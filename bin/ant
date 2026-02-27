@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""
+ant - Main wrapper command for anthive
+
+Dispatches to subcommands like ant-check, ant-convert, etc.
+Similar to how git works.
+"""
+
+import sys
+from pathlib import Path
+
+
+def get_available_commands(bin_dir: Path) -> dict:
+    """
+    Discover available ant commands in bin directory
+
+    Returns:
+        Dict mapping command names to descriptions
+    """
+    commands = {}
+    command_descriptions = {
+        'check': 'Check h5ad file for consistency and generate metadata',
+        'convert': 'Convert h5ad file to DuckDB database',
+        'build-all': 'Process entire datastore with parallel conversion',
+        'serve': 'Start REST API server',
+    }
+
+    for file_path in bin_dir.iterdir():
+        if file_path.name.startswith('ant-') and file_path.is_file():
+            command_name = file_path.name[4:]  # Remove 'ant-' prefix
+            description = command_descriptions.get(command_name, '')
+            commands[command_name] = description
+
+    return commands
+
+
+def print_available_commands(commands: dict):
+    """Print available commands with descriptions"""
+    if not commands:
+        print("  (no commands available)")
+        return
+
+    for cmd_name in sorted(commands.keys()):
+        description = commands[cmd_name]
+        if description:
+            print(f"  {cmd_name:<10} {description}")
+        else:
+            print(f"  {cmd_name}")
+
+
+def main():
+    """Main entry point for ant command"""
+
+    # Get the directory where this script is located
+    bin_dir = Path(__file__).parent.resolve()
+
+    # Get available commands
+    available_commands = get_available_commands(bin_dir)
+
+    # Check if a subcommand was provided
+    if len(sys.argv) < 2:
+        print("Usage: ant <command> [options]")
+        print("")
+        print("Available commands:")
+        print_available_commands(available_commands)
+        print("")
+        print("Run 'ant <command> --help' for more information on a command")
+        sys.exit(2)
+
+    # Get the subcommand
+    subcommand = sys.argv[1]
+
+    # Check for help/version flags
+    if subcommand in ['-h', '--help', 'help']:
+        print("ant - Anthive command line tools")
+        print("")
+        print("Usage: ant <command> [options]")
+        print("")
+        print("Available commands:")
+        print_available_commands(available_commands)
+        print("")
+        print("Run 'ant <command> --help' for more information on a command")
+        sys.exit(0)
+
+    if subcommand in ['-v', '--version', 'version']:
+        # Import version from lib
+        lib_dir = bin_dir.parent / 'lib'
+        sys.path.insert(0, str(lib_dir))
+        import __init__ as anthive
+        print(f"anthive version {anthive.__version__}")
+        sys.exit(0)
+
+    # Look for ant-<subcommand> in the bin directory
+    subcommand_path = bin_dir / f"ant-{subcommand}"
+
+    if not subcommand_path.exists():
+        print(f"Error: Unknown command 'ant {subcommand}'", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Available commands:", file=sys.stderr)
+        for cmd_name in sorted(available_commands.keys()):
+            print(f"  {cmd_name}", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Run 'ant --help' for usage information", file=sys.stderr)
+        sys.exit(2)
+
+    # Make sure it's executable
+    if not subcommand_path.is_file():
+        print(f"Error: {subcommand_path} is not a file", file=sys.stderr)
+        sys.exit(1)
+
+    # Execute the subcommand
+    # Pass all arguments except the first one (which is the subcommand name)
+    import subprocess
+    result = subprocess.run(
+        [str(subcommand_path)] + sys.argv[2:],
+        close_fds=False
+    )
+
+    sys.exit(result.returncode)
+
+
+if __name__ == '__main__':
+    main()

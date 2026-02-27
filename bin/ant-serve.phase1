@@ -1,0 +1,773 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "fastapi>=0.110.0",
+#   "uvicorn>=0.27.0",
+#   "duckdb>=0.10.0",
+#   "pandas>=2.0.0",
+#   "pyyaml>=6.0",
+# ]
+# ///
+"""
+ant-serve - Anthive REST API Server
+
+Serves single-cell expression databases via HTTP using FastAPI.
+Scans data folder for .duckdb files and exposes them through REST endpoints.
+
+Usage:
+    ant serve [--data-folder PATH] [--host HOST] [--port PORT]
+
+Example:
+    ant serve --data-folder ./data --host 0.0.0.0 --port 8080
+"""
+
+import argparse
+import sys
+import time
+from datetime import datetime
+from io import BytesIO, StringIO
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import pandas as pd
+import uvicorn
+from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+
+# Add lib directory to path
+script_dir = Path(__file__).parent.resolve()
+lib_dir = script_dir.parent / 'lib'
+sys.path.insert(0, str(lib_dir))
+
+from anthive_db import AnthiveDB
+from config import get_config
+from metadata import parse_md_file
+
+
+class QueryRequest(BaseModel):
+    """Request model for SQL query endpoints"""
+    query: str
+    limit: Optional[int] = None
+
+
+class DatabaseRegistry:
+    """Registry of available databases with metadata caching"""
+
+    def __init__(self, data_folder: Path):
+        self.data_folder = data_folder.resolve()
+        self.databases: Dict[str, Path] = {}
+        self.metadata_cache: Dict[str, Dict[str, Any]] = {}
+        self._databases_list_cache: Optional[List[Dict[str, Any]]] = None
+        self._startup_time = time.time()
+
+        print(f"Scanning data folder: {self.data_folder}")
+        self._scan_databases()
+        self._cache_all_metadata()
+
+    def _scan_databases(self):
+        """Scan data folder for .duckdb files"""
+        if not self.data_folder.exists():
+            raise FileNotFoundError(f"Data folder not found: {self.data_folder}")
+
+        self.databases.clear()
+
+        for db_path in self.data_folder.rglob("*.duckdb"):
+            # Get relative path without .duckdb extension
+            rel_path = db_path.relative_to(self.data_folder)
+            db_id = str(rel_path.with_suffix(''))
+            self.databases[db_id] = db_path
+
+        print(f"Found {len(self.databases)} databases")
+        for db_id in sorted(self.databases.keys()):
+            print(f"  - {db_id}")
+
+    def _cache_all_metadata(self):
+        """Cache metadata for all databases"""
+        print("Caching metadata...")
+        self.metadata_cache.clear()
+
+        for db_id, db_path in self.databases.items():
+            try:
+                self.metadata_cache[db_id] = self._load_database_metadata(db_path)
+            except Exception as e:
+                print(f"  Warning: Could not load metadata for {db_id}: {e}")
+                self.metadata_cache[db_id] = {'error': str(e)}
+
+        print(f"Cached metadata for {len(self.metadata_cache)} databases")
+
+    def _load_database_metadata(self, db_path: Path) -> Dict[str, Any]:
+        """Load metadata from .md files"""
+        # Load per-file metadata
+        md_path = db_path.with_suffix('.md')
+        file_metadata, _ = parse_md_file(md_path)
+
+        # Load collection metadata from index.md
+        index_path = db_path.parent / 'index.md'
+        collection_metadata, _ = parse_md_file(index_path)
+
+        # Get database info
+        with AnthiveDB(db_path) as db:
+            db_info = db.get_info()
+
+        # Combine metadata
+        metadata = {
+            'n_cells': db_info['n_cells'],
+            'n_genes': db_info['n_genes'],
+            'layers': db_info['layers'],
+            'embeddings': db_info['embeddings'],
+            'metadata_fields': db_info['metadata_fields'],
+            'title': file_metadata.get('title', db_path.stem),
+            'version': file_metadata.get('version'),
+            'sha256': file_metadata.get('sha256'),
+            'date': file_metadata.get('date'),
+            'year': file_metadata.get('year'),
+        }
+
+        # Add collection metadata if present
+        if collection_metadata:
+            metadata['group_metadata'] = {
+                'group': collection_metadata.get('group'),
+                'experiment': collection_metadata.get('experiment'),
+                'authors': collection_metadata.get('authors'),
+                'year': collection_metadata.get('year')
+            }
+
+        return metadata
+
+    def get_database_path(self, db_id: str) -> Path:
+        """Get absolute path for a database ID"""
+        if db_id not in self.databases:
+            raise KeyError(f"Database '{db_id}' not found")
+        return self.databases[db_id]
+
+    def get_database_metadata(self, db_id: str) -> Dict[str, Any]:
+        """Get cached metadata for a database"""
+        if db_id not in self.metadata_cache:
+            raise KeyError(f"Database '{db_id}' not found")
+        return self.metadata_cache[db_id]
+
+    def list_databases(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
+        """
+        List all databases with metadata
+
+        Args:
+            force_refresh: Force reload from disk
+
+        Returns:
+            List of database information dictionaries
+        """
+        if not force_refresh and self._databases_list_cache is not None:
+            return self._databases_list_cache
+
+        result = []
+        for db_id, db_path in sorted(self.databases.items()):
+            try:
+                metadata = self.get_database_metadata(db_id)
+
+                db_info = {
+                    'id': db_id,
+                    'path': str(db_path.relative_to(self.data_folder)),
+                    **metadata
+                }
+
+                result.append(db_info)
+            except Exception as e:
+                result.append({
+                    'id': db_id,
+                    'path': str(db_path.relative_to(self.data_folder)),
+                    'error': str(e)
+                })
+
+        self._databases_list_cache = result
+        return result
+
+    def rescan(self) -> Dict[str, Any]:
+        """Force rescan of data folder and reload all metadata"""
+        old_count = len(self.databases)
+        old_db_ids = set(self.databases.keys())
+
+        print("\nRescanning data folder...")
+        self.databases.clear()
+        self.metadata_cache.clear()
+        self._databases_list_cache = None
+
+        self._scan_databases()
+        self._cache_all_metadata()
+
+        new_db_ids = set(self.databases.keys())
+        added = new_db_ids - old_db_ids
+        removed = old_db_ids - new_db_ids
+
+        result = {
+            'status': 'success',
+            'previous_count': old_count,
+            'current_count': len(self.databases),
+            'added': sorted(list(added)),
+            'removed': sorted(list(removed)),
+            'databases': sorted(list(new_db_ids))
+        }
+
+        print(f"Rescan complete: {old_count} -> {len(self.databases)} databases")
+        if added:
+            print(f"  Added: {', '.join(added)}")
+        if removed:
+            print(f"  Removed: {', '.join(removed)}")
+
+        return result
+
+    def get_uptime(self) -> float:
+        """Get server uptime in seconds"""
+        return time.time() - self._startup_time
+
+
+# Global registry
+registry: Optional[DatabaseRegistry] = None
+
+# Create FastAPI app
+app = FastAPI(
+    title="Anthive API",
+    description="""
+## Anthive REST API v2.0
+
+A high-performance REST API for querying single-cell expression databases.
+
+### Features
+
+* **Database Discovery**: List and explore available databases
+* **Gene Search**: Search for genes by substring matching
+* **Metadata Queries**: Search and filter cells by metadata
+* **Expression Data**: Retrieve cell expression data with filtering
+* **Embeddings**: Access UMAP, PCA, and other embeddings
+* **SQL Queries**: Execute custom SQL queries
+* **Multiple Formats**: Export data as JSON, CSV, or Parquet
+
+### Authentication
+
+Authentication is handled by reverse proxy (nginx, caddy, etc.) using HTTP Basic Authentication.
+
+### Documentation
+
+- **Swagger UI**: [/docs](/docs) (this page)
+- **ReDoc**: [/redoc](/redoc)
+- **OpenAPI Schema**: [/openapi.json](/openapi.json)
+    """,
+    version="2.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
+
+# Enable CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Configure in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize registry on startup"""
+    global registry
+    if registry is None:
+        print("ERROR: Registry not initialized!")
+        print("This should not happen - registry is initialized in main()")
+        sys.exit(1)
+
+
+@app.get("/", tags=["info"])
+async def root():
+    """
+    API root endpoint with overview and available endpoints
+    """
+    return {
+        "name": "Anthive API",
+        "version": "2.0.0",
+        "databases": len(registry.databases) if registry else 0,
+        "uptime_seconds": registry.get_uptime() if registry else 0,
+        "documentation": {
+            "swagger": "/docs",
+            "redoc": "/redoc",
+            "openapi": "/openapi.json"
+        },
+        "endpoints": {
+            "health": "/health",
+            "databases": "/databases",
+            "database_info": "/databases/{db_id}/info",
+            "search_genes": "/databases/{db_id}/genes",
+            "get_cells": "/databases/{db_id}/cells",
+            "get_embeddings": "/databases/{db_id}/embeddings",
+            "query_sql": "POST /databases/{db_id}/query/sql",
+            "admin_rescan": "POST /admin/rescan"
+        }
+    }
+
+
+@app.get("/health", tags=["info"])
+async def health_check():
+    """
+    Health check endpoint for load balancers
+
+    Returns 200 if healthy, 503 if unhealthy
+    """
+    try:
+        database_count = len(registry.databases)
+        error_count = sum(1 for m in registry.metadata_cache.values() if 'error' in m)
+
+        if database_count == 0:
+            raise HTTPException(
+                status_code=503,
+                detail="No databases available"
+            )
+
+        return {
+            "status": "healthy",
+            "databases": database_count,
+            "database_errors": error_count,
+            "uptime_seconds": int(registry.get_uptime())
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Health check failed: {str(e)}"
+        )
+
+
+@app.get("/databases", tags=["databases"])
+async def list_databases(
+    refresh: bool = Query(False, description="Force refresh from disk")
+):
+    """
+    List all available databases with metadata
+
+    Returns comprehensive information about each database including:
+    - Database ID and path
+    - Title, version, checksum, date
+    - Cell and gene counts
+    - Available layers and embeddings
+    - Collection metadata (group, experiment, authors)
+
+    Use `?refresh=true` to force reload from disk.
+    """
+    databases = registry.list_databases(force_refresh=refresh)
+    return {
+        "databases": databases,
+        "total": len(databases)
+    }
+
+
+@app.get("/databases/{db_id:path}/info", tags=["databases"])
+async def get_database_info(db_id: str):
+    """
+    Get detailed information about a specific database
+
+    Returns:
+    - Cell and gene counts
+    - Available layers
+    - Available embeddings
+    - Metadata field types (numerical and categorical)
+    - File metadata (version, checksum, date)
+    - Collection metadata (group, experiment, authors)
+    """
+    try:
+        metadata = registry.get_database_metadata(db_id)
+        return metadata
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/databases/{db_id:path}/genes", tags=["genes"])
+async def search_genes(
+    db_id: str,
+    q: str = Query(..., description="Search substring", example="CD4"),
+    limit: Optional[int] = Query(None, description="Maximum results"),
+    case_sensitive: bool = Query(False, description="Case-sensitive search")
+):
+    """
+    Search for genes by substring
+
+    Returns a list of gene names matching the search query.
+    Useful for autocomplete and gene discovery.
+
+    Example:
+        GET /databases/my_db/genes?q=CD4&limit=10
+    """
+    try:
+        db_path = registry.get_database_path(db_id)
+        with AnthiveDB(db_path) as db:
+            genes = db.search_genes(q, case_sensitive=case_sensitive, limit=limit)
+            return {"query": q, "count": len(genes), "genes": genes}
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/databases/{db_id:path}/genes/{gene_id}", tags=["genes"])
+async def get_gene_info(db_id: str, gene_id: str):
+    """
+    Get information about a specific gene
+
+    Returns:
+    - Gene name
+    - Existence confirmation
+    - Available layers containing this gene
+    """
+    try:
+        db_path = registry.get_database_path(db_id)
+        with AnthiveDB(db_path) as db:
+            info = db.get_gene_info(gene_id)
+            return info
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/databases/{db_id:path}/cells", tags=["data"])
+async def get_cells(
+    db_id: str,
+    genes: Optional[str] = Query(None, description="Comma-separated gene names"),
+    metadata: Optional[str] = Query(None, description="Comma-separated metadata fields, '*' for all"),
+    layer: str = Query("X", description="Layer name"),
+    filter: Optional[List[str]] = Query(None, description="Filters: field:value or field:min,max"),
+    limit: Optional[int] = Query(None, description="Maximum cells (no default)"),
+    format: str = Query("json", description="Output format: json, csv, parquet")
+):
+    """
+    Get cell table with expression and metadata
+
+    Query Parameters:
+    - genes: Comma-separated gene names to include
+    - metadata: Comma-separated fields, "*" for all, empty/omit for none
+    - layer: Layer name (default: "X")
+    - filter: Filters in format field:value or field:min,max
+    - limit: Maximum cells (optional, returns all if not specified)
+    - format: Output format (json, csv, parquet)
+
+    Examples:
+        GET /databases/my_db/cells?genes=CD4,CD8&metadata=cell_type&layer=X
+        GET /databases/my_db/cells?genes=CD4&filter=cell_type:T-cell&limit=100
+        GET /databases/my_db/cells?metadata=*&format=csv
+    """
+    try:
+        db_path = registry.get_database_path(db_id)
+
+        # Parse parameters
+        gene_list = genes.split(',') if genes else None
+
+        # Handle metadata parameter
+        if metadata is None or metadata == "":
+            metadata_list = None  # No metadata
+        elif metadata == "*":
+            metadata_list = ["*"]  # All metadata
+        else:
+            metadata_list = metadata.split(',')
+
+        # Parse filters
+        filters = {}
+        if filter:
+            for f in filter:
+                if ':' not in f:
+                    raise ValueError(f"Invalid filter format: {f}")
+
+                field, value = f.split(':', 1)
+
+                # Try to parse as range
+                if ',' in value:
+                    try:
+                        parts = value.split(',')
+                        filters[field] = (float(parts[0]), float(parts[1]))
+                    except ValueError:
+                        filters[field] = value
+                else:
+                    # Try numeric conversion
+                    try:
+                        filters[field] = float(value)
+                    except ValueError:
+                        filters[field] = value
+
+        # Get data
+        with AnthiveDB(db_path) as db:
+            df = db.get_cell_table(
+                genes=gene_list,
+                metadata_fields=metadata_list,
+                layer=layer,
+                filters=filters,
+                limit=limit
+            )
+
+        # Return in requested format
+        if format == "csv":
+            output = StringIO()
+            df.to_csv(output, index=False)
+            return Response(
+                content=output.getvalue(),
+                media_type="text/csv",
+                headers={"Content-Disposition": f"attachment; filename={db_id.replace('/', '_')}_cells.csv"}
+            )
+        elif format == "parquet":
+            output = BytesIO()
+            df.to_parquet(output, index=False)
+            return Response(
+                content=output.getvalue(),
+                media_type="application/octet-stream",
+                headers={"Content-Disposition": f"attachment; filename={db_id.replace('/', '_')}_cells.parquet"}
+            )
+        else:  # json
+            # Convert to JSON-safe format using pandas to_json which handles NaN/inf properly
+            import json
+            json_str = df.to_json(orient='records', double_precision=6)
+            data = json.loads(json_str)
+            # Ensure all values are JSON-safe (no numpy types)
+            n_cells = int(len(df))
+            n_columns = int(len(df.columns))
+            columns = [str(col) for col in df.columns.tolist()]
+            return {
+                "n_cells": n_cells,
+                "n_columns": n_columns,
+                "columns": columns,
+                "data": data
+            }
+
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/databases/{db_id:path}/layers", tags=["data"])
+async def get_layers(db_id: str):
+    """
+    List available layers for a database
+
+    Returns list of layer names
+    """
+    try:
+        metadata = registry.get_database_metadata(db_id)
+        layers = metadata.get('layers', [])
+        return {"layers": layers}
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/databases/{db_id:path}/metadata/fields", tags=["metadata"])
+async def get_metadata_fields(db_id: str):
+    """
+    Get metadata fields with their types
+
+    Returns numerical and categorical field lists
+    """
+    try:
+        metadata = registry.get_database_metadata(db_id)
+        fields = metadata.get('metadata_fields', {})
+        return {
+            "numerical": fields.get('numerical', []),
+            "categorical": fields.get('categorical', [])
+        }
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/databases/{db_id:path}/embeddings", tags=["embeddings"])
+async def get_embeddings(db_id: str):
+    """
+    List available embeddings for a database
+
+    Returns list of embeddings with their dimensions
+    """
+    try:
+        metadata = registry.get_database_metadata(db_id)
+        embeddings = metadata.get('embeddings', [])
+        return {"embeddings": embeddings}
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/databases/{db_id:path}/embeddings/{embedding_id}", tags=["embeddings"])
+async def get_embedding_data(
+    db_id: str,
+    embedding_id: str,
+    limit: Optional[int] = Query(None, description="Maximum cells"),
+    n_dims: Optional[int] = Query(2, description="Number of dimensions (0 for all)")
+):
+    """
+    Get embedding coordinates for cells
+
+    Parameters:
+    - embedding_id: Embedding name (e.g., Umap, Pca)
+    - limit: Maximum cells to return
+    - n_dims: Number of dimensions (default: 2, use 0 for all)
+    """
+    try:
+        db_path = registry.get_database_path(db_id)
+        with AnthiveDB(db_path) as db:
+            dims = None if n_dims == 0 else n_dims
+            df = db.get_embedding_data(embedding_id, limit=limit, n_dims=dims)
+
+            return {
+                "embedding_id": embedding_id,
+                "n_cells": len(df),
+                "n_dims": len(df.columns) - 1,  # Subtract cell_name
+                "columns": df.columns.tolist(),
+                "data": df.to_dict(orient='records')
+            }
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/databases/{db_id:path}/query/sql", tags=["query"])
+async def execute_sql_query(db_id: str, request: QueryRequest):
+    """
+    Execute a raw SQL query on the database
+
+    Request Body:
+    - query: SQL query string
+    - limit: Optional limit to append
+
+    Returns results in JSON format.
+    All queries are read-only for security.
+    """
+    try:
+        db_path = registry.get_database_path(db_id)
+
+        with AnthiveDB(db_path) as db:
+            df = db.execute_sql(request.query, limit=request.limit)
+
+        # Convert to JSON-safe format
+        df = df.where(pd.notna(df), None)
+
+        return {
+            "query": request.query,
+            "n_rows": len(df),
+            "n_columns": len(df.columns),
+            "columns": df.columns.tolist(),
+            "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
+            "data": df.to_dict(orient='records')
+        }
+
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Query error: {str(e)}")
+
+
+@app.post("/admin/rescan", tags=["admin"])
+async def rescan_databases():
+    """
+    Force rescan of data folder and reload all metadata
+
+    Triggers a complete rescan of the data folder, clearing all caches
+    and re-discovering databases and metadata.
+
+    Useful after:
+    - Adding new database files
+    - Updating metadata files (.md, index.md)
+    - Removing database files
+
+    Returns:
+    - status: 'success'
+    - previous_count: Number of databases before rescan
+    - current_count: Number of databases after rescan
+    - added: List of added database IDs
+    - removed: List of removed database IDs
+    - databases: Complete list of current database IDs
+    """
+    try:
+        result = registry.rescan()
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def main():
+    """Main entry point"""
+    parser = argparse.ArgumentParser(
+        description="Anthive REST API Server",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+
+    # Get config for defaults
+    config = get_config()
+
+    parser.add_argument(
+        '--data-folder',
+        type=Path,
+        default=Path('./data'),
+        help='Path to data folder containing .duckdb files (default: ./data)'
+    )
+    parser.add_argument(
+        '--host',
+        default=config.get('rest_api_host', '127.0.0.1'),
+        help='Host to bind to (default: from config or 127.0.0.1)'
+    )
+    parser.add_argument(
+        '--port',
+        type=int,
+        default=config.get('rest_api_port', 8000),
+        help='Port to bind to (default: from config or 8000)'
+    )
+    parser.add_argument(
+        '--reload',
+        action='store_true',
+        help='Enable auto-reload for development'
+    )
+
+    args = parser.parse_args()
+
+    # Initialize global registry
+    global registry
+    try:
+        registry = DatabaseRegistry(args.data_folder)
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if len(registry.databases) == 0:
+        print(f"Warning: No .duckdb files found in {args.data_folder}")
+        print("The server will start but no databases will be available.")
+
+    # Start server
+    print(f"\n{'='*60}")
+    print(f"Starting Anthive REST API Server")
+    print(f"{'='*60}")
+    print(f"  Version: 2.0.0")
+    print(f"  Host: {args.host}")
+    print(f"  Port: {args.port}")
+    print(f"  Data folder: {args.data_folder}")
+    print(f"  Databases: {len(registry.databases)}")
+    print(f"  URL: http://{args.host}:{args.port}")
+    print(f"  Docs: http://{args.host}:{args.port}/docs")
+    print(f"{'='*60}\n")
+
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        reload=args.reload
+    )
+
+
+if __name__ == '__main__':
+    main()

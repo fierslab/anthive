@@ -1,0 +1,771 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "anndata>=0.10.0",
+#   "numpy>=1.24.0",
+#   "pandas>=2.0.0",
+#   "pyyaml>=6.0",
+#   "scipy>=1.10.0",
+#   "duckdb>=0.10.0",
+# ]
+# ///
+"""
+ant-convert - Convert h5ad file to DuckDB database
+
+Converts h5ad files to optimized DuckDB databases using metadata from .md files
+"""
+
+import argparse
+import gc
+import sys
+import time
+from pathlib import Path
+from typing import Dict, Any, List
+
+import duckdb
+import numpy as np
+import pandas as pd
+import scipy.sparse
+
+# Add lib directory to Python path
+script_dir = Path(__file__).parent.resolve()
+lib_dir = script_dir.parent / 'lib'
+sys.path.insert(0, str(lib_dir))
+
+from config import get_config
+from h5ad_utils import load_h5ad, H5ADError
+from metadata import parse_md_file, MetadataError
+
+
+class ConversionError(Exception):
+    """Conversion-related errors"""
+    pass
+
+
+def normalize_dataframe_dtypes(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize DataFrame dtypes to be compatible with DuckDB
+
+    Converts problematic dtypes like 'str' to standard pandas types.
+
+    Args:
+        df: Input DataFrame
+
+    Returns:
+        DataFrame with normalized dtypes
+    """
+    df = df.copy()
+
+    for col in df.columns:
+        dtype_str = str(df[col].dtype)
+
+        # Convert 'str' dtype to 'object'
+        if dtype_str == 'str':
+            df[col] = df[col].astype('object')
+
+        # Convert other non-standard string types
+        elif 'str' in dtype_str.lower() and dtype_str not in ['object', 'string']:
+            df[col] = df[col].astype('object')
+
+    return df
+
+
+def convert_h5ad_to_duckdb(h5ad_path: Path, config: Dict[str, Any]) -> None:
+    """
+    Main conversion function
+
+    Args:
+        h5ad_path: Path to h5ad file
+        config: Configuration dictionary
+
+    Raises:
+        ConversionError: If conversion fails
+    """
+    duckdb_path = h5ad_path.with_suffix('.duckdb')
+
+    print(f"{'='*70}")
+    print(f"CONVERTING: {h5ad_path.name}")
+    print(f"{'='*70}")
+
+    # Show file size
+    h5ad_size = h5ad_path.stat().st_size
+    print(f"Input file size: {format_size(h5ad_size)}")
+    print()
+
+    # Check prerequisites
+    md_path = h5ad_path.with_suffix('.md')
+    if not md_path.exists():
+        raise ConversionError(
+            f"ERROR: [ant-convert] Metadata file not found\n"
+            f"Details: Run 'ant check {h5ad_path}' first to generate metadata\n"
+            f"Location: {md_path}\n"
+            f"Action: Run ant check before converting"
+        )
+
+    # Load metadata
+    print("[1/7] Loading metadata...")
+    try:
+        metadata, _ = parse_md_file(md_path)
+    except MetadataError as error:
+        raise ConversionError(f"Failed to load metadata: {error}")
+
+    if not metadata:
+        raise ConversionError(
+            f"ERROR: [ant-convert] Empty metadata file\n"
+            f"Location: {md_path}\n"
+            f"Action: Run 'ant check {h5ad_path}' to regenerate metadata"
+        )
+    print("  ✓ Metadata loaded")
+
+    # Load h5ad file
+    print(f"[2/7] Loading h5ad file ({format_size(h5ad_size)})...")
+    load_start = time.time()
+    try:
+        adata = load_h5ad(h5ad_path)
+    except H5ADError as error:
+        raise ConversionError(str(error))
+    load_time = time.time() - load_start
+    print(f"  ✓ Loaded in {load_time:.1f}s ({adata.n_obs:,} cells × {adata.n_vars:,} genes)")
+
+    # Check if duckdb exists
+    if duckdb_path.exists():
+        print(f"⚠ Warning: {duckdb_path.name} already exists and will be overwritten")
+
+    # Create connection and start conversion
+    conn = None
+    try:
+        # Remove existing database
+        if duckdb_path.exists():
+            duckdb_path.unlink()
+
+        # Connect to new database
+        print(f"[3/7] Initializing database...")
+        conn = duckdb.connect(str(duckdb_path))
+        initialize_database(conn)
+        print(f"  ✓ Schema version: 1")
+
+        create_cell_index(conn, adata)
+        print(f"  ✓ Cell index: {adata.n_obs:,} cells")
+
+        create_gene_index(conn, adata)
+        print(f"  ✓ Gene index: {adata.n_vars:,} genes")
+
+        # Convert layers
+        print(f"\n[4/7] Converting layers...")
+        if metadata.get('layers_include'):
+            convert_layers(conn, adata, metadata, config)
+        else:
+            print("  (no layers to convert)")
+
+        # Convert observations
+        print(f"\n[5/7] Converting observations...")
+        if metadata.get('obsnum_include') or metadata.get('obscat_include'):
+            convert_observations(conn, adata, metadata)
+        else:
+            print("  (no observations to convert)")
+
+        # Convert variables
+        print(f"\n[6/7] Converting variables...")
+        if metadata.get('var_include'):
+            convert_variables(conn, adata, metadata)
+        else:
+            print("  (no variables to convert)")
+
+        # Convert embeddings
+        if metadata.get('obsm_include'):
+            print(f"\nConverting embeddings...")
+            convert_embeddings(conn, adata, metadata)
+
+        # Finalize
+        print(f"\n[7/7] Finalizing database...")
+        finalize_database(conn)
+        print("  ✓ Database optimized")
+
+        # Verify
+        verify_database(conn, adata)
+        print("  ✓ Integrity verified")
+
+        # Get file sizes
+        duckdb_size = duckdb_path.stat().st_size
+        compression_pct = (1 - duckdb_size / h5ad_size) * 100
+
+        print(f"\n{'='*70}")
+        print(f"CONVERSION COMPLETE!")
+        print(f"{'='*70}")
+        print(f"  Input:  {h5ad_path.name} ({format_size(h5ad_size)})")
+        print(f"  Output: {duckdb_path.name} ({format_size(duckdb_size)})")
+        print(f"  Compression: {compression_pct:.0f}%")
+
+    except Exception as error:
+        # Clean up on failure
+        if conn:
+            conn.close()
+
+        if duckdb_path.exists():
+            print(f"\n{'='*60}", file=sys.stderr)
+            print(f"ERROR: [ant-convert] Conversion failed", file=sys.stderr)
+            print(f"{'='*60}", file=sys.stderr)
+            print(f"File: {h5ad_path}", file=sys.stderr)
+            print(f"Error: {error}", file=sys.stderr)
+            print(f"\nRemoving partial database: {duckdb_path}", file=sys.stderr)
+            duckdb_path.unlink()
+
+        raise ConversionError(str(error))
+
+    finally:
+        if conn:
+            conn.close()
+
+
+def initialize_database(conn: duckdb.DuckDBPyConnection) -> None:
+    """Initialize database with schema version table"""
+    conn.execute("""
+        CREATE TABLE __schema_version (
+            version INTEGER PRIMARY KEY,
+            applied_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            description TEXT
+        )
+    """)
+
+    conn.execute("""
+        INSERT INTO __schema_version (version, description)
+        VALUES (1, 'Initial schema')
+    """)
+
+
+def create_cell_index(conn: duckdb.DuckDBPyConnection, adata) -> None:
+    """Create cell ID to name mapping table"""
+    cell_names = adata.obs_names.tolist()
+
+    cells_df = pd.DataFrame({
+        'cell_id': range(len(cell_names)),
+        'cell_name': cell_names
+    })
+
+    conn.execute("""
+        CREATE TABLE __cells (
+            cell_id INTEGER PRIMARY KEY,
+            cell_name TEXT NOT NULL UNIQUE
+        )
+    """)
+
+    cells_df = normalize_dataframe_dtypes(cells_df)
+    conn.register('temp_cells', cells_df)
+    conn.execute("INSERT INTO __cells SELECT * FROM temp_cells")
+    conn.unregister('temp_cells')
+
+    conn.execute("CREATE INDEX idx_cells_name ON __cells(cell_name)")
+    conn.execute("CREATE VIEW cells AS SELECT * FROM __cells")
+
+
+def create_gene_index(conn: duckdb.DuckDBPyConnection, adata) -> None:
+    """Create gene ID to name mapping table"""
+    gene_names = adata.var_names.tolist()
+
+    genes_df = pd.DataFrame({
+        'gene_id': range(len(gene_names)),
+        'gene_name': gene_names
+    })
+
+    conn.execute("""
+        CREATE TABLE __genes (
+            gene_id INTEGER PRIMARY KEY,
+            gene_name TEXT NOT NULL UNIQUE
+        )
+    """)
+
+    genes_df = normalize_dataframe_dtypes(genes_df)
+    conn.register('temp_genes', genes_df)
+    conn.execute("INSERT INTO __genes SELECT * FROM temp_genes")
+    conn.unregister('temp_genes')
+
+    conn.execute("CREATE INDEX idx_genes_name ON __genes(gene_name)")
+    conn.execute("CREATE VIEW genes AS SELECT * FROM __genes")
+
+
+def convert_layers(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict, config: Dict) -> None:
+    """Convert expression layers using chunked processing"""
+    layers_include = metadata['layers_include']
+    chunk_size = config['melt_chunk_size']
+
+    for layer_key, internal_name in layers_include.items():
+        # Get layer data
+        if layer_key == 'X':
+            if adata.X is None:
+                print(f"  ⚠ Layer 'X' (.X) not present, skipping")
+                continue
+            layer_data = adata.X
+        else:
+            if layer_key not in adata.layers:
+                print(f"  ⚠ Layer '{layer_key}' not found, skipping")
+                continue
+            layer_data = adata.layers[layer_key]
+
+        print(f"  layer__{internal_name} ({layer_key}):")
+        start_time = time.time()
+
+        # Create table
+        print(f"    Creating __layer__{internal_name} table...")
+        conn.execute(f"""
+            CREATE TABLE __layer__{internal_name} (
+                cell_id INTEGER NOT NULL,
+                gene_id INTEGER NOT NULL,
+                value DOUBLE NOT NULL,
+                PRIMARY KEY (cell_id, gene_id)
+            )
+        """)
+
+        # Process in chunks
+        num_cells = adata.n_obs
+        num_genes = adata.n_vars
+
+        for chunk_start in range(0, num_cells, chunk_size):
+            chunk_end = min(chunk_start + chunk_size, num_cells)
+            progress = (chunk_end / num_cells) * 100
+
+            chunk_start_time = time.time()
+
+            # Load chunk
+            chunk_data = layer_data[chunk_start:chunk_end, :]
+
+            # Convert to COO format if needed
+            if scipy.sparse.issparse(chunk_data):
+                chunk_coo = chunk_data.tocoo()
+            else:
+                chunk_coo = scipy.sparse.coo_matrix(chunk_data)
+
+            # Create dataframe with integer indices
+            # Adjust row indices by chunk_start
+            melted = pd.DataFrame({
+                'cell_id': chunk_coo.row + chunk_start,
+                'gene_id': chunk_coo.col,
+                'value': chunk_coo.data
+            })
+
+            # Remove zeros (safety check)
+            melted = melted[melted['value'] != 0]
+
+            # Insert into database
+            if len(melted) > 0:
+                melted = normalize_dataframe_dtypes(melted)
+                conn.register('temp_layer', melted)
+                conn.execute(f"INSERT INTO __layer__{internal_name} SELECT * FROM temp_layer")
+                conn.unregister('temp_layer')
+
+            chunk_time = time.time() - chunk_start_time
+            print(f"    Chunk {chunk_start:,}-{chunk_end:,} ({progress:.0f}%)... {len(melted):,} non-zero values, {chunk_time:.1f}s")
+
+            # Free memory
+            del chunk_data, chunk_coo, melted
+            gc.collect()
+
+        # Create indices
+        print(f"    Creating indices...")
+        conn.execute(f"CREATE INDEX idx_layer_{internal_name}_cell ON __layer__{internal_name}(cell_id)")
+        conn.execute(f"CREATE INDEX idx_layer_{internal_name}_gene ON __layer__{internal_name}(gene_id)")
+
+        # Get total row count
+        result = conn.execute(f"SELECT COUNT(*) FROM __layer__{internal_name}").fetchone()
+        total_values = result[0]
+
+        # Create view
+        print(f"    Creating view layer__{internal_name}...")
+        conn.execute(f"""
+            CREATE VIEW layer__{internal_name} AS
+            SELECT
+                c.cell_name,
+                g.gene_name,
+                l.value
+            FROM __layer__{internal_name} l
+            JOIN __cells c ON l.cell_id = c.cell_id
+            JOIN __genes g ON l.gene_id = g.gene_id
+        """)
+
+        # Calculate sparsity
+        total_elements = num_cells * num_genes
+        sparsity = (1 - total_values / total_elements) * 100
+
+        total_time = time.time() - start_time
+        print(f"  ✓ Completed in {total_time:.1f}s ({total_values:,} values stored, {sparsity:.1f}% sparse)")
+
+
+def convert_observations(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict) -> None:
+    """Convert observation (cell) annotations"""
+
+    # Convert numerical observations
+    obsnum_cols = metadata.get('obsnum_include', [])
+    if obsnum_cols:
+        # Filter to existing columns and remove duplicates (preserve order)
+        seen = set()
+        obsnum_cols = [col for col in obsnum_cols if col in adata.obs.columns and not (col in seen or seen.add(col))]
+
+        if obsnum_cols:
+            print(f"  Creating __obsnum table with {len(obsnum_cols)} columns...")
+            # Build CREATE TABLE statement
+            col_defs = ['cell_id INTEGER PRIMARY KEY']
+            for col in obsnum_cols:
+                col_defs.append(f'"{col}" DOUBLE')
+
+            conn.execute(f"""
+                CREATE TABLE __obsnum (
+                    {', '.join(col_defs)}
+                )
+            """)
+
+            # Prepare data
+            print(f"    Preparing {len(adata.obs):,} rows...")
+            obsnum_df = adata.obs[obsnum_cols].copy()
+            obsnum_df.insert(0, 'cell_id', range(len(obsnum_df)))
+
+            # Insert
+            print(f"    Inserting data...")
+            obsnum_df = normalize_dataframe_dtypes(obsnum_df)
+            conn.register('temp_obsnum', obsnum_df)
+            conn.execute("INSERT INTO __obsnum SELECT * FROM temp_obsnum")
+            conn.unregister('temp_obsnum')
+
+            # Create view
+            print(f"    Creating obsnum view...")
+            conn.execute("""
+                CREATE VIEW obsnum AS
+                SELECT c.cell_name, o.*
+                FROM __obsnum o
+                JOIN __cells c ON o.cell_id = c.cell_id
+            """)
+
+            print(f"  ✓ obsnum: {len(obsnum_cols)} columns ({', '.join(obsnum_cols)})")
+
+    # Convert categorical observations
+    obscat_cols = metadata.get('obscat_include', [])
+    if obscat_cols:
+        # Filter to existing columns and remove duplicates (preserve order)
+        seen = set()
+        obscat_cols = [col for col in obscat_cols if col in adata.obs.columns and not (col in seen or seen.add(col))]
+
+        if obscat_cols:
+            print(f"  Creating __obscat table with {len(obscat_cols)} columns...")
+            # Build CREATE TABLE statement with ENUM types
+            col_defs = ['cell_id INTEGER PRIMARY KEY']
+
+            for col in obscat_cols:
+                # Get unique values
+                unique_values = adata.obs[col].dropna().unique()
+
+                # Convert to string if numerical
+                if pd.api.types.is_numeric_dtype(adata.obs[col]):
+                    unique_values = [str(v) for v in unique_values]
+                else:
+                    unique_values = [str(v) for v in unique_values]
+
+                # Escape single quotes in values
+                unique_values = [v.replace("'", "''") for v in unique_values]
+
+                # Create ENUM definition
+                if len(unique_values) > 0:
+                    enum_values = "', '".join(unique_values)
+                    col_defs.append(f'"{col}" VARCHAR')  # Use VARCHAR instead of ENUM for simplicity
+                else:
+                    col_defs.append(f'"{col}" VARCHAR')
+
+            conn.execute(f"""
+                CREATE TABLE __obscat (
+                    {', '.join(col_defs)}
+                )
+            """)
+
+            # Prepare data
+            print(f"    Preparing {len(adata.obs):,} rows...")
+            obscat_df = adata.obs[obscat_cols].copy()
+
+            # Convert all to string (use 'object' dtype, not 'str')
+            for col in obscat_cols:
+                obscat_df[col] = obscat_df[col].astype('object')
+                obscat_df[col] = obscat_df[col].replace('nan', None)
+
+            obscat_df.insert(0, 'cell_id', range(len(obscat_df)))
+
+            # Insert
+            print(f"    Inserting data...")
+            obscat_df = normalize_dataframe_dtypes(obscat_df)
+            conn.register('temp_obscat', obscat_df)
+            conn.execute("INSERT INTO __obscat SELECT * FROM temp_obscat")
+            conn.unregister('temp_obscat')
+
+            # Create indices on categorical columns
+            print(f"    Creating indices on {len(obscat_cols)} columns...")
+            for col in obscat_cols:
+                # Sanitize column name for index (replace special chars with underscore)
+                safe_col = ''.join(c if c.isalnum() else '_' for c in col)
+                conn.execute(f'CREATE INDEX idx_obscat_{safe_col} ON __obscat("{col}")')
+
+            # Create view
+            print(f"    Creating obscat view...")
+            conn.execute("""
+                CREATE VIEW obscat AS
+                SELECT c.cell_name, o.*
+                FROM __obscat o
+                JOIN __cells c ON o.cell_id = c.cell_id
+            """)
+
+            print(f"  ✓ obscat: {len(obscat_cols)} columns ({', '.join(obscat_cols)})")
+
+
+def convert_variables(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict) -> None:
+    """Convert variable (gene) annotations"""
+
+    var_cols = metadata.get('var_include', [])
+    if not var_cols:
+        return
+
+    # Filter to existing columns and remove duplicates (preserve order)
+    seen = set()
+    var_cols = [col for col in var_cols if col in adata.var.columns and not (col in seen or seen.add(col))]
+    if not var_cols:
+        return
+
+    # Determine which are numerical and which are categorical
+    varnum_cols = []
+    varcat_cols = []
+
+    for col in var_cols:
+        if pd.api.types.is_numeric_dtype(adata.var[col]):
+            varnum_cols.append(col)
+        else:
+            varcat_cols.append(col)
+
+    # Convert numerical variables
+    if varnum_cols:
+        print(f"  Creating __varnum table with {len(varnum_cols)} columns...")
+        col_defs = ['gene_id INTEGER PRIMARY KEY']
+        for col in varnum_cols:
+            col_defs.append(f'"{col}" DOUBLE')
+
+        conn.execute(f"""
+            CREATE TABLE __varnum (
+                {', '.join(col_defs)}
+            )
+        """)
+
+        varnum_df = adata.var[varnum_cols].copy()
+        varnum_df.insert(0, 'gene_id', range(len(varnum_df)))
+
+        print(f"    Inserting {len(varnum_df):,} rows...")
+        varnum_df = normalize_dataframe_dtypes(varnum_df)
+        conn.register('temp_varnum', varnum_df)
+        conn.execute("INSERT INTO __varnum SELECT * FROM temp_varnum")
+        conn.unregister('temp_varnum')
+
+        print(f"    Creating varnum view...")
+        conn.execute("""
+            CREATE VIEW varnum AS
+            SELECT g.gene_name, v.*
+            FROM __varnum v
+            JOIN __genes g ON v.gene_id = g.gene_id
+        """)
+
+        print(f"  ✓ varnum: {len(varnum_cols)} columns ({', '.join(varnum_cols)})")
+
+    # Convert categorical variables
+    if varcat_cols:
+        print(f"  Creating __varcat table with {len(varcat_cols)} columns...")
+        col_defs = ['gene_id INTEGER PRIMARY KEY']
+        for col in varcat_cols:
+            col_defs.append(f'"{col}" VARCHAR')
+
+        conn.execute(f"""
+            CREATE TABLE __varcat (
+                {', '.join(col_defs)}
+            )
+        """)
+
+        varcat_df = adata.var[varcat_cols].copy()
+        for col in varcat_cols:
+            varcat_df[col] = varcat_df[col].astype('object')
+            varcat_df[col] = varcat_df[col].replace('nan', None)
+
+        varcat_df.insert(0, 'gene_id', range(len(varcat_df)))
+
+        print(f"    Inserting {len(varcat_df):,} rows...")
+        varcat_df = normalize_dataframe_dtypes(varcat_df)
+        conn.register('temp_varcat', varcat_df)
+        conn.execute("INSERT INTO __varcat SELECT * FROM temp_varcat")
+        conn.unregister('temp_varcat')
+
+        print(f"    Creating varcat view...")
+        conn.execute("""
+            CREATE VIEW varcat AS
+            SELECT g.gene_name, v.*
+            FROM __varcat v
+            JOIN __genes g ON v.gene_id = g.gene_id
+        """)
+
+        print(f"  ✓ varcat: {len(varcat_cols)} columns ({', '.join(varcat_cols)})")
+
+
+def convert_embeddings(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict) -> None:
+    """Convert embeddings (UMAP, PCA, etc.)"""
+
+    obsm_include = metadata.get('obsm_include', {})
+
+    for obsm_key, internal_name in obsm_include.items():
+        if obsm_key not in adata.obsm:
+            print(f"  ⚠ Embedding '{obsm_key}' not found, skipping")
+            continue
+
+        print(f"  Creating __obsm__{internal_name} table ({obsm_key})...")
+        embedding = adata.obsm[obsm_key]
+        original_dims = embedding.shape[1]
+
+        # Limit to maximum 4 dimensions
+        MAX_EMBEDDING_DIMS = 4
+        if original_dims > MAX_EMBEDDING_DIMS:
+            print(f"    ⚠ Limiting from {original_dims} to {MAX_EMBEDDING_DIMS} dimensions")
+            embedding = embedding[:, :MAX_EMBEDDING_DIMS]
+            num_dims = MAX_EMBEDDING_DIMS
+        else:
+            num_dims = original_dims
+
+        # Build CREATE TABLE statement
+        col_defs = ['cell_id INTEGER PRIMARY KEY']
+        for i in range(num_dims):
+            col_defs.append(f'dim_{i} DOUBLE NOT NULL')
+
+        conn.execute(f"""
+            CREATE TABLE __obsm__{internal_name} (
+                {', '.join(col_defs)}
+            )
+        """)
+
+        # Prepare data
+        print(f"    Inserting {len(embedding):,} rows with {num_dims} dimensions...")
+        embedding_df = pd.DataFrame(embedding)
+        embedding_df.columns = [f'dim_{i}' for i in range(num_dims)]
+        embedding_df.insert(0, 'cell_id', range(len(embedding_df)))
+
+        # Insert
+        placeholders = ','.join(['?'] * len(embedding_df.columns))
+        conn.executemany(
+            f"INSERT INTO __obsm__{internal_name} VALUES ({placeholders})",
+            embedding_df.values.tolist()
+        )
+
+        # Create index
+        print(f"    Creating index...")
+        conn.execute(f"CREATE INDEX idx_obsm_{internal_name}_cell ON __obsm__{internal_name}(cell_id)")
+
+        # Create view
+        print(f"    Creating obsm__{internal_name} view...")
+        conn.execute(f"""
+            CREATE VIEW obsm__{internal_name} AS
+            SELECT c.cell_name, e.*
+            FROM __obsm__{internal_name} e
+            JOIN __cells c ON e.cell_id = c.cell_id
+        """)
+
+        print(f"  ✓ obsm__{internal_name}: {num_dims} dimensions")
+
+
+def finalize_database(conn: duckdb.DuckDBPyConnection) -> None:
+    """Optimize database"""
+    conn.execute("VACUUM")
+    conn.execute("ANALYZE")
+
+
+def verify_database(conn: duckdb.DuckDBPyConnection, adata) -> None:
+    """Basic sanity checks on converted database"""
+
+    # Check cell count
+    result = conn.execute("SELECT COUNT(*) FROM __cells").fetchone()
+    if result[0] != adata.n_obs:
+        raise ConversionError(f"Cell count mismatch: {result[0]} != {adata.n_obs}")
+
+    # Check gene count
+    result = conn.execute("SELECT COUNT(*) FROM __genes").fetchone()
+    if result[0] != adata.n_vars:
+        raise ConversionError(f"Gene count mismatch: {result[0]} != {adata.n_vars}")
+
+
+def format_size(size_bytes: int) -> str:
+    """Format file size for display"""
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size_bytes < 1024.0:
+            return f"{size_bytes:.1f} {unit}"
+        size_bytes /= 1024.0
+    return f"{size_bytes:.1f} TB"
+
+
+def main():
+    """Main entry point"""
+
+    parser = argparse.ArgumentParser(
+        description='Convert h5ad file to DuckDB database',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument('file', help='Path to h5ad file')
+
+    args = parser.parse_args()
+
+    # Convert to Path
+    h5ad_path = Path(args.file).resolve()
+
+    # Check file exists
+    if not h5ad_path.exists():
+        print(f"ERROR: [ant-convert] File not found", file=sys.stderr)
+        print(f"Location: {h5ad_path}", file=sys.stderr)
+        sys.exit(3)
+
+    # Check file has .h5ad extension
+    if h5ad_path.suffix != '.h5ad':
+        print(f"ERROR: [ant-convert] Not an h5ad file", file=sys.stderr)
+        print(f"Details: File must have .h5ad extension", file=sys.stderr)
+        sys.exit(1)
+
+    # Load configuration
+    config = get_config()
+
+    # Start conversion
+    start_time = time.time()
+
+    try:
+        convert_h5ad_to_duckdb(h5ad_path, config)
+
+        total_time = time.time() - start_time
+        minutes = int(total_time // 60)
+        seconds = int(total_time % 60)
+
+        if minutes > 0:
+            print(f"  Total time: {minutes}m {seconds}s")
+        else:
+            print(f"  Total time: {seconds}s")
+
+        sys.exit(0)
+
+    except ConversionError as error:
+        print(str(error), file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\n\nInterrupted by user", file=sys.stderr)
+
+        # Try to clean up
+        duckdb_path = h5ad_path.with_suffix('.duckdb')
+        if duckdb_path.exists():
+            print(f"Removing partial database: {duckdb_path}", file=sys.stderr)
+            duckdb_path.unlink()
+
+        sys.exit(130)
+    except Exception as error:
+        print(f"\nERROR: [ant-convert] Unexpected error", file=sys.stderr)
+        print(f"Details: {error}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+
+        # Try to clean up
+        duckdb_path = h5ad_path.with_suffix('.duckdb')
+        if duckdb_path.exists():
+            print(f"\nRemoving partial database: {duckdb_path}", file=sys.stderr)
+            duckdb_path.unlink()
+
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()

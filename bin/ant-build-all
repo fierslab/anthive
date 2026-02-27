@@ -1,0 +1,338 @@
+#!/usr/bin/env python3
+"""
+ant-build-all - Process entire h5ad datastore with intelligent caching
+
+Scans data folder for h5ad files and:
+1. Checks if .md metadata exists (runs ant check if missing)
+2. Converts to .duckdb if missing or out-of-date
+3. Parallel processing with configurable workers
+4. Reports what was updated and warns about potential issues
+
+Usage:
+    ant build-all [--data-folder PATH] [-j WORKERS] [--force]
+"""
+
+import argparse
+import subprocess
+import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+
+@dataclass
+class FileSet:
+    """Represents an h5ad file and its associated files"""
+    h5ad: Path
+    md: Optional[Path]
+    duckdb: Optional[Path]
+
+    @property
+    def needs_md(self) -> bool:
+        return self.md is None or not self.md.exists()
+
+    @property
+    def needs_conversion(self) -> bool:
+        """Check if conversion is needed based on timestamps"""
+        if self.duckdb is None or not self.duckdb.exists():
+            return True
+
+        # Get modification times
+        duckdb_mtime = self.duckdb.stat().st_mtime
+        h5ad_mtime = self.h5ad.stat().st_mtime
+
+        # DuckDB is outdated if h5ad is newer
+        if h5ad_mtime > duckdb_mtime:
+            return True
+
+        # DuckDB is outdated if .md exists and is newer
+        if self.md and self.md.exists():
+            md_mtime = self.md.stat().st_mtime
+            if md_mtime > duckdb_mtime:
+                return True
+
+        return False
+
+    @property
+    def h5ad_newer_than_md(self) -> bool:
+        """Check if h5ad was modified after .md (potential issue)"""
+        if not self.md or not self.md.exists():
+            return False
+
+        h5ad_mtime = self.h5ad.stat().st_mtime
+        md_mtime = self.md.stat().st_mtime
+        return h5ad_mtime > md_mtime
+
+
+def scan_data_folder(data_folder: Path) -> List[FileSet]:
+    """Scan data folder for all h5ad files and their associated files"""
+    filesets = []
+
+    for h5ad_path in data_folder.rglob("*.h5ad"):
+        # Check for associated files
+        md_path = h5ad_path.with_suffix('.md')
+        duckdb_path = h5ad_path.with_suffix('.duckdb')
+
+        fileset = FileSet(
+            h5ad=h5ad_path,
+            md=md_path if md_path.exists() else None,
+            duckdb=duckdb_path if duckdb_path.exists() else None
+        )
+        filesets.append(fileset)
+
+    return filesets
+
+
+def run_check(h5ad_path: Path, timeout: Optional[int] = None) -> Tuple[bool, str]:
+    """Run ant check on an h5ad file"""
+    try:
+        cmd = [sys.executable, str(Path(__file__).parent / 'ant-check'), str(h5ad_path)]
+
+        # Stream output directly to terminal (no capture)
+        result = subprocess.run(
+            cmd,
+            timeout=timeout  # No timeout by default
+        )
+        if result.returncode == 0:
+            return True, "OK"
+        else:
+            return False, f"Exit code {result.returncode}"
+    except subprocess.TimeoutExpired:
+        return False, "Timeout"
+    except Exception as e:
+        return False, str(e)
+
+
+def run_convert(h5ad_path: Path, timeout: Optional[int] = None) -> Tuple[bool, str]:
+    """Run ant convert on an h5ad file"""
+    try:
+        # Stream output directly to terminal (no capture)
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__).parent / 'ant-convert'), str(h5ad_path)],
+            timeout=timeout  # No timeout by default
+        )
+        if result.returncode == 0:
+            return True, "OK"
+        else:
+            return False, f"Exit code {result.returncode}"
+    except subprocess.TimeoutExpired:
+        return False, "Timeout"
+    except Exception as e:
+        return False, str(e)
+
+
+def process_fileset(fileset: FileSet, force: bool = False, timeout: Optional[int] = None) -> dict:
+    """Process a single fileset (check and convert if needed)"""
+    result = {
+        'h5ad': fileset.h5ad,
+        'checked': False,
+        'converted': False,
+        'check_error': None,
+        'convert_error': None,
+        'h5ad_newer_than_md': fileset.h5ad_newer_than_md
+    }
+
+    # Run check if needed (DuckDB checking is now automatic)
+    if fileset.needs_md:
+        success, message = run_check(fileset.h5ad, timeout=timeout)
+        result['checked'] = success
+        if not success:
+            result['check_error'] = message
+            return result  # Don't convert if check failed
+
+    # Run convert if needed or forced
+    if force or fileset.needs_conversion:
+        success, message = run_convert(fileset.h5ad, timeout=timeout)
+        result['converted'] = success
+        if not success:
+            result['convert_error'] = message
+
+    return result
+
+
+def format_path(path: Path, base: Path) -> str:
+    """Format path relative to base for display"""
+    try:
+        return str(path.relative_to(base))
+    except ValueError:
+        return str(path)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Process entire h5ad datastore with intelligent caching',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  ant build-all --data-folder ./data
+  ant build-all --data-folder ./data -j 8
+  ant build-all --data-folder ./data --force
+  ant build-all --data-folder ./data --timeout 7200  # 2 hour timeout per file
+        """
+    )
+
+    parser.add_argument(
+        '--data-folder',
+        type=Path,
+        default=Path('./data'),
+        help='Path to data folder containing h5ad files (default: ./data)'
+    )
+    parser.add_argument(
+        '-j', '--jobs',
+        type=int,
+        default=4,
+        help='Number of parallel workers (default: 4)'
+    )
+    parser.add_argument(
+        '--force',
+        action='store_true',
+        help='Force reconversion even if up-to-date'
+    )
+    parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Show what would be done without actually doing it'
+    )
+    parser.add_argument(
+        '--timeout',
+        type=int,
+        default=None,
+        help='Timeout in seconds for each conversion (default: no timeout)'
+    )
+
+    args = parser.parse_args()
+
+    # Validate data folder
+    if not args.data_folder.exists():
+        print(f"Error: Data folder not found: {args.data_folder}", file=sys.stderr)
+        return 1
+
+    if not args.data_folder.is_dir():
+        print(f"Error: Not a directory: {args.data_folder}", file=sys.stderr)
+        return 1
+
+    # Scan for h5ad files
+    print(f"Scanning {args.data_folder} for h5ad files...")
+    filesets = scan_data_folder(args.data_folder)
+
+    if not filesets:
+        print("No h5ad files found")
+        return 0
+
+    print(f"Found {len(filesets)} h5ad file(s)")
+    print()
+
+    # Determine what needs to be done
+    needs_check = [fs for fs in filesets if fs.needs_md]
+    needs_convert = [fs for fs in filesets if args.force or fs.needs_conversion]
+
+    print(f"Files needing metadata check: {len(needs_check)}")
+    print(f"Files needing conversion: {len(needs_convert)}")
+
+    if args.dry_run:
+        print("\n--- Dry run mode - no changes will be made ---")
+        if needs_check:
+            print("\nWould check:")
+            for fs in needs_check:
+                print(f"  {format_path(fs.h5ad, args.data_folder)}")
+        if needs_convert:
+            print("\nWould convert:")
+            for fs in needs_convert:
+                print(f"  {format_path(fs.h5ad, args.data_folder)}")
+        return 0
+
+    if not needs_check and not needs_convert:
+        print("\n✓ All files are up-to-date")
+        return 0
+
+    print(f"\nProcessing with {args.jobs} parallel worker(s)...")
+    print()
+
+    # Process all filesets in parallel
+    results = []
+    with ProcessPoolExecutor(max_workers=args.jobs) as executor:
+        futures = {
+            executor.submit(process_fileset, fs, args.force, args.timeout): fs
+            for fs in filesets if fs.needs_md or args.force or fs.needs_conversion
+        }
+
+        for future in as_completed(futures):
+            fileset = futures[future]
+            try:
+                result = future.result()
+                results.append(result)
+
+                # Show completion status
+                rel_path = format_path(fileset.h5ad, args.data_folder)
+                print(f"\n{'='*70}")
+                if result['check_error']:
+                    print(f"✗ FAILED CHECK: {rel_path}")
+                    print(f"  Error: {result['check_error']}")
+                elif result['convert_error']:
+                    print(f"✗ FAILED CONVERT: {rel_path}")
+                    print(f"  Error: {result['convert_error']}")
+                else:
+                    print(f"✓ COMPLETED: {rel_path}")
+                    if result['checked']:
+                        print(f"  - Metadata checked")
+                    if result['converted']:
+                        print(f"  - Database converted")
+                print(f"{'='*70}\n")
+
+            except Exception as e:
+                print(f"\n{'='*70}")
+                print(f"✗ ERROR: {format_path(fileset.h5ad, args.data_folder)}")
+                print(f"  {e}")
+                print(f"{'='*70}\n")
+
+    # Generate summary
+    print("\n" + "="*70)
+    print("SUMMARY")
+    print("="*70)
+
+    checked = [r for r in results if r['checked']]
+    converted = [r for r in results if r['converted']]
+    check_errors = [r for r in results if r['check_error']]
+    convert_errors = [r for r in results if r['convert_error']]
+    h5ad_newer = [r for r in results if r['h5ad_newer_than_md'] and r['converted']]
+
+    print(f"\nTotal files processed: {len(results)}")
+    print(f"  Metadata checked: {len(checked)}")
+    print(f"  Databases converted: {len(converted)}")
+
+    if check_errors:
+        print(f"\n⚠ Check errors: {len(check_errors)}")
+        for r in check_errors:
+            print(f"    {format_path(r['h5ad'], args.data_folder)}")
+            print(f"      {r['check_error']}")
+
+    if convert_errors:
+        print(f"\n⚠ Conversion errors: {len(convert_errors)}")
+        for r in convert_errors:
+            print(f"    {format_path(r['h5ad'], args.data_folder)}")
+            print(f"      {r['convert_error']}")
+
+    if converted:
+        print(f"\n✓ Successfully converted databases:")
+        for r in converted:
+            print(f"    {format_path(r['h5ad'], args.data_folder)}")
+
+    if h5ad_newer:
+        print(f"\n⚠ WARNING: These h5ad files are newer than their .md files:")
+        print("  The .md metadata may be out of sync with the h5ad file.")
+        print("  Consider running 'ant check' to update metadata if needed.")
+        for r in h5ad_newer:
+            print(f"    {format_path(r['h5ad'], args.data_folder)}")
+
+    print()
+
+    # Return error code if there were any errors
+    if check_errors or convert_errors:
+        return 1
+
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
