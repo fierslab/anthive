@@ -152,6 +152,7 @@ pull-from-storagebox:
 		--exclude "**/.*/**" \
 		--exclude ".*/**" \
 		--exclude "**/*.partial" \
+		--exclude "**/*.h5ad" \
 		--exclude "**/*.duckdb.wal" \
 		--exclude "**/*.duckdb.deleted" \
 		--exclude "**/*.duckdb.wal.deleted" \
