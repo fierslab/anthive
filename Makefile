@@ -31,16 +31,16 @@ clean-webapp:
 	@rm -rf webapp
 	@echo "✓ Clean complete!"
 
-build-jupyter:
+build-jupyter: antclient/antclient.py
 	@echo "Building JupyterLite to webapp/jupyter..."
 	@echo ""
 	@# Create webapp directory
 	@mkdir -p webapp
-	@# Copy antclient.py into notebooks before build
-	@echo "Copying antclient.py to notebooks..."
-	@cp antclient/antclient.py notebooks/antclient.py
-	@# Build JupyterLite with notebooks as content using uvx
-	@uvx --from jupyterlite-core --with jupyterlite-pyodide-kernel --with jupyter-server jupyter-lite build --contents notebooks --output-dir webapp/jupyter
+	@# Copy antclient.py into jupyter content before build
+	@echo "Copying antclient.py to webapp-src/jupyter..."
+	@cp antclient/antclient.py webapp-src/jupyter/antclient.py
+	@# Build JupyterLite with jupyter content using uvx
+	@uvx --from jupyterlite-core --with jupyterlite-pyodide-kernel --with jupyter-server jupyter-lite build --contents webapp-src/jupyter --output-dir webapp/jupyter
 	@echo "✓ JupyterLite build complete!"
 	@echo ""
 	@echo "Location: webapp/jupyter/"
