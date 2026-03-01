@@ -23,6 +23,7 @@ def get_available_commands(bin_dir: Path) -> dict:
         'convert': 'Convert h5ad file to DuckDB database',
         'build-all': 'Process entire datastore with parallel conversion',
         'serve': 'Start REST API server',
+        'md': 'Manage markdown metadata (YAML preambles)',
     }
 
     for file_path in bin_dir.iterdir():

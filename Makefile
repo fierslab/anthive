@@ -5,14 +5,16 @@ help:
 	@echo "=============================="
 	@echo ""
 	@echo "Webapp:"
-	@echo "  make build-webapp      - Build complete webapp (JupyterLite + index)"
-	@echo "  make build-jupyter     - Build only JupyterLite to webapp/jupyter"
-	@echo "  make clean-webapp      - Clean webapp build directory"
-	@echo "  make serve             - Serve webapp with Caddy (port 8501, API proxied)"
-	@echo "  make serve-nginx       - Serve webapp with Nginx (port 8501, API proxied)"
+	@echo "  make build-webapp   - Build complete webapp (JupyterLite + Stlite + index)"
+	@echo "  make build-jupyter  - Build only JupyterLite to webapp/jupyter"
+	@echo "  make build-stlite   - Build only Streamlit Lite to webapp/stlite"
+	@echo "  make clean-webapp   - Clean webapp build directory"
+	@echo "  make serve          - Serve webapp with Caddy (port 8501, API proxied)"
+	@echo "  make serve-nginx    - Serve webapp with Nginx (port 8501, API proxied)"
 	@echo ""
 	@echo "Development:"
 	@echo "  make serve-api         - Run REST API server (port 8080)"
+	@echo "  make serve-browse      - Run web browser server (port 8081)"
 	@echo ""
 	@echo "Sync:"
 	@echo "  make sync-to-bds_dedata   - Push h5adstore to storage box (rclone)"
@@ -39,33 +41,46 @@ build-jupyter: antclient/antclient.py
 	@# Copy antclient.py into jupyter content before build
 	@echo "Copying antclient.py to webapp-src/jupyter..."
 	@cp antclient/antclient.py webapp-src/jupyter/antclient.py
-	@# Build JupyterLite with jupyter content using uvx
-	@uvx --from jupyterlite-core --with jupyterlite-pyodide-kernel --with jupyter-server jupyter-lite build --contents webapp-src/jupyter --output-dir webapp/jupyter
+	@# Build JupyterLite with jupyter content
+	@uvx --from jupyterlite-core --with jupyterlite-pyodide-kernel --with jupyter-server jupyter-lite build \
+		--contents webapp-src/jupyter \
+		--output-dir webapp/jupyter
 	@echo "✓ JupyterLite build complete!"
 	@echo ""
 	@echo "Location: webapp/jupyter/"
 	@echo "Client: webapp/jupyter/files/antclient.py"
 
-build-webapp: build-jupyter
+build-stlite: antclient/antclient.py
+	@echo "Building Streamlit Lite to webapp/stlite..."
+	@echo ""
+	@# Create webapp directory
+	@mkdir -p webapp/stlite
+	@# Copy antclient.py to stlite source
+	@echo "Copying antclient.py to webapp-src/stlite..."
+	@cp antclient/antclient.py webapp-src/stlite/antclient.py
+	@# Copy all stlite content to webapp
+	@echo "Copying stlite content..."
+	@cp -r webapp-src/stlite/* webapp/stlite/
+	@echo "✓ Streamlit Lite build complete!"
+	@echo ""
+	@echo "Location: webapp/stlite/"
+	@echo "Client: webapp/stlite/antclient.py"
+
+build-webapp: build-jupyter build-stlite webapp-src/index.html
 	@echo ""
 	@echo "Copying main index.html..."
-	@cp webapp-index.html webapp/index.html
+	@cp webapp-src/index.html webapp/index.html
 	@echo "✓ Index page copied"
-	@echo ""
-	@echo "Creating stlite placeholder..."
-	@mkdir -p webapp/stlite
-	@echo "<html><body><h1>Streamlit Lite - Coming Soon</h1><p>This section will contain the Streamlit Lite app.</p></body></html>" > webapp/stlite/index.html
-	@echo "✓ Stlite placeholder created"
 	@echo ""
 	@echo "╔═══════════════════════════════════════════════════════════╗"
 	@echo "║  ✓ Webapp built successfully!                            ║"
 	@echo "╚═══════════════════════════════════════════════════════════╝"
 	@echo ""
 	@echo "Contents:"
-	@echo "  - webapp/index.html           (landing page)"
-	@echo "  - webapp/jupyter/             (JupyterLite)"
-	@echo "  - webapp/jupyter/files/antclient.py  (symlinked client)"
-	@echo "  - webapp/stlite/              (placeholder for Streamlit)"
+	@echo "  - webapp/index.html             (landing page)"
+	@echo "  - webapp/jupyter/               (JupyterLite)"
+	@echo "  - webapp/stlite/                (Streamlit Lite)"
+	@echo "  - antclient.py auto-updated in both"
 	@echo ""
 	@echo "To serve with Caddy (recommended):"
 	@echo "  Terminal 1: make serve-api"
@@ -77,30 +92,43 @@ serve:
 	@echo "Starting Anthive webapp with Caddy on http://localhost:8501"
 	@echo ""
 	@echo "This serves:"
-	@echo "  - Static webapp files from ./webapp"
-	@echo "  - API proxied from http://localhost:8080 at /api/*"
+	@echo "  - Browser interface at /"
+	@echo "  - JupyterLite at /jupyter"
+	@echo "  - Streamlit at /stlite"
+	@echo "  - API at /api"
 	@echo ""
-	@echo "Make sure the API server is running first (in another terminal):"
-	@echo "  make serve-api"
+	@echo "Make sure backend servers are running (in other terminals):"
+	@echo "  Terminal 1: make serve-api (port 8080)"
+	@echo "  Terminal 2: make serve-browse (port 8081)"
+	@echo "  Terminal 3: make serve (this - port 8501)"
 	@echo ""
-	@caddy run --config Caddyfile
+	@caddy run --config config/Caddyfile
 
 serve-nginx:
 	@echo "Starting Anthive webapp with Nginx on http://localhost:8501"
 	@echo ""
 	@echo "This serves:"
-	@echo "  - Static webapp files from ./webapp"
-	@echo "  - API proxied from http://localhost:8080 at /api/*"
+	@echo "  - Browser interface at /"
+	@echo "  - JupyterLite at /jupyter"
+	@echo "  - Streamlit at /stlite"
+	@echo "  - API at /api"
 	@echo ""
-	@echo "Make sure the API server is running first (in another terminal):"
-	@echo "  make serve-api"
+	@echo "Make sure backend servers are running (in other terminals):"
+	@echo "  Terminal 1: make serve-api (port 8080)"
+	@echo "  Terminal 2: make serve-browse (port 8081)"
+	@echo "  Terminal 3: make serve-nginx (this - port 8501)"
 	@echo ""
-	@nginx -c $(PWD)/nginx.conf -p $(PWD)
+	@nginx -c $(PWD)/config/nginx.conf -p $(PWD)
 
 serve-api:
 	@echo "Starting Anthive REST API on http://localhost:8080"
 	@echo ""
 	@./bin/ant-serve --data-folder ./data/h5adstore --host 0.0.0.0 --port 8080
+
+serve-browse:
+	@echo "Starting Anthive Web Browser on http://localhost:8081"
+	@echo ""
+	@./bin/ant-browse --data-folder ./data/h5adstore --host 0.0.0.0 --port 8081
 
 sync-to-cbd3:
 	rsync -arv ./webapp cbd3:/data/anthive4/

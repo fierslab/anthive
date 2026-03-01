@@ -173,35 +173,77 @@ class DatabaseRegistry:
         self._cache_all_metadata()
 
     def _scan_databases(self):
-        """Scan data folder for .duckdb files"""
+        """Scan data folder for .duckdb files (follows symlinks)"""
         if not self.data_folder.exists():
             raise FileNotFoundError(f"Data folder not found: {self.data_folder}")
 
         self.databases.clear()
 
-        for db_path in self.data_folder.rglob("*.duckdb"):
-            # Get relative path without .duckdb extension
-            rel_path = db_path.relative_to(self.data_folder)
-            db_id = str(rel_path.with_suffix(''))
-            self.databases[db_id] = db_path
+        # Walk the directory tree, following symlinks
+        def scan_recursive(path: Path, base: Path):
+            """Recursively scan for .duckdb files, following symlinks"""
+            try:
+                for item in path.iterdir():
+                    # Resolve symlinks
+                    resolved_item = item.resolve()
+
+                    if resolved_item.is_file() and resolved_item.suffix == '.duckdb':
+                        # Calculate relative path from base
+                        try:
+                            rel_path = item.relative_to(base)
+                            db_id = str(rel_path.with_suffix(''))
+                            self.databases[db_id] = resolved_item
+                        except ValueError:
+                            # Skip if can't make relative path
+                            pass
+                    elif resolved_item.is_dir():
+                        # Recursively scan subdirectories
+                        scan_recursive(item, base)
+            except (PermissionError, OSError) as e:
+                # Skip directories we can't access
+                pass
+
+        scan_recursive(self.data_folder, self.data_folder)
 
         print(f"Found {len(self.databases)} databases")
-        for db_id in sorted(self.databases.keys()):
-            print(f"  - {db_id}")
+        if len(self.databases) <= 10:
+            for db_id in sorted(self.databases.keys()):
+                print(f"  - {db_id}")
+        else:
+            for db_id in sorted(self.databases.keys())[:10]:
+                print(f"  - {db_id}")
+            print(f"  ... and {len(self.databases) - 10} more")
 
     def _cache_all_metadata(self):
         """Cache metadata for all databases"""
         print("Caching metadata...")
         self.metadata_cache.clear()
+        errors = []
 
         for db_id, db_path in self.databases.items():
             try:
                 self.metadata_cache[db_id] = self._load_database_metadata(db_path)
             except Exception as e:
-                print(f"  Warning: Could not load metadata for {db_id}: {e}")
-                self.metadata_cache[db_id] = {'error': str(e)}
+                # Skip databases with errors
+                errors.append((db_id, str(e)))
+                print(f"\n{'='*70}")
+                print(f"ERROR: Failed to load database metadata")
+                print(f"{'='*70}")
+                print(f"Database: {db_id}")
+                print(f"Path: {db_path}")
+                print(f"Error: {str(e)}")
+                print(f"{'='*70}\n")
 
-        print(f"Cached metadata for {len(self.metadata_cache)} databases")
+        # Remove databases that failed to load from the registry
+        for db_id, _ in errors:
+            if db_id in self.databases:
+                del self.databases[db_id]
+
+        if errors:
+            print(f"\nWarning: Skipped {len(errors)} database(s) with errors")
+            print(f"Successfully loaded {len(self.metadata_cache)} database(s)")
+        else:
+            print(f"Cached metadata for {len(self.metadata_cache)} databases")
 
     def _load_database_metadata(self, db_path: Path) -> Dict[str, Any]:
         """Load metadata from .md files and database"""
@@ -221,28 +263,65 @@ class DatabaseRegistry:
             n_cells = conn.execute("SELECT COUNT(*) FROM __cells").fetchone()[0]
             n_genes = conn.execute("SELECT COUNT(*) FROM __genes").fetchone()[0]
 
-            # Get layers
+            # Get layers with friendly names
             layers_result = conn.execute("""
                 SELECT table_name
                 FROM information_schema.tables
                 WHERE table_type = 'VIEW'
                 AND table_name LIKE 'layer__%'
             """).fetchall()
-            layers = sorted([row[0].replace('layer__', '') for row in layers_result])
+            layer_keys = sorted([row[0].replace('layer__', '') for row in layers_result])
 
-            # Get embeddings
+            # Build layers dict with friendly names from metadata
+            layers = {}
+            layers_metadata = file_metadata.get('layers_include', {})
+            for key in layer_keys:
+                if key in layers_metadata:
+                    layers[key] = layers_metadata[key]
+                else:
+                    layers[key] = key  # Use key as name if no friendly name
+
+            # Get embeddings with friendly names and dimensions
             embeddings_result = conn.execute("""
                 SELECT table_name
                 FROM information_schema.tables
                 WHERE table_type = 'VIEW'
                 AND table_name LIKE 'obsm__%'
             """).fetchall()
-            embeddings = sorted([row[0].replace('obsm__', '') for row in embeddings_result])
+            embedding_keys = sorted([row[0].replace('obsm__', '') for row in embeddings_result])
 
-            # Get metadata fields
-            metadata_fields = {'numerical': [], 'categorical': []}
+            # Build embeddings dict with friendly names and dimensions
+            embeddings = {}
+            obsm_metadata = file_metadata.get('obsm_include', {})
+            for key in embedding_keys:
+                emb_info = {}
 
-            # Numerical fields
+                # Add friendly name from metadata
+                if key in obsm_metadata:
+                    emb_info['name'] = obsm_metadata[key]
+                else:
+                    # Fallback: capitalize and remove X_ prefix
+                    name = key
+                    if name.startswith('X_'):
+                        name = name[2:]
+                    emb_info['name'] = name.capitalize()
+
+                # Get dimensions (count columns excluding cell_name and cell_id)
+                try:
+                    dim_result = conn.execute(f"""
+                        SELECT COUNT(*)
+                        FROM information_schema.columns
+                        WHERE table_name = 'obsm__{key}'
+                        AND column_name NOT IN ('cell_name', 'cell_id')
+                    """).fetchone()
+                    emb_info['dimensions'] = dim_result[0] if dim_result else None
+                except:
+                    emb_info['dimensions'] = None
+
+                embeddings[key] = emb_info
+
+            # Get obs columns (numerical)
+            obs_numerical = []
             obsnum_exists = conn.execute("""
                 SELECT COUNT(*)
                 FROM information_schema.tables
@@ -255,10 +334,12 @@ class DatabaseRegistry:
                     FROM information_schema.columns
                     WHERE table_name = 'obsnum'
                     AND column_name NOT IN ('cell_name', 'cell_id')
+                    ORDER BY column_name
                 """).fetchall()
-                metadata_fields['numerical'] = [row[0] for row in num_fields]
+                obs_numerical = [row[0] for row in num_fields]
 
-            # Categorical fields
+            # Get obs columns (categorical)
+            obs_categorical = []
             obscat_exists = conn.execute("""
                 SELECT COUNT(*)
                 FROM information_schema.tables
@@ -271,20 +352,57 @@ class DatabaseRegistry:
                     FROM information_schema.columns
                     WHERE table_name = 'obscat'
                     AND column_name NOT IN ('cell_name', 'cell_id')
+                    ORDER BY column_name
                 """).fetchall()
-                metadata_fields['categorical'] = [row[0] for row in cat_fields]
+                obs_categorical = [row[0] for row in cat_fields]
+
+            # Get var columns
+            var_columns = []
+            var_exists = conn.execute("""
+                SELECT COUNT(*)
+                FROM information_schema.tables
+                WHERE table_name = 'var'
+            """).fetchone()[0]
+
+            if var_exists:
+                var_fields = conn.execute("""
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_name = 'var'
+                    AND column_name NOT IN ('gene_name', 'gene_id')
+                    ORDER BY column_name
+                """).fetchall()
+                var_columns = [row[0] for row in var_fields]
 
         finally:
             self.connection_pool.return_connection(db_path, conn)
 
-        # Combine metadata
+        # Combine metadata with enhanced structure
         metadata = {
+            'title': file_metadata.get('title', db_path.stem),
             'n_cells': n_cells,
             'n_genes': n_genes,
+
+            # Layers with friendly names
             'layers': layers,
+
+            # Embeddings with friendly names and dimensions
             'embeddings': embeddings,
-            'metadata_fields': metadata_fields,
-            'title': file_metadata.get('title', db_path.stem),
+
+            # Observation columns
+            'obs': {
+                'numerical': obs_numerical,
+                'categorical': obs_categorical,
+                'total': len(obs_numerical) + len(obs_categorical)
+            },
+
+            # Variable columns
+            'var': {
+                'columns': var_columns,
+                'total': len(var_columns)
+            },
+
+            # File metadata
             'version': file_metadata.get('version'),
             'sha256': file_metadata.get('sha256'),
             'date': file_metadata.get('date'),
@@ -293,7 +411,7 @@ class DatabaseRegistry:
 
         # Add collection metadata if present
         if collection_metadata:
-            metadata['group_metadata'] = {
+            metadata['collection'] = {
                 'group': collection_metadata.get('group'),
                 'experiment': collection_metadata.get('experiment'),
                 'authors': collection_metadata.get('authors'),
@@ -341,23 +459,39 @@ class DatabaseRegistry:
             return self._databases_list_cache
 
         result = []
+        errors = []
+
         for db_id, db_path in sorted(self.databases.items()):
             try:
                 metadata = self.get_database_metadata(db_id)
 
+                # db_id already contains the relative path (without .duckdb extension)
+                # Reconstruct the relative path by adding back the extension
+                relative_path = f"{db_id}.duckdb"
+
                 db_info = {
                     'id': db_id,
-                    'path': str(db_path.relative_to(self.data_folder)),
+                    'path': relative_path,
                     **metadata
                 }
 
                 result.append(db_info)
             except Exception as e:
-                result.append({
-                    'id': db_id,
-                    'path': str(db_path.relative_to(self.data_folder)),
-                    'error': str(e)
-                })
+                # Skip databases with errors and log them
+                errors.append((db_id, str(e)))
+                print(f"\n{'='*70}")
+                print(f"ERROR: Failed to load database metadata")
+                print(f"{'='*70}")
+                print(f"Database: {db_id}")
+                print(f"Path: {db_path}")
+                print(f"Error: {str(e)}")
+                print(f"{'='*70}\n")
+
+        # Log summary if there were errors
+        if errors:
+            print(f"\nWarning: Skipped {len(errors)} database(s) with errors")
+            print(f"Successfully loaded {len(result)} database(s)")
+            print()
 
         self._databases_list_cache = result
         return result
@@ -483,6 +617,10 @@ app.add_middleware(
 # Can enable gzip middleware here if needed
 
 
+# ============================================================================
+# API Endpoints (all under /api prefix via root_path)
+# ============================================================================
+
 @app.get("/", tags=["info"])
 async def root():
     """
@@ -605,12 +743,32 @@ async def get_database_info(db_id: str):
     Get detailed information about a specific database
 
     Returns:
-    - Cell and gene counts
-    - Available layers
-    - Available embeddings
-    - Metadata field types (numerical and categorical)
-    - File metadata (version, checksum, date)
-    - Collection metadata (group, experiment, authors)
+    - title: Dataset title
+    - n_cells: Number of cells
+    - n_genes: Number of genes
+    - layers: Dict of layer keys to friendly names
+      - Example: {"X": "Normalized expression", "counts": "Raw counts"}
+    - embeddings: Dict of embedding keys to metadata objects
+      - Example: {"X_umap": {"name": "Umap", "dimensions": 2}}
+      - Each value contains:
+        - name: Friendly name
+        - dimensions: Number of dimensions
+    - obs: Observation metadata columns
+      - numerical: List of numerical columns
+      - categorical: List of categorical columns
+      - total: Total number of obs columns
+    - var: Variable metadata columns
+      - columns: List of var columns
+      - total: Total number of var columns
+    - version: Anthive version
+    - sha256: File checksum
+    - date: Last checked date
+    - year: Publication year
+    - collection: Collection metadata (if available)
+      - group: Collection/study name
+      - experiment: Experiment description
+      - authors: List of authors
+      - year: Publication year
     """
     try:
         metadata = registry.get_database_metadata(db_id)

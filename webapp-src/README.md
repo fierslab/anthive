@@ -13,9 +13,10 @@ This directory contains source content for webapp components that get built into
   - Built to `../webapp/jupyter/` by `make build-jupyter`
   - Contains: Getting_Started.ipynb, examples, and helpers
 
-- **`stlite/`** - Streamlit Lite source (planned)
+- **`stlite/`** - Streamlit Lite source
   - Source for browser-based Streamlit apps
-  - Will be built to `../webapp/stlite/`
+  - Built to `../webapp/stlite/` by `make build-stlite`
+  - Contains: streamlit_app.py, components.py, pages/, etc.
 
 ## Build Process
 
@@ -23,11 +24,16 @@ This directory contains source content for webapp components that get built into
 # Build JupyterLite from jupyter/ content
 make build-jupyter
 
-# Build complete webapp (JupyterLite + landing page)
+# Build Streamlit Lite from stlite/ content
+make build-stlite
+
+# Build complete webapp (JupyterLite + Streamlit Lite + landing page)
 make build-webapp
 ```
 
 ## Notes
 
-- `antclient.py` is copied from `../antclient/` during build (don't edit the copy)
+- `antclient.py` is auto-copied from `../antclient/` to both `jupyter/` and `stlite/` during build
+- Don't edit the copied `antclient.py` files - edit the source in `../antclient/`
+- Both `jupyter/antclient.py` and `stlite/antclient.py` are gitignored
 - Build output goes to `../webapp/` (gitignored)

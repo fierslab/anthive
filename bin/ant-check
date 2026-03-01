@@ -207,6 +207,10 @@ def check_h5ad_file(h5ad_path: Path, config: dict, report: CheckReport):
         metadata['sha256'] = checksum
         metadata['date'] = datetime.now().strftime('%Y-%m-%d')
 
+    # Always update cell and gene counts
+    metadata['n_obs'] = int(adata.n_obs)
+    metadata['n_vars'] = int(adata.n_vars)
+
     # 7. Validate structure
     print(f"\n[4/9] Validating structure...")
     errors = validate_structure(adata)

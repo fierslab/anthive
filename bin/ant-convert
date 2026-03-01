@@ -304,7 +304,6 @@ def convert_layers(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict, confi
         start_time = time.time()
 
         # Create table
-        print(f"    Creating __layer__{internal_name} table...")
         conn.execute(f"""
             CREATE TABLE __layer__{internal_name} (
                 cell_id INTEGER NOT NULL,
@@ -317,12 +316,12 @@ def convert_layers(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict, confi
         # Process in chunks
         num_cells = adata.n_obs
         num_genes = adata.n_vars
+        total_nonzero = 0
+        chunk_count = 0
 
         for chunk_start in range(0, num_cells, chunk_size):
             chunk_end = min(chunk_start + chunk_size, num_cells)
-            progress = (chunk_end / num_cells) * 100
-
-            chunk_start_time = time.time()
+            chunk_count += 1
 
             # Load chunk
             chunk_data = layer_data[chunk_start:chunk_end, :]
@@ -343,6 +342,7 @@ def convert_layers(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict, confi
 
             # Remove zeros (safety check)
             melted = melted[melted['value'] != 0]
+            total_nonzero += len(melted)
 
             # Insert into database
             if len(melted) > 0:
@@ -351,24 +351,17 @@ def convert_layers(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict, confi
                 conn.execute(f"INSERT INTO __layer__{internal_name} SELECT * FROM temp_layer")
                 conn.unregister('temp_layer')
 
-            chunk_time = time.time() - chunk_start_time
-            print(f"    Chunk {chunk_start:,}-{chunk_end:,} ({progress:.0f}%)... {len(melted):,} non-zero values, {chunk_time:.1f}s")
-
             # Free memory
             del chunk_data, chunk_coo, melted
             gc.collect()
 
+        print(f"    Processed {chunk_count} chunks, {total_nonzero:,} non-zero values")
+
         # Create indices
-        print(f"    Creating indices...")
         conn.execute(f"CREATE INDEX idx_layer_{internal_name}_cell ON __layer__{internal_name}(cell_id)")
         conn.execute(f"CREATE INDEX idx_layer_{internal_name}_gene ON __layer__{internal_name}(gene_id)")
 
-        # Get total row count
-        result = conn.execute(f"SELECT COUNT(*) FROM __layer__{internal_name}").fetchone()
-        total_values = result[0]
-
         # Create view
-        print(f"    Creating view layer__{internal_name}...")
         conn.execute(f"""
             CREATE VIEW layer__{internal_name} AS
             SELECT
@@ -382,10 +375,10 @@ def convert_layers(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict, confi
 
         # Calculate sparsity
         total_elements = num_cells * num_genes
-        sparsity = (1 - total_values / total_elements) * 100
+        sparsity = (1 - total_nonzero / total_elements) * 100
 
         total_time = time.time() - start_time
-        print(f"  ✓ Completed in {total_time:.1f}s ({total_values:,} values stored, {sparsity:.1f}% sparse)")
+        print(f"  ✓ {internal_name}: {total_nonzero:,} values, {sparsity:.1f}% sparse, {total_time:.1f}s")
 
 
 def convert_observations(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict) -> None:
@@ -399,7 +392,6 @@ def convert_observations(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict)
         obsnum_cols = [col for col in obsnum_cols if col in adata.obs.columns and not (col in seen or seen.add(col))]
 
         if obsnum_cols:
-            print(f"  Creating __obsnum table with {len(obsnum_cols)} columns...")
             # Build CREATE TABLE statement
             col_defs = ['cell_id INTEGER PRIMARY KEY']
             for col in obsnum_cols:
@@ -411,20 +403,16 @@ def convert_observations(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict)
                 )
             """)
 
-            # Prepare data
-            print(f"    Preparing {len(adata.obs):,} rows...")
+            # Prepare and insert data
             obsnum_df = adata.obs[obsnum_cols].copy()
             obsnum_df.insert(0, 'cell_id', range(len(obsnum_df)))
 
-            # Insert
-            print(f"    Inserting data...")
             obsnum_df = normalize_dataframe_dtypes(obsnum_df)
             conn.register('temp_obsnum', obsnum_df)
             conn.execute("INSERT INTO __obsnum SELECT * FROM temp_obsnum")
             conn.unregister('temp_obsnum')
 
             # Create view
-            print(f"    Creating obsnum view...")
             conn.execute("""
                 CREATE VIEW obsnum AS
                 SELECT c.cell_name, o.*
@@ -432,7 +420,7 @@ def convert_observations(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict)
                 JOIN __cells c ON o.cell_id = c.cell_id
             """)
 
-            print(f"  ✓ obsnum: {len(obsnum_cols)} columns ({', '.join(obsnum_cols)})")
+            print(f"  ✓ obsnum: {len(obsnum_cols)} columns")
 
     # Convert categorical observations
     obscat_cols = metadata.get('obscat_include', [])
@@ -442,29 +430,11 @@ def convert_observations(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict)
         obscat_cols = [col for col in obscat_cols if col in adata.obs.columns and not (col in seen or seen.add(col))]
 
         if obscat_cols:
-            print(f"  Creating __obscat table with {len(obscat_cols)} columns...")
             # Build CREATE TABLE statement with ENUM types
             col_defs = ['cell_id INTEGER PRIMARY KEY']
 
             for col in obscat_cols:
-                # Get unique values
-                unique_values = adata.obs[col].dropna().unique()
-
-                # Convert to string if numerical
-                if pd.api.types.is_numeric_dtype(adata.obs[col]):
-                    unique_values = [str(v) for v in unique_values]
-                else:
-                    unique_values = [str(v) for v in unique_values]
-
-                # Escape single quotes in values
-                unique_values = [v.replace("'", "''") for v in unique_values]
-
-                # Create ENUM definition
-                if len(unique_values) > 0:
-                    enum_values = "', '".join(unique_values)
-                    col_defs.append(f'"{col}" VARCHAR')  # Use VARCHAR instead of ENUM for simplicity
-                else:
-                    col_defs.append(f'"{col}" VARCHAR')
+                col_defs.append(f'"{col}" VARCHAR')
 
             conn.execute(f"""
                 CREATE TABLE __obscat (
@@ -473,7 +443,6 @@ def convert_observations(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict)
             """)
 
             # Prepare data
-            print(f"    Preparing {len(adata.obs):,} rows...")
             obscat_df = adata.obs[obscat_cols].copy()
 
             # Convert all to string (use 'object' dtype, not 'str')
@@ -484,21 +453,18 @@ def convert_observations(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict)
             obscat_df.insert(0, 'cell_id', range(len(obscat_df)))
 
             # Insert
-            print(f"    Inserting data...")
             obscat_df = normalize_dataframe_dtypes(obscat_df)
             conn.register('temp_obscat', obscat_df)
             conn.execute("INSERT INTO __obscat SELECT * FROM temp_obscat")
             conn.unregister('temp_obscat')
 
             # Create indices on categorical columns
-            print(f"    Creating indices on {len(obscat_cols)} columns...")
             for col in obscat_cols:
                 # Sanitize column name for index (replace special chars with underscore)
                 safe_col = ''.join(c if c.isalnum() else '_' for c in col)
                 conn.execute(f'CREATE INDEX idx_obscat_{safe_col} ON __obscat("{col}")')
 
             # Create view
-            print(f"    Creating obscat view...")
             conn.execute("""
                 CREATE VIEW obscat AS
                 SELECT c.cell_name, o.*
@@ -506,7 +472,7 @@ def convert_observations(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict)
                 JOIN __cells c ON o.cell_id = c.cell_id
             """)
 
-            print(f"  ✓ obscat: {len(obscat_cols)} columns ({', '.join(obscat_cols)})")
+            print(f"  ✓ obscat: {len(obscat_cols)} columns")
 
 
 def convert_variables(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict) -> None:
@@ -534,7 +500,6 @@ def convert_variables(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict) ->
 
     # Convert numerical variables
     if varnum_cols:
-        print(f"  Creating __varnum table with {len(varnum_cols)} columns...")
         col_defs = ['gene_id INTEGER PRIMARY KEY']
         for col in varnum_cols:
             col_defs.append(f'"{col}" DOUBLE')
@@ -548,13 +513,11 @@ def convert_variables(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict) ->
         varnum_df = adata.var[varnum_cols].copy()
         varnum_df.insert(0, 'gene_id', range(len(varnum_df)))
 
-        print(f"    Inserting {len(varnum_df):,} rows...")
         varnum_df = normalize_dataframe_dtypes(varnum_df)
         conn.register('temp_varnum', varnum_df)
         conn.execute("INSERT INTO __varnum SELECT * FROM temp_varnum")
         conn.unregister('temp_varnum')
 
-        print(f"    Creating varnum view...")
         conn.execute("""
             CREATE VIEW varnum AS
             SELECT g.gene_name, v.*
@@ -562,11 +525,10 @@ def convert_variables(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict) ->
             JOIN __genes g ON v.gene_id = g.gene_id
         """)
 
-        print(f"  ✓ varnum: {len(varnum_cols)} columns ({', '.join(varnum_cols)})")
+        print(f"  ✓ varnum: {len(varnum_cols)} columns")
 
     # Convert categorical variables
     if varcat_cols:
-        print(f"  Creating __varcat table with {len(varcat_cols)} columns...")
         col_defs = ['gene_id INTEGER PRIMARY KEY']
         for col in varcat_cols:
             col_defs.append(f'"{col}" VARCHAR')
@@ -584,13 +546,11 @@ def convert_variables(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict) ->
 
         varcat_df.insert(0, 'gene_id', range(len(varcat_df)))
 
-        print(f"    Inserting {len(varcat_df):,} rows...")
         varcat_df = normalize_dataframe_dtypes(varcat_df)
         conn.register('temp_varcat', varcat_df)
         conn.execute("INSERT INTO __varcat SELECT * FROM temp_varcat")
         conn.unregister('temp_varcat')
 
-        print(f"    Creating varcat view...")
         conn.execute("""
             CREATE VIEW varcat AS
             SELECT g.gene_name, v.*
@@ -598,7 +558,7 @@ def convert_variables(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict) ->
             JOIN __genes g ON v.gene_id = g.gene_id
         """)
 
-        print(f"  ✓ varcat: {len(varcat_cols)} columns ({', '.join(varcat_cols)})")
+        print(f"  ✓ varcat: {len(varcat_cols)} columns")
 
 
 def convert_embeddings(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict) -> None:
@@ -607,61 +567,70 @@ def convert_embeddings(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict) -
     obsm_include = metadata.get('obsm_include', {})
 
     for obsm_key, internal_name in obsm_include.items():
-        if obsm_key not in adata.obsm:
-            print(f"  ⚠ Embedding '{obsm_key}' not found, skipping")
-            continue
+        try:
+            if obsm_key not in adata.obsm:
+                print(f"  ⚠ Embedding '{obsm_key}' not found, skipping")
+                continue
 
-        print(f"  Creating __obsm__{internal_name} table ({obsm_key})...")
-        embedding = adata.obsm[obsm_key]
-        original_dims = embedding.shape[1]
+            embedding_raw = adata.obsm[obsm_key]
 
-        # Limit to maximum 4 dimensions
-        MAX_EMBEDDING_DIMS = 4
-        if original_dims > MAX_EMBEDDING_DIMS:
-            print(f"    ⚠ Limiting from {original_dims} to {MAX_EMBEDDING_DIMS} dimensions")
-            embedding = embedding[:, :MAX_EMBEDDING_DIMS]
-            num_dims = MAX_EMBEDDING_DIMS
-        else:
-            num_dims = original_dims
+            # Convert to numpy array if it's a DataFrame
+            if isinstance(embedding_raw, pd.DataFrame):
+                embedding = embedding_raw.values
+            else:
+                embedding = np.array(embedding_raw)
 
-        # Build CREATE TABLE statement
-        col_defs = ['cell_id INTEGER PRIMARY KEY']
-        for i in range(num_dims):
-            col_defs.append(f'dim_{i} DOUBLE NOT NULL')
+            original_dims = embedding.shape[1]
 
-        conn.execute(f"""
-            CREATE TABLE __obsm__{internal_name} (
-                {', '.join(col_defs)}
-            )
-        """)
+            # Limit to maximum 4 dimensions
+            MAX_EMBEDDING_DIMS = 4
+            if original_dims > MAX_EMBEDDING_DIMS:
+                embedding = embedding[:, :MAX_EMBEDDING_DIMS]
+                num_dims = MAX_EMBEDDING_DIMS
+            else:
+                num_dims = original_dims
 
-        # Prepare data
-        print(f"    Inserting {len(embedding):,} rows with {num_dims} dimensions...")
-        embedding_df = pd.DataFrame(embedding)
-        embedding_df.columns = [f'dim_{i}' for i in range(num_dims)]
-        embedding_df.insert(0, 'cell_id', range(len(embedding_df)))
+            # Build CREATE TABLE statement
+            col_defs = ['cell_id INTEGER PRIMARY KEY']
+            for i in range(num_dims):
+                col_defs.append(f'dim_{i} DOUBLE NOT NULL')
 
-        # Insert
-        placeholders = ','.join(['?'] * len(embedding_df.columns))
-        conn.executemany(
-            f"INSERT INTO __obsm__{internal_name} VALUES ({placeholders})",
-            embedding_df.values.tolist()
-        )
+            conn.execute(f"""
+                CREATE TABLE __obsm__{internal_name} (
+                    {', '.join(col_defs)}
+                )
+            """)
 
-        # Create index
-        print(f"    Creating index...")
-        conn.execute(f"CREATE INDEX idx_obsm_{internal_name}_cell ON __obsm__{internal_name}(cell_id)")
+            # Prepare data - use register/insert pattern (much faster than executemany)
+            embedding_df = pd.DataFrame(embedding)
+            embedding_df.columns = [f'dim_{i}' for i in range(num_dims)]
+            embedding_df.insert(0, 'cell_id', range(len(embedding_df)))
 
-        # Create view
-        print(f"    Creating obsm__{internal_name} view...")
-        conn.execute(f"""
-            CREATE VIEW obsm__{internal_name} AS
-            SELECT c.cell_name, e.*
-            FROM __obsm__{internal_name} e
-            JOIN __cells c ON e.cell_id = c.cell_id
-        """)
+            # Insert using register pattern (fast)
+            conn.register('temp_embedding', embedding_df)
+            conn.execute(f"INSERT INTO __obsm__{internal_name} SELECT * FROM temp_embedding")
+            conn.unregister('temp_embedding')
 
-        print(f"  ✓ obsm__{internal_name}: {num_dims} dimensions")
+            # Create index
+            conn.execute(f"CREATE INDEX idx_obsm_{internal_name}_cell ON __obsm__{internal_name}(cell_id)")
+
+            # Create view
+            conn.execute(f"""
+                CREATE VIEW obsm__{internal_name} AS
+                SELECT c.cell_name, e.*
+                FROM __obsm__{internal_name} e
+                JOIN __cells c ON e.cell_id = c.cell_id
+            """)
+
+            print(f"  ✓ obsm__{internal_name}: {num_dims} dimensions")
+
+        except Exception as e:
+            print(f"  ✗ ERROR converting embedding '{obsm_key}' -> '{internal_name}':")
+            print(f"    Type: {type(e).__name__}")
+            print(f"    Message: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            raise ConversionError(f"Failed to convert embedding '{obsm_key}': {e}")
 
 
 def finalize_database(conn: duckdb.DuckDBPyConnection) -> None:
