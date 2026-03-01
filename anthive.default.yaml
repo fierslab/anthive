@@ -1,0 +1,27 @@
+# Anthive Default Configuration
+# This file contains all allowed configuration parameters with their default values
+# Copy to anthive.yaml in the same directory to customize
+
+# Data Processing
+# ---------------
+
+# Maximum number of unique values for an obs column to be treated as categorical
+# Columns exceeding this threshold are automatically excluded
+max_obscat_values: 100
+
+# Number of cells to process per chunk when melting expression layers
+# Balance between memory usage and processing speed
+# Smaller = less memory, slower; Larger = more memory, faster
+melt_chunk_size: 10000
+
+# REST API Configuration
+# ----------------------
+
+# Host address for the REST API server
+rest_api_host: localhost
+
+# Port number for the REST API server
+rest_api_port: 8080
+
+# Cache expiration in days (future use)
+cache_expiration_days: 7
