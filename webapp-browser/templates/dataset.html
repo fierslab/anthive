@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+
+{% block title %}{{ dataset_name }} - Anthive{% endblock %}
+
+{% block content %}
+<article>
+    <!-- Breadcrumb -->
+    <nav class="breadcrumb">
+        <a href="/">Home</a> /
+        <a href="/browse/{{ folder_url }}">{{ folder_name }}</a> /
+        <strong>{{ dataset_name }}</strong>
+    </nav>
+
+    <header>
+        <h2>{{ dataset_name }}</h2>
+        {% if info and info.n_cells and info.n_genes %}
+        <p><small>{{ "{:,}".format(info.n_cells) }} cells × {{ "{:,}".format(info.n_genes) }} genes</small></p>
+        {% endif %}
+    </header>
+
+    <!-- Quick stats -->
+    {% if info %}
+    <div class="stats-grid">
+        <div class="stat-card">
+            <h3>Cells</h3>
+            <div class="value">{{ "{:,}".format(info.n_cells) if info.n_cells else "—" }}</div>
+        </div>
+        <div class="stat-card">
+            <h3>Genes</h3>
+            <div class="value">{{ "{:,}".format(info.n_genes) if info.n_genes else "—" }}</div>
+        </div>
+        <div class="stat-card">
+            <h3>Layers</h3>
+            <div class="value">{{ info.layers|length if info.layers else 0 }}</div>
+        </div>
+        <div class="stat-card">
+            <h3>Embeddings</h3>
+            <div class="value">{{ info.obsm_keys|length if info.obsm_keys else 0 }}</div>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Tabs/sections -->
+    <details open>
+        <summary><strong>Overview</strong></summary>
+        {% if markdown_content %}
+        <div>
+            {{ markdown_content|safe }}
+        </div>
+        {% else %}
+        <p><em>No metadata available. Run <code>ant check</code> to generate.</em></p>
+        {% endif %}
+    </details>
+
+    {% if info %}
+    <details>
+        <summary><strong>Observations ({{ info.n_obs_columns }} columns)</strong></summary>
+        {% if obs_columns %}
+        <table class="compact data-table">
+            <thead>
+                <tr>
+                    <th>Column</th>
+                    <th>Type</th>
+                    <th>Unique Values</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for col in obs_columns %}
+                <tr>
+                    <td>{{ col.name }}</td>
+                    <td>{{ col.type }}</td>
+                    <td>{{ "{:,}".format(col.unique) if col.unique else "—" }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p><em>No observation metadata</em></p>
+        {% endif %}
+    </details>
+
+    <details>
+        <summary><strong>Layers</strong></summary>
+        {% if info.layers %}
+        <ul>
+            {% for layer in info.layers %}
+            <li><code>{{ layer }}</code></li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p><em>No layers</em></p>
+        {% endif %}
+    </details>
+
+    <details>
+        <summary><strong>Embeddings</strong></summary>
+        {% if info.obsm_keys %}
+        <ul>
+            {% for emb in info.obsm_keys %}
+            <li><code>{{ emb }}</code></li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p><em>No embeddings</em></p>
+        {% endif %}
+    </details>
+    {% endif %}
+
+    <!-- Actions -->
+    <footer>
+        <h3>Actions</h3>
+        <nav>
+            <a href="/api/databases/{{ db_id }}/info" role="button" class="secondary">View API Info</a>
+            <a href="/jupyter" role="button" class="secondary">Open in JupyterLite</a>
+            {% if has_duckdb %}
+            <a href="/api/databases/{{ db_id }}/cells?layer={{ info.layers[0] if info.layers else 'X' }}&format=csv" role="button" class="secondary">Download CSV</a>
+            {% endif %}
+        </nav>
+    </footer>
+</article>
+{% endblock %}

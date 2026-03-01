@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+
+{% block title %}{{ folder_name }} - Anthive{% endblock %}
+
+{% block content %}
+<article>
+    <!-- Breadcrumb -->
+    <nav class="breadcrumb">
+        <a href="/">Home</a> / <strong>{{ folder_name }}</strong>
+    </nav>
+
+    <header>
+        <h2>{{ folder_name }}</h2>
+        {% if description %}
+        <p>{{ description }}</p>
+        {% endif %}
+        <p><small>{{ datasets|length }} dataset(s)</small></p>
+    </header>
+
+    <!-- Dataset list -->
+    <table class="compact">
+        <thead>
+            <tr>
+                <th>Dataset</th>
+                <th>Cells × Genes</th>
+                <th>Layers</th>
+                <th>Embeddings</th>
+                <th>Size</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for dataset in datasets %}
+            <tr>
+                <td>
+                    <a href="/browse/{{ folder_url }}/{{ dataset.url_encoded }}">
+                        <strong>{{ dataset.name }}</strong>
+                    </a>
+                    {% if dataset.subfolder %}
+                    <br><small>{{ dataset.subfolder }}</small>
+                    {% endif %}
+                </td>
+                <td class="data-table">
+                    {% if dataset.n_obs and dataset.n_vars %}
+                    {{ "{:,}".format(dataset.n_obs) }} × {{ "{:,}".format(dataset.n_vars) }}
+                    {% else %}
+                    —
+                    {% endif %}
+                </td>
+                <td class="data-table">
+                    {% if dataset.layers %}
+                    {{ dataset.layers|length }}
+                    {% else %}
+                    —
+                    {% endif %}
+                </td>
+                <td class="data-table">
+                    {% if dataset.embeddings %}
+                    {{ dataset.embeddings|length }}
+                    {% else %}
+                    —
+                    {% endif %}
+                </td>
+                <td class="data-table">
+                    {% if dataset.h5ad_size %}
+                    {{ dataset.h5ad_size }}
+                    {% else %}
+                    —
+                    {% endif %}
+                </td>
+                <td>
+                    {% if dataset.has_duckdb %}
+                    <span class="status-ok">✓ Ready</span>
+                    {% elif dataset.has_metadata %}
+                    <span class="status-warning">⚠ Not converted</span>
+                    {% else %}
+                    <span class="status-error">✗ Not checked</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</article>
+{% endblock %}

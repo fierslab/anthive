@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+
+{% block title %}Datasets - Anthive{% endblock %}
+
+{% block content %}
+<article>
+    <header>
+        <h2>Datasets</h2>
+        <p>Browse {{ total_datasets }} dataset(s) organized in {{ total_folders }} folder(s)</p>
+    </header>
+
+    <!-- Summary stats -->
+    <div class="stats-grid">
+        <div class="stat-card">
+            <h3>Total Datasets</h3>
+            <div class="value">{{ total_datasets }}</div>
+        </div>
+        <div class="stat-card">
+            <h3>Total Cells</h3>
+            <div class="value">{{ "{:,}".format(total_cells) if total_cells else "—" }}</div>
+        </div>
+        <div class="stat-card">
+            <h3>Collections</h3>
+            <div class="value">{{ total_folders }}</div>
+        </div>
+    </div>
+
+    <!-- Folder list -->
+    <table class="compact">
+        <thead>
+            <tr>
+                <th>Collection</th>
+                <th>Datasets</th>
+                <th>Total Cells</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for folder in folders %}
+            <tr>
+                <td>
+                    <a href="/browse/{{ folder.url_encoded }}">
+                        <strong>{{ folder.name }}</strong>
+                    </a>
+                    {% if folder.description %}
+                    <br><small>{{ folder.description }}</small>
+                    {% endif %}
+                </td>
+                <td class="data-table">{{ folder.dataset_count }}</td>
+                <td class="data-table">{{ "{:,}".format(folder.total_cells) if folder.total_cells else "—" }}</td>
+                <td>
+                    {% if folder.all_converted %}
+                    <span class="status-ok">✓ All converted</span>
+                    {% elif folder.some_converted %}
+                    <span class="status-warning">⚠ Partial</span>
+                    {% else %}
+                    <span class="status-error">✗ Not converted</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</article>
+{% endblock %}
