@@ -1,0 +1,242 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "pyyaml>=6.0",
+# ]
+# ///
+"""
+Manage YAML metadata in markdown files
+
+Usage:
+  ant md set key=value [key=value ...] FILE
+  ant md get key [key ...] FILE
+  ant md show FILE
+  ant md delete key [key ...] FILE
+
+Examples:
+  ant md set experiment='Sierksma 2025' group='kidney' index.md
+  ant md get experiment group index.md
+  ant md show index.md
+  ant md delete old_field index.md
+"""
+
+import sys
+from pathlib import Path
+
+# Add lib directory to path
+script_dir = Path(__file__).parent.resolve()
+lib_dir = script_dir.parent / 'lib'
+sys.path.insert(0, str(lib_dir))
+
+from metadata import parse_md_file, write_md_file
+
+
+def parse_assignment(arg: str) -> tuple[str, str]:
+    """Parse key=value string, handling quoted values"""
+    if '=' not in arg:
+        return None, None
+
+    key, value = arg.split('=', 1)
+    key = key.strip()
+
+    # Remove quotes from value if present
+    value = value.strip()
+    if (value.startswith('"') and value.endswith('"')) or \
+       (value.startswith("'") and value.endswith("'")):
+        value = value[1:-1]
+
+    # Try to convert to appropriate type
+    if value.lower() == 'true':
+        value = True
+    elif value.lower() == 'false':
+        value = False
+    elif value.lower() == 'null':
+        value = None
+    elif value.isdigit():
+        value = int(value)
+    elif value.replace('.', '', 1).isdigit():
+        try:
+            value = float(value)
+        except ValueError:
+            pass
+
+    return key, value
+
+
+def cmd_set(args: list[str]) -> int:
+    """Set metadata fields"""
+    if len(args) < 2:
+        print("Error: Usage: ant md set key=value [key=value ...] FILE", file=sys.stderr)
+        return 1
+
+    file_path = Path(args[-1])
+    assignments = args[:-1]
+
+    if not file_path.exists():
+        print(f"Error: File not found: {file_path}", file=sys.stderr)
+        return 1
+
+    # Parse assignments
+    updates = {}
+    for assignment in assignments:
+        key, value = parse_assignment(assignment)
+        if key is None:
+            print(f"Error: Invalid assignment: {assignment}", file=sys.stderr)
+            print("Expected format: key=value", file=sys.stderr)
+            return 1
+        updates[key] = value
+
+    # Read existing metadata
+    try:
+        metadata, body = parse_md_file(file_path)
+    except Exception as e:
+        print(f"Error reading file: {e}", file=sys.stderr)
+        return 1
+
+    # Update metadata
+    for key, value in updates.items():
+        metadata[key] = value
+        print(f"Set {key} = {repr(value)}")
+
+    # Write back
+    try:
+        write_md_file(file_path, metadata, body)
+        print(f"\n✓ Updated {file_path}")
+        return 0
+    except Exception as e:
+        print(f"Error writing file: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_get(args: list[str]) -> int:
+    """Get metadata fields"""
+    if len(args) < 2:
+        print("Error: Usage: ant md get key [key ...] FILE", file=sys.stderr)
+        return 1
+
+    file_path = Path(args[-1])
+    keys = args[:-1]
+
+    if not file_path.exists():
+        print(f"Error: File not found: {file_path}", file=sys.stderr)
+        return 1
+
+    # Read metadata
+    try:
+        metadata, _ = parse_md_file(file_path)
+    except Exception as e:
+        print(f"Error reading file: {e}", file=sys.stderr)
+        return 1
+
+    # Get values
+    for key in keys:
+        value = metadata.get(key)
+        if value is None:
+            print(f"{key}: (not set)")
+        else:
+            print(f"{key}: {value}")
+
+    return 0
+
+
+def cmd_show(args: list[str]) -> int:
+    """Show all metadata"""
+    if len(args) != 1:
+        print("Error: Usage: ant md show FILE", file=sys.stderr)
+        return 1
+
+    file_path = Path(args[0])
+
+    if not file_path.exists():
+        print(f"Error: File not found: {file_path}", file=sys.stderr)
+        return 1
+
+    # Read metadata
+    try:
+        metadata, body = parse_md_file(file_path)
+    except Exception as e:
+        print(f"Error reading file: {e}", file=sys.stderr)
+        return 1
+
+    if not metadata:
+        print("(no metadata)")
+        return 0
+
+    # Print metadata
+    print(f"Metadata in {file_path}:")
+    print()
+    for key, value in metadata.items():
+        print(f"  {key}: {value}")
+
+    return 0
+
+
+def cmd_delete(args: list[str]) -> int:
+    """Delete metadata fields"""
+    if len(args) < 2:
+        print("Error: Usage: ant md delete key [key ...] FILE", file=sys.stderr)
+        return 1
+
+    file_path = Path(args[-1])
+    keys = args[:-1]
+
+    if not file_path.exists():
+        print(f"Error: File not found: {file_path}", file=sys.stderr)
+        return 1
+
+    # Read metadata
+    try:
+        metadata, body = parse_md_file(file_path)
+    except Exception as e:
+        print(f"Error reading file: {e}", file=sys.stderr)
+        return 1
+
+    # Delete keys
+    deleted = []
+    for key in keys:
+        if key in metadata:
+            del metadata[key]
+            deleted.append(key)
+            print(f"Deleted {key}")
+        else:
+            print(f"Warning: {key} not found", file=sys.stderr)
+
+    if not deleted:
+        print("Nothing to delete")
+        return 0
+
+    # Write back
+    try:
+        write_md_file(file_path, metadata, body)
+        print(f"\n✓ Updated {file_path}")
+        return 0
+    except Exception as e:
+        print(f"Error writing file: {e}", file=sys.stderr)
+        return 1
+
+
+def main():
+    if len(sys.argv) < 2:
+        print(__doc__)
+        return 1
+
+    command = sys.argv[1]
+    args = sys.argv[2:]
+
+    commands = {
+        'set': cmd_set,
+        'get': cmd_get,
+        'show': cmd_show,
+        'delete': cmd_delete,
+    }
+
+    if command not in commands:
+        print(f"Error: Unknown command: {command}", file=sys.stderr)
+        print(f"Available commands: {', '.join(commands.keys())}", file=sys.stderr)
+        return 1
+
+    return commands[command](args)
+
+
+if __name__ == '__main__':
+    sys.exit(main())
