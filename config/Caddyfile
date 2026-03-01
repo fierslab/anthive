@@ -1,0 +1,49 @@
+# Anthive4 Caddy Configuration
+# Serves static files and proxies API requests
+{
+	# Disable admin API to avoid port conflict with system Caddy
+	admin off
+}
+
+:8501 {
+	# Root directory for static files
+	root * ./webapp
+
+	# Reverse proxy for API - strip /api prefix before forwarding
+	handle_path /api/* {
+		reverse_proxy localhost:8080
+	}
+
+	# Reverse proxy for browser interface (dataset browsing)
+	handle /browse/* {
+		reverse_proxy localhost:8081
+	}
+
+	# Home page - browser interface
+	handle / {
+		reverse_proxy localhost:8081
+	}
+
+	# Serve static files for JupyterLite and Streamlit
+	handle /jupyter/* {
+		file_server
+	}
+
+	handle /stlite/* {
+		file_server
+	}
+
+	# Fallback - if no other handle matched, serve static files
+	handle {
+		file_server
+	}
+
+	# Enable gzip compression
+	encode gzip
+
+	# Logging
+	log {
+		output file ./caddy.log
+		format console
+	}
+}
