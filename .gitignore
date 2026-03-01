@@ -1,0 +1,37 @@
+# Build artifacts
+webapp/
+
+# Server logs and pids
+caddy.log
+nginx_access.log
+nginx_error.log
+nginx.pid
+
+# Webapp source - copied antclient (source is in antclient/)
+webapp-src/jupyter/antclient.py
+webapp-src/stlite/antclient.py
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Rclone (keep example, ignore actual config)
+rclone.conf
+
+# Deleted/broken DuckDB files
+*.duckdb.deleted
+*.duckdb.wal.deleted
+
+# Attic - archived old files
+attic/
