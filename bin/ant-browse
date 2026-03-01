@@ -1,0 +1,147 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "fastapi>=0.110.0",
+#   "uvicorn>=0.27.0",
+#   "jinja2>=3.1.0",
+#   "markdown>=3.5.0",
+#   "pyyaml>=6.0",
+# ]
+# ///
+"""
+ant-browse - Anthive Web Browser Server
+
+Serves HTML interface for browsing h5ad datasets.
+Runs on separate port from API server for clean separation.
+
+Usage:
+    ant browse [--data-folder PATH] [--host HOST] [--port PORT]
+
+Example:
+    ant browse --data-folder ./data --host 0.0.0.0 --port 8081
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+import uvicorn
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+# Add lib directory to path for config
+script_dir = Path(__file__).parent.resolve()
+lib_dir = script_dir.parent / 'lib'
+sys.path.insert(0, str(lib_dir))
+
+from config import get_config
+
+# Add webapp-browser to path
+browser_dir = script_dir.parent / 'webapp-browser'
+if not browser_dir.exists():
+    print(f"ERROR: webapp-browser directory not found at {browser_dir}", file=sys.stderr)
+    sys.exit(1)
+
+sys.path.insert(0, str(browser_dir.parent))
+
+# Import browser router with proper name (webapp-browser -> webapp_browser)
+import importlib.util
+spec = importlib.util.spec_from_file_location("webapp_browser", browser_dir / "browser.py")
+browser_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(browser_module)
+browser_router = browser_module.router
+
+
+def create_app(data_folder: Path) -> FastAPI:
+    """Create FastAPI app for browser"""
+
+    app = FastAPI(
+        title="Anthive Browser",
+        description="Web interface for browsing single-cell datasets",
+        version="1.0.0",
+        docs_url=None,  # No Swagger docs for browser
+        redoc_url=None,
+    )
+
+    # Enable CORS
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # Store data folder in app state for routes to access
+    app.state.data_folder = data_folder
+
+    # Include browser router
+    app.include_router(browser_router)
+
+    return app
+
+
+def main():
+    """Main entry point"""
+    parser = argparse.ArgumentParser(
+        description="Anthive Web Browser Server",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+
+    # Get config for defaults
+    config = get_config()
+
+    parser.add_argument(
+        '--data-folder',
+        type=Path,
+        default=Path('./data/h5adstore'),
+        help='Path to data folder containing h5ad files (default: ./data/h5adstore)'
+    )
+    parser.add_argument(
+        '--host',
+        default='127.0.0.1',
+        help='Host to bind to (default: 127.0.0.1)'
+    )
+    parser.add_argument(
+        '--port',
+        type=int,
+        default=8081,
+        help='Port to bind to (default: 8081)'
+    )
+    parser.add_argument(
+        '--reload',
+        action='store_true',
+        help='Enable auto-reload for development'
+    )
+
+    args = parser.parse_args()
+
+    # Validate data folder
+    if not args.data_folder.exists():
+        print(f"ERROR: Data folder not found: {args.data_folder}", file=sys.stderr)
+        print(f"Create it or specify correct path with --data-folder", file=sys.stderr)
+        sys.exit(1)
+
+    # Create app
+    app = create_app(args.data_folder)
+
+    # Print startup info
+    print(f"\n{'='*60}")
+    print(f"Starting Anthive Web Browser Server")
+    print(f"{'='*60}")
+    print(f"Data folder: {args.data_folder}")
+    print(f"Listening on: http://{args.host}:{args.port}")
+    print(f"{'='*60}\n")
+
+    # Start server
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        reload=args.reload,
+        log_level="info"
+    )
+
+
+if __name__ == '__main__':
+    main()
