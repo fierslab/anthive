@@ -42,9 +42,14 @@ build-jupyter: antclient/antclient.py
 	@echo "Copying antclient.py to webapp-src/jupyter..."
 	@cp antclient/antclient.py webapp-src/jupyter/antclient.py
 	@# Build JupyterLite with jupyter content
-	@uvx --from jupyterlite-core --with jupyterlite-pyodide-kernel --with jupyter-server jupyter-lite build \
+
+	@uvx --from jupyterlite-core \
+		--with jupyterlite-pyodide-kernel \
+		--with jupyterlab-widgets \
+		--with jupyter-server jupyter-lite build \
 		--contents webapp-src/jupyter \
 		--output-dir webapp/jupyter
+
 	@echo "✓ JupyterLite build complete!"
 	@echo ""
 	@echo "Location: webapp/jupyter/"

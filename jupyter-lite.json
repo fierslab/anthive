@@ -1,0 +1,19 @@
+{
+  "jupyter-lite-schema-version": 0,
+  "jupyter-config-data": {
+    "appName": "Anthive JupyterLite",
+    "appVersion": "1.0.0",
+    "disabledExtensions": [],
+    "settingsOverrides": {
+      "@jupyterlab/apputils-extension:themes": {
+        "theme": "JupyterLab Light"
+      }
+    }
+  },
+  "LiteBuildConfig": {
+    "federated_extensions": [
+      "https://cdn.jsdelivr.net/npm/@jupyter-widgets/jupyterlab-manager@5.0.9/dist/jupyter-widgets-jupyterlab-manager.tgz"
+    ],
+    "ignore_sys_prefix": false
+  }
+}
