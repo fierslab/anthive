@@ -25,6 +25,7 @@ def calculate_layer_statistics(layer_data, layer_name: str) -> Dict[str, Any]:
         data_values = layer_data.data  # Non-zero values only
         total_elements = layer_data.shape[0] * layer_data.shape[1]
         num_zeros = total_elements - layer_data.nnz
+        pct_zeros = (num_zeros / total_elements * 100) if total_elements > 0 else 0.0
 
         if len(data_values) > 0:
             min_nonzero = float(np.min(data_values))
@@ -47,6 +48,8 @@ def calculate_layer_statistics(layer_data, layer_name: str) -> Dict[str, Any]:
         # Dense array
         flat_data = layer_data.flatten()
         num_zeros = int(np.sum(flat_data == 0))
+        total_elements = len(flat_data)
+        pct_zeros = (num_zeros / total_elements * 100) if total_elements > 0 else 0.0
 
         min_value = float(np.min(flat_data))
         max_value = float(np.max(flat_data))
@@ -70,7 +73,8 @@ def calculate_layer_statistics(layer_data, layer_name: str) -> Dict[str, Any]:
         'max_value': max_value,
         'median': median,
         'q90': q90,
-        'num_zeros': num_zeros
+        'num_zeros': num_zeros,
+        'pct_zeros': pct_zeros
     }
 
 
