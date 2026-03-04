@@ -17,10 +17,11 @@ help:
 	@echo "  make serve-browse      - Run web browser server (port 8081)"
 	@echo ""
 	@echo "Sync:"
-	@echo "  make sync-to-bds_dedata   - Push h5adstore to storage box (rclone)"
-	@echo "  make sync-webapp-only     - Push webapp to storage box (rclone)"
-	@echo "  make pull-from-storagebox - Pull h5adstore from storage box (rclone)"
-	@echo "  make sync-to-cbd3         - Sync to cbd3 server (rsync)"
+	@echo "  make sync-to-bds-dedata      - Push h5adstore to storage box (rclone)"
+	@echo "  make sync-bds-dedata-to-foam - Push h5adstore to storage box (rclone)"
+	@echo "  make sync-webapp-only        - Push webapp to storage box (rclone)"
+	@echo "  make pull-from-storagebox-to-prs    - Pull h5adstore from storage box (rclone)"
+	@echo "  make sync-to-cbd3            - Sync to cbd3 server (rsync)"
 	@echo ""
 	@echo "Tools:"
 	@echo "  ./bin/ant check        - Validate h5ad files"
@@ -139,15 +140,41 @@ sync-to-cbd3:
 	rsync -arv ./webapp cbd3:/data/anthive4/
 	rsync -arv data/h5adstore/ cbd3:/data/anthive4/data/h5adstore/
 
-sync-to-bds_dedata:
+
+pull-h5ad-from-storagebox-to-foam:
+	@echo "Pulling h5adstore from storage box (resilient settings)..."
+	@echo ""
+	@echo "Downloading h5adstore..."
+	rclone copy bds_dedata:/ data/h5adstore/ \
+		--exclude "**/.*/**" \
+		--exclude ".*/**" \
+		--exclude "**/*.partial" \
+		--exclude "**/*.duckdb" \
+		--exclude "**/*.duckdb.wal" \
+		--exclude "**/*.duckdb.deleted" \
+		--exclude "**/*.duckdb.wal.deleted" \
+		--transfers 2 \
+		--checkers 4 \
+		--timeout 500s \
+		--contimeout 60s \
+		--retries 10 \
+		--low-level-retries 10 \
+		--stats 30s \
+		--progress
+	@echo ""
+	@echo "✓ Pull complete!"
+
+sync-to-bds-dedata:
 	@echo "Copying to storage box with rclone (resilient settings)..."
 	@echo ""
 	@echo "Copying h5adstore..."
-	rclone sync data/h5adstore/ bds_dedata:/anthive4/h5adstore \
+	rclone sync data/h5adstore/ bds_dedata:/ \
 		--exclude "**/.*/**" \
 		--exclude ".*/**" \
 		--exclude "**/*.partial" \
 		--exclude "**/*.duckdb.wal" \
+		--exclude "**/*.duckdb_xxx" \
+		--exclude "**/*.h5ad_xxx" \
 		--transfers 2 \
 		--checkers 4 \
 		--timeout 500s \
@@ -177,7 +204,7 @@ sync-webapp-only:
 		--progress
 	@echo "✓ Webapp copy complete!"
 
-pull-from-storagebox:
+pull-from-storagebox-to_prs:
 	@echo "Pulling h5adstore from storage box (resilient settings)..."
 	@echo ""
 	@echo "Downloading h5adstore..."
