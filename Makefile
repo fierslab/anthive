@@ -208,7 +208,7 @@ pull-from-storagebox-to_prs:
 	@echo "Pulling h5adstore from storage box (resilient settings)..."
 	@echo ""
 	@echo "Downloading h5adstore..."
-	rclone copy bds_dedata:/anthive4/h5adstore data/h5adstore/ \
+	rclone copy bds_dedata:/ data/h5adstore/ \
 		--exclude "**/.*/**" \
 		--exclude ".*/**" \
 		--exclude "**/*.partial" \
