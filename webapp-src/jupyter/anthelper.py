@@ -12,23 +12,33 @@ License: MIT
 """
 
 from functools import lru_cache
+import ipywidgets as widgets
+from IPython.display import display
 
 
 @lru_cache(32)
-def find_database(client, search_string: str | None = None):
+def find_database(client, 
+                  search_string: str | None = None,
+                  n: int = 20, 
+                 verbose: bool = False):
     """Search for databases by name or title
 
     Returns a DataFrame with databases that match the search string.
-    The search is case-insensitive and matches against both the database ID and title.
+    The search is case-insensitive and matches against both the database ID 
+    and title.
+
+    Note, always prints the first `n` databases
 
     Args:
         client: AnthiveClient instance
-        search_string: Text to search for in database ID or title (case-insensitive)
-                      If None, returns all databases
+        n: No db's to return
+        verbose: show more information
+        search_string: Text to search for in database ID or title 
+                       (case-insensitive). If None, returns the 20 
+                       databases.
 
     Returns:
-        pandas.DataFrame: DataFrame with columns 'id', 'title', 'n_cells', 'n_genes'
-                         showing matching databases
+        None
 
     Examples:
         >>> # Find all databases with "brain" in the name
@@ -42,7 +52,8 @@ def find_database(client, search_string: str | None = None):
 
     Notes:
         - Results are cached for performance (up to 32 different searches)
-        - Search matches substrings, so "cell" will find "single_cell", "bcell", etc.
+        - Search matches substrings, so "cell" will find 
+          "single_cell", "bcell", etc.
         - Both database ID and title are searched
 
     See also:
@@ -64,9 +75,26 @@ def find_database(client, search_string: str | None = None):
     else:
         rv = dbs
 
-    # Convert to DataFrame with relevant columns
-    rv = pd.DataFrame.from_records(rv)[['id', 'title', 'n_cells', 'n_genes']]
-    return rv
+    if len(rv) == 0:
+        print("No databases found")
+        return
+
+    for r in sorted(rv, key=lambda x: -x.get('year', 0))[:n]:
+        if verbose:
+            print(f"{r['id']}")
+            print(f"  - title  : {r['title']} ({r['year']})")
+            print(f"  - size   : {r['n_cells']} cells / {r['n_genes']} genes")
+            layers = ", ".join(r['layers'].keys())
+            print(f"  - layers : {layers}")
+            numcol = r['obs']['numerical']
+            catcol = r['obs']['categorical']
+            print(f"  - categ  : {len(catcol)} - {', '.join(catcol[:4])}, ...")
+            print(f"  - numer  : {len(numcol)} - {', '.join(numcol[:4])}, ...")
+        else:
+            print(r['id'])
+#    # Convert to DataFrame with relevant columns
+#    rv = pd.DataFrame.from_records(rv)[['id', 'title', 'n_cells', 'n_genes']]
+#    return rv
 
 
 def find_metadata(client, db_id: str, search_string: str | None = None):
@@ -162,3 +190,155 @@ def find_metadata(client, db_id: str, search_string: str | None = None):
     if len(cmd) > 0:
         print("# Categorical")
         print(pwrap(cmd))
+
+
+
+        
+# import ipywidgets as widgets
+# from IPython.display import display
+
+# def database_selector(client, databases=None, key: str = "db"):
+#     """
+#     Database selector component using ipywidgets.
+#     Returns an output widget; access .result for the selected db dict.
+#     """
+#     if databases is None:
+#         databases = client.get_databases()
+
+#     if not databases:
+#         print("No databases found")
+#         return None
+
+#     # Validate and extract groups
+#     for db_item in databases:
+#         if 'collection' not in db_item:
+#             print(f"Invalid db structure: {db_item}")
+#             return None
+
+#     groups = sorted(
+#         set(db['collection'].get('group', 'default') 
+#             for db in databases))
+
+#     # --- Widgets ---
+#     w_group = widgets.Dropdown(
+#         description="Group:", options=groups, 
+#         layout=widgets.Layout(width='400px'))
+#     w_exp = widgets.Dropdown(
+#         description="Experiment:", 
+#         layout=widgets.Layout(width='400px'))
+#     w_db = widgets.Dropdown(
+#         description="DB:", 
+#         layout=widgets.Layout(width='400px'))
+#     w_layer = widgets.Dropdown(
+#         description="Layer:", 
+#         layout=widgets.Layout(width='400px'))
+
+#     exp_box   = widgets.VBox([w_exp])    # hidden until needed
+#     layer_box = widgets.VBox([w_layer])  # hidden until needed
+
+#     output = widgets.Output()
+#     container = widgets.VBox([w_group, exp_box, w_db, layer_box, output])
+
+#     # Store result on the container for external access
+#     container.result = None
+
+#     def get_filtered_dbs(group, exp=None):
+#         dbs = [x for x in databases 
+#                if x['collection'].get('group') == group]
+#         if exp is not None:
+#             dbs = [x for x in dbs 
+#                    if x['collection'].get('experiment') == exp]
+#         return dbs
+
+#     def update_experiments(change=None):
+#         group = w_group.value
+#         filtered = get_filtered_dbs(group)
+#         exps = sorted(set(x['collection'].get('experiment', 'na') 
+#                           for x in filtered))
+
+#         if len(exps) > 1:
+#             w_exp.options = exps
+#             exp_box.layout.display = ''       # show
+#         else:
+#             w_exp.options = exps if exps else ['na']
+#             exp_box.layout.display = 'none'   # hide
+
+#         update_titles()
+
+#     def update_titles(change=None):
+#         group = w_group.value
+#         exp   = w_exp.value if exp_box.layout.display != 'none' else None
+#         filtered = get_filtered_dbs(group, exp)
+
+#         titles = sorted(x['title'] for x in filtered)
+#         assert len(titles) == len(set(titles)), "Duplicate titles found"
+#         w_db.options = titles if titles else ['']
+
+#         update_layers()
+
+#     def update_layers(change=None):
+#         group = w_group.value
+#         exp   = w_exp.value if exp_box.layout.display != 'none' else None
+#         filtered = get_filtered_dbs(group, exp)
+
+#         title_matches = [x for x in filtered if x['title'] == w_db.value]
+#         if not title_matches:
+#             return
+
+#         db = title_matches[0]
+#         layer_info = db.get('layers', {})
+#         layers = list(layer_info.keys())
+
+#         if len(layers) > 1:
+#             w_layer.options = layers
+#             w_layer.style.description_width = 'initial'
+#             # Show display names as labels, values as keys
+#             w_layer._options_labels = [layer_info[l] for l in layers]
+#             w_layer.options = [(layer_info[l], l) for l in layers]
+#             layer_box.layout.display = ''
+#         elif len(layers) == 1:
+#             w_layer.options = [(layers[0], layers[0])]
+#             layer_box.layout.display = 'none'
+#             with output:
+#                 output.clear_output()
+#                 print(f"Layer: {layers[0]}")
+#         else:
+#             with output:
+#                 output.clear_output()
+#                 print("Warning: No layers in database")
+#             return
+
+#         update_result()
+
+#     def update_result(change=None):
+#         group = w_group.value
+#         exp_shown = exp_box.layout.display != 'none'
+#         exp   = w_exp.value if exp_shown else None
+#         filtered = get_filtered_dbs(group, exp)
+
+#         title_matches = [x for x in filtered if x['title'] == w_db.value]
+#         if not title_matches:
+#             container.result = None
+#             return
+
+#         db = title_matches[0].copy()
+#         groupname = group
+#         if exp_shown and exp:
+#             groupname = f"{group}/{exp}"
+
+#         layer = w_layer.value
+#         db['groupname'] = groupname
+#         db['layer'] = layer
+#         container.result = db
+
+#     # Wire up observers
+#     w_group.observe(update_experiments, names='value')
+#     w_exp.observe(update_titles,        names='value')
+#     w_db.observe(update_layers,         names='value')
+#     w_layer.observe(update_result,      names='value')
+
+#     # Initialize
+#     update_experiments()
+
+#     display(container)
+#     return container
