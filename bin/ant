@@ -19,11 +19,16 @@ def get_available_commands(bin_dir: Path) -> dict:
     """
     commands = {}
     command_descriptions = {
-        'check': 'Check h5ad file for consistency and generate metadata',
-        'convert': 'Convert h5ad file to DuckDB database',
+        'api-check': 'Validate REST API endpoints and data integrity',
+        'browse': 'Start web browser interface for dataset exploration',
         'build-all': 'Process entire datastore with parallel conversion',
-        'serve': 'Start REST API server',
+        'check': 'Check h5ad and DuckDB (wrapper)',
+        'convert': 'Convert h5ad file to DuckDB database',
+        'db': 'Database inspection and management tools',
+        'duckdb-check': 'Validate DuckDB database integrity',
+        'h5ad-check': 'Check h5ad file and generate metadata',
         'md': 'Manage markdown metadata (YAML preambles)',
+        'serve': 'Start REST API server',
     }
 
     for file_path in bin_dir.iterdir():

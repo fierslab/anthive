@@ -274,12 +274,13 @@ class DatabaseRegistry:
 
             # Build layers dict with friendly names from metadata
             layers = {}
-            layers_metadata = file_metadata.get('layers_include', {})
+            layers_include = file_metadata.get('layers_include', [])
+            layer_description = file_metadata.get('layer_description', {})
             for key in layer_keys:
-                if key in layers_metadata:
-                    layers[key] = layers_metadata[key]
-                else:
-                    layers[key] = key  # Use key as name if no friendly name
+                # Only include layers that are in layers_include
+                if key in layers_include:
+                    # Use description if available, otherwise use key
+                    layers[key] = layer_description.get(key, key)
 
             # Get embeddings with friendly names and dimensions
             embeddings_result = conn.execute("""
@@ -292,33 +293,36 @@ class DatabaseRegistry:
 
             # Build embeddings dict with friendly names and dimensions
             embeddings = {}
-            obsm_metadata = file_metadata.get('obsm_include', {})
+            obsm_include = file_metadata.get('obsm_include', [])
+            embedding_description = file_metadata.get('embedding_description', {})
             for key in embedding_keys:
-                emb_info = {}
+                # Only include embeddings that are in obsm_include
+                if key in obsm_include:
+                    emb_info = {}
 
-                # Add friendly name from metadata
-                if key in obsm_metadata:
-                    emb_info['name'] = obsm_metadata[key]
-                else:
-                    # Fallback: capitalize and remove X_ prefix
-                    name = key
-                    if name.startswith('X_'):
-                        name = name[2:]
-                    emb_info['name'] = name.capitalize()
+                    # Add friendly name from metadata
+                    if key in embedding_description:
+                        emb_info['name'] = embedding_description[key]
+                    else:
+                        # Fallback: capitalize and remove X_ prefix
+                        name = key
+                        if name.startswith('X_'):
+                            name = name[2:]
+                        emb_info['name'] = name.capitalize()
 
-                # Get dimensions (count columns excluding cell_name and cell_id)
-                try:
-                    dim_result = conn.execute(f"""
-                        SELECT COUNT(*)
-                        FROM information_schema.columns
-                        WHERE table_name = 'obsm__{key}'
-                        AND column_name NOT IN ('cell_name', 'cell_id')
-                    """).fetchone()
-                    emb_info['dimensions'] = dim_result[0] if dim_result else None
-                except:
-                    emb_info['dimensions'] = None
+                    # Get dimensions (count columns excluding cell_name and cell_id)
+                    try:
+                        dim_result = conn.execute(f"""
+                            SELECT COUNT(*)
+                            FROM information_schema.columns
+                            WHERE table_name = 'obsm__{key}'
+                            AND column_name NOT IN ('cell_name', 'cell_id')
+                        """).fetchone()
+                        emb_info['dimensions'] = dim_result[0] if dim_result else None
+                    except:
+                        emb_info['dimensions'] = None
 
-                embeddings[key] = emb_info
+                    embeddings[key] = emb_info
 
             # Get obs columns (numerical)
             obs_numerical = []

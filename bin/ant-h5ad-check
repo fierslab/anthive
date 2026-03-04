@@ -1,0 +1,919 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "anndata>=0.10.0",
+#   "numpy>=1.24.0",
+#   "pandas>=2.0.0",
+#   "pyyaml>=6.0",
+#   "scipy>=1.10.0",
+# ]
+# ///
+"""
+ant-h5ad-check - Check h5ad file and generate metadata
+
+Validates h5ad files and creates/updates .md metadata files.
+Does NOT check DuckDB files - use ant-duckdb-check for that.
+"""
+
+import argparse
+import sys
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+# Add lib directory to Python path
+script_dir = Path(__file__).parent.resolve()
+lib_dir = script_dir.parent / 'lib'
+sys.path.insert(0, str(lib_dir))
+
+from __init__ import __version__
+from config import get_config
+from checksum import calculate_sha256, format_checksum
+from h5ad_utils import (
+    validate_filename,
+    load_h5ad,
+    validate_structure,
+    check_layer_sparsity,
+    check_column_cardinality,
+    check_for_na,
+    is_numerical_column,
+    get_h5ad_info,
+    H5ADError
+)
+from metadata import (
+    parse_md_file,
+    write_md_file,
+    ensure_in_list,
+    ensure_in_mapping,
+    add_to_obs_exclude,
+    get_obs_column_assignment,
+    get_default_embedding_name,
+    initialize_file_metadata,
+    initialize_collection_metadata,
+    MetadataError
+)
+from layer_stats import calculate_layer_statistics
+
+
+class CheckReport:
+    """Accumulator for categorized messages during check"""
+    def __init__(self):
+        self.non_sparse_layers = []
+        self.high_na_obs = []
+        self.high_na_var = []
+        self.low_cardinality_numerical_obs = []
+        self.high_cardinality_categorical_obs = []
+        self.low_na_obs = []
+        self.low_na_var = []
+        self.invalid_embeddings = []
+        self.na_embeddings = []
+        self.general_warnings = []
+
+    def has_messages(self) -> bool:
+        """Check if there are any messages"""
+        return (
+            len(self.non_sparse_layers) > 0 or
+            len(self.high_na_obs) > 0 or
+            len(self.high_na_var) > 0 or
+            len(self.low_cardinality_numerical_obs) > 0 or
+            len(self.high_cardinality_categorical_obs) > 0 or
+            len(self.low_na_obs) > 0 or
+            len(self.low_na_var) > 0 or
+            len(self.invalid_embeddings) > 0 or
+            len(self.na_embeddings) > 0 or
+            len(self.general_warnings) > 0
+        )
+
+    def print_summary(self):
+        """Print grouped summary of all messages"""
+        if not self.has_messages():
+            return
+
+        print("\nAnalysis Summary:")
+
+        # Non-sparse layers
+        if self.non_sparse_layers:
+            print(f"⚠ Non-sparse layers excluded (0 not most common): {', '.join(self.non_sparse_layers)}")
+
+        # High NA observations (>50%)
+        if self.high_na_obs:
+            print(f"⚠ Obs columns with >50% NAs excluded: {', '.join(self.high_na_obs)}")
+
+        # High NA variables (>50%)
+        if self.high_na_var:
+            print(f"⚠ Var columns with >50% NAs excluded: {', '.join(self.high_na_var)}")
+
+        # Low NA observations (<50%)
+        if self.low_na_obs:
+            print(f"ℹ Obs columns with NAs kept (<50%): {', '.join(self.low_na_obs)}")
+
+        # Low NA variables (<50%)
+        if self.low_na_var:
+            print(f"ℹ Var columns with NAs kept (<50%): {', '.join(self.low_na_var)}")
+
+        # High cardinality categorical
+        if self.high_cardinality_categorical_obs:
+            print(f"⚠ High-cardinality categorical obs columns excluded: {', '.join(self.high_cardinality_categorical_obs)}")
+
+        # Low cardinality numerical
+        if self.low_cardinality_numerical_obs:
+            print(f"ℹ Low-cardinality numerical obs columns (consider categorical): {', '.join(self.low_cardinality_numerical_obs)}")
+
+        # Invalid embeddings
+        if self.invalid_embeddings:
+            print(f"⚠ Embeddings with shape mismatch excluded: {', '.join(self.invalid_embeddings)}")
+
+        # NA embeddings
+        if self.na_embeddings:
+            print(f"ℹ Embeddings with NA/inf values kept: {', '.join(self.na_embeddings)}")
+
+        # General warnings
+        for warning in self.general_warnings:
+            print(f"⚠ {warning}")
+
+
+def remove_from_include(metadata: dict, key: str, item: str) -> bool:
+    """
+    Remove item from include list or mapping
+
+    Args:
+        metadata: Metadata dictionary
+        key: Include key (e.g., 'layers_include', 'obsm_include')
+        item: Item to remove
+
+    Returns:
+        True if item was removed, False if not present
+    """
+    if key not in metadata:
+        return False
+
+    if isinstance(metadata[key], dict):
+        if item in metadata[key]:
+            del metadata[key][item]
+            return True
+    elif isinstance(metadata[key], list):
+        if item in metadata[key]:
+            metadata[key].remove(item)
+            return True
+
+    return False
+
+
+def remove_from_exclude(metadata: dict, key: str, item: str) -> bool:
+    """
+    Remove item from exclude list
+
+    Args:
+        metadata: Metadata dictionary
+        key: Exclude key (e.g., 'layers_exclude', 'obs_exclude')
+        item: Item to remove
+
+    Returns:
+        True if item was removed, False if not present
+    """
+    if key not in metadata:
+        return False
+
+    if isinstance(metadata[key], list) and item in metadata[key]:
+        metadata[key].remove(item)
+        return True
+
+    return False
+
+
+def preserve_user_customizations(old_metadata: dict, new_metadata: dict) -> None:
+    """
+    Preserve user customizations when regenerating metadata
+
+    Preserves:
+    - Title and description fields
+    - Layer and embedding descriptions
+    - All exclude lists (will be cleaned separately)
+
+    Args:
+        old_metadata: Previous metadata dictionary
+        new_metadata: New metadata dictionary (modified in place)
+    """
+    # Preserve title and description
+    if 'title' in old_metadata:
+        new_metadata['title'] = old_metadata['title']
+    if 'description' in old_metadata:
+        new_metadata['description'] = old_metadata['description']
+
+    # Preserve layer descriptions
+    if 'layer_description' in old_metadata:
+        if 'layer_description' not in new_metadata:
+            new_metadata['layer_description'] = {}
+        # Preserve descriptions for layers that still exist
+        for key in new_metadata.get('layers_include', []):
+            if key in old_metadata['layer_description']:
+                new_metadata['layer_description'][key] = old_metadata['layer_description'][key]
+
+    # Preserve embedding descriptions
+    if 'embedding_description' in old_metadata:
+        if 'embedding_description' not in new_metadata:
+            new_metadata['embedding_description'] = {}
+        # Preserve descriptions for embeddings that still exist
+        for key in new_metadata.get('obsm_include', []):
+            if key in old_metadata['embedding_description']:
+                new_metadata['embedding_description'][key] = old_metadata['embedding_description'][key]
+
+    # Note: layer_stats are NOT preserved - always recalculated on regeneration
+
+    # Preserve all exclude lists (will be cleaned by clean_exclude_lists)
+    for exclude_key in ['layers_exclude', 'obs_exclude', 'var_exclude', 'obsm_exclude']:
+        if exclude_key in old_metadata:
+            new_metadata[exclude_key] = old_metadata[exclude_key].copy()
+
+
+def clean_exclude_lists(metadata: dict, adata) -> None:
+    """
+    Remove items from exclude lists if they no longer exist in the data
+
+    Args:
+        metadata: Metadata dictionary (modified in place)
+        adata: AnnData object
+    """
+    # Clean layers_exclude
+    if 'layers_exclude' in metadata:
+        valid_layers = set(adata.layers.keys()) if adata.layers else set()
+        if adata.X is not None:
+            valid_layers.add('X')
+        metadata['layers_exclude'] = [
+            layer for layer in metadata['layers_exclude']
+            if layer in valid_layers
+        ]
+
+    # Clean obs_exclude
+    if 'obs_exclude' in metadata:
+        valid_obs = set(adata.obs.columns)
+        metadata['obs_exclude'] = [
+            col for col in metadata['obs_exclude']
+            if col in valid_obs
+        ]
+
+    # Clean var_exclude
+    if 'var_exclude' in metadata:
+        valid_var = set(adata.var.columns)
+        metadata['var_exclude'] = [
+            col for col in metadata['var_exclude']
+            if col in valid_var
+        ]
+
+    # Clean obsm_exclude
+    if 'obsm_exclude' in metadata:
+        valid_obsm = set(adata.obsm.keys()) if adata.obsm else set()
+        metadata['obsm_exclude'] = [
+            key for key in metadata['obsm_exclude']
+            if key in valid_obsm
+        ]
+
+
+def check_h5ad_file(h5ad_path: Path, config: dict, report: CheckReport):
+    """
+    Main check function for h5ad file
+
+    Args:
+        h5ad_path: Path to h5ad file
+        config: Configuration dictionary
+        report: CheckReport accumulator
+
+    Returns:
+        Tuple of (adata, metadata_dict, markdown_body, layer_stats, was_created)
+    """
+    print(f"{'='*70}")
+    print(f"CHECKING: {h5ad_path.name}")
+    print(f"{'='*70}")
+
+    # Show file size
+    h5ad_size = h5ad_path.stat().st_size
+    print(f"File size: {format_size(h5ad_size)}")
+    print()
+
+    # 1. Validate filename
+    print("[1/9] Validating filename...")
+    is_valid, error_msg = validate_filename(h5ad_path.name)
+    if not is_valid:
+        print(f"  ✗ Filename validation failed", file=sys.stderr)
+        print(f"    {error_msg}", file=sys.stderr)
+        sys.exit(1)
+    print("  ✓ Filename valid")
+
+    # 2. Load h5ad file
+    print(f"\n[2/9] Loading h5ad file ({format_size(h5ad_size)})...")
+    try:
+        adata = load_h5ad(h5ad_path)
+    except H5ADError as error:
+        print(str(error), file=sys.stderr)
+        sys.exit(1)
+    print(f"  ✓ Loaded successfully ({adata.n_obs:,} cells × {adata.n_vars:,} genes)")
+
+    # 3. Calculate checksum
+    print(f"\n[3/9] Calculating SHA256 checksum...")
+    checksum = calculate_sha256(h5ad_path)
+
+    # 4. Load or create metadata
+    md_path = h5ad_path.with_suffix('.md')
+    was_created = not md_path.exists()
+
+    if was_created:
+        print("  ℹ No existing metadata, will create new")
+
+    old_metadata, markdown_body = parse_md_file(md_path)
+
+    # 5. Check checksum and determine if regeneration needed
+    force_regenerate = False
+    if 'sha256' in old_metadata:
+        if old_metadata['sha256'] != checksum:
+            print(f"  ⚠ SHA256: {format_checksum(checksum, short=True)}... [CHANGED - FORCING REGENERATION]")
+            force_regenerate = True
+        else:
+            print(f"  ✓ SHA256: {format_checksum(checksum, short=True)}... [UNCHANGED]")
+    else:
+        print(f"  ✓ SHA256: {format_checksum(checksum, short=True)}... [NEW]")
+
+    # 6. Initialize or regenerate metadata fields
+    if was_created or force_regenerate:
+        basename = h5ad_path.stem
+        metadata = initialize_file_metadata(basename, __version__, checksum)
+
+        if force_regenerate:
+            # Preserve user customizations from old metadata
+            preserve_user_customizations(old_metadata, metadata)
+            print("  ℹ Regenerating metadata (preserving user customizations)")
+        else:
+            # New file, create default markdown body
+            markdown_body = f"# {basename}\n\n"
+    else:
+        # Update version, checksum, and date only
+        metadata = old_metadata
+        metadata['version'] = __version__
+        metadata['sha256'] = checksum
+        metadata['date'] = datetime.now().strftime('%Y-%m-%d')
+
+    # Always update cell and gene counts
+    metadata['n_obs'] = int(adata.n_obs)
+    metadata['n_vars'] = int(adata.n_vars)
+
+    # Clean exclude lists to remove items that no longer exist
+    clean_exclude_lists(metadata, adata)
+
+    # 7. Validate structure
+    print(f"\n[4/9] Validating structure...")
+    errors = validate_structure(adata)
+    if errors:
+        print("  ✗ Structure validation failed:", file=sys.stderr)
+        for error in errors:
+            print(f"    - {error}", file=sys.stderr)
+        sys.exit(1)
+
+    # 8. Print info
+    info = get_h5ad_info(adata)
+    print("  ✓ Required structures present")
+    if info['has_X']:
+        print(f"    - .X: {info['n_cells']:,} cells × {info['n_genes']:,} genes")
+    else:
+        print(f"    - .X: not present")
+    print(f"    - .obs: {info['n_cells']:,} rows, {info['n_obs_columns']} columns")
+    print(f"    - .var: {info['n_genes']:,} rows, {info['n_var_columns']} columns")
+
+    if info['obsm_keys']:
+        print(f"    - .obsm: {len(info['obsm_keys'])} embeddings ({', '.join(info['obsm_keys'])})")
+    if info['layers']:
+        print(f"    - .layers: {len(info['layers'])} layers ({', '.join(info['layers'])})")
+
+    # 9. Check layers and collect statistics
+    print(f"\n[5/9] Analyzing layers...")
+    layer_stats = check_layers(adata, metadata, config, report)
+    if layer_stats:
+        print(f"  ✓ Analyzed {len(layer_stats)} layer(s)")
+
+    # 10. Check observations
+    print(f"\n[6/9] Analyzing observations...")
+    check_observations(adata, metadata, config, report, force_regenerate)
+    num_obsnum = len(metadata.get('obsnum_include', []))
+    num_obscat = len(metadata.get('obscat_include', []))
+    num_obs_excluded = len(metadata.get('obs_exclude', []))
+    print(f"  ✓ Analyzed {info['n_obs_columns']} column(s)")
+    print(f"    - Numerical: {num_obsnum}")
+    print(f"    - Categorical: {num_obscat}")
+    if num_obs_excluded > 0:
+        print(f"    - Excluded: {num_obs_excluded}")
+
+    # 11. Check variables
+    print(f"\n[7/9] Analyzing variables...")
+    check_variables(adata, metadata, config, report, force_regenerate)
+    num_var_included = len(metadata.get('var_include', []))
+    num_var_excluded = len(metadata.get('var_exclude', []))
+    print(f"  ✓ Analyzed {info['n_var_columns']} column(s)")
+    print(f"    - Included: {num_var_included}")
+    if num_var_excluded > 0:
+        print(f"    - Excluded: {num_var_excluded}")
+
+    # 12. Check embeddings
+    print(f"\n[8/9] Analyzing embeddings...")
+    check_embeddings(adata, metadata, report, force_regenerate)
+    num_embeddings = len(metadata.get('obsm_include', []))
+    if num_embeddings > 0:
+        print(f"  ✓ Found {num_embeddings} embedding(s)")
+        embedding_desc = metadata.get('embedding_description', {})
+        for key in metadata.get('obsm_include', []):
+            dims = adata.obsm[key].shape[1]
+            desc = embedding_desc.get(key, key)
+            print(f"    - {desc} ({key}): {dims} dimensions")
+    else:
+        print(f"  ℹ No embeddings found")
+
+    return adata, metadata, markdown_body, layer_stats, was_created
+
+
+def format_size(size_bytes: int) -> str:
+    """Format file size for display"""
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size_bytes < 1024.0:
+            return f"{size_bytes:.1f} {unit}"
+        size_bytes /= 1024.0
+    return f"{size_bytes:.1f} TB"
+
+
+def check_layers(adata, metadata, config, report):
+    """
+    Check layers for sparsity and add to metadata
+
+    Returns:
+        List of layer statistics dictionaries
+    """
+
+    # Initialize layers_include if needed
+    if 'layers_include' not in metadata:
+        metadata['layers_include'] = []
+    if 'layers_exclude' not in metadata:
+        metadata['layers_exclude'] = []
+    if 'layer_description' not in metadata:
+        metadata['layer_description'] = {}
+
+    layer_stats = []
+
+    # Check .X (only if it exists)
+    if adata.X is not None:
+        is_sparse, info = check_layer_sparsity(adata.X, 'X')
+        if not is_sparse:
+            report.non_sparse_layers.append('X')
+            # Remove from include before adding to exclude (mutual exclusivity)
+            remove_from_include(metadata, 'layers_include', 'X')
+            ensure_in_list(metadata, 'layers_exclude', 'X')
+        else:
+            # Skip if explicitly excluded by user
+            if 'X' in metadata['layers_exclude']:
+                pass
+            else:
+                # Remove from exclude before adding to include (mutual exclusivity)
+                remove_from_exclude(metadata, 'layers_exclude', 'X')
+                ensure_in_list(metadata, 'layers_include', 'X')
+                # Calculate statistics for included layers
+                stats = calculate_layer_statistics(adata.X, 'X')
+                layer_stats.append(stats)
+    else:
+        # No .X present, remove from both lists
+        remove_from_include(metadata, 'layers_include', 'X')
+        remove_from_exclude(metadata, 'layers_exclude', 'X')
+
+    # Check other layers
+    if adata.layers:
+        for layer_name in adata.layers.keys():
+            # Skip if starts with underscore
+            if layer_name.startswith('_'):
+                remove_from_include(metadata, 'layers_include', layer_name)
+                ensure_in_list(metadata, 'layers_exclude', layer_name)
+                continue
+
+            # Check sparsity
+            is_sparse, info = check_layer_sparsity(adata.layers[layer_name], layer_name)
+            if not is_sparse:
+                report.non_sparse_layers.append(layer_name)
+                # Remove from include before adding to exclude (mutual exclusivity)
+                remove_from_include(metadata, 'layers_include', layer_name)
+                ensure_in_list(metadata, 'layers_exclude', layer_name)
+            else:
+                # Skip if explicitly excluded by user
+                if layer_name in metadata['layers_exclude']:
+                    pass
+                else:
+                    # Remove from exclude before adding to include (mutual exclusivity)
+                    remove_from_exclude(metadata, 'layers_exclude', layer_name)
+                    ensure_in_list(metadata, 'layers_include', layer_name)
+                    # Calculate statistics for included layers
+                    stats = calculate_layer_statistics(adata.layers[layer_name], layer_name)
+                    layer_stats.append(stats)
+
+    return layer_stats
+
+
+def check_observations(adata, metadata, config, report, force_regenerate=False):
+    """Check observation columns and categorize them
+
+    Args:
+        adata: AnnData object
+        metadata: Metadata dictionary
+        config: Configuration dictionary
+        report: CheckReport accumulator
+        force_regenerate: If True, re-analyze all columns (ignore existing assignments)
+    """
+
+    max_obscat_values = config['max_obscat_values']
+
+    # Reserved column names that cannot be used in database tables
+    RESERVED_COLUMNS = {'cell_id', 'cell_name', 'gene_id', 'gene_name'}
+
+    # Initialize obs lists if needed
+    if 'obsnum_include' not in metadata:
+        metadata['obsnum_include'] = []
+    if 'obscat_include' not in metadata:
+        metadata['obscat_include'] = []
+    if 'obs_exclude' not in metadata:
+        metadata['obs_exclude'] = []
+
+    for col_name in adata.obs.columns:
+        # Skip reserved column names (case-insensitive check)
+        if col_name.lower() in RESERVED_COLUMNS:
+            if col_name not in metadata['obs_exclude']:
+                report.general_warnings.append(f"Obs column '{col_name}' conflicts with reserved name, excluding")
+            # Remove from include lists before adding to exclude
+            if col_name in metadata['obsnum_include']:
+                metadata['obsnum_include'].remove(col_name)
+            if col_name in metadata['obscat_include']:
+                metadata['obscat_include'].remove(col_name)
+            add_to_obs_exclude(metadata, col_name)
+            continue
+        # Skip if starts with underscore
+        if col_name.startswith('_'):
+            # Remove from include lists before adding to exclude (mutual exclusivity)
+            if col_name in metadata['obsnum_include']:
+                metadata['obsnum_include'].remove(col_name)
+            if col_name in metadata['obscat_include']:
+                metadata['obscat_include'].remove(col_name)
+            add_to_obs_exclude(metadata, col_name)
+            continue
+
+        # Check if already assigned (skip if not force regenerating)
+        if not force_regenerate:
+            existing_assignment = get_obs_column_assignment(metadata, col_name)
+            if existing_assignment:
+                continue
+
+        # Analyze column
+        column_data = adata.obs[col_name]
+
+        # Skip multi-dimensional or problematic columns
+        if hasattr(column_data, 'ndim') and column_data.ndim > 1:
+            report.general_warnings.append(f"Skipping multi-dimensional column: {col_name}")
+            # Remove from include lists
+            if col_name in metadata['obsnum_include']:
+                metadata['obsnum_include'].remove(col_name)
+            if col_name in metadata['obscat_include']:
+                metadata['obscat_include'].remove(col_name)
+            add_to_obs_exclude(metadata, col_name)
+            continue
+
+        # Skip if not a Series-like object
+        if not isinstance(column_data, pd.Series):
+            try:
+                column_data = pd.Series(column_data)
+            except (ValueError, TypeError):
+                report.general_warnings.append(f"Skipping problematic column: {col_name}")
+                # Remove from include lists
+                if col_name in metadata['obsnum_include']:
+                    metadata['obsnum_include'].remove(col_name)
+                if col_name in metadata['obscat_include']:
+                    metadata['obscat_include'].remove(col_name)
+                add_to_obs_exclude(metadata, col_name)
+                continue
+
+        is_numerical = is_numerical_column(column_data)
+
+        # Check for NA values
+        has_na, na_count, na_percentage = check_for_na(column_data)
+
+        # Exclude if >50% NAs
+        if na_percentage > 50:
+            report.high_na_obs.append(f"{col_name} ({na_percentage:.1f}%)")
+            # Remove from include lists
+            if col_name in metadata['obsnum_include']:
+                metadata['obsnum_include'].remove(col_name)
+            if col_name in metadata['obscat_include']:
+                metadata['obscat_include'].remove(col_name)
+            add_to_obs_exclude(metadata, col_name)
+            continue
+        elif has_na:
+            report.low_na_obs.append(f"{col_name} ({na_percentage:.1f}%)")
+
+        if is_numerical:
+            # Check if low cardinality (might be better as categorical)
+            unique_count, _ = check_column_cardinality(column_data, 10)
+            if unique_count <= 10:
+                report.low_cardinality_numerical_obs.append(f"{col_name} ({unique_count} values)")
+
+            # Remove from other lists before adding (mutual exclusivity)
+            if col_name in metadata['obscat_include']:
+                metadata['obscat_include'].remove(col_name)
+            if col_name in metadata['obs_exclude']:
+                metadata['obs_exclude'].remove(col_name)
+            # Add to obsnum_include
+            ensure_in_list(metadata, 'obsnum_include', col_name)
+        else:
+            # Categorical/text column
+            unique_count, is_acceptable = check_column_cardinality(column_data, max_obscat_values)
+
+            if not is_acceptable:
+                report.high_cardinality_categorical_obs.append(f"{col_name} ({unique_count} values)")
+                # Remove from include lists
+                if col_name in metadata['obsnum_include']:
+                    metadata['obsnum_include'].remove(col_name)
+                if col_name in metadata['obscat_include']:
+                    metadata['obscat_include'].remove(col_name)
+                add_to_obs_exclude(metadata, col_name)
+            else:
+                # Remove from other lists before adding (mutual exclusivity)
+                if col_name in metadata['obsnum_include']:
+                    metadata['obsnum_include'].remove(col_name)
+                if col_name in metadata['obs_exclude']:
+                    metadata['obs_exclude'].remove(col_name)
+                # Add to obscat_include
+                ensure_in_list(metadata, 'obscat_include', col_name)
+
+    # Remove case-insensitive duplicates from obsnum_include and obscat_include
+    # (DuckDB column names are case-insensitive)
+    for key in ['obsnum_include', 'obscat_include']:
+        if key in metadata:
+            seen_lower = set()
+            deduplicated = []
+            for col in metadata[key]:
+                if col.lower() not in seen_lower:
+                    deduplicated.append(col)
+                    seen_lower.add(col.lower())
+                else:
+                    report.general_warnings.append(f"Removing case-insensitive duplicate from {key}: {col}")
+            metadata[key] = deduplicated
+
+
+def check_variables(adata, metadata, config, report, force_regenerate=False):
+    """Check variable columns
+
+    Args:
+        adata: AnnData object
+        metadata: Metadata dictionary
+        config: Configuration dictionary
+        report: CheckReport accumulator
+        force_regenerate: If True, re-analyze all columns (ignore existing assignments)
+    """
+
+    # Reserved column names that cannot be used in database tables
+    RESERVED_COLUMNS = {'cell_id', 'cell_name', 'gene_id', 'gene_name'}
+
+    # Initialize var lists if needed
+    if 'var_include' not in metadata:
+        metadata['var_include'] = []
+    if 'var_exclude' not in metadata:
+        metadata['var_exclude'] = []
+
+    for col_name in adata.var.columns:
+        # Skip reserved column names (case-insensitive check)
+        if col_name.lower() in RESERVED_COLUMNS:
+            if col_name not in metadata['var_exclude']:
+                report.general_warnings.append(f"Var column '{col_name}' conflicts with reserved name, excluding")
+            # Remove from include before adding to exclude
+            if col_name in metadata['var_include']:
+                metadata['var_include'].remove(col_name)
+            ensure_in_list(metadata, 'var_exclude', col_name)
+            continue
+        # Skip if starts with underscore
+        if col_name.startswith('_'):
+            # Remove from include before adding to exclude (mutual exclusivity)
+            if col_name in metadata['var_include']:
+                metadata['var_include'].remove(col_name)
+            ensure_in_list(metadata, 'var_exclude', col_name)
+            continue
+
+        # Skip if already in a list (unless force regenerating)
+        if not force_regenerate:
+            if col_name in metadata['var_include'] or col_name in metadata['var_exclude']:
+                continue
+
+        # Check for NA values
+        has_na, na_count, na_percentage = check_for_na(adata.var[col_name])
+
+        # Exclude if >50% NAs
+        if na_percentage > 50:
+            report.high_na_var.append(f"{col_name} ({na_percentage:.1f}%)")
+            # Remove from include before adding to exclude (mutual exclusivity)
+            if col_name in metadata['var_include']:
+                metadata['var_include'].remove(col_name)
+            ensure_in_list(metadata, 'var_exclude', col_name)
+            continue
+        elif has_na:
+            report.low_na_var.append(f"{col_name} ({na_percentage:.1f}%)")
+
+        # Remove from exclude before adding to include (mutual exclusivity)
+        if col_name in metadata['var_exclude']:
+            metadata['var_exclude'].remove(col_name)
+        # Add to var_include
+        ensure_in_list(metadata, 'var_include', col_name)
+
+    # Remove case-insensitive duplicates from var_include
+    # (DuckDB column names are case-insensitive)
+    if 'var_include' in metadata:
+        seen_lower = set()
+        deduplicated = []
+        for col in metadata['var_include']:
+            if col.lower() not in seen_lower:
+                deduplicated.append(col)
+                seen_lower.add(col.lower())
+            else:
+                report.general_warnings.append(f"Removing case-insensitive duplicate from var_include: {col}")
+        metadata['var_include'] = deduplicated
+
+
+def check_embeddings(adata, metadata, report, force_regenerate=False):
+    """Check embeddings and add to metadata
+
+    Args:
+        adata: AnnData object
+        metadata: Metadata dictionary
+        report: CheckReport accumulator
+        force_regenerate: If True, re-analyze all embeddings (ignore existing assignments)
+    """
+
+    # Initialize obsm lists if needed
+    if 'obsm_include' not in metadata:
+        metadata['obsm_include'] = []
+    if 'obsm_exclude' not in metadata:
+        metadata['obsm_exclude'] = []
+    if 'embedding_description' not in metadata:
+        metadata['embedding_description'] = {}
+
+    if not adata.obsm:
+        return
+
+    for obsm_key in adata.obsm.keys():
+        # Skip if starts with underscore
+        if obsm_key.startswith('_'):
+            # Remove from include before adding to exclude (mutual exclusivity)
+            remove_from_include(metadata, 'obsm_include', obsm_key)
+            ensure_in_list(metadata, 'obsm_exclude', obsm_key)
+            continue
+
+        # Skip if already in lists (unless force regenerating)
+        if not force_regenerate:
+            if obsm_key in metadata['obsm_include'] or obsm_key in metadata['obsm_exclude']:
+                continue
+
+        # Get embedding
+        embedding = adata.obsm[obsm_key]
+
+        # Validate shape
+        if embedding.shape[0] != adata.n_obs:
+            report.invalid_embeddings.append(f"{obsm_key} (shape mismatch)")
+            # Remove from include before adding to exclude (mutual exclusivity)
+            remove_from_include(metadata, 'obsm_include', obsm_key)
+            ensure_in_list(metadata, 'obsm_exclude', obsm_key)
+            continue
+
+        # Check for NA/inf values
+        if np.any(np.isnan(embedding)) or np.any(np.isinf(embedding)):
+            report.na_embeddings.append(obsm_key)
+
+        # Skip if explicitly excluded by user
+        if obsm_key in metadata['obsm_exclude']:
+            pass
+        else:
+            # Remove from exclude before adding to include (mutual exclusivity)
+            remove_from_exclude(metadata, 'obsm_exclude', obsm_key)
+            # Add to obsm_include
+            ensure_in_list(metadata, 'obsm_include', obsm_key)
+            # Set default description if not already present
+            if obsm_key not in metadata['embedding_description']:
+                default_name = get_default_embedding_name(obsm_key)
+                metadata['embedding_description'][obsm_key] = default_name
+
+
+def check_collection_index(h5ad_path: Path, report: CheckReport):
+    """Check and create collection index.md if needed"""
+
+    index_path = h5ad_path.parent / 'index.md'
+
+    if index_path.exists():
+        print(f"  ✓ Collection index: index.md [OK]")
+        return
+
+    # Create index.md
+    group_name = h5ad_path.parent.name
+    metadata = initialize_collection_metadata(group_name)
+    markdown_body = f"# {group_name}\n\n"
+
+    try:
+        write_md_file(index_path, metadata, markdown_body)
+        print(f"  ✓ Collection index: index.md [CREATED]")
+    except MetadataError as error:
+        report.general_warnings.append(f"Failed to create collection index: {error}")
+
+
+
+def main():
+    """Main entry point"""
+
+    parser = argparse.ArgumentParser(
+        description='Check h5ad file and generate metadata',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument('file', help='Path to h5ad file')
+
+    args = parser.parse_args()
+
+    # Convert to Path
+    h5ad_path = Path(args.file).resolve()
+
+    # Check file exists
+    if not h5ad_path.exists():
+        print(f"ERROR: [ant-h5ad-check] File not found", file=sys.stderr)
+        print(f"Location: {h5ad_path}", file=sys.stderr)
+        print(f"Action: Check file path and try again", file=sys.stderr)
+        sys.exit(3)
+
+    # Check file has .h5ad extension
+    if h5ad_path.suffix != '.h5ad':
+        print(f"ERROR: [ant-h5ad-check] Not an h5ad file", file=sys.stderr)
+        print(f"Details: File must have .h5ad extension", file=sys.stderr)
+        print(f"Location: {h5ad_path}", file=sys.stderr)
+        sys.exit(1)
+
+    # Load configuration
+    config = get_config()
+
+    # Initialize report
+    report = CheckReport()
+
+    try:
+        # Run checks
+        adata, metadata, markdown_body, layer_stats, was_created = check_h5ad_file(
+            h5ad_path, config, report
+        )
+
+        # Store layer statistics in metadata (not markdown body)
+        if layer_stats:
+            # Convert list of stats to dict keyed by layer name
+            metadata['layer_stats'] = {
+                stats['name']: {
+                    'dtype': stats['dtype'],
+                    'min_value': stats['min_value'],
+                    'min_nonzero': stats['min_nonzero'],
+                    'max_value': stats['max_value'],
+                    'median': stats['median'],
+                    'q90': stats['q90'],
+                    'num_zeros': stats['num_zeros'],
+                    'pct_zeros': stats['pct_zeros']
+                }
+                for stats in layer_stats
+            }
+
+        # Write metadata file
+        print(f"\n[9/9] Writing metadata...")
+        md_path = h5ad_path.with_suffix('.md')
+        write_md_file(md_path, metadata, markdown_body)
+
+        status = "CREATED" if was_created else "UPDATED"
+        print(f"  ✓ Metadata file {status}: {md_path.name}")
+
+        # Check collection index
+        check_collection_index(h5ad_path, report)
+
+        # Print summary report
+        report.print_summary()
+
+        print(f"\n{'='*70}")
+        print("✓ H5AD CHECK COMPLETED SUCCESSFULLY")
+        print(f"{'='*70}")
+        print()
+        print("Next steps:")
+        print(f"  - To check DuckDB: ant duckdb-check {h5ad_path.name}")
+        print(f"  - To convert to DuckDB: ant convert {h5ad_path.name}")
+        sys.exit(0)
+
+    except (H5ADError, MetadataError) as error:
+        print(str(error), file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\n\nInterrupted by user", file=sys.stderr)
+        sys.exit(130)
+    except Exception as error:
+        print(f"\nERROR: [ant-h5ad-check] Unexpected error", file=sys.stderr)
+        print(f"Details: {error}", file=sys.stderr)
+        print(f"Location: {h5ad_path}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()

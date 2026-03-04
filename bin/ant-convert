@@ -42,6 +42,15 @@ class ConversionError(Exception):
     pass
 
 
+def sanitize_identifier(key: str) -> str:
+    """Sanitize a key for use as a DuckDB identifier (table/index/view name).
+
+    Replaces non-alphanumeric characters with underscores to avoid
+    DuckDB interpreting dots as schema separators.
+    """
+    return ''.join(c if c.isalnum() else '_' for c in key)
+
+
 def normalize_dataframe_dtypes(df: pd.DataFrame) -> pd.DataFrame:
     """Normalize DataFrame dtypes to be compatible with DuckDB
 
@@ -286,8 +295,9 @@ def convert_layers(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict, confi
     """Convert expression layers using chunked processing"""
     layers_include = metadata['layers_include']
     chunk_size = config['melt_chunk_size']
+    layer_description = metadata.get('layer_description', {})
 
-    for layer_key, internal_name in layers_include.items():
+    for layer_key in layers_include:
         # Get layer data
         if layer_key == 'X':
             if adata.X is None:
@@ -300,12 +310,14 @@ def convert_layers(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict, confi
                 continue
             layer_data = adata.layers[layer_key]
 
-        print(f"  layer__{internal_name} ({layer_key}):")
+        # Use layer key for table name (not description)
+        safe_layer_key = sanitize_identifier(layer_key)
+        print(f"  layer__{layer_key} ({layer_description.get(layer_key, layer_key)}):")
         start_time = time.time()
 
         # Create table
         conn.execute(f"""
-            CREATE TABLE __layer__{internal_name} (
+            CREATE TABLE __layer__{safe_layer_key} (
                 cell_id INTEGER NOT NULL,
                 gene_id INTEGER NOT NULL,
                 value DOUBLE NOT NULL,
@@ -348,7 +360,7 @@ def convert_layers(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict, confi
             if len(melted) > 0:
                 melted = normalize_dataframe_dtypes(melted)
                 conn.register('temp_layer', melted)
-                conn.execute(f"INSERT INTO __layer__{internal_name} SELECT * FROM temp_layer")
+                conn.execute(f"INSERT INTO __layer__{safe_layer_key} SELECT * FROM temp_layer")
                 conn.unregister('temp_layer')
 
             # Free memory
@@ -358,17 +370,17 @@ def convert_layers(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict, confi
         print(f"    Processed {chunk_count} chunks, {total_nonzero:,} non-zero values")
 
         # Create indices
-        conn.execute(f"CREATE INDEX idx_layer_{internal_name}_cell ON __layer__{internal_name}(cell_id)")
-        conn.execute(f"CREATE INDEX idx_layer_{internal_name}_gene ON __layer__{internal_name}(gene_id)")
+        conn.execute(f"CREATE INDEX idx_layer_{safe_layer_key}_cell ON __layer__{safe_layer_key}(cell_id)")
+        conn.execute(f"CREATE INDEX idx_layer_{safe_layer_key}_gene ON __layer__{safe_layer_key}(gene_id)")
 
         # Create view
         conn.execute(f"""
-            CREATE VIEW layer__{internal_name} AS
+            CREATE VIEW layer__{safe_layer_key} AS
             SELECT
                 c.cell_name,
                 g.gene_name,
                 l.value
-            FROM __layer__{internal_name} l
+            FROM __layer__{safe_layer_key} l
             JOIN __cells c ON l.cell_id = c.cell_id
             JOIN __genes g ON l.gene_id = g.gene_id
         """)
@@ -378,18 +390,46 @@ def convert_layers(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict, confi
         sparsity = (1 - total_nonzero / total_elements) * 100
 
         total_time = time.time() - start_time
-        print(f"  ✓ {internal_name}: {total_nonzero:,} values, {sparsity:.1f}% sparse, {total_time:.1f}s")
+        print(f"  ✓ {layer_key}: {total_nonzero:,} values, {sparsity:.1f}% sparse, {total_time:.1f}s")
 
 
 def convert_observations(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict) -> None:
     """Convert observation (cell) annotations"""
 
+    # Reserved column names that cannot be used
+    RESERVED_COLUMNS = {'cell_id', 'cell_name', 'gene_id', 'gene_name'}
+
     # Convert numerical observations
     obsnum_cols = metadata.get('obsnum_include', [])
     if obsnum_cols:
-        # Filter to existing columns and remove duplicates (preserve order)
+        # Filter to existing columns and remove duplicates (case-insensitive)
         seen = set()
-        obsnum_cols = [col for col in obsnum_cols if col in adata.obs.columns and not (col in seen or seen.add(col))]
+        seen_lower = set()
+        filtered_cols = []
+
+        for col in obsnum_cols:
+            if col not in adata.obs.columns:
+                continue
+
+            # Check for exact duplicates
+            if col in seen:
+                continue
+
+            # Check for case-insensitive duplicates (DuckDB columns are case-insensitive)
+            if col.lower() in seen_lower:
+                print(f"  ⚠ Skipping obs column '{col}' (case-insensitive duplicate)")
+                continue
+
+            # Check for reserved column names
+            if col.lower() in RESERVED_COLUMNS:
+                print(f"  ⚠ Skipping obs column '{col}' (conflicts with reserved name)")
+                continue
+
+            filtered_cols.append(col)
+            seen.add(col)
+            seen_lower.add(col.lower())
+
+        obsnum_cols = filtered_cols
 
         if obsnum_cols:
             # Build CREATE TABLE statement
@@ -425,9 +465,34 @@ def convert_observations(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict)
     # Convert categorical observations
     obscat_cols = metadata.get('obscat_include', [])
     if obscat_cols:
-        # Filter to existing columns and remove duplicates (preserve order)
+        # Filter to existing columns and remove duplicates (case-insensitive)
         seen = set()
-        obscat_cols = [col for col in obscat_cols if col in adata.obs.columns and not (col in seen or seen.add(col))]
+        seen_lower = set()
+        filtered_cols = []
+
+        for col in obscat_cols:
+            if col not in adata.obs.columns:
+                continue
+
+            # Check for exact duplicates
+            if col in seen:
+                continue
+
+            # Check for case-insensitive duplicates (DuckDB columns are case-insensitive)
+            if col.lower() in seen_lower:
+                print(f"  ⚠ Skipping obs column '{col}' (case-insensitive duplicate)")
+                continue
+
+            # Check for reserved column names
+            if col.lower() in RESERVED_COLUMNS:
+                print(f"  ⚠ Skipping obs column '{col}' (conflicts with reserved name)")
+                continue
+
+            filtered_cols.append(col)
+            seen.add(col)
+            seen_lower.add(col.lower())
+
+        obscat_cols = filtered_cols
 
         if obscat_cols:
             # Build CREATE TABLE statement with ENUM types
@@ -478,13 +543,42 @@ def convert_observations(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict)
 def convert_variables(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict) -> None:
     """Convert variable (gene) annotations"""
 
+    # Reserved column names that cannot be used
+    RESERVED_COLUMNS = {'cell_id', 'cell_name', 'gene_id', 'gene_name'}
+
     var_cols = metadata.get('var_include', [])
     if not var_cols:
         return
 
-    # Filter to existing columns and remove duplicates (preserve order)
+    # Filter to existing columns and remove duplicates (case-insensitive)
     seen = set()
-    var_cols = [col for col in var_cols if col in adata.var.columns and not (col in seen or seen.add(col))]
+    seen_lower = set()
+    filtered_cols = []
+
+    for col in var_cols:
+        if col not in adata.var.columns:
+            continue
+
+        # Check for exact duplicates
+        if col in seen:
+            continue
+
+        # Check for case-insensitive duplicates (DuckDB columns are case-insensitive)
+        if col.lower() in seen_lower:
+            print(f"  ⚠ Skipping var column '{col}' (case-insensitive duplicate)")
+            continue
+
+        # Check for reserved column names
+        if col.lower() in RESERVED_COLUMNS:
+            print(f"  ⚠ Skipping var column '{col}' (conflicts with reserved name)")
+            continue
+
+        filtered_cols.append(col)
+        seen.add(col)
+        seen_lower.add(col.lower())
+
+    var_cols = filtered_cols
+
     if not var_cols:
         return
 
@@ -564,14 +658,16 @@ def convert_variables(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict) ->
 def convert_embeddings(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict) -> None:
     """Convert embeddings (UMAP, PCA, etc.)"""
 
-    obsm_include = metadata.get('obsm_include', {})
+    obsm_include = metadata.get('obsm_include', [])
+    embedding_description = metadata.get('embedding_description', {})
 
-    for obsm_key, internal_name in obsm_include.items():
+    for obsm_key in obsm_include:
         try:
             if obsm_key not in adata.obsm:
                 print(f"  ⚠ Embedding '{obsm_key}' not found, skipping")
                 continue
 
+            safe_obsm_key = sanitize_identifier(obsm_key)
             embedding_raw = adata.obsm[obsm_key]
 
             # Convert to numpy array if it's a DataFrame
@@ -596,7 +692,7 @@ def convert_embeddings(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict) -
                 col_defs.append(f'dim_{i} DOUBLE NOT NULL')
 
             conn.execute(f"""
-                CREATE TABLE __obsm__{internal_name} (
+                CREATE TABLE __obsm__{safe_obsm_key} (
                     {', '.join(col_defs)}
                 )
             """)
@@ -608,24 +704,25 @@ def convert_embeddings(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict) -
 
             # Insert using register pattern (fast)
             conn.register('temp_embedding', embedding_df)
-            conn.execute(f"INSERT INTO __obsm__{internal_name} SELECT * FROM temp_embedding")
+            conn.execute(f"INSERT INTO __obsm__{safe_obsm_key} SELECT * FROM temp_embedding")
             conn.unregister('temp_embedding')
 
             # Create index
-            conn.execute(f"CREATE INDEX idx_obsm_{internal_name}_cell ON __obsm__{internal_name}(cell_id)")
+            conn.execute(f"CREATE INDEX idx_obsm_{safe_obsm_key}_cell ON __obsm__{safe_obsm_key}(cell_id)")
 
             # Create view
             conn.execute(f"""
-                CREATE VIEW obsm__{internal_name} AS
+                CREATE VIEW obsm__{safe_obsm_key} AS
                 SELECT c.cell_name, e.*
-                FROM __obsm__{internal_name} e
+                FROM __obsm__{safe_obsm_key} e
                 JOIN __cells c ON e.cell_id = c.cell_id
             """)
 
-            print(f"  ✓ obsm__{internal_name}: {num_dims} dimensions")
+            desc = embedding_description.get(obsm_key, obsm_key)
+            print(f"  ✓ obsm__{obsm_key} ({desc}): {num_dims} dimensions")
 
         except Exception as e:
-            print(f"  ✗ ERROR converting embedding '{obsm_key}' -> '{internal_name}':")
+            print(f"  ✗ ERROR converting embedding '{obsm_key}':")
             print(f"    Type: {type(e).__name__}")
             print(f"    Message: {str(e)}")
             import traceback

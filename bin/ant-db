@@ -1,0 +1,343 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "duckdb>=0.10.0",
+# ]
+# ///
+"""
+ant-db - Database inspection and management tools
+
+Provides utilities for inspecting and managing DuckDB databases
+without requiring metadata files.
+"""
+
+import argparse
+import sys
+from pathlib import Path
+from typing import List, Tuple, Optional
+
+import duckdb
+
+
+def format_size(size_bytes: int) -> str:
+    """Format file size for display"""
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size_bytes < 1024.0:
+            return f"{size_bytes:.1f} {unit}"
+        size_bytes /= 1024.0
+    return f"{size_bytes:.1f} TB"
+
+
+def format_number(num: int) -> str:
+    """Format number with thousands separator"""
+    return f"{num:,}"
+
+
+def get_table_info(conn: duckdb.DuckDBPyConnection, table_name: str) -> Tuple[int, int]:
+    """Get row count and approximate size for a table
+
+    Returns:
+        Tuple of (row_count, size_bytes)
+    """
+    try:
+        # Get row count
+        result = conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()
+        row_count = result[0] if result else 0
+
+        # Get approximate size (columns * rows * avg_size_per_cell)
+        # This is an approximation since DuckDB doesn't expose exact table sizes
+        col_result = conn.execute(f"SELECT COUNT(*) FROM information_schema.columns WHERE table_name = '{table_name}'").fetchone()
+        col_count = col_result[0] if col_result else 0
+
+        # Rough estimate: assume ~50 bytes per cell on average
+        size_bytes = row_count * col_count * 50
+
+        return row_count, size_bytes
+    except Exception as e:
+        return -1, 0
+
+
+def get_table_list(conn: duckdb.DuckDBPyConnection) -> List[str]:
+    """Get list of all tables in database"""
+    result = conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").fetchall()
+    return [row[0] for row in result]
+
+
+def get_view_list(conn: duckdb.DuckDBPyConnection) -> List[str]:
+    """Get list of all views in database"""
+    result = conn.execute("SELECT name FROM sqlite_master WHERE type='view' ORDER BY name").fetchall()
+    return [row[0] for row in result]
+
+
+def get_table_schema(conn: duckdb.DuckDBPyConnection, table_name: str) -> List[Tuple[str, str]]:
+    """Get schema for a table
+
+    Returns:
+        List of (column_name, column_type) tuples
+    """
+    try:
+        result = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        # PRAGMA table_info returns: (cid, name, type, notnull, dflt_value, pk)
+        return [(row[1], row[2]) for row in result]
+    except Exception:
+        return []
+
+
+def cmd_structure(duckdb_path: Path, args):
+    """Show database structure (tables, views, sizes)"""
+
+    print(f"{'='*70}")
+    print(f"DATABASE STRUCTURE: {duckdb_path.name}")
+    print(f"{'='*70}")
+    print()
+
+    # Show file size
+    db_size = duckdb_path.stat().st_size
+    print(f"File size: {format_size(db_size)}")
+    print()
+
+    try:
+        conn = duckdb.connect(str(duckdb_path), read_only=True)
+
+        # Get tables
+        tables = get_table_list(conn)
+        views = get_view_list(conn)
+
+        print(f"Tables: {len(tables)}")
+        print(f"Views:  {len(views)}")
+        print()
+
+        # System tables vs user tables
+        system_tables = [t for t in tables if t.startswith('__')]
+        user_tables = [t for t in tables if not t.startswith('__')]
+
+        # Show system tables
+        if system_tables:
+            print("="*70)
+            print("SYSTEM TABLES")
+            print("="*70)
+            print()
+            print(f"{'Table':<30} {'Rows':>15} {'Est. Size':>15}")
+            print("-"*70)
+
+            total_rows = 0
+            total_size = 0
+
+            for table_name in sorted(system_tables):
+                row_count, size_bytes = get_table_info(conn, table_name)
+                if row_count >= 0:
+                    print(f"{table_name:<30} {format_number(row_count):>15} {format_size(size_bytes):>15}")
+                    total_rows += row_count
+                    total_size += size_bytes
+                else:
+                    print(f"{table_name:<30} {'error':>15} {'-':>15}")
+
+            print("-"*70)
+            print(f"{'Total':<30} {format_number(total_rows):>15} {format_size(total_size):>15}")
+            print()
+
+        # Show user tables
+        if user_tables:
+            print("="*70)
+            print("DATA TABLES")
+            print("="*70)
+            print()
+            print(f"{'Table':<30} {'Rows':>15} {'Est. Size':>15}")
+            print("-"*70)
+
+            total_rows = 0
+            total_size = 0
+
+            for table_name in sorted(user_tables):
+                row_count, size_bytes = get_table_info(conn, table_name)
+                if row_count >= 0:
+                    print(f"{table_name:<30} {format_number(row_count):>15} {format_size(size_bytes):>15}")
+                    total_rows += row_count
+                    total_size += size_bytes
+                else:
+                    print(f"{table_name:<30} {'error':>15} {'-':>15}")
+
+            print("-"*70)
+            print(f"{'Total':<30} {format_number(total_rows):>15} {format_size(total_size):>15}")
+            print()
+
+        # Show views
+        if views:
+            print("="*70)
+            print("VIEWS")
+            print("="*70)
+            print()
+            for view_name in views:
+                print(f"  • {view_name}")
+            print()
+
+        conn.close()
+
+        print("="*70)
+        print("✓ Structure inspection complete")
+        print("="*70)
+
+    except Exception as e:
+        print(f"ERROR: Failed to inspect database", file=sys.stderr)
+        print(f"Details: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_schema(duckdb_path: Path, args):
+    """Show schema for a specific table"""
+
+    table_name = args.table
+
+    print(f"{'='*70}")
+    print(f"TABLE SCHEMA: {table_name}")
+    print(f"{'='*70}")
+    print()
+
+    try:
+        conn = duckdb.connect(str(duckdb_path), read_only=True)
+
+        # Check if table exists
+        tables = get_table_list(conn)
+        if table_name not in tables:
+            print(f"ERROR: Table '{table_name}' not found", file=sys.stderr)
+            print(f"\nAvailable tables:", file=sys.stderr)
+            for t in sorted(tables):
+                print(f"  • {t}", file=sys.stderr)
+            sys.exit(1)
+
+        # Get schema
+        schema = get_table_schema(conn, table_name)
+
+        if not schema:
+            print(f"ERROR: Could not retrieve schema for '{table_name}'", file=sys.stderr)
+            sys.exit(1)
+
+        # Get row count
+        row_count, _ = get_table_info(conn, table_name)
+
+        print(f"Table: {table_name}")
+        print(f"Rows:  {format_number(row_count)}")
+        print()
+        print(f"{'Column':<40} {'Type':<20}")
+        print("-"*70)
+
+        for col_name, col_type in schema:
+            print(f"{col_name:<40} {col_type:<20}")
+
+        print()
+        print(f"Total columns: {len(schema)}")
+
+        conn.close()
+
+    except Exception as e:
+        print(f"ERROR: Failed to retrieve schema", file=sys.stderr)
+        print(f"Details: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_query(duckdb_path: Path, args):
+    """Execute a SQL query"""
+
+    query = args.query
+
+    try:
+        conn = duckdb.connect(str(duckdb_path), read_only=True)
+
+        result = conn.execute(query).fetchall()
+
+        # Get column names
+        description = conn.description
+        if description:
+            col_names = [desc[0] for desc in description]
+
+            # Print header
+            print()
+            print("  ".join(f"{name:<20}" for name in col_names))
+            print("-" * (len(col_names) * 22))
+
+            # Print rows
+            for row in result:
+                print("  ".join(f"{str(val):<20}" for val in row))
+
+            print()
+            print(f"({len(result)} row{'s' if len(result) != 1 else ''})")
+        else:
+            print(f"Query executed successfully")
+
+        conn.close()
+
+    except Exception as e:
+        print(f"ERROR: Query failed", file=sys.stderr)
+        print(f"Details: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def main():
+    """Main entry point"""
+
+    parser = argparse.ArgumentParser(
+        description='Database inspection and management tools',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+
+    subparsers = parser.add_subparsers(dest='command', help='Available commands')
+
+    # Structure command
+    parser_structure = subparsers.add_parser(
+        'structure',
+        help='Show database structure (tables, views, sizes)'
+    )
+    parser_structure.add_argument('database', help='Path to DuckDB file')
+
+    # Schema command
+    parser_schema = subparsers.add_parser(
+        'schema',
+        help='Show schema for a specific table'
+    )
+    parser_schema.add_argument('database', help='Path to DuckDB file')
+    parser_schema.add_argument('table', help='Table name')
+
+    # Query command
+    parser_query = subparsers.add_parser(
+        'query',
+        help='Execute a SQL query'
+    )
+    parser_query.add_argument('database', help='Path to DuckDB file')
+    parser_query.add_argument('query', help='SQL query to execute')
+
+    args = parser.parse_args()
+
+    # Check if command was provided
+    if not args.command:
+        parser.print_help()
+        sys.exit(2)
+
+    # Get database path
+    duckdb_path = Path(args.database).resolve()
+
+    # Check if file exists
+    if not duckdb_path.exists():
+        print(f"ERROR: Database file not found", file=sys.stderr)
+        print(f"Location: {duckdb_path}", file=sys.stderr)
+        sys.exit(3)
+
+    # Check if it's a .duckdb file
+    if duckdb_path.suffix != '.duckdb':
+        print(f"WARNING: File does not have .duckdb extension", file=sys.stderr)
+        print(f"Attempting to open anyway...", file=sys.stderr)
+        print()
+
+    # Dispatch to command handler
+    if args.command == 'structure':
+        cmd_structure(duckdb_path, args)
+    elif args.command == 'schema':
+        cmd_schema(duckdb_path, args)
+    elif args.command == 'query':
+        cmd_query(duckdb_path, args)
+    else:
+        print(f"ERROR: Unknown command '{args.command}'", file=sys.stderr)
+        sys.exit(2)
+
+
+if __name__ == '__main__':
+    main()
