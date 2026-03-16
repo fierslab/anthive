@@ -21,26 +21,31 @@ class AnthiveDB:
             db_path: Path to .duckdb file
         """
         self.db_path = db_path
-        self.conn = None
+        self.conn: Optional[duckdb.DuckDBPyConnection] = None
 
     def __enter__(self):
         """Context manager entry"""
-        self.connect()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit"""
         self.close()
 
-    def connect(self):
+    def connect(self) -> duckdb.DuckDBPyConnection:
         """Open database connection"""
         if self.conn is None:
             self.conn = duckdb.connect(str(self.db_path), read_only=True)
+        return self.conn
+
+    @property
+    def _conn(self) -> duckdb.DuckDBPyConnection:
+        """Return open connection, connecting lazily if needed."""
+        return self.connect()
 
     def close(self):
         """Close database connection"""
         if self.conn:
-            self.conn.close()
+            self._conn.close()
             self.conn = None
 
     def get_info(self) -> Dict[str, Any]:
@@ -50,11 +55,10 @@ class AnthiveDB:
         Returns:
             Dictionary with database metadata
         """
-        self.connect()
 
         # Get cell and gene counts
-        n_cells = self.conn.execute("SELECT COUNT(*) FROM __cells").fetchone()[0]
-        n_genes = self.conn.execute("SELECT COUNT(*) FROM __genes").fetchone()[0]
+        n_cells = (self._conn.execute("SELECT COUNT(*) FROM __cells").fetchone() or (0,))[0]
+        n_genes = (self._conn.execute("SELECT COUNT(*) FROM __genes").fetchone() or (0,))[0]
 
         # Get available layers
         layers = self._get_layers()
@@ -79,10 +83,9 @@ class AnthiveDB:
 
     def _get_layers(self) -> List[str]:
         """Get list of available layers"""
-        self.connect()
 
         # Get all views that match pattern layer__*
-        result = self.conn.execute("""
+        result = self._conn.execute("""
             SELECT table_name
             FROM information_schema.tables
             WHERE table_type = 'VIEW'
@@ -94,10 +97,9 @@ class AnthiveDB:
 
     def _get_embeddings(self) -> List[str]:
         """Get list of available embeddings"""
-        self.connect()
 
         # Get all views that match pattern obsm__*
-        result = self.conn.execute("""
+        result = self._conn.execute("""
             SELECT table_name
             FROM information_schema.tables
             WHERE table_type = 'VIEW'
@@ -109,20 +111,19 @@ class AnthiveDB:
 
     def _get_numerical_fields(self) -> List[str]:
         """Get numerical metadata fields"""
-        self.connect()
 
         # Check if obsnum view exists
-        exists = self.conn.execute("""
+        exists = (self._conn.execute("""
             SELECT COUNT(*)
             FROM information_schema.tables
             WHERE table_name = 'obsnum'
-        """).fetchone()[0]
+        """).fetchone() or (0,))[0]
 
         if not exists:
             return []
 
         # Get columns except cell_name and cell_id
-        result = self.conn.execute("""
+        result = self._conn.execute("""
             SELECT column_name
             FROM information_schema.columns
             WHERE table_name = 'obsnum'
@@ -133,20 +134,19 @@ class AnthiveDB:
 
     def _get_categorical_fields(self) -> List[str]:
         """Get categorical metadata fields"""
-        self.connect()
 
         # Check if obscat view exists
-        exists = self.conn.execute("""
+        exists = (self._conn.execute("""
             SELECT COUNT(*)
             FROM information_schema.tables
             WHERE table_name = 'obscat'
-        """).fetchone()[0]
+        """).fetchone() or (0,))[0]
 
         if not exists:
             return []
 
         # Get columns except cell_name and cell_id
-        result = self.conn.execute("""
+        result = self._conn.execute("""
             SELECT column_name
             FROM information_schema.columns
             WHERE table_name = 'obscat'
@@ -168,7 +168,6 @@ class AnthiveDB:
         Returns:
             List of matching gene names
         """
-        self.connect()
 
         if case_sensitive:
             where_clause = f"WHERE gene_name LIKE '%{query}%'"
@@ -185,7 +184,7 @@ class AnthiveDB:
             {limit_clause}
         """
 
-        result = self.conn.execute(sql).fetchall()
+        result = self._conn.execute(sql).fetchall()
         return [row[0] for row in result]
 
     def get_gene_info(self, gene_name: str) -> Dict[str, Any]:
@@ -201,10 +200,9 @@ class AnthiveDB:
         Raises:
             ValueError: If gene not found
         """
-        self.connect()
 
         # Check if gene exists
-        result = self.conn.execute("""
+        result = self._conn.execute("""
             SELECT gene_name
             FROM genes
             WHERE gene_name = ?
@@ -238,7 +236,6 @@ class AnthiveDB:
         Returns:
             DataFrame with cell data
         """
-        self.connect()
 
         # Build SELECT clause
         select_parts = ["c.cell_name"]
@@ -337,7 +334,7 @@ class AnthiveDB:
             sql += f" LIMIT {limit}"
 
         # Execute and return
-        df = self.conn.execute(sql).fetchdf()
+        df = self._conn.execute(sql).fetchdf()
         return df
 
     def get_embedding_data(self, embedding_id: str,
@@ -354,21 +351,20 @@ class AnthiveDB:
         Returns:
             DataFrame with cell names and coordinates
         """
-        self.connect()
 
         # Check if embedding exists
         table_name = f"obsm__{embedding_id}"
-        exists = self.conn.execute(f"""
+        exists = (self._conn.execute(f"""
             SELECT COUNT(*)
             FROM information_schema.tables
             WHERE table_name = '{table_name}'
-        """).fetchone()[0]
+        """).fetchone() or (0,))[0]
 
         if not exists:
             raise ValueError(f"Embedding '{embedding_id}' not found")
 
         # Get all columns
-        columns_result = self.conn.execute(f"""
+        columns_result = self._conn.execute(f"""
             SELECT column_name
             FROM information_schema.columns
             WHERE table_name = '{table_name}'
@@ -394,8 +390,26 @@ class AnthiveDB:
             {limit_clause}
         """
 
-        df = self.conn.execute(sql).fetchdf()
+        df = self._conn.execute(sql).fetchdf()
         return df
+
+    def require_gene_bins(self) -> None:
+        """Raise ValueError if __gene_bins table is missing.
+
+        Call this at the start of any method that needs module scoring.
+        __gene_bins is built by ant-duckdb-check when a log-normalized layer
+        is detected. Databases without a log-normalized layer will not have it.
+        """
+        exists = (self._conn.execute("""
+            SELECT COUNT(*) FROM information_schema.tables
+            WHERE table_name = '__gene_bins'
+        """).fetchone() or (0,))[0]
+        if not exists:
+            raise ValueError(
+                "Module scoring is not available for this database: "
+                "__gene_bins table is missing. "
+                "Run 'ant duckdb-check' on a database that has a log-normalized layer."
+            )
 
     def execute_sql(self, query: str, limit: Optional[int] = None) -> pd.DataFrame:
         """
@@ -408,10 +422,9 @@ class AnthiveDB:
         Returns:
             DataFrame with results
         """
-        self.connect()
 
         if limit and 'LIMIT' not in query.upper():
             query = f"{query} LIMIT {limit}"
 
-        df = self.conn.execute(query).fetchdf()
+        df = self._conn.execute(query).fetchdf()
         return df

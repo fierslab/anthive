@@ -12,7 +12,7 @@ Example:
     >>> from antclient import AnthiveClient
     >>> client = AnthiveClient("http://localhost:8080")
     >>> databases = client.get_databases()
-    >>> df = client.get_cells("mydb", genes=["CD4", "CD8"], format='dataframe')
+    >>> df = client.get_cells("LC5/SPM", genes=["CD4", "CD8"], format='dataframe')
 
 Author: Anthive Team
 License: MIT
@@ -251,7 +251,7 @@ class AnthiveClient:
         Example:
             >>> databases = client.get_databases()
             >>> for db in databases:
-            ...     print(f"{db['id']}: {db['n_cells']} cells")
+            ...     print(f"{db['id']}: {db['title']} ({db['n_cells']} cells)")
         """
         params = {'refresh': 'true'} if refresh else None
         response = _self._get('/databases', params=params)
@@ -267,13 +267,13 @@ class AnthiveClient:
         """Get detailed database information
 
         Args:
-            db_id: Database identifier (e.g., "mygroup/mydatabase")
+            db_id: Database identifier in "{group_id}/{file_id}" format (e.g., "LC5/SPM")
 
         Returns:
             Dict with n_cells, n_genes, layers, embeddings, metadata_fields, etc.
 
         Example:
-            >>> info = client.get_database_info("Voet2025/slide_st.counts")
+            >>> info = client.get_database_info("LC5/SPM")
             >>> print(f"Cells: {info['n_cells']}, Genes: {info['n_genes']}")
         """
         return _self._get(f'/databases/{db_id}/info')
@@ -298,7 +298,7 @@ class AnthiveClient:
             List of matching gene names
 
         Example:
-            >>> genes = client.search_genes("mydb", q="CD4", limit=10)
+            >>> genes = client.search_genes("LC5/SPM", q="CD4", limit=10)
             >>> print(genes)  # ['CD4', 'CD40', 'CD40LG', ...]
         """
         params = {'q': q, 'limit': limit, 'case_sensitive': case_sensitive}
@@ -317,7 +317,7 @@ class AnthiveClient:
             Dict with gene info and available layers
 
         Example:
-            >>> info = client.get_gene_info("mydb", "CD4")
+            >>> info = client.get_gene_info("LC5/SPM", "CD4")
             >>> print(info['layers'])
         """
         return _self._get(f'/databases/{db_id}/genes/{gene_id}')
@@ -335,7 +335,7 @@ class AnthiveClient:
             List of layer names
 
         Example:
-            >>> layers = client.get_layers("mydb")
+            >>> layers = client.get_layers("LC5/SPM")
             >>> print(layers)  # ['X', 'counts', 'normalized']
         """
         response = _self._get(f'/databases/{db_id}/layers')
@@ -352,7 +352,7 @@ class AnthiveClient:
             Dict with 'numerical' and 'categorical' field lists
 
         Example:
-            >>> fields = client.get_metadata_fields("mydb")
+            >>> fields = client.get_metadata_fields("LC5/SPM")
             >>> print(f"Numerical: {fields['numerical']}")
             >>> print(f"Categorical: {fields['categorical']}")
         """
@@ -371,7 +371,7 @@ class AnthiveClient:
             List of embedding names
 
         Example:
-            >>> embeddings = client.get_embeddings("mydb")
+            >>> embeddings = client.get_embeddings("LC5/SPM")
             >>> print(embeddings)  # ['Umap', 'Pca']
         """
         response = _self._get(f'/databases/{db_id}/embeddings')
@@ -396,8 +396,8 @@ class AnthiveClient:
             Dict with embedding data or DataFrame if format='dataframe'
 
         Example:
-            >>> umap = client.get_embedding_data("mydb", "Umap", n_dims=2, limit=1000)
-            >>> df = client.get_embedding_data("mydb", "Umap", format='dataframe')
+            >>> umap = client.get_embedding_data("LC5/SPM", "Umap", n_dims=2, limit=1000)
+            >>> df = client.get_embedding_data("LC5/SPM", "Umap", format='dataframe')
         """
         params = {'n_dims': n_dims}
         if limit is not None:
@@ -441,23 +441,23 @@ class AnthiveClient:
 
         Example:
             >>> # Get expression data
-            >>> result = client.get_cells("mydb", genes=["CD4", "CD8"], limit=100)
+            >>> result = client.get_cells("LC5/SPM", genes=["CD4", "CD8"], limit=100)
             >>>
             >>> # Get as DataFrame
-            >>> df = client.get_cells("mydb",
+            >>> df = client.get_cells("LC5/SPM",
             ...                       genes=["CD4"],
             ...                       metadata=["cell_type", "tissue"],
             ...                       format='dataframe')
             >>>
             >>> # With filters
-            >>> df = client.get_cells("mydb",
+            >>> df = client.get_cells("LC5/SPM",
             ...                       genes=["CD4"],
             ...                       metadata=["cell_type"],
             ...                       filters=["cell_type:T-cell", "n_counts:1000,5000"],
             ...                       format='dataframe')
             >>>
             >>> # Export to CSV
-            >>> csv_data = client.get_cells("mydb", genes=["CD4"], format='csv')
+            >>> csv_data = client.get_cells("LC5/SPM", genes=["CD4"], format='csv')
         """
         # Handle dataframe format
         api_format = 'json' if format == 'dataframe' else format
@@ -511,9 +511,9 @@ class AnthiveClient:
             Dict with query, n_rows, columns, data or DataFrame if format='dataframe'
 
         Example:
-            >>> result = client.execute_sql("mydb",
+            >>> result = client.execute_sql("LC5/SPM",
             ...                             "SELECT cell_name, celltype FROM obscat LIMIT 10")
-            >>> df = client.execute_sql("mydb",
+            >>> df = client.execute_sql("LC5/SPM",
             ...                         "SELECT * FROM obsnum WHERE n_counts > 5000",
             ...                         format='dataframe')
         """
@@ -565,7 +565,7 @@ class AnthiveClient:
             List of all gene names (may be large!)
 
         Example:
-            >>> genes = client.get_all_genes("mydb")
+            >>> genes = client.get_all_genes("LC5/SPM")
             >>> print(f"Total genes: {len(genes)}")
         """
         # Use search with empty query and high limit

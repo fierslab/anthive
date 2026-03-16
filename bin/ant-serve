@@ -54,6 +54,7 @@ sys.path.insert(0, str(lib_dir))
 
 from anthive_db import AnthiveDB
 from config import get_config
+from md_check import generate_file_id, generate_group_id
 from metadata import parse_md_file
 
 
@@ -158,6 +159,7 @@ class DatabaseRegistry:
         self.databases: Dict[str, Path] = {}
         self.metadata_cache: Dict[str, Dict[str, Any]] = {}
         self._databases_list_cache: Optional[List[Dict[str, Any]]] = None
+        self._db_extra: Dict[str, Dict[str, str]] = {}  # db_id → {group_id, file_id, rel_path}
         self._startup_time = time.time()
 
         # Phase 2: Enhanced caching
@@ -172,12 +174,32 @@ class DatabaseRegistry:
         self._scan_databases()
         self._cache_all_metadata()
 
+    def _resolve_db_id(self, resolved_item: Path, rel_path: Path) -> tuple:
+        """Compute (db_id, group_id, file_id) from .md files for a .duckdb path.
+
+        db_id is '{group_id}/{file_id}' derived from YAML metadata.
+        Falls back to generate_group_id / generate_file_id when fields are absent.
+        Returns (db_id, group_id, file_id).
+        """
+        top_level = rel_path.parts[0] if len(rel_path.parts) > 1 else rel_path.stem
+
+        # group_id: from index.md alongside the .duckdb file
+        index_meta, _ = parse_md_file(resolved_item.parent / 'index.md')
+        group_id = str(index_meta.get('group_id') or '').strip() or generate_group_id(top_level)
+
+        # file_id: from companion .md file
+        data_meta, _ = parse_md_file(resolved_item.with_suffix('.md'))
+        file_id = str(data_meta.get('id') or '').strip() or generate_file_id(rel_path.stem)
+
+        return f"{group_id}/{file_id}", group_id, file_id
+
     def _scan_databases(self):
         """Scan data folder for .duckdb files (follows symlinks)"""
         if not self.data_folder.exists():
             raise FileNotFoundError(f"Data folder not found: {self.data_folder}")
 
         self.databases.clear()
+        self._db_extra.clear()
 
         # Walk the directory tree, following symlinks
         def scan_recursive(path: Path, base: Path):
@@ -191,15 +213,27 @@ class DatabaseRegistry:
                         # Calculate relative path from base
                         try:
                             rel_path = item.relative_to(base)
-                            db_id = str(rel_path.with_suffix(''))
+                            db_id, group_id, file_id = self._resolve_db_id(resolved_item, rel_path)
+
+                            if db_id in self.databases:
+                                existing = self._db_extra[db_id]['rel_path']
+                                print(f"  WARNING: ID collision '{db_id}': "
+                                      f"{existing} vs {rel_path} — using path fallback")
+                                db_id = str(rel_path.with_suffix(''))
+
                             self.databases[db_id] = resolved_item
+                            self._db_extra[db_id] = {
+                                'group_id': group_id,
+                                'file_id': file_id,
+                                'rel_path': str(rel_path),
+                            }
                         except ValueError:
                             # Skip if can't make relative path
                             pass
                     elif resolved_item.is_dir():
                         # Recursively scan subdirectories
                         scan_recursive(item, base)
-            except (PermissionError, OSError) as e:
+            except (PermissionError, OSError):
                 # Skip directories we can't access
                 pass
 
@@ -222,7 +256,9 @@ class DatabaseRegistry:
 
         for db_id, db_path in self.databases.items():
             try:
-                self.metadata_cache[db_id] = self._load_database_metadata(db_path)
+                self.metadata_cache[db_id] = self._load_database_metadata(
+                    db_path, self._db_extra[db_id]
+                )
             except Exception as e:
                 # Skip databases with errors
                 errors.append((db_id, str(e)))
@@ -245,7 +281,7 @@ class DatabaseRegistry:
         else:
             print(f"Cached metadata for {len(self.metadata_cache)} databases")
 
-    def _load_database_metadata(self, db_path: Path) -> Dict[str, Any]:
+    def _load_database_metadata(self, db_path: Path, extra: Dict[str, str]) -> Dict[str, Any]:
         """Load metadata from .md files and database"""
         # Load per-file metadata
         md_path = db_path.with_suffix('.md')
@@ -383,6 +419,9 @@ class DatabaseRegistry:
 
         # Combine metadata with enhanced structure
         metadata = {
+            'group_id': extra['group_id'],
+            'file_id': extra['file_id'],
+            'path': extra['rel_path'],
             'title': file_metadata.get('title', db_path.stem),
             'n_cells': n_cells,
             'n_genes': n_genes,
@@ -411,10 +450,18 @@ class DatabaseRegistry:
             'sha256': file_metadata.get('sha256'),
             'date': file_metadata.get('date'),
             'year': file_metadata.get('year'),
+            'default_layer': file_metadata.get('default_layer'),
+
+            # Module scoring availability
+            'module_scoring_available': bool(conn.execute("""
+                SELECT COUNT(*) FROM information_schema.tables
+                WHERE table_name = '__gene_bins'
+            """).fetchone()[0]),
         }
 
         # Add collection metadata if present
         if collection_metadata:
+            metadata['group'] = collection_metadata.get('group')
             metadata['collection'] = {
                 'group': collection_metadata.get('group'),
                 'experiment': collection_metadata.get('experiment'),
@@ -469,13 +516,8 @@ class DatabaseRegistry:
             try:
                 metadata = self.get_database_metadata(db_id)
 
-                # db_id already contains the relative path (without .duckdb extension)
-                # Reconstruct the relative path by adding back the extension
-                relative_path = f"{db_id}.duckdb"
-
                 db_info = {
                     'id': db_id,
-                    'path': relative_path,
                     **metadata
                 }
 
@@ -509,6 +551,7 @@ class DatabaseRegistry:
         self.databases.clear()
         self.metadata_cache.clear()
         self._databases_list_cache = None
+        self._db_extra.clear()
 
         # Phase 2: Clear enhanced caches
         self.gene_list_cache.clear()
@@ -987,10 +1030,10 @@ async def get_metadata_fields(db_id: str):
     """
     try:
         metadata = registry.get_database_metadata(db_id)
-        fields = metadata.get('metadata_fields', {})
+        obs = metadata.get('obs', {})
         return {
-            "numerical": fields.get('numerical', []),
-            "categorical": fields.get('categorical', [])
+            "numerical": obs.get('numerical', []),
+            "categorical": obs.get('categorical', [])
         }
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -1164,6 +1207,28 @@ def main():
     if len(registry.databases) == 0:
         print(f"Warning: No .duckdb files found in {args.data_folder}")
         print("The server will start but no databases will be available.")
+
+    # Run md-check on the data folder (read-only: report only, never modify)
+    print("\nRunning md-check on data folder...")
+    try:
+        from md_check import MdCheckReport, check_md_folder, write_log_entry
+        md_report = MdCheckReport()
+        check_md_folder(Path(args.data_folder), md_report, fix=False)
+        print(
+            f"  Checked {md_report.checked} .md file(s): "
+            f"{md_report.index_count} index.md, {md_report.data_count} data .md"
+        )
+        if md_report.has_errors() or md_report.has_warnings():
+            md_report.print_summary()
+            log_messages = md_report.collect_log_messages()
+            if log_messages:
+                write_log_entry(
+                    Path(args.data_folder), 'ant-serve md-check', log_messages
+                )
+        else:
+            print("  ✓ All .md files OK")
+    except Exception as e:
+        print(f"  ⚠ md-check failed: {e}")
 
     # Start server
     print(f"\n{'='*60}")

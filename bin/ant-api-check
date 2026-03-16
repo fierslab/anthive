@@ -464,7 +464,7 @@ def deep_check_layers_api(base_url: str, db_id: str, adata, layers: Dict, report
 
             # Get values from API
             try:
-                url = f"{base_url}/databases/{db_id}/cells?genes={gene_name}&layer={layer_key}&limit=10000"
+                url = f"{base_url}/databases/{db_id}/cells?genes={gene_name}&layer={layer_key}"
                 response = requests.get(url, timeout=30)
 
                 if response.status_code != 200:
@@ -743,7 +743,7 @@ Examples:
         base_url = f"http://{base_url}"
 
     # URL-encode the database ID (handles slashes and special characters)
-    db_id_encoded = quote(args.db_id, safe='')
+    db_id_encoded = quote(args.db_id, safe='/')  # preserve slashes for group_id/file_id format
 
     print(f"{'='*70}")
     print(f"API CHECK: {base_url}")
