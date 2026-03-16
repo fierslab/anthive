@@ -63,12 +63,31 @@ class DuckDBCheckReport:
             len(self.orphaned_tables) > 0
         )
 
+    def collect_log_messages(self) -> list:
+        """Collect all errors and warnings as strings for log file."""
+        messages = []
+        for table in self.missing_tables:
+            messages.append(f"✗ Missing table: {table}")
+        for msg in self.size_mismatches:
+            messages.append(f"✗ Size mismatch: {msg}")
+        for msg in self.data_mismatches:
+            messages.append(f"✗ Data mismatch: {msg}")
+        for table in self.orphaned_tables:
+            messages.append(f"⚠ Orphaned table: {table}")
+        for view in self.missing_views:
+            messages.append(f"⚠ Missing view: {view}")
+        for w in self.warnings:
+            messages.append(f"⚠ {w}")
+        return messages
+
     def print_summary(self):
         """Print summary of findings"""
         if not self.has_errors() and not self.has_warnings() and not self.info:
             return
 
-        print("\nCheck Summary:")
+        print(f"\n{'='*70}")
+        print("WARNINGS & ERRORS")
+        print(f"{'='*70}")
         print()
 
         # Errors
@@ -127,6 +146,25 @@ def format_size(size_bytes: int) -> str:
     return f"{size_bytes:.1f} TB"
 
 
+def write_log_entry(input_path: Path, tool_name: str, messages: list) -> None:
+    """Append warnings/errors to today's log file in the current working directory.
+
+    All invocations on the same calendar day append to the same file, making
+    it easy to review all problems when processing many files in a loop.
+    """
+    if not messages:
+        return
+    from datetime import datetime
+    now = datetime.now()
+    log_dir = Path.cwd() / 'tmp' if (Path.cwd() / 'tmp').is_dir() else Path.cwd()
+    log_path = log_dir / f"ant-{now.strftime('%Y%m%d')}.log"
+    timestamp = now.strftime('%H:%M:%S')
+    with open(log_path, 'a') as lf:
+        lf.write(f"\n{timestamp}  {tool_name}  {input_path}\n")
+        for msg in messages:
+            lf.write(f"  {msg}\n")
+
+
 def get_table_list(conn: duckdb.DuckDBPyConnection) -> List[str]:
     """Get list of all tables in database"""
     result = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
@@ -146,6 +184,101 @@ def get_table_row_count(conn: duckdb.DuckDBPyConnection, table_name: str) -> int
         return result[0] if result else 0
     except Exception:
         return -1
+
+
+def _sanitize_identifier(key: str) -> str:
+    """Match the sanitization used by ant-convert"""
+    return ''.join(c if c.isalnum() else '_' for c in key)
+
+
+def detect_default_layer(conn: duckdb.DuckDBPyConnection, layers_include: List[str]) -> List[str]:
+    """Detect log-normalized layer(s) by sampling value distributions.
+
+    Criteria for a log-normalized layer:
+      - All sampled values are non-negative (rules out scale.data / z-scores)
+      - Max value < 20 (log1p of typical counts stays well below this)
+      - > 5% of sampled values are non-integer (rules out raw count layers)
+
+    Args:
+        conn: DuckDB connection (read-only)
+        layers_include: Layer keys from metadata
+
+    Returns:
+        List of layer keys that match log-normalized criteria
+    """
+    candidates = []
+
+    for layer_key in layers_include:
+        safe_key = _sanitize_identifier(layer_key)
+        table_name = f"__layer__{safe_key}"
+
+        try:
+            row = conn.execute(f"""
+                SELECT
+                    COUNT(*)                                                      AS total,
+                    COUNT(CASE WHEN value < 0 THEN 1 END)                        AS negative_count,
+                    MAX(value)                                                    AS max_value,
+                    COUNT(CASE WHEN ABS(value - ROUND(value::DOUBLE)) > 0.001
+                               THEN 1 END)                                       AS non_integer_count
+                FROM {table_name} USING SAMPLE 10000 ROWS
+            """).fetchone()
+
+            total, negative_count, max_value, non_integer_count = row
+
+            if total == 0:
+                continue
+
+            if (negative_count == 0
+                    and max_value < 20
+                    and non_integer_count / total > 0.05):
+                candidates.append(layer_key)
+
+        except Exception:
+            continue
+
+    return candidates
+
+
+def build_gene_bins(duckdb_path: Path, default_layer_key: str) -> int:
+    """Build __gene_bins table using the default (log-normalized) layer.
+
+    Stores gene_id → mean_expr → expr_bin (25 bins, matching Scanpy default).
+    Uses gene_id integers throughout for efficiency.
+
+    Args:
+        duckdb_path: Path to .duckdb file (opened read-write)
+        default_layer_key: Original layer key (e.g. 'X')
+
+    Returns:
+        Number of genes in gene_bins table
+    """
+    safe_key = _sanitize_identifier(default_layer_key)
+    layer_table = f"__layer__{safe_key}"
+
+    conn = duckdb.connect(str(duckdb_path), read_only=False)
+    try:
+        conn.execute("DROP TABLE IF EXISTS __gene_bins")
+        conn.execute(f"""
+            CREATE TABLE __gene_bins AS
+            WITH gene_means AS (
+                SELECT g.gene_id, COALESCE(AVG(l.value), 0.0) AS mean_expr
+                FROM __genes g
+                LEFT JOIN {layer_table} l USING (gene_id)
+                GROUP BY g.gene_id
+            )
+            SELECT
+                gene_id,
+                mean_expr,
+                NTILE(25) OVER (ORDER BY mean_expr) AS expr_bin
+            FROM gene_means
+        """)
+        conn.execute("CREATE INDEX idx_gene_bins_gene ON __gene_bins(gene_id)")
+        conn.execute("CREATE INDEX idx_gene_bins_bin  ON __gene_bins(expr_bin)")
+        n_genes = conn.execute("SELECT COUNT(*) FROM __gene_bins").fetchone()[0]
+        conn.execute("CHECKPOINT")
+        return n_genes
+    finally:
+        conn.close()
 
 
 def check_schema(conn: duckdb.DuckDBPyConnection, report: DuckDBCheckReport) -> Optional[int]:
@@ -315,8 +448,14 @@ def check_var_tables(conn: duckdb.DuckDBPyConnection, metadata: dict, report: Du
                 f"__varcat: has {row_count:,} rows, expected {expected_n_vars:,}"
             )
 
+    # Reserved column names are never stored in __varnum/__varcat
+    # (gene_name / gene_id live in __genes; cell_name / cell_id in __cells)
+    RESERVED_COLUMNS = {'cell_id', 'cell_name', 'gene_id', 'gene_name'}
+
     # Check if columns exist in either table
     for col_name in var_include:
+        if col_name.lower() in RESERVED_COLUMNS:
+            continue
         found = False
 
         if has_varnum:
@@ -380,6 +519,7 @@ def check_orphaned_tables(conn: duckdb.DuckDBPyConnection, metadata: dict, repor
         '__schema_version',
         '__cells',
         '__genes',
+        '__gene_bins',
     }
 
     # Add layer tables
@@ -842,7 +982,7 @@ def main():
     print()
 
     # Load metadata
-    print("[1/9] Loading metadata...")
+    print("[1/10] Loading metadata...")
     try:
         metadata, _ = parse_md_file(md_path)
         print(f"  ✓ Loaded from {md_path.name}")
@@ -857,12 +997,12 @@ def main():
 
     try:
         # Open database
-        print(f"\n[2/9] Opening database...")
+        print(f"\n[2/10] Opening database...")
         conn = duckdb.connect(str(duckdb_path), read_only=True)
         print("  ✓ Connected successfully")
 
         # Check schema
-        print(f"\n[3/9] Checking schema...")
+        print(f"\n[3/10] Checking schema...")
         schema_version = check_schema(conn, report)
         if schema_version:
             print(f"  ✓ Schema version: {schema_version}")
@@ -870,14 +1010,14 @@ def main():
             print("  ⚠ Schema version check failed")
 
         # Check core tables
-        print(f"\n[4/9] Checking core tables...")
+        print(f"\n[4/10] Checking core tables...")
         if check_core_tables(conn, metadata, report):
             print("  ✓ Core tables validated")
         else:
             print("  ✗ Core table validation failed")
 
         # Check layers
-        print(f"\n[5/9] Checking layer tables...")
+        print(f"\n[5/10] Checking layer tables...")
         check_layer_tables(conn, metadata, report)
         num_layers = len(metadata.get('layers_include', []))
         if num_layers > 0:
@@ -886,7 +1026,7 @@ def main():
             print("  ℹ No layers to check")
 
         # Check obs tables
-        print(f"\n[6/9] Checking observation tables...")
+        print(f"\n[6/10] Checking observation tables...")
         check_obs_tables(conn, metadata, report)
         num_obs = len(metadata.get('obsnum_include', [])) + len(metadata.get('obscat_include', []))
         if num_obs > 0:
@@ -895,7 +1035,7 @@ def main():
             print("  ℹ No obs columns to check")
 
         # Check var tables
-        print(f"\n[7/9] Checking variable tables...")
+        print(f"\n[7/10] Checking variable tables...")
         check_var_tables(conn, metadata, report)
         num_var = len(metadata.get('var_include', []))
         if num_var > 0:
@@ -904,7 +1044,7 @@ def main():
             print("  ℹ No var columns to check")
 
         # Check embeddings
-        print(f"\n[8/9] Checking embedding tables...")
+        print(f"\n[8/10] Checking embedding tables...")
         check_embedding_tables(conn, metadata, report)
         num_embeddings = len(metadata.get('obsm_include', []))
         if num_embeddings > 0:
@@ -913,7 +1053,7 @@ def main():
             print("  ℹ No embeddings to check")
 
         # Check views
-        print(f"\n[9/9] Checking views...")
+        print(f"\n[9/10] Checking views...")
         check_views(conn, report)
         views = get_view_list(conn)
         print(f"  ✓ Found {len(views)} view(s)")
@@ -926,6 +1066,63 @@ def main():
         # Run integrity checks
         if run_integrity_checks(conn, report):
             print("\n  ✓ Integrity checks passed")
+
+        # Detect / confirm default layer and build gene_bins
+        print(f"\n[10/10] Checking default layer and gene_bins...")
+        layers_include = metadata.get('layers_include', [])
+        existing_default_layer = metadata.get('default_layer')
+
+        # Validate or detect default_layer
+        if existing_default_layer and existing_default_layer in layers_include:
+            default_layer = existing_default_layer
+            print(f"  ✓ default_layer already set: '{default_layer}'")
+        else:
+            if existing_default_layer:
+                report.warnings.append(
+                    f"default_layer '{existing_default_layer}' not in layers_include — re-detecting"
+                )
+            candidates = detect_default_layer(conn, layers_include)
+            if len(candidates) == 1:
+                default_layer = candidates[0]
+                print(f"  ✓ Detected log-normalized layer: '{default_layer}'")
+                metadata['default_layer'] = default_layer
+                _, markdown_body = parse_md_file(md_path)
+                from metadata import write_md_file
+                write_md_file(md_path, metadata, markdown_body)
+                print(f"    Saved default_layer to {md_path.name}")
+            elif len(candidates) > 1:
+                default_layer = None
+                report.warnings.append(
+                    f"Multiple log-normalized layer candidates: {candidates}. "
+                    f"Set 'default_layer' manually in {md_path.name}"
+                )
+                print(f"  ⚠ Multiple candidates: {candidates} — set default_layer manually")
+            else:
+                default_layer = None
+                report.warnings.append(
+                    f"No log-normalized layer detected in {layers_include}. "
+                    f"Set 'default_layer' manually in {md_path.name}"
+                )
+                print(f"  ⚠ No log-normalized layer detected")
+
+        # Build __gene_bins if we have a default layer
+        if default_layer:
+            tables = get_table_list(conn)
+            if '__gene_bins' in tables:
+                n_bins = conn.execute("SELECT COUNT(*) FROM __gene_bins").fetchone()[0]
+                print(f"  ✓ __gene_bins already present ({n_bins:,} genes)")
+            else:
+                conn.close()
+                conn = None
+                print(f"  Building __gene_bins from layer '{default_layer}'...")
+                try:
+                    n_genes = build_gene_bins(duckdb_path, default_layer)
+                    print(f"  ✓ __gene_bins built ({n_genes:,} genes, 25 expression bins)")
+                except Exception as e:
+                    report.warnings.append(f"Failed to build __gene_bins: {e}")
+                    print(f"  ✗ Failed to build __gene_bins: {e}")
+                # Re-open read-only for remaining steps
+                conn = duckdb.connect(str(duckdb_path), read_only=True)
 
         # Run deep data integrity checks if requested
         if args.deep:
@@ -944,15 +1141,23 @@ def main():
                 print(f"  Expected: {h5ad_path}")
                 report.warnings.append("Deep checks skipped (h5ad file not found)")
 
-        conn.close()
+        if conn is not None:
+            conn.close()
 
         # Clean up WAL if requested
         if args.clean_wal:
             print("\nCleaning up WAL file...")
             cleanup_wal(duckdb_path, report)
 
-        # Print summary
+        # Print summary and write to log if there are warnings/errors
         report.print_summary()
+        log_messages = report.collect_log_messages()
+        if log_messages:
+            from datetime import datetime
+            log_dir = Path.cwd() / 'tmp' if (Path.cwd() / 'tmp').is_dir() else Path.cwd()
+            log_path = log_dir / f"ant-{datetime.now().strftime('%Y%m%d')}.log"
+            write_log_entry(duckdb_path, 'ant-duckdb-check', log_messages)
+            print(f"  (Warnings/errors logged to {log_path})")
 
         # Final status
         print(f"{'='*70}")

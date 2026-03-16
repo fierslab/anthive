@@ -54,7 +54,7 @@ from metadata import (
     initialize_collection_metadata,
     MetadataError
 )
-from layer_stats import calculate_layer_statistics
+from layer_stats import calculate_layer_statistics, detect_duplicate_layers
 
 
 class CheckReport:
@@ -86,12 +86,31 @@ class CheckReport:
             len(self.general_warnings) > 0
         )
 
+    def collect_log_messages(self) -> list:
+        """Collect all warnings as strings for log file."""
+        messages = []
+        if self.non_sparse_layers:
+            messages.append(f"⚠ Non-sparse layers excluded: {', '.join(self.non_sparse_layers)}")
+        if self.high_na_obs:
+            messages.append(f"⚠ Obs columns with >50% NAs excluded: {', '.join(self.high_na_obs)}")
+        if self.high_na_var:
+            messages.append(f"⚠ Var columns with >50% NAs excluded: {', '.join(self.high_na_var)}")
+        if self.high_cardinality_categorical_obs:
+            messages.append(f"⚠ High-cardinality categorical obs excluded: {', '.join(self.high_cardinality_categorical_obs)}")
+        if self.invalid_embeddings:
+            messages.append(f"⚠ Embeddings with shape mismatch excluded: {', '.join(self.invalid_embeddings)}")
+        for warning in self.general_warnings:
+            messages.append(f"⚠ {warning}")
+        return messages
+
     def print_summary(self):
         """Print grouped summary of all messages"""
         if not self.has_messages():
             return
 
-        print("\nAnalysis Summary:")
+        print(f"\n{'='*70}")
+        print("WARNINGS & NOTES")
+        print(f"{'='*70}")
 
         # Non-sparse layers
         if self.non_sparse_layers:
@@ -438,6 +457,25 @@ def format_size(size_bytes: int) -> str:
     return f"{size_bytes:.1f} TB"
 
 
+def write_log_entry(input_path: Path, tool_name: str, messages: list) -> None:
+    """Append warnings/errors to today's log file in the current working directory.
+
+    All invocations on the same calendar day append to the same file, making
+    it easy to review all problems when processing many files in a loop.
+    """
+    if not messages:
+        return
+    from datetime import datetime
+    now = datetime.now()
+    log_dir = Path.cwd() / 'tmp' if (Path.cwd() / 'tmp').is_dir() else Path.cwd()
+    log_path = log_dir / f"ant-{now.strftime('%Y%m%d')}.log"
+    timestamp = now.strftime('%H:%M:%S')
+    with open(log_path, 'a') as lf:
+        lf.write(f"\n{timestamp}  {tool_name}  {input_path}\n")
+        for msg in messages:
+            lf.write(f"  {msg}\n")
+
+
 def check_layers(adata, metadata, config, report):
     """
     Check layers for sparsity and add to metadata
@@ -507,6 +545,14 @@ def check_layers(adata, metadata, config, report):
                     # Calculate statistics for included layers
                     stats = calculate_layer_statistics(adata.layers[layer_name], layer_name)
                     layer_stats.append(stats)
+
+    # Warn about layers that appear to contain identical data
+    duplicates = detect_duplicate_layers(layer_stats)
+    for name_a, name_b in duplicates:
+        report.general_warnings.append(
+            f"Layers '{name_a}' and '{name_b}' have identical statistics — likely duplicate data. "
+            f"Add one to layers_exclude in the .md file."
+        )
 
     return layer_stats
 
@@ -721,6 +767,20 @@ def check_variables(adata, metadata, config, report, force_regenerate=False):
         # Add to var_include
         ensure_in_list(metadata, 'var_include', col_name)
 
+    # Unconditionally remove reserved column names from var_include.
+    # These are stored in __genes/__cells, not in __varnum/__varcat, so
+    # ant-convert skips them. Remove them here regardless of force_regenerate
+    # to handle .md files that were created or edited before this check existed.
+    reserved_in_var = [c for c in metadata.get('var_include', [])
+                       if c.lower() in RESERVED_COLUMNS]
+    for col_name in reserved_in_var:
+        metadata['var_include'].remove(col_name)
+        ensure_in_list(metadata, 'var_exclude', col_name)
+        report.general_warnings.append(
+            f"Removed reserved column '{col_name}' from var_include "
+            f"(it is part of the gene index, not a var annotation)"
+        )
+
     # Remove case-insensitive duplicates from var_include
     # (DuckDB column names are case-insensitive)
     if 'var_include' in metadata:
@@ -888,8 +948,14 @@ def main():
         # Check collection index
         check_collection_index(h5ad_path, report)
 
-        # Print summary report
+        # Print summary report and write to log if there are warnings
         report.print_summary()
+        log_messages = report.collect_log_messages()
+        if log_messages:
+            log_dir = Path.cwd() / 'tmp' if (Path.cwd() / 'tmp').is_dir() else Path.cwd()
+            log_path = log_dir / f"ant-{datetime.now().strftime('%Y%m%d')}.log"
+            write_log_entry(h5ad_path, 'ant-h5ad-check', log_messages)
+            print(f"\n  (Warnings logged to {log_path})")
 
         print(f"\n{'='*70}")
         print("✓ H5AD CHECK COMPLETED SUCCESSFULLY")

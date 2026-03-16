@@ -117,6 +117,32 @@ def format_number(value: float) -> str:
             return f"{value:,.4f}"
 
 
+def detect_duplicate_layers(stats_list: list) -> list:
+    """
+    Detect pairs of layers with identical statistics (likely duplicate data).
+
+    Compares num_zeros, max_value, median, and q90. All four matching is
+    extremely unlikely by coincidence; it almost always means the same matrix
+    is stored twice (e.g. X is a copy of the 'data' layer).
+
+    Args:
+        stats_list: List of statistics dictionaries from calculate_layer_statistics
+
+    Returns:
+        List of (layer_name_a, layer_name_b) tuples for suspected duplicates
+    """
+    duplicates = []
+    for i in range(len(stats_list)):
+        for j in range(i + 1, len(stats_list)):
+            a, b = stats_list[i], stats_list[j]
+            if (a['num_zeros'] == b['num_zeros']
+                    and abs(a['max_value'] - b['max_value']) < 1e-6
+                    and abs(a['median'] - b['median']) < 1e-6
+                    and abs(a['q90'] - b['q90']) < 1e-6):
+                duplicates.append((a['name'], b['name']))
+    return duplicates
+
+
 def format_statistics_table(stats_list: list) -> str:
     """
     Format layer statistics as a markdown table
