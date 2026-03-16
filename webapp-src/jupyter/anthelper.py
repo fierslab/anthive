@@ -12,7 +12,6 @@ License: MIT
 """
 
 from functools import lru_cache
-import ipywidgets as widgets
 from IPython.display import display
 
 
@@ -20,7 +19,7 @@ from IPython.display import display
 def find_database(client, 
                   search_string: str | None = None,
                   n: int = 20, 
-                 verbose: bool = False):
+                 verbose: bool = True):
     """Search for databases by name or title
 
     Returns a DataFrame with databases that match the search string.
@@ -70,7 +69,9 @@ def find_database(client,
         search_string = search_string.lower()
         rv = [x for x in dbs
               if (search_string in x['id'].lower()
-                  or search_string in x['title'].lower())
+                  or search_string in x['title'].lower()
+                  or search_string in x['group'].lower()
+                 )
              ]
     else:
         rv = dbs
@@ -82,19 +83,17 @@ def find_database(client,
     for r in sorted(rv, key=lambda x: -x.get('year', 0))[:n]:
         if verbose:
             print(f"{r['id']}")
-            print(f"  - title  : {r['title']} ({r['year']})")
-            print(f"  - size   : {r['n_cells']} cells / {r['n_genes']} genes")
+            print(f"  - group       : {r['group']}")
+            print(f"  - title       : {r['title']} ({r['year']})")
+            print(f"  - size        : {r['n_cells']} cells / {r['n_genes']} genes")
             layers = ", ".join(r['layers'].keys())
-            print(f"  - layers : {layers}")
+            print(f"  - layers      : {layers}")
             numcol = r['obs']['numerical']
             catcol = r['obs']['categorical']
-            print(f"  - categ  : {len(catcol)} - {', '.join(catcol[:4])}, ...")
-            print(f"  - numer  : {len(numcol)} - {', '.join(numcol[:4])}, ...")
+            print(f"  - categorical : {len(catcol)} - {', '.join(catcol[:3])}, ...")
+            print(f"  - numererical : {len(numcol)} - {', '.join(numcol[:3])}, ...")
         else:
             print(r['id'])
-#    # Convert to DataFrame with relevant columns
-#    rv = pd.DataFrame.from_records(rv)[['id', 'title', 'n_cells', 'n_genes']]
-#    return rv
 
 
 def find_metadata(client, db_id: str, search_string: str | None = None):
@@ -178,7 +177,7 @@ def find_metadata(client, db_id: str, search_string: str | None = None):
 
     def pwrap(l):
         """Helper to wrap long lists of fields"""
-        return "\n".join(
+        return "    " + "\n    ".join(
             textwrap.wrap(
                 ", ".join(l),
                 width=70))

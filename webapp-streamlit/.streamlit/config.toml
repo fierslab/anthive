@@ -1,0 +1,25 @@
+# Streamlit configuration for Anthive
+
+[server]
+# Port for the server
+port = 8501
+# Address to bind to
+address = "0.0.0.0"
+# Enable CORS for development
+enableCORS = true
+enableXsrfProtection = false
+
+[browser]
+# Don't gather usage stats
+gatherUsageStats = false
+# Don't open browser automatically
+serverAddress = "localhost"
+serverPort = 8501
+
+[theme]
+# Use light theme by default
+primaryColor = "#1f77b4"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f0f2f6"
+textColor = "#262730"
+font = "sans serif"
