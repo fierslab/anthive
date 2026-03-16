@@ -43,7 +43,7 @@
 
 	# Logging
 	log {
-		output file ./caddy.log
+		output file ./tmp/caddy.log
 		format console
 	}
 }

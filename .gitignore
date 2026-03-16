@@ -1,6 +1,10 @@
 # Build artifacts
 webapp/
 
+# Temporary / generated files (go in tmp/)
+tmp/
+.jupyterlite.doit.db
+
 # Server logs and pids
 caddy.log
 nginx_access.log
