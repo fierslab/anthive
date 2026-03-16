@@ -1,85 +1,75 @@
 {% extends "base.html" %}
 
-{% block title %}{{ folder_name }} - Anthive{% endblock %}
+{% block title %}{{ folder_name }} — anthive{% endblock %}
 
 {% block content %}
-<article>
-    <!-- Breadcrumb -->
-    <nav class="breadcrumb">
-        <a href="/">Home</a> / <strong>{{ folder_name }}</strong>
-    </nav>
+<div class="breadcrumb">
+    <a href="/">datasets</a> /
+    {{ group_id or folder_name }}
+    {% if group_id and group_id != folder_name %}<span style="color:#aaa"> ({{ folder_name }})</span>{% endif %}
+</div>
 
-    <header>
-        <h2>{{ folder_name }}</h2>
-        {% if description %}
-        <p>{{ description }}</p>
-        {% endif %}
-        <p><small>{{ datasets|length }} dataset(s)</small></p>
-    </header>
+<div class="stats-row">
+    <div>datasets: <span class="val">{{ datasets|length }}</span></div>
+</div>
 
-    <!-- Dataset list -->
-    <table class="compact">
-        <thead>
-            <tr>
-                <th>Dataset</th>
-                <th>Cells × Genes</th>
-                <th>Layers</th>
-                <th>Embeddings</th>
-                <th>Size</th>
-                <th>Status</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for dataset in datasets %}
-            <tr>
-                <td>
-                    <a href="/browse/{{ folder_url }}/{{ dataset.url_encoded }}">
-                        <strong>{{ dataset.name }}</strong>
-                    </a>
-                    {% if dataset.subfolder %}
-                    <br><small>{{ dataset.subfolder }}</small>
-                    {% endif %}
-                </td>
-                <td class="data-table">
-                    {% if dataset.n_obs and dataset.n_vars %}
-                    {{ "{:,}".format(dataset.n_obs) }} × {{ "{:,}".format(dataset.n_vars) }}
-                    {% else %}
-                    —
-                    {% endif %}
-                </td>
-                <td class="data-table">
-                    {% if dataset.layers %}
-                    {{ dataset.layers|length }}
-                    {% else %}
-                    —
-                    {% endif %}
-                </td>
-                <td class="data-table">
-                    {% if dataset.embeddings %}
-                    {{ dataset.embeddings|length }}
-                    {% else %}
-                    —
-                    {% endif %}
-                </td>
-                <td class="data-table">
-                    {% if dataset.h5ad_size %}
-                    {{ dataset.h5ad_size }}
-                    {% else %}
-                    —
-                    {% endif %}
-                </td>
-                <td>
-                    {% if dataset.has_duckdb %}
-                    <span class="status-ok">✓ Ready</span>
-                    {% elif dataset.has_metadata %}
-                    <span class="status-warning">⚠ Not converted</span>
-                    {% else %}
-                    <span class="status-error">✗ Not checked</span>
-                    {% endif %}
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-</article>
+{% if description_html %}
+<div class="md-body" style="margin-bottom:10px;padding:6px 0 6px;border-bottom:1px solid #eee">
+    {{ description_html|safe }}
+</div>
+{% endif %}
+
+<table id="datasets-table">
+    <thead>
+        <tr>
+            <th>ID</th>
+            <th>Dataset</th>
+            <th>Cells × Genes</th>
+            <th>Layers</th>
+            <th>Embeddings</th>
+            <th>Size</th>
+            <th>St</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for dataset in datasets %}
+        <tr>
+            <td style="color:#888;font-size:11px">{{ dataset.file_id or "—" }}</td>
+            <td>
+                <a href="/browse/{{ folder_browse_id }}/{{ dataset.browse_id }}"><strong>{{ dataset.name }}</strong></a>
+                {% if dataset.subfolder %}<br><span style="color:#888;font-size:11px">{{ dataset.subfolder }}</span>{% endif %}
+            </td>
+            <td style="color:#555">
+                {% if dataset.n_obs and dataset.n_vars %}
+                {{ "{:,}".format(dataset.n_obs) }} × {{ "{:,}".format(dataset.n_vars) }}
+                {% else %}—{% endif %}
+            </td>
+            <td style="color:#555" title="{{ dataset.layers|join(', ') if dataset.layers else 'none' }}">
+                {{ dataset.layers|length if dataset.layers else "—" }}
+            </td>
+            <td style="color:#555" title="{{ dataset.embeddings|join(', ') if dataset.embeddings else 'none' }}">
+                {{ dataset.embeddings|length if dataset.embeddings else "—" }}
+            </td>
+            <td style="color:#777">{{ dataset.h5ad_size if dataset.h5ad_size else "—" }}</td>
+            <td>
+                {% if dataset.update_pending %}
+                <span class="dot dot-pending" title="update pending: h5ad or md newer than duckdb"></span>
+                {% elif dataset.has_duckdb %}
+                <span class="dot dot-ok" title="ready"></span>
+                {% elif dataset.has_metadata %}
+                <span class="dot dot-warn" title="not converted"></span>
+                {% else %}
+                <span class="dot dot-err" title="not checked"></span>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    initTable('datasets-table', { pageSize: 20 });
+});
+</script>
 {% endblock %}
