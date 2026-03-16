@@ -12,12 +12,20 @@ Usage:
   ant md get key [key ...] FILE
   ant md show FILE
   ant md delete key [key ...] FILE
+  ant md exclude-layer LAYER [LAYER ...] FILE
+  ant md include-layer LAYER [LAYER ...] FILE
+  ant md exclude-embedding KEY [KEY ...] FILE
+  ant md include-embedding KEY [KEY ...] FILE
 
 Examples:
   ant md set experiment='Sierksma 2025' group='kidney' index.md
   ant md get experiment group index.md
   ant md show index.md
   ant md delete old_field index.md
+  ant md exclude-layer scale.data UMIs Seattle_PFC_MG.md
+  ant md include-layer counts Seattle_PFC_MG.md
+  ant md exclude-embedding X_pca Seattle_PFC_MG.md
+  ant md include-embedding X_umap Seattle_PFC_MG.md
 """
 
 import sys
@@ -215,6 +223,130 @@ def cmd_delete(args: list[str]) -> int:
         return 1
 
 
+def _move_items(metadata: dict, items: list[str],
+                include_key: str, exclude_key: str,
+                direction: str) -> tuple[list[str], list[str]]:
+    """Move items between an include list and an exclude list.
+
+    direction: 'exclude' moves items → exclude_key (removes from include_key)
+               'include' moves items → include_key (removes from exclude_key)
+
+    Returns:
+        (moved, not_found) — names that were moved, names not present anywhere
+    """
+    inc = metadata.setdefault(include_key, [])
+    exc = metadata.setdefault(exclude_key, [])
+
+    moved = []
+    not_found = []
+
+    for item in items:
+        if direction == 'exclude':
+            if item in inc:
+                inc.remove(item)
+            if item not in exc:
+                exc.append(item)
+            moved.append(item)
+        else:  # include
+            if item in exc:
+                exc.remove(item)
+            if item not in inc:
+                inc.append(item)
+            moved.append(item)
+
+    return moved, not_found
+
+
+def _cmd_layer(args: list[str], direction: str) -> int:
+    """Shared implementation for exclude-layer / include-layer."""
+    if len(args) < 2:
+        print(f"Error: Usage: ant md {direction}-layer LAYER [LAYER ...] FILE",
+              file=sys.stderr)
+        return 1
+
+    file_path = Path(args[-1])
+    items = args[:-1]
+
+    if not file_path.exists():
+        print(f"Error: File not found: {file_path}", file=sys.stderr)
+        return 1
+
+    try:
+        metadata, body = parse_md_file(file_path)
+    except Exception as e:
+        print(f"Error reading file: {e}", file=sys.stderr)
+        return 1
+
+    moved, _ = _move_items(metadata, items, 'layers_include', 'layers_exclude', direction)
+
+    target = 'layers_exclude' if direction == 'exclude' else 'layers_include'
+    for name in moved:
+        print(f"  → {name}  added to {target}")
+
+    try:
+        write_md_file(file_path, metadata, body)
+        print(f"\n✓ Updated {file_path}")
+        return 0
+    except Exception as e:
+        print(f"Error writing file: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_exclude_layer(args: list[str]) -> int:
+    """Move layer(s) from layers_include to layers_exclude"""
+    return _cmd_layer(args, 'exclude')
+
+
+def cmd_include_layer(args: list[str]) -> int:
+    """Move layer(s) from layers_exclude to layers_include"""
+    return _cmd_layer(args, 'include')
+
+
+def _cmd_embedding(args: list[str], direction: str) -> int:
+    """Shared implementation for exclude-embedding / include-embedding."""
+    if len(args) < 2:
+        print(f"Error: Usage: ant md {direction}-embedding KEY [KEY ...] FILE",
+              file=sys.stderr)
+        return 1
+
+    file_path = Path(args[-1])
+    items = args[:-1]
+
+    if not file_path.exists():
+        print(f"Error: File not found: {file_path}", file=sys.stderr)
+        return 1
+
+    try:
+        metadata, body = parse_md_file(file_path)
+    except Exception as e:
+        print(f"Error reading file: {e}", file=sys.stderr)
+        return 1
+
+    moved, _ = _move_items(metadata, items, 'obsm_include', 'obsm_exclude', direction)
+
+    target = 'obsm_exclude' if direction == 'exclude' else 'obsm_include'
+    for name in moved:
+        print(f"  → {name}  added to {target}")
+
+    try:
+        write_md_file(file_path, metadata, body)
+        print(f"\n✓ Updated {file_path}")
+        return 0
+    except Exception as e:
+        print(f"Error writing file: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_exclude_embedding(args: list[str]) -> int:
+    """Move embedding(s) from obsm_include to obsm_exclude"""
+    return _cmd_embedding(args, 'exclude')
+
+
+def cmd_include_embedding(args: list[str]) -> int:
+    """Move embedding(s) from obsm_exclude to obsm_include"""
+    return _cmd_embedding(args, 'include')
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -228,6 +360,10 @@ def main():
         'get': cmd_get,
         'show': cmd_show,
         'delete': cmd_delete,
+        'exclude-layer': cmd_exclude_layer,
+        'include-layer': cmd_include_layer,
+        'exclude-embedding': cmd_exclude_embedding,
+        'include-embedding': cmd_include_embedding,
     }
 
     if command not in commands:
