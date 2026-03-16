@@ -28,6 +28,7 @@ def get_available_commands(bin_dir: Path) -> dict:
         'duckdb-check': 'Validate DuckDB database integrity',
         'h5ad-check': 'Check h5ad file and generate metadata',
         'md': 'Manage markdown metadata (YAML preambles)',
+        'md-check': 'Check .md metadata files for sanity (group_id / id)',
         'serve': 'Start REST API server',
     }
 

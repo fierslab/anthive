@@ -42,6 +42,48 @@ class ConversionError(Exception):
     pass
 
 
+def apply_layer_cli_overrides(metadata: Dict, include_layers: List[str], exclude_layers: List[str]) -> None:
+    """Apply --include-layer / --exclude-layer CLI overrides to metadata (in-place).
+
+    Does NOT write back to the .md file — changes apply to this conversion only.
+    """
+    layers_include = metadata.setdefault('layers_include', [])
+    layers_exclude = metadata.setdefault('layers_exclude', [])
+
+    for layer in exclude_layers:
+        if layer in layers_include:
+            layers_include.remove(layer)
+            print(f"  CLI override: removed '{layer}' from layers_include")
+        if layer not in layers_exclude:
+            layers_exclude.append(layer)
+
+    for layer in include_layers:
+        if layer in layers_exclude:
+            layers_exclude.remove(layer)
+            print(f"  CLI override: removed '{layer}' from layers_exclude")
+        if layer not in layers_include:
+            layers_include.append(layer)
+            print(f"  CLI override: added '{layer}' to layers_include")
+
+
+def validate_layer_lists(metadata: Dict) -> None:
+    """Validate that no layer name appears in both layers_include and layers_exclude.
+
+    Raises:
+        ConversionError: If any layer is listed in both
+    """
+    includes = set(metadata.get('layers_include', []))
+    excludes = set(metadata.get('layers_exclude', []))
+    conflict = sorted(includes & excludes)
+    if conflict:
+        raise ConversionError(
+            f"ERROR: [ant-convert] Layer(s) listed in both layers_include and layers_exclude: "
+            f"{conflict}\n"
+            f"Action: Edit the .md file to remove conflicting layer(s) from one list, "
+            f"or use --exclude-layer / --include-layer to override for this run."
+        )
+
+
 def sanitize_identifier(key: str) -> str:
     """Sanitize a key for use as a DuckDB identifier (table/index/view name).
 
@@ -78,7 +120,9 @@ def normalize_dataframe_dtypes(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def convert_h5ad_to_duckdb(h5ad_path: Path, config: Dict[str, Any]) -> None:
+def convert_h5ad_to_duckdb(h5ad_path: Path, config: Dict[str, Any],
+                           cli_include: List[str] = None,
+                           cli_exclude: List[str] = None) -> None:
     """
     Main conversion function
 
@@ -124,6 +168,14 @@ def convert_h5ad_to_duckdb(h5ad_path: Path, config: Dict[str, Any]) -> None:
             f"Action: Run 'ant check {h5ad_path}' to regenerate metadata"
         )
     print("  ✓ Metadata loaded")
+
+    # Apply CLI layer overrides (--include-layer / --exclude-layer)
+    if cli_include or cli_exclude:
+        print("  Applying CLI layer overrides...")
+        apply_layer_cli_overrides(metadata, cli_include or [], cli_exclude or [])
+
+    # Validate mutual exclusivity of layers_include and layers_exclude
+    validate_layer_lists(metadata)
 
     # Load h5ad file
     print(f"[2/7] Loading h5ad file ({format_size(h5ad_size)})...")
@@ -320,7 +372,7 @@ def convert_layers(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict, confi
             CREATE TABLE __layer__{safe_layer_key} (
                 cell_id INTEGER NOT NULL,
                 gene_id INTEGER NOT NULL,
-                value DOUBLE NOT NULL,
+                value FLOAT NOT NULL,
                 PRIMARY KEY (cell_id, gene_id)
             )
         """)
@@ -369,8 +421,7 @@ def convert_layers(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict, confi
 
         print(f"    Processed {chunk_count} chunks, {total_nonzero:,} non-zero values")
 
-        # Create indices
-        conn.execute(f"CREATE INDEX idx_layer_{safe_layer_key}_cell ON __layer__{safe_layer_key}(cell_id)")
+        # Create gene index (cell index omitted — not used by query patterns)
         conn.execute(f"CREATE INDEX idx_layer_{safe_layer_key}_gene ON __layer__{safe_layer_key}(gene_id)")
 
         # Create view
@@ -767,6 +818,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument('file', help='Path to h5ad file')
+    parser.add_argument(
+        '--exclude-layer', metavar='LAYER', nargs='+', default=[],
+        help='Exclude layer(s) from this conversion (overrides .md file, not saved)'
+    )
+    parser.add_argument(
+        '--include-layer', metavar='LAYER', nargs='+', default=[],
+        help='Force-include layer(s), removing from layers_exclude (overrides .md file, not saved)'
+    )
 
     args = parser.parse_args()
 
@@ -792,7 +851,11 @@ def main():
     start_time = time.time()
 
     try:
-        convert_h5ad_to_duckdb(h5ad_path, config)
+        convert_h5ad_to_duckdb(
+            h5ad_path, config,
+            cli_include=args.include_layer,
+            cli_exclude=args.exclude_layer,
+        )
 
         total_time = time.time() - start_time
         minutes = int(total_time // 60)
