@@ -1,0 +1,89 @@
+# Makefile.data — Anthive h5ad processing pipeline
+#
+# Pipeline per dataset:
+#   1. ant h5ad-check  →  creates/updates .md          (if .h5ad newer than .md)
+#   2. ant convert     →  creates/updates .duckdb       (if .h5ad or .md newer than .duckdb)
+#   3. ant duckdb-check →  validates; touches .duckdb.ok (if .duckdb newer than .duckdb.ok)
+#
+# Usage:
+#   make -f Makefile.data               full pipeline for all datasets
+#   make -f Makefile.data check         h5ad-check only (update .md files)
+#   make -f Makefile.data convert       through convert (check + convert)
+#   make -f Makefile.data -j4           run up to 4 datasets in parallel
+#   make -f Makefile.data DATA_DIR=...  override data root
+#   make -f Makefile.data clean-ok      force duckdb-check to re-run
+
+DATA_DIR ?= data/h5adstore
+ANT      := ./bin/ant
+
+H5AD_FILES   := $(shell find $(DATA_DIR) -name "*.h5ad" 2>/dev/null | sort)
+MD_FILES     := $(H5AD_FILES:.h5ad=.md)
+DUCKDB_FILES := $(H5AD_FILES:.h5ad=.duckdb)
+DUCKDB_OK    := $(H5AD_FILES:.h5ad=.duckdb.ok)
+
+.PHONY: all check convert clean-ok help
+
+# Prevent Make from deleting these as intermediate files or on interrupt
+.PRECIOUS: $(MD_FILES) $(DUCKDB_FILES)
+
+# ── top-level targets ──────────────────────────────────────────────────────
+
+all: $(DUCKDB_OK)
+	@echo ""
+	@echo "✓ Pipeline complete: $(words $(H5AD_FILES)) dataset(s) up to date."
+
+check: $(MD_FILES)
+	@echo ""
+	@echo "✓ h5ad-check done: $(words $(H5AD_FILES)) file(s)."
+
+convert: $(DUCKDB_FILES)
+	@echo ""
+	@echo "✓ Convert done: $(words $(H5AD_FILES)) file(s)."
+
+# ── pipeline rules ─────────────────────────────────────────────────────────
+
+# Step 1: h5ad-check — run when .h5ad is newer than .md (or .md missing)
+%.md: %.h5ad
+	@echo ""
+	@echo "━━━  [1/3] h5ad-check  $(notdir $<)  ━━━"
+	@$(ANT) h5ad-check $<
+
+# Step 2: convert — run when .h5ad or .md is newer than .duckdb
+%.duckdb: %.h5ad %.md
+	@echo ""
+	@echo "━━━  [2/3] convert  $(notdir $<)  ━━━"
+	@$(ANT) convert $<
+
+# Step 3: duckdb-check — run when .duckdb is newer than touch file
+%.duckdb.ok: %.duckdb
+	@echo ""
+	@echo "━━━  [3/3] duckdb-check  $(notdir $<)  ━━━"
+	@$(ANT) duckdb-check $<
+	@touch $@
+
+# ── utilities ──────────────────────────────────────────────────────────────
+
+clean-ok:
+	@echo "Removing .duckdb.ok touch files (duckdb-check will re-run on next make)..."
+	@rm -f $(DUCKDB_OK)
+	@echo "  Removed $(words $(DUCKDB_OK)) file(s)."
+
+help:
+	@echo "Makefile.data — Anthive h5ad processing pipeline"
+	@echo ""
+	@echo "Targets:"
+	@echo "  all        Full pipeline: h5ad-check → convert → duckdb-check  (default)"
+	@echo "  check      h5ad-check only — updates .md files"
+	@echo "  convert    check + convert — produces .duckdb files"
+	@echo "  clean-ok   Remove .duckdb.ok touch files (forces duckdb-check rerun)"
+	@echo "  help       Show this message"
+	@echo ""
+	@echo "Variables:"
+	@echo "  DATA_DIR   Root of data store (default: data/h5adstore)"
+	@echo ""
+	@echo "Tips:"
+	@echo "  make -f Makefile.data -j4              parallel (4 datasets at once)"
+	@echo "  make -f Makefile.data -n               dry run (show what would run)"
+	@echo "  make -f Makefile.data DATA_DIR=./other"
+	@echo ""
+	@echo "Found $(words $(H5AD_FILES)) h5ad file(s) in $(DATA_DIR)"

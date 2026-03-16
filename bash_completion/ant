@@ -1,0 +1,147 @@
+# Bash completion for ant command
+#
+# Installation:
+#   sudo cp bash_completion/ant /etc/bash_completion.d/ant
+#   OR
+#   cp bash_completion/ant ~/.bash_completion.d/ant
+#
+# Then reload: source ~/.bashrc
+
+_ant_completion()
+{
+    local cur prev words cword
+    _init_completion || return
+
+    # Available ant subcommands
+    local subcommands="api-check browse build-all check convert db duckdb-check h5ad-check md md-check serve"
+
+    # Complete the subcommand itself
+    if [[ $cword -eq 1 ]]; then
+        COMPREPLY=($(compgen -W "$subcommands" -- "$cur"))
+        return
+    fi
+
+    local subcommand="${words[1]}"
+
+    case "$subcommand" in
+
+        # ── file-less commands ─────────────────────────────────────────────
+        api-check)
+            return
+            ;;
+
+        # ── .h5ad file commands ────────────────────────────────────────────
+        check|h5ad-check)
+            _filedir h5ad
+            return
+            ;;
+
+        # ── convert: .h5ad file + optional layer overrides ─────────────────
+        convert)
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=($(compgen -W "--exclude-layer --include-layer" -- "$cur"))
+                return
+            fi
+            # After --exclude-layer / --include-layer the value is a layer name;
+            # we can't complete those, so fall through to file completion only
+            # when cur looks like a path.
+            _filedir h5ad
+            return
+            ;;
+
+        # ── duckdb-check: .h5ad or .duckdb + flags ────────────────────────
+        duckdb-check)
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=($(compgen -W "--deep --clean-wal --verbose" -- "$cur"))
+                return
+            fi
+            _filedir '@(h5ad|duckdb)'
+            return
+            ;;
+
+        # ── db: subcommand then .duckdb file ──────────────────────────────
+        db)
+            if [[ $cword -eq 2 ]]; then
+                COMPREPLY=($(compgen -W "structure schema query" -- "$cur"))
+                return
+            fi
+            if [[ $cword -eq 3 ]]; then
+                _filedir duckdb
+                return
+            fi
+            return
+            ;;
+
+        # ── md: YAML metadata editor ───────────────────────────────────────
+        md)
+            local md_subcommands="delete exclude-embedding exclude-layer get include-embedding include-layer set show"
+
+            # Complete the md subcommand
+            if [[ $cword -eq 2 ]]; then
+                COMPREPLY=($(compgen -W "$md_subcommands" -- "$cur"))
+                return
+            fi
+
+            local md_sub="${words[2]}"
+            case "$md_sub" in
+                set)
+                    # Arguments are key=value pairs followed by a .md file.
+                    # Complete .md files whenever cur doesn't look like key=value.
+                    if [[ "$cur" != *=* ]]; then
+                        _filedir md
+                    fi
+                    return
+                    ;;
+                get|delete)
+                    # Arguments are key names followed by a .md file.
+                    # Always offer .md completion (keys are free-form).
+                    _filedir md
+                    return
+                    ;;
+                show|exclude-layer|include-layer|exclude-embedding|include-embedding)
+                    # Single or multiple names then a .md file — complete .md.
+                    _filedir md
+                    return
+                    ;;
+            esac
+            return
+            ;;
+
+        # ── md-check: folder + flags ───────────────────────────────────────
+        md-check)
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=($(compgen -W "--no-fix --verbose" -- "$cur"))
+                return
+            fi
+            _filedir -d
+            return
+            ;;
+
+        # ── serve: data folder + flags ─────────────────────────────────────
+        serve)
+            if [[ "$prev" == "--data-folder" ]]; then
+                _filedir -d
+                return
+            fi
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=($(compgen -W "--data-folder --host --port --reload" -- "$cur"))
+                return
+            fi
+            return
+            ;;
+
+        # ── directory-based commands ───────────────────────────────────────
+        browse|build-all)
+            _filedir -d
+            return
+            ;;
+
+        # ── fallback ───────────────────────────────────────────────────────
+        *)
+            _filedir
+            return
+            ;;
+    esac
+}
+
+complete -F _ant_completion ant

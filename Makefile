@@ -1,4 +1,4 @@
-.PHONY: help build-webapp build-jupyter clean-webapp serve serve-api
+.PHONY: help build-webapp build-jupyter clean-webapp serve serve-api dev-jupyter
 
 help:
 	@echo "Anthive4 Development Commands"
@@ -15,6 +15,7 @@ help:
 	@echo "Development:"
 	@echo "  make serve-api         - Run REST API server (port 8080)"
 	@echo "  make serve-browse      - Run web browser server (port 8081)"
+	@echo "  make dev-jupyter       - Run JupyterLab on webapp-src/jupyter (port 9090)"
 	@echo ""
 	@echo "Sync:"
 	@echo "  make sync-to-bds-dedata      - Push h5adstore to storage box (rclone)"
@@ -37,20 +38,26 @@ clean-webapp:
 build-jupyter: antclient/antclient.py
 	@echo "Building JupyterLite to webapp/jupyter..."
 	@echo ""
-	@# Create webapp directory
+	@# Ensure source dir is writable (may be read-only from a previous run)
+	@chmod -R u+rw webapp-src/jupyter
+	@# Clear output directory so no stale files survive the build
+	@rm -rf webapp/jupyter
 	@mkdir -p webapp
 	@# Copy antclient.py into jupyter content before build
 	@echo "Copying antclient.py to webapp-src/jupyter..."
 	@cp antclient/antclient.py webapp-src/jupyter/antclient.py
-	@# Build JupyterLite with jupyter content
-
-	@uvx --from jupyterlite-core \
+	@# Make source files read-only so JupyterLite cannot modify them
+	@chmod -R a-w webapp-src/jupyter
+	@chmod -R a+rX webapp-src/jupyter
+	@DOIT_DB=tmp/.jupyterlite.doit.db \
+	uvx --from jupyterlite-core \
 		--with jupyterlite-pyodide-kernel \
 		--with jupyterlab-widgets \
 		--with jupyter-server jupyter-lite build \
 		--contents webapp-src/jupyter \
 		--output-dir webapp/jupyter
-
+	@# Restore read+write so files can be edited again
+	@chmod -R u+rw webapp-src/jupyter
 	@echo "✓ JupyterLite build complete!"
 	@echo ""
 	@echo "Location: webapp/jupyter/"
@@ -135,6 +142,9 @@ serve-browse:
 	@echo "Starting Anthive Web Browser on http://localhost:8081"
 	@echo ""
 	@./bin/ant-browse --data-folder ./data/h5adstore --host 0.0.0.0 --port 8081
+
+dev-jupyter:
+	@./bin/dev-jupyter
 
 sync-to-cbd3:
 	rsync -arv ./webapp cbd3:/data/anthive4/

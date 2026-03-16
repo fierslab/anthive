@@ -1,0 +1,74 @@
+#!/bin/bash
+# dev-jupyter - Start JupyterLab for developing webapp-src/jupyter
+#
+# Runs JupyterLab with all required packages against webapp-src/jupyter.
+# On exit (normal or Ctrl+C), warns if antclient.py or anthelper.py
+# were changed relative to their library sources.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+cd "$PROJECT_ROOT"
+
+# ── colours ────────────────────────────────────────────────────────────────
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+# ── snapshot state BEFORE session ──────────────────────────────────────────
+ANTHELPER_BEFORE=$(md5sum webapp-src/jupyter/anthelper.py 2>/dev/null | cut -d' ' -f1)
+
+# ── post-session check (runs on EXIT, including Ctrl+C) ────────────────────
+check_changes() {
+    CHANGED=()
+
+    # antclient.py: compare against canonical library source
+    if ! diff -q antclient/antclient.py webapp-src/jupyter/antclient.py > /dev/null 2>&1; then
+        CHANGED+=("antclient.py  →  differs from antclient/antclient.py")
+    fi
+
+    # anthelper.py: compare against checksum taken before this session
+    ANTHELPER_AFTER=$(md5sum webapp-src/jupyter/anthelper.py 2>/dev/null | cut -d' ' -f1)
+    if [ "$ANTHELPER_BEFORE" != "$ANTHELPER_AFTER" ]; then
+        CHANGED+=("anthelper.py  →  modified during this session")
+    fi
+
+    if [ ${#CHANGED[@]} -eq 0 ]; then
+        return
+    fi
+
+    echo ""
+    echo -e "${YELLOW}${BOLD}"
+    echo "  ╔══════════════════════════════════════════════════════════════════════╗"
+    echo "  ║                                                                      ║"
+    echo "  ║   !!  WARNING: sync these files back to the library  !!             ║"
+    echo "  ║                                                                      ║"
+    for msg in "${CHANGED[@]}"; do
+        printf "  ║   →  %-66s║\n" "$msg"
+    done
+    echo "  ║                                                                      ║"
+    echo "  ╚══════════════════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+}
+
+trap check_changes EXIT
+
+# ── prepare source folder ──────────────────────────────────────────────────
+chmod -R u+rw webapp-src/jupyter
+cp antclient/antclient.py webapp-src/jupyter/antclient.py
+
+echo "Starting JupyterLab on http://localhost:9090"
+echo ""
+
+uvx --from jupyterlab \
+    --with ipywidgets \
+    --with jupyterlab-widgets \
+    --with pandas \
+    --with matplotlib \
+    --with seaborn \
+    --with scikit-learn \
+    --with statsmodels \
+    jupyter-lab \
+    --notebook-dir webapp-src/jupyter \
+    --port 9090 \
+    --no-browser
