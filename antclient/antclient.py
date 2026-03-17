@@ -322,6 +322,46 @@ class AnthiveClient:
         """
         return _self._get(f'/databases/{db_id}/genes/{gene_id}')
 
+    def get_gene_stats(self,
+                       db_id: str,
+                       genes: Union[str, List[str]],
+                       layer: str = "X",
+                       format: str = "json") -> Union[List[Dict], Any]:
+        """Get expression statistics for one or more genes.
+
+        Statistics are computed efficiently from sparse data without transferring
+        all cells. Includes stats over all cells (zeros treated as 0) and over
+        expressing cells only.
+
+        Args:
+            db_id: Database identifier
+            genes: Gene name or list of gene names
+            layer: Layer name (default: "X")
+            format: "json" (default) or "dataframe" (requires pandas)
+
+        Returns:
+            List of dicts or DataFrame with columns:
+            gene, layer, n_cells, n_nonzero, pct_nonzero,
+            mean, std,  (all cells, zeros=0)
+            mean_nonzero, std_nonzero, median_nonzero, q10_nonzero, q90_nonzero, max
+
+        Example:
+            >>> stats = client.get_gene_stats("LC5/SPM", "APOE")
+            >>> df = client.get_gene_stats("LC5/SPM", ["APOE", "CLU"], format='dataframe')
+        """
+        if isinstance(genes, list):
+            genes_str = ','.join(genes)
+        else:
+            genes_str = genes
+        params = {'genes': genes_str, 'layer': layer}
+        response = self._get(f'/databases/{db_id}/gene_stats', params=params)
+        stats = response.get('stats', response) if isinstance(response, dict) else response
+
+        if format == 'dataframe':
+            import pandas as pd
+            return pd.DataFrame(stats)
+        return stats
+
     # ===== Layers and Metadata =====
 
     @_cache_long(ttl=3600)

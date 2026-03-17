@@ -411,6 +411,84 @@ class AnthiveDB:
                 "Run 'ant duckdb-check' on a database that has a log-normalized layer."
             )
 
+    def get_gene_stats(self, gene_names: List[str], layer: str = 'X') -> List[Dict[str, Any]]:
+        """
+        Get expression statistics for one or more genes.
+
+        Statistics over all cells (zeros included): mean, std.
+        Statistics over expressing cells only: mean, std, median, q10, q90, max.
+
+        Args:
+            gene_names: List of gene names
+            layer: Layer name (default: 'X')
+
+        Returns:
+            List of dicts with stats per gene
+        """
+        import math
+
+        n_cells = (self._conn.execute("SELECT COUNT(*) FROM cells").fetchone() or (0,))[0]
+
+        results = []
+        for gene_name in gene_names:
+            exists = (self._conn.execute(
+                "SELECT COUNT(*) FROM genes WHERE gene_name = ?", [gene_name]
+            ).fetchone() or (0,))[0]
+
+            if not exists:
+                results.append({'gene': gene_name, 'error': 'not found'})
+                continue
+
+            row = self._conn.execute(f"""
+                SELECT
+                    COUNT(*)                          AS n_nonzero,
+                    SUM(value)                        AS sum_nz,
+                    SUM(value * value)                AS sum_sq_nz,
+                    AVG(value)                        AS mean_nz,
+                    STDDEV_POP(value)                 AS std_nz,
+                    MEDIAN(value)                     AS median_nz,
+                    QUANTILE_CONT(value, 0.1)         AS q10_nz,
+                    QUANTILE_CONT(value, 0.9)         AS q90_nz,
+                    MAX(value)                        AS max_val
+                FROM layer__{layer}
+                WHERE gene_name = ?
+            """, [gene_name]).fetchone()
+
+            if row is None or row[0] == 0:
+                results.append({
+                    'gene': gene_name, 'layer': layer,
+                    'n_cells': n_cells, 'n_nonzero': 0, 'pct_nonzero': 0.0,
+                    'mean': 0.0, 'std': 0.0,
+                    'mean_nonzero': None, 'std_nonzero': None,
+                    'median_nonzero': None, 'q10_nonzero': None, 'q90_nonzero': None,
+                    'max': 0.0,
+                })
+                continue
+
+            n_nonzero, sum_nz, sum_sq_nz, mean_nz, std_nz, median_nz, q10_nz, q90_nz, max_val = row
+
+            mean_all = float(sum_nz) / n_cells
+            var_all = max(0.0, float(sum_sq_nz) / n_cells - mean_all ** 2)
+            std_all = math.sqrt(var_all)
+
+            results.append({
+                'gene': gene_name,
+                'layer': layer,
+                'n_cells': n_cells,
+                'n_nonzero': int(n_nonzero),
+                'pct_nonzero': round(n_nonzero * 100.0 / n_cells, 2),
+                'mean': round(mean_all, 6),
+                'std': round(std_all, 6),
+                'mean_nonzero': round(float(mean_nz), 6),
+                'std_nonzero': round(float(std_nz), 6),
+                'median_nonzero': round(float(median_nz), 6),
+                'q10_nonzero': round(float(q10_nz), 6),
+                'q90_nonzero': round(float(q90_nz), 6),
+                'max': round(float(max_val), 6),
+            })
+
+        return results
+
     def execute_sql(self, query: str, limit: Optional[int] = None) -> pd.DataFrame:
         """
         Execute raw SQL query

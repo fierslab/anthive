@@ -876,6 +876,39 @@ async def get_gene_info(db_id: str, gene_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/databases/{db_id:path}/gene_stats", tags=["genes"])
+async def get_gene_stats(
+    db_id: str,
+    genes: str = Query(..., description="Comma-separated gene names, e.g. APOE,CLU"),
+    layer: str = Query("X", description="Layer name (default: X)")
+):
+    """
+    Get expression statistics for one or more genes.
+
+    Computed efficiently from sparse data without transferring all cells.
+
+    Returns per-gene:
+    - **n_cells**: total cell count
+    - **n_nonzero**: cells with non-zero expression
+    - **pct_nonzero**: % cells expressing the gene
+    - **mean**, **std**: over all cells (zeros = 0)
+    - **mean_nonzero**, **std_nonzero**, **median_nonzero**, **q10_nonzero**, **q90_nonzero**, **max**: expressing cells only
+
+    Example:
+        GET /databases/LC5/SPM/gene_stats?genes=APOE,CLU&layer=X
+    """
+    try:
+        db_path = registry.get_database_path(db_id)
+        gene_list = [g.strip() for g in genes.split(',') if g.strip()]
+        with AnthiveDB(db_path) as db:
+            stats = db.get_gene_stats(gene_list, layer=layer)
+        return {"db_id": db_id, "layer": layer, "stats": stats}
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/databases/{db_id:path}/cells", tags=["data"])
 async def get_cells(
     db_id: str,
