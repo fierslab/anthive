@@ -30,13 +30,13 @@ echo "   ✓ Cleaned"
 # 3. Build
 echo ""
 echo "3. Building distribution packages..."
-python3 -m build
+uvx --from build pyproject-build
 echo "   ✓ Built"
 
 # 4. Check
 echo ""
 echo "4. Checking distribution..."
-twine check dist/*
+uvx twine check dist/*
 echo "   ✓ Checked"
 
 # 5. Show results
@@ -47,6 +47,6 @@ echo "Created files:"
 ls -lh dist/
 echo ""
 echo "Next steps:"
-echo "  Test PyPI: twine upload --repository testpypi dist/*"
-echo "  Production: twine upload dist/*"
+echo "  Test PyPI: uvx twine upload --repository testpypi dist/*"
+echo "  Production: uvx twine upload dist/*"
 echo ""

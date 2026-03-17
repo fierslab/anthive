@@ -31,8 +31,11 @@ anthive4/
 
 ### Prerequisites
 
+Only `uv` is required (no separate `pip install` needed):
+
 ```bash
-pip install build twine
+# uv must be installed: https://docs.astral.sh/uv/getting-started/installation/
+which uv
 ```
 
 ### Build Process
@@ -47,16 +50,16 @@ cp ../doc/ANTCLIENT_README.md README.md
 rm -rf build dist *.egg-info
 
 # 3. Build
-python -m build
+uvx --from build pyproject-build
 
 # 4. Check
-twine check dist/*
+uvx twine check dist/*
 
 # 5. Upload to Test PyPI
-twine upload --repository testpypi dist/*
+uvx twine upload --repository testpypi dist/*
 
 # 6. Upload to Production PyPI
-twine upload dist/*
+uvx twine upload dist/*
 ```
 
 ### Quick Build Script

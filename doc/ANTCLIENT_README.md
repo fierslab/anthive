@@ -384,20 +384,12 @@ flake8 antclient.py
 ### Building for PyPI
 
 ```bash
-# Clean previous builds
-rm -rf build dist *.egg-info
+cd antclient
+./build_pypi.sh            # copies README, builds, checks
 
-# Build distribution
-python -m build
-
-# Check distribution
-twine check dist/*
-
-# Upload to Test PyPI
-twine upload --repository testpypi dist/*
-
-# Upload to PyPI
-twine upload dist/*
+# Upload (requires PyPI credentials)
+uvx twine upload --repository testpypi dist/*   # test first
+uvx twine upload dist/*                          # production
 ```
 
 ## anthelper — Jupyter Notebook Helpers
