@@ -152,7 +152,7 @@ class AnthiveClient:
                     else:
                         # In browser: construct absolute URL from current origin
                         origin = str(js.window.location.origin)
-                        base_url = f"{origin}/api"
+                        base_url = f"{origin}/api/"
                 except (ImportError, AttributeError, Exception):
                     # Fallback for non-browser environments (direct API access)
                     base_url = "http://localhost:8080"
