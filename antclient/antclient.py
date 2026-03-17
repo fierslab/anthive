@@ -22,7 +22,7 @@ Version: 1.0.0
 from typing import Any, Dict, List, Optional, Union
 import requests
 
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 __all__ = ["AnthiveClient"]
 
 
@@ -285,14 +285,18 @@ class AnthiveClient:
                      db_id: str,
                      q: str = "",
                      limit: int = 100,
-                     case_sensitive: bool = False) -> List[str]:
-        """Search genes by substring
+                     case_sensitive: bool = False,
+                     exact: bool = False) -> List[str]:
+        """Search genes by name.
 
         Args:
             db_id: Database identifier
             q: Search string (empty returns all up to limit)
             limit: Maximum results to return (default: 100)
-            case_sensitive: Whether search is case-sensitive (default: False)
+            case_sensitive: Case-sensitive match (default: False)
+            exact: If True, match full gene name only; if False (default), substring match.
+                   Example: exact=True, q="APOE" returns ["APOE"] not ["APOE", "APOER2"].
+                   Case insensitivity still applies unless case_sensitive=True.
 
         Returns:
             List of matching gene names
@@ -300,8 +304,10 @@ class AnthiveClient:
         Example:
             >>> genes = client.search_genes("LC5/SPM", q="CD4", limit=10)
             >>> print(genes)  # ['CD4', 'CD40', 'CD40LG', ...]
+            >>> genes = client.search_genes("LC5/SPM", q="Apoe", exact=True)
+            >>> print(genes)  # ['Apoe']  (or ['APOE'] depending on stored name)
         """
-        params = {'q': q, 'limit': limit, 'case_sensitive': case_sensitive}
+        params = {'q': q, 'limit': limit, 'case_sensitive': case_sensitive, 'exact': exact}
         response = _self._get(f'/databases/{db_id}/genes', params=params)
         return response.get('genes', response) if isinstance(response, dict) else response
 

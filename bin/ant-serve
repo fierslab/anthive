@@ -829,23 +829,27 @@ async def get_database_info(db_id: str):
 @app.get("/databases/{db_id:path}/genes", tags=["genes"])
 async def search_genes(
     db_id: str,
-    q: str = Query(..., description="Search substring", example="CD4"),
+    q: str = Query(..., description="Search string", example="CD4"),
     limit: Optional[int] = Query(None, description="Maximum results"),
-    case_sensitive: bool = Query(False, description="Case-sensitive search")
+    case_sensitive: bool = Query(False, description="Case-sensitive search"),
+    exact: bool = Query(False, description="Exact name match (no substring)")
 ):
     """
-    Search for genes by substring
+    Search for genes by name.
 
     Returns a list of gene names matching the search query.
-    Useful for autocomplete and gene discovery.
+
+    - `exact=false` (default): substring match — `q=CD4` matches CD4, CD40, CD40LG, …
+    - `exact=true`: full-name match — `q=CD4` matches CD4 only (case-insensitive unless `case_sensitive=true`)
 
     Example:
         GET /databases/my_db/genes?q=CD4&limit=10
+        GET /databases/my_db/genes?q=CD4&exact=true
     """
     try:
         db_path = registry.get_database_path(db_id)
         with AnthiveDB(db_path) as db:
-            genes = db.search_genes(q, case_sensitive=case_sensitive, limit=limit)
+            genes = db.search_genes(q, case_sensitive=case_sensitive, limit=limit, exact=exact)
             return {"query": q, "count": len(genes), "genes": genes}
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))

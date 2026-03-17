@@ -5,6 +5,12 @@ All notable changes to the Anthive Client will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] - 2026-03-17
+
+### Changed
+- `search_genes`: added `exact` parameter for full-name matching (e.g. `APOE` no longer matches `APOER2`)
+- `search_genes`: SQL injection fix — queries now use parameterized placeholders
+
 ## [1.1.1] - 2026-03-17
 
 ### Changed

@@ -156,23 +156,26 @@ class AnthiveDB:
         return [row[0] for row in result]
 
     def search_genes(self, query: str, case_sensitive: bool = False,
-                    limit: Optional[int] = None) -> List[str]:
+                    limit: Optional[int] = None, exact: bool = False) -> List[str]:
         """
-        Search for genes by substring
+        Search for genes by name.
 
         Args:
             query: Search string
-            case_sensitive: Case-sensitive search
+            case_sensitive: Case-sensitive match (default: False)
             limit: Maximum results
+            exact: If True, match full gene name only; if False (default), substring match
 
         Returns:
             List of matching gene names
         """
 
-        if case_sensitive:
-            where_clause = f"WHERE gene_name LIKE '%{query}%'"
+        if exact:
+            where_clause = "WHERE LOWER(gene_name) = LOWER(?)" if not case_sensitive else "WHERE gene_name = ?"
+            param = query
         else:
-            where_clause = f"WHERE LOWER(gene_name) LIKE LOWER('%{query}%')"
+            where_clause = "WHERE gene_name ILIKE ?" if not case_sensitive else "WHERE gene_name LIKE ?"
+            param = f"%{query}%"
 
         limit_clause = f"LIMIT {limit}" if limit else ""
 
@@ -184,7 +187,7 @@ class AnthiveDB:
             {limit_clause}
         """
 
-        result = self._conn.execute(sql).fetchall()
+        result = self._conn.execute(sql, [param]).fetchall()
         return [row[0] for row in result]
 
     def get_gene_info(self, gene_name: str) -> Dict[str, Any]:
