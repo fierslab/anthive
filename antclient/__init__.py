@@ -20,5 +20,5 @@ Note:
 from .antclient import AnthiveClient, AntClient
 from .anthelper import find_database, find_metadata
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 __all__ = ["AnthiveClient", "AntClient", "find_database", "find_metadata"]
