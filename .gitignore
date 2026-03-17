@@ -11,8 +11,9 @@ nginx_access.log
 nginx_error.log
 nginx.pid
 
-# Webapp source - copied antclient (source is in antclient/)
+# Webapp source - copied from antclient/ (source of truth is antclient/)
 webapp-src/jupyter/antclient.py
+webapp-src/jupyter/anthelper.py
 webapp-src/stlite/antclient.py
 
 # Python

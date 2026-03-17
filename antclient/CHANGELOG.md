@@ -5,6 +5,20 @@ All notable changes to the Anthive Client will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-03-17
+
+### Added
+- `anthelper` module now included in the package (`find_database`, `find_metadata`)
+- `get_gene_stats(db_id, genes, layer, format)` — per-gene statistics without
+  downloading all cells: n_cells, n_nonzero, pct_nonzero, mean, std (all cells),
+  and mean/std/median/q10/q90/max over expressing cells only
+
+### Changed
+- Minimum Python version raised to 3.9 (was 3.8; required for anthelper)
+- `anthelper`: replaced `str | None` union syntax with `Optional[str]` (3.9 compat)
+- `anthelper`: removed unused `IPython.display` import (broke non-Jupyter installs)
+- `anthelper`: hardened `find_database` against missing keys in database metadata
+
 ## [1.0.0] - 2026-02-24
 
 ### Added

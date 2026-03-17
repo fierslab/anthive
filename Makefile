@@ -43,9 +43,10 @@ build-jupyter: antclient/antclient.py
 	@# Clear output directory so no stale files survive the build
 	@rm -rf webapp/jupyter
 	@mkdir -p webapp
-	@# Copy antclient.py into jupyter content before build
-	@echo "Copying antclient.py to webapp-src/jupyter..."
+	@# Copy antclient.py and anthelper.py into jupyter content before build
+	@echo "Copying antclient.py and anthelper.py to webapp-src/jupyter..."
 	@cp antclient/antclient.py webapp-src/jupyter/antclient.py
+	@cp antclient/anthelper.py webapp-src/jupyter/anthelper.py
 	@# Make source files read-only so JupyterLite cannot modify them
 	@chmod -R a-w webapp-src/jupyter
 	@chmod -R a+rX webapp-src/jupyter

@@ -6,10 +6,10 @@ Lightweight Python client for the Anthive REST API - query single-cell expressio
 
 - **Lightweight**: Only requires `requests` library
 - **Optional pandas support**: Install pandas for DataFrame output
-- **Single file**: Easy to integrate, Pyodide-compatible
+- **Pyodide-compatible**: Runs in JupyterLite / browser environments
 - **Type hints**: Full type annotations for IDE support
 - **Auto-detection**: Works in standard Python, Pyodide, and Streamlit
-- **Comprehensive**: Complete API coverage including Phase 2 features
+- **Comprehensive**: Complete API coverage including gene statistics
 
 ## Installation
 
@@ -44,27 +44,32 @@ cp antclient.py /path/to/your/project/
 
 ```python
 from antclient import AnthiveClient
+from anthelper import find_database, find_metadata
 
-# Connect to API
-client = AnthiveClient("http://localhost:8080")
+# Connect to API (auto-detects URL in Pyodide/browser)
+client = AnthiveClient()
 
-# List databases
-databases = client.get_databases()
-print(f"Found {len(databases)} databases")
+# Browse available datasets
+find_database(client, "brain")          # search by keyword
+find_metadata(client, "LC5/SPM")        # list obs columns
 
-# Get database info
-info = client.get_database_info("mygroup/mydatabase")
-print(f"Cells: {info['n_cells']}, Genes: {info['n_genes']}")
+# Get database info and detect best layer
+info = client.get_database_info("LC5/SPM")
+layer = 'data' if 'data' in info['layers'] else info['layers'][0]
 
 # Search genes
-genes = client.search_genes("mydb", q="CD4", limit=10)
-print(genes)  # ['CD4', 'CD40', 'CD40LG', ...]
+genes = client.search_genes("LC5/SPM", q="Apoe", limit=10)
+
+# Get per-gene statistics (fast — no full cell download)
+stats = client.get_gene_stats("LC5/SPM", ["Apoe", "Actb"], format='dataframe')
+print(stats[["gene", "pct_nonzero", "mean", "median_nonzero"]])
 
 # Get cell data as DataFrame
 df = client.get_cells(
-    "mydb",
-    genes=["CD4", "CD8", "CD3D"],
-    metadata=["cell_type", "tissue"],
+    "LC5/SPM",
+    genes=["Apoe", "Trem2"],
+    metadata=["genotype", "cell_type"],
+    layer=layer,
     format='dataframe'
 )
 print(df.head())
@@ -105,6 +110,21 @@ info = client.get_gene_info("mydb", "CD4")
 
 # Get all genes (careful - may be large!)
 all_genes = client.get_all_genes("mydb")
+```
+
+### Gene Statistics (lightweight — no full cell download)
+
+```python
+# Single gene
+stats = client.get_gene_stats("mydb", "APOE")
+# Returns list of dicts: gene, layer, n_cells, n_nonzero, pct_nonzero,
+#   mean, std (all cells), mean_nonzero, std_nonzero, median_nonzero,
+#   q10_nonzero, q90_nonzero, max
+
+# Multiple genes as DataFrame
+df = client.get_gene_stats("mydb", ["APOE", "CLU", "ACTB"],
+                           layer="data", format='dataframe')
+print(df[["gene", "pct_nonzero", "mean", "median_nonzero"]])
 ```
 
 ### Cell Data Retrieval
@@ -312,6 +332,7 @@ client = AnthiveClient("http://localhost:8080", timeout=60)
 - `search_genes(db_id, q='', limit=100, case_sensitive=False)` - Search genes
 - `get_gene_info(db_id, gene_id)` - Gene details
 - `get_all_genes(db_id)` - All genes (may be large!)
+- `get_gene_stats(db_id, genes, layer='X', format='json')` - Per-gene statistics
 
 **Metadata Methods:**
 - `get_layers(db_id)` - List layers
@@ -379,10 +400,28 @@ twine upload --repository testpypi dist/*
 twine upload dist/*
 ```
 
+## anthelper — Jupyter Notebook Helpers
+
+The companion `anthelper` module ships with `antclient` and provides pretty-printing helpers for interactive use:
+
+```python
+from anthelper import find_database, find_metadata
+
+# Browse available datasets (sorted by year, up to 20)
+find_database(client)
+find_database(client, "alzheimer")   # filter by keyword
+
+# List obs columns for a dataset
+find_metadata(client, "LC5/SPM")
+find_metadata(client, "LC5/SPM", "cell")   # filter column names
+```
+
+`anthelper` is designed for Jupyter / JupyterLite but works in any Python environment.
+
 ## Requirements
 
 **Required:**
-- Python >= 3.8
+- Python >= 3.9
 - requests >= 2.25.0
 
 **Optional:**
@@ -390,7 +429,7 @@ twine upload dist/*
 
 ## Compatibility
 
-- **Python**: 3.8, 3.9, 3.10, 3.11, 3.12
+- **Python**: 3.9, 3.10, 3.11, 3.12
 - **Environments**: Standard Python, Pyodide, Streamlit
 - **API**: Anthive REST API v2.0 (Phase 2)
 

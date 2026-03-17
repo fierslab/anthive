@@ -22,7 +22,7 @@ Version: 1.0.0
 from typing import Any, Dict, List, Optional, Union
 import requests
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __all__ = ["AnthiveClient"]
 
 
