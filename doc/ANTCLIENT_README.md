@@ -17,10 +17,10 @@ Lightweight Python client for the Anthive REST API - query single-cell expressio
 
 ```bash
 # Basic installation
-pip install anthive-client
+pip install antclient
 
 # With pandas support for DataFrames
-pip install anthive-client[pandas]
+pip install antclient[pandas]
 ```
 
 ### From Source

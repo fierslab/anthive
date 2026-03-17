@@ -20,7 +20,7 @@ if init_file.exists():
             break
 
 setup(
-    name="anthive-client",
+    name="antclient",
     version=version,
     author="Anthive Team",
     author_email="anthive@example.com",
