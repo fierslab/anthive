@@ -422,6 +422,18 @@ class AnthiveDB:
         Statistics over all cells (zeros included): mean, std.
         Statistics over expressing cells only: mean, std, median, q10, q90, max.
 
+        When the database has a ``__gene_bins`` table (built by ant-duckdb-check for
+        databases with a default_layer) two additional ranking fields are included:
+
+        - ``rank_mean`` (0–1): percentile rank of this gene's mean expression among
+          all genes in the dataset (0 = lowest, 1 = highest).
+        - ``scaled_mean`` (0–1): mean expression rescaled and clipped to the
+          [q05, q95] range of all gene means, giving an intuitive abundance score.
+
+        Both metrics are derived from ``__gene_bins.mean_expr``, which is the
+        mean expression over all cells (zeros included) using the default layer.
+        Databases without ``__gene_bins`` do not include these fields.
+
         Args:
             gene_names: List of gene names
             layer: Layer name (default: 'X')
@@ -436,23 +448,71 @@ class AnthiveDB:
 
         n_cells = (self._conn.execute("SELECT COUNT(*) FROM cells").fetchone() or (0,))[0]
 
-        results = []
+        # ── Step 1: resolve stored gene names (single lookup per gene) ────────
+        resolved: Dict[str, Optional[str]] = {}   # queried_name → stored_name or None
         for gene_name in gene_names:
-            # Resolve stored gene name
             if case_sensitive:
-                lookup = self._conn.execute(
+                row = self._conn.execute(
                     "SELECT gene_name FROM genes WHERE gene_name = ?", [gene_name]
                 ).fetchone()
             else:
-                lookup = self._conn.execute(
+                row = self._conn.execute(
                     "SELECT gene_name FROM genes WHERE LOWER(gene_name) = LOWER(?)", [gene_name]
                 ).fetchone()
+            resolved[gene_name] = row[0] if row else None
 
-            if not lookup:
+        # ── Step 2: batch rank/scale from __gene_bins (one query total) ───────
+        rank_ctx: Dict[str, Dict[str, float]] = {}   # stored_name → rank fields
+        has_bins = (self._conn.execute("""
+            SELECT COUNT(*) FROM information_schema.tables
+            WHERE table_name = '__gene_bins'
+        """).fetchone() or (0,))[0]
+
+        if has_bins:
+            q_row = self._conn.execute("""
+                SELECT QUANTILE_CONT(mean_expr, 0.05), QUANTILE_CONT(mean_expr, 0.95)
+                FROM __gene_bins
+            """).fetchone()
+            q05, q95 = float(q_row[0]), float(q_row[1])
+            q_range = max(q95 - q05, 1e-9)
+
+            stored_names = [s for s in resolved.values() if s is not None]
+            if stored_names:
+                placeholders = ','.join('?' * len(stored_names))
+                bin_rows = self._conn.execute(f"""
+                    WITH ranked AS (
+                        SELECT gene_id,
+                               PERCENT_RANK() OVER (ORDER BY mean_expr) AS rank_mean,
+                               mean_expr
+                        FROM __gene_bins
+                    )
+                    SELECT g.gene_name, r.rank_mean, r.mean_expr
+                    FROM ranked r
+                    JOIN __genes g USING (gene_id)
+                    WHERE g.gene_name IN ({placeholders})
+                """, stored_names).fetchall()
+
+                for gname, rank_mean, mean_expr in bin_rows:
+                    scaled = max(0.0, min(1.0, (float(mean_expr) - q05) / q_range))
+                    rank_ctx[gname] = {
+                        'rank_mean':   round(float(rank_mean), 4),
+                        'scaled_mean': round(scaled, 4),
+                    }
+
+        # ── Step 3: per-gene expression statistics ────────────────────────────
+        results = []
+        for gene_name in gene_names:
+            stored_name = resolved.get(gene_name)
+
+            if stored_name is None:
                 results.append({'gene': gene_name, 'error': 'not found'})
                 continue
 
-            stored_name = lookup[0]
+            base: Dict[str, Any] = {'gene': gene_name, 'layer': layer, 'n_cells': n_cells}
+            if stored_name != gene_name:
+                base['gene_found'] = stored_name
+            if stored_name in rank_ctx:
+                base.update(rank_ctx[stored_name])
 
             row = self._conn.execute(f"""
                 SELECT
@@ -468,10 +528,6 @@ class AnthiveDB:
                 FROM layer__{layer}
                 WHERE gene_name = ?
             """, [stored_name]).fetchone()
-
-            base = {'gene': gene_name, 'layer': layer, 'n_cells': n_cells}
-            if stored_name != gene_name:
-                base['gene_found'] = stored_name
 
             if row is None or row[0] == 0:
                 results.append({**base,
