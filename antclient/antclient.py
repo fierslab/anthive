@@ -414,6 +414,7 @@ class AnthiveClient:
                 for s in r.get('stats', []):
                     rows.append({
                         'db_id': r['db_id'],
+                        'group': r.get('group', ''),
                         'title': r['title'],
                         'n_cells_db': r['n_cells'],
                         'layer': r['layer'],

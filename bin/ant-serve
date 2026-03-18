@@ -949,6 +949,7 @@ async def get_gene_stats_all(
                 stats = db.get_gene_stats(gene_list, layer=layer, case_sensitive=case_sensitive)
             results.append({
                 'db_id': db_id,
+                'group': registry._db_extra.get(db_id, {}).get('group_id', ''),
                 'title': meta.get('title', db_id),
                 'n_cells': meta.get('n_cells', 0),
                 'layer': layer,
