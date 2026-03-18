@@ -913,6 +913,59 @@ async def get_gene_stats(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/gene_stats_all", tags=["genes"])
+async def get_gene_stats_all(
+    genes: str = Query(..., description="Comma-separated gene names, e.g. APOE,CLU"),
+    case_sensitive: bool = Query(False, description="Case-sensitive gene name matching (default: False)")
+):
+    """
+    Get expression statistics for selected genes across **all** databases that have a `default_layer`.
+
+    For each qualifying database the `default_layer` is used automatically.
+    Gene names are matched case-insensitively by default (so `APOE` matches `Apoe`).
+    When the stored name differs from the queried name a `gene_found` field is included in the result.
+
+    Returns:
+    - **results**: list of per-database entries, each with `db_id`, `title`, `n_cells`, `layer`, `stats`
+    - **n_databases**: number of databases queried
+    - **n_skipped**: number of databases skipped (no default_layer or error)
+
+    Example:
+        GET /gene_stats_all?genes=APOE,TREM2
+        GET /gene_stats_all?genes=APOE,TREM2&case_sensitive=true
+    """
+    gene_list = [g.strip() for g in genes.split(',') if g.strip()]
+    results = []
+    n_skipped = 0
+
+    for db_id, meta in registry.metadata_cache.items():
+        layer = meta.get('default_layer')
+        if not layer:
+            n_skipped += 1
+            continue
+        try:
+            db_path = registry.get_database_path(db_id)
+            with AnthiveDB(db_path) as db:
+                stats = db.get_gene_stats(gene_list, layer=layer, case_sensitive=case_sensitive)
+            results.append({
+                'db_id': db_id,
+                'title': meta.get('title', db_id),
+                'n_cells': meta.get('n_cells', 0),
+                'layer': layer,
+                'stats': stats,
+            })
+        except Exception:
+            n_skipped += 1
+
+    return {
+        'genes': gene_list,
+        'case_sensitive': case_sensitive,
+        'n_databases': len(results),
+        'n_skipped': n_skipped,
+        'results': results,
+    }
+
+
 @app.get("/databases/{db_id:path}/cells", tags=["data"])
 async def get_cells(
     db_id: str,

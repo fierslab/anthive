@@ -414,7 +414,8 @@ class AnthiveDB:
                 "Run 'ant duckdb-check' on a database that has a log-normalized layer."
             )
 
-    def get_gene_stats(self, gene_names: List[str], layer: str = 'X') -> List[Dict[str, Any]]:
+    def get_gene_stats(self, gene_names: List[str], layer: str = 'X',
+                       case_sensitive: bool = True) -> List[Dict[str, Any]]:
         """
         Get expression statistics for one or more genes.
 
@@ -424,6 +425,9 @@ class AnthiveDB:
         Args:
             gene_names: List of gene names
             layer: Layer name (default: 'X')
+            case_sensitive: If False, resolve gene names case-insensitively (default: True).
+                            Results include 'gene_found' with the actual stored name when
+                            it differs from the queried name.
 
         Returns:
             List of dicts with stats per gene
@@ -434,13 +438,21 @@ class AnthiveDB:
 
         results = []
         for gene_name in gene_names:
-            exists = (self._conn.execute(
-                "SELECT COUNT(*) FROM genes WHERE gene_name = ?", [gene_name]
-            ).fetchone() or (0,))[0]
+            # Resolve stored gene name
+            if case_sensitive:
+                lookup = self._conn.execute(
+                    "SELECT gene_name FROM genes WHERE gene_name = ?", [gene_name]
+                ).fetchone()
+            else:
+                lookup = self._conn.execute(
+                    "SELECT gene_name FROM genes WHERE LOWER(gene_name) = LOWER(?)", [gene_name]
+                ).fetchone()
 
-            if not exists:
+            if not lookup:
                 results.append({'gene': gene_name, 'error': 'not found'})
                 continue
+
+            stored_name = lookup[0]
 
             row = self._conn.execute(f"""
                 SELECT
@@ -455,12 +467,15 @@ class AnthiveDB:
                     MAX(value)                        AS max_val
                 FROM layer__{layer}
                 WHERE gene_name = ?
-            """, [gene_name]).fetchone()
+            """, [stored_name]).fetchone()
+
+            base = {'gene': gene_name, 'layer': layer, 'n_cells': n_cells}
+            if stored_name != gene_name:
+                base['gene_found'] = stored_name
 
             if row is None or row[0] == 0:
-                results.append({
-                    'gene': gene_name, 'layer': layer,
-                    'n_cells': n_cells, 'n_nonzero': 0, 'pct_nonzero': 0.0,
+                results.append({**base,
+                    'n_nonzero': 0, 'pct_nonzero': 0.0,
                     'mean': 0.0, 'std': 0.0,
                     'mean_nonzero': None, 'std_nonzero': None,
                     'median_nonzero': None, 'q10_nonzero': None, 'q90_nonzero': None,
@@ -474,10 +489,7 @@ class AnthiveDB:
             var_all = max(0.0, float(sum_sq_nz) / n_cells - mean_all ** 2)
             std_all = math.sqrt(var_all)
 
-            results.append({
-                'gene': gene_name,
-                'layer': layer,
-                'n_cells': n_cells,
+            results.append({**base,
                 'n_nonzero': int(n_nonzero),
                 'pct_nonzero': round(n_nonzero * 100.0 / n_cells, 2),
                 'mean': round(mean_all, 6),

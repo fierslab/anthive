@@ -22,7 +22,7 @@ Version: 1.0.0
 from typing import Any, Dict, List, Optional, Union
 import requests
 
-__version__ = "1.1.2"
+__version__ = "1.1.3"
 __all__ = ["AnthiveClient"]
 
 
@@ -367,6 +367,60 @@ class AnthiveClient:
             import pandas as pd
             return pd.DataFrame(stats)
         return stats
+
+    def get_gene_stats_all(self,
+                           genes: Union[str, List[str]],
+                           case_sensitive: bool = False,
+                           format: str = "json") -> Union[List[Dict], Any]:
+        """Get expression statistics for genes across all databases with a default_layer.
+
+        Each database is queried using its `default_layer` (the log-normalised layer
+        detected by ant-duckdb-check). Databases without a default_layer are skipped.
+
+        Gene names are matched case-insensitively by default, so `APOE` will match
+        `Apoe` in mouse datasets. When the stored name differs from the queried name
+        a `gene_found` field is present in the stat entry.
+
+        Args:
+            genes: Gene name or list of gene names (e.g. "APOE" or ["APOE", "TREM2"])
+            case_sensitive: Case-sensitive gene name matching (default: False)
+            format: "json" (default) — returns full response dict with `results` list.
+                    "dataframe" — returns a flat pandas DataFrame with one row per
+                    (database × gene), adding `db_id`, `title`, `n_cells_db`, `layer` columns.
+
+        Returns:
+            dict with keys: genes, case_sensitive, n_databases, n_skipped, results
+            (or DataFrame when format='dataframe')
+
+        Example:
+            >>> resp = client.get_gene_stats_all(["APOE", "TREM2"])
+            >>> for r in resp["results"]:
+            ...     print(r["db_id"], r["stats"])
+
+            >>> df = client.get_gene_stats_all("APOE", format="dataframe")
+            >>> df[["db_id", "title", "pct_nonzero", "mean"]].sort_values("mean", ascending=False)
+        """
+        if isinstance(genes, list):
+            genes_str = ','.join(genes)
+        else:
+            genes_str = genes
+        params = {'genes': genes_str, 'case_sensitive': case_sensitive}
+        response = self._get('/gene_stats_all', params=params)
+
+        if format == 'dataframe':
+            import pandas as pd
+            rows = []
+            for r in response.get('results', []):
+                for s in r.get('stats', []):
+                    rows.append({
+                        'db_id': r['db_id'],
+                        'title': r['title'],
+                        'n_cells_db': r['n_cells'],
+                        'layer': r['layer'],
+                        **s,
+                    })
+            return pd.DataFrame(rows)
+        return response
 
     # ===== Layers and Metadata =====
 
