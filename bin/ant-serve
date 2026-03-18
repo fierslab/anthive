@@ -958,6 +958,40 @@ async def get_gene_stats_all(
         except Exception:
             n_skipped += 1
 
+    # ── Cross-database CV per gene ─────────────────────────────────────────
+    # Collect mean expression per gene across all databases (skip not-found)
+    from collections import defaultdict
+    import math as _math
+
+    gene_means: Dict[str, List[float]] = defaultdict(list)
+    for r in results:
+        for s in r['stats']:
+            if 'error' not in s and s.get('mean', 0) > 0:
+                gene_means[s['gene']].append(s['mean'])
+
+    # CV = std(means) / mean(means) across databases
+    gene_cv: Dict[str, float] = {}
+    for gene, means in gene_means.items():
+        if len(means) >= 2:
+            mu = sum(means) / len(means)
+            if mu > 0:
+                variance = sum((m - mu) ** 2 for m in means) / (len(means) - 1)
+                gene_cv[gene] = round(_math.sqrt(variance) / mu, 4)
+
+    # Rank CV among queried genes (0 = least variable, 1 = most variable)
+    if gene_cv:
+        sorted_genes = sorted(gene_cv, key=lambda g: gene_cv[g])
+        n_cv = len(sorted_genes)
+        gene_cv_rank = {g: round(i / (n_cv - 1), 4) if n_cv > 1 else 0.5
+                        for i, g in enumerate(sorted_genes)}
+        for r in results:
+            for s in r['stats']:
+                gene = s.get('gene')
+                if gene in gene_cv:
+                    s['cross_db_cv']      = gene_cv[gene]
+                    s['rank_cross_db_cv'] = gene_cv_rank[gene]
+    # ──────────────────────────────────────────────────────────────────────
+
     return {
         'genes': gene_list,
         'case_sensitive': case_sensitive,

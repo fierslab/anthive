@@ -545,11 +545,14 @@ class AnthiveDB:
             var_all = max(0.0, float(sum_sq_nz) / n_cells - mean_all ** 2)
             std_all = math.sqrt(var_all)
 
+            cv = round(std_all / mean_all, 4) if mean_all > 0 else None
+
             results.append({**base,
                 'n_nonzero': int(n_nonzero),
                 'pct_nonzero': round(n_nonzero * 100.0 / n_cells, 2),
                 'mean': round(mean_all, 6),
                 'std': round(std_all, 6),
+                'cv': cv,
                 'mean_nonzero': round(float(mean_nz), 6),
                 'std_nonzero': round(float(std_nz), 6),
                 'median_nonzero': round(float(median_nz), 6),
