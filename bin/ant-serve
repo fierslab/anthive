@@ -452,6 +452,24 @@ class DatabaseRegistry:
             'year': file_metadata.get('year'),
             'default_layer': file_metadata.get('default_layer'),
 
+            # Biology & study annotation (from .md frontmatter; null = not set)
+            'organism':   file_metadata.get('organism'),
+            'tissue':     file_metadata.get('tissue'),
+            'celltype':   file_metadata.get('celltype'),
+            'disease':    file_metadata.get('disease'),
+            'condition':  file_metadata.get('condition'),
+            'region':     file_metadata.get('region'),
+            'sex':        file_metadata.get('sex'),
+            'age':        file_metadata.get('age'),
+            'strain':     file_metadata.get('strain'),
+            'technology': file_metadata.get('technology'),
+            'accession':  file_metadata.get('accession'),
+            'doi':        file_metadata.get('doi') or [],
+            'link':       file_metadata.get('link') or [],
+            'top_genes':  file_metadata.get('top_genes'),
+            'top_cat':    file_metadata.get('top_cat'),
+            'top_num':    file_metadata.get('top_num'),
+
             # Module scoring availability
             'module_scoring_available': bool(conn.execute("""
                 SELECT COUNT(*) FROM information_schema.tables
