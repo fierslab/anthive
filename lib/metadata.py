@@ -244,6 +244,42 @@ def initialize_file_metadata(basename: str, version: str, checksum: str) -> Dict
         'sha256': checksum,
         'year': current_year,
         'date': current_date,
+        # Biology & study annotation (fill in as needed; null = unknown)
+        # organism: human | mouse | rat | zebrafish | macaque | drosophila | ...
+        'organism': None,
+        # tissue: brain | lung | liver | kidney | ... (string or list)
+        'tissue': None,
+        # celltype: only if the dataset contains a single cell type
+        'celltype': None,
+        # disease: healthy | alzheimer | parkinson | cancer | ischemia | ... (str or list)
+        'disease': None,
+        # condition: control | treated | knockout | wildtype | ... (str or list)
+        'condition': None,
+        # region: cortex | hippocampus | striatum | prefrontal_cortex | ... (str or list)
+        'region': None,
+        # sex: male | female | mixed
+        'sex': None,
+        # age: include unit — e.g. 87y (years), 18m (months), 8w (weeks), P30 (postnatal days)
+        'age': None,
+        # strain: e.g. C57BL/6, BALB/c, 129S1 (mouse); leave null for human
+        'strain': None,
+        # technology: 10x_chromium | smart-seq2 | visium | xenium | multiome | snRNA-seq | ...
+        'technology': None,
+        # Data access
+        # accession: GEO/SRA/ArrayExpress ID, e.g. GSE123456 or PRJNA12345
+        'accession': None,
+        # doi: list of DOIs (without https://doi.org/ prefix)
+        'doi': [],
+        # link: list of generic URLs (project pages, supplementary data, etc.)
+        'link': [],
+        # UI curation hints (null = auto-selected)
+        # top_genes: genes to highlight — null falls back to top 10 by mean expression
+        'top_genes': None,
+        # top_cat: categorical columns to highlight — null falls back to first 3 in obscat_include
+        # first entry is treated as the primary cluster/annotation column
+        'top_cat': None,
+        # top_num: numerical columns to highlight — null falls back to first 3 in obsnum_include
+        'top_num': None,
         'obsnum_include': [],
         'obscat_include': [],
         'obs_exclude': [],

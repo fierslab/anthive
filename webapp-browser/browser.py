@@ -28,6 +28,51 @@ templates = Jinja2Templates(directory=str(templates_dir))
 templates.env.filters['urlencode'] = url_quote
 
 
+def _as_list(value) -> list:
+    """Normalise a YAML scalar-or-list field to a Python list."""
+    if not value:
+        return []
+    return value if isinstance(value, list) else [value]
+
+
+def _get_top_genes(duckdb_path: Path, n: int = 10) -> list:
+    """Return top n genes by mean expression from __gene_bins, or [] if unavailable."""
+    try:
+        import duckdb as _ddb
+        conn = _ddb.connect(str(duckdb_path), read_only=True)
+        try:
+            has_bins = conn.execute(
+                "SELECT COUNT(*) FROM information_schema.tables "
+                "WHERE table_name = '__gene_bins'"
+            ).fetchone()[0]
+            if has_bins:
+                rows = conn.execute(f"""
+                    SELECT g.gene_name
+                    FROM __gene_bins b
+                    JOIN __genes g USING (gene_id)
+                    ORDER BY b.mean_expr DESC
+                    LIMIT {n}
+                """).fetchall()
+                return [r[0] for r in rows]
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return []
+
+
+def _accession_url(accession: str) -> Optional[str]:
+    """Return a browse URL for a known accession prefix, else None."""
+    s = str(accession).upper()
+    if s.startswith('GSE') or s.startswith('GSM') or s.startswith('GPL'):
+        return f"https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc={accession}"
+    if s.startswith('PRJNA') or s.startswith('PRJEB'):
+        return f"https://www.ncbi.nlm.nih.gov/bioproject/{accession}"
+    if s.startswith('E-MTAB') or s.startswith('E-GEOD'):
+        return f"https://www.ebi.ac.uk/biostudies/arrayexpress/studies/{accession}"
+    return None
+
+
 def format_number(value: float) -> str:
     """Format a number for display (no numpy dependency)."""
     if value == 0:
@@ -392,6 +437,45 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         if raw_stats:
             layer_stats_rows = _format_layer_stats(raw_stats)
 
+    # Build dataset_meta for display (all optional, None = absent/unknown)
+    dataset_meta = None
+    if metadata_dict:
+        accession = metadata_dict.get('accession')
+        top_genes = (
+            _as_list(metadata_dict.get('top_genes'))
+            or (_get_top_genes(duckdb_file) if duckdb_file.exists() else [])
+            or None
+        )
+        top_cat = (
+            _as_list(metadata_dict.get('top_cat'))
+            or _as_list(metadata_dict.get('obscat_include'))[:3]
+            or None
+        )
+        top_num = (
+            _as_list(metadata_dict.get('top_num'))
+            or _as_list(metadata_dict.get('obsnum_include'))[:3]
+            or None
+        )
+        dataset_meta = {
+            'organism':      metadata_dict.get('organism'),
+            'tissue':        _as_list(metadata_dict.get('tissue')),
+            'celltype':      metadata_dict.get('celltype'),
+            'disease':       _as_list(metadata_dict.get('disease')),
+            'condition':     _as_list(metadata_dict.get('condition')),
+            'region':        _as_list(metadata_dict.get('region')),
+            'sex':           metadata_dict.get('sex'),
+            'age':           metadata_dict.get('age'),
+            'strain':        metadata_dict.get('strain'),
+            'technology':    _as_list(metadata_dict.get('technology')),
+            'accession':     accession,
+            'accession_url': _accession_url(str(accession)) if accession else None,
+            'doi':           _as_list(metadata_dict.get('doi')),
+            'link':          _as_list(metadata_dict.get('link')),
+            'top_genes':     top_genes,
+            'top_cat':       top_cat,
+            'top_num':       top_num,
+        }
+
     # Build canonical short db_id for API links
     file_id = _read_file_id(md_file)
     group_id = _read_group_id(folder_path)
@@ -414,6 +498,7 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "markdown_content": markdown_content,
         "obs_columns": obs_columns,
         "layer_stats_rows": layer_stats_rows,
+        "dataset_meta": dataset_meta,
         "has_duckdb": duckdb_file.exists(),
         "update_pending": _is_update_pending(h5ad_file),
     })

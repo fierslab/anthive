@@ -146,6 +146,23 @@
         /* Two-column layout helper */
         .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 0 24px; }
         @media (max-width: 700px) { .two-col { grid-template-columns: 1fr; } }
+
+        /* Metadata key column */
+        .mk { color: #888; font-size: 11px; width: 90px; white-space: nowrap; }
+
+        /* Explore chips */
+        .chip {
+            display: inline-block;
+            background: #eef2ff;
+            color: #3730a3;
+            border: 1px solid #c7d2fe;
+            border-radius: 3px;
+            padding: 1px 6px;
+            font-size: 11px;
+            margin: 1px 3px 1px 0;
+            text-decoration: none;
+        }
+        .chip:hover { background: #e0e7ff; text-decoration: none; }
     </style>
 
     <script>

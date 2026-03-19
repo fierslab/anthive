@@ -39,6 +39,39 @@
 <p style="color:#888;font-size:12px"><em>no metadata — run <code>ant check</code> to generate</em></p>
 {% endif %}
 
+<!-- Info -->
+{% if dataset_meta %}
+{% set has_info = dataset_meta.organism or dataset_meta.sex or dataset_meta.age or dataset_meta.tissue or dataset_meta.celltype or dataset_meta.region or dataset_meta.disease or dataset_meta.condition or dataset_meta.strain or dataset_meta.technology or dataset_meta.accession or dataset_meta.doi or dataset_meta.link %}
+{% if has_info %}
+<h2>Info</h2>
+<table class="narrow">
+    <tbody>
+    {% if dataset_meta.organism %}<tr><td class="mk">organism</td><td>{{ dataset_meta.organism }}</td></tr>{% endif %}
+    {% if dataset_meta.sex %}<tr><td class="mk">sex</td><td>{{ dataset_meta.sex }}</td></tr>{% endif %}
+    {% if dataset_meta.age %}<tr><td class="mk">age</td><td>{{ dataset_meta.age }}</td></tr>{% endif %}
+    {% if dataset_meta.tissue %}<tr><td class="mk">tissue</td><td>{{ dataset_meta.tissue | join(', ') }}</td></tr>{% endif %}
+    {% if dataset_meta.celltype %}<tr><td class="mk">celltype</td><td>{{ dataset_meta.celltype }}</td></tr>{% endif %}
+    {% if dataset_meta.region %}<tr><td class="mk">region</td><td>{{ dataset_meta.region | join(', ') }}</td></tr>{% endif %}
+    {% if dataset_meta.disease %}<tr><td class="mk">disease</td><td>{{ dataset_meta.disease | join(', ') }}</td></tr>{% endif %}
+    {% if dataset_meta.condition %}<tr><td class="mk">condition</td><td>{{ dataset_meta.condition | join(', ') }}</td></tr>{% endif %}
+    {% if dataset_meta.strain %}<tr><td class="mk">strain</td><td>{{ dataset_meta.strain }}</td></tr>{% endif %}
+    {% if dataset_meta.technology %}<tr><td class="mk">technology</td><td>{{ dataset_meta.technology | join(', ') }}</td></tr>{% endif %}
+    {% if dataset_meta.accession %}
+    <tr><td class="mk">accession</td><td>
+        {% if dataset_meta.accession_url %}<a href="{{ dataset_meta.accession_url }}">{{ dataset_meta.accession }}</a>{% else %}{{ dataset_meta.accession }}{% endif %}
+    </td></tr>
+    {% endif %}
+    {% for doi_item in dataset_meta.doi %}
+    <tr><td class="mk">doi</td><td><a href="https://doi.org/{{ doi_item }}">{{ doi_item }}</a></td></tr>
+    {% endfor %}
+    {% for url_item in dataset_meta.link %}
+    <tr><td class="mk">link</td><td><a href="{{ url_item }}">{{ url_item }}</a></td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+{% endif %}
+
 {% if info %}
 
 <!-- Observation columns -->
@@ -114,6 +147,35 @@
 <div style="padding:4px 0">
     {% for emb in info.obsm_keys %}<code>{{ emb }}</code> {% endfor %}
 </div>
+{% endif %}
+
+<!-- Explore -->
+{% if dataset_meta and (dataset_meta.top_genes or dataset_meta.top_cat or dataset_meta.top_num) %}
+<h2>Explore</h2>
+{% if dataset_meta.top_genes %}
+<div style="margin-bottom:4px">
+    <span class="mk" style="display:inline-block;vertical-align:middle">genes</span>
+    {% for gene in dataset_meta.top_genes %}
+    <a href="/streamlit/gene?db={{ db_id | urlencode }}&gene={{ gene | urlencode }}" class="chip">{{ gene }}</a>
+    {% endfor %}
+</div>
+{% endif %}
+{% if dataset_meta.top_cat %}
+<div style="margin-bottom:4px">
+    <span class="mk" style="display:inline-block;vertical-align:middle">categories</span>
+    {% for col in dataset_meta.top_cat %}
+    <a href="/streamlit/cat?db={{ db_id | urlencode }}&cat={{ col | urlencode }}&ytype=Count" class="chip">{{ col }}</a>
+    {% endfor %}
+</div>
+{% endif %}
+{% if dataset_meta.top_num %}
+<div style="margin-bottom:4px">
+    <span class="mk" style="display:inline-block;vertical-align:middle">numerical</span>
+    {% for col in dataset_meta.top_num %}
+    <code style="margin-right:4px">{{ col }}</code>
+    {% endfor %}
+</div>
+{% endif %}
 {% endif %}
 
 <!-- API access -->
