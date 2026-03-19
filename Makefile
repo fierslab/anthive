@@ -44,9 +44,9 @@ build-jupyter: antclient/antclient.py
 	@rm -rf webapp/jupyter
 	@mkdir -p webapp
 	@# Copy antclient.py and anthelper.py into jupyter content before build
-	@echo "Copying antclient.py and anthelper.py to webapp-src/jupyter..."
-	@cp antclient/antclient.py webapp-src/jupyter/antclient.py
-	@cp antclient/anthelper.py webapp-src/jupyter/anthelper.py
+	@# echo "Copying antclient.py and anthelper.py to webapp-src/jupyter..."
+	@# cp antclient/antclient.py webapp-src/jupyter/antclient.py
+	@# cp antclient/anthelper.py webapp-src/jupyter/anthelper.py
 	@# Make source files read-only so JupyterLite cannot modify them
 	@chmod -R a-w webapp-src/jupyter
 	@chmod -R a+rX webapp-src/jupyter
@@ -54,15 +54,13 @@ build-jupyter: antclient/antclient.py
 	uvx --from jupyterlite-core \
 		--with jupyterlite-pyodide-kernel \
 		--with jupyterlab-widgets \
-		--with jupyter-server jupyter-lite build \
+		--with notebook \
+		--with jupyter-server \
+		jupyter-lite build \
 		--contents webapp-src/jupyter \
 		--output-dir webapp/jupyter
 	@# Restore read+write so files can be edited again
 	@chmod -R u+rw webapp-src/jupyter
-	@# Apply SW pre-registration patch to lab/index.html
-	@# This fixes a race condition where /api/drive requests are made before the
-	@# service worker activates, causing a blank page on first load.
-	@cp webapp-src/jupyter-lab-index.html webapp/jupyter/lab/index.html
 	@echo "✓ JupyterLite build complete!"
 	@echo ""
 	@echo "Location: webapp/jupyter/"
