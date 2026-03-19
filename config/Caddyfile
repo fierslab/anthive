@@ -24,8 +24,11 @@
 		reverse_proxy localhost:8081
 	}
 
-	# Serve static files for JupyterLite and Streamlit
+	# Serve static files for JupyterLite
+	# COOP/COEP headers are required for SharedArrayBuffer (Pyodide kernel)
 	handle /jupyter/* {
+		header Cross-Origin-Opener-Policy "same-origin"
+		header Cross-Origin-Embedder-Policy "require-corp"
 		file_server
 	}
 
