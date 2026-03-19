@@ -59,6 +59,10 @@ build-jupyter: antclient/antclient.py
 		--output-dir webapp/jupyter
 	@# Restore read+write so files can be edited again
 	@chmod -R u+rw webapp-src/jupyter
+	@# Apply SW pre-registration patch to lab/index.html
+	@# This fixes a race condition where /api/drive requests are made before the
+	@# service worker activates, causing a blank page on first load.
+	@cp webapp-src/jupyter-lab-index.html webapp/jupyter/lab/index.html
 	@echo "✓ JupyterLite build complete!"
 	@echo ""
 	@echo "Location: webapp/jupyter/"
