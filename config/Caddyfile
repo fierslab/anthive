@@ -32,8 +32,9 @@
 		file_server
 	}
 
-	handle /stlite/* {
-		file_server
+	# Streamlit server - WebSocket proxying is automatic in Caddy
+	handle /streamlit/* {
+		reverse_proxy localhost:8082
 	}
 
 	# Fallback - if no other handle matched, serve static files
