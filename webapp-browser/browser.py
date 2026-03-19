@@ -8,7 +8,7 @@ URLs use short IDs (group_id/file_id) where available, with fallback to folder/f
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional
-from urllib.parse import quote, unquote
+from urllib.parse import quote, quote as url_quote, unquote
 
 import markdown
 from fastapi import APIRouter, Request
@@ -25,6 +25,7 @@ from metadata import parse_md_file
 router = APIRouter()
 templates_dir = script_dir / 'templates'
 templates = Jinja2Templates(directory=str(templates_dir))
+templates.env.filters['urlencode'] = url_quote
 
 
 def format_number(value: float) -> str:

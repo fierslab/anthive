@@ -51,7 +51,13 @@
             <tbody>
                 {% for col in obs_columns %}
                 <tr>
-                    <td>{{ col.name }}</td>
+                    <td>
+                        {% if col.type == 'cat' and has_duckdb and group_id and info.title %}
+                        <a href="/streamlit/cat?dbg={{ group_id | urlencode }}&dbt={{ info.title | urlencode }}&cat={{ col.name | urlencode }}&ytype=Count" title="View in Streamlit">{{ col.name }}</a>
+                        {% else %}
+                        {{ col.name }}
+                        {% endif %}
+                    </td>
                     <td style="color:#888;font-size:11px">{{ col.type }}</td>
                 </tr>
                 {% endfor %}
