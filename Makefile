@@ -1,13 +1,12 @@
-.PHONY: help build-webapp build-jupyter clean-webapp serve serve-api dev-jupyter
+.PHONY: help build-webapp build-jupyter clean-webapp serve serve-api serve-streamlit dev-jupyter
 
 help:
 	@echo "Anthive4 Development Commands"
 	@echo "=============================="
 	@echo ""
 	@echo "Webapp:"
-	@echo "  make build-webapp   - Build complete webapp (JupyterLite + Stlite + index)"
+	@echo "  make build-webapp   - Build complete webapp (JupyterLite + index)"
 	@echo "  make build-jupyter  - Build only JupyterLite to webapp/jupyter"
-	@echo "  make build-stlite   - Build only Streamlit Lite to webapp/stlite"
 	@echo "  make clean-webapp   - Clean webapp build directory"
 	@echo "  make serve          - Serve webapp with Caddy (port 8501, API proxied)"
 	@echo "  make serve-nginx    - Serve webapp with Nginx (port 8501, API proxied)"
@@ -15,6 +14,7 @@ help:
 	@echo "Development:"
 	@echo "  make serve-api         - Run REST API server (port 8080)"
 	@echo "  make serve-browse      - Run web browser server (port 8081)"
+	@echo "  make serve-streamlit   - Run Streamlit server (port 8082)"
 	@echo "  make dev-jupyter       - Run JupyterLab on webapp-src/jupyter (port 9090)"
 	@echo ""
 	@echo "Sync:"
@@ -51,14 +51,23 @@ build-jupyter: antclient/antclient.py
 	@chmod -R a-w webapp-src/jupyter
 	@chmod -R a+rX webapp-src/jupyter
 	@DOIT_DB=tmp/.jupyterlite.doit.db \
+	# uvx \
+	# 	--from jupyterlite-core \
+	# 	--with jupyterlite-pyodide-kernel \
+	# 	--with jupyter-server \
+	# 	--with jupyterlab-widgets \
+	# 	jupyter-lite build \
+	# 		--force \
+	# 		--contents webapp-src/jupyter \
+	# 		--output-dir webapp/jupyter
 	uvx --from jupyterlite-core \
 		--with jupyterlite-pyodide-kernel \
 		--with jupyterlab-widgets \
 		--with notebook \
 		--with jupyter-server \
-		jupyter-lite build \
-		--contents webapp-src/jupyter \
-		--output-dir webapp/jupyter
+		jupyter-lite build --force \
+			--contents webapp-src/jupyter \
+			--output-dir webapp/jupyter 
 	@# Restore read+write so files can be edited again
 	@chmod -R u+rw webapp-src/jupyter
 	@echo "✓ JupyterLite build complete!"
@@ -66,23 +75,7 @@ build-jupyter: antclient/antclient.py
 	@echo "Location: webapp/jupyter/"
 	@echo "Client: webapp/jupyter/files/antclient.py"
 
-build-stlite: antclient/antclient.py
-	@echo "Building Streamlit Lite to webapp/stlite..."
-	@echo ""
-	@# Create webapp directory
-	@mkdir -p webapp/stlite
-	@# Copy antclient.py to stlite source
-	@echo "Copying antclient.py to webapp-src/stlite..."
-	@cp antclient/antclient.py webapp-src/stlite/antclient.py
-	@# Copy all stlite content to webapp
-	@echo "Copying stlite content..."
-	@cp -r webapp-src/stlite/* webapp/stlite/
-	@echo "✓ Streamlit Lite build complete!"
-	@echo ""
-	@echo "Location: webapp/stlite/"
-	@echo "Client: webapp/stlite/antclient.py"
-
-build-webapp: build-jupyter build-stlite webapp-src/index.html
+build-webapp: build-jupyter webapp-src/index.html
 	@echo ""
 	@echo "Copying main index.html..."
 	@cp webapp-src/index.html webapp/index.html
@@ -95,8 +88,6 @@ build-webapp: build-jupyter build-stlite webapp-src/index.html
 	@echo "Contents:"
 	@echo "  - webapp/index.html             (landing page)"
 	@echo "  - webapp/jupyter/               (JupyterLite)"
-	@echo "  - webapp/stlite/                (Streamlit Lite)"
-	@echo "  - antclient.py auto-updated in both"
 	@echo ""
 	@echo "To serve with Caddy (recommended):"
 	@echo "  Terminal 1: make serve-api"
@@ -110,7 +101,6 @@ serve:
 	@echo "This serves:"
 	@echo "  - Browser interface at /"
 	@echo "  - JupyterLite at /jupyter"
-	@echo "  - Streamlit at /stlite"
 	@echo "  - API at /api"
 	@echo ""
 	@echo "Make sure backend servers are running (in other terminals):"
@@ -126,7 +116,6 @@ serve-nginx:
 	@echo "This serves:"
 	@echo "  - Browser interface at /"
 	@echo "  - JupyterLite at /jupyter"
-	@echo "  - Streamlit at /stlite"
 	@echo "  - API at /api"
 	@echo ""
 	@echo "Make sure backend servers are running (in other terminals):"
@@ -145,6 +134,22 @@ serve-browse:
 	@echo "Starting Anthive Web Browser on http://localhost:8081"
 	@echo ""
 	@./bin/ant-browse --data-folder ./data/h5adstore --host 0.0.0.0 --port 8081
+
+serve-streamlit:
+	@echo "Starting Anthive Streamlit server on http://localhost:8082"
+	@echo ""
+	@cd webapp-streamlit && uvx \
+		--with streamlit \
+		--with matplotlib \
+		--with seaborn \
+		--with scipy \
+		--with numpy \
+		--with pandas \
+		--with requests \
+		streamlit run streamlit_app.py \
+			--server.port 8082 \
+			--server.address 0.0.0.0 \
+			--browser.gatherUsageStats false
 
 dev-jupyter:
 	@./bin/dev-jupyter
