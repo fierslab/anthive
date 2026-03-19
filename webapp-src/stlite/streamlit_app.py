@@ -1,12 +1,4 @@
-import matplotlib.pyplot as plt
-import seaborn
-import seaborn as sns
 import streamlit as st
-import util
-from components import database_selector, gene_selector
-import os
-
-import antclient
 
 # Page config
 st.set_page_config(

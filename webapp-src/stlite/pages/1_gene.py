@@ -1,5 +1,3 @@
-import matplotlib.pyplot as plt
-import seaborn
 import seaborn as sns
 import streamlit as st
 import util
@@ -14,7 +12,7 @@ with st.sidebar:
     gene = gene_selector(client, db)
 
     gd = client.get_cells(
-        db['id'], genes=[gene], format='dataframe'
+        db['id'], layer=db['layer'], genes=[gene], format='dataframe'
     )
 
     plot_type = util.p_selectbox('Plot', ['ecdf', 'kde', 'histogram'], key='plot')

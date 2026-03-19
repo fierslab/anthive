@@ -1,8 +1,5 @@
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
-import matplotlib.pyplot as plt
-import seaborn
-import seaborn as sns
 import streamlit as st
 import util
 from components import (categorical_selector, database_selector, gene_selector,
@@ -14,14 +11,12 @@ client = antclient.AnthiveClient()  # Auto-detects from environment or browser l
 
 with st.sidebar:
     databases = client.get_databases()
-    # Filter databases with embeddings (check if embeddings dict exists and is not empty)
-    db2 = [x for x in databases
-        if x.get('embeddings') and len(x.get('embeddings', {})) > 0]
+    # Filter databases that have at least one embedding
+    db2 = [x for x in databases if x.get('embeddings')]
     db = database_selector(client, databases=db2)
 
-    # Get embeddings dict from new API format
+    # Select embedding
     embeddings = client.get_embeddings(db['id'])
-    # embeddings is now a dict like {"X_umap": {"name": "Umap", "dimensions": 2}}
     emname = {key: info['name'] for key, info in embeddings.items()}
     emb_name = util.p_selectbox(
         'Embedding',
@@ -33,7 +28,6 @@ with st.sidebar:
 data = client.get_embedding_data(
     db['id'], emb_name, format='dataframe')
 data = data.set_index(data.columns[0])
-
 
 ekey0 = data.columns[-2]
 ekey1 = data.columns[-1]
@@ -50,7 +44,7 @@ if colorby == 'Gene':
     with st.sidebar:
         colorfield = gene_selector(client, db)
     gd = client.get_cells(
-        db['id'], genes=[colorfield], format='dataframe' )
+        db['id'], layer=db['layer'], genes=[colorfield], format='dataframe')
 elif colorby == 'Categorical':
     with st.sidebar:
         colorfield = categorical_selector(client, db)
@@ -60,8 +54,7 @@ elif colorby == 'Numerical':
     with st.sidebar:
         colorfield = numerical_selector(client, db)
     gd = client.get_cells(
-        db['id'], metadata=[colorfield],
-        format='dataframe')
+        db['id'], metadata=[colorfield], format='dataframe')
 else:
     st.stop()
 
@@ -94,9 +87,10 @@ def plotfunc(ax):
         sm = cm.ScalarMappable(cmap="viridis",
                                norm=kwargs['norm'])
 
+    import seaborn as sns
     sns.scatterplot(data, **kwargs)
     if colorby in ['Gene', 'Numerical']:
-        ax.figure.colorbar(sm, ax=ax, label="total_counts")
+        ax.figure.colorbar(sm, ax=ax, label=colorfield)
 
 
 showplot(

@@ -1,9 +1,5 @@
-import matplotlib.cm as cm
-import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
-import seaborn
-import seaborn as sns
 import streamlit as st
 import util
 from components import (categorical_selector, database_selector, gene_selector,
@@ -16,9 +12,8 @@ client = antclient.AnthiveClient()  # Auto-detects from environment or browser l
 
 with st.sidebar:
     databases = client.get_databases()
-    # Filter databases with embeddings (check if embeddings dict exists and is not empty)
-    db2 = [x for x in databases
-        if x.get('embeddings') and len(x.get('embeddings', {})) > 0]
+    # Filter databases that have at least one embedding
+    db2 = [x for x in databases if x.get('embeddings')]
     db = database_selector(client, databases=db2)
 
     getcellkwargs = {}
@@ -44,7 +39,7 @@ with st.sidebar:
         getcellkwargs['metadata'] = getcellkwargs.get('metadata', []) + [plotfield]
 
 df = client.get_cells(
-    db['id'], format='dataframe', **getcellkwargs)
+    db['id'], layer=db['layer'], format='dataframe', **getcellkwargs)
 
 df = (df
       .set_index(df.columns[0])
@@ -58,14 +53,11 @@ def plotfunc(ax):
         c1, c2 = st.columns(2)
         with c1:
             rankify = st.toggle('rank X', value=True)
-            # kwargs['s'] = util.p_number_input(
-            #     'Point size', value=3, min_value=1,
-            #     max_value=100, key='ps')
         with c2:
             windowsize = util.p_number_input(
                 'Window size', key='ws',
                 min_value=5, max_value=len(df) // 2,
-                value = len(df) // 10)
+                value=len(df) // 10)
             kwargs['alpha'] = util.p_number_input(
                 'Alpha', key='a', value=0.9, max_value=1.0,
                 min_value=0.0)

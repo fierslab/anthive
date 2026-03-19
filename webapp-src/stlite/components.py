@@ -6,6 +6,7 @@ import streamlit as st
 import util
 import seaborn as sns
 
+
 def showplot(func, basename, rawdata=None, legend=None,
              xtabs=None, **kwargs):
     fig = plt.figure()
@@ -92,18 +93,22 @@ def showplot(func, basename, rawdata=None, legend=None,
     return moretabs
 
 
-def database_selector(client, databases=None,
-                      key: str = "db"):
-    """Database selector component
+def database_selector(client, databases=None, key: str = "db"):
+    """Database selector component.
+
+    Presents group → (optional experiment) → dataset → layer dropdowns.
+    Uses URL query params to persist selections across reruns.
 
     Args:
-        client: AntClient instance
-        key: Unique key for the selectbox
+        client: AnthiveClient instance
+        databases: list of database dicts from get_databases(); fetched if None
+        key: URL param key prefix (e.g. "db" → params dbg, dbt, dbl)
 
     Returns:
-        Selected database dict or None
+        Selected database dict with added keys:
+            - ``layer``: selected layer name
+            - ``groupname``: selected group label
     """
-
     if databases is None:
         databases = client.get_databases()
 
@@ -111,34 +116,29 @@ def database_selector(client, databases=None,
         st.warning("No databases found")
         st.stop()
 
-    # Add groupname and shortname fields by parsing id
-    groups = set()
-    for db_item in databases:
-        if not 'collection' in db_item:
-            st.warning("invalid db structure")
-            st.write(db_item)
-            st.stop()
+    # Use friendly group name from collection metadata, fall back to group_id
+    def _group(db):
+        return db.get('group') or db.get('group_id', 'default')
 
-        groups.add(db_item['collection'].get('group', 'default'))
-
-    groups = sorted(groups)
+    groups = sorted(set(_group(db) for db in databases))
     group = util.p_selectbox("Group", groups, f"{key}g")
 
+    databases_ = [x for x in databases if _group(x) == group]
+
+    # Optional experiment sub-grouping (from collection metadata)
+    experiments = sorted(set(
+        x.get('collection', {}).get('experiment') or ''
+        for x in databases_
+    ))
+    named_exps = [e for e in experiments if e]
     groupname = group
-
-    databases_ = [
-            x for x in databases
-            if x['collection'].get('group') == group]
-
-    exps = sorted(set([x['collection'].get('experiment', 'na')
-                       for x in databases_]))
-    if len(exps) > 1:
-        exp = util.p_selectbox("Experiment", exps, f"{key}x")
-        groupname = f"{groupname}/{exp}"
-
+    if len(named_exps) > 1:
+        exp = util.p_selectbox("Experiment", named_exps, f"{key}x")
+        groupname = f"{group}/{exp}"
         databases_ = [
-                x for x in databases_
-                if x['collection'].get('experiment') == exp]
+            x for x in databases_
+            if x.get('collection', {}).get('experiment', '') == exp
+        ]
 
     titles = sorted([x['title'] for x in databases_])
     assert len(titles) == len(set(titles))
@@ -148,21 +148,23 @@ def database_selector(client, databases=None,
     assert len(final_) == 1
     db = final_[0]
 
-    layer_info = db['layers']
-    if len(layer_info) == 0:
-        st.warning("No layers in database?")
+    # Layer selection: layers is a dict {key: description}
+    layer_info = db.get('layers', {})
+    if not layer_info:
+        st.warning("No layers in database")
         st.stop()
 
     layers = list(layer_info.keys())
+    default_layer = db.get('default_layer')
     if len(layers) > 1:
         layer = util.p_selectbox(
             "Layer", layers, f"{key}l",
-            format_func = lambda x: layer_info[x])
+            default_value=default_layer,
+            format_func=lambda x: layer_info[x])
     else:
         layer = layers[0]
         st.write(f"Layer: {layer}")
 
-    # patch the db object
     db['groupname'] = groupname
     db['layer'] = layer
     return db
@@ -172,12 +174,12 @@ def gene_selector(client, database: dict, key: str = "gene"):
     """Gene autocomplete selector component
 
     Args:
-        client: AntClient instance
+        client: AnthiveClient instance
         database: Selected database dict
-        key: Unique key for the selectbox
+        key: URL param key prefix
 
     Returns:
-        Selected gene name or None
+        Selected gene name
     """
     if not database:
         st.warning("Select a database first")
@@ -199,10 +201,10 @@ def gene_selector(client, database: dict, key: str = "gene"):
 
 
 def numerical_selector(client, database: dict, key: str = "num"):
-    """Numerical autocomplete selector component
+    """Numerical field selector component
 
     Returns:
-        Selected cat name or None
+        Selected numerical metadata field name
     """
     if not database:
         st.warning("Select a database first")
@@ -219,16 +221,15 @@ def numerical_selector(client, database: dict, key: str = "num"):
 
 
 def categorical_selector(client, database: dict, key: str = "cat"):
-    """Categorical autocomplete selector component
+    """Categorical field selector component
 
     Returns:
-        Selected cat name or None
+        Selected categorical metadata field name
     """
     if not database:
         st.warning("Select a database first")
         st.stop()
 
-    # Load all genes for autocomplete (cached)
     mdfields = client.get_metadata_fields(
         db_id=database['id'])['categorical']
 
@@ -238,44 +239,3 @@ def categorical_selector(client, database: dict, key: str = "cat"):
 
     cat = util.p_selectbox('Cat', mdfields, key)
     return cat
-
-
-# def categorical_selector(client: AntClient, database: dict, key: str = "categorical"):
-#     """Categorical field selector component
-
-#     Args:
-#         client: AntClient instance
-#         database: Selected database dict
-#         key: Unique key for the selectbox
-
-#     Returns:
-#         Selected categorical field name or None
-#     """
-#     if not database:
-#         st.warning("Select a database first")
-#         return None
-
-#     # Get categorical fields (cached)
-#     metadata_fields = _fetch_metadata_fields(client, database['id'])
-#     fields = metadata_fields.get('categorical', [])
-
-#     if not fields:
-#         st.warning("No categorical fields found in this database")
-#         return None
-
-#     # Get initial value from URL params
-#     url_params = st.query_params
-#     initial_category = url_params.get("category")
-#     initial_index = 0
-
-#     if initial_category and initial_category in fields:
-#         initial_index = fields.index(initial_category)
-
-#     selected = st.selectbox(
-#         "Group By",
-#         options=fields,
-#         index=initial_index,
-#         key=key
-#     )
-
-#     return selected
