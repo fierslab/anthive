@@ -142,20 +142,15 @@ serve-browse:
 serve-streamlit:
 	@echo "Starting Anthive Streamlit server on http://localhost:8082"
 	@echo ""
-	@cd webapp-streamlit && \
-		STREAMLIT_SERVER_PORT=8082 \
-		STREAMLIT_SERVER_ADDRESS=0.0.0.0 \
-		STREAMLIT_SERVER_BASE_URL_PATH=streamlit \
-		STREAMLIT_BROWSER_GATHER_USAGE_STATS=false \
-		uvx \
-			--with streamlit \
-			--with matplotlib \
-			--with seaborn \
-			--with scipy \
-			--with numpy \
-			--with pandas \
-			--with requests \
-			streamlit run streamlit_app.py
+	@cd webapp-streamlit && uvx \
+		--with streamlit \
+		--with matplotlib \
+		--with seaborn \
+		--with scipy \
+		--with numpy \
+		--with pandas \
+		--with requests \
+		streamlit run streamlit_app.py
 
 dev-jupyter:
 	@./bin/dev-jupyter
