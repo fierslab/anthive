@@ -49,25 +49,30 @@
               } catch (_) {}
             }
 
-            // Register the SW and wait for it to become active and claim this page.
-            const registration = await navigator.serviceWorker.register(swUrl);
-            const activeSw = registration.active || registration.installing || registration.waiting;
-            if (activeSw && activeSw.state !== 'activated') {
-              await new Promise(resolve => {
-                activeSw.addEventListener('statechange', function handler() {
-                  if (this.state === 'activated') {
-                    activeSw.removeEventListener('statechange', handler);
-                    resolve();
-                  }
+            // Register and wait for SW to activate + claim, with a 5s safety timeout.
+            // The timeout prevents a hang if the SW fails (e.g. goes to 'redundant').
+            const timeout = new Promise(resolve => setTimeout(resolve, 5000));
+            const swReady = (async () => {
+              const registration = await navigator.serviceWorker.register(swUrl);
+              const sw = registration.installing || registration.waiting || registration.active;
+              if (sw && sw.state !== 'activated') {
+                await new Promise((resolve, reject) => {
+                  sw.addEventListener('statechange', function handler() {
+                    if (this.state === 'activated') { sw.removeEventListener('statechange', handler); resolve(); }
+                    else if (this.state === 'redundant') { sw.removeEventListener('statechange', handler); reject(new Error('SW redundant')); }
+                  });
                 });
-              });
-            }
-            // Now wait for the SW to claim this page as its client.
-            if (!navigator.serviceWorker.controller) {
-              await new Promise(resolve => {
-                navigator.serviceWorker.addEventListener('controllerchange', resolve, { once: true });
-              });
-            }
+              }
+              if (!navigator.serviceWorker.controller) {
+                await new Promise(resolve =>
+                  navigator.serviceWorker.addEventListener('controllerchange', resolve, { once: true })
+                );
+              }
+            })();
+
+            await Promise.race([swReady, timeout]).catch(err =>
+              console.warn('SW pre-registration did not complete, proceeding anyway:', err)
+            );
           } catch (err) {
             console.warn('Service worker pre-registration failed, proceeding anyway:', err);
           }
