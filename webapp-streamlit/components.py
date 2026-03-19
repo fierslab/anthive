@@ -111,6 +111,18 @@ def database_selector(client, databases=None,
         st.warning("No databases found")
         st.stop()
 
+    # Support deep-linking via short db_id (e.g. ?db=LC5/SPM)
+    default_group = None
+    default_exp = None
+    default_title = None
+    db_id_param = st.query_params.get(key)
+    if db_id_param:
+        matched = [x for x in databases if x.get('id') == db_id_param]
+        if matched:
+            default_group = matched[0]['collection'].get('group', 'default')
+            default_exp = matched[0]['collection'].get('experiment')
+            default_title = matched[0]['title']
+
     # Add groupname and shortname fields by parsing id
     groups = set()
     for db_item in databases:
@@ -122,7 +134,7 @@ def database_selector(client, databases=None,
         groups.add(db_item['collection'].get('group', 'default'))
 
     groups = sorted(groups)
-    group = util.p_selectbox("Group", groups, f"{key}g")
+    group = util.p_selectbox("Group", groups, f"{key}g", default_value=default_group)
 
     groupname = group
 
@@ -133,7 +145,7 @@ def database_selector(client, databases=None,
     exps = sorted(set([x['collection'].get('experiment', 'na')
                        for x in databases_]))
     if len(exps) > 1:
-        exp = util.p_selectbox("Experiment", exps, f"{key}x")
+        exp = util.p_selectbox("Experiment", exps, f"{key}x", default_value=default_exp)
         groupname = f"{groupname}/{exp}"
 
         databases_ = [
@@ -142,7 +154,7 @@ def database_selector(client, databases=None,
 
     titles = sorted([x['title'] for x in databases_])
     assert len(titles) == len(set(titles))
-    title = util.p_selectbox("DB", titles, f"{key}t")
+    title = util.p_selectbox("DB", titles, f"{key}t", default_value=default_title)
 
     final_ = [x for x in databases_ if x['title'] == title]
     assert len(final_) == 1
