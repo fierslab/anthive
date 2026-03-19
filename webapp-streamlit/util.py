@@ -17,6 +17,8 @@ def p_selectbox(title, options, key,
         initial_option = default_value
     if initial_option in options:
         initial_index = options.index(initial_option)
+    elif default_value is not None and default_value in options:
+        initial_index = options.index(default_value)
     else:
         initial_index = 0
 

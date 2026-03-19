@@ -154,10 +154,12 @@ def database_selector(client, databases=None,
         st.stop()
 
     layers = list(layer_info.keys())
+    default_layer = db.get('default_layer')
     if len(layers) > 1:
         layer = util.p_selectbox(
             "Layer", layers, f"{key}l",
-            format_func = lambda x: layer_info[x])
+            default_value=default_layer,
+            format_func=lambda x: layer_info[x])
     else:
         layer = layers[0]
         st.write(f"Layer: {layer}")
