@@ -71,8 +71,9 @@ class ConnectionPool:
     Phase 2 enhancement for concurrent request handling.
     """
 
-    def __init__(self, max_connections_per_db: int = 5):
+    def __init__(self, max_connections_per_db: int = 5, s3_config: Optional[Dict] = None):
         self.max_connections_per_db = max_connections_per_db
+        self.s3_config = s3_config or {}
         self.pools: Dict[str, List[Any]] = defaultdict(list)
         self.in_use: Dict[str, int] = defaultdict(int)
         self.locks: Dict[str, Lock] = defaultdict(Lock)
@@ -80,10 +81,35 @@ class ConnectionPool:
         self.hits = 0
         self.misses = 0
 
-    def get_connection(self, db_path: Path):
-        """Get a connection from the pool or create a new one"""
-        db_key = str(db_path)
+    def _make_connection(self, db_key: str):
+        """Create a new DuckDB connection for a local path or S3 URL"""
+        import duckdb
+        if db_key.startswith('s3://'):
+            conn = duckdb.connect()
+            conn.execute("INSTALL httpfs; LOAD httpfs;")
+            s3 = self.s3_config
+            if s3.get('endpoint'):
+                raw = s3['endpoint']
+                use_ssl = not raw.startswith('http://')
+                ep = raw.removeprefix('https://').removeprefix('http://')
+                conn.execute(f"SET s3_endpoint = '{ep}';")
+                conn.execute(f"SET s3_use_ssl = {'true' if use_ssl else 'false'};")
+            if s3.get('region'):
+                conn.execute(f"SET s3_region = '{s3['region']}';")
+            if s3.get('access_key_id'):
+                conn.execute(f"SET s3_access_key_id = '{s3['access_key_id']}';")
+            if s3.get('secret_access_key'):
+                conn.execute(f"SET s3_secret_access_key = '{s3['secret_access_key']}';")
+            if s3.get('use_path_style'):
+                conn.execute("SET s3_url_style = 'path';")
+            conn.execute(f"ATTACH '{db_key}' AS db (READ_ONLY);")
+            conn.execute("USE db;")
+        else:
+            conn = duckdb.connect(db_key, read_only=True)
+        return conn
 
+    def get_connection(self, db_key: str):
+        """Get a connection from the pool or create a new one"""
         with self.locks[db_key]:
             # Try to get an existing connection
             if self.pools[db_key]:
@@ -94,22 +120,18 @@ class ConnectionPool:
 
             # Create new connection if under limit
             if self.in_use[db_key] < self.max_connections_per_db:
-                import duckdb
-                conn = duckdb.connect(str(db_path), read_only=True)
+                conn = self._make_connection(db_key)
                 self.in_use[db_key] += 1
                 self.total_connections += 1
                 self.misses += 1
                 return conn
 
-            # Wait and retry if at limit (fallback)
+            # Fallback: create an extra connection beyond the pool limit
             self.misses += 1
-            import duckdb
-            return duckdb.connect(str(db_path), read_only=True)
+            return self._make_connection(db_key)
 
-    def return_connection(self, db_path: Path, conn):
+    def return_connection(self, db_key: str, conn):
         """Return a connection to the pool"""
-        db_key = str(db_path)
-
         with self.locks[db_key]:
             if len(self.pools[db_key]) < self.max_connections_per_db:
                 self.pools[db_key].append(conn)
@@ -153,10 +175,12 @@ class DatabaseRegistry:
     - Metadata field statistics (Phase 2)
     """
 
-    def __init__(self, data_folder: Path, connection_pool: ConnectionPool):
+    def __init__(self, data_folder: Path, connection_pool: ConnectionPool, s3_config: Optional[Dict] = None):
         self.data_folder = data_folder.resolve()
         self.connection_pool = connection_pool
-        self.databases: Dict[str, Path] = {}
+        self._s3_config = s3_config or {}
+        self.databases: Dict[str, str] = {}           # db_id → local path str or s3:// URL
+        self._db_md_bases: Dict[str, Path] = {}       # db_id → local .md file path
         self.metadata_cache: Dict[str, Dict[str, Any]] = {}
         self._databases_list_cache: Optional[List[Dict[str, Any]]] = None
         self._db_extra: Dict[str, Dict[str, str]] = {}  # db_id → {group_id, file_id, rel_path}
@@ -174,8 +198,8 @@ class DatabaseRegistry:
         self._scan_databases()
         self._cache_all_metadata()
 
-    def _resolve_db_id(self, resolved_item: Path, rel_path: Path) -> tuple:
-        """Compute (db_id, group_id, file_id) from .md files for a .duckdb path.
+    def _resolve_db_id(self, md_path: Path, rel_path: Path) -> tuple:
+        """Compute (db_id, group_id, file_id) from .md files.
 
         db_id is '{group_id}/{file_id}' derived from YAML metadata.
         Falls back to generate_group_id / generate_file_id when fields are absent.
@@ -183,36 +207,56 @@ class DatabaseRegistry:
         """
         top_level = rel_path.parts[0] if len(rel_path.parts) > 1 else rel_path.stem
 
-        # group_id: from index.md alongside the .duckdb file
-        index_meta, _ = parse_md_file(resolved_item.parent / 'index.md')
+        # group_id: from index.md in the same directory as the .md file
+        index_meta, _ = parse_md_file(md_path.parent / 'index.md')
         group_id = str(index_meta.get('group_id') or '').strip() or generate_group_id(top_level)
 
-        # file_id: from companion .md file
-        data_meta, _ = parse_md_file(resolved_item.with_suffix('.md'))
+        # file_id: from the .md file itself
+        data_meta, _ = parse_md_file(md_path)
         file_id = str(data_meta.get('id') or '').strip() or generate_file_id(rel_path.stem)
 
         return f"{group_id}/{file_id}", group_id, file_id
 
+    def _build_s3_url(self, duckdb_rel: Path) -> str:
+        """Build an S3 URL for a relative .duckdb path"""
+        bucket = self._s3_config['bucket']
+        prefix = (self._s3_config.get('prefix') or '').strip('/')
+        base = f"s3://{bucket}/{prefix}" if prefix else f"s3://{bucket}"
+        return f"{base}/{duckdb_rel}"
+
     def _scan_databases(self):
-        """Scan data folder for .duckdb files (follows symlinks)"""
+        """Scan data folder for databases via .md files (follows symlinks)"""
         if not self.data_folder.exists():
             raise FileNotFoundError(f"Data folder not found: {self.data_folder}")
 
         self.databases.clear()
+        self._db_md_bases.clear()
         self._db_extra.clear()
+
+        s3_enabled = bool(self._s3_config.get('bucket'))
 
         # Walk the directory tree, following symlinks
         def scan_recursive(path: Path, base: Path):
-            """Recursively scan for .duckdb files, following symlinks"""
+            """Recursively scan for .md files (excluding index.md), following symlinks"""
             try:
                 for item in path.iterdir():
-                    # Resolve symlinks
                     resolved_item = item.resolve()
 
-                    if resolved_item.is_file() and resolved_item.suffix == '.duckdb':
-                        # Calculate relative path from base
+                    if (resolved_item.is_file()
+                            and resolved_item.suffix == '.md'
+                            and resolved_item.name != 'index.md'):
                         try:
                             rel_path = item.relative_to(base)
+
+                            local_duckdb = resolved_item.with_suffix('.duckdb')
+                            if local_duckdb.exists():
+                                db_url = str(local_duckdb)
+                            elif s3_enabled:
+                                duckdb_rel = rel_path.with_suffix('.duckdb')
+                                db_url = self._build_s3_url(duckdb_rel)
+                            else:
+                                continue  # no .duckdb available locally or on S3
+
                             db_id, group_id, file_id = self._resolve_db_id(resolved_item, rel_path)
 
                             if db_id in self.databases:
@@ -221,11 +265,12 @@ class DatabaseRegistry:
                                       f"{existing} vs {rel_path} — using path fallback")
                                 db_id = str(rel_path.with_suffix(''))
 
-                            self.databases[db_id] = resolved_item
+                            self.databases[db_id] = db_url
+                            self._db_md_bases[db_id] = resolved_item
                             self._db_extra[db_id] = {
                                 'group_id': group_id,
                                 'file_id': file_id,
-                                'rel_path': str(rel_path),
+                                'rel_path': str(rel_path.with_suffix('.duckdb')),
                             }
                         except ValueError:
                             # Skip if can't make relative path
@@ -254,10 +299,10 @@ class DatabaseRegistry:
         self.metadata_cache.clear()
         errors = []
 
-        for db_id, db_path in self.databases.items():
+        for db_id, db_url in self.databases.items():
             try:
                 self.metadata_cache[db_id] = self._load_database_metadata(
-                    db_path, self._db_extra[db_id]
+                    db_id, self._db_extra[db_id]
                 )
             except Exception as e:
                 # Skip databases with errors
@@ -266,7 +311,7 @@ class DatabaseRegistry:
                 print(f"ERROR: Failed to load database metadata")
                 print(f"{'='*70}")
                 print(f"Database: {db_id}")
-                print(f"Path: {db_path}")
+                print(f"Path: {db_url}")
                 print(f"Error: {str(e)}")
                 print(f"{'='*70}\n")
 
@@ -274,6 +319,7 @@ class DatabaseRegistry:
         for db_id, _ in errors:
             if db_id in self.databases:
                 del self.databases[db_id]
+                self._db_md_bases.pop(db_id, None)
 
         if errors:
             print(f"\nWarning: Skipped {len(errors)} database(s) with errors")
@@ -281,21 +327,21 @@ class DatabaseRegistry:
         else:
             print(f"Cached metadata for {len(self.metadata_cache)} databases")
 
-    def _load_database_metadata(self, db_path: Path, extra: Dict[str, str]) -> Dict[str, Any]:
+    def _load_database_metadata(self, db_id: str, extra: Dict[str, str]) -> Dict[str, Any]:
         """Load metadata from .md files and database"""
+        md_path = self._db_md_bases[db_id]
+        db_url = self.databases[db_id]
+
         # Load per-file metadata
-        md_path = db_path.with_suffix('.md')
         file_metadata, _ = parse_md_file(md_path)
 
         # Load collection metadata from index.md
-        index_path = db_path.parent / 'index.md'
+        index_path = md_path.parent / 'index.md'
         collection_metadata, _ = parse_md_file(index_path)
 
         # Get database info using connection pool
-        conn = self.connection_pool.get_connection(db_path)
+        conn = self.connection_pool.get_connection(db_url)
         try:
-            # Use connection directly instead of AnthiveDB context manager
-            import duckdb
             n_cells = conn.execute("SELECT COUNT(*) FROM __cells").fetchone()[0]
             n_genes = conn.execute("SELECT COUNT(*) FROM __genes").fetchone()[0]
 
@@ -414,15 +460,21 @@ class DatabaseRegistry:
                 """).fetchall()
                 var_columns = [row[0] for row in var_fields]
 
+            # Module scoring availability (queried here to avoid using conn after return)
+            module_scoring_available = bool(conn.execute("""
+                SELECT COUNT(*) FROM information_schema.tables
+                WHERE table_name = '__gene_bins'
+            """).fetchone()[0])
+
         finally:
-            self.connection_pool.return_connection(db_path, conn)
+            self.connection_pool.return_connection(db_url, conn)
 
         # Combine metadata with enhanced structure
         metadata = {
             'group_id': extra['group_id'],
             'file_id': extra['file_id'],
             'path': extra['rel_path'],
-            'title': file_metadata.get('title', db_path.stem),
+            'title': file_metadata.get('title', md_path.stem),
             'n_cells': n_cells,
             'n_genes': n_genes,
 
@@ -471,10 +523,7 @@ class DatabaseRegistry:
             'top_num':    file_metadata.get('top_num'),
 
             # Module scoring availability
-            'module_scoring_available': bool(conn.execute("""
-                SELECT COUNT(*) FROM information_schema.tables
-                WHERE table_name = '__gene_bins'
-            """).fetchone()[0]),
+            'module_scoring_available': module_scoring_available,
         }
 
         # Add collection metadata if present
@@ -492,18 +541,18 @@ class DatabaseRegistry:
     def get_gene_list(self, db_id: str) -> List[str]:
         """Get cached gene list for a database (Phase 2 enhancement)"""
         if db_id not in self.gene_list_cache:
-            db_path = self.get_database_path(db_id)
-            conn = self.connection_pool.get_connection(db_path)
+            db_url = self.get_database_path(db_id)
+            conn = self.connection_pool.get_connection(db_url)
             try:
                 result = conn.execute("SELECT gene_name FROM __genes ORDER BY gene_name").fetchall()
                 self.gene_list_cache[db_id] = [row[0] for row in result]
             finally:
-                self.connection_pool.return_connection(db_path, conn)
+                self.connection_pool.return_connection(db_url, conn)
 
         return self.gene_list_cache[db_id]
 
-    def get_database_path(self, db_id: str) -> Path:
-        """Get absolute path for a database ID"""
+    def get_database_path(self, db_id: str) -> str:
+        """Get path or URL for a database ID"""
         if db_id not in self.databases:
             raise KeyError(f"Database '{db_id}' not found")
         return self.databases[db_id]
@@ -567,6 +616,7 @@ class DatabaseRegistry:
 
         print("\nRescanning data folder...")
         self.databases.clear()
+        self._db_md_bases.clear()
         self.metadata_cache.clear()
         self._databases_list_cache = None
         self._db_extra.clear()
@@ -1338,17 +1388,18 @@ def main():
 
     # Initialize global connection pool and registry (Phase 2)
     global registry, connection_pool
+    s3_config = config.get('s3') or {}
     try:
         print("Initializing connection pool...")
-        connection_pool = ConnectionPool(max_connections_per_db=5)
+        connection_pool = ConnectionPool(max_connections_per_db=5, s3_config=s3_config)
         print("Initializing database registry...")
-        registry = DatabaseRegistry(args.data_folder, connection_pool)
+        registry = DatabaseRegistry(args.data_folder, connection_pool, s3_config=s3_config)
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
     if len(registry.databases) == 0:
-        print(f"Warning: No .duckdb files found in {args.data_folder}")
+        print(f"Warning: No databases found in {args.data_folder}")
         print("The server will start but no databases will be available.")
 
     # Run md-check on the data folder (read-only: report only, never modify)

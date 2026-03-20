@@ -25,3 +25,29 @@ rest_api_port: 8080
 
 # Cache expiration in days (future use)
 cache_expiration_days: 7
+
+# S3-compatible storage for DuckDB files (optional)
+# If bucket is set and a local .duckdb is not found, ant-serve will attempt
+# to open the .duckdb from S3 at the equivalent relative path.
+s3:
+  # S3 endpoint URL. Leave null for AWS S3.
+  # For MinIO / Cloudflare R2 / etc: https://my-minio.example.com:9000
+  endpoint: null
+
+  # AWS region (used for AWS S3; can be any string for non-AWS)
+  region: us-east-1
+
+  # Credentials (leave null for anonymous/IAM access)
+  access_key_id: null
+  secret_access_key: null
+
+  # Bucket name (required to enable S3 fallback)
+  bucket: null
+
+  # Optional path prefix inside the bucket, e.g. "h5adstore"
+  # The final S3 path is: s3://<bucket>/<prefix>/<relative_duckdb_path>
+  prefix: ""
+
+  # Set true for MinIO / path-style endpoints (s3://bucket/key)
+  # Set false (default) for AWS-style virtual-hosted (bucket.s3.region.amazonaws.com)
+  use_path_style: false
