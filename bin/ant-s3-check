@@ -114,9 +114,10 @@ def format_size(n_bytes: Optional[int]) -> str:
     return f"{n_bytes:.1f} PB"
 
 
-def scan_md_files(data_folder: Path):
-    """Yield (md_path, rel_path) for all non-index .md files under data_folder"""
-    def _recurse(path: Path, base: Path):
+def scan_md_files(scan_root: Path, base: Path):
+    """Yield (md_path, rel_path) for all non-index .md files under scan_root.
+    rel_path is always relative to base (the data folder root) so S3 keys stay correct."""
+    def _recurse(path: Path):
         try:
             for item in sorted(path.iterdir()):
                 resolved = item.resolve()
@@ -126,11 +127,11 @@ def scan_md_files(data_folder: Path):
                     except ValueError:
                         pass
                 elif resolved.is_dir():
-                    yield from _recurse(item, base)
+                    yield from _recurse(item)
         except (PermissionError, OSError):
             pass
 
-    yield from _recurse(data_folder, data_folder)
+    yield from _recurse(scan_root)
 
 
 def main():
@@ -143,6 +144,12 @@ def main():
         type=Path,
         default=Path('./data'),
         help='Path to data folder (default: ./data)'
+    )
+    parser.add_argument(
+        'subfolder',
+        nargs='?',
+        default=None,
+        help='Optional subfolder to scan (relative to data folder, e.g. G24)'
     )
     parser.add_argument(
         '--require-s3',
@@ -160,6 +167,14 @@ def main():
     if not data_folder.exists():
         print(f"Error: data folder not found: {data_folder}", file=sys.stderr)
         sys.exit(1)
+
+    # Narrow scan to a subfolder if specified
+    scan_root = data_folder
+    if args.subfolder:
+        scan_root = data_folder / args.subfolder
+        if not scan_root.exists():
+            print(f"Error: subfolder not found: {scan_root}", file=sys.stderr)
+            sys.exit(1)
 
     if not bucket:
         print("No S3 bucket configured (s3.bucket is not set in anthive.yaml).")
@@ -181,7 +196,8 @@ def main():
             print(f"Warning: could not connect to S3: {error}", file=sys.stderr)
             s3_client = None
 
-    print(f"Scanning: {data_folder}")
+    scan_label = str(scan_root) if scan_root == data_folder else f"{data_folder} (subfolder: {args.subfolder})"
+    print(f"Scanning: {scan_label}")
     print()
 
     # Column widths
@@ -198,7 +214,7 @@ def main():
     n_missing = 0
     n_total = 0
 
-    for md_path, rel_path in scan_md_files(data_folder):
+    for md_path, rel_path in scan_md_files(scan_root, data_folder):
         n_total += 1
 
         db_id, _, _ = resolve_db_id(md_path, rel_path)
