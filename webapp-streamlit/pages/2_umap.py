@@ -1,7 +1,6 @@
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
-import seaborn
 import seaborn as sns
 import streamlit as st
 import util
@@ -96,7 +95,10 @@ def plotfunc(ax):
 
     sns.scatterplot(data, **kwargs)
     if colorby in ['Gene', 'Numerical']:
-        ax.figure.colorbar(sm, ax=ax, label="total_counts")
+        ax.figure.colorbar(sm, ax=ax, label=colorfield)
+    elif colorby == 'Categorical':
+        sns.move_legend(ax, loc='upper left', bbox_to_anchor=(1, 1),
+                        frameon=False, title=colorfield, fontsize=8)
 
 
 showplot(

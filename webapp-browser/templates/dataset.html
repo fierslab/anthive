@@ -41,35 +41,59 @@
 
 <!-- Info -->
 {% if dataset_meta %}
-{% set has_info = dataset_meta.organism or dataset_meta.sex or dataset_meta.age or dataset_meta.tissue or dataset_meta.celltype or dataset_meta.region or dataset_meta.disease or dataset_meta.condition or dataset_meta.strain or dataset_meta.technology or dataset_meta.accession or dataset_meta.doi or dataset_meta.link %}
-{% if has_info %}
+
+{# Jinja2 macros for consistent metadata rows #}
+{% macro meta_row(key, value) %}
+<tr{% if not value %} style="opacity:0.35"{% endif %}>
+    <td class="mk">{{ key }}</td>
+    <td>{{ value if value else '—' }}</td>
+</tr>
+{% endmacro %}
+
+{% macro meta_row_link(key, value, href) %}
+<tr{% if not value %} style="opacity:0.35"{% endif %}>
+    <td class="mk">{{ key }}</td>
+    <td>{% if value and href %}<a href="{{ href }}">{{ value }}</a>{% elif value %}{{ value }}{% else %}—{% endif %}</td>
+</tr>
+{% endmacro %}
+
+{% macro meta_row_list(key, values) %}
+<tr{% if not values %} style="opacity:0.35"{% endif %}>
+    <td class="mk">{{ key }}</td>
+    <td>{{ values | join(', ') if values else '—' }}</td>
+</tr>
+{% endmacro %}
+
 <h2>Info</h2>
 <table class="narrow">
     <tbody>
-    {% if dataset_meta.organism %}<tr><td class="mk">organism</td><td>{{ dataset_meta.organism }}</td></tr>{% endif %}
-    {% if dataset_meta.sex %}<tr><td class="mk">sex</td><td>{{ dataset_meta.sex }}</td></tr>{% endif %}
-    {% if dataset_meta.age %}<tr><td class="mk">age</td><td>{{ dataset_meta.age }}</td></tr>{% endif %}
-    {% if dataset_meta.tissue %}<tr><td class="mk">tissue</td><td>{{ dataset_meta.tissue | join(', ') }}</td></tr>{% endif %}
-    {% if dataset_meta.celltype %}<tr><td class="mk">celltype</td><td>{{ dataset_meta.celltype }}</td></tr>{% endif %}
-    {% if dataset_meta.region %}<tr><td class="mk">region</td><td>{{ dataset_meta.region | join(', ') }}</td></tr>{% endif %}
-    {% if dataset_meta.disease %}<tr><td class="mk">disease</td><td>{{ dataset_meta.disease | join(', ') }}</td></tr>{% endif %}
-    {% if dataset_meta.condition %}<tr><td class="mk">condition</td><td>{{ dataset_meta.condition | join(', ') }}</td></tr>{% endif %}
-    {% if dataset_meta.strain %}<tr><td class="mk">strain</td><td>{{ dataset_meta.strain }}</td></tr>{% endif %}
-    {% if dataset_meta.technology %}<tr><td class="mk">technology</td><td>{{ dataset_meta.technology | join(', ') }}</td></tr>{% endif %}
-    {% if dataset_meta.accession %}
-    <tr><td class="mk">accession</td><td>
-        {% if dataset_meta.accession_url %}<a href="{{ dataset_meta.accession_url }}">{{ dataset_meta.accession }}</a>{% else %}{{ dataset_meta.accession }}{% endif %}
-    </td></tr>
-    {% endif %}
+    {{ meta_row('organism', dataset_meta.organism) }}
+    {{ meta_row('sex', dataset_meta.sex) }}
+    {{ meta_row('age', dataset_meta.age) }}
+    {{ meta_row_list('tissue', dataset_meta.tissue) }}
+    {{ meta_row('celltype', dataset_meta.celltype) }}
+    {{ meta_row_list('region', dataset_meta.region) }}
+    {{ meta_row_list('disease', dataset_meta.disease) }}
+    {{ meta_row_list('condition', dataset_meta.condition) }}
+    {{ meta_row('strain', dataset_meta.strain) }}
+    {{ meta_row_list('technology', dataset_meta.technology) }}
+    {{ meta_row_link('accession', dataset_meta.accession, dataset_meta.accession_url) }}
+    {% if dataset_meta.doi %}
     {% for doi_item in dataset_meta.doi %}
     <tr><td class="mk">doi</td><td><a href="https://doi.org/{{ doi_item }}">{{ doi_item }}</a></td></tr>
     {% endfor %}
+    {% else %}
+    <tr style="opacity:0.35"><td class="mk">doi</td><td>—</td></tr>
+    {% endif %}
+    {% if dataset_meta.link %}
     {% for url_item in dataset_meta.link %}
     <tr><td class="mk">link</td><td><a href="{{ url_item }}">{{ url_item }}</a></td></tr>
     {% endfor %}
+    {% else %}
+    <tr style="opacity:0.35"><td class="mk">link</td><td>—</td></tr>
+    {% endif %}
     </tbody>
 </table>
-{% endif %}
 {% endif %}
 
 {% if info %}
@@ -87,6 +111,8 @@
                     <td>
                         {% if col.type == 'cat' and has_duckdb %}
                         <a href="/streamlit/cat?db={{ db_id | urlencode }}&cat={{ col.name | urlencode }}&ytype=Count" title="View in Streamlit">{{ col.name }}</a>
+                        {% elif col.type == 'num' and has_duckdb %}
+                        <a href="/streamlit/num?db={{ db_id | urlencode }}&num={{ col.name | urlencode }}" title="View in Streamlit">{{ col.name }}</a>
                         {% else %}
                         {{ col.name }}
                         {% endif %}
@@ -146,6 +172,9 @@
 <h2>Embeddings ({{ info.obsm_keys|length }})</h2>
 <div style="padding:4px 0">
     {% for emb in info.obsm_keys %}<code>{{ emb }}</code> {% endfor %}
+    {% if has_duckdb %}
+    <a href="/streamlit/umap?db={{ db_id | urlencode }}" class="chip" style="margin-left:8px">open UMAP →</a>
+    {% endif %}
 </div>
 {% endif %}
 
@@ -172,7 +201,7 @@
 <div style="margin-bottom:4px">
     <span class="mk" style="display:inline-block;vertical-align:middle">numerical</span>
     {% for col in dataset_meta.top_num %}
-    <code style="margin-right:4px">{{ col }}</code>
+    <a href="/streamlit/num?db={{ db_id | urlencode }}&num={{ col | urlencode }}" class="chip">{{ col }}</a>
     {% endfor %}
 </div>
 {% endif %}
