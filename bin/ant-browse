@@ -5,20 +5,20 @@
 #   "uvicorn>=0.27.0",
 #   "jinja2>=3.1.0",
 #   "markdown>=3.5.0",
-#   "pyyaml>=6.0",
+#   "requests>=2.31.0",
 # ]
 # ///
 """
 ant-browse - Anthive Web Browser Server
 
-Serves HTML interface for browsing h5ad datasets.
-Runs on separate port from API server for clean separation.
+Serves HTML interface for browsing single-cell datasets.
+All data is fetched from the ant-serve REST API.
 
 Usage:
-    ant browse [--data-folder PATH] [--host HOST] [--port PORT]
+    ant browse [--api-url URL] [--host HOST] [--port PORT]
 
 Example:
-    ant browse --data-folder ./data --host 0.0.0.0 --port 8081
+    ant browse --api-url http://localhost:8080 --host 0.0.0.0 --port 8081
 """
 
 import argparse
@@ -52,7 +52,7 @@ spec.loader.exec_module(browser_module)
 browser_router = browser_module.router
 
 
-def create_app(data_folder: Path) -> FastAPI:
+def create_app(api_url: str) -> FastAPI:
     """Create FastAPI app for browser"""
 
     app = FastAPI(
@@ -72,8 +72,8 @@ def create_app(data_folder: Path) -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Store data folder in app state for routes to access
-    app.state.data_folder = data_folder
+    # Store API URL in app state for routes to access
+    app.state.api_url = api_url
 
     # Include browser router
     app.include_router(browser_router)
@@ -92,10 +92,9 @@ def main():
     config = get_config()
 
     parser.add_argument(
-        '--data-folder',
-        type=Path,
-        default=Path('./data/h5adstore'),
-        help='Path to data folder containing h5ad files (default: ./data/h5adstore)'
+        '--api-url',
+        default=f"http://{config.get('rest_api_host', 'localhost')}:{config.get('rest_api_port', 8080)}",
+        help='URL of the ant-serve REST API (default: from config or http://localhost:8080)'
     )
     parser.add_argument(
         '--host',
@@ -116,20 +115,14 @@ def main():
 
     args = parser.parse_args()
 
-    # Validate data folder
-    if not args.data_folder.exists():
-        print(f"ERROR: Data folder not found: {args.data_folder}", file=sys.stderr)
-        print(f"Create it or specify correct path with --data-folder", file=sys.stderr)
-        sys.exit(1)
-
     # Create app
-    app = create_app(args.data_folder)
+    app = create_app(args.api_url)
 
     # Print startup info
     print(f"\n{'='*60}")
     print(f"Starting Anthive Web Browser Server")
     print(f"{'='*60}")
-    print(f"Data folder: {args.data_folder}")
+    print(f"API URL: {args.api_url}")
     print(f"Listening on: http://{args.host}:{args.port}")
     print(f"{'='*60}\n")
 
