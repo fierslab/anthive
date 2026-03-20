@@ -201,12 +201,24 @@ def main():
     print()
 
     # Column widths
-    id_width = 36
+    id_width  = 36
+    loc_width = 12   # "✓ 150.0 GB" = 11 chars
+    s3_width  = 14   # same + "(not checked)" = 13 chars
+    sep = ' | '
     header = (
-        f"{'Database ID':<{id_width}}  {'Local':<6}  {'S3':<18}  Status"
+        f"{'Database ID':<{id_width}}{sep}"
+        f"{'Local':>{loc_width}}{sep}"
+        f"{'S3':>{s3_width}}{sep}"
+        f"Status"
+    )
+    divider = (
+        f"{'-' * id_width}-+-"
+        f"{'-' * loc_width}-+-"
+        f"{'-' * s3_width}-+-"
+        f"{'-' * 20}"
     )
     print(header)
-    print('-' * len(header))
+    print(divider)
 
     n_local_only = 0
     n_s3_only = 0
@@ -253,19 +265,25 @@ def main():
             status = '*** MISSING ***'
             n_missing += 1
 
-        local_col = f"{'✓' if has_local else '✗'}"
         if has_local and local_size is not None:
-            local_col += f" {format_size(local_size)}"
+            local_col = f"✓ {format_size(local_size):>8}"
+        else:
+            local_col = '✓' if has_local else '✗'
 
         if not s3_checked:
             s3_col = '(not checked)'
         elif s3_size is not None:
-            s3_col = f"✓ {format_size(s3_size)}"
+            s3_col = f"✓ {format_size(s3_size):>8}"
         else:
             s3_col = '✗'
 
         db_id_display = db_id if len(db_id) <= id_width else db_id[:id_width - 1] + '…'
-        print(f"{db_id_display:<{id_width}}  {local_col:<6}  {s3_col:<18}  {status}")
+        print(
+            f"{db_id_display:<{id_width}}{sep}"
+            f"{local_col:>{loc_width}}{sep}"
+            f"{s3_col:>{s3_width}}{sep}"
+            f"{status}"
+        )
 
     print()
     print(f"Total: {n_total} dataset(s)")
