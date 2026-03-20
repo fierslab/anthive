@@ -141,6 +141,11 @@ def main():
         default=Path('./data'),
         help='Path to data folder (default: ./data)'
     )
+    parser.add_argument(
+        '--require-s3',
+        action='store_true',
+        help='Treat local-only databases (no S3 copy) as errors and exit 1'
+    )
     args = parser.parse_args()
 
     config = get_config()
@@ -216,8 +221,12 @@ def main():
             status = 'ok (local + S3)'
             n_both += 1
         elif has_local:
-            status = 'ok (local only)' if s3_checked else 'local only'
-            n_local_only += 1
+            if s3_checked and args.require_s3:
+                status = '*** NO S3 BACKUP ***'
+                n_missing += 1
+            else:
+                status = 'ok (local only)' if s3_checked else 'local only'
+                n_local_only += 1
         elif s3_size is not None:
             status = 'ok (S3 fallback)'
             n_s3_only += 1
@@ -246,7 +255,10 @@ def main():
         print(f"  Local only : {n_local_only}")
         print(f"  S3 only    : {n_s3_only}")
         if n_missing:
-            print(f"  Missing    : {n_missing}  ← no .duckdb found locally or on S3")
+            if args.require_s3:
+                print(f"  Errors     : {n_missing}  ← missing S3 copy or no .duckdb at all")
+            else:
+                print(f"  Missing    : {n_missing}  ← no .duckdb found locally or on S3")
     else:
         n_local = n_local_only + n_both
         print(f"  With local .duckdb : {n_local}")
