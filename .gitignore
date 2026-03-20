@@ -33,6 +33,9 @@ build/
 # Rclone (keep example, ignore actual config)
 rclone.conf
 
+# User config (may contain credentials)
+anthive.yaml
+
 # Deleted/broken DuckDB files
 *.duckdb.deleted
 *.duckdb.wal.deleted
