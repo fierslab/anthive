@@ -10,8 +10,8 @@
       }
     }
   },
-  "LiteBuildConfig": {
-    "federated_extensions": [
+    "LiteBuildConfig": {
+	"federated_extensions": [
       "https://cdn.jsdelivr.net/npm/@jupyter-widgets/jupyterlab-manager@5.0.9/dist/jupyter-widgets-jupyterlab-manager.tgz"
     ],
     "ignore_sys_prefix": false
