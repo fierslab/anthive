@@ -44,6 +44,9 @@ def make_s3_client(s3_cfg: dict):
 
     endpoint = s3_cfg.get('endpoint')
     if endpoint:
+        # boto3 requires a full URL with scheme
+        if not endpoint.startswith(('http://', 'https://')):
+            endpoint = f"https://{endpoint}"
         kwargs['endpoint_url'] = endpoint
 
     region = s3_cfg.get('region')
