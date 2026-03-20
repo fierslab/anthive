@@ -56,6 +56,7 @@ trap check_changes EXIT
 # ── prepare source folder ──────────────────────────────────────────────────
 chmod -R u+rw webapp-src/jupyter
 cp antclient/antclient.py webapp-src/jupyter/antclient.py
+cp antclient/anthelper.py webapp-src/jupyter/anthelper.py
 
 echo "Starting JupyterLab on http://localhost:9090"
 echo ""
