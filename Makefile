@@ -137,7 +137,7 @@ serve-api:
 serve-browse:
 	@echo "Starting Anthive Web Browser on http://localhost:8081"
 	@echo ""
-	@./bin/ant-browse --data-folder ./data/h5adstore --host 0.0.0.0 --port 8081
+	@./bin/ant-browse --api-url http://localhost:8080 --host 0.0.0.0 --port 8081
 
 serve-streamlit:
 	@echo "Starting Anthive Streamlit server on http://localhost:8082"
