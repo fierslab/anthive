@@ -26,6 +26,9 @@
             <th>Collection</th>
             <th>n</th>
             <th>Cells</th>
+            <th title="organism">🧬</th>
+            <th title="technology">🔬</th>
+            <th title="cell type">🦠</th>
         </tr>
     </thead>
     <tbody>
@@ -38,6 +41,9 @@
             </td>
             <td style="color:#666">{{ folder.dataset_count }}</td>
             <td style="color:#555">{{ "{:,}".format(folder.total_cells) if folder.total_cells else "—" }}</td>
+            <td style="color:#555;font-size:11px" {% if folder.organism.full %}title="{{ folder.organism.full }}"{% endif %}>{{ folder.organism.abbrev }}</td>
+            <td style="color:#555;font-size:11px" {% if folder.technology.full %}title="{{ folder.technology.full }}"{% endif %}>{{ folder.technology.abbrev }}</td>
+            <td style="color:#555;font-size:11px" {% if folder.celltype.full %}title="{{ folder.celltype.full }}"{% endif %}>{{ folder.celltype.abbrev }}</td>
         </tr>
         {% endfor %}
     </tbody>

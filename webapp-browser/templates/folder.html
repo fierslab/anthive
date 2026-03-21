@@ -25,6 +25,9 @@
             <th>ID</th>
             <th>Dataset</th>
             <th>Cells × Genes</th>
+            <th title="organism">🧬</th>
+            <th title="technology">🔬</th>
+            <th title="cell type">🦠</th>
             <th>Layers</th>
             <th>Embeddings</th>
             <th>Size</th>
@@ -44,6 +47,9 @@
                 {{ "{:,}".format(dataset.n_obs) }} × {{ "{:,}".format(dataset.n_vars) }}
                 {% else %}—{% endif %}
             </td>
+            <td style="color:#555;font-size:11px" {% if dataset.organism.full %}title="{{ dataset.organism.full }}"{% endif %}>{{ dataset.organism.abbrev }}</td>
+            <td style="color:#555;font-size:11px" {% if dataset.technology.full %}title="{{ dataset.technology.full }}"{% endif %}>{{ dataset.technology.abbrev }}</td>
+            <td style="color:#555;font-size:11px" {% if dataset.celltype.full %}title="{{ dataset.celltype.full }}"{% endif %}>{{ dataset.celltype.abbrev }}</td>
             <td style="color:#555" title="{{ dataset.layers|join(', ') if dataset.layers else 'none' }}">
                 {{ dataset.layers|length if dataset.layers else "—" }}
             </td>

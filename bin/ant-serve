@@ -337,21 +337,33 @@ class DatabaseRegistry:
         self.metadata_cache.clear()
         errors = []
 
+        s3_warnings = []
         for db_id, db_url in self.databases.items():
             try:
                 self.metadata_cache[db_id] = self._load_database_metadata(
                     db_id, self._db_extra[db_id]
                 )
             except Exception as e:
-                # Skip databases with errors
-                errors.append((db_id, str(e)))
-                print(f"\n{'='*70}")
-                print(f"ERROR: Failed to load database metadata")
-                print(f"{'='*70}")
-                print(f"Database: {db_id}")
-                print(f"Path: {db_url}")
-                print(f"Error: {str(e)}")
-                print(f"{'='*70}\n")
+                error_msg = str(e)
+                is_s3_missing = (
+                    db_url.startswith('s3://')
+                    and 'does not exist' in error_msg.lower()
+                )
+                if is_s3_missing:
+                    s3_warnings.append(db_id)
+                else:
+                    errors.append((db_id, error_msg))
+                    print(f"\n{'='*70}")
+                    print(f"ERROR: Failed to load database metadata")
+                    print(f"{'='*70}")
+                    print(f"Database: {db_id}")
+                    print(f"Path: {db_url}")
+                    print(f"Error: {error_msg}")
+                    print(f"{'='*70}\n")
+
+        if s3_warnings:
+            print(f"  S3 not accessible ({len(s3_warnings)}): {', '.join(s3_warnings)}")
+            errors.extend((db_id, 'S3 not accessible') for db_id in s3_warnings)
 
         # Remove databases that failed to load from the registry
         for db_id, _ in errors:

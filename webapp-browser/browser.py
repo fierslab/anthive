@@ -75,6 +75,71 @@ def format_number(value: float) -> str:
     return f"{value:,.4f}"
 
 
+# ── metadata summary helpers ───────────────────────────────────────────────────
+
+_ORGANISM_ABBREV = {
+    'human': 'Hs', 'homo sapiens': 'Hs',
+    'mouse': 'Mm', 'mus musculus': 'Mm',
+    'rat': 'Rn', 'rattus norvegicus': 'Rn',
+    'zebrafish': 'Dr', 'danio rerio': 'Dr',
+    'drosophila': 'Dm', 'drosophila melanogaster': 'Dm',
+    'macaque': 'Mf', 'rhesus macaque': 'Mf', 'macaca fascicularis': 'Mf',
+    'c. elegans': 'Ce', 'caenorhabditis elegans': 'Ce',
+}
+
+_TECHNOLOGY_ABBREV = {
+    '10x_chromium': '10x', '10x': '10x', '10x chromium': '10x',
+    '10x_scrna': '10x', '10x_snrna': '10x-sn',
+    'smart-seq2': 'SS2', 'smartseq2': 'SS2', 'smart_seq2': 'SS2',
+    'visium': 'vis',
+    'xenium': 'xen',
+    'multiome': 'mult',
+    'snrna-seq': 'snRNA', 'snrna_seq': 'snRNA', 'snrna-seq (10x)': 'snRNA',
+    'scrna-seq': 'scRNA', 'scrna_seq': 'scRNA',
+    'slide-seq': 'slide', 'slide_seq': 'slide', 'slide-tag': 'slide',
+    'proteomics': 'prot',
+    'merfish': 'MER', 'seqfish': 'sFISH',
+}
+
+
+def _summarize_meta_field(
+    dbs: List[Dict],
+    field: str,
+    abbrev_map: Optional[Dict] = None,
+    max_len: Optional[int] = None,
+) -> Dict[str, str]:
+    """Return {'abbrev': ..., 'full': ...} summarising a metadata field across datasets.
+
+    Single unique value → abbreviated form + full value as tooltip.
+    Multiple unique values → 'mix' + all values listed as tooltip.
+    All null → '—' with no tooltip.
+    """
+    raw_values = [db.get(field) for db in dbs]
+    flat: List[str] = []
+    for raw_value in raw_values:
+        if isinstance(raw_value, list):
+            flat.extend(str(v) for v in raw_value if v)
+        elif raw_value:
+            flat.append(str(raw_value))
+
+    unique = sorted(set(flat))
+
+    if not unique:
+        return {'abbrev': '—', 'full': ''}
+
+    if len(unique) == 1:
+        full_value = unique[0]
+        if abbrev_map:
+            abbrev = abbrev_map.get(full_value.lower(), full_value[:6])
+        elif max_len and len(full_value) > max_len:
+            abbrev = full_value[:max_len] + '…'
+        else:
+            abbrev = full_value
+        return {'abbrev': abbrev, 'full': full_value}
+
+    return {'abbrev': 'mix', 'full': ', '.join(unique)}
+
+
 # ── data builders ──────────────────────────────────────────────────────────────
 
 def _all_databases(api_url: str) -> List[Dict]:
@@ -110,6 +175,9 @@ def get_collection_list(api_url: str) -> List[Dict]:
             'update_pending': 0,
             'last_modified': 0,
             'description': description,
+            'organism': _summarize_meta_field(dbs, 'organism', abbrev_map=_ORGANISM_ABBREV),
+            'technology': _summarize_meta_field(dbs, 'technology', abbrev_map=_TECHNOLOGY_ABBREV),
+            'celltype': _summarize_meta_field(dbs, 'celltype', max_len=10),
         })
 
     collections.sort(key=lambda c: c['name'])
@@ -151,6 +219,9 @@ def get_collection_datasets(api_url: str, group_id: str) -> tuple:
             'has_metadata': True,
             'has_duckdb': True,
             'update_pending': False,
+            'organism': _summarize_meta_field([db], 'organism', abbrev_map=_ORGANISM_ABBREV),
+            'technology': _summarize_meta_field([db], 'technology', abbrev_map=_TECHNOLOGY_ABBREV),
+            'celltype': _summarize_meta_field([db], 'celltype', max_len=10),
         })
 
     return datasets, description_html
