@@ -89,21 +89,24 @@ class ConnectionPool:
             conn = duckdb.connect()
             conn.execute("INSTALL httpfs; LOAD httpfs;")
             s3 = self.s3_config
-            if s3.get('endpoint'):
-                raw = s3['endpoint']
-                use_ssl = not raw.startswith('http://')
-                ep = raw.removeprefix('https://').removeprefix('http://')
-                conn.execute(f"SET s3_endpoint = '{ep}';")
-                conn.execute(f"SET s3_use_ssl = {'true' if use_ssl else 'false'};")
+            raw_ep = (s3.get('endpoint') or '').strip()
+            ep_host = raw_ep.removeprefix('https://').removeprefix('http://')
+            use_ssl = not raw_ep.startswith('http://')
+            use_path_style = s3.get('use_path_style') or bool(ep_host)
+            # DuckDB 1.x: use CREATE SECRET instead of SET s3_* variables
+            fields = [
+                f"TYPE S3",
+                f"KEY_ID '{s3.get('access_key_id') or ''}'",
+                f"SECRET '{s3.get('secret_access_key') or ''}'",
+            ]
+            if ep_host:
+                fields.append(f"ENDPOINT '{ep_host}'")
             if s3.get('region'):
-                conn.execute(f"SET s3_region = '{s3['region']}';")
-            if s3.get('access_key_id'):
-                conn.execute(f"SET s3_access_key_id = '{s3['access_key_id']}';")
-            if s3.get('secret_access_key'):
-                conn.execute(f"SET s3_secret_access_key = '{s3['secret_access_key']}';")
-            # Use path-style if explicitly set, or auto-enable for custom endpoints
-            if s3.get('use_path_style') or s3.get('endpoint'):
-                conn.execute("SET s3_url_style = 'path';")
+                fields.append(f"REGION '{s3['region']}'")
+            fields.append(f"USE_SSL {'true' if use_ssl else 'false'}")
+            if use_path_style:
+                fields.append("URL_STYLE 'path'")
+            conn.execute(f"CREATE OR REPLACE SECRET _s3 ({', '.join(fields)})")
             conn.execute(f"ATTACH '{db_key}' AS db (READ_ONLY);")
             conn.execute("USE db;")
         else:
