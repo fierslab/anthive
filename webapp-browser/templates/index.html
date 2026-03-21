@@ -26,7 +26,6 @@
             <th>Collection</th>
             <th>n</th>
             <th>Cells</th>
-            <th>St</th>
         </tr>
     </thead>
     <tbody>
@@ -35,22 +34,10 @@
             <td style="color:#888;font-size:11px">{{ folder.group_id or "—" }}</td>
             <td>
                 <a href="/browse/{{ folder.browse_id }}"><strong>{{ folder.name }}</strong></a>
-                {% if folder.group_id and folder.group_id != folder.name %}<span style="color:#999;font-size:11px"> ({{ folder.name }})</span>{% endif %}
-                {% if folder.description %}<br><span style="color:#888;font-size:11px">{{ folder.description }}</span>{% endif %}
+                {% if folder.description and folder.description != 'na' %}<br><span style="color:#888;font-size:11px">{{ folder.description }}</span>{% endif %}
             </td>
             <td style="color:#666">{{ folder.dataset_count }}</td>
             <td style="color:#555">{{ "{:,}".format(folder.total_cells) if folder.total_cells else "—" }}</td>
-            <td>
-                {% if folder.update_pending %}
-                <span class="dot dot-pending" title="update pending: {{ folder.update_pending }} dataset(s) need re-conversion"></span>
-                {% elif folder.all_converted %}
-                <span class="dot dot-ok" title="all converted ({{ folder.duckdb_count }}/{{ folder.dataset_count }})"></span>
-                {% elif folder.some_converted %}
-                <span class="dot dot-warn" title="partially converted ({{ folder.duckdb_count }}/{{ folder.dataset_count }})"></span>
-                {% else %}
-                <span class="dot dot-err" title="not converted"></span>
-                {% endif %}
-            </td>
         </tr>
         {% endfor %}
     </tbody>
