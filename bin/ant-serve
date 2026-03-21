@@ -6,6 +6,7 @@
 #   "duckdb>=0.10.0",
 #   "pandas>=2.0.0",
 #   "pyyaml>=6.0",
+#   "boto3>=1.26.0",
 # ]
 # ///
 """
@@ -224,6 +225,32 @@ class DatabaseRegistry:
         base = f"s3://{bucket}/{prefix}" if prefix else f"s3://{bucket}"
         return f"{base}/{duckdb_rel}"
 
+    def _make_s3_client(self):
+        """Create a boto3 S3 client from config"""
+        import boto3
+        s3 = self._s3_config
+        endpoint = s3.get('endpoint') or None
+        if endpoint and '://' not in endpoint:
+            endpoint = 'https://' + endpoint
+        return boto3.client(
+            's3',
+            endpoint_url=endpoint,
+            region_name=s3.get('region') or 'us-east-1',
+            aws_access_key_id=s3.get('access_key_id') or None,
+            aws_secret_access_key=s3.get('secret_access_key') or None,
+        )
+
+    def _s3_key_exists(self, s3_client, duckdb_rel: Path) -> bool:
+        """Return True if the S3 object exists (HEAD request)"""
+        bucket = self._s3_config['bucket']
+        prefix = (self._s3_config.get('prefix') or '').strip('/')
+        key = f"{prefix}/{duckdb_rel}" if prefix else str(duckdb_rel)
+        try:
+            s3_client.head_object(Bucket=bucket, Key=key)
+            return True
+        except Exception:
+            return False
+
     def _scan_databases(self):
         """Scan data folder for databases via .md files (follows symlinks)"""
         if not self.data_folder.exists():
@@ -234,6 +261,7 @@ class DatabaseRegistry:
         self._db_extra.clear()
 
         s3_enabled = bool(self._s3_config.get('bucket'))
+        s3_client = self._make_s3_client() if s3_enabled else None
 
         # Walk the directory tree, following symlinks
         def scan_recursive(path: Path, base: Path):
@@ -253,6 +281,8 @@ class DatabaseRegistry:
                                 db_url = str(local_duckdb)
                             elif s3_enabled:
                                 duckdb_rel = rel_path.with_suffix('.duckdb')
+                                if not self._s3_key_exists(s3_client, duckdb_rel):
+                                    continue  # not on S3 either
                                 db_url = self._build_s3_url(duckdb_rel)
                             else:
                                 continue  # no .duckdb available locally or on S3
