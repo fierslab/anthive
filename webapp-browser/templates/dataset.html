@@ -32,68 +32,52 @@
 {% endif %}
 
 <!-- Overview -->
+{% if markdown_content or layer_stats_rows %}
 <h2>Overview</h2>
-{% if markdown_content %}
-<div class="md-body">{{ markdown_content|safe }}</div>
-{% else %}
-<p style="color:#888;font-size:12px"><em>no metadata — run <code>ant check</code> to generate</em></p>
+{% if markdown_content %}<div class="md-body" style="margin-bottom:6px">{{ markdown_content|safe }}</div>{% endif %}
+{% if layer_stats_rows %}
+<table class="auto" style="font-size:12px">
+    <thead><tr>
+        <th>layer</th><th>dtype</th><th>min</th><th>min(nz)</th><th>max</th><th>median</th><th>q90</th><th>% zeros</th>
+    </tr></thead>
+    <tbody>
+    {% for row in layer_stats_rows %}
+    <tr>
+        <td><code>{{ row.name }}</code></td>
+        <td style="color:#888">{{ row.dtype }}</td>
+        <td style="color:#555">{{ row.min }}</td>
+        <td style="color:#555">{{ row.min_nz }}</td>
+        <td style="color:#555">{{ row.max }}</td>
+        <td style="color:#555">{{ row.median }}</td>
+        <td style="color:#555">{{ row.q90 }}</td>
+        <td style="color:#555">{{ row.pct_zeros }}%</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
 {% endif %}
 
 <!-- Info -->
 {% if dataset_meta %}
-
-{# Jinja2 macros for consistent metadata rows #}
-{% macro meta_row(key, value) %}
-<tr{% if not value %} style="opacity:0.35"{% endif %}>
-    <td class="mk">{{ key }}</td>
-    <td>{{ value if value else '—' }}</td>
-</tr>
-{% endmacro %}
-
-{% macro meta_row_link(key, value, href) %}
-<tr{% if not value %} style="opacity:0.35"{% endif %}>
-    <td class="mk">{{ key }}</td>
-    <td>{% if value and href %}<a href="{{ href }}">{{ value }}</a>{% elif value %}{{ value }}{% else %}—{% endif %}</td>
-</tr>
-{% endmacro %}
-
-{% macro meta_row_list(key, values) %}
-<tr{% if not values %} style="opacity:0.35"{% endif %}>
-    <td class="mk">{{ key }}</td>
-    <td>{{ values | join(', ') if values else '—' }}</td>
-</tr>
-{% endmacro %}
-
+{% set ns = namespace(nulls=[]) %}
 <h2>Info</h2>
-<table class="narrow">
-    <tbody>
-    {{ meta_row('organism', dataset_meta.organism) }}
-    {{ meta_row('sex', dataset_meta.sex) }}
-    {{ meta_row('age', dataset_meta.age) }}
-    {{ meta_row_list('tissue', dataset_meta.tissue) }}
-    {{ meta_row('celltype', dataset_meta.celltype) }}
-    {{ meta_row_list('region', dataset_meta.region) }}
-    {{ meta_row_list('disease', dataset_meta.disease) }}
-    {{ meta_row_list('condition', dataset_meta.condition) }}
-    {{ meta_row('strain', dataset_meta.strain) }}
-    {{ meta_row_list('technology', dataset_meta.technology) }}
-    {{ meta_row_link('accession', dataset_meta.accession, dataset_meta.accession_url) }}
-    {% if dataset_meta.doi %}
-    {% for doi_item in dataset_meta.doi %}
-    <tr><td class="mk">doi</td><td><a href="https://doi.org/{{ doi_item }}">{{ doi_item }}</a></td></tr>
-    {% endfor %}
-    {% else %}
-    <tr style="opacity:0.35"><td class="mk">doi</td><td>—</td></tr>
-    {% endif %}
-    {% if dataset_meta.link %}
-    {% for url_item in dataset_meta.link %}
-    <tr><td class="mk">link</td><td><a href="{{ url_item }}">{{ url_item }}</a></td></tr>
-    {% endfor %}
-    {% else %}
-    <tr style="opacity:0.35"><td class="mk">link</td><td>—</td></tr>
-    {% endif %}
-    </tbody>
-</table>
+<div style="display:flex;flex-wrap:wrap;gap:0 20px;line-height:1.9">
+  {% if dataset_meta.organism %}<div><span class="mk">organism</span> {{ dataset_meta.organism }}</div>{% else %}{% set ns.nulls = ns.nulls + ['organism'] %}{% endif %}
+  {% if dataset_meta.tissue %}<div><span class="mk">tissue</span> {{ dataset_meta.tissue|join(', ') }}</div>{% else %}{% set ns.nulls = ns.nulls + ['tissue'] %}{% endif %}
+  {% if dataset_meta.celltype %}<div><span class="mk">celltype</span> {{ dataset_meta.celltype }}</div>{% else %}{% set ns.nulls = ns.nulls + ['celltype'] %}{% endif %}
+  {% if dataset_meta.disease %}<div><span class="mk">disease</span> {{ dataset_meta.disease|join(', ') }}</div>{% else %}{% set ns.nulls = ns.nulls + ['disease'] %}{% endif %}
+  {% if dataset_meta.condition %}<div><span class="mk">condition</span> {{ dataset_meta.condition|join(', ') }}</div>{% else %}{% set ns.nulls = ns.nulls + ['condition'] %}{% endif %}
+  {% if dataset_meta.region %}<div><span class="mk">region</span> {{ dataset_meta.region|join(', ') }}</div>{% else %}{% set ns.nulls = ns.nulls + ['region'] %}{% endif %}
+  {% if dataset_meta.sex %}<div><span class="mk">sex</span> {{ dataset_meta.sex }}</div>{% else %}{% set ns.nulls = ns.nulls + ['sex'] %}{% endif %}
+  {% if dataset_meta.age %}<div><span class="mk">age</span> {{ dataset_meta.age }}</div>{% else %}{% set ns.nulls = ns.nulls + ['age'] %}{% endif %}
+  {% if dataset_meta.strain %}<div><span class="mk">strain</span> {{ dataset_meta.strain }}</div>{% else %}{% set ns.nulls = ns.nulls + ['strain'] %}{% endif %}
+  {% if dataset_meta.technology %}<div><span class="mk">technology</span> {{ dataset_meta.technology|join(', ') }}</div>{% else %}{% set ns.nulls = ns.nulls + ['technology'] %}{% endif %}
+  {% if dataset_meta.accession %}<div><span class="mk">accession</span> {% if dataset_meta.accession_url %}<a href="{{ dataset_meta.accession_url }}">{{ dataset_meta.accession }}</a>{% else %}{{ dataset_meta.accession }}{% endif %}</div>{% else %}{% set ns.nulls = ns.nulls + ['accession'] %}{% endif %}
+  {% if dataset_meta.doi %}{% for doi_item in dataset_meta.doi %}<div><span class="mk">doi</span> <a href="https://doi.org/{{ doi_item }}">{{ doi_item }}</a></div>{% endfor %}{% else %}{% set ns.nulls = ns.nulls + ['doi'] %}{% endif %}
+  {% if dataset_meta.link %}{% for url_item in dataset_meta.link %}<div><span class="mk">link</span> <a href="{{ url_item }}">{{ url_item }}</a></div>{% endfor %}{% else %}{% set ns.nulls = ns.nulls + ['link'] %}{% endif %}
+</div>
+{% if ns.nulls %}<div style="color:#ccc;font-size:11px;margin-top:2px">(null: {{ ns.nulls|join(', ') }})</div>{% endif %}
 {% endif %}
 
 {% if info %}
@@ -101,66 +85,28 @@
 <!-- Observation columns -->
 <h2>Observation columns ({{ info.n_obs_columns }})</h2>
 {% if obs_columns %}
-<div class="two-col">
-    <div>
-        <table id="obs-table" class="narrow">
-            <thead><tr><th>Column</th><th>Type</th></tr></thead>
-            <tbody>
-                {% for col in obs_columns %}
-                <tr>
-                    <td>
-                        {% if col.type == 'cat' and has_duckdb %}
-                        <a href="/streamlit/cat?db={{ db_id | urlencode }}&cat={{ col.name | urlencode }}&ytype=Count" title="View in Streamlit">{{ col.name }}</a>
-                        {% elif col.type == 'num' and has_duckdb %}
-                        <a href="/streamlit/num?db={{ db_id | urlencode }}&num={{ col.name | urlencode }}" title="View in Streamlit">{{ col.name }}</a>
-                        {% else %}
-                        {{ col.name }}
-                        {% endif %}
-                    </td>
-                    <td style="color:#888;font-size:11px">{{ col.type }}</td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </div>
-    <div></div>
+<div style="margin-bottom:4px;display:flex;align-items:center;gap:8px">
+    <input id="obs-filter" type="text" placeholder="filter…" style="padding:2px 6px;font-family:inherit;font-size:12px;border:1px solid #ccc;outline:none;width:140px">
+    <span id="obs-count" style="font-size:11px;color:#888"></span>
+    <span style="font-size:10px;color:#aaa"><span style="color:#e65100;font-size:11px">≡</span> cat &nbsp;<span style="color:#0277bd;font-size:11px">#</span> num</span>
+</div>
+<div id="obs-chips" style="display:flex;flex-wrap:wrap;gap:1px 0;line-height:1.8">
+    {% for col in obs_columns %}
+    <span class="obs-item" data-name="{{ col.name|lower }}" style="margin-right:14px;white-space:nowrap;font-size:12px">
+        {% if col.type == 'cat' %}<span style="color:#e65100;font-weight:bold;font-size:11px" title="categorical">≡</span>
+        {% else %}<span style="color:#0277bd;font-weight:bold;font-size:11px" title="numerical">#</span>{% endif %}
+        {% if col.type == 'cat' and has_duckdb %}<a href="/streamlit/cat?db={{ db_id | urlencode }}&cat={{ col.name | urlencode }}&ytype=Count">{{ col.name }}</a>
+        {% elif col.type == 'num' and has_duckdb %}<a href="/streamlit/num?db={{ db_id | urlencode }}&num={{ col.name | urlencode }}">{{ col.name }}</a>
+        {% else %}{{ col.name }}{% endif %}
+    </span>
+    {% endfor %}
 </div>
 {% else %}
 <p style="color:#888;font-size:12px"><em>none</em></p>
 {% endif %}
 
-<!-- Layer statistics -->
-{% if layer_stats_rows %}
-<h2>Layer statistics</h2>
-<table id="layer-stats-table" class="auto">
-    <thead>
-        <tr>
-            <th>Layer</th>
-            <th>dtype</th>
-            <th>Min</th>
-            <th>Min (nz)</th>
-            <th>Max</th>
-            <th>Median</th>
-            <th>Q90</th>
-            <th>% zeros</th>
-        </tr>
-    </thead>
-    <tbody>
-        {% for row in layer_stats_rows %}
-        <tr>
-            <td><code>{{ row.name }}</code></td>
-            <td style="color:#888;font-size:11px">{{ row.dtype }}</td>
-            <td style="color:#555">{{ row.min }}</td>
-            <td style="color:#555">{{ row.min_nz }}</td>
-            <td style="color:#555">{{ row.max }}</td>
-            <td style="color:#555">{{ row.median }}</td>
-            <td style="color:#555">{{ row.q90 }}</td>
-            <td style="color:#555">{{ row.pct_zeros }}%</td>
-        </tr>
-        {% endfor %}
-    </tbody>
-</table>
-{% elif info.layers %}
+{% if not layer_stats_rows and info.layers %}
+<!-- Layers (fallback when no stats) -->
 <h2>Layers</h2>
 <div style="padding:4px 0">
     {% for layer in info.layers %}<code>{{ layer }}</code> {% endfor %}
@@ -222,10 +168,23 @@
 <script>
 document.addEventListener('DOMContentLoaded', function() {
     {% if obs_columns|length > 0 %}
-    initTable('obs-table', { pageSize: 20 });
-    {% endif %}
-    {% if layer_stats_rows|length > 0 %}
-    initTable('layer-stats-table', { pageSize: 20, searchable: false });
+    (function() {
+        var input = document.getElementById('obs-filter');
+        var count = document.getElementById('obs-count');
+        var items = document.querySelectorAll('#obs-chips .obs-item');
+        function update() {
+            var q = input.value.toLowerCase();
+            var shown = 0;
+            items.forEach(function(el) {
+                var vis = !q || el.dataset.name.includes(q);
+                el.style.display = vis ? '' : 'none';
+                if (vis) shown++;
+            });
+            count.textContent = shown < items.length ? shown + ' / ' + items.length : items.length + ' cols';
+        }
+        input.addEventListener('input', update);
+        update();
+    })();
     {% endif %}
 });
 </script>

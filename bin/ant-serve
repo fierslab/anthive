@@ -333,7 +333,7 @@ class DatabaseRegistry:
         db_url = self.databases[db_id]
 
         # Load per-file metadata
-        file_metadata, _ = parse_md_file(md_path)
+        file_metadata, md_body = parse_md_file(md_path)
 
         # Load collection metadata from index.md
         index_path = md_path.parent / 'index.md'
@@ -524,6 +524,12 @@ class DatabaseRegistry:
 
             # Module scoring availability
             'module_scoring_available': module_scoring_available,
+
+            # Raw markdown body (for visualization in the browser)
+            'markdown': md_body or None,
+
+            # Layer statistics from .md frontmatter
+            'layer_stats': file_metadata.get('layer_stats') or {},
         }
 
         # Add collection metadata if present

@@ -261,6 +261,24 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         'top_num':       _as_list(db.get('top_num')),
     }
 
+    raw_md = db.get('markdown')
+    markdown_content = markdown.markdown(raw_md, extensions=['tables', 'fenced_code']) if raw_md else None
+
+    layer_stats = db.get('layer_stats') or {}
+    layer_stats_rows = [
+        {
+            'name':      name,
+            'dtype':     stats.get('dtype', ''),
+            'min':       format_number(stats['min_value'])     if stats.get('min_value')    is not None else '',
+            'min_nz':    format_number(stats['min_nonzero'])   if stats.get('min_nonzero')  is not None else '',
+            'max':       format_number(stats['max_value'])     if stats.get('max_value')    is not None else '',
+            'median':    format_number(stats['median'])        if stats.get('median')       is not None else '',
+            'q90':       format_number(stats['q90'])           if stats.get('q90')          is not None else '',
+            'pct_zeros': format_number(stats['pct_zeros'])     if stats.get('pct_zeros')    is not None else '',
+        }
+        for name, stats in layer_stats.items()
+    ]
+
     return templates.TemplateResponse("dataset.html", {
         "request": request,
         "folder_name": group_id,
@@ -269,9 +287,9 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "dataset_name": db.get('title') or file_id,
         "db_id": db_id,
         "info": info,
-        "markdown_content": None,
+        "markdown_content": markdown_content,
         "obs_columns": obs_columns,
-        "layer_stats_rows": [],
+        "layer_stats_rows": layer_stats_rows,
         "dataset_meta": dataset_meta,
         "has_duckdb": True,
         "update_pending": False,
