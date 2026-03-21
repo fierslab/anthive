@@ -12,6 +12,44 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 
+ANNOTATION_FIELDS = [
+    'organism', 'tissue', 'celltype', 'disease', 'condition',
+    'region', 'sex', 'age', 'strain', 'technology',
+    'accession', 'doi', 'link',
+]
+
+# These annotation fields are always stored as lists
+ANNOTATION_LIST_FIELDS = {'doi', 'link', 'tissue', 'disease', 'condition', 'region', 'technology'}
+
+# Expandable: add more fields here to enforce additional conventions
+ANNOTATION_CONVENTIONS = {
+    'sex': {
+        'choices': ['male', 'female', 'mixed'],
+    },
+    'organism': {
+        'lowercase': True,
+    },
+}
+
+
+def validate_annotation_field(field: str, value: Any) -> Optional[str]:
+    """
+    Validate an annotation field value against known conventions.
+
+    Returns:
+        Error string if invalid, else None
+    """
+    conv = ANNOTATION_CONVENTIONS.get(field)
+    if not conv:
+        return None
+    if 'choices' in conv:
+        if str(value).lower() not in [c.lower() for c in conv['choices']]:
+            return f"'{field}' must be one of: {', '.join(conv['choices'])} (got '{value}')"
+    if conv.get('lowercase') and isinstance(value, str) and value != value.lower():
+        return f"'{field}' must be lowercase (got '{value}')"
+    return None
+
+
 class MetadataError(Exception):
     """Metadata-related errors"""
     pass
@@ -245,33 +283,34 @@ def initialize_file_metadata(basename: str, version: str, checksum: str) -> Dict
         'year': current_year,
         'date': current_date,
         # Biology & study annotation (fill in as needed; null = unknown)
-        # organism: human | mouse | rat | zebrafish | macaque | drosophila | ...
-        'organism': None,
-        # tissue: brain | lung | liver | kidney | ... (string or list)
-        'tissue': None,
-        # celltype: only if the dataset contains a single cell type
-        'celltype': None,
-        # disease: healthy | alzheimer | parkinson | cancer | ischemia | ... (str or list)
-        'disease': None,
-        # condition: control | treated | knockout | wildtype | ... (str or list)
-        'condition': None,
-        # region: cortex | hippocampus | striatum | prefrontal_cortex | ... (str or list)
-        'region': None,
-        # sex: male | female | mixed
-        'sex': None,
-        # age: include unit — e.g. 87y (years), 18m (months), 8w (weeks), P30 (postnatal days)
-        'age': None,
-        # strain: e.g. C57BL/6, BALB/c, 129S1 (mouse); leave null for human
-        'strain': None,
-        # technology: 10x_chromium | smart-seq2 | visium | xenium | multiome | snRNA-seq | ...
-        'technology': None,
-        # Data access
-        # accession: GEO/SRA/ArrayExpress ID, e.g. GSE123456 or PRJNA12345
-        'accession': None,
-        # doi: list of DOIs (without https://doi.org/ prefix)
-        'doi': [],
-        # link: list of generic URLs (project pages, supplementary data, etc.)
-        'link': [],
+        'annotation': {
+            # organism: human | mouse | rat | zebrafish | macaque | drosophila | ...
+            'organism': None,
+            # tissue: brain | lung | liver | kidney | ... (string or list)
+            'tissue': None,
+            # celltype: only if the dataset contains a single cell type
+            'celltype': None,
+            # disease: healthy | alzheimer | parkinson | cancer | ischemia | ... (str or list)
+            'disease': None,
+            # condition: control | treated | knockout | wildtype | ... (str or list)
+            'condition': None,
+            # region: cortex | hippocampus | striatum | prefrontal_cortex | ... (str or list)
+            'region': None,
+            # sex: male | female | mixed
+            'sex': None,
+            # age: include unit — e.g. 87y (years), 18m (months), 8w (weeks), P30 (postnatal days)
+            'age': None,
+            # strain: e.g. C57BL/6, BALB/c, 129S1 (mouse); leave null for human
+            'strain': None,
+            # technology: 10x_chromium | smart-seq2 | visium | xenium | multiome | snRNA-seq | ...
+            'technology': None,
+            # accession: GEO/SRA/ArrayExpress ID, e.g. GSE123456 or PRJNA12345
+            'accession': None,
+            # doi: list of DOIs (without https://doi.org/ prefix)
+            'doi': [],
+            # link: list of generic URLs (project pages, supplementary data, etc.)
+            'link': [],
+        },
         # UI curation hints (null = auto-selected)
         # top_genes: genes to highlight — null falls back to top 10 by mean expression
         'top_genes': None,
@@ -308,5 +347,6 @@ def initialize_collection_metadata(group_name: str) -> Dict[str, Any]:
         'group': group_name,
         'experiment': 'na',
         'authors': [],
-        'year': current_year
+        'year': current_year,
+        'annotation': {},
     }

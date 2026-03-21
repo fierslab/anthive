@@ -42,3 +42,6 @@ anthive.yaml
 
 # Attic - archived old files
 attic/
+
+# Data - separate repos, not tracked here
+data/

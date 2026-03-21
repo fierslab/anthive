@@ -56,7 +56,7 @@ sys.path.insert(0, str(lib_dir))
 from anthive_db import AnthiveDB
 from config import get_config
 from md_check import generate_file_id, generate_group_id
-from metadata import parse_md_file
+from metadata import ANNOTATION_FIELDS, parse_md_file
 
 
 class QueryRequest(BaseModel):
@@ -365,6 +365,39 @@ class DatabaseRegistry:
         else:
             print(f"Cached metadata for {len(self.metadata_cache)} databases")
 
+    def _resolve_annotations(self, md_path: Path, file_metadata: dict) -> dict:
+        """
+        Build resolved annotation dict for a file by walking the folder tree.
+
+        Inheritance order (later wins):
+          1. index.md annotation from data_folder (shallowest)
+          2. index.md annotation from intermediate folders
+          3. index.md annotation in md_path.parent (deepest)
+          4. File's own annotation: subkey
+          5. Backward-compat: root-level annotation fields fill gaps
+        """
+        merged = {}
+        try:
+            rel_parts = md_path.parent.relative_to(self.data_folder).parts
+        except ValueError:
+            rel_parts = ()
+        ancestors = [self.data_folder] + [
+            self.data_folder.joinpath(*rel_parts[:i + 1])
+            for i in range(len(rel_parts))
+        ]
+        for folder in ancestors:
+            idx = folder / 'index.md'
+            if idx.exists():
+                idx_meta, _ = parse_md_file(idx)
+                merged.update(idx_meta.get('annotation') or {})
+        # File's own annotation overrides inherited
+        merged.update(file_metadata.get('annotation') or {})
+        # Backward compat: root-level fields fill in gaps
+        for field in ANNOTATION_FIELDS:
+            if field not in merged and file_metadata.get(field) is not None:
+                merged[field] = file_metadata[field]
+        return merged
+
     def _load_database_metadata(self, db_id: str, extra: Dict[str, str]) -> Dict[str, Any]:
         """Load metadata from .md files and database"""
         md_path = self._db_md_bases[db_id]
@@ -507,6 +540,9 @@ class DatabaseRegistry:
         finally:
             self.connection_pool.return_connection(db_url, conn)
 
+        # Resolve annotation with inheritance from ancestor index.md files
+        ann = self._resolve_annotations(md_path, file_metadata)
+
         # Combine metadata with enhanced structure
         metadata = {
             'group_id': extra['group_id'],
@@ -542,20 +578,20 @@ class DatabaseRegistry:
             'year': file_metadata.get('year'),
             'default_layer': file_metadata.get('default_layer'),
 
-            # Biology & study annotation (from .md frontmatter; null = not set)
-            'organism':   file_metadata.get('organism'),
-            'tissue':     file_metadata.get('tissue'),
-            'celltype':   file_metadata.get('celltype'),
-            'disease':    file_metadata.get('disease'),
-            'condition':  file_metadata.get('condition'),
-            'region':     file_metadata.get('region'),
-            'sex':        file_metadata.get('sex'),
-            'age':        file_metadata.get('age'),
-            'strain':     file_metadata.get('strain'),
-            'technology': file_metadata.get('technology'),
-            'accession':  file_metadata.get('accession'),
-            'doi':        file_metadata.get('doi') or [],
-            'link':       file_metadata.get('link') or [],
+            # Biology & study annotation (resolved with inheritance from index.md)
+            'organism':   ann.get('organism'),
+            'tissue':     ann.get('tissue'),
+            'celltype':   ann.get('celltype'),
+            'disease':    ann.get('disease'),
+            'condition':  ann.get('condition'),
+            'region':     ann.get('region'),
+            'sex':        ann.get('sex'),
+            'age':        ann.get('age'),
+            'strain':     ann.get('strain'),
+            'technology': ann.get('technology'),
+            'accession':  ann.get('accession'),
+            'doi':        ann.get('doi') or [],
+            'link':       ann.get('link') or [],
             'top_genes':  file_metadata.get('top_genes'),
             'top_cat':    file_metadata.get('top_cat'),
             'top_num':    file_metadata.get('top_num'),
