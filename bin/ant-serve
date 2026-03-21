@@ -804,6 +804,19 @@ async def root():
     }
 
 
+from contextlib import contextmanager
+
+@contextmanager
+def _pooled_db(db_id: str):
+    """Context manager: AnthiveDB backed by the connection pool (local or S3)."""
+    db_url = registry.get_database_path(db_id)
+    conn = connection_pool.get_connection(db_url)
+    try:
+        yield AnthiveDB(conn=conn, owns_conn=False)
+    finally:
+        connection_pool.return_connection(db_url, conn)
+
+
 @app.get("/health", tags=["info"])
 async def health_check():
     """
@@ -955,8 +968,7 @@ async def search_genes(
         GET /databases/my_db/genes?q=CD4&exact=true
     """
     try:
-        db_path = registry.get_database_path(db_id)
-        with AnthiveDB(db_path) as db:
+        with _pooled_db(db_id) as db:
             genes = db.search_genes(q, case_sensitive=case_sensitive, limit=limit, exact=exact)
             return {"query": q, "count": len(genes), "genes": genes}
     except KeyError as e:
@@ -976,8 +988,7 @@ async def get_gene_info(db_id: str, gene_id: str):
     - Available layers containing this gene
     """
     try:
-        db_path = registry.get_database_path(db_id)
-        with AnthiveDB(db_path) as db:
+        with _pooled_db(db_id) as db:
             info = db.get_gene_info(gene_id)
             return info
     except KeyError as e:
@@ -1010,9 +1021,8 @@ async def get_gene_stats(
         GET /databases/LC5/SPM/gene_stats?genes=APOE,CLU&layer=X
     """
     try:
-        db_path = registry.get_database_path(db_id)
         gene_list = [g.strip() for g in genes.split(',') if g.strip()]
-        with AnthiveDB(db_path) as db:
+        with _pooled_db(db_id) as db:
             stats = db.get_gene_stats(gene_list, layer=layer)
         return {"db_id": db_id, "layer": layer, "stats": stats}
     except KeyError as e:
@@ -1052,8 +1062,7 @@ async def get_gene_stats_all(
             n_skipped += 1
             continue
         try:
-            db_path = registry.get_database_path(db_id)
-            with AnthiveDB(db_path) as db:
+            with _pooled_db(db_id) as db:
                 stats = db.get_gene_stats(gene_list, layer=layer, case_sensitive=case_sensitive)
             results.append({
                 'db_id': db_id,
@@ -1136,8 +1145,6 @@ async def get_cells(
         GET /databases/my_db/cells?metadata=*&format=csv
     """
     try:
-        db_path = registry.get_database_path(db_id)
-
         # Parse parameters
         gene_list = genes.split(',') if genes else None
 
@@ -1173,7 +1180,7 @@ async def get_cells(
                         filters[field] = value
 
         # Get data
-        with AnthiveDB(db_path) as db:
+        with _pooled_db(db_id) as db:
             df = db.get_cell_table(
                 genes=gene_list,
                 metadata_fields=metadata_list,
@@ -1307,8 +1314,7 @@ async def get_embedding_data(
     - n_dims: Number of dimensions (default: 2, use 0 for all)
     """
     try:
-        db_path = registry.get_database_path(db_id)
-        with AnthiveDB(db_path) as db:
+        with _pooled_db(db_id) as db:
             dims = None if n_dims == 0 else n_dims
             df = db.get_embedding_data(embedding_id, limit=limit, n_dims=dims)
 
@@ -1340,9 +1346,7 @@ async def execute_sql_query(db_id: str, request: QueryRequest):
     All queries are read-only for security.
     """
     try:
-        db_path = registry.get_database_path(db_id)
-
-        with AnthiveDB(db_path) as db:
+        with _pooled_db(db_id) as db:
             df = db.execute_sql(request.query, limit=request.limit)
 
         # Convert to JSON-safe format

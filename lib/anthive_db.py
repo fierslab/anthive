@@ -13,15 +13,18 @@ import pandas as pd
 class AnthiveDB:
     """Interface to a single Anthive DuckDB database"""
 
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Optional[Path] = None, conn=None, owns_conn: bool = True):
         """
-        Initialize database connection
+        Initialize database connection.
 
         Args:
-            db_path: Path to .duckdb file
+            db_path: Path to .duckdb file (used when conn is None)
+            conn: Existing DuckDB connection to use (skips opening a new one)
+            owns_conn: If False, close() will not close the connection (for pooled use)
         """
         self.db_path = db_path
-        self.conn: Optional[duckdb.DuckDBPyConnection] = None
+        self.conn: Optional[duckdb.DuckDBPyConnection] = conn
+        self._owns_conn = owns_conn
 
     def __enter__(self):
         """Context manager entry"""
@@ -44,7 +47,7 @@ class AnthiveDB:
 
     def close(self):
         """Close database connection"""
-        if self.conn:
+        if self.conn and self._owns_conn:
             self._conn.close()
             self.conn = None
 
