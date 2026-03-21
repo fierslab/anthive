@@ -81,13 +81,17 @@ class ConnectionPool:
         self.total_connections = 0
         self.hits = 0
         self.misses = 0
+        self._httpfs_installed = False
 
     def _make_connection(self, db_key: str):
         """Create a new DuckDB connection for a local path or S3 URL"""
         import duckdb
         if db_key.startswith('s3://'):
             conn = duckdb.connect()
-            conn.execute("INSTALL httpfs; LOAD httpfs;")
+            if not self._httpfs_installed:
+                conn.execute("INSTALL httpfs;")
+                self._httpfs_installed = True
+            conn.execute("LOAD httpfs;")
             s3 = self.s3_config
             raw_ep = (s3.get('endpoint') or '').strip()
             ep_host = raw_ep.removeprefix('https://').removeprefix('http://')
