@@ -349,4 +349,5 @@ def initialize_collection_metadata(group_name: str) -> Dict[str, Any]:
         'authors': [],
         'year': current_year,
         'annotation': {},
+        'default_dataset': None,
     }

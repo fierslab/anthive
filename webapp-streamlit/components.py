@@ -142,6 +142,17 @@ def database_selector(client, databases=None,
             x for x in databases
             if x['collection'].get('group') == group]
 
+    # Resolve default_title from group metadata (only if not set from URL param)
+    if default_title is None:
+        coll_default = databases_[0]['collection'].get('default_dataset') if databases_ else None
+        if coll_default and any(x['title'] == coll_default for x in databases_):
+            default_title = coll_default
+        else:
+            # Fall back to most recently dated dataset
+            dated = sorted(databases_, key=lambda x: x.get('date') or '', reverse=True)
+            if dated:
+                default_title = dated[0]['title']
+
     exps = sorted(set([x['collection'].get('experiment', 'na')
                        for x in databases_]))
     if len(exps) > 1:

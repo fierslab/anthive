@@ -613,7 +613,8 @@ class DatabaseRegistry:
                 'group': collection_metadata.get('group'),
                 'experiment': collection_metadata.get('experiment'),
                 'authors': collection_metadata.get('authors'),
-                'year': collection_metadata.get('year')
+                'year': collection_metadata.get('year'),
+                'default_dataset': collection_metadata.get('default_dataset'),
             }
 
         return metadata
