@@ -101,7 +101,8 @@ class ConnectionPool:
                 conn.execute(f"SET s3_access_key_id = '{s3['access_key_id']}';")
             if s3.get('secret_access_key'):
                 conn.execute(f"SET s3_secret_access_key = '{s3['secret_access_key']}';")
-            if s3.get('use_path_style'):
+            # Use path-style if explicitly set, or auto-enable for custom endpoints
+            if s3.get('use_path_style') or s3.get('endpoint'):
                 conn.execute("SET s3_url_style = 'path';")
             conn.execute(f"ATTACH '{db_key}' AS db (READ_ONLY);")
             conn.execute("USE db;")
