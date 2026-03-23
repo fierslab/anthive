@@ -1,4 +1,4 @@
-.PHONY: help build-webapp build-jupyter clean-webapp serve serve-api serve-streamlit dev-jupyter
+.PHONY: help build-webapp build-jupyter clean-webapp serve serve-api serve-streamlit serve-mcp dev-jupyter
 
 help:
 	@echo "Anthive4 Development Commands"
@@ -15,6 +15,7 @@ help:
 	@echo "  make serve-api         - Run REST API server (port 8080)"
 	@echo "  make serve-browse      - Run web browser server (port 8081)"
 	@echo "  make serve-streamlit   - Run Streamlit server (port 8082)"
+	@echo "  make serve-mcp         - Run MCP server for LLM integration (port 8090)"
 	@echo "  make dev-jupyter       - Run JupyterLab on webapp-src/jupyter (port 9090)"
 	@echo ""
 	@echo "Sync:"
@@ -29,6 +30,7 @@ help:
 	@echo "  ./bin/ant convert      - Convert h5ad to DuckDB"
 	@echo "  ./bin/ant build-all    - Process entire datastore with parallel conversion"
 	@echo "  ./bin/ant serve        - Start REST API server"
+	@echo "  ./bin/ant-mcp          - MCP server (LLM tool integration)"
 
 clean-webapp:
 	@echo "Cleaning webapp directory..."
@@ -138,6 +140,15 @@ serve-browse:
 	@echo "Starting Anthive Web Browser on http://localhost:8081"
 	@echo ""
 	@./bin/ant-browse --api-url http://localhost:8080 --host 0.0.0.0 --port 8081
+
+serve-mcp:
+	@echo "Starting Anthive MCP server on http://localhost:8090"
+	@echo ""
+	@echo "Connect from any MCP client with:"
+	@echo "  URL:  http://localhost:8090/mcp"
+	@echo "  Type: streamable-http"
+	@echo ""
+	@./bin/ant-mcp --api-url http://localhost:8080 --host 0.0.0.0 --port 8090
 
 serve-streamlit:
 	@echo "Starting Anthive Streamlit server on http://localhost:8082"
