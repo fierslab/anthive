@@ -7,6 +7,8 @@
 #   "pandas>=2.0.0",
 #   "pyyaml>=6.0",
 #   "boto3>=1.26.0",
+#   "matplotlib>=3.7.0",
+#   "seaborn>=0.13.0",
 # ]
 # ///
 """
@@ -57,6 +59,7 @@ from anthive_db import AnthiveDB
 from config import get_config
 from md_check import generate_file_id, generate_group_id
 from metadata import ANNOTATION_FIELDS, parse_md_file
+import plotting
 
 
 class QueryRequest(BaseModel):
@@ -1418,6 +1421,189 @@ async def execute_sql_query(db_id: str, request: QueryRequest):
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Query error: {str(e)}")
+
+
+
+# ── plot endpoints ─────────────────────────────────────────────────────────────
+#
+# All endpoints share common size/quality parameters:
+#   width (float, inches), height (float, inches), dpi (int)
+# They return image/png.  Extend lib/plotting.py to add new plot types.
+
+
+@app.get("/databases/{db_id:path}/plot/umap", tags=["plots"])
+async def plot_umap(
+    db_id: str,
+    embedding: Optional[str] = Query(None, description="Embedding key, e.g. X_umap (default: first available)"),
+    gene: Optional[str] = Query(None, description="Color by gene expression"),
+    category: Optional[str] = Query(None, description="Color by categorical metadata field"),
+    numerical: Optional[str] = Query(None, description="Color by numerical metadata field"),
+    layer: str = Query("X", description="Expression layer"),
+    width: float = Query(8.0, description="Figure width in inches"),
+    height: float = Query(6.0, description="Figure height in inches"),
+    dpi: int = Query(150, description="Output resolution (dots per inch)"),
+    point_size: float = Query(3.0, description="Scatter point size"),
+    alpha: float = Query(0.8, description="Point transparency (0–1)"),
+    palette: str = Query("tab20", description="Seaborn palette for categorical coloring"),
+):
+    """
+    Render a UMAP scatter plot and return PNG.
+
+    Provide at most one of: gene, category, numerical.
+    If none given, all cells are rendered in a single colour.
+    """
+    try:
+        with _pooled_db(db_id) as db:
+            available_embeddings = db._get_embeddings()
+            if not available_embeddings:
+                raise HTTPException(status_code=400, detail="No embeddings available for this database")
+
+            emb_id = embedding or ('X_umap' if 'X_umap' in available_embeddings else available_embeddings[0])
+            embedding_df = db.get_embedding_data(emb_id, n_dims=2)
+
+            color_df = None
+            color_field = None
+            color_type = 'categorical'
+
+            if gene:
+                color_df = db.get_cell_table(genes=[gene], layer=layer)
+                color_field = gene
+                color_type = 'gene'
+            elif category:
+                color_df = db.get_cell_table(metadata_fields=[category])
+                color_field = category
+                color_type = 'categorical'
+            elif numerical:
+                color_df = db.get_cell_table(metadata_fields=[numerical])
+                color_field = numerical
+                color_type = 'numerical'
+
+        png = plotting.plot_umap(
+            embedding_df=embedding_df,
+            color_df=color_df,
+            color_field=color_field,
+            color_type=color_type,
+            width=width, height=height, dpi=dpi,
+            point_size=point_size, alpha=alpha, palette=palette,
+        )
+        return Response(content=png, media_type='image/png')
+
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/databases/{db_id:path}/plot/gene", tags=["plots"])
+async def plot_gene(
+    db_id: str,
+    gene: str = Query(..., description="Gene name"),
+    plot_type: str = Query("ecdf", description="Plot type: ecdf | kde | histogram"),
+    layer: str = Query("X", description="Expression layer"),
+    bins: int = Query(20, description="Histogram bins (ignored for ecdf/kde)"),
+    width: float = Query(7.0, description="Figure width in inches"),
+    height: float = Query(4.0, description="Figure height in inches"),
+    dpi: int = Query(150, description="Output resolution"),
+):
+    """Render a gene expression distribution plot and return PNG."""
+    try:
+        with _pooled_db(db_id) as db:
+            data_df = db.get_cell_table(genes=[gene], layer=layer)
+
+        png = plotting.plot_gene(
+            data_df=data_df,
+            gene_field=gene,
+            plot_type=plot_type,
+            bins=bins,
+            width=width, height=height, dpi=dpi,
+        )
+        return Response(content=png, media_type='image/png')
+
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/databases/{db_id:path}/plot/cat", tags=["plots"])
+async def plot_cat(
+    db_id: str,
+    cat: str = Query(..., description="Categorical metadata field to group by"),
+    y: Optional[str] = Query(None, description="Gene or numerical field for Y axis (omit for cell counts)"),
+    y_type: str = Query("count", description="Y axis type: count | gene | numerical"),
+    plot_type: str = Query("bar", description="Plot type: bar | box | violin"),
+    layer: str = Query("X", description="Expression layer (used when y_type=gene)"),
+    width: float = Query(8.0, description="Figure width in inches"),
+    height: float = Query(5.0, description="Figure height in inches"),
+    dpi: int = Query(150, description="Output resolution"),
+):
+    """Render a categorical breakdown plot and return PNG."""
+    try:
+        with _pooled_db(db_id) as db:
+            if y_type == 'gene' and y:
+                data_df = db.get_cell_table(genes=[y], metadata_fields=[cat], layer=layer)
+            elif y_type == 'numerical' and y:
+                data_df = db.get_cell_table(metadata_fields=[cat, y])
+            else:
+                data_df = db.get_cell_table(metadata_fields=[cat])
+
+        png = plotting.plot_cat(
+            data_df=data_df,
+            cat_field=cat,
+            y_field=y,
+            y_type=y_type,
+            plot_type=plot_type,
+            width=width, height=height, dpi=dpi,
+        )
+        return Response(content=png, media_type='image/png')
+
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/databases/{db_id:path}/plot/num", tags=["plots"])
+async def plot_num(
+    db_id: str,
+    num: str = Query(..., description="Numerical metadata field"),
+    cat: Optional[str] = Query(None, description="Categorical field to group by (optional)"),
+    plot_type: str = Query("ecdf", description="Plot type: ecdf | kde | histogram | box | violin | bar"),
+    bins: int = Query(20, description="Histogram bins"),
+    width: float = Query(7.0, description="Figure width in inches"),
+    height: float = Query(4.0, description="Figure height in inches"),
+    dpi: int = Query(150, description="Output resolution"),
+):
+    """Render a numerical field distribution plot and return PNG."""
+    try:
+        with _pooled_db(db_id) as db:
+            metadata_fields = [num] if not cat else [num, cat]
+            data_df = db.get_cell_table(metadata_fields=metadata_fields)
+
+        png = plotting.plot_num(
+            data_df=data_df,
+            num_field=num,
+            cat_field=cat,
+            plot_type=plot_type,
+            bins=bins,
+            width=width, height=height, dpi=dpi,
+        )
+        return Response(content=png, media_type='image/png')
+
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/admin/rescan", tags=["admin"])
