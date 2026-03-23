@@ -80,6 +80,8 @@ def main() -> None:
 
     mcp = FastMCP(
         name='anthive',
+        host=args.host,
+        port=args.port,
         instructions=(
             'Anthive is a single-cell RNA-seq data browser. '
             'Use search_datasets to discover relevant studies by organism, '
@@ -391,7 +393,7 @@ def main() -> None:
     if args.transport == 'stdio':
         mcp.run(transport='stdio')
     else:
-        mcp.run(transport=args.transport, host=args.host, port=args.port)
+        mcp.run(transport=args.transport)
 
 
 if __name__ == '__main__':
