@@ -105,12 +105,14 @@ serve:
 	@echo "  - JupyterLite at /jupyter"
 	@echo "  - Streamlit at /streamlit"
 	@echo "  - API at /api"
+	@echo "  - MCP at /mcp"
 	@echo ""
 	@echo "Make sure backend servers are running (in other terminals):"
 	@echo "  Terminal 1: make serve-api (port 8080)"
 	@echo "  Terminal 2: make serve-browse (port 8081)"
 	@echo "  Terminal 3: make serve-streamlit (port 8082)"
-	@echo "  Terminal 4: make serve (this - port 8501)"
+	@echo "  Terminal 4: make serve-mcp (port 8090)"
+	@echo "  Terminal 5: make serve (this - port 8501)"
 	@echo ""
 	@caddy run --config config/Caddyfile
 
@@ -122,12 +124,14 @@ serve-nginx:
 	@echo "  - JupyterLite at /jupyter"
 	@echo "  - Streamlit at /streamlit"
 	@echo "  - API at /api"
+	@echo "  - MCP at /mcp"
 	@echo ""
 	@echo "Make sure backend servers are running (in other terminals):"
 	@echo "  Terminal 1: make serve-api (port 8080)"
 	@echo "  Terminal 2: make serve-browse (port 8081)"
 	@echo "  Terminal 3: make serve-streamlit (port 8082)"
-	@echo "  Terminal 4: make serve-nginx (this - port 8501)"
+	@echo "  Terminal 4: make serve-mcp (port 8090)"
+	@echo "  Terminal 5: make serve-nginx (this - port 8501)"
 	@echo ""
 	@nginx -c $(PWD)/config/nginx.conf -p $(PWD)
 
