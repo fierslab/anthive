@@ -152,7 +152,12 @@ serve-mcp:
 	@echo "  URL:  http://localhost:8090/mcp"
 	@echo "  Type: streamable-http"
 	@echo ""
-	@./bin/ant-mcp --api-url http://localhost:8080 --host 0.0.0.0 --port 8090
+	@./bin/ant-mcp \
+		--api-url http://localhost:8080 \
+		--host 0.0.0.0 \
+		--port 8090 \
+		--plots-dir ./webapp/plots \
+		--public-url http://localhost:8501
 
 serve-streamlit:
 	@echo "Starting Anthive Streamlit server on http://localhost:8082"
