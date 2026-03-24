@@ -1,0 +1,272 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = []
+# ///
+"""
+Anthive process supervisor
+
+Starts all backend services, multiplexes their output with colored labels,
+and auto-restarts any crashed child process.
+"""
+
+import argparse
+import asyncio
+import os
+import shutil
+import signal
+import sys
+import textwrap
+import time
+from pathlib import Path
+
+# ANSI color codes
+CYAN    = '\033[36m'
+GREEN   = '\033[32m'
+MAGENTA = '\033[35m'
+YELLOW  = '\033[33m'
+BLUE    = '\033[34m'
+RED     = '\033[31m'
+RESET   = '\033[0m'
+BOLD    = '\033[1m'
+DIM     = '\033[2m'
+
+_script_dir = Path(__file__).parent.parent.resolve()
+
+SERVICES: dict = {
+    'api': {
+        'cmd': ['./bin/ant-serve', '--data-folder', './data/h5adstore',
+                '--host', '0.0.0.0', '--port', '8080'],
+        'color': CYAN,
+    },
+    'browse': {
+        'cmd': ['./bin/ant-browse', '--api-url', 'http://localhost:8080',
+                '--host', '0.0.0.0', '--port', '8081'],
+        'color': GREEN,
+    },
+    'mcp': {
+        'cmd': ['./bin/ant-mcp'],
+        'color': MAGENTA,
+    },
+    'streamlit': {
+        'cmd': [
+            'uvx',
+            '--with', 'streamlit',
+            '--with', 'matplotlib',
+            '--with', 'seaborn',
+            '--with', 'scipy',
+            '--with', 'numpy',
+            '--with', 'pandas',
+            '--with', 'requests',
+            'streamlit', 'run', 'streamlit_app.py',
+        ],
+        'cwd': 'webapp-streamlit',
+        'color': YELLOW,
+    },
+    'caddy': {
+        'cmd': ['caddy', 'run', '--config', 'config/Caddyfile'],
+        'color': BLUE,
+    },
+}
+
+DEFAULT_SERVICES = ['api', 'browse', 'mcp', 'streamlit']
+
+# Back-off settings
+BACKOFF_INITIAL     = 2   # seconds
+BACKOFF_MAX         = 30  # seconds
+BACKOFF_MULTIPLIER  = 2
+CLEAN_RUN_THRESHOLD = 10  # seconds; if process lived this long, reset back-off
+
+
+def _make_prefix(name: str, color: str, label_width: int) -> tuple[str, int]:
+    """Return (colored_prefix, visible_character_width)."""
+    padded_name = name.ljust(label_width)
+    prefix = f"{color}{BOLD}[{padded_name}]{RESET} "
+    visible_width = 1 + label_width + 2  # '[' + name + '] '
+    return prefix, visible_width
+
+
+async def _pipe_stream(
+    stream: asyncio.StreamReader,
+    prefix: str,
+    prefix_visible_width: int,
+) -> None:
+    """Read lines from a stream and print each with the given prefix.
+
+    Long lines are wrapped at the terminal width and continuation lines are
+    indented by the same number of spaces as the visible prefix width, so the
+    content column stays aligned:
+
+        [caddy     ] first part of a very long line that wraps here…
+                     continuation indented flush with the message above
+    """
+    continuation_indent = ' ' * prefix_visible_width
+
+    while True:
+        line_bytes = await stream.readline()
+        if not line_bytes:
+            break
+
+        line = line_bytes.decode(errors='replace').rstrip()
+        terminal_width = shutil.get_terminal_size(fallback=(120, 24)).columns
+        available_width = max(40, terminal_width - prefix_visible_width)
+
+        if len(line) <= available_width:
+            print(prefix + line, flush=True)
+        else:
+            wrapped_parts = textwrap.wrap(line, width=available_width) or ['']
+            first_line, *remaining_lines = wrapped_parts
+            print(prefix + first_line, flush=True)
+            for continuation_line in remaining_lines:
+                print(continuation_indent + continuation_line, flush=True)
+
+
+async def _run_service(
+    name: str,
+    config: dict,
+    label_width: int,
+    shutdown_event: asyncio.Event,
+    active_processes: dict,
+) -> None:
+    """Spawn a service process, pipe its output, and restart on crash."""
+    color = config['color']
+    prefix, prefix_visible_width = _make_prefix(name, color, label_width)
+    sup_prefix, sup_prefix_visible_width = _make_prefix('supervisor', DIM, label_width)
+    cwd = str(_script_dir / config.get('cwd', '.'))
+    cmd = config['cmd']
+
+    backoff_delay = BACKOFF_INITIAL
+
+    while not shutdown_event.is_set():
+        start_time = time.monotonic()
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
+            )
+        except FileNotFoundError:
+            print(
+                f"{sup_prefix}{RED}cannot start '{name}': "
+                f"command not found: {cmd[0]}{RESET}",
+                flush=True,
+            )
+            await asyncio.sleep(backoff_delay)
+            backoff_delay = min(backoff_delay * BACKOFF_MULTIPLIER, BACKOFF_MAX)
+            continue
+
+        active_processes[name] = process
+
+        # Stream stdout and stderr concurrently
+        await asyncio.gather(
+            _pipe_stream(process.stdout, prefix, prefix_visible_width),
+            _pipe_stream(process.stderr, prefix, prefix_visible_width),
+        )
+        return_code = await process.wait()
+        active_processes.pop(name, None)
+
+        elapsed = time.monotonic() - start_time
+
+        if shutdown_event.is_set():
+            break
+
+        if return_code == 0:
+            print(
+                f"{sup_prefix}{DIM}[{name}] exited cleanly — not restarting{RESET}",
+                flush=True,
+            )
+            break
+
+        # Reset back-off if the process ran long enough to be considered healthy
+        if elapsed >= CLEAN_RUN_THRESHOLD:
+            backoff_delay = BACKOFF_INITIAL
+
+        print(
+            f"{sup_prefix}{RED}[{name}] crashed (exit {return_code}) "
+            f"— restarting in {backoff_delay}s{RESET}",
+            flush=True,
+        )
+        await asyncio.sleep(backoff_delay)
+        backoff_delay = min(backoff_delay * BACKOFF_MULTIPLIER, BACKOFF_MAX)
+
+
+async def _main() -> None:
+    parser = argparse.ArgumentParser(description='Anthive process supervisor')
+    parser.add_argument(
+        '--caddy',
+        action='store_true',
+        help='Also start Caddy as local reverse proxy on port 8501',
+    )
+    args = parser.parse_args()
+
+    active_services = DEFAULT_SERVICES + (['caddy'] if args.caddy else [])
+    label_width = max(len(name) for name in active_services + ['supervisor'])
+    sup_prefix, _ = _make_prefix('supervisor', DIM, label_width)
+
+    mode = 'debug (caddy on :8501)' if args.caddy else 'deployment (nginx handles :8501)'
+    print(f"{sup_prefix}{BOLD}starting anthive — {mode}{RESET}", flush=True)
+    for service_name in active_services:
+        svc = SERVICES[service_name]
+        print(
+            f"{sup_prefix}  {svc['color']}{service_name}{RESET}: "
+            f"{' '.join(svc['cmd'][:3])}…",
+            flush=True,
+        )
+    print(flush=True)
+
+    shutdown_event = asyncio.Event()
+    active_processes: dict = {}  # name -> asyncio.subprocess.Process
+    loop = asyncio.get_running_loop()
+
+    def _handle_shutdown() -> None:
+        if not shutdown_event.is_set():
+            print(f"\n{sup_prefix}{BOLD}shutting down…{RESET}", flush=True)
+            shutdown_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, _handle_shutdown)
+
+    service_tasks = [
+        asyncio.create_task(
+            _run_service(
+                service_name,
+                SERVICES[service_name],
+                label_width,
+                shutdown_event,
+                active_processes,
+            )
+        )
+        for service_name in active_services
+    ]
+
+    # Wait until shutdown is requested
+    await shutdown_event.wait()
+
+    # Cancel all service tasks (stops restart loops)
+    for task in service_tasks:
+        task.cancel()
+
+    # SIGTERM all still-running children
+    for service_name, process in list(active_processes.items()):
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            pass
+
+    # Wait up to 5 s, then SIGKILL stragglers
+    deadline = loop.time() + 5.0
+    for service_name, process in list(active_processes.items()):
+        remaining = max(0.0, deadline - loop.time())
+        try:
+            await asyncio.wait_for(process.wait(), timeout=remaining)
+        except (asyncio.TimeoutError, ProcessLookupError):
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+
+    print(f"{sup_prefix}all services stopped", flush=True)
+
+
+if __name__ == '__main__':
+    asyncio.run(_main())

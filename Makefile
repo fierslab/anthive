@@ -1,4 +1,4 @@
-.PHONY: help build-webapp build-jupyter clean-webapp serve serve-api serve-streamlit serve-mcp dev-jupyter
+.PHONY: help build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-streamlit serve-mcp serve-all serve-debug dev-jupyter
 
 help:
 	@echo "Anthive4 Development Commands"
@@ -10,6 +10,10 @@ help:
 	@echo "  make clean-webapp   - Clean webapp build directory"
 	@echo "  make serve          - Serve webapp with Caddy (port 8501, API proxied)"
 	@echo "  make serve-nginx    - Serve webapp with Nginx (port 8501, API proxied)"
+	@echo ""
+	@echo "All-in-one:"
+	@echo "  make serve-all     - Start all services (deployment, nginx already running)"
+	@echo "  make serve-debug   - Start all services + Caddy on port 8501"
 	@echo ""
 	@echo "Development:"
 	@echo "  make serve-api         - Run REST API server (port 8080)"
@@ -153,6 +157,14 @@ serve-mcp:
 	@echo "  Type: streamable-http"
 	@echo ""
 	@./bin/ant-mcp
+
+serve-all:
+	@echo "Starting Anthive (deployment mode — nginx serves port 8501)"
+	@./bin/ant-supervisor
+
+serve-debug:
+	@echo "Starting Anthive with Caddy on http://localhost:8501"
+	@./bin/ant-supervisor --caddy
 
 serve-streamlit:
 	@echo "Starting Anthive Streamlit server on http://localhost:8082"
