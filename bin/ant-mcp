@@ -136,7 +136,7 @@ def main() -> None:
         plots_dir.mkdir(parents=True, exist_ok=True)
 
         # Prune old plots
-        cutoff = datetime.now() - timedelta(hours=2)
+        cutoff = datetime.now() - timedelta(weeks=1)
         for old_file in plots_dir.glob('*.png'):
             if datetime.fromtimestamp(old_file.stat().st_mtime) < cutoff:
                 old_file.unlink(missing_ok=True)
