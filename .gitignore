@@ -34,6 +34,9 @@ build/
 # Rclone (keep example, ignore actual config)
 rclone.conf
 
+# nginx active config (may contain secrets)
+config/default.conf
+
 # User config (may contain credentials)
 anthive.yaml
 
