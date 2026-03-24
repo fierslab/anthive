@@ -80,6 +80,12 @@ def _parse_args() -> argparse.Namespace:
         '--public-url', default='http://localhost:8501',
         help='Public base URL used to construct plot image URLs (default: http://localhost:8501)',
     )
+    parser.add_argument(
+        '--mcp-url', default=None,
+        help='Public-facing MCP URL shown at startup and passed to LLM clients '
+             '(e.g. https://data.nevel.eu/mcp/<token>). Defaults to '
+             'http://<host>:<port>/mcp when not set.',
+    )
     return parser.parse_args()
 
 
@@ -90,6 +96,7 @@ def main() -> None:
     api_base_url = args.api_url.rstrip('/')
     plots_dir = Path(args.plots_dir) if args.plots_dir else None
     public_url = args.public_url.rstrip('/')
+    mcp_public_url = (args.mcp_url or f'http://{args.host}:{args.port}/mcp').rstrip('/')
 
     mcp = FastMCP(
         name='anthive',
@@ -102,9 +109,16 @@ def main() -> None:
             'and search_genes to confirm gene names before plotting. '
             'Plot tools (plot_umap, plot_gene_distribution, plot_by_category, '
             'plot_numerical) return a URL to a PNG image — share the URL with '
-            'the user so they can open it in their browser.'
+            'the user so they can open it in their browser. '
+            f'This MCP server is reachable at: {mcp_public_url}'
         ),
     )
+
+    print(f'Anthive MCP server')
+    print(f'  MCP URL:    {mcp_public_url}')
+    print(f'  API URL:    {api_base_url}')
+    print(f'  Plots dir:  {plots_dir or "(none — using data: URIs)"}')
+    print(f'  Public URL: {public_url}')
 
     # ── API helpers ────────────────────────────────────────────────────────────
 

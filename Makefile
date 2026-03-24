@@ -157,7 +157,8 @@ serve-mcp:
 		--host 0.0.0.0 \
 		--port 8090 \
 		--plots-dir ./webapp/plots \
-		--public-url http://localhost:8501
+		--public-url http://localhost:8501 \
+		--mcp-url http://localhost:8090/mcp
 
 serve-streamlit:
 	@echo "Starting Anthive Streamlit server on http://localhost:8082"
