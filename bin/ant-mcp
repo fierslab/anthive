@@ -3,7 +3,6 @@
 # dependencies = [
 #   "mcp>=1.4.0",
 #   "httpx>=0.27.0",
-#   "uvicorn>=0.27.0",
 # ]
 # ///
 """
@@ -38,7 +37,6 @@ Generate the base64 token with:
 """
 
 import argparse
-import contextvars
 import json
 import sys
 import uuid
@@ -47,16 +45,7 @@ from pathlib import Path
 from typing import Optional
 
 import httpx
-import uvicorn
 from mcp.server.fastmcp import FastMCP
-from starlette.middleware.base import BaseHTTPMiddleware
-
-
-# ── per-request token (populated from X-MCP-Token header by nginx) ─────────────
-
-_current_mcp_token: contextvars.ContextVar[str] = contextvars.ContextVar(
-    '_current_mcp_token', default='anonymous',
-)
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
@@ -134,30 +123,27 @@ def main() -> None:
         return response.content
 
     def _save_plot_url(png_bytes: bytes) -> str:
-        """Save PNG bytes under the current user's token directory and return a URL.
+        """Save PNG bytes to plots_dir and return an unguessable public URL.
 
-        Files are scoped to the token supplied by nginx via X-MCP-Token so that
-        revoking a token also blocks access to that user's saved plots.
-        Old files (> 2 hours) in the token directory are pruned on each save.
+        Each file gets a random UUID filename (128-bit entropy) — the URL is
+        the only secret. Old files (> 2 hours) are pruned on each save.
         Falls back to a data: URI when --plots-dir is not configured.
         """
         if plots_dir is None:
             import base64
             return 'data:image/png;base64,' + base64.b64encode(png_bytes).decode()
 
-        user_token = _current_mcp_token.get()
-        token_dir = plots_dir / user_token
-        token_dir.mkdir(parents=True, exist_ok=True)
+        plots_dir.mkdir(parents=True, exist_ok=True)
 
-        # Prune old plots for this token
+        # Prune old plots
         cutoff = datetime.now() - timedelta(hours=2)
-        for old_file in token_dir.glob('*.png'):
+        for old_file in plots_dir.glob('*.png'):
             if datetime.fromtimestamp(old_file.stat().st_mtime) < cutoff:
                 old_file.unlink(missing_ok=True)
 
         plot_filename = f"{uuid.uuid4().hex}.png"
-        (token_dir / plot_filename).write_bytes(png_bytes)
-        return f"{public_url}/plots/{user_token}/{plot_filename}"
+        (plots_dir / plot_filename).write_bytes(png_bytes)
+        return f"{public_url}/plots/{plot_filename}"
 
     # ── tools ──────────────────────────────────────────────────────────────────
 
@@ -444,20 +430,7 @@ def main() -> None:
     if args.transport == 'stdio':
         mcp.run(transport='stdio')
     else:
-        # Wrap the FastMCP Starlette app with middleware that captures the
-        # X-MCP-Token header injected by nginx for per-user token routing.
-        class _TokenMiddleware(BaseHTTPMiddleware):
-            async def dispatch(self, request, call_next):
-                token_value = request.headers.get('x-mcp-token', 'anonymous')
-                token_context = _current_mcp_token.set(token_value)
-                try:
-                    return await call_next(request)
-                finally:
-                    _current_mcp_token.reset(token_context)
-
-        http_app = mcp.streamable_http_app()
-        http_app.add_middleware(_TokenMiddleware)
-        uvicorn.run(http_app, host=args.host, port=args.port)
+        mcp.run(transport=args.transport)
 
 
 if __name__ == '__main__':
