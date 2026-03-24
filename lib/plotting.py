@@ -1,9 +1,12 @@
 """
-Plotting functions for Anthive — all return PNG bytes.
+Plotting functions for Anthive.
 
 Each function accepts pandas DataFrames and renders with matplotlib/seaborn,
 mirroring the Streamlit visualisation pages. Common parameters width, height,
-and dpi control output size and resolution.
+dpi, and output_format control output size and format (png | svg | pdf).
+
+New unified API: plot_scatter, plot_distribution, plot_grouped, plot_heatmap.
+Legacy functions (plot_umap, plot_gene, plot_cat, plot_num) remain unchanged.
 """
 
 import io
@@ -18,19 +21,43 @@ import pandas as pd
 
 
 _DEFAULT_PALETTE = 'tab20'
+_VALID_FORMATS = {'png', 'svg', 'pdf'}
 
 
 def _setup_style() -> None:
     sns.set_theme(style='ticks', font_scale=0.9)
 
 
-def _render_png(fig: MplFigure, dpi: int) -> bytes:
-    """Render figure to PNG bytes and close it immediately."""
+def _render_figure(
+    fig: MplFigure,
+    dpi: int,
+    output_format: str = 'png',
+    caption: Optional[str] = None,
+) -> bytes:
+    """Render figure to bytes in the requested format and close it.
+
+    For PDF output the caption is embedded as a figure-level text annotation
+    at the bottom. For PNG/SVG the caption is not embedded — the caller passes
+    it back to the client via the X-Plot-Caption response header.
+    """
+    if output_format not in _VALID_FORMATS:
+        output_format = 'png'
+    if output_format == 'pdf' and caption:
+        fig.text(
+            0.5, 0.01, caption,
+            ha='center', va='bottom', fontsize=7, color='#555555',
+            wrap=True,
+        )
     buf = io.BytesIO()
-    fig.savefig(buf, format='png', dpi=dpi, bbox_inches='tight')
+    fig.savefig(buf, format=output_format, dpi=dpi, bbox_inches='tight')
     plt.close(fig)
     buf.seek(0)
     return buf.getvalue()
+
+
+def _render_png(fig: MplFigure, dpi: int) -> bytes:
+    """Render figure to PNG bytes and close it immediately (legacy wrapper)."""
+    return _render_figure(fig, dpi, 'png')
 
 
 # ── UMAP ──────────────────────────────────────────────────────────────────────
@@ -278,3 +305,242 @@ def plot_num(
         fig.tight_layout()
 
     return _render_png(fig, dpi)
+
+
+# ── Unified grammar-of-graphics API ───────────────────────────────────────────
+
+def build_caption(
+    db_id: str,
+    geom: str,
+    x: Optional[str],
+    x_kind: Optional[str],
+    y: Optional[str],
+    color: Optional[str],
+    layer: str = 'X',
+) -> str:
+    """Return a human-readable figure caption for the given plot parameters."""
+    if geom == 'scatter':
+        base = f'Scatter plot of {db_id}'
+        if x and x_kind == 'embedding':
+            base = f'UMAP of {db_id} ({x})'
+        if color:
+            return f'{base}, colored by {color}'
+        return base
+    if geom in ('violin', 'box'):
+        if y:
+            return f'{y} expression by {x} in {db_id} ({geom})'
+        return f'Cell counts per {x} in {db_id} ({geom})'
+    if geom == 'bar':
+        if y:
+            return f'Mean {y} per {x} in {db_id}'
+        return f'Cell counts per {x} in {db_id}'
+    if geom in ('histogram', 'ecdf', 'kde'):
+        base = f'Distribution of {x} in {db_id} ({geom})'
+        if color:
+            return f'{base}, grouped by {color}'
+        return base
+    if geom == 'heatmap':
+        return f'Mean gene expression per {y} in {db_id} (layer: {layer})'
+    return f'{geom} plot of {db_id}'
+
+
+def plot_scatter(
+    embedding_df: pd.DataFrame,
+    color_df: Optional[pd.DataFrame],
+    color_field: Optional[str],
+    color_kind: str = 'categorical',
+    x_label: str = 'Dim 1',
+    y_label: str = 'Dim 2',
+    width: float = 8,
+    height: float = 6,
+    dpi: int = 150,
+    output_format: str = 'png',
+    point_size: float = 3,
+    alpha: float = 0.8,
+    palette: str = _DEFAULT_PALETTE,
+    caption: Optional[str] = None,
+) -> bytes:
+    """Scatter plot on two embedding dimensions, optionally colored by any field.
+
+    Args:
+        embedding_df: DataFrame with columns [cell_name, dim_0, dim_1].
+        color_df:     DataFrame with [cell_name, <color_field>] or None.
+        color_field:  Column name to use for colouring.
+        color_kind:   'categorical', 'numerical', or 'gene'.
+        x_label:      X-axis label override.
+        y_label:      Y-axis label override.
+        output_format: 'png' | 'svg' | 'pdf'.
+        caption:      Figure caption embedded in PDF or passed via header.
+    """
+    _setup_style()
+    fig, ax = plt.subplots(figsize=(width, height))
+
+    x_col = embedding_df.columns[-2]
+    y_col = embedding_df.columns[-1]
+    plot_df = embedding_df.copy()
+
+    if color_df is not None and color_field:
+        color_values = color_df.set_index('cell_name')[color_field]
+        plot_df[color_field] = color_values.reindex(plot_df['cell_name'].values).values
+
+        scatter_kwargs: dict = dict(
+            data=plot_df, x=x_col, y=y_col,
+            hue=color_field, linewidth=0, s=point_size, alpha=alpha, ax=ax,
+        )
+        if color_kind == 'categorical':
+            scatter_kwargs['palette'] = palette
+
+        sns.scatterplot(**scatter_kwargs)
+
+        legend = ax.get_legend()
+        if legend and color_kind == 'categorical':
+            n_cats = int(plot_df[color_field].nunique())
+            if n_cats > 12:
+                ax.legend(
+                    bbox_to_anchor=(1.02, 1), loc='upper left',
+                    fontsize=6, markerscale=2, title=color_field,
+                )
+            else:
+                ax.legend(fontsize=8, markerscale=2, title=color_field)
+    else:
+        sns.scatterplot(
+            data=plot_df, x=x_col, y=y_col,
+            linewidth=0, s=point_size, alpha=alpha, color='steelblue', ax=ax,
+        )
+
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(y_label)
+    ax.set_title(color_field or 'UMAP')
+    sns.despine(ax=ax)
+
+    return _render_figure(fig, dpi, output_format, caption)
+
+
+def plot_distribution(
+    data_df: pd.DataFrame,
+    x_field: str,
+    geom: str = 'ecdf',
+    color_field: Optional[str] = None,
+    bins: int = 20,
+    width: float = 7,
+    height: float = 4,
+    dpi: int = 150,
+    output_format: str = 'png',
+    caption: Optional[str] = None,
+) -> bytes:
+    """Univariate distribution plot: ecdf, kde, or histogram.
+
+    Optionally grouped by a categorical field via the color_field hue.
+
+    Args:
+        data_df:     DataFrame with [cell_name, x_field, (color_field)].
+        x_field:     Gene or numerical column for the X axis.
+        geom:        'ecdf' | 'kde' | 'histogram'.
+        color_field: Optional categorical column for hue grouping.
+        output_format: 'png' | 'svg' | 'pdf'.
+        caption:     Figure caption.
+    """
+    _setup_style()
+    fig, ax = plt.subplots(figsize=(width, height))
+
+    hue = color_field if color_field and color_field in data_df.columns else None
+
+    if geom == 'ecdf':
+        sns.ecdfplot(data=data_df, x=x_field, hue=hue, ax=ax)
+    elif geom == 'kde':
+        sns.kdeplot(data=data_df, x=x_field, hue=hue, ax=ax)
+    else:
+        sns.histplot(data=data_df, x=x_field, bins=bins, hue=hue, ax=ax)
+
+    ax.set_xlabel(x_field)
+    ax.set_title(f'{x_field} ({geom})')
+    sns.despine(ax=ax)
+
+    return _render_figure(fig, dpi, output_format, caption)
+
+
+def plot_grouped(
+    data_df: pd.DataFrame,
+    x_field: str,
+    y_field: Optional[str] = None,
+    geom: str = 'bar',
+    ci: bool = True,
+    width: float = 8,
+    height: float = 5,
+    dpi: int = 150,
+    output_format: str = 'png',
+    caption: Optional[str] = None,
+) -> bytes:
+    """Values grouped by a categorical field: bar (with CI), box, or violin.
+
+    Args:
+        data_df:   DataFrame with [cell_name, x_field, (y_field)].
+        x_field:   Categorical column for grouping (X axis).
+        y_field:   Gene or numerical column for Y axis. None → cell counts.
+        geom:      'bar' | 'box' | 'violin'.
+        ci:        Show 95% confidence interval on bar plots (seaborn bootstrap).
+        output_format: 'png' | 'svg' | 'pdf'.
+        caption:   Figure caption.
+    """
+    _setup_style()
+    fig, ax = plt.subplots(figsize=(width, height))
+
+    cat_order = data_df[x_field].value_counts().index.tolist()
+
+    if y_field is None:
+        counts = data_df[x_field].value_counts().reindex(cat_order)
+        sns.barplot(x=counts.index, y=counts.values, ax=ax)
+        ax.set_ylabel('Cell count')
+    elif geom == 'box':
+        sns.boxplot(data=data_df, x=x_field, y=y_field,
+                    order=cat_order, ax=ax, showfliers=False)
+    elif geom == 'violin':
+        sns.violinplot(data=data_df, x=x_field, y=y_field,
+                       order=cat_order, ax=ax)
+    else:  # bar
+        errorbar = ('ci', 95) if ci else None
+        sns.barplot(data=data_df, x=x_field, y=y_field,
+                    order=cat_order, ax=ax, errorbar=errorbar)
+
+    ax.set_xlabel(x_field)
+    plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
+    sns.despine(ax=ax)
+    fig.tight_layout()
+
+    return _render_figure(fig, dpi, output_format, caption)
+
+
+def plot_heatmap(
+    mean_expr_df: pd.DataFrame,
+    width: float = 10,
+    height: float = 6,
+    dpi: int = 150,
+    output_format: str = 'png',
+    caption: Optional[str] = None,
+) -> bytes:
+    """Heatmap of mean gene expression per category group.
+
+    Args:
+        mean_expr_df: DataFrame with index=category values, columns=gene names.
+                      Values are z-scored per gene column before display.
+        output_format: 'png' | 'svg' | 'pdf'.
+        caption:      Figure caption.
+    """
+    _setup_style()
+    fig, ax = plt.subplots(figsize=(width, height))
+
+    z_df = (mean_expr_df - mean_expr_df.mean()) / (mean_expr_df.std() + 1e-9)
+    sns.heatmap(
+        z_df, ax=ax,
+        cmap='RdBu_r', center=0,
+        linewidths=0.3,
+        yticklabels=True,
+        xticklabels=True,
+        cbar_kws={'label': 'z-score'},
+    )
+    ax.set_xlabel('Gene')
+    ax.set_ylabel('')
+    plt.setp(ax.get_xticklabels(), rotation=45, ha='right', fontsize=8)
+    fig.tight_layout()
+
+    return _render_figure(fig, dpi, output_format, caption)

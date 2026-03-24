@@ -1431,7 +1431,266 @@ async def execute_sql_query(db_id: str, request: QueryRequest):
 # They return image/png.  Extend lib/plotting.py to add new plot types.
 
 
-@app.get("/databases/{db_id:path}/plot/umap", tags=["plots"])
+# ── plot helpers ───────────────────────────────────────────────────────────────
+
+_PLOT_MIME_TYPES = {
+    'png': 'image/png',
+    'svg': 'image/svg+xml',
+    'pdf': 'application/pdf',
+}
+
+_PLOT_GEOMS = {
+    'scatter', 'violin', 'box', 'bar', 'histogram', 'ecdf', 'kde', 'heatmap',
+}
+
+
+def _resolve_field_kind(
+    field_name: str,
+    available_embeddings: List[str],
+    categorical_fields: List[str],
+    numerical_fields: List[str],
+    db,
+) -> tuple:
+    """Classify field_name as (resolved_name, kind).
+
+    kind ∈ {embedding, categorical, numerical, gene}.
+    Resolution order: embedding → categorical → numerical → gene (gene is last
+    as it requires a DB query). Raises HTTPException(400) if not found.
+    """
+    if field_name in available_embeddings:
+        return field_name, 'embedding'
+    if field_name in categorical_fields:
+        return field_name, 'categorical'
+    if field_name in numerical_fields:
+        return field_name, 'numerical'
+    matches = db.search_genes(field_name, exact=True, case_sensitive=False, limit=1)
+    if matches:
+        return matches[0], 'gene'
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"Field '{field_name}' is not a known embedding, categorical field, "
+            f"numerical field, or gene in this dataset."
+        ),
+    )
+
+
+def _get_top_genes_by_mean(db, n_genes: int, layer: str) -> List[str]:
+    """Return top n_genes names ranked by mean expression."""
+    try:
+        db.require_gene_bins()
+        rows = db._conn.execute(
+            'SELECT g.gene_name FROM __gene_bins b '
+            'JOIN __genes g USING (gene_id) '
+            'ORDER BY b.mean_expr DESC '
+            f'LIMIT {n_genes}'
+        ).fetchall()
+        return [r[0] for r in rows]
+    except Exception:
+        rows = db._conn.execute(
+            f'SELECT gene_name, AVG(value) AS avg_expr '
+            f'FROM layer__{layer} '
+            f'GROUP BY gene_name '
+            f'ORDER BY avg_expr DESC '
+            f'LIMIT {n_genes}'
+        ).fetchall()
+        return [r[0] for r in rows]
+
+
+# ── unified plot endpoint ──────────────────────────────────────────────────────
+
+@app.get("/databases/{db_id:path}/plot", tags=["plots"])
+async def plot(
+    db_id: str,
+    geom: str = Query(..., description="scatter | violin | box | bar | histogram | ecdf | kde | heatmap"),
+    x: Optional[str] = Query(None, description="X-axis field (auto-typed: embedding, gene, categorical, numerical)"),
+    y: Optional[str] = Query(None, description="Y-axis field (auto-typed)"),
+    color: Optional[str] = Query(None, description="Color-encoding field (auto-typed)"),
+    output_format: str = Query('png', alias='format', description="png | svg | pdf"),
+    layer: str = Query('X', description="Expression layer"),
+    width: float = Query(8.0),
+    height: float = Query(6.0),
+    dpi: int = Query(150),
+    bins: int = Query(20),
+    point_size: float = Query(3.0),
+    alpha: float = Query(0.8),
+    palette: str = Query('tab20'),
+    ci: bool = Query(True, description="Show 95% CI on bar plots"),
+    n_genes: int = Query(20, description="Top genes for heatmap when x not given"),
+):
+    """Unified grammar-of-graphics plot endpoint.
+
+    Provide geom + x/y/color field names; the server auto-detects field types.
+    Returns the image with X-Plot-Caption and X-Plot-Format response headers.
+    """
+    if geom not in _PLOT_GEOMS:
+        raise HTTPException(400, detail=f"Unknown geom '{geom}'. Valid: {sorted(_PLOT_GEOMS)}")
+    if output_format not in _PLOT_MIME_TYPES:
+        raise HTTPException(400, detail=f"Unknown format '{output_format}'. Valid: png, svg, pdf")
+
+    try:
+        with _pooled_db(db_id) as db:
+            available_embeddings = db._get_embeddings()
+            categorical_fields = db._get_categorical_fields()
+            numerical_fields = db._get_numerical_fields()
+
+            def resolve(field_name):
+                return _resolve_field_kind(
+                    field_name, available_embeddings,
+                    categorical_fields, numerical_fields, db,
+                )
+
+            # ── scatter ────────────────────────────────────────────────────────
+            if geom == 'scatter':
+                emb_id = x or ('X_umap' if 'X_umap' in available_embeddings
+                               else (available_embeddings[0] if available_embeddings else None))
+                if not emb_id:
+                    raise HTTPException(400, detail="No embeddings available for scatter plot")
+                embedding_df = db.get_embedding_data(emb_id, n_dims=2)
+
+                color_df = None
+                color_field_name = None
+                color_kind = 'categorical'
+                if color:
+                    color_field_name, color_kind = resolve(color)
+                    if color_kind == 'gene':
+                        color_df = db.get_cell_table(genes=[color_field_name], layer=layer)
+                    else:
+                        color_df = db.get_cell_table(metadata_fields=[color_field_name])
+
+                x_label = str(embedding_df.columns[-2]).replace('dim_', 'Dim ')
+                y_label = str(embedding_df.columns[-1]).replace('dim_', 'Dim ')
+                caption = plotting.build_caption(db_id, geom, emb_id, 'embedding',
+                                                 None, color_field_name, layer)
+                image_bytes = plotting.plot_scatter(
+                    embedding_df=embedding_df,
+                    color_df=color_df,
+                    color_field=color_field_name,
+                    color_kind=color_kind,
+                    x_label=x_label,
+                    y_label=y_label,
+                    width=width, height=height, dpi=dpi,
+                    output_format=output_format,
+                    point_size=point_size, alpha=alpha, palette=palette,
+                    caption=caption,
+                )
+
+            # ── violin / box / bar ─────────────────────────────────────────────
+            elif geom in ('violin', 'box', 'bar'):
+                if not x:
+                    raise HTTPException(400, detail=f"geom='{geom}' requires x (categorical field)")
+                x_name, x_kind = resolve(x)
+                if x_kind != 'categorical':
+                    raise HTTPException(400, detail=(
+                        f"geom='{geom}' requires x to be categorical; "
+                        f"'{x}' resolved as '{x_kind}'"
+                    ))
+                y_name = None
+                if y:
+                    y_name, y_kind = resolve(y)
+                    if y_kind == 'gene':
+                        data_df = db.get_cell_table(genes=[y_name], metadata_fields=[x_name], layer=layer)
+                    else:
+                        data_df = db.get_cell_table(metadata_fields=[x_name, y_name])
+                else:
+                    data_df = db.get_cell_table(metadata_fields=[x_name])
+
+                caption = plotting.build_caption(db_id, geom, x_name, x_kind,
+                                                 y_name, None, layer)
+                image_bytes = plotting.plot_grouped(
+                    data_df=data_df,
+                    x_field=x_name,
+                    y_field=y_name,
+                    geom=geom, ci=ci,
+                    width=width, height=height, dpi=dpi,
+                    output_format=output_format,
+                    caption=caption,
+                )
+
+            # ── histogram / ecdf / kde ─────────────────────────────────────────
+            elif geom in ('histogram', 'ecdf', 'kde'):
+                if not x:
+                    raise HTTPException(400, detail=f"geom='{geom}' requires x (gene or numerical field)")
+                x_name, x_kind = resolve(x)
+                color_name = None
+                if color:
+                    color_name, _ = resolve(color)
+                    if x_kind == 'gene':
+                        data_df = db.get_cell_table(genes=[x_name], metadata_fields=[color_name], layer=layer)
+                    else:
+                        data_df = db.get_cell_table(metadata_fields=[x_name, color_name])
+                else:
+                    if x_kind == 'gene':
+                        data_df = db.get_cell_table(genes=[x_name], layer=layer)
+                    else:
+                        data_df = db.get_cell_table(metadata_fields=[x_name])
+
+                caption = plotting.build_caption(db_id, geom, x_name, x_kind,
+                                                 None, color_name, layer)
+                image_bytes = plotting.plot_distribution(
+                    data_df=data_df,
+                    x_field=x_name,
+                    geom=geom, color_field=color_name,
+                    bins=bins,
+                    width=width, height=height, dpi=dpi,
+                    output_format=output_format,
+                    caption=caption,
+                )
+
+            # ── heatmap ────────────────────────────────────────────────────────
+            else:  # heatmap
+                if not y:
+                    raise HTTPException(400, detail="geom='heatmap' requires y (categorical field)")
+                y_name, y_kind = resolve(y)
+                if y_kind != 'categorical':
+                    raise HTTPException(400, detail=(
+                        f"geom='heatmap' requires y to be categorical; "
+                        f"'{y}' resolved as '{y_kind}'"
+                    ))
+                if x:
+                    gene_list = [g.strip() for g in x.split(',')]
+                    gene_list = [db.search_genes(g, exact=True, limit=1)[0]
+                                 for g in gene_list
+                                 if db.search_genes(g, exact=True, limit=1)]
+                    if not gene_list:
+                        raise HTTPException(400, detail=f"None of the genes in x='{x}' were found")
+                else:
+                    gene_list = _get_top_genes_by_mean(db, n_genes, layer)
+
+                data_df = db.get_cell_table(genes=gene_list, metadata_fields=[y_name], layer=layer)
+                mean_expr_df = data_df.groupby(y_name)[gene_list].mean()
+
+                caption = plotting.build_caption(db_id, geom, x, 'gene',
+                                                 y_name, None, layer)
+                image_bytes = plotting.plot_heatmap(
+                    mean_expr_df=mean_expr_df,
+                    width=width, height=height, dpi=dpi,
+                    output_format=output_format,
+                    caption=caption,
+                )
+
+        return Response(
+            content=image_bytes,
+            media_type=_PLOT_MIME_TYPES[output_format],
+            headers={
+                'X-Plot-Caption': caption,
+                'X-Plot-Format': output_format,
+            },
+        )
+
+    except HTTPException:
+        raise
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── legacy plot endpoints (deprecated — use /plot) ────────────────────────────
+
+@app.get("/databases/{db_id:path}/plot/umap", tags=["plots"], deprecated=True)
 async def plot_umap(
     db_id: str,
     embedding: Optional[str] = Query(None, description="Embedding key, e.g. X_umap (default: first available)"),
@@ -1498,7 +1757,7 @@ async def plot_umap(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/databases/{db_id:path}/plot/gene", tags=["plots"])
+@app.get("/databases/{db_id:path}/plot/gene", tags=["plots"], deprecated=True)
 async def plot_gene(
     db_id: str,
     gene: str = Query(..., description="Gene name"),
@@ -1531,7 +1790,7 @@ async def plot_gene(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/databases/{db_id:path}/plot/cat", tags=["plots"])
+@app.get("/databases/{db_id:path}/plot/cat", tags=["plots"], deprecated=True)
 async def plot_cat(
     db_id: str,
     cat: str = Query(..., description="Categorical metadata field to group by"),
@@ -1571,7 +1830,7 @@ async def plot_cat(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/databases/{db_id:path}/plot/num", tags=["plots"])
+@app.get("/databases/{db_id:path}/plot/num", tags=["plots"], deprecated=True)
 async def plot_num(
     db_id: str,
     num: str = Query(..., description="Numerical metadata field"),

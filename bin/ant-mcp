@@ -120,9 +120,11 @@ def main() -> None:
             'Use search_datasets to discover relevant studies by organism, '
             'cell type, tissue, or disease. Use get_dataset_info for details '
             'and search_genes to confirm gene names before plotting. '
-            'Plot tools (plot_umap, plot_gene_distribution, plot_by_category, '
-            'plot_numerical) return a URL to a PNG image — share the URL with '
-            'the user so they can open it in their browser. '
+            'Use the plot tool for all visualisations — it accepts a geom '
+            '(scatter, violin, box, bar, histogram, ecdf, kde, heatmap) plus '
+            'x/y/color field names; the server auto-detects field types. '
+            'plot returns a URL to an HTML page (png/svg) or PDF — share it '
+            'with the user so they can open the image and read the caption. '
             f'This MCP server is reachable at: {mcp_public_url}'
         ),
     )
@@ -143,34 +145,73 @@ def main() -> None:
         return response.json()
 
     def _get_image(path: str, **params) -> bytes:
-        """GET PNG bytes from an ant-serve plot endpoint."""
+        """GET image bytes from an ant-serve plot endpoint (legacy)."""
         url = f"{api_base_url}{path}"
         response = httpx.get(url, params={k: v for k, v in params.items() if v is not None}, timeout=120)
         response.raise_for_status()
         return response.content
 
-    def _save_plot_url(png_bytes: bytes) -> str:
-        """Save PNG bytes to plots_dir and return an unguessable public URL.
+    def _get_plot(path: str, **params) -> tuple:
+        """GET image bytes + response headers from an ant-serve plot endpoint.
 
-        Each file gets a random UUID filename (128-bit entropy) — the URL is
-        the only secret. Old files (> 2 hours) are pruned on each save.
+        Returns (image_bytes, headers_dict). Headers include X-Plot-Caption
+        and X-Plot-Format set by ant-serve.
+        """
+        url = f"{api_base_url}{path}"
+        response = httpx.get(url, params={k: v for k, v in params.items() if v is not None}, timeout=120)
+        response.raise_for_status()
+        return response.content, dict(response.headers)
+
+    def _save_plot_url(image_bytes: bytes, output_format: str = 'png', caption: str = '') -> str:
+        """Save image to plots_dir and return a public URL.
+
+        PNG/SVG: saves uuid.ext + uuid.html (image + caption paragraph).
+                 Returns the HTML page URL so the user sees image + caption.
+        PDF:     saves uuid.pdf only (caption is embedded by ant-serve).
+                 Returns the PDF URL directly.
         Falls back to a data: URI when --plots-dir is not configured.
         """
+        _mime = {'png': 'image/png', 'svg': 'image/svg+xml', 'pdf': 'application/pdf'}
         if plots_dir is None:
             import base64
-            return 'data:image/png;base64,' + base64.b64encode(png_bytes).decode()
+            mime = _mime.get(output_format, 'image/png')
+            return f'data:{mime};base64,' + base64.b64encode(image_bytes).decode()
 
         plots_dir.mkdir(parents=True, exist_ok=True)
 
-        # Prune old plots
+        # Prune files older than 1 week
         cutoff = datetime.now() - timedelta(weeks=1)
-        for old_file in plots_dir.glob('*.png'):
-            if datetime.fromtimestamp(old_file.stat().st_mtime) < cutoff:
+        for old_file in plots_dir.iterdir():
+            if old_file.is_file() and datetime.fromtimestamp(old_file.stat().st_mtime) < cutoff:
                 old_file.unlink(missing_ok=True)
 
-        plot_filename = f"{uuid.uuid4().hex}.png"
-        (plots_dir / plot_filename).write_bytes(png_bytes)
-        return f"{public_url}/plots/{plot_filename}"
+        file_stem = uuid.uuid4().hex
+
+        if output_format == 'pdf':
+            plot_filename = f"{file_stem}.pdf"
+            (plots_dir / plot_filename).write_bytes(image_bytes)
+            return f"{public_url}/plots/{plot_filename}"
+
+        # PNG or SVG: save image file + minimal HTML page
+        plot_filename = f"{file_stem}.{output_format}"
+        html_filename = f"{file_stem}.html"
+        (plots_dir / plot_filename).write_bytes(image_bytes)
+
+        safe_caption = caption.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        html_content = (
+            '<!DOCTYPE html><html><head><meta charset="utf-8">'
+            f'<title>{safe_caption}</title>'
+            '<style>'
+            'body{margin:2rem auto;max-width:1000px;font-family:sans-serif;}'
+            'img{max-width:100%;height:auto;display:block;}'
+            'p.caption{color:#555;font-size:0.85rem;margin-top:0.75rem;line-height:1.5;}'
+            '</style></head><body>'
+            f'<img src="{plot_filename}" alt="{safe_caption}">'
+            f'<p class="caption">{safe_caption}</p>'
+            '</body></html>'
+        )
+        (plots_dir / html_filename).write_text(html_content, encoding='utf-8')
+        return f"{public_url}/plots/{html_filename}"
 
     # ── tools ──────────────────────────────────────────────────────────────────
 
@@ -311,6 +352,75 @@ def main() -> None:
         return f"Genes matching '{query}' in {db_id} ({len(gene_names)} result(s)):\n" + ', '.join(gene_names)
 
     @mcp.tool()
+    def plot(
+        db_id: str,
+        geom: str,
+        x: Optional[str] = None,
+        y: Optional[str] = None,
+        color: Optional[str] = None,
+        output_format: str = 'png',
+        layer: str = 'X',
+        width: float = 8,
+        height: float = 6,
+        dpi: int = 150,
+        bins: int = 20,
+        point_size: float = 3,
+        alpha: float = 0.8,
+        palette: str = 'tab20',
+        ci: bool = True,
+        n_genes: int = 20,
+    ) -> str:
+        """Generate a plot for a single-cell dataset and return a URL.
+
+        The server auto-detects field types (gene, embedding, categorical,
+        numerical) — just pass the field name.
+
+        geom choices:
+          scatter     UMAP/embedding scatter. x/y default to first embedding.
+          violin      Expression distribution per category (x=cat, y=gene/num).
+          box         Same as violin, box-plot style.
+          bar         Mean per category with 95% CI (x=cat, y=gene/num).
+                      Omit y for cell counts per category.
+          histogram   Expression/metadata histogram (x=gene/num).
+          ecdf        Empirical CDF (x=gene/num).
+          kde         Kernel density estimate (x=gene/num).
+          heatmap     Mean expression across genes per group (y=cat).
+                      x = comma-separated gene list, or omit for top n_genes.
+
+        color adds hue grouping for scatter and distribution geoms.
+
+        Returns a URL to an HTML page (png/svg) or PDF file.
+
+        Args:
+            db_id:         Dataset identifier from search_datasets.
+            geom:          Plot geometry (see above).
+            x:             X-axis field name.
+            y:             Y-axis field name.
+            color:         Color-encoding field name.
+            output_format: 'png' (default), 'svg', or 'pdf'.
+            layer:         Expression layer (default 'X').
+            width:         Figure width in inches (default 8).
+            height:        Figure height in inches (default 6).
+            dpi:           Output resolution (default 150).
+            bins:          Histogram bins (default 20).
+            point_size:    Scatter point size (default 3).
+            alpha:         Scatter point transparency (default 0.8).
+            palette:       Seaborn palette for categorical color (default tab20).
+            ci:            Show 95% CI on bar plots (default True).
+            n_genes:       Top genes for heatmap when x not given (default 20).
+        """
+        image_bytes, headers = _get_plot(
+            f'/databases/{db_id}/plot',
+            geom=geom, x=x, y=y, color=color,
+            format=output_format, layer=layer,
+            width=width, height=height, dpi=dpi,
+            bins=bins, point_size=point_size, alpha=alpha,
+            palette=palette, ci=ci, n_genes=n_genes,
+        )
+        caption = headers.get('x-plot-caption', '')
+        return _save_plot_url(image_bytes, output_format, caption)
+
+    @mcp.tool()
     def plot_umap(
         db_id: str,
         gene: Optional[str] = None,
@@ -325,24 +435,9 @@ def main() -> None:
         alpha: float = 0.8,
         palette: str = 'tab20',
     ) -> str:
-        """Generate a UMAP embedding scatter plot.
+        """Deprecated: use plot(geom='scatter', ...) instead.
 
-        Provide at most one of gene, category, or numerical to colour the plot.
-        If none is given, all cells appear in a single colour.
-
-        Args:
-            db_id:      Dataset identifier (e.g. 'B26/SOF').
-            gene:       Colour by gene expression, e.g. 'APOE'.
-            category:   Colour by categorical field, e.g. 'celltype'.
-            numerical:  Colour by numerical field, e.g. 'nCount_RNA'.
-            embedding:  Embedding key (default: X_umap if available).
-            layer:      Expression layer (default: X).
-            width:      Figure width in inches (default 8).
-            height:     Figure height in inches (default 6).
-            dpi:        Output resolution (default 150).
-            point_size: Scatter point size (default 3).
-            alpha:      Point transparency 0–1 (default 0.8).
-            palette:    Seaborn palette for categorical colouring (default tab20).
+        Generate a UMAP embedding scatter plot.
         """
         png_bytes = _get_image(
             f'/databases/{db_id}/plot/umap',
@@ -354,7 +449,7 @@ def main() -> None:
         return _save_plot_url(png_bytes)
 
     @mcp.tool()
-    def plot_gene_distribution(
+    def plot_gene_distribution(  # Deprecated: use plot(geom='ecdf'/'histogram'/'kde')
         db_id: str,
         gene: str,
         plot_type: str = 'ecdf',
@@ -384,7 +479,7 @@ def main() -> None:
         return _save_plot_url(png_bytes)
 
     @mcp.tool()
-    def plot_by_category(
+    def plot_by_category(  # Deprecated: use plot(geom='bar'/'violin'/'box')
         db_id: str,
         cat: str,
         y: Optional[str] = None,
@@ -419,7 +514,7 @@ def main() -> None:
         return _save_plot_url(png_bytes)
 
     @mcp.tool()
-    def plot_numerical(
+    def plot_numerical(  # Deprecated: use plot(geom='ecdf'/'histogram'/'kde'/'violin'/'box')
         db_id: str,
         num: str,
         cat: Optional[str] = None,
