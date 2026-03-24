@@ -51,3 +51,27 @@ s3:
   # Set true for MinIO / path-style endpoints (s3://bucket/key)
   # Set false (default) for AWS-style virtual-hosted (bucket.s3.region.amazonaws.com)
   use_path_style: false
+
+# MCP Server Configuration (ant-mcp)
+# ------------------------------------
+mcp:
+  # Host and port ant-mcp listens on
+  host: 0.0.0.0
+  port: 8090
+
+  # MCP transport: streamable-http | sse | stdio
+  transport: streamable-http
+
+  # Directory where plot PNG files are saved for URL-based serving.
+  # Set to null to disable file-based plots (falls back to data: URIs).
+  plots_dir: ./webapp/plots
+
+  # Public base URL used to construct plot image URLs
+  # (scheme + host only, no trailing slash)
+  public_url: http://localhost:8501
+
+  # Public-facing MCP URL shown at startup and passed to LLM clients.
+  # Include the per-user token here, e.g.:
+  #   https://data.nevel.eu/mcp/<token>
+  # Defaults to http://<host>:<port>/mcp when null.
+  mcp_url: null

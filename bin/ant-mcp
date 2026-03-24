@@ -3,6 +3,7 @@
 # dependencies = [
 #   "mcp>=1.4.0",
 #   "httpx>=0.27.0",
+#   "pyyaml>=6.0",
 # ]
 # ///
 """
@@ -47,44 +48,56 @@ from typing import Optional
 import httpx
 from mcp.server.fastmcp import FastMCP
 
+# ── load anthive config (anthive.yaml / anthive.default.yaml) ──────────────────
+
+_script_dir = Path(__file__).parent.resolve()
+sys.path.insert(0, str(_script_dir.parent / 'lib'))
+from config import get_config as _get_anthive_config  # noqa: E402
+
+_anthive_cfg = _get_anthive_config().get('mcp', {})
+
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
 def _parse_args() -> argparse.Namespace:
+    cfg = _anthive_cfg  # shorthand for yaml mcp: section
+    rest_host = _get_anthive_config().get('rest_api_host', 'localhost')
+    rest_port = _get_anthive_config().get('rest_api_port', 8080)
+    default_api_url = f'http://{rest_host}:{rest_port}'
+
     parser = argparse.ArgumentParser(
         description='Anthive MCP Server — exposes single-cell data to LLM sessions',
     )
     parser.add_argument(
-        '--api-url', default='http://localhost:8080',
-        help='ant-serve API base URL (default: http://localhost:8080)',
+        '--api-url', default=default_api_url,
+        help=f'ant-serve API base URL (default: {default_api_url})',
     )
     parser.add_argument(
-        '--host', default='0.0.0.0',
-        help='Bind host for HTTP/SSE transport (default: 0.0.0.0)',
+        '--host', default=cfg.get('host', '0.0.0.0'),
+        help='Bind host for HTTP/SSE transport',
     )
     parser.add_argument(
-        '--port', type=int, default=8090,
-        help='Port for HTTP/SSE transport (default: 8090)',
+        '--port', type=int, default=cfg.get('port', 8090),
+        help='Port for HTTP/SSE transport',
     )
     parser.add_argument(
         '--transport',
-        default='streamable-http',
+        default=cfg.get('transport', 'streamable-http'),
         choices=['streamable-http', 'sse', 'stdio'],
-        help='MCP transport (default: streamable-http)',
+        help='MCP transport',
     )
     parser.add_argument(
-        '--plots-dir', default=None,
-        help='Directory to save plot PNGs for URL-based serving (e.g. ./webapp/plots)',
+        '--plots-dir', default=cfg.get('plots_dir'),
+        help='Directory to save plot PNGs for URL-based serving',
     )
     parser.add_argument(
-        '--public-url', default='http://localhost:8501',
-        help='Public base URL used to construct plot image URLs (default: http://localhost:8501)',
+        '--public-url', default=cfg.get('public_url', 'http://localhost:8501'),
+        help='Public base URL used to construct plot image URLs',
     )
     parser.add_argument(
-        '--mcp-url', default=None,
+        '--mcp-url', default=cfg.get('mcp_url'),
         help='Public-facing MCP URL shown at startup and passed to LLM clients '
-             '(e.g. https://data.nevel.eu/mcp/<token>). Defaults to '
-             'http://<host>:<port>/mcp when not set.',
+             '(e.g. https://data.nevel.eu/mcp/<token>)',
     )
     return parser.parse_args()
 

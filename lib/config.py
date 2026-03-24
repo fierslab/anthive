@@ -168,11 +168,12 @@ def load_config() -> Dict[str, Any]:
     config = defaults.copy()
     config.update(user_config)
 
-    # Deep-merge the s3 sub-dict so partial user overrides don't drop defaults
-    if isinstance(user_config.get('s3'), dict):
-        merged_s3 = defaults.get('s3', {}).copy()
-        merged_s3.update(user_config['s3'])
-        config['s3'] = merged_s3
+    # Deep-merge nested sub-dicts so partial user overrides don't drop defaults
+    for subkey in ('s3', 'mcp'):
+        if isinstance(user_config.get(subkey), dict):
+            merged = defaults.get(subkey, {}).copy()
+            merged.update(user_config[subkey])
+            config[subkey] = merged
 
     return config
 
