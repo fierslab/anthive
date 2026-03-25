@@ -14,7 +14,7 @@ Accepted identifiers (pass any of these as <id>):
 Usage:
   ant-cellxgene import <id>   [--output-dir PATH] [--no-convert] [--force]
   ant-cellxgene info   <id>
-  ant-cellxgene search [--organism STR] [--tissue STR] [--disease STR] [--assay STR]
+  ant-cellxgene search [--organism STR] [--tissue STR] [--cell-type STR] [--disease STR] [--assay STR]
 """
 
 import argparse
@@ -569,10 +569,11 @@ def cmd_search(args: argparse.Namespace) -> None:
     datasets = fetch_all_datasets()
 
     filters = {
-        'organism': args.organism,
-        'tissue':   args.tissue,
-        'disease':  args.disease,
-        'assay':    args.assay,
+        'organism':  args.organism,
+        'tissue':    args.tissue,
+        'cell_type': args.cell_type,
+        'disease':   args.disease,
+        'assay':     args.assay,
     }
 
     results = []
@@ -637,10 +638,11 @@ def main() -> None:
 
     # search
     search_p = subparsers.add_parser('search', help='Search available datasets')
-    search_p.add_argument('--organism', default=None, metavar='STR')
-    search_p.add_argument('--tissue',   default=None, metavar='STR')
-    search_p.add_argument('--disease',  default=None, metavar='STR')
-    search_p.add_argument('--assay',    default=None, metavar='STR')
+    search_p.add_argument('--organism',  default=None, metavar='STR')
+    search_p.add_argument('--tissue',    default=None, metavar='STR')
+    search_p.add_argument('--cell-type', default=None, metavar='STR', dest='cell_type')
+    search_p.add_argument('--disease',   default=None, metavar='STR')
+    search_p.add_argument('--assay',     default=None, metavar='STR')
 
     args        = parser.parse_args()
     data_folder = Path(args.data_folder).resolve()

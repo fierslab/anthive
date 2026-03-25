@@ -41,7 +41,7 @@ _ant_completion()
                     return  # identifier is a URL/UUID; no file completion
                     ;;
                 search)
-                    COMPREPLY=($(compgen -W "--organism --tissue --disease --assay" -- "$cur"))
+                    COMPREPLY=($(compgen -W "--organism --tissue --cell-type --disease --assay" -- "$cur"))
                     return
                     ;;
             esac
