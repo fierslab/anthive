@@ -13,7 +13,7 @@ _ant_completion()
     _init_completion || return
 
     # Available ant subcommands
-    local subcommands="api-check browse build-all check convert db duckdb-check h5ad-check md md-check serve"
+    local subcommands="api-check browse build-all check convert db duckdb-check h5ad-check inactive mcp md md-check s3-check serve supervisor sync"
 
     # Complete the subcommand itself
     if [[ $cword -eq 1 ]]; then
@@ -26,7 +26,7 @@ _ant_completion()
     case "$subcommand" in
 
         # ── file-less commands ─────────────────────────────────────────────
-        api-check)
+        api-check|mcp|supervisor)
             return
             ;;
 
@@ -42,9 +42,6 @@ _ant_completion()
                 COMPREPLY=($(compgen -W "--exclude-layer --include-layer" -- "$cur"))
                 return
             fi
-            # After --exclude-layer / --include-layer the value is a layer name;
-            # we can't complete those, so fall through to file completion only
-            # when cur looks like a path.
             _filedir h5ad
             return
             ;;
@@ -72,6 +69,27 @@ _ant_completion()
             return
             ;;
 
+        # ── inactive: subcommand then files/folders ────────────────────────
+        inactive)
+            if [[ $cword -eq 2 ]]; then
+                COMPREPLY=($(compgen -W "mark unmark list" -- "$cur"))
+                return
+            fi
+            local inactive_sub="${words[2]}"
+            case "$inactive_sub" in
+                mark|unmark)
+                    # Accept .md, .h5ad, .duckdb, or directories
+                    _filedir '@(md|h5ad|duckdb)'
+                    return
+                    ;;
+                list)
+                    _filedir -d
+                    return
+                    ;;
+            esac
+            return
+            ;;
+
         # ── md: YAML metadata editor ───────────────────────────────────────
         md)
             local md_subcommands="delete exclude-embedding exclude-layer get include-embedding include-layer set show"
@@ -85,21 +103,16 @@ _ant_completion()
             local md_sub="${words[2]}"
             case "$md_sub" in
                 set)
-                    # Arguments are key=value pairs followed by a .md file.
-                    # Complete .md files whenever cur doesn't look like key=value.
                     if [[ "$cur" != *=* ]]; then
                         _filedir md
                     fi
                     return
                     ;;
                 get|delete)
-                    # Arguments are key names followed by a .md file.
-                    # Always offer .md completion (keys are free-form).
                     _filedir md
                     return
                     ;;
                 show|exclude-layer|include-layer|exclude-embedding|include-embedding)
-                    # Single or multiple names then a .md file — complete .md.
                     _filedir md
                     return
                     ;;
@@ -117,6 +130,19 @@ _ant_completion()
             return
             ;;
 
+        # ── s3-check: data folder + flags ─────────────────────────────────
+        s3-check)
+            if [[ "$prev" == "--data-folder" ]]; then
+                _filedir -d
+                return
+            fi
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=($(compgen -W "--data-folder --verbose" -- "$cur"))
+                return
+            fi
+            return
+            ;;
+
         # ── serve: data folder + flags ─────────────────────────────────────
         serve)
             if [[ "$prev" == "--data-folder" ]]; then
@@ -125,6 +151,23 @@ _ant_completion()
             fi
             if [[ "$cur" == -* ]]; then
                 COMPREPLY=($(compgen -W "--data-folder --host --port --reload" -- "$cur"))
+                return
+            fi
+            return
+            ;;
+
+        # ── sync: subcommand then optional glob filter ─────────────────────
+        sync)
+            if [[ $cword -eq 2 ]]; then
+                COMPREPLY=($(compgen -W "push pull status" -- "$cur"))
+                return
+            fi
+            if [[ "$prev" == "--data-folder" ]]; then
+                _filedir -d
+                return
+            fi
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=($(compgen -W "--data-folder" -- "$cur"))
                 return
             fi
             return

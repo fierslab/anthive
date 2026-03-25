@@ -88,6 +88,9 @@ def _local_files(data_folder: Path, filter_pattern: str | None) -> list[tuple[Pa
         rel = str(path.relative_to(data_folder))
         if not _is_syncable(rel):
             continue
+        # Never push a .duckdb whose dataset is marked inactive
+        if path.suffix == '.duckdb' and path.with_suffix('.inactive').exists():
+            continue
         if filter_pattern and not fnmatch.fnmatch(rel, filter_pattern):
             continue
         results.append((path, rel))

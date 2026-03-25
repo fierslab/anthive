@@ -1,0 +1,141 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = []
+# ///
+
+"""
+ant-inactive — mark/unmark datasets as inactive.
+
+Inactive datasets are skipped by the REST API and by ant-sync.
+The .duckdb is deleted on mark; the .h5ad and .md are never touched.
+A <basename>.inactive sidecar file records the state.
+
+Usage:
+  ant-inactive mark   <path> [path ...]   Mark inactive, delete .duckdb
+  ant-inactive unmark <path> [path ...]   Mark active again
+  ant-inactive list   [folder]            List all inactive datasets
+
+<path> can be:
+  - a .md file:      data/h5adstore/Sierksma2025/Single.Grafts/Single.Grafts.md
+  - a .h5ad file:    data/h5adstore/Sierksma2025/Single.Grafts/Single.Grafts.h5ad
+  - a .duckdb file:  data/h5adstore/Sierksma2025/Single.Grafts/Single.Grafts.duckdb
+  - a directory:     data/h5adstore/Sierksma2025/Single.Grafts  (all datasets inside)
+  - a stem path:     data/h5adstore/Sierksma2025/Single.Grafts/Single.Grafts
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+DATA_EXTENSIONS = {'.h5ad', '.duckdb', '.md', '.inactive'}
+
+
+def _find_md_files(input_path: Path) -> list[Path]:
+    """Resolve an input path to a list of .md data files (not index.md)."""
+    resolved = input_path.resolve()
+
+    if resolved.is_dir():
+        return sorted(p for p in resolved.rglob('*.md')
+                      if p.name != 'index.md')
+
+    # If the path has a recognised extension, strip it to find the stem
+    if resolved.suffix in DATA_EXTENSIONS:
+        stem_path = resolved.with_suffix('')
+    else:
+        stem_path = resolved  # already a stem
+
+    md_candidate = stem_path.with_suffix('.md')
+    if md_candidate.exists():
+        return [md_candidate]
+
+    print(f'  warning: no .md file found for {input_path}', file=sys.stderr)
+    return []
+
+
+def cmd_mark(paths: list[str]) -> None:
+    for raw_path in paths:
+        for md_path in _find_md_files(Path(raw_path)):
+            inactive_sidecar = md_path.with_suffix('.inactive')
+            duckdb_path      = md_path.with_suffix('.duckdb')
+
+            if inactive_sidecar.exists():
+                print(f'  already inactive: {md_path}')
+                continue
+
+            inactive_sidecar.touch()
+            print(f'  marked inactive:  {md_path.stem}  ({md_path.parent})')
+
+            if duckdb_path.exists():
+                duckdb_path.unlink()
+                print(f'  deleted .duckdb:  {duckdb_path.name}')
+            else:
+                print(f'  no .duckdb to delete')
+
+
+def cmd_unmark(paths: list[str]) -> None:
+    for raw_path in paths:
+        for md_path in _find_md_files(Path(raw_path)):
+            inactive_sidecar = md_path.with_suffix('.inactive')
+
+            if not inactive_sidecar.exists():
+                print(f'  not inactive: {md_path}')
+                continue
+
+            inactive_sidecar.unlink()
+            print(f'  marked active: {md_path.stem}  ({md_path.parent})')
+            print(f'  run "ant convert {md_path}" to rebuild the .duckdb')
+
+
+def cmd_list(folder: str | None) -> None:
+    search_root = Path(folder).resolve() if folder else Path.cwd()
+
+    inactive_sidecars = sorted(search_root.rglob('*.inactive'))
+    if not inactive_sidecars:
+        print('No inactive datasets found.')
+        return
+
+    print(f'Inactive datasets under {search_root}:\n')
+    for sidecar in inactive_sidecars:
+        md_path     = sidecar.with_suffix('.md')
+        h5ad_path   = sidecar.with_suffix('.h5ad')
+        duckdb_path = sidecar.with_suffix('.duckdb')
+
+        md_note     = '' if md_path.exists()     else '  [no .md]'
+        h5ad_note   = '' if h5ad_path.exists()   else '  [no .h5ad!]'
+        duckdb_note = '  [.duckdb present]' if duckdb_path.exists() else ''
+
+        print(f'  {sidecar.stem}{md_note}{h5ad_note}{duckdb_note}')
+        print(f'    {sidecar.parent}')
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog='ant-inactive',
+        description='Mark/unmark datasets as inactive.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    subparsers = parser.add_subparsers(dest='command', required=True)
+
+    mark_parser = subparsers.add_parser('mark', help='Mark inactive, delete .duckdb')
+    mark_parser.add_argument('paths', nargs='+', help='Files or directories to mark')
+
+    unmark_parser = subparsers.add_parser('unmark', help='Mark active again')
+    unmark_parser.add_argument('paths', nargs='+', help='Files or directories to unmark')
+
+    list_parser = subparsers.add_parser('list', help='List all inactive datasets')
+    list_parser.add_argument('folder', nargs='?', default=None,
+                             help='Root folder to search (default: cwd)')
+
+    args = parser.parse_args()
+
+    if args.command == 'mark':
+        cmd_mark(args.paths)
+    elif args.command == 'unmark':
+        cmd_unmark(args.paths)
+    elif args.command == 'list':
+        cmd_list(args.folder)
+
+
+if __name__ == '__main__':
+    main()

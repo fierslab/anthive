@@ -287,6 +287,10 @@ class DatabaseRegistry:
                         try:
                             rel_path = item.relative_to(base)
 
+                            # Skip datasets marked inactive via sidecar file
+                            if resolved_item.with_suffix('.inactive').exists():
+                                continue
+
                             local_duckdb = resolved_item.with_suffix('.duckdb')
                             if local_duckdb.exists():
                                 db_url = str(local_duckdb)
