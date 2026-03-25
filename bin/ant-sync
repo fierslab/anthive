@@ -32,6 +32,9 @@ from boto3.s3.transfer import TransferConfig
 sys.path.insert(0, str(Path(__file__).parent.parent / 'lib'))
 from config import get_config  # noqa: E402
 
+# Only these extensions are ever pushed/pulled.
+# .md files are intentionally excluded — they live in git (h5adstore repo), not S3.
+# .inactive sidecars are also intentionally excluded — they live in git.
 SYNC_EXTENSIONS = {'.h5ad', '.duckdb'}
 SKIP_SUFFIXES   = {'.wal', '.deleted', '.partial'}
 
