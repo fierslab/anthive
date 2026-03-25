@@ -219,26 +219,45 @@ _STOP_WORDS: frozenset[str] = frozenset({
 
 
 def _first_author_year(collection_meta: dict) -> str:
-    """Return 'LastnameYear' (e.g. 'Seeker2023') from collection publisher_metadata."""
+    """Return 'LastnameYear' (e.g. 'Seeker2023') — used as the group folder name."""
     pub_meta = collection_meta.get("publisher_metadata") or {}
     authors  = pub_meta.get("authors") or []
     year     = pub_meta.get("published_year")
 
-    first_author = ""
     for author in authors:
         family = (author.get("family") or "").strip()
         if family:
-            # Remove non-alpha characters, keep only the last-name part
-            first_author = re.sub(r"[^A-Za-z]", "", family)
-            break
+            last_name = re.sub(r"[^A-Za-z]", "", family)
+            return f"{last_name}{year or 'XXXX'}"
 
-    year_str = str(year) if year else "XXXX"
-    if first_author:
-        return f"{first_author}{year_str}"
-    # Fallback: initials of collection name + year
+    # Fallback: first meaningful word of collection name + year
+    name  = collection_meta.get("name", "CXG")
+    words = re.findall(r'\b[A-Za-z]{4,}\w*', name)
+    fallback = words[0].capitalize() if words else "CXG"
+    return f"{fallback}{year or 'XXXX'}"
+
+
+def _group_id(collection_meta: dict) -> str:
+    """
+    Return the 3-char group_id for index.md.
+
+    Uses the first 3 letters of the first author's last name (uppercased),
+    e.g. Seeker → SEE, Sierksma → SIE.  Falls back to initials of
+    the collection name if no author is available.
+    """
+    pub_meta = collection_meta.get("publisher_metadata") or {}
+    authors  = pub_meta.get("authors") or []
+
+    for author in authors:
+        family = (author.get("family") or "").strip()
+        if family:
+            letters = re.sub(r"[^A-Za-z]", "", family)
+            return letters[:3].upper()
+
+    # Fallback: up to 3 initials from collection name words
     name  = collection_meta.get("name", "CXG")
     words = re.findall(r'\b[A-Za-z]\w*', name)
-    return ''.join(w[0].upper() for w in words)[:4] + year_str
+    return ''.join(w[0].upper() for w in words)[:3]
 
 
 def _dataset_stem(dataset_meta: dict, collection_meta: dict, max_words: int = 4) -> str:
@@ -304,7 +323,14 @@ def build_annotation(dataset_meta: dict, collection_meta: dict) -> dict:
     tissue     = _single_or_list(tissues)    or None
     celltype   = _single_or_list(cell_types) or None
     technology = _normalize_technology(assays) or None
-    sex_val    = _single_or_list([s for s in sexes if s.lower() != 'unknown']) or None
+    known_sexes = [s.lower() for s in sexes if s.lower() not in ('unknown', 'other')]
+    unique_sexes = list(dict.fromkeys(known_sexes))   # deduplicate, preserve order
+    if len(unique_sexes) > 1:
+        sex_val: str | None = 'mixed'
+    elif unique_sexes:
+        sex_val = unique_sexes[0]
+    else:
+        sex_val = None
 
     disease_vals = [d for d in diseases if d.lower() not in ('normal', 'healthy')]
     disease      = _single_or_list(disease_vals) or None
@@ -362,7 +388,7 @@ def ensure_index_md(
     pub_meta     = collection_meta.get("publisher_metadata") or {}
     year         = pub_meta.get("published_year")
     authors      = _format_authors(pub_meta)
-    group_id     = _first_author_year(collection_meta)
+    group_id     = _group_id(collection_meta)
     col_name     = collection_meta.get("name", folder.name)
     col_desc     = (collection_meta.get("description") or "").strip()
     doi          = collection_meta.get("doi", "")
@@ -418,6 +444,13 @@ def patch_md(
     - Rich markdown body with all available metadata
     """
     fm, _ = _read_md(md_path)
+
+    # ── id: 3-char dataset identifier (required by validator) ─────────────────
+    if 'id' not in fm:
+        # Derive from the h5ad filename stem: first 3 alpha characters, uppercased.
+        # E.g. White.Matter.Microglia → WHI, Heterozygous.Knockout → HET
+        stem_letters = re.sub(r'[^A-Za-z]', '', md_path.stem)
+        fm['id'] = stem_letters[:3].upper() or 'CXG'
 
     # ── annotation ────────────────────────────────────────────────────────────
     annotation = build_annotation(dataset_meta, collection_meta)
