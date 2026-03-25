@@ -111,47 +111,56 @@ def database_selector(client, databases=None,
         st.warning("No databases found")
         st.stop()
 
-    # Support deep-linking via short db_id (e.g. ?db=LC5/SPM)
-    default_group = None
+    # Support deep-linking via short db_id (e.g. ?db=S25/SGM)
+    default_group_id = None
     default_exp = None
-    default_title = None
+    default_file_id = None
     db_id_param = st.query_params.get(key)
     if db_id_param:
         matched = [x for x in databases if x.get('id') == db_id_param]
         if matched:
-            default_group = matched[0]['collection'].get('group', 'default')
+            default_group_id = matched[0].get('group_id') or matched[0]['id'].split('/')[0]
             default_exp = matched[0]['collection'].get('experiment')
-            default_title = matched[0]['title']
+            default_file_id = matched[0].get('file_id') or matched[0]['id'].split('/')[1]
 
-    # Add groupname and shortname fields by parsing id
-    groups = set()
+    # Build group_id → long display name mapping
+    group_id_to_name: dict = {}
     for db_item in databases:
-        if not 'collection' in db_item:
+        if 'collection' not in db_item:
             st.warning("invalid db structure")
             st.write(db_item)
             st.stop()
+        gid = db_item.get('group_id') or db_item['id'].split('/')[0]
+        long_name = db_item['collection'].get('group', gid)
+        group_id_to_name[gid] = long_name
 
-        groups.add(db_item['collection'].get('group', 'default'))
+    group_ids = sorted(group_id_to_name.keys())
+    selected_group_id = util.p_selectbox(
+        "Group", group_ids, f"{key}g",
+        default_value=default_group_id,
+        format_func=lambda gid: group_id_to_name[gid],
+    )
 
-    groups = sorted(groups)
-    group = util.p_selectbox("Group", groups, f"{key}g", default_value=default_group)
-
-    groupname = group
+    groupname = group_id_to_name[selected_group_id]
 
     databases_ = [
-            x for x in databases
-            if x['collection'].get('group') == group]
+        x for x in databases
+        if (x.get('group_id') or x['id'].split('/')[0]) == selected_group_id
+    ]
 
-    # Resolve default_title from group metadata (only if not set from URL param)
-    if default_title is None:
+    # Resolve default_file_id from group metadata (only if not set from URL param)
+    if default_file_id is None:
         coll_default = databases_[0]['collection'].get('default_dataset') if databases_ else None
         if coll_default and any(x['title'] == coll_default for x in databases_):
-            default_title = coll_default
+            default_file_id = next(
+                x.get('file_id') or x['id'].split('/')[1]
+                for x in databases_ if x['title'] == coll_default
+            )
         else:
             # Fall back to most recently dated dataset
             dated = sorted(databases_, key=lambda x: x.get('date') or '', reverse=True)
             if dated:
-                default_title = dated[0]['title']
+                default_file_id = dated[0].get('file_id') or dated[0]['id'].split('/')[1]
 
     exps = sorted(set([x['collection'].get('experiment', 'na')
                        for x in databases_]))
@@ -160,14 +169,26 @@ def database_selector(client, databases=None,
         groupname = f"{groupname}/{exp}"
 
         databases_ = [
-                x for x in databases_
-                if x['collection'].get('experiment') == exp]
+            x for x in databases_
+            if x['collection'].get('experiment') == exp
+        ]
 
-    titles = sorted([x['title'] for x in databases_])
-    assert len(titles) == len(set(titles))
-    title = util.p_selectbox("DB", titles, f"{key}t", default_value=default_title)
+    # Build file_id → title mapping for the DB selectbox
+    file_id_to_title = {
+        (x.get('file_id') or x['id'].split('/')[1]): x['title']
+        for x in databases_
+    }
+    file_ids = sorted(file_id_to_title.keys())
+    selected_file_id = util.p_selectbox(
+        "DB", file_ids, f"{key}t",
+        default_value=default_file_id,
+        format_func=lambda fid: file_id_to_title[fid],
+    )
 
-    final_ = [x for x in databases_ if x['title'] == title]
+    final_ = [
+        x for x in databases_
+        if (x.get('file_id') or x['id'].split('/')[1]) == selected_file_id
+    ]
     assert len(final_) == 1
     db = final_[0]
 
