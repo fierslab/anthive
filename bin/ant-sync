@@ -1,0 +1,307 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = ["boto3", "pyyaml"]
+# ///
+
+"""
+ant-sync — push/pull .h5ad and .duckdb files to/from S3.
+
+Usage:
+  ant-sync push   [FILTER]   Upload local files to S3
+  ant-sync pull   [FILTER]   Download S3 files to local
+  ant-sync status [FILTER]   Show sync status (no transfers)
+
+FILTER is an optional glob pattern relative to --data-folder.
+
+Examples:
+  ant-sync push                            # push all files
+  ant-sync push 'Sierksma2025/**'          # push one group
+  ant-sync push '**/Single.Grafts.h5ad'    # push a specific file
+  ant-sync status                          # show what needs syncing
+"""
+
+import argparse
+import fnmatch
+import sys
+import time
+from pathlib import Path
+
+import boto3
+from boto3.s3.transfer import TransferConfig
+
+sys.path.insert(0, str(Path(__file__).parent.parent / 'lib'))
+from config import get_config  # noqa: E402
+
+SYNC_EXTENSIONS = {'.h5ad', '.duckdb'}
+SKIP_SUFFIXES   = {'.wal', '.deleted', '.partial'}
+
+MULTIPART_THRESHOLD = 256 * 1024 ** 2   # 256 MB
+MULTIPART_CHUNKSIZE = 256 * 1024 ** 2
+
+
+def _s3_client(s3_cfg: dict):
+    endpoint = s3_cfg.get('endpoint')
+    return boto3.client(
+        's3',
+        endpoint_url=f'https://{endpoint}' if endpoint else None,
+        region_name=s3_cfg.get('region', 'us-east-1'),
+        aws_access_key_id=s3_cfg.get('access_key_id'),
+        aws_secret_access_key=s3_cfg.get('secret_access_key'),
+    )
+
+
+def _transfer_config() -> TransferConfig:
+    return TransferConfig(
+        multipart_threshold=MULTIPART_THRESHOLD,
+        multipart_chunksize=MULTIPART_CHUNKSIZE,
+        max_concurrency=4,
+    )
+
+
+def _s3_key(relative_path: str, prefix: str) -> str:
+    if prefix:
+        return f'{prefix.rstrip("/")}/{relative_path}'
+    return relative_path
+
+
+def _rel_from_s3_key(s3_key: str, prefix: str) -> str:
+    prefix_str = prefix.rstrip('/') + '/' if prefix else ''
+    return s3_key[len(prefix_str):] if prefix_str else s3_key
+
+
+def _is_syncable(rel: str) -> bool:
+    path = Path(rel)
+    if path.name.startswith('.'):
+        return False
+    if path.suffix not in SYNC_EXTENSIONS:
+        return False
+    if any(rel.endswith(suffix) for suffix in SKIP_SUFFIXES):
+        return False
+    return True
+
+
+def _local_files(data_folder: Path, filter_pattern: str | None) -> list[tuple[Path, str]]:
+    results = []
+    for path in sorted(data_folder.rglob('*')):
+        if not path.is_file():
+            continue
+        rel = str(path.relative_to(data_folder))
+        if not _is_syncable(rel):
+            continue
+        if filter_pattern and not fnmatch.fnmatch(rel, filter_pattern):
+            continue
+        results.append((path, rel))
+    return results
+
+
+def _s3_objects(client, bucket: str, prefix: str) -> dict[str, int]:
+    """Return {relative_path: size} for all syncable S3 objects."""
+    paginator = client.get_paginator('list_objects_v2')
+    prefix_str = prefix.rstrip('/') + '/' if prefix else ''
+    index: dict[str, int] = {}
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix_str):
+        for obj in page.get('Contents', []):
+            rel = _rel_from_s3_key(obj['Key'], prefix)
+            if rel and _is_syncable(rel):
+                index[rel] = obj['Size']
+    return index
+
+
+def _fmt_size(num_bytes: int) -> str:
+    for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
+        if num_bytes < 1024 or unit == 'TB':
+            return f'{num_bytes:.1f} {unit}'
+        num_bytes /= 1024
+    return str(num_bytes)
+
+
+class _ProgressCallback:
+    def __init__(self, label: str, total_size: int):
+        self._label      = label
+        self._total      = total_size
+        self._seen       = 0
+        self._start      = time.monotonic()
+        self._last_print = 0.0
+
+    def __call__(self, bytes_amount: int) -> None:
+        self._seen += bytes_amount
+        now = time.monotonic()
+        if now - self._last_print < 1.0 and self._seen < self._total:
+            return
+        self._last_print = now
+        elapsed = now - self._start
+        pct     = 100 * self._seen / self._total if self._total else 0
+        speed   = self._seen / elapsed / (1024 ** 3) if elapsed > 0 else 0
+        done_gb = self._seen / (1024 ** 3)
+        total_gb = self._total / (1024 ** 3)
+        print(
+            f'\r  {done_gb:.1f}/{total_gb:.1f} GB  {pct:.0f}%  {speed:.2f} GB/s   ',
+            end='',
+            flush=True,
+        )
+        if self._seen >= self._total:
+            print()
+
+
+def cmd_push(args, s3_cfg: dict, data_folder: Path) -> None:
+    client   = _s3_client(s3_cfg)
+    bucket   = s3_cfg['bucket']
+    prefix   = s3_cfg.get('prefix', '') or ''
+    transfer = _transfer_config()
+
+    print('Scanning S3…')
+    s3_index = _s3_objects(client, bucket, prefix)
+
+    local_files = _local_files(data_folder, args.filter)
+    print(f'Found {len(local_files)} local file(s) to check.\n')
+
+    uploaded = skipped = 0
+    for local_path, rel in local_files:
+        local_size = local_path.stat().st_size
+        s3_size    = s3_index.get(rel)
+
+        if s3_size == local_size:
+            skipped += 1
+            continue
+
+        action = 'UPDATE' if s3_size is not None else 'UPLOAD'
+        print(f'[{action}] {rel}  ({_fmt_size(local_size)})')
+
+        s3_key   = _s3_key(rel, prefix)
+        callback = _ProgressCallback(rel, local_size)
+        client.upload_file(
+            str(local_path),
+            bucket,
+            s3_key,
+            Config=transfer,
+            Callback=callback,
+        )
+        uploaded += 1
+
+    print(f'\nDone.  Uploaded: {uploaded},  skipped (up-to-date): {skipped}')
+
+
+def cmd_pull(args, s3_cfg: dict, data_folder: Path) -> None:
+    client   = _s3_client(s3_cfg)
+    bucket   = s3_cfg['bucket']
+    prefix   = s3_cfg.get('prefix', '') or ''
+    transfer = _transfer_config()
+
+    print('Scanning S3…')
+    s3_index = _s3_objects(client, bucket, prefix)
+
+    if args.filter:
+        s3_index = {rel: size for rel, size in s3_index.items()
+                    if fnmatch.fnmatch(rel, args.filter)}
+
+    print(f'Found {len(s3_index)} S3 file(s) to check.\n')
+
+    downloaded = skipped = 0
+    for rel, s3_size in sorted(s3_index.items()):
+        local_path = data_folder / rel
+
+        if local_path.exists() and local_path.stat().st_size == s3_size:
+            skipped += 1
+            continue
+
+        action = 'UPDATE' if local_path.exists() else 'DOWNLOAD'
+        print(f'[{action}] {rel}  ({_fmt_size(s3_size)})')
+
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        callback = _ProgressCallback(rel, s3_size)
+        client.download_file(
+            bucket,
+            _s3_key(rel, prefix),
+            str(local_path),
+            Config=transfer,
+            Callback=callback,
+        )
+        downloaded += 1
+
+    print(f'\nDone.  Downloaded: {downloaded},  skipped (up-to-date): {skipped}')
+
+
+def cmd_status(args, s3_cfg: dict, data_folder: Path) -> None:
+    client = _s3_client(s3_cfg)
+    bucket = s3_cfg['bucket']
+    prefix = s3_cfg.get('prefix', '') or ''
+
+    print('Scanning local and S3…')
+    local_index = {rel: path.stat().st_size
+                   for path, rel in _local_files(data_folder, args.filter)}
+    s3_index    = _s3_objects(client, bucket, prefix)
+    if args.filter:
+        s3_index = {rel: size for rel, size in s3_index.items()
+                    if fnmatch.fnmatch(rel, args.filter)}
+
+    all_keys   = sorted(set(local_index) | set(s3_index))
+    only_local = only_s3 = modified = in_sync = 0
+
+    for rel in all_keys:
+        local_size = local_index.get(rel)
+        s3_size    = s3_index.get(rel)
+
+        if local_size is not None and s3_size is None:
+            print(f'  LOCAL ONLY   {rel}  ({_fmt_size(local_size)})')
+            only_local += 1
+        elif s3_size is not None and local_size is None:
+            print(f'  S3 ONLY      {rel}  ({_fmt_size(s3_size)})')
+            only_s3 += 1
+        elif local_size != s3_size:
+            print(f'  MODIFIED     {rel}  '
+                  f'(local {_fmt_size(local_size)}, s3 {_fmt_size(s3_size)})')
+            modified += 1
+        else:
+            in_sync += 1
+
+    print(f'\nLocal only: {only_local},  S3 only: {only_s3},  '
+          f'modified: {modified},  in sync: {in_sync}')
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog='ant-sync',
+        description='Push/pull .h5ad and .duckdb files to/from S3.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument(
+        '--data-folder', default='./data/h5adstore',
+        help='Root of the h5adstore (default: ./data/h5adstore)',
+    )
+
+    subparsers = parser.add_subparsers(dest='command', required=True)
+    for cmd_name in ('push', 'pull', 'status'):
+        sub = subparsers.add_parser(cmd_name)
+        sub.add_argument(
+            'filter', nargs='?', default=None,
+            help='Optional glob filter relative to data-folder',
+        )
+
+    args        = parser.parse_args()
+    config      = get_config()
+    s3_cfg      = config.get('s3') or {}
+    bucket      = s3_cfg.get('bucket')
+
+    if not bucket:
+        print('Error: s3.bucket is not set in anthive.yaml', file=sys.stderr)
+        sys.exit(1)
+    if not s3_cfg.get('access_key_id'):
+        print('Error: s3.access_key_id is not set in anthive.yaml', file=sys.stderr)
+        sys.exit(1)
+
+    data_folder = Path(args.data_folder).resolve()
+    if not data_folder.exists():
+        print(f'Error: data folder not found: {data_folder}', file=sys.stderr)
+        sys.exit(1)
+
+    if args.command == 'push':
+        cmd_push(args, s3_cfg, data_folder)
+    elif args.command == 'pull':
+        cmd_pull(args, s3_cfg, data_folder)
+    elif args.command == 'status':
+        cmd_status(args, s3_cfg, data_folder)
+
+
+if __name__ == '__main__':
+    main()

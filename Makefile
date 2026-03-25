@@ -1,4 +1,4 @@
-.PHONY: help build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-streamlit serve-mcp serve-all serve-debug dev-jupyter
+.PHONY: help build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-streamlit serve-mcp serve-all serve-debug dev-jupyter sync-push sync-pull sync-status
 
 help:
 	@echo "Anthive4 Development Commands"
@@ -22,12 +22,10 @@ help:
 	@echo "  make serve-mcp         - Run MCP server for LLM integration (port 8090)"
 	@echo "  make dev-jupyter       - Run JupyterLab on webapp-src/jupyter (port 9090)"
 	@echo ""
-	@echo "Sync:"
-	@echo "  make sync-to-bds-dedata      - Push h5adstore to storage box (rclone)"
-	@echo "  make sync-bds-dedata-to-foam - Push h5adstore to storage box (rclone)"
-	@echo "  make sync-webapp-only        - Push webapp to storage box (rclone)"
-	@echo "  make pull-from-storagebox-to-prs    - Pull h5adstore from storage box (rclone)"
-	@echo "  make sync-to-cbd3            - Sync to cbd3 server (rsync)"
+	@echo "Sync (S3):"
+	@echo "  make sync-push   - Push .h5ad and .duckdb files to S3"
+	@echo "  make sync-pull   - Pull .h5ad and .duckdb files from S3"
+	@echo "  make sync-status - Show local vs S3 sync status"
 	@echo ""
 	@echo "Tools:"
 	@echo "  ./bin/ant check        - Validate h5ad files"
@@ -181,6 +179,15 @@ serve-streamlit:
 
 dev-jupyter:
 	@./bin/dev-jupyter
+
+sync-push:
+	@./bin/ant-sync push
+
+sync-pull:
+	@./bin/ant-sync pull
+
+sync-status:
+	@./bin/ant-sync status
 
 sync-to-cbd3:
 	rsync -arv ./webapp cbd3:/data/anthive4/
