@@ -237,27 +237,94 @@ def _first_author_year(collection_meta: dict) -> str:
     return f"{fallback}{year or 'XXXX'}"
 
 
-def _group_id(collection_meta: dict) -> str:
-    """
-    Return the 3-char group_id for index.md.
+def _collect_existing_group_ids(data_folder: Path) -> set[str]:
+    """Scan all index.md files and return the set of group_ids already in use."""
+    existing: set[str] = set()
+    for index_md in data_folder.rglob("index.md"):
+        try:
+            text = index_md.read_text()
+            if not text.startswith('---'):
+                continue
+            parts = text.split('---', 2)
+            if len(parts) < 3:
+                continue
+            import yaml as _yaml
+            fm = _yaml.safe_load(parts[1]) or {}
+            gid = fm.get('group_id')
+            if gid:
+                existing.add(str(gid).upper())
+        except Exception:
+            pass
+    return existing
 
-    Uses the first 3 letters of the first author's last name (uppercased),
-    e.g. Seeker → SEE, Sierksma → SIE.  Falls back to initials of
-    the collection name if no author is available.
+
+def _group_id(collection_meta: dict, data_folder: Path | None = None) -> str:
+    """
+    Return a unique 3-char group_id for index.md, following the h5adstore
+    convention: initial(s) of author last name(s) + compressed year digit(s).
+
+    Examples: Seeker 2023 → S23, Sierksma 2025 → S25, but if S25 is taken,
+    try Se5, SK5, … extending the name prefix until we find a free slot.
+
+    If data_folder is given, existing group_ids are read and collisions avoided.
     """
     pub_meta = collection_meta.get("publisher_metadata") or {}
     authors  = pub_meta.get("authors") or []
+    year     = pub_meta.get("published_year")
+    year_str = str(year)[-2:] if year else "XX"   # 2-digit year
 
+    # Build author initials string: first letters of each author's last name
+    initials = ""
     for author in authors:
-        family = (author.get("family") or "").strip()
+        family = re.sub(r"[^A-Za-z]", "", (author.get("family") or "").strip())
         if family:
-            letters = re.sub(r"[^A-Za-z]", "", family)
-            return letters[:3].upper()
+            initials += family[0].upper()
+        if len(initials) >= 3:
+            break
 
-    # Fallback: up to 3 initials from collection name words
-    name  = collection_meta.get("name", "CXG")
-    words = re.findall(r'\b[A-Za-z]\w*', name)
-    return ''.join(w[0].upper() for w in words)[:3]
+    if not initials:
+        # Fallback: first letter(s) of significant collection name words
+        name  = collection_meta.get("name", "CXG")
+        words = re.findall(r'\b[A-Za-z]\w*', name)
+        initials = ''.join(w[0].upper() for w in words)[:3] or "CXG"
+
+    existing = _collect_existing_group_ids(data_folder) if data_folder else set()
+
+    # First choice: first_initial + 2-digit year (e.g. S25)
+    # If taken, extend with more letters from the last name, replacing the
+    # year with a single digit, then try longer prefixes.
+    first_family = ""
+    for author in authors:
+        first_family = re.sub(r"[^A-Za-z]", "", (author.get("family") or "").strip())
+        if first_family:
+            break
+
+    candidates: list[str] = []
+    # Standard: up to 2 initials + 2-digit year (e.g. S25, SF25 → wait, must be 3 chars)
+    # Exactly 3 chars: 1 initial + 2-digit year, 2 initials + 1-digit year, 3 initials
+    year1 = str(year)[-1] if year else "X"   # last digit of year
+    candidates.append(f"{initials[0]}{year_str}")                   # S25
+    if len(initials) >= 2:
+        candidates.append(f"{initials[:2]}{year1}")                 # SF5
+    if len(initials) >= 3:
+        candidates.append(f"{initials[:3]}")                        # SFG
+    # Disambiguation using more letters of first author name
+    if first_family:
+        for prefix_len in range(2, min(len(first_family) + 1, 4)):
+            prefix = first_family[:prefix_len].capitalize()
+            candidates.append(f"{prefix}{year1}")                   # Se5, Sek5
+        for prefix_len in range(3, min(len(first_family) + 1, 4)):
+            candidates.append(first_family[:prefix_len].upper())    # SEE, SEK
+
+    for candidate in candidates:
+        if len(candidate) == 3 and candidate.upper() not in existing:
+            return candidate
+
+    # Last resort: first 3 chars of last name, uppercased (may collide — warn)
+    fallback = (first_family[:3] or initials[:3] or "CXG").upper()
+    if fallback.upper() in existing:
+        print(f"  WARNING: group_id '{fallback}' may conflict — edit index.md manually.")
+    return fallback
 
 
 def _dataset_stem(dataset_meta: dict, collection_meta: dict, max_words: int = 4) -> str:
@@ -382,13 +449,14 @@ def ensure_index_md(
     folder: Path,
     dataset_meta: dict,
     collection_meta: dict,
+    data_folder: Path | None = None,
 ) -> None:
     """Create or lightly update the group index.md (collection-level metadata)."""
     index_path   = folder / "index.md"
     pub_meta     = collection_meta.get("publisher_metadata") or {}
     year         = pub_meta.get("published_year")
     authors      = _format_authors(pub_meta)
-    group_id     = _group_id(collection_meta)
+    group_id     = _group_id(collection_meta, data_folder)
     col_name     = collection_meta.get("name", folder.name)
     col_desc     = (collection_meta.get("description") or "").strip()
     doi          = collection_meta.get("doi", "")
@@ -648,7 +716,7 @@ def cmd_import(args: argparse.Namespace, bin_dir: Path, data_folder: Path) -> No
         download_h5ad(dataset_meta, h5ad_path)
 
     # Group index.md
-    ensure_index_md(folder, dataset_meta, collection_meta)
+    ensure_index_md(folder, dataset_meta, collection_meta, data_folder)
 
     # h5ad-check → structural .md
     print("\nRunning h5ad-check…")
