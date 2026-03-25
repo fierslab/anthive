@@ -116,18 +116,18 @@ def parse_identifier(raw: str) -> tuple[str, str]:
 
 
 def _detect_kind(uuid: str) -> str:
-    resp = requests.get(f"{CXG_API}/datasets/{uuid}", timeout=15)
+    resp = requests.get(f"{CXG_API}/datasets/{uuid}", timeout=30)
     if resp.status_code == 200:
         return 'dataset'
-    resp = requests.get(f"{CXG_API}/collections/{uuid}", timeout=15)
+    resp = requests.get(f"{CXG_API}/collections/{uuid}", timeout=30)
     if resp.status_code == 200:
         return 'collection'
     raise ValueError(f"UUID {uuid!r} not found as dataset or collection in CellxGene.")
 
 # ── REST API ───────────────────────────────────────────────────────────────────
 
-def _get(url: str) -> dict | list:
-    resp = requests.get(url, timeout=30)
+def _get(url: str, timeout: int = 30) -> dict | list:
+    resp = requests.get(url, timeout=timeout)
     resp.raise_for_status()
     return resp.json()
 
@@ -141,7 +141,8 @@ def fetch_collection(collection_id: str) -> dict:
 
 
 def fetch_all_datasets() -> list[dict]:
-    return _get(f"{CXG_API}/datasets")  # type: ignore[return-value]
+    # Full dataset list can be large — use a generous timeout
+    return _get(f"{CXG_API}/datasets", timeout=120)  # type: ignore[return-value]
 
 # ── metadata helpers ───────────────────────────────────────────────────────────
 
