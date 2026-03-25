@@ -425,9 +425,18 @@ class DatabaseRegistry:
         # Load per-file metadata
         file_metadata, md_body = parse_md_file(md_path)
 
-        # Load collection metadata from index.md
-        index_path = md_path.parent / 'index.md'
-        collection_metadata, _ = parse_md_file(index_path)
+        # Load collection metadata from the nearest index.md walking up the tree.
+        # Sierksma2025 datasets live in subdirectories, so the index.md is one
+        # level above the immediate parent.
+        index_path = None
+        search = md_path.parent
+        while search != self.data_folder.parent:
+            candidate = search / 'index.md'
+            if candidate.exists():
+                index_path = candidate
+                break
+            search = search.parent
+        collection_metadata, _ = parse_md_file(index_path) if index_path else ({}, '')
 
         # Get database info using connection pool
         conn = self.connection_pool.get_connection(db_url)
