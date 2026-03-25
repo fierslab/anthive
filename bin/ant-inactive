@@ -38,13 +38,17 @@ def _find_md_files(input_path: Path) -> list[Path]:
         return sorted(p for p in resolved.rglob('*.md')
                       if p.name != 'index.md')
 
-    # If the path has a recognised extension, strip it to find the stem
+    # Strip a known data extension from the filename using string slicing so
+    # that multi-dot names like prs.modules_pharma.WGCNA.h5ad are handled
+    # correctly.  Path.with_suffix() would replace only the last segment
+    # (.WGCNA → .md) which is wrong.
+    name = resolved.name
     if resolved.suffix in DATA_EXTENSIONS:
-        stem_path = resolved.with_suffix('')
+        base_name = name[: -len(resolved.suffix)]   # e.g. 'prs.modules_pharma.WGCNA'
     else:
-        stem_path = resolved  # already a stem
+        base_name = name                             # treat whole name as base
 
-    md_candidate = stem_path.with_suffix('.md')
+    md_candidate = resolved.parent / (base_name + '.md')
     if md_candidate.exists():
         return [md_candidate]
 
