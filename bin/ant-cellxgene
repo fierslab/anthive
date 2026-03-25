@@ -1,15 +1,16 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
-# dependencies = ["cellxgene-census", "requests", "pyyaml"]
+# dependencies = ["requests", "pyyaml"]
 # ///
 
 """
 ant-cellxgene — import datasets from CellxGene Discover into the h5adstore.
 
 Accepted identifiers (pass any of these as <id>):
-  Full URL:    https://cellxgene.cziscience.com/datasets/<dataset_id>
-  Full URL:    https://cellxgene.cziscience.com/collections/<collection_id>
-  Bare UUID:   0bd1a1de-3aee-40e0-b2ec-86c7a30c7149
+  Download URL: https://datasets.cellxgene.cziscience.com/<version_id>.h5ad
+  Portal URL:   https://cellxgene.cziscience.com/datasets/<dataset_id>
+  Portal URL:   https://cellxgene.cziscience.com/collections/<collection_id>
+  Bare UUID:    0bd1a1de-3aee-40e0-b2ec-86c7a30c7149
 
 Usage:
   ant-cellxgene import <id>   [--output-dir PATH] [--no-convert] [--force]
@@ -91,13 +92,17 @@ _SPACE_RE  = re.compile(r"[\s_]+")
 
 def parse_identifier(raw: str) -> tuple[str, str]:
     """
-    Parse a raw identifier string into (kind, uuid).
-    kind is 'dataset' or 'collection'.
+    Parse any CellxGene identifier into (kind, uuid) where kind is
+    'dataset', 'collection', or 'version' (dataset_version_id from
+    a direct download URL like datasets.cellxgene.cziscience.com/<id>.h5ad).
     """
     raw = raw.strip().rstrip('/')
 
-    if '/datasets/' in raw:
-        kind: str = 'dataset'
+    # Direct h5ad download URL — UUID is a dataset_version_id
+    if 'datasets.cellxgene.cziscience.com' in raw:
+        kind: str = 'version'
+    elif '/datasets/' in raw:
+        kind = 'dataset'
     elif '/collections/' in raw:
         kind = 'collection'
     else:
@@ -107,22 +112,7 @@ def parse_identifier(raw: str) -> tuple[str, str]:
     if not match:
         raise ValueError(f"Cannot extract a UUID from: {raw!r}")
 
-    uuid = match.group(0).lower()
-
-    if kind == 'unknown':
-        kind = _detect_kind(uuid)
-
-    return kind, uuid
-
-
-def _detect_kind(uuid: str) -> str:
-    resp = requests.get(f"{CXG_API}/datasets/{uuid}", timeout=30)
-    if resp.status_code == 200:
-        return 'dataset'
-    resp = requests.get(f"{CXG_API}/collections/{uuid}", timeout=30)
-    if resp.status_code == 200:
-        return 'collection'
-    raise ValueError(f"UUID {uuid!r} not found as dataset or collection in CellxGene.")
+    return kind, match.group(0).lower()
 
 # ── REST API ───────────────────────────────────────────────────────────────────
 
@@ -132,17 +122,35 @@ def _get(url: str, timeout: int = 30) -> dict | list:
     return resp.json()
 
 
-def fetch_dataset(dataset_id: str) -> dict:
-    return _get(f"{CXG_API}/datasets/{dataset_id}")  # type: ignore[return-value]
-
-
 def fetch_collection(collection_id: str) -> dict:
-    return _get(f"{CXG_API}/collections/{collection_id}")  # type: ignore[return-value]
+    return _get(f"{CXG_API}/collections/{collection_id}", timeout=30)  # type: ignore[return-value]
 
 
 def fetch_all_datasets() -> list[dict]:
-    # Full dataset list can be large — use a generous timeout
+    """Fetch the full public dataset listing (~2000 entries). Takes ~60-90s."""
     return _get(f"{CXG_API}/datasets", timeout=120)  # type: ignore[return-value]
+
+
+def resolve_dataset(uuid: str, kind: str) -> dict:
+    """
+    Resolve any UUID to a full dataset metadata dict from the listing.
+
+    The CellxGene API's individual /datasets/{id} endpoint is unreliable;
+    the full listing is the authoritative source.  We match on both
+    dataset_id and dataset_version_id so that direct download URLs work.
+    """
+    if kind == 'collection':
+        raise ValueError("UUID is a collection — use info to list its datasets.")
+
+    print("Fetching dataset listing from CellxGene (may take ~60 s)…")
+    all_datasets = fetch_all_datasets()
+
+    for ds in all_datasets:
+        if ds.get('dataset_id') == uuid or ds.get('dataset_version_id') == uuid:
+            return ds
+
+    # Last resort: try the collection sub-endpoint if we somehow have collection context
+    raise ValueError(f"UUID {uuid!r} not found in the CellxGene dataset listing.")
 
 # ── metadata helpers ───────────────────────────────────────────────────────────
 
@@ -444,6 +452,45 @@ def choose_paths(
     h5ad_path = folder / f"{stem}.h5ad"
     return h5ad_path, folder
 
+# ── download ───────────────────────────────────────────────────────────────────
+
+def _asset_url(dataset_meta: dict) -> str:
+    """Extract the H5AD download URL from dataset metadata assets list."""
+    for asset in dataset_meta.get('assets', []):
+        if asset.get('filetype', '').upper() == 'H5AD':
+            return asset['url']
+    raise ValueError("No H5AD asset found in dataset metadata.")
+
+
+def download_h5ad(dataset_meta: dict, dest_path: Path) -> None:
+    """Stream-download the h5ad file with a simple progress counter."""
+    url       = _asset_url(dataset_meta)
+    filesize  = next(
+        (a.get('filesize', 0) for a in dataset_meta.get('assets', [])
+         if a.get('filetype', '').upper() == 'H5AD'),
+        0,
+    )
+
+    print(f"Downloading {url}")
+    print(f"  → {dest_path}")
+    if filesize:
+        print(f"  Size: {filesize / 1024**2:.0f} MB")
+
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    with requests.get(url, stream=True, timeout=600) as resp:
+        resp.raise_for_status()
+        downloaded = 0
+        with open(dest_path, 'wb') as fh:
+            for chunk in resp.iter_content(chunk_size=8 * 1024 ** 2):   # 8 MB chunks
+                fh.write(chunk)
+                downloaded += len(chunk)
+                if filesize:
+                    pct = 100 * downloaded / filesize
+                    print(f"\r  {downloaded / 1024**2:.0f}/{filesize / 1024**2:.0f} MB  ({pct:.0f}%)",
+                          end='', flush=True)
+    print(f"\r  {downloaded / 1024**2:.0f} MB downloaded.          ")
+
+
 # ── subprocess helpers ────────────────────────────────────────────────────────
 
 def _run(cmd: list[str]) -> int:
@@ -453,18 +500,14 @@ def _run(cmd: list[str]) -> int:
 # ── commands ──────────────────────────────────────────────────────────────────
 
 def cmd_import(args: argparse.Namespace, bin_dir: Path, data_folder: Path) -> None:
-    import cellxgene_census
-
     kind, uuid = parse_identifier(args.identifier)
 
     if kind == 'collection':
-        # Show datasets and exit
-        print(f"Collection given — listing datasets. Re-run with a dataset ID/URL to import.\n")
+        print("Collection given — listing datasets. Re-run with a dataset ID/URL to import.\n")
         cmd_info(args)
         sys.exit(0)
 
-    print(f"Fetching metadata for dataset {uuid}…")
-    dataset_meta    = fetch_dataset(uuid)
+    dataset_meta    = resolve_dataset(uuid, kind)
     collection_id   = dataset_meta.get('collection_id', '')
     collection_meta = fetch_collection(collection_id) if collection_id else {}
 
@@ -479,10 +522,7 @@ def cmd_import(args: argparse.Namespace, bin_dir: Path, data_folder: Path) -> No
     if h5ad_path.exists() and not args.force:
         print(f"  {h5ad_path.name} already exists — skipping download (use --force to re-download).")
     else:
-        print(f"\nDownloading → {h5ad_path}")
-        cellxgene_census.download_source_h5ad(uuid, to_path=str(h5ad_path))
-        size_gb = h5ad_path.stat().st_size / 1024 ** 3
-        print(f"  Downloaded: {size_gb:.2f} GB")
+        download_h5ad(dataset_meta, h5ad_path)
 
     # Group index.md
     ensure_index_md(folder, dataset_meta, collection_meta)
@@ -531,7 +571,7 @@ def cmd_info(args: argparse.Namespace) -> None:
             print(f"    {ds['dataset_id']}  {cells:>9,} cells  {(ds.get('title') or '')[:55]}")
         return
 
-    meta            = fetch_dataset(uuid)
+    meta            = resolve_dataset(uuid, kind)
     collection_id   = meta.get('collection_id', '')
     collection_meta = fetch_collection(collection_id) if collection_id else {}
     pub_meta        = collection_meta.get("publisher_metadata") or {}
