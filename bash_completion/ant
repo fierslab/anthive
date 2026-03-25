@@ -13,7 +13,7 @@ _ant_completion()
     _init_completion || return
 
     # Available ant subcommands
-    local subcommands="api-check browse build-all check convert db duckdb-check h5ad-check inactive mcp md md-check s3-check serve supervisor sync"
+    local subcommands="api-check browse build-all cellxgene check convert db duckdb-check h5ad-check inactive mcp md md-check s3-check serve supervisor sync"
 
     # Complete the subcommand itself
     if [[ $cword -eq 1 ]]; then
@@ -24,6 +24,29 @@ _ant_completion()
     local subcommand="${words[1]}"
 
     case "$subcommand" in
+
+        # ── cellxgene: subcommand + optional identifier ────────────────────
+        cellxgene)
+            if [[ $cword -eq 2 ]]; then
+                COMPREPLY=($(compgen -W "import info search" -- "$cur"))
+                return
+            fi
+            local cxg_sub="${words[2]}"
+            case "$cxg_sub" in
+                import|info)
+                    if [[ "$cur" == -* ]]; then
+                        COMPREPLY=($(compgen -W "--output-dir --no-convert --force --data-folder" -- "$cur"))
+                        return
+                    fi
+                    return  # identifier is a URL/UUID; no file completion
+                    ;;
+                search)
+                    COMPREPLY=($(compgen -W "--organism --tissue --disease --assay" -- "$cur"))
+                    return
+                    ;;
+            esac
+            return
+            ;;
 
         # ── file-less commands ─────────────────────────────────────────────
         api-check|mcp|supervisor)
