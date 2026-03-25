@@ -19,9 +19,11 @@ Usage:
 """
 
 import argparse
+import json
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import requests
@@ -126,12 +128,32 @@ def fetch_collection(collection_id: str) -> dict:
     return _get(f"{CXG_API}/collections/{collection_id}", timeout=30)  # type: ignore[return-value]
 
 
-def fetch_all_datasets() -> list[dict]:
-    """Fetch the full public dataset listing (~2000 entries). Takes ~60-90s."""
-    return _get(f"{CXG_API}/datasets", timeout=120)  # type: ignore[return-value]
+_CACHE_PATH = Path.home() / ".cache" / "anthive" / "cellxgene_datasets.json"
+_CACHE_TTL  = 86_400   # 24 hours in seconds
 
 
-def resolve_dataset(uuid: str, kind: str) -> dict:
+def fetch_all_datasets(force_refresh: bool = False) -> list[dict]:
+    """
+    Return the full public dataset listing (~2000 entries).
+
+    The result is cached at ~/.cache/anthive/cellxgene_datasets.json for 24 h.
+    Pass force_refresh=True (or use --force on any subcommand) to bypass the cache.
+    """
+    if not force_refresh and _CACHE_PATH.exists():
+        cache_age = time.time() - _CACHE_PATH.stat().st_mtime
+        if cache_age < _CACHE_TTL:
+            print(f"Using cached dataset listing ({cache_age / 3600:.1f} h old).")
+            return json.loads(_CACHE_PATH.read_text())
+
+    print("Fetching dataset listing from CellxGene (may take ~60 s)…")
+    datasets: list[dict] = _get(f"{CXG_API}/datasets", timeout=120)  # type: ignore[return-value]
+    _CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _CACHE_PATH.write_text(json.dumps(datasets))
+    print(f"Cached {len(datasets)} datasets → {_CACHE_PATH}")
+    return datasets
+
+
+def resolve_dataset(uuid: str, kind: str, force_refresh: bool = False) -> dict:
     """
     Resolve any UUID to a full dataset metadata dict from the listing.
 
@@ -142,14 +164,12 @@ def resolve_dataset(uuid: str, kind: str) -> dict:
     if kind == 'collection':
         raise ValueError("UUID is a collection — use info to list its datasets.")
 
-    print("Fetching dataset listing from CellxGene (may take ~60 s)…")
-    all_datasets = fetch_all_datasets()
+    all_datasets = fetch_all_datasets(force_refresh=force_refresh)
 
     for ds in all_datasets:
         if ds.get('dataset_id') == uuid or ds.get('dataset_version_id') == uuid:
             return ds
 
-    # Last resort: try the collection sub-endpoint if we somehow have collection context
     raise ValueError(f"UUID {uuid!r} not found in the CellxGene dataset listing.")
 
 # ── metadata helpers ───────────────────────────────────────────────────────────
@@ -507,7 +527,7 @@ def cmd_import(args: argparse.Namespace, bin_dir: Path, data_folder: Path) -> No
         cmd_info(args)
         sys.exit(0)
 
-    dataset_meta    = resolve_dataset(uuid, kind)
+    dataset_meta    = resolve_dataset(uuid, kind, force_refresh=args.force)
     collection_id   = dataset_meta.get('collection_id', '')
     collection_meta = fetch_collection(collection_id) if collection_id else {}
 
@@ -571,7 +591,7 @@ def cmd_info(args: argparse.Namespace) -> None:
             print(f"    {ds['dataset_id']}  {cells:>9,} cells  {(ds.get('title') or '')[:55]}")
         return
 
-    meta            = resolve_dataset(uuid, kind)
+    meta            = resolve_dataset(uuid, kind, force_refresh=args.force)
     collection_id   = meta.get('collection_id', '')
     collection_meta = fetch_collection(collection_id) if collection_id else {}
     pub_meta        = collection_meta.get("publisher_metadata") or {}
@@ -606,8 +626,7 @@ def cmd_info(args: argparse.Namespace) -> None:
 
 
 def cmd_search(args: argparse.Namespace) -> None:
-    print("Fetching dataset list from CellxGene…")
-    datasets = fetch_all_datasets()
+    datasets = fetch_all_datasets(force_refresh=args.force)
 
     filters = {
         'organism':  args.organism,
@@ -671,11 +690,13 @@ def main() -> None:
     import_p.add_argument('--no-convert', action='store_true',
                           help='Skip DuckDB conversion')
     import_p.add_argument('--force', action='store_true',
-                          help='Re-download even if .h5ad already exists')
+                          help='Re-download .h5ad and refresh the dataset listing cache')
 
     # info
     info_p = subparsers.add_parser('info', help='Show metadata without downloading')
     info_p.add_argument('identifier', help='Dataset or collection URL/UUID')
+    info_p.add_argument('--force', action='store_true',
+                        help='Refresh the dataset listing cache')
 
     # search
     search_p = subparsers.add_parser('search', help='Search available datasets')
@@ -684,6 +705,8 @@ def main() -> None:
     search_p.add_argument('--cell-type', default=None, metavar='STR', dest='cell_type')
     search_p.add_argument('--disease',   default=None, metavar='STR')
     search_p.add_argument('--assay',     default=None, metavar='STR')
+    search_p.add_argument('--force', action='store_true',
+                          help='Refresh the dataset listing cache')
 
     args        = parser.parse_args()
     data_folder = Path(args.data_folder).resolve()
