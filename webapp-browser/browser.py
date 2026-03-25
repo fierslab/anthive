@@ -240,8 +240,7 @@ async def index(request: Request):
     total_datasets = sum(c['dataset_count'] for c in collections)
     total_cells = sum(c['total_cells'] for c in collections if c['total_cells']) or None
 
-    return templates.TemplateResponse("index.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "index.html", {
         "folders": collections,
         "total_datasets": total_datasets,
         "total_folders": len(collections),
@@ -261,13 +260,12 @@ async def folder_view(request: Request, browse_id: str):
 
     if not datasets:
         return templates.TemplateResponse(
-            "index.html",
-            {"request": request, "folders": [], "error": f"Collection '{group_id}' not found"},
+            request, "index.html",
+            {"folders": [], "error": f"Collection '{group_id}' not found"},
             status_code=404
         )
 
-    return templates.TemplateResponse("folder.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "folder.html", {
         "folder_name": group_id,
         "folder_browse_id": group_id,
         "group_id": group_id,
@@ -287,8 +285,8 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
     except Exception as error:
         print(f"API error: {error}")
         return templates.TemplateResponse(
-            "index.html",
-            {"request": request, "folders": [], "error": f"Dataset '{db_id}' not found"},
+            request, "index.html",
+            {"folders": [], "error": f"Dataset '{db_id}' not found"},
             status_code=404
         )
 
@@ -350,8 +348,7 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         for name, stats in layer_stats.items()
     ]
 
-    return templates.TemplateResponse("dataset.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "dataset.html", {
         "folder_name": group_id,
         "folder_browse_id": group_id,
         "group_id": group_id,
