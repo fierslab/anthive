@@ -32,8 +32,10 @@
 		file_server
 	}
 
-	# Streamlit server - WebSocket proxying is automatic in Caddy
-	handle /streamlit/* {
+	# Streamlit — started with --server.baseUrlPath=streamlit so all its
+	# routes (/_stcore/stream WS, /static/, /streamlit/) carry the prefix.
+	# Match both /streamlit (redirect to /streamlit/) and /streamlit/*.
+	handle /streamlit* {
 		reverse_proxy localhost:8082
 	}
 
