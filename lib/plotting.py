@@ -12,6 +12,7 @@ Legacy functions (plot_umap, plot_gene, plot_cat, plot_num) remain unchanged.
 import io
 from typing import Optional
 
+import numpy as np
 import matplotlib
 matplotlib.use('Agg')  # non-interactive backend — must precede pyplot import
 import matplotlib.pyplot as plt
@@ -383,17 +384,12 @@ def plot_scatter(
         color_values = color_df.set_index('cell_name')[color_field]
         plot_df[color_field] = color_values.reindex(plot_df['cell_name'].values).values
 
-        scatter_kwargs: dict = dict(
-            data=plot_df, x=x_col, y=y_col,
-            hue=color_field, linewidth=0, s=point_size, alpha=alpha, ax=ax,
-        )
         if color_kind == 'categorical':
-            scatter_kwargs['palette'] = palette
-
-        sns.scatterplot(**scatter_kwargs)
-
-        legend = ax.get_legend()
-        if legend and color_kind == 'categorical':
+            sns.scatterplot(
+                data=plot_df, x=x_col, y=y_col,
+                hue=color_field, linewidth=0, s=point_size, alpha=alpha,
+                palette=palette, ax=ax,
+            )
             n_cats = int(plot_df[color_field].nunique())
             if n_cats > 12:
                 ax.legend(
@@ -402,6 +398,22 @@ def plot_scatter(
                 )
             else:
                 ax.legend(fontsize=8, markerscale=2, title=color_field)
+        else:
+            # Numerical / gene: use matplotlib directly so viridis (or any cmap)
+            # is applied correctly and a proper colorbar is shown instead of a
+            # dot-legend.
+            cmap = palette if palette != _DEFAULT_PALETTE else 'viridis'
+            color_array = np.asarray(pd.to_numeric(plot_df[color_field], errors='coerce'), dtype=float)
+            sc = ax.scatter(
+                np.asarray(plot_df[x_col], dtype=float),
+                np.asarray(plot_df[y_col], dtype=float),
+                c=color_array,
+                cmap=cmap,
+                s=point_size,
+                alpha=alpha,
+                linewidths=0,
+            )
+            plt.colorbar(sc, ax=ax, label=color_field, shrink=0.8)
     else:
         sns.scatterplot(
             data=plot_df, x=x_col, y=y_col,

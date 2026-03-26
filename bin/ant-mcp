@@ -366,7 +366,7 @@ def main() -> None:
         bins: int = 20,
         point_size: float = 3,
         alpha: float = 0.8,
-        palette: str = 'tab20',
+        palette: str = 'viridis',
         ci: bool = True,
         n_genes: int = 20,
     ) -> str:
@@ -405,7 +405,7 @@ def main() -> None:
             bins:          Histogram bins (default 20).
             point_size:    Scatter point size (default 3).
             alpha:         Scatter point transparency (default 0.8).
-            palette:       Seaborn palette for categorical color (default tab20).
+            palette:       Colormap/palette name (default viridis for scatter; use tab20 for categorical).
             ci:            Show 95% CI on bar plots (default True).
             n_genes:       Top genes for heatmap when x not given (default 20).
         """
