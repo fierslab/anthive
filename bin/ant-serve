@@ -60,6 +60,7 @@ from config import get_config
 from md_check import generate_file_id, generate_group_id
 from metadata import ANNOTATION_FIELDS, parse_md_file
 import plotting
+import analytics
 
 
 class QueryRequest(BaseModel):
@@ -1876,6 +1877,110 @@ async def plot_num(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── analytics endpoints ────────────────────────────────────────────────────────
+
+
+class AnalyticsQueryRequest(BaseModel):
+    sql: str
+    session_id: Optional[str] = None
+
+
+class AnalyticsVizRequest(BaseModel):
+    session_id: str
+    code: str
+    output_format: str = 'png'
+
+
+@app.get("/databases/{db_id:path}/analytics/schema", tags=["analytics"])
+async def analytics_schema(db_id: str):
+    """Return the schema of all DuckDB tables in a dataset.
+
+    Lists every table with its column names, types, row count, and a 3-row
+    sample.  Use this to understand what fields are available before writing
+    an analytics_query SQL statement.
+    """
+    try:
+        db_url = registry.get_database_path(db_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Dataset '{db_id}' not found.")
+    conn = connection_pool.get_connection(db_url)
+    try:
+        schema = analytics.get_schema(conn)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        connection_pool.return_connection(db_url, conn)
+    return {"db_id": db_id, "tables": schema}
+
+
+@app.post("/databases/{db_id:path}/analytics/query", tags=["analytics"])
+async def analytics_query(db_id: str, request: AnalyticsQueryRequest):
+    """Execute a read-only SELECT query and persist results as a Parquet file.
+
+    The full result set is saved server-side; only column metadata and a small
+    preview (first 10 rows) are returned.  Use the returned session_id in a
+    subsequent POST /analytics/viz call to visualise the data.
+
+    Constraints:
+    - Only SELECT / WITH … SELECT queries are accepted.
+    - Result is capped at 500 000 rows (configurable via ANTHIVE_ANALYTICS_ROWS).
+    - Query is killed after 30 s (configurable via ANTHIVE_QUERY_TIMEOUT).
+    """
+    try:
+        db_url = registry.get_database_path(db_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Dataset '{db_id}' not found.")
+    conn = connection_pool.get_connection(db_url)
+    try:
+        result = analytics.run_query(conn, request.sql, request.session_id)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except TimeoutError as exc:
+        raise HTTPException(status_code=408, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        connection_pool.return_connection(db_url, conn)
+    return result
+
+
+@app.post("/analytics/viz", tags=["analytics"])
+async def analytics_viz(request: AnalyticsVizRequest):
+    """Execute a Python visualisation script and return the figure as base64.
+
+    The script runs in a subprocess with a blocked-import AST scan and a
+    wall-clock timeout.  Two variables are pre-injected:
+
+      DATA_PATH   — path to the Parquet file saved by a prior analytics_query
+      OUTPUT_PATH — path where the script MUST save its figure, e.g.:
+                        plt.savefig(OUTPUT_PATH, bbox_inches='tight', dpi=150)
+
+    The script may use: pandas, matplotlib, seaborn, numpy, scipy, sklearn,
+    statsmodels, and other data-science packages.  Imports of os, sys,
+    subprocess, socket, requests, and similar modules are blocked.
+    Scripts are killed after 60 s (configurable via ANTHIVE_VIZ_TIMEOUT).
+    """
+    try:
+        figure_b64, output_format = analytics.run_viz(
+            request.session_id, request.code, request.output_format,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except TimeoutError as exc:
+        raise HTTPException(status_code=408, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    mime_types = {'png': 'image/png', 'svg': 'image/svg+xml', 'pdf': 'application/pdf'}
+    return {
+        "session_id":    request.session_id,
+        "output_format": output_format,
+        "mime_type":     mime_types.get(output_format, 'image/png'),
+        "figure_b64":    figure_b64,
+    }
 
 
 @app.post("/admin/rescan", tags=["admin"])

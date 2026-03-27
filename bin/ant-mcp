@@ -38,6 +38,7 @@ Generate the base64 token with:
 """
 
 import argparse
+import base64
 import json
 import sys
 import uuid
@@ -141,6 +142,13 @@ def main() -> None:
         """GET JSON from ant-serve."""
         url = f"{api_base_url}{path}"
         response = httpx.get(url, params={k: v for k, v in params.items() if v is not None}, timeout=60)
+        response.raise_for_status()
+        return response.json()
+
+    def _get_post(path: str, body: dict) -> dict:
+        """POST JSON body to ant-serve and return JSON response."""
+        url = f"{api_base_url}{path}"
+        response = httpx.post(url, json=body, timeout=120)
         response.raise_for_status()
         return response.json()
 
@@ -546,6 +554,126 @@ def main() -> None:
             bins=bins, width=width, height=height, dpi=dpi,
         )
         return _save_plot_url(png_bytes)
+
+    # ── analytics tools ────────────────────────────────────────────────────────
+
+    @mcp.tool()
+    def analytics_schema(db_id: str) -> str:
+        """Explore the DuckDB schema of a dataset — list tables, columns, and sample rows.
+
+        Call this first when planning a custom analysis to understand what tables
+        and fields are available.  Then write a SQL query with analytics_query.
+
+        Args:
+            db_id: Dataset identifier (e.g. 'S25/SGM').
+        """
+        try:
+            data = _get(f'/databases/{db_id}/analytics/schema')
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code == 404:
+                return f"Dataset '{db_id}' not found. Use search_datasets to find valid IDs."
+            raise
+
+        lines = [f"Schema for {db_id}:\n"]
+        for table in data.get('tables', []):
+            row_count = table.get('row_count')
+            count_str = f"  ({row_count:,} rows)" if row_count is not None else ''
+            lines.append(f"Table: {table['table']}{count_str}")
+            for col in table.get('columns', []):
+                lines.append(f"  {col['name']}  [{col['type']}]")
+            sample = table.get('sample', [])
+            if sample:
+                lines.append(f"  Sample: {sample[0]}")
+            lines.append('')
+        return '\n'.join(lines)
+
+    @mcp.tool()
+    def analytics_query(db_id: str, sql: str) -> str:
+        """Execute a read-only SQL query against a dataset and save results server-side.
+
+        Only SELECT / WITH … SELECT queries are permitted.  Results are stored as
+        a Parquet file on the server — no bulk data travels over MCP.  Use the
+        returned session_id in analytics_viz to visualise the result.
+
+        Returns column names, dtypes, total row count, and a 10-row preview.
+
+        Args:
+            db_id: Dataset identifier (e.g. 'S25/SGM').
+            sql:   SELECT query, e.g.:
+                       SELECT celltype, COUNT(*) AS n FROM __cells GROUP BY celltype
+        """
+        try:
+            data = _get_post(f'/databases/{db_id}/analytics/query', {'sql': sql})
+        except httpx.HTTPStatusError as error:
+            code = error.response.status_code
+            if code == 404:
+                return f"Dataset '{db_id}' not found."
+            if code in (400, 408):
+                return f"Query error: {error.response.text}"
+            raise
+
+        lines = [
+            f"session_id: {data['session_id']}",
+            f"rows: {data['row_count']:,}" + (" (truncated at limit)" if data.get('truncated') else ''),
+            "columns: " + ', '.join(f"{c} [{t}]" for c, t in zip(data['columns'], data['dtypes'])),
+            '',
+            'Preview (first 10 rows):',
+        ]
+        for row in data.get('preview', []):
+            lines.append(f"  {row}")
+        lines += [
+            '',
+            f"Use analytics_viz(session_id='{data['session_id']}', code=...) to visualise.",
+        ]
+        return '\n'.join(lines)
+
+    @mcp.tool()
+    def analytics_viz(
+        session_id: str,
+        code: str,
+        output_format: str = 'png',
+    ) -> str:
+        """Execute a Python visualisation script against a prior analytics_query result.
+
+        The script runs server-side in a sandboxed subprocess.  Two variables are
+        pre-injected — use them to load data and save the figure:
+
+            df = pd.read_parquet(DATA_PATH)   # already loaded for you
+            # … build your plot …
+            plt.savefig(OUTPUT_PATH, bbox_inches='tight', dpi=150)
+
+        Available libraries: pandas, matplotlib, seaborn, numpy, scipy, sklearn.
+        Blocked: os, sys, subprocess, socket, requests, and other I/O modules.
+
+        Returns a URL to the rendered figure (same mechanism as the plot tool).
+
+        Args:
+            session_id:    ID returned by analytics_query.
+            code:          Python source for the visualisation.
+            output_format: 'png' (default), 'svg', or 'pdf'.
+        """
+        try:
+            data = _get_post('/analytics/viz', {
+                'session_id': session_id,
+                'code': code,
+                'output_format': output_format,
+            })
+        except httpx.HTTPStatusError as error:
+            code_status = error.response.status_code
+            if code_status == 404:
+                return f"Session '{session_id}' not found. Run analytics_query first."
+            if code_status in (400, 408):
+                return f"Visualization error: {error.response.text}"
+            raise
+
+        figure_b64 = data['figure_b64']
+        fmt = data.get('output_format', output_format)
+        mime = data.get('mime_type', 'image/png')
+        return _save_plot_url(
+            base64.b64decode(figure_b64),
+            fmt,
+            caption=f"Analytics visualization (session {session_id})",
+        )
 
     # ── run ────────────────────────────────────────────────────────────────────
 
