@@ -1932,17 +1932,16 @@ async def analytics_query(db_id: str, request: AnalyticsQueryRequest):
         db_url = registry.get_database_path(db_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Dataset '{db_id}' not found.")
-    conn = connection_pool.get_connection(db_url)
+    # analytics.run_query opens and closes its own dedicated connection so that
+    # closing it on timeout actually cancels the in-flight DuckDB query.
     try:
-        result = analytics.run_query(conn, request.sql, request.session_id)
+        result = analytics.run_query(db_url, request.sql, request.session_id)
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except TimeoutError as exc:
         raise HTTPException(status_code=408, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
-    finally:
-        connection_pool.return_connection(db_url, conn)
     return result
 
 

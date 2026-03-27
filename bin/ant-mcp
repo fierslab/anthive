@@ -591,16 +591,29 @@ def main() -> None:
     def analytics_query(db_id: str, sql: str) -> str:
         """Execute a read-only SQL query against a dataset and save results server-side.
 
+        IMPORTANT: do ALL filtering, grouping, aggregation, pivoting, and
+        transformation here in SQL — DuckDB is orders of magnitude faster than
+        pandas for these operations on large single-cell datasets.  The Python
+        analytics_viz step should contain only plotting code that operates on the
+        already-aggregated result.
+
         Only SELECT / WITH … SELECT queries are permitted.  Results are stored as
         a Parquet file on the server — no bulk data travels over MCP.  Use the
         returned session_id in analytics_viz to visualise the result.
 
         Returns column names, dtypes, total row count, and a 10-row preview.
 
+        DuckDB supports window functions, PIVOT, LIST_AGG, MEDIAN, QUANTILE,
+        CORR, and full standard SQL.  Prefer complex SQL over complex Python.
+
         Args:
             db_id: Dataset identifier (e.g. 'S25/SGM').
             sql:   SELECT query, e.g.:
-                       SELECT celltype, COUNT(*) AS n FROM __cells GROUP BY celltype
+                       SELECT celltype, COUNT(*) AS n,
+                              AVG(TREM2) AS mean_trem2
+                       FROM __cells
+                       GROUP BY celltype
+                       ORDER BY n DESC
         """
         try:
             data = _get_post(f'/databases/{db_id}/analytics/query', {'sql': sql})
@@ -634,6 +647,10 @@ def main() -> None:
         output_format: str = 'png',
     ) -> str:
         """Execute a Python visualisation script against a prior analytics_query result.
+
+        IMPORTANT: do NOT transform or aggregate data here — that belongs in the
+        analytics_query SQL step.  This script should only plot the already-small
+        aggregated DataFrame that analytics_query produced.
 
         The script runs server-side in a sandboxed subprocess.  Two variables are
         pre-injected — use them to load data and save the figure:

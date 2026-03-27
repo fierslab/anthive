@@ -50,7 +50,12 @@ PREVIEW_ROWS:  int = 10
 
 _WRITE_PATTERN = re.compile(
     r'\b(INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|TRUNCATE|REPLACE|MERGE'
-    r'|ATTACH|DETACH|COPY|EXPORT|IMPORT|PRAGMA|CALL)\b',
+    r'|ATTACH|DETACH|COPY|EXPORT|IMPORT|PRAGMA|CALL'
+    # DuckDB table-generating functions that can read arbitrary files or URLs
+    r'|read_csv|read_parquet|read_json|read_ndjson|read_text|read_arrow'
+    r'|scan_csv|scan_parquet|scan_arrow|scan_ndjson|scan_json'
+    r'|glob|httpfs_get|httpfs_post|load_spatial|parquet_metadata'
+    r'|csv_scan|parquet_scan)\b',
     re.IGNORECASE,
 )
 
@@ -90,6 +95,17 @@ _BLOCKED_BUILTINS: frozenset = frozenset({
     'breakpoint', 'memoryview',
 })
 
+# Attribute-style calls that load data from disk or network regardless of
+# what module they live on — blocks pd.read_csv, pl.read_csv, etc.
+_BLOCKED_DATA_LOADERS: frozenset = frozenset({
+    'read_csv', 'read_table', 'read_fwf', 'read_excel', 'read_html',
+    'read_json', 'read_parquet', 'read_feather', 'read_orc',
+    'read_pickle', 'read_hdf', 'read_sas', 'read_spss', 'read_stata',
+    'read_clipboard', 'read_xml', 'read_sql', 'read_sql_query',
+    'load', 'loadtxt', 'load_npz', 'fromfile',          # numpy
+    'urlopen', 'urlretrieve', 'get', 'post', 'request',  # network
+})
+
 
 def validate_python(code: str) -> None:
     """Raise ValueError if code contains blocked imports or dangerous built-in calls."""
@@ -113,8 +129,14 @@ def validate_python(code: str) -> None:
             func = node.func
             if isinstance(func, ast.Name) and func.id in _BLOCKED_BUILTINS:
                 raise ValueError(f"Call to '{func.id}()' is not permitted.")
-            if isinstance(func, ast.Attribute) and func.attr in _BLOCKED_BUILTINS:
-                raise ValueError(f"Call to '.{func.attr}()' is not permitted.")
+            if isinstance(func, ast.Attribute):
+                if func.attr in _BLOCKED_BUILTINS:
+                    raise ValueError(f"Call to '.{func.attr}()' is not permitted.")
+                if func.attr in _BLOCKED_DATA_LOADERS:
+                    raise ValueError(
+                        f"Call to '.{func.attr}()' is not permitted "
+                        "(file/network I/O must go through the analytics_query SQL step)."
+                    )
 
 
 _VIZ_PREAMBLE = """\
@@ -168,7 +190,7 @@ def get_schema(conn: duckdb.DuckDBPyConnection) -> List[Dict[str, Any]]:
 # ── Query execution ────────────────────────────────────────────────────────────
 
 def run_query(
-    conn: duckdb.DuckDBPyConnection,
+    db_url: str,
     sql: str,
     session_id: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -178,13 +200,18 @@ def run_query(
     (PREVIEW_ROWS rows).  The full result set lives at tmp/{session_id}.parquet
     and is never returned in this response — the session_id is the only handle.
 
+    A dedicated read-only DuckDB connection is opened for this query and closed
+    immediately after (or on timeout).  Closing the connection interrupts any
+    in-flight query, so the timeout is enforced at the DuckDB level — not just
+    at the Python thread-join level.
+
     Args:
-        conn:       Read-only DuckDB connection.
+        db_url:     Path or S3 URL of the DuckDB file.
         sql:        SELECT query to execute.
         session_id: Optional caller-supplied ID; one is generated if omitted.
 
     Returns:
-        Dict with keys: session_id, columns, dtypes, row_count, preview.
+        Dict with keys: session_id, columns, dtypes, row_count, preview, truncated.
     """
     validate_sql(sql)
     session_id = session_id or uuid.uuid4().hex
@@ -193,10 +220,14 @@ def run_query(
 
     result_holder: Dict[str, Any] = {}
     error_holder:  Dict[str, Any] = {}
+    conn_holder:   Dict[str, Any] = {}
 
     def _exec() -> None:
         try:
-            result_holder['df'] = conn.execute(limited_sql).df()
+            # Dedicated connection — closing it from the main thread kills the query.
+            query_conn = duckdb.connect(db_url, read_only=True)
+            conn_holder['conn'] = query_conn
+            result_holder['df'] = query_conn.execute(limited_sql).df()
         except Exception as exc:
             error_holder['exc'] = exc
 
@@ -205,7 +236,23 @@ def run_query(
     thread.join(QUERY_TIMEOUT)
 
     if thread.is_alive():
-        raise TimeoutError(f"Query exceeded the {QUERY_TIMEOUT}s time limit.")
+        # Close the connection to interrupt the running query, then wait briefly.
+        dedicated_conn = conn_holder.get('conn')
+        if dedicated_conn is not None:
+            try:
+                dedicated_conn.close()
+            except Exception:
+                pass
+        thread.join(2)
+        raise TimeoutError(f"Query exceeded the {QUERY_TIMEOUT}s time limit and was cancelled.")
+
+    dedicated_conn = conn_holder.get('conn')
+    if dedicated_conn is not None:
+        try:
+            dedicated_conn.close()
+        except Exception:
+            pass
+
     if 'exc' in error_holder:
         raise RuntimeError(str(error_holder['exc'])) from error_holder['exc']
 
