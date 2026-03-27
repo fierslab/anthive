@@ -625,18 +625,39 @@ def main() -> None:
                 return f"Query error: {error.response.text}"
             raise
 
+        session_id_val = data['session_id']
+        row_count = data['row_count']
+        columns = data['columns']
+        dtypes = data['dtypes']
+        preview_rows = data.get('preview', [])
+        is_full_table = data.get('full_table', False)
+        is_truncated = data.get('truncated', False)
+
         lines = [
-            f"session_id: {data['session_id']}",
-            f"rows: {data['row_count']:,}" + (" (truncated at limit)" if data.get('truncated') else ''),
-            "columns: " + ', '.join(f"{c} [{t}]" for c, t in zip(data['columns'], data['dtypes'])),
+            f"session_id: {session_id_val}",
+            f"rows: {row_count:,}" + (" (truncated at limit)" if is_truncated else ''),
+            "columns: " + ', '.join(f"{c} [{t}]" for c, t in zip(columns, dtypes)),
             '',
-            'Preview (first 10 rows):',
         ]
-        for row in data.get('preview', []):
-            lines.append(f"  {row}")
+
+        if is_full_table and preview_rows:
+            # Render full result as a markdown table
+            col_widths = [max(len(str(c)), max((len(str(r.get(c, ''))) for r in preview_rows), default=0))
+                          for c in columns]
+            header = '| ' + ' | '.join(str(c).ljust(col_widths[i]) for i, c in enumerate(columns)) + ' |'
+            separator = '| ' + ' | '.join('-' * col_widths[i] for i in range(len(columns))) + ' |'
+            lines += [header, separator]
+            for row in preview_rows:
+                cells = [str(row.get(c, '')).ljust(col_widths[i]) for i, c in enumerate(columns)]
+                lines.append('| ' + ' | '.join(cells) + ' |')
+        else:
+            lines.append('Preview (first 10 rows):')
+            for row in preview_rows:
+                lines.append(f"  {row}")
+
         lines += [
             '',
-            f"Use analytics_viz(session_id='{data['session_id']}', code=...) to visualise.",
+            f"Use analytics_viz(session_id='{session_id_val}', code=...) to visualise.",
         ]
         return '\n'.join(lines)
 

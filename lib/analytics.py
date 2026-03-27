@@ -40,10 +40,11 @@ def _get_tmp_dir() -> Path:
     tmp.mkdir(parents=True, exist_ok=True)
     return tmp
 
-MAX_ROWS:      int = int(os.environ.get('ANTHIVE_ANALYTICS_ROWS', 500_000))
-QUERY_TIMEOUT: int = int(os.environ.get('ANTHIVE_QUERY_TIMEOUT', 30))
-VIZ_TIMEOUT:   int = int(os.environ.get('ANTHIVE_VIZ_TIMEOUT', 60))
-PREVIEW_ROWS:  int = 10
+MAX_ROWS:       int = int(os.environ.get('ANTHIVE_ANALYTICS_ROWS', 500_000))
+QUERY_TIMEOUT:  int = int(os.environ.get('ANTHIVE_QUERY_TIMEOUT', 30))
+VIZ_TIMEOUT:    int = int(os.environ.get('ANTHIVE_VIZ_TIMEOUT', 60))
+PREVIEW_ROWS:   int = 10
+FULL_TABLE_ROWS: int = 500   # return all rows in preview when result is this small
 
 
 # ── SQL security ───────────────────────────────────────────────────────────────
@@ -299,13 +300,16 @@ def run_query(
     parquet_path = _get_tmp_dir() / f"{session_id}.parquet"
     result_df.to_parquet(parquet_path, index=False)
 
-    preview = result_df.head(PREVIEW_ROWS).where(pd.notna(result_df.head(PREVIEW_ROWS)), None).to_dict(orient='records')
+    full_table = len(result_df) <= FULL_TABLE_ROWS
+    preview_df = result_df if full_table else result_df.head(PREVIEW_ROWS)
+    preview = preview_df.where(pd.notna(preview_df), None).to_dict(orient='records')
     return {
         'session_id':  session_id,
         'columns':     list(result_df.columns),
         'dtypes':      [str(dtype) for dtype in result_df.dtypes],
         'row_count':   len(result_df),
         'truncated':   len(result_df) == MAX_ROWS,
+        'full_table':  full_table,
         'preview':     preview,
     }
 
