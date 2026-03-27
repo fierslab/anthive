@@ -318,9 +318,9 @@ def main() -> None:
             f"Embeddings:    {', '.join(data.get('embeddings', {}).keys()) or '—'}",
         ]
         if categorical_fields:
-            info_lines.append(f"Categorical:   {', '.join(categorical_fields[:15])}")
+            info_lines.append(f"Categorical ({len(categorical_fields)}): {', '.join(categorical_fields)}")
         if numerical_fields:
-            info_lines.append(f"Numerical:     {', '.join(numerical_fields[:15])}")
+            info_lines.append(f"Numerical ({len(numerical_fields)}):   {', '.join(numerical_fields)}")
         if data.get('doi'):
             info_lines.append(f"DOI:           {', '.join(data['doi'])}")
         if data.get('markdown'):
