@@ -189,10 +189,48 @@ def get_schema(conn: duckdb.DuckDBPyConnection) -> List[Dict[str, Any]]:
 
 # ── Query execution ────────────────────────────────────────────────────────────
 
+def _open_analytics_connection(
+    db_url: str,
+    s3_config: Optional[Dict[str, Any]] = None,
+) -> duckdb.DuckDBPyConnection:
+    """Open a dedicated read-only DuckDB connection, configuring httpfs for S3 URLs."""
+    if db_url.startswith('s3://'):
+        conn = duckdb.connect()
+        # httpfs is installed once by the connection pool; LOAD is idempotent.
+        try:
+            conn.execute("LOAD httpfs;")
+        except Exception:
+            conn.execute("INSTALL httpfs; LOAD httpfs;")
+        s3 = s3_config or {}
+        raw_ep = (s3.get('endpoint') or '').strip()
+        ep_host = raw_ep.removeprefix('https://').removeprefix('http://')
+        use_ssl = not raw_ep.startswith('http://')
+        use_path_style = s3.get('use_path_style') or bool(ep_host)
+        fields = [
+            "TYPE S3",
+            f"KEY_ID '{s3.get('access_key_id') or ''}'",
+            f"SECRET '{s3.get('secret_access_key') or ''}'",
+        ]
+        if ep_host:
+            fields.append(f"ENDPOINT '{ep_host}'")
+        if s3.get('region'):
+            fields.append(f"REGION '{s3['region']}'")
+        fields.append(f"USE_SSL {'true' if use_ssl else 'false'}")
+        if use_path_style:
+            fields.append("URL_STYLE 'path'")
+        conn.execute(f"CREATE OR REPLACE SECRET _s3 ({', '.join(fields)})")
+        conn.execute(f"ATTACH '{db_url}' AS db (READ_ONLY);")
+        conn.execute("USE db;")
+        return conn
+    else:
+        return duckdb.connect(db_url, read_only=True)
+
+
 def run_query(
     db_url: str,
     sql: str,
     session_id: Optional[str] = None,
+    s3_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Execute a validated SELECT query, persist results as Parquet, and return metadata.
 
@@ -209,6 +247,7 @@ def run_query(
         db_url:     Path or S3 URL of the DuckDB file.
         sql:        SELECT query to execute.
         session_id: Optional caller-supplied ID; one is generated if omitted.
+        s3_config:  S3 credentials dict (required for s3:// URLs).
 
     Returns:
         Dict with keys: session_id, columns, dtypes, row_count, preview, truncated.
@@ -225,7 +264,7 @@ def run_query(
     def _exec() -> None:
         try:
             # Dedicated connection — closing it from the main thread kills the query.
-            query_conn = duckdb.connect(db_url, read_only=True)
+            query_conn = _open_analytics_connection(db_url, s3_config)
             conn_holder['conn'] = query_conn
             result_holder['df'] = query_conn.execute(limited_sql).df()
         except Exception as exc:
