@@ -35,6 +35,7 @@ Example:
 import argparse
 import asyncio
 import json
+import math
 import sys
 import time
 from collections import defaultdict
@@ -2009,6 +2010,17 @@ async def plot_num(
 # ── analytics endpoints ────────────────────────────────────────────────────────
 
 
+def _json_safe(obj: Any) -> Any:
+    """Recursively replace NaN/Inf floats with None so json.dumps never chokes."""
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_json_safe(v) for v in obj]
+    return obj
+
+
 class AnalyticsQueryRequest(BaseModel):
     sql: str
     session_id: Optional[str] = None
@@ -2039,7 +2051,7 @@ async def analytics_schema(db_id: str):
         raise HTTPException(status_code=500, detail=str(exc))
     finally:
         connection_pool.return_connection(db_url, conn)
-    return {"db_id": db_id, "tables": schema}
+    return _json_safe({"db_id": db_id, "tables": schema})
 
 
 @app.post("/databases/{db_id:path}/analytics/query", tags=["analytics"])
@@ -2072,7 +2084,7 @@ async def analytics_query(db_id: str, request: AnalyticsQueryRequest):
         raise HTTPException(status_code=408, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
-    return result
+    return _json_safe(result)
 
 
 @app.post("/analytics/viz", tags=["analytics"])
