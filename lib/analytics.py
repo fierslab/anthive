@@ -175,7 +175,7 @@ def get_schema(conn: duckdb.DuckDBPyConnection) -> List[Dict[str, Any]]:
             row_count = None
         try:
             sample_df = conn.execute(f'SELECT * FROM "{table_name}" LIMIT 3').df()
-            sample = sample_df.to_dict(orient='records')
+            sample = sample_df.where(pd.notna(sample_df), None).to_dict(orient='records')
         except Exception:
             sample = []
         schema.append({
