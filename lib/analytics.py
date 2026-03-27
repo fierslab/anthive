@@ -255,7 +255,7 @@ def run_query(
     validate_sql(sql)
     session_id = session_id or uuid.uuid4().hex
 
-    limited_sql = f"SELECT * FROM ({sql}) __q LIMIT {MAX_ROWS}"
+    limited_sql = f"SELECT * FROM (\n{sql}\n) __q LIMIT {MAX_ROWS}"
 
     result_holder: Dict[str, Any] = {}
     error_holder:  Dict[str, Any] = {}
