@@ -33,6 +33,7 @@ Example:
 
 import argparse
 import asyncio
+import json
 import sys
 import time
 from collections import defaultdict
@@ -179,6 +180,17 @@ class ConnectionPool:
         }
 
 
+_METADATA_CACHE_VERSION = 4       # bump when cache format changes
+_METADATA_CACHE_TTL_S3  = 86_400  # 24 h for S3 databases (no local mtime)
+
+
+def _json_serial(obj: object) -> str:
+    """JSON serializer for types not handled by the default encoder (e.g. date)."""
+    if hasattr(obj, 'isoformat'):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
 class DatabaseRegistry:
     """Registry of available databases with enhanced caching (Phase 2)
 
@@ -263,6 +275,77 @@ class DatabaseRegistry:
         except Exception:
             return False
 
+    # ── persistent metadata cache ──────────────────────────────────────────────
+
+    def _cache_file_path(self) -> Path:
+        return Path('./tmp/metadata_cache.json')
+
+    def _load_persisted_cache(self) -> Dict[str, Any]:
+        """Load the on-disk metadata cache.  Returns {} on any error or version mismatch."""
+        cache_path = self._cache_file_path()
+        if not cache_path.exists():
+            return {}
+        try:
+            with cache_path.open() as f:
+                data = json.load(f)
+            if data.get('cache_version') != _METADATA_CACHE_VERSION:
+                return {}
+            return data.get('entries', {})
+        except Exception as exc:
+            print(f"  Note: could not read metadata cache ({exc}); will reload all.")
+            return {}
+
+    def _save_persisted_cache(self, entries: Dict[str, Any]) -> None:
+        """Write the metadata cache to disk."""
+        cache_path = self._cache_file_path()
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        data = {'cache_version': _METADATA_CACHE_VERSION, 'entries': entries}
+        try:
+            tmp_path = cache_path.with_suffix('.json.tmp')
+            with tmp_path.open('w') as f:
+                json.dump(data, f, default=_json_serial)
+            tmp_path.replace(cache_path)
+        except Exception as exc:
+            print(f"  Warning: could not save metadata cache ({exc}).")
+
+    def _get_entry_fingerprint(self, db_id: str) -> Dict[str, float]:
+        """Return mtime fingerprint for the files that back a single registry entry."""
+        md_path = self._db_md_bases[db_id]
+        db_url  = self.databases[db_id]
+
+        md_mtime = md_path.stat().st_mtime if md_path.exists() else 0.0
+
+        # mtime of the nearest ancestor index.md (carries inherited annotation)
+        index_mtime = 0.0
+        search = md_path.parent
+        while search != self.data_folder.parent:
+            candidate = search / 'index.md'
+            if candidate.exists():
+                index_mtime = candidate.stat().st_mtime
+                break
+            search = search.parent
+
+        duckdb_mtime = 0.0
+        if not db_url.startswith('s3://'):
+            duckdb_path = Path(db_url)
+            duckdb_mtime = duckdb_path.stat().st_mtime if duckdb_path.exists() else 0.0
+
+        return {'md_mtime': md_mtime, 'index_mtime': index_mtime, 'duckdb_mtime': duckdb_mtime}
+
+    def _is_cache_entry_valid(
+        self, db_id: str, cached_entry: Dict[str, Any], fingerprint: Dict[str, float],
+    ) -> bool:
+        """Return True if the cached entry still matches the on-disk files."""
+        db_url = self.databases[db_id]
+        if cached_entry.get('md_mtime')    != fingerprint['md_mtime']:    return False
+        if cached_entry.get('index_mtime') != fingerprint['index_mtime']: return False
+        if db_url.startswith('s3://'):
+            # No reliable mtime for S3 — fall back to 24 h TTL
+            return time.time() - cached_entry.get('cached_at', 0) < _METADATA_CACHE_TTL_S3
+        return cached_entry.get('duckdb_mtime') == fingerprint['duckdb_mtime']
+
+    # ── database scanning ──────────────────────────────────────────────────────
+
     def _scan_databases(self):
         """Scan data folder for databases via .md files (follows symlinks)"""
         if not self.data_folder.exists():
@@ -339,20 +422,46 @@ class DatabaseRegistry:
                 print(f"  - {db_id}")
             print(f"  ... and {len(self.databases) - 10} more")
 
-    def _cache_all_metadata(self):
-        """Cache metadata for all databases"""
-        print("Caching metadata...")
-        self.metadata_cache.clear()
-        errors = []
+    def _cache_all_metadata(self, force_reload: bool = False) -> None:
+        """Load metadata for all databases, using the persisted cache where possible.
 
-        s3_warnings = []
+        A cache entry is reused when the mtime of the dataset's .md file, its
+        nearest ancestor index.md, and the local .duckdb file are all unchanged.
+        S3-backed databases use a 24 h TTL instead.
+
+        Pass force_reload=True to ignore the cache and reload everything (used by
+        POST /admin/rescan).
+        """
+        print("Loading metadata (checking cache)..." if not force_reload else "Loading metadata (forced reload)...")
+        persisted = {} if force_reload else self._load_persisted_cache()
+
+        self.metadata_cache.clear()
+        self._databases_list_cache = None
+        errors: List[tuple] = []
+        cache_hits = 0
+        reloaded = 0
+        s3_warnings: List[str] = []
+
         for db_id, db_url in self.databases.items():
+            fingerprint = self._get_entry_fingerprint(db_id)
+            cached_entry = persisted.get(db_id, {})
+
+            if not force_reload and self._is_cache_entry_valid(db_id, cached_entry, fingerprint):
+                self.metadata_cache[db_id] = cached_entry['metadata']
+                cache_hits += 1
+                continue
+
             try:
-                self.metadata_cache[db_id] = self._load_database_metadata(
-                    db_id, self._db_extra[db_id]
-                )
-            except Exception as e:
-                error_msg = str(e)
+                metadata = self._load_database_metadata(db_id, self._db_extra[db_id])
+                self.metadata_cache[db_id] = metadata
+                persisted[db_id] = {
+                    'metadata': metadata,
+                    **fingerprint,
+                    'cached_at': time.time(),
+                }
+                reloaded += 1
+            except Exception as exc:
+                error_msg = str(exc)
                 is_s3_missing = (
                     db_url.startswith('s3://')
                     and 'does not exist' in error_msg.lower()
@@ -373,17 +482,21 @@ class DatabaseRegistry:
             print(f"  S3 not accessible ({len(s3_warnings)}): {', '.join(s3_warnings)}")
             errors.extend((db_id, 'S3 not accessible') for db_id in s3_warnings)
 
-        # Remove databases that failed to load from the registry
+        # Remove databases that failed to load
         for db_id, _ in errors:
             if db_id in self.databases:
                 del self.databases[db_id]
                 self._db_md_bases.pop(db_id, None)
+                persisted.pop(db_id, None)
 
+        self._save_persisted_cache(persisted)
+
+        status = f"{len(self.metadata_cache)} databases"
+        if cache_hits:
+            status += f" ({cache_hits} from cache, {reloaded} reloaded)"
         if errors:
-            print(f"\nWarning: Skipped {len(errors)} database(s) with errors")
-            print(f"Successfully loaded {len(self.metadata_cache)} database(s)")
-        else:
-            print(f"Cached metadata for {len(self.metadata_cache)} databases")
+            status += f", {len(errors)} skipped"
+        print(f"Metadata ready: {status}")
 
     def _resolve_annotations(self, md_path: Path, file_metadata: dict) -> dict:
         """
@@ -736,7 +849,7 @@ class DatabaseRegistry:
         self.metadata_stats_cache.clear()
 
         self._scan_databases()
-        self._cache_all_metadata()
+        self._cache_all_metadata(force_reload=True)
 
         new_db_ids = set(self.databases.keys())
         added = new_db_ids - old_db_ids
@@ -770,6 +883,18 @@ connection_pool: Optional[ConnectionPool] = None
 
 
 @asynccontextmanager
+async def _daily_metadata_refresh() -> None:
+    """Background task: re-scan and refresh any stale metadata entries once per day."""
+    while True:
+        await asyncio.sleep(_METADATA_CACHE_TTL_S3)   # 24 h
+        print("Daily metadata refresh: scanning for changes...")
+        try:
+            registry._scan_databases()
+            registry._cache_all_metadata(force_reload=False)
+        except Exception as exc:
+            print(f"Daily metadata refresh error: {exc}")
+
+
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown (Phase 2)"""
     # Startup
@@ -777,6 +902,7 @@ async def lifespan(app: FastAPI):
     if registry is None or connection_pool is None:
         print("ERROR: Registry or connection pool not initialized!")
         sys.exit(1)
+    asyncio.create_task(_daily_metadata_refresh())
     print("Server startup complete")
     yield
     # Shutdown
