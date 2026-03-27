@@ -882,7 +882,6 @@ registry: Optional[DatabaseRegistry] = None
 connection_pool: Optional[ConnectionPool] = None
 
 
-@asynccontextmanager
 async def _daily_metadata_refresh() -> None:
     """Background task: re-scan and refresh any stale metadata entries once per day."""
     while True:
@@ -895,6 +894,7 @@ async def _daily_metadata_refresh() -> None:
             print(f"Daily metadata refresh error: {exc}")
 
 
+@asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown (Phase 2)"""
     # Startup
