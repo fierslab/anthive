@@ -1639,6 +1639,55 @@ def _get_top_genes_by_mean(db, n_genes: int, layer: str) -> List[str]:
         return [r[0] for r in rows]
 
 
+# ── subset / filter helpers ───────────────────────────────────────────────────
+
+
+def _parse_subset(subset_params: List[str]) -> Optional[Dict[str, Any]]:
+    """Parse ?subset=field:value query params into a filters dict for AnthiveDB.
+
+    Supported formats (all URL-encoded as needed):
+      field:value          exact categorical match
+      field:v1,v2,v3      IN list (multiple categorical values)
+      field:min..max       numerical range (BETWEEN min AND max)
+
+    Multiple subset params for the same field are merged into an IN list.
+    Returns None when the list is empty.
+    """
+    if not subset_params:
+        return None
+
+    merged: Dict[str, Any] = {}
+    for param in subset_params:
+        if ':' not in param:
+            continue
+        field, _, raw = param.partition(':')
+        field = field.strip()
+        raw = raw.strip()
+        if not field or not raw:
+            continue
+
+        # Range: field:min..max
+        if '..' in raw:
+            parts = raw.split('..', 1)
+            try:
+                lo, hi = float(parts[0]), float(parts[1])
+                merged[field] = (lo, hi)
+                continue
+            except ValueError:
+                pass  # fall through to string handling
+
+        # Single or comma-separated list
+        values = [v.strip() for v in raw.split(',') if v.strip()]
+        if field in merged:
+            existing = merged[field]
+            existing_list = existing if isinstance(existing, list) else [existing]
+            merged[field] = existing_list + values
+        else:
+            merged[field] = values if len(values) > 1 else values[0]
+
+    return merged or None
+
+
 # ── unified plot endpoint ──────────────────────────────────────────────────────
 
 @app.get("/databases/{db_id:path}/plot", tags=["plots"])
@@ -1659,12 +1708,19 @@ async def plot(
     palette: str = Query('tab20'),
     ci: bool = Query(True, description="Show 95% CI on bar plots"),
     n_genes: int = Query(20, description="Top genes for heatmap when x not given"),
+    subset: List[str] = Query(default=[], description=(
+        "Cell subset filter(s). Repeatable. Formats: "
+        "'field:value' (exact), 'field:v1,v2' (IN list), 'field:min..max' (range). "
+        "Example: subset=sex:female&subset=condition:AD"
+    )),
 ):
     """Unified grammar-of-graphics plot endpoint.
 
     Provide geom + x/y/color field names; the server auto-detects field types.
     Returns the image with X-Plot-Caption and X-Plot-Format response headers.
+    Restrict to a cell subset with one or more ?subset=field:value params.
     """
+    filters = _parse_subset(subset)
     if geom not in _PLOT_GEOMS:
         raise HTTPException(400, detail=f"Unknown geom '{geom}'. Valid: {sorted(_PLOT_GEOMS)}")
     if output_format not in _PLOT_MIME_TYPES:
@@ -1688,7 +1744,7 @@ async def plot(
                                else (available_embeddings[0] if available_embeddings else None))
                 if not emb_id:
                     raise HTTPException(400, detail="No embeddings available for scatter plot")
-                embedding_df = db.get_embedding_data(emb_id, n_dims=2)
+                embedding_df = db.get_embedding_data(emb_id, n_dims=2, filters=filters)
 
                 color_df = None
                 color_field_name = None
@@ -1696,9 +1752,9 @@ async def plot(
                 if color:
                     color_field_name, color_kind = resolve(color)
                     if color_kind == 'gene':
-                        color_df = db.get_cell_table(genes=[color_field_name], layer=layer)
+                        color_df = db.get_cell_table(genes=[color_field_name], layer=layer, filters=filters)
                     else:
-                        color_df = db.get_cell_table(metadata_fields=[color_field_name])
+                        color_df = db.get_cell_table(metadata_fields=[color_field_name], filters=filters)
 
                 x_label = str(embedding_df.columns[-2]).replace('dim_', 'Dim ')
                 y_label = str(embedding_df.columns[-1]).replace('dim_', 'Dim ')
@@ -1731,11 +1787,11 @@ async def plot(
                 if y:
                     y_name, y_kind = resolve(y)
                     if y_kind == 'gene':
-                        data_df = db.get_cell_table(genes=[y_name], metadata_fields=[x_name], layer=layer)
+                        data_df = db.get_cell_table(genes=[y_name], metadata_fields=[x_name], layer=layer, filters=filters)
                     else:
-                        data_df = db.get_cell_table(metadata_fields=[x_name, y_name])
+                        data_df = db.get_cell_table(metadata_fields=[x_name, y_name], filters=filters)
                 else:
-                    data_df = db.get_cell_table(metadata_fields=[x_name])
+                    data_df = db.get_cell_table(metadata_fields=[x_name], filters=filters)
 
                 caption = plotting.build_caption(db_id, geom, x_name, x_kind,
                                                  y_name, None, layer)
@@ -1758,14 +1814,14 @@ async def plot(
                 if color:
                     color_name, _ = resolve(color)
                     if x_kind == 'gene':
-                        data_df = db.get_cell_table(genes=[x_name], metadata_fields=[color_name], layer=layer)
+                        data_df = db.get_cell_table(genes=[x_name], metadata_fields=[color_name], layer=layer, filters=filters)
                     else:
-                        data_df = db.get_cell_table(metadata_fields=[x_name, color_name])
+                        data_df = db.get_cell_table(metadata_fields=[x_name, color_name], filters=filters)
                 else:
                     if x_kind == 'gene':
-                        data_df = db.get_cell_table(genes=[x_name], layer=layer)
+                        data_df = db.get_cell_table(genes=[x_name], layer=layer, filters=filters)
                     else:
-                        data_df = db.get_cell_table(metadata_fields=[x_name])
+                        data_df = db.get_cell_table(metadata_fields=[x_name], filters=filters)
 
                 caption = plotting.build_caption(db_id, geom, x_name, x_kind,
                                                  None, color_name, layer)
@@ -1799,7 +1855,7 @@ async def plot(
                 else:
                     gene_list = _get_top_genes_by_mean(db, n_genes, layer)
 
-                data_df = db.get_cell_table(genes=gene_list, metadata_fields=[y_name], layer=layer)
+                data_df = db.get_cell_table(genes=gene_list, metadata_fields=[y_name], layer=layer, filters=filters)
                 mean_expr_df = data_df.groupby(y_name)[gene_list].mean()
 
                 caption = plotting.build_caption(db_id, geom, x, 'gene',
@@ -1846,6 +1902,7 @@ async def plot_umap(
     point_size: float = Query(3.0, description="Scatter point size"),
     alpha: float = Query(0.8, description="Point transparency (0–1)"),
     palette: str = Query("tab20", description="Seaborn palette for categorical coloring"),
+    subset: List[str] = Query(default=[], description="Cell subset filters: 'field:value', 'field:v1,v2', 'field:min..max'"),
 ):
     """
     Render a UMAP scatter plot and return PNG.
@@ -1853,6 +1910,7 @@ async def plot_umap(
     Provide at most one of: gene, category, numerical.
     If none given, all cells are rendered in a single colour.
     """
+    filters = _parse_subset(subset)
     try:
         with _pooled_db(db_id) as db:
             available_embeddings = db._get_embeddings()
@@ -1860,22 +1918,22 @@ async def plot_umap(
                 raise HTTPException(status_code=400, detail="No embeddings available for this database")
 
             emb_id = embedding or ('X_umap' if 'X_umap' in available_embeddings else available_embeddings[0])
-            embedding_df = db.get_embedding_data(emb_id, n_dims=2)
+            embedding_df = db.get_embedding_data(emb_id, n_dims=2, filters=filters)
 
             color_df = None
             color_field = None
             color_type = 'categorical'
 
             if gene:
-                color_df = db.get_cell_table(genes=[gene], layer=layer)
+                color_df = db.get_cell_table(genes=[gene], layer=layer, filters=filters)
                 color_field = gene
                 color_type = 'gene'
             elif category:
-                color_df = db.get_cell_table(metadata_fields=[category])
+                color_df = db.get_cell_table(metadata_fields=[category], filters=filters)
                 color_field = category
                 color_type = 'categorical'
             elif numerical:
-                color_df = db.get_cell_table(metadata_fields=[numerical])
+                color_df = db.get_cell_table(metadata_fields=[numerical], filters=filters)
                 color_field = numerical
                 color_type = 'numerical'
 
@@ -1909,11 +1967,13 @@ async def plot_gene(
     width: float = Query(7.0, description="Figure width in inches"),
     height: float = Query(4.0, description="Figure height in inches"),
     dpi: int = Query(150, description="Output resolution"),
+    subset: List[str] = Query(default=[], description="Cell subset filters: 'field:value', 'field:v1,v2', 'field:min..max'"),
 ):
     """Render a gene expression distribution plot and return PNG."""
+    filters = _parse_subset(subset)
     try:
         with _pooled_db(db_id) as db:
-            data_df = db.get_cell_table(genes=[gene], layer=layer)
+            data_df = db.get_cell_table(genes=[gene], layer=layer, filters=filters)
 
         png = plotting.plot_gene(
             data_df=data_df,
@@ -1943,16 +2003,18 @@ async def plot_cat(
     width: float = Query(8.0, description="Figure width in inches"),
     height: float = Query(5.0, description="Figure height in inches"),
     dpi: int = Query(150, description="Output resolution"),
+    subset: List[str] = Query(default=[], description="Cell subset filters: 'field:value', 'field:v1,v2', 'field:min..max'"),
 ):
     """Render a categorical breakdown plot and return PNG."""
+    filters = _parse_subset(subset)
     try:
         with _pooled_db(db_id) as db:
             if y_type == 'gene' and y:
-                data_df = db.get_cell_table(genes=[y], metadata_fields=[cat], layer=layer)
+                data_df = db.get_cell_table(genes=[y], metadata_fields=[cat], layer=layer, filters=filters)
             elif y_type == 'numerical' and y:
-                data_df = db.get_cell_table(metadata_fields=[cat, y])
+                data_df = db.get_cell_table(metadata_fields=[cat, y], filters=filters)
             else:
-                data_df = db.get_cell_table(metadata_fields=[cat])
+                data_df = db.get_cell_table(metadata_fields=[cat], filters=filters)
 
         png = plotting.plot_cat(
             data_df=data_df,
@@ -1982,12 +2044,14 @@ async def plot_num(
     width: float = Query(7.0, description="Figure width in inches"),
     height: float = Query(4.0, description="Figure height in inches"),
     dpi: int = Query(150, description="Output resolution"),
+    subset: List[str] = Query(default=[], description="Cell subset filters: 'field:value', 'field:v1,v2', 'field:min..max'"),
 ):
     """Render a numerical field distribution plot and return PNG."""
+    filters = _parse_subset(subset)
     try:
         with _pooled_db(db_id) as db:
             metadata_fields = [num] if not cat else [num, cat]
-            data_df = db.get_cell_table(metadata_fields=metadata_fields)
+            data_df = db.get_cell_table(metadata_fields=metadata_fields, filters=filters)
 
         png = plotting.plot_num(
             data_df=data_df,

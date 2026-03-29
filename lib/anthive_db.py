@@ -317,8 +317,12 @@ class AnthiveDB:
                     continue
 
                 if isinstance(value, tuple) and len(value) == 2:
-                    # Range filter
+                    # Range filter: field:(min, max)
                     where_parts.append(f'{prefix}."{field}" BETWEEN {value[0]} AND {value[1]}')
+                elif isinstance(value, list):
+                    # IN list: field:[v1, v2, ...]
+                    quoted = ', '.join(f"'{v}'" for v in value)
+                    where_parts.append(f'{prefix}."{field}" IN ({quoted})')
                 else:
                     # Exact match
                     if isinstance(value, str):
@@ -345,7 +349,8 @@ class AnthiveDB:
 
     def get_embedding_data(self, embedding_id: str,
                           limit: Optional[int] = None,
-                          n_dims: Optional[int] = 2) -> pd.DataFrame:
+                          n_dims: Optional[int] = 2,
+                          filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
         """
         Get embedding coordinates
 
@@ -353,6 +358,7 @@ class AnthiveDB:
             embedding_id: Embedding name
             limit: Maximum cells
             n_dims: Number of dimensions (None = all)
+            filters: Optional metadata filters (same format as get_cell_table)
 
         Returns:
             DataFrame with cell names and coordinates
@@ -390,9 +396,46 @@ class AnthiveDB:
 
         limit_clause = f"LIMIT {limit}" if limit else ""
 
+        # Build optional WHERE clause from metadata filters
+        filter_where = ""
+        if filters:
+            num_fields = self._get_numerical_fields()
+            cat_fields = self._get_categorical_fields()
+            sub_joins = []
+            sub_where = []
+            if any(f in num_fields for f in filters):
+                sub_joins.append("LEFT JOIN obsnum n ON c.cell_name = n.cell_name")
+            if any(f in cat_fields for f in filters):
+                sub_joins.append("LEFT JOIN obscat cat ON c.cell_name = cat.cell_name")
+            for field, value in filters.items():
+                if field in num_fields:
+                    prefix = 'n'
+                elif field in cat_fields:
+                    prefix = 'cat'
+                else:
+                    continue
+                if isinstance(value, tuple) and len(value) == 2:
+                    sub_where.append(f'{prefix}."{field}" BETWEEN {value[0]} AND {value[1]}')
+                elif isinstance(value, list):
+                    quoted = ', '.join(f"'{v}'" for v in value)
+                    sub_where.append(f'{prefix}."{field}" IN ({quoted})')
+                else:
+                    if isinstance(value, str):
+                        sub_where.append(f'{prefix}."{field}" = \'{value}\'')
+                    else:
+                        sub_where.append(f'{prefix}."{field}" = {value}')
+            if sub_where:
+                subquery = (
+                    f"SELECT c.cell_name FROM __cells c "
+                    f"{' '.join(sub_joins)} "
+                    f"WHERE {' AND '.join(sub_where)}"
+                )
+                filter_where = f"WHERE cell_name IN ({subquery})"
+
         sql = f"""
             SELECT {', '.join(select_cols)}
             FROM {table_name}
+            {filter_where}
             {limit_clause}
         """
 
@@ -475,7 +518,7 @@ class AnthiveDB:
             q_row = self._conn.execute("""
                 SELECT QUANTILE_CONT(mean_expr, 0.05), QUANTILE_CONT(mean_expr, 0.95)
                 FROM __gene_bins
-            """).fetchone()
+            """).fetchone() or (0.0, 1.0)
             q05, q95 = float(q_row[0]), float(q_row[1])
             q_range = max(q95 - q05, 1e-9)
 

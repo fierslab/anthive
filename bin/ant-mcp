@@ -45,7 +45,7 @@ import sys
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import httpx
 import uvicorn
@@ -196,6 +196,19 @@ def main() -> None:
             '                     blocked: os, sys, subprocess, socket, requests, file I/O;\n'
             '                     returns a URL + inline image (if header present)\n'
             '\n'
+            'CELL SUBSETTING\n'
+            '  Every plot call accepts an optional subset parameter to restrict which cells\n'
+            '  are used — the rest of the dataset is ignored for that request.\n'
+            '  Pass a list of filter strings to the subset argument:\n'
+            "    'field:value'      exact categorical match  e.g. 'sex:female'\n"
+            "    'field:v1,v2'      IN list (OR within field)  e.g. 'celltype:Microglia,Astrocyte'\n"
+            "    'field:min..max'   numerical range  e.g. 'nCount_RNA:500..8000'\n"
+            '  Multiple entries are combined with AND across fields.\n'
+            '  Use analytics_schema to discover exact field names and values first.\n'
+            '  Example: plot APOE expression on female AD cells only:\n'
+            "    plot(db_id='S25/SGM', geom='violin', x='APOE_genotype', y='APOE',\n"
+            "         subset=['sex:female', 'condition:AD'])\n"
+            '\n'
             'IMAGE EMBEDDING (Open WebUI, compatible clients)\n'
             '  Add the custom HTTP header  X-Image-Output: inline  in your MCP client settings.\n'
             '  When this header is present, plot and analytics_viz embed the image as a base64\n'
@@ -239,9 +252,20 @@ def main() -> None:
 
         Returns (image_bytes, headers_dict). Headers include X-Plot-Caption
         and X-Plot-Format set by ant-serve.
+        List-valued params (e.g. subset) are expanded into repeated query pairs.
         """
         url = f"{api_base_url}{path}"
-        response = httpx.get(url, params={k: v for k, v in params.items() if v is not None}, timeout=120)
+        # Build list-of-tuples so repeated params (e.g. subset) are sent correctly
+        query: list = []
+        for k, v in params.items():
+            if v is None:
+                continue
+            if isinstance(v, list):
+                for item in v:
+                    query.append((k, item))
+            else:
+                query.append((k, v))
+        response = httpx.get(url, params=query, timeout=120)
         response.raise_for_status()
         return response.content, dict(response.headers)
 
@@ -465,6 +489,7 @@ def main() -> None:
         palette: str = 'viridis',
         ci: bool = True,
         n_genes: int = 20,
+        subset: Optional[List[str]] = None,
     ):
         """Generate a plot for a single-cell dataset and return a URL (and optionally an inline image).
 
@@ -489,6 +514,19 @@ def main() -> None:
           - color= a categorical obs field  → always set palette='tab20'
           - color= a gene or numerical field → leave palette at default ('viridis')
 
+        SUBSETTING — restrict which cells are used:
+          Pass one or more subset strings to limit the analysis to a cell subset.
+          Formats:
+            'field:value'       exact match on a categorical field
+            'field:v1,v2'       match any of the listed values (IN list)
+            'field:min..max'    numerical range (BETWEEN min AND max)
+          Examples:
+            subset=['sex:female']
+            subset=['sex:female', 'condition:AD']   ← AND logic across fields
+            subset=['celltype:Microglia,Astrocyte']  ← OR within a field
+            subset=['nCount_RNA:1000..10000']
+          Use analytics_schema to discover exact field names and values first.
+
         Returns:
           Always: a URL to an HTML page (PNG/SVG) or PDF — share this with the user.
           Also (when X-Image-Output: inline header is present): an embedded image
@@ -511,7 +549,9 @@ def main() -> None:
             palette:       Colormap/palette (default 'viridis'; use 'tab20' for categorical color).
             ci:            Show 95 % CI on bar plots (default True).
             n_genes:       Top genes for heatmap when x is not given (default 20).
+            subset:        Optional list of cell-filter strings (see SUBSETTING above).
         """
+        subset_params = subset or []
         image_bytes, headers = _get_plot(
             f'/databases/{db_id}/plot',
             geom=geom, x=x, y=y, color=color,
@@ -519,6 +559,7 @@ def main() -> None:
             width=width, height=height, dpi=dpi,
             bins=bins, point_size=point_size, alpha=alpha,
             palette=palette, ci=ci, n_genes=n_genes,
+            subset=subset_params,
         )
         caption = headers.get('x-plot-caption', '')
         return _make_plot_response(image_bytes, output_format, caption)
