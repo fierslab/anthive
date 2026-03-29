@@ -39,6 +39,7 @@ Generate the base64 token with:
 
 import argparse
 import base64
+import contextvars
 import json
 import sys
 import uuid
@@ -47,7 +48,41 @@ from pathlib import Path
 from typing import Optional
 
 import httpx
+import uvicorn
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ImageContent, TextContent
+
+
+# ── Image-capability detection ─────────────────────────────────────────────────
+# Tools check this ContextVar to decide whether to embed images inline.
+# The value is set per-request by _ImageCapabilityMiddleware.
+
+_client_displays_images: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    'client_displays_images', default=False,
+)
+
+
+class _ImageCapabilityMiddleware:
+    """ASGI middleware: reads X-Image-Output header and stores it in a ContextVar.
+
+    Add the header  X-Image-Output: inline  in your MCP client config to receive
+    images embedded directly in the response alongside the URL.
+    """
+
+    def __init__(self, app) -> None:
+        self._app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope['type'] == 'http':
+            headers = {k.lower(): v for k, v in scope.get('headers', [])}
+            raw_value = headers.get(b'x-image-output', b'').decode().lower()
+            token = _client_displays_images.set(raw_value in ('true', '1', 'yes', 'inline'))
+            try:
+                await self._app(scope, receive, send)
+            finally:
+                _client_displays_images.reset(token)
+        else:
+            await self._app(scope, receive, send)
 
 # ── load anthive config (anthive.yaml / anthive.default.yaml) ──────────────────
 
@@ -117,15 +152,55 @@ def main() -> None:
         host=args.host,
         port=args.port,
         instructions=(
-            'Anthive is a single-cell RNA-seq data browser. '
-            'Use search_datasets to discover relevant studies by organism, '
-            'cell type, tissue, or disease. Use get_dataset_info for details '
-            'and search_genes to confirm gene names before plotting. '
-            'Use the plot tool for all visualisations — it accepts a geom '
-            '(scatter, violin, box, bar, histogram, ecdf, kde, heatmap) plus '
-            'x/y/color field names; the server auto-detects field types. '
-            'plot returns a URL to an HTML page (png/svg) or PDF — share it '
-            'with the user so they can open the image and read the caption. '
+            'Anthive is a single-cell RNA-seq data browser with 60+ curated datasets.\n'
+            '\n'
+            'DISCOVERING DATA\n'
+            '  search_datasets  — find datasets by organism, cell type, tissue, disease, or free text;\n'
+            '                     returns db_id values used in every other tool\n'
+            '  get_dataset_info — full metadata for one dataset: all categorical and numerical\n'
+            '                     observation fields (use these exact names in queries/plots),\n'
+            '                     available expression layers, and embedding names\n'
+            '  search_genes     — confirm exact gene identifiers before using them in queries or plots\n'
+            '\n'
+            'PLOTTING\n'
+            '  plot(db_id, geom, ...)  — generate a publication-quality figure server-side\n'
+            '  Supported geom values:\n'
+            '    scatter   UMAP / embedding scatter; x/y default to the first embedding\n'
+            '    violin    per-category expression or metadata distribution\n'
+            '    box       same as violin, box-plot style\n'
+            '    bar       mean ± 95 % CI per category; omit y for cell counts\n'
+            '    histogram expression or metadata histogram\n'
+            '    ecdf      empirical CDF\n'
+            '    kde       kernel density estimate\n'
+            '    heatmap   mean expression across a gene list × category groups\n'
+            '  Field-type detection is automatic: pass any obs column, gene name, or embedding name\n'
+            '  as x / y / color and the server resolves it.\n'
+            '  Color encoding:\n'
+            '    categorical fields → palette="tab20"  (always specify this for obs columns!)\n'
+            '    gene expression / numerical → palette="viridis" (default) — adds a colorbar\n'
+            '  All figures are saved server-side.  Every call returns:\n'
+            '    1. A URL to an HTML page (PNG/SVG) or PDF — always share this with the user.\n'
+            '    2. If the client sends the header X-Image-Output: inline, the image is ALSO\n'
+            '       embedded directly in this response so it renders without opening a browser.\n'
+            '\n'
+            'SQL ANALYTICS  (for custom questions the plot tool cannot answer)\n'
+            '  analytics_schema — inspect DuckDB tables, column names/types, and 3-row samples;\n'
+            '                     ALWAYS call this first — column names differ per dataset\n'
+            '  analytics_query  — run any SELECT / WITH … SELECT query (writes are blocked);\n'
+            '                     do ALL aggregation, filtering, pivoting, and joins HERE;\n'
+            '                     returns a markdown table when ≤ 500 rows, otherwise a 10-row\n'
+            '                     preview plus a session_id for analytics_viz\n'
+            '  analytics_viz    — run a sandboxed Python script against the query result;\n'
+            '                     df is pre-loaded; save figure to OUTPUT_PATH;\n'
+            '                     available: pandas, matplotlib, seaborn, numpy, scipy, sklearn;\n'
+            '                     blocked: os, sys, subprocess, socket, requests, file I/O;\n'
+            '                     returns a URL + inline image (if header present)\n'
+            '\n'
+            'IMAGE EMBEDDING (Open WebUI, compatible clients)\n'
+            '  Add the custom HTTP header  X-Image-Output: inline  in your MCP client settings.\n'
+            '  When this header is present, plot and analytics_viz embed the image as a base64\n'
+            '  content block so it renders inline — the URL is always included as well.\n'
+            '\n'
             f'This MCP server is reachable at: {mcp_public_url}'
         ),
     )
@@ -220,6 +295,19 @@ def main() -> None:
         )
         (plots_dir / html_filename).write_text(html_content, encoding='utf-8')
         return f"{public_url}/plots/{html_filename}"
+
+    def _make_plot_response(image_bytes: bytes, output_format: str = 'png', caption: str = ''):
+        """Return URL string normally; [TextContent, ImageContent] when client supports inline images."""
+        url = _save_plot_url(image_bytes, output_format, caption)
+        if not _client_displays_images.get():
+            return url
+        _mime_map = {'png': 'image/png', 'svg': 'image/svg+xml', 'pdf': 'application/pdf'}
+        mime = _mime_map.get(output_format, 'image/png')
+        text = f"View online: {url}" + (f"\n\n{caption}" if caption else '')
+        return [
+            TextContent(type='text', text=text),
+            ImageContent(type='image', data=base64.b64encode(image_bytes).decode(), mimeType=mime),
+        ]
 
     # ── tools ──────────────────────────────────────────────────────────────────
 
@@ -377,34 +465,41 @@ def main() -> None:
         palette: str = 'viridis',
         ci: bool = True,
         n_genes: int = 20,
-    ) -> str:
-        """Generate a plot for a single-cell dataset and return a URL.
+    ):
+        """Generate a plot for a single-cell dataset and return a URL (and optionally an inline image).
 
-        The server auto-detects field types (gene, embedding, categorical,
-        numerical) — just pass the field name.
+        The server auto-detects field types (gene, embedding, categorical, numerical)
+        from the field name — no type annotation needed.
 
         geom choices:
-          scatter     UMAP/embedding scatter. x/y default to first embedding.
-          violin      Expression distribution per category (x=cat, y=gene/num).
+          scatter     UMAP / embedding scatter.  x/y default to the first embedding axes.
+                      Use color= for hue: categorical fields → tab20 palette;
+                      gene expression / numerical → viridis + colorbar.
+          violin      Per-category expression or metadata distribution (x=cat, y=gene/num).
           box         Same as violin, box-plot style.
-          bar         Mean per category with 95% CI (x=cat, y=gene/num).
-                      Omit y for cell counts per category.
-          histogram   Expression/metadata histogram (x=gene/num).
-          ecdf        Empirical CDF (x=gene/num).
-          kde         Kernel density estimate (x=gene/num).
-          heatmap     Mean expression across genes per group (y=cat).
-                      x = comma-separated gene list, or omit for top n_genes.
+          bar         Mean ± 95 % CI per category (x=cat, y=gene/num).
+                      Omit y to plot cell counts per category.
+          histogram   Distribution of a gene or numerical field (x=gene/num).
+          ecdf        Empirical CDF of a gene or numerical field.
+          kde         Kernel density estimate.
+          heatmap     Mean expression across a gene list × category groups.
+                      Pass x as comma-separated gene names, or omit to use top n_genes.
 
-        color adds hue grouping for scatter and distribution geoms.
+        IMPORTANT palette guidance:
+          - color= a categorical obs field  → always set palette='tab20'
+          - color= a gene or numerical field → leave palette at default ('viridis')
 
-        Returns a URL to an HTML page (png/svg) or PDF file.
+        Returns:
+          Always: a URL to an HTML page (PNG/SVG) or PDF — share this with the user.
+          Also (when X-Image-Output: inline header is present): an embedded image
+          content block so clients like Open WebUI render it immediately.
 
         Args:
             db_id:         Dataset identifier from search_datasets.
             geom:          Plot geometry (see above).
-            x:             X-axis field name.
+            x:             X-axis field name (obs column, gene, or embedding).
             y:             Y-axis field name.
-            color:         Color-encoding field name.
+            color:         Field to encode as colour hue.
             output_format: 'png' (default), 'svg', or 'pdf'.
             layer:         Expression layer (default 'X').
             width:         Figure width in inches (default 8).
@@ -413,9 +508,9 @@ def main() -> None:
             bins:          Histogram bins (default 20).
             point_size:    Scatter point size (default 3).
             alpha:         Scatter point transparency (default 0.8).
-            palette:       Colormap/palette name (default viridis for scatter; use tab20 for categorical).
-            ci:            Show 95% CI on bar plots (default True).
-            n_genes:       Top genes for heatmap when x not given (default 20).
+            palette:       Colormap/palette (default 'viridis'; use 'tab20' for categorical color).
+            ci:            Show 95 % CI on bar plots (default True).
+            n_genes:       Top genes for heatmap when x is not given (default 20).
         """
         image_bytes, headers = _get_plot(
             f'/databases/{db_id}/plot',
@@ -426,7 +521,7 @@ def main() -> None:
             palette=palette, ci=ci, n_genes=n_genes,
         )
         caption = headers.get('x-plot-caption', '')
-        return _save_plot_url(image_bytes, output_format, caption)
+        return _make_plot_response(image_bytes, output_format, caption)
 
     @mcp.tool()
     def plot_umap(
@@ -454,7 +549,7 @@ def main() -> None:
             width=width, height=height, dpi=dpi,
             point_size=point_size, alpha=alpha, palette=palette,
         )
-        return _save_plot_url(png_bytes)
+        return _make_plot_response(png_bytes)
 
     @mcp.tool()
     def plot_gene_distribution(  # Deprecated: use plot(geom='ecdf'/'histogram'/'kde')
@@ -484,7 +579,7 @@ def main() -> None:
             gene=gene, plot_type=plot_type, layer=layer,
             bins=bins, width=width, height=height, dpi=dpi,
         )
-        return _save_plot_url(png_bytes)
+        return _make_plot_response(png_bytes)
 
     @mcp.tool()
     def plot_by_category(  # Deprecated: use plot(geom='bar'/'violin'/'box')
@@ -519,7 +614,7 @@ def main() -> None:
             cat=cat, y=y, y_type=y_type, plot_type=plot_type,
             layer=layer, width=width, height=height, dpi=dpi,
         )
-        return _save_plot_url(png_bytes)
+        return _make_plot_response(png_bytes)
 
     @mcp.tool()
     def plot_numerical(  # Deprecated: use plot(geom='ecdf'/'histogram'/'kde'/'violin'/'box')
@@ -553,7 +648,7 @@ def main() -> None:
             num=num, cat=cat, plot_type=plot_type,
             bins=bins, width=width, height=height, dpi=dpi,
         )
-        return _save_plot_url(png_bytes)
+        return _make_plot_response(png_bytes)
 
     # ── analytics tools ────────────────────────────────────────────────────────
 
@@ -706,17 +801,20 @@ def main() -> None:
 
         figure_b64 = data['figure_b64']
         fmt = data.get('output_format', output_format)
-        mime = data.get('mime_type', 'image/png')
-        return _save_plot_url(
-            base64.b64decode(figure_b64),
-            fmt,
-            caption=f"Analytics visualization (session {session_id})",
-        )
+        caption = f"Analytics visualization (session {session_id})"
+        return _make_plot_response(base64.b64decode(figure_b64), fmt, caption)
 
     # ── run ────────────────────────────────────────────────────────────────────
 
     if args.transport == 'stdio':
         mcp.run(transport='stdio')
+    elif args.transport == 'streamable-http':
+        starlette_app = mcp.streamable_http_app()
+        uvicorn.run(
+            _ImageCapabilityMiddleware(starlette_app),
+            host=args.host,
+            port=args.port,
+        )
     else:
         mcp.run(transport=args.transport)
 
