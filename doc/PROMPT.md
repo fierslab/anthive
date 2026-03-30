@@ -92,7 +92,8 @@ quick per-group estimates before committing to a full query.
 
 Rare populations (< 1 % of cells) may be underrepresented at low N;
 use `subset` to isolate them first or increase N.  For SQL analytics
-use DuckDB's own clause: `… FROM __cells USING SAMPLE 10000 ROWS (reservoir)`.
+use DuckDB's own clause: `… FROM __cells USING SAMPLE 10000 ROWS
+(reservoir)`.
 
 **Standard workflow:** search → `get_dataset_info` → query or plot →
 share URL with user.
