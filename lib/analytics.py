@@ -103,8 +103,8 @@ _BLOCKED_DATA_LOADERS: frozenset = frozenset({
     'read_json', 'read_parquet', 'read_feather', 'read_orc',
     'read_pickle', 'read_hdf', 'read_sas', 'read_spss', 'read_stata',
     'read_clipboard', 'read_xml', 'read_sql', 'read_sql_query',
-    'load', 'loadtxt', 'load_npz', 'fromfile',          # numpy
-    'urlopen', 'urlretrieve', 'get', 'post', 'request',  # network
+    'load', 'loadtxt', 'load_npz', 'fromfile',  # numpy
+    'urlopen', 'urlretrieve',                   # network (modules already import-blocked)
 })
 
 
