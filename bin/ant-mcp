@@ -226,28 +226,30 @@ def main() -> None:
 
     # ── API helpers ────────────────────────────────────────────────────────────
 
-    def _get(path: str, **params) -> dict:
+    _http_client = httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=120, write=60, pool=10))
+
+    async def _get(path: str, **params) -> dict:
         """GET JSON from ant-serve."""
         url = f"{api_base_url}{path}"
-        response = httpx.get(url, params={k: v for k, v in params.items() if v is not None}, timeout=60)
+        response = await _http_client.get(url, params={k: v for k, v in params.items() if v is not None})
         response.raise_for_status()
         return response.json()
 
-    def _get_post(path: str, body: dict) -> dict:
+    async def _get_post(path: str, body: dict) -> dict:
         """POST JSON body to ant-serve and return JSON response."""
         url = f"{api_base_url}{path}"
-        response = httpx.post(url, json=body, timeout=120)
+        response = await _http_client.post(url, json=body)
         response.raise_for_status()
         return response.json()
 
-    def _get_image(path: str, **params) -> bytes:
+    async def _get_image(path: str, **params) -> bytes:
         """GET image bytes from an ant-serve plot endpoint (legacy)."""
         url = f"{api_base_url}{path}"
-        response = httpx.get(url, params={k: v for k, v in params.items() if v is not None}, timeout=120)
+        response = await _http_client.get(url, params={k: v for k, v in params.items() if v is not None})
         response.raise_for_status()
         return response.content
 
-    def _get_plot(path: str, **params) -> tuple:
+    async def _get_plot(path: str, **params) -> tuple:
         """GET image bytes + response headers from an ant-serve plot endpoint.
 
         Returns (image_bytes, headers_dict). Headers include X-Plot-Caption
@@ -265,7 +267,7 @@ def main() -> None:
                     query.append((k, item))
             else:
                 query.append((k, v))
-        response = httpx.get(url, params=query, timeout=120)
+        response = await _http_client.get(url, params=query)
         response.raise_for_status()
         return response.content, dict(response.headers)
 
@@ -336,7 +338,7 @@ def main() -> None:
     # ── tools ──────────────────────────────────────────────────────────────────
 
     @mcp.tool()
-    def search_datasets(
+    async def search_datasets(
         organism: Optional[str] = None,
         celltype: Optional[str] = None,
         tissue: Optional[str] = None,
@@ -357,7 +359,7 @@ def main() -> None:
             technology: Filter by sequencing method, e.g. '10x', 'visium'.
             search:     Free-text search across all metadata fields.
         """
-        all_databases = _get('/databases').get('databases', [])
+        all_databases = (await _get('/databases')).get('databases', [])
 
         def field_matches(database: dict, field: str, query: Optional[str]) -> bool:
             if not query:
@@ -406,14 +408,14 @@ def main() -> None:
         return '\n'.join(result_lines)
 
     @mcp.tool()
-    def get_dataset_info(db_id: str) -> str:
+    async def get_dataset_info(db_id: str) -> str:
         """Get detailed information about a specific dataset.
 
         Args:
             db_id: Dataset identifier from search_datasets (e.g. 'B26/SOF').
         """
         try:
-            data = _get(f'/databases/{db_id}/info')
+            data = await _get(f'/databases/{db_id}/info')
         except httpx.HTTPStatusError as error:
             if error.response.status_code == 404:
                 return f"Dataset '{db_id}' not found. Use search_datasets to find valid IDs."
@@ -449,7 +451,7 @@ def main() -> None:
         return '\n'.join(info_lines)
 
     @mcp.tool()
-    def search_genes(db_id: str, query: str, limit: int = 20) -> str:
+    async def search_genes(db_id: str, query: str, limit: int = 20) -> str:
         """Search for gene names within a dataset.
 
         Use this to confirm exact gene names before calling plot tools.
@@ -460,7 +462,7 @@ def main() -> None:
             limit:  Maximum number of results (default 20).
         """
         try:
-            data = _get(f'/databases/{db_id}/genes', q=query, limit=limit)
+            data = await _get(f'/databases/{db_id}/genes', q=query, limit=limit)
         except httpx.HTTPStatusError as error:
             if error.response.status_code == 404:
                 return f"Dataset '{db_id}' not found."
@@ -472,7 +474,7 @@ def main() -> None:
         return f"Genes matching '{query}' in {db_id} ({len(gene_names)} result(s)):\n" + ', '.join(gene_names)
 
     @mcp.tool()
-    def plot(
+    async def plot(
         db_id: str,
         geom: str,
         x: Optional[str] = None,
@@ -552,7 +554,7 @@ def main() -> None:
             subset:        Optional list of cell-filter strings (see SUBSETTING above).
         """
         subset_params = subset or []
-        image_bytes, headers = _get_plot(
+        image_bytes, headers = await _get_plot(
             f'/databases/{db_id}/plot',
             geom=geom, x=x, y=y, color=color,
             format=output_format, layer=layer,
@@ -565,7 +567,7 @@ def main() -> None:
         return _make_plot_response(image_bytes, output_format, caption)
 
     @mcp.tool()
-    def plot_umap(
+    async def plot_umap(
         db_id: str,
         gene: Optional[str] = None,
         category: Optional[str] = None,
@@ -583,7 +585,7 @@ def main() -> None:
 
         Generate a UMAP embedding scatter plot.
         """
-        png_bytes = _get_image(
+        png_bytes = await _get_image(
             f'/databases/{db_id}/plot/umap',
             gene=gene, category=category, numerical=numerical,
             embedding=embedding, layer=layer,
@@ -593,7 +595,7 @@ def main() -> None:
         return _make_plot_response(png_bytes)
 
     @mcp.tool()
-    def plot_gene_distribution(  # Deprecated: use plot(geom='ecdf'/'histogram'/'kde')
+    async def plot_gene_distribution(  # Deprecated: use plot(geom='ecdf'/'histogram'/'kde')
         db_id: str,
         gene: str,
         plot_type: str = 'ecdf',
@@ -615,7 +617,7 @@ def main() -> None:
             height:     Figure height in inches (default 4).
             dpi:        Output resolution (default 150).
         """
-        png_bytes = _get_image(
+        png_bytes = await _get_image(
             f'/databases/{db_id}/plot/gene',
             gene=gene, plot_type=plot_type, layer=layer,
             bins=bins, width=width, height=height, dpi=dpi,
@@ -623,7 +625,7 @@ def main() -> None:
         return _make_plot_response(png_bytes)
 
     @mcp.tool()
-    def plot_by_category(  # Deprecated: use plot(geom='bar'/'violin'/'box')
+    async def plot_by_category(  # Deprecated: use plot(geom='bar'/'violin'/'box')
         db_id: str,
         cat: str,
         y: Optional[str] = None,
@@ -650,7 +652,7 @@ def main() -> None:
             height:     Figure height in inches (default 5).
             dpi:        Output resolution (default 150).
         """
-        png_bytes = _get_image(
+        png_bytes = await _get_image(
             f'/databases/{db_id}/plot/cat',
             cat=cat, y=y, y_type=y_type, plot_type=plot_type,
             layer=layer, width=width, height=height, dpi=dpi,
@@ -658,7 +660,7 @@ def main() -> None:
         return _make_plot_response(png_bytes)
 
     @mcp.tool()
-    def plot_numerical(  # Deprecated: use plot(geom='ecdf'/'histogram'/'kde'/'violin'/'box')
+    async def plot_numerical(  # Deprecated: use plot(geom='ecdf'/'histogram'/'kde'/'violin'/'box')
         db_id: str,
         num: str,
         cat: Optional[str] = None,
@@ -684,7 +686,7 @@ def main() -> None:
             height:     Figure height in inches (default 4).
             dpi:        Output resolution (default 150).
         """
-        png_bytes = _get_image(
+        png_bytes = await _get_image(
             f'/databases/{db_id}/plot/num',
             num=num, cat=cat, plot_type=plot_type,
             bins=bins, width=width, height=height, dpi=dpi,
@@ -694,7 +696,7 @@ def main() -> None:
     # ── analytics tools ────────────────────────────────────────────────────────
 
     @mcp.tool()
-    def analytics_schema(db_id: str) -> str:
+    async def analytics_schema(db_id: str) -> str:
         """Explore the DuckDB schema of a dataset — list tables, columns, and sample rows.
 
         Call this first when planning a custom analysis to understand what tables
@@ -704,7 +706,7 @@ def main() -> None:
             db_id: Dataset identifier (e.g. 'S25/SGM').
         """
         try:
-            data = _get(f'/databases/{db_id}/analytics/schema')
+            data = await _get(f'/databases/{db_id}/analytics/schema')
         except httpx.HTTPStatusError as error:
             if error.response.status_code == 404:
                 return f"Dataset '{db_id}' not found. Use search_datasets to find valid IDs."
@@ -724,7 +726,7 @@ def main() -> None:
         return '\n'.join(lines)
 
     @mcp.tool()
-    def analytics_query(db_id: str, sql: str) -> str:
+    async def analytics_query(db_id: str, sql: str) -> str:
         """Execute a read-only SQL query against a dataset and save results server-side.
 
         IMPORTANT: do ALL filtering, grouping, aggregation, pivoting, and
@@ -752,7 +754,7 @@ def main() -> None:
                        ORDER BY n DESC
         """
         try:
-            data = _get_post(f'/databases/{db_id}/analytics/query', {'sql': sql})
+            data = await _get_post(f'/databases/{db_id}/analytics/query', {'sql': sql})
         except httpx.HTTPStatusError as error:
             code = error.response.status_code
             if code == 404:
@@ -798,7 +800,7 @@ def main() -> None:
         return '\n'.join(lines)
 
     @mcp.tool()
-    def analytics_viz(
+    async def analytics_viz(
         session_id: str,
         code: str,
         output_format: str = 'png',
@@ -827,7 +829,7 @@ def main() -> None:
             output_format: 'png' (default), 'svg', or 'pdf'.
         """
         try:
-            data = _get_post('/analytics/viz', {
+            data = await _get_post('/analytics/viz', {
                 'session_id': session_id,
                 'code': code,
                 'output_format': output_format,
