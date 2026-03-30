@@ -547,8 +547,8 @@ def main() -> None:
           Use analytics_schema to discover exact field names and values first.
 
         SAMPLING — speed up plots on large datasets:
-          Pass sample=N to randomly draw at most N cells using DuckDB system
-          sampling (near-zero overhead, applied after subset filters).
+          Pass sample=N to randomly draw at most N cells using DuckDB reservoir
+          sampling (exact row count, applied after subset filters).
           If N exceeds the number of (filtered) cells, all cells are used.
           Rule of thumb:
             - Scatter / UMAP:        sample=50000 gives near-identical visual quality
