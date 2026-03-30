@@ -611,7 +611,7 @@ def main() -> None:
         point_size: float = 3,
         alpha: float = 0.8,
         palette: str = 'tab20',
-    ) -> str:
+    ):
         """Deprecated: use plot(geom='scatter', ...) instead.
 
         Generate a UMAP embedding scatter plot.
@@ -635,7 +635,7 @@ def main() -> None:
         width: float = 7,
         height: float = 4,
         dpi: int = 150,
-    ) -> str:
+    ):
         """Plot the expression distribution of a gene across all cells.
 
         Args:
@@ -666,7 +666,7 @@ def main() -> None:
         width: float = 8,
         height: float = 5,
         dpi: int = 150,
-    ) -> str:
+    ):
         """Plot values grouped by a categorical field (cell type, condition, …).
 
         Shows cell counts per category by default, or the distribution of a gene
@@ -700,7 +700,7 @@ def main() -> None:
         width: float = 7,
         height: float = 4,
         dpi: int = 150,
-    ) -> str:
+    ):
         """Plot the distribution of a numerical metadata field.
 
         Without cat: shows ecdf, kde, or histogram.
@@ -835,7 +835,7 @@ def main() -> None:
         session_id: str,
         code: str,
         output_format: str = 'png',
-    ) -> str:
+    ):
         """Execute a Python visualisation script against a prior analytics_query result.
 
         IMPORTANT: do NOT transform or aggregate data here — that belongs in the
