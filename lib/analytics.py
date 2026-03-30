@@ -36,7 +36,7 @@ import pandas as pd
 # ── Configuration ──────────────────────────────────────────────────────────────
 
 def _get_tmp_dir() -> Path:
-    tmp = Path(os.environ.get('ANTHIVE_ANALYTICS_TMP', './tmp/analytics'))
+    tmp = Path(os.environ.get('ANTHIVE_ANALYTICS_TMP', './tmp/analytics')).resolve()
     tmp.mkdir(parents=True, exist_ok=True)
     return tmp
 
