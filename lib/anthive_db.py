@@ -241,7 +241,7 @@ class AnthiveDB:
             limit: Maximum number of cells
             sample: Random subsample size (absolute row count, system sampling).
                     Applied after filters. If larger than the result set, returns
-                    all rows. Uses DuckDB USING SAMPLE (system) for near-zero overhead.
+                    all rows. Uses DuckDB USING SAMPLE (reservoir) for exact row count.
 
         Returns:
             DataFrame with cell data
@@ -346,7 +346,7 @@ class AnthiveDB:
 
         # Wrap in USING SAMPLE when requested (applied after filters)
         if sample:
-            sql = f"SELECT * FROM ({inner_sql}) USING SAMPLE {sample} ROWS (system)"
+            sql = f"SELECT * FROM ({inner_sql}) USING SAMPLE {sample} ROWS (reservoir)"
         else:
             sql = inner_sql
 
@@ -371,7 +371,7 @@ class AnthiveDB:
             n_dims: Number of dimensions (None = all)
             filters: Optional metadata filters (same format as get_cell_table)
             sample: Random subsample size (absolute row count, system sampling).
-                    Applied after filters. Uses DuckDB USING SAMPLE (system).
+                    Applied after filters. Uses DuckDB USING SAMPLE (reservoir).
 
         Returns:
             DataFrame with cell names and coordinates
@@ -447,7 +447,7 @@ class AnthiveDB:
 
         if sample:
             inner = f"SELECT {', '.join(select_cols)} FROM {table_name} {filter_where}"
-            sql = f"SELECT * FROM ({inner}) USING SAMPLE {sample} ROWS (system) {limit_clause}"
+            sql = f"SELECT * FROM ({inner}) USING SAMPLE {sample} ROWS (reservoir) {limit_clause}"
         else:
             sql = f"""
                 SELECT {', '.join(select_cols)}

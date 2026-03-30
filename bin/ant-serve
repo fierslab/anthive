@@ -1714,7 +1714,7 @@ async def plot(
         "Example: subset=sex:female&subset=condition:AD"
     )),
     sample: Optional[int] = Query(None, description=(
-        "Random subsample: draw at most this many cells using DuckDB system sampling "
+        "Random subsample: draw at most this many cells using DuckDB reservoir sampling"
         "(near-zero overhead, applied after subset filters). "
         "Example: sample=10000. If larger than the cell count, all cells are used."
     )),
@@ -1724,7 +1724,7 @@ async def plot(
     Provide geom + x/y/color field names; the server auto-detects field types.
     Returns the image with X-Plot-Caption and X-Plot-Format response headers.
     Restrict to a cell subset with one or more ?subset=field:value params.
-    Use ?sample=N to randomly draw N cells (fast in-DuckDB system sampling).
+    Use ?sample=N to randomly draw N cells (DuckDB reservoir sampling).
     """
     filters = _parse_subset(subset)
     if geom not in _PLOT_GEOMS:
