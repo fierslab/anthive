@@ -228,7 +228,8 @@ class AnthiveDB:
                        metadata_fields: Optional[List[str]] = None,
                        layer: str = 'X',
                        filters: Optional[Dict[str, Any]] = None,
-                       limit: Optional[int] = None) -> pd.DataFrame:
+                       limit: Optional[int] = None,
+                       sample: Optional[int] = None) -> pd.DataFrame:
         """
         Get cell table with expression and metadata
 
@@ -238,6 +239,9 @@ class AnthiveDB:
             layer: Layer name
             filters: Dictionary of field: value/range filters
             limit: Maximum number of cells
+            sample: Random subsample size (absolute row count, system sampling).
+                    Applied after filters. If larger than the result set, returns
+                    all rows. Uses DuckDB USING SAMPLE (system) for near-zero overhead.
 
         Returns:
             DataFrame with cell data
@@ -330,15 +334,21 @@ class AnthiveDB:
                     else:
                         where_parts.append(f'{prefix}."{field}" = {value}')
 
-        # Build SQL
-        sql = f"""
+        # Build inner SQL (filters applied here, sampling wraps this)
+        inner_sql = f"""
             SELECT {', '.join(select_parts)}
             FROM cells c
             {' '.join(metadata_joins)}
         """
 
         if where_parts:
-            sql += f" WHERE {' AND '.join(where_parts)}"
+            inner_sql += f" WHERE {' AND '.join(where_parts)}"
+
+        # Wrap in USING SAMPLE when requested (applied after filters)
+        if sample:
+            sql = f"SELECT * FROM ({inner_sql}) USING SAMPLE {sample} ROWS (system)"
+        else:
+            sql = inner_sql
 
         if limit:
             sql += f" LIMIT {limit}"
@@ -350,7 +360,8 @@ class AnthiveDB:
     def get_embedding_data(self, embedding_id: str,
                           limit: Optional[int] = None,
                           n_dims: Optional[int] = 2,
-                          filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
+                          filters: Optional[Dict[str, Any]] = None,
+                          sample: Optional[int] = None) -> pd.DataFrame:
         """
         Get embedding coordinates
 
@@ -359,6 +370,8 @@ class AnthiveDB:
             limit: Maximum cells
             n_dims: Number of dimensions (None = all)
             filters: Optional metadata filters (same format as get_cell_table)
+            sample: Random subsample size (absolute row count, system sampling).
+                    Applied after filters. Uses DuckDB USING SAMPLE (system).
 
         Returns:
             DataFrame with cell names and coordinates
@@ -432,12 +445,16 @@ class AnthiveDB:
                 )
                 filter_where = f"WHERE cell_name IN ({subquery})"
 
-        sql = f"""
-            SELECT {', '.join(select_cols)}
-            FROM {table_name}
-            {filter_where}
-            {limit_clause}
-        """
+        if sample:
+            inner = f"SELECT {', '.join(select_cols)} FROM {table_name} {filter_where}"
+            sql = f"SELECT * FROM ({inner}) USING SAMPLE {sample} ROWS (system) {limit_clause}"
+        else:
+            sql = f"""
+                SELECT {', '.join(select_cols)}
+                FROM {table_name}
+                {filter_where}
+                {limit_clause}
+            """
 
         df = self._conn.execute(sql).fetchdf()
         return df

@@ -1713,12 +1713,18 @@ async def plot(
         "'field:value' (exact), 'field:v1,v2' (IN list), 'field:min..max' (range). "
         "Example: subset=sex:female&subset=condition:AD"
     )),
+    sample: Optional[int] = Query(None, description=(
+        "Random subsample: draw at most this many cells using DuckDB system sampling "
+        "(near-zero overhead, applied after subset filters). "
+        "Example: sample=10000. If larger than the cell count, all cells are used."
+    )),
 ):
     """Unified grammar-of-graphics plot endpoint.
 
     Provide geom + x/y/color field names; the server auto-detects field types.
     Returns the image with X-Plot-Caption and X-Plot-Format response headers.
     Restrict to a cell subset with one or more ?subset=field:value params.
+    Use ?sample=N to randomly draw N cells (fast in-DuckDB system sampling).
     """
     filters = _parse_subset(subset)
     if geom not in _PLOT_GEOMS:
@@ -1744,7 +1750,7 @@ async def plot(
                                else (available_embeddings[0] if available_embeddings else None))
                 if not emb_id:
                     raise HTTPException(400, detail="No embeddings available for scatter plot")
-                embedding_df = db.get_embedding_data(emb_id, n_dims=2, filters=filters)
+                embedding_df = db.get_embedding_data(emb_id, n_dims=2, filters=filters, sample=sample)
 
                 color_df = None
                 color_field_name = None
@@ -1787,11 +1793,11 @@ async def plot(
                 if y:
                     y_name, y_kind = resolve(y)
                     if y_kind == 'gene':
-                        data_df = db.get_cell_table(genes=[y_name], metadata_fields=[x_name], layer=layer, filters=filters)
+                        data_df = db.get_cell_table(genes=[y_name], metadata_fields=[x_name], layer=layer, filters=filters, sample=sample)
                     else:
-                        data_df = db.get_cell_table(metadata_fields=[x_name, y_name], filters=filters)
+                        data_df = db.get_cell_table(metadata_fields=[x_name, y_name], filters=filters, sample=sample)
                 else:
-                    data_df = db.get_cell_table(metadata_fields=[x_name], filters=filters)
+                    data_df = db.get_cell_table(metadata_fields=[x_name], filters=filters, sample=sample)
 
                 caption = plotting.build_caption(db_id, geom, x_name, x_kind,
                                                  y_name, None, layer)
@@ -1814,14 +1820,14 @@ async def plot(
                 if color:
                     color_name, _ = resolve(color)
                     if x_kind == 'gene':
-                        data_df = db.get_cell_table(genes=[x_name], metadata_fields=[color_name], layer=layer, filters=filters)
+                        data_df = db.get_cell_table(genes=[x_name], metadata_fields=[color_name], layer=layer, filters=filters, sample=sample)
                     else:
-                        data_df = db.get_cell_table(metadata_fields=[x_name, color_name], filters=filters)
+                        data_df = db.get_cell_table(metadata_fields=[x_name, color_name], filters=filters, sample=sample)
                 else:
                     if x_kind == 'gene':
-                        data_df = db.get_cell_table(genes=[x_name], layer=layer, filters=filters)
+                        data_df = db.get_cell_table(genes=[x_name], layer=layer, filters=filters, sample=sample)
                     else:
-                        data_df = db.get_cell_table(metadata_fields=[x_name], filters=filters)
+                        data_df = db.get_cell_table(metadata_fields=[x_name], filters=filters, sample=sample)
 
                 caption = plotting.build_caption(db_id, geom, x_name, x_kind,
                                                  None, color_name, layer)
@@ -1855,7 +1861,7 @@ async def plot(
                 else:
                     gene_list = _get_top_genes_by_mean(db, n_genes, layer)
 
-                data_df = db.get_cell_table(genes=gene_list, metadata_fields=[y_name], layer=layer, filters=filters)
+                data_df = db.get_cell_table(genes=gene_list, metadata_fields=[y_name], layer=layer, filters=filters, sample=sample)
                 mean_expr_df = data_df.groupby(y_name)[gene_list].mean()
 
                 caption = plotting.build_caption(db_id, geom, x, 'gene',

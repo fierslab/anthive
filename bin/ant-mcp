@@ -209,6 +209,22 @@ def main() -> None:
             "    plot(db_id='S25/SGM', geom='violin', x='APOE_genotype', y='APOE',\n"
             "         subset=['sex:female', 'condition:AD'])\n"
             '\n'
+            'RANDOM SUBSAMPLING\n'
+            '  Every plot call accepts sample=N to draw at most N cells at random\n'
+            '  (DuckDB system sampling — near-zero overhead, applied after subset filters).\n'
+            '  If N ≥ cell count the full dataset is used.  Use this to:\n'
+            '    • Speed up scatter/UMAP plots on large datasets (sample=50000 is usually enough)\n'
+            '    • Get a quick sense of expression patterns before running the full query\n'
+            '    • Estimate per-group averages: sample=10000 is sufficient for common cell types\n'
+            '      (rare populations < 1 % may be underrepresented — use subset or more cells)\n'
+            '  Rule of thumb by geom:\n'
+            '    scatter/UMAP          sample=50000  — visual quality indistinguishable\n'
+            '    violin / kde / ecdf   sample=20000  — distribution shape well preserved\n'
+            '    bar / heatmap means   sample=10000  — sufficient for common cell types\n'
+            '  SQL analytics: use DuckDB\'s own USING SAMPLE clause in analytics_query, e.g.:\n'
+            '    SELECT celltype, AVG(TREM2) FROM __cells USING SAMPLE 10000 ROWS (system)\n'
+            '    GROUP BY celltype\n'
+            '\n'
             'IMAGE EMBEDDING (Open WebUI, compatible clients)\n'
             '  Add the custom HTTP header  X-Image-Output: inline  in your MCP client settings.\n'
             '  When this header is present, plot and analytics_viz embed the image as a base64\n'
@@ -492,6 +508,7 @@ def main() -> None:
         ci: bool = True,
         n_genes: int = 20,
         subset: Optional[List[str]] = None,
+        sample: Optional[int] = None,
     ):
         """Generate a plot for a single-cell dataset and return a URL (and optionally an inline image).
 
@@ -529,6 +546,19 @@ def main() -> None:
             subset=['nCount_RNA:1000..10000']
           Use analytics_schema to discover exact field names and values first.
 
+        SAMPLING — speed up plots on large datasets:
+          Pass sample=N to randomly draw at most N cells using DuckDB system
+          sampling (near-zero overhead, applied after subset filters).
+          If N exceeds the number of (filtered) cells, all cells are used.
+          Rule of thumb:
+            - Scatter / UMAP:        sample=50000 gives near-identical visual quality
+            - Violin / KDE / ECDF:   sample=20000–50000 usually sufficient
+            - Bar / heatmap means:   sample=10000 is often sufficient; rare cell types
+                                     (<1 % of cells) may be underrepresented at low N
+          Example: plot a quick UMAP overview of a 500k-cell dataset:
+            plot(db_id='...', geom='scatter', color='celltype',
+                 palette='tab20', sample=50000)
+
         Returns:
           Always: a URL to an HTML page (PNG/SVG) or PDF — share this with the user.
           Also (when X-Image-Output: inline header is present): an embedded image
@@ -552,6 +582,7 @@ def main() -> None:
             ci:            Show 95 % CI on bar plots (default True).
             n_genes:       Top genes for heatmap when x is not given (default 20).
             subset:        Optional list of cell-filter strings (see SUBSETTING above).
+            sample:        Optional random subsample size (see SAMPLING above).
         """
         subset_params = subset or []
         image_bytes, headers = await _get_plot(
@@ -561,7 +592,7 @@ def main() -> None:
             width=width, height=height, dpi=dpi,
             bins=bins, point_size=point_size, alpha=alpha,
             palette=palette, ci=ci, n_genes=n_genes,
-            subset=subset_params,
+            subset=subset_params, sample=sample,
         )
         caption = headers.get('x-plot-caption', '')
         return _make_plot_response(image_bytes, output_format, caption)
