@@ -13,7 +13,7 @@ Configuration (env vars):
   ANTHIVE_ANALYTICS_TMP   directory for parquet + figure scratch files
                           (default: ./tmp/analytics)
   ANTHIVE_ANALYTICS_ROWS  max rows per query result (default: 500000)
-  ANTHIVE_QUERY_TIMEOUT   SQL query timeout in seconds (default: 30)
+  ANTHIVE_QUERY_TIMEOUT   SQL query timeout in seconds (default: 120)
   ANTHIVE_VIZ_TIMEOUT     Python script timeout in seconds (default: 60)
 """
 
@@ -41,7 +41,7 @@ def _get_tmp_dir() -> Path:
     return tmp
 
 MAX_ROWS:       int = int(os.environ.get('ANTHIVE_ANALYTICS_ROWS', 500_000))
-QUERY_TIMEOUT:  int = int(os.environ.get('ANTHIVE_QUERY_TIMEOUT', 30))
+QUERY_TIMEOUT:  int = int(os.environ.get('ANTHIVE_QUERY_TIMEOUT', 120))
 VIZ_TIMEOUT:    int = int(os.environ.get('ANTHIVE_VIZ_TIMEOUT', 60))
 PREVIEW_ROWS:   int = 10
 FULL_TABLE_ROWS: int = 500   # return all rows in preview when result is this small
@@ -232,6 +232,7 @@ def run_query(
     sql: str,
     session_id: Optional[str] = None,
     s3_config: Optional[Dict[str, Any]] = None,
+    timeout: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Execute a validated SELECT query, persist results as Parquet, and return metadata.
 
@@ -249,10 +250,12 @@ def run_query(
         sql:        SELECT query to execute.
         session_id: Optional caller-supplied ID; one is generated if omitted.
         s3_config:  S3 credentials dict (required for s3:// URLs).
+        timeout:    Query timeout in seconds. Defaults to QUERY_TIMEOUT (120 s).
 
     Returns:
         Dict with keys: session_id, columns, dtypes, row_count, preview, truncated.
     """
+    effective_timeout = timeout if timeout is not None else QUERY_TIMEOUT
     validate_sql(sql)
     session_id = session_id or uuid.uuid4().hex
 
@@ -273,7 +276,7 @@ def run_query(
 
     thread = threading.Thread(target=_exec, daemon=True)
     thread.start()
-    thread.join(QUERY_TIMEOUT)
+    thread.join(effective_timeout)
 
     if thread.is_alive():
         # Close the connection to interrupt the running query, then wait briefly.
@@ -284,7 +287,7 @@ def run_query(
             except Exception:
                 pass
         thread.join(2)
-        raise TimeoutError(f"Query exceeded the {QUERY_TIMEOUT}s time limit and was cancelled.")
+        raise TimeoutError(f"Query exceeded the {effective_timeout}s time limit and was cancelled.")
 
     dedicated_conn = conn_holder.get('conn')
     if dedicated_conn is not None:

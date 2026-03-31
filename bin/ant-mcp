@@ -757,7 +757,7 @@ def main() -> None:
         return '\n'.join(lines)
 
     @mcp.tool()
-    async def analytics_query(db_id: str, sql: str) -> str:
+    async def analytics_query(db_id: str, sql: str, timeout: Optional[int] = None) -> str:
         """Execute a read-only SQL query against a dataset and save results server-side.
 
         IMPORTANT: do ALL filtering, grouping, aggregation, pivoting, and
@@ -776,16 +776,21 @@ def main() -> None:
         CORR, and full standard SQL.  Prefer complex SQL over complex Python.
 
         Args:
-            db_id: Dataset identifier (e.g. 'S25/SGM').
-            sql:   SELECT query, e.g.:
-                       SELECT celltype, COUNT(*) AS n,
-                              AVG(TREM2) AS mean_trem2
-                       FROM __cells
-                       GROUP BY celltype
-                       ORDER BY n DESC
+            db_id:   Dataset identifier (e.g. 'S25/SGM').
+            sql:     SELECT query, e.g.:
+                         SELECT celltype, COUNT(*) AS n,
+                                AVG(TREM2) AS mean_trem2
+                         FROM __cells
+                         GROUP BY celltype
+                         ORDER BY n DESC
+            timeout: Query timeout in seconds (default 120). Increase for complex
+                     multi-CTE queries on large datasets, e.g. timeout=300.
         """
+        body: Dict[str, Any] = {'sql': sql}
+        if timeout is not None:
+            body['timeout'] = timeout
         try:
-            data = await _get_post(f'/databases/{db_id}/analytics/query', {'sql': sql})
+            data = await _get_post(f'/databases/{db_id}/analytics/query', body)
         except httpx.HTTPStatusError as error:
             code = error.response.status_code
             if code == 404:

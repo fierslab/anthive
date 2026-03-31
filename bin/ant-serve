@@ -2094,6 +2094,7 @@ def _json_safe(obj: Any) -> Any:
 class AnalyticsQueryRequest(BaseModel):
     sql: str
     session_id: Optional[str] = None
+    timeout: Optional[int] = None  # seconds; defaults to server ANTHIVE_QUERY_TIMEOUT (120)
 
 
 class AnalyticsVizRequest(BaseModel):
@@ -2147,6 +2148,7 @@ async def analytics_query(db_id: str, request: AnalyticsQueryRequest):
         result = analytics.run_query(
             db_url, request.sql, request.session_id,
             s3_config=registry._s3_config,
+            timeout=request.timeout,
         )
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
