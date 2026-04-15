@@ -754,12 +754,20 @@ def cmd_download(cfg: dict, args):
     print(f'  ✓ Done')
 
 
+MAX_EXPIRY = 48 * 3600   # 48 hours
+
+
 def cmd_open(cfg: dict, args):
-    """Generate a presigned URL for a file (default expiry: 24 h)."""
+    """Generate a presigned URL for a file (default expiry: 24 h, max: 48 h)."""
     bucket  = require_bucket(cfg)
     prefix  = cfg.get('prefix', '') or ''
     client  = make_client(cfg)
     expiry  = getattr(args, 'expiry', 86400)
+
+    if expiry > MAX_EXPIRY:
+        print(f'ERROR: --expiry {expiry}s exceeds the maximum of {MAX_EXPIRY}s (48 h).', file=sys.stderr)
+        print(f'  Use --expiry 172800 or less.', file=sys.stderr)
+        sys.exit(1)
 
     if args.key:
         keys = [s3_key(args.key, prefix)]
@@ -871,7 +879,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_open.add_argument('key', nargs='?', default=None,
                         help='Relative S3 path (omit to list all)')
     p_open.add_argument('--expiry', type=int, default=86400,
-                        help='URL expiry in seconds (default: 86400 = 24 h)')
+                        help='URL expiry in seconds (default: 86400 = 24 h, max: 172800 = 48 h)')
 
     return parser
 

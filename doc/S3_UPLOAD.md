@@ -270,10 +270,10 @@ Simpson2025/sample_A.h5ad
 
 ```
 
-The link is valid for **24 hours** by default.  For a longer window:
+The link is valid for **24 hours** by default.  Maximum is **48 hours**:
 
 ```bash
-ant_s3 open Simpson2025/sample_A.h5ad --expiry 604800   # 7 days
+ant_s3 open Simpson2025/sample_A.h5ad --expiry 172800   # 48 h (maximum)
 ```
 
 ---
@@ -317,7 +317,7 @@ ant_s3 show
 # Download / share
 ant_s3 download MyStudy2025/file1.h5ad
 ant_s3 open MyStudy2025/file1.h5ad
-ant_s3 open MyStudy2025/file1.h5ad --expiry 604800
+ant_s3 open MyStudy2025/file1.h5ad --expiry 172800
 ```
 
 ---
