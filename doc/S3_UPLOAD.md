@@ -21,14 +21,14 @@ e.g. `Simpson2025`).  The workflow is always:
 
 ## Requirements
 
-- **Python 3.10+** and **[uv](https://docs.astral.sh/uv/getting-started/installation/)**
+- **[uv](https://docs.astral.sh/uv/getting-started/installation/)** — that's it.
 
-  Install uv with:
+  uv will download Python automatically if needed. Install it with:
   ```bash
   curl -LsSf https://astral.sh/uv/install.sh | sh
   ```
-  That's it — `ant_s3` is a self-contained script that installs its own dependencies
-  the first time it runs.
+  `ant_s3` is a self-contained script — uv handles Python and all dependencies
+  the first time it runs. Nothing else to install.
 
 ---
 
@@ -105,9 +105,8 @@ Expected output:
   Edit the index.md to add authors, experiment notes, etc.
 ```
 
-This creates a small `index.md` file inside the group that describes the study.
-You can download it, fill in the metadata (authors, year, experiment description),
-and re-upload it if you like — but it is not required to proceed.
+This creates a small `index.md` file inside the group on S3 that describes the study.
+Fill in the metadata fields in the next step.
 
 ### Group naming rules
 
