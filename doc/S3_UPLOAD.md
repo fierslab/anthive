@@ -111,10 +111,11 @@ and re-upload it if you like — but it is not required to proceed.
 
 ### Group naming rules
 
-- Letters, digits, hyphens (`-`) and underscores (`_`) only
-- Must start with a letter or digit
+- Letters, digits and underscores (`_`) only — **no hyphens**
+- Must start with a letter
+- Must end with a **4-digit year**
 - No spaces or slashes
-- Good examples: `Simpson2025`, `Van_Der_Berg2024`, `MouseBrainAtlas`
+- Good examples: `Simpson2025`, `Van_Der_Berg2024`, `MouseBrainAtlas2026`
 
 ### See what groups already exist
 

@@ -258,7 +258,9 @@ def _fmt_size(n: int) -> str:
 # Group helpers
 # ---------------------------------------------------------------------------
 
-GROUP_NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]*$')
+# Must start with a letter, contain only letters/digits/underscores,
+# and end with exactly 4 digits (the year).
+GROUP_NAME_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_]*\d{4}$')
 
 
 def _validate_group_name(name: str) -> None:
@@ -266,9 +268,9 @@ def _validate_group_name(name: str) -> None:
     if not GROUP_NAME_RE.match(name):
         print(
             f'ERROR: Invalid group name {name!r}.\n'
-            f'  Use only letters, digits, hyphens and underscores.\n'
-            f'  Must start with a letter or digit.\n'
-            f'  Example: Simpson2025',
+            f'  Rules: letters, digits and underscores only (no hyphens).\n'
+            f'  Must start with a letter and end with a 4-digit year.\n'
+            f'  Example: Simpson2025  Van_Der_Berg2024',
             file=sys.stderr,
         )
         sys.exit(1)
