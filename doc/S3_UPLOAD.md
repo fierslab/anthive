@@ -150,7 +150,7 @@ ant_s3 group set Simpson2025 experiment "snRNA-seq cortex aging cohort"
 ant_s3 group set Simpson2025 year      2025
 ```
 
-Each command updates the local copy **and** immediately pushes the change to S3.
+Each command immediately pushes the change to S3.
 
 ### Available fields
 
@@ -170,7 +170,7 @@ ant_s3 group show Simpson2025
 ```
 
 ```
-Group: Simpson2025  (source: local (.../data/h5adstore/Simpson2025/index.md))
+Group: Simpson2025  (source: s3://anthive4a/Simpson2025/index.md)
 
   group        Simpson2025
   experiment   snRNA-seq cortex aging cohort
@@ -180,14 +180,6 @@ Group: Simpson2025  (source: local (.../data/h5adstore/Simpson2025/index.md))
   celltypes    ['neuron', 'astrocyte', 'microglia']
   tissue       cortex
 ```
-
-### Local copy location
-
-The `index.md` is saved locally at:
-- `data/h5adstore/<group>/index.md` — if an `h5adstore` directory is found by
-  walking up from your current directory (standard project layout)
-- `~/.anthive/groups/<group>/index.md` — fallback if no project directory is found
-  (useful when running the script from anywhere on your machine)
 
 ---
 

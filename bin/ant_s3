@@ -322,26 +322,6 @@ def _index_md_template(group: str) -> str:
     )
 
 
-def _local_index_path(group: str) -> Path:
-    """
-    Return the local path for a group's index.md.
-    Prefers data/h5adstore/<group>/index.md if the data root is found,
-    falls back to ~/.anthive/groups/<group>/index.md.
-    """
-    data_root = _find_data_root()
-    if data_root:
-        return data_root / group / 'index.md'
-    return Path.home() / '.anthive' / 'groups' / group / 'index.md'
-
-
-def _save_local_index(group: str, content: str) -> Path:
-    """Write content to the local index.md and return its path."""
-    path = _local_index_path(group)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
-    return path
-
-
 def _parse_index_md(content: str) -> tuple[dict, str]:
     """
     Split an index.md into (yaml_dict, body_text).
@@ -410,24 +390,13 @@ def _cmd_group_create(cfg: dict, args):
 
     if _group_exists(client, bucket, name, prefix):
         print(f'Group {name!r} already exists on S3.')
-        local_path = _local_index_path(name)
-        if not local_path.exists():
-            # Pull it down so we have a local copy
-            key = _group_index_key(name, prefix)
-            obj = client.get_object(Bucket=bucket, Key=key)
-            content = obj['Body'].read().decode()
-            saved = _save_local_index(name, content)
-            print(f'  ↓ Downloaded existing index.md  →  {saved}')
         return
 
-    content  = _index_md_template(name)
-    key      = _group_index_key(name, prefix)
+    content = _index_md_template(name)
+    key     = _group_index_key(name, prefix)
     client.put_object(Bucket=bucket, Key=key, Body=content.encode(),
                       ContentType='text/markdown')
-    local_path = _save_local_index(name, content)
-    print(f'✓ Created group {name!r}')
-    print(f'  S3    →  s3://{bucket}/{key}')
-    print(f'  Local →  {local_path}')
+    print(f'✓ Created group {name!r}  →  s3://{bucket}/{key}')
     print(f'  Use \'ant_s3 group set {name} <field> <value>\' to fill in metadata.')
 
 
@@ -469,19 +438,13 @@ def _cmd_group_show(cfg: dict, args):
     name   = args.name
     _validate_group_name(name)
 
-    # Prefer local copy; fall back to S3
-    local_path = _local_index_path(name)
-    if local_path.exists():
-        content = local_path.read_text()
-        source  = f'local ({local_path})'
-    else:
-        if not _group_exists(client, bucket, name, prefix):
-            print(f'ERROR: Group {name!r} not found on S3.', file=sys.stderr)
-            sys.exit(1)
-        key     = _group_index_key(name, prefix)
-        obj     = client.get_object(Bucket=bucket, Key=key)
-        content = obj['Body'].read().decode()
-        source  = f's3://{bucket}/{key}'
+    if not _group_exists(client, bucket, name, prefix):
+        print(f'ERROR: Group {name!r} not found on S3.', file=sys.stderr)
+        sys.exit(1)
+    key     = _group_index_key(name, prefix)
+    obj     = client.get_object(Bucket=bucket, Key=key)
+    content = obj['Body'].read().decode()
+    source  = f's3://{bucket}/{key}'
 
     data, _ = _parse_index_md(content)
     print(f'Group: {name}  (source: {source})')
@@ -524,35 +487,25 @@ def _cmd_group_set(cfg: dict, args):
     else:
         parsed = args.value
 
-    # Load current index.md: local copy first, then S3, then fresh template
-    local_path = _local_index_path(name)
-    if local_path.exists():
-        content = local_path.read_text()
-    elif _group_exists(client, bucket, name, prefix):
-        key     = _group_index_key(name, prefix)
-        obj     = client.get_object(Bucket=bucket, Key=key)
-        content = obj['Body'].read().decode()
-    else:
+    if not _group_exists(client, bucket, name, prefix):
         print(f"ERROR: Group '{name}' not found. Create it first with:", file=sys.stderr)
         print(f"  ant_s3 group create {name}", file=sys.stderr)
         sys.exit(1)
+
+    key     = _group_index_key(name, prefix)
+    obj     = client.get_object(Bucket=bucket, Key=key)
+    content = obj['Body'].read().decode()
 
     data, body = _parse_index_md(content)
     data[args.field] = parsed
     new_content = _render_index_md(data, body)
 
-    # Save locally
-    saved = _save_local_index(name, new_content)
-
-    # Push to S3
-    key = _group_index_key(name, prefix)
     client.put_object(Bucket=bucket, Key=key,
                       Body=new_content.encode(), ContentType='text/markdown')
 
     display = parsed if field_type != 'str' else f'"{parsed}"'
     print(f'✓ {name}/{args.field} = {display}')
-    print(f'  Local →  {saved}')
-    print(f'  S3    →  s3://{bucket}/{key}')
+    print(f'  S3 →  s3://{bucket}/{key}')
 
 
 def cmd_show(cfg: dict, _args):
