@@ -136,6 +136,61 @@ Groups in s3://anthive4a  (prefix: /)
 
 ---
 
+## Step 3b — Add group metadata (recommended)
+
+After creating a group you can fill in descriptive metadata that will be stored
+in the group's `index.md` on S3 and kept as a local copy.
+
+```bash
+ant_s3 group set Simpson2025 organism  "Homo sapiens"
+ant_s3 group set Simpson2025 tissue    "cortex"
+ant_s3 group set Simpson2025 celltypes "neuron, astrocyte, microglia"
+ant_s3 group set Simpson2025 authors   "Alice Smith, Bob Jones"
+ant_s3 group set Simpson2025 experiment "snRNA-seq cortex aging cohort"
+ant_s3 group set Simpson2025 year      2025
+```
+
+Each command updates the local copy **and** immediately pushes the change to S3.
+
+### Available fields
+
+| Field | Type | Example |
+|---|---|---|
+| `organism` | text | `Homo sapiens` |
+| `tissue` | text | `cortex` |
+| `celltypes` | comma-separated list | `neuron, astrocyte` |
+| `authors` | comma-separated list | `Alice Smith, Bob Jones` |
+| `experiment` | text | `snRNA-seq aging cohort` |
+| `year` | integer | `2025` |
+
+### Review the metadata at any time
+
+```bash
+ant_s3 group show Simpson2025
+```
+
+```
+Group: Simpson2025  (source: local (.../data/h5adstore/Simpson2025/index.md))
+
+  group        Simpson2025
+  experiment   snRNA-seq cortex aging cohort
+  authors      ['Alice Smith', 'Bob Jones']
+  year         2025
+  organism     Homo sapiens
+  celltypes    ['neuron', 'astrocyte', 'microglia']
+  tissue       cortex
+```
+
+### Local copy location
+
+The `index.md` is saved locally at:
+- `data/h5adstore/<group>/index.md` — if an `h5adstore` directory is found by
+  walking up from your current directory (standard project layout)
+- `~/.anthive/groups/<group>/index.md` — fallback if no project directory is found
+  (useful when running the script from anywhere on your machine)
+
+---
+
 ## Step 4 — Upload files
 
 ```bash
