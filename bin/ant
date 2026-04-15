@@ -31,15 +31,24 @@ def get_available_commands(bin_dir: Path) -> dict:
         'inactive': 'Mark/unmark datasets as inactive (removes .duckdb, hides from API)',
         'md': 'Manage markdown metadata (YAML preambles)',
         'md-check': 'Check .md metadata files for sanity (group_id / id)',
+        's3':       'Upload/download/manage S3 storage (credentials, list, status)',
         's3-check': 'Check S3 availability of DuckDB files',
         'serve': 'Start REST API server',
+        'sync':  'Push/pull h5ad and DuckDB files to/from S3',
     }
 
     for file_path in bin_dir.iterdir():
-        if file_path.name.startswith('ant-') and file_path.is_file():
+        if not file_path.is_file():
+            continue
+        # Support both ant-<cmd> (hyphen) and ant_<cmd> (underscore) naming.
+        if file_path.name.startswith('ant-'):
             command_name = file_path.name[4:]  # Remove 'ant-' prefix
-            description = command_descriptions.get(command_name, '')
-            commands[command_name] = description
+        elif file_path.name.startswith('ant_'):
+            command_name = file_path.name[4:]  # Remove 'ant_' prefix
+        else:
+            continue
+        description = command_descriptions.get(command_name, '')
+        commands[command_name] = description
 
     return commands
 
@@ -100,8 +109,10 @@ def main():
         print(f"anthive version {anthive.__version__}")
         sys.exit(0)
 
-    # Look for ant-<subcommand> in the bin directory
+    # Look for ant-<subcommand> first (hyphen style), then ant_<subcommand>
     subcommand_path = bin_dir / f"ant-{subcommand}"
+    if not subcommand_path.exists():
+        subcommand_path = bin_dir / f"ant_{subcommand}"
 
     if not subcommand_path.exists():
         print(f"Error: Unknown command 'ant {subcommand}'", file=sys.stderr)

@@ -1,0 +1,949 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "boto3>=1.34.0",
+#   "pyyaml>=6.0",
+# ]
+# ///
+"""
+ant_s3 — Manage S3 storage for anthive h5ad files.
+
+Files are always organised in a group subfolder (e.g. Simpson2025/).
+Create the group first, then upload files into it.
+
+Usage:
+  ant_s3 group create <name>          Create a new group folder on S3
+  ant_s3 group list                   List existing groups
+  ant_s3 group show <name>            Show metadata for a group
+  ant_s3 group set <name> <field> <value>  Set a metadata field and push to S3
+    Fields: experiment  authors  year  organism  celltypes  tissue
+  ant_s3 upload <group> <file> [...]  Upload h5ad file(s) into a group
+  ant_s3 download <key> [<dest>]      Download a file from S3
+  ant_s3 list [<pattern>]             List files in the S3 bucket
+  ant_s3 status [<pattern>]           Compare local h5adstore vs S3
+  ant_s3 check                        Test credentials (HeadBucket)
+  ant_s3 open [<key>]                 Print presigned URL(s) for a file
+  ant_s3 show                         Show effective S3 config
+  ant_s3 set <key> <value>            Save a credential/config value
+    Keys: endpoint  region  bucket  prefix  access-key  secret-key
+
+Credential precedence (highest → lowest):
+  1. anthive.yaml  (project root, walked up from cwd)
+  2. Environment variables:
+       ANT_S3_ENDPOINT, ANT_S3_BUCKET, ANT_S3_REGION
+       ANT_S3_ACCESS_KEY, ANT_S3_SECRET_KEY, ANT_S3_PREFIX
+  3. ~/.anthive/credentials.yaml
+
+'ant_s3 set' always writes to ~/.anthive/credentials.yaml.
+
+Examples:
+  ant_s3 set bucket my-bucket
+  ant_s3 set access-key AKIAIOSFODNN7
+  ant_s3 set secret-key wJalrXUtn...
+  ant_s3 check
+  ant_s3 group create Simpson2025
+  ant_s3 group list
+  ant_s3 group set Simpson2025 organism "Homo sapiens"
+  ant_s3 group set Simpson2025 authors "Alice Smith, Bob Jones"
+  ant_s3 group set Simpson2025 celltypes "neuron, astrocyte, microglia"
+  ant_s3 group show Simpson2025
+  ant_s3 upload Simpson2025 sample1.h5ad sample2.h5ad
+  ant_s3 list
+  ant_s3 list 'Simpson2025/*'
+  ant_s3 status
+  ant_s3 open Simpson2025/sample1.h5ad
+"""
+
+import argparse
+import datetime
+import fnmatch
+import os
+import re
+import sys
+import time
+from pathlib import Path
+
+import boto3
+import yaml
+from boto3.s3.transfer import TransferConfig
+from botocore.config import Config
+from botocore.exceptions import ClientError
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+
+CREDENTIALS_FILE = Path.home() / '.anthive' / 'credentials.yaml'
+
+# Keys used in credentials.yaml / anthive.yaml[s3] / env
+_CRED_KEYS = ('endpoint', 'region', 'bucket', 'prefix', 'access_key_id', 'secret_access_key')
+
+# ---------------------------------------------------------------------------
+# Credential loading
+# ---------------------------------------------------------------------------
+
+def _load_yaml_safe(path: Path) -> dict:
+    """Load a YAML file, return empty dict on any error."""
+    try:
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+        return data
+    except Exception:
+        return {}
+
+
+def _find_anthive_yaml() -> dict:
+    """
+    Walk up from cwd looking for anthive.yaml.
+    Returns the s3 sub-dict if found, else {}.
+    """
+    current = Path.cwd()
+    for directory in [current, *current.parents]:
+        candidate = directory / 'anthive.yaml'
+        if candidate.exists():
+            data = _load_yaml_safe(candidate)
+            return data.get('s3', {}) if isinstance(data, dict) else {}
+    return {}
+
+
+def _load_env_creds() -> dict:
+    """Read S3 settings from environment variables."""
+    mapping = {
+        'ANT_S3_ENDPOINT':   'endpoint',
+        'ANT_S3_REGION':     'region',
+        'ANT_S3_BUCKET':     'bucket',
+        'ANT_S3_PREFIX':     'prefix',
+        'ANT_S3_ACCESS_KEY': 'access_key_id',
+        'ANT_S3_SECRET_KEY': 'secret_access_key',
+    }
+    result = {}
+    for env_var, key in mapping.items():
+        val = os.environ.get(env_var)
+        if val:
+            result[key] = val
+    return result
+
+
+def _load_user_creds() -> dict:
+    """Load ~/.anthive/credentials.yaml."""
+    return _load_yaml_safe(CREDENTIALS_FILE)
+
+
+def load_config() -> dict:
+    """
+    Merge credentials from all sources.
+    Priority: anthive.yaml > env vars > ~/.anthive/credentials.yaml
+    """
+    base = _load_user_creds()
+    base.update(_load_env_creds())
+    base.update(_find_anthive_yaml())
+    return base
+
+
+def config_source_summary() -> list[str]:
+    """Return human-readable list of active config sources."""
+    sources = []
+    if _load_user_creds():
+        sources.append(f'~/.anthive/credentials.yaml')
+    if _load_env_creds():
+        sources.append('environment variables')
+    if _find_anthive_yaml():
+        sources.append('anthive.yaml')
+    return sources if sources else ['(none)']
+
+# ---------------------------------------------------------------------------
+# S3 client
+# ---------------------------------------------------------------------------
+
+MULTIPART_THRESHOLD = 256 * 1024 ** 2   # 256 MB
+MULTIPART_CHUNKSIZE  = 256 * 1024 ** 2
+
+
+def make_client(cfg: dict):
+    """Build a boto3 S3 client from the merged config dict."""
+    kwargs = {}
+
+    endpoint = cfg.get('endpoint')
+    if endpoint:
+        if not endpoint.startswith(('http://', 'https://')):
+            endpoint = f'https://{endpoint}'
+        kwargs['endpoint_url'] = endpoint
+
+    region = cfg.get('region', 'us-east-1')
+    kwargs['region_name'] = region
+
+    access_key = cfg.get('access_key_id')
+    secret_key  = cfg.get('secret_access_key')
+    if access_key and secret_key:
+        kwargs['aws_access_key_id']     = access_key
+        kwargs['aws_secret_access_key'] = secret_key
+
+    if cfg.get('use_path_style'):
+        kwargs['config'] = Config(s3={'addressing_style': 'path'})
+
+    return boto3.client('s3', **kwargs)
+
+
+def transfer_config() -> TransferConfig:
+    return TransferConfig(
+        multipart_threshold=MULTIPART_THRESHOLD,
+        multipart_chunksize=MULTIPART_CHUNKSIZE,
+        max_concurrency=4,
+    )
+
+
+def require_bucket(cfg: dict) -> str:
+    bucket = cfg.get('bucket')
+    if not bucket:
+        print('ERROR: No S3 bucket configured.', file=sys.stderr)
+        print("Run:  ant_s3 set bucket <name>", file=sys.stderr)
+        sys.exit(1)
+    return bucket
+
+
+def s3_key(relative: str, prefix: str) -> str:
+    """Build a full S3 key from a relative path and optional prefix."""
+    prefix = prefix.strip('/') if prefix else ''
+    relative = relative.lstrip('/')
+    return f'{prefix}/{relative}' if prefix else relative
+
+
+def s3_key_to_rel(key: str, prefix: str) -> str:
+    """Strip prefix from an S3 key to get the relative path."""
+    prefix_str = prefix.strip('/') + '/' if prefix and prefix.strip('/') else ''
+    return key[len(prefix_str):] if prefix_str and key.startswith(prefix_str) else key
+
+# ---------------------------------------------------------------------------
+# Progress callback
+# ---------------------------------------------------------------------------
+
+class ProgressBar:
+    """Simple console progress bar for S3 transfers."""
+
+    def __init__(self, filename: str, total: int):
+        self._name  = filename
+        self._total = total
+        self._seen  = 0
+        self._start = time.time()
+        self._width = 30
+
+    def __call__(self, bytes_amount: int):
+        self._seen += bytes_amount
+        pct  = self._seen / self._total if self._total else 1.0
+        done = int(self._width * pct)
+        bar  = '█' * done + '░' * (self._width - done)
+        elapsed  = time.time() - self._start
+        rate     = self._seen / elapsed if elapsed > 0 else 0
+        rate_str = _fmt_size(int(rate)) + '/s'
+        print(
+            f'\r  [{bar}] {pct*100:5.1f}%  {_fmt_size(self._seen)}'
+            f' / {_fmt_size(self._total)}  {rate_str}   ',
+            end='', flush=True,
+        )
+        if self._seen >= self._total:
+            print()  # newline when done
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _fmt_size(n: int) -> str:
+    for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
+        if n < 1024 or unit == 'TB':
+            return f'{n:.1f} {unit}'
+        n /= 1024
+
+
+# ---------------------------------------------------------------------------
+# Group helpers
+# ---------------------------------------------------------------------------
+
+GROUP_NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]*$')
+
+
+def _validate_group_name(name: str) -> None:
+    """Exit with a clear message if the group name is invalid."""
+    if not GROUP_NAME_RE.match(name):
+        print(
+            f'ERROR: Invalid group name {name!r}.\n'
+            f'  Use only letters, digits, hyphens and underscores.\n'
+            f'  Must start with a letter or digit.\n'
+            f'  Example: Simpson2025',
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+def _group_index_key(group: str, prefix: str) -> str:
+    """Return the S3 key for a group's index.md."""
+    return s3_key(f'{group}/index.md', prefix)
+
+
+def _group_exists(client, bucket: str, group: str, prefix: str) -> bool:
+    """True if the group's index.md exists in S3."""
+    key = _group_index_key(group, prefix)
+    try:
+        client.head_object(Bucket=bucket, Key=key)
+        return True
+    except ClientError as e:
+        if e.response['Error']['Code'] in ('404', 'NoSuchKey'):
+            return False
+        raise
+
+
+# Metadata fields that ant_s3 can set, with types and defaults.
+# 'list' fields accept comma-separated input and are stored as YAML lists.
+GROUP_FIELDS: dict[str, tuple[str, object]] = {
+    'experiment': ('str',  'na'),
+    'authors':    ('list', []),
+    'year':       ('int',  None),   # filled at creation time
+    'organism':   ('str',  ''),
+    'celltypes':  ('list', []),
+    'tissue':     ('str',  ''),
+}
+
+
+def _index_md_template(group: str) -> str:
+    """Full index.md template for a new group."""
+    year = datetime.date.today().year
+    return (
+        f'---\n'
+        f'group: {group}\n'
+        f'experiment: na\n'
+        f'authors: []\n'
+        f'year: {year}\n'
+        f'organism: \"\"\n'
+        f'celltypes: []\n'
+        f'tissue: \"\"\n'
+        f'---\n\n'
+        f'# {group}\n'
+    )
+
+
+def _local_index_path(group: str) -> Path:
+    """
+    Return the local path for a group's index.md.
+    Prefers data/h5adstore/<group>/index.md if the data root is found,
+    falls back to ~/.anthive/groups/<group>/index.md.
+    """
+    data_root = _find_data_root()
+    if data_root:
+        return data_root / group / 'index.md'
+    return Path.home() / '.anthive' / 'groups' / group / 'index.md'
+
+
+def _save_local_index(group: str, content: str) -> Path:
+    """Write content to the local index.md and return its path."""
+    path = _local_index_path(group)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    return path
+
+
+def _parse_index_md(content: str) -> tuple[dict, str]:
+    """
+    Split an index.md into (yaml_dict, body_text).
+    Returns ({}, '') on parse errors.
+    """
+    if not content.startswith('---'):
+        return {}, content
+    parts = content.split('---', 2)
+    if len(parts) < 3:
+        return {}, content
+    try:
+        data = yaml.safe_load(parts[1]) or {}
+    except yaml.YAMLError:
+        data = {}
+    return data, parts[2]
+
+
+def _render_index_md(data: dict, body: str) -> str:
+    """Serialise (yaml_dict, body) back to index.md text."""
+    # Preserve key order: group first, then known fields, then any extras
+    ordered_keys = ['group', 'experiment', 'authors', 'year',
+                    'organism', 'celltypes', 'tissue']
+    ordered = {k: data[k] for k in ordered_keys if k in data}
+    extras  = {k: v for k, v in data.items() if k not in ordered_keys}
+    ordered.update(extras)
+    preamble = yaml.dump(ordered, default_flow_style=False,
+                         allow_unicode=True, sort_keys=False)
+    return f'---\n{preamble}---{body}'
+
+
+def list_s3_objects(client, bucket: str, prefix: str) -> dict[str, int]:
+    """Return {relative_path: size_bytes} for all objects in bucket/prefix."""
+    paginator = client.get_paginator('list_objects_v2')
+    prefix_str = prefix.strip('/') + '/' if prefix and prefix.strip('/') else ''
+    objects = {}
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix_str):
+        for obj in page.get('Contents', []):
+            rel = s3_key_to_rel(obj['Key'], prefix)
+            objects[rel] = obj['Size']
+    return objects
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+
+def cmd_group(cfg: dict, args):
+    """Dispatch group sub-commands."""
+    dispatch = {
+        'create': _cmd_group_create,
+        'list':   _cmd_group_list,
+        'show':   _cmd_group_show,
+        'set':    _cmd_group_set,
+    }
+    dispatch[args.group_cmd](cfg, args)
+
+
+def _cmd_group_create(cfg: dict, args):
+    """Create a new group folder on S3 by uploading an index.md."""
+    bucket = require_bucket(cfg)
+    prefix = cfg.get('prefix', '') or ''
+    client = make_client(cfg)
+
+    name = args.name
+    _validate_group_name(name)
+
+    if _group_exists(client, bucket, name, prefix):
+        print(f'Group {name!r} already exists on S3.')
+        local_path = _local_index_path(name)
+        if not local_path.exists():
+            # Pull it down so we have a local copy
+            key = _group_index_key(name, prefix)
+            obj = client.get_object(Bucket=bucket, Key=key)
+            content = obj['Body'].read().decode()
+            saved = _save_local_index(name, content)
+            print(f'  ↓ Downloaded existing index.md  →  {saved}')
+        return
+
+    content  = _index_md_template(name)
+    key      = _group_index_key(name, prefix)
+    client.put_object(Bucket=bucket, Key=key, Body=content.encode(),
+                      ContentType='text/markdown')
+    local_path = _save_local_index(name, content)
+    print(f'✓ Created group {name!r}')
+    print(f'  S3    →  s3://{bucket}/{key}')
+    print(f'  Local →  {local_path}')
+    print(f'  Use \'ant_s3 group set {name} <field> <value>\' to fill in metadata.')
+
+
+def _cmd_group_list(cfg: dict, _args):
+    """List all groups (first-level folders that contain an index.md)."""
+    bucket = require_bucket(cfg)
+    prefix = cfg.get('prefix', '') or ''
+    client = make_client(cfg)
+
+    objects = list_s3_objects(client, bucket, prefix)
+    # A group is any top-level path component that has an index.md
+    groups = sorted({
+        rel.split('/')[0]
+        for rel in objects
+        if '/' in rel and rel.endswith('index.md')
+    })
+
+    if not groups:
+        print('(no groups found — create one with: ant_s3 group create <name>)')
+        return
+
+    print(f'Groups in s3://{bucket}  (prefix: {prefix or "/"})')
+    print()
+    for g in groups:
+        # Count data files (h5ad / duckdb) in this group
+        data_files = [r for r in objects if r.startswith(f'{g}/') and
+                      r.endswith(('.h5ad', '.duckdb'))]
+        total_size = sum(objects[r] for r in data_files)
+        print(f'  {g:<40}  {len(data_files):>3} file(s)  {_fmt_size(total_size):>10}')
+    print()
+    print(f'  {len(groups)} group(s) total')
+
+
+def _cmd_group_show(cfg: dict, args):
+    """Print the metadata fields for a group's index.md."""
+    bucket = require_bucket(cfg)
+    prefix = cfg.get('prefix', '') or ''
+    client = make_client(cfg)
+    name   = args.name
+    _validate_group_name(name)
+
+    # Prefer local copy; fall back to S3
+    local_path = _local_index_path(name)
+    if local_path.exists():
+        content = local_path.read_text()
+        source  = f'local ({local_path})'
+    else:
+        if not _group_exists(client, bucket, name, prefix):
+            print(f'ERROR: Group {name!r} not found on S3.', file=sys.stderr)
+            sys.exit(1)
+        key     = _group_index_key(name, prefix)
+        obj     = client.get_object(Bucket=bucket, Key=key)
+        content = obj['Body'].read().decode()
+        source  = f's3://{bucket}/{key}'
+
+    data, _ = _parse_index_md(content)
+    print(f'Group: {name}  (source: {source})')
+    print()
+    all_fields = ['group', 'experiment', 'authors', 'year',
+                  'organism', 'celltypes', 'tissue']
+    for field in all_fields:
+        val = data.get(field, '(not set)')
+        print(f'  {field:<12} {val}')
+    extras = {k: v for k, v in data.items() if k not in all_fields}
+    for k, v in extras.items():
+        print(f'  {k:<12} {v}')
+
+
+def _cmd_group_set(cfg: dict, args):
+    """Set a metadata field in a group's index.md and push to S3."""
+    bucket = require_bucket(cfg)
+    prefix = cfg.get('prefix', '') or ''
+    client = make_client(cfg)
+    name   = args.name
+    _validate_group_name(name)
+
+    if args.field not in GROUP_FIELDS:
+        print(f"ERROR: Unknown field '{args.field}'.", file=sys.stderr)
+        print(f"Valid fields: {', '.join(GROUP_FIELDS)}", file=sys.stderr)
+        sys.exit(1)
+
+    field_type, _ = GROUP_FIELDS[args.field]
+
+    # Parse the raw value according to the field type
+    if field_type == 'list':
+        # Accept comma-separated or a single value
+        parsed = [v.strip() for v in args.value.split(',') if v.strip()]
+    elif field_type == 'int':
+        try:
+            parsed = int(args.value)
+        except ValueError:
+            print(f"ERROR: '{args.field}' must be an integer.", file=sys.stderr)
+            sys.exit(1)
+    else:
+        parsed = args.value
+
+    # Load current index.md: local copy first, then S3, then fresh template
+    local_path = _local_index_path(name)
+    if local_path.exists():
+        content = local_path.read_text()
+    elif _group_exists(client, bucket, name, prefix):
+        key     = _group_index_key(name, prefix)
+        obj     = client.get_object(Bucket=bucket, Key=key)
+        content = obj['Body'].read().decode()
+    else:
+        print(f"ERROR: Group '{name}' not found. Create it first with:", file=sys.stderr)
+        print(f"  ant_s3 group create {name}", file=sys.stderr)
+        sys.exit(1)
+
+    data, body = _parse_index_md(content)
+    data[args.field] = parsed
+    new_content = _render_index_md(data, body)
+
+    # Save locally
+    saved = _save_local_index(name, new_content)
+
+    # Push to S3
+    key = _group_index_key(name, prefix)
+    client.put_object(Bucket=bucket, Key=key,
+                      Body=new_content.encode(), ContentType='text/markdown')
+
+    display = parsed if field_type != 'str' else f'"{parsed}"'
+    print(f'✓ {name}/{args.field} = {display}')
+    print(f'  Local →  {saved}')
+    print(f'  S3    →  s3://{bucket}/{key}')
+
+
+def cmd_show(cfg: dict, _args):
+    """Print the effective S3 configuration."""
+    sources = config_source_summary()
+    print('Effective S3 configuration')
+    print('=' * 40)
+    print(f"  Sources (highest priority last → wins): {', '.join(sources)}")
+    print()
+
+    fields = [
+        ('endpoint',          'Endpoint',   False),
+        ('region',            'Region',     False),
+        ('bucket',            'Bucket',     False),
+        ('prefix',            'Prefix',     False),
+        ('access_key_id',     'Access Key', False),
+        ('secret_access_key', 'Secret Key', True),   # masked
+    ]
+    for key, label, masked in fields:
+        val = cfg.get(key) or '(not set)'
+        if masked and cfg.get(key):
+            val = cfg[key][:4] + '****' + cfg[key][-4:] if len(cfg[key]) > 8 else '****'
+        print(f'  {label:<12} {val}')
+
+
+def cmd_set(cfg: dict, args):
+    """Save a single credential/config value to ~/.anthive/credentials.yaml."""
+    key_map = {
+        'endpoint':   'endpoint',
+        'region':     'region',
+        'bucket':     'bucket',
+        'prefix':     'prefix',
+        'access-key': 'access_key_id',
+        'secret-key': 'secret_access_key',
+    }
+    if args.key not in key_map:
+        print(f"ERROR: Unknown key '{args.key}'.", file=sys.stderr)
+        print(f"Valid keys: {', '.join(key_map)}", file=sys.stderr)
+        sys.exit(1)
+
+    CREDENTIALS_FILE.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    data = _load_yaml_safe(CREDENTIALS_FILE)
+    yaml_key = key_map[args.key]
+    data[yaml_key] = args.value
+
+    # Write to a temp file then rename atomically, so the file is never
+    # readable by others even for a brief moment during the write.
+    tmp = CREDENTIALS_FILE.with_suffix('.tmp')
+    tmp.touch(mode=0o600)
+    with open(tmp, 'w') as f:
+        yaml.dump(data, f, default_flow_style=False, sort_keys=True)
+    tmp.rename(CREDENTIALS_FILE)
+    CREDENTIALS_FILE.chmod(0o600)
+
+    display_val = args.value
+    if args.key == 'secret-key':
+        display_val = args.value[:4] + '****' if len(args.value) > 4 else '****'
+    print(f'✓ Saved {args.key} = {display_val}  →  {CREDENTIALS_FILE}')
+
+
+def cmd_check(cfg: dict, _args):
+    """Test credentials with a HeadBucket call."""
+    bucket = require_bucket(cfg)
+    print(f'Checking S3 connection...')
+    print(f'  Endpoint : {cfg.get("endpoint") or "AWS default"}')
+    print(f'  Bucket   : {bucket}')
+    print()
+    try:
+        client = make_client(cfg)
+        client.head_bucket(Bucket=bucket)
+        print('✓ Connection successful — bucket is accessible.')
+    except ClientError as e:
+        code = e.response['Error']['Code']
+        print(f'✗ Connection failed  (HTTP {code})', file=sys.stderr)
+        print(f'  {e}', file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_list(cfg: dict, args):
+    """List files in the S3 bucket, optionally filtered by glob pattern."""
+    bucket = require_bucket(cfg)
+    prefix = cfg.get('prefix', '') or ''
+    client = make_client(cfg)
+
+    pattern = getattr(args, 'pattern', None)
+    objects = list_s3_objects(client, bucket, prefix)
+
+    if not objects:
+        print('(bucket is empty)')
+        return
+
+    if pattern:
+        objects = {k: v for k, v in objects.items() if fnmatch.fnmatch(k, pattern)}
+        if not objects:
+            print(f'(no files matching {pattern!r})')
+            return
+
+    total_size = sum(objects.values())
+    print(f'S3 bucket: {bucket}  (prefix: {prefix or "/"})')
+    print(f'{"File":<60}  {"Size":>10}')
+    print('-' * 72)
+    for rel in sorted(objects):
+        print(f'{rel:<60}  {_fmt_size(objects[rel]):>10}')
+    print('-' * 72)
+    print(f'  {len(objects)} file(s)   total {_fmt_size(total_size)}')
+
+
+def cmd_status(cfg: dict, args):
+    """Compare local h5adstore directory against S3."""
+    bucket = require_bucket(cfg)
+    prefix = cfg.get('prefix', '') or ''
+    client = make_client(cfg)
+    pattern = getattr(args, 'pattern', None)
+
+    # Find local h5ad/duckdb files — walk up to find data/h5adstore
+    local_root = _find_data_root()
+    if local_root is None:
+        print('WARNING: Could not locate local data/h5adstore directory.',
+              file=sys.stderr)
+        print('         Running status against S3 only.\n', file=sys.stderr)
+        local_files = {}
+    else:
+        local_files = {
+            str(p.relative_to(local_root)): p.stat().st_size
+            for p in local_root.rglob('*')
+            if p.is_file() and p.suffix in ('.h5ad', '.duckdb')
+            and not any(p.name.endswith(s) for s in ('.wal', '.partial', '.deleted'))
+        }
+
+    s3_files = list_s3_objects(client, bucket, prefix)
+
+    if pattern:
+        local_files = {k: v for k, v in local_files.items() if fnmatch.fnmatch(k, pattern)}
+        s3_files    = {k: v for k, v in s3_files.items()    if fnmatch.fnmatch(k, pattern)}
+
+    all_keys = sorted(set(local_files) | set(s3_files))
+
+    if not all_keys:
+        print('(nothing to compare)')
+        return
+
+    col = 55
+    print(f'{"File":<{col}}  {"Local":>10}  {"S3":>10}  Status')
+    print('-' * (col + 36))
+    for key in all_keys:
+        local_sz = local_files.get(key)
+        s3_sz    = s3_files.get(key)
+        if local_sz is not None and s3_sz is not None:
+            if local_sz == s3_sz:
+                status = '✓ synced'
+            elif local_sz > s3_sz:
+                status = '↑ local newer'
+            else:
+                status = '↓ S3 newer'
+        elif local_sz is not None:
+            status = '  local only'
+        else:
+            status = '  S3 only'
+        l_str = _fmt_size(local_sz) if local_sz is not None else '-'
+        s_str = _fmt_size(s3_sz)    if s3_sz    is not None else '-'
+        print(f'{key:<{col}}  {l_str:>10}  {s_str:>10}  {status}')
+
+
+def cmd_upload(cfg: dict, args):
+    """Upload one or more h5ad files into a group on S3."""
+    bucket = require_bucket(cfg)
+    prefix = cfg.get('prefix', '') or ''
+    client = make_client(cfg)
+    tc     = transfer_config()
+
+    group = args.group
+    _validate_group_name(group)
+
+    # Warn (don't fail) if group has no index.md yet
+    if not _group_exists(client, bucket, group, prefix):
+        print(f'WARNING: Group {group!r} has no index.md on S3.')
+        print(f'         Create it first with: ant_s3 group create {group}')
+        print()
+
+    files = [Path(f) for f in args.files]
+    for path in files:
+        if not path.exists():
+            print(f'ERROR: File not found: {path}', file=sys.stderr)
+            sys.exit(1)
+        if path.suffix not in ('.h5ad', '.duckdb'):
+            print(f'WARNING: {path.name} is not an .h5ad or .duckdb file — uploading anyway.')
+
+    total = len(files)
+    for i, path in enumerate(files, 1):
+        path = path.resolve()
+        # Key is always <group>/<filename> — never nest deeper automatically
+        rel      = f'{group}/{path.name}'
+        key      = s3_key(rel, prefix)
+        filesize = path.stat().st_size
+
+        print(f'[{i}/{total}] Uploading: {path.name}')
+        print(f'  → s3://{bucket}/{key}  ({_fmt_size(filesize)})')
+
+        progress = ProgressBar(path.name, filesize)
+        try:
+            client.upload_file(
+                str(path), bucket, key,
+                Callback=progress,
+                Config=tc,
+            )
+        except ClientError as e:
+            print(f'\n✗ Upload failed: {e}', file=sys.stderr)
+            sys.exit(1)
+
+        print(f'  ✓ Done')
+        print()
+
+
+def cmd_download(cfg: dict, args):
+    """Download a file from S3 to a local destination."""
+    bucket = require_bucket(cfg)
+    prefix = cfg.get('prefix', '') or ''
+    client = make_client(cfg)
+
+    key      = s3_key(args.key, prefix)
+    dest     = Path(args.dest) if args.dest else Path(Path(args.key).name)
+
+    # Check the object exists and get its size
+    try:
+        head = client.head_object(Bucket=bucket, Key=key)
+        filesize = head['ContentLength']
+    except ClientError as e:
+        code = e.response['Error']['Code']
+        if code in ('404', 'NoSuchKey'):
+            print(f'ERROR: s3://{bucket}/{key} does not exist.', file=sys.stderr)
+        else:
+            print(f'ERROR: {e}', file=sys.stderr)
+        sys.exit(1)
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    print(f'Downloading: s3://{bucket}/{key}')
+    print(f'  → {dest}  ({_fmt_size(filesize)})')
+
+    progress = ProgressBar(args.key, filesize)
+    try:
+        client.download_file(bucket, key, str(dest), Callback=progress)
+    except ClientError as e:
+        print(f'\n✗ Download failed: {e}', file=sys.stderr)
+        sys.exit(1)
+
+    print(f'  ✓ Done')
+
+
+def cmd_open(cfg: dict, args):
+    """Generate a presigned URL for a file (default expiry: 24 h)."""
+    bucket  = require_bucket(cfg)
+    prefix  = cfg.get('prefix', '') or ''
+    client  = make_client(cfg)
+    expiry  = getattr(args, 'expiry', 86400)
+
+    if args.key:
+        keys = [s3_key(args.key, prefix)]
+    else:
+        # No key given → list all and generate URLs for everything
+        objects = list_s3_objects(client, bucket, prefix)
+        keys    = [s3_key(rel, prefix) for rel in sorted(objects)]
+
+    if not keys:
+        print('(bucket is empty)')
+        return
+
+    for key in keys:
+        try:
+            url = client.generate_presigned_url(
+                'get_object',
+                Params={'Bucket': bucket, 'Key': key},
+                ExpiresIn=expiry,
+            )
+            rel = s3_key_to_rel(key, prefix)
+            print(f'{rel}')
+            print(f'  {url}')
+            print()
+        except ClientError as e:
+            print(f'ERROR generating URL for {key}: {e}', file=sys.stderr)
+
+# ---------------------------------------------------------------------------
+# Helper: locate local data root
+# ---------------------------------------------------------------------------
+
+def _find_data_root() -> Path | None:
+    """Walk up from cwd to find the data/h5adstore directory."""
+    current = Path.cwd()
+    for directory in [current, *current.parents]:
+        candidate = directory / 'data' / 'h5adstore'
+        if candidate.is_dir():
+            return candidate
+        # Also accept bare 'h5adstore'
+        candidate2 = directory / 'h5adstore'
+        if candidate2.is_dir():
+            return candidate2
+    return None
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog='ant_s3',
+        description='Manage S3 storage for anthive h5ad files.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    sub = parser.add_subparsers(dest='command', metavar='<command>')
+    sub.required = True
+
+    # show
+    sub.add_parser('show', help='Show effective S3 config')
+
+    # set
+    p_set = sub.add_parser('set', help='Save a config value to ~/.anthive/credentials.yaml')
+    p_set.add_argument('key',   choices=['endpoint', 'region', 'bucket', 'prefix',
+                                          'access-key', 'secret-key'])
+    p_set.add_argument('value', help='Value to store')
+
+    # check
+    sub.add_parser('check', help='Test S3 credentials (HeadBucket)')
+
+    # list
+    p_list = sub.add_parser('list', help='List files in S3 bucket')
+    p_list.add_argument('pattern', nargs='?', default=None, help='Glob filter (e.g. "*.h5ad")')
+
+    # status
+    p_status = sub.add_parser('status', help='Compare local vs S3')
+    p_status.add_argument('pattern', nargs='?', default=None, help='Glob filter')
+
+    # group
+    p_grp = sub.add_parser('group', help='Manage groups (create / list / delete)')
+    grp_sub = p_grp.add_subparsers(dest='group_cmd', metavar='<subcommand>')
+    grp_sub.required = True
+
+    p_gcreate = grp_sub.add_parser('create', help='Create a new group folder on S3')
+    p_gcreate.add_argument('name', help='Group name (e.g. Simpson2025)')
+
+    grp_sub.add_parser('list', help='List existing groups')
+
+    p_gshow = grp_sub.add_parser('show', help='Show metadata for a group')
+    p_gshow.add_argument('name', help='Group name')
+
+    p_gset = grp_sub.add_parser('set', help='Set a metadata field and push to S3')
+    p_gset.add_argument('name',  help='Group name')
+    p_gset.add_argument('field', choices=list(GROUP_FIELDS),
+                        help='Field to set')
+    p_gset.add_argument('value', help='Value (lists: comma-separated)')
+
+    # upload
+    p_up = sub.add_parser('upload', help='Upload h5ad file(s) into a group')
+    p_up.add_argument('group', help='Target group (e.g. Simpson2025)')
+    p_up.add_argument('files', nargs='+', metavar='file', help='.h5ad file(s) to upload')
+
+    # download
+    p_dl = sub.add_parser('download', help='Download a file from S3')
+    p_dl.add_argument('key',  help='Relative S3 path (e.g. MyStudy/sample.h5ad)')
+    p_dl.add_argument('dest', nargs='?', default=None, help='Local destination path')
+
+    # open
+    p_open = sub.add_parser('open', help='Generate presigned URL(s)')
+    p_open.add_argument('key', nargs='?', default=None,
+                        help='Relative S3 path (omit to list all)')
+    p_open.add_argument('--expiry', type=int, default=86400,
+                        help='URL expiry in seconds (default: 86400 = 24 h)')
+
+    return parser
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+COMMANDS = {
+    'show':     cmd_show,
+    'set':      cmd_set,
+    'check':    cmd_check,
+    'group':    cmd_group,
+    'list':     cmd_list,
+    'status':   cmd_status,
+    'upload':   cmd_upload,
+    'download': cmd_download,
+    'open':     cmd_open,
+}
+
+
+def main():
+    parser = build_parser()
+    args   = parser.parse_args()
+    cfg    = load_config()
+    COMMANDS[args.command](cfg, args)
+
+
+if __name__ == '__main__':
+    main()
