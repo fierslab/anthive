@@ -937,6 +937,51 @@ def main():
                 for stats in layer_stats
             }
 
+        # ── Warn loudly if X is raw counts ─────────────────────────────────────
+        x_stats = metadata.get('layer_stats', {}).get('X')
+        if x_stats:
+            dtype = str(x_stats.get('dtype', ''))
+            min_nz = x_stats.get('min_nonzero', 0)
+            max_val = x_stats.get('max_value', 0)
+            is_likely_counts = ('int' in dtype) or (min_nz == 1.0 and max_val > 20)
+            if is_likely_counts:
+                # Check if there's a log-normalized layer available
+                log_layers = []
+                for lname, lstats in metadata.get('layer_stats', {}).items():
+                    if lname == 'X':
+                        continue
+                    ld = str(lstats.get('dtype', ''))
+                    lmin = lstats.get('min_nonzero', 0)
+                    lmax = lstats.get('max_value', 0)
+                    if 'float' in ld and 0 < lmin and lmax < 20:
+                        log_layers.append(lname)
+
+                print()
+                print("=" * 70)
+                print("  WARNING: .X appears to contain RAW COUNTS (not log-normalized)")
+                print("=" * 70)
+                print(f"  dtype={dtype}, min_nonzero={min_nz}, max={max_val}")
+                print()
+                print("  Anthive expects .X to be log-normalized expression data.")
+                print("  Module scoring and gene ranking will not work correctly")
+                print("  if .X contains raw integer counts.")
+                print()
+                if log_layers:
+                    print(f"  Log-normalized layer(s) found: {', '.join(log_layers)}")
+                    print(f"  Consider swapping: adata.layers['counts'] = adata.X")
+                    print(f"  Then: adata.X = adata.layers['{log_layers[0]}']")
+                else:
+                    print("  No log-normalized layer found. Consider normalizing:")
+                    print("    sc.pp.normalize_total(adata, target_sum=1e4)")
+                    print("    sc.pp.log1p(adata)")
+                print("=" * 70)
+                print()
+                report.general_warnings.append(
+                    f".X contains raw counts (dtype={dtype}, max={max_val}). "
+                    f"Anthive expects .X to be log-normalized."
+                    + (f" Available log-normalized layer(s): {', '.join(log_layers)}" if log_layers else "")
+                )
+
         # Write metadata file
         print(f"\n[9/9] Writing metadata...")
         md_path = h5ad_path.with_suffix('.md')
