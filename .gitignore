@@ -44,6 +44,12 @@ anthive.yaml
 *.duckdb.deleted
 *.duckdb.wal.deleted
 
+# Micromamba environments (large, reproducible from envs/*.yml)
+envs/anthive-data/
+
+# Server logs (generated at runtime)
+logs/
+
 # Attic - archived old files
 attic/
 

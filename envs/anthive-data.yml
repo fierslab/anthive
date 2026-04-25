@@ -1,0 +1,21 @@
+name: anthive-data
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  # R + Seurat for RDS → h5ad conversion
+  - r-base>=4.3
+  - r-seurat>=5.0
+  - r-seuratobject>=5.0
+  - r-matrix
+  - r-reticulate
+  - r-remotes
+  # Python for h5ad I/O and subsetting
+  - python>=3.11
+  - anndata>=0.12
+  - scanpy>=1.10
+  - numpy
+  - pandas
+  - scipy
+  - h5py
+  - leidenalg
