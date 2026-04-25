@@ -104,6 +104,24 @@ def _setup_logging(log_dir: Path = None) -> logging.Logger:
 log = _setup_logging()
 
 
+def _auto_memory_limit(max_connections: int = 3) -> str:
+    """Compute a per-connection DuckDB memory limit based on system RAM.
+
+    Heuristic: reserve 40% of system RAM for DuckDB total, then divide
+    by the max number of concurrent connections that could be active.
+    Floor at 512 MB, cap at 8 GB per connection.
+    """
+    import os
+    try:
+        total_bytes = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
+    except (ValueError, OSError):
+        return '2GB'  # safe fallback
+    duckdb_budget = int(total_bytes * 0.4)
+    per_conn = max(512 * 1024 * 1024, min(duckdb_budget // max(max_connections, 1), 8 * 1024 * 1024 * 1024))
+    per_conn_gb = round(per_conn / (1024 * 1024 * 1024), 1)
+    return f'{per_conn_gb}GB'
+
+
 class QueryRequest(BaseModel):
     """Request model for SQL query endpoints"""
     query: str
@@ -118,11 +136,16 @@ class ConnectionPool:
     """
 
     def __init__(self, max_connections_per_db: int = 3, s3_config: Optional[Dict] = None,
-                 memory_limit: str = '2GB', threads: int = 2):
+                 memory_limit: str = 'auto', threads: int = 2):
         self.max_connections_per_db = max_connections_per_db
         self.s3_config = s3_config or {}
-        self.memory_limit = memory_limit
+        if memory_limit == 'auto':
+            self.memory_limit = _auto_memory_limit(max_connections_per_db)
+        else:
+            self.memory_limit = memory_limit
         self.threads = threads
+        log.info('ConnectionPool: memory_limit=%s/conn, threads=%d/conn, max_conns_per_db=%d',
+                 self.memory_limit, threads, max_connections_per_db)
         self.pools: Dict[str, List[Any]] = defaultdict(list)
         self.in_use: Dict[str, int] = defaultdict(int)
         self.locks: Dict[str, Lock] = defaultdict(Lock)
@@ -2387,7 +2410,12 @@ def main():
     s3_config = config.get('s3') or {}
     try:
         print("Initializing connection pool...")
-        connection_pool = ConnectionPool(max_connections_per_db=5, s3_config=s3_config)
+        connection_pool = ConnectionPool(
+            max_connections_per_db=config.get('duckdb_max_connections', 3),
+            s3_config=s3_config,
+            memory_limit=str(config.get('duckdb_memory_limit', 'auto')),
+            threads=config.get('duckdb_threads', 2),
+        )
         print("Initializing database registry...")
         registry = DatabaseRegistry(args.data_folder, connection_pool, s3_config=s3_config)
     except FileNotFoundError as e:

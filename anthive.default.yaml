@@ -26,6 +26,15 @@ rest_api_port: 8080
 # Cache expiration in days (future use)
 cache_expiration_days: 7
 
+# DuckDB resource limits (per connection)
+# memory_limit: "auto" uses 40% of system RAM / max_connections.
+#               Set explicitly (e.g. "2GB") on shared or constrained servers.
+# threads: CPU threads per DuckDB connection (lower = less memory, less parallelism)
+# max_connections_per_db: max pooled connections per database file
+duckdb_memory_limit: auto
+duckdb_threads: 2
+duckdb_max_connections: 3
+
 # S3-compatible storage for DuckDB files (optional)
 # If bucket is set and a local .duckdb is not found, ant-serve will attempt
 # to open the .duckdb from S3 at the equivalent relative path.

@@ -242,8 +242,10 @@ def _open_analytics_connection(
     else:
         conn = duckdb.connect(db_url, read_only=True)
     # Cap memory to prevent OOM on constrained servers
-    conn.execute("SET memory_limit = '2GB'")
-    conn.execute("SET threads = 2")
+    mem_limit = os.environ.get('ANTHIVE_DUCKDB_MEMORY_LIMIT', '2GB')
+    threads = os.environ.get('ANTHIVE_DUCKDB_THREADS', '2')
+    conn.execute(f"SET memory_limit = '{mem_limit}'")
+    conn.execute(f"SET threads = {threads}")
     return conn
 
 
