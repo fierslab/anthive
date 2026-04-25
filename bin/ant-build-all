@@ -66,20 +66,28 @@ class FileSet:
 
 
 def scan_data_folder(data_folder: Path) -> List[FileSet]:
-    """Scan data folder for all h5ad files and their associated files"""
+    """Scan data folder for all h5ad files and their associated files.
+
+    Uses os.walk with followlinks=True so that symlinked directories
+    (e.g. data/h5adstore -> /data/1/project/h5adstore) are traversed.
+    """
+    import os
     filesets = []
 
-    for h5ad_path in data_folder.rglob("*.h5ad"):
-        # Check for associated files
-        md_path = h5ad_path.with_suffix('.md')
-        duckdb_path = h5ad_path.with_suffix('.duckdb')
+    for dirpath, _dirnames, filenames in os.walk(data_folder, followlinks=True):
+        for fname in filenames:
+            if not fname.endswith('.h5ad'):
+                continue
+            h5ad_path = Path(dirpath) / fname
+            md_path = h5ad_path.with_suffix('.md')
+            duckdb_path = h5ad_path.with_suffix('.duckdb')
 
-        fileset = FileSet(
-            h5ad=h5ad_path,
-            md=md_path if md_path.exists() else None,
-            duckdb=duckdb_path if duckdb_path.exists() else None
-        )
-        filesets.append(fileset)
+            fileset = FileSet(
+                h5ad=h5ad_path,
+                md=md_path if md_path.exists() else None,
+                duckdb=duckdb_path if duckdb_path.exists() else None,
+            )
+            filesets.append(fileset)
 
     return filesets
 
@@ -87,7 +95,7 @@ def scan_data_folder(data_folder: Path) -> List[FileSet]:
 def run_check(h5ad_path: Path, timeout: Optional[int] = None) -> Tuple[bool, str]:
     """Run ant check on an h5ad file"""
     try:
-        cmd = [sys.executable, str(Path(__file__).parent / 'ant-check'), str(h5ad_path)]
+        cmd = [str(Path(__file__).parent / 'ant-check'), str(h5ad_path)]
 
         # Stream output directly to terminal (no capture)
         result = subprocess.run(
@@ -109,7 +117,7 @@ def run_convert(h5ad_path: Path, timeout: Optional[int] = None) -> Tuple[bool, s
     try:
         # Stream output directly to terminal (no capture)
         result = subprocess.run(
-            [sys.executable, str(Path(__file__).parent / 'ant-convert'), str(h5ad_path)],
+            [str(Path(__file__).parent / 'ant-convert'), str(h5ad_path)],
             timeout=timeout  # No timeout by default
         )
         if result.returncode == 0:

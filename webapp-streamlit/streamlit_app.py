@@ -15,7 +15,8 @@ st.set_page_config(
     page_icon="🧬")
 
 pg = st.navigation(
-    ["pages/1_gene.py", "pages/2_umap.py", "pages/3_rolling.py"],
+    ["pages/1_gene.py", "pages/2_umap.py", "pages/3_rolling.py",
+     "pages/4_cat.py", "pages/5_num.py"],
     position='top')
 
 pg.run()

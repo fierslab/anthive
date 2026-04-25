@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
 # dependencies = [
-#   "anndata>=0.10.0",
+#   "anndata>=0.12.0",
 #   "numpy>=1.24.0",
 #   "pandas>=2.0.0",
 #   "pyyaml>=6.0",
@@ -959,6 +959,12 @@ For more control, run these tools separately.
         """
     )
     parser.add_argument('file', help='Path to h5ad file')
+    parser.add_argument('--skip-h5ad', action='store_true',
+                        help='Skip h5ad validation step')
+    parser.add_argument('--skip-duckdb', action='store_true',
+                        help='Skip DuckDB validation step')
+    args = parser.parse_args()
+
     # Convert to Path
     h5ad_path = Path(args.file).resolve()
 

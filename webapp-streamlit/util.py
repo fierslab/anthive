@@ -10,6 +10,11 @@ def p_selectbox(title, options, key,
                 default_value=None,
                 **kwargs):
 
+    # Clear stale session state if current value is no longer a valid option
+    # (e.g. when a parent selectbox changes and the child's options shrink)
+    if key in st.session_state and st.session_state[key] not in options:
+        del st.session_state[key]
+
     # first check if it is in the URL. If not, check
     # default_value
     initial_option = st.query_params.get(key)

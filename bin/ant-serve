@@ -1166,9 +1166,11 @@ async def search_genes(
         GET /databases/my_db/genes?q=CD4&exact=true
     """
     try:
-        with _pooled_db(db_id) as db:
-            genes = db.search_genes(q, case_sensitive=case_sensitive, limit=limit, exact=exact)
+        def _sync_search():
+            with _pooled_db(db_id) as db:
+                genes = db.search_genes(q, case_sensitive=case_sensitive, limit=limit, exact=exact)
             return {"query": q, "count": len(genes), "genes": genes}
+        return await asyncio.to_thread(_sync_search)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -1251,27 +1253,31 @@ async def get_gene_stats_all(
         GET /gene_stats_all?genes=APOE,TREM2&case_sensitive=true
     """
     gene_list = [g.strip() for g in genes.split(',') if g.strip()]
-    results = []
-    n_skipped = 0
 
-    for db_id, meta in registry.metadata_cache.items():
-        layer = meta.get('default_layer')
-        if not layer:
-            n_skipped += 1
-            continue
-        try:
-            with _pooled_db(db_id) as db:
-                stats = db.get_gene_stats(gene_list, layer=layer, case_sensitive=case_sensitive)
-            results.append({
-                'db_id': db_id,
-                'group': registry._db_extra.get(db_id, {}).get('group_id', ''),
-                'title': meta.get('title', db_id),
-                'n_cells': meta.get('n_cells', 0),
-                'layer': layer,
-                'stats': stats,
-            })
-        except Exception:
-            n_skipped += 1
+    def _sync_query_all_dbs():
+        query_results = []
+        n_skip = 0
+        for db_id_inner, meta in registry.metadata_cache.items():
+            layer = meta.get('default_layer')
+            if not layer:
+                n_skip += 1
+                continue
+            try:
+                with _pooled_db(db_id_inner) as db:
+                    stats = db.get_gene_stats(gene_list, layer=layer, case_sensitive=case_sensitive)
+                query_results.append({
+                    'db_id': db_id_inner,
+                    'group': registry._db_extra.get(db_id_inner, {}).get('group_id', ''),
+                    'title': meta.get('title', db_id_inner),
+                    'n_cells': meta.get('n_cells', 0),
+                    'layer': layer,
+                    'stats': stats,
+                })
+            except Exception:
+                n_skip += 1
+        return query_results, n_skip
+
+    results, n_skipped = await asyncio.to_thread(_sync_query_all_dbs)
 
     # ── Cross-database CV per gene ─────────────────────────────────────────
     # Collect mean expression per gene across all databases (skip not-found)
@@ -1732,7 +1738,7 @@ async def plot(
     if output_format not in _PLOT_MIME_TYPES:
         raise HTTPException(400, detail=f"Unknown format '{output_format}'. Valid: png, svg, pdf")
 
-    try:
+    def _sync_plot():
         with _pooled_db(db_id) as db:
             available_embeddings = db._get_embeddings()
             categorical_fields = db._get_categorical_fields()
@@ -1873,15 +1879,10 @@ async def plot(
                     caption=caption,
                 )
 
-        return Response(
-            content=image_bytes,
-            media_type=_PLOT_MIME_TYPES[output_format],
-            headers={
-                'X-Plot-Caption': caption,
-                'X-Plot-Format': output_format,
-            },
-        )
+        return image_bytes, caption
 
+    try:
+        image_bytes, caption = await asyncio.to_thread(_sync_plot)
     except HTTPException:
         raise
     except KeyError as e:
@@ -1890,6 +1891,15 @@ async def plot(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+    return Response(
+        content=image_bytes,
+        media_type=_PLOT_MIME_TYPES[output_format],
+        headers={
+            'X-Plot-Caption': caption,
+            'X-Plot-Format': output_format,
+        },
+    )
 
 
 # ── legacy plot endpoints (deprecated — use /plot) ────────────────────────────
@@ -2115,13 +2125,16 @@ async def analytics_schema(db_id: str):
         db_url = registry.get_database_path(db_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Dataset '{db_id}' not found.")
-    conn = connection_pool.get_connection(db_url)
+    def _sync_schema():
+        conn = connection_pool.get_connection(db_url)
+        try:
+            return analytics.get_schema(conn)
+        finally:
+            connection_pool.return_connection(db_url, conn)
     try:
-        schema = analytics.get_schema(conn)
+        schema = await asyncio.to_thread(_sync_schema)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
-    finally:
-        connection_pool.return_connection(db_url, conn)
     return _json_safe({"db_id": db_id, "tables": schema})
 
 
@@ -2145,10 +2158,12 @@ async def analytics_query(db_id: str, request: AnalyticsQueryRequest):
     # analytics.run_query opens and closes its own dedicated connection so that
     # closing it on timeout actually cancels the in-flight DuckDB query.
     try:
-        result = analytics.run_query(
-            db_url, request.sql, request.session_id,
-            s3_config=registry._s3_config,
-            timeout=request.timeout,
+        result = await asyncio.to_thread(
+            lambda: analytics.run_query(
+                db_url, request.sql, request.session_id,
+                s3_config=registry._s3_config,
+                timeout=request.timeout,
+            )
         )
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -2176,7 +2191,8 @@ async def analytics_viz(request: AnalyticsVizRequest):
     Scripts are killed after 60 s (configurable via ANTHIVE_VIZ_TIMEOUT).
     """
     try:
-        figure_b64, output_format = analytics.run_viz(
+        figure_b64, output_format = await asyncio.to_thread(
+            analytics.run_viz,
             request.session_id, request.code, request.output_format,
         )
     except FileNotFoundError as exc:
@@ -2222,6 +2238,23 @@ async def rescan_databases():
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/skill", tags=["info"], response_class=Response)
+async def get_skill():
+    """Return the Anthive Claude Code skill file (SKILL.md).
+
+    Collaborators can install it with:
+        curl -n https://data.nevel.eu/api/skill -o ~/.claude/skills/anthive/SKILL.md
+    """
+    skill_path = script_dir.parent / ".claude" / "skills" / "anthive" / "SKILL.md"
+    if not skill_path.exists():
+        raise HTTPException(status_code=404, detail="SKILL.md not found")
+    return Response(
+        content=skill_path.read_text(),
+        media_type="text/markdown",
+        headers={"Content-Disposition": "inline; filename=SKILL.md"},
+    )
 
 
 def main():
