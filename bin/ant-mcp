@@ -883,6 +883,25 @@ def main() -> None:
         caption = f"Analytics visualization (session {session_id})"
         return _make_plot_response(base64.b64decode(figure_b64), fmt, caption)
 
+    @mcp.tool()
+    async def rescan_databases():
+        """Force the API server to rescan its data folder and reload all datasets.
+
+        Call this after new h5ad/duckdb files have been added or converted.
+        Returns the number of databases before and after, plus any added/removed IDs.
+        """
+        data = await _get_post('/admin/rescan', {})
+        added = data.get('added', [])
+        removed = data.get('removed', [])
+        lines = [
+            f"Rescan complete: {data.get('previous_count', '?')} → {data.get('current_count', '?')} databases.",
+        ]
+        if added:
+            lines.append(f"Added: {', '.join(added)}")
+        if removed:
+            lines.append(f"Removed: {', '.join(removed)}")
+        return '\n'.join(lines)
+
     # ── run ────────────────────────────────────────────────────────────────────
 
     if args.transport == 'stdio':

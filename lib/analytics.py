@@ -19,18 +19,22 @@ Configuration (env vars):
 
 import ast
 import base64
+import logging
 import os
 import re
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import duckdb
 import pandas as pd
+
+log = logging.getLogger('anthive.analytics')
 
 
 # ── Configuration ──────────────────────────────────────────────────────────────
@@ -45,6 +49,19 @@ QUERY_TIMEOUT:  int = int(os.environ.get('ANTHIVE_QUERY_TIMEOUT', 120))
 VIZ_TIMEOUT:    int = int(os.environ.get('ANTHIVE_VIZ_TIMEOUT', 60))
 PREVIEW_ROWS:   int = 10
 FULL_TABLE_ROWS: int = 500   # return all rows in preview when result is this small
+SESSION_MAX_AGE: int = int(os.environ.get('ANTHIVE_SESSION_MAX_AGE', 3600 * 6))  # 6 hours
+
+
+def _cleanup_old_sessions() -> int:
+    """Remove analytics Parquet and viz files older than SESSION_MAX_AGE. Returns count removed."""
+    tmp = _get_tmp_dir()
+    cutoff = time.time() - SESSION_MAX_AGE
+    removed = 0
+    for path in tmp.iterdir():
+        if path.suffix in ('.parquet', '.png', '.svg', '.pdf') and path.stat().st_mtime < cutoff:
+            path.unlink(missing_ok=True)
+            removed += 1
+    return removed
 
 
 # ── SQL security ───────────────────────────────────────────────────────────────
@@ -222,9 +239,12 @@ def _open_analytics_connection(
         conn.execute(f"CREATE OR REPLACE SECRET _s3 ({', '.join(fields)})")
         conn.execute(f"ATTACH '{db_url}' AS db (READ_ONLY);")
         conn.execute("USE db;")
-        return conn
     else:
-        return duckdb.connect(db_url, read_only=True)
+        conn = duckdb.connect(db_url, read_only=True)
+    # Cap memory to prevent OOM on constrained servers
+    conn.execute("SET memory_limit = '2GB'")
+    conn.execute("SET threads = 2")
+    return conn
 
 
 def run_query(
@@ -257,6 +277,7 @@ def run_query(
     """
     effective_timeout = timeout if timeout is not None else QUERY_TIMEOUT
     validate_sql(sql)
+    _cleanup_old_sessions()  # prune stale Parquet files to prevent disk fill
     session_id = session_id or uuid.uuid4().hex
 
     limited_sql = f"SELECT * FROM (\n{sql}\n) __q LIMIT {MAX_ROWS}"
@@ -274,11 +295,13 @@ def run_query(
         except Exception as exc:
             error_holder['exc'] = exc
 
+    log.info('analytics_query session=%s timeout=%ds sql=%.100s', session_id, effective_timeout, sql.replace('\n', ' '))
     thread = threading.Thread(target=_exec, daemon=True)
     thread.start()
     thread.join(effective_timeout)
 
     if thread.is_alive():
+        log.warning('analytics_query TIMEOUT session=%s after %ds', session_id, effective_timeout)
         # Close the connection to interrupt the running query, then wait briefly.
         dedicated_conn = conn_holder.get('conn')
         if dedicated_conn is not None:
@@ -297,6 +320,7 @@ def run_query(
             pass
 
     if 'exc' in error_holder:
+        log.error('analytics_query FAILED session=%s: %s', session_id, error_holder['exc'])
         raise RuntimeError(str(error_holder['exc'])) from error_holder['exc']
 
     result_df: pd.DataFrame = result_holder['df']
@@ -374,6 +398,7 @@ def run_viz(
             cwd=str(tmp),
         )
     except subprocess.TimeoutExpired:
+        log.warning('analytics_viz TIMEOUT session=%s after %ds', session_id, VIZ_TIMEOUT)
         raise TimeoutError(
             f"Visualization script exceeded the {VIZ_TIMEOUT}s time limit."
         )
@@ -382,6 +407,7 @@ def run_viz(
 
     if proc.returncode != 0:
         stderr_snippet = (proc.stderr or '(no stderr)')[-1000:]
+        log.error('analytics_viz FAILED session=%s: %s', session_id, stderr_snippet[:200])
         raise RuntimeError(f"Visualization script failed:\n{stderr_snippet}")
 
     if not output_path.exists():

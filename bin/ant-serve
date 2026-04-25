@@ -35,6 +35,8 @@ Example:
 import argparse
 import asyncio
 import json
+import logging
+import logging.handlers
 import math
 import sys
 import time
@@ -66,6 +68,42 @@ import plotting
 import analytics
 
 
+# ── Logging setup ─────────────────────────────────────────────────────────────
+
+def _setup_logging(log_dir: Path = None) -> logging.Logger:
+    """Configure file + console logging with rotation."""
+    if log_dir is None:
+        log_dir = Path(__file__).parent.parent.resolve() / 'logs'
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    logger = logging.getLogger('anthive')
+    logger.setLevel(logging.DEBUG)
+
+    # Rotating file handler: 10 MB per file, keep 5 backups
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_dir / 'ant-serve.log',
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+    )
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s %(levelname)-8s %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S',
+    ))
+    logger.addHandler(file_handler)
+
+    # Console: warnings and above only (uvicorn handles INFO)
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.WARNING)
+    console_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+    logger.addHandler(console_handler)
+
+    return logger
+
+
+log = _setup_logging()
+
+
 class QueryRequest(BaseModel):
     """Request model for SQL query endpoints"""
     query: str
@@ -79,9 +117,12 @@ class ConnectionPool:
     Phase 2 enhancement for concurrent request handling.
     """
 
-    def __init__(self, max_connections_per_db: int = 5, s3_config: Optional[Dict] = None):
+    def __init__(self, max_connections_per_db: int = 3, s3_config: Optional[Dict] = None,
+                 memory_limit: str = '2GB', threads: int = 2):
         self.max_connections_per_db = max_connections_per_db
         self.s3_config = s3_config or {}
+        self.memory_limit = memory_limit
+        self.threads = threads
         self.pools: Dict[str, List[Any]] = defaultdict(list)
         self.in_use: Dict[str, int] = defaultdict(int)
         self.locks: Dict[str, Lock] = defaultdict(Lock)
@@ -122,6 +163,9 @@ class ConnectionPool:
             conn.execute("USE db;")
         else:
             conn = duckdb.connect(db_key, read_only=True)
+        # Cap per-connection memory and parallelism to prevent OOM
+        conn.execute(f"SET memory_limit = '{self.memory_limit}'")
+        conn.execute(f"SET threads = {self.threads}")
         return conn
 
     def get_connection(self, db_key: str):
@@ -905,9 +949,11 @@ async def lifespan(app: FastAPI):
         print("ERROR: Registry or connection pool not initialized!")
         sys.exit(1)
     asyncio.create_task(_daily_metadata_refresh())
+    log.info("Server startup complete — %d databases", len(registry.databases))
     print("Server startup complete")
     yield
     # Shutdown
+    log.info("Server shutting down")
     print("Shutting down...")
     if connection_pool:
         connection_pool.close_all()
@@ -968,6 +1014,40 @@ app.add_middleware(
 
 # Note: Response compression via reverse proxy (nginx, caddy) recommended
 # Can enable gzip middleware here if needed
+
+
+# ── Request logging middleware ────────────────────────────────────────────────
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as StarletteRequest
+
+
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    """Log every request with timing, status, and errors."""
+
+    async def dispatch(self, request: StarletteRequest, call_next):
+        start = time.time()
+        path = request.url.path
+        method = request.method
+        try:
+            response = await call_next(request)
+            elapsed = time.time() - start
+            status = response.status_code
+            if status >= 500:
+                log.error('%s %s → %d (%.2fs)', method, path, status, elapsed)
+            elif status >= 400:
+                log.warning('%s %s → %d (%.2fs)', method, path, status, elapsed)
+            elif elapsed > 10:
+                log.warning('%s %s → %d SLOW (%.2fs)', method, path, status, elapsed)
+            else:
+                log.debug('%s %s → %d (%.2fs)', method, path, status, elapsed)
+            return response
+        except Exception as exc:
+            elapsed = time.time() - start
+            log.exception('%s %s CRASHED after %.2fs: %s', method, path, elapsed, exc)
+            raise
+
+
+app.add_middleware(RequestLoggingMiddleware)
 
 
 # ============================================================================
@@ -1329,7 +1409,7 @@ async def get_cells(
     metadata: Optional[str] = Query(None, description="Comma-separated metadata fields, '*' for all"),
     layer: str = Query("X", description="Layer name"),
     filter: Optional[List[str]] = Query(None, description="Filters: field:value or field:min,max"),
-    limit: Optional[int] = Query(None, description="Maximum cells (no default)"),
+    limit: int = Query(50000, description="Maximum cells (default 50000, max 500000)"),
     format: str = Query("json", description="Output format: json, csv, parquet")
 ):
     """
@@ -1349,6 +1429,9 @@ async def get_cells(
         GET /databases/my_db/cells?metadata=*&format=csv
     """
     try:
+        # Cap limit to prevent OOM on large datasets
+        limit = min(limit, 500_000)
+
         # Parse parameters
         gene_list = genes.split(',') if genes else None
 
@@ -1425,20 +1508,19 @@ async def get_cells(
                 headers={"Content-Disposition": f"attachment; filename={filename}"}
             )
         else:  # json
-            # Convert to JSON-safe format using pandas to_json which handles NaN/inf properly
-            import json
-            json_str = df.to_json(orient='records', double_precision=6)
-            data = json.loads(json_str)
-            # Ensure all values are JSON-safe (no numpy types)
+            # Build JSON directly to avoid 3x memory amplification
+            # (DataFrame → JSON string → Python dicts → output JSON)
             n_cells = int(len(df))
             n_columns = int(len(df.columns))
             columns = [str(col) for col in df.columns.tolist()]
-            return {
-                "n_cells": n_cells,
-                "n_columns": n_columns,
-                "columns": columns,
-                "data": data
-            }
+            records_json = df.to_json(orient='records', double_precision=6)
+            # Assemble final JSON with metadata wrapper without re-parsing
+            body = (
+                f'{{"n_cells":{n_cells},"n_columns":{n_columns},'
+                f'"columns":{json.dumps(columns)},'
+                f'"data":{records_json}}}'
+            )
+            return Response(content=body, media_type="application/json")
 
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -1506,7 +1588,7 @@ async def get_embeddings(db_id: str):
 async def get_embedding_data(
     db_id: str,
     embedding_id: str,
-    limit: Optional[int] = Query(None, description="Maximum cells"),
+    limit: int = Query(100000, description="Maximum cells (default 100000)"),
     n_dims: Optional[int] = Query(2, description="Number of dimensions (0 for all)")
 ):
     """
@@ -1514,13 +1596,13 @@ async def get_embedding_data(
 
     Parameters:
     - embedding_id: Embedding name (e.g., Umap, Pca)
-    - limit: Maximum cells to return
+    - limit: Maximum cells to return (default 100000)
     - n_dims: Number of dimensions (default: 2, use 0 for all)
     """
     try:
         with _pooled_db(db_id) as db:
             dims = None if n_dims == 0 else n_dims
-            df = db.get_embedding_data(embedding_id, limit=limit, n_dims=dims)
+            df = db.get_embedding_data(embedding_id, limit=min(limit, 500_000), n_dims=dims)
 
             return {
                 "embedding_id": embedding_id,
@@ -1544,14 +1626,17 @@ async def execute_sql_query(db_id: str, request: QueryRequest):
 
     Request Body:
     - query: SQL query string
-    - limit: Optional limit to append
+    - limit: Optional limit to append (capped at 100000)
 
     Returns results in JSON format.
-    All queries are read-only for security.
+    All queries are read-only for security. Only SELECT queries are allowed.
     """
     try:
+        # Validate SQL (block writes, DDL, file-reading functions)
+        analytics.validate_sql(request.query)
+        effective_limit = min(request.limit or 100_000, 100_000)
         with _pooled_db(db_id) as db:
-            df = db.execute_sql(request.query, limit=request.limit)
+            df = db.execute_sql(request.query, limit=effective_limit)
 
         # Convert to JSON-safe format
         df = df.where(pd.notna(df), None)
@@ -1763,10 +1848,15 @@ async def plot(
                 color_kind = 'categorical'
                 if color:
                     color_field_name, color_kind = resolve(color)
+                    # Fetch color data only for the sampled cells (not the full dataset)
+                    sampled_cells = embedding_df['cell_name'].tolist() if sample else None
+                    color_filters = dict(filters) if filters else {}
+                    if sampled_cells:
+                        color_filters['cell_name'] = sampled_cells
                     if color_kind == 'gene':
-                        color_df = db.get_cell_table(genes=[color_field_name], layer=layer, filters=filters)
+                        color_df = db.get_cell_table(genes=[color_field_name], layer=layer, filters=color_filters if sampled_cells else filters)
                     else:
-                        color_df = db.get_cell_table(metadata_fields=[color_field_name], filters=filters)
+                        color_df = db.get_cell_table(metadata_fields=[color_field_name], filters=color_filters if sampled_cells else filters)
 
                 x_label = str(embedding_df.columns[-2]).replace('dim_', 'Dim ')
                 y_label = str(embedding_df.columns[-1]).replace('dim_', 'Dim ')
