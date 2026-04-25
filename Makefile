@@ -1,4 +1,4 @@
-.PHONY: help build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-streamlit serve-mcp serve-all serve-debug dev-jupyter sync-push sync-pull sync-status
+.PHONY: help test build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-streamlit serve-mcp serve-all serve-debug dev-jupyter sync-push sync-pull sync-status
 
 help:
 	@echo "Anthive4 Development Commands"
@@ -33,6 +33,10 @@ help:
 	@echo "  ./bin/ant build-all    - Process entire datastore with parallel conversion"
 	@echo "  ./bin/ant serve        - Start REST API server"
 	@echo "  ./bin/ant-mcp          - MCP server (LLM tool integration)"
+
+# Run the test suite (lib/ + API tests)
+test:
+	PYTHONPATH=lib python -m pytest tests/ -v
 
 clean-webapp:
 	@echo "Cleaning webapp directory..."
