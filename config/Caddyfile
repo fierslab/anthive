@@ -32,6 +32,11 @@
 		file_server
 	}
 
+	# MCP server (FastMCP streamable-http)
+	handle /mcp/* {
+		reverse_proxy localhost:8090
+	}
+
 	# Streamlit — started with --server.baseUrlPath=streamlit so all its
 	# routes (/_stcore/stream WS, /static/, /streamlit/) carry the prefix.
 	# Match both /streamlit (redirect to /streamlit/) and /streamlit/*.
