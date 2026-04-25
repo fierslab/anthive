@@ -626,6 +626,115 @@ class AnthiveDB:
 
         return results
 
+    def score_module(
+        self,
+        module_genes: List[str],
+        layer: str = 'X',
+        n_control: int = 100,
+        seed: int = 42,
+    ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+        """Compute per-cell module scores (Scanpy score_genes equivalent).
+
+        For each cell, score = mean(module genes) - mean(control genes),
+        where control genes are sampled from the same expression bins as
+        the module genes (using __gene_bins built by ant-duckdb-check).
+
+        Args:
+            module_genes: List of gene names in the module.
+            layer: Expression layer (default 'X'). Must be log-normalized.
+            n_control: Control genes sampled per expression bin (default 100).
+            seed: Integer seed for reproducible control gene selection.
+
+        Returns:
+            Tuple of (scores_df, meta_dict).
+            scores_df: DataFrame with columns [cell_name, module_score].
+            meta_dict: Dict with genes_found, genes_missing, n_control_genes.
+        """
+        self.require_gene_bins()
+
+        # Resolve gene names → integer IDs (parameterized, no SQL injection)
+        placeholders = ', '.join('?' for _ in module_genes)
+        found_rows = self._conn.execute(
+            f"SELECT gene_name, gene_id FROM __genes WHERE gene_name IN ({placeholders})",
+            module_genes,
+        ).fetchall()
+        found_map = {name: gid for name, gid in found_rows}
+        genes_found = [g for g in module_genes if g in found_map]
+        genes_missing = [g for g in module_genes if g not in found_map]
+
+        if not genes_found:
+            raise ValueError(
+                f"None of the module genes found in database: {module_genes}"
+            )
+
+        gene_id_list = ', '.join(str(found_map[g]) for g in genes_found)
+        layer_table = f"__layer__{layer}"
+
+        # Count control genes that will be selected
+        n_control_genes = self._conn.execute(f"""
+            SELECT COUNT(*) FROM (
+                SELECT gb.gene_id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY gb.expr_bin
+                           ORDER BY md5(CAST(gb.gene_id AS VARCHAR) || CAST({seed} AS VARCHAR))
+                       ) AS rn
+                FROM __gene_bins gb
+                WHERE gb.expr_bin IN (
+                    SELECT DISTINCT expr_bin FROM __gene_bins
+                    WHERE gene_id IN ({gene_id_list})
+                )
+                AND gb.gene_id NOT IN ({gene_id_list})
+            ) WHERE rn <= {n_control}
+        """).fetchone()[0]
+
+        # Compute per-cell module scores
+        scores_df = self._conn.execute(f"""
+            WITH control AS (
+                SELECT gene_id FROM (
+                    SELECT
+                        gb.gene_id,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY gb.expr_bin
+                            ORDER BY md5(CAST(gb.gene_id AS VARCHAR) || CAST({seed} AS VARCHAR))
+                        ) AS rn
+                    FROM __gene_bins gb
+                    WHERE gb.expr_bin IN (
+                        SELECT DISTINCT expr_bin
+                        FROM __gene_bins
+                        WHERE gene_id IN ({gene_id_list})
+                    )
+                    AND gb.gene_id NOT IN ({gene_id_list})
+                )
+                WHERE rn <= {n_control}
+            ),
+            module_avg AS (
+                SELECT cell_id, AVG(value) AS m
+                FROM {layer_table}
+                WHERE gene_id IN ({gene_id_list})
+                GROUP BY cell_id
+            ),
+            control_avg AS (
+                SELECT cell_id, AVG(value) AS c
+                FROM {layer_table}
+                WHERE gene_id IN (SELECT gene_id FROM control)
+                GROUP BY cell_id
+            )
+            SELECT
+                cl.cell_name,
+                COALESCE(ma.m, 0.0) - COALESCE(ca.c, 0.0) AS module_score
+            FROM __cells cl
+            LEFT JOIN module_avg  ma ON cl.cell_id = ma.cell_id
+            LEFT JOIN control_avg ca ON cl.cell_id = ca.cell_id
+            WHERE ma.cell_id IS NOT NULL OR ca.cell_id IS NOT NULL
+        """).fetchdf()
+
+        meta = {
+            'genes_found': genes_found,
+            'genes_missing': genes_missing,
+            'n_control_genes': int(n_control_genes),
+        }
+        return scores_df, meta
+
     def execute_sql(self, query: str, limit: Optional[int] = None) -> pd.DataFrame:
         """
         Execute raw SQL query

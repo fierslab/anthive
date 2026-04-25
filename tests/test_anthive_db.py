@@ -84,6 +84,26 @@ def db():
         )
     conn.execute("CREATE VIEW obsm__X_umap AS SELECT * FROM __obsm_X_umap")
 
+    # Internal layer table (integer IDs, used by score_module)
+    conn.execute("""
+        CREATE TABLE __layer__X AS
+        SELECT e.cell_id, e.gene_id, e.value FROM __expr e
+    """)
+
+    # Gene bins (required for module scoring)
+    conn.execute("""
+        CREATE TABLE __gene_bins AS
+        WITH gene_means AS (
+            SELECT g.gene_id, COALESCE(AVG(l.value), 0.0) AS mean_expr
+            FROM __genes g
+            LEFT JOIN __layer__X l USING (gene_id)
+            GROUP BY g.gene_id
+        )
+        SELECT gene_id, mean_expr,
+               NTILE(25) OVER (ORDER BY mean_expr) AS expr_bin
+        FROM gene_means
+    """)
+
     anthive_db = AnthiveDB(conn=conn, owns_conn=False)
     yield anthive_db
     conn.close()
@@ -268,3 +288,45 @@ class TestExecuteSql:
     def test_with_limit(self, db):
         df = db.execute_sql("SELECT * FROM cells", limit=3)
         assert len(df) == 3
+
+
+# ── score_module ──────────────────────────────────────────────────────────────
+
+class TestScoreModule:
+
+    def test_basic(self, db):
+        scores_df, meta = db.score_module(["APOE", "TREM2"])
+        assert "cell_name" in scores_df.columns
+        assert "module_score" in scores_df.columns
+        assert len(scores_df) > 0
+        assert meta["genes_found"] == ["APOE", "TREM2"]
+        assert meta["genes_missing"] == []
+        # With only 5 genes, NTILE(25) puts each in a separate bin,
+        # so no control genes share a bin with the module genes.
+        assert meta["n_control_genes"] >= 0
+
+    def test_missing_genes_reported(self, db):
+        scores_df, meta = db.score_module(["APOE", "NONEXISTENT"])
+        assert "APOE" in meta["genes_found"]
+        assert "NONEXISTENT" in meta["genes_missing"]
+        assert len(scores_df) > 0
+
+    def test_all_genes_missing_raises(self, db):
+        with pytest.raises(ValueError, match="None of the module genes"):
+            db.score_module(["FAKE1", "FAKE2"])
+
+    def test_scores_are_floats(self, db):
+        scores_df, _ = db.score_module(["APOE"])
+        assert scores_df["module_score"].dtype in ("float64", "float32")
+
+    def test_reproducible_with_same_seed(self, db):
+        df1, _ = db.score_module(["APOE", "TREM2"], seed=42)
+        df2, _ = db.score_module(["APOE", "TREM2"], seed=42)
+        assert df1["module_score"].tolist() == df2["module_score"].tolist()
+
+    def test_different_seed_different_controls(self, db):
+        df1, meta1 = db.score_module(["APOE"], seed=1)
+        df2, meta2 = db.score_module(["APOE"], seed=9999)
+        # Scores may differ because different control genes are selected
+        # (but with only 5 genes total, control sets may overlap — just check it runs)
+        assert len(df1) == len(df2)

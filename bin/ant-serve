@@ -128,6 +128,15 @@ class QueryRequest(BaseModel):
     limit: Optional[int] = None
 
 
+class ModuleScoreRequest(BaseModel):
+    """Request model for module scoring"""
+    genes: List[str]
+    layer: str = 'X'
+    n_control: int = 100
+    seed: int = 42
+    subset: List[str] = []
+
+
 class ConnectionPool:
     """Connection pool for DuckDB databases
 
@@ -2323,6 +2332,82 @@ async def analytics_viz(request: AnalyticsVizRequest):
         "mime_type":     mime_types.get(output_format, 'image/png'),
         "figure_b64":    figure_b64,
     }
+
+
+@app.post("/databases/{db_id:path}/module_score", tags=["analytics"])
+async def module_score(db_id: str, request: ModuleScoreRequest):
+    """Compute per-cell module scores (Scanpy score_genes / Seurat AddModuleScore equivalent).
+
+    For each cell: score = mean(module genes) − mean(expression-matched control genes).
+    Control genes are sampled from the same expression bins as the module genes
+    using the precomputed __gene_bins table.
+
+    Returns summary statistics and a session_id. The full per-cell scores are saved
+    as a Parquet file that can be visualized via POST /analytics/viz or queried
+    via POST /analytics/query using the session_id.
+
+    Requires __gene_bins (built by ant-duckdb-check on databases with a log-normalized layer).
+    """
+    filters = _parse_subset(request.subset)
+
+    def _sync_score():
+        with _pooled_db(db_id) as db:
+            scores_df, meta = db.score_module(
+                module_genes=request.genes,
+                layer=request.layer,
+                n_control=request.n_control,
+                seed=request.seed,
+            )
+
+            # Apply subset filters if any
+            if filters:
+                cat_fields = db._get_categorical_fields()
+                num_fields = db._get_numerical_fields()
+                filter_df = db.get_cell_table(metadata_fields=list(filters.keys()), filters=filters)
+                keep_cells = set(filter_df['cell_name'])
+                scores_df = scores_df[scores_df['cell_name'].isin(keep_cells)]
+
+            return scores_df, meta
+
+    try:
+        scores_df, meta = await asyncio.to_thread(_sync_score)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    # Save to Parquet for downstream analytics_viz / analytics_query
+    import uuid as _uuid
+    session_id = _uuid.uuid4().hex
+    parquet_path = analytics._get_tmp_dir() / f"{session_id}.parquet"
+    scores_df.to_parquet(parquet_path, index=False)
+
+    # Summary statistics
+    s = scores_df['module_score']
+    summary = {
+        'mean':   round(float(s.mean()), 6),
+        'std':    round(float(s.std()), 6),
+        'min':    round(float(s.min()), 6),
+        'q25':    round(float(s.quantile(0.25)), 6),
+        'median': round(float(s.median()), 6),
+        'q75':    round(float(s.quantile(0.75)), 6),
+        'max':    round(float(s.max()), 6),
+    }
+
+    return _json_safe({
+        'db_id':           db_id,
+        'session_id':      session_id,
+        'genes_found':     meta['genes_found'],
+        'genes_missing':   meta['genes_missing'],
+        'n_cells':         len(scores_df),
+        'n_control_genes': meta['n_control_genes'],
+        'layer':           request.layer,
+        'n_control':       request.n_control,
+        'seed':            request.seed,
+        'summary':         summary,
+    })
 
 
 @app.post("/admin/rescan", tags=["admin"])

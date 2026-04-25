@@ -174,6 +174,35 @@ Then read `/tmp/viz.png` with the Read tool.
 The script has `df` (your query result as a DataFrame), `DATA_PATH`,
 and `OUTPUT_PATH` pre-injected. The script MUST save to `OUTPUT_PATH`.
 
+### Module scoring
+
+Compute per-cell module scores (equivalent to Scanpy `score_genes` / Seurat `AddModuleScore`).
+Returns summary statistics and a `session_id` for downstream visualization.
+
+```bash
+curl -n -s -X POST "$API/databases/$DB/module_score" \
+  -H "Content-Type: application/json" \
+  -d '{"genes": ["TREM2", "APOE", "SPP1", "CD9", "LPL", "CST7"]}' \
+  | jq .
+```
+
+Returns: `session_id`, `genes_found`, `genes_missing`, `n_cells`, `n_control_genes`, `summary` (mean/std/median/min/max/q25/q75).
+
+**Parameters:**
+- `genes` (required): list of gene names in the module
+- `layer`: expression layer (default `X`, should be log-normalized)
+- `n_control`: control genes per expression bin (default 100)
+- `seed`: random seed for reproducible control selection (default 42)
+- `subset`: cell subset filters (same syntax as plot endpoint)
+
+**Visualization:** Use the returned `session_id` with `analytics_viz` to plot:
+```bash
+curl -n -s -X POST "$API/analytics/viz" \
+  -H "Content-Type: application/json" \
+  -d '{"session_id": "SESSION_ID", "code": "sns.histplot(df, x=\"module_score\", bins=50)\nplt.savefig(OUTPUT_PATH, bbox_inches=\"tight\", dpi=150)"}' \
+  | jq -r .figure_b64 | base64 -d > /tmp/module_score.png
+```
+
 ---
 
 ## Standard workflow

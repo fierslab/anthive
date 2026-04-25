@@ -77,6 +77,13 @@ call returns a URL and an image; share both with the user.
    matplotlib, seaborn, numpy, scipy, sklearn) against query results
    to produce a custom figure; save output to `OUTPUT_PATH`
 
+**Module scoring** — `module_score(db_id, genes, ...)` computes per-cell
+scores equivalent to Scanpy `score_genes` / Seurat `AddModuleScore`.
+Returns summary statistics and a `session_id` for downstream
+visualization via `analytics_viz`.  Example module gene lists:
+DAM (TREM2, APOE, SPP1, CD9, LPL, CST7), Homeostatic (P2RY12, CX3CR1,
+TMEM119, CSF1R), Interferon (IFIT1, IFIT3, ISG15, MX1, OAS1).
+
 **Cell subsetting** — all plot calls accept a `subset` parameter to
 restrict which cells are used:
 

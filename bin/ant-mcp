@@ -902,6 +902,64 @@ def main() -> None:
             lines.append(f"Removed: {', '.join(removed)}")
         return '\n'.join(lines)
 
+    @mcp.tool()
+    async def module_score(
+        db_id: str,
+        genes: list[str],
+        layer: str = 'X',
+        n_control: int = 100,
+        seed: int = 42,
+        subset: Optional[list[str]] = None,
+    ) -> str:
+        """Compute per-cell module scores (Scanpy score_genes / Seurat AddModuleScore).
+
+        For each cell: score = mean(module genes) − mean(expression-matched control genes).
+        Returns summary statistics and a session_id. Use the session_id with analytics_viz
+        to plot the score distribution or overlay scores on a UMAP.
+
+        Example module gene lists:
+          DAM:          TREM2, APOE, SPP1, CD9, LPL, CST7
+          Homeostatic:  P2RY12, CX3CR1, TMEM119, CSF1R
+          Interferon:   IFIT1, IFIT3, ISG15, MX1, OAS1
+
+        Requires __gene_bins (databases with a log-normalized default layer).
+
+        Args:
+            db_id:     Dataset ID (e.g. 'P26/HMI').
+            genes:     List of gene names in the module.
+            layer:     Expression layer (default 'X'). Should be log-normalized.
+            n_control: Control genes per expression bin (default 100).
+            seed:      Random seed for reproducible control selection.
+            subset:    Cell subset filters (same syntax as plot tool).
+        """
+        try:
+            data = await _get_post(f'/databases/{db_id}/module_score', {
+                'genes': genes,
+                'layer': layer,
+                'n_control': n_control,
+                'seed': seed,
+                'subset': subset or [],
+            })
+        except httpx.HTTPStatusError as exc:
+            return f"Error {exc.response.status_code}: {exc.response.text}"
+
+        lines = [
+            f"Module score for {len(data['genes_found'])} genes in {data['db_id']}",
+            f"  Genes found:   {', '.join(data['genes_found'])}",
+        ]
+        if data['genes_missing']:
+            lines.append(f"  Genes missing: {', '.join(data['genes_missing'])}")
+        lines.append(f"  Control genes: {data['n_control_genes']}")
+        lines.append(f"  Cells scored:  {data['n_cells']}")
+        s = data['summary']
+        lines.append(f"  Score summary: mean={s['mean']:.4f}, std={s['std']:.4f}, "
+                      f"median={s['median']:.4f}, range=[{s['min']:.4f}, {s['max']:.4f}]")
+        lines.append(f"  Session ID:    {data['session_id']}")
+        lines.append("")
+        lines.append("Use this session_id with analytics_viz to plot the score distribution,")
+        lines.append("e.g. a histogram or overlay on UMAP embeddings.")
+        return '\n'.join(lines)
+
     # ── run ────────────────────────────────────────────────────────────────────
 
     if args.transport == 'stdio':
