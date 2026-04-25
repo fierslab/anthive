@@ -33,7 +33,7 @@
 	}
 
 	# MCP server (FastMCP streamable-http)
-	handle /mcp/* {
+	handle /mcp* {
 		reverse_proxy localhost:8090
 	}
 
