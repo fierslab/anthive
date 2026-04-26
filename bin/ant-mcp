@@ -757,7 +757,11 @@ def main() -> None:
         return '\n'.join(lines)
 
     @mcp.tool()
-    async def analytics_query(db_id: str, sql: str, timeout: Optional[int] = None) -> str:
+    async def analytics_query(
+        db_id: str, sql: str,
+        timeout: Optional[int] = None,
+        attach_sessions: Optional[list[str]] = None,
+    ) -> str:
         """Execute a read-only SQL query against a dataset and save results server-side.
 
         IMPORTANT: do ALL filtering, grouping, aggregation, pivoting, and
@@ -775,20 +779,26 @@ def main() -> None:
         DuckDB supports window functions, PIVOT, LIST_AGG, MEDIAN, QUANTILE,
         CORR, and full standard SQL.  Prefer complex SQL over complex Python.
 
+        JOINING MODULE SCORES: If you previously called module_score and got a
+        session_id, pass it in attach_sessions to make the scores available as a
+        table called `scores` (columns: cell_name, module_score). Example:
+            sql: "SELECT o.cell_type, AVG(s.module_score) FROM scores s JOIN obscat o USING (cell_name) GROUP BY 1"
+            attach_sessions: ["<session_id from module_score>"]
+
         Args:
             db_id:   Dataset identifier (e.g. 'S25/SGM').
-            sql:     SELECT query, e.g.:
-                         SELECT celltype, COUNT(*) AS n,
-                                AVG(TREM2) AS mean_trem2
-                         FROM __cells
-                         GROUP BY celltype
-                         ORDER BY n DESC
+            sql:     SELECT query.
             timeout: Query timeout in seconds (default 120). Increase for complex
                      multi-CTE queries on large datasets, e.g. timeout=300.
+            attach_sessions: List of session IDs from prior module_score or
+                     analytics_query calls. The first is available as table
+                     `scores`, additional ones as `session_1`, `session_2`, etc.
         """
         body: Dict[str, Any] = {'sql': sql}
         if timeout is not None:
             body['timeout'] = timeout
+        if attach_sessions:
+            body['attach_sessions'] = attach_sessions
         try:
             data = await _get_post(f'/databases/{db_id}/analytics/query', body)
         except httpx.HTTPStatusError as error:

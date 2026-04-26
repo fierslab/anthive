@@ -2227,6 +2227,7 @@ class AnalyticsQueryRequest(BaseModel):
     sql: str
     session_id: Optional[str] = None
     timeout: Optional[int] = None  # seconds; defaults to server ANTHIVE_QUERY_TIMEOUT (120)
+    attach_sessions: Optional[List[str]] = None  # prior session IDs to attach as tables (e.g. module_score results)
 
 
 class AnalyticsVizRequest(BaseModel):
@@ -2268,10 +2269,17 @@ async def analytics_query(db_id: str, request: AnalyticsQueryRequest):
     preview (first 10 rows) are returned.  Use the returned session_id in a
     subsequent POST /analytics/viz call to visualise the data.
 
+    To use results from a prior module_score call, pass its session_id in
+    `attach_sessions`. The scores become available as a table called `scores`
+    with columns (cell_name, module_score). Example:
+
+        {"sql": "SELECT o.cell_type, AVG(s.module_score) FROM scores s JOIN obscat o USING (cell_name) GROUP BY 1",
+         "attach_sessions": ["abc123..."]}
+
     Constraints:
     - Only SELECT / WITH … SELECT queries are accepted.
     - Result is capped at 500 000 rows (configurable via ANTHIVE_ANALYTICS_ROWS).
-    - Query is killed after 30 s (configurable via ANTHIVE_QUERY_TIMEOUT).
+    - Query is killed after 120 s (configurable via ANTHIVE_QUERY_TIMEOUT).
     """
     try:
         db_url = registry.get_database_path(db_id)
@@ -2285,6 +2293,7 @@ async def analytics_query(db_id: str, request: AnalyticsQueryRequest):
                 db_url, request.sql, request.session_id,
                 s3_config=registry._s3_config,
                 timeout=request.timeout,
+                attach_sessions=request.attach_sessions,
             )
         )
     except (ValueError, RuntimeError) as exc:

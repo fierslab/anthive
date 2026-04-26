@@ -255,6 +255,7 @@ def run_query(
     session_id: Optional[str] = None,
     s3_config: Optional[Dict[str, Any]] = None,
     timeout: Optional[int] = None,
+    attach_sessions: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Execute a validated SELECT query, persist results as Parquet, and return metadata.
 
@@ -293,6 +294,17 @@ def run_query(
             # Dedicated connection — closing it from the main thread kills the query.
             query_conn = _open_analytics_connection(db_url, s3_config)
             conn_holder['conn'] = query_conn
+            # Attach prior session Parquet files as views (e.g. module_score results)
+            if attach_sessions:
+                tmp = _get_tmp_dir()
+                for i, sid in enumerate(attach_sessions):
+                    pq_path = tmp / f"{sid}.parquet"
+                    if pq_path.exists():
+                        view_name = f"session_{i}" if i > 0 else "scores"
+                        query_conn.execute(
+                            f"CREATE OR REPLACE VIEW {view_name} AS "
+                            f"SELECT * FROM read_parquet('{pq_path}')"
+                        )
             result_holder['df'] = query_conn.execute(limited_sql).df()
         except Exception as exc:
             error_holder['exc'] = exc
