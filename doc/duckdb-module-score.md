@@ -109,16 +109,21 @@ def score_module(con, module_genes: list[str], n_control: int = 100, seed: int =
             )
             WHERE rn <= {n_control}
         ),
+        n_control_total AS (
+            SELECT COUNT(*) AS n FROM control
+        ),
         module_score AS (
-            -- Mean expression of module genes per cell
-            SELECT cell_id, AVG(value) AS m
+            -- SUM/n_genes (not AVG!) because the sparse table omits zeros.
+            -- AVG would divide by non-zero count only, biasing the score.
+            SELECT cell_id,
+                   SUM(value) / {len(module_gene_ids)}.0 AS m
             FROM __layer__X
             WHERE gene_id IN ({gene_id_list})
             GROUP BY cell_id
         ),
         control_score AS (
-            -- Mean expression of control genes per cell
-            SELECT cell_id, AVG(value) AS c
+            SELECT cell_id,
+                   SUM(value) / (SELECT n FROM n_control_total)::DOUBLE AS c
             FROM __layer__X
             WHERE gene_id IN (SELECT gene_id FROM control)
             GROUP BY cell_id

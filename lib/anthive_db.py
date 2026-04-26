@@ -707,14 +707,20 @@ class AnthiveDB:
                 )
                 WHERE rn <= {n_control}
             ),
+            n_control_total AS (
+                SELECT COUNT(*) AS n FROM control
+            ),
             module_avg AS (
-                SELECT cell_id, AVG(value) AS m
+                -- SUM/n_genes (not AVG) because sparse table omits zeros
+                SELECT cell_id,
+                       SUM(value) / {len(genes_found)}.0 AS m
                 FROM {layer_table}
                 WHERE gene_id IN ({gene_id_list})
                 GROUP BY cell_id
             ),
             control_avg AS (
-                SELECT cell_id, AVG(value) AS c
+                SELECT cell_id,
+                       SUM(value) / (SELECT n FROM n_control_total)::DOUBLE AS c
                 FROM {layer_table}
                 WHERE gene_id IN (SELECT gene_id FROM control)
                 GROUP BY cell_id
