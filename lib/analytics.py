@@ -291,20 +291,56 @@ def run_query(
 
     def _exec() -> None:
         try:
-            # Dedicated connection — closing it from the main thread kills the query.
-            query_conn = _open_analytics_connection(db_url, s3_config)
-            conn_holder['conn'] = query_conn
-            # Attach prior session Parquet files as views (e.g. module_score results)
             if attach_sessions:
+                # Open a writable in-memory connection, then attach the real
+                # database read-only. This lets us CREATE VIEWs for session
+                # Parquet files while keeping the database itself read-only.
+                import duckdb as _duckdb
+                query_conn = _duckdb.connect()
+                # Cap memory/threads
+                mem_limit = os.environ.get('ANTHIVE_DUCKDB_MEMORY_LIMIT', '2GB')
+                threads = os.environ.get('ANTHIVE_DUCKDB_THREADS', '2')
+                query_conn.execute(f"SET memory_limit = '{mem_limit}'")
+                query_conn.execute(f"SET threads = {threads}")
+
+                if db_url.startswith('s3://'):
+                    # Configure S3 credentials
+                    s3 = s3_config or {}
+                    raw_ep = (s3.get('endpoint') or '').strip()
+                    ep_host = raw_ep.removeprefix('https://').removeprefix('http://')
+                    use_ssl = not raw_ep.startswith('http://')
+                    use_path_style = s3.get('use_path_style') or bool(ep_host)
+                    try:
+                        query_conn.execute("LOAD httpfs;")
+                    except Exception:
+                        query_conn.execute("INSTALL httpfs; LOAD httpfs;")
+                    fields = ["TYPE S3", f"KEY_ID '{s3.get('access_key_id') or ''}'",
+                              f"SECRET '{s3.get('secret_access_key') or ''}'"]
+                    if ep_host: fields.append(f"ENDPOINT '{ep_host}'")
+                    if s3.get('region'): fields.append(f"REGION '{s3['region']}'")
+                    fields.append(f"USE_SSL {'true' if use_ssl else 'false'}")
+                    if use_path_style: fields.append("URL_STYLE 'path'")
+                    query_conn.execute(f"CREATE OR REPLACE SECRET _s3 ({', '.join(fields)})")
+                    query_conn.execute(f"ATTACH '{db_url}' AS db (READ_ONLY);")
+                else:
+                    query_conn.execute(f"ATTACH '{db_url}' AS db (READ_ONLY);")
+                query_conn.execute("USE db;")
+
+                # Create views for attached session Parquet files
                 tmp = _get_tmp_dir()
                 for i, sid in enumerate(attach_sessions):
                     pq_path = tmp / f"{sid}.parquet"
                     if pq_path.exists():
                         view_name = f"session_{i}" if i > 0 else "scores"
                         query_conn.execute(
-                            f"CREATE OR REPLACE VIEW {view_name} AS "
+                            f"CREATE OR REPLACE TEMP VIEW {view_name} AS "
                             f"SELECT * FROM read_parquet('{pq_path}')"
                         )
+            else:
+                # Standard path: dedicated read-only connection
+                query_conn = _open_analytics_connection(db_url, s3_config)
+
+            conn_holder['conn'] = query_conn
             result_holder['df'] = query_conn.execute(limited_sql).df()
         except Exception as exc:
             error_holder['exc'] = exc
