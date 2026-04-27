@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """
-ant-build-reports — Pull static report sites from git repositories.
+ant-build-reports — Pull report repos and build with mkdocs.
 
-Reads the `reports` list from anthive.yaml, clones/pulls each repo into
-a cache directory, and copies the specified subfolder into webapp/report/<slug>/.
+Reads the `reports` list from anthive.yaml, clones/pulls each repo,
+then either:
+  - build=mkdocs: runs `mkdocs build` in the repo to produce the site
+  - build=static (or absent): copies a pre-built folder as-is
+
+Output goes to webapp/report/<slug>/.
 
 Usage:
-    ant build-reports           # pull all reports
-    ant build-reports --clean   # remove cached repos and rebuilt sites
+    ant build-reports           # pull and build all reports
+    ant build-reports --clean   # remove cached repos and built sites
 """
 
 import argparse
@@ -19,8 +23,79 @@ from pathlib import Path
 import yaml
 
 
+def _clone_or_pull(repo_url, repo_dir):
+    """Clone or pull a git repo. Returns True on success."""
+    if repo_dir.exists():
+        print(f"    Pulling...")
+        result = subprocess.run(
+            ["git", "-C", str(repo_dir), "pull", "--ff-only", "-q"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            print(f"    git pull failed, re-cloning...")
+            shutil.rmtree(repo_dir)
+        else:
+            return True
+
+    result = subprocess.run(
+        ["git", "clone", "--depth=1", repo_url, str(repo_dir)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"    FAILED: {result.stderr.strip()}")
+        return False
+    return True
+
+
+def _build_mkdocs(repo_dir, dest_dir):
+    """Run mkdocs build in repo_dir, output to dest_dir. Returns True on success."""
+    mkdocs_yml = repo_dir / "mkdocs.yml"
+    if not mkdocs_yml.exists():
+        print(f"    ERROR: no mkdocs.yml found in repo root")
+        return False
+
+    if dest_dir.exists():
+        shutil.rmtree(dest_dir)
+
+    result = subprocess.run(
+        ["uvx", "--with", "mkdocs-material",
+         "--with", "mkdocs-bibtex",
+         "--with", "mkdocs-table-reader-plugin",
+         "mkdocs", "build",
+         "--site-dir", str(dest_dir),
+         "--quiet"],
+        capture_output=True, text=True,
+        cwd=str(repo_dir),
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        # mkdocs warnings go to stderr but aren't fatal
+        if "ERROR" in stderr or not dest_dir.exists():
+            print(f"    mkdocs build FAILED:\n    {stderr[:500]}")
+            return False
+        if stderr:
+            print(f"    (warnings: {stderr[:200]})")
+
+    return dest_dir.exists()
+
+
+def _build_static(repo_dir, folder, dest_dir):
+    """Copy a pre-built static folder. Returns True on success."""
+    src = repo_dir / folder
+    if not src.exists():
+        print(f"    ERROR: folder '{folder}' not found in repo")
+        dirs = [p.name for p in repo_dir.iterdir() if p.is_dir() and not p.name.startswith('.')]
+        print(f"    Available: {dirs}")
+        return False
+
+    if dest_dir.exists():
+        shutil.rmtree(dest_dir)
+    shutil.copytree(src, dest_dir)
+    return True
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Pull static report sites from git")
+    parser = argparse.ArgumentParser(description="Pull and build report sites from git")
     parser.add_argument("--clean", action="store_true", help="Remove cache and output dirs")
     args = parser.parse_args()
 
@@ -41,12 +116,10 @@ def main():
     output_dir = root / "webapp" / "report"
 
     if args.clean:
-        if cache_dir.exists():
-            shutil.rmtree(cache_dir)
-            print(f"Removed {cache_dir}")
-        if output_dir.exists():
-            shutil.rmtree(output_dir)
-            print(f"Removed {output_dir}")
+        for d in [cache_dir, output_dir]:
+            if d.exists():
+                shutil.rmtree(d)
+                print(f"Removed {d}")
         return 0
 
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -55,59 +128,34 @@ def main():
     for report in reports:
         name = report.get("name", "?")
         repo = report.get("repo")
-        folder = report.get("folder", ".")
         slug = report.get("slug")
+        build = report.get("build", "static")
+        folder = report.get("folder", ".")
 
         if not repo or not slug:
             print(f"  SKIP {name}: missing repo or slug")
             continue
 
+        print(f"  {name} ({slug}, build={build})")
         repo_dir = cache_dir / slug
 
-        # Clone or pull
-        if repo_dir.exists():
-            print(f"  Pulling {name} ({slug})...")
-            result = subprocess.run(
-                ["git", "-C", str(repo_dir), "pull", "--ff-only", "-q"],
-                capture_output=True, text=True,
-            )
-            if result.returncode != 0:
-                print(f"    git pull failed: {result.stderr.strip()}")
-                print(f"    Removing and re-cloning...")
-                shutil.rmtree(repo_dir)
-                result = subprocess.run(
-                    ["git", "clone", "--depth=1", repo, str(repo_dir)],
-                    capture_output=True, text=True,
-                )
-                if result.returncode != 0:
-                    print(f"    FAILED: {result.stderr.strip()}")
-                    continue
-        else:
-            print(f"  Cloning {name} ({slug})...")
-            result = subprocess.run(
-                ["git", "clone", "--depth=1", repo, str(repo_dir)],
-                capture_output=True, text=True,
-            )
-            if result.returncode != 0:
-                print(f"    FAILED: {result.stderr.strip()}")
-                continue
-
-        # Copy the subfolder to webapp/report/<slug>/
-        src = repo_dir / folder
-        if not src.exists():
-            print(f"    ERROR: folder '{folder}' not found in repo")
-            print(f"    Available: {[p.name for p in repo_dir.iterdir() if p.is_dir() and not p.name.startswith('.')]}")
+        if not _clone_or_pull(repo, repo_dir):
             continue
 
         dest = output_dir / slug
-        if dest.exists():
-            shutil.rmtree(dest)
-        shutil.copytree(src, dest)
 
-        n_files = sum(1 for _ in dest.rglob("*") if _.is_file())
-        print(f"    ✓ {name} → /report/{slug}/ ({n_files} files)")
+        if build == "mkdocs":
+            ok = _build_mkdocs(repo_dir, dest)
+        else:
+            ok = _build_static(repo_dir, folder, dest)
 
-    print(f"\nDone. Reports served at /report/<slug>/")
+        if ok:
+            n_files = sum(1 for _ in dest.rglob("*") if _.is_file())
+            print(f"    -> /report/{slug}/ ({n_files} files)")
+        else:
+            print(f"    FAILED")
+
+    print(f"\nDone.")
     return 0
 
 

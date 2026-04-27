@@ -91,5 +91,6 @@ mcp:
 reports: []
   # - name: Microglia States          # display name in navigation
   #   repo: git@github.com:badslab/microglia_states.git
-  #   folder: report/site             # subfolder in repo containing the static site
+  #   build: mkdocs                   # "mkdocs" = run mkdocs build; "static" = copy folder as-is
   #   slug: microglia-states          # URL slug: /report/microglia-states/
+  #   folder: report/site             # only for build=static: subfolder containing the site
