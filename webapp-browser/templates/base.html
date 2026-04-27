@@ -4,16 +4,17 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}anthive{% endblock %}</title>
+    <link rel="stylesheet" href="/anthive-theme.css">
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
-            font-family: 'Courier New', Courier, monospace;
+            font-family: var(--anthive-font-mono);
             font-size: 13px;
-            color: #222;
-            background: #fafafa;
+            color: var(--anthive-text);
+            background: var(--anthive-bg-page);
             line-height: 1.5;
         }
-        a { color: #0055cc; text-decoration: none; }
+        a { color: var(--anthive-link); text-decoration: none; }
         a:hover { text-decoration: underline; }
 
         /* Top bar */
