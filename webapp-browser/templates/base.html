@@ -52,6 +52,32 @@
         #topbar nav a:hover { color: #fff; text-decoration: none; }
         #topbar .sep { color: #333; font-size: 14px; }
 
+        /* Dropdown */
+        .dropdown { position: relative; }
+        .dropdown-toggle { cursor: pointer; }
+        .dropdown-toggle::after { content: ' \25BE'; font-size: 9px; }
+        .dropdown-menu {
+            display: none;
+            position: absolute;
+            top: 100%;
+            left: 0;
+            background: #1a1a2e;
+            border: 1px solid #2a2a4e;
+            padding: 4px 0;
+            min-width: 180px;
+            z-index: 100;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        }
+        .dropdown-menu a {
+            display: block;
+            padding: 4px 14px;
+            color: #ccc !important;
+            font-size: 12px;
+            white-space: nowrap;
+        }
+        .dropdown-menu a:hover { background: #2a2a4e; color: #fff !important; }
+        .dropdown:hover .dropdown-menu { display: block; }
+
         main { padding: 10px 16px; max-width: 1200px; }
 
         /* Tables */
@@ -262,9 +288,16 @@
             <a href="/jupyter">jupyterlite</a>
             <a href="/streamlit">streamlit</a>
             <a href="/api/docs">api</a>
-            {% for r in request.app.state.reports %}
-            <a href="/report/{{ r.slug }}/">{{ r.name }}</a>
-            {% endfor %}
+            {% if request.app.state.reports %}
+            <span class="dropdown">
+                <a href="#" class="dropdown-toggle">reports</a>
+                <div class="dropdown-menu">
+                    {% for r in request.app.state.reports %}
+                    <a href="/report/{{ r.slug }}/">{{ r.name }}</a>
+                    {% endfor %}
+                </div>
+            </span>
+            {% endif %}
         </nav>
     </div>
     <main>
