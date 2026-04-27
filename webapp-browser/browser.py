@@ -36,6 +36,10 @@ def _api_url(request: Request) -> str:
     return request.app.state.api_url
 
 
+def _reports(request: Request) -> list:
+    return getattr(request.app.state, 'reports', [])
+
+
 # ── misc helpers ───────────────────────────────────────────────────────────────
 
 def _as_list(value) -> list:

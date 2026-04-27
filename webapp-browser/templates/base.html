@@ -262,6 +262,9 @@
             <a href="/jupyter">jupyterlite</a>
             <a href="/streamlit">streamlit</a>
             <a href="/api/docs">api</a>
+            {% for r in request.app.state.reports %}
+            <a href="/report/{{ r.slug }}/">{{ r.name }}</a>
+            {% endfor %}
         </nav>
     </div>
     <main>

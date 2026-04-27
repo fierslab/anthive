@@ -73,8 +73,10 @@ def create_app(api_url: str) -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Store API URL in app state for routes to access
+    # Store API URL and config in app state for routes to access
     app.state.api_url = api_url
+    config = get_config()
+    app.state.reports = config.get('reports', [])
 
     # Include browser router
     app.include_router(browser_router)
