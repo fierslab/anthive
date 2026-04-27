@@ -84,3 +84,12 @@ mcp:
   #   https://data.nevel.eu/mcp/<token>
   # Defaults to http://<host>:<port>/mcp when null.
   mcp_url: null
+
+# Static report sites pulled from git repositories
+# Each entry is served at /report/<slug>/ as a static website.
+# Run `make build-reports` to pull/update all.
+reports: []
+  # - name: Microglia States          # display name in navigation
+  #   repo: git@github.com:badslab/microglia_states.git
+  #   folder: report/site             # subfolder in repo containing the static site
+  #   slug: microglia-states          # URL slug: /report/microglia-states/

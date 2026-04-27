@@ -24,6 +24,11 @@
 		reverse_proxy localhost:8081
 	}
 
+	# Static report sites (pulled from git, served as-is)
+	handle /report/* {
+		file_server
+	}
+
 	# Serve static files for JupyterLite
 	# COOP/COEP headers are required for SharedArrayBuffer (Pyodide kernel)
 	handle /jupyter/* {

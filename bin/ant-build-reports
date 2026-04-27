@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""
+ant-build-reports — Pull static report sites from git repositories.
+
+Reads the `reports` list from anthive.yaml, clones/pulls each repo into
+a cache directory, and copies the specified subfolder into webapp/report/<slug>/.
+
+Usage:
+    ant build-reports           # pull all reports
+    ant build-reports --clean   # remove cached repos and rebuilt sites
+"""
+
+import argparse
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import yaml
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Pull static report sites from git")
+    parser.add_argument("--clean", action="store_true", help="Remove cache and output dirs")
+    args = parser.parse_args()
+
+    root = Path(__file__).parent.parent.resolve()
+    config_path = root / "anthive.yaml"
+    if not config_path.exists():
+        config_path = root / "anthive.default.yaml"
+
+    with open(config_path) as f:
+        config = yaml.safe_load(f) or {}
+
+    reports = config.get("reports", [])
+    if not reports:
+        print("No reports configured in anthive.yaml")
+        return 0
+
+    cache_dir = root / "tmp" / "report-repos"
+    output_dir = root / "webapp" / "report"
+
+    if args.clean:
+        if cache_dir.exists():
+            shutil.rmtree(cache_dir)
+            print(f"Removed {cache_dir}")
+        if output_dir.exists():
+            shutil.rmtree(output_dir)
+            print(f"Removed {output_dir}")
+        return 0
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for report in reports:
+        name = report.get("name", "?")
+        repo = report.get("repo")
+        folder = report.get("folder", ".")
+        slug = report.get("slug")
+
+        if not repo or not slug:
+            print(f"  SKIP {name}: missing repo or slug")
+            continue
+
+        repo_dir = cache_dir / slug
+
+        # Clone or pull
+        if repo_dir.exists():
+            print(f"  Pulling {name} ({slug})...")
+            result = subprocess.run(
+                ["git", "-C", str(repo_dir), "pull", "--ff-only", "-q"],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                print(f"    git pull failed: {result.stderr.strip()}")
+                print(f"    Removing and re-cloning...")
+                shutil.rmtree(repo_dir)
+                result = subprocess.run(
+                    ["git", "clone", "--depth=1", repo, str(repo_dir)],
+                    capture_output=True, text=True,
+                )
+                if result.returncode != 0:
+                    print(f"    FAILED: {result.stderr.strip()}")
+                    continue
+        else:
+            print(f"  Cloning {name} ({slug})...")
+            result = subprocess.run(
+                ["git", "clone", "--depth=1", repo, str(repo_dir)],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                print(f"    FAILED: {result.stderr.strip()}")
+                continue
+
+        # Copy the subfolder to webapp/report/<slug>/
+        src = repo_dir / folder
+        if not src.exists():
+            print(f"    ERROR: folder '{folder}' not found in repo")
+            print(f"    Available: {[p.name for p in repo_dir.iterdir() if p.is_dir() and not p.name.startswith('.')]}")
+            continue
+
+        dest = output_dir / slug
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(src, dest)
+
+        n_files = sum(1 for _ in dest.rglob("*") if _.is_file())
+        print(f"    ✓ {name} → /report/{slug}/ ({n_files} files)")
+
+    print(f"\nDone. Reports served at /report/<slug>/")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

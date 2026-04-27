@@ -1,4 +1,4 @@
-.PHONY: help test build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-streamlit serve-mcp serve-all serve-debug dev-jupyter sync-push sync-pull sync-status
+.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-streamlit serve-mcp serve-all serve-debug dev-jupyter sync-push sync-pull sync-status
 
 help:
 	@echo "Anthive4 Development Commands"
@@ -37,6 +37,10 @@ help:
 # Run the test suite (lib/ + API tests)
 test:
 	PYTHONPATH=lib python -m pytest tests/ -v
+
+# Pull static report sites from git repos (defined in anthive.yaml)
+build-reports:
+	@./bin/ant-build-reports
 
 clean-webapp:
 	@echo "Cleaning webapp directory..."
