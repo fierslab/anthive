@@ -168,6 +168,7 @@ def _build_quarto(repo_dir, dest_dir, report_cfg):
             "  sidebar:",
             "    style: docked",
             "    search: true",
+            "    collapse-level: 1",
             "    contents:",
         ]
 
@@ -181,6 +182,25 @@ def _build_quarto(repo_dir, dest_dir, report_cfg):
                 for sub_item in item["contents"]:
                     cfg_lines.append(f"          - {sub_item}")
 
+        # Write custom CSS for sidebar dimming
+        css_path = doc_dir / "_anthive-sidebar.css"
+        css_path.write_text("""\
+/* Compact sidebar */
+.sidebar-item { font-size: 13px; }
+.sidebar-item-text { padding: 2px 0; }
+/* Dim non-active siblings when a section is open */
+.sidebar-item-section.active ~ .sidebar-item-section:not(.active) > .sidebar-item-text,
+.sidebar-item-section:not(.active):has(~ .sidebar-item-section.active) > .sidebar-item-text {
+    opacity: 0.45;
+}
+/* Also dim top-level pages when inside a section */
+.sidebar-navigation:has(.sidebar-item-section.active) > .sidebar-item:not(.sidebar-item-section):not(.active) > .sidebar-item-text {
+    opacity: 0.45;
+}
+/* Active item highlight */
+.sidebar-item .active .sidebar-link { font-weight: 600; }
+""")
+
         cfg_lines.extend([
             "",
             "format:",
@@ -191,6 +211,7 @@ def _build_quarto(repo_dir, dest_dir, report_cfg):
             "    code-fold: true",
             "    mainfont: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
             "    fontsize: 13px",
+            "    css: _anthive-sidebar.css",
         ])
         if bib_path:
             try:
@@ -225,9 +246,11 @@ def _build_quarto(repo_dir, dest_dir, report_cfg):
         cwd=str(repo_dir),
     )
 
-    # Clean up generated yml
-    if generated_yml and quarto_yml.exists():
-        quarto_yml.unlink()
+    # Clean up generated files
+    if generated_yml:
+        for f in [quarto_yml, doc_dir / "_anthive-sidebar.css"]:
+            if f.exists():
+                f.unlink()
 
     if result.returncode != 0:
         stderr = result.stderr.strip()
