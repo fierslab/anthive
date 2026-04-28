@@ -126,8 +126,13 @@ def _build_quarto(repo_dir, dest_dir, report_cfg):
             "website:",
             f'  title: "{name}"',
             "  navbar:",
+            f'    background: "#bacacf"',
+            f'    foreground: "#333"',
             "    left:",
-            '      - text: "Anthive"',
+            f'      - text: "{name}"',
+            "        href: index.html",
+            "    right:",
+            '      - text: "\u2302 anthive"',
             '        href: https://data.nevel.eu/',
             "",
             "format:",
@@ -136,7 +141,8 @@ def _build_quarto(repo_dir, dest_dir, report_cfg):
             "    toc: true",
             "    toc-depth: 3",
             "    code-fold: true",
-            "    css: []",
+            "    mainfont: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+            "    fontsize: 13px",
         ]
         if bib_path:
             # Path relative to doc_dir
