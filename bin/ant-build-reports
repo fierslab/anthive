@@ -79,6 +79,111 @@ def _build_mkdocs(repo_dir, dest_dir):
     return dest_dir.exists()
 
 
+def _build_quarto(repo_dir, dest_dir, report_cfg):
+    """Render a repo's doc/ folder as a Quarto website.
+
+    Looks for _quarto.yml in the doc_dir. If absent, generates one from
+    the anthive template with the report's name and bib path.
+
+    The bib file lives inside the repo (typically doc/literature/references.bib).
+    """
+    doc_dir = repo_dir / report_cfg.get("folder", "doc")
+    if not doc_dir.exists():
+        print(f"    ERROR: folder '{doc_dir.name}' not found in repo")
+        return False
+
+    # Find bib file: explicit config, or scan common locations
+    bib_path = None
+    bib_cfg = report_cfg.get("bib")
+    if bib_cfg:
+        candidate = repo_dir / bib_cfg
+        if candidate.exists():
+            bib_path = candidate
+    if not bib_path:
+        for candidate in [
+            doc_dir / "literature" / "references.bib",
+            doc_dir / "references.bib",
+            repo_dir / "references.bib",
+        ]:
+            if candidate.exists():
+                bib_path = candidate
+                break
+
+    # Generate _quarto.yml if not present in doc_dir
+    quarto_yml = doc_dir / "_quarto.yml"
+    generated_yml = False
+    if not quarto_yml.exists():
+        name = report_cfg.get("name", "Report")
+        cfg_lines = [
+            "project:",
+            "  type: website",
+            f"  output-dir: {dest_dir}",
+            "",
+            "website:",
+            f'  title: "{name}"',
+            "  navbar:",
+            "    left:",
+            '      - text: "Anthive"',
+            '        href: https://data.nevel.eu/',
+            "",
+            "format:",
+            "  html:",
+            "    theme: cosmo",
+            "    toc: true",
+            "    toc-depth: 3",
+            "    code-fold: true",
+            "    css: []",
+        ]
+        if bib_path:
+            # Path relative to doc_dir
+            try:
+                rel_bib = bib_path.relative_to(doc_dir)
+            except ValueError:
+                rel_bib = bib_path.relative_to(repo_dir)
+            cfg_lines.extend([
+                "",
+                f"bibliography: {rel_bib}",
+                "csl: https://raw.githubusercontent.com/citation-style-language/styles/master/nature.csl",
+            ])
+
+        quarto_yml.write_text("\n".join(cfg_lines) + "\n")
+        generated_yml = True
+        print(f"    Generated _quarto.yml" + (f" (bib: {bib_path.name})" if bib_path else ""))
+    else:
+        # Patch output-dir into existing _quarto.yml so output goes to our dest
+        existing = yaml.safe_load(quarto_yml.read_text()) or {}
+        project = existing.get("project", {})
+        project["output-dir"] = str(dest_dir)
+        existing["project"] = project
+        quarto_yml.write_text(yaml.dump(existing, default_flow_style=False, sort_keys=False))
+        print(f"    Patched output-dir in existing _quarto.yml")
+
+    if dest_dir.exists():
+        shutil.rmtree(dest_dir)
+
+    result = subprocess.run(
+        ["quarto", "render", str(doc_dir)],
+        capture_output=True, text=True,
+        cwd=str(repo_dir),
+    )
+
+    # Clean up generated yml
+    if generated_yml and quarto_yml.exists():
+        quarto_yml.unlink()
+
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        print(f"    quarto render FAILED:\n    {stderr[:500]}")
+        return False
+
+    if result.stderr:
+        warnings = [l for l in result.stderr.strip().split('\n') if 'WARN' in l]
+        if warnings:
+            print(f"    ({len(warnings)} warnings)")
+
+    return dest_dir.exists()
+
+
 def _build_static(repo_dir, folder, dest_dir):
     """Copy a pre-built static folder. Returns True on success."""
     src = repo_dir / folder
@@ -146,6 +251,8 @@ def main():
 
         if build == "mkdocs":
             ok = _build_mkdocs(repo_dir, dest)
+        elif build == "quarto":
+            ok = _build_quarto(repo_dir, dest, report)
         else:
             ok = _build_static(repo_dir, folder, dest)
 

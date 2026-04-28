@@ -91,6 +91,7 @@ mcp:
 reports: []
   # - name: Microglia States          # display name in navigation
   #   repo: git@github.com:badslab/microglia_states.git
-  #   build: mkdocs                   # "mkdocs" = run mkdocs build; "static" = copy folder as-is
+  #   build: quarto                   # "quarto" | "mkdocs" | "static"
   #   slug: microglia-states          # URL slug: /report/microglia-states/
-  #   folder: report/site             # only for build=static: subfolder containing the site
+  #   folder: doc                     # for quarto: input dir (default "doc"); for static: output subfolder
+  #   bib: doc/literature/refs.bib    # optional: path to .bib file (quarto auto-detects common locations)
