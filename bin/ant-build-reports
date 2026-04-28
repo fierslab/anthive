@@ -92,22 +92,26 @@ def _build_quarto(repo_dir, dest_dir, report_cfg):
         print(f"    ERROR: folder '{doc_dir.name}' not found in repo")
         return False
 
-    # Find bib file: explicit config, or scan common locations
+    # Find bib file: explicit config → scan doc_dir → scan repo root
     bib_path = None
     bib_cfg = report_cfg.get("bib")
     if bib_cfg:
         candidate = repo_dir / bib_cfg
         if candidate.exists():
             bib_path = candidate
+        else:
+            print(f"    WARNING: configured bib '{bib_cfg}' not found")
     if not bib_path:
-        for candidate in [
-            doc_dir / "literature" / "references.bib",
-            doc_dir / "references.bib",
-            repo_dir / "references.bib",
-        ]:
-            if candidate.exists():
-                bib_path = candidate
-                break
+        # Scan for .bib files under doc_dir and repo root
+        bib_files = sorted(set(list(doc_dir.rglob("*.bib")) + list(repo_dir.glob("*.bib"))))
+        if len(bib_files) == 1:
+            bib_path = bib_files[0]
+        elif len(bib_files) > 1:
+            print(f"    WARNING: {len(bib_files)} .bib files found — set 'bib:' in config to pick one:")
+            for b in bib_files:
+                print(f"      {b.relative_to(repo_dir)}")
+            bib_path = bib_files[0]
+            print(f"    Using: {bib_path.relative_to(repo_dir)}")
 
     # Generate _quarto.yml if not present in doc_dir
     quarto_yml = doc_dir / "_quarto.yml"
