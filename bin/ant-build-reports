@@ -27,6 +27,11 @@ def _clone_or_pull(repo_url, repo_dir):
     """Clone or pull a git repo. Returns True on success."""
     if repo_dir.exists():
         print(f"    Pulling...")
+        # Reset any files we patched during the previous build
+        subprocess.run(
+            ["git", "-C", str(repo_dir), "checkout", "."],
+            capture_output=True, text=True,
+        )
         result = subprocess.run(
             ["git", "-C", str(repo_dir), "pull", "--ff-only", "-q"],
             capture_output=True, text=True,
