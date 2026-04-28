@@ -113,11 +113,42 @@ def _build_quarto(repo_dir, dest_dir, report_cfg):
             bib_path = bib_files[0]
             print(f"    Using: {bib_path.relative_to(repo_dir)}")
 
+    # Auto-discover pages: all .md/.qmd files, organized by subdirectory
+    def _build_sidebar_contents(base_dir):
+        """Build a quarto sidebar contents list from .md/.qmd files."""
+        items = []
+        # Top-level files first (index.md becomes the landing page)
+        top_files = sorted(
+            f for f in base_dir.iterdir()
+            if f.is_file() and f.suffix in ('.md', '.qmd') and f.name != 'index.md'
+        )
+        for f in top_files:
+            items.append(f.name)
+
+        # Subdirectories as sections
+        for sub in sorted(d for d in base_dir.iterdir() if d.is_dir() and not d.name.startswith(('.', '_'))):
+            sub_files = sorted(
+                f for f in sub.rglob('*')
+                if f.is_file() and f.suffix in ('.md', '.qmd')
+            )
+            if sub_files:
+                section_items = []
+                for f in sub_files:
+                    rel = str(f.relative_to(base_dir))
+                    section_items.append(rel)
+                items.append({
+                    "section": sub.name.replace('_', ' ').replace('-', ' ').title(),
+                    "contents": section_items,
+                })
+        return items
+
     # Generate _quarto.yml if not present in doc_dir
     quarto_yml = doc_dir / "_quarto.yml"
     generated_yml = False
     if not quarto_yml.exists():
         name = report_cfg.get("name", "Report")
+        sidebar_contents = _build_sidebar_contents(doc_dir)
+
         cfg_lines = [
             "project:",
             "  type: website",
@@ -134,6 +165,23 @@ def _build_quarto(repo_dir, dest_dir, report_cfg):
             "    right:",
             '      - text: "\u2302 anthive"',
             '        href: https://data.nevel.eu/',
+            "  sidebar:",
+            "    style: docked",
+            "    search: true",
+            "    contents:",
+        ]
+
+        # Serialize sidebar contents
+        for item in sidebar_contents:
+            if isinstance(item, str):
+                cfg_lines.append(f"      - {item}")
+            elif isinstance(item, dict):
+                cfg_lines.append(f'      - section: "{item["section"]}"')
+                cfg_lines.append(f"        contents:")
+                for sub_item in item["contents"]:
+                    cfg_lines.append(f"          - {sub_item}")
+
+        cfg_lines.extend([
             "",
             "format:",
             "  html:",
@@ -143,9 +191,8 @@ def _build_quarto(repo_dir, dest_dir, report_cfg):
             "    code-fold: true",
             "    mainfont: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
             "    fontsize: 13px",
-        ]
+        ])
         if bib_path:
-            # Path relative to doc_dir
             try:
                 rel_bib = bib_path.relative_to(doc_dir)
             except ValueError:
@@ -158,7 +205,8 @@ def _build_quarto(repo_dir, dest_dir, report_cfg):
 
         quarto_yml.write_text("\n".join(cfg_lines) + "\n")
         generated_yml = True
-        print(f"    Generated _quarto.yml" + (f" (bib: {bib_path.name})" if bib_path else ""))
+        print(f"    Generated _quarto.yml ({len(sidebar_contents)} sidebar entries"
+              + (f", bib: {bib_path.name}" if bib_path else "") + ")")
     else:
         # Patch output-dir into existing _quarto.yml so output goes to our dest
         existing = yaml.safe_load(quarto_yml.read_text()) or {}
