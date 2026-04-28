@@ -172,12 +172,13 @@ def _build_quarto(repo_dir, dest_dir, report_cfg):
             "    contents:",
         ]
 
-        # Serialize sidebar contents
+        # Serialize sidebar contents — sections start collapsed
         for item in sidebar_contents:
             if isinstance(item, str):
                 cfg_lines.append(f"      - {item}")
             elif isinstance(item, dict):
                 cfg_lines.append(f'      - section: "{item["section"]}"')
+                cfg_lines.append(f"        collapsed: true")
                 cfg_lines.append(f"        contents:")
                 for sub_item in item["contents"]:
                     cfg_lines.append(f"          - {sub_item}")
@@ -229,13 +230,17 @@ def _build_quarto(repo_dir, dest_dir, report_cfg):
         print(f"    Generated _quarto.yml ({len(sidebar_contents)} sidebar entries"
               + (f", bib: {bib_path.name}" if bib_path else "") + ")")
     else:
-        # Patch output-dir into existing _quarto.yml so output goes to our dest
+        # Patch existing _quarto.yml: set output-dir and ensure collapse-level: 1
         existing = yaml.safe_load(quarto_yml.read_text()) or {}
         project = existing.get("project", {})
         project["output-dir"] = str(dest_dir)
         existing["project"] = project
+        # Force sections to start collapsed
+        sidebar = existing.get("website", {}).get("sidebar", {})
+        if isinstance(sidebar, dict):
+            sidebar["collapse-level"] = 1
         quarto_yml.write_text(yaml.dump(existing, default_flow_style=False, sort_keys=False))
-        print(f"    Patched output-dir in existing _quarto.yml")
+        print(f"    Patched existing _quarto.yml (output-dir + collapse-level: 1)")
 
     if dest_dir.exists():
         shutil.rmtree(dest_dir)
