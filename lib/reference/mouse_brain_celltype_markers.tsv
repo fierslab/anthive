@@ -1,0 +1,28 @@
+class	subclass	canonical_markers	notes
+Immune	Microglia	P2ry12,Tmem119,Cx3cr1,Hexb,Siglech,Csf1r,Trem2,C1qa,C1qb,C1qc,Aif1	Homeostatic microglia core signature
+Immune	BAM	Mrc1,Lyve1,Cd163,Ms4a7,Pf4,F13a1	Border-associated macrophages (perivascular, meningeal, choroid plexus)
+Immune	Monocytes	Ly6c2,Ccr2,Ms4a6c,Plac8	Circulating/infiltrating monocytes
+Immune	DC	Flt3,Batf3,Clec9a,Xcr1	Dendritic cells
+Immune	Lymphoid	Cd3d,Cd3e,Nkg7,Gzma,Ccl5	T/NK cells
+Astro-Epen	Astrocytes	Aqp4,Gfap,Aldh1l1,Slc1a3,Slc1a2,S100b,Sox9	Pan-astrocyte markers
+Astro-Epen	Bergmann	Gdf10,Aqp4,Hopx	Cerebellar Bergmann glia
+Astro-Epen	Ependymal	Foxj1,Ccdc153,Tmem212	Ciliated ependymal cells
+Astro-Epen	Tanycyte	Rax,Col23a1,Scn7a	Hypothalamic tanycytes
+Astro-Epen	Choroid plexus	Ttr,Folr1,Kcnj13	Choroid plexus epithelium
+OPC-Oligo	OPC	Pdgfra,Cspg4,Vcan,Sox10	Oligodendrocyte precursor cells
+OPC-Oligo	Oligodendrocytes	Mbp,Plp1,Mog,Mag,Opalin,Cnp	Mature oligodendrocytes
+OEC	OEC	S100b,Mpz,Sox10,Aldh1a1	Olfactory ensheathing cells
+Vascular	Endothelial	Cldn5,Flt1,Pecam1,Cdh5,Tie1	Blood vessel endothelial cells
+Vascular	Pericytes	Pdgfrb,Kcnj8,Vtn,Rgs5	Mural cells / pericytes
+Vascular	SMC	Acta2,Tagln,Myh11	Smooth muscle cells
+Vascular	VLMC	Col1a1,Col1a2,Dcn,Lum	Vascular leptomeningeal cells
+Vascular	ABC	Slc47a1,Slc22a8	Arachnoid barrier cells
+Neurons_Glut	Excitatory	Slc17a7,Slc17a6,Neurod6,Tbr1,Satb2	Pan-glutamatergic markers
+Neurons_GABA	Inhibitory	Gad1,Gad2,Slc32a1	Pan-GABAergic markers
+Neurons_GABA	Pvalb	Pvalb	Fast-spiking interneurons
+Neurons_GABA	Sst	Sst,Sst2	Somatostatin interneurons
+Neurons_GABA	Vip	Vip	VIP interneurons
+Neurons_GABA	Lamp5	Lamp5	Lamp5 interneurons (CGE-derived)
+Neurons_Dopa	Dopaminergic	Th,Slc6a3,Ddc,Nr4a2	Midbrain dopaminergic neurons (SNc/VTA)
+Neurons_Sero	Serotonergic	Tph2,Slc6a4,Fev	Raphe serotonergic neurons
+Neurons_Chol	Cholinergic	Chat,Slc18a3,Slc5a7	Cholinergic neurons
