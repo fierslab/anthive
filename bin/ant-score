@@ -264,6 +264,8 @@ def _score_experiment(adata, experiment: Experiment, genesets: List[Geneset],
         ))
 
     # provenance under adata.uns['module_scores'][experiment_id]
+    # Stored as a JSON string — anndata.uns is fragile with nested dicts
+    # containing empty lists or mixed types.
     if 'module_scores' not in adata.uns:
         adata.uns['module_scores'] = {}
     if not isinstance(adata.uns['module_scores'], dict):
@@ -289,7 +291,7 @@ def _score_experiment(adata, experiment: Experiment, genesets: List[Geneset],
         'timestamp':         datetime.now(timezone.utc).isoformat(),
         'tool_version':      TOOL_VERSION,
     }
-    adata.uns['module_scores'][experiment.experiment_id] = record
+    adata.uns['module_scores'][experiment.experiment_id] = json.dumps(record)
     return record
 
 
