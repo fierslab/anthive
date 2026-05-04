@@ -1,0 +1,536 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "anndata>=0.10.0",
+#   "scanpy>=1.10.0",
+#   "numpy>=1.24.0",
+#   "pandas>=2.0.0",
+#   "pyyaml>=6.0",
+#   "scipy>=1.10.0",
+# ]
+# ///
+"""
+ant-score - Compute scanpy module scores from genesetstore on h5ad files.
+
+For one experiment in the genesetstore (e.g. Sierksma2025/WGCNA), runs
+scanpy.tl.score_genes per geneset and writes the per-cell scores back into
+the parent_dataset's h5ad as obs columns named:
+
+    <study>::<experiment>::<geneset_name>
+
+Writes are atomic and all-or-nothing per experiment: if any geneset fails,
+the original h5ad is left untouched.
+
+Usage:
+  ant score <experiment_id>          # all genesets in one experiment
+  ant score <geneset_id>             # one geneset
+  ant score --all                    # every experiment in the store
+  ant score <id> --rebuild           # also re-convert to DuckDB
+  ant score <id> --rebuild --push --rescan
+                                     # full pipeline: h5ad -> duckdb -> S3 -> API
+  ant score <id> --dry-run           # report what would happen
+
+Options:
+  --ctrl-size N      scanpy ctrl_size (default 50)
+  --n-bins N         scanpy n_bins (default 25)
+  --seed N           random_state (default 0)
+  --layer NAME       use this h5ad layer (default: X)
+  --use-raw          use adata.raw
+  -v, --verbose      more logging
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import anndata
+import numpy as np
+import scanpy as sc
+
+script_dir = Path(__file__).parent.resolve()
+lib_dir = script_dir.parent / 'lib'
+sys.path.insert(0, str(lib_dir))
+
+from config import get_config            # type: ignore
+from geneset import (                    # type: ignore
+    Experiment, Geneset, GenesetRegistry,
+)
+from h5adstore import H5adEntry, find_h5ad   # type: ignore
+
+
+SEPARATOR = '::'
+TOOL_VERSION = 'ant-score/0.1'
+
+
+# ── resolution helpers ────────────────────────────────────────────────────────
+
+def _load_geneset_registry() -> GenesetRegistry:
+    config = get_config()
+    store_value = config.get('geneset_store')
+    if not store_value:
+        sys.exit("ERROR: geneset_store is not configured (anthive.yaml)")
+    store_path = (script_dir.parent / store_value).resolve()
+    if not store_path.exists():
+        sys.exit(f"ERROR: geneset store does not exist: {store_path}")
+    registry = GenesetRegistry(store_path)
+    registry.scan()
+    if registry.errors:
+        for error in registry.errors:
+            print(f"  store error: {error}", file=sys.stderr)
+        sys.exit("ERROR: geneset store has unresolved errors — fix with `ant geneset validate`")
+    return registry
+
+
+def _h5adstore_root() -> Path:
+    config = get_config()
+    h5ad_root_value = config.get('h5ad_store') or 'data/h5adstore'
+    root = (script_dir.parent / h5ad_root_value).resolve()
+    if not root.exists():
+        sys.exit(f"ERROR: h5ad store does not exist: {root}")
+    return root
+
+
+def _resolve_target(registry: GenesetRegistry, target: str
+                    ) -> List[Tuple[Experiment, List[Geneset]]]:
+    """
+    Resolve a target string to a list of (experiment, [genesets]).
+
+    Accepts:
+      - experiment id  ('Sierksma2025/WGCNA')         -> all genesets
+      - geneset id     ('Sierksma2025/WGCNA/Brown')   -> that one geneset
+    """
+    target = target.strip().strip('/')
+    parts = target.split('/')
+
+    if len(parts) == 2:
+        experiment_id = target
+        experiment = registry.get_experiment(experiment_id)
+        if experiment is None:
+            sys.exit(f"ERROR: experiment {experiment_id!r} not found in geneset store")
+        members = [
+            g for g in registry.list_genesets()
+            if g.experiment.experiment_id == experiment_id
+        ]
+        if not members:
+            sys.exit(f"ERROR: experiment {experiment_id!r} contains no genesets")
+        return [(experiment, members)]
+
+    if len(parts) == 3:
+        geneset = registry.get(target)
+        if geneset is None:
+            sys.exit(f"ERROR: geneset {target!r} not found in geneset store")
+        return [(geneset.experiment, [geneset])]
+
+    sys.exit(
+        f"ERROR: target {target!r} must be either '<study>/<experiment>' "
+        f"or '<study>/<experiment>/<geneset>'"
+    )
+
+
+def _resolve_all(registry: GenesetRegistry) -> List[Tuple[Experiment, List[Geneset]]]:
+    out = []
+    for experiment in registry.list_experiments():
+        members = [
+            g for g in registry.list_genesets()
+            if g.experiment.experiment_id == experiment.experiment_id
+        ]
+        if members:
+            out.append((experiment, members))
+    return out
+
+
+# ── core scoring ──────────────────────────────────────────────────────────────
+
+def _column_name(experiment: Experiment, geneset: Geneset) -> str:
+    return f"{experiment.study}{SEPARATOR}{experiment.name}{SEPARATOR}{geneset.name}"
+
+
+def _score_one(adata, geneset: Geneset, column: str,
+               ctrl_size: int, n_bins: int, seed: int,
+               layer: Optional[str], use_raw: bool, verbose: bool
+               ) -> Dict[str, object]:
+    """
+    Run scanpy.tl.score_genes for one geneset. Mutates adata.obs.
+    Returns a per-geneset provenance dict.
+    """
+    if geneset.format != 'grp':
+        raise RuntimeError(
+            f"{geneset.geneset_id}: only .grp genesets are supported (got .{geneset.format}). "
+            "Rank-aware scoring is not implemented yet."
+        )
+
+    requested = list(geneset.genes)
+    var_names = set(adata.var_names)
+    found = [g for g in requested if g in var_names]
+    missing = [g for g in requested if g not in var_names]
+
+    if not found:
+        raise RuntimeError(
+            f"{geneset.geneset_id}: 0 of {len(requested)} genes found in adata.var_names "
+            f"— refusing to score."
+        )
+    if len(found) < 3:
+        raise RuntimeError(
+            f"{geneset.geneset_id}: only {len(found)} of {len(requested)} genes found "
+            f"— too few to compute a meaningful module score (need >= 3)."
+        )
+
+    sc.tl.score_genes(
+        adata,
+        gene_list=found,
+        ctrl_size=ctrl_size,
+        n_bins=n_bins,
+        score_name=column,
+        random_state=seed,
+        layer=layer,
+        use_raw=use_raw,
+        copy=False,
+    )
+
+    scores = np.asarray(adata.obs[column].values, dtype=float)
+    summary = {
+        'mean':   float(np.mean(scores)),
+        'std':    float(np.std(scores)),
+        'min':    float(np.min(scores)),
+        'max':    float(np.max(scores)),
+        'median': float(np.median(scores)),
+    }
+
+    if verbose:
+        print(
+            f"    {column}  found={len(found)}/{len(requested)}  "
+            f"range=[{summary['min']:.3f}, {summary['max']:.3f}]  "
+            f"mean={summary['mean']:.3f}"
+        )
+    else:
+        print(
+            f"    {column}  ({len(found)}/{len(requested)} genes, "
+            f"mean={summary['mean']:.3f})"
+        )
+
+    return {
+        'column':        column,
+        'geneset_id':    geneset.geneset_id,
+        'requested':     len(requested),
+        'found':         len(found),
+        'missing':       missing,
+        'summary':       summary,
+    }
+
+
+def _score_experiment(adata, experiment: Experiment, genesets: List[Geneset],
+                      genesetstore_root: Path, args: argparse.Namespace
+                      ) -> Dict[str, object]:
+    """
+    Score one experiment's worth of genesets onto adata. Mutates adata.
+
+    Raises on any failure — caller is responsible for not writing back if so.
+    """
+    # organism cross-check (geneset metadata only — adata's organism is in .uns
+    # sometimes, and not always reliable; we use the genesetstore as truth)
+    geneset_organism = experiment.organism
+    if geneset_organism and geneset_organism != 'human' and geneset_organism != 'mouse':
+        # non-canonical organism — warn but don't refuse
+        print(f"  WARNING: experiment organism is {geneset_organism!r}", file=sys.stderr)
+
+    plan = []
+    for geneset in genesets:
+        column = _column_name(experiment, geneset)
+        plan.append((geneset, column))
+        if column in adata.obs.columns:
+            print(f"    (overwriting existing column {column!r})")
+
+    print(f"  Scoring {len(plan)} geneset(s)…")
+
+    per_geneset = []
+    for geneset, column in plan:
+        per_geneset.append(_score_one(
+            adata, geneset, column,
+            ctrl_size=args.ctrl_size,
+            n_bins=args.n_bins,
+            seed=args.seed,
+            layer=args.layer,
+            use_raw=args.use_raw,
+            verbose=args.verbose,
+        ))
+
+    # provenance under adata.uns['module_scores'][experiment_id]
+    if 'module_scores' not in adata.uns:
+        adata.uns['module_scores'] = {}
+    if not isinstance(adata.uns['module_scores'], dict):
+        adata.uns['module_scores'] = {}
+
+    record = {
+        'experiment_id':     experiment.experiment_id,
+        'organism':          experiment.organism,
+        'method':            experiment.method,
+        'parent_dataset':    experiment.parent_dataset,
+        'gene_id_type':      experiment.gene_id_type,
+        'genesetstore_sha':  _git_sha(genesetstore_root),
+        'parameters': {
+            'ctrl_size':  args.ctrl_size,
+            'n_bins':     args.n_bins,
+            'seed':       args.seed,
+            'layer':      args.layer,
+            'use_raw':    args.use_raw,
+            'separator':  SEPARATOR,
+        },
+        'per_geneset':       per_geneset,
+        'columns':           [g['column'] for g in per_geneset],
+        'timestamp':         datetime.now(timezone.utc).isoformat(),
+        'tool_version':      TOOL_VERSION,
+    }
+    adata.uns['module_scores'][experiment.experiment_id] = record
+    return record
+
+
+def _git_sha(repo: Path) -> Optional[str]:
+    try:
+        result = subprocess.run(
+            ['git', '-C', str(repo), 'rev-parse', 'HEAD'],
+            capture_output=True, text=True, check=False,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+# ── h5ad I/O with atomic write ────────────────────────────────────────────────
+
+def _process_one_h5ad(entry: H5adEntry,
+                      experiments: List[Tuple[Experiment, List[Geneset]]],
+                      genesetstore_root: Path,
+                      args: argparse.Namespace) -> Dict[str, object]:
+    """
+    Apply all (experiment, genesets) pairs to one h5ad. Atomic: writes to
+    .h5ad.tmp first, only renames on full success. On any error, the .tmp is
+    removed and the original is untouched.
+    """
+    print(f"\n=== {entry.db_id} ({entry.readable_id}) ===")
+    print(f"  h5ad: {entry.h5ad_path}")
+
+    if not entry.h5ad_path.exists():
+        sys.exit(
+            f"ERROR: {entry.h5ad_path} not found locally — refusing to score "
+            f"a remote / S3-only dataset. Pull it first."
+        )
+
+    print(f"  Loading…")
+    adata = anndata.read_h5ad(entry.h5ad_path)
+    print(f"  {adata.n_obs:,} cells × {adata.n_vars:,} genes")
+
+    summaries = []
+    for experiment, genesets in experiments:
+        print(f"\n  Experiment: {experiment.experiment_id}  "
+              f"(organism={experiment.organism}, method={experiment.method})")
+        if experiment.organism and not _organism_compatible(adata, experiment.organism):
+            sys.exit(
+                f"ERROR: experiment organism {experiment.organism!r} is not "
+                f"compatible with the h5ad. Aborting (no scores written)."
+            )
+        record = _score_experiment(
+            adata, experiment, genesets, genesetstore_root, args,
+        )
+        summaries.append(record)
+
+    if args.dry_run:
+        print("\n  (dry run — not writing h5ad)")
+        return {'entry': entry.db_id, 'experiments': summaries, 'wrote': False}
+
+    tmp_path = entry.h5ad_path.with_suffix('.h5ad.tmp')
+    if tmp_path.exists():
+        tmp_path.unlink()
+    print(f"\n  Writing to {tmp_path.name} (atomic)…")
+    try:
+        adata.write_h5ad(tmp_path, compression='gzip')
+        os.replace(tmp_path, entry.h5ad_path)
+    except BaseException:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
+    print(f"  ✓ wrote {entry.h5ad_path}")
+
+    return {'entry': entry.db_id, 'experiments': summaries, 'wrote': True}
+
+
+def _organism_compatible(adata, organism: str) -> bool:
+    """
+    Crude organism check.
+
+    Look at adata.uns for an 'organism' key, otherwise inspect var_names
+    (uppercase = human, mixed case = mouse, by convention).
+    """
+    declared = None
+    if 'organism' in adata.uns:
+        declared = str(adata.uns['organism']).lower()
+    if declared:
+        return declared == organism.lower()
+
+    # Fallback: heuristic on gene-name casing.
+    sample = list(adata.var_names[:200])
+    if not sample:
+        return True  # nothing to check; trust the user
+    upper = sum(1 for g in sample if g.isupper() or '-' in g)
+    fraction_upper = upper / len(sample)
+    if organism.lower() == 'human':
+        return fraction_upper >= 0.4
+    if organism.lower() == 'mouse':
+        return fraction_upper <= 0.7
+    return True  # other organisms, no heuristic
+
+
+# ── pipeline chaining ─────────────────────────────────────────────────────────
+
+def _run_rebuild(entry: H5adEntry) -> int:
+    cmd = [str(script_dir / 'ant-convert'), str(entry.h5ad_path)]
+    print(f"\n  $ {' '.join(cmd)}")
+    return subprocess.call(cmd)
+
+
+def _run_push(entry: H5adEntry) -> int:
+    files = [str(entry.h5ad_path), str(entry.duckdb_path)]
+    files = [f for f in files if Path(f).exists()]
+    cmd = [str(script_dir / 'ant-sync'), 'push', *files]
+    print(f"\n  $ {' '.join(cmd)}")
+    return subprocess.call(cmd)
+
+
+def _run_rescan(api_url: str) -> int:
+    import urllib.request
+    request = urllib.request.Request(
+        f"{api_url.rstrip('/')}/admin/rescan", method='POST',
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            print(f"\n  rescan -> {response.status} {response.read()[:200]}")
+            return 0
+    except Exception as exc:
+        print(f"\n  rescan FAILED: {exc}", file=sys.stderr)
+        return 1
+
+
+# ── main ──────────────────────────────────────────────────────────────────────
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description='Compute scanpy module scores from the genesetstore.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument('target', nargs='?',
+                        help='experiment_id or geneset_id (omit with --all)')
+    parser.add_argument('--all', action='store_true',
+                        help='Score every experiment in the store onto its parent_dataset')
+    parser.add_argument('--ctrl-size', type=int, default=50)
+    parser.add_argument('--n-bins',    type=int, default=25)
+    parser.add_argument('--seed',      type=int, default=0)
+    parser.add_argument('--layer',     default=None,
+                        help='h5ad layer to use (default: X)')
+    parser.add_argument('--use-raw',   action='store_true',
+                        help='Use adata.raw')
+    parser.add_argument('--rebuild',   action='store_true',
+                        help='After writing, run `ant convert` to rebuild the .duckdb')
+    parser.add_argument('--push',      action='store_true',
+                        help='After rebuild, run `ant sync push` to S3')
+    parser.add_argument('--rescan',    action='store_true',
+                        help='POST /admin/rescan to the API after writing')
+    parser.add_argument('--api-url',   default=None,
+                        help='API base URL for --rescan (default: from anthive.yaml)')
+    parser.add_argument('--dry-run',   action='store_true',
+                        help='Compute scores but do not write the h5ad back')
+    parser.add_argument('-v', '--verbose', action='store_true')
+    args = parser.parse_args()
+
+    if not args.target and not args.all:
+        parser.error('target id is required (or use --all)')
+    if args.target and args.all:
+        parser.error('use either a target or --all, not both')
+
+    registry = _load_geneset_registry()
+    h5ad_root = _h5adstore_root()
+    genesetstore_root = registry.root
+
+    if args.all:
+        all_pairs = _resolve_all(registry)
+    else:
+        all_pairs = _resolve_target(registry, args.target)
+
+    # group by parent_dataset → list of (experiment, genesets)
+    by_dataset: Dict[str, List[Tuple[Experiment, List[Geneset]]]] = {}
+    skipped: List[str] = []
+    for experiment, genesets in all_pairs:
+        parent = experiment.parent_dataset
+        if not parent:
+            skipped.append(
+                f"{experiment.experiment_id}: no parent_dataset set in index.md"
+            )
+            continue
+        by_dataset.setdefault(parent, []).append((experiment, genesets))
+
+    for message in skipped:
+        print(f"SKIP  {message}", file=sys.stderr)
+
+    if not by_dataset:
+        sys.exit("ERROR: nothing to do — no experiments resolved with a parent_dataset")
+
+    print(f"Plan: {len(by_dataset)} parent dataset(s), "
+          f"{sum(len(v) for v in by_dataset.values())} experiment(s)")
+
+    results = []
+    for parent_id, experiments in by_dataset.items():
+        entry = find_h5ad(h5ad_root, parent_id)
+        if entry is None:
+            sys.exit(
+                f"ERROR: parent_dataset {parent_id!r} not found in h5adstore "
+                f"({h5ad_root})"
+            )
+        result = _process_one_h5ad(entry, experiments, genesetstore_root, args)
+        results.append((entry, result))
+
+    if args.dry_run:
+        print("\n(dry run; no h5ad files modified)")
+        return 0
+
+    # Optional pipeline chain
+    rebuild_failed = False
+    for entry, result in results:
+        if not result.get('wrote'):
+            continue
+        if args.rebuild:
+            rc = _run_rebuild(entry)
+            if rc != 0:
+                rebuild_failed = True
+                print(f"  ⚠ rebuild for {entry.db_id} returned {rc}", file=sys.stderr)
+                continue
+            if args.push:
+                rc = _run_push(entry)
+                if rc != 0:
+                    print(f"  ⚠ push for {entry.db_id} returned {rc}", file=sys.stderr)
+
+    if args.rescan:
+        api_url = args.api_url
+        if not api_url:
+            config = get_config()
+            host = config.get('rest_api_host', 'localhost')
+            port = config.get('rest_api_port', 8080)
+            api_url = f"http://{host}:{port}/api"
+        _run_rescan(api_url)
+
+    print()
+    print(f"Done. {sum(1 for _, r in results if r.get('wrote'))} h5ad(s) written, "
+          f"{sum(len(r['experiments']) for _, r in results)} experiment(s) scored.")
+    return 1 if rebuild_failed else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

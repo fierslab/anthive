@@ -34,6 +34,7 @@ def get_available_commands(bin_dir: Path) -> dict:
         'md-check': 'Check .md metadata files for sanity (group_id / id)',
         's3':       'Upload/download/manage S3 storage (credentials, list, status)',
         's3-check': 'Check S3 availability of DuckDB files',
+        'score': 'Compute scanpy module scores from genesetstore onto h5ads',
         'serve': 'Start REST API server',
         'sync':  'Push/pull h5ad and DuckDB files to/from S3',
     }
