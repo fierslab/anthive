@@ -10,25 +10,38 @@
 # ]
 # ///
 """
-ant-score - Compute scanpy module scores from genesetstore on h5ad files.
+ant-score - Compute scanpy module scores from genesetstore onto h5ad files.
 
-For one experiment in the genesetstore (e.g. Sierksma2025/WGCNA), runs
-scanpy.tl.score_genes per geneset and writes the per-cell scores back into
-the parent_dataset's h5ad as obs columns named:
+Pairing is explicit: you give the target h5ad (db_id) and one or more
+genesets/experiments. scanpy.tl.score_genes runs per geneset and the per-cell
+scores are written back as obs columns named:
 
     <study>::<experiment>::<geneset_name>
 
-Writes are atomic and all-or-nothing per experiment: if any geneset fails,
-the original h5ad is left untouched.
+Writes are atomic and all-or-nothing: if any geneset fails, the original h5ad
+is left untouched.
 
 Usage:
-  ant score <experiment_id>          # all genesets in one experiment
-  ant score <geneset_id>             # one geneset
-  ant score --all                    # every experiment in the store
-  ant score <id> --rebuild           # also re-convert to DuckDB
-  ant score <id> --rebuild --push --rescan
-                                     # full pipeline: h5ad -> duckdb -> S3 -> API
-  ant score <id> --dry-run           # report what would happen
+  ant score <db_id> <experiment_or_geneset_id> [<id>...]
+
+Examples:
+  # Score all 13 WGCNA modules onto S25/PhM
+  ant score S25/PhM Sierksma2025/WGCNA
+
+  # Score one module
+  ant score S25/PhM Sierksma2025/WGCNA/Brown_Lysosome
+
+  # Multiple experiments in one atomic write
+  ant score S25/PhM Sierksma2025/WGCNA Mancuso2024/cNMF
+
+  # Cross-apply Sierksma WGCNA modules to a different study's h5ad
+  ant score P26/HMI Sierksma2025/WGCNA
+
+  # Full pipeline: h5ad -> duckdb -> S3 -> API rescan
+  ant score S25/PhM Sierksma2025/WGCNA --rebuild --push --rescan
+
+  # Dry-run: compute and report, do not write
+  ant score S25/PhM Sierksma2025/WGCNA --dry-run
 
 Options:
   --ctrl-size N      scanpy ctrl_size (default 50)
@@ -133,18 +146,6 @@ def _resolve_target(registry: GenesetRegistry, target: str
         f"ERROR: target {target!r} must be either '<study>/<experiment>' "
         f"or '<study>/<experiment>/<geneset>'"
     )
-
-
-def _resolve_all(registry: GenesetRegistry) -> List[Tuple[Experiment, List[Geneset]]]:
-    out = []
-    for experiment in registry.list_experiments():
-        members = [
-            g for g in registry.list_genesets()
-            if g.experiment.experiment_id == experiment.experiment_id
-        ]
-        if members:
-            out.append((experiment, members))
-    return out
 
 
 # ── core scoring ──────────────────────────────────────────────────────────────
@@ -427,10 +428,12 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument('target', nargs='?',
-                        help='experiment_id or geneset_id (omit with --all)')
-    parser.add_argument('--all', action='store_true',
-                        help='Score every experiment in the store onto its parent_dataset')
+    parser.add_argument('db_id',
+                        help='h5adstore dataset to score onto, e.g. S25/PhM '
+                             'or Sierksma2025/Pharmacogenomics')
+    parser.add_argument('genesets', nargs='+',
+                        help='one or more experiment_id or geneset_id values, e.g. '
+                             'Sierksma2025/WGCNA  or  Sierksma2025/WGCNA/Brown_Lysosome')
     parser.add_argument('--ctrl-size', type=int, default=50)
     parser.add_argument('--n-bins',    type=int, default=25)
     parser.add_argument('--seed',      type=int, default=0)
@@ -451,51 +454,47 @@ def main() -> int:
     parser.add_argument('-v', '--verbose', action='store_true')
     args = parser.parse_args()
 
-    if not args.target and not args.all:
-        parser.error('target id is required (or use --all)')
-    if args.target and args.all:
-        parser.error('use either a target or --all, not both')
-
     registry = _load_geneset_registry()
     h5ad_root = _h5adstore_root()
     genesetstore_root = registry.root
 
-    if args.all:
-        all_pairs = _resolve_all(registry)
-    else:
-        all_pairs = _resolve_target(registry, args.target)
+    # Resolve target h5ad first — fail fast on a bad db_id.
+    entry = find_h5ad(h5ad_root, args.db_id)
+    if entry is None:
+        sys.exit(f"ERROR: dataset {args.db_id!r} not found in h5adstore ({h5ad_root})")
 
-    # group by parent_dataset → list of (experiment, genesets)
-    by_dataset: Dict[str, List[Tuple[Experiment, List[Geneset]]]] = {}
-    skipped: List[str] = []
-    for experiment, genesets in all_pairs:
-        parent = experiment.parent_dataset
-        if not parent:
-            skipped.append(
-                f"{experiment.experiment_id}: no parent_dataset set in index.md"
-            )
-            continue
-        by_dataset.setdefault(parent, []).append((experiment, genesets))
+    # Collect (experiment, [genesets]) for every requested geneset/experiment id.
+    # Multiple ids referencing the same experiment merge — each geneset appears once.
+    pairs: List[Tuple[Experiment, List[Geneset]]] = []
+    seen_columns: Dict[str, str] = {}  # column -> source id (for collision detection)
+    by_experiment: Dict[str, List[Geneset]] = {}
+    experiments_by_id: Dict[str, Experiment] = {}
+    for raw_id in args.genesets:
+        for experiment, genesets in _resolve_target(registry, raw_id):
+            experiments_by_id[experiment.experiment_id] = experiment
+            for geneset in genesets:
+                column = _column_name(experiment, geneset)
+                if column in seen_columns and seen_columns[column] != raw_id:
+                    print(
+                        f"  (skipping duplicate {column} from {raw_id!r}; "
+                        f"already requested via {seen_columns[column]!r})"
+                    )
+                    continue
+                seen_columns[column] = raw_id
+                by_experiment.setdefault(experiment.experiment_id, []).append(geneset)
 
-    for message in skipped:
-        print(f"SKIP  {message}", file=sys.stderr)
+    for experiment_id, members in by_experiment.items():
+        pairs.append((experiments_by_id[experiment_id], members))
 
-    if not by_dataset:
-        sys.exit("ERROR: nothing to do — no experiments resolved with a parent_dataset")
+    if not pairs:
+        sys.exit("ERROR: no genesets resolved")
 
-    print(f"Plan: {len(by_dataset)} parent dataset(s), "
-          f"{sum(len(v) for v in by_dataset.values())} experiment(s)")
+    n_total = sum(len(genesets) for _, genesets in pairs)
+    print(f"Plan: {entry.db_id} ({entry.readable_id}) ← "
+          f"{len(pairs)} experiment(s), {n_total} geneset(s)")
 
-    results = []
-    for parent_id, experiments in by_dataset.items():
-        entry = find_h5ad(h5ad_root, parent_id)
-        if entry is None:
-            sys.exit(
-                f"ERROR: parent_dataset {parent_id!r} not found in h5adstore "
-                f"({h5ad_root})"
-            )
-        result = _process_one_h5ad(entry, experiments, genesetstore_root, args)
-        results.append((entry, result))
+    result = _process_one_h5ad(entry, pairs, genesetstore_root, args)
+    results = [(entry, result)]
 
     if args.dry_run:
         print("\n(dry run; no h5ad files modified)")
