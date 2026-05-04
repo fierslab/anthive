@@ -366,3 +366,78 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "has_duckdb": True,
         "update_pending": False,
     })
+
+
+# ── geneset routes ─────────────────────────────────────────────────────────────
+
+@router.get("/genesets", response_class=HTMLResponse)
+async def genesets_index(request: Request):
+    api_url = _api_url(request)
+    try:
+        payload = _api_get(api_url, '/genesets')
+        genesets = payload.get('genesets', [])
+    except Exception as error:
+        print(f"API error: {error}")
+        genesets = []
+
+    # Group by study → experiment for display
+    by_study: Dict[str, Dict[str, list]] = {}
+    for geneset in genesets:
+        by_study.setdefault(geneset['study'], {}).setdefault(
+            geneset['experiment'], []
+        ).append(geneset)
+
+    return templates.TemplateResponse(request, "genesets.html", {
+        "by_study": by_study,
+        "total": len(genesets),
+    })
+
+
+@router.get("/genesets/{study}/{experiment}", response_class=HTMLResponse)
+async def geneset_experiment_view(request: Request, study: str, experiment: str):
+    api_url = _api_url(request)
+    try:
+        payload = _api_get(api_url, f'/genesets/{study}/{experiment}')
+    except Exception as error:
+        print(f"API error: {error}")
+        return templates.TemplateResponse(
+            request, "genesets.html",
+            {"by_study": {}, "error": f"Experiment {study}/{experiment} not found"},
+            status_code=404,
+        )
+
+    body_html = markdown.markdown(payload.get('body') or '', extensions=['tables'])
+
+    return templates.TemplateResponse(request, "geneset_experiment.html", {
+        "study": study,
+        "experiment": experiment,
+        "metadata": payload.get('metadata', {}),
+        "body_html": body_html,
+        "genesets": payload.get('genesets', []),
+    })
+
+
+@router.get("/genesets/{study}/{experiment}/{name}", response_class=HTMLResponse)
+async def geneset_view(request: Request, study: str, experiment: str, name: str):
+    api_url = _api_url(request)
+    try:
+        payload = _api_get(api_url, f'/genesets/{study}/{experiment}/{name}')
+    except Exception as error:
+        print(f"API error: {error}")
+        return templates.TemplateResponse(
+            request, "genesets.html",
+            {"by_study": {}, "error": f"Geneset {study}/{experiment}/{name} not found"},
+            status_code=404,
+        )
+
+    geneset_body_html = markdown.markdown(payload.get('geneset_body') or '', extensions=['tables'])
+    experiment_body_html = markdown.markdown(payload.get('experiment_body') or '', extensions=['tables'])
+
+    return templates.TemplateResponse(request, "geneset.html", {
+        "study": study,
+        "experiment": experiment,
+        "name": name,
+        "payload": payload,
+        "geneset_body_html": geneset_body_html,
+        "experiment_body_html": experiment_body_html,
+    })

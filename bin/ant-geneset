@@ -1,0 +1,305 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "pyyaml>=6.0",
+# ]
+# ///
+"""
+ant-geneset - Manage the geneset store.
+
+Usage:
+  ant geneset list [--organism O] [--method M] [--study S] [--store PATH]
+  ant geneset show <geneset_id>      [--store PATH] [--genes]
+  ant geneset validate [PATH]        [--store PATH]
+  ant geneset add <study> <experiment> <name> <gene_file> [--rnk]
+                                     [--store PATH] [--organism O] [--method M]
+                                     [--parent-dataset DBID]
+
+Geneset IDs look like:  <Study>/<Experiment>/<name>
+e.g. Sierksma2025/WGCNA/blue
+"""
+
+import argparse
+import shutil
+import sys
+from pathlib import Path
+
+script_dir = Path(__file__).parent.resolve()
+lib_dir = script_dir.parent / 'lib'
+sys.path.insert(0, str(lib_dir))
+
+from config import get_config  # type: ignore
+from geneset import (  # type: ignore
+    GENESET_EXTENSIONS,
+    GenesetError,
+    GenesetRegistry,
+    parse_grp,
+    parse_rnk,
+    validate_registry,
+    write_grp,
+)
+from metadata import write_md_file  # type: ignore
+
+
+def _resolve_store(cli_store: str | None) -> Path:
+    if cli_store:
+        return Path(cli_store).resolve()
+    config = get_config()
+    store_value = config.get('geneset_store')
+    if not store_value:
+        sys.exit("ERROR: geneset_store is not configured (anthive.yaml)")
+    return (script_dir.parent / store_value).resolve()
+
+
+def _scan(store_path: Path) -> GenesetRegistry:
+    if not store_path.exists():
+        sys.exit(f"ERROR: geneset store does not exist: {store_path}")
+    registry = GenesetRegistry(store_path)
+    registry.scan()
+    return registry
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    store = _resolve_store(args.store)
+    registry = _scan(store)
+    genesets = registry.list_genesets(
+        organism=args.organism, method=args.method, study=args.study,
+    )
+    if not genesets:
+        print("(no genesets)")
+        return 0
+    width_id = max(len(g.geneset_id) for g in genesets)
+    width_org = max(len(g.organism or '?') for g in genesets)
+    print(f"{'GENESET_ID':<{width_id}}  {'ORG':<{width_org}}  {'METHOD':<8}  "
+          f"{'FMT':<3}  {'N':>5}  PARENT")
+    for geneset in genesets:
+        parent = geneset.experiment.parent_dataset or '-'
+        print(
+            f"{geneset.geneset_id:<{width_id}}  "
+            f"{(geneset.organism or '?'):<{width_org}}  "
+            f"{geneset.experiment.method:<8}  "
+            f"{geneset.format:<3}  "
+            f"{geneset.n_genes:>5}  "
+            f"{parent}"
+        )
+    if registry.errors:
+        print(f"\n{len(registry.errors)} error(s) — run `ant geneset validate`",
+              file=sys.stderr)
+    return 0
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    store = _resolve_store(args.store)
+    registry = _scan(store)
+    geneset = registry.get(args.geneset_id)
+    if not geneset:
+        if args.geneset_id in registry.experiments:
+            experiment = registry.experiments[args.geneset_id]
+            print(f"# Experiment: {experiment.experiment_id}")
+            print(f"  path:    {experiment.path}")
+            for key in ('organism', 'method', 'parent_dataset', 'gene_id_type',
+                        'date_derived', 'derived_by', 'software', 'software_version'):
+                value = experiment.metadata.get(key)
+                if value is not None:
+                    print(f"  {key}: {value}")
+            members = registry.list_genesets(study=experiment.study)
+            members = [g for g in members if g.experiment.name == experiment.name]
+            print(f"\n  {len(members)} geneset(s):")
+            for member in members:
+                print(f"    {member.geneset_id}  ({member.format}, {member.n_genes} genes)")
+            return 0
+        sys.exit(f"ERROR: geneset {args.geneset_id!r} not found")
+
+    print(f"# {geneset.geneset_id}")
+    print(f"  path:        {geneset.path}")
+    print(f"  format:      {geneset.format}")
+    print(f"  n_genes:     {geneset.n_genes}")
+    print(f"  organism:    {geneset.organism or '-'}")
+    print(f"  method:      {geneset.experiment.method or '-'}")
+    print(f"  parent:      {geneset.experiment.parent_dataset or '-'}")
+    if geneset.metadata.get('description'):
+        print(f"  description: {geneset.metadata['description']}")
+    if geneset.metadata.get('direction'):
+        print(f"  direction:   {geneset.metadata['direction']}")
+    if args.genes:
+        print()
+        if geneset.format == 'rnk':
+            for gene, rank in geneset.ranks or []:
+                print(f"{gene}\t{rank}")
+        else:
+            for gene in geneset.genes:
+                print(gene)
+    return 0
+
+
+def cmd_validate(args: argparse.Namespace) -> int:
+    store = _resolve_store(args.store)
+    registry = _scan(store)
+    h5ad_db_ids = _load_h5ad_db_ids()
+    errors, warnings = validate_registry(registry, h5ad_db_ids=h5ad_db_ids)
+
+    target = Path(args.path).resolve() if args.path else None
+
+    def _matches(message: str) -> bool:
+        if target is None:
+            return True
+        return str(target) in message
+
+    errors = [e for e in errors if _matches(e)]
+    warnings = [w for w in warnings if _matches(w)]
+
+    for warning in warnings:
+        print(f"WARN  {warning}")
+    for error in errors:
+        print(f"ERROR {error}", file=sys.stderr)
+
+    n_experiments = len(registry.experiments)
+    n_genesets = len(registry.genesets)
+    print(f"\n{n_experiments} experiment(s), {n_genesets} geneset(s); "
+          f"{len(errors)} error(s), {len(warnings)} warning(s)")
+    return 1 if errors else 0
+
+
+def cmd_add(args: argparse.Namespace) -> int:
+    store = _resolve_store(args.store)
+    if not store.exists():
+        sys.exit(f"ERROR: geneset store does not exist: {store}")
+
+    source = Path(args.gene_file).resolve()
+    if not source.exists():
+        sys.exit(f"ERROR: gene file not found: {source}")
+
+    extension = '.rnk' if args.rnk else '.grp'
+    experiment_dir = store / args.study / args.experiment
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+
+    index_path = experiment_dir / 'index.md'
+    if not index_path.exists():
+        organism = args.organism
+        method = args.method
+        if not organism or not method:
+            sys.exit(
+                "ERROR: experiment index.md missing — supply --organism and --method "
+                "to bootstrap one"
+            )
+        bootstrap = {
+            'name': f"{args.study} {args.experiment}",
+            'organism': organism,
+            'method': method,
+            'gene_id_type': 'symbol',
+        }
+        if args.parent_dataset:
+            bootstrap['parent_dataset'] = args.parent_dataset
+        write_md_file(index_path, bootstrap, '')
+        print(f"Created {index_path}")
+
+    target = experiment_dir / f"{args.name}{extension}"
+    if target.exists():
+        sys.exit(f"ERROR: {target} already exists")
+
+    if extension == '.grp':
+        try:
+            genes = parse_grp(source)
+        except GenesetError:
+            # Source file might not be in .grp form — accept any text file with
+            # one symbol per line, no header.
+            with open(source) as handle:
+                genes = [line.strip() for line in handle if line.strip()
+                         and not line.strip().startswith('#')]
+        write_grp(target, genes)
+    else:
+        rows = parse_rnk(source)
+        shutil.copyfile(source, target)
+        # round-trip parse to confirm strict-format compliance after copy
+        parse_rnk(target)
+        del rows
+
+    print(f"Wrote {target}")
+    return 0
+
+
+def _load_h5ad_db_ids() -> set | None:
+    """
+    Build the set of valid h5adstore db_ids by scanning .md files.
+
+    Both forms are accepted for parent_dataset:
+      - the canonical db_id  '{group_id}/{file_id}'  (e.g. S25/PhM)
+      - the readable path     '{Study}/{file_stem}'  (e.g. Sierksma2025/Pharmacogenomics)
+    """
+    try:
+        from metadata import parse_md_file as _parse  # type: ignore
+    except ImportError:
+        return None
+    try:
+        config = get_config()
+    except SystemExit:
+        return None
+    h5ad_root_value = config.get('h5ad_store') or 'data/h5adstore'
+    h5ad_root = (script_dir.parent / h5ad_root_value).resolve()
+    if not h5ad_root.exists():
+        return None
+    db_ids: set = set()
+    for md_path in h5ad_root.rglob('*.md'):
+        if md_path.name == 'index.md':
+            continue
+        try:
+            data_meta, _ = _parse(md_path)
+        except Exception:
+            data_meta = {}
+        index_meta, _ = _parse(md_path.parent / 'index.md')
+        file_id = str(data_meta.get('id') or '').strip()
+        group_id = str(index_meta.get('group_id') or '').strip()
+        if group_id and file_id:
+            db_ids.add(f"{group_id}/{file_id}")
+        # readable path form
+        relative = md_path.relative_to(h5ad_root)
+        db_ids.add(str(relative.with_suffix('')))
+        # also accept '<Study>/<stem>' (drop intermediate folders)
+        if len(relative.parts) >= 2:
+            db_ids.add(f"{relative.parts[0]}/{relative.stem}")
+    return db_ids
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description='Manage the geneset store',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument('--store', default=None,
+                        help='Path to genesetstore (default: anthive.yaml geneset_store)')
+    sub = parser.add_subparsers(dest='subcommand', required=True)
+
+    sub_list = sub.add_parser('list', help='List all genesets')
+    sub_list.add_argument('--organism')
+    sub_list.add_argument('--method')
+    sub_list.add_argument('--study')
+    sub_list.set_defaults(func=cmd_list)
+
+    sub_show = sub.add_parser('show', help='Show one geneset or experiment')
+    sub_show.add_argument('geneset_id')
+    sub_show.add_argument('--genes', action='store_true', help='Print gene list')
+    sub_show.set_defaults(func=cmd_show)
+
+    sub_val = sub.add_parser('validate', help='Validate the store')
+    sub_val.add_argument('path', nargs='?', default=None,
+                          help='Restrict checks to this path')
+    sub_val.set_defaults(func=cmd_validate)
+
+    sub_add = sub.add_parser('add', help='Add a new .grp/.rnk geneset')
+    sub_add.add_argument('study')
+    sub_add.add_argument('experiment')
+    sub_add.add_argument('name')
+    sub_add.add_argument('gene_file', help='Source file (one gene per line, or .rnk format)')
+    sub_add.add_argument('--rnk', action='store_true', help='Treat as .rnk (gene\\trank)')
+    sub_add.add_argument('--organism', help='Required if creating a new experiment')
+    sub_add.add_argument('--method', help='Required if creating a new experiment')
+    sub_add.add_argument('--parent-dataset', dest='parent_dataset')
+    sub_add.set_defaults(func=cmd_add)
+
+    args = parser.parse_args()
+    return args.func(args)
+
+
+if __name__ == '__main__':
+    sys.exit(main())

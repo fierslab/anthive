@@ -106,6 +106,9 @@
         <a href="/" class="brand">anthive</a>
         <nav>
             <a href="/">datasets</a>
+            {% if request.app.state.genesets_available %}
+            <a href="/genesets">genesets</a>
+            {% endif %}
             <a href="/streamlit">streamlit</a>
             <a href="/api/docs">api</a>
             {% if request.app.state.reports %}

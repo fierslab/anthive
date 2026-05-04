@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+
+{% block title %}{{ study }}/{{ experiment }} — genesets{% endblock %}
+
+{% block content %}
+<div class="breadcrumb">
+    <a href="/genesets">genesets</a> &rsaquo;
+    {{ study }} &rsaquo;
+    <strong>{{ experiment }}</strong>
+</div>
+
+<h2 style="font-size:15px">{{ metadata.get('name', experiment) }}</h2>
+{% if metadata.get('description') %}
+<p style="color:#555">{{ metadata.description }}</p>
+{% endif %}
+
+<div class="two-col" style="margin:8px 0 12px">
+    <div>
+        <div><span class="mk">organism</span> {{ metadata.get('organism', '—') }}</div>
+        <div><span class="mk">method</span> {{ metadata.get('method', '—') }}</div>
+        <div><span class="mk">gene_id_type</span> {{ metadata.get('gene_id_type', 'symbol') }}</div>
+        <div><span class="mk">parent dataset</span>
+            {% if metadata.get('parent_dataset') %}
+            <a href="/browse/{{ metadata.parent_dataset.split('/')[0] }}/{{ metadata.parent_dataset.split('/')[1] }}">{{ metadata.parent_dataset }}</a>
+            {% else %}—{% endif %}
+        </div>
+    </div>
+    <div>
+        <div><span class="mk">date_derived</span> {{ metadata.get('date_derived', '—') }}</div>
+        <div><span class="mk">derived_by</span> {{ metadata.get('derived_by', '—') }}</div>
+        <div><span class="mk">software</span>
+            {{ metadata.get('software', '—') }}
+            {% if metadata.get('software_version') %}({{ metadata.software_version }}){% endif %}
+        </div>
+    </div>
+</div>
+
+{% if metadata.get('parameters') %}
+<h2>Parameters</h2>
+<table class="auto" style="margin:4px 0 12px">
+    <tbody>
+    {% for key, value in metadata.parameters.items() %}
+        <tr><td style="color:#666;font-size:11px">{{ key }}</td><td>{{ value }}</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+
+{% if body_html %}
+<div class="md-body">{{ body_html|safe }}</div>
+{% endif %}
+
+<h2>Genesets ({{ genesets|length }})</h2>
+<table class="auto">
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Format</th>
+            <th>n genes</th>
+            <th>Direction</th>
+            <th>Description</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for g in genesets %}
+        <tr>
+            <td><a href="/genesets/{{ study }}/{{ experiment }}/{{ g.name }}"><strong>{{ g.display_name }}</strong></a></td>
+            <td style="color:#666">{{ g.format }}</td>
+            <td style="color:#555">{{ g.n_genes }}</td>
+            <td style="color:#555">{{ g.direction or '—' }}</td>
+            <td style="color:#555">{{ g.description or '' }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

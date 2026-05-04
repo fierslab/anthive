@@ -85,6 +85,13 @@ mcp:
   # Defaults to http://<host>:<port>/mcp when null.
   mcp_url: null
 
+# Geneset store (curated gene sets / ranked lists tied to studies)
+# ----------------------------------------------------------------
+# Path to the geneset store root. Default is `data/genesetstore`
+# (typically a symlink to a separate git repo). Set to null to
+# disable geneset features.
+geneset_store: data/genesetstore
+
 # Static report sites pulled from git repositories
 # Each entry is served at /report/<slug>/ as a static website.
 # Run `make build-reports` to pull/update all.

@@ -27,6 +27,7 @@ def get_available_commands(bin_dir: Path) -> dict:
         'convert': 'Convert h5ad file to DuckDB database',
         'db': 'Database inspection and management tools',
         'duckdb-check': 'Validate DuckDB database integrity',
+        'geneset': 'Manage geneset store (.grp / .rnk gene lists per study)',
         'h5ad-check': 'Check h5ad file and generate metadata',
         'inactive': 'Mark/unmark datasets as inactive (removes .duckdb, hides from API)',
         'md': 'Manage markdown metadata (YAML preambles)',

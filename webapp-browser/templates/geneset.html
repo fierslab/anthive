@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+
+{% block title %}{{ study }}/{{ experiment }}/{{ name }} — geneset{% endblock %}
+
+{% block content %}
+<div class="breadcrumb">
+    <a href="/genesets">genesets</a> &rsaquo;
+    {{ study }} &rsaquo;
+    <a href="/genesets/{{ study }}/{{ experiment }}">{{ experiment }}</a> &rsaquo;
+    <strong>{{ name }}</strong>
+</div>
+
+<h2 style="font-size:15px">{{ payload.display_name }}</h2>
+{% if payload.description %}
+<p style="color:#555">{{ payload.description }}</p>
+{% endif %}
+
+<div class="two-col" style="margin:8px 0 12px">
+    <div>
+        <div><span class="mk">format</span> {{ payload.format }}</div>
+        <div><span class="mk">n genes</span> {{ payload.n_genes }}</div>
+        <div><span class="mk">organism</span> {{ payload.organism or '—' }}</div>
+        <div><span class="mk">method</span> {{ payload.method or '—' }}</div>
+    </div>
+    <div>
+        <div><span class="mk">direction</span> {{ payload.direction or '—' }}</div>
+        <div><span class="mk">parent</span>
+            {% if payload.parent_dataset %}
+            <a href="/browse/{{ payload.parent_dataset.split('/')[0] }}/{{ payload.parent_dataset.split('/')[1] }}">{{ payload.parent_dataset }}</a>
+            {% else %}—{% endif %}
+        </div>
+        <div><span class="mk">experiment</span>
+            <a href="/genesets/{{ study }}/{{ experiment }}">{{ study }}/{{ experiment }}</a>
+        </div>
+    </div>
+</div>
+
+{% if payload.geneset_metadata.get('top_go') %}
+<div style="margin:6px 0">
+    <span class="mk">top_go</span>
+    {% for term in payload.geneset_metadata.top_go %}
+    <span class="chip">{{ term }}</span>
+    {% endfor %}
+</div>
+{% endif %}
+
+{% if geneset_body_html %}
+<div class="md-body">{{ geneset_body_html|safe }}</div>
+{% endif %}
+
+<h2>Genes</h2>
+{% if payload.format == 'rnk' and payload.ranks %}
+<table class="auto narrow">
+    <thead><tr><th>Gene</th><th>Rank</th></tr></thead>
+    <tbody>
+    {% for gene, rank in payload.ranks %}
+        <tr><td><code>{{ gene }}</code></td><td style="color:#555">{{ rank }}</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div style="font-family:var(--font-mono); font-size:11px; line-height:1.7; column-width:120px; max-width:900px">
+{% for gene in payload.genes %}<span style="display:inline-block; min-width:90px">{{ gene }}</span>{% endfor %}
+</div>
+{% endif %}
+
+<details style="margin-top:14px; font-size:11px; color:#666">
+<summary style="cursor:pointer">Raw metadata</summary>
+<pre style="margin-top:6px; background:var(--border-light); padding:8px">experiment metadata:
+{{ payload.experiment_metadata }}
+
+geneset metadata:
+{{ payload.geneset_metadata }}</pre>
+</details>
+{% endblock %}

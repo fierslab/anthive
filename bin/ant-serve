@@ -62,6 +62,7 @@ sys.path.insert(0, str(lib_dir))
 
 from anthive_db import AnthiveDB
 from config import get_config
+from geneset import GenesetRegistry, validate_registry as validate_geneset_registry
 from md_check import generate_file_id, generate_group_id
 from metadata import ANNOTATION_FIELDS, parse_md_file
 import plotting
@@ -958,6 +959,7 @@ class DatabaseRegistry:
 # Global registry
 registry: Optional[DatabaseRegistry] = None
 connection_pool: Optional[ConnectionPool] = None
+geneset_registry: Optional[GenesetRegistry] = None
 
 
 async def _daily_metadata_refresh() -> None:
@@ -2447,6 +2449,74 @@ async def rescan_databases():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── Genesets ───────────────────────────────────────────────────────────────────
+
+def _require_geneset_registry() -> GenesetRegistry:
+    if geneset_registry is None:
+        raise HTTPException(status_code=503, detail="Geneset store is not configured")
+    return geneset_registry
+
+
+@app.get("/genesets", tags=["genesets"])
+async def list_genesets(
+    organism: Optional[str] = None,
+    method: Optional[str] = None,
+    study: Optional[str] = None,
+):
+    """List all genesets, optionally filtered by organism/method/study."""
+    registry = _require_geneset_registry()
+    items = registry.list_genesets(organism=organism, method=method, study=study)
+    return {
+        "count": len(items),
+        "genesets": [g.to_summary() for g in items],
+    }
+
+
+@app.get("/genesets/{study}/{experiment}", tags=["genesets"])
+async def get_geneset_experiment(study: str, experiment: str):
+    """Return experiment metadata + the list of genesets it contains."""
+    registry = _require_geneset_registry()
+    experiment_id = f"{study}/{experiment}"
+    exp = registry.get_experiment(experiment_id)
+    if exp is None:
+        raise HTTPException(status_code=404, detail=f"Experiment {experiment_id} not found")
+    members = [g for g in registry.list_genesets(study=study) if g.experiment.name == experiment]
+    return {
+        "experiment_id": exp.experiment_id,
+        "study": exp.study,
+        "name": exp.name,
+        "metadata": exp.metadata,
+        "body": exp.body,
+        "genesets": [g.to_summary() for g in members],
+    }
+
+
+@app.get("/genesets/{study}/{experiment}/{name}", tags=["genesets"])
+async def get_geneset(study: str, experiment: str, name: str):
+    """Return one geneset (merged metadata + gene list)."""
+    registry = _require_geneset_registry()
+    geneset_id = f"{study}/{experiment}/{name}"
+    geneset = registry.get(geneset_id)
+    if geneset is None:
+        raise HTTPException(status_code=404, detail=f"Geneset {geneset_id} not found")
+    return geneset.to_detail()
+
+
+@app.post("/genesets/rescan", tags=["genesets"])
+async def rescan_genesets():
+    """Re-scan the geneset store from disk."""
+    registry = _require_geneset_registry()
+    registry.scan()
+    h5ad_db_ids = set(globals()['registry'].databases.keys()) if globals().get('registry') else None
+    errors, warnings = validate_geneset_registry(registry, h5ad_db_ids=h5ad_db_ids)
+    return {
+        "experiments": len(registry.experiments),
+        "genesets": len(registry.genesets),
+        "errors": errors,
+        "warnings": warnings,
+    }
+
+
 @app.get("/skill", tags=["info"], response_class=Response)
 async def get_skill():
     """Return the Anthive Claude Code skill file (SKILL.md).
@@ -2500,7 +2570,7 @@ def main():
     args = parser.parse_args()
 
     # Initialize global connection pool and registry (Phase 2)
-    global registry, connection_pool
+    global registry, connection_pool, geneset_registry
     s3_config = config.get('s3') or {}
     try:
         print("Initializing connection pool...")
@@ -2519,6 +2589,23 @@ def main():
     if len(registry.databases) == 0:
         print(f"Warning: No databases found in {args.data_folder}")
         print("The server will start but no databases will be available.")
+
+    # Initialize geneset registry (optional)
+    geneset_store_value = config.get('geneset_store')
+    if geneset_store_value:
+        geneset_path = (script_dir.parent / geneset_store_value).resolve()
+        if geneset_path.exists():
+            print(f"Initializing geneset registry: {geneset_path}")
+            geneset_registry = GenesetRegistry(geneset_path)
+            geneset_registry.scan()
+            print(
+                f"  {len(geneset_registry.experiments)} experiment(s), "
+                f"{len(geneset_registry.genesets)} geneset(s)"
+            )
+            if geneset_registry.errors:
+                print(f"  ⚠ {len(geneset_registry.errors)} parse error(s)")
+        else:
+            print(f"Geneset store path does not exist: {geneset_path} (skipping)")
 
     # Run md-check on the data folder (read-only: report only, never modify)
     print("\nRunning md-check on data folder...")

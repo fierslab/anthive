@@ -26,6 +26,7 @@ import argparse
 import sys
 from pathlib import Path
 
+import requests
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -53,6 +54,15 @@ spec.loader.exec_module(browser_module)
 browser_router = browser_module.router
 
 
+def _probe_genesets(api_url: str) -> bool:
+    """Return True if /genesets responds 200 (geneset store is configured)."""
+    try:
+        response = requests.get(f"{api_url.rstrip('/')}/genesets", timeout=3)
+        return response.status_code == 200
+    except requests.RequestException:
+        return False
+
+
 def create_app(api_url: str) -> FastAPI:
     """Create FastAPI app for browser"""
 
@@ -77,6 +87,9 @@ def create_app(api_url: str) -> FastAPI:
     app.state.api_url = api_url
     config = get_config()
     app.state.reports = config.get('reports', [])
+
+    # Probe API for geneset availability (used by topbar)
+    app.state.genesets_available = _probe_genesets(api_url)
 
     # Include browser router
     app.include_router(browser_router)

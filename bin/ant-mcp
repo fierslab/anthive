@@ -894,6 +894,95 @@ def main() -> None:
         return _make_plot_response(base64.b64decode(figure_b64), fmt, caption)
 
     @mcp.tool()
+    async def list_genesets(
+        organism: Optional[str] = None,
+        method: Optional[str] = None,
+        study: Optional[str] = None,
+    ) -> str:
+        """List available curated genesets in the geneset store.
+
+        Genesets are organized as <Study>/<Experiment>/<name>. An "experiment"
+        is one analysis run (e.g. WGCNA, cNMF, DGE) on a parent dataset; each
+        contains one or more named genesets in .grp (unranked) or .rnk (ranked)
+        format. Use get_geneset to fetch one geneset's genes for downstream
+        analysis (e.g. as input to module_score).
+
+        Args:
+            organism: Filter to one organism (e.g. 'human', 'mouse').
+            method:   Filter to one method (WGCNA, cNMF, DGE, GSEA, manual).
+            study:    Filter to one study folder (e.g. 'Sierksma2025').
+        """
+        try:
+            data = await _get('/genesets', organism=organism, method=method, study=study)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 503:
+                return "Geneset store is not configured on this server."
+            return f"Error {exc.response.status_code}: {exc.response.text}"
+
+        items = data.get('genesets', [])
+        if not items:
+            return "No genesets found matching the filters."
+
+        lines = [f"{data['count']} geneset(s):"]
+        for geneset in items:
+            description = geneset.get('description') or ''
+            lines.append(
+                f"  {geneset['geneset_id']}  "
+                f"[{geneset['format']}, {geneset['n_genes']} genes, "
+                f"organism={geneset.get('organism', '?')}, "
+                f"method={geneset.get('method', '?')}, "
+                f"parent={geneset.get('parent_dataset') or '-'}]"
+                + (f"\n      {description}" if description else "")
+            )
+        return '\n'.join(lines)
+
+    @mcp.tool()
+    async def get_geneset(geneset_id: str) -> str:
+        """Fetch a single geneset by ID and return its metadata + gene list.
+
+        The geneset_id format is '<Study>/<Experiment>/<name>', e.g.
+        'Sierksma2025/WGCNA/Brown_Lysosome'. Use list_genesets to discover IDs.
+
+        Returns merged metadata (experiment + per-geneset), the full gene list,
+        and (for .rnk format) the rank values.
+
+        Args:
+            geneset_id: Full ID '<Study>/<Experiment>/<name>'.
+        """
+        try:
+            data = await _get(f'/genesets/{geneset_id}')
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return f"Geneset {geneset_id!r} not found. Use list_genesets to discover available IDs."
+            if exc.response.status_code == 503:
+                return "Geneset store is not configured on this server."
+            return f"Error {exc.response.status_code}: {exc.response.text}"
+
+        lines = [
+            f"Geneset: {data['geneset_id']}",
+            f"  Display name:  {data.get('display_name', data['name'])}",
+            f"  Format:        {data['format']}",
+            f"  N genes:       {data['n_genes']}",
+            f"  Organism:      {data.get('organism') or '-'}",
+            f"  Method:        {data.get('method') or '-'}",
+            f"  Parent:        {data.get('parent_dataset') or '-'}",
+        ]
+        if data.get('description'):
+            lines.append(f"  Description:   {data['description']}")
+        if data.get('direction'):
+            lines.append(f"  Direction:     {data['direction']}")
+
+        genes = data.get('genes') or []
+        if data['format'] == 'rnk' and data.get('ranks'):
+            lines.append("\nRanked genes (gene\\trank):")
+            for gene, rank in data['ranks']:
+                lines.append(f"  {gene}\t{rank}")
+        else:
+            lines.append("\nGenes:")
+            lines.append("  " + ", ".join(genes))
+        return '\n'.join(lines)
+
+    @mcp.tool()
     async def rescan_databases():
         """Force the API server to rescan its data folder and reload all datasets.
 
