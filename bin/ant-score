@@ -77,6 +77,7 @@ from geneset import (                    # type: ignore
     Experiment, Geneset, GenesetRegistry,
 )
 from h5adstore import H5adEntry, find_h5ad   # type: ignore
+from metadata import parse_md_file, write_md_file   # type: ignore
 
 
 SEPARATOR = '::'
@@ -368,7 +369,29 @@ def _process_one_h5ad(entry: H5adEntry,
         raise
     print(f"  ✓ wrote {entry.h5ad_path}")
 
+    # Update the .md to expose the new columns through ant-convert (which uses
+    # obsnum_include as an allowlist).
+    new_columns = []
+    for record in summaries:
+        new_columns.extend(record['columns'])
+    if new_columns:
+        _ensure_obsnum_include(entry.md_path, new_columns)
+
     return {'entry': entry.db_id, 'experiments': summaries, 'wrote': True}
+
+
+def _ensure_obsnum_include(md_path: Path, columns: List[str]) -> None:
+    """Append new columns to obsnum_include in the dataset's .md (idempotent)."""
+    metadata, body = parse_md_file(md_path)
+    existing = metadata.get('obsnum_include') or []
+    if not isinstance(existing, list):
+        existing = [existing]
+    added = [c for c in columns if c not in existing]
+    if not added:
+        return
+    metadata['obsnum_include'] = list(existing) + added
+    write_md_file(md_path, metadata, body)
+    print(f"  ✓ updated {md_path.name}: +{len(added)} obsnum_include entries")
 
 
 def _organism_compatible(adata, organism: str) -> bool:
