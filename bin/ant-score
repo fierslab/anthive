@@ -291,7 +291,12 @@ def _score_experiment(adata, experiment: Experiment, genesets: List[Geneset],
         'timestamp':         datetime.now(timezone.utc).isoformat(),
         'tool_version':      TOOL_VERSION,
     }
-    adata.uns['module_scores'][experiment.experiment_id] = json.dumps(record)
+    # Replace '/' with the column separator so the key doesn't auto-split into
+    # nested HDF5 groups (anndata raises FutureWarning otherwise, will become
+    # an error). Readers should split the key on SEPARATOR to recover the
+    # experiment_id.
+    safe_key = experiment.experiment_id.replace('/', SEPARATOR)
+    adata.uns['module_scores'][safe_key] = json.dumps(record)
     return record
 
 
