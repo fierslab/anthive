@@ -283,7 +283,7 @@ def _score_experiment(adata, experiment: Experiment, genesets: List[Geneset],
             'ctrl_size':  args.ctrl_size,
             'n_bins':     args.n_bins,
             'seed':       args.seed,
-            'layer':      args.layer,
+            'layer':      args.layer if args.layer is not None else 'X',
             'use_raw':    args.use_raw,
             'separator':  SEPARATOR,
         },
@@ -334,9 +334,40 @@ def _process_one_h5ad(entry: H5adEntry,
             f"a remote / S3-only dataset. Pull it first."
         )
 
+    # Resolve default_layer from .md — REQUIRED. ant-score will refuse to
+    # score on a dataset without an explicit default_layer declaration, since
+    # silently using adata.X can score on raw counts (which is meaningless for
+    # scanpy.tl.score_genes).
+    md_metadata, _ = parse_md_file(entry.md_path)
+    default_layer = md_metadata.get('default_layer')
+    if args.layer is not None:
+        layer_to_use = args.layer
+        layer_source = 'CLI override'
+    elif default_layer:
+        layer_to_use = default_layer
+        layer_source = f'.md default_layer'
+    else:
+        sys.exit(
+            f"ERROR: {entry.md_path.name} has no 'default_layer' field — "
+            f"refusing to score. Set 'default_layer: X' (or another layer "
+            f"name) in the .md, or pass --layer explicitly."
+        )
+
     print(f"  Loading…")
     adata = anndata.read_h5ad(entry.h5ad_path)
     print(f"  {adata.n_obs:,} cells × {adata.n_vars:,} genes")
+    print(f"  Layer: {layer_to_use!r}  (from {layer_source})")
+
+    # Translate "X" → None (scanpy convention for adata.X)
+    layer_arg = None if layer_to_use == 'X' else layer_to_use
+    if layer_arg is not None and layer_arg not in adata.layers:
+        sys.exit(
+            f"ERROR: layer {layer_arg!r} not found in h5ad. "
+            f"Available layers: {list(adata.layers.keys())}"
+        )
+
+    # Override args.layer so _score_experiment / _score_one see the resolved value.
+    args.layer = layer_arg
 
     summaries = []
     for experiment, genesets in experiments:
