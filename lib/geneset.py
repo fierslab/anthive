@@ -35,6 +35,30 @@ GENE_ID_TYPES = {'symbol', 'ensembl', 'entrez'}
 DIRECTION_VALUES = {'up', 'down', 'bidirectional'}
 GENESET_EXTENSIONS = {'.grp', '.rnk'}
 
+# Separator used by ant-score when writing module-score columns:
+#     <study>::<experiment>::<geneset_name>
+# e.g. "Sierksma2025::WGCNA::Brown_Lysosome"
+SCORE_COLUMN_SEPARATOR = '::'
+SCORE_COLUMN_TEMPLATE  = '{study}::{experiment}::{name}'
+
+
+def parse_score_column(column: str) -> Optional[str]:
+    """Convert a module-score column name back into a geneset_id.
+
+    "Sierksma2025::WGCNA::Brown_Lysosome" -> "Sierksma2025/WGCNA/Brown_Lysosome"
+
+    Returns None if the column isn't a 3-part score column.
+    """
+    parts = column.split(SCORE_COLUMN_SEPARATOR)
+    if len(parts) != 3:
+        return None
+    return '/'.join(parts)
+
+
+def is_score_column(column: str) -> bool:
+    """True if a column name follows the <study>::<experiment>::<name> shape."""
+    return parse_score_column(column) is not None
+
 
 class GenesetError(Exception):
     """Raised on parse or validation failures inside the geneset store."""

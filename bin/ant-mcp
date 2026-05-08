@@ -923,15 +923,29 @@ def main() -> None:
         if not items:
             return "No genesets found matching the filters."
 
-        lines = [f"{data['count']} geneset(s):"]
+        naming = data.get('column_naming', {})
+        lines = [
+            f"{data['count']} geneset(s):"
+        ]
+        if naming:
+            lines.append(
+                f"(score-column convention: {naming.get('template', '?')}; "
+                f"separator {naming.get('separator', '?')!r})"
+            )
         for geneset in items:
             description = geneset.get('description') or ''
+            scored_in = geneset.get('scored_in') or []
+            scored_str = (
+                f"  pre-scored in: {', '.join(scored_in)}"
+                if scored_in else "  pre-scored in: (none)"
+            )
             lines.append(
                 f"  {geneset['geneset_id']}  "
                 f"[{geneset['format']}, {geneset['n_genes']} genes, "
                 f"organism={geneset.get('organism', '?')}, "
                 f"method={geneset.get('method', '?')}, "
-                f"parent={geneset.get('parent_dataset') or '-'}]"
+                f"parent={geneset.get('parent_dataset') or '-'}]\n"
+                + scored_str
                 + (f"\n      {description}" if description else "")
             )
         return '\n'.join(lines)
@@ -972,6 +986,20 @@ def main() -> None:
         if data.get('direction'):
             lines.append(f"  Direction:     {data['direction']}")
 
+        column = data.get('column_name')
+        scored_in = data.get('scored_in') or []
+        if column:
+            lines.append(f"  Score column:  {column!r}")
+        if scored_in:
+            lines.append(f"  Pre-scored in: {', '.join(scored_in)}")
+            lines.append(
+                f"  → Use analytics_query to read pre-computed scores instead of "
+                f"recomputing with module_score, e.g.:")
+            lines.append(
+                f"      SELECT cell_name, \"{column}\" FROM obsnum")
+        else:
+            lines.append(f"  Pre-scored in: (none — use module_score to compute on-the-fly)")
+
         genes = data.get('genes') or []
         if data['format'] == 'rnk' and data.get('ranks'):
             lines.append("\nRanked genes (gene\\trank):")
@@ -980,6 +1008,66 @@ def main() -> None:
         else:
             lines.append("\nGenes:")
             lines.append("  " + ", ".join(genes))
+        return '\n'.join(lines)
+
+    @mcp.tool()
+    async def list_module_scores(db_id: str) -> str:
+        """List geneset module scores already computed and stored on a dataset.
+
+        Use this BEFORE module_score to check whether a geneset is already
+        pre-computed as an obs column — if it is, prefer reading it via
+        analytics_query rather than recomputing.
+
+        Returns the column names, geneset references, and per-column stats.
+        Each column can be queried directly:
+
+            SELECT cell_name, "Sierksma2025::WGCNA::Brown_Lysosome"
+            FROM   obsnum
+
+        Args:
+            db_id: Dataset id, e.g. 'P26/HMI'.
+        """
+        try:
+            data = await _get(f'/databases/{db_id}/module_scores')
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return f"Dataset {db_id!r} not found."
+            return f"Error {exc.response.status_code}: {exc.response.text}"
+
+        items = data.get('scored_genesets', [])
+        if not items:
+            return (
+                f"{db_id}: no pre-computed module scores. "
+                f"Use module_score to compute one on-the-fly."
+            )
+
+        lines = [f"{db_id}: {data['count']} pre-computed module score(s):"]
+        for item in items:
+            stats = item.get('stats') or {}
+            line = (
+                f"  {item['geneset_id']}\n"
+                f"      column: {item['column_name']!r}"
+            )
+            if item.get('method'):
+                line += f"  method={item['method']}"
+            if item.get('description'):
+                line += f"\n      {item['description']}"
+            if 'mean' in stats and stats.get('mean') is not None:
+                line += (
+                    f"\n      stats: mean={stats['mean']:.3f}, "
+                    f"std={stats.get('std',0):.3f}, "
+                    f"range=[{stats.get('min',0):.3f}, {stats.get('max',0):.3f}]"
+                )
+            if not item.get('geneset_known'):
+                line += "\n      (geneset is in obs but not registered in genesetstore)"
+            lines.append(line)
+
+        lines.append("")
+        lines.append("To read pre-computed scores, use analytics_query, e.g.:")
+        if items:
+            lines.append(
+                f"  SELECT cell_name, \"{items[0]['column_name']}\" FROM obsnum LIMIT 5"
+            )
         return '\n'.join(lines)
 
     @mcp.tool()

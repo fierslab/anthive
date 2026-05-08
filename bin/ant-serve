@@ -46,7 +46,7 @@ from datetime import datetime
 from io import BytesIO, StringIO
 from pathlib import Path
 from threading import Lock
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import uvicorn
@@ -62,7 +62,14 @@ sys.path.insert(0, str(lib_dir))
 
 from anthive_db import AnthiveDB
 from config import get_config
-from geneset import GenesetRegistry, validate_registry as validate_geneset_registry
+from geneset import (
+    GenesetRegistry,
+    SCORE_COLUMN_SEPARATOR,
+    SCORE_COLUMN_TEMPLATE,
+    is_score_column,
+    parse_score_column,
+    validate_registry as validate_geneset_registry,
+)
 from md_check import generate_file_id, generate_group_id
 from metadata import ANNOTATION_FIELDS, parse_md_file
 import plotting
@@ -961,6 +968,14 @@ registry: Optional[DatabaseRegistry] = None
 connection_pool: Optional[ConnectionPool] = None
 geneset_registry: Optional[GenesetRegistry] = None
 
+# Reverse index built at startup / rescans:
+#   _score_index_by_db[db_id]      = [geneset_id, ...]   (which genesets are scored on this db)
+#   _score_index_by_geneset[gid]   = [db_id, ...]        (which dbs have this geneset pre-scored)
+# Plus per-(db_id, geneset_id) the actual column name (in case naming convention drifts).
+_score_index_by_db: Dict[str, List[str]] = {}
+_score_index_by_geneset: Dict[str, List[str]] = {}
+_score_columns: Dict[Tuple[str, str], str] = {}    # (db_id, geneset_id) -> column_name
+
 
 async def _daily_metadata_refresh() -> None:
     """Background task: re-scan and refresh any stale metadata entries once per day."""
@@ -983,6 +998,15 @@ async def lifespan(app: FastAPI):
         print("ERROR: Registry or connection pool not initialized!")
         sys.exit(1)
     asyncio.create_task(_daily_metadata_refresh())
+    if geneset_registry is not None:
+        try:
+            _build_score_index()
+            log.info(
+                "Module-score index: %d database(s), %d distinct geneset(s)",
+                len(_score_index_by_db), len(_score_index_by_geneset),
+            )
+        except Exception as exc:
+            log.warning("Failed to build module-score index: %s", exc)
     log.info("Server startup complete — %d databases", len(registry.databases))
     print("Server startup complete")
     yield
@@ -2444,6 +2468,10 @@ async def rescan_databases():
     """
     try:
         result = registry.rescan()
+        # rebuild module-score reverse index too
+        if geneset_registry is not None:
+            _build_score_index()
+            result['scored_databases'] = len(_score_index_by_db)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -2457,18 +2485,89 @@ def _require_geneset_registry() -> GenesetRegistry:
     return geneset_registry
 
 
+def _build_score_index() -> None:
+    """
+    Walk every database in the registry, find columns matching
+    <study>::<experiment>::<geneset> in obsnum, and build the bidirectional
+    index. Cheap (one information_schema query per db).
+    """
+    global _score_index_by_db, _score_index_by_geneset, _score_columns
+    new_by_db: Dict[str, List[str]] = {}
+    new_by_geneset: Dict[str, List[str]] = {}
+    new_columns: Dict[Tuple[str, str], str] = {}
+
+    if registry is None:
+        return
+
+    for db_id in registry.databases.keys():
+        try:
+            db_url = registry.get_database_path(db_id)
+            conn = connection_pool.get_connection(db_url)
+        except Exception as exc:
+            log.warning("score-index: skipping %s (open failed: %s)", db_id, exc)
+            continue
+        try:
+            rows = conn.execute("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'obsnum'
+            """).fetchall()
+            for (col,) in rows:
+                geneset_id = parse_score_column(col)
+                if not geneset_id:
+                    continue
+                new_by_db.setdefault(db_id, []).append(geneset_id)
+                new_by_geneset.setdefault(geneset_id, []).append(db_id)
+                new_columns[(db_id, geneset_id)] = col
+        except Exception as exc:
+            log.warning("score-index: scan failed for %s: %s", db_id, exc)
+        finally:
+            try:
+                connection_pool.return_connection(db_url, conn)
+            except Exception:
+                pass
+
+    # Sort for deterministic output
+    for ids in new_by_db.values():
+        ids.sort()
+    for ids in new_by_geneset.values():
+        ids.sort()
+
+    _score_index_by_db = new_by_db
+    _score_index_by_geneset = new_by_geneset
+    _score_columns = new_columns
+    log.info(
+        "score-index: %d database(s) with scored genesets, %d distinct geneset(s)",
+        len(new_by_db), len(new_by_geneset),
+    )
+
+
+def _annotate_with_scored_in(summary: Dict[str, Any]) -> Dict[str, Any]:
+    """Mutate a geneset summary dict to include scored_in (list of db_ids)."""
+    summary['scored_in'] = list(_score_index_by_geneset.get(summary['geneset_id'], []))
+    return summary
+
+
 @app.get("/genesets", tags=["genesets"])
 async def list_genesets(
     organism: Optional[str] = None,
     method: Optional[str] = None,
     study: Optional[str] = None,
 ):
-    """List all genesets, optionally filtered by organism/method/study."""
+    """List all genesets, optionally filtered by organism/method/study.
+
+    Each entry includes `scored_in` — a list of `db_id`s where the geneset is
+    already pre-computed as an obs column (no on-the-fly scoring required).
+    """
     registry = _require_geneset_registry()
     items = registry.list_genesets(organism=organism, method=method, study=study)
     return {
         "count": len(items),
-        "genesets": [g.to_summary() for g in items],
+        "column_naming": {
+            "separator": SCORE_COLUMN_SEPARATOR,
+            "template":  SCORE_COLUMN_TEMPLATE,
+            "example":   "Sierksma2025::WGCNA::Brown_Lysosome",
+        },
+        "genesets": [_annotate_with_scored_in(g.to_summary()) for g in items],
     }
 
 
@@ -2487,33 +2586,133 @@ async def get_geneset_experiment(study: str, experiment: str):
         "name": exp.name,
         "metadata": exp.metadata,
         "body": exp.body,
-        "genesets": [g.to_summary() for g in members],
+        "genesets": [_annotate_with_scored_in(g.to_summary()) for g in members],
     }
 
 
 @app.get("/genesets/{study}/{experiment}/{name}", tags=["genesets"])
 async def get_geneset(study: str, experiment: str, name: str):
-    """Return one geneset (merged metadata + gene list)."""
+    """Return one geneset (merged metadata + gene list).
+
+    Includes `scored_in` (list of db_ids) and `column_name` (the obs column name
+    used in pre-scored datasets).
+    """
     registry = _require_geneset_registry()
     geneset_id = f"{study}/{experiment}/{name}"
     geneset = registry.get(geneset_id)
     if geneset is None:
         raise HTTPException(status_code=404, detail=f"Geneset {geneset_id} not found")
-    return geneset.to_detail()
+    detail = geneset.to_detail()
+    detail['scored_in'] = list(_score_index_by_geneset.get(geneset_id, []))
+    detail['column_name'] = SCORE_COLUMN_TEMPLATE.format(
+        study=geneset.experiment.study,
+        experiment=geneset.experiment.name,
+        name=geneset.name,
+    )
+    return detail
 
 
 @app.post("/genesets/rescan", tags=["genesets"])
 async def rescan_genesets():
-    """Re-scan the geneset store from disk."""
-    registry = _require_geneset_registry()
-    registry.scan()
+    """Re-scan the geneset store from disk and rebuild the score index."""
+    geneset_reg = _require_geneset_registry()
+    geneset_reg.scan()
     h5ad_db_ids = set(globals()['registry'].databases.keys()) if globals().get('registry') else None
-    errors, warnings = validate_geneset_registry(registry, h5ad_db_ids=h5ad_db_ids)
+    errors, warnings = validate_geneset_registry(geneset_reg, h5ad_db_ids=h5ad_db_ids)
+    _build_score_index()
     return {
-        "experiments": len(registry.experiments),
-        "genesets": len(registry.genesets),
+        "experiments": len(geneset_reg.experiments),
+        "genesets": len(geneset_reg.genesets),
+        "scored_databases": len(_score_index_by_db),
         "errors": errors,
         "warnings": warnings,
+    }
+
+
+@app.get("/databases/{db_id:path}/module_scores", tags=["databases"])
+async def get_database_module_scores(db_id: str):
+    """List all pre-computed module-score columns for one dataset.
+
+    For each scored geneset, returns:
+      - geneset_id        canonical geneset id (study/experiment/name)
+      - column_name       obs/duckdb column where the score is stored
+      - geneset_known     True if the geneset is in the registered genesetstore
+      - method            (if known)
+      - description       (if known)
+      - n_genes           (if known)
+      - stats             {min, max, mean, std, median}  computed from the column
+
+    Use the resulting column names directly in analytics_query, e.g.:
+        SELECT cell_name, "Sierksma2025::WGCNA::Brown_Lysosome"
+        FROM   obsnum
+    """
+    if registry is None or db_id not in registry.databases:
+        raise HTTPException(status_code=404, detail=f"Database not found: {db_id}")
+
+    db_url = registry.get_database_path(db_id)
+    conn = connection_pool.get_connection(db_url)
+    try:
+        cols = conn.execute("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'obsnum'
+        """).fetchall()
+        score_cols = [c[0] for c in cols if is_score_column(c[0])]
+
+        out = []
+        gset_reg = geneset_registry  # may be None if store not configured
+        for col in sorted(score_cols):
+            geneset_id = parse_score_column(col)
+            row = {
+                "geneset_id":   geneset_id,
+                "column_name":  col,
+                "geneset_known": False,
+                "method":       None,
+                "description":  None,
+                "n_genes":      None,
+                "stats":        None,
+            }
+            if gset_reg is not None:
+                gs = gset_reg.get(geneset_id)
+                if gs is not None:
+                    row["geneset_known"] = True
+                    row["method"]       = gs.experiment.method
+                    row["description"]  = gs.metadata.get('description') or ''
+                    row["n_genes"]      = gs.n_genes
+            try:
+                stats_row = conn.execute(f"""
+                    SELECT
+                      COUNT(*) AS n,
+                      MIN("{col}") AS min,
+                      MAX("{col}") AS max,
+                      AVG("{col}") AS mean,
+                      STDDEV("{col}") AS std,
+                      MEDIAN("{col}") AS median
+                    FROM __obsnum
+                """).fetchone()
+                if stats_row is not None:
+                    n, mn, mx, mean, std, med = stats_row
+                    row["stats"] = {
+                        "n":      int(n) if n is not None else None,
+                        "min":    float(mn)   if mn   is not None else None,
+                        "max":    float(mx)   if mx   is not None else None,
+                        "mean":   float(mean) if mean is not None else None,
+                        "std":    float(std)  if std  is not None else None,
+                        "median": float(med)  if med  is not None else None,
+                    }
+            except Exception as exc:
+                row["stats"] = {"error": str(exc)}
+            out.append(row)
+    finally:
+        connection_pool.return_connection(db_url, conn)
+
+    return {
+        "db_id": db_id,
+        "count": len(out),
+        "column_naming": {
+            "separator": SCORE_COLUMN_SEPARATOR,
+            "template":  SCORE_COLUMN_TEMPLATE,
+        },
+        "scored_genesets": out,
     }
 
 
