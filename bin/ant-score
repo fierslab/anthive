@@ -363,7 +363,7 @@ def _process_one_h5ad(entry: H5adEntry,
     # var_names and the human-readable gene symbols in a column like
     # 'feature_name' / 'gene_symbol'. If we detect that, swap var_names to
     # the symbol column so geneset gene names match.
-    _maybe_remap_var_names(adata, args.gene_column)
+    adata = _maybe_remap_var_names(adata, args.gene_column)
 
     # Translate "X" → None (scanpy convention for adata.X)
     layer_arg = None if layer_to_use == 'X' else layer_to_use
@@ -456,15 +456,38 @@ _GENE_SYMBOL_COLUMN_CANDIDATES = ('feature_name', 'gene_symbol', 'Symbol',
                                   'gene_symbols', 'gene_name', 'symbol')
 
 
-def _maybe_remap_var_names(adata, explicit_column: Optional[str]) -> None:
-    """Swap adata.var_names to a symbol column when var_names are not symbols.
+def _swap_var_names(adata, column: str, source_label: str):
+    """Swap adata.var_names to `column`, deduplicating by keeping first.
 
-    Triggered when:
-      - explicit_column is passed (always swap, error if missing), OR
-      - >50% of the first 200 var_names match the Ensembl ID pattern AND
-        a known symbol column exists in var.
+    Returns a new adata view (subsetted to unique gene symbols).
+    """
+    old_idx_name = adata.var.index.name or '_var_index'
+    # Preserve the original IDs as a column
+    adata.var[old_idx_name + '_orig'] = adata.var.index.values
+    new_names = pd.Index(adata.var[column].astype(str).values, name=old_idx_name)
 
-    Mutates adata in place.
+    # Deduplicate: keep first row for each symbol
+    keep_mask = ~new_names.duplicated(keep='first')
+    n_dups = int((~keep_mask).sum())
+
+    # Apply temporary index for slicing
+    adata.var.index = new_names
+    if n_dups:
+        adata = adata[:, keep_mask].copy()
+        print(
+            f"  Var names swapped to {column!r} ({source_label}); "
+            f"dropped {n_dups:,} duplicate symbols (kept first)."
+        )
+    else:
+        print(f"  Var names swapped to {column!r} ({source_label}).")
+    return adata
+
+
+def _maybe_remap_var_names(adata, explicit_column: Optional[str]):
+    """If var_names aren't symbols, return adata with var index swapped.
+
+    Auto-detects CellxGene-style Ensembl IDs and looks up a known symbol
+    column. Returns the (possibly new) adata.
     """
     if explicit_column:
         if explicit_column not in adata.var.columns:
@@ -472,40 +495,28 @@ def _maybe_remap_var_names(adata, explicit_column: Optional[str]) -> None:
                 f"ERROR: --gene-column {explicit_column!r} not found in "
                 f"adata.var. Available columns: {list(adata.var.columns)}"
             )
-        old_idx_name = adata.var.index.name
-        adata.var[old_idx_name or 'original_var_names'] = adata.var.index
-        adata.var.index = pd.Index(adata.var[explicit_column].astype(str).values,
-                                    name=old_idx_name)
-        print(f"  Var names swapped: now using column {explicit_column!r}")
-        return
+        return _swap_var_names(adata, explicit_column, 'CLI override')
 
-    # Auto-detect: Ensembl-id pattern check
     sample = list(adata.var_names[:200])
     if not sample:
-        return
-    looks_ensembl = sum(1 for s in sample
-                        if isinstance(s, str)
-                        and (s.startswith('ENSG') or s.startswith('ENSMUS'))) / len(sample)
+        return adata
+    looks_ensembl = sum(
+        1 for s in sample
+        if isinstance(s, str) and (s.startswith('ENSG') or s.startswith('ENSMUS'))
+    ) / len(sample)
     if looks_ensembl < 0.5:
-        return
+        return adata
 
     for cand in _GENE_SYMBOL_COLUMN_CANDIDATES:
         if cand in adata.var.columns:
-            old_idx_name = adata.var.index.name
-            adata.var[old_idx_name or 'original_var_names'] = adata.var.index
-            adata.var.index = pd.Index(adata.var[cand].astype(str).values,
-                                        name=old_idx_name)
-            print(
-                f"  Var names looked like Ensembl IDs; swapped to {cand!r} "
-                f"(autodetected). Original IDs preserved in "
-                f"adata.var[{old_idx_name or 'original_var_names'!r}]."
-            )
-            return
+            return _swap_var_names(adata, cand, 'autodetected; var_names looked like Ensembl IDs')
+
     print(
         "  WARNING: var_names look like Ensembl IDs but no symbol column "
         "(feature_name/gene_symbol/Symbol/...) found in adata.var. "
         "Scoring will likely fail."
     )
+    return adata
 
 
 def _organism_compatible(adata, organism: str) -> bool:
