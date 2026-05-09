@@ -369,15 +369,35 @@ def _process_one_h5ad(entry: H5adEntry,
     # Override args.layer so _score_experiment / _score_one see the resolved value.
     args.layer = layer_arg
 
+    # Resolve dataset organism from .md annotation; falls back to a heuristic
+    # only if the .md says nothing.
+    md_annotation = md_metadata.get('annotation') or {}
+    md_organism = md_annotation.get('organism')
+    if isinstance(md_organism, list):
+        md_organism = [str(o).lower() for o in md_organism]
+    elif md_organism is not None:
+        md_organism = str(md_organism).lower()
+
     summaries = []
     for experiment, genesets in experiments:
         print(f"\n  Experiment: {experiment.experiment_id}  "
               f"(organism={experiment.organism}, method={experiment.method})")
-        if experiment.organism and not _organism_compatible(adata, experiment.organism):
-            sys.exit(
-                f"ERROR: experiment organism {experiment.organism!r} is not "
-                f"compatible with the h5ad. Aborting (no scores written)."
-            )
+        if experiment.organism:
+            wanted = experiment.organism.lower()
+            ok = False
+            if md_organism is not None:
+                if isinstance(md_organism, list):
+                    ok = wanted in md_organism
+                else:
+                    ok = wanted == md_organism
+            else:
+                ok = _organism_compatible(adata, experiment.organism)
+            if not ok:
+                sys.exit(
+                    f"ERROR: experiment organism {experiment.organism!r} is not "
+                    f"compatible with dataset organism {md_organism!r}. "
+                    f"Aborting (no scores written)."
+                )
         record = _score_experiment(
             adata, experiment, genesets, genesetstore_root, args,
         )
