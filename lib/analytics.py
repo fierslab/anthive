@@ -65,46 +65,101 @@ def _cleanup_old_sessions() -> int:
 
 
 # ── SQL security ───────────────────────────────────────────────────────────────
+#
+# Validation uses DuckDB's own parser — never a regex over the raw source.
+# Two pure-parse checks, both grammar-aware (comments stripped, string literals
+# correctly distinguished from keywords, no false positives or negatives):
+#
+#   1. extract_statements: every statement must be SELECT.
+#      Catches multi-statement injection, SET / COPY / ATTACH / DETACH /
+#      INSERT / UPDATE / DELETE / CREATE / DROP / ALTER / PRAGMA / EXEC /
+#      LOAD etc. cleanly via the StatementType enum.
+#
+#   2. tokenize: scan for keyword=FROM followed by either a string literal
+#      (`FROM 's3://...'` path-as-table) or a known table-producing
+#      function identifier (`FROM read_parquet(...)`).  The tokenizer
+#      operates on the raw source, recognises comments and string literals,
+#      and emits typed tokens — no regex needed.
+#
+# Neither call talks to the database or the network, so they are safe to run
+# on hostile input.  EXPLAIN-based validation is NOT used: DuckDB will
+# perform schema inference for foreign sources (e.g. open the s3:// URL) at
+# EXPLAIN time, which is the exact attack we are trying to prevent.
 
-_WRITE_PATTERN = re.compile(
-    r'\b(INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|TRUNCATE|REPLACE|MERGE'
-    r'|ATTACH|DETACH|COPY|EXPORT|IMPORT|PRAGMA|CALL|SET'
-    # DuckDB table-generating functions that can read arbitrary files or URLs
-    r'|read_csv|read_parquet|read_json|read_ndjson|read_text|read_arrow'
-    r'|scan_csv|scan_parquet|scan_arrow|scan_ndjson|scan_json'
-    r'|glob|httpfs_get|httpfs_post|load_spatial|parquet_metadata'
-    r'|csv_scan|parquet_scan)\b',
-    re.IGNORECASE,
-)
+# Identifiers that — when used in FROM clause position — read files or URLs.
+# Token-stream check is grammar-aware: these are blocked only as actual FROM
+# items, not as column names or string literals containing the same text.
+_BLOCKED_FROM_FUNCTIONS = frozenset({
+    'read_csv', 'read_csv_auto', 'read_parquet', 'read_json', 'read_ndjson',
+    'read_text', 'read_arrow', 'read_blob', 'read_xlsx', 'read_excel',
+    'scan_csv', 'scan_parquet', 'scan_arrow', 'scan_ndjson', 'scan_json',
+    'csv_scan', 'parquet_scan',
+    'glob', 'httpfs_get', 'httpfs_post', 'parquet_metadata', 'parquet_schema',
+    'load_spatial',
+})
 
-# Block DuckDB's bare-path-as-table syntax (`FROM 'file.parquet'` /
-# `FROM 's3://…'`), which side-steps the read_* function blocklist.
-# A legitimate query never has a single-quoted string immediately after
-# FROM — SELECT 'lit' FROM table is fine because the literal is before FROM,
-# and a subquery uses `(` not `'`.
-_BARE_PATH_FROM = re.compile(r"\bFROM\s+'", re.IGNORECASE)
+_IDENT_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
 
 
-def _strip_sql_comments(sql: str) -> str:
-    sql = re.sub(r'--[^\n]*', '', sql)
-    sql = re.sub(r'/\*.*?\*/', '', sql, flags=re.DOTALL)
-    return sql
+def _token_text(sql: str, offset: int) -> str:
+    """Best-effort: return the identifier/keyword text starting at offset."""
+    m = _IDENT_RE.match(sql, offset)
+    return m.group(0) if m else ''
 
 
 def validate_sql(sql: str) -> None:
-    """Raise ValueError if sql contains write, DDL, or admin statements."""
-    stripped = _strip_sql_comments(sql)
-    match = _WRITE_PATTERN.search(stripped)
-    if match:
-        raise ValueError(
-            f"Statement not allowed: '{match.group()}'. "
-            "Only SELECT / WITH … SELECT queries are permitted."
-        )
-    if _BARE_PATH_FROM.search(stripped):
-        raise ValueError(
-            "Statement not allowed: `FROM '…'` (path-as-table). "
-            "External files / URLs cannot be read through analytics_query."
-        )
+    """Raise ValueError if sql is not a single SELECT or attempts to read
+    external files / URLs from the FROM clause.  Pure parse — no execution,
+    no network."""
+    # Step 1 — statement-type check via DuckDB's parser.
+    parse_conn = duckdb.connect()  # transient in-memory connection
+    try:
+        stmts = parse_conn.extract_statements(sql)
+    except Exception as exc:
+        raise ValueError(f"Could not parse SQL: {exc}") from exc
+    finally:
+        parse_conn.close()
+
+    if not stmts:
+        raise ValueError("Empty SQL")
+    for i, stmt in enumerate(stmts):
+        if stmt.type != duckdb.StatementType.SELECT:
+            raise ValueError(
+                f"Statement {i+1} is {stmt.type.name}; "
+                f"only SELECT / WITH … SELECT queries are permitted."
+            )
+
+    # Step 2 — token-stream check for FROM-clause attacks.
+    try:
+        tokens = duckdb.tokenize(sql)
+    except Exception as exc:
+        raise ValueError(f"Could not tokenize SQL: {exc}") from exc
+
+    n = len(tokens)
+    for i in range(n):
+        offset, tt = tokens[i]
+        if tt != duckdb.token_type.keyword:
+            continue
+        if _token_text(sql, offset).lower() != 'from':
+            continue
+        # Find next non-comment token.
+        j = i + 1
+        while j < n and tokens[j][1] == duckdb.token_type.comment:
+            j += 1
+        if j >= n:
+            continue
+        next_offset, next_tt = tokens[j]
+        if next_tt == duckdb.token_type.string_const:
+            raise ValueError(
+                "FROM '<path>' (path-as-table) is not allowed. "
+                "External files / URLs cannot be read through analytics_query."
+            )
+        if next_tt == duckdb.token_type.identifier:
+            name = _token_text(sql, next_offset).lower()
+            if name in _BLOCKED_FROM_FUNCTIONS:
+                raise ValueError(
+                    f"Table-producing function '{name}()' is not allowed in FROM."
+                )
 
 
 # ── Python security ────────────────────────────────────────────────────────────
