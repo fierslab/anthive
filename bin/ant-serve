@@ -60,7 +60,7 @@ script_dir = Path(__file__).parent.resolve()
 lib_dir = script_dir.parent / 'lib'
 sys.path.insert(0, str(lib_dir))
 
-from anthive_db import AnthiveDB
+from anthive_db import AnthiveDB, safe_ident
 from config import get_config
 from geneset import (
     GenesetRegistry,
@@ -2679,14 +2679,18 @@ async def get_database_module_scores(db_id: str):
                     row["description"]  = gs.metadata.get('description') or ''
                     row["n_genes"]      = gs.n_genes
             try:
+                # safe_ident() validates against [A-Za-z0-9_:.\- ] and quotes
+                # — defends against a crafted column name (`"); DROP …`) even
+                # though the connection is read-only.
+                qcol = safe_ident(col)
                 stats_row = conn.execute(f"""
                     SELECT
                       COUNT(*) AS n,
-                      MIN("{col}") AS min,
-                      MAX("{col}") AS max,
-                      AVG("{col}") AS mean,
-                      STDDEV("{col}") AS std,
-                      MEDIAN("{col}") AS median
+                      MIN({qcol}) AS min,
+                      MAX({qcol}) AS max,
+                      AVG({qcol}) AS mean,
+                      STDDEV({qcol}) AS std,
+                      MEDIAN({qcol}) AS median
                     FROM __obsnum
                 """).fetchone()
                 if stats_row is not None:

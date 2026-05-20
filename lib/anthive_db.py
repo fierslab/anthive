@@ -4,10 +4,35 @@ Database access layer for Anthive DuckDB files
 Provides a clean interface to query DuckDB databases created by ant-convert
 """
 
+import re
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 import duckdb
 import pandas as pd
+
+
+# DuckDB identifiers we interpolate via f-strings have to be validated and
+# quoted. The allowed character set covers every obs / var / layer column we
+# have actually seen in the h5adstore (parentheses, spaces, hyphens, dots,
+# colons — see e.g. "Antigen-presenting response (HLA)_microtype"), while
+# excluding quote characters and any statement-terminator chars.
+#
+# Note that quoting is what makes this safe — DuckDB treats `"FOO BAR"` as
+# one identifier name, never as SQL keywords. The regex just keeps quote
+# characters out so the quote/escape can't be tricked.
+_SAFE_IDENT_RE = re.compile(r'^[A-Za-z0-9_:.\-(), ]+$')
+
+
+def safe_ident(name: str) -> str:
+    """Return a double-quoted SQL identifier, validated against a strict regex.
+
+    Raises ValueError if `name` contains any character outside the allowed
+    set. Use at every f-string interpolation site that places `name` in
+    identifier position — never bypass.
+    """
+    if not isinstance(name, str) or not _SAFE_IDENT_RE.fullmatch(name):
+        raise ValueError(f"Unsafe SQL identifier: {name!r}")
+    return '"' + name.replace('"', '""') + '"'
 
 
 class AnthiveDB:
@@ -252,13 +277,18 @@ class AnthiveDB:
 
         # Add gene expression columns if requested
         if genes:
+            layer_table = safe_ident(f"layer__{layer}")
             for gene in genes:
-                # Use subquery to get expression value for this gene
+                # NOTE: gene-name string interpolation here is a separate
+                # known issue (see QA findings) — needs callers to be
+                # refactored to thread bound parameters through. The layer
+                # identifier is now safely quoted.
+                gene_alias = safe_ident(gene)
                 select_parts.append(f"""
                     (SELECT value
-                     FROM layer__{layer}
+                     FROM {layer_table}
                      WHERE cell_name = c.cell_name
-                     AND gene_name = '{gene}') AS "{gene}"
+                     AND gene_name = '{gene}') AS {gene_alias}
                 """)
 
         # Add metadata columns if requested
@@ -577,6 +607,7 @@ class AnthiveDB:
             if stored_name in rank_ctx:
                 base.update(rank_ctx[stored_name])
 
+            layer_table = safe_ident(f"layer__{layer}")
             row = self._conn.execute(f"""
                 SELECT
                     COUNT(*)                          AS n_nonzero,
@@ -588,7 +619,7 @@ class AnthiveDB:
                     QUANTILE_CONT(value, 0.1)         AS q10_nz,
                     QUANTILE_CONT(value, 0.9)         AS q90_nz,
                     MAX(value)                        AS max_val
-                FROM layer__{layer}
+                FROM {layer_table}
                 WHERE gene_name = ?
             """, [stored_name]).fetchone()
 
@@ -668,7 +699,7 @@ class AnthiveDB:
             )
 
         gene_id_list = ', '.join(str(found_map[g]) for g in genes_found)
-        layer_table = f"__layer__{layer}"
+        layer_table = safe_ident(f"__layer__{layer}")
 
         # Count control genes that will be selected
         n_control_genes = self._conn.execute(f"""

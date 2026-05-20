@@ -68,7 +68,7 @@ def _cleanup_old_sessions() -> int:
 
 _WRITE_PATTERN = re.compile(
     r'\b(INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|TRUNCATE|REPLACE|MERGE'
-    r'|ATTACH|DETACH|COPY|EXPORT|IMPORT|PRAGMA|CALL'
+    r'|ATTACH|DETACH|COPY|EXPORT|IMPORT|PRAGMA|CALL|SET'
     # DuckDB table-generating functions that can read arbitrary files or URLs
     r'|read_csv|read_parquet|read_json|read_ndjson|read_text|read_arrow'
     r'|scan_csv|scan_parquet|scan_arrow|scan_ndjson|scan_json'
@@ -76,6 +76,13 @@ _WRITE_PATTERN = re.compile(
     r'|csv_scan|parquet_scan)\b',
     re.IGNORECASE,
 )
+
+# Block DuckDB's bare-path-as-table syntax (`FROM 'file.parquet'` /
+# `FROM 's3://…'`), which side-steps the read_* function blocklist.
+# A legitimate query never has a single-quoted string immediately after
+# FROM — SELECT 'lit' FROM table is fine because the literal is before FROM,
+# and a subquery uses `(` not `'`.
+_BARE_PATH_FROM = re.compile(r"\bFROM\s+'", re.IGNORECASE)
 
 
 def _strip_sql_comments(sql: str) -> str:
@@ -92,6 +99,11 @@ def validate_sql(sql: str) -> None:
         raise ValueError(
             f"Statement not allowed: '{match.group()}'. "
             "Only SELECT / WITH … SELECT queries are permitted."
+        )
+    if _BARE_PATH_FROM.search(stripped):
+        raise ValueError(
+            "Statement not allowed: `FROM '…'` (path-as-table). "
+            "External files / URLs cannot be read through analytics_query."
         )
 
 
