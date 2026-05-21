@@ -52,10 +52,24 @@ async def _packages(mo):
 
 @app.cell
 def _(mo):
-    """Read query parameters once.  Defaults reflect a sensible starter dataset."""
+    """Read query parameters once.  Defaults reflect a sensible starter dataset.
+
+    The API URL defaults to *same origin* as the page so that browser
+    credentials (basic-auth, cookies) flow naturally and CORS doesn't apply.
+    A `?api=…` query param overrides this for cross-origin / local testing.
+    """
     params = mo.query_params()
-    default_api = params.get("api", "https://data.nevel.eu/api")
-    default_db  = params.get("db_id", "P26/HMI")
+
+    # auto-detect: when running in the browser, use the current page's origin.
+    auto_api = None
+    try:
+        import js  # only present under Pyodide / browser
+        auto_api = js.location.origin + "/api"
+    except Exception:
+        auto_api = "http://localhost:8080/api"
+
+    default_api  = params.get("api", auto_api)
+    default_db   = params.get("db_id", "P26/HMI")
     default_gene = params.get("gene", "TREM2")
     return default_api, default_db, default_gene, params
 
@@ -259,16 +273,18 @@ def _(cells, color_by, gene_input, mo):
 
 
 @app.cell
-def _(api_input, db_selector, gene_input, mo, params):
+def _(api_input, db_selector, default_api, gene_input, mo, params):
     """Two-way bind widget state to URL — so anyone can copy-paste this link."""
     if db_selector.value:
         params["db_id"] = db_selector.value
     if gene_input.value.strip():
         params["gene"] = gene_input.value.strip()
-    if api_input.value.strip() and api_input.value != "https://data.nevel.eu/api":
+    # Only record `api` in the URL when it differs from the auto-detected
+    # same-origin default. Avoids cluttering shareable links.
+    if api_input.value.strip() and api_input.value != default_api:
         params["api"] = api_input.value
     mo.md(
-        f"🔗 **Share this view:** copy the URL bar — it's updated live as you change widgets."
+        "🔗 **Share this view:** copy the URL bar — it's updated live as you change widgets."
     )
     return
 
