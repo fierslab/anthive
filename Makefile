@@ -87,7 +87,18 @@ build-jupyter: antclient/antclient.py
 	@echo "Location: webapp/jupyter/"
 	@echo "Client: webapp/jupyter/files/antclient.py"
 
-build-webapp: build-jupyter webapp-src/index.html
+build-marimo:
+	@echo "Building marimo WASM notebook to webapp/marimo..."
+	@rm -rf webapp/marimo
+	@mkdir -p webapp
+	@uvx marimo export html-wasm \
+		webapp-src/marimo/explore.py \
+		-o webapp/marimo --mode run
+	@# strip marimo's stale template
+	@rm -f webapp/marimo/CLAUDE.md
+	@echo "✓ marimo build complete: webapp/marimo/"
+
+build-webapp: build-jupyter build-marimo webapp-src/index.html
 	@echo ""
 	@echo "Copying main index.html..."
 	@cp webapp-src/index.html webapp/index.html
