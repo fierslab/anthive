@@ -216,56 +216,79 @@ def _(mo, stats):
 
 @app.cell
 def _(client, db_id, gene_input, mo, obs_cat):
-    """Pull a manageable cell sample (gene + first categorical obs) for plotting."""
+    """Pull a manageable cell sample (gene + first categorical obs) for plotting.
+
+    Returns (df, color_by, err). `err` is a markdown-formatted error string
+    when something went wrong, else None. We keep going so downstream cells
+    can render an inline error instead of going silent.
+    """
+    import pandas as pd
+
     gene = gene_input.value.strip()
-    if not gene:
-        return None, None
     color_by = obs_cat[0] if obs_cat else None
-    sample_size = 5000
-    try:
-        cells = client.get_cells(
-            db_id=db_id,
-            genes=[gene],
-            obs=[color_by] if color_by else None,
-            limit=sample_size,
-        )
-    except Exception as exc:
-        mo.stop(True, mo.md(f"`get_cells` failed: `{exc}`"))
-        cells = None
-    return cells, color_by
+    df = pd.DataFrame()
+    err = None
+
+    if not gene:
+        err = "Enter a gene name above."
+    else:
+        try:
+            df = client.get_cells(
+                db_id=db_id,
+                genes=[gene],
+                metadata=[color_by] if color_by else None,  # antclient: metadata=, not obs=
+                limit=5000,
+                format='dataframe',
+            )
+        except Exception as exc:
+            err = f"`get_cells` failed: `{exc}`"
+        else:
+            if df is None or len(df) == 0:
+                err = "API returned 0 cells."
+            elif gene not in df.columns:
+                err = (
+                    f"Gene `{gene}` not in returned table (columns: "
+                    f"{list(df.columns)}). Try one of the search hits above."
+                )
+
+    mo.md(
+        f"**fetch:** {('sample of ' + f'{len(df):,}' + ' cells' ) if err is None else '❌ ' + err}"
+        + (f" — colour by `{color_by}`" if color_by and err is None else "")
+    )
+    return color_by, df, err
 
 
 @app.cell
-def _(cells, color_by, gene_input, mo):
-    """Render expression histogram with matplotlib."""
-    if cells is None or len(cells) == 0:
-        mo.stop(True, mo.md("No cells returned."))
+def _(color_by, df, err, gene_input, mo):
+    """Render expression histogram + per-category box plot."""
+    if err is not None:
+        mo.md(f"_(no plot — see error above)_")
+        return
 
     import matplotlib.pyplot as plt
-    import pandas as pd
 
-    df = cells if isinstance(cells, pd.DataFrame) else pd.DataFrame(cells)
     gene = gene_input.value.strip()
+    values = df[gene].astype(float).dropna()
 
-    if gene not in df.columns:
-        mo.stop(True, mo.md(f"Column `{gene}` not in returned cell table."))
+    n_cols = 2 if (color_by and color_by in df.columns) else 1
+    fig, axes = plt.subplots(1, n_cols, figsize=(5 * n_cols, 4), squeeze=False)
 
-    fig, axes = plt.subplots(1, 2 if color_by else 1, figsize=(10, 4), squeeze=False)
     ax = axes[0, 0]
-    ax.hist(df[gene].astype(float), bins=60, color="#4c72b0", edgecolor="white")
-    ax.set_title(f"{gene} (n={len(df):,} cells, sampled)")
-    ax.set_xlabel(f"{gene} expression")
+    ax.hist(values, bins=60, color="#4c72b0", edgecolor="white")
+    ax.set_title(f"{gene} expression (n={len(values):,} cells, sampled)")
+    ax.set_xlabel(f"{gene}")
     ax.set_ylabel("cells")
 
-    if color_by and color_by in df.columns:
+    if n_cols == 2:
         ax2 = axes[0, 1]
         groups = df.groupby(color_by)[gene].apply(list)
-        # cap labels — top 8 by group size
+        # cap labels — top 8 by group size, sorted by median
         keys = sorted(groups.index, key=lambda k: -len(groups[k]))[:8]
         ax2.boxplot([groups[k] for k in keys], labels=[str(k)[:12] for k in keys],
                     showfliers=False)
         ax2.set_title(f"{gene} by {color_by}")
         ax2.tick_params(axis='x', rotation=30)
+        ax2.set_ylabel(f"{gene}")
 
     fig.tight_layout()
     fig
