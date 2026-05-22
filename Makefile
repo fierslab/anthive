@@ -1,4 +1,4 @@
-.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-streamlit serve-mcp serve-all serve-debug dev-jupyter sync-push sync-pull sync-pull-all sync-status build-stale sync-update
+.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-streamlit serve-mcp serve-all serve-debug dev-jupyter sync-push sync-pull sync-pull-all sync-status build-stale sync-update serve-status serve-restart
 
 help:
 	@echo "Anthive4 Development Commands"
@@ -14,6 +14,10 @@ help:
 	@echo "All-in-one:"
 	@echo "  make serve-all     - Start all services (deployment, nginx already running)"
 	@echo "  make serve-debug   - Start all services + Caddy on port 8501"
+	@echo "  make serve-status  - Show supervisor state + child PIDs"
+	@echo "  make serve-restart SVC=browse        - Restart a single service"
+	@echo "  make serve-restart SVC='api browse'  - Restart several at once"
+	@echo "  make serve-restart SVC=all           - Restart every child"
 	@echo ""
 	@echo "Development:"
 	@echo "  make serve-api         - Run REST API server (port 8080)"
@@ -185,6 +189,17 @@ serve-all:
 serve-debug:
 	@echo "Starting Anthive with Caddy on http://localhost:8501"
 	@./bin/ant-supervisor --caddy
+
+# Restart one or more children of a running supervisor.
+#   make serve-restart SVC=browse
+#   make serve-restart SVC='api browse'
+#   make serve-restart SVC=all       (everything)
+SVC ?= all
+serve-restart:
+	@./bin/ant-supervisor restart $(SVC)
+
+serve-status:
+	@./bin/ant-supervisor status
 
 serve-streamlit:
 	@echo "Starting Anthive Streamlit server on http://localhost:8082"
