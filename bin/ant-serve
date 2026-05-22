@@ -824,6 +824,8 @@ class DatabaseRegistry:
             'accession':  ann.get('accession'),
             'doi':        ann.get('doi') or [],
             'link':       ann.get('link') or [],
+            'source':     ann.get('source'),
+            'access':     ann.get('access'),
             'top_genes':  file_metadata.get('top_genes'),
             'top_cat':    file_metadata.get('top_cat'),
             'top_num':    file_metadata.get('top_num'),

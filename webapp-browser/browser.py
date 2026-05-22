@@ -181,10 +181,32 @@ def get_collection_list(api_url: str) -> List[Dict]:
             'organism': _summarize_meta_field(dbs, 'organism', abbrev_map=_ORGANISM_ABBREV),
             'technology': _summarize_meta_field(dbs, 'technology', abbrev_map=_TECHNOLOGY_ABBREV),
             'celltype': _summarize_meta_field(dbs, 'celltype', max_len=10),
+            'source': _summarize_meta_field(dbs, 'source', max_len=12),
         })
 
     collections.sort(key=lambda c: c['name'])
     return collections
+
+
+def get_filter_options(collections: List[Dict]) -> Dict[str, List[str]]:
+    """Compute the unique 'full' values across all collections for each filter
+    field. Used to populate the frontpage dropdowns.
+
+    A folder with multiple values in a field contributes each of them
+    (e.g. organism='human, mouse' → ['human', 'mouse']).
+    """
+    fields = ['organism', 'technology', 'celltype', 'source']
+    out: Dict[str, set] = {f: set() for f in fields}
+    for c in collections:
+        for f in fields:
+            full = (c.get(f) or {}).get('full') or ''
+            if not full:
+                continue
+            for value in full.split(','):
+                value = value.strip()
+                if value:
+                    out[f].add(value)
+    return {f: sorted(out[f]) for f in fields}
 
 
 def get_collection_datasets(api_url: str, group_id: str) -> tuple:
@@ -243,11 +265,14 @@ async def index(request: Request):
     total_datasets = sum(c['dataset_count'] for c in collections)
     total_cells = sum(c['total_cells'] for c in collections if c['total_cells']) or None
 
+    filter_options = get_filter_options(collections)
+
     return templates.TemplateResponse(request, "index.html", {
         "folders": collections,
         "total_datasets": total_datasets,
         "total_folders": len(collections),
         "total_cells": total_cells,
+        "filter_options": filter_options,
     })
 
 

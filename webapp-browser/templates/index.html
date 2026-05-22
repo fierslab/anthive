@@ -14,8 +14,25 @@
     {% endif %}
 </div>
 
-<div class="tbl-controls">
-    <input type="text" id="coll-search" placeholder="filter collections…" style="width:240px">
+<div class="tbl-controls" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+    <input type="text" id="coll-search" placeholder="filter collections…" style="width:200px">
+    <select id="flt-organism" class="coll-filter">
+        <option value="">organism: any</option>
+        {% for v in filter_options.organism %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
+    </select>
+    <select id="flt-technology" class="coll-filter">
+        <option value="">technology: any</option>
+        {% for v in filter_options.technology %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
+    </select>
+    <select id="flt-celltype" class="coll-filter">
+        <option value="">celltype: any</option>
+        {% for v in filter_options.celltype %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
+    </select>
+    <select id="flt-source" class="coll-filter">
+        <option value="">source: any</option>
+        {% for v in filter_options.source %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
+    </select>
+    <a href="#" id="clear-filters" style="font-size:11px;color:#888">clear</a>
     <span class="tbl-info" id="coll-info"></span>
 </div>
 
@@ -29,11 +46,16 @@
             <th title="organism">🧬</th>
             <th title="technology">🔬</th>
             <th title="cell type">🦠</th>
+            <th title="source (internal / external)">src</th>
         </tr>
     </thead>
     <tbody>
         {% for folder in folders %}
-        <tr>
+        <tr
+            data-organism="{{ folder.organism.full or '' }}"
+            data-technology="{{ folder.technology.full or '' }}"
+            data-celltype="{{ folder.celltype.full or '' }}"
+            data-source="{{ folder.source.full or '' }}">
             <td style="color:#888;font-size:11px">{{ folder.group_id or "—" }}</td>
             <td>
                 <a href="/browse/{{ folder.browse_id }}"><strong>{{ folder.name }}</strong></a>
@@ -44,6 +66,7 @@
             <td style="color:#555;font-size:11px" {% if folder.organism.full %}title="{{ folder.organism.full }}"{% endif %}>{{ folder.organism.abbrev }}</td>
             <td style="color:#555;font-size:11px" {% if folder.technology.full %}title="{{ folder.technology.full }}"{% endif %}>{{ folder.technology.abbrev }}</td>
             <td style="color:#555;font-size:11px" {% if folder.celltype.full %}title="{{ folder.celltype.full }}"{% endif %}>{{ folder.celltype.abbrev }}</td>
+            <td style="color:#555;font-size:11px" {% if folder.source.full %}title="{{ folder.source.full }}"{% endif %}>{{ folder.source.abbrev }}</td>
         </tr>
         {% endfor %}
     </tbody>
@@ -56,22 +79,64 @@
     var searchEl = document.getElementById('coll-search');
     var infoEl  = document.getElementById('coll-info');
     var showAllLink = document.getElementById('show-all-link');
+    var clearLink = document.getElementById('clear-filters');
+    var filterEls = {
+        organism:   document.getElementById('flt-organism'),
+        technology: document.getElementById('flt-technology'),
+        celltype:   document.getElementById('flt-celltype'),
+        source:     document.getElementById('flt-source'),
+    };
     var rows = Array.from(document.querySelectorAll('#coll-table tbody tr'));
+
+    function rowMatchesFilters(row) {
+        // A row matches a filter dropdown if its data-<field> attribute (a
+        // comma-separated list of values) contains the selected value.
+        for (var field in filterEls) {
+            var selected = filterEls[field].value;
+            if (!selected) continue;
+            var dataVal = (row.getAttribute('data-' + field) || '').toLowerCase();
+            var values = dataVal.split(',').map(function(v) { return v.trim(); });
+            if (values.indexOf(selected.toLowerCase()) === -1) return false;
+        }
+        return true;
+    }
 
     function update() {
         var q = searchEl.value.toLowerCase().trim();
+        var anyFilterActive = Object.values(filterEls).some(function(el) { return el.value; });
         var visible = 0;
-        rows.forEach(function(row, i) {
-            var match = !q || row.textContent.toLowerCase().includes(q);
-            var withinLimit = q ? true : (showAll || i < DEFAULT_SHOW);
-            row.style.display = (match && withinLimit) ? '' : 'none';
-            if (match && withinLimit) visible++;
+        var matchingRows = [];
+        rows.forEach(function(row) {
+            var textMatch = !q || row.textContent.toLowerCase().includes(q);
+            var filterMatch = rowMatchesFilters(row);
+            if (textMatch && filterMatch) matchingRows.push(row);
         });
-        var total = q ? rows.filter(function(r) { return r.textContent.toLowerCase().includes(q); }).length : rows.length;
-        infoEl.textContent = visible + ' of ' + total;
+        // Apply DEFAULT_SHOW limit only when no search/filter is active.
+        matchingRows.forEach(function(row, i) {
+            var withinLimit = (q || anyFilterActive) ? true : (showAll || i < DEFAULT_SHOW);
+            row.style.display = withinLimit ? '' : 'none';
+            if (withinLimit) visible++;
+        });
+        // Hide rows that didn't match at all.
+        rows.forEach(function(row) {
+            if (matchingRows.indexOf(row) === -1) row.style.display = 'none';
+        });
+        infoEl.textContent = visible + ' of ' + matchingRows.length;
     }
 
     searchEl.addEventListener('input', update);
+    Object.values(filterEls).forEach(function(el) {
+        el.addEventListener('change', update);
+    });
+
+    if (clearLink) {
+        clearLink.addEventListener('click', function(e) {
+            e.preventDefault();
+            searchEl.value = '';
+            Object.values(filterEls).forEach(function(el) { el.value = ''; });
+            update();
+        });
+    }
 
     if (showAllLink) {
         showAllLink.addEventListener('click', function(e) {
