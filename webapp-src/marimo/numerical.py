@@ -65,7 +65,8 @@ def _(default_api, mo):
 @app.cell
 def _(api_input):
     from antclient import AnthiveClient
-    return (AnthiveClient(api_input.value),)
+    client = AnthiveClient(api_input.value, timeout=120)
+    return (client,)
 
 
 @app.cell
@@ -172,7 +173,10 @@ def _(cat_selector, client, db_id, group_by, mo, num_selector):
         if group_by.value == "Categorical" and cat_selector.value:
             fields.append(cat_selector.value)
         try:
-            plot_df = client.get_cells(db_id=db_id, metadata=fields, format="dataframe")
+            # Sample up to 20k cells (backend JSON serialization is the
+            # slow step). 20k is plenty for a histogram / box plot.
+            plot_df = client.get_cells(db_id=db_id, metadata=fields,
+                                       limit=20000, format="dataframe")
         except Exception as exc:
             fetch_err = f"`get_cells` failed: `{exc}`"
         if not fetch_err and num not in plot_df.columns:

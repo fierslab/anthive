@@ -65,7 +65,8 @@ def _(default_api, mo):
 @app.cell
 def _(api_input):
     from antclient import AnthiveClient
-    return (AnthiveClient(api_input.value),)
+    client = AnthiveClient(api_input.value, timeout=120)
+    return (client,)
 
 
 @app.cell
@@ -176,15 +177,20 @@ def _(cat_selector, client, db_id, mo, y_field, y_type):
     if db_id and cat_selector and cat_selector.value:
         cat = cat_selector.value
         try:
+            # Sample up to 20k cells — backend JSON serialization is the
+            # slow step. For a categorical breakdown that's plenty.
             if y_type.value == "Gene":
                 plot_df = client.get_cells(
-                    db_id=db_id, genes=[yval], metadata=[cat], format="dataframe")
+                    db_id=db_id, genes=[yval], metadata=[cat],
+                    limit=20000, format="dataframe")
             elif y_type.value == "Numerical":
                 plot_df = client.get_cells(
-                    db_id=db_id, metadata=[cat, yval], format="dataframe")
+                    db_id=db_id, metadata=[cat, yval],
+                    limit=20000, format="dataframe")
             else:
                 plot_df = client.get_cells(
-                    db_id=db_id, metadata=[cat], format="dataframe")
+                    db_id=db_id, metadata=[cat],
+                    limit=20000, format="dataframe")
         except Exception as exc:
             fetch_err = f"`get_cells` failed: `{exc}`"
         if not fetch_err and cat not in plot_df.columns:

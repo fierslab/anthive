@@ -64,7 +64,7 @@ def _(default_api, mo):
 @app.cell
 def _(api_input):
     from antclient import AnthiveClient
-    client = AnthiveClient(api_input.value)
+    client = AnthiveClient(api_input.value, timeout=120)
     return (client,)
 
 
@@ -192,10 +192,14 @@ def _(client, color_by, db_id, emb_selector, field_input, mo):
         emb_name = emb_selector.value
         try:
             emb = client.get_embedding_data(db_id, emb_name, format="dataframe")
+            # Sample cells for the colour fetch — backend JSON serialization
+            # is the slow step. 20k is plenty for a scatter.
             if color_by.value == "Gene":
-                color_df = client.get_cells(db_id=db_id, genes=[field], format="dataframe")
+                color_df = client.get_cells(db_id=db_id, genes=[field],
+                                            limit=20000, format="dataframe")
             else:
-                color_df = client.get_cells(db_id=db_id, metadata=[field], format="dataframe")
+                color_df = client.get_cells(db_id=db_id, metadata=[field],
+                                            limit=20000, format="dataframe")
             emb = emb.set_index(emb.columns[0])
             color_df = color_df.set_index(color_df.columns[0])
             if field not in color_df.columns:

@@ -66,7 +66,7 @@ def _(default_api, mo):
 @app.cell
 def _(api_input):
     from antclient import AnthiveClient
-    client = AnthiveClient(api_input.value)
+    client = AnthiveClient(api_input.value, timeout=120)
     return (client,)
 
 
@@ -161,7 +161,10 @@ def _(client, db_id, gene, mo):
     fetch_err = None
     if db_id and gene:
         try:
-            cells_df = client.get_cells(db_id=db_id, genes=[gene], format="dataframe")
+            # Sample up to 20k cells — backend JSON serialization scales
+            # badly past that, and the distribution looks identical.
+            cells_df = client.get_cells(db_id=db_id, genes=[gene],
+                                        limit=20000, format="dataframe")
         except Exception as exc:
             fetch_err = f"`get_cells` failed: `{exc}`"
         if not fetch_err and gene not in cells_df.columns:
