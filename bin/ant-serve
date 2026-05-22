@@ -821,6 +821,7 @@ class DatabaseRegistry:
             'age':        ann.get('age'),
             'strain':     ann.get('strain'),
             'technology': ann.get('technology'),
+            'technology_category': ann.get('technology_category'),
             'accession':  ann.get('accession'),
             'doi':        ann.get('doi') or [],
             'link':       ann.get('link') or [],

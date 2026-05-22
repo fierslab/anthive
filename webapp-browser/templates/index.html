@@ -20,6 +20,10 @@
         <option value="">organism: any</option>
         {% for v in filter_options.organism %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
     </select>
+    <select id="flt-tech_category" class="coll-filter">
+        <option value="">category: any</option>
+        {% for v in filter_options.technology_category %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
+    </select>
     <select id="flt-technology" class="coll-filter">
         <option value="">technology: any</option>
         {% for v in filter_options.technology %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
@@ -53,6 +57,7 @@
         {% for folder in folders %}
         <tr
             data-organism="{{ folder.organism.full or '' }}"
+            data-tech_category="{{ folder.technology_category.full or '' }}"
             data-technology="{{ folder.technology.full or '' }}"
             data-celltype="{{ folder.celltype.full or '' }}"
             data-source="{{ folder.source.full or '' }}">
@@ -81,10 +86,11 @@
     var showAllLink = document.getElementById('show-all-link');
     var clearLink = document.getElementById('clear-filters');
     var filterEls = {
-        organism:   document.getElementById('flt-organism'),
-        technology: document.getElementById('flt-technology'),
-        celltype:   document.getElementById('flt-celltype'),
-        source:     document.getElementById('flt-source'),
+        organism:      document.getElementById('flt-organism'),
+        tech_category: document.getElementById('flt-tech_category'),
+        technology:    document.getElementById('flt-technology'),
+        celltype:      document.getElementById('flt-celltype'),
+        source:        document.getElementById('flt-source'),
     };
     var rows = Array.from(document.querySelectorAll('#coll-table tbody tr'));
 

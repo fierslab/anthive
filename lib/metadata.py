@@ -14,7 +14,7 @@ import yaml
 
 ANNOTATION_FIELDS = [
     'organism', 'tissue', 'celltype', 'disease', 'condition',
-    'region', 'sex', 'age', 'strain', 'technology',
+    'region', 'sex', 'age', 'strain', 'technology', 'technology_category',
     'accession', 'doi', 'link',
 ]
 
@@ -28,6 +28,14 @@ ANNOTATION_CONVENTIONS = {
     },
     'organism': {
         'lowercase': True,
+    },
+    'technology_category': {
+        'choices': [
+            'single-cell/nucleus transcriptomics',
+            'spatial transcriptomics',
+            'bulk transcriptomics',
+            'proteomics',
+        ],
     },
 }
 

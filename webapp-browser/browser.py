@@ -180,6 +180,7 @@ def get_collection_list(api_url: str) -> List[Dict]:
             'description': None,
             'organism': _summarize_meta_field(dbs, 'organism', abbrev_map=_ORGANISM_ABBREV),
             'technology': _summarize_meta_field(dbs, 'technology', abbrev_map=_TECHNOLOGY_ABBREV),
+            'technology_category': _summarize_meta_field(dbs, 'technology_category', max_len=12),
             'celltype': _summarize_meta_field(dbs, 'celltype', max_len=10),
             'source': _summarize_meta_field(dbs, 'source', max_len=12),
         })
@@ -195,7 +196,7 @@ def get_filter_options(collections: List[Dict]) -> Dict[str, List[str]]:
     A folder with multiple values in a field contributes each of them
     (e.g. organism='human, mouse' → ['human', 'mouse']).
     """
-    fields = ['organism', 'technology', 'celltype', 'source']
+    fields = ['organism', 'technology_category', 'technology', 'celltype', 'source']
     out: Dict[str, set] = {f: set() for f in fields}
     for c in collections:
         for f in fields:
