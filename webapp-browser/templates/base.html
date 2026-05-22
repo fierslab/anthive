@@ -111,16 +111,6 @@
             {% endif %}
             <a href="/streamlit">streamlit</a>
             <a href="/api/docs">api</a>
-            {% if request.app.state.reports %}
-            <span class="dropdown">
-                <a href="#" class="dropdown-toggle">reports</a>
-                <div class="dropdown-menu">
-                    {% for r in request.app.state.reports %}
-                    <a href="/report/{{ r.slug }}/">{{ r.name }}</a>
-                    {% endfor %}
-                </div>
-            </span>
-            {% endif %}
         </nav>
     </div>
     <main>
