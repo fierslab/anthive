@@ -341,9 +341,17 @@ def _process_one_h5ad(entry: H5adEntry,
     # scanpy.tl.score_genes).
     md_metadata, _ = parse_md_file(entry.md_path)
     default_layer = md_metadata.get('default_layer')
+    has_lognorm = md_metadata.get('has_lognorm', True)
     if args.layer is not None:
         layer_to_use = args.layer
         layer_source = 'CLI override'
+    elif has_lognorm is False:
+        sys.exit(
+            f"ERROR: {entry.md_path.name} declares 'has_lognorm: false' — "
+            f"this dataset has no log-normalized layer, so module scoring "
+            f"on raw counts would be meaningless. Pass --layer explicitly "
+            f"if you really want to override."
+        )
     elif default_layer:
         layer_to_use = default_layer
         layer_source = f'.md default_layer'
@@ -351,7 +359,8 @@ def _process_one_h5ad(entry: H5adEntry,
         sys.exit(
             f"ERROR: {entry.md_path.name} has no 'default_layer' field — "
             f"refusing to score. Set 'default_layer: X' (or another layer "
-            f"name) in the .md, or pass --layer explicitly."
+            f"name) in the .md, declare 'has_lognorm: false' if no "
+            f"log-norm exists, or pass --layer explicitly."
         )
 
     print(f"  Loading…")
