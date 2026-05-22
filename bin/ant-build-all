@@ -30,7 +30,13 @@ class FileSet:
 
     @property
     def needs_md(self) -> bool:
-        return self.md is None or not self.md.exists()
+        """True if the .md is missing or stale relative to the h5ad."""
+        if self.md is None or not self.md.exists():
+            return True
+        # .md is stale when the h5ad has been touched after the .md
+        if self.h5ad.stat().st_mtime > self.md.stat().st_mtime:
+            return True
+        return False
 
     @property
     def needs_conversion(self) -> bool:
@@ -70,17 +76,27 @@ def scan_data_folder(data_folder: Path) -> List[FileSet]:
 
     Uses os.walk with followlinks=True so that symlinked directories
     (e.g. data/h5adstore -> /data/1/project/h5adstore) are traversed.
+
+    Skips _-prefixed folders (staging / archive areas).
     """
     import os
     filesets = []
 
-    for dirpath, _dirnames, filenames in os.walk(data_folder, followlinks=True):
+    for dirpath, dirnames, filenames in os.walk(data_folder, followlinks=True):
+        # Mutate dirnames in place so os.walk doesn't descend into _-prefixed
+        # folders (e.g. _synapse_raw). Root-level files (none currently) are
+        # still visited.
+        dirnames[:] = [d for d in dirnames if not d.startswith('_')]
+        # Skip files inside a .inactive-flagged dataset folder
         for fname in filenames:
             if not fname.endswith('.h5ad'):
                 continue
             h5ad_path = Path(dirpath) / fname
             md_path = h5ad_path.with_suffix('.md')
             duckdb_path = h5ad_path.with_suffix('.duckdb')
+            # Skip if the dataset is explicitly inactive
+            if h5ad_path.with_suffix('.inactive').exists():
+                continue
 
             fileset = FileSet(
                 h5ad=h5ad_path,

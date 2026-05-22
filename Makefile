@@ -1,4 +1,4 @@
-.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-streamlit serve-mcp serve-all serve-debug dev-jupyter sync-push sync-pull sync-status
+.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-streamlit serve-mcp serve-all serve-debug dev-jupyter sync-push sync-pull sync-pull-all sync-status build-stale sync-update
 
 help:
 	@echo "Anthive4 Development Commands"
@@ -22,15 +22,18 @@ help:
 	@echo "  make serve-mcp         - Run MCP server for LLM integration (port 8090)"
 	@echo "  make dev-jupyter       - Run JupyterLab on webapp-src/jupyter (port 9090)"
 	@echo ""
-	@echo "Sync (S3):"
-	@echo "  make sync-push   - Push .h5ad and .duckdb files to S3"
-	@echo "  make sync-pull   - Pull .h5ad and .duckdb files from S3"
-	@echo "  make sync-status - Show local vs S3 sync status"
+	@echo "Sync (S3) — the maintenance workflow:"
+	@echo "  make sync-update     - Full cycle: pull h5ad → rebuild stale duckdb → push"
+	@echo "  make sync-pull       - Pull .h5ad ONLY from S3 (duckdb is rebuilt locally)"
+	@echo "  make build-stale     - Rebuild .duckdb for any h5ad newer than its duckdb"
+	@echo "  make sync-push       - Push .h5ad and .duckdb to S3 (mtime metadata included)"
+	@echo "  make sync-status     - Show local vs S3 sync status (size + mtime drift)"
+	@echo "  make sync-pull-all   - Pull .h5ad AND .duckdb (rarely needed)"
 	@echo ""
 	@echo "Tools:"
-	@echo "  ./bin/ant check        - Validate h5ad files"
+	@echo "  ./bin/ant check        - Validate h5ad files / refresh .md"
 	@echo "  ./bin/ant convert      - Convert h5ad to DuckDB"
-	@echo "  ./bin/ant build-all    - Process entire datastore with parallel conversion"
+	@echo "  ./bin/ant build-all    - Refresh .md + rebuild stale .duckdb across tree"
 	@echo "  ./bin/ant serve        - Start REST API server"
 	@echo "  ./bin/ant-mcp          - MCP server (LLM tool integration)"
 
@@ -199,102 +202,64 @@ serve-streamlit:
 dev-jupyter:
 	@./bin/dev-jupyter
 
-sync-push:
-	@./bin/ant-sync push
+# ── Sync workflow (S3 = canonical for .h5ad; .duckdb is rebuilt locally) ──
 
+# Default pull: h5ad only. .duckdb is derived; rebuild it via `make build-stale`.
 sync-pull:
 	@./bin/ant-sync pull
+
+# Force pull duckdb too (disaster-recovery / mass-rebuild bootstrap).
+sync-pull-all:
+	@./bin/ant-sync pull --include-duckdb
+
+# Rebuild any .duckdb older than its .h5ad. Also refreshes the .md if the
+# h5ad is newer (sha256, n_obs, layer_stats), via ant-h5ad-check.
+build-stale:
+	@./bin/ant-build-all --data-folder ./data/h5adstore
+
+# Push h5ad + duckdb to S3. The mtime header is set on every upload so
+# `make sync-status` can detect content-without-size-change drift later.
+sync-push:
+	@./bin/ant-sync push
 
 sync-status:
 	@./bin/ant-sync status
 
-sync-to-cbd3:
-	rsync -arv ./webapp cbd3:/data/anthive4/
-	rsync -arv data/h5adstore/ cbd3:/data/anthive4/data/h5adstore/
+# Full maintenance cycle: bring everything into a consistent state.
+sync-update:
+	@echo "── 1/3  pull .h5ad from S3 ─────────────────────────────────"
+	@$(MAKE) sync-pull
+	@echo ""
+	@echo "── 2/3  rebuild any stale .duckdb (and refresh stale .md) ──"
+	@$(MAKE) build-stale
+	@echo ""
+	@echo "── 3/3  push .h5ad and rebuilt .duckdb back to S3 ──────────"
+	@$(MAKE) sync-push
 
-
-pull-h5ad-from-storagebox-to-foam:
-	@echo "Pulling h5adstore from storage box (resilient settings)..."
-	@echo ""
-	@echo "Downloading h5adstore..."
-	rclone copy bds_dedata:/ data/h5adstore/ \
-		--exclude "**/.*/**" \
-		--exclude ".*/**" \
-		--exclude "**/*.partial" \
-		--exclude "**/*.duckdb" \
-		--exclude "**/*.duckdb.wal" \
-		--exclude "**/*.duckdb.deleted" \
-		--exclude "**/*.duckdb.wal.deleted" \
-		--transfers 2 \
-		--checkers 4 \
-		--timeout 500s \
-		--contimeout 60s \
-		--retries 10 \
-		--low-level-retries 10 \
-		--stats 30s \
-		--progress
-	@echo ""
-	@echo "✓ Pull complete!"
-
-sync-to-bds-dedata:
-	@echo "Copying to storage box with rclone (resilient settings)..."
-	@echo ""
-	@echo "Copying h5adstore..."
-	rclone sync data/h5adstore/ bds_dedata:/ \
-		--exclude "**/.*/**" \
-		--exclude ".*/**" \
-		--exclude "**/*.partial" \
-		--exclude "**/*.duckdb.wal" \
-		--exclude "**/*.duckdb_xxx" \
-		--exclude "**/*.h5ad_xxx" \
-		--transfers 2 \
-		--checkers 4 \
-		--timeout 500s \
-		--contimeout 60s \
-		--retries 10 \
-		--low-level-retries 10 \
-		--stats 30s \
-		--progress
-	@echo ""
-	@echo "✓ Copy complete!"
-
-sync-webapp-only:
-	@echo "Copying only webapp to storage box..."
-	rclone sync ./webapp bds_dedata:/anthive4/webapp \
-		--exclude "**/.*/**" \
-		--exclude ".*/**" \
-		--exclude "**/*.partial" \
-		--transfers 2 \
-		--checkers 4 \
-		--timeout 300s \
-		--contimeout 60s \
-		--retries 10 \
-		--low-level-retries 10 \
-		--stats 30s \
-		--sftp-set-modtime=false \
-		--sftp-use-fstat=false \
-		--progress
-	@echo "✓ Webapp copy complete!"
-
-pull-from-storagebox-to_prs:
-	@echo "Pulling h5adstore from storage box (resilient settings)..."
-	@echo ""
-	@echo "Downloading h5adstore..."
-	rclone copy bds_dedata:/ data/h5adstore/ \
-		--exclude "**/.*/**" \
-		--exclude ".*/**" \
-		--exclude "**/*.partial" \
-		--exclude "**/*.h5ad" \
-		--exclude "**/*.duckdb.wal" \
-		--exclude "**/*.duckdb.deleted" \
-		--exclude "**/*.duckdb.wal.deleted" \
-		--transfers 2 \
-		--checkers 4 \
-		--timeout 500s \
-		--contimeout 60s \
-		--retries 10 \
-		--low-level-retries 10 \
-		--stats 30s \
-		--progress
-	@echo ""
-	@echo "✓ Pull complete!"
+# ── Legacy / disabled sync targets (kept for reference, commented out) ────
+# All of these have been superseded by ant-sync (boto3-based, mtime-aware,
+# `_`-folder-aware). They reference rclone or rsync against hosts that may
+# no longer be configured. Uncomment + adapt if you need them again.
+#
+# sync-to-cbd3:
+# 	rsync -arv ./webapp cbd3:/data/anthive4/
+# 	rsync -arv data/h5adstore/ cbd3:/data/anthive4/data/h5adstore/
+#
+# pull-h5ad-from-storagebox-to-foam:
+# 	rclone copy bds_dedata:/ data/h5adstore/ \
+# 	    --exclude "**/*.duckdb" --exclude "**/*.duckdb.wal" \
+# 	    --transfers 2 --checkers 4 --timeout 500s --progress
+#
+# sync-to-bds-dedata:
+# 	rclone sync data/h5adstore/ bds_dedata:/ \
+# 	    --exclude "**/*.duckdb.wal" --exclude "**/*.partial" \
+# 	    --transfers 2 --checkers 4 --timeout 500s --progress
+#
+# sync-webapp-only:
+# 	rclone sync ./webapp bds_dedata:/anthive4/webapp \
+# 	    --transfers 2 --checkers 4 --timeout 300s --progress
+#
+# pull-from-storagebox-to_prs:
+# 	rclone copy bds_dedata:/ data/h5adstore/ \
+# 	    --exclude "**/*.h5ad" --exclude "**/*.duckdb.wal" \
+# 	    --transfers 2 --checkers 4 --timeout 500s --progress

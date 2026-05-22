@@ -35,8 +35,16 @@ from config import get_config  # noqa: E402
 # Only these extensions are ever pushed/pulled.
 # .md files are intentionally excluded — they live in git (h5adstore repo), not S3.
 # .inactive sidecars are also intentionally excluded — they live in git.
-SYNC_EXTENSIONS = {'.h5ad', '.duckdb'}
-SKIP_SUFFIXES   = {'.wal', '.deleted', '.partial'}
+SYNC_EXTENSIONS      = {'.h5ad', '.duckdb'}
+# Pull defaults to .h5ad only. .duckdb is derived from .h5ad and should be
+# rebuilt locally via `ant-build-all`. Use `pull --include-duckdb` to override
+# (e.g., disaster recovery where rebuilding everything would be expensive).
+PULL_DEFAULT_EXTS    = {'.h5ad'}
+SKIP_SUFFIXES        = {'.wal', '.deleted', '.partial'}
+# S3 object metadata key holding the source file's mtime (integer seconds).
+# Set on every push so we can detect content-without-size-change drift
+# (e.g., ant-score adds module-score columns in-place).
+MTIME_METADATA_KEY   = 'original-mtime'
 
 MULTIPART_THRESHOLD = 256 * 1024 ** 2   # 256 MB
 MULTIPART_CHUNKSIZE = 256 * 1024 ** 2
@@ -72,24 +80,32 @@ def _rel_from_s3_key(s3_key: str, prefix: str) -> str:
     return s3_key[len(prefix_str):] if prefix_str else s3_key
 
 
-def _is_syncable(rel: str) -> bool:
+def _is_syncable(rel: str, allowed_exts: set[str] | None = None) -> bool:
     path = Path(rel)
     if path.name.startswith('.'):
         return False
-    if path.suffix not in SYNC_EXTENSIONS:
+    allowed = allowed_exts if allowed_exts is not None else SYNC_EXTENSIONS
+    if path.suffix not in allowed:
         return False
     if any(rel.endswith(suffix) for suffix in SKIP_SUFFIXES):
+        return False
+    # Skip _-prefixed folders (e.g. _synapse_raw) — staging / archive areas.
+    if any(part.startswith('_') for part in path.parts[:-1]):
         return False
     return True
 
 
-def _local_files(data_folder: Path, filter_pattern: str | None) -> list[tuple[Path, str]]:
+def _local_files(
+    data_folder: Path,
+    filter_pattern: str | None,
+    allowed_exts: set[str] | None = None,
+) -> list[tuple[Path, str]]:
     results = []
     for path in sorted(data_folder.rglob('*')):
         if not path.is_file():
             continue
         rel = str(path.relative_to(data_folder))
-        if not _is_syncable(rel):
+        if not _is_syncable(rel, allowed_exts):
             continue
         # Never push a .duckdb whose dataset is marked inactive
         if path.suffix == '.duckdb' and path.with_suffix('.inactive').exists():
@@ -100,7 +116,12 @@ def _local_files(data_folder: Path, filter_pattern: str | None) -> list[tuple[Pa
     return results
 
 
-def _s3_objects(client, bucket: str, prefix: str) -> dict[str, int]:
+def _s3_objects(
+    client,
+    bucket: str,
+    prefix: str,
+    allowed_exts: set[str] | None = None,
+) -> dict[str, int]:
     """Return {relative_path: size} for all syncable S3 objects."""
     paginator = client.get_paginator('list_objects_v2')
     prefix_str = prefix.rstrip('/') + '/' if prefix else ''
@@ -108,9 +129,24 @@ def _s3_objects(client, bucket: str, prefix: str) -> dict[str, int]:
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix_str):
         for obj in page.get('Contents', []):
             rel = _rel_from_s3_key(obj['Key'], prefix)
-            if rel and _is_syncable(rel):
+            if rel and _is_syncable(rel, allowed_exts):
                 index[rel] = obj['Size']
     return index
+
+
+def _s3_mtime(client, bucket: str, key: str) -> int | None:
+    """Fetch the original-mtime metadata header from an S3 object, if set.
+    Returns int seconds since epoch, or None if missing / inaccessible."""
+    try:
+        head = client.head_object(Bucket=bucket, Key=key)
+        raw = (head.get('Metadata') or {}).get(MTIME_METADATA_KEY)
+        return int(raw) if raw else None
+    except Exception:
+        return None
+
+
+def _local_mtime(path: Path) -> int:
+    return int(path.stat().st_mtime)
 
 
 def _fmt_size(num_bytes: int) -> str:
@@ -163,12 +199,23 @@ def cmd_push(args, s3_cfg: dict, data_folder: Path) -> None:
 
     uploaded = skipped = 0
     for local_path, rel in local_files:
-        local_size = local_path.stat().st_size
-        s3_size    = s3_index.get(rel)
+        local_size  = local_path.stat().st_size
+        local_mtime = _local_mtime(local_path)
+        s3_size     = s3_index.get(rel)
 
         if s3_size == local_size:
-            skipped += 1
-            continue
+            # Same size — could still be different content (in-place edits like
+            # ant-score appending columns). Check the mtime metadata header.
+            s3_mt = _s3_mtime(client, bucket, _s3_key(rel, prefix))
+            if s3_mt is not None and local_mtime <= s3_mt:
+                skipped += 1
+                continue
+            if s3_mt is None and args.skip_no_mtime:
+                # Treat absent metadata as 'in sync' when --skip-no-mtime is set.
+                # (Legacy uploads before this version have no metadata; opt-out
+                # for users who don't want to re-push everything just to add it.)
+                skipped += 1
+                continue
 
         action = 'UPDATE' if s3_size is not None else 'UPLOAD'
         print(f'[{action}] {rel}  ({_fmt_size(local_size)})')
@@ -181,6 +228,7 @@ def cmd_push(args, s3_cfg: dict, data_folder: Path) -> None:
             s3_key,
             Config=transfer,
             Callback=callback,
+            ExtraArgs={'Metadata': {MTIME_METADATA_KEY: str(local_mtime)}},
         )
         uploaded += 1
 
@@ -193,8 +241,13 @@ def cmd_pull(args, s3_cfg: dict, data_folder: Path) -> None:
     prefix   = s3_cfg.get('prefix', '') or ''
     transfer = _transfer_config()
 
+    # By default pull only .h5ad. .duckdb is derived; rebuild locally.
+    allowed = SYNC_EXTENSIONS if args.include_duckdb else PULL_DEFAULT_EXTS
+    if not args.include_duckdb:
+        print('(skipping .duckdb — pass --include-duckdb to override)')
+
     print('Scanning S3…')
-    s3_index = _s3_objects(client, bucket, prefix)
+    s3_index = _s3_objects(client, bucket, prefix, allowed_exts=allowed)
 
     if args.filter:
         s3_index = {rel: size for rel, size in s3_index.items()
@@ -233,19 +286,22 @@ def cmd_status(args, s3_cfg: dict, data_folder: Path) -> None:
     prefix = s3_cfg.get('prefix', '') or ''
 
     print('Scanning local and S3…')
-    local_index = {rel: path.stat().st_size
-                   for path, rel in _local_files(data_folder, args.filter)}
+    local_files = _local_files(data_folder, args.filter)
+    local_index = {rel: (path, path.stat().st_size, _local_mtime(path))
+                   for path, rel in local_files}
     s3_index    = _s3_objects(client, bucket, prefix)
     if args.filter:
         s3_index = {rel: size for rel, size in s3_index.items()
                     if fnmatch.fnmatch(rel, args.filter)}
 
     all_keys   = sorted(set(local_index) | set(s3_index))
-    only_local = only_s3 = modified = in_sync = 0
+    only_local = only_s3 = modified = mtime_drift = in_sync = 0
 
     for rel in all_keys:
-        local_size = local_index.get(rel)
-        s3_size    = s3_index.get(rel)
+        local_entry = local_index.get(rel)
+        s3_size     = s3_index.get(rel)
+        local_size  = local_entry[1] if local_entry else None
+        local_mt    = local_entry[2] if local_entry else None
 
         if local_size is not None and s3_size is None:
             print(f'  LOCAL ONLY   {rel}  ({_fmt_size(local_size)})')
@@ -258,10 +314,20 @@ def cmd_status(args, s3_cfg: dict, data_folder: Path) -> None:
                   f'(local {_fmt_size(local_size)}, s3 {_fmt_size(s3_size)})')
             modified += 1
         else:
-            in_sync += 1
+            # Same size — fetch S3 mtime metadata and compare. If S3 mtime
+            # is missing, treat as in-sync (legacy upload pre-mtime header).
+            s3_mt = _s3_mtime(client, bucket, _s3_key(rel, prefix))
+            if s3_mt is not None and local_mt is not None and local_mt != s3_mt:
+                direction = 'local newer' if local_mt > s3_mt else 's3 newer'
+                print(f'  MTIME DRIFT  {rel}  ({direction}, '
+                      f'Δ={abs(local_mt - s3_mt)}s, size matches)')
+                mtime_drift += 1
+            else:
+                in_sync += 1
 
     print(f'\nLocal only: {only_local},  S3 only: {only_s3},  '
-          f'modified: {modified},  in sync: {in_sync}')
+          f'modified: {modified},  mtime drift: {mtime_drift},  '
+          f'in sync: {in_sync}')
 
 
 def main() -> None:
@@ -277,12 +343,35 @@ def main() -> None:
     )
 
     subparsers = parser.add_subparsers(dest='command', required=True)
-    for cmd_name in ('push', 'pull', 'status'):
-        sub = subparsers.add_parser(cmd_name)
-        sub.add_argument(
-            'filter', nargs='?', default=None,
-            help='Optional glob filter relative to data-folder',
-        )
+
+    push_sub = subparsers.add_parser('push', help='Upload local files to S3')
+    push_sub.add_argument(
+        'filter', nargs='?', default=None,
+        help='Optional glob filter relative to data-folder',
+    )
+    push_sub.add_argument(
+        '--skip-no-mtime', action='store_true',
+        help=('When a same-size file has no S3 mtime metadata (legacy upload), '
+              'treat as in-sync rather than re-uploading. Useful for a no-op '
+              'first run after deploying the mtime feature.'),
+    )
+
+    pull_sub = subparsers.add_parser('pull', help='Download S3 files locally')
+    pull_sub.add_argument(
+        'filter', nargs='?', default=None,
+        help='Optional glob filter relative to data-folder',
+    )
+    pull_sub.add_argument(
+        '--include-duckdb', action='store_true',
+        help=('Also pull .duckdb files. By default only .h5ad is pulled — '
+              '.duckdb should be rebuilt locally via `ant build-all`.'),
+    )
+
+    status_sub = subparsers.add_parser('status', help='Show local/S3 sync state')
+    status_sub.add_argument(
+        'filter', nargs='?', default=None,
+        help='Optional glob filter relative to data-folder',
+    )
 
     args        = parser.parse_args()
     config      = get_config()
