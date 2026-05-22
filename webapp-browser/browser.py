@@ -164,7 +164,6 @@ def get_collection_list(api_url: str) -> List[Dict]:
         total_cells = sum(db.get('n_cells') or 0 for db in dbs)
         collection_meta = (dbs[0].get('collection') or {})
         name = collection_meta.get('group') or group_id
-        description = collection_meta.get('experiment')
 
         collections.append({
             'name': name,
@@ -178,7 +177,7 @@ def get_collection_list(api_url: str) -> List[Dict]:
             'duckdb_count': len(dbs),
             'update_pending': 0,
             'last_modified': 0,
-            'description': description,
+            'description': None,
             'organism': _summarize_meta_field(dbs, 'organism', abbrev_map=_ORGANISM_ABBREV),
             'technology': _summarize_meta_field(dbs, 'technology', abbrev_map=_TECHNOLOGY_ABBREV),
             'celltype': _summarize_meta_field(dbs, 'celltype', max_len=10),
