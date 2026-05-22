@@ -941,6 +941,16 @@ class DatabaseRegistry:
         self.gene_list_cache.clear()
         self.metadata_stats_cache.clear()
 
+        # Drop the DuckDB connection pool — pooled connections hold the OLD
+        # schema after a .duckdb file is replaced (e.g., after ant-convert
+        # rebuilds with new obs columns added by ant-score), so any
+        # information_schema query against them returns stale column lists.
+        # Closing forces fresh connections on next access.
+        try:
+            self.connection_pool.close_all()
+        except Exception as exc:
+            print(f"  (connection_pool.close_all failed: {exc})")
+
         self._scan_databases()
         self._cache_all_metadata(force_reload=True)
 
