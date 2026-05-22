@@ -73,16 +73,17 @@ def _(api_input):
 @app.cell
 def _(client, mo):
     """Fetch dataset list once, surface any error inline."""
-    err = None
+    db_list_err = None
     dbs = []
     try:
         dbs = client.get_databases()
     except Exception as exc:
-        err = f"Could not reach API: `{exc}`"
+        db_list_err = f"Could not reach API: `{exc}`"
     options = {f"{d['id']} — {d.get('title','')}": d['id'] for d in dbs}
-    if err:
-        mo.md(f"❌ {err}")
-    return (dbs, options, err)
+    mo.md(f"❌ {db_list_err}") if db_list_err else mo.md(
+        f"_loaded {len(dbs)} dataset(s) from the API_"
+    )
+    return (dbs, options, db_list_err)
 
 
 @app.cell
@@ -114,20 +115,22 @@ def _(default_gene, mo):
 def _(client, db_selector, mo):
     """Dataset info card."""
     db_id = db_selector.value
-    if not db_id:
-        info = {}
-        mo.md("_(pick a dataset above)_")
-        return info, db_id
-    info = client.get_database_info(db_id)
-    layers = list((info.get("layers") or {}).keys())
-    obs = info.get("obs", {})
-    mo.md(
-        f"### `{db_id}` — {info.get('title','')}\n\n"
-        f"**{info.get('n_cells', 0):,}** cells × **{info.get('n_genes', 0):,}** genes  ·  "
-        f"organism: {info.get('organism','?')}  ·  "
-        f"layers: {', '.join(layers) or '—'}"
-    )
-    return info, db_id
+    db_info = {}
+    if db_id:
+        db_info = client.get_database_info(db_id)
+    if db_id and db_info:
+        layers = list((db_info.get("layers") or {}).keys())
+        info_card = mo.md(
+            f"### `{db_id}` — {db_info.get('title','')}\n\n"
+            f"**{db_info.get('n_cells', 0):,}** cells × "
+            f"**{db_info.get('n_genes', 0):,}** genes  ·  "
+            f"organism: {db_info.get('organism','?')}  ·  "
+            f"layers: {', '.join(layers) or '—'}"
+        )
+    else:
+        info_card = mo.md("_(pick a dataset above)_")
+    info_card
+    return db_id, db_info
 
 
 @app.cell
@@ -135,17 +138,19 @@ def _(client, db_id, gene_input, mo):
     """Verify the gene exists in this dataset."""
     gene = gene_input.value.strip()
     matches = []
-    err = None
-    if not db_id or not gene:
-        return gene, matches, err
-    try:
-        matches = client.search_genes(db_id, q=gene, limit=8)
-    except Exception as exc:
-        err = f"`search_genes` failed: `{exc}`"
+    search_err = None
+    if db_id and gene:
+        try:
+            matches = client.search_genes(db_id, q=gene, limit=8)
+        except Exception as exc:
+            search_err = f"`search_genes` failed: `{exc}`"
     hit_str = ", ".join(f"`{g}`" for g in matches[:8]) or "_(none)_"
-    mo.md(f"**search** → {len(matches)} match{'es' if len(matches)!=1 else ''}: {hit_str}"
-          + (f"\n\n❌ {err}" if err else ""))
-    return gene, matches, err
+    search_status = mo.md(
+        f"**search** → {len(matches)} match{'es' if len(matches)!=1 else ''}: {hit_str}"
+        + (f"\n\n❌ {search_err}" if search_err else "")
+    )
+    search_status
+    return gene, matches, search_err
 
 
 @app.cell
@@ -154,72 +159,73 @@ def _(client, db_id, gene, mo):
     import pandas as pd
     cells_df = pd.DataFrame()
     fetch_err = None
-    if not (db_id and gene):
-        return cells_df, fetch_err
-    try:
-        cells_df = client.get_cells(db_id=db_id, genes=[gene], format="dataframe")
-    except Exception as exc:
-        fetch_err = f"`get_cells` failed: `{exc}`"
-    if fetch_err:
-        mo.md(f"❌ {fetch_err}")
-    elif gene not in cells_df.columns:
-        fetch_err = (
-            f"Gene `{gene}` not in returned columns ({list(cells_df.columns)}). "
-            "Try one of the search hits above."
-        )
-        mo.md(f"❌ {fetch_err}")
-    else:
-        mo.md(f"**fetched** {len(cells_df):,} cells")
+    if db_id and gene:
+        try:
+            cells_df = client.get_cells(db_id=db_id, genes=[gene], format="dataframe")
+        except Exception as exc:
+            fetch_err = f"`get_cells` failed: `{exc}`"
+        if not fetch_err and gene not in cells_df.columns:
+            fetch_err = (
+                f"Gene `{gene}` not in returned columns ({list(cells_df.columns)}). "
+                "Try one of the search hits above."
+            )
+    fetch_status = (
+        mo.md(f"❌ {fetch_err}") if fetch_err
+        else mo.md(f"**fetched** {len(cells_df):,} cells")
+    )
+    fetch_status
     return cells_df, fetch_err
 
 
 @app.cell
-def _(cells_df, fetch_err, gene, plot_type):
+def _(cells_df, fetch_err, gene, mo, plot_type):
     """Render the distribution plot."""
-    if fetch_err or cells_df.empty or gene not in cells_df.columns:
-        return
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-    values = cells_df[gene].astype(float).dropna()
-    fig, ax = plt.subplots(figsize=(7, 4))
-    pt = plot_type.value
-    if pt == "ecdf":
-        sns.ecdfplot(x=values, ax=ax)
-    elif pt == "kde":
-        sns.kdeplot(x=values, ax=ax, fill=True)
-    else:
-        sns.histplot(x=values, bins=60, ax=ax)
-    ax.set_xlabel(gene)
-    ax.set_title(f"{gene} expression — {pt} (n={len(values):,})")
-    fig.tight_layout()
-    fig
-    return
+    plot_fig = None
+    if not (fetch_err or cells_df.empty or gene not in cells_df.columns):
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        values = cells_df[gene].astype(float).dropna()
+        fig, ax = plt.subplots(figsize=(7, 4))
+        plot_kind = plot_type.value
+        if plot_kind == "ecdf":
+            sns.ecdfplot(x=values, ax=ax)
+        elif plot_kind == "kde":
+            sns.kdeplot(x=values, ax=ax, fill=True)
+        else:
+            sns.histplot(x=values, bins=60, ax=ax)
+        ax.set_xlabel(gene)
+        ax.set_title(f"{gene} expression — {plot_kind} (n={len(values):,})")
+        fig.tight_layout()
+        plot_fig = fig
+    plot_fig if plot_fig is not None else mo.md("_(no plot yet)_")
+    return (plot_fig,)
 
 
 @app.cell
 def _(cells_df, fetch_err, gene, mo):
     """Tabular summary stats — matches the streamlit page."""
-    if fetch_err or cells_df.empty or gene not in cells_df.columns:
-        return
-    values = cells_df[gene]
-    nonzero = values[values > 0]
-    rows = [
-        ("entries", f"{len(values):,}"),
-        ("non-zero", f"{len(nonzero):,}"),
-        ("% non-zero", f"{100*len(nonzero)/max(len(values),1):.2f}%"),
-        ("mean", f"{values.mean():.3g}"),
-        ("std", f"{values.std():.3g}"),
-        ("median", f"{values.median():.3g}"),
-        ("min", f"{values.min():.3g}"),
-        ("10%", f"{values.quantile(0.1):.3g}"),
-        ("90%", f"{values.quantile(0.9):.3g}"),
-        ("max", f"{values.max():.3g}"),
-    ]
-    table_md = "| field | value |\n|---|---:|\n" + "\n".join(
-        f"| {k} | {v} |" for k, v in rows
-    )
-    mo.md("### Stats\n\n" + table_md)
-    return
+    stats_md = None
+    if not (fetch_err or cells_df.empty or gene not in cells_df.columns):
+        values = cells_df[gene]
+        nonzero = values[values > 0]
+        rows = [
+            ("entries", f"{len(values):,}"),
+            ("non-zero", f"{len(nonzero):,}"),
+            ("% non-zero", f"{100*len(nonzero)/max(len(values),1):.2f}%"),
+            ("mean", f"{values.mean():.3g}"),
+            ("std", f"{values.std():.3g}"),
+            ("median", f"{values.median():.3g}"),
+            ("min", f"{values.min():.3g}"),
+            ("10%", f"{values.quantile(0.1):.3g}"),
+            ("90%", f"{values.quantile(0.9):.3g}"),
+            ("max", f"{values.max():.3g}"),
+        ]
+        table = "| field | value |\n|---|---:|\n" + "\n".join(
+            f"| {k} | {v} |" for k, v in rows
+        )
+        stats_md = mo.md("### Stats\n\n" + table)
+    stats_md if stats_md is not None else mo.md("")
+    return (stats_md,)
 
 
 @app.cell

@@ -70,14 +70,19 @@ def _(api_input):
 
 @app.cell
 def _(client, mo):
-    err = None
+    db_list_err = None
+    dbs = []
     try:
         dbs = client.get_databases()
     except Exception as exc:
-        dbs, err = [], f"Could not reach API: `{exc}`"
-        mo.md(f"❌ {err}")
+        db_list_err = f"Could not reach API: `{exc}`"
     options = {f"{d['id']} — {d.get('title','')}": d['id'] for d in dbs}
-    return (dbs, options, err)
+    db_status = (
+        mo.md(f"❌ {db_list_err}") if db_list_err
+        else mo.md(f"_{len(dbs)} datasets loaded_")
+    )
+    db_status
+    return dbs, options, db_list_err
 
 
 @app.cell
@@ -97,11 +102,14 @@ def _(default_db, mo, options):
 @app.cell
 def _(client, db_selector):
     db_id = db_selector.value
-    if not db_id:
-        return db_id, [], []
-    info = client.get_database_info(db_id)
-    obs = info.get("obs") or {}
-    return db_id, obs.get("categorical") or [], obs.get("numerical") or []
+    obs_cat = []
+    obs_num = []
+    if db_id:
+        info = client.get_database_info(db_id)
+        obs = info.get("obs") or {}
+        obs_cat = obs.get("categorical") or []
+        obs_num = obs.get("numerical") or []
+    return db_id, obs_cat, obs_num
 
 
 @app.cell
@@ -156,64 +164,62 @@ def _(group_by, mo):
 def _(cat_selector, client, db_id, group_by, mo, num_selector):
     """Fetch the data."""
     import pandas as pd
-    df = pd.DataFrame()
-    err = None
-    if not (db_id and num_selector and num_selector.value):
-        return df, err
-    num = num_selector.value
-    fields = [num]
-    if group_by.value == "Categorical" and cat_selector.value:
-        fields.append(cat_selector.value)
-    try:
-        df = client.get_cells(db_id=db_id, metadata=fields, format="dataframe")
-    except Exception as exc:
-        err = f"`get_cells` failed: `{exc}`"
-        mo.md(f"❌ {err}")
-        return df, err
-    if num not in df.columns:
-        err = f"Field `{num}` not in columns ({list(df.columns)})."
-        mo.md(f"❌ {err}")
-        return df, err
-    mo.md(f"**fetched** {len(df):,} cells")
-    return df, err
+    plot_df = pd.DataFrame()
+    fetch_err = None
+    if db_id and num_selector and num_selector.value:
+        num = num_selector.value
+        fields = [num]
+        if group_by.value == "Categorical" and cat_selector.value:
+            fields.append(cat_selector.value)
+        try:
+            plot_df = client.get_cells(db_id=db_id, metadata=fields, format="dataframe")
+        except Exception as exc:
+            fetch_err = f"`get_cells` failed: `{exc}`"
+        if not fetch_err and num not in plot_df.columns:
+            fetch_err = f"Field `{num}` not in columns ({list(plot_df.columns)})."
+    fetch_status = (
+        mo.md(f"❌ {fetch_err}") if fetch_err
+        else mo.md(f"**fetched** {len(plot_df):,} cells")
+    )
+    fetch_status
+    return plot_df, fetch_err
 
 
 @app.cell
-def _(cat_selector, df, err, group_by, num_selector, plot_kind):
+def _(cat_selector, fetch_err, group_by, mo, num_selector, plot_df, plot_kind):
     """Render."""
-    if err or df.empty:
-        return
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-    num = num_selector.value
-    kind = plot_kind.value
-
-    fig, ax = plt.subplots(figsize=(8, 4.5))
-
-    if group_by.value == "Categorical" and cat_selector.value:
-        cat = cat_selector.value
-        order = df[cat].value_counts().index.tolist()
-        if kind == "box":
-            sns.boxplot(data=df, x=cat, y=num, order=order, ax=ax, showfliers=False)
-        elif kind == "violin":
-            sns.violinplot(data=df, x=cat, y=num, order=order, ax=ax)
+    num_fig = None
+    if not fetch_err and not plot_df.empty:
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        num = num_selector.value
+        kind = plot_kind.value
+        fig, ax = plt.subplots(figsize=(8, 4.5))
+        if group_by.value == "Categorical" and cat_selector.value:
+            cat = cat_selector.value
+            order = plot_df[cat].value_counts().index.tolist()
+            if kind == "box":
+                sns.boxplot(data=plot_df, x=cat, y=num, order=order, ax=ax, showfliers=False)
+            elif kind == "violin":
+                sns.violinplot(data=plot_df, x=cat, y=num, order=order, ax=ax)
+            else:
+                sns.barplot(data=plot_df, x=cat, y=num, order=order, ax=ax)
+            plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+            ax.set_title(f"{num} by {cat} — {kind}")
         else:
-            sns.barplot(data=df, x=cat, y=num, order=order, ax=ax)
-        plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
-        ax.set_title(f"{num} by {cat} — {kind}")
-    else:
-        values = df[num].astype(float).dropna()
-        if kind == "ecdf":
-            sns.ecdfplot(x=values, ax=ax)
-        elif kind == "kde":
-            sns.kdeplot(x=values, ax=ax, fill=True)
-        else:
-            sns.histplot(x=values, bins=60, ax=ax)
-        ax.set_xlabel(num)
-        ax.set_title(f"{num} — {kind} (n={len(values):,})")
-    fig.tight_layout()
-    fig
-    return
+            values = plot_df[num].astype(float).dropna()
+            if kind == "ecdf":
+                sns.ecdfplot(x=values, ax=ax)
+            elif kind == "kde":
+                sns.kdeplot(x=values, ax=ax, fill=True)
+            else:
+                sns.histplot(x=values, bins=60, ax=ax)
+            ax.set_xlabel(num)
+            ax.set_title(f"{num} — {kind} (n={len(values):,})")
+        fig.tight_layout()
+        num_fig = fig
+    num_fig if num_fig is not None else mo.md("_(no plot yet)_")
+    return (num_fig,)
 
 
 @app.cell

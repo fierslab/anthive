@@ -71,19 +71,21 @@ def _(api_input):
 @app.cell
 def _(client, mo):
     """Pick from datasets that actually have an embedding."""
-    err = None
+    db_list_err = None
     candidates = []
     try:
         dbs = client.get_databases()
         candidates = [d for d in dbs if (d.get("embeddings") or {})]
     except Exception as exc:
-        err = f"Could not reach API: `{exc}`"
+        db_list_err = f"Could not reach API: `{exc}`"
     options = {f"{d['id']} — {d.get('title','')}": d['id'] for d in candidates}
-    if err:
-        mo.md(f"❌ {err}")
-    elif not options:
-        mo.md("_(no datasets in the catalog expose an embedding)_")
-    return (candidates, options, err)
+    db_status = (
+        mo.md(f"❌ {db_list_err}") if db_list_err
+        else (mo.md("_(no datasets expose an embedding)_") if not options
+              else mo.md(f"_{len(options)} dataset(s) with embeddings_"))
+    )
+    db_status
+    return candidates, options, db_list_err
 
 
 @app.cell
@@ -102,19 +104,26 @@ def _(default_db, mo, options):
 
 @app.cell
 def _(client, db_selector, mo):
-    """Pick the embedding to plot."""
+    """Fetch embeddings + obs schema for the chosen dataset."""
     db_id = db_selector.value
-    if not db_id:
-        return db_id, None, {}, {}, {}
-    embeddings = client.get_embeddings(db_id) or {}
-    if not embeddings:
-        mo.md("_(this dataset has no embeddings)_")
-        return db_id, None, embeddings, {}, {}
-    info = client.get_database_info(db_id)
-    obs = info.get("obs") or {}
-    obs_cat = obs.get("categorical") or []
-    obs_num = obs.get("numerical") or []
-    return db_id, embeddings, info, obs_cat, obs_num
+    embeddings = {}
+    db_info = {}
+    obs_cat = []
+    obs_num = []
+    if db_id:
+        embeddings = client.get_embeddings(db_id) or {}
+        db_info = client.get_database_info(db_id)
+        obs = db_info.get("obs") or {}
+        obs_cat = obs.get("categorical") or []
+        obs_num = obs.get("numerical") or []
+    schema_status = (
+        mo.md(f"_dataset has {len(embeddings)} embedding(s), "
+              f"{len(obs_cat)} categorical / {len(obs_num)} numerical obs_")
+        if db_id and embeddings
+        else mo.md("_(pick a dataset that has an embedding)_")
+    )
+    schema_status
+    return db_id, db_info, embeddings, obs_cat, obs_num
 
 
 @app.cell
@@ -176,71 +185,70 @@ def _(color_by, default_gene, mo, obs_cat, obs_num):
 def _(client, color_by, db_id, emb_selector, field_input, mo):
     """Fetch embedding coordinates AND the colour values, join by cell."""
     import pandas as pd
-    df = pd.DataFrame()
-    err = None
-    if not (db_id and emb_selector and emb_selector.value and field_input.value.strip()):
-        return df, err
-    emb_name = emb_selector.value
-    field = field_input.value.strip()
-    try:
-        emb = client.get_embedding_data(db_id, emb_name, format="dataframe")
-        if color_by.value == "Gene":
-            color_df = client.get_cells(db_id=db_id, genes=[field], format="dataframe")
-        else:
-            color_df = client.get_cells(db_id=db_id, metadata=[field], format="dataframe")
-    except Exception as exc:
-        err = f"Fetch failed: `{exc}`"
-        mo.md(f"❌ {err}")
-        return df, err
-
-    emb = emb.set_index(emb.columns[0])
-    color_df = color_df.set_index(color_df.columns[0])
-    if field not in color_df.columns:
-        err = f"Field `{field}` not in the returned columns ({list(color_df.columns)})."
-        mo.md(f"❌ {err}")
-        return df, err
-    emb[field] = color_df[field]
-    df = emb.dropna(subset=[emb.columns[0], emb.columns[1]])
-    mo.md(f"**fetched** {len(df):,} cells")
-    return df, err
+    plot_df = pd.DataFrame()
+    fetch_err = None
+    field = field_input.value.strip() if field_input.value else ""
+    if db_id and emb_selector and emb_selector.value and field:
+        emb_name = emb_selector.value
+        try:
+            emb = client.get_embedding_data(db_id, emb_name, format="dataframe")
+            if color_by.value == "Gene":
+                color_df = client.get_cells(db_id=db_id, genes=[field], format="dataframe")
+            else:
+                color_df = client.get_cells(db_id=db_id, metadata=[field], format="dataframe")
+            emb = emb.set_index(emb.columns[0])
+            color_df = color_df.set_index(color_df.columns[0])
+            if field not in color_df.columns:
+                fetch_err = (
+                    f"Field `{field}` not in returned columns "
+                    f"({list(color_df.columns)})."
+                )
+            else:
+                emb[field] = color_df[field]
+                plot_df = emb.dropna(subset=[emb.columns[0], emb.columns[1]])
+        except Exception as exc:
+            fetch_err = f"Fetch failed: `{exc}`"
+    fetch_status = (
+        mo.md(f"❌ {fetch_err}") if fetch_err
+        else mo.md(f"**fetched** {len(plot_df):,} cells")
+    )
+    fetch_status
+    return field, fetch_err, plot_df
 
 
 @app.cell
-def _(color_by, df, field_input, mo):
+def _(color_by, field, fetch_err, mo, plot_df):
     """Render the scatter plot."""
-    if df.empty:
-        return
-    import matplotlib.pyplot as plt
-    import matplotlib.cm as cm
-    import matplotlib.colors as mcolors
-    import seaborn as sns
+    scatter_fig = None
+    if not fetch_err and not plot_df.empty:
+        import matplotlib.pyplot as plt
+        import matplotlib.cm as cm
+        import matplotlib.colors as mcolors
+        import seaborn as sns
 
-    field = field_input.value.strip()
-    xcol = df.columns[0]
-    ycol = df.columns[1]
-
-    fig, ax = plt.subplots(figsize=(7, 6))
-    kwargs = dict(x=xcol, y=ycol, s=4, linewidth=0, ax=ax)
-
-    if color_by.value in ("Gene", "Numerical"):
-        values = df[field].astype(float)
-        norm = mcolors.Normalize(
-            vmin=values.quantile(0.05), vmax=values.quantile(0.95),
-        )
-        sns.scatterplot(data=df, hue=field, palette="viridis", legend=False,
-                        hue_norm=norm, **kwargs)
-        fig.colorbar(cm.ScalarMappable(norm=norm, cmap="viridis"),
-                     ax=ax, label=field, shrink=0.7)
-    else:
-        sns.scatterplot(data=df, hue=field, palette="tab20", **kwargs)
-        sns.move_legend(ax, loc="upper left", bbox_to_anchor=(1, 1),
-                        frameon=False, title=field, fontsize=8)
-
-    ax.set_xlabel(xcol)
-    ax.set_ylabel(ycol)
-    fig.tight_layout()
-    fig
-    return
+        xcol = plot_df.columns[0]
+        ycol = plot_df.columns[1]
+        fig, ax = plt.subplots(figsize=(7, 6))
+        kwargs = dict(x=xcol, y=ycol, s=4, linewidth=0, ax=ax)
+        if color_by.value in ("Gene", "Numerical"):
+            values = plot_df[field].astype(float)
+            norm = mcolors.Normalize(
+                vmin=values.quantile(0.05), vmax=values.quantile(0.95),
+            )
+            sns.scatterplot(data=plot_df, hue=field, palette="viridis",
+                            legend=False, hue_norm=norm, **kwargs)
+            fig.colorbar(cm.ScalarMappable(norm=norm, cmap="viridis"),
+                         ax=ax, label=field, shrink=0.7)
+        else:
+            sns.scatterplot(data=plot_df, hue=field, palette="tab20", **kwargs)
+            sns.move_legend(ax, loc="upper left", bbox_to_anchor=(1, 1),
+                            frameon=False, title=field, fontsize=8)
+        ax.set_xlabel(xcol)
+        ax.set_ylabel(ycol)
+        fig.tight_layout()
+        scatter_fig = fig
+    scatter_fig if scatter_fig is not None else mo.md("_(no plot yet)_")
+    return (scatter_fig,)
 
 
 @app.cell
