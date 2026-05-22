@@ -63,7 +63,7 @@ areas as audited.
     is silently mangled.
 - Fix: use DuckDB's own parser (`EXPLAIN` plan walk) to enforce that the
   FROM list contains only known catalog tables, and that no `SET`/`COPY`
-  ever appears. Replace regex stripper with parse-aware tokenizer.
+side  ever appears. Replace regex stripper with parse-aware tokenizer.
 - [ ] Fixed
 
 ### 3. S3 credentials in plaintext on shared FS **[session]**

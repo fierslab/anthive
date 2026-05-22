@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Anthive — interactive notebooks</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            max-width: 720px;
+            margin: 2rem auto;
+            padding: 0 1rem;
+            color: #222;
+            line-height: 1.5;
+        }
+        h1 { margin: 0 0 0.25rem; }
+        p.lead { color: #555; margin-top: 0; }
+        .nb-list { display: grid; gap: 0.75rem; margin-top: 2rem; }
+        .nb {
+            display: block;
+            padding: 1rem 1.25rem;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            text-decoration: none;
+            color: inherit;
+            transition: background 0.1s;
+        }
+        .nb:hover { background: #f3f7ff; border-color: #4c72b0; }
+        .nb h2 { margin: 0 0 0.25rem; font-size: 1.1rem; color: #2c5aa0; }
+        .nb p { margin: 0; color: #555; font-size: 0.9rem; }
+        code {
+            background: #f0f0f0; padding: 0 4px; border-radius: 3px;
+            font-size: 0.85em;
+        }
+        footer { margin-top: 3rem; color: #888; font-size: 0.8rem; }
+    </style>
+</head>
+<body>
+    <h1>Interactive notebooks</h1>
+    <p class="lead">
+        marimo notebooks that run entirely in your browser via Pyodide.
+        Each is a focused view onto the Anthive REST API; widget state
+        is mirrored to the URL bar so any view is one copy-paste from sharing.
+    </p>
+
+    <div class="nb-list">
+        <a class="nb" href="gene/">
+            <h2>Gene expression</h2>
+            <p>Distribution of a single gene across cells — histogram, ECDF,
+            or KDE — with summary statistics.</p>
+        </a>
+        <a class="nb" href="umap/">
+            <h2>UMAP / embedding scatter</h2>
+            <p>2-D embedding scatter, with cells colored by gene expression,
+            a numerical obs field, or a categorical field.</p>
+        </a>
+        <a class="nb" href="category/">
+            <h2>Categorical breakdown</h2>
+            <p>Box / violin / bar plot of a gene or numerical obs field split
+            by a categorical field. Or a simple cell-count bar chart per
+            category.</p>
+        </a>
+        <a class="nb" href="numerical/">
+            <h2>Numerical obs distribution</h2>
+            <p>Distribution of a numerical obs field (QC metrics, module
+            scores) — optionally grouped by a categorical field.</p>
+        </a>
+    </div>
+
+    <footer>
+        URL parameters: <code>?db_id=…&amp;gene=…&amp;api=…</code> work on
+        every notebook. Widget state writes back to the URL on every change.
+    </footer>
+</body>
+</html>
