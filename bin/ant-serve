@@ -491,6 +491,10 @@ class DatabaseRegistry:
                             # Skip if can't make relative path
                             pass
                     elif resolved_item.is_dir():
+                        # Skip _-prefixed folders (e.g. _synapse_raw) —
+                        # staging / archive areas, not served datasets.
+                        if item.name.startswith('_'):
+                            continue
                         # Recursively scan subdirectories
                         scan_recursive(item, base)
             except (PermissionError, OSError):
