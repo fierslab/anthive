@@ -85,6 +85,12 @@ SEPARATOR = '::'
 TOOL_VERSION = 'ant-score/0.1'
 
 
+class GenesetSkipped(Exception):
+    """Raised when a single geneset can't be meaningfully scored on this
+    dataset (0 genes overlap, <3 genes overlap). The dataset's other
+    genesets are scored anyway; the skip is recorded in provenance."""
+
+
 # ── resolution helpers ────────────────────────────────────────────────────────
 
 def _load_geneset_registry() -> GenesetRegistry:
@@ -175,15 +181,18 @@ def _score_one(adata, geneset: Geneset, column: str,
     found = [g for g in requested if g in var_names]
     missing = [g for g in requested if g not in var_names]
 
+    # Skip (don't abort) modules that can't be meaningfully scored. Aborting
+    # would block the remaining 12+ modules over one Y-linked or other
+    # filtered-out edge case. Caller treats GenesetSkipped as a per-module
+    # skip and continues with the rest of the experiment.
     if not found:
-        raise RuntimeError(
-            f"{geneset.geneset_id}: 0 of {len(requested)} genes found in adata.var_names "
-            f"— refusing to score."
+        raise GenesetSkipped(
+            f"{geneset.geneset_id}: 0 of {len(requested)} genes in adata.var_names"
         )
     if len(found) < 3:
-        raise RuntimeError(
+        raise GenesetSkipped(
             f"{geneset.geneset_id}: only {len(found)} of {len(requested)} genes found "
-            f"— too few to compute a meaningful module score (need >= 3)."
+            f"(need >= 3 for a meaningful score)"
         )
 
     sc.tl.score_genes(
@@ -254,16 +263,24 @@ def _score_experiment(adata, experiment: Experiment, genesets: List[Geneset],
     print(f"  Scoring {len(plan)} geneset(s)…")
 
     per_geneset = []
+    skipped = []
     for geneset, column in plan:
-        per_geneset.append(_score_one(
-            adata, geneset, column,
-            ctrl_size=args.ctrl_size,
-            n_bins=args.n_bins,
-            seed=args.seed,
-            layer=args.layer,
-            use_raw=args.use_raw,
-            verbose=args.verbose,
-        ))
+        try:
+            per_geneset.append(_score_one(
+                adata, geneset, column,
+                ctrl_size=args.ctrl_size,
+                n_bins=args.n_bins,
+                seed=args.seed,
+                layer=args.layer,
+                use_raw=args.use_raw,
+                verbose=args.verbose,
+            ))
+        except GenesetSkipped as exc:
+            print(f"    SKIP {geneset.geneset_id}: {exc}", file=sys.stderr)
+            skipped.append({
+                'geneset_id': geneset.geneset_id,
+                'reason':     str(exc),
+            })
 
     # provenance under adata.uns['module_scores'][experiment_id]
     # Stored as a JSON string — anndata.uns is fragile with nested dicts
@@ -290,6 +307,7 @@ def _score_experiment(adata, experiment: Experiment, genesets: List[Geneset],
         },
         'per_geneset':       per_geneset,
         'columns':           [g['column'] for g in per_geneset],
+        'skipped':           skipped,
         'timestamp':         datetime.now(timezone.utc).isoformat(),
         'tool_version':      TOOL_VERSION,
     }
