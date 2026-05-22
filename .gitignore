@@ -55,3 +55,6 @@ attic/
 
 # Data - separate repos, not tracked here
 data/
+
+# Claude runtime artefacts (lock files, transient state)
+.claude/scheduled_tasks.lock
