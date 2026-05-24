@@ -61,12 +61,26 @@ def _s3_client(s3_cfg: dict):
     )
 
 
-def _transfer_config() -> TransferConfig:
-    return TransferConfig(
+def _transfer_config(max_concurrency: int = 4,
+                     max_bandwidth: int | None = None) -> TransferConfig:
+    kwargs = dict(
         multipart_threshold=MULTIPART_THRESHOLD,
         multipart_chunksize=MULTIPART_CHUNKSIZE,
-        max_concurrency=4,
+        max_concurrency=max_concurrency,
     )
+    if max_bandwidth:
+        kwargs['max_bandwidth'] = max_bandwidth
+    return TransferConfig(**kwargs)
+
+
+def _parse_bandwidth(spec: str) -> int:
+    """Parse '4M', '500K', '1G' (or plain int) into bytes/sec."""
+    s = spec.strip().upper()
+    mult = 1
+    if s.endswith('K'): mult, s = 1024, s[:-1]
+    elif s.endswith('M'): mult, s = 1024 ** 2, s[:-1]
+    elif s.endswith('G'): mult, s = 1024 ** 3, s[:-1]
+    return int(float(s) * mult)
 
 
 def _s3_key(relative_path: str, prefix: str) -> str:
@@ -189,7 +203,10 @@ def cmd_push(args, s3_cfg: dict, data_folder: Path) -> None:
     client   = _s3_client(s3_cfg)
     bucket   = s3_cfg['bucket']
     prefix   = s3_cfg.get('prefix', '') or ''
-    transfer = _transfer_config()
+    transfer = _transfer_config(
+        max_concurrency=args.max_concurrency,
+        max_bandwidth=_parse_bandwidth(args.max_bandwidth) if args.max_bandwidth else None,
+    )
 
     print('Scanning S3…')
     s3_index = _s3_objects(client, bucket, prefix)
@@ -239,7 +256,10 @@ def cmd_pull(args, s3_cfg: dict, data_folder: Path) -> None:
     client   = _s3_client(s3_cfg)
     bucket   = s3_cfg['bucket']
     prefix   = s3_cfg.get('prefix', '') or ''
-    transfer = _transfer_config()
+    transfer = _transfer_config(
+        max_concurrency=args.max_concurrency,
+        max_bandwidth=_parse_bandwidth(args.max_bandwidth) if args.max_bandwidth else None,
+    )
 
     # By default pull only .h5ad. .duckdb is derived; rebuild locally.
     allowed = SYNC_EXTENSIONS if args.include_duckdb else PULL_DEFAULT_EXTS
@@ -355,6 +375,16 @@ def main() -> None:
               'treat as in-sync rather than re-uploading. Useful for a no-op '
               'first run after deploying the mtime feature.'),
     )
+    push_sub.add_argument(
+        '--max-bandwidth', default=None,
+        help='Cap upload bandwidth, e.g. "4M" (= 4 MB/s) or "500K". '
+             'Default: unlimited.',
+    )
+    push_sub.add_argument(
+        '--max-concurrency', type=int, default=4,
+        help='Parallel multipart upload chunks (default 4). Lower it to '
+             'reduce CPU + socket pressure.',
+    )
 
     pull_sub = subparsers.add_parser('pull', help='Download S3 files locally')
     pull_sub.add_argument(
@@ -365,6 +395,14 @@ def main() -> None:
         '--include-duckdb', action='store_true',
         help=('Also pull .duckdb files. By default only .h5ad is pulled — '
               '.duckdb should be rebuilt locally via `ant build-all`.'),
+    )
+    pull_sub.add_argument(
+        '--max-bandwidth', default=None,
+        help='Cap download bandwidth, e.g. "4M". Default: unlimited.',
+    )
+    pull_sub.add_argument(
+        '--max-concurrency', type=int, default=4,
+        help='Parallel multipart download chunks (default 4).',
     )
 
     status_sub = subparsers.add_parser('status', help='Show local/S3 sync state')
