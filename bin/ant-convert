@@ -97,14 +97,23 @@ def normalize_dataframe_dtypes(df: pd.DataFrame) -> pd.DataFrame:
     """Normalize DataFrame dtypes to be compatible with DuckDB
 
     Converts problematic dtypes like 'str' to standard pandas types.
-
-    Args:
-        df: Input DataFrame
-
-    Returns:
-        DataFrame with normalized dtypes
+    Drops columns that are nested DataFrames (e.g., h5ad obs columns stored
+    as a sub-DataFrame group like percentage_SEAAD_L2) — DuckDB can't
+    represent those as a single column.
     """
     df = df.copy()
+
+    # Drop nested-DataFrame columns first (anndata sometimes returns a
+    # DataFrame when reading a multi-key h5ad obs group). `.dtype` raises
+    # AttributeError on a DataFrame, blowing up the loop below.
+    bad_cols = [
+        col for col in df.columns
+        if isinstance(df[col], pd.DataFrame)
+    ]
+    if bad_cols:
+        print(f"  ⚠ dropping nested-DataFrame obs columns: {bad_cols}",
+              file=sys.stderr)
+        df = df.drop(columns=bad_cols)
 
     for col in df.columns:
         dtype_str = str(df[col].dtype)
