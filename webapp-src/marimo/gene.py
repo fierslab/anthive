@@ -13,17 +13,20 @@ def _():
 
 @app.cell
 async def _packages():
-    """Install deps + initialise Pyodide streaming-fetch worker."""
-    import sys
-    if sys.platform == "emscripten":
+    """Install deps + best-effort init of streaming-fetch worker."""
+    import sys as _sys
+    streaming_ready = False
+    if _sys.platform == "emscripten":
         import micropip
         await micropip.install(["antclient", "matplotlib", "seaborn"])
         try:
+            import asyncio as _aio
             from urllib3.contrib.emscripten.fetch import wait_for_streaming_ready
-            await wait_for_streaming_ready()
+            await _aio.wait_for(wait_for_streaming_ready(), timeout=5.0)
+            streaming_ready = True
         except Exception:
-            pass
-    return
+            streaming_ready = False  # XHR fallback truncates >~56 KB
+    return (streaming_ready,)
 
 
 @app.cell
@@ -49,15 +52,37 @@ def _(default_api):
 
 
 @app.cell
-def _(client):
+def _(client, streaming_ready):
+    """Fetch dataset list. streaming_ready is in the param list so this
+    cell waits for the streaming-fetch init (or its 5s timeout)."""
+    _ = streaming_ready  # establish ordering only
     db_list_err = None
     dbs = []
     try:
         dbs = client.get_databases()
     except Exception as exc:
-        db_list_err = f"Could not reach API: `{exc}`"
+        db_list_err = f"Could not reach API: `{exc!r}`"
     options = {f"{d['id']} — {d.get('title','')}": d['id'] for d in dbs}
     return db_list_err, options
+
+
+@app.cell
+def _(default_api, db_list_err, mo, options, streaming_ready):
+    """Status banner — visible only when something is wrong."""
+    if db_list_err:
+        banner = mo.md(
+            f"❌ {db_list_err}<br>"
+            f"<small>API URL: `{default_api}` · streaming_ready: {streaming_ready}</small>"
+        )
+    elif not options:
+        banner = mo.md(
+            f"⚠ API returned 0 datasets.<br>"
+            f"<small>API URL: `{default_api}` · streaming_ready: {streaming_ready}</small>"
+        )
+    else:
+        banner = mo.md("")
+    banner
+    return
 
 
 @app.cell

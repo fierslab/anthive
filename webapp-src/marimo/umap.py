@@ -13,17 +13,20 @@ def _():
 
 @app.cell
 async def _packages():
-    """Install deps + initialise the streaming-fetch worker. See gene.py."""
-    import sys
-    if sys.platform == "emscripten":
+    """Install deps + best-effort init of streaming-fetch worker (5s timeout)."""
+    import sys as _sys
+    streaming_ready = False
+    if _sys.platform == "emscripten":
         import micropip
         await micropip.install(["antclient", "matplotlib", "seaborn"])
         try:
+            import asyncio as _aio
             from urllib3.contrib.emscripten.fetch import wait_for_streaming_ready
-            await wait_for_streaming_ready()
+            await _aio.wait_for(wait_for_streaming_ready(), timeout=5.0)
+            streaming_ready = True
         except Exception:
-            pass
-    return
+            streaming_ready = False
+    return (streaming_ready,)
 
 
 @app.cell
@@ -48,16 +51,35 @@ def _(default_api):
 
 
 @app.cell
-def _(client):
+def _(client, streaming_ready):
+    _ = streaming_ready
     db_list_err = None
     candidates = []
     try:
         dbs = client.get_databases()
         candidates = [d for d in dbs if (d.get("embeddings") or {})]
     except Exception as exc:
-        db_list_err = f"Could not reach API: `{exc}`"
+        db_list_err = f"Could not reach API: `{exc!r}`"
     options = {f"{d['id']} — {d.get('title','')}": d['id'] for d in candidates}
     return candidates, db_list_err, options
+
+
+@app.cell
+def _(default_api, db_list_err, mo, options, streaming_ready):
+    if db_list_err:
+        banner = mo.md(
+            f"❌ {db_list_err}<br>"
+            f"<small>API URL: `{default_api}` · streaming_ready: {streaming_ready}</small>"
+        )
+    elif not options:
+        banner = mo.md(
+            f"⚠ No datasets with embeddings returned by the API.<br>"
+            f"<small>API URL: `{default_api}` · streaming_ready: {streaming_ready}</small>"
+        )
+    else:
+        banner = mo.md("")
+    banner
+    return
 
 
 @app.cell
