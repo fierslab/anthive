@@ -148,44 +148,85 @@ def _(db_id, db_info, mo):
 
 
 @app.cell
-def _(cat_selector, client, db_id, y_type, y_widget):
+def _(client, db_id, y_type, y_widget):
+    """Resolve y-field (case-insensitive gene lookup with suggestions)."""
+    raw = (y_widget.value or "").strip() if y_widget and y_type.value != "Count" else ""
+    resolved = None
+    suggestions = []
+    if db_id and raw:
+        if y_type.value == "Gene":
+            try:
+                exact_hits = client.search_genes(db_id, q=raw, limit=1, exact=True)
+                if exact_hits:
+                    resolved = exact_hits[0]
+                else:
+                    suggestions = client.search_genes(db_id, q=raw, limit=8)
+                    if len(suggestions) == 1:
+                        resolved = suggestions[0]
+            except Exception:
+                pass
+        else:
+            resolved = raw
+    return raw, resolved, suggestions
+
+
+@app.cell
+def _(mo, raw, resolved, suggestions, y_type):
+    if y_type.value != "Gene":
+        hint = mo.md("")
+    elif raw and resolved is None and suggestions:
+        hint = mo.md(
+            f"<small>**`{raw}`** — no exact match. Did you mean: "
+            f"{', '.join(f'`{g}`' for g in suggestions[:6])}?</small>"
+        )
+    elif raw and resolved is None:
+        hint = mo.md(f"<small>**`{raw}`** — not found.</small>")
+    elif resolved and resolved != raw:
+        hint = mo.md(f"<small>resolved `{raw}` → `{resolved}` (case)</small>")
+    else:
+        hint = mo.md("")
+    hint
+    return
+
+
+@app.cell
+def _(cat_selector, client, db_id, resolved, y_type):
     import pandas as pd
     plot_df = pd.DataFrame()
     fetch_err = None
     cat = cat_selector.value if hasattr(cat_selector, "value") else None
-    yval = (y_widget.value or "").strip() if y_widget and y_type.value != "Count" else None
     if db_id and cat:
         try:
-            if y_type.value == "Gene":
+            if y_type.value == "Gene" and resolved:
                 plot_df = client.get_cells(
-                    db_id=db_id, genes=[yval], metadata=[cat],
+                    db_id=db_id, genes=[resolved], metadata=[cat],
                     limit=20000, format="dataframe",
                 )
-            elif y_type.value == "Numerical":
+            elif y_type.value == "Numerical" and resolved:
                 plot_df = client.get_cells(
-                    db_id=db_id, metadata=[cat, yval],
+                    db_id=db_id, metadata=[cat, resolved],
                     limit=20000, format="dataframe",
                 )
-            else:
+            elif y_type.value == "Count":
                 plot_df = client.get_cells(
                     db_id=db_id, metadata=[cat],
                     limit=20000, format="dataframe",
                 )
         except Exception as exc:
             fetch_err = f"`get_cells` failed: `{exc}`"
-        if not fetch_err and cat not in plot_df.columns:
+        if not fetch_err and not plot_df.empty and cat not in plot_df.columns:
             fetch_err = f"Field `{cat}` not in returned columns."
-        if not fetch_err and yval and yval not in plot_df.columns:
-            fetch_err = f"Field `{yval}` not in returned columns."
-    return cat, fetch_err, plot_df, yval
+        if not fetch_err and resolved and not plot_df.empty and resolved not in plot_df.columns:
+            fetch_err = f"Field `{resolved}` not in returned columns."
+    return cat, fetch_err, plot_df
 
 
 @app.cell
-def _(cat, fetch_err, mo, plot_df, plot_kind, y_type, yval):
+def _(cat, fetch_err, mo, plot_df, plot_kind, resolved, y_type):
     if fetch_err:
         out = mo.md(f"❌ {fetch_err}")
     elif plot_df.empty:
-        out = mo.md("_no data yet_")
+        out = mo.md("_pick a dataset and group_")
     else:
         import matplotlib.pyplot as plt
         import seaborn as sns
@@ -200,15 +241,15 @@ def _(cat, fetch_err, mo, plot_df, plot_kind, y_type, yval):
             ax.set_title(f"cells per {cat}", fontsize=10)
         else:
             if kind == "box":
-                sns.boxplot(data=plot_df, x=cat, y=yval, order=order, ax=ax,
+                sns.boxplot(data=plot_df, x=cat, y=resolved, order=order, ax=ax,
                             showfliers=False, color="#4c72b0")
             elif kind == "violin":
-                sns.violinplot(data=plot_df, x=cat, y=yval, order=order, ax=ax,
+                sns.violinplot(data=plot_df, x=cat, y=resolved, order=order, ax=ax,
                                color="#4c72b0")
             else:
-                sns.barplot(data=plot_df, x=cat, y=yval, order=order, ax=ax,
+                sns.barplot(data=plot_df, x=cat, y=resolved, order=order, ax=ax,
                             color="#4c72b0")
-            ax.set_title(f"{yval} by {cat} — {kind}", fontsize=10)
+            ax.set_title(f"{resolved} by {cat} — {kind}", fontsize=10)
         plt.setp(ax.get_xticklabels(), rotation=30, ha="right", fontsize=8)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
@@ -219,7 +260,7 @@ def _(cat, fetch_err, mo, plot_df, plot_kind, y_type, yval):
 
 
 @app.cell
-def _(cat, fetch_err, mo, plot_df, y_type, yval):
+def _(cat, fetch_err, mo, plot_df, resolved, y_type):
     if fetch_err or plot_df.empty:
         summary = mo.md("")
     else:
@@ -231,15 +272,15 @@ def _(cat, fetch_err, mo, plot_df, y_type, yval):
                 f"top: {_top3}</small>"
             )
         else:
-            stats = (plot_df.groupby(cat)[yval]
+            _stats = (plot_df.groupby(cat)[resolved]
                      .agg(n="count", mean="mean", median="median")
                      .round(3))
-            top3 = " · ".join(
+            _top3 = " · ".join(
                 f"{k}: n={r['n']:.0f} μ={r['mean']:.3g}"
-                for k, r in stats.head(3).iterrows()
+                for k, r in _stats.head(3).iterrows()
             )
             summary = mo.md(
-                f"<small>**{yval} by {cat}** · {len(stats)} groups · {top3}</small>"
+                f"<small>**{resolved} by {cat}** · {len(_stats)} groups · {_top3}</small>"
             )
     summary
     return

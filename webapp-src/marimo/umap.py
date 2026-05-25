@@ -143,41 +143,84 @@ def _(db_id, db_info, mo):
 
 
 @app.cell
-def _(client, color_by, db_id, emb_selector, field_widget):
+def _(client, color_by, db_id, field_widget):
+    """Resolve the requested field. For Gene, do a case-insensitive lookup
+    and offer suggestions if there's no exact match."""
+    raw = (field_widget.value or "").strip() if hasattr(field_widget, "value") else ""
+    resolved = None
+    suggestions = []
+    if db_id and raw:
+        if color_by.value == "Gene":
+            try:
+                exact_hits = client.search_genes(db_id, q=raw, limit=1, exact=True)
+                if exact_hits:
+                    resolved = exact_hits[0]
+                else:
+                    suggestions = client.search_genes(db_id, q=raw, limit=8)
+                    if len(suggestions) == 1:
+                        resolved = suggestions[0]
+            except Exception:
+                pass
+        else:
+            # Numerical / categorical — exact match expected (came from dropdown)
+            resolved = raw
+    return raw, resolved, suggestions
+
+
+@app.cell
+def _(color_by, mo, raw, resolved, suggestions):
+    if color_by.value != "Gene":
+        hint = mo.md("")
+    elif raw and resolved is None and suggestions:
+        hint = mo.md(
+            f"<small>**`{raw}`** — no exact match. Did you mean: "
+            f"{', '.join(f'`{g}`' for g in suggestions[:6])}?</small>"
+        )
+    elif raw and resolved is None:
+        hint = mo.md(f"<small>**`{raw}`** — not found.</small>")
+    elif resolved and resolved != raw:
+        hint = mo.md(f"<small>resolved `{raw}` → `{resolved}` (case)</small>")
+    else:
+        hint = mo.md("")
+    hint
+    return
+
+
+@app.cell
+def _(client, color_by, db_id, emb_selector, resolved):
     import pandas as pd
     plot_df = pd.DataFrame()
     fetch_err = None
-    field = (field_widget.value or "").strip() if hasattr(field_widget, "value") else ""
-    if db_id and emb_selector and getattr(emb_selector, "value", None) and field:
+    if db_id and emb_selector and getattr(emb_selector, "value", None) and resolved:
         emb_name = emb_selector.value
         try:
             emb = client.get_embedding_data(db_id, emb_name, format="dataframe")
             if color_by.value == "Gene":
                 color_df = client.get_cells(
-                    db_id=db_id, genes=[field], limit=20000, format="dataframe"
+                    db_id=db_id, genes=[resolved], limit=20000, format="dataframe"
                 )
             else:
                 color_df = client.get_cells(
-                    db_id=db_id, metadata=[field], limit=20000, format="dataframe"
+                    db_id=db_id, metadata=[resolved], limit=20000, format="dataframe"
                 )
             emb = emb.set_index(emb.columns[0])
             color_df = color_df.set_index(color_df.columns[0])
-            if field not in color_df.columns:
-                fetch_err = f"Field `{field}` missing in response."
+            if resolved not in color_df.columns:
+                fetch_err = f"Field `{resolved}` missing in response."
             else:
-                emb[field] = color_df[field]
+                emb[resolved] = color_df[resolved]
                 plot_df = emb.dropna(subset=[emb.columns[0], emb.columns[1]])
         except Exception as exc:
             fetch_err = f"Fetch failed: `{exc}`"
-    return fetch_err, field, plot_df
+    return fetch_err, plot_df
 
 
 @app.cell
-def _(color_by, fetch_err, field, mo, plot_df):
+def _(color_by, fetch_err, mo, plot_df, resolved):
     if fetch_err:
         out = mo.md(f"❌ {fetch_err}")
-    elif plot_df.empty:
-        out = mo.md("_no data yet_")
+    elif plot_df.empty or not resolved:
+        out = mo.md("_pick a dataset, embedding, and colour field_")
     else:
         import matplotlib.pyplot as plt
         import matplotlib.cm as cm
@@ -188,21 +231,21 @@ def _(color_by, fetch_err, field, mo, plot_df):
         fig, ax = plt.subplots(figsize=(5.5, 5))
         kwargs = dict(x=xcol, y=ycol, s=3, linewidth=0, ax=ax)
         if color_by.value in ("Gene", "Numerical"):
-            values = plot_df[field].astype(float)
+            _values = plot_df[resolved].astype(float)
             norm = mcolors.Normalize(
-                vmin=values.quantile(0.05), vmax=values.quantile(0.95)
+                vmin=_values.quantile(0.05), vmax=_values.quantile(0.95)
             )
-            sns.scatterplot(data=plot_df, hue=field, palette="viridis",
+            sns.scatterplot(data=plot_df, hue=resolved, palette="viridis",
                             legend=False, hue_norm=norm, **kwargs)
             fig.colorbar(cm.ScalarMappable(norm=norm, cmap="viridis"),
-                         ax=ax, label=field, shrink=0.6)
+                         ax=ax, label=resolved, shrink=0.6)
         else:
-            sns.scatterplot(data=plot_df, hue=field, palette="tab20", **kwargs)
+            sns.scatterplot(data=plot_df, hue=resolved, palette="tab20", **kwargs)
             sns.move_legend(ax, loc="upper left", bbox_to_anchor=(1, 1),
-                            frameon=False, title=field, fontsize=8)
+                            frameon=False, title=resolved, fontsize=8)
         ax.set_xlabel(xcol, fontsize=9)
         ax.set_ylabel(ycol, fontsize=9)
-        ax.set_title(f"{field} · n={len(plot_df):,}", fontsize=10)
+        ax.set_title(f"{resolved} · n={len(plot_df):,}", fontsize=10)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         fig.tight_layout()
