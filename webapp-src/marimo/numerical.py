@@ -1,35 +1,14 @@
-"""
-Anthive — Numerical obs distribution
-
-Distribution of a numerical obs field (e.g. n_counts, percent.mt, a module
-score) across cells. Optionally split by a categorical field.
-
-URL parameters: ?db_id=…&field=…&api=…
-"""
+"""Anthive — Numerical obs distribution (compact)."""
 import marimo
 
 __generated_with = "0.10.0"
-app = marimo.App(width="medium", app_title="Anthive — Numerical")
+app = marimo.App(width="medium", app_title="Numerical")
 
 
 @app.cell
 def _():
     import marimo as mo
     return (mo,)
-
-
-@app.cell
-def _(mo):
-    mo.md(
-        r"""
-        # Numerical obs distribution
-
-        Pick a numerical obs field and visualise it. Useful for QC metrics
-        (UMI counts, percent mito) and module scores (e.g. WGCNA modules).
-        Optional grouping by a categorical field.
-        """
-    )
-    return
 
 
 @app.cell
@@ -56,21 +35,14 @@ def _(mo):
 
 
 @app.cell
-def _(default_api, mo):
-    api_input = mo.ui.text(value=default_api, label="API base URL", full_width=True)
-    api_input
-    return (api_input,)
-
-
-@app.cell
-def _(api_input):
+def _(default_api):
     from antclient import AnthiveClient
-    client = AnthiveClient(api_input.value, timeout=120)
+    client = AnthiveClient(default_api, timeout=120)
     return (client,)
 
 
 @app.cell
-def _(client, mo):
+def _(client):
     db_list_err = None
     dbs = []
     try:
@@ -78,12 +50,7 @@ def _(client, mo):
     except Exception as exc:
         db_list_err = f"Could not reach API: `{exc}`"
     options = {f"{d['id']} — {d.get('title','')}": d['id'] for d in dbs}
-    db_status = (
-        mo.md(f"❌ {db_list_err}") if db_list_err
-        else mo.md(f"_{len(dbs)} datasets loaded_")
-    )
-    db_status
-    return dbs, options, db_list_err
+    return db_list_err, options
 
 
 @app.cell
@@ -94,7 +61,7 @@ def _(default_db, mo, options):
     )
     db_selector = mo.ui.dropdown(
         options=options, value=initial_key,
-        label=f"Dataset ({len(options)})", searchable=True,
+        label="dataset", searchable=True, full_width=True,
     )
     db_selector
     return (db_selector,)
@@ -105,135 +72,136 @@ def _(client, db_selector):
     db_id = db_selector.value
     obs_cat = []
     obs_num = []
+    db_info = {}
     if db_id:
-        info = client.get_database_info(db_id)
-        obs = info.get("obs") or {}
+        db_info = client.get_database_info(db_id)
+        obs = db_info.get("obs") or {}
         obs_cat = obs.get("categorical") or []
         obs_num = obs.get("numerical") or []
-    return db_id, obs_cat, obs_num
+    return db_id, db_info, obs_cat, obs_num
 
 
 @app.cell
-def _(default_fld, mo, obs_num):
-    if not obs_num:
-        mo.md("_(this dataset has no numerical obs fields)_")
-        return (None,)
-    default_value = default_fld if default_fld in obs_num else obs_num[0]
+def _(default_fld, mo, obs_cat, obs_num):
+    default_value = default_fld if default_fld in obs_num else (obs_num[0] if obs_num else None)
     num_selector = mo.ui.dropdown(
         options=sorted(obs_num), value=default_value,
-        label="Numerical field", searchable=True,
-    )
-    num_selector
-    return (num_selector,)
-
-
-@app.cell
-def _(mo, obs_cat):
-    group_choices = ["None"] + (["Categorical"] if obs_cat else [])
+        label="numerical field", searchable=True,
+    ) if obs_num else mo.ui.text(value="", label="(no numerical)", disabled=True)
     group_by = mo.ui.dropdown(
-        options=group_choices, value="None", label="Group by",
+        options=["None"] + (["Categorical"] if obs_cat else []),
+        value="None", label="group by",
     )
-    group_by
-    return (group_by,)
+    cat_selector = mo.ui.dropdown(
+        options=sorted(obs_cat), value=obs_cat[0] if obs_cat else None,
+        label="categorical group", searchable=True,
+    ) if obs_cat else mo.ui.text(value="", label="(no categorical)", disabled=True)
+    return cat_selector, group_by, num_selector
 
 
 @app.cell
-def _(group_by, mo, obs_cat):
-    if group_by.value != "Categorical" or not obs_cat:
-        cat_selector = mo.ui.text(value="", label="(no grouping)", disabled=True)
-    else:
-        cat_selector = mo.ui.dropdown(
-            options=sorted(obs_cat), value=obs_cat[0],
-            label="Categorical group", searchable=True,
-        )
-    cat_selector
-    return (cat_selector,)
+def _(cat_selector, group_by, mo, num_selector):
+    """Show group control only if grouping selected."""
+    widgets = [num_selector, group_by]
+    if group_by.value == "Categorical":
+        widgets.append(cat_selector)
+    mo.hstack(widgets, justify="start", gap=1)
+    return
 
 
 @app.cell
 def _(group_by, mo):
-    if group_by.value == "Categorical":
-        choices = ["box", "violin", "bar"]
-    else:
-        choices = ["histogram", "ecdf", "kde"]
-    plot_kind = mo.ui.dropdown(options=choices, value=choices[0], label="Plot")
+    choices = (["box", "violin", "bar"] if group_by.value == "Categorical"
+               else ["histogram", "ecdf", "kde"])
+    plot_kind = mo.ui.dropdown(
+        options=choices, value=choices[0], label="plot"
+    )
     plot_kind
     return (plot_kind,)
 
 
 @app.cell
-def _(cat_selector, client, db_id, group_by, mo, num_selector):
-    """Fetch the data."""
+def _(db_id, db_info, mo):
+    if db_info:
+        mo.md(
+            f"<small>{db_id} · {db_info.get('n_cells', 0):,} cells · "
+            f"organism: {db_info.get('organism','?')}</small>"
+        )
+    else:
+        mo.md("_pick a dataset_")
+    return
+
+
+@app.cell
+def _(cat_selector, client, db_id, group_by, num_selector):
     import pandas as pd
     plot_df = pd.DataFrame()
     fetch_err = None
-    if db_id and num_selector and num_selector.value:
-        num = num_selector.value
+    num = num_selector.value if hasattr(num_selector, "value") else None
+    if db_id and num:
         fields = [num]
-        if group_by.value == "Categorical" and cat_selector.value:
+        if group_by.value == "Categorical" and hasattr(cat_selector, "value") and cat_selector.value:
             fields.append(cat_selector.value)
         try:
-            # Sample up to 20k cells (backend JSON serialization is the
-            # slow step). 20k is plenty for a histogram / box plot.
-            plot_df = client.get_cells(db_id=db_id, metadata=fields,
-                                       limit=20000, format="dataframe")
+            plot_df = client.get_cells(
+                db_id=db_id, metadata=fields, limit=20000, format="dataframe"
+            )
         except Exception as exc:
             fetch_err = f"`get_cells` failed: `{exc}`"
         if not fetch_err and num not in plot_df.columns:
-            fetch_err = f"Field `{num}` not in columns ({list(plot_df.columns)})."
-    fetch_status = (
-        mo.md(f"❌ {fetch_err}") if fetch_err
-        else mo.md(f"**fetched** {len(plot_df):,} cells")
-    )
-    fetch_status
-    return plot_df, fetch_err
+            fetch_err = f"Field `{num}` not in returned columns."
+    return fetch_err, num, plot_df
 
 
 @app.cell
-def _(cat_selector, fetch_err, group_by, mo, num_selector, plot_df, plot_kind):
-    """Render."""
-    num_fig = None
-    if not fetch_err and not plot_df.empty:
+def _(cat_selector, fetch_err, group_by, mo, num, plot_df, plot_kind):
+    if fetch_err:
+        out = mo.md(f"❌ {fetch_err}")
+    elif plot_df.empty:
+        out = mo.md("_no data yet_")
+    else:
         import matplotlib.pyplot as plt
         import seaborn as sns
-        num = num_selector.value
         kind = plot_kind.value
-        fig, ax = plt.subplots(figsize=(8, 4.5))
-        if group_by.value == "Categorical" and cat_selector.value:
+        fig, ax = plt.subplots(figsize=(6, 3.5))
+        if group_by.value == "Categorical" and hasattr(cat_selector, "value") and cat_selector.value:
             cat = cat_selector.value
-            order = plot_df[cat].value_counts().index.tolist()
+            order = plot_df[cat].value_counts().index.tolist()[:20]
             if kind == "box":
-                sns.boxplot(data=plot_df, x=cat, y=num, order=order, ax=ax, showfliers=False)
+                sns.boxplot(data=plot_df, x=cat, y=num, order=order, ax=ax,
+                            showfliers=False, color="#4c72b0")
             elif kind == "violin":
-                sns.violinplot(data=plot_df, x=cat, y=num, order=order, ax=ax)
+                sns.violinplot(data=plot_df, x=cat, y=num, order=order, ax=ax,
+                               color="#4c72b0")
             else:
-                sns.barplot(data=plot_df, x=cat, y=num, order=order, ax=ax)
-            plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
-            ax.set_title(f"{num} by {cat} — {kind}")
+                sns.barplot(data=plot_df, x=cat, y=num, order=order, ax=ax,
+                            color="#4c72b0")
+            plt.setp(ax.get_xticklabels(), rotation=30, ha="right", fontsize=8)
+            ax.set_title(f"{num} by {cat}", fontsize=10)
         else:
             values = plot_df[num].astype(float).dropna()
             if kind == "ecdf":
-                sns.ecdfplot(x=values, ax=ax)
+                sns.ecdfplot(x=values, ax=ax, color="#2c5aa0")
             elif kind == "kde":
-                sns.kdeplot(x=values, ax=ax, fill=True)
+                sns.kdeplot(x=values, ax=ax, fill=True, color="#2c5aa0")
             else:
-                sns.histplot(x=values, bins=60, ax=ax)
-            ax.set_xlabel(num)
-            ax.set_title(f"{num} — {kind} (n={len(values):,})")
+                sns.histplot(x=values, bins=50, ax=ax, color="#4c72b0")
+            ax.set_xlabel(num, fontsize=9)
+            ax.set_title(f"{num} — {kind} (n={len(values):,})", fontsize=10)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
         fig.tight_layout()
-        num_fig = fig
-    num_fig if num_fig is not None else mo.md("_(no plot yet)_")
-    return (num_fig,)
+        out = fig
+    out
+    return
 
 
 @app.cell
-def _(api_input, db_selector, default_api, num_selector, params):
+def _(db_selector, num_selector, params):
     if db_selector.value:
         params["db_id"] = db_selector.value
-    if num_selector and num_selector.value:
+    if hasattr(num_selector, "value") and num_selector.value:
         params["field"] = num_selector.value
-    if api_input.value.strip() and api_input.value != default_api:
-        params["api"] = api_input.value
     return
 
 

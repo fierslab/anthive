@@ -1,15 +1,8 @@
-"""
-Anthive — Gene expression distribution
-
-A single-gene view: histogram / ECDF / KDE of expression across cells,
-plus summary statistics. Mirrors webapp-streamlit/pages/1_gene.py.
-
-URL parameters: ?db_id=…&gene=…&api=…
-"""
+"""Anthive — Gene expression distribution (compact, streamlit-replacement)."""
 import marimo
 
 __generated_with = "0.10.0"
-app = marimo.App(width="medium", app_title="Anthive — Gene")
+app = marimo.App(width="medium", app_title="Gene")
 
 
 @app.cell
@@ -19,21 +12,7 @@ def _():
 
 
 @app.cell
-def _(mo):
-    mo.md(
-        r"""
-        # Gene expression
-
-        Distribution of a single gene's expression across cells in one dataset.
-        URL params: `?db_id=…&gene=…&api=…` — widgets and URL stay in sync.
-        """
-    )
-    return
-
-
-@app.cell
 async def _packages():
-    """Install client dependencies under Pyodide (no-op outside WASM)."""
     import sys
     if sys.platform == "emscripten":
         import micropip
@@ -43,7 +22,6 @@ async def _packages():
 
 @app.cell
 def _(mo):
-    """Read URL params; auto-detect API origin in the browser."""
     params = mo.query_params()
     try:
         import js
@@ -53,26 +31,19 @@ def _(mo):
     default_api  = params.get("api", auto_api)
     default_db   = params.get("db_id", "P26/HMI")
     default_gene = params.get("gene", "TREM2")
-    return default_api, default_db, default_gene, params
+    default_plot = params.get("plot", "histogram")
+    return default_api, default_db, default_gene, default_plot, params
 
 
 @app.cell
-def _(default_api, mo):
-    api_input = mo.ui.text(value=default_api, label="API base URL", full_width=True)
-    api_input
-    return (api_input,)
-
-
-@app.cell
-def _(api_input):
+def _(default_api):
     from antclient import AnthiveClient
-    client = AnthiveClient(api_input.value, timeout=120)
+    client = AnthiveClient(default_api, timeout=120)
     return (client,)
 
 
 @app.cell
-def _(client, mo):
-    """Fetch dataset list once, surface any error inline."""
+def _(client):
     db_list_err = None
     dbs = []
     try:
@@ -80,62 +51,53 @@ def _(client, mo):
     except Exception as exc:
         db_list_err = f"Could not reach API: `{exc}`"
     options = {f"{d['id']} — {d.get('title','')}": d['id'] for d in dbs}
-    mo.md(f"❌ {db_list_err}") if db_list_err else mo.md(
-        f"_loaded {len(dbs)} dataset(s) from the API_"
-    )
-    return (dbs, options, db_list_err)
+    return dbs, options, db_list_err
 
 
 @app.cell
-def _(default_db, mo, options):
-    """Dataset picker (searchable dropdown)."""
+def _(default_db, default_gene, default_plot, mo, options):
     initial_key = (
         next((k for k, v in options.items() if v == default_db), None)
         or (next(iter(options)) if options else None)
     )
     db_selector = mo.ui.dropdown(
         options=options, value=initial_key,
-        label=f"Dataset ({len(options)} available)", searchable=True,
+        label="dataset", searchable=True, full_width=True,
     )
-    db_selector
-    return (db_selector,)
+    gene_input = mo.ui.text(value=default_gene, label="gene")
+    plot_type = mo.ui.dropdown(
+        options=["histogram", "ecdf", "kde"], value=default_plot, label="plot",
+    )
+    mo.vstack([
+        db_selector,
+        mo.hstack([gene_input, plot_type], justify="start", gap=1),
+    ])
+    return db_selector, gene_input, plot_type
 
 
 @app.cell
-def _(default_gene, mo):
-    gene_input = mo.ui.text(value=default_gene, label="Gene symbol", full_width=True)
-    plot_type  = mo.ui.dropdown(
-        options=["histogram", "ecdf", "kde"], value="histogram", label="Plot type",
-    )
-    mo.hstack([gene_input, plot_type])
-    return gene_input, plot_type
-
-
-@app.cell
-def _(client, db_selector, mo):
-    """Dataset info card."""
+def _(client, db_selector):
     db_id = db_selector.value
-    db_info = {}
-    if db_id:
-        db_info = client.get_database_info(db_id)
-    if db_id and db_info:
-        layers = list((db_info.get("layers") or {}).keys())
-        info_card = mo.md(
-            f"### `{db_id}` — {db_info.get('title','')}\n\n"
-            f"**{db_info.get('n_cells', 0):,}** cells × "
-            f"**{db_info.get('n_genes', 0):,}** genes  ·  "
-            f"organism: {db_info.get('organism','?')}  ·  "
-            f"layers: {', '.join(layers) or '—'}"
-        )
-    else:
-        info_card = mo.md("_(pick a dataset above)_")
-    info_card
+    db_info = client.get_database_info(db_id) if db_id else {}
     return db_id, db_info
 
 
 @app.cell
+def _(db_id, db_info, mo):
+    if db_info:
+        n_cells = db_info.get('n_cells', 0)
+        layers = list((db_info.get('layers') or {}).keys())
+        mo.md(
+            f"<small>{db_id} · {n_cells:,} cells × {db_info.get('n_genes', 0):,} genes · "
+            f"organism: {db_info.get('organism','?')} · layers: {', '.join(layers) or '—'}</small>"
+        )
+    else:
+        mo.md("_pick a dataset_")
+    return
+
+
+@app.cell
 def _(client, db_id, gene_input, mo):
-    """Verify the gene exists in this dataset."""
     gene = gene_input.value.strip()
     matches = []
     search_err = None
@@ -144,104 +106,87 @@ def _(client, db_id, gene_input, mo):
             matches = client.search_genes(db_id, q=gene, limit=8)
         except Exception as exc:
             search_err = f"`search_genes` failed: `{exc}`"
-    hit_str = ", ".join(f"`{g}`" for g in matches[:8]) or "_(none)_"
-    search_status = mo.md(
-        f"**search** → {len(matches)} match{'es' if len(matches)!=1 else ''}: {hit_str}"
-        + (f"\n\n❌ {search_err}" if search_err else "")
-    )
-    search_status
+    status = None
+    if search_err:
+        status = mo.md(f"❌ {search_err}")
+    elif gene and matches and gene not in matches:
+        status = mo.md(f"<small>no exact match — closest: {', '.join(f'`{g}`' for g in matches[:5])}</small>")
+    elif gene and not matches:
+        status = mo.md(f"<small>gene `{gene}` not found in this dataset</small>")
+    status if status is not None else mo.md("")
     return gene, matches, search_err
 
 
 @app.cell
-def _(client, db_id, gene, mo):
-    """Pull the gene's expression vector across all cells (single column)."""
+def _(client, db_id, gene):
     import pandas as pd
     cells_df = pd.DataFrame()
     fetch_err = None
     if db_id and gene:
         try:
-            # Sample up to 20k cells — backend JSON serialization scales
-            # badly past that, and the distribution looks identical.
-            cells_df = client.get_cells(db_id=db_id, genes=[gene],
-                                        limit=20000, format="dataframe")
+            cells_df = client.get_cells(
+                db_id=db_id, genes=[gene], limit=20000, format="dataframe"
+            )
         except Exception as exc:
             fetch_err = f"`get_cells` failed: `{exc}`"
         if not fetch_err and gene not in cells_df.columns:
-            fetch_err = (
-                f"Gene `{gene}` not in returned columns ({list(cells_df.columns)}). "
-                "Try one of the search hits above."
-            )
-    fetch_status = (
-        mo.md(f"❌ {fetch_err}") if fetch_err
-        else mo.md(f"**fetched** {len(cells_df):,} cells")
-    )
-    fetch_status
+            fetch_err = f"Gene `{gene}` not in returned columns."
     return cells_df, fetch_err
 
 
 @app.cell
 def _(cells_df, fetch_err, gene, mo, plot_type):
-    """Render the distribution plot."""
-    plot_fig = None
-    if not (fetch_err or cells_df.empty or gene not in cells_df.columns):
+    if fetch_err:
+        out = mo.md(f"❌ {fetch_err}")
+    elif cells_df.empty or gene not in cells_df.columns:
+        out = mo.md("_no data yet_")
+    else:
         import matplotlib.pyplot as plt
         import seaborn as sns
-        values = cells_df[gene].astype(float).dropna()
-        fig, ax = plt.subplots(figsize=(7, 4))
-        plot_kind = plot_type.value
-        if plot_kind == "ecdf":
-            sns.ecdfplot(x=values, ax=ax)
-        elif plot_kind == "kde":
-            sns.kdeplot(x=values, ax=ax, fill=True)
+        _values = cells_df[gene].astype(float).dropna()
+        fig, ax = plt.subplots(figsize=(6, 3.2))
+        kind = plot_type.value
+        if kind == "ecdf":
+            sns.ecdfplot(x=_values, ax=ax, color="#2c5aa0")
+        elif kind == "kde":
+            sns.kdeplot(x=_values, ax=ax, fill=True, color="#2c5aa0")
         else:
-            sns.histplot(x=values, bins=60, ax=ax)
+            sns.histplot(x=_values, bins=50, ax=ax, color="#4c72b0")
         ax.set_xlabel(gene)
-        ax.set_title(f"{gene} expression — {plot_kind} (n={len(values):,})")
+        ax.set_title(f"{gene} — {kind} (n={len(_values):,} sampled)", fontsize=10)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
         fig.tight_layout()
-        plot_fig = fig
-    plot_fig if plot_fig is not None else mo.md("_(no plot yet)_")
-    return (plot_fig,)
+        out = fig
+    out
+    return
 
 
 @app.cell
 def _(cells_df, fetch_err, gene, mo):
-    """Tabular summary stats — matches the streamlit page."""
-    stats_md = None
-    if not (fetch_err or cells_df.empty or gene not in cells_df.columns):
-        values = cells_df[gene]
-        nonzero = values[values > 0]
-        rows = [
-            ("entries", f"{len(values):,}"),
-            ("non-zero", f"{len(nonzero):,}"),
-            ("% non-zero", f"{100*len(nonzero)/max(len(values),1):.2f}%"),
-            ("mean", f"{values.mean():.3g}"),
-            ("std", f"{values.std():.3g}"),
-            ("median", f"{values.median():.3g}"),
-            ("min", f"{values.min():.3g}"),
-            ("10%", f"{values.quantile(0.1):.3g}"),
-            ("90%", f"{values.quantile(0.9):.3g}"),
-            ("max", f"{values.max():.3g}"),
-        ]
-        table = "| field | value |\n|---|---:|\n" + "\n".join(
-            f"| {k} | {v} |" for k, v in rows
+    if fetch_err or cells_df.empty or gene not in cells_df.columns:
+        stats_md = mo.md("")
+    else:
+        _vals = cells_df[gene]
+        _nz = _vals[_vals > 0]
+        _pct = 100 * len(_nz) / max(len(_vals), 1)
+        stats_md = mo.md(
+            f"<small>**{gene}** · non-zero {len(_nz):,}/{len(_vals):,} ({_pct:.1f}%) · "
+            f"mean {_vals.mean():.3g} · median {_vals.median():.3g} · "
+            f"std {_vals.std():.3g} · range [{_vals.min():.3g}, {_vals.max():.3g}]</small>"
         )
-        stats_md = mo.md("### Stats\n\n" + table)
-    stats_md if stats_md is not None else mo.md("")
-    return (stats_md,)
+    stats_md
+    return
 
 
 @app.cell
-def _(api_input, db_selector, default_api, gene_input, params, plot_type):
-    """Two-way bind widget state into the URL."""
+def _(db_selector, gene_input, params, plot_type):
     if db_selector.value:
         params["db_id"] = db_selector.value
     if gene_input.value.strip():
         params["gene"] = gene_input.value.strip()
     if plot_type.value:
         params["plot"] = plot_type.value
-    if api_input.value.strip() and api_input.value != default_api:
-        params["api"] = api_input.value
     return
 
 

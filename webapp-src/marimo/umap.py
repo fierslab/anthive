@@ -1,34 +1,14 @@
-"""
-Anthive — UMAP / embedding scatter
-
-Plots a 2-D embedding with cells colored by gene, numerical obs, or
-categorical obs. Mirrors webapp-streamlit/pages/2_umap.py.
-
-URL parameters: ?db_id=…&gene=…&api=…
-"""
+"""Anthive — UMAP / embedding scatter (compact)."""
 import marimo
 
 __generated_with = "0.10.0"
-app = marimo.App(width="medium", app_title="Anthive — UMAP")
+app = marimo.App(width="medium", app_title="UMAP")
 
 
 @app.cell
 def _():
     import marimo as mo
     return (mo,)
-
-
-@app.cell
-def _(mo):
-    mo.md(
-        r"""
-        # UMAP / embedding scatter
-
-        Pick a dataset with a stored 2-D embedding, then colour cells by
-        gene expression, a numerical obs field, or a categorical field.
-        """
-    )
-    return
 
 
 @app.cell
@@ -55,22 +35,14 @@ def _(mo):
 
 
 @app.cell
-def _(default_api, mo):
-    api_input = mo.ui.text(value=default_api, label="API base URL", full_width=True)
-    api_input
-    return (api_input,)
-
-
-@app.cell
-def _(api_input):
+def _(default_api):
     from antclient import AnthiveClient
-    client = AnthiveClient(api_input.value, timeout=120)
+    client = AnthiveClient(default_api, timeout=120)
     return (client,)
 
 
 @app.cell
-def _(client, mo):
-    """Pick from datasets that actually have an embedding."""
+def _(client):
     db_list_err = None
     candidates = []
     try:
@@ -79,13 +51,7 @@ def _(client, mo):
     except Exception as exc:
         db_list_err = f"Could not reach API: `{exc}`"
     options = {f"{d['id']} — {d.get('title','')}": d['id'] for d in candidates}
-    db_status = (
-        mo.md(f"❌ {db_list_err}") if db_list_err
-        else (mo.md("_(no datasets expose an embedding)_") if not options
-              else mo.md(f"_{len(options)} dataset(s) with embeddings_"))
-    )
-    db_status
-    return candidates, options, db_list_err
+    return candidates, db_list_err, options
 
 
 @app.cell
@@ -96,173 +62,155 @@ def _(default_db, mo, options):
     )
     db_selector = mo.ui.dropdown(
         options=options, value=initial_key,
-        label=f"Dataset with embedding ({len(options)})", searchable=True,
+        label="dataset", searchable=True, full_width=True,
     )
     db_selector
     return (db_selector,)
 
 
 @app.cell
-def _(client, db_selector, mo):
-    """Fetch embeddings + obs schema for the chosen dataset."""
+def _(client, db_selector):
     db_id = db_selector.value
     embeddings = {}
-    db_info = {}
     obs_cat = []
     obs_num = []
+    db_info = {}
     if db_id:
         embeddings = client.get_embeddings(db_id) or {}
         db_info = client.get_database_info(db_id)
         obs = db_info.get("obs") or {}
         obs_cat = obs.get("categorical") or []
         obs_num = obs.get("numerical") or []
-    schema_status = (
-        mo.md(f"_dataset has {len(embeddings)} embedding(s), "
-              f"{len(obs_cat)} categorical / {len(obs_num)} numerical obs_")
-        if db_id and embeddings
-        else mo.md("_(pick a dataset that has an embedding)_")
-    )
-    schema_status
     return db_id, db_info, embeddings, obs_cat, obs_num
 
 
 @app.cell
-def _(embeddings, mo):
-    if not embeddings:
-        return (None,)
-    emb_options = {
-        info.get("name", key): key for key, info in embeddings.items()
-    }
-    default_emb_key = next(
+def _(default_gene, embeddings, mo, obs_cat, obs_num):
+    emb_options = {info.get("name", key): key for key, info in embeddings.items()}
+    default_emb = next(
         (k for k, v in emb_options.items() if v == "X_umap"),
-        next(iter(emb_options))
+        next(iter(emb_options)) if emb_options else None,
     )
     emb_selector = mo.ui.dropdown(
-        options=emb_options, value=default_emb_key, label="Embedding",
-    )
-    emb_selector
-    return (emb_selector,)
-
-
-@app.cell
-def _(mo):
+        options=emb_options, value=default_emb, label="embedding",
+    ) if emb_options else mo.ui.text(value="", label="(no embedding)", disabled=True)
     color_by = mo.ui.dropdown(
         options=["Gene", "Numerical", "Categorical"],
-        value="Gene", label="Color by",
+        value="Gene", label="color by",
     )
-    color_by
-    return (color_by,)
+    gene_input = mo.ui.text(value=default_gene, label="gene")
+    num_input = mo.ui.dropdown(
+        options=sorted(obs_num), value=obs_num[0] if obs_num else None,
+        label="numerical field", searchable=True,
+    ) if obs_num else mo.ui.text(value="", label="(no numerical)", disabled=True)
+    cat_input = mo.ui.dropdown(
+        options=sorted(obs_cat), value=obs_cat[0] if obs_cat else None,
+        label="categorical field", searchable=True,
+    ) if obs_cat else mo.ui.text(value="", label="(no categorical)", disabled=True)
+    mo.hstack([emb_selector, color_by], justify="start", gap=1)
+    return cat_input, color_by, emb_selector, gene_input, num_input
 
 
 @app.cell
-def _(color_by, default_gene, mo, obs_cat, obs_num):
-    """Selector for the actual field to color by — depends on color_by."""
+def _(cat_input, color_by, gene_input, mo, num_input):
+    """Conditional field picker — only one is shown."""
     if color_by.value == "Gene":
-        field_input = mo.ui.text(value=default_gene, label="Gene symbol")
+        field_widget = gene_input
     elif color_by.value == "Numerical":
-        if not obs_num:
-            mo.md("_(this dataset has no numerical obs fields)_")
-            field_input = mo.ui.text(value="", label="Numerical field")
-        else:
-            field_input = mo.ui.dropdown(
-                options=sorted(obs_num),
-                value=obs_num[0], label="Numerical field", searchable=True,
-            )
-    else:  # Categorical
-        if not obs_cat:
-            mo.md("_(this dataset has no categorical obs fields)_")
-            field_input = mo.ui.text(value="", label="Categorical field")
-        else:
-            field_input = mo.ui.dropdown(
-                options=sorted(obs_cat),
-                value=obs_cat[0], label="Categorical field", searchable=True,
-            )
-    field_input
-    return (field_input,)
+        field_widget = num_input
+    else:
+        field_widget = cat_input
+    field_widget
+    return (field_widget,)
 
 
 @app.cell
-def _(client, color_by, db_id, emb_selector, field_input, mo):
-    """Fetch embedding coordinates AND the colour values, join by cell."""
+def _(db_id, db_info, mo):
+    if db_info:
+        mo.md(
+            f"<small>{db_id} · {db_info.get('n_cells', 0):,} cells · "
+            f"organism: {db_info.get('organism','?')}</small>"
+        )
+    else:
+        mo.md("_pick a dataset_")
+    return
+
+
+@app.cell
+def _(client, color_by, db_id, emb_selector, field_widget):
     import pandas as pd
     plot_df = pd.DataFrame()
     fetch_err = None
-    field = field_input.value.strip() if field_input.value else ""
-    if db_id and emb_selector and emb_selector.value and field:
+    field = (field_widget.value or "").strip() if hasattr(field_widget, "value") else ""
+    if db_id and emb_selector and getattr(emb_selector, "value", None) and field:
         emb_name = emb_selector.value
         try:
             emb = client.get_embedding_data(db_id, emb_name, format="dataframe")
-            # Sample cells for the colour fetch — backend JSON serialization
-            # is the slow step. 20k is plenty for a scatter.
             if color_by.value == "Gene":
-                color_df = client.get_cells(db_id=db_id, genes=[field],
-                                            limit=20000, format="dataframe")
+                color_df = client.get_cells(
+                    db_id=db_id, genes=[field], limit=20000, format="dataframe"
+                )
             else:
-                color_df = client.get_cells(db_id=db_id, metadata=[field],
-                                            limit=20000, format="dataframe")
+                color_df = client.get_cells(
+                    db_id=db_id, metadata=[field], limit=20000, format="dataframe"
+                )
             emb = emb.set_index(emb.columns[0])
             color_df = color_df.set_index(color_df.columns[0])
             if field not in color_df.columns:
-                fetch_err = (
-                    f"Field `{field}` not in returned columns "
-                    f"({list(color_df.columns)})."
-                )
+                fetch_err = f"Field `{field}` missing in response."
             else:
                 emb[field] = color_df[field]
                 plot_df = emb.dropna(subset=[emb.columns[0], emb.columns[1]])
         except Exception as exc:
             fetch_err = f"Fetch failed: `{exc}`"
-    fetch_status = (
-        mo.md(f"❌ {fetch_err}") if fetch_err
-        else mo.md(f"**fetched** {len(plot_df):,} cells")
-    )
-    fetch_status
-    return field, fetch_err, plot_df
+    return fetch_err, field, plot_df
 
 
 @app.cell
-def _(color_by, field, fetch_err, mo, plot_df):
-    """Render the scatter plot."""
-    scatter_fig = None
-    if not fetch_err and not plot_df.empty:
+def _(color_by, fetch_err, field, mo, plot_df):
+    if fetch_err:
+        out = mo.md(f"❌ {fetch_err}")
+    elif plot_df.empty:
+        out = mo.md("_no data yet_")
+    else:
         import matplotlib.pyplot as plt
         import matplotlib.cm as cm
         import matplotlib.colors as mcolors
         import seaborn as sns
-
         xcol = plot_df.columns[0]
         ycol = plot_df.columns[1]
-        fig, ax = plt.subplots(figsize=(7, 6))
-        kwargs = dict(x=xcol, y=ycol, s=4, linewidth=0, ax=ax)
+        fig, ax = plt.subplots(figsize=(5.5, 5))
+        kwargs = dict(x=xcol, y=ycol, s=3, linewidth=0, ax=ax)
         if color_by.value in ("Gene", "Numerical"):
             values = plot_df[field].astype(float)
             norm = mcolors.Normalize(
-                vmin=values.quantile(0.05), vmax=values.quantile(0.95),
+                vmin=values.quantile(0.05), vmax=values.quantile(0.95)
             )
             sns.scatterplot(data=plot_df, hue=field, palette="viridis",
                             legend=False, hue_norm=norm, **kwargs)
             fig.colorbar(cm.ScalarMappable(norm=norm, cmap="viridis"),
-                         ax=ax, label=field, shrink=0.7)
+                         ax=ax, label=field, shrink=0.6)
         else:
             sns.scatterplot(data=plot_df, hue=field, palette="tab20", **kwargs)
             sns.move_legend(ax, loc="upper left", bbox_to_anchor=(1, 1),
                             frameon=False, title=field, fontsize=8)
-        ax.set_xlabel(xcol)
-        ax.set_ylabel(ycol)
+        ax.set_xlabel(xcol, fontsize=9)
+        ax.set_ylabel(ycol, fontsize=9)
+        ax.set_title(f"{field} · n={len(plot_df):,}", fontsize=10)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
         fig.tight_layout()
-        scatter_fig = fig
-    scatter_fig if scatter_fig is not None else mo.md("_(no plot yet)_")
-    return (scatter_fig,)
+        out = fig
+    out
+    return
 
 
 @app.cell
-def _(api_input, db_selector, default_api, field_input, color_by, params):
+def _(color_by, db_selector, field_widget, params):
     if db_selector.value:
         params["db_id"] = db_selector.value
-    if color_by.value == "Gene" and field_input.value.strip():
-        params["gene"] = field_input.value.strip()
-    if api_input.value.strip() and api_input.value != default_api:
-        params["api"] = api_input.value
+    if color_by.value == "Gene" and getattr(field_widget, "value", "").strip():
+        params["gene"] = field_widget.value.strip()
     return
 
 

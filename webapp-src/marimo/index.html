@@ -6,7 +6,7 @@
     <style>
         body {
             font-family: system-ui, -apple-system, sans-serif;
-            max-width: 720px;
+            max-width: 760px;
             margin: 2rem auto;
             padding: 0 1rem;
             color: #222;
@@ -14,61 +14,84 @@
         }
         h1 { margin: 0 0 0.25rem; }
         p.lead { color: #555; margin-top: 0; }
-        .nb-list { display: grid; gap: 0.75rem; margin-top: 2rem; }
-        .nb {
-            display: block;
-            padding: 1rem 1.25rem;
+        .nb-list { display: grid; gap: 0.6rem; margin-top: 1.5rem; }
+        .nb-row {
+            display: grid;
+            grid-template-columns: 1fr auto auto;
+            gap: 0.5rem;
+            align-items: center;
+            padding: 0.8rem 1rem;
             border: 1px solid #ddd;
             border-radius: 6px;
+        }
+        .nb-row:hover { border-color: #4c72b0; background: #fafcff; }
+        .nb-title { font-weight: 600; color: #2c5aa0; }
+        .nb-desc { color: #555; font-size: 0.85rem; }
+        .btn {
+            display: inline-block;
+            padding: 0.35rem 0.8rem;
+            border-radius: 4px;
             text-decoration: none;
-            color: inherit;
-            transition: background 0.1s;
+            font-size: 0.85rem;
+            border: 1px solid;
         }
-        .nb:hover { background: #f3f7ff; border-color: #4c72b0; }
-        .nb h2 { margin: 0 0 0.25rem; font-size: 1.1rem; color: #2c5aa0; }
-        .nb p { margin: 0; color: #555; font-size: 0.9rem; }
-        code {
-            background: #f0f0f0; padding: 0 4px; border-radius: 3px;
-            font-size: 0.85em;
-        }
-        footer { margin-top: 3rem; color: #888; font-size: 0.8rem; }
+        .btn-view { color: #2c5aa0; border-color: #2c5aa0; }
+        .btn-edit { color: #b06c00; border-color: #b06c00; }
+        .btn-view:hover { background: #2c5aa0; color: white; }
+        .btn-edit:hover { background: #b06c00; color: white; }
+        code { background: #f0f0f0; padding: 0 4px; border-radius: 3px; font-size: 0.85em; }
+        footer { margin-top: 2.5rem; color: #888; font-size: 0.8rem; line-height: 1.6; }
     </style>
 </head>
 <body>
     <h1>Interactive notebooks</h1>
     <p class="lead">
-        marimo notebooks that run entirely in your browser via Pyodide.
-        Each is a focused view onto the Anthive REST API; widget state
-        is mirrored to the URL bar so any view is one copy-paste from sharing.
+        Reactive notebooks running entirely in your browser via Pyodide.
+        Pick <strong>view</strong> for the streamlit-replacement (controls + plot, no code visible)
+        or <strong>edit</strong> for the full marimo editor (modify cells, save to your browser).
     </p>
 
     <div class="nb-list">
-        <a class="nb" href="gene/">
-            <h2>Gene expression</h2>
-            <p>Distribution of a single gene across cells — histogram, ECDF,
-            or KDE — with summary statistics.</p>
-        </a>
-        <a class="nb" href="umap/">
-            <h2>UMAP / embedding scatter</h2>
-            <p>2-D embedding scatter, with cells colored by gene expression,
-            a numerical obs field, or a categorical field.</p>
-        </a>
-        <a class="nb" href="category/">
-            <h2>Categorical breakdown</h2>
-            <p>Box / violin / bar plot of a gene or numerical obs field split
-            by a categorical field. Or a simple cell-count bar chart per
-            category.</p>
-        </a>
-        <a class="nb" href="numerical/">
-            <h2>Numerical obs distribution</h2>
-            <p>Distribution of a numerical obs field (QC metrics, module
-            scores) — optionally grouped by a categorical field.</p>
-        </a>
+        <div class="nb-row">
+            <div>
+                <div class="nb-title">Gene expression</div>
+                <div class="nb-desc">Distribution of a single gene — histogram, ECDF, KDE — with stats.</div>
+            </div>
+            <a class="btn btn-view" href="gene/">view</a>
+            <a class="btn btn-edit" href="gene-edit/">edit</a>
+        </div>
+        <div class="nb-row">
+            <div>
+                <div class="nb-title">UMAP / embedding scatter</div>
+                <div class="nb-desc">2-D embedding coloured by gene, numerical obs, or categorical.</div>
+            </div>
+            <a class="btn btn-view" href="umap/">view</a>
+            <a class="btn btn-edit" href="umap-edit/">edit</a>
+        </div>
+        <div class="nb-row">
+            <div>
+                <div class="nb-title">Categorical breakdown</div>
+                <div class="nb-desc">Box / violin / bar plot split by a categorical obs field.</div>
+            </div>
+            <a class="btn btn-view" href="category/">view</a>
+            <a class="btn btn-edit" href="category-edit/">edit</a>
+        </div>
+        <div class="nb-row">
+            <div>
+                <div class="nb-title">Numerical obs distribution</div>
+                <div class="nb-desc">QC metrics, module scores — distribution with optional grouping.</div>
+            </div>
+            <a class="btn btn-view" href="numerical/">view</a>
+            <a class="btn btn-edit" href="numerical-edit/">edit</a>
+        </div>
     </div>
 
     <footer>
-        URL parameters: <code>?db_id=…&amp;gene=…&amp;api=…</code> work on
-        every notebook. Widget state writes back to the URL on every change.
+        URL parameters work on every notebook: <code>?db_id=…&amp;gene=…&amp;api=…</code>.
+        Widget state writes back to the URL on each change, so any view is one copy-paste from sharing.
+        <br><br>
+        <strong>Edit mode</strong> persists your changes in your browser's local storage (per-origin, per-browser).
+        Edits are not saved back to the server — if you want a clean copy back, just reload <em>view</em>.
     </footer>
 </body>
 </html>
