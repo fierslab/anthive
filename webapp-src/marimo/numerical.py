@@ -13,10 +13,16 @@ def _():
 
 @app.cell
 async def _packages():
+    """Install deps + initialise the streaming-fetch worker. See gene.py."""
     import sys
     if sys.platform == "emscripten":
         import micropip
         await micropip.install(["antclient", "matplotlib", "seaborn"])
+        try:
+            from urllib3.contrib.emscripten.fetch import wait_for_streaming_ready
+            await wait_for_streaming_ready()
+        except Exception:
+            pass
     return
 
 

@@ -13,10 +13,21 @@ def _():
 
 @app.cell
 async def _packages():
+    """Install deps + initialise the streaming-fetch worker.
+
+    Without wait_for_streaming_ready() Pyodide's urllib3 falls back to XHR,
+    which silently truncates responses above ~56 KB — manifesting as
+    `JSONDecodeError: Unterminated string at column 56532` from antclient.
+    """
     import sys
     if sys.platform == "emscripten":
         import micropip
         await micropip.install(["antclient", "matplotlib", "seaborn"])
+        try:
+            from urllib3.contrib.emscripten.fetch import wait_for_streaming_ready
+            await wait_for_streaming_ready()
+        except Exception:
+            pass  # older urllib3 — XHR fallback applies, may truncate large fetches
     return
 
 
