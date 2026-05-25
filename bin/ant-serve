@@ -809,6 +809,7 @@ class DatabaseRegistry:
             'date': file_metadata.get('date'),
             'year': file_metadata.get('year'),
             'default_layer': file_metadata.get('default_layer'),
+            'has_lognorm':   file_metadata.get('has_lognorm', True),
 
             # Biology & study annotation (resolved with inheritance from index.md)
             'organism':   ann.get('organism'),
