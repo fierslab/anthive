@@ -145,12 +145,24 @@ class ModuleScoreRequest(BaseModel):
     subset: List[str] = []
 
 
+class EvictedDatabaseError(RuntimeError):
+    """Raised when get_connection() is called on a db_key that has been
+    administratively evicted (a writer is holding the duckdb r/w lock)."""
+
+
 class ConnectionPool:
     """Connection pool for DuckDB databases
 
     Maintains a pool of reusable connections per database for better performance.
     Phase 2 enhancement for concurrent request handling.
+
+    Supports eviction (POST /admin/release/{db_id}) for the AnnotationWriter
+    workflow — when an annotator wants to take the duckdb r/w lock, ant-serve
+    must first close its r/o handles and refuse to issue new ones until the
+    writer is done.
     """
+
+    EVICTION_DEFAULT_SECONDS = 300.0
 
     def __init__(self, max_connections_per_db: int = 3, s3_config: Optional[Dict] = None,
                  memory_limit: str = 'auto', threads: int = 2):
@@ -166,6 +178,7 @@ class ConnectionPool:
         self.pools: Dict[str, List[Any]] = defaultdict(list)
         self.in_use: Dict[str, int] = defaultdict(int)
         self.locks: Dict[str, Lock] = defaultdict(Lock)
+        self.eviction_until: Dict[str, float] = {}  # db_key -> unix timestamp
         self.total_connections = 0
         self.hits = 0
         self.misses = 0
@@ -208,9 +221,27 @@ class ConnectionPool:
         conn.execute(f"SET threads = {self.threads}")
         return conn
 
+    def _is_evicted_unlocked(self, db_key: str) -> bool:
+        """Caller must hold self.locks[db_key]. Auto-clears expired evictions."""
+        deadline = self.eviction_until.get(db_key)
+        if deadline is None:
+            return False
+        if time.time() >= deadline:
+            self.eviction_until.pop(db_key, None)
+            return False
+        return True
+
     def get_connection(self, db_key: str):
         """Get a connection from the pool or create a new one"""
         with self.locks[db_key]:
+            if self._is_evicted_unlocked(db_key):
+                expires_in = self.eviction_until[db_key] - time.time()
+                raise EvictedDatabaseError(
+                    f"db_key {db_key!r} is currently evicted by a writer "
+                    f"(expires in {expires_in:.0f}s). Retry shortly or call "
+                    f"POST /admin/restore/{{db_id}} to clear."
+                )
+
             # Try to get an existing connection
             if self.pools[db_key]:
                 conn = self.pools[db_key].pop()
@@ -229,6 +260,72 @@ class ConnectionPool:
             # Fallback: create an extra connection beyond the pool limit
             self.misses += 1
             return self._make_connection(db_key)
+
+    def release(self, db_key: str, *,
+                duration_seconds: Optional[float] = None,
+                drain_timeout_seconds: float = 30.0) -> Dict[str, Any]:
+        """Mark db_key evicted, close idle conns, wait for in-use to drain.
+
+        Used by POST /admin/release/{db_id}. Returns dict with status and
+        counts so the caller can decide whether to proceed.
+        """
+        if duration_seconds is None:
+            duration_seconds = self.EVICTION_DEFAULT_SECONDS
+
+        with self.locks[db_key]:
+            # Close idle connections
+            n_closed = 0
+            while self.pools[db_key]:
+                conn = self.pools[db_key].pop()
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                n_closed += 1
+            # Mark evicted
+            self.eviction_until[db_key] = time.time() + duration_seconds
+
+        # Wait for in-use to drain (outside the per-key lock so request
+        # handlers can finish and call return_connection)
+        deadline = time.monotonic() + drain_timeout_seconds
+        while True:
+            in_use = self.in_use.get(db_key, 0)
+            if in_use <= 0:
+                break
+            if time.monotonic() > deadline:
+                return {
+                    'ok': False,
+                    'closed_idle': n_closed,
+                    'still_in_use': in_use,
+                    'eviction_expires_in': duration_seconds,
+                    'reason': f"in_use did not drain within {drain_timeout_seconds:.0f}s",
+                }
+            time.sleep(0.1)
+
+        # Drain happened; also close any conns that came back during the wait
+        with self.locks[db_key]:
+            late_returns = 0
+            while self.pools[db_key]:
+                conn = self.pools[db_key].pop()
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                late_returns += 1
+
+        return {
+            'ok': True,
+            'closed_idle': n_closed + late_returns,
+            'still_in_use': 0,
+            'eviction_expires_in': duration_seconds,
+        }
+
+    def restore(self, db_key: str) -> Dict[str, Any]:
+        """Clear eviction state so new connections can be issued again."""
+        with self.locks[db_key]:
+            was_evicted = self._is_evicted_unlocked(db_key)
+            self.eviction_until.pop(db_key, None)
+        return {'was_evicted': was_evicted}
 
     def return_connection(self, db_key: str, conn):
         """Return a connection to the pool"""
@@ -1153,7 +1250,9 @@ async def root():
             "get_cells": "/databases/{db_id}/cells",
             "get_embeddings": "/databases/{db_id}/embeddings",
             "query_sql": "POST /databases/{db_id}/query/sql",
-            "admin_rescan": "POST /admin/rescan"
+            "admin_rescan": "POST /admin/rescan",
+            "admin_release": "POST /admin/release/{db_id}",
+            "admin_restore": "POST /admin/restore/{db_id}"
         }
     }
 
@@ -1164,7 +1263,14 @@ from contextlib import contextmanager
 def _pooled_db(db_id: str):
     """Context manager: AnthiveDB backed by the connection pool (local or S3)."""
     db_url = registry.get_database_path(db_id)
-    conn = connection_pool.get_connection(db_url)
+    try:
+        conn = connection_pool.get_connection(db_url)
+    except EvictedDatabaseError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"{exc}",
+            headers={"Retry-After": "5"},
+        )
     try:
         yield AnthiveDB(conn=conn, owns_conn=False)
     finally:
@@ -2461,6 +2567,57 @@ async def module_score(db_id: str, request: ModuleScoreRequest):
         'seed':            request.seed,
         'summary':         summary,
     })
+
+
+@app.post("/admin/release/{db_id:path}", tags=["admin"])
+async def release_database(
+    db_id: str,
+    duration_seconds: float = 300.0,
+    drain_timeout_seconds: float = 30.0,
+):
+    """Evict a database from the connection pool so a writer can take the
+    DuckDB r/w lock.
+
+    Closes idle pooled connections, marks the db_key as evicted (refuses new
+    connections), and waits up to `drain_timeout_seconds` for in-use
+    connections to be returned. The eviction self-expires after
+    `duration_seconds` (safety net so a crashed writer can't lock ant-serve
+    out indefinitely).
+
+    Returns:
+      - ok: True if the db is fully released; False if in-use connections
+        didn't drain in time (the writer should retry or fail)
+      - closed_idle: number of pooled connections that were closed
+      - still_in_use: 0 on success, else the count of stubbornly in-use conns
+      - eviction_expires_in: seconds until the eviction auto-clears
+
+    Used by AnnotationWriter / ant-merge-h5ad / ant-score / ant-starcat
+    before they open the duckdb in r/w mode.
+    """
+    try:
+        db_url = registry.get_database_path(db_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"db_id {db_id!r} not found")
+    result = connection_pool.release(
+        db_url,
+        duration_seconds=duration_seconds,
+        drain_timeout_seconds=drain_timeout_seconds,
+    )
+    log.info("admin.release db_id=%s result=%s", db_id, result)
+    return result
+
+
+@app.post("/admin/restore/{db_id:path}", tags=["admin"])
+async def restore_database(db_id: str):
+    """Clear an eviction set by /admin/release/{db_id}. The connection pool
+    will issue fresh r/o connections on the next request."""
+    try:
+        db_url = registry.get_database_path(db_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"db_id {db_id!r} not found")
+    result = connection_pool.restore(db_url)
+    log.info("admin.restore db_id=%s result=%s", db_id, result)
+    return result
 
 
 @app.post("/admin/rescan", tags=["admin"])

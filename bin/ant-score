@@ -7,40 +7,46 @@
 #   "pandas>=2.0.0",
 #   "pyyaml>=6.0",
 #   "scipy>=1.10.0",
+#   "duckdb>=0.10.0",
 # ]
 # ///
 """
-ant-score - Compute scanpy module scores from genesetstore onto h5ad files.
+ant-score - Compute scanpy module scores from the genesetstore.
 
 Pairing is explicit: you give the target h5ad (db_id) and one or more
-genesets/experiments. scanpy.tl.score_genes runs per geneset and the per-cell
-scores are written back as obs columns named:
+genesets/experiments. scanpy.tl.score_genes runs per geneset and the
+per-cell scores are written as obs columns named:
 
     <study>::<experiment>::<geneset_name>
 
-Writes are atomic and all-or-nothing: if any geneset fails, the original h5ad
-is left untouched.
+DEFAULT (fast path):
+  Scores are written incrementally to the dataset's .duckdb via
+  AnnotationWriter (ALTER TABLE on __obsnum). The .h5ad is left untouched
+  and the columns are tracked in __pending_cols. Run `ant-merge-h5ad` later
+  to sync them back into the .h5ad.
+
+LEGACY (--rebuild):
+  Writes the entire .h5ad atomically and then runs ant-convert to rebuild
+  the .duckdb. Slow (often >30 min for large datasets) — use only when you
+  need a full rebuild for unrelated reasons.
 
 Usage:
   ant score <db_id> <experiment_or_geneset_id> [<id>...]
 
 Examples:
-  # Score all 13 WGCNA modules onto S25/PhM
+  # FAST: score all 13 WGCNA modules onto S25/PhM (duckdb-only, marks pending)
   ant score S25/PhM Sierksma2025/WGCNA
 
-  # Score one module
-  ant score S25/PhM Sierksma2025/WGCNA/Brown_Lysosome
+  # Then sync into h5ad when ready:
+  ant-merge-h5ad data/h5adstore/Sierksma2025/Pharmacogenomics.md
 
-  # Multiple experiments in one atomic write
+  # Multiple experiments in one go
   ant score S25/PhM Sierksma2025/WGCNA Mancuso2024/cNMF
 
-  # Cross-apply Sierksma WGCNA modules to a different study's h5ad
-  ant score P26/HMI Sierksma2025/WGCNA
-
-  # Full pipeline: h5ad -> duckdb -> S3 -> API rescan
+  # SLOW LEGACY: full h5ad rewrite + ant-convert + push + rescan
   ant score S25/PhM Sierksma2025/WGCNA --rebuild --push --rescan
 
-  # Dry-run: compute and report, do not write
+  # Dry-run
   ant score S25/PhM Sierksma2025/WGCNA --dry-run
 
 Options:
@@ -49,14 +55,20 @@ Options:
   --seed N           random_state (default 0)
   --layer NAME       use this h5ad layer (default: X)
   --use-raw          use adata.raw
+  --overwrite        overwrite existing columns instead of failing
+  --rebuild          LEGACY: write h5ad + run ant-convert (slow)
+  --push             after writing, push files to S3
+  --rescan           POST /admin/rescan after writing
   -v, --verbose      more logging
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -65,6 +77,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import anndata
+import duckdb
 import numpy as np
 import pandas as pd
 import scanpy as sc
@@ -73,6 +86,7 @@ script_dir = Path(__file__).parent.resolve()
 lib_dir = script_dir.parent / 'lib'
 sys.path.insert(0, str(lib_dir))
 
+from anthive_db import AnnotationWriter, AnnotationWriterError   # type: ignore
 from config import get_config            # type: ignore
 from geneset import (                    # type: ignore
     Experiment, Geneset, GenesetRegistry,
@@ -438,13 +452,34 @@ def _process_one_h5ad(entry: H5adEntry,
         summaries.append(record)
 
     if args.dry_run:
-        print("\n  (dry run — not writing h5ad)")
+        print("\n  (dry run — not writing)")
         return {'entry': entry.db_id, 'experiments': summaries, 'wrote': False}
 
+    # Two write paths:
+    #   default: AnnotationWriter → duckdb only (fast, marks pending)
+    #   --rebuild: write h5ad in place + chain ant-convert (slow, legacy)
+    if args.rebuild:
+        _writeback_via_h5ad(adata, entry, summaries)
+        return {'entry': entry.db_id, 'experiments': summaries,
+                'wrote': True, 'path': 'h5ad'}
+    else:
+        _writeback_via_writer(adata, entry, summaries, args)
+        return {'entry': entry.db_id, 'experiments': summaries,
+                'wrote': True, 'path': 'duckdb'}
+
+
+def _writeback_via_h5ad(adata, entry: H5adEntry,
+                        summaries: List[Dict]) -> None:
+    """Legacy path: rewrite the entire h5ad atomically.
+
+    Used by --rebuild. The atomic .tmp + rename keeps the original safe but
+    pays the full h5ad rewrite cost — often 30+ min for large datasets.
+    Prefer the AnnotationWriter path (default) for incremental updates.
+    """
     tmp_path = entry.h5ad_path.with_suffix('.h5ad.tmp')
     if tmp_path.exists():
         tmp_path.unlink()
-    print(f"\n  Writing to {tmp_path.name} (atomic)…")
+    print(f"\n  Writing to {tmp_path.name} (atomic h5ad rewrite — slow path)…")
     try:
         adata.write_h5ad(tmp_path, compression='gzip')
         os.replace(tmp_path, entry.h5ad_path)
@@ -454,15 +489,70 @@ def _process_one_h5ad(entry: H5adEntry,
         raise
     print(f"  ✓ wrote {entry.h5ad_path}")
 
-    # Update the .md to expose the new columns through ant-convert (which uses
-    # obsnum_include as an allowlist).
+    # Update the .md so ant-convert picks the new columns up on rebuild.
     new_columns = []
     for record in summaries:
         new_columns.extend(record['columns'])
     if new_columns:
         _ensure_obsnum_include(entry.md_path, new_columns)
 
-    return {'entry': entry.db_id, 'experiments': summaries, 'wrote': True}
+
+def _writeback_via_writer(adata, entry: H5adEntry,
+                          summaries: List[Dict],
+                          args: argparse.Namespace) -> None:
+    """Default path: write new score columns straight to the duckdb via
+    AnnotationWriter. Does NOT touch the h5ad. The .md `obsnum_include` is
+    NOT updated here — that happens later in ant-merge-h5ad when the columns
+    move into the h5ad.
+
+    Refuses if the dataset has no duckdb yet (ant-convert must run first).
+    """
+    if not entry.duckdb_path.exists():
+        sys.exit(
+            f"ERROR: no duckdb at {entry.duckdb_path} — cannot use the "
+            f"incremental writer path. Run `ant-convert {entry.h5ad_path}` "
+            f"first, OR pass --rebuild to use the legacy slow path."
+        )
+
+    run_id = f"score-{secrets.token_hex(3)}"
+    print(f"\n  Writing scores to {entry.duckdb_path.name} (run_id={run_id})")
+
+    ant_serve_url = _resolve_ant_serve_url(args)
+
+    for record in summaries:
+        catalog_tag = record['experiment_id']
+        source_hash = record.get('genesetstore_sha')
+        columns = record['columns']
+        print(f"    [{catalog_tag}] {len(columns)} cols")
+
+        try:
+            with AnnotationWriter(
+                entry.duckdb_path,
+                annotator='ant-score',
+                run_id=run_id,
+                catalog=catalog_tag,
+                db_id=entry.db_id,
+                ant_serve_url=ant_serve_url,
+            ) as writer:
+                for col in columns:
+                    if col not in adata.obs.columns:
+                        sys.exit(
+                            f"ERROR: expected column '{col}' missing from "
+                            f"adata.obs after scoring."
+                        )
+                    series = adata.obs[col].astype('float64')
+                    writer.add_numerical(
+                        col, series,
+                        source_hash=source_hash,
+                        on_conflict='overwrite' if args.overwrite else 'fail',
+                    )
+                writer.commit()
+        except AnnotationWriterError as exc:
+            sys.exit(f"ERROR: AnnotationWriter rejected write: {exc}")
+
+    n_cols = sum(len(r['columns']) for r in summaries)
+    print(f"  ✓ added {n_cols} pending columns to {entry.duckdb_path.name}")
+    print(f"  ℹ run `ant-merge-h5ad {entry.md_path}` to sync into the h5ad.")
 
 
 def _ensure_obsnum_include(md_path: Path, columns: List[str]) -> None:
@@ -588,6 +678,19 @@ def _run_push(entry: H5adEntry) -> int:
     return subprocess.call(cmd)
 
 
+def _resolve_ant_serve_url(args: argparse.Namespace) -> Optional[str]:
+    """Build the API base URL from CLI override or anthive.yaml config.
+    Returns None only if the user explicitly disables it via --no-coordinate."""
+    if getattr(args, 'no_coordinate', False):
+        return None
+    if getattr(args, 'api_url', None):
+        return args.api_url.rstrip('/')
+    config = get_config()
+    host = config.get('rest_api_host', 'localhost')
+    port = config.get('rest_api_port', 8080)
+    return f"http://{host}:{port}/api"
+
+
 def _run_rescan(api_url: str) -> int:
     import urllib.request
     request = urllib.request.Request(
@@ -628,9 +731,16 @@ def main() -> int:
                              'use this column from adata.var as the gene index. '
                              'Auto-detected for CellxGene-style files.')
     parser.add_argument('--rebuild',   action='store_true',
-                        help='After writing, run `ant convert` to rebuild the .duckdb')
+                        help='LEGACY: write to the h5ad and run ant-convert to '
+                             'rebuild the .duckdb. SLOW. Default is to write '
+                             'directly to the .duckdb via AnnotationWriter.')
     parser.add_argument('--push',      action='store_true',
-                        help='After rebuild, run `ant sync push` to S3')
+                        help='After --rebuild, run `ant sync push` to S3')
+    parser.add_argument('--overwrite', action='store_true',
+                        help='Overwrite existing columns instead of failing')
+    parser.add_argument('--no-coordinate', action='store_true',
+                        help='Do not negotiate the DuckDB lock with ant-serve. '
+                             'Use when ant-serve is not running.')
     parser.add_argument('--rescan',    action='store_true',
                         help='POST /admin/rescan to the API after writing')
     parser.add_argument('--api-url',   default=None,
@@ -691,16 +801,20 @@ def main() -> int:
     for entry, result in results:
         if not result.get('wrote'):
             continue
-        if args.rebuild:
+        # --rebuild only meaningful for the h5ad path; the duckdb path has
+        # already updated the duckdb incrementally.
+        if args.rebuild and result.get('path') == 'h5ad':
             rc = _run_rebuild(entry)
             if rc != 0:
                 rebuild_failed = True
                 print(f"  ⚠ rebuild for {entry.db_id} returned {rc}", file=sys.stderr)
                 continue
-            if args.push:
-                rc = _run_push(entry)
-                if rc != 0:
-                    print(f"  ⚠ push for {entry.db_id} returned {rc}", file=sys.stderr)
+        # --push works in both paths. For the writer path the h5ad is unchanged
+        # (so push only really uploads the duckdb); ant-sync handles that.
+        if args.push:
+            rc = _run_push(entry)
+            if rc != 0:
+                print(f"  ⚠ push for {entry.db_id} returned {rc}", file=sys.stderr)
 
     if args.rescan:
         api_url = args.api_url

@@ -17,6 +17,7 @@ Converts h5ad files to optimized DuckDB databases using metadata from .md files
 
 import argparse
 import gc
+import os
 import sys
 import time
 from pathlib import Path
@@ -35,6 +36,7 @@ sys.path.insert(0, str(lib_dir))
 from config import get_config
 from h5ad_utils import load_h5ad, H5ADError
 from metadata import parse_md_file, MetadataError
+from anthive_db import pending_state_diagnosis
 
 
 class ConversionError(Exception):
@@ -129,20 +131,72 @@ def normalize_dataframe_dtypes(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def check_pending_state(
+    duckdb_path: Path,
+    h5ad_obs_keys: set,
+    force_discard: bool,
+) -> None:
+    """Dual-check guard: refuse to rebuild if the existing duckdb has pending
+    obs columns that would be silently lost. Delegates the actual diagnosis
+    to lib.anthive_db.pending_state_diagnosis so the check is unit-testable.
+    """
+    if not duckdb_path.exists():
+        return  # no existing duckdb, nothing to lose
+
+    diag = pending_state_diagnosis(duckdb_path, h5ad_obs_keys)
+    if diag['clean']:
+        return
+
+    pending_df = diag['pending_table']
+    unrecorded = diag['unrecorded']
+
+    print()
+    print("=" * 70)
+    print("⚠  EXISTING DUCKDB HAS PENDING OBS COLUMNS")
+    print("=" * 70)
+    if not pending_df.empty:
+        print(f"  __pending_cols table ({len(pending_df)} columns):")
+        for _, row in pending_df.iterrows():
+            print(f"    - {row['col_name']:50s} "
+                  f"[{row['kind']}] by {row['annotator']} "
+                  f"({row['catalog'] or '-'})")
+    if unrecorded:
+        print(f"  duckdb obs cols not in h5ad (and NOT in __pending_cols):")
+        for col in unrecorded:
+            print(f"    - {col}")
+
+    if not force_discard:
+        raise ConversionError(
+            "ERROR: [ant-convert] Refusing to rebuild — pending obs columns "
+            "would be lost.\n"
+            "Action: run 'ant-merge-h5ad' first to sync these columns into "
+            "the h5ad,\n"
+            "        OR pass --force-discard-pending to overwrite anyway "
+            "(columns lost!)."
+        )
+    print()
+    print("  --force-discard-pending given — proceeding with REBUILD; "
+          "columns above will be lost.")
+    print("=" * 70)
+
+
 def convert_h5ad_to_duckdb(h5ad_path: Path, config: Dict[str, Any],
                            cli_include: List[str] = None,
-                           cli_exclude: List[str] = None) -> None:
+                           cli_exclude: List[str] = None,
+                           force_discard_pending: bool = False) -> None:
     """
     Main conversion function
 
     Args:
         h5ad_path: Path to h5ad file
         config: Configuration dictionary
+        force_discard_pending: Override pending-column guard
 
     Raises:
         ConversionError: If conversion fails
     """
     duckdb_path = h5ad_path.with_suffix('.duckdb')
+    rebuilding_sentinel = h5ad_path.with_suffix('.duckdb.rebuilding')
 
     print(f"{'='*70}")
     print(f"CONVERTING: {h5ad_path.name}")
@@ -196,9 +250,16 @@ def convert_h5ad_to_duckdb(h5ad_path: Path, config: Dict[str, Any],
     load_time = time.time() - load_start
     print(f"  ✓ Loaded in {load_time:.1f}s ({adata.n_obs:,} cells × {adata.n_vars:,} genes)")
 
+    # Dual-check pending-state guard BEFORE any destructive operation
+    h5ad_obs_keys = set(adata.obs.columns)
+    check_pending_state(duckdb_path, h5ad_obs_keys, force_discard_pending)
+
     # Check if duckdb exists
     if duckdb_path.exists():
         print(f"⚠ Warning: {duckdb_path.name} already exists and will be overwritten")
+
+    # Set sentinel BEFORE the rebuild starts so AnnotationWriter refuses to open
+    rebuilding_sentinel.write_text(f"ant-convert pid={os.getpid()}\n")
 
     # Create connection and start conversion
     conn = None
@@ -284,6 +345,11 @@ def convert_h5ad_to_duckdb(h5ad_path: Path, config: Dict[str, Any],
     finally:
         if conn:
             conn.close()
+        if rebuilding_sentinel.exists():
+            try:
+                rebuilding_sentinel.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def initialize_database(conn: duckdb.DuckDBPyConnection) -> None:
@@ -835,6 +901,12 @@ def main():
         '--include-layer', metavar='LAYER', nargs='+', default=[],
         help='Force-include layer(s), removing from layers_exclude (overrides .md file, not saved)'
     )
+    parser.add_argument(
+        '--force-discard-pending', action='store_true',
+        help='Override the pending-column guard. Existing duckdb obs columns '
+             'not in the h5ad WILL BE LOST. Use only after deliberate '
+             'inspection of the warning output.'
+    )
 
     args = parser.parse_args()
 
@@ -864,6 +936,7 @@ def main():
             h5ad_path, config,
             cli_include=args.include_layer,
             cli_exclude=args.exclude_layer,
+            force_discard_pending=args.force_discard_pending,
         )
 
         total_time = time.time() - start_time
