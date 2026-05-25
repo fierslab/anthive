@@ -845,7 +845,11 @@ def _post_ant_serve(
         if on_failure == 'raise':
             raise AnnotationWriterError(f"no ant_serve_url given")
         return None
-    url = f"{base_url}{path}"
+    # Normalize: strip any trailing slashes from base, ensure path has one
+    # leading slash. This makes `_post_ant_serve('http://h/api/', '/admin/x')`
+    # and `_post_ant_serve('http://h/api',  '/admin/x')` both produce
+    # `http://h/api/admin/x` with no double slashes.
+    url = base_url.rstrip('/') + '/' + path.lstrip('/')
     req = urllib.request.Request(url, method='POST',
                                  headers={'Content-Length': '0'})
     try:

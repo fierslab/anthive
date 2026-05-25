@@ -34,9 +34,9 @@ def _(mo):
     params = mo.query_params()
     try:
         import js
-        auto_api = js.location.origin + "/api"
+        auto_api = js.location.origin + "/api/"
     except Exception:
-        auto_api = "http://localhost:8080/api"
+        auto_api = "http://localhost:8080/api/"
     default_api  = params.get("api", auto_api)
     default_db   = params.get("db_id", "P26/HMI")
     default_gene = params.get("gene", "TREM2")

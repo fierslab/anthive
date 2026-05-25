@@ -114,66 +114,140 @@ def _check_organism(md_path: Path) -> str:
 
 
 def _looks_integer(matrix, n: int = 2000) -> bool:
-    sample = matrix[:n]
+    if matrix is None:
+        return False
+    try:
+        sample = matrix[:n]
+    except (TypeError, IndexError):
+        return False
     if sp.issparse(sample):
         sample = sample.toarray()
-    return bool(np.allclose(np.asarray(sample), np.rint(np.asarray(sample))))
+    arr = np.asarray(sample)
+    if arr.size == 0:
+        return False
+    return bool(np.allclose(arr, np.rint(arr), atol=1e-6))
 
 
 def _get_raw_counts_in_X(adata):
-    """Move raw integer counts into adata.X if not already there."""
+    """Move raw integer counts into adata.X if not already there.
+
+    Search order:
+      1. adata.X
+      2. adata.layers['counts'] (the conventional name)
+      3. any other layer that looks integer (e.g. 'UMIs', 'raw_counts')
+      4. adata.raw.X
+    """
     if _looks_integer(adata.X):
         print(f"  ✓ raw counts found in adata.X")
         return adata
+    # Conventional name first
     if 'counts' in adata.layers and _looks_integer(adata.layers['counts']):
         print(f"  ✓ raw counts found in adata.layers['counts']; promoting to X")
         adata.X = adata.layers['counts']
         return adata
+    # Any other layer that smells like integer counts
+    for layer_name in adata.layers.keys():
+        if layer_name == 'counts':
+            continue
+        if _looks_integer(adata.layers[layer_name]):
+            print(f"  ✓ raw counts found in adata.layers['{layer_name}']; promoting to X")
+            adata.X = adata.layers[layer_name]
+            return adata
     if adata.raw is not None and _looks_integer(adata.raw.X):
         print(f"  ✓ raw counts found in adata.raw; promoting via adata.raw.to_adata()")
         return adata.raw.to_adata()
     sys.exit(
-        f"ERROR: no raw integer counts found in X / layers['counts'] / raw.\n"
+        f"ERROR: no raw integer counts found in X / any layer / raw.\n"
+        f"  Layers searched: {list(adata.layers.keys())}\n"
         f"  starCAT requires raw counts — log-normalised matrices produce "
         f"nonsense. Re-download from the original source if needed."
     )
 
 
-def _remap_ensembl_to_symbol(adata):
-    """If var_names start with ENSG, remap to HGNC symbols via mygene."""
-    if not str(adata.var_names[0]).startswith('ENSG'):
-        return adata
-    print(f"  remapping Ensembl → HGNC via mygene (this may take ~30s)…",
-          flush=True)
-    import mygene
-    mg = mygene.MyGeneInfo()
-    hit = mg.querymany(list(adata.var_names), scopes='ensembl.gene',
-                       fields='symbol', species='human', as_dataframe=True)
-    symbol = hit['symbol'].dropna().groupby(level=0).first()
-    keep = adata.var_names.isin(symbol.index)
-    n_before = adata.n_vars
-    adata = adata[:, keep].copy()
-    adata.var_names = symbol.loc[adata.var_names].values
-    adata.var_names_make_unique()
-    print(f"  ✓ remapped: {n_before} → {adata.n_vars} genes "
-          f"(after dropping un-mappable + dedup)")
-    return adata
-
-
-def _report_overlap(adata, catalog_tsv: Path) -> int:
+def _catalog_genes(catalog_tsv: Path) -> set:
+    """Read the catalog's gene set from the TSV header row."""
     with open(catalog_tsv) as fh:
         header = fh.readline().rstrip('\n').split('\t')
-    catalog_genes = set(header[1:])
-    overlap = len(set(adata.var_names) & catalog_genes)
-    pct = 100 * overlap / max(len(catalog_genes), 1)
-    print(f"  gene overlap: {overlap:,} / {len(catalog_genes):,} ({pct:.1f}%)")
+    return set(header[1:])
+
+
+def _gene_overlap(var_names, catalog_set: set) -> int:
+    """Count how many catalog genes are present in var_names."""
+    return len(set(var_names) & catalog_set)
+
+
+def _ensure_hgnc_var_names(adata, catalog_tsv: Path):
+    """Check catalog overlap first; remap from Ensembl to HGNC only if needed.
+
+    Strategy:
+      1. If current var_names already give sufficient overlap → no-op
+      2. If a likely-symbol column exists in adata.var, try swapping to it
+      3. Else, if var_names look mostly like Ensembl IDs, call mygene to
+         remap (only the ENSG entries — keep existing symbols intact)
+      4. Bail with a clear error if none of the above lifts overlap above
+         MIN_GENE_OVERLAP.
+    """
+    catalog = _catalog_genes(catalog_tsv)
+    overlap = _gene_overlap(adata.var_names, catalog)
+    print(f"  gene overlap (as-is): {overlap:,} / {len(catalog):,} "
+          f"({100*overlap/len(catalog):.1f}%)")
+    if overlap >= MIN_GENE_OVERLAP:
+        return adata
+
+    # Try a var column that looks like it has symbols
+    symbol_col = None
+    for cand in ('feature_name', 'gene_symbol', 'Symbol', 'gene_symbols',
+                 'gene_name', 'symbol', 'hgnc_symbol'):
+        if cand in adata.var.columns:
+            candidate_names = adata.var[cand].astype(str).values
+            candidate_overlap = _gene_overlap(candidate_names, catalog)
+            if candidate_overlap > overlap:
+                print(f"  swapping var_names → adata.var[{cand!r}] "
+                      f"(overlap {candidate_overlap:,} > {overlap:,})")
+                adata.var_names = candidate_names
+                adata.var_names_make_unique()
+                overlap = _gene_overlap(adata.var_names, catalog)
+                symbol_col = cand
+                break
+
+    if overlap >= MIN_GENE_OVERLAP:
+        return adata
+
+    # Try mygene on the ENSG-looking entries
+    ensg_entries = [v for v in adata.var_names if str(v).startswith('ENSG')]
+    if not ensg_entries:
+        sys.exit(
+            f"ERROR: only {overlap} catalog genes present after exhausting "
+            f"recovery options, and no Ensembl IDs to remap. Catalog uses "
+            f"HGNC symbols — check that adata.var_names are gene symbols."
+        )
+    print(f"  attempting mygene remap of {len(ensg_entries):,} Ensembl IDs "
+          f"(of {adata.n_vars:,} total)…", flush=True)
+    import mygene
+    mg = mygene.MyGeneInfo()
+    hits = mg.querymany(ensg_entries, scopes='ensembl.gene',
+                        fields='symbol', species='human', as_dataframe=True)
+    symbol_map = (hits.get('symbol') if 'symbol' in hits.columns
+                  else pd.Series(dtype=object)).dropna()
+    # Keep the first symbol if mygene returned multiple
+    symbol_map = symbol_map.groupby(level=0).first()
+    new_var_names = []
+    for v in adata.var_names:
+        if v in symbol_map.index:
+            new_var_names.append(symbol_map.loc[v])
+        else:
+            new_var_names.append(v)
+    adata.var_names = pd.Index(new_var_names)
+    adata.var_names_make_unique()
+    overlap = _gene_overlap(adata.var_names, catalog)
+    print(f"  after remap: overlap = {overlap:,} / {len(catalog):,}")
+
     if overlap < MIN_GENE_OVERLAP:
         sys.exit(
             f"ERROR: only {overlap} catalog genes present (need ≥{MIN_GENE_OVERLAP}).\n"
-            f"  Most likely cause: wrong gene-identifier type (Ensembl vs HGNC). "
-            f"Catalog uses HGNC symbols."
+            f"  Most likely cause: wrong gene-identifier type or species mismatch."
         )
-    return overlap
+    return adata
 
 
 def _per_cell_residual(adata, usage_df: pd.DataFrame, spectra_df: pd.DataFrame
@@ -292,7 +366,7 @@ def main() -> int:
         cfg = get_config()
         host = cfg.get('rest_api_host', 'localhost')
         port = cfg.get('rest_api_port', 8080)
-        ant_serve_url = f"http://{host}:{port}/api"
+        ant_serve_url = f"http://{host}:{port}/api/"
 
     # --- Resolve dataset ---
     h5ad_root = _h5adstore_root()
@@ -329,8 +403,8 @@ def main() -> int:
     print(f"  shape: {adata.n_obs:,} cells × {adata.n_vars:,} genes")
 
     adata = _get_raw_counts_in_X(adata)
-    adata = _remap_ensembl_to_symbol(adata)
-    overlap = _report_overlap(adata, reference_tsv)
+    adata = _ensure_hgnc_var_names(adata, reference_tsv)
+    overlap = _gene_overlap(adata.var_names, _catalog_genes(reference_tsv))
 
     if args.cell_type_col:
         types = [t.strip() for t in (args.cell_types or '').split(',') if t.strip()]

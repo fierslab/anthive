@@ -688,7 +688,7 @@ def _resolve_ant_serve_url(args: argparse.Namespace) -> Optional[str]:
     config = get_config()
     host = config.get('rest_api_host', 'localhost')
     port = config.get('rest_api_port', 8080)
-    return f"http://{host}:{port}/api"
+    return f"http://{host}:{port}/api/"
 
 
 def _run_rescan(api_url: str) -> int:
@@ -822,7 +822,7 @@ def main() -> int:
             config = get_config()
             host = config.get('rest_api_host', 'localhost')
             port = config.get('rest_api_port', 8080)
-            api_url = f"http://{host}:{port}/api"
+            api_url = f"http://{host}:{port}/api/"
         _run_rescan(api_url)
 
     print()
