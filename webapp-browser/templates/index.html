@@ -29,8 +29,24 @@
         {% for v in filter_options.technology %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
     </select>
     <select id="flt-celltype" class="coll-filter">
-        <option value="">celltype: any</option>
+        <option value="">cell type: any</option>
         {% for v in filter_options.celltype %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
+    </select>
+    <select id="flt-suspension_type" class="coll-filter">
+        <option value="">prep: any</option>
+        {% for v in filter_options.suspension_type or [] %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
+    </select>
+    <select id="flt-tissue" class="coll-filter">
+        <option value="">tissue: any</option>
+        {% for v in filter_options.tissue or [] %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
+    </select>
+    <select id="flt-disease" class="coll-filter">
+        <option value="">disease: any</option>
+        {% for v in filter_options.disease or [] %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
+    </select>
+    <select id="flt-access" class="coll-filter">
+        <option value="">access: any</option>
+        {% for v in filter_options.access or [] %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
     </select>
     <select id="flt-source" class="coll-filter">
         <option value="">source: any</option>
@@ -50,7 +66,11 @@
             <th title="organism">🧬</th>
             <th title="technology">🔬</th>
             <th title="cell type">🦠</th>
-            <th title="source (internal / external)">src</th>
+            <th title="suspension type (cell / nucleus / na)">prep</th>
+            <th title="tissue (when all datasets agree)">tissue</th>
+            <th title="disease (when all datasets agree)">disease</th>
+            <th title="access (internal = lab-private; public = shareable)">acc</th>
+            <th title="source (internal = lab-generated; external = imported)">src</th>
         </tr>
     </thead>
     <tbody>
@@ -60,6 +80,10 @@
             data-tech_category="{{ folder.technology_category.full or '' }}"
             data-technology="{{ folder.technology.full or '' }}"
             data-celltype="{{ folder.celltype.full or '' }}"
+            data-suspension_type="{{ (folder.suspension_type or {}).full or '' }}"
+            data-tissue="{{ (folder.tissue or {}).full or '' }}"
+            data-disease="{{ (folder.disease or {}).full or '' }}"
+            data-access="{{ (folder.access or {}).full or '' }}"
             data-source="{{ folder.source.full or '' }}">
             <td style="color:#888;font-size:11px">{{ folder.group_id or "—" }}</td>
             <td>
@@ -71,6 +95,14 @@
             <td style="color:#555;font-size:11px" {% if folder.organism.full %}title="{{ folder.organism.full }}"{% endif %}>{{ folder.organism.abbrev }}</td>
             <td style="color:#555;font-size:11px" {% if folder.technology.full %}title="{{ folder.technology.full }}"{% endif %}>{{ folder.technology.abbrev }}</td>
             <td style="color:#555;font-size:11px" {% if folder.celltype.full %}title="{{ folder.celltype.full }}"{% endif %}>{{ folder.celltype.abbrev }}</td>
+            {% set _sus = folder.suspension_type or {} %}
+            <td style="color:#555;font-size:11px" {% if _sus.full %}title="{{ _sus.full }}"{% endif %}>{{ _sus.abbrev or '' }}</td>
+            {% set _tis = folder.tissue or {} %}
+            <td style="color:#555;font-size:11px" {% if _tis.full %}title="{{ _tis.full }}"{% endif %}>{{ _tis.abbrev or '' }}</td>
+            {% set _dis = folder.disease or {} %}
+            <td style="color:#555;font-size:11px" {% if _dis.full %}title="{{ _dis.full }}"{% endif %}>{{ _dis.abbrev or '' }}</td>
+            {% set _acc = folder.access or {} %}
+            <td style="color:#555;font-size:11px" {% if _acc.full %}title="{{ _acc.full }}"{% endif %}>{{ _acc.abbrev or '' }}</td>
             <td style="color:#555;font-size:11px" {% if folder.source.full %}title="{{ folder.source.full }}"{% endif %}>{{ folder.source.abbrev }}</td>
         </tr>
         {% endfor %}
@@ -86,11 +118,15 @@
     var showAllLink = document.getElementById('show-all-link');
     var clearLink = document.getElementById('clear-filters');
     var filterEls = {
-        organism:      document.getElementById('flt-organism'),
-        tech_category: document.getElementById('flt-tech_category'),
-        technology:    document.getElementById('flt-technology'),
-        celltype:      document.getElementById('flt-celltype'),
-        source:        document.getElementById('flt-source'),
+        organism:        document.getElementById('flt-organism'),
+        tech_category:   document.getElementById('flt-tech_category'),
+        technology:      document.getElementById('flt-technology'),
+        celltype:        document.getElementById('flt-celltype'),
+        suspension_type: document.getElementById('flt-suspension_type'),
+        tissue:          document.getElementById('flt-tissue'),
+        disease:         document.getElementById('flt-disease'),
+        access:          document.getElementById('flt-access'),
+        source:          document.getElementById('flt-source'),
     };
     var rows = Array.from(document.querySelectorAll('#coll-table tbody tr'));
 

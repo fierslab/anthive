@@ -86,16 +86,6 @@
             margin-bottom: 15px;
         }
 
-        .coming-soon {
-            opacity: 0.6;
-            cursor: default;
-        }
-
-        .coming-soon:hover {
-            transform: none;
-            box-shadow: none;
-        }
-
         .badge {
             display: inline-block;
             padding: 3px 8px;
@@ -130,22 +120,22 @@
         <p class="subtitle">Interactive Single-Cell Expression Analysis Platform</p>
 
         <div class="apps">
+            <a href="/browse" class="app-card">
+                <div class="app-icon">🗂</div>
+                <h2>Browse</h2>
+                <p>Catalog of all curated datasets — metadata, cell counts, annotations. The main entry point.</p>
+            </a>
+
+            <a href="/streamlit/" class="app-card">
+                <div class="app-icon">📊</div>
+                <h2>Streamlit</h2>
+                <p>Interactive plots: gene expression, UMAP, categorical and numerical obs distributions.</p>
+            </a>
+
             <a href="jupyter/" class="app-card">
                 <div class="app-icon">📓</div>
                 <h2>JupyterLite</h2>
-                <p>Interactive notebooks with Python analysis. Pre-loaded with pandas, seaborn, and Anthive client.</p>
-            </a>
-
-            <a href="marimo/" class="app-card">
-                <div class="app-icon">🐍</div>
-                <h2>marimo</h2>
-                <p>Reactive in-browser notebook. Drives the API with <code>?db_id=…&amp;gene=…</code> URL parameters; shareable views.</p>
-            </a>
-
-            <a href="stlite/" class="app-card coming-soon">
-                <div class="app-icon">📊</div>
-                <h2>Streamlit <span class="badge">SOON</span></h2>
-                <p>Interactive web app for exploratory analysis and visualization.</p>
+                <p>In-browser Python notebooks pre-loaded with pandas, seaborn, and the Anthive client.</p>
             </a>
 
             <a href="/api/docs" class="app-card">

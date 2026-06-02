@@ -39,7 +39,7 @@ Every `bin/ant-*` tool and the server import the same `lib/` modules via a
 | `lib/` | shared core (the contract everything depends on) | `lib/CLAUDE.md` |
 | `bin/` | CLI tools — **server** (ant-serve/mcp/browse) + **pipeline** (convert/score/starcat/…) | `bin/CLAUDE.md` |
 | `antclient/` | standalone REST client package | `antclient/CLAUDE.md` |
-| `webapp-src/` | in-browser notebooks (marimo + jupyter) | `webapp-src/CLAUDE.md` |
+| `webapp-src/` | JupyterLite example notebooks (in-browser, Pyodide) | `webapp-src/CLAUDE.md` |
 
 Data stores live in **separate git repos**: `data/h5adstore/` (`.md` + `.h5ad`
 + `.duckdb`), `data/genesetstore/`. The `.md` files are git-tracked; `.h5ad`

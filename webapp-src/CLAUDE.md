@@ -1,36 +1,33 @@
-# webapp-src/ — in-browser notebooks
+# webapp-src/ — JupyterLite examples (sources)
 
-Client-side notebooks that talk to ant-serve via `antclient` (no server-side
-execution). Two stacks:
+Sources for the JupyterLite static deployment served at `/jupyter/`.
+The build copies them into `webapp/jupyter/` for distribution.
 
-- `marimo/` — 4 reactive notebooks (`gene`, `umap`, `category`, `numerical`),
-  the streamlit-replacement views. Exported to WASM and served at `/marimo/`.
-- `jupyter/` — JupyterLite example notebooks + a vendored `antclient.py`.
+Interactive plotting (gene / UMAP / category / numerical) is **not**
+in this directory anymore — it lives in `webapp-streamlit/` and is
+reached via `/streamlit/`. The old marimo prototype was removed
+2026-06.
+
+## Layout
+- `jupyter/` — example notebooks (`Getting_Started.ipynb`,
+  `examples/01_umap.ipynb`, …) plus a vendored copy of `antclient.py`
+  pinned to the API contract these notebooks expect.
 
 ## Everything runs in the browser via Pyodide
 
-There is no Python process on the server for these. Deps install client-side
-with `micropip`; API calls go out over the browser fetch path.
+There is no Python process on the server for these notebooks. Deps install
+client-side with `micropip`; API calls go out over the browser fetch path.
 
 - **Streaming fetch must be ready before API calls.** urllib3's emscripten
   backend falls back to XHR (truncates responses ~56 KB → "Unterminated
-  string" JSON errors) until the streaming service worker initialises. The
-  `_packages` cell does `await wait_for_streaming_ready()` with a 5 s timeout
-  before any request — keep that pattern.
-- API URL is auto-detected as `f"{js.location.origin}/api/"` (trailing slash —
-  a bare `/api` 307-redirects and POSTs don't follow it).
-- Widget state round-trips to URL query params (`?db_id=…&gene=…`), so any view
-  is one copy-paste from sharing.
-
-## marimo cell rules (its static analyser enforces these)
-- Each variable defined in exactly one cell. Use `_`-prefixed names for
-  cell-private locals to avoid cross-cell collisions (`_values`, `_vals`, …).
-- No bare `return` inside an `@app.cell` — marimo strips the function wrapper.
-- One widget per cell with the widget as the last expression, so reactivity
-  tracks correctly.
+  string" JSON errors) until the streaming service worker initialises. If
+  you write a new notebook, do an `await wait_for_streaming_ready()` with
+  a short timeout before any API call.
+- API URL is auto-detected as `f"{js.location.origin}/api/"` (trailing
+  slash — a bare `/api` 307-redirects and POSTs don't follow safely).
 
 ## Build
-`make build-marimo` exports each notebook twice: `--mode run` (view-only,
-streamlit replacement) and `--mode edit` (full editor, persists to browser
-localStorage). Output → `webapp/marimo/`. Edits in the browser are NOT saved
-back to the server.
+
+`make build-jupyter` runs `jupyter-lite build` and writes the static site
+into `webapp/jupyter/`. Edits made in the browser are persisted to that
+browser's local storage only; they are NOT saved back to the server.

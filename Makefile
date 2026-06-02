@@ -94,26 +94,7 @@ build-jupyter: antclient/antclient.py
 	@echo "Location: webapp/jupyter/"
 	@echo "Client: webapp/jupyter/files/antclient.py"
 
-build-marimo:
-	@echo "Building marimo WASM notebooks (run + edit) to webapp/marimo/…"
-	@rm -rf webapp/marimo
-	@mkdir -p webapp/marimo
-	@for nb in gene umap category numerical; do \
-	    echo "  → $$nb (run)"; \
-	    uvx marimo export html-wasm \
-	        webapp-src/marimo/$$nb.py \
-	        -o webapp/marimo/$$nb --mode run; \
-	    rm -f webapp/marimo/$$nb/CLAUDE.md; \
-	    echo "  → $$nb-edit (edit)"; \
-	    uvx marimo export html-wasm \
-	        webapp-src/marimo/$$nb.py \
-	        -o webapp/marimo/$$nb-edit --mode edit; \
-	    rm -f webapp/marimo/$$nb-edit/CLAUDE.md; \
-	done
-	@cp webapp-src/marimo/index.html webapp/marimo/index.html
-	@echo "✓ marimo build complete: webapp/marimo/{gene,umap,category,numerical}{,-edit}/"
-
-build-webapp: build-jupyter build-marimo webapp-src/index.html
+build-webapp: build-jupyter webapp-src/index.html
 	@echo ""
 	@echo "Copying main index.html..."
 	@cp webapp-src/index.html webapp/index.html

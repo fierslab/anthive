@@ -31,6 +31,17 @@
 </div>
 {% endif %}
 
+{# Visualize — prominent streamlit entry points #}
+{% if has_duckdb %}
+<div class="viz-row">
+    <span class="viz-label">visualize</span>
+    <a href="/streamlit/gene?db={{ db_id | urlencode }}" class="viz-btn">📈 gene expression</a>
+    {% if info and info.obsm_keys %}<a href="/streamlit/umap?db={{ db_id | urlencode }}" class="viz-btn">🗺 UMAP scatter</a>{% endif %}
+    <a href="/streamlit/cat?db={{ db_id | urlencode }}" class="viz-btn">≡ categorical</a>
+    <a href="/streamlit/num?db={{ db_id | urlencode }}" class="viz-btn"># numerical</a>
+</div>
+{% endif %}
+
 <!-- Overview -->
 {% if markdown_content or layer_stats_rows %}
 <h2>Overview</h2>
@@ -62,22 +73,34 @@
 {% if dataset_meta %}
 {% set ns = namespace(nulls=[]) %}
 <h2>Info</h2>
-<div style="display:flex;flex-wrap:wrap;gap:0 20px;line-height:1.9">
-  {% if dataset_meta.organism %}<div><span class="mk">organism</span> {{ dataset_meta.organism }}</div>{% else %}{% set ns.nulls = ns.nulls + ['organism'] %}{% endif %}
-  {% if dataset_meta.tissue %}<div><span class="mk">tissue</span> {{ dataset_meta.tissue|join(', ') }}</div>{% else %}{% set ns.nulls = ns.nulls + ['tissue'] %}{% endif %}
-  {% if dataset_meta.celltype %}<div><span class="mk">celltype</span> {{ dataset_meta.celltype }}</div>{% else %}{% set ns.nulls = ns.nulls + ['celltype'] %}{% endif %}
-  {% if dataset_meta.disease %}<div><span class="mk">disease</span> {{ dataset_meta.disease|join(', ') }}</div>{% else %}{% set ns.nulls = ns.nulls + ['disease'] %}{% endif %}
-  {% if dataset_meta.condition %}<div><span class="mk">condition</span> {{ dataset_meta.condition|join(', ') }}</div>{% else %}{% set ns.nulls = ns.nulls + ['condition'] %}{% endif %}
-  {% if dataset_meta.region %}<div><span class="mk">region</span> {{ dataset_meta.region|join(', ') }}</div>{% else %}{% set ns.nulls = ns.nulls + ['region'] %}{% endif %}
-  {% if dataset_meta.sex %}<div><span class="mk">sex</span> {{ dataset_meta.sex }}</div>{% else %}{% set ns.nulls = ns.nulls + ['sex'] %}{% endif %}
-  {% if dataset_meta.age %}<div><span class="mk">age</span> {{ dataset_meta.age }}</div>{% else %}{% set ns.nulls = ns.nulls + ['age'] %}{% endif %}
-  {% if dataset_meta.strain %}<div><span class="mk">strain</span> {{ dataset_meta.strain }}</div>{% else %}{% set ns.nulls = ns.nulls + ['strain'] %}{% endif %}
-  {% if dataset_meta.technology %}<div><span class="mk">technology</span> {{ dataset_meta.technology|join(', ') }}</div>{% else %}{% set ns.nulls = ns.nulls + ['technology'] %}{% endif %}
-  {% if dataset_meta.accession %}<div><span class="mk">accession</span> {% if dataset_meta.accession_url %}<a href="{{ dataset_meta.accession_url }}">{{ dataset_meta.accession }}</a>{% else %}{{ dataset_meta.accession }}{% endif %}</div>{% else %}{% set ns.nulls = ns.nulls + ['accession'] %}{% endif %}
-  {% if dataset_meta.doi %}{% for doi_item in dataset_meta.doi %}<div><span class="mk">doi</span> <a href="https://doi.org/{{ doi_item }}">{{ doi_item }}</a></div>{% endfor %}{% else %}{% set ns.nulls = ns.nulls + ['doi'] %}{% endif %}
-  {% if dataset_meta.link %}{% for url_item in dataset_meta.link %}<div><span class="mk">link</span> <a href="{{ url_item }}">{{ url_item }}</a></div>{% endfor %}{% else %}{% set ns.nulls = ns.nulls + ['link'] %}{% endif %}
+<div class="info-grid">
+  <div class="info-col">
+    <div class="info-col-title">biology</div>
+    {% if dataset_meta.organism %}<div class="info-row"><span class="mk">organism</span><span>{{ dataset_meta.organism }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['organism'] %}{% endif %}
+    {% if dataset_meta.tissue %}<div class="info-row"><span class="mk">tissue</span><span>{{ dataset_meta.tissue|join(', ') }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['tissue'] %}{% endif %}
+    {% if dataset_meta.celltype %}<div class="info-row"><span class="mk">cell type</span><span>{{ dataset_meta.celltype }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['cell_type'] %}{% endif %}
+    {% if dataset_meta.suspension_type %}<div class="info-row"><span class="mk">prep</span><span>{{ dataset_meta.suspension_type }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['suspension_type'] %}{% endif %}
+    {% if dataset_meta.technology %}<div class="info-row"><span class="mk">technology</span><span>{{ dataset_meta.technology|join(', ') }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['technology'] %}{% endif %}
+    {% if dataset_meta.disease %}<div class="info-row"><span class="mk">disease</span><span>{{ dataset_meta.disease|join(', ') }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['disease'] %}{% endif %}
+    {% if dataset_meta.condition %}<div class="info-row"><span class="mk">condition</span><span>{{ dataset_meta.condition|join(', ') }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['condition'] %}{% endif %}
+    {% if dataset_meta.sex %}<div class="info-row"><span class="mk">sex</span><span>{{ dataset_meta.sex }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['sex'] %}{% endif %}
+    {% if dataset_meta.age %}<div class="info-row"><span class="mk">age</span><span>{{ dataset_meta.age }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['age'] %}{% endif %}
+    {% if dataset_meta.strain %}<div class="info-row"><span class="mk">strain</span><span>{{ dataset_meta.strain }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['strain'] %}{% endif %}
+  </div>
+  <div class="info-col">
+    <div class="info-col-title">provenance</div>
+    {% if dataset_meta.access %}<div class="info-row"><span class="mk">access</span><span>{{ dataset_meta.access }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['access'] %}{% endif %}
+    {% if dataset_meta.source %}<div class="info-row"><span class="mk">source</span><span>{{ dataset_meta.source }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['source'] %}{% endif %}
+    {% if dataset_meta.year %}<div class="info-row"><span class="mk">year</span><span>{{ dataset_meta.year }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['year'] %}{% endif %}
+    {% if dataset_meta.license %}<div class="info-row"><span class="mk">license</span><span>{{ dataset_meta.license }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['license'] %}{% endif %}
+    {% if dataset_meta.contributor %}<div class="info-row"><span class="mk">contributor</span><span>{{ dataset_meta.contributor }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['contributor'] %}{% endif %}
+    {% if dataset_meta.accession %}<div class="info-row"><span class="mk">accession</span><span>{% if dataset_meta.accession_url %}<a href="{{ dataset_meta.accession_url }}">{{ dataset_meta.accession }}</a>{% else %}{{ dataset_meta.accession }}{% endif %}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['accession'] %}{% endif %}
+    {% if dataset_meta.doi %}{% for doi_item in dataset_meta.doi %}<div class="info-row"><span class="mk">doi</span><span><a href="https://doi.org/{{ doi_item }}">{{ doi_item }}</a></span></div>{% endfor %}{% else %}{% set ns.nulls = ns.nulls + ['doi'] %}{% endif %}
+    {% if dataset_meta.pmid %}{% for p in dataset_meta.pmid %}<div class="info-row"><span class="mk">pmid</span><span><a href="https://pubmed.ncbi.nlm.nih.gov/{{ p }}">{{ p }}</a></span></div>{% endfor %}{% else %}{% set ns.nulls = ns.nulls + ['pmid'] %}{% endif %}
+    {% if dataset_meta.link %}{% for url_item in dataset_meta.link %}<div class="info-row"><span class="mk">link</span><span><a href="{{ url_item }}">{{ url_item }}</a></span></div>{% endfor %}{% else %}{% set ns.nulls = ns.nulls + ['link'] %}{% endif %}
+  </div>
 </div>
-{% if ns.nulls %}<div style="color:#ccc;font-size:11px;margin-top:2px">(null: {{ ns.nulls|join(', ') }})</div>{% endif %}
+{% if ns.nulls %}<div style="color:#bbb;font-size:11px;margin-top:4px">{{ ns.nulls|length }} field{{ 's' if ns.nulls|length != 1 else '' }} not set: {{ ns.nulls|join(', ') }}</div>{% endif %}
 {% endif %}
 
 {% if info %}
@@ -155,9 +178,8 @@
 
 <!-- API access -->
 <h2>API access</h2>
-<div style="padding:4px 0;display:flex;gap:12px;flex-wrap:wrap;font-size:12px">
+<div style="padding:4px 0;display:flex;gap:14px;flex-wrap:wrap;font-size:12px;align-items:center">
     <span>dataset id: <code>{{ db_id }}</code></span>
-    &nbsp;
     <a href="/api/databases/{{ db_id }}/info">api info</a>
     <a href="/api/docs#/default/get_cells_databases__db_id__cells_get">api docs → /cells</a>
     <a href="/jupyter">open in jupyterlite</a>

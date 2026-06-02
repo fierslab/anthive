@@ -32,13 +32,6 @@
 		file_server
 	}
 
-	# marimo WASM notebook (Pyodide-based, like JupyterLite) — same headers
-	handle /marimo/* {
-		header Cross-Origin-Opener-Policy "same-origin"
-		header Cross-Origin-Embedder-Policy "require-corp"
-		file_server
-	}
-
 	# MCP server (FastMCP streamable-http)
 	handle /mcp* {
 		reverse_proxy localhost:8090

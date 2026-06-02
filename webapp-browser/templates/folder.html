@@ -28,6 +28,8 @@
             <th title="organism">🧬</th>
             <th title="technology">🔬</th>
             <th title="cell type">🦠</th>
+            <th title="suspension type (cell / nucleus / na)">prep</th>
+            <th title="access (internal = lab-private; public = shareable)">acc</th>
             <th>Layers</th>
             <th>Embeddings</th>
             <th>Size</th>
@@ -50,6 +52,10 @@
             <td style="color:#555;font-size:11px" {% if dataset.organism.full %}title="{{ dataset.organism.full }}"{% endif %}>{{ dataset.organism.abbrev }}</td>
             <td style="color:#555;font-size:11px" {% if dataset.technology.full %}title="{{ dataset.technology.full }}"{% endif %}>{{ dataset.technology.abbrev }}</td>
             <td style="color:#555;font-size:11px" {% if dataset.celltype.full %}title="{{ dataset.celltype.full }}"{% endif %}>{{ dataset.celltype.abbrev }}</td>
+            {% set _sus = dataset.suspension_type or {} %}
+            <td style="color:#555;font-size:11px" {% if _sus.full %}title="{{ _sus.full }}"{% endif %}>{{ _sus.abbrev or '' }}</td>
+            {% set _acc = dataset.access or {} %}
+            <td style="color:#555;font-size:11px" {% if _acc.full %}title="{{ _acc.full }}"{% endif %}>{{ _acc.abbrev or '' }}</td>
             <td style="color:#555" title="{{ dataset.layers|join(', ') if dataset.layers else 'none' }}">
                 {{ dataset.layers|length if dataset.layers else "—" }}
             </td>

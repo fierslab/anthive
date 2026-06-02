@@ -92,10 +92,27 @@
 
         .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 0 20px; }
         @media (max-width: 700px) { .two-col { grid-template-columns: 1fr; } }
-        .mk { color: var(--text-muted); font-size: 11px; width: 90px; white-space: nowrap; }
+        .mk { color: var(--text-muted); font-size: 11px; width: 90px; white-space: nowrap; display: inline-block; }
+
+        /* Info block — biology + provenance side-by-side */
+        .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 24px; margin: 4px 0 8px; }
+        @media (max-width: 760px) { .info-grid { grid-template-columns: 1fr; } }
+        .info-col-title { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; margin-bottom: 2px; padding-bottom: 2px; border-bottom: 1px dotted var(--border); }
+        .info-row { display: flex; gap: 6px; line-height: 1.7; font-size: 12px; }
+        .info-row > span:last-child { color: var(--text); flex: 1; }
 
         .chip { display: inline-block; background: #eef2ff; color: #1d4ed8; border: 1px solid #bfdbfe; padding: 1px 6px; font-size: 11px; margin: 1px 3px 1px 0; text-decoration: none; }
         .chip:hover { background: #dbeafe; text-decoration: none; }
+
+        /* Visualize action row on the dataset page */
+        .viz-row { display: flex; gap: 6px; align-items: center; margin: 6px 0 10px; flex-wrap: wrap; }
+        .viz-label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; margin-right: 4px; }
+        .viz-btn {
+            display: inline-block; padding: 4px 10px; background: #1d4ed8; color: #fff;
+            border-radius: 3px; font-size: 12px; font-weight: 500; text-decoration: none;
+            border: 1px solid #1d4ed8; transition: background .1s;
+        }
+        .viz-btn:hover { background: #1e40af; color: #fff; text-decoration: none; }
     </style>
     <script>
     function initTable(id,o){o=o||{};var ps=o.pageSize||20,s=o.searchable!==false,t=document.getElementById(id);if(!t)return;var tb=t.querySelector('tbody');if(!tb)return;var c=document.createElement('div');c.className='tbl-controls';t.parentNode.insertBefore(c,t);var si=null;if(s){si=document.createElement('input');si.type='text';si.placeholder='Filter\u2026';si.addEventListener('input',function(){p=0;r()});c.appendChild(si)}var inf=document.createElement('span');inf.className='tbl-info';c.appendChild(inf);var pv=document.createElement('a');pv.className='tbl-pg';pv.href='#';pv.textContent='\u2039 prev';pv.style.display='none';pv.addEventListener('click',function(e){e.preventDefault();p--;r()});c.appendChild(pv);var nx=document.createElement('a');nx.className='tbl-pg';nx.href='#';nx.textContent='next \u203a';nx.style.display='none';nx.addEventListener('click',function(e){e.preventDefault();p++;r()});c.appendChild(nx);var p=0;function r(){var q=si?si.value.toLowerCase().trim():'',a=Array.from(tb.querySelectorAll('tr')),f=q?a.filter(function(r){return r.textContent.toLowerCase().includes(q)}):a,tp=Math.max(1,Math.ceil(f.length/ps));if(p>=tp)p=tp-1;if(p<0)p=0;var st=p*ps;a.forEach(function(r){r.style.display='none'});f.slice(st,st+ps).forEach(function(r){r.style.display=''});var sh=Math.min(ps,f.length-st);inf.textContent=f.length<=ps?f.length+' item'+(f.length!==1?'s':''):(st+1)+'\u2013'+(st+sh)+' of '+f.length;pv.style.display=p>0?'':'none';nx.style.display=p<tp-1?'':'none'}r()}
@@ -109,7 +126,7 @@
             {% if request.app.state.genesets_available %}
             <a href="/genesets">genesets</a>
             {% endif %}
-            <a href="/streamlit">streamlit</a>
+            <a href="/streamlit/">streamlit</a>
             <a href="/api/docs">api</a>
         </nav>
     </div>

@@ -893,26 +893,32 @@ class DatabaseRegistry:
             'default_layer': file_metadata.get('default_layer'),
             'has_lognorm':   file_metadata.get('has_lognorm', True),
 
-            # Biology & study annotation (resolved with inheritance from index.md)
-            'organism':   ann.get('organism'),
-            'tissue':     ann.get('tissue'),
-            'celltype':   ann.get('celltype'),
-            'disease':    ann.get('disease'),
-            'condition':  ann.get('condition'),
-            'region':     ann.get('region'),
-            'sex':        ann.get('sex'),
-            'age':        ann.get('age'),
-            'strain':     ann.get('strain'),
-            'technology': ann.get('technology'),
-            'technology_category': ann.get('technology_category'),
-            'accession':  ann.get('accession'),
-            'doi':        ann.get('doi') or [],
-            'link':       ann.get('link') or [],
-            'source':     ann.get('source'),
-            'access':     ann.get('access'),
-            'top_genes':  file_metadata.get('top_genes'),
-            'top_cat':    file_metadata.get('top_cat'),
-            'top_num':    file_metadata.get('top_num'),
+            # Biology & study annotation (resolved from .h5ad.mus + .env cascade)
+            'organism':         ann.get('organism'),
+            'tissue':           ann.get('tissue'),
+            'cell_type':        ann.get('cell_type'),
+            'celltype':         ann.get('celltype'),          # legacy alias
+            'suspension_type':  ann.get('suspension_type'),   # cell | nucleus | na
+            'disease':          ann.get('disease'),
+            'condition':        ann.get('condition'),
+            'region':           ann.get('region'),            # legacy — empty after migration
+            'sex':              ann.get('sex'),
+            'age':              ann.get('age'),
+            'strain':           ann.get('strain'),
+            'technology':       ann.get('technology'),
+            'technology_category': ann.get('technology_category'),  # legacy
+            'accession':        ann.get('accession'),
+            'doi':              ann.get('doi') or [],
+            'pmid':             ann.get('pmid') or [],
+            'link':             ann.get('link') or [],
+            'license':          ann.get('license'),
+            'contributor':      ann.get('contributor'),
+            'year':             ann.get('year') or file_metadata.get('year'),
+            'source':           ann.get('source'),            # internal | external
+            'access':           ann.get('access'),            # internal | public
+            'top_genes':        file_metadata.get('top_genes'),
+            'top_cat':          file_metadata.get('top_cat'),
+            'top_num':          file_metadata.get('top_num'),
 
             # Module scoring availability
             'module_scoring_available': module_scoring_available,

@@ -47,7 +47,7 @@ Skip the h5ad write; mutate the duckdb directly.
 - Per-update cost drops from 30–60 min to **seconds**
 - No giant uploads to S3 — only the .md (git) plus the slightly larger .duckdb get pushed
 - No new file types, no new sync rules, no new schema introspection
-- Existing tooling (ant-serve, MCP, marimo, analytics_query) continues to query a single duckdb — zero downstream changes
+- Existing tooling (ant-serve, MCP, streamlit, analytics_query) continues to query a single duckdb — zero downstream changes
 
 ### Cons
 
@@ -92,7 +92,7 @@ At query time the API `ATTACH`es the sidecar, exposes its cols via a UNION view 
 - Every obs query becomes a JOIN across two (or more) duckdbs
 - Schema introspection has to ATTACH each sidecar — slower API cold start
 - Cell-id alignment is fragile: sidecar must use cell_name (slower joins) or sidecar must be regenerated whenever the main duckdb is rebuilt
-- Tooling now has to know about multiple files: ant-sync, analytics_query, the MCP tools, marimo notebooks
+- Tooling now has to know about multiple files: ant-sync, analytics_query, the MCP tools, the streamlit app
 - `obs_exclude` / `obscat_include` lists need a column → file mapping, or a strict "one sidecar per dataset" rule
 - AnnData consumers (Python notebooks pulling h5ad directly) STILL don't see the new columns
 
@@ -518,8 +518,8 @@ env and runs the Python pipeline.
 - Raw-counts requirement forces us to think about h5ad-source-of-truth-for-X
   vs duckdb-source-of-truth-for-obs early.
 - Outputs are valuable to existing analyses — `starcat_Identity_Label` and
-  `starcat_DAM_progression` are the kind of columns we'd plot in the marimo
-  notebooks the moment they exist.
+  `starcat_DAM_progression` are the kind of columns we'd plot in the streamlit
+  views the moment they exist.
 
 ## 8. Decisions log (resolved on 2026-05-25 with MF)
 
@@ -547,7 +547,7 @@ env and runs the Python pipeline.
 5. `bin/ant-score` — switch its write path to `AnnotationWriter`
 6. `bin/ant-starcat` + `envs/anthive-starcat/` — first real user
 7. Pick one human microglia dataset, run end-to-end (annotate → merge → push),
-   confirm the marimo notebooks see the new columns
+   confirm the streamlit views see the new columns
 
 ## 10. Known issue — DuckDB cross-process lock (discovered 2026-05-25)
 

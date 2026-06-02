@@ -93,16 +93,44 @@ _ORGANISM_ABBREV = {
 
 _TECHNOLOGY_ABBREV = {
     '10x_chromium': '10x', '10x': '10x', '10x chromium': '10x',
+    '10x_chromium_3p_v2': '10x v2', '10x_chromium_3p_v3': '10x v3',
+    '10x_chromium_5p': '10x 5p', '10x_multiome': 'multi',
+    '10x_visium': 'vis', '10x_xenium': 'xen',
     '10x_scrna': '10x', '10x_snrna': '10x-sn',
     'smart-seq2': 'SS2', 'smartseq2': 'SS2', 'smart_seq2': 'SS2',
+    'smart-seq3': 'SS3', 'cel-seq2': 'CEL2',
+    'parse_evercode': 'Parse', 'bd_rhapsody': 'BD',
+    'mars-seq': 'MARS', 'microwell-seq': 'µwell',
     'visium': 'vis',
     'xenium': 'xen',
     'multiome': 'mult',
     'snrna-seq': 'snRNA', 'snrna_seq': 'snRNA', 'snrna-seq (10x)': 'snRNA',
     'scrna-seq': 'scRNA', 'scrna_seq': 'scRNA',
     'slide-seq': 'slide', 'slide_seq': 'slide', 'slide-tag': 'slide',
-    'proteomics': 'prot',
-    'merfish': 'MER', 'seqfish': 'sFISH',
+    'slide-seqv2': 'slide2', 'slide-tags': 'slide',
+    'proteomics': 'prot', 'mass-spectrometry': 'MS',
+    'novast': 'NovaST',
+    'bulk_rna-seq': 'bulk',
+    'merfish': 'MER', 'cosmx': 'CosMx', 'stereo-seq': 'Stereo',
+}
+
+# Suspension type — distinguishes whole-cell vs nuclei vs non-cellular
+_SUSPENSION_ABBREV = {
+    'cell': 'cell',
+    'nucleus': 'nucl',
+    'na': '—',
+}
+
+# Access — internal/public (whether dataset is private or shareable)
+_ACCESS_ABBREV = {
+    'internal': 'int',
+    'public': 'pub',
+}
+
+# Source — internal/external (lab-generated vs imported from elsewhere)
+_SOURCE_ABBREV = {
+    'internal': 'int',
+    'external': 'ext',
 }
 
 
@@ -178,11 +206,17 @@ def get_collection_list(api_url: str) -> List[Dict]:
             'update_pending': 0,
             'last_modified': 0,
             'description': None,
-            'organism': _summarize_meta_field(dbs, 'organism', abbrev_map=_ORGANISM_ABBREV),
-            'technology': _summarize_meta_field(dbs, 'technology', abbrev_map=_TECHNOLOGY_ABBREV),
+            # Group-level summaries: single shared value → that value;
+            # multiple values across datasets → "mix". Used by index.html.
+            'organism':        _summarize_meta_field(dbs, 'organism', abbrev_map=_ORGANISM_ABBREV),
+            'technology':      _summarize_meta_field(dbs, 'technology', abbrev_map=_TECHNOLOGY_ABBREV),
             'technology_category': _summarize_meta_field(dbs, 'technology_category', max_len=12),
-            'celltype': _summarize_meta_field(dbs, 'celltype', max_len=10),
-            'source': _summarize_meta_field(dbs, 'source', max_len=12),
+            'celltype':        _summarize_meta_field(dbs, 'celltype', max_len=12),
+            'suspension_type': _summarize_meta_field(dbs, 'suspension_type', abbrev_map=_SUSPENSION_ABBREV),
+            'tissue':          _summarize_meta_field(dbs, 'tissue', max_len=14),
+            'disease':         _summarize_meta_field(dbs, 'disease', max_len=14),
+            'source':          _summarize_meta_field(dbs, 'source', abbrev_map=_SOURCE_ABBREV),
+            'access':          _summarize_meta_field(dbs, 'access', abbrev_map=_ACCESS_ABBREV),
         })
 
     collections.sort(key=lambda c: c['name'])
@@ -196,7 +230,8 @@ def get_filter_options(collections: List[Dict]) -> Dict[str, List[str]]:
     A folder with multiple values in a field contributes each of them
     (e.g. organism='human, mouse' → ['human', 'mouse']).
     """
-    fields = ['organism', 'technology_category', 'technology', 'celltype', 'source']
+    fields = ['organism', 'technology_category', 'technology', 'celltype',
+              'suspension_type', 'tissue', 'disease', 'source', 'access']
     out: Dict[str, set] = {f: set() for f in fields}
     for c in collections:
         for f in fields:
@@ -245,9 +280,11 @@ def get_collection_datasets(api_url: str, group_id: str) -> tuple:
             'has_metadata': True,
             'has_duckdb': True,
             'update_pending': False,
-            'organism': _summarize_meta_field([db], 'organism', abbrev_map=_ORGANISM_ABBREV),
-            'technology': _summarize_meta_field([db], 'technology', abbrev_map=_TECHNOLOGY_ABBREV),
-            'celltype': _summarize_meta_field([db], 'celltype', max_len=10),
+            'organism':        _summarize_meta_field([db], 'organism', abbrev_map=_ORGANISM_ABBREV),
+            'technology':      _summarize_meta_field([db], 'technology', abbrev_map=_TECHNOLOGY_ABBREV),
+            'celltype':        _summarize_meta_field([db], 'celltype', max_len=12),
+            'suspension_type': _summarize_meta_field([db], 'suspension_type', abbrev_map=_SUSPENSION_ABBREV),
+            'access':          _summarize_meta_field([db], 'access', abbrev_map=_ACCESS_ABBREV),
         })
 
     return datasets, description_html
@@ -340,23 +377,32 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
 
     accession = db.get('accession')
     dataset_meta = {
-        'organism':      db.get('organism'),
-        'tissue':        _as_list(db.get('tissue')),
-        'celltype':      db.get('celltype'),
-        'disease':       _as_list(db.get('disease')),
-        'condition':     _as_list(db.get('condition')),
-        'region':        _as_list(db.get('region')),
-        'sex':           db.get('sex'),
-        'age':           db.get('age'),
-        'strain':        db.get('strain'),
-        'technology':    _as_list(db.get('technology')),
-        'accession':     accession,
-        'accession_url': _accession_url(str(accession)) if accession else None,
-        'doi':           _as_list(db.get('doi')),
-        'link':          _as_list(db.get('link')),
-        'top_genes':     _as_list(db.get('top_genes')),
-        'top_cat':       _as_list(db.get('top_cat')),
-        'top_num':       _as_list(db.get('top_num')),
+        # Biology
+        'organism':        db.get('organism'),
+        'tissue':          _as_list(db.get('tissue')),
+        'celltype':        db.get('cell_type') or db.get('celltype'),
+        'suspension_type': db.get('suspension_type'),
+        'disease':         _as_list(db.get('disease')),
+        'condition':       _as_list(db.get('condition')),
+        'sex':             db.get('sex'),
+        'age':             db.get('age'),
+        'strain':          db.get('strain'),
+        'technology':      _as_list(db.get('technology')),
+        # Provenance + access
+        'access':          db.get('access'),
+        'source':          db.get('source'),
+        'license':         db.get('license'),
+        'year':            db.get('year'),
+        'contributor':     db.get('contributor'),
+        'accession':       accession,
+        'accession_url':   _accession_url(str(accession)) if accession else None,
+        'doi':             _as_list(db.get('doi')),
+        'pmid':            _as_list(db.get('pmid')),
+        'link':            _as_list(db.get('link')),
+        # UI hints from .md
+        'top_genes':       _as_list(db.get('top_genes')),
+        'top_cat':         _as_list(db.get('top_cat')),
+        'top_num':         _as_list(db.get('top_num')),
     }
 
     raw_md = db.get('markdown')
