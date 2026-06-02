@@ -5,9 +5,10 @@
 {% block content %}
 <div class="breadcrumb">
     <a href="/">datasets</a> /
-    {{ group_id or folder_name }}
-    {% if group_id and group_id != folder_name %}<span style="color:#aaa"> ({{ folder_name }})</span>{% endif %}
+    {{ folder_name }}
+    {% if group_id and group_id != folder_name %}<span class="slug">({{ group_id }})</span>{% endif %}
 </div>
+<h1 class="page-title">{{ folder_name }}</h1>
 
 <div class="stats-row">
     <div>datasets: <span class="val">{{ datasets|length }}</span></div>

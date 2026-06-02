@@ -5,9 +5,12 @@
 {% block content %}
 <div class="breadcrumb">
     <a href="/">datasets</a> /
-    <a href="/browse/{{ folder_browse_id }}">{{ group_id or folder_name }}</a> /
-    {{ info.file_id or dataset_name }}
+    <a href="/browse/{{ folder_browse_id }}">{{ folder_name }}</a>
+    {% if group_id and group_id != folder_name %}<span class="slug">({{ group_id }})</span>{% endif %} /
+    {{ dataset_name }}
+    {% if file_id and file_id != dataset_name %}<span class="slug">({{ file_id }})</span>{% endif %}
 </div>
+<h1 class="page-title">{{ dataset_name }}</h1>
 
 {% if info %}
 <div class="stats-row">

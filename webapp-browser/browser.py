@@ -331,8 +331,21 @@ async def folder_view(request: Request, browse_id: str):
             status_code=404
         )
 
+    # Friendly group name (from the collection metadata in any of the datasets);
+    # falls back to the short group_id when not declared.
+    friendly_group = None
+    try:
+        all_dbs = _all_databases(_api_url(request))
+        for db in all_dbs:
+            if (db.get('group_id') or db['id'].split('/')[0]) == group_id:
+                friendly_group = (db.get('collection') or {}).get('group')
+                if friendly_group:
+                    break
+    except Exception:
+        pass
+
     return templates.TemplateResponse(request, "folder.html", {
-        "folder_name": group_id,
+        "folder_name": friendly_group or group_id,
         "folder_browse_id": group_id,
         "group_id": group_id,
         "description_html": description_html,
@@ -423,11 +436,16 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         for name, stats in layer_stats.items()
     ]
 
+    collection = db.get('collection') or {}
+    friendly_group = collection.get('group') or group_id
+    dataset_title = db.get('title') or file_id
+
     return templates.TemplateResponse(request, "dataset.html", {
-        "folder_name": group_id,
+        "folder_name": friendly_group,
         "folder_browse_id": group_id,
         "group_id": group_id,
-        "dataset_name": db.get('title') or file_id,
+        "dataset_name": dataset_title,
+        "file_id": file_id,
         "db_id": db_id,
         "info": info,
         "markdown_content": markdown_content,
