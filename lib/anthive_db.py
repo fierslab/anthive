@@ -278,24 +278,26 @@ class AnthiveDB:
             DataFrame with cell data
         """
 
-        # Build SELECT clause
+        # Build SELECT clause. All literal VALUES go into `params` and are
+        # bound via DuckDB `?` placeholders — never f-string'd. Identifiers
+        # (column names, layer table) go through `safe_ident()` and are
+        # double-quoted; that's safe because the regex blocks every char
+        # that would let an attacker break out of the identifier.
         select_parts = ["c.cell_name"]
+        params: List[Any] = []
 
         # Add gene expression columns if requested
         if genes:
             layer_table = safe_ident(f"layer__{layer}")
             for gene in genes:
-                # NOTE: gene-name string interpolation here is a separate
-                # known issue (see QA findings) — needs callers to be
-                # refactored to thread bound parameters through. The layer
-                # identifier is now safely quoted.
                 gene_alias = safe_ident(gene)
                 select_parts.append(f"""
                     (SELECT value
                      FROM {layer_table}
                      WHERE cell_name = c.cell_name
-                     AND gene_name = '{gene}') AS {gene_alias}
+                     AND gene_name = ?) AS {gene_alias}
                 """)
+                params.append(gene)
 
         # Add metadata columns if requested
         metadata_joins = []
@@ -356,19 +358,23 @@ class AnthiveDB:
                 else:
                     continue
 
+                # `field` was validated against num_fields / cat_fields (which
+                # come from the duckdb schema), so safe_ident() will accept it
+                # and produce a properly quoted identifier.
+                col_sql = safe_ident(field)
+
                 if isinstance(value, tuple) and len(value) == 2:
                     # Range filter: field:(min, max)
-                    where_parts.append(f'{prefix}."{field}" BETWEEN {value[0]} AND {value[1]}')
+                    where_parts.append(f'{prefix}.{col_sql} BETWEEN ? AND ?')
+                    params.extend([value[0], value[1]])
                 elif isinstance(value, list):
                     # IN list: field:[v1, v2, ...]
-                    quoted = ', '.join(f"'{v}'" for v in value)
-                    where_parts.append(f'{prefix}."{field}" IN ({quoted})')
+                    placeholders = ', '.join(['?'] * len(value))
+                    where_parts.append(f'{prefix}.{col_sql} IN ({placeholders})')
+                    params.extend(value)
                 else:
-                    # Exact match
-                    if isinstance(value, str):
-                        where_parts.append(f'{prefix}."{field}" = \'{value}\'')
-                    else:
-                        where_parts.append(f'{prefix}."{field}" = {value}')
+                    where_parts.append(f'{prefix}.{col_sql} = ?')
+                    params.append(value)
 
         # Build inner SQL (filters applied here, sampling wraps this)
         inner_sql = f"""
@@ -380,17 +386,17 @@ class AnthiveDB:
         if where_parts:
             inner_sql += f" WHERE {' AND '.join(where_parts)}"
 
-        # Wrap in USING SAMPLE when requested (applied after filters)
+        # Wrap in USING SAMPLE when requested (applied after filters).
+        # `sample` / `limit` are coerced to int — they cannot carry SQL.
         if sample:
-            sql = f"SELECT * FROM ({inner_sql}) USING SAMPLE {sample} ROWS (reservoir)"
+            sql = f"SELECT * FROM ({inner_sql}) USING SAMPLE {int(sample)} ROWS (reservoir)"
         else:
             sql = inner_sql
 
         if limit:
-            sql += f" LIMIT {limit}"
+            sql += f" LIMIT {int(limit)}"
 
-        # Execute and return
-        df = self._conn.execute(sql).fetchdf()
+        df = self._conn.execute(sql, params).fetchdf()
         return df
 
     def get_embedding_data(self, embedding_id: str,

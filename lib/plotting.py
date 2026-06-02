@@ -34,23 +34,52 @@ def _render_figure(
     dpi: int,
     output_format: str = 'png',
     caption: Optional[str] = None,
+    source_url: Optional[str] = None,
 ) -> bytes:
     """Render figure to bytes in the requested format and close it.
 
-    For PDF output the caption is embedded as a figure-level text annotation
-    at the bottom. For PNG/SVG the caption is not embedded — the caller passes
-    it back to the client via the X-Plot-Caption response header.
+    Provenance embedding:
+      - PDF: caption + source_url rendered as small grey footer lines.
+      - PNG: caption + source_url written as tEXt chunks via matplotlib's
+        `metadata` kwarg (`Title`, `Description`, `Source`). Survives save-as.
+      - SVG: same metadata keys → XML `<metadata>` element. Also survives.
+
+    For PNG/SVG, the caption is ALSO returned via the `X-Plot-Caption` /
+    `X-Source-URL` HTTP headers so HTTP clients see provenance without
+    parsing image metadata.
     """
     if output_format not in _VALID_FORMATS:
         output_format = 'png'
-    if output_format == 'pdf' and caption:
-        fig.text(
-            0.5, 0.01, caption,
-            ha='center', va='bottom', fontsize=7, color='#555555',
-            wrap=True,
-        )
+
+    # PDF: render caption + source URL as visible footer text.
+    if output_format == 'pdf':
+        footer_lines = []
+        if caption:
+            footer_lines.append(caption)
+        if source_url:
+            footer_lines.append(source_url)
+        for i, line in enumerate(reversed(footer_lines)):
+            fig.text(
+                0.5, 0.005 + i * 0.012, line,
+                ha='center', va='bottom', fontsize=6,
+                color='#555555' if i == len(footer_lines) - 1 else '#888888',
+                wrap=True,
+            )
+
+    # PNG / SVG: structured metadata via matplotlib savefig kwarg.
+    metadata: dict = {}
+    if caption:
+        metadata['Title'] = caption[:200]
+        metadata['Description'] = caption
+    if source_url:
+        metadata['Source'] = source_url
+    metadata['Software'] = 'anthive ant-serve / matplotlib'
+
     buf = io.BytesIO()
-    fig.savefig(buf, format=output_format, dpi=dpi, bbox_inches='tight')
+    save_kwargs = {'format': output_format, 'dpi': dpi, 'bbox_inches': 'tight'}
+    if output_format in ('png', 'svg', 'pdf') and metadata:
+        save_kwargs['metadata'] = metadata
+    fig.savefig(buf, **save_kwargs)
     plt.close(fig)
     buf.seek(0)
     return buf.getvalue()
@@ -360,6 +389,7 @@ def plot_scatter(
     alpha: float = 0.8,
     palette: str = _DEFAULT_PALETTE,
     caption: Optional[str] = None,
+    source_url: Optional[str] = None,
 ) -> bytes:
     """Scatter plot on two embedding dimensions, optionally colored by any field.
 
@@ -425,7 +455,7 @@ def plot_scatter(
     ax.set_title(color_field or 'UMAP')
     sns.despine(ax=ax)
 
-    return _render_figure(fig, dpi, output_format, caption)
+    return _render_figure(fig, dpi, output_format, caption, source_url)
 
 
 def plot_distribution(
@@ -439,6 +469,7 @@ def plot_distribution(
     dpi: int = 150,
     output_format: str = 'png',
     caption: Optional[str] = None,
+    source_url: Optional[str] = None,
 ) -> bytes:
     """Univariate distribution plot: ecdf, kde, or histogram.
 
@@ -468,7 +499,7 @@ def plot_distribution(
     ax.set_title(f'{x_field} ({geom})')
     sns.despine(ax=ax)
 
-    return _render_figure(fig, dpi, output_format, caption)
+    return _render_figure(fig, dpi, output_format, caption, source_url)
 
 
 def plot_grouped(
@@ -482,6 +513,7 @@ def plot_grouped(
     dpi: int = 150,
     output_format: str = 'png',
     caption: Optional[str] = None,
+    source_url: Optional[str] = None,
 ) -> bytes:
     """Values grouped by a categorical field: bar (with CI), box, or violin.
 
@@ -519,7 +551,7 @@ def plot_grouped(
     sns.despine(ax=ax)
     fig.tight_layout()
 
-    return _render_figure(fig, dpi, output_format, caption)
+    return _render_figure(fig, dpi, output_format, caption, source_url)
 
 
 def plot_heatmap(
@@ -529,6 +561,7 @@ def plot_heatmap(
     dpi: int = 150,
     output_format: str = 'png',
     caption: Optional[str] = None,
+    source_url: Optional[str] = None,
 ) -> bytes:
     """Heatmap of mean gene expression per category group.
 
@@ -555,4 +588,4 @@ def plot_heatmap(
     plt.setp(ax.get_xticklabels(), rotation=45, ha='right', fontsize=8)
     fig.tight_layout()
 
-    return _render_figure(fig, dpi, output_format, caption)
+    return _render_figure(fig, dpi, output_format, caption, source_url)

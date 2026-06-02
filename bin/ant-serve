@@ -1882,23 +1882,39 @@ def _resolve_field_kind(
 
 
 def _get_top_genes_by_mean(db, n_genes: int, layer: str) -> List[str]:
-    """Return top n_genes names ranked by mean expression."""
+    """Return top n_genes names ranked by mean expression.
+
+    Both branches use bound parameters (`?`) for n_genes and `safe_ident()`
+    for the layer table — no f-string SQL interpolation of user input.
+    """
     try:
         db.require_gene_bins()
         rows = db._conn.execute(
             'SELECT g.gene_name FROM __gene_bins b '
             'JOIN __genes g USING (gene_id) '
             'ORDER BY b.mean_expr DESC '
-            f'LIMIT {n_genes}'
+            'LIMIT ?',
+            [n_genes],
         ).fetchall()
         return [r[0] for r in rows]
     except Exception:
+        # Validate the layer exists, then route through safe_ident so the
+        # identifier is properly quoted (closes a SQL-injection vector that
+        # surfaced in the v0 implementation).
+        available = db._get_layers()
+        if layer not in available:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Layer '{layer}' not in this dataset (available: {available})",
+            )
+        layer_table = safe_ident(f"layer__{layer}")
         rows = db._conn.execute(
             f'SELECT gene_name, AVG(value) AS avg_expr '
-            f'FROM layer__{layer} '
+            f'FROM {layer_table} '
             f'GROUP BY gene_name '
             f'ORDER BY avg_expr DESC '
-            f'LIMIT {n_genes}'
+            f'LIMIT ?',
+            [n_genes],
         ).fetchall()
         return [r[0] for r in rows]
 
@@ -1952,6 +1968,276 @@ def _parse_subset(subset_params: List[str]) -> Optional[Dict[str, Any]]:
     return merged or None
 
 
+# ── plot response cache ───────────────────────────────────────────────────────
+#
+# In-memory LRU keyed on (db_id, query string, output format, duckdb mtime
+# fingerprint). Plots are deterministic in their inputs, so repeat requests
+# return the cached bytes instantly. mtime in the key invalidates a stale
+# entry the moment the duckdb is rebuilt (the new key simply misses; the
+# LRU bound evicts the old entry over time). /admin/rescan also wipes the
+# cache eagerly.
+
+import hashlib as _plot_hashlib
+import os as _plot_os
+from collections import OrderedDict as _PlotOrderedDict
+from threading import Lock as _PlotLock
+
+_PLOT_CACHE_MAX_ENTRIES = 256
+_plot_cache: "_PlotOrderedDict[str, dict]" = _PlotOrderedDict()
+_plot_cache_lock = _PlotLock()
+_plot_cache_stats = {'hits': 0, 'misses': 0, 'evictions': 0}
+
+
+def _plot_db_fingerprint(db_url: str) -> str:
+    """Stable per-deposit fingerprint. mtime for local files, the URL
+    itself for s3:// (S3 deposits don't change underneath a running server)."""
+    if db_url.startswith('s3://'):
+        return db_url
+    try:
+        return f"{_plot_os.path.getmtime(db_url):.0f}"
+    except OSError:
+        return db_url
+
+
+def _plot_cache_key(db_id: str, query: str, output_format: str, fingerprint: str) -> str:
+    raw = f"{db_id}|{query}|{output_format}|{fingerprint}"
+    return _plot_hashlib.sha1(raw.encode()).hexdigest()
+
+
+def _plot_cache_get(key: str) -> Optional[dict]:
+    with _plot_cache_lock:
+        entry = _plot_cache.get(key)
+        if entry is None:
+            _plot_cache_stats['misses'] += 1
+            return None
+        _plot_cache.move_to_end(key)
+        _plot_cache_stats['hits'] += 1
+        return entry
+
+
+def _plot_cache_put(key: str, entry: dict) -> None:
+    with _plot_cache_lock:
+        _plot_cache[key] = entry
+        _plot_cache.move_to_end(key)
+        while len(_plot_cache) > _PLOT_CACHE_MAX_ENTRIES:
+            _plot_cache.popitem(last=False)
+            _plot_cache_stats['evictions'] += 1
+
+
+def _plot_cache_clear() -> int:
+    """Drop every cached plot. Returns the number of entries removed."""
+    with _plot_cache_lock:
+        n = len(_plot_cache)
+        _plot_cache.clear()
+        return n
+
+
+# ── plot dispatch (handler registry) ──────────────────────────────────────────
+#
+# Each geom (scatter / violin-box-bar / histogram-ecdf-kde / heatmap) has its
+# own handler. The dispatch keeps the endpoint body thin and makes it trivial
+# to add a new geom: write a handler, register it. The handler receives a
+# PlotRequest + a PlotContext (db connection + a resolve helper for typing
+# field names against the dataset's schema).
+
+from dataclasses import dataclass as _plot_dataclass
+
+
+@_plot_dataclass(frozen=True)
+class PlotRequest:
+    """Validated inputs to a plot handler — what the endpoint forwards."""
+    db_id: str
+    geom: str
+    x: Optional[str]
+    y: Optional[str]
+    color: Optional[str]
+    output_format: str
+    layer: str
+    width: float
+    height: float
+    dpi: int
+    bins: int
+    point_size: float
+    alpha: float
+    palette: str
+    ci: bool
+    n_genes: int
+    filters: Optional[Dict[str, Any]]
+    sample: Optional[int]
+    source_url: str
+
+
+@_plot_dataclass
+class PlotContext:
+    """Database handle + schema/resolver helpers shared across handlers."""
+    db: Any
+    available_embeddings: List[str]
+    categorical_fields: List[str]
+    numerical_fields: List[str]
+
+    def resolve(self, field_name: str):
+        return _resolve_field_kind(
+            field_name, self.available_embeddings,
+            self.categorical_fields, self.numerical_fields, self.db,
+        )
+
+
+def _handle_scatter(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
+    emb_id = req.x or ('X_umap' if 'X_umap' in ctx.available_embeddings
+                       else (ctx.available_embeddings[0] if ctx.available_embeddings else None))
+    if not emb_id:
+        raise HTTPException(400, detail="No embeddings available for scatter plot")
+    embedding_df = ctx.db.get_embedding_data(emb_id, n_dims=2, filters=req.filters, sample=req.sample)
+
+    color_df = None
+    color_field_name = None
+    color_kind = 'categorical'
+    if req.color:
+        color_field_name, color_kind = ctx.resolve(req.color)
+        sampled_cells = embedding_df['cell_name'].tolist() if req.sample else None
+        color_filters = dict(req.filters) if req.filters else {}
+        if sampled_cells:
+            color_filters['cell_name'] = sampled_cells
+        used_filters = color_filters if sampled_cells else req.filters
+        if color_kind == 'gene':
+            color_df = ctx.db.get_cell_table(genes=[color_field_name], layer=req.layer, filters=used_filters)
+        else:
+            color_df = ctx.db.get_cell_table(metadata_fields=[color_field_name], filters=used_filters)
+
+    x_label = str(embedding_df.columns[-2]).replace('dim_', 'Dim ')
+    y_label = str(embedding_df.columns[-1]).replace('dim_', 'Dim ')
+    caption = plotting.build_caption(req.db_id, req.geom, emb_id, 'embedding',
+                                     None, color_field_name, req.layer)
+    image_bytes = plotting.plot_scatter(
+        embedding_df=embedding_df,
+        color_df=color_df,
+        color_field=color_field_name,
+        color_kind=color_kind,
+        x_label=x_label,
+        y_label=y_label,
+        width=req.width, height=req.height, dpi=req.dpi,
+        output_format=req.output_format,
+        point_size=req.point_size, alpha=req.alpha, palette=req.palette,
+        caption=caption, source_url=req.source_url,
+    )
+    return image_bytes, caption
+
+
+def _handle_grouped(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
+    """Handles violin / box / bar — all share x=categorical, optional y."""
+    if not req.x:
+        raise HTTPException(400, detail=f"geom='{req.geom}' requires x (categorical field)")
+    x_name, x_kind = ctx.resolve(req.x)
+    if x_kind != 'categorical':
+        raise HTTPException(400, detail=(
+            f"geom='{req.geom}' requires x to be categorical; '{req.x}' resolved as '{x_kind}'"
+        ))
+    y_name = None
+    if req.y:
+        y_name, y_kind = ctx.resolve(req.y)
+        if y_kind == 'gene':
+            data_df = ctx.db.get_cell_table(genes=[y_name], metadata_fields=[x_name],
+                                            layer=req.layer, filters=req.filters, sample=req.sample)
+        else:
+            data_df = ctx.db.get_cell_table(metadata_fields=[x_name, y_name],
+                                            filters=req.filters, sample=req.sample)
+    else:
+        data_df = ctx.db.get_cell_table(metadata_fields=[x_name],
+                                        filters=req.filters, sample=req.sample)
+
+    caption = plotting.build_caption(req.db_id, req.geom, x_name, x_kind, y_name, None, req.layer)
+    image_bytes = plotting.plot_grouped(
+        data_df=data_df, x_field=x_name, y_field=y_name,
+        geom=req.geom, ci=req.ci,
+        width=req.width, height=req.height, dpi=req.dpi,
+        output_format=req.output_format,
+        caption=caption, source_url=req.source_url,
+    )
+    return image_bytes, caption
+
+
+def _handle_distribution(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
+    """Handles histogram / ecdf / kde — univariate distribution of x, optional color hue."""
+    if not req.x:
+        raise HTTPException(400, detail=f"geom='{req.geom}' requires x (gene or numerical field)")
+    x_name, x_kind = ctx.resolve(req.x)
+    color_name = None
+    if req.color:
+        color_name, _ = ctx.resolve(req.color)
+        if x_kind == 'gene':
+            data_df = ctx.db.get_cell_table(genes=[x_name], metadata_fields=[color_name],
+                                            layer=req.layer, filters=req.filters, sample=req.sample)
+        else:
+            data_df = ctx.db.get_cell_table(metadata_fields=[x_name, color_name],
+                                            filters=req.filters, sample=req.sample)
+    else:
+        if x_kind == 'gene':
+            data_df = ctx.db.get_cell_table(genes=[x_name], layer=req.layer,
+                                            filters=req.filters, sample=req.sample)
+        else:
+            data_df = ctx.db.get_cell_table(metadata_fields=[x_name],
+                                            filters=req.filters, sample=req.sample)
+
+    caption = plotting.build_caption(req.db_id, req.geom, x_name, x_kind, None, color_name, req.layer)
+    image_bytes = plotting.plot_distribution(
+        data_df=data_df, x_field=x_name,
+        geom=req.geom, color_field=color_name,
+        bins=req.bins,
+        width=req.width, height=req.height, dpi=req.dpi,
+        output_format=req.output_format,
+        caption=caption, source_url=req.source_url,
+    )
+    return image_bytes, caption
+
+
+def _handle_heatmap(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
+    if not req.y:
+        raise HTTPException(400, detail="geom='heatmap' requires y (categorical field)")
+    y_name, y_kind = ctx.resolve(req.y)
+    if y_kind != 'categorical':
+        raise HTTPException(400, detail=(
+            f"geom='heatmap' requires y to be categorical; '{req.y}' resolved as '{y_kind}'"
+        ))
+    if req.x:
+        # Resolve each gene exactly once (was duplicated in the v0 implementation).
+        gene_list: List[str] = []
+        for g in (s.strip() for s in req.x.split(',')):
+            hits = ctx.db.search_genes(g, exact=True, limit=1)
+            if hits:
+                gene_list.append(hits[0])
+        if not gene_list:
+            raise HTTPException(400, detail=f"None of the genes in x='{req.x}' were found")
+    else:
+        gene_list = _get_top_genes_by_mean(ctx.db, req.n_genes, req.layer)
+
+    data_df = ctx.db.get_cell_table(genes=gene_list, metadata_fields=[y_name],
+                                    layer=req.layer, filters=req.filters, sample=req.sample)
+    mean_expr_df = data_df.groupby(y_name)[gene_list].mean()
+
+    caption = plotting.build_caption(req.db_id, req.geom, req.x, 'gene', y_name, None, req.layer)
+    image_bytes = plotting.plot_heatmap(
+        mean_expr_df=mean_expr_df,
+        width=req.width, height=req.height, dpi=req.dpi,
+        output_format=req.output_format,
+        caption=caption, source_url=req.source_url,
+    )
+    return image_bytes, caption
+
+
+# Registry: geom → handler. Adding a new geom is now: write a handler,
+# add a line here, add the geom name to _PLOT_GEOMS.
+_PLOT_HANDLERS: Dict[str, Any] = {
+    'scatter':   _handle_scatter,
+    'violin':    _handle_grouped,
+    'box':       _handle_grouped,
+    'bar':       _handle_grouped,
+    'histogram': _handle_distribution,
+    'ecdf':      _handle_distribution,
+    'kde':       _handle_distribution,
+    'heatmap':   _handle_heatmap,
+}
+
+
 # ── unified plot endpoint ──────────────────────────────────────────────────────
 
 @app.get("/databases/{db_id:path}/plot", tags=["plots"])
@@ -1963,25 +2249,26 @@ async def plot(
     color: Optional[str] = Query(None, description="Color-encoding field (auto-typed)"),
     output_format: str = Query('png', alias='format', description="png | svg | pdf"),
     layer: str = Query('X', description="Expression layer"),
-    width: float = Query(8.0),
-    height: float = Query(6.0),
-    dpi: int = Query(150),
-    bins: int = Query(20),
-    point_size: float = Query(3.0),
-    alpha: float = Query(0.8),
+    width: float = Query(8.0, gt=1.0, le=32.0, description="Figure width in inches (1–32)"),
+    height: float = Query(6.0, gt=1.0, le=32.0, description="Figure height in inches (1–32)"),
+    dpi: int = Query(150, ge=72, le=600, description="Resolution dots per inch (72–600)"),
+    bins: int = Query(20, ge=2, le=500),
+    point_size: float = Query(3.0, gt=0.0, le=200.0),
+    alpha: float = Query(0.8, ge=0.0, le=1.0),
     palette: str = Query('tab20'),
     ci: bool = Query(True, description="Show 95% CI on bar plots"),
-    n_genes: int = Query(20, description="Top genes for heatmap when x not given"),
+    n_genes: int = Query(20, ge=1, le=200, description="Top genes for heatmap when x not given"),
     subset: List[str] = Query(default=[], description=(
         "Cell subset filter(s). Repeatable. Formats: "
         "'field:value' (exact), 'field:v1,v2' (IN list), 'field:min..max' (range). "
         "Example: subset=sex:female&subset=condition:AD"
     )),
-    sample: Optional[int] = Query(None, description=(
+    sample: Optional[int] = Query(None, ge=1, le=1_000_000, description=(
         "Random subsample: draw at most this many cells using DuckDB reservoir sampling"
         "(near-zero overhead, applied after subset filters). "
         "Example: sample=10000. If larger than the cell count, all cells are used."
     )),
+    request: Request = None,  # type: ignore[assignment]
 ):
     """Unified grammar-of-graphics plot endpoint.
 
@@ -1996,153 +2283,51 @@ async def plot(
     if output_format not in _PLOT_MIME_TYPES:
         raise HTTPException(400, detail=f"Unknown format '{output_format}'. Valid: png, svg, pdf")
 
+    # Cache lookup — keyed on (db_id, query string, format, file fingerprint).
+    # If the duckdb hasn't changed since we last rendered this exact query,
+    # return the cached bytes directly.
+    source_url = str(request.url) if request is not None else ''
+    try:
+        db_fingerprint = _plot_db_fingerprint(registry.get_database_path(db_id))
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Dataset '{db_id}' not found")
+    query_string = request.url.query if request is not None else ''
+    cache_key = _plot_cache_key(db_id, query_string, output_format, db_fingerprint)
+    cached = _plot_cache_get(cache_key)
+    if cached is not None:
+        return Response(
+            content=cached['bytes'],
+            media_type=cached['mime'],
+            headers={
+                'X-Plot-Caption':   cached['caption'],
+                'X-Plot-Format':    output_format,
+                'X-Source-URL':     cached['source_url'],
+                'X-Plot-Cache':     'HIT',
+                'ETag':             f'"{cache_key}"',
+                'Cache-Control':    'public, max-age=3600',
+            },
+        )
+
+    plot_req = PlotRequest(
+        db_id=db_id, geom=geom, x=x, y=y, color=color,
+        output_format=output_format, layer=layer,
+        width=width, height=height, dpi=dpi, bins=bins,
+        point_size=point_size, alpha=alpha, palette=palette,
+        ci=ci, n_genes=n_genes,
+        filters=filters, sample=sample,
+        source_url=source_url,
+    )
+    handler = _PLOT_HANDLERS[geom]  # geom validity already checked above
+
     def _sync_plot():
         with _pooled_db(db_id) as db:
-            available_embeddings = db._get_embeddings()
-            categorical_fields = db._get_categorical_fields()
-            numerical_fields = db._get_numerical_fields()
-
-            def resolve(field_name):
-                return _resolve_field_kind(
-                    field_name, available_embeddings,
-                    categorical_fields, numerical_fields, db,
-                )
-
-            # ── scatter ────────────────────────────────────────────────────────
-            if geom == 'scatter':
-                emb_id = x or ('X_umap' if 'X_umap' in available_embeddings
-                               else (available_embeddings[0] if available_embeddings else None))
-                if not emb_id:
-                    raise HTTPException(400, detail="No embeddings available for scatter plot")
-                embedding_df = db.get_embedding_data(emb_id, n_dims=2, filters=filters, sample=sample)
-
-                color_df = None
-                color_field_name = None
-                color_kind = 'categorical'
-                if color:
-                    color_field_name, color_kind = resolve(color)
-                    # Fetch color data only for the sampled cells (not the full dataset)
-                    sampled_cells = embedding_df['cell_name'].tolist() if sample else None
-                    color_filters = dict(filters) if filters else {}
-                    if sampled_cells:
-                        color_filters['cell_name'] = sampled_cells
-                    if color_kind == 'gene':
-                        color_df = db.get_cell_table(genes=[color_field_name], layer=layer, filters=color_filters if sampled_cells else filters)
-                    else:
-                        color_df = db.get_cell_table(metadata_fields=[color_field_name], filters=color_filters if sampled_cells else filters)
-
-                x_label = str(embedding_df.columns[-2]).replace('dim_', 'Dim ')
-                y_label = str(embedding_df.columns[-1]).replace('dim_', 'Dim ')
-                caption = plotting.build_caption(db_id, geom, emb_id, 'embedding',
-                                                 None, color_field_name, layer)
-                image_bytes = plotting.plot_scatter(
-                    embedding_df=embedding_df,
-                    color_df=color_df,
-                    color_field=color_field_name,
-                    color_kind=color_kind,
-                    x_label=x_label,
-                    y_label=y_label,
-                    width=width, height=height, dpi=dpi,
-                    output_format=output_format,
-                    point_size=point_size, alpha=alpha, palette=palette,
-                    caption=caption,
-                )
-
-            # ── violin / box / bar ─────────────────────────────────────────────
-            elif geom in ('violin', 'box', 'bar'):
-                if not x:
-                    raise HTTPException(400, detail=f"geom='{geom}' requires x (categorical field)")
-                x_name, x_kind = resolve(x)
-                if x_kind != 'categorical':
-                    raise HTTPException(400, detail=(
-                        f"geom='{geom}' requires x to be categorical; "
-                        f"'{x}' resolved as '{x_kind}'"
-                    ))
-                y_name = None
-                if y:
-                    y_name, y_kind = resolve(y)
-                    if y_kind == 'gene':
-                        data_df = db.get_cell_table(genes=[y_name], metadata_fields=[x_name], layer=layer, filters=filters, sample=sample)
-                    else:
-                        data_df = db.get_cell_table(metadata_fields=[x_name, y_name], filters=filters, sample=sample)
-                else:
-                    data_df = db.get_cell_table(metadata_fields=[x_name], filters=filters, sample=sample)
-
-                caption = plotting.build_caption(db_id, geom, x_name, x_kind,
-                                                 y_name, None, layer)
-                image_bytes = plotting.plot_grouped(
-                    data_df=data_df,
-                    x_field=x_name,
-                    y_field=y_name,
-                    geom=geom, ci=ci,
-                    width=width, height=height, dpi=dpi,
-                    output_format=output_format,
-                    caption=caption,
-                )
-
-            # ── histogram / ecdf / kde ─────────────────────────────────────────
-            elif geom in ('histogram', 'ecdf', 'kde'):
-                if not x:
-                    raise HTTPException(400, detail=f"geom='{geom}' requires x (gene or numerical field)")
-                x_name, x_kind = resolve(x)
-                color_name = None
-                if color:
-                    color_name, _ = resolve(color)
-                    if x_kind == 'gene':
-                        data_df = db.get_cell_table(genes=[x_name], metadata_fields=[color_name], layer=layer, filters=filters, sample=sample)
-                    else:
-                        data_df = db.get_cell_table(metadata_fields=[x_name, color_name], filters=filters, sample=sample)
-                else:
-                    if x_kind == 'gene':
-                        data_df = db.get_cell_table(genes=[x_name], layer=layer, filters=filters, sample=sample)
-                    else:
-                        data_df = db.get_cell_table(metadata_fields=[x_name], filters=filters, sample=sample)
-
-                caption = plotting.build_caption(db_id, geom, x_name, x_kind,
-                                                 None, color_name, layer)
-                image_bytes = plotting.plot_distribution(
-                    data_df=data_df,
-                    x_field=x_name,
-                    geom=geom, color_field=color_name,
-                    bins=bins,
-                    width=width, height=height, dpi=dpi,
-                    output_format=output_format,
-                    caption=caption,
-                )
-
-            # ── heatmap ────────────────────────────────────────────────────────
-            else:  # heatmap
-                if not y:
-                    raise HTTPException(400, detail="geom='heatmap' requires y (categorical field)")
-                y_name, y_kind = resolve(y)
-                if y_kind != 'categorical':
-                    raise HTTPException(400, detail=(
-                        f"geom='heatmap' requires y to be categorical; "
-                        f"'{y}' resolved as '{y_kind}'"
-                    ))
-                if x:
-                    gene_list = [g.strip() for g in x.split(',')]
-                    gene_list = [db.search_genes(g, exact=True, limit=1)[0]
-                                 for g in gene_list
-                                 if db.search_genes(g, exact=True, limit=1)]
-                    if not gene_list:
-                        raise HTTPException(400, detail=f"None of the genes in x='{x}' were found")
-                else:
-                    gene_list = _get_top_genes_by_mean(db, n_genes, layer)
-
-                data_df = db.get_cell_table(genes=gene_list, metadata_fields=[y_name], layer=layer, filters=filters, sample=sample)
-                mean_expr_df = data_df.groupby(y_name)[gene_list].mean()
-
-                caption = plotting.build_caption(db_id, geom, x, 'gene',
-                                                 y_name, None, layer)
-                image_bytes = plotting.plot_heatmap(
-                    mean_expr_df=mean_expr_df,
-                    width=width, height=height, dpi=dpi,
-                    output_format=output_format,
-                    caption=caption,
-                )
-
-        return image_bytes, caption
+            ctx = PlotContext(
+                db=db,
+                available_embeddings=db._get_embeddings(),
+                categorical_fields=db._get_categorical_fields(),
+                numerical_fields=db._get_numerical_fields(),
+            )
+            return handler(plot_req, ctx)
 
     try:
         image_bytes, caption = await asyncio.to_thread(_sync_plot)
@@ -2155,12 +2340,23 @@ async def plot(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+    mime = _PLOT_MIME_TYPES[output_format]
+    _plot_cache_put(cache_key, {
+        'bytes':      image_bytes,
+        'caption':    caption,
+        'source_url': source_url,
+        'mime':       mime,
+    })
     return Response(
         content=image_bytes,
-        media_type=_PLOT_MIME_TYPES[output_format],
+        media_type=mime,
         headers={
-            'X-Plot-Caption': caption,
-            'X-Plot-Format': output_format,
+            'X-Plot-Caption':   caption,
+            'X-Plot-Format':    output_format,
+            'X-Source-URL':     source_url,
+            'X-Plot-Cache':     'MISS',
+            'ETag':             f'"{cache_key}"',
+            'Cache-Control':    'public, max-age=3600',
         },
     )
 
@@ -2638,9 +2834,37 @@ async def rescan_databases():
         if geneset_registry is not None:
             _build_score_index()
             result['scored_databases'] = len(_score_index_by_db)
+        # Drop the plot-response cache — any cached image may now be stale.
+        result['plot_cache_cleared'] = _plot_cache_clear()
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/admin/plot-cache/stats", tags=["admin"])
+async def plot_cache_stats():
+    """Return the plot response cache stats (hits / misses / evictions / size)."""
+    with _plot_cache_lock:
+        size = len(_plot_cache)
+        total_bytes = sum(len(e.get('bytes', b'')) for e in _plot_cache.values())
+    hits, misses = _plot_cache_stats['hits'], _plot_cache_stats['misses']
+    total = hits + misses
+    return {
+        'size':         size,
+        'max_size':     _PLOT_CACHE_MAX_ENTRIES,
+        'memory_bytes': total_bytes,
+        'hits':         hits,
+        'misses':       misses,
+        'evictions':    _plot_cache_stats['evictions'],
+        'hit_rate':     (hits / total) if total else 0.0,
+    }
+
+
+@app.post("/admin/plot-cache/clear", tags=["admin"])
+async def plot_cache_clear():
+    """Drop all cached plot responses."""
+    n = _plot_cache_clear()
+    return {'cleared': n}
 
 
 # ── Genesets ───────────────────────────────────────────────────────────────────
