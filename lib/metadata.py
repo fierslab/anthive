@@ -1,7 +1,18 @@
 """
 Metadata management for anthive
 
-Functions for reading and writing .md files with YAML preambles
+Functions for reading and writing the `.md` YAML preambles that hold
+anthive-catalog fields (`id`, `sha256`, `n_obs`, `layer_stats`,
+`obscat_include`, `default_layer`, …).
+
+DEPRECATED: as of the 2026-06 h5adstore migration, experimental
+annotation (organism, tissue, cell_type, technology, …) NO LONGER
+lives in `.md` frontmatter. It lives in `<basename>.h5ad.mus` sidecars
+plus folder-level `.env` cascade — read via `lib/mus.py`. The
+`ANNOTATION_FIELDS`, `ANNOTATION_LIST_FIELDS`, `ANNOTATION_CONVENTIONS`,
+and `validate_annotation_field()` symbols below are kept for backward
+compatibility with `tests/test_metadata.py` and any legacy importer
+that hasn't been migrated yet. New code should use `lib.mus`.
 """
 
 import re
@@ -12,16 +23,17 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 
+# ── DEPRECATED — use lib/mus.py for experiment annotation ────────────────
+# These describe the pre-migration `annotation:` block in `.md` frontmatter.
+# Vocabulary is now upstream at codeberg.org/mfiers/mus.
 ANNOTATION_FIELDS = [
     'organism', 'tissue', 'celltype', 'disease', 'condition',
     'region', 'sex', 'age', 'strain', 'technology', 'technology_category',
     'accession', 'doi', 'link',
 ]
 
-# These annotation fields are always stored as lists
 ANNOTATION_LIST_FIELDS = {'doi', 'link', 'tissue', 'disease', 'condition', 'region', 'technology'}
 
-# Expandable: add more fields here to enforce additional conventions
 ANNOTATION_CONVENTIONS = {
     'sex': {
         'choices': ['male', 'female', 'mixed'],
@@ -41,11 +53,11 @@ ANNOTATION_CONVENTIONS = {
 
 
 def validate_annotation_field(field: str, value: Any) -> Optional[str]:
-    """
-    Validate an annotation field value against known conventions.
+    """DEPRECATED — see lib/mus.validate_value() and lib/mus.validate_annotation().
 
-    Returns:
-        Error string if invalid, else None
+    Validate an annotation field value against the (legacy) anthive-side
+    conventions. Returns error string if invalid, else None. New code
+    should validate against the joint vocabulary via `lib/mus.py`.
     """
     conv = ANNOTATION_CONVENTIONS.get(field)
     if not conv:

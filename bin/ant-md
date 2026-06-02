@@ -88,28 +88,20 @@ def _apply_updates_to_file(file_path: Path, updates: dict) -> int:
         return 1
 
     for key, value in updates.items():
-        if key.startswith('annotation.'):
-            # Freeform annotation key (e.g. annotation.custom=foo)
-            ann_key = key[len('annotation.'):]
-            if not isinstance(value, str) and value is not None:
-                print(f"Error: freeform annotation key '{key}' value must be a string", file=sys.stderr)
-                return 1
-            if 'annotation' not in metadata or not isinstance(metadata.get('annotation'), dict):
-                metadata['annotation'] = {}
-            metadata['annotation'][ann_key] = value
-            print(f"Set annotation.{ann_key} = {repr(value)}")
-        elif key in ANNOTATION_FIELDS:
-            # Known annotation field — route into annotation: subkey
-            error = validate_annotation_field(key, value)
-            if error:
-                print(f"Error: {error}", file=sys.stderr)
-                return 1
-            if 'annotation' not in metadata or not isinstance(metadata.get('annotation'), dict):
-                metadata['annotation'] = {}
-            if key in ANNOTATION_LIST_FIELDS and not isinstance(value, list):
-                value = [value]
-            metadata['annotation'][key] = value
-            print(f"Set annotation.{key} = {repr(value)}")
+        if key.startswith('annotation.') or key in ANNOTATION_FIELDS:
+            # POST-2026-06: annotation fields no longer live in .md frontmatter.
+            # Direct the user at the new location instead of silently writing
+            # to the wrong place.
+            print(
+                f"ERROR: '{key}' is an experimental annotation field. After the "
+                f"2026-06 h5adstore migration these live in `<basename>.h5ad.mus` "
+                f"sidecars + folder `.env` cascade — not in `.md` frontmatter.\n"
+                f"  Use the `mus` CLI instead:\n"
+                f"    mus -C <folder> config set {key.split('.', 1)[-1]} {value!r}\n"
+                f"  Or edit the sidecar directly. See data/h5adstore/CONVENTIONS.md.",
+                file=sys.stderr,
+            )
+            return 1
         else:
             metadata[key] = value
             print(f"Set {key} = {repr(value)}")

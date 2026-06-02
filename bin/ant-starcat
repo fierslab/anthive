@@ -67,7 +67,7 @@ sys.path.insert(0, str(lib_dir))
 from anthive_db import AnnotationWriter, AnnotationWriterError   # type: ignore
 from config import get_config   # type: ignore
 from h5adstore import find_h5ad   # type: ignore
-from metadata import parse_md_file   # type: ignore
+import mus   # type: ignore
 
 
 # Hard-coded for the v1 catalog. If a v2 is added, lift these to CLI flags
@@ -88,11 +88,15 @@ def _h5adstore_root() -> Path:
     return candidate
 
 
-def _check_organism(md_path: Path) -> str:
-    """Refuse anything other than human (until a mouse catalog exists)."""
-    metadata, _ = parse_md_file(md_path)
-    annotation = metadata.get('annotation') or {}
-    organism = annotation.get('organism')
+def _check_organism(md_path: Path, h5adstore_root: Path) -> str:
+    """Refuse anything other than human (until a mouse catalog exists).
+
+    Reads `organism` from the post-2026-06 model (`.h5ad.mus` sidecar +
+    `.env` cascade) — not from `.md` frontmatter.
+    """
+    h5ad_path = md_path.with_suffix('.h5ad')
+    ann = mus.resolve_annotation(h5ad_path, root=h5adstore_root)
+    organism = ann.get('organism')
     if isinstance(organism, list):
         organisms_lower = {str(o).lower() for o in organism}
     elif organism is None:
@@ -101,7 +105,8 @@ def _check_organism(md_path: Path) -> str:
         organisms_lower = {str(organism).lower()}
     if not organisms_lower:
         sys.exit(
-            f"ERROR: {md_path.name} has no annotation.organism field. "
+            f"ERROR: {md_path.name} has no organism set in the mus cascade "
+            f"(.env) or sidecar (.h5ad.mus). "
             f"ant-starcat requires explicit organism declaration."
         )
     if 'human' not in organisms_lower:
@@ -376,7 +381,7 @@ def main() -> int:
     print(f"=== {entry.db_id} ({entry.readable_id}) ===")
 
     # --- Pre-flight: organism, files, duckdb ---
-    _check_organism(entry.md_path)
+    _check_organism(entry.md_path, h5ad_root)
     if not entry.h5ad_path.exists():
         sys.exit(f"ERROR: {entry.h5ad_path} not present locally. Pull first.")
     if not entry.duckdb_path.exists() and not args.dry_run:

@@ -71,7 +71,8 @@ from geneset import (
     validate_registry as validate_geneset_registry,
 )
 from md_check import generate_file_id, generate_group_id
-from metadata import ANNOTATION_FIELDS, parse_md_file
+from metadata import parse_md_file
+import mus
 import plotting
 import analytics
 
@@ -686,37 +687,21 @@ class DatabaseRegistry:
         print(f"Metadata ready: {status}")
 
     def _resolve_annotations(self, md_path: Path, file_metadata: dict) -> dict:
-        """
-        Build resolved annotation dict for a file by walking the folder tree.
+        """Build resolved annotation dict for a deposit.
 
-        Inheritance order (later wins):
-          1. index.md annotation from data_folder (shallowest)
-          2. index.md annotation from intermediate folders
-          3. index.md annotation in md_path.parent (deepest)
-          4. File's own annotation: subkey
-          5. Backward-compat: root-level annotation fields fill gaps
+        Reads the post-2026-06 model: the dataset's `<basename>.h5ad.mus`
+        sidecar plus the `.env` cascade walking up the folder tree.
+        See `lib/mus.py` and `data/h5adstore/CONVENTIONS.md`.
+
+        Legacy alias `celltype` is populated alongside the canonical
+        `cell_type` so API consumers that haven't been ported keep working.
         """
-        merged = {}
-        try:
-            rel_parts = md_path.parent.relative_to(self.data_folder).parts
-        except ValueError:
-            rel_parts = ()
-        ancestors = [self.data_folder] + [
-            self.data_folder.joinpath(*rel_parts[:i + 1])
-            for i in range(len(rel_parts))
-        ]
-        for folder in ancestors:
-            idx = folder / 'index.md'
-            if idx.exists():
-                idx_meta, _ = parse_md_file(idx)
-                merged.update(idx_meta.get('annotation') or {})
-        # File's own annotation overrides inherited
-        merged.update(file_metadata.get('annotation') or {})
-        # Backward compat: root-level fields fill in gaps
-        for field in ANNOTATION_FIELDS:
-            if field not in merged and file_metadata.get(field) is not None:
-                merged[field] = file_metadata[field]
-        return merged
+        h5ad_path = md_path.with_suffix('.h5ad')
+        ann = dict(mus.resolve_annotation(h5ad_path, root=self.data_folder))
+        # Backward-compat alias for /databases/{db_id}/info consumers
+        if 'cell_type' in ann and 'celltype' not in ann:
+            ann['celltype'] = ann['cell_type']
+        return ann
 
     def _load_database_metadata(self, db_id: str, extra: Dict[str, str]) -> Dict[str, Any]:
         """Load metadata from .md files and database"""

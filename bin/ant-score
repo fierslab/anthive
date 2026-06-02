@@ -93,6 +93,7 @@ from geneset import (                    # type: ignore
 )
 from h5adstore import H5adEntry, find_h5ad   # type: ignore
 from metadata import parse_md_file, write_md_file   # type: ignore
+import mus                                            # type: ignore
 
 
 SEPARATOR = '::'
@@ -417,10 +418,11 @@ def _process_one_h5ad(entry: H5adEntry,
     # Override args.layer so _score_experiment / _score_one see the resolved value.
     args.layer = layer_arg
 
-    # Resolve dataset organism from .md annotation; falls back to a heuristic
-    # only if the .md says nothing.
-    md_annotation = md_metadata.get('annotation') or {}
-    md_organism = md_annotation.get('organism')
+    # Resolve dataset organism from the mus cascade (.env) + sidecar
+    # (.h5ad.mus); falls back to a heuristic only if neither declares it.
+    h5adstore_root = _h5adstore_root()
+    mus_annotation = mus.resolve_annotation(entry.h5ad_path, root=h5adstore_root)
+    md_organism = mus_annotation.get('organism')
     if isinstance(md_organism, list):
         md_organism = [str(o).lower() for o in md_organism]
     elif md_organism is not None:
