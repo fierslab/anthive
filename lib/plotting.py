@@ -543,9 +543,16 @@ def plot_distribution(
     if geom == 'ecdf':
         sns.ecdfplot(data=data_df, x=x_field, hue=hue, ax=ax)
     elif geom == 'kde':
-        sns.kdeplot(data=data_df, x=x_field, hue=hue, ax=ax)
+        # `common_norm=False` lets each group sum to 1 independently — usually
+        # what people want when comparing distributions of different sizes.
+        sns.kdeplot(data=data_df, x=x_field, hue=hue, ax=ax,
+                    common_norm=False, fill=True, alpha=0.4)
     else:
-        sns.histplot(data=data_df, x=x_field, bins=bins, hue=hue, ax=ax)
+        # seaborn's default multiple='layer' overlays groups with transparency,
+        # which reads as stacked-but-blurry. 'dodge' puts them side-by-side
+        # which is what a "multi-category bar plot" should look like.
+        sns.histplot(data=data_df, x=x_field, bins=bins, hue=hue, ax=ax,
+                     multiple='dodge' if hue else 'layer')
 
     ax.set_xlabel(x_field)
     ax.set_title(f'{x_field} ({geom})')
@@ -568,13 +575,17 @@ def plot_grouped(
     source_url: Optional[str] = None,
     font_family: Optional[str] = None,
     font_size: Optional[float] = None,
+    hue_field: Optional[str] = None,
 ) -> bytes:
     """Values grouped by a categorical field: bar (with CI), box, or violin.
 
     Args:
-        data_df:   DataFrame with [cell_name, x_field, (y_field)].
+        data_df:   DataFrame with [cell_name, x_field, (y_field), (hue_field)].
         x_field:   Categorical column for grouping (X axis).
         y_field:   Gene or numerical column for Y axis. None → cell counts.
+        hue_field: Optional second categorical column. Bars / boxes / violins
+                   for each (x_field × hue_field) combination are dodged
+                   side-by-side, NOT stacked.
         geom:      'bar' | 'box' | 'violin'.
         ci:        Show 95% confidence interval on bar plots (seaborn bootstrap).
         output_format: 'png' | 'svg' | 'pdf'.
@@ -584,21 +595,36 @@ def plot_grouped(
     fig, ax = plt.subplots(figsize=(width, height))
 
     cat_order = data_df[x_field].value_counts().index.tolist()
+    hue = hue_field if hue_field and hue_field in data_df.columns else None
+    hue_order = (data_df[hue].value_counts().index.tolist()
+                 if hue else None)
 
     if y_field is None:
-        counts = data_df[x_field].value_counts().reindex(cat_order)
-        sns.barplot(x=counts.index, y=counts.values, ax=ax)
-        ax.set_ylabel('Cell count')
+        if hue:
+            # 2-factor count: bar of count(cells) per (x_field × hue_field),
+            # dodged side-by-side. Use crosstab → long form.
+            ct = pd.crosstab(data_df[x_field], data_df[hue])
+            ct = ct.reindex(cat_order)[hue_order]
+            long = ct.reset_index().melt(id_vars=x_field, var_name=hue, value_name='count')
+            sns.barplot(data=long, x=x_field, y='count', hue=hue,
+                        order=cat_order, hue_order=hue_order, ax=ax)
+            ax.set_ylabel('Cell count')
+        else:
+            counts = data_df[x_field].value_counts().reindex(cat_order)
+            sns.barplot(x=counts.index, y=counts.values, ax=ax)
+            ax.set_ylabel('Cell count')
     elif geom == 'box':
-        sns.boxplot(data=data_df, x=x_field, y=y_field,
-                    order=cat_order, ax=ax, showfliers=False)
+        sns.boxplot(data=data_df, x=x_field, y=y_field, hue=hue,
+                    order=cat_order, hue_order=hue_order,
+                    ax=ax, showfliers=False)
     elif geom == 'violin':
-        sns.violinplot(data=data_df, x=x_field, y=y_field,
-                       order=cat_order, ax=ax)
+        sns.violinplot(data=data_df, x=x_field, y=y_field, hue=hue,
+                       order=cat_order, hue_order=hue_order, ax=ax)
     else:  # bar
         errorbar = ('ci', 95) if ci else None
-        sns.barplot(data=data_df, x=x_field, y=y_field,
-                    order=cat_order, ax=ax, errorbar=errorbar)
+        sns.barplot(data=data_df, x=x_field, y=y_field, hue=hue,
+                    order=cat_order, hue_order=hue_order,
+                    ax=ax, errorbar=errorbar)
 
     ax.set_xlabel(x_field)
     plt.setp(ax.get_xticklabels(), rotation=45, ha='right')

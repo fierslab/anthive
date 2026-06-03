@@ -126,7 +126,7 @@
 
     {% elif geom in ('violin', 'box', 'bar') %}
     <fieldset>
-      <legend>group by</legend>
+      <legend>group by (x)</legend>
       <select name="x" id="f-x">
         <option value="">— pick categorical —</option>
         {% for c in plot_meta.cat_fields %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
@@ -142,6 +142,14 @@
       {% if geom == 'bar' %}
       <label style="margin-top:4px"><input type="checkbox" name="ci" id="f-ci" checked> show 95% CI</label>
       {% endif %}
+    </fieldset>
+    <fieldset>
+      <legend>split by (optional)</legend>
+      <label>second categorical → side-by-side {{ geom }}s</label>
+      <select name="color" id="f-color">
+        <option value="">— none —</option>
+        {% for c in plot_meta.cat_fields %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
+      </select>
     </fieldset>
 
     {% elif geom in ('histogram', 'ecdf', 'kde') %}

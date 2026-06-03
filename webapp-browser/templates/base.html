@@ -137,19 +137,64 @@
         {% block content %}{% endblock %}
     </main>
 
-    <!-- ── localStorage notice (EU ePrivacy compliance, functional storage) ── -->
+    <!-- ── EU ePrivacy / GDPR storage notice — informational only ──────────
+         The data stored falls under "strictly necessary" / functional
+         storage per ePrivacy Art. 5(3) and so does not require prior
+         consent; this notice is purely informational, dismissable, and
+         offers a clear-data control. No "accept" wording — no consent is
+         being collected. -->
     <div id="storage-notice" style="display:none;position:fixed;bottom:8px;right:8px;
-        max-width:340px;background:#fff;border:1px solid var(--border);
-        box-shadow:0 4px 16px rgba(0,0,0,.12);padding:8px 12px;font-size:11px;
-        line-height:1.5;color:var(--text-muted);z-index:1000;border-radius:3px">
-      This site stores small bits of <strong>functional</strong> data in your
-      browser's <code>localStorage</code> (only your plot-display preferences
-      — figure size, font, DPI, palette). No tracking, no analytics, no cookies.
-      <div style="margin-top:6px;display:flex;gap:8px;align-items:center">
+        max-width:380px;background:#fff;border:1px solid var(--border);
+        box-shadow:0 4px 16px rgba(0,0,0,.12);padding:10px 12px;font-size:11px;
+        line-height:1.55;color:var(--text);z-index:1000;border-radius:3px">
+      <div style="font-weight:600;font-size:11px;color:var(--text);margin-bottom:4px">
+        Your data stays in your browser
+      </div>
+      This catalogue stores your <strong>plot-display preferences</strong>
+      (figure size, DPI, font, palette) locally so they survive the page reload.
+      No analytics, no profiling, no tracking pixels, no third-party services.
+      <a href="#" id="storage-details" style="white-space:nowrap">details ▾</a>
+
+      <div id="storage-details-body" style="display:none;margin-top:6px;padding-top:6px;border-top:1px dotted var(--border);color:var(--text-muted)">
+        <strong>What's stored, where, and why:</strong>
+        <ul style="margin:4px 0 4px 16px;padding:0">
+          <li><code>anthive.plot.settings</code> — your figure size, DPI, font, palette.
+              Written when you change a setting on a plot page.</li>
+          <li><code>anthive.storage.notice.ack</code> — that you closed this notice.
+              Without it the notice would re-appear on every page reload.</li>
+        </ul>
+        Both entries are kept in your browser's <code>localStorage</code> — they
+        are <strong>never</strong> sent to the catalogue server, and no third
+        party can read them. They persist until you clear browser data or
+        click "clear my data" below.
+
+        <p style="margin:6px 0 4px"><strong>Cookies:</strong> the catalogue UI
+        (this site, <code>ant-browse</code>) does not set any HTTP cookies. The
+        catalogue's REST API (<code>ant-serve</code>) returns
+        <code>Cache-Control</code> headers for cached plot images but no
+        identifying cookies. The optional Streamlit visualisation subsite at
+        <code>/streamlit/</code> sets short-lived session cookies for its
+        WebSocket connection; they expire when you close the tab and carry no
+        identifier across sessions.</p>
+
+        <p style="margin:6px 0 4px"><strong>Logs:</strong> the server records
+        HTTP requests (URL, status, timestamp) for operational debugging. These
+        do not contain plot preferences and are not shared with third parties.
+        Anonymous access logging is required for security and uptime monitoring
+        under GDPR Art. 6(1)(f).</p>
+
+        <p style="margin:6px 0 0"><strong>Legal basis:</strong> the local-storage
+        usage above is functional / strictly necessary under ePrivacy Art. 5(3)
+        and therefore does not require prior consent. This notice is
+        informational. You can clear all stored data at any time using the
+        button below — the catalogue keeps working without it.</p>
+      </div>
+
+      <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
         <button id="storage-ack"
-          style="font-size:10px;padding:2px 10px;background:var(--link);
+          style="font-size:11px;padding:3px 12px;background:var(--link);
           color:#fff;border:none;border-radius:2px;cursor:pointer;font-family:inherit">
-          got it
+          dismiss
         </button>
         <a href="#" id="storage-clear" style="font-size:10px">clear my data</a>
       </div>
@@ -162,8 +207,10 @@
       try {
         if (localStorage.getItem(KEY) !== '1') notice.style.display = '';
       } catch (e) { /* localStorage unavailable — don't show notice */ }
-      var ack = document.getElementById('storage-ack');
-      var clear = document.getElementById('storage-clear');
+      var ack    = document.getElementById('storage-ack');
+      var clear  = document.getElementById('storage-clear');
+      var det    = document.getElementById('storage-details');
+      var detBody= document.getElementById('storage-details-body');
       if (ack) ack.addEventListener('click', function() {
         try { localStorage.setItem(KEY, '1'); } catch (e) {}
         notice.style.display = 'none';
@@ -172,7 +219,13 @@
         e.preventDefault();
         try { localStorage.clear(); } catch (e2) {}
         notice.style.display = 'none';
-        alert('All locally-stored anthive preferences cleared.');
+        alert('All locally-stored anthive preferences cleared from this browser.');
+      });
+      if (det) det.addEventListener('click', function(e) {
+        e.preventDefault();
+        var open = detBody.style.display !== 'none';
+        detBody.style.display = open ? 'none' : 'block';
+        det.textContent = open ? 'details ▾' : 'details ▴';
       });
     })();
     </script>

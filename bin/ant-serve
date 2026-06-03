@@ -2127,7 +2127,9 @@ def _handle_scatter(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
 
 
 def _handle_grouped(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
-    """Handles violin / box / bar — all share x=categorical, optional y."""
+    """Handles violin / box / bar — x=categorical, optional y, optional
+    second-factor `color` (rendered as side-by-side dodged hue, never stacked).
+    """
     if not req.x:
         raise HTTPException(400, detail=f"geom='{req.geom}' requires x (categorical field)")
     x_name, x_kind = ctx.resolve(req.x)
@@ -2135,22 +2137,39 @@ def _handle_grouped(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         raise HTTPException(400, detail=(
             f"geom='{req.geom}' requires x to be categorical; '{req.x}' resolved as '{x_kind}'"
         ))
+
+    hue_name: Optional[str] = None
+    if req.color:
+        hue_name, hue_kind = ctx.resolve(req.color)
+        if hue_kind != 'categorical':
+            raise HTTPException(400, detail=(
+                f"geom='{req.geom}' 'split by' requires categorical; "
+                f"'{req.color}' resolved as '{hue_kind}'"
+            ))
+
+    extra_meta = [x_name] + ([hue_name] if hue_name else [])
     y_name = None
     if req.y:
         y_name, y_kind = ctx.resolve(req.y)
         if y_kind == 'gene':
-            data_df = ctx.db.get_cell_table(genes=[y_name], metadata_fields=[x_name],
-                                            layer=req.layer, filters=req.filters, sample=req.sample)
+            data_df = ctx.db.get_cell_table(
+                genes=[y_name], metadata_fields=extra_meta,
+                layer=req.layer, filters=req.filters, sample=req.sample,
+            )
         else:
-            data_df = ctx.db.get_cell_table(metadata_fields=[x_name, y_name],
-                                            filters=req.filters, sample=req.sample)
+            data_df = ctx.db.get_cell_table(
+                metadata_fields=extra_meta + [y_name],
+                filters=req.filters, sample=req.sample,
+            )
     else:
-        data_df = ctx.db.get_cell_table(metadata_fields=[x_name],
-                                        filters=req.filters, sample=req.sample)
+        data_df = ctx.db.get_cell_table(
+            metadata_fields=extra_meta,
+            filters=req.filters, sample=req.sample,
+        )
 
-    caption = plotting.build_caption(req.db_id, req.geom, x_name, x_kind, y_name, None, req.layer)
+    caption = plotting.build_caption(req.db_id, req.geom, x_name, x_kind, y_name, hue_name, req.layer)
     image_bytes = plotting.plot_grouped(
-        data_df=data_df, x_field=x_name, y_field=y_name,
+        data_df=data_df, x_field=x_name, y_field=y_name, hue_field=hue_name,
         geom=req.geom, ci=req.ci,
         width=req.width, height=req.height, dpi=req.dpi,
         output_format=req.output_format,
