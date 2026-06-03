@@ -88,18 +88,44 @@ def _render_figure(
                 wrap=True,
             )
 
-    # PNG / SVG: structured metadata via matplotlib savefig kwarg.
+    # Structured metadata via matplotlib savefig — different backends accept
+    # different key sets, so we build per-format dicts:
+    #   PNG: tolerant (accepts any string key → tEXt chunk)
+    #   SVG: Dublin Core only (Title, Creator, Subject, Description, Date,
+    #        Type, Format, Identifier, Source, Relation, Coverage, Rights,
+    #        Language, Keywords, Publisher, Contributor)
+    #   PDF: Title, Author, Subject, Keywords, Producer, Creator,
+    #        CreationDate, ModDate, Trapped
+    # We use the common-denominator keys (Title, Description, Source,
+    # Creator) and tag PNG with an extra Software key.
     metadata: dict = {}
-    if caption:
-        metadata['Title'] = caption[:200]
-        metadata['Description'] = caption
-    if source_url:
-        metadata['Source'] = source_url
-    metadata['Software'] = 'anthive ant-serve / matplotlib'
+    if output_format == 'png':
+        if caption:
+            metadata['Title'] = caption[:200]
+            metadata['Description'] = caption
+        if source_url:
+            metadata['Source'] = source_url
+        metadata['Software'] = 'anthive ant-serve / matplotlib'
+    elif output_format == 'svg':
+        if caption:
+            metadata['Title'] = caption[:200]
+            metadata['Description'] = caption
+        if source_url:
+            metadata['Source'] = source_url
+        metadata['Creator'] = 'anthive ant-serve / matplotlib'
+    elif output_format == 'pdf':
+        if caption:
+            metadata['Title'] = caption[:200]
+            metadata['Subject'] = caption
+        # PDF doesn't have a Source key — fold the URL into Keywords so
+        # the URL is still searchable in the file's metadata.
+        if source_url:
+            metadata['Keywords'] = source_url
+        metadata['Creator'] = 'anthive ant-serve / matplotlib'
 
     buf = io.BytesIO()
     save_kwargs = {'format': output_format, 'dpi': dpi, 'bbox_inches': 'tight'}
-    if output_format in ('png', 'svg', 'pdf') and metadata:
+    if metadata:
         save_kwargs['metadata'] = metadata
     fig.savefig(buf, **save_kwargs)
     plt.close(fig)

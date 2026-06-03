@@ -136,5 +136,45 @@
     <main>
         {% block content %}{% endblock %}
     </main>
+
+    <!-- ── localStorage notice (EU ePrivacy compliance, functional storage) ── -->
+    <div id="storage-notice" style="display:none;position:fixed;bottom:8px;right:8px;
+        max-width:340px;background:#fff;border:1px solid var(--border);
+        box-shadow:0 4px 16px rgba(0,0,0,.12);padding:8px 12px;font-size:11px;
+        line-height:1.5;color:var(--text-muted);z-index:1000;border-radius:3px">
+      This site stores small bits of <strong>functional</strong> data in your
+      browser's <code>localStorage</code> (only your plot-display preferences
+      — figure size, font, DPI, palette). No tracking, no analytics, no cookies.
+      <div style="margin-top:6px;display:flex;gap:8px;align-items:center">
+        <button id="storage-ack"
+          style="font-size:10px;padding:2px 10px;background:var(--link);
+          color:#fff;border:none;border-radius:2px;cursor:pointer;font-family:inherit">
+          got it
+        </button>
+        <a href="#" id="storage-clear" style="font-size:10px">clear my data</a>
+      </div>
+    </div>
+    <script>
+    (function() {
+      var KEY = 'anthive.storage.notice.ack';
+      var notice = document.getElementById('storage-notice');
+      if (!notice) return;
+      try {
+        if (localStorage.getItem(KEY) !== '1') notice.style.display = '';
+      } catch (e) { /* localStorage unavailable — don't show notice */ }
+      var ack = document.getElementById('storage-ack');
+      var clear = document.getElementById('storage-clear');
+      if (ack) ack.addEventListener('click', function() {
+        try { localStorage.setItem(KEY, '1'); } catch (e) {}
+        notice.style.display = 'none';
+      });
+      if (clear) clear.addEventListener('click', function(e) {
+        e.preventDefault();
+        try { localStorage.clear(); } catch (e2) {}
+        notice.style.display = 'none';
+        alert('All locally-stored anthive preferences cleared.');
+      });
+    })();
+    </script>
 </body>
 </html>

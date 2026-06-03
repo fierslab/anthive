@@ -225,8 +225,9 @@
           <option>tab20</option><option>tab10</option><option>Set1</option><option>Set2</option><option>Set3</option><option>Paired</option><option>viridis</option><option>plasma</option><option>mako</option>
         </select>
       </div>
-      <div style="display:flex;gap:6px;margin-top:6px">
-        <button type="button" id="settings-save" style="font-size:11px;padding:2px 8px">save defaults</button>
+      <div style="display:flex;gap:8px;margin-top:6px;align-items:center;font-size:10px;color:#888">
+        <span id="settings-status">saved automatically</span>
+        <span style="flex:1"></span>
         <button type="button" id="settings-reset" style="font-size:11px;padding:2px 8px">reset</button>
       </div>
     </div>
@@ -388,18 +389,26 @@
     e.preventDefault(); panel.classList.toggle('open');
   });
   applySettingsToForm(loadSettings());
-  document.querySelectorAll('#settings-panel input, #settings-panel select').forEach(el => {
-    el.addEventListener('change', scheduleRefresh);
-    if (el.tagName === 'INPUT') el.addEventListener('input', scheduleRefresh);
-  });
-  document.getElementById('settings-save').addEventListener('click', () => {
+  // Auto-persist every settings change, no button needed.
+  const _settingsStatus = document.getElementById('settings-status');
+  function autoSaveSettings() {
     saveSettings(readSettingsFromForm());
-    document.getElementById('settings-save').textContent = '✓ saved';
-    setTimeout(() => document.getElementById('settings-save').textContent = 'save defaults', 900);
+    if (_settingsStatus) {
+      _settingsStatus.textContent = '✓ saved';
+      clearTimeout(autoSaveSettings._t);
+      autoSaveSettings._t = setTimeout(
+        () => { _settingsStatus.textContent = 'saved automatically'; }, 1200);
+    }
+  }
+  document.querySelectorAll('#settings-panel input, #settings-panel select').forEach(el => {
+    el.addEventListener('change', () => { autoSaveSettings(); scheduleRefresh(); });
+    if (el.tagName === 'INPUT')
+      el.addEventListener('input', () => { autoSaveSettings(); scheduleRefresh(); });
   });
   document.getElementById('settings-reset').addEventListener('click', () => {
     saveSettings(DEFAULT_SETTINGS);
     applySettingsToForm(DEFAULT_SETTINGS);
+    if (_settingsStatus) _settingsStatus.textContent = '↻ reset';
     refreshDownloadLinks(); refresh();
   });
 
