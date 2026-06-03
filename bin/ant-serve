@@ -2060,6 +2060,8 @@ class PlotRequest:
     point_size: float
     alpha: float
     palette: str
+    font_family: str
+    font_size: float
     ci: bool
     n_genes: int
     filters: Optional[Dict[str, Any]]
@@ -2119,6 +2121,7 @@ def _handle_scatter(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         output_format=req.output_format,
         point_size=req.point_size, alpha=req.alpha, palette=req.palette,
         caption=caption, source_url=req.source_url,
+        font_family=req.font_family, font_size=req.font_size,
     )
     return image_bytes, caption
 
@@ -2152,6 +2155,7 @@ def _handle_grouped(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         width=req.width, height=req.height, dpi=req.dpi,
         output_format=req.output_format,
         caption=caption, source_url=req.source_url,
+        font_family=req.font_family, font_size=req.font_size,
     )
     return image_bytes, caption
 
@@ -2186,6 +2190,7 @@ def _handle_distribution(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str
         width=req.width, height=req.height, dpi=req.dpi,
         output_format=req.output_format,
         caption=caption, source_url=req.source_url,
+        font_family=req.font_family, font_size=req.font_size,
     )
     return image_bytes, caption
 
@@ -2220,6 +2225,7 @@ def _handle_heatmap(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         width=req.width, height=req.height, dpi=req.dpi,
         output_format=req.output_format,
         caption=caption, source_url=req.source_url,
+        font_family=req.font_family, font_size=req.font_size,
     )
     return image_bytes, caption
 
@@ -2256,6 +2262,8 @@ async def plot(
     point_size: float = Query(3.0, gt=0.0, le=200.0),
     alpha: float = Query(0.8, ge=0.0, le=1.0),
     palette: str = Query('tab20'),
+    font_family: str = Query('DejaVu Sans', description="matplotlib font family (e.g. 'Arial', 'Helvetica', 'DejaVu Sans', 'serif')"),
+    font_size: float = Query(10.0, ge=6.0, le=36.0, description="Base font size in pt; titles & ticks scale relative to this"),
     ci: bool = Query(True, description="Show 95% CI on bar plots"),
     n_genes: int = Query(20, ge=1, le=200, description="Top genes for heatmap when x not given"),
     subset: List[str] = Query(default=[], description=(
@@ -2313,6 +2321,7 @@ async def plot(
         output_format=output_format, layer=layer,
         width=width, height=height, dpi=dpi, bins=bins,
         point_size=point_size, alpha=alpha, palette=palette,
+        font_family=font_family, font_size=font_size,
         ci=ci, n_genes=n_genes,
         filters=filters, sample=sample,
         source_url=source_url,

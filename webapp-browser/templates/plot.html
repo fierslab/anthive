@@ -1,0 +1,486 @@
+{% extends "base.html" %}
+
+{% block title %}{{ geom_label }} — {{ dataset_name }} — anthive{% endblock %}
+
+{% block content %}
+<style>
+  /* Plot-page-specific styles — kept inline so the rest of the site is unaffected */
+  .plot-page { display: grid; grid-template-columns: 280px 1fr; gap: 12px; align-items: start; }
+  @media (max-width: 760px) { .plot-page { grid-template-columns: 1fr; } }
+
+  .plot-sidebar { display: flex; flex-direction: column; gap: 8px; }
+  .plot-sidebar fieldset {
+    border: 1px solid var(--border); padding: 6px 8px 8px;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .plot-sidebar legend { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; padding: 0 4px; }
+  .plot-sidebar label { font-size: 11px; color: var(--text-muted); margin-bottom: -2px; }
+  .plot-sidebar select,
+  .plot-sidebar input[type=text],
+  .plot-sidebar input[type=number] {
+    padding: 3px 6px; font-size: 12px; border: 1px solid var(--border);
+    background: #fff; font-family: var(--font); width: 100%; outline: none;
+  }
+  .plot-sidebar input:focus, .plot-sidebar select:focus { border-color: var(--link); }
+  .plot-sidebar .row { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+
+  .plot-area {
+    background: #fff; border: 1px solid var(--border); padding: 8px;
+    min-height: 400px; display: flex; flex-direction: column;
+  }
+  .plot-img {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    overflow: auto; min-height: 360px;
+  }
+  .plot-img img { max-width: 100%; max-height: 80vh; object-fit: contain; }
+  .plot-status {
+    font-size: 11px; color: var(--text-muted); display: flex; gap: 12px;
+    align-items: center; margin-top: 4px; flex-wrap: wrap;
+  }
+  .plot-status .err { color: #dc2626; }
+  .plot-status .spinner {
+    display: inline-block; width: 10px; height: 10px;
+    border: 2px solid #ddd; border-top-color: var(--link); border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .plot-toolbar {
+    display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
+    padding-bottom: 6px; border-bottom: 1px solid var(--border-light); margin-bottom: 6px;
+  }
+  .plot-toolbar a, .plot-toolbar button {
+    font-size: 11px; padding: 3px 8px; border: 1px solid var(--border);
+    background: #fff; color: var(--text); text-decoration: none; cursor: pointer;
+    font-family: var(--font); border-radius: 2px;
+  }
+  .plot-toolbar a:hover, .plot-toolbar button:hover { background: var(--hover); }
+  .plot-toolbar .dl-primary { background: #1d4ed8; color: #fff; border-color: #1d4ed8; }
+  .plot-toolbar .dl-primary:hover { background: #1e40af; }
+  .plot-toolbar .geom-select { font-size: 11px; padding: 3px 4px; }
+
+  .ac-wrap { position: relative; }
+  .ac-suggest {
+    position: absolute; top: 100%; left: 0; right: 0; max-height: 200px;
+    overflow-y: auto; background: #fff; border: 1px solid var(--border);
+    z-index: 50; box-shadow: 0 4px 10px rgba(0,0,0,.08); display: none;
+  }
+  .ac-suggest div { padding: 3px 8px; font-size: 12px; cursor: pointer; }
+  .ac-suggest div:hover, .ac-suggest div.active { background: #eef2ff; }
+
+  .settings-panel {
+    border: 1px dashed var(--border); padding: 6px 8px;
+    background: #fafafa; margin-top: 6px; display: none;
+  }
+  .settings-panel.open { display: block; }
+  .settings-panel .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; align-items: center; }
+
+  .src-url {
+    margin-top: 4px; font-family: var(--font-mono); font-size: 10px;
+    color: #888; word-break: break-all;
+  }
+  .src-url a { color: #888; }
+</style>
+
+<div class="breadcrumb">
+  <a href="/">datasets</a> /
+  <a href="/browse/{{ folder_browse_id }}">{{ folder_name }}</a> /
+  <a href="/browse/{{ folder_browse_id }}/{{ file_id }}">{{ dataset_name }}</a> /
+  <span>{{ geom_icon }} {{ geom_label }}</span>
+</div>
+<h1 class="page-title">{{ geom_icon }} {{ geom_label }} — {{ dataset_name }}</h1>
+
+<div class="plot-page">
+
+  {# ── Sidebar form ─────────────────────────────────────────────────────────── #}
+  <form class="plot-sidebar" id="plot-form" onsubmit="return false">
+
+    <fieldset>
+      <legend>plot type</legend>
+      <select class="geom-select" id="geom-switcher">
+        {% for g, info in all_geoms.items() %}
+        <option value="{{ g }}" {% if g == geom %}selected{% endif %}>{{ info.icon }} {{ info.label }}</option>
+        {% endfor %}
+      </select>
+    </fieldset>
+
+    {# ── geom-specific fields ──────────────────────────────────────────────── #}
+
+    {% if geom == 'scatter' %}
+    <fieldset>
+      <legend>embedding</legend>
+      <select name="x" id="f-x">
+        {% for emb in plot_meta.embeddings %}
+        <option value="{{ emb }}" {% if emb == 'X_umap' %}selected{% endif %}>{{ emb }}</option>
+        {% endfor %}
+      </select>
+    </fieldset>
+    <fieldset>
+      <legend>colour by</legend>
+      <label>field / gene</label>
+      <div class="ac-wrap">
+        <input type="text" name="color" id="f-color" autocomplete="off" placeholder="gene name or obs field">
+        <div class="ac-suggest" id="ac-color"></div>
+      </div>
+    </fieldset>
+
+    {% elif geom in ('violin', 'box', 'bar') %}
+    <fieldset>
+      <legend>group by</legend>
+      <select name="x" id="f-x">
+        <option value="">— pick categorical —</option>
+        {% for c in plot_meta.cat_fields %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
+      </select>
+    </fieldset>
+    <fieldset>
+      <legend>y axis</legend>
+      <label>(empty = cell count)</label>
+      <div class="ac-wrap">
+        <input type="text" name="y" id="f-y" autocomplete="off" placeholder="gene or numerical (optional)">
+        <div class="ac-suggest" id="ac-y"></div>
+      </div>
+      {% if geom == 'bar' %}
+      <label style="margin-top:4px"><input type="checkbox" name="ci" id="f-ci" checked> show 95% CI</label>
+      {% endif %}
+    </fieldset>
+
+    {% elif geom in ('histogram', 'ecdf', 'kde') %}
+    <fieldset>
+      <legend>x axis (required)</legend>
+      <div class="ac-wrap">
+        <input type="text" name="x" id="f-x" autocomplete="off" placeholder="gene or numerical">
+        <div class="ac-suggest" id="ac-x"></div>
+      </div>
+      {% if geom == 'histogram' %}
+      <label style="margin-top:4px">bins</label>
+      <input type="number" name="bins" id="f-bins" value="20" min="2" max="500">
+      {% endif %}
+    </fieldset>
+    <fieldset>
+      <legend>group by (optional)</legend>
+      <select name="color" id="f-color">
+        <option value="">— none —</option>
+        {% for c in plot_meta.cat_fields %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
+      </select>
+    </fieldset>
+
+    {% elif geom == 'heatmap' %}
+    <fieldset>
+      <legend>group by (rows)</legend>
+      <select name="y" id="f-y">
+        <option value="">— pick categorical —</option>
+        {% for c in plot_meta.cat_fields %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
+      </select>
+    </fieldset>
+    <fieldset>
+      <legend>genes (columns)</legend>
+      <label>comma-separated, or leave empty for top n by mean</label>
+      <input type="text" name="x" id="f-x" autocomplete="off" placeholder="e.g. TREM2, APOE, CX3CR1">
+      <label style="margin-top:4px">top n if blank</label>
+      <input type="number" name="n_genes" id="f-n_genes" value="20" min="1" max="200">
+    </fieldset>
+    {% endif %}
+
+    {# ── common ────────────────────────────────────────────────────────────── #}
+
+    <fieldset>
+      <legend>data</legend>
+      <label>layer</label>
+      <select name="layer" id="f-layer">
+        {% for layer in plot_meta.layers %}
+        <option value="{{ layer }}" {% if layer == plot_meta.default_layer %}selected{% endif %}>{{ layer }}</option>
+        {% endfor %}
+      </select>
+      <label style="margin-top:4px">sample N cells (optional)</label>
+      <input type="number" name="sample" id="f-sample" placeholder="e.g. 10000" min="100" max="1000000">
+      <label style="margin-top:4px">subset (advanced)</label>
+      <input type="text" name="subset" id="f-subset" autocomplete="off" placeholder="field:value or field:v1,v2">
+    </fieldset>
+
+    <button type="button" class="dl-primary" id="apply-btn"
+      style="margin-top:4px;padding:5px 10px;font-size:12px;background:#1d4ed8;color:#fff;border:1px solid #1d4ed8;cursor:pointer;font-family:inherit">
+      ↻ refresh
+    </button>
+
+    <a href="#" id="settings-toggle" style="font-size:11px;color:#888;margin-top:4px">⚙ figure settings…</a>
+    <div class="settings-panel" id="settings-panel">
+      <div class="pair">
+        <label>width (in)</label><input type="number" id="s-width" min="2" max="32" step="0.5">
+        <label>height (in)</label><input type="number" id="s-height" min="2" max="32" step="0.5">
+        <label>dpi</label><input type="number" id="s-dpi" min="72" max="600" step="10">
+        <label>point size</label><input type="number" id="s-point_size" min="0.5" max="20" step="0.5">
+        <label>alpha</label><input type="number" id="s-alpha" min="0" max="1" step="0.05">
+        <label>font family</label>
+        <select id="s-font_family">
+          <option>DejaVu Sans</option>
+          <option>Arial</option>
+          <option>Helvetica</option>
+          <option>Liberation Sans</option>
+          <option>serif</option>
+          <option>monospace</option>
+        </select>
+        <label>font size (pt)</label><input type="number" id="s-font_size" min="6" max="36" step="0.5">
+        <label>palette</label>
+        <select id="s-palette">
+          <option>tab20</option><option>tab10</option><option>Set1</option><option>Set2</option><option>Set3</option><option>Paired</option><option>viridis</option><option>plasma</option><option>mako</option>
+        </select>
+      </div>
+      <div style="display:flex;gap:6px;margin-top:6px">
+        <button type="button" id="settings-save" style="font-size:11px;padding:2px 8px">save defaults</button>
+        <button type="button" id="settings-reset" style="font-size:11px;padding:2px 8px">reset</button>
+      </div>
+    </div>
+  </form>
+
+  {# ── Preview + toolbar ─────────────────────────────────────────────────────── #}
+  <div class="plot-area">
+    <div class="plot-toolbar">
+      <a class="dl-primary" id="dl-png">⬇ PNG</a>
+      <a id="dl-svg">⬇ SVG</a>
+      <a id="dl-pdf">⬇ PDF (publication)</a>
+      <span style="flex:1"></span>
+      <a id="copy-url" href="#">copy URL</a>
+    </div>
+    <div class="plot-img" id="plot-img">
+      <span style="color:#aaa;font-size:13px">configure on the left to render</span>
+    </div>
+    <div class="plot-status" id="plot-status"></div>
+    <div class="src-url" id="src-url"></div>
+  </div>
+
+</div>
+
+<script>
+(function() {
+  const DB_ID   = {{ db_id|tojson }};
+  const API_URL = {{ api_url|tojson }};
+  const GEOM    = {{ geom|tojson }};
+  const BROWSE  = {{ ('/browse/' + folder_browse_id + '/' + file_id + '/plot/')|tojson }};
+
+  const SETTINGS_KEY = 'anthive.plot.settings';
+
+  // ── default settings (used until user saves their own)
+  const DEFAULT_SETTINGS = {
+    width: 8, height: 6, dpi: 150, point_size: 3, alpha: 0.8,
+    font_family: 'DejaVu Sans', font_size: 10, palette: 'tab20'
+  };
+
+  function loadSettings() {
+    try {
+      const raw = localStorage.getItem(SETTINGS_KEY);
+      if (!raw) return Object.assign({}, DEFAULT_SETTINGS);
+      return Object.assign({}, DEFAULT_SETTINGS, JSON.parse(raw));
+    } catch (e) { return Object.assign({}, DEFAULT_SETTINGS); }
+  }
+  function saveSettings(s) {
+    try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); } catch (e) {}
+  }
+  function applySettingsToForm(s) {
+    for (const k of Object.keys(DEFAULT_SETTINGS)) {
+      const el = document.getElementById('s-' + k);
+      if (el) el.value = s[k];
+    }
+  }
+  function readSettingsFromForm() {
+    const s = {};
+    for (const k of Object.keys(DEFAULT_SETTINGS)) {
+      const el = document.getElementById('s-' + k);
+      s[k] = el ? (typeof DEFAULT_SETTINGS[k] === 'number' ? Number(el.value) : el.value) : DEFAULT_SETTINGS[k];
+    }
+    return s;
+  }
+
+  // ── build API URL from form state
+  function buildUrl(format) {
+    format = format || 'png';
+    const params = new URLSearchParams();
+    params.set('geom', GEOM);
+    params.set('format', format);
+    // geom-specific fields
+    document.querySelectorAll('#plot-form [name]').forEach(el => {
+      const name = el.getAttribute('name');
+      if (!name) return;
+      if (el.type === 'checkbox') {
+        if (el.checked) params.set(name, 'true');
+        return;
+      }
+      const v = (el.value || '').trim();
+      if (v !== '') params.append(name, v);
+    });
+    // settings
+    const s = readSettingsFromForm();
+    for (const k of Object.keys(s)) {
+      if (s[k] !== '' && s[k] !== null && s[k] !== undefined) {
+        params.set(k, s[k]);
+      }
+    }
+    return `${API_URL.replace(/\/$/, '')}/databases/${DB_ID}/plot?${params.toString()}`;
+  }
+
+  // ── render preview
+  let renderToken = 0;
+  const imgBox  = document.getElementById('plot-img');
+  const status  = document.getElementById('plot-status');
+  const srcUrl  = document.getElementById('src-url');
+
+  async function refresh() {
+    renderToken++;
+    const my = renderToken;
+    const url = buildUrl('png');
+    status.innerHTML = '<span class="spinner"></span> rendering…';
+    srcUrl.innerHTML = `source: <a href="${url}">${url.split('?')[1]||''}</a>`;
+    try {
+      // Use a fresh Image so we can detect errors (img.onerror)
+      const img = new Image();
+      img.onload = () => {
+        if (my !== renderToken) return;
+        imgBox.innerHTML = '';
+        imgBox.appendChild(img);
+        status.textContent = '';
+      };
+      img.onerror = async () => {
+        if (my !== renderToken) return;
+        // Fetch to read the error body
+        try {
+          const r = await fetch(url);
+          const body = await r.text();
+          status.innerHTML = `<span class="err">render failed (HTTP ${r.status}): ${body.slice(0,300)}</span>`;
+        } catch (e) {
+          status.innerHTML = `<span class="err">${e.message}</span>`;
+        }
+      };
+      img.src = url;
+    } catch (e) {
+      status.innerHTML = `<span class="err">${e.message}</span>`;
+    }
+  }
+
+  function refreshDownloadLinks() {
+    document.getElementById('dl-png').href = buildUrl('png');
+    document.getElementById('dl-svg').href = buildUrl('svg');
+    document.getElementById('dl-pdf').href = buildUrl('pdf');
+    document.getElementById('dl-png').setAttribute('download', `${DB_ID.replace('/','_')}.${GEOM}.png`);
+    document.getElementById('dl-svg').setAttribute('download', `${DB_ID.replace('/','_')}.${GEOM}.svg`);
+    document.getElementById('dl-pdf').setAttribute('download', `${DB_ID.replace('/','_')}.${GEOM}.pdf`);
+  }
+
+  // ── geom switcher
+  document.getElementById('geom-switcher').addEventListener('change', e => {
+    window.location = BROWSE + e.target.value + window.location.search;
+  });
+
+  // ── apply button + change listeners (debounced)
+  let debounceTimer = null;
+  function scheduleRefresh() {
+    refreshDownloadLinks();
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(refresh, 400);
+  }
+  document.querySelectorAll('#plot-form [name]').forEach(el => {
+    el.addEventListener('change', scheduleRefresh);
+    if (el.tagName === 'INPUT') el.addEventListener('input', scheduleRefresh);
+  });
+  document.getElementById('apply-btn').addEventListener('click', () => { refreshDownloadLinks(); refresh(); });
+
+  // ── settings panel
+  const panel = document.getElementById('settings-panel');
+  document.getElementById('settings-toggle').addEventListener('click', e => {
+    e.preventDefault(); panel.classList.toggle('open');
+  });
+  applySettingsToForm(loadSettings());
+  document.querySelectorAll('#settings-panel input, #settings-panel select').forEach(el => {
+    el.addEventListener('change', scheduleRefresh);
+    if (el.tagName === 'INPUT') el.addEventListener('input', scheduleRefresh);
+  });
+  document.getElementById('settings-save').addEventListener('click', () => {
+    saveSettings(readSettingsFromForm());
+    document.getElementById('settings-save').textContent = '✓ saved';
+    setTimeout(() => document.getElementById('settings-save').textContent = 'save defaults', 900);
+  });
+  document.getElementById('settings-reset').addEventListener('click', () => {
+    saveSettings(DEFAULT_SETTINGS);
+    applySettingsToForm(DEFAULT_SETTINGS);
+    refreshDownloadLinks(); refresh();
+  });
+
+  // ── copy URL
+  document.getElementById('copy-url').addEventListener('click', e => {
+    e.preventDefault();
+    const url = buildUrl('png');
+    navigator.clipboard?.writeText(url);
+    const orig = e.target.textContent;
+    e.target.textContent = '✓ copied';
+    setTimeout(() => e.target.textContent = orig, 900);
+  });
+
+  // ── autocomplete (gene + obs fields) on free-text inputs
+  // Pre-fetch the categorical and numerical field lists; genes via /genes?q=
+  const OBS_CAT = {{ plot_meta.cat_fields|tojson }};
+  const OBS_NUM = {{ plot_meta.num_fields|tojson }};
+
+  function attachAutocomplete(inputId, listId, kinds /* ['gene', 'cat', 'num'] */) {
+    const input = document.getElementById(inputId);
+    const sug   = document.getElementById(listId);
+    if (!input || !sug) return;
+    let activeIdx = -1, currentMatches = [];
+    let lookupTimer = null;
+
+    async function fetchSuggestions(q) {
+      let matches = [];
+      if (kinds.includes('cat')) matches.push(...OBS_CAT.filter(c => c.toLowerCase().includes(q)));
+      if (kinds.includes('num')) matches.push(...OBS_NUM.filter(c => c.toLowerCase().includes(q)));
+      if (kinds.includes('gene') && q.length >= 1) {
+        try {
+          const r = await fetch(`${API_URL.replace(/\/$/, '')}/databases/${DB_ID}/genes?q=${encodeURIComponent(q)}&limit=8`);
+          if (r.ok) {
+            const data = await r.json();
+            const list = data.genes || data || [];
+            matches.push(...list.slice(0, 8));
+          }
+        } catch (e) {}
+      }
+      // dedupe while preserving order
+      const seen = new Set(); const out = [];
+      for (const m of matches) { if (!seen.has(m)) { seen.add(m); out.push(m); } }
+      return out.slice(0, 12);
+    }
+
+    function render(items) {
+      currentMatches = items; activeIdx = -1;
+      if (!items.length) { sug.style.display = 'none'; return; }
+      sug.innerHTML = items.map(it => `<div>${it}</div>`).join('');
+      sug.style.display = 'block';
+      sug.querySelectorAll('div').forEach((el, i) => {
+        el.addEventListener('mousedown', ev => { ev.preventDefault(); input.value = currentMatches[i]; sug.style.display='none'; scheduleRefresh(); });
+      });
+    }
+
+    input.addEventListener('input', () => {
+      const q = (input.value || '').trim().toLowerCase();
+      if (!q) { sug.style.display = 'none'; return; }
+      clearTimeout(lookupTimer);
+      lookupTimer = setTimeout(async () => render(await fetchSuggestions(q)), 200);
+    });
+    input.addEventListener('blur', () => setTimeout(() => sug.style.display = 'none', 150));
+    input.addEventListener('keydown', e => {
+      if (sug.style.display !== 'block') return;
+      const items = sug.querySelectorAll('div');
+      if (e.key === 'ArrowDown') { e.preventDefault(); activeIdx = (activeIdx + 1) % items.length; items.forEach((el,i)=>el.classList.toggle('active', i===activeIdx)); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); activeIdx = (activeIdx - 1 + items.length) % items.length; items.forEach((el,i)=>el.classList.toggle('active', i===activeIdx)); }
+      else if (e.key === 'Enter' && activeIdx >= 0) { e.preventDefault(); input.value = currentMatches[activeIdx]; sug.style.display='none'; scheduleRefresh(); }
+      else if (e.key === 'Escape') { sug.style.display='none'; }
+    });
+  }
+
+  // attach autocomplete to the inputs that have a matching .ac-suggest
+  attachAutocomplete('f-color', 'ac-color', ['gene','cat','num']);
+  attachAutocomplete('f-y',     'ac-y',     ['gene','num']);
+  attachAutocomplete('f-x',     'ac-x',     ['gene','num']);
+
+  // initial render
+  refreshDownloadLinks();
+  // Defer initial refresh slightly so all listeners are attached
+  setTimeout(refresh, 100);
+})();
+</script>
+{% endblock %}

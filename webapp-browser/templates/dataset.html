@@ -34,14 +34,20 @@
 </div>
 {% endif %}
 
-{# Visualize — prominent streamlit entry points #}
+{# Visualize — prominent plot entry points (in-app forms with autocomplete + downloads) #}
 {% if has_duckdb %}
 <div class="viz-row">
     <span class="viz-label">visualize</span>
-    <a href="/streamlit/gene?db={{ db_id | urlencode }}" class="viz-btn">📈 gene expression</a>
-    {% if info and info.obsm_keys %}<a href="/streamlit/umap?db={{ db_id | urlencode }}" class="viz-btn">🗺 UMAP scatter</a>{% endif %}
-    <a href="/streamlit/cat?db={{ db_id | urlencode }}" class="viz-btn">≡ categorical</a>
-    <a href="/streamlit/num?db={{ db_id | urlencode }}" class="viz-btn"># numerical</a>
+    {% if info and info.obsm_keys %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/scatter" class="viz-btn">🗺 embedding</a>{% endif %}
+    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/violin" class="viz-btn">🎻 violin</a>
+    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/box" class="viz-btn">📦 box</a>
+    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/bar" class="viz-btn">📊 bar</a>
+    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram" class="viz-btn">📈 hist</a>
+    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/ecdf" class="viz-btn">📉 ecdf</a>
+    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/kde" class="viz-btn">🌊 kde</a>
+    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/heatmap" class="viz-btn">🔥 heatmap</a>
+    <span style="flex:1"></span>
+    <a href="/streamlit/" class="viz-btn" style="background:#888;border-color:#888;font-weight:400">streamlit ↗</a>
 </div>
 {% endif %}
 

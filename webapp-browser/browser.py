@@ -353,6 +353,87 @@ async def folder_view(request: Request, browse_id: str):
     })
 
 
+# ── plot UI routes ─────────────────────────────────────────────────────────────
+#
+# Registered BEFORE dataset_view because dataset_view uses {dataset_browse_id:path}
+# which would otherwise greedy-match "TSO/plot/scatter" as the dataset id.
+
+_PLOT_GEOMS_UI = {
+    'scatter':   {'label': 'Embedding (UMAP)', 'icon': '🗺',
+                  'needs': {'embedding': True, 'color': 'any'}},
+    'violin':    {'label': 'Violin',           'icon': '🎻',
+                  'needs': {'x': 'categorical', 'y': 'gene_or_num'}},
+    'box':       {'label': 'Boxplot',          'icon': '📦',
+                  'needs': {'x': 'categorical', 'y': 'gene_or_num'}},
+    'bar':       {'label': 'Bar (mean ± CI)',  'icon': '📊',
+                  'needs': {'x': 'categorical', 'y': 'gene_or_num_or_count'}},
+    'histogram': {'label': 'Histogram',        'icon': '📈',
+                  'needs': {'x': 'gene_or_num', 'color': 'categorical'}},
+    'ecdf':      {'label': 'ECDF',             'icon': '📉',
+                  'needs': {'x': 'gene_or_num', 'color': 'categorical'}},
+    'kde':       {'label': 'KDE density',      'icon': '🌊',
+                  'needs': {'x': 'gene_or_num', 'color': 'categorical'}},
+    'heatmap':   {'label': 'Heatmap',          'icon': '🔥',
+                  'needs': {'y': 'categorical', 'x_genes': True}},
+}
+
+
+@router.get("/browse/{folder_browse_id}/{dataset_browse_id}/plot/{geom}",
+            response_class=HTMLResponse)
+async def plot_view(request: Request, folder_browse_id: str,
+                    dataset_browse_id: str, geom: str):
+    """Render the interactive plot form for one geom on one dataset."""
+    if geom not in _PLOT_GEOMS_UI:
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unknown plot geom '{geom}'. Valid: {sorted(_PLOT_GEOMS_UI)}",
+        )
+
+    group_id = unquote(folder_browse_id)
+    file_id = unquote(dataset_browse_id)
+    db_id = f"{group_id}/{file_id}"
+
+    try:
+        db = _api_get(_api_url(request), f'/databases/{db_id}/info')
+    except Exception as error:
+        print(f"API error: {error}")
+        return templates.TemplateResponse(
+            request, "index.html",
+            {"folders": [], "error": f"Dataset '{db_id}' not found"},
+            status_code=404,
+        )
+
+    collection = db.get('collection') or {}
+    friendly_group = collection.get('group') or group_id
+    dataset_title = db.get('title') or file_id
+
+    obs = db.get('obs') or {}
+    plot_meta = {
+        'embeddings':  sorted(list((db.get('embeddings') or {}).keys())),
+        'layers':      sorted(list((db.get('layers') or {}).keys())),
+        'cat_fields':  sorted(obs.get('categorical') or []),
+        'num_fields':  sorted(obs.get('numerical') or []),
+        'default_layer': db.get('default_layer') or 'X',
+    }
+
+    return templates.TemplateResponse(request, "plot.html", {
+        "folder_name":      friendly_group,
+        "folder_browse_id": group_id,
+        "group_id":         group_id,
+        "file_id":          file_id,
+        "dataset_name":     dataset_title,
+        "db_id":            db_id,
+        "geom":             geom,
+        "geom_label":       _PLOT_GEOMS_UI[geom]['label'],
+        "geom_icon":        _PLOT_GEOMS_UI[geom]['icon'],
+        "geom_needs":       _PLOT_GEOMS_UI[geom]['needs'],
+        "plot_meta":        plot_meta,
+        "all_geoms":        _PLOT_GEOMS_UI,
+        "api_url":          "/api",
+    })
+
+
 @router.get("/browse/{folder_browse_id}/{dataset_browse_id:path}", response_class=HTMLResponse)
 async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_id: str):
     group_id = unquote(folder_browse_id)

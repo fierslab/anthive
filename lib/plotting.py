@@ -25,8 +25,28 @@ _DEFAULT_PALETTE = 'tab20'
 _VALID_FORMATS = {'png', 'svg', 'pdf'}
 
 
-def _setup_style() -> None:
+def _setup_style(
+    font_family: Optional[str] = None,
+    font_size: Optional[float] = None,
+) -> None:
+    """Configure matplotlib + seaborn style. Per-call so concurrent renders
+    with different font settings don't clobber each other (matplotlib's
+    rcParams is process-global; this is best-effort but each render fully
+    overrides at the start)."""
     sns.set_theme(style='ticks', font_scale=0.9)
+    rc = {}
+    if font_family:
+        rc['font.family'] = font_family
+    if font_size is not None:
+        rc['font.size'] = font_size
+        rc['axes.titlesize'] = font_size * 1.15
+        rc['axes.labelsize'] = font_size
+        rc['xtick.labelsize'] = font_size * 0.85
+        rc['ytick.labelsize'] = font_size * 0.85
+        rc['legend.fontsize'] = font_size * 0.85
+        rc['legend.title_fontsize'] = font_size * 0.9
+    if rc:
+        plt.rcParams.update(rc)
 
 
 def _render_figure(
@@ -35,6 +55,8 @@ def _render_figure(
     output_format: str = 'png',
     caption: Optional[str] = None,
     source_url: Optional[str] = None,
+    font_family: Optional[str] = None,
+    font_size: Optional[float] = None,
 ) -> bytes:
     """Render figure to bytes in the requested format and close it.
 
@@ -390,6 +412,8 @@ def plot_scatter(
     palette: str = _DEFAULT_PALETTE,
     caption: Optional[str] = None,
     source_url: Optional[str] = None,
+    font_family: Optional[str] = None,
+    font_size: Optional[float] = None,
 ) -> bytes:
     """Scatter plot on two embedding dimensions, optionally colored by any field.
 
@@ -403,7 +427,7 @@ def plot_scatter(
         output_format: 'png' | 'svg' | 'pdf'.
         caption:      Figure caption embedded in PDF or passed via header.
     """
-    _setup_style()
+    _setup_style(font_family, font_size)
     fig, ax = plt.subplots(figsize=(width, height))
 
     x_col = embedding_df.columns[-2]
@@ -470,6 +494,8 @@ def plot_distribution(
     output_format: str = 'png',
     caption: Optional[str] = None,
     source_url: Optional[str] = None,
+    font_family: Optional[str] = None,
+    font_size: Optional[float] = None,
 ) -> bytes:
     """Univariate distribution plot: ecdf, kde, or histogram.
 
@@ -483,7 +509,7 @@ def plot_distribution(
         output_format: 'png' | 'svg' | 'pdf'.
         caption:     Figure caption.
     """
-    _setup_style()
+    _setup_style(font_family, font_size)
     fig, ax = plt.subplots(figsize=(width, height))
 
     hue = color_field if color_field and color_field in data_df.columns else None
@@ -514,6 +540,8 @@ def plot_grouped(
     output_format: str = 'png',
     caption: Optional[str] = None,
     source_url: Optional[str] = None,
+    font_family: Optional[str] = None,
+    font_size: Optional[float] = None,
 ) -> bytes:
     """Values grouped by a categorical field: bar (with CI), box, or violin.
 
@@ -526,7 +554,7 @@ def plot_grouped(
         output_format: 'png' | 'svg' | 'pdf'.
         caption:   Figure caption.
     """
-    _setup_style()
+    _setup_style(font_family, font_size)
     fig, ax = plt.subplots(figsize=(width, height))
 
     cat_order = data_df[x_field].value_counts().index.tolist()
@@ -562,6 +590,8 @@ def plot_heatmap(
     output_format: str = 'png',
     caption: Optional[str] = None,
     source_url: Optional[str] = None,
+    font_family: Optional[str] = None,
+    font_size: Optional[float] = None,
 ) -> bytes:
     """Heatmap of mean gene expression per category group.
 
@@ -571,7 +601,7 @@ def plot_heatmap(
         output_format: 'png' | 'svg' | 'pdf'.
         caption:      Figure caption.
     """
-    _setup_style()
+    _setup_style(font_family, font_size)
     fig, ax = plt.subplots(figsize=(width, height))
 
     z_df = (mean_expr_df - mean_expr_df.mean()) / (mean_expr_df.std() + 1e-9)
