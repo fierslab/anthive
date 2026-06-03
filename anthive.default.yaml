@@ -17,11 +17,21 @@ melt_chunk_size: 10000
 # REST API Configuration
 # ----------------------
 
-# Host address for the REST API server
+# Host address for the REST API server (ant-serve).  Default `localhost` (=
+# 127.0.0.1) is secure: only the local machine can connect, and the Caddy
+# reverse-proxy on this host fronts public access.  Set to `0.0.0.0` to
+# bind on all interfaces (e.g. for direct LAN access without Caddy).
+# Applies whether ant-serve runs standalone or via ant-supervisor.
 rest_api_host: localhost
 
 # Port number for the REST API server
 rest_api_port: 8080
+
+# Browse UI (ant-browse) bind host + port.  Same semantics as
+# rest_api_host/port above.  Public access goes through Caddy on the
+# default deployment, so `localhost` is appropriate.
+browse_host: localhost
+browse_port: 8081
 
 # Cache expiration in days (future use)
 cache_expiration_days: 7

@@ -1,6 +1,8 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
-# dependencies = []
+# dependencies = [
+#   "pyyaml>=6.0",
+# ]
 # ///
 """
 Anthive process supervisor
@@ -41,15 +43,31 @@ DIM     = '\033[2m'
 
 _script_dir = Path(__file__).parent.parent.resolve()
 
+# Read host/port from anthive.yaml so the supervisor doesn't override the
+# user's config.  Default is `localhost` (secure) — see anthive.default.yaml.
+sys.path.insert(0, str(_script_dir / 'lib'))
+try:
+    from config import load_config as _load_anthive_config
+    _CFG = _load_anthive_config()
+except Exception:
+    _CFG = {}
+
+_API_HOST    = _CFG.get('rest_api_host', 'localhost')
+_API_PORT    = str(_CFG.get('rest_api_port', 8080))
+_BROWSE_HOST = _CFG.get('browse_host',    'localhost')
+_BROWSE_PORT = str(_CFG.get('browse_port', 8081))
+# ant-browse connects TO ant-serve; use loopback when serve is bound there.
+_API_INTERNAL_URL = f"http://{'localhost' if _API_HOST in ('127.0.0.1', 'localhost') else _API_HOST}:{_API_PORT}"
+
 SERVICES: dict = {
     'api': {
         'cmd': ['./bin/ant-serve', '--data-folder', './data/h5adstore',
-                '--host', '0.0.0.0', '--port', '8080'],
+                '--host', _API_HOST, '--port', _API_PORT],
         'color': CYAN,
     },
     'browse': {
-        'cmd': ['./bin/ant-browse', '--api-url', 'http://localhost:8080',
-                '--host', '0.0.0.0', '--port', '8081'],
+        'cmd': ['./bin/ant-browse', '--api-url', _API_INTERNAL_URL,
+                '--host', _BROWSE_HOST, '--port', _BROWSE_PORT],
         'color': GREEN,
     },
     'mcp': {
