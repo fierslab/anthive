@@ -3,6 +3,22 @@
 {% block title %}{{ folder_name }} — anthive{% endblock %}
 
 {% block content %}
+<style>
+  /* Mirror landing's .ctx-pill palette so the vocabulary is identical
+     when switching between landing / folder / dataset pages. */
+  .grp-pill {
+    display: inline-block; padding: 1px 7px; font-size: 11px;
+    line-height: 1.5; border-radius: 10px; white-space: nowrap;
+    background: #eef2ff; color: #3730a3; border: 1px solid #e0e7ff;
+  }
+  .grp-pill.tech    { background:#fef3c7; color:#92400e; border-color:#fde68a; }
+  .grp-pill.cell    { background:#dcfce7; color:#166534; border-color:#bbf7d0; }
+  .grp-pill.tissue  { background:#e0f2fe; color:#075985; border-color:#bae6fd; }
+  .grp-pill.disease { background:#fee2e2; color:#991b1b; border-color:#fecaca; }
+  .grp-pill.prep    { background:#fce7f3; color:#9d174d; border-color:#fbcfe8; }
+  /* Acc / Src icons stay glyph-only (no background) — they're symbolic, not labels. */
+</style>
+
 <div class="breadcrumb">
     <a href="/">datasets</a> /
     {{ folder_name }}
@@ -23,47 +39,56 @@
 <table id="datasets-table">
     <thead>
         <tr>
-            <th>ID</th>
             <th>Dataset</th>
-            <th>Cells × Genes</th>
-            <th title="organism">🧬</th>
-            <th title="technology">🔬</th>
-            <th title="cell type">🦠</th>
-            <th title="suspension type (cell / nucleus / na)">prep</th>
-            <th title="access (internal = lab-private; public = shareable)">acc</th>
-            <th>Layers</th>
-            <th>Embeddings</th>
-            <th>Size</th>
-            <th>St</th>
+            <th title="cells × genes">Cells × Genes</th>
+            <th title="organism">Org</th>
+            <th title="technology">Tech</th>
+            <th title="cell type">Cell</th>
+            <th title="tissue / brain region">Tissue</th>
+            <th title="disease state">Disease</th>
+            <th title="suspension type (cell / nucleus / na)">Prep</th>
+            <th title="access — who can view: 🔒 internal / 🌐 public">Acc</th>
+            <th title="source — provenance: 🏠 lab-generated / ↓ external">Src</th>
+            <th title="layer count — hover to list">L</th>
+            <th title="embedding count — hover to list">E</th>
+            <th>Status</th>
         </tr>
     </thead>
     <tbody>
         {% for dataset in datasets %}
+        {% set _org  = dataset.organism        or {} %}
+        {% set _tech = dataset.technology      or {} %}
+        {% set _cell = dataset.celltype        or {} %}
+        {% set _tis  = dataset.tissue          or {} %}
+        {% set _dis  = dataset.disease         or {} %}
+        {% set _sus  = dataset.suspension_type or {} %}
+        {% set _acc  = dataset.access          or {} %}
+        {% set _src  = dataset.source          or {} %}
         <tr>
-            <td style="color:#888;font-size:11px">{{ dataset.file_id or "—" }}</td>
             <td>
                 <a href="/browse/{{ folder_browse_id }}/{{ dataset.browse_id }}"><strong>{{ dataset.name }}</strong></a>
                 {% if dataset.subfolder %}<br><span style="color:#888;font-size:11px">{{ dataset.subfolder }}</span>{% endif %}
+                <div style="color:#aaa;font-size:10px;font-family:var(--font-mono);margin-top:1px">{{ dataset.file_id }}</div>
             </td>
-            <td style="color:#555">
+            <td style="color:#555;font-family:var(--font-mono);font-size:11px;white-space:nowrap">
                 {% if dataset.n_obs and dataset.n_vars %}
-                {{ "{:,}".format(dataset.n_obs) }} × {{ "{:,}".format(dataset.n_vars) }}
-                {% else %}—{% endif %}
+                {{ format_count(dataset.n_obs) }} × {{ format_count(dataset.n_vars) }}
+                {% endif %}
             </td>
-            <td style="color:#555;font-size:11px" {% if dataset.organism.full %}title="{{ dataset.organism.full }}"{% endif %}>{{ dataset.organism.abbrev }}</td>
-            <td style="color:#555;font-size:11px" {% if dataset.technology.full %}title="{{ dataset.technology.full }}"{% endif %}>{{ dataset.technology.abbrev }}</td>
-            <td style="color:#555;font-size:11px" {% if dataset.celltype.full %}title="{{ dataset.celltype.full }}"{% endif %}>{{ dataset.celltype.abbrev }}</td>
-            {% set _sus = dataset.suspension_type or {} %}
-            <td style="color:#555;font-size:11px" {% if _sus.full %}title="{{ _sus.full }}"{% endif %}>{{ _sus.abbrev or '' }}</td>
-            {% set _acc = dataset.access or {} %}
-            <td style="color:#555;font-size:11px" {% if _acc.full %}title="{{ _acc.full }}"{% endif %}>{{ _acc.abbrev or '' }}</td>
-            <td style="color:#555" title="{{ dataset.layers|join(', ') if dataset.layers else 'none' }}">
-                {{ dataset.layers|length if dataset.layers else "—" }}
+            <td>{% if _org.abbrev  %}<span class="grp-pill"          title="organism: {{ _org.full }}">{{ _org.abbrev }}</span>{% endif %}</td>
+            <td>{% if _tech.abbrev %}<span class="grp-pill tech"     title="technology: {{ _tech.full }}">{{ _tech.abbrev }}</span>{% endif %}</td>
+            <td>{% if _cell.abbrev %}<span class="grp-pill cell"     title="cell type: {{ _cell.full }}">{{ _cell.abbrev }}</span>{% endif %}</td>
+            <td>{% if _tis.abbrev  %}<span class="grp-pill tissue"   title="tissue: {{ _tis.full }}">{{ _tis.abbrev }}</span>{% endif %}</td>
+            <td>{% if _dis.abbrev  %}<span class="grp-pill disease"  title="disease: {{ _dis.full }}">{{ _dis.abbrev }}</span>{% endif %}</td>
+            <td>{% if _sus.abbrev  %}<span class="grp-pill prep"     title="prep: {{ _sus.full }}">{{ _sus.abbrev }}</span>{% endif %}</td>
+            <td style="font-size:13px" {% if _acc.full %}title="{{ _acc.full }}"{% endif %}>{{ _acc.abbrev }}</td>
+            <td style="font-size:13px" {% if _src.full %}title="{{ _src.full }}"{% endif %}>{{ _src.abbrev }}</td>
+            <td style="color:#555;font-size:11px" title="{{ dataset.layers|join(', ') if dataset.layers else 'none' }}">
+                {{ dataset.layers|length if dataset.layers else 0 }}
             </td>
-            <td style="color:#555" title="{{ dataset.embeddings|join(', ') if dataset.embeddings else 'none' }}">
-                {{ dataset.embeddings|length if dataset.embeddings else "—" }}
+            <td style="color:#555;font-size:11px" title="{{ dataset.embeddings|join(', ') if dataset.embeddings else 'none' }}">
+                {{ dataset.embeddings|length if dataset.embeddings else 0 }}
             </td>
-            <td style="color:#777">{{ dataset.h5ad_size if dataset.h5ad_size else "—" }}</td>
             <td>
                 {% if dataset.update_pending %}
                 <span class="dot dot-pending" title="update pending: h5ad or md newer than duckdb"></span>

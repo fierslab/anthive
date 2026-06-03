@@ -8,17 +8,27 @@
   .summary-row { display:flex; gap:14px; align-items:center; margin:2px 0 6px; font-size:12px; color:var(--text-muted); flex-wrap:wrap; }
   .summary-row .val { font-weight:600; color:var(--text); }
 
-  /* compact "context" cell — organism + tech + celltype + prep as inline badges */
+  /* compact "context" cell — organism + tech + celltype + tissue + disease + prep */
   .ctx-cell { display:inline-flex; gap:3px; flex-wrap:wrap; font-size:10px; line-height:1.2; }
   .ctx-pill {
     display:inline-block; padding:0 4px; border-radius:2px;
     background:#eef2ff; color:#1d4ed8; border:1px solid #bfdbfe;
     font-family:var(--font-mono); font-size:9.5px; letter-spacing:.2px;
   }
-  .ctx-pill.muted { background:#f5f5f5; color:#888; border-color:#e5e5e5; }
-  .ctx-pill.tech  { background:#fef3c7; color:#92400e; border-color:#fde68a; }
-  .ctx-pill.cell  { background:#dcfce7; color:#166534; border-color:#bbf7d0; }
-  .ctx-pill.prep  { background:#fce7f3; color:#9d174d; border-color:#fbcfe8; }
+  .ctx-pill.muted   { background:#f5f5f5; color:#888;    border-color:#e5e5e5; }
+  .ctx-pill.tech    { background:#fef3c7; color:#92400e; border-color:#fde68a; }
+  .ctx-pill.cell    { background:#dcfce7; color:#166534; border-color:#bbf7d0; }
+  .ctx-pill.tissue  { background:#e0f2fe; color:#075985; border-color:#bae6fd; }
+  .ctx-pill.disease { background:#fee2e2; color:#991b1b; border-color:#fecaca; }
+  .ctx-pill.prep    { background:#fce7f3; color:#9d174d; border-color:#fbcfe8; }
+
+  /* filter section header inside Context popover */
+  .col-popover .filter-section { margin-top: 4px; padding-top: 4px; border-top: 1px dotted var(--border); }
+  .col-popover .filter-section:first-of-type { margin-top: 0; padding-top: 0; border-top: 0; }
+  .col-popover .filter-section h5 {
+    font-size: 10px; font-weight: 600; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: .4px; margin-bottom: 2px;
+  }
 
   /* sortable column headers */
   th.sortable { cursor: pointer; user-select: none; position: relative; }
@@ -68,11 +78,10 @@
       <th class="sortable" data-col="cells" data-help="Total cells summed across the collection's datasets">Cells<span class="sort-ind"></span></th>
       <th class="sortable" data-col="modified" data-help="Most recent modification across this collection's datasets (mus 'updated' or .md 'date')">Modified<span class="sort-ind"></span></th>
       <th class="sortable" data-col="context"
-          data-help="Compact summary: organism · technology · cell-type · preparation. Pills show 'mix' when datasets disagree."
-          data-filter-fields="organism,technology,celltype,suspension_type">Context<span class="sort-ind"></span></th>
-      <th class="sortable" data-col="tissue" data-help="Tissue (shown when all datasets agree, else 'mix')">Tissue<span class="sort-ind"></span></th>
-      <th class="sortable" data-col="disease" data-help="Disease (shown when all datasets agree, else 'mix')">Disease<span class="sort-ind"></span></th>
-      <th class="sortable" data-col="acc" data-help="Access: 'int' (lab-private) or 'pub' (publishable). 'mix' when collection contains both">Acc<span class="sort-ind"></span></th>
+          data-help="Compact summary: organism · technology · cell type · tissue · disease · prep. Each pill shows 'mix' when the collection's datasets disagree on that field."
+          data-filter-fields="organism,technology,celltype,tissue,disease,suspension_type">Context<span class="sort-ind"></span></th>
+      <th class="sortable" data-col="acc" data-help="Access — who can view: 🔒 internal (lab-private) or 🌐 public (publishable). 'mix' when the collection contains both.">Acc<span class="sort-ind"></span></th>
+      <th class="sortable" data-col="src" data-help="Source — provenance: 🏠 lab-generated (in-house) or ↓ external (downloaded). 'mix' when the collection contains both.">Src<span class="sort-ind"></span></th>
     </tr>
   </thead>
   <tbody>
@@ -84,6 +93,7 @@
     {% set _tis = folder.tissue or {} %}
     {% set _dis = folder.disease or {} %}
     {% set _acc = folder.access or {} %}
+    {% set _src = folder.source or {} %}
     <tr
       data-id="{{ folder.group_id or '' }}"
       data-name="{{ folder.name or '' }}"
@@ -96,28 +106,30 @@
       data-suspension_type="{{ _sus.full or '' }}"
       data-tissue="{{ _tis.full or '' }}"
       data-disease="{{ _dis.full or '' }}"
-      data-acc="{{ _acc.full or '' }}">
+      data-acc="{{ _acc.full or '' }}"
+      data-src="{{ _src.full or '' }}">
       <td style="color:#888;font-size:11px;font-family:var(--font-mono)">{{ folder.group_id or "—" }}</td>
       <td>
         <a href="/browse/{{ folder.browse_id }}"><strong>{{ folder.name }}</strong></a>
         {% if folder.description and folder.description != 'na' %}<br><span style="color:#888;font-size:11px">{{ folder.description }}</span>{% endif %}
       </td>
       <td style="color:#666">{{ folder.dataset_count }}</td>
-      <td style="color:#555">{{ "{:,}".format(folder.total_cells) if folder.total_cells else "—" }}</td>
+      <td style="color:#555;font-family:var(--font-mono);font-size:11px">{{ format_count(folder.total_cells) }}</td>
       <td style="color:#666;font-size:11px;font-family:var(--font-mono);white-space:nowrap">
         {{ (folder.last_modified or '')[:10] or "—" }}
       </td>
       <td>
         <span class="ctx-cell">
-          {% if _org.abbrev %}<span class="ctx-pill" title="organism: {{ _org.full }}">{{ _org.abbrev }}</span>{% endif %}
-          {% if _tech.abbrev %}<span class="ctx-pill tech" title="technology: {{ _tech.full }}">{{ _tech.abbrev }}</span>{% endif %}
-          {% if _cell.abbrev %}<span class="ctx-pill cell" title="cell type: {{ _cell.full }}">{{ _cell.abbrev }}</span>{% endif %}
+          {% if _org.abbrev %}<span class="ctx-pill"         title="organism: {{ _org.full }}">{{ _org.abbrev }}</span>{% endif %}
+          {% if _tech.abbrev %}<span class="ctx-pill tech"    title="technology: {{ _tech.full }}">{{ _tech.abbrev }}</span>{% endif %}
+          {% if _cell.abbrev %}<span class="ctx-pill cell"    title="cell type: {{ _cell.full }}">{{ _cell.abbrev }}</span>{% endif %}
+          {% if _tis.abbrev %}<span class="ctx-pill tissue"  title="tissue: {{ _tis.full }}">{{ _tis.abbrev }}</span>{% endif %}
+          {% if _dis.abbrev %}<span class="ctx-pill disease" title="disease: {{ _dis.full }}">{{ _dis.abbrev }}</span>{% endif %}
           {% if _sus.abbrev and _sus.abbrev != '—' %}<span class="ctx-pill prep" title="prep: {{ _sus.full }}">{{ _sus.abbrev }}</span>{% endif %}
         </span>
       </td>
-      <td style="color:#555;font-size:11px" title="{{ _tis.full or '' }}">{{ _tis.abbrev or "—" }}</td>
-      <td style="color:#555;font-size:11px" title="{{ _dis.full or '' }}">{{ _dis.abbrev or "—" }}</td>
-      <td style="color:#555;font-size:11px;font-family:var(--font-mono)" title="{{ _acc.full or '' }}">{{ _acc.abbrev or "—" }}</td>
+      <td style="font-size:13px" title="{{ _acc.full or '' }}">{{ _acc.abbrev or "" }}</td>
+      <td style="font-size:13px" title="{{ _src.full or '' }}">{{ _src.abbrev or "" }}</td>
     </tr>
     {% endfor %}
   </tbody>
@@ -267,47 +279,66 @@
       sortBtns.appendChild(ascBtn); sortBtns.appendChild(descBtn);
       pop.appendChild(sortBtns);
 
-      // Value filter (for columns that map to data attrs with values)
-      const filterableCols = new Set(['organism','technology','celltype','suspension_type','tissue','disease','acc']);
-      const hasFilter = filterFields.some(f => filterableCols.has(f));
-      if (hasFilter) {
-        const vals = uniqueValuesFor(filterFields);
-        if (vals.length) {
-          const filterTitle = document.createElement('div');
-          filterTitle.innerHTML = `<strong>filter:</strong>`;
-          filterTitle.style.marginTop = '4px';
-          pop.appendChild(filterTitle);
+      // Value filter — one section per component field, each with its own
+      // <h5> heading and its own checklist + clear link.
+      const filterableCols = new Set(
+        ['organism','technology','celltype','suspension_type','tissue','disease','acc']
+      );
+      const sectionLabels = {
+        organism:        'organism',
+        technology:      'technology',
+        celltype:        'cell type',
+        tissue:          'tissue',
+        disease:         'disease',
+        suspension_type: 'prep',
+        acc:             'access',
+      };
+      const filterableFields = filterFields.filter(f => filterableCols.has(f));
+      if (filterableFields.length) {
+        filterableFields.forEach((field) => {
+          const vals = uniqueValuesFor([field]);
+          if (!vals.length) return;
+          const section = document.createElement('div');
+          section.className = 'filter-section';
+          const h5 = document.createElement('h5');
+          h5.textContent = sectionLabels[field] || field;
+          section.appendChild(h5);
+
+          if (!valueFilters[field]) valueFilters[field] = new Set();
           const valsBox = document.createElement('div');
           valsBox.className = 'vals';
-          const filterKey = filterFields[0]; // primary key for storage
-          if (!valueFilters[filterKey]) valueFilters[filterKey] = new Set();
           vals.forEach(v => {
             const lbl = document.createElement('label');
             const cb = document.createElement('input');
             cb.type = 'checkbox';
             cb.value = v;
-            cb.checked = valueFilters[filterKey].has(v);
+            cb.checked = valueFilters[field].has(v);
             cb.addEventListener('change', () => {
-              if (cb.checked) valueFilters[filterKey].add(v);
-              else valueFilters[filterKey].delete(v);
+              if (cb.checked) valueFilters[field].add(v);
+              else valueFilters[field].delete(v);
               update();
             });
             lbl.appendChild(cb);
             lbl.appendChild(document.createTextNode(' ' + v));
             valsBox.appendChild(lbl);
           });
-          pop.appendChild(valsBox);
-          const clr = document.createElement('a');
-          clr.className = 'clear-link';
-          clr.href = '#';
-          clr.textContent = '× clear filter';
-          clr.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation();
-            valueFilters[filterKey] = new Set();
-            pop.querySelectorAll('input[type=checkbox]').forEach(c => c.checked = false);
-            update();
-          };
-          pop.appendChild(clr);
-        }
+          section.appendChild(valsBox);
+
+          if (valueFilters[field].size) {
+            const clr = document.createElement('a');
+            clr.className = 'clear-link';
+            clr.href = '#';
+            clr.textContent = '× clear ' + (sectionLabels[field] || field);
+            clr.onclick = (ev) => {
+              ev.preventDefault(); ev.stopPropagation();
+              valueFilters[field] = new Set();
+              section.querySelectorAll('input[type=checkbox]').forEach(c => c.checked = false);
+              update();
+            };
+            section.appendChild(clr);
+          }
+          pop.appendChild(section);
+        });
       }
       activePopover = pop;
     });

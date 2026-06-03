@@ -80,6 +80,15 @@
     color: #888; word-break: break-all;
   }
   .src-url a { color: #888; }
+
+  .plot-caption {
+    margin-top: 8px; padding: 6px 10px;
+    background: #fafafa; border-left: 3px solid #1d4ed8;
+    font-size: 12px; line-height: 1.5; color: #333;
+    max-width: 100%; font-family: var(--font);
+  }
+  .plot-caption b { color: #1d4ed8; font-weight: 600; }
+  .plot-caption:empty { display: none; }
 </style>
 
 <div class="breadcrumb">
@@ -254,6 +263,7 @@
       <span style="color:#aaa;font-size:13px">configure on the left to render</span>
     </div>
     <div class="plot-status" id="plot-status"></div>
+    <div class="plot-caption" id="plot-caption"></div>
     <div class="src-url" id="src-url"></div>
   </div>
 
@@ -327,10 +337,15 @@
   }
 
   // ── render preview
+  // We fetch as blob (not <img src=…>) so we can read the X-Plot-Caption
+  // response header and render the caption underneath the figure.  Each
+  // request bumps renderToken so stale responses don't overwrite newer ones.
   let renderToken = 0;
-  const imgBox  = document.getElementById('plot-img');
-  const status  = document.getElementById('plot-status');
-  const srcUrl  = document.getElementById('src-url');
+  let lastBlobUrl = null;
+  const imgBox   = document.getElementById('plot-img');
+  const status   = document.getElementById('plot-status');
+  const srcUrl   = document.getElementById('src-url');
+  const captionEl = document.getElementById('plot-caption');
 
   async function refresh() {
     renderToken++;
@@ -339,28 +354,33 @@
     status.innerHTML = '<span class="spinner"></span> rendering…';
     srcUrl.innerHTML = `source: <a href="${url}">${url.split('?')[1]||''}</a>`;
     try {
-      // Use a fresh Image so we can detect errors (img.onerror)
+      const response = await fetch(url);
+      if (my !== renderToken) return;
+      if (!response.ok) {
+        const body = await response.text();
+        status.innerHTML = `<span class="err">render failed (HTTP ${response.status}): ${body.slice(0,300)}</span>`;
+        captionEl.innerHTML = '';
+        return;
+      }
+      const blob = await response.blob();
+      if (my !== renderToken) return;
+      if (lastBlobUrl) URL.revokeObjectURL(lastBlobUrl);
+      lastBlobUrl = URL.createObjectURL(blob);
       const img = new Image();
-      img.onload = () => {
-        if (my !== renderToken) return;
-        imgBox.innerHTML = '';
-        imgBox.appendChild(img);
-        status.textContent = '';
-      };
-      img.onerror = async () => {
-        if (my !== renderToken) return;
-        // Fetch to read the error body
-        try {
-          const r = await fetch(url);
-          const body = await r.text();
-          status.innerHTML = `<span class="err">render failed (HTTP ${r.status}): ${body.slice(0,300)}</span>`;
-        } catch (e) {
-          status.innerHTML = `<span class="err">${e.message}</span>`;
-        }
-      };
-      img.src = url;
+      img.src = lastBlobUrl;
+      imgBox.innerHTML = '';
+      imgBox.appendChild(img);
+      status.textContent = '';
+      // Caption is emitted by ant-serve as the X-Plot-Caption response header
+      // (also embedded in PDF as a footer, in PNG tEXt chunks, and in SVG
+      // metadata).  Decode the latin-1 → utf-8 round-trip the header bytes
+      // may have undergone so accented characters render correctly.
+      const rawCaption = response.headers.get('X-Plot-Caption') || '';
+      captionEl.textContent = rawCaption;
     } catch (e) {
+      if (my !== renderToken) return;
       status.innerHTML = `<span class="err">${e.message}</span>`;
+      captionEl.innerHTML = '';
     }
   }
 
@@ -493,6 +513,22 @@
   attachAutocomplete('f-color', 'ac-color', ['gene','cat','num']);
   attachAutocomplete('f-y',     'ac-y',     ['gene','num']);
   attachAutocomplete('f-x',     'ac-x',     ['gene','num']);
+
+  // Pre-fill from URL: links like /plot/bar?x=development_stage should land
+  // ready-to-render. Every form input uses its plot-API name as the `name`
+  // attribute, so copy params 1:1.  Done before the deferred refresh below.
+  (function prefillFromURL() {
+    const urlParams = new URLSearchParams(window.location.search);
+    urlParams.forEach((value, key) => {
+      const field = document.querySelector(`form [name="${key}"]`);
+      if (!field) return;
+      if (field.type === 'checkbox') {
+        field.checked = value === 'true' || value === '1' || value === 'on';
+      } else {
+        field.value = value;
+      }
+    });
+  })();
 
   // initial render
   refreshDownloadLinks();

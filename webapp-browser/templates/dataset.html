@@ -3,6 +3,24 @@
 {% block title %}{{ dataset_name }} — anthive{% endblock %}
 
 {% block content %}
+<style>
+  /* Context bar — same pill vocabulary as landing/folder pages.
+     Colors must mirror .ctx-pill in index.html. */
+  .ds-ctx { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 10px; }
+  .ds-ctx .pill {
+    display: inline-block; padding: 1px 7px; font-size: 11px;
+    line-height: 1.5; border-radius: 10px; white-space: nowrap;
+    background: #eef2ff; color: #3730a3; border: 1px solid #e0e7ff;
+  }
+  .ds-ctx .pill.tech    { background:#fef3c7; color:#92400e; border-color:#fde68a; }
+  .ds-ctx .pill.cell    { background:#dcfce7; color:#166534; border-color:#bbf7d0; }
+  .ds-ctx .pill.tissue  { background:#e0f2fe; color:#075985; border-color:#bae6fd; }
+  .ds-ctx .pill.disease { background:#fee2e2; color:#991b1b; border-color:#fecaca; }
+  .ds-ctx .pill.prep    { background:#fce7f3; color:#9d174d; border-color:#fbcfe8; }
+  .ds-ctx .pill.icon    { background:#f5f5f5; color:#444; border-color:#e5e5e5; font-size:13px; line-height:1.2; }
+  .ds-ctx .pill.year    { background:#f3f4f6; color:#374151; border-color:#e5e7eb; font-family:var(--font-mono); }
+</style>
+
 <div class="breadcrumb">
     <a href="/">datasets</a> /
     <a href="/browse/{{ folder_browse_id }}">{{ folder_name }}</a>
@@ -11,6 +29,21 @@
     {% if file_id and file_id != dataset_name %}<span class="slug">({{ file_id }})</span>{% endif %}
 </div>
 <h1 class="page-title">{{ dataset_name }}</h1>
+
+{% if context_bar %}
+{% set _cb = context_bar %}
+<div class="ds-ctx">
+    {% if _cb.organism.abbrev %}<span class="pill"         title="organism: {{ _cb.organism.full }}">{{ _cb.organism.abbrev }}</span>{% endif %}
+    {% if _cb.technology.abbrev %}<span class="pill tech"   title="technology: {{ _cb.technology.full }}">{{ _cb.technology.abbrev }}</span>{% endif %}
+    {% if _cb.celltype.abbrev %}<span class="pill cell"     title="cell type: {{ _cb.celltype.full }}">{{ _cb.celltype.abbrev }}</span>{% endif %}
+    {% if _cb.tissue.abbrev %}<span class="pill tissue"     title="tissue: {{ _cb.tissue.full }}">{{ _cb.tissue.abbrev }}</span>{% endif %}
+    {% if _cb.disease.abbrev %}<span class="pill disease"   title="disease: {{ _cb.disease.full }}">{{ _cb.disease.abbrev }}</span>{% endif %}
+    {% if _cb.suspension_type.abbrev %}<span class="pill prep" title="prep: {{ _cb.suspension_type.full }}">{{ _cb.suspension_type.abbrev }}</span>{% endif %}
+    {% if _cb.access.abbrev %}<span class="pill icon"       title="access: {{ _cb.access.full }}">{{ _cb.access.abbrev }}</span>{% endif %}
+    {% if _cb.source.abbrev %}<span class="pill icon"       title="source: {{ _cb.source.full }}">{{ _cb.source.abbrev }}</span>{% endif %}
+    {% if _cb.year %}<span class="pill year" title="publication year">{{ _cb.year }}</span>{% endif %}
+</div>
+{% endif %}
 
 {% if info %}
 <div class="stats-row">
@@ -49,11 +82,17 @@
 </div>
 {% endif %}
 
-<!-- Overview -->
-{% if markdown_content or layer_stats_rows %}
-<h2>Overview</h2>
-{% if markdown_content %}<div class="md-body" style="margin-bottom:6px">{{ markdown_content|safe }}</div>{% endif %}
+<!-- Description -->
+{% if markdown_content %}
+<h2>Description</h2>
+<div class="md-body" style="margin-bottom:6px">{{ markdown_content|safe }}</div>
+{% endif %}
+
+<!-- Data — promoted from inside the old Overview block.  This is the
+     numeric snapshot of every layer in the duckdb, useful for sanity-checking
+     before plotting. -->
 {% if layer_stats_rows %}
+<h2>Data</h2>
 <table class="auto" style="font-size:12px">
     <thead><tr>
         <th>layer</th><th>dtype</th><th>min</th><th>min(nz)</th><th>max</th><th>median</th><th>q90</th><th>% zeros</th>
@@ -74,15 +113,12 @@
     </tbody>
 </table>
 {% endif %}
-{% endif %}
 
-<!-- Info -->
+<!-- Biology -->
 {% if dataset_meta %}
 {% set ns = namespace(nulls=[]) %}
-<h2>Info</h2>
-<div class="info-grid">
-  <div class="info-col">
-    <div class="info-col-title">biology</div>
+<h2>Biology</h2>
+<div class="info-col">
     {% if dataset_meta.organism %}<div class="info-row"><span class="mk">organism</span><span>{{ dataset_meta.organism }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['organism'] %}{% endif %}
     {% if dataset_meta.tissue %}<div class="info-row"><span class="mk">tissue</span><span>{{ dataset_meta.tissue|join(', ') }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['tissue'] %}{% endif %}
     {% if dataset_meta.celltype %}<div class="info-row"><span class="mk">cell type</span><span>{{ dataset_meta.celltype }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['cell_type'] %}{% endif %}
@@ -93,9 +129,11 @@
     {% if dataset_meta.sex %}<div class="info-row"><span class="mk">sex</span><span>{{ dataset_meta.sex }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['sex'] %}{% endif %}
     {% if dataset_meta.age %}<div class="info-row"><span class="mk">age</span><span>{{ dataset_meta.age }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['age'] %}{% endif %}
     {% if dataset_meta.strain %}<div class="info-row"><span class="mk">strain</span><span>{{ dataset_meta.strain }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['strain'] %}{% endif %}
-  </div>
-  <div class="info-col">
-    <div class="info-col-title">provenance</div>
+</div>
+
+<!-- Provenance -->
+<h2>Provenance</h2>
+<div class="info-col">
     {% if dataset_meta.access %}<div class="info-row"><span class="mk">access</span><span>{{ dataset_meta.access }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['access'] %}{% endif %}
     {% if dataset_meta.source %}<div class="info-row"><span class="mk">source</span><span>{{ dataset_meta.source }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['source'] %}{% endif %}
     {% if dataset_meta.year %}<div class="info-row"><span class="mk">year</span><span>{{ dataset_meta.year }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['year'] %}{% endif %}
@@ -105,7 +143,6 @@
     {% if dataset_meta.doi %}{% for doi_item in dataset_meta.doi %}<div class="info-row"><span class="mk">doi</span><span><a href="https://doi.org/{{ doi_item }}">{{ doi_item }}</a></span></div>{% endfor %}{% else %}{% set ns.nulls = ns.nulls + ['doi'] %}{% endif %}
     {% if dataset_meta.pmid %}{% for p in dataset_meta.pmid %}<div class="info-row"><span class="mk">pmid</span><span><a href="https://pubmed.ncbi.nlm.nih.gov/{{ p }}">{{ p }}</a></span></div>{% endfor %}{% else %}{% set ns.nulls = ns.nulls + ['pmid'] %}{% endif %}
     {% if dataset_meta.link %}{% for url_item in dataset_meta.link %}<div class="info-row"><span class="mk">link</span><span><a href="{{ url_item }}">{{ url_item }}</a></span></div>{% endfor %}{% else %}{% set ns.nulls = ns.nulls + ['link'] %}{% endif %}
-  </div>
 </div>
 {% if ns.nulls %}<div style="color:#bbb;font-size:11px;margin-top:4px">{{ ns.nulls|length }} field{{ 's' if ns.nulls|length != 1 else '' }} not set: {{ ns.nulls|join(', ') }}</div>{% endif %}
 {% endif %}
@@ -113,7 +150,11 @@
 {% if info %}
 
 <!-- Observation columns -->
-<h2>Observation columns ({{ info.n_obs_columns }})</h2>
+<h2>Observation columns
+    <span style="font-size:12px;font-weight:normal;color:#888">
+        ({{ n_cat_cols }} cat · {{ n_num_cols }} num · total {{ info.n_obs_columns }})
+    </span>
+</h2>
 {% if obs_columns %}
 <div style="margin-bottom:4px;display:flex;align-items:center;gap:8px">
     <input id="obs-filter" type="text" placeholder="filter…" style="padding:2px 6px;font-family:inherit;font-size:12px;border:1px solid #ccc;outline:none;width:140px">
@@ -136,7 +177,8 @@
 {% endif %}
 
 {% if not layer_stats_rows and info.layers %}
-<!-- Layers (fallback when no stats) -->
+<!-- Layers fallback — only when the Data section didn't get rendered (no
+     layer_stats in the .md).  Plain list, no stats. -->
 <h2>Layers</h2>
 <div style="padding:4px 0">
     {% for layer in info.layers %}<code>{{ layer }}</code> {% endfor %}
@@ -183,8 +225,8 @@
 {% endif %}
 {% endif %}
 
-<!-- API access -->
-<h2>API access</h2>
+<!-- Resources — programmatic entry points for this dataset. -->
+<h2>Resources</h2>
 <div style="padding:4px 0;display:flex;gap:14px;flex-wrap:wrap;font-size:12px;align-items:center">
     <span>dataset id: <code>{{ db_id }}</code></span>
     <a href="/api/databases/{{ db_id }}/info">api info</a>

@@ -114,6 +114,108 @@ _TECHNOLOGY_ABBREV = {
     'merfish': 'MER', 'cosmx': 'CosMx', 'stereo-seq': 'Stereo',
 }
 
+# Cell-type abbreviations — match the mus joint vocab (Cell Ontology labels).
+# Keys are lower-cased to match _summarize_meta_field's lookup.
+_CELLTYPE_ABBREV = {
+    'microglial cell': 'MG',
+    'macrophage': 'MΦ',
+    'dendritic cell': 'DC',
+    'monocyte': 'Mono',
+    'astrocyte': 'Astro',
+    'oligodendrocyte': 'Oligo',
+    'oligodendrocyte precursor cell': 'OPC',
+    'neuron': 'Neu',
+    'excitatory neuron': 'ExN',
+    'inhibitory neuron': 'InN',
+    'endothelial cell': 'Endo',
+    'pericyte': 'Peri',
+    'fibroblast': 'Fibro',
+    'ependymal cell': 'Epend',
+    'vascular leptomeningeal cell': 'VLMC',
+    'myeloid cell': 'Myel',
+    'glial cell': 'Glia',
+    'mixed': 'mix',
+}
+
+# Tissue / brain-region abbreviations — UBERON-aligned mus vocab.
+_TISSUE_ABBREV = {
+    'brain': 'brain',
+    'cortex': 'ctx',
+    'prefrontal cortex': 'PFC',
+    'dorsolateral prefrontal cortex': 'DLPFC',
+    'motor cortex': 'M1',
+    'occipital cortex': 'OC',
+    'temporal cortex': 'TC',
+    'parietal cortex': 'PC',
+    'middle temporal gyrus': 'MTG',
+    'angular gyrus': 'AG',
+    'entorhinal cortex': 'EC',
+    'midtemporal cortex': 'midTC',
+    'occipitotemporal cortex': 'OTC',
+    'hippocampus': 'Hipp',
+    'striatum': 'Str',
+    'basal ganglia': 'BG',
+    'caudate nucleus': 'caud',
+    'thalamus': 'Thal',
+    'hypothalamus': 'HyTh',
+    'cerebellum': 'Cb',
+    'cerebellar microglia aging': 'Cb',  # quirk
+    'midbrain': 'MB',
+    'brainstem': 'BS',
+    'substantia nigra': 'SN',
+    'facial nucleus': 'fNuc',
+    'olfactory bulb': 'OB',
+    'corpus callosum': 'CC',
+    'white matter': 'WM',
+    'white matter of frontal lobe': 'WMf',
+    'white matter of occipital lobe': 'WMo',
+    'white matter of parietal lobe': 'WMp',
+    'white matter of temporal lobe': 'WMt',
+    'white matter of cerebellum': 'WMc',
+    'cervical spinal cord white matter': 'cSC-WM',
+    'subventricular zone': 'SVZ',
+    'spinal cord': 'SpC',
+    'cortical layer 2/3': 'L2/3',
+    'grey matter': 'GM',
+    'tumor': 'tum',
+    # Non-CNS
+    'blood': 'blood',
+    'bone marrow': 'BM',
+    'lung': 'lung',
+    'liver': 'liver',
+    'kidney': 'kid',
+    'heart': 'heart',
+    'retina': 'retina',
+    'skin': 'skin',
+    'csf': 'CSF',
+    # Brodmann
+    'brodmann (1909) area 4':  'BA4',
+    'brodmann (1909) area 7':  'BA7',
+    'brodmann (1909) area 9':  'BA9',
+    'brodmann (1909) area 17': 'BA17',
+}
+
+# Disease abbreviations — MONDO-aligned mus vocab.
+_DISEASE_ABBREV = {
+    'normal': 'norm',
+    'alzheimer disease': 'AD',
+    'parkinson disease': 'PD',
+    'amyotrophic lateral sclerosis': 'ALS',
+    'multiple sclerosis': 'MS',
+    'huntington disease': 'HD',
+    'frontotemporal dementia': 'FTD',
+    'down syndrome': 'DS',
+    'autism spectrum disorder': 'ASD',
+    'schizophrenia': 'SCZ',
+    'glioma': 'glioma',
+    'glioblastoma': 'GBM',
+    'covid-19': 'COVID',
+    'viral encephalitis': 'VE',
+    'hippocampal sclerosis': 'HS',
+    'focal cortical dysplasia': 'FCD',
+    "leukoencephalopathy, diffuse hereditary, with spheroids 1": 'LDHS1',
+}
+
 # Suspension type — distinguishes whole-cell vs nuclei vs non-cellular
 _SUSPENSION_ABBREV = {
     'cell': 'cell',
@@ -121,17 +223,35 @@ _SUSPENSION_ABBREV = {
     'na': '—',
 }
 
-# Access — internal/public (whether dataset is private or shareable)
+# Access — small icon: 🔒 internal (lab-private), 🌐 public (shareable).
 _ACCESS_ABBREV = {
-    'internal': 'int',
-    'public': 'pub',
+    'internal': '🔒',
+    'public': '🌐',
 }
 
 # Source — internal/external (lab-generated vs imported from elsewhere)
 _SOURCE_ABBREV = {
-    'internal': 'int',
-    'external': 'ext',
+    'internal': '🏠',
+    'external': '↓',
 }
+
+
+def _short_count(n: Optional[int]) -> str:
+    """Humanize a cell-count: 999, 1.4k, 144k, 2.3M."""
+    if not n:
+        return '—'
+    if n < 1_000:
+        return f'{n}'
+    if n < 100_000:
+        return f'{n/1_000:.1f}k'
+    if n < 1_000_000:
+        return f'{int(round(n/1_000))}k'
+    return f'{n/1_000_000:.1f}M'
+
+
+# Register Jinja2 helpers — templates use {{ value|short_count }} / {{ format_count(n) }}
+templates.env.filters['short_count'] = _short_count
+templates.env.globals['format_count'] = _short_count
 
 
 def _summarize_meta_field(
@@ -144,7 +264,7 @@ def _summarize_meta_field(
 
     Single unique value → abbreviated form + full value as tooltip.
     Multiple unique values → 'mix' + all values listed as tooltip.
-    All null → '—' with no tooltip.
+    All null → empty strings (caller is expected to hide the cell/pill).
     """
     raw_values = [db.get(field) for db in dbs]
     flat: List[str] = []
@@ -157,7 +277,7 @@ def _summarize_meta_field(
     unique = sorted(set(flat))
 
     if not unique:
-        return {'abbrev': '—', 'full': ''}
+        return {'abbrev': '', 'full': ''}
 
     if len(unique) == 1:
         full_value = unique[0]
@@ -232,15 +352,15 @@ def get_collection_list(api_url: str) -> List[Dict]:
             'description': None,
             # Group-level summaries: single shared value → that value;
             # multiple values across datasets → "mix". Used by index.html.
-            'organism':        _summarize_meta_field(dbs, 'organism', abbrev_map=_ORGANISM_ABBREV),
-            'technology':      _summarize_meta_field(dbs, 'technology', abbrev_map=_TECHNOLOGY_ABBREV),
+            'organism':        _summarize_meta_field(dbs, 'organism',        abbrev_map=_ORGANISM_ABBREV),
+            'technology':      _summarize_meta_field(dbs, 'technology',      abbrev_map=_TECHNOLOGY_ABBREV),
             'technology_category': _summarize_meta_field(dbs, 'technology_category', max_len=12),
-            'celltype':        _summarize_meta_field(dbs, 'celltype', max_len=12),
+            'celltype':        _summarize_meta_field(dbs, 'celltype',        abbrev_map=_CELLTYPE_ABBREV),
             'suspension_type': _summarize_meta_field(dbs, 'suspension_type', abbrev_map=_SUSPENSION_ABBREV),
-            'tissue':          _summarize_meta_field(dbs, 'tissue', max_len=14),
-            'disease':         _summarize_meta_field(dbs, 'disease', max_len=14),
-            'source':          _summarize_meta_field(dbs, 'source', abbrev_map=_SOURCE_ABBREV),
-            'access':          _summarize_meta_field(dbs, 'access', abbrev_map=_ACCESS_ABBREV),
+            'tissue':          _summarize_meta_field(dbs, 'tissue',          abbrev_map=_TISSUE_ABBREV),
+            'disease':         _summarize_meta_field(dbs, 'disease',         abbrev_map=_DISEASE_ABBREV),
+            'source':          _summarize_meta_field(dbs, 'source',          abbrev_map=_SOURCE_ABBREV),
+            'access':          _summarize_meta_field(dbs, 'access',          abbrev_map=_ACCESS_ABBREV),
         })
 
     # Default sort: newest-first by last_modified (empty values sink to the
@@ -302,15 +422,17 @@ def get_collection_datasets(api_url: str, group_id: str) -> tuple:
             'n_vars': db.get('n_genes'),
             'layers': layers,
             'embeddings': embeddings,
-            'h5ad_size': None,
             'has_metadata': True,
             'has_duckdb': True,
             'update_pending': False,
-            'organism':        _summarize_meta_field([db], 'organism', abbrev_map=_ORGANISM_ABBREV),
-            'technology':      _summarize_meta_field([db], 'technology', abbrev_map=_TECHNOLOGY_ABBREV),
-            'celltype':        _summarize_meta_field([db], 'celltype', max_len=12),
+            'organism':        _summarize_meta_field([db], 'organism',        abbrev_map=_ORGANISM_ABBREV),
+            'technology':      _summarize_meta_field([db], 'technology',      abbrev_map=_TECHNOLOGY_ABBREV),
+            'celltype':        _summarize_meta_field([db], 'celltype',        abbrev_map=_CELLTYPE_ABBREV),
             'suspension_type': _summarize_meta_field([db], 'suspension_type', abbrev_map=_SUSPENSION_ABBREV),
-            'access':          _summarize_meta_field([db], 'access', abbrev_map=_ACCESS_ABBREV),
+            'tissue':          _summarize_meta_field([db], 'tissue',          abbrev_map=_TISSUE_ABBREV),
+            'disease':         _summarize_meta_field([db], 'disease',         abbrev_map=_DISEASE_ABBREV),
+            'access':          _summarize_meta_field([db], 'access',          abbrev_map=_ACCESS_ABBREV),
+            'source':          _summarize_meta_field([db], 'source',          abbrev_map=_SOURCE_ABBREV),
         })
 
     return datasets, description_html
@@ -528,6 +650,23 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
     raw_md = db.get('markdown')
     markdown_content = markdown.markdown(raw_md, extensions=['tables', 'fenced_code']) if raw_md else None
 
+    # Context bar — same abbrev maps as landing / folder pages.  Uses single-db
+    # summarise so 'mix' never appears (one dataset → one value).  Empty
+    # `abbrev` is correctly skipped by the template guards.
+    context_bar = {
+        'organism':        _summarize_meta_field([db], 'organism',        abbrev_map=_ORGANISM_ABBREV),
+        'technology':      _summarize_meta_field([db], 'technology',      abbrev_map=_TECHNOLOGY_ABBREV),
+        'celltype':        _summarize_meta_field([db], 'celltype',        abbrev_map=_CELLTYPE_ABBREV),
+        'tissue':          _summarize_meta_field([db], 'tissue',          abbrev_map=_TISSUE_ABBREV),
+        'disease':         _summarize_meta_field([db], 'disease',         abbrev_map=_DISEASE_ABBREV),
+        'suspension_type': _summarize_meta_field([db], 'suspension_type', abbrev_map=_SUSPENSION_ABBREV),
+        'access':          _summarize_meta_field([db], 'access',          abbrev_map=_ACCESS_ABBREV),
+        'source':          _summarize_meta_field([db], 'source',          abbrev_map=_SOURCE_ABBREV),
+        'year':            db.get('year'),
+    }
+    n_cat = len(obs.get('categorical') or [])
+    n_num = len(obs.get('numerical') or [])
+
     layer_stats = db.get('layer_stats') or {}
     layer_stats_rows = [
         {
@@ -559,6 +698,9 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "obs_columns": obs_columns,
         "layer_stats_rows": layer_stats_rows,
         "dataset_meta": dataset_meta,
+        "context_bar": context_bar,
+        "n_cat_cols": n_cat,
+        "n_num_cols": n_num,
         "has_duckdb": True,
         "update_pending": False,
     })

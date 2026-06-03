@@ -2086,6 +2086,24 @@ class PlotContext:
         )
 
 
+def _subset_for_caption(req: 'PlotRequest') -> Optional[str]:
+    """Return a short human string summarising any active filters, for the
+    caption footer.  ASCII-only — the caption travels in the X-Plot-Caption
+    HTTP header (RFC 7230 latin-1 only).  Truncates long value lists."""
+    if not req.filters:
+        return None
+    parts = []
+    for key, value in req.filters.items():
+        if isinstance(value, list):
+            if len(value) <= 3:
+                parts.append(f"{key} in ({', '.join(map(str, value))})")
+            else:
+                parts.append(f"{key} in ({', '.join(map(str, value[:3]))} + {len(value) - 3} more)")
+        else:
+            parts.append(f"{key} = {value}")
+    return '; '.join(parts) or None
+
+
 def _handle_scatter(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     emb_id = req.x or ('X_umap' if 'X_umap' in ctx.available_embeddings
                        else (ctx.available_embeddings[0] if ctx.available_embeddings else None))
@@ -2110,8 +2128,15 @@ def _handle_scatter(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
 
     x_label = str(embedding_df.columns[-2]).replace('dim_', 'Dim ')
     y_label = str(embedding_df.columns[-1]).replace('dim_', 'Dim ')
-    caption = plotting.build_caption(req.db_id, req.geom, emb_id, 'embedding',
-                                     None, color_field_name, req.layer)
+    n_cells = int(len(embedding_df))
+    n_groups = (int(color_df[color_field_name].nunique())
+                if color_df is not None and color_kind == 'categorical' else None)
+    caption = plotting.build_caption(
+        req.db_id, req.geom, emb_id, 'embedding',
+        None, color_field_name, req.layer,
+        n_cells=n_cells, n_groups=n_groups,
+        sample=req.sample, subset=_subset_for_caption(req),
+    )
     image_bytes = plotting.plot_scatter(
         embedding_df=embedding_df,
         color_df=color_df,
@@ -2169,7 +2194,14 @@ def _handle_grouped(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
             filters=req.filters, sample=req.sample,
         )
 
-    caption = plotting.build_caption(req.db_id, req.geom, x_name, x_kind, y_name, hue_name, req.layer)
+    n_cells = int(len(data_df))
+    n_groups = int(data_df[x_name].nunique())
+    caption = plotting.build_caption(
+        req.db_id, req.geom, x_name, x_kind, y_name, hue_name, req.layer,
+        n_cells=n_cells, n_groups=n_groups,
+        sample=req.sample, subset=_subset_for_caption(req),
+        ci=req.ci if req.geom == 'bar' else None,
+    )
     image_bytes = plotting.plot_grouped(
         data_df=data_df, x_field=x_name, y_field=y_name, hue_field=hue_name,
         geom=req.geom, ci=req.ci,
@@ -2203,7 +2235,13 @@ def _handle_distribution(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str
             data_df = ctx.db.get_cell_table(metadata_fields=[x_name],
                                             filters=req.filters, sample=req.sample)
 
-    caption = plotting.build_caption(req.db_id, req.geom, x_name, x_kind, None, color_name, req.layer)
+    n_cells = int(len(data_df))
+    n_groups = int(data_df[color_name].nunique()) if color_name else None
+    caption = plotting.build_caption(
+        req.db_id, req.geom, x_name, x_kind, None, color_name, req.layer,
+        n_cells=n_cells, n_groups=n_groups,
+        sample=req.sample, subset=_subset_for_caption(req),
+    )
     image_bytes = plotting.plot_distribution(
         data_df=data_df, x_field=x_name,
         geom=req.geom, color_field=color_name,
@@ -2240,7 +2278,13 @@ def _handle_heatmap(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
                                     layer=req.layer, filters=req.filters, sample=req.sample)
     mean_expr_df = data_df.groupby(y_name)[gene_list].mean()
 
-    caption = plotting.build_caption(req.db_id, req.geom, req.x, 'gene', y_name, None, req.layer)
+    n_cells = int(len(data_df))
+    n_groups = int(mean_expr_df.shape[0])
+    caption = plotting.build_caption(
+        req.db_id, req.geom, req.x, 'gene', y_name, None, req.layer,
+        n_cells=n_cells, n_groups=n_groups,
+        sample=req.sample, subset=_subset_for_caption(req),
+    )
     image_bytes = plotting.plot_heatmap(
         mean_expr_df=mean_expr_df,
         width=req.width, height=req.height, dpi=req.dpi,

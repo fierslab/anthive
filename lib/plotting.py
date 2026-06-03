@@ -25,6 +25,29 @@ _DEFAULT_PALETTE = 'tab20'
 _VALID_FORMATS = {'png', 'svg', 'pdf'}
 
 
+def _legend_outside(ax, title: Optional[str] = None, fontsize: float = 8) -> None:
+    """Move an existing matplotlib legend to outside-top-right of the axes.
+
+    No-op when the axes has no legend (e.g. no hue mapping).  Used by every
+    plot geom so legend placement is uniform across the site.  bbox_inches
+    is set to 'tight' on savefig so the outside legend is not clipped.
+    """
+    legend = ax.get_legend()
+    if legend is None:
+        return
+    new_title = title if title is not None else (
+        legend.get_title().get_text() if legend.get_title() else None
+    )
+    ax.legend(
+        bbox_to_anchor=(1.02, 1.0), loc='upper left',
+        borderaxespad=0.0,
+        fontsize=fontsize,
+        title=new_title,
+        title_fontsize=fontsize + 1,
+        frameon=False,
+    )
+
+
 def _setup_style(
     font_family: Optional[str] = None,
     font_size: Optional[float] = None,
@@ -195,16 +218,16 @@ def plot_umap(
 
         sns.scatterplot(**scatter_kwargs)
 
-        legend = ax.get_legend()
-        if legend and color_type == 'categorical':
+        if ax.get_legend() and color_type == 'categorical':
             n_cats = int(plot_df[color_field].nunique())
-            if n_cats > 12:
-                ax.legend(
-                    bbox_to_anchor=(1.02, 1), loc='upper left',
-                    fontsize=6, markerscale=2, title=color_field,
-                )
-            else:
-                ax.legend(fontsize=8, markerscale=2, title=color_field)
+            legend_fontsize = 6 if n_cats > 12 else 8
+            ax.legend(
+                bbox_to_anchor=(1.02, 1.0), loc='upper left',
+                borderaxespad=0.0,
+                fontsize=legend_fontsize, markerscale=2,
+                title=color_field, title_fontsize=legend_fontsize + 1,
+                frameon=False,
+            )
     else:
         sns.scatterplot(
             data=plot_df,
@@ -395,31 +418,80 @@ def build_caption(
     y: Optional[str],
     color: Optional[str],
     layer: str = 'X',
+    n_cells: Optional[int] = None,
+    n_groups: Optional[int] = None,
+    sample: Optional[int] = None,
+    subset: Optional[str] = None,
+    ci: Optional[bool] = None,
 ) -> str:
-    """Return a human-readable figure caption for the given plot parameters."""
+    """Build a single-paragraph figure caption.
+
+    The result is meant to be shown verbatim under the rendered image — it
+    should answer: what kind of plot, on what dataset, of what, grouped how,
+    over how many cells/groups, drawn from which layer, with which
+    statistical decoration.  Optional context fields are appended only when
+    given so callers can stay terse for legacy paths.
+    """
+    plural = lambda n: 's' if n != 1 else ''  # noqa: E731
+
+    # Sentence 1 — what the plot is.
     if geom == 'scatter':
-        base = f'Scatter plot of {db_id}'
         if x and x_kind == 'embedding':
-            base = f'UMAP of {db_id} ({x})'
+            sentence = f'UMAP embedding of {db_id} ({x})'
+        else:
+            sentence = f'Scatter plot of {db_id}'
         if color:
-            return f'{base}, colored by {color}'
-        return base
-    if geom in ('violin', 'box'):
+            sentence += f', cells colored by {color}'
+    elif geom in ('violin', 'box'):
+        kind = {'violin': 'Violin plot', 'box': 'Box plot'}[geom]
         if y:
-            return f'{y} expression by {x} in {db_id} ({geom})'
-        return f'Cell counts per {x} in {db_id} ({geom})'
-    if geom == 'bar':
-        if y:
-            return f'Mean {y} per {x} in {db_id}'
-        return f'Cell counts per {x} in {db_id}'
-    if geom in ('histogram', 'ecdf', 'kde'):
-        base = f'Distribution of {x} in {db_id} ({geom})'
+            sentence = f'{kind} of {y} expression per {x} in {db_id}'
+        else:
+            sentence = f'{kind} of cell counts per {x} in {db_id}'
         if color:
-            return f'{base}, grouped by {color}'
-        return base
-    if geom == 'heatmap':
-        return f'Mean gene expression per {y} in {db_id} (layer: {layer})'
-    return f'{geom} plot of {db_id}'
+            sentence += f', split by {color}'
+    elif geom == 'bar':
+        if y:
+            sentence = f'Bar plot of mean {y} per {x} in {db_id}'
+            if ci:
+                sentence += ' with 95% confidence interval (bootstrap)'
+        else:
+            sentence = f'Bar plot of cell counts per {x} in {db_id}'
+        if color:
+            sentence += f', split by {color}'
+    elif geom in ('histogram', 'ecdf', 'kde'):
+        label = {'histogram': 'Histogram', 'ecdf': 'Empirical CDF',
+                 'kde': 'KDE density'}[geom]
+        sentence = f'{label} of {x} in {db_id}'
+        if color:
+            sentence += f', grouped by {color}'
+    elif geom == 'heatmap':
+        sentence = (f'Heatmap of mean gene expression per {y} in {db_id}'
+                    f' (z-scored per gene)')
+    else:
+        sentence = f'{geom} plot of {db_id}'
+
+    # Layer — name the data source for any geom touching expression values.
+    if layer and layer != 'X' and geom in (
+            'scatter', 'violin', 'box', 'bar',
+            'histogram', 'ecdf', 'kde', 'heatmap'):
+        sentence += f'; layer: {layer}'
+    elif geom == 'heatmap' and layer:
+        sentence += f'; layer: {layer}'
+
+    # Footer — sample size, sub-grouping cardinality, and any active subset.
+    footer = []
+    if n_cells:
+        footer.append(f'n = {n_cells:,} cell{plural(n_cells)}')
+    if n_groups:
+        footer.append(f'{n_groups} group{plural(n_groups)}')
+    if sample:
+        footer.append(f'random sample of {sample:,}')
+    if subset:
+        footer.append(f'subset: {subset}')
+    if footer:
+        sentence += '.  ' + '; '.join(footer)
+    return sentence + '.'
 
 
 def plot_scatter(
@@ -470,14 +542,18 @@ def plot_scatter(
                 hue=color_field, linewidth=0, s=point_size, alpha=alpha,
                 palette=palette, ax=ax,
             )
+            # Site-wide convention: legend pinned outside, top-right of axes.
+            # Shrink font when there are many categories so the legend doesn't
+            # dwarf the plot itself.
             n_cats = int(plot_df[color_field].nunique())
-            if n_cats > 12:
-                ax.legend(
-                    bbox_to_anchor=(1.02, 1), loc='upper left',
-                    fontsize=6, markerscale=2, title=color_field,
-                )
-            else:
-                ax.legend(fontsize=8, markerscale=2, title=color_field)
+            legend_fontsize = 6 if n_cats > 12 else 8
+            ax.legend(
+                bbox_to_anchor=(1.02, 1.0), loc='upper left',
+                borderaxespad=0.0,
+                fontsize=legend_fontsize, markerscale=2,
+                title=color_field, title_fontsize=legend_fontsize + 1,
+                frameon=False,
+            )
         else:
             # Numerical / gene: use matplotlib directly so viridis (or any cmap)
             # is applied correctly and a proper colorbar is shown instead of a
@@ -557,6 +633,7 @@ def plot_distribution(
     ax.set_xlabel(x_field)
     ax.set_title(f'{x_field} ({geom})')
     sns.despine(ax=ax)
+    _legend_outside(ax)
 
     return _render_figure(fig, dpi, output_format, caption, source_url)
 
@@ -629,6 +706,7 @@ def plot_grouped(
     ax.set_xlabel(x_field)
     plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
     sns.despine(ax=ax)
+    _legend_outside(ax)
     fig.tight_layout()
 
     return _render_figure(fig, dpi, output_format, caption, source_url)
