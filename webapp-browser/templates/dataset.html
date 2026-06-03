@@ -46,8 +46,6 @@
     <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/ecdf" class="viz-btn">📉 ecdf</a>
     <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/kde" class="viz-btn">🌊 kde</a>
     <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/heatmap" class="viz-btn">🔥 heatmap</a>
-    <span style="flex:1"></span>
-    <a href="/streamlit/" class="viz-btn" style="background:#888;border-color:#888;font-weight:400">streamlit ↗</a>
 </div>
 {% endif %}
 
@@ -127,8 +125,8 @@
     <span class="obs-item" data-name="{{ col.name|lower }}" style="margin-right:14px;white-space:nowrap;font-size:12px">
         {% if col.type == 'cat' %}<span style="color:#e65100;font-weight:bold;font-size:11px" title="categorical">≡</span>
         {% else %}<span style="color:#0277bd;font-weight:bold;font-size:11px" title="numerical">#</span>{% endif %}
-        {% if col.type == 'cat' and has_duckdb %}<a href="/streamlit/cat?db={{ db_id | urlencode }}&cat={{ col.name | urlencode }}&ytype=Count">{{ col.name }}</a>
-        {% elif col.type == 'num' and has_duckdb %}<a href="/streamlit/num?db={{ db_id | urlencode }}&num={{ col.name | urlencode }}">{{ col.name }}</a>
+        {% if col.type == 'cat' and has_duckdb %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/bar?x={{ col.name | urlencode }}">{{ col.name }}</a>
+        {% elif col.type == 'num' and has_duckdb %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ col.name | urlencode }}">{{ col.name }}</a>
         {% else %}{{ col.name }}{% endif %}
     </span>
     {% endfor %}
@@ -151,7 +149,7 @@
 <div style="padding:4px 0">
     {% for emb in info.obsm_keys %}<code>{{ emb }}</code> {% endfor %}
     {% if has_duckdb %}
-    <a href="/streamlit/umap?db={{ db_id | urlencode }}" class="chip" style="margin-left:8px">open UMAP →</a>
+    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/scatter" class="chip" style="margin-left:8px">open UMAP →</a>
     {% endif %}
 </div>
 {% endif %}
@@ -163,7 +161,7 @@
 <div style="margin-bottom:4px">
     <span class="mk" style="display:inline-block;vertical-align:middle">genes</span>
     {% for gene in dataset_meta.top_genes %}
-    <a href="/streamlit/gene?db={{ db_id | urlencode }}&gene={{ gene | urlencode }}" class="chip">{{ gene }}</a>
+    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ gene | urlencode }}" class="chip">{{ gene }}</a>
     {% endfor %}
 </div>
 {% endif %}
@@ -171,7 +169,7 @@
 <div style="margin-bottom:4px">
     <span class="mk" style="display:inline-block;vertical-align:middle">categories</span>
     {% for col in dataset_meta.top_cat %}
-    <a href="/streamlit/cat?db={{ db_id | urlencode }}&cat={{ col | urlencode }}&ytype=Count" class="chip">{{ col }}</a>
+    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/bar?x={{ col | urlencode }}" class="chip">{{ col }}</a>
     {% endfor %}
 </div>
 {% endif %}
@@ -179,7 +177,7 @@
 <div style="margin-bottom:4px">
     <span class="mk" style="display:inline-block;vertical-align:middle">numerical</span>
     {% for col in dataset_meta.top_num %}
-    <a href="/streamlit/num?db={{ db_id | urlencode }}&num={{ col | urlencode }}" class="chip">{{ col }}</a>
+    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ col | urlencode }}" class="chip">{{ col }}</a>
     {% endfor %}
 </div>
 {% endif %}

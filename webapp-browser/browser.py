@@ -179,6 +179,28 @@ def _all_databases(api_url: str) -> List[Dict]:
     return _api_get(api_url, '/databases').get('databases', [])
 
 
+def _modified_ts(db: Dict) -> str:
+    """Best-available modification timestamp for a single dataset.
+
+    Order of preference:
+      1. mus `updated` (auto-stamped ISO 8601 on every metadata change)
+      2. mus `created`
+      3. .md `date` (manually set ISO date)
+      4. .md `year` cast to ISO ('2026' → '2026-01-01')
+      5. empty string
+
+    Returned as an ISO-ish string so lexical sort works as chronological.
+    """
+    for key in ('updated', 'created', 'date'):
+        v = db.get(key)
+        if v:
+            return str(v)
+    y = db.get('year')
+    if y:
+        return f'{y}-01-01'
+    return ''
+
+
 def get_collection_list(api_url: str) -> List[Dict]:
     """Build collection list by grouping API databases by group_id."""
     databases = _all_databases(api_url)
@@ -192,6 +214,8 @@ def get_collection_list(api_url: str) -> List[Dict]:
         total_cells = sum(db.get('n_cells') or 0 for db in dbs)
         collection_meta = (dbs[0].get('collection') or {})
         name = collection_meta.get('group') or group_id
+        # Group modification = most recent member modification.
+        last_modified = max((_modified_ts(db) for db in dbs), default='')
 
         collections.append({
             'name': name,
@@ -204,7 +228,7 @@ def get_collection_list(api_url: str) -> List[Dict]:
             'some_converted': True,
             'duckdb_count': len(dbs),
             'update_pending': 0,
-            'last_modified': 0,
+            'last_modified': last_modified,
             'description': None,
             # Group-level summaries: single shared value → that value;
             # multiple values across datasets → "mix". Used by index.html.
@@ -219,7 +243,9 @@ def get_collection_list(api_url: str) -> List[Dict]:
             'access':          _summarize_meta_field(dbs, 'access', abbrev_map=_ACCESS_ABBREV),
         })
 
-    collections.sort(key=lambda c: c['name'])
+    # Default sort: newest-first by last_modified (empty values sink to the
+    # bottom). Lexical compare works because all timestamps are ISO-ish.
+    collections.sort(key=lambda c: (c['last_modified'] or '', c['name']), reverse=True)
     return collections
 
 

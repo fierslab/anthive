@@ -914,6 +914,8 @@ class DatabaseRegistry:
             'license':          ann.get('license'),
             'contributor':      ann.get('contributor'),
             'year':             ann.get('year') or file_metadata.get('year'),
+            'updated':          ann.get('updated'),           # ISO 8601 from .h5ad.mus
+            'created':          ann.get('created'),           # ISO 8601 from .h5ad.mus
             'source':           ann.get('source'),            # internal | external
             'access':           ann.get('access'),            # internal | public
             'top_genes':        file_metadata.get('top_genes'),

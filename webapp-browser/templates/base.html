@@ -129,7 +129,6 @@
             {% if request.app.state.genesets_available %}
             <a href="/genesets">genesets</a>
             {% endif %}
-            <a href="/streamlit/">streamlit</a>
             <a href="/api/docs">api</a>
         </nav>
     </div>
@@ -158,36 +157,43 @@
       <div id="storage-details-body" style="display:none;margin-top:6px;padding-top:6px;border-top:1px dotted var(--border);color:var(--text-muted)">
         <strong>What's stored, where, and why:</strong>
         <ul style="margin:4px 0 4px 16px;padding:0">
-          <li><code>anthive.plot.settings</code> — your figure size, DPI, font, palette.
-              Written when you change a setting on a plot page.</li>
-          <li><code>anthive.storage.notice.ack</code> — that you closed this notice.
-              Without it the notice would re-appear on every page reload.</li>
+          <li><code>anthive.plot.settings</code> — your figure size, DPI, font,
+              palette. Written when you change a setting on a plot page.</li>
+          <li><code>anthive.storage.notice.ack</code> — that you closed this
+              notice (without it the notice would re-appear on every reload).</li>
+          <li>If you visit <code>/jupyter/</code>, <strong>JupyterLite</strong>
+              stores your notebook contents, kernel state, and
+              <code>micropip</code>-installed Python packages locally
+              (typically in IndexedDB and <code>localStorage</code>). This is
+              what lets the browser act as your "notebook server" — there is
+              no server-side notebook execution. None of this leaves your
+              browser.</li>
         </ul>
-        Both entries are kept in your browser's <code>localStorage</code> — they
-        are <strong>never</strong> sent to the catalogue server, and no third
-        party can read them. They persist until you clear browser data or
-        click "clear my data" below.
+        All entries are kept in your browser's <code>localStorage</code> /
+        <code>IndexedDB</code> — they are <strong>never</strong> sent to the
+        catalogue server, and no third party can read them. They persist until
+        you clear browser data or click "clear my data" below.
 
         <p style="margin:6px 0 4px"><strong>Cookies:</strong> the catalogue UI
         (this site, <code>ant-browse</code>) does not set any HTTP cookies. The
         catalogue's REST API (<code>ant-serve</code>) returns
         <code>Cache-Control</code> headers for cached plot images but no
-        identifying cookies. The optional Streamlit visualisation subsite at
-        <code>/streamlit/</code> sets short-lived session cookies for its
-        WebSocket connection; they expire when you close the tab and carry no
-        identifier across sessions.</p>
+        identifying cookies. The reverse proxy (Caddy) and any TLS-terminator
+        in front of this site may set short-lived session cookies for their
+        own routing — those expire when you close the tab.</p>
 
         <p style="margin:6px 0 4px"><strong>Logs:</strong> the server records
         HTTP requests (URL, status, timestamp) for operational debugging. These
         do not contain plot preferences and are not shared with third parties.
-        Anonymous access logging is required for security and uptime monitoring
-        under GDPR Art. 6(1)(f).</p>
+        Anonymous access logging falls under GDPR Art. 6(1)(f) (legitimate
+        interest in security and uptime monitoring).</p>
 
         <p style="margin:6px 0 0"><strong>Legal basis:</strong> the local-storage
         usage above is functional / strictly necessary under ePrivacy Art. 5(3)
         and therefore does not require prior consent. This notice is
         informational. You can clear all stored data at any time using the
-        button below — the catalogue keeps working without it.</p>
+        button below — the catalogue keeps working without it (you'll just see
+        plot defaults instead of your saved preferences).</p>
       </div>
 
       <div style="margin-top:8px;display:flex;gap:8px;align-items:center">

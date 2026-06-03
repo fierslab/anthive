@@ -3,193 +3,319 @@
 {% block title %}datasets — anthive{% endblock %}
 
 {% block content %}
-<div class="stats-row">
-    <div>collections: <span class="val">{{ total_folders }}</span></div>
-    <div>datasets: <span class="val">{{ total_datasets }}</span></div>
-    {% if total_cells %}
-    <div>cells: <span class="val">{{ "{:,}".format(total_cells) }}</span></div>
-    {% endif %}
-    {% if total_folders > 10 %}
-    <div style="color:#999;font-size:11px">sorted by last updated &nbsp;·&nbsp; <a href="#" id="show-all-link">show all {{ total_folders }}</a></div>
-    {% endif %}
-</div>
+<style>
+  /* ── index-page-specific styles ────────────────────────────────────────── */
+  .summary-row { display:flex; gap:14px; align-items:center; margin:2px 0 6px; font-size:12px; color:var(--text-muted); flex-wrap:wrap; }
+  .summary-row .val { font-weight:600; color:var(--text); }
 
-<div class="tbl-controls" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
-    <input type="text" id="coll-search" placeholder="filter collections…" style="width:200px">
-    <select id="flt-organism" class="coll-filter">
-        <option value="">organism: any</option>
-        {% for v in filter_options.organism %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
-    </select>
-    <select id="flt-tech_category" class="coll-filter">
-        <option value="">category: any</option>
-        {% for v in filter_options.technology_category %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
-    </select>
-    <select id="flt-technology" class="coll-filter">
-        <option value="">technology: any</option>
-        {% for v in filter_options.technology %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
-    </select>
-    <select id="flt-celltype" class="coll-filter">
-        <option value="">cell type: any</option>
-        {% for v in filter_options.celltype %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
-    </select>
-    <select id="flt-suspension_type" class="coll-filter">
-        <option value="">prep: any</option>
-        {% for v in filter_options.suspension_type or [] %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
-    </select>
-    <select id="flt-tissue" class="coll-filter">
-        <option value="">tissue: any</option>
-        {% for v in filter_options.tissue or [] %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
-    </select>
-    <select id="flt-disease" class="coll-filter">
-        <option value="">disease: any</option>
-        {% for v in filter_options.disease or [] %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
-    </select>
-    <select id="flt-access" class="coll-filter">
-        <option value="">access: any</option>
-        {% for v in filter_options.access or [] %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
-    </select>
-    <select id="flt-source" class="coll-filter">
-        <option value="">source: any</option>
-        {% for v in filter_options.source %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
-    </select>
-    <a href="#" id="clear-filters" style="font-size:11px;color:#888">clear</a>
-    <span class="tbl-info" id="coll-info"></span>
+  /* compact "context" cell — organism + tech + celltype + prep as inline badges */
+  .ctx-cell { display:inline-flex; gap:3px; flex-wrap:wrap; font-size:10px; line-height:1.2; }
+  .ctx-pill {
+    display:inline-block; padding:0 4px; border-radius:2px;
+    background:#eef2ff; color:#1d4ed8; border:1px solid #bfdbfe;
+    font-family:var(--font-mono); font-size:9.5px; letter-spacing:.2px;
+  }
+  .ctx-pill.muted { background:#f5f5f5; color:#888; border-color:#e5e5e5; }
+  .ctx-pill.tech  { background:#fef3c7; color:#92400e; border-color:#fde68a; }
+  .ctx-pill.cell  { background:#dcfce7; color:#166534; border-color:#bbf7d0; }
+  .ctx-pill.prep  { background:#fce7f3; color:#9d174d; border-color:#fbcfe8; }
+
+  /* sortable column headers */
+  th.sortable { cursor: pointer; user-select: none; position: relative; }
+  th.sortable:hover { background: var(--hover); }
+  th.sortable .sort-ind { display:inline-block; width:8px; color:#bbb; margin-left:2px; font-size:9px; }
+  th.sortable.sort-asc  .sort-ind::before  { content:'▲'; color:var(--text); }
+  th.sortable.sort-desc .sort-ind::before  { content:'▼'; color:var(--text); }
+
+  /* column-header popover (help + sort + value filter) */
+  .col-popover {
+    position:absolute; top:100%; left:0; min-width:200px; max-width:280px;
+    background:#fff; border:1px solid var(--border); box-shadow:0 4px 12px rgba(0,0,0,.12);
+    padding:8px 10px; z-index:50; font-size:11px; font-weight:400; color:var(--text);
+    text-transform:none; letter-spacing:0; line-height:1.4;
+  }
+  .col-popover h4 { font-size:11px; margin-bottom:4px; color:var(--text); }
+  .col-popover .desc { color:var(--text-muted); margin-bottom:6px; }
+  .col-popover .sort-btns { display:flex; gap:4px; margin:4px 0 6px; }
+  .col-popover .sort-btns button {
+    flex:1; padding:2px 4px; font-size:11px; background:#f8fafc;
+    border:1px solid var(--border); cursor:pointer; font-family:inherit;
+  }
+  .col-popover .sort-btns button.active { background:#dbeafe; border-color:var(--link); }
+  .col-popover .vals { max-height:160px; overflow-y:auto; }
+  .col-popover .vals label { display:block; padding:1px 0; cursor:pointer; }
+  .col-popover .clear-link { font-size:10px; color:#888; }
+</style>
+
+<div class="summary-row">
+  <div>collections: <span class="val">{{ total_folders }}</span></div>
+  <div>datasets: <span class="val">{{ total_datasets }}</span></div>
+  {% if total_cells %}
+  <div>cells: <span class="val">{{ "{:,}".format(total_cells) }}</span></div>
+  {% endif %}
+  <div style="flex:1"></div>
+  <input type="text" id="coll-search" placeholder="filter collections…" style="width:220px;padding:3px 8px;font-size:12px;border:1px solid var(--border);font-family:inherit;outline:none">
+  <span id="coll-info" style="font-size:11px;color:var(--text-muted)"></span>
+  <a href="#" id="show-all-link" style="font-size:11px;color:#999;display:none">show all {{ total_folders }}</a>
 </div>
 
 <table id="coll-table">
-    <thead>
-        <tr>
-            <th>ID</th>
-            <th>Collection</th>
-            <th>n</th>
-            <th>Cells</th>
-            <th title="organism">🧬</th>
-            <th title="technology">🔬</th>
-            <th title="cell type">🦠</th>
-            <th title="suspension type (cell / nucleus / na)">prep</th>
-            <th title="tissue (when all datasets agree)">tissue</th>
-            <th title="disease (when all datasets agree)">disease</th>
-            <th title="access (internal = lab-private; public = shareable)">acc</th>
-            <th title="source (internal = lab-generated; external = imported)">src</th>
-        </tr>
-    </thead>
-    <tbody>
-        {% for folder in folders %}
-        <tr
-            data-organism="{{ folder.organism.full or '' }}"
-            data-tech_category="{{ folder.technology_category.full or '' }}"
-            data-technology="{{ folder.technology.full or '' }}"
-            data-celltype="{{ folder.celltype.full or '' }}"
-            data-suspension_type="{{ (folder.suspension_type or {}).full or '' }}"
-            data-tissue="{{ (folder.tissue or {}).full or '' }}"
-            data-disease="{{ (folder.disease or {}).full or '' }}"
-            data-access="{{ (folder.access or {}).full or '' }}"
-            data-source="{{ folder.source.full or '' }}">
-            <td style="color:#888;font-size:11px">{{ folder.group_id or "—" }}</td>
-            <td>
-                <a href="/browse/{{ folder.browse_id }}"><strong>{{ folder.name }}</strong></a>
-                {% if folder.description and folder.description != 'na' %}<br><span style="color:#888;font-size:11px">{{ folder.description }}</span>{% endif %}
-            </td>
-            <td style="color:#666">{{ folder.dataset_count }}</td>
-            <td style="color:#555">{{ "{:,}".format(folder.total_cells) if folder.total_cells else "—" }}</td>
-            <td style="color:#555;font-size:11px" {% if folder.organism.full %}title="{{ folder.organism.full }}"{% endif %}>{{ folder.organism.abbrev }}</td>
-            <td style="color:#555;font-size:11px" {% if folder.technology.full %}title="{{ folder.technology.full }}"{% endif %}>{{ folder.technology.abbrev }}</td>
-            <td style="color:#555;font-size:11px" {% if folder.celltype.full %}title="{{ folder.celltype.full }}"{% endif %}>{{ folder.celltype.abbrev }}</td>
-            {% set _sus = folder.suspension_type or {} %}
-            <td style="color:#555;font-size:11px" {% if _sus.full %}title="{{ _sus.full }}"{% endif %}>{{ _sus.abbrev or '' }}</td>
-            {% set _tis = folder.tissue or {} %}
-            <td style="color:#555;font-size:11px" {% if _tis.full %}title="{{ _tis.full }}"{% endif %}>{{ _tis.abbrev or '' }}</td>
-            {% set _dis = folder.disease or {} %}
-            <td style="color:#555;font-size:11px" {% if _dis.full %}title="{{ _dis.full }}"{% endif %}>{{ _dis.abbrev or '' }}</td>
-            {% set _acc = folder.access or {} %}
-            <td style="color:#555;font-size:11px" {% if _acc.full %}title="{{ _acc.full }}"{% endif %}>{{ _acc.abbrev or '' }}</td>
-            <td style="color:#555;font-size:11px" {% if folder.source.full %}title="{{ folder.source.full }}"{% endif %}>{{ folder.source.abbrev }}</td>
-        </tr>
-        {% endfor %}
-    </tbody>
+  <thead>
+    <tr>
+      <th class="sortable" data-col="id" data-help="3-char study identifier (group_id)">ID<span class="sort-ind"></span></th>
+      <th class="sortable" data-col="name" data-help="Friendly collection name (the study)">Collection<span class="sort-ind"></span></th>
+      <th class="sortable" data-col="n_datasets" data-help="Number of distinct .h5ad datasets in this collection">n<span class="sort-ind"></span></th>
+      <th class="sortable" data-col="cells" data-help="Total cells summed across the collection's datasets">Cells<span class="sort-ind"></span></th>
+      <th class="sortable" data-col="modified" data-help="Most recent modification across this collection's datasets (mus 'updated' or .md 'date')">Modified<span class="sort-ind"></span></th>
+      <th class="sortable" data-col="context"
+          data-help="Compact summary: organism · technology · cell-type · preparation. Pills show 'mix' when datasets disagree."
+          data-filter-fields="organism,technology,celltype,suspension_type">Context<span class="sort-ind"></span></th>
+      <th class="sortable" data-col="tissue" data-help="Tissue (shown when all datasets agree, else 'mix')">Tissue<span class="sort-ind"></span></th>
+      <th class="sortable" data-col="disease" data-help="Disease (shown when all datasets agree, else 'mix')">Disease<span class="sort-ind"></span></th>
+      <th class="sortable" data-col="acc" data-help="Access: 'int' (lab-private) or 'pub' (publishable). 'mix' when collection contains both">Acc<span class="sort-ind"></span></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for folder in folders %}
+    {% set _org = folder.organism or {} %}
+    {% set _tech = folder.technology or {} %}
+    {% set _cell = folder.celltype or {} %}
+    {% set _sus = folder.suspension_type or {} %}
+    {% set _tis = folder.tissue or {} %}
+    {% set _dis = folder.disease or {} %}
+    {% set _acc = folder.access or {} %}
+    <tr
+      data-id="{{ folder.group_id or '' }}"
+      data-name="{{ folder.name or '' }}"
+      data-n_datasets="{{ folder.dataset_count }}"
+      data-cells="{{ folder.total_cells or 0 }}"
+      data-modified="{{ folder.last_modified or '' }}"
+      data-organism="{{ _org.full or '' }}"
+      data-technology="{{ _tech.full or '' }}"
+      data-celltype="{{ _cell.full or '' }}"
+      data-suspension_type="{{ _sus.full or '' }}"
+      data-tissue="{{ _tis.full or '' }}"
+      data-disease="{{ _dis.full or '' }}"
+      data-acc="{{ _acc.full or '' }}">
+      <td style="color:#888;font-size:11px;font-family:var(--font-mono)">{{ folder.group_id or "—" }}</td>
+      <td>
+        <a href="/browse/{{ folder.browse_id }}"><strong>{{ folder.name }}</strong></a>
+        {% if folder.description and folder.description != 'na' %}<br><span style="color:#888;font-size:11px">{{ folder.description }}</span>{% endif %}
+      </td>
+      <td style="color:#666">{{ folder.dataset_count }}</td>
+      <td style="color:#555">{{ "{:,}".format(folder.total_cells) if folder.total_cells else "—" }}</td>
+      <td style="color:#666;font-size:11px;font-family:var(--font-mono);white-space:nowrap">
+        {{ (folder.last_modified or '')[:10] or "—" }}
+      </td>
+      <td>
+        <span class="ctx-cell">
+          {% if _org.abbrev %}<span class="ctx-pill" title="organism: {{ _org.full }}">{{ _org.abbrev }}</span>{% endif %}
+          {% if _tech.abbrev %}<span class="ctx-pill tech" title="technology: {{ _tech.full }}">{{ _tech.abbrev }}</span>{% endif %}
+          {% if _cell.abbrev %}<span class="ctx-pill cell" title="cell type: {{ _cell.full }}">{{ _cell.abbrev }}</span>{% endif %}
+          {% if _sus.abbrev and _sus.abbrev != '—' %}<span class="ctx-pill prep" title="prep: {{ _sus.full }}">{{ _sus.abbrev }}</span>{% endif %}
+        </span>
+      </td>
+      <td style="color:#555;font-size:11px" title="{{ _tis.full or '' }}">{{ _tis.abbrev or "—" }}</td>
+      <td style="color:#555;font-size:11px" title="{{ _dis.full or '' }}">{{ _dis.abbrev or "—" }}</td>
+      <td style="color:#555;font-size:11px;font-family:var(--font-mono)" title="{{ _acc.full or '' }}">{{ _acc.abbrev or "—" }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
 </table>
 
 <script>
 (function() {
-    var DEFAULT_SHOW = 10;
-    var showAll = false;
-    var searchEl = document.getElementById('coll-search');
-    var infoEl  = document.getElementById('coll-info');
-    var showAllLink = document.getElementById('show-all-link');
-    var clearLink = document.getElementById('clear-filters');
-    var filterEls = {
-        organism:        document.getElementById('flt-organism'),
-        tech_category:   document.getElementById('flt-tech_category'),
-        technology:      document.getElementById('flt-technology'),
-        celltype:        document.getElementById('flt-celltype'),
-        suspension_type: document.getElementById('flt-suspension_type'),
-        tissue:          document.getElementById('flt-tissue'),
-        disease:         document.getElementById('flt-disease'),
-        access:          document.getElementById('flt-access'),
-        source:          document.getElementById('flt-source'),
-    };
-    var rows = Array.from(document.querySelectorAll('#coll-table tbody tr'));
+  const DEFAULT_SHOW = 50;
+  let   showAll = false;
+  const searchEl = document.getElementById('coll-search');
+  const infoEl   = document.getElementById('coll-info');
+  const showAllLink = document.getElementById('show-all-link');
+  const rows = Array.from(document.querySelectorAll('#coll-table tbody tr'));
+  const headers = Array.from(document.querySelectorAll('#coll-table th.sortable'));
 
-    function rowMatchesFilters(row) {
-        // A row matches a filter dropdown if its data-<field> attribute (a
-        // comma-separated list of values) contains the selected value.
-        for (var field in filterEls) {
-            var selected = filterEls[field].value;
-            if (!selected) continue;
-            var dataVal = (row.getAttribute('data-' + field) || '').toLowerCase();
-            var values = dataVal.split(',').map(function(v) { return v.trim(); });
-            if (values.indexOf(selected.toLowerCase()) === -1) return false;
-        }
-        return true;
-    }
+  // Per-column value filters (set/unset via header popover checkboxes).
+  // Map: { columnKey: Set<value> }. Empty/missing = no filter.
+  const valueFilters = {};
 
-    function update() {
-        var q = searchEl.value.toLowerCase().trim();
-        var anyFilterActive = Object.values(filterEls).some(function(el) { return el.value; });
-        var visible = 0;
-        var matchingRows = [];
-        rows.forEach(function(row) {
-            var textMatch = !q || row.textContent.toLowerCase().includes(q);
-            var filterMatch = rowMatchesFilters(row);
-            if (textMatch && filterMatch) matchingRows.push(row);
-        });
-        // Apply DEFAULT_SHOW limit only when no search/filter is active.
-        matchingRows.forEach(function(row, i) {
-            var withinLimit = (q || anyFilterActive) ? true : (showAll || i < DEFAULT_SHOW);
-            row.style.display = withinLimit ? '' : 'none';
-            if (withinLimit) visible++;
-        });
-        // Hide rows that didn't match at all.
-        rows.forEach(function(row) {
-            if (matchingRows.indexOf(row) === -1) row.style.display = 'none';
-        });
-        infoEl.textContent = visible + ' of ' + matchingRows.length;
-    }
+  // Current sort. Default: modified desc.
+  let sortCol = 'modified', sortDir = 'desc';
 
-    searchEl.addEventListener('input', update);
-    Object.values(filterEls).forEach(function(el) {
-        el.addEventListener('change', update);
+  function getRowVal(row, col) {
+    return (row.getAttribute('data-' + col) || '').toLowerCase();
+  }
+  function getRowSortVal(row, col) {
+    const raw = row.getAttribute('data-' + col) || '';
+    // Numeric columns: parse, fall back to 0
+    if (col === 'cells' || col === 'n_datasets') return Number(raw) || 0;
+    return raw.toLowerCase();
+  }
+
+  function applySort() {
+    rows.sort((a, b) => {
+      const av = getRowSortVal(a, sortCol), bv = getRowSortVal(b, sortCol);
+      const cmp = (av < bv) ? -1 : (av > bv) ? 1 : 0;
+      return sortDir === 'desc' ? -cmp : cmp;
     });
+    const tbody = document.querySelector('#coll-table tbody');
+    rows.forEach(r => tbody.appendChild(r));
+    headers.forEach(h => {
+      h.classList.remove('sort-asc','sort-desc');
+      if (h.getAttribute('data-col') === sortCol)
+        h.classList.add('sort-' + sortDir);
+    });
+  }
 
-    if (clearLink) {
-        clearLink.addEventListener('click', function(e) {
-            e.preventDefault();
-            searchEl.value = '';
-            Object.values(filterEls).forEach(function(el) { el.value = ''; });
-            update();
-        });
+  function rowMatches(row) {
+    // text search
+    const q = (searchEl.value || '').toLowerCase().trim();
+    if (q && !row.textContent.toLowerCase().includes(q)) return false;
+    // per-column value filters
+    for (const col in valueFilters) {
+      const wanted = valueFilters[col];
+      if (!wanted || !wanted.size) continue;
+      const raw = row.getAttribute('data-' + col) || '';
+      // multi-valued data attrs are stored as comma-separated 'full' strings
+      const vals = raw.split(',').map(s => s.trim()).filter(Boolean);
+      if (!vals.some(v => wanted.has(v))) return false;
     }
+    return true;
+  }
 
-    if (showAllLink) {
-        showAllLink.addEventListener('click', function(e) {
-            e.preventDefault();
-            showAll = true;
-            update();
-            showAllLink.parentNode.style.display = 'none';
-        });
+  function update() {
+    const visible = [];
+    rows.forEach(r => { if (rowMatches(r)) visible.push(r); });
+    const anyFilter = !!searchEl.value || Object.values(valueFilters).some(s => s && s.size);
+    let shown = 0;
+    rows.forEach(r => { r.style.display = 'none'; });
+    visible.forEach((r, i) => {
+      const within = (anyFilter || showAll) ? true : (i < DEFAULT_SHOW);
+      if (within) { r.style.display = ''; shown++; }
+    });
+    if (visible.length > DEFAULT_SHOW && !anyFilter && !showAll) {
+      showAllLink.style.display = '';
+      showAllLink.textContent = 'show all ' + visible.length;
+    } else {
+      showAllLink.style.display = 'none';
     }
+    infoEl.textContent = `${shown} of ${visible.length}`;
+  }
 
-    update();
+  searchEl.addEventListener('input', update);
+  showAllLink.addEventListener('click', e => { e.preventDefault(); showAll = true; update(); });
+
+  // ── header popovers (help + sort + value filter) ──────────────────────────
+  let activePopover = null;
+  function closePopover() {
+    if (activePopover) { activePopover.remove(); activePopover = null; }
+  }
+  document.addEventListener('click', e => {
+    if (activePopover && !activePopover.contains(e.target)
+        && !e.target.closest('th.sortable')) closePopover();
+  });
+
+  function uniqueValuesFor(fields) {
+    const out = new Set();
+    rows.forEach(r => {
+      fields.forEach(f => {
+        (r.getAttribute('data-' + f) || '').split(',').forEach(v => {
+          v = v.trim(); if (v) out.add(v);
+        });
+      });
+    });
+    return Array.from(out).sort();
+  }
+
+  headers.forEach(th => {
+    th.addEventListener('click', e => {
+      e.stopPropagation();
+      const col = th.getAttribute('data-col');
+      const help = th.getAttribute('data-help') || '';
+      const filterFields = (th.getAttribute('data-filter-fields') || col).split(',');
+      // If the same header is clicked while its popover is open, just toggle sort.
+      const reopenOnSame = activePopover && activePopover.dataset.col === col;
+      closePopover();
+      if (reopenOnSame) {
+        // toggle sort dir on the same column instead of opening again
+        if (sortCol === col) sortDir = (sortDir === 'asc') ? 'desc' : 'asc';
+        else { sortCol = col; sortDir = 'asc'; }
+        applySort(); update();
+        return;
+      }
+      const pop = document.createElement('div');
+      pop.className = 'col-popover';
+      pop.dataset.col = col;
+      // Position in the th
+      th.appendChild(pop);
+
+      // Help
+      const desc = document.createElement('div');
+      desc.className = 'desc';
+      desc.textContent = help;
+      pop.appendChild(desc);
+
+      // Sort buttons
+      const sortBtns = document.createElement('div');
+      sortBtns.className = 'sort-btns';
+      const ascBtn = document.createElement('button');
+      ascBtn.textContent = '▲ asc';
+      if (sortCol === col && sortDir === 'asc') ascBtn.classList.add('active');
+      ascBtn.onclick = (ev) => { ev.stopPropagation(); sortCol = col; sortDir = 'asc'; applySort(); update(); closePopover(); };
+      const descBtn = document.createElement('button');
+      descBtn.textContent = '▼ desc';
+      if (sortCol === col && sortDir === 'desc') descBtn.classList.add('active');
+      descBtn.onclick = (ev) => { ev.stopPropagation(); sortCol = col; sortDir = 'desc'; applySort(); update(); closePopover(); };
+      sortBtns.appendChild(ascBtn); sortBtns.appendChild(descBtn);
+      pop.appendChild(sortBtns);
+
+      // Value filter (for columns that map to data attrs with values)
+      const filterableCols = new Set(['organism','technology','celltype','suspension_type','tissue','disease','acc']);
+      const hasFilter = filterFields.some(f => filterableCols.has(f));
+      if (hasFilter) {
+        const vals = uniqueValuesFor(filterFields);
+        if (vals.length) {
+          const filterTitle = document.createElement('div');
+          filterTitle.innerHTML = `<strong>filter:</strong>`;
+          filterTitle.style.marginTop = '4px';
+          pop.appendChild(filterTitle);
+          const valsBox = document.createElement('div');
+          valsBox.className = 'vals';
+          const filterKey = filterFields[0]; // primary key for storage
+          if (!valueFilters[filterKey]) valueFilters[filterKey] = new Set();
+          vals.forEach(v => {
+            const lbl = document.createElement('label');
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.value = v;
+            cb.checked = valueFilters[filterKey].has(v);
+            cb.addEventListener('change', () => {
+              if (cb.checked) valueFilters[filterKey].add(v);
+              else valueFilters[filterKey].delete(v);
+              update();
+            });
+            lbl.appendChild(cb);
+            lbl.appendChild(document.createTextNode(' ' + v));
+            valsBox.appendChild(lbl);
+          });
+          pop.appendChild(valsBox);
+          const clr = document.createElement('a');
+          clr.className = 'clear-link';
+          clr.href = '#';
+          clr.textContent = '× clear filter';
+          clr.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation();
+            valueFilters[filterKey] = new Set();
+            pop.querySelectorAll('input[type=checkbox]').forEach(c => c.checked = false);
+            update();
+          };
+          pop.appendChild(clr);
+        }
+      }
+      activePopover = pop;
+    });
+  });
+
+  // initial sort + display
+  applySort();
+  update();
 })();
 </script>
 {% endblock %}
