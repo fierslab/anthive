@@ -557,12 +557,21 @@ async def plot_view(request: Request, folder_browse_id: str,
     dataset_title = db.get('title') or file_id
 
     obs = db.get('obs') or {}
+    # top_* defaults come from the .md and were curated by `ant-suggest-tops`.
+    # Fall back to empty lists so the template never crashes on null.
+    top_genes = db.get('top_genes') or []
+    top_cat   = db.get('top_cat')   or []
+    top_num   = db.get('top_num')   or []
     plot_meta = {
         'embeddings':  sorted(list((db.get('embeddings') or {}).keys())),
         'layers':      sorted(list((db.get('layers') or {}).keys())),
         'cat_fields':  sorted(obs.get('categorical') or []),
         'num_fields':  sorted(obs.get('numerical') or []),
         'default_layer': db.get('default_layer') or 'X',
+        # Curated defaults — drive the plot form's pre-population.
+        'top_genes':   top_genes,
+        'top_cat':     top_cat,
+        'top_num':     top_num,
     }
 
     return templates.TemplateResponse(request, "plot.html", {

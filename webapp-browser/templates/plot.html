@@ -530,6 +530,57 @@
     });
   })();
 
+  // Pre-fill curated defaults from the dataset's .md (top_genes / top_cat /
+  // top_num).  Only filled when the user-visible field is still empty after
+  // the URL pass — explicit URL params always win.  This makes /plot/bar
+  // land on a useful plot immediately (no clicking required).
+  (function prefillFromMD() {
+    const topGenes = {{ plot_meta.top_genes|tojson }};
+    const topCat   = {{ plot_meta.top_cat|tojson }};
+    const topNum   = {{ plot_meta.top_num|tojson }};
+    const geom     = GEOM;
+
+    function setIfEmpty(selector, value) {
+      if (!value) return;
+      const field = document.querySelector(selector);
+      if (!field) return;
+      if (field.tagName === 'SELECT') {
+        // For selects, only set when the current value is empty AND the
+        // option actually exists — avoids picking a non-listed value.
+        if (field.value) return;
+        const hasOption = Array.from(field.options).some(o => o.value === value);
+        if (hasOption) field.value = value;
+      } else if (!field.value) {
+        field.value = value;
+      }
+    }
+
+    // Per-geom curated default pick.  We use the FIRST element of each list
+    // and only fall back to subsequent ones if needed.
+    if (geom === 'scatter') {
+      // color: prefer first top_cat (categorical legend), then first gene
+      setIfEmpty('form [name="color"]', topCat[0] || topGenes[0]);
+    } else if (geom === 'violin' || geom === 'box') {
+      setIfEmpty('form [name="x"]', topCat[0]);
+      setIfEmpty('form [name="y"]', topGenes[0] || topNum[0]);
+    } else if (geom === 'bar') {
+      setIfEmpty('form [name="x"]', topCat[0]);
+      // Bar with no y = cell counts per category, which is meaningful;
+      // leave y blank unless the user pre-filled it.
+    } else if (geom === 'histogram' || geom === 'ecdf' || geom === 'kde') {
+      setIfEmpty('form [name="x"]', topGenes[0] || topNum[0]);
+      setIfEmpty('form [name="color"]', topCat[0]);
+    } else if (geom === 'heatmap') {
+      setIfEmpty('form [name="y"]', topCat[0]);
+      // For heatmap x: pre-fill the comma-separated gene list with the
+      // curated top genes (up to 10).
+      const x = document.querySelector('form [name="x"]');
+      if (x && !x.value && topGenes.length) {
+        x.value = topGenes.slice(0, 10).join(', ');
+      }
+    }
+  })();
+
   // initial render
   refreshDownloadLinks();
   // Defer initial refresh slightly so all listeners are attached
