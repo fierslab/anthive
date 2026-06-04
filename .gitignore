@@ -61,3 +61,7 @@ data/
 
 # Caddy basic-auth credentials — dropped in by 'make caddy-passwd'
 config/caddy-auth-*.conf
+
+# vark — standalone repo (codeberg.org/mfiers/vark), nested here but never tracked by anthive4
+vark/
+.vark/
