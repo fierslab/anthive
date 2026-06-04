@@ -1,0 +1,156 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "fastapi>=0.110.0",
+#   "uvicorn>=0.27.0",
+#   "jinja2>=3.1.0",
+#   "markdown>=3.5.0",
+#   "requests>=2.31.0",
+#   "pyyaml>=6.0",
+# ]
+# ///
+"""
+ant-browse - Anthive Web Browser Server
+
+Serves HTML interface for browsing single-cell datasets.
+All data is fetched from the ant-serve REST API.
+
+Usage:
+    ant browse [--api-url URL] [--host HOST] [--port PORT]
+
+Example:
+    ant browse --api-url http://localhost:8080 --host 0.0.0.0 --port 8081
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+import requests
+import uvicorn
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+# Add lib directory to path for config
+script_dir = Path(__file__).parent.resolve()
+lib_dir = script_dir.parent.parent / 'lib'
+sys.path.insert(0, str(lib_dir))
+
+from config import get_config
+
+# Add frontend/browser to path (the Jinja templates + browser.py router)
+browser_dir = script_dir.parent.parent / 'frontend' / 'browser'
+if not browser_dir.exists():
+    print(f"ERROR: frontend/browser directory not found at {browser_dir}", file=sys.stderr)
+    sys.exit(1)
+
+sys.path.insert(0, str(browser_dir.parent))
+
+# Import browser router with proper Python name (frontend/browser → frontend_browser)
+import importlib.util
+spec = importlib.util.spec_from_file_location("frontend_browser", browser_dir / "browser.py")
+browser_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(browser_module)
+browser_router = browser_module.router
+
+
+def _probe_genesets(api_url: str) -> bool:
+    """Return True if /genesets responds 200 (geneset store is configured)."""
+    try:
+        response = requests.get(f"{api_url.rstrip('/')}/genesets", timeout=3)
+        return response.status_code == 200
+    except requests.RequestException:
+        return False
+
+
+def create_app(api_url: str) -> FastAPI:
+    """Create FastAPI app for browser"""
+
+    app = FastAPI(
+        title="Anthive Browser",
+        description="Web interface for browsing single-cell datasets",
+        version="1.0.0",
+        docs_url=None,  # No Swagger docs for browser
+        redoc_url=None,
+    )
+
+    # Enable CORS
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # Store API URL and config in app state for routes to access
+    app.state.api_url = api_url
+    config = get_config()
+    app.state.reports = config.get('reports', [])
+
+    # Probe API for geneset availability (used by topbar)
+    app.state.genesets_available = _probe_genesets(api_url)
+
+    # Include browser router
+    app.include_router(browser_router)
+
+    return app
+
+
+def main():
+    """Main entry point"""
+    parser = argparse.ArgumentParser(
+        description="Anthive Web Browser Server",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+
+    # Get config for defaults
+    config = get_config()
+
+    parser.add_argument(
+        '--api-url',
+        default=f"http://{config.get('rest_api_host', 'localhost')}:{config.get('rest_api_port', 8080)}",
+        help='URL of the ant-serve REST API (default: from config or http://localhost:8080)'
+    )
+    parser.add_argument(
+        '--host',
+        default='127.0.0.1',
+        help='Host to bind to (default: 127.0.0.1)'
+    )
+    parser.add_argument(
+        '--port',
+        type=int,
+        default=8081,
+        help='Port to bind to (default: 8081)'
+    )
+    parser.add_argument(
+        '--reload',
+        action='store_true',
+        help='Enable auto-reload for development'
+    )
+
+    args = parser.parse_args()
+
+    # Create app
+    app = create_app(args.api_url)
+
+    # Print startup info
+    print(f"\n{'='*60}")
+    print(f"Starting Anthive Web Browser Server")
+    print(f"{'='*60}")
+    print(f"API URL: {args.api_url}")
+    print(f"Listening on: http://{args.host}:{args.port}")
+    print(f"{'='*60}\n")
+
+    # Start server
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        reload=args.reload,
+        log_level="info"
+    )
+
+
+if __name__ == '__main__':
+    main()

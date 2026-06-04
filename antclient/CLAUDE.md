@@ -22,9 +22,9 @@ repo / PyPI package.
   conversions are deliberate; don't "simplify" them.
 
 ## Consumers
-The `webapp-src/jupyter/` notebooks import this client (via micropip) to talk
+The `frontend/jupyter/jupyter/` notebooks import this client (via micropip) to talk
 to ant-serve. Changes to method signatures here affect those notebooks. The
-server-side `webapp-streamlit/` app also uses it for interactive plots.
+server-side `frontend/streamlit/` app also uses it for interactive plots.
 
 ## When extracting to its own repo
 This is the clean candidate: copy `antclient/`, keep `pyproject.toml`, publish.

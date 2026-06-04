@@ -1,0 +1,1166 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "mcp>=1.4.0",
+#   "httpx>=0.27.0",
+#   "pyyaml>=6.0",
+# ]
+# ///
+"""
+ant-mcp — Anthive MCP Server
+
+Exposes Anthive single-cell RNA-seq data as MCP tools so any LLM session
+(Claude Code, Claude Desktop, Cursor, …) can query datasets and generate
+plots via natural language.
+
+The MCP server wraps the ant-serve REST API — it never touches DuckDB
+directly, so it can run on any machine that can reach the API URL.
+
+Usage (local):
+    ant-mcp --api-url http://localhost:8080
+
+Usage (remote HTTP server, proxied through nginx):
+    ant-mcp --api-url http://localhost:8080 --host 0.0.0.0 --port 8090
+
+Client configuration (add to ~/.claude/settings.json or Claude Desktop config):
+    {
+      "mcpServers": {
+        "anthive": {
+          "type": "http",
+          "url": "https://data.nevel.eu/mcp",
+          "headers": { "Authorization": "Basic <base64(user:pass)>" }
+        }
+      }
+    }
+
+Generate the base64 token with:
+    echo -n "user:password" | base64
+"""
+
+import argparse
+import base64
+import contextvars
+import json
+import sys
+import uuid
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import List, Optional
+
+import httpx
+import uvicorn
+from mcp.server.fastmcp import FastMCP
+from mcp.types import ImageContent, TextContent
+
+
+# ── Image-capability detection ─────────────────────────────────────────────────
+# Tools check this ContextVar to decide whether to embed images inline.
+# The value is set per-request by _ImageCapabilityMiddleware.
+
+_client_displays_images: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    'client_displays_images', default=False,
+)
+
+
+class _ImageCapabilityMiddleware:
+    """ASGI middleware: reads X-Image-Output header and stores it in a ContextVar.
+
+    Add the header  X-Image-Output: inline  in your MCP client config to receive
+    images embedded directly in the response alongside the URL.
+    """
+
+    def __init__(self, app) -> None:
+        self._app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope['type'] == 'http':
+            headers = {k.lower(): v for k, v in scope.get('headers', [])}
+            raw_value = headers.get(b'x-image-output', b'').decode().lower()
+            token = _client_displays_images.set(raw_value in ('true', '1', 'yes', 'inline'))
+            try:
+                await self._app(scope, receive, send)
+            finally:
+                _client_displays_images.reset(token)
+        else:
+            await self._app(scope, receive, send)
+
+# ── load anthive config (anthive.yaml / anthive.default.yaml) ──────────────────
+
+_script_dir = Path(__file__).parent.resolve()
+sys.path.insert(0, str(_script_dir.parent.parent / 'lib'))
+from config import get_config as _get_anthive_config  # noqa: E402
+
+_anthive_cfg = _get_anthive_config().get('mcp', {})
+
+
+# ── CLI ────────────────────────────────────────────────────────────────────────
+
+def _parse_args() -> argparse.Namespace:
+    cfg = _anthive_cfg  # shorthand for yaml mcp: section
+    rest_host = _get_anthive_config().get('rest_api_host', 'localhost')
+    rest_port = _get_anthive_config().get('rest_api_port', 8080)
+    default_api_url = f'http://{rest_host}:{rest_port}'
+
+    parser = argparse.ArgumentParser(
+        description='Anthive MCP Server — exposes single-cell data to LLM sessions',
+    )
+    parser.add_argument(
+        '--api-url', default=default_api_url,
+        help=f'ant-serve API base URL (default: {default_api_url})',
+    )
+    parser.add_argument(
+        '--host', default=cfg.get('host', '0.0.0.0'),
+        help='Bind host for HTTP/SSE transport',
+    )
+    parser.add_argument(
+        '--port', type=int, default=cfg.get('port', 8090),
+        help='Port for HTTP/SSE transport',
+    )
+    parser.add_argument(
+        '--transport',
+        default=cfg.get('transport', 'streamable-http'),
+        choices=['streamable-http', 'sse', 'stdio'],
+        help='MCP transport',
+    )
+    parser.add_argument(
+        '--plots-dir', default=cfg.get('plots_dir'),
+        help='Directory to save plot PNGs for URL-based serving',
+    )
+    parser.add_argument(
+        '--public-url', default=cfg.get('public_url', 'http://localhost:8501'),
+        help='Public base URL used to construct plot image URLs',
+    )
+    parser.add_argument(
+        '--mcp-url', default=cfg.get('mcp_url'),
+        help='Public-facing MCP URL shown at startup and passed to LLM clients '
+             '(e.g. https://data.nevel.eu/mcp/<token>)',
+    )
+    return parser.parse_args()
+
+
+# ── main ───────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    args = _parse_args()
+    api_base_url = args.api_url.rstrip('/')
+    plots_dir = Path(args.plots_dir) if args.plots_dir else None
+    public_url = args.public_url.rstrip('/')
+    mcp_public_url = (args.mcp_url or f'http://{args.host}:{args.port}/mcp').rstrip('/')
+
+    mcp = FastMCP(
+        name='anthive',
+        host=args.host,
+        port=args.port,
+        instructions=(
+            'Anthive is a single-cell RNA-seq data browser with 60+ curated datasets.\n'
+            '\n'
+            'DISCOVERING DATA\n'
+            '  search_datasets  — find datasets by organism, cell type, tissue, disease, or free text;\n'
+            '                     returns db_id values used in every other tool\n'
+            '  get_dataset_info — full metadata for one dataset: all categorical and numerical\n'
+            '                     observation fields (use these exact names in queries/plots),\n'
+            '                     available expression layers, and embedding names\n'
+            '  search_genes     — confirm exact gene identifiers before using them in queries or plots\n'
+            '\n'
+            'PLOTTING\n'
+            '  plot(db_id, geom, ...)  — generate a publication-quality figure server-side\n'
+            '  Supported geom values:\n'
+            '    scatter   UMAP / embedding scatter; x/y default to the first embedding\n'
+            '    violin    per-category expression or metadata distribution\n'
+            '    box       same as violin, box-plot style\n'
+            '    bar       mean ± 95 % CI per category; omit y for cell counts\n'
+            '    histogram expression or metadata histogram\n'
+            '    ecdf      empirical CDF\n'
+            '    kde       kernel density estimate\n'
+            '    heatmap   mean expression across a gene list × category groups\n'
+            '  Field-type detection is automatic: pass any obs column, gene name, or embedding name\n'
+            '  as x / y / color and the server resolves it.\n'
+            '  Color encoding:\n'
+            '    categorical fields → palette="tab20"  (always specify this for obs columns!)\n'
+            '    gene expression / numerical → palette="viridis" (default) — adds a colorbar\n'
+            '  All figures are saved server-side.  Every call returns:\n'
+            '    1. A URL to an HTML page (PNG/SVG) or PDF — always share this with the user.\n'
+            '    2. If the client sends the header X-Image-Output: inline, the image is ALSO\n'
+            '       embedded directly in this response so it renders without opening a browser.\n'
+            '\n'
+            'SQL ANALYTICS  (for custom questions the plot tool cannot answer)\n'
+            '  analytics_schema — inspect DuckDB tables, column names/types, and 3-row samples;\n'
+            '                     ALWAYS call this first — column names differ per dataset\n'
+            '  analytics_query  — run any SELECT / WITH … SELECT query (writes are blocked);\n'
+            '                     do ALL aggregation, filtering, pivoting, and joins HERE;\n'
+            '                     returns a markdown table when ≤ 500 rows, otherwise a 10-row\n'
+            '                     preview plus a session_id for analytics_viz\n'
+            '  analytics_viz    — run a sandboxed Python script against the query result;\n'
+            '                     df is pre-loaded; save figure to OUTPUT_PATH;\n'
+            '                     available: pandas, matplotlib, seaborn, numpy, scipy, sklearn;\n'
+            '                     blocked: os, sys, subprocess, socket, requests, file I/O;\n'
+            '                     returns a URL + inline image (if header present)\n'
+            '\n'
+            'CELL SUBSETTING\n'
+            '  Every plot call accepts an optional subset parameter to restrict which cells\n'
+            '  are used — the rest of the dataset is ignored for that request.\n'
+            '  Pass a list of filter strings to the subset argument:\n'
+            "    'field:value'      exact categorical match  e.g. 'sex:female'\n"
+            "    'field:v1,v2'      IN list (OR within field)  e.g. 'celltype:Microglia,Astrocyte'\n"
+            "    'field:min..max'   numerical range  e.g. 'nCount_RNA:500..8000'\n"
+            '  Multiple entries are combined with AND across fields.\n'
+            '  Use analytics_schema to discover exact field names and values first.\n'
+            '  Example: plot APOE expression on female AD cells only:\n'
+            "    plot(db_id='S25/SGM', geom='violin', x='APOE_genotype', y='APOE',\n"
+            "         subset=['sex:female', 'condition:AD'])\n"
+            '\n'
+            'RANDOM SUBSAMPLING\n'
+            '  Every plot call accepts sample=N to draw at most N cells at random\n'
+            '  (DuckDB reservoir sampling — exact row count, applied after subset filters).\n'
+            '  If N ≥ cell count the full dataset is used.  Use this to:\n'
+            '    • Speed up scatter/UMAP plots on large datasets (sample=50000 is usually enough)\n'
+            '    • Get a quick sense of expression patterns before running the full query\n'
+            '    • Estimate per-group averages: sample=10000 is sufficient for common cell types\n'
+            '      (rare populations < 1 % may be underrepresented — use subset or more cells)\n'
+            '  Rule of thumb by geom:\n'
+            '    scatter/UMAP          sample=50000  — visual quality indistinguishable\n'
+            '    violin / kde / ecdf   sample=20000  — distribution shape well preserved\n'
+            '    bar / heatmap means   sample=10000  — sufficient for common cell types\n'
+            '  SQL analytics: use DuckDB\'s own USING SAMPLE clause in analytics_query, e.g.:\n'
+            '    SELECT celltype, AVG(TREM2) FROM __cells USING SAMPLE 10000 ROWS (reservoir)\n'
+            '    GROUP BY celltype\n'
+            '\n'
+            'IMAGE EMBEDDING (Open WebUI, compatible clients)\n'
+            '  Add the custom HTTP header  X-Image-Output: inline  in your MCP client settings.\n'
+            '  When this header is present, plot and analytics_viz embed the image as a base64\n'
+            '  content block so it renders inline — the URL is always included as well.\n'
+            '\n'
+            f'This MCP server is reachable at: {mcp_public_url}'
+        ),
+    )
+
+    print(f'Anthive MCP server')
+    print(f'  MCP URL:    {mcp_public_url}')
+    print(f'  API URL:    {api_base_url}')
+    print(f'  Plots dir:  {plots_dir or "(none — using data: URIs)"}')
+    print(f'  Public URL: {public_url}')
+
+    # ── API helpers ────────────────────────────────────────────────────────────
+
+    _http_client = httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=120, write=60, pool=10))
+
+    async def _get(path: str, **params) -> dict:
+        """GET JSON from ant-serve."""
+        url = f"{api_base_url}{path}"
+        response = await _http_client.get(url, params={k: v for k, v in params.items() if v is not None})
+        response.raise_for_status()
+        return response.json()
+
+    async def _get_post(path: str, body: dict) -> dict:
+        """POST JSON body to ant-serve and return JSON response."""
+        url = f"{api_base_url}{path}"
+        response = await _http_client.post(url, json=body)
+        response.raise_for_status()
+        return response.json()
+
+    async def _get_image(path: str, **params) -> bytes:
+        """GET image bytes from an ant-serve plot endpoint (legacy)."""
+        url = f"{api_base_url}{path}"
+        response = await _http_client.get(url, params={k: v for k, v in params.items() if v is not None})
+        response.raise_for_status()
+        return response.content
+
+    async def _get_plot(path: str, **params) -> tuple:
+        """GET image bytes + response headers from an ant-serve plot endpoint.
+
+        Returns (image_bytes, headers_dict). Headers include X-Plot-Caption
+        and X-Plot-Format set by ant-serve.
+        List-valued params (e.g. subset) are expanded into repeated query pairs.
+        """
+        url = f"{api_base_url}{path}"
+        # Build list-of-tuples so repeated params (e.g. subset) are sent correctly
+        query: list = []
+        for k, v in params.items():
+            if v is None:
+                continue
+            if isinstance(v, list):
+                for item in v:
+                    query.append((k, item))
+            else:
+                query.append((k, v))
+        response = await _http_client.get(url, params=query)
+        response.raise_for_status()
+        return response.content, dict(response.headers)
+
+    def _save_plot_url(image_bytes: bytes, output_format: str = 'png', caption: str = '') -> str:
+        """Save image to plots_dir and return a public URL.
+
+        PNG/SVG: saves uuid.ext + uuid.html (image + caption paragraph).
+                 Returns the HTML page URL so the user sees image + caption.
+        PDF:     saves uuid.pdf only (caption is embedded by ant-serve).
+                 Returns the PDF URL directly.
+        Falls back to a data: URI when --plots-dir is not configured.
+        """
+        _mime = {'png': 'image/png', 'svg': 'image/svg+xml', 'pdf': 'application/pdf'}
+        if plots_dir is None:
+            import base64
+            mime = _mime.get(output_format, 'image/png')
+            return f'data:{mime};base64,' + base64.b64encode(image_bytes).decode()
+
+        plots_dir.mkdir(parents=True, exist_ok=True)
+
+        # Prune files older than 1 week
+        cutoff = datetime.now() - timedelta(weeks=1)
+        for old_file in plots_dir.iterdir():
+            if old_file.is_file() and datetime.fromtimestamp(old_file.stat().st_mtime) < cutoff:
+                old_file.unlink(missing_ok=True)
+
+        file_stem = uuid.uuid4().hex
+
+        if output_format == 'pdf':
+            plot_filename = f"{file_stem}.pdf"
+            (plots_dir / plot_filename).write_bytes(image_bytes)
+            return f"{public_url}/plots/{plot_filename}"
+
+        # PNG or SVG: save image file + minimal HTML page
+        plot_filename = f"{file_stem}.{output_format}"
+        html_filename = f"{file_stem}.html"
+        (plots_dir / plot_filename).write_bytes(image_bytes)
+
+        safe_caption = caption.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        html_content = (
+            '<!DOCTYPE html><html><head><meta charset="utf-8">'
+            f'<title>{safe_caption}</title>'
+            '<style>'
+            'body{margin:2rem auto;max-width:1000px;font-family:sans-serif;}'
+            'img{max-width:100%;height:auto;display:block;}'
+            'p.caption{color:#555;font-size:0.85rem;margin-top:0.75rem;line-height:1.5;}'
+            '</style></head><body>'
+            f'<img src="{plot_filename}" alt="{safe_caption}">'
+            f'<p class="caption">{safe_caption}</p>'
+            '</body></html>'
+        )
+        (plots_dir / html_filename).write_text(html_content, encoding='utf-8')
+        return f"{public_url}/plots/{html_filename}"
+
+    def _make_plot_response(image_bytes: bytes, output_format: str = 'png', caption: str = ''):
+        """Return URL string normally; [TextContent, ImageContent] when client supports inline images."""
+        url = _save_plot_url(image_bytes, output_format, caption)
+        if not _client_displays_images.get():
+            return url
+        _mime_map = {'png': 'image/png', 'svg': 'image/svg+xml', 'pdf': 'application/pdf'}
+        mime = _mime_map.get(output_format, 'image/png')
+        text = f"View online: {url}" + (f"\n\n{caption}" if caption else '')
+        return [
+            TextContent(type='text', text=text),
+            ImageContent(type='image', data=base64.b64encode(image_bytes).decode(), mimeType=mime),
+        ]
+
+    # ── tools ──────────────────────────────────────────────────────────────────
+
+    @mcp.tool()
+    async def search_datasets(
+        organism: Optional[str] = None,
+        celltype: Optional[str] = None,
+        tissue: Optional[str] = None,
+        disease: Optional[str] = None,
+        technology: Optional[str] = None,
+        search: Optional[str] = None,
+    ) -> str:
+        """Search and filter available single-cell datasets.
+
+        Returns a list of datasets with IDs, titles, cell/gene counts, and
+        biological metadata. Use the returned db_id in all other tools.
+
+        Args:
+            organism:   Filter by species, e.g. 'human', 'mouse'.
+            celltype:   Filter by cell type, e.g. 'microglia', 'neuron'.
+            tissue:     Filter by tissue, e.g. 'brain', 'retina'.
+            disease:    Filter by condition, e.g. 'alzheimer', 'healthy'.
+            technology: Filter by sequencing method, e.g. '10x', 'visium'.
+            search:     Free-text search across all metadata fields.
+        """
+        all_databases = (await _get('/databases')).get('databases', [])
+
+        def field_matches(database: dict, field: str, query: Optional[str]) -> bool:
+            if not query:
+                return True
+            field_value = database.get(field)
+            if not field_value:
+                return False
+            values_to_check = field_value if isinstance(field_value, list) else [field_value]
+            return any(query.lower() in str(v).lower() for v in values_to_check)
+
+        matching_databases = []
+        for database in all_databases:
+            if not field_matches(database, 'organism', organism):
+                continue
+            if not field_matches(database, 'celltype', celltype):
+                continue
+            if not field_matches(database, 'tissue', tissue):
+                continue
+            if not field_matches(database, 'disease', disease):
+                continue
+            if not field_matches(database, 'technology', technology):
+                continue
+            if search and search.lower() not in json.dumps(database).lower():
+                continue
+            matching_databases.append(database)
+
+        if not matching_databases:
+            return 'No datasets found matching the given filters.'
+
+        result_lines = [f'Found {len(matching_databases)} dataset(s):\n']
+        for db in matching_databases:
+            collection_meta = db.get('collection') or {}
+            result_lines.append(
+                f"  db_id:      {db['id']}\n"
+                f"  title:      {db.get('title', '—')}\n"
+                f"  group:      {collection_meta.get('group', '—')} / {collection_meta.get('experiment', '—')}\n"
+                f"  cells:      {db.get('n_cells') or '?':,}    genes: {db.get('n_genes') or '?':,}\n"
+                f"  organism:   {db.get('organism') or '—'}\n"
+                f"  celltype:   {db.get('celltype') or '—'}\n"
+                f"  tissue:     {db.get('tissue') or '—'}\n"
+                f"  disease:    {db.get('disease') or '—'}\n"
+                f"  technology: {db.get('technology') or '—'}\n"
+                f"  layers:     {', '.join(db.get('layers', {}).keys()) or '—'}\n"
+                f"  embeddings: {', '.join(db.get('embeddings', {}).keys()) or '—'}\n"
+            )
+        return '\n'.join(result_lines)
+
+    @mcp.tool()
+    async def get_dataset_info(db_id: str) -> str:
+        """Get detailed information about a specific dataset.
+
+        Args:
+            db_id: Dataset identifier from search_datasets (e.g. 'B26/SOF').
+        """
+        try:
+            data = await _get(f'/databases/{db_id}/info')
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code == 404:
+                return f"Dataset '{db_id}' not found. Use search_datasets to find valid IDs."
+            raise
+
+        observation_fields = data.get('obs', {})
+        categorical_fields = observation_fields.get('categorical', [])
+        numerical_fields = observation_fields.get('numerical', [])
+
+        info_lines = [
+            f"Dataset:       {db_id}",
+            f"Title:         {data.get('title', '—')}",
+            f"Cells:         {data.get('n_cells', '?'):,}",
+            f"Genes:         {data.get('n_genes', '?'):,}",
+            f"Date:          {data.get('date') or '—'}",
+            f"Organism:      {data.get('organism') or '—'}",
+            f"Cell type:     {data.get('celltype') or '—'}",
+            f"Tissue:        {data.get('tissue') or '—'}",
+            f"Disease:       {data.get('disease') or '—'}",
+            f"Technology:    {data.get('technology') or '—'}",
+            f"Layers:        {', '.join(data.get('layers', {}).keys()) or '—'}",
+            f"Embeddings:    {', '.join(data.get('embeddings', {}).keys()) or '—'}",
+        ]
+        if categorical_fields:
+            info_lines.append(f"Categorical ({len(categorical_fields)}): {', '.join(categorical_fields)}")
+        if numerical_fields:
+            info_lines.append(f"Numerical ({len(numerical_fields)}):   {', '.join(numerical_fields)}")
+        if data.get('doi'):
+            info_lines.append(f"DOI:           {', '.join(data['doi'])}")
+        if data.get('markdown'):
+            info_lines.append(f"\nDescription:\n{data['markdown'][:600]}")
+
+        return '\n'.join(info_lines)
+
+    @mcp.tool()
+    async def search_genes(db_id: str, query: str, limit: int = 20) -> str:
+        """Search for gene names within a dataset.
+
+        Use this to confirm exact gene names before calling plot tools.
+
+        Args:
+            db_id:  Dataset identifier (e.g. 'B26/SOF').
+            query:  Gene name or prefix, e.g. 'APOE', 'CD4', 'Trem'.
+            limit:  Maximum number of results (default 20).
+        """
+        try:
+            data = await _get(f'/databases/{db_id}/genes', q=query, limit=limit)
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code == 404:
+                return f"Dataset '{db_id}' not found."
+            raise
+
+        gene_names = data.get('genes', [])
+        if not gene_names:
+            return f"No genes matching '{query}' in {db_id}."
+        return f"Genes matching '{query}' in {db_id} ({len(gene_names)} result(s)):\n" + ', '.join(gene_names)
+
+    @mcp.tool()
+    async def plot(
+        db_id: str,
+        geom: str,
+        x: Optional[str] = None,
+        y: Optional[str] = None,
+        color: Optional[str] = None,
+        output_format: str = 'png',
+        layer: str = 'X',
+        width: float = 8,
+        height: float = 6,
+        dpi: int = 150,
+        bins: int = 20,
+        point_size: float = 3,
+        alpha: float = 0.8,
+        palette: str = 'viridis',
+        ci: bool = True,
+        n_genes: int = 20,
+        subset: Optional[List[str]] = None,
+        sample: Optional[int] = None,
+    ):
+        """Generate a plot for a single-cell dataset and return a URL (and optionally an inline image).
+
+        The server auto-detects field types (gene, embedding, categorical, numerical)
+        from the field name — no type annotation needed.
+
+        geom choices:
+          scatter     UMAP / embedding scatter.  x/y default to the first embedding axes.
+                      Use color= for hue: categorical fields → tab20 palette;
+                      gene expression / numerical → viridis + colorbar.
+          violin      Per-category expression or metadata distribution (x=cat, y=gene/num).
+          box         Same as violin, box-plot style.
+          bar         Mean ± 95 % CI per category (x=cat, y=gene/num).
+                      Omit y to plot cell counts per category.
+          histogram   Distribution of a gene or numerical field (x=gene/num).
+          ecdf        Empirical CDF of a gene or numerical field.
+          kde         Kernel density estimate.
+          heatmap     Mean expression across a gene list × category groups.
+                      Pass x as comma-separated gene names, or omit to use top n_genes.
+
+        IMPORTANT palette guidance:
+          - color= a categorical obs field  → always set palette='tab20'
+          - color= a gene or numerical field → leave palette at default ('viridis')
+
+        SUBSETTING — restrict which cells are used:
+          Pass one or more subset strings to limit the analysis to a cell subset.
+          Formats:
+            'field:value'       exact match on a categorical field
+            'field:v1,v2'       match any of the listed values (IN list)
+            'field:min..max'    numerical range (BETWEEN min AND max)
+          Examples:
+            subset=['sex:female']
+            subset=['sex:female', 'condition:AD']   ← AND logic across fields
+            subset=['celltype:Microglia,Astrocyte']  ← OR within a field
+            subset=['nCount_RNA:1000..10000']
+          Use analytics_schema to discover exact field names and values first.
+
+        SAMPLING — speed up plots on large datasets:
+          Pass sample=N to randomly draw at most N cells using DuckDB reservoir
+          sampling (exact row count, applied after subset filters).
+          If N exceeds the number of (filtered) cells, all cells are used.
+          Rule of thumb:
+            - Scatter / UMAP:        sample=50000 gives near-identical visual quality
+            - Violin / KDE / ECDF:   sample=20000–50000 usually sufficient
+            - Bar / heatmap means:   sample=10000 is often sufficient; rare cell types
+                                     (<1 % of cells) may be underrepresented at low N
+          Example: plot a quick UMAP overview of a 500k-cell dataset:
+            plot(db_id='...', geom='scatter', color='celltype',
+                 palette='tab20', sample=50000)
+
+        Returns:
+          Always: a URL to an HTML page (PNG/SVG) or PDF — share this with the user.
+          Also (when X-Image-Output: inline header is present): an embedded image
+          content block so clients like Open WebUI render it immediately.
+
+        Args:
+            db_id:         Dataset identifier from search_datasets.
+            geom:          Plot geometry (see above).
+            x:             X-axis field name (obs column, gene, or embedding).
+            y:             Y-axis field name.
+            color:         Field to encode as colour hue.
+            output_format: 'png' (default), 'svg', or 'pdf'.
+            layer:         Expression layer (default 'X').
+            width:         Figure width in inches (default 8).
+            height:        Figure height in inches (default 6).
+            dpi:           Output resolution (default 150).
+            bins:          Histogram bins (default 20).
+            point_size:    Scatter point size (default 3).
+            alpha:         Scatter point transparency (default 0.8).
+            palette:       Colormap/palette (default 'viridis'; use 'tab20' for categorical color).
+            ci:            Show 95 % CI on bar plots (default True).
+            n_genes:       Top genes for heatmap when x is not given (default 20).
+            subset:        Optional list of cell-filter strings (see SUBSETTING above).
+            sample:        Optional random subsample size (see SAMPLING above).
+        """
+        subset_params = subset or []
+        image_bytes, headers = await _get_plot(
+            f'/databases/{db_id}/plot',
+            geom=geom, x=x, y=y, color=color,
+            format=output_format, layer=layer,
+            width=width, height=height, dpi=dpi,
+            bins=bins, point_size=point_size, alpha=alpha,
+            palette=palette, ci=ci, n_genes=n_genes,
+            subset=subset_params, sample=sample,
+        )
+        caption = headers.get('x-plot-caption', '')
+        return _make_plot_response(image_bytes, output_format, caption)
+
+    @mcp.tool()
+    async def plot_umap(
+        db_id: str,
+        gene: Optional[str] = None,
+        category: Optional[str] = None,
+        numerical: Optional[str] = None,
+        embedding: Optional[str] = None,
+        layer: str = 'X',
+        width: float = 8,
+        height: float = 6,
+        dpi: int = 150,
+        point_size: float = 3,
+        alpha: float = 0.8,
+        palette: str = 'tab20',
+    ):
+        """Deprecated: use plot(geom='scatter', ...) instead.
+
+        Generate a UMAP embedding scatter plot.
+        """
+        png_bytes = await _get_image(
+            f'/databases/{db_id}/plot/umap',
+            gene=gene, category=category, numerical=numerical,
+            embedding=embedding, layer=layer,
+            width=width, height=height, dpi=dpi,
+            point_size=point_size, alpha=alpha, palette=palette,
+        )
+        return _make_plot_response(png_bytes)
+
+    @mcp.tool()
+    async def plot_gene_distribution(  # Deprecated: use plot(geom='ecdf'/'histogram'/'kde')
+        db_id: str,
+        gene: str,
+        plot_type: str = 'ecdf',
+        layer: str = 'X',
+        bins: int = 20,
+        width: float = 7,
+        height: float = 4,
+        dpi: int = 150,
+    ):
+        """Plot the expression distribution of a gene across all cells.
+
+        Args:
+            db_id:      Dataset identifier (e.g. 'B26/SOF').
+            gene:       Gene name (e.g. 'APOE').
+            plot_type:  'ecdf' (default), 'kde', or 'histogram'.
+            layer:      Expression layer (default: X).
+            bins:       Histogram bins, ignored for ecdf/kde (default 20).
+            width:      Figure width in inches (default 7).
+            height:     Figure height in inches (default 4).
+            dpi:        Output resolution (default 150).
+        """
+        png_bytes = await _get_image(
+            f'/databases/{db_id}/plot/gene',
+            gene=gene, plot_type=plot_type, layer=layer,
+            bins=bins, width=width, height=height, dpi=dpi,
+        )
+        return _make_plot_response(png_bytes)
+
+    @mcp.tool()
+    async def plot_by_category(  # Deprecated: use plot(geom='bar'/'violin'/'box')
+        db_id: str,
+        cat: str,
+        y: Optional[str] = None,
+        y_type: str = 'count',
+        plot_type: str = 'bar',
+        layer: str = 'X',
+        width: float = 8,
+        height: float = 5,
+        dpi: int = 150,
+    ):
+        """Plot values grouped by a categorical field (cell type, condition, …).
+
+        Shows cell counts per category by default, or the distribution of a gene
+        or numerical field across categories.
+
+        Args:
+            db_id:      Dataset identifier (e.g. 'B26/SOF').
+            cat:        Categorical field to group by, e.g. 'celltype'.
+            y:          Gene or numerical field for Y axis (omit for cell counts).
+            y_type:     'count' (default), 'gene', or 'numerical'.
+            plot_type:  'bar' (default), 'box', or 'violin'.
+            layer:      Expression layer used when y_type='gene' (default: X).
+            width:      Figure width in inches (default 8).
+            height:     Figure height in inches (default 5).
+            dpi:        Output resolution (default 150).
+        """
+        png_bytes = await _get_image(
+            f'/databases/{db_id}/plot/cat',
+            cat=cat, y=y, y_type=y_type, plot_type=plot_type,
+            layer=layer, width=width, height=height, dpi=dpi,
+        )
+        return _make_plot_response(png_bytes)
+
+    @mcp.tool()
+    async def plot_numerical(  # Deprecated: use plot(geom='ecdf'/'histogram'/'kde'/'violin'/'box')
+        db_id: str,
+        num: str,
+        cat: Optional[str] = None,
+        plot_type: str = 'ecdf',
+        bins: int = 20,
+        width: float = 7,
+        height: float = 4,
+        dpi: int = 150,
+    ):
+        """Plot the distribution of a numerical metadata field.
+
+        Without cat: shows ecdf, kde, or histogram.
+        With cat:    shows box, violin, or bar grouped by that category.
+
+        Args:
+            db_id:      Dataset identifier (e.g. 'B26/SOF').
+            num:        Numerical field, e.g. 'nCount_RNA', 'percent.mt'.
+            cat:        Optional groupby categorical field.
+            plot_type:  'ecdf', 'kde', 'histogram' (ungrouped);
+                        'box', 'violin', 'bar' (grouped).
+            bins:       Histogram bins (default 20).
+            width:      Figure width in inches (default 7).
+            height:     Figure height in inches (default 4).
+            dpi:        Output resolution (default 150).
+        """
+        png_bytes = await _get_image(
+            f'/databases/{db_id}/plot/num',
+            num=num, cat=cat, plot_type=plot_type,
+            bins=bins, width=width, height=height, dpi=dpi,
+        )
+        return _make_plot_response(png_bytes)
+
+    # ── analytics tools ────────────────────────────────────────────────────────
+
+    @mcp.tool()
+    async def analytics_schema(db_id: str) -> str:
+        """Explore the DuckDB schema of a dataset — list tables, columns, and sample rows.
+
+        Call this first when planning a custom analysis to understand what tables
+        and fields are available.  Then write a SQL query with analytics_query.
+
+        Args:
+            db_id: Dataset identifier (e.g. 'S25/SGM').
+        """
+        try:
+            data = await _get(f'/databases/{db_id}/analytics/schema')
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code == 404:
+                return f"Dataset '{db_id}' not found. Use search_datasets to find valid IDs."
+            raise
+
+        lines = [f"Schema for {db_id}:\n"]
+        for table in data.get('tables', []):
+            row_count = table.get('row_count')
+            count_str = f"  ({row_count:,} rows)" if row_count is not None else ''
+            lines.append(f"Table: {table['table']}{count_str}")
+            for col in table.get('columns', []):
+                lines.append(f"  {col['name']}  [{col['type']}]")
+            sample = table.get('sample', [])
+            if sample:
+                lines.append(f"  Sample: {sample[0]}")
+            lines.append('')
+        return '\n'.join(lines)
+
+    @mcp.tool()
+    async def analytics_query(
+        db_id: str, sql: str,
+        timeout: Optional[int] = None,
+        attach_sessions: Optional[list[str]] = None,
+    ) -> str:
+        """Execute a read-only SQL query against a dataset and save results server-side.
+
+        IMPORTANT: do ALL filtering, grouping, aggregation, pivoting, and
+        transformation here in SQL — DuckDB is orders of magnitude faster than
+        pandas for these operations on large single-cell datasets.  The Python
+        analytics_viz step should contain only plotting code that operates on the
+        already-aggregated result.
+
+        Only SELECT / WITH … SELECT queries are permitted.  Results are stored as
+        a Parquet file on the server — no bulk data travels over MCP.  Use the
+        returned session_id in analytics_viz to visualise the result.
+
+        Returns column names, dtypes, total row count, and a 10-row preview.
+
+        DuckDB supports window functions, PIVOT, LIST_AGG, MEDIAN, QUANTILE,
+        CORR, and full standard SQL.  Prefer complex SQL over complex Python.
+
+        JOINING MODULE SCORES: If you previously called module_score and got a
+        session_id, pass it in attach_sessions to make the scores available as a
+        table called `scores` (columns: cell_name, module_score). Example:
+            sql: "SELECT o.cell_type, AVG(s.module_score) FROM scores s JOIN obscat o USING (cell_name) GROUP BY 1"
+            attach_sessions: ["<session_id from module_score>"]
+
+        Args:
+            db_id:   Dataset identifier (e.g. 'S25/SGM').
+            sql:     SELECT query.
+            timeout: Query timeout in seconds (default 120). Increase for complex
+                     multi-CTE queries on large datasets, e.g. timeout=300.
+            attach_sessions: List of session IDs from prior module_score or
+                     analytics_query calls. The first is available as table
+                     `scores`, additional ones as `session_1`, `session_2`, etc.
+        """
+        body: Dict[str, Any] = {'sql': sql}
+        if timeout is not None:
+            body['timeout'] = timeout
+        if attach_sessions:
+            body['attach_sessions'] = attach_sessions
+        try:
+            data = await _get_post(f'/databases/{db_id}/analytics/query', body)
+        except httpx.HTTPStatusError as error:
+            code = error.response.status_code
+            if code == 404:
+                return f"Dataset '{db_id}' not found."
+            if code in (400, 408):
+                return f"Query error: {error.response.text}"
+            raise
+
+        session_id_val = data['session_id']
+        row_count = data['row_count']
+        columns = data['columns']
+        dtypes = data['dtypes']
+        preview_rows = data.get('preview', [])
+        is_full_table = data.get('full_table', False)
+        is_truncated = data.get('truncated', False)
+
+        lines = [
+            f"session_id: {session_id_val}",
+            f"rows: {row_count:,}" + (" (truncated at limit)" if is_truncated else ''),
+            "columns: " + ', '.join(f"{c} [{t}]" for c, t in zip(columns, dtypes)),
+            '',
+        ]
+
+        if is_full_table and preview_rows:
+            # Render full result as a markdown table
+            col_widths = [max(len(str(c)), max((len(str(r.get(c, ''))) for r in preview_rows), default=0))
+                          for c in columns]
+            header = '| ' + ' | '.join(str(c).ljust(col_widths[i]) for i, c in enumerate(columns)) + ' |'
+            separator = '| ' + ' | '.join('-' * col_widths[i] for i in range(len(columns))) + ' |'
+            lines += [header, separator]
+            for row in preview_rows:
+                cells = [str(row.get(c, '')).ljust(col_widths[i]) for i, c in enumerate(columns)]
+                lines.append('| ' + ' | '.join(cells) + ' |')
+        else:
+            lines.append('Preview (first 10 rows):')
+            for row in preview_rows:
+                lines.append(f"  {row}")
+
+        lines += [
+            '',
+            f"Use analytics_viz(session_id='{session_id_val}', code=...) to visualise.",
+        ]
+        return '\n'.join(lines)
+
+    @mcp.tool()
+    async def analytics_viz(
+        session_id: str,
+        code: str,
+        output_format: str = 'png',
+    ):
+        """Execute a Python visualisation script against a prior analytics_query result.
+
+        IMPORTANT: do NOT transform or aggregate data here — that belongs in the
+        analytics_query SQL step.  This script should only plot the already-small
+        aggregated DataFrame that analytics_query produced.
+
+        The script runs server-side in a sandboxed subprocess.  Two variables are
+        pre-injected — use them to load data and save the figure:
+
+            df = pd.read_parquet(DATA_PATH)   # already loaded for you
+            # … build your plot …
+            plt.savefig(OUTPUT_PATH, bbox_inches='tight', dpi=150)
+
+        Available libraries: pandas, matplotlib, seaborn, numpy, scipy, sklearn.
+        Blocked: os, sys, subprocess, socket, requests, and other I/O modules.
+
+        Returns a URL to the rendered figure (same mechanism as the plot tool).
+
+        Args:
+            session_id:    ID returned by analytics_query.
+            code:          Python source for the visualisation.
+            output_format: 'png' (default), 'svg', or 'pdf'.
+        """
+        try:
+            data = await _get_post('/analytics/viz', {
+                'session_id': session_id,
+                'code': code,
+                'output_format': output_format,
+            })
+        except httpx.HTTPStatusError as error:
+            code_status = error.response.status_code
+            if code_status == 404:
+                return f"Session '{session_id}' not found. Run analytics_query first."
+            if code_status in (400, 408):
+                return f"Visualization error: {error.response.text}"
+            raise
+
+        figure_b64 = data['figure_b64']
+        fmt = data.get('output_format', output_format)
+        caption = f"Analytics visualization (session {session_id})"
+        return _make_plot_response(base64.b64decode(figure_b64), fmt, caption)
+
+    @mcp.tool()
+    async def list_genesets(
+        organism: Optional[str] = None,
+        method: Optional[str] = None,
+        study: Optional[str] = None,
+    ) -> str:
+        """List available curated genesets in the geneset store.
+
+        Genesets are organized as <Study>/<Experiment>/<name>. An "experiment"
+        is one analysis run (e.g. WGCNA, cNMF, DGE) on a parent dataset; each
+        contains one or more named genesets in .grp (unranked) or .rnk (ranked)
+        format. Use get_geneset to fetch one geneset's genes for downstream
+        analysis (e.g. as input to module_score).
+
+        Args:
+            organism: Filter to one organism (e.g. 'human', 'mouse').
+            method:   Filter to one method (WGCNA, cNMF, DGE, GSEA, manual).
+            study:    Filter to one study folder (e.g. 'Sierksma2025').
+        """
+        try:
+            data = await _get('/genesets', organism=organism, method=method, study=study)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 503:
+                return "Geneset store is not configured on this server."
+            return f"Error {exc.response.status_code}: {exc.response.text}"
+
+        items = data.get('genesets', [])
+        if not items:
+            return "No genesets found matching the filters."
+
+        naming = data.get('column_naming', {})
+        lines = [
+            f"{data['count']} geneset(s):"
+        ]
+        if naming:
+            lines.append(
+                f"(score-column convention: {naming.get('template', '?')}; "
+                f"separator {naming.get('separator', '?')!r})"
+            )
+        for geneset in items:
+            description = geneset.get('description') or ''
+            scored_in = geneset.get('scored_in') or []
+            scored_str = (
+                f"  pre-scored in: {', '.join(scored_in)}"
+                if scored_in else "  pre-scored in: (none)"
+            )
+            lines.append(
+                f"  {geneset['geneset_id']}  "
+                f"[{geneset['format']}, {geneset['n_genes']} genes, "
+                f"organism={geneset.get('organism', '?')}, "
+                f"method={geneset.get('method', '?')}, "
+                f"parent={geneset.get('parent_dataset') or '-'}]\n"
+                + scored_str
+                + (f"\n      {description}" if description else "")
+            )
+        return '\n'.join(lines)
+
+    @mcp.tool()
+    async def get_geneset(geneset_id: str) -> str:
+        """Fetch a single geneset by ID and return its metadata + gene list.
+
+        The geneset_id format is '<Study>/<Experiment>/<name>', e.g.
+        'Sierksma2025/WGCNA/Brown_Lysosome'. Use list_genesets to discover IDs.
+
+        Returns merged metadata (experiment + per-geneset), the full gene list,
+        and (for .rnk format) the rank values.
+
+        Args:
+            geneset_id: Full ID '<Study>/<Experiment>/<name>'.
+        """
+        try:
+            data = await _get(f'/genesets/{geneset_id}')
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return f"Geneset {geneset_id!r} not found. Use list_genesets to discover available IDs."
+            if exc.response.status_code == 503:
+                return "Geneset store is not configured on this server."
+            return f"Error {exc.response.status_code}: {exc.response.text}"
+
+        lines = [
+            f"Geneset: {data['geneset_id']}",
+            f"  Display name:  {data.get('display_name', data['name'])}",
+            f"  Format:        {data['format']}",
+            f"  N genes:       {data['n_genes']}",
+            f"  Organism:      {data.get('organism') or '-'}",
+            f"  Method:        {data.get('method') or '-'}",
+            f"  Parent:        {data.get('parent_dataset') or '-'}",
+        ]
+        if data.get('description'):
+            lines.append(f"  Description:   {data['description']}")
+        if data.get('direction'):
+            lines.append(f"  Direction:     {data['direction']}")
+
+        column = data.get('column_name')
+        scored_in = data.get('scored_in') or []
+        if column:
+            lines.append(f"  Score column:  {column!r}")
+        if scored_in:
+            lines.append(f"  Pre-scored in: {', '.join(scored_in)}")
+            lines.append(
+                f"  → Use analytics_query to read pre-computed scores instead of "
+                f"recomputing with module_score, e.g.:")
+            lines.append(
+                f"      SELECT cell_name, \"{column}\" FROM obsnum")
+        else:
+            lines.append(f"  Pre-scored in: (none — use module_score to compute on-the-fly)")
+
+        genes = data.get('genes') or []
+        if data['format'] == 'rnk' and data.get('ranks'):
+            lines.append("\nRanked genes (gene\\trank):")
+            for gene, rank in data['ranks']:
+                lines.append(f"  {gene}\t{rank}")
+        else:
+            lines.append("\nGenes:")
+            lines.append("  " + ", ".join(genes))
+        return '\n'.join(lines)
+
+    @mcp.tool()
+    async def list_module_scores(db_id: str) -> str:
+        """List geneset module scores already computed and stored on a dataset.
+
+        Use this BEFORE module_score to check whether a geneset is already
+        pre-computed as an obs column — if it is, prefer reading it via
+        analytics_query rather than recomputing.
+
+        Returns the column names, geneset references, and per-column stats.
+        Each column can be queried directly:
+
+            SELECT cell_name, "Sierksma2025::WGCNA::Brown_Lysosome"
+            FROM   obsnum
+
+        Args:
+            db_id: Dataset id, e.g. 'P26/HMI'.
+        """
+        try:
+            data = await _get(f'/databases/{db_id}/module_scores')
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return f"Dataset {db_id!r} not found."
+            return f"Error {exc.response.status_code}: {exc.response.text}"
+
+        items = data.get('scored_genesets', [])
+        if not items:
+            return (
+                f"{db_id}: no pre-computed module scores. "
+                f"Use module_score to compute one on-the-fly."
+            )
+
+        lines = [f"{db_id}: {data['count']} pre-computed module score(s):"]
+        for item in items:
+            stats = item.get('stats') or {}
+            line = (
+                f"  {item['geneset_id']}\n"
+                f"      column: {item['column_name']!r}"
+            )
+            if item.get('method'):
+                line += f"  method={item['method']}"
+            if item.get('description'):
+                line += f"\n      {item['description']}"
+            if 'mean' in stats and stats.get('mean') is not None:
+                line += (
+                    f"\n      stats: mean={stats['mean']:.3f}, "
+                    f"std={stats.get('std',0):.3f}, "
+                    f"range=[{stats.get('min',0):.3f}, {stats.get('max',0):.3f}]"
+                )
+            if not item.get('geneset_known'):
+                line += "\n      (geneset is in obs but not registered in genesetstore)"
+            lines.append(line)
+
+        lines.append("")
+        lines.append("To read pre-computed scores, use analytics_query, e.g.:")
+        if items:
+            lines.append(
+                f"  SELECT cell_name, \"{items[0]['column_name']}\" FROM obsnum LIMIT 5"
+            )
+        return '\n'.join(lines)
+
+    @mcp.tool()
+    async def rescan_databases():
+        """Force the API server to rescan its data folder and reload all datasets.
+
+        Call this after new h5ad/duckdb files have been added or converted.
+        Returns the number of databases before and after, plus any added/removed IDs.
+        """
+        data = await _get_post('/admin/rescan', {})
+        added = data.get('added', [])
+        removed = data.get('removed', [])
+        lines = [
+            f"Rescan complete: {data.get('previous_count', '?')} → {data.get('current_count', '?')} databases.",
+        ]
+        if added:
+            lines.append(f"Added: {', '.join(added)}")
+        if removed:
+            lines.append(f"Removed: {', '.join(removed)}")
+        return '\n'.join(lines)
+
+    @mcp.tool()
+    async def module_score(
+        db_id: str,
+        genes: list[str],
+        layer: str = 'X',
+        n_control: int = 100,
+        seed: int = 42,
+        subset: Optional[list[str]] = None,
+    ) -> str:
+        """Compute per-cell module scores (Scanpy score_genes / Seurat AddModuleScore).
+
+        For each cell: score = mean(module genes) − mean(expression-matched control genes).
+        Returns summary statistics and a session_id. Use the session_id with analytics_viz
+        to plot the score distribution or overlay scores on a UMAP.
+
+        Example module gene lists:
+          DAM:          TREM2, APOE, SPP1, CD9, LPL, CST7
+          Homeostatic:  P2RY12, CX3CR1, TMEM119, CSF1R
+          Interferon:   IFIT1, IFIT3, ISG15, MX1, OAS1
+
+        Requires __gene_bins (databases with a log-normalized default layer).
+
+        Args:
+            db_id:     Dataset ID (e.g. 'P26/HMI').
+            genes:     List of gene names in the module.
+            layer:     Expression layer (default 'X'). Should be log-normalized.
+            n_control: Control genes per expression bin (default 100).
+            seed:      Random seed for reproducible control selection.
+            subset:    Cell subset filters (same syntax as plot tool).
+        """
+        try:
+            data = await _get_post(f'/databases/{db_id}/module_score', {
+                'genes': genes,
+                'layer': layer,
+                'n_control': n_control,
+                'seed': seed,
+                'subset': subset or [],
+            })
+        except httpx.HTTPStatusError as exc:
+            return f"Error {exc.response.status_code}: {exc.response.text}"
+
+        lines = [
+            f"Module score for {len(data['genes_found'])} genes in {data['db_id']}",
+            f"  Genes found:   {', '.join(data['genes_found'])}",
+        ]
+        if data['genes_missing']:
+            lines.append(f"  Genes missing: {', '.join(data['genes_missing'])}")
+        lines.append(f"  Control genes: {data['n_control_genes']}")
+        lines.append(f"  Cells scored:  {data['n_cells']}")
+        s = data['summary']
+        lines.append(f"  Score summary: mean={s['mean']:.4f}, std={s['std']:.4f}, "
+                      f"median={s['median']:.4f}, range=[{s['min']:.4f}, {s['max']:.4f}]")
+        lines.append(f"  Session ID:    {data['session_id']}")
+        lines.append("")
+        lines.append("Use this session_id with analytics_viz to plot the score distribution,")
+        lines.append("e.g. a histogram or overlay on UMAP embeddings.")
+        return '\n'.join(lines)
+
+    # ── run ────────────────────────────────────────────────────────────────────
+
+    if args.transport == 'stdio':
+        mcp.run(transport='stdio')
+    elif args.transport == 'streamable-http':
+        starlette_app = mcp.streamable_http_app()
+        uvicorn.run(
+            _ImageCapabilityMiddleware(starlette_app),
+            host=args.host,
+            port=args.port,
+        )
+    else:
+        mcp.run(transport=args.transport)
+
+
+if __name__ == '__main__':
+    main()

@@ -27,7 +27,7 @@ help:
 	@echo "  make serve-browse      - Run web browser server (port 8081)"
 	@echo "  make serve-streamlit   - Run Streamlit server (port 8082)"
 	@echo "  make serve-mcp         - Run MCP server for LLM integration (port 8090)"
-	@echo "  make dev-jupyter       - Run JupyterLab on webapp-src/jupyter (port 9090)"
+	@echo "  make dev-jupyter       - Run JupyterLab on frontend/jupyter/jupyter (port 9090)"
 	@echo ""
 	@echo "Sync (S3) — the maintenance workflow:"
 	@echo "  make sync-update     - Full cycle: pull h5ad → rebuild stale duckdb → push"
@@ -42,7 +42,7 @@ help:
 	@echo "  ./bin/ant convert      - Convert h5ad to DuckDB"
 	@echo "  ./bin/ant build-all    - Refresh .md + rebuild stale .duckdb across tree"
 	@echo "  ./bin/ant serve        - Start REST API server"
-	@echo "  ./bin/ant-mcp          - MCP server (LLM tool integration)"
+	@echo "  ./bin/api/ant-mcp          - MCP server (LLM tool integration)"
 
 # Run the test suite (lib/ + API tests)
 test:
@@ -50,7 +50,7 @@ test:
 
 # Pull static report sites from git repos (defined in anthive.yaml)
 build-reports:
-	@./bin/ant-build-reports
+	@./bin/ops/ant-build-reports
 
 clean-webapp:
 	@echo "Cleaning webapp directory..."
@@ -61,17 +61,17 @@ build-jupyter: antclient/antclient.py
 	@echo "Building JupyterLite to webapp/jupyter..."
 	@echo ""
 	@# Ensure source dir is writable (may be read-only from a previous run)
-	@chmod -R u+rw webapp-src/jupyter
+	@chmod -R u+rw frontend/jupyter/jupyter
 	@# Clear output directory so no stale files survive the build
 	@rm -rf webapp/jupyter
 	@mkdir -p webapp
 	@# Copy antclient.py and anthelper.py into jupyter content before build
-	@# echo "Copying antclient.py and anthelper.py to webapp-src/jupyter..."
-	@# cp antclient/antclient.py webapp-src/jupyter/antclient.py
-	@# cp antclient/anthelper.py webapp-src/jupyter/anthelper.py
+	@# echo "Copying antclient.py and anthelper.py to frontend/jupyter/jupyter..."
+	@# cp antclient/antclient.py frontend/jupyter/jupyter/antclient.py
+	@# cp antclient/anthelper.py frontend/jupyter/jupyter/anthelper.py
 	@# Make source files read-only so JupyterLite cannot modify them
-	@chmod -R a-w webapp-src/jupyter
-	@chmod -R a+rX webapp-src/jupyter
+	@chmod -R a-w frontend/jupyter/jupyter
+	@chmod -R a+rX frontend/jupyter/jupyter
 	@DOIT_DB=tmp/.jupyterlite.doit.db \
 	# uvx \
 	# 	--from jupyterlite-core \
@@ -80,7 +80,7 @@ build-jupyter: antclient/antclient.py
 	# 	--with jupyterlab-widgets \
 	# 	jupyter-lite build \
 	# 		--force \
-	# 		--contents webapp-src/jupyter \
+	# 		--contents frontend/jupyter/jupyter \
 	# 		--output-dir webapp/jupyter
 	uvx --from jupyterlite-core \
 		--with jupyterlite-pyodide-kernel \
@@ -88,19 +88,19 @@ build-jupyter: antclient/antclient.py
 		--with notebook \
 		--with jupyter-server \
 		jupyter-lite build --force \
-			--contents webapp-src/jupyter \
+			--contents frontend/jupyter/jupyter \
 			--output-dir webapp/jupyter 
 	@# Restore read+write so files can be edited again
-	@chmod -R u+rw webapp-src/jupyter
+	@chmod -R u+rw frontend/jupyter/jupyter
 	@echo "✓ JupyterLite build complete!"
 	@echo ""
 	@echo "Location: webapp/jupyter/"
 	@echo "Client: webapp/jupyter/files/antclient.py"
 
-build-webapp: build-jupyter webapp-src/index.html
+build-webapp: build-jupyter frontend/jupyter/index.html
 	@echo ""
 	@echo "Copying main index.html..."
-	@cp webapp-src/index.html webapp/index.html
+	@cp frontend/jupyter/index.html webapp/index.html
 	@echo "✓ Index page copied"
 	@echo ""
 	@echo "╔═══════════════════════════════════════════════════════════╗"
@@ -161,14 +161,14 @@ serve-api:
 	@# Host & port come from anthive.yaml (rest_api_host / rest_api_port).
 	@# To bind on all interfaces, set rest_api_host: 0.0.0.0 in anthive.yaml
 	@# or pass --host 0.0.0.0 on the CLI.
-	@./bin/ant-serve --data-folder ./data/h5adstore
+	@./bin/api/ant-serve --data-folder ./data/h5adstore
 
 serve-browse:
 	@echo "Starting Anthive Web Browser (host/port from anthive.yaml — default localhost:8081)"
 	@echo ""
 	@# Same convention as serve-api: host/port from anthive.yaml
 	@# (browse_host / browse_port).
-	@./bin/ant-browse
+	@./bin/web/ant-browse
 
 serve-mcp:
 	@echo "Starting Anthive MCP server on http://localhost:8090"
@@ -177,15 +177,15 @@ serve-mcp:
 	@echo "  URL:  http://localhost:8090/mcp"
 	@echo "  Type: streamable-http"
 	@echo ""
-	@./bin/ant-mcp
+	@./bin/api/ant-mcp
 
 serve-all:
 	@echo "Starting Anthive (deployment mode — nginx serves port 8501)"
-	@./bin/ant-supervisor
+	@./bin/ops/ant-supervisor
 
 serve-debug:
 	@echo "Starting Anthive with Caddy on http://localhost:8501"
-	@./bin/ant-supervisor --caddy
+	@./bin/ops/ant-supervisor --caddy
 
 # Restart one or more children of a running supervisor.
 #   make serve-restart SVC=browse
@@ -193,10 +193,10 @@ serve-debug:
 #   make serve-restart SVC=all       (everything)
 SVC ?= all
 serve-restart:
-	@./bin/ant-supervisor restart $(SVC)
+	@./bin/ops/ant-supervisor restart $(SVC)
 
 serve-status:
-	@./bin/ant-supervisor status
+	@./bin/ops/ant-supervisor status
 
 # Drop a basic-auth credential into config/caddy-auth-basic.conf, gitignored.
 # The Caddyfile imports `caddy-auth-*.conf` automatically — present = auth on.
@@ -234,7 +234,7 @@ caddy-passwd-clear:
 # mcp, streamlit, caddy).  Re-run `make serve-debug` or `make serve-all`
 # afterwards to bring everything back up.
 serve-stop:
-	@PID=$$(./bin/ant-supervisor status 2>/dev/null | awk '/^supervisor pid:/ {print $$3; exit}'); \
+	@PID=$$(./bin/ops/ant-supervisor status 2>/dev/null | awk '/^supervisor pid:/ {print $$3; exit}'); \
 	if [ -n "$$PID" ]; then \
 		echo "stopping supervisor pid $$PID (cascades to all children)"; \
 		kill $$PID; \
@@ -245,7 +245,7 @@ serve-stop:
 serve-streamlit:
 	@echo "Starting Anthive Streamlit server on http://localhost:8082"
 	@echo ""
-	@cd webapp-streamlit && uvx \
+	@cd frontend/streamlit && uvx \
 		--with streamlit \
 		--with matplotlib \
 		--with seaborn \
@@ -256,30 +256,30 @@ serve-streamlit:
 		streamlit run streamlit_app.py
 
 dev-jupyter:
-	@./bin/dev-jupyter
+	@./bin/ops/dev-jupyter
 
 # ── Sync workflow (S3 = canonical for .h5ad; .duckdb is rebuilt locally) ──
 
 # Default pull: h5ad only. .duckdb is derived; rebuild it via `make build-stale`.
 sync-pull:
-	@./bin/ant-sync pull
+	@./bin/ops/ant-sync pull
 
 # Force pull duckdb too (disaster-recovery / mass-rebuild bootstrap).
 sync-pull-all:
-	@./bin/ant-sync pull --include-duckdb
+	@./bin/ops/ant-sync pull --include-duckdb
 
 # Rebuild any .duckdb older than its .h5ad. Also refreshes the .md if the
 # h5ad is newer (sha256, n_obs, layer_stats), via ant-h5ad-check.
 build-stale:
-	@./bin/ant-build-all --data-folder ./data/h5adstore
+	@./bin/ingest/ant-build-all --data-folder ./data/h5adstore
 
 # Push h5ad + duckdb to S3. The mtime header is set on every upload so
 # `make sync-status` can detect content-without-size-change drift later.
 sync-push:
-	@./bin/ant-sync push
+	@./bin/ops/ant-sync push
 
 sync-status:
-	@./bin/ant-sync status
+	@./bin/ops/ant-sync status
 
 # Full maintenance cycle: bring everything into a consistent state.
 sync-update:

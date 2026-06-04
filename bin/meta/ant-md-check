@@ -1,0 +1,109 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "pyyaml>=6.0",
+# ]
+# ///
+"""
+ant-md-check - Check .md metadata files for sanity
+
+Scans all anthive .md files under a folder:
+  - index.md:  must have a valid 3-char group_id (generated if missing)
+  - data .md:  must have a valid 3-char id (generated if missing)
+
+Duplicate group_ids across groups and duplicate ids within a group
+are reported as errors.
+
+Usage:
+  ant md-check [FOLDER]
+  ant md-check [FOLDER] --no-fix
+  ant md-check [FOLDER] --verbose
+"""
+
+import argparse
+import sys
+from datetime import datetime
+from pathlib import Path
+
+script_dir = Path(__file__).parent.resolve()
+lib_dir = script_dir.parent.parent / 'lib'
+sys.path.insert(0, str(lib_dir))
+
+from md_check import MdCheckReport, check_md_folder, write_log_entry
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Check .md metadata files for sanity',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument(
+        'folder', nargs='?', default='.',
+        help='Folder to scan recursively (default: current directory)'
+    )
+    parser.add_argument(
+        '--no-fix', action='store_true',
+        help='Report only — do not write missing IDs back to .md files'
+    )
+    parser.add_argument(
+        '--verbose', action='store_true',
+        help='Print a status line for every file checked'
+    )
+
+    args = parser.parse_args()
+
+    folder = Path(args.folder).resolve()
+    if not folder.exists():
+        print(f"ERROR: Folder not found: {folder}", file=sys.stderr)
+        sys.exit(1)
+
+    fix = not args.no_fix
+
+    print(f"{'='*70}")
+    print(f"MD CHECK: {folder}")
+    if not fix:
+        print("  (report-only mode, no files will be modified)")
+    print(f"{'='*70}")
+    print()
+
+    report = MdCheckReport()
+    check_md_folder(folder, report, fix=fix, verbose=args.verbose)
+
+    print(
+        f"Scanned {report.checked} file(s): "
+        f"{report.index_count} index.md, "
+        f"{report.data_count} data .md"
+    )
+
+    if report.fixed:
+        print(f"\nIDs auto-generated ({len(report.fixed)}):")
+        for msg in report.fixed:
+            print(f"  ✓ {msg}")
+
+    report.print_summary()
+
+    log_messages = report.collect_log_messages()
+    if log_messages:
+        log_dir = Path.cwd() / 'tmp' if (Path.cwd() / 'tmp').is_dir() else Path.cwd()
+        log_path = log_dir / f"ant-{datetime.now().strftime('%Y%m%d')}.log"
+        write_log_entry(folder, 'ant-md-check', log_messages)
+        print(f"\n  (Warnings/errors logged to {log_path})")
+
+    print(f"\n{'='*70}")
+    if report.has_errors():
+        print("✗ MD CHECK FAILED")
+        print(f"{'='*70}")
+        sys.exit(1)
+    elif report.has_warnings():
+        print("⚠ MD CHECK COMPLETED WITH WARNINGS")
+        print(f"{'='*70}")
+        sys.exit(0)
+    else:
+        print("✓ MD CHECK COMPLETED SUCCESSFULLY")
+        print(f"{'='*70}")
+        sys.exit(0)
+
+
+if __name__ == '__main__':
+    main()

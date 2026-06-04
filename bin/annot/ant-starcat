@@ -1,0 +1,525 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.10,<3.13"
+# dependencies = [
+#   "starcatpy>=1.0.0",
+#   "anndata>=0.10.0",
+#   "scanpy>=1.10.0",
+#   "numpy>=1.24.0,<2.0",
+#   "pandas>=2.0.0",
+#   "scipy>=1.10.0",
+#   "scikit-learn==1.3.2",
+#   "mygene>=3.2.2",
+#   "pyyaml>=6.0",
+#   "duckdb>=0.10.0",
+# ]
+# ///
+"""
+ant-starcat - Project a microglia dataset onto the MICROGLIA_V1 starCAT catalog.
+
+Writes program-usage and score columns to the dataset's .duckdb via
+AnnotationWriter (incremental — no h5ad rewrite). Columns are named:
+
+    starcat__MICROGLIA_V1__<program_or_score>
+
+Run `ant-merge-h5ad <dataset>.md` afterwards to sync into the h5ad.
+
+Requirements (enforced):
+  - annotation.organism == 'human' in the .md (refuses otherwise)
+  - h5ad has raw integer counts somewhere (X, layers['counts'], or .raw)
+  - var_names are HGNC symbols (Ensembl auto-remapped if mygene available)
+  - ≥1500 of 2727 catalog genes present after symbol resolution
+
+Usage:
+  ant-starcat <db_id> [options]
+
+Examples:
+  ant-starcat Sierksma2025/Pharmacogenomics
+  ant-starcat S25/PhM --cell-type-col cell_type --cell-types microglia,macrophage
+  ant-starcat S25/PhM --dry-run
+
+Options:
+  --catalog-dir PATH    starcat catalog root (default: /data/1/project/starcatstore/microglia/catalog)
+  --cache-dir PATH      starCAT spectra cache (default: <h5adstore>/.starcat_cache)
+  --cell-type-col COL   subset obs[COL] before projection (recommended)
+  --cell-types LIST     comma-separated values of COL to keep (e.g. microglia,macrophage)
+  --overwrite           overwrite existing columns instead of failing
+  --dry-run             run the projection but do not write to duckdb
+"""
+from __future__ import annotations
+
+import argparse
+import secrets
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+import anndata
+import numpy as np
+import pandas as pd
+import scipy.sparse as sp
+
+script_dir = Path(__file__).parent.resolve()
+lib_dir = script_dir.parent.parent / 'lib'
+sys.path.insert(0, str(lib_dir))
+
+from anthive_db import AnnotationWriter, AnnotationWriterError   # type: ignore
+from config import get_config   # type: ignore
+from h5adstore import find_h5ad   # type: ignore
+import mus   # type: ignore
+
+
+# Hard-coded for the v1 catalog. If a v2 is added, lift these to CLI flags
+# and bump the CATALOG_TAG accordingly.
+DEFAULT_CATALOG_DIR = Path('/data/1/project/starcatstore/microglia/catalog')
+CATALOG_TAG = 'MICROGLIA_V1'   # → column prefix starcat__MICROGLIA_V1__
+COL_PREFIX = f'starcat__{CATALOG_TAG}__'
+
+# Minimum gene overlap with the 2,727-gene catalog before refusing
+MIN_GENE_OVERLAP = 1500
+
+
+def _h5adstore_root() -> Path:
+    """Find data/h5adstore relative to this script."""
+    candidate = script_dir.parent / 'data' / 'h5adstore'
+    if not candidate.exists():
+        sys.exit(f"ERROR: h5adstore not found at {candidate}")
+    return candidate
+
+
+def _check_organism(md_path: Path, h5adstore_root: Path) -> str:
+    """Refuse anything other than human (until a mouse catalog exists).
+
+    Reads `organism` from the post-2026-06 model (`.h5ad.mus` sidecar +
+    `.env` cascade) — not from `.md` frontmatter.
+    """
+    h5ad_path = md_path.with_suffix('.h5ad')
+    ann = mus.resolve_annotation(h5ad_path, root=h5adstore_root)
+    organism = ann.get('organism')
+    if isinstance(organism, list):
+        organisms_lower = {str(o).lower() for o in organism}
+    elif organism is None:
+        organisms_lower = set()
+    else:
+        organisms_lower = {str(organism).lower()}
+    if not organisms_lower:
+        sys.exit(
+            f"ERROR: {md_path.name} has no organism set in the mus cascade "
+            f"(.env) or sidecar (.h5ad.mus). "
+            f"ant-starcat requires explicit organism declaration."
+        )
+    if 'human' not in organisms_lower:
+        sys.exit(
+            f"ERROR: ant-starcat only supports human datasets (got {sorted(organisms_lower)}).\n"
+            f"A mouse catalog does not yet exist. See "
+            f"/data/1/project/starcatstore/microglia/ANNOTATE_CELLS.md."
+        )
+    return 'human'
+
+
+def _looks_integer(matrix, n: int = 2000) -> bool:
+    if matrix is None:
+        return False
+    try:
+        sample = matrix[:n]
+    except (TypeError, IndexError):
+        return False
+    if sp.issparse(sample):
+        sample = sample.toarray()
+    arr = np.asarray(sample)
+    if arr.size == 0:
+        return False
+    return bool(np.allclose(arr, np.rint(arr), atol=1e-6))
+
+
+def _get_raw_counts_in_X(adata):
+    """Move raw integer counts into adata.X if not already there.
+
+    Search order:
+      1. adata.X
+      2. adata.layers['counts'] (the conventional name)
+      3. any other layer that looks integer (e.g. 'UMIs', 'raw_counts')
+      4. adata.raw.X
+    """
+    if _looks_integer(adata.X):
+        print(f"  ✓ raw counts found in adata.X")
+        return adata
+    # Conventional name first
+    if 'counts' in adata.layers and _looks_integer(adata.layers['counts']):
+        print(f"  ✓ raw counts found in adata.layers['counts']; promoting to X")
+        adata.X = adata.layers['counts']
+        return adata
+    # Any other layer that smells like integer counts
+    for layer_name in adata.layers.keys():
+        if layer_name == 'counts':
+            continue
+        if _looks_integer(adata.layers[layer_name]):
+            print(f"  ✓ raw counts found in adata.layers['{layer_name}']; promoting to X")
+            adata.X = adata.layers[layer_name]
+            return adata
+    if adata.raw is not None and _looks_integer(adata.raw.X):
+        print(f"  ✓ raw counts found in adata.raw; promoting via adata.raw.to_adata()")
+        return adata.raw.to_adata()
+    sys.exit(
+        f"ERROR: no raw integer counts found in X / any layer / raw.\n"
+        f"  Layers searched: {list(adata.layers.keys())}\n"
+        f"  starCAT requires raw counts — log-normalised matrices produce "
+        f"nonsense. Re-download from the original source if needed."
+    )
+
+
+def _catalog_genes(catalog_tsv: Path) -> set:
+    """Read the catalog's gene set from the TSV header row."""
+    with open(catalog_tsv) as fh:
+        header = fh.readline().rstrip('\n').split('\t')
+    return set(header[1:])
+
+
+def _gene_overlap(var_names, catalog_set: set) -> int:
+    """Count how many catalog genes are present in var_names."""
+    return len(set(var_names) & catalog_set)
+
+
+def _ensure_hgnc_var_names(adata, catalog_tsv: Path):
+    """Check catalog overlap first; remap from Ensembl to HGNC only if needed.
+
+    Strategy:
+      1. If current var_names already give sufficient overlap → no-op
+      2. If a likely-symbol column exists in adata.var, try swapping to it
+      3. Else, if var_names look mostly like Ensembl IDs, call mygene to
+         remap (only the ENSG entries — keep existing symbols intact)
+      4. Bail with a clear error if none of the above lifts overlap above
+         MIN_GENE_OVERLAP.
+    """
+    catalog = _catalog_genes(catalog_tsv)
+    overlap = _gene_overlap(adata.var_names, catalog)
+    print(f"  gene overlap (as-is): {overlap:,} / {len(catalog):,} "
+          f"({100*overlap/len(catalog):.1f}%)")
+    if overlap >= MIN_GENE_OVERLAP:
+        return adata
+
+    # Try a var column that looks like it has symbols
+    symbol_col = None
+    for cand in ('feature_name', 'gene_symbol', 'Symbol', 'gene_symbols',
+                 'gene_name', 'symbol', 'hgnc_symbol'):
+        if cand in adata.var.columns:
+            candidate_names = adata.var[cand].astype(str).values
+            candidate_overlap = _gene_overlap(candidate_names, catalog)
+            if candidate_overlap > overlap:
+                print(f"  swapping var_names → adata.var[{cand!r}] "
+                      f"(overlap {candidate_overlap:,} > {overlap:,})")
+                adata.var_names = candidate_names
+                adata.var_names_make_unique()
+                overlap = _gene_overlap(adata.var_names, catalog)
+                symbol_col = cand
+                break
+
+    if overlap >= MIN_GENE_OVERLAP:
+        return adata
+
+    # Try mygene on the ENSG-looking entries
+    ensg_entries = [v for v in adata.var_names if str(v).startswith('ENSG')]
+    if not ensg_entries:
+        sys.exit(
+            f"ERROR: only {overlap} catalog genes present after exhausting "
+            f"recovery options, and no Ensembl IDs to remap. Catalog uses "
+            f"HGNC symbols — check that adata.var_names are gene symbols."
+        )
+    print(f"  attempting mygene remap of {len(ensg_entries):,} Ensembl IDs "
+          f"(of {adata.n_vars:,} total)…", flush=True)
+    import mygene
+    mg = mygene.MyGeneInfo()
+    hits = mg.querymany(ensg_entries, scopes='ensembl.gene',
+                        fields='symbol', species='human', as_dataframe=True)
+    symbol_map = (hits.get('symbol') if 'symbol' in hits.columns
+                  else pd.Series(dtype=object)).dropna()
+    # Keep the first symbol if mygene returned multiple
+    symbol_map = symbol_map.groupby(level=0).first()
+    new_var_names = []
+    for v in adata.var_names:
+        if v in symbol_map.index:
+            new_var_names.append(symbol_map.loc[v])
+        else:
+            new_var_names.append(v)
+    adata.var_names = pd.Index(new_var_names)
+    adata.var_names_make_unique()
+    overlap = _gene_overlap(adata.var_names, catalog)
+    print(f"  after remap: overlap = {overlap:,} / {len(catalog):,}")
+
+    if overlap < MIN_GENE_OVERLAP:
+        sys.exit(
+            f"ERROR: only {overlap} catalog genes present (need ≥{MIN_GENE_OVERLAP}).\n"
+            f"  Most likely cause: wrong gene-identifier type or species mismatch."
+        )
+    return adata
+
+
+def _per_cell_residual(adata, usage_df: pd.DataFrame, spectra_df: pd.DataFrame
+                       ) -> np.ndarray:
+    """L2 residual of x vs usage @ spectra on shared genes (variance-normalized)."""
+    common = [g for g in spectra_df.columns if g in adata.var_names]
+    matrix = adata[:, common].X
+    if sp.issparse(matrix):
+        matrix = matrix.toarray()
+    matrix = np.asarray(matrix, dtype=np.float64)
+    variance_norm = matrix.std(axis=0)
+    variance_norm[variance_norm == 0] = 1.0
+    normalized = matrix / variance_norm
+    reconstruction = usage_df.values @ spectra_df[common].values / variance_norm
+    numerator = np.linalg.norm(normalized - reconstruction, axis=1)
+    denominator = np.linalg.norm(normalized, axis=1) + 1e-9
+    return numerator / denominator
+
+
+def _subset_to_cell_types(adata, col: str, types: List[str]):
+    """Keep only rows where obs[col] in types. Exits on missing column."""
+    if col not in adata.obs.columns:
+        sys.exit(
+            f"ERROR: --cell-type-col '{col}' not in adata.obs.\n"
+            f"  Available columns: {list(adata.obs.columns)[:20]}"
+        )
+    before = adata.n_obs
+    mask = adata.obs[col].astype(str).isin(types)
+    if mask.sum() == 0:
+        sys.exit(f"ERROR: 0 cells match cell-types {types} in obs[{col!r}]")
+    adata = adata[mask, :].copy()
+    print(f"  subset to {col} ∈ {types}: {before:,} → {adata.n_obs:,} cells")
+    return adata
+
+
+def _write_subreport(report_path: Path,
+                     entry_id: str,
+                     catalog_tag: str,
+                     run_id: str,
+                     overlap: int,
+                     n_cells: int,
+                     residual_median: float,
+                     wc_baseline_frac: Optional[float],
+                     dc_total_frac: Optional[float]) -> None:
+    """Write a small markdown sub-report next to the rest of the project docs."""
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    when = datetime.now(timezone.utc).isoformat(timespec='seconds')
+    text = f"""# starCAT annotation — {entry_id}
+
+- catalog: `{catalog_tag}`
+- run_id: `{run_id}`
+- timestamp: {when}
+- cells annotated: {n_cells:,}
+- gene overlap: {overlap:,} / 2,727
+- median per-cell residual: {residual_median:.3f}  (high > 0.7 = poor coverage)
+"""
+    if wc_baseline_frac is not None:
+        flag = " ⚠ likely whole-cell" if wc_baseline_frac > 0.25 else ""
+        text += f"- WholeCell_Baseline_high fraction: {wc_baseline_frac:.1%}{flag}\n"
+    if dc_total_frac is not None:
+        flag = " ⚠ DC contamination" if dc_total_frac > 0.10 else ""
+        text += f"- DC_total > 0.05 fraction: {dc_total_frac:.1%}{flag}\n"
+    text += (
+        f"\nColumns written to duckdb (prefix `{COL_PREFIX}`); "
+        f"sync to h5ad with `ant-merge-h5ad`.\n"
+    )
+    report_path.write_text(text)
+    print(f"  ✓ sub-report → {report_path}")
+
+
+def _classify_score_columns(scores_df: pd.DataFrame
+                            ) -> Tuple[List[str], List[str]]:
+    """Split scores DataFrame columns into (numerical, categorical) by dtype.
+
+    Numerical: floats (composites like DAM_progression).
+    Categorical: everything else (booleans, strings like Identity_Label).
+    """
+    num_cols = []
+    cat_cols = []
+    for col in scores_df.columns:
+        dtype = scores_df[col].dtype
+        if pd.api.types.is_numeric_dtype(dtype) and not pd.api.types.is_bool_dtype(dtype):
+            num_cols.append(col)
+        else:
+            cat_cols.append(col)
+    return num_cols, cat_cols
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument('db_id', help='h5adstore dataset to annotate (e.g. S25/PhM)')
+    parser.add_argument('--catalog-dir', type=Path, default=DEFAULT_CATALOG_DIR)
+    parser.add_argument('--cache-dir', type=Path, default=None)
+    parser.add_argument('--cell-type-col', default=None,
+                        help='obs column to subset by (e.g. cell_type)')
+    parser.add_argument('--cell-types', default=None,
+                        help='comma-separated values of --cell-type-col to keep')
+    parser.add_argument('--overwrite', action='store_true',
+                        help='Overwrite existing starcat columns')
+    parser.add_argument('--api-url', default=None,
+                        help='Override ant-serve URL (default: from anthive.yaml)')
+    parser.add_argument('--no-coordinate', action='store_true',
+                        help='Do not negotiate the DuckDB lock with ant-serve.')
+    parser.add_argument('--dry-run', action='store_true')
+    args = parser.parse_args()
+
+    # Build ant-serve URL for DuckDB lock coordination
+    if args.no_coordinate:
+        ant_serve_url = None
+    elif args.api_url:
+        ant_serve_url = args.api_url.rstrip('/')
+    else:
+        cfg = get_config()
+        host = cfg.get('rest_api_host', 'localhost')
+        port = cfg.get('rest_api_port', 8080)
+        ant_serve_url = f"http://{host}:{port}/api/"
+
+    # --- Resolve dataset ---
+    h5ad_root = _h5adstore_root()
+    entry = find_h5ad(h5ad_root, args.db_id)
+    if entry is None:
+        sys.exit(f"ERROR: dataset {args.db_id!r} not found in {h5ad_root}")
+    print(f"=== {entry.db_id} ({entry.readable_id}) ===")
+
+    # --- Pre-flight: organism, files, duckdb ---
+    _check_organism(entry.md_path, h5ad_root)
+    if not entry.h5ad_path.exists():
+        sys.exit(f"ERROR: {entry.h5ad_path} not present locally. Pull first.")
+    if not entry.duckdb_path.exists() and not args.dry_run:
+        sys.exit(
+            f"ERROR: no duckdb at {entry.duckdb_path}. Run `ant-convert "
+            f"{entry.h5ad_path}` first."
+        )
+
+    # --- Catalog paths ---
+    reference_tsv = args.catalog_dir / 'MICROGLIA.V1.0.tsv'
+    scores_yaml = args.catalog_dir / 'MICROGLIA.V1.0.scores.yaml'
+    if not reference_tsv.exists() or not scores_yaml.exists():
+        sys.exit(
+            f"ERROR: catalog files missing under {args.catalog_dir}\n"
+            f"  Expected: MICROGLIA.V1.0.tsv and MICROGLIA.V1.0.scores.yaml"
+        )
+
+    cache_dir = args.cache_dir or (h5ad_root / '.starcat_cache')
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- Load + prep h5ad ---
+    print(f"loading {entry.h5ad_path.name}…")
+    adata = anndata.read_h5ad(entry.h5ad_path)
+    print(f"  shape: {adata.n_obs:,} cells × {adata.n_vars:,} genes")
+
+    adata = _get_raw_counts_in_X(adata)
+    adata = _ensure_hgnc_var_names(adata, reference_tsv)
+    overlap = _gene_overlap(adata.var_names, _catalog_genes(reference_tsv))
+
+    if args.cell_type_col:
+        types = [t.strip() for t in (args.cell_types or '').split(',') if t.strip()]
+        if not types:
+            sys.exit("ERROR: --cell-type-col requires --cell-types A,B,…")
+        adata = _subset_to_cell_types(adata, args.cell_type_col, types)
+
+    # --- Project ---
+    print("loading starCAT…")
+    from starcat import starCAT
+    model = starCAT(
+        reference=str(reference_tsv),
+        score_path=str(scores_yaml),
+        cachedir=str(cache_dir),
+    )
+    print(f"  catalog: {model.ref.shape[0]} programs × {model.ref.shape[1]} genes")
+
+    print("fit_transform…")
+    usage, scores = model.fit_transform(adata)
+    print(f"  usage: {usage.shape}   scores: {scores.shape}")
+
+    # --- QA stats ---
+    residual = _per_cell_residual(adata, usage, model.ref)
+    median_resid = float(np.median(residual))
+    print(f"  median residual: {median_resid:.3f}")
+
+    wc_col = 'WholeCell_Baseline_high'
+    dc_col = 'DC_total'
+    wc_frac = (float(scores[wc_col].astype(bool).mean())
+               if wc_col in scores.columns else None)
+    if wc_frac is not None:
+        print(f"  WholeCell_Baseline_high fraction: {wc_frac:.1%}")
+    dc_frac = (float((scores[dc_col].astype(float) > 0.05).mean())
+               if dc_col in scores.columns else None)
+    if dc_frac is not None:
+        print(f"  DC_total > 0.05 fraction: {dc_frac:.1%}")
+
+    if args.dry_run:
+        print(f"\n  (dry-run; not writing to duckdb)")
+        return 0
+
+    # --- Write to duckdb ---
+    run_id = f"sc-{secrets.token_hex(3)}"
+    print(f"\nWriting to {entry.duckdb_path.name} (run_id={run_id})…")
+
+    # Make sure usage/scores indexes match what's in the duckdb (cell_name strings)
+    usage.index = usage.index.astype(str)
+    scores.index = scores.index.astype(str)
+
+    num_score_cols, cat_score_cols = _classify_score_columns(scores)
+    print(f"  {usage.shape[1]} usage cols (num), "
+          f"{len(num_score_cols)} score cols (num), "
+          f"{len(cat_score_cols)} score cols (cat)")
+
+    try:
+        with AnnotationWriter(
+            entry.duckdb_path,
+            annotator='ant-starcat',
+            run_id=run_id,
+            catalog=CATALOG_TAG,
+            db_id=entry.db_id,
+            ant_serve_url=ant_serve_url,
+        ) as writer:
+            for col in usage.columns:
+                writer.add_numerical(
+                    f"{COL_PREFIX}{col}",
+                    usage[col].astype('float64'),
+                    on_conflict='overwrite' if args.overwrite else 'fail',
+                )
+            for col in num_score_cols:
+                writer.add_numerical(
+                    f"{COL_PREFIX}{col}",
+                    scores[col].astype('float64'),
+                    on_conflict='overwrite' if args.overwrite else 'fail',
+                )
+            for col in cat_score_cols:
+                vals = scores[col]
+                if pd.api.types.is_bool_dtype(vals.dtype):
+                    vals = vals.map(lambda b: 'True' if bool(b) else 'False')
+                else:
+                    vals = vals.astype(str)
+                writer.add_categorical(
+                    f"{COL_PREFIX}{col}",
+                    vals,
+                    on_conflict='overwrite' if args.overwrite else 'fail',
+                )
+            writer.commit()
+    except AnnotationWriterError as exc:
+        sys.exit(f"ERROR: AnnotationWriter rejected write: {exc}")
+
+    n_cols = usage.shape[1] + len(num_score_cols) + len(cat_score_cols)
+    print(f"  ✓ added {n_cols} pending columns")
+    print(f"  ℹ run `ant-merge-h5ad {entry.md_path}` to sync into the h5ad.")
+
+    # --- Sub-report ---
+    report_path = script_dir.parent / 'report' / 'starcat' / f'{entry.study}__{entry.stem}.md'
+    _write_subreport(
+        report_path,
+        entry_id=entry.readable_id,
+        catalog_tag=CATALOG_TAG,
+        run_id=run_id,
+        overlap=overlap,
+        n_cells=adata.n_obs,
+        residual_median=median_resid,
+        wc_baseline_frac=wc_frac,
+        dc_total_frac=dc_frac,
+    )
+
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

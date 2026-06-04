@@ -39,18 +39,23 @@ def get_available_commands(bin_dir: Path) -> dict:
         'sync':  'Push/pull h5ad and DuckDB files to/from S3',
     }
 
-    for file_path in bin_dir.iterdir():
-        if not file_path.is_file():
-            continue
-        # Support both ant-<cmd> (hyphen) and ant_<cmd> (underscore) naming.
-        if file_path.name.startswith('ant-'):
-            command_name = file_path.name[4:]  # Remove 'ant-' prefix
-        elif file_path.name.startswith('ant_'):
-            command_name = file_path.name[4:]  # Remove 'ant_' prefix
-        else:
-            continue
-        description = command_descriptions.get(command_name, '')
-        commands[command_name] = description
+    # Walk bin/ AND its one-level subdirectories (api/, web/, ingest/,
+    # annot/, meta/, ops/).  Scripts may live in any of these after the
+    # 2026-06 reorg, but we keep the flat-bin/ fallback so a freshly added
+    # ant-foo at the top level still gets picked up automatically.
+    for parent in [bin_dir] + sorted(p for p in bin_dir.iterdir() if p.is_dir() and not p.name.startswith('_')):
+        for file_path in parent.iterdir():
+            if not file_path.is_file():
+                continue
+            # Support both ant-<cmd> (hyphen) and ant_<cmd> (underscore) naming.
+            if file_path.name.startswith('ant-'):
+                command_name = file_path.name[4:]
+            elif file_path.name.startswith('ant_'):
+                command_name = file_path.name[4:]
+            else:
+                continue
+            description = command_descriptions.get(command_name, '')
+            commands[command_name] = description
 
     return commands
 
@@ -111,12 +116,23 @@ def main():
         print(f"anthive version {anthive.__version__}")
         sys.exit(0)
 
-    # Look for ant-<subcommand> first (hyphen style), then ant_<subcommand>
-    subcommand_path = bin_dir / f"ant-{subcommand}"
-    if not subcommand_path.exists():
-        subcommand_path = bin_dir / f"ant_{subcommand}"
+    # Look for the script under bin/, then under each subfolder (api/, web/,
+    # ingest/, annot/, meta/, ops/).  Hyphen-style takes precedence over
+    # underscore-style at every depth.
+    candidate_dirs = [bin_dir] + sorted(
+        p for p in bin_dir.iterdir() if p.is_dir() and not p.name.startswith('_')
+    )
+    subcommand_path = None
+    for parent in candidate_dirs:
+        for prefix in ('ant-', 'ant_'):
+            candidate = parent / f"{prefix}{subcommand}"
+            if candidate.exists():
+                subcommand_path = candidate
+                break
+        if subcommand_path is not None:
+            break
 
-    if not subcommand_path.exists():
+    if subcommand_path is None:
         print(f"Error: Unknown command 'ant {subcommand}'", file=sys.stderr)
         print("", file=sys.stderr)
         print("Available commands:", file=sys.stderr)

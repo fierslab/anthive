@@ -1,0 +1,330 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "duckdb>=0.10.0",
+#   "pandas>=2.0.0",
+#   "pyyaml>=6.0",
+# ]
+# ///
+"""
+ant-annotate — add obs columns to a duckdb without rebuilding from h5ad.
+
+A thin wrapper around lib.anthive_db.AnnotationWriter. The Python API is
+preferred for in-process annotators (ant-score, ant-starcat); this CLI is
+for ad-hoc TSV ingest, status inspection, and rollback.
+
+Usage:
+  ant-annotate add-num DUCKDB COL TSV
+  ant-annotate add-cat DUCKDB COL TSV
+  ant-annotate status DUCKDB
+  ant-annotate rollback DUCKDB --run-id RUN_ID
+
+TSV format:
+  cell_name <TAB> value
+  (no header; one row per cell)
+
+Examples:
+  ant-annotate add-num data/foo.duckdb my_score scores.tsv
+  ant-annotate status data/foo.duckdb
+  ant-annotate rollback data/foo.duckdb --run-id sc-7f3a
+"""
+from __future__ import annotations
+
+import argparse
+import secrets
+import sys
+from pathlib import Path
+from typing import Optional
+
+import duckdb
+import pandas as pd
+
+# Add lib/ to path
+script_dir = Path(__file__).parent.resolve()
+lib_dir = script_dir.parent.parent / 'lib'
+sys.path.insert(0, str(lib_dir))
+
+from anthive_db import (  # noqa: E402
+    AnnotationWriter,
+    AnnotationWriterError,
+    read_pending_cols,
+    duckdb_obs_columns,
+    safe_ident,
+)
+
+# Optional config import — ant-annotate works on bare paths so it doesn't
+# require the full anthive layout to be present.
+try:
+    from config import get_config  # type: ignore
+except Exception:
+    get_config = None  # type: ignore
+
+try:
+    from metadata import parse_md_file  # type: ignore
+except Exception:
+    parse_md_file = None  # type: ignore
+
+
+def _short_run_id(prefix: str = 'cli') -> str:
+    return f"{prefix}-{secrets.token_hex(3)}"
+
+
+def _resolve_db_id_from_md(duckdb_path: Path) -> Optional[str]:
+    """Try to infer the canonical db_id ('group_id/file_id') from sibling
+    .md files. Returns None if we can't resolve — caller falls back to
+    --no-coordinate behavior."""
+    if parse_md_file is None:
+        return None
+    md_path = duckdb_path.with_suffix('.md')
+    index_path = duckdb_path.parent / 'index.md'
+    if not md_path.exists() or not index_path.exists():
+        return None
+    try:
+        data_meta, _ = parse_md_file(md_path)
+        index_meta, _ = parse_md_file(index_path)
+    except Exception:
+        return None
+    file_id = str(data_meta.get('id') or '').strip()
+    group_id = str(index_meta.get('group_id') or '').strip()
+    if not file_id or not group_id:
+        return None
+    return f"{group_id}/{file_id}"
+
+
+def _resolve_ant_serve_url(args: argparse.Namespace) -> Optional[str]:
+    if getattr(args, 'no_coordinate', False):
+        return None
+    if getattr(args, 'api_url', None):
+        return args.api_url.rstrip('/')
+    if get_config is None:
+        return None
+    try:
+        cfg = get_config()
+    except Exception:
+        return None
+    host = cfg.get('rest_api_host', 'localhost')
+    port = cfg.get('rest_api_port', 8080)
+    return f"http://{host}:{port}/api/"
+
+
+def _read_tsv(path: Path, kind: str) -> pd.Series:
+    """Read a 2-column TSV (cell_name, value) into a Series indexed by cell_name."""
+    df = pd.read_csv(path, sep='\t', header=None, names=['cell_name', 'value'])
+    if df['cell_name'].duplicated().any():
+        dups = df['cell_name'][df['cell_name'].duplicated()].unique()[:5]
+        raise SystemExit(f"ERROR: duplicate cell_names in {path}: {list(dups)}")
+    series = df.set_index('cell_name')['value']
+    if kind == 'num':
+        try:
+            series = series.astype('float64')
+        except Exception as exc:
+            raise SystemExit(f"ERROR: cannot coerce to float64 ({exc})")
+    else:
+        series = series.astype('object')
+    return series
+
+
+def cmd_add(args, kind: str) -> int:
+    duckdb_path = Path(args.duckdb).resolve()
+    tsv_path = Path(args.tsv).resolve()
+    if not duckdb_path.exists():
+        print(f"ERROR: duckdb not found: {duckdb_path}", file=sys.stderr)
+        return 3
+    if not tsv_path.exists():
+        print(f"ERROR: tsv not found: {tsv_path}", file=sys.stderr)
+        return 3
+
+    values = _read_tsv(tsv_path, kind=kind)
+    run_id = args.run_id or _short_run_id('cli')
+    print(f"ant-annotate: add-{kind} '{args.col}' "
+          f"({len(values):,} rows) → {duckdb_path.name} [run_id={run_id}]")
+
+    ant_serve_url = _resolve_ant_serve_url(args)
+    db_id = args.db_id or _resolve_db_id_from_md(duckdb_path)
+    if ant_serve_url and not db_id:
+        print(f"  ⚠ could not resolve db_id from .md; ant-serve coordination "
+              f"disabled (pass --db-id or --no-coordinate to silence)",
+              file=sys.stderr)
+        ant_serve_url = None
+
+    try:
+        with AnnotationWriter(
+            duckdb_path,
+            annotator='ant-annotate',
+            run_id=run_id,
+            catalog=args.catalog,
+            db_id=db_id,
+            ant_serve_url=ant_serve_url,
+        ) as writer:
+            if kind == 'num':
+                writer.add_numerical(
+                    args.col, values,
+                    on_conflict='overwrite' if args.overwrite else 'fail',
+                )
+            else:
+                writer.add_categorical(
+                    args.col, values,
+                    on_conflict='overwrite' if args.overwrite else 'fail',
+                )
+            writer.commit()
+    except AnnotationWriterError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    print("  ✓ committed")
+    return 0
+
+
+def cmd_status(args) -> int:
+    duckdb_path = Path(args.duckdb).resolve()
+    if not duckdb_path.exists():
+        print(f"ERROR: duckdb not found: {duckdb_path}", file=sys.stderr)
+        return 3
+
+    pending = read_pending_cols(duckdb_path)
+    cols = duckdb_obs_columns(duckdb_path)
+
+    print(f"Database: {duckdb_path}")
+    print(f"  obsnum cols: {len(cols['obsnum'])}")
+    print(f"  obscat cols: {len(cols['obscat'])}")
+
+    if pending.empty:
+        print()
+        print("  No pending columns. State: clean.")
+        return 0
+
+    print()
+    print(f"Pending columns ({len(pending)}):")
+    print(f"  {'col_name':<45s} {'kind':<4s} {'annotator':<14s} "
+          f"{'run_id':<14s} {'catalog':<18s} added_at")
+    print(f"  {'-'*45} {'-'*4} {'-'*14} {'-'*14} {'-'*18} {'-'*19}")
+    for _, row in pending.sort_values('added_at').iterrows():
+        added = str(row['added_at'])[:19]
+        cat = row['catalog'] or '-'
+        print(f"  {row['col_name']:<45s} {row['kind']:<4s} "
+              f"{row['annotator']:<14s} {row['run_id']:<14s} "
+              f"{cat:<18s} {added}")
+    return 0
+
+
+def cmd_rollback(args) -> int:
+    duckdb_path = Path(args.duckdb).resolve()
+    if not duckdb_path.exists():
+        print(f"ERROR: duckdb not found: {duckdb_path}", file=sys.stderr)
+        return 3
+
+    pending = read_pending_cols(duckdb_path)
+    to_drop = pending[pending['run_id'] == args.run_id]
+    if to_drop.empty:
+        print(f"ERROR: no pending columns with run_id='{args.run_id}'",
+              file=sys.stderr)
+        return 1
+
+    print(f"Rolling back run_id={args.run_id}: {len(to_drop)} columns")
+    for _, row in to_drop.iterrows():
+        print(f"  - {row['col_name']} [{row['kind']}]")
+
+    if not args.yes:
+        try:
+            ans = input("Proceed? [y/N] ").strip().lower()
+        except EOFError:
+            ans = 'n'
+        if ans != 'y':
+            print("aborted.")
+            return 1
+
+    # Drop directly via duckdb — bypasses AnnotationWriter's add/commit
+    # semantics because we're going in the other direction.
+    lock_path = duckdb_path.with_suffix(duckdb_path.suffix + '.lock')
+    import fcntl
+    with open(lock_path, 'w') as lock_fd:
+        try:
+            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(f"ERROR: another writer holds the lock: {lock_path}",
+                  file=sys.stderr)
+            return 1
+        con = duckdb.connect(str(duckdb_path), read_only=False)
+        try:
+            for _, row in to_drop.iterrows():
+                col = row['col_name']
+                target = row['target_table']
+                underscore_table = f"__{target}"
+                con.execute(
+                    f"ALTER TABLE {safe_ident(underscore_table)} "
+                    f"DROP COLUMN {safe_ident(col)}"
+                )
+                con.execute(
+                    "DELETE FROM __pending_cols WHERE col_name = ?", [col]
+                )
+                # Refresh view
+                con.execute(f"DROP VIEW IF EXISTS {safe_ident(target)}")
+                con.execute(
+                    f"CREATE VIEW {safe_ident(target)} AS "
+                    f"SELECT c.cell_name, o.* "
+                    f"FROM {safe_ident(underscore_table)} o "
+                    f"JOIN __cells c ON o.cell_id = c.cell_id"
+                )
+        finally:
+            con.close()
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                pass
+    print("  ✓ rolled back")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog='ant-annotate',
+        description='Add obs columns to a duckdb without full rebuild.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sub = parser.add_subparsers(dest='cmd', required=True)
+
+    for kind, label in [('num', 'numerical (DOUBLE)'),
+                        ('cat', 'categorical (VARCHAR)')]:
+        p = sub.add_parser(f'add-{kind}',
+                           help=f'Add a {label} obs column from TSV')
+        p.add_argument('duckdb', help='Path to .duckdb file')
+        p.add_argument('col', help='Column name (bare identifier: [A-Za-z_][A-Za-z0-9_]*)')
+        p.add_argument('tsv', help='Two-column TSV (cell_name<TAB>value)')
+        p.add_argument('--catalog', default=None,
+                       help='Optional catalog tag for provenance')
+        p.add_argument('--run-id', default=None,
+                       help='Optional run_id; auto-generated if not given')
+        p.add_argument('--overwrite', action='store_true',
+                       help='Allow overwriting an existing column')
+        p.add_argument('--db-id', default=None,
+                       help='Canonical db_id for ant-serve coordination '
+                            '(auto-resolved from .md if omitted)')
+        p.add_argument('--api-url', default=None,
+                       help='Override ant-serve URL (default: from anthive.yaml)')
+        p.add_argument('--no-coordinate', action='store_true',
+                       help='Skip ant-serve lock coordination')
+
+    p_status = sub.add_parser('status', help='Show pending columns and counts')
+    p_status.add_argument('duckdb', help='Path to .duckdb file')
+
+    p_rb = sub.add_parser('rollback', help='Drop columns by run_id')
+    p_rb.add_argument('duckdb', help='Path to .duckdb file')
+    p_rb.add_argument('--run-id', required=True, help='run_id to roll back')
+    p_rb.add_argument('-y', '--yes', action='store_true',
+                      help='Skip confirmation prompt')
+
+    args = parser.parse_args()
+
+    if args.cmd == 'add-num':
+        return cmd_add(args, kind='num')
+    if args.cmd == 'add-cat':
+        return cmd_add(args, kind='cat')
+    if args.cmd == 'status':
+        return cmd_status(args)
+    if args.cmd == 'rollback':
+        return cmd_rollback(args)
+    parser.print_help()
+    return 2
+
+
+if __name__ == '__main__':
+    sys.exit(main())

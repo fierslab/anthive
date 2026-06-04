@@ -1,0 +1,3321 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "fastapi>=0.110.0",
+#   "uvicorn>=0.27.0",
+#   "duckdb>=0.10.0",
+#   "pandas>=2.0.0",
+#   "pyyaml>=6.0",
+#   "boto3>=1.26.0",
+#   "matplotlib>=3.7.0",
+#   "seaborn>=0.13.0",
+#   "pyarrow>=14.0.0",
+# ]
+# ///
+"""
+ant-serve - Anthive REST API Server (Phase 2 - Enhanced Performance)
+
+Serves single-cell expression databases via HTTP using FastAPI.
+Scans data folder for .duckdb files and exposes them through REST endpoints.
+
+Phase 2 Features:
+- Connection pooling for DuckDB connections
+- Enhanced caching (gene lists, metadata statistics)
+- Better async handling
+- Response compression
+- Basic metrics
+
+Usage:
+    ant serve [--data-folder PATH] [--host HOST] [--port PORT]
+
+Example:
+    ant serve --data-folder ./data --host 0.0.0.0 --port 8080
+"""
+
+import argparse
+import asyncio
+import json
+import logging
+import logging.handlers
+import math
+import sys
+import time
+from collections import defaultdict
+from contextlib import asynccontextmanager
+from datetime import datetime
+from io import BytesIO, StringIO
+from pathlib import Path
+from threading import Lock
+from typing import Any, Dict, List, Optional, Tuple
+
+import pandas as pd
+import uvicorn
+from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+
+# Add lib directory to path
+script_dir = Path(__file__).parent.resolve()
+lib_dir = script_dir.parent.parent / 'lib'
+sys.path.insert(0, str(lib_dir))
+
+from anthive_db import AnthiveDB, safe_ident
+from config import get_config
+from geneset import (
+    GenesetRegistry,
+    SCORE_COLUMN_SEPARATOR,
+    SCORE_COLUMN_TEMPLATE,
+    is_score_column,
+    parse_score_column,
+    validate_registry as validate_geneset_registry,
+)
+from md_check import generate_file_id, generate_group_id
+from metadata import parse_md_file
+import mus
+import plotting
+import analytics
+
+
+# ── Logging setup ─────────────────────────────────────────────────────────────
+
+def _setup_logging(log_dir: Path = None) -> logging.Logger:
+    """Configure file + console logging with rotation."""
+    if log_dir is None:
+        log_dir = Path(__file__).parent.parent.resolve() / 'logs'
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    logger = logging.getLogger('anthive')
+    logger.setLevel(logging.DEBUG)
+
+    # Rotating file handler: 10 MB per file, keep 5 backups
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_dir / 'ant-serve.log',
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+    )
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s %(levelname)-8s %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S',
+    ))
+    logger.addHandler(file_handler)
+
+    # Console: warnings and above only (uvicorn handles INFO)
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.WARNING)
+    console_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+    logger.addHandler(console_handler)
+
+    return logger
+
+
+log = _setup_logging()
+
+
+def _auto_memory_limit(max_connections: int = 3) -> str:
+    """Compute a per-connection DuckDB memory limit based on system RAM.
+
+    Heuristic: reserve 40% of system RAM for DuckDB total, then divide
+    by the max number of concurrent connections that could be active.
+    Floor at 512 MB, cap at 8 GB per connection.
+    """
+    import os
+    try:
+        total_bytes = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
+    except (ValueError, OSError):
+        return '2GB'  # safe fallback
+    duckdb_budget = int(total_bytes * 0.4)
+    per_conn = max(512 * 1024 * 1024, min(duckdb_budget // max(max_connections, 1), 8 * 1024 * 1024 * 1024))
+    per_conn_gb = round(per_conn / (1024 * 1024 * 1024), 1)
+    return f'{per_conn_gb}GB'
+
+
+class QueryRequest(BaseModel):
+    """Request model for SQL query endpoints"""
+    query: str
+    limit: Optional[int] = None
+
+
+class ModuleScoreRequest(BaseModel):
+    """Request model for module scoring"""
+    genes: List[str]
+    layer: str = 'X'
+    n_control: int = 100
+    seed: int = 42
+    subset: List[str] = []
+
+
+class EvictedDatabaseError(RuntimeError):
+    """Raised when get_connection() is called on a db_key that has been
+    administratively evicted (a writer is holding the duckdb r/w lock)."""
+
+
+class ConnectionPool:
+    """Connection pool for DuckDB databases
+
+    Maintains a pool of reusable connections per database for better performance.
+    Phase 2 enhancement for concurrent request handling.
+
+    Supports eviction (POST /admin/release/{db_id}) for the AnnotationWriter
+    workflow — when an annotator wants to take the duckdb r/w lock, ant-serve
+    must first close its r/o handles and refuse to issue new ones until the
+    writer is done.
+    """
+
+    EVICTION_DEFAULT_SECONDS = 300.0
+
+    def __init__(self, max_connections_per_db: int = 3, s3_config: Optional[Dict] = None,
+                 memory_limit: str = 'auto', threads: int = 2):
+        self.max_connections_per_db = max_connections_per_db
+        self.s3_config = s3_config or {}
+        if memory_limit == 'auto':
+            self.memory_limit = _auto_memory_limit(max_connections_per_db)
+        else:
+            self.memory_limit = memory_limit
+        self.threads = threads
+        log.info('ConnectionPool: memory_limit=%s/conn, threads=%d/conn, max_conns_per_db=%d',
+                 self.memory_limit, threads, max_connections_per_db)
+        self.pools: Dict[str, List[Any]] = defaultdict(list)
+        self.in_use: Dict[str, int] = defaultdict(int)
+        self.locks: Dict[str, Lock] = defaultdict(Lock)
+        self.eviction_until: Dict[str, float] = {}  # db_key -> unix timestamp
+        self.total_connections = 0
+        self.hits = 0
+        self.misses = 0
+        self._httpfs_installed = False
+
+    def _make_connection(self, db_key: str):
+        """Create a new DuckDB connection for a local path or S3 URL"""
+        import duckdb
+        if db_key.startswith('s3://'):
+            conn = duckdb.connect()
+            if not self._httpfs_installed:
+                conn.execute("INSTALL httpfs;")
+                self._httpfs_installed = True
+            conn.execute("LOAD httpfs;")
+            s3 = self.s3_config
+            raw_ep = (s3.get('endpoint') or '').strip()
+            ep_host = raw_ep.removeprefix('https://').removeprefix('http://')
+            use_ssl = not raw_ep.startswith('http://')
+            use_path_style = s3.get('use_path_style') or bool(ep_host)
+            # DuckDB 1.x: use CREATE SECRET instead of SET s3_* variables
+            fields = [
+                f"TYPE S3",
+                f"KEY_ID '{s3.get('access_key_id') or ''}'",
+                f"SECRET '{s3.get('secret_access_key') or ''}'",
+            ]
+            if ep_host:
+                fields.append(f"ENDPOINT '{ep_host}'")
+            if s3.get('region'):
+                fields.append(f"REGION '{s3['region']}'")
+            fields.append(f"USE_SSL {'true' if use_ssl else 'false'}")
+            if use_path_style:
+                fields.append("URL_STYLE 'path'")
+            conn.execute(f"CREATE OR REPLACE SECRET _s3 ({', '.join(fields)})")
+            conn.execute(f"ATTACH '{db_key}' AS db (READ_ONLY);")
+            conn.execute("USE db;")
+        else:
+            conn = duckdb.connect(db_key, read_only=True)
+        # Cap per-connection memory and parallelism to prevent OOM
+        conn.execute(f"SET memory_limit = '{self.memory_limit}'")
+        conn.execute(f"SET threads = {self.threads}")
+        return conn
+
+    def _is_evicted_unlocked(self, db_key: str) -> bool:
+        """Caller must hold self.locks[db_key]. Auto-clears expired evictions."""
+        deadline = self.eviction_until.get(db_key)
+        if deadline is None:
+            return False
+        if time.time() >= deadline:
+            self.eviction_until.pop(db_key, None)
+            return False
+        return True
+
+    def get_connection(self, db_key: str):
+        """Get a connection from the pool or create a new one"""
+        with self.locks[db_key]:
+            if self._is_evicted_unlocked(db_key):
+                expires_in = self.eviction_until[db_key] - time.time()
+                raise EvictedDatabaseError(
+                    f"db_key {db_key!r} is currently evicted by a writer "
+                    f"(expires in {expires_in:.0f}s). Retry shortly or call "
+                    f"POST /admin/restore/{{db_id}} to clear."
+                )
+
+            # Try to get an existing connection
+            if self.pools[db_key]:
+                conn = self.pools[db_key].pop()
+                self.in_use[db_key] += 1
+                self.hits += 1
+                return conn
+
+            # Create new connection if under limit
+            if self.in_use[db_key] < self.max_connections_per_db:
+                conn = self._make_connection(db_key)
+                self.in_use[db_key] += 1
+                self.total_connections += 1
+                self.misses += 1
+                return conn
+
+            # Fallback: create an extra connection beyond the pool limit
+            self.misses += 1
+            return self._make_connection(db_key)
+
+    def release(self, db_key: str, *,
+                duration_seconds: Optional[float] = None,
+                drain_timeout_seconds: float = 30.0) -> Dict[str, Any]:
+        """Mark db_key evicted, close idle conns, wait for in-use to drain.
+
+        Used by POST /admin/release/{db_id}. Returns dict with status and
+        counts so the caller can decide whether to proceed.
+        """
+        if duration_seconds is None:
+            duration_seconds = self.EVICTION_DEFAULT_SECONDS
+
+        with self.locks[db_key]:
+            # Close idle connections
+            n_closed = 0
+            while self.pools[db_key]:
+                conn = self.pools[db_key].pop()
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                n_closed += 1
+            # Mark evicted
+            self.eviction_until[db_key] = time.time() + duration_seconds
+
+        # Wait for in-use to drain (outside the per-key lock so request
+        # handlers can finish and call return_connection)
+        deadline = time.monotonic() + drain_timeout_seconds
+        while True:
+            in_use = self.in_use.get(db_key, 0)
+            if in_use <= 0:
+                break
+            if time.monotonic() > deadline:
+                return {
+                    'ok': False,
+                    'closed_idle': n_closed,
+                    'still_in_use': in_use,
+                    'eviction_expires_in': duration_seconds,
+                    'reason': f"in_use did not drain within {drain_timeout_seconds:.0f}s",
+                }
+            time.sleep(0.1)
+
+        # Drain happened; also close any conns that came back during the wait
+        with self.locks[db_key]:
+            late_returns = 0
+            while self.pools[db_key]:
+                conn = self.pools[db_key].pop()
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                late_returns += 1
+
+        return {
+            'ok': True,
+            'closed_idle': n_closed + late_returns,
+            'still_in_use': 0,
+            'eviction_expires_in': duration_seconds,
+        }
+
+    def restore(self, db_key: str) -> Dict[str, Any]:
+        """Clear eviction state so new connections can be issued again."""
+        with self.locks[db_key]:
+            was_evicted = self._is_evicted_unlocked(db_key)
+            self.eviction_until.pop(db_key, None)
+        return {'was_evicted': was_evicted}
+
+    def return_connection(self, db_key: str, conn):
+        """Return a connection to the pool"""
+        with self.locks[db_key]:
+            if len(self.pools[db_key]) < self.max_connections_per_db:
+                self.pools[db_key].append(conn)
+                self.in_use[db_key] = max(0, self.in_use[db_key] - 1)
+            else:
+                # Close if pool is full
+                conn.close()
+                self.in_use[db_key] = max(0, self.in_use[db_key] - 1)
+
+    def close_all(self):
+        """Close all pooled connections"""
+        for db_key, conns in self.pools.items():
+            for conn in conns:
+                try:
+                    conn.close()
+                except:
+                    pass
+            conns.clear()
+        self.pools.clear()
+        self.in_use.clear()
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get pool statistics"""
+        return {
+            'total_connections': self.total_connections,
+            'active_databases': len(self.pools),
+            'pooled_connections': sum(len(p) for p in self.pools.values()),
+            'in_use': sum(self.in_use.values()),
+            'cache_hits': self.hits,
+            'cache_misses': self.misses,
+            'hit_rate': self.hits / max(1, self.hits + self.misses)
+        }
+
+
+_METADATA_CACHE_VERSION = 4       # bump when cache format changes
+_METADATA_CACHE_TTL_S3  = 86_400  # 24 h for S3 databases (no local mtime)
+
+
+def _json_serial(obj: object) -> str:
+    """JSON serializer for types not handled by the default encoder (e.g. date)."""
+    if hasattr(obj, 'isoformat'):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+class DatabaseRegistry:
+    """Registry of available databases with enhanced caching (Phase 2)
+
+    Caches:
+    - Database metadata (Phase 1)
+    - Gene lists per database (Phase 2)
+    - Metadata field statistics (Phase 2)
+    """
+
+    def __init__(self, data_folder: Path, connection_pool: ConnectionPool, s3_config: Optional[Dict] = None):
+        self.data_folder = data_folder.resolve()
+        self.connection_pool = connection_pool
+        self._s3_config = s3_config or {}
+        self.databases: Dict[str, str] = {}           # db_id → local path str or s3:// URL
+        self._db_md_bases: Dict[str, Path] = {}       # db_id → local .md file path
+        self.metadata_cache: Dict[str, Dict[str, Any]] = {}
+        self._databases_list_cache: Optional[List[Dict[str, Any]]] = None
+        self._db_extra: Dict[str, Dict[str, str]] = {}  # db_id → {group_id, file_id, rel_path}
+        self._startup_time = time.time()
+
+        # Phase 2: Enhanced caching
+        self.gene_list_cache: Dict[str, List[str]] = {}
+        self.metadata_stats_cache: Dict[str, Dict[str, Any]] = {}
+
+        # Metrics
+        self.request_count = 0
+        self.error_count = 0
+
+        print(f"Scanning data folder: {self.data_folder}")
+        self._scan_databases()
+        self._cache_all_metadata()
+
+    def _resolve_db_id(self, md_path: Path, rel_path: Path) -> tuple:
+        """Compute (db_id, group_id, file_id) from .md files.
+
+        db_id is '{group_id}/{file_id}' derived from YAML metadata.
+        Falls back to generate_group_id / generate_file_id when fields are absent.
+        Returns (db_id, group_id, file_id).
+        """
+        top_level = rel_path.parts[0] if len(rel_path.parts) > 1 else rel_path.stem
+
+        # group_id: from index.md in the same directory as the .md file
+        index_meta, _ = parse_md_file(md_path.parent / 'index.md')
+        group_id = str(index_meta.get('group_id') or '').strip() or generate_group_id(top_level)
+
+        # file_id: from the .md file itself
+        data_meta, _ = parse_md_file(md_path)
+        file_id = str(data_meta.get('id') or '').strip() or generate_file_id(rel_path.stem)
+
+        return f"{group_id}/{file_id}", group_id, file_id
+
+    def _build_s3_url(self, duckdb_rel: Path) -> str:
+        """Build an S3 URL for a relative .duckdb path"""
+        bucket = self._s3_config['bucket']
+        prefix = (self._s3_config.get('prefix') or '').strip('/')
+        base = f"s3://{bucket}/{prefix}" if prefix else f"s3://{bucket}"
+        return f"{base}/{duckdb_rel}"
+
+    def _make_s3_client(self):
+        """Create a boto3 S3 client from config"""
+        import boto3
+        s3 = self._s3_config
+        endpoint = s3.get('endpoint') or None
+        if endpoint and '://' not in endpoint:
+            endpoint = 'https://' + endpoint
+        return boto3.client(
+            's3',
+            endpoint_url=endpoint,
+            region_name=s3.get('region') or 'us-east-1',
+            aws_access_key_id=s3.get('access_key_id') or None,
+            aws_secret_access_key=s3.get('secret_access_key') or None,
+        )
+
+    def _s3_key_exists(self, s3_client, duckdb_rel: Path) -> bool:
+        """Return True if the S3 object exists (HEAD request)"""
+        bucket = self._s3_config['bucket']
+        prefix = (self._s3_config.get('prefix') or '').strip('/')
+        key = f"{prefix}/{duckdb_rel}" if prefix else str(duckdb_rel)
+        try:
+            s3_client.head_object(Bucket=bucket, Key=key)
+            return True
+        except Exception:
+            return False
+
+    # ── persistent metadata cache ──────────────────────────────────────────────
+
+    def _cache_file_path(self) -> Path:
+        return Path('./tmp/metadata_cache.json')
+
+    def _load_persisted_cache(self) -> Dict[str, Any]:
+        """Load the on-disk metadata cache.  Returns {} on any error or version mismatch."""
+        cache_path = self._cache_file_path()
+        if not cache_path.exists():
+            return {}
+        try:
+            with cache_path.open() as f:
+                data = json.load(f)
+            if data.get('cache_version') != _METADATA_CACHE_VERSION:
+                return {}
+            return data.get('entries', {})
+        except Exception as exc:
+            print(f"  Note: could not read metadata cache ({exc}); will reload all.")
+            return {}
+
+    def _save_persisted_cache(self, entries: Dict[str, Any]) -> None:
+        """Write the metadata cache to disk."""
+        cache_path = self._cache_file_path()
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        data = {'cache_version': _METADATA_CACHE_VERSION, 'entries': entries}
+        try:
+            tmp_path = cache_path.with_suffix('.json.tmp')
+            with tmp_path.open('w') as f:
+                json.dump(data, f, default=_json_serial)
+            tmp_path.replace(cache_path)
+        except Exception as exc:
+            print(f"  Warning: could not save metadata cache ({exc}).")
+
+    def _get_entry_fingerprint(self, db_id: str) -> Dict[str, float]:
+        """Return mtime fingerprint for the files that back a single registry entry."""
+        md_path = self._db_md_bases[db_id]
+        db_url  = self.databases[db_id]
+
+        md_mtime = md_path.stat().st_mtime if md_path.exists() else 0.0
+
+        # mtime of the nearest ancestor index.md (carries inherited annotation)
+        index_mtime = 0.0
+        search = md_path.parent
+        while search != self.data_folder.parent:
+            candidate = search / 'index.md'
+            if candidate.exists():
+                index_mtime = candidate.stat().st_mtime
+                break
+            search = search.parent
+
+        duckdb_mtime = 0.0
+        if not db_url.startswith('s3://'):
+            duckdb_path = Path(db_url)
+            duckdb_mtime = duckdb_path.stat().st_mtime if duckdb_path.exists() else 0.0
+
+        return {'md_mtime': md_mtime, 'index_mtime': index_mtime, 'duckdb_mtime': duckdb_mtime}
+
+    def _is_cache_entry_valid(
+        self, db_id: str, cached_entry: Dict[str, Any], fingerprint: Dict[str, float],
+    ) -> bool:
+        """Return True if the cached entry still matches the on-disk files."""
+        db_url = self.databases[db_id]
+        if cached_entry.get('md_mtime')    != fingerprint['md_mtime']:    return False
+        if cached_entry.get('index_mtime') != fingerprint['index_mtime']: return False
+        if db_url.startswith('s3://'):
+            # No reliable mtime for S3 — fall back to 24 h TTL
+            return time.time() - cached_entry.get('cached_at', 0) < _METADATA_CACHE_TTL_S3
+        return cached_entry.get('duckdb_mtime') == fingerprint['duckdb_mtime']
+
+    # ── database scanning ──────────────────────────────────────────────────────
+
+    def _scan_databases(self):
+        """Scan data folder for databases via .md files (follows symlinks)"""
+        if not self.data_folder.exists():
+            raise FileNotFoundError(f"Data folder not found: {self.data_folder}")
+
+        self.databases.clear()
+        self._db_md_bases.clear()
+        self._db_extra.clear()
+
+        s3_enabled = bool(self._s3_config.get('bucket'))
+        s3_client = self._make_s3_client() if s3_enabled else None
+
+        # Walk the directory tree, following symlinks
+        def scan_recursive(path: Path, base: Path):
+            """Recursively scan for .md files (excluding index.md), following symlinks"""
+            try:
+                for item in path.iterdir():
+                    resolved_item = item.resolve()
+
+                    if (resolved_item.is_file()
+                            and resolved_item.suffix == '.md'
+                            and resolved_item.name != 'index.md'):
+                        try:
+                            rel_path = item.relative_to(base)
+
+                            # Skip datasets marked inactive via sidecar file
+                            if resolved_item.with_suffix('.inactive').exists():
+                                continue
+
+                            local_duckdb = resolved_item.with_suffix('.duckdb')
+                            if local_duckdb.exists():
+                                db_url = str(local_duckdb)
+                            elif s3_enabled:
+                                duckdb_rel = rel_path.with_suffix('.duckdb')
+                                if not self._s3_key_exists(s3_client, duckdb_rel):
+                                    continue  # not on S3 either
+                                db_url = self._build_s3_url(duckdb_rel)
+                            else:
+                                continue  # no .duckdb available locally or on S3
+
+                            db_id, group_id, file_id = self._resolve_db_id(resolved_item, rel_path)
+
+                            if db_id in self.databases:
+                                existing = self._db_extra[db_id]['rel_path']
+                                print(f"  WARNING: ID collision '{db_id}': "
+                                      f"{existing} vs {rel_path} — using path fallback")
+                                db_id = str(rel_path.with_suffix(''))
+
+                            self.databases[db_id] = db_url
+                            self._db_md_bases[db_id] = resolved_item
+                            self._db_extra[db_id] = {
+                                'group_id': group_id,
+                                'file_id': file_id,
+                                'rel_path': str(rel_path.with_suffix('.duckdb')),
+                            }
+                        except ValueError:
+                            # Skip if can't make relative path
+                            pass
+                    elif resolved_item.is_dir():
+                        # Skip _-prefixed folders (e.g. _synapse_raw) —
+                        # staging / archive areas, not served datasets.
+                        if item.name.startswith('_'):
+                            continue
+                        # Recursively scan subdirectories
+                        scan_recursive(item, base)
+            except (PermissionError, OSError):
+                # Skip directories we can't access
+                pass
+
+        scan_recursive(self.data_folder, self.data_folder)
+
+        print(f"Found {len(self.databases)} databases")
+        if len(self.databases) <= 10:
+            for db_id in sorted(self.databases.keys()):
+                print(f"  - {db_id}")
+        else:
+            for db_id in sorted(self.databases.keys())[:10]:
+                print(f"  - {db_id}")
+            print(f"  ... and {len(self.databases) - 10} more")
+
+    def _cache_all_metadata(self, force_reload: bool = False) -> None:
+        """Load metadata for all databases, using the persisted cache where possible.
+
+        A cache entry is reused when the mtime of the dataset's .md file, its
+        nearest ancestor index.md, and the local .duckdb file are all unchanged.
+        S3-backed databases use a 24 h TTL instead.
+
+        Pass force_reload=True to ignore the cache and reload everything (used by
+        POST /admin/rescan).
+        """
+        print("Loading metadata (checking cache)..." if not force_reload else "Loading metadata (forced reload)...")
+        persisted = {} if force_reload else self._load_persisted_cache()
+
+        self.metadata_cache.clear()
+        self._databases_list_cache = None
+        errors: List[tuple] = []
+        cache_hits = 0
+        reloaded = 0
+        s3_warnings: List[str] = []
+
+        for db_id, db_url in self.databases.items():
+            fingerprint = self._get_entry_fingerprint(db_id)
+            cached_entry = persisted.get(db_id, {})
+
+            if not force_reload and self._is_cache_entry_valid(db_id, cached_entry, fingerprint):
+                self.metadata_cache[db_id] = cached_entry['metadata']
+                cache_hits += 1
+                continue
+
+            try:
+                metadata = self._load_database_metadata(db_id, self._db_extra[db_id])
+                self.metadata_cache[db_id] = metadata
+                persisted[db_id] = {
+                    'metadata': metadata,
+                    **fingerprint,
+                    'cached_at': time.time(),
+                }
+                reloaded += 1
+            except Exception as exc:
+                error_msg = str(exc)
+                is_s3_missing = (
+                    db_url.startswith('s3://')
+                    and 'does not exist' in error_msg.lower()
+                )
+                if is_s3_missing:
+                    s3_warnings.append(db_id)
+                else:
+                    errors.append((db_id, error_msg))
+                    print(f"\n{'='*70}")
+                    print(f"ERROR: Failed to load database metadata")
+                    print(f"{'='*70}")
+                    print(f"Database: {db_id}")
+                    print(f"Path: {db_url}")
+                    print(f"Error: {error_msg}")
+                    print(f"{'='*70}\n")
+
+        if s3_warnings:
+            print(f"  S3 not accessible ({len(s3_warnings)}): {', '.join(s3_warnings)}")
+            errors.extend((db_id, 'S3 not accessible') for db_id in s3_warnings)
+
+        # Remove databases that failed to load
+        for db_id, _ in errors:
+            if db_id in self.databases:
+                del self.databases[db_id]
+                self._db_md_bases.pop(db_id, None)
+                persisted.pop(db_id, None)
+
+        self._save_persisted_cache(persisted)
+
+        status = f"{len(self.metadata_cache)} databases"
+        if cache_hits:
+            status += f" ({cache_hits} from cache, {reloaded} reloaded)"
+        if errors:
+            status += f", {len(errors)} skipped"
+        print(f"Metadata ready: {status}")
+
+    def _resolve_annotations(self, md_path: Path, file_metadata: dict) -> dict:
+        """Build resolved annotation dict for a deposit.
+
+        Reads the post-2026-06 model: the dataset's `<basename>.h5ad.mus`
+        sidecar plus the `.env` cascade walking up the folder tree.
+        See `lib/mus.py` and `data/h5adstore/CONVENTIONS.md`.
+
+        Legacy alias `celltype` is populated alongside the canonical
+        `cell_type` so API consumers that haven't been ported keep working.
+        """
+        h5ad_path = md_path.with_suffix('.h5ad')
+        ann = dict(mus.resolve_annotation(h5ad_path, root=self.data_folder))
+        # Backward-compat alias for /databases/{db_id}/info consumers
+        if 'cell_type' in ann and 'celltype' not in ann:
+            ann['celltype'] = ann['cell_type']
+        return ann
+
+    def _load_database_metadata(self, db_id: str, extra: Dict[str, str]) -> Dict[str, Any]:
+        """Load metadata from .md files and database"""
+        md_path = self._db_md_bases[db_id]
+        db_url = self.databases[db_id]
+
+        # Load per-file metadata
+        file_metadata, md_body = parse_md_file(md_path)
+
+        # Load collection metadata from the nearest index.md walking up the tree.
+        # Sierksma2025 datasets live in subdirectories, so the index.md is one
+        # level above the immediate parent.
+        index_path = None
+        search = md_path.parent
+        while search != self.data_folder.parent:
+            candidate = search / 'index.md'
+            if candidate.exists():
+                index_path = candidate
+                break
+            search = search.parent
+        collection_metadata, _ = parse_md_file(index_path) if index_path else ({}, '')
+
+        # Get database info using connection pool
+        conn = self.connection_pool.get_connection(db_url)
+        try:
+            n_cells = conn.execute("SELECT COUNT(*) FROM __cells").fetchone()[0]
+            n_genes = conn.execute("SELECT COUNT(*) FROM __genes").fetchone()[0]
+
+            # Get layers with friendly names
+            layers_result = conn.execute("""
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_type = 'VIEW'
+                AND table_name LIKE 'layer__%'
+            """).fetchall()
+            layer_keys = sorted([row[0].replace('layer__', '') for row in layers_result])
+
+            # Build layers dict with friendly names from metadata
+            layers = {}
+            layers_include = file_metadata.get('layers_include', [])
+            layer_description = file_metadata.get('layer_description', {})
+            for key in layer_keys:
+                # Only include layers that are in layers_include
+                if key in layers_include:
+                    # Use description if available, otherwise use key
+                    layers[key] = layer_description.get(key, key)
+
+            # Get embeddings with friendly names and dimensions
+            embeddings_result = conn.execute("""
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_type = 'VIEW'
+                AND table_name LIKE 'obsm__%'
+            """).fetchall()
+            embedding_keys = sorted([row[0].replace('obsm__', '') for row in embeddings_result])
+
+            # Build embeddings dict with friendly names and dimensions
+            embeddings = {}
+            obsm_include = file_metadata.get('obsm_include', [])
+            embedding_description = file_metadata.get('embedding_description', {})
+            for key in embedding_keys:
+                # Only include embeddings that are in obsm_include
+                if key in obsm_include:
+                    emb_info = {}
+
+                    # Add friendly name from metadata
+                    if key in embedding_description:
+                        emb_info['name'] = embedding_description[key]
+                    else:
+                        # Fallback: capitalize and remove X_ prefix
+                        name = key
+                        if name.startswith('X_'):
+                            name = name[2:]
+                        emb_info['name'] = name.capitalize()
+
+                    # Get dimensions (count columns excluding cell_name and cell_id)
+                    try:
+                        dim_result = conn.execute(f"""
+                            SELECT COUNT(*)
+                            FROM information_schema.columns
+                            WHERE table_name = 'obsm__{key}'
+                            AND column_name NOT IN ('cell_name', 'cell_id')
+                        """).fetchone()
+                        emb_info['dimensions'] = dim_result[0] if dim_result else None
+                    except:
+                        emb_info['dimensions'] = None
+
+                    embeddings[key] = emb_info
+
+            # Get obs columns (numerical)
+            obs_numerical = []
+            obsnum_exists = conn.execute("""
+                SELECT COUNT(*)
+                FROM information_schema.tables
+                WHERE table_name = 'obsnum'
+            """).fetchone()[0]
+
+            if obsnum_exists:
+                num_fields = conn.execute("""
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_name = 'obsnum'
+                    AND column_name NOT IN ('cell_name', 'cell_id')
+                    ORDER BY column_name
+                """).fetchall()
+                obs_numerical = [row[0] for row in num_fields]
+
+            # Get obs columns (categorical)
+            obs_categorical = []
+            obscat_exists = conn.execute("""
+                SELECT COUNT(*)
+                FROM information_schema.tables
+                WHERE table_name = 'obscat'
+            """).fetchone()[0]
+
+            if obscat_exists:
+                cat_fields = conn.execute("""
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_name = 'obscat'
+                    AND column_name NOT IN ('cell_name', 'cell_id')
+                    ORDER BY column_name
+                """).fetchall()
+                obs_categorical = [row[0] for row in cat_fields]
+
+            # Get var columns
+            var_columns = []
+            var_exists = conn.execute("""
+                SELECT COUNT(*)
+                FROM information_schema.tables
+                WHERE table_name = 'var'
+            """).fetchone()[0]
+
+            if var_exists:
+                var_fields = conn.execute("""
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_name = 'var'
+                    AND column_name NOT IN ('gene_name', 'gene_id')
+                    ORDER BY column_name
+                """).fetchall()
+                var_columns = [row[0] for row in var_fields]
+
+            # Module scoring availability (queried here to avoid using conn after return)
+            module_scoring_available = bool(conn.execute("""
+                SELECT COUNT(*) FROM information_schema.tables
+                WHERE table_name = '__gene_bins'
+            """).fetchone()[0])
+
+        finally:
+            self.connection_pool.return_connection(db_url, conn)
+
+        # Resolve annotation with inheritance from ancestor index.md files
+        ann = self._resolve_annotations(md_path, file_metadata)
+
+        # Combine metadata with enhanced structure
+        metadata = {
+            'group_id': extra['group_id'],
+            'file_id': extra['file_id'],
+            'path': extra['rel_path'],
+            'title': file_metadata.get('title', md_path.stem),
+            'n_cells': n_cells,
+            'n_genes': n_genes,
+
+            # Layers with friendly names
+            'layers': layers,
+
+            # Embeddings with friendly names and dimensions
+            'embeddings': embeddings,
+
+            # Observation columns
+            'obs': {
+                'numerical': obs_numerical,
+                'categorical': obs_categorical,
+                'total': len(obs_numerical) + len(obs_categorical)
+            },
+
+            # Variable columns
+            'var': {
+                'columns': var_columns,
+                'total': len(var_columns)
+            },
+
+            # File metadata
+            'version': file_metadata.get('version'),
+            'sha256': file_metadata.get('sha256'),
+            'date': file_metadata.get('date'),
+            'year': file_metadata.get('year'),
+            'default_layer': file_metadata.get('default_layer'),
+            'has_lognorm':   file_metadata.get('has_lognorm', True),
+
+            # Biology & study annotation (resolved from .h5ad.mus + .env cascade)
+            'organism':         ann.get('organism'),
+            'tissue':           ann.get('tissue'),
+            'cell_type':        ann.get('cell_type'),
+            'celltype':         ann.get('celltype'),          # legacy alias
+            'suspension_type':  ann.get('suspension_type'),   # cell | nucleus | na
+            'disease':          ann.get('disease'),
+            'condition':        ann.get('condition'),
+            'region':           ann.get('region'),            # legacy — empty after migration
+            'sex':              ann.get('sex'),
+            'age':              ann.get('age'),
+            'strain':           ann.get('strain'),
+            'technology':       ann.get('technology'),
+            'technology_category': ann.get('technology_category'),  # legacy
+            'accession':        ann.get('accession'),
+            'doi':              ann.get('doi') or [],
+            'pmid':             ann.get('pmid') or [],
+            'link':             ann.get('link') or [],
+            'license':          ann.get('license'),
+            'contributor':      ann.get('contributor'),
+            'year':             ann.get('year') or file_metadata.get('year'),
+            'updated':          ann.get('updated'),           # ISO 8601 from .h5ad.mus
+            'created':          ann.get('created'),           # ISO 8601 from .h5ad.mus
+            'source':           ann.get('source'),            # internal | external
+            'access':           ann.get('access'),            # internal | public
+            'top_genes':        file_metadata.get('top_genes'),
+            'top_cat':          file_metadata.get('top_cat'),
+            'top_num':          file_metadata.get('top_num'),
+
+            # Module scoring availability
+            'module_scoring_available': module_scoring_available,
+
+            # Raw markdown body (for visualization in the browser)
+            'markdown': md_body or None,
+
+            # Layer statistics from .md frontmatter
+            'layer_stats': file_metadata.get('layer_stats') or {},
+        }
+
+        # Add collection metadata if present
+        if collection_metadata:
+            metadata['group'] = collection_metadata.get('group')
+            metadata['collection'] = {
+                'group': collection_metadata.get('group'),
+                'experiment': collection_metadata.get('experiment'),
+                'authors': collection_metadata.get('authors'),
+                'year': collection_metadata.get('year'),
+                'default_dataset': collection_metadata.get('default_dataset'),
+            }
+
+        return metadata
+
+    def get_gene_list(self, db_id: str) -> List[str]:
+        """Get cached gene list for a database (Phase 2 enhancement)"""
+        if db_id not in self.gene_list_cache:
+            db_url = self.get_database_path(db_id)
+            conn = self.connection_pool.get_connection(db_url)
+            try:
+                result = conn.execute("SELECT gene_name FROM __genes ORDER BY gene_name").fetchall()
+                self.gene_list_cache[db_id] = [row[0] for row in result]
+            finally:
+                self.connection_pool.return_connection(db_url, conn)
+
+        return self.gene_list_cache[db_id]
+
+    def get_database_path(self, db_id: str) -> str:
+        """Get path or URL for a database ID"""
+        if db_id not in self.databases:
+            raise KeyError(f"Database '{db_id}' not found")
+        return self.databases[db_id]
+
+    def get_database_metadata(self, db_id: str) -> Dict[str, Any]:
+        """Get cached metadata for a database"""
+        if db_id not in self.metadata_cache:
+            raise KeyError(f"Database '{db_id}' not found")
+        return self.metadata_cache[db_id]
+
+    def list_databases(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
+        """
+        List all databases with metadata
+
+        Args:
+            force_refresh: Force reload from disk
+
+        Returns:
+            List of database information dictionaries
+        """
+        if not force_refresh and self._databases_list_cache is not None:
+            return self._databases_list_cache
+
+        result = []
+        errors = []
+
+        for db_id, db_path in sorted(self.databases.items()):
+            try:
+                metadata = self.get_database_metadata(db_id)
+
+                db_info = {
+                    'id': db_id,
+                    **metadata
+                }
+
+                result.append(db_info)
+            except Exception as e:
+                # Skip databases with errors and log them
+                errors.append((db_id, str(e)))
+                print(f"\n{'='*70}")
+                print(f"ERROR: Failed to load database metadata")
+                print(f"{'='*70}")
+                print(f"Database: {db_id}")
+                print(f"Path: {db_path}")
+                print(f"Error: {str(e)}")
+                print(f"{'='*70}\n")
+
+        # Log summary if there were errors
+        if errors:
+            print(f"\nWarning: Skipped {len(errors)} database(s) with errors")
+            print(f"Successfully loaded {len(result)} database(s)")
+            print()
+
+        self._databases_list_cache = result
+        return result
+
+    def rescan(self) -> Dict[str, Any]:
+        """Force rescan of data folder and reload all metadata"""
+        old_count = len(self.databases)
+        old_db_ids = set(self.databases.keys())
+
+        print("\nRescanning data folder...")
+        self.databases.clear()
+        self._db_md_bases.clear()
+        self.metadata_cache.clear()
+        self._databases_list_cache = None
+        self._db_extra.clear()
+
+        # Phase 2: Clear enhanced caches
+        self.gene_list_cache.clear()
+        self.metadata_stats_cache.clear()
+
+        # Drop the DuckDB connection pool — pooled connections hold the OLD
+        # schema after a .duckdb file is replaced (e.g., after ant-convert
+        # rebuilds with new obs columns added by ant-score), so any
+        # information_schema query against them returns stale column lists.
+        # Closing forces fresh connections on next access.
+        try:
+            self.connection_pool.close_all()
+        except Exception as exc:
+            print(f"  (connection_pool.close_all failed: {exc})")
+
+        self._scan_databases()
+        self._cache_all_metadata(force_reload=True)
+
+        new_db_ids = set(self.databases.keys())
+        added = new_db_ids - old_db_ids
+        removed = old_db_ids - new_db_ids
+
+        result = {
+            'status': 'success',
+            'previous_count': old_count,
+            'current_count': len(self.databases),
+            'added': sorted(list(added)),
+            'removed': sorted(list(removed)),
+            'databases': sorted(list(new_db_ids))
+        }
+
+        print(f"Rescan complete: {old_count} -> {len(self.databases)} databases")
+        if added:
+            print(f"  Added: {', '.join(added)}")
+        if removed:
+            print(f"  Removed: {', '.join(removed)}")
+
+        return result
+
+    def get_uptime(self) -> float:
+        """Get server uptime in seconds"""
+        return time.time() - self._startup_time
+
+
+# Global registry
+registry: Optional[DatabaseRegistry] = None
+connection_pool: Optional[ConnectionPool] = None
+geneset_registry: Optional[GenesetRegistry] = None
+
+# Reverse index built at startup / rescans:
+#   _score_index_by_db[db_id]      = [geneset_id, ...]   (which genesets are scored on this db)
+#   _score_index_by_geneset[gid]   = [db_id, ...]        (which dbs have this geneset pre-scored)
+# Plus per-(db_id, geneset_id) the actual column name (in case naming convention drifts).
+_score_index_by_db: Dict[str, List[str]] = {}
+_score_index_by_geneset: Dict[str, List[str]] = {}
+_score_columns: Dict[Tuple[str, str], str] = {}    # (db_id, geneset_id) -> column_name
+
+
+async def _daily_metadata_refresh() -> None:
+    """Background task: re-scan and refresh any stale metadata entries once per day."""
+    while True:
+        await asyncio.sleep(_METADATA_CACHE_TTL_S3)   # 24 h
+        print("Daily metadata refresh: scanning for changes...")
+        try:
+            registry._scan_databases()
+            registry._cache_all_metadata(force_reload=False)
+        except Exception as exc:
+            print(f"Daily metadata refresh error: {exc}")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup and shutdown (Phase 2)"""
+    # Startup
+    global registry, connection_pool
+    if registry is None or connection_pool is None:
+        print("ERROR: Registry or connection pool not initialized!")
+        sys.exit(1)
+    asyncio.create_task(_daily_metadata_refresh())
+    if geneset_registry is not None:
+        try:
+            _build_score_index()
+            log.info(
+                "Module-score index: %d database(s), %d distinct geneset(s)",
+                len(_score_index_by_db), len(_score_index_by_geneset),
+            )
+        except Exception as exc:
+            log.warning("Failed to build module-score index: %s", exc)
+    log.info("Server startup complete — %d databases", len(registry.databases))
+    print("Server startup complete")
+    yield
+    # Shutdown
+    log.info("Server shutting down")
+    print("Shutting down...")
+    if connection_pool:
+        connection_pool.close_all()
+    print("Server shutdown complete")
+
+
+# Create FastAPI app with lifespan handler (Phase 2)
+app = FastAPI(
+    title="Anthive API",
+    description="""
+## Anthive REST API v2.0 (Phase 2 - Enhanced Performance)
+
+A high-performance REST API for querying single-cell expression databases.
+
+### Phase 2 Enhancements
+
+* **Connection Pooling**: Reusable database connections for better concurrency
+* **Enhanced Caching**: Gene lists and metadata statistics cached
+* **Response Compression**: Automatic gzip compression for large responses
+* **Performance Metrics**: Track request performance and cache efficiency
+
+### Features
+
+* **Database Discovery**: List and explore available databases
+* **Gene Search**: Search for genes by substring matching
+* **Metadata Queries**: Search and filter cells by metadata
+* **Expression Data**: Retrieve cell expression data with filtering
+* **Embeddings**: Access UMAP, PCA, and other embeddings
+* **SQL Queries**: Execute custom SQL queries
+* **Multiple Formats**: Export data as JSON, CSV, or Parquet
+
+### Authentication
+
+Authentication is handled by reverse proxy (nginx, caddy, etc.) using HTTP Basic Authentication.
+
+### Documentation
+
+- **Swagger UI**: [/docs](/docs) (this page)
+- **ReDoc**: [/redoc](/redoc)
+- **OpenAPI Schema**: [/openapi.json](/openapi.json)
+- **Metrics**: [/metrics](/metrics) - Performance metrics
+    """,
+    version="2.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    root_path="/api",
+    lifespan=lifespan
+)
+
+# Enable CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Configure in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Note: Response compression via reverse proxy (nginx, caddy) recommended
+# Can enable gzip middleware here if needed
+
+
+# ── Request logging middleware ────────────────────────────────────────────────
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as StarletteRequest
+
+
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    """Log every request with timing, status, and errors."""
+
+    async def dispatch(self, request: StarletteRequest, call_next):
+        start = time.time()
+        path = request.url.path
+        method = request.method
+        try:
+            response = await call_next(request)
+            elapsed = time.time() - start
+            status = response.status_code
+            if status >= 500:
+                log.error('%s %s → %d (%.2fs)', method, path, status, elapsed)
+            elif status >= 400:
+                log.warning('%s %s → %d (%.2fs)', method, path, status, elapsed)
+            elif elapsed > 10:
+                log.warning('%s %s → %d SLOW (%.2fs)', method, path, status, elapsed)
+            else:
+                log.debug('%s %s → %d (%.2fs)', method, path, status, elapsed)
+            return response
+        except Exception as exc:
+            elapsed = time.time() - start
+            log.exception('%s %s CRASHED after %.2fs: %s', method, path, elapsed, exc)
+            raise
+
+
+app.add_middleware(RequestLoggingMiddleware)
+
+
+# ============================================================================
+# API Endpoints (all under /api prefix via root_path)
+# ============================================================================
+
+@app.get("/", tags=["info"])
+async def root():
+    """
+    API root endpoint with overview and available endpoints
+    """
+    return {
+        "name": "Anthive API",
+        "version": "2.0.0",
+        "databases": len(registry.databases) if registry else 0,
+        "uptime_seconds": registry.get_uptime() if registry else 0,
+        "documentation": {
+            "swagger": "/docs",
+            "redoc": "/redoc",
+            "openapi": "/openapi.json"
+        },
+        "endpoints": {
+            "health": "/health",
+            "databases": "/databases",
+            "database_info": "/databases/{db_id}/info",
+            "search_genes": "/databases/{db_id}/genes",
+            "get_cells": "/databases/{db_id}/cells",
+            "get_embeddings": "/databases/{db_id}/embeddings",
+            "query_sql": "POST /databases/{db_id}/query/sql",
+            "admin_rescan": "POST /admin/rescan",
+            "admin_release": "POST /admin/release/{db_id}",
+            "admin_restore": "POST /admin/restore/{db_id}"
+        }
+    }
+
+
+from contextlib import contextmanager
+
+@contextmanager
+def _pooled_db(db_id: str):
+    """Context manager: AnthiveDB backed by the connection pool (local or S3)."""
+    db_url = registry.get_database_path(db_id)
+    try:
+        conn = connection_pool.get_connection(db_url)
+    except EvictedDatabaseError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"{exc}",
+            headers={"Retry-After": "5"},
+        )
+    try:
+        yield AnthiveDB(conn=conn, owns_conn=False)
+    finally:
+        connection_pool.return_connection(db_url, conn)
+
+
+@app.get("/health", tags=["info"])
+async def health_check():
+    """
+    Health check endpoint for load balancers
+
+    Returns 200 if healthy, 503 if unhealthy
+    """
+    try:
+        database_count = len(registry.databases)
+        error_count = sum(1 for m in registry.metadata_cache.values() if 'error' in m)
+
+        if database_count == 0:
+            raise HTTPException(
+                status_code=503,
+                detail="No databases available"
+            )
+
+        return {
+            "status": "healthy",
+            "databases": database_count,
+            "database_errors": error_count,
+            "uptime_seconds": int(registry.get_uptime())
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Health check failed: {str(e)}"
+        )
+
+
+@app.get("/metrics", tags=["info"])
+async def get_metrics():
+    """
+    Performance metrics endpoint (Phase 2)
+
+    Returns:
+    - Request statistics
+    - Connection pool statistics
+    - Cache statistics
+    - Uptime information
+    """
+    try:
+        pool_stats = connection_pool.get_stats()
+
+        return {
+            "uptime_seconds": int(registry.get_uptime()),
+            "requests": {
+                "total": registry.request_count,
+                "errors": registry.error_count,
+                "error_rate": registry.error_count / max(1, registry.request_count)
+            },
+            "connection_pool": pool_stats,
+            "caches": {
+                "databases": len(registry.databases),
+                "metadata_cached": len(registry.metadata_cache),
+                "gene_lists_cached": len(registry.gene_list_cache),
+                "metadata_stats_cached": len(registry.metadata_stats_cache)
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/databases", tags=["databases"])
+async def list_databases(
+    refresh: bool = Query(False, description="Force refresh from disk")
+):
+    """
+    List all available databases with metadata
+
+    Returns comprehensive information about each database including:
+    - Database ID and path
+    - Title, version, checksum, date
+    - Cell and gene counts
+    - Available layers and embeddings
+    - Collection metadata (group, experiment, authors)
+
+    Use `?refresh=true` to force reload from disk.
+    """
+    databases = registry.list_databases(force_refresh=refresh)
+    return {
+        "databases": databases,
+        "total": len(databases)
+    }
+
+
+@app.get("/databases/{db_id:path}/info", tags=["databases"])
+async def get_database_info(db_id: str):
+    """
+    Get detailed information about a specific database
+
+    Returns:
+    - title: Dataset title
+    - n_cells: Number of cells
+    - n_genes: Number of genes
+    - layers: Dict of layer keys to friendly names
+      - Example: {"X": "Normalized expression", "counts": "Raw counts"}
+    - embeddings: Dict of embedding keys to metadata objects
+      - Example: {"X_umap": {"name": "Umap", "dimensions": 2}}
+      - Each value contains:
+        - name: Friendly name
+        - dimensions: Number of dimensions
+    - obs: Observation metadata columns
+      - numerical: List of numerical columns
+      - categorical: List of categorical columns
+      - total: Total number of obs columns
+    - var: Variable metadata columns
+      - columns: List of var columns
+      - total: Total number of var columns
+    - version: Anthive version
+    - sha256: File checksum
+    - date: Last checked date
+    - year: Publication year
+    - collection: Collection metadata (if available)
+      - group: Collection/study name
+      - experiment: Experiment description
+      - authors: List of authors
+      - year: Publication year
+    """
+    try:
+        metadata = registry.get_database_metadata(db_id)
+        return metadata
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/databases/{db_id:path}/genes", tags=["genes"])
+async def search_genes(
+    db_id: str,
+    q: str = Query(..., description="Search string", example="CD4"),
+    limit: Optional[int] = Query(None, description="Maximum results"),
+    case_sensitive: bool = Query(False, description="Case-sensitive search"),
+    exact: bool = Query(False, description="Exact name match (no substring)")
+):
+    """
+    Search for genes by name.
+
+    Returns a list of gene names matching the search query.
+
+    - `exact=false` (default): substring match — `q=CD4` matches CD4, CD40, CD40LG, …
+    - `exact=true`: full-name match — `q=CD4` matches CD4 only (case-insensitive unless `case_sensitive=true`)
+
+    Example:
+        GET /databases/my_db/genes?q=CD4&limit=10
+        GET /databases/my_db/genes?q=CD4&exact=true
+    """
+    try:
+        def _sync_search():
+            with _pooled_db(db_id) as db:
+                genes = db.search_genes(q, case_sensitive=case_sensitive, limit=limit, exact=exact)
+            return {"query": q, "count": len(genes), "genes": genes}
+        return await asyncio.to_thread(_sync_search)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/databases/{db_id:path}/genes/{gene_id}", tags=["genes"])
+async def get_gene_info(db_id: str, gene_id: str):
+    """
+    Get information about a specific gene
+
+    Returns:
+    - Gene name
+    - Existence confirmation
+    - Available layers containing this gene
+    """
+    try:
+        with _pooled_db(db_id) as db:
+            info = db.get_gene_info(gene_id)
+            return info
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/databases/{db_id:path}/gene_stats", tags=["genes"])
+async def get_gene_stats(
+    db_id: str,
+    genes: str = Query(..., description="Comma-separated gene names, e.g. APOE,CLU"),
+    layer: str = Query("X", description="Layer name (default: X)")
+):
+    """
+    Get expression statistics for one or more genes.
+
+    Computed efficiently from sparse data without transferring all cells.
+
+    Returns per-gene:
+    - **n_cells**: total cell count
+    - **n_nonzero**: cells with non-zero expression
+    - **pct_nonzero**: % cells expressing the gene
+    - **mean**, **std**: over all cells (zeros = 0)
+    - **mean_nonzero**, **std_nonzero**, **median_nonzero**, **q10_nonzero**, **q90_nonzero**, **max**: expressing cells only
+
+    Example:
+        GET /databases/LC5/SPM/gene_stats?genes=APOE,CLU&layer=X
+    """
+    try:
+        gene_list = [g.strip() for g in genes.split(',') if g.strip()]
+        with _pooled_db(db_id) as db:
+            stats = db.get_gene_stats(gene_list, layer=layer)
+        return {"db_id": db_id, "layer": layer, "stats": stats}
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/gene_stats_all", tags=["genes"])
+async def get_gene_stats_all(
+    genes: str = Query(..., description="Comma-separated gene names, e.g. APOE,CLU"),
+    case_sensitive: bool = Query(False, description="Case-sensitive gene name matching (default: False)")
+):
+    """
+    Get expression statistics for selected genes across **all** databases that have a `default_layer`.
+
+    For each qualifying database the `default_layer` is used automatically.
+    Gene names are matched case-insensitively by default (so `APOE` matches `Apoe`).
+    When the stored name differs from the queried name a `gene_found` field is included in the result.
+
+    Returns:
+    - **results**: list of per-database entries, each with `db_id`, `title`, `n_cells`, `layer`, `stats`
+    - **n_databases**: number of databases queried
+    - **n_skipped**: number of databases skipped (no default_layer or error)
+
+    Example:
+        GET /gene_stats_all?genes=APOE,TREM2
+        GET /gene_stats_all?genes=APOE,TREM2&case_sensitive=true
+    """
+    gene_list = [g.strip() for g in genes.split(',') if g.strip()]
+
+    def _sync_query_all_dbs():
+        query_results = []
+        n_skip = 0
+        for db_id_inner, meta in registry.metadata_cache.items():
+            layer = meta.get('default_layer')
+            if not layer:
+                n_skip += 1
+                continue
+            try:
+                with _pooled_db(db_id_inner) as db:
+                    stats = db.get_gene_stats(gene_list, layer=layer, case_sensitive=case_sensitive)
+                query_results.append({
+                    'db_id': db_id_inner,
+                    'group': registry._db_extra.get(db_id_inner, {}).get('group_id', ''),
+                    'title': meta.get('title', db_id_inner),
+                    'n_cells': meta.get('n_cells', 0),
+                    'layer': layer,
+                    'stats': stats,
+                })
+            except Exception:
+                n_skip += 1
+        return query_results, n_skip
+
+    results, n_skipped = await asyncio.to_thread(_sync_query_all_dbs)
+
+    # ── Cross-database CV per gene ─────────────────────────────────────────
+    # Collect mean expression per gene across all databases (skip not-found)
+    from collections import defaultdict
+    import math as _math
+
+    gene_means: Dict[str, List[float]] = defaultdict(list)
+    for r in results:
+        for s in r['stats']:
+            if 'error' not in s and s.get('mean', 0) > 0:
+                gene_means[s['gene']].append(s['mean'])
+
+    # CV = std(means) / mean(means) across databases
+    gene_cv: Dict[str, float] = {}
+    for gene, means in gene_means.items():
+        if len(means) >= 2:
+            mu = sum(means) / len(means)
+            if mu > 0:
+                variance = sum((m - mu) ** 2 for m in means) / (len(means) - 1)
+                gene_cv[gene] = round(_math.sqrt(variance) / mu, 4)
+
+    # Rank CV among queried genes (0 = least variable, 1 = most variable)
+    if gene_cv:
+        sorted_genes = sorted(gene_cv, key=lambda g: gene_cv[g])
+        n_cv = len(sorted_genes)
+        gene_cv_rank = {g: round(i / (n_cv - 1), 4) if n_cv > 1 else 0.5
+                        for i, g in enumerate(sorted_genes)}
+        for r in results:
+            for s in r['stats']:
+                gene = s.get('gene')
+                if gene in gene_cv:
+                    s['cross_db_cv']      = gene_cv[gene]
+                    s['rank_cross_db_cv'] = gene_cv_rank[gene]
+    # ──────────────────────────────────────────────────────────────────────
+
+    return {
+        'genes': gene_list,
+        'case_sensitive': case_sensitive,
+        'n_databases': len(results),
+        'n_skipped': n_skipped,
+        'results': results,
+    }
+
+
+@app.get("/databases/{db_id:path}/cells", tags=["data"])
+async def get_cells(
+    db_id: str,
+    genes: Optional[str] = Query(None, description="Comma-separated gene names"),
+    metadata: Optional[str] = Query(None, description="Comma-separated metadata fields, '*' for all"),
+    layer: str = Query("X", description="Layer name"),
+    filter: Optional[List[str]] = Query(None, description="Filters: field:value or field:min,max"),
+    limit: int = Query(50000, description="Maximum cells (default 50000, max 500000)"),
+    format: str = Query("json", description="Output format: json, csv, parquet")
+):
+    """
+    Get cell table with expression and metadata
+
+    Query Parameters:
+    - genes: Comma-separated gene names to include
+    - metadata: Comma-separated fields, "*" for all, empty/omit for none
+    - layer: Layer name (default: "X")
+    - filter: Filters in format field:value or field:min,max
+    - limit: Maximum cells (optional, returns all if not specified)
+    - format: Output format (json, csv, parquet)
+
+    Examples:
+        GET /databases/my_db/cells?genes=CD4,CD8&metadata=cell_type&layer=X
+        GET /databases/my_db/cells?genes=CD4&filter=cell_type:T-cell&limit=100
+        GET /databases/my_db/cells?metadata=*&format=csv
+    """
+    try:
+        # Cap limit to prevent OOM on large datasets
+        limit = min(limit, 500_000)
+
+        # Parse parameters
+        gene_list = genes.split(',') if genes else None
+
+        # Handle metadata parameter
+        if metadata is None or metadata == "":
+            metadata_list = None  # No metadata
+        elif metadata == "*":
+            metadata_list = ["*"]  # All metadata
+        else:
+            metadata_list = metadata.split(',')
+
+        # Parse filters
+        filters = {}
+        if filter:
+            for f in filter:
+                if ':' not in f:
+                    raise ValueError(f"Invalid filter format: {f}")
+
+                field, value = f.split(':', 1)
+
+                # Try to parse as range
+                if ',' in value:
+                    try:
+                        parts = value.split(',')
+                        filters[field] = (float(parts[0]), float(parts[1]))
+                    except ValueError:
+                        filters[field] = value
+                else:
+                    # Try numeric conversion
+                    try:
+                        filters[field] = float(value)
+                    except ValueError:
+                        filters[field] = value
+
+        # Get data
+        with _pooled_db(db_id) as db:
+            df = db.get_cell_table(
+                genes=gene_list,
+                metadata_fields=metadata_list,
+                layer=layer,
+                filters=filters,
+                limit=limit
+            )
+
+        # Return in requested format
+        if format == "csv":
+            output = StringIO()
+            df.to_csv(output, index=False)
+            # Generate filename (max 60 chars)
+            base_name = db_id.replace('/', '_')
+            filename = f"{base_name}_cells.csv"
+            if len(filename) > 60:
+                # Truncate base_name to fit within 60 chars including suffix
+                max_base = 60 - len("_cells.csv")
+                filename = f"{base_name[:max_base]}_cells.csv"
+            return Response(
+                content=output.getvalue(),
+                media_type="text/csv",
+                headers={"Content-Disposition": f"attachment; filename={filename}"}
+            )
+        elif format == "parquet":
+            output = BytesIO()
+            df.to_parquet(output, index=False)
+            # Generate filename (max 60 chars)
+            base_name = db_id.replace('/', '_')
+            filename = f"{base_name}_cells.parquet"
+            if len(filename) > 60:
+                # Truncate base_name to fit within 60 chars including suffix
+                max_base = 60 - len("_cells.parquet")
+                filename = f"{base_name[:max_base]}_cells.parquet"
+            return Response(
+                content=output.getvalue(),
+                media_type="application/octet-stream",
+                headers={"Content-Disposition": f"attachment; filename={filename}"}
+            )
+        else:  # json
+            # Build JSON directly to avoid 3x memory amplification
+            # (DataFrame → JSON string → Python dicts → output JSON)
+            n_cells = int(len(df))
+            n_columns = int(len(df.columns))
+            columns = [str(col) for col in df.columns.tolist()]
+            records_json = df.to_json(orient='records', double_precision=6)
+            # Assemble final JSON with metadata wrapper without re-parsing
+            body = (
+                f'{{"n_cells":{n_cells},"n_columns":{n_columns},'
+                f'"columns":{json.dumps(columns)},'
+                f'"data":{records_json}}}'
+            )
+            return Response(content=body, media_type="application/json")
+
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/databases/{db_id:path}/layers", tags=["data"])
+async def get_layers(db_id: str):
+    """
+    List available layers for a database
+
+    Returns list of layer names
+    """
+    try:
+        metadata = registry.get_database_metadata(db_id)
+        layers = metadata.get('layers', [])
+        return {"layers": layers}
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/databases/{db_id:path}/metadata/fields", tags=["metadata"])
+async def get_metadata_fields(db_id: str):
+    """
+    Get metadata fields with their types
+
+    Returns numerical and categorical field lists
+    """
+    try:
+        metadata = registry.get_database_metadata(db_id)
+        obs = metadata.get('obs', {})
+        return {
+            "numerical": obs.get('numerical', []),
+            "categorical": obs.get('categorical', [])
+        }
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/databases/{db_id:path}/embeddings", tags=["embeddings"])
+async def get_embeddings(db_id: str):
+    """
+    List available embeddings for a database
+
+    Returns list of embeddings with their dimensions
+    """
+    try:
+        metadata = registry.get_database_metadata(db_id)
+        embeddings = metadata.get('embeddings', [])
+        return {"embeddings": embeddings}
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/databases/{db_id:path}/embeddings/{embedding_id}", tags=["embeddings"])
+async def get_embedding_data(
+    db_id: str,
+    embedding_id: str,
+    limit: int = Query(100000, description="Maximum cells (default 100000)"),
+    n_dims: Optional[int] = Query(2, description="Number of dimensions (0 for all)")
+):
+    """
+    Get embedding coordinates for cells
+
+    Parameters:
+    - embedding_id: Embedding name (e.g., Umap, Pca)
+    - limit: Maximum cells to return (default 100000)
+    - n_dims: Number of dimensions (default: 2, use 0 for all)
+    """
+    try:
+        with _pooled_db(db_id) as db:
+            dims = None if n_dims == 0 else n_dims
+            df = db.get_embedding_data(embedding_id, limit=min(limit, 500_000), n_dims=dims)
+
+            return {
+                "embedding_id": embedding_id,
+                "n_cells": len(df),
+                "n_dims": len(df.columns) - 1,  # Subtract cell_name
+                "columns": df.columns.tolist(),
+                "data": df.to_dict(orient='records')
+            }
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/databases/{db_id:path}/query/sql", tags=["query"])
+async def execute_sql_query(db_id: str, request: QueryRequest):
+    """
+    Execute a raw SQL query on the database
+
+    Request Body:
+    - query: SQL query string
+    - limit: Optional limit to append (capped at 100000)
+
+    Returns results in JSON format.
+    All queries are read-only for security. Only SELECT queries are allowed.
+    """
+    try:
+        # Validate SQL (block writes, DDL, file-reading functions)
+        analytics.validate_sql(request.query)
+        effective_limit = min(request.limit or 100_000, 100_000)
+        with _pooled_db(db_id) as db:
+            df = db.execute_sql(request.query, limit=effective_limit)
+
+        # Convert to JSON-safe format
+        df = df.where(pd.notna(df), None)
+
+        return {
+            "query": request.query,
+            "n_rows": len(df),
+            "n_columns": len(df.columns),
+            "columns": df.columns.tolist(),
+            "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
+            "data": df.to_dict(orient='records')
+        }
+
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Query error: {str(e)}")
+
+
+
+# ── plot endpoints ─────────────────────────────────────────────────────────────
+#
+# All endpoints share common size/quality parameters:
+#   width (float, inches), height (float, inches), dpi (int)
+# They return image/png.  Extend lib/plotting.py to add new plot types.
+
+
+# ── plot helpers ───────────────────────────────────────────────────────────────
+
+_PLOT_MIME_TYPES = {
+    'png': 'image/png',
+    'svg': 'image/svg+xml',
+    'pdf': 'application/pdf',
+}
+
+_PLOT_GEOMS = {
+    'scatter', 'violin', 'box', 'bar', 'histogram', 'ecdf', 'kde', 'heatmap',
+}
+
+
+def _resolve_field_kind(
+    field_name: str,
+    available_embeddings: List[str],
+    categorical_fields: List[str],
+    numerical_fields: List[str],
+    db,
+) -> tuple:
+    """Classify field_name as (resolved_name, kind).
+
+    kind ∈ {embedding, categorical, numerical, gene}.
+    Resolution order: embedding → categorical → numerical → gene (gene is last
+    as it requires a DB query). Raises HTTPException(400) if not found.
+    """
+    if field_name in available_embeddings:
+        return field_name, 'embedding'
+    if field_name in categorical_fields:
+        return field_name, 'categorical'
+    if field_name in numerical_fields:
+        return field_name, 'numerical'
+    matches = db.search_genes(field_name, exact=True, case_sensitive=False, limit=1)
+    if matches:
+        return matches[0], 'gene'
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"Field '{field_name}' is not a known embedding, categorical field, "
+            f"numerical field, or gene in this dataset."
+        ),
+    )
+
+
+def _get_top_genes_by_mean(db, n_genes: int, layer: str) -> List[str]:
+    """Return top n_genes names ranked by mean expression.
+
+    Both branches use bound parameters (`?`) for n_genes and `safe_ident()`
+    for the layer table — no f-string SQL interpolation of user input.
+    """
+    try:
+        db.require_gene_bins()
+        rows = db._conn.execute(
+            'SELECT g.gene_name FROM __gene_bins b '
+            'JOIN __genes g USING (gene_id) '
+            'ORDER BY b.mean_expr DESC '
+            'LIMIT ?',
+            [n_genes],
+        ).fetchall()
+        return [r[0] for r in rows]
+    except Exception:
+        # Validate the layer exists, then route through safe_ident so the
+        # identifier is properly quoted (closes a SQL-injection vector that
+        # surfaced in the v0 implementation).
+        available = db._get_layers()
+        if layer not in available:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Layer '{layer}' not in this dataset (available: {available})",
+            )
+        layer_table = safe_ident(f"layer__{layer}")
+        rows = db._conn.execute(
+            f'SELECT gene_name, AVG(value) AS avg_expr '
+            f'FROM {layer_table} '
+            f'GROUP BY gene_name '
+            f'ORDER BY avg_expr DESC '
+            f'LIMIT ?',
+            [n_genes],
+        ).fetchall()
+        return [r[0] for r in rows]
+
+
+# ── subset / filter helpers ───────────────────────────────────────────────────
+
+
+def _parse_subset(subset_params: List[str]) -> Optional[Dict[str, Any]]:
+    """Parse ?subset=field:value query params into a filters dict for AnthiveDB.
+
+    Supported formats (all URL-encoded as needed):
+      field:value          exact categorical match
+      field:v1,v2,v3      IN list (multiple categorical values)
+      field:min..max       numerical range (BETWEEN min AND max)
+
+    Multiple subset params for the same field are merged into an IN list.
+    Returns None when the list is empty.
+    """
+    if not subset_params:
+        return None
+
+    merged: Dict[str, Any] = {}
+    for param in subset_params:
+        if ':' not in param:
+            continue
+        field, _, raw = param.partition(':')
+        field = field.strip()
+        raw = raw.strip()
+        if not field or not raw:
+            continue
+
+        # Range: field:min..max
+        if '..' in raw:
+            parts = raw.split('..', 1)
+            try:
+                lo, hi = float(parts[0]), float(parts[1])
+                merged[field] = (lo, hi)
+                continue
+            except ValueError:
+                pass  # fall through to string handling
+
+        # Single or comma-separated list
+        values = [v.strip() for v in raw.split(',') if v.strip()]
+        if field in merged:
+            existing = merged[field]
+            existing_list = existing if isinstance(existing, list) else [existing]
+            merged[field] = existing_list + values
+        else:
+            merged[field] = values if len(values) > 1 else values[0]
+
+    return merged or None
+
+
+# ── plot response cache ───────────────────────────────────────────────────────
+#
+# In-memory LRU keyed on (db_id, query string, output format, duckdb mtime
+# fingerprint). Plots are deterministic in their inputs, so repeat requests
+# return the cached bytes instantly. mtime in the key invalidates a stale
+# entry the moment the duckdb is rebuilt (the new key simply misses; the
+# LRU bound evicts the old entry over time). /admin/rescan also wipes the
+# cache eagerly.
+
+import hashlib as _plot_hashlib
+import os as _plot_os
+from collections import OrderedDict as _PlotOrderedDict
+from threading import Lock as _PlotLock
+
+_PLOT_CACHE_MAX_ENTRIES = 256
+_plot_cache: "_PlotOrderedDict[str, dict]" = _PlotOrderedDict()
+_plot_cache_lock = _PlotLock()
+_plot_cache_stats = {'hits': 0, 'misses': 0, 'evictions': 0}
+
+
+def _plot_db_fingerprint(db_url: str) -> str:
+    """Stable per-deposit fingerprint. mtime for local files, the URL
+    itself for s3:// (S3 deposits don't change underneath a running server)."""
+    if db_url.startswith('s3://'):
+        return db_url
+    try:
+        return f"{_plot_os.path.getmtime(db_url):.0f}"
+    except OSError:
+        return db_url
+
+
+def _plot_cache_key(db_id: str, query: str, output_format: str, fingerprint: str) -> str:
+    raw = f"{db_id}|{query}|{output_format}|{fingerprint}"
+    return _plot_hashlib.sha1(raw.encode()).hexdigest()
+
+
+def _plot_cache_get(key: str) -> Optional[dict]:
+    with _plot_cache_lock:
+        entry = _plot_cache.get(key)
+        if entry is None:
+            _plot_cache_stats['misses'] += 1
+            return None
+        _plot_cache.move_to_end(key)
+        _plot_cache_stats['hits'] += 1
+        return entry
+
+
+def _plot_cache_put(key: str, entry: dict) -> None:
+    with _plot_cache_lock:
+        _plot_cache[key] = entry
+        _plot_cache.move_to_end(key)
+        while len(_plot_cache) > _PLOT_CACHE_MAX_ENTRIES:
+            _plot_cache.popitem(last=False)
+            _plot_cache_stats['evictions'] += 1
+
+
+def _plot_cache_clear() -> int:
+    """Drop every cached plot. Returns the number of entries removed."""
+    with _plot_cache_lock:
+        n = len(_plot_cache)
+        _plot_cache.clear()
+        return n
+
+
+# ── plot dispatch (handler registry) ──────────────────────────────────────────
+#
+# Each geom (scatter / violin-box-bar / histogram-ecdf-kde / heatmap) has its
+# own handler. The dispatch keeps the endpoint body thin and makes it trivial
+# to add a new geom: write a handler, register it. The handler receives a
+# PlotRequest + a PlotContext (db connection + a resolve helper for typing
+# field names against the dataset's schema).
+
+from dataclasses import dataclass as _plot_dataclass
+
+
+@_plot_dataclass(frozen=True)
+class PlotRequest:
+    """Validated inputs to a plot handler — what the endpoint forwards."""
+    db_id: str
+    geom: str
+    x: Optional[str]
+    y: Optional[str]
+    color: Optional[str]
+    output_format: str
+    layer: str
+    width: float
+    height: float
+    dpi: int
+    bins: int
+    point_size: float
+    alpha: float
+    palette: str
+    font_family: str
+    font_size: float
+    ci: bool
+    n_genes: int
+    filters: Optional[Dict[str, Any]]
+    sample: Optional[int]
+    source_url: str
+
+
+@_plot_dataclass
+class PlotContext:
+    """Database handle + schema/resolver helpers shared across handlers."""
+    db: Any
+    available_embeddings: List[str]
+    categorical_fields: List[str]
+    numerical_fields: List[str]
+
+    def resolve(self, field_name: str):
+        return _resolve_field_kind(
+            field_name, self.available_embeddings,
+            self.categorical_fields, self.numerical_fields, self.db,
+        )
+
+
+def _subset_for_caption(req: 'PlotRequest') -> Optional[str]:
+    """Return a short human string summarising any active filters, for the
+    caption footer.  ASCII-only — the caption travels in the X-Plot-Caption
+    HTTP header (RFC 7230 latin-1 only).  Truncates long value lists."""
+    if not req.filters:
+        return None
+    parts = []
+    for key, value in req.filters.items():
+        if isinstance(value, list):
+            if len(value) <= 3:
+                parts.append(f"{key} in ({', '.join(map(str, value))})")
+            else:
+                parts.append(f"{key} in ({', '.join(map(str, value[:3]))} + {len(value) - 3} more)")
+        else:
+            parts.append(f"{key} = {value}")
+    return '; '.join(parts) or None
+
+
+def _handle_scatter(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
+    emb_id = req.x or ('X_umap' if 'X_umap' in ctx.available_embeddings
+                       else (ctx.available_embeddings[0] if ctx.available_embeddings else None))
+    if not emb_id:
+        raise HTTPException(400, detail="No embeddings available for scatter plot")
+    embedding_df = ctx.db.get_embedding_data(emb_id, n_dims=2, filters=req.filters, sample=req.sample)
+
+    color_df = None
+    color_field_name = None
+    color_kind = 'categorical'
+    if req.color:
+        color_field_name, color_kind = ctx.resolve(req.color)
+        sampled_cells = embedding_df['cell_name'].tolist() if req.sample else None
+        color_filters = dict(req.filters) if req.filters else {}
+        if sampled_cells:
+            color_filters['cell_name'] = sampled_cells
+        used_filters = color_filters if sampled_cells else req.filters
+        if color_kind == 'gene':
+            color_df = ctx.db.get_cell_table(genes=[color_field_name], layer=req.layer, filters=used_filters)
+        else:
+            color_df = ctx.db.get_cell_table(metadata_fields=[color_field_name], filters=used_filters)
+
+    x_label = str(embedding_df.columns[-2]).replace('dim_', 'Dim ')
+    y_label = str(embedding_df.columns[-1]).replace('dim_', 'Dim ')
+    n_cells = int(len(embedding_df))
+    n_groups = (int(color_df[color_field_name].nunique())
+                if color_df is not None and color_kind == 'categorical' else None)
+    caption = plotting.build_caption(
+        req.db_id, req.geom, emb_id, 'embedding',
+        None, color_field_name, req.layer,
+        n_cells=n_cells, n_groups=n_groups,
+        sample=req.sample, subset=_subset_for_caption(req),
+    )
+    image_bytes = plotting.plot_scatter(
+        embedding_df=embedding_df,
+        color_df=color_df,
+        color_field=color_field_name,
+        color_kind=color_kind,
+        x_label=x_label,
+        y_label=y_label,
+        width=req.width, height=req.height, dpi=req.dpi,
+        output_format=req.output_format,
+        point_size=req.point_size, alpha=req.alpha, palette=req.palette,
+        caption=caption, source_url=req.source_url,
+        font_family=req.font_family, font_size=req.font_size,
+    )
+    return image_bytes, caption
+
+
+def _handle_grouped(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
+    """Handles violin / box / bar — x=categorical, optional y, optional
+    second-factor `color` (rendered as side-by-side dodged hue, never stacked).
+    """
+    if not req.x:
+        raise HTTPException(400, detail=f"geom='{req.geom}' requires x (categorical field)")
+    x_name, x_kind = ctx.resolve(req.x)
+    if x_kind != 'categorical':
+        raise HTTPException(400, detail=(
+            f"geom='{req.geom}' requires x to be categorical; '{req.x}' resolved as '{x_kind}'"
+        ))
+
+    hue_name: Optional[str] = None
+    if req.color:
+        hue_name, hue_kind = ctx.resolve(req.color)
+        if hue_kind != 'categorical':
+            raise HTTPException(400, detail=(
+                f"geom='{req.geom}' 'split by' requires categorical; "
+                f"'{req.color}' resolved as '{hue_kind}'"
+            ))
+
+    extra_meta = [x_name] + ([hue_name] if hue_name else [])
+    y_name = None
+    if req.y:
+        y_name, y_kind = ctx.resolve(req.y)
+        if y_kind == 'gene':
+            data_df = ctx.db.get_cell_table(
+                genes=[y_name], metadata_fields=extra_meta,
+                layer=req.layer, filters=req.filters, sample=req.sample,
+            )
+        else:
+            data_df = ctx.db.get_cell_table(
+                metadata_fields=extra_meta + [y_name],
+                filters=req.filters, sample=req.sample,
+            )
+    else:
+        data_df = ctx.db.get_cell_table(
+            metadata_fields=extra_meta,
+            filters=req.filters, sample=req.sample,
+        )
+
+    n_cells = int(len(data_df))
+    n_groups = int(data_df[x_name].nunique())
+    caption = plotting.build_caption(
+        req.db_id, req.geom, x_name, x_kind, y_name, hue_name, req.layer,
+        n_cells=n_cells, n_groups=n_groups,
+        sample=req.sample, subset=_subset_for_caption(req),
+        ci=req.ci if req.geom == 'bar' else None,
+    )
+    image_bytes = plotting.plot_grouped(
+        data_df=data_df, x_field=x_name, y_field=y_name, hue_field=hue_name,
+        geom=req.geom, ci=req.ci,
+        width=req.width, height=req.height, dpi=req.dpi,
+        output_format=req.output_format,
+        caption=caption, source_url=req.source_url,
+        font_family=req.font_family, font_size=req.font_size,
+    )
+    return image_bytes, caption
+
+
+def _handle_distribution(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
+    """Handles histogram / ecdf / kde — univariate distribution of x, optional color hue."""
+    if not req.x:
+        raise HTTPException(400, detail=f"geom='{req.geom}' requires x (gene or numerical field)")
+    x_name, x_kind = ctx.resolve(req.x)
+    color_name = None
+    if req.color:
+        color_name, _ = ctx.resolve(req.color)
+        if x_kind == 'gene':
+            data_df = ctx.db.get_cell_table(genes=[x_name], metadata_fields=[color_name],
+                                            layer=req.layer, filters=req.filters, sample=req.sample)
+        else:
+            data_df = ctx.db.get_cell_table(metadata_fields=[x_name, color_name],
+                                            filters=req.filters, sample=req.sample)
+    else:
+        if x_kind == 'gene':
+            data_df = ctx.db.get_cell_table(genes=[x_name], layer=req.layer,
+                                            filters=req.filters, sample=req.sample)
+        else:
+            data_df = ctx.db.get_cell_table(metadata_fields=[x_name],
+                                            filters=req.filters, sample=req.sample)
+
+    n_cells = int(len(data_df))
+    n_groups = int(data_df[color_name].nunique()) if color_name else None
+    caption = plotting.build_caption(
+        req.db_id, req.geom, x_name, x_kind, None, color_name, req.layer,
+        n_cells=n_cells, n_groups=n_groups,
+        sample=req.sample, subset=_subset_for_caption(req),
+    )
+    image_bytes = plotting.plot_distribution(
+        data_df=data_df, x_field=x_name,
+        geom=req.geom, color_field=color_name,
+        bins=req.bins,
+        width=req.width, height=req.height, dpi=req.dpi,
+        output_format=req.output_format,
+        caption=caption, source_url=req.source_url,
+        font_family=req.font_family, font_size=req.font_size,
+    )
+    return image_bytes, caption
+
+
+def _handle_heatmap(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
+    if not req.y:
+        raise HTTPException(400, detail="geom='heatmap' requires y (categorical field)")
+    y_name, y_kind = ctx.resolve(req.y)
+    if y_kind != 'categorical':
+        raise HTTPException(400, detail=(
+            f"geom='heatmap' requires y to be categorical; '{req.y}' resolved as '{y_kind}'"
+        ))
+    if req.x:
+        # Resolve each gene exactly once (was duplicated in the v0 implementation).
+        gene_list: List[str] = []
+        for g in (s.strip() for s in req.x.split(',')):
+            hits = ctx.db.search_genes(g, exact=True, limit=1)
+            if hits:
+                gene_list.append(hits[0])
+        if not gene_list:
+            raise HTTPException(400, detail=f"None of the genes in x='{req.x}' were found")
+    else:
+        gene_list = _get_top_genes_by_mean(ctx.db, req.n_genes, req.layer)
+
+    data_df = ctx.db.get_cell_table(genes=gene_list, metadata_fields=[y_name],
+                                    layer=req.layer, filters=req.filters, sample=req.sample)
+    mean_expr_df = data_df.groupby(y_name)[gene_list].mean()
+
+    n_cells = int(len(data_df))
+    n_groups = int(mean_expr_df.shape[0])
+    caption = plotting.build_caption(
+        req.db_id, req.geom, req.x, 'gene', y_name, None, req.layer,
+        n_cells=n_cells, n_groups=n_groups,
+        sample=req.sample, subset=_subset_for_caption(req),
+    )
+    image_bytes = plotting.plot_heatmap(
+        mean_expr_df=mean_expr_df,
+        width=req.width, height=req.height, dpi=req.dpi,
+        output_format=req.output_format,
+        caption=caption, source_url=req.source_url,
+        font_family=req.font_family, font_size=req.font_size,
+    )
+    return image_bytes, caption
+
+
+# Registry: geom → handler. Adding a new geom is now: write a handler,
+# add a line here, add the geom name to _PLOT_GEOMS.
+_PLOT_HANDLERS: Dict[str, Any] = {
+    'scatter':   _handle_scatter,
+    'violin':    _handle_grouped,
+    'box':       _handle_grouped,
+    'bar':       _handle_grouped,
+    'histogram': _handle_distribution,
+    'ecdf':      _handle_distribution,
+    'kde':       _handle_distribution,
+    'heatmap':   _handle_heatmap,
+}
+
+
+# ── unified plot endpoint ──────────────────────────────────────────────────────
+
+@app.get("/databases/{db_id:path}/plot", tags=["plots"])
+async def plot(
+    db_id: str,
+    geom: str = Query(..., description="scatter | violin | box | bar | histogram | ecdf | kde | heatmap"),
+    x: Optional[str] = Query(None, description="X-axis field (auto-typed: embedding, gene, categorical, numerical)"),
+    y: Optional[str] = Query(None, description="Y-axis field (auto-typed)"),
+    color: Optional[str] = Query(None, description="Color-encoding field (auto-typed)"),
+    output_format: str = Query('png', alias='format', description="png | svg | pdf"),
+    layer: str = Query('X', description="Expression layer"),
+    width: float = Query(8.0, gt=1.0, le=32.0, description="Figure width in inches (1–32)"),
+    height: float = Query(6.0, gt=1.0, le=32.0, description="Figure height in inches (1–32)"),
+    dpi: int = Query(150, ge=72, le=600, description="Resolution dots per inch (72–600)"),
+    bins: int = Query(20, ge=2, le=500),
+    point_size: float = Query(3.0, gt=0.0, le=200.0),
+    alpha: float = Query(0.8, ge=0.0, le=1.0),
+    palette: str = Query('tab20'),
+    font_family: str = Query('DejaVu Sans', description="matplotlib font family (e.g. 'Arial', 'Helvetica', 'DejaVu Sans', 'serif')"),
+    font_size: float = Query(10.0, ge=6.0, le=36.0, description="Base font size in pt; titles & ticks scale relative to this"),
+    ci: bool = Query(True, description="Show 95% CI on bar plots"),
+    n_genes: int = Query(20, ge=1, le=200, description="Top genes for heatmap when x not given"),
+    subset: List[str] = Query(default=[], description=(
+        "Cell subset filter(s). Repeatable. Formats: "
+        "'field:value' (exact), 'field:v1,v2' (IN list), 'field:min..max' (range). "
+        "Example: subset=sex:female&subset=condition:AD"
+    )),
+    sample: Optional[int] = Query(None, ge=1, le=1_000_000, description=(
+        "Random subsample: draw at most this many cells using DuckDB reservoir sampling"
+        "(near-zero overhead, applied after subset filters). "
+        "Example: sample=10000. If larger than the cell count, all cells are used."
+    )),
+    request: Request = None,  # type: ignore[assignment]
+):
+    """Unified grammar-of-graphics plot endpoint.
+
+    Provide geom + x/y/color field names; the server auto-detects field types.
+    Returns the image with X-Plot-Caption and X-Plot-Format response headers.
+    Restrict to a cell subset with one or more ?subset=field:value params.
+    Use ?sample=N to randomly draw N cells (DuckDB reservoir sampling).
+    """
+    filters = _parse_subset(subset)
+    if geom not in _PLOT_GEOMS:
+        raise HTTPException(400, detail=f"Unknown geom '{geom}'. Valid: {sorted(_PLOT_GEOMS)}")
+    if output_format not in _PLOT_MIME_TYPES:
+        raise HTTPException(400, detail=f"Unknown format '{output_format}'. Valid: png, svg, pdf")
+
+    # Cache lookup — keyed on (db_id, query string, format, file fingerprint).
+    # If the duckdb hasn't changed since we last rendered this exact query,
+    # return the cached bytes directly.
+    source_url = str(request.url) if request is not None else ''
+    try:
+        db_fingerprint = _plot_db_fingerprint(registry.get_database_path(db_id))
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Dataset '{db_id}' not found")
+    query_string = request.url.query if request is not None else ''
+    cache_key = _plot_cache_key(db_id, query_string, output_format, db_fingerprint)
+    cached = _plot_cache_get(cache_key)
+    if cached is not None:
+        return Response(
+            content=cached['bytes'],
+            media_type=cached['mime'],
+            headers={
+                'X-Plot-Caption':   cached['caption'],
+                'X-Plot-Format':    output_format,
+                'X-Source-URL':     cached['source_url'],
+                'X-Plot-Cache':     'HIT',
+                'ETag':             f'"{cache_key}"',
+                'Cache-Control':    'public, max-age=3600',
+            },
+        )
+
+    plot_req = PlotRequest(
+        db_id=db_id, geom=geom, x=x, y=y, color=color,
+        output_format=output_format, layer=layer,
+        width=width, height=height, dpi=dpi, bins=bins,
+        point_size=point_size, alpha=alpha, palette=palette,
+        font_family=font_family, font_size=font_size,
+        ci=ci, n_genes=n_genes,
+        filters=filters, sample=sample,
+        source_url=source_url,
+    )
+    handler = _PLOT_HANDLERS[geom]  # geom validity already checked above
+
+    def _sync_plot():
+        with _pooled_db(db_id) as db:
+            ctx = PlotContext(
+                db=db,
+                available_embeddings=db._get_embeddings(),
+                categorical_fields=db._get_categorical_fields(),
+                numerical_fields=db._get_numerical_fields(),
+            )
+            return handler(plot_req, ctx)
+
+    try:
+        image_bytes, caption = await asyncio.to_thread(_sync_plot)
+    except HTTPException:
+        raise
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    mime = _PLOT_MIME_TYPES[output_format]
+    _plot_cache_put(cache_key, {
+        'bytes':      image_bytes,
+        'caption':    caption,
+        'source_url': source_url,
+        'mime':       mime,
+    })
+    return Response(
+        content=image_bytes,
+        media_type=mime,
+        headers={
+            'X-Plot-Caption':   caption,
+            'X-Plot-Format':    output_format,
+            'X-Source-URL':     source_url,
+            'X-Plot-Cache':     'MISS',
+            'ETag':             f'"{cache_key}"',
+            'Cache-Control':    'public, max-age=3600',
+        },
+    )
+
+
+# ── legacy plot endpoints (deprecated — use /plot) ────────────────────────────
+
+@app.get("/databases/{db_id:path}/plot/umap", tags=["plots"], deprecated=True)
+async def plot_umap(
+    db_id: str,
+    embedding: Optional[str] = Query(None, description="Embedding key, e.g. X_umap (default: first available)"),
+    gene: Optional[str] = Query(None, description="Color by gene expression"),
+    category: Optional[str] = Query(None, description="Color by categorical metadata field"),
+    numerical: Optional[str] = Query(None, description="Color by numerical metadata field"),
+    layer: str = Query("X", description="Expression layer"),
+    width: float = Query(8.0, description="Figure width in inches"),
+    height: float = Query(6.0, description="Figure height in inches"),
+    dpi: int = Query(150, description="Output resolution (dots per inch)"),
+    point_size: float = Query(3.0, description="Scatter point size"),
+    alpha: float = Query(0.8, description="Point transparency (0–1)"),
+    palette: str = Query("tab20", description="Seaborn palette for categorical coloring"),
+    subset: List[str] = Query(default=[], description="Cell subset filters: 'field:value', 'field:v1,v2', 'field:min..max'"),
+):
+    """
+    Render a UMAP scatter plot and return PNG.
+
+    Provide at most one of: gene, category, numerical.
+    If none given, all cells are rendered in a single colour.
+    """
+    filters = _parse_subset(subset)
+    try:
+        with _pooled_db(db_id) as db:
+            available_embeddings = db._get_embeddings()
+            if not available_embeddings:
+                raise HTTPException(status_code=400, detail="No embeddings available for this database")
+
+            emb_id = embedding or ('X_umap' if 'X_umap' in available_embeddings else available_embeddings[0])
+            embedding_df = db.get_embedding_data(emb_id, n_dims=2, filters=filters)
+
+            color_df = None
+            color_field = None
+            color_type = 'categorical'
+
+            if gene:
+                color_df = db.get_cell_table(genes=[gene], layer=layer, filters=filters)
+                color_field = gene
+                color_type = 'gene'
+            elif category:
+                color_df = db.get_cell_table(metadata_fields=[category], filters=filters)
+                color_field = category
+                color_type = 'categorical'
+            elif numerical:
+                color_df = db.get_cell_table(metadata_fields=[numerical], filters=filters)
+                color_field = numerical
+                color_type = 'numerical'
+
+        png = plotting.plot_umap(
+            embedding_df=embedding_df,
+            color_df=color_df,
+            color_field=color_field,
+            color_type=color_type,
+            width=width, height=height, dpi=dpi,
+            point_size=point_size, alpha=alpha, palette=palette,
+        )
+        return Response(content=png, media_type='image/png')
+
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/databases/{db_id:path}/plot/gene", tags=["plots"], deprecated=True)
+async def plot_gene(
+    db_id: str,
+    gene: str = Query(..., description="Gene name"),
+    plot_type: str = Query("ecdf", description="Plot type: ecdf | kde | histogram"),
+    layer: str = Query("X", description="Expression layer"),
+    bins: int = Query(20, description="Histogram bins (ignored for ecdf/kde)"),
+    width: float = Query(7.0, description="Figure width in inches"),
+    height: float = Query(4.0, description="Figure height in inches"),
+    dpi: int = Query(150, description="Output resolution"),
+    subset: List[str] = Query(default=[], description="Cell subset filters: 'field:value', 'field:v1,v2', 'field:min..max'"),
+):
+    """Render a gene expression distribution plot and return PNG."""
+    filters = _parse_subset(subset)
+    try:
+        with _pooled_db(db_id) as db:
+            data_df = db.get_cell_table(genes=[gene], layer=layer, filters=filters)
+
+        png = plotting.plot_gene(
+            data_df=data_df,
+            gene_field=gene,
+            plot_type=plot_type,
+            bins=bins,
+            width=width, height=height, dpi=dpi,
+        )
+        return Response(content=png, media_type='image/png')
+
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/databases/{db_id:path}/plot/cat", tags=["plots"], deprecated=True)
+async def plot_cat(
+    db_id: str,
+    cat: str = Query(..., description="Categorical metadata field to group by"),
+    y: Optional[str] = Query(None, description="Gene or numerical field for Y axis (omit for cell counts)"),
+    y_type: str = Query("count", description="Y axis type: count | gene | numerical"),
+    plot_type: str = Query("bar", description="Plot type: bar | box | violin"),
+    layer: str = Query("X", description="Expression layer (used when y_type=gene)"),
+    width: float = Query(8.0, description="Figure width in inches"),
+    height: float = Query(5.0, description="Figure height in inches"),
+    dpi: int = Query(150, description="Output resolution"),
+    subset: List[str] = Query(default=[], description="Cell subset filters: 'field:value', 'field:v1,v2', 'field:min..max'"),
+):
+    """Render a categorical breakdown plot and return PNG."""
+    filters = _parse_subset(subset)
+    try:
+        with _pooled_db(db_id) as db:
+            if y_type == 'gene' and y:
+                data_df = db.get_cell_table(genes=[y], metadata_fields=[cat], layer=layer, filters=filters)
+            elif y_type == 'numerical' and y:
+                data_df = db.get_cell_table(metadata_fields=[cat, y], filters=filters)
+            else:
+                data_df = db.get_cell_table(metadata_fields=[cat], filters=filters)
+
+        png = plotting.plot_cat(
+            data_df=data_df,
+            cat_field=cat,
+            y_field=y,
+            y_type=y_type,
+            plot_type=plot_type,
+            width=width, height=height, dpi=dpi,
+        )
+        return Response(content=png, media_type='image/png')
+
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/databases/{db_id:path}/plot/num", tags=["plots"], deprecated=True)
+async def plot_num(
+    db_id: str,
+    num: str = Query(..., description="Numerical metadata field"),
+    cat: Optional[str] = Query(None, description="Categorical field to group by (optional)"),
+    plot_type: str = Query("ecdf", description="Plot type: ecdf | kde | histogram | box | violin | bar"),
+    bins: int = Query(20, description="Histogram bins"),
+    width: float = Query(7.0, description="Figure width in inches"),
+    height: float = Query(4.0, description="Figure height in inches"),
+    dpi: int = Query(150, description="Output resolution"),
+    subset: List[str] = Query(default=[], description="Cell subset filters: 'field:value', 'field:v1,v2', 'field:min..max'"),
+):
+    """Render a numerical field distribution plot and return PNG."""
+    filters = _parse_subset(subset)
+    try:
+        with _pooled_db(db_id) as db:
+            metadata_fields = [num] if not cat else [num, cat]
+            data_df = db.get_cell_table(metadata_fields=metadata_fields, filters=filters)
+
+        png = plotting.plot_num(
+            data_df=data_df,
+            num_field=num,
+            cat_field=cat,
+            plot_type=plot_type,
+            bins=bins,
+            width=width, height=height, dpi=dpi,
+        )
+        return Response(content=png, media_type='image/png')
+
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── analytics endpoints ────────────────────────────────────────────────────────
+
+
+def _json_safe(obj: Any) -> Any:
+    """Recursively replace NaN/Inf floats with None so json.dumps never chokes."""
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_json_safe(v) for v in obj]
+    return obj
+
+
+class AnalyticsQueryRequest(BaseModel):
+    sql: str
+    session_id: Optional[str] = None
+    timeout: Optional[int] = None  # seconds; defaults to server ANTHIVE_QUERY_TIMEOUT (120)
+    attach_sessions: Optional[List[str]] = None  # prior session IDs to attach as tables (e.g. module_score results)
+
+
+class AnalyticsVizRequest(BaseModel):
+    session_id: str
+    code: str
+    output_format: str = 'png'
+
+
+@app.get("/databases/{db_id:path}/analytics/schema", tags=["analytics"])
+async def analytics_schema(db_id: str):
+    """Return the schema of all DuckDB tables in a dataset.
+
+    Lists every table with its column names, types, row count, and a 3-row
+    sample.  Use this to understand what fields are available before writing
+    an analytics_query SQL statement.
+    """
+    try:
+        db_url = registry.get_database_path(db_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Dataset '{db_id}' not found.")
+    def _sync_schema():
+        conn = connection_pool.get_connection(db_url)
+        try:
+            return analytics.get_schema(conn)
+        finally:
+            connection_pool.return_connection(db_url, conn)
+    try:
+        schema = await asyncio.to_thread(_sync_schema)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return _json_safe({"db_id": db_id, "tables": schema})
+
+
+@app.post("/databases/{db_id:path}/analytics/query", tags=["analytics"])
+async def analytics_query(db_id: str, request: AnalyticsQueryRequest):
+    """Execute a read-only SELECT query and persist results as a Parquet file.
+
+    The full result set is saved server-side; only column metadata and a small
+    preview (first 10 rows) are returned.  Use the returned session_id in a
+    subsequent POST /analytics/viz call to visualise the data.
+
+    To use results from a prior module_score call, pass its session_id in
+    `attach_sessions`. The scores become available as a table called `scores`
+    with columns (cell_name, module_score). Example:
+
+        {"sql": "SELECT o.cell_type, AVG(s.module_score) FROM scores s JOIN obscat o USING (cell_name) GROUP BY 1",
+         "attach_sessions": ["abc123..."]}
+
+    Constraints:
+    - Only SELECT / WITH … SELECT queries are accepted.
+    - Result is capped at 500 000 rows (configurable via ANTHIVE_ANALYTICS_ROWS).
+    - Query is killed after 120 s (configurable via ANTHIVE_QUERY_TIMEOUT).
+    """
+    try:
+        db_url = registry.get_database_path(db_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Dataset '{db_id}' not found.")
+    # analytics.run_query opens and closes its own dedicated connection so that
+    # closing it on timeout actually cancels the in-flight DuckDB query.
+    try:
+        result = await asyncio.to_thread(
+            lambda: analytics.run_query(
+                db_url, request.sql, request.session_id,
+                s3_config=registry._s3_config,
+                timeout=request.timeout,
+                attach_sessions=request.attach_sessions,
+            )
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except TimeoutError as exc:
+        raise HTTPException(status_code=408, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return _json_safe(result)
+
+
+@app.post("/analytics/viz", tags=["analytics"])
+async def analytics_viz(request: AnalyticsVizRequest):
+    """Execute a Python visualisation script and return the figure as base64.
+
+    The script runs in a subprocess with a blocked-import AST scan and a
+    wall-clock timeout.  Two variables are pre-injected:
+
+      DATA_PATH   — path to the Parquet file saved by a prior analytics_query
+      OUTPUT_PATH — path where the script MUST save its figure, e.g.:
+                        plt.savefig(OUTPUT_PATH, bbox_inches='tight', dpi=150)
+
+    The script may use: pandas, matplotlib, seaborn, numpy, scipy, sklearn,
+    statsmodels, and other data-science packages.  Imports of os, sys,
+    subprocess, socket, requests, and similar modules are blocked.
+    Scripts are killed after 60 s (configurable via ANTHIVE_VIZ_TIMEOUT).
+    """
+    try:
+        figure_b64, output_format = await asyncio.to_thread(
+            analytics.run_viz,
+            request.session_id, request.code, request.output_format,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except TimeoutError as exc:
+        raise HTTPException(status_code=408, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    mime_types = {'png': 'image/png', 'svg': 'image/svg+xml', 'pdf': 'application/pdf'}
+    return {
+        "session_id":    request.session_id,
+        "output_format": output_format,
+        "mime_type":     mime_types.get(output_format, 'image/png'),
+        "figure_b64":    figure_b64,
+    }
+
+
+@app.post("/databases/{db_id:path}/module_score", tags=["analytics"])
+async def module_score(db_id: str, request: ModuleScoreRequest):
+    """Compute per-cell module scores (Scanpy score_genes / Seurat AddModuleScore equivalent).
+
+    For each cell: score = mean(module genes) − mean(expression-matched control genes).
+    Control genes are sampled from the same expression bins as the module genes
+    using the precomputed __gene_bins table.
+
+    Returns summary statistics and a session_id. The full per-cell scores are saved
+    as a Parquet file that can be visualized via POST /analytics/viz or queried
+    via POST /analytics/query using the session_id.
+
+    Requires __gene_bins (built by ant-duckdb-check on databases with a log-normalized layer).
+    """
+    filters = _parse_subset(request.subset)
+
+    def _sync_score():
+        with _pooled_db(db_id) as db:
+            scores_df, meta = db.score_module(
+                module_genes=request.genes,
+                layer=request.layer,
+                n_control=request.n_control,
+                seed=request.seed,
+            )
+
+            # Apply subset filters if any
+            if filters:
+                cat_fields = db._get_categorical_fields()
+                num_fields = db._get_numerical_fields()
+                filter_df = db.get_cell_table(metadata_fields=list(filters.keys()), filters=filters)
+                keep_cells = set(filter_df['cell_name'])
+                scores_df = scores_df[scores_df['cell_name'].isin(keep_cells)]
+
+            return scores_df, meta
+
+    try:
+        scores_df, meta = await asyncio.to_thread(_sync_score)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    # Save to Parquet for downstream analytics_viz / analytics_query
+    import uuid as _uuid
+    session_id = _uuid.uuid4().hex
+    parquet_path = analytics._get_tmp_dir() / f"{session_id}.parquet"
+    scores_df.to_parquet(parquet_path, index=False)
+
+    # Summary statistics
+    s = scores_df['module_score']
+    summary = {
+        'mean':   round(float(s.mean()), 6),
+        'std':    round(float(s.std()), 6),
+        'min':    round(float(s.min()), 6),
+        'q25':    round(float(s.quantile(0.25)), 6),
+        'median': round(float(s.median()), 6),
+        'q75':    round(float(s.quantile(0.75)), 6),
+        'max':    round(float(s.max()), 6),
+    }
+
+    return _json_safe({
+        'db_id':           db_id,
+        'session_id':      session_id,
+        'genes_found':     meta['genes_found'],
+        'genes_missing':   meta['genes_missing'],
+        'n_cells':         len(scores_df),
+        'n_control_genes': meta['n_control_genes'],
+        'layer':           request.layer,
+        'n_control':       request.n_control,
+        'seed':            request.seed,
+        'summary':         summary,
+    })
+
+
+@app.post("/admin/release/{db_id:path}", tags=["admin"])
+async def release_database(
+    db_id: str,
+    duration_seconds: float = 300.0,
+    drain_timeout_seconds: float = 30.0,
+):
+    """Evict a database from the connection pool so a writer can take the
+    DuckDB r/w lock.
+
+    Closes idle pooled connections, marks the db_key as evicted (refuses new
+    connections), and waits up to `drain_timeout_seconds` for in-use
+    connections to be returned. The eviction self-expires after
+    `duration_seconds` (safety net so a crashed writer can't lock ant-serve
+    out indefinitely).
+
+    Returns:
+      - ok: True if the db is fully released; False if in-use connections
+        didn't drain in time (the writer should retry or fail)
+      - closed_idle: number of pooled connections that were closed
+      - still_in_use: 0 on success, else the count of stubbornly in-use conns
+      - eviction_expires_in: seconds until the eviction auto-clears
+
+    Used by AnnotationWriter / ant-merge-h5ad / ant-score / ant-starcat
+    before they open the duckdb in r/w mode.
+    """
+    try:
+        db_url = registry.get_database_path(db_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"db_id {db_id!r} not found")
+    result = connection_pool.release(
+        db_url,
+        duration_seconds=duration_seconds,
+        drain_timeout_seconds=drain_timeout_seconds,
+    )
+    log.info("admin.release db_id=%s result=%s", db_id, result)
+    return result
+
+
+@app.post("/admin/restore/{db_id:path}", tags=["admin"])
+async def restore_database(db_id: str):
+    """Clear an eviction set by /admin/release/{db_id}. The connection pool
+    will issue fresh r/o connections on the next request."""
+    try:
+        db_url = registry.get_database_path(db_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"db_id {db_id!r} not found")
+    result = connection_pool.restore(db_url)
+    log.info("admin.restore db_id=%s result=%s", db_id, result)
+    return result
+
+
+@app.post("/admin/rescan", tags=["admin"])
+async def rescan_databases():
+    """
+    Force rescan of data folder and reload all metadata
+
+    Triggers a complete rescan of the data folder, clearing all caches
+    and re-discovering databases and metadata.
+
+    Useful after:
+    - Adding new database files
+    - Updating metadata files (.md, index.md)
+    - Removing database files
+
+    Returns:
+    - status: 'success'
+    - previous_count: Number of databases before rescan
+    - current_count: Number of databases after rescan
+    - added: List of added database IDs
+    - removed: List of removed database IDs
+    - databases: Complete list of current database IDs
+    """
+    try:
+        result = registry.rescan()
+        # rebuild module-score reverse index too
+        if geneset_registry is not None:
+            _build_score_index()
+            result['scored_databases'] = len(_score_index_by_db)
+        # Drop the plot-response cache — any cached image may now be stale.
+        result['plot_cache_cleared'] = _plot_cache_clear()
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/admin/plot-cache/stats", tags=["admin"])
+async def plot_cache_stats():
+    """Return the plot response cache stats (hits / misses / evictions / size)."""
+    with _plot_cache_lock:
+        size = len(_plot_cache)
+        total_bytes = sum(len(e.get('bytes', b'')) for e in _plot_cache.values())
+    hits, misses = _plot_cache_stats['hits'], _plot_cache_stats['misses']
+    total = hits + misses
+    return {
+        'size':         size,
+        'max_size':     _PLOT_CACHE_MAX_ENTRIES,
+        'memory_bytes': total_bytes,
+        'hits':         hits,
+        'misses':       misses,
+        'evictions':    _plot_cache_stats['evictions'],
+        'hit_rate':     (hits / total) if total else 0.0,
+    }
+
+
+@app.post("/admin/plot-cache/clear", tags=["admin"])
+async def plot_cache_clear():
+    """Drop all cached plot responses."""
+    n = _plot_cache_clear()
+    return {'cleared': n}
+
+
+# ── Genesets ───────────────────────────────────────────────────────────────────
+
+def _require_geneset_registry() -> GenesetRegistry:
+    if geneset_registry is None:
+        raise HTTPException(status_code=503, detail="Geneset store is not configured")
+    return geneset_registry
+
+
+def _build_score_index() -> None:
+    """
+    Walk every database in the registry, find columns matching
+    <study>::<experiment>::<geneset> in obsnum, and build the bidirectional
+    index. Cheap (one information_schema query per db).
+    """
+    global _score_index_by_db, _score_index_by_geneset, _score_columns
+    new_by_db: Dict[str, List[str]] = {}
+    new_by_geneset: Dict[str, List[str]] = {}
+    new_columns: Dict[Tuple[str, str], str] = {}
+
+    if registry is None:
+        return
+
+    for db_id in registry.databases.keys():
+        try:
+            db_url = registry.get_database_path(db_id)
+            conn = connection_pool.get_connection(db_url)
+        except Exception as exc:
+            log.warning("score-index: skipping %s (open failed: %s)", db_id, exc)
+            continue
+        try:
+            rows = conn.execute("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'obsnum'
+            """).fetchall()
+            for (col,) in rows:
+                geneset_id = parse_score_column(col)
+                if not geneset_id:
+                    continue
+                new_by_db.setdefault(db_id, []).append(geneset_id)
+                new_by_geneset.setdefault(geneset_id, []).append(db_id)
+                new_columns[(db_id, geneset_id)] = col
+        except Exception as exc:
+            log.warning("score-index: scan failed for %s: %s", db_id, exc)
+        finally:
+            try:
+                connection_pool.return_connection(db_url, conn)
+            except Exception:
+                pass
+
+    # Sort for deterministic output
+    for ids in new_by_db.values():
+        ids.sort()
+    for ids in new_by_geneset.values():
+        ids.sort()
+
+    _score_index_by_db = new_by_db
+    _score_index_by_geneset = new_by_geneset
+    _score_columns = new_columns
+    log.info(
+        "score-index: %d database(s) with scored genesets, %d distinct geneset(s)",
+        len(new_by_db), len(new_by_geneset),
+    )
+
+
+def _annotate_with_scored_in(summary: Dict[str, Any]) -> Dict[str, Any]:
+    """Mutate a geneset summary dict to include scored_in (list of db_ids)."""
+    summary['scored_in'] = list(_score_index_by_geneset.get(summary['geneset_id'], []))
+    return summary
+
+
+@app.get("/genesets", tags=["genesets"])
+async def list_genesets(
+    organism: Optional[str] = None,
+    method: Optional[str] = None,
+    study: Optional[str] = None,
+):
+    """List all genesets, optionally filtered by organism/method/study.
+
+    Each entry includes `scored_in` — a list of `db_id`s where the geneset is
+    already pre-computed as an obs column (no on-the-fly scoring required).
+    """
+    registry = _require_geneset_registry()
+    items = registry.list_genesets(organism=organism, method=method, study=study)
+    return {
+        "count": len(items),
+        "column_naming": {
+            "separator": SCORE_COLUMN_SEPARATOR,
+            "template":  SCORE_COLUMN_TEMPLATE,
+            "example":   "Sierksma2025::WGCNA::Brown_Lysosome",
+        },
+        "genesets": [_annotate_with_scored_in(g.to_summary()) for g in items],
+    }
+
+
+@app.get("/genesets/{study}/{experiment}", tags=["genesets"])
+async def get_geneset_experiment(study: str, experiment: str):
+    """Return experiment metadata + the list of genesets it contains."""
+    registry = _require_geneset_registry()
+    experiment_id = f"{study}/{experiment}"
+    exp = registry.get_experiment(experiment_id)
+    if exp is None:
+        raise HTTPException(status_code=404, detail=f"Experiment {experiment_id} not found")
+    members = [g for g in registry.list_genesets(study=study) if g.experiment.name == experiment]
+    return {
+        "experiment_id": exp.experiment_id,
+        "study": exp.study,
+        "name": exp.name,
+        "metadata": exp.metadata,
+        "body": exp.body,
+        "genesets": [_annotate_with_scored_in(g.to_summary()) for g in members],
+    }
+
+
+@app.get("/genesets/{study}/{experiment}/{name}", tags=["genesets"])
+async def get_geneset(study: str, experiment: str, name: str):
+    """Return one geneset (merged metadata + gene list).
+
+    Includes `scored_in` (list of db_ids) and `column_name` (the obs column name
+    used in pre-scored datasets).
+    """
+    registry = _require_geneset_registry()
+    geneset_id = f"{study}/{experiment}/{name}"
+    geneset = registry.get(geneset_id)
+    if geneset is None:
+        raise HTTPException(status_code=404, detail=f"Geneset {geneset_id} not found")
+    detail = geneset.to_detail()
+    detail['scored_in'] = list(_score_index_by_geneset.get(geneset_id, []))
+    detail['column_name'] = SCORE_COLUMN_TEMPLATE.format(
+        study=geneset.experiment.study,
+        experiment=geneset.experiment.name,
+        name=geneset.name,
+    )
+    return detail
+
+
+@app.post("/genesets/rescan", tags=["genesets"])
+async def rescan_genesets():
+    """Re-scan the geneset store from disk and rebuild the score index."""
+    geneset_reg = _require_geneset_registry()
+    geneset_reg.scan()
+    h5ad_db_ids = set(globals()['registry'].databases.keys()) if globals().get('registry') else None
+    errors, warnings = validate_geneset_registry(geneset_reg, h5ad_db_ids=h5ad_db_ids)
+    _build_score_index()
+    return {
+        "experiments": len(geneset_reg.experiments),
+        "genesets": len(geneset_reg.genesets),
+        "scored_databases": len(_score_index_by_db),
+        "errors": errors,
+        "warnings": warnings,
+    }
+
+
+@app.get("/databases/{db_id:path}/module_scores", tags=["databases"])
+async def get_database_module_scores(db_id: str):
+    """List all pre-computed module-score columns for one dataset.
+
+    For each scored geneset, returns:
+      - geneset_id        canonical geneset id (study/experiment/name)
+      - column_name       obs/duckdb column where the score is stored
+      - geneset_known     True if the geneset is in the registered genesetstore
+      - method            (if known)
+      - description       (if known)
+      - n_genes           (if known)
+      - stats             {min, max, mean, std, median}  computed from the column
+
+    Use the resulting column names directly in analytics_query, e.g.:
+        SELECT cell_name, "Sierksma2025::WGCNA::Brown_Lysosome"
+        FROM   obsnum
+    """
+    if registry is None or db_id not in registry.databases:
+        raise HTTPException(status_code=404, detail=f"Database not found: {db_id}")
+
+    db_url = registry.get_database_path(db_id)
+    conn = connection_pool.get_connection(db_url)
+    try:
+        cols = conn.execute("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'obsnum'
+        """).fetchall()
+        score_cols = [c[0] for c in cols if is_score_column(c[0])]
+
+        out = []
+        gset_reg = geneset_registry  # may be None if store not configured
+        for col in sorted(score_cols):
+            geneset_id = parse_score_column(col)
+            row = {
+                "geneset_id":   geneset_id,
+                "column_name":  col,
+                "geneset_known": False,
+                "method":       None,
+                "description":  None,
+                "n_genes":      None,
+                "stats":        None,
+            }
+            if gset_reg is not None:
+                gs = gset_reg.get(geneset_id)
+                if gs is not None:
+                    row["geneset_known"] = True
+                    row["method"]       = gs.experiment.method
+                    row["description"]  = gs.metadata.get('description') or ''
+                    row["n_genes"]      = gs.n_genes
+            try:
+                # safe_ident() validates against [A-Za-z0-9_:.\- ] and quotes
+                # — defends against a crafted column name (`"); DROP …`) even
+                # though the connection is read-only.
+                qcol = safe_ident(col)
+                stats_row = conn.execute(f"""
+                    SELECT
+                      COUNT(*) AS n,
+                      MIN({qcol}) AS min,
+                      MAX({qcol}) AS max,
+                      AVG({qcol}) AS mean,
+                      STDDEV({qcol}) AS std,
+                      MEDIAN({qcol}) AS median
+                    FROM __obsnum
+                """).fetchone()
+                if stats_row is not None:
+                    n, mn, mx, mean, std, med = stats_row
+                    row["stats"] = {
+                        "n":      int(n) if n is not None else None,
+                        "min":    float(mn)   if mn   is not None else None,
+                        "max":    float(mx)   if mx   is not None else None,
+                        "mean":   float(mean) if mean is not None else None,
+                        "std":    float(std)  if std  is not None else None,
+                        "median": float(med)  if med  is not None else None,
+                    }
+            except Exception as exc:
+                row["stats"] = {"error": str(exc)}
+            out.append(row)
+    finally:
+        connection_pool.return_connection(db_url, conn)
+
+    return {
+        "db_id": db_id,
+        "count": len(out),
+        "column_naming": {
+            "separator": SCORE_COLUMN_SEPARATOR,
+            "template":  SCORE_COLUMN_TEMPLATE,
+        },
+        "scored_genesets": out,
+    }
+
+
+@app.get("/skill", tags=["info"], response_class=Response)
+async def get_skill():
+    """Return the Anthive Claude Code skill file (SKILL.md).
+
+    Collaborators can install it with:
+        curl -n https://data.nevel.eu/api/skill -o ~/.claude/skills/anthive/SKILL.md
+    """
+    skill_path = script_dir.parent / ".claude" / "skills" / "anthive" / "SKILL.md"
+    if not skill_path.exists():
+        raise HTTPException(status_code=404, detail="SKILL.md not found")
+    return Response(
+        content=skill_path.read_text(),
+        media_type="text/markdown",
+        headers={"Content-Disposition": "inline; filename=SKILL.md"},
+    )
+
+
+def main():
+    """Main entry point"""
+    parser = argparse.ArgumentParser(
+        description="Anthive REST API Server",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+
+    # Get config for defaults
+    config = get_config()
+
+    parser.add_argument(
+        '--data-folder',
+        type=Path,
+        default=Path('./data'),
+        help='Path to data folder containing .duckdb files (default: ./data)'
+    )
+    parser.add_argument(
+        '--host',
+        default=config.get('rest_api_host', '127.0.0.1'),
+        help='Host to bind to (default: from config or 127.0.0.1)'
+    )
+    parser.add_argument(
+        '--port',
+        type=int,
+        default=config.get('rest_api_port', 8000),
+        help='Port to bind to (default: from config or 8000)'
+    )
+    parser.add_argument(
+        '--reload',
+        action='store_true',
+        help='Enable auto-reload for development'
+    )
+
+    args = parser.parse_args()
+
+    # Initialize global connection pool and registry (Phase 2)
+    global registry, connection_pool, geneset_registry
+    s3_config = config.get('s3') or {}
+    try:
+        print("Initializing connection pool...")
+        connection_pool = ConnectionPool(
+            max_connections_per_db=config.get('duckdb_max_connections', 3),
+            s3_config=s3_config,
+            memory_limit=str(config.get('duckdb_memory_limit', 'auto')),
+            threads=config.get('duckdb_threads', 2),
+        )
+        print("Initializing database registry...")
+        registry = DatabaseRegistry(args.data_folder, connection_pool, s3_config=s3_config)
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if len(registry.databases) == 0:
+        print(f"Warning: No databases found in {args.data_folder}")
+        print("The server will start but no databases will be available.")
+
+    # Initialize geneset registry (optional)
+    geneset_store_value = config.get('geneset_store')
+    if geneset_store_value:
+        geneset_path = (script_dir.parent / geneset_store_value).resolve()
+        if geneset_path.exists():
+            print(f"Initializing geneset registry: {geneset_path}")
+            geneset_registry = GenesetRegistry(geneset_path)
+            geneset_registry.scan()
+            print(
+                f"  {len(geneset_registry.experiments)} experiment(s), "
+                f"{len(geneset_registry.genesets)} geneset(s)"
+            )
+            if geneset_registry.errors:
+                print(f"  ⚠ {len(geneset_registry.errors)} parse error(s)")
+        else:
+            print(f"Geneset store path does not exist: {geneset_path} (skipping)")
+
+    # Run md-check on the data folder (read-only: report only, never modify)
+    print("\nRunning md-check on data folder...")
+    try:
+        from md_check import MdCheckReport, check_md_folder, write_log_entry
+        md_report = MdCheckReport()
+        check_md_folder(Path(args.data_folder), md_report, fix=False)
+        print(
+            f"  Checked {md_report.checked} .md file(s): "
+            f"{md_report.index_count} index.md, {md_report.data_count} data .md"
+        )
+        if md_report.has_errors() or md_report.has_warnings():
+            md_report.print_summary()
+            log_messages = md_report.collect_log_messages()
+            if log_messages:
+                write_log_entry(
+                    Path(args.data_folder), 'ant-serve md-check', log_messages
+                )
+        else:
+            print("  ✓ All .md files OK")
+    except Exception as e:
+        print(f"  ⚠ md-check failed: {e}")
+
+    # Start server
+    print(f"\n{'='*60}")
+    print(f"Starting Anthive REST API Server")
+    print(f"{'='*60}")
+    print(f"  Version: 2.0.0")
+    print(f"  Host: {args.host}")
+    print(f"  Port: {args.port}")
+    print(f"  Data folder: {args.data_folder}")
+    print(f"  Databases: {len(registry.databases)}")
+    print(f"  URL: http://{args.host}:{args.port}")
+    print(f"  Docs: http://{args.host}:{args.port}/docs")
+    print(f"{'='*60}\n")
+
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        reload=args.reload
+    )
+
+
+if __name__ == '__main__':
+    main()

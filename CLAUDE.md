@@ -6,8 +6,8 @@ in-browser notebooks. ~60 datasets, mostly human microglia.
 
 ## The one thing to internalise: `lib/` is the shared core
 
-Every `bin/ant-*` tool and the server import the same `lib/` modules via a
-`sys.path.insert(0, lib_dir)` shim (NOT a pip install). So:
+Every `bin/<domain>/ant-*` tool and the server import the same `lib/`
+modules via a `sys.path.insert(0, lib_dir)` shim (NOT a pip install). So:
 
 - A change in `lib/` ripples to **every** tool and the server at once.
 - There is no version boundary between `lib/` and its consumers — treat it as
@@ -34,24 +34,53 @@ Every `bin/ant-*` tool and the server import the same `lib/` modules via a
 
 ## Sub-project seams (scoped by nested CLAUDE.md)
 
-| Area | What | Nested CLAUDE.md |
+Each subfolder has its own `CLAUDE.md` so a Claude Code session opened
+there auto-loads the right scope.
+
+```
+bin/
+  api/       ant-serve, ant-mcp                    bin/api/CLAUDE.md
+  web/       ant-browse                            bin/web/CLAUDE.md
+  ingest/    ant-convert, ant-merge-h5ad, …        bin/ingest/CLAUDE.md
+  annot/     ant-score, ant-starcat, ant-suggest-tops, …   bin/annot/CLAUDE.md
+  meta/      ant-md, ant-check, ant-cellxgene, …   bin/meta/CLAUDE.md
+  ops/       ant-supervisor, ant-sync, dev-*       bin/ops/CLAUDE.md
+  ant                                               ← dispatcher (walks subdirs)
+lib/         shared core (anthive_db, plotting, …)  lib/CLAUDE.md
+frontend/
+  browser/   FastAPI Jinja templates for bin/web/   frontend/browser/CLAUDE.md
+  streamlit/ Streamlit app                          frontend/streamlit/CLAUDE.md
+  jupyter/   JupyterLite source (Pyodide)           frontend/jupyter/CLAUDE.md
+antclient/   standalone REST client package         antclient/CLAUDE.md
+config/      Caddyfile, nginx.conf, caddy-auth.example
+```
+
+| Working on… | `cd` here | Scope loaded |
 | --- | --- | --- |
-| `lib/` | shared core (the contract everything depends on) | `lib/CLAUDE.md` |
-| `bin/` | CLI tools — **server** (ant-serve/mcp/browse) + **pipeline** (convert/score/starcat/…) | `bin/CLAUDE.md` |
-| `antclient/` | standalone REST client package | `antclient/CLAUDE.md` |
-| `webapp-src/` | JupyterLite example notebooks (in-browser, Pyodide) | `webapp-src/CLAUDE.md` |
+| REST/MCP plot or query endpoints | `bin/api/` | root + bin + bin/api |
+| Web UI route handlers | `bin/web/` | root + bin + bin/web |
+| Web UI templates/CSS/JS | `frontend/browser/` | root + frontend + frontend/browser |
+| h5ad → duckdb ingestion | `bin/ingest/` | root + bin + bin/ingest |
+| Scoring / curation | `bin/annot/` | root + bin + bin/annot |
+| .md / .mus / catalog | `bin/meta/` | root + bin + bin/meta |
+| Sync / supervisor / dev wrappers | `bin/ops/` | root + bin + bin/ops |
 
 Data stores live in **separate git repos**: `data/h5adstore/` (`.md` + `.h5ad`
 + `.duckdb`), `data/genesetstore/`. The `.md` files are git-tracked; `.h5ad`
-and `.duckdb` are synced to S3 via `ant-sync` (never committed).
+and `.duckdb` are synced to S3 via `bin/ops/ant-sync` (never committed).
 
 ## Conventions specific to this repo
 
-- **Every `bin/ant-*` tool is a self-contained `uv run --script`** with inline
-  PEP-723 dependencies in the shebang header. Adding a dependency = editing
-  that script's `# dependencies = [...]` block, NOT a shared venv. A missing
-  dep there fails silently as an `ImportError` caught by a `try/except` (this
-  has bitten us — e.g. `pyyaml` missing in `ant-merge-h5ad`).
+- **Every `bin/<domain>/ant-*` tool is a self-contained `uv run --script`**
+  with inline PEP-723 dependencies in the shebang header. Adding a dependency
+  = editing that script's `# dependencies = [...]` block, NOT a shared venv.
+  A missing dep there fails silently as an `ImportError` caught by a
+  `try/except` (this has bitten us — e.g. `pyyaml` missing in `ant-merge-h5ad`).
+- **The `ant` dispatcher** in `bin/ant` walks all subfolders to find an
+  `ant-<cmd>` script, so `ant convert ...` works the same after the reorg.
+- **`sys.path` shim**: scripts use `script_dir.parent.parent / 'lib'` (now
+  two levels up, since they live in `bin/<domain>/`). The supervisor in
+  `bin/ops/` uses `Path(__file__).parent.parent.parent` to reach repo root.
 - Config (`anthive.yaml`) is loaded via `lib/config.py`; S3 creds + API
   host/port live there.
 - Data-management Python that needs heavy deps (scanpy/anndata/R) uses the
