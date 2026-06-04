@@ -1,4 +1,4 @@
-.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-streamlit serve-mcp serve-all serve-debug dev-jupyter sync-push sync-pull sync-pull-all sync-status build-stale sync-update serve-status serve-restart
+.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-streamlit serve-mcp serve-all serve-debug serve-stop dev-jupyter sync-push sync-pull sync-pull-all sync-status build-stale sync-update serve-status serve-restart
 
 help:
 	@echo "Anthive4 Development Commands"
@@ -15,6 +15,7 @@ help:
 	@echo "  make serve-all     - Start all services (deployment, nginx already running)"
 	@echo "  make serve-debug   - Start all services + Caddy on port 8501"
 	@echo "  make serve-status  - Show supervisor state + child PIDs"
+	@echo "  make serve-stop    - Stop the running supervisor + all children"
 	@echo "  make serve-restart SVC=browse        - Restart a single service"
 	@echo "  make serve-restart SVC='api browse'  - Restart several at once"
 	@echo "  make serve-restart SVC=all           - Restart every child"
@@ -153,14 +154,19 @@ serve-nginx:
 	@nginx -c $(PWD)/config/nginx.conf -p $(PWD)
 
 serve-api:
-	@echo "Starting Anthive REST API on http://localhost:8080"
+	@echo "Starting Anthive REST API (host/port from anthive.yaml — default localhost:8080)"
 	@echo ""
-	@./bin/ant-serve --data-folder ./data/h5adstore --host 0.0.0.0 --port 8080
+	@# Host & port come from anthive.yaml (rest_api_host / rest_api_port).
+	@# To bind on all interfaces, set rest_api_host: 0.0.0.0 in anthive.yaml
+	@# or pass --host 0.0.0.0 on the CLI.
+	@./bin/ant-serve --data-folder ./data/h5adstore
 
 serve-browse:
-	@echo "Starting Anthive Web Browser on http://localhost:8081"
+	@echo "Starting Anthive Web Browser (host/port from anthive.yaml — default localhost:8081)"
 	@echo ""
-	@./bin/ant-browse --api-url http://localhost:8080 --host 0.0.0.0 --port 8081
+	@# Same convention as serve-api: host/port from anthive.yaml
+	@# (browse_host / browse_port).
+	@./bin/ant-browse
 
 serve-mcp:
 	@echo "Starting Anthive MCP server on http://localhost:8090"
@@ -189,6 +195,18 @@ serve-restart:
 
 serve-status:
 	@./bin/ant-supervisor status
+
+# SIGTERM the running supervisor — it cascades to every child (api, browse,
+# mcp, streamlit, caddy).  Re-run `make serve-debug` or `make serve-all`
+# afterwards to bring everything back up.
+serve-stop:
+	@PID=$$(./bin/ant-supervisor status 2>/dev/null | awk '/^supervisor pid:/ {print $$3; exit}'); \
+	if [ -n "$$PID" ]; then \
+		echo "stopping supervisor pid $$PID (cascades to all children)"; \
+		kill $$PID; \
+	else \
+		echo "no supervisor running"; \
+	fi
 
 serve-streamlit:
 	@echo "Starting Anthive Streamlit server on http://localhost:8082"
