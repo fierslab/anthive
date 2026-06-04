@@ -2,7 +2,7 @@
 
 ## Two Deployment Targets
 
-### 1. Server-Based Streamlit (webapp-streamlit/)
+### 1. Server-Based Streamlit (frontend/streamlit/)
 **For: Development and testing**
 
 - Traditional Python Streamlit server
@@ -21,7 +21,7 @@ bin/dev-serve
 
 **Access:** http://localhost:8501
 
-### 2. Browser-Based stlite (webapp-src/stlite/)
+### 2. Browser-Based stlite (frontend/jupyter/stlite/)
 **For: Production deployment**
 
 - Streamlit runs in browser via Pyodide/WebAssembly
@@ -36,7 +36,7 @@ bin/dev-serve
 ```
 ┌─────────────────────┐
 │  1. Develop         │
-│  webapp-streamlit/  │  ← Work here (fast, easy debug)
+│  frontend/streamlit/  │  ← Work here (fast, easy debug)
 └──────────┬──────────┘
            │
            ▼
@@ -54,7 +54,7 @@ bin/dev-serve
            ▼
 ┌─────────────────────┐
 │  4. Deploy          │
-│  webapp-src/stlite/ │  ← Browser version ready
+│  frontend/jupyter/stlite/ │  ← Browser version ready
 └─────────────────────┘
 ```
 
@@ -62,7 +62,7 @@ bin/dev-serve
 
 ### Development (Daily Work)
 
-1. **Edit** files in `webapp-streamlit/`:
+1. **Edit** files in `frontend/streamlit/`:
    - `components.py`
    - `pages/*.py`
    - `streamlit_app.py`
@@ -86,7 +86,7 @@ This will:
 - Show which files changed
 - Ask for confirmation
 - Create a backup
-- Copy files to `webapp-src/stlite/`
+- Copy files to `frontend/jupyter/stlite/`
 
 ### Testing stlite Version
 
@@ -98,14 +98,14 @@ After syncing, test the browser version:
 
 ## Key Differences
 
-### Server Streamlit (webapp-streamlit/)
+### Server Streamlit (frontend/streamlit/)
 - ✅ Fast reload
 - ✅ Full Python debugging
 - ✅ All Python libraries available
 - ❌ Requires Python server
 - ❌ Not suitable for static hosting
 
-### Browser stlite (webapp-src/stlite/)
+### Browser stlite (frontend/jupyter/stlite/)
 - ✅ No server needed
 - ✅ Can host anywhere (S3, GitHub Pages, etc.)
 - ✅ Lower hosting costs
@@ -117,12 +117,12 @@ After syncing, test the browser version:
 
 ### Don't Edit stlite Directly
 
-❌ **Don't develop in `webapp-src/stlite/`**
+❌ **Don't develop in `frontend/jupyter/stlite/`**
 - Slower iteration
 - Harder to debug
 - Browser console for errors
 
-✅ **Develop in `webapp-streamlit/`**
+✅ **Develop in `frontend/streamlit/`**
 - Fast reload
 - Python debugger
 - Better error messages
@@ -152,7 +152,7 @@ The two versions will naturally diverge during development. That's OK!
 ## File Structure
 
 ```
-webapp-streamlit/              # Development version
+frontend/streamlit/              # Development version
 ├── streamlit_app.py          # Main entry
 ├── components.py             # UI components
 ├── util.py                   # Utilities
@@ -164,7 +164,7 @@ webapp-streamlit/              # Development version
 └── .streamlit/
     └── config.toml          # Server config
 
-webapp-src/stlite/            # Production version
+frontend/jupyter/stlite/            # Production version
 ├── index.html               # Browser loader
 ├── streamlit_app.py         # (synced from above)
 ├── components.py            # (synced from above)
@@ -183,11 +183,11 @@ webapp-src/stlite/            # Production version
 git status
 
 # Should show changes in both:
-# - webapp-streamlit/
-# - webapp-src/stlite/
+# - frontend/streamlit/
+# - frontend/jupyter/stlite/
 
 # Commit both together
-git add webapp-streamlit/ webapp-src/stlite/
+git add frontend/streamlit/ frontend/jupyter/stlite/
 git commit -m "Update UMAP visualization"
 ```
 
@@ -213,7 +213,7 @@ git commit -m "Update UMAP visualization"
 
 ## Summary
 
-✅ **Develop** in `webapp-streamlit/` (fast, easy)
+✅ **Develop** in `frontend/streamlit/` (fast, easy)
 ✅ **Sync** with `bin/sync-to-stlite` (when ready)
-✅ **Deploy** from `webapp-src/stlite/` (no server needed)
+✅ **Deploy** from `frontend/jupyter/stlite/` (no server needed)
 ✅ **Commit** both together (keep in sync)

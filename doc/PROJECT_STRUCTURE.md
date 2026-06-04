@@ -90,7 +90,7 @@ anthive4/
 **API Development:**
 - `doc/REST_API_SPEC.md` - API specification
 - `doc/PHASE2_COMPLETE.md` - Phase 2 features
-- `bin/ant-serve` - Server implementation
+- `bin/api/ant-serve` - Server implementation
 
 **Client Development:**
 - `antclient/README_DEV.md` - Client dev guide

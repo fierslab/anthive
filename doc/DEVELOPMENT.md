@@ -95,13 +95,13 @@ bin/streamlit-serve
 
 ### Make Changes to Streamlit App
 
-1. Edit files in `webapp-streamlit/`
+1. Edit files in `frontend/streamlit/`
 2. Streamlit auto-reloads on save
 3. Refresh browser to see changes
 
 ### Make Changes to REST API
 
-1. Edit files in `bin/ant-serve` or `lib/`
+1. Edit files in `bin/api/ant-serve` or `lib/`
 2. In the API terminal: Ctrl+C to stop
 3. Restart: `bin/ant serve`
 4. Streamlit continues running (no need to restart)
@@ -110,14 +110,14 @@ bin/streamlit-serve
 
 1. Edit `antclient/antclient.py`
 2. Restart Streamlit (or use Streamlit's "Rerun")
-3. webapp-streamlit has a symlink to antclient
+3. frontend/streamlit has a symlink to antclient
 
 ### Update Streamlit App from stlite Source
 
 Copy changes from source:
 ```bash
-cp webapp-src/stlite/*.py webapp-streamlit/
-cp webapp-src/stlite/pages/*.py webapp-streamlit/pages/
+cp frontend/jupyter/stlite/*.py frontend/streamlit/
+cp frontend/jupyter/stlite/pages/*.py frontend/streamlit/pages/
 ```
 
 ### Clear Streamlit Cache
@@ -128,7 +128,7 @@ Or programmatically: Add `st.cache_data.clear()` in code
 
 ### Debug Mode
 
-Edit `webapp-streamlit/.streamlit/config.toml`:
+Edit `frontend/streamlit/.streamlit/config.toml`:
 ```toml
 [server]
 runOnSave = true  # Auto-rerun on save
@@ -149,10 +149,10 @@ level = "debug"   # Verbose logging
 ## Configuration Files
 
 - `Caddyfile.dev` - Caddy reverse proxy config
-- `webapp-streamlit/.streamlit/config.toml` - Streamlit settings
+- `frontend/streamlit/.streamlit/config.toml` - Streamlit settings
 - `bin/dev-serve` - Combined startup script
 - `bin/streamlit-serve` - Streamlit launcher
-- `bin/ant-serve` - REST API server
+- `bin/api/ant-serve` - REST API server
 
 ## Troubleshooting
 

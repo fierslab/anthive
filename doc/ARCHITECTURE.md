@@ -4,19 +4,19 @@
 
 ### Core Services
 
-1. **REST API** (`bin/ant-serve`)
+1. **REST API** (`bin/api/ant-serve`)
    - Port: 8080
    - Purpose: Core data API for querying single-cell databases
    - Tech: FastAPI with DuckDB backend
    - Docs: `REST_API_SPEC.md`, `REST_API_COMPLETE.md`
 
-2. **Browser Interface** (`bin/ant-browse`)
+2. **Browser Interface** (`bin/web/ant-browse`)
    - Port: 8081
    - Purpose: HTML-based dataset browser
    - Tech: FastAPI + Jinja2 templates + Pico CSS
    - Docs: `WEB_INTERFACE.md`
 
-3. **Streamlit Dev Server** (`webapp-streamlit/`)
+3. **Streamlit Dev Server** (`frontend/streamlit/`)
    - Port: 8501 (via `bin/dev-serve`)
    - Purpose: Development environment for Streamlit apps
    - Tech: Traditional server-based Streamlit
@@ -29,7 +29,7 @@
    - Contains:
      - JupyterLite (browser-based Jupyter)
      - Stlite (browser-based Streamlit via Pyodide)
-   - Built from: `webapp-src/`
+   - Built from: `frontend/jupyter/`
    - Docs: `WEBAPP-WORKFLOW.md`
 
 ### Libraries
@@ -92,11 +92,11 @@ Access: http://localhost:8501
 ├── data/                # Data storage (h5adstore symlink)
 ├── doc/                 # All documentation
 ├── webapp/              # Built webapp (gitignored)
-├── webapp-browser/      # Browser interface source
-├── webapp-src/          # Source for built webapp
+├── frontend/browser/      # Browser interface source
+├── frontend/jupyter/          # Source for built webapp
 │   ├── jupyter/         # JupyterLite notebooks
 │   └── stlite/          # Stlite source
-└── webapp-streamlit/    # Streamlit dev environment
+└── frontend/streamlit/    # Streamlit dev environment
 ```
 
 ## Key Documentation

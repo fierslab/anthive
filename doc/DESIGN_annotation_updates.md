@@ -61,7 +61,7 @@ Skip the h5ad write; mutate the duckdb directly.
 ~1–2 days. Components:
 
 - `lib/anthive_db.py` — add `add_obscat_column()`, `add_obsnum_column()` methods that use `ALTER TABLE` + batched INSERT
-- `bin/ant-score` — switch the writeback path from "edit h5ad + rebuild" to "edit duckdb directly" (keep --rebuild as fallback)
+- `bin/annot/ant-score` — switch the writeback path from "edit h5ad + rebuild" to "edit duckdb directly" (keep --rebuild as fallback)
 - Need a clear convention for what gets written: only WGCNA cols? all annotation? Probably both modes
 
 ## Option B — sidecar `.extras.duckdb` files
@@ -486,7 +486,7 @@ three-part structure with no quoting tax.)
 
 ### Wiring it in
 
-A new `bin/ant-starcat` does:
+A new `bin/annot/ant-starcat` does:
 
 1. Refuse if `annotation.organism != 'human'` (mouse catalog doesn't exist yet).
 2. Locate raw counts in the source h5ad. Tries `adata.X` → `adata.layers["counts"]`
@@ -541,11 +541,11 @@ env and runs the Python pipeline.
 ## 9. Implementation order
 
 1. `lib/anthive_db.py` — `AnnotationWriter` + `__pending_cols` table creation
-2. `bin/ant-convert` — refuse-on-pending guard + `--force-discard-pending`
-3. `bin/ant-annotate` — tsv ingest + status + rollback
-4. `bin/ant-merge-h5ad` — cold-path merge with sanity check
-5. `bin/ant-score` — switch its write path to `AnnotationWriter`
-6. `bin/ant-starcat` + `envs/anthive-starcat/` — first real user
+2. `bin/ingest/ant-convert` — refuse-on-pending guard + `--force-discard-pending`
+3. `bin/annot/ant-annotate` — tsv ingest + status + rollback
+4. `bin/ingest/ant-merge-h5ad` — cold-path merge with sanity check
+5. `bin/annot/ant-score` — switch its write path to `AnnotationWriter`
+6. `bin/annot/ant-starcat` + `envs/anthive-starcat/` — first real user
 7. Pick one human microglia dataset, run end-to-end (annotate → merge → push),
    confirm the streamlit views see the new columns
 

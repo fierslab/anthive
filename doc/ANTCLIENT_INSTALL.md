@@ -7,7 +7,7 @@
 ```bash
 # Start the Anthive server (in one terminal)
 cd /data/1/users/mark/anthive4
-./bin/ant-serve --data-folder /data/1/project/h5adstore
+./bin/api/ant-serve --data-folder /data/1/project/h5adstore
 
 # Test the client (in another terminal)
 cd /data/1/users/mark/anthive4

@@ -109,25 +109,25 @@ layer_stats:
 
 ### Files Changed
 
-1. **bin/ant-h5ad-check** - Generates metadata
+1. **bin/ingest/ant-h5ad-check** - Generates metadata
    - Initialize `layers_include` as list (not dict)
    - Initialize `obsm_include` as list (not dict)
    - Add `layer_description` and `embedding_description` dicts
    - Update `preserve_user_customizations()` to preserve descriptions
    - Change from `ensure_in_mapping()` to `ensure_in_list()`
 
-2. **bin/ant-convert** - Creates DuckDB tables
+2. **bin/ingest/ant-convert** - Creates DuckDB tables
    - Iterate over `layers_include` list
    - Iterate over `obsm_include` list
    - Use original keys for table names
    - Use descriptions for display messages
 
-3. **bin/ant-duckdb-check** - Validates database
+3. **bin/ingest/ant-duckdb-check** - Validates database
    - Read `layers_include` as list
    - Read `obsm_include` as list
    - Validate table names using original keys
 
-4. **bin/ant-serve** - REST API
+4. **bin/api/ant-serve** - REST API
    - Read `layers_include` list and `layer_description` dict
    - Read `obsm_include` list and `embedding_description` dict
    - Build API response with friendly names from descriptions

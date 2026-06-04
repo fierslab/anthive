@@ -29,7 +29,7 @@ from pathlib import Path
 import boto3
 from boto3.s3.transfer import TransferConfig
 
-sys.path.insert(0, str(Path(__file__).parent.parent / 'lib'))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'lib'))
 from config import get_config  # noqa: E402
 
 # Only these extensions are ever pushed/pulled.

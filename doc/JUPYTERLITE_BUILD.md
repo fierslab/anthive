@@ -19,7 +19,7 @@ uvx --from jupyterlite-core \
     --with jupyterlab-widgets \
     --with jupyter-server \
     jupyter-lite build \
-    --contents webapp-src/jupyter \
+    --contents frontend/jupyter/jupyter \
     --output-dir webapp/jupyter
 ```
 
@@ -49,7 +49,7 @@ These are loaded by Pyodide in the browser:
 - Lists federated extensions (including widgets)
 - Build settings
 
-**webapp-src/jupyter/** - Source content
+**frontend/jupyter/jupyter/** - Source content
 - Contains notebooks that will be available
 - antclient.py is copied here during build
 - anthelper.py provides helper functions

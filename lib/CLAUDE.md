@@ -1,8 +1,13 @@
 # lib/ — shared core
 
-The contract every `bin/` tool and `ant-serve` depends on (imported via a
-`sys.path` shim, not pip). **A change here ripples everywhere** — there is no
-version boundary. Tread carefully and run the test suite.
+The contract every `bin/<domain>/` tool and `ant-serve` depends on (imported
+via a `sys.path` shim, not pip). **A change here ripples everywhere** — there
+is no version boundary. Tread carefully and run the test suite.
+
+After the 2026-06 reorg, scripts that depend on this module live under
+`bin/api/`, `bin/web/`, `bin/ingest/`, `bin/annot/`, `bin/meta/`, `bin/ops/`,
+and each adds `lib/` to `sys.path` via `script_dir.parent.parent / 'lib'`
+(two levels up to repo root, then into `lib/`).
 
 ## Modules
 
@@ -51,8 +56,9 @@ Context manager for adding obs columns without an h5ad rebuild. Invariants:
   `/admin/release/{db_id}`, retries, POSTs `/admin/restore/{db_id}` on exit.
 
 `pending_state_diagnosis(duckdb, h5ad_obs_keys)` is the shared truth used by
-both the `ant-convert` guard and `ant-merge-h5ad`: it returns `clean`,
-`only_in_duckdb`, `already_merged`, `unrecorded`, `missing_from_duckdb`.
+both `bin/ingest/ant-convert`'s guard and `bin/ingest/ant-merge-h5ad`: it
+returns `clean`, `only_in_duckdb`, `already_merged`, `unrecorded`,
+`missing_from_duckdb`.
 
 ## Tests
 `tests/test_annotation_writer.py`, `test_ant_annotate_cli.py`,
