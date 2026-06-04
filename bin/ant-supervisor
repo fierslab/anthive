@@ -212,9 +212,27 @@ def cmd_restart(service_names: list[str]) -> int:
                   f'(supervisor will restart it)')
         except ProcessLookupError:
             print(f'  {name}: pid={pid} vanished before signal')
+            continue
         except PermissionError:
             print(f'  {name}: not permitted to signal pid={pid} '
                   f'(different user?)', file=sys.stderr)
+            continue
+
+        # Caddy honours SIGTERM by entering an "eternal grace period"
+        # graceful-shutdown that never exits while keep-alive connections
+        # are around.  Give it 3 seconds, then SIGKILL — the supervisor
+        # respawn loop expects the process to actually die.
+        for _ in range(30):  # 30 × 0.1s = 3s
+            if not _pid_alive(pid):
+                break
+            time.sleep(0.1)
+        else:
+            try:
+                os.kill(pid, signal.SIGKILL)
+                print(f'  {name}: pid={pid} ignored SIGTERM for 3s, '
+                      f'sent SIGKILL')
+            except ProcessLookupError:
+                pass
     return 0
 
 

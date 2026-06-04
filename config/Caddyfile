@@ -9,6 +9,11 @@
 	# Root directory for static files
 	root * ./webapp
 
+	# Optional basic-auth, dropped in by `make caddy-passwd`.  The file is
+	# gitignored.  No file → import is a no-op → no auth → the same
+	# unauthenticated dev experience as before.  See config/caddy-auth.example.
+	import caddy-auth-*.conf
+
 	# Reverse proxy for API - strip /api prefix before forwarding
 	handle_path /api/* {
 		reverse_proxy localhost:8080
