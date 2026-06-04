@@ -37,6 +37,22 @@
 		reverse_proxy localhost:8090
 	}
 
+	# MCP clients (per RFC 8414 / MCP spec) probe many discovery URLs
+	# *before* /mcp itself: oauth-authorization-server,
+	# oauth-protected-resource, openid-configuration, and the OAuth
+	# dynamic-registration endpoint /register.  We don't require auth, but
+	# if these return an empty 404 body the client SDK crashes parsing it
+	# as JSON ("Unexpected EOF").  Catch them all and respond with valid
+	# JSON 404s so the SDK falls back to no-auth and proceeds to /mcp.
+	handle /.well-known/* {
+		header Content-Type application/json
+		respond `{"error":"not_supported","error_description":"This MCP server does not implement OAuth"}` 404
+	}
+	handle /register {
+		header Content-Type application/json
+		respond `{"error":"not_supported","error_description":"OAuth dynamic registration is not supported"}` 404
+	}
+
 	# Streamlit — started with --server.baseUrlPath=streamlit so all its
 	# routes (/_stcore/stream WS, /static/, /streamlit/) carry the prefix.
 	# Match both /streamlit (redirect to /streamlit/) and /streamlit/*.
