@@ -4,6 +4,29 @@
 
 {% block content %}
 <style>
+  /* Collapsible obs-prefix groups (rendered by the script at the bottom of
+     this page).  A group is auto-created when ≥2 obs columns share the same
+     prefix delimited by `::` or `__` — the prefix is shown once with a
+     `[+]` toggle; expanded view shows each child indented on the next row. */
+  .obs-group {
+    display: inline-flex; align-items: baseline; gap: 4px;
+    margin-right: 14px; white-space: nowrap;
+  }
+  .obs-toggle {
+    cursor: pointer; user-select: none; font-size: 11px;
+    color: #555; background: #f5f5f5; padding: 0 5px;
+    border-radius: 3px; font-family: var(--font-mono);
+  }
+  .obs-toggle:hover { background: #e5e7eb; color: #1f2937; }
+  .obs-group.open .obs-toggle { background: #e0e7ff; color: #3730a3; }
+  .obs-group-body {
+    display: none; flex-wrap: wrap; gap: 1px 0; line-height: 1.8;
+    margin-left: 4px;
+  }
+  .obs-group.open .obs-group-body { display: inline-flex; }
+  .obs-group-body .obs-item { font-size: 11px; }
+  /* Items still rendered as children inside .obs-group-body — keep margin. */
+
   /* Context bar — same pill vocabulary as landing/folder pages.
      Colors must mirror .ctx-pill in index.html. */
   .ds-ctx { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 10px; }
@@ -240,18 +263,142 @@
 document.addEventListener('DOMContentLoaded', function() {
     {% if obs_columns|length > 0 %}
     (function() {
+        // ── Group obs items by common prefix ──────────────────────────────
+        // A column name like `Sierksma2025::WGCNA::Black_Mito` carries the
+        // prefix `Sierksma2025::WGCNA` (everything before the last `::`).
+        // `starcat__MICROGLIA_V1__Translation` → `starcat__MICROGLIA_V1`.
+        // Columns without a recognised separator have no prefix and stay flat.
+        var container = document.getElementById('obs-chips');
+        var items = Array.from(container.querySelectorAll('.obs-item'));
+
+        function getPrefix(name) {
+            var i = name.lastIndexOf('::');
+            if (i > 0) return { prefix: name.slice(0, i), sep: '::' };
+            i = name.lastIndexOf('__');
+            if (i > 0) return { prefix: name.slice(0, i), sep: '__' };
+            return null;
+        }
+
+        // Bucket items by prefix.  Names without a prefix go to '_solo_'.
+        var buckets = new Map();
+        items.forEach(function(el) {
+            // Original column name lives in the visible link text or text node.
+            var link = el.querySelector('a');
+            var name = (link ? link.textContent : el.textContent).trim();
+            var pfx = getPrefix(name);
+            var key = pfx ? pfx.prefix + pfx.sep : '_solo_';
+            if (!buckets.has(key)) buckets.set(key, { sep: pfx ? pfx.sep : null, items: [] });
+            buckets.get(key).items.push(el);
+            el.dataset.fullname = name.toLowerCase();
+        });
+
+        // Walk in original order: emit groups for buckets of size ≥2,
+        // emit solos directly.  Track insertion point to keep order stable.
+        var inserted = new Set();
+        items.forEach(function(el) {
+            if (inserted.has(el)) return;
+            var name = el.dataset.fullname;
+            var pfx = getPrefix(name);
+            var key = pfx ? pfx.prefix + pfx.sep : '_solo_';
+            var bucket = buckets.get(key);
+            if (key === '_solo_' || bucket.items.length < 2) {
+                inserted.add(el);
+                return;
+            }
+            // Create the group wrapper at this position
+            var group = document.createElement('span');
+            group.className = 'obs-group';
+            group.dataset.prefix = key;
+            var toggle = document.createElement('span');
+            toggle.className = 'obs-toggle';
+            toggle.textContent = '[+] ' + pfx.prefix + pfx.sep + ' (' + bucket.items.length + ')';
+            toggle.addEventListener('click', function() { group.classList.toggle('open'); refreshToggleLabel(group); });
+            var body = document.createElement('span');
+            body.className = 'obs-group-body';
+            bucket.items.forEach(function(m) {
+                body.appendChild(m);
+                inserted.add(m);
+            });
+            group.appendChild(toggle);
+            group.appendChild(body);
+            container.insertBefore(group, container.firstChild);  // we re-order
+            // The insertBefore call shoves it to top; rebuild order at the end.
+        });
+
+        // Rebuild container DOM order: emit either solo items or groups in the
+        // original item order they were collected in.
+        var seen = new Set();
+        var ordered = [];
+        items.forEach(function(el) {
+            var group = el.closest('.obs-group');
+            var node = group || el;
+            if (seen.has(node)) return;
+            seen.add(node);
+            ordered.push(node);
+        });
+        // Detach and re-append in the right order
+        ordered.forEach(function(n) { container.appendChild(n); });
+
+        function refreshToggleLabel(group) {
+            var toggle = group.querySelector('.obs-toggle');
+            var open = group.classList.contains('open');
+            // Replace only the leading [+]/[-] marker
+            toggle.textContent = toggle.textContent.replace(/^\[[+-]\]/, open ? '[−]' : '[+]');
+        }
+
+        // ── Filter input ──────────────────────────────────────────────────
+        // Solo items toggle their own visibility.  Groups: show the group if
+        // either its prefix or any member matches; auto-expand the group when
+        // its match is on a member rather than the prefix itself.
         var input = document.getElementById('obs-filter');
         var count = document.getElementById('obs-count');
-        var items = document.querySelectorAll('#obs-chips .obs-item');
+        var totalItems = items.length;
+
         function update() {
-            var q = input.value.toLowerCase();
+            var q = (input.value || '').toLowerCase();
             var shown = 0;
-            items.forEach(function(el) {
-                var vis = !q || el.dataset.name.includes(q);
+
+            // Solo items
+            container.querySelectorAll(':scope > .obs-item').forEach(function(el) {
+                var vis = !q || el.dataset.fullname.includes(q);
                 el.style.display = vis ? '' : 'none';
                 if (vis) shown++;
             });
-            count.textContent = shown < items.length ? shown + ' / ' + items.length : items.length + ' cols';
+
+            // Groups
+            container.querySelectorAll('.obs-group').forEach(function(group) {
+                var prefix = (group.dataset.prefix || '').toLowerCase();
+                var members = Array.from(group.querySelectorAll('.obs-item'));
+                if (!q) {
+                    group.style.display = '';
+                    members.forEach(function(m) { m.style.display = ''; });
+                    shown += members.length;
+                    return;
+                }
+                var prefixMatch = prefix.includes(q);
+                var memberHits = members.filter(function(m) { return m.dataset.fullname.includes(q); });
+                if (prefixMatch || memberHits.length) {
+                    group.style.display = '';
+                    group.classList.add('open');
+                    refreshToggleLabel(group);
+                    if (prefixMatch) {
+                        members.forEach(function(m) { m.style.display = ''; });
+                        shown += members.length;
+                    } else {
+                        members.forEach(function(m) {
+                            var hit = m.dataset.fullname.includes(q);
+                            m.style.display = hit ? '' : 'none';
+                            if (hit) shown++;
+                        });
+                    }
+                } else {
+                    group.style.display = 'none';
+                }
+            });
+
+            count.textContent = (shown < totalItems)
+                ? shown + ' / ' + totalItems
+                : totalItems + ' cols';
         }
         input.addEventListener('input', update);
         update();
