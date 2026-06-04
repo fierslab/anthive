@@ -279,29 +279,34 @@ document.addEventListener('DOMContentLoaded', function() {
             return null;
         }
 
-        // Bucket items by prefix.  Names without a prefix go to '_solo_'.
-        var buckets = new Map();
+        // Cache the visible column name (original case) + lowercased copy on
+        // each item.  Both loops below use these — case-consistent.
         items.forEach(function(el) {
-            // Original column name lives in the visible link text or text node.
             var link = el.querySelector('a');
             var name = (link ? link.textContent : el.textContent).trim();
-            var pfx = getPrefix(name);
+            el.dataset.colname  = name;                 // original case
+            el.dataset.fullname = name.toLowerCase();   // for filter matching
+        });
+
+        // Bucket items by prefix.  Names without a prefix go to '_solo_'.
+        // Key uses the ORIGINAL-case prefix so the toggle label looks right.
+        var buckets = new Map();
+        items.forEach(function(el) {
+            var pfx = getPrefix(el.dataset.colname);
             var key = pfx ? pfx.prefix + pfx.sep : '_solo_';
             if (!buckets.has(key)) buckets.set(key, { sep: pfx ? pfx.sep : null, items: [] });
             buckets.get(key).items.push(el);
-            el.dataset.fullname = name.toLowerCase();
         });
 
         // Walk in original order: emit groups for buckets of size ≥2,
-        // emit solos directly.  Track insertion point to keep order stable.
+        // solos stay flat.  Track which items have already been processed.
         var inserted = new Set();
         items.forEach(function(el) {
             if (inserted.has(el)) return;
-            var name = el.dataset.fullname;
-            var pfx = getPrefix(name);
+            var pfx = getPrefix(el.dataset.colname);
             var key = pfx ? pfx.prefix + pfx.sep : '_solo_';
             var bucket = buckets.get(key);
-            if (key === '_solo_' || bucket.items.length < 2) {
+            if (!bucket || key === '_solo_' || bucket.items.length < 2) {
                 inserted.add(el);
                 return;
             }
