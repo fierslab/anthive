@@ -331,20 +331,18 @@ async def _run_service(
         if shutdown_event.is_set():
             break
 
-        if return_code == 0:
-            print(
-                f"{sup_prefix}{DIM}[{name}] exited cleanly — not restarting{RESET}",
-                flush=True,
-            )
-            break
-
-        # Reset back-off if the process ran long enough to be considered healthy
+        # Always respawn: the supervisor's job is to keep long-running
+        # daemons alive.  Caddy in particular exits 0 on a SIGTERM-induced
+        # graceful shutdown — which we want to treat as "got restarted"
+        # not "task complete".  If the user genuinely wants something to
+        # stop, they SIGTERM the supervisor itself (make serve-stop).
         if elapsed >= CLEAN_RUN_THRESHOLD:
             backoff_delay = BACKOFF_INITIAL
 
+        label = ('exited cleanly' if return_code == 0
+                 else f'crashed (exit {return_code})')
         print(
-            f"{sup_prefix}{RED}[{name}] crashed (exit {return_code}) "
-            f"— restarting in {backoff_delay}s{RESET}",
+            f"{sup_prefix}{RED}[{name}] {label} — restarting in {backoff_delay}s{RESET}",
             flush=True,
         )
         await asyncio.sleep(backoff_delay)
