@@ -94,8 +94,10 @@
 {% if has_duckdb %}
 <div class="viz-row">
     <span class="viz-label">visualize</span>
-    {% if info and info.obsm_keys %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/scatter" class="viz-btn">🗺 embedding</a>{% endif %}
-    {% if info and info.obsm_keys %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/hexbin" class="viz-btn">⬣ hexbin</a>{% endif %}
+    {% if info and info.obsm_keys %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/scatter" class="viz-btn" title="UMAP / embedding scatter">🗺 emb scatter</a>{% endif %}
+    {% if info and info.obsm_keys %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/hexbin" class="viz-btn" title="UMAP / embedding hexbin">⬣ emb hexbin</a>{% endif %}
+    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/xy_scatter" class="viz-btn" title="Generic XY scatter — two continuous variables (gene vs gene, gene vs module score, etc.)">✦ XY scatter</a>
+    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/xy_hexbin" class="viz-btn" title="Generic XY hexbin — two continuous variables, hex-aggregated">⬢ XY hexbin</a>
     <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/violin" class="viz-btn">🎻 violin</a>
     <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/box" class="viz-btn">📦 box</a>
     <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/bar" class="viz-btn">📊 bar</a>

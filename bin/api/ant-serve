@@ -1954,7 +1954,9 @@ _PLOT_MIME_TYPES = {
 }
 
 _PLOT_GEOMS = {
-    'scatter', 'hexbin', 'violin', 'box', 'bar',
+    'scatter', 'hexbin',               # embedding-based (x is an obsm key)
+    'xy_scatter', 'xy_hexbin',         # generic 2-variable (x AND y are continuous fields)
+    'violin', 'box', 'bar',
     'histogram', 'ecdf', 'kde', 'heatmap',
 }
 
@@ -2333,6 +2335,116 @@ def _handle_hexbin(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     return image_bytes, caption
 
 
+def _handle_xy(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
+    """Generic 2-variable (xy_scatter / xy_hexbin) — x and y are BOTH
+    continuous (gene or numerical obs).  Optional `color` (any kind).
+
+    Distinct from `scatter` / `hexbin` which use an obsm embedding for
+    the axes.  Useful for gene-vs-gene, expression-vs-module-score,
+    QC-vs-gene comparisons, etc.
+    """
+    if not req.x or not req.y:
+        raise HTTPException(400, detail=(
+            f"geom='{req.geom}' requires BOTH x and y (continuous fields). "
+            f"For embedding-based scatter/hexbin omit x."
+        ))
+    x_name, x_kind = ctx.resolve(req.x)
+    y_name, y_kind = ctx.resolve(req.y)
+    if x_kind == 'categorical' or y_kind == 'categorical':
+        raise HTTPException(400, detail=(
+            f"geom='{req.geom}' requires x and y to be continuous (gene or numerical). "
+            f"For categorical x use violin/box/bar; for embedding use scatter/hexbin."
+        ))
+
+    # Fetch x + y values for every cell.  Genes go via the layer, numerical
+    # obs come from obsnum.
+    genes_to_fetch: List[str] = []
+    metas_to_fetch: List[str] = []
+    if x_kind == 'gene':   genes_to_fetch.append(x_name)
+    else:                  metas_to_fetch.append(x_name)
+    if y_kind == 'gene':   genes_to_fetch.append(y_name)
+    else:                  metas_to_fetch.append(y_name)
+    # de-dupe in case x == y (silly but legal)
+    genes_to_fetch = list(dict.fromkeys(genes_to_fetch))
+    metas_to_fetch = list(dict.fromkeys(metas_to_fetch))
+    data_df = ctx.db.get_cell_table(
+        genes=genes_to_fetch or None,
+        metadata_fields=metas_to_fetch or None,
+        layer=req.layer,
+        filters=req.filters,
+        sample=req.sample,
+    )
+    # Build a fake "embedding df" with [cell_name, <x_name>, <y_name>] so we
+    # can re-use plot_scatter / plot_hexbin — they treat the last two
+    # columns as the spatial axes.
+    embedding_df = data_df[['cell_name', x_name, y_name]].copy()
+
+    # Optional colour.
+    color_df = None
+    color_field_name = None
+    color_kind = 'categorical'
+    if req.color:
+        color_field_name, color_kind = ctx.resolve(req.color)
+        if color_field_name in (x_name, y_name):
+            # Reuse the value we already fetched.
+            color_df = data_df[['cell_name', color_field_name]].copy()
+        else:
+            if color_kind == 'gene':
+                color_df = ctx.db.get_cell_table(
+                    genes=[color_field_name], layer=req.layer,
+                    filters=req.filters, sample=req.sample,
+                )
+            else:
+                color_df = ctx.db.get_cell_table(
+                    metadata_fields=[color_field_name],
+                    filters=req.filters, sample=req.sample,
+                )
+            # Align to the cells we fetched for x/y (in case the colour
+            # query path landed a different sample).
+            color_df = color_df.set_index('cell_name').reindex(
+                embedding_df['cell_name']
+            ).reset_index()
+
+    n_cells = int(len(embedding_df))
+    n_groups = (int(color_df[color_field_name].nunique())
+                if color_df is not None and color_kind == 'categorical' else None)
+    caption = plotting.build_caption(
+        req.db_id, req.geom, req.x, x_kind, req.y, color_field_name, req.layer,
+        n_cells=n_cells, n_groups=n_groups,
+        sample=req.sample, subset=_subset_for_caption(req),
+    )
+
+    plot_fn = plotting.plot_hexbin if req.geom == 'xy_hexbin' else plotting.plot_scatter
+    common_kwargs = dict(
+        embedding_df=embedding_df,
+        color_df=color_df,
+        color_field=color_field_name,
+        color_kind=color_kind,
+        x_label=x_name, y_label=y_name,
+        width=req.width, height=req.height, dpi=req.dpi,
+        output_format=req.output_format,
+        palette=req.palette,
+        palette_cat=req.palette_cat,
+        palette_cont=req.palette_cont,
+        palette_div=req.palette_div,
+        title_extra=req.db_id,
+        caption=caption, source_url=req.source_url,
+        font_family=req.font_family, font_size=req.font_size,
+    )
+    if req.geom == 'xy_hexbin':
+        image_bytes = plot_fn(
+            **common_kwargs,
+            alpha=req.alpha,
+            gridsize=req.gridsize, mincnt=req.mincnt,
+        )
+    else:
+        image_bytes = plot_fn(
+            **common_kwargs,
+            point_size=req.point_size, alpha=req.alpha,
+        )
+    return image_bytes, caption
+
+
 def _handle_grouped(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     """Handles violin / box / bar — x=categorical, optional y, optional
     second-factor `color` (rendered as side-by-side dodged hue, never stacked).
@@ -2478,15 +2590,17 @@ def _handle_heatmap(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
 # Registry: geom → handler. Adding a new geom is now: write a handler,
 # add a line here, add the geom name to _PLOT_GEOMS.
 _PLOT_HANDLERS: Dict[str, Any] = {
-    'scatter':   _handle_scatter,
-    'hexbin':    _handle_hexbin,
-    'violin':    _handle_grouped,
-    'box':       _handle_grouped,
-    'bar':       _handle_grouped,
-    'histogram': _handle_distribution,
-    'ecdf':      _handle_distribution,
-    'kde':       _handle_distribution,
-    'heatmap':   _handle_heatmap,
+    'scatter':    _handle_scatter,
+    'hexbin':     _handle_hexbin,
+    'xy_scatter': _handle_xy,
+    'xy_hexbin':  _handle_xy,
+    'violin':     _handle_grouped,
+    'box':        _handle_grouped,
+    'bar':        _handle_grouped,
+    'histogram':  _handle_distribution,
+    'ecdf':       _handle_distribution,
+    'kde':        _handle_distribution,
+    'heatmap':    _handle_heatmap,
 }
 
 

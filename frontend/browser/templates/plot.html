@@ -115,7 +115,39 @@
 
     {# ── geom-specific fields ──────────────────────────────────────────────── #}
 
-    {% if geom == 'scatter' or geom == 'hexbin' %}
+    {% if geom == 'xy_scatter' or geom == 'xy_hexbin' %}
+    <fieldset>
+      <legend>x axis (continuous)</legend>
+      <label>gene or numerical obs field</label>
+      <div class="ac-wrap">
+        <input type="text" name="x" id="f-x" autocomplete="off" placeholder="e.g. CD4, TREM2, total_counts">
+        <div class="ac-suggest" id="ac-x"></div>
+      </div>
+    </fieldset>
+    <fieldset>
+      <legend>y axis (continuous)</legend>
+      <label>gene or numerical obs field</label>
+      <div class="ac-wrap">
+        <input type="text" name="y" id="f-y" autocomplete="off" placeholder="e.g. APOE, MEblack, pct_counts_mt">
+        <div class="ac-suggest" id="ac-y"></div>
+      </div>
+    </fieldset>
+    <fieldset>
+      <legend>colour by (optional)</legend>
+      <label>any field — gene, numerical, or categorical</label>
+      <div class="ac-wrap">
+        <input type="text" name="color" id="f-color" autocomplete="off" placeholder="(empty = blue / hex density)">
+        <div class="ac-suggest" id="ac-color"></div>
+      </div>
+      {% if geom == 'xy_hexbin' %}
+      <label style="margin-top:4px">grid size (hex columns)</label>
+      <input type="number" name="gridsize" id="f-gridsize" value="60" min="10" max="200">
+      <label style="margin-top:4px">min cells per hex</label>
+      <input type="number" name="mincnt" id="f-mincnt" value="1" min="1" max="100">
+      {% endif %}
+    </fieldset>
+
+    {% elif geom == 'scatter' or geom == 'hexbin' %}
     <fieldset>
       <legend>embedding</legend>
       <select name="x" id="f-x">
@@ -610,6 +642,15 @@
     if (geom === 'scatter') {
       // color: prefer first top_cat (categorical legend), then first gene
       setIfEmpty('form [name="color"]', topCat[0] || topGenes[0]);
+    } else if (geom === 'hexbin') {
+      setIfEmpty('form [name="color"]', topGenes[0] || topNum[0] || topCat[0]);
+    } else if (geom === 'xy_scatter' || geom === 'xy_hexbin') {
+      // Two continuous axes — first two genes from the curated list, or
+      // pair top_gene with top_num if there's only one gene.
+      setIfEmpty('form [name="x"]', topGenes[0] || topNum[0]);
+      setIfEmpty('form [name="y"]', topGenes[1] || topNum[1] || topNum[0]);
+      // Colour: first categorical so groups separate visually
+      setIfEmpty('form [name="color"]', topCat[0]);
     } else if (geom === 'violin' || geom === 'box') {
       setIfEmpty('form [name="x"]', topCat[0]);
       setIfEmpty('form [name="y"]', topGenes[0] || topNum[0]);

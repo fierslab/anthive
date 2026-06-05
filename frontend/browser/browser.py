@@ -507,10 +507,14 @@ async def folder_view(request: Request, browse_id: str):
 # which would otherwise greedy-match "TSO/plot/scatter" as the dataset id.
 
 _PLOT_GEOMS_UI = {
-    'scatter':   {'label': 'Embedding (UMAP)', 'icon': '🗺',
+    'scatter':   {'label': 'Embedding scatter', 'icon': '🗺',
                   'needs': {'embedding': True, 'color': 'any'}},
-    'hexbin':    {'label': 'Embedding (hexbin)', 'icon': '⬣',
+    'hexbin':    {'label': 'Embedding hexbin', 'icon': '⬣',
                   'needs': {'embedding': True, 'color': 'any'}},
+    'xy_scatter': {'label': 'XY scatter', 'icon': '✦',
+                   'needs': {'x': 'gene_or_num', 'y': 'gene_or_num', 'color': 'any'}},
+    'xy_hexbin':  {'label': 'XY hexbin', 'icon': '⬢',
+                   'needs': {'x': 'gene_or_num', 'y': 'gene_or_num', 'color': 'any'}},
     'violin':    {'label': 'Violin',           'icon': '🎻',
                   'needs': {'x': 'categorical', 'y': 'gene_or_num'}},
     'box':       {'label': 'Boxplot',          'icon': '📦',

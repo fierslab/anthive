@@ -588,6 +588,16 @@ def build_caption(
             sentence += f', hexes aggregated on {color}'
         else:
             sentence += '; coloured by cell density'
+    elif geom == 'xy_scatter':
+        sentence = f'Scatter of {y} vs {x} in {db_id}'
+        if color:
+            sentence += f', cells coloured by {color}'
+    elif geom == 'xy_hexbin':
+        sentence = f'Hexbin of {y} vs {x} in {db_id}'
+        if color:
+            sentence += f', hexes aggregated on {color}'
+        else:
+            sentence += '; coloured by cell density'
     elif geom in ('violin', 'box'):
         kind = {'violin': 'Violin plot', 'box': 'Box plot'}[geom]
         if y:

@@ -83,6 +83,25 @@ def create_app(api_url: str) -> FastAPI:
         allow_headers=["*"],
     )
 
+    # No-cache for HTML responses — these are dynamic and embed JS that
+    # ships with each new commit (e.g. the plot.html form's syncURL).
+    # Browsers were caching the old plot.html and silently running stale
+    # JS even after a server-side update; this prevents that.  Static
+    # assets (CSS/JS/images) are unaffected — they have their own URLs.
+    from starlette.middleware.base import BaseHTTPMiddleware
+
+    class _NoCacheHTMLMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            response = await call_next(request)
+            ct = response.headers.get('content-type', '')
+            if ct.startswith('text/html'):
+                response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+                response.headers['Pragma'] = 'no-cache'
+                response.headers['Expires'] = '0'
+            return response
+
+    app.add_middleware(_NoCacheHTMLMiddleware)
+
     # Store API URL and config in app state for routes to access
     app.state.api_url = api_url
     config = get_config()
