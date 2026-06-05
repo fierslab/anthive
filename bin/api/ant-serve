@@ -1127,6 +1127,11 @@ async def lifespan(app: FastAPI):
     print("Server shutdown complete")
 
 
+# Single source of truth for the API version — used by the FastAPI app
+# (→ openapi.json info.version), the root endpoint, /health, and the startup
+# banner, so they can never drift apart again.
+API_VERSION = "2.1.0"
+
 # Create FastAPI app with lifespan handler (Phase 2)
 app = FastAPI(
     title="Anthive API",
@@ -1163,7 +1168,7 @@ Authentication is handled by reverse proxy (nginx, caddy, etc.) using HTTP Basic
 - **OpenAPI Schema**: [/openapi.json](/openapi.json)
 - **Metrics**: [/metrics](/metrics) - Performance metrics
     """,
-    version="2.1.0",
+    version=API_VERSION,
     docs_url="/docs",
     redoc_url="/redoc",
     root_path="/api",
@@ -1302,7 +1307,7 @@ async def root():
     """
     return {
         "name": "Anthive API",
-        "version": "2.0.0",
+        "version": API_VERSION,
         "databases": len(registry.databases) if registry else 0,
         "uptime_seconds": registry.get_uptime() if registry else 0,
         "documentation": {
@@ -1375,6 +1380,7 @@ async def health_check():
             "databases": database_count,
             "database_errors": error_count,
             "uptime_seconds": int(registry.get_uptime()),
+            "api_version": API_VERSION,
             # Speed signal — lower = faster.  null when no samples yet.
             "mean_response_ms": timing['mean_ms'],
             "p50_response_ms":  timing['p50_ms'],
@@ -2162,7 +2168,10 @@ class PlotRequest:
     bins: int
     point_size: float
     alpha: float
-    palette: str
+    palette: str          # legacy — used as palette_cat when palette_cat is default
+    palette_cat: str      # categorical / qualitative
+    palette_cont: str     # sequential continuous (counts, expression, …)
+    palette_div: str      # divergent continuous (z-scores, log fold change, …)
     font_family: str
     font_size: float
     ci: bool
@@ -2249,7 +2258,12 @@ def _handle_scatter(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         y_label=y_label,
         width=req.width, height=req.height, dpi=req.dpi,
         output_format=req.output_format,
-        point_size=req.point_size, alpha=req.alpha, palette=req.palette,
+        point_size=req.point_size, alpha=req.alpha,
+        palette=req.palette,
+        palette_cat=req.palette_cat,
+        palette_cont=req.palette_cont,
+        palette_div=req.palette_div,
+        title_extra=f'{req.db_id} · {emb_id}',
         caption=caption, source_url=req.source_url,
         font_family=req.font_family, font_size=req.font_size,
     )
@@ -2306,8 +2320,13 @@ def _handle_hexbin(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         x_label=x_label, y_label=y_label,
         width=req.width, height=req.height, dpi=req.dpi,
         output_format=req.output_format,
-        palette=req.palette, alpha=req.alpha,
+        palette=req.palette,
+        palette_cat=req.palette_cat,
+        palette_cont=req.palette_cont,
+        palette_div=req.palette_div,
+        alpha=req.alpha,
         gridsize=req.gridsize, mincnt=req.mincnt,
+        title_extra=f'{req.db_id} · {emb_id}',
         caption=caption, source_url=req.source_url,
         font_family=req.font_family, font_size=req.font_size,
     )
@@ -2488,7 +2507,10 @@ async def plot(
     bins: int = Query(20, ge=2, le=500),
     point_size: float = Query(3.0, gt=0.0, le=200.0),
     alpha: float = Query(0.8, ge=0.0, le=1.0),
-    palette: str = Query('tab10', description="Categorical colormap. tab10 has 10 colors; tab20 cycles 20. Continuous fields use viridis when unspecified."),
+    palette: str = Query('tab10', description="DEPRECATED — use palette_categorical. Kept for backward-compat; if passed, overrides palette_categorical."),
+    palette_categorical: str = Query('tab10', description="Qualitative palette for categorical / discrete colour. Examples: tab10, tab20, Set1, Set2, Paired, Dark2."),
+    palette_continuous: str = Query('inferno_r', description="Sequential cmap for one-sided continuous data (counts, gene expression, %mt, ...). Examples: inferno_r, viridis, plasma, mako."),
+    palette_divergent: str = Query('RdBu_r', description="Divergent cmap for data that straddles zero (z-scores, log fold change). Auto-selected when the data is detected as divergent. Examples: RdBu_r, coolwarm, PiYG, BrBG."),
     font_family: str = Query('DejaVu Sans', description="matplotlib font family (e.g. 'Arial', 'Helvetica', 'DejaVu Sans', 'serif')"),
     font_size: float = Query(10.0, ge=6.0, le=36.0, description="Base font size in pt; titles & ticks scale relative to this"),
     ci: bool = Query(True, description="Show 95% CI on bar plots"),
@@ -2549,7 +2571,11 @@ async def plot(
         db_id=db_id, geom=geom, x=x, y=y, color=color,
         output_format=output_format, layer=layer,
         width=width, height=height, dpi=dpi, bins=bins,
-        point_size=point_size, alpha=alpha, palette=palette,
+        point_size=point_size, alpha=alpha,
+        palette=palette,
+        palette_cat=palette_categorical,
+        palette_cont=palette_continuous,
+        palette_div=palette_divergent,
         font_family=font_family, font_size=font_size,
         ci=ci, n_genes=n_genes,
         gridsize=gridsize, mincnt=mincnt,
@@ -3465,7 +3491,7 @@ def main():
     print(f"\n{'='*60}")
     print(f"Starting Anthive REST API Server")
     print(f"{'='*60}")
-    print(f"  Version: 2.0.0")
+    print(f"  Version: {API_VERSION}")
     print(f"  Host: {args.host}")
     print(f"  Port: {args.port}")
     print(f"  Data folder: {args.data_folder}")

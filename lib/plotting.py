@@ -10,7 +10,7 @@ Legacy functions (plot_umap, plot_gene, plot_cat, plot_num) remain unchanged.
 """
 
 import io
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 import matplotlib
@@ -21,30 +21,144 @@ import seaborn as sns
 import pandas as pd
 
 
-_DEFAULT_PALETTE = 'tab10'
+# Three palette families.  The right one is picked from the data kind:
+#
+#   categorical  — discrete labels (cell types, clusters, samples)
+#   sequential   — strictly ordered, single-direction continuous
+#                  (counts, gene expression, mt-fraction, percent-X, …)
+#   divergent    — continuous values that straddle a meaningful zero
+#                  (z-scores, log fold change, signed module scores)
+#
+# Defaults — used when the caller doesn't override:
+_DEFAULT_CATEGORICAL = 'tab10'
+_DEFAULT_SEQUENTIAL  = 'inferno_r'
+_DEFAULT_DIVERGENT   = 'RdBu_r'
+
+# Legacy alias kept for older callers — points at the categorical default.
+_DEFAULT_PALETTE = _DEFAULT_CATEGORICAL
+
 _VALID_FORMATS = {'png', 'svg', 'pdf'}
 
-# Qualitative (categorical) palettes — never use these as a continuous cmap.
-# If a caller passes one of these for a continuous field, we fall back to
-# `_CONTINUOUS_DEFAULT` below.
+# Qualitative palettes: never use these as a continuous cmap (matplotlib
+# accepts them but cycles them into an unreadable scale).  Discrete colours
+# only.
 _QUALITATIVE_PALETTES = {
     'tab10', 'tab20', 'tab20b', 'tab20c',
     'Set1', 'Set2', 'Set3',
     'Paired', 'Accent', 'Dark2',
     'Pastel1', 'Pastel2',
 }
-_CONTINUOUS_DEFAULT = 'inferno_r'
+
+# Divergent palettes: red↔blue, brown↔green, etc. — only meaningful when
+# data spans zero (or some other neutral midpoint).  Don't use these for
+# sequential data — the midpoint colour becomes uninformative.
+_DIVERGENT_PALETTES = {
+    'RdBu', 'RdBu_r',
+    'coolwarm',
+    'RdYlBu', 'RdYlBu_r',
+    'PiYG', 'PiYG_r',
+    'PuOr', 'PuOr_r',
+    'BrBG', 'BrBG_r',
+    'RdGy', 'RdGy_r',
+    'bwr', 'seismic', 'Spectral', 'Spectral_r',
+}
 
 
-def _continuous_cmap(palette: str) -> str:
-    """Return a sane sequential cmap for continuous data.
+# Back-compat shim — used to be the only "is continuous?" helper.
+_CONTINUOUS_DEFAULT = _DEFAULT_SEQUENTIAL
 
-    Categorical palettes (tab10, Set1, ...) are NOT valid continuous cmaps —
-    matplotlib will accept them but render an unreadable cycled scale.  We
-    substitute `_CONTINUOUS_DEFAULT` (inferno_r) for those.
+
+def _fmt_n(n: int) -> str:
+    """Pretty cell-count: 234567 → '235k', 1_300_000 → '1.3M'."""
+    if n < 1_000:
+        return str(n)
+    if n < 100_000:
+        return f"{n/1_000:.1f}k"
+    if n < 1_000_000:
+        return f"{int(round(n/1_000))}k"
+    return f"{n/1_000_000:.1f}M"
+
+
+def _compose_title(bits: list, extra: Optional[str] = None) -> str:
+    """Compose a tight title: "<main> · <bit> · <bit> · <extra>"."""
+    pieces = [str(b) for b in bits if b]
+    if extra:
+        pieces.append(str(extra))
+    if not pieces:
+        return ''
+    return pieces[0] + (' · ' + ' · '.join(pieces[1:]) if len(pieces) > 1 else '')
+
+
+def _looks_divergent(values) -> bool:
+    """Heuristic: data straddles zero with comparable magnitudes on each side
+    → it's meaningfully divergent (z-scores, log fold change, signed module
+    scores).  A field where 99% of values are positive isn't divergent even
+    if a few negatives slipped in."""
+    arr = np.asarray(values, dtype=float)
+    finite = arr[np.isfinite(arr)]
+    if finite.size < 10:
+        return False
+    vmin = float(finite.min())
+    vmax = float(finite.max())
+    if not (vmin < 0 < vmax):
+        return False
+    # require both arms to be at least ~10% of the dominant arm
+    return min(abs(vmin), abs(vmax)) / max(abs(vmin), abs(vmax)) > 0.1
+
+
+def pick_cmap(
+    kind: str,
+    palette_cat: str = _DEFAULT_CATEGORICAL,
+    palette_cont: str = _DEFAULT_SEQUENTIAL,
+    palette_div: str = _DEFAULT_DIVERGENT,
+    values=None,
+) -> Tuple[str, str]:
+    """Return ``(cmap_name, used_kind)`` for the given data kind.
+
+    Args:
+        kind:  ``'categorical'`` | ``'continuous'`` | ``'gene'``.
+               ``'gene'`` is treated like ``'continuous'`` for cmap purposes.
+        palette_cat / palette_cont / palette_div: per-family palettes.
+        values: numeric array used to auto-decide sequential vs divergent
+                inside the continuous branch.  Pass ``None`` for "force
+                sequential".
+
+    Returns:
+        ``(cmap_name, 'categorical' | 'sequential' | 'divergent')``.
+
+    Defensive fallbacks:
+        - a qualitative palette name passed for a continuous family is
+          silently replaced with the default sequential cmap.
+        - a divergent palette passed when the data is one-sided is replaced
+          with the sequential default.
+        - a sequential palette passed when the data is divergent is replaced
+          with the divergent default (so the user always sees a coherent
+          axis).
     """
+    if kind == 'categorical':
+        if palette_cat in _QUALITATIVE_PALETTES:
+            return palette_cat, 'categorical'
+        return _DEFAULT_CATEGORICAL, 'categorical'
+
+    # 'continuous' or 'gene'
+    if values is not None and _looks_divergent(values):
+        if palette_div in _DIVERGENT_PALETTES:
+            return palette_div, 'divergent'
+        return _DEFAULT_DIVERGENT, 'divergent'
+
+    if palette_cont in _QUALITATIVE_PALETTES:
+        return _DEFAULT_SEQUENTIAL, 'sequential'
+    if palette_cont in _DIVERGENT_PALETTES:
+        # one-sided data → divergent cmap wastes range; fall back
+        return _DEFAULT_SEQUENTIAL, 'sequential'
+    return palette_cont, 'sequential'
+
+
+# Legacy single-palette helper kept for any old callsite I missed.
+def _continuous_cmap(palette: str) -> str:
+    """Old single-palette helper.  Prefer pick_cmap() for new code."""
     if not palette or palette in _QUALITATIVE_PALETTES:
-        return _CONTINUOUS_DEFAULT
+        return _DEFAULT_SEQUENTIAL
     return palette
 
 
@@ -539,7 +653,11 @@ def plot_scatter(
     output_format: str = 'png',
     point_size: float = 3,
     alpha: float = 0.8,
-    palette: str = _DEFAULT_PALETTE,
+    palette: Optional[str] = None,          # legacy alias (used as palette_cat)
+    palette_cat: str = _DEFAULT_CATEGORICAL,
+    palette_cont: str = _DEFAULT_SEQUENTIAL,
+    palette_div: str = _DEFAULT_DIVERGENT,
+    title_extra: Optional[str] = None,
     caption: Optional[str] = None,
     source_url: Optional[str] = None,
     font_family: Optional[str] = None,
@@ -564,19 +682,26 @@ def plot_scatter(
     y_col = embedding_df.columns[-1]
     plot_df = embedding_df.copy()
 
+    # Back-compat: legacy callers passing a single `palette=` override the
+    # categorical default.
+    if palette:
+        palette_cat = palette
+
+    n_cells = int(len(plot_df))
+
     if color_df is not None and color_field:
         color_values = color_df.set_index('cell_name')[color_field]
         plot_df[color_field] = color_values.reindex(plot_df['cell_name'].values).values
 
         if color_kind == 'categorical':
+            cmap_name, _ = pick_cmap('categorical', palette_cat=palette_cat,
+                                     palette_cont=palette_cont,
+                                     palette_div=palette_div)
             sns.scatterplot(
                 data=plot_df, x=x_col, y=y_col,
                 hue=color_field, linewidth=0, s=point_size, alpha=alpha,
-                palette=palette, ax=ax,
+                palette=cmap_name, ax=ax,
             )
-            # Site-wide convention: legend pinned outside, top-right of axes.
-            # Shrink font when there are many categories so the legend doesn't
-            # dwarf the plot itself.
             n_cats = int(plot_df[color_field].nunique())
             legend_fontsize = 6 if n_cats > 12 else 8
             ax.legend(
@@ -586,32 +711,46 @@ def plot_scatter(
                 title=color_field, title_fontsize=legend_fontsize + 1,
                 frameon=False,
             )
+            title_bits = [color_field, f'{n_cats} grps', f'n={_fmt_n(n_cells)}']
         else:
-            # Numerical / gene: continuous data needs a sequential cmap.
-            # Substitute inferno_r when the user (or default) gave us a
-            # qualitative palette like tab10/tab20/Set1 — those would render
-            # an unreadable cycled colour scale.
-            cmap = _continuous_cmap(palette)
             color_array = np.asarray(pd.to_numeric(plot_df[color_field], errors='coerce'), dtype=float)
+            cmap_name, used_kind = pick_cmap(
+                'continuous',
+                palette_cat=palette_cat,
+                palette_cont=palette_cont,
+                palette_div=palette_div,
+                values=color_array,
+            )
+            sc_kwargs: dict = {
+                'c': color_array,
+                'cmap': cmap_name,
+                's': point_size,
+                'alpha': alpha,
+                'linewidths': 0,
+            }
+            if used_kind == 'divergent':
+                finite = color_array[np.isfinite(color_array)]
+                vlim = float(np.nanmax(np.abs(finite))) if finite.size else 1.0
+                sc_kwargs['vmin'] = -vlim
+                sc_kwargs['vmax'] = +vlim
             sc = ax.scatter(
                 np.asarray(plot_df[x_col], dtype=float),
                 np.asarray(plot_df[y_col], dtype=float),
-                c=color_array,
-                cmap=cmap,
-                s=point_size,
-                alpha=alpha,
-                linewidths=0,
+                **sc_kwargs,
             )
-            plt.colorbar(sc, ax=ax, label=color_field, shrink=0.8)
+            label_suffix = ' (z-scored / divergent)' if used_kind == 'divergent' else ''
+            plt.colorbar(sc, ax=ax, label=f'{color_field}{label_suffix}', shrink=0.8)
+            title_bits = [color_field, f'n={_fmt_n(n_cells)}']
     else:
         sns.scatterplot(
             data=plot_df, x=x_col, y=y_col,
             linewidth=0, s=point_size, alpha=alpha, color='steelblue', ax=ax,
         )
+        title_bits = ['UMAP', f'n={_fmt_n(n_cells)}']
 
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
-    ax.set_title(color_field or 'UMAP')
+    ax.set_title(_compose_title(title_bits, extra=title_extra))
     sns.despine(ax=ax)
 
     return _render_figure(fig, dpi, output_format, caption, source_url)
@@ -628,10 +767,14 @@ def plot_hexbin(
     height: float = 6,
     dpi: int = 150,
     output_format: str = 'png',
-    palette: str = _DEFAULT_PALETTE,
+    palette: Optional[str] = None,                # legacy alias for palette_cat
+    palette_cat: str = _DEFAULT_CATEGORICAL,
+    palette_cont: str = _DEFAULT_SEQUENTIAL,
+    palette_div: str = _DEFAULT_DIVERGENT,
     gridsize: int = 60,
     mincnt: int = 1,
     alpha: float = 1.0,
+    title_extra: Optional[str] = None,
     caption: Optional[str] = None,
     source_url: Optional[str] = None,
     font_family: Optional[str] = None,
@@ -674,13 +817,24 @@ def plot_hexbin(
     xs = np.asarray(embedding_df[x_col], dtype=float)
     ys = np.asarray(embedding_df[y_col], dtype=float)
 
+    # Back-compat: legacy single-`palette` callers point at the categorical
+    # default (it was the only knob before this revision).
+    if palette:
+        palette_cat = palette
+
+    n_cells = int(len(embedding_df))
+
     if color_df is None or not color_field:
-        # Density only (count of cells per hex).  Continuous → inferno_r-ish.
-        cmap = _continuous_cmap(palette)
+        # Density only — sequential, count of cells per hex.
+        cmap_name, _ = pick_cmap('continuous',
+                                 palette_cat=palette_cat,
+                                 palette_cont=palette_cont,
+                                 palette_div=palette_div)
         hb = ax.hexbin(xs, ys, gridsize=gridsize, mincnt=mincnt,
-                       cmap=cmap, linewidths=0)
+                       cmap=cmap_name, linewidths=0)
         plt.colorbar(hb, ax=ax, label='cell count', shrink=0.8)
-        ax.set_title('Cell density')
+        title_bits = ['density', f'n={_fmt_n(n_cells)}', f'gridsize={gridsize}']
+        ax.set_title(_compose_title(title_bits, extra=title_extra))
 
     elif color_kind in ('numerical', 'gene'):
         # Per-hex mean of a continuous value.
@@ -688,15 +842,39 @@ def plot_hexbin(
             embedding_df['cell_name'].values
         )
         cvals = np.asarray(values, dtype=float)
-        # Continuous data — never use a qualitative palette for the cmap.
-        cmap = _continuous_cmap(palette)
-        hb = ax.hexbin(xs, ys, C=cvals, reduce_C_function=np.mean,
-                       gridsize=gridsize, mincnt=mincnt,
-                       cmap=cmap, alpha=alpha, linewidths=0)
+        cmap_name, used_kind = pick_cmap(
+            'continuous',
+            palette_cat=palette_cat,
+            palette_cont=palette_cont,
+            palette_div=palette_div,
+            values=cvals,
+        )
+        hb_kwargs: dict = {
+            'C': cvals,
+            'reduce_C_function': np.mean,
+            'gridsize': gridsize,
+            'mincnt': mincnt,
+            'cmap': cmap_name,
+            'alpha': alpha,
+            'linewidths': 0,
+        }
+        if used_kind == 'divergent':
+            finite = cvals[np.isfinite(cvals)]
+            vlim = float(np.nanmax(np.abs(finite))) if finite.size else 1.0
+            hb_kwargs['vmin'] = -vlim
+            hb_kwargs['vmax'] = +vlim
+        hb = ax.hexbin(xs, ys, **hb_kwargs)
         label_kind = 'expression' if color_kind == 'gene' else 'value'
-        plt.colorbar(hb, ax=ax, label=f'mean {color_field} ({label_kind})',
+        label_suffix = ' (divergent)' if used_kind == 'divergent' else ''
+        plt.colorbar(hb, ax=ax,
+                     label=f'mean {color_field} ({label_kind}){label_suffix}',
                      shrink=0.8)
-        ax.set_title(f'{color_field} (hexbin mean)')
+        title_bits = [
+            color_field,
+            f'⬣ mean ({"div" if used_kind == "divergent" else "seq"})',
+            f'n={_fmt_n(n_cells)}',
+        ]
+        ax.set_title(_compose_title(title_bits, extra=title_extra))
 
     else:
         # Categorical: modal label + dominance.  Done by hand because
@@ -748,10 +926,15 @@ def plot_hexbin(
             alphas_hex = np.clip(alphas_hex, 0.15, 1.0)
             modal_code = counts.argmax(axis=1)
 
-            # Pick colours from a qualitative palette.  If the user passed
-            # a continuous cmap (viridis etc.), fall back to the default
-            # qualitative one — a continuous cmap on 9 clusters is unreadable.
-            cat_palette = palette if palette in _QUALITATIVE_PALETTES else _DEFAULT_PALETTE
+            # Categorical: always use a qualitative palette.  pick_cmap()
+            # handles fallback if the user accidentally passed a divergent
+            # or sequential cmap for categorical colour.
+            cat_palette, _ = pick_cmap(
+                'categorical',
+                palette_cat=palette_cat,
+                palette_cont=palette_cont,
+                palette_div=palette_div,
+            )
             cmap_obj = matplotlib.cm.get_cmap(cat_palette)
             n_palette = getattr(cmap_obj, 'N', 256)
             colors = cmap_obj(np.array([m % n_palette for m in modal_code]) / max(n_palette - 1, 1))
@@ -795,7 +978,22 @@ def plot_hexbin(
                 fontsize=8, title=color_field,
                 title_fontsize=9, frameon=False,
             )
-        ax.set_title(f'{color_field} (modal hex; α = dominance)')
+        # Title carries the categorical context: n_cats, n_used hexes,
+        # and the median dominance so the reader knows "how mixed" the
+        # plot looks before reading the alpha.
+        try:
+            n_used_hex = int(used.sum())
+            median_dom = float(np.median(dominance[used])) if n_used_hex else 0.0
+        except Exception:
+            n_used_hex, median_dom = 0, 0.0
+        title_bits = [
+            color_field,
+            f'⬣ modal · α=dom',
+            f'{len(unique_cats)} grps',
+            f'n={_fmt_n(n_cells)}',
+            f'median dom={median_dom:.1f}',
+        ]
+        ax.set_title(_compose_title(title_bits, extra=title_extra))
 
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)

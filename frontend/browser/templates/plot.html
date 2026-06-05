@@ -247,9 +247,17 @@
           <option>monospace</option>
         </select>
         <label>font size (pt)</label><input type="number" id="s-font_size" min="6" max="36" step="0.5">
-        <label>palette</label>
-        <select id="s-palette">
-          <option>tab20</option><option>tab10</option><option>Set1</option><option>Set2</option><option>Set3</option><option>Paired</option><option>viridis</option><option>plasma</option><option>mako</option>
+        <label title="categorical / discrete colour">palette (categorical)</label>
+        <select id="s-palette_categorical">
+          <option>tab10</option><option>tab20</option><option>tab20b</option><option>tab20c</option><option>Set1</option><option>Set2</option><option>Set3</option><option>Paired</option><option>Dark2</option><option>Accent</option>
+        </select>
+        <label title="sequential continuous: counts, expression, %mt, etc.">palette (continuous)</label>
+        <select id="s-palette_continuous">
+          <option>inferno_r</option><option>inferno</option><option>viridis</option><option>viridis_r</option><option>plasma</option><option>magma</option><option>cividis</option><option>mako</option><option>rocket</option>
+        </select>
+        <label title="divergent: data straddling zero (z-scores, log fold change)">palette (divergent)</label>
+        <select id="s-palette_divergent">
+          <option>RdBu_r</option><option>RdBu</option><option>coolwarm</option><option>RdYlBu</option><option>RdYlBu_r</option><option>Spectral</option><option>PiYG</option><option>PuOr</option><option>BrBG</option><option>bwr</option>
         </select>
       </div>
       <div style="display:flex;gap:8px;margin-top:6px;align-items:center;font-size:10px;color:#888">
@@ -291,7 +299,11 @@
   // ── default settings (used until user saves their own)
   const DEFAULT_SETTINGS = {
     width: 8, height: 6, dpi: 150, point_size: 3, alpha: 0.8,
-    font_family: 'DejaVu Sans', font_size: 10, palette: 'tab20'
+    font_family: 'DejaVu Sans', font_size: 10,
+    // Three palette families — each used for the matching data kind:
+    palette_categorical: 'tab10',
+    palette_continuous:  'inferno_r',
+    palette_divergent:   'RdBu_r',
   };
 
   function loadSettings() {
@@ -408,9 +420,37 @@
     window.location = BROWSE + e.target.value + window.location.search;
   });
 
+  // ── URL sync — every form change is also pushed into window.location's
+  //     query string via history.replaceState, so the browser address bar
+  //     is always copy/share-able and a paste of that URL on another
+  //     machine reproduces the exact same plot.  We strip empty values to
+  //     keep URLs short.
+  function syncURL() {
+    const params = new URLSearchParams();
+    document.querySelectorAll('#plot-form [name]').forEach(el => {
+      const name = el.getAttribute('name');
+      if (!name) return;
+      let value;
+      if (el.type === 'checkbox') {
+        // Only emit when checkbox state differs from the form's default
+        // (preserves the "?" in the URL only for non-default toggles).
+        if (el.checked === el.defaultChecked) return;
+        value = el.checked ? 'true' : 'false';
+      } else {
+        value = el.value;
+      }
+      if (value === '' || value == null) return;
+      params.set(name, value);
+    });
+    const qs = params.toString();
+    const newUrl = window.location.pathname + (qs ? '?' + qs : '');
+    history.replaceState(null, '', newUrl);
+  }
+
   // ── apply button + change listeners (debounced)
   let debounceTimer = null;
   function scheduleRefresh() {
+    syncURL();
     refreshDownloadLinks();
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(refresh, 400);
@@ -419,7 +459,7 @@
     el.addEventListener('change', scheduleRefresh);
     if (el.tagName === 'INPUT') el.addEventListener('input', scheduleRefresh);
   });
-  document.getElementById('apply-btn').addEventListener('click', () => { refreshDownloadLinks(); refresh(); });
+  document.getElementById('apply-btn').addEventListener('click', () => { syncURL(); refreshDownloadLinks(); refresh(); });
 
   // ── settings panel
   const panel = document.getElementById('settings-panel');
