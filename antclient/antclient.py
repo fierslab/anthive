@@ -16,13 +16,13 @@ Example:
 
 Author: Anthive Team
 License: MIT
-Version: 1.0.0
+Version: 1.2.0
 """
 
 from typing import Any, Dict, List, Optional, Union
 import requests
 
-__version__ = "1.1.3"
+__version__ = "1.2.0"
 __all__ = ["AnthiveClient"]
 
 
@@ -138,7 +138,23 @@ class AnthiveClient:
         In Pyodide/browser environments, automatically detects origin
     """
 
-    def __init__(self, base_url: str = None, timeout: int = 30):
+    def __init__(self,
+                 base_url: Optional[str] = None,
+                 timeout: int = 30,
+                 auth: Optional[Any] = None):
+        """Create an Anthive REST client.
+
+        Args:
+            base_url: e.g. ``"http://localhost:8080"`` or ``"https://my.host/api"``.
+                When None, falls back to the ``ANTHIVE_API_URL`` env var, then
+                to a browser-side ``js.window.location.origin``, then to
+                ``http://localhost:8080``.
+            timeout: per-request timeout in seconds.
+            auth: HTTP authentication, passed straight through to ``requests``.
+                Use a ``(user, password)`` tuple for HTTP Basic auth, or any
+                ``requests.auth.AuthBase`` subclass.  Required when the server
+                is behind a Caddy basic-auth gate (see ``config/caddy-auth.example``).
+        """
         # Auto-detect base_url if not provided
         if base_url is None:
             import os
@@ -160,40 +176,32 @@ class AnthiveClient:
         self.base_url = base_url.rstrip('/') if base_url else "http://localhost:8080"
         self.timeout = timeout
         self.headers = {}
+        self.auth = auth
 
     def _get(self, path: str, params: Optional[Dict] = None) -> Any:
-        """Execute GET request
-
-        Args:
-            path: API path (e.g., "/databases")
-            params: Optional query parameters
-
-        Returns:
-            JSON response
-
-        Raises:
-            requests.HTTPError: If request fails
-        """
+        """GET → JSON.  Raises ``requests.HTTPError`` on non-2xx."""
         url = f"{self.base_url}{path}"
-        response = requests.get(url, params=params, headers=self.headers, timeout=self.timeout)
+        response = requests.get(url, params=params, headers=self.headers,
+                                timeout=self.timeout, auth=self.auth)
         response.raise_for_status()
         return response.json()
 
-    def _post(self, path: str, json: Optional[Dict] = None) -> Any:
-        """Execute POST request
-
-        Args:
-            path: API path
-            json: Optional JSON payload
-
-        Returns:
-            JSON response
-
-        Raises:
-            requests.HTTPError: If request fails
-        """
+    def _get_raw(self, path: str, params: Optional[Dict] = None) -> 'requests.Response':
+        """GET → raw ``requests.Response`` (for endpoints that return non-JSON
+        bytes, e.g. the plot endpoint).  Caller is responsible for reading
+        ``.content`` / ``.headers`` and for the HTTP status check (a leading
+        ``raise_for_status()`` is done here so non-2xx already raises)."""
         url = f"{self.base_url}{path}"
-        response = requests.post(url, json=json, headers=self.headers, timeout=self.timeout)
+        response = requests.get(url, params=params, headers=self.headers,
+                                timeout=self.timeout, auth=self.auth)
+        response.raise_for_status()
+        return response
+
+    def _post(self, path: str, json: Optional[Dict] = None) -> Any:
+        """POST → JSON.  Raises ``requests.HTTPError`` on non-2xx."""
+        url = f"{self.base_url}{path}"
+        response = requests.post(url, json=json, headers=self.headers,
+                                 timeout=self.timeout, auth=self.auth)
         response.raise_for_status()
         return response.json()
 
@@ -212,14 +220,29 @@ class AnthiveClient:
         return self._get('/')
 
     def get_health(self) -> Dict:
-        """Get server health status
+        """Get server health + speed signal.
 
         Returns:
-            Dict with status, database count, errors, uptime
+            Dict with::
+
+                {
+                    "status": "healthy",
+                    "databases": 98,
+                    "database_errors": 0,
+                    "uptime_seconds": 3600,
+                    "mean_response_ms": 126.2,   # null until n_samples > 0
+                    "p50_response_ms":  81.1,    # null until n_samples > 0
+                    "n_samples":  31             # last-1024 non-probe requests
+                }
+
+            ``mean_response_ms`` / ``p50_response_ms`` are server-side
+            wall-clock means over the last 1024 non-probe requests.
+            Lower = faster.  Use them to pick between replicas — see
+            :meth:`pick_fastest` for a ready-made helper.
 
         Example:
-            >>> health = client.get_health()
-            >>> print(f"Status: {health['status']}")
+            >>> client.get_health()['status']
+            'healthy'
         """
         return self._get('/health')
 
@@ -627,6 +650,218 @@ class AnthiveClient:
             return _to_dataframe(result, fill_na_genes=fill_na)
         return result
 
+    # ===== Plot =====
+
+    def get_plot(self,
+                 db_id: str,
+                 geom: str,
+                 x: Optional[str] = None,
+                 y: Optional[str] = None,
+                 color: Optional[str] = None,
+                 layer: str = "X",
+                 format: str = "png",
+                 width: float = 8,
+                 height: float = 6,
+                 dpi: int = 150,
+                 palette: str = "tab20",
+                 sample: Optional[int] = None,
+                 subset: Optional[List[str]] = None,
+                 **extra) -> Dict[str, Any]:
+        """Render a plot server-side.  Returns image bytes + caption.
+
+        Args:
+            db_id:  Database identifier (``group/file``).
+            geom:   ``scatter`` | ``violin`` | ``box`` | ``bar`` | ``histogram``
+                    | ``ecdf`` | ``kde`` | ``heatmap``.
+            x, y, color: field names (gene, obs column, or embedding).  Their
+                    meaning is geom-specific — see the OpenAPI docs.
+            layer:  Expression layer to plot from (default ``"X"``).
+            format: ``png`` | ``svg`` | ``pdf``.
+            width, height, dpi, palette: figure styling.
+            sample: random-subsample N cells (server-side, reservoir sampling).
+            subset: list of ``field:value`` or ``field:v1,v2`` filter strings;
+                    sent as repeated ``?subset=`` query params.
+            **extra: any other plot params (``bins``, ``ci``, ``font_family``,
+                    ``font_size``, ``point_size``, ``alpha``, ``n_genes``, ...).
+
+        Returns:
+            Dict with::
+
+                {
+                    "bytes":      <raw image bytes>,
+                    "format":     "png" | "svg" | "pdf",
+                    "caption":    "<informative figure legend>",
+                    "source_url": "<original URL the server saw>",
+                    "cache":      "HIT" | "MISS",
+                    "mime":       "image/png" | ...,
+                }
+
+            Save with ``open(path, 'wb').write(result['bytes'])`` or pass to
+            ``IPython.display.Image(result['bytes'])`` in a notebook.
+
+        Example:
+            >>> p = client.get_plot("S25/V6W", "bar", x="patient_geno", dpi=80)
+            >>> open("bar.png", "wb").write(p["bytes"])
+            >>> print(p["caption"])  # "Bar plot of ... n = 235,106 cells; 29 groups."
+        """
+        params: Dict[str, Any] = {
+            'geom': geom, 'format': format, 'layer': layer,
+            'width': width, 'height': height, 'dpi': dpi, 'palette': palette,
+        }
+        if x      is not None: params['x']      = x
+        if y      is not None: params['y']      = y
+        if color  is not None: params['color']  = color
+        if sample is not None: params['sample'] = sample
+        if subset:
+            # FastAPI accepts repeated ?subset= params; `requests` does this
+            # when the value is a list.
+            params['subset'] = subset
+        for key, value in extra.items():
+            if value is not None:
+                params[key] = value
+        response = self._get_raw(f'/databases/{db_id}/plot', params=params)
+        return {
+            'bytes':      response.content,
+            'format':     response.headers.get('X-Plot-Format', format),
+            'caption':    response.headers.get('X-Plot-Caption', ''),
+            'source_url': response.headers.get('X-Source-URL', ''),
+            'cache':      response.headers.get('X-Plot-Cache', ''),
+            'mime':       response.headers.get('Content-Type', ''),
+        }
+
+    # ===== Analytics (sandboxed SELECT) =====
+
+    def analytics_schema(self, db_id: str) -> Dict:
+        """Return the schema (tables + columns + 3-row samples) visible to the
+        analytics sandbox.  Use this before constructing an analytics query —
+        column names differ per dataset.
+
+        Example:
+            >>> schema = client.analytics_schema("S25/V6W")
+            >>> [t['name'] for t in schema['tables']]
+            ['obsnum', 'obscat', 'genes', 'cells', 'layer__X']
+        """
+        return self._get(f'/databases/{db_id}/analytics/schema')
+
+    def analytics_query(self,
+                        db_id: str,
+                        sql: str,
+                        limit: Optional[int] = None,
+                        format: str = "json") -> Union[Dict, Any]:
+        """Run a sandboxed SELECT-only query.  Safer than :meth:`execute_sql`
+        for untrusted input — INSERT / UPDATE / DELETE / ATTACH are rejected.
+
+        The full result set is saved server-side as Parquet under a
+        ``session_id``; ``preview`` holds the first rows for inspection,
+        and ``row_count`` is the true total.  Pass the ``session_id`` to
+        downstream tools (e.g. ``/analytics/viz``) to visualise the same
+        result without re-running the query.
+
+        Args:
+            db_id:  Database identifier.
+            sql:    SELECT (or WITH … SELECT) statement.
+            limit:  optional server-side row cap (applies to the preview
+                    AND the saved Parquet).
+            format: ``json`` (default) — returns the full response dict
+                    (``session_id``, ``columns``, ``dtypes``, ``row_count``,
+                    ``truncated``, ``full_table``, ``preview``).
+                    ``dataframe`` — convert the ``preview`` rows to a
+                    pandas DataFrame (requires pandas).
+
+        Example:
+            >>> r = client.analytics_query(
+            ...     "S25/V6W",
+            ...     "SELECT patient_geno, COUNT(*) AS n FROM obscat GROUP BY 1")
+            >>> r["row_count"]
+            29
+            >>> r["preview"][:3]
+            [{'patient_geno': '...', 'n': 12345}, ...]
+        """
+        payload: Dict[str, Any] = {'sql': sql}
+        if limit is not None:
+            payload['limit'] = limit
+        result = self._post(f'/databases/{db_id}/analytics/query', json=payload)
+        if format == 'dataframe':
+            try:
+                import pandas as pd
+            except ImportError:
+                raise ImportError(
+                    "pandas is required for format='dataframe'. "
+                    "Install with: pip install pandas"
+                )
+            return pd.DataFrame(result.get('preview', []),
+                                columns=result.get('columns'))
+        return result
+
+    # ===== Module scores =====
+
+    def module_score(self,
+                     db_id: str,
+                     genes: List[str],
+                     name: Optional[str] = None,
+                     layer: str = "X",
+                     format: str = "json") -> Union[Dict, Any]:
+        """Compute a Seurat-style module score for an arbitrary gene list,
+        on the fly.  Result is per-cell.
+
+        Args:
+            db_id: Database identifier.
+            genes: list of gene symbols (case-resolved against the dataset).
+            name:  optional label for the score (echoed back in the response).
+            layer: layer to score from (default ``"X"``).
+            format: ``json`` (default) or ``dataframe`` (requires pandas).
+
+        Example:
+            >>> r = client.module_score("S25/V6W", ["P2RY12","CX3CR1","TMEM119"],
+            ...                          name="homeostatic_MG")
+        """
+        payload: Dict[str, Any] = {'genes': genes, 'layer': layer}
+        if name:
+            payload['name'] = name
+        result = self._post(f'/databases/{db_id}/module_score', json=payload)
+        if format == 'dataframe':
+            import pandas as pd
+            return pd.DataFrame(result.get('cells', result))
+        return result
+
+    @_cache_short(ttl=60)
+    def list_module_scores(_self, db_id: str) -> List[Dict]:
+        """List pre-computed module-score columns available on this dataset
+        (the ones already in ``obsnum``).  Use this for catalog/discovery,
+        then ``analytics_query`` to read the values.
+
+        Example:
+            >>> [m['name'] for m in client.list_module_scores("S25/V6W")][:3]
+            ['Sierksma2025::WGCNA::Black_Mito', '…', '…']
+        """
+        return _self._get(f'/databases/{db_id}/module_scores')
+
+    # ===== Genesets =====
+
+    @_cache_long(ttl=3600)
+    def list_genesets(_self) -> Dict:
+        """Return the geneset catalog: studies → experiments → genesets.
+
+        Returns ``{}`` if the geneset store isn't configured (server
+        responds 503/404).  Any other HTTP error is propagated."""
+        try:
+            return _self._get('/genesets')
+        except requests.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else 0
+            if status in (404, 503):
+                return {}
+            raise
+
+    @_cache_long(ttl=3600)
+    def get_geneset_experiment(_self, study: str, experiment: str) -> Dict:
+        """Return one experiment from the geneset store, listing its genesets."""
+        return _self._get(f'/genesets/{study}/{experiment}')
+
+    @_cache_long(ttl=3600)
+    def get_geneset(_self, study: str, experiment: str, name: str) -> Dict:
+        """Return the full content of one geneset (gene list + ranks if .rnk)."""
+        return _self._get(f'/genesets/{study}/{experiment}/{name}')
+
     # ===== Admin Operations =====
 
     def rescan_databases(self) -> Dict:
@@ -640,6 +875,22 @@ class AnthiveClient:
             >>> print(f"Databases: {result['previous_count']} -> {result['current_count']}")
         """
         return self._post('/admin/rescan')
+
+    def admin_release(self, db_id: str) -> Dict:
+        """Tell ant-serve to drop its read-only handle on a duckdb so a
+        writer (ant-score / ant-starcat / ant-annotate / ant-convert) can
+        open it read-write.  Pair with :meth:`admin_restore` when done.
+
+        Used internally by ``lib.anthive_db.AnnotationWriter``.  You only
+        need to call it directly if you're driving annotation from outside
+        the standard tools.
+        """
+        return self._post(f'/admin/release/{db_id}')
+
+    def admin_restore(self, db_id: str) -> Dict:
+        """Inverse of :meth:`admin_release` — clears the eviction so
+        ant-serve can serve from the database again."""
+        return self._post(f'/admin/restore/{db_id}')
 
     # ===== Convenience Methods =====
 
@@ -671,6 +922,64 @@ class AnthiveClient:
         """
         # Use search with empty query and high limit
         return self.search_genes(db_id, q="", limit=100000)
+
+    @classmethod
+    def pick_fastest(cls,
+                     base_urls: List[str],
+                     auth: Optional[Any] = None,
+                     timeout: float = 2.0,
+                     prefer: str = "p50",
+                     min_samples: int = 10) -> Optional[str]:
+        """Probe several anthive servers' ``/health`` endpoints, return the
+        ``base_url`` of the one most likely to answer fastest.
+
+        For each URL we read ``mean_response_ms`` / ``p50_response_ms`` from
+        ``/health``.  If the server has fewer than ``min_samples`` samples
+        in its ring buffer (cold start), we fall back to the client-observed
+        RTT of the probe itself.  Servers that 503 or time out are skipped.
+
+        Args:
+            base_urls:   list of ``http(s)://host[:port][/api]`` candidates.
+            auth:        passed through to ``requests`` (e.g. ``("user","pw")``).
+            timeout:     per-probe timeout, seconds.
+            prefer:      ``"p50"`` (outlier-resistant; default) or ``"mean"``.
+            min_samples: below this, ignore server-side stats and use RTT.
+
+        Returns:
+            The fastest base_url (str), or ``None`` if every endpoint failed.
+
+        Example:
+            >>> from antclient import AnthiveClient
+            >>> best = AnthiveClient.pick_fastest(
+            ...     ["http://anthive-a:8501", "http://anthive-b:8501"],
+            ...     auth=("user", "pass"))
+            >>> client = AnthiveClient(best, auth=("user", "pass"))
+        """
+        import time
+        if prefer not in ('mean', 'p50'):
+            raise ValueError(f"prefer must be 'mean' or 'p50', got {prefer!r}")
+        field = f'{prefer}_response_ms'
+        best, best_score = None, float('inf')
+        for raw in base_urls:
+            url = raw.rstrip('/')
+            try:
+                t0 = time.perf_counter()
+                response = requests.get(
+                    f"{url}/health", auth=auth, timeout=timeout,
+                )
+                rtt_ms = (time.perf_counter() - t0) * 1000.0
+                body = response.json() if response.status_code == 200 else {}
+            except (requests.RequestException, ValueError):
+                continue
+            # Use server-side stat once it has enough samples; otherwise
+            # the client-observed RTT is the fairer signal.
+            if body.get('n_samples', 0) >= min_samples and body.get(field) is not None:
+                score = body[field]
+            else:
+                score = rtt_ms
+            if score < best_score:
+                best, best_score = url, score
+        return best
 
     def __repr__(self):
         """String representation"""

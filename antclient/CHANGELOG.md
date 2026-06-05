@@ -5,6 +5,52 @@ All notable changes to the Anthive Client will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-06-05
+
+### Added
+- **Constructor `auth=` parameter** — pass a `(user, password)` tuple or any
+  `requests.auth.AuthBase` for HTTP Basic and friends. Required for servers
+  fronted by a Caddy basic-auth gate.
+- **`get_plot(db_id, geom, **params)`** — render plots server-side; returns
+  a dict with `bytes` (image bytes), `caption`, `format`, `cache`,
+  `source_url`, `mime`. Supports every geom the API exposes
+  (scatter/violin/box/bar/histogram/ecdf/kde/heatmap) plus subset filters
+  and random sampling.
+- **`analytics_schema(db_id)`** — list tables/columns visible to the
+  SELECT-only analytics sandbox (call before constructing a query).
+- **`analytics_query(db_id, sql, ...)`** — sandboxed SELECT-only query,
+  safer than `execute_sql` for untrusted input. Returns
+  `{session_id, columns, dtypes, row_count, truncated, preview, ...}`;
+  `session_id` can be reused for downstream visualization endpoints.
+- **`module_score(db_id, genes, ...)`** — compute a Seurat-style module
+  score on the fly from an arbitrary gene list.
+- **`list_module_scores(db_id)`** — discover pre-computed module-score obs
+  columns on a dataset.
+- **Geneset access**: `list_genesets()`,
+  `get_geneset_experiment(study, experiment)`,
+  `get_geneset(study, experiment, name)`. `list_genesets` returns `{}`
+  gracefully when the server has no geneset store configured.
+- **`admin_release(db_id)` / `admin_restore(db_id)`** — coordination
+  endpoints used by external writers (rarely needed directly; usually
+  driven by `lib.anthive_db.AnnotationWriter`).
+- **`AnthiveClient.pick_fastest(base_urls, auth=..., prefer='p50')`**
+  classmethod — probe several anthive endpoints' `/health` and return
+  the fastest base URL. Uses server-side `p50_response_ms` /
+  `mean_response_ms` when available, falls back to client-observed RTT
+  for cold servers (`n_samples < 10`).
+- `get_health` docstring now documents the new `mean_response_ms`,
+  `p50_response_ms`, and `n_samples` fields the server exposes (since
+  REST API 2.1).
+
+### Changed
+- `_get` / `_post` now forward `self.auth` through to `requests`, so the
+  new constructor param is honoured uniformly across every method.
+
+### Compatibility
+- All existing methods and call signatures are unchanged.
+- Optional dep `pandas` is still the only optional; required deps remain
+  just `requests`.
+
 ## [1.1.3] - 2026-03-18
 
 ### Added
