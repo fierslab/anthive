@@ -16,13 +16,13 @@ Example:
 
 Author: Anthive Team
 License: MIT
-Version: 1.2.0
+Version: 1.3.0
 """
 
 from typing import Any, Dict, List, Optional, Union
 import requests
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 __all__ = ["AnthiveClient"]
 
 
@@ -861,6 +861,86 @@ class AnthiveClient:
     def get_geneset(_self, study: str, experiment: str, name: str) -> Dict:
         """Return the full content of one geneset (gene list + ranks if .rnk)."""
         return _self._get(f'/genesets/{study}/{experiment}/{name}')
+
+    def rescan_genesets(self) -> Dict:
+        """Re-scan the server-side geneset store from disk and rebuild the
+        score index.  Pair with :meth:`rescan_databases` after editing
+        ``data/genesetstore/``.
+
+        Returns counts of experiments / genesets / scored_databases plus
+        validation errors + warnings."""
+        return self._post('/genesets/rescan')
+
+    # ===== Analytics visualization (driven by analytics_query session_id) =====
+
+    def analytics_viz(self,
+                      session_id: str,
+                      code: str,
+                      output_format: str = "png") -> Dict[str, Any]:
+        """Run a Python visualisation script against the Parquet result of a
+        prior :meth:`analytics_query`, return the rendered figure.
+
+        The script runs server-side in a sandbox: AST-scanned for dangerous
+        imports, killed after ~60 s wall-clock.  The sandbox **pre-injects**:
+
+        - ``df``           — your analytics_query result, already loaded as a
+                             pandas DataFrame (do NOT call ``pd.read_parquet`` —
+                             it's blocked).
+        - ``pd``, ``plt``, ``sns``, ``np`` — pre-imported.
+        - ``DATA_PATH``    — path to the Parquet file (read-only).
+        - ``OUTPUT_PATH``  — path the script MUST save its figure to, e.g.
+                             ``plt.savefig(OUTPUT_PATH, bbox_inches='tight')``.
+
+        Args:
+            session_id:    the ``session_id`` from an earlier ``analytics_query``.
+            code:          Python script body.  See pre-injected names above.
+            output_format: ``png`` | ``svg`` | ``pdf``.
+
+        Returns:
+            Dict with ``session_id``, ``output_format``, ``mime_type``, and
+            ``figure_b64`` (base64-encoded image bytes).  Decode with
+            ``base64.b64decode(result['figure_b64'])``.
+
+        Example:
+            >>> q = c.analytics_query("S25/V6W",
+            ...     "SELECT MEblack, MEblue FROM obsnum LIMIT 1000")
+            >>> v = c.analytics_viz(q['session_id'], '''
+            ...   df.plot.scatter(x="MEblack", y="MEblue")
+            ...   plt.savefig(OUTPUT_PATH, bbox_inches="tight", dpi=150)
+            ... ''')
+            >>> import base64
+            >>> open('out.png','wb').write(base64.b64decode(v['figure_b64']))
+        """
+        payload = {
+            'session_id': session_id,
+            'code': code,
+            'output_format': output_format,
+        }
+        return self._post('/analytics/viz', json=payload)
+
+    # ===== Plot cache admin =====
+
+    def get_plot_cache_stats(self) -> Dict:
+        """Return ant-serve's plot-response cache stats: ``size``, ``max_size``,
+        ``memory_bytes``, ``hits``, ``misses``, ``evictions``, ``hit_rate``."""
+        return self._get('/admin/plot-cache/stats')
+
+    def clear_plot_cache(self) -> Dict:
+        """Drop every entry from ant-serve's plot-response LRU cache.
+        Returns ``{"cleared": N}``."""
+        return self._post('/admin/plot-cache/clear')
+
+    # ===== Skill (MCP collaborator install path) =====
+
+    def get_skill(self) -> str:
+        """Fetch the Anthive Claude Code skill file (``SKILL.md``) as plain
+        Markdown.  Used to install the anthive skill into ``~/.claude/skills/``
+        when collaborators want LLM clients to discover this API.
+
+        Returns the SKILL.md content as a string (NOT a dict).  Raises
+        ``HTTPError`` 404 if the file isn't present on the server."""
+        response = self._get_raw('/skill')
+        return response.text
 
     # ===== Admin Operations =====
 

@@ -5,6 +5,34 @@ All notable changes to the Anthive Client will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-06-05
+
+### Added — full API coverage
+
+After a 1.2.0 audit found 5 server endpoints had no client method, these
+are now wrapped:
+
+- **`analytics_viz(session_id, code, output_format='png')`** — run a
+  Python visualisation script server-side against the Parquet result of
+  an earlier ``analytics_query`` (sandboxed, AST-scanned, 60 s timeout).
+  Pre-injected vars: ``df``, ``pd``, ``plt``, ``sns``, ``np``,
+  ``DATA_PATH``, ``OUTPUT_PATH`` — do NOT call ``pd.read_parquet``
+  (blocked).  Returns base64-encoded image bytes.
+- **`rescan_genesets()`** — re-scan ``data/genesetstore/`` from disk and
+  rebuild the score index.  Pair with ``rescan_databases``.
+- **`get_plot_cache_stats()`** — ant-serve plot-LRU diagnostics.
+- **`clear_plot_cache()`** — drop every entry from the plot-LRU.
+- **`get_skill()`** — fetch the Anthive Claude Code skill file
+  (``SKILL.md``) as plain Markdown; for collaborators installing the
+  anthive skill into ``~/.claude/skills/``.
+
+### Coverage
+
+Every non-deprecated REST endpoint now has a client method.  The 4
+``/databases/{id}/plot/{umap,gene,cat,num}`` endpoints are intentionally
+skipped — they are deprecated on the server in favour of the unified
+``/databases/{id}/plot`` (already wrapped as ``get_plot``).
+
 ## [1.2.0] - 2026-06-05
 
 ### Added
