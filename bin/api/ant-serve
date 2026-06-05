@@ -1182,18 +1182,88 @@ app.add_middleware(
 # Can enable gzip middleware here if needed
 
 
-# ── Request logging middleware ────────────────────────────────────────────────
+# ── Request logging + timing middleware ───────────────────────────────────────
+#
+# The middleware logs every request AND feeds a ring buffer of recent
+# latency samples used by /metrics and /health.  /health exposes
+# `mean_response_ms` + `p50_response_ms` so a client picking between
+# multiple anthive servers can choose the fastest one (lower = faster).
+#
+# Health/metrics requests themselves are excluded — otherwise client
+# probing would dominate the stat.
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request as StarletteRequest
 
+import threading as _threading
+from collections import deque as _deque
+
+_TIMING_RING_SIZE = 1024
+_timing_lock     = _threading.Lock()
+_timing_ring: '_deque[float]' = _deque(maxlen=_TIMING_RING_SIZE)
+_timing_count_total = 0
+_timing_count_errors = 0
+# Paths excluded from the timing stat (their purpose is being polled, so
+# including them would skew the metric toward "fast").
+_TIMING_SKIP_PATH_SUFFIXES = ('/health', '/metrics', '/admin/plot-cache/stats')
+
+
+def _record_timing(elapsed_ms: float, is_error: bool) -> None:
+    global _timing_count_total, _timing_count_errors
+    with _timing_lock:
+        _timing_ring.append(elapsed_ms)
+        _timing_count_total += 1
+        if is_error:
+            _timing_count_errors += 1
+
+
+def _timing_snapshot() -> dict:
+    """Latency stats from the ring buffer (O(n log n) on size 1024 —
+    negligible vs a real request)."""
+    with _timing_lock:
+        samples = list(_timing_ring)
+        total   = _timing_count_total
+        errors  = _timing_count_errors
+    if not samples:
+        return {
+            'n_samples': 0,
+            'mean_ms':   None,
+            'p50_ms':    None,
+            'p95_ms':    None,
+            'p99_ms':    None,
+            'max_ms':    None,
+            'total':     total,
+            'errors':    errors,
+        }
+    sorted_samples = sorted(samples)
+    n = len(sorted_samples)
+
+    def _pct(p: float) -> float:
+        if n == 1:
+            return sorted_samples[0]
+        # Nearest-rank percentile — fine for diagnostic purposes.
+        idx = max(0, min(n - 1, int(round((p / 100.0) * (n - 1)))))
+        return sorted_samples[idx]
+
+    return {
+        'n_samples': n,
+        'mean_ms':   sum(sorted_samples) / n,
+        'p50_ms':    _pct(50),
+        'p95_ms':    _pct(95),
+        'p99_ms':    _pct(99),
+        'max_ms':    sorted_samples[-1],
+        'total':     total,
+        'errors':    errors,
+    }
+
 
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
-    """Log every request with timing, status, and errors."""
+    """Log every request and record latency into the global ring buffer."""
 
     async def dispatch(self, request: StarletteRequest, call_next):
         start = time.time()
         path = request.url.path
         method = request.method
+        skip_timing = any(path.endswith(suf) for suf in _TIMING_SKIP_PATH_SUFFIXES)
         try:
             response = await call_next(request)
             elapsed = time.time() - start
@@ -1206,10 +1276,14 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                 log.warning('%s %s → %d SLOW (%.2fs)', method, path, status, elapsed)
             else:
                 log.debug('%s %s → %d (%.2fs)', method, path, status, elapsed)
+            if not skip_timing:
+                _record_timing(elapsed * 1000.0, is_error=(status >= 500))
             return response
         except Exception as exc:
             elapsed = time.time() - start
             log.exception('%s %s CRASHED after %.2fs: %s', method, path, elapsed, exc)
+            if not skip_timing:
+                _record_timing(elapsed * 1000.0, is_error=True)
             raise
 
 
@@ -1273,9 +1347,16 @@ def _pooled_db(db_id: str):
 @app.get("/health", tags=["info"])
 async def health_check():
     """
-    Health check endpoint for load balancers
+    Health check + speed signal for load balancers and client-side server
+    selection.
 
-    Returns 200 if healthy, 503 if unhealthy
+    Returns 200 if healthy, 503 if unhealthy.  `mean_response_ms` /
+    `p50_response_ms` are computed over the last 1024 non-probe requests;
+    a client picking between multiple anthive servers should prefer the
+    one with the lowest values (null = no samples yet).
+
+    Health and /metrics requests are excluded from the timing samples so
+    that polling doesn't skew the metric.
     """
     try:
         database_count = len(registry.databases)
@@ -1287,11 +1368,16 @@ async def health_check():
                 detail="No databases available"
             )
 
+        timing = _timing_snapshot()
         return {
             "status": "healthy",
             "databases": database_count,
             "database_errors": error_count,
-            "uptime_seconds": int(registry.get_uptime())
+            "uptime_seconds": int(registry.get_uptime()),
+            # Speed signal — lower = faster.  null when no samples yet.
+            "mean_response_ms": timing['mean_ms'],
+            "p50_response_ms":  timing['p50_ms'],
+            "n_samples":        timing['n_samples'],
         }
     except HTTPException:
         raise
@@ -1305,23 +1391,36 @@ async def health_check():
 @app.get("/metrics", tags=["info"])
 async def get_metrics():
     """
-    Performance metrics endpoint (Phase 2)
+    Performance metrics endpoint.
 
     Returns:
-    - Request statistics
-    - Connection pool statistics
-    - Cache statistics
-    - Uptime information
+    - uptime_seconds
+    - requests: total, errors, error_rate (counted from middleware ring,
+      excluding /health, /metrics, plot-cache stats)
+    - latency_ms: mean / p50 / p95 / p99 / max over the last 1024 non-probe
+      requests, plus n_samples.  Use these to compare server speed across
+      replicas.
+    - connection_pool: hit/miss/in_use stats
+    - caches: database/metadata/gene cache sizes
     """
     try:
         pool_stats = connection_pool.get_stats()
+        timing = _timing_snapshot()
 
         return {
             "uptime_seconds": int(registry.get_uptime()),
             "requests": {
-                "total": registry.request_count,
-                "errors": registry.error_count,
-                "error_rate": registry.error_count / max(1, registry.request_count)
+                "total":      timing['total'],
+                "errors":     timing['errors'],
+                "error_rate": timing['errors'] / max(1, timing['total']),
+            },
+            "latency_ms": {
+                "n_samples": timing['n_samples'],
+                "mean":      timing['mean_ms'],
+                "p50":       timing['p50_ms'],
+                "p95":       timing['p95_ms'],
+                "p99":       timing['p99_ms'],
+                "max":       timing['max_ms'],
             },
             "connection_pool": pool_stats,
             "caches": {
