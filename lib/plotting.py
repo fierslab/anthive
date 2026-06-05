@@ -24,6 +24,29 @@ import pandas as pd
 _DEFAULT_PALETTE = 'tab10'
 _VALID_FORMATS = {'png', 'svg', 'pdf'}
 
+# Qualitative (categorical) palettes — never use these as a continuous cmap.
+# If a caller passes one of these for a continuous field, we fall back to
+# `_CONTINUOUS_DEFAULT` below.
+_QUALITATIVE_PALETTES = {
+    'tab10', 'tab20', 'tab20b', 'tab20c',
+    'Set1', 'Set2', 'Set3',
+    'Paired', 'Accent', 'Dark2',
+    'Pastel1', 'Pastel2',
+}
+_CONTINUOUS_DEFAULT = 'inferno_r'
+
+
+def _continuous_cmap(palette: str) -> str:
+    """Return a sane sequential cmap for continuous data.
+
+    Categorical palettes (tab10, Set1, ...) are NOT valid continuous cmaps —
+    matplotlib will accept them but render an unreadable cycled scale.  We
+    substitute `_CONTINUOUS_DEFAULT` (inferno_r) for those.
+    """
+    if not palette or palette in _QUALITATIVE_PALETTES:
+        return _CONTINUOUS_DEFAULT
+    return palette
+
 
 def _legend_outside(ax, title: Optional[str] = None, fontsize: float = 8) -> None:
     """Move an existing matplotlib legend to outside-top-right of the axes.
@@ -564,10 +587,11 @@ def plot_scatter(
                 frameon=False,
             )
         else:
-            # Numerical / gene: use matplotlib directly so viridis (or any cmap)
-            # is applied correctly and a proper colorbar is shown instead of a
-            # dot-legend.
-            cmap = palette if palette != _DEFAULT_PALETTE else 'viridis'
+            # Numerical / gene: continuous data needs a sequential cmap.
+            # Substitute inferno_r when the user (or default) gave us a
+            # qualitative palette like tab10/tab20/Set1 — those would render
+            # an unreadable cycled colour scale.
+            cmap = _continuous_cmap(palette)
             color_array = np.asarray(pd.to_numeric(plot_df[color_field], errors='coerce'), dtype=float)
             sc = ax.scatter(
                 np.asarray(plot_df[x_col], dtype=float),
@@ -651,21 +675,21 @@ def plot_hexbin(
     ys = np.asarray(embedding_df[y_col], dtype=float)
 
     if color_df is None or not color_field:
-        # Density only.
+        # Density only (count of cells per hex).  Continuous → inferno_r-ish.
+        cmap = _continuous_cmap(palette)
         hb = ax.hexbin(xs, ys, gridsize=gridsize, mincnt=mincnt,
-                       cmap='viridis', linewidths=0)
+                       cmap=cmap, linewidths=0)
         plt.colorbar(hb, ax=ax, label='cell count', shrink=0.8)
         ax.set_title('Cell density')
 
     elif color_kind in ('numerical', 'gene'):
         # Per-hex mean of a continuous value.
-        # color_df is aligned to embedding_df via cell_name.
         values = color_df.set_index('cell_name')[color_field].reindex(
             embedding_df['cell_name'].values
         )
         cvals = np.asarray(values, dtype=float)
-        # Hexbin's C+reduce_C_function gives us the per-hex aggregate.
-        cmap = palette if palette in plt.colormaps() else 'viridis'
+        # Continuous data — never use a qualitative palette for the cmap.
+        cmap = _continuous_cmap(palette)
         hb = ax.hexbin(xs, ys, C=cvals, reduce_C_function=np.mean,
                        gridsize=gridsize, mincnt=mincnt,
                        cmap=cmap, alpha=alpha, linewidths=0)
@@ -724,24 +748,27 @@ def plot_hexbin(
             alphas_hex = np.clip(alphas_hex, 0.15, 1.0)
             modal_code = counts.argmax(axis=1)
 
-            cmap_obj = matplotlib.cm.get_cmap(palette if palette in plt.colormaps() else _DEFAULT_PALETTE)
+            # Pick colours from a qualitative palette.  If the user passed
+            # a continuous cmap (viridis etc.), fall back to the default
+            # qualitative one — a continuous cmap on 9 clusters is unreadable.
+            cat_palette = palette if palette in _QUALITATIVE_PALETTES else _DEFAULT_PALETTE
+            cmap_obj = matplotlib.cm.get_cmap(cat_palette)
             n_palette = getattr(cmap_obj, 'N', 256)
             colors = cmap_obj(np.array([m % n_palette for m in modal_code]) / max(n_palette - 1, 1))
 
             # Draw hexes as a PolyCollection so we can vary per-hex alpha.
-            radius = scratch.get_paths()[0].vertices
-            # Reconstruct hex polygon vertices around each centre.
-            # `radius` is a unit hex in the [-0.5, 0.5] box; scale by hex width.
-            xs_off = offsets[:, 0]
-            ys_off = offsets[:, 1]
-            dx = (xs_off.max() - xs_off.min()) / max(gridsize - 1, 1)
-            dy = dx  # hexbin uses near-square aspect
+            # matplotlib's hexbin builds the polygon already sized in data
+            # units (sx = (xmax-xmin)/gridsize, sy = (ymax-ymin)/(gridsize*√3/2)),
+            # centred at origin — we just translate it to each hex centre.
+            # The earlier version re-scaled by an additional 1/gridsize,
+            # which made the hexes tiny.
+            hex_polygon = scratch.get_paths()[0].vertices  # data units, centred at (0,0)
             from matplotlib.collections import PolyCollection
             polys = []
-            for cx, cy in zip(xs_off[used], ys_off[used]):
+            for cx, cy in zip(offsets[used, 0], offsets[used, 1]):
                 polys.append(np.column_stack([
-                    radius[:, 0] * dx + cx,
-                    radius[:, 1] * dy + cy,
+                    hex_polygon[:, 0] + cx,
+                    hex_polygon[:, 1] + cy,
                 ]))
             face_colours = colors[used]
             face_colours[:, 3] = alphas_hex[used]  # set per-hex alpha
