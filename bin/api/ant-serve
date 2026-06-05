@@ -2182,6 +2182,8 @@ class PlotRequest:
     mincnt: int          # hexbin: minimum cells per hex to render
     log_x: bool          # xy_scatter / xy_hexbin: apply log1p to x values
     log_y: bool          # xy_scatter / xy_hexbin: apply log1p to y values
+    vmin: Optional[float]  # hexbin / scatter colorbar lower clip (None = auto)
+    vmax: Optional[float]  # hexbin / scatter colorbar upper clip (None = auto)
     filters: Optional[Dict[str, Any]]
     sample: Optional[int]
     source_url: str
@@ -2267,6 +2269,7 @@ def _handle_scatter(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         palette_cat=req.palette_cat,
         palette_cont=req.palette_cont,
         palette_div=req.palette_div,
+        vmin=req.vmin, vmax=req.vmax,
         title_extra=f'{req.db_id} · {emb_id}',
         caption=caption, source_url=req.source_url,
         font_family=req.font_family, font_size=req.font_size,
@@ -2330,6 +2333,7 @@ def _handle_hexbin(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         palette_div=req.palette_div,
         alpha=req.alpha,
         gridsize=req.gridsize, mincnt=req.mincnt,
+        vmin=req.vmin, vmax=req.vmax,
         title_extra=f'{req.db_id} · {emb_id}',
         caption=caption, source_url=req.source_url,
         font_family=req.font_family, font_size=req.font_size,
@@ -2449,11 +2453,13 @@ def _handle_xy(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
             **common_kwargs,
             alpha=req.alpha,
             gridsize=req.gridsize, mincnt=req.mincnt,
+            vmin=req.vmin, vmax=req.vmax,
         )
     else:
         image_bytes = plot_fn(
             **common_kwargs,
             point_size=req.point_size, alpha=req.alpha,
+            vmin=req.vmin, vmax=req.vmax,
         )
     return image_bytes, caption
 
@@ -2646,6 +2652,8 @@ async def plot(
     mincnt: int = Query(1, ge=1, le=1000, description="Hexbin: minimum cells per hex to render (filters out sparse outliers)"),
     log_x: bool = Query(False, description="xy_scatter / xy_hexbin: apply log1p(x) before plotting. Use for raw counts / heavy-tailed expression. Zeros stay at 0."),
     log_y: bool = Query(False, description="xy_scatter / xy_hexbin: apply log1p(y) before plotting."),
+    vmin: Optional[float] = Query(None, description="Hexbin / scatter: lower clip for the continuous colour scale. Leave empty for auto. For density (no colour field), this clips the cell-count scale."),
+    vmax: Optional[float] = Query(None, description="Hexbin / scatter: upper clip — useful when one hex's outlier value washes out the rest of the gradient. Leave empty for auto."),
     subset: List[str] = Query(default=[], description=(
         "Cell subset filter(s). Repeatable. Formats: "
         "'field:value' (exact), 'field:v1,v2' (IN list), 'field:min..max' (range). "
@@ -2709,6 +2717,7 @@ async def plot(
         ci=ci, n_genes=n_genes,
         gridsize=gridsize, mincnt=mincnt,
         log_x=log_x, log_y=log_y,
+        vmin=vmin, vmax=vmax,
         filters=filters, sample=sample,
         source_url=source_url,
     )

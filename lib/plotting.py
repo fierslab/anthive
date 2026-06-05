@@ -667,6 +667,8 @@ def plot_scatter(
     palette_cat: str = _DEFAULT_CATEGORICAL,
     palette_cont: str = _DEFAULT_SEQUENTIAL,
     palette_div: str = _DEFAULT_DIVERGENT,
+    vmin: Optional[float] = None,           # colorbar clip — None = auto
+    vmax: Optional[float] = None,
     title_extra: Optional[str] = None,
     caption: Optional[str] = None,
     source_url: Optional[str] = None,
@@ -743,6 +745,9 @@ def plot_scatter(
                 vlim = float(np.nanmax(np.abs(finite))) if finite.size else 1.0
                 sc_kwargs['vmin'] = -vlim
                 sc_kwargs['vmax'] = +vlim
+            # User overrides always win.
+            if vmin is not None: sc_kwargs['vmin'] = vmin
+            if vmax is not None: sc_kwargs['vmax'] = vmax
             sc = ax.scatter(
                 np.asarray(plot_df[x_col], dtype=float),
                 np.asarray(plot_df[y_col], dtype=float),
@@ -784,6 +789,8 @@ def plot_hexbin(
     gridsize: int = 60,
     mincnt: int = 1,
     alpha: float = 1.0,
+    vmin: Optional[float] = None,                 # colorbar clip — None = auto
+    vmax: Optional[float] = None,
     title_extra: Optional[str] = None,
     caption: Optional[str] = None,
     source_url: Optional[str] = None,
@@ -840,8 +847,11 @@ def plot_hexbin(
                                  palette_cat=palette_cat,
                                  palette_cont=palette_cont,
                                  palette_div=palette_div)
-        hb = ax.hexbin(xs, ys, gridsize=gridsize, mincnt=mincnt,
-                       cmap=cmap_name, linewidths=0)
+        hb_kwargs: dict = dict(gridsize=gridsize, mincnt=mincnt,
+                               cmap=cmap_name, linewidths=0)
+        if vmin is not None: hb_kwargs['vmin'] = vmin
+        if vmax is not None: hb_kwargs['vmax'] = vmax
+        hb = ax.hexbin(xs, ys, **hb_kwargs)
         plt.colorbar(hb, ax=ax, label='cell count', shrink=0.8)
         title_bits = ['density', f'n={_fmt_n(n_cells)}', f'gridsize={gridsize}']
         ax.set_title(_compose_title(title_bits, extra=title_extra))
@@ -873,6 +883,10 @@ def plot_hexbin(
             vlim = float(np.nanmax(np.abs(finite))) if finite.size else 1.0
             hb_kwargs['vmin'] = -vlim
             hb_kwargs['vmax'] = +vlim
+        # Explicit user overrides always win — useful to clip outliers
+        # (e.g. one hex with a mean expression of 12 washes out the rest).
+        if vmin is not None: hb_kwargs['vmin'] = vmin
+        if vmax is not None: hb_kwargs['vmax'] = vmax
         hb = ax.hexbin(xs, ys, **hb_kwargs)
         label_kind = 'expression' if color_kind == 'gene' else 'value'
         label_suffix = ' (divergent)' if used_kind == 'divergent' else ''

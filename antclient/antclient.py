@@ -16,13 +16,13 @@ Example:
 
 Author: Anthive Team
 License: MIT
-Version: 1.3.0
+Version: 1.4.0
 """
 
 from typing import Any, Dict, List, Optional, Union
 import requests
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 __all__ = ["AnthiveClient"]
 
 
@@ -681,8 +681,14 @@ class AnthiveClient:
             sample: random-subsample N cells (server-side, reservoir sampling).
             subset: list of ``field:value`` or ``field:v1,v2`` filter strings;
                     sent as repeated ``?subset=`` query params.
-            **extra: any other plot params (``bins``, ``ci``, ``font_family``,
-                    ``font_size``, ``point_size``, ``alpha``, ``n_genes``, ...).
+            **extra: any other plot params, forwarded as query params:
+                    ``bins``, ``ci``, ``font_family``, ``font_size``,
+                    ``point_size``, ``alpha``, ``n_genes``,
+                    ``gridsize``, ``mincnt`` (hexbin),
+                    ``log_x``, ``log_y`` (xy_scatter / xy_hexbin),
+                    ``vmin``, ``vmax`` (continuous colorbar clip),
+                    ``palette_categorical``, ``palette_continuous``,
+                    ``palette_divergent``.
 
         Returns:
             Dict with::

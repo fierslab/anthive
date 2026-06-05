@@ -5,6 +5,35 @@ All notable changes to the Anthive Client will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-06-05
+
+### Added — full coverage of new plot params
+
+The server-side `/plot` endpoint gained several params over the last
+day; `get_plot()` already forwards them via `**extra`, but the
+docstring now enumerates them so callers know what's available without
+reading the OpenAPI spec:
+
+- **`hexbin`** (embedding) — new geom in REST API 2.1.  Aggregates
+  cells into hex bins; three colour modes (categorical with dominance
+  α, continuous mean, density).  Params: `gridsize`, `mincnt`.
+- **`xy_scatter` / `xy_hexbin`** — generic 2-variable plots (not
+  embedding-based).  `x` and `y` are arbitrary continuous fields
+  (gene or numerical).  Params: `log_x`, `log_y` (apply log1p before
+  plotting).
+- **Three palette families** (replacing the single `palette`):
+  `palette_categorical` (default `tab10`),
+  `palette_continuous` (default `inferno_r`),
+  `palette_divergent` (default `RdBu_r`).  Server auto-detects
+  divergent for continuous fields straddling zero.
+- **`vmin` / `vmax`** — clip the continuous colour scale at user-
+  supplied limits.  Useful when one outlier hex would otherwise wash
+  out the gradient.  Applies to scatter (continuous colour) and
+  hexbin (all colour modes).
+
+Existing call sites are unchanged.  All new params pass through
+`**extra` to the URL query string — no client API break.
+
 ## [1.3.0] - 2026-06-05
 
 ### Added — full API coverage

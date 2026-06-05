@@ -146,6 +146,10 @@
       <input type="number" name="gridsize" id="f-gridsize" value="60" min="10" max="200">
       <label style="margin-top:4px">min cells per hex</label>
       <input type="number" name="mincnt" id="f-mincnt" value="1" min="1" max="100">
+      <label style="margin-top:4px">vmin (colorbar lower clip — blank = auto)</label>
+      <input type="number" name="vmin" id="f-vmin" step="any" placeholder="auto">
+      <label style="margin-top:4px">vmax (colorbar upper clip — blank = auto)</label>
+      <input type="number" name="vmax" id="f-vmax" step="any" placeholder="auto">
       {% endif %}
     </fieldset>
 
@@ -170,9 +174,15 @@
       <input type="number" name="gridsize" id="f-gridsize" value="60" min="10" max="200">
       <label style="margin-top:4px">min cells per hex</label>
       <input type="number" name="mincnt" id="f-mincnt" value="1" min="1" max="100">
+      <label style="margin-top:4px">vmin (colorbar lower clip — blank = auto)</label>
+      <input type="number" name="vmin" id="f-vmin" step="any" placeholder="auto">
+      <label style="margin-top:4px">vmax (colorbar upper clip — blank = auto)</label>
+      <input type="number" name="vmax" id="f-vmax" step="any" placeholder="auto">
       <small style="display:block;margin-top:4px;color:#666">
         Categorical → hex coloured by modal class, alpha by dominance
         (top1/top2 ratio).  Continuous → per-hex mean.  No colour → density.
+        vmin/vmax clip the gradient when one outlier hex would otherwise
+        wash out the rest.
       </small>
       {% endif %}
     </fieldset>
