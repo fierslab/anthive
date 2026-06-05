@@ -1162,7 +1162,7 @@ Authentication is handled by reverse proxy (nginx, caddy, etc.) using HTTP Basic
 - **OpenAPI Schema**: [/openapi.json](/openapi.json)
 - **Metrics**: [/metrics](/metrics) - Performance metrics
     """,
-    version="2.0.0",
+    version="2.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
     root_path="/api",
