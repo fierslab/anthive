@@ -509,6 +509,8 @@ async def folder_view(request: Request, browse_id: str):
 _PLOT_GEOMS_UI = {
     'scatter':   {'label': 'Embedding (UMAP)', 'icon': '🗺',
                   'needs': {'embedding': True, 'color': 'any'}},
+    'hexbin':    {'label': 'Embedding (hexbin)', 'icon': '⬣',
+                  'needs': {'embedding': True, 'color': 'any'}},
     'violin':    {'label': 'Violin',           'icon': '🎻',
                   'needs': {'x': 'categorical', 'y': 'gene_or_num'}},
     'box':       {'label': 'Boxplot',          'icon': '📦',

@@ -21,7 +21,7 @@ import seaborn as sns
 import pandas as pd
 
 
-_DEFAULT_PALETTE = 'tab20'
+_DEFAULT_PALETTE = 'tab10'
 _VALID_FORMATS = {'png', 'svg', 'pdf'}
 
 
@@ -442,6 +442,15 @@ def build_caption(
             sentence = f'Scatter plot of {db_id}'
         if color:
             sentence += f', cells colored by {color}'
+    elif geom == 'hexbin':
+        if x and x_kind == 'embedding':
+            sentence = f'Hexbin embedding of {db_id} ({x})'
+        else:
+            sentence = f'Hexbin plot of {db_id}'
+        if color:
+            sentence += f', hexes aggregated on {color}'
+        else:
+            sentence += '; coloured by cell density'
     elif geom in ('violin', 'box'):
         kind = {'violin': 'Violin plot', 'box': 'Box plot'}[geom]
         if y:
@@ -579,6 +588,191 @@ def plot_scatter(
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
     ax.set_title(color_field or 'UMAP')
+    sns.despine(ax=ax)
+
+    return _render_figure(fig, dpi, output_format, caption, source_url)
+
+
+def plot_hexbin(
+    embedding_df: pd.DataFrame,
+    color_df: Optional[pd.DataFrame],
+    color_field: Optional[str],
+    color_kind: str = 'numerical',
+    x_label: str = 'Dim 1',
+    y_label: str = 'Dim 2',
+    width: float = 8,
+    height: float = 6,
+    dpi: int = 150,
+    output_format: str = 'png',
+    palette: str = _DEFAULT_PALETTE,
+    gridsize: int = 60,
+    mincnt: int = 1,
+    alpha: float = 1.0,
+    caption: Optional[str] = None,
+    source_url: Optional[str] = None,
+    font_family: Optional[str] = None,
+    font_size: Optional[float] = None,
+) -> bytes:
+    """Hexagonal-binned embedding plot — alternative to scatter for showing
+    *regional* enrichment when overlapping points obscure density.
+
+    Three colour modes, switched by ``color_kind``:
+
+    * ``'gene'`` / ``'numerical'`` — each hex shows the **mean** value of
+      the colour field across the cells that fall in it.  Color = mean,
+      colourbar attached.
+    * ``'categorical'`` — each hex is coloured by the **modal category**
+      (the most-abundant cell type / cluster in that hex).  Hex alpha is
+      driven by a **dominance score** = ``count_top1 / count_top2``,
+      mapped through a sigmoid so:
+          ratio 1.0 (perfectly mixed)  → alpha ≈ 0.25 (transparent)
+          ratio 2.0 (top is 2× runner-up) → alpha ≈ 0.5
+          ratio ≥ 5.0 (essentially pure) → alpha ≈ 1.0
+      A small legend lists the categories that win at least one hex.
+    * Color field missing — each hex shows the **cell density** (a basic
+      density plot).
+
+    Args:
+        embedding_df: DataFrame with [cell_name, dim_0, dim_1].
+        color_df:     DataFrame with [cell_name, <color_field>] or None.
+        color_field:  column name to colour by.
+        color_kind:   'numerical' | 'gene' | 'categorical'.
+        gridsize:     number of hex bins along the x-axis.  Higher = finer.
+        mincnt:       minimum cells per hex to render (lower = more sparse hexes).
+        alpha:        per-hex alpha (numerical/gene mode).  Ignored in
+                      categorical mode (dominance drives alpha there).
+    """
+    _setup_style(font_family, font_size)
+    fig, ax = plt.subplots(figsize=(width, height))
+
+    x_col = embedding_df.columns[-2]
+    y_col = embedding_df.columns[-1]
+    xs = np.asarray(embedding_df[x_col], dtype=float)
+    ys = np.asarray(embedding_df[y_col], dtype=float)
+
+    if color_df is None or not color_field:
+        # Density only.
+        hb = ax.hexbin(xs, ys, gridsize=gridsize, mincnt=mincnt,
+                       cmap='viridis', linewidths=0)
+        plt.colorbar(hb, ax=ax, label='cell count', shrink=0.8)
+        ax.set_title('Cell density')
+
+    elif color_kind in ('numerical', 'gene'):
+        # Per-hex mean of a continuous value.
+        # color_df is aligned to embedding_df via cell_name.
+        values = color_df.set_index('cell_name')[color_field].reindex(
+            embedding_df['cell_name'].values
+        )
+        cvals = np.asarray(values, dtype=float)
+        # Hexbin's C+reduce_C_function gives us the per-hex aggregate.
+        cmap = palette if palette in plt.colormaps() else 'viridis'
+        hb = ax.hexbin(xs, ys, C=cvals, reduce_C_function=np.mean,
+                       gridsize=gridsize, mincnt=mincnt,
+                       cmap=cmap, alpha=alpha, linewidths=0)
+        label_kind = 'expression' if color_kind == 'gene' else 'value'
+        plt.colorbar(hb, ax=ax, label=f'mean {color_field} ({label_kind})',
+                     shrink=0.8)
+        ax.set_title(f'{color_field} (hexbin mean)')
+
+    else:
+        # Categorical: modal label + dominance.  Done by hand because
+        # matplotlib's hexbin doesn't natively aggregate categoricals.
+        cats = color_df.set_index('cell_name')[color_field].reindex(
+            embedding_df['cell_name'].values
+        ).astype(str)
+        # Encode categories to integer codes so we can use hexbin's C param
+        # to discover hex membership; the actual reduce is done after.
+        unique_cats = pd.Series(cats).dropna().unique()
+        unique_cats = sorted(unique_cats.tolist())
+        cat_to_code = {c: i for i, c in enumerate(unique_cats)}
+        codes = np.array([cat_to_code.get(c, -1) for c in cats], dtype=float)
+
+        # Step 1 — find hex centers + which cells map to which hex.
+        # We use a transparent hexbin call just to get the hex polygon mesh,
+        # then assign each cell to its hex by nearest center.
+        scratch = ax.hexbin(xs, ys, gridsize=gridsize, mincnt=0,
+                            visible=False, linewidths=0)
+        offsets = scratch.get_offsets()  # (n_hex, 2) — centres
+        # Map cells → hex_index via nearest centre.  For a typical hex grid
+        # this is exact because the bins are convex.
+        from scipy.spatial import cKDTree  # noqa: WPS433 — only when needed
+        tree = cKDTree(offsets)
+        _, hex_idx = tree.query(np.column_stack([xs, ys]))
+
+        # Step 2 — per hex: counts per category, then modal + dominance.
+        n_hex = offsets.shape[0]
+        n_cats = len(unique_cats)
+        counts = np.zeros((n_hex, n_cats), dtype=np.int64)
+        valid = codes >= 0
+        np.add.at(counts, (hex_idx[valid], codes[valid].astype(int)), 1)
+
+        hex_totals = counts.sum(axis=1)
+        used = hex_totals >= mincnt
+        if not used.any():
+            ax.text(0.5, 0.5, 'no hex bins reached mincnt; lower --mincnt',
+                    transform=ax.transAxes, ha='center', va='center', color='#888')
+        else:
+            # Modal category per hex; second-most-abundant for the ratio.
+            sorted_counts = np.sort(counts, axis=1)
+            top1 = sorted_counts[:, -1]
+            top2 = sorted_counts[:, -2] if n_cats >= 2 else np.zeros(n_hex)
+            # dominance = top1 / max(top2, 1) ∈ [1, +∞); ties = 1.
+            dominance = top1.astype(float) / np.clip(top2, 1, None)
+            # Map dominance → alpha via a sigmoid centred at ratio 2.0.
+            # alpha(1)=0.25, alpha(2)=0.50, alpha(5)≈0.95.
+            alphas_hex = 1.0 / (1.0 + np.exp(-(dominance - 2.0)))
+            alphas_hex = np.clip(alphas_hex, 0.15, 1.0)
+            modal_code = counts.argmax(axis=1)
+
+            cmap_obj = matplotlib.cm.get_cmap(palette if palette in plt.colormaps() else _DEFAULT_PALETTE)
+            n_palette = getattr(cmap_obj, 'N', 256)
+            colors = cmap_obj(np.array([m % n_palette for m in modal_code]) / max(n_palette - 1, 1))
+
+            # Draw hexes as a PolyCollection so we can vary per-hex alpha.
+            radius = scratch.get_paths()[0].vertices
+            # Reconstruct hex polygon vertices around each centre.
+            # `radius` is a unit hex in the [-0.5, 0.5] box; scale by hex width.
+            xs_off = offsets[:, 0]
+            ys_off = offsets[:, 1]
+            dx = (xs_off.max() - xs_off.min()) / max(gridsize - 1, 1)
+            dy = dx  # hexbin uses near-square aspect
+            from matplotlib.collections import PolyCollection
+            polys = []
+            for cx, cy in zip(xs_off[used], ys_off[used]):
+                polys.append(np.column_stack([
+                    radius[:, 0] * dx + cx,
+                    radius[:, 1] * dy + cy,
+                ]))
+            face_colours = colors[used]
+            face_colours[:, 3] = alphas_hex[used]  # set per-hex alpha
+            coll = PolyCollection(
+                polys, facecolors=face_colours,
+                edgecolors='none', linewidths=0,
+            )
+            ax.add_collection(coll)
+            ax.set_xlim(xs.min(), xs.max())
+            ax.set_ylim(ys.min(), ys.max())
+
+            # Legend: one entry per category that wins at least one used hex.
+            won = np.unique(modal_code[used])
+            handles = [
+                plt.matplotlib.patches.Patch(
+                    color=cmap_obj((c % n_palette) / max(n_palette - 1, 1)),
+                    label=unique_cats[c],
+                )
+                for c in won
+            ]
+            ax.legend(
+                handles=handles, bbox_to_anchor=(1.02, 1.0),
+                loc='upper left', borderaxespad=0.0,
+                fontsize=8, title=color_field,
+                title_fontsize=9, frameon=False,
+            )
+        ax.set_title(f'{color_field} (modal hex; α = dominance)')
+
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(y_label)
+    ax.set_aspect('equal', adjustable='datalim')
     sns.despine(ax=ax)
 
     return _render_figure(fig, dpi, output_format, caption, source_url)

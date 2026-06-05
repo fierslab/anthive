@@ -9,6 +9,7 @@
 #   "boto3>=1.26.0",
 #   "matplotlib>=3.7.0",
 #   "seaborn>=0.13.0",
+#   "scipy>=1.10.0",
 #   "pyarrow>=14.0.0",
 # ]
 # ///
@@ -1947,7 +1948,8 @@ _PLOT_MIME_TYPES = {
 }
 
 _PLOT_GEOMS = {
-    'scatter', 'violin', 'box', 'bar', 'histogram', 'ecdf', 'kde', 'heatmap',
+    'scatter', 'hexbin', 'violin', 'box', 'bar',
+    'histogram', 'ecdf', 'kde', 'heatmap',
 }
 
 
@@ -2165,6 +2167,8 @@ class PlotRequest:
     font_size: float
     ci: bool
     n_genes: int
+    gridsize: int        # hexbin: number of hex bins along x-axis
+    mincnt: int          # hexbin: minimum cells per hex to render
     filters: Optional[Dict[str, Any]]
     sample: Optional[int]
     source_url: str
@@ -2246,6 +2250,64 @@ def _handle_scatter(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         width=req.width, height=req.height, dpi=req.dpi,
         output_format=req.output_format,
         point_size=req.point_size, alpha=req.alpha, palette=req.palette,
+        caption=caption, source_url=req.source_url,
+        font_family=req.font_family, font_size=req.font_size,
+    )
+    return image_bytes, caption
+
+
+def _handle_hexbin(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
+    """Hexbin embedding plot — same input contract as `_handle_scatter` but
+    aggregates cells into hex bins instead of drawing every point.
+
+    Continuous color (gene/numerical) → per-hex mean.
+    Categorical color                  → modal category per hex, with hex
+                                          alpha driven by dominance ratio
+                                          (top1 / top2 count).
+    No color                           → cell density.
+    """
+    emb_id = req.x or ('X_umap' if 'X_umap' in ctx.available_embeddings
+                       else (ctx.available_embeddings[0] if ctx.available_embeddings else None))
+    if not emb_id:
+        raise HTTPException(400, detail="No embeddings available for hexbin plot")
+    embedding_df = ctx.db.get_embedding_data(emb_id, n_dims=2, filters=req.filters, sample=req.sample)
+
+    color_df = None
+    color_field_name = None
+    color_kind = 'numerical'
+    if req.color:
+        color_field_name, color_kind = ctx.resolve(req.color)
+        sampled_cells = embedding_df['cell_name'].tolist() if req.sample else None
+        color_filters = dict(req.filters) if req.filters else {}
+        if sampled_cells:
+            color_filters['cell_name'] = sampled_cells
+        used_filters = color_filters if sampled_cells else req.filters
+        if color_kind == 'gene':
+            color_df = ctx.db.get_cell_table(genes=[color_field_name], layer=req.layer, filters=used_filters)
+        else:
+            color_df = ctx.db.get_cell_table(metadata_fields=[color_field_name], filters=used_filters)
+
+    x_label = str(embedding_df.columns[-2]).replace('dim_', 'Dim ')
+    y_label = str(embedding_df.columns[-1]).replace('dim_', 'Dim ')
+    n_cells = int(len(embedding_df))
+    n_groups = (int(color_df[color_field_name].nunique())
+                if color_df is not None and color_kind == 'categorical' else None)
+    caption = plotting.build_caption(
+        req.db_id, req.geom, emb_id, 'embedding',
+        None, color_field_name, req.layer,
+        n_cells=n_cells, n_groups=n_groups,
+        sample=req.sample, subset=_subset_for_caption(req),
+    )
+    image_bytes = plotting.plot_hexbin(
+        embedding_df=embedding_df,
+        color_df=color_df,
+        color_field=color_field_name,
+        color_kind=color_kind,
+        x_label=x_label, y_label=y_label,
+        width=req.width, height=req.height, dpi=req.dpi,
+        output_format=req.output_format,
+        palette=req.palette, alpha=req.alpha,
+        gridsize=req.gridsize, mincnt=req.mincnt,
         caption=caption, source_url=req.source_url,
         font_family=req.font_family, font_size=req.font_size,
     )
@@ -2398,6 +2460,7 @@ def _handle_heatmap(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
 # add a line here, add the geom name to _PLOT_GEOMS.
 _PLOT_HANDLERS: Dict[str, Any] = {
     'scatter':   _handle_scatter,
+    'hexbin':    _handle_hexbin,
     'violin':    _handle_grouped,
     'box':       _handle_grouped,
     'bar':       _handle_grouped,
@@ -2425,11 +2488,13 @@ async def plot(
     bins: int = Query(20, ge=2, le=500),
     point_size: float = Query(3.0, gt=0.0, le=200.0),
     alpha: float = Query(0.8, ge=0.0, le=1.0),
-    palette: str = Query('tab20'),
+    palette: str = Query('tab10', description="Categorical colormap. tab10 has 10 colors; tab20 cycles 20. Continuous fields use viridis when unspecified."),
     font_family: str = Query('DejaVu Sans', description="matplotlib font family (e.g. 'Arial', 'Helvetica', 'DejaVu Sans', 'serif')"),
     font_size: float = Query(10.0, ge=6.0, le=36.0, description="Base font size in pt; titles & ticks scale relative to this"),
     ci: bool = Query(True, description="Show 95% CI on bar plots"),
     n_genes: int = Query(20, ge=1, le=200, description="Top genes for heatmap when x not given"),
+    gridsize: int = Query(60, ge=10, le=200, description="Hexbin: number of hex bins along the x-axis (higher = finer)"),
+    mincnt: int = Query(1, ge=1, le=1000, description="Hexbin: minimum cells per hex to render (filters out sparse outliers)"),
     subset: List[str] = Query(default=[], description=(
         "Cell subset filter(s). Repeatable. Formats: "
         "'field:value' (exact), 'field:v1,v2' (IN list), 'field:min..max' (range). "
@@ -2487,6 +2552,7 @@ async def plot(
         point_size=point_size, alpha=alpha, palette=palette,
         font_family=font_family, font_size=font_size,
         ci=ci, n_genes=n_genes,
+        gridsize=gridsize, mincnt=mincnt,
         filters=filters, sample=sample,
         source_url=source_url,
     )

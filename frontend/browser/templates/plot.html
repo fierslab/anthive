@@ -115,7 +115,7 @@
 
     {# ── geom-specific fields ──────────────────────────────────────────────── #}
 
-    {% if geom == 'scatter' %}
+    {% if geom == 'scatter' or geom == 'hexbin' %}
     <fieldset>
       <legend>embedding</legend>
       <select name="x" id="f-x">
@@ -126,11 +126,21 @@
     </fieldset>
     <fieldset>
       <legend>colour by</legend>
-      <label>field / gene</label>
+      <label>{% if geom == 'hexbin' %}field / gene (empty = density){% else %}field / gene{% endif %}</label>
       <div class="ac-wrap">
         <input type="text" name="color" id="f-color" autocomplete="off" placeholder="gene name or obs field">
         <div class="ac-suggest" id="ac-color"></div>
       </div>
+      {% if geom == 'hexbin' %}
+      <label style="margin-top:4px">grid size (hex columns)</label>
+      <input type="number" name="gridsize" id="f-gridsize" value="60" min="10" max="200">
+      <label style="margin-top:4px">min cells per hex</label>
+      <input type="number" name="mincnt" id="f-mincnt" value="1" min="1" max="100">
+      <small style="display:block;margin-top:4px;color:#666">
+        Categorical → hex coloured by modal class, alpha by dominance
+        (top1/top2 ratio).  Continuous → per-hex mean.  No colour → density.
+      </small>
+      {% endif %}
     </fieldset>
 
     {% elif geom in ('violin', 'box', 'bar') %}

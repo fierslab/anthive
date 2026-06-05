@@ -95,6 +95,7 @@
 <div class="viz-row">
     <span class="viz-label">visualize</span>
     {% if info and info.obsm_keys %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/scatter" class="viz-btn">🗺 embedding</a>{% endif %}
+    {% if info and info.obsm_keys %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/hexbin" class="viz-btn">⬣ hexbin</a>{% endif %}
     <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/violin" class="viz-btn">🎻 violin</a>
     <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/box" class="viz-btn">📦 box</a>
     <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/bar" class="viz-btn">📊 bar</a>
