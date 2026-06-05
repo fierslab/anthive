@@ -2180,6 +2180,8 @@ class PlotRequest:
     n_genes: int
     gridsize: int        # hexbin: number of hex bins along x-axis
     mincnt: int          # hexbin: minimum cells per hex to render
+    log_x: bool          # xy_scatter / xy_hexbin: apply log1p to x values
+    log_y: bool          # xy_scatter / xy_hexbin: apply log1p to y values
     filters: Optional[Dict[str, Any]]
     sample: Optional[int]
     source_url: str
@@ -2376,8 +2378,19 @@ def _handle_xy(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     )
     # Build a fake "embedding df" with [cell_name, <x_name>, <y_name>] so we
     # can re-use plot_scatter / plot_hexbin — they treat the last two
-    # columns as the spatial axes.
+    # columns as the spatial axes.  Apply log1p before passing the data
+    # along (log1p safely handles zero / sparse expression).  Axis labels
+    # are amended so the reader knows the transform was applied.
+    import numpy as _np
     embedding_df = data_df[['cell_name', x_name, y_name]].copy()
+    x_axis_label = x_name
+    y_axis_label = y_name
+    if req.log_x:
+        embedding_df[x_name] = _np.log1p(_np.asarray(embedding_df[x_name], dtype=float))
+        x_axis_label = f'log1p({x_name})'
+    if req.log_y:
+        embedding_df[y_name] = _np.log1p(_np.asarray(embedding_df[y_name], dtype=float))
+        y_axis_label = f'log1p({y_name})'
 
     # Optional colour.
     color_df = None
@@ -2420,7 +2433,7 @@ def _handle_xy(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         color_df=color_df,
         color_field=color_field_name,
         color_kind=color_kind,
-        x_label=x_name, y_label=y_name,
+        x_label=x_axis_label, y_label=y_axis_label,
         width=req.width, height=req.height, dpi=req.dpi,
         output_format=req.output_format,
         palette=req.palette,
@@ -2631,6 +2644,8 @@ async def plot(
     n_genes: int = Query(20, ge=1, le=200, description="Top genes for heatmap when x not given"),
     gridsize: int = Query(60, ge=10, le=200, description="Hexbin: number of hex bins along the x-axis (higher = finer)"),
     mincnt: int = Query(1, ge=1, le=1000, description="Hexbin: minimum cells per hex to render (filters out sparse outliers)"),
+    log_x: bool = Query(False, description="xy_scatter / xy_hexbin: apply log1p(x) before plotting. Use for raw counts / heavy-tailed expression. Zeros stay at 0."),
+    log_y: bool = Query(False, description="xy_scatter / xy_hexbin: apply log1p(y) before plotting."),
     subset: List[str] = Query(default=[], description=(
         "Cell subset filter(s). Repeatable. Formats: "
         "'field:value' (exact), 'field:v1,v2' (IN list), 'field:min..max' (range). "
@@ -2693,6 +2708,7 @@ async def plot(
         font_family=font_family, font_size=font_size,
         ci=ci, n_genes=n_genes,
         gridsize=gridsize, mincnt=mincnt,
+        log_x=log_x, log_y=log_y,
         filters=filters, sample=sample,
         source_url=source_url,
     )
