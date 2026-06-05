@@ -126,35 +126,77 @@ Root endpoint with API overview.
 ```
 
 #### `GET /health`
-Health check for load balancers.
+Health check + server-speed signal for load balancers and client-side
+server selection (e.g. vark choosing the fastest of multiple anthive
+endpoints).
 
 **Response:**
 ```json
 {
   "status": "healthy",
-  "databases": 10,
+  "databases": 98,
   "database_errors": 0,
-  "uptime_seconds": 3600
+  "uptime_seconds": 3600,
+  "mean_response_ms": 126.2,
+  "p50_response_ms":  81.1,
+  "n_samples": 31
 }
 ```
 
+**Speed fields** — computed from the last 1024 non-probe requests served
+by this server:
+
+- `mean_response_ms` — arithmetic mean. Skewed by plot renders.
+- `p50_response_ms` — median. More stable; recommended for server picks.
+- `n_samples` — how many real requests fed the stats. `null` (with both
+  `*_response_ms` also `null`) until the first non-probe request lands.
+
+`/health` and `/metrics` are themselves excluded from the timing samples
+so probe traffic can't make a server look artificially fast.
+
 **Status Codes:**
 - 200: Healthy
-- 503: Unhealthy (database connection issues)
+- 503: Unhealthy (no databases or fatal init error)
 
-#### `GET /metrics` (optional)
-Prometheus-format metrics.
+#### `GET /metrics`
+Server performance metrics.
 
 **Response:**
+```json
+{
+  "uptime_seconds": 3600,
+  "requests": {
+    "total":      31,
+    "errors":     0,
+    "error_rate": 0.0
+  },
+  "latency_ms": {
+    "n_samples": 31,
+    "mean":      126.2,
+    "p50":       81.1,
+    "p95":       227.4,
+    "p99":       476.3,
+    "max":       476.3
+  },
+  "connection_pool": {
+    "total_connections": 99,
+    "active_databases":  98,
+    "in_use":            0,
+    "cache_hits":        39,
+    "cache_misses":      99,
+    "hit_rate":          0.28
+  },
+  "caches": {
+    "databases":             98,
+    "metadata_cached":       98,
+    "gene_lists_cached":     0,
+    "metadata_stats_cached": 0
+  }
+}
 ```
-# HELP anthive_requests_total Total requests
-# TYPE anthive_requests_total counter
-anthive_requests_total{endpoint="/databases"} 1234
 
-# HELP anthive_databases Total databases
-# TYPE anthive_databases gauge
-anthive_databases 10
-```
+`latency_ms.*` and `requests.*` are computed from the same ring buffer
+as `/health` — same exclusions, same window (1024 samples).
 
 ### 2. Database Discovery
 

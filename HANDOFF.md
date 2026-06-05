@@ -96,6 +96,13 @@ make sync-update                                       # full cycle
 make test    # PYTHONPATH=lib python -m pytest tests/
 ```
 
+### Pick the fastest of several anthive servers (e.g. from a vark CLI)
+
+`GET /api/health` exposes `mean_response_ms`, `p50_response_ms`, and
+`n_samples` derived from the last 1024 real requests.  Lower = faster.
+Use these to round-robin or to pin to whichever replica is currently
+responsive.  Details + recipe in [`bin/api/CLAUDE.md`](bin/api/CLAUDE.md).
+
 ---
 
 ## Data stores (separate git repos)
