@@ -112,6 +112,7 @@ def pick_cmap(
     palette_cont: str = _DEFAULT_SEQUENTIAL,
     palette_div: str = _DEFAULT_DIVERGENT,
     values=None,
+    n_categories: Optional[int] = None,
 ) -> Tuple[str, str]:
     """Return ``(cmap_name, used_kind)`` for the given data kind.
 
@@ -136,9 +137,15 @@ def pick_cmap(
           axis).
     """
     if kind == 'categorical':
-        if palette_cat in _QUALITATIVE_PALETTES:
-            return palette_cat, 'categorical'
-        return _DEFAULT_CATEGORICAL, 'categorical'
+        chosen = palette_cat if palette_cat in _QUALITATIVE_PALETTES else _DEFAULT_CATEGORICAL
+        # tab10 cycles after 10 colours — distinct clusters reuse hues and
+        # become ambiguous.  When we know the cardinality and the user is
+        # still on the small default, auto-promote.  tab20 has 20 distinct
+        # colours; beyond that, even tab20 cycles but at least the labels
+        # are distinguishable for legend reading.
+        if n_categories is not None and chosen == 'tab10' and n_categories > 10:
+            chosen = 'tab20'
+        return chosen, 'categorical'
 
     # 'continuous' or 'gene'
     if values is not None and _looks_divergent(values):
@@ -706,15 +713,16 @@ def plot_scatter(
         plot_df[color_field] = color_values.reindex(plot_df['cell_name'].values).values
 
         if color_kind == 'categorical':
+            n_cats = int(plot_df[color_field].nunique())
             cmap_name, _ = pick_cmap('categorical', palette_cat=palette_cat,
                                      palette_cont=palette_cont,
-                                     palette_div=palette_div)
+                                     palette_div=palette_div,
+                                     n_categories=n_cats)
             sns.scatterplot(
                 data=plot_df, x=x_col, y=y_col,
                 hue=color_field, linewidth=0, s=point_size, alpha=alpha,
                 palette=cmap_name, ax=ax,
             )
-            n_cats = int(plot_df[color_field].nunique())
             legend_fontsize = 6 if n_cats > 12 else 8
             ax.legend(
                 bbox_to_anchor=(1.02, 1.0), loc='upper left',
@@ -952,12 +960,14 @@ def plot_hexbin(
 
             # Categorical: always use a qualitative palette.  pick_cmap()
             # handles fallback if the user accidentally passed a divergent
-            # or sequential cmap for categorical colour.
+            # or sequential cmap, AND auto-promotes tab10 → tab20 when
+            # >10 distinct categories would otherwise have colliding hues.
             cat_palette, _ = pick_cmap(
                 'categorical',
                 palette_cat=palette_cat,
                 palette_cont=palette_cont,
                 palette_div=palette_div,
+                n_categories=len(unique_cats),
             )
             cmap_obj = matplotlib.cm.get_cmap(cat_palette)
             n_palette = getattr(cmap_obj, 'N', 256)
@@ -1074,7 +1084,11 @@ def plot_distribution(
                      multiple='dodge' if hue else 'layer')
 
     ax.set_xlabel(x_field)
-    ax.set_title(f'{x_field} ({geom})')
+    n_cells = int(len(data_df))
+    title_bits = [x_field, geom, f'n={_fmt_n(n_cells)}']
+    if hue:
+        title_bits.append(f'split by {hue}')
+    ax.set_title(_compose_title(title_bits))
     sns.despine(ax=ax)
     _legend_outside(ax)
 
@@ -1148,6 +1162,16 @@ def plot_grouped(
 
     ax.set_xlabel(x_field)
     plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
+    n_cells = int(len(data_df))
+    title_bits = [
+        f'{y_field} by {x_field}' if y_field else f'cells per {x_field}',
+        geom,
+        f'n={_fmt_n(n_cells)}',
+        f'{len(cat_order)} grps',
+    ]
+    if hue:
+        title_bits.append(f'split by {hue}')
+    ax.set_title(_compose_title(title_bits))
     sns.despine(ax=ax)
     _legend_outside(ax)
     fig.tight_layout()
@@ -1161,6 +1185,8 @@ def plot_heatmap(
     height: float = 6,
     dpi: int = 150,
     output_format: str = 'png',
+    palette_div: str = _DEFAULT_DIVERGENT,
+    title_extra: Optional[str] = None,
     caption: Optional[str] = None,
     source_url: Optional[str] = None,
     font_family: Optional[str] = None,
@@ -1178,9 +1204,13 @@ def plot_heatmap(
     fig, ax = plt.subplots(figsize=(width, height))
 
     z_df = (mean_expr_df - mean_expr_df.mean()) / (mean_expr_df.std() + 1e-9)
+    # Heatmap data is z-scored (centred on 0) — it's inherently divergent.
+    # Use the palette_div family (default RdBu_r) so it stays consistent
+    # with the rest of the visualisation stack's divergent rendering.
+    cmap_div = palette_div if palette_div in _DIVERGENT_PALETTES else _DEFAULT_DIVERGENT
     sns.heatmap(
         z_df, ax=ax,
-        cmap='RdBu_r', center=0,
+        cmap=cmap_div, center=0,
         linewidths=0.3,
         yticklabels=True,
         xticklabels=True,
@@ -1189,6 +1219,9 @@ def plot_heatmap(
     ax.set_xlabel('Gene')
     ax.set_ylabel('')
     plt.setp(ax.get_xticklabels(), rotation=45, ha='right', fontsize=8)
+    n_groups, n_genes = mean_expr_df.shape
+    title_bits = ['Mean expression', f'{n_groups} grps', f'{n_genes} genes']
+    ax.set_title(_compose_title(title_bits, extra=title_extra))
     fig.tight_layout()
 
     return _render_figure(fig, dpi, output_format, caption, source_url)

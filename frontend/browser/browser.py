@@ -507,29 +507,42 @@ async def folder_view(request: Request, browse_id: str):
 # which would otherwise greedy-match "TSO/plot/scatter" as the dataset id.
 
 _PLOT_GEOMS_UI = {
-    'scatter':   {'label': 'Embedding scatter', 'icon': '🗺',
-                  'needs': {'embedding': True, 'color': 'any'}},
-    'hexbin':    {'label': 'Embedding hexbin', 'icon': '⬣',
-                  'needs': {'embedding': True, 'color': 'any'}},
-    'xy_scatter': {'label': 'XY scatter', 'icon': '✦',
-                   'needs': {'x': 'gene_or_num', 'y': 'gene_or_num', 'color': 'any'}},
-    'xy_hexbin':  {'label': 'XY hexbin', 'icon': '⬢',
-                   'needs': {'x': 'gene_or_num', 'y': 'gene_or_num', 'color': 'any'}},
+    'scatter':   {'label': 'Scatter (embedding or XY)', 'icon': '🗺',
+                  'needs': {'embedding_or_xy': True, 'color': 'any'},
+                  'group': 'spatial'},
+    'hexbin':    {'label': 'Hexbin (embedding or XY)', 'icon': '⬣',
+                  'needs': {'embedding_or_xy': True, 'color': 'any'},
+                  'group': 'spatial'},
     'violin':    {'label': 'Violin',           'icon': '🎻',
-                  'needs': {'x': 'categorical', 'y': 'gene_or_num'}},
+                  'needs': {'x': 'categorical', 'y': 'gene_or_num'},
+                  'group': 'grouped'},
     'box':       {'label': 'Boxplot',          'icon': '📦',
-                  'needs': {'x': 'categorical', 'y': 'gene_or_num'}},
+                  'needs': {'x': 'categorical', 'y': 'gene_or_num'},
+                  'group': 'grouped'},
     'bar':       {'label': 'Bar (mean ± CI)',  'icon': '📊',
-                  'needs': {'x': 'categorical', 'y': 'gene_or_num_or_count'}},
+                  'needs': {'x': 'categorical', 'y': 'gene_or_num_or_count'},
+                  'group': 'grouped'},
     'histogram': {'label': 'Histogram',        'icon': '📈',
-                  'needs': {'x': 'gene_or_num', 'color': 'categorical'}},
+                  'needs': {'x': 'gene_or_num', 'color': 'categorical'},
+                  'group': 'distribution'},
     'ecdf':      {'label': 'ECDF',             'icon': '📉',
-                  'needs': {'x': 'gene_or_num', 'color': 'categorical'}},
+                  'needs': {'x': 'gene_or_num', 'color': 'categorical'},
+                  'group': 'distribution'},
     'kde':       {'label': 'KDE density',      'icon': '🌊',
-                  'needs': {'x': 'gene_or_num', 'color': 'categorical'}},
+                  'needs': {'x': 'gene_or_num', 'color': 'categorical'},
+                  'group': 'distribution'},
     'heatmap':   {'label': 'Heatmap',          'icon': '🔥',
-                  'needs': {'y': 'categorical', 'x_genes': True}},
+                  'needs': {'y': 'categorical', 'x_genes': True},
+                  'group': 'matrix'},
 }
+
+# Display order for the viz row on the dataset page (group + label).
+_PLOT_GEOM_GROUPS = (
+    ('spatial',      'spatial'),       # scatter, hexbin
+    ('grouped',      'per category'),  # violin, box, bar
+    ('distribution', 'distribution'),  # histogram, ecdf, kde
+    ('matrix',       'matrix'),        # heatmap
+)
 
 
 @router.get("/browse/{folder_browse_id}/{dataset_browse_id}/plot/{geom}",

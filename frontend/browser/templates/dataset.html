@@ -94,17 +94,32 @@
 {% if has_duckdb %}
 <div class="viz-row">
     <span class="viz-label">visualize</span>
-    {% if info and info.obsm_keys %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/scatter" class="viz-btn" title="UMAP / embedding scatter">🗺 emb scatter</a>{% endif %}
-    {% if info and info.obsm_keys %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/hexbin" class="viz-btn" title="UMAP / embedding hexbin">⬣ emb hexbin</a>{% endif %}
-    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/xy_scatter" class="viz-btn" title="Generic XY scatter — two continuous variables (gene vs gene, gene vs module score, etc.)">✦ XY scatter</a>
-    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/xy_hexbin" class="viz-btn" title="Generic XY hexbin — two continuous variables, hex-aggregated">⬢ XY hexbin</a>
-    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/violin" class="viz-btn">🎻 violin</a>
-    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/box" class="viz-btn">📦 box</a>
-    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/bar" class="viz-btn">📊 bar</a>
-    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram" class="viz-btn">📈 hist</a>
-    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/ecdf" class="viz-btn">📉 ecdf</a>
-    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/kde" class="viz-btn">🌊 kde</a>
-    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/heatmap" class="viz-btn">🔥 heatmap</a>
+    {# Grouped viz row.  scatter / hexbin are polymorphic — embedding when the
+       dataset has an obsm key (shown by default), XY-style when the user
+       enters two continuous fields on the form. #}
+    {% if info and info.obsm_keys %}
+    <span class="viz-group">
+      <span class="viz-group-label">spatial</span>
+      <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/scatter" class="viz-btn" title="2D scatter — embedding (UMAP/PCA) or any pair of continuous variables">🗺 scatter</a>
+      <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/hexbin" class="viz-btn" title="2D hexbin — embedding or any pair of continuous variables, hex-aggregated">⬣ hexbin</a>
+    </span>
+    {% endif %}
+    <span class="viz-group">
+      <span class="viz-group-label">per category</span>
+      <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/violin" class="viz-btn">🎻 violin</a>
+      <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/box" class="viz-btn">📦 box</a>
+      <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/bar" class="viz-btn">📊 bar</a>
+    </span>
+    <span class="viz-group">
+      <span class="viz-group-label">distribution</span>
+      <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram" class="viz-btn">📈 hist</a>
+      <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/ecdf" class="viz-btn">📉 ecdf</a>
+      <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/kde" class="viz-btn">🌊 kde</a>
+    </span>
+    <span class="viz-group">
+      <span class="viz-group-label">matrix</span>
+      <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/heatmap" class="viz-btn">🔥 heatmap</a>
+    </span>
 </div>
 {% endif %}
 
