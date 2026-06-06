@@ -16,13 +16,13 @@ Example:
 
 Author: Anthive Team
 License: MIT
-Version: 1.4.0
+Version: 1.5.0
 """
 
 from typing import Any, Dict, List, Optional, Union
 import requests
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 __all__ = ["AnthiveClient"]
 
 
@@ -671,8 +671,12 @@ class AnthiveClient:
 
         Args:
             db_id:  Database identifier (``group/file``).
-            geom:   ``scatter`` | ``violin`` | ``box`` | ``bar`` | ``histogram``
-                    | ``ecdf`` | ``kde`` | ``heatmap``.
+            geom:   ``scatter`` | ``hexbin`` | ``violin`` | ``box`` | ``bar`` |
+                    ``histogram`` | ``ecdf`` | ``kde`` | ``heatmap`` |
+                    ``rolling``.  ``scatter`` and ``hexbin`` are polymorphic:
+                    embedding when x is omitted/an obsm key, two-axis when
+                    x and y are both continuous fields.  ``rolling`` plots a
+                    rolling-mean line along a continuous x (e.g. pseudotime).
             x, y, color: field names (gene, obs column, or embedding).  Their
                     meaning is geom-specific — see the OpenAPI docs.
             layer:  Expression layer to plot from (default ``"X"``).
@@ -685,8 +689,9 @@ class AnthiveClient:
                     ``bins``, ``ci``, ``font_family``, ``font_size``,
                     ``point_size``, ``alpha``, ``n_genes``,
                     ``gridsize``, ``mincnt`` (hexbin),
-                    ``log_x``, ``log_y`` (xy_scatter / xy_hexbin),
+                    ``log_x``, ``log_y`` (gene-vs-gene scatter/hexbin),
                     ``vmin``, ``vmax`` (continuous colorbar clip),
+                    ``window``, ``show_band`` (rolling),
                     ``palette_categorical``, ``palette_continuous``,
                     ``palette_divergent``.
 

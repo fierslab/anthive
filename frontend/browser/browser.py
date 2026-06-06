@@ -534,6 +534,10 @@ _PLOT_GEOMS_UI = {
     'heatmap':   {'label': 'Heatmap',          'icon': '🔥',
                   'needs': {'y': 'categorical', 'x_genes': True},
                   'group': 'matrix'},
+    'rolling':   {'label': 'Rolling-mean trajectory', 'icon': '〰',
+                  'needs': {'x': 'gene_or_num', 'y': 'gene_or_num',
+                            'color': 'categorical'},
+                  'group': 'trajectory'},
 }
 
 # Display order for the viz row on the dataset page (group + label).

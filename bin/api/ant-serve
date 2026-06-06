@@ -1958,7 +1958,9 @@ _PLOT_GEOMS = {
                    # gene-vs-gene/continuous when x and y are both fields
     'hexbin',      # same polymorphism as scatter, hex-aggregated
     'violin', 'box', 'bar',
-    'histogram', 'ecdf', 'kde', 'heatmap',
+    'histogram', 'ecdf', 'kde',
+    'heatmap',
+    'rolling',     # rolling-mean trajectory along a continuous axis (pseudotime, etc.)
 }
 
 
@@ -2185,6 +2187,8 @@ class PlotRequest:
     log_y: bool          # xy_scatter / xy_hexbin: apply log1p to y values
     vmin: Optional[float]  # hexbin / scatter colorbar lower clip (None = auto)
     vmax: Optional[float]  # hexbin / scatter colorbar upper clip (None = auto)
+    window: int          # rolling: window size in cells
+    show_band: bool      # rolling: show IQR ribbon around the line
     filters: Optional[Dict[str, Any]]
     sample: Optional[int]
     source_url: str
@@ -2591,6 +2595,105 @@ def _handle_distribution(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str
     return image_bytes, caption
 
 
+def _handle_rolling(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
+    """Rolling-mean trajectory along a continuous x (typically pseudotime).
+
+    Required:
+        x:    a continuous obs/gene field — the trajectory axis.
+        y:    comma-separated list of continuous fields (genes or
+              numerical obs).  Each becomes a line.
+    Optional:
+        color: categorical → one line per group per y.
+    """
+    if not req.x or not req.y:
+        raise HTTPException(400, detail=(
+            "geom='rolling' requires x (continuous trajectory axis, "
+            "e.g. pseudotime) AND y (comma-separated continuous fields)."
+        ))
+    x_name, x_kind = ctx.resolve(req.x)
+    if x_kind == 'categorical':
+        raise HTTPException(400, detail=(
+            f"geom='rolling' x must be continuous (gene or numerical); "
+            f"'{req.x}' resolved as '{x_kind}'."
+        ))
+
+    # Resolve every y in the comma-separated list.
+    y_raw = [s.strip() for s in req.y.split(',') if s.strip()]
+    y_resolved: List[str] = []
+    y_kinds: List[str] = []
+    for token in y_raw:
+        name, kind = ctx.resolve(token)
+        if kind == 'categorical':
+            raise HTTPException(400, detail=(
+                f"geom='rolling' y fields must be continuous; "
+                f"'{token}' resolved as 'categorical'."
+            ))
+        y_resolved.append(name)
+        y_kinds.append(kind)
+    if not y_resolved:
+        raise HTTPException(400, detail="geom='rolling' needs at least one y field.")
+
+    # Optional grouping.
+    color_field_name: Optional[str] = None
+    color_kind = 'categorical'
+    if req.color:
+        color_field_name, color_kind = ctx.resolve(req.color)
+        if color_kind != 'categorical':
+            raise HTTPException(400, detail=(
+                f"geom='rolling' color must be categorical (group split); "
+                f"'{req.color}' resolved as '{color_kind}'."
+            ))
+
+    # Fetch x + all y values + optional grouping in a single trip.  Genes
+    # go via the layer; numerical obs come from obsnum.
+    genes: List[str] = []
+    metas: List[str] = []
+    if x_kind == 'gene':   genes.append(x_name)
+    else:                  metas.append(x_name)
+    for name, kind in zip(y_resolved, y_kinds):
+        (genes if kind == 'gene' else metas).append(name)
+    if color_field_name:
+        metas.append(color_field_name)
+    # de-dupe preserving order
+    genes = list(dict.fromkeys(genes))
+    metas = list(dict.fromkeys(metas))
+    data_df = ctx.db.get_cell_table(
+        genes=genes or None,
+        metadata_fields=metas or None,
+        layer=req.layer,
+        filters=req.filters,
+        sample=req.sample,
+    )
+
+    n_cells = int(len(data_df))
+    n_groups = (int(data_df[color_field_name].nunique())
+                if color_field_name else None)
+    caption = plotting.build_caption(
+        req.db_id, req.geom, x_name, x_kind,
+        ', '.join(y_resolved), color_field_name, req.layer,
+        n_cells=n_cells, n_groups=n_groups,
+        sample=req.sample, subset=_subset_for_caption(req),
+    )
+    image_bytes = plotting.plot_rolling(
+        data_df=data_df,
+        x_field=x_name,
+        y_fields=y_resolved,
+        color_field=color_field_name,
+        color_kind=color_kind,
+        window=req.window,
+        show_band=req.show_band,
+        width=req.width, height=req.height, dpi=req.dpi,
+        output_format=req.output_format,
+        palette_cat=req.palette_cat,
+        palette_cont=req.palette_cont,
+        palette_div=req.palette_div,
+        title_extra=req.db_id,
+        caption=caption, source_url=req.source_url,
+        font_family=req.font_family, font_size=req.font_size,
+    )
+    return image_bytes, caption
+
+
 def _handle_heatmap(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     if not req.y:
         raise HTTPException(400, detail="geom='heatmap' requires y (categorical field)")
@@ -2646,6 +2749,7 @@ _PLOT_HANDLERS: Dict[str, Any] = {
     'ecdf':       _handle_distribution,
     'kde':        _handle_distribution,
     'heatmap':    _handle_heatmap,
+    'rolling':    _handle_rolling,   # rolling-mean trajectory along pseudotime
 }
 
 
@@ -2680,6 +2784,8 @@ async def plot(
     log_y: bool = Query(False, description="xy_scatter / xy_hexbin: apply log1p(y) before plotting."),
     vmin: Optional[float] = Query(None, description="Hexbin / scatter: lower clip for the continuous colour scale. Leave empty for auto. For density (no colour field), this clips the cell-count scale."),
     vmax: Optional[float] = Query(None, description="Hexbin / scatter: upper clip — useful when one hex's outlier value washes out the rest of the gradient. Leave empty for auto."),
+    window: int = Query(200, ge=2, le=50000, description="Rolling: window size in cells along x (typically pseudotime). Higher = smoother line."),
+    show_band: bool = Query(False, description="Rolling: shade an IQR (q25..q75) ribbon under the rolling mean to visualise within-window spread."),
     subset: List[str] = Query(default=[], description=(
         "Cell subset filter(s). Repeatable. Formats: "
         "'field:value' (exact), 'field:v1,v2' (IN list), 'field:min..max' (range). "
@@ -2744,6 +2850,7 @@ async def plot(
         gridsize=gridsize, mincnt=mincnt,
         log_x=log_x, log_y=log_y,
         vmin=vmin, vmax=vmax,
+        window=window, show_band=show_band,
         filters=filters, sample=sample,
         source_url=source_url,
     )

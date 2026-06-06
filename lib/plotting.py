@@ -10,7 +10,7 @@ Legacy functions (plot_umap, plot_gene, plot_cat, plot_num) remain unchanged.
 """
 
 import io
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import matplotlib
@@ -307,251 +307,6 @@ def _render_png(fig: MplFigure, dpi: int) -> bytes:
 
 # ── UMAP ──────────────────────────────────────────────────────────────────────
 
-def plot_umap(
-    embedding_df: pd.DataFrame,
-    color_df: Optional[pd.DataFrame],
-    color_field: Optional[str],
-    color_type: str = 'categorical',
-    width: float = 8,
-    height: float = 6,
-    dpi: int = 150,
-    point_size: float = 3,
-    alpha: float = 0.8,
-    palette: str = _DEFAULT_PALETTE,
-    title: Optional[str] = None,
-) -> bytes:
-    """UMAP scatter plot, optionally colored by gene / category / numerical.
-
-    Args:
-        embedding_df: DataFrame with columns [cell_name, dim_0, dim_1].
-        color_df:     DataFrame with [cell_name, <color_field>] or None.
-        color_field:  Name of the column to use for colouring.
-        color_type:   'categorical', 'numerical', or 'gene'.
-        width, height: Figure size in inches.
-        dpi:          Output resolution.
-        point_size:   Scatter point size (s=).
-        alpha:        Point transparency (0–1).
-        palette:      Seaborn palette name for categorical data.
-        title:        Override plot title.
-    """
-    _setup_style()
-    fig, ax = plt.subplots(figsize=(width, height))
-
-    # The embedding columns are always the last two (after cell_name)
-    x_col = embedding_df.columns[-2]
-    y_col = embedding_df.columns[-1]
-
-    plot_df = embedding_df.copy()
-
-    if color_df is not None and color_field:
-        color_values = color_df.set_index('cell_name')[color_field]
-        plot_df[color_field] = color_values.reindex(plot_df['cell_name'].values).values
-
-        scatter_kwargs: dict = dict(
-            data=plot_df,
-            x=x_col,
-            y=y_col,
-            hue=color_field,
-            linewidth=0,
-            s=point_size,
-            alpha=alpha,
-            ax=ax,
-        )
-        if color_type == 'categorical':
-            scatter_kwargs['palette'] = palette
-
-        sns.scatterplot(**scatter_kwargs)
-
-        if ax.get_legend() and color_type == 'categorical':
-            n_cats = int(plot_df[color_field].nunique())
-            legend_fontsize = 6 if n_cats > 12 else 8
-            ax.legend(
-                bbox_to_anchor=(1.02, 1.0), loc='upper left',
-                borderaxespad=0.0,
-                fontsize=legend_fontsize, markerscale=2,
-                title=color_field, title_fontsize=legend_fontsize + 1,
-                frameon=False,
-            )
-    else:
-        sns.scatterplot(
-            data=plot_df,
-            x=x_col,
-            y=y_col,
-            linewidth=0,
-            s=point_size,
-            alpha=alpha,
-            color='steelblue',
-            ax=ax,
-        )
-
-    ax.set_xlabel(str(x_col).replace('dim_', 'Dim '))
-    ax.set_ylabel(str(y_col).replace('dim_', 'Dim '))
-    ax.set_title(title or (color_field or 'UMAP'))
-    sns.despine(ax=ax)
-
-    return _render_png(fig, dpi)
-
-
-# ── Gene expression distribution ──────────────────────────────────────────────
-
-def plot_gene(
-    data_df: pd.DataFrame,
-    gene_field: str,
-    plot_type: str = 'ecdf',
-    bins: int = 20,
-    width: float = 7,
-    height: float = 4,
-    dpi: int = 150,
-    title: Optional[str] = None,
-) -> bytes:
-    """Expression distribution for one gene: ecdf, kde, or histogram.
-
-    Args:
-        data_df:    DataFrame with at least [cell_name, <gene_field>].
-        gene_field: Gene (column) name.
-        plot_type:  'ecdf' | 'kde' | 'histogram'.
-        bins:       Number of histogram bins (ignored for ecdf/kde).
-        width, height: Figure size in inches.
-        dpi:        Output resolution.
-        title:      Override plot title.
-    """
-    _setup_style()
-    fig, ax = plt.subplots(figsize=(width, height))
-
-    if plot_type == 'ecdf':
-        sns.ecdfplot(data=data_df, x=gene_field, ax=ax)
-    elif plot_type == 'kde':
-        sns.kdeplot(data=data_df, x=gene_field, ax=ax)
-    else:  # histogram
-        sns.histplot(data=data_df, x=gene_field, bins=bins, ax=ax)
-
-    ax.set_xlabel(gene_field)
-    ax.set_title(title or f'{gene_field} ({plot_type})')
-    sns.despine(ax=ax)
-
-    return _render_png(fig, dpi)
-
-
-# ── Categorical breakdown ──────────────────────────────────────────────────────
-
-def plot_cat(
-    data_df: pd.DataFrame,
-    cat_field: str,
-    y_field: Optional[str] = None,
-    y_type: str = 'count',
-    plot_type: str = 'bar',
-    width: float = 8,
-    height: float = 5,
-    dpi: int = 150,
-    title: Optional[str] = None,
-) -> bytes:
-    """Values grouped by a categorical field.
-
-    Args:
-        data_df:    DataFrame with [cell_name, cat_field, (y_field)].
-        cat_field:  Categorical column to group by.
-        y_field:    Gene or numerical column for Y axis (None → cell counts).
-        y_type:     'count' | 'gene' | 'numerical'.
-        plot_type:  'bar' | 'box' | 'violin'.
-        width, height: Figure size in inches.
-        dpi:        Output resolution.
-        title:      Override plot title.
-    """
-    _setup_style()
-    fig, ax = plt.subplots(figsize=(width, height))
-
-    cat_order = data_df[cat_field].value_counts().index.tolist()
-
-    if y_type == 'count':
-        counts = data_df[cat_field].value_counts().reindex(cat_order)
-        sns.barplot(x=counts.index, y=counts.values, ax=ax)
-        ax.set_ylabel('Cell count')
-        auto_title = f'Cells per {cat_field}'
-    elif plot_type == 'box':
-        sns.boxplot(data=data_df, x=cat_field, y=y_field,
-                    order=cat_order, ax=ax, showfliers=False)
-        auto_title = f'{y_field} by {cat_field} (box)'
-    elif plot_type == 'violin':
-        sns.violinplot(data=data_df, x=cat_field, y=y_field,
-                       order=cat_order, ax=ax)
-        auto_title = f'{y_field} by {cat_field} (violin)'
-    else:  # bar
-        sns.barplot(data=data_df, x=cat_field, y=y_field,
-                    order=cat_order, ax=ax)
-        auto_title = f'{y_field} by {cat_field}'
-
-    ax.set_xlabel(cat_field)
-    plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
-    ax.set_title(title or auto_title)
-    sns.despine(ax=ax)
-    fig.tight_layout()
-
-    return _render_png(fig, dpi)
-
-
-# ── Numerical field distribution ───────────────────────────────────────────────
-
-def plot_num(
-    data_df: pd.DataFrame,
-    num_field: str,
-    cat_field: Optional[str] = None,
-    plot_type: str = 'ecdf',
-    bins: int = 20,
-    width: float = 7,
-    height: float = 4,
-    dpi: int = 150,
-    title: Optional[str] = None,
-) -> bytes:
-    """Numerical metadata field distribution, optionally grouped by category.
-
-    Without cat_field: ecdf, kde, or histogram.
-    With cat_field:    box, violin, or bar grouped by category.
-
-    Args:
-        data_df:    DataFrame with [cell_name, num_field, (cat_field)].
-        num_field:  Numerical column name.
-        cat_field:  Optional groupby categorical column.
-        plot_type:  'ecdf' | 'kde' | 'histogram' | 'box' | 'violin' | 'bar'.
-        bins:       Histogram bins (default 20).
-        width, height: Figure size in inches.
-        dpi:        Output resolution.
-        title:      Override plot title.
-    """
-    _setup_style()
-    fig, ax = plt.subplots(figsize=(width, height))
-
-    if cat_field:
-        cat_order = data_df[cat_field].value_counts().index.tolist()
-        if plot_type == 'box':
-            sns.boxplot(data=data_df, x=cat_field, y=num_field,
-                        order=cat_order, ax=ax, showfliers=False)
-        elif plot_type == 'violin':
-            sns.violinplot(data=data_df, x=cat_field, y=num_field,
-                           order=cat_order, ax=ax)
-        else:  # bar
-            sns.barplot(data=data_df, x=cat_field, y=num_field,
-                        order=cat_order, ax=ax)
-        ax.set_xlabel(cat_field)
-        plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
-        auto_title = f'{num_field} by {cat_field}'
-    else:
-        if plot_type == 'ecdf':
-            sns.ecdfplot(data=data_df, x=num_field, ax=ax)
-        elif plot_type == 'kde':
-            sns.kdeplot(data=data_df, x=num_field, ax=ax)
-        else:  # histogram
-            sns.histplot(data=data_df, x=num_field, bins=bins, ax=ax)
-        ax.set_xlabel(num_field)
-        auto_title = f'{num_field} ({plot_type})'
-
-    ax.set_title(title or auto_title)
-    sns.despine(ax=ax)
-    if cat_field:
-        fig.tight_layout()
-
-    return _render_png(fig, dpi)
-
-
 # ── Unified grammar-of-graphics API ───────────────────────────────────────────
 
 def build_caption(
@@ -631,6 +386,10 @@ def build_caption(
     elif geom == 'heatmap':
         sentence = (f'Heatmap of mean gene expression per {y} in {db_id}'
                     f' (z-scored per gene)')
+    elif geom == 'rolling':
+        sentence = f'Rolling-mean trajectory of {y} along {x} in {db_id}'
+        if color:
+            sentence += f', split by {color}'
     else:
         sentence = f'{geom} plot of {db_id}'
 
@@ -1223,5 +982,132 @@ def plot_heatmap(
     title_bits = ['Mean expression', f'{n_groups} grps', f'{n_genes} genes']
     ax.set_title(_compose_title(title_bits, extra=title_extra))
     fig.tight_layout()
+
+    return _render_figure(fig, dpi, output_format, caption, source_url)
+
+
+def plot_rolling(
+    data_df: pd.DataFrame,
+    x_field: str,
+    y_fields: List[str],
+    color_field: Optional[str] = None,
+    color_kind: str = 'categorical',
+    window: int = 200,
+    show_band: bool = False,
+    width: float = 9,
+    height: float = 5,
+    dpi: int = 150,
+    output_format: str = 'png',
+    palette_cat: str = _DEFAULT_CATEGORICAL,
+    palette_cont: str = _DEFAULT_SEQUENTIAL,
+    palette_div: str = _DEFAULT_DIVERGENT,
+    title_extra: Optional[str] = None,
+    caption: Optional[str] = None,
+    source_url: Optional[str] = None,
+    font_family: Optional[str] = None,
+    font_size: Optional[float] = None,
+) -> bytes:
+    """Rolling-window line plot along a continuous axis (e.g. pseudotime).
+
+    For each ``y_field``:
+      1. Sort cells by ``x_field`` ascending.
+      2. Apply a rolling mean of ``window`` cells.
+      3. Plot the smoothed line.
+
+    With ``color_field`` (categorical), one line per group is drawn — cells
+    are first split by group, then sorted+rolled within each.  Useful for
+    comparing trajectories (e.g. wild-type vs. knockout along pseudotime).
+
+    With ``show_band=True``, fills a translucent IQR (q25..q75) ribbon
+    around the rolling mean — visualises within-window variability.
+
+    Args:
+        data_df:    DataFrame with [cell_name, x_field, *y_fields[, color_field]].
+        x_field:    Continuous obs/gene field to use as the trajectory axis.
+        y_fields:   List of continuous fields to plot (each becomes a line).
+        color_field, color_kind: Optional categorical for per-group split.
+        window:     Rolling window in cells (default 200).
+        show_band:  Show IQR ribbon around each mean line (default False).
+    """
+    _setup_style(font_family, font_size)
+    fig, ax = plt.subplots(figsize=(width, height))
+
+    if not y_fields:
+        raise ValueError("plot_rolling needs at least one y field")
+    # Clip window to data size — very small datasets shouldn't blow up.
+    n_cells = int(len(data_df))
+    eff_window = max(2, min(window, n_cells))
+
+    # Decide line / band palette.
+    if color_field and color_kind == 'categorical':
+        # Multiple groups, each with potentially multiple y fields →
+        # categorical palette for groups, dash style for y fields.
+        cat_palette, _ = pick_cmap(
+            'categorical',
+            palette_cat=palette_cat,
+            palette_cont=palette_cont,
+            palette_div=palette_div,
+            n_categories=int(data_df[color_field].nunique()),
+        )
+        cmap_obj = matplotlib.cm.get_cmap(cat_palette)
+        groups = list(pd.Series(data_df[color_field]).dropna().unique())
+        groups = sorted(groups, key=str)
+        n_palette = getattr(cmap_obj, 'N', 256)
+        dash_cycle = ['-', '--', ':', '-.']
+
+        for gi, grp in enumerate(groups):
+            sub = data_df[data_df[color_field] == grp].sort_values(x_field)
+            if len(sub) < 2:
+                continue
+            colour = cmap_obj((gi % n_palette) / max(n_palette - 1, 1))
+            x_vals = sub[x_field].to_numpy(dtype=float)
+            for yi, y in enumerate(y_fields):
+                rolled = (pd.Series(sub[y].to_numpy(dtype=float))
+                          .rolling(eff_window, min_periods=1, center=True).mean())
+                label = f'{y} · {grp}' if len(y_fields) > 1 else str(grp)
+                ax.plot(x_vals, rolled, color=colour,
+                        linestyle=dash_cycle[yi % len(dash_cycle)],
+                        linewidth=1.4, label=label)
+                if show_band:
+                    series = pd.Series(sub[y].to_numpy(dtype=float))
+                    q25 = series.rolling(eff_window, min_periods=1, center=True).quantile(0.25)
+                    q75 = series.rolling(eff_window, min_periods=1, center=True).quantile(0.75)
+                    ax.fill_between(x_vals, q25, q75, color=colour, alpha=0.15, linewidth=0)
+    else:
+        # No grouping — one line per y field on a single subset.
+        ordered = data_df.sort_values(x_field)
+        x_vals = ordered[x_field].to_numpy(dtype=float)
+        cat_palette, _ = pick_cmap(
+            'categorical',
+            palette_cat=palette_cat,
+            palette_cont=palette_cont,
+            palette_div=palette_div,
+            n_categories=len(y_fields),
+        )
+        cmap_obj = matplotlib.cm.get_cmap(cat_palette)
+        n_palette = getattr(cmap_obj, 'N', 256)
+        for yi, y in enumerate(y_fields):
+            colour = cmap_obj((yi % n_palette) / max(n_palette - 1, 1))
+            series = pd.Series(ordered[y].to_numpy(dtype=float))
+            rolled = series.rolling(eff_window, min_periods=1, center=True).mean()
+            ax.plot(x_vals, rolled, color=colour, linewidth=1.6, label=y)
+            if show_band:
+                q25 = series.rolling(eff_window, min_periods=1, center=True).quantile(0.25)
+                q75 = series.rolling(eff_window, min_periods=1, center=True).quantile(0.75)
+                ax.fill_between(x_vals, q25, q75, color=colour, alpha=0.18, linewidth=0)
+
+    ax.set_xlabel(x_field)
+    ax.set_ylabel('rolling mean')
+    title_bits = [
+        ', '.join(y_fields[:3]) + ('…' if len(y_fields) > 3 else ''),
+        f'along {x_field}',
+        f'window={eff_window}',
+        f'n={_fmt_n(n_cells)}',
+    ]
+    if color_field:
+        title_bits.append(f'split by {color_field}')
+    ax.set_title(_compose_title(title_bits, extra=title_extra))
+    sns.despine(ax=ax)
+    _legend_outside(ax, title=color_field if color_field else 'y')
 
     return _render_figure(fig, dpi, output_format, caption, source_url)

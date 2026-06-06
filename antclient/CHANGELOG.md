@@ -5,6 +5,34 @@ All notable changes to the Anthive Client will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-06-06
+
+### Added — rolling-mean trajectory geom + scatter/hexbin polymorphism
+
+Server-side changes the client picks up via ``**extra`` (no API change here):
+
+- **``rolling``** — new geom.  Rolling-mean line along a continuous axis
+  (e.g. pseudotime).  ``x`` = continuous field, ``y`` = comma-separated
+  continuous fields (one line per).  Optional ``color`` for per-group
+  split.  Knobs: ``window`` (cells, default 200), ``show_band`` (IQR ribbon).
+- **``scatter`` and ``hexbin`` are now polymorphic** — embedding mode when
+  x is an obsm key or omitted, two-axis mode when x and y are both
+  continuous fields.  ``xy_scatter`` / ``xy_hexbin`` are gone (they were
+  two days old; superseded).
+- **Deprecated ``/plot/{umap,gene,cat,num}`` endpoints removed** —
+  return 404 now.  Use ``get_plot(geom='scatter'/...)``.
+
+### Changed
+
+- ``get_plot()`` docstring lists the rolling-specific params (``window``,
+  ``show_band``) and notes the scatter/hexbin polymorphism.
+
+### Notes
+
+No code change in the client itself — every new param flows through
+``**extra``.  Library deps are unchanged (still just ``requests`` +
+optional ``pandas``).
+
 ## [1.4.0] - 2026-06-05
 
 ### Added — full coverage of new plot params

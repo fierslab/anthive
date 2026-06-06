@@ -250,6 +250,32 @@
       <label style="margin-top:4px">top n if blank</label>
       <input type="number" name="n_genes" id="f-n_genes" value="20" min="1" max="200">
     </fieldset>
+
+    {% elif geom == 'rolling' %}
+    <fieldset>
+      <legend>x axis — trajectory (continuous)</legend>
+      <label>e.g. pseudotime, distance_to_*, an ordered numerical obs</label>
+      <div class="ac-wrap">
+        <input type="text" name="x" id="f-x" autocomplete="off" placeholder="pseudotime">
+        <div class="ac-suggest" id="ac-x"></div>
+      </div>
+    </fieldset>
+    <fieldset>
+      <legend>y fields (continuous)</legend>
+      <label>comma-separated genes or numerical obs — one line per field</label>
+      <input type="text" name="y" id="f-y" autocomplete="off" placeholder="e.g. TREM2, APOE, CST7">
+      <label style="margin-top:4px">window size (cells, rolling)</label>
+      <input type="number" name="window" id="f-window" value="200" min="2" max="50000">
+      <label style="margin-top:4px"><input type="checkbox" name="show_band" id="f-show_band"> show IQR band</label>
+    </fieldset>
+    <fieldset>
+      <legend>split by (optional)</legend>
+      <label>categorical — one line per group, per y field</label>
+      <select name="color" id="f-color">
+        <option value="">— none —</option>
+        {% for c in plot_meta.cat_fields %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
+      </select>
+    </fieldset>
     {% endif %}
 
     {# ── common ────────────────────────────────────────────────────────────── #}
@@ -268,10 +294,10 @@
       <input type="text" name="subset" id="f-subset" autocomplete="off" placeholder="field:value or field:v1,v2">
     </fieldset>
 
-    <button type="button" class="dl-primary" id="apply-btn"
-      style="margin-top:4px;padding:5px 10px;font-size:12px;background:#1d4ed8;color:#fff;border:1px solid #1d4ed8;cursor:pointer;font-family:inherit">
-      ↻ refresh
-    </button>
+    {# Apply button removed — the form auto-renders on every change
+       (debounced ~400ms via scheduleRefresh).  Kept here only as a
+       hidden hook so the existing JS doesn't need a null-check. #}
+    <button type="button" id="apply-btn" hidden></button>
 
     <a href="#" id="settings-toggle" style="font-size:11px;color:#888;margin-top:4px">⚙ figure settings…</a>
     <div class="settings-panel" id="settings-panel">
@@ -681,6 +707,18 @@
       if (x && !x.value && topGenes.length) {
         x.value = topGenes.slice(0, 10).join(', ');
       }
+    } else if (geom === 'rolling') {
+      // x = the first numerical obs that LOOKS like a trajectory axis,
+      //     otherwise top_num[0].  We look for the word "pseudotime",
+      //     "distance", "time", or "rank" in the field name.
+      const traj = topNum.find(c => /pseudotime|distance|time|rank|stage|order/i.test(c)) || topNum[0];
+      setIfEmpty('form [name="x"]', traj);
+      // y = first 3 curated genes (comma-separated)
+      const yField = document.querySelector('form [name="y"]');
+      if (yField && !yField.value && topGenes.length) {
+        yField.value = topGenes.slice(0, 3).join(', ');
+      }
+      setIfEmpty('form [name="color"]', topCat[0]);
     }
   })();
 
