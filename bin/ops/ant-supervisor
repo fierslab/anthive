@@ -98,7 +98,10 @@ SERVICES: dict = {
     },
 }
 
-DEFAULT_SERVICES = ['api', 'browse', 'mcp', 'streamlit']
+# MCP server is intentionally NOT in the default set — vark (CLI) is the
+# preferred LLM-facing path now.  To re-enable: add 'mcp' to the
+# DEFAULT_SERVICES list (or run `make serve-mcp` standalone).
+DEFAULT_SERVICES = ['api', 'browse', 'streamlit']
 
 # Back-off settings
 BACKOFF_INITIAL     = 2   # seconds

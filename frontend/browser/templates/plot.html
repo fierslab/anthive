@@ -249,6 +249,11 @@
       <input type="text" name="x" id="f-x" autocomplete="off" placeholder="e.g. TREM2, APOE, CX3CR1">
       <label style="margin-top:4px">top n if blank</label>
       <input type="number" name="n_genes" id="f-n_genes" value="20" min="1" max="200">
+      <label style="margin-top:6px">
+        <input type="checkbox" name="zscore" id="f-zscore" value="true" checked>
+        z-score per gene (centred divergent palette)
+      </label>
+      <small>untick to plot raw means with the sequential palette</small>
     </fieldset>
 
     {% elif geom == 'rolling' %}
@@ -412,7 +417,12 @@
       const name = el.getAttribute('name');
       if (!name) return;
       if (el.type === 'checkbox') {
-        if (el.checked) params.set(name, 'true');
+        // Emit only when state differs from the form default.  For
+        // default-OFF boxes that means we only send 'true' when ticked;
+        // for default-ON boxes (e.g. zscore) we need an explicit 'false'
+        // when unticked, otherwise the server falls back to its True default.
+        if (el.checked === el.defaultChecked) return;
+        params.set(name, el.checked ? 'true' : 'false');
         return;
       }
       const v = (el.value || '').trim();

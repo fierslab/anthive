@@ -2114,7 +2114,21 @@ def _plot_db_fingerprint(db_url: str) -> str:
 
 
 def _plot_cache_key(db_id: str, query: str, output_format: str, fingerprint: str) -> str:
-    raw = f"{db_id}|{query}|{output_format}|{fingerprint}"
+    # Normalise the URL query so equivalent calls collide on the same key:
+    #   - sort params by key (order shouldn't matter)
+    #   - canonicalise numerics so "dpi=80" / "dpi=80.0" / "dpi=80.00" agree
+    # Non-numeric values pass through unchanged.
+    from urllib.parse import parse_qsl, urlencode
+    canonical = []
+    for key, value in parse_qsl(query, keep_blank_values=True):
+        try:
+            num = float(value)
+        except (ValueError, TypeError):
+            canonical.append((key, value))
+            continue
+        canonical.append((key, str(int(num)) if num.is_integer() else repr(num)))
+    canonical.sort()
+    raw = f"{db_id}|{urlencode(canonical)}|{output_format}|{fingerprint}"
     return _plot_hashlib.sha1(raw.encode()).hexdigest()
 
 
@@ -2173,7 +2187,6 @@ class PlotRequest:
     bins: int
     point_size: float
     alpha: float
-    palette: str          # legacy — used as palette_cat when palette_cat is default
     palette_cat: str      # categorical / qualitative
     palette_cont: str     # sequential continuous (counts, expression, …)
     palette_div: str      # divergent continuous (z-scores, log fold change, …)
@@ -2189,6 +2202,7 @@ class PlotRequest:
     vmax: Optional[float]  # hexbin / scatter colorbar upper clip (None = auto)
     window: int          # rolling: window size in cells
     show_band: bool      # rolling: show IQR ribbon around the line
+    zscore: bool         # heatmap: z-score per gene (centred divergent) vs raw means
     filters: Optional[Dict[str, Any]]
     sample: Optional[int]
     source_url: str
@@ -2282,7 +2296,6 @@ def _handle_scatter(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         width=req.width, height=req.height, dpi=req.dpi,
         output_format=req.output_format,
         point_size=req.point_size, alpha=req.alpha,
-        palette=req.palette,
         palette_cat=req.palette_cat,
         palette_cont=req.palette_cont,
         palette_div=req.palette_div,
@@ -2355,7 +2368,6 @@ def _handle_hexbin(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         x_label=x_label, y_label=y_label,
         width=req.width, height=req.height, dpi=req.dpi,
         output_format=req.output_format,
-        palette=req.palette,
         palette_cat=req.palette_cat,
         palette_cont=req.palette_cont,
         palette_div=req.palette_div,
@@ -2470,7 +2482,6 @@ def _handle_xy(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         x_label=x_axis_label, y_label=y_axis_label,
         width=req.width, height=req.height, dpi=req.dpi,
         output_format=req.output_format,
-        palette=req.palette,
         palette_cat=req.palette_cat,
         palette_cont=req.palette_cont,
         palette_div=req.palette_div,
@@ -2729,7 +2740,9 @@ def _handle_heatmap(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         mean_expr_df=mean_expr_df,
         width=req.width, height=req.height, dpi=req.dpi,
         output_format=req.output_format,
+        palette_cont=req.palette_cont,
         palette_div=req.palette_div,
+        zscore=req.zscore,
         title_extra=req.db_id,
         caption=caption, source_url=req.source_url,
         font_family=req.font_family, font_size=req.font_size,
@@ -2770,8 +2783,7 @@ async def plot(
     bins: int = Query(20, ge=2, le=500),
     point_size: float = Query(3.0, gt=0.0, le=200.0),
     alpha: float = Query(0.8, ge=0.0, le=1.0),
-    palette: str = Query('tab10', description="DEPRECATED — use palette_categorical. Kept for backward-compat; if passed, overrides palette_categorical."),
-    palette_categorical: str = Query('tab10', description="Qualitative palette for categorical / discrete colour. Examples: tab10, tab20, Set1, Set2, Paired, Dark2."),
+    palette_categorical: str = Query('tab10', description="Qualitative palette for categorical / discrete colour. Examples: tab10, tab20, Set1, Set2, Paired, Dark2. Auto-bumps tab10 → tab20 when there are >10 distinct categories."),
     palette_continuous: str = Query('inferno_r', description="Sequential cmap for one-sided continuous data (counts, gene expression, %mt, ...). Examples: inferno_r, viridis, plasma, mako."),
     palette_divergent: str = Query('RdBu_r', description="Divergent cmap for data that straddles zero (z-scores, log fold change). Auto-selected when the data is detected as divergent. Examples: RdBu_r, coolwarm, PiYG, BrBG."),
     font_family: str = Query('DejaVu Sans', description="matplotlib font family (e.g. 'Arial', 'Helvetica', 'DejaVu Sans', 'serif')"),
@@ -2786,6 +2798,7 @@ async def plot(
     vmax: Optional[float] = Query(None, description="Hexbin / scatter: upper clip — useful when one hex's outlier value washes out the rest of the gradient. Leave empty for auto."),
     window: int = Query(200, ge=2, le=50000, description="Rolling: window size in cells along x (typically pseudotime). Higher = smoother line."),
     show_band: bool = Query(False, description="Rolling: shade an IQR (q25..q75) ribbon under the rolling mean to visualise within-window spread."),
+    zscore: bool = Query(True, description="Heatmap: z-score per gene (centred divergent palette, default — highlights relative differences). Set false to show raw means with the sequential palette."),
     subset: List[str] = Query(default=[], description=(
         "Cell subset filter(s). Repeatable. Formats: "
         "'field:value' (exact), 'field:v1,v2' (IN list), 'field:min..max' (range). "
@@ -2841,7 +2854,6 @@ async def plot(
         output_format=output_format, layer=layer,
         width=width, height=height, dpi=dpi, bins=bins,
         point_size=point_size, alpha=alpha,
-        palette=palette,
         palette_cat=palette_categorical,
         palette_cont=palette_continuous,
         palette_div=palette_divergent,
@@ -2851,6 +2863,7 @@ async def plot(
         log_x=log_x, log_y=log_y,
         vmin=vmin, vmax=vmax,
         window=window, show_band=show_band,
+        zscore=zscore,
         filters=filters, sample=sample,
         source_url=source_url,
     )

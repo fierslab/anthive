@@ -34,9 +34,6 @@ _DEFAULT_CATEGORICAL = 'tab10'
 _DEFAULT_SEQUENTIAL  = 'inferno_r'
 _DEFAULT_DIVERGENT   = 'RdBu_r'
 
-# Legacy alias kept for older callers — points at the categorical default.
-_DEFAULT_PALETTE = _DEFAULT_CATEGORICAL
-
 _VALID_FORMATS = {'png', 'svg', 'pdf'}
 
 # Qualitative palettes: never use these as a continuous cmap (matplotlib
@@ -62,10 +59,6 @@ _DIVERGENT_PALETTES = {
     'RdGy', 'RdGy_r',
     'bwr', 'seismic', 'Spectral', 'Spectral_r',
 }
-
-
-# Back-compat shim — used to be the only "is continuous?" helper.
-_CONTINUOUS_DEFAULT = _DEFAULT_SEQUENTIAL
 
 
 def _fmt_n(n: int) -> str:
@@ -159,14 +152,6 @@ def pick_cmap(
         # one-sided data → divergent cmap wastes range; fall back
         return _DEFAULT_SEQUENTIAL, 'sequential'
     return palette_cont, 'sequential'
-
-
-# Legacy single-palette helper kept for any old callsite I missed.
-def _continuous_cmap(palette: str) -> str:
-    """Old single-palette helper.  Prefer pick_cmap() for new code."""
-    if not palette or palette in _QUALITATIVE_PALETTES:
-        return _DEFAULT_SEQUENTIAL
-    return palette
 
 
 def _legend_outside(ax, title: Optional[str] = None, fontsize: float = 8) -> None:
@@ -300,13 +285,6 @@ def _render_figure(
     return buf.getvalue()
 
 
-def _render_png(fig: MplFigure, dpi: int) -> bytes:
-    """Render figure to PNG bytes and close it immediately (legacy wrapper)."""
-    return _render_figure(fig, dpi, 'png')
-
-
-# ── UMAP ──────────────────────────────────────────────────────────────────────
-
 # ── Unified grammar-of-graphics API ───────────────────────────────────────────
 
 def build_caption(
@@ -429,7 +407,6 @@ def plot_scatter(
     output_format: str = 'png',
     point_size: float = 3,
     alpha: float = 0.8,
-    palette: Optional[str] = None,          # legacy alias (used as palette_cat)
     palette_cat: str = _DEFAULT_CATEGORICAL,
     palette_cont: str = _DEFAULT_SEQUENTIAL,
     palette_div: str = _DEFAULT_DIVERGENT,
@@ -459,11 +436,6 @@ def plot_scatter(
     x_col = embedding_df.columns[-2]
     y_col = embedding_df.columns[-1]
     plot_df = embedding_df.copy()
-
-    # Back-compat: legacy callers passing a single `palette=` override the
-    # categorical default.
-    if palette:
-        palette_cat = palette
 
     n_cells = int(len(plot_df))
 
@@ -549,7 +521,6 @@ def plot_hexbin(
     height: float = 6,
     dpi: int = 150,
     output_format: str = 'png',
-    palette: Optional[str] = None,                # legacy alias for palette_cat
     palette_cat: str = _DEFAULT_CATEGORICAL,
     palette_cont: str = _DEFAULT_SEQUENTIAL,
     palette_div: str = _DEFAULT_DIVERGENT,
@@ -600,11 +571,6 @@ def plot_hexbin(
     y_col = embedding_df.columns[-1]
     xs = np.asarray(embedding_df[x_col], dtype=float)
     ys = np.asarray(embedding_df[y_col], dtype=float)
-
-    # Back-compat: legacy single-`palette` callers point at the categorical
-    # default (it was the only knob before this revision).
-    if palette:
-        palette_cat = palette
 
     n_cells = int(len(embedding_df))
 
@@ -701,6 +667,7 @@ def plot_hexbin(
 
         hex_totals = counts.sum(axis=1)
         used = hex_totals >= mincnt
+        dominance = np.zeros(0, dtype=float)   # filled in the else-branch; default keeps the title-block safe.
         if not used.any():
             ax.text(0.5, 0.5, 'no hex bins reached mincnt; lower --mincnt',
                     transform=ax.transAxes, ha='center', va='center', color='#888')
@@ -774,11 +741,12 @@ def plot_hexbin(
         # Title carries the categorical context: n_cats, n_used hexes,
         # and the median dominance so the reader knows "how mixed" the
         # plot looks before reading the alpha.
-        try:
-            n_used_hex = int(used.sum())
-            median_dom = float(np.median(dominance[used])) if n_used_hex else 0.0
-        except Exception:
-            n_used_hex, median_dom = 0, 0.0
+        n_used_hex = int(used.sum())
+        median_dom = (
+            float(np.median(dominance[used]))
+            if n_used_hex and dominance.size == used.size
+            else 0.0
+        )
         # "modal" = the most-frequent category in each hex.  "α=top₁/top₂"
         # = each hex's alpha tracks the dominance ratio (count of modal
         # class / count of runner-up), pushed through a sigmoid so a
@@ -950,7 +918,9 @@ def plot_heatmap(
     height: float = 6,
     dpi: int = 150,
     output_format: str = 'png',
+    palette_cont: str = _DEFAULT_SEQUENTIAL,
     palette_div: str = _DEFAULT_DIVERGENT,
+    zscore: bool = True,
     title_extra: Optional[str] = None,
     caption: Optional[str] = None,
     source_url: Optional[str] = None,
@@ -960,32 +930,41 @@ def plot_heatmap(
     """Heatmap of mean gene expression per category group.
 
     Args:
-        mean_expr_df: DataFrame with index=category values, columns=gene names.
-                      Values are z-scored per gene column before display.
-        output_format: 'png' | 'svg' | 'pdf'.
-        caption:      Figure caption.
+        mean_expr_df: index=category values, columns=gene names.
+        zscore:       When True (default) z-score each gene column and render
+                      with the divergent palette centred at 0 — highlights
+                      relative differences across groups.  When False, plot
+                      raw means with the sequential palette (palette_cont).
     """
     _setup_style(font_family, font_size)
     fig, ax = plt.subplots(figsize=(width, height))
 
-    z_df = (mean_expr_df - mean_expr_df.mean()) / (mean_expr_df.std() + 1e-9)
-    # Heatmap data is z-scored (centred on 0) — it's inherently divergent.
-    # Use the palette_div family (default RdBu_r) so it stays consistent
-    # with the rest of the visualisation stack's divergent rendering.
-    cmap_div = palette_div if palette_div in _DIVERGENT_PALETTES else _DEFAULT_DIVERGENT
+    if zscore:
+        plot_df = (mean_expr_df - mean_expr_df.mean()) / (mean_expr_df.std() + 1e-9)
+        cmap = palette_div if palette_div in _DIVERGENT_PALETTES else _DEFAULT_DIVERGENT
+        cbar_label = 'z-score'
+        center = 0
+        title_lead = 'Mean expression (z-scored)'
+    else:
+        plot_df = mean_expr_df
+        cmap = palette_cont if palette_cont not in _QUALITATIVE_PALETTES else _DEFAULT_SEQUENTIAL
+        cbar_label = 'mean expression'
+        center = None
+        title_lead = 'Mean expression'
+
     sns.heatmap(
-        z_df, ax=ax,
-        cmap=cmap_div, center=0,
+        plot_df, ax=ax,
+        cmap=cmap, center=center,
         linewidths=0.3,
         yticklabels=True,
         xticklabels=True,
-        cbar_kws={'label': 'z-score'},
+        cbar_kws={'label': cbar_label},
     )
     ax.set_xlabel('Gene')
     ax.set_ylabel('')
     plt.setp(ax.get_xticklabels(), rotation=45, ha='right', fontsize=8)
     n_groups, n_genes = mean_expr_df.shape
-    title_bits = ['Mean expression', f'{n_groups} grps', f'{n_genes} genes']
+    title_bits = [title_lead, f'{n_groups} grps', f'{n_genes} genes']
     ax.set_title(_compose_title(title_bits, extra=title_extra))
     fig.tight_layout()
 

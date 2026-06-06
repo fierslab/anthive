@@ -692,6 +692,7 @@ class AnthiveClient:
                     ``log_x``, ``log_y`` (gene-vs-gene scatter/hexbin),
                     ``vmin``, ``vmax`` (continuous colorbar clip),
                     ``window``, ``show_band`` (rolling),
+                    ``zscore`` (heatmap — default True, set False for raw means),
                     ``palette_categorical``, ``palette_continuous``,
                     ``palette_divergent``.
 
