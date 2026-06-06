@@ -779,12 +779,18 @@ def plot_hexbin(
             median_dom = float(np.median(dominance[used])) if n_used_hex else 0.0
         except Exception:
             n_used_hex, median_dom = 0, 0.0
+        # "modal" = the most-frequent category in each hex.  "α=top₁/top₂"
+        # = each hex's alpha tracks the dominance ratio (count of modal
+        # class / count of runner-up), pushed through a sigmoid so a
+        # fully mixed hex (ratio=1) gets α≈0.25 and a near-pure hex
+        # (ratio≥5) gets α≈1.  "median dom=X" is the median ratio across
+        # used hexes — high = sharp regional structure, near 1 = mixed.
         title_bits = [
             color_field,
-            f'⬣ modal · α=dom',
+            '⬣ modal class · α=top₁/top₂',
             f'{len(unique_cats)} grps',
             f'n={_fmt_n(n_cells)}',
-            f'median dom={median_dom:.1f}',
+            f'median top₁/top₂={median_dom:.1f}',
         ]
         ax.set_title(_compose_title(title_bits, extra=title_extra))
 
@@ -1034,8 +1040,14 @@ def plot_rolling(
 
     if not y_fields:
         raise ValueError("plot_rolling needs at least one y field")
-    # Clip window to data size — very small datasets shouldn't blow up.
     n_cells = int(len(data_df))
+    # Auto-scale the window when the user is on the API default (200) but
+    # the dataset is much larger — 200 cells out of 200k is so tight you
+    # can't see anything.  Rule of thumb: 1% of the dataset, clamped to
+    # [50, 10000] so we don't over- or under-smooth.  User-supplied
+    # windows are still honoured.
+    if window == 200 and n_cells > 5_000:
+        window = max(50, min(10_000, n_cells // 100))
     eff_window = max(2, min(window, n_cells))
 
     # Decide line / band palette.

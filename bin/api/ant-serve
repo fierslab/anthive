@@ -2183,8 +2183,8 @@ class PlotRequest:
     n_genes: int
     gridsize: int        # hexbin: number of hex bins along x-axis
     mincnt: int          # hexbin: minimum cells per hex to render
-    log_x: bool          # xy_scatter / xy_hexbin: apply log1p to x values
-    log_y: bool          # xy_scatter / xy_hexbin: apply log1p to y values
+    log_x: bool          # scatter / hexbin (XY-mode): apply log1p to x
+    log_y: bool          # scatter / hexbin (XY-mode): apply log1p to y
     vmin: Optional[float]  # hexbin / scatter colorbar lower clip (None = auto)
     vmax: Optional[float]  # hexbin / scatter colorbar upper clip (None = auto)
     window: int          # rolling: window size in cells
