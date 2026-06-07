@@ -22,7 +22,7 @@ Version: 1.5.0
 from typing import Any, Dict, List, Optional, Union
 import requests
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 __all__ = ["AnthiveClient"]
 
 
@@ -652,6 +652,17 @@ class AnthiveClient:
 
     # ===== Plot =====
 
+    # Geoms the server exposes as a per-geom endpoint.  Adding a new geom
+    # = registering it on the server AND adding it here.  Kept on the class
+    # so callers can validate via ``AnthiveClient.PLOT_GEOMS`` without a
+    # network round-trip to OpenAPI.
+    PLOT_GEOMS = frozenset({
+        'scatter', 'hexbin',
+        'violin', 'box', 'bar',
+        'histogram', 'ecdf', 'kde',
+        'heatmap', 'rolling',
+    })
+
     def get_plot(self,
                  db_id: str,
                  geom: str,
@@ -663,36 +674,42 @@ class AnthiveClient:
                  width: float = 8,
                  height: float = 6,
                  dpi: int = 150,
-                 palette: str = "tab20",
                  sample: Optional[int] = None,
                  subset: Optional[List[str]] = None,
                  **extra) -> Dict[str, Any]:
         """Render a plot server-side.  Returns image bytes + caption.
 
+        Hits the per-geom endpoint at
+        ``/databases/{db_id}/plot/{geom}`` (REST API 2.2, antclient 1.6).
+        For older servers, the legacy ``/databases/{db_id}/plot?geom=…``
+        dispatcher is still available via :meth:`get_plot_legacy`.
+
         Args:
             db_id:  Database identifier (``group/file``).
-            geom:   ``scatter`` | ``hexbin`` | ``violin`` | ``box`` | ``bar`` |
-                    ``histogram`` | ``ecdf`` | ``kde`` | ``heatmap`` |
-                    ``rolling``.  ``scatter`` and ``hexbin`` are polymorphic:
-                    embedding when x is omitted/an obsm key, two-axis when
-                    x and y are both continuous fields.  ``rolling`` plots a
-                    rolling-mean line along a continuous x (e.g. pseudotime).
+            geom:   One of :attr:`AnthiveClient.PLOT_GEOMS`:
+                    ``scatter``, ``hexbin``, ``violin``, ``box``, ``bar``,
+                    ``histogram``, ``ecdf``, ``kde``, ``heatmap``,
+                    ``rolling``. ``scatter`` and ``hexbin`` are polymorphic
+                    (embedding when ``x`` is omitted / an obsm key, two-axis
+                    when ``x`` and ``y`` are both continuous fields).
             x, y, color: field names (gene, obs column, or embedding).  Their
-                    meaning is geom-specific — see the OpenAPI docs.
+                    semantics are geom-specific — see the per-geom OpenAPI
+                    page (e.g. ``…/api/docs#/plots/plot_heatmap_endpoint``).
             layer:  Expression layer to plot from (default ``"X"``).
             format: ``png`` | ``svg`` | ``pdf``.
-            width, height, dpi, palette: figure styling.
+            width, height, dpi: figure styling.
             sample: random-subsample N cells (server-side, reservoir sampling).
             subset: list of ``field:value`` or ``field:v1,v2`` filter strings;
                     sent as repeated ``?subset=`` query params.
-            **extra: any other plot params, forwarded as query params:
-                    ``bins``, ``ci``, ``font_family``, ``font_size``,
-                    ``point_size``, ``alpha``, ``n_genes``,
+            **extra: geom-specific params, forwarded as query params:
+                    ``bins`` (histogram), ``ci`` (bar),
+                    ``font_family``, ``font_size``,
+                    ``point_size``, ``alpha`` (scatter / hexbin),
+                    ``n_genes``, ``zscore`` (heatmap),
                     ``gridsize``, ``mincnt`` (hexbin),
-                    ``log_x``, ``log_y`` (gene-vs-gene scatter/hexbin),
-                    ``vmin``, ``vmax`` (continuous colorbar clip),
+                    ``log_x``, ``log_y`` (XY-mode scatter / hexbin),
+                    ``vmin``, ``vmax`` (continuous colour-scale clip),
                     ``window``, ``show_band`` (rolling),
-                    ``zscore`` (heatmap — default True, set False for raw means),
                     ``palette_categorical``, ``palette_continuous``,
                     ``palette_divergent``.
 
@@ -716,9 +733,13 @@ class AnthiveClient:
             >>> open("bar.png", "wb").write(p["bytes"])
             >>> print(p["caption"])  # "Bar plot of ... n = 235,106 cells; 29 groups."
         """
+        if geom not in self.PLOT_GEOMS:
+            raise ValueError(
+                f"Unknown geom '{geom}'. Valid: {sorted(self.PLOT_GEOMS)}"
+            )
         params: Dict[str, Any] = {
-            'geom': geom, 'format': format, 'layer': layer,
-            'width': width, 'height': height, 'dpi': dpi, 'palette': palette,
+            'format': format, 'layer': layer,
+            'width': width, 'height': height, 'dpi': dpi,
         }
         if x      is not None: params['x']      = x
         if y      is not None: params['y']      = y
@@ -731,7 +752,7 @@ class AnthiveClient:
         for key, value in extra.items():
             if value is not None:
                 params[key] = value
-        response = self._get_raw(f'/databases/{db_id}/plot', params=params)
+        response = self._get_raw(f'/databases/{db_id}/plot/{geom}', params=params)
         return {
             'bytes':      response.content,
             'format':     response.headers.get('X-Plot-Format', format),

@@ -51,7 +51,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi import (
+    Depends, FastAPI, HTTPException,
+    Path as FastAPIPath,   # avoid shadowing pathlib.Path imported above
+    Query, Request, Response,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -2113,11 +2117,17 @@ def _plot_db_fingerprint(db_url: str) -> str:
         return db_url
 
 
-def _plot_cache_key(db_id: str, query: str, output_format: str, fingerprint: str) -> str:
+def _plot_cache_key(
+    db_id: str, geom: str, query: str, output_format: str, fingerprint: str,
+) -> str:
     # Normalise the URL query so equivalent calls collide on the same key:
     #   - sort params by key (order shouldn't matter)
     #   - canonicalise numerics so "dpi=80" / "dpi=80.0" / "dpi=80.00" agree
     # Non-numeric values pass through unchanged.
+    # ``geom`` is included explicitly because the per-geom endpoints encode
+    # it in the URL path (not the query string) — without it, two different
+    # geoms with the same params (e.g. /plot/violin?x=X vs /plot/box?x=X)
+    # would collide on the same cache entry.
     from urllib.parse import parse_qsl, urlencode
     canonical = []
     for key, value in parse_qsl(query, keep_blank_values=True):
@@ -2128,7 +2138,7 @@ def _plot_cache_key(db_id: str, query: str, output_format: str, fingerprint: str
             continue
         canonical.append((key, str(int(num)) if num.is_integer() else repr(num)))
     canonical.sort()
-    raw = f"{db_id}|{urlencode(canonical)}|{output_format}|{fingerprint}"
+    raw = f"{db_id}|{geom}|{urlencode(canonical)}|{output_format}|{fingerprint}"
     return _plot_hashlib.sha1(raw.encode()).hexdigest()
 
 
@@ -2766,74 +2776,184 @@ _PLOT_HANDLERS: Dict[str, Any] = {
 }
 
 
-# ── unified plot endpoint ──────────────────────────────────────────────────────
+# ── shared plot-request infrastructure ────────────────────────────────────────
+#
+# Every plot endpoint follows the same three-step pipeline:
+#   1. CommonPlotParams (Depends) gathers the shared knobs (db_id, format,
+#      figure size, palettes, fonts, subset, sample, the Request).
+#   2. _build_plot_request() folds those plus the per-geom params into a
+#      frozen PlotRequest — the contract the handlers consume.
+#   3. _render_plot() does the cache lookup / handler dispatch / response.
+#
+# Per-geom endpoints therefore stay two lines of body, and their signatures
+# document exactly which params apply to that geom (no kitchen-sink Query
+# list, no "this param only matters for hexbin" comments).
 
-@app.get("/databases/{db_id:path}/plot", tags=["plots"])
-async def plot(
-    db_id: str,
-    geom: str = Query(..., description="scatter | violin | box | bar | histogram | ecdf | kde | heatmap"),
-    x: Optional[str] = Query(None, description="X-axis field (auto-typed: embedding, gene, categorical, numerical)"),
-    y: Optional[str] = Query(None, description="Y-axis field (auto-typed)"),
-    color: Optional[str] = Query(None, description="Color-encoding field (auto-typed)"),
-    output_format: str = Query('png', alias='format', description="png | svg | pdf"),
-    layer: str = Query('X', description="Expression layer"),
-    width: float = Query(8.0, gt=1.0, le=32.0, description="Figure width in inches (1–32)"),
-    height: float = Query(6.0, gt=1.0, le=32.0, description="Figure height in inches (1–32)"),
-    dpi: int = Query(150, ge=72, le=600, description="Resolution dots per inch (72–600)"),
-    bins: int = Query(20, ge=2, le=500),
-    point_size: float = Query(3.0, gt=0.0, le=200.0),
-    alpha: float = Query(0.8, ge=0.0, le=1.0),
-    palette_categorical: str = Query('tab10', description="Qualitative palette for categorical / discrete colour. Examples: tab10, tab20, Set1, Set2, Paired, Dark2. Auto-bumps tab10 → tab20 when there are >10 distinct categories."),
-    palette_continuous: str = Query('inferno_r', description="Sequential cmap for one-sided continuous data (counts, gene expression, %mt, ...). Examples: inferno_r, viridis, plasma, mako."),
-    palette_divergent: str = Query('RdBu_r', description="Divergent cmap for data that straddles zero (z-scores, log fold change). Auto-selected when the data is detected as divergent. Examples: RdBu_r, coolwarm, PiYG, BrBG."),
-    font_family: str = Query('DejaVu Sans', description="matplotlib font family (e.g. 'Arial', 'Helvetica', 'DejaVu Sans', 'serif')"),
-    font_size: float = Query(10.0, ge=6.0, le=36.0, description="Base font size in pt; titles & ticks scale relative to this"),
-    ci: bool = Query(True, description="Show 95% CI on bar plots"),
-    n_genes: int = Query(20, ge=1, le=200, description="Top genes for heatmap when x not given"),
-    gridsize: int = Query(60, ge=10, le=200, description="Hexbin: number of hex bins along the x-axis (higher = finer)"),
-    mincnt: int = Query(1, ge=1, le=1000, description="Hexbin: minimum cells per hex to render (filters out sparse outliers)"),
-    log_x: bool = Query(False, description="xy_scatter / xy_hexbin: apply log1p(x) before plotting. Use for raw counts / heavy-tailed expression. Zeros stay at 0."),
-    log_y: bool = Query(False, description="xy_scatter / xy_hexbin: apply log1p(y) before plotting."),
-    vmin: Optional[float] = Query(None, description="Hexbin / scatter: lower clip for the continuous colour scale. Leave empty for auto. For density (no colour field), this clips the cell-count scale."),
-    vmax: Optional[float] = Query(None, description="Hexbin / scatter: upper clip — useful when one hex's outlier value washes out the rest of the gradient. Leave empty for auto."),
-    window: int = Query(200, ge=2, le=50000, description="Rolling: window size in cells along x (typically pseudotime). Higher = smoother line."),
-    show_band: bool = Query(False, description="Rolling: shade an IQR (q25..q75) ribbon under the rolling mean to visualise within-window spread."),
-    zscore: bool = Query(True, description="Heatmap: z-score per gene (centred divergent palette, default — highlights relative differences). Set false to show raw means with the sequential palette."),
-    subset: List[str] = Query(default=[], description=(
-        "Cell subset filter(s). Repeatable. Formats: "
-        "'field:value' (exact), 'field:v1,v2' (IN list), 'field:min..max' (range). "
-        "Example: subset=sex:female&subset=condition:AD"
-    )),
-    sample: Optional[int] = Query(None, ge=1, le=1_000_000, description=(
-        "Random subsample: draw at most this many cells using DuckDB reservoir sampling"
-        "(near-zero overhead, applied after subset filters). "
-        "Example: sample=10000. If larger than the cell count, all cells are used."
-    )),
-    request: Request = None,  # type: ignore[assignment]
-):
-    """Unified grammar-of-graphics plot endpoint.
 
-    Provide geom + x/y/color field names; the server auto-detects field types.
-    Returns the image with X-Plot-Caption and X-Plot-Format response headers.
-    Restrict to a cell subset with one or more ?subset=field:value params.
-    Use ?sample=N to randomly draw N cells (DuckDB reservoir sampling).
+class CommonPlotParams:
+    """Shared plot-request parameters, injected via FastAPI ``Depends``.
+
+    Every per-geom endpoint declares ``common: CommonPlotParams = Depends()``
+    and receives the dataset id (from the path) plus every shared knob in a
+    single object — keeping per-geom signatures focused on the params that
+    geom actually understands.
     """
-    filters = _parse_subset(subset)
-    if geom not in _PLOT_GEOMS:
-        raise HTTPException(400, detail=f"Unknown geom '{geom}'. Valid: {sorted(_PLOT_GEOMS)}")
-    if output_format not in _PLOT_MIME_TYPES:
-        raise HTTPException(400, detail=f"Unknown format '{output_format}'. Valid: png, svg, pdf")
 
-    # Cache lookup — keyed on (db_id, query string, format, file fingerprint).
-    # If the duckdb hasn't changed since we last rendered this exact query,
-    # return the cached bytes directly.
-    source_url = str(request.url) if request is not None else ''
+    def __init__(
+        self,
+        db_id: str = FastAPIPath(..., description="Dataset id, e.g. ``S25/V6W``"),
+        output_format: str = Query(
+            'png', alias='format',
+            description="Output image format: ``png`` | ``svg`` | ``pdf``.",
+        ),
+        layer: str = Query('X', description="Expression layer to read (default ``X``)."),
+        width: float = Query(8.0, gt=1.0, le=32.0, description="Figure width in inches (1–32)."),
+        height: float = Query(6.0, gt=1.0, le=32.0, description="Figure height in inches (1–32)."),
+        dpi: int = Query(150, ge=72, le=600, description="Resolution in dots per inch (72–600)."),
+        palette_categorical: str = Query(
+            'tab10',
+            description=(
+                "Qualitative palette for categorical / discrete colour. "
+                "Examples: ``tab10``, ``tab20``, ``Set1``, ``Set2``, ``Paired``, ``Dark2``. "
+                "Auto-bumps ``tab10`` → ``tab20`` when there are >10 distinct categories."
+            ),
+        ),
+        palette_continuous: str = Query(
+            'inferno_r',
+            description=(
+                "Sequential cmap for one-sided continuous data (counts, gene "
+                "expression, %mt, …). Examples: ``inferno_r``, ``viridis``, "
+                "``plasma``, ``mako``."
+            ),
+        ),
+        palette_divergent: str = Query(
+            'RdBu_r',
+            description=(
+                "Divergent cmap for data that straddles zero (z-scores, log "
+                "fold change). Auto-selected when the data is detected as "
+                "divergent. Examples: ``RdBu_r``, ``coolwarm``, ``PiYG``, ``BrBG``."
+            ),
+        ),
+        font_family: str = Query(
+            'DejaVu Sans',
+            description="matplotlib font family (e.g. 'Arial', 'Helvetica', 'DejaVu Sans', 'serif').",
+        ),
+        font_size: float = Query(
+            10.0, ge=6.0, le=36.0,
+            description="Base font size in pt; titles & ticks scale relative to this.",
+        ),
+        subset: List[str] = Query(
+            default=[],
+            description=(
+                "Cell-subset filter(s) applied before plotting. Repeatable. "
+                "Formats: ``field:value`` (exact), ``field:v1,v2`` (IN list), "
+                "``field:min..max`` (range). Example: "
+                "``?subset=sex:female&subset=condition:AD``."
+            ),
+        ),
+        sample: Optional[int] = Query(
+            None, ge=1, le=1_000_000,
+            description=(
+                "Random subsample: draw at most this many cells using DuckDB "
+                "reservoir sampling (near-zero overhead, applied after subset "
+                "filters). Example: ``sample=10000``."
+            ),
+        ),
+        request: Request = None,  # type: ignore[assignment]
+    ):
+        if output_format not in _PLOT_MIME_TYPES:
+            raise HTTPException(
+                400, detail=f"Unknown format '{output_format}'. Valid: png, svg, pdf",
+            )
+        self.db_id = db_id
+        self.output_format = output_format
+        self.layer = layer
+        self.width = width
+        self.height = height
+        self.dpi = dpi
+        self.palette_categorical = palette_categorical
+        self.palette_continuous = palette_continuous
+        self.palette_divergent = palette_divergent
+        self.font_family = font_family
+        self.font_size = font_size
+        self.subset = subset
+        self.sample = sample
+        self.request = request
+
+
+def _build_plot_request(
+    common: CommonPlotParams,
+    geom: str,
+    *,
+    x: Optional[str] = None,
+    y: Optional[str] = None,
+    color: Optional[str] = None,
+    bins: int = 20,
+    point_size: float = 3.0,
+    alpha: float = 0.8,
+    ci: bool = True,
+    n_genes: int = 20,
+    gridsize: int = 60,
+    mincnt: int = 1,
+    log_x: bool = False,
+    log_y: bool = False,
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+    window: int = 200,
+    show_band: bool = False,
+    zscore: bool = True,
+) -> PlotRequest:
+    """Fold ``CommonPlotParams`` + geom-specific kwargs into a ``PlotRequest``.
+
+    Geom-specific kwargs default to the values the unified endpoint used to
+    pass, so handlers see the same inputs regardless of which endpoint
+    routed them.  Per-geom endpoints only override the kwargs that geom
+    actually exposes — every other field falls back to its safe default.
+    """
+    return PlotRequest(
+        db_id=common.db_id, geom=geom,
+        x=x, y=y, color=color,
+        output_format=common.output_format, layer=common.layer,
+        width=common.width, height=common.height, dpi=common.dpi,
+        bins=bins,
+        point_size=point_size, alpha=alpha,
+        palette_cat=common.palette_categorical,
+        palette_cont=common.palette_continuous,
+        palette_div=common.palette_divergent,
+        font_family=common.font_family, font_size=common.font_size,
+        ci=ci, n_genes=n_genes,
+        gridsize=gridsize, mincnt=mincnt,
+        log_x=log_x, log_y=log_y,
+        vmin=vmin, vmax=vmax,
+        window=window, show_band=show_band,
+        zscore=zscore,
+        filters=_parse_subset(common.subset),
+        sample=common.sample,
+        source_url=str(common.request.url) if common.request is not None else '',
+    )
+
+
+async def _render_plot(plot_req: PlotRequest, request: Request) -> Response:
+    """Cache-aware execution of a plot request.
+
+    Hits the in-memory LRU first (keyed on db_id + normalised query string +
+    format + file fingerprint).  On miss, runs the geom's handler in a worker
+    thread, stores the result, returns a ``Response`` with the standard
+    ``X-Plot-Caption`` / ``X-Plot-Cache`` / ``ETag`` headers.
+
+    Per-geom endpoints don't need to know any of this — they call
+    ``await _render_plot(req, common.request)`` and they're done.
+    """
     try:
-        db_fingerprint = _plot_db_fingerprint(registry.get_database_path(db_id))
+        db_fingerprint = _plot_db_fingerprint(registry.get_database_path(plot_req.db_id))
     except KeyError:
-        raise HTTPException(status_code=404, detail=f"Dataset '{db_id}' not found")
+        raise HTTPException(status_code=404, detail=f"Dataset '{plot_req.db_id}' not found")
+
     query_string = request.url.query if request is not None else ''
-    cache_key = _plot_cache_key(db_id, query_string, output_format, db_fingerprint)
+    cache_key = _plot_cache_key(
+        plot_req.db_id, plot_req.geom, query_string,
+        plot_req.output_format, db_fingerprint,
+    )
     cached = _plot_cache_get(cache_key)
     if cached is not None:
         return Response(
@@ -2841,7 +2961,7 @@ async def plot(
             media_type=cached['mime'],
             headers={
                 'X-Plot-Caption':   cached['caption'],
-                'X-Plot-Format':    output_format,
+                'X-Plot-Format':    plot_req.output_format,
                 'X-Source-URL':     cached['source_url'],
                 'X-Plot-Cache':     'HIT',
                 'ETag':             f'"{cache_key}"',
@@ -2849,28 +2969,10 @@ async def plot(
             },
         )
 
-    plot_req = PlotRequest(
-        db_id=db_id, geom=geom, x=x, y=y, color=color,
-        output_format=output_format, layer=layer,
-        width=width, height=height, dpi=dpi, bins=bins,
-        point_size=point_size, alpha=alpha,
-        palette_cat=palette_categorical,
-        palette_cont=palette_continuous,
-        palette_div=palette_divergent,
-        font_family=font_family, font_size=font_size,
-        ci=ci, n_genes=n_genes,
-        gridsize=gridsize, mincnt=mincnt,
-        log_x=log_x, log_y=log_y,
-        vmin=vmin, vmax=vmax,
-        window=window, show_band=show_band,
-        zscore=zscore,
-        filters=filters, sample=sample,
-        source_url=source_url,
-    )
-    handler = _PLOT_HANDLERS[geom]  # geom validity already checked above
+    handler = _PLOT_HANDLERS[plot_req.geom]
 
     def _sync_plot():
-        with _pooled_db(db_id) as db:
+        with _pooled_db(plot_req.db_id) as db:
             ctx = PlotContext(
                 db=db,
                 available_embeddings=db._get_embeddings(),
@@ -2890,11 +2992,11 @@ async def plot(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    mime = _PLOT_MIME_TYPES[output_format]
+    mime = _PLOT_MIME_TYPES[plot_req.output_format]
     _plot_cache_put(cache_key, {
         'bytes':      image_bytes,
         'caption':    caption,
-        'source_url': source_url,
+        'source_url': plot_req.source_url,
         'mime':       mime,
     })
     return Response(
@@ -2902,13 +3004,308 @@ async def plot(
         media_type=mime,
         headers={
             'X-Plot-Caption':   caption,
-            'X-Plot-Format':    output_format,
-            'X-Source-URL':     source_url,
+            'X-Plot-Format':    plot_req.output_format,
+            'X-Source-URL':     plot_req.source_url,
             'X-Plot-Cache':     'MISS',
             'ETag':             f'"{cache_key}"',
             'Cache-Control':    'public, max-age=3600',
         },
     )
+
+
+# ── per-geom plot endpoints ───────────────────────────────────────────────────
+#
+# Each endpoint declares only the Query params that geom understands.  The
+# OpenAPI schema (Swagger UI at /api/docs) now shows one focused page per
+# geom instead of a 30-knob kitchen sink, and FastAPI 422 errors actually
+# tell the caller which geom-relevant param was wrong.
+
+
+@app.get("/databases/{db_id:path}/plot/scatter", tags=["plots"])
+async def plot_scatter_endpoint(
+    common: CommonPlotParams = Depends(),
+    x: Optional[str] = Query(
+        None,
+        description=(
+            "X-axis field.  **Omit** for the default embedding (``X_umap``). "
+            "Pass an embedding key (``X_umap``, ``X_pca``, …) for an embedding "
+            "scatter.  Pass a continuous field (gene or numerical obs) for a "
+            "generic 2-axis scatter (then ``y`` is required)."
+        ),
+    ),
+    y: Optional[str] = Query(
+        None,
+        description="Y-axis field (continuous) — required when ``x`` is continuous; ignored for embedding scatter.",
+    ),
+    color: Optional[str] = Query(
+        None, description="Colour-encoding field — gene, numerical, or categorical.",
+    ),
+    point_size: float = Query(3.0, gt=0.0, le=200.0, description="Marker size in pt²."),
+    alpha: float = Query(0.8, ge=0.0, le=1.0, description="Marker opacity."),
+    log_x: bool = Query(False, description="Apply ``log1p(x)`` before plotting (XY-mode only). Use for raw counts."),
+    log_y: bool = Query(False, description="Apply ``log1p(y)`` before plotting (XY-mode only)."),
+    vmin: Optional[float] = Query(None, description="Continuous colour-scale lower clip. Leave empty for auto."),
+    vmax: Optional[float] = Query(
+        None,
+        description="Continuous colour-scale upper clip — useful when one outlier washes out the gradient.",
+    ),
+):
+    """Cell-level scatter, **polymorphic**:
+
+    * No ``x`` (or an embedding key) → embedding scatter.
+    * Continuous ``x`` + ``y`` → generic gene-vs-gene / numerical-vs-numerical scatter.
+
+    Continuous ``color`` fields auto-pick ``palette_continuous`` or
+    ``palette_divergent`` based on whether values straddle zero.
+    """
+    req = _build_plot_request(
+        common, 'scatter',
+        x=x, y=y, color=color,
+        point_size=point_size, alpha=alpha,
+        log_x=log_x, log_y=log_y, vmin=vmin, vmax=vmax,
+    )
+    return await _render_plot(req, common.request)
+
+
+@app.get("/databases/{db_id:path}/plot/hexbin", tags=["plots"])
+async def plot_hexbin_endpoint(
+    common: CommonPlotParams = Depends(),
+    x: Optional[str] = Query(
+        None,
+        description=(
+            "X-axis field.  Omit for the default embedding (``X_umap``).  Pass "
+            "an embedding key for an embedding hexbin, or a continuous field "
+            "for a 2-axis hexbin (then ``y`` is required)."
+        ),
+    ),
+    y: Optional[str] = Query(None, description="Y-axis field — required when ``x`` is continuous."),
+    color: Optional[str] = Query(
+        None,
+        description=(
+            "Colour-encoding field. Continuous → per-hex mean; categorical → "
+            "modal category with hex alpha = dominance ratio (top₁/top₂); "
+            "unset → cell density."
+        ),
+    ),
+    alpha: float = Query(
+        1.0, ge=0.0, le=1.0,
+        description="Base hex opacity (categorical mode overrides per-hex with dominance-driven alpha).",
+    ),
+    gridsize: int = Query(
+        60, ge=10, le=200,
+        description="Number of hex bins along the x-axis (higher = finer).",
+    ),
+    mincnt: int = Query(
+        1, ge=1, le=1000,
+        description="Minimum cells per hex to render (filters out sparse outliers).",
+    ),
+    log_x: bool = Query(False, description="Apply ``log1p(x)`` before plotting (XY-mode only)."),
+    log_y: bool = Query(False, description="Apply ``log1p(y)`` before plotting (XY-mode only)."),
+    vmin: Optional[float] = Query(None, description="Continuous colour-scale lower clip (auto when empty)."),
+    vmax: Optional[float] = Query(None, description="Continuous colour-scale upper clip."),
+):
+    """Hex-aggregated scatter — same polymorphism as ``/plot/scatter``,
+    cells aggregated into hex bins instead of one marker per cell."""
+    req = _build_plot_request(
+        common, 'hexbin',
+        x=x, y=y, color=color,
+        alpha=alpha, gridsize=gridsize, mincnt=mincnt,
+        log_x=log_x, log_y=log_y, vmin=vmin, vmax=vmax,
+    )
+    return await _render_plot(req, common.request)
+
+
+@app.get("/databases/{db_id:path}/plot/violin", tags=["plots"])
+async def plot_violin_endpoint(
+    common: CommonPlotParams = Depends(),
+    x: str = Query(..., description="Categorical obs field — defines the groups on the x-axis."),
+    y: Optional[str] = Query(
+        None,
+        description="Continuous field (gene or numerical obs) to plot per group. Omit for a count violin.",
+    ),
+    color: Optional[str] = Query(
+        None,
+        description="Second categorical for side-by-side (dodged) split within each group.",
+    ),
+):
+    """Violin plot of a continuous y across categorical x groups, with
+    optional side-by-side split by ``color`` (also categorical)."""
+    req = _build_plot_request(common, 'violin', x=x, y=y, color=color)
+    return await _render_plot(req, common.request)
+
+
+@app.get("/databases/{db_id:path}/plot/box", tags=["plots"])
+async def plot_box_endpoint(
+    common: CommonPlotParams = Depends(),
+    x: str = Query(..., description="Categorical obs field — defines the groups on the x-axis."),
+    y: Optional[str] = Query(None, description="Continuous field to plot per group."),
+    color: Optional[str] = Query(None, description="Second categorical for dodged split within each group."),
+):
+    """Box plot — same input contract as ``/plot/violin``, box style."""
+    req = _build_plot_request(common, 'box', x=x, y=y, color=color)
+    return await _render_plot(req, common.request)
+
+
+@app.get("/databases/{db_id:path}/plot/bar", tags=["plots"])
+async def plot_bar_endpoint(
+    common: CommonPlotParams = Depends(),
+    x: str = Query(..., description="Categorical obs field — bar positions."),
+    y: Optional[str] = Query(
+        None,
+        description="Continuous field — bars show mean (with optional 95% CI). Omit for cell-count bars.",
+    ),
+    color: Optional[str] = Query(None, description="Second categorical for dodged bars within each group."),
+    ci: bool = Query(True, description="Overlay 95% bootstrap CI error bars on mean bars."),
+):
+    """Bar plot — cell counts when ``y`` is omitted, mean(±CI) of ``y`` per
+    group when ``y`` is provided."""
+    req = _build_plot_request(common, 'bar', x=x, y=y, color=color, ci=ci)
+    return await _render_plot(req, common.request)
+
+
+@app.get("/databases/{db_id:path}/plot/histogram", tags=["plots"])
+async def plot_histogram_endpoint(
+    common: CommonPlotParams = Depends(),
+    x: str = Query(..., description="Continuous field (gene or numerical obs) to histogram."),
+    color: Optional[str] = Query(None, description="Categorical for overlaid per-group histograms."),
+    bins: int = Query(20, ge=2, le=500, description="Number of histogram bins."),
+):
+    """Univariate histogram of ``x``, optionally split by a categorical ``color``."""
+    req = _build_plot_request(common, 'histogram', x=x, color=color, bins=bins)
+    return await _render_plot(req, common.request)
+
+
+@app.get("/databases/{db_id:path}/plot/ecdf", tags=["plots"])
+async def plot_ecdf_endpoint(
+    common: CommonPlotParams = Depends(),
+    x: str = Query(..., description="Continuous field to plot the empirical CDF of."),
+    color: Optional[str] = Query(None, description="Categorical for overlaid per-group ECDFs."),
+):
+    """Empirical CDF of ``x``, optionally split by a categorical ``color``."""
+    req = _build_plot_request(common, 'ecdf', x=x, color=color)
+    return await _render_plot(req, common.request)
+
+
+@app.get("/databases/{db_id:path}/plot/kde", tags=["plots"])
+async def plot_kde_endpoint(
+    common: CommonPlotParams = Depends(),
+    x: str = Query(..., description="Continuous field to estimate a kernel density of."),
+    color: Optional[str] = Query(None, description="Categorical for overlaid per-group KDEs."),
+):
+    """Kernel-density estimate of ``x``, optionally split by a categorical ``color``."""
+    req = _build_plot_request(common, 'kde', x=x, color=color)
+    return await _render_plot(req, common.request)
+
+
+@app.get("/databases/{db_id:path}/plot/heatmap", tags=["plots"])
+async def plot_heatmap_endpoint(
+    common: CommonPlotParams = Depends(),
+    y: str = Query(..., description="Categorical obs field — defines the rows of the heatmap."),
+    x: Optional[str] = Query(
+        None,
+        description=(
+            "Comma-separated gene list to plot as columns. Leave empty to use "
+            "the top ``n_genes`` by mean expression."
+        ),
+    ),
+    n_genes: int = Query(
+        20, ge=1, le=200,
+        description="Number of top-mean genes to show when ``x`` is omitted.",
+    ),
+    zscore: bool = Query(
+        True,
+        description=(
+            "Z-score per gene (centred divergent palette, default — highlights "
+            "relative differences across groups).  Set false to show raw means "
+            "with the sequential palette."
+        ),
+    ),
+):
+    """Mean expression heatmap — rows = ``y`` (categorical), columns = genes."""
+    req = _build_plot_request(common, 'heatmap', x=x, y=y, n_genes=n_genes, zscore=zscore)
+    return await _render_plot(req, common.request)
+
+
+@app.get("/databases/{db_id:path}/plot/rolling", tags=["plots"])
+async def plot_rolling_endpoint(
+    common: CommonPlotParams = Depends(),
+    x: str = Query(
+        ...,
+        description="Continuous obs/gene field used as the trajectory axis (typically pseudotime).",
+    ),
+    y: str = Query(
+        ...,
+        description="Comma-separated continuous fields (genes or numerical obs) — one rolling-mean line per field.",
+    ),
+    color: Optional[str] = Query(
+        None,
+        description="Categorical field — splits each y into one line per group (e.g. wild-type vs knockout).",
+    ),
+    window: int = Query(
+        200, ge=2, le=50_000,
+        description="Rolling-window size in cells along ``x`` (higher = smoother line).",
+    ),
+    show_band: bool = Query(
+        False,
+        description="Shade an IQR (q25..q75) ribbon under the rolling mean to visualise within-window spread.",
+    ),
+):
+    """Rolling-mean trajectory plot — for each ``y`` field, sort cells by
+    ``x`` ascending, take a rolling mean of ``window`` cells, plot."""
+    req = _build_plot_request(
+        common, 'rolling',
+        x=x, y=y, color=color,
+        window=window, show_band=show_band,
+    )
+    return await _render_plot(req, common.request)
+
+
+# ── legacy dispatcher (deprecated) ────────────────────────────────────────────
+#
+# The unified ``/plot?geom=X`` endpoint is kept for one release so older
+# antclient (≤1.5) and bookmarked URLs keep working.  New code should call
+# the per-geom endpoints above — they have focused signatures and OpenAPI
+# pages.  Slated for removal in REST API 2.3 / antclient 1.7.
+
+@app.get("/databases/{db_id:path}/plot", tags=["plots"], deprecated=True)
+async def plot_legacy(
+    common: CommonPlotParams = Depends(),
+    geom: str = Query(..., description="Plot geom: scatter | hexbin | violin | box | bar | histogram | ecdf | kde | heatmap | rolling."),
+    x: Optional[str] = Query(None, description="X-axis field (auto-typed: embedding, gene, categorical, numerical)."),
+    y: Optional[str] = Query(None, description="Y-axis field (auto-typed)."),
+    color: Optional[str] = Query(None, description="Colour-encoding field (auto-typed)."),
+    bins: int = Query(20, ge=2, le=500),
+    point_size: float = Query(3.0, gt=0.0, le=200.0),
+    alpha: float = Query(0.8, ge=0.0, le=1.0),
+    ci: bool = Query(True),
+    n_genes: int = Query(20, ge=1, le=200),
+    gridsize: int = Query(60, ge=10, le=200),
+    mincnt: int = Query(1, ge=1, le=1000),
+    log_x: bool = Query(False),
+    log_y: bool = Query(False),
+    vmin: Optional[float] = Query(None),
+    vmax: Optional[float] = Query(None),
+    window: int = Query(200, ge=2, le=50_000),
+    show_band: bool = Query(False),
+    zscore: bool = Query(True),
+):
+    """**Deprecated** — use ``/databases/{db_id}/plot/{geom}`` instead.
+
+    Kept for one release so older clients keep working.  Behaviour and
+    accepted params are identical to the union of the per-geom endpoints.
+    """
+    if geom not in _PLOT_GEOMS:
+        raise HTTPException(400, detail=f"Unknown geom '{geom}'. Valid: {sorted(_PLOT_GEOMS)}")
+    req = _build_plot_request(
+        common, geom,
+        x=x, y=y, color=color,
+        bins=bins, point_size=point_size, alpha=alpha,
+        ci=ci, n_genes=n_genes,
+        gridsize=gridsize, mincnt=mincnt,
+        log_x=log_x, log_y=log_y, vmin=vmin, vmax=vmax,
+        window=window, show_band=show_band, zscore=zscore,
+    )
+    return await _render_plot(req, common.request)
 
 
 

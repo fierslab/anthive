@@ -5,6 +5,38 @@ All notable changes to the Anthive Client will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-06-07
+
+### Changed — per-geom plot endpoints
+
+The unified ``/databases/{id}/plot?geom=…`` endpoint has been split into
+one endpoint per geom on the server.  ``get_plot()`` now targets
+``/databases/{id}/plot/{geom}`` directly, so the OpenAPI page each call
+hits documents *only* the params relevant to that geom (and 422 errors
+mean something — they reference the actual param that's wrong for that
+geom).  No call-site change for users: ``client.get_plot(db_id, geom,
+…)`` keeps the same signature, the URL is just constructed differently
+under the hood.
+
+The signature change:
+
+- **Dropped** the long-deprecated ``palette`` keyword argument (the
+  server stopped reading it in 1.5.0).  Use ``palette_categorical=``,
+  ``palette_continuous=``, ``palette_divergent=`` via ``**extra``.
+- **Added** ``AnthiveClient.PLOT_GEOMS`` — a frozenset of the geoms the
+  client knows about.  ``get_plot()`` raises ``ValueError`` early on an
+  unknown geom (saves a round-trip).
+
+### Server compatibility
+
+- Requires **REST API 2.2+** (the server release that ships per-geom
+  endpoints).  Older servers (≤2.1) only have the unified ``/plot``
+  endpoint — calls will 404.  Pin the client to 1.5.x against those
+  servers.
+- The unified ``/plot?geom=…`` endpoint remains on the server (deprecated)
+  for one release so other clients keep working.  Removal slated for
+  REST API 2.3.
+
 ## [1.5.0] - 2026-06-06
 
 ### Added — rolling-mean trajectory geom + scatter/hexbin polymorphism

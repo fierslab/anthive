@@ -407,10 +407,13 @@
   }
 
   // ── build API URL from form state
+  //
+  // Hits the per-geom endpoint at /databases/{id}/plot/{geom} (REST API 2.2+).
+  // The geom is encoded in the path, NOT in the query string — keeps URL
+  // params focused on what actually shapes the plot.
   function buildUrl(format) {
     format = format || 'png';
     const params = new URLSearchParams();
-    params.set('geom', GEOM);
     params.set('format', format);
     // geom-specific fields
     document.querySelectorAll('#plot-form [name]').forEach(el => {
@@ -435,7 +438,7 @@
         params.set(k, s[k]);
       }
     }
-    return `${API_URL.replace(/\/$/, '')}/databases/${DB_ID}/plot?${params.toString()}`;
+    return `${API_URL.replace(/\/$/, '')}/databases/${DB_ID}/plot/${GEOM}?${params.toString()}`;
   }
 
   // ── render preview
