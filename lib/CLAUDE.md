@@ -4,10 +4,12 @@ The contract every `bin/<domain>/` tool and `ant-serve` depends on (imported
 via a `sys.path` shim, not pip). **A change here ripples everywhere** — there
 is no version boundary. Tread carefully and run the test suite.
 
-After the 2026-06 reorg, scripts that depend on this module live under
-`bin/api/`, `bin/web/`, `bin/ingest/`, `bin/annot/`, `bin/meta/`, `bin/ops/`,
-and each adds `lib/` to `sys.path` via `script_dir.parent.parent / 'lib'`
-(two levels up to repo root, then into `lib/`).
+After the 2026-06 reorgs, the consumers live under:
+
+- `bin/api/`, `bin/ingest/`, `bin/annot/`, `bin/meta/`, `bin/ops/` — two
+  levels up: `script_dir.parent.parent / 'lib'`.
+- `web/` — one level up: `script_dir.parent / 'lib'` (the web UI is a
+  top-level seam, not under `bin/`).
 
 ## Modules
 

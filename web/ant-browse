@@ -31,24 +31,18 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# Add lib directory to path for config
-script_dir = Path(__file__).parent.resolve()
-lib_dir = script_dir.parent.parent / 'lib'
+# Layout: web/ant-browse lives next to web/browser.py and web/templates/,
+# with the shared core in ../lib/.  No more cross-folder gymnastics.
+script_dir = Path(__file__).parent.resolve()      # → repo/web/
+lib_dir = script_dir.parent / 'lib'
 sys.path.insert(0, str(lib_dir))
 
 from config import get_config
 
-# Add frontend/browser to path (the Jinja templates + browser.py router)
-browser_dir = script_dir.parent.parent / 'frontend' / 'browser'
-if not browser_dir.exists():
-    print(f"ERROR: frontend/browser directory not found at {browser_dir}", file=sys.stderr)
-    sys.exit(1)
-
-sys.path.insert(0, str(browser_dir.parent))
-
-# Import browser router with proper Python name (frontend/browser → frontend_browser)
+# Load the router module — sibling of this script.
+sys.path.insert(0, str(script_dir.parent))   # allow `import web.browser`-ish paths if ever needed
 import importlib.util
-spec = importlib.util.spec_from_file_location("frontend_browser", browser_dir / "browser.py")
+spec = importlib.util.spec_from_file_location("anthive_web_browser", script_dir / "browser.py")
 browser_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(browser_module)
 browser_router = browser_module.router

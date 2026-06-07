@@ -20,7 +20,6 @@ def get_available_commands(bin_dir: Path) -> dict:
     commands = {}
     command_descriptions = {
         'api-check': 'Validate REST API endpoints and data integrity',
-        'browse': 'Start web browser interface (requires ant-serve)',
         'build-all': 'Process entire datastore with parallel conversion',
         'cellxgene': 'Import datasets from CellxGene Discover (download, check, convert)',
         'check': 'Check h5ad and DuckDB (wrapper)',

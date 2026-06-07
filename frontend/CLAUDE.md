@@ -1,12 +1,14 @@
-# frontend/ — user-facing web surfaces
+# frontend/ — secondary web surfaces
 
-Three independent UIs onto the anthive REST API, all of them clients of
-`bin/api/ant-serve` (port 8080).
+The "main" web UI is no longer here.  After the 2026-06-07 reorg, the
+server-rendered Jinja browser was promoted to a **top-level seam** at
+`./web/` (router + templates + launcher all under one folder, scoped by
+`web/CLAUDE.md`).  What lives in `frontend/` now is the two ancillary
+surfaces:
 
 | Folder | What | Talks to | Driven by |
 | --- | --- | --- | --- |
-| `browser/` | Server-rendered FastAPI + Jinja2 catalog + dataset pages + in-app plot UI. The "main" web UI. | `/databases`, `/databases/{id}/info`, `/databases/{id}/plot`, `/genesets` | `bin/web/ant-browse` |
-| `streamlit/` | Streamlit app for exploratory custom dashboards. | REST API via `antclient` | `streamlit run streamlit_app.py` (started by supervisor or `make serve-streamlit`) |
+| `streamlit/` | Streamlit app (legacy / opt-in). Removed from the production stack — `/streamlit` on the reverse proxy returns 410.  Source kept for ad-hoc runs via `make serve-streamlit`. | REST API via `antclient` | `streamlit run streamlit_app.py` (manual only) |
 | `jupyter/` | JupyterLite (Pyodide) source — notebooks pre-loaded with the anthive client. Built into `webapp/jupyter/` by `make build-jupyter`. | REST API via `antclient.py` | the static build served by Caddy at `/jupyter/` |
 
 Common pattern: **none of these touch DuckDB or h5ad files directly.**
@@ -25,9 +27,9 @@ the other routes are reverse-proxied to running services.
 
 ## Cross-references
 
-- `frontend/browser/` ↔ `bin/web/` (router lives in `bin/web/ant-browse`;
-  templates + CSS + JS live here).
-- `frontend/streamlit/` ↔ `bin/ops/streamlit-serve` (standalone runner) +
-  `ant-supervisor` (production launcher).
+- The main web UI is at **`./web/`** (router + templates + launcher).
+  Not in this folder any more.
+- `frontend/streamlit/` ↔ `make serve-streamlit` (manual; not in the
+  supervisor's default service set).
 - `frontend/jupyter/` ↔ `bin/ops/dev-jupyter` (dev loop) +
   `make build-jupyter` (production build).

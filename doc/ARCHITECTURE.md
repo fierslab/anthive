@@ -10,7 +10,7 @@
    - Tech: FastAPI with DuckDB backend
    - Docs: `REST_API_SPEC.md`, `REST_API_COMPLETE.md`
 
-2. **Browser Interface** (`bin/web/ant-browse`)
+2. **Browser Interface** (`web/ant-browse`)
    - Port: 8081
    - Purpose: HTML-based dataset browser
    - Tech: FastAPI + Jinja2 templates + Pico CSS
@@ -92,7 +92,7 @@ Access: http://localhost:8501
 ├── data/                # Data storage (h5adstore symlink)
 ├── doc/                 # All documentation
 ├── webapp/              # Built webapp (gitignored)
-├── frontend/browser/      # Browser interface source
+├── web/      # Browser interface source
 ├── frontend/jupyter/          # Source for built webapp
 │   ├── jupyter/         # JupyterLite notebooks
 │   └── stlite/          # Stlite source

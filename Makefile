@@ -159,7 +159,7 @@ serve-browse:
 	@echo ""
 	@# Same convention as serve-api: host/port from anthive.yaml
 	@# (browse_host / browse_port).
-	@./bin/web/ant-browse
+	@./web/ant-browse
 
 serve-mcp:
 	@echo "Starting Anthive MCP server on http://localhost:8090"

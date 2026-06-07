@@ -6,7 +6,7 @@ Sources for the JupyterLite static deployment served at `/jupyter/`.
 
 Interactive plotting (gene / UMAP / category / numerical) is **not**
 in this directory — it now lives in two other places:
-- The **in-app plot UI** in `frontend/browser/templates/plot.html`
+- The **in-app plot UI** in `web/templates/plot.html`
   (reached via `/browse/<group>/<file>/plot/<geom>`).
 - The **Streamlit dashboards** in `frontend/streamlit/`, reached at
   `/streamlit/`.

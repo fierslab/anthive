@@ -40,26 +40,29 @@ there auto-loads the right scope.
 ```
 bin/
   api/       ant-serve, ant-mcp                    bin/api/CLAUDE.md
-  web/       ant-browse                            bin/web/CLAUDE.md
   ingest/    ant-convert, ant-merge-h5ad, …        bin/ingest/CLAUDE.md
   annot/     ant-score, ant-starcat, ant-suggest-tops, …   bin/annot/CLAUDE.md
   meta/      ant-md, ant-check, ant-cellxgene, …   bin/meta/CLAUDE.md
   ops/       ant-supervisor, ant-sync, dev-*       bin/ops/CLAUDE.md
   ant                                               ← dispatcher (walks subdirs)
+web/         ant-browse + browser.py + templates/  web/CLAUDE.md      ← top-level web UI
 lib/         shared core (anthive_db, plotting, …)  lib/CLAUDE.md
 frontend/
-  browser/   FastAPI Jinja templates for bin/web/   frontend/browser/CLAUDE.md
-  streamlit/ Streamlit app                          frontend/streamlit/CLAUDE.md
-  jupyter/   JupyterLite source (Pyodide)           frontend/jupyter/CLAUDE.md
-antclient/   standalone REST client package         antclient/CLAUDE.md
+  streamlit/ Streamlit app (deprecated, opt-in)    frontend/streamlit/CLAUDE.md
+  jupyter/   JupyterLite source (Pyodide)          frontend/jupyter/CLAUDE.md
+antclient/   standalone REST client package        antclient/CLAUDE.md
 config/      Caddyfile, nginx.conf, caddy-auth.example
 ```
+
+The web UI is now a **top-level seam** (`./web/`), not an `ant` subcommand.
+That makes "the web UI" a self-contained Claude Code scope: `cd web/` and
+you have the FastAPI router (`browser.py`), the Jinja templates, the static
+assets, and the launcher (`ant-browse`) all under one folder.
 
 | Working on… | `cd` here | Scope loaded |
 | --- | --- | --- |
 | REST/MCP plot or query endpoints | `bin/api/` | root + bin + bin/api |
-| Web UI route handlers | `bin/web/` | root + bin + bin/web |
-| Web UI templates/CSS/JS | `frontend/browser/` | root + frontend + frontend/browser |
+| Web UI — router, templates, CSS, JS | `web/` | root + web |
 | h5ad → duckdb ingestion | `bin/ingest/` | root + bin + bin/ingest |
 | Scoring / curation | `bin/annot/` | root + bin + bin/annot |
 | .md / .mus / catalog | `bin/meta/` | root + bin + bin/meta |

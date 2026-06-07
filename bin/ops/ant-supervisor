@@ -66,7 +66,9 @@ SERVICES: dict = {
         'color': CYAN,
     },
     'browse': {
-        'cmd': ['./bin/web/ant-browse', '--api-url', _API_INTERNAL_URL,
+        # ant-browse lives at the top of the tree (./web/), not under bin/,
+        # so the web UI is a peer of api/lib/data — not an ant-* subcommand.
+        'cmd': ['./web/ant-browse', '--api-url', _API_INTERNAL_URL,
                 '--host', _BROWSE_HOST, '--port', _BROWSE_PORT],
         'color': GREEN,
     },

@@ -126,7 +126,7 @@ App has a minimal layout - information dense - reminds me of old-day bbs' - but 
 
 **File Structure:**
 ```
-frontend/browser/
+web/
   templates/
     base.html
     index.html (folder list)
@@ -195,15 +195,15 @@ frontend/browser/
 ## Implementation Summary
 
 **Architecture:** Dual-port (Option A)
-- Browser server: `bin/web/ant-browse` on port 8081
+- Browser server: `web/ant-browse` on port 8081
 - API server: `bin/api/ant-serve` on port 8080
 - Reverse proxy: Caddy/nginx on port 8501
 
 **Components:**
-- `frontend/browser/` - Browser application code
+- `web/` - Browser application code
   - `templates/` - Jinja2 HTML templates with Pico CSS
   - `browser.py` - FastAPI routes with URL encoding
-- `bin/web/ant-browse` - Browser server executable
+- `web/ant-browse` - Browser server executable
 - Updated configs in `config/`
 
 **Usage:**
@@ -215,5 +215,5 @@ make serve          # Terminal 3: Caddy (port 8501)
 
 Open: http://localhost:8501
 
-See `frontend/browser/README.md` for details.
+See `web/README.md` for details.
 

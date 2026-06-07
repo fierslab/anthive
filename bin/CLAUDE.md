@@ -7,12 +7,15 @@ its own `CLAUDE.md` with the bits that matter for that domain.
 | Folder | What it owns | Detail |
 | --- | --- | --- |
 | `api/` | the running data + protocol servers (`ant-serve`, `ant-mcp`) | `bin/api/CLAUDE.md` |
-| `web/` | server-rendered web UI (`ant-browse`) — talks to `api/` | `bin/web/CLAUDE.md` |
 | `ingest/` | h5ad → duckdb conversion + validation pipeline | `bin/ingest/CLAUDE.md` |
 | `annot/` | scoring + obs-annotation tools | `bin/annot/CLAUDE.md` |
 | `meta/` | catalog metadata (`.md` / `.mus`), validators, genesets, CellxGene import | `bin/meta/CLAUDE.md` |
 | `ops/` | supervisor, S3 sync, dev helpers | `bin/ops/CLAUDE.md` |
 | `ant` | dispatcher — walks every subfolder to find an `ant-<cmd>` script. Path stays `bin/ant`. |
+
+The **web UI** lives outside `bin/` now: see `web/` at the repo root. It
+is launched via `web/ant-browse` (NOT `ant browse`), supervised by
+`bin/ops/ant-supervisor`, and proxied by Caddy/nginx.
 
 ## Shared conventions
 

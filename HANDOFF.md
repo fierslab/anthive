@@ -12,8 +12,8 @@ deeper, more current detail.
 ## TL;DR — how the parts fit together
 
 ```
-.h5ad  ──[ingest]──▶  .duckdb  ──[api]──▶  REST API ──┬──▶  [web]  + [frontend/browser]
-  ▲                      ▲                            ├──▶  [frontend/streamlit]
+.h5ad  ──[ingest]──▶  .duckdb  ──[api]──▶  REST API ──┬──▶  [web] (server-rendered UI)
+  ▲                      ▲                            ├──▶  [frontend/streamlit] (legacy)
   │ [annot]              │ [annot] writes obs cols    └──▶  [frontend/jupyter]
   │ writes back          │ here first; ant-merge-h5ad
   │ later                │ pushes them back to .h5ad
@@ -38,12 +38,12 @@ when you `cd` there. Use this table to pick which one to open.
 | Domain | Lives in | Owns | When to open it |
 | --- | --- | --- | --- |
 | **api** | `bin/api/` ([CLAUDE.md](bin/api/CLAUDE.md)) | `ant-serve` REST API + `ant-mcp` MCP server | Add/change a `/databases/...` endpoint, plot a new geom, debug `/admin/release` coordination, tune the plot cache |
-| **web** | `bin/web/` ([CLAUDE.md](bin/web/CLAUDE.md)) | `ant-browse` — the FastAPI server that renders Jinja templates from API responses | Add a route, change response shape, fix breadcrumbs/navigation |
+| **web** | `web/` ([CLAUDE.md](web/CLAUDE.md)) | `ant-browse` — the FastAPI server that renders Jinja templates from API responses | Add a route, change response shape, fix breadcrumbs/navigation |
 | **ingest** | `bin/ingest/` ([CLAUDE.md](bin/ingest/CLAUDE.md)) | `ant-convert`, `ant-merge-h5ad`, `ant-build-all`, `ant-h5ad-check`, `ant-duckdb-check` | New h5ad → duckdb conversion, pending-column merges, h5ad/duckdb schema validators |
 | **annot** | `bin/annot/` ([CLAUDE.md](bin/annot/CLAUDE.md)) | `ant-score`, `ant-starcat`, `ant-annotate`, `ant-suggest-tops` | New module-score panel, manual obs columns from TSV, top_genes curation |
 | **meta** | `bin/meta/` ([CLAUDE.md](bin/meta/CLAUDE.md)) | `ant-md`, `ant-md-check`, `ant-check`, `ant-cellxgene`, `ant-geneset`, `ant-api-check`, `ant-s3-check` | Edit `.md` frontmatter, validate the catalog, import a CELL×GENE dataset, manage genesets |
 | **ops** | `bin/ops/` ([CLAUDE.md](bin/ops/CLAUDE.md)) | `ant-supervisor`, `ant-sync`, S3 helpers, dev wrappers | Run the stack, S3 sync, debug supervisor restart, build reports |
-| **frontend** | `frontend/{browser,streamlit,jupyter}/` ([CLAUDE.md](frontend/CLAUDE.md)) | three web UIs: Jinja templates (browser), Streamlit dashboards, JupyterLite notebooks | UI changes, HTML/CSS/JS, page layout |
+| **frontend** | `frontend/{streamlit,jupyter}/` ([CLAUDE.md](frontend/CLAUDE.md)) | secondary UIs: Streamlit dashboards (legacy / opt-in), JupyterLite notebooks. The main UI lives at `web/`. | Streamlit / Jupyter changes |
 
 Plus the shared core: **`lib/`** ([CLAUDE.md](lib/CLAUDE.md)) — the DuckDB query layer, plot rendering, mus annotation, metadata IO. Almost any tool above will pull from here.
 
@@ -171,7 +171,7 @@ historical, intentionally not updated to current paths.
 
 - **Adding a plot geom or query endpoint**: `bin/api/CLAUDE.md` →
   `bin/api/ant-serve` → `lib/plotting.py` or `lib/anthive_db.py`.
-- **Tweaking the UI**: `frontend/browser/CLAUDE.md` → `frontend/browser/templates/`.
+- **Tweaking the UI**: `web/CLAUDE.md` → `web/templates/`.
 - **Importing a new dataset**: `doc/H5AD_INGESTION_SPEC.md` → `bin/ingest/CLAUDE.md` → `./bin/ant convert`.
 - **Computing module scores**: `bin/annot/CLAUDE.md` → `./bin/ant score`.
 - **Anything DuckDB-internal**: `lib/CLAUDE.md` → `lib/anthive_db.py`.
