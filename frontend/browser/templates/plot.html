@@ -68,6 +68,35 @@
   .ac-suggest div { padding: 3px 8px; font-size: 12px; cursor: pointer; }
   .ac-suggest div:hover, .ac-suggest div.active { background: #eef2ff; }
 
+  /* Suggestion chips — clickable shortcuts populated from the dataset's
+     curated metadata (top_genes, top_cat, top_num) and pattern-detected
+     trajectory / cluster fields.  Sit beneath each text/select input. */
+  .picks-row {
+    display: flex; flex-wrap: wrap; gap: 3px;
+    margin-top: 3px;
+  }
+  .picks-label {
+    font-size: 9px; color: var(--text-muted, #888);
+    text-transform: uppercase; letter-spacing: .4px;
+    align-self: center; margin-right: 2px;
+  }
+  .pick-chip {
+    display: inline-block; padding: 1px 7px;
+    background: #eef2ff; border: 1px solid #c7d2fe;
+    border-radius: 9px; font-size: 10px; color: #1e3a8a;
+    cursor: pointer; font-family: var(--font, sans-serif);
+    line-height: 1.5;
+  }
+  .pick-chip:hover { background: #1d4ed8; color: #fff; border-color: #1d4ed8; }
+  .pick-chip.smart {  /* pattern-detected suggestions (pseudotime, cluster, …) */
+    background: #fef3c7; border-color: #fcd34d; color: #92400e;
+  }
+  .pick-chip.smart:hover { background: #d97706; color: #fff; border-color: #d97706; }
+  .pick-chip.append {  /* y-field chips that APPEND to a comma-separated list */
+    background: #ecfdf5; border-color: #6ee7b7; color: #065f46;
+  }
+  .pick-chip.append:hover { background: #059669; color: #fff; border-color: #059669; }
+
   .settings-panel {
     border: 1px dashed var(--border); padding: 6px 8px;
     background: #fafafa; margin-top: 6px; display: none;
@@ -663,23 +692,120 @@
     });
   })();
 
-  // Pre-fill curated defaults from the dataset's .md (top_genes / top_cat /
-  // top_num).  Only filled when the user-visible field is still empty after
-  // the URL pass — explicit URL params always win.  This makes /plot/bar
-  // land on a useful plot immediately (no clicking required).
-  (function prefillFromMD() {
-    const topGenes = {{ plot_meta.top_genes|tojson }};
-    const topCat   = {{ plot_meta.top_cat|tojson }};
-    const topNum   = {{ plot_meta.top_num|tojson }};
-    const geom     = GEOM;
+  // ── curated defaults + suggestion chips
+  //
+  // Two related jobs, sharing the same source data (top_genes / top_cat /
+  // top_num from the dataset's .md, plus pattern-detected "smart" picks
+  // across the full obs lists):
+  //
+  //   1. PREFILL — set the first sensible value for every empty field
+  //      (so /plot/bar lands on a working plot, /plot/rolling auto-picks
+  //      pseudotime when present, etc).  URL params win; we only fill
+  //      what the URL didn't.
+  //   2. CHIPS — surface the *other* curated picks as clickable chips
+  //      beneath each input, so users see what's recommended without
+  //      having to type or hit the autocomplete.
+  //
+  // Pattern detection (the "smart" chips, highlighted in amber) scans the
+  // FULL obs lists, not just the curated top_* subsets — so pseudotime
+  // gets found even on datasets where the curator didn't add it to
+  // top_num.  Datasets often have well-known column names; this catches
+  // the common ones without forcing per-dataset curation.
+  const topGenes = {{ plot_meta.top_genes|tojson }};
+  const topCat   = {{ plot_meta.top_cat|tojson }};
+  const topNum   = {{ plot_meta.top_num|tojson }};
+
+  // ── pattern-based smart detection across full obs lists
+  // Returns an ordered, de-duplicated list of candidates: smart matches
+  // first (in regex priority order), then top_num.  ``topFirst=true``
+  // promotes curated top picks above pattern matches.
+  const TRAJECTORY_RE = /pseudotime|latent[_.-]?time|dpt|monocle|distance[_.-]|trajectory|order/i;
+  const CLUSTER_RE    = /^(cluster|leiden|louvain|seurat_clusters?)$|_cluster$|^clusters?$|^celltype$|^cell[_.-]type$|^annotation$/i;
+  function detectTrajectoryFields() {
+    return OBS_NUM.filter(c => TRAJECTORY_RE.test(c));
+  }
+  function detectClusterFields() {
+    return OBS_CAT.filter(c => CLUSTER_RE.test(c));
+  }
+  // Items from `smartList` that aren't already in `curatedList`, prepended.
+  function mergeSmart(curatedList, smartList) {
+    const seen = new Set(curatedList);
+    const extra = smartList.filter(s => !seen.has(s));
+    return { curated: curatedList, smart: extra };
+  }
+
+  // ── chip injection helper
+  // Inserts a row of clickable chips beneath an input.  ``mode``:
+  //   'replace' (default) — chip click sets input.value to the chip text
+  //   'append'            — chip click appends "<text>, " to existing value
+  //                         (skips if already present), for CSV fields
+  //                         like heatmap-x and rolling-y.
+  function attachChips(fieldName, chipSpec, mode) {
+    mode = mode || 'replace';
+    const field = document.querySelector(`#plot-form [name="${fieldName}"]`);
+    if (!field) return;
+    // Anchor: for ac-wrapped inputs, insert after the wrapper so chips
+    // sit below both the input AND its autocomplete dropdown.  For bare
+    // inputs/selects, insert right after the element itself.
+    const anchor = field.closest('.ac-wrap') || field;
+    const row = document.createElement('div');
+    row.className = 'picks-row';
+
+    function pushChip(value, klass, title) {
+      if (!value) return;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'pick-chip' + (klass ? ' ' + klass : '');
+      btn.textContent = value;
+      if (title) btn.title = title;
+      btn.addEventListener('click', () => {
+        if (field.tagName === 'SELECT') {
+          // Only set when the value is an actual option (avoids breaking
+          // the select on a smart pick that's outside the curated list).
+          const hasOption = Array.from(field.options).some(o => o.value === value);
+          if (hasOption) field.value = value;
+        } else if (mode === 'append') {
+          const cur = (field.value || '').split(',').map(s => s.trim()).filter(Boolean);
+          if (!cur.includes(value)) cur.push(value);
+          field.value = cur.join(', ');
+        } else {
+          field.value = value;
+        }
+        field.dispatchEvent(new Event('change', { bubbles: true }));
+        scheduleRefresh();
+      });
+      row.appendChild(btn);
+    }
+
+    if (chipSpec.label) {
+      const lbl = document.createElement('span');
+      lbl.className = 'picks-label';
+      lbl.textContent = chipSpec.label;
+      row.appendChild(lbl);
+    }
+    (chipSpec.curated || []).forEach(v => pushChip(v, '', 'curated favourite (.md)'));
+    (chipSpec.smart   || []).forEach(v => pushChip(v, 'smart', 'auto-detected from field name'));
+    if (mode === 'append') {
+      // Replace .pick-chip with .pick-chip.append so users see it adds to a list.
+      row.querySelectorAll('.pick-chip:not(.smart)').forEach(c =>
+        c.classList.add('append')
+      );
+    }
+    if (row.children.length > (chipSpec.label ? 1 : 0)) {
+      anchor.insertAdjacentElement('afterend', row);
+    }
+  }
+
+  (function prefillAndChips() {
+    const geom        = GEOM;
+    const trajectory  = detectTrajectoryFields();   // continuous-obs that look like a trajectory
+    const clusterCols = detectClusterFields();      // categorical-obs that look like clustering
 
     function setIfEmpty(selector, value) {
       if (!value) return;
       const field = document.querySelector(selector);
       if (!field) return;
       if (field.tagName === 'SELECT') {
-        // For selects, only set when the current value is empty AND the
-        // option actually exists — avoids picking a non-listed value.
         if (field.value) return;
         const hasOption = Array.from(field.options).some(o => o.value === value);
         if (hasOption) field.value = value;
@@ -688,50 +814,88 @@
       }
     }
 
-    // Per-geom curated default pick.  We use the FIRST element of each list
-    // and only fall back to subsequent ones if needed.
+    // ── per-geom prefill + chips
     if (geom === 'scatter') {
-      // color: prefer first top_cat (categorical legend), then first gene
-      setIfEmpty('form [name="color"]', topCat[0] || topGenes[0]);
+      // color: prefer first cluster-like cat, then top_cat[0], then first gene.
+      setIfEmpty('form [name="color"]', clusterCols[0] || topCat[0] || topGenes[0]);
+      attachChips('color', {
+        label: 'pick',
+        ...mergeSmart(topCat.slice(0, 4), clusterCols),
+      });
+      // Genes are also useful as scatter colour overlays.
+      attachChips('color', { label: 'gene', curated: topGenes.slice(0, 4) });
+
     } else if (geom === 'hexbin') {
-      setIfEmpty('form [name="color"]', topGenes[0] || topNum[0] || topCat[0]);
-    } else if (geom === 'xy_scatter' || geom === 'xy_hexbin') {
-      // Two continuous axes — first two genes from the curated list, or
-      // pair top_gene with top_num if there's only one gene.
-      setIfEmpty('form [name="x"]', topGenes[0] || topNum[0]);
-      setIfEmpty('form [name="y"]', topGenes[1] || topNum[1] || topNum[0]);
-      // Colour: first categorical so groups separate visually
-      setIfEmpty('form [name="color"]', topCat[0]);
-    } else if (geom === 'violin' || geom === 'box') {
-      setIfEmpty('form [name="x"]', topCat[0]);
-      setIfEmpty('form [name="y"]', topGenes[0] || topNum[0]);
-    } else if (geom === 'bar') {
-      setIfEmpty('form [name="x"]', topCat[0]);
-      // Bar with no y = cell counts per category, which is meaningful;
-      // leave y blank unless the user pre-filled it.
+      setIfEmpty('form [name="color"]', topGenes[0] || topNum[0] || clusterCols[0] || topCat[0]);
+      attachChips('color', { label: 'pick', curated: topGenes.slice(0, 4) });
+      attachChips('color', {
+        label: 'cat',
+        ...mergeSmart(topCat.slice(0, 3), clusterCols),
+      });
+
+    } else if (geom === 'violin' || geom === 'box' || geom === 'bar') {
+      setIfEmpty('form [name="x"]', clusterCols[0] || topCat[0]);
+      attachChips('x', {
+        label: 'group',
+        ...mergeSmart(topCat.slice(0, 5), clusterCols),
+      });
+      if (geom !== 'bar') {
+        // Bar with no y = count bars, which is meaningful; leave y empty.
+        setIfEmpty('form [name="y"]', topGenes[0] || topNum[0]);
+      }
+      attachChips('y', { label: 'gene', curated: topGenes.slice(0, 5) });
+      attachChips('y', { label: 'num',  curated: topNum.slice(0, 3) });
+      // color = optional categorical for dodged split
+      attachChips('color', {
+        label: 'split',
+        ...mergeSmart(topCat.slice(0, 3), clusterCols),
+      });
+
     } else if (geom === 'histogram' || geom === 'ecdf' || geom === 'kde') {
       setIfEmpty('form [name="x"]', topGenes[0] || topNum[0]);
-      setIfEmpty('form [name="color"]', topCat[0]);
+      attachChips('x', { label: 'gene', curated: topGenes.slice(0, 5) });
+      attachChips('x', { label: 'num',  curated: topNum.slice(0, 5) });
+      attachChips('color', {
+        label: 'group',
+        ...mergeSmart(topCat.slice(0, 3), clusterCols),
+      });
+
     } else if (geom === 'heatmap') {
-      setIfEmpty('form [name="y"]', topCat[0]);
-      // For heatmap x: pre-fill the comma-separated gene list with the
-      // curated top genes (up to 10).
+      setIfEmpty('form [name="y"]', clusterCols[0] || topCat[0]);
+      attachChips('y', {
+        label: 'group',
+        ...mergeSmart(topCat.slice(0, 5), clusterCols),
+      });
+      // For heatmap x: pre-fill the comma-separated gene list, plus chips
+      // that APPEND individual genes to the list.
       const x = document.querySelector('form [name="x"]');
       if (x && !x.value && topGenes.length) {
         x.value = topGenes.slice(0, 10).join(', ');
       }
+      attachChips('x', { label: 'add gene', curated: topGenes.slice(0, 10) }, 'append');
+
     } else if (geom === 'rolling') {
-      // x = the first numerical obs that LOOKS like a trajectory axis,
-      //     otherwise top_num[0].  We look for the word "pseudotime",
-      //     "distance", "time", or "rank" in the field name.
-      const traj = topNum.find(c => /pseudotime|distance|time|rank|stage|order/i.test(c)) || topNum[0];
-      setIfEmpty('form [name="x"]', traj);
-      // y = first 3 curated genes (comma-separated)
+      // x: smart pseudotime detection scans the FULL OBS_NUM (not just
+      // topNum), so it works even when the curator hasn't called out
+      // pseudotime in the .md.
+      setIfEmpty('form [name="x"]', trajectory[0] || topNum[0]);
+      attachChips('x', {
+        label: 'axis',
+        ...mergeSmart(topNum.slice(0, 3), trajectory),
+      });
+      // y: csv of continuous fields — both gene chips and num chips,
+      // both with append behaviour.
       const yField = document.querySelector('form [name="y"]');
       if (yField && !yField.value && topGenes.length) {
         yField.value = topGenes.slice(0, 3).join(', ');
       }
-      setIfEmpty('form [name="color"]', topCat[0]);
+      attachChips('y', { label: 'add gene', curated: topGenes.slice(0, 5) }, 'append');
+      attachChips('y', { label: 'add num',  curated: topNum.slice(0, 3) },   'append');
+      // color: cluster-like cat if present.
+      attachChips('color', {
+        label: 'split',
+        ...mergeSmart(topCat.slice(0, 3), clusterCols),
+      });
     }
   })();
 
