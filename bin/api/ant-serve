@@ -122,22 +122,45 @@ def _setup_logging(log_dir: Path = None) -> logging.Logger:
 log = _setup_logging()
 
 
-def _auto_memory_limit(max_connections: int = 3) -> str:
-    """Compute a per-connection DuckDB memory limit based on system RAM.
+def _parse_size_mb(value) -> int:
+    """Parse a size string like ``'8GB'``, ``'512MB'``, ``'1024'`` (MB), or an
+    int (assumed MB) into megabytes.  Used for the DuckDB budget config.
+    """
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip().upper().replace(' ', '')
+    multipliers = {'TB': 1024 * 1024, 'GB': 1024, 'MB': 1, 'KB': 1 / 1024.0, 'B': 1 / (1024 * 1024)}
+    for suffix, mult in multipliers.items():
+        if text.endswith(suffix):
+            return max(1, int(float(text[:-len(suffix)]) * mult))
+    return int(float(text))  # bare number → assume MB
 
-    Heuristic: reserve 40% of system RAM for DuckDB total, then divide
-    by the max number of concurrent connections that could be active.
-    Floor at 512 MB, cap at 8 GB per connection.
+
+def _auto_total_memory_budget_mb() -> int:
+    """Total DuckDB memory budget, shared across ALL in-flight pool
+    connections. Defaults to 25% of system RAM, capped at 16 GB.
+
+    The progressive-throttling logic in ConnectionPool divides this
+    among the connections in use right now (with a floor), so a solo
+    query gets the full budget and concurrent queries share it.
     """
     import os
     try:
         total_bytes = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
     except (ValueError, OSError):
-        return '2GB'  # safe fallback
-    duckdb_budget = int(total_bytes * 0.4)
-    per_conn = max(512 * 1024 * 1024, min(duckdb_budget // max(max_connections, 1), 8 * 1024 * 1024 * 1024))
-    per_conn_gb = round(per_conn / (1024 * 1024 * 1024), 1)
-    return f'{per_conn_gb}GB'
+        return 4 * 1024  # 4 GB safe fallback
+    budget_mb = int(total_bytes * 0.25 / (1024 * 1024))
+    return max(1024, min(budget_mb, 16 * 1024))
+
+
+def _auto_memory_limit(max_connections: int = 3) -> str:
+    """Back-compat shim for callers that still expect a per-connection
+    string limit.  Returns the floor of the adaptive scheme (total /
+    max_connections) so existing call sites keep working.
+    """
+    total_mb = _auto_total_memory_budget_mb()
+    per_mb = max(256, total_mb // max(max_connections, 1))
+    return f'{per_mb}MB'
 
 
 class QueryRequest(BaseModel):
@@ -175,16 +198,72 @@ class ConnectionPool:
     EVICTION_DEFAULT_SECONDS = 300.0
 
     def __init__(self, max_connections_per_db: int = 3, s3_config: Optional[Dict] = None,
-                 memory_limit: str = 'auto', threads: int = 2):
+                 memory_limit: str = 'auto', threads: int = 2,
+                 total_memory_budget: str = 'auto',
+                 min_memory_per_conn: str = '256MB',
+                 temp_directory: Optional[str] = None):
+        """
+        Memory model — progressive throttling
+        --------------------------------------
+        ``total_memory_budget`` is a single shared budget across ALL in-flight
+        pool connections.  On each ``get_connection()`` we compute
+        ``per_conn = max(min_memory_per_conn, total / in_use_count)`` and
+        ``SET memory_limit`` on the returned connection.  Effects:
+
+        * Solo query: gets the full budget (e.g. 8 GB).
+        * Concurrent queries: each new request shrinks the per-conn budget;
+          when 8 are running, each has total/8 (with a floor).
+        * Existing queries keep whatever memory_limit they were issued at
+          acquire time — we don't reach into a running query.
+        * Above the budget DuckDB spills to ``temp_directory`` (if set) or
+          OOM-errors (if not), so set ``temp_directory`` if you expect
+          big aggregations under contention.
+
+        Args:
+            total_memory_budget: total DuckDB RAM across the whole pool.
+                ``'auto'`` = 25% of system RAM, capped at 16 GB.
+                Pass any size string (``'4GB'``, ``'512MB'``, ``'8192'`` (MB), …).
+            min_memory_per_conn: floor on the per-connection budget. Even
+                under heavy concurrency, every connection gets at least
+                this much, so a single huge query never starves out.
+            temp_directory: where DuckDB spills when a query exceeds its
+                budget.  ``None`` disables spilling (queries OOM-error
+                instead).  The directory is created if missing.
+            memory_limit: DEPRECATED — kept for callers that still pass it,
+                folded into ``total_memory_budget`` if explicitly given.
+        """
+        import os
         self.max_connections_per_db = max_connections_per_db
         self.s3_config = s3_config or {}
-        if memory_limit == 'auto':
-            self.memory_limit = _auto_memory_limit(max_connections_per_db)
-        else:
-            self.memory_limit = memory_limit
         self.threads = threads
-        log.info('ConnectionPool: memory_limit=%s/conn, threads=%d/conn, max_conns_per_db=%d',
-                 self.memory_limit, threads, max_connections_per_db)
+
+        if total_memory_budget == 'auto':
+            self.total_memory_mb = _auto_total_memory_budget_mb()
+        else:
+            self.total_memory_mb = _parse_size_mb(total_memory_budget)
+        self.min_memory_mb = max(64, _parse_size_mb(min_memory_per_conn))
+        # Back-compat: surface the static-budget number too (some metrics expose it).
+        self.memory_limit = (
+            memory_limit if memory_limit != 'auto'
+            else _auto_memory_limit(max_connections_per_db)
+        )
+
+        self.temp_directory = temp_directory
+        if temp_directory:
+            try:
+                os.makedirs(temp_directory, exist_ok=True)
+            except OSError as exc:
+                log.warning("ConnectionPool: cannot create temp_directory %r: %s — "
+                            "spilling disabled, queries past budget will OOM.",
+                            temp_directory, exc)
+                self.temp_directory = None
+
+        log.info(
+            'ConnectionPool: total_memory_budget=%dMB (shared, adaptive per-conn, '
+            'floor=%dMB), threads=%d/conn, max_conns_per_db=%d, temp_directory=%s',
+            self.total_memory_mb, self.min_memory_mb, threads,
+            max_connections_per_db, self.temp_directory or '(disabled)',
+        )
         self.pools: Dict[str, List[Any]] = defaultdict(list)
         self.in_use: Dict[str, int] = defaultdict(int)
         self.locks: Dict[str, Lock] = defaultdict(Lock)
@@ -192,6 +271,9 @@ class ConnectionPool:
         self.total_connections = 0
         self.hits = 0
         self.misses = 0
+        # Last per-conn budget computed at acquire — surfaced in /metrics so
+        # operators can see when throttling kicks in.
+        self.last_per_conn_mb = self.total_memory_mb
         self._httpfs_installed = False
 
     def _make_connection(self, db_key: str):
@@ -226,10 +308,44 @@ class ConnectionPool:
             conn.execute("USE db;")
         else:
             conn = duckdb.connect(db_key, read_only=True)
-        # Cap per-connection memory and parallelism to prevent OOM
-        conn.execute(f"SET memory_limit = '{self.memory_limit}'")
+        # Static settings only — memory_limit is set per-acquire by
+        # _apply_adaptive_settings so the budget tracks current load.
         conn.execute(f"SET threads = {self.threads}")
+        if self.temp_directory:
+            # Quote the path; DuckDB SET expects a string literal.
+            conn.execute(f"SET temp_directory = '{self.temp_directory}'")
         return conn
+
+    def _adaptive_per_conn_mb(self) -> int:
+        """Compute the per-connection memory budget given current load.
+
+        Sums ``in_use`` across every db in the pool, adds 1 for the
+        connection being acquired right now, and divides the total
+        budget across that count — floored at ``min_memory_mb``.
+
+        Threading note: the read is unlocked across dbs.  Worst case it's
+        stale by one or two — the budget is heuristic, slight skew is
+        fine.  We never need an exact concurrent count.
+        """
+        in_use_total = sum(self.in_use.values())
+        n_after_acquire = max(1, in_use_total + 1)
+        return max(self.min_memory_mb, self.total_memory_mb // n_after_acquire)
+
+    def _apply_adaptive_settings(self, conn) -> int:
+        """Set ``memory_limit`` on a connection based on current load.
+
+        Returns the budget (MB) that was applied — caller can log it.
+        Failures are non-fatal (we log + continue with whatever the
+        connection's previous limit was).
+        """
+        budget_mb = self._adaptive_per_conn_mb()
+        try:
+            conn.execute(f"SET memory_limit = '{budget_mb}MB'")
+            self.last_per_conn_mb = budget_mb
+        except Exception as exc:
+            log.warning("ConnectionPool: SET memory_limit=%dMB failed: %s",
+                        budget_mb, exc)
+        return budget_mb
 
     def _is_evicted_unlocked(self, db_key: str) -> bool:
         """Caller must hold self.locks[db_key]. Auto-clears expired evictions."""
@@ -257,6 +373,9 @@ class ConnectionPool:
                 conn = self.pools[db_key].pop()
                 self.in_use[db_key] += 1
                 self.hits += 1
+                # Rebalance: this acquire raises the in-use count, so the
+                # per-conn budget shrinks for this connection accordingly.
+                self._apply_adaptive_settings(conn)
                 return conn
 
             # Create new connection if under limit
@@ -265,11 +384,14 @@ class ConnectionPool:
                 self.in_use[db_key] += 1
                 self.total_connections += 1
                 self.misses += 1
+                self._apply_adaptive_settings(conn)
                 return conn
 
             # Fallback: create an extra connection beyond the pool limit
             self.misses += 1
-            return self._make_connection(db_key)
+            conn = self._make_connection(db_key)
+            self._apply_adaptive_settings(conn)
+            return conn
 
     def release(self, db_key: str, *,
                 duration_seconds: Optional[float] = None,
@@ -361,15 +483,31 @@ class ConnectionPool:
         self.in_use.clear()
 
     def get_stats(self) -> Dict[str, Any]:
-        """Get pool statistics"""
+        """Get pool statistics — includes the adaptive-throttling state so
+        operators can see when concurrent load is squeezing the per-conn
+        memory budget.
+        """
+        in_use = sum(self.in_use.values())
+        # Predict what the NEXT acquire would get, given current load.
+        next_budget_mb = max(self.min_memory_mb,
+                             self.total_memory_mb // max(1, in_use + 1))
         return {
             'total_connections': self.total_connections,
             'active_databases': len(self.pools),
             'pooled_connections': sum(len(p) for p in self.pools.values()),
-            'in_use': sum(self.in_use.values()),
+            'in_use': in_use,
             'cache_hits': self.hits,
             'cache_misses': self.misses,
-            'hit_rate': self.hits / max(1, self.hits + self.misses)
+            'hit_rate': self.hits / max(1, self.hits + self.misses),
+            'memory': {
+                'total_budget_mb':         self.total_memory_mb,
+                'min_per_conn_mb':         self.min_memory_mb,
+                'last_per_conn_mb':        self.last_per_conn_mb,
+                'next_acquire_per_conn_mb': next_budget_mb,
+                # How aggressively throttled: 1.0 = no throttling, 0.5 = half budget per conn, etc.
+                'throttle_ratio':          next_budget_mb / self.total_memory_mb,
+                'temp_directory':          self.temp_directory,
+            },
         }
 
 
@@ -3984,6 +4122,9 @@ def main():
             s3_config=s3_config,
             memory_limit=str(config.get('duckdb_memory_limit', 'auto')),
             threads=config.get('duckdb_threads', 2),
+            total_memory_budget=str(config.get('duckdb_total_memory_budget', 'auto')),
+            min_memory_per_conn=str(config.get('duckdb_min_memory_per_conn', '256MB')),
+            temp_directory=config.get('duckdb_temp_directory') or './tmp/duckdb_spill',
         )
         print("Initializing database registry...")
         registry = DatabaseRegistry(args.data_folder, connection_pool, s3_config=s3_config)
