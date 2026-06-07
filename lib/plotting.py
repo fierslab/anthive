@@ -394,6 +394,34 @@ def build_caption(
     return sentence + '.'
 
 
+# Above this many cells, matplotlib's ax.scatter() becomes the dominant cost
+# of a scatter render (it builds a PathCollection of n offsets and renders
+# each marker individually).  ax.plot() with marker='.' is 5-10x faster
+# because matplotlib batches all markers behind a single draw_markers call.
+# The tradeoff: ax.plot() can't do per-point colour, so we only use it for
+# no-colour scatters and (per-group) categorical scatters.  Continuous
+# colour still needs ax.scatter for the cmap.
+_FAST_SCATTER_THRESHOLD = 50_000
+
+
+def _fast_scatter(ax, xs, ys, *, point_size: float, alpha: float,
+                  color, label: Optional[str] = None) -> None:
+    """Single-colour scatter via ax.plot — 5-10x faster than ax.scatter for
+    big embeddings.  ``point_size`` is matplotlib's ``s`` (area in pt²);
+    converted here to ``markersize`` (diameter in pt) so callers get the
+    same visual marker size as the slow path.
+    """
+    import math as _math
+    markersize = _math.sqrt(point_size) if point_size > 0 else 1.0
+    ax.plot(
+        xs, ys,
+        marker='.', linestyle='none',
+        markersize=markersize, alpha=alpha,
+        color=color, label=label,
+        rasterized=True,  # keeps SVG/PDF outputs reasonable on huge embeddings
+    )
+
+
 def plot_scatter(
     embedding_df: pd.DataFrame,
     color_df: Optional[pd.DataFrame],
@@ -438,6 +466,7 @@ def plot_scatter(
     plot_df = embedding_df.copy()
 
     n_cells = int(len(plot_df))
+    use_fastpath = n_cells > _FAST_SCATTER_THRESHOLD
 
     if color_df is not None and color_field:
         color_values = color_df.set_index('cell_name')[color_field]
@@ -449,11 +478,29 @@ def plot_scatter(
                                      palette_cont=palette_cont,
                                      palette_div=palette_div,
                                      n_categories=n_cats)
-            sns.scatterplot(
-                data=plot_df, x=x_col, y=y_col,
-                hue=color_field, linewidth=0, s=point_size, alpha=alpha,
-                palette=cmap_name, ax=ax,
-            )
+            if use_fastpath:
+                # Per-group fastpath — one ax.plot per category, drastically
+                # faster than the seaborn/scatter PathCollection for big N.
+                xs_all = np.asarray(plot_df[x_col], dtype=float)
+                ys_all = np.asarray(plot_df[y_col], dtype=float)
+                cats = plot_df[color_field].astype(str).values
+                unique_cats = sorted(np.unique(cats[cats != 'nan']).tolist())
+                cmap_obj = matplotlib.cm.get_cmap(cmap_name)
+                n_palette = getattr(cmap_obj, 'N', 256)
+                for idx, cat in enumerate(unique_cats):
+                    mask = cats == cat
+                    colour = cmap_obj((idx % n_palette) / max(n_palette - 1, 1))
+                    _fast_scatter(
+                        ax, xs_all[mask], ys_all[mask],
+                        point_size=point_size, alpha=alpha,
+                        color=colour, label=cat,
+                    )
+            else:
+                sns.scatterplot(
+                    data=plot_df, x=x_col, y=y_col,
+                    hue=color_field, linewidth=0, s=point_size, alpha=alpha,
+                    palette=cmap_name, ax=ax,
+                )
             legend_fontsize = 6 if n_cats > 12 else 8
             ax.legend(
                 bbox_to_anchor=(1.02, 1.0), loc='upper left',
@@ -472,12 +519,16 @@ def plot_scatter(
                 palette_div=palette_div,
                 values=color_array,
             )
+            # Continuous color requires ax.scatter — per-point cmap mapping
+            # has no equivalent in ax.plot().  We rasterize so SVG/PDF
+            # output doesn't explode on big embeddings.
             sc_kwargs: dict = {
                 'c': color_array,
                 'cmap': cmap_name,
                 's': point_size,
                 'alpha': alpha,
                 'linewidths': 0,
+                'rasterized': use_fastpath,
             }
             if used_kind == 'divergent':
                 finite = color_array[np.isfinite(color_array)]
@@ -496,10 +547,19 @@ def plot_scatter(
             plt.colorbar(sc, ax=ax, label=f'{color_field}{label_suffix}', shrink=0.8)
             title_bits = [color_field, f'n={_fmt_n(n_cells)}']
     else:
-        sns.scatterplot(
-            data=plot_df, x=x_col, y=y_col,
-            linewidth=0, s=point_size, alpha=alpha, color='steelblue', ax=ax,
-        )
+        if use_fastpath:
+            _fast_scatter(
+                ax,
+                np.asarray(plot_df[x_col], dtype=float),
+                np.asarray(plot_df[y_col], dtype=float),
+                point_size=point_size, alpha=alpha,
+                color='steelblue',
+            )
+        else:
+            sns.scatterplot(
+                data=plot_df, x=x_col, y=y_col,
+                linewidth=0, s=point_size, alpha=alpha, color='steelblue', ax=ax,
+            )
         title_bits = ['UMAP', f'n={_fmt_n(n_cells)}']
 
     ax.set_xlabel(x_label)

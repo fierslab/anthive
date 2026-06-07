@@ -35,6 +35,9 @@ Example:
 
 import argparse
 import asyncio
+import ctypes
+import ctypes.util
+import gc
 import json
 import logging
 import logging.handlers
@@ -58,6 +61,7 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel
 
 # Add lib directory to path
@@ -2117,6 +2121,46 @@ def _plot_db_fingerprint(db_url: str) -> str:
         return db_url
 
 
+# ── memory hygiene ────────────────────────────────────────────────────────────
+#
+# Long-running Python servers that briefly handle large pandas / numpy arrays
+# tend to retain a lot of memory in glibc's malloc arenas — the pages have
+# been freed back to glibc but glibc holds them rather than handing them back
+# to the OS.  Cheap RSS recovery: gc.collect() to drop reference cycles,
+# then malloc_trim(0) to release those arenas.
+#
+# We bind libc once at startup so it stays cheap on each plot render.  If
+# libc.so.6 isn't available (non-Linux, weird stripped envs), we just skip
+# the trim — gc.collect() still runs.
+_libc_malloc_trim = None
+try:
+    _libc_name = ctypes.util.find_library('c')
+    if _libc_name:
+        _libc = ctypes.CDLL(_libc_name, use_errno=True)
+        if hasattr(_libc, 'malloc_trim'):
+            _libc.malloc_trim.argtypes = [ctypes.c_size_t]
+            _libc.malloc_trim.restype = ctypes.c_int
+            _libc_malloc_trim = _libc.malloc_trim
+except (OSError, AttributeError):
+    _libc_malloc_trim = None
+
+
+def _release_memory() -> None:
+    """Drop Python reference cycles and return freed pages back to the OS.
+
+    Cheap when the heap is small; takes a few ms when there's a lot to
+    collect.  Called at the end of each plot render — it's the natural
+    point where DataFrame / matplotlib figure references go out of scope
+    and there's something for the trim to actually return.
+    """
+    gc.collect()
+    if _libc_malloc_trim is not None:
+        try:
+            _libc_malloc_trim(0)
+        except Exception:
+            pass
+
+
 def _plot_cache_key(
     db_id: str, geom: str, query: str, output_format: str, fingerprint: str,
 ) -> str:
@@ -2999,6 +3043,10 @@ async def _render_plot(plot_req: PlotRequest, request: Request) -> Response:
         'source_url': plot_req.source_url,
         'mime':       mime,
     })
+    # Starlette runs BackgroundTask after the response has been sent — the
+    # client doesn't wait on the trim.  Sync target is run in a threadpool,
+    # so it never blocks the event loop.  Only fired on cache MISS (HIT
+    # paths don't allocate anything worth trimming).
     return Response(
         content=image_bytes,
         media_type=mime,
@@ -3010,6 +3058,7 @@ async def _render_plot(plot_req: PlotRequest, request: Request) -> Response:
             'ETag':             f'"{cache_key}"',
             'Cache-Control':    'public, max-age=3600',
         },
+        background=BackgroundTask(_release_memory),
     )
 
 
