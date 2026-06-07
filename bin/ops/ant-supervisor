@@ -98,10 +98,17 @@ SERVICES: dict = {
     },
 }
 
-# MCP server is intentionally NOT in the default set — vark (CLI) is the
-# preferred LLM-facing path now.  To re-enable: add 'mcp' to the
-# DEFAULT_SERVICES list (or run `make serve-mcp` standalone).
-DEFAULT_SERVICES = ['api', 'browse', 'streamlit']
+# Services intentionally NOT in the default set:
+#   * mcp        — vark (CLI/skill) is the LLM-facing path now.
+#   * streamlit  — superseded by ant-browse (per-dataset plot UI ships the
+#                  same gene / cat / num plots via /browse/...).  The
+#                  source under frontend/streamlit/ is kept for reference
+#                  and one-off runs (`make serve-streamlit`) but isn't
+#                  part of the production stack any more.
+#
+# To re-enable either: add the name back to DEFAULT_SERVICES, OR launch
+# it standalone (`make serve-mcp` / `make serve-streamlit`).
+DEFAULT_SERVICES = ['api', 'browse']
 
 # Back-off settings
 BACKOFF_INITIAL     = 2   # seconds

@@ -58,11 +58,12 @@
 		respond `{"error":"not_supported","error_description":"OAuth dynamic registration is not supported"}` 404
 	}
 
-	# Streamlit — started with --server.baseUrlPath=streamlit so all its
-	# routes (/_stcore/stream WS, /static/, /streamlit/) carry the prefix.
-	# Match both /streamlit (redirect to /streamlit/) and /streamlit/*.
+	# /streamlit was a Streamlit dashboard mounted at :8082; superseded by
+	# ant-browse's per-dataset plot UI and removed from the production
+	# stack.  Any stale link gets a tiny 410 instead of a confusing 502.
 	handle /streamlit* {
-		reverse_proxy localhost:8082
+		header Content-Type application/json
+		respond `{"error":"gone","error_description":"The Streamlit dashboard has been removed. Use the per-dataset plot UI at /browse/ instead."}` 410
 	}
 
 	# Fallback - if no other handle matched, serve static files

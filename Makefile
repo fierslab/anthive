@@ -25,8 +25,7 @@ help:
 	@echo "Development:"
 	@echo "  make serve-api         - Run REST API server (port 8080)"
 	@echo "  make serve-browse      - Run web browser server (port 8081)"
-	@echo "  make serve-streamlit   - Run Streamlit server (port 8082)"
-	@echo "  make serve-mcp         - Run MCP server for LLM integration (port 8090)"
+	@echo "  make serve-mcp         - Run MCP server for LLM integration (port 8090, OPT-IN)"
 	@echo "  make dev-jupyter       - Run JupyterLab on frontend/jupyter/jupyter (port 9090)"
 	@echo ""
 	@echo "Sync (S3) — the maintenance workflow:"
@@ -123,16 +122,12 @@ serve:
 	@echo "This serves:"
 	@echo "  - Browser interface at /"
 	@echo "  - JupyterLite at /jupyter"
-	@echo "  - Streamlit at /streamlit"
 	@echo "  - API at /api"
-	@echo "  - MCP at /mcp"
 	@echo ""
 	@echo "Make sure backend servers are running (in other terminals):"
 	@echo "  Terminal 1: make serve-api (port 8080)"
 	@echo "  Terminal 2: make serve-browse (port 8081)"
-	@echo "  Terminal 3: make serve-streamlit (port 8082)"
-	@echo "  Terminal 4: make serve-mcp (port 8090)"
-	@echo "  Terminal 5: make serve (this - port 8501)"
+	@echo "  Terminal 3: make serve (this - port 8501)"
 	@echo ""
 	@caddy run --config config/Caddyfile
 
@@ -142,16 +137,12 @@ serve-nginx:
 	@echo "This serves:"
 	@echo "  - Browser interface at /"
 	@echo "  - JupyterLite at /jupyter"
-	@echo "  - Streamlit at /streamlit"
 	@echo "  - API at /api"
-	@echo "  - MCP at /mcp"
 	@echo ""
 	@echo "Make sure backend servers are running (in other terminals):"
 	@echo "  Terminal 1: make serve-api (port 8080)"
 	@echo "  Terminal 2: make serve-browse (port 8081)"
-	@echo "  Terminal 3: make serve-streamlit (port 8082)"
-	@echo "  Terminal 4: make serve-mcp (port 8090)"
-	@echo "  Terminal 5: make serve-nginx (this - port 8501)"
+	@echo "  Terminal 3: make serve-nginx (this - port 8501)"
 	@echo ""
 	@nginx -c $(PWD)/config/nginx.conf -p $(PWD)
 
@@ -242,7 +233,18 @@ serve-stop:
 		echo "no supervisor running"; \
 	fi
 
+# NOTE: the Streamlit dashboard has been removed from the production stack.
+# ant-browse owns the interactive plot UI now (per-dataset, autocompleting,
+# URL-shareable).  This target is kept for one-off ad-hoc runs against the
+# legacy source under frontend/streamlit/.  It is NOT proxied by the
+# reverse proxy any more (/streamlit returns 410) — hit :8082 directly if
+# you really want it.
 serve-streamlit:
+	@echo "WARNING: Streamlit has been removed from the production stack."
+	@echo "         ant-browse covers the same plots; only run this for ad-hoc"
+	@echo "         work against the legacy code in frontend/streamlit/."
+	@echo "         /streamlit on the reverse proxy now returns 410."
+	@echo ""
 	@echo "Starting Anthive Streamlit server on http://localhost:8082"
 	@echo ""
 	@cd frontend/streamlit && uvx \
