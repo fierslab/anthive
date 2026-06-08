@@ -63,6 +63,12 @@
         table.narrow { max-width: 480px; }
         table.auto { width: auto; }
 
+        /* Horizontal-scroll guard for wide tables on narrow viewports — keeps
+           a many-column table from blowing out the page width and forcing a
+           whole-page horizontal scroll. The table scrolls inside this box
+           instead. Every page table is wrapped in one of these. */
+        .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
         .tbl-controls { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
         .tbl-controls input[type=text] { padding: 4px 8px; font-family: var(--font); font-size: 12px; border: 1px solid var(--border); background: #fff; color: var(--text); width: 200px; outline: none; }
         .tbl-controls input[type=text]:focus { border-color: var(--link); }

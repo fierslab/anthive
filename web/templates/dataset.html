@@ -138,6 +138,7 @@
      before plotting. -->
 {% if layer_stats_rows %}
 <h2>Data</h2>
+<div class="table-wrap">
 <table class="auto" style="font-size:12px">
     <thead><tr>
         <th>layer</th><th>dtype</th><th>min</th><th>min(nz)</th><th>max</th><th>median</th><th>q90</th><th>% zeros</th>
@@ -157,6 +158,7 @@
     {% endfor %}
     </tbody>
 </table>
+</div>
 {% endif %}
 
 <!-- Biology -->

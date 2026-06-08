@@ -37,6 +37,7 @@
 
 {% if metadata.get('parameters') %}
 <h2>Parameters</h2>
+<div class="table-wrap">
 <table class="auto" style="margin:4px 0 12px">
     <tbody>
     {% for key, value in metadata.parameters.items() %}
@@ -44,6 +45,7 @@
     {% endfor %}
     </tbody>
 </table>
+</div>
 {% endif %}
 
 {% if body_html %}
@@ -51,6 +53,7 @@
 {% endif %}
 
 <h2>Genesets ({{ genesets|length }})</h2>
+<div class="table-wrap">
 <table class="auto">
     <thead>
         <tr>
@@ -73,4 +76,5 @@
         {% endfor %}
     </tbody>
 </table>
+</div>
 {% endblock %}

@@ -542,3 +542,34 @@ def test_geneset_view_renders(client):
 def test_geneset_view_404(client):
     resp = client.get("/genesets/StudyX/Exp1/nope")
     assert resp.status_code == 404
+
+
+# ── responsive / mobile markup ─────────────────────────────────────────────────
+
+def test_table_wrap_present_on_table_pages(client):
+    # Every data table is wrapped in .table-wrap (overflow-x guard) so a wide
+    # table scrolls inside its box rather than widening the page on mobile.
+    for path in ("/", "/browse/GroupA", "/browse/GroupA/ds1", "/genesets",
+                 "/genesets/StudyX/Exp1"):
+        resp = client.get(path)
+        assert resp.status_code == 200
+        assert 'class="table-wrap"' in resp.text, f"missing .table-wrap on {path}"
+
+
+def test_table_wrap_style_defined(client):
+    # The .table-wrap rule itself ships in base.html's <style>.
+    resp = client.get("/")
+    assert ".table-wrap" in resp.text
+    assert "overflow-x: auto" in resp.text
+
+
+def test_folder_mobile_card_markup(client):
+    # The folder table carries the per-cell data-label hooks, the card-title
+    # class, and the <=760px card-layout media query that the mobile cards
+    # are built from.
+    resp = client.get("/browse/GroupA")
+    assert resp.status_code == 200
+    assert 'class="card-title"' in resp.text
+    assert 'data-label="Org"' in resp.text
+    assert 'data-label="Status"' in resp.text
+    assert "@media (max-width: 760px)" in resp.text

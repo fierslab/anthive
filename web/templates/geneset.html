@@ -50,6 +50,7 @@
 
 <h2>Genes</h2>
 {% if payload.format == 'rnk' and payload.ranks %}
+<div class="table-wrap">
 <table class="auto narrow">
     <thead><tr><th>Gene</th><th>Rank</th></tr></thead>
     <tbody>
@@ -58,6 +59,7 @@
     {% endfor %}
     </tbody>
 </table>
+</div>
 {% else %}
 <div style="font-family:var(--font-mono); font-size:11px; line-height:1.7; column-width:120px; max-width:900px">
 {% for gene in payload.genes %}<span style="display:inline-block; min-width:90px">{{ gene }}</span>{% endfor %}

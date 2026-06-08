@@ -75,6 +75,22 @@ detection) and lets the client hit `/api/databases/{id}/plot/{geom}`.
   append-mode green chips for CSV fields (heatmap genes, rolling y).
   Implementation in `plot.html`'s `prefillAndChips()`.
 
+## Responsive / mobile
+
+- **Wrap every `<table>` in `<div class="table-wrap">`.**  `.table-wrap`
+  (defined in `base.html`: `overflow-x:auto`) keeps a wide table scrolling
+  inside its box instead of widening the whole page on a phone.  This is a
+  convention — any new table must be wrapped.  A route test asserts the
+  wrapper is present (`tests/test_web_browser.py`).
+- **`folder.html`'s 13-column table becomes a stacked card layout below
+  760px.**  Each `<td>` carries a `data-label` (the mobile field label,
+  drawn via `::before`); the dataset-name cell is `.card-title`; empty pill
+  cells collapse out via `:empty` (so the pill `<td>`s keep zero internal
+  whitespace — don't reformat them).  The `@media (max-width:760px)` block
+  lives in `folder.html`'s `<style>`.
+- Other breakpoints: `plot.html` sidebar+plot grid and `dataset.html`'s
+  `.two-col` / `.info-grid` collapse to one column at ~760px.
+
 ## Running it
 
 - Production / debug: under the supervisor — `bin/ops/ant-supervisor`
