@@ -12,36 +12,9 @@ from analytics import (
     _BLOCKED_DATA_LOADERS,
     _BLOCKED_MODULES,
     _build_viz_script,
-    _strip_sql_comments,
     validate_python,
     validate_sql,
 )
-
-
-# ── SQL comment stripping ─────────────────────────────────────────────────────
-
-class TestStripSqlComments:
-
-    def test_strip_line_comment(self):
-        assert _strip_sql_comments("SELECT 1 -- comment") == "SELECT 1 "
-
-    def test_strip_block_comment(self):
-        assert _strip_sql_comments("SELECT /* removed */ 1") == "SELECT  1"
-
-    def test_strip_multiline_block_comment(self):
-        sql = "SELECT\n/* multi\nline\n*/ 1"
-        assert "multi" not in _strip_sql_comments(sql)
-
-    def test_no_comment_unchanged(self):
-        sql = "SELECT 1 FROM t WHERE x > 0"
-        assert _strip_sql_comments(sql) == sql
-
-    def test_nested_dashes_in_string(self):
-        # Dashes inside a query (not comment syntax)
-        sql = "SELECT 'a--b' AS x"
-        # The regex strips after '--', which is a known limitation
-        result = _strip_sql_comments(sql)
-        assert "SELECT" in result
 
 
 # ── SQL validation: allowed queries ───────────────────────────────────────────
@@ -100,7 +73,11 @@ class TestValidateSqlBlocked:
         "COPY", "EXPORT", "IMPORT", "PRAGMA", "CALL",
     ])
     def test_ddl_dml_blocked(self, keyword):
-        with pytest.raises(ValueError, match="not allowed"):
+        # The security contract is rejection (a raised ValueError), not a
+        # specific message.  Depending on the keyword, validate_sql rejects
+        # either via the statement-type gate ("…are permitted.") or as an
+        # unparseable statement ("Could not parse SQL: …") — both are secure.
+        with pytest.raises(ValueError):
             validate_sql(f"{keyword} INTO cells VALUES (1)")
 
     @pytest.mark.security
@@ -108,7 +85,7 @@ class TestValidateSqlBlocked:
         "insert", "update", "delete", "drop", "create",
     ])
     def test_case_insensitive_blocking(self, keyword):
-        with pytest.raises(ValueError, match="not allowed"):
+        with pytest.raises(ValueError):
             validate_sql(f"{keyword} into cells values (1)")
 
     @pytest.mark.security
@@ -124,17 +101,26 @@ class TestValidateSqlBlocked:
 
     @pytest.mark.security
     def test_write_after_comment_newline(self):
-        # DROP on a new line after a line comment should still be caught
-        with pytest.raises(ValueError, match="not allowed"):
+        # DROP on a new line after a line comment is a second statement and
+        # must still be caught by the statement-type gate.
+        with pytest.raises(ValueError):
             validate_sql("SELECT 1;\n-- harmless\nDROP TABLE cells")
 
     @pytest.mark.security
-    def test_keyword_in_string_literal_known_limitation(self):
-        """The regex scanner cannot distinguish keywords inside string
-        literals from real statements. This is intentional: false-positive
-        blocking is preferred over false-negative bypasses."""
-        with pytest.raises(ValueError, match="not allowed"):
-            validate_sql("SELECT 'INSERT' AS x")
+    def test_keyword_in_string_literal_allowed(self):
+        """A SQL keyword appearing inside a string literal is not a statement.
+        The parser/tokenizer-based validator (unlike the older regex scanner)
+        distinguishes them correctly, so this legitimate SELECT is allowed —
+        no false-positive block."""
+        validate_sql("SELECT 'INSERT' AS x")  # must not raise
+
+    @pytest.mark.security
+    def test_pragma_blocked(self):
+        # DuckDB parses read-only pragmas (e.g. PRAGMA database_list) as
+        # StatementType.SELECT, so they slip the statement-type gate; the
+        # token-level PRAGMA check is what rejects them.
+        with pytest.raises(ValueError, match="PRAGMA"):
+            validate_sql("PRAGMA database_list")
 
 
 # ── Python validation: allowed code ───────────────────────────────────────────

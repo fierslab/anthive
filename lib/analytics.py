@@ -140,7 +140,18 @@ def validate_sql(sql: str) -> None:
         offset, tt = tokens[i]
         if tt != duckdb.token_type.keyword:
             continue
-        if _token_text(sql, offset).lower() != 'from':
+        keyword = _token_text(sql, offset).lower()
+        # PRAGMA slips past the Step-1 statement-type gate because DuckDB's
+        # parser reports read-only pragmas (e.g. `PRAGMA database_list`) as
+        # StatementType.SELECT.  Reject it explicitly here: pragmas expose
+        # engine/schema introspection and the `PRAGMA x=y` form changes
+        # settings.  (The `=` form is already StatementType.SET and blocked,
+        # but catching the keyword covers both spellings in one place.)
+        if keyword == 'pragma':
+            raise ValueError(
+                "PRAGMA statements are not allowed through analytics_query."
+            )
+        if keyword != 'from':
             continue
         # Find next non-comment token.
         j = i + 1
@@ -154,7 +165,11 @@ def validate_sql(sql: str) -> None:
                 "FROM '<path>' (path-as-table) is not allowed. "
                 "External files / URLs cannot be read through analytics_query."
             )
-        if next_tt == duckdb.token_type.identifier:
+        # Most blocked table-functions tokenize as identifiers, but a few are
+        # also DuckDB keywords — notably `glob`, which doubles as the GLOB
+        # pattern operator.  Checking only identifiers let `FROM glob('…')`
+        # bypass the blocklist, so inspect keyword tokens too.
+        if next_tt in (duckdb.token_type.identifier, duckdb.token_type.keyword):
             name = _token_text(sql, next_offset).lower()
             if name in _BLOCKED_FROM_FUNCTIONS:
                 raise ValueError(
