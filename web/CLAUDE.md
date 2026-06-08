@@ -48,7 +48,9 @@ styles live in `templates/base.html`'s `<style>` block.
 | `/browse/{group}` | one collection | `folder.html` |
 | `/browse/{group}/{file}` | one dataset (info + viz launcher) | `dataset.html` |
 | `/browse/{group}/{file}/plot/{geom}` | interactive plot UI for one geom on one dataset | `plot.html` |
-| `/genesets`, `/genesets/{study}`, `/genesets/{study}/{exp}` | geneset browsing | `genesets*.html` |
+| `/genesets` | top-level geneset study list | `genesets.html` |
+| `/genesets/{study}/{experiment}` | one experiment's geneset list | `geneset_experiment.html` |
+| `/genesets/{study}/{experiment}/{name}` | one geneset's gene table | `geneset.html` |
 
 The plot page talks to the REST API directly from the browser via JS —
 the FastAPI router doesn't proxy plot requests.  It just hands the
