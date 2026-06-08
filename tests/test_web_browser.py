@@ -563,13 +563,35 @@ def test_table_wrap_style_defined(client):
     assert "overflow-x: auto" in resp.text
 
 
+def test_card_table_rule_defined(client):
+    # The shared mobile card-grid layout lives in base.html, keyed on
+    # table.card-table, and triggers at <=760px.
+    resp = client.get("/")
+    assert "table.card-table" in resp.text
+    assert "@media (max-width: 760px)" in resp.text
+    assert "grid-template-columns: 1fr 1fr" in resp.text
+
+
 def test_folder_mobile_card_markup(client):
-    # The folder table carries the per-cell data-label hooks, the card-title
-    # class, and the <=760px card-layout media query that the mobile cards
-    # are built from.
+    # The folder table opts into the card layout and carries the per-cell
+    # hooks it consumes: card-title on the dataset name, data-labels on the
+    # metadata cells.
     resp = client.get("/browse/GroupA")
     assert resp.status_code == 200
+    assert 'id="datasets-table" class="card-table"' in resp.text
     assert 'class="card-title"' in resp.text
     assert 'data-label="Org"' in resp.text
     assert 'data-label="Status"' in resp.text
-    assert "@media (max-width: 760px)" in resp.text
+
+
+def test_landing_mobile_card_markup(client):
+    # The landing collection table is also a card-table: collection name is
+    # the card title, the context pill cluster spans full width (card-span),
+    # and the scalar columns are labelled for the 2-column card grid.
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert 'id="coll-table" class="card-table"' in resp.text
+    assert 'class="card-title"' in resp.text
+    assert 'class="card-span"' in resp.text
+    assert 'data-label="Datasets"' in resp.text
+    assert 'data-label="Cells"' in resp.text

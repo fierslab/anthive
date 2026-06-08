@@ -69,6 +69,44 @@
            instead. Every page table is wrapped in one of these. */
         .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 
+        /* ── mobile card layout for wide row-per-entity tables ──────────────
+           Add class="card-table" to a table and below 760px each row becomes
+           a card whose fields pack into a 2-column grid (so short label:value
+           pairs use the width instead of stacking into one tall column).
+           Per-cell hooks:
+             td.card-title  → spans both columns, acts as the card header
+             td.card-span   → spans both columns (e.g. a pill cluster)
+             td[data-label] → labelled via ::before ("LABEL: value")
+             empty <td>     → collapses out (so cards only show fields they
+                              have; keep such cells free of inner whitespace).
+           Above 760px the table renders normally (inside .table-wrap). */
+        @media (max-width: 760px) {
+            table.card-table thead { display: none; }
+            table.card-table, table.card-table tbody { display: block; }
+            table.card-table tr {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 2px 14px;
+                border: 1px solid var(--border); border-radius: 6px;
+                padding: 8px 11px; margin-bottom: 8px; background: #fff;
+            }
+            table.card-table td { display: block; border: none; padding: 2px 0; min-width: 0; }
+            table.card-table tr:hover td { background: transparent; }
+            table.card-table td:empty { display: none; }
+            table.card-table td[data-label]::before {
+                content: attr(data-label) ": ";
+                color: var(--text-muted); font-size: 10px;
+                text-transform: uppercase; letter-spacing: .4px; margin-right: 5px;
+            }
+            table.card-table td.card-title,
+            table.card-table td.card-span { grid-column: 1 / -1; }
+            table.card-table td.card-title {
+                padding-bottom: 5px; margin-bottom: 4px;
+                border-bottom: 1px solid var(--border-light);
+            }
+            table.card-table td.card-title::before { content: none; }
+        }
+
         .tbl-controls { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
         .tbl-controls input[type=text] { padding: 4px 8px; font-family: var(--font); font-size: 12px; border: 1px solid var(--border); background: #fff; color: var(--text); width: 200px; outline: none; }
         .tbl-controls input[type=text]:focus { border-color: var(--link); }

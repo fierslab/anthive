@@ -17,39 +17,8 @@
   .grp-pill.disease { background:#fee2e2; color:#991b1b; border-color:#fecaca; }
   .grp-pill.prep    { background:#fce7f3; color:#9d174d; border-color:#fbcfe8; }
   /* Acc / Src icons stay glyph-only (no background) — they're symbolic, not labels. */
-
-  /* ── mobile card layout ──────────────────────────────────────────────────
-     The 13-column table is unreadable below ~760px, so each row collapses
-     into a stacked card: the header row is hidden and every cell becomes a
-     labelled line (label drawn from data-label via ::before). Empty pill
-     cells collapse out (:empty) so a card only lists the fields it has.
-     Above 760px the normal table renders, wrapped in .table-wrap so it
-     scrolls inside its box instead of widening the page. */
-  @media (max-width: 760px) {
-    #datasets-table thead { display: none; }
-    #datasets-table,
-    #datasets-table tbody,
-    #datasets-table tr,
-    #datasets-table td { display: block; width: 100%; }
-    #datasets-table tr {
-      border: 1px solid var(--border); border-radius: 6px;
-      padding: 8px 11px; margin-bottom: 8px; background: #fff;
-    }
-    #datasets-table td { border: none; padding: 2px 0; }
-    #datasets-table tr:hover td { background: transparent; }
-    #datasets-table td:empty { display: none; }
-    #datasets-table td[data-label]::before {
-      content: attr(data-label) ": ";
-      color: var(--text-muted); font-size: 10px;
-      text-transform: uppercase; letter-spacing: .4px; margin-right: 6px;
-    }
-    /* Dataset name is the card title — no label, with a divider under it. */
-    #datasets-table td.card-title {
-      padding-bottom: 5px; margin-bottom: 4px;
-      border-bottom: 1px solid var(--border-light);
-    }
-    #datasets-table td.card-title::before { content: none; }
-  }
+  /* Mobile card layout (≤760px) is the shared `.card-table` rule in base.html;
+     the cells below carry the data-label / card-title hooks it consumes. */
 </style>
 
 <div class="breadcrumb">
@@ -70,7 +39,7 @@
 {% endif %}
 
 <div class="table-wrap">
-<table id="datasets-table">
+<table id="datasets-table" class="card-table">
     <thead>
         <tr>
             <th>Dataset</th>
@@ -104,7 +73,7 @@
                 {% if dataset.subfolder %}<br><span style="color:#888;font-size:11px">{{ dataset.subfolder }}</span>{% endif %}
                 <div style="color:#aaa;font-size:10px;font-family:var(--font-mono);margin-top:1px">{{ dataset.file_id }}</div>
             </td>
-            <td data-label="Cells × Genes" style="color:#555;font-family:var(--font-mono);font-size:11px;white-space:nowrap">
+            <td data-label="Cells × Genes" class="card-span" style="color:#555;font-family:var(--font-mono);font-size:11px;white-space:nowrap">
                 {% if dataset.n_obs and dataset.n_vars %}
                 {{ format_count(dataset.n_obs) }} × {{ format_count(dataset.n_vars) }}
                 {% endif %}

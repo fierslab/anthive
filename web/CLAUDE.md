@@ -82,12 +82,21 @@ detection) and lets the client hit `/api/databases/{id}/plot/{geom}`.
   inside its box instead of widening the whole page on a phone.  This is a
   convention — any new table must be wrapped.  A route test asserts the
   wrapper is present (`tests/test_web_browser.py`).
-- **`folder.html`'s 13-column table becomes a stacked card layout below
-  760px.**  Each `<td>` carries a `data-label` (the mobile field label,
-  drawn via `::before`); the dataset-name cell is `.card-title`; empty pill
-  cells collapse out via `:empty` (so the pill `<td>`s keep zero internal
-  whitespace — don't reformat them).  The `@media (max-width:760px)` block
-  lives in `folder.html`'s `<style>`.
+- **Row-per-entity tables become 2-column cards below 760px via the shared
+  `table.card-table` rule in `base.html`.**  Both the landing collection
+  table (`index.html`) and the folder dataset table (`folder.html`) opt in
+  with `class="card-table"`.  Below 760px each `<tr>` becomes a card whose
+  cells pack into a `1fr 1fr` grid.  Per-cell hooks the rule consumes:
+  - `td.card-title` — spans both columns, card header (no label)
+  - `td.card-span`  — spans both columns (e.g. the context pill cluster, or
+    the folder's `Cells × Genes` stat)
+  - `td[data-label="…"]` — labelled `LABEL: value` via `::before`
+  - empty `<td>` collapses out (`:empty`) so a card shows only the fields it
+    has — **keep such cells free of inner whitespace** or `:empty` won't
+    match and a blank labelled line appears.
+
+  Adding the card layout to a new table = give the `<table>` `card-table`,
+  then tag its cells with the hooks above.  No per-page CSS needed.
 - Other breakpoints: `plot.html` sidebar+plot grid and `dataset.html`'s
   `.two-col` / `.info-grid` collapse to one column at ~760px.
 
