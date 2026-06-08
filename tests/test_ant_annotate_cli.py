@@ -13,7 +13,7 @@ sys.path.insert(0, str(REPO_ROOT / 'tests'))
 
 from test_annotation_writer import build_synthetic_duckdb, CELL_NAMES  # noqa: E402
 
-ANT_ANNOTATE = REPO_ROOT / 'bin' / 'ant-annotate'
+ANT_ANNOTATE = REPO_ROOT / 'bin' / 'annot' / 'ant-annotate'
 
 
 def _run_cli(*args: str) -> subprocess.CompletedProcess:

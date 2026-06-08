@@ -43,9 +43,20 @@ help:
 	@echo "  ./bin/ant serve        - Start REST API server"
 	@echo "  ./bin/api/ant-mcp          - MCP server (LLM tool integration)"
 
-# Run the test suite (lib/ + API tests)
+# Run the test suite (lib/ + API + web tests)
+#
+# Run via `uv run` with an explicit dependency set rather than a bare
+# `python -m pytest`: there is no shared venv (every ant-* tool carries its
+# own PEP-723 inline deps), so the test runner needs its own. uv resolves
+# these from cache on repeat runs. PYTHONPATH=lib mirrors the sys.path shim
+# the tools use at runtime.
+TEST_DEPS = --with pytest --with duckdb --with pyyaml --with numpy \
+            --with pandas --with h5py --with scipy \
+            --with fastapi --with httpx --with jinja2 \
+            --with markdown --with requests
+
 test:
-	PYTHONPATH=lib python -m pytest tests/ -v
+	uv run $(TEST_DEPS) env PYTHONPATH=lib python -m pytest tests/ -v
 
 # Pull static report sites from git repos (defined in anthive.yaml)
 build-reports:

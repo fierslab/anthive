@@ -21,7 +21,7 @@ sys.path.insert(0, str(REPO_ROOT / 'tests'))
 from test_annotation_writer import build_synthetic_duckdb, CELL_NAMES  # noqa: E402
 from anthive_db import AnnotationWriter  # noqa: E402
 
-ANT_MERGE = REPO_ROOT / 'bin' / 'ant-merge-h5ad'
+ANT_MERGE = REPO_ROOT / 'bin' / 'ingest' / 'ant-merge-h5ad'
 
 
 def build_synthetic_h5ad(path: Path, obs_keys: list[str] | None = None) -> None:
