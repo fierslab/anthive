@@ -2,6 +2,11 @@
 
 A collection of command-line tools to validate, convert, and serve single-cell analysis data from h5ad files.
 
+## Deploying anthive on a new host
+
+See **[doc/INSTALL.md](doc/INSTALL.md)** — end-to-end install + production
+deploy instructions (Caddy / nginx, systemd, S3 data sync).
+
 ## Main Goals
 
 - **Check** any scanpy h5ad file for consistency & errors
