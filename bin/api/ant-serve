@@ -3168,10 +3168,30 @@ def _de_contrast_dataframe(req: PlotRequest, ctx: PlotContext) -> Any:
 
 def _handle_volcano(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     df = _de_contrast_dataframe(req, ctx)
+    # Mirror plot_volcano's axis-fallback logic when building the caption,
+    # so the X-Plot-Caption header agrees with the in-figure title for
+    # zeff-only studies (the fallback auto-zeros log2fc_threshold and
+    # switches the axis label).  Without this, web clients see
+    # title='padj only' but caption='|log2fc|>=1' — visibly inconsistent.
+    has_log2fc = df['log2fc'].notna().any()
+    if has_log2fc:
+        axis_label   = 'log2fc'
+        threshold_in_caption = req.log2fc_threshold
+    else:
+        kind = (df['efftype'].mode().iat[0]
+                if 'efftype' in df.columns and df['efftype'].notna().any() else 'effect')
+        axis_label = kind
+        threshold_in_caption = (
+            0.0 if req.log2fc_threshold == 1.0 else req.log2fc_threshold
+        )
+    if threshold_in_caption and threshold_in_caption > 0:
+        thresh_text = f"|{axis_label}|>={threshold_in_caption:g}"
+    else:
+        thresh_text = "padj only"
     caption = (
         f"Volcano of {req.de_study} · {req.de_term} · {req.de_contrast} "
         f"in {req.db_id}.  {len(df)} genes; "
-        f"significance: padj<={req.padj_threshold:g}, |log2fc|>={req.log2fc_threshold:g}."
+        f"significance: padj<={req.padj_threshold:g}, {thresh_text}."
     )
     image_bytes = plotting.plot_volcano(
         df,

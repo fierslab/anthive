@@ -1489,9 +1489,26 @@ def plot_forest(
         return _render_figure(fig, dpi, output_format, caption, source_url)
 
     df = df.sort_values('_effect').reset_index(drop=True)
-    df['_label'] = (df['study_name'].astype(str) + ' · '
-                    + df['term'].astype(str) + ' · '
-                    + df['contrast'].astype(str))
+    # Y-axis labels: only show the components that VARY across rows.
+    # Constant components (e.g. when /plot/forest is narrowed to one
+    # study + one term) are hoisted into the title — keeps the label
+    # column compact so CI bars have room.  Always keep contrast on
+    # the label even if there's only one row, so a single-row forest
+    # still labels itself sensibly.
+    study_constant    = df['study_name'].nunique() == 1
+    term_constant     = df['term'].nunique() == 1
+    label_components = []
+    title_constants  = []
+    if study_constant:
+        title_constants.append(str(df['study_name'].iloc[0]))
+    else:
+        label_components.append('study_name')
+    if term_constant:
+        title_constants.append(str(df['term'].iloc[0]))
+    else:
+        label_components.append('term')
+    label_components.append('contrast')   # always shown
+    df['_label'] = df[label_components].astype(str).agg(' · '.join, axis=1)
     df['_sig'] = df['padj'] <= padj_threshold
 
     # Height scales with the number of rows so labels stay readable.
@@ -1520,7 +1537,9 @@ def plot_forest(
     ax.set_xlabel(x_label)
     ax.set_ylim(-0.5, len(df) - 0.5)
     n_sig = int(df['_sig'].sum())
-    title_bits = ['Forest', gene_name, f'{n_sig}/{len(df)} sig (padj≤{padj_threshold:g})']
+    title_bits = ['Forest', gene_name]
+    title_bits.extend(title_constants)   # hoisted study / term when constant
+    title_bits.append(f'{n_sig}/{len(df)} sig (padj≤{padj_threshold:g})')
     ax.set_title(_compose_title(title_bits, extra=title_extra))
     sns.despine(ax=ax)
     fig.tight_layout()
