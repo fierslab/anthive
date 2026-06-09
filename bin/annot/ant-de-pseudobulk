@@ -1,0 +1,494 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "anndata>=0.10.0",
+#   "h5py>=3.0.0",
+#   "duckdb>=0.10.0",
+#   "numpy>=1.24.0",
+#   "pandas>=2.0.0",
+#   "pydeseq2>=0.4.0",
+#   "scipy>=1.10.0",
+#   "pyyaml>=6.0",
+#   "requests>=2.25.0",
+# ]
+# ///
+"""ant-de-pseudobulk — pseudobulk DESeq2 DE on any categorical column.
+
+For each unique value of ``--pseudobulk-by`` (typically a donor / lane /
+sample id), sum the raw counts across cells, then run pydeseq2 on the
+resulting (n_samples × n_genes) matrix with ``--group-by`` as the
+treatment.  Pairs cleanly with ant-de-ingest: results land in
+``__de_study`` + ``__de`` plus a sidecar ``.de.parquet`` next to the
+h5ad.
+
+Example (Sierksma2025 V6M-style, but for any dataset)::
+
+    ant-de-pseudobulk SF9/SAN \\
+        --group-by genotype \\
+        --pseudobulk-by lane,genotype \\
+        --covariates sex,tissue \\
+        --reference W \\
+        --study-id sala_microglia_geno_K_vs_W
+
+The pseudobulk unit (``--pseudobulk-by``) accepts a comma-separated
+list — useful when one column alone doesn't uniquely identify a
+sample.  See ``doc/DESIGN_var_and_de.md`` for the design rationale.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+import scipy.sparse as sp
+
+# sys.path shim — see bin/CLAUDE.md
+script_dir = Path(__file__).parent.resolve()
+sys.path.insert(0, str(script_dir.parent.parent / 'lib'))
+
+from config import get_config         # noqa: E402
+from h5adstore import find_h5ad       # noqa: E402
+from de_storage import (              # noqa: E402
+    DEWriter, DEWriterError, StudySpec, sidecar_path_for, write_sidecar,
+)
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+
+def _die(msg: str, code: int = 2) -> None:
+    print(f"ant-de-pseudobulk: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def _parse_subset(subset_args: List[str]) -> Dict[str, List[str]]:
+    """Parse one or more ``--subset field:value`` / ``--subset field:v1,v2`` flags."""
+    out: Dict[str, List[str]] = {}
+    for s in subset_args or []:
+        if ':' not in s:
+            _die(f"--subset expected 'field:value' or 'field:v1,v2', got {s!r}")
+        field, _, values = s.partition(':')
+        out[field.strip()] = [v.strip() for v in values.split(',') if v.strip()]
+    return out
+
+
+# ── pseudobulk math ───────────────────────────────────────────────────────────
+
+
+def build_pseudobulk(
+    adata,                                       # AnnData
+    pseudobulk_cols: List[str],
+    group_by: str,
+    covariates: List[str],
+    counts_layer: str,
+    min_cells_per_sample: int,
+    min_total_count_per_gene: int,
+) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, int]]:
+    """Sum raw counts across cells per sample → (counts, metadata, summary).
+
+    Args:
+        adata:
+            AnnData with cells × genes; ``adata.layers[counts_layer]``
+            must hold integer counts.
+        pseudobulk_cols:
+            Cell-metadata columns whose joined values uniquely identify
+            a pseudobulk sample (e.g. ``['lane', 'genotype']``).
+        group_by:
+            The treatment column (must be categorical; carried into the
+            sample metadata).
+        covariates:
+            Extra columns to carry into the sample metadata (used in
+            the DESeq2 design formula).
+        counts_layer:
+            The layer holding integer counts. ``'X'`` is allowed if
+            X already holds counts; otherwise pass e.g. ``'counts'``.
+        min_cells_per_sample, min_total_count_per_gene:
+            Filter thresholds.
+
+    Returns:
+        counts:    DataFrame  (n_samples × n_genes_kept)  int64
+        metadata:  DataFrame  (n_samples × len([group_by]+covariates))
+        summary:   dict with counts of dropped samples / genes.
+    """
+    if counts_layer != 'X' and counts_layer not in adata.layers:
+        _die(f"layer {counts_layer!r} not in adata.layers "
+             f"(have: {list(adata.layers.keys())})")
+    # Validate columns
+    missing_meta = [c for c in pseudobulk_cols + [group_by] + covariates
+                    if c not in adata.obs.columns]
+    if missing_meta:
+        _die(f"these columns are missing from adata.obs: {missing_meta}. "
+             f"Available: {list(adata.obs.columns)[:30]} …")
+
+    counts = adata.layers[counts_layer] if counts_layer != 'X' else adata.X
+
+    # Build the sample key: string-join pseudobulk_cols values.
+    sample_key = adata.obs[pseudobulk_cols[0]].astype(str)
+    for c in pseudobulk_cols[1:]:
+        sample_key = sample_key + '_' + adata.obs[c].astype(str)
+    sample_key.name = '_sample'
+
+    # Per-sample cell-index lists.
+    idx_map = pd.Series(np.arange(adata.n_obs)).groupby(sample_key.values).apply(list)
+    samples = sorted(idx_map.index.tolist())
+    n_samples = len(samples)
+    n_genes = adata.n_vars
+    print(f"  unique pseudobulk samples: {n_samples}")
+
+    # Sum counts per sample.
+    bulk = np.zeros((n_samples, n_genes), dtype=np.int64)
+    n_cells_per_sample = np.zeros(n_samples, dtype=np.int64)
+    is_sparse = sp.issparse(counts)
+    for i, sample in enumerate(samples):
+        cell_idx = idx_map.loc[sample]
+        n_cells_per_sample[i] = len(cell_idx)
+        sub = counts[cell_idx, :]
+        if is_sparse:
+            bulk[i, :] = np.asarray(sub.sum(axis=0)).ravel().astype(np.int64)
+        else:
+            bulk[i, :] = np.asarray(sub.sum(axis=0)).ravel().astype(np.int64)
+
+    # Drop samples with too few cells.
+    keep_sample = n_cells_per_sample >= min_cells_per_sample
+    n_dropped_samples = int((~keep_sample).sum())
+    bulk = bulk[keep_sample, :]
+    kept_samples = [s for s, k in zip(samples, keep_sample) if k]
+    print(f"  dropped {n_dropped_samples} samples with < {min_cells_per_sample} cells "
+          f"({len(kept_samples)} remain)")
+
+    # Per-sample metadata (take first cell's value for each metadata column).
+    obs_with_key = adata.obs.copy()
+    obs_with_key['_sample'] = sample_key.values
+    meta_cols = list(dict.fromkeys([group_by] + covariates))   # de-dupe preserving order
+    sample_meta = obs_with_key.groupby('_sample').first()[meta_cols]
+    sample_meta = sample_meta.loc[kept_samples]
+    sample_meta.index.name = None
+
+    # Drop low-count genes.
+    total_per_gene = bulk.sum(axis=0)
+    keep_gene = total_per_gene >= min_total_count_per_gene
+    n_dropped_genes = int((~keep_gene).sum())
+    bulk = bulk[:, keep_gene]
+    genes_kept = list(adata.var_names[keep_gene])
+    print(f"  dropped {n_dropped_genes} genes with < {min_total_count_per_gene} total counts "
+          f"({len(genes_kept)} remain)")
+
+    counts_df = pd.DataFrame(bulk, index=kept_samples, columns=genes_kept)
+    return counts_df, sample_meta, {
+        'n_samples_before': n_samples,
+        'n_samples_after':  len(kept_samples),
+        'n_samples_dropped': n_dropped_samples,
+        'n_genes_before':   int(n_genes),
+        'n_genes_after':    int(len(genes_kept)),
+        'n_genes_dropped':  n_dropped_genes,
+        'mean_cells_per_sample': float(n_cells_per_sample[keep_sample].mean()) if keep_sample.any() else 0.0,
+    }
+
+
+# ── pydeseq2 driver ───────────────────────────────────────────────────────────
+
+
+def run_deseq2(
+    counts_df: pd.DataFrame,
+    sample_meta: pd.DataFrame,
+    group_by: str,
+    covariates: List[str],
+    reference: Optional[str],
+    n_cpus: int,
+) -> Tuple[pd.DataFrame, List[str], str]:
+    """Run pydeseq2 → long-format result DataFrame.
+
+    Returns:
+        results: long DataFrame with columns gene, contrast, log2fc, pvalue,
+                 padj, base_mean, SE, score, estimate, ci_low, ci_high.
+                 (estimate/ci_low/ci_high are NaN for pydeseq2 — DESeq2's
+                 native confidence intervals aren't exposed by pydeseq2;
+                 SE is the lfcSE.)
+        levels:  list of group_by levels actually compared (non-reference).
+        reference: the reference level used.
+    """
+    # Lazy import so help / dry-run work without pydeseq2 installed.
+    from pydeseq2.dds import DeseqDataSet                              # noqa: WPS433
+    from pydeseq2.ds import DeseqStats                                  # noqa: WPS433
+    from pydeseq2.default_inference import DefaultInference             # noqa: WPS433
+
+    # Ensure the metadata is clean — pydeseq2 wants string / category columns.
+    metadata = sample_meta.copy()
+    for col in [group_by] + covariates:
+        metadata[col] = metadata[col].astype(str)
+
+    levels = sorted(metadata[group_by].unique())
+    if len(levels) < 2:
+        _die(f"--group-by {group_by!r} has only {len(levels)} level(s) after filtering: "
+             f"{levels}.  At least 2 are needed for a contrast.")
+    if reference is None:
+        reference = levels[0]
+        print(f"  --reference defaulted to {reference!r} (first level alphabetically)")
+    elif reference not in levels:
+        _die(f"--reference {reference!r} is not a value of {group_by!r}. "
+             f"Available: {levels}")
+
+    print(f"  pydeseq2 design: ~ {' + '.join(covariates + [group_by])}  "
+          f"(reference={reference!r})")
+    print(f"  pydeseq2 fit on {counts_df.shape[0]} samples × {counts_df.shape[1]} genes …")
+    t_start = time.time()
+    inference = DefaultInference(n_cpus=n_cpus)
+    dds = DeseqDataSet(
+        counts=counts_df,
+        metadata=metadata,
+        design_factors=covariates + [group_by],
+        ref_level=[group_by, reference],
+        refit_cooks=True,
+        inference=inference,
+        quiet=True,
+    )
+    dds.deseq2()
+    fit_seconds = time.time() - t_start
+    print(f"  pydeseq2 fit complete in {fit_seconds:.1f}s")
+
+    results = []
+    for level in levels:
+        if level == reference:
+            continue
+        print(f"  extracting contrast: {level} vs {reference}")
+        ds = DeseqStats(
+            dds,
+            contrast=[group_by, level, reference],
+            inference=inference,
+            quiet=True,
+        )
+        ds.summary()
+        df = ds.results_df.reset_index().rename(columns={'index': 'gene'})
+        if 'gene' not in df.columns:
+            df['gene'] = ds.results_df.index
+        df = df.rename(columns={
+            'log2FoldChange': 'log2fc',
+            'pvalue':         'pvalue',
+            'padj':           'padj',
+            'baseMean':       'base_mean',
+            'lfcSE':          'SE',
+            'stat':           'score',
+        })
+        df['contrast'] = f'{level}_vs_{reference}'
+        df['estimate'] = df['log2fc']   # DESeq2's "estimate" is the log2fc itself
+        df['ci_low']   = df['log2fc'] - 1.96 * df['SE']
+        df['ci_high']  = df['log2fc'] + 1.96 * df['SE']
+        df['zeff']     = np.nan
+        results.append(df[['gene', 'contrast', 'log2fc', 'zeff', 'pvalue', 'padj',
+                           'estimate', 'SE', 'ci_low', 'ci_high',
+                           'base_mean', 'score']])
+
+    return pd.concat(results, ignore_index=True), [l for l in levels if l != reference], reference
+
+
+# ── argparse ──────────────────────────────────────────────────────────────────
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog='ant-de-pseudobulk',
+        description='Pseudobulk + pydeseq2 DE on any categorical obs column.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument('db_id', help="Dataset id (e.g. 'SF9/SAN'). Required.")
+    p.add_argument('--group-by', required=True,
+                   help="Categorical obs column to test for DE (e.g. 'genotype').")
+    p.add_argument('--pseudobulk-by', required=True,
+                   help="One or more comma-separated obs columns whose joined values "
+                        "uniquely identify a pseudobulk sample (e.g. 'lane,genotype').")
+    p.add_argument('--covariates', default='',
+                   help="Comma-separated obs columns to include in the design "
+                        "matrix as covariates (e.g. 'sex,tissue'). Optional.")
+    p.add_argument('--reference', default=None,
+                   help="Reference level of --group-by. Default: first alphabetically.")
+    p.add_argument('--counts-layer', default='counts',
+                   help="adata.layers key holding raw integer counts. "
+                        "Use 'X' if X already is raw counts. Default: 'counts'.")
+    p.add_argument('--min-cells-per-sample', type=int, default=10,
+                   help='Drop pseudobulk samples with < N cells. Default: 10.')
+    p.add_argument('--min-total-count-per-gene', type=int, default=10,
+                   help='Drop genes with < N total reads across all samples. Default: 10.')
+    p.add_argument('--subset', action='append', default=[],
+                   help="Cell subset filter — 'field:value' or 'field:v1,v2'. Repeatable. "
+                        "Applied before pseudobulking.")
+    p.add_argument('--study-id', default=None,
+                   help="Study id slug. Default: '<group_by>_pseudobulk_deseq2'.")
+    p.add_argument('--name', default=None,
+                   help="Human-readable study name. Default: --study-id.")
+    p.add_argument('--description', default=None,
+                   help="Optional free-text description.")
+    p.add_argument('--engine', choices=['pydeseq2', 'deseq2-r'], default='pydeseq2',
+                   help='DE engine. v1 only supports pydeseq2.')
+    p.add_argument('--n-cpus', type=int, default=1,
+                   help='Number of CPUs for pydeseq2. Default: 1.')
+    p.add_argument('--no-sidecar', action='store_true',
+                   help='Skip writing the .de.parquet sidecar.')
+    p.add_argument('--dry-run', action='store_true',
+                   help='Pseudobulk + validate only; do not run DESeq2 or write.')
+    p.add_argument('--replace', action='store_true',
+                   help='Delete an existing study_id before writing.')
+    p.add_argument('--ant-serve-url', default=None,
+                   help='ant-serve URL for /admin/release coordination '
+                        '(default: from anthive.yaml).')
+    return p
+
+
+# ── main pipeline ─────────────────────────────────────────────────────────────
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    if args.engine == 'deseq2-r':
+        _die("--engine deseq2-r is reserved for a future release. Use --engine pydeseq2.")
+
+    pseudobulk_cols = [c.strip() for c in args.pseudobulk_by.split(',') if c.strip()]
+    covariates     = [c.strip() for c in args.covariates.split(',') if c.strip()]
+    subset = _parse_subset(args.subset)
+
+    config = get_config()
+    if not args.ant_serve_url:
+        host = config.get('rest_api_host', 'localhost')
+        port = config.get('rest_api_port', 8080)
+        args.ant_serve_url = f"http://{host}:{port}/api"
+
+    data_root = Path(config.get('data_folder', './data/h5adstore')).resolve()
+    h5ad_entry = find_h5ad(data_root, args.db_id)
+    if h5ad_entry is None:
+        _die(f"unknown db_id {args.db_id!r} under {data_root}")
+    if not h5ad_entry.h5ad_path.exists():
+        _die(f"h5ad not found: {h5ad_entry.h5ad_path}")
+
+    study_id = args.study_id or f"{args.group_by}_pseudobulk_deseq2"
+    name     = args.name or study_id
+
+    print(f"ant-de-pseudobulk: {args.db_id}")
+    print(f"  h5ad:          {h5ad_entry.h5ad_path}")
+    print(f"  duckdb:        {h5ad_entry.duckdb_path}")
+    print(f"  group_by:      {args.group_by!r}")
+    print(f"  pseudobulk_by: {pseudobulk_cols}")
+    print(f"  covariates:    {covariates}")
+    print(f"  counts_layer:  {args.counts_layer!r}")
+    if subset:
+        print(f"  subset:        {subset}")
+    print(f"  study_id:      {study_id!r}")
+    if args.dry_run:
+        print(f"  [DRY RUN — no DESeq2, no write]")
+
+    # ── load h5ad
+    print(f"\nLoading h5ad …")
+    import anndata as ad
+    t0 = time.time()
+    adata = ad.read_h5ad(h5ad_entry.h5ad_path)   # full load — DE inputs are usually small enough
+    print(f"  loaded {adata.n_obs} cells × {adata.n_vars} genes in {time.time()-t0:.1f}s")
+
+    # ── apply subsets
+    if subset:
+        mask = np.ones(adata.n_obs, dtype=bool)
+        for col, vals in subset.items():
+            if col not in adata.obs.columns:
+                _die(f"subset column {col!r} not in adata.obs (have: {list(adata.obs.columns)[:20]} …)")
+            mask &= adata.obs[col].astype(str).isin(vals).values
+        adata = adata[mask].copy()
+        print(f"  after subset: {adata.n_obs} cells")
+
+    # ── pseudobulk
+    print(f"\nBuilding pseudobulk matrix …")
+    counts_df, sample_meta, pb_summary = build_pseudobulk(
+        adata,
+        pseudobulk_cols=pseudobulk_cols,
+        group_by=args.group_by,
+        covariates=covariates,
+        counts_layer=args.counts_layer,
+        min_cells_per_sample=args.min_cells_per_sample,
+        min_total_count_per_gene=args.min_total_count_per_gene,
+    )
+    print()
+    print('  sample × group_by counts:')
+    for row in sample_meta[args.group_by].value_counts().sort_index().items():
+        print(f'    {row[0]:15s} {row[1]:>4d}')
+
+    if args.dry_run:
+        print(f"\nDRY RUN — would now run DESeq2 on {counts_df.shape[0]} samples × {counts_df.shape[1]} genes.")
+        print('Exiting before fit + write.')
+        return
+
+    # ── DESeq2
+    print(f"\nRunning pydeseq2 …")
+    results_df, contrasts, reference = run_deseq2(
+        counts_df, sample_meta,
+        group_by=args.group_by,
+        covariates=covariates,
+        reference=args.reference,
+        n_cpus=args.n_cpus,
+    )
+    print(f"  result rows: {len(results_df):,}  "
+          f"(n_contrasts={len(contrasts)}, n_genes={counts_df.shape[1]})")
+
+    # ── ingest via DEWriter
+    print(f"\nWriting __de + __de_study …")
+    spec = StudySpec(
+        study_id=study_id,
+        name=name,
+        description=args.description,
+        method='deseq2_pseudobulk',
+        target='gene',
+        reference_type='vsreference',
+        covariates=covariates if covariates else None,
+        n_tests_total=int(counts_df.shape[1]),
+        n_cells_total=int(adata.n_obs),
+        subset_filter=subset if subset else None,
+        source=(f"ant-de-pseudobulk: h5ad={h5ad_entry.h5ad_path.name}, "
+                f"group_by={args.group_by}, pseudobulk_by={pseudobulk_cols}, "
+                f"covariates={covariates}, reference={reference}"),
+        created_at=datetime.now(timezone.utc),
+    )
+
+    try:
+        with DEWriter(
+            h5ad_entry.duckdb_path,
+            db_id=args.db_id, ant_serve_url=args.ant_serve_url,
+        ) as writer:
+            if args.replace and writer.study_exists(study_id):
+                n_deleted = writer.delete_study(study_id)
+                print(f"  --replace: deleted {n_deleted} existing rows")
+
+            # Register the result DataFrame as a DuckDB view on the writer's
+            # connection — same pattern as ant-de-ingest's tmp parquet, but
+            # in-memory.
+            writer.conn.register('_stage_de', results_df)
+            n_inserted, n_unmatched = writer.ingest_rows(
+                spec=spec,
+                rows_table='_stage_de',
+                gene_col='gene',
+                term_col=None, fixed_term=args.group_by,
+                contrast_col='contrast',
+            )
+            writer.conn.unregister('_stage_de')
+            print(f"  ✓ inserted {n_inserted:,} rows into __de (study={study_id!r})")
+            if n_unmatched:
+                print(f"    {n_unmatched:,} rows had unmatched gene names (skipped)")
+    except DEWriterError as exc:
+        _die(str(exc))
+
+    # ── sidecar
+    if not args.no_sidecar:
+        sidecar = sidecar_path_for(h5ad_entry.h5ad_path)
+        n = write_sidecar(sidecar, h5ad_entry.duckdb_path)
+        if n:
+            sz = sidecar.stat().st_size / (1024 * 1024)
+            print(f"  ✓ wrote sidecar: {sidecar.name} ({n:,} rows, {sz:.1f} MB)")
+
+    print(f"\nant-de-pseudobulk: done. "
+          f"{len(contrasts)} contrast(s): {', '.join(contrasts)}")
+
+
+if __name__ == '__main__':
+    main()
