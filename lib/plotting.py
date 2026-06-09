@@ -1290,7 +1290,12 @@ def plot_volcano(
             color=colors[cat], label=label, rasterized=True,
         )
 
-    # Threshold lines
+    # Reference line at x=0 — separates up- from down-regulated visually.
+    # Same style as the MA / forest plots use for their zero lines, so
+    # the three DE geoms read consistently.
+    ax.axvline(0, color='#444', linewidth=0.7)
+
+    # Threshold lines (dashed, lighter — distinct from the solid x=0).
     if padj_threshold and padj_threshold > 0:
         ax.axhline(-np.log10(padj_threshold), linestyle='--',
                    color='#888', linewidth=0.8)
