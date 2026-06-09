@@ -42,6 +42,38 @@
   .ds-ctx .pill.prep    { background:#fce7f3; color:#9d174d; border-color:#fbcfe8; }
   .ds-ctx .pill.icon    { background:#f5f5f5; color:#444; border-color:#e5e5e5; font-size:13px; line-height:1.2; }
   .ds-ctx .pill.year    { background:#f3f4f6; color:#374151; border-color:#e5e7eb; font-family:var(--font-mono); }
+
+  /* ── visualize dropdown (top-right of the page) ──────────────────────────
+     One button replaces the long row of plot buttons; clicking reveals a
+     panel with the plot categories and their geoms. */
+  .title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .viz-menu { position: relative; flex-shrink: 0; }
+  .viz-menu-btn {
+    font-size: 13px; padding: 6px 13px; background: #1d4ed8; color: #fff;
+    border: 1px solid #1d4ed8; border-radius: 4px; cursor: pointer;
+    font-family: inherit; font-weight: 500; white-space: nowrap;
+  }
+  .viz-menu-btn:hover { background: #1e40af; }
+  .viz-menu-btn .caret { font-size: 9px; opacity: .8; margin-left: 2px; }
+  .viz-menu-panel {
+    display: none; position: absolute; top: calc(100% + 4px); right: 0;
+    background: #fff; border: 1px solid var(--border); border-radius: 6px;
+    box-shadow: 0 6px 20px rgba(0,0,0,.14); padding: 9px 11px; z-index: 200;
+    min-width: 250px;
+  }
+  .viz-menu.open .viz-menu-panel { display: block; }
+  .viz-cat { margin-bottom: 9px; }
+  .viz-cat:last-child { margin-bottom: 0; }
+  .viz-cat-label { font-size: 9px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; margin-bottom: 3px; }
+  .viz-cat-items { display: flex; flex-wrap: wrap; gap: 4px; }
+  .viz-menu-panel a {
+    display: inline-block; padding: 4px 9px; background: #f5f7fa;
+    border: 1px solid #e5e7eb; border-radius: 4px; font-size: 12px;
+    color: var(--text); text-decoration: none; white-space: nowrap;
+  }
+  .viz-menu-panel a:hover { background: #1d4ed8; color: #fff; border-color: #1d4ed8; }
+  .viz-cat.de a { background: #fff7ed; border-color: #fed7aa; color: #9a3412; }
+  .viz-cat.de a:hover { background: #ea580c; color: #fff; border-color: #ea580c; }
 </style>
 
 <div class="breadcrumb">
@@ -51,7 +83,64 @@
     {{ dataset_name }}
     {% if file_id and file_id != dataset_name %}<span class="slug">({{ file_id }})</span>{% endif %}
 </div>
-<h1 class="page-title">{{ dataset_name }}</h1>
+<div class="title-row">
+  <h1 class="page-title">{{ dataset_name }}</h1>
+  {% if has_duckdb %}
+  <div class="viz-menu" id="viz-menu">
+    <button type="button" class="viz-menu-btn" id="viz-menu-btn" aria-haspopup="true" aria-expanded="false">📊 visualize <span class="caret">▾</span></button>
+    <div class="viz-menu-panel" id="viz-menu-panel" role="menu">
+      {% set _base = '/browse/' + folder_browse_id + '/' + file_id %}
+      {% if info and info.obsm_keys %}
+      <div class="viz-cat">
+        <div class="viz-cat-label">spatial</div>
+        <div class="viz-cat-items">
+          <a href="{{ _base }}/plot/scatter" title="2D scatter — embedding (UMAP/PCA) or any pair of continuous variables">🗺 scatter</a>
+          <a href="{{ _base }}/plot/hexbin" title="2D hexbin — embedding or any pair of continuous variables">⬣ hexbin</a>
+        </div>
+      </div>
+      {% endif %}
+      <div class="viz-cat">
+        <div class="viz-cat-label">per category</div>
+        <div class="viz-cat-items">
+          <a href="{{ _base }}/plot/violin">🎻 violin</a>
+          <a href="{{ _base }}/plot/box">📦 box</a>
+          <a href="{{ _base }}/plot/bar">📊 bar</a>
+        </div>
+      </div>
+      <div class="viz-cat">
+        <div class="viz-cat-label">distribution</div>
+        <div class="viz-cat-items">
+          <a href="{{ _base }}/plot/histogram">📈 hist</a>
+          <a href="{{ _base }}/plot/ecdf">📉 ecdf</a>
+          <a href="{{ _base }}/plot/kde">🌊 kde</a>
+        </div>
+      </div>
+      <div class="viz-cat">
+        <div class="viz-cat-label">matrix</div>
+        <div class="viz-cat-items">
+          <a href="{{ _base }}/plot/heatmap">🔥 heatmap</a>
+        </div>
+      </div>
+      <div class="viz-cat">
+        <div class="viz-cat-label">trajectory</div>
+        <div class="viz-cat-items">
+          <a href="{{ _base }}/plot/rolling" title="Rolling-mean line along a continuous axis (e.g. pseudotime)">〰 rolling</a>
+        </div>
+      </div>
+      {% if de_studies %}
+      <div class="viz-cat de">
+        <div class="viz-cat-label">differential expression</div>
+        <div class="viz-cat-items">
+          <a href="{{ _base }}/plot/volcano" title="log2FC vs −log10(padj) for a DE contrast">🌋 volcano</a>
+          <a href="{{ _base }}/plot/forest" title="one gene's effect across contrasts">🌲 forest</a>
+          <a href="{{ _base }}/de/{{ de_studies[0].study_id | urlencode }}" title="browse DE: terms, contrasts, gene tables">🔬 browse</a>
+        </div>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+</div>
 
 {% if context_bar %}
 {% set _cb = context_bar %}
@@ -75,6 +164,12 @@
     <div>layers: <span class="val">{{ info.layers|length if info.layers else 0 }}</span></div>
     <div>embeddings: <span class="val">{{ info.obsm_keys|length if info.obsm_keys else 0 }}</span></div>
     <div>obs cols: <span class="val">{{ info.n_obs_columns }}</span></div>
+    {% if de_studies %}
+    <div title="differential-expression results available">
+        DE: <span class="val">{{ de_studies|length }}</span> stud{{ 'y' if de_studies|length == 1 else 'ies' }},
+        <span class="val">{{ de_total_contrasts }}</span> contrasts
+    </div>
+    {% endif %}
     <div>
         {% if update_pending %}
         <span class="dot dot-pending" title="update pending"></span> update pending
@@ -87,43 +182,6 @@
     {% if info.file_id %}
     <div style="color:#999;font-size:11px">id: {{ info.file_id }}</div>
     {% endif %}
-</div>
-{% endif %}
-
-{# Visualize — prominent plot entry points (in-app forms with autocomplete + downloads) #}
-{% if has_duckdb %}
-<div class="viz-row">
-    <span class="viz-label">visualize</span>
-    {# Grouped viz row.  scatter / hexbin are polymorphic — embedding when the
-       dataset has an obsm key (shown by default), XY-style when the user
-       enters two continuous fields on the form. #}
-    {% if info and info.obsm_keys %}
-    <span class="viz-group">
-      <span class="viz-group-label">spatial</span>
-      <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/scatter" class="viz-btn" title="2D scatter — embedding (UMAP/PCA) or any pair of continuous variables">🗺 scatter</a>
-      <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/hexbin" class="viz-btn" title="2D hexbin — embedding or any pair of continuous variables, hex-aggregated">⬣ hexbin</a>
-    </span>
-    {% endif %}
-    <span class="viz-group">
-      <span class="viz-group-label">per category</span>
-      <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/violin" class="viz-btn">🎻 violin</a>
-      <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/box" class="viz-btn">📦 box</a>
-      <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/bar" class="viz-btn">📊 bar</a>
-    </span>
-    <span class="viz-group">
-      <span class="viz-group-label">distribution</span>
-      <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram" class="viz-btn">📈 hist</a>
-      <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/ecdf" class="viz-btn">📉 ecdf</a>
-      <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/kde" class="viz-btn">🌊 kde</a>
-    </span>
-    <span class="viz-group">
-      <span class="viz-group-label">matrix</span>
-      <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/heatmap" class="viz-btn">🔥 heatmap</a>
-    </span>
-    <span class="viz-group">
-      <span class="viz-group-label">trajectory</span>
-      <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/rolling" class="viz-btn" title="Rolling-mean line along a continuous axis (e.g. pseudotime)">〰 rolling</a>
-    </span>
 </div>
 {% endif %}
 
@@ -223,6 +281,32 @@
 <p style="color:#888;font-size:12px"><em>none</em></p>
 {% endif %}
 
+{% if de_studies %}
+<!-- Differential expression -->
+<h2>Differential expression ({{ de_studies|length }})</h2>
+<div class="table-wrap">
+<table class="auto" style="font-size:12px">
+    <thead><tr>
+        <th>Study</th><th>Method</th><th>Target</th><th>Terms</th>
+        <th>Contrasts</th><th>Rows</th><th></th>
+    </tr></thead>
+    <tbody>
+    {% for s in de_studies %}
+    <tr>
+        <td><a href="/browse/{{ folder_browse_id }}/{{ file_id }}/de/{{ s.study_id | urlencode }}"><strong>{{ s.name or s.study_id }}</strong></a></td>
+        <td style="color:#555">{{ s.method or '—' }}</td>
+        <td style="color:#555">{{ s.target or '—' }}</td>
+        <td style="color:#555">{{ s.n_terms if s.n_terms is not none else '—' }}</td>
+        <td style="color:#555">{{ s.n_contrasts if s.n_contrasts is not none else '—' }}</td>
+        <td style="color:#555;font-family:var(--font-mono);font-size:11px">{{ "{:,}".format(s.n_rows) if s.n_rows else '—' }}</td>
+        <td><a href="/browse/{{ folder_browse_id }}/{{ file_id }}/de/{{ s.study_id | urlencode }}" class="chip">browse →</a></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+</div>
+{% endif %}
+
 {% if not layer_stats_rows and info.layers %}
 <!-- Layers fallback — only when the Data section didn't get rendered (no
      layer_stats in the .md).  Plain list, no stats. -->
@@ -285,6 +369,25 @@
 
 <script>
 document.addEventListener('DOMContentLoaded', function() {
+    // ── visualize dropdown toggle ────────────────────────────────────────
+    (function() {
+        var menu = document.getElementById('viz-menu');
+        var btn  = document.getElementById('viz-menu-btn');
+        if (!menu || !btn) return;
+        btn.addEventListener('click', function(e) {
+            e.stopPropagation();
+            var open = menu.classList.toggle('open');
+            btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+        });
+        // Close on outside click or Escape.
+        document.addEventListener('click', function(e) {
+            if (!menu.contains(e.target)) { menu.classList.remove('open'); btn.setAttribute('aria-expanded', 'false'); }
+        });
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') { menu.classList.remove('open'); btn.setAttribute('aria-expanded', 'false'); }
+        });
+    })();
+
     {% if obs_columns|length > 0 %}
     (function() {
         // ── Group obs items by common prefix ──────────────────────────────

@@ -476,6 +476,40 @@ def test_dataset_view_api_failure_404(client):
     assert resp.status_code == 404
 
 
+def test_dataset_view_de_panel_and_badge(client):
+    # Dataset with DE data: the DE panel, the stat-row badge, and the DE
+    # category in the visualize dropdown all render.
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    assert "Differential expression" in resp.text   # panel heading
+    assert "GLMM demo" in resp.text                  # study name
+    assert "DE:" in resp.text                         # stat-row badge
+    assert "differential expression" in resp.text     # dropdown category label
+    # browse-DE deep link to the (stage-3) de page
+    assert "/de/glmm_demo" in resp.text
+
+
+def test_dataset_view_no_de_surfaces_hidden(client, monkeypatch):
+    # No DE data → none of the DE surfaces appear.
+    def no_de(api_url, path):
+        if path.endswith("/de"):
+            raise requests.HTTPError("no DE")
+        return _fake_api_get(api_url, path)
+    monkeypatch.setattr(browser, "_api_get", no_de)
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    assert "Differential expression" not in resp.text
+    assert "GLMM demo" not in resp.text
+
+
+def test_dataset_view_visualize_dropdown(client):
+    # The viz buttons are collapsed into a single top-right dropdown button.
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    assert 'id="viz-menu-btn"' in resp.text
+    assert 'id="viz-menu-panel"' in resp.text
+
+
 def test_plot_view_renders_known_geom(client):
     resp = client.get("/browse/GroupA/ds1/plot/scatter")
     assert resp.status_code == 200
@@ -518,14 +552,53 @@ def test_plot_view_api_failure_404(client):
 
 # ── DE plot geoms (REST API 2.3) ───────────────────────────────────────────────
 
-def test_geom_switcher_lists_de_geoms(client):
-    # The three DE geoms are registered in _PLOT_GEOMS_UI, so the plot-type
-    # switcher (which iterates all_geoms) offers them from any plot page.
+def test_geom_switcher_lists_de_geoms_when_de_present(client):
+    # When the dataset has DE data, the plot-type switcher offers the DE geoms.
     resp = client.get("/browse/GroupA/ds1/plot/scatter")
     assert resp.status_code == 200
     assert "Volcano (DE)" in resp.text
     assert "Forest (gene × contrasts)" in resp.text
     assert "MA (DE)" in resp.text
+
+
+def test_geom_switcher_hides_de_geoms_without_de(client, monkeypatch):
+    # No DE data → the switcher must NOT offer volcano/ma/forest on a non-DE
+    # geom page. This is the "only show DE links for datasets that have DE" rule.
+    def no_de(api_url, path):
+        if path.endswith("/de"):
+            raise requests.HTTPError("no DE")
+        return _fake_api_get(api_url, path)
+    monkeypatch.setattr(browser, "_api_get", no_de)
+    resp = client.get("/browse/GroupA/ds1/plot/scatter")
+    assert resp.status_code == 200
+    assert "Volcano (DE)" not in resp.text
+    assert "MA (DE)" not in resp.text
+    assert "Forest (gene × contrasts)" not in resp.text
+
+
+def test_geom_switcher_keeps_current_de_geom_without_de(client, monkeypatch):
+    # A direct link to a DE geom on a no-DE dataset still lists that geom (so
+    # the switcher reflects the current page) but not the other DE geoms.
+    def no_de(api_url, path):
+        if path.endswith("/de"):
+            raise requests.HTTPError("no DE")
+        return _fake_api_get(api_url, path)
+    monkeypatch.setattr(browser, "_api_get", no_de)
+    resp = client.get("/browse/GroupA/ds1/plot/volcano")
+    assert resp.status_code == 200
+    assert "Volcano (DE)" in resp.text     # current geom, kept
+    assert "Forest (gene × contrasts)" not in resp.text
+
+
+def test_plot_view_scatter_xy_mode_affordance(client):
+    # scatter/hexbin expose the embedding ⇄ X-vs-Y mode switch with the XY
+    # inputs and log toggles (polymorphic endpoint, REST API 2.x).
+    resp = client.get("/browse/GroupA/ds1/plot/scatter")
+    assert resp.status_code == 200
+    assert 'name="_xymode"' in resp.text
+    assert 'id="f-x-xy"' in resp.text
+    assert 'id="f-y-xy"' in resp.text
+    assert 'name="log_x"' in resp.text and 'name="log_y"' in resp.text
 
 
 @pytest.mark.parametrize("geom", ["volcano", "ma"])

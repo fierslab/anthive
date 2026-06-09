@@ -136,8 +136,12 @@
     <fieldset>
       <legend>plot type</legend>
       <select class="geom-select" id="geom-switcher">
+        {# DE geoms (group 'de') are only listed when the dataset has DE data;
+           the current geom is always listed so a direct link still selects. #}
         {% for g, info in all_geoms.items() %}
+        {% if info.group != 'de' or has_de or g == geom %}
         <option value="{{ g }}" {% if g == geom %}selected{% endif %}>{{ info.icon }} {{ info.label }}</option>
+        {% endif %}
         {% endfor %}
       </select>
     </fieldset>
@@ -183,14 +187,55 @@
     </fieldset>
 
     {% elif geom == 'scatter' or geom == 'hexbin' %}
+    {# Polymorphic geom: 'embedding' mode plots an obsm map coloured by a field;
+       'X vs Y' mode plots any two continuous variables against each other.
+       The mode radio toggles which x/y widgets are active — only the enabled
+       ones are submitted (buildUrl skips disabled + _-prefixed names). #}
     <fieldset>
+      <legend>mode</legend>
+      <label style="display:inline-flex;gap:4px;align-items:center;margin-right:12px;color:var(--text)">
+        <input type="radio" name="_xymode" value="embedding" id="m-emb" {% if plot_meta.embeddings %}checked{% endif %}> embedding
+      </label>
+      <label style="display:inline-flex;gap:4px;align-items:center;color:var(--text)">
+        <input type="radio" name="_xymode" value="xy" id="m-xy" {% if not plot_meta.embeddings %}checked{% endif %}> X vs Y
+      </label>
+      <small style="margin-top:4px;color:#666">
+        <b>Embedding</b>: a UMAP/PCA map coloured by a field.
+        <b>X vs Y</b>: any two continuous variables (gene-vs-gene,
+        module-score vs PRS, expression vs age…).
+      </small>
+    </fieldset>
+
+    <fieldset id="fs-x-emb">
       <legend>embedding</legend>
-      <select name="x" id="f-x">
+      <select name="x" id="f-x-emb">
         {% for emb in plot_meta.embeddings %}
         <option value="{{ emb }}" {% if emb == 'X_umap' %}selected{% endif %}>{{ emb }}</option>
         {% endfor %}
+        {% if not plot_meta.embeddings %}<option value="">(no embeddings)</option>{% endif %}
       </select>
     </fieldset>
+
+    <fieldset id="fs-x-xy">
+      <legend>x axis (continuous)</legend>
+      <label>gene or numerical field</label>
+      <div class="ac-wrap">
+        <input type="text" name="x" id="f-x-xy" autocomplete="off" placeholder="e.g. APOE, total_counts, MEblack">
+        <div class="ac-suggest" id="ac-x-xy"></div>
+      </div>
+      <label style="margin-top:4px"><input type="checkbox" name="log_x" id="f-log_x"> log<sub>1p</sub>(x)</label>
+    </fieldset>
+
+    <fieldset id="fs-y-xy">
+      <legend>y axis (continuous)</legend>
+      <label>gene or numerical field</label>
+      <div class="ac-wrap">
+        <input type="text" name="y" id="f-y-xy" autocomplete="off" placeholder="e.g. TREM2, age, MEblue">
+        <div class="ac-suggest" id="ac-y-xy"></div>
+      </div>
+      <label style="margin-top:4px"><input type="checkbox" name="log_y" id="f-log_y"> log<sub>1p</sub>(y)</label>
+    </fieldset>
+
     <fieldset>
       <legend>colour by</legend>
       <label>{% if geom == 'hexbin' %}field / gene (empty = density){% else %}field / gene{% endif %}</label>
@@ -523,6 +568,8 @@
     document.querySelectorAll('#plot-form [name]').forEach(el => {
       const name = el.getAttribute('name');
       if (!name) return;
+      if (name.startsWith('_')) return;   // UI-only control (e.g. mode radio)
+      if (el.disabled) return;            // inactive mode's widget — don't submit
       if (el.type === 'checkbox') {
         // Emit only when state differs from the form default.  For
         // default-OFF boxes that means we only send 'true' when ticked;
@@ -641,6 +688,8 @@
     document.querySelectorAll('#plot-form [name]').forEach(el => {
       const name = el.getAttribute('name');
       if (!name) return;
+      if (name.startsWith('_')) return;   // UI-only control (e.g. mode radio)
+      if (el.disabled) return;            // inactive mode's widget
       let value;
       if (el.type === 'checkbox') {
         // Only emit when checkbox state differs from the form's default
@@ -775,6 +824,39 @@
   attachAutocomplete('f-y',     'ac-y',     ['gene','num']);
   attachAutocomplete('f-x',     'ac-x',     ['gene','num']);
   attachAutocomplete('f-gene',  'ac-gene',  ['gene']);   // forest geom
+  attachAutocomplete('f-x-xy',  'ac-x-xy',  ['gene','num']);  // scatter/hexbin XY mode
+  attachAutocomplete('f-y-xy',  'ac-y-xy',  ['gene','num']);
+
+  // ── scatter/hexbin mode switch: embedding ⇄ X-vs-Y ───────────────────────
+  // Only the active mode's widgets are enabled; buildUrl skips disabled ones,
+  // so exactly one name="x" (and an optional name="y") is ever submitted.
+  function setScatterMode(mode) {
+    const emb = mode === 'embedding';
+    const show = (id, on) => { const el = document.getElementById(id); if (el) el.style.display = on ? '' : 'none'; };
+    const dis  = (id, off) => { const el = document.getElementById(id); if (el) el.disabled = off; };
+    show('fs-x-emb', emb);  dis('f-x-emb', !emb);
+    show('fs-x-xy', !emb);  dis('f-x-xy', emb);
+    show('fs-y-xy', !emb);  dis('f-y-xy', emb); dis('f-log_x', emb); dis('f-log_y', emb);
+  }
+  if (GEOM === 'scatter' || GEOM === 'hexbin') {
+    document.querySelectorAll('input[name="_xymode"]').forEach(r =>
+      r.addEventListener('change', () => { setScatterMode(r.value); scheduleRefresh(); }));
+    // If the URL specifies x as a non-embedding field (or y is set), start in
+    // XY mode so a shared link reproduces the intended plot.
+    const _p = new URLSearchParams(window.location.search);
+    const _embs = {{ plot_meta.embeddings|tojson }};
+    const _xVal = _p.get('x'), _yVal = _p.get('y');
+    const wantXy = !!_yVal || (_xVal && !_embs.includes(_xVal));
+    const radio = document.getElementById(wantXy ? 'm-xy' : 'm-emb');
+    if (radio) radio.checked = true;
+    setScatterMode(wantXy ? 'xy' : 'embedding');
+    // prefillFromURL sets name="x" on the embedding select (first match), so
+    // seed the XY text inputs from the URL ourselves when starting in XY mode.
+    if (wantXy) {
+      const xx = document.getElementById('f-x-xy'); if (xx && _xVal) xx.value = _xVal;
+      const yy = document.getElementById('f-y-xy'); if (yy && _yVal) yy.value = _yVal;
+    }
+  }
 
   // ── DE cascade: study → term → contrast ──────────────────────────────────
   // term/contrast option lists are dataset-and-study-specific, so they're
@@ -908,7 +990,11 @@
   //                         like heatmap-x and rolling-y.
   function attachChips(fieldName, chipSpec, mode) {
     mode = mode || 'replace';
-    const field = document.querySelector(`#plot-form [name="${fieldName}"]`);
+    // fieldName may be a plot-API name (resolved within #plot-form) or, when
+    // two widgets share a name (scatter's dual x), a '#id' selector.
+    const field = fieldName[0] === '#'
+      ? document.querySelector(fieldName)
+      : document.querySelector(`#plot-form [name="${fieldName}"]`);
     if (!field) return;
     // Anchor: for ac-wrapped inputs, insert after the wrapper so chips
     // sit below both the input AND its autocomplete dropdown.  For bare
@@ -981,23 +1067,22 @@
     }
 
     // ── per-geom prefill + chips
-    if (geom === 'scatter') {
-      // color: prefer first cluster-like cat, then top_cat[0], then first gene.
-      setIfEmpty('form [name="color"]', clusterCols[0] || topCat[0] || topGenes[0]);
+    if (geom === 'scatter' || geom === 'hexbin') {
+      // colour: cluster-like cat, then top_cat, then a gene (hexbin → gene first).
+      if (geom === 'scatter')
+        setIfEmpty('form [name="color"]', clusterCols[0] || topCat[0] || topGenes[0]);
+      else
+        setIfEmpty('form [name="color"]', topGenes[0] || topNum[0] || clusterCols[0] || topCat[0]);
       attachChips('color', {
-        label: 'pick',
+        label: 'colour',
         ...mergeSmart(topCat.slice(0, 4), clusterCols),
       });
-      // Genes are also useful as scatter colour overlays.
       attachChips('color', { label: 'gene', curated: topGenes.slice(0, 4) });
-
-    } else if (geom === 'hexbin') {
-      setIfEmpty('form [name="color"]', topGenes[0] || topNum[0] || clusterCols[0] || topCat[0]);
-      attachChips('color', { label: 'pick', curated: topGenes.slice(0, 4) });
-      attachChips('color', {
-        label: 'cat',
-        ...mergeSmart(topCat.slice(0, 3), clusterCols),
-      });
+      // XY mode: x and y take continuous fields (numerical obs + genes).
+      // These target the #id (the embedding select shares name="x").
+      const xyPicks = [...topNum.slice(0, 3), ...topGenes.slice(0, 3)];
+      attachChips('#f-x-xy', { label: 'x', curated: xyPicks });
+      attachChips('#f-y-xy', { label: 'y', curated: xyPicks });
 
     } else if (geom === 'violin' || geom === 'box' || geom === 'bar') {
       setIfEmpty('form [name="x"]', clusterCols[0] || topCat[0]);

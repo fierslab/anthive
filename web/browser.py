@@ -552,11 +552,6 @@ _PLOT_GEOMS_UI = {
                   'group': 'de'},
 }
 
-# Geoms that consume differential-expression endpoints.  plot_view fetches
-# the dataset's DE study list (for the cascading study→term→contrast pickers)
-# only for these.
-_DE_GEOMS = {'volcano', 'ma', 'forest'}
-
 # Display order for the viz row on the dataset page (group + label).
 _PLOT_GEOM_GROUPS = (
     ('spatial',      'spatial'),       # scatter, hexbin
@@ -597,14 +592,16 @@ async def plot_view(request: Request, folder_browse_id: str,
     friendly_group = collection.get('group') or group_id
     dataset_title = db.get('title') or file_id
 
-    # DE geoms need the dataset's DE study list to seed the study→term→contrast
-    # pickers (terms/contrasts are then loaded client-side on demand).
+    # Fetch the dataset's DE study list (best-effort). Used two ways:
+    #   • seeds the study→term→contrast pickers for DE geoms, and
+    #   • gates the geom-switcher so volcano/ma/forest are only offered when
+    #     the dataset actually has DE data (has_de).
     de_studies: List[Dict] = []
-    if geom in _DE_GEOMS:
-        try:
-            de_studies = _api_get(api_url, f'/databases/{db_id}/de').get('studies', [])
-        except Exception as error:
-            print(f"DE study fetch error: {error}")
+    try:
+        de_studies = _api_get(api_url, f'/databases/{db_id}/de').get('studies', [])
+    except Exception as error:
+        print(f"DE study fetch error: {error}")
+    has_de = bool(de_studies)
 
     obs = db.get('obs') or {}
     # top_* defaults come from the .md and were curated by `ant-suggest-tops`.
@@ -640,6 +637,8 @@ async def plot_view(request: Request, folder_browse_id: str,
         "geom_needs":       _PLOT_GEOMS_UI[geom]['needs'],
         "plot_meta":        plot_meta,
         "all_geoms":        _PLOT_GEOMS_UI,
+        # gates DE geoms in the switcher — only shown when the dataset has DE.
+        "has_de":           has_de,
         "api_url":          "/api",
     })
 
@@ -649,9 +648,10 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
     group_id = unquote(folder_browse_id)
     file_id = unquote(dataset_browse_id)
     db_id = f"{group_id}/{file_id}"
+    api_url = _api_url(request)
 
     try:
-        db = _api_get(_api_url(request), f'/databases/{db_id}/info')
+        db = _api_get(api_url, f'/databases/{db_id}/info')
     except Exception as error:
         print(f"API error: {error}")
         return templates.TemplateResponse(
@@ -659,6 +659,15 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
             {"folders": [], "error": f"Dataset '{db_id}' not found"},
             status_code=404
         )
+
+    # Differential-expression studies (best-effort — empty if none ingested or
+    # the geneset/DE store isn't configured). Drives the DE panel + badge.
+    de_studies: List[Dict] = []
+    try:
+        de_studies = _api_get(api_url, f'/databases/{db_id}/de').get('studies', [])
+    except Exception:
+        pass
+    de_total_contrasts = sum((s.get('n_contrasts') or 0) for s in de_studies)
 
     layers = list(db.get('layers', {}).keys())
     embeddings = list(db.get('embeddings', {}).keys())
@@ -765,6 +774,8 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "n_num_cols": n_num,
         "has_duckdb": True,
         "update_pending": False,
+        "de_studies": de_studies,
+        "de_total_contrasts": de_total_contrasts,
     })
 
 
