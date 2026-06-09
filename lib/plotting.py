@@ -1191,31 +1191,82 @@ def plot_volcano(
     font_family: Optional[str] = None,
     font_size: Optional[float] = None,
 ) -> bytes:
-    """Volcano plot — log2fc on x, -log10(padj) on y, top genes labelled.
+    """Volcano plot — effect size on x, -log10(padj) on y, top genes labelled.
+
+    The X-axis adapts to the data:
+
+    - **log2fc data** (DESeq2, edgeR, scanpy rank_genes_groups, most GLMM
+      ingests): plot ``log2fc``, label the axis "log₂ fold change".  The
+      ``log2fc_threshold`` default of 1.0 is sensible (2-fold change).
+    - **z-effect data** (zeff-only studies — e.g. module-DE on z-scaled
+      eigengene scores, or some GLMM intercept terms): when ``log2fc``
+      is all-NULL, plot ``effsize`` (which equals ``zeff`` here), label
+      the axis "z-effect", and auto-zero ``log2fc_threshold`` since a
+      ≥1 cutoff on z-scores in the ~1e-4 range would render an empty
+      "significant" set.
 
     Args:
-        de_df:           DataFrame with at least `gene_name`, `log2fc`, `padj`.
+        de_df:           DataFrame with at least `gene_name`, `padj`, and
+                         either `log2fc` or `effsize` populated.  ``efftype``
+                         (when present) is used for the axis label.
         padj_threshold:  Significance line on y (horizontal dashed); rows
-                         with padj <= this AND |log2fc| >= log2fc_threshold
+                         with padj <= this AND |effect| >= log2fc_threshold
                          are coloured as "significant".
-        log2fc_threshold: Effect-size lines on x (vertical dashed).
-        n_label:         Label this many top genes (smallest padj, biggest
-                         |log2fc|).
+        log2fc_threshold: Effect-size cutoff on x.  Default 1.0 is right
+                          for log2fc data; auto-zeroed when the axis
+                          falls back to z-effect.
+        n_label:         Label this many top genes (smallest padj).
     """
     _setup_style(font_family, font_size)
     fig, ax = plt.subplots(figsize=(width, height))
 
     df = de_df.copy()
+
+    # Pick the effect axis.  log2fc is the default; fall back to effsize
+    # (= COALESCE(log2fc, zeff)) only when log2fc is unusable.  This is
+    # what makes the plot Just Work on zeff-only studies (e.g. module
+    # eigengene DE) instead of silently rendering empty axes.
+    if df['log2fc'].notna().any():
+        df['_effect'] = df['log2fc']
+        x_label = 'log₂ fold change'
+        axis_kind = 'log2fc'
+    elif 'effsize' in df.columns and df['effsize'].notna().any():
+        df['_effect'] = df['effsize']
+        # Use the modal efftype for the axis label so "z-effect" /
+        # "log2fc" / "score" all surface correctly.
+        if 'efftype' in df.columns and df['efftype'].notna().any():
+            kind = df['efftype'].mode().iat[0]
+        else:
+            kind = 'effect'
+        x_label = {
+            'zeff':   'z-effect',
+            'log2fc': 'log₂ fold change',
+        }.get(kind, f'effect ({kind})')
+        axis_kind = kind
+        # A fold-change-style threshold (≥1 = 2-fold) is meaningless on
+        # z-scores in the 1e-4 range — would render an empty 'sig' set.
+        # Zero the threshold by default; user can pass it explicitly if
+        # they want.
+        if log2fc_threshold == 1.0:    # the function's default value
+            log2fc_threshold = 0.0
+    else:
+        # Neither log2fc nor effsize is usable.  Render an empty plot
+        # with an explanatory message rather than crashing.
+        ax.text(0.5, 0.5,
+                'no log2fc or effsize values — check the study',
+                transform=ax.transAxes, ha='center', va='center', color='#888')
+        ax.set_xlabel('effect size')
+        ax.set_ylabel('-log₁₀ adjusted p')
+        return _render_figure(fig, dpi, output_format, caption, source_url)
+
     # Clip padj=0 to a tiny floor so -log10 doesn't blow up to inf.
     floor = max(1e-300, df['padj'].replace(0, np.nan).dropna().min() / 10
                 if df['padj'].notna().any() else 1e-300)
     df['_padj_clipped'] = df['padj'].clip(lower=floor)
     df['_neglog10p'] = -np.log10(df['_padj_clipped'])
-    df['_sig'] = (df['padj'] <= padj_threshold) & (df['log2fc'].abs() >= log2fc_threshold)
-    df['_direction'] = np.where(df['log2fc'] > 0, 'up', 'down')
-    df['_category'] = np.where(
-        df['_sig'], df['_direction'], 'ns'
-    )
+    df['_sig'] = (df['padj'] <= padj_threshold) & (df['_effect'].abs() >= log2fc_threshold)
+    df['_direction'] = np.where(df['_effect'] > 0, 'up', 'down')
+    df['_category'] = np.where(df['_sig'], df['_direction'], 'ns')
 
     cmap_obj = matplotlib.cm.get_cmap(
         palette_cat if palette_cat in _QUALITATIVE_PALETTES else _DEFAULT_CATEGORICAL
@@ -1230,9 +1281,9 @@ def plot_volcano(
         sub = df[df['_category'] == cat]
         if len(sub) == 0:
             continue
-        label = {'ns': 'n.s.', 'down': f'sig ↓', 'up': f'sig ↑'}[cat]
+        label = {'ns': 'n.s.', 'down': 'sig ↓', 'up': 'sig ↑'}[cat]
         ax.plot(
-            sub['log2fc'], sub['_neglog10p'],
+            sub['_effect'], sub['_neglog10p'],
             marker='.', linestyle='none',
             markersize=2.5 if cat == 'ns' else 4.0,
             alpha=0.5 if cat == 'ns' else 0.9,
@@ -1253,16 +1304,20 @@ def plot_volcano(
         for _, row in labelled.iterrows():
             ax.annotate(
                 str(row['gene_name']),
-                (row['log2fc'], row['_neglog10p']),
+                (row['_effect'], row['_neglog10p']),
                 fontsize=7, alpha=0.85, ha='left', va='bottom',
                 xytext=(2, 2), textcoords='offset points',
             )
 
-    ax.set_xlabel('log₂ fold change')
+    ax.set_xlabel(x_label)
     ax.set_ylabel('-log₁₀ adjusted p')
     n_total = len(df)
     n_sig = int(df['_sig'].sum())
-    title_bits = ['Volcano', f'{n_sig}/{n_total} sig (padj≤{padj_threshold:g}, |log2fc|≥{log2fc_threshold:g})']
+    thresh_label = (
+        f'|{axis_kind}|≥{log2fc_threshold:g}' if log2fc_threshold and log2fc_threshold > 0
+        else 'padj only'
+    )
+    title_bits = ['Volcano', f'{n_sig}/{n_total} sig (padj≤{padj_threshold:g}, {thresh_label})']
     ax.set_title(_compose_title(title_bits, extra=title_extra))
     sns.despine(ax=ax)
     _legend_outside(ax, title='significance')
