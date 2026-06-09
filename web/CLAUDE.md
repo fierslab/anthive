@@ -48,6 +48,7 @@ styles live in `templates/base.html`'s `<style>` block.
 | `/browse/{group}` | one collection | `folder.html` |
 | `/browse/{group}/{file}` | one dataset (info + viz launcher) | `dataset.html` |
 | `/browse/{group}/{file}/plot/{geom}` | interactive plot UI for one geom on one dataset | `plot.html` |
+| `/browse/{group}/{file}/de/{study}` | differential-expression explorer for one study | `de_browser.html` |
 | `/genesets` | top-level geneset study list | `genesets.html` |
 | `/genesets/{study}/{experiment}` | one experiment's geneset list | `geneset_experiment.html` |
 | `/genesets/{study}/{experiment}/{name}` | one geneset's gene table | `geneset.html` |
@@ -56,6 +57,39 @@ The plot page talks to the REST API directly from the browser via JS —
 the FastAPI router doesn't proxy plot requests.  It just hands the
 client a populated form (with curated favourites + smart pseudotime
 detection) and lets the client hit `/api/databases/{id}/plot/{geom}`.
+
+**Route ordering matters.** `plot_view` and `de_study_view` are registered
+*before* `dataset_view` because the latter's `{dataset_browse_id:path}`
+converter is greedy and would otherwise swallow `…/plot/scatter` and
+`…/de/{study}`. Keep new `/browse/{group}/{file}/…` sub-routes above
+`dataset_view` in `browser.py`.
+
+### Differential expression (REST API 2.3)
+
+DE is surfaced in three places, all **gated on the dataset actually having
+DE data** (`dataset_view` / `plot_view` fetch `/databases/{id}/de`; empty →
+nothing DE shows):
+
+- **dataset.html**: a stat-row badge (`DE: N studies, M contrasts`), a
+  "Differential expression" panel listing studies, and a `differential
+  expression` category in the visualize dropdown — each deep-links to the
+  `de_browser` page or the DE plot forms.
+- **plot.html**: three DE geoms — `volcano` / `ma` (cascading
+  study→term→contrast pickers, loaded client-side from `/de/…`) and `forest`
+  (gene + optional narrowing). The geom-switcher only lists them when the
+  dataset has DE. `ma` surfaces the server's "needs base_mean" 400 for
+  GLMM/Wilcoxon studies.
+- **de_browser.html**: the full term→contrast→gene explorer (see its route
+  above).
+
+### The visualize dropdown + polymorphic scatter
+
+- The dataset page's plot entry points live in **one top-right
+  `visualize ▾` dropdown** (`dataset.html`), not a long button row.
+- `scatter` / `hexbin` are **polymorphic**: an `embedding ⇄ X vs Y` mode
+  radio toggles between the obsm-map form and a two-continuous-variable
+  form (free-text x+y + log1p toggles). `buildUrl`/`syncURL` skip
+  `disabled` and `_`-prefixed fields so only the active mode submits.
 
 ## Vocabulary shared across pages
 
