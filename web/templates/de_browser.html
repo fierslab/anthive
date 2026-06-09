@@ -1,0 +1,334 @@
+{% extends "base.html" %}
+
+{% block title %}DE: {{ study_id }} — {{ dataset_name }} — anthive{% endblock %}
+
+{% block content %}
+<style>
+  .de-page { display: grid; grid-template-columns: 280px 1fr; gap: 14px; align-items: start; }
+  @media (max-width: 820px) { .de-page { grid-template-columns: 1fr; } }
+
+  /* left rail: term → contrast tree */
+  .de-rail { border: 1px solid var(--border); border-radius: 6px; padding: 6px; max-height: 78vh; overflow-y: auto; }
+  .de-term { margin-bottom: 2px; }
+  .de-term-hd {
+    display: flex; justify-content: space-between; align-items: center; gap: 6px;
+    padding: 4px 6px; cursor: pointer; border-radius: 4px; font-size: 12px;
+  }
+  .de-term-hd:hover { background: var(--hover); }
+  .de-term.open > .de-term-hd { background: #eef2ff; color: #3730a3; font-weight: 600; }
+  .de-term-hd .n { font-size: 10px; color: var(--text-muted); font-family: var(--font-mono); }
+  .de-term.open > .de-term-hd .n { color: #6366f1; }
+  .de-contrasts { display: none; margin: 2px 0 4px 8px; border-left: 2px solid var(--border-light); padding-left: 6px; }
+  .de-term.open > .de-contrasts { display: block; }
+  .de-contrast {
+    display: flex; justify-content: space-between; align-items: baseline; gap: 6px;
+    padding: 3px 6px; cursor: pointer; border-radius: 4px; font-size: 11px;
+  }
+  .de-contrast:hover { background: var(--hover); }
+  .de-contrast.active { background: #1d4ed8; color: #fff; }
+  .de-contrast .sig { font-size: 9.5px; color: var(--text-muted); font-family: var(--font-mono); white-space: nowrap; }
+  .de-contrast.active .sig { color: #c7d8ff; }
+  .de-rail .loading { font-size: 11px; color: var(--text-muted); padding: 4px 6px; }
+
+  /* main: gene table */
+  .de-main { min-width: 0; }
+  .de-filters {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end;
+    padding: 8px 10px; background: #fafafa; border: 1px solid var(--border);
+    border-radius: 6px; margin-bottom: 8px;
+  }
+  .de-filters .fld { display: flex; flex-direction: column; gap: 2px; }
+  .de-filters label { font-size: 9px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; }
+  .de-filters select, .de-filters input {
+    padding: 3px 6px; font-size: 12px; border: 1px solid var(--border);
+    background: #fff; font-family: var(--font); outline: none;
+  }
+  .de-filters input[type=number] { width: 90px; }
+  .de-summary { font-size: 12px; color: var(--text-muted); margin-bottom: 6px; }
+  .de-summary b { color: var(--text); }
+  .de-gene-tbl { font-size: 12px; }
+  .de-gene-tbl td.num { font-family: var(--font-mono); font-size: 11px; text-align: right; white-space: nowrap; }
+  .de-gene-tbl td.gene { font-weight: 600; }
+  .de-up   { color: #b91c1c; }   /* positive log2fc */
+  .de-down { color: #1d4ed8; }   /* negative log2fc */
+  .de-actions a {
+    display: inline-block; text-decoration: none; font-size: 13px;
+    padding: 0 2px; opacity: .8;
+  }
+  .de-actions a:hover { opacity: 1; }
+  .de-loadmore { margin-top: 8px; }
+  .de-loadmore button {
+    font-size: 12px; padding: 5px 12px; border: 1px solid var(--border);
+    background: #fff; cursor: pointer; border-radius: 4px; font-family: var(--font);
+  }
+  .de-loadmore button:hover { background: var(--hover); }
+  .de-placeholder { color: #aaa; font-size: 13px; padding: 40px 0; text-align: center; }
+  .de-err { color: #dc2626; font-size: 12px; }
+</style>
+
+<div class="breadcrumb">
+  <a href="/">datasets</a> /
+  <a href="/browse/{{ folder_browse_id }}">{{ folder_name }}</a> /
+  <a href="/browse/{{ folder_browse_id }}/{{ file_id }}">{{ dataset_name }}</a> /
+  <span>🔬 DE</span>
+</div>
+<h1 class="page-title">🔬 {{ study.name or study_id }}</h1>
+
+<div class="stats-row">
+  {% if study.method %}<div>method: <span class="val">{{ study.method }}</span></div>{% endif %}
+  {% if study.target %}<div>target: <span class="val">{{ study.target }}</span></div>{% endif %}
+  {% if study.reference_type %}<div>reference: <span class="val">{{ study.reference_type }}</span></div>{% endif %}
+  <div>terms: <span class="val">{{ study.n_terms if study.n_terms is not none else (study.terms|length) }}</span></div>
+  <div>contrasts: <span class="val">{{ study.n_contrasts if study.n_contrasts is not none else '—' }}</span></div>
+  {% if study.n_rows %}<div>rows: <span class="val">{{ "{:,}".format(study.n_rows) }}</span></div>{% endif %}
+</div>
+{% if study.description %}<p style="font-size:12px;color:#555;margin:2px 0 8px">{{ study.description }}</p>{% endif %}
+
+<div class="de-page">
+  {# ── left rail: term → contrast tree ─────────────────────────────────────── #}
+  <div class="de-rail" id="de-rail">
+    {% for t in study.terms %}
+    <div class="de-term" data-term="{{ t.term }}">
+      <div class="de-term-hd">
+        <span>{{ t.term }}</span>
+        <span class="n">{{ t.n_contrasts }}</span>
+      </div>
+      <div class="de-contrasts" data-loaded="0"></div>
+    </div>
+    {% else %}
+    <div class="loading">No terms in this study.</div>
+    {% endfor %}
+  </div>
+
+  {# ── main: gene table ────────────────────────────────────────────────────── #}
+  <div class="de-main">
+    <div class="de-filters" id="de-filters" style="display:none">
+      <div class="fld">
+        <label>sort by</label>
+        <select id="f-sort">
+          <option value="padj">padj</option>
+          <option value="effsize">effect size</option>
+          <option value="estimate">estimate</option>
+        </select>
+      </div>
+      <div class="fld">
+        <label>direction</label>
+        <select id="f-dir">
+          <option value="both">both</option>
+          <option value="up">up</option>
+          <option value="down">down</option>
+        </select>
+      </div>
+      <div class="fld">
+        <label>padj ≤</label>
+        <input type="number" id="f-padj" step="any" min="0" max="1" placeholder="any">
+      </div>
+      <div class="fld">
+        <label>|log2FC| ≥</label>
+        <input type="number" id="f-l2fc" step="any" min="0" placeholder="any">
+      </div>
+    </div>
+
+    <div class="de-summary" id="de-summary"></div>
+    <div id="de-table-wrap">
+      <div class="de-placeholder" id="de-placeholder">← select a term, then a contrast</div>
+    </div>
+    <div class="de-loadmore" id="de-loadmore" style="display:none">
+      <button type="button" id="de-more">load more</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  const API_URL = {{ api_url|tojson }};
+  const DB_ID   = {{ db_id|tojson }};
+  const STUDY   = {{ study_id|tojson }};
+  const BROWSE  = {{ ('/browse/' + folder_browse_id + '/' + file_id)|tojson }};
+  const PAGE    = 50;
+
+  function api(path) {
+    return `${API_URL.replace(/\/$/, '')}/databases/${DB_ID}${path}`;
+  }
+  async function getJSON(path) {
+    const r = await fetch(api(path));
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.json();
+  }
+  // number formatting
+  function fmtP(v) {
+    if (v == null) return '';
+    if (v === 0) return '0';
+    return (v < 1e-3 || v >= 1e4) ? v.toExponential(2) : v.toPrecision(3);
+  }
+  function fmtF(v) { return v == null ? '' : (Math.abs(v) >= 1e4 ? v.toExponential(2) : v.toFixed(3)); }
+  const enc = encodeURIComponent;
+
+  // ── selection state (also reflected in the URL for shareable links)
+  let curTerm = null, curContrast = null, offset = 0, lastCount = 0;
+
+  const rail        = document.getElementById('de-rail');
+  const filters     = document.getElementById('de-filters');
+  const summaryEl    = document.getElementById('de-summary');
+  const tableWrap    = document.getElementById('de-table-wrap');
+  const placeholder  = document.getElementById('de-placeholder');
+  const loadMoreWrap = document.getElementById('de-loadmore');
+
+  function syncURL() {
+    const p = new URLSearchParams();
+    if (curTerm) p.set('term', curTerm);
+    if (curContrast) p.set('contrast', curContrast);
+    const sort = document.getElementById('f-sort').value;
+    const dir  = document.getElementById('f-dir').value;
+    const padj = document.getElementById('f-padj').value;
+    const l2fc = document.getElementById('f-l2fc').value;
+    if (sort !== 'padj') p.set('sort', sort);
+    if (dir !== 'both') p.set('dir', dir);
+    if (padj) p.set('padj_max', padj);
+    if (l2fc) p.set('l2fc_min', l2fc);
+    history.replaceState(null, '', window.location.pathname + (p.toString() ? '?' + p : ''));
+  }
+
+  // ── expand a term → load its contrasts (cached after first open)
+  async function toggleTerm(termEl) {
+    const wasOpen = termEl.classList.contains('open');
+    // accordion: close siblings
+    rail.querySelectorAll('.de-term.open').forEach(e => { if (e !== termEl) e.classList.remove('open'); });
+    termEl.classList.toggle('open', !wasOpen);
+    if (wasOpen) return;
+    const box = termEl.querySelector('.de-contrasts');
+    if (box.getAttribute('data-loaded') === '1') return;
+    box.innerHTML = '<div class="loading">loading…</div>';
+    const term = termEl.getAttribute('data-term');
+    try {
+      const data = await getJSON(`/de/${enc(STUDY)}/terms/${enc(term)}`);
+      box.innerHTML = '';
+      (data.contrasts || []).forEach(c => {
+        const row = document.createElement('div');
+        row.className = 'de-contrast';
+        row.setAttribute('data-contrast', c.contrast);
+        const sig = c['n_sig_padj_lt_0.05'];
+        row.innerHTML = `<span>${c.contrast}</span><span class="sig">${sig != null ? sig + ' sig' : ''}</span>`;
+        row.addEventListener('click', () => selectContrast(term, c.contrast));
+        box.appendChild(row);
+      });
+      box.setAttribute('data-loaded', '1');
+    } catch (e) {
+      box.innerHTML = `<div class="de-err">failed to load contrasts (${e.message})</div>`;
+    }
+  }
+
+  function markActiveContrast() {
+    rail.querySelectorAll('.de-contrast.active').forEach(e => e.classList.remove('active'));
+    rail.querySelectorAll('.de-term').forEach(termEl => {
+      if (termEl.getAttribute('data-term') !== curTerm) return;
+      termEl.querySelectorAll('.de-contrast').forEach(c => {
+        if (c.getAttribute('data-contrast') === curContrast) c.classList.add('active');
+      });
+    });
+  }
+
+  async function selectContrast(term, contrast) {
+    curTerm = term; curContrast = contrast; offset = 0;
+    filters.style.display = '';
+    placeholder.style.display = 'none';
+    markActiveContrast();
+    syncURL();
+    await loadGenes(false);
+  }
+
+  async function loadGenes(append) {
+    const sort = document.getElementById('f-sort').value;
+    const dir  = document.getElementById('f-dir').value;
+    const padj = document.getElementById('f-padj').value;
+    const l2fc = document.getElementById('f-l2fc').value;
+    const params = new URLSearchParams({ sort, direction: dir, limit: PAGE, offset });
+    if (padj) params.set('padj_max', padj);
+    if (l2fc) params.set('abs_log2fc_min', l2fc);
+    const path = `/de/${enc(STUDY)}/terms/${enc(curTerm)}/contrasts/${enc(curContrast)}?${params}`;
+
+    if (!append) {
+      tableWrap.innerHTML = '<div class="de-summary">loading…</div>';
+    }
+    try {
+      const data = await getJSON(path);
+      const rows = data.rows || [];
+      lastCount = rows.length;
+      if (!append) renderTableShell();
+      const tbody = document.getElementById('de-tbody');
+      rows.forEach(r => tbody.appendChild(geneRow(r)));
+      offset += rows.length;
+      summaryEl.innerHTML = `<b>${curTerm}</b> · <b>${curContrast}</b> — showing <b>${offset}</b> genes` +
+        `${padj ? `, padj≤${padj}` : ''}${l2fc ? `, |log2FC|≥${l2fc}` : ''} (sorted by ${sort}, ${dir})`;
+      loadMoreWrap.style.display = (rows.length === PAGE) ? '' : 'none';
+    } catch (e) {
+      tableWrap.innerHTML = `<div class="de-err">failed to load genes (${e.message})</div>`;
+      loadMoreWrap.style.display = 'none';
+    }
+  }
+
+  function renderTableShell() {
+    tableWrap.innerHTML = `
+      <div class="table-wrap">
+      <table class="de-gene-tbl">
+        <thead><tr>
+          <th>gene</th><th style="text-align:right">log2FC</th>
+          <th style="text-align:right">padj</th><th style="text-align:right">pvalue</th>
+          <th style="text-align:right">estimate</th><th style="text-align:right">95% CI</th>
+          <th>plots</th>
+        </tr></thead>
+        <tbody id="de-tbody"></tbody>
+      </table>
+      </div>`;
+  }
+
+  function geneRow(r) {
+    const tr = document.createElement('tr');
+    const fc = r.log2fc != null ? r.log2fc : r.effsize;
+    const fcCls = fc == null ? '' : (fc >= 0 ? 'de-up' : 'de-down');
+    const ci = (r.ci_low != null && r.ci_high != null) ? `[${fmtF(r.ci_low)}, ${fmtF(r.ci_high)}]` : '';
+    const g = r.gene_name;
+    const volcano = `${BROWSE}/plot/volcano?study=${enc(STUDY)}&term=${enc(curTerm)}&contrast=${enc(curContrast)}`;
+    const scatter = `${BROWSE}/plot/scatter?color=${enc(g)}`;
+    const forest  = `${BROWSE}/plot/forest?gene=${enc(g)}&study=${enc(STUDY)}&term=${enc(curTerm)}`;
+    tr.innerHTML =
+      `<td class="gene">${g}</td>` +
+      `<td class="num ${fcCls}">${fmtF(fc)}</td>` +
+      `<td class="num">${fmtP(r.padj)}</td>` +
+      `<td class="num">${fmtP(r.pvalue)}</td>` +
+      `<td class="num">${fmtF(r.estimate)}</td>` +
+      `<td class="num" style="color:#888">${ci}</td>` +
+      `<td class="de-actions">` +
+        `<a href="${volcano}" title="volcano for this contrast">🌋</a>` +
+        `<a href="${scatter}" title="${g} on the embedding">🗺</a>` +
+        `<a href="${forest}" title="${g} across contrasts">🌲</a>` +
+      `</td>`;
+    return tr;
+  }
+
+  // ── wire up
+  rail.querySelectorAll('.de-term-hd').forEach(hd =>
+    hd.addEventListener('click', () => toggleTerm(hd.closest('.de-term'))));
+  ['f-sort', 'f-dir', 'f-padj', 'f-l2fc'].forEach(id => {
+    const el = document.getElementById(id);
+    el.addEventListener('change', () => { if (curContrast) { offset = 0; syncURL(); loadGenes(false); } });
+  });
+  document.getElementById('de-more').addEventListener('click', () => loadGenes(true));
+
+  // ── restore from URL (deep link): open term, load contrasts, select contrast
+  (async function initFromURL() {
+    const p = new URLSearchParams(window.location.search);
+    if (p.get('sort')) document.getElementById('f-sort').value = p.get('sort');
+    if (p.get('dir'))  document.getElementById('f-dir').value  = p.get('dir');
+    if (p.get('padj_max')) document.getElementById('f-padj').value = p.get('padj_max');
+    if (p.get('l2fc_min')) document.getElementById('f-l2fc').value = p.get('l2fc_min');
+    const term = p.get('term'), contrast = p.get('contrast');
+    if (!term) return;
+    const termEl = rail.querySelector(`.de-term[data-term="${CSS.escape(term)}"]`);
+    if (!termEl) return;
+    await toggleTerm(termEl);
+    if (contrast) await selectContrast(term, contrast);
+  })();
+})();
+</script>
+{% endblock %}

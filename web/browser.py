@@ -643,6 +643,56 @@ async def plot_view(request: Request, folder_browse_id: str,
     })
 
 
+# ── DE study browser ─────────────────────────────────────────────────────────
+# Registered BEFORE dataset_view (same reason as plot_view): the {dataset:path}
+# catch-all would otherwise swallow "<file>/de/<study>".
+
+@router.get("/browse/{folder_browse_id}/{dataset_browse_id}/de/{study}",
+            response_class=HTMLResponse)
+async def de_study_view(request: Request, folder_browse_id: str,
+                        dataset_browse_id: str, study: str):
+    """Per-study DE explorer: term → contrast tree + a sortable/filterable gene
+    table.  All the term/contrast/gene fetching happens client-side against the
+    /de/{study}/… endpoints; this handler just resolves the study metadata and
+    the breadcrumb context."""
+    group_id = unquote(folder_browse_id)
+    file_id = unquote(dataset_browse_id)
+    study_id = unquote(study)
+    db_id = f"{group_id}/{file_id}"
+    api_url = _api_url(request)
+
+    try:
+        study_meta = _api_get(api_url, f'/databases/{db_id}/de/{study_id}')
+    except Exception as error:
+        print(f"API error: {error}")
+        return templates.TemplateResponse(
+            request, "index.html",
+            {"folders": [], "error": f"DE study '{study_id}' not found on {db_id}"},
+            status_code=404,
+        )
+
+    # Breadcrumb names (best-effort).
+    friendly_group, dataset_title = group_id, file_id
+    try:
+        info = _api_get(api_url, f'/databases/{db_id}/info')
+        friendly_group = (info.get('collection') or {}).get('group') or group_id
+        dataset_title = info.get('title') or file_id
+    except Exception:
+        pass
+
+    return templates.TemplateResponse(request, "de_browser.html", {
+        "folder_name":      friendly_group,
+        "folder_browse_id": group_id,
+        "group_id":         group_id,
+        "file_id":          file_id,
+        "dataset_name":     dataset_title,
+        "db_id":            db_id,
+        "study_id":         study_id,
+        "study":            study_meta,
+        "api_url":          "/api",
+    })
+
+
 @router.get("/browse/{folder_browse_id}/{dataset_browse_id:path}", response_class=HTMLResponse)
 async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_id: str):
     group_id = unquote(folder_browse_id)

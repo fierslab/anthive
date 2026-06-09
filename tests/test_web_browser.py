@@ -323,6 +323,17 @@ _DE_STUDIES = {
     ]
 }
 
+# Per-study detail (terms) returned by /databases/{id}/de/{study_id}.
+_DE_STUDY_DETAIL = {
+    "study_id": "glmm_demo", "name": "GLMM demo", "method": "glmm",
+    "target": "gene", "reference_type": "vsgrandmean",
+    "n_rows": 1000, "n_terms": 2, "n_contrasts": 5,
+    "terms": [
+        {"term": "batch", "n_contrasts": 3, "n_rows": 600},
+        {"term": "strain", "n_contrasts": 2, "n_rows": 400},
+    ],
+}
+
 
 def _fake_api_get(api_url, path):
     """In-process stand-in for browser._api_get. Dispatches on path; raises
@@ -332,6 +343,8 @@ def _fake_api_get(api_url, path):
         return {"databases": _DATABASES}
     if path.startswith("/databases/") and path.endswith("/de"):
         return _DE_STUDIES
+    if "/de/" in path:           # /databases/{id}/de/{study_id}
+        return _DE_STUDY_DETAIL
     if path.startswith("/databases/") and path.endswith("/info"):
         db_id = path[len("/databases/"):-len("/info")]
         if db_id in _INFO:
@@ -678,6 +691,35 @@ def test_geneset_view_renders(client):
 
 def test_geneset_view_404(client):
     resp = client.get("/genesets/StudyX/Exp1/nope")
+    assert resp.status_code == 404
+
+
+# ── DE study browser page ──────────────────────────────────────────────────────
+
+def test_de_study_view_renders(client):
+    resp = client.get("/browse/GroupA/ds1/de/glmm_demo")
+    assert resp.status_code == 200
+    assert "GLMM demo" in resp.text          # study name
+    assert 'id="de-rail"' in resp.text        # term tree
+    assert 'data-term="batch"' in resp.text   # term server-rendered
+    assert 'data-term="strain"' in resp.text
+
+
+def test_de_study_view_route_beats_dataset_path(client):
+    # The /de/{study} route must win over dataset_view's {dataset:path}
+    # catch-all (which would treat 'ds1/de/glmm_demo' as a dataset id → 404).
+    resp = client.get("/browse/GroupA/ds1/de/glmm_demo")
+    assert resp.status_code == 200
+    assert 'class="de-page"' in resp.text     # DE browser template, not index
+
+
+def test_de_study_view_404_on_missing_study(client, monkeypatch):
+    def no_study(api_url, path):
+        if "/de/" in path:
+            raise requests.HTTPError("no study")
+        return _fake_api_get(api_url, path)
+    monkeypatch.setattr(browser, "_api_get", no_study)
+    resp = client.get("/browse/GroupA/ds1/de/nope")
     assert resp.status_code == 404
 
 
