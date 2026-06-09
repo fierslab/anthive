@@ -29,6 +29,65 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.3.0 — 2026-06-09
+
+### Added — differential-expression data endpoints
+
+Read-only surfaces over the new `__de_study` + `__de` tables (see
+`doc/DESIGN_var_and_de.md`). Datasets without any DE data return
+empty lists / 404 cleanly.
+
+* `GET /databases/{db_id}/de` — list DE studies on this dataset, with
+  per-study row, term, and contrast counts.
+* `GET /databases/{db_id}/de/{study_id}` — one study's metadata plus
+  its (term, n_contrasts) list.
+* `GET /databases/{db_id}/de/{study_id}/terms/{term}` — contrasts
+  within one term, each with significance counts at padj < 0.05, 0.01,
+  0.001.
+* `GET /databases/{db_id}/de/{study_id}/terms/{term}/contrasts/{contrast}`
+  — paged gene rows. Sortable by `padj` / `effsize` / `estimate`;
+  filterable by `padj_max` and `abs_log2fc_min`; `limit` / `offset`
+  for paging.
+* `GET /databases/{db_id}/de/by-gene/{gene_name}` — every DE row for
+  one gene across the dataset's studies / terms / contrasts. Forest-
+  plot data source.
+
+Ingestion is **not** an API endpoint — the analysis itself happens
+offline via the `ant-de-ingest` CLI, which produces an
+`<basename>.de.parquet` sidecar (backed up to S3 by `ant-sync`) and
+re-imports it into the duckdb. `ant-convert` auto-re-ingests the
+sidecar after a rebuild, so DE survives full duckdb rebuilds.
+
+### Added — DE-driven plot geoms
+
+Three new plot endpoints, slot into the existing per-geom shape:
+
+* `GET /databases/{db_id}/plot/volcano?study=&term=&contrast=…` —
+  log2fc on x, -log10(padj) on y, top genes labelled.  Tunable
+  `padj_threshold`, `log2fc_threshold`, `n_label`.
+* `GET /databases/{db_id}/plot/ma?study=&term=&contrast=…` —
+  log10(base_mean) on x, log2fc on y.  Requires the underlying DE
+  rows to carry `base_mean` (DESeq2 / edgeR ingest captures it
+  automatically; Wilcoxon / GLMM rows don't — endpoint returns a 400
+  with a helpful "switch to volcano or re-ingest from DESeq2" hint).
+* `GET /databases/{db_id}/plot/forest?gene=…[&study=&term=&contrast=]`
+  — one gene across every (study, term, contrast); point = log2fc
+  (or estimate fallback), bar = 95% CI when available. Optional
+  filter args narrow the view.
+
+Updated `/version`:
+
+* `plot_geoms` now includes `volcano`, `ma`, `forest`.
+
+### Client compatibility
+
+* `antclient >= 1.6.0` — still compatible. The new endpoints flow
+  through `get_plot(geom='volcano', study=…, term=…, contrast=…)`
+  via `**extra`; no client API change.
+* All 2.2 endpoints still work — additive change.
+
+---
+
 ## 2.2.0 — 2026-06-07
 
 ### Added — per-geom plot endpoints

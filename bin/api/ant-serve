@@ -1285,8 +1285,8 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.2.0"
-API_VERSION_RELEASED = "2026-06-07"
+API_VERSION = "2.3.0"
+API_VERSION_RELEASED = "2026-06-09"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
 # Create FastAPI app with lifespan handler (Phase 2)
@@ -1305,7 +1305,8 @@ REST API for querying single-cell expression databases.
 ## Surface
 
 * **Database discovery**: `/databases`, `/databases/{{id}}/info`, `/genesets`, …
-* **Plot endpoints** (per geom): `/databases/{{id}}/plot/{{scatter|hexbin|violin|box|bar|histogram|ecdf|kde|heatmap|rolling}}`. Each declares only the params relevant to that geom.
+* **Plot endpoints** (per geom): `/databases/{{id}}/plot/{{scatter|hexbin|violin|box|bar|histogram|ecdf|kde|heatmap|rolling|volcano|ma|forest}}`. Each declares only the params relevant to that geom.
+* **Differential expression** (read-only): `/databases/{{id}}/de`, `/de/{{study}}`, `/de/{{study}}/terms/{{term}}`, `/de/{{study}}/terms/{{term}}/contrasts/{{contrast}}`, `/de/by-gene/{{gene}}`. Ingest via the `ant-de-ingest` CLI.
 * **Analytics sandbox**: `/databases/{{id}}/analytics/{{schema|query|viz}}` — SELECT-only SQL, runs server-side with its own memory cap.
 * **Module score on the fly**: `/databases/{{id}}/module_score` — Seurat-style score from an arbitrary gene list.
 * **Admin coordination** (for annotators): `/admin/release/{{id}}`, `/admin/restore/{{id}}`.
@@ -2268,6 +2269,10 @@ _PLOT_GEOMS = {
     'histogram', 'ecdf', 'kde',
     'heatmap',
     'rolling',     # rolling-mean trajectory along a continuous axis (pseudotime, etc.)
+    # DE-driven geoms — operate on pre-computed __de rows, not raw cells.
+    'volcano',     # log2fc on x, -log10(padj) on y; needs (study, term, contrast).
+    'ma',          # mean expression on x, log2fc on y; needs (study, term, contrast).
+    'forest',      # one gene's effect across (study, term, contrast); needs (gene).
 }
 
 
@@ -2556,6 +2561,14 @@ class PlotRequest:
     window: int          # rolling: window size in cells
     show_band: bool      # rolling: show IQR ribbon around the line
     zscore: bool         # heatmap: z-score per gene (centred divergent) vs raw means
+    # DE-driven geoms (volcano / ma / forest): selectors + visual thresholds.
+    de_study: Optional[str]      # __de_study.study_id (volcano / ma / forest)
+    de_term: Optional[str]       # __de.term (volcano / ma)
+    de_contrast: Optional[str]   # __de.contrast (volcano / ma)
+    de_gene: Optional[str]       # __genes.gene_name (forest)
+    padj_threshold: float        # volcano / ma / forest: cutoff for sig colouring
+    log2fc_threshold: float      # volcano / ma: |log2fc| cutoff
+    n_label: int                 # volcano / ma: top-N genes to label
     filters: Optional[Dict[str, Any]]
     sample: Optional[int]
     source_url: str
@@ -3103,6 +3116,157 @@ def _handle_heatmap(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     return image_bytes, caption
 
 
+# ── DE-driven handlers ────────────────────────────────────────────────────────
+
+def _de_contrast_dataframe(req: PlotRequest, ctx: PlotContext) -> Any:
+    """Pull every row from __de for (req.de_study, req.de_term, req.de_contrast)
+    into a pandas DataFrame.  Raises 404-flavoured HTTPException if the triple
+    matches nothing.
+
+    Returns columns: gene_name, log2fc, zeff, effsize, efftype, pvalue, padj,
+    estimate, SE, ci_low, ci_high, base_mean (extracted from stats_extra).
+    """
+    if not req.de_study:
+        raise HTTPException(400, detail=f"geom='{req.geom}' requires --de-study (study_id)")
+    if not req.de_term:
+        raise HTTPException(400, detail=f"geom='{req.geom}' requires --de-term")
+    if not req.de_contrast:
+        raise HTTPException(400, detail=f"geom='{req.geom}' requires --de-contrast")
+    if not lib_de_storage.has_de_data(ctx.db.conn):
+        raise HTTPException(
+            404, detail=f"dataset '{req.db_id}' has no DE data ingested",
+        )
+    sql = """
+        SELECT g.gene_name,
+               d.log2fc, d.zeff, d.effsize, d.efftype,
+               d.pvalue, d.padj,
+               d.estimate, d.SE, d.ci_low, d.ci_high,
+               d.stats_extra
+        FROM __de d
+        JOIN __genes g USING (gene_id)
+        WHERE d.study_id = ? AND d.term = ? AND d.contrast = ?
+    """
+    df = ctx.db.conn.execute(sql, [req.de_study, req.de_term, req.de_contrast]).fetchdf()
+    if len(df) == 0:
+        raise HTTPException(
+            404,
+            detail=(f"no DE rows for study={req.de_study!r}, term={req.de_term!r}, "
+                    f"contrast={req.de_contrast!r} on '{req.db_id}'"),
+        )
+    # Pull base_mean out of stats_extra JSON if present, so the MA plot can use it.
+    import json as _json
+    def _extract_base_mean(s):
+        if not s:
+            return None
+        try:
+            return _json.loads(s).get('base_mean')
+        except (TypeError, _json.JSONDecodeError):
+            return None
+    df['base_mean'] = df['stats_extra'].map(_extract_base_mean)
+    return df
+
+
+def _handle_volcano(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
+    df = _de_contrast_dataframe(req, ctx)
+    caption = (
+        f"Volcano of {req.de_study} · {req.de_term} · {req.de_contrast} "
+        f"in {req.db_id}.  {len(df)} genes; "
+        f"significance: padj<={req.padj_threshold:g}, |log2fc|>={req.log2fc_threshold:g}."
+    )
+    image_bytes = plotting.plot_volcano(
+        df,
+        padj_threshold=req.padj_threshold,
+        log2fc_threshold=req.log2fc_threshold,
+        n_label=req.n_label,
+        width=req.width, height=req.height, dpi=req.dpi,
+        output_format=req.output_format,
+        palette_cat=req.palette_cat,
+        title_extra=f'{req.db_id} · {req.de_term} · {req.de_contrast}',
+        caption=caption, source_url=req.source_url,
+        font_family=req.font_family, font_size=req.font_size,
+    )
+    return image_bytes, caption
+
+
+def _handle_ma(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
+    df = _de_contrast_dataframe(req, ctx)
+    if df['base_mean'].notna().sum() == 0:
+        raise HTTPException(
+            400,
+            detail=(f"MA plot needs base_mean for each gene, but the DE rows for "
+                    f"{req.de_study}/{req.de_term}/{req.de_contrast} don't carry it. "
+                    f"This typically means the upstream tool (GLMM / wilcoxon) "
+                    f"didn't emit baseMean — try the DESeq2 / edgeR DE source "
+                    f"instead, or use the volcano plot."),
+        )
+    caption = (
+        f"MA plot of {req.de_study} · {req.de_term} · {req.de_contrast} "
+        f"in {req.db_id}.  "
+        f"significance: padj<={req.padj_threshold:g}, |log2fc|>={req.log2fc_threshold:g}."
+    )
+    image_bytes = plotting.plot_ma(
+        df,
+        padj_threshold=req.padj_threshold,
+        log2fc_threshold=req.log2fc_threshold,
+        n_label=req.n_label,
+        width=req.width, height=req.height, dpi=req.dpi,
+        output_format=req.output_format,
+        palette_cat=req.palette_cat,
+        title_extra=f'{req.db_id} · {req.de_term} · {req.de_contrast}',
+        caption=caption, source_url=req.source_url,
+        font_family=req.font_family, font_size=req.font_size,
+    )
+    return image_bytes, caption
+
+
+def _handle_forest(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
+    if not req.de_gene:
+        raise HTTPException(400, detail="geom='forest' requires --de-gene (a gene name)")
+    if not lib_de_storage.has_de_data(ctx.db.conn):
+        raise HTTPException(
+            404, detail=f"dataset '{req.db_id}' has no DE data ingested",
+        )
+    # de_storage.get_gene_rows returns dicts; convert to a DataFrame.
+    rows = lib_de_storage.get_gene_rows(ctx.db.conn, req.de_gene)
+    if not rows:
+        raise HTTPException(
+            404, detail=f"gene '{req.de_gene}' not found in any DE study on '{req.db_id}'",
+        )
+    import pandas as _pd
+    df = _pd.DataFrame(rows)
+    # Filter further if user supplied study / term / contrast (optional narrowing).
+    if req.de_study:
+        df = df[df['study_id'] == req.de_study]
+    if req.de_term:
+        df = df[df['term'] == req.de_term]
+    if req.de_contrast:
+        df = df[df['contrast'] == req.de_contrast]
+    if len(df) == 0:
+        raise HTTPException(
+            404,
+            detail=(f"gene {req.de_gene!r} has DE rows but none match the "
+                    f"requested filters (study={req.de_study!r}, term={req.de_term!r}, "
+                    f"contrast={req.de_contrast!r})"),
+        )
+    caption = (
+        f"Forest plot of {req.de_gene} across {len(df)} DE rows in {req.db_id}. "
+        f"Point = log2fc (or estimate), error bars = 95% CI when available. "
+        f"Significance: padj<={req.padj_threshold:g}."
+    )
+    image_bytes = plotting.plot_forest(
+        df,
+        gene_name=req.de_gene,
+        padj_threshold=req.padj_threshold,
+        width=req.width, height=req.height, dpi=req.dpi,
+        output_format=req.output_format,
+        palette_cat=req.palette_cat,
+        title_extra=req.db_id,
+        caption=caption, source_url=req.source_url,
+        font_family=req.font_family, font_size=req.font_size,
+    )
+    return image_bytes, caption
+
+
 # Registry: geom → handler. Adding a new geom is now: write a handler,
 # add a line here, add the geom name to _PLOT_GEOMS.
 _PLOT_HANDLERS: Dict[str, Any] = {
@@ -3116,6 +3280,9 @@ _PLOT_HANDLERS: Dict[str, Any] = {
     'kde':        _handle_distribution,
     'heatmap':    _handle_heatmap,
     'rolling':    _handle_rolling,   # rolling-mean trajectory along pseudotime
+    'volcano':    _handle_volcano,   # DE: log2fc × -log10(padj)
+    'ma':         _handle_ma,        # DE: base_mean × log2fc
+    'forest':     _handle_forest,    # DE: one gene across many studies/terms/contrasts
 }
 
 
@@ -3245,6 +3412,14 @@ def _build_plot_request(
     window: int = 200,
     show_band: bool = False,
     zscore: bool = True,
+    # DE-driven geoms — pass-through with safe defaults.
+    de_study: Optional[str] = None,
+    de_term: Optional[str] = None,
+    de_contrast: Optional[str] = None,
+    de_gene: Optional[str] = None,
+    padj_threshold: float = 0.05,
+    log2fc_threshold: float = 1.0,
+    n_label: int = 20,
 ) -> PlotRequest:
     """Fold ``CommonPlotParams`` + geom-specific kwargs into a ``PlotRequest``.
 
@@ -3270,6 +3445,11 @@ def _build_plot_request(
         vmin=vmin, vmax=vmax,
         window=window, show_band=show_band,
         zscore=zscore,
+        de_study=de_study, de_term=de_term,
+        de_contrast=de_contrast, de_gene=de_gene,
+        padj_threshold=padj_threshold,
+        log2fc_threshold=log2fc_threshold,
+        n_label=n_label,
         filters=_parse_subset(common.subset),
         sample=common.sample,
         source_url=str(common.request.url) if common.request is not None else '',
@@ -3604,6 +3784,90 @@ async def plot_rolling_endpoint(
         common, 'rolling',
         x=x, y=y, color=color,
         window=window, show_band=show_band,
+    )
+    return await _render_plot(req, common.request)
+
+
+# ── DE-driven plot endpoints (volcano / ma / forest) ──────────────────────────
+#
+# These three geoms plot pre-computed differential-expression results from
+# the __de table (see lib/de_storage.py).  They don't touch raw cell
+# expression — the model fit happened upstream (e.g. via ant-de-ingest)
+# and we just render the (effsize, pvalue, padj) per gene.
+
+
+@app.get("/databases/{db_id:path}/plot/volcano", tags=["plots"])
+async def plot_volcano_endpoint(
+    common: CommonPlotParams = Depends(),
+    study: str = Query(..., description="DE study id (see `GET /databases/{id}/de` for the list)."),
+    term: str = Query(..., description="Model term within the study (e.g. `patient_geno_short_relevel`)."),
+    contrast: str = Query(..., description="Level within the term (e.g. `Uaqe_1`)."),
+    padj_threshold: float = Query(
+        0.05, gt=0.0, le=1.0,
+        description="padj cutoff for the dashed horizontal line and significance colouring.",
+    ),
+    log2fc_threshold: float = Query(
+        1.0, ge=0.0, le=20.0,
+        description="|log2fc| cutoff for the dashed vertical lines and significance colouring.",
+    ),
+    n_label: int = Query(
+        20, ge=0, le=200,
+        description="Number of top-significant genes to annotate by name.",
+    ),
+):
+    """Volcano plot of one (study, term, contrast): log2fc on x,
+    -log10(padj) on y, top genes labelled."""
+    req = _build_plot_request(
+        common, 'volcano',
+        de_study=study, de_term=term, de_contrast=contrast,
+        padj_threshold=padj_threshold, log2fc_threshold=log2fc_threshold,
+        n_label=n_label,
+    )
+    return await _render_plot(req, common.request)
+
+
+@app.get("/databases/{db_id:path}/plot/ma", tags=["plots"])
+async def plot_ma_endpoint(
+    common: CommonPlotParams = Depends(),
+    study: str = Query(..., description="DE study id."),
+    term: str = Query(..., description="Model term within the study."),
+    contrast: str = Query(..., description="Level within the term."),
+    padj_threshold: float = Query(0.05, gt=0.0, le=1.0),
+    log2fc_threshold: float = Query(1.0, ge=0.0, le=20.0),
+    n_label: int = Query(20, ge=0, le=200),
+):
+    """MA plot of one (study, term, contrast): log10(mean expression) on x,
+    log2fc on y.  Requires the underlying DE rows to carry `base_mean`
+    (DESeq2 / edgeR; absent for Wilcoxon / GLMM)."""
+    req = _build_plot_request(
+        common, 'ma',
+        de_study=study, de_term=term, de_contrast=contrast,
+        padj_threshold=padj_threshold, log2fc_threshold=log2fc_threshold,
+        n_label=n_label,
+    )
+    return await _render_plot(req, common.request)
+
+
+@app.get("/databases/{db_id:path}/plot/forest", tags=["plots"])
+async def plot_forest_endpoint(
+    common: CommonPlotParams = Depends(),
+    gene: str = Query(..., description="Gene name (or module name) to plot."),
+    study: Optional[str] = Query(None, description="Optional: restrict to one study_id."),
+    term: Optional[str] = Query(None, description="Optional: restrict to one term."),
+    contrast: Optional[str] = Query(None, description="Optional: restrict to one contrast."),
+    padj_threshold: float = Query(
+        0.05, gt=0.0, le=1.0,
+        description="padj cutoff for the significance colouring of each row.",
+    ),
+):
+    """Forest plot of one gene across every (study, term, contrast) where
+    it has a DE result.  Point = log2fc (or estimate if log2fc is null);
+    horizontal bar = 95% CI when available."""
+    req = _build_plot_request(
+        common, 'forest',
+        de_gene=gene,
+        de_study=study, de_term=term, de_contrast=contrast,
+        padj_threshold=padj_threshold,
     )
     return await _render_plot(req, common.request)
 

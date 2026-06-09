@@ -1162,3 +1162,283 @@ def plot_rolling(
     _legend_outside(ax, title=color_field if color_field else 'y')
 
     return _render_figure(fig, dpi, output_format, caption, source_url)
+
+
+# ── DE-driven geoms ───────────────────────────────────────────────────────────
+#
+# These plot pre-computed differential-expression results stored in the
+# duckdb's __de table (see lib/de_storage.py and doc/DESIGN_var_and_de.md).
+# Unlike the cell-level geoms above, the inputs here are model results,
+# not raw cell expression — the caller has already done the heavy lifting
+# (a Wilcoxon test, a DESeq2 fit, a GLMM, …) and just hands us the
+# (effsize, pvalue, padj) per (study, term, contrast, gene).
+
+
+def plot_volcano(
+    de_df: pd.DataFrame,
+    *,
+    padj_threshold: float = 0.05,
+    log2fc_threshold: float = 1.0,
+    n_label: int = 20,
+    width: float = 8,
+    height: float = 6,
+    dpi: int = 150,
+    output_format: str = 'png',
+    palette_cat: str = _DEFAULT_CATEGORICAL,
+    title_extra: Optional[str] = None,
+    caption: Optional[str] = None,
+    source_url: Optional[str] = None,
+    font_family: Optional[str] = None,
+    font_size: Optional[float] = None,
+) -> bytes:
+    """Volcano plot — log2fc on x, -log10(padj) on y, top genes labelled.
+
+    Args:
+        de_df:           DataFrame with at least `gene_name`, `log2fc`, `padj`.
+        padj_threshold:  Significance line on y (horizontal dashed); rows
+                         with padj <= this AND |log2fc| >= log2fc_threshold
+                         are coloured as "significant".
+        log2fc_threshold: Effect-size lines on x (vertical dashed).
+        n_label:         Label this many top genes (smallest padj, biggest
+                         |log2fc|).
+    """
+    _setup_style(font_family, font_size)
+    fig, ax = plt.subplots(figsize=(width, height))
+
+    df = de_df.copy()
+    # Clip padj=0 to a tiny floor so -log10 doesn't blow up to inf.
+    floor = max(1e-300, df['padj'].replace(0, np.nan).dropna().min() / 10
+                if df['padj'].notna().any() else 1e-300)
+    df['_padj_clipped'] = df['padj'].clip(lower=floor)
+    df['_neglog10p'] = -np.log10(df['_padj_clipped'])
+    df['_sig'] = (df['padj'] <= padj_threshold) & (df['log2fc'].abs() >= log2fc_threshold)
+    df['_direction'] = np.where(df['log2fc'] > 0, 'up', 'down')
+    df['_category'] = np.where(
+        df['_sig'], df['_direction'], 'ns'
+    )
+
+    cmap_obj = matplotlib.cm.get_cmap(
+        palette_cat if palette_cat in _QUALITATIVE_PALETTES else _DEFAULT_CATEGORICAL
+    )
+    colors = {
+        'ns':   '#bbbbbb',
+        'down': cmap_obj(0.0),
+        'up':   cmap_obj(0.1),
+    }
+
+    for cat in ('ns', 'down', 'up'):
+        sub = df[df['_category'] == cat]
+        if len(sub) == 0:
+            continue
+        label = {'ns': 'n.s.', 'down': f'sig ↓', 'up': f'sig ↑'}[cat]
+        ax.plot(
+            sub['log2fc'], sub['_neglog10p'],
+            marker='.', linestyle='none',
+            markersize=2.5 if cat == 'ns' else 4.0,
+            alpha=0.5 if cat == 'ns' else 0.9,
+            color=colors[cat], label=label, rasterized=True,
+        )
+
+    # Threshold lines
+    if padj_threshold and padj_threshold > 0:
+        ax.axhline(-np.log10(padj_threshold), linestyle='--',
+                   color='#888', linewidth=0.8)
+    if log2fc_threshold and log2fc_threshold > 0:
+        ax.axvline(+log2fc_threshold, linestyle='--', color='#888', linewidth=0.8)
+        ax.axvline(-log2fc_threshold, linestyle='--', color='#888', linewidth=0.8)
+
+    # Label top-N significant genes by lowest padj.
+    if n_label > 0:
+        labelled = df[df['_sig']].nsmallest(n_label, '_padj_clipped')
+        for _, row in labelled.iterrows():
+            ax.annotate(
+                str(row['gene_name']),
+                (row['log2fc'], row['_neglog10p']),
+                fontsize=7, alpha=0.85, ha='left', va='bottom',
+                xytext=(2, 2), textcoords='offset points',
+            )
+
+    ax.set_xlabel('log₂ fold change')
+    ax.set_ylabel('-log₁₀ adjusted p')
+    n_total = len(df)
+    n_sig = int(df['_sig'].sum())
+    title_bits = ['Volcano', f'{n_sig}/{n_total} sig (padj≤{padj_threshold:g}, |log2fc|≥{log2fc_threshold:g})']
+    ax.set_title(_compose_title(title_bits, extra=title_extra))
+    sns.despine(ax=ax)
+    _legend_outside(ax, title='significance')
+
+    return _render_figure(fig, dpi, output_format, caption, source_url)
+
+
+def plot_ma(
+    de_df: pd.DataFrame,
+    *,
+    padj_threshold: float = 0.05,
+    log2fc_threshold: float = 1.0,
+    n_label: int = 20,
+    width: float = 8,
+    height: float = 6,
+    dpi: int = 150,
+    output_format: str = 'png',
+    palette_cat: str = _DEFAULT_CATEGORICAL,
+    title_extra: Optional[str] = None,
+    caption: Optional[str] = None,
+    source_url: Optional[str] = None,
+    font_family: Optional[str] = None,
+    font_size: Optional[float] = None,
+) -> bytes:
+    """MA plot — mean expression on x (log10), log2fc on y.
+
+    Args:
+        de_df: DataFrame with at least `gene_name`, `log2fc`, `padj`,
+               `base_mean` (or any "mean expression" column — caller
+               renames before passing). Rows with NaN base_mean are
+               dropped silently.
+    """
+    _setup_style(font_family, font_size)
+    fig, ax = plt.subplots(figsize=(width, height))
+
+    df = de_df.copy().dropna(subset=['base_mean'])
+    df = df[df['base_mean'] > 0]
+    if len(df) == 0:
+        ax.text(0.5, 0.5, 'no rows with positive base_mean',
+                transform=ax.transAxes, ha='center', va='center', color='#888')
+        return _render_figure(fig, dpi, output_format, caption, source_url)
+
+    df['_logmean'] = np.log10(df['base_mean'])
+    df['_sig'] = (df['padj'] <= padj_threshold) & (df['log2fc'].abs() >= log2fc_threshold)
+    df['_direction'] = np.where(df['log2fc'] > 0, 'up', 'down')
+    df['_category'] = np.where(df['_sig'], df['_direction'], 'ns')
+
+    cmap_obj = matplotlib.cm.get_cmap(
+        palette_cat if palette_cat in _QUALITATIVE_PALETTES else _DEFAULT_CATEGORICAL
+    )
+    colors = {'ns': '#bbbbbb', 'down': cmap_obj(0.0), 'up': cmap_obj(0.1)}
+
+    for cat in ('ns', 'down', 'up'):
+        sub = df[df['_category'] == cat]
+        if len(sub) == 0:
+            continue
+        label = {'ns': 'n.s.', 'down': 'sig ↓', 'up': 'sig ↑'}[cat]
+        ax.plot(
+            sub['_logmean'], sub['log2fc'],
+            marker='.', linestyle='none',
+            markersize=2.5 if cat == 'ns' else 4.0,
+            alpha=0.5 if cat == 'ns' else 0.9,
+            color=colors[cat], label=label, rasterized=True,
+        )
+
+    ax.axhline(0, color='#444', linewidth=0.7)
+    if log2fc_threshold and log2fc_threshold > 0:
+        ax.axhline(+log2fc_threshold, linestyle='--', color='#888', linewidth=0.8)
+        ax.axhline(-log2fc_threshold, linestyle='--', color='#888', linewidth=0.8)
+
+    if n_label > 0:
+        labelled = df[df['_sig']].nsmallest(n_label, 'padj')
+        for _, row in labelled.iterrows():
+            ax.annotate(
+                str(row['gene_name']),
+                (row['_logmean'], row['log2fc']),
+                fontsize=7, alpha=0.85, ha='left', va='bottom',
+                xytext=(2, 2), textcoords='offset points',
+            )
+
+    ax.set_xlabel('log₁₀ mean expression')
+    ax.set_ylabel('log₂ fold change')
+    n_total = len(df)
+    n_sig = int(df['_sig'].sum())
+    title_bits = ['MA', f'{n_sig}/{n_total} sig (padj≤{padj_threshold:g}, |log2fc|≥{log2fc_threshold:g})']
+    ax.set_title(_compose_title(title_bits, extra=title_extra))
+    sns.despine(ax=ax)
+    _legend_outside(ax, title='significance')
+
+    return _render_figure(fig, dpi, output_format, caption, source_url)
+
+
+def plot_forest(
+    de_df: pd.DataFrame,
+    *,
+    gene_name: str,
+    padj_threshold: float = 0.05,
+    width: float = 8,
+    height: float = 6,
+    dpi: int = 150,
+    output_format: str = 'png',
+    palette_cat: str = _DEFAULT_CATEGORICAL,
+    title_extra: Optional[str] = None,
+    caption: Optional[str] = None,
+    source_url: Optional[str] = None,
+    font_family: Optional[str] = None,
+    font_size: Optional[float] = None,
+) -> bytes:
+    """Forest plot — one gene's effect across many (study, term, contrast).
+
+    Args:
+        de_df:     DataFrame with `study_name`, `term`, `contrast`,
+                   `log2fc` (or `estimate`), `ci_low`, `ci_high`, `padj`.
+                   One row per (study, term, contrast) for the chosen gene.
+        gene_name: Just used in the title; data must already be filtered
+                   to a single gene.
+
+    Each row gets a horizontal point + error bar.  Significance (padj
+    below the threshold) is marked by colour.  Sorted by effect size
+    ascending so the visual reads left-to-right as down-regulated →
+    up-regulated.
+    """
+    _setup_style(font_family, font_size)
+
+    df = de_df.copy()
+    if len(df) == 0:
+        fig, ax = plt.subplots(figsize=(width, height))
+        ax.text(0.5, 0.5, f'no DE rows for {gene_name!r}',
+                transform=ax.transAxes, ha='center', va='center', color='#888')
+        return _render_figure(fig, dpi, output_format, caption, source_url)
+
+    # Prefer log2fc; fall back to estimate if log2fc is null
+    df['_effect'] = df['log2fc'].where(df['log2fc'].notna(), df.get('estimate'))
+    df = df.dropna(subset=['_effect'])
+    if len(df) == 0:
+        fig, ax = plt.subplots(figsize=(width, height))
+        ax.text(0.5, 0.5, f'no rows with a numeric effect for {gene_name!r}',
+                transform=ax.transAxes, ha='center', va='center', color='#888')
+        return _render_figure(fig, dpi, output_format, caption, source_url)
+
+    df = df.sort_values('_effect').reset_index(drop=True)
+    df['_label'] = (df['study_name'].astype(str) + ' · '
+                    + df['term'].astype(str) + ' · '
+                    + df['contrast'].astype(str))
+    df['_sig'] = df['padj'] <= padj_threshold
+
+    # Height scales with the number of rows so labels stay readable.
+    height_dyn = max(height, 0.25 * len(df) + 1.5)
+    fig, ax = plt.subplots(figsize=(width, height_dyn))
+
+    cmap_obj = matplotlib.cm.get_cmap(
+        palette_cat if palette_cat in _QUALITATIVE_PALETTES else _DEFAULT_CATEGORICAL
+    )
+    sig_color = cmap_obj(0.1)
+    ns_color = '#bbbbbb'
+
+    ax.axvline(0, color='#444', linewidth=0.7)
+
+    has_ci = df['ci_low'].notna().any() and df['ci_high'].notna().any()
+    for i, row in df.iterrows():
+        color = sig_color if row['_sig'] else ns_color
+        if has_ci and pd.notna(row.get('ci_low')) and pd.notna(row.get('ci_high')):
+            ax.plot([row['ci_low'], row['ci_high']], [i, i],
+                    color=color, linewidth=1.2, solid_capstyle='round')
+        ax.plot([row['_effect']], [i],
+                marker='o', color=color, markersize=5,
+                markeredgecolor='white', markeredgewidth=0.5)
+
+    ax.set_yticks(range(len(df)))
+    ax.set_yticklabels(df['_label'].tolist(), fontsize=7)
+    ax.set_xlabel('log₂ fold change')
+    ax.set_ylim(-0.5, len(df) - 0.5)
+    n_sig = int(df['_sig'].sum())
+    title_bits = ['Forest', gene_name, f'{n_sig}/{len(df)} sig (padj≤{padj_threshold:g})']
+    ax.set_title(_compose_title(title_bits, extra=title_extra))
+    sns.despine(ax=ax)
+    fig.tight_layout()
+
+    return _render_figure(fig, dpi, output_format, caption, source_url)
