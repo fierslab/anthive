@@ -867,21 +867,26 @@
       return r.ok ? await r.json() : null;
     } catch (e) { return null; }
   }
+  // Returns the effective term (explicit selection, else the sole term when
+  // there's only one — so a single-term study needs no manual pick), or ''.
   async function populateTerms(study, selected) {
     const sel = document.getElementById('f-term');
-    if (!sel) return;
+    if (!sel) return '';
     const allOpt = GEOM === 'forest' ? '<option value="">— all terms —</option>'
                                      : '<option value="">— select term —</option>';
     sel.innerHTML = allOpt;
-    if (!study) return;
+    if (!study) return '';
     const data = await _deFetch(`/de/${encodeURIComponent(study)}`);
-    (data?.terms || []).forEach(t => {
+    const terms = data?.terms || [];
+    terms.forEach(t => {
       const o = document.createElement('option');
       o.value = t.term;
       o.textContent = `${t.term} (${t.n_contrasts})`;
       sel.appendChild(o);
     });
-    if (selected) sel.value = selected;
+    const chosen = selected || (terms.length === 1 ? terms[0].term : '');
+    if (chosen) sel.value = chosen;
+    return sel.value || '';
   }
   async function populateContrasts(study, term, selected) {
     const sel = document.getElementById('f-contrast');
@@ -891,35 +896,45 @@
     sel.innerHTML = allOpt;
     if (!study || !term) return;
     const data = await _deFetch(`/de/${encodeURIComponent(study)}/terms/${encodeURIComponent(term)}`);
-    (data?.contrasts || []).forEach(c => {
+    const contrasts = data?.contrasts || [];
+    contrasts.forEach(c => {
       const o = document.createElement('option');
       o.value = c.contrast;
       const nsig = c['n_sig_padj_lt_0.05'];
       o.textContent = nsig != null ? `${c.contrast} — ${nsig} sig` : c.contrast;
       sel.appendChild(o);
     });
-    if (selected) sel.value = selected;
+    const chosen = selected || (contrasts.length === 1 ? contrasts[0].contrast : '');
+    if (chosen) sel.value = chosen;
   }
   async function initDeCascade() {
     const studySel = document.getElementById('f-study');
     const termSel  = document.getElementById('f-term');
+    // Programmatic .value changes don't fire 'change', so the cascade handlers
+    // explicitly re-render after auto-filling dependent selects.
     if (studySel) {
       studySel.addEventListener('change', async () => {
-        await populateTerms(studySel.value);
-        await populateContrasts(studySel.value, '');   // reset contrasts
+        const term = await populateTerms(studySel.value);   // auto-picks a sole term
+        await populateContrasts(studySel.value, term);       // …and a sole contrast
+        scheduleRefresh();
       });
     }
     if (termSel) {
       termSel.addEventListener('change', async () => {
         await populateContrasts(studySel ? studySel.value : '', termSel.value);
+        scheduleRefresh();
       });
     }
-    // Restore a fully-specified plot from the URL (study+term+contrast).
+    // Auto-select the sole study when there's only one (skip the placeholder).
+    if (studySel && !studySel.value) {
+      const real = Array.from(studySel.options).filter(o => o.value);
+      if (real.length === 1) studySel.value = real[0].value;
+    }
+    // Restore from URL, cascading through any auto-selected sole options.
     const p = new URLSearchParams(window.location.search);
     if (studySel && studySel.value) {
-      await populateTerms(studySel.value, p.get('term'));
-      if (termSel && termSel.value)
-        await populateContrasts(studySel.value, termSel.value, p.get('contrast'));
+      const term = await populateTerms(studySel.value, p.get('term'));
+      if (term) await populateContrasts(studySel.value, term, p.get('contrast'));
     }
     refresh();
   }

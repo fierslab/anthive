@@ -315,7 +315,15 @@
   });
   document.getElementById('de-more').addEventListener('click', () => loadGenes(true));
 
-  // ── restore from URL (deep link): open term, load contrasts, select contrast
+  // If a freshly-opened term has exactly one contrast, select it (so a
+  // single-contrast term needs no extra click) — mirrors the dropdown
+  // auto-select on the plot page.
+  async function autoSelectSoleContrast(termEl, term) {
+    const cs = termEl.querySelectorAll('.de-contrast');
+    if (cs.length === 1) await selectContrast(term, cs[0].getAttribute('data-contrast'));
+  }
+
+  // ── restore from URL (deep link); otherwise auto-open a sole term
   (async function initFromURL() {
     const p = new URLSearchParams(window.location.search);
     if (p.get('sort')) document.getElementById('f-sort').value = p.get('sort');
@@ -323,11 +331,21 @@
     if (p.get('padj_max')) document.getElementById('f-padj').value = p.get('padj_max');
     if (p.get('l2fc_min')) document.getElementById('f-l2fc').value = p.get('l2fc_min');
     const term = p.get('term'), contrast = p.get('contrast');
-    if (!term) return;
-    const termEl = rail.querySelector(`.de-term[data-term="${CSS.escape(term)}"]`);
-    if (!termEl) return;
-    await toggleTerm(termEl);
-    if (contrast) await selectContrast(term, contrast);
+    if (term) {
+      const termEl = rail.querySelector(`.de-term[data-term="${CSS.escape(term)}"]`);
+      if (!termEl) return;
+      await toggleTerm(termEl);
+      if (contrast) await selectContrast(term, contrast);
+      else await autoSelectSoleContrast(termEl, term);
+      return;
+    }
+    // No deep link: if the study has exactly one term, open it (and, if it has
+    // a single contrast, load that contrast's genes straight away).
+    const terms = rail.querySelectorAll('.de-term');
+    if (terms.length === 1) {
+      await toggleTerm(terms[0]);
+      await autoSelectSoleContrast(terms[0], terms[0].getAttribute('data-term'));
+    }
   })();
 })();
 </script>
