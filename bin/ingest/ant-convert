@@ -319,6 +319,30 @@ def convert_h5ad_to_duckdb(h5ad_path: Path, config: Dict[str, Any],
         duckdb_size = duckdb_path.stat().st_size
         compression_pct = (1 - duckdb_size / h5ad_size) * 100
 
+        # Re-ingest DE sidecar if one exists. The .duckdb's __de_study /
+        # __de tables are gone (full rebuild dropped them); the sidecar
+        # parquet is the durable copy. ant-de-ingest writes the sidecar
+        # so this is a no-op for datasets that haven't run DE ingestion.
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            conn = None
+        try:
+            import de_storage as _de_storage  # type: ignore
+            sidecar = _de_storage.sidecar_path_for(h5ad_path)
+            if sidecar.exists():
+                print(f"\nReimporting DE sidecar...")
+                print(f"  {sidecar.name}")
+                inserted = _de_storage.reimport_sidecar(duckdb_path, sidecar)
+                for study_id, n_rows in inserted.items():
+                    print(f"  ✓ {study_id}: {n_rows} rows")
+        except Exception as de_exc:
+            # Non-fatal — the duckdb rebuild succeeded; just warn loudly.
+            print(f"  ⚠ DE sidecar reimport failed: {de_exc}", file=sys.stderr)
+            print(f"  Run `ant-de-ingest` manually to recover.", file=sys.stderr)
+
         print(f"\n{'='*70}")
         print(f"CONVERSION COMPLETE!")
         print(f"{'='*70}")

@@ -1,0 +1,629 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "duckdb>=0.10.0",
+#   "pyyaml>=6.0",
+#   "requests>=2.25.0",
+# ]
+# ///
+"""ant-de-ingest — friendly ingestion of a DE result file into the
+anthive duckdb + sidecar parquet.
+
+See ``doc/DESIGN_var_and_de.md`` Part 4 for the design rationale, the
+preset list, and the UX principles (friendly defaults, explicit
+choices, no guessing — errors include the next command to run).
+
+Example for the worked example data (Sierksma2025 V6M GLMM):
+
+    ant-de-ingest S25/V6W \\
+        --preset long \\
+        --from /data/1/project/PRS/de_merge/merged_DE.csv \\
+        --study-id-from model \\
+        --target gene \\
+        --method glmm \\
+        --reference-type vsgrandmean \\
+        --map gene=gene,term=variable,contrast=level,\\
+log2fc=log2fc,pvalue=pval,padj=pval_adj,\\
+estimate=estimate_og,SE=SE_og,\\
+ci_low=ninetyfiveL_og,ci_high=ninetyfiveH_og \\
+        --filter "model = 'DE interpretable glmm vs grandmean'"
+
+The full surface is documented in ``--help``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+# sys.path shim — see bin/CLAUDE.md
+script_dir = Path(__file__).parent.resolve()
+sys.path.insert(0, str(script_dir.parent.parent / 'lib'))
+
+import duckdb  # noqa: E402
+
+from config import get_config  # noqa: E402
+from h5adstore import find_h5ad  # noqa: E402
+from de_presets import (  # noqa: E402
+    PRESETS, ANTHIVE_DE_COLUMNS, STATS_EXTRA_COLUMNS,
+    format_preset_help, format_preset_list, suggest_preset_for_columns,
+    Preset,
+)
+from de_storage import (  # noqa: E402
+    DEWriter, DEWriterError, StudySpec, sidecar_path_for, write_sidecar,
+)
+
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+
+def _die(msg: str, code: int = 2) -> None:
+    print(f"ant-de-ingest: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def _parse_map(map_str: Optional[str]) -> Dict[str, str]:
+    """Parse ``--map src=dst,src=dst,...`` into a dict.
+
+    Empty value (``src=``) means "drop this anthive column" — useful
+    when a preset expects a column the user's file doesn't have.
+    """
+    if not map_str:
+        return {}
+    out: Dict[str, str] = {}
+    for piece in map_str.split(','):
+        piece = piece.strip()
+        if not piece:
+            continue
+        if '=' not in piece:
+            _die(f"--map: expected 'src=dst' pairs, got {piece!r}")
+        src, _, dst = piece.partition('=')
+        out[src.strip()] = dst.strip()
+    return out
+
+
+def _peek_csv_columns(input_path: Path) -> List[str]:
+    """Return the column list of a CSV/parquet/tsv file without loading it."""
+    con = duckdb.connect()
+    try:
+        if input_path.suffix == '.parquet':
+            sql = f"DESCRIBE SELECT * FROM read_parquet('{input_path}') LIMIT 0"
+        else:
+            sql = (
+                f"DESCRIBE SELECT * FROM "
+                f"read_csv_auto('{input_path}', sample_size=1024) LIMIT 0"
+            )
+        return [row[0] for row in con.execute(sql).fetchall()]
+    finally:
+        con.close()
+
+
+def _build_stage_view(
+    input_path: Path,
+    where_filter: Optional[str],
+    column_map: Dict[str, str],
+    map_overrides: Dict[str, str],
+) -> Tuple[duckdb.DuckDBPyConnection, str, Dict[str, str]]:
+    """Stage the input file as an in-memory view with anthive column names.
+
+    Returns (connection, view_name, resolved_map).
+
+    ``resolved_map`` is ``source_col → anthive_col`` after merging the
+    preset's defaults with --map overrides. An anthive col mapped to ``''``
+    (the explicit "drop" signal) is omitted entirely.
+    """
+    # Merge preset defaults + user overrides.
+    # column_map is source→anthive; user --map is anthive=source (per the
+    # design doc's CLI shape).
+    resolved: Dict[str, str] = dict(column_map)   # source → anthive
+    for anthive, src in map_overrides.items():
+        if src == '':
+            # User explicitly says "drop". Remove any source mapping to this anthive col.
+            resolved = {s: a for s, a in resolved.items() if a != anthive}
+        else:
+            # User says: anthive 'foo' should come from source column 'src'.
+            resolved = {s: a for s, a in resolved.items() if a != anthive}
+            resolved[src] = anthive
+
+    con = duckdb.connect()
+    reader = (
+        f"read_parquet('{input_path}')" if input_path.suffix == '.parquet'
+        else f"read_csv_auto('{input_path}', sample_size=-1)"
+    )
+    where_sql = f" WHERE {where_filter}" if where_filter else ""
+
+    # Build SELECT clause renaming source → anthive.
+    select_parts = []
+    for src, dst in resolved.items():
+        select_parts.append(f'"{src}" AS "{dst}"')
+    if not select_parts:
+        _die("after applying --map, no columns are mapped — nothing to ingest")
+    select_clause = ", ".join(select_parts)
+
+    view_sql = f"""
+        CREATE VIEW _stage AS
+        SELECT {select_clause} FROM {reader}{where_sql}
+    """
+    try:
+        con.execute(view_sql)
+    except duckdb.Error as exc:
+        _die(f"failed to stage input file:\n  SQL: {view_sql.strip()}\n  {exc}")
+    return con, '_stage', resolved
+
+
+def _list_columns(con: duckdb.DuckDBPyConnection, view: str) -> List[str]:
+    return [r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {view}").fetchall()]
+
+
+# ── validation ───────────────────────────────────────────────────────────────
+
+
+def _validate_preset(args: argparse.Namespace, input_path: Path) -> Preset:
+    """Resolve --preset; bail with a helpful error if missing."""
+    if not args.preset:
+        try:
+            columns = _peek_csv_columns(input_path)
+        except duckdb.Error as exc:
+            _die(f"could not read {input_path} to suggest a preset:\n  {exc}")
+        suggestions = suggest_preset_for_columns(columns)
+        msg_lines = [
+            "--preset is required (no auto-detection — we don't guess).",
+            "",
+            f"Your file's columns: {', '.join(columns)}",
+            "",
+            "Available presets:",
+        ]
+        for name, preset in PRESETS.items():
+            mark = "  ← matches your file" if name in suggestions else ""
+            msg_lines.append(f"  --preset {name:8s}  {preset.description}{mark}")
+        msg_lines.append("")
+        msg_lines.append("Run `ant-de-ingest --help-preset <name>` for details.")
+        _die("\n".join(msg_lines), code=2)
+
+    if args.preset not in PRESETS:
+        _die(
+            f"unknown preset {args.preset!r}. "
+            f"Available: {', '.join(PRESETS.keys())}\n"
+            f"Run `ant-de-ingest --list-presets` for descriptions.",
+        )
+    return PRESETS[args.preset]
+
+
+def _validate_required_columns(
+    preset: Preset,
+    staged_view_cols: List[str],
+    map_overrides: Dict[str, str],
+) -> None:
+    """Bail if a preset-required anthive column is missing post-mapping."""
+    missing = [c for c in preset.required_in_file if c not in staged_view_cols]
+    if not missing:
+        return
+    # Reverse-lookup to tell the user what source-file column the preset
+    # expected for each missing anthive column.
+    inv = {v: k for k, v in preset.column_map.items()}
+    lines = [
+        f"preset {preset.name!r} expects these anthive columns "
+        f"to be present after mapping: {preset.required_in_file}.",
+        f"Missing: {missing}",
+        "",
+        "For each missing column, the preset's default source-name is:",
+    ]
+    for m in missing:
+        src = inv.get(m, '(no default)')
+        lines.append(f"  {m}  ←  {src}")
+    lines.append("")
+    lines.append("Either rename your column to the source-name above, OR")
+    lines.append("use --map to point anthive at your actual column name:")
+    sample = missing[0]
+    lines.append(f"  --map {sample}=<your_column>")
+    lines.append("")
+    lines.append("If your file legitimately doesn't have a column, drop it with:")
+    lines.append(f"  --map {sample}=")
+    _die("\n".join(lines))
+
+
+def _validate_required_flags(args: argparse.Namespace, preset: Preset) -> None:
+    """Per-preset CLI flag check (--term, --contrast, --method)."""
+    missing = []
+    for flag in preset.required_cli_flags:
+        attr = flag.lstrip('-').replace('-', '_')
+        if not getattr(args, attr, None):
+            missing.append(flag)
+    if missing:
+        lines = [
+            f"preset {preset.name!r} requires these CLI flags: {', '.join(missing)}",
+            "",
+        ]
+        if '--term' in missing:
+            lines.append(
+                "  --term is the model term being tested. "
+                "For a DESeq2/edgeR comparison this is the obs column name "
+                "you grouped by, e.g. --term cell_type."
+            )
+        if '--contrast' in missing:
+            lines.append(
+                "  --contrast is the specific level being compared "
+                "(the file represents one contrast). Pick a label "
+                "consistent with your filename / pipeline, e.g. "
+                "--contrast 'AD_vs_control'."
+            )
+        if '--method' in missing:
+            suggest = (
+                f"  --method describes the statistical test. "
+                f"Suggested for this preset: --method {preset.default_method!r}."
+            ) if preset.default_method else (
+                "  --method describes the statistical test, "
+                "e.g. --method wilcoxon | deseq2 | glmm."
+            )
+            lines.append(suggest)
+        _die("\n".join(lines))
+
+
+def _validate_gene_namespace(
+    stage_con: duckdb.DuckDBPyConnection, stage_view: str,
+    duckdb_path: Path,
+    force: bool = False,
+) -> Tuple[int, int]:
+    """Cross-check the input gene names against the target duckdb's __genes.
+
+    Returns (n_matched, n_total). Bails if <10% match unless --force-mismatch.
+    """
+    # Attach the target duckdb read-only just for this probe.
+    stage_con.execute(f"ATTACH '{duckdb_path}' AS tgt (READ_ONLY)")
+    try:
+        row = stage_con.execute(f"""
+            SELECT
+                (SELECT count(DISTINCT gene) FROM {stage_view}) AS n_input,
+                (SELECT count(DISTINCT gene) FROM {stage_view} s
+                   JOIN tgt.__genes g ON g.gene_name = CAST(s.gene AS VARCHAR)) AS n_matched
+        """).fetchone()
+    finally:
+        stage_con.execute("DETACH tgt")
+    n_input = row[0] or 0
+    n_matched = row[1] or 0
+    if n_input == 0:
+        _die("input has zero rows after --filter — nothing to ingest.")
+    ratio = n_matched / max(n_input, 1)
+    if ratio < 0.10 and not force:
+        # Sample the unmatched + the dataset for diagnostic output.
+        stage_con.execute(f"ATTACH '{duckdb_path}' AS tgt (READ_ONLY)")
+        try:
+            sample_input = [r[0] for r in stage_con.execute(
+                f"SELECT DISTINCT gene FROM {stage_view} LIMIT 5"
+            ).fetchall()]
+            sample_target = [r[0] for r in stage_con.execute(
+                "SELECT gene_name FROM tgt.__genes LIMIT 5"
+            ).fetchall()]
+        finally:
+            stage_con.execute("DETACH tgt")
+        _die(
+            f"only {n_matched} / {n_input} input gene names matched the "
+            f"dataset's __genes (expected >=10%). Likely causes:\n"
+            f"  - DE was computed against a different gene-namespace "
+            f"(Ensembl ID vs HGNC symbol).\n"
+            f"  - --target should be 'module' not 'gene' (or vice versa).\n"
+            f"\n"
+            f"Examples of unmatched DE genes:    {', '.join(sample_input)}\n"
+            f"Examples from dataset __genes:     {', '.join(sample_target)}\n"
+            f"\n"
+            f"To bypass this check (use carefully):\n"
+            f"  --force-mismatch"
+        )
+    return n_matched, n_input
+
+
+# ── argparse ─────────────────────────────────────────────────────────────────
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog='ant-de-ingest',
+        description='Ingest a DE result file into an anthive duckdb + sidecar parquet.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument('db_id', nargs='?', help="Dataset id (e.g. 'S25/V6W'), or a path to a .duckdb")
+    p.add_argument('--from', dest='from_', type=Path,
+                   help='Input CSV / parquet / tsv (required).')
+    p.add_argument('--preset', choices=list(PRESETS.keys()),
+                   help='Format preset for the input file. REQUIRED.')
+    p.add_argument('--list-presets', action='store_true',
+                   help='List available presets and exit.')
+    p.add_argument('--help-preset', metavar='NAME',
+                   help='Show detailed help for one preset and exit.')
+
+    p.add_argument('--study-id',
+                   help="Study id (slug). Default: file stem (e.g. 'merged_DE.csv' → 'merged_DE').")
+    p.add_argument('--study-id-from', metavar='COLUMN',
+                   help="Long-format: split rows into one study per unique "
+                        "value of COLUMN (e.g. --study-id-from model).")
+
+    p.add_argument('--target', choices=('gene', 'module'), default='gene',
+                   help='What gene_id resolves against (default: gene).')
+    p.add_argument('--method',
+                   help="Method label, stored on __de_study. Required for new studies "
+                        "(presets suggest a default in the error message).")
+    p.add_argument('--reference-type', metavar='STR',
+                   help="reference_type to record on __de_study "
+                        "(e.g. 'vsgrandmean', 'vsreference', 'pairwise').")
+    p.add_argument('--term', help='For one-file-one-contrast presets: the model term name.')
+    p.add_argument('--contrast', help='For one-file-one-contrast presets: the contrast name.')
+    p.add_argument('--name', help='Human-readable study name. Default: --study-id.')
+    p.add_argument('--description', default=None,
+                   help='Free-text description, stored on __de_study.')
+    p.add_argument('--covariates', metavar='CSV',
+                   help='Comma-separated list of model covariates (informational).')
+
+    p.add_argument('--map', dest='map_str',
+                   help="Column rename: 'anthive=source,anthive=source,...'. "
+                        "Overrides the preset's defaults field-by-field. "
+                        "Use 'anthive=' (empty rhs) to drop a preset column.")
+    p.add_argument('--filter', dest='filter_sql',
+                   help="SQL WHERE clause applied at read time, "
+                        "e.g. --filter \"model = 'glmm'\".")
+
+    p.add_argument('--dry-run', action='store_true',
+                   help='Parse + validate only, do not write.')
+    p.add_argument('--replace', action='store_true',
+                   help='Delete an existing study_id before writing.')
+    p.add_argument('--force-mismatch', action='store_true',
+                   help='Bypass the gene-namespace check (use carefully).')
+    p.add_argument('--no-sidecar', action='store_true',
+                   help='Skip writing the .de.parquet sidecar.')
+
+    p.add_argument('--ant-serve-url',
+                   help='ant-serve URL for /admin/release coordination '
+                        '(default: from anthive.yaml, fallback http://localhost:8080/api).')
+    return p
+
+
+# ── main pipeline ────────────────────────────────────────────────────────────
+
+
+def run_ingest_for_study(
+    *,
+    args: argparse.Namespace,
+    preset: Preset,
+    h5ad_entry,
+    input_path: Path,
+    study_id: str,
+    study_filter_sql: Optional[str],   # extra WHERE when splitting via --study-id-from
+) -> int:
+    """Do the actual ingest for one resolved study_id.
+
+    Returns the number of rows inserted.
+    """
+    # Build combined WHERE: --filter + per-study split.
+    where_clauses: List[str] = []
+    if args.filter_sql:
+        where_clauses.append(f"({args.filter_sql})")
+    if study_filter_sql:
+        where_clauses.append(f"({study_filter_sql})")
+    where_sql = " AND ".join(where_clauses) if where_clauses else None
+
+    # Stage view: source columns → anthive columns.
+    map_overrides = _parse_map(args.map_str)
+    stage_con, stage_view, resolved = _build_stage_view(
+        input_path, where_sql, preset.column_map, map_overrides,
+    )
+    try:
+        staged_cols = _list_columns(stage_con, stage_view)
+        _validate_required_columns(preset, staged_cols, map_overrides)
+        n_matched, n_input = _validate_gene_namespace(
+            stage_con, stage_view, h5ad_entry.duckdb_path,
+            force=args.force_mismatch,
+        )
+
+        if args.dry_run:
+            n_rows = stage_con.execute(
+                f"SELECT count(*) FROM {stage_view}"
+            ).fetchone()[0]
+            print(f"  dry-run: {n_rows} rows would be ingested for study {study_id!r}")
+            print(f"  dry-run: {n_matched} / {n_input} gene names match the duckdb")
+            return 0
+
+        # Pull a parquet snapshot of the staged view (small enough to
+        # round-trip through pandas if it weren't; we use parquet through
+        # DuckDB to avoid memory issues on large inputs).
+        # We let DEWriter receive a query that JOINs to its own __genes,
+        # so we register the staged data into the writer's connection
+        # via a tmp parquet.
+        tmp_parquet = (Path(input_path).parent /
+                       f".ant-de-ingest-stage-{os.getpid()}.parquet")
+        stage_con.execute(
+            f"COPY (SELECT * FROM {stage_view}) TO '{tmp_parquet}' (FORMAT PARQUET)"
+        )
+    finally:
+        stage_con.close()
+
+    try:
+        with DEWriter(
+            h5ad_entry.duckdb_path,
+            db_id=args.db_id, ant_serve_url=args.ant_serve_url,
+        ) as writer:
+            writer.conn.execute(
+                f"CREATE OR REPLACE VIEW _stage AS "
+                f"SELECT * FROM read_parquet('{tmp_parquet}')"
+            )
+            # one_file_one_contrast → fixed_term/fixed_contrast from CLI.
+            if preset.shape == 'one-file-one-contrast':
+                term_col, contrast_col = None, None
+                fixed_term, fixed_contrast = args.term, args.contrast
+            else:
+                term_col = 'term'   if args.term is None else None
+                fixed_term = args.term
+                contrast_col = 'contrast' if args.contrast is None else None
+                fixed_contrast = args.contrast
+
+            if args.replace:
+                n_deleted = writer.delete_study(study_id)
+                if n_deleted:
+                    print(f"  --replace: deleted {n_deleted} existing rows for study {study_id!r}")
+
+            spec = StudySpec(
+                study_id=study_id,
+                name=args.name or study_id,
+                description=args.description,
+                method=args.method,
+                target=args.target,
+                reference_type=args.reference_type,
+                covariates=(args.covariates.split(',') if args.covariates else None),
+                source=f"{input_path.name}" + (f" [{args.filter_sql}]" if args.filter_sql else ""),
+                created_at=datetime.now(timezone.utc),
+            )
+            n_inserted, n_unmatched = writer.ingest_rows(
+                spec=spec,
+                rows_table='_stage',
+                gene_col='gene',
+                term_col=term_col, fixed_term=fixed_term,
+                contrast_col=contrast_col, fixed_contrast=fixed_contrast,
+            )
+            print(f"  ✓ inserted {n_inserted} rows into __de "
+                  f"(study={study_id!r})")
+            if n_unmatched:
+                print(f"    {n_unmatched} input rows had unmatched gene names (skipped)")
+        return n_inserted
+    finally:
+        try:
+            tmp_parquet.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+
+    # ── informational subcommands first
+    if args.list_presets:
+        print(format_preset_list())
+        return
+    if args.help_preset:
+        if args.help_preset not in PRESETS:
+            _die(f"unknown preset {args.help_preset!r}. Available: {', '.join(PRESETS.keys())}")
+        print(format_preset_help(PRESETS[args.help_preset]))
+        return
+
+    # ── required positional + --from
+    if not args.db_id:
+        _die("db_id is required (e.g. 'S25/V6W' or a path to a .duckdb). "
+             "See --help-preset / --list-presets for format info.")
+    if not args.from_:
+        _die("--from PATH is required (a CSV or parquet file with DE results).")
+    input_path: Path = args.from_.resolve()
+    if not input_path.exists():
+        _die(f"input file does not exist: {input_path}")
+
+    config = get_config()
+    if not args.ant_serve_url:
+        host = config.get('rest_api_host', 'localhost')
+        port = config.get('rest_api_port', 8080)
+        args.ant_serve_url = f"http://{host}:{port}/api"
+
+    # ── resolve db_id → h5ad entry → duckdb path
+    data_root = Path(config.get('data_folder', './data/h5adstore')).resolve()
+    h5ad_entry = find_h5ad(data_root, args.db_id)
+    if h5ad_entry is None:
+        _die(f"unknown db_id {args.db_id!r} (not found under {data_root}).")
+    if not h5ad_entry.duckdb_path.exists():
+        _die(f"duckdb not found: {h5ad_entry.duckdb_path}. "
+             f"Run ant-convert first.")
+
+    # ── preset
+    preset = _validate_preset(args, input_path)
+
+    # method default suggestion: only used in --method-missing error
+    if not args.method:
+        # Honour preset's default_method silently? No — design says don't
+        # guess. Surface it as an error with the preset's suggestion.
+        suggestion = (
+            f"  Suggested for preset {preset.name!r}: --method {preset.default_method!r}"
+            if preset.default_method else
+            "  Examples: --method wilcoxon | deseq2 | edger | glmm | lmem"
+        )
+        _die(f"--method is required.\n{suggestion}")
+
+    if not args.reference_type and preset.default_reference_type:
+        args.reference_type = preset.default_reference_type
+        print(f"  (defaulting --reference-type to {args.reference_type!r} per preset {preset.name!r})")
+
+    # Validate the rest of the required CLI flags up-front (term/contrast for one-file-one-contrast).
+    _validate_required_flags(args, preset)
+
+    # ── resolve study_id(s)
+    if args.study_id_from:
+        # Long-format split: read distinct values of the SPLIT column.
+        # The split column lives in the SOURCE file under args.study_id_from's
+        # original name — not yet renamed because we read before mapping.
+        # Apply --filter so the split is over the same row subset.
+        where = f" WHERE {args.filter_sql}" if args.filter_sql else ""
+        reader = (
+            f"read_parquet('{input_path}')" if input_path.suffix == '.parquet'
+            else f"read_csv_auto('{input_path}', sample_size=-1)"
+        )
+        con = duckdb.connect()
+        try:
+            split_values = [r[0] for r in con.execute(
+                f"SELECT DISTINCT \"{args.study_id_from}\" FROM {reader}{where}"
+            ).fetchall()]
+        finally:
+            con.close()
+        if not split_values:
+            _die(f"--study-id-from {args.study_id_from!r}: no values found in the "
+                 f"file (after --filter, if any). Nothing to ingest.")
+        studies = [(v, f"\"{args.study_id_from}\" = '{v}'") for v in split_values]
+    else:
+        default_study_id = input_path.stem
+        # strip a trailing '.de' if user named the file <stem>.de.csv
+        if default_study_id.endswith('.de'):
+            default_study_id = default_study_id[:-3]
+        study_id = args.study_id or default_study_id
+        studies = [(study_id, None)]
+
+    # Banner
+    print(f"ant-de-ingest: {args.db_id} ← {input_path.name} (preset={preset.name})")
+    print(f"  duckdb: {h5ad_entry.duckdb_path}")
+    print(f"  studies to ingest: {len(studies)}")
+    if args.dry_run:
+        print(f"  [DRY RUN — no writes]")
+
+    # ── ingest each study
+    total_inserted = 0
+    for study_id, study_filter in studies:
+        # Slugify the study_id to a safe identifier (replace spaces).
+        slug = study_id.replace(' ', '_').replace('/', '_')
+        if slug != study_id:
+            print(f"  note: study_id {study_id!r} slugified to {slug!r}")
+        n = run_ingest_for_study(
+            args=args, preset=preset, h5ad_entry=h5ad_entry,
+            input_path=input_path,
+            study_id=slug,
+            study_filter_sql=study_filter,
+        )
+        total_inserted += n
+
+    # ── sidecar
+    if not args.dry_run and not args.no_sidecar:
+        sidecar = sidecar_path_for(h5ad_entry.h5ad_path)
+        n_sidecar = write_sidecar(sidecar, h5ad_entry.duckdb_path)
+        if n_sidecar:
+            print(f"  ✓ wrote sidecar: {sidecar} ({n_sidecar} rows)")
+        else:
+            print(f"  (no rows in __de — sidecar not written)")
+
+    if args.dry_run:
+        print("ant-de-ingest: dry-run complete (no writes).")
+    else:
+        print(f"ant-de-ingest: done. Inserted {total_inserted} rows across "
+              f"{len(studies)} studies.")
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except DEWriterError as exc:
+        _die(str(exc), code=2)

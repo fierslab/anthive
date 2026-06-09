@@ -71,6 +71,7 @@ sys.path.insert(0, str(lib_dir))
 
 from anthive_db import AnthiveDB, safe_ident
 from config import get_config
+import de_storage as lib_de_storage
 from geneset import (
     GenesetRegistry,
     SCORE_COLUMN_SEPARATOR,
@@ -1711,6 +1712,105 @@ async def get_database_info(db_id: str):
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── differential expression endpoints ─────────────────────────────────────────
+#
+# All under /databases/{db_id}/de/* and read-only. Writes go through
+# the ant-de-ingest CLI (lib/de_storage.py:DEWriter).  Datasets without
+# any DE data return an empty list from /de (and 404 on the rest).
+#
+# Endpoints:
+#   GET /de                                           list studies
+#   GET /de/{study_id}                                study metadata + per-term row counts
+#   GET /de/{study_id}/terms/{term}                   contrasts in this (study, term)
+#   GET /de/{study_id}/terms/{term}/contrasts/{c}     gene rows for one contrast
+#   GET /de/by-gene/{gene_name}                       all rows for one gene (forest plot data)
+
+@app.get("/databases/{db_id:path}/de", tags=["de"])
+async def list_de_studies(db_id: str):
+    """List every DE study on this dataset, with per-study row / term / contrast counts.
+
+    Empty list if no DE data has been ingested for this dataset.
+    """
+    with _pooled_db(db_id) as db:
+        return {"studies": lib_de_storage.list_studies(db.conn)}
+
+
+@app.get("/databases/{db_id:path}/de/by-gene/{gene_name}", tags=["de"])
+async def get_de_by_gene(db_id: str, gene_name: str):
+    """All DE rows for one gene across every study × term × contrast on this dataset.
+
+    Feeds forest-plot UIs. Returns an empty list if the gene is unknown
+    or no DE data exists for this dataset.
+    """
+    with _pooled_db(db_id) as db:
+        return {"gene": gene_name, "rows": lib_de_storage.get_gene_rows(db.conn, gene_name)}
+
+
+@app.get("/databases/{db_id:path}/de/{study_id}", tags=["de"])
+async def get_de_study(db_id: str, study_id: str):
+    """One DE study's metadata + the list of (term, n_contrasts) pairs in it."""
+    with _pooled_db(db_id) as db:
+        study = lib_de_storage.get_study(db.conn, study_id)
+    if study is None:
+        raise HTTPException(404, detail=f"unknown DE study '{study_id}' on '{db_id}'")
+    return study
+
+
+@app.get("/databases/{db_id:path}/de/{study_id}/terms/{term}", tags=["de"])
+async def list_de_contrasts(db_id: str, study_id: str, term: str):
+    """List the contrasts within one (study, term), with per-contrast significance counts."""
+    with _pooled_db(db_id) as db:
+        contrasts = lib_de_storage.list_contrasts(db.conn, study_id, term)
+    if not contrasts:
+        raise HTTPException(
+            404,
+            detail=f"no contrasts for study '{study_id}' / term '{term}' on '{db_id}'",
+        )
+    return {"study_id": study_id, "term": term, "contrasts": contrasts}
+
+
+@app.get(
+    "/databases/{db_id:path}/de/{study_id}/terms/{term}/contrasts/{contrast}",
+    tags=["de"],
+)
+async def get_de_contrast_rows(
+    db_id: str,
+    study_id: str,
+    term: str,
+    contrast: str,
+    sort: str = Query('padj', description="Sort key: 'padj' | 'effsize' | 'estimate'."),
+    direction: str = Query('both', description="'up' | 'down' | 'both'. Only effective for effsize / estimate sorts."),
+    padj_max: Optional[float] = Query(None, description="Filter: rows with padj <= this."),
+    abs_log2fc_min: Optional[float] = Query(None, description="Filter: rows with |log2fc| >= this."),
+    limit: int = Query(200, ge=1, le=10000, description="Page size."),
+    offset: int = Query(0, ge=0, description="Skip this many rows."),
+):
+    """Paged gene rows for one (study, term, contrast).
+
+    Sortable by `padj` (default, ascending — most significant first),
+    `effsize` (signed magnitude of effect; pair with `direction=up/down/both`),
+    or `estimate` (the model-native estimate, same direction semantics as effsize).
+    Optional `padj_max` and `abs_log2fc_min` are applied as filters before paging.
+    """
+    try:
+        with _pooled_db(db_id) as db:
+            rows = lib_de_storage.get_contrast_rows(
+                db.conn, study_id, term, contrast,
+                sort=sort, direction=direction,
+                padj_max=padj_max, abs_log2fc_min=abs_log2fc_min,
+                limit=limit, offset=offset,
+            )
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc))
+    return {
+        "study_id": study_id, "term": term, "contrast": contrast,
+        "sort": sort, "direction": direction,
+        "limit": limit, "offset": offset,
+        "n_rows": len(rows),
+        "rows": rows,
+    }
 
 
 @app.get("/databases/{db_id:path}/genes", tags=["genes"])

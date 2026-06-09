@@ -35,11 +35,16 @@ from config import get_config  # noqa: E402
 # Only these extensions are ever pushed/pulled.
 # .md files are intentionally excluded — they live in git (h5adstore repo), not S3.
 # .inactive sidecars are also intentionally excluded — they live in git.
-SYNC_EXTENSIONS      = {'.h5ad', '.duckdb'}
-# Pull defaults to .h5ad only. .duckdb is derived from .h5ad and should be
-# rebuilt locally via `ant-build-all`. Use `pull --include-duckdb` to override
-# (e.g., disaster recovery where rebuilding everything would be expensive).
-PULL_DEFAULT_EXTS    = {'.h5ad'}
+# .de.parquet is the differential-expression sidecar (see
+# doc/DESIGN_var_and_de.md). It does NOT round-trip into the h5ad, so it
+# lives alongside the h5ad and is shipped to S3 as part of the source-of-
+# truth set (alongside .h5ad). It's also pulled back by default.
+SYNC_EXTENSIONS      = {'.h5ad', '.duckdb', '.de.parquet'}
+# Pull defaults to .h5ad + .de.parquet. .duckdb is derived (rebuilt
+# locally via `ant-build-all` — which auto-re-ingests the .de.parquet
+# sidecar). Use `pull --include-duckdb` to override (e.g., disaster
+# recovery where rebuilding everything would be expensive).
+PULL_DEFAULT_EXTS    = {'.h5ad', '.de.parquet'}
 SKIP_SUFFIXES        = {'.wal', '.deleted', '.partial'}
 # S3 object metadata key holding the source file's mtime (integer seconds).
 # Set on every push so we can detect content-without-size-change drift
@@ -99,7 +104,9 @@ def _is_syncable(rel: str, allowed_exts: set[str] | None = None) -> bool:
     if path.name.startswith('.'):
         return False
     allowed = allowed_exts if allowed_exts is not None else SYNC_EXTENSIONS
-    if path.suffix not in allowed:
+    # endswith() (not path.suffix) because some extensions have multiple
+    # dots: '.de.parquet' must match without also matching every '.parquet'.
+    if not any(rel.endswith(ext) for ext in allowed):
         return False
     if any(rel.endswith(suffix) for suffix in SKIP_SUFFIXES):
         return False
