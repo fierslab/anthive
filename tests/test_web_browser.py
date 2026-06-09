@@ -314,12 +314,24 @@ _GENESET_PAYLOAD = {
 }
 
 
+# DE study list returned by the fake /databases/{id}/de endpoint.
+_DE_STUDIES = {
+    "studies": [
+        {"study_id": "glmm_demo", "name": "GLMM demo", "method": "glmm",
+         "target": "gene", "reference_type": "vsgrandmean",
+         "n_rows": 1000, "n_terms": 2, "n_contrasts": 5},
+    ]
+}
+
+
 def _fake_api_get(api_url, path):
     """In-process stand-in for browser._api_get. Dispatches on path; raises
     requests.HTTPError for anything unknown (mirrors a 404 from ant-serve,
     which the routes catch)."""
     if path == "/databases":
         return {"databases": _DATABASES}
+    if path.startswith("/databases/") and path.endswith("/de"):
+        return _DE_STUDIES
     if path.startswith("/databases/") and path.endswith("/info"):
         db_id = path[len("/databases/"):-len("/info")]
         if db_id in _INFO:
@@ -502,6 +514,58 @@ def test_plot_route_wins_over_dataset_path_converter(client):
 def test_plot_view_api_failure_404(client):
     resp = client.get("/browse/GroupA/missing/plot/scatter")
     assert resp.status_code == 404
+
+
+# ── DE plot geoms (REST API 2.3) ───────────────────────────────────────────────
+
+def test_geom_switcher_lists_de_geoms(client):
+    # The three DE geoms are registered in _PLOT_GEOMS_UI, so the plot-type
+    # switcher (which iterates all_geoms) offers them from any plot page.
+    resp = client.get("/browse/GroupA/ds1/plot/scatter")
+    assert resp.status_code == 200
+    assert "Volcano (DE)" in resp.text
+    assert "Forest (gene × contrasts)" in resp.text
+    assert "MA (DE)" in resp.text
+
+
+@pytest.mark.parametrize("geom", ["volcano", "ma"])
+def test_plot_view_de_cascade_form(client, geom):
+    # volcano/ma render the study→term→contrast cascade, with the study
+    # select seeded from /databases/{id}/de (fake returns 'GLMM demo').
+    resp = client.get(f"/browse/GroupA/ds1/plot/{geom}")
+    assert resp.status_code == 200
+    assert 'name="study"' in resp.text
+    assert 'name="term"' in resp.text
+    assert 'name="contrast"' in resp.text
+    assert "GLMM demo" in resp.text   # study option seeded from /de
+
+
+def test_plot_view_volcano_threshold_inputs(client):
+    resp = client.get("/browse/GroupA/ds1/plot/volcano")
+    assert resp.status_code == 200
+    for field in ("padj_threshold", "log2fc_threshold", "n_label"):
+        assert f'name="{field}"' in resp.text
+
+
+def test_plot_view_forest_gene_input(client):
+    resp = client.get("/browse/GroupA/ds1/plot/forest")
+    assert resp.status_code == 200
+    assert 'name="gene"' in resp.text
+    # optional narrowing selectors present too
+    assert 'name="study"' in resp.text
+
+
+def test_plot_view_de_geom_without_de_data(client, monkeypatch):
+    # When /de fails (no DE ingested), the form still renders and shows the
+    # "no DE data" hint rather than 500ing.
+    def no_de(api_url, path):
+        if path.endswith("/de"):
+            raise requests.HTTPError("no DE")
+        return _fake_api_get(api_url, path)
+    monkeypatch.setattr(browser, "_api_get", no_de)
+    resp = client.get("/browse/GroupA/ds1/plot/volcano")
+    assert resp.status_code == 200
+    assert "No differential-expression data" in resp.text
 
 
 def test_genesets_index_renders_grouped(client):

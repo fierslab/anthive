@@ -310,6 +310,81 @@
         {% for c in plot_meta.cat_fields %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
       </select>
     </fieldset>
+
+    {% elif geom in ('volcano', 'ma') %}
+    {# DE geoms: cascading study → term → contrast.  Terms/contrasts are
+       loaded client-side from /de/{study}/… once a study is chosen. #}
+    <fieldset>
+      <legend>DE study</legend>
+      <select name="study" id="f-study">
+        <option value="">— select study —</option>
+        {% for s in plot_meta.de_studies %}
+        <option value="{{ s.study_id }}" data-method="{{ s.method }}">{{ s.name }} · {{ s.method }} ({{ s.n_contrasts }} contrasts)</option>
+        {% endfor %}
+      </select>
+      {% if not plot_meta.de_studies %}
+      <small style="color:#b45309;margin-top:4px">No differential-expression data ingested for this dataset.</small>
+      {% endif %}
+    </fieldset>
+    <fieldset>
+      <legend>term</legend>
+      <label>model term (covariate / interaction)</label>
+      <select name="term" id="f-term"><option value="">— select study first —</option></select>
+    </fieldset>
+    <fieldset>
+      <legend>contrast</legend>
+      <label>level within the term</label>
+      <select name="contrast" id="f-contrast"><option value="">— select term first —</option></select>
+    </fieldset>
+    {% if geom == 'volcano' %}
+    <fieldset>
+      <legend>thresholds</legend>
+      <label>padj threshold (significance line)</label>
+      <input type="number" name="padj_threshold" id="f-padj_threshold" value="0.05" step="any" min="0" max="1">
+      <label style="margin-top:4px">|log<sub>2</sub>FC| threshold</label>
+      <input type="number" name="log2fc_threshold" id="f-log2fc_threshold" value="1" step="any" min="0">
+      <label style="margin-top:4px">label top N genes</label>
+      <input type="number" name="n_label" id="f-n_label" value="10" min="0" max="100">
+    </fieldset>
+    {% else %}
+    <fieldset>
+      <legend>note</legend>
+      <small style="color:#b45309">
+        MA needs a per-gene <b>base mean</b>, which only DESeq2 / edgeR
+        ingests carry.  GLMM / Wilcoxon studies will return an error here —
+        use Volcano for those.
+      </small>
+    </fieldset>
+    {% endif %}
+
+    {% elif geom == 'forest' %}
+    {# Forest: one gene across many contrasts.  Optional study/term/contrast
+       narrowing (recommended for big studies — the PNG can get tall). #}
+    <fieldset>
+      <legend>gene (required)</legend>
+      <div class="ac-wrap">
+        <input type="text" name="gene" id="f-gene" autocomplete="off" placeholder="e.g. TREM2, APOE">
+        <div class="ac-suggest" id="ac-gene"></div>
+      </div>
+    </fieldset>
+    <fieldset>
+      <legend>narrow (optional)</legend>
+      <label>study</label>
+      <select name="study" id="f-study">
+        <option value="">— all studies —</option>
+        {% for s in plot_meta.de_studies %}
+        <option value="{{ s.study_id }}">{{ s.name }} · {{ s.method }}</option>
+        {% endfor %}
+      </select>
+      <label style="margin-top:4px">term</label>
+      <select name="term" id="f-term"><option value="">— all terms —</option></select>
+      <label style="margin-top:4px">contrast</label>
+      <select name="contrast" id="f-contrast"><option value="">— all contrasts —</option></select>
+      <small style="margin-top:4px;color:#666">
+        A gene across every contrast can be tall.  Narrowing by term keeps
+        the figure readable for large studies.
+      </small>
+    </fieldset>
     {% endif %}
 
     {# ── common ────────────────────────────────────────────────────────────── #}
@@ -481,9 +556,33 @@
   const srcUrl   = document.getElementById('src-url');
   const captionEl = document.getElementById('plot-caption');
 
+  // DE geoms have required selections that arrive via a cascade; until they're
+  // all chosen, show a hint instead of firing a request that would 400.
+  const DE_GEOMS = ['volcano', 'ma', 'forest'];
+  function fieldVal(name) {
+    const el = document.querySelector(`#plot-form [name="${name}"]`);
+    return el ? (el.value || '').trim() : '';
+  }
+  function canRender() {
+    if (GEOM === 'volcano' || GEOM === 'ma')
+      return !!(fieldVal('study') && fieldVal('term') && fieldVal('contrast'));
+    if (GEOM === 'forest') return !!fieldVal('gene');
+    return true;
+  }
+  function renderHint() {
+    if (GEOM === 'volcano' || GEOM === 'ma') return 'select a DE study, term, and contrast on the left';
+    if (GEOM === 'forest') return 'enter a gene on the left';
+    return 'configure on the left to render';
+  }
+
   async function refresh() {
     renderToken++;
     const my = renderToken;
+    if (!canRender()) {
+      imgBox.innerHTML = `<span style="color:#aaa;font-size:13px">${renderHint()}</span>`;
+      status.textContent = ''; captionEl.textContent = ''; srcUrl.innerHTML = '';
+      return;
+    }
     const url = buildUrl('png');
     status.innerHTML = '<span class="spinner"></span> rendering…';
     srcUrl.innerHTML = `source: <a href="${url}">${url.split('?')[1]||''}</a>`;
@@ -675,6 +774,73 @@
   attachAutocomplete('f-color', 'ac-color', ['gene','cat','num']);
   attachAutocomplete('f-y',     'ac-y',     ['gene','num']);
   attachAutocomplete('f-x',     'ac-x',     ['gene','num']);
+  attachAutocomplete('f-gene',  'ac-gene',  ['gene']);   // forest geom
+
+  // ── DE cascade: study → term → contrast ──────────────────────────────────
+  // term/contrast option lists are dataset-and-study-specific, so they're
+  // fetched on demand from /de/{study}/… rather than baked into the page.
+  async function _deFetch(path) {
+    try {
+      const r = await fetch(`${API_URL.replace(/\/$/, '')}/databases/${DB_ID}${path}`);
+      return r.ok ? await r.json() : null;
+    } catch (e) { return null; }
+  }
+  async function populateTerms(study, selected) {
+    const sel = document.getElementById('f-term');
+    if (!sel) return;
+    const allOpt = GEOM === 'forest' ? '<option value="">— all terms —</option>'
+                                     : '<option value="">— select term —</option>';
+    sel.innerHTML = allOpt;
+    if (!study) return;
+    const data = await _deFetch(`/de/${encodeURIComponent(study)}`);
+    (data?.terms || []).forEach(t => {
+      const o = document.createElement('option');
+      o.value = t.term;
+      o.textContent = `${t.term} (${t.n_contrasts})`;
+      sel.appendChild(o);
+    });
+    if (selected) sel.value = selected;
+  }
+  async function populateContrasts(study, term, selected) {
+    const sel = document.getElementById('f-contrast');
+    if (!sel) return;
+    const allOpt = GEOM === 'forest' ? '<option value="">— all contrasts —</option>'
+                                     : '<option value="">— select contrast —</option>';
+    sel.innerHTML = allOpt;
+    if (!study || !term) return;
+    const data = await _deFetch(`/de/${encodeURIComponent(study)}/terms/${encodeURIComponent(term)}`);
+    (data?.contrasts || []).forEach(c => {
+      const o = document.createElement('option');
+      o.value = c.contrast;
+      const nsig = c['n_sig_padj_lt_0.05'];
+      o.textContent = nsig != null ? `${c.contrast} — ${nsig} sig` : c.contrast;
+      sel.appendChild(o);
+    });
+    if (selected) sel.value = selected;
+  }
+  async function initDeCascade() {
+    const studySel = document.getElementById('f-study');
+    const termSel  = document.getElementById('f-term');
+    if (studySel) {
+      studySel.addEventListener('change', async () => {
+        await populateTerms(studySel.value);
+        await populateContrasts(studySel.value, '');   // reset contrasts
+      });
+    }
+    if (termSel) {
+      termSel.addEventListener('change', async () => {
+        await populateContrasts(studySel ? studySel.value : '', termSel.value);
+      });
+    }
+    // Restore a fully-specified plot from the URL (study+term+contrast).
+    const p = new URLSearchParams(window.location.search);
+    if (studySel && studySel.value) {
+      await populateTerms(studySel.value, p.get('term'));
+      if (termSel && termSel.value)
+        await populateContrasts(studySel.value, termSel.value, p.get('contrast'));
+    }
+    refresh();
+  }
 
   // Pre-fill from URL: links like /plot/bar?x=development_stage should land
   // ready-to-render. Every form input uses its plot-API name as the `name`
@@ -896,13 +1062,23 @@
         label: 'split',
         ...mergeSmart(topCat.slice(0, 3), clusterCols),
       });
+
+    } else if (geom === 'forest') {
+      // gene shortcuts from the dataset's curated favourites
+      attachChips('gene', { label: 'gene', curated: topGenes.slice(0, 6) });
     }
   })();
 
   // initial render
   refreshDownloadLinks();
-  // Defer initial refresh slightly so all listeners are attached
-  setTimeout(refresh, 100);
+  if (DE_GEOMS.includes(GEOM)) {
+    // populates the study→term→contrast dropdowns (restoring any URL state),
+    // then refreshes once the cascade is in place
+    initDeCascade();
+  } else {
+    // Defer initial refresh slightly so all listeners are attached
+    setTimeout(refresh, 100);
+  }
 })();
 </script>
 {% endblock %}

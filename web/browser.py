@@ -538,7 +538,24 @@ _PLOT_GEOMS_UI = {
                   'needs': {'x': 'gene_or_num', 'y': 'gene_or_num',
                             'color': 'categorical'},
                   'group': 'trajectory'},
+    # ── DE-driven geoms (REST API 2.3) — need differential-expression data
+    #    ingested for the dataset.  volcano/ma take a (study, term, contrast)
+    #    triple; forest takes a gene and plots it across contrasts.
+    'volcano':   {'label': 'Volcano (DE)', 'icon': '🌋',
+                  'needs': {'de': 'study_term_contrast'},
+                  'group': 'de'},
+    'ma':        {'label': 'MA (DE)', 'icon': '📐',
+                  'needs': {'de': 'study_term_contrast'},
+                  'group': 'de'},
+    'forest':    {'label': 'Forest (gene × contrasts)', 'icon': '🌲',
+                  'needs': {'de': 'gene'},
+                  'group': 'de'},
 }
+
+# Geoms that consume differential-expression endpoints.  plot_view fetches
+# the dataset's DE study list (for the cascading study→term→contrast pickers)
+# only for these.
+_DE_GEOMS = {'volcano', 'ma', 'forest'}
 
 # Display order for the viz row on the dataset page (group + label).
 _PLOT_GEOM_GROUPS = (
@@ -564,9 +581,10 @@ async def plot_view(request: Request, folder_browse_id: str,
     group_id = unquote(folder_browse_id)
     file_id = unquote(dataset_browse_id)
     db_id = f"{group_id}/{file_id}"
+    api_url = _api_url(request)
 
     try:
-        db = _api_get(_api_url(request), f'/databases/{db_id}/info')
+        db = _api_get(api_url, f'/databases/{db_id}/info')
     except Exception as error:
         print(f"API error: {error}")
         return templates.TemplateResponse(
@@ -578,6 +596,15 @@ async def plot_view(request: Request, folder_browse_id: str,
     collection = db.get('collection') or {}
     friendly_group = collection.get('group') or group_id
     dataset_title = db.get('title') or file_id
+
+    # DE geoms need the dataset's DE study list to seed the study→term→contrast
+    # pickers (terms/contrasts are then loaded client-side on demand).
+    de_studies: List[Dict] = []
+    if geom in _DE_GEOMS:
+        try:
+            de_studies = _api_get(api_url, f'/databases/{db_id}/de').get('studies', [])
+        except Exception as error:
+            print(f"DE study fetch error: {error}")
 
     obs = db.get('obs') or {}
     # top_* defaults come from the .md and were curated by `ant-suggest-tops`.
@@ -595,6 +622,9 @@ async def plot_view(request: Request, folder_browse_id: str,
         'top_genes':   top_genes,
         'top_cat':     top_cat,
         'top_num':     top_num,
+        # DE study list (empty unless this is a DE geom) — seeds the
+        # study→term→contrast cascade in plot.html.
+        'de_studies':  de_studies,
     }
 
     return templates.TemplateResponse(request, "plot.html", {
