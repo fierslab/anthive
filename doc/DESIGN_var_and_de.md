@@ -342,9 +342,10 @@ Steps:
    per the ingestion contract).
 2. Aggregate cells by `--pseudobulk-by` (typically donor-level) → a
    `(n_donors × n_genes)` count matrix.
-3. Run DESeq2 via [`pydeseq2`](https://pydeseq2.readthedocs.io/) (pure
-   Python — no R dependency). For `--method edger`, shell out to R
-   (separate optional path; only required when DESeq2 isn't a fit).
+3. Run DESeq2 via [`pydeseq2`](https://pydeseq2.readthedocs.io/) — pure
+   Python, default. `--engine deseq2-r` (R shell-out) is reserved as a
+   future opt-in for projects that need bit-for-bit R-DESeq2
+   reproducibility; not implemented in v1.
 4. Reshape, write sidecar, ingest — same as `ant-de-wilcoxon` step 4–5.
 
 Single-cell DE is increasingly recommended to be done on **pseudobulk**
@@ -352,39 +353,179 @@ Single-cell DE is increasingly recommended to be done on **pseudobulk**
 single-cell differential expression"). This tool is the easy path to
 that recommended workflow.
 
-### `ant-de-ingest` — generic ingestion of a DE result file
+### `ant-de-ingest` — friendly ingestion of a DE result file
 
 The shared backend; the two analysis tools above feed into it, plus it
-handles ad-hoc imports from user-supplied CSV / parquet (like the
-worked example below).
+handles ad-hoc imports from user-supplied CSV / parquet (DESeq2 / edgeR
+/ scanpy outputs, the worked example below, etc.).
+
+#### UX principles
+
+The tool is **friendly but never guesses**. Two rules:
+
+1. **Be helpful** — for every required input, surface what valid values
+   look like and give one clear example. Built-in presets cover the
+   common cases (default DESeq2 / edgeR / scanpy outputs).
+2. **Be explicit about ambiguity** — if a column could mean two things,
+   stop and ask. Don't silently pick. The error message names the
+   column, lists the candidates, and shows the exact flag to set.
+
+This means: errors include *the next command to run*, not just *what
+went wrong*.
+
+#### Built-in presets
 
 ```sh
-ant-de-ingest S25/V6W \
-    --from merged_DE.csv \
-    --map gene=gene,term=variable,contrast=level,log2fc=log2fc,pvalue=pval,padj=pval_adj,...
-    [--study-id-from model]              # or pass --study-id explicitly
-    [--method glmm]
-    [--target gene|module]
+ant-de-ingest <db_id> --preset <name> --from <file> --study-id <slug> [...]
 ```
 
-The `--map` flag lets you rename columns from whatever the upstream
-file calls them to the anthive `__de` column names. Defaults match the
-natural names (`gene`, `log2fc`, `pvalue`, `padj`, …), so for
-well-formed inputs `--map` can be omitted.
+Presets ship column-name mappings for the common DE-tool outputs.
+Each preset can be overridden field-by-field with `--map`; presets are
+just shortcuts for "the column-name conventions this tool emits".
 
-Steps:
+| Preset | Source | Notes |
+| --- | --- | --- |
+| `deseq2` | `pydeseq2` / DESeq2 R `results()` (CSV per contrast) | One file = one contrast; user passes `--term` and `--contrast` explicitly or supplies a folder of files via `--from-dir` (filename = contrast). |
+| `edger` | edgeR `topTags()$table` (CSV per contrast) | Same shape as DESeq2; different column names (`logFC`, `PValue`, `FDR`). |
+| `scanpy` | `sc.tl.rank_genes_groups()` exported via `sc.get.rank_genes_groups_df()` | Has a `group` column, so one file = many contrasts; `--term` is the obs column tested, `contrast` reads from `group`. |
+| `long` | A long-format CSV with explicit `study/term/contrast/gene/...` columns (the merged_DE.csv shape) | The "I built my own format" path; relies on `--map` for renames. |
+
+The preset list is **discoverable**:
+
+```sh
+ant-de-ingest --list-presets
+```
+
+prints each preset's expected columns, the canonical anthive column it
+maps to, and a one-line description.
+
+#### CLI shape
+
+```sh
+ant-de-ingest <db_id>                          # e.g. S25/V6W (required)
+    --from <file>                              # CSV or parquet (required)
+    [--from-dir <dir>]                         # alternative: a directory of per-contrast files (DESeq2/edgeR style)
+    --preset deseq2|edger|scanpy|long          # which tool produced the file (REQUIRED — no default; we don't guess)
+    [--study-id <slug>]                        # default: file stem ('merged_DE.csv' → 'merged_DE'). Override with --study-id.
+    [--study-id-from <column>]                 # for long-format files with a 'model'/'study' column — one input file → many studies
+    [--method <name>]                          # e.g. 'wilcoxon', 'deseq2', 'glmm'. Required for new studies; preset suggests a default.
+    [--target gene|module]                     # default: 'gene'.
+    [--reference-type vsgrandmean|vsreference|pairwise]   # default depends on preset (vsreference for deseq2/edger, none for scanpy rank_genes_groups)
+    [--term <name>]                            # required for presets where the file is "one term, many contrasts" (deseq2, edger, scanpy)
+    [--contrast <name>]                        # required for presets where the file is a single contrast (one-file deseq2/edger)
+    [--name <human-readable>]                  # default: --study-id
+    [--description <text>]                     # default: empty
+    [--covariates <csv-list>]                  # informational, stored on __de_study
+    [--map src=dst,src=dst,...]                # explicit column rename, overrides the preset's defaults field-by-field
+    [--filter "<SQL WHERE clause>"]            # row-level filter applied at read time (e.g. --filter "model = 'glmm'")
+    [--dry-run]                                # parse + validate only, don't write
+    [--force-mismatch]                         # bypass the gene-namespace bail-out (use only when you're sure)
+    [--replace]                                # delete an existing study_id before writing
+```
+
+Plus two informational subcommands:
+
+```sh
+ant-de-ingest --list-presets                   # print each preset's expected columns + a one-liner
+ant-de-ingest --help-preset deseq2             # detailed help for one preset (mapping, required flags, example)
+```
+
+#### Strict-but-helpful validation
+
+The ingester runs validation **before** any write and exits clean on
+failure with a message that tells you the next step.
+
+What it checks (in order):
+
+1. **Preset chosen**: `--preset` is required. If omitted, error names
+   all available presets and tells you which one fits your file based
+   on its column names. (Detection is informational only; the user
+   still has to pass the flag explicitly.)
+
+2. **Required columns present**: per the preset, the file must have
+   the expected source columns. Missing columns produce:
+
+   ```
+   ant-de-ingest: preset 'deseq2' expects columns
+                  ['gene', 'log2FoldChange', 'pvalue', 'padj', 'baseMean', 'lfcSE']
+                  but your file is missing: ['baseMean'].
+                  If your file uses a different column name for the
+                  base-mean expression, map it with:
+                    --map baseMean=<your_column>
+                  Or, if your file doesn't have it, that's fine — pass:
+                    --map baseMean=
+                  to drop it.
+   ```
+
+3. **Required CLI args**: if the preset is `deseq2` or `edger` (one
+   file = one contrast), the ingester refuses unless `--term` and
+   `--contrast` are passed. The error names both flags and tells you
+   to look at the file's column / filename to pick values.
+
+4. **`--method` required for new studies**: if the resolved `study_id`
+   doesn't exist in `__de_study` yet, `--method` is required. The error
+   lists the methods the preset suggests (`'deseq2'` for `--preset
+   deseq2`, etc.) so the user can just copy-paste.
+
+5. **Gene-namespace sanity**: validate gene names against the duckdb's
+   `__genes`. If <10% match, fail with:
+
+   ```
+   ant-de-ingest: only 47 / 30000 gene names matched the dataset
+                  (expected ≥10%).  Likely causes:
+                    - DE was computed against a different gene-name
+                      namespace (Ensembl ID vs HGNC symbol).
+                    - --target should be 'module' not 'gene' (or vice versa).
+                  Examples of unmatched DE genes: ENSG00000142192, ENSG00000142168, ...
+                  Examples of dataset __genes:     APP, APOE, TREM2, ...
+                  To bypass this check (use carefully):
+                    --force-mismatch
+   ```
+
+   Warning (not error) if 10–95% match — partial matches probably mean
+   a gene-filter step but worth flagging the count.
+
+6. **Contrast / term resolution**: for `scanpy` / `long` presets, if the
+   file has a `term` value that names an obs column, validate that the
+   `contrast` values are a subset of that obs column's levels. Mismatch
+   is a warning, not an error (model terms like `interaction` legitimately
+   don't map to obs levels).
+
+7. **`study_id` collision**: if `study_id` already exists and the new
+   data has different `__de_study` metadata (different method, different
+   covariates), fail with:
+
+   ```
+   ant-de-ingest: study_id 'leiden_r0.8_wilcoxon' already exists with
+                  method='wilcoxon', n_tests_total=18000, created_at=...
+                  Your new input would change those values. Either:
+                    --study-id <new-slug>          # ingest as a separate study
+                    --replace                      # delete & re-ingest this study
+   ```
+
+   Re-ingesting the same data into the same `study_id` (idempotent
+   UPSERT) is fine and silent.
+
+#### Steps (after validation passes)
 
 1. Read CSV / parquet via DuckDB (no pandas memory blow-up).
-2. Validate gene names against the duckdb's `__genes` (warn on
-   unmatched; error if >X% unmatched — likely wrong gene namespace).
-3. Validate contrast levels against the relevant obs column (warn if
-   the contrasts can't be tied to a known obs column; this is fine for
-   pure model-term contrasts like `interaction` that don't directly
-   map to one obs).
-4. Write rows to `__de` and `__de_study`. UPSERT semantics on
-   `(study_id, term, contrast, gene_id)` — re-running the ingester on
-   the same input is idempotent.
-5. Append to the sidecar `<basename>.de.parquet`.
+2. Apply the preset's column mapping plus any `--map` overrides.
+3. Compute `effsize` = `COALESCE(log2fc, zeff)` at ingest.
+4. For `long` presets with `--study-id-from <col>`, split the input by
+   that column and ingest as multiple studies (each file pass creates
+   N study rows).
+5. Write rows to `__de_study` + `__de`. UPSERT on
+   `(study_id, term, contrast, gene_id)`.
+6. Write the sidecar `<basename>.de.parquet` (append; the parquet has
+   `study_id` so multiple studies coexist in one file).
+7. Print a summary:
+
+   ```
+   ✓ Ingested 2,980,000 rows into __de (study='glmm_vsgrandmean_genes',
+     14 terms, 154 contrasts, 10,000 genes).
+   ✓ Wrote sidecar: data/h5adstore/Sierksma2025/Village.6M/Village.6M.de.parquet (632 MB).
+     `ant-sync push` will upload it.
+   ```
 
 ### Optional: `ant-de-export` — read DE out
 
@@ -518,18 +659,56 @@ Cross-validation against the `.h5ad`:
   values: **clean, reference omitted as expected**.
 - 13 module names == `WGCNA_modules.h5ad.var_names`: **exact match**.
 
+This file is **a one-off custom format** (not something a tool produced
+out of the box) — it goes through the `long` preset with explicit column
+maps. We will import it as a test case, but this exact shape is not
+expected to recur and the ingester is not tuned for it.
+
 Ingestion path:
 
 1. Place `merged_DE.csv` alongside the dataset (or anywhere reachable).
-2. `ant-de-ingest S25/V6W --from merged_DE.csv --study-id-from model
-   --map gene=gene,term=variable,contrast=level,log2fc=log2fc,pvalue=pval,padj=pval_adj,estimate=estimate_og,SE=SE_og,ci_low=ninetyfiveL_og,ci_high=ninetyfiveH_og`
-3. The ingester:
+2. Run the ingester for the gene-DE rows:
+
+   ```sh
+   ant-de-ingest S25/V6W \
+       --preset long \
+       --from /data/1/project/PRS/de_merge/merged_DE.csv \
+       --study-id-from model \
+       --target gene \
+       --method glmm \
+       --reference-type vsgrandmean \
+       --map gene=gene,term=variable,contrast=level,\
+log2fc=log2fc,pvalue=pval,padj=pval_adj,\
+estimate=estimate_og,SE=SE_og,\
+ci_low=ninetyfiveL_og,ci_high=ninetyfiveH_og \
+       --filter "model = 'DE interpretable glmm vs grandmean'"
+   ```
+
+3. Same again for the module-DE rows, against the modules duckdb:
+
+   ```sh
+   ant-de-ingest S25/V6W_WGCNA_modules \
+       --preset long \
+       --from /data/1/project/PRS/de_merge/merged_DE.csv \
+       --study-id-from model \
+       --target module \
+       --method lmem \
+       --reference-type vsgrandmean \
+       --map [same as above] \
+       --filter "model = 'Module DE interpretable lmem vs grandmean'"
+   ```
+
+4. The ingester:
    - Reads the CSV via DuckDB (handles the 1 GB file without pandas
-     memory issues).
+     memory blow-up).
    - Splits into 2 studies (one per unique `model`).
-   - Module rows route to the modules duckdb; gene rows to the main duckdb.
-   - Writes `<basename>.de.parquet` sidecars next to each.
-4. The data is now queryable via `/api/databases/S25/V6W/de`.
+   - Validates gene names against each duckdb's `__genes`.
+   - Writes the `.de.parquet` sidecar next to each h5ad.
+5. The data is now queryable via `/api/databases/S25/V6W/de`.
+
+(The `--filter` flag — a SQL `WHERE` clause applied at read-time — is
+the way to subset a long-format file. Useful here because gene-DE and
+module-DE share one CSV but route to different duckdbs.)
 
 Patient-level data (`patientleveldata.parquet`, 31 rows × 189 cols) is
 **out of scope** for this design. It's per-donor PRS + summary data,
@@ -550,21 +729,51 @@ not DE. Best home: a separate "donor metadata" facility (TBD).
 
 ---
 
-## Open questions
+## Resolved design decisions
 
-1. **`pydeseq2` vs R shell-out for `ant-de-pseudobulk`.** `pydeseq2` is
-   pure Python (matches the existing micromamba env philosophy) and
-   converges on identical numbers as DESeq2 for standard tests. Default
-   to `pydeseq2`; offer `--engine deseq2-r` as an opt-in if a project
-   needs strict R-DESeq2 reproducibility.
-2. **Where does the sidecar `<basename>.de.parquet` actually live?**
-   Right next to the `.h5ad` is the natural answer. Alternative: a
-   `de/` subdir per dataset folder. Going with "next to" for symmetry
-   with `.h5ad.mus`, `.md`.
-3. **What about ingesting CSV without a `model` column?** Default the
-   `study_id` to the file stem, or require `--study-id` explicitly.
-   Going with "require `--study-id` unless `--study-id-from COLUMN` is
-   passed". Explicit is safer for one-off imports.
-4. **Test ergonomics.** The CSV-ingester's column mapping flag (`--map
-   k=v,k=v,…`) is the only awkward UX. Worth a sanity-check pass once
-   we have a couple of real inputs.
+1. **Pseudobulk engine.** `pydeseq2` is the default and only engine in
+   v1. The R shell-out (`--engine deseq2-r`) is reserved as a future
+   opt-in for projects that need bit-for-bit R-DESeq2 reproducibility;
+   the CLI flag is documented but exits with a "not yet implemented"
+   message in v1.
+
+2. **Sidecar location.** Right next to the `.h5ad`:
+   `<basename>.de.parquet`. Matches the existing `.h5ad.mus`, `.md`,
+   `.duckdb` symmetry.
+
+3. **`study_id` default.** **The file stem.** `merged_DE.csv`
+   → `study_id='merged_DE'`. Override with `--study-id <slug>`.
+   For files with a study/model column (long format),
+   `--study-id-from <column>` splits the file into multiple studies
+   named after the column values.
+
+4. **Format support — presets, not auto-detection.** v1 ships four
+   built-in presets covering the standard cases:
+
+   - `deseq2` — pydeseq2 / R DESeq2 `results()` output.
+   - `edger` — edgeR `topTags()$table` output.
+   - `scanpy` — `sc.get.rank_genes_groups_df()` output.
+   - `long` — arbitrary long-format CSV with explicit columns.
+
+   `--preset` is **required**; the tool does NOT try to guess from
+   file contents. If the user doesn't pass it, the error names the
+   four presets and shows which expected columns are present in the
+   file (so picking is mechanical, not divination).
+
+   Extensibility for new variants: a new preset is ~20 lines (a dict
+   of source-name → anthive-name mappings + a method default + a
+   shape declaration: "one file = one contrast" vs "one file = many
+   contrasts"). Drop it into `lib/de_presets.py`, list it in `--help`,
+   done.
+
+5. **UX rules — friendly defaults, explicit choices, no guessing.**
+   - For every required input, errors show *the next command to run*
+     (named flag + valid values + example), not just *what went wrong*.
+   - Ambiguity is fatal until resolved by the user. "Two columns could
+     be the gene name" → stop, list both, point at `--map gene=<your_column>`.
+   - `--dry-run` parses + validates the full pipeline without writing,
+     so users can iterate on flags cheaply.
+   - The presets give defaults for the **column mapping**, never for
+     the **semantic decisions** (study_id, term, method). Those stay
+     user-supplied; the preset only suggests defaults in error
+     messages.
