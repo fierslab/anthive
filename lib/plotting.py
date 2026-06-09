@@ -1394,8 +1394,33 @@ def plot_forest(
                 transform=ax.transAxes, ha='center', va='center', color='#888')
         return _render_figure(fig, dpi, output_format, caption, source_url)
 
-    # Prefer log2fc; fall back to estimate if log2fc is null
-    df['_effect'] = df['log2fc'].where(df['log2fc'].notna(), df.get('estimate'))
+    # Effect axis must match the CI axis.  For DESeq2/edgeR pipelines log2fc
+    # and ci_low/ci_high are co-stored on the log2 scale, so they coincide.
+    # For a GLMM with a natural-log link, log2fc is on log2 scale while
+    # estimate / ci_low / ci_high live on the linear-predictor scale —
+    # plotting log2fc as the dot with CIs from the linear-predictor scale
+    # gives a visually broken plot where the bar doesn't cover the dot.
+    # Pick: if CIs are present AND an estimate column is present, use the
+    # estimate (matches the CI scale); otherwise fall back to log2fc with
+    # no CI bars.  Determine the X-axis label from what was actually picked.
+    has_ci = ('ci_low' in df.columns and 'ci_high' in df.columns
+              and df['ci_low'].notna().any() and df['ci_high'].notna().any())
+    has_estimate = 'estimate' in df.columns and df['estimate'].notna().any()
+
+    if has_ci and has_estimate:
+        df['_effect'] = df['estimate'].where(df['estimate'].notna(), df['log2fc'])
+        # If estimate and log2fc are numerically identical (DESeq2 / edgeR
+        # convention), the axis is still the log2-fc axis — just labelled
+        # accordingly.  Otherwise we're on the model-native scale (typically
+        # log-link / linear-predictor for GLMM, LMEM).
+        diffs = (df['estimate'] - df['log2fc']).abs()
+        same_scale = diffs.notna().any() and float(diffs.max()) < 1e-6
+        x_label = 'log₂ fold change' if same_scale else 'effect (model-native scale)'
+    else:
+        df['_effect'] = df['log2fc'].where(df['log2fc'].notna(), df.get('estimate'))
+        x_label = 'log₂ fold change'
+        has_ci = False   # without a matching estimate, don't draw possibly-mismatched bars
+
     df = df.dropna(subset=['_effect'])
     if len(df) == 0:
         fig, ax = plt.subplots(figsize=(width, height))
@@ -1421,7 +1446,6 @@ def plot_forest(
 
     ax.axvline(0, color='#444', linewidth=0.7)
 
-    has_ci = df['ci_low'].notna().any() and df['ci_high'].notna().any()
     for i, row in df.iterrows():
         color = sig_color if row['_sig'] else ns_color
         if has_ci and pd.notna(row.get('ci_low')) and pd.notna(row.get('ci_high')):
@@ -1433,7 +1457,7 @@ def plot_forest(
 
     ax.set_yticks(range(len(df)))
     ax.set_yticklabels(df['_label'].tolist(), fontsize=7)
-    ax.set_xlabel('log₂ fold change')
+    ax.set_xlabel(x_label)
     ax.set_ylim(-0.5, len(df) - 0.5)
     n_sig = int(df['_sig'].sum())
     title_bits = ['Forest', gene_name, f'{n_sig}/{len(df)} sig (padj≤{padj_threshold:g})']
