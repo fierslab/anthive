@@ -3,9 +3,31 @@
 {
 	# Disable admin API to avoid port conflict with system Caddy
 	admin off
+
+	# Disable Caddy's automatic HTTPS.  This stack runs HTTP-only on
+	# the localhost / Nebula / LAN interfaces — TLS is handled either
+	# upstream (Nebula encrypts its tunnel; a public deploy fronts
+	# anthive with nginx/Cloudflare) or not at all (localhost).  Without
+	# this line, Caddy sees ip:port addresses and tries to bind :80 for
+	# the HTTP→HTTPS redirect, which fails as a non-root process.
+	auto_https off
 }
 
 :8501 {
+	# Restrict which network interfaces Caddy actually accepts connections
+	# on.  Default ("0.0.0.0 ::") = all IPv4 + IPv6 interfaces — fine for
+	# laptops, but typically too open on a multi-homed host where you want
+	# the stack reachable on (say) Nebula + localhost but NOT on the office
+	# LAN or Docker bridges.
+	#
+	# Override at runtime via the ANTHIVE_CADDY_BIND env var.  Multiple
+	# space-separated IPs / hostnames bind to each one.
+	#
+	#   export ANTHIVE_CADDY_BIND="127.0.0.1 10.42.0.3"
+	#   # → reachable only on localhost + the Nebula IP
+	#
+	# See INSTALL.md section 5 for the persistent-per-host pattern.
+	bind {$ANTHIVE_CADDY_BIND:0.0.0.0 ::}
 	# Root directory for static files
 	root * ./webapp
 

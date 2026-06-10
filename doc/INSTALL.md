@@ -240,6 +240,35 @@ make caddy-passwd       # interactive: pick a user + password
 make caddy-passwd-clear # remove the auth and re-open the host
 ```
 
+**Restrict which interfaces Caddy binds to** (multi-homed hosts —
+Nebula / Tailscale / Wireguard + LAN):
+
+By default Caddy accepts connections on *every* network interface. On
+a multi-homed host (Nebula peer + office LAN + Docker bridges all on
+the same machine), that often exposes more than you want even with
+basic-auth in front. Restrict by setting ``ANTHIVE_CADDY_BIND``
+before starting the supervisor — values are space-separated IPs or
+hostnames:
+
+```sh
+# Localhost + a Nebula peer only:
+export ANTHIVE_CADDY_BIND="127.0.0.1 10.42.0.3"
+
+# Localhost + Tailscale only (substitute your TS IP):
+export ANTHIVE_CADDY_BIND="127.0.0.1 100.x.y.z"
+
+# Then restart the whole supervisor so the env var propagates to caddy:
+make serve-stop
+make serve-debug      # or: make serve-all
+```
+
+The env var is read by `config/Caddyfile` on startup (consumed by
+Caddy's `bind` directive). Children of the supervisor inherit its
+environment, so setting the var in the systemd unit's `Environment=`
+directive makes this persistent across restarts. Leaving it unset
+preserves the default `0.0.0.0 ::` (all v4 + v6 interfaces) for
+development laptops.
+
 ---
 
 ## 5b. Reverse proxy: nginx (alternative)
@@ -316,6 +345,9 @@ ExecStop=/opt/anthive/anthive4/bin/ops/ant-supervisor restart all
 Restart=on-failure
 RestartSec=5
 Environment=PATH=/home/anthive/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Optional: restrict Caddy to specific interfaces (see section 5 above).
+# Without this, Caddy binds to every interface.
+Environment=ANTHIVE_CADDY_BIND=127.0.0.1 10.42.0.3
 
 [Install]
 WantedBy=multi-user.target
