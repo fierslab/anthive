@@ -5,6 +5,64 @@ All notable changes to the Anthive Client will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-06-10
+
+### Added — differential-expression data wrappers
+
+Covers the REST API 2.3 ``/databases/{db_id}/de/*`` endpoints
+(see ``doc/DESIGN_var_and_de.md`` for the design rationale):
+
+- **``list_de_studies(db_id)``** — list studies on a dataset with
+  ``n_rows`` / ``n_terms`` / ``n_contrasts`` counts.  Returns ``[]``
+  when no DE has been ingested.
+- **``get_de_study(db_id, study_id)``** — full study metadata + the
+  list of (term, n_contrasts).
+- **``list_de_contrasts(db_id, study_id, term)``** — contrasts within
+  one term with per-contrast significance counts at
+  padj < 0.05 / 0.01 / 0.001.
+- **``get_de_rows(db_id, study_id, term, contrast, ...)``** — paged
+  gene rows.  Sortable by ``padj`` / ``effsize`` / ``estimate``;
+  filterable by ``padj_max`` and ``abs_log2fc_min``; ``limit`` /
+  ``offset`` for paging.  ``format='dataframe'`` returns a pandas
+  DataFrame.
+- **``get_de_by_gene(db_id, gene)``** — every DE row for one gene
+  across all studies / terms / contrasts on a dataset.  Forest-plot
+  data source.
+
+### Added — version + changelog wrappers
+
+- **``get_version()``** — structured ``/version`` response (REST API
+  2.3+).  Falls back to ``/health.api_version`` on pre-2.3 servers
+  so older deploys keep working.  Use this for the recommended
+  "cache version, diff on session start" client pattern.
+- **``get_changelog()``** — fetches the API changelog as a Markdown
+  string.
+
+### Added — bundled tests + PyPI build
+
+- **``antclient/tests/``** — first dedicated test suite for the
+  client.  Two flavours:
+    * ``test_offline.py`` — pure-Python checks that don't need a
+      running server (URL construction, ``PLOT_GEOMS`` validation,
+      ``ValueError`` on unknown geom, etc.).
+    * ``test_smoke.py`` — round-trip tests against a live ant-serve.
+      Skipped when ``ANTHIVE_TEST_URL`` env var isn't set.  Covers
+      every method introduced in this release.
+
+### Server compatibility
+
+- ``antclient 1.7.0`` works against **REST API 2.3+** for the DE
+  endpoints (returns 404 cleanly on older servers — the methods
+  surface the HTTPError so callers can catch and fall back).
+- All 1.6.0 endpoints (per-geom plots, analytics, module score,
+  genesets) still work — no breaking changes.
+
+### PyPI
+
+This is the first release prepped for a PyPI publish.  The wheel +
+sdist in ``dist/`` are built from ``pyproject.toml`` and are ready
+for ``twine upload`` — see ``antclient/RELEASE.md``.
+
 ## [1.6.0] - 2026-06-07
 
 ### Changed — per-geom plot endpoints

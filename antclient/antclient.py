@@ -22,7 +22,7 @@ Version: 1.5.0
 from typing import Any, Dict, List, Optional, Union
 import requests
 
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 __all__ = ["AnthiveClient"]
 
 
@@ -257,6 +257,84 @@ class AnthiveClient:
             >>> print(f"Cache hit rate: {metrics['connection_pool']['hit_rate']:.2%}")
         """
         return self._get('/metrics')
+
+    def get_version(self) -> Dict:
+        """Get the API version + contract pointers (REST API 2.3+).
+
+        Returns:
+            Dict shaped like::
+
+                {
+                    "version":              "2.3.0",
+                    "released":             "2026-06-09",
+                    "compatible_antclient": ">=1.6.0",
+                    "openapi_url":          "/api/openapi.json",
+                    "swagger_ui_url":       "/api/docs",
+                    "redoc_url":            "/api/redoc",
+                    "changelog_url":        "/api/changelog",
+                    "plot_geoms":           ["bar", "box", "ecdf", "forest",
+                                             "heatmap", "hexbin", "histogram",
+                                             "kde", "ma", "rolling", "scatter",
+                                             "violin", "volcano"],
+                    "plot_output_formats":  ["pdf", "png", "svg"],
+                    "deprecated_endpoints": ["GET /databases/{db_id}/plot"]
+                }
+
+            ``version`` is the single source of truth for "is my client up
+            to date?" — cache it on first contact, hit ``get_version()`` on
+            session start, and if it changed, re-read ``openapi_url`` to
+            regenerate bindings, or ``get_changelog()`` for the human
+            description of what's new.
+
+            Falls back to ``get_health()`` data (which has the same
+            ``api_version`` field) on servers older than REST API 2.3.
+
+        Example:
+            >>> ver = client.get_version()
+            >>> print(ver['version'])
+            '2.3.0'
+            >>> if 'volcano' in ver['plot_geoms']:
+            ...     # safe to use the volcano geom
+            ...     pass
+        """
+        try:
+            return self._get('/version')
+        except Exception:
+            # Pre-2.3 servers don't have /version yet; fall back to /health.
+            # Synthesise a minimal-but-compatible shape so callers don't break.
+            health = self._get('/health')
+            return {
+                'version': health.get('api_version'),
+                'released': None,
+                'compatible_antclient': None,
+                'openapi_url': '/openapi.json',
+                'swagger_ui_url': '/docs',
+                'redoc_url': '/redoc',
+                'changelog_url': None,
+                'plot_geoms': [],
+                'plot_output_formats': ['png', 'svg', 'pdf'],
+                'deprecated_endpoints': [],
+            }
+
+    def get_changelog(self) -> str:
+        """Get the API changelog as a Markdown string (REST API 2.3+).
+
+        Returns:
+            The contents of ``doc/API_CHANGELOG.md`` on the server — a
+            human-readable version history with the "why" and migration
+            notes for each release.  Pair with :meth:`get_version` (the
+            structured equivalent).
+
+        Example:
+            >>> md = client.get_changelog()
+            >>> print(md.splitlines()[0])
+            '# Anthive REST API — Changelog'
+
+        Raises:
+            requests.HTTPError: ``404`` on pre-2.3 servers (no endpoint).
+        """
+        response = self._get_raw('/changelog')
+        return response.text
 
     # ===== Database Discovery =====
 
@@ -661,6 +739,8 @@ class AnthiveClient:
         'violin', 'box', 'bar',
         'histogram', 'ecdf', 'kde',
         'heatmap', 'rolling',
+        # DE-driven geoms (REST API 2.3+) — operate on pre-computed __de rows.
+        'volcano', 'ma', 'forest',
     })
 
     def get_plot(self,
@@ -761,6 +841,162 @@ class AnthiveClient:
             'cache':      response.headers.get('X-Plot-Cache', ''),
             'mime':       response.headers.get('Content-Type', ''),
         }
+
+    # ===== Differential expression (REST API 2.3+) =====
+    #
+    # Read-only wrappers over the /databases/{db_id}/de/* endpoints.
+    # Datasets without DE data return empty lists / 404 cleanly; callers
+    # can check ``len(list_de_studies(db_id)) == 0`` to decide whether
+    # to surface a DE UI.
+
+    def list_de_studies(self, db_id: str) -> List[Dict]:
+        """List every DE study on a dataset.
+
+        Args:
+            db_id: Database identifier (``group/file``).
+
+        Returns:
+            List of dicts, one per study, with the study metadata plus
+            ``n_rows`` / ``n_terms`` / ``n_contrasts`` counts.  Empty list
+            when the dataset has no DE data ingested.
+
+        Example:
+            >>> studies = client.list_de_studies("S25/V6A")
+            >>> [s['study_id'] for s in studies]
+            ['DE_interpretable_glmm_vs_grandmean']
+        """
+        return self._get(f'/databases/{db_id}/de').get('studies', [])
+
+    def get_de_study(self, db_id: str, study_id: str) -> Dict:
+        """Get one DE study's full metadata + list of (term, n_contrasts).
+
+        Args:
+            db_id: Database identifier.
+            study_id: Study slug from :meth:`list_de_studies`.
+
+        Returns:
+            Dict with the study row PLUS a ``terms`` key — a list of
+            ``{term, n_contrasts, n_rows}`` for each term in the study.
+
+        Raises:
+            requests.HTTPError: 404 if the study doesn't exist.
+        """
+        return self._get(f'/databases/{db_id}/de/{study_id}')
+
+    def list_de_contrasts(self, db_id: str, study_id: str, term: str) -> List[Dict]:
+        """List the contrasts within one (study, term) + significance counts.
+
+        Args:
+            db_id, study_id, term: identifiers.
+
+        Returns:
+            List of ``{contrast, n_genes, n_sig_padj_lt_0.05,
+            n_sig_padj_lt_0.01, n_sig_padj_lt_0.001}`` per contrast.
+
+        Example:
+            >>> contrasts = client.list_de_contrasts(
+            ...     "S25/V6A",
+            ...     "DE_interpretable_glmm_vs_grandmean",
+            ...     "patient_geno_short_relevel",
+            ... )
+            >>> len(contrasts)
+            29
+        """
+        return self._get(
+            f'/databases/{db_id}/de/{study_id}/terms/{term}'
+        ).get('contrasts', [])
+
+    def get_de_rows(self,
+                    db_id: str,
+                    study_id: str,
+                    term: str,
+                    contrast: str,
+                    *,
+                    sort: str = 'padj',
+                    direction: str = 'both',
+                    padj_max: Optional[float] = None,
+                    abs_log2fc_min: Optional[float] = None,
+                    limit: int = 200,
+                    offset: int = 0,
+                    format: str = 'json') -> Union[List[Dict], Any]:
+        """Paged gene rows for one (study, term, contrast).
+
+        Args:
+            db_id, study_id, term, contrast: identifiers.
+            sort:           ``'padj'`` (default — most-significant first) |
+                            ``'effsize'`` | ``'estimate'``.
+            direction:      ``'up'`` | ``'down'`` | ``'both'`` (default).
+                            Effective only when sorting by an effect axis.
+            padj_max:       Filter to rows with ``padj <= padj_max``.
+            abs_log2fc_min: Filter to rows with ``|log2fc| >= abs_log2fc_min``.
+            limit:          Page size (1–10000, default 200).
+            offset:         Skip the first N rows (for paging).
+            format:         ``'json'`` (default) returns a list of row dicts.
+                            ``'dataframe'`` returns a pandas DataFrame
+                            (requires pandas).
+
+        Returns:
+            List of row dicts (or DataFrame) with: ``gene_name``, ``log2fc``,
+            ``zeff``, ``effsize``, ``efftype``, ``pvalue``, ``padj``,
+            ``estimate``, ``SE``, ``ci_low``, ``ci_high``, ``stats_extra``.
+
+        Example:
+            >>> top = client.get_de_rows(
+            ...     "S25/V6A",
+            ...     "DE_interpretable_glmm_vs_grandmean",
+            ...     "patient_geno_short_relevel",
+            ...     "Uaqe_1",
+            ...     sort='padj', limit=10,
+            ... )
+            >>> [(r['gene_name'], r['padj']) for r in top[:3]]
+            [('CCDC200', 0.0), ('CHCHD2', 0.0), ('FGD4', 0.0)]
+        """
+        params: Dict[str, Any] = {
+            'sort': sort, 'direction': direction,
+            'limit': limit, 'offset': offset,
+        }
+        if padj_max is not None:
+            params['padj_max'] = padj_max
+        if abs_log2fc_min is not None:
+            params['abs_log2fc_min'] = abs_log2fc_min
+
+        result = self._get(
+            f'/databases/{db_id}/de/{study_id}/terms/{term}/contrasts/{contrast}',
+            params=params,
+        )
+        rows = result.get('rows', [])
+        if format == 'dataframe':
+            import pandas as pd
+            return pd.DataFrame(rows)
+        return rows
+
+    def get_de_by_gene(self, db_id: str, gene: str,
+                       format: str = 'json') -> Union[List[Dict], Any]:
+        """All DE rows for one gene across every study × term × contrast on
+        a dataset — feeds forest plots.
+
+        Args:
+            db_id:  Database identifier.
+            gene:   Gene name (or module name for module-DE datasets).
+            format: ``'json'`` (default) or ``'dataframe'``.
+
+        Returns:
+            List of row dicts (or DataFrame) with: ``study_id``,
+            ``study_name``, ``method``, ``term``, ``contrast``, all
+            effect-size stats, and ``stats_extra``.  Empty list when
+            the gene isn't found.
+
+        Example:
+            >>> rows = client.get_de_by_gene("S25/V6A", "TREM2")
+            >>> len(rows)
+            298
+        """
+        result = self._get(f'/databases/{db_id}/de/by-gene/{gene}')
+        rows = result.get('rows', [])
+        if format == 'dataframe':
+            import pandas as pd
+            return pd.DataFrame(rows)
+        return rows
 
     # ===== Analytics (sandboxed SELECT) =====
 
