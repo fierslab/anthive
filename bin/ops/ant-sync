@@ -268,10 +268,33 @@ def cmd_pull(args, s3_cfg: dict, data_folder: Path) -> None:
         max_bandwidth=_parse_bandwidth(args.max_bandwidth) if args.max_bandwidth else None,
     )
 
-    # By default pull only .h5ad. .duckdb is derived; rebuild locally.
-    allowed = SYNC_EXTENSIONS if args.include_duckdb else PULL_DEFAULT_EXTS
-    if not args.include_duckdb:
-        print('(skipping .duckdb — pass --include-duckdb to override)')
+    # Three ways to choose the set:
+    # 1. --only EXT,EXT — explicit allow list (overrides defaults + --include-duckdb)
+    # 2. --include-duckdb — everything (h5ad + duckdb + de.parquet)
+    # 3. default — h5ad + de.parquet only; rebuild .duckdb locally via `make build-stale`
+    if args.only:
+        allowed = set()
+        for raw in args.only.split(','):
+            ext = raw.strip()
+            if not ext:
+                continue
+            if not ext.startswith('.'):
+                ext = '.' + ext
+            if ext not in SYNC_EXTENSIONS:
+                print(f"ant-sync pull: --only includes {ext!r} but it's not "
+                      f"in the syncable set ({sorted(SYNC_EXTENSIONS)}). "
+                      f"Aborting.")
+                raise SystemExit(2)
+            allowed.add(ext)
+        if not allowed:
+            print('ant-sync pull: --only is empty — nothing to pull.')
+            return
+        print(f'(pulling only {sorted(allowed)} per --only)')
+    elif args.include_duckdb:
+        allowed = SYNC_EXTENSIONS
+    else:
+        allowed = PULL_DEFAULT_EXTS
+        print('(skipping .duckdb — pass --include-duckdb or --only .duckdb to override)')
 
     print('Scanning S3…')
     s3_index = _s3_objects(client, bucket, prefix, allowed_exts=allowed)
@@ -400,8 +423,16 @@ def main() -> None:
     )
     pull_sub.add_argument(
         '--include-duckdb', action='store_true',
-        help=('Also pull .duckdb files. By default only .h5ad is pulled — '
-              '.duckdb should be rebuilt locally via `ant build-all`.'),
+        help=('Also pull .duckdb files. By default only .h5ad and '
+              '.de.parquet are pulled — .duckdb should be rebuilt '
+              'locally via `make build-stale`.'),
+    )
+    pull_sub.add_argument(
+        '--only', default=None, metavar='EXTS',
+        help=('Pull ONLY these extensions (comma-separated, e.g. '
+              "'.duckdb' or '.h5ad,.de.parquet').  Overrides the default "
+              'set and --include-duckdb.  Useful for surgical pulls like '
+              '"just refresh the duckdbs without re-downloading h5ads".'),
     )
     pull_sub.add_argument(
         '--max-bandwidth', default=None,

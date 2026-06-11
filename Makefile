@@ -1,4 +1,4 @@
-.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-streamlit serve-mcp serve-all serve-debug serve-stop caddy-passwd caddy-passwd-clear dev-jupyter sync-push sync-pull sync-pull-all sync-status build-stale sync-update serve-status serve-restart
+.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-streamlit serve-mcp serve-all serve-debug serve-stop caddy-passwd caddy-passwd-clear dev-jupyter sync-push sync-pull sync-pull-duckdb sync-pull-all sync-status build-stale sync-update serve-status serve-restart
 
 help:
 	@echo "Anthive4 Development Commands"
@@ -30,11 +30,12 @@ help:
 	@echo ""
 	@echo "Sync (S3) — the maintenance workflow:"
 	@echo "  make sync-update     - Full cycle: pull h5ad → rebuild stale duckdb → push"
-	@echo "  make sync-pull       - Pull .h5ad ONLY from S3 (duckdb is rebuilt locally)"
-	@echo "  make build-stale     - Rebuild .duckdb for any h5ad newer than its duckdb"
-	@echo "  make sync-push       - Push .h5ad and .duckdb to S3 (mtime metadata included)"
-	@echo "  make sync-status     - Show local vs S3 sync status (size + mtime drift)"
-	@echo "  make sync-pull-all   - Pull .h5ad AND .duckdb (rarely needed)"
+	@echo "  make sync-pull         - Pull .h5ad + .de.parquet from S3 (duckdb rebuilt locally)"
+	@echo "  make sync-pull-duckdb  - Pull ONLY .duckdb files from S3 (skip h5ad / de.parquet)"
+	@echo "  make build-stale       - Rebuild .duckdb for any h5ad newer than its duckdb"
+	@echo "  make sync-push         - Push .h5ad and .duckdb to S3 (mtime metadata included)"
+	@echo "  make sync-status       - Show local vs S3 sync status (size + mtime drift)"
+	@echo "  make sync-pull-all     - Pull .h5ad AND .duckdb AND .de.parquet (rarely needed)"
 	@echo ""
 	@echo "Tools:"
 	@echo "  ./bin/ant check        - Validate h5ad files / refresh .md"
@@ -273,11 +274,20 @@ dev-jupyter:
 
 # ── Sync workflow (S3 = canonical for .h5ad; .duckdb is rebuilt locally) ──
 
-# Default pull: h5ad only. .duckdb is derived; rebuild it via `make build-stale`.
+# Default pull: h5ad + .de.parquet. .duckdb is derived; rebuild it via
+# `make build-stale` (or pull it explicitly with sync-pull-duckdb / -all).
 sync-pull:
 	@./bin/ops/ant-sync pull
 
-# Force pull duckdb too (disaster-recovery / mass-rebuild bootstrap).
+# Pull ONLY the .duckdb files from S3 — leave .h5ad / .de.parquet alone.
+# Use when local .h5ad files are current but the .duckdb cache is stale
+# (e.g. a peer rebuilt the duckdbs and pushed; you just want the rebuilt
+# served-derivative without re-running `make build-stale` locally).
+sync-pull-duckdb:
+	@./bin/ops/ant-sync pull --only .duckdb
+
+# Force pull h5ad + duckdb + de.parquet (disaster-recovery / mass-rebuild
+# bootstrap).
 sync-pull-all:
 	@./bin/ops/ant-sync pull --include-duckdb
 
