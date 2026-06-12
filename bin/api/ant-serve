@@ -1285,8 +1285,8 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.3.0"
-API_VERSION_RELEASED = "2026-06-09"
+API_VERSION = "2.4.0"
+API_VERSION_RELEASED = "2026-06-12"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
 # Create FastAPI app with lifespan handler (Phase 2)
@@ -2269,6 +2269,7 @@ _PLOT_GEOMS = {
     'histogram', 'ecdf', 'kde',
     'heatmap',
     'rolling',     # rolling-mean trajectory along a continuous axis (pseudotime, etc.)
+    'kde2d',       # 2-D Gaussian kernel density of two continuous obs/gene fields.
     # DE-driven geoms — operate on pre-computed __de rows, not raw cells.
     'volcano',     # log2fc on x, -log10(padj) on y; needs (study, term, contrast).
     'ma',          # mean expression on x, log2fc on y; needs (study, term, contrast).
@@ -2554,10 +2555,24 @@ class PlotRequest:
     n_genes: int
     gridsize: int        # hexbin: number of hex bins along x-axis
     mincnt: int          # hexbin: minimum cells per hex to render
-    log_x: bool          # scatter / hexbin (XY-mode): apply log1p to x
-    log_y: bool          # scatter / hexbin (XY-mode): apply log1p to y
+    log_x: bool          # legacy alias for transform_x='log1p' (XY-mode)
+    log_y: bool          # legacy alias for transform_y='log1p' (XY-mode)
+    transform_x: Optional[str]   # XY-mode + kde2d: 'linear'|'log'|'log1p'|'signed_log1p'|'asinh'|'signed_sqrt'|'rank'
+    transform_y: Optional[str]   # same kinds for the y axis
+    asinh_scale: float           # scale factor for asinh transform (y = asinh(x/s))
     vmin: Optional[float]  # hexbin / scatter colorbar lower clip (None = auto)
     vmax: Optional[float]  # hexbin / scatter colorbar upper clip (None = auto)
+    vmin_quantile: Optional[float]   # hexbin auto-clip lower (e.g. 0.10); ignored if vmin is set
+    vmax_quantile: Optional[float]   # hexbin auto-clip upper (e.g. 0.90); ignored if vmax is set
+    # kde2d-specific knobs
+    kde_n: int                   # subsample size for the KDE fit
+    kde_bw: Optional[float]      # bandwidth (None → Scott's rule)
+    n_levels: int                # number of filled contour levels
+    iso_overlay: bool            # white iso-density contours over the filled levels
+    point_overlay: bool          # raster scatter under the contours
+    # marginal + regression overlays (XY-mode scatter / hexbin / kde2d)
+    marginals: bool              # univariate KDE strips on each axis
+    regline: Optional[str]       # 'global' | 'by_group' | None
     window: int          # rolling: window size in cells
     show_band: bool      # rolling: show IQR ribbon around the line
     zscore: bool         # heatmap: z-score per gene (centred divergent) vs raw means
@@ -2740,6 +2755,7 @@ def _handle_hexbin(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         alpha=req.alpha,
         gridsize=req.gridsize, mincnt=req.mincnt,
         vmin=req.vmin, vmax=req.vmax,
+        vmin_quantile=req.vmin_quantile, vmax_quantile=req.vmax_quantile,
         title_extra=f'{req.db_id} · {emb_id}',
         caption=caption, source_url=req.source_url,
         font_family=req.font_family, font_size=req.font_size,
@@ -2788,19 +2804,35 @@ def _handle_xy(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     )
     # Build a fake "embedding df" with [cell_name, <x_name>, <y_name>] so we
     # can re-use plot_scatter / plot_hexbin — they treat the last two
-    # columns as the spatial axes.  Apply log1p before passing the data
-    # along (log1p safely handles zero / sparse expression).  Axis labels
-    # are amended so the reader knows the transform was applied.
+    # columns as the spatial axes.  Apply the configured axis transforms
+    # before passing the data along.  Default 'linear' means no-op; the
+    # legacy `log_x`/`log_y` booleans still work as a back-compat shim
+    # (they map to transform_x='log1p' / transform_y='log1p').
     import numpy as _np
     embedding_df = data_df[['cell_name', x_name, y_name]].copy()
-    x_axis_label = x_name
-    y_axis_label = y_name
-    if req.log_x:
-        embedding_df[x_name] = _np.log1p(_np.asarray(embedding_df[x_name], dtype=float))
-        x_axis_label = f'log1p({x_name})'
-    if req.log_y:
-        embedding_df[y_name] = _np.log1p(_np.asarray(embedding_df[y_name], dtype=float))
-        y_axis_label = f'log1p({y_name})'
+    tx = req.transform_x or 'linear'
+    ty = req.transform_y or 'linear'
+    if req.log_x and tx == 'linear':
+        tx = 'log1p'      # back-compat: log_x=true → transform_x='log1p'
+    if req.log_y and ty == 'linear':
+        ty = 'log1p'
+    if tx != 'linear':
+        embedding_df[x_name] = plotting.apply_axis_transform(
+            _np.asarray(embedding_df[x_name], dtype=float), tx,
+            asinh_scale=req.asinh_scale or 1.0,
+        )
+    if ty != 'linear':
+        embedding_df[y_name] = plotting.apply_axis_transform(
+            _np.asarray(embedding_df[y_name], dtype=float), ty,
+            asinh_scale=req.asinh_scale or 1.0,
+        )
+    # Drop rows where either axis ended up NaN after transform (e.g. log
+    # of a non-positive).  Without this matplotlib silently empties the plot.
+    keep = (_np.isfinite(_np.asarray(embedding_df[x_name], dtype=float))
+            & _np.isfinite(_np.asarray(embedding_df[y_name], dtype=float)))
+    embedding_df = embedding_df[keep].reset_index(drop=True)
+    x_axis_label = plotting._axis_label_with_transform(x_name, tx)
+    y_axis_label = plotting._axis_label_with_transform(y_name, ty)
 
     # Optional colour.
     color_df = None
@@ -2861,13 +2893,82 @@ def _handle_xy(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
             alpha=req.alpha,
             gridsize=req.gridsize, mincnt=req.mincnt,
             vmin=req.vmin, vmax=req.vmax,
+            vmin_quantile=req.vmin_quantile, vmax_quantile=req.vmax_quantile,
+            marginals=req.marginals, regline=req.regline,
         )
     else:
         image_bytes = plot_fn(
             **common_kwargs,
             point_size=req.point_size, alpha=req.alpha,
             vmin=req.vmin, vmax=req.vmax,
+            marginals=req.marginals, regline=req.regline,
         )
+    return image_bytes, caption
+
+
+def _handle_kde2d(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
+    """2-D Gaussian kernel density of two continuous obs/gene fields.
+
+    Same input contract as the XY-mode scatter/hexbin: x and y must
+    both resolve to continuous fields (gene or numerical obs).
+    """
+    if not req.x or not req.y:
+        raise HTTPException(400, detail=(
+            "geom='kde2d' requires BOTH x and y (continuous fields)."
+        ))
+    x_name, x_kind = ctx.resolve(req.x)
+    y_name, y_kind = ctx.resolve(req.y)
+    if x_kind not in ('gene', 'numerical') or y_kind not in ('gene', 'numerical'):
+        raise HTTPException(400, detail=(
+            f"geom='kde2d' requires x and y to be continuous (gene or "
+            f"numerical). Got x='{req.x}' ({x_kind}) and y='{req.y}' ({y_kind})."
+        ))
+
+    # Pull both axes in one go.
+    genes, metas = [], []
+    if x_kind == 'gene':   genes.append(x_name)
+    else:                  metas.append(x_name)
+    if y_kind == 'gene':   genes.append(y_name)
+    else:                  metas.append(y_name)
+    data_df = ctx.db.get_cell_table(
+        genes=list(dict.fromkeys(genes)) or None,
+        metadata_fields=list(dict.fromkeys(metas)) or None,
+        layer=req.layer,
+        filters=req.filters,
+        sample=req.sample,
+    )
+
+    # Resolve transforms (legacy log_x/log_y → 'log1p' if transform is unset).
+    tx = req.transform_x or 'linear'
+    ty = req.transform_y or 'linear'
+    if req.log_x and tx == 'linear':
+        tx = 'log1p'
+    if req.log_y and ty == 'linear':
+        ty = 'log1p'
+
+    n_cells = int(len(data_df))
+    caption = plotting.build_caption(
+        req.db_id, req.geom, req.x, x_kind, req.y, None, req.layer,
+        n_cells=n_cells, sample=req.sample, subset=_subset_for_caption(req),
+    )
+    image_bytes = plotting.plot_kde2d(
+        data_df=data_df,
+        x_field=x_name,
+        y_field=y_name,
+        transform_x=tx, transform_y=ty,
+        asinh_scale=req.asinh_scale or 1.0,
+        kde_n=req.kde_n, kde_bw=req.kde_bw,
+        n_levels=req.n_levels,
+        iso_overlay=req.iso_overlay,
+        point_overlay=req.point_overlay,
+        marginals=req.marginals,
+        regline=req.regline,
+        width=req.width, height=req.height, dpi=req.dpi,
+        output_format=req.output_format,
+        title_extra=req.db_id,
+        caption=caption, source_url=req.source_url,
+        font_family=req.font_family, font_size=req.font_size,
+    )
     return image_bytes, caption
 
 
@@ -3300,6 +3401,7 @@ _PLOT_HANDLERS: Dict[str, Any] = {
     'kde':        _handle_distribution,
     'heatmap':    _handle_heatmap,
     'rolling':    _handle_rolling,   # rolling-mean trajectory along pseudotime
+    'kde2d':      _handle_kde2d,     # 2-D Gaussian KDE of two continuous fields
     'volcano':    _handle_volcano,   # DE: log2fc × -log10(padj)
     'ma':         _handle_ma,        # DE: base_mean × log2fc
     'forest':     _handle_forest,    # DE: one gene across many studies/terms/contrasts
@@ -3427,11 +3529,25 @@ def _build_plot_request(
     mincnt: int = 1,
     log_x: bool = False,
     log_y: bool = False,
+    transform_x: Optional[str] = None,
+    transform_y: Optional[str] = None,
+    asinh_scale: float = 1.0,
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
+    vmin_quantile: Optional[float] = None,
+    vmax_quantile: Optional[float] = None,
     window: int = 200,
     show_band: bool = False,
     zscore: bool = True,
+    # kde2d-specific knobs
+    kde_n: int = 15_000,
+    kde_bw: Optional[float] = 0.22,
+    n_levels: int = 10,
+    iso_overlay: bool = True,
+    point_overlay: bool = False,
+    # marginals / regression overlays (XY scatter / hexbin / kde2d)
+    marginals: bool = False,
+    regline: Optional[str] = None,
     # DE-driven geoms — pass-through with safe defaults.
     de_study: Optional[str] = None,
     de_term: Optional[str] = None,
@@ -3462,9 +3578,15 @@ def _build_plot_request(
         ci=ci, n_genes=n_genes,
         gridsize=gridsize, mincnt=mincnt,
         log_x=log_x, log_y=log_y,
+        transform_x=transform_x, transform_y=transform_y,
+        asinh_scale=asinh_scale,
         vmin=vmin, vmax=vmax,
+        vmin_quantile=vmin_quantile, vmax_quantile=vmax_quantile,
         window=window, show_band=show_band,
         zscore=zscore,
+        kde_n=kde_n, kde_bw=kde_bw, n_levels=n_levels,
+        iso_overlay=iso_overlay, point_overlay=point_overlay,
+        marginals=marginals, regline=regline,
         de_study=de_study, de_term=de_term,
         de_contrast=de_contrast, de_gene=de_gene,
         padj_threshold=padj_threshold,
@@ -3590,12 +3712,34 @@ async def plot_scatter_endpoint(
     ),
     point_size: float = Query(3.0, gt=0.0, le=200.0, description="Marker size in pt²."),
     alpha: float = Query(0.8, ge=0.0, le=1.0, description="Marker opacity."),
-    log_x: bool = Query(False, description="Apply ``log1p(x)`` before plotting (XY-mode only). Use for raw counts."),
-    log_y: bool = Query(False, description="Apply ``log1p(y)`` before plotting (XY-mode only)."),
+    log_x: bool = Query(False, description="Legacy alias for ``transform_x=log1p`` (XY-mode only)."),
+    log_y: bool = Query(False, description="Legacy alias for ``transform_y=log1p`` (XY-mode only)."),
+    transform_x: Optional[str] = Query(
+        None,
+        description=(
+            "Per-axis transform applied BEFORE plotting (XY-mode only). One of: "
+            "linear (default), log, log1p, signed_log1p, asinh, signed_sqrt, rank. "
+            "Use signed_log1p / asinh for fields straddling zero (e.g. module "
+            "eigengene scores); rank to give every cell equal visual weight."
+        ),
+    ),
+    transform_y: Optional[str] = Query(None, description="Same kinds as ``transform_x`` for the y axis."),
+    asinh_scale: float = Query(
+        1.0, gt=0.0, le=1000.0,
+        description="Scale factor for asinh transform: y = asinh(x/scale). Lower = more aggressive compression.",
+    ),
     vmin: Optional[float] = Query(None, description="Continuous colour-scale lower clip. Leave empty for auto."),
     vmax: Optional[float] = Query(
         None,
         description="Continuous colour-scale upper clip — useful when one outlier washes out the gradient.",
+    ),
+    marginals: bool = Query(False, description="XY-mode overlay: univariate KDE strips on x and y."),
+    regline: Optional[str] = Query(
+        None,
+        description=(
+            "XY-mode overlay: regression line + R²/Pearson/Spearman/slope. "
+            "``global`` for one line; ``by_group`` for one per categorical-colour group (cap 30)."
+        ),
     ),
 ):
     """Cell-level scatter, **polymorphic**:
@@ -3610,7 +3754,11 @@ async def plot_scatter_endpoint(
         common, 'scatter',
         x=x, y=y, color=color,
         point_size=point_size, alpha=alpha,
-        log_x=log_x, log_y=log_y, vmin=vmin, vmax=vmax,
+        log_x=log_x, log_y=log_y,
+        transform_x=transform_x, transform_y=transform_y,
+        asinh_scale=asinh_scale,
+        vmin=vmin, vmax=vmax,
+        marginals=marginals, regline=regline,
     )
     return await _render_plot(req, common.request)
 
@@ -3647,10 +3795,37 @@ async def plot_hexbin_endpoint(
         1, ge=1, le=1000,
         description="Minimum cells per hex to render (filters out sparse outliers).",
     ),
-    log_x: bool = Query(False, description="Apply ``log1p(x)`` before plotting (XY-mode only)."),
-    log_y: bool = Query(False, description="Apply ``log1p(y)`` before plotting (XY-mode only)."),
+    log_x: bool = Query(False, description="Legacy alias for ``transform_x=log1p`` (XY-mode only)."),
+    log_y: bool = Query(False, description="Legacy alias for ``transform_y=log1p`` (XY-mode only)."),
+    transform_x: Optional[str] = Query(
+        None,
+        description="Per-axis transform: linear (default) | log | log1p | signed_log1p | asinh | signed_sqrt | rank.",
+    ),
+    transform_y: Optional[str] = Query(None),
+    asinh_scale: float = Query(1.0, gt=0.0, le=1000.0),
     vmin: Optional[float] = Query(None, description="Continuous colour-scale lower clip (auto when empty)."),
     vmax: Optional[float] = Query(None, description="Continuous colour-scale upper clip."),
+    vmin_quantile: Optional[float] = Query(
+        None, ge=0.0, le=1.0,
+        description=(
+            "Auto-clip the per-hex density at this lower QUANTILE (0-1, e.g. 0.10). "
+            "Ignored when ``vmin`` is set explicitly.  Density mode only (no `color`)."
+        ),
+    ),
+    vmax_quantile: Optional[float] = Query(
+        None, ge=0.0, le=1.0,
+        description=(
+            "Auto-clip the per-hex density at this upper QUANTILE (e.g. 0.90). "
+            "Use together with ``vmin_quantile`` for the 10-90% clip that makes "
+            "big-N density plots readable when a few hexes are 10x denser than "
+            "the rest.  Ignored when ``vmax`` is set explicitly."
+        ),
+    ),
+    marginals: bool = Query(False, description="XY-mode overlay: univariate KDE strips on x and y."),
+    regline: Optional[str] = Query(
+        None,
+        description="XY-mode overlay: ``global`` for one regression line, ``by_group`` for per-categorical-colour-group (cap 30).",
+    ),
 ):
     """Hex-aggregated scatter — same polymorphism as ``/plot/scatter``,
     cells aggregated into hex bins instead of one marker per cell."""
@@ -3658,7 +3833,69 @@ async def plot_hexbin_endpoint(
         common, 'hexbin',
         x=x, y=y, color=color,
         alpha=alpha, gridsize=gridsize, mincnt=mincnt,
-        log_x=log_x, log_y=log_y, vmin=vmin, vmax=vmax,
+        log_x=log_x, log_y=log_y,
+        transform_x=transform_x, transform_y=transform_y,
+        asinh_scale=asinh_scale,
+        vmin=vmin, vmax=vmax,
+        vmin_quantile=vmin_quantile, vmax_quantile=vmax_quantile,
+        marginals=marginals, regline=regline,
+    )
+    return await _render_plot(req, common.request)
+
+
+@app.get("/databases/{db_id:path}/plot/kde2d", tags=["plots"])
+async def plot_kde2d_endpoint(
+    common: CommonPlotParams = Depends(),
+    x: str = Query(..., description="X-axis continuous field (gene or numerical obs)."),
+    y: str = Query(..., description="Y-axis continuous field (gene or numerical obs)."),
+    transform_x: Optional[str] = Query(
+        None,
+        description="Per-axis transform: linear (default) | log | log1p | signed_log1p | asinh | signed_sqrt | rank.",
+    ),
+    transform_y: Optional[str] = Query(None),
+    asinh_scale: float = Query(1.0, gt=0.0, le=1000.0),
+    kde_n: int = Query(
+        15_000, ge=100, le=200_000,
+        description="Subsample size for the KDE fit. Full evaluation on >100k cells is slow with no visible gain.",
+    ),
+    kde_bw: Optional[float] = Query(
+        0.22, gt=0.0, le=10.0,
+        description="Bandwidth (Gaussian KDE scale). Lower = sharper. Set 0 / omit for Scott's rule.",
+    ),
+    n_levels: int = Query(10, ge=2, le=30, description="Number of filled contour levels."),
+    iso_overlay: bool = Query(True, description="Draw thin white iso-density lines over the filled contours."),
+    point_overlay: bool = Query(False, description="Raster scatter under the contours (off by default for clarity)."),
+    marginals: bool = Query(False, description="Add univariate KDE strips on top of x and right of y."),
+    regline: Optional[str] = Query(
+        None,
+        description=(
+            "Overlay a regression line + R² / Pearson / Spearman / slope. "
+            "``global`` for one line across all points; not yet supported on "
+            "kde2d for ``by_group`` (no categorical colour input here)."
+        ),
+    ),
+):
+    """2-D Gaussian kernel-density estimate over two continuous fields
+    (e.g. two WGCNA module scores, or two gene expressions).
+
+    Workflow:
+
+    * apply the per-axis transform (default linear)
+    * fit a Gaussian KDE on a ``kde_n``-cell subsample
+    * evaluate the density on a 200×200 grid
+    * render as ``n_levels`` filled magma contours + optional iso-density overlay
+    """
+    req = _build_plot_request(
+        common, 'kde2d',
+        x=x, y=y,
+        transform_x=transform_x, transform_y=transform_y,
+        asinh_scale=asinh_scale,
+        kde_n=kde_n, kde_bw=kde_bw if kde_bw and kde_bw > 0 else None,
+        n_levels=n_levels,
+        iso_overlay=iso_overlay,
+        point_overlay=point_overlay,
+        marginals=marginals,
+        regline=regline,
     )
     return await _render_plot(req, common.request)
 

@@ -404,6 +404,108 @@ def build_caption(
 _FAST_SCATTER_THRESHOLD = 50_000
 
 
+# ── axis transforms ───────────────────────────────────────────────────────────
+#
+# Used by /plot/scatter (XY mode), /plot/hexbin (XY mode), and /plot/kde2d.
+# Picking the right transform is what makes a module-vs-module scatter
+# (e.g. MEbrown vs MEmagenta on a 235k-cell dataset) readable instead of
+# a single dense blob — the densest few % of cells otherwise wash out the
+# rest of the distribution.
+#
+# All transforms are defined on every real (including negatives).
+# Composed with the X / Y axes independently — you can rank one and asinh
+# the other.
+
+TRANSFORMS = ('linear', 'log', 'log1p', 'signed_log1p', 'asinh',
+              'signed_sqrt', 'rank')
+
+
+def apply_axis_transform(values: 'np.ndarray', kind: str,
+                         asinh_scale: float = 1.0) -> 'np.ndarray':
+    """Apply a numerical transform to a 1-D array.
+
+    Args:
+        values:      a 1-D numpy array of floats.
+        kind:        one of ``TRANSFORMS``.
+        asinh_scale: rescaling factor for asinh (``y = asinh(x / s)``).
+                     Defaults to 1.0; lower s flattens more aggressively.
+                     Ignored for non-asinh transforms.
+
+    Returns:
+        a 1-D numpy array of the same shape.
+
+    Notes on each kind:
+
+    * ``linear``       — identity, for completeness.
+    * ``log``          — natural log; values ≤ 0 become NaN (caller filters).
+    * ``log1p``        — ``log(1 + x)``; values < -1 become NaN.
+    * ``signed_log1p`` — ``sign(x) * log1p(|x|)``. Symmetric, defined for
+                         all reals, fast (just abs + log1p). Has a kink in
+                         the second derivative at 0 but visually identical
+                         to asinh on the value ranges used in single-cell
+                         work. Recommended default for symmetric data.
+    * ``asinh``        — ``asinh(x / s)``. Smooth (C∞ at 0) symmetric. The
+                         CyTOF / flow-cytometry standard. Slightly slower
+                         than signed_log1p, indistinguishable visually.
+    * ``signed_sqrt``  — ``sign(x) * sqrt(|x|)``. Gentler compression than
+                         the log family — good when you want to preserve
+                         relative magnitude.
+    * ``rank``         — percentile rank in [0, 1]. Gives every cell equal
+                         visual weight; obliterates magnitude information.
+                         Useful for spotting modal structure.
+    """
+    if kind not in TRANSFORMS:
+        raise ValueError(f"unknown transform {kind!r}. Valid: {TRANSFORMS}")
+    if kind == 'linear':
+        return values
+    out = np.asarray(values, dtype=float)
+    if kind == 'log':
+        return np.where(out > 0, np.log(np.maximum(out, np.finfo(float).tiny)),
+                        np.nan)
+    if kind == 'log1p':
+        return np.where(out > -1, np.log1p(np.maximum(out, -1 + 1e-300)),
+                        np.nan)
+    if kind == 'signed_log1p':
+        return np.sign(out) * np.log1p(np.abs(out))
+    if kind == 'asinh':
+        return np.arcsinh(out / max(asinh_scale, 1e-12))
+    if kind == 'signed_sqrt':
+        return np.sign(out) * np.sqrt(np.abs(out))
+    # rank → percentile in [0, 1].  np.argsort.argsort gives the ranks;
+    # divide by (n-1) to scale to [0, 1].  Stable on ties (uses positional).
+    n = out.size
+    if n == 0:
+        return out
+    finite = np.isfinite(out)
+    ranks = np.empty(n, dtype=float)
+    ranks.fill(np.nan)
+    if finite.any():
+        order = np.argsort(out[finite], kind='stable')
+        rk = np.empty(int(finite.sum()), dtype=float)
+        rk[order] = np.arange(int(finite.sum()))
+        ranks[finite] = rk / max(int(finite.sum()) - 1, 1)
+    return ranks
+
+
+def _axis_label_with_transform(field: str, kind: str) -> str:
+    """Compose an axis label that reflects the applied transform."""
+    if kind in (None, 'linear'):
+        return field
+    if kind == 'signed_log1p':
+        return f'sign(x) · log1p(|{field}|)'
+    if kind == 'log1p':
+        return f'log1p({field})'
+    if kind == 'log':
+        return f'log({field})'
+    if kind == 'asinh':
+        return f'asinh({field})'
+    if kind == 'signed_sqrt':
+        return f'sign(x) · √|{field}|'
+    if kind == 'rank':
+        return f'rank({field}) [0..1]'
+    return f'{kind}({field})'
+
+
 def _fast_scatter(ax, xs, ys, *, point_size: float, alpha: float,
                   color, label: Optional[str] = None) -> None:
     """Single-colour scatter via ax.plot — 5-10x faster than ax.scatter for
@@ -443,6 +545,8 @@ def plot_scatter(
     title_extra: Optional[str] = None,
     caption: Optional[str] = None,
     source_url: Optional[str] = None,
+    marginals: bool = False,
+    regline: Optional[str] = None,
     font_family: Optional[str] = None,
     font_size: Optional[float] = None,
 ) -> bytes:
@@ -455,6 +559,10 @@ def plot_scatter(
         color_kind:   'categorical', 'numerical', or 'gene'.
         x_label:      X-axis label override.
         y_label:      Y-axis label override.
+        marginals:    XY-mode overlay — univariate KDE strips on x and y.
+        regline:      XY-mode overlay — ``'global'`` for one regression
+                      line across all points, ``'by_group'`` to draw one
+                      per categorical-colour group (cap 30).
         output_format: 'png' | 'svg' | 'pdf'.
         caption:      Figure caption embedded in PDF or passed via header.
     """
@@ -567,6 +675,21 @@ def plot_scatter(
     ax.set_title(_compose_title(title_bits, extra=title_extra))
     sns.despine(ax=ax)
 
+    # XY-mode overlays.  ``regline`` + ``marginals`` apply uniformly to
+    # scatter / hexbin / kde2d; the caller (typically _handle_xy) is the
+    # one that decides to set them (embedding mode usually skips these).
+    if regline or marginals:
+        _xs = np.asarray(plot_df[x_col], dtype=float)
+        _ys = np.asarray(plot_df[y_col], dtype=float)
+        if regline:
+            groups = None
+            if regline == 'by_group' and color_df is not None and color_kind == 'categorical':
+                groups = plot_df[color_field].astype(str).values
+            attach_regression(ax, _xs, _ys, groups=groups, kind=regline,
+                              palette_cat=palette_cat)
+        if marginals:
+            attach_marginals(fig, ax, _xs, _ys, color='#666666')
+
     return _render_figure(fig, dpi, output_format, caption, source_url)
 
 
@@ -589,6 +712,10 @@ def plot_hexbin(
     alpha: float = 1.0,
     vmin: Optional[float] = None,                 # colorbar clip — None = auto
     vmax: Optional[float] = None,
+    vmin_quantile: Optional[float] = None,        # auto-clip per-hex value at quantile
+    vmax_quantile: Optional[float] = None,        # ignored when vmin/vmax is set explicitly
+    marginals: bool = False,                       # XY-mode overlay
+    regline: Optional[str] = None,                 # 'global' | 'by_group'
     title_extra: Optional[str] = None,
     caption: Optional[str] = None,
     source_url: Optional[str] = None,
@@ -640,13 +767,38 @@ def plot_hexbin(
                                  palette_cat=palette_cat,
                                  palette_cont=palette_cont,
                                  palette_div=palette_div)
+        # First pass: compute per-hex counts WITHOUT drawing, so we can
+        # auto-clip the colour scale at the requested quantiles before the
+        # real draw.  This is what makes a 235k-cell density readable —
+        # otherwise the densest few hexes wash everything else out.
+        clip_used = None
+        if (vmin_quantile is not None or vmax_quantile is not None) \
+           and vmin is None and vmax is None:
+            probe = ax.hexbin(xs, ys, gridsize=gridsize, mincnt=mincnt,
+                              cmap=cmap_name, visible=False, linewidths=0)
+            counts = probe.get_array()
+            if counts is not None and counts.size > 0:
+                lo, hi = _quantile_clip(
+                    np.asarray(counts, dtype=float),
+                    lo=vmin_quantile if vmin_quantile is not None else 0.0,
+                    hi=vmax_quantile if vmax_quantile is not None else 1.0,
+                )
+                if vmin_quantile is not None: vmin = lo
+                if vmax_quantile is not None: vmax = hi
+                clip_used = (vmin_quantile, vmax_quantile)
         hb_kwargs: dict = dict(gridsize=gridsize, mincnt=mincnt,
                                cmap=cmap_name, linewidths=0)
         if vmin is not None: hb_kwargs['vmin'] = vmin
         if vmax is not None: hb_kwargs['vmax'] = vmax
         hb = ax.hexbin(xs, ys, **hb_kwargs)
-        plt.colorbar(hb, ax=ax, label='cell count', shrink=0.8)
+        cbar = plt.colorbar(hb, ax=ax, label='cell count', shrink=0.8,
+                            extend='both' if clip_used else 'neither')
         title_bits = ['density', f'n={_fmt_n(n_cells)}', f'gridsize={gridsize}']
+        if clip_used:
+            lo_q, hi_q = clip_used
+            title_bits.append(
+                f'clip {int((lo_q or 0)*100)}–{int((hi_q or 1)*100)}%'
+            )
         ax.set_title(_compose_title(title_bits, extra=title_extra))
 
     elif color_kind in ('numerical', 'gene'):
@@ -826,6 +978,18 @@ def plot_hexbin(
     ax.set_ylabel(y_label)
     ax.set_aspect('equal', adjustable='datalim')
     sns.despine(ax=ax)
+
+    # XY-mode overlays (only meaningful for non-embedding hexbins).
+    if regline or marginals:
+        if regline:
+            groups = None
+            if regline == 'by_group' and color_df is not None and color_kind == 'categorical':
+                groups = (color_df.set_index('cell_name')[color_field]
+                          .reindex(embedding_df['cell_name'].values).astype(str).values)
+            attach_regression(ax, xs, ys, groups=groups, kind=regline,
+                              palette_cat=palette_cat)
+        if marginals:
+            attach_marginals(fig, ax, xs, ys, color='#666666')
 
     return _render_figure(fig, dpi, output_format, caption, source_url)
 
@@ -1542,6 +1706,290 @@ def plot_forest(
     title_bits.append(f'{n_sig}/{len(df)} sig (padj≤{padj_threshold:g})')
     ax.set_title(_compose_title(title_bits, extra=title_extra))
     sns.despine(ax=ax)
+    fig.tight_layout()
+
+    return _render_figure(fig, dpi, output_format, caption, source_url)
+
+
+# ── 2-axis density geom: plot_kde2d ───────────────────────────────────────────
+
+
+def _quantile_clip(values: 'np.ndarray',
+                   lo: float = 0.10, hi: float = 0.90) -> 'Tuple[float, float]':
+    """Compute (vmin, vmax) at the lo / hi quantiles of a 1-D array.
+
+    Used by hexbin density colour-scale auto-clipping: without it, the
+    densest few hex bins drag the entire gradient and the rest of the
+    distribution looks flat.  10–90% is the default that works for
+    every plot in the module-annotator iteration.
+    """
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return (0.0, 1.0)
+    q_lo = float(np.quantile(finite, lo))
+    q_hi = float(np.quantile(finite, hi))
+    if q_hi <= q_lo:
+        q_hi = q_lo + 1.0
+    return (q_lo, q_hi)
+
+
+# ── shared overlays for XY-mode geoms: marginals + regression ────────────────
+
+
+_REGLINE_MAX_GROUPS = 30
+
+
+def attach_marginals(fig, ax_main, xs, ys,
+                     *, color: str = '#666666') -> None:
+    """Append univariate KDE strips on the top and right of ``ax_main``.
+
+    Uses ``make_axes_locatable`` so the marginal axes share the main
+    axes' data range automatically and the figure layout stays clean.
+    Called by ``plot_scatter`` / ``plot_hexbin`` / ``plot_kde2d`` when
+    their ``marginals=True`` flag is set.
+    """
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+    xs = np.asarray(xs, dtype=float)
+    ys = np.asarray(ys, dtype=float)
+    xs = xs[np.isfinite(xs)]
+    ys = ys[np.isfinite(ys)]
+    if xs.size < 5 or ys.size < 5:
+        return  # not enough data for a KDE
+    divider = make_axes_locatable(ax_main)
+    ax_top   = divider.append_axes('top',   size='12%', pad=0.05, sharex=ax_main)
+    ax_right = divider.append_axes('right', size='12%', pad=0.05, sharey=ax_main)
+    # KDE strips (seaborn handles the bw + fill).
+    sns.kdeplot(x=xs, ax=ax_top,   color=color, fill=True, linewidth=0.6, bw_adjust=1.0)
+    sns.kdeplot(y=ys, ax=ax_right, color=color, fill=True, linewidth=0.6, bw_adjust=1.0)
+    for marginal in (ax_top, ax_right):
+        marginal.tick_params(labelbottom=False, labelleft=False, labelright=False,
+                             labeltop=False, length=0)
+        marginal.set_xlabel(''); marginal.set_ylabel('')
+        for side in ('top', 'right', 'bottom', 'left'):
+            marginal.spines[side].set_visible(False)
+
+
+def attach_regression(ax, xs, ys,
+                      *, groups: 'Optional[np.ndarray]' = None,
+                      kind: str = 'global',
+                      palette_cat: str = _DEFAULT_CATEGORICAL) -> None:
+    """Overlay a regression line + correlation stats on ``ax``.
+
+    Args:
+        ax:     the main axes (caller is responsible for axis scales).
+        xs, ys: the transformed values that were plotted.  Must be 1-D
+                arrays of the same length.
+        groups: optional 1-D array of categorical labels aligned with
+                xs/ys.  When given and ``kind='by_group'``, one line +
+                stats box per group (cap ``_REGLINE_MAX_GROUPS``).
+        kind:   ``'global'`` (one line across all points) or
+                ``'by_group'`` (per-group regression).
+    """
+    from scipy.stats import linregress, spearmanr
+
+    xs = np.asarray(xs, dtype=float)
+    ys = np.asarray(ys, dtype=float)
+    finite = np.isfinite(xs) & np.isfinite(ys)
+    xs, ys = xs[finite], ys[finite]
+    if xs.size < 3:
+        return
+
+    def _fit_and_draw(_xs, _ys, color, label_prefix=''):
+        try:
+            lr = linregress(_xs, _ys)
+        except Exception:
+            return None
+        try:
+            spear, _ = spearmanr(_xs, _ys, nan_policy='omit')
+        except Exception:
+            spear = float('nan')
+        # Line spanning the data range
+        xline = np.array([float(_xs.min()), float(_xs.max())])
+        yline = lr.slope * xline + lr.intercept
+        ax.plot(xline, yline, color=color, linewidth=1.2, alpha=0.9)
+        return {
+            'label':     label_prefix,
+            'slope':     float(lr.slope),
+            'intercept': float(lr.intercept),
+            'pearson':   float(lr.rvalue),
+            'r2':        float(lr.rvalue) ** 2,
+            'pvalue':    float(lr.pvalue),
+            'spearman':  float(spear),
+            'n':         int(_xs.size),
+        }
+
+    cmap_name = palette_cat if palette_cat in _QUALITATIVE_PALETTES else _DEFAULT_CATEGORICAL
+    cmap_obj = matplotlib.cm.get_cmap(cmap_name)
+
+    if groups is None or kind == 'global':
+        stats = _fit_and_draw(xs, ys, color='#1d4ed8')
+        if stats:
+            text = (
+                f"n={stats['n']:,}\n"
+                f"slope={stats['slope']:+.3g}\n"
+                f"R²={stats['r2']:.3f}\n"
+                f"r={stats['pearson']:+.3f}  ρ={stats['spearman']:+.3f}"
+            )
+            ax.text(0.02, 0.98, text, transform=ax.transAxes,
+                    fontsize=7, va='top', ha='left',
+                    bbox=dict(facecolor='white', alpha=0.75, edgecolor='#cccccc',
+                              boxstyle='round,pad=0.3'))
+        return
+
+    # Per-group regression — group_labels aligned 1:1 with xs/ys.
+    groups = np.asarray(groups)[finite]
+    unique = sorted({str(g) for g in groups if g is not None})
+    if len(unique) > _REGLINE_MAX_GROUPS:
+        unique = unique[:_REGLINE_MAX_GROUPS]
+    rows: 'List[str]' = []
+    n_palette = getattr(cmap_obj, 'N', 256)
+    for i, label in enumerate(unique):
+        mask = groups.astype(str) == label
+        if mask.sum() < 3:
+            continue
+        color = cmap_obj((i % n_palette) / max(n_palette - 1, 1))
+        stats = _fit_and_draw(xs[mask], ys[mask], color=color, label_prefix=label)
+        if stats:
+            rows.append(
+                f"{label}: n={stats['n']:,} slope={stats['slope']:+.2g} "
+                f"R²={stats['r2']:.2f} ρ={stats['spearman']:+.2f}"
+            )
+    if rows:
+        # Keep the box readable: max 8 lines.
+        if len(rows) > 8:
+            shown = rows[:8] + [f"… ({len(rows) - 8} more groups)"]
+        else:
+            shown = rows
+        ax.text(0.02, 0.98, "\n".join(shown), transform=ax.transAxes,
+                fontsize=6, va='top', ha='left', family='monospace',
+                bbox=dict(facecolor='white', alpha=0.85, edgecolor='#cccccc',
+                          boxstyle='round,pad=0.3'))
+
+
+def plot_kde2d(
+    data_df: pd.DataFrame,
+    x_field: str,
+    y_field: str,
+    *,
+    transform_x: str = 'linear',
+    transform_y: str = 'linear',
+    asinh_scale: float = 1.0,
+    kde_n: int = 15_000,             # subsample size for the KDE fit
+    kde_bw: Optional[float] = 0.22,  # bandwidth (None → scott's rule)
+    n_levels: int = 10,
+    grid_res: int = 200,             # grid resolution per axis
+    cmap: str = 'magma',
+    iso_overlay: bool = True,        # thin white iso-density contours
+    point_overlay: bool = False,     # raster scatter behind the contours
+    point_alpha: float = 0.05,
+    marginals: bool = False,         # univariate KDE strips on top/right
+    regline: Optional[str] = None,   # 'global' | None — regression line overlay
+    seed: int = 0,
+    width: float = 7,
+    height: float = 6,
+    dpi: int = 150,
+    output_format: str = 'png',
+    title_extra: Optional[str] = None,
+    caption: Optional[str] = None,
+    source_url: Optional[str] = None,
+    font_family: Optional[str] = None,
+    font_size: Optional[float] = None,
+) -> bytes:
+    """2-D Gaussian kernel-density estimate over two continuous fields.
+
+    Args:
+        data_df:       DataFrame with at least ``[x_field, y_field]``.
+        transform_x / transform_y:
+                       per-axis transform (see ``TRANSFORMS``). Applied
+                       BEFORE the KDE fit so the contours sit in the
+                       transformed space.
+        kde_n:         subsample N cells for the KDE fit (default 15k —
+                       full evaluation on 200k+ cells is slow and adds
+                       no visible detail).
+        kde_bw:        bandwidth.  None → ``scipy.stats.gaussian_kde``'s
+                       Scott's-rule default.  Numeric → that float.
+        n_levels:      number of filled contour levels (default 10).
+        grid_res:      evaluation-grid resolution per axis (default 200,
+                       so 40,000 grid points; usually <0.5s).
+        iso_overlay:   draw thin white iso-density contour lines on top
+                       of the filled contours (highlights modes).
+        point_overlay: raster scatter behind the contours (default off;
+                       fine on small N).
+    """
+    from scipy.stats import gaussian_kde
+    _setup_style(font_family, font_size)
+    fig, ax = plt.subplots(figsize=(width, height))
+
+    df = data_df[[x_field, y_field]].dropna()
+    if len(df) < 5:
+        ax.text(0.5, 0.5, 'too few cells for a KDE',
+                transform=ax.transAxes, ha='center', va='center', color='#888')
+        return _render_figure(fig, dpi, output_format, caption, source_url)
+
+    xs = apply_axis_transform(df[x_field].to_numpy(), transform_x, asinh_scale)
+    ys = apply_axis_transform(df[y_field].to_numpy(), transform_y, asinh_scale)
+    finite = np.isfinite(xs) & np.isfinite(ys)
+    xs, ys = xs[finite], ys[finite]
+    n_total = int(finite.sum())
+    if n_total < 5:
+        ax.text(0.5, 0.5, 'too few finite values after transform',
+                transform=ax.transAxes, ha='center', va='center', color='#888')
+        return _render_figure(fig, dpi, output_format, caption, source_url)
+
+    # Subsample for the KDE fit (default 15k cells).  The grid evaluation
+    # uses the full bandwidth from the subsampled fit, so the density
+    # estimate is unbiased — the subsample only reduces fit cost.
+    rng = np.random.default_rng(seed)
+    if n_total > kde_n:
+        idx = rng.choice(n_total, size=kde_n, replace=False)
+        fit_xs, fit_ys = xs[idx], ys[idx]
+    else:
+        fit_xs, fit_ys = xs, ys
+
+    bw_method = kde_bw if kde_bw is not None else 'scott'
+    kde = gaussian_kde(np.vstack([fit_xs, fit_ys]), bw_method=bw_method)
+
+    # Evaluation grid spans the FULL data range (not the subsample's),
+    # padded by 3% on each side so contours don't clip at the edges.
+    pad = 0.03
+    xmin, xmax = xs.min(), xs.max()
+    ymin, ymax = ys.min(), ys.max()
+    xrange, yrange = (xmax - xmin) or 1.0, (ymax - ymin) or 1.0
+    xmin -= pad * xrange; xmax += pad * xrange
+    ymin -= pad * yrange; ymax += pad * yrange
+    grid_x = np.linspace(xmin, xmax, grid_res)
+    grid_y = np.linspace(ymin, ymax, grid_res)
+    grid_xx, grid_yy = np.meshgrid(grid_x, grid_y)
+    z = kde(np.vstack([grid_xx.ravel(), grid_yy.ravel()])).reshape(grid_res, grid_res)
+
+    if point_overlay:
+        ax.plot(xs, ys, marker='.', linestyle='none', markersize=1.5,
+                color='#444444', alpha=point_alpha, rasterized=True)
+
+    cs = ax.contourf(grid_xx, grid_yy, z, levels=n_levels, cmap=cmap)
+    if iso_overlay:
+        ax.contour(grid_xx, grid_yy, z, levels=n_levels,
+                   colors='white', linewidths=0.4, alpha=0.6)
+
+    cbar = plt.colorbar(cs, ax=ax, shrink=0.7)
+    cbar.set_label('density', fontsize=9)
+
+    ax.set_xlabel(_axis_label_with_transform(x_field, transform_x))
+    ax.set_ylabel(_axis_label_with_transform(y_field, transform_y))
+    title_bits = [
+        '2-D KDE',
+        f'{y_field} vs {x_field}',
+        f'n={_fmt_n(n_total)}{" (fit "+_fmt_n(len(fit_xs))+")" if n_total > kde_n else ""}',
+    ]
+    ax.set_title(_compose_title(title_bits, extra=title_extra))
+    sns.despine(ax=ax)
+
+    # Overlays — drawn AFTER the title so they read on top of the contours.
+    if regline:
+        attach_regression(ax, xs, ys, kind='global')
+    if marginals:
+        attach_marginals(fig, ax, xs, ys, color='#666666')
+
     fig.tight_layout()
 
     return _render_figure(fig, dpi, output_format, caption, source_url)

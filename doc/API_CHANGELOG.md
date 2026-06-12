@@ -29,6 +29,66 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.4.0 — 2026-06-12
+
+### Added — 2-D scatter / hexbin / KDE pack for module-level exploration
+
+Driven by a module-annotator request — making two-continuous-field
+plots (e.g. WGCNA module score A vs B) actually readable on 235k+
+cell datasets instead of a single dense blob.
+
+* **`GET /databases/{db_id}/plot/kde2d`** — new geom.  2-D Gaussian
+  kernel-density estimate over two continuous fields.  Fits the KDE
+  on a configurable subsample (default 15,000 cells) and evaluates
+  on a 200×200 grid.  Renders ``n_levels`` filled magma contours +
+  optional thin white iso-density overlay.  Optional ``point_overlay``
+  raster scatter under the contours.
+* **Per-axis numerical transforms** on ``/plot/scatter`` (XY-mode),
+  ``/plot/hexbin`` (XY-mode), and ``/plot/kde2d`` via new
+  ``transform_x`` / ``transform_y`` query params.  Seven kinds:
+    * ``linear`` (default)
+    * ``log`` — natural log; non-positive values become NaN and are
+      dropped.
+    * ``log1p`` — ``log(1+x)``; the legacy ``log_x``/``log_y`` booleans
+      still work as aliases for this.
+    * ``signed_log1p`` — ``sign(x) * log1p(|x|)``.  Symmetric, defined
+      for all reals, very close to ``asinh`` visually; cheap.
+    * ``asinh`` — smooth (C∞) symmetric transform; tunable via
+      ``asinh_scale``.
+    * ``signed_sqrt`` — ``sign(x) * sqrt(|x|)``.  Gentler compression
+      than log.
+    * ``rank`` — percentile in [0, 1].  Gives every cell equal visual
+      weight.
+* **Auto-clipping the hexbin density colour scale** at user-supplied
+  quantiles via new ``vmin_quantile`` / ``vmax_quantile`` params on
+  ``/plot/hexbin``.  e.g. ``vmin_quantile=0.10&vmax_quantile=0.90``
+  clips at the 10th–90th percentile of per-hex counts, restoring
+  contrast in the bulk of the distribution when a few hexes are
+  10× denser than the rest.  Default off (preserves prior behaviour).
+  Density mode only; ignored when ``color`` is set.  The colorbar
+  shows ``extend='both'`` arrows when clipping fires.
+* **Optional marginal univariate KDE strips** on ``/plot/scatter``,
+  ``/plot/hexbin``, and ``/plot/kde2d`` via ``marginals=true``.
+* **Optional regression overlay** via ``regline=global`` (one line +
+  R²/Pearson/Spearman/slope in a stats box) or ``regline=by_group``
+  (one line per categorical-colour group, capped at 30 groups; only
+  meaningful when ``color`` resolves to a categorical field).
+  Server uses ``scipy.stats.linregress`` + ``spearmanr``.
+
+### Changed
+
+* ``plot_geoms`` in ``/version`` now lists 14 entries (added ``kde2d``).
+* The hexbin density colorbar grows ``extend='both'`` arrows when
+  auto-clipping is active.  No visible change when it isn't.
+
+### Backwards compatibility
+
+* All 2.3.0 endpoints, params, and response shapes unchanged.
+* The legacy ``log_x`` / ``log_y`` booleans on scatter+hexbin still
+  work; they're now aliases for ``transform_x=log1p`` / ``transform_y=log1p``.
+* antclient 1.7.0 picks up everything new via ``**extra`` on
+  ``get_plot``.  No client-API change required.
+
 ## 2.3.0 — 2026-06-09
 
 ### Added — differential-expression data endpoints
