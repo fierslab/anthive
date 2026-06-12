@@ -88,8 +88,18 @@ nothing DE shows):
   `visualize ▾` dropdown** (`dataset.html`), not a long button row.
 - `scatter` / `hexbin` are **polymorphic**: an `embedding ⇄ X vs Y` mode
   radio toggles between the obsm-map form and a two-continuous-variable
-  form (free-text x+y + log1p toggles). `buildUrl`/`syncURL` skip
-  `disabled` and `_`-prefixed fields so only the active mode submits.
+  form. `setScatterMode()` shows AND enables/disables every control in the
+  toggled fieldsets; `buildUrl`/`syncURL` skip `disabled` and `_`-prefixed
+  fields so only the active mode submits.
+- **2-axis pack (REST API 2.4):** XY mode (scatter/hexbin) + the `kde2d`
+  geom expose per-axis **transform** dropdowns (`transform_x/_y` — linear,
+  log, log1p, signed_log1p, asinh, signed_sqrt, rank; rendered by the
+  `transform_select` Jinja macro) and a shared **overlays** fieldset
+  (`marginals`, `regline`, `asinh_scale`). Hexbin density mode adds a
+  one-click "auto-clip density 10–90%" checkbox driving
+  `vmin_quantile`/`vmax_quantile`. Legacy `log_x/log_y` URLs map to
+  `transform_*=log1p` on load (back-compat). `kde2d` is gated in `canRender`
+  on x+y both set.
 
 ## Vocabulary shared across pages
 

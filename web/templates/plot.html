@@ -2,6 +2,22 @@
 
 {% block title %}{{ geom_label }} — {{ dataset_name }} — anthive{% endblock %}
 
+{# Per-axis transform picker (REST API 2.4). Reused for scatter/hexbin XY mode
+   and kde2d. signed_log1p / signed_sqrt / asinh suit data that straddles zero
+   (module scores); rank is distribution-free. #}
+{% macro transform_select(axis) %}
+<label style="margin-top:4px">transform ({{ axis }})</label>
+<select name="transform_{{ axis }}" id="f-transform_{{ axis }}">
+  <option value="linear">linear</option>
+  <option value="log">log</option>
+  <option value="log1p">log1p</option>
+  <option value="signed_log1p">signed_log1p</option>
+  <option value="asinh">asinh</option>
+  <option value="signed_sqrt">signed_sqrt</option>
+  <option value="rank">rank</option>
+</select>
+{% endmacro %}
+
 {% block content %}
 <style>
   /* Plot-page-specific styles — kept inline so the rest of the site is unaffected */
@@ -223,7 +239,7 @@
         <input type="text" name="x" id="f-x-xy" autocomplete="off" placeholder="e.g. APOE, total_counts, MEblack">
         <div class="ac-suggest" id="ac-x-xy"></div>
       </div>
-      <label style="margin-top:4px"><input type="checkbox" name="log_x" id="f-log_x"> log<sub>1p</sub>(x)</label>
+      {{ transform_select('x') }}
     </fieldset>
 
     <fieldset id="fs-y-xy">
@@ -233,7 +249,7 @@
         <input type="text" name="y" id="f-y-xy" autocomplete="off" placeholder="e.g. TREM2, age, MEblue">
         <div class="ac-suggest" id="ac-y-xy"></div>
       </div>
-      <label style="margin-top:4px"><input type="checkbox" name="log_y" id="f-log_y"> log<sub>1p</sub>(y)</label>
+      {{ transform_select('y') }}
     </fieldset>
 
     <fieldset>
@@ -252,11 +268,18 @@
       <input type="number" name="vmin" id="f-vmin" step="any" placeholder="auto">
       <label style="margin-top:4px">vmax (colorbar upper clip — blank = auto)</label>
       <input type="number" name="vmax" id="f-vmax" step="any" placeholder="auto">
+      {# Density-mode (no colour) quantile auto-clip — big readability win on
+         200k+ cell plots where a few dense hexes wash out the gradient. #}
+      <label style="margin-top:6px"><input type="checkbox" id="f-autoclip" name="_autoclip"> auto-clip density 10–90%</label>
+      <div class="row" style="margin-top:2px">
+        <div><label>vmin quantile</label><input type="number" name="vmin_quantile" id="f-vmin_quantile" step="0.01" min="0" max="1" placeholder="auto"></div>
+        <div><label>vmax quantile</label><input type="number" name="vmax_quantile" id="f-vmax_quantile" step="0.01" min="0" max="1" placeholder="auto"></div>
+      </div>
       <small style="display:block;margin-top:4px;color:#666">
         Categorical → hex coloured by modal class, alpha by dominance
         (top1/top2 ratio).  Continuous → per-hex mean.  No colour → density.
-        vmin/vmax clip the gradient when one outlier hex would otherwise
-        wash out the rest.
+        vmin/vmax clip on absolute value; the quantile clip (density mode)
+        is robust to outlier hexes.
       </small>
       {% endif %}
     </fieldset>
@@ -356,6 +379,47 @@
       </select>
     </fieldset>
 
+    {% elif geom == 'kde2d' %}
+    {# 2-axis kernel density (REST API 2.4). Two continuous fields; optional
+       categorical grouping → one density per group. #}
+    <fieldset>
+      <legend>x axis (continuous)</legend>
+      <label>gene or numerical field</label>
+      <div class="ac-wrap">
+        <input type="text" name="x" id="f-x" autocomplete="off" placeholder="e.g. APOE, total_counts, MEblack">
+        <div class="ac-suggest" id="ac-x"></div>
+      </div>
+      {{ transform_select('x') }}
+    </fieldset>
+    <fieldset>
+      <legend>y axis (continuous)</legend>
+      <label>gene or numerical field</label>
+      <div class="ac-wrap">
+        <input type="text" name="y" id="f-y" autocomplete="off" placeholder="e.g. TREM2, age, MEblue">
+        <div class="ac-suggest" id="ac-y"></div>
+      </div>
+      {{ transform_select('y') }}
+    </fieldset>
+    <fieldset>
+      <legend>group by (optional)</legend>
+      <label>categorical → one density per group</label>
+      <select name="color" id="f-color">
+        <option value="">— none —</option>
+        {% for c in plot_meta.cat_fields %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
+      </select>
+    </fieldset>
+    <fieldset>
+      <legend>density</legend>
+      <label>contour levels</label>
+      <input type="number" name="n_levels" id="f-n_levels" value="10" min="2" max="50">
+      <label style="margin-top:4px">bandwidth (blank = auto)</label>
+      <input type="text" name="kde_bw" id="f-kde_bw" autocomplete="off" placeholder="auto (e.g. 0.2 or scott)">
+      <label style="margin-top:4px">grid resolution (blank = auto)</label>
+      <input type="number" name="kde_n" id="f-kde_n" placeholder="auto" min="16" max="512">
+      <label style="margin-top:6px"><input type="checkbox" name="iso_overlay" id="f-iso_overlay"> iso contour lines</label>
+      <label><input type="checkbox" name="point_overlay" id="f-point_overlay"> overlay raw points</label>
+    </fieldset>
+
     {% elif geom in ('volcano', 'ma') %}
     {# DE geoms: cascading study → term → contrast.  Terms/contrasts are
        loaded client-side from /de/{study}/… once a study is chosen. #}
@@ -429,6 +493,22 @@
         A gene across every contrast can be tall.  Narrowing by term keeps
         the figure readable for large studies.
       </small>
+    </fieldset>
+    {% endif %}
+
+    {# ── overlays (scatter / hexbin XY + kde2d; REST API 2.4) ──────────────── #}
+    {% if geom in ('scatter', 'hexbin', 'kde2d') %}
+    <fieldset id="fs-overlays">
+      <legend>overlays</legend>
+      <label><input type="checkbox" name="marginals" id="f-marginals"> marginal density strips</label>
+      <label style="margin-top:4px">regression line</label>
+      <select name="regline" id="f-regline">
+        <option value="">none</option>
+        <option value="global">global</option>
+        <option value="by_group">by group</option>
+      </select>
+      <label style="margin-top:4px">asinh scale (only when transform = asinh)</label>
+      <input type="number" name="asinh_scale" id="f-asinh_scale" step="any" placeholder="auto">
     </fieldset>
     {% endif %}
 
@@ -614,11 +694,13 @@
     if (GEOM === 'volcano' || GEOM === 'ma')
       return !!(fieldVal('study') && fieldVal('term') && fieldVal('contrast'));
     if (GEOM === 'forest') return !!fieldVal('gene');
+    if (GEOM === 'kde2d') return !!(fieldVal('x') && fieldVal('y'));
     return true;
   }
   function renderHint() {
     if (GEOM === 'volcano' || GEOM === 'ma') return 'select a DE study, term, and contrast on the left';
     if (GEOM === 'forest') return 'enter a gene on the left';
+    if (GEOM === 'kde2d') return 'enter continuous x and y fields on the left';
     return 'configure on the left to render';
   }
 
@@ -832,11 +914,19 @@
   // so exactly one name="x" (and an optional name="y") is ever submitted.
   function setScatterMode(mode) {
     const emb = mode === 'embedding';
-    const show = (id, on) => { const el = document.getElementById(id); if (el) el.style.display = on ? '' : 'none'; };
-    const dis  = (id, off) => { const el = document.getElementById(id); if (el) el.disabled = off; };
-    show('fs-x-emb', emb);  dis('f-x-emb', !emb);
-    show('fs-x-xy', !emb);  dis('f-x-xy', emb);
-    show('fs-y-xy', !emb);  dis('f-y-xy', emb); dis('f-log_x', emb); dis('f-log_y', emb);
+    // Show/hide a fieldset AND enable/disable every control inside it, so the
+    // inactive mode's widgets (incl. transform selects + overlays) aren't
+    // submitted (buildUrl skips disabled).
+    const setFs = (id, on) => {
+      const fs = document.getElementById(id);
+      if (!fs) return;
+      fs.style.display = on ? '' : 'none';
+      fs.querySelectorAll('input, select, textarea').forEach(el => { el.disabled = !on; });
+    };
+    setFs('fs-x-emb', emb);
+    setFs('fs-x-xy', !emb);
+    setFs('fs-y-xy', !emb);
+    setFs('fs-overlays', !emb);   // marginals/regline are XY-only
   }
   if (GEOM === 'scatter' || GEOM === 'hexbin') {
     document.querySelectorAll('input[name="_xymode"]').forEach(r =>
@@ -856,7 +946,31 @@
       const xx = document.getElementById('f-x-xy'); if (xx && _xVal) xx.value = _xVal;
       const yy = document.getElementById('f-y-xy'); if (yy && _yVal) yy.value = _yVal;
     }
+    // Back-compat: old shared links used log_x/log_y booleans; map them to the
+    // transform dropdowns (transform_x/_y = log1p) so the form reflects them.
+    ['x', 'y'].forEach(ax => {
+      const v = _p.get('log_' + ax);
+      if (v === 'true' || v === '1') {
+        const sel = document.getElementById('f-transform_' + ax);
+        if (sel) sel.value = 'log1p';
+      }
+    });
   }
+
+  // ── hexbin density auto-clip (one-click 10–90% quantile clip)
+  (function() {
+    const cb = document.getElementById('f-autoclip');
+    if (!cb) return;
+    const vmin = document.getElementById('f-vmin_quantile');
+    const vmax = document.getElementById('f-vmax_quantile');
+    // reflect an initial state from the URL (so a shared link ticks the box)
+    if (vmin && vmax && parseFloat(vmin.value) === 0.10 && parseFloat(vmax.value) === 0.90) cb.checked = true;
+    cb.addEventListener('change', () => {
+      if (cb.checked) { if (vmin) vmin.value = '0.10'; if (vmax) vmax.value = '0.90'; }
+      else            { if (vmin) vmin.value = '';      if (vmax) vmax.value = '';     }
+      scheduleRefresh();
+    });
+  })();
 
   // ── DE cascade: study → term → contrast ──────────────────────────────────
   // term/contrast option lists are dataset-and-study-specific, so they're
@@ -1162,6 +1276,13 @@
         label: 'split',
         ...mergeSmart(topCat.slice(0, 3), clusterCols),
       });
+
+    } else if (geom === 'kde2d') {
+      setIfEmpty('form [name="x"]', topNum[0] || topGenes[0]);
+      setIfEmpty('form [name="y"]', topNum[1] || topGenes[1] || topGenes[0]);
+      const xyPicks = [...topNum.slice(0, 3), ...topGenes.slice(0, 3)];
+      attachChips('x', { label: 'x', curated: xyPicks });
+      attachChips('y', { label: 'y', curated: xyPicks });
 
     } else if (geom === 'forest') {
       // gene shortcuts from the dataset's curated favourites

@@ -605,13 +605,47 @@ def test_geom_switcher_keeps_current_de_geom_without_de(client, monkeypatch):
 
 def test_plot_view_scatter_xy_mode_affordance(client):
     # scatter/hexbin expose the embedding ⇄ X-vs-Y mode switch with the XY
-    # inputs and log toggles (polymorphic endpoint, REST API 2.x).
+    # inputs and per-axis transform dropdowns (REST API 2.4 replaced the
+    # log_x/log_y checkboxes with transform_x/_y).
     resp = client.get("/browse/GroupA/ds1/plot/scatter")
     assert resp.status_code == 200
     assert 'name="_xymode"' in resp.text
     assert 'id="f-x-xy"' in resp.text
     assert 'id="f-y-xy"' in resp.text
-    assert 'name="log_x"' in resp.text and 'name="log_y"' in resp.text
+    assert 'name="transform_x"' in resp.text and 'name="transform_y"' in resp.text
+    assert 'signed_log1p' in resp.text          # the 7-kind transform list
+    # shared overlays (marginals / regression) for scatter/hexbin/kde2d
+    assert 'name="marginals"' in resp.text and 'name="regline"' in resp.text
+
+
+def test_plot_view_hexbin_density_autoclip(client):
+    resp = client.get("/browse/GroupA/ds1/plot/hexbin")
+    assert resp.status_code == 200
+    assert 'name="vmin_quantile"' in resp.text and 'name="vmax_quantile"' in resp.text
+    assert 'auto-clip density' in resp.text
+
+
+def test_plot_view_kde2d_form(client):
+    # kde2d is registered (REST API 2.4) and renders its 2-axis density form.
+    resp = client.get("/browse/GroupA/ds1/plot/kde2d")
+    assert resp.status_code == 200
+    assert "KDE density (2D)" in resp.text
+    assert 'name="x"' in resp.text and 'name="y"' in resp.text
+    assert 'name="transform_x"' in resp.text
+    assert 'name="n_levels"' in resp.text
+    assert 'name="iso_overlay"' in resp.text and 'name="point_overlay"' in resp.text
+
+
+def test_kde2d_in_geom_switcher(client):
+    # listed in the plot-type switcher (non-DE geom → always offered)
+    resp = client.get("/browse/GroupA/ds1/plot/scatter")
+    assert "KDE density (2D)" in resp.text
+
+
+def test_dataset_dropdown_has_kde2d(client):
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    assert "/plot/kde2d" in resp.text
 
 
 @pytest.mark.parametrize("geom", ["volcano", "ma"])
