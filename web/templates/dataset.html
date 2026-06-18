@@ -43,6 +43,14 @@
   .ds-ctx .pill.icon    { background:#f5f5f5; color:#444; border-color:#e5e5e5; font-size:13px; line-height:1.2; }
   .ds-ctx .pill.year    { background:#f3f4f6; color:#374151; border-color:#e5e7eb; font-family:var(--font-mono); }
 
+  /* Quick external-link badges (DOI / PubMed / accession / URL) under the
+     context bar — small and inconspicuous (plain links, not filled pills). */
+  .ds-links { display: flex; flex-wrap: wrap; gap: 12px; margin: -4px 0 10px; }
+  .ds-links .lnk {
+    font-size: 11px; color: var(--text-muted); text-decoration: none; white-space: nowrap;
+  }
+  .ds-links .lnk:hover { color: var(--link); text-decoration: underline; }
+
   /* ── visualize dropdown (top-right of the page) ──────────────────────────
      One button replaces the long row of plot buttons; clicking reveals a
      panel with the plot categories and their geoms. */
@@ -155,6 +163,17 @@
     {% if _cb.access.abbrev %}<span class="pill icon"       title="access: {{ _cb.access.full }}">{{ _cb.access.abbrev }}</span>{% endif %}
     {% if _cb.source.abbrev %}<span class="pill icon"       title="source: {{ _cb.source.full }}">{{ _cb.source.abbrev }}</span>{% endif %}
     {% if _cb.year %}<span class="pill year" title="publication year">{{ _cb.year }}</span>{% endif %}
+</div>
+{% endif %}
+
+{# Quick external links — DOI / PubMed / accession / URLs surfaced up top as
+   compact badges (the full list still lives in the Provenance section). #}
+{% if dataset_meta and (dataset_meta.doi or dataset_meta.pmid or dataset_meta.accession_url or dataset_meta.link) %}
+<div class="ds-links">
+    {% for doi_item in dataset_meta.doi %}<a class="lnk" href="https://doi.org/{{ doi_item }}" target="_blank" rel="noopener" title="{{ doi_item }}">🔗 doi</a>{% endfor %}
+    {% for p in dataset_meta.pmid %}<a class="lnk" href="https://pubmed.ncbi.nlm.nih.gov/{{ p }}" target="_blank" rel="noopener" title="PMID {{ p }}">🔗 pubmed</a>{% endfor %}
+    {% if dataset_meta.accession and dataset_meta.accession_url %}<a class="lnk" href="{{ dataset_meta.accession_url }}" target="_blank" rel="noopener" title="accession {{ dataset_meta.accession }}">🔗 {{ dataset_meta.accession }}</a>{% endif %}
+    {% for url_item in dataset_meta.link %}<a class="lnk" href="{{ url_item }}" target="_blank" rel="noopener" title="{{ url_item }}">🔗 link</a>{% endfor %}
 </div>
 {% endif %}
 

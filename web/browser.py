@@ -433,6 +433,11 @@ def get_collection_datasets(api_url: str, group_id: str) -> tuple:
             'disease':         _summarize_meta_field([db], 'disease',         abbrev_map=_DISEASE_ABBREV),
             'access':          _summarize_meta_field([db], 'access',          abbrev_map=_ACCESS_ABBREV),
             'source':          _summarize_meta_field([db], 'source',          abbrev_map=_SOURCE_ABBREV),
+            # External resources — surfaced as small link icons after the name.
+            'doi':             _as_list(db.get('doi')),
+            'link':            _as_list(db.get('link')),
+            'accession':       db.get('accession'),
+            'accession_url':   _accession_url(str(db.get('accession'))) if db.get('accession') else None,
         })
 
     return datasets, description_html

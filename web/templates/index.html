@@ -22,6 +22,10 @@
   .ctx-pill.disease { background:#fee2e2; color:#991b1b; border-color:#fecaca; }
   .ctx-pill.prep    { background:#fce7f3; color:#9d174d; border-color:#fbcfe8; }
 
+  /* access / source glyphs: small, desaturated (B&W), just before the name */
+  .acc-src { font-size:10px; margin-right:3px; vertical-align:baseline; cursor:default;
+             filter:grayscale(1); opacity:.55; }
+
   /* filter section header inside Context popover */
   .col-popover .filter-section { margin-top: 4px; padding-top: 4px; border-top: 1px dotted var(--border); }
   .col-popover .filter-section:first-of-type { margin-top: 0; padding-top: 0; border-top: 0; }
@@ -74,15 +78,15 @@
   <thead>
     <tr>
       <th class="sortable" data-col="id" data-help="3-char study identifier (group_id)">ID<span class="sort-ind"></span></th>
-      <th class="sortable" data-col="name" data-help="Friendly collection name (the study)">Collection<span class="sort-ind"></span></th>
+      <th class="sortable" data-col="name"
+          data-help="Friendly collection name (the study). The 🌐/🔒 (access) and 🏠/↓ (source) icons sit after the name; filter by them here."
+          data-filter-fields="acc,src">Collection<span class="sort-ind"></span></th>
       <th class="sortable" data-col="n_datasets" data-help="Number of distinct .h5ad datasets in this collection">n<span class="sort-ind"></span></th>
       <th class="sortable" data-col="cells" data-help="Total cells summed across the collection's datasets">Cells<span class="sort-ind"></span></th>
       <th class="sortable" data-col="modified" data-help="Most recent modification across this collection's datasets (mus 'updated' or .md 'date')">Modified<span class="sort-ind"></span></th>
       <th class="sortable" data-col="context"
           data-help="Compact summary: organism · technology · cell type · tissue · disease · prep. Each pill shows 'mix' when the collection's datasets disagree on that field."
           data-filter-fields="organism,technology,celltype,tissue,disease,suspension_type">Context<span class="sort-ind"></span></th>
-      <th class="sortable" data-col="acc" data-help="Access — who can view: 🔒 internal (lab-private) or 🌐 public (publishable). 'mix' when the collection contains both.">Acc<span class="sort-ind"></span></th>
-      <th class="sortable" data-col="src" data-help="Source — provenance: 🏠 lab-generated (in-house) or ↓ external (downloaded). 'mix' when the collection contains both.">Src<span class="sort-ind"></span></th>
     </tr>
   </thead>
   <tbody>
@@ -111,7 +115,7 @@
       data-src="{{ _src.full or '' }}">
       <td data-label="ID" style="color:#888;font-size:11px;font-family:var(--font-mono)">{{ folder.group_id or "—" }}</td>
       <td class="card-title">
-        <a href="/browse/{{ folder.browse_id }}"><strong>{{ folder.name }}</strong></a>
+        {% if _acc.abbrev %}<span class="acc-src" title="access: {{ _acc.full }}">{{ _acc.abbrev }}</span>{% endif %}{% if _src.abbrev %}<span class="acc-src" title="source: {{ _src.full }}">{{ _src.abbrev }}</span>{% endif %}<a href="/browse/{{ folder.browse_id }}"><strong>{{ folder.name }}</strong></a>
         {% if folder.description and folder.description != 'na' %}<br><span style="color:#888;font-size:11px">{{ folder.description }}</span>{% endif %}
       </td>
       <td data-label="Datasets" style="color:#666">{{ folder.dataset_count }}</td>
@@ -129,8 +133,6 @@
           {% if _sus.abbrev and _sus.abbrev != '—' %}<span class="ctx-pill prep" title="prep: {{ _sus.full }}">{{ _sus.abbrev }}</span>{% endif %}
         </span>
       </td>
-      <td data-label="Access" style="font-size:13px" title="{{ _acc.full or '' }}">{{ _acc.abbrev or "" }}</td>
-      <td data-label="Source" style="font-size:13px" title="{{ _src.full or '' }}">{{ _src.abbrev or "" }}</td>
     </tr>
     {% endfor %}
   </tbody>
@@ -284,7 +286,7 @@
       // Value filter — one section per component field, each with its own
       // <h5> heading and its own checklist + clear link.
       const filterableCols = new Set(
-        ['organism','technology','celltype','suspension_type','tissue','disease','acc']
+        ['organism','technology','celltype','suspension_type','tissue','disease','acc','src']
       );
       const sectionLabels = {
         organism:        'organism',
@@ -294,6 +296,7 @@
         disease:         'disease',
         suspension_type: 'prep',
         acc:             'access',
+        src:             'source',
       };
       const filterableFields = filterFields.filter(f => filterableCols.has(f));
       if (filterableFields.length) {

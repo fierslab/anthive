@@ -104,9 +104,17 @@ nothing DE shows):
 ## Vocabulary shared across pages
 
 - **Coloured "context" pills** (organism / tech / cell / tissue / disease
-  / prep / access / source / year) on landing, folder, and dataset
-  pages.  Palette is in `index.html`'s `.ctx-pill`, mirrored as
-  `.grp-pill` in `folder.html` and `.ds-ctx .pill` in `dataset.html`.
+  / prep / year) on landing, folder, and dataset pages.  Palette is in
+  `index.html`'s `.ctx-pill`, mirrored as `.grp-pill` in `folder.html` and
+  `.ds-ctx .pill` in `dataset.html`.
+- **Access / source** are NOT pills in the list views — they're small
+  desaturated glyphs (`.acc-src`, B&W) just *before* the collection/dataset
+  name, and their value-filters live in the Collection column's header
+  popover (`data-filter-fields="acc,src"` in `index.html`). External
+  resources (DOI / accession / URL) render as small `.ext-lnk` 🔗 icons
+  *after* the dataset name in `folder.html` (fed by doi/link in
+  `get_collection_datasets`) and as a `.ds-links` row under the context bar
+  on `dataset.html`.
 - **Abbreviation maps** in `browser.py`: `_CELLTYPE_ABBREV`,
   `_TISSUE_ABBREV`, `_DISEASE_ABBREV`, `_ORGANISM_ABBREV`,
   `_TECHNOLOGY_ABBREV`, `_ACCESS_ABBREV`, `_SOURCE_ABBREV`,

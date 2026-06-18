@@ -221,6 +221,7 @@ _DATABASES = [
         "access": "public", "source": "internal", "suspension_type": "nucleus",
         "layers": {"X": {}, "counts": {}}, "embeddings": {"X_umap": {}},
         "year": 2025, "updated": "2026-05-01",
+        "doi": "10.1/abc", "link": ["https://example.org/ds1"],
     },
     {
         "id": "GroupA/ds2", "group_id": "GroupA", "file_id": "ds2",
@@ -795,6 +796,53 @@ def test_folder_mobile_card_markup(client):
     assert 'class="card-title"' in resp.text
     assert 'data-label="Org"' in resp.text
     assert 'data-label="Status"' in resp.text
+
+
+def test_landing_access_source_inline(client):
+    # Acc/Source are no longer their own columns; the icons sit inline after the
+    # collection name (.acc-src) and their filters fold into the Collection
+    # header popover (data-filter-fields="acc,src").
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert 'class="acc-src"' in resp.text
+    assert 'data-filter-fields="acc,src"' in resp.text
+    assert 'data-label="Access"' not in resp.text   # column removed
+    assert 'data-label="Source"' not in resp.text
+
+
+def test_folder_access_source_inline(client):
+    resp = client.get("/browse/GroupA")
+    assert resp.status_code == 200
+    assert 'class="acc-src"' in resp.text
+    assert 'data-label="Access"' not in resp.text
+    assert 'data-label="Source"' not in resp.text
+
+
+def test_folder_external_link_icons(client):
+    # datasets with a doi/link get small link icons after the name (.ext-lnk)
+    resp = client.get("/browse/GroupA")
+    assert resp.status_code == 200
+    assert 'class="ext-lnk"' in resp.text
+    assert "https://doi.org/10.1/abc" in resp.text
+    assert "https://example.org/ds1" in resp.text
+
+
+def test_dataset_quick_links(client):
+    # DOI / PubMed / accession surfaced as compact badges up top (.ds-links),
+    # in addition to the verbose Provenance section.
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    assert 'class="ds-links"' in resp.text
+    assert "https://doi.org/10.1/abc" in resp.text
+    assert "pubmed.ncbi.nlm.nih.gov/123456" in resp.text
+
+
+def test_plot_pdf_label_and_no_source_line(client):
+    resp = client.get("/browse/GroupA/ds1/plot/scatter")
+    assert resp.status_code == 200
+    assert "PDF (publication)" not in resp.text   # label trimmed to "⬇ PDF"
+    assert 'id="src-url"' not in resp.text          # source line removed
+    assert "spinner-lg" in resp.text                # prominent in-canvas loader
 
 
 def test_landing_mobile_card_markup(client):
