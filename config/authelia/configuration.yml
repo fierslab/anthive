@@ -1,25 +1,47 @@
 ###############################################################
-# Authelia configuration for anthive4 — single instance, file
-# user backend, no SSO. Path-based behind Caddy at /authelia/.
+# Authelia configuration for anthive4 — data.nevel.eu instance.
 #
-# HTTP-only deployment: behind Nebula or localhost. No explicit
-# cookie domain block — Authelia auto-derives cookie scope from
-# each incoming request (works for HTTP because we never assert
-# the Secure flag).
+# Single instance, file user backend, no SSO. Sits behind the
+# system nginx (auth_request) at path prefix /authelia/, in front
+# of the anthive REST API + browser UI on data.nevel.eu (:443,
+# real Let's Encrypt cert). HTTPS is genuine here, so Secure
+# session cookies apply and the cookie domain is the real FQDN.
 #
-# Secrets are read from files via env-var:
+# Secrets are read from files via env-var (set by ant-supervisor):
 #   AUTHELIA_SESSION_SECRET_FILE
 #   AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE
 #   AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE
-# set by ant-supervisor.
 ###############################################################
 
 theme: dark
 
 server:
   # Path-aware base URL so Authelia knows its public prefix when
-  # generating redirects + asset URLs behind Caddy's path proxy.
+  # generating redirects + asset URLs behind nginx's /authelia/ proxy.
   address: 'tcp://127.0.0.1:9091/authelia'
+  endpoints:
+    authz:
+      # Browser gate (nginx /internal/authelia-verify): COOKIE ONLY.
+      # Deliberately excludes the Authorization-header strategy so a
+      # browser still sending stale HTTP basic-auth creds (cached from
+      # the old auth_basic gate) is treated as "no credentials" → clean
+      # 401 → redirect to portal, instead of a failed login that trips
+      # regulation and bans the user.
+      auth-request:
+        implementation: 'AuthRequest'
+        authn_strategies:
+          - name: 'CookieSession'
+      # API/CLI gate (nginx /internal/authelia-verify-api): cookie first
+      # (so a logged-in browser's XHR uses its session and ignores any
+      # stale basic header), then HTTP basic for programmatic clients
+      # (antclient / skill) that send Authorization and no cookie.
+      auth-request-api:
+        implementation: 'AuthRequest'
+        authn_strategies:
+          - name: 'CookieSession'
+          - name: 'HeaderAuthorization'
+            schemes:
+              - 'basic'
 
 log:
   level: 'info'
@@ -35,13 +57,13 @@ identity_validation:
 authentication_backend:
   file:
     path: './config/authelia/users_database.yml'
-    watch: true
+    watch: true            # hot-reload on file change, no restart
     password:
       algorithm: 'argon2'
 
 access_control:
-  # Every authenticated user can reach the bypass-able rules
-  # below; everything else needs a session.
+  # Password-only. Programmatic clients (antclient / skill) pass
+  # Authorization: Basic and are validated against the same backend.
   default_policy: 'one_factor'
 
 session:
@@ -51,18 +73,9 @@ session:
   inactivity: '15 minutes'
   remember_me: '1 month'
   cookies:
-    # Authelia v4.39 hard-requires https:// for cookie URLs. Caddy
-    # terminates TLS via `tls internal` (self-signed via Caddy's CA)
-    # so both access paths below resolve cleanly. Cookie domain MUST
-    # have a dot or be an IP — 'localhost.localdomain' satisfies the
-    # dot rule; '10.42.0.3' is an IP. Clients need to accept the cert
-    # warning once (or run `caddy trust` to import the CA).
-    - domain: 'localhost.localdomain'
-      authelia_url: 'https://localhost.localdomain:8501/authelia/'
-      default_redirection_url: 'https://localhost.localdomain:8501/'
-    - domain: '10.42.0.3'
-      authelia_url: 'https://10.42.0.3:8501/authelia/'
-      default_redirection_url: 'https://10.42.0.3:8501/'
+    - domain: 'data.nevel.eu'
+      authelia_url: 'https://data.nevel.eu/authelia/'
+      default_redirection_url: 'https://data.nevel.eu/'
 
 regulation:
   max_retries: 5
@@ -74,5 +87,33 @@ storage:
     path: './config/authelia/db.sqlite3'
 
 notifier:
-  filesystem:
-    filename: './config/authelia/notification.txt'
+  # Exactly one notifier allowed. SMTP (Migadu) replaces the old
+  # filesystem notifier so password-reset emails are actually delivered.
+  # Don't let a flaky SMTP egress crash the whole auth stack at boot —
+  # password reset degrades, login stays up. Re-enable once SMTP is solid.
+  disable_startup_check: true
+  smtp:
+    # scheme picks the transport:
+    #   submission://host:587   → STARTTLS (most common)
+    #   submissions://host:465  → implicit TLS
+    #   smtp://host:25          → opportunistic STARTTLS
+    # Port 465 and 25 are firewall-blocked outbound on this host; 587
+    # (STARTTLS) is the only open SMTP egress.
+    # IPv4 literal is deliberate: this host's IPv6 egress to Migadu
+    # connects but stalls mid-SMTP (broken IPv6 path), and Authelia's
+    # dialer prefers IPv6. Pinning the IPv4 address forces the working
+    # route; tls.server_name keeps cert verification against the FQDN.
+    # If Migadu ever changes this IP, password-reset mail breaks (login
+    # is unaffected) — re-resolve smtp.migadu.com and update.
+    address: 'submission://37.59.57.117:587'
+    timeout: '30s'   # default 5s is too tight for this egress path
+    username: 'anthive@nevel.eu'
+    # password is NOT here — supplied via AUTHELIA_NOTIFIER_SMTP_PASSWORD_FILE
+    # Migadu rejects a sender not owned by the authenticated mailbox, so
+    # this must be anthive@nevel.eu (or a Migadu-configured alias of it).
+    sender: 'Anthive <anthive@nevel.eu>'
+    subject: '[Anthive] {title}'
+    startup_check_address: 'anthive@nevel.eu'
+    tls:
+      server_name: 'smtp.migadu.com'
+      minimum_version: 'TLS1.2'

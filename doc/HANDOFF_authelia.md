@@ -258,6 +258,9 @@ server {
         proxy_pass_request_body       off;
         proxy_set_header              Content-Length        "";
         proxy_set_header              Host                  $host;
+        # REQUIRED by the auth-request endpoint — without it Authelia
+        # logs "missing required X-Original-URL header" and the gate fails.
+        proxy_set_header              X-Original-URL        $scheme://$host$request_uri;
         proxy_set_header              X-Original-Method     $request_method;
         proxy_set_header              X-Forwarded-Method    $request_method;
         proxy_set_header              X-Forwarded-Proto     $scheme;
@@ -388,6 +391,45 @@ curl -ksS -b "$COOKIE_JAR" -o /dev/null -w "%{http_code}\n" \
 - **Caddy `tls internal` needs the hostnames enumerated in the site
   address** so it knows which certs to issue. `:8501` alone won't work
   — use `host1:8501, host2:8501 {…}`.
+- **Migrating off an existing HTTP basic-auth gate? Make the browser
+  endpoint cookie-only or you will ban every existing user.** Browsers
+  cache basic-auth creds and keep sending `Authorization: Basic <old>`
+  on every request to the same host. nginx forwards that to Authelia's
+  default `auth-request` endpoint, which validates it as basic-auth,
+  fails (old password ≠ Authelia password), and after `max_retries`
+  trips regulation and bans the user. Fix: give the browser gate a
+  cookie-only strategy so stale headers are ignored (clean 401 →
+  portal redirect, no failed-login, no ban). Keep header/basic auth
+  on a *separate* endpoint used only by your API/CLI route:
+
+  ```yaml
+  server:
+    address: 'tcp://127.0.0.1:9091/authelia'
+    endpoints:
+      authz:
+        auth-request:                # browser gate — cookie only
+          implementation: 'AuthRequest'
+          authn_strategies:
+            - name: 'CookieSession'
+        auth-request-api:            # API/CLI gate — cookie first, then basic
+          implementation: 'AuthRequest'
+          authn_strategies:
+            - name: 'CookieSession'
+            - name: 'HeaderAuthorization'
+              schemes: ['basic']
+  ```
+
+  Point the API location at the second endpoint:
+  `auth_request /internal/authelia-verify-api;` →
+  `proxy_pass …/authelia/api/authz/auth-request-api;` and forward the
+  `Authorization` header (`proxy_set_header Authorization $http_authorization;`).
+  Cookie-first means a logged-in browser's same-origin XHR uses its
+  session and ignores any stale header, while a CLI client with no
+  cookie authenticates by basic. To unban during testing:
+  `DELETE FROM banned_user; DELETE FROM banned_ip;` in
+  `config/authelia/db.sqlite3` (the new ban tables; no sqlite3 binary?
+  use `python3 -c "import sqlite3; …"`).
+
 - **Each host gets its own secrets.** Sharing a secret = sharing the
   ability to sign sessions on the other host. Always regenerate.
 - **The `env VAR=…` trick in the supervisor cmd** is how the secret-file

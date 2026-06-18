@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+#
+# ant-adduser — add an Authelia user with a random 12-char password.
+#
+# What it does:
+#   - generates a 12-character alphanumeric password
+#   - hashes it with Authelia's argon2 (same params as the live config)
+#   - appends the user block to config/authelia/users_database.yml
+#   - prints the username + plaintext password ONCE (not stored anywhere)
+#
+# Authelia watches users_database.yml (watch: true), so the new user can
+# log in within ~a second — no restart needed.
+#
+# Usage:
+#   ant-adduser <username> [-e email] [-n "Display Name"] [-g group]
+#
+# Defaults: email=<username>@nevel.eu, display name=<username>, group=users
+#
+# Examples:
+#   ant-adduser carlo
+#   ant-adduser emily -e emily@kuleuven.be -n "Emily R" -g admins
+
+set -euo pipefail
+
+# --- resolve repo root (this script lives in <root>/bin/ops/) ----------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+AUTHELIA_BIN="${REPO_ROOT}/envs/authelia/authelia"
+USERS_FILE="${REPO_ROOT}/config/authelia/users_database.yml"
+
+die() { echo "error: $*" >&2; exit 1; }
+
+# --- parse args --------------------------------------------------------------
+USERNAME="${1:-}"
+shift || true
+[ -n "${USERNAME}" ] || die "usage: ant-adduser <username> [-e email] [-n \"Display Name\"] [-g group]"
+[[ "${USERNAME}" == -* ]] && die "first argument must be the username, not a flag"
+
+EMAIL="${USERNAME}@nevel.eu"
+DISPLAYNAME="${USERNAME}"
+GROUP="users"
+
+while getopts ":e:n:g:" opt; do
+  case "${opt}" in
+    e) EMAIL="${OPTARG}" ;;
+    n) DISPLAYNAME="${OPTARG}" ;;
+    g) GROUP="${OPTARG}" ;;
+    \?) die "unknown flag: -${OPTARG}" ;;
+    :)  die "flag -${OPTARG} needs a value" ;;
+  esac
+done
+
+# username must be a safe YAML key + login name
+[[ "${USERNAME}" =~ ^[a-z][a-z0-9_-]*$ ]] \
+  || die "username '${USERNAME}' must be lowercase, start with a letter, and contain only a-z 0-9 _ -"
+
+# --- sanity checks -----------------------------------------------------------
+[ -x "${AUTHELIA_BIN}" ] || die "authelia binary not found/executable at ${AUTHELIA_BIN}"
+[ -f "${USERS_FILE}" ]   || die "users database not found at ${USERS_FILE}"
+
+# refuse to clobber an existing user (match a 2-space-indented YAML key)
+if grep -qE "^  ${USERNAME}:[[:space:]]*$" "${USERS_FILE}"; then
+  die "user '${USERNAME}' already exists in ${USERS_FILE} (this script won't overwrite; edit the password line by hand or remove the block first)"
+fi
+
+# --- generate password + hash ------------------------------------------------
+# One call yields both the plaintext (to show the user) and the argon2 digest.
+GEN_OUTPUT="$("${AUTHELIA_BIN}" crypto hash generate argon2 \
+                --random --random.length 12 --random.charset alphanumeric \
+                --no-confirm)"
+
+PASSWORD="$(printf '%s\n' "${GEN_OUTPUT}" | sed -n 's/^Random Password: //p')"
+HASH="$(printf '%s\n' "${GEN_OUTPUT}"     | sed -n 's/^Digest: //p')"
+
+[ -n "${PASSWORD}" ] || die "could not parse generated password from authelia output"
+[ -n "${HASH}" ]     || die "could not parse generated hash from authelia output"
+
+# --- append the user block ---------------------------------------------------
+# Ensure the file ends with a newline before appending.
+[ -n "$(tail -c1 "${USERS_FILE}")" ] && printf '\n' >> "${USERS_FILE}"
+
+{
+  printf '  %s:\n' "${USERNAME}"
+  printf "    displayname: '%s'\n" "${DISPLAYNAME}"
+  printf "    password: '%s'\n"    "${HASH}"
+  printf "    email: '%s'\n"       "${EMAIL}"
+  printf "    groups: ['%s']\n"    "${GROUP}"
+} >> "${USERS_FILE}"
+
+chmod 600 "${USERS_FILE}"
+
+# --- report ------------------------------------------------------------------
+cat <<REPORT
+================================================================
+  Authelia user created (live within ~1s, no restart needed)
+----------------------------------------------------------------
+  username:     ${USERNAME}
+  password:     ${PASSWORD}
+  email:        ${EMAIL}
+  display name: ${DISPLAYNAME}
+  group:        ${GROUP}
+----------------------------------------------------------------
+  Share the password over a secure channel. It is NOT stored;
+  if lost, re-run with a fresh user or regenerate the hash.
+================================================================
+REPORT

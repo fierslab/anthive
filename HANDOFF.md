@@ -62,12 +62,36 @@ make serve-stop          # SIGTERM the supervisor (cascades)
 ```
 Caddy on `:8501` fronts everything. Backends bind to `127.0.0.1` by default.
 
-### Optionally add a password
+### Optionally add a password (local Caddy only)
 ```bash
 make caddy-passwd        # interactive — generates config/caddy-auth-basic.conf
 make caddy-passwd-clear  # remove auth
 ```
 Protects `/`, `/browse/*`, `/api/*`, `/jupyter/*`, `/streamlit/*`. MCP and OAuth-discovery probes stay open.
+This Caddy basic-auth is for local/dev only.
+
+### Authentication in production (Authelia) — UPDATED 2026-06-18
+**data.nevel.eu (and prs.nevel.eu, pending) no longer use HTTP basic-auth.**
+The public deployment runs behind **system nginx** (`/etc/nginx/conf.d/*.conf`,
+real Let's Encrypt certs on :443 — NOT Caddy) with **Authelia** as the auth
+layer. The supervisor starts Authelia automatically (it's in
+`DEFAULT_SERVICES`; binary in `envs/authelia/`, config in `config/authelia/`,
+listens on `127.0.0.1:9091` at path `/authelia/`). The stack will not come up
+until Authelia is configured (binary + secrets + `users_database.yml`).
+
+Dev-facing implications:
+- **The REST API is gated.** `/api/*` accepts EITHER an Authelia session
+  cookie (browser, same-origin XHR) OR HTTP basic-auth (`antclient` /
+  skill: `AnthiveClient(url, auth=(user, password))`). Credentials are the
+  Authelia users in `config/authelia/users_database.yml`, validated by
+  Authelia — not nginx, not the old `data.passwords`.
+- **Public (un-gated):** `/plots/*` (UUID plot images, so LLM links open) and
+  `/.well-known/acme-challenge/`. Everything else needs a session.
+- Browser gate is **cookie-only** by design; `/api/` uses a cookie-first,
+  then-basic endpoint. Don't add a header/basic strategy to the browser gate
+  — browsers resend stale cached basic creds and Authelia will ban the user.
+- Full setup + gotchas: [`doc/HANDOFF_authelia.md`](doc/HANDOFF_authelia.md).
+  Staged nginx reference: `config/nginx-data.nevel.eu.authelia.conf`.
 
 ### Convert a new h5ad
 ```bash
@@ -135,6 +159,7 @@ git and live on S3.
 | `CONVERT_PROCESS.md`, `CHECK_PROCESS.md` | Pipeline-level processes |
 | `PERFORMANCE.md` | Tuning notes (DuckDB threads, plot cache, chunking) |
 | `S3_UPLOAD.md` | S3 layout + sync strategy |
+| `HANDOFF_authelia.md` | Authelia auth setup behind nginx/Caddy (prod login + API gating) |
 | `JUPYTERLITE_BUILD.md` | How `frontend/jupyter/` becomes `webapp/jupyter/` |
 | `WEB_INTERFACE.md`, `WEBAPP-WORKFLOW.md` | Web UI design notes |
 | `CONFIG.md` | `anthive.yaml` reference |

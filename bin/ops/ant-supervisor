@@ -107,6 +107,7 @@ SERVICES: dict = {
             'AUTHELIA_SESSION_SECRET_FILE=./config/authelia/secrets/session',
             'AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE=./config/authelia/secrets/encryption',
             'AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE=./config/authelia/secrets/jwt',
+            'AUTHELIA_NOTIFIER_SMTP_PASSWORD_FILE=./config/authelia/secrets/smtp',
             './envs/authelia/authelia',
             '--config', './config/authelia/configuration.yml',
         ],
