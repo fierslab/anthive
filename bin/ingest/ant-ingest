@@ -1,0 +1,908 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = ["boto3", "pyyaml"]
+# ///
+
+"""
+ant-ingest — end-to-end ingestion from S3 __incoming/ to the catalog.
+
+Workflow (default subcommand):
+  1. Scan s3://<bucket>/__incoming/ → group by data_project (+ optional
+     single-segment subfolder).
+  2. For each h5ad in __incoming/, pull it and its `<basename>.h5ad.mus`
+     sidecar into  data/h5adstore/.staging/<dp>/[<sub>/]
+  3. Verify the pulled h5ad's sha256 against `sha256=` in the sidecar.
+     Mismatch → mark dataset failed (refuse to ingest).
+  4. Check the local catalog (data/h5adstore/<dp>/[<sub>/]<basename>.h5ad):
+       absent       → promote staging → catalog
+       same sha     → skip the h5ad copy, proceed to metadata merge
+       different sha→ STOP this dataset (verbose diff; user must resolve)
+  5. Merge the freshly-pulled sidecar with the catalog sidecar via
+     `lib.sidecar_merge` (KEY=VALUE rules; conflicts warn but don't abort
+     — they are recorded in the run report).
+  6. Promote any  __incoming/<dp>/static/<basename>  files to
+     data/h5adstore/<dp>/static/<basename> (sha-compare; identical →
+     ignore, different → warn).
+  7. Run `ant-h5ad-check`, `ant-convert`, `ant-duckdb-check` on the
+     newly-promoted h5ad. Any failure aborts THIS dataset (others continue).
+  8. Push the catalog h5ad + sidecar to s3://<bucket>/<dp>/[<sub>/]
+     (catalog root, NOT __incoming/). On success, re-stamp the sidecar's
+     s3_* block so it reflects the catalog key + new etag/uploaded_at.
+  9. Record the consumed __incoming/ keys + staging files in
+     data/h5adstore/.staging/_pending_prune.json so `ant-ingest prune`
+     can clean them later.
+
+At end of run, print a per-dataset status table + a "Pending cleanup"
+section with concrete next commands.
+
+Subcommands:
+  ant-ingest             # default: pull + run end-to-end
+  ant-ingest --dry-run   # show what would happen, no destructive ops
+  ant-ingest --filter <data_project>  # restrict scan to one project
+  ant-ingest prune              # remove staging + S3 __incoming/ keys
+  ant-ingest prune --dry-run    # preview only
+  ant-ingest prune --include-catalog-orphans
+                                # additionally remove S3 catalog files
+                                # that no longer exist locally
+
+Non-destructive guarantee: `ant-ingest` (without `prune`) never deletes
+anything on S3. `ant-ingest prune` is the only command that calls S3
+DeleteObject.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from dataclasses import dataclass, field, asdict
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import boto3
+from boto3.s3.transfer import TransferConfig
+from botocore.exceptions import ClientError
+
+# Repo-relative imports (lib/ shim).
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _SCRIPT_DIR.parent.parent
+sys.path.insert(0, str(_REPO_ROOT / 'lib'))
+from config import get_config                                       # noqa: E402
+from sidecar_merge import (                                         # noqa: E402
+    Conflict,
+    merge_sidecars,
+    read_sidecar,
+    restamp_s3_block,
+    write_sidecar_atomic,
+)
+
+INCOMING_PREFIX = '__incoming/'
+STAGING_DIR_REL = '.staging'
+PENDING_PRUNE_FILE = '_pending_prune.json'
+H5AD_SUFFIX = '.h5ad'
+MUS_SUFFIX = '.h5ad.mus'
+
+MULTIPART_THRESHOLD = 256 * 1024 ** 2
+MULTIPART_CHUNKSIZE = 256 * 1024 ** 2
+
+# ANSI colour codes — kept simple, no rich dep.
+_COL_OK = '\033[32m'
+_COL_WARN = '\033[33m'
+_COL_ERR = '\033[31m'
+_COL_DIM = '\033[2m'
+_COL_RESET = '\033[0m'
+
+
+def _ok(msg: str) -> None:
+    print(f'{_COL_OK}✓{_COL_RESET} {msg}')
+
+
+def _warn(msg: str) -> None:
+    print(f'{_COL_WARN}⚠{_COL_RESET} {msg}')
+
+
+def _err(msg: str) -> None:
+    print(f'{_COL_ERR}✗{_COL_RESET} {msg}', file=sys.stderr)
+
+
+def _dim(msg: str) -> str:
+    return f'{_COL_DIM}{msg}{_COL_RESET}'
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Run state
+# ─────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class DatasetPlan:
+    """One h5ad found in __incoming/ — the unit of ingestion."""
+    data_project: str
+    subfolder: Optional[str]
+    basename: str                            # e.g. 'Microglia' (without .h5ad)
+    incoming_h5ad_key: str                   # S3 key of the .h5ad
+    incoming_mus_key: str                    # S3 key of the .h5ad.mus
+    static_keys: List[str] = field(default_factory=list)
+
+    @property
+    def display_name(self) -> str:
+        if self.subfolder:
+            return f'{self.data_project}/{self.subfolder}/{self.basename}'
+        return f'{self.data_project}/{self.basename}'
+
+
+@dataclass
+class DatasetResult:
+    plan: DatasetPlan
+    status: str = 'pending'          # ok / skipped / failed / conflict
+    detail: str = ''
+    sidecar_conflicts: List[Conflict] = field(default_factory=list)
+    static_conflicts: List[str] = field(default_factory=list)
+    staging_files: List[str] = field(default_factory=list)   # paths relative to staging root
+    promoted_files: List[str] = field(default_factory=list)  # absolute catalog paths
+    s3_incoming_keys: List[str] = field(default_factory=list)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# S3 helpers
+# ─────────────────────────────────────────────────────────────────────────
+
+def _s3_client(s3_cfg: dict):
+    endpoint = s3_cfg.get('endpoint')
+    return boto3.client(
+        's3',
+        endpoint_url=f'https://{endpoint}' if endpoint else None,
+        region_name=s3_cfg.get('region', 'us-east-1'),
+        aws_access_key_id=s3_cfg.get('access_key_id'),
+        aws_secret_access_key=s3_cfg.get('secret_access_key'),
+    )
+
+
+def _transfer_config() -> TransferConfig:
+    return TransferConfig(
+        multipart_threshold=MULTIPART_THRESHOLD,
+        multipart_chunksize=MULTIPART_CHUNKSIZE,
+        max_concurrency=4,
+    )
+
+
+def _list_incoming(client, bucket: str, filter_project: Optional[str]) -> List[dict]:
+    """List every object under __incoming/ — returns full S3 metadata dicts."""
+    paginator = client.get_paginator('list_objects_v2')
+    prefix = INCOMING_PREFIX
+    if filter_project:
+        prefix = f'{INCOMING_PREFIX}{filter_project.strip("/")}/'
+    objects: List[dict] = []
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get('Contents', []):
+            objects.append(obj)
+    return objects
+
+
+def _group_into_plans(objects: List[dict]) -> Tuple[List[DatasetPlan], List[str]]:
+    """Group the listing into DatasetPlan units.
+
+    Rules:
+      - Each .h5ad in __incoming/ creates one plan; the matching .h5ad.mus
+        MUST exist or the dataset is reported as malformed.
+      - The relative path between __incoming/<dp>/ and the file decides
+        whether it's at the project root, under a subfolder, or under static/.
+        Depth >1 (beyond a single subfolder) is rejected as malformed.
+
+    Returns (plans, malformed_messages).
+    """
+    by_key: Dict[str, dict] = {obj['Key']: obj for obj in objects}
+    keys = sorted(by_key)
+
+    h5ad_keys = [k for k in keys if k.endswith(H5AD_SUFFIX)]
+    plans: List[DatasetPlan] = []
+    malformed: List[str] = []
+
+    for h5ad_key in h5ad_keys:
+        # __incoming/<dp>/...rest...
+        rest = h5ad_key[len(INCOMING_PREFIX):]
+        parts = rest.split('/')
+        if len(parts) < 2:
+            malformed.append(f'{h5ad_key}: not under __incoming/<data_project>/')
+            continue
+        data_project = parts[0]
+        tail = parts[1:]
+
+        subfolder: Optional[str] = None
+        if len(tail) == 1:
+            filename = tail[0]
+        elif len(tail) == 2 and tail[0] != 'static':
+            subfolder, filename = tail
+        else:
+            malformed.append(
+                f'{h5ad_key}: too deep '
+                f'(expected __incoming/<dp>/[<subfolder>/]<file>.h5ad)'
+            )
+            continue
+
+        if not filename.endswith(H5AD_SUFFIX):
+            continue  # shouldn't happen — already filtered
+        basename = filename[:-len(H5AD_SUFFIX)]
+
+        # Required sidecar key.
+        if subfolder:
+            mus_key = f'{INCOMING_PREFIX}{data_project}/{subfolder}/{filename}.mus'
+        else:
+            mus_key = f'{INCOMING_PREFIX}{data_project}/{filename}.mus'
+        if mus_key not in by_key:
+            malformed.append(
+                f'{h5ad_key}: missing companion sidecar at {mus_key}. '
+                f'Skipping (mus is expected to deposit both atomically).'
+            )
+            continue
+
+        plans.append(DatasetPlan(
+            data_project=data_project,
+            subfolder=subfolder,
+            basename=basename,
+            incoming_h5ad_key=h5ad_key,
+            incoming_mus_key=mus_key,
+        ))
+
+    # Static files are associated with a data_project, not a specific h5ad,
+    # so we just attach them to every plan in that project; promotion is
+    # sha-aware so the same file copied multiple times is a no-op.
+    static_by_project: Dict[str, List[str]] = {}
+    for key in keys:
+        rest = key[len(INCOMING_PREFIX):]
+        parts = rest.split('/')
+        if len(parts) >= 3 and parts[1] == 'static':
+            static_by_project.setdefault(parts[0], []).append(key)
+    for plan in plans:
+        plan.static_keys = static_by_project.get(plan.data_project, [])
+
+    return plans, malformed
+
+
+def _download(client, bucket: str, key: str, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    client.download_file(bucket, key, str(dest), Config=_transfer_config())
+
+
+def _sha256_file(path: Path) -> str:
+    sha = hashlib.sha256()
+    with open(path, 'rb') as handle:
+        for chunk in iter(lambda: handle.read(2 ** 20), b''):
+            sha.update(chunk)
+    return sha.hexdigest()
+
+
+def _parse_sidecar_keys(text: str) -> Dict[str, str]:
+    """Tiny key=value extractor — only needed for sha256 lookup pre-merge."""
+    out: Dict[str, str] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#') or '=' not in line:
+            continue
+        key, _, val = line.partition('=')
+        out[key.strip()] = val.strip()
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Subprocess helpers (delegate to existing ant-* tools)
+# ─────────────────────────────────────────────────────────────────────────
+
+def _run(label: str, cmd: List[str]) -> Tuple[bool, str]:
+    """Run a subprocess; return (ok, tail_of_output)."""
+    print(_dim(f'  $ {" ".join(cmd)}'))
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, check=False,
+        )
+    except FileNotFoundError as exc:
+        return False, f'{label}: executable not found ({exc})'
+    if result.returncode != 0:
+        tail = (result.stderr or result.stdout or '').strip().splitlines()
+        tail_text = '\n'.join(tail[-15:])
+        return False, f'{label} failed (exit {result.returncode}):\n{tail_text}'
+    return True, (result.stdout or '').strip()
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Per-dataset workflow
+# ─────────────────────────────────────────────────────────────────────────
+
+def _catalog_paths(data_folder: Path, plan: DatasetPlan) -> Tuple[Path, Path]:
+    """Return (catalog_h5ad_path, catalog_mus_path) for a plan."""
+    parts = [data_folder, plan.data_project]
+    if plan.subfolder:
+        parts.append(plan.subfolder)
+    catalog_dir = Path(*parts)
+    h5ad_name = plan.basename + H5AD_SUFFIX
+    return catalog_dir / h5ad_name, catalog_dir / (h5ad_name + '.mus')
+
+
+def _staging_dir(data_folder: Path, plan: DatasetPlan) -> Path:
+    parts = [data_folder, STAGING_DIR_REL, plan.data_project]
+    if plan.subfolder:
+        parts.append(plan.subfolder)
+    return Path(*parts)
+
+
+def _print_h5ad_conflict_table(
+    plan: DatasetPlan,
+    incoming_path: Path, incoming_sha: str,
+    catalog_path: Path, catalog_sha: str,
+    incoming_mus_text: str,
+) -> None:
+    """Verbose diff to help the human resolve a same-name-different-sha clash."""
+    msg = _parse_sidecar_keys(incoming_mus_text).get('irods_message') or \
+          _parse_sidecar_keys(incoming_mus_text).get('note') or ''
+    _err(f'h5ad collision for {plan.display_name}:')
+    print(f'    INCOMING')
+    print(f'      key:    {plan.incoming_h5ad_key}')
+    print(f'      sha256: {incoming_sha}')
+    print(f'      size:   {incoming_path.stat().st_size:,} bytes')
+    if msg:
+        print(f'      msg:    {msg[:120]}')
+    print(f'    CATALOG (already in data/h5adstore/)')
+    print(f'      path:   {catalog_path}')
+    print(f'      sha256: {catalog_sha}')
+    print(f'      size:   {catalog_path.stat().st_size:,} bytes')
+    print(f'      mtime:  {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(catalog_path.stat().st_mtime))}')
+    print(f'    To resolve, choose ONE:')
+    print(f'      a) Keep catalog, discard incoming:')
+    print(f'           ant-ingest prune --only-incoming-key {plan.incoming_h5ad_key}')
+    print(f'      b) Replace catalog with incoming:')
+    print(f'           rm {catalog_path}{{,.mus}}')
+    print(f'           ant-ingest --filter {plan.data_project}')
+    print(f'      c) Treat as a new dataset under a different name:')
+    print(f'           rename in S3 __incoming/ first, then ant-ingest')
+
+
+def _process_dataset(
+    plan: DatasetPlan,
+    client,
+    bucket: str,
+    data_folder: Path,
+    args: argparse.Namespace,
+) -> DatasetResult:
+    """Execute steps 2-9 of the workflow for one h5ad. All-or-nothing per
+    dataset — any failure leaves staging intact so the user can inspect."""
+    result = DatasetResult(plan=plan)
+    print(f'\n─── {plan.display_name} ───')
+
+    # 2. Pull h5ad + .mus into staging.
+    staging_dir = _staging_dir(data_folder, plan)
+    staged_h5ad = staging_dir / (plan.basename + H5AD_SUFFIX)
+    staged_mus = staging_dir / (plan.basename + H5AD_SUFFIX + '.mus')
+
+    if args.dry_run:
+        result.status = 'dry-run'
+        result.detail = f'would pull {plan.incoming_h5ad_key} + sidecar'
+        result.s3_incoming_keys = [plan.incoming_h5ad_key, plan.incoming_mus_key]
+        return result
+
+    try:
+        print(f'  Pulling sidecar  {plan.incoming_mus_key}')
+        _download(client, bucket, plan.incoming_mus_key, staged_mus)
+        result.staging_files.append(str(staged_mus))
+
+        print(f'  Pulling h5ad     {plan.incoming_h5ad_key} ({_human_size(client, bucket, plan.incoming_h5ad_key)})')
+        _download(client, bucket, plan.incoming_h5ad_key, staged_h5ad)
+        result.staging_files.append(str(staged_h5ad))
+    except ClientError as exc:
+        result.status = 'failed'
+        result.detail = f'pull failed: {exc}'
+        _err(result.detail)
+        return result
+
+    # 3. Validate sha.
+    incoming_text = staged_mus.read_text(encoding='utf-8', errors='replace')
+    incoming_meta = _parse_sidecar_keys(incoming_text)
+    declared_sha = incoming_meta.get('sha256', '')
+    actual_sha = _sha256_file(staged_h5ad)
+    if not declared_sha:
+        _warn('sidecar has no sha256= line; cannot verify integrity, proceeding')
+    elif declared_sha != actual_sha:
+        result.status = 'failed'
+        result.detail = (
+            f'sha256 mismatch: pulled file is {actual_sha}, '
+            f'sidecar declared {declared_sha}. Aborting (possible mid-upload race or corruption).'
+        )
+        _err(result.detail)
+        return result
+    else:
+        _ok(f'sha256 verified ({actual_sha[:12]}…)')
+
+    # 4. Catalog clash check.
+    catalog_h5ad, catalog_mus = _catalog_paths(data_folder, plan)
+    h5ad_action = 'promote'   # 'promote' | 'reuse' (already in catalog with matching sha)
+    if catalog_h5ad.exists():
+        existing_sha = _sha256_file(catalog_h5ad)
+        if existing_sha == actual_sha:
+            h5ad_action = 'reuse'
+            _ok('catalog h5ad already present with matching sha — proceeding to metadata')
+        else:
+            _print_h5ad_conflict_table(
+                plan,
+                incoming_path=staged_h5ad, incoming_sha=actual_sha,
+                catalog_path=catalog_h5ad, catalog_sha=existing_sha,
+                incoming_mus_text=incoming_text,
+            )
+            result.status = 'conflict'
+            result.detail = (
+                'catalog has same-name h5ad with different sha256 — '
+                'human must resolve before re-running'
+            )
+            return result
+
+    # 5. Metadata merge.
+    local_text = read_sidecar(catalog_mus)
+    merge = merge_sidecars(local_text, incoming_text)
+    if merge.conflicts:
+        for conflict in merge.conflicts:
+            _warn(
+                f'sidecar key conflict — kept local: '
+                f'{conflict.key}={conflict.local_value}  '
+                f'(incoming was: {conflict.incoming_value})'
+            )
+        result.sidecar_conflicts = list(merge.conflicts)
+    if merge.adopted:
+        _ok(f'adopted {len(merge.adopted)} new sidecar key(s): {", ".join(merge.adopted[:8])}'
+            + ('…' if len(merge.adopted) > 8 else ''))
+    if merge.overwritten:
+        print(_dim(f'  machine-keys refreshed: {", ".join(merge.overwritten)}'))
+
+    # 6. Promote h5ad (if needed) and write merged sidecar.
+    catalog_h5ad.parent.mkdir(parents=True, exist_ok=True)
+    if h5ad_action == 'promote':
+        shutil.move(str(staged_h5ad), str(catalog_h5ad))
+        result.promoted_files.append(str(catalog_h5ad))
+        _ok(f'promoted h5ad → {catalog_h5ad}')
+    write_sidecar_atomic(catalog_mus, merge.merged_text)
+    result.promoted_files.append(str(catalog_mus))
+
+    # 7. Static files (sha-compare).
+    for static_key in plan.static_keys:
+        static_filename = static_key.split('/')[-1]
+        catalog_static = data_folder / plan.data_project / 'static' / static_filename
+        staged_static = staging_dir.parent / 'static' / static_filename
+        try:
+            _download(client, bucket, static_key, staged_static)
+        except ClientError as exc:
+            _warn(f'static pull failed: {static_key} — {exc}')
+            continue
+        incoming_sha_static = _sha256_file(staged_static)
+        if catalog_static.exists():
+            existing_static_sha = _sha256_file(catalog_static)
+            if existing_static_sha == incoming_sha_static:
+                staged_static.unlink()  # identical — no-op
+                continue
+            _warn(
+                f'static file conflict (kept local): '
+                f'{catalog_static.relative_to(data_folder)}  '
+                f'(catalog sha {existing_static_sha[:8]}…, incoming sha {incoming_sha_static[:8]}…)'
+            )
+            result.static_conflicts.append(str(catalog_static))
+            staged_static.unlink()
+            continue
+        catalog_static.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(staged_static), str(catalog_static))
+        result.promoted_files.append(str(catalog_static))
+        _ok(f'promoted static → {catalog_static.relative_to(data_folder)}')
+
+    # 8. Run check, convert, duckdb-check.
+    ant_h5ad_check = _SCRIPT_DIR / 'ant-h5ad-check'
+    ant_convert = _SCRIPT_DIR / 'ant-convert'
+    ant_duckdb_check = _SCRIPT_DIR / 'ant-duckdb-check'
+
+    for label, cmd in [
+        ('ant-h5ad-check', [str(ant_h5ad_check), str(catalog_h5ad)]),
+        ('ant-convert', [str(ant_convert), str(catalog_h5ad)]),
+        ('ant-duckdb-check', [str(ant_duckdb_check),
+                              str(catalog_h5ad.with_suffix('.duckdb'))]),
+    ]:
+        ok, msg = _run(label, cmd)
+        if not ok:
+            result.status = 'failed'
+            result.detail = msg
+            _err(msg)
+            return result
+        _ok(f'{label} ok')
+
+    # 9. Push to catalog root + re-stamp s3_*.
+    catalog_key = _catalog_key(plan)
+    h5ad_size = catalog_h5ad.stat().st_size
+    print(f'  Pushing to catalog: s3://{bucket}/{catalog_key}  ({_fmt_size(h5ad_size)})')
+    try:
+        client.upload_file(
+            str(catalog_h5ad), bucket, catalog_key,
+            Config=_transfer_config(),
+            ExtraArgs={'Metadata': {'original-mtime': str(int(catalog_h5ad.stat().st_mtime))}},
+        )
+        head = client.head_object(Bucket=bucket, Key=catalog_key)
+        etag = head['ETag'].strip('"')
+        uploaded_at = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        endpoint = get_config()['s3'].get('endpoint')
+        url = f'https://{endpoint}/{bucket}/{catalog_key}' if endpoint else \
+              f's3://{bucket}/{catalog_key}'
+        new_text = restamp_s3_block(
+            catalog_mus.read_text(encoding='utf-8'),
+            bucket=bucket, key=catalog_key, url=url,
+            etag=etag, uploaded_at=uploaded_at,
+        )
+        write_sidecar_atomic(catalog_mus, new_text)
+        # Also push the sidecar so S3 stays consistent with the local truth.
+        client.upload_file(
+            str(catalog_mus), bucket, catalog_key + '.mus',
+            Config=_transfer_config(),
+            ExtraArgs={'Metadata': {'original-mtime': str(int(catalog_mus.stat().st_mtime))}},
+        )
+        _ok('pushed to catalog + sidecar s3_* re-stamped')
+    except ClientError as exc:
+        result.status = 'failed'
+        result.detail = f'catalog push failed: {exc}'
+        _err(result.detail)
+        return result
+
+    # 10. Record __incoming/ keys for pending prune.
+    result.s3_incoming_keys = [plan.incoming_mus_key, plan.incoming_h5ad_key]
+    result.s3_incoming_keys.extend(plan.static_keys)
+    result.status = 'ok'
+    result.detail = 'ingested'
+    return result
+
+
+def _catalog_key(plan: DatasetPlan) -> str:
+    parts = [plan.data_project]
+    if plan.subfolder:
+        parts.append(plan.subfolder)
+    parts.append(plan.basename + H5AD_SUFFIX)
+    return '/'.join(parts)
+
+
+def _fmt_size(num_bytes: int) -> str:
+    for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
+        if num_bytes < 1024 or unit == 'TB':
+            return f'{num_bytes:.1f} {unit}'
+        num_bytes /= 1024
+    return str(num_bytes)
+
+
+def _human_size(client, bucket: str, key: str) -> str:
+    try:
+        head = client.head_object(Bucket=bucket, Key=key)
+        return _fmt_size(head['ContentLength'])
+    except Exception:
+        return '?'
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Catalog-orphan scan (used by prune --include-catalog-orphans)
+# ─────────────────────────────────────────────────────────────────────────
+
+def _catalog_orphans(client, bucket: str, data_folder: Path) -> List[str]:
+    """Return S3 keys outside __incoming/ that have no local counterpart."""
+    paginator = client.get_paginator('list_objects_v2')
+    orphans: List[str] = []
+    for page in paginator.paginate(Bucket=bucket):
+        for obj in page.get('Contents', []):
+            key = obj['Key']
+            if key.startswith(INCOMING_PREFIX):
+                continue
+            local_path = data_folder / key
+            if not local_path.exists():
+                orphans.append(key)
+    return orphans
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Pending-prune ledger
+# ─────────────────────────────────────────────────────────────────────────
+
+def _ledger_path(data_folder: Path) -> Path:
+    return data_folder / STAGING_DIR_REL / PENDING_PRUNE_FILE
+
+
+def _load_ledger(data_folder: Path) -> Dict:
+    ledger_file = _ledger_path(data_folder)
+    if not ledger_file.exists():
+        return {'datasets': []}
+    return json.loads(ledger_file.read_text())
+
+
+def _save_ledger(data_folder: Path, ledger: Dict) -> None:
+    ledger_file = _ledger_path(data_folder)
+    ledger_file.parent.mkdir(parents=True, exist_ok=True)
+    ledger_file.write_text(json.dumps(ledger, indent=2, default=str))
+
+
+def _append_to_ledger(data_folder: Path, results: List[DatasetResult]) -> None:
+    ledger = _load_ledger(data_folder)
+    for result in results:
+        if result.status != 'ok':
+            continue
+        ledger['datasets'].append({
+            'display_name': result.plan.display_name,
+            'data_project': result.plan.data_project,
+            'subfolder': result.plan.subfolder,
+            'basename': result.plan.basename,
+            'staging_files': result.staging_files,
+            's3_incoming_keys': result.s3_incoming_keys,
+            'recorded_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+        })
+    _save_ledger(data_folder, ledger)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Report
+# ─────────────────────────────────────────────────────────────────────────
+
+_STATUS_GLYPH = {
+    'ok': f'{_COL_OK}OK{_COL_RESET}',
+    'skipped': 'SKIP',
+    'failed': f'{_COL_ERR}FAIL{_COL_RESET}',
+    'conflict': f'{_COL_ERR}CONFLICT{_COL_RESET}',
+    'dry-run': 'DRY-RUN',
+    'pending': f'{_COL_DIM}…{_COL_RESET}',
+}
+
+
+def _print_run_report(results: List[DatasetResult], malformed: List[str]) -> None:
+    print()
+    print('═' * 66)
+    print('RUN REPORT')
+    print('═' * 66)
+    if not results and not malformed:
+        print('  (no datasets found in __incoming/)')
+        return
+    name_width = max((len(r.plan.display_name) for r in results), default=10)
+    for result in results:
+        glyph = _STATUS_GLYPH.get(result.status, result.status)
+        print(f'  {glyph:<20}  {result.plan.display_name:<{name_width}}  {result.detail}')
+        for conflict in result.sidecar_conflicts:
+            print(f'    {_COL_WARN}sidecar conflict{_COL_RESET}: {conflict.key}  '
+                  f'local={conflict.local_value!r}  incoming={conflict.incoming_value!r}')
+        for path in result.static_conflicts:
+            print(f'    {_COL_WARN}static conflict{_COL_RESET}: {path}')
+    for line in malformed:
+        print(f'  {_COL_WARN}MALFORMED{_COL_RESET}    {line}')
+
+
+def _print_prune_hints(data_folder: Path, results: List[DatasetResult],
+                       client, bucket: str, args: argparse.Namespace) -> None:
+    print()
+    print('═' * 66)
+    print('PENDING CLEANUP')
+    print('═' * 66)
+
+    successes = [r for r in results if r.status == 'ok']
+    if not successes and args.dry_run:
+        # nothing to summarise
+        return
+
+    if successes:
+        n_staging = sum(len(r.staging_files) for r in successes)
+        n_incoming = sum(len(r.s3_incoming_keys) for r in successes)
+        print(f'  Local staging:      {n_staging} file(s) under '
+              f'{(data_folder / STAGING_DIR_REL).relative_to(data_folder)}/')
+        print(f'  S3 __incoming/ :    {n_incoming} key(s) under s3://{bucket}/{INCOMING_PREFIX}')
+
+    # Catalog orphans — cheap to scan, useful even if no datasets ingested.
+    if not args.skip_orphan_scan:
+        try:
+            orphans = _catalog_orphans(client, bucket, data_folder)
+        except ClientError as exc:
+            orphans = []
+            _warn(f'(orphan scan failed: {exc})')
+        if orphans:
+            shown = orphans[:5]
+            extra = max(0, len(orphans) - len(shown))
+            print(f'  S3 catalog orphans: {len(orphans)} key(s) on S3 with no local file')
+            for key in shown:
+                print(f'    - {key}')
+            if extra:
+                print(f'    … and {extra} more')
+
+    print()
+    print('  To clean:')
+    print(f'    ant-ingest prune --dry-run     # preview')
+    print(f'    ant-ingest prune               # remove staging + __incoming/')
+    print(f'    ant-ingest prune --include-catalog-orphans')
+    print(f'                                   # also remove S3 catalog orphans')
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Subcommand handlers
+# ─────────────────────────────────────────────────────────────────────────
+
+def cmd_run(args: argparse.Namespace, s3_cfg: dict, data_folder: Path) -> int:
+    client = _s3_client(s3_cfg)
+    bucket = s3_cfg['bucket']
+
+    print(f'Scanning s3://{bucket}/{INCOMING_PREFIX} …')
+    try:
+        objects = _list_incoming(client, bucket, args.filter)
+    except ClientError as exc:
+        _err(f'list_objects_v2 failed: {exc}')
+        return 2
+    plans, malformed = _group_into_plans(objects)
+    if not plans and not malformed:
+        print('  (nothing under __incoming/)')
+        # Still print orphan-scan hints — orphans aren't tied to a deposit.
+        _print_prune_hints(data_folder, [], client, bucket, args)
+        return 0
+
+    print(f'  Found {len(plans)} dataset(s) to ingest'
+          + (f', {len(malformed)} malformed' if malformed else ''))
+
+    results: List[DatasetResult] = []
+    for plan in plans:
+        result = _process_dataset(plan, client, bucket, data_folder, args)
+        results.append(result)
+
+    if not args.dry_run:
+        _append_to_ledger(data_folder, results)
+
+    _print_run_report(results, malformed)
+    _print_prune_hints(data_folder, results, client, bucket, args)
+
+    any_failed = any(r.status in {'failed', 'conflict'} for r in results)
+    return 1 if any_failed else 0
+
+
+def cmd_prune(args: argparse.Namespace, s3_cfg: dict, data_folder: Path) -> int:
+    client = _s3_client(s3_cfg)
+    bucket = s3_cfg['bucket']
+
+    ledger = _load_ledger(data_folder)
+    datasets = ledger.get('datasets', [])
+
+    print(f'Loaded {len(datasets)} dataset(s) from pending-prune ledger.')
+
+    staging_files: List[Path] = []
+    incoming_keys: List[str] = []
+    for entry in datasets:
+        for path_str in entry.get('staging_files', []):
+            path = Path(path_str)
+            if path.exists():
+                staging_files.append(path)
+        incoming_keys.extend(entry.get('s3_incoming_keys', []))
+
+    orphan_keys: List[str] = []
+    if args.include_catalog_orphans:
+        print('Scanning S3 for catalog orphans …')
+        try:
+            orphan_keys = _catalog_orphans(client, bucket, data_folder)
+        except ClientError as exc:
+            _err(f'orphan scan failed: {exc}')
+            return 2
+
+    print()
+    print(f'  Local staging files: {len(staging_files)}')
+    print(f'  S3 __incoming/ keys: {len(incoming_keys)}')
+    if args.include_catalog_orphans:
+        print(f'  S3 catalog orphans:  {len(orphan_keys)}')
+
+    if args.dry_run:
+        for path in staging_files[:5]:
+            print(f'    [would rm]      {path}')
+        if len(staging_files) > 5:
+            print(f'    … and {len(staging_files)-5} more local files')
+        for key in incoming_keys[:5]:
+            print(f'    [would s3 del]  {key}')
+        if len(incoming_keys) > 5:
+            print(f'    … and {len(incoming_keys)-5} more incoming keys')
+        for key in orphan_keys[:5]:
+            print(f'    [would s3 del]  {key}')
+        if len(orphan_keys) > 5:
+            print(f'    … and {len(orphan_keys)-5} more orphan keys')
+        print('\n(dry-run: nothing deleted)')
+        return 0
+
+    deleted_local = 0
+    for path in staging_files:
+        try:
+            path.unlink()
+            deleted_local += 1
+        except FileNotFoundError:
+            pass
+
+    # Also remove staging dirs that became empty.
+    staging_root = data_folder / STAGING_DIR_REL
+    if staging_root.exists():
+        for sub in sorted(staging_root.rglob('*'), reverse=True):
+            if sub.is_dir() and not any(sub.iterdir()):
+                sub.rmdir()
+
+    deleted_remote = _bulk_delete(client, bucket, incoming_keys + orphan_keys)
+
+    # Clear processed entries from the ledger.
+    if not args.include_catalog_orphans:
+        # Only clear successful ingest entries; orphan mode doesn't touch them.
+        ledger['datasets'] = []
+    _save_ledger(data_folder, ledger)
+
+    _ok(f'removed {deleted_local} local file(s)')
+    _ok(f'removed {deleted_remote} S3 key(s)')
+    return 0
+
+
+def _bulk_delete(client, bucket: str, keys: List[str]) -> int:
+    """Delete S3 keys 1000 at a time (boto3 limit). Returns count deleted."""
+    deleted = 0
+    for i in range(0, len(keys), 1000):
+        batch = keys[i:i + 1000]
+        if not batch:
+            continue
+        try:
+            resp = client.delete_objects(
+                Bucket=bucket,
+                Delete={'Objects': [{'Key': k} for k in batch], 'Quiet': True},
+            )
+            deleted += len(batch) - len(resp.get('Errors', []) or [])
+            for err in resp.get('Errors', []) or []:
+                _warn(f'delete failed for {err.get("Key")}: {err.get("Message")}')
+        except ClientError as exc:
+            _err(f'bulk delete failed: {exc}')
+    return deleted
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Entry point
+# ─────────────────────────────────────────────────────────────────────────
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description='End-to-end ingestion from S3 __incoming/ to the anthive catalog.',
+    )
+    parser.add_argument(
+        '--data-folder', default='data/h5adstore',
+        help='h5adstore root (default: data/h5adstore)',
+    )
+    parser.add_argument(
+        '--filter', metavar='DATA_PROJECT',
+        help='Only ingest this data project (matches __incoming/<DP>/)',
+    )
+    parser.add_argument(
+        '--dry-run', action='store_true',
+        help='Plan only, no downloads, no promotion, no uploads',
+    )
+    parser.add_argument(
+        '--skip-orphan-scan', action='store_true',
+        help='Skip the post-run S3 catalog-orphan scan (faster on big buckets)',
+    )
+
+    subparsers = parser.add_subparsers(dest='command')
+    prune = subparsers.add_parser(
+        'prune', help='Remove local staging + __incoming/ keys consumed by past runs',
+    )
+    prune.add_argument(
+        '--dry-run', action='store_true',
+        help='Preview what would be deleted (nothing destructive)',
+    )
+    prune.add_argument(
+        '--include-catalog-orphans', action='store_true',
+        help='Also delete S3 catalog keys with no local counterpart',
+    )
+
+    args = parser.parse_args()
+
+    cfg = get_config()
+    if 's3' not in cfg:
+        _err('No [s3] block in anthive.yaml')
+        return 2
+
+    data_folder = (Path.cwd() / args.data_folder).resolve()
+    if not data_folder.exists():
+        _err(f'data folder not found: {data_folder}')
+        return 2
+
+    if args.command == 'prune':
+        return cmd_prune(args, cfg['s3'], data_folder)
+    return cmd_run(args, cfg['s3'], data_folder)
+
+
+if __name__ == '__main__':
+    sys.exit(main())

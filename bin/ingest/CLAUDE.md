@@ -10,6 +10,7 @@ The conversion + maintenance tools that turn `.h5ad` files into the
 | `ant-build-all` | Walk the whole h5adstore, rebuild stale `.duckdb` (h5ad newer than duckdb), refresh `.md` (sha256/n_obs/layer_stats). Parallel-friendly. |
 | `ant-h5ad-check` | Validate one `.h5ad` against the ingestion contract — log-norm in `.X`, raw counts in `layers['counts']`, embedding present, etc. |
 | `ant-duckdb-check` | Validate a `.duckdb` schema (`__cells`, `__genes`, `__obscat`, `__obsnum`, `__layer__*`, views, schema_version). |
+| `ant-ingest` | End-to-end ingestion from S3 `__incoming/` to the catalog: pull → sha-validate → promote (with collision detection) → run `ant-h5ad-check`/`-convert`/`-duckdb-check` → push to catalog root → re-stamp `s3_*` in the sidecar. Has `prune` subcommand for cleanup. Uses `lib.sidecar_merge` for `.h5ad.mus` merges (KEY=VALUE, machine-keys silent, semantic conflicts warn-and-keep-local). |
 
 ## Dependencies
 

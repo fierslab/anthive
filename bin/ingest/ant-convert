@@ -839,7 +839,7 @@ def convert_embeddings(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict) -
             # Build CREATE TABLE statement
             col_defs = ['cell_id INTEGER PRIMARY KEY']
             for i in range(num_dims):
-                col_defs.append(f'dim_{i} DOUBLE NOT NULL')
+                col_defs.append(f'dim_{i} DOUBLE')
 
             conn.execute(f"""
                 CREATE TABLE __obsm__{safe_obsm_key} (
