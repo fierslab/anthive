@@ -4,16 +4,31 @@
 	# Disable admin API to avoid port conflict with system Caddy
 	admin off
 
-	# Disable Caddy's automatic HTTPS.  This stack runs HTTP-only on
-	# the localhost / Nebula / LAN interfaces — TLS is handled either
-	# upstream (Nebula encrypts its tunnel; a public deploy fronts
-	# anthive with nginx/Cloudflare) or not at all (localhost).  Without
-	# this line, Caddy sees ip:port addresses and tries to bind :80 for
-	# the HTTP→HTTPS redirect, which fails as a non-root process.
-	auto_https off
+	# Authelia v4.39 hard-requires https:// for cookie URLs, so Caddy
+	# terminates TLS via `tls internal` (self-signed by Caddy's local CA).
+	# `disable_redirects` keeps automatic cert provisioning ON (`tls
+	# internal` needs that) but skips the :80 → :443 redirect listener
+	# that fails as a non-root process. The ACME path is unused since
+	# the certs come from Caddy's local CA, not Let's Encrypt.
+	auto_https disable_redirects
 }
 
-:8501 {
+# HTTP companion on :8500 — redirects any plain-http hit to https:8501.
+# A single TCP listener can't serve both http and https on the same port,
+# so we offer a small adjacent HTTP listener whose only job is the 301.
+http://localhost:8500, http://localhost.localdomain:8500, http://127.0.0.1:8500, http://10.42.0.3:8500 {
+	bind {$ANTHIVE_CADDY_BIND:0.0.0.0 ::}
+	redir https://{host}:8501{uri} 301
+}
+
+# Site address enumerates the hostnames Caddy serves. `tls internal`
+# issues a self-signed cert for each one. Connecting clients see a cert
+# matching the hostname they used (no "wrong CN" warning beyond the
+# trust warning itself).
+#
+# To add a hostname for another machine, append it here. The bind below
+# still controls WHICH interfaces accept connections.
+localhost:8501, localhost.localdomain:8501, 127.0.0.1:8501, 10.42.0.3:8501 {
 	# Restrict which network interfaces Caddy actually accepts connections
 	# on.  Default ("0.0.0.0 ::") = all IPv4 + IPv6 interfaces — fine for
 	# laptops, but typically too open on a multi-homed host where you want
@@ -28,13 +43,35 @@
 	#
 	# See INSTALL.md section 5 for the persistent-per-host pattern.
 	bind {$ANTHIVE_CADDY_BIND:0.0.0.0 ::}
+
+	# Caddy internal CA — Authelia v4.39 requires https:// for cookie URLs.
+	# Self-signed cert; clients accept once or run `caddy trust` on the
+	# server box to install the CA into the system trust store.
+	tls internal
+
 	# Root directory for static files
 	root * ./webapp
 
-	# Optional basic-auth, dropped in by `make caddy-passwd`.  The file is
-	# gitignored.  No file → import is a no-op → no auth → the same
-	# unauthenticated dev experience as before.  See config/caddy-auth.example.
-	import caddy-auth-*.conf
+	# Authelia portal — always reachable, never gated by forward_auth
+	# (chicken-and-egg: this IS the gate). handle_path strips /authelia/
+	# so Authelia (which is configured with base path /authelia) sees the
+	# full path it expects.
+	handle /authelia/* {
+		reverse_proxy localhost:9091
+	}
+
+	# Routes that MUST bypass auth — MCP discovery probes + the /streamlit
+	# gone-410 stub. Otherwise MCP clients see a 302-to-login instead of
+	# the JSON 404 they need to parse.
+	@bypass_auth path /.well-known/* /register /streamlit*
+
+	# Everything else: forward_auth → Authelia. Authelia returns 200 (allow)
+	# or 302 (redirect to /authelia/) based on the session cookie.
+	@protected not path /authelia/* /.well-known/* /register /streamlit*
+	forward_auth @protected localhost:9091 {
+		uri /authelia/api/authz/forward-auth
+		copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
+	}
 
 	# Reverse proxy for API - strip /api prefix before forwarding
 	handle_path /api/* {

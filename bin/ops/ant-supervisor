@@ -98,6 +98,20 @@ SERVICES: dict = {
         'cmd': ['caddy', 'run', '--config', 'config/Caddyfile'],
         'color': BLUE,
     },
+    'authelia': {
+        # `env VAR=value …` is a portable way to inject env vars without
+        # threading them through ant-supervisor's subprocess plumbing.
+        # Secrets are read from files (gitignored).
+        'cmd': [
+            'env',
+            'AUTHELIA_SESSION_SECRET_FILE=./config/authelia/secrets/session',
+            'AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE=./config/authelia/secrets/encryption',
+            'AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE=./config/authelia/secrets/jwt',
+            './envs/authelia/authelia',
+            '--config', './config/authelia/configuration.yml',
+        ],
+        'color': YELLOW,
+    },
 }
 
 # Services intentionally NOT in the default set:
@@ -110,7 +124,7 @@ SERVICES: dict = {
 #
 # To re-enable either: add the name back to DEFAULT_SERVICES, OR launch
 # it standalone (`make serve-mcp` / `make serve-streamlit`).
-DEFAULT_SERVICES = ['api', 'browse']
+DEFAULT_SERVICES = ['api', 'browse', 'authelia']
 
 # Back-off settings
 BACKOFF_INITIAL     = 2   # seconds

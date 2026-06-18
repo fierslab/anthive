@@ -62,6 +62,16 @@ data/
 # Caddy basic-auth credentials — dropped in by 'make caddy-passwd'
 config/caddy-auth-*.conf
 
+# Authelia: secrets + the user database (bcrypt hashes still secret).
+# The configuration.yml itself is tracked.
+config/authelia/secrets/
+config/authelia/users_database.yml
+config/authelia/db.sqlite3
+config/authelia/notification.txt
+
+# Authelia binary (large, reproducible — download via setup script)
+envs/authelia/
+
 # vark — standalone repo (codeberg.org/mfiers/vark), nested here but never tracked by anthive4
 vark/
 .vark/

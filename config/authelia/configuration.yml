@@ -1,0 +1,78 @@
+###############################################################
+# Authelia configuration for anthive4 — single instance, file
+# user backend, no SSO. Path-based behind Caddy at /authelia/.
+#
+# HTTP-only deployment: behind Nebula or localhost. No explicit
+# cookie domain block — Authelia auto-derives cookie scope from
+# each incoming request (works for HTTP because we never assert
+# the Secure flag).
+#
+# Secrets are read from files via env-var:
+#   AUTHELIA_SESSION_SECRET_FILE
+#   AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE
+#   AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE
+# set by ant-supervisor.
+###############################################################
+
+theme: dark
+
+server:
+  # Path-aware base URL so Authelia knows its public prefix when
+  # generating redirects + asset URLs behind Caddy's path proxy.
+  address: 'tcp://127.0.0.1:9091/authelia'
+
+log:
+  level: 'info'
+  format: 'text'
+  file_path: './tmp/authelia.log'
+  keep_stdout: true
+
+identity_validation:
+  reset_password:
+    # JWT secret for password-reset emails (filesystem notifier).
+    # Wired via AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE.
+
+authentication_backend:
+  file:
+    path: './config/authelia/users_database.yml'
+    watch: true
+    password:
+      algorithm: 'argon2'
+
+access_control:
+  # Every authenticated user can reach the bypass-able rules
+  # below; everything else needs a session.
+  default_policy: 'one_factor'
+
+session:
+  name: 'authelia_session'
+  same_site: 'lax'
+  expiration: '1 hour'
+  inactivity: '15 minutes'
+  remember_me: '1 month'
+  cookies:
+    # Authelia v4.39 hard-requires https:// for cookie URLs. Caddy
+    # terminates TLS via `tls internal` (self-signed via Caddy's CA)
+    # so both access paths below resolve cleanly. Cookie domain MUST
+    # have a dot or be an IP — 'localhost.localdomain' satisfies the
+    # dot rule; '10.42.0.3' is an IP. Clients need to accept the cert
+    # warning once (or run `caddy trust` to import the CA).
+    - domain: 'localhost.localdomain'
+      authelia_url: 'https://localhost.localdomain:8501/authelia/'
+      default_redirection_url: 'https://localhost.localdomain:8501/'
+    - domain: '10.42.0.3'
+      authelia_url: 'https://10.42.0.3:8501/authelia/'
+      default_redirection_url: 'https://10.42.0.3:8501/'
+
+regulation:
+  max_retries: 5
+  find_time: '2 minutes'
+  ban_time: '10 minutes'
+
+storage:
+  local:
+    path: './config/authelia/db.sqlite3'
+
+notifier:
+  filesystem:
+    filename: './config/authelia/notification.txt'
