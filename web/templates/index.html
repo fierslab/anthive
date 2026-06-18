@@ -243,6 +243,11 @@
 
   headers.forEach(th => {
     th.addEventListener('click', e => {
+      // Clicks INSIDE an open popover (filter checkboxes, clear links) bubble
+      // up to this th because the popover is a child of it. Ignore them here —
+      // the popover's own handlers do the work; otherwise this would close the
+      // popover (and flip the sort) before a checkbox's change event fires.
+      if (activePopover && activePopover.contains(e.target)) return;
       e.stopPropagation();
       const col = th.getAttribute('data-col');
       const help = th.getAttribute('data-help') || '';

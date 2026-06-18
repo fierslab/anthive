@@ -798,6 +798,15 @@ def test_folder_mobile_card_markup(client):
     assert 'data-label="Status"' in resp.text
 
 
+def test_landing_popover_filter_guard(client):
+    # Regression: the column-header popover is a child of the <th>, so its th
+    # click handler must ignore clicks that originate inside the open popover —
+    # otherwise filter checkboxes close the popover before they register.
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "activePopover.contains(e.target)" in resp.text
+
+
 def test_landing_access_source_inline(client):
     # Acc/Source are no longer their own columns; the icons sit inline after the
     # collection name (.acc-src) and their filters fold into the Collection
