@@ -13,7 +13,7 @@ web/
   ant-browse        # uv-script launcher; supervisor runs this. Port 8081.
   browser.py        # the FastAPI router, mounted at /
   templates/        # Jinja2 templates (one per page + base.html)
-    base.html       # shared chrome (nav, footer, storage notice)
+    base.html       # shared chrome (nav, auth menu, footer, storage notice)
     index.html      # landing — collection list with context pills
     folder.html     # one collection — per-dataset table
     dataset.html    # one dataset — info, biology, provenance, obs cols, viz
@@ -179,3 +179,12 @@ nothing DE shows):
 - Reverse proxy: `config/Caddyfile` (debug) and `config/nginx.conf` (prod).
 - Companion in-browser notebooks: `frontend/jupyter/` (built into
   `webapp/jupyter/`, served as static files at `/jupyter/`).
+- **Auth (Authelia cookie SSO):** the proxy (`config/Caddyfile` / nginx)
+  gates every route via `forward_auth` and forwards `Remote-User` /
+  `Remote-Name` / `Remote-Email` / `Remote-Groups` headers. `base.html`'s
+  topbar reads these to show the signed-in user + a "sign out" action
+  (`POST /authelia/api/logout` → `/`) and an account-settings link
+  (`/authelia/`). Only renders when the header is present (un-proxied access
+  shows nothing). **Never add HTTP Basic Auth to browser routes** — browsers
+  resend stale creds and trip Authelia's rate-limiter/ban. See
+  `doc/HANDOFF_authelia.md`.

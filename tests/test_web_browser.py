@@ -798,6 +798,27 @@ def test_folder_mobile_card_markup(client):
     assert 'data-label="Status"' in resp.text
 
 
+def test_topbar_authelia_identity_and_signout(client):
+    # When behind Authelia (Remote-* headers forwarded by Caddy), the topbar
+    # surfaces the user + a sign-out action + account-settings link.
+    resp = client.get("/", headers={
+        "Remote-User": "mf", "Remote-Name": "Mark Fiers",
+        "Remote-Email": "mark@example.org",
+    })
+    assert resp.status_code == 200
+    assert "Mark Fiers" in resp.text
+    assert 'id="authelia-signout"' in resp.text
+    assert "/authelia/api/logout" in resp.text
+    assert "/authelia/" in resp.text          # account settings link
+
+
+def test_topbar_no_auth_section_without_header(client):
+    # Direct / un-proxied access (no Remote-User) → no auth UI.
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert 'id="authelia-signout"' not in resp.text
+
+
 def test_landing_popover_filter_guard(client):
     # Regression: the column-header popover is a child of the <th>, so its th
     # click handler must ignore clicks that originate inside the open popover —

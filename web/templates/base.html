@@ -53,6 +53,10 @@
         .dropdown-menu a { display: block; padding: 4px 12px; color: var(--text) !important; font-size: 12px; white-space: nowrap; }
         .dropdown-menu a:hover { background: var(--hover); text-decoration: none; }
         .dropdown:hover .dropdown-menu { display: block; }
+        /* right-aligned variant for the auth menu at the far end of the topbar */
+        .dropdown-menu.right { left: auto; right: -6px; }
+        #topbar .topbar-auth .dropdown-toggle { color: var(--bar-link); }
+        #topbar .topbar-auth .dropdown-toggle:hover { color: var(--bar-link-hover); }
 
         main { padding: 10px 16px; max-width: 1200px; margin: 0 auto; }
 
@@ -177,7 +181,37 @@
             {% endif %}
             <a href="/api/docs">api</a>
         </nav>
+        {# Authelia identity + sign-out. Only shown when the request carries the
+           Remote-User header Caddy/nginx forwards from Authelia — so direct
+           (un-proxied) access shows nothing. Cookie SSO only: no basic auth. #}
+        {% set _auth_user = request.headers.get('remote-name') or request.headers.get('remote-user') %}
+        {% if _auth_user %}
+        <span style="flex:1"></span>
+        <nav class="topbar-auth">
+            <span class="dropdown">
+                <span class="dropdown-toggle" title="signed in{% if request.headers.get('remote-email') %} — {{ request.headers.get('remote-email') }}{% endif %}">👤 {{ _auth_user }}</span>
+                <span class="dropdown-menu right">
+                    <a href="/authelia/" target="_blank" rel="noopener">account settings</a>
+                    <a href="#" id="authelia-signout">sign out</a>
+                </span>
+            </span>
+        </nav>
+        {% endif %}
     </div>
+    <script>
+    // Sign out via Authelia's logout endpoint (clears the SSO session), then
+    // land back on the catalogue (which will bounce to the login portal).
+    (function () {
+        var btn = document.getElementById('authelia-signout');
+        if (!btn) return;
+        btn.addEventListener('click', function (e) {
+            e.preventDefault();
+            fetch('/authelia/api/logout', { method: 'POST', credentials: 'same-origin' })
+                .catch(function () {})
+                .finally(function () { window.location = '/'; });
+        });
+    })();
+    </script>
     <main>
         {% block content %}{% endblock %}
     </main>
