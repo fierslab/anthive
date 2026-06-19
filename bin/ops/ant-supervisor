@@ -95,7 +95,11 @@ SERVICES: dict = {
         'color': YELLOW,
     },
     'caddy': {
-        'cmd': ['caddy', 'run', '--config', 'config/Caddyfile'],
+        # Use our custom-built Caddy (with the replace_response module)
+        # so we can inject CSS into Authelia's portal HTML for the
+        # logo-size override. Build script: see doc/HANDOFF_authelia.md.
+        # The system caddy at /usr/bin/caddy stays untouched.
+        'cmd': ['./envs/caddy/caddy', 'run', '--config', 'config/Caddyfile'],
         'color': BLUE,
     },
     'authelia': {

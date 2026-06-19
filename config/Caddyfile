@@ -56,6 +56,9 @@ localhost:8501, localhost.localdomain:8501, 127.0.0.1:8501, 10.42.0.3:8501 {
 	# (chicken-and-egg: this IS the gate). handle_path strips /authelia/
 	# so Authelia (which is configured with base path /authelia) sees the
 	# full path it expects.
+	# Authelia portal — pass-through, no body modification. Logo sizing
+	# is handled by serving a pre-cropped logo.png from asset_path; we
+	# don't need to inject CSS for layout overrides.
 	handle /authelia/* {
 		reverse_proxy localhost:9091
 	}
@@ -65,11 +68,28 @@ localhost:8501, localhost.localdomain:8501, 127.0.0.1:8501, 10.42.0.3:8501 {
 	# the JSON 404 they need to parse.
 	@bypass_auth path /.well-known/* /register /streamlit*
 
-	# Everything else: forward_auth → Authelia. Authelia returns 200 (allow)
-	# or 302 (redirect to /authelia/) based on the session cookie.
-	@protected not path /authelia/* /.well-known/* /register /streamlit*
-	forward_auth @protected localhost:9091 {
-		uri /authelia/api/authz/forward-auth
+	# Split auth gates by client type — mirrors data.nevel.eu's nginx split.
+	#
+	# /api/* gate: cookie OR HTTP basic. AuthRequest returns 401 on unauth
+	# which is what API clients (antclient, vark) expect — they can react
+	# to it directly. Logged-in browser XHRs ride their session cookie.
+	@api path /api/*
+	forward_auth @api localhost:9091 {
+		uri /authelia/api/authz/auth-request-api
+		# AuthRequest impl needs the original URL header (Caddy doesn't
+		# send X-Original-URL by default — nginx's auth_request does).
+		header_up X-Original-URL "{http.request.scheme}://{http.request.host}{http.request.uri}"
+		header_up X-Original-Method "{http.request.method}"
+		copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
+	}
+
+	# Browser gate: cookie-only. ForwardAuth returns 302 → /authelia/ on
+	# unauth, which the browser follows to the portal. The cookie-only
+	# strategy avoids the basic-auth challenge (WWW-Authenticate) that
+	# breaks the redirect AND the stale-basic-creds → ban risk.
+	@browser not path /api/* /authelia/* /.well-known/* /register /streamlit*
+	forward_auth @browser localhost:9091 {
+		uri /authelia/api/authz/forward-auth-cookie
 		copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
 	}
 

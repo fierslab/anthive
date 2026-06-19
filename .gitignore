@@ -72,6 +72,17 @@ config/authelia/notification.txt
 # Authelia binary (large, reproducible — download via setup script)
 envs/authelia/
 
+# Custom Caddy build (xcaddy with replace-response module) — large binary,
+# reproducible. Build via: cd envs/go && ./go/bin/go install xcaddy && xcaddy build --with caddyserver/replace-response
+envs/caddy/
+
+# Local Go toolchain (for building the custom Caddy). Tarball download,
+# never tracked.
+envs/go/
+
+# Original logo backup (kept locally as a fallback; not for git)
+config/authelia/assets/logo.original.png
+
 # vark — standalone repo (codeberg.org/mfiers/vark), nested here but never tracked by anthive4
 vark/
 .vark/

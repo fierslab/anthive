@@ -42,6 +42,20 @@ server:
           - name: 'HeaderAuthorization'
             schemes:
               - 'basic'
+      # Browser-only gate. ForwardAuth + CookieSession returns 302 →
+      # /authelia/ on unauth so browsers redirect cleanly. Deliberately
+      # NO HeaderAuthorization strategy — adding it makes Authelia
+      # respond with 401 + WWW-Authenticate (basic challenge) instead
+      # of the redirect, which browsers can't recover from. Also
+      # avoids the cached-stale-basic-creds ban risk that bit prod.
+      forward-auth-cookie:
+        implementation: 'ForwardAuth'
+        authn_strategies:
+          - name: 'CookieSession'
+
+  # Override default Authelia branding. Authelia picks up logo.png
+  # (and optionally favicon.ico) from this directory at startup.
+  asset_path: './config/authelia/assets'
 
 log:
   level: 'info'
@@ -76,6 +90,15 @@ session:
     - domain: 'data.nevel.eu'
       authelia_url: 'https://data.nevel.eu/authelia/'
       default_redirection_url: 'https://data.nevel.eu/'
+    # Local-dev access paths on this host. Inert on data.nevel.eu (nginx
+    # never sees requests for these hosts), populated so the Caddy-based
+    # local stack can bind sessions.
+    - domain: 'localhost.localdomain'
+      authelia_url: 'https://localhost.localdomain:8501/authelia/'
+      default_redirection_url: 'https://localhost.localdomain:8501/'
+    - domain: '10.42.0.3'
+      authelia_url: 'https://10.42.0.3:8501/authelia/'
+      default_redirection_url: 'https://10.42.0.3:8501/'
 
 regulation:
   max_retries: 5
