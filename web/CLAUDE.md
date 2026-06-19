@@ -161,6 +161,89 @@ nothing DE shows):
 - Restart only this service while the rest of the stack stays up:
   `./bin/ops/ant-supervisor restart browse`.
 
+## Developing here (the loop that actually works)
+
+**Reload model.** Jinja templates auto-reload on every request — edit a
+`*.html` and just refresh the browser. `browser.py` is imported **once** at
+boot, so a Python change needs a browse restart:
+`./bin/ops/ant-supervisor restart browse`. Caveat seen in the wild: if
+`tmp/supervisor-state.json` has been wiped (e.g. a `tmp/` clean), the
+`restart`/`status` CLI prints "No supervisor state file found" even though the
+supervisor is alive — in that case `kill -TERM` the `ant-browse` child PID
+directly (find it with `ps -eo pid,cmd | grep ant-browse`) and the running
+supervisor respawns it (and rewrites the state file).
+
+**Tests** live in `tests/test_web_browser.py` (~100 tests, the whole web
+contract). They load `browser.py` via `importlib` (web/ isn't an importable
+package), monkeypatch `browser._api_get` with an in-process fake so **no live
+ant-serve is needed**, drive all routes through a FastAPI `TestClient`, and
+render the **real Jinja templates** — so a broken route↔template contract or a
+missing field fails here. New routes/markup → add a case (the suite already
+covers DE gating, the visualize dropdown, XY mode, kde2d, acc/src inline,
+external-link icons, the popover-filter guard, and the Authelia topbar).
+
+There is **no shared venv** (every tool carries PEP-723 inline deps), so a bare
+`python -m pytest` has nothing installed. Run via `uv` with the deps:
+
+```sh
+uv run --with pytest --with fastapi --with httpx --with jinja2 \
+       --with markdown --with requests \
+       env PYTHONPATH=lib python -m pytest tests/test_web_browser.py -q
+```
+
+`make test` wraps the same idea for the full repo suite (its `TEST_DEPS` adds
+duckdb/numpy/pandas/h5py/scipy). A stray `uv.lock` may appear from `uv run` in
+the repo root — delete it (this repo deliberately has no shared lock).
+
+**Visual verification (headless).** The pages fetch `/api/**` at runtime;
+Caddy proxies that to ant-serve on :8080 (and the whole site is behind
+Authelia). Easiest loop: drive **ant-browse directly on :8081** and reroute
+`/api/**` → :8080 in the headless browser, mirroring Caddy's
+`handle_path /api/*` prefix strip:
+
+```python
+page.route("**/api/**", lambda r: r.continue_(
+    url=r.request.url.replace("localhost:8081/api/", "localhost:8080/")))
+```
+
+Run chromium via `uv run --with playwright python …` (one-time
+`uv run --with playwright python -m playwright install chromium`). To exercise
+the auth topbar, inject the proxy headers with
+`page.set_extra_http_headers({"Remote-User": "mf", "Remote-Name": "…"})`. Note
+`:8501` (Caddy) is TLS + Authelia-gated, so it's not the convenient target for
+scripted screenshots — go direct to :8081 with the reroute.
+
+## Working with the API/viz side (multi-session)
+
+Plotting, DE endpoints, and anything touching DuckDB/h5ad live in
+`bin/api/ant-serve` + `lib/plotting.py` — usually a **separate Claude session**
+(`anthive4`). When the UI needs new data or a server-side guard (e.g. "cap bar
+plots at 100 bars", "volcano should fall back to a z-effect axis when log2fc is
+null"), **request it there** instead of working around it in the client — the
+server already returns helpful 400s that `plot.html` surfaces in-status.
+
+Sessions share one git worktree + HEAD, so: **branch before committing**
+(`web/<topic>` for UI work), commit eagerly (keeps `git checkout` safe for the
+other session), FF-merge to `main` + delete the branch + push when shippable.
+Coordinate via `pika message send --to anthive4`.
+
+## Gotchas worth keeping in mind
+
+- **The header popover is a child of its `<th>`** (`index.html`), so clicks
+  inside it bubble to the th's click handler. That handler early-returns on
+  `activePopover.contains(e.target)` — drop that guard and the filter
+  checkboxes close the popover before their `change` fires (they become
+  unclickable). The sort buttons are safe because they `stopPropagation()`.
+- **`buildUrl`/`syncURL` skip `disabled` and `_`-prefixed fields**; the
+  polymorphic scatter/hexbin mode switch relies on it (`setScatterMode`
+  disables the inactive mode's whole fieldset). Keep that contract when adding
+  form fields, and name UI-only controls with a leading `_` (e.g. `_xymode`,
+  `_autoclip`).
+- **DE term/contrast names can contain spaces and dashes** (e.g.
+  `AppNLGF - AppHuHu`); they go in the plot URL as query params (encoded by
+  `URLSearchParams`) and in `/de/{study}/terms/{term}` path segments
+  (`encodeURIComponent`). Don't assume slug-safe.
+
 ## What NOT to do
 
 - **Don't talk to DuckDB or h5ad from here.**  If the REST API doesn't
