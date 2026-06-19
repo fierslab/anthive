@@ -29,6 +29,34 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.5.0 — 2026-06-19
+
+### Added — group/collection metadata endpoint
+
+The web UI needed the prose body and the full frontmatter from each
+group's `index.md` to render a per-collection landing page (citation,
+accession, study description). Previously only `group`, `experiment`,
+`authors`, `year`, and `default_dataset` were surfaced on the dataset
+detail; the prose body was silently discarded.
+
+* **`GET /api/groups/{group_id}`** — new endpoint. Returns the
+  group-level metadata + prose body from the nearest `index.md`,
+  plus a list of `{db_id, title, id}` for every dataset in the group.
+  404 if the 3-char `group_id` doesn't match any dataset's catalog
+  entry. Example payload keys:
+  `group, group_id, experiment, authors, year, doi, pmid, accession,
+   default_dataset, description, datasets[]`.
+* **`GET /api/databases/{db_id}/info`** — the `collection` block now
+  carries `group_id`, `doi`, `pmid`, `accession`, and `description`
+  (markdown body of the nearest `index.md`) in addition to the prior
+  fields. Existing callers keep working — additive only.
+
+Trigger to rescan if you don't see the new fields after upgrading:
+`POST /api/admin/rescan`. The metadata cache is per-process and
+doesn't auto-invalidate on .md edits.
+
+---
+
 ## 2.4.0 — 2026-06-12
 
 ### Added — 2-D scatter / hexbin / KDE pack for module-level exploration

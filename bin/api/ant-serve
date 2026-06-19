@@ -870,7 +870,7 @@ class DatabaseRegistry:
                 index_path = candidate
                 break
             search = search.parent
-        collection_metadata, _ = parse_md_file(index_path) if index_path else ({}, '')
+        collection_metadata, collection_body = parse_md_file(index_path) if index_path else ({}, '')
 
         # Get database info using connection pool
         conn = self.connection_pool.get_connection(db_url)
@@ -1080,15 +1080,22 @@ class DatabaseRegistry:
             'layer_stats': file_metadata.get('layer_stats') or {},
         }
 
-        # Add collection metadata if present
+        # Add collection metadata if present. The full frontmatter + prose
+        # body of index.md are surfaced — the web UI uses these for the
+        # collection landing page (citation, accession, free-text description).
         if collection_metadata:
             metadata['group'] = collection_metadata.get('group')
             metadata['collection'] = {
                 'group': collection_metadata.get('group'),
+                'group_id': collection_metadata.get('group_id'),
                 'experiment': collection_metadata.get('experiment'),
                 'authors': collection_metadata.get('authors'),
                 'year': collection_metadata.get('year'),
+                'doi': collection_metadata.get('doi'),
+                'pmid': collection_metadata.get('pmid'),
+                'accession': collection_metadata.get('accession'),
                 'default_dataset': collection_metadata.get('default_dataset'),
+                'description': collection_body or None,
             }
 
         return metadata
@@ -1285,8 +1292,8 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.4.0"
-API_VERSION_RELEASED = "2026-06-12"
+API_VERSION = "2.5.0"
+API_VERSION_RELEASED = "2026-06-19"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
 # Create FastAPI app with lifespan handler (Phase 2)
@@ -1670,6 +1677,85 @@ async def list_databases(
     return {
         "databases": databases,
         "total": len(databases)
+    }
+
+
+@app.get("/groups/{group_id}", tags=["databases"])
+async def get_group_info(group_id: str):
+    """
+    Return collection-level metadata + prose for a single group.
+
+    The web UI uses this to render a per-collection landing page —
+    citation, accession, free-text description from index.md plus the
+    list of datasets in the group. The 3-char `group_id` (e.g. `S25`)
+    is the catalog short code; resolution scans the registry for any
+    dataset whose .md frontmatter or nearest-ancestor index.md carries
+    this id.
+
+    Returns:
+    - group: Long-form group name (e.g. "Sierksma2025")
+    - group_id: 3-char catalog code (e.g. "S25")
+    - experiment, authors, year, doi, pmid, accession, default_dataset:
+      Fields from index.md frontmatter
+    - description: Prose body of index.md (markdown, unrendered)
+    - datasets: List of {db_id, title, id} for every dataset in the group
+
+    404 if no dataset in the catalog belongs to this group_id.
+    """
+    # Find datasets whose group_id matches. The group_id can live on
+    # the per-file .md (rare) or — far more commonly — on the nearest
+    # ancestor index.md. For each dataset we resolve the group_id AND
+    # remember its index.md path so we can return the right one.
+    matching: List[Dict] = []
+    index_path: Optional[Path] = None
+    for db_id, md_path in registry._db_md_bases.items():
+        file_meta, _body = parse_md_file(md_path)
+        gid: Optional[str] = file_meta.get('group_id')
+        dataset_index_path: Optional[Path] = None
+        if not gid:
+            search = md_path.parent
+            while search != registry.data_folder.parent:
+                cand = search / 'index.md'
+                if cand.exists():
+                    cand_meta, _ = parse_md_file(cand)
+                    gid = cand_meta.get('group_id')
+                    dataset_index_path = cand
+                    break
+                search = search.parent
+        if gid != group_id:
+            continue
+        # First matching dataset wins for the index.md location.
+        if index_path is None and dataset_index_path is not None:
+            index_path = dataset_index_path
+        matching.append({
+            'db_id': db_id,
+            'title': file_meta.get('title') or md_path.stem,
+            'id': file_meta.get('id'),
+        })
+
+    if not matching:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No datasets found for group_id={group_id!r}",
+        )
+
+    collection_meta: Dict = {}
+    collection_body: str = ''
+    if index_path is not None:
+        collection_meta, collection_body = parse_md_file(index_path)
+
+    return {
+        'group': collection_meta.get('group'),
+        'group_id': group_id,
+        'experiment': collection_meta.get('experiment'),
+        'authors': collection_meta.get('authors'),
+        'year': collection_meta.get('year'),
+        'doi': collection_meta.get('doi'),
+        'pmid': collection_meta.get('pmid'),
+        'accession': collection_meta.get('accession'),
+        'default_dataset': collection_meta.get('default_dataset'),
+        'description': collection_body or None,
+        'datasets': sorted(matching, key=lambda x: (x.get('title') or '').lower()),
     }
 
 
