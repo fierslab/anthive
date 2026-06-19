@@ -18,6 +18,8 @@ as an importable package and ``import browser`` would risk colliding with other
 modules.
 """
 
+# pyright: reportMissingImports=false, reportUnusedParameter=false
+
 import importlib.util
 from pathlib import Path
 
