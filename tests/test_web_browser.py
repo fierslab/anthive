@@ -18,7 +18,7 @@ as an importable package and ``import browser`` would risk colliding with other
 modules.
 """
 
-# pyright: reportMissingImports=false, reportUnusedParameter=false
+# pyright: reportMissingImports=false
 
 import importlib.util
 from pathlib import Path
@@ -341,7 +341,7 @@ _DE_STUDY_DETAIL = {
 }
 
 
-def _fake_api_get(api_url, path):
+def _fake_api_get(api_url, path):  # pyright: ignore
     """In-process stand-in for browser._api_get. Dispatches on path; raises
     requests.HTTPError for anything unknown (mirrors a 404 from ant-serve,
     which the routes catch)."""
@@ -372,7 +372,7 @@ def fake_api(monkeypatch):
     monkeypatch.setattr(browser, "_api_get", _fake_api_get)
 
 
-def test_get_collection_list_groups_and_counts(fake_api):
+def test_get_collection_list_groups_and_counts(fake_api):  # pyright: ignore
     collections = browser.get_collection_list("http://x")
     by_id = {c["group_id"]: c for c in collections}
 
@@ -385,7 +385,7 @@ def test_get_collection_list_groups_and_counts(fake_api):
     assert by_id["GroupB"]["dataset_count"] == 1
 
 
-def test_get_collection_list_mix_summaries(fake_api):
+def test_get_collection_list_mix_summaries(fake_api):  # pyright: ignore
     by_id = {c["group_id"]: c for c in browser.get_collection_list("http://x")}
     ga = by_id["GroupA"]
     # human + mouse → mix
@@ -397,14 +397,14 @@ def test_get_collection_list_mix_summaries(fake_api):
     assert ga["tissue"]["abbrev"] == "PFC"
 
 
-def test_get_collection_list_sorted_newest_first(fake_api):
+def test_get_collection_list_sorted_newest_first(fake_api):  # pyright: ignore
     collections = browser.get_collection_list("http://x")
     # GroupA last_modified 2026-05-01 > GroupB 2026-03-01
     assert collections[0]["group_id"] == "GroupA"
     assert collections[0]["last_modified"] == "2026-05-01"
 
 
-def test_get_filter_options_splits_and_dedups(fake_api):
+def test_get_filter_options_splits_and_dedups(fake_api):  # pyright: ignore
     collections = browser.get_collection_list("http://x")
     options = browser.get_filter_options(collections)
     # organism mix in GroupA contributes both; GroupB contributes human again
@@ -413,7 +413,7 @@ def test_get_filter_options_splits_and_dedups(fake_api):
     assert "single-cell" in options["technology_category"]
 
 
-def test_get_collection_datasets_filters_and_builds_description(fake_api):
+def test_get_collection_datasets_filters_and_builds_description(fake_api):  # pyright: ignore
     datasets, description_html = browser.get_collection_datasets("http://x", "GroupA")
     assert len(datasets) == 2
     names = {d["name"] for d in datasets}
@@ -423,7 +423,7 @@ def test_get_collection_datasets_filters_and_builds_description(fake_api):
     assert "<h1" in description_html  # "# Heading" → <h1>
 
 
-def test_get_collection_datasets_unknown_group_is_empty(fake_api):
+def test_get_collection_datasets_unknown_group_is_empty(fake_api):  # pyright: ignore
     datasets, description_html = browser.get_collection_datasets("http://x", "Nope")
     assert datasets == []
     assert description_html is None
@@ -509,7 +509,7 @@ def test_index_zero_collections_no_redirect(client, monkeypatch):
 
 
 def test_index_survives_api_failure(client, monkeypatch):
-    def boom(api_url, path):
+    def boom(api_url, path):  # pyright: ignore
         raise requests.HTTPError("API down")
     monkeypatch.setattr(browser, "_api_get", boom)
     resp = client.get("/")
