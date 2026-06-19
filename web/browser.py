@@ -392,15 +392,25 @@ def get_filter_options(collections: List[Dict]) -> Dict[str, List[str]]:
 
 
 def get_collection_datasets(api_url: str, group_id: str) -> tuple:
-    """Return (datasets, description_html) for a collection."""
+    """Return (datasets, description_html, collection_meta) for a collection.
+
+    ``collection_meta`` splits the per-dataset metadata fields into those that
+    are *constant* across every dataset in the collection (hoisted to inert
+    header pills, and dropped from the table) vs those that *vary* (kept as
+    table columns). So the dataset table only shows the discriminating fields —
+    e.g. an all-microglia collection shows one 'microglial cell' pill in the
+    header instead of repeating it down a Cell column.
+    """
     databases = _all_databases(api_url)
 
     datasets = []
     description_html = None
+    group_dbs = []
 
     for db in databases:
         if (db.get('group_id') or db['id'].split('/')[0]) != group_id:
             continue
+        group_dbs.append(db)
 
         if description_html is None:
             experiment = (db.get('collection') or {}).get('experiment')
@@ -440,7 +450,36 @@ def get_collection_datasets(api_url: str, group_id: str) -> tuple:
             'accession_url':   _accession_url(str(db.get('accession'))) if db.get('accession') else None,
         })
 
-    return datasets, description_html
+    # Constant-across-collection fields → header pills; varying fields → columns.
+    # (field, abbrev_map, css class, human label)
+    _coll_fields = [
+        ('organism',        _ORGANISM_ABBREV,    '',        'organism'),
+        ('technology',      _TECHNOLOGY_ABBREV,  'tech',    'technology'),
+        ('celltype',        _CELLTYPE_ABBREV,    'cell',    'cell type'),
+        ('tissue',          _TISSUE_ABBREV,      'tissue',  'tissue'),
+        ('disease',         _DISEASE_ABBREV,     'disease', 'disease'),
+        ('suspension_type', _SUSPENSION_ABBREV,  'prep',    'prep'),
+        ('access',          _ACCESS_ABBREV,      'icon',    'access'),
+        ('source',          _SOURCE_ABBREV,      'icon',    'source'),
+    ]
+    header_pills: List[Dict] = []
+    var_fields: List[str] = []
+    for field, abbrev_map, css, label in _coll_fields:
+        summary = _summarize_meta_field(group_dbs, field, abbrev_map=abbrev_map)
+        abbrev, full = summary['abbrev'], summary['full']
+        if abbrev and abbrev != 'mix':
+            # single shared value across the whole collection → header pill
+            is_icon = css == 'icon'
+            header_pills.append({
+                'cls': css,
+                'text': f'{abbrev} {full}' if is_icon else full,
+                'title': f'{label}: {full}',
+            })
+        elif abbrev == 'mix':
+            var_fields.append(field)   # differs between datasets → keep column
+
+    collection_meta = {'pills': header_pills, 'var_fields': var_fields}
+    return datasets, description_html, collection_meta
 
 
 # ── routes ─────────────────────────────────────────────────────────────────────
@@ -490,10 +529,10 @@ async def folder_view(request: Request, browse_id: str):
     group_id = unquote(browse_id)
 
     try:
-        datasets, description_html = get_collection_datasets(_api_url(request), group_id)
+        datasets, description_html, collection_meta = get_collection_datasets(_api_url(request), group_id)
     except Exception as error:
         print(f"API error: {error}")
-        datasets, description_html = [], None
+        datasets, description_html, collection_meta = [], None, {'pills': [], 'var_fields': []}
 
     if not datasets:
         return templates.TemplateResponse(
@@ -521,6 +560,8 @@ async def folder_view(request: Request, browse_id: str):
         "group_id": group_id,
         "description_html": description_html,
         "datasets": datasets,
+        "collection_pills": collection_meta['pills'],
+        "var_fields": collection_meta['var_fields'],
     })
 
 

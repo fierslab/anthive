@@ -107,6 +107,15 @@ nothing DE shows):
   / prep / year) on landing, folder, and dataset pages.  Palette is in
   `index.html`'s `.ctx-pill`, mirrored as `.grp-pill` in `folder.html` and
   `.ds-ctx .pill` in `dataset.html`.
+- **Collection-constant metadata is hoisted to the folder header.** In
+  `folder.html`, `get_collection_datasets` computes (via `_summarize_meta_field`
+  over all datasets in the group) which fields are *constant* across the whole
+  collection vs *variable*. Constant fields render as inert pills under the
+  collection title (`collection_pills`) and their **table column is dropped**;
+  only fields in `var_fields` keep a per-dataset column. So an all-microglia
+  collection shows one "microglial cell" header pill instead of a repeated
+  Cell column. Inline acc/src glyphs likewise only appear when access/source
+  vary.
 - **Access / source** are NOT pills in the list views — they're small
   desaturated glyphs (`.acc-src`, B&W) just *before* the collection/dataset
   name, and their value-filters live in the Collection column's header

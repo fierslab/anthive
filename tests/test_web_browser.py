@@ -235,7 +235,7 @@ _DATABASES = [
         "organism": "mouse", "technology": "10x_chromium_3p_v3",
         "technology_category": "single-cell", "celltype": "astrocyte",
         "tissue": "prefrontal cortex", "disease": "normal",
-        "access": "public", "source": "internal", "suspension_type": "nucleus",
+        "access": "public", "source": "external", "suspension_type": "nucleus",
         "layers": {"X": {}}, "embeddings": {"X_umap": {}},
         "year": 2024, "updated": "2026-04-01",
     },
@@ -414,19 +414,28 @@ def test_get_filter_options_splits_and_dedups(fake_api):  # pyright: ignore
 
 
 def test_get_collection_datasets_filters_and_builds_description(fake_api):  # pyright: ignore
-    datasets, description_html = browser.get_collection_datasets("http://x", "GroupA")
+    datasets, description_html, collection_meta = browser.get_collection_datasets("http://x", "GroupA")
     assert len(datasets) == 2
     names = {d["name"] for d in datasets}
     assert names == {"Dataset One", "Dataset Two"}
     # description rendered from the first dataset's collection.experiment markdown
     assert description_html is not None
     assert "<h1" in description_html  # "# Heading" → <h1>
+    # GroupA: ds1 (human/microglia/PFC/AD/nucleus) + ds2 (mouse/astrocyte/PFC/normal)
+    # → tissue + suspension_type are constant (header pills); organism, celltype,
+    #   disease vary (stay as columns).
+    pill_titles = " ".join(p["title"] for p in collection_meta["pills"])
+    assert "prefrontal cortex" in pill_titles      # tissue constant → header
+    assert "organism" in collection_meta["var_fields"]
+    assert "celltype" in collection_meta["var_fields"]
+    assert "tissue" not in collection_meta["var_fields"]
 
 
 def test_get_collection_datasets_unknown_group_is_empty(fake_api):  # pyright: ignore
-    datasets, description_html = browser.get_collection_datasets("http://x", "Nope")
+    datasets, description_html, collection_meta = browser.get_collection_datasets("http://x", "Nope")
     assert datasets == []
     assert description_html is None
+    assert collection_meta["pills"] == [] and collection_meta["var_fields"] == []
 
 
 # ── route integration tests (TestClient + fake API + real templates) ───────────
@@ -900,11 +909,27 @@ def test_landing_access_source_inline(client):
     assert 'data-label="Source"' not in resp.text
 
 
-def test_folder_access_source_inline(client):
+def test_folder_collection_pills_hoist_constants(client):
+    # GroupA: tissue (prefrontal cortex) + prep (nucleus) + access (public) are
+    # constant across both datasets → hoisted to inert header pills and their
+    # columns dropped; organism/celltype/disease vary → columns kept.
     resp = client.get("/browse/GroupA")
     assert resp.status_code == 200
-    assert 'class="acc-src"' in resp.text
-    assert 'data-label="Access"' not in resp.text
+    assert 'class="coll-meta"' in resp.text          # header pill row
+    assert "prefrontal cortex" in resp.text            # tissue constant → pill
+    assert 'data-label="Tissue"' not in resp.text      # tissue column dropped
+    assert 'data-label="Prep"' not in resp.text        # prep column dropped
+    assert 'data-label="Org"' in resp.text             # organism varies → kept
+    assert 'data-label="Cell"' in resp.text            # celltype varies → kept
+
+
+def test_folder_access_source_inline_only_when_variable(client):
+    # source varies (internal vs external) → inline glyph before the name;
+    # access is constant (public) → it's a header pill, not inline.
+    resp = client.get("/browse/GroupA")
+    assert resp.status_code == 200
+    assert 'class="acc-src"' in resp.text              # source inline (varies)
+    assert 'data-label="Access"' not in resp.text      # never a column
     assert 'data-label="Source"' not in resp.text
 
 

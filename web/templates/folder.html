@@ -16,6 +16,10 @@
   .grp-pill.tissue  { background:#e0f2fe; color:#075985; border-color:#bae6fd; }
   .grp-pill.disease { background:#fee2e2; color:#991b1b; border-color:#fecaca; }
   .grp-pill.prep    { background:#fce7f3; color:#9d174d; border-color:#fbcfe8; }
+  .grp-pill.icon    { background:#f3f4f6; color:#374151; border-color:#e5e7eb; }
+  /* Collection-level constant metadata: shown once as inert pills under the
+     title (rather than repeated down a column for every dataset). */
+  .coll-meta { display:flex; flex-wrap:wrap; gap:4px; margin:4px 0 8px; }
   /* Acc / Src icons: small, desaturated (B&W), just BEFORE the dataset name
      (they used to be their own columns). External-resource links (.ext-lnk)
      sit AFTER the name — also small + inconspicuous. */
@@ -35,6 +39,12 @@
 </div>
 <h1 class="page-title">{{ folder_name }}</h1>
 
+{% if collection_pills %}
+<div class="coll-meta" title="metadata shared by every dataset in this collection">
+    {% for p in collection_pills %}<span class="grp-pill {{ p.cls }}" title="{{ p.title }}">{{ p.text }}</span>{% endfor %}
+</div>
+{% endif %}
+
 <div class="stats-row">
     <div>datasets: <span class="val">{{ datasets|length }}</span></div>
 </div>
@@ -51,12 +61,12 @@
         <tr>
             <th>Dataset</th>
             <th title="cells × genes">Cells × Genes</th>
-            <th title="organism">Org</th>
-            <th title="technology">Tech</th>
-            <th title="cell type">Cell</th>
-            <th title="tissue / brain region">Tissue</th>
-            <th title="disease state">Disease</th>
-            <th title="suspension type (cell / nucleus / na)">Prep</th>
+            {% if 'organism' in var_fields %}<th title="organism">Org</th>{% endif %}
+            {% if 'technology' in var_fields %}<th title="technology">Tech</th>{% endif %}
+            {% if 'celltype' in var_fields %}<th title="cell type">Cell</th>{% endif %}
+            {% if 'tissue' in var_fields %}<th title="tissue / brain region">Tissue</th>{% endif %}
+            {% if 'disease' in var_fields %}<th title="disease state">Disease</th>{% endif %}
+            {% if 'suspension_type' in var_fields %}<th title="suspension type (cell / nucleus / na)">Prep</th>{% endif %}
             <th title="layer count — hover to list">L</th>
             <th title="embedding count — hover to list">E</th>
             <th>Status</th>
@@ -74,7 +84,7 @@
         {% set _src  = dataset.source          or {} %}
         <tr>
             <td class="card-title">
-                {% if _acc.abbrev %}<span class="acc-src" title="access: {{ _acc.full }}">{{ _acc.abbrev }}</span>{% endif %}{% if _src.abbrev %}<span class="acc-src" title="source: {{ _src.full }}">{{ _src.abbrev }}</span>{% endif %}<a href="/browse/{{ folder_browse_id }}/{{ dataset.browse_id }}"><strong>{{ dataset.name }}</strong></a>{% for doi_item in dataset.doi %}<a class="ext-lnk" href="https://doi.org/{{ doi_item }}" target="_blank" rel="noopener" title="DOI: {{ doi_item }}">🔗</a>{% endfor %}{% if dataset.accession_url %}<a class="ext-lnk" href="{{ dataset.accession_url }}" target="_blank" rel="noopener" title="accession: {{ dataset.accession }}">🔗</a>{% endif %}{% for url_item in dataset.link %}<a class="ext-lnk" href="{{ url_item }}" target="_blank" rel="noopener" title="{{ url_item }}">🔗</a>{% endfor %}
+                {% if 'access' in var_fields and _acc.abbrev %}<span class="acc-src" title="access: {{ _acc.full }}">{{ _acc.abbrev }}</span>{% endif %}{% if 'source' in var_fields and _src.abbrev %}<span class="acc-src" title="source: {{ _src.full }}">{{ _src.abbrev }}</span>{% endif %}<a href="/browse/{{ folder_browse_id }}/{{ dataset.browse_id }}"><strong>{{ dataset.name }}</strong></a>{% for doi_item in dataset.doi %}<a class="ext-lnk" href="https://doi.org/{{ doi_item }}" target="_blank" rel="noopener" title="DOI: {{ doi_item }}">🔗</a>{% endfor %}{% if dataset.accession_url %}<a class="ext-lnk" href="{{ dataset.accession_url }}" target="_blank" rel="noopener" title="accession: {{ dataset.accession }}">🔗</a>{% endif %}{% for url_item in dataset.link %}<a class="ext-lnk" href="{{ url_item }}" target="_blank" rel="noopener" title="{{ url_item }}">🔗</a>{% endfor %}
                 {% if dataset.subfolder %}<br><span style="color:#888;font-size:11px">{{ dataset.subfolder }}</span>{% endif %}
                 <div style="color:#aaa;font-size:10px;font-family:var(--font-mono);margin-top:1px">{{ dataset.file_id }}</div>
             </td>
@@ -83,12 +93,12 @@
                 {{ format_count(dataset.n_obs) }} × {{ format_count(dataset.n_vars) }}
                 {% endif %}
             </td>
-            <td data-label="Org">{% if _org.abbrev  %}<span class="grp-pill"          title="organism: {{ _org.full }}">{{ _org.abbrev }}</span>{% endif %}</td>
-            <td data-label="Tech">{% if _tech.abbrev %}<span class="grp-pill tech"     title="technology: {{ _tech.full }}">{{ _tech.abbrev }}</span>{% endif %}</td>
-            <td data-label="Cell">{% if _cell.abbrev %}<span class="grp-pill cell"     title="cell type: {{ _cell.full }}">{{ _cell.abbrev }}</span>{% endif %}</td>
-            <td data-label="Tissue">{% if _tis.abbrev  %}<span class="grp-pill tissue"   title="tissue: {{ _tis.full }}">{{ _tis.abbrev }}</span>{% endif %}</td>
-            <td data-label="Disease">{% if _dis.abbrev  %}<span class="grp-pill disease"  title="disease: {{ _dis.full }}">{{ _dis.abbrev }}</span>{% endif %}</td>
-            <td data-label="Prep">{% if _sus.abbrev  %}<span class="grp-pill prep"     title="prep: {{ _sus.full }}">{{ _sus.abbrev }}</span>{% endif %}</td>
+            {% if 'organism' in var_fields %}<td data-label="Org">{% if _org.abbrev  %}<span class="grp-pill"          title="organism: {{ _org.full }}">{{ _org.abbrev }}</span>{% endif %}</td>{% endif %}
+            {% if 'technology' in var_fields %}<td data-label="Tech">{% if _tech.abbrev %}<span class="grp-pill tech"     title="technology: {{ _tech.full }}">{{ _tech.abbrev }}</span>{% endif %}</td>{% endif %}
+            {% if 'celltype' in var_fields %}<td data-label="Cell">{% if _cell.abbrev %}<span class="grp-pill cell"     title="cell type: {{ _cell.full }}">{{ _cell.abbrev }}</span>{% endif %}</td>{% endif %}
+            {% if 'tissue' in var_fields %}<td data-label="Tissue">{% if _tis.abbrev  %}<span class="grp-pill tissue"   title="tissue: {{ _tis.full }}">{{ _tis.abbrev }}</span>{% endif %}</td>{% endif %}
+            {% if 'disease' in var_fields %}<td data-label="Disease">{% if _dis.abbrev  %}<span class="grp-pill disease"  title="disease: {{ _dis.full }}">{{ _dis.abbrev }}</span>{% endif %}</td>{% endif %}
+            {% if 'suspension_type' in var_fields %}<td data-label="Prep">{% if _sus.abbrev  %}<span class="grp-pill prep"     title="prep: {{ _sus.full }}">{{ _sus.abbrev }}</span>{% endif %}</td>{% endif %}
             <td data-label="Layers" style="color:#555;font-size:11px" title="{{ dataset.layers|join(', ') if dataset.layers else 'none' }}">
                 {{ dataset.layers|length if dataset.layers else 0 }}
             </td>
