@@ -63,7 +63,9 @@ data/
 config/caddy-auth-*.conf
 
 # Authelia: secrets + the user database (bcrypt hashes still secret).
-# The configuration.yml itself is tracked.
+# configuration.yml is instance-specific (host/port/cookie domain/SMTP) and
+# is gitignored — copy configuration.example.yml per host. Secrets stay in files.
+config/authelia/configuration.yml
 config/authelia/secrets/
 config/authelia/users_database.yml
 config/authelia/db.sqlite3

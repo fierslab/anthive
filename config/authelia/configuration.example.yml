@@ -1,0 +1,118 @@
+###############################################################
+# Authelia configuration TEMPLATE for an anthive4 instance.
+#
+# configuration.yml is gitignored (instance-specific: host, port,
+# cookie domain, SMTP). Copy this file and fill in the per-host bits:
+#
+#   cp config/authelia/configuration.example.yml \
+#      config/authelia/configuration.yml
+#   # then edit:  AUTHELIA_PORT, PRIMARY_HOST
+#
+# Per-host values on the current deployments:
+#   data.nevel.eu : AUTHELIA_PORT=9091  api 8080 / browse 8081
+#   prs.nevel.eu  : AUTHELIA_PORT=9191  api 8180 / browse 8181
+#
+# Secrets are NOT in this file — they are read from gitignored files via
+# env-vars set by ant-supervisor:
+#   AUTHELIA_SESSION_SECRET_FILE
+#   AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE
+#   AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE
+#   AUTHELIA_NOTIFIER_SMTP_PASSWORD_FILE
+# Generate them once per host:
+#   openssl rand -hex 64 > config/authelia/secrets/jwt
+#   openssl rand -hex 64 > config/authelia/secrets/session
+#   openssl rand -hex 32 > config/authelia/secrets/encryption
+###############################################################
+
+theme: dark
+
+server:
+  # Path-aware base URL behind nginx's /authelia/ proxy. Port must be
+  # unique per instance on a shared host (see header).
+  address: 'tcp://127.0.0.1:AUTHELIA_PORT/authelia'
+  endpoints:
+    authz:
+      # Browser gate (nginx /internal/authelia-verify): COOKIE ONLY.
+      # No Authorization-header strategy, so a browser sending stale
+      # cached basic-auth is treated as "no credentials" → clean 401 →
+      # portal redirect, instead of a failed login that trips a ban.
+      auth-request:
+        implementation: 'AuthRequest'
+        authn_strategies:
+          - name: 'CookieSession'
+      # API/CLI gate (nginx /internal/authelia-verify-api): cookie first
+      # (logged-in browser XHR), then HTTP basic for programmatic clients.
+      auth-request-api:
+        implementation: 'AuthRequest'
+        authn_strategies:
+          - name: 'CookieSession'
+          - name: 'HeaderAuthorization'
+            schemes:
+              - 'basic'
+      # Browser-only ForwardAuth gate (302 redirect on unauth).
+      forward-auth-cookie:
+        implementation: 'ForwardAuth'
+        authn_strategies:
+          - name: 'CookieSession'
+
+  # Authelia branding (logo.png) — tracked under config/authelia/assets/.
+  asset_path: './config/authelia/assets'
+
+log:
+  level: 'info'
+  format: 'text'
+  file_path: './tmp/authelia.log'
+  keep_stdout: true
+
+identity_validation:
+  reset_password:
+    # JWT secret via AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE.
+
+authentication_backend:
+  file:
+    path: './config/authelia/users_database.yml'
+    watch: true            # hot-reload on file change, no restart
+    password:
+      algorithm: 'argon2'
+
+access_control:
+  default_policy: 'one_factor'
+
+session:
+  name: 'authelia_session'
+  same_site: 'lax'
+  expiration: '1 hour'
+  inactivity: '30 minutes'
+  remember_me: '1 month'
+  cookies:
+    - domain: 'PRIMARY_HOST'                                 # e.g. data.nevel.eu
+      authelia_url: 'https://PRIMARY_HOST/authelia/'
+      default_redirection_url: 'https://PRIMARY_HOST/'
+
+regulation:
+  max_retries: 5
+  find_time: '2 minutes'
+  ban_time: '10 minutes'
+
+storage:
+  local:
+    path: './config/authelia/db.sqlite3'
+
+notifier:
+  # SMTP via Migadu (shared anthive@nevel.eu mailbox; password in the
+  # AUTHELIA_NOTIFIER_SMTP_PASSWORD_FILE). disable_startup_check keeps a
+  # flaky SMTP egress from crashing auth at boot. The IPv4 literal +
+  # tls.server_name work around this host's broken IPv6 egress to Migadu
+  # (587 only; 465/25 are firewall-blocked). Re-resolve smtp.migadu.com
+  # if that IP ever changes.
+  disable_startup_check: true
+  smtp:
+    address: 'submission://37.59.57.117:587'
+    timeout: '30s'
+    username: 'anthive@nevel.eu'
+    sender: 'Anthive <anthive@nevel.eu>'
+    subject: '[Anthive] {title}'
+    startup_check_address: 'anthive@nevel.eu'
+    tls:
+      server_name: 'smtp.migadu.com'
+      minimum_version: 'TLS1.2'
