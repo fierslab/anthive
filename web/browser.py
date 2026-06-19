@@ -413,10 +413,18 @@ def get_collection_datasets(api_url: str, group_id: str) -> tuple:
         group_dbs.append(db)
 
         if description_html is None:
-            experiment = (db.get('collection') or {}).get('experiment')
-            if experiment:
+            # Collection blurb = the markdown body of the collection's top-level
+            # index.md (REST API 2.5 `collection.description`). NOT `experiment`,
+            # which is a per-dataset field that read confusingly as the blurb.
+            body = ((db.get('collection') or {}).get('description') or '').strip()
+            # The index.md body conventionally opens with `# <Group>` — drop that
+            # leading H1 so it doesn't duplicate the page title rendered above.
+            lines = body.split('\n')
+            if lines and lines[0].lstrip().startswith('# '):
+                body = '\n'.join(lines[1:]).strip()
+            if body:
                 description_html = markdown.markdown(
-                    experiment, extensions=['tables', 'fenced_code']
+                    body, extensions=['tables', 'fenced_code']
                 )
 
         layers = list(db.get('layers', {}).keys())

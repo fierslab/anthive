@@ -219,7 +219,8 @@ _DATABASES = [
     {
         "id": "GroupA/ds1", "group_id": "GroupA", "file_id": "ds1",
         "title": "Dataset One", "n_cells": 1500, "n_genes": 20000,
-        "collection": {"group": "Group A Study", "experiment": "# Heading\nBody text."},
+        "collection": {"group": "Group A Study", "experiment": "Pharmacogenomics",
+                       "description": "# Group A Study\n\nA cohort of microglia datasets."},
         "organism": "human", "technology": "10x_chromium_3p_v3",
         "technology_category": "single-cell", "celltype": "microglial cell",
         "tissue": "prefrontal cortex", "disease": "alzheimer disease",
@@ -418,9 +419,12 @@ def test_get_collection_datasets_filters_and_builds_description(fake_api):  # py
     assert len(datasets) == 2
     names = {d["name"] for d in datasets}
     assert names == {"Dataset One", "Dataset Two"}
-    # description rendered from the first dataset's collection.experiment markdown
+    # blurb rendered from collection.description (index.md body), NOT experiment;
+    # the leading '# Group A Study' H1 is stripped (avoids duplicating the title).
     assert description_html is not None
-    assert "<h1" in description_html  # "# Heading" → <h1>
+    assert "A cohort of microglia datasets" in description_html
+    assert "<h1" not in description_html          # leading H1 stripped
+    assert "Pharmacogenomics" not in description_html  # experiment NOT used as blurb
     # GroupA: ds1 (human/microglia/PFC/AD/nucleus) + ds2 (mouse/astrocyte/PFC/normal)
     # → tissue + suspension_type are constant (header pills); organism, celltype,
     #   disease vary (stay as columns).
