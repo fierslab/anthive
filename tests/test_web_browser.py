@@ -30,6 +30,9 @@ _WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 _spec = importlib.util.spec_from_file_location(
     "anthive_web_browser", _WEB_DIR / "browser.py"
 )
+assert _spec is not None and _spec.loader is not None, (
+    f"could not load web/browser.py spec from {_WEB_DIR}"
+)
 browser = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(browser)
 
@@ -602,12 +605,13 @@ def test_plot_route_wins_over_dataset_path_converter(client):
         requested.append(path)
         return _fake_api_get(api_url, path)
 
-    # rebind on the client's monkeypatched module
-    browser._api_get = recording
+    # rebind on the client's monkeypatched module (setattr keeps pyright quiet
+    # about the dynamic _api_get attribute on the ModuleType)
+    setattr(browser, "_api_get", recording)
     try:
         resp = client.get("/browse/GroupA/ds1/plot/scatter")
     finally:
-        browser._api_get = _fake_api_get
+        setattr(browser, "_api_get", _fake_api_get)
     assert resp.status_code == 200
     assert "/databases/GroupA/ds1/info" in requested
     assert "/databases/GroupA/ds1/plot/scatter/info" not in requested
