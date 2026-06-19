@@ -1,107 +1,216 @@
-#!/usr/bin/env bash
-#
-# ant-adduser — add an Authelia user with a random 12-char password.
-#
-# What it does:
-#   - generates a 12-character alphanumeric password
-#   - hashes it with Authelia's argon2 (same params as the live config)
-#   - appends the user block to config/authelia/users_database.yml
-#   - prints the username + plaintext password ONCE (not stored anywhere)
-#
-# Authelia watches users_database.yml (watch: true), so the new user can
-# log in within ~a second — no restart needed.
-#
-# Usage:
-#   ant-adduser <username> [-e email] [-n "Display Name"] [-g group]
-#
-# Defaults: email=<username>@nevel.eu, display name=<username>, group=users
-#
-# Examples:
-#   ant-adduser carlo
-#   ant-adduser emily -e emily@kuleuven.be -n "Emily R" -g admins
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["ruamel.yaml"]
+# ///
+"""ant-adduser — add an Authelia user, keyed on email, with a random password.
 
-set -euo pipefail
+What it does:
+  - REQUIRES an email address (validated).
+  - Auto-derives the login name from the email local part's initials:
+      mark.fiers@kuleuven.be  -> mf
+      bert.bobjes@nevel.eu    -> bb
+      jan.van.berg@x.eu       -> jvb
+      carlo@nevel.eu          -> carlo   (single token: used as-is)
+    If that login is already taken by a DIFFERENT email, it falls back to
+    <first-initial><lastname> (mfiers), then <initials>2, 3, …  If it's
+    taken by the SAME email, that's the same person -> error (no change).
+  - Auto-derives a display name ("Mark Fiers") unless -n is given.
+  - Generates a random 12-char alphanumeric password, hashes it (argon2 via
+    the Authelia binary), and adds the user to users_database.yml.
+  - Prints the username + plaintext password ONCE (it is not stored).
 
-# --- resolve repo root (this script lives in <root>/bin/ops/) ----------------
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+Robust to file format: the database is parsed and re-dumped with a YAML
+round-trip parser, so it works whether entries are in the minimal 4-field
+form or Authelia's fully-expanded schema — and never emits invalid YAML.
+Existing users are preserved untouched. Authelia watches the file
+(watch: true), so a new user can log in within ~a second; no restart.
 
-AUTHELIA_BIN="${REPO_ROOT}/envs/authelia/authelia"
-USERS_FILE="${REPO_ROOT}/config/authelia/users_database.yml"
+Usage:
+  ant-adduser <email> [-u login] [-n "Display Name"] [-g group] [-f users_file]
 
-die() { echo "error: $*" >&2; exit 1; }
+Examples:
+  ant-adduser mark.fiers@kuleuven.be            # -> login mf
+  ant-adduser bert.bobjes@nevel.eu -g admins    # -> login bb, group admins
+  ant-adduser carlo@nevel.eu -u carlo2          # force the login name
+"""
 
-# --- parse args --------------------------------------------------------------
-USERNAME="${1:-}"
-shift || true
-[ -n "${USERNAME}" ] || die "usage: ant-adduser <username> [-e email] [-n \"Display Name\"] [-g group]"
-[[ "${USERNAME}" == -* ]] && die "first argument must be the username, not a flag"
+import argparse
+import re
+import subprocess
+import sys
+from pathlib import Path
 
-EMAIL="${USERNAME}@nevel.eu"
-DISPLAYNAME="${USERNAME}"
-GROUP="users"
+from ruamel.yaml import YAML
 
-while getopts ":e:n:g:" opt; do
-  case "${opt}" in
-    e) EMAIL="${OPTARG}" ;;
-    n) DISPLAYNAME="${OPTARG}" ;;
-    g) GROUP="${OPTARG}" ;;
-    \?) die "unknown flag: -${OPTARG}" ;;
-    :)  die "flag -${OPTARG} needs a value" ;;
-  esac
-done
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent.parent
+AUTHELIA_BIN = REPO_ROOT / "envs" / "authelia" / "authelia"
+DEFAULT_USERS_FILE = REPO_ROOT / "config" / "authelia" / "users_database.yml"
 
-# username must be a safe YAML key + login name
-[[ "${USERNAME}" =~ ^[a-z][a-z0-9_-]*$ ]] \
-  || die "username '${USERNAME}' must be lowercase, start with a letter, and contain only a-z 0-9 _ -"
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+LOGIN_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 
-# --- sanity checks -----------------------------------------------------------
-[ -x "${AUTHELIA_BIN}" ] || die "authelia binary not found/executable at ${AUTHELIA_BIN}"
-[ -f "${USERS_FILE}" ]   || die "users database not found at ${USERS_FILE}"
 
-# refuse to clobber an existing user (match a 2-space-indented YAML key)
-if grep -qE "^  ${USERNAME}:[[:space:]]*$" "${USERS_FILE}"; then
-  die "user '${USERNAME}' already exists in ${USERS_FILE} (this script won't overwrite; edit the password line by hand or remove the block first)"
-fi
+def die(message: str) -> None:
+    """Print an error to stderr and exit non-zero."""
+    print(f"error: {message}", file=sys.stderr)
+    raise SystemExit(1)
 
-# --- generate password + hash ------------------------------------------------
-# One call yields both the plaintext (to show the user) and the argon2 digest.
-GEN_OUTPUT="$("${AUTHELIA_BIN}" crypto hash generate argon2 \
-                --random --random.length 12 --random.charset alphanumeric \
-                --no-confirm)"
 
-PASSWORD="$(printf '%s\n' "${GEN_OUTPUT}" | sed -n 's/^Random Password: //p')"
-HASH="$(printf '%s\n' "${GEN_OUTPUT}"     | sed -n 's/^Digest: //p')"
+def candidate_logins(email: str) -> tuple[list[str], list[str]]:
+    """Ordered login candidates derived from the email, plus the name tokens.
 
-[ -n "${PASSWORD}" ] || die "could not parse generated password from authelia output"
-[ -n "${HASH}" ]     || die "could not parse generated hash from authelia output"
+    multi-token -> initials (mark.fiers -> mf); single token -> as-is (carlo).
+    Fallbacks: <first-initial><lastname> (mfiers), then <initials>2, 3, …
+    """
+    local = email.split("@")[0]
+    tokens = [token for token in re.split(r"[._\-]+", local) if token]
+    if not tokens:
+        die(f"cannot derive a login from email {email}")
+    base = (tokens[0] if len(tokens) == 1
+            else "".join(token[0] for token in tokens)).lower()
+    candidates = [base]
+    if len(tokens) >= 2:
+        candidates.append((tokens[0][0] + tokens[-1]).lower())  # mfiers
+    candidates += [f"{base}{n}" for n in range(2, 100)]
+    return candidates, tokens
 
-# --- append the user block ---------------------------------------------------
-# Ensure the file ends with a newline before appending.
-[ -n "$(tail -c1 "${USERS_FILE}")" ] && printf '\n' >> "${USERS_FILE}"
 
-{
-  printf '  %s:\n' "${USERNAME}"
-  printf "    displayname: '%s'\n" "${DISPLAYNAME}"
-  printf "    password: '%s'\n"    "${HASH}"
-  printf "    email: '%s'\n"       "${EMAIL}"
-  printf "    groups: ['%s']\n"    "${GROUP}"
-} >> "${USERS_FILE}"
+def confirm_login(suggestion: str, existing: dict[str, str | None],
+                  email: str) -> str:
+    """Prompt for a free login after a collision; exit if no input is given.
 
-chmod 600 "${USERS_FILE}"
+    Accepts a typed login or the offered suggestion (empty line). Re-prompts
+    on an invalid or still-taken choice. With no input available (EOF / not a
+    terminal), exits with the warning rather than auto-resolving.
+    """
+    while True:
+        try:
+            response = input(f"  enter a login to use [{suggestion}]: ").strip()
+        except EOFError:
+            die("collision not resolved (no input); re-run with "
+                f"-u <login> — suggestion: {suggestion}")
+        choice = response or suggestion
+        if not LOGIN_RE.match(choice):
+            print("  invalid: lowercase, start with a letter, a-z 0-9 _ -",
+                  file=sys.stderr)
+            continue
+        if choice not in existing:
+            return choice
+        if (existing[choice] or "").lower() == email.lower():
+            die(f"'{choice}' already exists with email {email} (same person)")
+        print(f"  '{choice}' is taken by {existing[choice]}; choose another",
+              file=sys.stderr)
 
-# --- report ------------------------------------------------------------------
-cat <<REPORT
+
+def generate_password_and_hash() -> tuple[str, str]:
+    """Return (plaintext, argon2_digest) from the Authelia crypto helper."""
+    result = subprocess.run(
+        [str(AUTHELIA_BIN), "crypto", "hash", "generate", "argon2",
+         "--random", "--random.length", "12", "--random.charset", "alphanumeric",
+         "--no-confirm"],
+        capture_output=True, text=True, check=True,
+    )
+    password = digest = None
+    for line in result.stdout.splitlines():
+        if line.startswith("Random Password: "):
+            password = line[len("Random Password: "):].strip()
+        elif line.startswith("Digest: "):
+            digest = line[len("Digest: "):].strip()
+    if not password or not digest:
+        die(f"could not parse password/hash from authelia output:\n{result.stdout}")
+    return password, digest
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="ant-adduser", description="Add an Authelia user keyed on email.")
+    parser.add_argument("email", help="email address (required; drives the login)")
+    parser.add_argument("-u", "--login", default="",
+                        help="explicit login name (overrides the auto-derived one)")
+    parser.add_argument("-n", "--name", default="",
+                        help="display name (default: derived from email)")
+    parser.add_argument("-g", "--group", default="users", help="group (default: users)")
+    parser.add_argument("-f", "--file", default=str(DEFAULT_USERS_FILE),
+                        help="users database path (default: this instance's)")
+    args = parser.parse_args()
+
+    if not AUTHELIA_BIN.is_file():
+        die(f"authelia binary not found at {AUTHELIA_BIN}")
+    users_path = Path(args.file)
+    if not users_path.is_file():
+        die(f"users database not found at {users_path}")
+    if not EMAIL_RE.match(args.email):
+        die(f"invalid email address: {args.email}")
+
+    yaml = YAML()  # round-trip: preserves existing entries' formatting
+    yaml.preserve_quotes = True
+    data = yaml.load(users_path) or {}
+    users = data.get("users")
+    if users is None:
+        die(f"{users_path} has no top-level 'users:' mapping")
+
+    existing = {login: (entry or {}).get("email") for login, entry in users.items()}
+
+    candidates, tokens = candidate_logins(args.email)
+
+    if args.login:
+        if not LOGIN_RE.match(args.login):
+            die(f"login {args.login!r} must be lowercase, start with a letter, "
+                f"and contain only a-z 0-9 _ -")
+        desired = args.login
+        suggestions = [args.login] + [f"{args.login}{n}" for n in range(2, 100)]
+    else:
+        desired = candidates[0]
+        suggestions = candidates
+
+    if desired not in existing:
+        login = desired
+        login_source = "explicit (-u)" if args.login else "auto-derived from email"
+    elif (existing[desired] or "").lower() == args.email.lower():
+        die(f"user '{desired}' already exists with email {args.email} "
+            f"(same person) — nothing to do")
+    else:
+        # collision with a DIFFERENT email: warn + require manual confirmation
+        # rather than silently picking an alternative.
+        suggestion = next((c for c in suggestions if c not in existing),
+                          f"{desired}2")
+        print(f"warning: login '{desired}' is already taken by a different "
+              f"email ({existing[desired]}).", file=sys.stderr)
+        login = confirm_login(suggestion, existing, args.email)
+        login_source = "manually confirmed (collision)"
+
+    display_name = args.name or (
+        " ".join(token.capitalize() for token in tokens) if tokens else login)
+
+    password, digest = generate_password_and_hash()
+
+    users[login] = {
+        "displayname": display_name,
+        "password": digest,
+        "email": args.email,
+        "groups": [args.group],
+    }
+
+    yaml.dump(data, users_path)
+    users_path.chmod(0o600)
+
+    print(f"""\
 ================================================================
   Authelia user created (live within ~1s, no restart needed)
 ----------------------------------------------------------------
-  username:     ${USERNAME}
-  password:     ${PASSWORD}
-  email:        ${EMAIL}
-  display name: ${DISPLAYNAME}
-  group:        ${GROUP}
+  username:     {login}      ({login_source})
+  password:     {password}
+  email:        {args.email}
+  display name: {display_name}
+  group:        {args.group}
+  file:         {users_path}
 ----------------------------------------------------------------
   Share the password over a secure channel. It is NOT stored;
-  if lost, re-run with a fresh user or regenerate the hash.
-================================================================
-REPORT
+  if lost, regenerate the hash and replace the password line.
+================================================================""")
+
+
+if __name__ == "__main__":
+    main()
