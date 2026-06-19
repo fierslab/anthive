@@ -449,6 +449,60 @@ def test_index_renders(client):
     assert "Group A Study" in resp.text
 
 
+def test_index_renders_with_multiple_collections_no_redirect(client):
+    # Sanity: with the default fake (two groups), '/' renders the overview;
+    # the single-collection auto-jump must not fire here.
+    resp = client.get("/", follow_redirects=False)
+    assert resp.status_code == 200
+
+
+def test_index_auto_redirects_to_only_collection(client, monkeypatch):
+    # Reduce the fake catalog to a single group → '/' should 302 into it.
+    single = [db for db in _DATABASES if db.get("group_id") == "GroupA"
+              or db["id"].startswith("GroupA/")]
+
+    def fake(api_url, path):
+        if path == "/databases":
+            return {"databases": single}
+        return _fake_api_get(api_url, path)
+
+    monkeypatch.setattr(browser, "_api_get", fake)
+    resp = client.get("/", follow_redirects=False)
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/browse/GroupA"
+
+
+def test_index_no_redirect_when_query_string_present(client, monkeypatch):
+    # Opt-out: any query string (search, filter, explicit ?all=1) suppresses
+    # the auto-jump so the overview is reachable even with one collection.
+    single = [db for db in _DATABASES if db.get("group_id") == "GroupA"
+              or db["id"].startswith("GroupA/")]
+
+    def fake(api_url, path):
+        if path == "/databases":
+            return {"databases": single}
+        return _fake_api_get(api_url, path)
+
+    monkeypatch.setattr(browser, "_api_get", fake)
+    for qs in ("?all=1", "?search=foo", "?organism=human"):
+        resp = client.get(f"/{qs}", follow_redirects=False)
+        assert resp.status_code == 200, f"unexpected redirect for {qs!r}"
+        assert "Group A Study" in resp.text
+
+
+def test_index_zero_collections_no_redirect(client, monkeypatch):
+    # An empty catalog must keep rendering the existing empty page, not 302
+    # somewhere broken.
+    def fake(api_url, path):
+        if path == "/databases":
+            return {"databases": []}
+        return _fake_api_get(api_url, path)
+
+    monkeypatch.setattr(browser, "_api_get", fake)
+    resp = client.get("/", follow_redirects=False)
+    assert resp.status_code == 200
+
+
 def test_index_survives_api_failure(client, monkeypatch):
     def boom(api_url, path):
         raise requests.HTTPError("API down")

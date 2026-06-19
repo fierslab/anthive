@@ -12,7 +12,7 @@ from urllib.parse import quote as url_quote, unquote
 import markdown
 import requests
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pathlib import Path
 
@@ -447,11 +447,29 @@ def get_collection_datasets(api_url: str, group_id: str) -> tuple:
 
 @router.get("/", response_class=HTMLResponse)
 async def index(request: Request):
+    """Catalog landing page.
+
+    UX shortcut: when the (post-filter) catalog contains exactly one
+    collection, skip the overview and redirect straight into that
+    collection's folder page.  The user can opt out — or simply land on
+    the overview while searching — by appending **any** query string
+    (e.g. ``/?all=1``, ``/?search=foo``); a non-empty query string
+    suppresses the auto-redirect.  Zero collections → the empty-catalog
+    page renders as before; two or more → the normal overview.
+    """
     try:
         collections = get_collection_list(_api_url(request))
     except Exception as error:
         collections = []
         print(f"API error: {error}")
+
+    # Auto-jump into the only collection.  Use the same list the overview
+    # would render (already filtered for visibility / inactives upstream)
+    # so a hidden second group can't trigger an unexpected redirect.  Any
+    # query string (?all=1, ?search=…, …) opts out.
+    if len(collections) == 1 and not request.url.query:
+        target = f"/browse/{url_quote(collections[0]['browse_id'])}"
+        return RedirectResponse(url=target, status_code=302)
 
     total_datasets = sum(c['dataset_count'] for c in collections)
     total_cells = sum(c['total_cells'] for c in collections if c['total_cells']) or None
