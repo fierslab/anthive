@@ -579,6 +579,7 @@
       <a id="dl-svg">⬇ SVG</a>
       <a id="dl-pdf" title="vector PDF — publication quality">⬇ PDF</a>
       <span style="flex:1"></span>
+      <a id="force-refresh" href="#" title="re-render this figure, bypassing the server + browser cache">↻ refresh</a>
       <a id="copy-url" href="#">copy URL</a>
     </div>
     <div class="plot-img" id="plot-img">
@@ -702,7 +703,8 @@
     return 'configure on the left to render';
   }
 
-  async function refresh() {
+  async function refresh(opts) {
+    opts = opts || {};
     renderToken++;
     const my = renderToken;
     if (!canRender()) {
@@ -710,13 +712,19 @@
       status.textContent = ''; captionEl.textContent = '';
       return;
     }
-    const url = buildUrl('png');
+    let url = buildUrl('png');
+    // Force-refresh: append a one-shot cache-buster so the request misses both
+    // the browser HTTP cache AND the server's plot cache (its key hashes the
+    // full query string), yielding a fresh render. NOT added to syncURL or the
+    // download links — the shareable URL stays clean.
+    if (opts.bust) url += '&_cb=' + Date.now();
     // Prominent loading state right in the plot canvas (large spinner), so it's
     // obvious a render is in flight — not just a small line under the figure.
-    imgBox.innerHTML = '<div class="plot-loading"><span class="spinner-lg"></span><span>rendering…</span></div>';
+    imgBox.innerHTML = '<div class="plot-loading"><span class="spinner-lg"></span><span>'
+      + (opts.bust ? 're-rendering…' : 'rendering…') + '</span></div>';
     status.textContent = '';
     try {
-      const response = await fetch(url);
+      const response = await fetch(url, opts.bust ? { cache: 'no-store' } : undefined);
       if (my !== renderToken) return;
       if (!response.ok) {
         const body = await response.text();
@@ -840,6 +848,12 @@
     const orig = e.target.textContent;
     e.target.textContent = '✓ copied';
     setTimeout(() => e.target.textContent = orig, 900);
+  });
+
+  // ── force refresh — re-render bypassing caches (server fixes, changed data)
+  document.getElementById('force-refresh').addEventListener('click', e => {
+    e.preventDefault();
+    refresh({ bust: true });
   });
 
   // ── autocomplete (gene + obs fields) on free-text inputs

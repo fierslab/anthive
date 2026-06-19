@@ -927,6 +927,13 @@ def test_dataset_quick_links(client):
     assert "pubmed.ncbi.nlm.nih.gov/123456" in resp.text
 
 
+def test_plot_force_refresh_control(client):
+    # The plot toolbar offers a force-refresh (cache-bypassing re-render).
+    resp = client.get("/browse/GroupA/ds1/plot/scatter")
+    assert resp.status_code == 200
+    assert 'id="force-refresh"' in resp.text
+
+
 def test_plot_pdf_label_and_no_source_line(client):
     resp = client.get("/browse/GroupA/ds1/plot/scatter")
     assert resp.status_code == 200
