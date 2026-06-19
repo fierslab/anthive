@@ -1,4 +1,4 @@
-.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-streamlit serve-mcp serve-all serve-debug serve-stop caddy-passwd caddy-passwd-clear dev-jupyter sync-push sync-pull sync-pull-duckdb sync-pull-all sync-status build-stale sync-update serve-status serve-restart
+.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-streamlit serve-mcp serve-all serve-debug serve-stop caddy-passwd caddy-passwd-clear dev-jupyter sync-push sync-pull sync-pull-duckdb sync-pull-all sync-status build-stale sync-update serve-status serve-restart h5adstore-push push-all
 
 help:
 	@echo "Anthive4 Development Commands"
@@ -303,6 +303,32 @@ sync-push:
 
 sync-status:
 	@./bin/ops/ant-sync status
+
+# Commit + push all pending metadata in data/h5adstore/ to its own git
+# repo (github.com:badslab/h5adstore). Auto-commit message uses an ISO
+# timestamp; pre-commit validator (validate_md.py) still enforces the
+# id / group_id requirements — a missing field on a new dataset stops
+# the auto-commit, which is the right behaviour (human needs to assign
+# the 3-char codes anyway).
+h5adstore-push:
+	@cd data/h5adstore && \
+	  if [ -n "$$(git status --porcelain)" ]; then \
+	    git add -A && \
+	    git commit -m "auto: metadata snapshot $$(date -u +%Y-%m-%dT%H:%MZ)" && \
+	    git push origin main; \
+	  else \
+	    echo "h5adstore: working tree clean — nothing to commit"; \
+	    git fetch origin main >/dev/null 2>&1; \
+	    ahead=$$(git rev-list --count origin/main..HEAD 2>/dev/null || echo 0); \
+	    if [ "$$ahead" != "0" ]; then \
+	      echo "h5adstore: $$ahead unpushed commit(s) — pushing"; \
+	      git push origin main; \
+	    fi; \
+	  fi
+
+# One-shot: S3 data + h5adstore git, in that order so a stale .md never
+# blocks the S3 push that would have been fine anyway.
+push-all: sync-push h5adstore-push
 
 # Full maintenance cycle: bring everything into a consistent state.
 sync-update:
