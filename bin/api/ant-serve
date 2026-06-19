@@ -859,17 +859,22 @@ class DatabaseRegistry:
         # Load per-file metadata
         file_metadata, md_body = parse_md_file(md_path)
 
-        # Load collection metadata from the nearest index.md walking up the tree.
-        # Sierksma2025 datasets live in subdirectories, so the index.md is one
-        # level above the immediate parent.
-        index_path = None
-        search = md_path.parent
-        while search != self.data_folder.parent:
-            candidate = search / 'index.md'
-            if candidate.exists():
-                index_path = candidate
-                break
-            search = search.parent
+        # Use ONLY the collection-root index.md — data/h5adstore/<dp>/index.md.
+        # Walking up the tree was wrong: groups like Sierksma2025 also have
+        # per-subfolder index.md files for nested datasets, and the walk-up
+        # would pick the closest (subfolder) one rather than the collection
+        # root that carries the citation / study description.
+        try:
+            relpath = md_path.relative_to(self.data_folder)
+            data_project = relpath.parts[0] if relpath.parts else None
+        except ValueError:
+            data_project = None
+        index_path = (
+            self.data_folder / data_project / 'index.md'
+            if data_project else None
+        )
+        if index_path and not index_path.exists():
+            index_path = None
         collection_metadata, collection_body = parse_md_file(index_path) if index_path else ({}, '')
 
         # Get database info using connection pool
@@ -1702,31 +1707,34 @@ async def get_group_info(group_id: str):
 
     404 if no dataset in the catalog belongs to this group_id.
     """
-    # Find datasets whose group_id matches. The group_id can live on
-    # the per-file .md (rare) or — far more commonly — on the nearest
-    # ancestor index.md. For each dataset we resolve the group_id AND
-    # remember its index.md path so we can return the right one.
+    # Find datasets whose group_id matches. We use ONLY the
+    # collection-root index.md (data/h5adstore/<data_project>/index.md)
+    # — nested subfolder index.md files (e.g. Sierksma2025/Village.6M/
+    # index.md) are NOT consulted for group_id resolution or for the
+    # description body returned below.
     matching: List[Dict] = []
     index_path: Optional[Path] = None
     for db_id, md_path in registry._db_md_bases.items():
         file_meta, _body = parse_md_file(md_path)
         gid: Optional[str] = file_meta.get('group_id')
-        dataset_index_path: Optional[Path] = None
-        if not gid:
-            search = md_path.parent
-            while search != registry.data_folder.parent:
-                cand = search / 'index.md'
-                if cand.exists():
-                    cand_meta, _ = parse_md_file(cand)
-                    gid = cand_meta.get('group_id')
-                    dataset_index_path = cand
-                    break
-                search = search.parent
+        # Resolve the collection-root index.md for this dataset.
+        try:
+            relpath = md_path.relative_to(registry.data_folder)
+            dp = relpath.parts[0] if relpath.parts else None
+        except ValueError:
+            dp = None
+        root_index = (
+            registry.data_folder / dp / 'index.md' if dp else None
+        )
+        root_index = root_index if (root_index and root_index.exists()) else None
+        if not gid and root_index is not None:
+            cand_meta, _ = parse_md_file(root_index)
+            gid = cand_meta.get('group_id')
         if gid != group_id:
             continue
-        # First matching dataset wins for the index.md location.
-        if index_path is None and dataset_index_path is not None:
-            index_path = dataset_index_path
+        # First matching dataset locks in the index.md.
+        if index_path is None and root_index is not None:
+            index_path = root_index
         matching.append({
             'db_id': db_id,
             'title': file_meta.get('title') or md_path.stem,
