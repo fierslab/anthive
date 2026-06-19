@@ -155,18 +155,32 @@ def pick_cmap(
 
 
 def _legend_outside(ax, title: Optional[str] = None, fontsize: float = 8) -> None:
-    """Move an existing matplotlib legend to outside-top-right of the axes.
+    """Place a legend outside-top-right of the axes.
 
-    No-op when the axes has no legend (e.g. no hue mapping).  Used by every
-    plot geom so legend placement is uniform across the site.  bbox_inches
-    is set to 'tight' on savefig so the outside legend is not clipped.
+    Works in two scenarios:
+      1. Seaborn / sns_* already created a legend → just relocate it.
+      2. Plot used raw `ax.plot(..., label=...)` with no `ax.legend()` call
+         → labelled artists exist but no legend yet; materialise one from
+         them and place it outside.
+
+    No-op only when there's neither an existing legend NOR any labelled
+    artists on the axes — i.e. nothing meaningful to label.
     """
     legend = ax.get_legend()
     if legend is None:
-        return
-    new_title = title if title is not None else (
-        legend.get_title().get_text() if legend.get_title() else None
-    )
+        # No legend yet — check if there are labelled artists we should
+        # materialise into one (plot_rolling and similar ax.plot-based
+        # geoms hit this path; without this, every label= passed to
+        # ax.plot was silently dropped).
+        handles, _labels = ax.get_legend_handles_labels()
+        if not handles:
+            return
+        existing_title = None
+    else:
+        existing_title = (
+            legend.get_title().get_text() if legend.get_title() else None
+        )
+    new_title = title if title is not None else existing_title
     ax.legend(
         bbox_to_anchor=(1.02, 1.0), loc='upper left',
         borderaxespad=0.0,
@@ -581,6 +595,17 @@ def plot_scatter(
         plot_df[color_field] = color_values.reindex(plot_df['cell_name'].values).values
 
         if color_kind == 'categorical':
+            # Defensive normalisation of the colour column. Two problems
+            # this fixes for "dirty" obs columns (label strings + NaN):
+            #   1. pandas StringArray + NaN: a true `<NA>` survives astype(str)
+            #      as a special NA object, so `sorted(values.unique())` fails
+            #      with TypeError('< not supported between str and float').
+            #   2. seaborn's slow path sorts hue categories internally and
+            #      explodes the same way.
+            # Solution: fillna('(missing)') before astype(str). Cells with
+            # NA values stay in the plot under an explicit "(missing)"
+            # category — honest about data quality without dropping cells.
+            plot_df[color_field] = plot_df[color_field].fillna('(missing)').astype(str)
             n_cats = int(plot_df[color_field].nunique())
             cmap_name, _ = pick_cmap('categorical', palette_cat=palette_cat,
                                      palette_cont=palette_cont,
@@ -591,7 +616,7 @@ def plot_scatter(
                 # faster than the seaborn/scatter PathCollection for big N.
                 xs_all = np.asarray(plot_df[x_col], dtype=float)
                 ys_all = np.asarray(plot_df[y_col], dtype=float)
-                cats = plot_df[color_field].astype(str).values
+                cats = plot_df[color_field].values
                 unique_cats = sorted(np.unique(cats[cats != 'nan']).tolist())
                 cmap_obj = matplotlib.cm.get_cmap(cmap_name)
                 n_palette = getattr(cmap_obj, 'N', 256)
