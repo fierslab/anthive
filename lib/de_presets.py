@@ -160,6 +160,92 @@ PRESETS: Dict[str, Preset] = {
         default_method=None,
         default_reference_type=None,
     ),
+
+    # ── Added with the mus DE-ingest contract (#125–#138 / mus 0.2.24) ──
+
+    'seurat': Preset(
+        name='seurat',
+        description=(
+            "Seurat FindMarkers / FindAllMarkers output (CSV per contrast). "
+            "One file = one contrast; --term and --contrast required. "
+            "If the file ALSO has a 'cluster' column (FindAllMarkers), use "
+            "the 'long' preset with --map cluster:contrast instead."
+        ),
+        shape='one-file-one-contrast',
+        column_map={
+            # Seurat column → anthive column
+            # Seurat ships avg_log2FC (or avg_logFC in older versions);
+            # both map to log2fc. Default to avg_log2FC; --map can override.
+            'gene':         'gene',
+            'avg_log2FC':   'log2fc',
+            'avg_logFC':    'log2fc',     # older Seurat (<4.0) ships natural-log
+            'p_val':        'pvalue',
+            'p_val_adj':    'padj',
+            'pct.1':        'pct_in',     # → stats_extra
+            'pct.2':        'pct_out',    # → stats_extra
+        },
+        required_in_file=['gene', 'log2fc', 'pvalue', 'padj'],
+        required_cli_flags=['--term', '--contrast', '--method'],
+        default_method='seurat.FindMarkers',
+        default_reference_type='vsreference',
+    ),
+
+    'glmmseq': Preset(
+        name='glmmseq',
+        description=(
+            "glmmSeq fixed-effects coefficient table (CSV, one row per gene). "
+            "One file = one contrast; --term and --contrast required. The "
+            "p-value column varies with glmmSeq version (P_FixedEffects vs "
+            "pvalue) — both names map to anthive pvalue."
+        ),
+        shape='one-file-one-contrast',
+        column_map={
+            'gene':              'gene',
+            # glmmSeq tables vary across versions/users. Cover the common
+            # column-name flavours; --map overrides if a layout is odd.
+            'log2fc':            'log2fc',
+            'log2FoldChange':    'log2fc',
+            'chisq':             'score',           # → stats_extra
+            'df':                'df',              # → stats_extra (informational)
+            'P_FixedEffects':    'pvalue',
+            'pvalue':            'pvalue',
+            'q.FixedEffects':    'padj',
+            'padj':              'padj',
+        },
+        required_in_file=['gene', 'log2fc', 'pvalue', 'padj'],
+        required_cli_flags=['--term', '--contrast', '--method'],
+        default_method='glmmSeq',
+        default_reference_type='vsreference',
+    ),
+
+    'glmmtmb': Preset(
+        name='glmmtmb',
+        description=(
+            "glmmTMB per-gene coefficient table — the depositor wraps "
+            "summary(fit)$coefficients$cond per gene and binds into a flat "
+            "CSV. One file = one contrast; --term and --contrast required. "
+            "Estimate is the model coefficient on the LINEAR PREDICTOR scale "
+            "(not log2 unless explicitly transformed); the depositor should "
+            "use --map Estimate:log2fc when their model is log2-scale."
+        ),
+        shape='one-file-one-contrast',
+        column_map={
+            'gene':         'gene',
+            # Default: Estimate → 'estimate' (linear-predictor scale). For
+            # log2-scale models the depositor uses --map Estimate:log2fc.
+            'Estimate':     'estimate',
+            'Std. Error':   'SE',
+            'z value':      'score',         # → stats_extra
+            'Pr(>|z|)':     'pvalue',
+            # padj typically not in the raw output; depositor adds via
+            # p.adjust() and names it 'padj' or similar — --map covers it.
+            'padj':         'padj',
+        },
+        required_in_file=['gene', 'estimate', 'pvalue'],
+        required_cli_flags=['--term', '--contrast', '--method'],
+        default_method='glmmTMB',
+        default_reference_type='vsreference',
+    ),
 }
 
 

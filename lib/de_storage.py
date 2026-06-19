@@ -73,6 +73,12 @@ class StudySpec:
     source: Optional[str] = None
     created_at: Optional[datetime] = None
     notes: Optional[str] = None
+    # (v2) Which obs column the 'cluster' dimension of __de rows points at.
+    # Set when the DE is per-cluster (e.g. cluster_obs_column='leiden'
+    # means contrast='DAM_vs_homeo' for cluster='leiden:3' refers to
+    # obs[leiden]==3). NULL for non-cluster DEs. mus's de.cfg key:
+    # de_cluster_obs_column.
+    cluster_obs_column: Optional[str] = None
 
 
 @dataclass
@@ -91,26 +97,38 @@ class IngestReport:
 
 # ── schema ────────────────────────────────────────────────────────────────────
 
-DE_SCHEMA_VERSION = 1
+# v1 → v2 (2026-06-19): add cluster_obs_column. Captures the obs-column
+# name that 'cluster' values in __de.contrast (or __de.term) reference,
+# so the web UI / API can render per-cluster DE next to the cell-level
+# categorical of the same name. Nullable — non-cluster DEs leave it
+# NULL. Migration: ALTER TABLE __de_study ADD COLUMN IF NOT EXISTS.
+DE_SCHEMA_VERSION = 2
 
 _CREATE_DE_STUDY = """
 CREATE TABLE IF NOT EXISTS __de_study (
-    study_id        VARCHAR PRIMARY KEY,
-    name            VARCHAR,
-    description     VARCHAR,
-    method          VARCHAR,
-    target          VARCHAR,
-    reference_type  VARCHAR,
-    covariates      VARCHAR,         -- JSON list
-    n_tests_total   INTEGER,
-    n_cells_total   INTEGER,
-    subset_filter   VARCHAR,         -- JSON dict
-    source          VARCHAR,
-    created_at      TIMESTAMP,
-    notes           VARCHAR,
-    schema_version  INTEGER DEFAULT """ + str(DE_SCHEMA_VERSION) + """
+    study_id            VARCHAR PRIMARY KEY,
+    name                VARCHAR,
+    description         VARCHAR,
+    method              VARCHAR,
+    target              VARCHAR,
+    reference_type      VARCHAR,
+    covariates          VARCHAR,         -- JSON list
+    n_tests_total       INTEGER,
+    n_cells_total       INTEGER,
+    subset_filter       VARCHAR,         -- JSON dict
+    source              VARCHAR,
+    created_at          TIMESTAMP,
+    notes               VARCHAR,
+    cluster_obs_column  VARCHAR,         -- (v2) which obs column 'cluster' refs
+    schema_version      INTEGER DEFAULT """ + str(DE_SCHEMA_VERSION) + """
 )
 """
+
+# v1 → v2 column add (idempotent — duckdb honours IF NOT EXISTS).
+_MIGRATE_DE_STUDY_V2 = (
+    "ALTER TABLE __de_study ADD COLUMN IF NOT EXISTS "
+    "cluster_obs_column VARCHAR"
+)
 
 _CREATE_DE = """
 CREATE TABLE IF NOT EXISTS __de (
@@ -169,9 +187,16 @@ def ensure_schema(conn: duckdb.DuckDBPyConnection) -> None:
     Idempotent. Safe to call on every connection. Called by ``DEWriter``
     before any insert, and by the read API endpoints (they need the
     view to query against, even if it returns 0 rows).
+
+    Also applies forward-only schema migrations — currently:
+    * v1 → v2: ADD COLUMN __de_study.cluster_obs_column (nullable).
+    Older duckdbs without DE data simply get the v2 shape on create;
+    older duckdbs WITH DE data pick up the new column via ALTER.
     """
     conn.execute(_CREATE_DE_STUDY)
     conn.execute(_CREATE_DE)
+    # Forward migrations (idempotent).
+    conn.execute(_MIGRATE_DE_STUDY_V2)
     for sql in _CREATE_INDEXES:
         conn.execute(sql)
     conn.execute(_CREATE_DE_VIEW)
@@ -358,7 +383,7 @@ class DEWriter:
         cols = ['study_id', 'name', 'description', 'method', 'target',
                 'reference_type', 'covariates', 'n_tests_total',
                 'n_cells_total', 'subset_filter', 'source', 'created_at',
-                'notes', 'schema_version']
+                'notes', 'cluster_obs_column', 'schema_version']
         row = self.conn.execute(
             f"SELECT {', '.join(cols)} FROM __de_study WHERE study_id = ?",
             [study_id],
@@ -397,6 +422,8 @@ class DEWriter:
             'created_at':     spec.created_at     or (existing or {}).get('created_at')
                               or datetime.now(timezone.utc),
             'notes':          spec.notes          or (existing or {}).get('notes'),
+            'cluster_obs_column':
+                spec.cluster_obs_column or (existing or {}).get('cluster_obs_column'),
         }
         self.conn.execute(
             "DELETE FROM __de_study WHERE study_id = ?", [spec.study_id]
@@ -404,13 +431,14 @@ class DEWriter:
         self.conn.execute(
             "INSERT INTO __de_study (study_id, name, description, method, "
             "target, reference_type, covariates, n_tests_total, "
-            "n_cells_total, subset_filter, source, created_at, notes) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "n_cells_total, subset_filter, source, created_at, notes, "
+            "cluster_obs_column) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [merged[k] for k in (
                 'study_id', 'name', 'description', 'method', 'target',
                 'reference_type', 'covariates', 'n_tests_total',
                 'n_cells_total', 'subset_filter', 'source', 'created_at',
-                'notes',
+                'notes', 'cluster_obs_column',
             )],
         )
 
