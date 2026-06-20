@@ -1758,6 +1758,104 @@ def plot_rolling(
 # (effsize, pvalue, padj) per (study, term, contrast, gene).
 
 
+def plot_de_heatmap(
+    matrix_df: pd.DataFrame,
+    *,
+    value_label: str = 'effect',
+    row_label: str = 'contrast',
+    col_label: str = 'gene',
+    sig_mask: Optional[pd.DataFrame] = None,
+    width: float = 10,
+    height: float = 6,
+    dpi: int = 150,
+    output_format: str = 'png',
+    palette_cont: str = _DEFAULT_SEQUENTIAL,
+    palette_div: str = _DEFAULT_DIVERGENT,
+    color_scale: Optional[str] = None,
+    annot: bool = False,
+    title_extra: Optional[str] = None,
+    caption: Optional[str] = None,
+    source_url: Optional[str] = None,
+    font_family: Optional[str] = None,
+    font_size: Optional[float] = None,
+) -> bytes:
+    """Heatmap of pre-computed DE values: contrasts (rows) × genes/modules (cols).
+
+    Renders Sierksma Fig 2E / 4B-style matrices directly from the
+    ``__de`` table — no cell-level expression involved. Each cell is one
+    (contrast, gene) effect size (or estimate / log2fc / zeff /
+    p-value-derived score, depending on what the caller picked).
+
+    Args:
+        matrix_df:   DataFrame indexed by ``contrast``, columns are gene
+                     / module names, values are the effect size to show.
+                     Caller is responsible for the pivot.
+        sig_mask:    Optional boolean DataFrame (same shape as matrix_df)
+                     marking significant cells (padj <= threshold). When
+                     provided, those cells get a small dot overlay.
+        color_scale: 'auto' / 'sequential' / 'divergent'. Defaults to
+                     divergent for effect-size data; pass 'sequential'
+                     for one-sided value columns (e.g. -log10(padj)).
+    """
+    _setup_style(font_family, font_size)
+    fig, ax = plt.subplots(figsize=(width, height))
+
+    # Values used to pick the cmap family.
+    values = matrix_df.to_numpy(dtype=float)
+    cmap_name, used_kind = pick_cmap(
+        'continuous',
+        palette_cont=palette_cont,
+        palette_div=palette_div,
+        values=values,
+        # DE effect-size heatmaps almost always want divergent unless
+        # the user explicitly asked for one-sided.
+        color_scale=color_scale or 'divergent',
+    )
+    # Symmetric vmin/vmax when divergent; raw when sequential.
+    if used_kind == 'divergent':
+        finite = values[np.isfinite(values)]
+        vlim = float(np.nanmax(np.abs(finite))) if finite.size else 1.0
+        vmin, vmax = -vlim, vlim
+    else:
+        vmin, vmax = None, None
+
+    sns.heatmap(
+        matrix_df,
+        ax=ax,
+        cmap=cmap_name,
+        center=0.0 if used_kind == 'divergent' else None,
+        vmin=vmin, vmax=vmax,
+        annot=annot,
+        fmt='.2f',
+        annot_kws={'fontsize': 6},
+        cbar_kws={'label': value_label, 'shrink': 0.8},
+        linewidths=0.3,
+        linecolor='white',
+        square=False,
+    )
+    # Significant cells get a small dot overlay (mirrors Fig 4B's
+    # "asterisk in significant cells" convention).
+    if sig_mask is not None and sig_mask.shape == matrix_df.shape:
+        ys, xs = np.where(sig_mask.to_numpy())
+        # Cell centres are at integer + 0.5 in seaborn's heatmap coords.
+        ax.scatter(xs + 0.5, ys + 0.5, marker='o',
+                   s=6, c='black', linewidths=0, alpha=0.85)
+
+    ax.set_xlabel(col_label)
+    ax.set_ylabel(row_label)
+    plt.setp(ax.get_xticklabels(), rotation=45, ha='right', fontsize=8)
+    plt.setp(ax.get_yticklabels(), rotation=0, fontsize=8)
+
+    n_rows, n_cols = matrix_df.shape
+    title_bits = [
+        f'DE: {n_rows} {row_label}s × {n_cols} {col_label}s',
+        value_label,
+    ]
+    ax.set_title(_compose_title(title_bits, extra=title_extra))
+    fig.tight_layout()
+    return _render_figure(fig, dpi, output_format, caption, source_url)
+
+
 def plot_volcano(
     de_df: pd.DataFrame,
     *,

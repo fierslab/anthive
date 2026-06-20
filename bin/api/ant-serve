@@ -1297,7 +1297,7 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.6.0"
+API_VERSION = "2.7.0"
 API_VERSION_RELEASED = "2026-06-20"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
@@ -2376,6 +2376,7 @@ _PLOT_GEOMS = {
     'volcano',     # log2fc on x, -log10(padj) on y; needs (study, term, contrast).
     'ma',          # mean expression on x, log2fc on y; needs (study, term, contrast).
     'forest',      # one gene's effect across (study, term, contrast); needs (gene).
+    'de_heatmap',  # contrasts × genes/modules matrix of pre-computed DE values.
 }
 
 
@@ -2686,6 +2687,11 @@ class PlotRequest:
     padj_threshold: float        # volcano / ma / forest: cutoff for sig colouring
     log2fc_threshold: float      # volcano / ma: |log2fc| cutoff
     n_label: int                 # volcano / ma: top-N genes to label
+    # de_heatmap-specific:
+    de_contrasts: Optional[str]  # comma-list to restrict the contrast (row) axis
+    de_genes: Optional[str]      # comma-list to restrict the gene/module (col) axis
+    de_value: Optional[str]      # which __de column to plot — None = auto-pick
+    sig_overlay: bool            # mark significant cells (padj <= padj_threshold)
     # bar-geom layout knobs
     bar_mode: str                # 'dodge' (default, side-by-side) | 'stack'
     normalize: bool              # stacked bar: scale each bar to 100% (proportions)
@@ -3630,6 +3636,162 @@ def _handle_forest(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
 
 # Registry: geom → handler. Adding a new geom is now: write a handler,
 # add a line here, add the geom name to _PLOT_GEOMS.
+# Cap on the number of cells a de_heatmap can render. Larger and the
+# image becomes a soup of mini-rectangles; users should pre-filter the
+# contrast / gene axes via de_contrasts / de_genes.
+_DE_HEATMAP_CAP = 2000
+
+# Candidate value columns, in the order we'd auto-pick the first that
+# has any non-null values. Caller can override with de_value.
+_DE_HEATMAP_VALUE_COLS = ('estimate', 'log2fc', 'zeff', 'effsize')
+
+
+def _handle_de_heatmap(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
+    """Render a contrasts × genes/modules matrix of pre-computed DE values.
+
+    Implements Sierksma Fig 2E / 4B-style heatmaps directly from
+    `__de` rows: rows = contrast, columns = gene/module, fill =
+    requested DE column (default: first of estimate / log2fc / zeff /
+    effsize with non-null values for the (study, term) slice).
+    """
+    if not req.de_study:
+        raise HTTPException(400, detail="geom='de_heatmap' requires de_study")
+    if not req.de_term:
+        raise HTTPException(400, detail="geom='de_heatmap' requires de_term")
+    if not lib_de_storage.has_de_data(ctx.db.conn):
+        raise HTTPException(
+            404, detail=f"dataset '{req.db_id}' has no DE data ingested",
+        )
+
+    # Pick the value column. If caller specified, validate it's one of
+    # the supported ones; else auto-pick.
+    value_col: str
+    if req.de_value:
+        if req.de_value not in _DE_HEATMAP_VALUE_COLS:
+            raise HTTPException(400, detail=(
+                f"de_value must be one of {_DE_HEATMAP_VALUE_COLS}, "
+                f"got {req.de_value!r}"
+            ))
+        value_col = req.de_value
+    else:
+        # Probe each candidate column for non-null content under the
+        # (study, term) slice. Take the first one with data.
+        chosen = None
+        for col in _DE_HEATMAP_VALUE_COLS:
+            n = ctx.db.conn.execute(
+                f"SELECT count(*) FROM __de "
+                f"WHERE study_id = ? AND term = ? AND {col} IS NOT NULL",
+                [req.de_study, req.de_term],
+            ).fetchone()[0]
+            if n:
+                chosen = col
+                break
+        if not chosen:
+            raise HTTPException(404, detail=(
+                f"no non-null DE values for study={req.de_study!r}, "
+                f"term={req.de_term!r} (checked {_DE_HEATMAP_VALUE_COLS})"
+            ))
+        value_col = chosen
+
+    # Optional contrast / gene filters (comma-separated). Refresh against
+    # the live data so a typo gives an early 400.
+    contrast_filter = None
+    if req.de_contrasts:
+        contrast_filter = [c.strip() for c in req.de_contrasts.split(',') if c.strip()]
+    gene_filter = None
+    if req.de_genes:
+        gene_filter = [g.strip() for g in req.de_genes.split(',') if g.strip()]
+
+    # Build SQL.
+    where_parts = ["d.study_id = ?", "d.term = ?"]
+    params: List = [req.de_study, req.de_term]
+    if contrast_filter:
+        placeholders = ','.join(['?'] * len(contrast_filter))
+        where_parts.append(f"d.contrast IN ({placeholders})")
+        params.extend(contrast_filter)
+    if gene_filter:
+        placeholders = ','.join(['?'] * len(gene_filter))
+        where_parts.append(f"g.gene_name IN ({placeholders})")
+        params.extend(gene_filter)
+    sql = f"""
+        SELECT d.contrast, g.gene_name, d.{value_col} AS value, d.padj
+        FROM __de d JOIN __genes g USING (gene_id)
+        WHERE {' AND '.join(where_parts)}
+    """
+    df = ctx.db.conn.execute(sql, params).fetchdf()
+    if len(df) == 0:
+        raise HTTPException(404, detail=(
+            f"no DE rows for study={req.de_study!r}, term={req.de_term!r}"
+            + (f" matching contrasts={contrast_filter}" if contrast_filter else "")
+            + (f" matching genes={gene_filter}" if gene_filter else "")
+        ))
+
+    # Pivot into a contrast × gene matrix. Preserve a stable ordering:
+    # rows in the order the filter requested (or natural sort of distinct
+    # contrasts); columns same logic.
+    n_contrasts = int(df['contrast'].nunique())
+    n_genes = int(df['gene_name'].nunique())
+    if n_contrasts * n_genes > _DE_HEATMAP_CAP:
+        raise HTTPException(400, detail=(
+            f"de_heatmap would have {n_contrasts * n_genes} cells "
+            f"({n_contrasts} contrasts × {n_genes} genes/modules); "
+            f"capped at {_DE_HEATMAP_CAP}. Narrow with de_contrasts="
+            f"<list> and/or de_genes=<list>."
+        ))
+
+    if contrast_filter:
+        row_order = [c for c in contrast_filter if c in df['contrast'].unique()]
+    else:
+        row_order = sorted(df['contrast'].unique())
+    if gene_filter:
+        col_order = [g for g in gene_filter if g in df['gene_name'].unique()]
+    else:
+        col_order = sorted(df['gene_name'].unique())
+
+    matrix = df.pivot_table(
+        index='contrast', columns='gene_name', values='value', aggfunc='first',
+    ).reindex(index=row_order, columns=col_order)
+
+    sig_mask = None
+    if req.sig_overlay:
+        sig_mat = df.pivot_table(
+            index='contrast', columns='gene_name', values='padj', aggfunc='first',
+        ).reindex(index=row_order, columns=col_order)
+        sig_mask = sig_mat.le(req.padj_threshold).fillna(False)
+
+    if req.output_format in _PLOT_DATA_FORMATS:
+        # Export as long-form (one row per cell) — keeps the structure
+        # explicit and avoids pandas-CSV's confusing multi-index header.
+        return _emit_dataframe(
+            df.rename(columns={'gene_name': 'gene'})[
+                ['contrast', 'gene', 'value', 'padj']
+            ],
+            req,
+        )
+
+    caption = (
+        f"DE heatmap of {req.de_study} · {req.de_term} in {req.db_id}: "
+        f"{n_contrasts} contrasts x {n_genes} genes/modules, fill={value_col}."
+    )
+    image_bytes = plotting.plot_de_heatmap(
+        matrix,
+        value_label=value_col,
+        row_label='contrast',
+        col_label='gene' if n_genes > 50 else 'module/gene',
+        sig_mask=sig_mask,
+        width=req.width, height=req.height, dpi=req.dpi,
+        output_format=req.output_format,
+        palette_cont=req.palette_cont,
+        palette_div=req.palette_div,
+        color_scale=req.color_scale,
+        annot=False,
+        title_extra=req.db_id,
+        caption=caption, source_url=req.source_url,
+        font_family=req.font_family, font_size=req.font_size,
+    )
+    return image_bytes, caption
+
+
 _PLOT_HANDLERS: Dict[str, Any] = {
     'scatter':    _handle_scatter,   # polymorphic — embedding when x is obsm,
     'hexbin':     _handle_hexbin,    # XY when x/y are continuous fields
@@ -3645,6 +3807,7 @@ _PLOT_HANDLERS: Dict[str, Any] = {
     'volcano':    _handle_volcano,   # DE: log2fc × -log10(padj)
     'ma':         _handle_ma,        # DE: base_mean × log2fc
     'forest':     _handle_forest,    # DE: one gene across many studies/terms/contrasts
+    'de_heatmap': _handle_de_heatmap,# DE: contrasts × genes/modules matrix
 }
 
 
@@ -3829,6 +3992,11 @@ def _build_plot_request(
     padj_threshold: float = 0.05,
     log2fc_threshold: float = 1.0,
     n_label: int = 20,
+    # de_heatmap-specific
+    de_contrasts: Optional[str] = None,
+    de_genes: Optional[str] = None,
+    de_value: Optional[str] = None,
+    sig_overlay: bool = False,
     # bar-geom: 'dodge' (default) | 'stack' for composition plots
     bar_mode: str = 'dodge',
     normalize: bool = False,
@@ -3871,6 +4039,10 @@ def _build_plot_request(
         padj_threshold=padj_threshold,
         log2fc_threshold=log2fc_threshold,
         n_label=n_label,
+        de_contrasts=de_contrasts,
+        de_genes=de_genes,
+        de_value=de_value,
+        sig_overlay=sig_overlay,
         bar_mode=bar_mode,
         normalize=normalize,
         facet=facet,
@@ -4479,6 +4651,65 @@ async def plot_forest_endpoint(
         de_gene=gene,
         de_study=study, de_term=term, de_contrast=contrast,
         padj_threshold=padj_threshold,
+    )
+    return await _render_plot(req, common.request)
+
+
+@app.get("/databases/{db_id:path}/plot/de_heatmap", tags=["plots"])
+async def plot_de_heatmap_endpoint(
+    common: CommonPlotParams = Depends(),
+    study: str = Query(..., description="DE study_id (required)."),
+    term: str = Query(..., description="DE term within the study (required)."),
+    contrasts: Optional[str] = Query(
+        None,
+        description=(
+            "Comma-separated list of contrast names to use as rows. "
+            "Default: every contrast under (study, term)."
+        ),
+    ),
+    genes: Optional[str] = Query(
+        None,
+        description=(
+            "Comma-separated list of gene / module names to use as columns. "
+            "Default: every gene present under (study, term). For module-"
+            "target studies these are module names."
+        ),
+    ),
+    value: Optional[str] = Query(
+        None,
+        regex='^(estimate|log2fc|zeff|effsize)$',
+        description=(
+            "Which __de column to plot. Default: auto-pick the first of "
+            "estimate / log2fc / zeff / effsize that has non-null values "
+            "for this (study, term)."
+        ),
+    ),
+    padj_threshold: float = Query(
+        0.05, gt=0.0, le=1.0,
+        description="padj cutoff for the sig_overlay dot.",
+    ),
+    sig_overlay: bool = Query(
+        False,
+        description="When true, draw a small black dot in each cell whose padj <= padj_threshold.",
+    ),
+):
+    """Contrasts × genes/modules heatmap of pre-computed DE values.
+
+    Renders Sierksma Fig 2E / 4B-style matrices directly from the
+    `__de` table. Cell capacity: 2000 (contrasts × genes); pre-filter
+    with ``contrasts`` and / or ``genes`` for tighter views.
+
+    Defaults to a divergent palette centred on zero (effect-size data
+    is signed); flip with ``color_scale=sequential`` for one-sided
+    value columns.
+    """
+    req = _build_plot_request(
+        common, 'de_heatmap',
+        de_study=study, de_term=term,
+        de_contrasts=contrasts, de_genes=genes,
+        de_value=value,
+        padj_threshold=padj_threshold,
+        sig_overlay=sig_overlay,
     )
     return await _render_plot(req, common.request)
 
