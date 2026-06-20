@@ -475,17 +475,31 @@ def run_ingest_for_study(
                 source=f"{input_path.name}" + (f" [{args.filter_sql}]" if args.filter_sql else ""),
                 created_at=datetime.now(timezone.utc),
             )
-            n_inserted, n_unmatched = writer.ingest_rows(
-                spec=spec,
-                rows_table='_stage',
-                gene_col='gene',
-                term_col=term_col, fixed_term=fixed_term,
-                contrast_col=contrast_col, fixed_contrast=fixed_contrast,
-            )
-            print(f"  ✓ inserted {n_inserted} rows into __de "
-                  f"(study={study_id!r})")
-            if n_unmatched:
-                print(f"    {n_unmatched} input rows had unmatched gene names (skipped)")
+            try:
+                n_inserted, n_unmatched = writer.ingest_rows(
+                    spec=spec,
+                    rows_table='_stage',
+                    gene_col='gene',
+                    term_col=term_col, fixed_term=fixed_term,
+                    contrast_col=contrast_col, fixed_contrast=fixed_contrast,
+                )
+                print(f"  ✓ inserted {n_inserted} rows into __de "
+                      f"(study={study_id!r})")
+                if n_unmatched:
+                    print(f"    {n_unmatched} input rows had unmatched gene names (skipped)")
+            finally:
+                # Drop the _stage view BEFORE leaving the writer's
+                # context. Without this the view persists in the duckdb
+                # pointing at the (about-to-be-deleted) temp parquet —
+                # any downstream consumer that touches the duckdb-level
+                # information_schema (e.g. ant-serve's /analytics/schema)
+                # tries to materialise it and 500s with 'IO Error: No
+                # files found that match the pattern …'. Surfaced by
+                # anthive-web 2026-06-20.
+                try:
+                    writer.conn.execute("DROP VIEW IF EXISTS _stage")
+                except Exception:
+                    pass  # best-effort cleanup; don't mask the real exit
         return n_inserted
     finally:
         try:

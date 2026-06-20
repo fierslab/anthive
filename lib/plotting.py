@@ -1092,6 +1092,9 @@ def plot_grouped(
     font_family: Optional[str] = None,
     font_size: Optional[float] = None,
     hue_field: Optional[str] = None,
+    bar_mode: str = 'dodge',
+    normalize: bool = False,
+    palette_cat: str = _DEFAULT_CATEGORICAL,
 ) -> bytes:
     """Values grouped by a categorical field: bar (with CI), box, or violin.
 
@@ -1099,11 +1102,19 @@ def plot_grouped(
         data_df:   DataFrame with [cell_name, x_field, (y_field), (hue_field)].
         x_field:   Categorical column for grouping (X axis).
         y_field:   Gene or numerical column for Y axis. None → cell counts.
-        hue_field: Optional second categorical column. Bars / boxes / violins
-                   for each (x_field × hue_field) combination are dodged
-                   side-by-side, NOT stacked.
+        hue_field: Optional second categorical column. With ``bar_mode='dodge'``
+                   (default) bars are drawn side-by-side per (x × hue);
+                   with ``bar_mode='stack'`` they're stacked along Y.
         geom:      'bar' | 'box' | 'violin'.
         ci:        Show 95% confidence interval on bar plots (seaborn bootstrap).
+                   Ignored in stacked mode (segments come from raw counts /
+                   aggregates, not a bootstrap).
+        bar_mode:  'dodge' (default, current behaviour) | 'stack'. Only
+                   meaningful for geom='bar' with a hue_field set — otherwise
+                   silently ignored.
+        normalize: When ``bar_mode='stack'`` and ``y_field is None``, scale
+                   each bar to 100% so segments show within-x composition
+                   fractions instead of raw counts.
         output_format: 'png' | 'svg' | 'pdf'.
         caption:   Figure caption.
     """
@@ -1115,7 +1126,54 @@ def plot_grouped(
     hue_order = (data_df[hue].value_counts().index.tolist()
                  if hue else None)
 
-    if y_field is None:
+    # Stacked bar path — composition plots (Sierksma Fig 1B). Requires
+    # geom='bar' + a hue_field; falls back to dodge if either's absent.
+    is_stacked = (geom == 'bar' and hue is not None and bar_mode == 'stack')
+    if is_stacked:
+        # Build the stack matrix: rows=x levels, cols=hue levels.
+        if y_field is None:
+            stack_mat = pd.crosstab(data_df[x_field], data_df[hue])
+        else:
+            # Aggregate y_field per (x, hue). Mean is the natural choice
+            # for continuous y; the segments-sum then is the sum-of-means
+            # which is rarely what users want for non-count plots. Counts
+            # are the dominant stacked-bar use case, so we accept the
+            # caveat and document it.
+            stack_mat = (
+                data_df.groupby([x_field, hue], observed=True)[y_field]
+                .mean().unstack(fill_value=0.0)
+            )
+        stack_mat = stack_mat.reindex(cat_order)
+        # Reorder columns by descending column-totals so the biggest
+        # group sits at the bottom of every stack (visually stable).
+        col_order = stack_mat.sum(axis=0).sort_values(ascending=False).index.tolist()
+        stack_mat = stack_mat[col_order]
+        if normalize:
+            totals = stack_mat.sum(axis=1).replace(0, np.nan)
+            stack_mat = stack_mat.div(totals, axis=0).fillna(0.0)
+        # Pick a colour per hue level via the categorical palette.
+        cmap_name, _ = pick_cmap('categorical', palette_cat=palette_cat,
+                                 n_categories=len(col_order))
+        cmap_obj = matplotlib.cm.get_cmap(cmap_name)
+        n_palette = getattr(cmap_obj, 'N', 256)
+        # Manual stacking: ax.bar(bottom=cumulative_height).
+        xs = np.arange(len(stack_mat.index))
+        bottom = np.zeros(len(stack_mat.index), dtype=float)
+        for col_idx, col in enumerate(col_order):
+            heights = stack_mat[col].to_numpy(dtype=float)
+            colour = cmap_obj((col_idx % n_palette) / max(n_palette - 1, 1))
+            ax.bar(xs, heights, bottom=bottom, width=0.8,
+                   color=colour, edgecolor='white', linewidth=0.3,
+                   label=str(col))
+            bottom += heights
+        ax.set_xticks(xs)
+        ax.set_xticklabels(stack_mat.index)
+        if normalize:
+            ax.set_ylabel('Proportion')
+            ax.set_ylim(0, 1)
+        else:
+            ax.set_ylabel('Cell count' if y_field is None else f'mean {y_field}')
+    elif y_field is None:
         if hue:
             # 2-factor count: bar of count(cells) per (x_field × hue_field),
             # dodged side-by-side. Use crosstab → long form.
@@ -1136,7 +1194,7 @@ def plot_grouped(
     elif geom == 'violin':
         sns.violinplot(data=data_df, x=x_field, y=y_field, hue=hue,
                        order=cat_order, hue_order=hue_order, ax=ax)
-    else:  # bar
+    else:  # bar (dodge)
         errorbar = ('ci', 95) if ci else None
         sns.barplot(data=data_df, x=x_field, y=y_field, hue=hue,
                     order=cat_order, hue_order=hue_order,
@@ -1147,15 +1205,20 @@ def plot_grouped(
     n_cells = int(len(data_df))
     title_bits = [
         f'{y_field} by {x_field}' if y_field else f'cells per {x_field}',
-        geom,
+        ('bar (stacked)' if is_stacked else
+         ('bar (proportions)' if (is_stacked and normalize) else geom)),
         f'n={_fmt_n(n_cells)}',
         f'{len(cat_order)} grps',
     ]
     if hue:
         title_bits.append(f'split by {hue}')
+    if is_stacked and normalize:
+        # The override above misses the 'and normalize' arm because
+        # is_stacked is False there — just append the modifier directly.
+        title_bits[1] = 'bar (100% stacked)'
     ax.set_title(_compose_title(title_bits))
     sns.despine(ax=ax)
-    _legend_outside(ax)
+    _legend_outside(ax, title=hue if is_stacked else None)
     fig.tight_layout()
 
     return _render_figure(fig, dpi, output_format, caption, source_url)

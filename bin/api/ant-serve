@@ -2678,6 +2678,9 @@ class PlotRequest:
     padj_threshold: float        # volcano / ma / forest: cutoff for sig colouring
     log2fc_threshold: float      # volcano / ma: |log2fc| cutoff
     n_label: int                 # volcano / ma: top-N genes to label
+    # bar-geom layout knobs
+    bar_mode: str                # 'dodge' (default, side-by-side) | 'stack'
+    normalize: bool              # stacked bar: scale each bar to 100% (proportions)
     filters: Optional[Dict[str, Any]]
     sample: Optional[int]
     source_url: str
@@ -3114,21 +3117,44 @@ def _handle_grouped(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     # unreadable; refuse early with a helpful 400 so the web UI can surface
     # the constraint in-status (matches the MA/volcano pattern). Violin/box
     # don't suffer the same explosion problem and are uncapped.
+    #
+    # Cap counts BARS, not segments. In dodge mode bars = x × color
+    # (each (x,color) combination renders one bar). In stack mode the
+    # color levels become segments WITHIN a bar, so the bar count is
+    # just the x cardinality — a composition like 40 samples × 29 donor
+    # lines (1160 dodge bars) is 40 stacked bars and renders cleanly.
     if req.geom == 'bar':
-        n_split = int(data_df[hue_name].nunique()) if hue_name else 1
-        n_bars = n_groups * n_split
+        is_stacked = (hue_name is not None and req.bar_mode == 'stack')
+        if is_stacked:
+            n_bars = n_groups
+        else:
+            n_split = int(data_df[hue_name].nunique()) if hue_name else 1
+            n_bars = n_groups * n_split
         _BAR_CAP = 100
         if n_bars > _BAR_CAP:
-            split_clause = (
-                f" × color='{hue_name}': {n_split} levels"
-                if hue_name else ""
-            )
-            raise HTTPException(400, detail=(
-                f"bar plot would have {n_bars} bars (x='{x_name}': "
-                f"{n_groups} levels{split_clause}); capped at {_BAR_CAP}. "
-                f"Pick a lower-cardinality field, set a subset filter, "
-                f"or use a different geom."
-            ))
+            if is_stacked:
+                detail = (
+                    f"stacked bar plot would have {n_bars} bars "
+                    f"(x='{x_name}': {n_groups} levels); capped at {_BAR_CAP}. "
+                    f"Pick a lower-cardinality x field or set a subset filter."
+                )
+            elif hue_name:
+                detail = (
+                    f"bar plot would have {n_bars} bars (x='{x_name}': "
+                    f"{n_groups} levels × color='{hue_name}': "
+                    f"{int(data_df[hue_name].nunique())} levels); "
+                    f"capped at {_BAR_CAP}. Pick a lower-cardinality field, "
+                    f"try bar_mode=stack, set a subset filter, or use a "
+                    f"different geom."
+                )
+            else:
+                detail = (
+                    f"bar plot would have {n_bars} bars (x='{x_name}': "
+                    f"{n_groups} levels); capped at {_BAR_CAP}. "
+                    f"Pick a lower-cardinality field, set a subset filter, "
+                    f"or use a different geom."
+                )
+            raise HTTPException(400, detail=detail)
 
     caption = plotting.build_caption(
         req.db_id, req.geom, x_name, x_kind, y_name, hue_name, req.layer,
@@ -3139,8 +3165,10 @@ def _handle_grouped(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     image_bytes = plotting.plot_grouped(
         data_df=data_df, x_field=x_name, y_field=y_name, hue_field=hue_name,
         geom=req.geom, ci=req.ci,
+        bar_mode=req.bar_mode, normalize=req.normalize,
         width=req.width, height=req.height, dpi=req.dpi,
         output_format=req.output_format,
+        palette_cat=req.palette_cat,
         caption=caption, source_url=req.source_url,
         font_family=req.font_family, font_size=req.font_size,
     )
@@ -3671,6 +3699,9 @@ def _build_plot_request(
     padj_threshold: float = 0.05,
     log2fc_threshold: float = 1.0,
     n_label: int = 20,
+    # bar-geom: 'dodge' (default) | 'stack' for composition plots
+    bar_mode: str = 'dodge',
+    normalize: bool = False,
 ) -> PlotRequest:
     """Fold ``CommonPlotParams`` + geom-specific kwargs into a ``PlotRequest``.
 
@@ -3707,6 +3738,8 @@ def _build_plot_request(
         padj_threshold=padj_threshold,
         log2fc_threshold=log2fc_threshold,
         n_label=n_label,
+        bar_mode=bar_mode,
+        normalize=normalize,
         filters=_parse_subset(common.subset),
         sample=common.sample,
         source_url=str(common.request.url) if common.request is not None else '',
@@ -4054,12 +4087,30 @@ async def plot_bar_endpoint(
         None,
         description="Continuous field — bars show mean (with optional 95% CI). Omit for cell-count bars.",
     ),
-    color: Optional[str] = Query(None, description="Second categorical for dodged bars within each group."),
-    ci: bool = Query(True, description="Overlay 95% bootstrap CI error bars on mean bars."),
+    color: Optional[str] = Query(None, description="Second categorical: dodged side-by-side by default, stacked when ``bar_mode=stack``."),
+    ci: bool = Query(True, description="Overlay 95% bootstrap CI error bars on mean bars (dodge mode only; stacked segments are raw aggregates)."),
+    bar_mode: str = Query(
+        'dodge',
+        regex='^(dodge|stack)$',
+        description="Layout when a ``color`` categorical is set. 'dodge' (default) draws bars side-by-side per (x × color); 'stack' segments each x bar by the color levels (composition plot, e.g. Sierksma Fig 1B).",
+    ),
+    normalize: bool = Query(
+        False,
+        description="Stacked bar only: scale each bar to 100% so segments show within-group proportions instead of raw counts. Ignored in dodge mode.",
+    ),
 ):
     """Bar plot — cell counts when ``y`` is omitted, mean(±CI) of ``y`` per
-    group when ``y`` is provided."""
-    req = _build_plot_request(common, 'bar', x=x, y=y, color=color, ci=ci)
+    group when ``y`` is provided.
+
+    Stacked mode (``bar_mode=stack``) is intended for composition plots:
+    one bar per x level, segmented by the ``color`` categorical. The
+    number-of-bars cap counts x levels only (the segments don't multiply
+    the bar count); legitimate compositions like ~40 samples × 29 donor
+    lines stay under the cap."""
+    req = _build_plot_request(
+        common, 'bar', x=x, y=y, color=color, ci=ci,
+        bar_mode=bar_mode, normalize=normalize,
+    )
     return await _render_plot(req, common.request)
 
 
