@@ -915,8 +915,11 @@ def plot_hexbin(
                 if vmin_quantile is not None: vmin = lo
                 if vmax_quantile is not None: vmax = hi
                 clip_used = (vmin_quantile, vmax_quantile)
+        # Thin black outline per hex — makes the cell grid visible
+        # against light backgrounds and at low data density.
         hb_kwargs: dict = dict(gridsize=gridsize, mincnt=mincnt,
-                               cmap=cmap_name, linewidths=0)
+                               cmap=cmap_name,
+                               edgecolors='black', linewidths=0.4)
         if vmin is not None: hb_kwargs['vmin'] = vmin
         if vmax is not None: hb_kwargs['vmax'] = vmax
         hb = ax.hexbin(xs, ys, **hb_kwargs)
@@ -951,7 +954,9 @@ def plot_hexbin(
             'mincnt': mincnt,
             'cmap': cmap_name,
             'alpha': alpha,
-            'linewidths': 0,
+            # Thin black outline per hex (matches density-mode styling).
+            'edgecolors': 'black',
+            'linewidths': 0.4,
         }
         if used_kind == 'divergent':
             finite = cvals[np.isfinite(cvals)]
@@ -1064,7 +1069,12 @@ def plot_hexbin(
             face_colours[:, 3] = alphas_hex[used]  # set per-hex alpha
             coll = PolyCollection(
                 polys, facecolors=face_colours,
-                edgecolors='none', linewidths=0,
+                # Thin black outline per hex (matches the
+                # numerical/gene + density paths). Categorical mode
+                # uses per-hex alpha for dominance; the outline stays
+                # opaque so cell boundaries are still legible on
+                # half-transparent hexes.
+                edgecolors='black', linewidths=0.4,
             )
             ax.add_collection(coll)
             ax.set_xlim(xs.min(), xs.max())
