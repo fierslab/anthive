@@ -923,8 +923,13 @@ def plot_hexbin(
         if vmin is not None: hb_kwargs['vmin'] = vmin
         if vmax is not None: hb_kwargs['vmax'] = vmax
         hb = ax.hexbin(xs, ys, **hb_kwargs)
+        # extend='both' triangles cue the reader that values are clipped —
+        # show them whenever a clip is in effect (quantile probe OR explicit
+        # vmin/vmax). Without this an explicit vmin=0.1 looks like no clip
+        # is happening even though hexes outside the range get capped.
+        cbar_extend = 'both' if (clip_used or vmin is not None or vmax is not None) else 'neither'
         cbar = plt.colorbar(hb, ax=ax, label='cell count', shrink=0.8,
-                            extend='both' if clip_used else 'neither')
+                            extend=cbar_extend)
         title_bits = ['density', f'n={_fmt_n(n_cells)}', f'gridsize={gridsize}']
         if clip_used:
             lo_q, hi_q = clip_used
@@ -947,6 +952,30 @@ def plot_hexbin(
             values=cvals,
             color_scale=color_scale,
         )
+        # First pass: probe the per-hex MEAN distribution so we can auto-clip
+        # at the requested quantiles before the real draw. Mirrors the
+        # density-mode logic — without this, one outlier hex (mean=12 while
+        # everything else is 0–2) washes out the colourmap. Ignored when
+        # vmin or vmax is set explicitly.
+        clip_used = None
+        if (vmin_quantile is not None or vmax_quantile is not None) \
+           and vmin is None and vmax is None:
+            probe = ax.hexbin(xs, ys, C=cvals, reduce_C_function=np.mean,
+                              gridsize=gridsize, mincnt=mincnt,
+                              cmap=cmap_name, visible=False, linewidths=0)
+            per_hex = probe.get_array()
+            if per_hex is not None and per_hex.size > 0:
+                arr = np.asarray(per_hex, dtype=float)
+                finite_means = arr[np.isfinite(arr)]
+                if finite_means.size > 0:
+                    lo, hi = _quantile_clip(
+                        finite_means,
+                        lo=vmin_quantile if vmin_quantile is not None else 0.0,
+                        hi=vmax_quantile if vmax_quantile is not None else 1.0,
+                    )
+                    if vmin_quantile is not None: vmin = lo
+                    if vmax_quantile is not None: vmax = hi
+                    clip_used = (vmin_quantile, vmax_quantile)
         hb_kwargs: dict = {
             'C': cvals,
             'reduce_C_function': np.mean,
@@ -963,21 +992,29 @@ def plot_hexbin(
             vlim = float(np.nanmax(np.abs(finite))) if finite.size else 1.0
             hb_kwargs['vmin'] = -vlim
             hb_kwargs['vmax'] = +vlim
-        # Explicit user overrides always win — useful to clip outliers
-        # (e.g. one hex with a mean expression of 12 washes out the rest).
+        # Explicit user overrides (and quantile-derived ones) always win —
+        # useful to clip outliers (e.g. one hex with mean expression 12
+        # washes out the rest).
         if vmin is not None: hb_kwargs['vmin'] = vmin
         if vmax is not None: hb_kwargs['vmax'] = vmax
         hb = ax.hexbin(xs, ys, **hb_kwargs)
         label_kind = 'expression' if color_kind == 'gene' else 'value'
         label_suffix = ' (divergent)' if used_kind == 'divergent' else ''
+        cbar_extend = 'both' if (clip_used or vmin is not None or vmax is not None) else 'neither'
         plt.colorbar(hb, ax=ax,
                      label=f'mean {color_field} ({label_kind}){label_suffix}',
-                     shrink=0.8)
+                     shrink=0.8,
+                     extend=cbar_extend)
         title_bits = [
             color_field,
             f'⬣ mean ({"div" if used_kind == "divergent" else "seq"})',
             f'n={_fmt_n(n_cells)}',
         ]
+        if clip_used:
+            lo_q, hi_q = clip_used
+            title_bits.append(
+                f'clip {int((lo_q or 0)*100)}–{int((hi_q or 1)*100)}%'
+            )
         ax.set_title(_compose_title(title_bits, extra=title_extra))
 
     else:
