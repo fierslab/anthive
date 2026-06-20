@@ -18,7 +18,10 @@ What it does:
   - Auto-derives a display name ("Mark Fiers") unless -n is given.
   - Generates a random 12-char alphanumeric password, hashes it (argon2 via
     the Authelia binary), and adds the user to users_database.yml.
-  - Prints the username + plaintext password ONCE (it is not stored).
+  - Prints the username + plaintext password ONCE (it is not stored), plus a
+    ready-to-send email body (recipient, site URL, credentials). The site URL
+    is auto-detected from this instance's Authelia configuration.yml
+    (session.cookies[].default_redirection_url); override with --url.
 
 Robust to file format: the database is parsed and re-dumped with a YAML
 round-trip parser, so it works whether entries are in the minimal 4-field
@@ -28,11 +31,13 @@ Existing users are preserved untouched. Authelia watches the file
 
 Usage:
   ant-adduser <email> [-u login] [-n "Display Name"] [-g group] [-f users_file]
+              [--url https://host/]
 
 Examples:
   ant-adduser mark.fiers@kuleuven.be            # -> login mf
   ant-adduser bert.bobjes@nevel.eu -g admins    # -> login bb, group admins
   ant-adduser carlo@nevel.eu -u carlo2          # force the login name
+  ant-adduser jo@x.eu --url https://data.x.eu/  # override the auto-detected URL
 """
 
 import argparse
@@ -40,6 +45,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 from ruamel.yaml import YAML
 
@@ -47,6 +53,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent
 AUTHELIA_BIN = REPO_ROOT / "envs" / "authelia" / "authelia"
 DEFAULT_USERS_FILE = REPO_ROOT / "config" / "authelia" / "users_database.yml"
+DEFAULT_CONFIG_FILE = REPO_ROOT / "config" / "authelia" / "configuration.yml"
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 LOGIN_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
@@ -104,6 +111,29 @@ def confirm_login(suggestion: str, existing: dict[str, str | None],
               file=sys.stderr)
 
 
+def detect_instance_url(config_path: Path) -> str | None:
+    """Best-effort public base URL of this instance, for the welcome email.
+
+    Reads the first session cookie's `default_redirection_url` from the
+    Authelia config (e.g. https://intern.bdslab.org/); falls back to
+    `authelia_url` with the trailing `authelia/` stripped. Returns None if
+    the config is missing/unparseable so the caller can prompt for --url.
+    """
+    if not config_path.is_file():
+        return None
+    try:
+        cfg = YAML(typ="safe").load(config_path) or {}
+    except Exception:
+        return None
+    cookies = ((cfg.get("session") or {}).get("cookies")) or []
+    for cookie in cookies:
+        if cookie.get("default_redirection_url"):
+            return cookie["default_redirection_url"].strip()
+        if cookie.get("authelia_url"):
+            return re.sub(r"authelia/?$", "", cookie["authelia_url"].strip())
+    return None
+
+
 def generate_password_and_hash() -> tuple[str, str]:
     """Return (plaintext, argon2_digest) from the Authelia crypto helper."""
     result = subprocess.run(
@@ -134,6 +164,9 @@ def main() -> None:
     parser.add_argument("-g", "--group", default="users", help="group (default: users)")
     parser.add_argument("-f", "--file", default=str(DEFAULT_USERS_FILE),
                         help="users database path (default: this instance's)")
+    parser.add_argument("--url", default="",
+                        help="public site URL for the welcome email "
+                             "(default: auto-detected from configuration.yml)")
     args = parser.parse_args()
 
     if not AUTHELIA_BIN.is_file():
@@ -210,6 +243,35 @@ def main() -> None:
   Share the password over a secure channel. It is NOT stored;
   if lost, regenerate the hash and replace the password line.
 ================================================================""")
+
+    site_url = args.url.strip() or detect_instance_url(DEFAULT_CONFIG_FILE)
+    if not site_url:
+        site_url = "https://<your-instance>/"
+        print("\nnote: could not auto-detect the site URL; pass --url to fill "
+              "it into the email below.", file=sys.stderr)
+    host = urlparse(site_url).netloc or site_url.strip("/")
+    portal_url = site_url.rstrip("/") + "/authelia/"
+
+    print(f"""
+─── ready-to-send email ─────────────────────────────────────────
+To: {args.email}
+Subject: Your login for the Anthive data browser ({host})
+
+Dear {display_name},
+
+You have an account on the Anthive single-cell data browser at {host}.
+
+  Website:   {site_url}
+  Username:  {login}
+  Password:  {password}
+
+Please sign in and set your own password under Settings → Reset
+Password ({portal_url}). Keep these credentials private; do not
+forward this email.
+
+Kind regards,
+The Anthive team
+─────────────────────────────────────────────────────────────────""")
 
 
 if __name__ == "__main__":
