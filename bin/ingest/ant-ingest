@@ -147,6 +147,40 @@ class DatasetResult:
     s3_incoming_keys: List[str] = field(default_factory=list)
 
 
+@dataclass
+class DEPlan:
+    """One DE file under __incoming/<dp>/de/<local-parent>/. Resolves to
+    a single ant-de-ingest call against one target h5ad.
+
+    The mus contract (#125-#138, shipped mus 0.2.24) puts:
+      __incoming/<dp>/de/<local-parent>/<basename>.tsv      (or .csv)
+      __incoming/<dp>/de/<local-parent>/<basename>.tsv.mus  (collapsed sidecar)
+
+    Each DE file is one ingest unit. Multi-file analyses (one per cluster)
+    produce multiple DEPlans bound to the same data_project + target h5ad.
+    """
+    data_project: str
+    local_parent: str                 # the folder name under de/ (e.g. 'main_model')
+    basename: str                     # the full filename including extension (e.g. 'carlo_mg_DAM_vs_homeo.tsv')
+    incoming_data_key: str            # S3 key of the data file
+    incoming_mus_key: str             # S3 key of the .mus sidecar
+
+    @property
+    def display_name(self) -> str:
+        return f'{self.data_project}/de/{self.local_parent}/{self.basename}'
+
+
+@dataclass
+class DEResult:
+    plan: DEPlan
+    status: str = 'pending'            # ok / skipped / failed / conflict
+    detail: str = ''
+    staging_files: List[str] = field(default_factory=list)
+    promoted_files: List[str] = field(default_factory=list)
+    s3_incoming_keys: List[str] = field(default_factory=list)
+    sidecar_conflicts: List[Conflict] = field(default_factory=list)
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # S3 helpers
 # ─────────────────────────────────────────────────────────────────────────
@@ -259,6 +293,73 @@ def _group_into_plans(objects: List[dict]) -> Tuple[List[DatasetPlan], List[str]
             static_by_project.setdefault(parts[0], []).append(key)
     for plan in plans:
         plan.static_keys = static_by_project.get(plan.data_project, [])
+
+    return plans, malformed
+
+
+# DE file extensions we accept (mus deposit gate rejects .parquet).
+_DE_DATA_EXTS = ('.tsv', '.csv', '.tsv.gz', '.csv.gz')
+
+
+def _group_into_de_plans(objects: List[dict]) -> Tuple[List[DEPlan], List[str]]:
+    """Find DE deposits under __incoming/<dp>/de/<local-parent>/<basename>.
+
+    Per the mus contract: every DE primary has a companion `.mus`
+    collapsed sidecar at the same path with `.mus` appended. Layout is
+    one folder per analysis (local-parent), one file per contrast
+    (basename).
+
+    Returns (de_plans, malformed_messages).
+    """
+    by_key: Dict[str, dict] = {obj['Key']: obj for obj in objects}
+    keys = sorted(by_key)
+    plans: List[DEPlan] = []
+    malformed: List[str] = []
+
+    for key in keys:
+        rest = key[len(INCOMING_PREFIX):]
+        parts = rest.split('/')
+        # __incoming/<dp>/de/<local-parent>/<basename>
+        if len(parts) < 4 or parts[1] != 'de':
+            continue
+        data_project = parts[0]
+        local_parent = parts[2]
+        filename = parts[3]
+
+        # Skip .mus sidecars themselves — they're paired with data files.
+        if filename.endswith('.mus'):
+            continue
+        # Reject parquet at the deposit gate (mus already does, but defend
+        # against an out-of-band put).
+        if filename.endswith('.parquet'):
+            malformed.append(
+                f'{key}: parquet not accepted in DE deposits — '
+                f'mus de check should refuse this. Convert to .tsv.'
+            )
+            continue
+        # Only accept the data-file extensions mus's check allows.
+        if not any(filename.endswith(ext) for ext in _DE_DATA_EXTS):
+            malformed.append(
+                f"{key}: DE file has unrecognized extension "
+                f"(want one of {_DE_DATA_EXTS})"
+            )
+            continue
+        # Companion sidecar required.
+        mus_key = f'{key}.mus'
+        if mus_key not in by_key:
+            malformed.append(
+                f'{key}: missing companion .mus sidecar at {mus_key}. '
+                f'mus is expected to deposit both atomically — skipping.'
+            )
+            continue
+
+        plans.append(DEPlan(
+            data_project=data_project,
+            local_parent=local_parent,
+            basename=filename,
+            incoming_data_key=key,
+            incoming_mus_key=mus_key,
+        ))
 
     return plans, malformed
 
@@ -635,6 +736,31 @@ def _append_to_ledger(data_folder: Path, results: List[DatasetResult]) -> None:
     _save_ledger(data_folder, ledger)
 
 
+def _append_de_to_ledger(data_folder: Path, results: List[DEResult]) -> None:
+    """Add successful DE deposits to the pending-prune ledger.
+
+    Stored alongside h5ad deposits under the 'datasets' key — `prune`
+    consumes both kinds identically (delete from S3, remove staging
+    files). Source-of-truth distinction is whether the entry has
+    'local_parent' (DE) or 'subfolder' (h5ad).
+    """
+    ledger = _load_ledger(data_folder)
+    for result in results:
+        if result.status != 'ok':
+            continue
+        ledger['datasets'].append({
+            'display_name':     result.plan.display_name,
+            'data_project':     result.plan.data_project,
+            'local_parent':     result.plan.local_parent,
+            'basename':         result.plan.basename,
+            'kind':             'de',
+            'staging_files':    result.staging_files,
+            's3_incoming_keys': result.s3_incoming_keys,
+            'recorded_at':      datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+        })
+    _save_ledger(data_folder, ledger)
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # Report
 # ─────────────────────────────────────────────────────────────────────────
@@ -670,21 +796,42 @@ def _print_run_report(results: List[DatasetResult], malformed: List[str]) -> Non
         print(f'  {_COL_WARN}MALFORMED{_COL_RESET}    {line}')
 
 
+def _print_de_run_report(de_results: List[DEResult]) -> None:
+    if not de_results:
+        return
+    print()
+    print('═' * 66)
+    print('DE RUN REPORT')
+    print('═' * 66)
+    name_width = max((len(r.plan.display_name) for r in de_results), default=10)
+    for result in de_results:
+        glyph = _STATUS_GLYPH.get(result.status, result.status)
+        print(f'  {glyph:<20}  {result.plan.display_name:<{name_width}}  {result.detail}')
+
+
 def _print_prune_hints(data_folder: Path, results: List[DatasetResult],
-                       client, bucket: str, args: argparse.Namespace) -> None:
+                       client, bucket: str, args: argparse.Namespace,
+                       de_results: Optional[List[DEResult]] = None) -> None:
     print()
     print('═' * 66)
     print('PENDING CLEANUP')
     print('═' * 66)
 
     successes = [r for r in results if r.status == 'ok']
-    if not successes and args.dry_run:
+    de_successes = [r for r in (de_results or []) if r.status == 'ok']
+    if not successes and not de_successes and args.dry_run:
         # nothing to summarise
         return
 
-    if successes:
-        n_staging = sum(len(r.staging_files) for r in successes)
-        n_incoming = sum(len(r.s3_incoming_keys) for r in successes)
+    if successes or de_successes:
+        n_staging = (
+            sum(len(r.staging_files) for r in successes)
+            + sum(len(r.staging_files) for r in de_successes)
+        )
+        n_incoming = (
+            sum(len(r.s3_incoming_keys) for r in successes)
+            + sum(len(r.s3_incoming_keys) for r in de_successes)
+        )
         print(f'  Local staging:      {n_staging} file(s) under '
               f'{(data_folder / STAGING_DIR_REL).relative_to(data_folder)}/')
         print(f'  S3 __incoming/ :    {n_incoming} key(s) under s3://{bucket}/{INCOMING_PREFIX}')
@@ -717,6 +864,262 @@ def _print_prune_hints(data_folder: Path, results: List[DatasetResult],
 # Subcommand handlers
 # ─────────────────────────────────────────────────────────────────────────
 
+def _resolve_target_h5ad(
+    data_folder: Path,
+    data_project: str,
+    de_dataset_id: Optional[str],
+    de_dataset_h5ad: Optional[str],
+) -> Tuple[Optional[Path], str]:
+    """Resolve a DE deposit's target h5ad in the local catalog.
+
+    Returns (h5ad_path, reason). h5ad_path is None if unresolved; reason
+    is a human-readable explanation either way.
+
+    Resolution order (preferring de_dataset_id since basenames are
+    mutable — see #132):
+      1. de_dataset_id: scan <data_project>/**/*.md for frontmatter
+         `id:` matching, take the sibling <basename>.h5ad.
+      2. de_dataset_h5ad: just look at <data_project>/<basename>.h5ad
+         (and one level of nested subfolders).
+    """
+    project_dir = data_folder / data_project
+    if not project_dir.exists():
+        return None, f"data_project folder not on disk: {project_dir}"
+
+    if de_dataset_id:
+        # Walk the project dir for any .md whose frontmatter has id:
+        # matching. Tracks the opening/closing `---` fences explicitly;
+        # only looks at lines INSIDE the frontmatter block.
+        for md_path in sorted(project_dir.rglob('*.md')):
+            if md_path.name == 'index.md':
+                continue
+            try:
+                text = md_path.read_text(encoding='utf-8', errors='replace')
+            except OSError:
+                continue
+            if not text.startswith('---\n'):
+                continue
+            in_frontmatter = False
+            for line in text.split('\n', 60)[:60]:
+                stripped = line.strip()
+                if stripped == '---':
+                    if not in_frontmatter:
+                        in_frontmatter = True
+                        continue
+                    break  # closing fence
+                if not in_frontmatter:
+                    continue
+                if stripped.lower().startswith('id:'):
+                    val = stripped.split(':', 1)[1].strip().strip('"\'')
+                    if val == de_dataset_id:
+                        h5ad = md_path.with_suffix('.h5ad')
+                        if h5ad.exists():
+                            return h5ad, f"matched de_dataset_id={de_dataset_id} → {h5ad.name}"
+                        return None, (
+                            f"de_dataset_id={de_dataset_id} matches {md_path.name} but "
+                            f"sibling h5ad ({h5ad.name}) not on disk"
+                        )
+                    break  # id: line found and didn't match, stop scanning this .md
+        return None, f"no .md frontmatter `id:` matches de_dataset_id={de_dataset_id!r} in {data_project}"
+
+    if de_dataset_h5ad:
+        # Direct lookup; also handle one level of subfolder.
+        cand = project_dir / de_dataset_h5ad
+        if cand.exists():
+            return cand, f"matched de_dataset_h5ad={de_dataset_h5ad}"
+        # Search one level deep
+        for sub in project_dir.iterdir():
+            if sub.is_dir() and not sub.name.startswith(('_', '.')):
+                deeper = sub / de_dataset_h5ad
+                if deeper.exists():
+                    return deeper, f"matched de_dataset_h5ad={de_dataset_h5ad} (in {sub.name}/)"
+        return None, f"de_dataset_h5ad={de_dataset_h5ad!r} not found under {data_project}"
+
+    return None, "neither de_dataset_id nor de_dataset_h5ad set in sidecar"
+
+
+def _de_staging_dir(data_folder: Path, plan: DEPlan) -> Path:
+    return (
+        data_folder / STAGING_DIR_REL / plan.data_project /
+        'de' / plan.local_parent
+    )
+
+
+def _process_de(
+    plan: DEPlan,
+    client,
+    bucket: str,
+    data_folder: Path,
+    args: argparse.Namespace,
+) -> DEResult:
+    """Pull a DE file + sidecar → resolve target h5ad → call ant-de-ingest.
+
+    Per #134 contract:
+      - DE sidecar carries de_format, de_dataset_id / de_dataset_h5ad,
+        de_term, de_contrast, de_cluster, de_cluster_obs_column, de_method,
+        de_software_version, de_reference_type, de_covariates,
+        de_description, plus sha256 of the data file.
+      - Target h5ad must already be in the catalog (mus's check passed
+        because either it co-ingested an h5ad in the same deposit, or the
+        depositor pointed at an existing catalog id).
+      - Run ant-de-ingest with the right preset + flags; write a .de.parquet
+        sidecar next to the catalog h5ad.
+    """
+    result = DEResult(plan=plan)
+    print(f'\n─── DE  {plan.display_name} ───')
+
+    staging_dir = _de_staging_dir(data_folder, plan)
+    staged_data = staging_dir / plan.basename
+    staged_mus = staging_dir / (plan.basename + '.mus')
+
+    if args.dry_run:
+        result.status = 'dry-run'
+        result.detail = f'would pull DE {plan.incoming_data_key} + sidecar'
+        result.s3_incoming_keys = [plan.incoming_data_key, plan.incoming_mus_key]
+        return result
+
+    # 1. Pull sidecar + data file into staging.
+    try:
+        print(f'  Pulling sidecar  {plan.incoming_mus_key}')
+        _download(client, bucket, plan.incoming_mus_key, staged_mus)
+        result.staging_files.append(str(staged_mus))
+        size_hint = _human_size(client, bucket, plan.incoming_data_key)
+        print(f'  Pulling DE data  {plan.incoming_data_key} ({size_hint})')
+        _download(client, bucket, plan.incoming_data_key, staged_data)
+        result.staging_files.append(str(staged_data))
+    except ClientError as exc:
+        result.status = 'failed'
+        result.detail = f'pull failed: {exc}'
+        _err(result.detail)
+        return result
+
+    # 2. Parse sidecar + verify sha256 of the data file.
+    incoming_text = staged_mus.read_text(encoding='utf-8', errors='replace')
+    incoming_meta = _parse_sidecar_keys(incoming_text)
+    declared_sha = incoming_meta.get('sha256', '')
+    actual_sha = _sha256_file(staged_data)
+    if declared_sha and declared_sha != actual_sha:
+        result.status = 'failed'
+        result.detail = (
+            f'DE file sha256 mismatch: pulled {actual_sha}, '
+            f'sidecar declared {declared_sha}. Possible mid-upload race.'
+        )
+        _err(result.detail)
+        return result
+    if declared_sha:
+        _ok(f'sha256 verified ({actual_sha[:12]}…)')
+
+    # 3. Resolve target h5ad.
+    de_dataset_id = incoming_meta.get('de_dataset_id')
+    de_dataset_h5ad = incoming_meta.get('de_dataset_h5ad')
+    target_h5ad, reason = _resolve_target_h5ad(
+        data_folder, plan.data_project, de_dataset_id, de_dataset_h5ad,
+    )
+    if target_h5ad is None:
+        result.status = 'failed'
+        result.detail = f'cannot resolve target h5ad: {reason}'
+        _err(result.detail)
+        return result
+    _ok(f'target h5ad: {target_h5ad.relative_to(data_folder)}  ({reason})')
+
+    # 4. Promote sidecar to data/h5adstore/<dp>/de_sources/<local-parent>/<basename>.mus
+    #    (the data file rides too — kept as the audit trail). The .de.parquet
+    #    written by ant-de-ingest goes next to the h5ad, NOT into de_sources.
+    de_sources_dir = data_folder / plan.data_project / 'de_sources' / plan.local_parent
+    de_sources_dir.mkdir(parents=True, exist_ok=True)
+    catalog_data = de_sources_dir / plan.basename
+    catalog_mus = de_sources_dir / (plan.basename + '.mus')
+
+    if catalog_data.exists():
+        existing_sha = _sha256_file(catalog_data)
+        if existing_sha != actual_sha:
+            result.status = 'conflict'
+            result.detail = (
+                f'DE source collision: {catalog_data.relative_to(data_folder)} '
+                f'already exists with different sha {existing_sha[:8]}… '
+                f'(incoming {actual_sha[:8]}…). Rename the local-parent '
+                f'or remove the existing source.'
+            )
+            _err(result.detail)
+            return result
+        _ok('catalog DE source already present with matching sha — re-ingesting')
+    else:
+        shutil.move(str(staged_data), str(catalog_data))
+        result.promoted_files.append(str(catalog_data))
+    shutil.move(str(staged_mus), str(catalog_mus))
+    result.promoted_files.append(str(catalog_mus))
+    _ok(f'promoted DE source → {catalog_data.relative_to(data_folder)}')
+
+    # 5. Build the ant-de-ingest command.
+    target_duckdb = target_h5ad.with_suffix('.duckdb')
+    if not target_duckdb.exists():
+        result.status = 'failed'
+        result.detail = f'target duckdb missing: {target_duckdb}'
+        _err(result.detail)
+        return result
+
+    de_format = incoming_meta.get('de_format')
+    if not de_format:
+        result.status = 'failed'
+        result.detail = 'sidecar missing required key: de_format'
+        _err(result.detail)
+        return result
+    de_method = incoming_meta.get('de_method')
+    de_term = incoming_meta.get('de_term')
+    de_contrast = incoming_meta.get('de_contrast')
+    de_description = incoming_meta.get('de_description')
+    de_covariates = incoming_meta.get('de_covariates')
+    de_reference_type = incoming_meta.get('de_reference_type')
+
+    # Study id: prefer mus-supplied if present, else file-stem.
+    study_id = incoming_meta.get('de_study_id') or _de_study_id_from_basename(plan.basename)
+
+    cmd = [
+        str(_SCRIPT_DIR / 'ant-de-ingest'),
+        str(target_duckdb),
+        '--from', str(catalog_data),
+        '--preset', de_format,
+        '--study-id', study_id,
+        '--no-sidecar',           # we'll handle sidecar regen ourselves
+    ]
+    if de_method:
+        cmd += ['--method', de_method]
+    if de_term:
+        cmd += ['--term', de_term]
+    if de_contrast:
+        cmd += ['--contrast', de_contrast]
+    if de_description:
+        cmd += ['--description', de_description]
+    if de_covariates:
+        cmd += ['--covariates', de_covariates]
+    if de_reference_type:
+        cmd += ['--reference-type', de_reference_type]
+
+    ok, msg = _run('ant-de-ingest', cmd)
+    if not ok:
+        result.status = 'failed'
+        result.detail = msg
+        _err(msg)
+        return result
+    _ok('ant-de-ingest ok')
+
+    # 6. Record S3 incoming keys for pending prune.
+    result.s3_incoming_keys = [plan.incoming_mus_key, plan.incoming_data_key]
+    result.status = 'ok'
+    result.detail = f'ingested → study_id={study_id}'
+    return result
+
+
+def _de_study_id_from_basename(basename: str) -> str:
+    """Strip the data-file extension from the basename to produce a
+    default study_id. Matches ant-de-ingest's default behaviour."""
+    for ext in _DE_DATA_EXTS:
+        if basename.endswith(ext):
+            return basename[: -len(ext)]
+    # Fallback — strip the last suffix.
+    return basename.rsplit('.', 1)[0]
+
+
 def cmd_run(args: argparse.Namespace, s3_cfg: dict, data_folder: Path) -> int:
     client = _s3_client(s3_cfg)
     bucket = s3_cfg['bucket']
@@ -727,28 +1130,51 @@ def cmd_run(args: argparse.Namespace, s3_cfg: dict, data_folder: Path) -> int:
     except ClientError as exc:
         _err(f'list_objects_v2 failed: {exc}')
         return 2
+
     plans, malformed = _group_into_plans(objects)
-    if not plans and not malformed:
+    de_plans, de_malformed = _group_into_de_plans(objects)
+    malformed.extend(de_malformed)
+
+    if not plans and not de_plans and not malformed:
         print('  (nothing under __incoming/)')
-        # Still print orphan-scan hints — orphans aren't tied to a deposit.
         _print_prune_hints(data_folder, [], client, bucket, args)
         return 0
 
-    print(f'  Found {len(plans)} dataset(s) to ingest'
-          + (f', {len(malformed)} malformed' if malformed else ''))
+    parts = []
+    if plans:
+        parts.append(f'{len(plans)} h5ad dataset(s)')
+    if de_plans:
+        parts.append(f'{len(de_plans)} DE deposit(s)')
+    if malformed:
+        parts.append(f'{len(malformed)} malformed')
+    print(f"  Found {', '.join(parts) or '(nothing)'}")
 
+    # Process h5ads FIRST so DE files can resolve their target_id against
+    # an already-promoted .md. (Mus's recommended ingest order, #134.)
     results: List[DatasetResult] = []
     for plan in plans:
         result = _process_dataset(plan, client, bucket, data_folder, args)
         results.append(result)
 
+    # Process DE files SECOND.
+    de_results: List[DEResult] = []
+    for plan in de_plans:
+        de_result = _process_de(plan, client, bucket, data_folder, args)
+        de_results.append(de_result)
+
     if not args.dry_run:
         _append_to_ledger(data_folder, results)
+        _append_de_to_ledger(data_folder, de_results)
 
     _print_run_report(results, malformed)
-    _print_prune_hints(data_folder, results, client, bucket, args)
+    _print_de_run_report(de_results)
+    _print_prune_hints(data_folder, results, client, bucket, args,
+                       de_results=de_results)
 
-    any_failed = any(r.status in {'failed', 'conflict'} for r in results)
+    any_failed = (
+        any(r.status in {'failed', 'conflict'} for r in results)
+        or any(r.status in {'failed', 'conflict'} for r in de_results)
+    )
     return 1 if any_failed else 0
 
 
