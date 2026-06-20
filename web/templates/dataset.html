@@ -184,6 +184,7 @@
     <div>layers: <span class="val">{{ info.layers|length if info.layers else 0 }}</span></div>
     <div>embeddings: <span class="val">{{ info.obsm_keys|length if info.obsm_keys else 0 }}</span></div>
     <div>obs cols: <span class="val">{{ info.n_obs_columns }}</span></div>
+    {% if info.modified %}<div title="last modified (mus 'updated' / .md 'date')">modified: <span class="val">{{ info.modified[:10] }}</span></div>{% endif %}
     {% if de_studies %}
     <div title="differential-expression results available">
         DE: <span class="val">{{ de_studies|length }}</span> stud{{ 'y' if de_studies|length == 1 else 'ies' }},

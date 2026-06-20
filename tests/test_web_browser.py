@@ -937,6 +937,23 @@ def test_folder_access_source_inline_only_when_variable(client):
     assert 'data-label="Source"' not in resp.text
 
 
+def test_folder_modified_column_and_newest_first(client):
+    # Each dataset shows a Modified date; the list is sorted newest-first.
+    resp = client.get("/browse/GroupA")
+    assert resp.status_code == 200
+    assert 'data-label="Modified"' in resp.text
+    assert "2026-05-01" in resp.text          # ds1's updated date
+    # ds1 (2026-05-01) sorts above ds2 (2026-04-01)
+    assert resp.text.index("Dataset One") < resp.text.index("Dataset Two")
+
+
+def test_dataset_page_shows_modified(client):
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    assert "modified:" in resp.text
+    assert "2025-01-01" in resp.text   # _INFO has year=2025 → _modified_ts year-cast
+
+
 def test_folder_external_link_icons(client):
     # datasets with a doi/link get small link icons after the name (.ext-lnk)
     resp = client.get("/browse/GroupA")

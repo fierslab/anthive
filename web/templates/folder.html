@@ -61,6 +61,7 @@
         <tr>
             <th>Dataset</th>
             <th title="cells × genes">Cells × Genes</th>
+            <th title="last modified (mus 'updated' / .md 'date')">Modified</th>
             {% if 'organism' in var_fields %}<th title="organism">Org</th>{% endif %}
             {% if 'technology' in var_fields %}<th title="technology">Tech</th>{% endif %}
             {% if 'celltype' in var_fields %}<th title="cell type">Cell</th>{% endif %}
@@ -93,6 +94,7 @@
                 {{ format_count(dataset.n_obs) }} × {{ format_count(dataset.n_vars) }}
                 {% endif %}
             </td>
+            <td data-label="Modified" style="color:#666;font-size:11px;font-family:var(--font-mono);white-space:nowrap">{{ (dataset.modified or '')[:10] or '—' }}</td>
             {% if 'organism' in var_fields %}<td data-label="Org">{% if _org.abbrev  %}<span class="grp-pill"          title="organism: {{ _org.full }}">{{ _org.abbrev }}</span>{% endif %}</td>{% endif %}
             {% if 'technology' in var_fields %}<td data-label="Tech">{% if _tech.abbrev %}<span class="grp-pill tech"     title="technology: {{ _tech.full }}">{{ _tech.abbrev }}</span>{% endif %}</td>{% endif %}
             {% if 'celltype' in var_fields %}<td data-label="Cell">{% if _cell.abbrev %}<span class="grp-pill cell"     title="cell type: {{ _cell.full }}">{{ _cell.abbrev }}</span>{% endif %}</td>{% endif %}

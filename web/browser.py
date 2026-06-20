@@ -438,6 +438,7 @@ def get_collection_datasets(api_url: str, group_id: str) -> tuple:
             'subfolder': None,
             'n_obs': db.get('n_cells'),
             'n_vars': db.get('n_genes'),
+            'modified': _modified_ts(db),
             'layers': layers,
             'embeddings': embeddings,
             'has_metadata': True,
@@ -485,6 +486,9 @@ def get_collection_datasets(api_url: str, group_id: str) -> tuple:
             })
         elif abbrev == 'mix':
             var_fields.append(field)   # differs between datasets → keep column
+
+    # Newest-first: most-recently-modified dataset on top (lexical ISO sort).
+    datasets.sort(key=lambda d: (d.get('modified') or '', d['name']), reverse=True)
 
     collection_meta = {'pills': header_pills, 'var_fields': var_fields}
     return datasets, description_html, collection_meta
@@ -811,6 +815,7 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         'file_id': db.get('file_id'),
         'group_id': db.get('group_id'),
         'title': db.get('title'),
+        'modified': _modified_ts(db),
     }
 
     accession = db.get('accession')
