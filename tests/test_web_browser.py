@@ -984,6 +984,21 @@ def test_plot_settings_in_toolbar_dropdown(client):
     assert 'id="s-dpi"' in resp.text   # a settings control still present
 
 
+def test_plot_settings_metric_and_presets(client):
+    # mm units, A4/A5/A6 + screen presets, a resolution dropdown (DPI alt) with
+    # px readout. Palettes are JS-generated (selects start empty in HTML).
+    resp = client.get("/browse/GroupA/ds1/plot/scatter")
+    assert resp.status_code == 200
+    assert "width (mm)" in resp.text and "height (mm)" in resp.text   # metric
+    assert 'data-w="210" data-h="148"' in resp.text                  # A5 preset
+    assert 'class="size-presets"' in resp.text                        # preset rows
+    assert 'id="px-readout"' in resp.text                             # DPI alternative readout
+    assert "screen (96)" in resp.text and "print (300)" in resp.text  # resolution dropdown
+    # palette base lists + auto-reverse are defined in JS
+    assert "function populatePalettes" in resp.text
+    assert "viridis" in resp.text and "vlag" in resp.text
+
+
 def test_plot_pdf_label_and_no_source_line(client):
     resp = client.get("/browse/GroupA/ds1/plot/scatter")
     assert resp.status_code == 200

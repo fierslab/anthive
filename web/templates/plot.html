@@ -128,6 +128,13 @@
   }
   .settings-panel.open { display: block; }
   .settings-panel .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; align-items: center; }
+  .size-presets { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: 6px; }
+  .size-presets button {
+    font-size: 11px; padding: 2px 8px; border: 1px solid var(--border);
+    background: #f8fafc; cursor: pointer; font-family: inherit; border-radius: 3px;
+  }
+  .size-presets button:hover { background: #dbeafe; border-color: var(--link); }
+  .px-readout { margin-top: 6px; font-size: 10px; color: var(--text-muted); font-family: var(--font-mono); }
 
   .plot-caption {
     margin-top: 8px; padding: 6px 10px;
@@ -559,9 +566,16 @@
         <a href="#" id="settings-toggle" title="figure size, DPI, fonts, palettes">⚙ settings ▾</a>
         <div class="settings-panel" id="settings-panel">
           <div class="pair">
-            <label>width (in)</label><input type="number" id="s-width" min="2" max="32" step="0.5">
-            <label>height (in)</label><input type="number" id="s-height" min="2" max="32" step="0.5">
-            <label>dpi</label><input type="number" id="s-dpi" min="72" max="600" step="10">
+            <label>width (mm)</label><input type="number" id="s-width" min="20" max="900" step="1">
+            <label>height (mm)</label><input type="number" id="s-height" min="20" max="900" step="1">
+            <label title="output resolution — sets dots-per-inch under the hood">resolution</label>
+            <select id="s-dpi">
+              <option value="96">screen (96)</option>
+              <option value="150">balanced (150)</option>
+              <option value="192">retina (192)</option>
+              <option value="300">print (300)</option>
+              <option value="600">max (600)</option>
+            </select>
             <label>point size</label><input type="number" id="s-point_size" min="0.5" max="20" step="0.5">
             <label>alpha</label><input type="number" id="s-alpha" min="0" max="1" step="0.05">
             <label>font family</label>
@@ -575,18 +589,26 @@
             </select>
             <label>font size (pt)</label><input type="number" id="s-font_size" min="6" max="36" step="0.5">
             <label title="categorical / discrete colour">palette (categorical)</label>
-            <select id="s-palette_categorical">
-              <option>tab10</option><option>tab20</option><option>tab20b</option><option>tab20c</option><option>Set1</option><option>Set2</option><option>Set3</option><option>Paired</option><option>Dark2</option><option>Accent</option>
-            </select>
+            <select id="s-palette_categorical"></select>
             <label title="sequential continuous: counts, expression, %mt, etc.">palette (continuous)</label>
-            <select id="s-palette_continuous">
-              <option>inferno_r</option><option>inferno</option><option>viridis</option><option>viridis_r</option><option>plasma</option><option>magma</option><option>cividis</option><option>mako</option><option>rocket</option>
-            </select>
+            <select id="s-palette_continuous"></select>
             <label title="divergent: data straddling zero (z-scores, log fold change)">palette (divergent)</label>
-            <select id="s-palette_divergent">
-              <option>RdBu_r</option><option>RdBu</option><option>coolwarm</option><option>RdYlBu</option><option>RdYlBu_r</option><option>Spectral</option><option>PiYG</option><option>PuOr</option><option>BrBG</option><option>bwr</option>
-            </select>
+            <select id="s-palette_divergent"></select>
           </div>
+          <div class="size-presets">
+            <span class="picks-label">print</span>
+            <button type="button" data-w="297" data-h="210">A4</button>
+            <button type="button" data-w="210" data-h="148">A5</button>
+            <button type="button" data-w="148" data-h="105">A6</button>
+          </div>
+          <div class="size-presets">
+            <span class="picks-label">screen</span>
+            <button type="button" data-w="254" data-h="143" title="16:9 slide">16:9</button>
+            <button type="button" data-w="200" data-h="150" title="4:3">4:3</button>
+            <button type="button" data-w="160" data-h="160" title="square">square</button>
+            <span style="font-size:9px;color:#aaa">landscape — swap W/H for portrait</span>
+          </div>
+          <div class="px-readout" id="px-readout"></div>
           <div style="display:flex;gap:8px;margin-top:6px;align-items:center;font-size:10px;color:#888">
             <span id="settings-status">saved automatically</span>
             <span style="flex:1"></span>
@@ -614,10 +636,51 @@
   const BROWSE  = {{ ('/browse/' + folder_browse_id + '/' + file_id + '/plot/')|tojson }};
 
   const SETTINGS_KEY = 'anthive.plot.settings';
+  // Figure size is stored + sent in INCHES (matplotlib figsize). The two size
+  // inputs DISPLAY mm and convert on read — so the API contract and any
+  // previously-saved (inch) settings are unchanged. Metric UI, imperial wire.
+  const MM_PER_IN = 25.4;
+  const _MM_FIELDS = new Set(['width', 'height']);
 
-  // ── default settings (used until user saves their own)
+  // Palette options. Continuous + divergent ALWAYS include the reversed (_r)
+  // variant (direction matters for gradients); categorical reversal isn't
+  // meaningful so it's omitted there.
+  const PALETTES = {
+    categorical: ['tab10','tab20','tab20b','tab20c','Set1','Set2','Set3','Paired','Dark2','Accent','Pastel1','Pastel2'],
+    continuous:  ['viridis','magma','inferno','plasma','cividis','mako','rocket','turbo','crest','flare','Blues','Greens','Oranges','Greys','YlGnBu','YlOrRd'],
+    divergent:   ['RdBu','coolwarm','bwr','seismic','Spectral','RdYlBu','RdYlGn','PiYG','PRGn','BrBG','PuOr','vlag','icefire'],
+  };
+  // Live "what you'll actually get" readout: mm + dpi → output pixels. Makes
+  // the resolution choice concrete without the user reasoning about DPI.
+  function updatePxReadout() {
+    const el = document.getElementById('px-readout');
+    if (!el) return;
+    const wmm = Number(document.getElementById('s-width').value);
+    const hmm = Number(document.getElementById('s-height').value);
+    const dpi = Number(document.getElementById('s-dpi').value);
+    if (wmm > 0 && hmm > 0 && dpi > 0) {
+      const wpx = Math.round(wmm / MM_PER_IN * dpi), hpx = Math.round(hmm / MM_PER_IN * dpi);
+      el.textContent = `output ≈ ${wpx} × ${hpx} px  (${wmm}×${hmm} mm @ ${dpi} dpi)`;
+    } else { el.textContent = ''; }
+  }
+  function populatePalettes() {
+    const fill = (id, base, rev) => {
+      const sel = document.getElementById(id);
+      if (!sel) return;
+      const opts = [];
+      base.forEach(n => { opts.push(n); if (rev) opts.push(n + '_r'); });
+      sel.innerHTML = opts.map(n => `<option value="${n}">${n}</option>`).join('');
+    };
+    fill('s-palette_categorical', PALETTES.categorical, false);
+    fill('s-palette_continuous',  PALETTES.continuous,  true);
+    fill('s-palette_divergent',   PALETTES.divergent,   true);
+  }
+
+  // ── default settings (used until user saves their own); width/height in inches.
+  //    Default = A5 landscape (210 × 148 mm) — a sensible metric page default now
+  //    that the UI is mm-based.
   const DEFAULT_SETTINGS = {
-    width: 8, height: 6, dpi: 150, point_size: 3, alpha: 0.8,
+    width: 210 / MM_PER_IN, height: 148 / MM_PER_IN, dpi: 150, point_size: 3, alpha: 0.8,
     font_family: 'DejaVu Sans', font_size: 10,
     // Three palette families — each used for the matching data kind:
     palette_categorical: 'tab10',
@@ -638,14 +701,21 @@
   function applySettingsToForm(s) {
     for (const k of Object.keys(DEFAULT_SETTINGS)) {
       const el = document.getElementById('s-' + k);
-      if (el) el.value = s[k];
+      if (!el) continue;
+      el.value = _MM_FIELDS.has(k) ? Math.round(Number(s[k]) * MM_PER_IN) : s[k];  // inches→mm for display
     }
   }
   function readSettingsFromForm() {
     const s = {};
     for (const k of Object.keys(DEFAULT_SETTINGS)) {
       const el = document.getElementById('s-' + k);
-      s[k] = el ? (typeof DEFAULT_SETTINGS[k] === 'number' ? Number(el.value) : el.value) : DEFAULT_SETTINGS[k];
+      if (!el) { s[k] = DEFAULT_SETTINGS[k]; continue; }
+      if (_MM_FIELDS.has(k)) {
+        const mm = Number(el.value);
+        s[k] = mm > 0 ? mm / MM_PER_IN : DEFAULT_SETTINGS[k];   // mm→inches for the API
+      } else {
+        s[k] = (typeof DEFAULT_SETTINGS[k] === 'number') ? Number(el.value) : el.value;
+      }
     }
     return s;
   }
@@ -837,11 +907,14 @@
     if (!settingsMenu.contains(e.target)) panel.classList.remove('open');
   });
   document.addEventListener('keydown', e => { if (e.key === 'Escape') panel.classList.remove('open'); });
+  populatePalettes();                       // build palette <option>s (with _r) before restoring saved value
   applySettingsToForm(loadSettings());
+  updatePxReadout();
   // Auto-persist every settings change, no button needed.
   const _settingsStatus = document.getElementById('settings-status');
   function autoSaveSettings() {
     saveSettings(readSettingsFromForm());
+    updatePxReadout();
     if (_settingsStatus) {
       _settingsStatus.textContent = '✓ saved';
       clearTimeout(autoSaveSettings._t);
@@ -858,7 +931,16 @@
     saveSettings(DEFAULT_SETTINGS);
     applySettingsToForm(DEFAULT_SETTINGS);
     if (_settingsStatus) _settingsStatus.textContent = '↻ reset';
+    updatePxReadout();
     refreshDownloadLinks(); refresh();
+  });
+  // ── page-size presets (A4/A5/A6, landscape, mm) → set the size inputs
+  document.querySelectorAll('.size-presets button[data-w]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.getElementById('s-width').value  = btn.getAttribute('data-w');
+      document.getElementById('s-height').value = btn.getAttribute('data-h');
+      autoSaveSettings(); scheduleRefresh();
+    });
   });
 
   // ── copy URL
