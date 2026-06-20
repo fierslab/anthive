@@ -1182,27 +1182,64 @@ def _render_grouped_panel(
 
 
 def _draw_group_band(ax, group_by_labels) -> None:
-    """Draw a group-label band with separators under the x-axis.
+    """Draw the separator lines for the group-label band.
 
-    group_by_labels is [(label, x_center, gap_x), ...]. For each
-    consecutive pair we draw a vertical separator at the gap_x of the
-    LATER group (so the line falls in the gap between the two), and
-    place the label centred above the x-axis at the band's midpoint.
+    Only the SEPARATORS are drawn here (in-axes vertical dashes).
+    The text labels are placed by ``_place_group_band_labels`` AFTER
+    tight_layout, so they can sit below the rotated tick labels'
+    measured extent without colliding with them (anthive-web #153).
+
+    group_by_labels is [(label, x_center, gap_x), ...].
     """
     if not group_by_labels:
         return
-    ymin, ymax = ax.get_ylim()
-    sep_y = ymin + (ymax - ymin) * 0.0  # at bottom of plot area
     for i, (label, x_center, gap_x) in enumerate(group_by_labels):
         if i > 0:
-            ax.axvline(x=gap_x, color='#888', linewidth=0.6, linestyle='--', alpha=0.6)
-        # Group label below the x tick row.
-        ax.annotate(
-            label,
-            xy=(x_center, 0), xycoords=('data', 'axes fraction'),
-            xytext=(0, -42), textcoords='offset points',
+            ax.axvline(x=gap_x, color='#888', linewidth=0.6,
+                       linestyle='--', alpha=0.6)
+
+
+def _place_group_band_labels(fig, ax, group_by_labels) -> None:
+    """Place the group-band TEXT labels below the rotated x-tick labels.
+
+    Measures the actual rendered bbox of the tick labels (post-tight-
+    layout) and offsets each group label below that extent. Uses a
+    blended transform: data coords for X (so labels stay centred under
+    their group regardless of figure size), display coords for Y (so
+    we land just under the rotated tick text).
+
+    Called AFTER fig.tight_layout() so the tick labels have their
+    final position; otherwise the measurement is wrong.
+    """
+    if not group_by_labels:
+        return
+    fig.canvas.draw()  # ensure renderer state is current
+    renderer = fig.canvas.get_renderer()
+    # Bottom of the x-axis label block (in display coords). Falls back
+    # to the axis spine if there are no tick labels to measure.
+    tick_labels = ax.get_xticklabels()
+    if tick_labels:
+        bboxes = [t.get_window_extent(renderer=renderer) for t in tick_labels
+                  if t.get_text()]
+        if bboxes:
+            min_y_display = min(b.y0 for b in bboxes)
+        else:
+            min_y_display = ax.get_position().y0 * fig.bbox.height
+    else:
+        min_y_display = ax.get_position().y0 * fig.bbox.height
+    # Drop another 6 points of padding under the tick labels.
+    pad_pixels = 6 * fig.dpi / 72.0
+    y_display = min_y_display - pad_pixels
+    # Convert display Y → axes-fraction Y for portability across resize.
+    _, y_axes = ax.transAxes.inverted().transform((0, y_display))
+    for label, x_center, _gap_x in group_by_labels:
+        ax.text(
+            x_center, y_axes, label,
+            transform=matplotlib.transforms.blended_transform_factory(
+                ax.transData, ax.transAxes,
+            ),
             ha='center', va='top', fontsize=8, fontweight='bold',
-            annotation_clip=False,
+            clip_on=False,
         )
 
 
@@ -1401,6 +1438,15 @@ def plot_grouped(
     # One shared legend, outside the rightmost panel.
     _legend_outside(axes[-1], title=hue if (hue and (is_stacked or facet)) else None)
     fig.tight_layout()
+
+    # group_by labels: placed AFTER tight_layout so we can measure the
+    # rotated x-tick label extent and offset the band below it. Doing
+    # this earlier collided with long rotated labels (anthive-web #153).
+    # Reserve bottom margin first so tight_layout doesn't squash them.
+    if group_by_labels:
+        fig.subplots_adjust(bottom=0.30)
+        for ax in axes:
+            _place_group_band_labels(fig, ax, group_by_labels)
 
     return _render_figure(fig, dpi, output_format, caption, source_url)
 
