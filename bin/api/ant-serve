@@ -1297,7 +1297,7 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.7.0"
+API_VERSION = "2.7.1"
 API_VERSION_RELEASED = "2026-06-20"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
@@ -2760,6 +2760,15 @@ def _handle_scatter(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     color_kind = 'categorical'
     if req.color:
         color_field_name, color_kind = ctx.resolve(req.color)
+        # Reject embedding-typed color fields: they have multiple
+        # dimensions (X_umap → dim_0/dim_1), no single per-cell scalar
+        # to colour by. Without this the downstream path tries
+        # pd.to_numeric on a column that doesn't exist on color_df.
+        if color_kind not in ('categorical', 'numerical', 'gene'):
+            raise HTTPException(400, detail=(
+                f"color={req.color!r} resolved as '{color_kind}'; "
+                f"color must be a categorical / numerical obs field or a gene."
+            ))
         sampled_cells = embedding_df['cell_name'].tolist() if req.sample else None
         color_filters = dict(req.filters) if req.filters else {}
         if sampled_cells:
@@ -2843,6 +2852,15 @@ def _handle_hexbin(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     color_kind = 'numerical'
     if req.color:
         color_field_name, color_kind = ctx.resolve(req.color)
+        # Reject embedding-typed color fields: they have multiple
+        # dimensions (X_umap → dim_0/dim_1), no single per-cell scalar
+        # to colour by. Without this the downstream path tries
+        # pd.to_numeric on a column that doesn't exist on color_df.
+        if color_kind not in ('categorical', 'numerical', 'gene'):
+            raise HTTPException(400, detail=(
+                f"color={req.color!r} resolved as '{color_kind}'; "
+                f"color must be a categorical / numerical obs field or a gene."
+            ))
         sampled_cells = embedding_df['cell_name'].tolist() if req.sample else None
         color_filters = dict(req.filters) if req.filters else {}
         if sampled_cells:
@@ -2941,7 +2959,13 @@ def _handle_xy(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     # legacy `log_x`/`log_y` booleans still work as a back-compat shim
     # (they map to transform_x='log1p' / transform_y='log1p').
     import numpy as _np
-    embedding_df = data_df[['cell_name', x_name, y_name]].copy()
+    # Two copies: `_raw_df` keeps the un-transformed columns for the
+    # CSV-export branch (so users downloading "data behind the plot"
+    # get the actual axis values, not their log/asinh/signed_log1p
+    # transforms — see QA review B2). `embedding_df` is what gets
+    # passed to the renderer with transforms applied.
+    _raw_df = data_df[['cell_name', x_name, y_name]].copy()
+    embedding_df = _raw_df.copy()
     tx = req.transform_x or 'linear'
     ty = req.transform_y or 'linear'
     if req.log_x and tx == 'linear':
@@ -2996,7 +3020,9 @@ def _handle_xy(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     n_groups = (int(color_df[color_field_name].nunique())
                 if color_df is not None and color_kind == 'categorical' else None)
     if req.output_format in _PLOT_DATA_FORMATS:
-        df_out = embedding_df.copy()
+        # Export uses the RAW (pre-transform) frame so the CSV row
+        # values match the axis labels — not the transformed view.
+        df_out = _raw_df.copy()
         if color_df is not None and color_field_name and color_field_name not in df_out.columns:
             df_out = df_out.merge(
                 color_df[['cell_name', color_field_name]],
@@ -3102,6 +3128,8 @@ def _handle_kde2d(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         asinh_scale=req.asinh_scale or 1.0,
         kde_n=req.kde_n, kde_bw=req.kde_bw,
         n_levels=req.n_levels,
+        palette_cont=req.palette_cont,
+        color_scale=req.color_scale,
         iso_overlay=req.iso_overlay,
         point_overlay=req.point_overlay,
         marginals=req.marginals,
@@ -3246,7 +3274,9 @@ def _handle_grouped(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         req.db_id, req.geom, x_name, x_kind, y_name, hue_name, req.layer,
         n_cells=n_cells, n_groups=n_groups,
         sample=req.sample, subset=_subset_for_caption(req),
-        ci=req.ci if req.geom == 'bar' else None,
+        # Caption claims "with CI" only when bar mode actually computes
+        # one. Stacked bars use raw aggregates, no bootstrap.
+        ci=(req.ci if req.geom == 'bar' and req.bar_mode != 'stack' else None),
     )
     image_bytes = plotting.plot_grouped(
         data_df=data_df, x_field=x_name, y_field=y_name, hue_field=hue_name,
@@ -3433,6 +3463,17 @@ def _handle_heatmap(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
 
     n_cells = int(len(data_df))
     n_groups = int(mean_expr_df.shape[0])
+    # Row-cardinality cap. y=donor_id (500 levels) × default 20 genes
+    # produces a 500-row heatmap nobody can read. Refuse early with
+    # the same helpful-400 shape as bar / de_heatmap. n_genes is
+    # already constrained at the endpoint (le=200), so we only cap rows.
+    _HEATMAP_ROW_CAP = 100
+    if n_groups > _HEATMAP_ROW_CAP:
+        raise HTTPException(400, detail=(
+            f"heatmap has {n_groups} rows (y='{y_name}': {n_groups} levels); "
+            f"capped at {_HEATMAP_ROW_CAP}. Pick a lower-cardinality y "
+            f"field or apply a subset filter."
+        ))
     if req.output_format in _PLOT_DATA_FORMATS:
         # Heatmap exports the AGGREGATED matrix (per-group mean per gene),
         # since that's what's drawn — raw cell-level data wouldn't
@@ -3449,6 +3490,7 @@ def _handle_heatmap(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         output_format=req.output_format,
         palette_cont=req.palette_cont,
         palette_div=req.palette_div,
+        color_scale=req.color_scale,
         zscore=req.zscore,
         title_extra=req.db_id,
         caption=caption, source_url=req.source_url,
@@ -3468,11 +3510,11 @@ def _de_contrast_dataframe(req: PlotRequest, ctx: PlotContext) -> Any:
     estimate, SE, ci_low, ci_high, base_mean (extracted from stats_extra).
     """
     if not req.de_study:
-        raise HTTPException(400, detail=f"geom='{req.geom}' requires --de-study (study_id)")
+        raise HTTPException(400, detail=f"geom='{req.geom}' requires ?study=<study_id>")
     if not req.de_term:
-        raise HTTPException(400, detail=f"geom='{req.geom}' requires --de-term")
+        raise HTTPException(400, detail=f"geom='{req.geom}' requires ?term=<term>")
     if not req.de_contrast:
-        raise HTTPException(400, detail=f"geom='{req.geom}' requires --de-contrast")
+        raise HTTPException(400, detail=f"geom='{req.geom}' requires ?contrast=<contrast>")
     if not lib_de_storage.has_de_data(ctx.db.conn):
         raise HTTPException(
             404, detail=f"dataset '{req.db_id}' has no DE data ingested",
@@ -3586,7 +3628,7 @@ def _handle_ma(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
 
 def _handle_forest(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     if not req.de_gene:
-        raise HTTPException(400, detail="geom='forest' requires --de-gene (a gene name)")
+        raise HTTPException(400, detail="geom='forest' requires ?gene=<gene_name>")
     if not lib_de_storage.has_de_data(ctx.db.conn):
         raise HTTPException(
             404, detail=f"dataset '{req.db_id}' has no DE data ingested",
@@ -3720,6 +3762,41 @@ def _handle_de_heatmap(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     """
     df = ctx.db.conn.execute(sql, params).fetchdf()
     if len(df) == 0:
+        # Specialise the message when a filter is entirely off-target
+        # (helps the user fix a typo). Probe whether the (study, term)
+        # has ANY rows; if yes, the filter killed everything.
+        if contrast_filter or gene_filter:
+            base_n = ctx.db.conn.execute(
+                "SELECT count(*) FROM __de WHERE study_id=? AND term=?",
+                [req.de_study, req.de_term],
+            ).fetchone()[0]
+            if base_n > 0:
+                # Surface a 'none of contrasts=' / 'none of genes='
+                # message with the available alternatives.
+                if contrast_filter:
+                    avail = ctx.db.conn.execute(
+                        "SELECT DISTINCT contrast FROM __de "
+                        "WHERE study_id=? AND term=? ORDER BY contrast LIMIT 20",
+                        [req.de_study, req.de_term],
+                    ).fetchdf()['contrast'].tolist()
+                    raise HTTPException(404, detail=(
+                        f"none of contrasts={contrast_filter} match any DE "
+                        f"rows for study={req.de_study!r}, term={req.de_term!r}. "
+                        f"Available contrasts (up to 20): {avail}"
+                    ))
+                if gene_filter:
+                    avail = ctx.db.conn.execute(
+                        "SELECT DISTINCT g.gene_name FROM __de d "
+                        "JOIN __genes g USING (gene_id) "
+                        "WHERE d.study_id=? AND d.term=? "
+                        "ORDER BY g.gene_name LIMIT 20",
+                        [req.de_study, req.de_term],
+                    ).fetchdf()['gene_name'].tolist()
+                    raise HTTPException(404, detail=(
+                        f"none of genes={gene_filter} match any DE rows "
+                        f"for study={req.de_study!r}, term={req.de_term!r}. "
+                        f"Available genes (up to 20): {avail}"
+                    ))
         raise HTTPException(404, detail=(
             f"no DE rows for study={req.de_study!r}, term={req.de_term!r}"
             + (f" matching contrasts={contrast_filter}" if contrast_filter else "")
@@ -3739,14 +3816,41 @@ def _handle_de_heatmap(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
             f"<list> and/or de_genes=<list>."
         ))
 
+    # Flag user-requested filter values that didn't resolve. A typo in
+    # ?contrasts=Foo would otherwise silently produce a smaller-than-
+    # expected matrix (QA review B7).
+    present_contrasts = set(df['contrast'].unique())
+    present_genes = set(df['gene_name'].unique())
+    missing_contrasts = (
+        [c for c in contrast_filter if c not in present_contrasts]
+        if contrast_filter else []
+    )
+    missing_genes = (
+        [g for g in gene_filter if g not in present_genes]
+        if gene_filter else []
+    )
+    if missing_contrasts and contrast_filter and not (set(contrast_filter) & present_contrasts):
+        raise HTTPException(404, detail=(
+            f"none of contrasts={contrast_filter} match any DE rows for "
+            f"study={req.de_study!r}, term={req.de_term!r}. Available "
+            f"contrasts (up to 20): "
+            f"{sorted(present_contrasts)[:20]}"
+        ))
+    if missing_genes and gene_filter and not (set(gene_filter) & present_genes):
+        raise HTTPException(404, detail=(
+            f"none of genes={gene_filter} match any DE rows for "
+            f"study={req.de_study!r}, term={req.de_term!r}. Available "
+            f"genes (up to 20): {sorted(present_genes)[:20]}"
+        ))
+
     if contrast_filter:
-        row_order = [c for c in contrast_filter if c in df['contrast'].unique()]
+        row_order = [c for c in contrast_filter if c in present_contrasts]
     else:
-        row_order = sorted(df['contrast'].unique())
+        row_order = sorted(present_contrasts)
     if gene_filter:
-        col_order = [g for g in gene_filter if g in df['gene_name'].unique()]
+        col_order = [g for g in gene_filter if g in present_genes]
     else:
-        col_order = sorted(df['gene_name'].unique())
+        col_order = sorted(present_genes)
 
     matrix = df.pivot_table(
         index='contrast', columns='gene_name', values='value', aggfunc='first',
@@ -3773,6 +3877,10 @@ def _handle_de_heatmap(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         f"DE heatmap of {req.de_study} · {req.de_term} in {req.db_id}: "
         f"{n_contrasts} contrasts x {n_genes} genes/modules, fill={value_col}."
     )
+    if missing_contrasts:
+        caption += f" (dropped {len(missing_contrasts)} unmatched contrasts: {missing_contrasts[:5]})"
+    if missing_genes:
+        caption += f" (dropped {len(missing_genes)} unmatched genes: {missing_genes[:5]})"
     image_bytes = plotting.plot_de_heatmap(
         matrix,
         value_label=value_col,
@@ -4235,6 +4343,7 @@ async def plot_scatter_endpoint(
     marginals: bool = Query(False, description="XY-mode overlay: univariate KDE strips on x and y."),
     regline: Optional[str] = Query(
         None,
+        regex='^(global|by_group)$',
         description=(
             "XY-mode overlay: regression line + R²/Pearson/Spearman/slope. "
             "``global`` for one line; ``by_group`` for one per categorical-colour group (cap 30)."
@@ -4367,10 +4476,11 @@ async def plot_kde2d_endpoint(
     marginals: bool = Query(False, description="Add univariate KDE strips on top of x and right of y."),
     regline: Optional[str] = Query(
         None,
+        regex='^global$',
         description=(
             "Overlay a regression line + R² / Pearson / Spearman / slope. "
-            "``global`` for one line across all points; not yet supported on "
-            "kde2d for ``by_group`` (no categorical colour input here)."
+            "Only ``global`` is supported on kde2d (no categorical colour "
+            "input). ``by_group`` returns 422."
         ),
     ),
 ):

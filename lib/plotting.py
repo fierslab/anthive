@@ -978,13 +978,18 @@ def plot_hexbin(
     else:
         # Categorical: modal label + dominance.  Done by hand because
         # matplotlib's hexbin doesn't natively aggregate categoricals.
-        cats = color_df.set_index('cell_name')[color_field].reindex(
-            embedding_df['cell_name'].values
-        ).astype(str)
+        # Mirror plot_scatter's NaN policy: keep missing cells under
+        # an explicit '(missing)' category instead of silently
+        # dropping them (which would give different cell counts
+        # between scatter and hexbin on the same data — QA review B6).
+        cats = (
+            color_df.set_index('cell_name')[color_field]
+            .reindex(embedding_df['cell_name'].values)
+            .fillna('(missing)').astype(str)
+        )
         # Encode categories to integer codes so we can use hexbin's C param
         # to discover hex membership; the actual reduce is done after.
-        unique_cats = pd.Series(cats).dropna().unique()
-        unique_cats = sorted(unique_cats.tolist())
+        unique_cats = sorted(pd.Series(cats).unique().tolist())
         cat_to_code = {c: i for i, c in enumerate(unique_cats)}
         codes = np.array([cat_to_code.get(c, -1) for c in cats], dtype=float)
 
@@ -1564,6 +1569,7 @@ def plot_heatmap(
     output_format: str = 'png',
     palette_cont: str = _DEFAULT_SEQUENTIAL,
     palette_div: str = _DEFAULT_DIVERGENT,
+    color_scale: Optional[str] = None,
     zscore: bool = True,
     title_extra: Optional[str] = None,
     caption: Optional[str] = None,
@@ -1579,26 +1585,44 @@ def plot_heatmap(
                       with the divergent palette centred at 0 — highlights
                       relative differences across groups.  When False, plot
                       raw means with the sequential palette (palette_cont).
+        color_scale:  Optional override: ``'sequential'`` forces a one-sided
+                      ramp even with ``zscore=True``; ``'divergent'`` forces
+                      a centred ramp even with raw means.
     """
     _setup_style(font_family, font_size)
     fig, ax = plt.subplots(figsize=(width, height))
 
+    # color_scale override beats the zscore default. (zscore still
+    # controls the data shown — divergent palette on raw means is
+    # rarely useful but the user gets what they asked for.)
     if zscore:
         plot_df = (mean_expr_df - mean_expr_df.mean()) / (mean_expr_df.std() + 1e-9)
-        cmap = palette_div if palette_div in _DIVERGENT_PALETTES else _DEFAULT_DIVERGENT
         cbar_label = 'z-score'
-        center = 0
         title_lead = 'Mean expression (z-scored)'
+        default_kind = 'divergent'
     else:
         plot_df = mean_expr_df
-        cmap = palette_cont if palette_cont not in _QUALITATIVE_PALETTES else _DEFAULT_SEQUENTIAL
         cbar_label = 'mean expression'
-        center = None
         title_lead = 'Mean expression'
+        default_kind = 'sequential'
+    cmap_name, used_kind = pick_cmap(
+        'continuous',
+        palette_cont=palette_cont, palette_div=palette_div,
+        values=plot_df.to_numpy(dtype=float),
+        color_scale=color_scale or default_kind,
+    )
+    if used_kind == 'divergent':
+        finite = plot_df.to_numpy(dtype=float)
+        finite = finite[np.isfinite(finite)]
+        vlim = float(np.nanmax(np.abs(finite))) if finite.size else 1.0
+        vmin, vmax, center = -vlim, vlim, 0
+    else:
+        vmin, vmax, center = None, None, None
 
     sns.heatmap(
         plot_df, ax=ax,
-        cmap=cmap, center=center,
+        cmap=cmap_name, center=center,
+        vmin=vmin, vmax=vmax,
         linewidths=0.3,
         yticklabels=True,
         xticklabels=True,
@@ -2396,7 +2420,12 @@ def plot_kde2d(
     kde_bw: Optional[float] = 0.22,  # bandwidth (None → scott's rule)
     n_levels: int = 10,
     grid_res: int = 200,             # grid resolution per axis
-    cmap: str = 'magma',
+    # kde2d density is one-sided count-of-mass — sequential by nature.
+    # palette_cont threads in the user's choice; color_scale='divergent'
+    # is ignored here because diverging contours on a density don't
+    # mean anything.
+    palette_cont: str = _DEFAULT_SEQUENTIAL,
+    color_scale: Optional[str] = None,     # accepted + ignored (density is always sequential)
     iso_overlay: bool = True,        # thin white iso-density contours
     point_overlay: bool = False,     # raster scatter behind the contours
     point_alpha: float = 0.05,
@@ -2484,7 +2513,14 @@ def plot_kde2d(
         ax.plot(xs, ys, marker='.', linestyle='none', markersize=1.5,
                 color='#444444', alpha=point_alpha, rasterized=True)
 
-    cs = ax.contourf(grid_xx, grid_yy, z, levels=n_levels, cmap=cmap)
+    # Honour palette_cont for the density colormap. pick_cmap handles
+    # the qualitative-palette / divergent-palette fallbacks defensively
+    # — kde2d density is one-sided so we always want sequential.
+    cmap_name, _ = pick_cmap(
+        'continuous', palette_cont=palette_cont,
+        color_scale='sequential',
+    )
+    cs = ax.contourf(grid_xx, grid_yy, z, levels=n_levels, cmap=cmap_name)
     if iso_overlay:
         ax.contour(grid_xx, grid_yy, z, levels=n_levels,
                    colors='white', linewidths=0.4, alpha=0.6)
