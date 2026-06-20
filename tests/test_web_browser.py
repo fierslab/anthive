@@ -980,9 +980,11 @@ def test_plot_bar_stacked_controls(client):
     assert 'name="bar_mode"' in resp.text
     assert 'value="stack"' in resp.text
     assert 'name="normalize"' in resp.text
+    assert 'name="facet"' in resp.text   # group-by small-multiples (REST API 2.6)
     # not on non-bar grouped geoms
     v = client.get("/browse/GroupA/ds1/plot/violin")
     assert 'name="bar_mode"' not in v.text
+    assert 'name="facet"' not in v.text
 
 
 def test_plot_force_refresh_control(client):

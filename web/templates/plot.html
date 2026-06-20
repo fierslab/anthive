@@ -330,6 +330,14 @@
       </select>
       <label style="margin-top:4px"><input type="checkbox" name="normalize" id="f-normalize"> 100% (proportions)</label>
       <small style="display:block;margin-top:2px;color:#666">Stacked + count y = composition per group (e.g. donor mix per sample); 100% normalises each bar.</small>
+      {# facet (REST API 2.6): small multiples, one panel per value of a 3rd
+         categorical — e.g. composition per sample, grouped by Village. #}
+      <label style="margin-top:6px">group by (small multiples)</label>
+      <select name="facet" id="f-facet">
+        <option value="">— none —</option>
+        {% for c in plot_meta.cat_fields %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
+      </select>
+      <small style="display:block;margin-top:2px;color:#666">One panel per value (≤8 levels). Shared y &amp; colours.</small>
       {% endif %}
     </fieldset>
 
