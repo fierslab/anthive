@@ -3696,7 +3696,8 @@ class CommonPlotParams:
             description=(
                 "Sequential cmap for one-sided continuous data (counts, gene "
                 "expression, %mt, …). Examples: ``inferno_r``, ``viridis``, "
-                "``plasma``, ``mako``."
+                "``plasma``, ``mako``, ``magenta`` (white→magenta), "
+                "``magenta_r`` (magenta→white)."
             ),
         ),
         palette_divergent: str = Query(

@@ -36,6 +36,47 @@ _DEFAULT_DIVERGENT   = 'RdBu_r'
 
 _VALID_FORMATS = {'png', 'svg', 'pdf'}
 
+# ── custom sequential colormaps registered into matplotlib ────────────────
+# Matplotlib doesn't ship a clean white→magenta sequential map. Register
+# 'magenta' (white → magenta, low → high) and 'magenta_r' (magenta → white).
+# Once registered they're addressable by name anywhere a matplotlib cmap
+# string is accepted — pick_cmap, sns.heatmap, ax.scatter(cmap=...), etc.
+#
+# Idempotent: register only if not already present. Safe to import the
+# module multiple times.
+def _register_custom_cmaps() -> None:
+    try:
+        import matplotlib as _mpl
+        import matplotlib.colors as _mcolors
+    except ImportError:
+        return
+    for name, stops in (
+        # white at low end, full magenta at high end. Matches the
+        # 'sequential' contract: low values fade into the background.
+        ('magenta',   [(1.0, 1.0, 1.0), (1.0, 0.0, 1.0)]),
+        # reversed: magenta at low, white at high. Use when the figure
+        # background is dark or the visual focus should be on low values.
+        ('magenta_r', [(1.0, 0.0, 1.0), (1.0, 1.0, 1.0)]),
+    ):
+        try:
+            _mpl.colormaps[name]  # already registered → skip
+            continue
+        except KeyError:
+            pass
+        cmap = _mcolors.LinearSegmentedColormap.from_list(name, stops, N=256)
+        try:
+            _mpl.colormaps.register(cmap, name=name)
+        except (ValueError, AttributeError):
+            # ValueError if a race re-registers; AttributeError on very
+            # old matplotlib (<3.6). Fall back to the legacy API.
+            try:
+                _mpl.cm.register_cmap(name=name, cmap=cmap)
+            except Exception:
+                pass
+
+
+_register_custom_cmaps()
+
 # Qualitative palettes: never use these as a continuous cmap (matplotlib
 # accepts them but cycles them into an unreadable scale).  Discrete colours
 # only.
