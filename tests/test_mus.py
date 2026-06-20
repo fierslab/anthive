@@ -303,7 +303,7 @@ H5ADSTORE = REPO_ROOT / 'data/h5adstore'
 
 @pytest.mark.skipif(not H5ADSTORE.exists(), reason='no local h5adstore')
 def test_real_mancuso_2024():
-    h5 = H5ADSTORE / 'Mancuso_2024' / 'Mancuso_2023.h5ad'
+    h5 = H5ADSTORE / 'Mancuso2024' / 'Mancuso_2023.h5ad'
     ann = resolve_annotation(h5, root=H5ADSTORE)
     assert ann.get('organism') == 'human'
     assert ann.get('cell_type') == 'microglial cell'
@@ -331,7 +331,7 @@ def test_real_pan2024_microglia_multi_disease():
 def test_real_required_fields_present():
     """Migrated datasets should have all required vocabulary fields filled."""
     for study, stem in [
-        ('Mancuso_2024', 'Mancuso_2023'),
+        ('Mancuso2024', 'Mancuso_2023'),
         ('Pan2024', 'Microglia'),
         ('Olah2020', 'olah2020_microglia'),
         ('Simpson2025', 'seurat_obj_sorl1_final'),
