@@ -74,11 +74,16 @@ nothing DE shows):
   "Differential expression" panel listing studies, and a `differential
   expression` category in the visualize dropdown — each deep-links to the
   `de_browser` page or the DE plot forms.
-- **plot.html**: three DE geoms — `volcano` / `ma` (cascading
-  study→term→contrast pickers, loaded client-side from `/de/…`) and `forest`
-  (gene + optional narrowing). The geom-switcher only lists them when the
-  dataset has DE. `ma` surfaces the server's "needs base_mean" 400 for
-  GLMM/Wilcoxon studies.
+- **plot.html**: four DE geoms — `volcano` / `ma` (cascading
+  study→term→contrast pickers, loaded client-side from `/de/…`), `forest`
+  (gene + optional narrowing), and `de_heatmap` (REST 2.7: the DE result
+  matrix — contrasts × genes/modules filled with a chosen effect size;
+  study→term cascade + `value` auto/estimate/log2fc/zeff/effsize +
+  `sig_overlay` + optional `contrasts`/`genes` CSV narrowers; server caps
+  rows×cols at 2000). All four are in `DE_GEOMS` (so `initDeCascade` runs)
+  and `canRender` (de_heatmap needs study+term). The geom-switcher only
+  lists them when the dataset has DE. `ma` surfaces the server's "needs
+  base_mean" 400 for GLMM/Wilcoxon studies.
 - **de_browser.html**: the full term→contrast→gene explorer (see its route
   above).
 
@@ -100,6 +105,16 @@ nothing DE shows):
   `vmin_quantile`/`vmax_quantile`. Legacy `log_x/log_y` URLs map to
   `transform_*=log1p` on load (back-compat). `kde2d` is gated in `canRender`
   on x+y both set.
+- **Colour ramp anchoring (REST 2.6):** the settings panel has a
+  `color_scale` select (`auto`/`sequential`/`divergent`) next to the palette
+  pickers; `buildUrl` emits it only when not `auto`. The continuous palette
+  list also carries 14 named single-hue white→colour ramps (`magenta`,
+  `turquoise`, `brown`, …) with their `_r` variants. **`prefillFromURL` also
+  applies `palette_*`/`color_scale` from the URL to the settings selects**
+  (they're not `form [name]` fields) — so a curated viz link reproduces its
+  exact colours in the live preview (URL wins for that page load, not
+  persisted). This is why the Sierksma Fig-2 hexbin links render in their
+  per-module colours.
 
 ## Vocabulary shared across pages
 
