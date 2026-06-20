@@ -3695,9 +3695,16 @@ class CommonPlotParams:
             'inferno_r',
             description=(
                 "Sequential cmap for one-sided continuous data (counts, gene "
-                "expression, %mt, …). Examples: ``inferno_r``, ``viridis``, "
-                "``plasma``, ``mako``, ``magenta`` (white→magenta), "
-                "``magenta_r`` (magenta→white)."
+                "expression, %mt, …). Built-in matplotlib options: "
+                "``inferno_r``, ``viridis``, ``plasma``, ``mako``, plus the "
+                "title-case sequentials ``Blues`` / ``Reds`` / ``Greens`` / "
+                "``Oranges`` / ``Purples`` / ``Greys``. Anthive also "
+                "registers single-colour white→colour gradients: "
+                "``magenta`` / ``blue`` / ``red`` / ``green`` / ``orange`` / "
+                "``purple`` / ``cyan`` / ``yellow`` / ``black`` "
+                "and the reversed colour→white variants ``magenta_r`` / "
+                "``blue_r`` / … (For greyscale use matplotlib's ``Greys`` "
+                "or ``gray`` — anthive leaves those intact.)"
             ),
         ),
         palette_divergent: str = Query(

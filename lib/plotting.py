@@ -37,42 +37,70 @@ _DEFAULT_DIVERGENT   = 'RdBu_r'
 _VALID_FORMATS = {'png', 'svg', 'pdf'}
 
 # ── custom sequential colormaps registered into matplotlib ────────────────
-# Matplotlib doesn't ship a clean white→magenta sequential map. Register
-# 'magenta' (white → magenta, low → high) and 'magenta_r' (magenta → white).
-# Once registered they're addressable by name anywhere a matplotlib cmap
-# string is accepted — pick_cmap, sns.heatmap, ax.scatter(cmap=...), etc.
+# Matplotlib ships title-case PLURAL sequential cmaps (Blues, Reds, Greens
+# …) that go white→colour, but their colour stops are perceptually-tuned
+# (not pure RGB) and they don't cover magenta, cyan, yellow, or pure black.
+# We register CLEAN white→pure-colour gradients under the lowercase
+# singular names, leaving matplotlib's stock cmaps untouched. The reversed
+# variants (_r) go colour→white.
 #
-# Idempotent: register only if not already present. Safe to import the
-# module multiple times.
+# Use case: figures where the user wants a single dominant colour
+# (matching a manuscript palette, brand colour, or a poster theme) and
+# doesn't need matplotlib's perceptual uniformity.
+#
+# Idempotent: registers only if not already present. Safe to re-import.
+#
+# Stops chosen so that low values fade into a white background. For
+# 'green' / 'orange' we dim the pure RGB to avoid the harsh primary —
+# (0, 0.6, 0) and (1, 0.5, 0) read better in print and on screen than
+# (0, 1, 0) and (1, 0.65, 0). 'black' goes to pure (0,0,0); 'gray' lands
+# at (0.5, 0.5, 0.5) so it doesn't visually collapse with 'black' at the
+# high end.
+_CUSTOM_SEQUENTIAL_ENDPOINTS = {
+    'magenta': (1.0, 0.0, 1.0),
+    'blue':    (0.0, 0.0, 1.0),
+    'red':     (1.0, 0.0, 0.0),
+    'green':   (0.0, 0.6, 0.0),
+    'orange':  (1.0, 0.5, 0.0),
+    'purple':  (0.5, 0.0, 0.5),
+    'cyan':    (0.0, 0.8, 0.8),    # dimmed slightly — pure cyan washes out on white
+    'yellow':  (0.95, 0.85, 0.0),  # dimmed — pure yellow is invisible at low alpha
+    'black':   (0.0, 0.0, 0.0),
+    # NOTE on greyscale: matplotlib ships both 'gray' and 'grey' as
+    # aliases for its black→white grayscale cmap, so we can't claim
+    # either name without overriding it. Use 'black' for white→pure
+    # black (registered above) or matplotlib's 'Greys' for the
+    # perceptually-tuned white→black-ish variant.
+}
+
+
 def _register_custom_cmaps() -> None:
     try:
         import matplotlib as _mpl
         import matplotlib.colors as _mcolors
     except ImportError:
         return
-    for name, stops in (
-        # white at low end, full magenta at high end. Matches the
-        # 'sequential' contract: low values fade into the background.
-        ('magenta',   [(1.0, 1.0, 1.0), (1.0, 0.0, 1.0)]),
-        # reversed: magenta at low, white at high. Use when the figure
-        # background is dark or the visual focus should be on low values.
-        ('magenta_r', [(1.0, 0.0, 1.0), (1.0, 1.0, 1.0)]),
-    ):
+
+    def _register_one(name: str, stops: list) -> None:
         try:
-            _mpl.colormaps[name]  # already registered → skip
-            continue
+            _mpl.colormaps[name]
+            return  # already registered
         except KeyError:
             pass
         cmap = _mcolors.LinearSegmentedColormap.from_list(name, stops, N=256)
         try:
             _mpl.colormaps.register(cmap, name=name)
         except (ValueError, AttributeError):
-            # ValueError if a race re-registers; AttributeError on very
-            # old matplotlib (<3.6). Fall back to the legacy API.
             try:
                 _mpl.cm.register_cmap(name=name, cmap=cmap)
             except Exception:
                 pass
+
+    for name, end_rgb in _CUSTOM_SEQUENTIAL_ENDPOINTS.items():
+        # forward: white → colour (low fades into background)
+        _register_one(name, [(1.0, 1.0, 1.0), end_rgb])
+        # reversed: colour → white (high fades into background)
+        _register_one(name + '_r', [end_rgb, (1.0, 1.0, 1.0)])
 
 
 _register_custom_cmaps()
