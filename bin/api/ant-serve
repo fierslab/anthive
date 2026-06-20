@@ -2691,6 +2691,7 @@ class PlotRequest:
     normalize: bool              # stacked bar: scale each bar to 100% (proportions)
     facet: Optional[str]         # 3rd categorical for small-multiples panels
     group_by: Optional[str]      # in-plot grouping: cluster x-bars by this categorical
+    color_scale: Optional[str]   # explicit cmap family: 'auto'|'sequential'|'divergent'
     filters: Optional[Dict[str, Any]]
     sample: Optional[int]
     source_url: str
@@ -2795,6 +2796,7 @@ def _handle_scatter(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         palette_cat=req.palette_cat,
         palette_cont=req.palette_cont,
         palette_div=req.palette_div,
+        color_scale=req.color_scale,
         vmin=req.vmin, vmax=req.vmax,
         title_extra=f'{req.db_id} · {emb_id}',
         caption=caption, source_url=req.source_url,
@@ -2875,6 +2877,7 @@ def _handle_hexbin(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         palette_cat=req.palette_cat,
         palette_cont=req.palette_cont,
         palette_div=req.palette_div,
+        color_scale=req.color_scale,
         alpha=req.alpha,
         gridsize=req.gridsize, mincnt=req.mincnt,
         vmin=req.vmin, vmax=req.vmax,
@@ -3014,6 +3017,7 @@ def _handle_xy(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         palette_cat=req.palette_cat,
         palette_cont=req.palette_cont,
         palette_div=req.palette_div,
+        color_scale=req.color_scale,
         title_extra=req.db_id,
         caption=caption, source_url=req.source_url,
         font_family=req.font_family, font_size=req.font_size,
@@ -3718,6 +3722,20 @@ class CommonPlotParams:
                 "divergent. Examples: ``RdBu_r``, ``coolwarm``, ``PiYG``, ``BrBG``."
             ),
         ),
+        color_scale: Optional[str] = Query(
+            None,
+            regex='^(auto|sequential|divergent)$',
+            description=(
+                "Override the sequential-vs-divergent heuristic for "
+                "continuous colour. Default ``auto`` (or omitted) picks "
+                "divergent when the data straddles zero with comparable "
+                "magnitudes on each side; otherwise sequential. Force "
+                "``sequential`` for one-sided ramps (uses "
+                "``palette_continuous``) or ``divergent`` to centre on "
+                "zero (uses ``palette_divergent``). Ignored for "
+                "categorical colour."
+            ),
+        ),
         font_family: str = Query(
             'DejaVu Sans',
             description="matplotlib font family (e.g. 'Arial', 'Helvetica', 'DejaVu Sans', 'serif').",
@@ -3760,6 +3778,7 @@ class CommonPlotParams:
         self.palette_categorical = palette_categorical
         self.palette_continuous = palette_continuous
         self.palette_divergent = palette_divergent
+        self.color_scale = color_scale
         self.font_family = font_family
         self.font_size = font_size
         self.subset = subset
@@ -3815,6 +3834,7 @@ def _build_plot_request(
     normalize: bool = False,
     facet: Optional[str] = None,
     group_by: Optional[str] = None,
+    color_scale: Optional[str] = None,
 ) -> PlotRequest:
     """Fold ``CommonPlotParams`` + geom-specific kwargs into a ``PlotRequest``.
 
@@ -3855,6 +3875,10 @@ def _build_plot_request(
         normalize=normalize,
         facet=facet,
         group_by=group_by,
+        # color_scale: per-geom override (rarely set explicitly) falls
+        # back to the CommonPlotParams value so a global override on any
+        # /plot/{geom} endpoint Just Works.
+        color_scale=color_scale if color_scale is not None else common.color_scale,
         filters=_parse_subset(common.subset),
         sample=common.sample,
         source_url=str(common.request.url) if common.request is not None else '',

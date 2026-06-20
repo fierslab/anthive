@@ -184,6 +184,7 @@ def pick_cmap(
     palette_div: str = _DEFAULT_DIVERGENT,
     values=None,
     n_categories: Optional[int] = None,
+    color_scale: Optional[str] = None,
 ) -> Tuple[str, str]:
     """Return ``(cmap_name, used_kind)`` for the given data kind.
 
@@ -192,8 +193,20 @@ def pick_cmap(
                ``'gene'`` is treated like ``'continuous'`` for cmap purposes.
         palette_cat / palette_cont / palette_div: per-family palettes.
         values: numeric array used to auto-decide sequential vs divergent
-                inside the continuous branch.  Pass ``None`` for "force
-                sequential".
+                inside the continuous branch when ``color_scale`` is
+                None / 'auto'.  Pass ``None`` for "force sequential".
+        color_scale: explicit override for the sequential-vs-divergent
+                decision in the continuous branch. Values:
+                ``None`` / ``'auto'`` — use the ``_looks_divergent``
+                  heuristic against ``values`` (the prior behaviour).
+                ``'sequential'`` — force the sequential family, even when
+                  the data straddles zero (useful for hexbin/heatmap on
+                  effect-size data where you want a one-sided ramp).
+                ``'divergent'`` — force the divergent family, even when
+                  the data is one-sided (useful for z-scores that are
+                  signed but happen to be all-positive in the sampled
+                  subset).
+                Ignored for ``kind='categorical'``.
 
     Returns:
         ``(cmap_name, 'categorical' | 'sequential' | 'divergent')``.
@@ -201,11 +214,13 @@ def pick_cmap(
     Defensive fallbacks:
         - a qualitative palette name passed for a continuous family is
           silently replaced with the default sequential cmap.
-        - a divergent palette passed when the data is one-sided is replaced
-          with the sequential default.
-        - a sequential palette passed when the data is divergent is replaced
-          with the divergent default (so the user always sees a coherent
-          axis).
+        - in ``auto`` mode, a divergent palette passed when the data is
+          one-sided is replaced with the sequential default; a sequential
+          palette passed when the data is divergent is replaced with the
+          divergent default (so the user always sees a coherent axis).
+        - in explicit ``sequential`` / ``divergent`` mode, fallbacks
+          still pick the right default if the passed palette doesn't
+          match the family — but the family is honoured.
     """
     if kind == 'categorical':
         chosen = palette_cat if palette_cat in _QUALITATIVE_PALETTES else _DEFAULT_CATEGORICAL
@@ -218,8 +233,16 @@ def pick_cmap(
             chosen = 'tab20'
         return chosen, 'categorical'
 
-    # 'continuous' or 'gene'
-    if values is not None and _looks_divergent(values):
+    # 'continuous' or 'gene' — decide divergent vs sequential.
+    mode = (color_scale or 'auto').lower()
+    if mode == 'divergent':
+        is_div = True
+    elif mode == 'sequential':
+        is_div = False
+    else:  # 'auto'
+        is_div = bool(values is not None and _looks_divergent(values))
+
+    if is_div:
         if palette_div in _DIVERGENT_PALETTES:
             return palette_div, 'divergent'
         return _DEFAULT_DIVERGENT, 'divergent'
@@ -632,6 +655,7 @@ def plot_scatter(
     palette_cat: str = _DEFAULT_CATEGORICAL,
     palette_cont: str = _DEFAULT_SEQUENTIAL,
     palette_div: str = _DEFAULT_DIVERGENT,
+    color_scale: Optional[str] = None,
     vmin: Optional[float] = None,           # colorbar clip — None = auto
     vmax: Optional[float] = None,
     title_extra: Optional[str] = None,
@@ -729,6 +753,7 @@ def plot_scatter(
                 palette_cont=palette_cont,
                 palette_div=palette_div,
                 values=color_array,
+                color_scale=color_scale,
             )
             # Continuous color requires ax.scatter — per-point cmap mapping
             # has no equivalent in ax.plot().  We rasterize so SVG/PDF
@@ -810,6 +835,7 @@ def plot_hexbin(
     palette_cat: str = _DEFAULT_CATEGORICAL,
     palette_cont: str = _DEFAULT_SEQUENTIAL,
     palette_div: str = _DEFAULT_DIVERGENT,
+    color_scale: Optional[str] = None,
     gridsize: int = 60,
     mincnt: int = 1,
     alpha: float = 1.0,
@@ -916,6 +942,7 @@ def plot_hexbin(
             palette_cont=palette_cont,
             palette_div=palette_div,
             values=cvals,
+            color_scale=color_scale,
         )
         hb_kwargs: dict = {
             'C': cvals,
