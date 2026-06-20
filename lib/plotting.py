@@ -71,6 +71,15 @@ _CUSTOM_SEQUENTIAL_ENDPOINTS = {
     # either name without overriding it. Use 'black' for white→pure
     # black (registered above) or matplotlib's 'Greys' for the
     # perceptually-tuned white→black-ish variant.
+    # ── earth tones + extra hues ──
+    'tan':         (0.82, 0.71, 0.55),   # CSS tan #D2B48C
+    'greenyellow': (0.55, 0.85, 0.18),   # CSS greenyellow #ADFF2F, dimmed
+    'turquoise':   (0.25, 0.88, 0.82),   # CSS turquoise #40E0D0
+    # 'pink' would collide with matplotlib's pink cmap (perceptually-
+    # tuned black-pink-white). Use 'hotpink' (CSS hotpink #FF69B4) for
+    # the simple white→hot-pink variant.
+    'hotpink':     (1.0, 0.41, 0.71),
+    'brown':       (0.55, 0.27, 0.07),   # CSS saddlebrown #8B4513
 }
 
 

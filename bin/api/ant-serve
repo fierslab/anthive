@@ -3701,10 +3701,13 @@ class CommonPlotParams:
                 "``Oranges`` / ``Purples`` / ``Greys``. Anthive also "
                 "registers single-colour white→colour gradients: "
                 "``magenta`` / ``blue`` / ``red`` / ``green`` / ``orange`` / "
-                "``purple`` / ``cyan`` / ``yellow`` / ``black`` "
+                "``purple`` / ``cyan`` / ``yellow`` / ``black`` / ``tan`` / "
+                "``greenyellow`` / ``turquoise`` / ``hotpink`` / ``brown`` "
                 "and the reversed colour→white variants ``magenta_r`` / "
                 "``blue_r`` / … (For greyscale use matplotlib's ``Greys`` "
-                "or ``gray`` — anthive leaves those intact.)"
+                "or ``gray`` — anthive leaves those intact. Matplotlib's "
+                "``pink`` is also preserved — use ``hotpink`` for the "
+                "simple white→hot-pink gradient.)"
             ),
         ),
         palette_divergent: str = Query(
