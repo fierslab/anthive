@@ -330,9 +330,16 @@
       </select>
       <label style="margin-top:4px"><input type="checkbox" name="normalize" id="f-normalize"> 100% (proportions)</label>
       <small style="display:block;margin-top:2px;color:#666">Stacked + count y = composition per group (e.g. donor mix per sample); 100% normalises each bar.</small>
-      {# facet (REST API 2.6): small multiples — one SEPARATE panel per value of
-         a 3rd categorical. (Distinct from in-plot 'group by' clustering, which
-         keeps a single axes — pending API support.) #}
+      {# group_by (REST API 2.6): in-plot clustering — one axes, bars ordered
+         into groups by a 3rd categorical (e.g. mice grouped by Village), with
+         separators + a group-label band. Distinct from facet (separate panels). #}
+      <label style="margin-top:6px">group by (cluster in one plot)</label>
+      <select name="group_by" id="f-group_by">
+        <option value="">— none —</option>
+        {% for c in plot_meta.cat_fields %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
+      </select>
+      <small style="display:block;margin-top:2px;color:#666">Orders the bars into groups in one plot (separators + group labels).</small>
+      {# facet: small multiples — one SEPARATE panel per value of a 3rd categorical. #}
       <label style="margin-top:6px">facet — separate panels</label>
       <select name="facet" id="f-facet">
         <option value="">— none —</option>
@@ -570,6 +577,7 @@
       <a class="dl-primary" id="dl-png">⬇ PNG</a>
       <a id="dl-svg">⬇ SVG</a>
       <a id="dl-pdf" title="vector PDF — publication quality">⬇ PDF</a>
+      <a id="dl-data" title="download the data behind this plot (CSV)">⬇ data</a>
       <span style="flex:1"></span>
       <span class="settings-menu">
         <a href="#" id="settings-toggle" title="figure size, DPI, fonts, palettes">⚙ settings ▾</a>
@@ -852,9 +860,11 @@
     document.getElementById('dl-png').href = buildUrl('png');
     document.getElementById('dl-svg').href = buildUrl('svg');
     document.getElementById('dl-pdf').href = buildUrl('pdf');
+    document.getElementById('dl-data').href = buildUrl('csv');   // underlying data (REST API 2.6)
     document.getElementById('dl-png').setAttribute('download', `${DB_ID.replace('/','_')}.${GEOM}.png`);
     document.getElementById('dl-svg').setAttribute('download', `${DB_ID.replace('/','_')}.${GEOM}.svg`);
     document.getElementById('dl-pdf').setAttribute('download', `${DB_ID.replace('/','_')}.${GEOM}.pdf`);
+    document.getElementById('dl-data').setAttribute('download', `${DB_ID.replace('/','_')}.${GEOM}.csv`);
   }
 
   // ── geom switcher

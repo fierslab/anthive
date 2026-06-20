@@ -980,11 +980,21 @@ def test_plot_bar_stacked_controls(client):
     assert 'name="bar_mode"' in resp.text
     assert 'value="stack"' in resp.text
     assert 'name="normalize"' in resp.text
-    assert 'name="facet"' in resp.text   # group-by small-multiples (REST API 2.6)
+    assert 'name="group_by"' in resp.text   # in-plot clustering (REST API 2.6)
+    assert 'name="facet"' in resp.text       # separate panels
     # not on non-bar grouped geoms
     v = client.get("/browse/GroupA/ds1/plot/violin")
     assert 'name="bar_mode"' not in v.text
     assert 'name="facet"' not in v.text
+    assert 'name="group_by"' not in v.text
+
+
+def test_plot_data_download_button(client):
+    # "⬇ data" button (CSV export of the plot's underlying data, REST API 2.6).
+    resp = client.get("/browse/GroupA/ds1/plot/scatter")
+    assert resp.status_code == 200
+    assert 'id="dl-data"' in resp.text
+    assert "buildUrl('csv')" in resp.text
 
 
 def test_plot_force_refresh_control(client):
