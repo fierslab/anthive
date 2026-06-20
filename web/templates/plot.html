@@ -305,11 +305,22 @@
     </fieldset>
     <fieldset>
       <legend>split by (optional)</legend>
-      <label>second categorical → side-by-side {{ geom }}s</label>
+      <label>second categorical{% if geom == 'bar' %} → bars per group{% else %} → side-by-side {{ geom }}s{% endif %}</label>
       <select name="color" id="f-color">
         <option value="">— none —</option>
         {% for c in plot_meta.cat_fields %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
       </select>
+      {% if geom == 'bar' %}
+      {# stacked composition (REST API 2.6): one bar per x, stacked by the split
+         categorical — e.g. cell composition per sample. #}
+      <label style="margin-top:6px">layout (when split set)</label>
+      <select name="bar_mode" id="f-bar_mode">
+        <option value="dodge">side-by-side</option>
+        <option value="stack">stacked (composition)</option>
+      </select>
+      <label style="margin-top:4px"><input type="checkbox" name="normalize" id="f-normalize"> 100% (proportions)</label>
+      <small style="display:block;margin-top:2px;color:#666">Stacked + count y = composition per group (e.g. donor mix per sample); 100% normalises each bar.</small>
+      {% endif %}
     </fieldset>
 
     {% elif geom in ('histogram', 'ecdf', 'kde') %}

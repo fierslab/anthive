@@ -956,6 +956,18 @@ def test_dataset_quick_links(client):
     assert "pubmed.ncbi.nlm.nih.gov/123456" in resp.text
 
 
+def test_plot_bar_stacked_controls(client):
+    # bar form exposes the stacked-composition controls (REST API 2.6).
+    resp = client.get("/browse/GroupA/ds1/plot/bar")
+    assert resp.status_code == 200
+    assert 'name="bar_mode"' in resp.text
+    assert 'value="stack"' in resp.text
+    assert 'name="normalize"' in resp.text
+    # not on non-bar grouped geoms
+    v = client.get("/browse/GroupA/ds1/plot/violin")
+    assert 'name="bar_mode"' not in v.text
+
+
 def test_plot_force_refresh_control(client):
     # The plot toolbar offers a force-refresh (cache-bypassing re-render).
     resp = client.get("/browse/GroupA/ds1/plot/scatter")
