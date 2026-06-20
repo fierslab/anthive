@@ -531,6 +531,56 @@
         the figure readable for large studies.
       </small>
     </fieldset>
+
+    {% elif geom == 'de_heatmap' %}
+    {# DE matrix: contrasts (rows) × genes/modules (cols), filled with the
+       stored effect size.  study + term required; the cascade reuses the
+       shared study→term loader.  contrasts/genes are optional CSV narrowers;
+       the server caps rows×cols at 2000 and returns a helpful 400 otherwise. #}
+    <fieldset>
+      <legend>DE study</legend>
+      <select name="study" id="f-study">
+        <option value="">— select study —</option>
+        {% for s in plot_meta.de_studies %}
+        <option value="{{ s.study_id }}" data-method="{{ s.method }}">{{ s.name }} · {{ s.method }} ({{ s.n_contrasts }} contrasts)</option>
+        {% endfor %}
+      </select>
+      {% if not plot_meta.de_studies %}
+      <small style="color:#b45309;margin-top:4px">No differential-expression data ingested for this dataset.</small>
+      {% endif %}
+    </fieldset>
+    <fieldset>
+      <legend>term</legend>
+      <label>model term (covariate / interaction)</label>
+      <select name="term" id="f-term"><option value="">— select study first —</option></select>
+    </fieldset>
+    <fieldset>
+      <legend>value</legend>
+      <label>fill / colour</label>
+      <select name="value" id="f-value">
+        <option value="">auto (server picks)</option>
+        <option value="estimate">estimate</option>
+        <option value="log2fc">log2fc</option>
+        <option value="zeff">zeff (z-effect)</option>
+        <option value="effsize">effsize</option>
+      </select>
+      <label style="margin-top:4px" title="black dot where padj ≤ threshold">
+        <input type="checkbox" name="sig_overlay" id="f-sig_overlay"> significance overlay
+      </label>
+      <label style="margin-top:4px">padj threshold</label>
+      <input type="number" name="padj_threshold" id="f-padj_threshold" value="0.05" step="any" min="0" max="1">
+    </fieldset>
+    <fieldset>
+      <legend>narrow (optional)</legend>
+      <label title="comma-separated contrast names; default = all rows">contrasts (CSV)</label>
+      <input type="text" name="contrasts" id="f-contrasts" autocomplete="off" placeholder="default: all contrasts">
+      <label style="margin-top:4px" title="comma-separated gene / module names; default = all columns">genes (CSV)</label>
+      <input type="text" name="genes" id="f-genes" autocomplete="off" placeholder="default: all genes/modules">
+      <small style="margin-top:4px;color:#666">
+        Server caps the matrix at 2000 cells (rows × cols). For big studies,
+        narrow with a contrast or gene list, else it returns a helpful error.
+      </small>
+    </fieldset>
     {% endif %}
 
     {# ── overlays (scatter / hexbin XY + kde2d; REST API 2.4) ──────────────── #}
@@ -798,7 +848,7 @@
 
   // DE geoms have required selections that arrive via a cascade; until they're
   // all chosen, show a hint instead of firing a request that would 400.
-  const DE_GEOMS = ['volcano', 'ma', 'forest'];
+  const DE_GEOMS = ['volcano', 'ma', 'forest', 'de_heatmap'];
   function fieldVal(name) {
     const el = document.querySelector(`#plot-form [name="${name}"]`);
     return el ? (el.value || '').trim() : '';
@@ -807,12 +857,14 @@
     if (GEOM === 'volcano' || GEOM === 'ma')
       return !!(fieldVal('study') && fieldVal('term') && fieldVal('contrast'));
     if (GEOM === 'forest') return !!fieldVal('gene');
+    if (GEOM === 'de_heatmap') return !!(fieldVal('study') && fieldVal('term'));
     if (GEOM === 'kde2d') return !!(fieldVal('x') && fieldVal('y'));
     return true;
   }
   function renderHint() {
     if (GEOM === 'volcano' || GEOM === 'ma') return 'select a DE study, term, and contrast on the left';
     if (GEOM === 'forest') return 'enter a gene on the left';
+    if (GEOM === 'de_heatmap') return 'select a DE study and term on the left';
     if (GEOM === 'kde2d') return 'enter continuous x and y fields on the left';
     return 'configure on the left to render';
   }

@@ -762,6 +762,27 @@ def test_plot_view_de_geom_without_de_data(client, monkeypatch):
     assert "No differential-expression data" in resp.text
 
 
+def test_plot_view_de_heatmap_form(client):
+    # de_heatmap (DE matrix; contrasts × genes) renders the study→term cascade
+    # plus the value / significance-overlay / CSV-narrower controls.
+    resp = client.get("/browse/GroupA/ds1/plot/de_heatmap")
+    assert resp.status_code == 200
+    for field in ("study", "term", "value", "sig_overlay", "contrasts", "genes"):
+        assert f'name="{field}"' in resp.text
+    assert "GLMM demo" in resp.text   # study option seeded from /de
+
+
+def test_plot_view_color_scale_control(client):
+    # The continuous-colour-ramp override (auto/sequential/divergent) and the
+    # new named single-hue cmaps live in the settings panel of every plot page.
+    resp = client.get("/browse/GroupA/ds1/plot/hexbin")
+    assert resp.status_code == 200
+    assert 'id="s-color_scale"' in resp.text
+    assert 'value="sequential"' in resp.text
+    assert 'value="divergent"' in resp.text
+    assert "'turquoise'" in resp.text   # new named cmap registered in PALETTES
+
+
 def test_genesets_index_renders_grouped(client):
     resp = client.get("/genesets")
     assert resp.status_code == 200

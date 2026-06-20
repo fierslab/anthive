@@ -629,6 +629,9 @@ _PLOT_GEOMS_UI = {
     'forest':    {'label': 'Forest (gene × contrasts)', 'icon': '🌲',
                   'needs': {'de': 'gene'},
                   'group': 'de'},
+    'de_heatmap': {'label': 'DE heatmap (contrasts × genes)', 'icon': '▦',
+                   'needs': {'de': 'study_term'},
+                   'group': 'de'},
 }
 
 # Display order for the viz row on the dataset page (group + label).
