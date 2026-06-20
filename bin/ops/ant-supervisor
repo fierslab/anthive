@@ -461,9 +461,17 @@ async def _main() -> None:
 
     print(f"{sup_prefix}all services stopped", flush=True)
 
+    # Only remove the state file if it is still OURS. During a hot cutover
+    # (e.g. `make serve-stop && systemctl start` — the old supervisor drains
+    # while the new one has already started and written its state), both
+    # supervisors of this repo share STATE_FILE. Unlinking unconditionally
+    # would delete the newer supervisor's state, leaving `status`/`restart`
+    # blind until the next child respawn. Guard on supervisor_pid.
     try:
-        STATE_FILE.unlink()
-    except (OSError, FileNotFoundError):
+        current = json.loads(STATE_FILE.read_text())
+        if current.get('supervisor_pid') == os.getpid():
+            STATE_FILE.unlink()
+    except (OSError, FileNotFoundError, ValueError):
         pass
 
 
