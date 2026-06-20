@@ -975,6 +975,15 @@ def test_plot_force_refresh_control(client):
     assert 'id="force-refresh"' in resp.text
 
 
+def test_plot_settings_in_toolbar_dropdown(client):
+    # Figure settings live in a toolbar dropdown (.settings-menu), not the sidebar.
+    resp = client.get("/browse/GroupA/ds1/plot/scatter")
+    assert resp.status_code == 200
+    assert 'class="settings-menu"' in resp.text
+    assert 'id="settings-toggle"' in resp.text
+    assert 'id="s-dpi"' in resp.text   # a settings control still present
+
+
 def test_plot_pdf_label_and_no_source_line(client):
     resp = client.get("/browse/GroupA/ds1/plot/scatter")
     assert resp.status_code == 200
