@@ -10,7 +10,7 @@ Legacy functions (plot_umap, plot_gene, plot_cat, plot_num) remain unchanged.
 """
 
 import io
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import matplotlib
@@ -1077,6 +1077,93 @@ def plot_distribution(
     return _render_figure(fig, dpi, output_format, caption, source_url)
 
 
+def _render_grouped_panel(
+    ax,
+    panel_df: pd.DataFrame,
+    *,
+    x_field: str,
+    y_field: Optional[str],
+    hue: Optional[str],
+    cat_order: List,
+    hue_order: Optional[List],
+    geom: str,
+    ci: bool,
+    bar_mode: str,
+    normalize: bool,
+    cmap_obj,
+    cmap_n: int,
+    hue_colour_index: Optional[Dict],
+) -> bool:
+    """Render one panel (one axis) for plot_grouped.
+
+    Returns True if this panel rendered as a stacked bar (so the caller
+    knows to use the stack-mode labelling). When faceting, the caller
+    feeds a per-panel subset of the data; cat_order/hue_order are SHARED
+    across panels so x-positions and colours line up.
+
+    hue_colour_index maps a hue level to a stable column index → colour.
+    Built once across all facets; ensures the same hue value gets the
+    same colour in every panel even if absent from one of them.
+    """
+    is_stacked = (geom == 'bar' and hue is not None and bar_mode == 'stack')
+    if is_stacked:
+        if y_field is None:
+            stack_mat = pd.crosstab(panel_df[x_field], panel_df[hue])
+        else:
+            stack_mat = (
+                panel_df.groupby([x_field, hue], observed=True)[y_field]
+                .mean().unstack(fill_value=0.0)
+            )
+        # Align to shared orderings (zero-fill missing rows / hue levels).
+        stack_mat = stack_mat.reindex(index=cat_order, columns=hue_order, fill_value=0.0)
+        if normalize:
+            totals = stack_mat.sum(axis=1).replace(0, np.nan)
+            stack_mat = stack_mat.div(totals, axis=0).fillna(0.0)
+        xs = np.arange(len(cat_order))
+        bottom = np.zeros(len(cat_order), dtype=float)
+        for col in hue_order:
+            heights = stack_mat[col].to_numpy(dtype=float)
+            idx = hue_colour_index[col] if hue_colour_index else 0
+            colour = cmap_obj((idx % cmap_n) / max(cmap_n - 1, 1))
+            ax.bar(xs, heights, bottom=bottom, width=0.8,
+                   color=colour, edgecolor='white', linewidth=0.3,
+                   label=str(col))
+            bottom += heights
+        ax.set_xticks(xs)
+        ax.set_xticklabels(cat_order)
+        if normalize:
+            ax.set_ylabel('Proportion')
+            ax.set_ylim(0, 1)
+        else:
+            ax.set_ylabel('Cell count' if y_field is None else f'mean {y_field}')
+        return True
+
+    if y_field is None:
+        if hue:
+            ct = pd.crosstab(panel_df[x_field], panel_df[hue])
+            ct = ct.reindex(index=cat_order, columns=hue_order, fill_value=0)
+            long = ct.reset_index().melt(id_vars=x_field, var_name=hue, value_name='count')
+            sns.barplot(data=long, x=x_field, y='count', hue=hue,
+                        order=cat_order, hue_order=hue_order, ax=ax)
+        else:
+            counts = panel_df[x_field].value_counts().reindex(cat_order, fill_value=0)
+            sns.barplot(x=counts.index, y=counts.values, ax=ax)
+        ax.set_ylabel('Cell count')
+    elif geom == 'box':
+        sns.boxplot(data=panel_df, x=x_field, y=y_field, hue=hue,
+                    order=cat_order, hue_order=hue_order,
+                    ax=ax, showfliers=False)
+    elif geom == 'violin':
+        sns.violinplot(data=panel_df, x=x_field, y=y_field, hue=hue,
+                       order=cat_order, hue_order=hue_order, ax=ax)
+    else:  # bar (dodge)
+        errorbar = ('ci', 95) if ci else None
+        sns.barplot(data=panel_df, x=x_field, y=y_field, hue=hue,
+                    order=cat_order, hue_order=hue_order,
+                    ax=ax, errorbar=errorbar)
+    return False
+
+
 def plot_grouped(
     data_df: pd.DataFrame,
     x_field: str,
@@ -1095,16 +1182,24 @@ def plot_grouped(
     bar_mode: str = 'dodge',
     normalize: bool = False,
     palette_cat: str = _DEFAULT_CATEGORICAL,
+    facet_field: Optional[str] = None,
 ) -> bytes:
     """Values grouped by a categorical field: bar (with CI), box, or violin.
 
     Args:
-        data_df:   DataFrame with [cell_name, x_field, (y_field), (hue_field)].
+        data_df:   DataFrame with [cell_name, x_field, (y_field), (hue_field), (facet_field)].
         x_field:   Categorical column for grouping (X axis).
         y_field:   Gene or numerical column for Y axis. None → cell counts.
         hue_field: Optional second categorical column. With ``bar_mode='dodge'``
                    (default) bars are drawn side-by-side per (x × hue);
                    with ``bar_mode='stack'`` they're stacked along Y.
+        facet_field: Optional 3rd categorical → one subplot panel per
+                   facet level (small multiples). Cardinality cap on
+                   facets is 8 panels; beyond that the API rejects the
+                   request rather than rendering an unreadable grid.
+                   X order, hue order, and colours are SHARED across
+                   panels so they're directly comparable. Legend is
+                   placed once, outside the rightmost panel.
         geom:      'bar' | 'box' | 'violin'.
         ci:        Show 95% confidence interval on bar plots (seaborn bootstrap).
                    Ignored in stacked mode (segments come from raw counts /
@@ -1119,106 +1214,98 @@ def plot_grouped(
         caption:   Figure caption.
     """
     _setup_style(font_family, font_size)
-    fig, ax = plt.subplots(figsize=(width, height))
 
+    # Resolve the shared orderings from the FULL dataset (so panels
+    # show the same x-positions / hue colours even when a panel is
+    # missing some levels).
     cat_order = data_df[x_field].value_counts().index.tolist()
     hue = hue_field if hue_field and hue_field in data_df.columns else None
     hue_order = (data_df[hue].value_counts().index.tolist()
                  if hue else None)
 
-    # Stacked bar path — composition plots (Sierksma Fig 1B). Requires
-    # geom='bar' + a hue_field; falls back to dodge if either's absent.
-    is_stacked = (geom == 'bar' and hue is not None and bar_mode == 'stack')
-    if is_stacked:
-        # Build the stack matrix: rows=x levels, cols=hue levels.
-        if y_field is None:
-            stack_mat = pd.crosstab(data_df[x_field], data_df[hue])
-        else:
-            # Aggregate y_field per (x, hue). Mean is the natural choice
-            # for continuous y; the segments-sum then is the sum-of-means
-            # which is rarely what users want for non-count plots. Counts
-            # are the dominant stacked-bar use case, so we accept the
-            # caveat and document it.
-            stack_mat = (
-                data_df.groupby([x_field, hue], observed=True)[y_field]
-                .mean().unstack(fill_value=0.0)
-            )
-        stack_mat = stack_mat.reindex(cat_order)
-        # Reorder columns by descending column-totals so the biggest
-        # group sits at the bottom of every stack (visually stable).
-        col_order = stack_mat.sum(axis=0).sort_values(ascending=False).index.tolist()
-        stack_mat = stack_mat[col_order]
-        if normalize:
-            totals = stack_mat.sum(axis=1).replace(0, np.nan)
-            stack_mat = stack_mat.div(totals, axis=0).fillna(0.0)
-        # Pick a colour per hue level via the categorical palette.
-        cmap_name, _ = pick_cmap('categorical', palette_cat=palette_cat,
-                                 n_categories=len(col_order))
-        cmap_obj = matplotlib.cm.get_cmap(cmap_name)
-        n_palette = getattr(cmap_obj, 'N', 256)
-        # Manual stacking: ax.bar(bottom=cumulative_height).
-        xs = np.arange(len(stack_mat.index))
-        bottom = np.zeros(len(stack_mat.index), dtype=float)
-        for col_idx, col in enumerate(col_order):
-            heights = stack_mat[col].to_numpy(dtype=float)
-            colour = cmap_obj((col_idx % n_palette) / max(n_palette - 1, 1))
-            ax.bar(xs, heights, bottom=bottom, width=0.8,
-                   color=colour, edgecolor='white', linewidth=0.3,
-                   label=str(col))
-            bottom += heights
-        ax.set_xticks(xs)
-        ax.set_xticklabels(stack_mat.index)
-        if normalize:
-            ax.set_ylabel('Proportion')
-            ax.set_ylim(0, 1)
-        else:
-            ax.set_ylabel('Cell count' if y_field is None else f'mean {y_field}')
-    elif y_field is None:
-        if hue:
-            # 2-factor count: bar of count(cells) per (x_field × hue_field),
-            # dodged side-by-side. Use crosstab → long form.
-            ct = pd.crosstab(data_df[x_field], data_df[hue])
-            ct = ct.reindex(cat_order)[hue_order]
-            long = ct.reset_index().melt(id_vars=x_field, var_name=hue, value_name='count')
-            sns.barplot(data=long, x=x_field, y='count', hue=hue,
-                        order=cat_order, hue_order=hue_order, ax=ax)
-            ax.set_ylabel('Cell count')
-        else:
-            counts = data_df[x_field].value_counts().reindex(cat_order)
-            sns.barplot(x=counts.index, y=counts.values, ax=ax)
-            ax.set_ylabel('Cell count')
-    elif geom == 'box':
-        sns.boxplot(data=data_df, x=x_field, y=y_field, hue=hue,
-                    order=cat_order, hue_order=hue_order,
-                    ax=ax, showfliers=False)
-    elif geom == 'violin':
-        sns.violinplot(data=data_df, x=x_field, y=y_field, hue=hue,
-                       order=cat_order, hue_order=hue_order, ax=ax)
-    else:  # bar (dodge)
-        errorbar = ('ci', 95) if ci else None
-        sns.barplot(data=data_df, x=x_field, y=y_field, hue=hue,
-                    order=cat_order, hue_order=hue_order,
-                    ax=ax, errorbar=errorbar)
+    # Facet axis: only respected if the field is present in data_df.
+    facet = (facet_field if facet_field and facet_field in data_df.columns
+             else None)
+    facet_levels = (data_df[facet].value_counts().index.tolist()
+                    if facet else [None])
 
-    ax.set_xlabel(x_field)
-    plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
+    # Stable hue → colour index, computed once across the union of all
+    # panels. For stacked bars we want the SAME donor line to get the
+    # SAME colour in every Village panel.
+    is_stacked_overall = (geom == 'bar' and hue is not None and bar_mode == 'stack')
+    cmap_n = 0
+    cmap_obj = None
+    hue_colour_index: Optional[Dict] = None
+    if hue is not None:
+        # Reorder hue_order by descending column total (same logic as
+        # the single-panel stack mode used previously — biggest at the
+        # bottom of each stack).
+        if is_stacked_overall:
+            if y_field is None:
+                col_totals = pd.crosstab(data_df[x_field], data_df[hue]).sum(axis=0)
+            else:
+                col_totals = (
+                    data_df.groupby([hue], observed=True)[y_field].sum()
+                )
+            hue_order = col_totals.sort_values(ascending=False).index.tolist()
+        cmap_name, _ = pick_cmap('categorical', palette_cat=palette_cat,
+                                 n_categories=max(len(hue_order), 1))
+        cmap_obj = matplotlib.cm.get_cmap(cmap_name)
+        cmap_n = getattr(cmap_obj, 'N', 256)
+        hue_colour_index = {h: i for i, h in enumerate(hue_order)}
+
+    n_panels = len(facet_levels)
+    # Lay out panels in a single row, share the y axis so heights compare.
+    panel_width = max(2.5, width / max(n_panels, 1))
+    fig, axes = plt.subplots(
+        nrows=1, ncols=n_panels,
+        figsize=(panel_width * n_panels, height),
+        sharey=True, squeeze=False,
+    )
+    axes = axes[0]
+
+    is_stacked = False
+    for ax, facet_value in zip(axes, facet_levels):
+        if facet_value is None:
+            panel_df = data_df
+        else:
+            panel_df = data_df[data_df[facet] == facet_value]
+        is_stacked = _render_grouped_panel(
+            ax, panel_df,
+            x_field=x_field, y_field=y_field, hue=hue,
+            cat_order=cat_order, hue_order=hue_order,
+            geom=geom, ci=ci,
+            bar_mode=bar_mode, normalize=normalize,
+            cmap_obj=cmap_obj, cmap_n=cmap_n,
+            hue_colour_index=hue_colour_index,
+        ) or is_stacked
+        ax.set_xlabel(x_field)
+        plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
+        if facet_value is not None:
+            ax.set_title(f'{facet} = {facet_value}')
+        sns.despine(ax=ax)
+        # Per-panel legends produced by seaborn need to go away; only
+        # the rightmost panel's legend is kept by _legend_outside below.
+        leg = ax.get_legend()
+        if leg is not None and ax is not axes[-1]:
+            leg.remove()
+
     n_cells = int(len(data_df))
     title_bits = [
         f'{y_field} by {x_field}' if y_field else f'cells per {x_field}',
-        ('bar (stacked)' if is_stacked else
-         ('bar (proportions)' if (is_stacked and normalize) else geom)),
+        ('bar (100% stacked)' if (is_stacked and normalize) else
+         ('bar (stacked)' if is_stacked else geom)),
         f'n={_fmt_n(n_cells)}',
         f'{len(cat_order)} grps',
     ]
     if hue:
         title_bits.append(f'split by {hue}')
-    if is_stacked and normalize:
-        # The override above misses the 'and normalize' arm because
-        # is_stacked is False there — just append the modifier directly.
-        title_bits[1] = 'bar (100% stacked)'
-    ax.set_title(_compose_title(title_bits))
-    sns.despine(ax=ax)
-    _legend_outside(ax, title=hue if is_stacked else None)
+    if facet:
+        title_bits.append(f'facet by {facet} ({n_panels} panels)')
+    fig.suptitle(_compose_title(title_bits), y=1.02 if n_panels > 1 else 1.0)
+
+    # One shared legend, outside the rightmost panel.
+    _legend_outside(axes[-1], title=hue if (hue and (is_stacked or facet)) else None)
     fig.tight_layout()
 
     return _render_figure(fig, dpi, output_format, caption, source_url)

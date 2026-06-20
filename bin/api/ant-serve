@@ -2681,6 +2681,7 @@ class PlotRequest:
     # bar-geom layout knobs
     bar_mode: str                # 'dodge' (default, side-by-side) | 'stack'
     normalize: bool              # stacked bar: scale each bar to 100% (proportions)
+    facet: Optional[str]         # 3rd categorical for small-multiples panels
     filters: Optional[Dict[str, Any]]
     sample: Optional[int]
     source_url: str
@@ -3090,7 +3091,17 @@ def _handle_grouped(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
                 f"'{req.color}' resolved as '{hue_kind}'"
             ))
 
-    extra_meta = [x_name] + ([hue_name] if hue_name else [])
+    facet_name: Optional[str] = None
+    if req.facet:
+        facet_name, facet_kind = ctx.resolve(req.facet)
+        if facet_kind != 'categorical':
+            raise HTTPException(400, detail=(
+                f"facet requires categorical; "
+                f"'{req.facet}' resolved as '{facet_kind}'"
+            ))
+
+    extra_meta = [x_name] + ([hue_name] if hue_name else []) + \
+                 ([facet_name] if facet_name else [])
     y_name = None
     if req.y:
         y_name, y_kind = ctx.resolve(req.y)
@@ -3123,6 +3134,18 @@ def _handle_grouped(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     # color levels become segments WITHIN a bar, so the bar count is
     # just the x cardinality — a composition like 40 samples × 29 donor
     # lines (1160 dodge bars) is 40 stacked bars and renders cleanly.
+    # Facet cap — runs for ALL grouped geoms because every multi-panel
+    # layout becomes unreadable past a small number of panels.
+    if facet_name:
+        n_facets = int(data_df[facet_name].nunique())
+        _FACET_CAP = 8
+        if n_facets > _FACET_CAP:
+            raise HTTPException(400, detail=(
+                f"facet='{facet_name}' has {n_facets} levels; capped at "
+                f"{_FACET_CAP}. Pick a lower-cardinality facet field or "
+                f"set a subset filter to narrow it."
+            ))
+
     if req.geom == 'bar':
         is_stacked = (hue_name is not None and req.bar_mode == 'stack')
         if is_stacked:
@@ -3130,6 +3153,8 @@ def _handle_grouped(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         else:
             n_split = int(data_df[hue_name].nunique()) if hue_name else 1
             n_bars = n_groups * n_split
+        # facet does NOT multiply bars — x positions are shared across
+        # panels, segments live within bars in stack mode.
         _BAR_CAP = 100
         if n_bars > _BAR_CAP:
             if is_stacked:
@@ -3166,6 +3191,7 @@ def _handle_grouped(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         data_df=data_df, x_field=x_name, y_field=y_name, hue_field=hue_name,
         geom=req.geom, ci=req.ci,
         bar_mode=req.bar_mode, normalize=req.normalize,
+        facet_field=facet_name,
         width=req.width, height=req.height, dpi=req.dpi,
         output_format=req.output_format,
         palette_cat=req.palette_cat,
@@ -3702,6 +3728,7 @@ def _build_plot_request(
     # bar-geom: 'dodge' (default) | 'stack' for composition plots
     bar_mode: str = 'dodge',
     normalize: bool = False,
+    facet: Optional[str] = None,
 ) -> PlotRequest:
     """Fold ``CommonPlotParams`` + geom-specific kwargs into a ``PlotRequest``.
 
@@ -3740,6 +3767,7 @@ def _build_plot_request(
         n_label=n_label,
         bar_mode=bar_mode,
         normalize=normalize,
+        facet=facet,
         filters=_parse_subset(common.subset),
         sample=common.sample,
         source_url=str(common.request.url) if common.request is not None else '',
@@ -4098,6 +4126,10 @@ async def plot_bar_endpoint(
         False,
         description="Stacked bar only: scale each bar to 100% so segments show within-group proportions instead of raw counts. Ignored in dodge mode.",
     ),
+    facet: Optional[str] = Query(
+        None,
+        description="Optional 3rd categorical for small-multiples — one panel per facet value, shared x order / hue colours / y axis. Capped at 8 panels.",
+    ),
 ):
     """Bar plot — cell counts when ``y`` is omitted, mean(±CI) of ``y`` per
     group when ``y`` is provided.
@@ -4109,7 +4141,7 @@ async def plot_bar_endpoint(
     lines stay under the cap."""
     req = _build_plot_request(
         common, 'bar', x=x, y=y, color=color, ci=ci,
-        bar_mode=bar_mode, normalize=normalize,
+        bar_mode=bar_mode, normalize=normalize, facet=facet,
     )
     return await _render_plot(req, common.request)
 
