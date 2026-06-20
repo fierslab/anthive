@@ -3109,6 +3109,27 @@ def _handle_grouped(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
 
     n_cells = int(len(data_df))
     n_groups = int(data_df[x_name].nunique())
+
+    # Bar-specific cardinality cap. A bar plot with thousands of bars is
+    # unreadable; refuse early with a helpful 400 so the web UI can surface
+    # the constraint in-status (matches the MA/volcano pattern). Violin/box
+    # don't suffer the same explosion problem and are uncapped.
+    if req.geom == 'bar':
+        n_split = int(data_df[hue_name].nunique()) if hue_name else 1
+        n_bars = n_groups * n_split
+        _BAR_CAP = 100
+        if n_bars > _BAR_CAP:
+            split_clause = (
+                f" × color='{hue_name}': {n_split} levels"
+                if hue_name else ""
+            )
+            raise HTTPException(400, detail=(
+                f"bar plot would have {n_bars} bars (x='{x_name}': "
+                f"{n_groups} levels{split_clause}); capped at {_BAR_CAP}. "
+                f"Pick a lower-cardinality field, set a subset filter, "
+                f"or use a different geom."
+            ))
+
     caption = plotting.build_caption(
         req.db_id, req.geom, x_name, x_kind, y_name, hue_name, req.layer,
         n_cells=n_cells, n_groups=n_groups,
