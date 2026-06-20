@@ -1,0 +1,525 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = ["duckdb", "pandas", "numpy", "pyyaml", "requests"]
+# ///
+"""
+ant-de-fill-base-mean — backfill base_mean into __de.stats_extra by
+computing mean expression per gene from the catalog duckdb's default
+log-norm layer.
+
+When DE results arrive from tools that don't ship per-gene mean
+expression (Seurat, glmmSeq, glmmTMB, custom GLMM wrappers), the MA
+plot has nothing to plot on its x-axis. This tool fills the gap:
+for every gene present in __de, it computes mean(layer_X[gene, :])
+across all cells and writes that into stats_extra as
+{"base_mean": <value>}.
+
+The mean is computed from the log-norm-space layer ('X' by default —
+the dataset's `default_layer` per .md frontmatter, log1p of normalised
+counts in anthive convention). It is NOT the same units as DESeq2's
+baseMean (which is the mean of normalised counts on the linear scale)
+— that's a deliberate compromise: most DE tools we care about don't
+ship raw counts either, and the relative ordering (which is what the
+MA plot's gene-ranking on x reads) is preserved between the two
+units.
+
+For genes that already carry a base_mean (e.g. DESeq2 deposits with
+the deseq2 preset), the value is preserved unless --replace is given.
+
+Usage:
+  ant-de-fill-base-mean S25/V6A                  # by db_id
+  ant-de-fill-base-mean path/to/file.duckdb      # by direct path
+  ant-de-fill-base-mean S25/V6A --layer counts   # use a different layer
+  ant-de-fill-base-mean S25/V6A --study-id …     # restrict to one study
+  ant-de-fill-base-mean --all                    # scan every duckdb under data_folder
+  ant-de-fill-base-mean S25/V6A --dry-run        # report what would change
+
+Coordination with ant-serve: uses /admin/release/{db_id} +
+/admin/restore/{db_id} like AnnotationWriter / DEWriter. Use
+--no-coordinate when ant-serve isn't running or you've stopped it.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import time
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+import duckdb
+import requests
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _SCRIPT_DIR.parent.parent
+sys.path.insert(0, str(_REPO_ROOT / 'lib'))
+from config import get_config                                # noqa: E402
+
+_DEFAULT_DATA_FOLDER = _REPO_ROOT / 'data' / 'h5adstore'
+
+
+def _eprint(*args, **kwargs) -> None:
+    print(*args, **kwargs, file=sys.stderr)
+
+
+def _post_ant_serve(url: str, db_id: str, action: str) -> None:
+    """release / restore the duckdb against ant-serve, swallowing failures
+    when --no-coordinate or the server isn't reachable."""
+    full = url.rstrip('/') + f'/admin/{action}/{db_id}'
+    try:
+        r = requests.post(full, timeout=5,
+                          auth=_auth_for_url(url))
+        if r.status_code == 200:
+            return
+        _eprint(f"  ant-serve {action} returned {r.status_code}: {r.text[:120]}")
+    except requests.RequestException as exc:
+        _eprint(f"  ant-serve {action} unreachable: {exc}")
+
+
+def _auth_for_url(url: str) -> Optional[Tuple[str, str]]:
+    """Best-effort basic auth: anthive.yaml may carry it, else fall back to
+    common dev credentials. ant-serve behind Authelia accepts basic auth
+    on /api/* — same path used by antclient + vark."""
+    cfg = get_config()
+    user = cfg.get('basic_auth_user') or cfg.get('admin_user')
+    pw = cfg.get('basic_auth_password') or cfg.get('admin_password')
+    return (user, pw) if (user and pw) else None
+
+
+def _md_frontmatter_field(md_text: str, key: str) -> Optional[str]:
+    """Cheap frontmatter scan for `key: <value>` inside the leading ---
+    block. Handles a key on the first line (no preceding newline)."""
+    if not md_text.startswith('---\n'):
+        return None
+    in_block = False
+    for line in md_text.split('\n', 80)[:80]:
+        stripped = line.strip()
+        if stripped == '---':
+            if not in_block:
+                in_block = True
+                continue
+            return None
+        if not in_block:
+            continue
+        if stripped.lower().startswith(key.lower() + ':'):
+            return stripped.split(':', 1)[1].strip().strip("'\"")
+    return None
+
+
+def _path_to_db_id(path: Path, data_folder: Path) -> Optional[str]:
+    """Given a .duckdb path, derive its `<group_id>/<id>` (the ant-serve
+    db_id) by reading the sibling .md + the data_project's index.md."""
+    try:
+        rel = path.relative_to(data_folder)
+    except ValueError:
+        return None
+    md = path.with_suffix('.md')
+    if not md.exists():
+        return None
+    file_id = _md_frontmatter_field(
+        md.read_text(encoding='utf-8', errors='replace'), 'id',
+    )
+    if not file_id:
+        return None
+    if not rel.parts:
+        return None
+    project_index = data_folder / rel.parts[0] / 'index.md'
+    if not project_index.exists():
+        return None
+    group_id = _md_frontmatter_field(
+        project_index.read_text(encoding='utf-8', errors='replace'),
+        'group_id',
+    )
+    if not group_id:
+        return None
+    return f'{group_id}/{file_id}'
+
+
+def _resolve_via_api(target: str, ant_serve_url: str) -> Optional[str]:
+    """Ask the running ant-serve where db_id `target` lives on disk.
+
+    Used because db_ids can be AUTO-GENERATED by ant-serve when the .md
+    frontmatter doesn't carry an explicit `id:` (see ant-serve's
+    `generate_file_id`) — making a static lookup against .md files
+    impossible. The API is the authoritative resolver.
+
+    Returns the filesystem path of the .duckdb or None if the server
+    is unreachable / db_id unknown.
+    """
+    try:
+        r = requests.get(
+            ant_serve_url.rstrip('/') + f'/databases/{target}/info',
+            auth=_auth_for_url(ant_serve_url),
+            timeout=5,
+        )
+        if r.status_code != 200:
+            return None
+        # /info doesn't expose the on-disk path; instead list all
+        # databases and find the one whose db_id matches.
+    except requests.RequestException:
+        return None
+    try:
+        r = requests.get(
+            ant_serve_url.rstrip('/') + '/databases',
+            auth=_auth_for_url(ant_serve_url),
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return None
+        body = r.json()
+    except (requests.RequestException, ValueError):
+        return None
+    for db in body.get('databases', []):
+        if db.get('id') == target or db.get('db_id') == target:
+            # /databases returns `path` relative to the data_folder
+            # (e.g. 'Sierksma2025/Village.6M/Village.6M.duckdb'), not an
+            # absolute path. Resolve against the env-resolved data_folder.
+            rel = db.get('path') or db.get('duckdb_path')
+            if rel:
+                # The caller knows the data_folder; we just return the
+                # relative path here and let _resolve_duckdb's caller
+                # join it.
+                return rel
+    return None
+
+
+def _resolve_duckdb(
+    target: str, data_folder: Path, ant_serve_url: str,
+) -> Tuple[Path, Optional[str]]:
+    """Resolve target → (duckdb_path, db_id_or_None).
+
+    Accepts either a .duckdb path or a `group_id/file_id` slug. Two-tier
+    resolution for slugs:
+      1. Walk .md frontmatter (works when both `id:` and `group_id:`
+         are explicitly set).
+      2. Fall back to the running ant-serve API (catches auto-generated
+         3-char codes).
+    """
+    p = Path(target)
+    if p.exists() and p.suffix == '.duckdb':
+        resolved = p.resolve()
+        return resolved, _path_to_db_id(resolved, data_folder)
+
+    if '/' not in target:
+        raise SystemExit(
+            f"target {target!r} is neither a .duckdb path nor a db_id "
+            f"(expected '<group_id>/<file_id>')"
+        )
+    group_id, file_id = target.split('/', 1)
+    for md in data_folder.rglob('*.md'):
+        if md.name == 'index.md':
+            continue
+        try:
+            text = md.read_text(encoding='utf-8', errors='replace')
+        except OSError:
+            continue
+        if _md_frontmatter_field(text, 'id') != file_id:
+            continue
+        rel = md.relative_to(data_folder)
+        if not rel.parts:
+            continue
+        idx = data_folder / rel.parts[0] / 'index.md'
+        if idx.exists():
+            idx_text = idx.read_text(encoding='utf-8', errors='replace')
+            if _md_frontmatter_field(idx_text, 'group_id') != group_id:
+                continue
+        duckdb_path = md.with_suffix('.duckdb')
+        if duckdb_path.exists():
+            return duckdb_path.resolve(), target
+
+    # Fall back to ant-serve when frontmatter resolution failed (auto-IDs).
+    api_rel = _resolve_via_api(target, ant_serve_url)
+    if api_rel:
+        api_path = Path(api_rel)
+        # The API returns paths relative to data_folder.
+        if not api_path.is_absolute():
+            api_path = data_folder / api_path
+        if api_path.exists():
+            return api_path.resolve(), target
+
+    raise SystemExit(
+        f"no .duckdb in {data_folder} resolves db_id {target!r} "
+        f"(and ant-serve at {ant_serve_url} doesn't know it either)"
+    )
+
+
+def _has_de(con: duckdb.DuckDBPyConnection) -> bool:
+    n = con.execute(
+        "SELECT count(*) FROM information_schema.tables WHERE table_name='__de'"
+    ).fetchone()[0]
+    if not n:
+        return False
+    n_rows = con.execute("SELECT count(*) FROM __de").fetchone()[0]
+    return bool(n_rows)
+
+
+def _has_layer(con: duckdb.DuckDBPyConnection, layer: str) -> bool:
+    n = con.execute(
+        "SELECT count(*) FROM information_schema.tables WHERE table_name=?",
+        [f'__layer__{layer}'],
+    ).fetchone()[0]
+    return bool(n)
+
+
+def _de_studies(con: duckdb.DuckDBPyConnection,
+                study_filter: Optional[str]) -> List[dict]:
+    if study_filter:
+        rows = con.execute(
+            "SELECT study_id, target FROM __de_study WHERE study_id = ?",
+            [study_filter],
+        ).fetchall()
+    else:
+        rows = con.execute(
+            "SELECT study_id, target FROM __de_study"
+        ).fetchall()
+    return [{'study_id': r[0], 'target': r[1] or 'gene'} for r in rows]
+
+
+def _compute_gene_means(
+    con: duckdb.DuckDBPyConnection, layer: str,
+) -> int:
+    """Materialise a temp table `_gene_means(gene_id, base_mean)` covering
+    every gene in __genes (zero for genes absent from __layer__<layer>).
+
+    Layer storage is sparse — only non-zero values are stored. Mean per
+    gene = SUM(value) / n_cells (zeros count toward the denominator).
+
+    Returns the count of genes for which a mean was computed.
+    """
+    n_cells = con.execute("SELECT count(*) FROM __cells").fetchone()[0]
+    con.execute("DROP TABLE IF EXISTS _gene_means")
+    con.execute(f"""
+        CREATE TEMP TABLE _gene_means AS
+        SELECT
+            g.gene_id,
+            COALESCE(SUM(l.value), 0.0) / {n_cells}::DOUBLE AS base_mean
+        FROM __genes g
+        LEFT JOIN __layer__{layer} l USING (gene_id)
+        GROUP BY g.gene_id
+    """)
+    return con.execute("SELECT count(*) FROM _gene_means").fetchone()[0]
+
+
+def _backfill(
+    con: duckdb.DuckDBPyConnection,
+    study_id: str,
+    *,
+    replace: bool,
+    dry_run: bool,
+) -> Tuple[int, int]:
+    """Update __de.stats_extra for `study_id` by merging in base_mean from
+    _gene_means.
+
+    Without --replace, rows that already carry a base_mean key are
+    preserved. With --replace, every row's base_mean is overwritten with
+    the freshly-computed value.
+
+    Returns (rows_inspected, rows_updated).
+    """
+    n_inspected = con.execute(
+        "SELECT count(*) FROM __de WHERE study_id = ?", [study_id],
+    ).fetchone()[0]
+    if n_inspected == 0:
+        return 0, 0
+
+    # Two strategies depending on --replace:
+    #   * default: only touch rows that LACK a base_mean
+    #   * replace: touch every row
+    if replace:
+        target_filter = "1=1"
+    else:
+        target_filter = (
+            "(stats_extra IS NULL "
+            " OR stats_extra = '' "
+            " OR stats_extra NOT LIKE '%\"base_mean\"%')"
+        )
+
+    n_target = con.execute(
+        f"SELECT count(*) FROM __de "
+        f"WHERE study_id = ? AND {target_filter}", [study_id],
+    ).fetchone()[0]
+    if dry_run or n_target == 0:
+        return n_inspected, n_target
+
+    # Build the merge expression. DuckDB's json_object + COALESCE pattern
+    # works without depending on json_merge_patch (which exists in
+    # newer DuckDB releases but isn't ubiquitous yet). Strategy:
+    #   * If stats_extra is empty/NULL → write {"base_mean": x}
+    #   * Otherwise STRIP the closing '}' and append ', "base_mean": x}'
+    # The closing '}' check is robust as long as stats_extra is valid
+    # JSON object syntax (which lib/de_storage.py guarantees).
+    con.execute(f"""
+        UPDATE __de
+        SET stats_extra = CASE
+            WHEN stats_extra IS NULL OR stats_extra = '' OR stats_extra = '{{}}' THEN
+                CONCAT('{{', '"base_mean":', g.base_mean::VARCHAR, '}}')
+            ELSE
+                CONCAT(
+                    LEFT(stats_extra, LENGTH(stats_extra) - 1),
+                    ',', '"base_mean":', g.base_mean::VARCHAR, '}}'
+                )
+        END
+        FROM _gene_means g
+        WHERE __de.gene_id = g.gene_id
+          AND __de.study_id = ?
+          AND {target_filter}
+    """, [study_id])
+    return n_inspected, n_target
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description='Backfill __de.stats_extra.base_mean from the '
+                    'default log-norm layer of the catalog duckdb.',
+    )
+    parser.add_argument('target', nargs='?',
+                        help='db_id (e.g. S25/V6A) or .duckdb path. Omit with --all.')
+    parser.add_argument('--all', action='store_true',
+                        help='Scan every duckdb under --data-folder.')
+    parser.add_argument('--data-folder',
+                        default=str(_DEFAULT_DATA_FOLDER),
+                        help='Catalog root (default data/h5adstore).')
+    parser.add_argument('--layer', default='X',
+                        help="Layer to compute mean from. Default 'X' (log-norm).")
+    parser.add_argument('--study-id',
+                        help='Restrict to one study_id (default: every study in the duckdb).')
+    parser.add_argument('--include-module-target', action='store_true',
+                        help="By default we skip target='module' studies — "
+                             "mean expression doesn't apply to modules. "
+                             "Pass this flag to backfill them anyway (the "
+                             "mean is then over module-score obs columns, "
+                             "if they exist).")
+    parser.add_argument('--replace', action='store_true',
+                        help='Overwrite existing base_mean values.')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='Report would-be updates; do not modify the duckdb.')
+    parser.add_argument('--no-coordinate', action='store_true',
+                        help='Skip the release/restore POST cycle (only safe '
+                             'when ant-serve is stopped).')
+    parser.add_argument('--ant-serve-url',
+                        help='Override ant-serve URL (default from anthive.yaml + '
+                             'rest_api_host/rest_api_port).')
+    args = parser.parse_args()
+
+    data_folder = Path(args.data_folder).resolve()
+    if not data_folder.exists():
+        _eprint(f"data folder not found: {data_folder}")
+        return 2
+
+    cfg = get_config()
+    if not args.ant_serve_url:
+        host = cfg.get('rest_api_host', 'localhost')
+        port = cfg.get('rest_api_port', 8080)
+        args.ant_serve_url = f"http://{host}:{port}/api"
+
+    # Each target: (label_for_logging, duckdb_path, db_id_or_None)
+    targets: List[Tuple[str, Path, Optional[str]]] = []
+    if args.all:
+        if args.target:
+            _eprint('--all and a positional target are mutually exclusive.')
+            return 2
+        for duckdb_path in sorted(data_folder.rglob('*.duckdb')):
+            if '.staging' in str(duckdb_path):
+                continue
+            db_id = _path_to_db_id(duckdb_path.resolve(), data_folder)
+            rel = duckdb_path.relative_to(data_folder)
+            label = db_id or str(rel)
+            targets.append((label, duckdb_path, db_id))
+    else:
+        if not args.target:
+            _eprint('Provide a target (db_id or .duckdb path) or --all.')
+            return 2
+        path, db_id = _resolve_duckdb(args.target, data_folder, args.ant_serve_url)
+        label = db_id or args.target
+        targets.append((label, path, db_id))
+
+    # Decide which duckdbs actually have DE data + matching layer.
+    candidates: List[Tuple[str, Path, Optional[str], List[dict]]] = []
+    for label, path, db_id in targets:
+        try:
+            con = duckdb.connect(str(path), read_only=True)
+        except duckdb.IOException as exc:
+            _eprint(f"  skip {label} (cannot open read-only): {exc}")
+            continue
+        try:
+            if not _has_de(con):
+                continue
+            if not _has_layer(con, args.layer):
+                _eprint(f"  skip {label}: no __layer__{args.layer}")
+                continue
+            studies = _de_studies(con, args.study_id)
+            if not studies:
+                _eprint(f"  skip {label}: no matching studies")
+                continue
+            candidates.append((label, path, db_id, studies))
+        finally:
+            con.close()
+
+    if not candidates:
+        _eprint('No duckdbs to update.')
+        return 0
+
+    for label, path, db_id, studies in candidates:
+        print(f'\n══ {label} ══')
+        gene_studies = [s for s in studies if s['target'] != 'module']
+        skipped = [s for s in studies if s['target'] == 'module']
+        if skipped and not args.include_module_target:
+            print(f"  skipping {len(skipped)} module-target study(ies): "
+                  f"{', '.join(s['study_id'] for s in skipped)} "
+                  f"(use --include-module-target to override)")
+            studies = gene_studies
+        if not studies:
+            print('  no eligible (gene-target) studies — moving on')
+            continue
+
+        # release the duckdb against ant-serve before opening r/w.
+        # Dry-run only counts rows — open r/o, skip the release/restore
+        # entirely (no need to disturb the running server). Release/
+        # restore is also skipped when we don't know a db_id (e.g. a
+        # direct path with no .md frontmatter).
+        will_coordinate = (
+            db_id is not None and not args.dry_run and not args.no_coordinate
+        )
+        if will_coordinate:
+            _post_ant_serve(args.ant_serve_url, db_id, 'release')
+            time.sleep(0.3)
+
+        try:
+            con = duckdb.connect(str(path), read_only=args.dry_run)
+        except duckdb.IOException as exc:
+            _eprint(f"  cannot open {'r/o' if args.dry_run else 'r/w'} "
+                    f"(perhaps ant-serve still holds it): {exc}")
+            if will_coordinate:
+                _post_ant_serve(args.ant_serve_url, db_id, 'restore')
+            continue
+
+        try:
+            t0 = time.monotonic()
+            n_genes = _compute_gene_means(con, args.layer)
+            print(f"  computed mean({args.layer}) for {n_genes} genes "
+                  f"in {time.monotonic() - t0:.1f}s")
+            for s in studies:
+                tt = time.monotonic()
+                n_inspected, n_target = _backfill(
+                    con, s['study_id'],
+                    replace=args.replace, dry_run=args.dry_run,
+                )
+                if args.dry_run:
+                    print(f"  study={s['study_id']!r}: would update "
+                          f"{n_target:,} / {n_inspected:,} rows")
+                else:
+                    print(f"  study={s['study_id']!r}: updated "
+                          f"{n_target:,} / {n_inspected:,} rows "
+                          f"in {time.monotonic() - tt:.1f}s")
+            if not args.dry_run:
+                con.execute("DROP TABLE IF EXISTS _gene_means")
+        finally:
+            con.close()
+            if will_coordinate:
+                _post_ant_serve(args.ant_serve_url, db_id, 'restore')
+
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
