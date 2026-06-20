@@ -1297,8 +1297,8 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.5.0"
-API_VERSION_RELEASED = "2026-06-19"
+API_VERSION = "2.6.0"
+API_VERSION_RELEASED = "2026-06-20"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
 # Create FastAPI app with lifespan handler (Phase 2)
@@ -2353,7 +2353,15 @@ _PLOT_MIME_TYPES = {
     'png': 'image/png',
     'svg': 'image/svg+xml',
     'pdf': 'application/pdf',
+    'csv': 'text/csv; charset=utf-8',
+    'tsv': 'text/tab-separated-values; charset=utf-8',
 }
+
+# Output formats that skip image rendering and emit the raw dataframe
+# the handler queried from the DB (post-subset/post-sample). Used by
+# the web UI's "⬇ data" button — guarantees the data exported is the
+# exact data behind the plotted image.
+_PLOT_DATA_FORMATS = ('csv', 'tsv')
 
 _PLOT_GEOMS = {
     'scatter',     # 2-axis scatter — embedding when x is an obsm key,
@@ -2760,6 +2768,14 @@ def _handle_scatter(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     n_cells = int(len(embedding_df))
     n_groups = (int(color_df[color_field_name].nunique())
                 if color_df is not None and color_kind == 'categorical' else None)
+    if req.output_format in _PLOT_DATA_FORMATS:
+        df_out = embedding_df.copy()
+        if color_df is not None and color_field_name:
+            df_out = df_out.merge(
+                color_df[['cell_name', color_field_name]],
+                on='cell_name', how='left',
+            )
+        return _emit_dataframe(df_out, req)
     caption = plotting.build_caption(
         req.db_id, req.geom, emb_id, 'embedding',
         None, color_field_name, req.layer,
@@ -2840,6 +2856,14 @@ def _handle_hexbin(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         n_cells=n_cells, n_groups=n_groups,
         sample=req.sample, subset=_subset_for_caption(req),
     )
+    if req.output_format in _PLOT_DATA_FORMATS:
+        df_out = embedding_df.copy()
+        if color_df is not None and color_field_name:
+            df_out = df_out.merge(
+                color_df[['cell_name', color_field_name]],
+                on='cell_name', how='left',
+            )
+        return _emit_dataframe(df_out, req)
     image_bytes = plotting.plot_hexbin(
         embedding_df=embedding_df,
         color_df=color_df,
@@ -2962,6 +2986,14 @@ def _handle_xy(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     n_cells = int(len(embedding_df))
     n_groups = (int(color_df[color_field_name].nunique())
                 if color_df is not None and color_kind == 'categorical' else None)
+    if req.output_format in _PLOT_DATA_FORMATS:
+        df_out = embedding_df.copy()
+        if color_df is not None and color_field_name and color_field_name not in df_out.columns:
+            df_out = df_out.merge(
+                color_df[['cell_name', color_field_name]],
+                on='cell_name', how='left',
+            )
+        return _emit_dataframe(df_out, req)
     caption = plotting.build_caption(
         req.db_id, req.geom, req.x, x_kind, req.y, color_field_name, req.layer,
         n_cells=n_cells, n_groups=n_groups,
@@ -3046,6 +3078,8 @@ def _handle_kde2d(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         ty = 'log1p'
 
     n_cells = int(len(data_df))
+    if req.output_format in _PLOT_DATA_FORMATS:
+        return _emit_dataframe(data_df, req)
     caption = plotting.build_caption(
         req.db_id, req.geom, req.x, x_kind, req.y, None, req.layer,
         n_cells=n_cells, sample=req.sample, subset=_subset_for_caption(req),
@@ -3195,6 +3229,9 @@ def _handle_grouped(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
                 )
             raise HTTPException(400, detail=detail)
 
+    if req.output_format in _PLOT_DATA_FORMATS:
+        return _emit_dataframe(data_df, req)
+
     caption = plotting.build_caption(
         req.db_id, req.geom, x_name, x_kind, y_name, hue_name, req.layer,
         n_cells=n_cells, n_groups=n_groups,
@@ -3240,6 +3277,8 @@ def _handle_distribution(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str
 
     n_cells = int(len(data_df))
     n_groups = int(data_df[color_name].nunique()) if color_name else None
+    if req.output_format in _PLOT_DATA_FORMATS:
+        return _emit_dataframe(data_df, req)
     caption = plotting.build_caption(
         req.db_id, req.geom, x_name, x_kind, None, color_name, req.layer,
         n_cells=n_cells, n_groups=n_groups,
@@ -3330,6 +3369,8 @@ def _handle_rolling(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     n_cells = int(len(data_df))
     n_groups = (int(data_df[color_field_name].nunique())
                 if color_field_name else None)
+    if req.output_format in _PLOT_DATA_FORMATS:
+        return _emit_dataframe(data_df, req)
     caption = plotting.build_caption(
         req.db_id, req.geom, x_name, x_kind,
         ', '.join(y_resolved), color_field_name, req.layer,
@@ -3382,6 +3423,11 @@ def _handle_heatmap(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
 
     n_cells = int(len(data_df))
     n_groups = int(mean_expr_df.shape[0])
+    if req.output_format in _PLOT_DATA_FORMATS:
+        # Heatmap exports the AGGREGATED matrix (per-group mean per gene),
+        # since that's what's drawn — raw cell-level data wouldn't
+        # reconstruct the figure without re-aggregation.
+        return _emit_dataframe(mean_expr_df.reset_index(), req)
     caption = plotting.build_caption(
         req.db_id, req.geom, req.x, 'gene', y_name, None, req.layer,
         n_cells=n_cells, n_groups=n_groups,
@@ -3453,6 +3499,8 @@ def _de_contrast_dataframe(req: PlotRequest, ctx: PlotContext) -> Any:
 
 def _handle_volcano(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     df = _de_contrast_dataframe(req, ctx)
+    if req.output_format in _PLOT_DATA_FORMATS:
+        return _emit_dataframe(df, req)
     # Mirror plot_volcano's axis-fallback logic when building the caption,
     # so the X-Plot-Caption header agrees with the in-figure title for
     # zeff-only studies (the fallback auto-zeros log2fc_threshold and
@@ -3495,6 +3543,8 @@ def _handle_volcano(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
 
 def _handle_ma(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     df = _de_contrast_dataframe(req, ctx)
+    if req.output_format in _PLOT_DATA_FORMATS:
+        return _emit_dataframe(df, req)
     if df['base_mean'].notna().sum() == 0:
         raise HTTPException(
             400,
@@ -3553,6 +3603,8 @@ def _handle_forest(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
                     f"requested filters (study={req.de_study!r}, term={req.de_term!r}, "
                     f"contrast={req.de_contrast!r})"),
         )
+    if req.output_format in _PLOT_DATA_FORMATS:
+        return _emit_dataframe(df, req)
     caption = (
         f"Forest plot of {req.de_gene} across {len(df)} DE rows in {req.db_id}. "
         f"Point = log2fc (or estimate), error bars = 95% CI when available. "
@@ -3620,7 +3672,12 @@ class CommonPlotParams:
         db_id: str = FastAPIPath(..., description="Dataset id, e.g. ``S25/V6W``"),
         output_format: str = Query(
             'png', alias='format',
-            description="Output image format: ``png`` | ``svg`` | ``pdf``.",
+            description=(
+                "Output format. Image: ``png`` | ``svg`` | ``pdf``. "
+                "Data export (same URL + params, returns the post-subset/"
+                "post-sample dataframe the plot was built from, "
+                "Content-Disposition: attachment): ``csv`` | ``tsv``."
+            ),
         ),
         layer: str = Query('X', description="Expression layer to read (default ``X``)."),
         width: float = Query(8.0, gt=1.0, le=32.0, description="Figure width in inches (1–32)."),
@@ -3679,7 +3736,9 @@ class CommonPlotParams:
     ):
         if output_format not in _PLOT_MIME_TYPES:
             raise HTTPException(
-                400, detail=f"Unknown format '{output_format}'. Valid: png, svg, pdf",
+                400,
+                detail=f"Unknown format '{output_format}'. Valid: "
+                       + ', '.join(sorted(_PLOT_MIME_TYPES.keys())),
             )
         self.db_id = db_id
         self.output_format = output_format
@@ -3791,6 +3850,32 @@ def _build_plot_request(
     )
 
 
+def _emit_dataframe(df, req) -> Tuple[bytes, str]:
+    """Serialise a handler's source dataframe as CSV / TSV bytes.
+
+    Used by every plot handler when the request asked for
+    output_format='csv' or 'tsv' — same URL + params as the image
+    render, but the response carries the post-subset/post-sample
+    dataframe the handler queried from the DB. Lets the web UI
+    expose a "⬇ data" button that's guaranteed consistent with the
+    plotted image (no client-side reconstruction).
+
+    The caption is reused for the X-Plot-Caption response header so
+    downstream consumers see the same context as the image path.
+    """
+    import io
+    sep = '\t' if req.output_format == 'tsv' else ','
+    buf = io.StringIO()
+    df.to_csv(buf, sep=sep, index=False)
+    n_rows, n_cols = df.shape if hasattr(df, 'shape') else (len(df), 0)
+    # HTTP headers are latin-1; avoid em-dash / multiplication-sign chars.
+    caption = (
+        f"data behind /plot/{req.geom} for {req.db_id}: "
+        f"{n_rows} rows x {n_cols} cols"
+    )
+    return buf.getvalue().encode('utf-8'), caption
+
+
 async def _render_plot(plot_req: PlotRequest, request: Request) -> Response:
     """Cache-aware execution of a plot request.
 
@@ -3814,17 +3899,24 @@ async def _render_plot(plot_req: PlotRequest, request: Request) -> Response:
     )
     cached = _plot_cache_get(cache_key)
     if cached is not None:
+        headers = {
+            'X-Plot-Caption':   cached['caption'],
+            'X-Plot-Format':    plot_req.output_format,
+            'X-Source-URL':     cached['source_url'],
+            'X-Plot-Cache':     'HIT',
+            'ETag':             f'"{cache_key}"',
+            'Cache-Control':    'public, max-age=3600',
+        }
+        if plot_req.output_format in _PLOT_DATA_FORMATS:
+            headers['Content-Disposition'] = (
+                f'attachment; filename="'
+                f'{plot_req.db_id.replace("/", "_")}_{plot_req.geom}.'
+                f'{plot_req.output_format}"'
+            )
         return Response(
             content=cached['bytes'],
             media_type=cached['mime'],
-            headers={
-                'X-Plot-Caption':   cached['caption'],
-                'X-Plot-Format':    plot_req.output_format,
-                'X-Source-URL':     cached['source_url'],
-                'X-Plot-Cache':     'HIT',
-                'ETag':             f'"{cache_key}"',
-                'Cache-Control':    'public, max-age=3600',
-            },
+            headers=headers,
         )
 
     handler = _PLOT_HANDLERS[plot_req.geom]
@@ -3861,17 +3953,24 @@ async def _render_plot(plot_req: PlotRequest, request: Request) -> Response:
     # client doesn't wait on the trim.  Sync target is run in a threadpool,
     # so it never blocks the event loop.  Only fired on cache MISS (HIT
     # paths don't allocate anything worth trimming).
+    headers = {
+        'X-Plot-Caption':   caption,
+        'X-Plot-Format':    plot_req.output_format,
+        'X-Source-URL':     plot_req.source_url,
+        'X-Plot-Cache':     'MISS',
+        'ETag':             f'"{cache_key}"',
+        'Cache-Control':    'public, max-age=3600',
+    }
+    if plot_req.output_format in _PLOT_DATA_FORMATS:
+        headers['Content-Disposition'] = (
+            f'attachment; filename="'
+            f'{plot_req.db_id.replace("/", "_")}_{plot_req.geom}.'
+            f'{plot_req.output_format}"'
+        )
     return Response(
         content=image_bytes,
         media_type=mime,
-        headers={
-            'X-Plot-Caption':   caption,
-            'X-Plot-Format':    plot_req.output_format,
-            'X-Source-URL':     plot_req.source_url,
-            'X-Plot-Cache':     'MISS',
-            'ETag':             f'"{cache_key}"',
-            'Cache-Control':    'public, max-age=3600',
-        },
+        headers=headers,
         background=BackgroundTask(_release_memory),
     )
 

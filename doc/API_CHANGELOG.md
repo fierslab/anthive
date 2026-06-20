@@ -29,6 +29,49 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.6.0 — 2026-06-20
+
+### Added — plot data export (`format=csv` | `format=tsv`)
+
+Every `/plot/{geom}` endpoint now accepts `format=csv` and `format=tsv`
+in addition to the existing image formats (`png` | `svg` | `pdf`).
+Same URL + same params (x/y/color/subset/sample/transform/bar_mode/
+facet/group_by/de selectors/etc.) — but the response is the
+post-subset/post-sample dataframe the handler queried from the DB,
+not the rendered image:
+
+```
+content-type:        text/csv; charset=utf-8
+content-disposition: attachment; filename="<db_id>_<geom>.csv"
+x-plot-caption:      data behind /plot/<geom> for <db_id>: <N> rows x <M> cols
+```
+
+The dataframe emitted depends on the geom:
+* scatter / hexbin (embedding or XY) — cell-level: `cell_name, dim_0,
+  dim_1[, color_field]` (or `x_field, y_field, color_field` in XY mode)
+* violin / box / bar — cell-level: `cell_name, x_field[, y_field][, hue_field]`
+* histogram / ecdf / kde — cell-level: `cell_name, x_field[, color_field]`
+* rolling — cell-level: `cell_name, x_field, *y_fields[, color_field]`
+* kde2d — cell-level: `cell_name, x_field, y_field`
+* heatmap — aggregated: `y_field, *gene_columns` (per-group mean matrix,
+  since that's what's plotted)
+* volcano / ma / forest — DE rows: `gene, log2fc, padj, base_mean, ...`
+
+Guarantees the export is consistent with the plotted image (no
+client-side reconstruction via /query/sql, no drift between the data
+behind the figure and what the user downloads).
+
+### Added — `group_by` on `/plot/bar`
+
+In-plot clustering of x-bars by a 3rd categorical (distinct from
+`facet`'s small-multiples). Single axes; x re-ordered so all values in
+one group are adjacent; vertical separator + bold group-label band
+between groups. Used for Sierksma Fig 1B where mice should cluster
+under their Village. Doesn't multiply bars; cap unchanged. Coexists
+with `facet`.
+
+---
+
 ## 2.5.0 — 2026-06-19
 
 ### Added — group/collection metadata endpoint
