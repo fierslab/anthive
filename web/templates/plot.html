@@ -611,6 +611,12 @@
             <select id="s-palette_continuous"></select>
             <label title="divergent: data straddling zero (z-scores, log fold change)">palette (divergent)</label>
             <select id="s-palette_divergent"></select>
+            <label title="how a continuous colour ramp is anchored. auto = the server guesses (divergent when data straddles 0, else sequential). Force sequential for mostly-positive data (e.g. density, module scores) so the one-sided ramp isn't wasted; force divergent to centre on 0.">colour scale</label>
+            <select id="s-color_scale">
+              <option value="auto">auto (server picks)</option>
+              <option value="sequential">sequential (one-sided)</option>
+              <option value="divergent">divergent (centred on 0)</option>
+            </select>
           </div>
           <div class="size-presets">
             <span class="picks-label">print</span>
@@ -664,7 +670,10 @@
   // meaningful so it's omitted there.
   const PALETTES = {
     categorical: ['tab10','tab20','tab20b','tab20c','Set1','Set2','Set3','Paired','Dark2','Accent','Pastel1','Pastel2'],
-    continuous:  ['viridis','magma','inferno','plasma','cividis','mako','rocket','turbo','crest','flare','Blues','Greens','Oranges','Greys','YlGnBu','YlOrRd'],
+    continuous:  ['viridis','magma','inferno','plasma','cividis','mako','rocket','turbo','crest','flare','Blues','Greens','Oranges','Greys','YlGnBu','YlOrRd',
+                  // single-hue white→colour ramps (anthive REST 2.6+); handy for
+                  // brand/manuscript colours — e.g. WGCNA module-coloured maps.
+                  'magenta','blue','red','green','orange','purple','cyan','yellow','black','tan','greenyellow','turquoise','hotpink','brown'],
     divergent:   ['RdBu','coolwarm','bwr','seismic','Spectral','RdYlBu','RdYlGn','PiYG','PRGn','BrBG','PuOr','vlag','icefire'],
   };
   // Live "what you'll actually get" readout: mm + dpi → output pixels. Makes
@@ -703,6 +712,8 @@
     palette_categorical: 'tab10',
     palette_continuous:  'inferno_r',
     palette_divergent:   'RdBu_r',
+    // continuous-colour ramp anchoring; 'auto' = server heuristic (default).
+    color_scale: 'auto',
   };
 
   function loadSettings() {
@@ -767,6 +778,7 @@
     // settings
     const s = readSettingsFromForm();
     for (const k of Object.keys(s)) {
+      if (k === 'color_scale' && s[k] === 'auto') continue;   // auto = server default; don't clutter the URL
       if (s[k] !== '' && s[k] !== null && s[k] !== undefined) {
         params.set(k, s[k]);
       }
@@ -1202,6 +1214,20 @@
       } else {
         field.value = value;
       }
+    });
+    // Colour-family controls (palette_*/color_scale) live in the settings panel
+    // (id="s-<key>"), NOT the form — so the loop above misses them. A curated
+    // viz link carries them as URL params; apply them here so a shared link
+    // reproduces its exact colours in the live preview. URL wins over the
+    // user's saved settings for this page load only (set directly → no change
+    // event → not persisted to localStorage).
+    ['palette_categorical', 'palette_continuous', 'palette_divergent', 'color_scale'].forEach(key => {
+      if (!urlParams.has(key)) return;
+      const sel = document.getElementById('s-' + key);
+      if (!sel) return;
+      const val = urlParams.get(key);
+      if (![...sel.options].some(o => o.value === val)) sel.add(new Option(val, val));  // not a preset → keep it anyway
+      sel.value = val;
     });
   })();
 
