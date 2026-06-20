@@ -18,6 +18,11 @@
 </select>
 {% endmacro %}
 
+{# Compact help: a small ⓘ that reveals the text on hover (native title), so
+   explanatory prose doesn't eat vertical space in the sidebar. Text must not
+   contain a double-quote (it's an HTML attribute value). #}
+{% macro info(text) %}<span class="info" title="{{ text }}" aria-label="{{ text }}">ⓘ</span>{% endmacro %}
+
 {% block content %}
 <style>
   /* Plot-page-specific styles — kept inline so the rest of the site is unaffected */
@@ -123,11 +128,14 @@
   .settings-menu { position: relative; display: inline-block; }
   .settings-panel {
     display: none; position: absolute; top: calc(100% + 4px); right: 0; z-index: 200;
-    min-width: 300px; border: 1px solid var(--border); border-radius: 6px;
+    width: 400px; max-width: 92vw; border: 1px solid var(--border); border-radius: 6px;
     padding: 8px 10px; background: #fff; box-shadow: 0 6px 20px rgba(0,0,0,.14);
   }
   .settings-panel.open { display: block; }
-  .settings-panel .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; align-items: center; }
+  /* Fixed label column so labels like "palette (continuous)" don't wrap. */
+  .settings-panel .pair { display: grid; grid-template-columns: 150px 1fr; gap: 5px 8px; align-items: center; }
+  .settings-panel .pair label { white-space: nowrap; }
+  .settings-panel select, .settings-panel input { min-width: 0; }
   .size-presets { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: 6px; }
   .size-presets button {
     font-size: 11px; padding: 2px 8px; border: 1px solid var(--border);
@@ -144,6 +152,24 @@
   }
   .plot-caption b { color: #1d4ed8; font-weight: 600; }
   .plot-caption:empty { display: none; }
+
+  /* Compact help icon — hover reveals the (native title) tooltip. */
+  .info {
+    cursor: help; color: var(--text-muted, #6b7280); font-size: 11px;
+    font-style: normal; margin-left: 3px; user-select: none; vertical-align: baseline;
+  }
+  .info:hover { color: var(--link, #1d4ed8); }
+  legend .info { font-size: 10px; }
+  /* A select with only one possible value is shown as inert greyed text
+     (set by collapseSingleSelects), not a dropdown — nothing to choose. */
+  .field-static {
+    display: block; padding: 3px 6px; font-size: 12px;
+    color: var(--text-muted, #6b7280); background: #f8fafc;
+    border: 1px solid var(--border-light, #eee); border-radius: 2px;
+    width: 100%; box-sizing: border-box;
+  }
+  /* Orientation toggle in the settings size presets. */
+  .orient-btn.active { background: #1d4ed8; color: #fff; border-color: #1d4ed8; }
 </style>
 
 <div class="breadcrumb">
@@ -161,7 +187,7 @@
 
     <fieldset>
       <legend>plot type</legend>
-      <select class="geom-select" id="geom-switcher">
+      <select class="geom-select" id="geom-switcher" data-keep-select>
         {# DE geoms (group 'de') are only listed when the dataset has DE data;
            the current geom is always listed so a direct link still selects. #}
         {% for g, info in all_geoms.items() %}
@@ -218,18 +244,13 @@
        The mode radio toggles which x/y widgets are active — only the enabled
        ones are submitted (buildUrl skips disabled + _-prefixed names). #}
     <fieldset>
-      <legend>mode</legend>
+      <legend>mode {{ info('Embedding: a UMAP/PCA map coloured by a field. X vs Y: any two continuous variables — gene-vs-gene, module-score vs PRS, expression vs age.') }}</legend>
       <label style="display:inline-flex;gap:4px;align-items:center;margin-right:12px;color:var(--text)">
         <input type="radio" name="_xymode" value="embedding" id="m-emb" {% if plot_meta.embeddings %}checked{% endif %}> embedding
       </label>
       <label style="display:inline-flex;gap:4px;align-items:center;color:var(--text)">
         <input type="radio" name="_xymode" value="xy" id="m-xy" {% if not plot_meta.embeddings %}checked{% endif %}> X vs Y
       </label>
-      <small style="margin-top:4px;color:#666">
-        <b>Embedding</b>: a UMAP/PCA map coloured by a field.
-        <b>X vs Y</b>: any two continuous variables (gene-vs-gene,
-        module-score vs PRS, expression vs age…).
-      </small>
     </fieldset>
 
     <fieldset id="fs-x-emb">
@@ -263,7 +284,7 @@
     </fieldset>
 
     <fieldset>
-      <legend>colour by</legend>
+      <legend>colour by{% if geom == 'hexbin' %} {{ info('Categorical → hex coloured by modal class, alpha by dominance (top1/top2 ratio). Continuous → per-hex mean. No colour → density. vmin/vmax clip on absolute value; the percentile clip (density mode) is robust to outlier hexes.') }}{% endif %}</legend>
       <label>{% if geom == 'hexbin' %}field / gene (empty = density){% else %}field / gene{% endif %}</label>
       <div class="ac-wrap">
         <input type="text" name="color" id="f-color" autocomplete="off" placeholder="gene name or obs field">
@@ -278,19 +299,13 @@
       <input type="number" name="vmin" id="f-vmin" step="any" placeholder="auto">
       <label style="margin-top:4px">vmax (colorbar upper clip — blank = auto)</label>
       <input type="number" name="vmax" id="f-vmax" step="any" placeholder="auto">
-      {# Density-mode (no colour) quantile auto-clip — big readability win on
+      {# Density-mode (no colour) quantile clip — big readability win on
          200k+ cell plots where a few dense hexes wash out the gradient. #}
-      <label style="margin-top:6px"><input type="checkbox" id="f-autoclip" name="_autoclip"> auto-clip density 10–90%</label>
+      <label style="margin-top:6px"><input type="checkbox" id="f-autoclip" name="_autoclip"> clip density to percentiles {{ info('Clips the colour scale to the lower/upper density quantiles below, so a few ultra-dense hexes do not wash out the gradient. Ticking pre-fills 0.10 / 0.90 — edit either bound to taste.') }}</label>
       <div class="row" style="margin-top:2px">
-        <div><label>vmin quantile</label><input type="number" name="vmin_quantile" id="f-vmin_quantile" step="0.01" min="0" max="1" placeholder="auto"></div>
-        <div><label>vmax quantile</label><input type="number" name="vmax_quantile" id="f-vmax_quantile" step="0.01" min="0" max="1" placeholder="auto"></div>
+        <div><label>lower quantile</label><input type="number" name="vmin_quantile" id="f-vmin_quantile" step="0.01" min="0" max="1" placeholder="auto"></div>
+        <div><label>upper quantile</label><input type="number" name="vmax_quantile" id="f-vmax_quantile" step="0.01" min="0" max="1" placeholder="auto"></div>
       </div>
-      <small style="display:block;margin-top:4px;color:#666">
-        Categorical → hex coloured by modal class, alpha by dominance
-        (top1/top2 ratio).  Continuous → per-hex mean.  No colour → density.
-        vmin/vmax clip on absolute value; the quantile clip (density mode)
-        is robust to outlier hexes.
-      </small>
       {% endif %}
     </fieldset>
 
@@ -323,29 +338,26 @@
       {% if geom == 'bar' %}
       {# stacked composition (REST API 2.6): one bar per x, stacked by the split
          categorical — e.g. cell composition per sample. #}
-      <label style="margin-top:6px">layout (when split set)</label>
+      <label style="margin-top:6px">layout (when split set) {{ info('Stacked + count y = composition per group (e.g. donor mix per sample). Tick 100% to normalise each bar to proportions.') }}</label>
       <select name="bar_mode" id="f-bar_mode">
         <option value="dodge">side-by-side</option>
         <option value="stack">stacked (composition)</option>
       </select>
       <label style="margin-top:4px"><input type="checkbox" name="normalize" id="f-normalize"> 100% (proportions)</label>
-      <small style="display:block;margin-top:2px;color:#666">Stacked + count y = composition per group (e.g. donor mix per sample); 100% normalises each bar.</small>
       {# group_by (REST API 2.6): in-plot clustering — one axes, bars ordered
          into groups by a 3rd categorical (e.g. mice grouped by Village), with
          separators + a group-label band. Distinct from facet (separate panels). #}
-      <label style="margin-top:6px">group by (cluster in one plot)</label>
+      <label style="margin-top:6px">group by (cluster in one plot) {{ info('Orders the bars into groups within ONE plot — separators + a group-label band, ordered by a 3rd categorical (e.g. mice grouped by Village).') }}</label>
       <select name="group_by" id="f-group_by">
         <option value="">— none —</option>
         {% for c in plot_meta.cat_fields %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
       </select>
-      <small style="display:block;margin-top:2px;color:#666">Orders the bars into groups in one plot (separators + group labels).</small>
       {# facet: small multiples — one SEPARATE panel per value of a 3rd categorical. #}
-      <label style="margin-top:6px">facet — separate panels</label>
+      <label style="margin-top:6px">facet — separate panels {{ info('Small multiples — one SEPARATE panel per value of a 3rd categorical (≤8 levels). Shared y and colours. Distinct from group-by, which stays in one plot.') }}</label>
       <select name="facet" id="f-facet">
         <option value="">— none —</option>
         {% for c in plot_meta.cat_fields %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
       </select>
-      <small style="display:block;margin-top:2px;color:#666">One panel per value (≤8 levels). Shared y &amp; colours.</small>
       {% endif %}
     </fieldset>
 
@@ -385,9 +397,8 @@
       <input type="number" name="n_genes" id="f-n_genes" value="20" min="1" max="200">
       <label style="margin-top:6px">
         <input type="checkbox" name="zscore" id="f-zscore" value="true" checked>
-        z-score per gene (centred divergent palette)
+        z-score per gene (centred divergent palette) {{ info('Untick to plot raw means with the sequential palette instead of per-gene z-scores.') }}
       </label>
-      <small>untick to plot raw means with the sequential palette</small>
     </fieldset>
 
     {% elif geom == 'rolling' %}
@@ -494,12 +505,8 @@
     </fieldset>
     {% else %}
     <fieldset>
-      <legend>note</legend>
-      <small style="color:#b45309">
-        MA needs a per-gene <b>base mean</b>, which only DESeq2 / edgeR
-        ingests carry.  GLMM / Wilcoxon studies will return an error here —
-        use Volcano for those.
-      </small>
+      <legend>MA note {{ info('MA needs a per-gene base mean, which only DESeq2 / edgeR ingests carry. GLMM / Wilcoxon studies return an error here — use Volcano for those.') }}</legend>
+      <small style="color:#b45309">MA needs a base mean — DESeq2 / edgeR only. Use Volcano for GLMM / Wilcoxon.</small>
     </fieldset>
     {% endif %}
 
@@ -514,7 +521,7 @@
       </div>
     </fieldset>
     <fieldset>
-      <legend>narrow (optional)</legend>
+      <legend>narrow (optional) {{ info('A gene across every contrast can be tall. Narrowing by study / term keeps the figure readable for large studies.') }}</legend>
       <label>study</label>
       <select name="study" id="f-study">
         <option value="">— all studies —</option>
@@ -526,10 +533,6 @@
       <select name="term" id="f-term"><option value="">— all terms —</option></select>
       <label style="margin-top:4px">contrast</label>
       <select name="contrast" id="f-contrast"><option value="">— all contrasts —</option></select>
-      <small style="margin-top:4px;color:#666">
-        A gene across every contrast can be tall.  Narrowing by term keeps
-        the figure readable for large studies.
-      </small>
     </fieldset>
 
     {% elif geom == 'de_heatmap' %}
@@ -571,15 +574,11 @@
       <input type="number" name="padj_threshold" id="f-padj_threshold" value="0.05" step="any" min="0" max="1">
     </fieldset>
     <fieldset>
-      <legend>narrow (optional)</legend>
+      <legend>narrow (optional) {{ info('Server caps the matrix at 2000 cells (rows × cols). For big studies, narrow with a contrast or gene list, else it returns a helpful error.') }}</legend>
       <label title="comma-separated contrast names; default = all rows">contrasts (CSV)</label>
       <input type="text" name="contrasts" id="f-contrasts" autocomplete="off" placeholder="default: all contrasts">
       <label style="margin-top:4px" title="comma-separated gene / module names; default = all columns">genes (CSV)</label>
       <input type="text" name="genes" id="f-genes" autocomplete="off" placeholder="default: all genes/modules">
-      <small style="margin-top:4px;color:#666">
-        Server caps the matrix at 2000 cells (rows × cols). For big studies,
-        narrow with a contrast or gene list, else it returns a helpful error.
-      </small>
     </fieldset>
     {% endif %}
 
@@ -669,17 +668,23 @@
             </select>
           </div>
           <div class="size-presets">
+            <span class="picks-label">orient</span>
+            <button type="button" class="orient-btn active" id="orient-landscape" data-orient="landscape">landscape</button>
+            <button type="button" class="orient-btn" id="orient-portrait" data-orient="portrait">portrait</button>
+          </div>
+          {# data-long / data-short = the two page dimensions; the preset is
+             applied as W×H according to the current orientation. #}
+          <div class="size-presets">
             <span class="picks-label">print</span>
-            <button type="button" data-w="297" data-h="210">A4</button>
-            <button type="button" data-w="210" data-h="148">A5</button>
-            <button type="button" data-w="148" data-h="105">A6</button>
+            <button type="button" data-long="297" data-short="210">A4</button>
+            <button type="button" data-long="210" data-short="148">A5</button>
+            <button type="button" data-long="148" data-short="105">A6</button>
           </div>
           <div class="size-presets">
             <span class="picks-label">screen</span>
-            <button type="button" data-w="254" data-h="143" title="16:9 slide">16:9</button>
-            <button type="button" data-w="200" data-h="150" title="4:3">4:3</button>
-            <button type="button" data-w="160" data-h="160" title="square">square</button>
-            <span style="font-size:9px;color:#aaa">landscape — swap W/H for portrait</span>
+            <button type="button" data-long="254" data-short="143" title="16:9 slide">16:9</button>
+            <button type="button" data-long="200" data-short="150" title="4:3">4:3</button>
+            <button type="button" data-long="160" data-short="160" title="square">square</button>
           </div>
           <div class="px-readout" id="px-readout"></div>
           <div style="display:flex;gap:8px;margin-top:6px;align-items:center;font-size:10px;color:#888">
@@ -920,16 +925,34 @@
     }
   }
 
-  function refreshDownloadLinks() {
-    document.getElementById('dl-png').href = buildUrl('png');
-    document.getElementById('dl-svg').href = buildUrl('svg');
-    document.getElementById('dl-pdf').href = buildUrl('pdf');
-    document.getElementById('dl-data').href = buildUrl('csv');   // underlying data (REST API 2.6)
-    document.getElementById('dl-png').setAttribute('download', `${DB_ID.replace('/','_')}.${GEOM}.png`);
-    document.getElementById('dl-svg').setAttribute('download', `${DB_ID.replace('/','_')}.${GEOM}.svg`);
-    document.getElementById('dl-pdf').setAttribute('download', `${DB_ID.replace('/','_')}.${GEOM}.pdf`);
-    document.getElementById('dl-data').setAttribute('download', `${DB_ID.replace('/','_')}.${GEOM}.csv`);
+  // Downloads are fetched as blobs and saved via a transient anchor, instead of
+  // pointing the toolbar buttons at the API URL. That keeps the (long) image URL
+  // out of the browser status bar on hover, and lets a failed render surface
+  // inline rather than navigating the tab to an error body.
+  async function downloadBlob(format, ext) {
+    const url = buildUrl(format);
+    status.innerHTML = `<span class="spinner"></span> preparing ${ext.toUpperCase()}…`;
+    try {
+      const r = await fetch(url);
+      if (!r.ok) { status.innerHTML = `<span class="err">download failed (HTTP ${r.status})</span>`; return; }
+      const blob = await r.blob();
+      const objUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = objUrl;
+      a.download = `${DB_ID.replace('/', '_')}.${GEOM}.${ext}`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(objUrl), 2000);
+      status.textContent = '';
+    } catch (e) { status.innerHTML = `<span class="err">${e.message}</span>`; }
   }
+  [['dl-png', 'png', 'png'], ['dl-svg', 'svg', 'svg'],
+   ['dl-pdf', 'pdf', 'pdf'], ['dl-data', 'csv', 'csv']].forEach(([id, fmt, ext]) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('click', e => { e.preventDefault(); downloadBlob(fmt, ext); });
+  });
+  // Kept as a no-op so existing callers stay valid; download URLs are now
+  // computed lazily at click time by downloadBlob (above).
+  function refreshDownloadLinks() {}
 
   // ── geom switcher
   document.getElementById('geom-switcher').addEventListener('change', e => {
@@ -1017,19 +1040,47 @@
     updatePxReadout();
     refreshDownloadLinks(); refresh();
   });
-  // ── page-size presets (A4/A5/A6, landscape, mm) → set the size inputs
-  document.querySelectorAll('.size-presets button[data-w]').forEach(btn => {
+  // ── page-size presets + orientation (mm). data-long/data-short are the two
+  //    page dimensions; orientation decides which is width vs height.
+  let pageOrient = 'landscape';
+  function applyPreset(longMm, shortMm) {
+    document.getElementById('s-width').value  = pageOrient === 'portrait' ? shortMm : longMm;
+    document.getElementById('s-height').value = pageOrient === 'portrait' ? longMm  : shortMm;
+    autoSaveSettings(); scheduleRefresh();
+  }
+  document.querySelectorAll('.size-presets button[data-long]').forEach(btn => {
+    btn.addEventListener('click', () =>
+      applyPreset(Number(btn.dataset.long), Number(btn.dataset.short)));
+  });
+  document.querySelectorAll('.orient-btn').forEach(btn => {
     btn.addEventListener('click', () => {
-      document.getElementById('s-width').value  = btn.getAttribute('data-w');
-      document.getElementById('s-height').value = btn.getAttribute('data-h');
+      if (btn.dataset.orient === pageOrient) return;
+      pageOrient = btn.dataset.orient;
+      document.querySelectorAll('.orient-btn').forEach(b =>
+        b.classList.toggle('active', b.dataset.orient === pageOrient));
+      // flip the current width/height so the live size follows the change
+      const wEl = document.getElementById('s-width'), hEl = document.getElementById('s-height');
+      const w = Number(wEl.value), h = Number(hEl.value);
+      if (w && h && ((pageOrient === 'portrait') === (w > h))) { wEl.value = h; hEl.value = w; }
       autoSaveSettings(); scheduleRefresh();
     });
   });
+  // Seed the orientation toggle from the current (possibly saved) dimensions.
+  (function initOrient() {
+    const w = Number(document.getElementById('s-width').value);
+    const h = Number(document.getElementById('s-height').value);
+    pageOrient = (h > w) ? 'portrait' : 'landscape';
+    document.querySelectorAll('.orient-btn').forEach(b =>
+      b.classList.toggle('active', b.dataset.orient === pageOrient));
+  })();
 
   // ── copy URL
   document.getElementById('copy-url').addEventListener('click', e => {
     e.preventDefault();
-    const url = buildUrl('png');
+    // Share the interactive plot PAGE (full absolute URL incl. domain) — syncURL
+    // keeps window.location's query string in step with the form, so this
+    // reproduces the exact configured plot on another machine.
+    const url = window.location.href;
     navigator.clipboard?.writeText(url);
     const orig = e.target.textContent;
     e.target.textContent = '✓ copied';
@@ -1221,6 +1272,51 @@
     const chosen = selected || (contrasts.length === 1 ? contrasts[0].contrast : '');
     if (chosen) sel.value = chosen;
   }
+  // ── collapse single-choice selects to inert greyed text ──────────────────
+  // A <select> offering exactly one value isn't a choice; show it as static
+  // text (+ a hidden input carrying the value, so buildUrl/syncURL still pick
+  // it up). Skips [data-keep-select] (geom switcher) and disabled selects (the
+  // inactive scatter-mode widget). The hidden input lands in the same fieldset,
+  // so setScatterMode's enable/disable sweep still toggles it on mode switch.
+  function makeStatic(sel) {
+    const opt = [...sel.options].find(o => o.value !== '') || sel.options[0];
+    if (!opt) return;
+    const span = document.createElement('span');
+    span.className = 'field-static';
+    span.textContent = (opt.textContent || opt.value).trim();
+    span.title = opt.value;
+    const hidden = document.createElement('input');
+    hidden.type = 'hidden';
+    hidden.name = sel.getAttribute('name') || '';
+    hidden.value = opt.value;
+    sel.replaceWith(span);
+    span.after(hidden);
+  }
+  function collapseSingleSelects(root) {
+    root.querySelectorAll('select').forEach(sel => {
+      if (sel.hasAttribute('data-keep-select') || sel.disabled) return;
+      const name = sel.getAttribute('name');
+      if (!name || name.startsWith('_')) return;
+      // Only truly single-option selects (no placeholder / no "none"/"all"
+      // alternative) — so optional split/colour pickers keep their dropdown.
+      if (sel.options.length === 1) makeStatic(sel);
+    });
+  }
+  // DE chain: collapse downstream selects only when the upstream is also fixed,
+  // so a study with one term/contrast reads as static while a multi-study form
+  // keeps its repopulating dropdowns intact.
+  function collapseDeChain() {
+    const realCount = sel => [...sel.options].filter(o => o.value !== '').length;
+    const study = document.getElementById('f-study');
+    if (!study || study.hasAttribute('data-keep-select') || realCount(study) !== 1) return;
+    makeStatic(study);
+    const term = document.getElementById('f-term');
+    if (!term || realCount(term) !== 1) return;
+    makeStatic(term);
+    const contrast = document.getElementById('f-contrast');
+    if (contrast && realCount(contrast) === 1) makeStatic(contrast);
+  }
+
   async function initDeCascade() {
     const studySel = document.getElementById('f-study');
     const termSel  = document.getElementById('f-term');
@@ -1250,6 +1346,7 @@
       const term = await populateTerms(studySel.value, p.get('term'));
       if (term) await populateContrasts(studySel.value, term, p.get('contrast'));
     }
+    collapseDeChain();   // study/term/contrast now final — collapse the singular ones
     refresh();
   }
 
@@ -1508,10 +1605,12 @@
   refreshDownloadLinks();
   if (DE_GEOMS.includes(GEOM)) {
     // populates the study→term→contrast dropdowns (restoring any URL state),
-    // then refreshes once the cascade is in place
+    // then collapses the singular ones + refreshes once the cascade is in place
     initDeCascade();
   } else {
-    // Defer initial refresh slightly so all listeners are attached
+    // Collapse single-choice selects (embedding/layer/…) to static text, then
+    // defer the initial refresh slightly so all listeners are attached.
+    collapseSingleSelects(document.getElementById('plot-form'));
     setTimeout(refresh, 100);
   }
 })();

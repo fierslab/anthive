@@ -101,10 +101,28 @@ nothing DE shows):
   log, log1p, signed_log1p, asinh, signed_sqrt, rank; rendered by the
   `transform_select` Jinja macro) and a shared **overlays** fieldset
   (`marginals`, `regline`, `asinh_scale`). Hexbin density mode adds a
-  one-click "auto-clip density 10–90%" checkbox driving
+  a "clip density to percentiles" checkbox that pre-fills (editable)
   `vmin_quantile`/`vmax_quantile`. Legacy `log_x/log_y` URLs map to
   `transform_*=log1p` on load (back-compat). `kde2d` is gated in `canRender`
   on x+y both set.
+- **Plot-form UX conventions (keep these when adding controls):**
+  - **Help → hover `ⓘ`.** Verbose explanatory prose goes in the `info(text)`
+    Jinja macro (`<span class="info" title="…">ⓘ</span>`) on the relevant
+    legend/label, NOT inline `<small>` blocks. `text` must contain no `"`.
+  - **Single-choice selects collapse.** `collapseSingleSelects(form)` (non-DE,
+    at init) and `collapseDeChain()` (DE, after the cascade resolves) turn a
+    `<select>` with exactly one real option into greyed `.field-static` text +
+    a hidden input carrying the value (so `buildUrl`/`syncURL` still see it).
+    Mark a select `data-keep-select` to opt out (the geom switcher does). The
+    `disabled` guard keeps it safe with the polymorphic-scatter mode toggle.
+  - **Downloads are blob-fetched** (`downloadBlob(fmt, ext)`), not `<a href>` —
+    so the long API URL never shows in the browser status bar on hover, and a
+    failed render surfaces inline. `copy URL` copies `window.location.href`
+    (the shareable interactive-page URL, full domain), not the image URL.
+  - **Size presets are orientation-aware:** buttons carry `data-long`/
+    `data-short`; a landscape/portrait toggle (`.orient-btn`) decides which is
+    width vs height. Settings panel is a fixed 400px with a 150px label column
+    so labels don't wrap.
 - **Colour ramp anchoring (REST 2.6):** the settings panel has a
   `color_scale` select (`auto`/`sequential`/`divergent`) next to the palette
   pickers; `buildUrl` emits it only when not `auto`. The continuous palette

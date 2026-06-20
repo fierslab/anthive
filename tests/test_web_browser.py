@@ -696,7 +696,7 @@ def test_plot_view_hexbin_density_autoclip(client):
     resp = client.get("/browse/GroupA/ds1/plot/hexbin")
     assert resp.status_code == 200
     assert 'name="vmin_quantile"' in resp.text and 'name="vmax_quantile"' in resp.text
-    assert 'auto-clip density' in resp.text
+    assert 'clip density to percentiles' in resp.text
 
 
 def test_plot_view_kde2d_form(client):
@@ -781,6 +781,17 @@ def test_plot_view_color_scale_control(client):
     assert 'value="sequential"' in resp.text
     assert 'value="divergent"' in resp.text
     assert "'turquoise'" in resp.text   # new named cmap registered in PALETTES
+
+
+def test_plot_view_info_tooltips_and_collapse(client):
+    # Verbose help sits behind hover ⓘ icons (class="info"); single-choice
+    # selects collapse to static text client-side; size presets have a
+    # portrait/landscape toggle.
+    resp = client.get("/browse/GroupA/ds1/plot/scatter")
+    assert resp.status_code == 200
+    assert 'class="info"' in resp.text
+    assert "function collapseSingleSelects" in resp.text
+    assert 'class="orient-btn' in resp.text
 
 
 def test_genesets_index_renders_grouped(client):
@@ -1015,7 +1026,10 @@ def test_plot_data_download_button(client):
     resp = client.get("/browse/GroupA/ds1/plot/scatter")
     assert resp.status_code == 200
     assert 'id="dl-data"' in resp.text
-    assert "buildUrl('csv')" in resp.text
+    # downloads are blob-fetched at click time (no href → no URL in the status
+    # bar); the CSV button is wired through downloadBlob via the dl-data entry.
+    assert "function downloadBlob" in resp.text
+    assert "['dl-data', 'csv', 'csv']" in resp.text
 
 
 def test_plot_force_refresh_control(client):
@@ -1040,8 +1054,9 @@ def test_plot_settings_metric_and_presets(client):
     resp = client.get("/browse/GroupA/ds1/plot/scatter")
     assert resp.status_code == 200
     assert "width (mm)" in resp.text and "height (mm)" in resp.text   # metric
-    assert 'data-w="210" data-h="148"' in resp.text                  # A5 preset
+    assert 'data-long="210" data-short="148"' in resp.text           # A5 preset (orientation-aware)
     assert 'class="size-presets"' in resp.text                        # preset rows
+    assert 'class="orient-btn' in resp.text                           # portrait/landscape toggle
     assert 'id="px-readout"' in resp.text                             # DPI alternative readout
     assert "screen (96)" in resp.text and "print (300)" in resp.text  # resolution dropdown
     # palette base lists + auto-reverse are defined in JS
