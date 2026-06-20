@@ -1093,6 +1093,8 @@ def _render_grouped_panel(
     cmap_obj,
     cmap_n: int,
     hue_colour_index: Optional[Dict],
+    x_positions: Optional[List[float]] = None,
+    group_by_labels: Optional[List[Tuple[str, float, float]]] = None,
 ) -> bool:
     """Render one panel (one axis) for plot_grouped.
 
@@ -1104,6 +1106,17 @@ def _render_grouped_panel(
     hue_colour_index maps a hue level to a stable column index → colour.
     Built once across all facets; ensures the same hue value gets the
     same colour in every panel even if absent from one of them.
+
+    x_positions: optional list of x-axis positions (same length as
+        cat_order). When set, bars are placed at these positions
+        instead of np.arange(len(cat_order)) — used by group_by to
+        insert gaps between groups. Only honoured for the stacked-bar
+        path; seaborn-driven paths ignore this (they manage their own
+        positions internally).
+    group_by_labels: optional [(group_label, x_center, gap_x), ...].
+        When set, a group-label band is drawn under the x-axis with a
+        vertical separator at each gap_x. Only meaningful in combination
+        with x_positions.
     """
     is_stacked = (geom == 'bar' and hue is not None and bar_mode == 'stack')
     if is_stacked:
@@ -1119,7 +1132,9 @@ def _render_grouped_panel(
         if normalize:
             totals = stack_mat.sum(axis=1).replace(0, np.nan)
             stack_mat = stack_mat.div(totals, axis=0).fillna(0.0)
-        xs = np.arange(len(cat_order))
+        xs = (np.asarray(x_positions, dtype=float)
+              if x_positions is not None
+              else np.arange(len(cat_order), dtype=float))
         bottom = np.zeros(len(cat_order), dtype=float)
         for col in hue_order:
             heights = stack_mat[col].to_numpy(dtype=float)
@@ -1136,6 +1151,7 @@ def _render_grouped_panel(
             ax.set_ylim(0, 1)
         else:
             ax.set_ylabel('Cell count' if y_field is None else f'mean {y_field}')
+        _draw_group_band(ax, group_by_labels)
         return True
 
     if y_field is None:
@@ -1161,7 +1177,33 @@ def _render_grouped_panel(
         sns.barplot(data=panel_df, x=x_field, y=y_field, hue=hue,
                     order=cat_order, hue_order=hue_order,
                     ax=ax, errorbar=errorbar)
+    _draw_group_band(ax, group_by_labels)
     return False
+
+
+def _draw_group_band(ax, group_by_labels) -> None:
+    """Draw a group-label band with separators under the x-axis.
+
+    group_by_labels is [(label, x_center, gap_x), ...]. For each
+    consecutive pair we draw a vertical separator at the gap_x of the
+    LATER group (so the line falls in the gap between the two), and
+    place the label centred above the x-axis at the band's midpoint.
+    """
+    if not group_by_labels:
+        return
+    ymin, ymax = ax.get_ylim()
+    sep_y = ymin + (ymax - ymin) * 0.0  # at bottom of plot area
+    for i, (label, x_center, gap_x) in enumerate(group_by_labels):
+        if i > 0:
+            ax.axvline(x=gap_x, color='#888', linewidth=0.6, linestyle='--', alpha=0.6)
+        # Group label below the x tick row.
+        ax.annotate(
+            label,
+            xy=(x_center, 0), xycoords=('data', 'axes fraction'),
+            xytext=(0, -42), textcoords='offset points',
+            ha='center', va='top', fontsize=8, fontweight='bold',
+            annotation_clip=False,
+        )
 
 
 def plot_grouped(
@@ -1183,6 +1225,7 @@ def plot_grouped(
     normalize: bool = False,
     palette_cat: str = _DEFAULT_CATEGORICAL,
     facet_field: Optional[str] = None,
+    group_by_field: Optional[str] = None,
 ) -> bytes:
     """Values grouped by a categorical field: bar (with CI), box, or violin.
 
@@ -1218,7 +1261,6 @@ def plot_grouped(
     # Resolve the shared orderings from the FULL dataset (so panels
     # show the same x-positions / hue colours even when a panel is
     # missing some levels).
-    cat_order = data_df[x_field].value_counts().index.tolist()
     hue = hue_field if hue_field and hue_field in data_df.columns else None
     hue_order = (data_df[hue].value_counts().index.tolist()
                  if hue else None)
@@ -1228,6 +1270,57 @@ def plot_grouped(
              else None)
     facet_levels = (data_df[facet].value_counts().index.tolist()
                     if facet else [None])
+
+    # group_by: in-plot clustering of the x bars by a 3rd categorical.
+    # Re-orders cat_order so all x-values in one group are adjacent
+    # (groups themselves sorted by total count, descending; x within a
+    # group sorted by count within-group, descending). Produces gap-
+    # adjusted x_positions + a group-label band spec for the renderer.
+    group_by = (group_by_field if group_by_field
+                and group_by_field in data_df.columns else None)
+    x_positions: Optional[List[float]] = None
+    group_by_labels: Optional[List[Tuple[str, float, float]]] = None
+    cat_order: List
+    if group_by is not None:
+        # Map every x value to its dominant group_by level (the level
+        # with the most cells; deterministic if a tie).
+        x_to_group = (
+            data_df.groupby([x_field, group_by], observed=True)
+            .size().reset_index(name='_n')
+            .sort_values(['_n'], ascending=False)
+            .drop_duplicates(x_field)
+            .set_index(x_field)[group_by]
+        )
+        # Sort groups by descending total cell count.
+        group_totals = data_df[group_by].value_counts()
+        group_order = group_totals.index.tolist()
+        # Sort x's within each group by descending count.
+        x_counts = data_df[x_field].value_counts()
+        cat_order = []
+        x_positions = []
+        group_by_labels = []
+        gap = 0.6   # extra width between groups (in bar-position units)
+        pos = 0.0
+        for grp in group_order:
+            xs_in_group = [
+                x for x in x_counts.index
+                if x_to_group.get(x) == grp
+            ]
+            if not xs_in_group:
+                continue
+            group_start = pos
+            for x in xs_in_group:
+                cat_order.append(x)
+                x_positions.append(pos)
+                pos += 1.0
+            group_end = pos - 1.0
+            label_center = (group_start + group_end) / 2.0
+            # gap_x for the separator drawn BEFORE this group (mid-gap).
+            sep_x = group_start - (gap / 2.0)
+            group_by_labels.append((str(grp), label_center, sep_x))
+            pos += gap   # gap between groups
+    else:
+        cat_order = data_df[x_field].value_counts().index.tolist()
 
     # Stable hue → colour index, computed once across the union of all
     # panels. For stacked bars we want the SAME donor line to get the
@@ -1278,6 +1371,7 @@ def plot_grouped(
             bar_mode=bar_mode, normalize=normalize,
             cmap_obj=cmap_obj, cmap_n=cmap_n,
             hue_colour_index=hue_colour_index,
+            x_positions=x_positions, group_by_labels=group_by_labels,
         ) or is_stacked
         ax.set_xlabel(x_field)
         plt.setp(ax.get_xticklabels(), rotation=45, ha='right')

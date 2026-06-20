@@ -2682,6 +2682,7 @@ class PlotRequest:
     bar_mode: str                # 'dodge' (default, side-by-side) | 'stack'
     normalize: bool              # stacked bar: scale each bar to 100% (proportions)
     facet: Optional[str]         # 3rd categorical for small-multiples panels
+    group_by: Optional[str]      # in-plot grouping: cluster x-bars by this categorical
     filters: Optional[Dict[str, Any]]
     sample: Optional[int]
     source_url: str
@@ -3100,8 +3101,21 @@ def _handle_grouped(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
                 f"'{req.facet}' resolved as '{facet_kind}'"
             ))
 
-    extra_meta = [x_name] + ([hue_name] if hue_name else []) + \
-                 ([facet_name] if facet_name else [])
+    group_by_name: Optional[str] = None
+    if req.group_by:
+        group_by_name, group_by_kind = ctx.resolve(req.group_by)
+        if group_by_kind != 'categorical':
+            raise HTTPException(400, detail=(
+                f"group_by requires categorical; "
+                f"'{req.group_by}' resolved as '{group_by_kind}'"
+            ))
+
+    extra_meta = (
+        [x_name]
+        + ([hue_name] if hue_name else [])
+        + ([facet_name] if facet_name else [])
+        + ([group_by_name] if group_by_name else [])
+    )
     y_name = None
     if req.y:
         y_name, y_kind = ctx.resolve(req.y)
@@ -3192,6 +3206,7 @@ def _handle_grouped(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         geom=req.geom, ci=req.ci,
         bar_mode=req.bar_mode, normalize=req.normalize,
         facet_field=facet_name,
+        group_by_field=group_by_name,
         width=req.width, height=req.height, dpi=req.dpi,
         output_format=req.output_format,
         palette_cat=req.palette_cat,
@@ -3729,6 +3744,7 @@ def _build_plot_request(
     bar_mode: str = 'dodge',
     normalize: bool = False,
     facet: Optional[str] = None,
+    group_by: Optional[str] = None,
 ) -> PlotRequest:
     """Fold ``CommonPlotParams`` + geom-specific kwargs into a ``PlotRequest``.
 
@@ -3768,6 +3784,7 @@ def _build_plot_request(
         bar_mode=bar_mode,
         normalize=normalize,
         facet=facet,
+        group_by=group_by,
         filters=_parse_subset(common.subset),
         sample=common.sample,
         source_url=str(common.request.url) if common.request is not None else '',
@@ -4130,6 +4147,10 @@ async def plot_bar_endpoint(
         None,
         description="Optional 3rd categorical for small-multiples — one panel per facet value, shared x order / hue colours / y axis. Capped at 8 panels.",
     ),
+    group_by: Optional[str] = Query(
+        None,
+        description="Optional in-plot grouping by a 3rd categorical — x-bars are clustered together by this field with a gap + a group-label band, all in ONE axes. Does not multiply bars (bar count = #x levels). Different from facet (separate panels).",
+    ),
 ):
     """Bar plot — cell counts when ``y`` is omitted, mean(±CI) of ``y`` per
     group when ``y`` is provided.
@@ -4141,7 +4162,8 @@ async def plot_bar_endpoint(
     lines stay under the cap."""
     req = _build_plot_request(
         common, 'bar', x=x, y=y, color=color, ci=ci,
-        bar_mode=bar_mode, normalize=normalize, facet=facet,
+        bar_mode=bar_mode, normalize=normalize,
+        facet=facet, group_by=group_by,
     )
     return await _render_plot(req, common.request)
 
