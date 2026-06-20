@@ -14,7 +14,9 @@ What it does:
       carlo@nevel.eu          -> carlo   (single token: used as-is)
     If that login is already taken by a DIFFERENT email, it falls back to
     <first-initial><lastname> (mfiers), then <initials>2, 3, …  If it's
-    taken by the SAME email, that's the same person -> error (no change).
+    taken by the SAME email, that's the same person -> error, unless
+    --force is given (then the password is regenerated for that account,
+    preserving its login / display name / groups).
   - Auto-derives a display name ("Mark Fiers") unless -n is given.
   - Generates a random 12-char alphanumeric password, hashes it (argon2 via
     the Authelia binary), and adds the user to users_database.yml.
@@ -31,13 +33,14 @@ Existing users are preserved untouched. Authelia watches the file
 
 Usage:
   ant-adduser <email> [-u login] [-n "Display Name"] [-g group] [-f users_file]
-              [--url https://host/]
+              [--url https://host/] [--force]
 
 Examples:
   ant-adduser mark.fiers@kuleuven.be            # -> login mf
   ant-adduser bert.bobjes@nevel.eu -g admins    # -> login bb, group admins
   ant-adduser carlo@nevel.eu -u carlo2          # force the login name
   ant-adduser jo@x.eu --url https://data.x.eu/  # override the auto-detected URL
+  ant-adduser mark.fiers@kuleuven.be --force    # reset mf's password, new one printed
 """
 
 import argparse
@@ -161,12 +164,18 @@ def main() -> None:
                         help="explicit login name (overrides the auto-derived one)")
     parser.add_argument("-n", "--name", default="",
                         help="display name (default: derived from email)")
-    parser.add_argument("-g", "--group", default="users", help="group (default: users)")
+    parser.add_argument("-g", "--group", default=None,
+                        help="group (default: 'users' for new accounts; "
+                             "preserved on --force unless given)")
     parser.add_argument("-f", "--file", default=str(DEFAULT_USERS_FILE),
                         help="users database path (default: this instance's)")
     parser.add_argument("--url", default="",
                         help="public site URL for the welcome email "
                              "(default: auto-detected from configuration.yml)")
+    parser.add_argument("--force", action="store_true",
+                        help="if the email already has an account, regenerate "
+                             "its password instead of erroring (preserves the "
+                             "existing login, display name and groups)")
     args = parser.parse_args()
 
     if not AUTHELIA_BIN.is_file():
@@ -186,6 +195,11 @@ def main() -> None:
 
     existing = {login: (entry or {}).get("email") for login, entry in users.items()}
 
+    # The login that already owns this email, if any (for --force resets).
+    existing_login_for_email = next(
+        (login for login, mail in existing.items()
+         if (mail or "").lower() == args.email.lower()), None)
+
     candidates, tokens = candidate_logins(args.email)
 
     if args.login:
@@ -198,12 +212,19 @@ def main() -> None:
         desired = candidates[0]
         suggestions = candidates
 
-    if desired not in existing:
+    is_reset = False
+    if args.force and existing_login_for_email:
+        # --force: regenerate the password for whoever already owns this email
+        # (matched by email, not by the derived login), preserving their entry.
+        login = existing_login_for_email
+        login_source = "existing — password reset (--force)"
+        is_reset = True
+    elif desired not in existing:
         login = desired
         login_source = "explicit (-u)" if args.login else "auto-derived from email"
     elif (existing[desired] or "").lower() == args.email.lower():
         die(f"user '{desired}' already exists with email {args.email} "
-            f"(same person) — nothing to do")
+            f"(same person) — use --force to reset the password")
     else:
         # collision with a DIFFERENT email: warn + require manual confirmation
         # rather than silently picking an alternative.
@@ -214,30 +235,45 @@ def main() -> None:
         login = confirm_login(suggestion, existing, args.email)
         login_source = "manually confirmed (collision)"
 
-    display_name = args.name or (
-        " ".join(token.capitalize() for token in tokens) if tokens else login)
-
     password, digest = generate_password_and_hash()
 
-    users[login] = {
-        "displayname": display_name,
-        "password": digest,
-        "email": args.email,
-        "groups": [args.group],
-    }
+    if is_reset:
+        # Mutate the existing entry: swap only the password (and display
+        # name / group if explicitly given), preserving any other fields
+        # and the file's formatting.
+        entry = users[login]
+        entry["password"] = digest
+        if args.name:
+            entry["displayname"] = args.name
+        if args.group:
+            entry["groups"] = [args.group]
+        display_name = entry.get("displayname") or login
+        group_display = ",".join(entry.get("groups") or []) or "—"
+    else:
+        display_name = args.name or (
+            " ".join(token.capitalize() for token in tokens) if tokens else login)
+        group = args.group or "users"
+        users[login] = {
+            "displayname": display_name,
+            "password": digest,
+            "email": args.email,
+            "groups": [group],
+        }
+        group_display = group
 
     yaml.dump(data, users_path)
     users_path.chmod(0o600)
 
+    action_label = "password reset" if is_reset else "created"
     print(f"""\
 ================================================================
-  Authelia user created (live within ~1s, no restart needed)
+  Authelia user {action_label} (live within ~1s, no restart needed)
 ----------------------------------------------------------------
   username:     {login}      ({login_source})
   password:     {password}
   email:        {args.email}
   display name: {display_name}
-  group:        {args.group}
+  group:        {group_display}
   file:         {users_path}
 ----------------------------------------------------------------
   Share the password over a secure channel. It is NOT stored;
