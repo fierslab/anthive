@@ -741,6 +741,21 @@ def test_plot_view_volcano_threshold_inputs(client):
         assert f'name="{field}"' in resp.text
 
 
+def test_plot_view_volcano_axis_clamp(client):
+    # optional axis-clamp controls (REST API 2.7.2): log2fc_clip (x) + neglog10p_clip (y)
+    resp = client.get("/browse/GroupA/ds1/plot/volcano")
+    assert resp.status_code == 200
+    assert 'name="log2fc_clip"' in resp.text
+    assert 'name="neglog10p_clip"' in resp.text
+
+
+def test_plot_view_ma_axis_clamp(client):
+    resp = client.get("/browse/GroupA/ds1/plot/ma")
+    assert resp.status_code == 200
+    assert 'name="log2fc_clip"' in resp.text
+    assert 'name="logmean_clip"' in resp.text
+
+
 def test_plot_view_forest_gene_input(client):
     resp = client.get("/browse/GroupA/ds1/plot/forest")
     assert resp.status_code == 200

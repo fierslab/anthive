@@ -90,7 +90,11 @@ nothing DE shows):
   rows×cols at 2000). All four are in `DE_GEOMS` (so `initDeCascade` runs)
   and `canRender` (de_heatmap needs study+term). The geom-switcher only
   lists them when the dataset has DE. `ma` surfaces the server's "needs
-  base_mean" 400 for GLMM/Wilcoxon studies.
+  base_mean" 400 for GLMM/Wilcoxon studies. Both `volcano` and `ma` have an
+  **optional axis-clamp** fieldset (REST 2.7.2): `log2fc_clip` +
+  `neglog10p_clip` (volcano), `log2fc_clip` + `logmean_clip` (ma) — blank =
+  no clamp (`buildUrl` omits empties); a 0/out-of-range value gets the
+  server's 422 in-status.
 - **de_browser.html**: the full term→contrast→gene explorer (see its route
   above).
 

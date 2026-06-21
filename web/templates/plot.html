@@ -503,10 +503,24 @@
       <label style="margin-top:4px">label top N genes</label>
       <input type="number" name="n_label" id="f-n_label" value="10" min="0" max="100">
     </fieldset>
+    <fieldset>
+      <legend>axis clamp (optional) {{ info('Saturate the axes so a padj≈0 / huge-fold-change cluster collapses to the boundary instead of squashing the rest of the distribution. Blank = no clamp; labels ride the clamp edge and the title notes the clip.') }}</legend>
+      <label>|log<sub>2</sub>FC| clamp — x axis (blank = none)</label>
+      <input type="number" name="log2fc_clip" id="f-log2fc_clip" step="any" min="0.1" max="50" placeholder="none">
+      <label style="margin-top:4px">−log<sub>10</sub>(padj) clamp — y axis</label>
+      <input type="number" name="neglog10p_clip" id="f-neglog10p_clip" step="any" min="1" max="400" placeholder="none">
+    </fieldset>
     {% else %}
     <fieldset>
       <legend>MA note {{ info('MA needs a per-gene base mean, which only DESeq2 / edgeR ingests carry. GLMM / Wilcoxon studies return an error here — use Volcano for those.') }}</legend>
       <small style="color:#b45309">MA needs a base mean — DESeq2 / edgeR only. Use Volcano for GLMM / Wilcoxon.</small>
+    </fieldset>
+    <fieldset>
+      <legend>axis clamp (optional) {{ info('Saturate the axes so a saturation cluster collapses to the boundary instead of squashing the rest. Blank = no clamp; the title notes the clip.') }}</legend>
+      <label>|log<sub>2</sub>FC| clamp — y axis (blank = none)</label>
+      <input type="number" name="log2fc_clip" id="f-log2fc_clip" step="any" min="0.1" max="50" placeholder="none">
+      <label style="margin-top:4px">log<sub>10</sub>(mean) clamp — x axis</label>
+      <input type="number" name="logmean_clip" id="f-logmean_clip" step="any" min="-10" max="10" placeholder="none">
     </fieldset>
     {% endif %}
 
