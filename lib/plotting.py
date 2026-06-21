@@ -821,6 +821,38 @@ def plot_scatter(
     return _render_figure(fig, dpi, output_format, caption, source_url)
 
 
+def _cbar_extend(mappable, vmin, vmax) -> str:
+    """Colorbar `extend` cue: an arrowhead only on a side that *genuinely* clips.
+
+    Compares the requested vmin/vmax against the mappable's actual data range,
+    so a no-op clip — e.g. vmin at the 0th percentile and vmax at the 100th, or
+    symmetric divergent limits that bracket the data — shows no arrows. The
+    triangle should only signal that values fall outside the colour range.
+
+    Returns one of 'both' | 'min' | 'max' | 'neither'.
+    """
+    arr = mappable.get_array()
+    if arr is None or len(arr) == 0:
+        return 'neither'
+    finite = np.asarray(arr, dtype=float)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return 'neither'
+    data_min = float(np.min(finite))
+    data_max = float(np.max(finite))
+    span = data_max - data_min
+    tol = span * 1e-9 if span > 0 else 1e-9
+    clip_lo = vmin is not None and vmin > data_min + tol
+    clip_hi = vmax is not None and vmax < data_max - tol
+    if clip_lo and clip_hi:
+        return 'both'
+    if clip_lo:
+        return 'min'
+    if clip_hi:
+        return 'max'
+    return 'neither'
+
+
 def plot_hexbin(
     embedding_df: pd.DataFrame,
     color_df: Optional[pd.DataFrame],
@@ -923,11 +955,10 @@ def plot_hexbin(
         if vmin is not None: hb_kwargs['vmin'] = vmin
         if vmax is not None: hb_kwargs['vmax'] = vmax
         hb = ax.hexbin(xs, ys, **hb_kwargs)
-        # extend='both' triangles cue the reader that values are clipped —
-        # show them whenever a clip is in effect (quantile probe OR explicit
-        # vmin/vmax). Without this an explicit vmin=0.1 looks like no clip
-        # is happening even though hexes outside the range get capped.
-        cbar_extend = 'both' if (clip_used or vmin is not None or vmax is not None) else 'neither'
+        # Arrowhead only on a side that genuinely clips — a clip at the 0th/100th
+        # percentile (or vmin/vmax outside the data range) caps nothing, so no
+        # triangle there.
+        cbar_extend = _cbar_extend(hb, vmin, vmax)
         cbar = plt.colorbar(hb, ax=ax, label='cell count', shrink=0.8,
                             extend=cbar_extend)
         title_bits = ['density', f'n={_fmt_n(n_cells)}', f'gridsize={gridsize}']
@@ -1000,7 +1031,7 @@ def plot_hexbin(
         hb = ax.hexbin(xs, ys, **hb_kwargs)
         label_kind = 'expression' if color_kind == 'gene' else 'value'
         label_suffix = ' (divergent)' if used_kind == 'divergent' else ''
-        cbar_extend = 'both' if (clip_used or vmin is not None or vmax is not None) else 'neither'
+        cbar_extend = _cbar_extend(hb, vmin, vmax)
         plt.colorbar(hb, ax=ax,
                      label=f'mean {color_field} ({label_kind}){label_suffix}',
                      shrink=0.8,
