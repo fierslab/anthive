@@ -622,7 +622,9 @@ def build_caption(
         if kde_bw is not None: kde_bits.append(f'bandwidth = {kde_bw:g}')
         if n_levels: kde_bits.append(f'{n_levels} iso-density levels')
         if kde_bits: knobs.append('; '.join(kde_bits))
-    if alpha is not None and alpha != 1.0:
+    # Common default is alpha=0.8 (set by CommonPlotParams); only call it out
+    # when it visibly deviates from the typical default range.
+    if alpha is not None and alpha not in (0.8, 1.0):
         knobs.append(f'point alpha = {alpha:g}')
 
     if knobs:
