@@ -9,29 +9,31 @@
     <strong>{{ experiment }}</strong>
 </div>
 
-<h2 style="font-size:15px">{{ metadata.get('name', experiment) }}</h2>
+<h1 class="page-title">{{ metadata.get('name', experiment) }}</h1>
 {% if metadata.get('description') %}
-<p style="color:#555">{{ metadata.description }}</p>
+<p class="muted">{{ metadata.description }}</p>
 {% endif %}
 
 <div class="two-col" style="margin:8px 0 12px">
     <div>
-        <div><span class="mk">organism</span> {{ metadata.get('organism', '—') }}</div>
-        <div><span class="mk">method</span> {{ metadata.get('method', '—') }}</div>
-        <div><span class="mk">gene_id_type</span> {{ metadata.get('gene_id_type', 'symbol') }}</div>
+        {% if metadata.get('organism') %}<div><span class="mk">organism</span> {{ metadata.organism }}</div>{% endif %}
+        {% if metadata.get('method') %}<div><span class="mk">method</span> {{ metadata.method }}</div>{% endif %}
+        {% if metadata.get('gene_id_type') %}<div><span class="mk">gene_id_type</span> {{ metadata.gene_id_type }}</div>{% endif %}
+        {% if metadata.get('parent_dataset') %}
         <div><span class="mk">parent dataset</span>
-            {% if metadata.get('parent_dataset') %}
             <a href="/browse/{{ metadata.parent_dataset.split('/')[0] }}/{{ metadata.parent_dataset.split('/')[1] }}">{{ metadata.parent_dataset }}</a>
-            {% else %}—{% endif %}
         </div>
+        {% endif %}
     </div>
     <div>
-        <div><span class="mk">date_derived</span> {{ metadata.get('date_derived', '—') }}</div>
-        <div><span class="mk">derived_by</span> {{ metadata.get('derived_by', '—') }}</div>
+        {% if metadata.get('date_derived') %}<div><span class="mk">date_derived</span> {{ metadata.date_derived }}</div>{% endif %}
+        {% if metadata.get('derived_by') %}<div><span class="mk">derived_by</span> {{ metadata.derived_by }}</div>{% endif %}
+        {% if metadata.get('software') %}
         <div><span class="mk">software</span>
-            {{ metadata.get('software', '—') }}
+            {{ metadata.software }}
             {% if metadata.get('software_version') %}({{ metadata.software_version }}){% endif %}
         </div>
+        {% endif %}
     </div>
 </div>
 
@@ -41,7 +43,7 @@
 <table class="auto" style="margin:4px 0 12px">
     <tbody>
     {% for key, value in metadata.parameters.items() %}
-        <tr><td style="color:#666;font-size:11px">{{ key }}</td><td>{{ value }}</td></tr>
+        <tr><td class="muted mono" style="font-size:11px">{{ key }}</td><td>{{ value }}</td></tr>
     {% endfor %}
     </tbody>
 </table>
@@ -54,7 +56,7 @@
 
 <h2>Genesets ({{ genesets|length }})</h2>
 <div class="table-wrap">
-<table class="auto">
+<table class="auto card-table">
     <thead>
         <tr>
             <th>Name</th>
@@ -67,11 +69,11 @@
     <tbody>
         {% for g in genesets %}
         <tr>
-            <td><a href="/genesets/{{ study }}/{{ experiment }}/{{ g.name }}"><strong>{{ g.display_name }}</strong></a></td>
-            <td style="color:#666">{{ g.format }}</td>
-            <td style="color:#555">{{ g.n_genes }}</td>
-            <td style="color:#555">{{ g.direction or '—' }}</td>
-            <td style="color:#555">{{ g.description or '' }}</td>
+            <td class="card-title"><a href="/genesets/{{ study }}/{{ experiment }}/{{ g.name }}">{{ g.display_name }}</a></td>
+            <td data-label="Format" class="muted">{{ g.format }}</td>
+            <td data-label="n genes" class="muted">{{ g.n_genes }}</td>
+            <td data-label="Direction" class="muted">{% if g.direction %}{{ g.direction }}{% else %}—{% endif %}</td>
+            <td data-label="Description" class="muted">{% if g.description %}{{ g.description }}{% endif %}</td>
         </tr>
         {% endfor %}
     </tbody>

@@ -32,6 +32,15 @@ try:
 except Exception:  # asset missing — page still renders, just without the mark
     _LOGO_DATA_URI = ''
 
+# Tiny dark ant-head mark for the topbar (every page). Registered as a Jinja
+# global so base.html can use it without each route threading it through.
+try:
+    templates.env.globals['topbar_logo'] = 'data:image/png;base64,' + base64.b64encode(
+        (Path(__file__).parent / 'topbar_logo.png').read_bytes()
+    ).decode('ascii')
+except Exception:
+    templates.env.globals['topbar_logo'] = ''
+
 # Favicons / PWA manifest live under web/favicons/ (tracked — NOT the gitignored
 # webapp/ build dir) and are served by the app at their conventional root paths.
 # The reverse proxy routes unmatched root paths here (see config/Caddyfile,

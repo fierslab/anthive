@@ -8,6 +8,11 @@
   .summary-row { display:flex; gap:14px; align-items:center; margin:2px 0 6px; font-size:12px; color:var(--text-muted); flex-wrap:wrap; }
   .summary-row .val { font-weight:600; color:var(--text); }
 
+  /* per-collection description: keep to one line, full text in title= */
+  .coll-desc { display:inline-block; max-width:520px; overflow:hidden;
+               text-overflow:ellipsis; white-space:nowrap; vertical-align:bottom;
+               font-size:11px; }
+
   /* compact "context" cell — organism + tech + celltype + tissue + disease + prep */
   .ctx-cell { display:inline-flex; gap:3px; flex-wrap:wrap; font-size:10px; line-height:1.2; }
   .ctx-pill {
@@ -77,16 +82,16 @@
 <table id="coll-table" class="card-table">
   <thead>
     <tr>
-      <th class="sortable" data-col="id" data-help="3-char study identifier (group_id)">ID<span class="sort-ind"></span></th>
+      <th class="sortable" data-col="id" data-help="3-char study identifier">ID <span class="info" title="Click to sort by study ID">ⓘ</span><span class="sort-ind"></span></th>
       <th class="sortable" data-col="name"
           data-help="Friendly collection name (the study). The 🌐/🔒 (access) and 🏠/↓ (source) icons sit after the name; filter by them here."
-          data-filter-fields="acc,src">Collection<span class="sort-ind"></span></th>
-      <th class="sortable" data-col="n_datasets" data-help="Number of distinct .h5ad datasets in this collection">n<span class="sort-ind"></span></th>
-      <th class="sortable" data-col="cells" data-help="Total cells summed across the collection's datasets">Cells<span class="sort-ind"></span></th>
-      <th class="sortable" data-col="modified" data-help="Most recent modification across this collection's datasets (mus 'updated' or .md 'date')">Modified<span class="sort-ind"></span></th>
+          data-filter-fields="acc,src">Collection <span class="info" title="Click to sort by name or filter by access / source">ⓘ</span><span class="sort-ind"></span></th>
+      <th class="sortable" data-col="n_datasets" data-help="Number of distinct .h5ad datasets in this collection">Datasets <span class="info" title="Click to sort by number of datasets in the collection">ⓘ</span><span class="sort-ind"></span></th>
+      <th class="sortable" data-col="cells" data-help="Total cells summed across the collection's datasets">Cells <span class="info" title="Click to sort by total cells across the collection">ⓘ</span><span class="sort-ind"></span></th>
+      <th class="sortable" data-col="modified" data-help="Most recent modification across this collection's datasets (mus 'updated' or .md 'date')">Modified <span class="info" title="Click to sort by last modification date">ⓘ</span><span class="sort-ind"></span></th>
       <th class="sortable" data-col="context"
           data-help="Compact summary: organism · technology · cell type · tissue · disease · prep. Each pill shows 'mix' when the collection's datasets disagree on that field."
-          data-filter-fields="organism,technology,celltype,tissue,disease,suspension_type">Context<span class="sort-ind"></span></th>
+          data-filter-fields="organism,technology,celltype,tissue,disease,suspension_type">Context <span class="info" title="Click to filter by organism, technology, cell type, tissue, disease or prep">ⓘ</span><span class="sort-ind"></span></th>
     </tr>
   </thead>
   <tbody>
@@ -113,16 +118,14 @@
       data-disease="{{ _dis.full or '' }}"
       data-acc="{{ _acc.full or '' }}"
       data-src="{{ _src.full or '' }}">
-      <td data-label="ID" style="color:#888;font-size:11px;font-family:var(--font-mono)">{{ folder.group_id or "—" }}</td>
+      <td data-label="ID" class="muted-2 mono" style="font-size:11px">{{ folder.group_id or "—" }}</td>
       <td class="card-title">
         {% if _acc.abbrev %}<span class="acc-src" title="access: {{ _acc.full }}">{{ _acc.abbrev }}</span>{% endif %}{% if _src.abbrev %}<span class="acc-src" title="source: {{ _src.full }}">{{ _src.abbrev }}</span>{% endif %}<a href="/browse/{{ folder.browse_id }}"><strong>{{ folder.name }}</strong></a>
-        {% if folder.description and folder.description != 'na' %}<br><span style="color:#888;font-size:11px">{{ folder.description }}</span>{% endif %}
+        {% if folder.description and folder.description != 'na' %}<br><span class="muted-2 coll-desc" title="{{ folder.description }}">{{ folder.description }}</span>{% endif %}
       </td>
-      <td data-label="Datasets" style="color:#666">{{ folder.dataset_count }}</td>
-      <td data-label="Cells" style="color:#555;font-family:var(--font-mono);font-size:11px">{{ format_count(folder.total_cells) }}</td>
-      <td data-label="Modified" style="color:#666;font-size:11px;font-family:var(--font-mono);white-space:nowrap">
-        {{ (folder.last_modified or '')[:10] or "—" }}
-      </td>
+      <td data-label="Datasets" class="muted">{{ folder.dataset_count }}</td>
+      <td data-label="Cells" class="muted mono" style="font-size:11px">{{ format_count(folder.total_cells) or "—" }}</td>
+      <td data-label="Modified" class="muted mono" style="font-size:11px;white-space:nowrap">{{ (folder.last_modified or '')[:10] or "—" }}</td>
       <td class="card-span">
         <span class="ctx-cell">
           {% if _org.abbrev %}<span class="ctx-pill"         title="organism: {{ _org.full }}">{{ _org.abbrev }}</span>{% endif %}

@@ -151,6 +151,26 @@ nothing DE shows):
   persisted). This is why the Sierksma Fig-2 hexbin links render in their
   per-module colours.
 
+## Sitewide UI conventions (base.html)
+
+- **Help → hover `ⓘ`.** Verbose/explanatory prose hides behind a small `ⓘ`
+  with a `title=` (the `.info` class is defined sitewide in `base.html`; `title`
+  text must contain no `"`). Used in every view; plot.html also has a local
+  `info(text)` Jinja macro. Prefer this over inline `<small>` help blocks.
+- **Utility classes** (base.html, DRY — don't inline colors): `.muted`
+  (`--text-muted`), `.muted-2` (#94a3b8), `.mono` (monospace).
+- **Topbar brand logo** is `web/topbar_logo.png` (a dark-recoloured crop of the
+  Authelia login mark), base64-inlined once and exposed as the Jinja **global**
+  `topbar_logo` (`templates.env.globals`), so `base.html` shows it on every page
+  without per-route context.
+- **No-duplication rule on dataset.html:** headline biology (organism /
+  technology / cell / tissue / disease / prep / year) lives ONLY in the coloured
+  context pills (full names in their `title`); the **Biology** section shows only
+  the remaining sample attributes (condition / sex / age / strain); **Provenance**
+  shows only descriptive metadata (access / source / license / contributor);
+  external resources (doi / pubmed / accession / url) are ONLY the `.ds-links`
+  badges under the title. Each datum appears once. Sections hide when empty.
+
 ## Vocabulary shared across pages
 
 - **Coloured "context" pills** (organism / tech / cell / tissue / disease

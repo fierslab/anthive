@@ -42,9 +42,14 @@
             font-size: 12px;
             border-bottom: 1px solid #a8b8be;
         }
-        #topbar .brand { font-weight: 600; color: #333; font-size: 13px; text-decoration: none; }
+        #topbar .brand { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; color: #333; font-size: 13px; text-decoration: none; }
         #topbar .brand:hover { text-decoration: none; color: #000; }
+        #topbar .brand img { height: 20px; width: auto; display: block; }
         #topbar nav { display: flex; gap: 14px; }
+        /* Topbar wraps instead of overflowing on narrow screens. */
+        @media (max-width: 560px) {
+            #topbar { height: auto; min-height: 32px; flex-wrap: wrap; padding: 4px 12px; gap: 8px 12px; }
+        }
         #topbar nav > a, #topbar nav .dropdown-toggle { color: var(--bar-link); font-size: 12px; }
         #topbar nav > a:hover, #topbar nav .dropdown-toggle:hover { color: var(--bar-link-hover); text-decoration: none; }
 
@@ -172,6 +177,23 @@
             border: 1px solid #1d4ed8; transition: background .1s;
         }
         .viz-btn:hover { background: #1e40af; color: #fff; text-decoration: none; }
+        /* Sitewide utilities (DRY — replace scattered inline color styles). */
+        .muted    { color: var(--text-muted); }
+        .muted-2  { color: #94a3b8; }
+        .mono     { font-family: var(--font-mono); }
+        /* Compact help: a small ⓘ revealing its text on hover (native title),
+           so explanatory prose doesn't take up space. Used across all views. */
+        .info {
+            cursor: help; color: var(--text-muted); font-size: 11px; font-style: normal;
+            margin-left: 3px; user-select: none; vertical-align: baseline;
+        }
+        .info:hover { color: var(--link); }
+        legend .info, th .info, h2 .info { font-size: 10px; }
+        /* GDPR notice: full-width, scrollable bottom sheet on small screens
+           (the inline desktop styling is a fixed 380px corner card). */
+        @media (max-width: 560px) {
+            #storage-notice { left: 6px !important; right: 6px !important; max-width: none !important; max-height: 62vh; overflow-y: auto; }
+        }
     </style>
     <script>
     function initTable(id,o){o=o||{};var ps=o.pageSize||20,s=o.searchable!==false,t=document.getElementById(id);if(!t)return;var tb=t.querySelector('tbody');if(!tb)return;var c=document.createElement('div');c.className='tbl-controls';t.parentNode.insertBefore(c,t);var si=null;if(s){si=document.createElement('input');si.type='text';si.placeholder='Filter\u2026';si.addEventListener('input',function(){p=0;r()});c.appendChild(si)}var inf=document.createElement('span');inf.className='tbl-info';c.appendChild(inf);var pv=document.createElement('a');pv.className='tbl-pg';pv.href='#';pv.textContent='\u2039 prev';pv.style.display='none';pv.addEventListener('click',function(e){e.preventDefault();p--;r()});c.appendChild(pv);var nx=document.createElement('a');nx.className='tbl-pg';nx.href='#';nx.textContent='next \u203a';nx.style.display='none';nx.addEventListener('click',function(e){e.preventDefault();p++;r()});c.appendChild(nx);var p=0;function r(){var q=si?si.value.toLowerCase().trim():'',a=Array.from(tb.querySelectorAll('tr')),f=q?a.filter(function(r){return r.textContent.toLowerCase().includes(q)}):a,tp=Math.max(1,Math.ceil(f.length/ps));if(p>=tp)p=tp-1;if(p<0)p=0;var st=p*ps;a.forEach(function(r){r.style.display='none'});f.slice(st,st+ps).forEach(function(r){r.style.display=''});var sh=Math.min(ps,f.length-st);inf.textContent=f.length<=ps?f.length+' item'+(f.length!==1?'s':''):(st+1)+'\u2013'+(st+sh)+' of '+f.length;pv.style.display=p>0?'':'none';nx.style.display=p<tp-1?'':'none'}r()}
@@ -179,7 +201,7 @@
 </head>
 <body>
     <div id="topbar">
-        <a href="/" class="brand">anthive</a>
+        <a href="/" class="brand">{% if topbar_logo %}<img src="{{ topbar_logo }}" alt="">{% endif %}anthive</a>
         <nav>
             <a href="/">datasets</a>
             {% if request.app.state.genesets_available %}
@@ -233,12 +255,8 @@
         max-width:380px;background:#fff;border:1px solid var(--border);
         box-shadow:0 4px 16px rgba(0,0,0,.12);padding:10px 12px;font-size:11px;
         line-height:1.55;color:var(--text);z-index:1000;border-radius:3px">
-      <div style="font-weight:600;font-size:11px;color:var(--text);margin-bottom:4px">
-        Your data stays in your browser
-      </div>
-      This catalogue stores your <strong>plot-display preferences</strong>
-      (figure size, DPI, font, palette) locally so they survive the page reload.
-      No analytics, no profiling, no tracking pixels, no third-party services.
+      <strong>Your data stays in your browser.</strong> Plot preferences are
+      stored locally — no analytics or tracking.
       <a href="#" id="storage-details" style="white-space:nowrap">details ▾</a>
 
       <div id="storage-details-body" style="display:none;margin-top:6px;padding-top:6px;border-top:1px dotted var(--border);color:var(--text-muted)">

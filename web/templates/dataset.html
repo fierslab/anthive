@@ -67,7 +67,7 @@
     display: none; position: absolute; top: calc(100% + 4px); right: 0;
     background: #fff; border: 1px solid var(--border); border-radius: 6px;
     box-shadow: 0 6px 20px rgba(0,0,0,.14); padding: 9px 11px; z-index: 200;
-    min-width: 250px;
+    min-width: 250px; max-width: calc(100vw - 24px);
   }
   .viz-menu.open .viz-menu-panel { display: block; }
   .viz-cat { margin-bottom: 9px; }
@@ -160,8 +160,6 @@
     {% if _cb.tissue.abbrev %}<span class="pill tissue"     title="tissue: {{ _cb.tissue.full }}">{{ _cb.tissue.abbrev }}</span>{% endif %}
     {% if _cb.disease.abbrev %}<span class="pill disease"   title="disease: {{ _cb.disease.full }}">{{ _cb.disease.abbrev }}</span>{% endif %}
     {% if _cb.suspension_type.abbrev %}<span class="pill prep" title="prep: {{ _cb.suspension_type.full }}">{{ _cb.suspension_type.abbrev }}</span>{% endif %}
-    {% if _cb.access.abbrev %}<span class="pill icon"       title="access: {{ _cb.access.full }}">{{ _cb.access.abbrev }}</span>{% endif %}
-    {% if _cb.source.abbrev %}<span class="pill icon"       title="source: {{ _cb.source.full }}">{{ _cb.source.abbrev }}</span>{% endif %}
     {% if _cb.year %}<span class="pill year" title="publication year">{{ _cb.year }}</span>{% endif %}
 </div>
 {% endif %}
@@ -181,10 +179,8 @@
 <div class="stats-row">
     {% if info.n_cells %}<div>cells: <span class="val">{{ "{:,}".format(info.n_cells) }}</span></div>{% endif %}
     {% if info.n_genes %}<div>genes: <span class="val">{{ "{:,}".format(info.n_genes) }}</span></div>{% endif %}
-    <div>layers: <span class="val">{{ info.layers|length if info.layers else 0 }}</span></div>
-    <div>embeddings: <span class="val">{{ info.obsm_keys|length if info.obsm_keys else 0 }}</span></div>
     <div>obs cols: <span class="val">{{ info.n_obs_columns }}</span></div>
-    {% if info.modified %}<div title="last modified (mus 'updated' / .md 'date')">modified: <span class="val">{{ info.modified[:10] }}</span></div>{% endif %}
+    {% if info.modified %}<div title="last updated">modified: <span class="val">{{ info.modified[:10] }}</span></div>{% endif %}
     {% if de_studies %}
     <div title="differential-expression results available">
         DE: <span class="val">{{ de_studies|length }}</span> stud{{ 'y' if de_studies|length == 1 else 'ies' }},
@@ -200,9 +196,6 @@
         <span class="dot dot-warn" title="not converted"></span> not converted
         {% endif %}
     </div>
-    {% if info.file_id %}
-    <div style="color:#999;font-size:11px">id: {{ info.file_id }}</div>
-    {% endif %}
 </div>
 {% endif %}
 
@@ -240,52 +233,41 @@
 </div>
 {% endif %}
 
-<!-- Biology -->
-{% if dataset_meta %}
-{% set ns = namespace(nulls=[]) %}
-<h2>Biology</h2>
+<!-- Biology — sample attributes beyond the headline pills (organism / tech /
+     cell / tissue / disease / prep) shown in the context bar above. -->
+{% if dataset_meta and (dataset_meta.condition or dataset_meta.sex or dataset_meta.age or dataset_meta.strain) %}
+<h2>Biology <span class="info" title="Headline biology — organism, technology, cell type, tissue, disease, prep — is in the coloured pills under the title (hover for full names).">ⓘ</span></h2>
 <div class="info-col">
-    {% if dataset_meta.organism %}<div class="info-row"><span class="mk">organism</span><span>{{ dataset_meta.organism }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['organism'] %}{% endif %}
-    {% if dataset_meta.tissue %}<div class="info-row"><span class="mk">tissue</span><span>{{ dataset_meta.tissue|join(', ') }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['tissue'] %}{% endif %}
-    {% if dataset_meta.celltype %}<div class="info-row"><span class="mk">cell type</span><span>{{ dataset_meta.celltype }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['cell_type'] %}{% endif %}
-    {% if dataset_meta.suspension_type %}<div class="info-row"><span class="mk">prep</span><span>{{ dataset_meta.suspension_type }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['suspension_type'] %}{% endif %}
-    {% if dataset_meta.technology %}<div class="info-row"><span class="mk">technology</span><span>{{ dataset_meta.technology|join(', ') }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['technology'] %}{% endif %}
-    {% if dataset_meta.disease %}<div class="info-row"><span class="mk">disease</span><span>{{ dataset_meta.disease|join(', ') }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['disease'] %}{% endif %}
-    {% if dataset_meta.condition %}<div class="info-row"><span class="mk">condition</span><span>{{ dataset_meta.condition|join(', ') }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['condition'] %}{% endif %}
-    {% if dataset_meta.sex %}<div class="info-row"><span class="mk">sex</span><span>{{ dataset_meta.sex }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['sex'] %}{% endif %}
-    {% if dataset_meta.age %}<div class="info-row"><span class="mk">age</span><span>{{ dataset_meta.age }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['age'] %}{% endif %}
-    {% if dataset_meta.strain %}<div class="info-row"><span class="mk">strain</span><span>{{ dataset_meta.strain }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['strain'] %}{% endif %}
+    {% if dataset_meta.condition %}<div class="info-row"><span class="mk">condition</span><span>{{ dataset_meta.condition|join(', ') }}</span></div>{% endif %}
+    {% if dataset_meta.sex %}<div class="info-row"><span class="mk">sex</span><span>{{ dataset_meta.sex }}</span></div>{% endif %}
+    {% if dataset_meta.age %}<div class="info-row"><span class="mk">age</span><span>{{ dataset_meta.age }}</span></div>{% endif %}
+    {% if dataset_meta.strain %}<div class="info-row"><span class="mk">strain</span><span>{{ dataset_meta.strain }}</span></div>{% endif %}
 </div>
+{% endif %}
 
-<!-- Provenance -->
+<!-- Provenance — descriptive metadata. External resources (doi / pubmed /
+     accession / url) are the link badges under the title; year is a pill. -->
+{% if dataset_meta and (dataset_meta.access or dataset_meta.source or dataset_meta.license or dataset_meta.contributor) %}
 <h2>Provenance</h2>
 <div class="info-col">
-    {% if dataset_meta.access %}<div class="info-row"><span class="mk">access</span><span>{{ dataset_meta.access }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['access'] %}{% endif %}
-    {% if dataset_meta.source %}<div class="info-row"><span class="mk">source</span><span>{{ dataset_meta.source }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['source'] %}{% endif %}
-    {% if dataset_meta.year %}<div class="info-row"><span class="mk">year</span><span>{{ dataset_meta.year }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['year'] %}{% endif %}
-    {% if dataset_meta.license %}<div class="info-row"><span class="mk">license</span><span>{{ dataset_meta.license }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['license'] %}{% endif %}
-    {% if dataset_meta.contributor %}<div class="info-row"><span class="mk">contributor</span><span>{{ dataset_meta.contributor }}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['contributor'] %}{% endif %}
-    {% if dataset_meta.accession %}<div class="info-row"><span class="mk">accession</span><span>{% if dataset_meta.accession_url %}<a href="{{ dataset_meta.accession_url }}">{{ dataset_meta.accession }}</a>{% else %}{{ dataset_meta.accession }}{% endif %}</span></div>{% else %}{% set ns.nulls = ns.nulls + ['accession'] %}{% endif %}
-    {% if dataset_meta.doi %}{% for doi_item in dataset_meta.doi %}<div class="info-row"><span class="mk">doi</span><span><a href="https://doi.org/{{ doi_item }}">{{ doi_item }}</a></span></div>{% endfor %}{% else %}{% set ns.nulls = ns.nulls + ['doi'] %}{% endif %}
-    {% if dataset_meta.pmid %}{% for p in dataset_meta.pmid %}<div class="info-row"><span class="mk">pmid</span><span><a href="https://pubmed.ncbi.nlm.nih.gov/{{ p }}">{{ p }}</a></span></div>{% endfor %}{% else %}{% set ns.nulls = ns.nulls + ['pmid'] %}{% endif %}
-    {% if dataset_meta.link %}{% for url_item in dataset_meta.link %}<div class="info-row"><span class="mk">link</span><span><a href="{{ url_item }}">{{ url_item }}</a></span></div>{% endfor %}{% else %}{% set ns.nulls = ns.nulls + ['link'] %}{% endif %}
+    {% if dataset_meta.access %}<div class="info-row"><span class="mk">access</span><span>{{ dataset_meta.access }}</span></div>{% endif %}
+    {% if dataset_meta.source %}<div class="info-row"><span class="mk">source</span><span>{{ dataset_meta.source }}</span></div>{% endif %}
+    {% if dataset_meta.license %}<div class="info-row"><span class="mk">license</span><span>{{ dataset_meta.license }}</span></div>{% endif %}
+    {% if dataset_meta.contributor %}<div class="info-row"><span class="mk">contributor</span><span>{{ dataset_meta.contributor }}</span></div>{% endif %}
 </div>
-{% if ns.nulls %}<div style="color:#bbb;font-size:11px;margin-top:4px">{{ ns.nulls|length }} field{{ 's' if ns.nulls|length != 1 else '' }} not set: {{ ns.nulls|join(', ') }}</div>{% endif %}
 {% endif %}
 
 {% if info %}
 
 <!-- Observation columns -->
 <h2>Observation columns
-    <span style="font-size:12px;font-weight:normal;color:#888">
-        ({{ n_cat_cols }} cat · {{ n_num_cols }} num · total {{ info.n_obs_columns }})
-    </span>
+    <span class="muted" style="font-size:12px;font-weight:normal">({{ n_cat_cols }} cat · {{ n_num_cols }} num)</span>
+    <span class="info" title="≡ categorical · # numerical. Click a column to plot it (bar for categorical, histogram for numerical).">ⓘ</span>
 </h2>
 {% if obs_columns %}
 <div style="margin-bottom:4px;display:flex;align-items:center;gap:8px">
     <input id="obs-filter" type="text" placeholder="filter…" style="padding:2px 6px;font-family:inherit;font-size:12px;border:1px solid #ccc;outline:none;width:140px">
-    <span id="obs-count" style="font-size:11px;color:#888"></span>
-    <span style="font-size:10px;color:#aaa"><span style="color:#e65100;font-size:11px">≡</span> cat &nbsp;<span style="color:#0277bd;font-size:11px">#</span> num</span>
+    <span id="obs-count" class="muted" style="font-size:11px"></span>
 </div>
 <div id="obs-chips" style="display:flex;flex-wrap:wrap;gap:1px 0;line-height:1.8">
     {% for col in obs_columns %}
@@ -304,7 +286,7 @@
 
 {% if de_studies %}
 <!-- Differential expression -->
-<h2>Differential expression ({{ de_studies|length }})</h2>
+<h2>Differential expression <span class="muted" style="font-weight:normal;font-size:13px">({{ de_studies|length }} {{ 'study' if de_studies|length == 1 else 'studies' }})</span></h2>
 <div class="table-wrap">
 <table class="auto" style="font-size:12px">
     <thead><tr>
@@ -343,7 +325,7 @@
 <div style="padding:4px 0">
     {% for emb in info.obsm_keys %}<code>{{ emb }}</code> {% endfor %}
     {% if has_duckdb %}
-    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/scatter" class="chip" style="margin-left:8px">open UMAP →</a>
+    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/scatter" class="chip" style="margin-left:8px">open scatter →</a>
     {% endif %}
 </div>
 {% endif %}

@@ -30,6 +30,10 @@
   .ext-lnk:hover { opacity:1; filter:none; text-decoration:none; }
   /* Mobile card layout (≤760px) is the shared `.card-table` rule in base.html;
      the cells below carry the data-label / card-title hooks it consumes. */
+  /* Cells × Genes stays on one line on wide screens, but is allowed to wrap
+     in the ≤760px card layout so a narrow card never forces horizontal scroll. */
+  td.cells-genes { white-space: nowrap; }
+  @media (max-width: 760px) { td.cells-genes { white-space: normal; } }
 </style>
 
 <div class="breadcrumb">
@@ -61,7 +65,7 @@
         <tr>
             <th>Dataset</th>
             <th title="cells × genes">Cells × Genes</th>
-            <th title="last modified (mus 'updated' / .md 'date')">Modified</th>
+            <th title="last updated">Modified</th>
             {% if 'organism' in var_fields %}<th title="organism">Org</th>{% endif %}
             {% if 'technology' in var_fields %}<th title="technology">Tech</th>{% endif %}
             {% if 'celltype' in var_fields %}<th title="cell type">Cell</th>{% endif %}
@@ -85,11 +89,10 @@
         {% set _src  = dataset.source          or {} %}
         <tr>
             <td class="card-title">
-                {% if 'access' in var_fields and _acc.abbrev %}<span class="acc-src" title="access: {{ _acc.full }}">{{ _acc.abbrev }}</span>{% endif %}{% if 'source' in var_fields and _src.abbrev %}<span class="acc-src" title="source: {{ _src.full }}">{{ _src.abbrev }}</span>{% endif %}<a href="/browse/{{ folder_browse_id }}/{{ dataset.browse_id }}"><strong>{{ dataset.name }}</strong></a>{% for doi_item in dataset.doi %}<a class="ext-lnk" href="https://doi.org/{{ doi_item }}" target="_blank" rel="noopener" title="DOI: {{ doi_item }}">🔗</a>{% endfor %}{% if dataset.accession_url %}<a class="ext-lnk" href="{{ dataset.accession_url }}" target="_blank" rel="noopener" title="accession: {{ dataset.accession }}">🔗</a>{% endif %}{% for url_item in dataset.link %}<a class="ext-lnk" href="{{ url_item }}" target="_blank" rel="noopener" title="{{ url_item }}">🔗</a>{% endfor %}
-                {% if dataset.subfolder %}<br><span style="color:#888;font-size:11px">{{ dataset.subfolder }}</span>{% endif %}
-                <div style="color:#aaa;font-size:10px;font-family:var(--font-mono);margin-top:1px">{{ dataset.file_id }}</div>
+                {% if 'access' in var_fields and _acc.abbrev %}<span class="acc-src" title="access: {{ _acc.full }}">{{ _acc.abbrev }}</span>{% endif %}{% if 'source' in var_fields and _src.abbrev %}<span class="acc-src" title="source: {{ _src.full }}">{{ _src.abbrev }}</span>{% endif %}<a href="/browse/{{ folder_browse_id }}/{{ dataset.browse_id }}" title="{{ dataset.file_id }}"><strong>{{ dataset.name }}</strong></a>{% for doi_item in dataset.doi %}<a class="ext-lnk" href="https://doi.org/{{ doi_item }}" target="_blank" rel="noopener" title="DOI: {{ doi_item }}">🔗</a>{% endfor %}{% if dataset.accession_url %}<a class="ext-lnk" href="{{ dataset.accession_url }}" target="_blank" rel="noopener" title="accession: {{ dataset.accession }}">🔗</a>{% endif %}{% for url_item in dataset.link %}<a class="ext-lnk" href="{{ url_item }}" target="_blank" rel="noopener" title="{{ url_item }}">🔗</a>{% endfor %}
+                {% if dataset.subfolder %}<br><span class="muted-2" style="font-size:11px">{{ dataset.subfolder }}</span>{% endif %}
             </td>
-            <td data-label="Cells × Genes" class="card-span" style="color:#555;font-family:var(--font-mono);font-size:11px;white-space:nowrap">
+            <td data-label="Cells × Genes" class="card-span cells-genes mono" style="color:#555;font-size:11px">
                 {% if dataset.n_obs and dataset.n_vars %}
                 {{ format_count(dataset.n_obs) }} × {{ format_count(dataset.n_vars) }}
                 {% endif %}

@@ -5,7 +5,12 @@
 {% block content %}
 <style>
   .de-page { display: grid; grid-template-columns: 280px 1fr; gap: 14px; align-items: start; }
-  @media (max-width: 820px) { .de-page { grid-template-columns: 1fr; } }
+  @media (max-width: 820px) {
+    .de-page { grid-template-columns: 1fr; }
+    /* stacked above the table on narrow screens — keep the rail short so the
+       gene table stays reachable without a long scroll. */
+    .de-rail { max-height: 32vh; }
+  }
 
   /* left rail: term → contrast tree */
   .de-rail { border: 1px solid var(--border); border-radius: 6px; padding: 6px; max-height: 78vh; overflow-y: auto; }
@@ -67,10 +72,10 @@
 </style>
 
 <div class="breadcrumb">
-  <a href="/">datasets</a> /
-  <a href="/browse/{{ folder_browse_id }}">{{ folder_name }}</a> /
-  <a href="/browse/{{ folder_browse_id }}/{{ file_id }}">{{ dataset_name }}</a> /
-  <span>🔬 DE</span>
+  <a href="/">datasets</a> &rsaquo;
+  <a href="/browse/{{ folder_browse_id }}">{{ folder_name }}</a> &rsaquo;
+  <a href="/browse/{{ folder_browse_id }}/{{ file_id }}">{{ dataset_name }}</a> &rsaquo;
+  <span>DE</span>
 </div>
 <h1 class="page-title">🔬 {{ study.name or study_id }}</h1>
 
@@ -131,7 +136,7 @@
 
     <div class="de-summary" id="de-summary"></div>
     <div id="de-table-wrap">
-      <div class="de-placeholder" id="de-placeholder">← select a term, then a contrast</div>
+      <div class="de-placeholder" id="de-placeholder">Select a term, then a contrast</div>
     </div>
     <div class="de-loadmore" id="de-loadmore" style="display:none">
       <button type="button" id="de-more">load more</button>
@@ -258,8 +263,10 @@
       const tbody = document.getElementById('de-tbody');
       rows.forEach(r => tbody.appendChild(geneRow(r)));
       offset += rows.length;
-      summaryEl.innerHTML = `<b>${curTerm}</b> · <b>${curContrast}</b> — showing <b>${offset}</b> genes` +
-        `${padj ? `, padj≤${padj}` : ''}${l2fc ? `, |log2FC|≥${l2fc}` : ''} (sorted by ${sort}, ${dir})`;
+      const recap = `sorted by ${sort}, ${dir}` +
+        `${padj ? `, padj≤${padj}` : ''}${l2fc ? `, |log2FC|≥${l2fc}` : ''}`;
+      summaryEl.title = recap;
+      summaryEl.innerHTML = `<b>${curTerm}</b> · <b>${curContrast}</b> — showing <b>${offset}</b> genes`;
       loadMoreWrap.style.display = (rows.length === PAGE) ? '' : 'none';
     } catch (e) {
       tableWrap.innerHTML = `<div class="de-err">failed to load genes (${e.message})</div>`;
@@ -272,7 +279,7 @@
       <div class="table-wrap">
       <table class="de-gene-tbl">
         <thead><tr>
-          <th>gene</th><th style="text-align:right">log2FC</th>
+          <th>gene</th><th style="text-align:right">log2FC / effect</th>
           <th style="text-align:right">padj</th><th style="text-align:right">pvalue</th>
           <th style="text-align:right">estimate</th><th style="text-align:right">95% CI</th>
           <th>plots</th>
@@ -284,8 +291,10 @@
 
   function geneRow(r) {
     const tr = document.createElement('tr');
+    const isEff = r.log2fc == null && r.effsize != null;
     const fc = r.log2fc != null ? r.log2fc : r.effsize;
     const fcCls = fc == null ? '' : (fc >= 0 ? 'de-up' : 'de-down');
+    const fcTitle = isEff ? ' title="effect size (no log2FC for this study)"' : '';
     const ci = (r.ci_low != null && r.ci_high != null) ? `[${fmtF(r.ci_low)}, ${fmtF(r.ci_high)}]` : '';
     const g = r.gene_name;
     const volcano = `${BROWSE}/plot/volcano?study=${enc(STUDY)}&term=${enc(curTerm)}&contrast=${enc(curContrast)}`;
@@ -293,11 +302,11 @@
     const forest  = `${BROWSE}/plot/forest?gene=${enc(g)}&study=${enc(STUDY)}&term=${enc(curTerm)}`;
     tr.innerHTML =
       `<td class="gene">${g}</td>` +
-      `<td class="num ${fcCls}">${fmtF(fc)}</td>` +
+      `<td class="num ${fcCls}"${fcTitle}>${fmtF(fc)}</td>` +
       `<td class="num">${fmtP(r.padj)}</td>` +
       `<td class="num">${fmtP(r.pvalue)}</td>` +
       `<td class="num">${fmtF(r.estimate)}</td>` +
-      `<td class="num" style="color:#888">${ci}</td>` +
+      `<td class="num muted-2">${ci}</td>` +
       `<td class="de-actions">` +
         `<a href="${volcano}" title="volcano for this contrast">🌋</a>` +
         `<a href="${scatter}" title="${g} on the embedding">🗺</a>` +

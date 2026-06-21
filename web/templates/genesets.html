@@ -13,16 +13,19 @@
 </div>
 
 {% if not by_study %}
-<p style="color:#888">No genesets in the store.</p>
+<p class="muted">No genesets in the store.</p>
 {% else %}
 
 {% for study, experiments in by_study.items() %}
 <h2>{{ study }}</h2>
+{% for experiment, genesets in experiments.items() %}
+<h3 class="muted" style="margin:10px 0 2px">
+    <a href="/genesets/{{ study }}/{{ experiment }}">{{ experiment }}</a>
+</h3>
 <div class="table-wrap">
-<table class="auto" style="margin-bottom:10px">
+<table class="auto card-table" style="margin-bottom:10px">
     <thead>
         <tr>
-            <th>Experiment</th>
             <th>Geneset</th>
             <th>Format</th>
             <th>n genes</th>
@@ -32,26 +35,20 @@
         </tr>
     </thead>
     <tbody>
-    {% for experiment, genesets in experiments.items() %}
-        {% for g in genesets %}
+    {% for g in genesets %}
         <tr>
-            <td>
-                {% if loop.first %}
-                <a href="/genesets/{{ study }}/{{ experiment }}"><strong>{{ experiment }}</strong></a>
-                {% endif %}
-            </td>
-            <td><a href="/genesets/{{ study }}/{{ experiment }}/{{ g.name }}">{{ g.display_name }}</a></td>
-            <td style="color:#666">{{ g.format }}</td>
-            <td style="color:#555">{{ g.n_genes }}</td>
-            <td style="color:#555">{{ g.organism or '—' }}</td>
-            <td style="color:#555">{{ g.method or '—' }}</td>
-            <td style="color:#555;font-size:11px">{{ g.parent_dataset or '—' }}</td>
+            <td class="card-title"><a href="/genesets/{{ study }}/{{ experiment }}/{{ g.name }}">{{ g.display_name }}</a></td>
+            <td data-label="Format" class="muted">{{ g.format }}</td>
+            <td data-label="n genes" class="muted">{{ g.n_genes }}</td>
+            <td data-label="Organism" class="muted">{% if g.organism %}{{ g.organism }}{% else %}—{% endif %}</td>
+            <td data-label="Method" class="muted">{% if g.method %}{{ g.method }}{% else %}—{% endif %}</td>
+            <td data-label="Parent dataset" class="muted mono" style="font-size:11px">{% if g.parent_dataset %}{{ g.parent_dataset }}{% else %}—{% endif %}</td>
         </tr>
-        {% endfor %}
     {% endfor %}
     </tbody>
 </table>
 </div>
+{% endfor %}
 {% endfor %}
 
 {% endif %}
