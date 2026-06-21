@@ -1,4 +1,4 @@
-.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-streamlit serve-mcp serve-all serve-debug serve-stop caddy-passwd caddy-passwd-clear dev-jupyter sync-push sync-pull sync-pull-duckdb sync-pull-all sync-status build-stale sync-update serve-status serve-restart h5adstore-push push-all
+.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-streamlit serve-mcp serve-all serve-debug serve-stop caddy-passwd caddy-passwd-clear dev-jupyter sync-push sync-pull sync-pull-duckdb sync-pull-de sync-pull-all sync-status build-stale sync-update serve-status serve-restart h5adstore-push push-all
 
 help:
 	@echo "Anthive4 Development Commands"
@@ -32,6 +32,7 @@ help:
 	@echo "  make sync-update     - Full cycle: pull h5ad → rebuild stale duckdb → push"
 	@echo "  make sync-pull         - Pull .h5ad + .de.parquet from S3 (duckdb rebuilt locally)"
 	@echo "  make sync-pull-duckdb  - Pull ONLY .duckdb files from S3 (skip h5ad / de.parquet)"
+	@echo "  make sync-pull-de      - Pull ONLY .de.parquet sidecars from S3"
 	@echo "  make build-stale       - Rebuild .duckdb for any h5ad newer than its duckdb"
 	@echo "  make sync-push         - Push .h5ad and .duckdb to S3 (mtime metadata included)"
 	@echo "  make sync-status       - Show local vs S3 sync status (size + mtime drift)"
@@ -285,6 +286,13 @@ sync-pull:
 # served-derivative without re-running `make build-stale` locally).
 sync-pull-duckdb:
 	@./bin/ops/ant-sync pull --only .duckdb
+
+# Pull ONLY the .de.parquet sidecars — leave .h5ad / .duckdb alone.
+# Use when a peer ingested a new DE study (or re-ingested an existing one)
+# and you want the source-of-truth sidecar without re-pulling the
+# multi-GB h5ad payload.
+sync-pull-de:
+	@./bin/ops/ant-sync pull --only .de.parquet
 
 # Force pull h5ad + duckdb + de.parquet (disaster-recovery / mass-rebuild
 # bootstrap).
