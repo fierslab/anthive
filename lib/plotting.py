@@ -2087,16 +2087,39 @@ def plot_volcano(
         ax.axvline(+log2fc_threshold, linestyle='--', color='#888', linewidth=0.8)
         ax.axvline(-log2fc_threshold, linestyle='--', color='#888', linewidth=0.8)
 
-    # Label top-N significant genes by lowest padj.
+    # Label top-N significant genes by lowest padj.  When many genes share
+    # padj=0 (saturated clip), naive 2pt offsets stack them on top of each
+    # other; adjustText repels them apart and draws thin leader lines.
+    # Give it some headroom above the data ceiling so it has room to push
+    # labels up + out — otherwise the iteration just rotates them around
+    # the same crowded zone.
     if n_label > 0:
         labelled = df[df['_sig']].nsmallest(n_label, '_padj_clipped')
-        for _, row in labelled.iterrows():
-            ax.annotate(
-                str(row['gene_name']),
-                (row['_effect'], row['_neglog10p']),
-                fontsize=7, alpha=0.85, ha='left', va='bottom',
-                xytext=(2, 2), textcoords='offset points',
-            )
+        y_max = float(df['_neglog10p'].max())
+        ax.set_ylim(top=y_max * 1.12)
+        x_lo, x_hi = float(df['_effect'].min()), float(df['_effect'].max())
+        x_pad = max(0.6, 0.05 * (x_hi - x_lo))
+        ax.set_xlim(x_lo - x_pad, x_hi + x_pad)
+        texts = [
+            ax.text(row['_effect'], row['_neglog10p'], str(row['gene_name']),
+                    fontsize=7, alpha=0.9, ha='center', va='center')
+            for _, row in labelled.iterrows()
+        ]
+        if len(texts) > 1:
+            try:
+                from adjustText import adjust_text  # type: ignore
+                adjust_text(
+                    texts, ax=ax,
+                    arrowprops=dict(arrowstyle='-', color='#888', lw=0.4,
+                                    alpha=0.7),
+                    expand_points=(1.8, 2.2),
+                    expand_text=(1.4, 1.6),
+                    force_text=(0.8, 1.2),
+                    force_points=(0.4, 0.6),
+                    lim=1500,
+                )
+            except ImportError:
+                pass  # fall-back: stacked labels are still readable enough
 
     ax.set_xlabel(x_label)
     ax.set_ylabel('-log₁₀ adjusted p')
@@ -2179,13 +2202,22 @@ def plot_ma(
 
     if n_label > 0:
         labelled = df[df['_sig']].nsmallest(n_label, 'padj')
-        for _, row in labelled.iterrows():
-            ax.annotate(
-                str(row['gene_name']),
-                (row['_logmean'], row['log2fc']),
-                fontsize=7, alpha=0.85, ha='left', va='bottom',
-                xytext=(2, 2), textcoords='offset points',
-            )
+        texts = [
+            ax.text(row['_logmean'], row['log2fc'], str(row['gene_name']),
+                    fontsize=7, alpha=0.9, ha='center', va='center')
+            for _, row in labelled.iterrows()
+        ]
+        if len(texts) > 1:
+            try:
+                from adjustText import adjust_text  # type: ignore
+                adjust_text(
+                    texts, ax=ax,
+                    arrowprops=dict(arrowstyle='-', color='#888', lw=0.4),
+                    expand_points=(1.3, 1.6),
+                    force_text=(0.4, 0.6),
+                )
+            except ImportError:
+                pass
 
     ax.set_xlabel('log₁₀ mean expression')
     ax.set_ylabel('log₂ fold change')
