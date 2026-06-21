@@ -116,12 +116,18 @@ nothing DE shows):
   - **Help → hover `ⓘ`.** Verbose explanatory prose goes in the `info(text)`
     Jinja macro (`<span class="info" title="…">ⓘ</span>`) on the relevant
     legend/label, NOT inline `<small>` blocks. `text` must contain no `"`.
-  - **Single-choice selects collapse.** `collapseSingleSelects(form)` (non-DE,
-    at init) and `collapseDeChain()` (DE, after the cascade resolves) turn a
-    `<select>` with exactly one real option into greyed `.field-static` text +
-    a hidden input carrying the value (so `buildUrl`/`syncURL` still see it).
-    Mark a select `data-keep-select` to opt out (the geom switcher does). The
-    `disabled` guard keeps it safe with the polymorphic-scatter mode toggle.
+  - **Single-choice selects show as static text.** Two mechanisms, same
+    `.field-static` look: `collapseSingleSelects(form)` *removes* a truly-static
+    single-option `<select>` (embedding/layer) and drops in a hidden input
+    (so `buildUrl`/`syncURL` still see the value); the DE **cascade** selects
+    (study/term/contrast) instead use `reflectSingle()` — it hides the
+    `<select>` and shows a static twin when there's one real option, and
+    reveals the dropdown again if it repopulates to several (so a single-
+    contrast term reads as text without breaking re-selection). `reflectSingle`
+    is called at the end of `populateTerms`/`populateContrasts` and via
+    `reflectDeCascade()` once the cascade settles. Mark a select
+    `data-keep-select` to opt out (the geom switcher does); the `disabled`
+    guard keeps removal safe with the polymorphic-scatter mode toggle.
   - **Downloads are blob-fetched** (`downloadBlob(fmt, ext)`), not `<a href>` —
     so the long API URL never shows in the browser status bar on hover, and a
     failed render surfaces inline. `copy URL` copies `window.location.href`

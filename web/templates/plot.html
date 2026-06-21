@@ -1251,6 +1251,7 @@
     });
     const chosen = selected || (terms.length === 1 ? terms[0].term : '');
     if (chosen) sel.value = chosen;
+    reflectSingle(sel);   // one term → show as static text, not a 1-option dropdown
     return sel.value || '';
   }
   async function populateContrasts(study, term, selected) {
@@ -1271,6 +1272,7 @@
     });
     const chosen = selected || (contrasts.length === 1 ? contrasts[0].contrast : '');
     if (chosen) sel.value = chosen;
+    reflectSingle(sel);   // one contrast → show as static text, not a 1-option dropdown
   }
   // ── collapse single-choice selects to inert greyed text ──────────────────
   // A <select> offering exactly one value isn't a choice; show it as static
@@ -1302,19 +1304,35 @@
       if (sel.options.length === 1) makeStatic(sel);
     });
   }
-  // DE chain: collapse downstream selects only when the upstream is also fixed,
-  // so a study with one term/contrast reads as static while a multi-study form
-  // keeps its repopulating dropdowns intact.
-  function collapseDeChain() {
-    const realCount = sel => [...sel.options].filter(o => o.value !== '').length;
-    const study = document.getElementById('f-study');
-    if (!study || study.hasAttribute('data-keep-select') || realCount(study) !== 1) return;
-    makeStatic(study);
-    const term = document.getElementById('f-term');
-    if (!term || realCount(term) !== 1) return;
-    makeStatic(term);
-    const contrast = document.getElementById('f-contrast');
-    if (contrast && realCount(contrast) === 1) makeStatic(contrast);
+  // Cascade selects (DE study/term/contrast) repopulate as the user navigates,
+  // so they can't be REMOVED like the static ones above. Instead we hide the
+  // <select> and show a static-text twin whenever it has a single real option,
+  // and reveal the dropdown again if it repopulates to several. The <select>
+  // stays in the DOM (value set), so buildUrl/syncURL still read it. Net effect
+  // matches makeStatic visually (.field-static) — consistent across the form.
+  function reflectSingle(sel) {
+    if (!sel) return;
+    let twin = sel.nextElementSibling;
+    if (!(twin && twin.classList && twin.classList.contains('field-static'))) {
+      twin = document.createElement('span');
+      twin.className = 'field-static';
+      sel.after(twin);
+    }
+    const real = [...sel.options].filter(o => o.value !== '');
+    if (real.length === 1) {
+      sel.value = real[0].value;
+      twin.textContent = (real[0].textContent || real[0].value).trim();
+      twin.title = real[0].value;
+      sel.style.display = 'none';
+      twin.style.display = '';
+    } else {
+      sel.style.display = '';
+      twin.style.display = 'none';
+    }
+  }
+  function reflectDeCascade() {
+    ['f-study', 'f-term', 'f-contrast'].forEach(id =>
+      reflectSingle(document.getElementById(id)));
   }
 
   async function initDeCascade() {
@@ -1346,7 +1364,7 @@
       const term = await populateTerms(studySel.value, p.get('term'));
       if (term) await populateContrasts(studySel.value, term, p.get('contrast'));
     }
-    collapseDeChain();   // study/term/contrast now final — collapse the singular ones
+    reflectDeCascade();   // study/term/contrast now final — show singular ones as static
     refresh();
   }
 

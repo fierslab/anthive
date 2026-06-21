@@ -116,6 +116,19 @@ localhost:8501, localhost.localdomain:8501, 127.0.0.1:8501, 10.42.0.3:8501 {
 		file_server
 	}
 
+	# Other static bundles under ./webapp (rendered reports, plot exports, the
+	# stlite playground). Explicit so they stay on file_server now that the
+	# fallback below proxies everything else to the browser app.
+	handle /plots/* {
+		file_server
+	}
+	handle /report/* {
+		file_server
+	}
+	handle /stlite/* {
+		file_server
+	}
+
 	# MCP server (FastMCP streamable-http)
 	handle /mcp* {
 		reverse_proxy localhost:8090
@@ -145,9 +158,13 @@ localhost:8501, localhost.localdomain:8501, 127.0.0.1:8501, 10.42.0.3:8501 {
 		respond `{"error":"gone","error_description":"The Streamlit dashboard has been removed. Use the per-dataset plot UI at /browse/ instead."}` 410
 	}
 
-	# Fallback - if no other handle matched, serve static files
+	# Fallback — the browser app (ant-browse) owns every remaining path:
+	# /, /browse/*, /genesets*, /about, and the favicon / webmanifest routes
+	# it serves. Previously this was file_server, which 404'd any browser
+	# route not explicitly enumerated above (e.g. /about, /genesets). The app
+	# is the default; static bundles are the handled exceptions, just above.
 	handle {
-		file_server
+		reverse_proxy localhost:8081
 	}
 
 	# Enable gzip compression

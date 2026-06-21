@@ -801,6 +801,25 @@ def test_about_link_in_nav(client):
     assert 'href="/about"' in resp.text
 
 
+def test_favicon_routes_served(client):
+    # favicons/manifest are served by the app (from web/favicons/, since the
+    # webapp/ static dir is gitignored). The reverse proxy routes these here.
+    for path, ctype in [("/favicon.ico", "image/x-icon"),
+                        ("/favicon.svg", "svg"),
+                        ("/site.webmanifest", "manifest"),
+                        ("/apple-touch-icon.png", "png")]:
+        resp = client.get(path)
+        assert resp.status_code == 200, path
+        assert ctype in resp.headers.get("content-type", ""), path
+
+
+def test_favicon_links_in_head(client):
+    resp = client.get("/")
+    assert 'rel="manifest"' in resp.text
+    assert "/favicon.svg" in resp.text
+    assert 'name="theme-color"' in resp.text
+
+
 def test_plot_view_info_tooltips_and_collapse(client):
     # Verbose help sits behind hover ⓘ icons (class="info"); single-choice
     # selects collapse to static text client-side; size presets have a

@@ -13,7 +13,7 @@ from urllib.parse import quote as url_quote, unquote
 import markdown
 import requests
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pathlib import Path
 
@@ -31,6 +31,32 @@ try:
     ).decode('ascii')
 except Exception:  # asset missing — page still renders, just without the mark
     _LOGO_DATA_URI = ''
+
+# Favicons / PWA manifest live under web/favicons/ (tracked — NOT the gitignored
+# webapp/ build dir) and are served by the app at their conventional root paths.
+# The reverse proxy routes unmatched root paths here (see config/Caddyfile,
+# config/nginx.conf), so these resolve at /favicon.ico etc.
+_FAVICON_DIR = Path(__file__).parent / 'favicons'
+_FAVICON_FILES = {
+    'favicon.ico': 'image/x-icon',
+    'favicon.svg': 'image/svg+xml',
+    'favicon-96x96.png': 'image/png',
+    'apple-touch-icon.png': 'image/png',
+    'web-app-manifest-192x192.png': 'image/png',
+    'web-app-manifest-512x512.png': 'image/png',
+    'site.webmanifest': 'application/manifest+json',
+}
+
+
+def _make_favicon_route(filename: str, media_type: str):
+    async def _serve():
+        return FileResponse(_FAVICON_DIR / filename, media_type=media_type)
+    return _serve
+
+
+for _fav_name, _fav_media in _FAVICON_FILES.items():
+    router.add_api_route(f"/{_fav_name}", _make_favicon_route(_fav_name, _fav_media),
+                         methods=["GET"], include_in_schema=False)
 
 
 # ── API helpers ────────────────────────────────────────────────────────────────
