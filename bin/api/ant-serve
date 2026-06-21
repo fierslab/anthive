@@ -2687,6 +2687,9 @@ class PlotRequest:
     de_gene: Optional[str]       # __genes.gene_name (forest)
     padj_threshold: float        # volcano / ma / forest: cutoff for sig colouring
     log2fc_threshold: float      # volcano / ma: |log2fc| cutoff
+    log2fc_clip: Optional[float] # volcano / ma: symmetric clamp of the log2fc axis
+    neglog10p_clip: Optional[float]  # volcano: upper clamp of -log10(padj)
+    logmean_clip: Optional[float]    # ma: upper clamp of log10(mean expression)
     n_label: int                 # volcano / ma: top-N genes to label
     # de_heatmap-specific:
     de_contrasts: Optional[str]  # comma-list to restrict the contrast (row) axis
@@ -3583,6 +3586,8 @@ def _handle_volcano(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         df,
         padj_threshold=req.padj_threshold,
         log2fc_threshold=req.log2fc_threshold,
+        log2fc_clip=req.log2fc_clip,
+        neglog10p_clip=req.neglog10p_clip,
         n_label=req.n_label,
         width=req.width, height=req.height, dpi=req.dpi,
         output_format=req.output_format,
@@ -3616,6 +3621,8 @@ def _handle_ma(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         df,
         padj_threshold=req.padj_threshold,
         log2fc_threshold=req.log2fc_threshold,
+        log2fc_clip=req.log2fc_clip,
+        logmean_clip=req.logmean_clip,
         n_label=req.n_label,
         width=req.width, height=req.height, dpi=req.dpi,
         output_format=req.output_format,
@@ -4100,6 +4107,9 @@ def _build_plot_request(
     de_gene: Optional[str] = None,
     padj_threshold: float = 0.05,
     log2fc_threshold: float = 1.0,
+    log2fc_clip: Optional[float] = None,
+    neglog10p_clip: Optional[float] = None,
+    logmean_clip: Optional[float] = None,
     n_label: int = 20,
     # de_heatmap-specific
     de_contrasts: Optional[str] = None,
@@ -4147,6 +4157,9 @@ def _build_plot_request(
         de_contrast=de_contrast, de_gene=de_gene,
         padj_threshold=padj_threshold,
         log2fc_threshold=log2fc_threshold,
+        log2fc_clip=log2fc_clip,
+        neglog10p_clip=neglog10p_clip,
+        logmean_clip=logmean_clip,
         n_label=n_label,
         de_contrasts=de_contrasts,
         de_genes=de_genes,
@@ -4704,6 +4717,23 @@ async def plot_volcano_endpoint(
         1.0, ge=0.0, le=20.0,
         description="|log2fc| cutoff for the dashed vertical lines and significance colouring.",
     ),
+    log2fc_clip: Optional[float] = Query(
+        None, gt=0.0, le=50.0,
+        description=(
+            "Symmetric visual clamp on the log2fc axis — points with |log2fc| beyond "
+            "this are drawn at ±clip (their actual value still drives significance). "
+            "Useful to compress huge sex-chromosome / lineage-marker outliers so the "
+            "bulk of the distribution gets visual space."
+        ),
+    ),
+    neglog10p_clip: Optional[float] = Query(
+        None, gt=0.0, le=400.0,
+        description=(
+            "Upper-bound clamp on -log10(padj). When many genes share padj=0 they "
+            "stack at the y-axis ceiling; clipping (e.g. 100) pins them there but "
+            "stretches the rest of the distribution downward into view."
+        ),
+    ),
     n_label: int = Query(
         20, ge=0, le=200,
         description="Number of top-significant genes to annotate by name.",
@@ -4715,6 +4745,7 @@ async def plot_volcano_endpoint(
         common, 'volcano',
         de_study=study, de_term=term, de_contrast=contrast,
         padj_threshold=padj_threshold, log2fc_threshold=log2fc_threshold,
+        log2fc_clip=log2fc_clip, neglog10p_clip=neglog10p_clip,
         n_label=n_label,
     )
     return await _render_plot(req, common.request)
@@ -4728,6 +4759,18 @@ async def plot_ma_endpoint(
     contrast: str = Query(..., description="Level within the term."),
     padj_threshold: float = Query(0.05, gt=0.0, le=1.0),
     log2fc_threshold: float = Query(1.0, ge=0.0, le=20.0),
+    log2fc_clip: Optional[float] = Query(
+        None, gt=0.0, le=50.0,
+        description="Symmetric visual clamp on the log2fc axis (y-axis on MA).",
+    ),
+    logmean_clip: Optional[float] = Query(
+        None, gt=-10.0, le=10.0,
+        description=(
+            "Upper-bound clamp on log10(mean expression) (x-axis on MA). "
+            "Compresses the right tail of high-expressors so mid-range genes "
+            "get visual space."
+        ),
+    ),
     n_label: int = Query(20, ge=0, le=200),
 ):
     """MA plot of one (study, term, contrast): log10(mean expression) on x,
@@ -4737,6 +4780,7 @@ async def plot_ma_endpoint(
         common, 'ma',
         de_study=study, de_term=term, de_contrast=contrast,
         padj_threshold=padj_threshold, log2fc_threshold=log2fc_threshold,
+        log2fc_clip=log2fc_clip, logmean_clip=logmean_clip,
         n_label=n_label,
     )
     return await _render_plot(req, common.request)

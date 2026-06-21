@@ -1963,6 +1963,8 @@ def plot_volcano(
     *,
     padj_threshold: float = 0.05,
     log2fc_threshold: float = 1.0,
+    log2fc_clip: Optional[float] = None,        # symmetric clamp of the x-axis effect
+    neglog10p_clip: Optional[float] = None,     # upper-bound clamp of -log10(padj)
     n_label: int = 20,
     width: float = 8,
     height: float = 6,
@@ -2048,6 +2050,17 @@ def plot_volcano(
                 if df['padj'].notna().any() else 1e-300)
     df['_padj_clipped'] = df['padj'].clip(lower=floor)
     df['_neglog10p'] = -np.log10(df['_padj_clipped'])
+
+    # Optional visual clamps — pin outliers to a finite axis range so the
+    # bulk of the distribution gets visual space.  Significance / labels
+    # use the clamped values (i.e. the label rides at the clamp).
+    clip_marks = []
+    if log2fc_clip is not None and log2fc_clip > 0:
+        df['_effect'] = df['_effect'].clip(-log2fc_clip, +log2fc_clip)
+        clip_marks.append(f'|{axis_kind}|≤{log2fc_clip:g}')
+    if neglog10p_clip is not None and neglog10p_clip > 0:
+        df['_neglog10p'] = df['_neglog10p'].clip(upper=neglog10p_clip)
+        clip_marks.append(f'-log₁₀p≤{neglog10p_clip:g}')
     df['_sig'] = (df['padj'] <= padj_threshold) & (df['_effect'].abs() >= log2fc_threshold)
     df['_direction'] = np.where(df['_effect'] > 0, 'up', 'down')
     df['_category'] = np.where(df['_sig'], df['_direction'], 'ns')
@@ -2130,6 +2143,8 @@ def plot_volcano(
         else 'padj only'
     )
     title_bits = ['Volcano', f'{n_sig}/{n_total} sig (padj≤{padj_threshold:g}, {thresh_label})']
+    if clip_marks:
+        title_bits.append('clipped ' + ', '.join(clip_marks))
     ax.set_title(_compose_title(title_bits, extra=title_extra))
     sns.despine(ax=ax)
     _legend_outside(ax, title='significance')
@@ -2142,6 +2157,8 @@ def plot_ma(
     *,
     padj_threshold: float = 0.05,
     log2fc_threshold: float = 1.0,
+    log2fc_clip: Optional[float] = None,        # symmetric clamp of the y-axis log2fc
+    logmean_clip: Optional[float] = None,       # upper-bound clamp of log10(mean expression)
     n_label: int = 20,
     width: float = 8,
     height: float = 6,
@@ -2176,6 +2193,17 @@ def plot_ma(
     df['_sig'] = (df['padj'] <= padj_threshold) & (df['log2fc'].abs() >= log2fc_threshold)
     df['_direction'] = np.where(df['log2fc'] > 0, 'up', 'down')
     df['_category'] = np.where(df['_sig'], df['_direction'], 'ns')
+
+    # Optional visual clamps — sig classification uses the raw log2fc, so
+    # clipping only affects where the dot is drawn, not whether it counts
+    # as significant.
+    ma_clip_marks = []
+    if log2fc_clip is not None and log2fc_clip > 0:
+        df['log2fc'] = df['log2fc'].clip(-log2fc_clip, +log2fc_clip)
+        ma_clip_marks.append(f'|log2fc|≤{log2fc_clip:g}')
+    if logmean_clip is not None and logmean_clip > 0:
+        df['_logmean'] = df['_logmean'].clip(upper=logmean_clip)
+        ma_clip_marks.append(f'log₁₀mean≤{logmean_clip:g}')
 
     cmap_obj = matplotlib.cm.get_cmap(
         palette_cat if palette_cat in _QUALITATIVE_PALETTES else _DEFAULT_CATEGORICAL
@@ -2224,6 +2252,8 @@ def plot_ma(
     n_total = len(df)
     n_sig = int(df['_sig'].sum())
     title_bits = ['MA', f'{n_sig}/{n_total} sig (padj≤{padj_threshold:g}, |log2fc|≥{log2fc_threshold:g})']
+    if ma_clip_marks:
+        title_bits.append('clipped ' + ', '.join(ma_clip_marks))
     ax.set_title(_compose_title(title_bits, extra=title_extra))
     sns.despine(ax=ax)
     _legend_outside(ax, title='significance')
