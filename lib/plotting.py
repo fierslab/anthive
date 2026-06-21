@@ -962,7 +962,7 @@ def plot_hexbin(
         cbar = plt.colorbar(hb, ax=ax, label='cell count', shrink=0.8,
                             extend=cbar_extend)
         title_bits = ['density', f'n={_fmt_n(n_cells)}', f'gridsize={gridsize}']
-        if clip_used:
+        if clip_used and cbar_extend != 'neither':   # don't advertise a no-op clip
             lo_q, hi_q = clip_used
             title_bits.append(
                 f'clip {int((lo_q or 0)*100)}–{int((hi_q or 1)*100)}%'
@@ -1041,7 +1041,7 @@ def plot_hexbin(
             f'⬣ mean ({"div" if used_kind == "divergent" else "seq"})',
             f'n={_fmt_n(n_cells)}',
         ]
-        if clip_used:
+        if clip_used and cbar_extend != 'neither':   # don't advertise a no-op clip
             lo_q, hi_q = clip_used
             title_bits.append(
                 f'clip {int((lo_q or 0)*100)}–{int((hi_q or 1)*100)}%'
