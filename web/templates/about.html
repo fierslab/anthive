@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+
+{% block title %}about — anthive{% endblock %}
+
+{% block content %}
+<style>
+  .about-wrap { max-width: 760px; margin: 0 auto; }
+  /* Dark hero so the white line-art logo reads cleanly. */
+  .about-hero {
+    background: #0f172a; border-radius: 10px; padding: 28px 24px;
+    display: flex; flex-direction: column; align-items: center; text-align: center;
+  }
+  .about-hero img { width: 300px; max-width: 78%; height: auto; }
+  .about-hero .tagline {
+    color: #cbd5e1; font-size: 13px; margin-top: 10px; letter-spacing: .3px;
+  }
+  .about-lead {
+    font-size: 14px; line-height: 1.65; color: var(--text); margin: 18px 0 8px;
+  }
+  .about-lead b { color: var(--text); }
+  /* Live catalogue stats. */
+  .about-stats { display: flex; gap: 10px; flex-wrap: wrap; margin: 16px 0; }
+  .about-stat {
+    flex: 1; min-width: 130px; border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; background: #fff;
+  }
+  .about-stat .num { font-size: 22px; font-weight: 700; color: var(--link); line-height: 1; }
+  .about-stat .lbl { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; margin-top: 4px; }
+  /* The data-flow line. */
+  .about-flow {
+    font-family: var(--font-mono); font-size: 11.5px; color: var(--text-muted);
+    background: var(--border-light); border-radius: 6px; padding: 10px 12px;
+    overflow-x: auto; white-space: nowrap; margin: 4px 0 16px;
+  }
+  .about-flow b { color: var(--link); font-weight: 600; }
+  .about-links { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0 18px; }
+  .about-links a {
+    border: 1px solid var(--border); border-radius: 6px; padding: 7px 14px;
+    font-size: 13px; background: #fff;
+  }
+  .about-links a:hover { background: var(--hover); border-color: var(--link); text-decoration: none; }
+  .about-links a.primary { background: var(--link); color: #fff; border-color: var(--link); }
+  .about-links a.primary:hover { filter: brightness(1.08); }
+  .about-foot { font-size: 11px; color: var(--text-muted); border-top: 1px solid var(--border-light); padding-top: 10px; }
+  @media (max-width: 760px) { .about-hero img { width: 220px; } }
+</style>
+
+<div class="about-wrap">
+
+  <div class="about-hero">
+    {% if logo_data_uri %}
+    <img src="{{ logo_data_uri }}" alt="anthive — single cell · omics" width="380" height="361">
+    {% else %}
+    <div style="color:#fff;font-size:28px;font-weight:700">anthive</div>
+    {% endif %}
+    <div class="tagline">a browser for curated single-cell RNA-seq data</div>
+  </div>
+
+  <p class="about-lead">
+    <b>anthive</b> makes a collection of curated single-cell RNA-seq datasets
+    explorable in the browser — no download, no setup. Each dataset can be
+    filtered, plotted (embeddings, distributions, differential expression,
+    module scores) and exported, straight from the catalogue. The same data is
+    reachable programmatically through a REST API, an MCP server, and
+    in-browser Python notebooks.
+  </p>
+
+  <div class="about-stats">
+    <div class="about-stat">
+      <div class="num">{{ n_datasets if n_datasets is not none else '—' }}</div>
+      <div class="lbl">datasets</div>
+    </div>
+    <div class="about-stat">
+      <div class="num">{{ n_collections if n_collections is not none else '—' }}</div>
+      <div class="lbl">collections</div>
+    </div>
+    <div class="about-stat">
+      <div class="num">scRNA-seq</div>
+      <div class="lbl">mostly human microglia</div>
+    </div>
+  </div>
+
+  <div class="about-flow">
+    <b>.h5ad</b> &nbsp;──▶&nbsp; <b>DuckDB</b> &nbsp;──▶&nbsp; <b>REST API</b>
+    &nbsp;──▶&nbsp; web UI · MCP · notebooks
+  </div>
+
+  <div class="about-links">
+    <a class="primary" href="/">browse datasets</a>
+    {% if genesets_available %}<a href="/genesets">gene sets</a>{% endif %}
+    <a href="/api/docs">REST API</a>
+    <a href="/jupyter/" target="_blank" rel="noopener">notebooks</a>
+  </div>
+
+  <div class="about-foot">
+    Source of truth is the curated <code>.h5ad</code> per dataset; the served
+    DuckDB is its query-fast derivative. Datasets carry provenance (DOI /
+    accession / source) shown on each dataset page.
+    {% if api_version %}<br>REST API v{{ api_version }}.{% endif %}
+  </div>
+
+</div>
+{% endblock %}

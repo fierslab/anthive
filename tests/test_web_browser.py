@@ -783,6 +783,24 @@ def test_plot_view_color_scale_control(client):
     assert "'turquoise'" in resp.text   # new named cmap registered in PALETTES
 
 
+def test_about_page_renders(client):
+    # /about: hero + inlined logo (data URI from the committed asset), what-it-is
+    # copy, live catalogue counts, and quick links.
+    resp = client.get("/about")
+    assert resp.status_code == 200
+    assert "about-hero" in resp.text
+    assert "data:image/png;base64," in resp.text   # logo inlined, no static dir
+    assert "browse datasets" in resp.text
+    assert "REST API" in resp.text
+
+
+def test_about_link_in_nav(client):
+    # the topbar nav links to /about
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert 'href="/about"' in resp.text
+
+
 def test_plot_view_info_tooltips_and_collapse(client):
     # Verbose help sits behind hover ⓘ icons (class="info"); single-choice
     # selects collapse to static text client-side; size presets have a

@@ -5,6 +5,7 @@ Provides HTML interface for browsing single-cell datasets.
 Data is sourced entirely from the ant-serve REST API.
 """
 
+import base64
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote as url_quote, unquote
@@ -20,6 +21,16 @@ router = APIRouter()
 templates_dir = Path(__file__).parent / 'templates'
 templates = Jinja2Templates(directory=str(templates_dir))
 templates.env.filters['urlencode'] = url_quote
+
+# The (white) anthive logo, base64-inlined once at import so the About page
+# stays self-contained — no static/ dir or asset route (see web/CLAUDE.md).
+# It's a grayscale+alpha PNG (white line-art), meant for a dark backdrop.
+try:
+    _LOGO_DATA_URI = 'data:image/png;base64,' + base64.b64encode(
+        (Path(__file__).parent / 'anthive_logo.png').read_bytes()
+    ).decode('ascii')
+except Exception:  # asset missing — page still renders, just without the mark
+    _LOGO_DATA_URI = ''
 
 
 # ── API helpers ────────────────────────────────────────────────────────────────
@@ -913,6 +924,32 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
 
 
 # ── geneset routes ─────────────────────────────────────────────────────────────
+
+@router.get("/about", response_class=HTMLResponse)
+async def about_view(request: Request):
+    """Static 'about anthive' page — logo, what-it-is, live catalogue counts."""
+    api_url = _api_url(request)
+    n_datasets = n_collections = api_version = None
+    try:
+        databases = _all_databases(api_url)
+        n_datasets = len(databases)
+        n_collections = len({
+            (db.get('group_id') or db['id'].split('/')[0]) for db in databases
+        })
+    except Exception as error:
+        print(f"API error: {error}")
+    try:
+        api_version = _api_get(api_url, '/version').get('version')
+    except Exception:
+        pass
+    return templates.TemplateResponse(request, "about.html", {
+        "logo_data_uri": _LOGO_DATA_URI,
+        "n_datasets": n_datasets,
+        "n_collections": n_collections,
+        "api_version": api_version,
+        "genesets_available": getattr(request.app.state, 'genesets_available', False),
+    })
+
 
 @router.get("/genesets", response_class=HTMLResponse)
 async def genesets_index(request: Request):

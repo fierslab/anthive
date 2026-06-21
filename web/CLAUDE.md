@@ -18,7 +18,9 @@ web/
     folder.html     # one collection — per-dataset table
     dataset.html    # one dataset — info, biology, provenance, obs cols, viz
     plot.html       # in-app plot UI (form + preview + downloads)
+    about.html      # /about — logo hero, what-it-is, live catalogue counts
     genesets.html, geneset.html, geneset_experiment.html
+  anthive_logo.png  # the (white) brand logo — grayscale+alpha, for dark bg
   __init__.py       # so the directory imports cleanly if ever needed
   README.md         # user-facing overview
 ```
@@ -26,7 +28,11 @@ web/
 There is no separate `static/` directory — page-specific CSS and JS sit
 inline in the matching `*.html` (the JS budget is small enough that
 splitting into separate files would only add HTTP requests).  Sitewide
-styles live in `templates/base.html`'s `<style>` block.
+styles live in `templates/base.html`'s `<style>` block.  The one bundled
+binary asset, `anthive_logo.png`, is **base64-inlined into a data URI once at
+import** (`browser._LOGO_DATA_URI`, passed to `about.html`) — so even the logo
+stays self-contained, with no static dir or asset route.  It's a white
+line-art logo (grayscale+alpha PNG), so it's shown on a dark hero panel.
 
 ## How it boots
 
@@ -52,6 +58,7 @@ styles live in `templates/base.html`'s `<style>` block.
 | `/genesets` | top-level geneset study list | `genesets.html` |
 | `/genesets/{study}/{experiment}` | one experiment's geneset list | `geneset_experiment.html` |
 | `/genesets/{study}/{experiment}/{name}` | one geneset's gene table | `geneset.html` |
+| `/about` | logo hero + what-it-is + live dataset/collection counts | `about.html` |
 
 The plot page talks to the REST API directly from the browser via JS —
 the FastAPI router doesn't proxy plot requests.  It just hands the
