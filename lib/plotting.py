@@ -340,20 +340,10 @@ def _render_figure(
     if output_format not in _VALID_FORMATS:
         output_format = 'png'
 
-    # PDF: render caption + source URL as visible footer text.
-    if output_format == 'pdf':
-        footer_lines = []
-        if caption:
-            footer_lines.append(caption)
-        if source_url:
-            footer_lines.append(source_url)
-        for i, line in enumerate(reversed(footer_lines)):
-            fig.text(
-                0.5, 0.005 + i * 0.012, line,
-                ha='center', va='bottom', fontsize=6,
-                color='#555555' if i == len(footer_lines) - 1 else '#888888',
-                wrap=True,
-            )
+    # No visible caption/footer is rendered into the image — the caption
+    # travels alongside the bytes (X-Plot-Caption header, PNG tEXt chunk,
+    # SVG/PDF <metadata>) so consumers can fetch it but the figure stays
+    # unmarked for reuse in manuscripts / slides.
 
     # Structured metadata via matplotlib savefig — different backends accept
     # different key sets, so we build per-format dicts:
@@ -415,98 +405,230 @@ def build_caption(
     sample: Optional[int] = None,
     subset: Optional[str] = None,
     ci: Optional[bool] = None,
+    # ── extra render context — caller passes whatever applies ───────────────
+    color_kind: Optional[str] = None,
+    bar_mode: Optional[str] = None,
+    normalize: Optional[bool] = None,
+    facet: Optional[str] = None,
+    group_by: Optional[str] = None,
+    bins: Optional[int] = None,
+    window: Optional[int] = None,
+    show_band: Optional[bool] = None,
+    zscore: Optional[bool] = None,
+    gridsize: Optional[int] = None,
+    mincnt: Optional[int] = None,
+    alpha: Optional[float] = None,
+    log_x: Optional[bool] = None,
+    log_y: Optional[bool] = None,
+    transform_x: Optional[str] = None,
+    transform_y: Optional[str] = None,
+    asinh_scale: Optional[float] = None,
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+    vmin_quantile: Optional[float] = None,
+    vmax_quantile: Optional[float] = None,
+    color_scale: Optional[str] = None,
+    palette_cat: Optional[str] = None,
+    palette_cont: Optional[str] = None,
+    palette_div: Optional[str] = None,
+    marginals: Optional[bool] = None,
+    regline: Optional[str] = None,
+    iso_overlay: Optional[bool] = None,
+    point_overlay: Optional[bool] = None,
+    kde_n: Optional[int] = None,
+    kde_bw: Optional[float] = None,
+    n_levels: Optional[int] = None,
 ) -> str:
-    """Build a single-paragraph figure caption.
+    """Build a multi-sentence figure caption — describe the plot, the data,
+    and every knob the caller actually exercised.
 
-    The result is meant to be shown verbatim under the rendered image — it
-    should answer: what kind of plot, on what dataset, of what, grouped how,
-    over how many cells/groups, drawn from which layer, with which
-    statistical decoration.  Optional context fields are appended only when
-    given so callers can stay terse for legacy paths.
+    The caption travels alongside the rendered bytes (X-Plot-Caption HTTP
+    header / PNG tEXt / SVG metadata) but is NOT drawn into the figure.
+    The text is meant to be drop-in for a manuscript "Figure X. ..." legend
+    or a methods note — so it states what the plot is, what's on each axis,
+    which subset / sample / transforms are active, and which visual
+    parameters were tuned away from defaults.
+
+    Caller passes only the kwargs that apply to its geom; unused ones stay
+    None and are silently skipped.  ASCII-only output (the caption rides
+    in an HTTP header).
     """
     plural = lambda n: 's' if n != 1 else ''  # noqa: E731
+
+    parts: List[str] = []   # each part is a complete sentence
+    knobs: List[str] = []   # tail sentence — "Visual knobs: A; B; C."
 
     # Sentence 1 — what the plot is.
     if geom == 'scatter':
         if x and x_kind == 'embedding':
-            sentence = f'UMAP embedding of {db_id} ({x})'
+            sent = f'Embedding scatter plot of dataset {db_id} on the {x} projection'
         else:
-            sentence = f'Scatter plot of {db_id}'
+            sent = f'Scatter plot of dataset {db_id}'
         if color:
-            sentence += f', cells colored by {color}'
+            kind_phrase = f' ({color_kind})' if color_kind else ''
+            sent += f', with cells coloured by {color}{kind_phrase}'
     elif geom == 'hexbin':
         if x and x_kind == 'embedding':
-            sentence = f'Hexbin embedding of {db_id} ({x})'
+            sent = f'Hexbin embedding plot of dataset {db_id} on the {x} projection'
         else:
-            sentence = f'Hexbin plot of {db_id}'
+            sent = f'Hexbin plot of dataset {db_id}'
         if color:
-            sentence += f', hexes aggregated on {color}'
+            kind_phrase = f' ({color_kind})' if color_kind else ''
+            sent += f', with each hex aggregating {color}{kind_phrase} across the cells it contains'
         else:
-            sentence += '; coloured by cell density'
+            sent += ', with hexes coloured by cell density'
     elif geom == 'xy_scatter':
-        sentence = f'Scatter of {y} vs {x} in {db_id}'
+        sent = f'Scatter plot of {y} vs {x} for dataset {db_id}'
         if color:
-            sentence += f', cells coloured by {color}'
+            sent += f', with points coloured by {color}'
     elif geom == 'xy_hexbin':
-        sentence = f'Hexbin of {y} vs {x} in {db_id}'
+        sent = f'Hexbin plot of {y} vs {x} for dataset {db_id}'
         if color:
-            sentence += f', hexes aggregated on {color}'
+            sent += f', with each hex aggregating {color}'
         else:
-            sentence += '; coloured by cell density'
+            sent += ', with hexes coloured by cell density'
+    elif geom == 'kde2d':
+        sent = f'Two-dimensional kernel density estimate of {y} vs {x} for dataset {db_id}'
     elif geom in ('violin', 'box'):
         kind = {'violin': 'Violin plot', 'box': 'Box plot'}[geom]
         if y:
-            sentence = f'{kind} of {y} expression per {x} in {db_id}'
+            sent = f'{kind} of {y} per {x} for dataset {db_id}'
         else:
-            sentence = f'{kind} of cell counts per {x} in {db_id}'
+            sent = f'{kind} of cell counts per {x} for dataset {db_id}'
         if color:
-            sentence += f', split by {color}'
+            sent += f', further split by {color}'
     elif geom == 'bar':
         if y:
-            sentence = f'Bar plot of mean {y} per {x} in {db_id}'
-            if ci:
-                sentence += ' with 95% confidence interval (bootstrap)'
+            mode_phrase = {'stack': 'Stacked bar plot', 'dodge': 'Bar plot'}.get(bar_mode or 'dodge', 'Bar plot')
+            sent = f'{mode_phrase} of mean {y} per {x} for dataset {db_id}'
+            if ci and bar_mode != 'stack':
+                sent += ' with bootstrap 95% confidence intervals'
         else:
-            sentence = f'Bar plot of cell counts per {x} in {db_id}'
+            mode_phrase = {'stack': 'Stacked bar plot', 'dodge': 'Bar plot'}.get(bar_mode or 'dodge', 'Bar plot')
+            sent = f'{mode_phrase} of cell counts per {x} for dataset {db_id}'
         if color:
-            sentence += f', split by {color}'
+            sent += f', further split by {color}'
+        if normalize:
+            sent += '; each stack is normalised to 100% so the chart shows proportions, not absolute counts'
+        if facet:
+            sent += f'; faceted into one panel per level of {facet}'
+        if group_by:
+            sent += f'; within-axis bars are grouped by {group_by}'
     elif geom in ('histogram', 'ecdf', 'kde'):
-        label = {'histogram': 'Histogram', 'ecdf': 'Empirical CDF',
-                 'kde': 'KDE density'}[geom]
-        sentence = f'{label} of {x} in {db_id}'
+        label = {'histogram': 'Histogram', 'ecdf': 'Empirical cumulative-distribution plot',
+                 'kde': 'Kernel-density-estimate plot'}[geom]
+        sent = f'{label} of {x} for dataset {db_id}'
         if color:
-            sentence += f', grouped by {color}'
+            sent += f', with curves split by {color}'
+        if geom == 'histogram' and bins:
+            sent += f' ({bins} bins)'
     elif geom == 'heatmap':
-        sentence = (f'Heatmap of mean gene expression per {y} in {db_id}'
-                    f' (z-scored per gene)')
+        zsc = 'z-scored per gene' if zscore else 'raw mean'
+        sent = f'Heatmap of {zsc} expression per {y} for dataset {db_id} (genes on the y-axis)'
     elif geom == 'rolling':
-        sentence = f'Rolling-mean trajectory of {y} along {x} in {db_id}'
+        sent = f'Rolling-mean trajectory of {y} along ordered {x} for dataset {db_id}'
         if color:
-            sentence += f', split by {color}'
+            sent += f', with one trace per level of {color}'
+        if window:
+            sent += f'; window size = {window} cells'
+        if show_band:
+            sent += '; IQR shown as a shaded band around each trace'
     else:
-        sentence = f'{geom} plot of {db_id}'
+        sent = f'{geom} plot of dataset {db_id}'
+    if not sent.endswith('.'):
+        sent += '.'
+    parts.append(sent)
 
-    # Layer — name the data source for any geom touching expression values.
-    if layer and layer != 'X' and geom in (
-            'scatter', 'violin', 'box', 'bar',
-            'histogram', 'ecdf', 'kde', 'heatmap'):
-        sentence += f'; layer: {layer}'
-    elif geom == 'heatmap' and layer:
-        sentence += f'; layer: {layer}'
-
-    # Footer — sample size, sub-grouping cardinality, and any active subset.
-    footer = []
+    # Sentence 2 — sample / subset / layer / sampling.
+    sample_bits: List[str] = []
     if n_cells:
-        footer.append(f'n = {n_cells:,} cell{plural(n_cells)}')
+        sample_bits.append(f'{n_cells:,} cell{plural(n_cells)}')
     if n_groups:
-        footer.append(f'{n_groups} group{plural(n_groups)}')
-    if sample:
-        footer.append(f'random sample of {sample:,}')
-    if subset:
-        footer.append(f'subset: {subset}')
-    if footer:
-        sentence += '.  ' + '; '.join(footer)
-    return sentence + '.'
+        sample_bits.append(f'{n_groups} group{plural(n_groups)}')
+    if sample_bits:
+        body = 'Built from ' + ' across '.join(sample_bits)
+        if sample:
+            body += f' (after random downsampling to {sample:,} cells)'
+        if subset:
+            body += f', restricted to the subset where {subset}'
+        if layer and geom in ('scatter', 'violin', 'box', 'bar',
+                               'histogram', 'ecdf', 'kde', 'heatmap', 'rolling',
+                               'hexbin', 'xy_scatter', 'xy_hexbin', 'kde2d'):
+            body += f'; expression values read from the "{layer}" layer'
+        parts.append(body + '.')
+    elif subset:
+        parts.append(f'Restricted to the subset where {subset}.')
+
+    # Sentence 3 — axis transforms.
+    transforms: List[str] = []
+    if log_x:
+        transforms.append('x-axis on log10 scale')
+    if log_y:
+        transforms.append('y-axis on log10 scale')
+    if transform_x and transform_x not in (None, 'linear'):
+        if transform_x == 'asinh' and asinh_scale is not None:
+            transforms.append(f'x-axis transformed by asinh (scale = {asinh_scale:g})')
+        else:
+            transforms.append(f'x-axis transformed by {transform_x}')
+    if transform_y and transform_y not in (None, 'linear'):
+        if transform_y == 'asinh' and asinh_scale is not None:
+            transforms.append(f'y-axis transformed by asinh (scale = {asinh_scale:g})')
+        else:
+            transforms.append(f'y-axis transformed by {transform_y}')
+    if transforms:
+        parts.append('Axis scales: ' + '; '.join(transforms) + '.')
+
+    # Trailing knobs — visual params worth surfacing.
+    if geom == 'hexbin' or geom == 'xy_hexbin':
+        if gridsize:
+            knobs.append(f'hex gridsize = {gridsize}')
+        if mincnt and mincnt > 1:
+            knobs.append(f'hexes with fewer than {mincnt} cells suppressed (mincnt = {mincnt})')
+    if vmin is not None or vmax is not None:
+        if vmin is not None and vmax is not None:
+            knobs.append(f'colour scale clipped to [{vmin:g}, {vmax:g}]')
+        elif vmin is not None:
+            knobs.append(f'colour scale lower-clipped at {vmin:g}')
+        else:
+            knobs.append(f'colour scale upper-clipped at {vmax:g}')
+    if vmin_quantile is not None or vmax_quantile is not None:
+        lo = vmin_quantile if vmin_quantile is not None else 0.0
+        hi = vmax_quantile if vmax_quantile is not None else 1.0
+        knobs.append(f'colour scale auto-clipped to the {lo:g}-{hi:g} quantile band of per-hex values')
+    if color_scale and color_scale != 'auto':
+        knobs.append(f'colour scale forced {color_scale}')
+    # Only mention palette if the caller deviated from the defaults — listing
+    # the default tab10/inferno_r/RdBu_r on every caption is noise.
+    pal_bits = []
+    if palette_cat and palette_cat != _DEFAULT_CATEGORICAL:
+        pal_bits.append(f'categorical = {palette_cat}')
+    if palette_cont and palette_cont != _DEFAULT_SEQUENTIAL:
+        pal_bits.append(f'continuous = {palette_cont}')
+    if palette_div and palette_div != _DEFAULT_DIVERGENT:
+        pal_bits.append(f'divergent = {palette_div}')
+    if pal_bits:
+        knobs.append('palette overrides: ' + ', '.join(pal_bits))
+    if marginals:
+        knobs.append('marginal KDE strips drawn on top and right axes')
+    if regline:
+        knobs.append(f'regression line overlay ({regline})')
+    if iso_overlay is False:
+        knobs.append('iso-density contours suppressed')
+    if point_overlay:
+        knobs.append('individual cells drawn on top of the density')
+    if geom == 'kde2d':
+        kde_bits = []
+        if kde_n:    kde_bits.append(f'KDE evaluated on a random sample of {kde_n:,} cells')
+        if kde_bw is not None: kde_bits.append(f'bandwidth = {kde_bw:g}')
+        if n_levels: kde_bits.append(f'{n_levels} iso-density levels')
+        if kde_bits: knobs.append('; '.join(kde_bits))
+    if alpha is not None and alpha != 1.0:
+        knobs.append(f'point alpha = {alpha:g}')
+
+    if knobs:
+        parts.append('Visual parameters: ' + '; '.join(knobs) + '.')
+
+    return ' '.join(parts)
 
 
 # Above this many cells, matplotlib's ax.scatter() becomes the dominant cost
