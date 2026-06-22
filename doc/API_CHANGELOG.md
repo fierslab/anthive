@@ -29,6 +29,68 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.8.0 — 2026-06-22
+
+### Added — plot-to-notebook endpoint
+
+New endpoint `GET /databases/{db_id:path}/plot/{geom}/notebook` returns a
+JupyterLite-compatible `.ipynb` (nbformat 4) for any plot URL. Accepts the
+**same query-param surface** as the matching `/plot/{geom}` endpoint
+(`x`, `y`, `color`, `study`, `term`, `contrast`, `padj_threshold`,
+`log2fc_threshold`, `log2fc_clip`, `neglog10p_clip`, `logmean_clip`,
+`n_label`, `palette_*`, `transform_*`, `bar_mode`, `normalize`, `facet`,
+`group_by`, `color_scale`, `layer`, `subset`, `sample`, `width`,
+`height`, `dpi`, …) — everything that geom understands.
+
+Response:
+
+```
+content-type:         application/x-ipynb+json
+content-disposition:  attachment; filename="<db_id>_<geom>.ipynb"
+x-anthive-auth-case:  authelia | basic | public | unknown
+```
+
+Notebook has exactly three cells:
+
+1. **Markdown** — title + the same X-Plot-Caption the image carries +
+   a JupyterLite persistence disclaimer + a pyvark[vark-config] tip.
+2. **Code** — instantiates a `vark.AnthiveClient(BASE_URL)` and fetches
+   the plot's source dataframe via `format=csv` into pandas.
+3. **Code** — re-fetches via `format=png`, displays the image inline,
+   prints the caption underneath.
+
+`BASE_URL` is derived from `X-Forwarded-Host` (with `X-Forwarded-Proto`
+fallback) so the notebook is portable across deployments.
+
+The auth block in cell 2 is templated per request:
+
+* `Remote-User` / `X-Forwarded-User` header present → Authelia case,
+  username pre-filled in the commented escape-hatch.
+* `Authorization: Basic` header present → HTTP Basic case, username
+  pre-filled.
+* `ANTHIVE_PUBLIC=1` env var on the server → passwordless case (no
+  credentials needed).
+* Otherwise → unknown case (gated, generic `<user>` / `<password>`).
+
+The active (uncommented) line is always `c = AnthiveClient(BASE_URL)` —
+works inside JupyterLite at this server's origin (cookie / basic carried
+by the browser) and on workstations via `pyvark[vark-config]`
+auto-discovery. The commented line is the explicit-password fallback for
+users who copy the notebook elsewhere.
+
+### Integration with JupyterLite
+
+Open the notebook in the in-browser Jupyter via:
+
+```
+/jupyter/lab/index.html?fromURL=<urlencoded-notebook-URL>
+```
+
+JupyterLite materialises the file in IndexedDB; *File → Download* lets
+the user persist changes off-browser.
+
+---
+
 ## 2.6.0 — 2026-06-20
 
 ### Added — plot data export (`format=csv` | `format=tsv`)

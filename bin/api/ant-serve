@@ -1298,8 +1298,8 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.7.2"
-API_VERSION_RELEASED = "2026-06-20"
+API_VERSION = "2.8.0"
+API_VERSION_RELEASED = "2026-06-22"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
 # Create FastAPI app with lifespan handler (Phase 2)
@@ -1319,6 +1319,7 @@ REST API for querying single-cell expression databases.
 
 * **Database discovery**: `/databases`, `/databases/{{id}}/info`, `/genesets`, …
 * **Plot endpoints** (per geom): `/databases/{{id}}/plot/{{scatter|hexbin|violin|box|bar|histogram|ecdf|kde|heatmap|rolling|volcano|ma|forest}}`. Each declares only the params relevant to that geom.
+* **Plot-to-notebook**: `/databases/{{id}}/plot/{{geom}}/notebook` — same query-param surface as the plot endpoint, returns a JupyterLite-compatible `.ipynb` that fetches the same data + image when run.
 * **Differential expression** (read-only): `/databases/{{id}}/de`, `/de/{{study}}`, `/de/{{study}}/terms/{{term}}`, `/de/{{study}}/terms/{{term}}/contrasts/{{contrast}}`, `/de/by-gene/{{gene}}`. Ingest via the `ant-de-ingest` CLI.
 * **Analytics sandbox**: `/databases/{{id}}/analytics/{{schema|query|viz}}` — SELECT-only SQL, runs server-side with its own memory cap.
 * **Module score on the fly**: `/databases/{{id}}/module_score` — Seurat-style score from an arbitrary gene list.
@@ -5054,6 +5055,434 @@ async def plot_legacy(
     )
     return await _render_plot(req, common.request)
 
+
+# ── notebook generator (plot URL → JupyterLite-compatible .ipynb) ────────────
+#
+# Anthive-web wants an "open this plot in a notebook" button on every plot
+# page. This endpoint takes the EXACT same query-param surface as
+# /plot/{geom} and returns a 3-cell .ipynb (markdown + two code cells)
+# that:
+#   1) introduces the plot with the same X-Plot-Caption the image carries,
+#   2) re-fetches the plot's source dataframe as CSV (DataFrame ready),
+#   3) renders the PNG inline with the caption underneath.
+#
+# Auth-block is templated at render time:
+#   - Authelia / Remote-User present → Case B (user known, active line uses
+#     the JupyterLite-origin cookie; explicit-password line commented).
+#   - HTTP Basic credentials present → Case C with username pre-filled.
+#   - ANTHIVE_PUBLIC=1 env var → Case A (passwordless; no auth at all).
+#   - Otherwise → Case C with <user>/<password> placeholders.
+#
+# BASE_URL inside the notebook is derived from X-Forwarded-Host (Caddy)
+# falling back to the Host header so the notebook is portable across
+# deployments.
+
+# Mapping from the user-facing query param names declared by the per-geom
+# /plot/{geom} endpoints to the kwarg names _build_plot_request() expects.
+# Anything not in this dict is forwarded with its query-param name unchanged.
+_NOTEBOOK_PARAM_RENAME = {
+    'study':       'de_study',
+    'term':        'de_term',
+    'contrast':    'de_contrast',
+    'gene':        'de_gene',
+    'contrasts':   'de_contrasts',
+    'genes':       'de_genes',
+    'value':       'de_value',
+}
+
+# Type coercion table for params arriving as raw strings on the URL.
+# Anything not listed is passed through as str.
+def _coerce_bool(value: str) -> bool:
+    return value.lower() in ('1', 'true', 'yes', 'on')
+
+_NOTEBOOK_PARAM_TYPES = {
+    # numeric
+    'bins': int, 'n_genes': int, 'gridsize': int, 'mincnt': int,
+    'window': int, 'kde_n': int, 'n_levels': int, 'n_label': int,
+    'point_size': float, 'alpha': float, 'asinh_scale': float,
+    'vmin': float, 'vmax': float, 'vmin_quantile': float, 'vmax_quantile': float,
+    'kde_bw': float,
+    'padj_threshold': float, 'log2fc_threshold': float,
+    'log2fc_clip': float, 'neglog10p_clip': float, 'logmean_clip': float,
+    # booleans
+    'log_x': _coerce_bool, 'log_y': _coerce_bool, 'ci': _coerce_bool,
+    'iso_overlay': _coerce_bool, 'point_overlay': _coerce_bool,
+    'marginals': _coerce_bool, 'show_band': _coerce_bool, 'zscore': _coerce_bool,
+    'sig_overlay': _coerce_bool, 'normalize': _coerce_bool,
+}
+
+# Params handled by CommonPlotParams already (we re-use the Depends-built
+# object for those, NOT the per-geom kwargs path), so we MUST NOT forward
+# them as _build_plot_request kwargs.
+_NOTEBOOK_COMMON_PARAMS = {
+    'format', 'layer', 'width', 'height', 'dpi',
+    'palette_categorical', 'palette_continuous', 'palette_divergent',
+    'font_family', 'font_size', 'subset', 'sample',
+}
+
+
+def _coerce_query_value(name: str, raw: str) -> Any:
+    """Best-effort cast of a raw query-string value to the right Python type."""
+    caster = _NOTEBOOK_PARAM_TYPES.get(name)
+    if caster is None:
+        return raw
+    try:
+        return caster(raw)
+    except (ValueError, TypeError):
+        # On a bad cast, fall back to the string so the downstream handler
+        # raises a clean 4xx instead of us masking the error here.
+        return raw
+
+
+def _detect_notebook_auth(request: Request) -> Tuple[str, Optional[str], bool]:
+    """Inspect the inbound request to pick the right auth-block template.
+
+    Returns ``(case, remote_user, passwordless)`` where ``case`` is one of
+    ``authelia``, ``basic``, ``public``, ``unknown``.
+    """
+    import os
+    # Headers are case-insensitive in Starlette / FastAPI.
+    remote_user = (
+        request.headers.get('Remote-User')
+        or request.headers.get('X-Forwarded-User')
+    )
+    if remote_user:
+        return 'authelia', remote_user, False
+    # HTTP Basic — try to extract the username.
+    auth_header = request.headers.get('Authorization', '')
+    if auth_header.lower().startswith('basic '):
+        try:
+            import base64
+            raw = base64.b64decode(auth_header.split(' ', 1)[1]).decode('utf-8', 'replace')
+            user_part = raw.split(':', 1)[0] or None
+        except Exception:
+            user_part = None
+        return 'basic', user_part, False
+    # Explicit passwordless signal — only trust an env var. Anything else
+    # gets the "auth probably required, prefill commented" treatment.
+    if os.environ.get('ANTHIVE_PUBLIC') in ('1', 'true', 'yes'):
+        return 'public', None, True
+    return 'unknown', None, False
+
+
+def _notebook_base_url(request: Request) -> str:
+    """Public base URL of the API, suitable for use inside the notebook.
+
+    Prefers X-Forwarded-Host (set by Caddy / nginx), falls back to the
+    inbound Host header. Always ends in ``/api`` (the FastAPI app's
+    ``root_path``).
+    """
+    forwarded_host = request.headers.get('X-Forwarded-Host')
+    forwarded_proto = request.headers.get('X-Forwarded-Proto')
+    host = forwarded_host or request.headers.get('Host') or 'localhost'
+    # If we're behind a proxy, default to https unless explicitly told otherwise.
+    if forwarded_proto:
+        proto = forwarded_proto
+    elif forwarded_host:
+        proto = 'https'
+    else:
+        proto = request.url.scheme or 'http'
+    return f"{proto}://{host}/api"
+
+
+def _build_auth_block(case: str, remote_user: Optional[str]) -> str:
+    """Render the Cell-2 auth block as a Python source fragment.
+
+    The ACTIVE (uncommented) line is always
+    ``c = AnthiveClient(BASE_URL)`` — it works inside JupyterLite via the
+    Authelia cookie, and works on workstations via pyvark[vark-config]
+    auto-discovery. The commented line is the explicit-password fallback.
+    """
+    if case == 'public':
+        return (
+            "# Passwordless deployment — no credentials needed.\n"
+            "c = AnthiveClient(BASE_URL)"
+        )
+    if case == 'authelia':
+        user = remote_user or '<user>'
+        return (
+            "# Authelia-gated deployment. Inside JupyterLite at this server's\n"
+            "# origin, the Authelia session cookie carries the auth for you.\n"
+            "# When you copy this notebook elsewhere, uncomment and fill in the\n"
+            "# password (or install pyvark[vark-config] to reuse Go vark CLI\n"
+            "# credentials):\n"
+            "c = AnthiveClient(BASE_URL)\n"
+            f"# c = AnthiveClient(BASE_URL, auth=({user!r}, \"<your-password>\"))"
+        )
+    if case == 'basic':
+        user = remote_user or '<user>'
+        return (
+            "# HTTP Basic-gated deployment. The active line works inside\n"
+            "# JupyterLite at this server's origin (the browser sends the\n"
+            "# stored credentials with each fetch). Outside JupyterLite,\n"
+            "# uncomment and fill in the password (or install\n"
+            "# pyvark[vark-config] to reuse Go vark CLI credentials):\n"
+            "c = AnthiveClient(BASE_URL)\n"
+            f"# c = AnthiveClient(BASE_URL, auth=({user!r}, \"<your-password>\"))"
+        )
+    # Fallback — gated, unknown user.
+    return (
+        "# This server appears to be gated, but the request reaching ant-serve\n"
+        "# carried no auth headers we recognise. Uncomment and edit when\n"
+        "# running this notebook outside JupyterLite (or install\n"
+        "# pyvark[vark-config] to reuse Go vark CLI credentials):\n"
+        "c = AnthiveClient(BASE_URL)\n"
+        "# c = AnthiveClient(BASE_URL, auth=(\"<user>\", \"<password>\"))"
+    )
+
+
+def _build_notebook_for_plot(
+    *,
+    db_id: str,
+    geom: str,
+    plot_params: Dict[str, Any],
+    caption: str,
+    base_url: str,
+    auth_block: str,
+) -> Dict[str, Any]:
+    """Assemble the nbformat-4 JSON dict for a plot URL.
+
+    Three cells: a markdown intro + caption + disclaimer, a code cell that
+    fetches the plot data as a pandas DataFrame, and a code cell that
+    renders the PNG inline with the caption underneath.
+    """
+    title_md = (
+        f"# {db_id} · {geom}\n"
+        f"\n"
+        f"{caption}\n"
+        f"\n"
+        f"> **Disclaimer.** This notebook lives only in your browser "
+        f"(JupyterLite saves to the local IndexedDB). To persist your "
+        f"changes, download the .ipynb via *File → Download* and run it "
+        f"against your own Jupyter server.\n"
+        f"\n"
+        f"> Tip: install **pyvark[vark-config]** to reuse Go vark CLI "
+        f"credentials; the auth block below becomes a no-op."
+    )
+
+    # Pretty-print the params dict for the source cell. repr() on a dict
+    # with stable key order gives a deterministic, copy-paste-safe Python
+    # literal.
+    params_literal = '{\n' + ''.join(
+        f"    {k!r}: {v!r},\n" for k, v in plot_params.items()
+    ) + '}'
+    if not plot_params:
+        params_literal = '{}'
+
+    fetch_data_src = (
+        "# Pull the same data the plot was rendered from, as a pandas DataFrame.\n"
+        "from vark import AnthiveClient\n"
+        "import pandas as pd, io\n"
+        "\n"
+        f"BASE_URL = {base_url!r}\n"
+        f"DB_ID    = {db_id!r}\n"
+        f"GEOM     = {geom!r}\n"
+        f"PARAMS   = {params_literal}\n"
+        "\n"
+        f"{auth_block}\n"
+        "\n"
+        "result = c.get_plot(DB_ID, GEOM, format=\"csv\", **PARAMS)\n"
+        "df = pd.read_csv(io.BytesIO(result[\"bytes\"]))\n"
+        "df.head()"
+    )
+
+    render_plot_src = (
+        "# Render the plot inline. The same call also fetches the\n"
+        "# X-Plot-Caption (anthive's multi-sentence figure legend —\n"
+        "# the only place it exists).\n"
+        "from IPython.display import Image, Markdown, display\n"
+        "\n"
+        "img = c.get_plot(DB_ID, GEOM, format=\"png\", **PARAMS)\n"
+        "display(Image(data=img[\"bytes\"]))\n"
+        "display(Markdown(f\"**Caption.** {img['caption']}\"))"
+    )
+
+    cells = [
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": title_md,
+        },
+        {
+            "cell_type": "code",
+            "metadata": {},
+            "execution_count": None,
+            "outputs": [],
+            "source": fetch_data_src,
+        },
+        {
+            "cell_type": "code",
+            "metadata": {},
+            "execution_count": None,
+            "outputs": [],
+            "source": render_plot_src,
+        },
+    ]
+
+    return {
+        "nbformat": 4,
+        "nbformat_minor": 5,
+        "metadata": {
+            "kernelspec": {
+                "name": "python3",
+                "display_name": "Python 3 (Pyodide)",
+                "language": "python",
+            },
+            "language_info": {
+                "name": "python",
+                "version": "3.11",
+                "file_extension": ".py",
+                "mimetype": "text/x-python",
+            },
+            "anthive": {
+                "generator": "ant-serve",
+                "api_version": API_VERSION,
+                "db_id": db_id,
+                "geom": geom,
+            },
+        },
+        "cells": cells,
+    }
+
+
+@app.get(
+    "/databases/{db_id:path}/plot/{geom}/notebook",
+    tags=["plots"],
+    response_class=JSONResponse,
+)
+async def plot_notebook_endpoint(
+    common: CommonPlotParams = Depends(),
+    geom: str = FastAPIPath(
+        ...,
+        description=(
+            "Plot geom (same value as the path segment in "
+            "``/plot/{geom}``): ``scatter`` | ``hexbin`` | ``violin`` | "
+            "``box`` | ``bar`` | ``histogram`` | ``ecdf`` | ``kde`` | "
+            "``heatmap`` | ``rolling`` | ``kde2d`` | ``volcano`` | "
+            "``ma`` | ``forest`` | ``de_heatmap``."
+        ),
+    ),
+):
+    """Return a JupyterLite-compatible ``.ipynb`` for this plot.
+
+    Same query-param surface as ``/plot/{geom}`` — the resulting notebook
+    re-issues the same plot request via ``vark.AnthiveClient`` and renders
+    the figure inline with the caption underneath.
+
+    **JupyterLite integration.** Pass the absolute URL of this endpoint as
+    ``?fromURL=…`` to JupyterLite's index:
+
+        /jupyter/lab/index.html?fromURL=<urlencoded-notebook-URL>
+
+    JupyterLite then materialises the notebook in the user's in-browser
+    filesystem (IndexedDB-backed). The user can edit and re-run cells; to
+    persist their changes off-browser they use *File → Download*.
+
+    The active auth line in cell 2 is always ``c = AnthiveClient(BASE_URL)``
+    — works inside JupyterLite at this server's origin (Authelia cookie /
+    HTTP Basic carried by the browser) and outside via the
+    ``pyvark[vark-config]`` credential lookup. A commented explicit-password
+    line is templated alongside for users who copy the notebook elsewhere.
+    """
+    if geom not in _PLOT_GEOMS:
+        raise HTTPException(
+            400,
+            detail=f"Unknown geom '{geom}'. Valid: {sorted(_PLOT_GEOMS)}",
+        )
+    request = common.request
+    if request is None:
+        # Should never happen — CommonPlotParams always injects the request.
+        raise HTTPException(500, detail="Could not access inbound Request object.")
+
+    # Build the PlotRequest from the query string. CommonPlotParams already
+    # handled the shared knobs (db_id, layer, width, …, subset, sample);
+    # everything else gets folded in via _build_plot_request kwargs.
+    plot_kwargs: Dict[str, Any] = {}
+    # Keep the original (user-facing) names too — that's what we drop into
+    # the notebook's PARAMS dict so the vark.AnthiveClient.get_plot call
+    # looks like the URL the user opened.
+    notebook_params: Dict[str, Any] = {}
+    for raw_key, raw_value in request.query_params.multi_items():
+        # `format` is selected per-cell inside the notebook (csv for cell 2,
+        # png for cell 3) — drop it from the user-facing PARAMS.
+        if raw_key == 'format':
+            continue
+        # The user-facing dict keeps URL semantics: repeats become lists.
+        # This dict is the one that lands in the notebook's PARAMS, so it
+        # MUST include shared knobs (layer, subset, sample, palette_*, etc.)
+        # for the notebook to faithfully reproduce the original plot URL.
+        if raw_key in notebook_params:
+            existing = notebook_params[raw_key]
+            if isinstance(existing, list):
+                existing.append(raw_value)
+            else:
+                notebook_params[raw_key] = [existing, raw_value]
+        else:
+            notebook_params[raw_key] = raw_value
+        # plot_kwargs gets only the per-geom params (CommonPlotParams Depends
+        # has already absorbed the shared ones).
+        if raw_key in _NOTEBOOK_COMMON_PARAMS:
+            continue
+        coerced = _coerce_query_value(raw_key, raw_value)
+        kwarg_name = _NOTEBOOK_PARAM_RENAME.get(raw_key, raw_key)
+        plot_kwargs[kwarg_name] = coerced
+
+    # Filter kwargs to only those _build_plot_request actually accepts —
+    # anything else would raise a TypeError, which the user would see as
+    # an opaque 500. Inspect the signature.
+    import inspect as _inspect
+    allowed = set(_inspect.signature(_build_plot_request).parameters.keys())
+    plot_kwargs = {k: v for k, v in plot_kwargs.items() if k in allowed}
+
+    try:
+        plot_req = _build_plot_request(common, geom, **plot_kwargs)
+    except TypeError as exc:
+        raise HTTPException(400, detail=f"Bad plot params: {exc}")
+
+    # Force PNG render path for the caption — the notebook generator only
+    # needs the X-Plot-Caption text. The cache is keyed by output_format
+    # so this won't pollute any CSV/SVG/PDF entries for the same plot.
+    plot_req = _plot_request_force_png(plot_req)
+
+    # Re-use _render_plot's cache + handler dispatch. Drop the bytes,
+    # keep the caption header.
+    plot_response = await _render_plot(plot_req, request)
+    caption = plot_response.headers.get('X-Plot-Caption') or ''
+
+    case, remote_user, _passwordless = _detect_notebook_auth(request)
+    auth_block = _build_auth_block(case, remote_user)
+    base_url = _notebook_base_url(request)
+
+    notebook_dict = _build_notebook_for_plot(
+        db_id=common.db_id,
+        geom=geom,
+        plot_params=notebook_params,
+        caption=caption,
+        base_url=base_url,
+        auth_block=auth_block,
+    )
+
+    filename = f"{common.db_id.replace('/', '_')}_{geom}.ipynb"
+    return Response(
+        content=json.dumps(notebook_dict, indent=1),
+        media_type="application/x-ipynb+json",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+            "X-Anthive-Auth-Case": case,
+        },
+    )
+
+
+def _plot_request_force_png(req: PlotRequest) -> PlotRequest:
+    """Return a copy of ``req`` with output_format='png'.
+
+    PlotRequest is frozen — we can't mutate; we replace via dataclasses.replace.
+    """
+    from dataclasses import replace as _dc_replace
+    if req.output_format == 'png':
+        return req
+    return _dc_replace(req, output_format='png')
 
 
 # ── analytics endpoints ────────────────────────────────────────────────────────
