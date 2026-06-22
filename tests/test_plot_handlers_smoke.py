@@ -320,6 +320,123 @@ def test_de_heatmap_csv():
     assert 'contrast' in first_line and 'gene' in first_line
 
 
+# ── /plot/de_heatmap: 2.10.0 features (clip + exclude + sort) ─────────
+
+
+_V6W_STUDY = 'Module_DE_interpretable_lmem_vs_grandmean'
+_V6W_TERM = 'patient_geno_short_relevel_sexreg'
+
+
+def _de_heatmap_columns(**extra):
+    """Helper: fetch a de_heatmap as CSV and return the list of distinct
+    gene tokens (column-axis labels) and contrast tokens (row-axis labels)."""
+    r = _get(
+        f"/databases/{V6W}/plot/de_heatmap",
+        study=_V6W_STUDY, term=_V6W_TERM, format='csv', cache='miss',
+        **extra,
+    )
+    assert r.status_code == 200, r.text[:300]
+    lines = r.text.strip().splitlines()
+    header = lines[0].split(',')
+    contrast_ix = header.index('contrast')
+    gene_ix = header.index('gene')
+    contrasts = []
+    genes = []
+    seen_g = set()
+    seen_c = set()
+    for line in lines[1:]:
+        parts = line.split(',')
+        c = parts[contrast_ix]
+        g = parts[gene_ix]
+        if c not in seen_c:
+            seen_c.add(c)
+            contrasts.append(c)
+        if g not in seen_g:
+            seen_g.add(g)
+            genes.append(g)
+    return contrasts, genes
+
+
+def test_de_heatmap_vmin_vmax_clip():
+    """?vmin=-2&vmax=2 — caption mentions the clip; image renders."""
+    r = _get(f"/databases/{V6W}/plot/de_heatmap",
+             study=_V6W_STUDY, term=_V6W_TERM,
+             vmin=-2, vmax=2, cache='miss')
+    assert r.status_code == 200, r.text[:300]
+    assert r.headers.get('content-type', '').startswith('image/')
+    caption = r.headers.get('x-plot-caption', '').lower()
+    assert 'clipped to [-2, 2]' in caption, caption
+
+
+def test_de_heatmap_vmax_quantile_clip():
+    """?vmax_quantile=0.95 — caption mentions the quantile band."""
+    r = _get(f"/databases/{V6W}/plot/de_heatmap",
+             study=_V6W_STUDY, term=_V6W_TERM,
+             vmax_quantile=0.95, cache='miss')
+    assert r.status_code == 200, r.text[:300]
+    caption = r.headers.get('x-plot-caption', '').lower()
+    assert 'quantile band' in caption, caption
+
+
+def test_de_heatmap_exclude_only_gene():
+    """?genes=-MEbrown — every gene EXCEPT MEbrown."""
+    # First grab all genes so we know what to compare against.
+    _, all_genes = _de_heatmap_columns()
+    # Pick a gene that's actually present so the exclude is meaningful.
+    target = all_genes[0]
+    _, kept_genes = _de_heatmap_columns(genes=f'-{target}')
+    assert target not in kept_genes
+    assert set(kept_genes) == set(all_genes) - {target}
+
+
+def test_de_heatmap_redundant_negative_no_error():
+    """?genes=A,B,-A — net effect = {B}. Negative on already-excluded
+    value (i.e. a value not in the positive set) is also a silent no-op."""
+    _, all_genes = _de_heatmap_columns()
+    a, b = all_genes[0], all_genes[1]
+    # Case 1: A in positives + -A → final = {B}
+    _, genes = _de_heatmap_columns(genes=f'{a},{b},-{a}')
+    assert set(genes) == {b}
+    # Case 2: -nonexistent silently ignored
+    _, genes2 = _de_heatmap_columns(genes=f'{a},{b},-DOES_NOT_EXIST')
+    assert set(genes2) == {a, b}
+
+
+def test_de_heatmap_sort_by_gene():
+    """?sort=<gene> — rows reordered by that column's values ascending."""
+    _, all_genes = _de_heatmap_columns()
+    pick = all_genes[0]
+    r = _get(f"/databases/{V6W}/plot/de_heatmap",
+             study=_V6W_STUDY, term=_V6W_TERM,
+             sort=pick, cache='miss')
+    assert r.status_code == 200, r.text[:300]
+    caption = r.headers.get('x-plot-caption', '').lower()
+    assert 'reordered by' in caption, caption
+    assert pick.lower() in caption
+
+
+def test_de_heatmap_sort_unknown_label_400():
+    """?sort=xyz where xyz matches no row OR column → 400 with hints."""
+    r = _get(f"/databases/{V6W}/plot/de_heatmap",
+             study=_V6W_STUDY, term=_V6W_TERM,
+             sort='absolutely_not_a_thing', cache='miss')
+    assert r.status_code == 400, r.text[:300]
+    detail = r.json().get('detail', '').lower()
+    assert 'matches neither' in detail, detail
+
+
+def test_de_heatmap_sort_desc():
+    """?sort=<gene>&sort_desc=true — caption mentions descending."""
+    _, all_genes = _de_heatmap_columns()
+    pick = all_genes[0]
+    r = _get(f"/databases/{V6W}/plot/de_heatmap",
+             study=_V6W_STUDY, term=_V6W_TERM,
+             sort=pick, sort_desc='true', cache='miss')
+    assert r.status_code == 200, r.text[:300]
+    caption = r.headers.get('x-plot-caption', '').lower()
+    assert 'descending' in caption, caption
+
+
 # ── new cmap registration ─────────────────────────────────────────────
 
 

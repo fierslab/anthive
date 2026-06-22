@@ -1299,7 +1299,7 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.9.2"
+API_VERSION = "2.10.0"
 API_VERSION_RELEASED = "2026-06-22"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
@@ -2698,6 +2698,8 @@ class PlotRequest:
     de_genes: Optional[str]      # comma-list to restrict the gene/module (col) axis
     de_value: Optional[str]      # which __de column to plot — None = auto-pick
     sig_overlay: bool            # mark significant cells (padj <= padj_threshold)
+    sort: Optional[str]          # de_heatmap: row OR column label to sort by
+    sort_desc: bool              # de_heatmap: descending sort (default ascending)
     # bar-geom layout knobs
     bar_mode: str                # 'dodge' (default, side-by-side) | 'stack'
     normalize: bool              # stacked bar: scale each bar to 100% (proportions)
@@ -3863,26 +3865,42 @@ def _handle_de_heatmap(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
             ))
         value_col = chosen
 
-    # Optional contrast / gene filters (comma-separated). Refresh against
-    # the live data so a typo gives an early 400.
-    contrast_filter = None
-    if req.de_contrasts:
-        contrast_filter = [c.strip() for c in req.de_contrasts.split(',') if c.strip()]
-    gene_filter = None
-    if req.de_genes:
-        gene_filter = [g.strip() for g in req.de_genes.split(',') if g.strip()]
+    # Optional contrast / gene filters (comma-separated). The `-` prefix
+    # negates a token: positives form the include-set (or "everything" if
+    # none given), then negatives are subtracted.
+    def _split_include_exclude(raw: Optional[str]) -> Tuple[List[str], List[str]]:
+        if not raw:
+            return [], []
+        positives: List[str] = []
+        negatives: List[str] = []
+        for token in raw.split(','):
+            token = token.strip()
+            if not token:
+                continue
+            if token.startswith('-'):
+                body = token[1:].strip()
+                if body:
+                    negatives.append(body)
+            else:
+                positives.append(token)
+        return positives, negatives
 
-    # Build SQL.
+    contrast_positives, contrast_negatives = _split_include_exclude(req.de_contrasts)
+    gene_positives, gene_negatives = _split_include_exclude(req.de_genes)
+
+    # SQL only needs positives (so we can early-narrow). Negatives are
+    # applied in pandas after the pivot because they may refer to
+    # tokens not in the positive include set (a no-op, by design).
     where_parts = ["d.study_id = ?", "d.term = ?"]
     params: List = [req.de_study, req.de_term]
-    if contrast_filter:
-        placeholders = ','.join(['?'] * len(contrast_filter))
+    if contrast_positives:
+        placeholders = ','.join(['?'] * len(contrast_positives))
         where_parts.append(f"d.contrast IN ({placeholders})")
-        params.extend(contrast_filter)
-    if gene_filter:
-        placeholders = ','.join(['?'] * len(gene_filter))
+        params.extend(contrast_positives)
+    if gene_positives:
+        placeholders = ','.join(['?'] * len(gene_positives))
         where_parts.append(f"g.gene_name IN ({placeholders})")
-        params.extend(gene_filter)
+        params.extend(gene_positives)
     sql = f"""
         SELECT d.contrast, g.gene_name, d.{value_col} AS value, d.padj
         FROM __de d JOIN __genes g USING (gene_id)
@@ -3890,29 +3908,28 @@ def _handle_de_heatmap(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     """
     df = ctx.db.conn.execute(sql, params).fetchdf()
     if len(df) == 0:
-        # Specialise the message when a filter is entirely off-target
-        # (helps the user fix a typo). Probe whether the (study, term)
-        # has ANY rows; if yes, the filter killed everything.
-        if contrast_filter or gene_filter:
+        # Specialise the message when an explicit positive filter is
+        # entirely off-target (helps the user fix a typo). Skip when
+        # only negatives were given — those have an "include-all"
+        # baseline and a missing-from-data exclude is a no-op.
+        if contrast_positives or gene_positives:
             base_n = ctx.db.conn.execute(
                 "SELECT count(*) FROM __de WHERE study_id=? AND term=?",
                 [req.de_study, req.de_term],
             ).fetchone()[0]
             if base_n > 0:
-                # Surface a 'none of contrasts=' / 'none of genes='
-                # message with the available alternatives.
-                if contrast_filter:
+                if contrast_positives:
                     avail = ctx.db.conn.execute(
                         "SELECT DISTINCT contrast FROM __de "
                         "WHERE study_id=? AND term=? ORDER BY contrast LIMIT 20",
                         [req.de_study, req.de_term],
                     ).fetchdf()['contrast'].tolist()
                     raise HTTPException(404, detail=(
-                        f"none of contrasts={contrast_filter} match any DE "
+                        f"none of contrasts={contrast_positives} match any DE "
                         f"rows for study={req.de_study!r}, term={req.de_term!r}. "
                         f"Available contrasts (up to 20): {avail}"
                     ))
-                if gene_filter:
+                if gene_positives:
                     avail = ctx.db.conn.execute(
                         "SELECT DISTINCT g.gene_name FROM __de d "
                         "JOIN __genes g USING (gene_id) "
@@ -3921,14 +3938,28 @@ def _handle_de_heatmap(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
                         [req.de_study, req.de_term],
                     ).fetchdf()['gene_name'].tolist()
                     raise HTTPException(404, detail=(
-                        f"none of genes={gene_filter} match any DE rows "
+                        f"none of genes={gene_positives} match any DE rows "
                         f"for study={req.de_study!r}, term={req.de_term!r}. "
                         f"Available genes (up to 20): {avail}"
                     ))
         raise HTTPException(404, detail=(
             f"no DE rows for study={req.de_study!r}, term={req.de_term!r}"
-            + (f" matching contrasts={contrast_filter}" if contrast_filter else "")
-            + (f" matching genes={gene_filter}" if gene_filter else "")
+            + (f" matching contrasts={contrast_positives}" if contrast_positives else "")
+            + (f" matching genes={gene_positives}" if gene_positives else "")
+        ))
+
+    # Apply negative filters in pandas (post-SQL). Negatives drop rows /
+    # columns from whatever positive set was assembled; a negative that
+    # doesn't match anything is a silent no-op (no error).
+    if contrast_negatives:
+        df = df[~df['contrast'].isin(contrast_negatives)]
+    if gene_negatives:
+        df = df[~df['gene_name'].isin(gene_negatives)]
+    if len(df) == 0:
+        raise HTTPException(404, detail=(
+            f"no DE rows left after applying excludes "
+            f"(contrasts={contrast_negatives}, genes={gene_negatives}) "
+            f"for study={req.de_study!r}, term={req.de_term!r}"
         ))
 
     # Pivot into a contrast × gene matrix. Preserve a stable ordering:
@@ -3944,39 +3975,39 @@ def _handle_de_heatmap(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
             f"<list> and/or de_genes=<list>."
         ))
 
-    # Flag user-requested filter values that didn't resolve. A typo in
+    # Flag positive-filter values that didn't resolve. A typo in
     # ?contrasts=Foo would otherwise silently produce a smaller-than-
-    # expected matrix (QA review B7).
+    # expected matrix (QA review B7). Negatives skipped — see above.
     present_contrasts = set(df['contrast'].unique())
     present_genes = set(df['gene_name'].unique())
     missing_contrasts = (
-        [c for c in contrast_filter if c not in present_contrasts]
-        if contrast_filter else []
+        [c for c in contrast_positives if c not in present_contrasts]
+        if contrast_positives else []
     )
     missing_genes = (
-        [g for g in gene_filter if g not in present_genes]
-        if gene_filter else []
+        [g for g in gene_positives if g not in present_genes]
+        if gene_positives else []
     )
-    if missing_contrasts and contrast_filter and not (set(contrast_filter) & present_contrasts):
+    if missing_contrasts and contrast_positives and not (set(contrast_positives) & present_contrasts):
         raise HTTPException(404, detail=(
-            f"none of contrasts={contrast_filter} match any DE rows for "
+            f"none of contrasts={contrast_positives} match any DE rows for "
             f"study={req.de_study!r}, term={req.de_term!r}. Available "
             f"contrasts (up to 20): "
             f"{sorted(present_contrasts)[:20]}"
         ))
-    if missing_genes and gene_filter and not (set(gene_filter) & present_genes):
+    if missing_genes and gene_positives and not (set(gene_positives) & present_genes):
         raise HTTPException(404, detail=(
-            f"none of genes={gene_filter} match any DE rows for "
+            f"none of genes={gene_positives} match any DE rows for "
             f"study={req.de_study!r}, term={req.de_term!r}. Available "
             f"genes (up to 20): {sorted(present_genes)[:20]}"
         ))
 
-    if contrast_filter:
-        row_order = [c for c in contrast_filter if c in present_contrasts]
+    if contrast_positives:
+        row_order = [c for c in contrast_positives if c in present_contrasts]
     else:
         row_order = sorted(present_contrasts)
-    if gene_filter:
-        col_order = [g for g in gene_filter if g in present_genes]
+    if gene_positives:
+        col_order = [g for g in gene_positives if g in present_genes]
     else:
         col_order = sorted(present_genes)
 
@@ -3991,6 +4022,45 @@ def _handle_de_heatmap(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         ).reindex(index=row_order, columns=col_order)
         sig_mask = sig_mat.le(req.padj_threshold).fillna(False)
 
+    # Sort: if the matrix has only 1 row or 1 col, sort is a no-op.
+    sort_note: Optional[str] = None
+    if req.sort and matrix.shape[0] >= 2 and matrix.shape[1] >= 2:
+        sort_label = req.sort
+        ascending = not req.sort_desc
+        direction_word = 'descending' if req.sort_desc else 'ascending'
+        if sort_label in matrix.columns:
+            # Treat as gene name → reorder ROWS by this column's values.
+            ordered = matrix[sort_label].sort_values(
+                ascending=ascending, na_position='last',
+            ).index.tolist()
+            matrix = matrix.reindex(index=ordered)
+            if sig_mask is not None:
+                sig_mask = sig_mask.reindex(index=ordered)
+            sort_note = f"rows reordered by '{sort_label}' {direction_word}"
+        elif sort_label in matrix.index:
+            # Treat as contrast name → reorder COLUMNS by this row's values.
+            ordered = matrix.loc[sort_label].sort_values(
+                ascending=ascending, na_position='last',
+            ).index.tolist()
+            matrix = matrix.reindex(columns=ordered)
+            if sig_mask is not None:
+                sig_mask = sig_mask.reindex(columns=ordered)
+            sort_note = f"columns reordered by '{sort_label}' {direction_word}"
+        else:
+            # Helpful 400 listing closest matches across rows AND columns.
+            import difflib as _difflib
+            candidates = list(matrix.columns) + list(matrix.index)
+            closest = _difflib.get_close_matches(sort_label, candidates, n=5, cutoff=0.4)
+            raise HTTPException(400, detail=(
+                f"sort={sort_label!r} matches neither a row (contrast) nor "
+                f"column (gene/module) label of the resulting matrix. "
+                f"Closest matches: {closest if closest else 'none'}."
+            ))
+    elif req.sort:
+        # Matrix too small for sort to do anything — silently no-op
+        # but still let the user know via the caption.
+        sort_note = f"sort={req.sort!r} ignored (matrix has < 2 rows or columns)"
+
     if req.output_format in _PLOT_DATA_FORMATS:
         # Export as long-form (one row per cell) — keeps the structure
         # explicit and avoids pandas-CSV's confusing multi-index header.
@@ -4001,6 +4071,10 @@ def _handle_de_heatmap(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
             req,
         )
 
+    # Recompute post-sort dims so the caption is honest (sort might have
+    # changed neither — but excludes/positives could have narrowed shape).
+    n_contrasts, n_genes = matrix.shape
+
     n_sig_cells = int(sig_mask.sum().sum()) if sig_mask is not None else None
     extras: List[str] = []
     if req.sig_overlay:
@@ -4010,6 +4084,26 @@ def _handle_de_heatmap(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         )
     if req.color_scale and req.color_scale != 'auto':
         extras.append(f'colour scale forced {req.color_scale}')
+    if req.vmin is not None and req.vmax is not None:
+        extras.append(f'colour scale clipped to [{req.vmin:g}, {req.vmax:g}]')
+    elif req.vmin is not None:
+        extras.append(f'colour scale lower-clipped at {req.vmin:g}')
+    elif req.vmax is not None:
+        extras.append(f'colour scale upper-clipped at {req.vmax:g}')
+    if (req.vmin_quantile is not None or req.vmax_quantile is not None) \
+       and req.vmin is None and req.vmax is None:
+        lo = req.vmin_quantile if req.vmin_quantile is not None else 0.0
+        hi = req.vmax_quantile if req.vmax_quantile is not None else 1.0
+        extras.append(
+            f'colour scale auto-clipped to the {lo:g}-{hi:g} quantile band '
+            f'of the matrix values'
+        )
+    if contrast_negatives:
+        extras.append(f"excluded contrasts: {','.join('-' + c for c in contrast_negatives)}")
+    if gene_negatives:
+        extras.append(f"excluded genes: {','.join('-' + g for g in gene_negatives)}")
+    if sort_note:
+        extras.append(sort_note)
     extras_text = (' ' + '. '.join(extras) + '.') if extras else ''
     caption = (
         f"Differential-expression heatmap of the '{req.de_term}' term of study "
@@ -4033,6 +4127,8 @@ def _handle_de_heatmap(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         palette_cont=req.palette_cont,
         palette_div=req.palette_div,
         color_scale=req.color_scale,
+        vmin=req.vmin, vmax=req.vmax,
+        vmin_quantile=req.vmin_quantile, vmax_quantile=req.vmax_quantile,
         annot=False,
         title_extra=req.db_id,
         caption=caption, source_url=req.source_url,
@@ -4249,6 +4345,8 @@ def _build_plot_request(
     de_genes: Optional[str] = None,
     de_value: Optional[str] = None,
     sig_overlay: bool = False,
+    sort: Optional[str] = None,
+    sort_desc: bool = False,
     # bar-geom: 'dodge' (default) | 'stack' for composition plots
     bar_mode: str = 'dodge',
     normalize: bool = False,
@@ -4298,6 +4396,8 @@ def _build_plot_request(
         de_genes=de_genes,
         de_value=de_value,
         sig_overlay=sig_overlay,
+        sort=sort,
+        sort_desc=sort_desc,
         bar_mode=bar_mode,
         normalize=normalize,
         facet=facet,
@@ -5099,12 +5199,62 @@ async def plot_de_heatmap_endpoint(
         False,
         description="When true, draw a small black dot in each cell whose padj <= padj_threshold.",
     ),
+    vmin: Optional[float] = Query(
+        None,
+        description=(
+            "Hard lower clip for the colour scale. Overrides vmin_quantile "
+            "when set. On an auto-divergent palette, setting only vmax "
+            "mirrors to -vmax for vmin (symmetric)."
+        ),
+    ),
+    vmax: Optional[float] = Query(
+        None,
+        description=(
+            "Hard upper clip for the colour scale. Overrides vmax_quantile "
+            "when set."
+        ),
+    ),
+    vmin_quantile: Optional[float] = Query(
+        None, gt=0.0, lt=1.0,
+        description=(
+            "Auto-clip the lower bound at the Qth quantile of the pivoted "
+            "matrix's finite cell values (0-1 exclusive). Ignored when "
+            "vmin is explicitly set."
+        ),
+    ),
+    vmax_quantile: Optional[float] = Query(
+        None, gt=0.0, lt=1.0,
+        description=(
+            "Auto-clip the upper bound at the Qth quantile of the pivoted "
+            "matrix's finite cell values (0-1 exclusive). Ignored when "
+            "vmax is explicitly set."
+        ),
+    ),
+    sort: Optional[str] = Query(
+        None,
+        description=(
+            "Row or column label to sort by. If the label matches a gene "
+            "(column header), rows are reordered by that column's values. "
+            "If it matches a contrast (row header), columns are reordered "
+            "by that row's values. Ascending by default; NaNs go to the "
+            "end. Overrides positional ordering from ?contrasts= / ?genes=."
+        ),
+    ),
+    sort_desc: bool = Query(
+        False,
+        description="Reverse the sort direction (descending).",
+    ),
 ):
     """Contrasts × genes/modules heatmap of pre-computed DE values.
 
     Renders Sierksma Fig 2E / 4B-style matrices directly from the
     `__de` table. Cell capacity: 2000 (contrasts × genes); pre-filter
     with ``contrasts`` and / or ``genes`` for tighter views.
+
+    Both `contrasts` and `genes` accept the `-` prefix to exclude a
+    value (e.g. `genes=-APOE` = "everything except APOE", or
+    `genes=A,B,-A` = `{B}`). Mixing positives and negatives starts
+    with the positive set and then removes the negatives.
 
     Defaults to a divergent palette centred on zero (effect-size data
     is signed); flip with ``color_scale=sequential`` for one-sided
@@ -5117,6 +5267,9 @@ async def plot_de_heatmap_endpoint(
         de_value=value,
         padj_threshold=padj_threshold,
         sig_overlay=sig_overlay,
+        vmin=vmin, vmax=vmax,
+        vmin_quantile=vmin_quantile, vmax_quantile=vmax_quantile,
+        sort=sort, sort_desc=sort_desc,
     )
     return await _render_plot(req, common.request)
 

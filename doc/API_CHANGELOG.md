@@ -29,6 +29,46 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.10.0 — 2026-06-22
+
+### Added — three new knobs on `/plot/de_heatmap`
+
+`/plot/de_heatmap` gains colour-scale clipping, exclude-filters, and
+axis sorting. All additive — existing queries continue to render
+identically.
+
+* **Colour-scale clipping**: `?vmin=N`, `?vmax=N`, `?vmin_quantile=Q`,
+  `?vmax_quantile=Q` (semantics mirror the existing `/plot/hexbin`
+  knobs). Quantiles are computed over the finite cell values of the
+  pivoted matrix that's actually being coloured.  On the
+  auto-divergent palette: setting only `vmax` mirrors to `-vmax` for
+  `vmin` (keeps zero centred); setting both lets the user choose an
+  asymmetric range; quantiles are honoured asymmetrically too (the
+  user's call).
+* **Negative-prefix filters** on `?contrasts=` and `?genes=`:
+  * `?genes=-APOE` — every gene except APOE (include-all baseline,
+    then drop negatives).
+  * `?genes=A,B,-A` — start from `{A, B}`, drop A → `{B}`.
+  * A negative pointing at a value that isn't in the data is a
+    silent no-op (no 404).
+  * The "none of contrasts/genes matched" 404 only fires when explicit
+    *positives* were given and missed; pure-negative queries fall back
+    to include-all.
+* **`?sort=LABEL`** + **`?sort_desc=true`**: if `LABEL` matches a
+  column (gene/module), the rows are reordered by that column's
+  values; if it matches a row (contrast), the columns are reordered
+  by that row's values. NaNs always sort to the end. Mis-matched
+  labels return `400` with the closest suggestions. Overrides any
+  positional ordering from `?contrasts=` / `?genes=`. No-op when the
+  matrix has only 1 row or 1 column.
+
+The `X-Plot-Caption` header now includes the active clip range,
+quantile band, exclude tokens, and sort note when these are used.
+
+Caller impact: purely additive — older clients keep working unchanged.
+
+---
+
 ## 2.9.2 — 2026-06-22
 
 ### Added — biology-keyed filename in the notebook URL, plus a no-render `/meta` descriptor

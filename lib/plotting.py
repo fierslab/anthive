@@ -2413,6 +2413,10 @@ def plot_de_heatmap(
     palette_cont: str = _DEFAULT_SEQUENTIAL,
     palette_div: str = _DEFAULT_DIVERGENT,
     color_scale: Optional[str] = None,
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+    vmin_quantile: Optional[float] = None,
+    vmax_quantile: Optional[float] = None,
     annot: bool = False,
     title_extra: Optional[str] = None,
     caption: Optional[str] = None,
@@ -2437,11 +2441,22 @@ def plot_de_heatmap(
         color_scale: 'auto' / 'sequential' / 'divergent'. Defaults to
                      divergent for effect-size data; pass 'sequential'
                      for one-sided value columns (e.g. -log10(padj)).
+        vmin, vmax:  Hard clips for the colour scale. Override the
+                     auto-computed symmetric range. On the auto-divergent
+                     path, passing only ``vmax`` mirrors to ``-vmax``;
+                     passing only ``vmin`` mirrors to ``-vmin``. Passing
+                     both lets the user set an asymmetric range.
+        vmin_quantile, vmax_quantile:
+                     Compute clips from the Qth quantile of the finite
+                     cell values of the matrix. Ignored when the
+                     corresponding hard clip is set. On the auto-divergent
+                     path, asymmetric quantiles are honoured as-is.
     """
     _setup_style(font_family, font_size)
     fig, ax = plt.subplots(figsize=(width, height))
 
-    # Values used to pick the cmap family.
+    # Values used to pick the cmap family and (optionally) compute
+    # quantile-based clips.
     values = matrix_df.to_numpy(dtype=float)
     cmap_name, used_kind = pick_cmap(
         'continuous',
@@ -2452,13 +2467,29 @@ def plot_de_heatmap(
         # the user explicitly asked for one-sided.
         color_scale=color_scale or 'divergent',
     )
-    # Symmetric vmin/vmax when divergent; raw when sequential.
+
+    # Quantile-based auto-clip (only for axes not pinned by explicit
+    # vmin/vmax). Computed over the finite values of the pivoted matrix
+    # — that's what's actually being coloured.
+    finite = values[np.isfinite(values)]
+    if vmin is None and vmin_quantile is not None and finite.size:
+        vmin = float(np.quantile(finite, vmin_quantile))
+    if vmax is None and vmax_quantile is not None and finite.size:
+        vmax = float(np.quantile(finite, vmax_quantile))
+
+    # Symmetric vmin/vmax when divergent (unless the user pinned one /
+    # both); raw when sequential.
     if used_kind == 'divergent':
-        finite = values[np.isfinite(values)]
-        vlim = float(np.nanmax(np.abs(finite))) if finite.size else 1.0
-        vmin, vmax = -vlim, vlim
-    else:
-        vmin, vmax = None, None
+        if vmin is None and vmax is None:
+            vlim = float(np.nanmax(np.abs(finite))) if finite.size else 1.0
+            vmin, vmax = -vlim, vlim
+        elif vmin is None and vmax is not None:
+            # Mirror to keep zero centred unless the user also pinned vmin.
+            vmin = -vmax
+        elif vmax is None and vmin is not None:
+            vmax = -vmin
+        # If both are set, respect them as-is (user's call, may be
+        # asymmetric).
 
     sns.heatmap(
         matrix_df,
