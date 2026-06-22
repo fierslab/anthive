@@ -103,12 +103,18 @@ build-jupyter:
 	@#   lab UI loads but never fetches the requested notebook.
 	@#   So we pin notebook to exactly 7.5.6 against jupyterlite-core 0.7.6.
 	@#   When bumping either, re-check the matrix above and adjust both.
+	@# jupyterlab-open-url-parameter adds a robust ?fromURL=<url> handler
+	@# that hooks into JupyterLab's standard `filebrowser:open-url` command,
+	@# bypassing the brittle INotebookPathOpener path from
+	@# @jupyter-notebook/lab-extension. Required for the "Open in JupyterLite"
+	@# button on plot pages (ant-serve /databases/{id}/plot/{geom}/notebook.ipynb).
 	@DOIT_DB=tmp/.jupyterlite.doit.db \
 	uvx --from 'jupyterlite-core==0.7.6' \
 		--with jupyterlite-pyodide-kernel \
 		--with jupyterlab-widgets \
 		--with 'notebook==7.5.6' \
 		--with jupyter-server \
+		--with jupyterlab-open-url-parameter \
 		jupyter-lite build --force \
 			--contents frontend/jupyter/jupyter \
 			--output-dir webapp/jupyter
