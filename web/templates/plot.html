@@ -767,10 +767,10 @@
   }
 
   // ── default settings (used until user saves their own); width/height in inches.
-  //    Default = A5 landscape (210 × 148 mm) — a sensible metric page default now
-  //    that the UI is mm-based.
+  //    Default = 16:9 (254 × 143 mm) — matches the '16:9' screen preset; good for
+  //    slides/screens. Users who've saved a size keep theirs (localStorage).
   const DEFAULT_SETTINGS = {
-    width: 210 / MM_PER_IN, height: 148 / MM_PER_IN, dpi: 150, point_size: 3, alpha: 0.8,
+    width: 254 / MM_PER_IN, height: 143 / MM_PER_IN, dpi: 150, point_size: 3, alpha: 0.8,
     font_family: 'DejaVu Sans', font_size: 10,
     // Three palette families — each used for the matching data kind:
     palette_categorical: 'tab10',
