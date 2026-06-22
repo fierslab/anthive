@@ -29,6 +29,54 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.12.0 — 2026-06-22
+
+### Added — `de_quadrant` plot geom (16th geom)
+
+New `GET /databases/{db_id:path}/plot/de_quadrant` endpoint. Renders a
+2-experiment effect-vs-effect scatter: one gene per point at
+`(stat_x, stat_y)` where `stat` is the gene's DE statistic on each
+axis. Quadrants encode concordance vs discordance; colour encodes the
+4-way significance category (significant in X only / Y only / both /
+neither, gated by `padj_threshold` independently on each side).
+
+Query-param surface (in addition to the standard plot knobs):
+
+* `study`, `term`, `contrast` — A side (lives on the path `db_id`).
+* `db_y` (optional, default = path db_id), `study_y`, `term_y`,
+  `contrast_y` — B side.
+* `axis_x`, `axis_y` — one of `log2fc` (default), `signed_log10p`
+  ( -log10(padj) * sign(log2fc) ), or `zeff`. Picked independently
+  per axis.
+* `padj_threshold` (default 0.05) — significance cutoff for the
+  colour split.
+* `n_label` (default 8) — top-N concordant + top-N discordant genes
+  to label, ranked by `|stat_x * stat_y|`.
+* `mode` — `scatter` (default) | `hex` (hexbin density variant).
+* `log2fc_clip` — symmetric visual clamp applied to BOTH axes.
+
+Cross-dataset comparisons are allowed only when both datasets carry
+the same `organism` field in the obs catalog metadata; mismatch
+returns 400 with a descriptive detail. Genes present on only one
+side are dropped from the scatter (inner-join on `gene_name`), but
+the caption reports the full set sizes (`|X|`, `|Y|`, union,
+intersection) so callers can see how much got dropped. If the
+intersection is empty, the endpoint returns 400 (not 500) with a
+"no genes in common" explanation.
+
+Colour mapping (with default `palette_cat='tab10'`): neither sig =
+light grey (#bbbbbb), X-only = tab10[0] (blue), Y-only = tab10[1]
+(orange), both = tab10[3] (red). Reference overlays: dashed
+`y = x` (concordance reference) plus solid axis-zero crosshairs.
+Bottom-right corner carries the Pearson r + Spearman ρ + n.
+
+Caller impact: purely additive. Existing geoms keep working
+unchanged. Clients tracking `/version.plot_geoms` will see
+`de_quadrant` appear in the list. vark / pyvark need to extend
+their geom enums to expose it.
+
+---
+
 ## 2.11.1 — 2026-06-22
 
 ### Changed — prettier notebook params + real DE de-novo snippets

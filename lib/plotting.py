@@ -651,6 +651,7 @@ _FILENAME_MAX_LEN = 80
 # back to the geom name unchanged.
 _GEOM_COMPACT: Dict[str, str] = {
     'histogram': 'hist',
+    'de_quadrant': 'quadrant',
 }
 
 
@@ -734,6 +735,10 @@ def build_plot_descriptor(
     de_term: Optional[str] = None,
     de_contrast: Optional[str] = None,
     de_gene: Optional[str] = None,
+    # de_quadrant — B-side dataset + term/contrast
+    db_y: Optional[str] = None,
+    de_term_y: Optional[str] = None,
+    de_contrast_y: Optional[str] = None,
     # heatmap-specific: comma-list of genes (in `x`); precomputed y_resolved label.
     y_resolved: Optional[str] = None,
 ) -> Dict[str, str]:
@@ -840,6 +845,14 @@ def build_plot_descriptor(
     elif geom == 'de_heatmap':
         term = de_term or '?'
         body = f"DE matrix - {term}"
+    elif geom == 'de_quadrant':
+        term_x = de_term or '?'
+        contrast_x = de_contrast or '?'
+        term_y = de_term_y or '?'
+        contrast_y = de_contrast_y or '?'
+        body = (
+            f"{term_x} / {contrast_x} vs {term_y} / {contrast_y} (quadrant)"
+        )
     else:
         body = geom
 
@@ -895,6 +908,19 @@ def build_plot_descriptor(
     elif geom == 'de_heatmap':
         if de_term:
             bio_tokens.append(_filename_sanitise(de_term))
+    elif geom == 'de_quadrant':
+        # Filename pattern:
+        #   <db_x_safe>_quadrant_<term_x>_<contrast_x>_vs_<term_y>_<contrast_y>
+        # The "vs" anchor is dropped if the second pair is unknown (we
+        # still emit a usable filename without exploding into ?_? noise).
+        a_bits = [t for t in (de_term, de_contrast) if t]
+        b_bits = [t for t in (de_term_y, de_contrast_y) if t]
+        a_part = '_'.join(_filename_sanitise(t) for t in a_bits)
+        b_part = '_'.join(_filename_sanitise(t) for t in b_bits)
+        if a_part and b_part:
+            bio_tokens.append(f'{a_part}_vs_{b_part}')
+        elif a_part:
+            bio_tokens.append(a_part)
 
     if subset_filename_token:
         bio_tokens.append(subset_filename_token)
@@ -3247,6 +3273,290 @@ def plot_kde2d(
     if marginals:
         attach_marginals(fig, ax, xs, ys, color='#666666')
 
+    fig.tight_layout()
+
+    return _render_figure(fig, dpi, output_format, caption, source_url)
+
+
+# ── DE quadrant: two-experiment effect-vs-effect scatter ─────────────────────
+
+
+_QUADRANT_AXIS_LABELS = {
+    'log2fc':         'log₂ fold change',
+    'signed_log10p':  '−log₁₀(padj) · sign(log2fc)',
+    'zeff':           'z-effect',
+}
+
+
+def plot_de_quadrant(
+    df: pd.DataFrame,
+    *,
+    padj_threshold: float = 0.05,
+    axis_x: str = 'log2fc',
+    axis_y: str = 'log2fc',
+    label_x: Optional[str] = None,
+    label_y: Optional[str] = None,
+    log2fc_clip: Optional[float] = None,
+    n_label: int = 8,
+    mode: str = 'scatter',
+    width: float = 8,
+    height: float = 7,
+    dpi: int = 150,
+    output_format: str = 'png',
+    palette_cat: str = _DEFAULT_CATEGORICAL,
+    title_extra: Optional[str] = None,
+    caption: Optional[str] = None,
+    source_url: Optional[str] = None,
+    font_family: Optional[str] = None,
+    font_size: Optional[float] = None,
+) -> bytes:
+    """Quadrant plot — one gene per point at (stat_x, stat_y).
+
+    Compares the same gene's DE statistic from two different
+    contrasts (or two different datasets). Quadrants encode
+    concordance vs discordance; colour encodes the 4-way significance
+    category (neither / X-only / Y-only / both, gated by
+    ``padj_threshold`` on each side independently).
+
+    Args:
+        df: DataFrame with ``gene_name``, ``stat_x``, ``stat_y``,
+            ``padj_x``, ``padj_y``. The two stats are already computed
+            in the caller (one of log2fc, signed_log10p, zeff per
+            side). Rows with a NaN stat on either side are dropped
+            here.
+        padj_threshold: Significance cutoff applied independently to
+            ``padj_x`` and ``padj_y``.
+        axis_x / axis_y: Stat name on each axis (one of ``log2fc``,
+            ``signed_log10p``, ``zeff``) — drives axis labelling only.
+        label_x / label_y: Optional human axis labels overriding the
+            stat-name default (e.g. ``"log2fc Sex_donor / F"``).
+        log2fc_clip: Optional symmetric clamp applied to BOTH axes.
+            Points beyond the clamp are pinned to the boundary so
+            outliers don't drag the visible range; significance and
+            label selection still use the raw values.
+        n_label: Top-N concordant + top-N discordant genes to label
+            (by ``|stat_x * stat_y|``). 0 disables labelling.
+        mode: ``scatter`` (default) or ``hex`` (hexbin density —
+            useful for very high gene counts).
+
+    Colour mapping (4-way, ``palette_cat='tab10'`` default):
+
+        neither sig → light grey (#bbbbbb)
+        X-only sig  → tab10 index 0 (blue)
+        Y-only sig  → tab10 index 1 (orange)
+        both sig    → tab10 index 3 (red)
+
+    Reference overlays:
+
+        * dashed line ``y = x`` (concordance reference)
+        * solid light crosshairs at ``x = 0`` and ``y = 0``
+
+    Bottom-right corner: Pearson r + Spearman ρ over the plotted
+    (non-NaN, post-clip) gene set.
+    """
+    _setup_style(font_family, font_size)
+    fig, ax = plt.subplots(figsize=(width, height))
+
+    if mode not in ('scatter', 'hex'):
+        raise ValueError(f"mode must be 'scatter' | 'hex', got {mode!r}")
+
+    plot_df = df.copy()
+    plot_df = plot_df.dropna(subset=['stat_x', 'stat_y'])
+    n_plot = len(plot_df)
+    if n_plot == 0:
+        ax.text(0.5, 0.5,
+                'no genes with non-NaN stats on both sides',
+                transform=ax.transAxes, ha='center', va='center', color='#888')
+        ax.set_xlabel(label_x or _QUADRANT_AXIS_LABELS.get(axis_x, axis_x))
+        ax.set_ylabel(label_y or _QUADRANT_AXIS_LABELS.get(axis_y, axis_y))
+        return _render_figure(fig, dpi, output_format, caption, source_url)
+
+    # Significance categories — raw padj values; never clipped.
+    pad_x = plot_df['padj_x'].fillna(1.0)
+    pad_y = plot_df['padj_y'].fillna(1.0)
+    sig_x = pad_x <= padj_threshold
+    sig_y = pad_y <= padj_threshold
+    n_both    = int((sig_x & sig_y).sum())
+    n_x_only  = int((sig_x & ~sig_y).sum())
+    n_y_only  = int((~sig_x & sig_y).sum())
+    n_neither = int((~sig_x & ~sig_y).sum())
+
+    # Visual clip — applied to a working copy of the stats, NOT to the
+    # values used for significance or for the label-rank score. This
+    # mirrors plot_volcano / plot_ma's clip semantics.
+    sx_plot = plot_df['stat_x'].copy()
+    sy_plot = plot_df['stat_y'].copy()
+    if log2fc_clip is not None and log2fc_clip > 0:
+        sx_plot = sx_plot.clip(-log2fc_clip, +log2fc_clip)
+        sy_plot = sy_plot.clip(-log2fc_clip, +log2fc_clip)
+
+    # Reference lines — drawn first so points overlay them. Light style
+    # so they stay non-distracting in busy scatters.
+    lim_lo = float(min(sx_plot.min(), sy_plot.min()))
+    lim_hi = float(max(sx_plot.max(), sy_plot.max()))
+    if lim_lo == lim_hi:
+        # Degenerate single-value case — give a 1-unit window.
+        lim_lo -= 0.5
+        lim_hi += 0.5
+    pad = max(0.05 * (lim_hi - lim_lo), 1e-6)
+    lim_lo -= pad
+    lim_hi += pad
+    ax.set_xlim(lim_lo, lim_hi)
+    ax.set_ylim(lim_lo, lim_hi)
+    # y = x concordance reference
+    ax.plot([lim_lo, lim_hi], [lim_lo, lim_hi],
+            linestyle='--', color='#888', linewidth=0.7, alpha=0.8,
+            label='y = x')
+    # axis-zero crosshairs (solid, light)
+    ax.axhline(0, color='#444', linewidth=0.6, alpha=0.7)
+    ax.axvline(0, color='#444', linewidth=0.6, alpha=0.7)
+
+    # Colour palette — fixed semantic mapping that does NOT depend on
+    # the qualitative palette family beyond "take 3 distinct colours
+    # from the chosen tab10/tab20/Set1/...". Neither-sig stays grey for
+    # consistency with the volcano / MA convention.
+    cmap_obj = matplotlib.cm.get_cmap(
+        palette_cat if palette_cat in _QUALITATIVE_PALETTES else _DEFAULT_CATEGORICAL
+    )
+    colors = {
+        'neither': '#bbbbbb',
+        'X only':  cmap_obj(0.0),
+        'Y only':  cmap_obj(0.1),
+        'both':    cmap_obj(0.3),
+    }
+
+    if mode == 'scatter':
+        # Plot in order so the most-interesting (both-sig) lands on top.
+        category = np.where(
+            sig_x & sig_y, 'both',
+            np.where(sig_x & ~sig_y, 'X only',
+                     np.where(~sig_x & sig_y, 'Y only', 'neither')),
+        )
+        for cat in ('neither', 'X only', 'Y only', 'both'):
+            mask = category == cat
+            n = int(mask.sum())
+            if n == 0:
+                continue
+            ax.plot(
+                sx_plot[mask], sy_plot[mask],
+                marker='.', linestyle='none',
+                markersize=2.5 if cat == 'neither' else 4.5,
+                alpha=0.4 if cat == 'neither' else 0.9,
+                color=colors[cat],
+                label=f'{cat} (n={n})',
+                rasterized=True,
+            )
+    else:  # mode == 'hex'
+        # Hexbin density of all post-clip points; significance categories
+        # are summarised in the legend by counts only.
+        hb = ax.hexbin(
+            sx_plot.values, sy_plot.values,
+            gridsize=50, cmap='inferno_r', mincnt=1,
+            rasterized=True,
+        )
+        cbar = plt.colorbar(hb, ax=ax, shrink=0.7)
+        cbar.set_label('genes per hex', fontsize=9)
+        # Synthesise the legend handles for the colour categories so
+        # the user can still read the 4-way breakdown.
+        from matplotlib.lines import Line2D
+        handles = [
+            Line2D([0], [0], marker='o', linestyle='none',
+                   markerfacecolor=colors[cat], markeredgecolor='none',
+                   markersize=6, label=f'{cat} (n={n})')
+            for cat, n in (('both', n_both), ('X only', n_x_only),
+                           ('Y only', n_y_only), ('neither', n_neither))
+        ]
+        ax.legend(handles=handles, loc='upper left', fontsize=7,
+                  title='significance', frameon=True)
+
+    # Top-N concordant + top-N discordant by |stat_x * stat_y|. Uses
+    # RAW (unclipped) stats for the score so the strongest genes still
+    # win even if they were visually pinned.
+    if n_label > 0:
+        score = (plot_df['stat_x'] * plot_df['stat_y'])
+        sign_match = np.sign(plot_df['stat_x']) == np.sign(plot_df['stat_y'])
+        # Drop ties at zero (sign 0) from both buckets — they're
+        # neither concordant nor discordant in a useful sense.
+        nonzero = (plot_df['stat_x'] != 0) & (plot_df['stat_y'] != 0)
+        conc_mask = sign_match & nonzero
+        disc_mask = (~sign_match) & nonzero
+        conc = plot_df[conc_mask].assign(_score=score[conc_mask].abs())
+        disc = plot_df[disc_mask].assign(_score=score[disc_mask].abs())
+        top_conc = conc.nlargest(n_label, '_score') if len(conc) else conc
+        top_disc = disc.nlargest(n_label, '_score') if len(disc) else disc
+
+        # Use the CLIPPED coords so the label sits at the point's
+        # rendered position (otherwise an outlier label can float
+        # outside the axis range).
+        sx_dict = sx_plot.to_dict()
+        sy_dict = sy_plot.to_dict()
+        texts = []
+        for idx, row in top_conc.iterrows():
+            texts.append(ax.text(sx_dict[idx], sy_dict[idx],
+                                 str(row['gene_name']),
+                                 fontsize=7, alpha=0.9,
+                                 ha='center', va='center',
+                                 color='#222'))
+        for idx, row in top_disc.iterrows():
+            texts.append(ax.text(sx_dict[idx], sy_dict[idx],
+                                 str(row['gene_name']),
+                                 fontsize=7, alpha=0.9,
+                                 ha='center', va='center',
+                                 color='#222'))
+        if len(texts) > 1:
+            try:
+                from adjustText import adjust_text  # type: ignore
+                adjust_text(
+                    texts, ax=ax,
+                    arrowprops=dict(arrowstyle='-', color='#888',
+                                    lw=0.4, alpha=0.7),
+                    expand_points=(1.8, 2.2),
+                    expand_text=(1.4, 1.6),
+                    force_text=(0.8, 1.2),
+                    force_points=(0.4, 0.6),
+                    lim=1500,
+                )
+            except ImportError:
+                pass
+
+    # Stat annotations — bottom-right corner so they don't collide
+    # with the upper-left legend.
+    try:
+        from scipy.stats import pearsonr, spearmanr  # type: ignore
+        # Use raw stats (post-NaN-drop but pre-clip) — clipping
+        # changes the rank order of saturated outliers.
+        sx_raw = plot_df['stat_x'].values
+        sy_raw = plot_df['stat_y'].values
+        if n_plot >= 3:
+            r_p, _ = pearsonr(sx_raw, sy_raw)
+            r_s, _ = spearmanr(sx_raw, sy_raw)
+            stat_text = (
+                f'Pearson r = {r_p:.3f}\n'
+                f'Spearman ρ = {r_s:.3f}\n'
+                f'n = {n_plot:,}'
+            )
+        else:
+            stat_text = f'n = {n_plot:,} (too few for r/ρ)'
+    except ImportError:
+        stat_text = f'n = {n_plot:,}'
+    ax.text(0.98, 0.02, stat_text, transform=ax.transAxes,
+            ha='right', va='bottom', fontsize=8,
+            bbox=dict(boxstyle='round,pad=0.35', facecolor='white',
+                      edgecolor='#aaa', alpha=0.85))
+
+    ax.set_xlabel(label_x or _QUADRANT_AXIS_LABELS.get(axis_x, axis_x))
+    ax.set_ylabel(label_y or _QUADRANT_AXIS_LABELS.get(axis_y, axis_y))
+    title_bits = [
+        'DE quadrant',
+        f'n={n_plot:,} (both: {n_both:,}, X-only: {n_x_only:,}, '
+        f'Y-only: {n_y_only:,}, n.s.: {n_neither:,})',
+    ]
+    if log2fc_clip is not None and log2fc_clip > 0:
+        title_bits.append(f'clipped |stat|≤{log2fc_clip:g}')
+    ax.set_title(_compose_title(title_bits, extra=title_extra))
+    sns.despine(ax=ax)
+    if mode == 'scatter':
+        _legend_outside(ax, title='significance')
     fig.tight_layout()
 
     return _render_figure(fig, dpi, output_format, caption, source_url)

@@ -440,6 +440,130 @@ def test_de_heatmap_sort_desc():
 # ── new cmap registration ─────────────────────────────────────────────
 
 
+# ── /plot/de_quadrant: 2.12.0 ─────────────────────────────────────────
+
+
+_S25_V6A_STUDY = 'DE_interpretable_glmm_vs_grandmean'
+
+
+def test_de_quadrant_within_dataset():
+    """Two terms of the same study on S25/V6A — Sex_donor/F vs sex_mouse/m.
+
+    This is the canonical example: human donor-sex contrast (signed log2fc)
+    vs the mouse-sex covariate term. Most points cluster near y=0 because
+    mouse-sex has weak signal in the human contrast; Y-chrom genes
+    spread on the X-axis.
+    """
+    r = _get(f"/databases/{V6A}/plot/de_quadrant",
+             study=_S25_V6A_STUDY, term='Sex_donor', contrast='F',
+             term_y='sex_mouse', contrast_y='m', cache='miss')
+    assert r.status_code == 200, r.text[:300]
+    assert r.headers.get('content-type', '').startswith('image/')
+    caption = r.headers.get('x-plot-caption', '')
+    # Caption must report all four gene-set counts (n_x, n_y, union, intersection).
+    assert 'A side =' in caption and 'B side =' in caption, caption
+    assert 'union =' in caption and 'intersection =' in caption, caption
+    assert 'Pearson r' in caption, caption
+    assert 'Spearman' in caption, caption
+    # 4-way category counts
+    assert 'both sig =' in caption, caption
+    assert 'X-only =' in caption and 'Y-only =' in caption, caption
+
+
+def test_de_quadrant_intra_two_contrasts():
+    """Two contrasts of the same term on the same dataset (intra-dataset)."""
+    r = _get(f"/databases/{V6A}/plot/de_quadrant",
+             study=_S25_V6A_STUDY,
+             term='patient_geno_short_relevel', contrast='Aipt_33',
+             term_y='patient_geno_short_relevel', contrast_y='BR04',
+             cache='miss')
+    assert r.status_code == 200, r.text[:300]
+    assert r.headers.get('content-type', '').startswith('image/')
+
+
+def test_de_quadrant_cross_organism_rejected():
+    """S25/V6A (human) vs SF9/SAN (mouse) → 400 with descriptive detail."""
+    r = _get(f"/databases/{V6A}/plot/de_quadrant",
+             study=_S25_V6A_STUDY, term='Sex_donor', contrast='F',
+             db_y=SAN, study_y='sala_microglia_genoKvsW',
+             term_y='genotype', contrast_y='K_vs_W', cache='miss')
+    assert r.status_code == 400, r.text[:300]
+    detail = r.json().get('detail', '').lower()
+    assert 'cross-organism' in detail, detail
+    assert 'human' in detail and 'mouse' in detail, detail
+
+
+def test_de_quadrant_mixed_axes():
+    """axis_x=log2fc + axis_y=signed_log10p — mixed-stat case."""
+    r = _get(f"/databases/{V6A}/plot/de_quadrant",
+             study=_S25_V6A_STUDY, term='Sex_donor', contrast='F',
+             term_y='sex_mouse', contrast_y='m',
+             axis_x='log2fc', axis_y='signed_log10p', cache='miss')
+    assert r.status_code == 200, r.text[:300]
+    caption = r.headers.get('x-plot-caption', '')
+    assert 'X-axis: log2fc' in caption, caption
+    assert 'Y-axis: signed_log10p' in caption, caption
+
+
+def test_de_quadrant_hex_mode():
+    r = _get(f"/databases/{V6A}/plot/de_quadrant",
+             study=_S25_V6A_STUDY, term='Sex_donor', contrast='F',
+             term_y='sex_mouse', contrast_y='m',
+             mode='hex', cache='miss')
+    assert r.status_code == 200, r.text[:300]
+    assert r.headers.get('content-type', '').startswith('image/')
+
+
+def test_de_quadrant_n_label_zero():
+    r = _get(f"/databases/{V6A}/plot/de_quadrant",
+             study=_S25_V6A_STUDY, term='Sex_donor', contrast='F',
+             term_y='sex_mouse', contrast_y='m',
+             n_label=0, cache='miss')
+    assert r.status_code == 200, r.text[:300]
+
+
+def test_de_quadrant_invalid_axis_422():
+    """axis_x=banana → 422 (regex validation)."""
+    r = _get(f"/databases/{V6A}/plot/de_quadrant",
+             study=_S25_V6A_STUDY, term='Sex_donor', contrast='F',
+             term_y='sex_mouse', contrast_y='m',
+             axis_x='banana', cache='miss')
+    assert r.status_code == 422
+
+
+def test_de_quadrant_invalid_mode_422():
+    r = _get(f"/databases/{V6A}/plot/de_quadrant",
+             study=_S25_V6A_STUDY, term='Sex_donor', contrast='F',
+             term_y='sex_mouse', contrast_y='m',
+             mode='cube', cache='miss')
+    assert r.status_code == 422
+
+
+def test_de_quadrant_csv_export():
+    """format=csv on de_quadrant returns the post-join dataframe."""
+    r = _get(f"/databases/{V6A}/plot/de_quadrant",
+             study=_S25_V6A_STUDY, term='Sex_donor', contrast='F',
+             term_y='sex_mouse', contrast_y='m',
+             format='csv', cache='miss')
+    assert r.status_code == 200, r.text[:300]
+    assert r.headers.get('content-type', '').startswith('text/csv')
+    first_line = r.text.split('\n', 1)[0]
+    assert 'gene_name' in first_line
+    assert 'stat_x' in first_line and 'stat_y' in first_line
+    assert 'padj_x' in first_line and 'padj_y' in first_line
+
+
+def test_de_quadrant_registered_in_version():
+    """`de_quadrant` must appear in /version.plot_geoms."""
+    r = requests.get(f"{_BASE_URL}/version", auth=(_USER, _PW),
+                     verify=False, timeout=10)
+    assert r.status_code == 200
+    assert 'de_quadrant' in r.json().get('plot_geoms', [])
+
+
+# ── new cmap registration ─────────────────────────────────────────────
+
+
 def test_custom_cmaps_registered():
     """The 14 white→colour cmaps registered at module import are all
     addressable from the live api."""
