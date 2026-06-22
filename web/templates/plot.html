@@ -1103,23 +1103,38 @@
   });
 
   // ── open this exact plot as a one-off JupyterLite notebook
-  //   ant-serve's /plot/{geom}/notebook returns an .ipynb (data pull + plot +
-  //   caption + browser-only-persistence disclaimer). JupyterLite's ?fromURL=
-  //   fetches it (same-origin → the Authelia cookie carries) and opens it in a
-  //   new tab. Contract agreed with anthive4 (API 2.8.0).
+  //   Uses ant-serve's base64-encoded-params endpoint (API 2.8.0+):
+  //     GET /api/notebook/{b64params}/plot.ipynb
+  //   Returns an .ipynb (data pull + plot + caption + disclaimer).
+  //   The reason for base64: JupyterLite's jupyterlab-open-url-parameter
+  //   extension uses the URL basename as the saved filename. With a normal
+  //   query-string URL, the saved file ends up named with the query string
+  //   embedded ('plot.ipynb?study=…&term=…') and JupyterLab can't open it.
+  //   The base64-path-encoded URL has zero query string → clean basename
+  //   'plot.ipynb' → opens correctly.
   document.getElementById('open-notebook').addEventListener('click', e => {
     e.preventDefault();
     if (!canRender()) {
       status.innerHTML = `<span class="err">${renderHint()} before opening a notebook</span>`;
       return;
     }
-    // buildUrl() → …/databases/{db}/plot/{geom}?params ; insert /notebook before
-    // the query, keep it same-origin relative so JupyterLite fetches it
-    // authenticated through the user's session.
+    // Parse buildUrl() → /api/databases/{db_id}/plot/{geom}?<params>
     const u = new URL(buildUrl(), window.location.origin);
-    u.pathname = u.pathname + '/notebook';
-    const labUrl = '/jupyter/lab/index.html?fromURL=' +
-                   encodeURIComponent(u.pathname + u.search);
+    const m = u.pathname.match(/^\/api\/databases\/(.+)\/plot\/([^\/]+)$/);
+    if (!m) {
+      status.innerHTML = `<span class="err">unexpected plot URL: ${u.pathname}</span>`;
+      return;
+    }
+    const db_id = decodeURIComponent(m[1]);
+    const geom = m[2];
+    // Collect ALL plot params + the path-derived db_id + geom into one dict.
+    const params = {db_id, geom};
+    for (const [k, v] of u.searchParams) params[k] = v;
+    // base64-url-safe encode (RFC 4648 §5: '+' → '-', '/' → '_', strip '=' pad).
+    const b64 = btoa(JSON.stringify(params))
+                  .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const notebookUrl = '/api/notebook/' + b64 + '/plot.ipynb';
+    const labUrl = '/jupyter/lab/index.html?fromURL=' + encodeURIComponent(notebookUrl);
     window.open(labUrl, '_blank', 'noopener');
     const orig = e.target.textContent;
     e.target.textContent = '📓 opening…';
