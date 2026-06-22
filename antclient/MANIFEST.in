@@ -1,6 +1,0 @@
-include README.md
-include LICENSE
-include CHANGELOG.md
-include pyproject.toml
-include antclient.py
-include anthelper.py

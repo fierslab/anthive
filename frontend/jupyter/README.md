@@ -1,39 +1,39 @@
-# Webapp Source Content
+# frontend/jupyter/ — webapp source content
 
-This directory contains source content for webapp components that get built into `../webapp/`.
+This directory contains source content for webapp components that get
+built into `../webapp/`.
 
 ## Structure
 
-- **`index.html`** - Main webapp landing page
-  - Copied to `../webapp/index.html` during build
-  - Entry point for the Anthive webapp
+- **`index.html`** — Main webapp landing page.
+  Copied to `../webapp/index.html` during `make build-webapp`.
 
-- **`jupyter/`** - JupyterLite notebooks and content
-  - Source for the browser-based Python notebook environment
-  - Built to `../webapp/jupyter/` by `make build-jupyter`
-  - Contains: Getting_Started.ipynb, examples, and helpers
+- **`jupyter/`** — JupyterLite notebooks and content.
+  Source for the browser-based Python notebook environment. Built to
+  `../webapp/jupyter/` by `make build-jupyter`. Contains:
+  - `Getting_Started.ipynb`, `Empty.ipynb`, `Emily.ipynb`
+  - `examples/` — themed notebooks
+  - `vark/` — vendored copy of the Python client
+    ([`codeberg.org/mfiers/pyvark`](https://codeberg.org/mfiers/pyvark))
 
-- **`stlite/`** - Streamlit Lite source
-  - Source for browser-based Streamlit apps
-  - Built to `../webapp/stlite/` by `make build-stlite`
-  - Contains: streamlit_app.py, components.py, pages/, etc.
-
-## Build Process
+## Build process
 
 ```bash
 # Build JupyterLite from jupyter/ content
 make build-jupyter
 
-# Build Streamlit Lite from stlite/ content
-make build-stlite
-
-# Build complete webapp (JupyterLite + Streamlit Lite + landing page)
+# Build the complete webapp (JupyterLite + landing page)
 make build-webapp
 ```
 
 ## Notes
 
-- `antclient.py` is auto-copied from `../antclient/` to both `jupyter/` and `stlite/` during build
-- Don't edit the copied `antclient.py` files - edit the source in `../antclient/`
-- Both `jupyter/antclient.py` and `stlite/antclient.py` are gitignored
-- Build output goes to `../webapp/` (gitignored)
+- The `vark/` package is **vendored** under `jupyter/vark/`. Pyodide
+  treats it as a top-level package — `from vark import AnthiveClient`
+  works without `micropip.install('pyvark')`. To bump the client,
+  copy the latest `vark/*.py` files from a checkout of
+  [`pyvark`](https://codeberg.org/mfiers/pyvark) over this directory.
+- Build output goes to `../webapp/` (gitignored).
+- The Streamlit dashboard (`frontend/streamlit/`) was removed
+  2026-06-22 — `/streamlit` on the reverse proxy continues to return
+  410 for anyone with a bookmark.

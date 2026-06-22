@@ -1,4 +1,4 @@
-.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-streamlit serve-mcp serve-all serve-debug serve-stop caddy-passwd caddy-passwd-clear dev-jupyter sync-push sync-pull sync-pull-duckdb sync-pull-de sync-pull-all sync-status build-stale sync-update serve-status serve-restart h5adstore-push push-all
+.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-mcp serve-all serve-debug serve-stop caddy-passwd caddy-passwd-clear dev-jupyter sync-push sync-pull sync-pull-duckdb sync-pull-de sync-pull-all sync-status build-stale sync-update serve-status serve-restart h5adstore-push push-all
 
 help:
 	@echo "Anthive4 Development Commands"
@@ -69,7 +69,13 @@ clean-webapp:
 	@rm -rf webapp
 	@echo "✓ Clean complete!"
 
-build-jupyter: antclient/antclient.py
+# build-jupyter packages the JupyterLite notebooks.
+# The `vark/` package is vendored under frontend/jupyter/jupyter/ — that's
+# the source of truth for what the notebooks see (Pyodide treats it as a
+# top-level package, no PyPI install needed). The canonical pyvark repo
+# lives at codeberg.org/mfiers/pyvark — re-vendor by copying the new
+# vark/*.py over the vendored copy when bumping the client version.
+build-jupyter:
 	@echo "Building JupyterLite to webapp/jupyter..."
 	@echo ""
 	@# Ensure source dir is writable (may be read-only from a previous run)
@@ -77,23 +83,10 @@ build-jupyter: antclient/antclient.py
 	@# Clear output directory so no stale files survive the build
 	@rm -rf webapp/jupyter
 	@mkdir -p webapp
-	@# Copy antclient.py and anthelper.py into jupyter content before build
-	@# echo "Copying antclient.py and anthelper.py to frontend/jupyter/jupyter..."
-	@# cp antclient/antclient.py frontend/jupyter/jupyter/antclient.py
-	@# cp antclient/anthelper.py frontend/jupyter/jupyter/anthelper.py
 	@# Make source files read-only so JupyterLite cannot modify them
 	@chmod -R a-w frontend/jupyter/jupyter
 	@chmod -R a+rX frontend/jupyter/jupyter
 	@DOIT_DB=tmp/.jupyterlite.doit.db \
-	# uvx \
-	# 	--from jupyterlite-core \
-	# 	--with jupyterlite-pyodide-kernel \
-	# 	--with jupyter-server \
-	# 	--with jupyterlab-widgets \
-	# 	jupyter-lite build \
-	# 		--force \
-	# 		--contents frontend/jupyter/jupyter \
-	# 		--output-dir webapp/jupyter
 	uvx --from jupyterlite-core \
 		--with jupyterlite-pyodide-kernel \
 		--with jupyterlab-widgets \
@@ -101,13 +94,13 @@ build-jupyter: antclient/antclient.py
 		--with jupyter-server \
 		jupyter-lite build --force \
 			--contents frontend/jupyter/jupyter \
-			--output-dir webapp/jupyter 
+			--output-dir webapp/jupyter
 	@# Restore read+write so files can be edited again
 	@chmod -R u+rw frontend/jupyter/jupyter
 	@echo "✓ JupyterLite build complete!"
 	@echo ""
 	@echo "Location: webapp/jupyter/"
-	@echo "Client: webapp/jupyter/files/antclient.py"
+	@echo "Client:   webapp/jupyter/files/vark/  (vendored from codeberg.org/mfiers/pyvark)"
 
 build-webapp: build-jupyter frontend/jupyter/index.html
 	@echo ""
@@ -235,7 +228,7 @@ caddy-passwd-clear:
 	@echo "  Restart Caddy: make serve-restart SVC=caddy"
 
 # SIGTERM the running supervisor — it cascades to every child (api, browse,
-# mcp, streamlit, caddy).  Re-run `make serve-debug` or `make serve-all`
+# mcp, caddy).  Re-run `make serve-debug` or `make serve-all`
 # afterwards to bring everything back up.
 serve-stop:
 	@PID=$$(./bin/ops/ant-supervisor status 2>/dev/null | awk '/^supervisor pid:/ {print $$3; exit}'); \
@@ -246,29 +239,10 @@ serve-stop:
 		echo "no supervisor running"; \
 	fi
 
-# NOTE: the Streamlit dashboard has been removed from the production stack.
-# ant-browse owns the interactive plot UI now (per-dataset, autocompleting,
-# URL-shareable).  This target is kept for one-off ad-hoc runs against the
-# legacy source under frontend/streamlit/.  It is NOT proxied by the
-# reverse proxy any more (/streamlit returns 410) — hit :8082 directly if
-# you really want it.
-serve-streamlit:
-	@echo "WARNING: Streamlit has been removed from the production stack."
-	@echo "         ant-browse covers the same plots; only run this for ad-hoc"
-	@echo "         work against the legacy code in frontend/streamlit/."
-	@echo "         /streamlit on the reverse proxy now returns 410."
-	@echo ""
-	@echo "Starting Anthive Streamlit server on http://localhost:8082"
-	@echo ""
-	@cd frontend/streamlit && uvx \
-		--with streamlit \
-		--with matplotlib \
-		--with seaborn \
-		--with scipy \
-		--with numpy \
-		--with pandas \
-		--with requests \
-		streamlit run streamlit_app.py
+# NOTE: the Streamlit dashboard was removed 2026-06-22 along with
+# frontend/streamlit/. ant-browse owns the interactive plot UI now
+# (per-dataset, autocompleting, URL-shareable). /streamlit on the
+# reverse proxy continues to return 410 for anyone with a bookmark.
 
 dev-jupyter:
 	@./bin/ops/dev-jupyter

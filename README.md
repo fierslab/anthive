@@ -366,7 +366,7 @@ Comprehensive documentation in `./doc/`:
 ## Future Features
 
 - **REST API**: Fast, cached HTTP access to data
-- **antclient**: Python/R client library for querying
+- **pyvark**: Python client library for querying (`codeberg.org/mfiers/pyvark`)
 - **Incremental updates**: Re-convert only changed portions
 - **Multi-file queries**: Query across multiple datasets
 

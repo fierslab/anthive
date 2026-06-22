@@ -13,8 +13,11 @@ modules via a `sys.path.insert(0, lib_dir)` shim (NOT a pip install). So:
 - There is no version boundary between `lib/` and its consumers — treat it as
   one tightly-coupled unit. This is why the codebase is one repo, not many.
 
-`antclient/` is the exception: a standalone pip-installable REST client with
-**no** `lib/` dependency. It's the only piece structured for extraction today.
+The Python REST client lives in its own repo at
+[`codeberg.org/mfiers/pyvark`](https://codeberg.org/mfiers/pyvark)
+(importable as `from vark import AnthiveClient`). It used to ship as
+`anthive4/antclient/` — that was spun off 2026-06-22 in the same
+commit that removed `frontend/streamlit/`.
 
 ## Data flow
 
@@ -48,9 +51,8 @@ bin/
 web/         ant-browse + browser.py + templates/  web/CLAUDE.md      ← top-level web UI
 lib/         shared core (anthive_db, plotting, …)  lib/CLAUDE.md
 frontend/
-  streamlit/ Streamlit app (deprecated, opt-in)    frontend/streamlit/CLAUDE.md
-  jupyter/   JupyterLite source (Pyodide)          frontend/jupyter/CLAUDE.md
-antclient/   standalone REST client package        antclient/CLAUDE.md
+  jupyter/   JupyterLite source (Pyodide), vendors codeberg.org/mfiers/pyvark
+             as `vark/`                              frontend/jupyter/CLAUDE.md
 config/      Caddyfile, nginx.conf, caddy-auth.example
 ```
 

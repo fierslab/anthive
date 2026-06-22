@@ -11,9 +11,8 @@ nginx_access.log
 nginx_error.log
 nginx.pid
 
-# Webapp source - copied from antclient/ (source of truth is antclient/)
-webapp-src/jupyter/antclient.py
-webapp-src/jupyter/anthelper.py
+# (former antclient.py / anthelper.py vendored-copy gitignore lines
+# dropped 2026-06-22: pyvark `vark/` is now tracked in frontend/jupyter/.)
 
 
 # Python
@@ -85,6 +84,9 @@ envs/go/
 # Original logo backup (kept locally as a fallback; not for git)
 config/authelia/assets/logo.original.png
 
-# vark — standalone repo (codeberg.org/mfiers/vark), nested here but never tracked by anthive4
-vark/
+# vark — Go CLI standalone repo (codeberg.org/mfiers/vark), nested at
+# repo root but never tracked by anthive4. Anchored with leading slash
+# so the vendored Python `vark/` package under frontend/jupyter/jupyter/
+# (= codeberg.org/mfiers/pyvark) is NOT excluded.
+/vark/
 .vark/

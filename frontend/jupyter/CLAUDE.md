@@ -5,23 +5,31 @@ Sources for the JupyterLite static deployment served at `/jupyter/`.
 (the JupyterLite build artifact, gitignored).
 
 Interactive plotting (gene / UMAP / category / numerical) is **not**
-in this directory — it now lives in two other places:
+in this directory — it now lives in:
+
 - The **in-app plot UI** in `web/templates/plot.html`
   (reached via `/browse/<group>/<file>/plot/<geom>`).
-- The **Streamlit dashboards** in `frontend/streamlit/`, reached at
-  `/streamlit/`.
 
-The old marimo prototype was removed 2026-06.
+The old marimo prototype was removed 2026-06; the legacy
+`frontend/streamlit/` Streamlit dashboards were removed 2026-06-22.
 
 ## Layout
+
 - `jupyter/` — example notebooks (`Getting_Started.ipynb`,
-  `examples/01_umap.ipynb`, …) plus a vendored copy of `antclient.py`
-  pinned to the API contract these notebooks expect.
+  `examples/01_umap.ipynb`, …)
+- `jupyter/vark/` — **vendored** copy of the Python REST client
+  ([`codeberg.org/mfiers/pyvark`](https://codeberg.org/mfiers/pyvark)).
+  Pyodide picks it up as a top-level package — `from vark import
+  AnthiveClient` works without a `micropip.install('pyvark')` step.
+  Bump the client by copying the latest `vark/*.py` from a pyvark
+  checkout over this directory.
 
 ## Everything runs in the browser via Pyodide
 
 There is no Python process on the server for these notebooks. Deps install
-client-side with `micropip`; API calls go out over the browser fetch path.
+client-side with `micropip` (only scientific Python stack — pandas,
+matplotlib, seaborn — since `vark` is vendored locally); API calls go
+out over the browser fetch path.
 
 - **Streaming fetch must be ready before API calls.** urllib3's emscripten
   backend falls back to XHR (truncates responses ~56 KB → "Unterminated

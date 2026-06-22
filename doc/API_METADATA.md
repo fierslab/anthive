@@ -226,14 +226,15 @@ curl -s http://localhost:8080/databases/Sierksma2025/dataset/info | \
   jq '.obs.categorical[] | select(. == "cell_type")'
 ```
 
-### Python with antclient
+### Python with pyvark
 
-The `antclient` will automatically use this enhanced metadata:
+The `vark` Python client (`codeberg.org/mfiers/pyvark`) will
+automatically use this enhanced metadata:
 
 ```python
-from antclient import AntClient
+from vark import AnthiveClient
 
-client = AntClient()
+client = AnthiveClient()
 
 # Get database info
 info = client.get_info('Sierksma2025/dataset')
