@@ -81,7 +81,7 @@ nothing DE shows):
   "Differential expression" panel listing studies, and a `differential
   expression` category in the visualize dropdown — each deep-links to the
   `de_browser` page or the DE plot forms.
-- **plot.html**: four DE geoms — `volcano` / `ma` (cascading
+- **plot.html**: five DE geoms — `volcano` / `ma` (cascading
   study→term→contrast pickers, loaded client-side from `/de/…`), `forest`
   (gene + optional narrowing), and `de_heatmap` (REST 2.7: the DE result
   matrix — contrasts × genes/modules filled with a chosen effect size;
@@ -90,7 +90,14 @@ nothing DE shows):
   rows×cols at 2000). All four are in `DE_GEOMS` (so `initDeCascade` runs)
   and `canRender` (de_heatmap needs study+term). The geom-switcher only
   lists them when the dataset has DE. `ma` surfaces the server's "needs
-  base_mean" 400 for GLMM/Wilcoxon studies. Both `volcano` and `ma` have an
+  base_mean" 400 for GLMM/Wilcoxon studies. **`de_quadrant`** (API 2.12)
+  compares two DE contrasts gene-by-gene; it has its OWN `initDeQuadrant` (the
+  shared `initDeCascade` only handles one triple) with db-parameterised
+  `_fillStudies/_fillTermsDb/_fillContrastsDb` — **two independent cascades**
+  (X = path dataset; Y = `db_y`||path), the Y study pre-seeded to the X study
+  (no ongoing X→Y coupling). Per-axis stat + `mode` are `<select>`s (NOT radios
+  — `buildUrl`/`fieldVal` mishandle radio groups). It is NOT in `DE_GEOMS`
+  (own init branch). Both `volcano` and `ma` have an
   **optional axis-clamp** fieldset (REST 2.7.2): `log2fc_clip` +
   `neglog10p_clip` (volcano), `log2fc_clip` + `logmean_clip` (ma) — blank =
   no clamp (`buildUrl` omits empties); a 0/out-of-range value gets the

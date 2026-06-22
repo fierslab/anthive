@@ -768,6 +768,18 @@ def test_plot_view_notebook_button(client):
     assert "plot.ipynb" in resp.text
 
 
+def test_plot_view_de_quadrant_form(client):
+    # de_quadrant (API 2.12): two DE cascades (X = path dataset, Y = db_y||path),
+    # per-axis stat selects, optional db_y override, mode/n_label knobs.
+    resp = client.get("/browse/GroupA/ds1/plot/de_quadrant")
+    assert resp.status_code == 200
+    for field in ("study", "term", "contrast", "db_y", "study_y", "term_y",
+                  "contrast_y", "axis_x", "axis_y", "mode", "n_label"):
+        assert f'name="{field}"' in resp.text
+    assert "GLMM demo" in resp.text          # X-side study seeded from /de
+    assert "initDeQuadrant" in resp.text     # dedicated dual-cascade init
+
+
 def test_plot_view_forest_gene_input(client):
     resp = client.get("/browse/GroupA/ds1/plot/forest")
     assert resp.status_code == 200

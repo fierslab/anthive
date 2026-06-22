@@ -605,6 +605,64 @@
       <input type="text" name="sort" id="f-sort_label" autocomplete="off" placeholder="contrast or gene/module">
       <label style="margin-top:4px"><input type="checkbox" name="sort_desc" id="f-sort_desc" value="true"> descending</label>
     </fieldset>
+
+    {% elif geom == 'de_quadrant' %}
+    {# Compare two DE contrasts gene-by-gene. X = a contrast in THIS dataset;
+       Y = another contrast (same dataset by default, or another same-organism
+       dataset). Genes off the diagonal disagree. Two independent cascades; the
+       Y study is pre-seeded to the X study. (API 2.12) #}
+    <fieldset>
+      <legend>X axis — this dataset {{ info('The first DE contrast. Each gene is plotted at (X-statistic, Y-statistic); genes far off the diagonal behave differently between the two contrasts (discordant).') }}</legend>
+      <select name="study" id="f-study">
+        <option value="">— select study —</option>
+        {% for s in plot_meta.de_studies %}
+        <option value="{{ s.study_id }}" data-method="{{ s.method }}">{{ s.name }} · {{ s.method }} ({{ s.n_contrasts }} contrasts)</option>
+        {% endfor %}
+      </select>
+      {% if not plot_meta.de_studies %}<small style="color:#b45309;margin-top:4px">No differential-expression data ingested for this dataset.</small>{% endif %}
+      <label style="margin-top:4px">term</label>
+      <select name="term" id="f-term"><option value="">— select study first —</option></select>
+      <label style="margin-top:4px">contrast</label>
+      <select name="contrast" id="f-contrast"><option value="">— select term first —</option></select>
+      <label style="margin-top:4px">statistic</label>
+      <select name="axis_x" id="f-axis_x">
+        <option value="log2fc">log2 fold-change</option>
+        <option value="signed_log10p">signed −log10(p)</option>
+        <option value="zeff">z-effect</option>
+      </select>
+    </fieldset>
+    <fieldset>
+      <legend>Y axis {{ info('The contrast to compare against. Leave the dataset blank to compare two contrasts within THIS dataset; or pick another dataset of the SAME organism (mismatched organisms are rejected).') }}</legend>
+      <label>compare against dataset</label>
+      <input type="text" name="db_y" id="f-db_y" list="dl-datasets" autocomplete="off" placeholder="this dataset">
+      <label style="margin-top:4px">study</label>
+      <select name="study_y" id="f-study_y"><option value="">— select study —</option></select>
+      <label style="margin-top:4px">term</label>
+      <select name="term_y" id="f-term_y"><option value="">— select study first —</option></select>
+      <label style="margin-top:4px">contrast</label>
+      <select name="contrast_y" id="f-contrast_y"><option value="">— select term first —</option></select>
+      <label style="margin-top:4px">statistic</label>
+      <select name="axis_y" id="f-axis_y">
+        <option value="log2fc">log2 fold-change</option>
+        <option value="signed_log10p">signed −log10(p)</option>
+        <option value="zeff">z-effect</option>
+      </select>
+    </fieldset>
+    <datalist id="dl-datasets"></datalist>
+    <fieldset>
+      <legend>options</legend>
+      <label>mode</label>
+      <select name="mode" id="f-mode">
+        <option value="scatter">scatter</option>
+        <option value="hex">hexbin density</option>
+      </select>
+      <label style="margin-top:4px">label top N genes {{ info('Labels the top-N concordant + top-N discordant genes.') }}</label>
+      <input type="number" name="n_label" id="f-n_label" value="8" min="0" max="100">
+      <label style="margin-top:4px">padj threshold</label>
+      <input type="number" name="padj_threshold" id="f-padj_threshold" value="0.05" step="any" min="0" max="1">
+      <label style="margin-top:4px">effect clamp (optional) {{ info('Symmetric visual clamp on both axes (log2fc units). Blank = none.') }}</label>
+      <input type="number" name="log2fc_clip" id="f-log2fc_clip" step="any" min="0.1" max="50" placeholder="none">
+    </fieldset>
     {% endif %}
 
     {# ── overlays (scatter / hexbin XY + kde2d; REST API 2.4) ──────────────── #}
@@ -889,6 +947,8 @@
       return !!(fieldVal('study') && fieldVal('term') && fieldVal('contrast'));
     if (GEOM === 'forest') return !!fieldVal('gene');
     if (GEOM === 'de_heatmap') return !!(fieldVal('study') && fieldVal('term'));
+    if (GEOM === 'de_quadrant') return !!(fieldVal('study') && fieldVal('term') && fieldVal('contrast')
+                                          && fieldVal('study_y') && fieldVal('term_y') && fieldVal('contrast_y'));
     if (GEOM === 'kde2d') return !!(fieldVal('x') && fieldVal('y'));
     return true;
   }
@@ -896,6 +956,7 @@
     if (GEOM === 'volcano' || GEOM === 'ma') return 'select a DE study, term, and contrast on the left';
     if (GEOM === 'forest') return 'enter a gene on the left';
     if (GEOM === 'de_heatmap') return 'select a DE study and term on the left';
+    if (GEOM === 'de_quadrant') return 'pick an X contrast and a Y contrast on the left';
     if (GEOM === 'kde2d') return 'enter continuous x and y fields on the left';
     return 'configure on the left to render';
   }
@@ -1708,12 +1769,126 @@
     }
   })();
 
+  // ── de_quadrant: two INDEPENDENT DE cascades (X = path dataset; Y = db_y ||
+  //    path). The shared initDeCascade only knows one triple, so de_quadrant has
+  //    its own init with db-parameterised fill helpers. The Y study is pre-seeded
+  //    to the X study (a sensible default), but the two cascades don't otherwise
+  //    couple — changing X never silently mutates Y (predictable).
+  async function _deFetchDb(dbId, path) {
+    try {
+      const r = await fetch(`${API_URL.replace(/\/$/, '')}/databases/${dbId}${path}`);
+      return r.ok ? await r.json() : null;
+    } catch (e) { return null; }
+  }
+  async function _fillStudies(sel, dbId, selected) {
+    sel.innerHTML = '<option value="">— select study —</option>';
+    const data = await _deFetchDb(dbId, '/de');
+    (data?.studies || []).forEach(s => {
+      const o = document.createElement('option');
+      o.value = s.study_id;
+      o.textContent = `${s.name || s.study_id} · ${s.method || ''} (${s.n_contrasts} contrasts)`;
+      sel.appendChild(o);
+    });
+    const real = [...sel.options].filter(o => o.value);
+    const chosen = selected || (real.length === 1 ? real[0].value : '');
+    if (chosen) sel.value = chosen;
+    return sel.value || '';
+  }
+  async function _fillTermsDb(sel, dbId, study, selected) {
+    sel.innerHTML = '<option value="">— select study first —</option>';
+    if (!study) { reflectSingle(sel); return ''; }
+    const data = await _deFetchDb(dbId, `/de/${encodeURIComponent(study)}`);
+    (data?.terms || []).forEach(t => {
+      const o = document.createElement('option');
+      o.value = t.term; o.textContent = `${t.term} (${t.n_contrasts})`;
+      sel.appendChild(o);
+    });
+    const real = [...sel.options].filter(o => o.value);
+    const chosen = selected || (real.length === 1 ? real[0].value : '');
+    if (chosen) sel.value = chosen;
+    reflectSingle(sel);
+    return sel.value || '';
+  }
+  async function _fillContrastsDb(sel, dbId, study, term, selected) {
+    sel.innerHTML = '<option value="">— select term first —</option>';
+    if (!study || !term) { reflectSingle(sel); return; }
+    const data = await _deFetchDb(dbId, `/de/${encodeURIComponent(study)}/terms/${encodeURIComponent(term)}`);
+    (data?.contrasts || []).forEach(c => {
+      const o = document.createElement('option');
+      o.value = c.contrast;
+      const n = c['n_sig_padj_lt_0.05'];
+      o.textContent = n != null ? `${c.contrast} — ${n} sig` : c.contrast;
+      sel.appendChild(o);
+    });
+    const real = [...sel.options].filter(o => o.value);
+    const chosen = selected || (real.length === 1 ? real[0].value : '');
+    if (chosen) sel.value = chosen;
+    reflectSingle(sel);
+  }
+  async function initDeQuadrant() {
+    const $ = id => document.getElementById(id);
+    const aStudy = $('f-study'), aTerm = $('f-term'), aContrast = $('f-contrast');
+    const dbY = $('f-db_y'), bStudy = $('f-study_y'), bTerm = $('f-term_y'), bContrast = $('f-contrast_y');
+    const p = new URLSearchParams(window.location.search);
+    const bDb = () => (dbY.value.trim() || DB_ID);
+
+    // dataset typeahead for the optional db_y override (best-effort)
+    try {
+      const r = await fetch(`${API_URL.replace(/\/$/, '')}/databases`);
+      if (r.ok) {
+        const d = await r.json();
+        $('dl-datasets').innerHTML = (d.databases || d || [])
+          .map(x => x.id).filter(Boolean).map(i => `<option value="${i}"></option>`).join('');
+      }
+    } catch (e) {}
+
+    // X cascade (path dataset) — independent
+    if (!aStudy.value) { const real = [...aStudy.options].filter(o => o.value); if (real.length === 1) aStudy.value = real[0].value; }
+    if (p.get('study')) aStudy.value = p.get('study');
+    aStudy.addEventListener('change', async () => {
+      const t = await _fillTermsDb(aTerm, DB_ID, aStudy.value);
+      await _fillContrastsDb(aContrast, DB_ID, aStudy.value, t);
+      scheduleRefresh();
+    });
+    aTerm.addEventListener('change', async () => {
+      await _fillContrastsDb(aContrast, DB_ID, aStudy.value, aTerm.value); scheduleRefresh();
+    });
+
+    // Y cascade (bDb) — independent; study pre-seeded to X's study
+    dbY.addEventListener('change', async () => {
+      await _fillStudies(bStudy, bDb(), aStudy.value);            // new dataset → new study list
+      const t = await _fillTermsDb(bTerm, bDb(), bStudy.value);
+      await _fillContrastsDb(bContrast, bDb(), bStudy.value, t);
+      scheduleRefresh();
+    });
+    bStudy.addEventListener('change', async () => {
+      const t = await _fillTermsDb(bTerm, bDb(), bStudy.value);
+      await _fillContrastsDb(bContrast, bDb(), bStudy.value, t);
+      scheduleRefresh();
+    });
+    bTerm.addEventListener('change', async () => {
+      await _fillContrastsDb(bContrast, bDb(), bStudy.value, bTerm.value); scheduleRefresh();
+    });
+
+    // initial population (restore URL state, else defaults)
+    if (p.get('db_y')) dbY.value = p.get('db_y');
+    const aT = await _fillTermsDb(aTerm, DB_ID, aStudy.value, p.get('term'));
+    await _fillContrastsDb(aContrast, DB_ID, aStudy.value, aT, p.get('contrast'));
+    await _fillStudies(bStudy, bDb(), p.get('study_y') || aStudy.value);   // Y study ← X study by default
+    const bT = await _fillTermsDb(bTerm, bDb(), bStudy.value, p.get('term_y'));
+    await _fillContrastsDb(bContrast, bDb(), bStudy.value, bT, p.get('contrast_y'));
+    reflectSingle(aStudy); reflectSingle(bStudy);
+    refresh();
+  }
+
   // initial render
   refreshDownloadLinks();
   if (DE_GEOMS.includes(GEOM)) {
     // populates the study→term→contrast dropdowns (restoring any URL state),
     // then collapses the singular ones + refreshes once the cascade is in place
     initDeCascade();
+  } else if (GEOM === 'de_quadrant') {
+    initDeQuadrant();
   } else {
     // Collapse single-choice selects (embedding/layer/…) to static text, then
     // defer the initial refresh slightly so all listeners are attached.
