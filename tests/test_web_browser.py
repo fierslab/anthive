@@ -763,7 +763,9 @@ def test_plot_view_notebook_button(client):
     assert resp.status_code == 200
     assert 'id="open-notebook"' in resp.text
     assert "/jupyter/lab/index.html?fromURL=" in resp.text
-    assert "'/notebook'" in resp.text
+    # base64-path-encoded endpoint (Plan D): no query string → clean basename
+    assert "/api/notebook/" in resp.text
+    assert "plot.ipynb" in resp.text
 
 
 def test_plot_view_forest_gene_input(client):

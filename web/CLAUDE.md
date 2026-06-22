@@ -133,12 +133,16 @@ nothing DE shows):
     `data-keep-select` to opt out (the geom switcher does); the `disabled`
     guard keeps removal safe with the polymorphic-scatter mode toggle.
   - **"📓 notebook"** (`#open-notebook`) opens the current plot as a one-off
-    JupyterLite notebook: it takes `buildUrl()`, inserts `/notebook` before the
-    query (ant-serve `/databases/{id}/plot/{geom}/notebook`, API 2.8 — returns
-    an `.ipynb` with data-pull + plot + caption + browser-only-persistence
-    disclaimer), and `window.open`s `/jupyter/lab/index.html?fromURL=<that,
-    same-origin relative>`. JupyterLite fetches it through the user's Authelia
-    session (no creds in the URL). Guarded on `canRender()`.
+    JupyterLite notebook. It packs `{db_id, geom, ...all plot params}` into a
+    **urlsafe-base64 PATH segment** → `/api/notebook/{b64}/plot.ipynb` (ant-serve
+    API 2.8, returns an `.ipynb` with data-pull + plot + caption + browser-only
+    disclaimer), and `window.open`s `/jupyter/lab/index.html?fromURL=<that>`.
+    The base64 path (no query string) is deliberate: JupyterLite's open-url
+    extension names the saved file after the URL basename, so a query string
+    would mash into the filename and break open-as-notebook — `plot.ipynb` stays
+    clean. JupyterLite fetches it through the user's Authelia session (no creds
+    in URL). Guarded on `canRender()`. (A query-param variant
+    `/databases/{id}/plot/{geom}/notebook?…` also exists for curl/CLI.)
   - **Downloads are blob-fetched** (`downloadBlob(fmt, ext)`), not `<a href>` —
     so the long API URL never shows in the browser status bar on hover, and a
     failed render surfaces inline. `copy URL` copies `window.location.href`
