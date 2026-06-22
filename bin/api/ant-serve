@@ -5345,8 +5345,141 @@ def _build_notebook_for_plot(
     }
 
 
+def _common_plot_params_from_dict(
+    db_id: str,
+    params: Dict[str, Any],
+    request: Request,
+) -> "CommonPlotParams":
+    """Construct a CommonPlotParams from a flat dict, falling back to the
+    same defaults FastAPI's Query() declarations carry.  Used by the
+    b64-encoded-params notebook route (where the params come from a URL
+    path segment, not request.query_params), so the existing notebook
+    builder can run uniformly off CommonPlotParams.
+
+    Anything in ``params`` that isn't a known shared knob is silently
+    ignored — geom-specific params travel via plot_kwargs separately.
+    """
+    common = CommonPlotParams.__new__(CommonPlotParams)
+    common.db_id = db_id
+    common.output_format = str(params.get('format', 'png'))
+    common.layer = str(params.get('layer', 'X'))
+    common.width = float(params.get('width', 8.0))
+    common.height = float(params.get('height', 6.0))
+    common.dpi = int(params.get('dpi', 150))
+    common.palette_categorical = str(params.get('palette_categorical', 'tab10'))
+    common.palette_continuous = str(params.get('palette_continuous', 'inferno_r'))
+    common.palette_divergent = str(params.get('palette_divergent', 'RdBu_r'))
+    cs = params.get('color_scale')
+    common.color_scale = str(cs) if cs is not None else None
+    common.font_family = str(params.get('font_family', 'DejaVu Sans'))
+    common.font_size = float(params.get('font_size', 10.0))
+    raw_subset = params.get('subset', [])
+    if isinstance(raw_subset, str):
+        common.subset = [raw_subset]
+    else:
+        common.subset = list(raw_subset) if raw_subset else []
+    s = params.get('sample')
+    common.sample = int(s) if s is not None else None
+    common.request = request
+    if common.output_format not in _PLOT_MIME_TYPES:
+        raise HTTPException(
+            400,
+            detail=f"Unknown format '{common.output_format}'. Valid: "
+                   + ', '.join(sorted(_PLOT_MIME_TYPES.keys())),
+        )
+    return common
+
+
+async def _build_notebook_response(
+    db_id: str,
+    geom: str,
+    all_params: Dict[str, Any],
+    request: Request,
+):
+    """Core notebook builder, shared by the query-string route and the
+    base64-path-encoded route. ``all_params`` is a flat dict containing
+    BOTH shared knobs (layer, width, …, subset, sample) and per-geom
+    params (x, y, color, study, term, …) — same keys the URL query
+    string carries.
+    """
+    if geom not in _PLOT_GEOMS:
+        raise HTTPException(
+            400,
+            detail=f"Unknown geom '{geom}'. Valid: {sorted(_PLOT_GEOMS)}",
+        )
+
+    common = _common_plot_params_from_dict(db_id, all_params, request)
+
+    # Build the kwargs dict for _build_plot_request from non-common params.
+    plot_kwargs: Dict[str, Any] = {}
+    notebook_params: Dict[str, Any] = {}
+    for raw_key, raw_value in all_params.items():
+        # `format` is selected per-cell inside the notebook — drop it from
+        # the user-facing PARAMS dict.
+        if raw_key == 'format':
+            continue
+        notebook_params[raw_key] = raw_value
+        if raw_key in _NOTEBOOK_COMMON_PARAMS:
+            continue
+        # In dict-mode we may already have a typed value (int / float /
+        # bool). Only coerce if it's still a string.
+        if isinstance(raw_value, str):
+            coerced = _coerce_query_value(raw_key, raw_value)
+        else:
+            coerced = raw_value
+        kwarg_name = _NOTEBOOK_PARAM_RENAME.get(raw_key, raw_key)
+        plot_kwargs[kwarg_name] = coerced
+
+    import inspect as _inspect
+    allowed = set(_inspect.signature(_build_plot_request).parameters.keys())
+    plot_kwargs = {k: v for k, v in plot_kwargs.items() if k in allowed}
+
+    try:
+        plot_req = _build_plot_request(common, geom, **plot_kwargs)
+    except TypeError as exc:
+        raise HTTPException(400, detail=f"Bad plot params: {exc}")
+
+    plot_req = _plot_request_force_png(plot_req)
+    plot_response = await _render_plot(plot_req, request)
+    caption = plot_response.headers.get('X-Plot-Caption') or ''
+
+    case, remote_user, _passwordless = _detect_notebook_auth(request)
+    auth_block = _build_auth_block(case, remote_user)
+    base_url = _notebook_base_url(request)
+
+    notebook_dict = _build_notebook_for_plot(
+        db_id=db_id,
+        geom=geom,
+        plot_params=notebook_params,
+        caption=caption,
+        base_url=base_url,
+        auth_block=auth_block,
+    )
+
+    filename = f"{db_id.replace('/', '_')}_{geom}.ipynb"
+    return Response(
+        content=json.dumps(notebook_dict, indent=1),
+        media_type="application/x-ipynb+json",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+            "X-Anthive-Auth-Case": case,
+        },
+    )
+
+
 @app.get(
     "/databases/{db_id:path}/plot/{geom}/notebook",
+    tags=["plots"],
+    response_class=JSONResponse,
+)
+# Alias with explicit .ipynb extension — JupyterLite's ?fromURL= handler uses
+# the URL basename to decide the saved filename. Without an .ipynb extension
+# it either skips the save or stores the file unrecognised, breaking the
+# auto-open. The alias lets clients hit the same endpoint with a URL ending
+# in .ipynb so JupyterLite materialises and opens it correctly.
+@app.get(
+    "/databases/{db_id:path}/plot/{geom}/notebook.ipynb",
     tags=["plots"],
     response_class=JSONResponse,
 )
@@ -5384,94 +5517,90 @@ async def plot_notebook_endpoint(
     ``pyvark[vark-config]`` credential lookup. A commented explicit-password
     line is templated alongside for users who copy the notebook elsewhere.
     """
-    if geom not in _PLOT_GEOMS:
-        raise HTTPException(
-            400,
-            detail=f"Unknown geom '{geom}'. Valid: {sorted(_PLOT_GEOMS)}",
-        )
     request = common.request
     if request is None:
         # Should never happen — CommonPlotParams always injects the request.
         raise HTTPException(500, detail="Could not access inbound Request object.")
 
-    # Build the PlotRequest from the query string. CommonPlotParams already
-    # handled the shared knobs (db_id, layer, width, …, subset, sample);
-    # everything else gets folded in via _build_plot_request kwargs.
-    plot_kwargs: Dict[str, Any] = {}
-    # Keep the original (user-facing) names too — that's what we drop into
-    # the notebook's PARAMS dict so the vark.AnthiveClient.get_plot call
-    # looks like the URL the user opened.
-    notebook_params: Dict[str, Any] = {}
+    # Flatten the inbound query params into a dict so the shared
+    # ``_build_notebook_response`` helper can drive both this query-string
+    # route AND the base64-path-encoded route uniformly. Repeats become
+    # lists (matches URL semantics).
+    all_params: Dict[str, Any] = {}
     for raw_key, raw_value in request.query_params.multi_items():
-        # `format` is selected per-cell inside the notebook (csv for cell 2,
-        # png for cell 3) — drop it from the user-facing PARAMS.
-        if raw_key == 'format':
-            continue
-        # The user-facing dict keeps URL semantics: repeats become lists.
-        # This dict is the one that lands in the notebook's PARAMS, so it
-        # MUST include shared knobs (layer, subset, sample, palette_*, etc.)
-        # for the notebook to faithfully reproduce the original plot URL.
-        if raw_key in notebook_params:
-            existing = notebook_params[raw_key]
+        if raw_key in all_params:
+            existing = all_params[raw_key]
             if isinstance(existing, list):
                 existing.append(raw_value)
             else:
-                notebook_params[raw_key] = [existing, raw_value]
+                all_params[raw_key] = [existing, raw_value]
         else:
-            notebook_params[raw_key] = raw_value
-        # plot_kwargs gets only the per-geom params (CommonPlotParams Depends
-        # has already absorbed the shared ones).
-        if raw_key in _NOTEBOOK_COMMON_PARAMS:
-            continue
-        coerced = _coerce_query_value(raw_key, raw_value)
-        kwarg_name = _NOTEBOOK_PARAM_RENAME.get(raw_key, raw_key)
-        plot_kwargs[kwarg_name] = coerced
+            all_params[raw_key] = raw_value
+    return await _build_notebook_response(common.db_id, geom, all_params, request)
 
-    # Filter kwargs to only those _build_plot_request actually accepts —
-    # anything else would raise a TypeError, which the user would see as
-    # an opaque 500. Inspect the signature.
-    import inspect as _inspect
-    allowed = set(_inspect.signature(_build_plot_request).parameters.keys())
-    plot_kwargs = {k: v for k, v in plot_kwargs.items() if k in allowed}
 
+@app.get(
+    "/notebook/{b64params}/plot.ipynb",
+    tags=["plots"],
+    response_class=JSONResponse,
+)
+async def plot_notebook_b64_endpoint(
+    b64params: str = FastAPIPath(
+        ...,
+        description=(
+            "Base64-url-safe-encoded JSON of the plot params. MUST include "
+            "``db_id`` and ``geom`` keys; everything else maps to the same "
+            "params as ``/databases/{db_id}/plot/{geom}/notebook?...``. "
+            "Used by the JupyterLite 'open this plot as a notebook' button "
+            "to avoid the filename-includes-query-string bug in "
+            "jupyterlab-open-url-parameter — a URL with NO query string "
+            "lets the extension save the file with a clean basename. The "
+            "trailing ``/plot.ipynb`` segment is the saved filename in "
+            "JupyterLite's in-browser FS."
+        ),
+    ),
+    request: Request = None,  # type: ignore[assignment]
+):
+    """Notebook generator with all plot params encoded as a base64-url-safe
+    JSON blob in the URL path. Functionally equivalent to
+    ``GET /databases/{db_id}/plot/{geom}/notebook.ipynb?<params>`` but with
+    NO query string — required for JupyterLite's ``?fromURL=`` deep link
+    to save the resulting notebook with a recognisable ``.ipynb`` basename.
+
+    The encoded blob is a JSON object::
+
+        {"db_id": "S25/V6A", "geom": "volcano",
+         "study": "DE_…", "term": "Sex_donor", "contrast": "F",
+         "log2fc_clip": 3, ...}
+
+    encoded with ``base64.urlsafe_b64encode(json.dumps(params).encode())``
+    (Python) or the JS equivalent (``btoa`` with ``+`` → ``-`` and
+    ``/`` → ``_``). Trailing ``=`` padding is optional — the decoder is
+    tolerant.
+    """
+    import base64 as _b64
     try:
-        plot_req = _build_plot_request(common, geom, **plot_kwargs)
-    except TypeError as exc:
-        raise HTTPException(400, detail=f"Bad plot params: {exc}")
-
-    # Force PNG render path for the caption — the notebook generator only
-    # needs the X-Plot-Caption text. The cache is keyed by output_format
-    # so this won't pollute any CSV/SVG/PDF entries for the same plot.
-    plot_req = _plot_request_force_png(plot_req)
-
-    # Re-use _render_plot's cache + handler dispatch. Drop the bytes,
-    # keep the caption header.
-    plot_response = await _render_plot(plot_req, request)
-    caption = plot_response.headers.get('X-Plot-Caption') or ''
-
-    case, remote_user, _passwordless = _detect_notebook_auth(request)
-    auth_block = _build_auth_block(case, remote_user)
-    base_url = _notebook_base_url(request)
-
-    notebook_dict = _build_notebook_for_plot(
-        db_id=common.db_id,
-        geom=geom,
-        plot_params=notebook_params,
-        caption=caption,
-        base_url=base_url,
-        auth_block=auth_block,
-    )
-
-    filename = f"{common.db_id.replace('/', '_')}_{geom}.ipynb"
-    return Response(
-        content=json.dumps(notebook_dict, indent=1),
-        media_type="application/x-ipynb+json",
-        headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
-            "Cache-Control": "no-store",
-            "X-Anthive-Auth-Case": case,
-        },
-    )
+        # Tolerate missing padding.
+        padded = b64params + '=' * (-len(b64params) % 4)
+        raw = _b64.urlsafe_b64decode(padded)
+        params = json.loads(raw.decode('utf-8'))
+    except (ValueError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(
+            400,
+            detail=f"Could not decode base64-url-safe JSON params: {exc}",
+        )
+    if not isinstance(params, dict):
+        raise HTTPException(
+            400, detail="Decoded payload must be a JSON object.",
+        )
+    db_id = params.pop('db_id', None)
+    geom = params.pop('geom', None)
+    if not db_id or not geom:
+        raise HTTPException(
+            400,
+            detail="Encoded params dict must include 'db_id' and 'geom'.",
+        )
+    return await _build_notebook_response(str(db_id), str(geom), params, request)
 
 
 def _plot_request_force_png(req: PlotRequest) -> PlotRequest:
