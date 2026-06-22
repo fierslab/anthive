@@ -7,6 +7,18 @@ A collection of command-line tools to validate, convert, and serve single-cell a
 See **[doc/INSTALL.md](doc/INSTALL.md)** — end-to-end install + production
 deploy instructions (Caddy / nginx, systemd, S3 data sync).
 
+## Clients
+
+The REST API has two first-class clients — both wrap the same endpoints,
+including the multi-sentence X-Plot-Caption capture introduced in API 2.7.2:
+
+- **[`vark`](https://codeberg.org/mfiers/vark)** — Go CLI, single static
+  binary. Best for shell scripting, piping data, batch workflows.
+- **[`pyvark`](https://codeberg.org/mfiers/pyvark)** — Python client
+  library (`pip install pyvark`; imports as `from vark import AnthiveClient`).
+  Best for notebooks, pandas / scanpy workflows, and the JupyterLite
+  build that ships with the webapp.
+
 ## Main Goals
 
 - **Check** any scanpy h5ad file for consistency & errors
@@ -365,8 +377,6 @@ Comprehensive documentation in `./doc/`:
 
 ## Future Features
 
-- **REST API**: Fast, cached HTTP access to data
-- **pyvark**: Python client library for querying (`codeberg.org/mfiers/pyvark`)
 - **Incremental updates**: Re-convert only changed portions
 - **Multi-file queries**: Query across multiple datasets
 
