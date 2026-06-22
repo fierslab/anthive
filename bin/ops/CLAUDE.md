@@ -4,16 +4,17 @@ Process supervision, S3 sync, build helpers, and developer wrappers.
 
 | Tool | Role |
 | --- | --- |
-| `ant-supervisor` | Runs the full stack (api+web+mcp+streamlit+caddy), multiplexes their stdout/stderr with colored labels, auto-restarts crashed children. `restart <name>` / `status` / `stop` subcommands. |
+| `ant-supervisor` | Runs the full stack (api+web+mcp+caddy+authelia), multiplexes their stdout/stderr with colored labels, auto-restarts crashed children. `restart <name>` / `status` / `stop` subcommands. |
 | `ant-sync` | Push/pull `.h5ad` and `.duckdb` files to/from S3 (boto3, mtime-aware, `_`-folder-aware). Never touches `.md` files. |
 | `ant_s3` | Lower-level S3 toolkit (credentials, list, status). Mostly invoked via `ant-sync`. |
 | `ant-build-reports` | Pull static report sites from the git repos listed in `anthive.yaml` → `data/reports/`. Served by Caddy at `/report/<slug>/`. |
 | `ant-inactive` | Mark/unmark a dataset as inactive (drops a `.inactive` sidecar; hides it from `ant-serve`). |
 | `ant-db` | DuckDB inspection / one-off queries against an h5adstore database. |
 | `dev-jupyter` | Start a local JupyterLab against `frontend/jupyter/jupyter` for developing the JupyterLite notebooks. |
-| `dev-serve` | Streamlit dev server wrapper. |
-| `streamlit-serve` | Run the Streamlit app standalone (without supervisor). |
-| `sync-to-stlite` | Mirror changes from `frontend/streamlit/` into the in-browser stlite copy in `frontend/jupyter/stlite/`. |
+
+The Streamlit dashboard was removed 2026-06-22 along with
+`dev-serve` / `streamlit-serve` / `sync-to-stlite`. The interactive
+plot UI now lives in `web/templates/plot.html` (`./web/ant-browse`).
 
 ## ant-supervisor — the bits that bite
 
@@ -47,7 +48,7 @@ s3:
   secret_access_key: ...
 ```
 
-## Dev helpers (`dev-jupyter`, `dev-serve`, `streamlit-serve`, `sync-to-stlite`)
+## Dev helpers (`dev-jupyter`)
 
-These are convenience scripts for developing the frontend layers. They are
-not part of the production runtime path — for that, use `ant-supervisor`.
+Convenience script for developing the JupyterLite notebooks. Not part
+of the production runtime path — for that, use `ant-supervisor`.
