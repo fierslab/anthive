@@ -794,9 +794,11 @@ def test_plot_view_de_heatmap_form(client):
     # plus the value / significance-overlay / CSV-narrower controls.
     resp = client.get("/browse/GroupA/ds1/plot/de_heatmap")
     assert resp.status_code == 200
-    for field in ("study", "term", "value", "sig_overlay", "contrasts", "genes"):
+    for field in ("study", "term", "value", "sig_overlay", "contrasts", "genes",
+                  "vmin", "vmax", "vmin_quantile", "vmax_quantile", "sort", "sort_desc"):
         assert f'name="{field}"' in resp.text
     assert "GLMM demo" in resp.text   # study option seeded from /de
+    assert "to EXCLUDE" in resp.text   # the '-' exclude-syntax help (API 2.10)
 
 
 def test_plot_view_color_scale_control(client):

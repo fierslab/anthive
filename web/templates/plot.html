@@ -582,11 +582,28 @@
       <input type="number" name="padj_threshold" id="f-padj_threshold" value="0.05" step="any" min="0" max="1">
     </fieldset>
     <fieldset>
-      <legend>narrow (optional) {{ info('Server caps the matrix at 2000 cells (rows × cols). For big studies, narrow with a contrast or gene list, else it returns a helpful error.') }}</legend>
-      <label title="comma-separated contrast names; default = all rows">contrasts (CSV)</label>
-      <input type="text" name="contrasts" id="f-contrasts" autocomplete="off" placeholder="default: all contrasts">
-      <label style="margin-top:4px" title="comma-separated gene / module names; default = all columns">genes (CSV)</label>
-      <input type="text" name="genes" id="f-genes" autocomplete="off" placeholder="default: all genes/modules">
+      <legend>narrow (optional) {{ info('Comma-separated. Prefix a token with "-" to EXCLUDE:  APOE,CD74 = only these  ·  -APOE = all except APOE  ·  A,B,-C = {A,B} minus C. Server caps the matrix at 2000 cells (rows × cols); narrow if it refuses.') }}</legend>
+      <label title="comma-separated; default = all rows; prefix a name with - to exclude">contrasts (CSV)</label>
+      <input type="text" name="contrasts" id="f-contrasts" autocomplete="off" placeholder="all (or -name to drop)">
+      <label style="margin-top:4px" title="comma-separated; default = all columns; prefix a name with - to exclude">genes (CSV)</label>
+      <input type="text" name="genes" id="f-genes" autocomplete="off" placeholder="all (or -name to drop)">
+    </fieldset>
+    <fieldset>
+      <legend>colour clamp (optional) {{ info('Clamp the effect-colour scale so a few extreme cells do not wash out the bulk. Set manual vmin/vmax, OR percentile clips (0–1). Blank = auto; the caption notes the clip when active.') }}</legend>
+      <div class="row">
+        <div><label>vmin</label><input type="number" name="vmin" id="f-vmin" step="any" placeholder="auto"></div>
+        <div><label>vmax</label><input type="number" name="vmax" id="f-vmax" step="any" placeholder="auto"></div>
+      </div>
+      <div class="row" style="margin-top:2px">
+        <div><label>vmin quantile</label><input type="number" name="vmin_quantile" id="f-vmin_quantile" step="0.01" min="0" max="1" placeholder="auto"></div>
+        <div><label>vmax quantile</label><input type="number" name="vmax_quantile" id="f-vmax_quantile" step="0.01" min="0" max="1" placeholder="auto"></div>
+      </div>
+    </fieldset>
+    <fieldset>
+      <legend>sort (optional) {{ info('Reorder the matrix by one label (a contrast or a gene/module). Tick descending to flip. Unknown label → the server suggests close matches in-status.') }}</legend>
+      <label>sort by</label>
+      <input type="text" name="sort" id="f-sort_label" autocomplete="off" placeholder="contrast or gene/module">
+      <label style="margin-top:4px"><input type="checkbox" name="sort_desc" id="f-sort_desc" value="true"> descending</label>
     </fieldset>
     {% endif %}
 
