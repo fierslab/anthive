@@ -1111,15 +1111,19 @@
 
   // ── open this exact plot as a one-off JupyterLite notebook
   //   Uses ant-serve's base64-encoded-params endpoint (API 2.8.0+):
-  //     GET /api/notebook/{b64params}/plot.ipynb
+  //     GET /api/notebook/{b64params}/{filename}.ipynb     (API 2.9.2+)
+  //     GET /api/notebook/{b64params}/plot.ipynb           (back-compat)
   //   Returns an .ipynb (data pull + plot + caption + disclaimer).
   //   The reason for base64: JupyterLite's jupyterlab-open-url-parameter
   //   extension uses the URL basename as the saved filename. With a normal
   //   query-string URL, the saved file ends up named with the query string
   //   embedded ('plot.ipynb?study=…&term=…') and JupyterLab can't open it.
-  //   The base64-path-encoded URL has zero query string → clean basename
-  //   'plot.ipynb' → opens correctly.
-  document.getElementById('open-notebook').addEventListener('click', e => {
+  //   The base64-path-encoded URL has zero query string → clean basename.
+  //   With API 2.9.2 we first hit /api/notebook/{b64}/meta to pull the
+  //   biology-keyed filename, then put that into the URL — so JupyterLite
+  //   saves the file as e.g. 'S25_V6A_scatter_P2RY12.ipynb' instead of
+  //   the literal 'plot.ipynb'.
+  document.getElementById('open-notebook').addEventListener('click', async e => {
     e.preventDefault();
     if (!canRender()) {
       status.innerHTML = `<span class="err">${renderHint()} before opening a notebook</span>`;
@@ -1140,7 +1144,20 @@
     // base64-url-safe encode (RFC 4648 §5: '+' → '-', '/' → '_', strip '=' pad).
     const b64 = btoa(JSON.stringify(params))
                   .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-    const notebookUrl = '/api/notebook/' + b64 + '/plot.ipynb';
+    // Pre-fetch the biology-keyed filename so JupyterLite saves the
+    // notebook under that name instead of the literal 'plot'. /meta is
+    // pure-Python (no plot render), so it's typically <50ms; on any
+    // failure we fall back to 'plot' and the URL still works.
+    let filename = 'plot';
+    try {
+      const metaResp = await fetch('/api/notebook/' + b64 + '/meta',
+                                   {credentials: 'same-origin'});
+      if (metaResp.ok) {
+        const meta = await metaResp.json();
+        if (meta && meta.filename) filename = meta.filename;
+      }
+    } catch (_) { /* keep fallback */ }
+    const notebookUrl = '/api/notebook/' + b64 + '/' + filename + '.ipynb';
     const labUrl = '/jupyter/lab/index.html?fromURL=' + encodeURIComponent(notebookUrl);
     window.open(labUrl, '_blank', 'noopener');
     const orig = e.target.textContent;

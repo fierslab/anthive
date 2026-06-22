@@ -1299,7 +1299,7 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.9.1"
+API_VERSION = "2.9.2"
 API_VERSION_RELEASED = "2026-06-22"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
@@ -5680,44 +5680,12 @@ async def plot_notebook_endpoint(
     return await _build_notebook_response(common.db_id, geom, all_params, request)
 
 
-@app.get(
-    "/notebook/{b64params}/plot.ipynb",
-    tags=["plots"],
-    response_class=JSONResponse,
-)
-async def plot_notebook_b64_endpoint(
-    b64params: str = FastAPIPath(
-        ...,
-        description=(
-            "Base64-url-safe-encoded JSON of the plot params. MUST include "
-            "``db_id`` and ``geom`` keys; everything else maps to the same "
-            "params as ``/databases/{db_id}/plot/{geom}/notebook?...``. "
-            "Used by the JupyterLite 'open this plot as a notebook' button "
-            "to avoid the filename-includes-query-string bug in "
-            "jupyterlab-open-url-parameter — a URL with NO query string "
-            "lets the extension save the file with a clean basename. The "
-            "trailing ``/plot.ipynb`` segment is the saved filename in "
-            "JupyterLite's in-browser FS."
-        ),
-    ),
-    request: Request = None,  # type: ignore[assignment]
-):
-    """Notebook generator with all plot params encoded as a base64-url-safe
-    JSON blob in the URL path. Functionally equivalent to
-    ``GET /databases/{db_id}/plot/{geom}/notebook.ipynb?<params>`` but with
-    NO query string — required for JupyterLite's ``?fromURL=`` deep link
-    to save the resulting notebook with a recognisable ``.ipynb`` basename.
+def _decode_b64_notebook_params(b64params: str) -> Tuple[str, str, Dict[str, Any]]:
+    """Decode a base64-urlsafe JSON blob of notebook params.
 
-    The encoded blob is a JSON object::
-
-        {"db_id": "S25/V6A", "geom": "volcano",
-         "study": "DE_…", "term": "Sex_donor", "contrast": "F",
-         "log2fc_clip": 3, ...}
-
-    encoded with ``base64.urlsafe_b64encode(json.dumps(params).encode())``
-    (Python) or the JS equivalent (``btoa`` with ``+`` → ``-`` and
-    ``/`` → ``_``). Trailing ``=`` padding is optional — the decoder is
-    tolerant.
+    Returns ``(db_id, geom, params)`` where ``params`` has db_id / geom
+    already popped out. Raises HTTPException(400) on any decode failure
+    or missing required keys.
     """
     import base64 as _b64
     try:
@@ -5741,7 +5709,173 @@ async def plot_notebook_b64_endpoint(
             400,
             detail="Encoded params dict must include 'db_id' and 'geom'.",
         )
-    return await _build_notebook_response(str(db_id), str(geom), params, request)
+    return str(db_id), str(geom), params
+
+
+# Pattern for the per-URL "saved filename" segment in the b64-encoded
+# notebook routes. Matches the sanitiser used by
+# ``plotting._filename_sanitise`` and caps length at 100 chars — long
+# enough for any biology-keyed filename (descriptor cap is 80) plus a
+# little slack, short enough to refuse weird/abusive URLs.
+import re as _re_notebook_filename
+_NOTEBOOK_FILENAME_RE = _re_notebook_filename.compile(r'^[A-Za-z0-9_-]{1,100}$')
+
+
+@app.get(
+    "/notebook/{b64params}/plot.ipynb",
+    tags=["plots"],
+    response_class=JSONResponse,
+)
+@app.get(
+    "/notebook/{b64params}/{filename}.ipynb",
+    tags=["plots"],
+    response_class=JSONResponse,
+)
+async def plot_notebook_b64_endpoint(
+    b64params: str = FastAPIPath(
+        ...,
+        description=(
+            "Base64-url-safe-encoded JSON of the plot params. MUST include "
+            "``db_id`` and ``geom`` keys; everything else maps to the same "
+            "params as ``/databases/{db_id}/plot/{geom}/notebook?...``. "
+            "Used by the JupyterLite 'open this plot as a notebook' button "
+            "to avoid the filename-includes-query-string bug in "
+            "jupyterlab-open-url-parameter — a URL with NO query string "
+            "lets the extension save the file with a clean basename."
+        ),
+    ),
+    filename: str = FastAPIPath(
+        'plot',
+        description=(
+            "The saved filename basename in JupyterLite's in-browser FS "
+            "(without the ``.ipynb`` extension). Server ignores it for the "
+            "actual response — the b64 blob drives content — but echoes it "
+            "back via the URL so JupyterLite's open-url extension saves "
+            "the notebook with this name. Must match ``[A-Za-z0-9_-]{1,100}``."
+        ),
+    ),
+    request: Request = None,  # type: ignore[assignment]
+):
+    """Notebook generator with all plot params encoded as a base64-url-safe
+    JSON blob in the URL path. Functionally equivalent to
+    ``GET /databases/{db_id}/plot/{geom}/notebook.ipynb?<params>`` but with
+    NO query string — required for JupyterLite's ``?fromURL=`` deep link
+    to save the resulting notebook with a recognisable ``.ipynb`` basename.
+
+    Two URL shapes are accepted, with identical behaviour:
+
+    * ``/notebook/{b64}/plot.ipynb`` — back-compat for older clients.
+    * ``/notebook/{b64}/{filename}.ipynb`` — ``filename`` can be any
+      ``[A-Za-z0-9_-]{1,100}`` token; lets the client pass the biology-keyed
+      filename (from ``/notebook/{b64}/meta``) so JupyterLite saves the
+      file under the descriptive basename instead of literal ``plot``.
+
+    The encoded blob is a JSON object::
+
+        {"db_id": "S25/V6A", "geom": "volcano",
+         "study": "DE_…", "term": "Sex_donor", "contrast": "F",
+         "log2fc_clip": 3, ...}
+
+    encoded with ``base64.urlsafe_b64encode(json.dumps(params).encode())``
+    (Python) or the JS equivalent (``btoa`` with ``+`` → ``-`` and
+    ``/`` → ``_``). Trailing ``=`` padding is optional — the decoder is
+    tolerant.
+    """
+    # ``filename`` is cosmetic — the response body is driven entirely by
+    # the b64 blob. Validate it just enough to refuse abuse / weird URLs.
+    if not _NOTEBOOK_FILENAME_RE.match(filename):
+        raise HTTPException(
+            400,
+            detail=(
+                "filename must match [A-Za-z0-9_-]{1,100} (got "
+                f"{filename!r})."
+            ),
+        )
+    db_id, geom, params = _decode_b64_notebook_params(b64params)
+    return await _build_notebook_response(db_id, geom, params, request)
+
+
+@app.get(
+    "/notebook/{b64params}/meta",
+    tags=["plots"],
+    response_class=JSONResponse,
+)
+async def plot_notebook_descriptor_endpoint(
+    b64params: str = FastAPIPath(
+        ...,
+        description=(
+            "Base64-url-safe-encoded JSON of the plot params (same encoding "
+            "as ``/notebook/{b64params}/{filename}.ipynb``)."
+        ),
+    ),
+    request: Request = None,  # type: ignore[assignment]
+):
+    """Return the biology-keyed title + filename for a notebook URL,
+    WITHOUT rendering the plot.
+
+    Used by the web client's "open as notebook" button to pre-compute the
+    JupyterLite-FS in-browser filename BEFORE opening JupyterLite, so the
+    saved file's basename matches the biology (e.g. ``S25_V6A_scatter_P2RY12``)
+    instead of the literal ``plot`` fallback.
+
+    Pure / param-only — no DB I/O. Field-kind resolution against the live
+    PlotContext is skipped (kinds default to ``None``) so the descriptor
+    output is slightly fuzzier than the full render-time descriptor, but
+    still readable and stable. Returns::
+
+        {"title": "S25/V6A: P2RY12 expression on embedding",
+         "filename": "S25_V6A_scatter_P2RY12",
+         "filename_truncated": false}
+    """
+    db_id, geom, params = _decode_b64_notebook_params(b64params)
+    if geom not in _PLOT_GEOMS:
+        raise HTTPException(
+            400,
+            detail=f"Unknown geom '{geom}'. Valid: {sorted(_PLOT_GEOMS)}",
+        )
+
+    # Reuse the same param-folding logic as _build_notebook_response so
+    # the descriptor sees the same kwargs the real plot would. We do NOT
+    # render — just build a PlotRequest and run the static descriptor.
+    try:
+        common = _common_plot_params_from_dict(db_id, params, request)
+    except HTTPException:
+        raise
+
+    plot_kwargs: Dict[str, Any] = {}
+    for raw_key, raw_value in params.items():
+        if raw_key == 'format':
+            continue
+        if raw_key in _NOTEBOOK_COMMON_PARAMS:
+            continue
+        if isinstance(raw_value, str):
+            coerced = _coerce_query_value(raw_key, raw_value)
+        else:
+            coerced = raw_value
+        kwarg_name = _NOTEBOOK_PARAM_RENAME.get(raw_key, raw_key)
+        plot_kwargs[kwarg_name] = coerced
+
+    import inspect as _inspect
+    allowed = set(_inspect.signature(_build_plot_request).parameters.keys())
+    plot_kwargs = {k: v for k, v in plot_kwargs.items() if k in allowed}
+
+    try:
+        plot_req = _build_plot_request(common, geom, **plot_kwargs)
+    except TypeError as exc:
+        raise HTTPException(400, detail=f"Bad plot params: {exc}")
+
+    # Static descriptor — no DB context. For scatter/hexbin with no
+    # explicit x, the descriptor will say "embedding"; that's the
+    # acceptable fallback (kinds aren't resolved here).
+    desc = plotting.build_plot_descriptor(**_descriptor_inputs_static(plot_req))
+    return JSONResponse(
+        content={
+            'title':              desc['title'],
+            'filename':           desc['filename'],
+            'filename_truncated': desc['filename_truncated'] == '1',
+        },
+        headers={'Cache-Control': 'no-store'},
+    )
 
 
 def _plot_request_force_png(req: PlotRequest) -> PlotRequest:

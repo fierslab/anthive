@@ -29,6 +29,37 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.9.2 — 2026-06-22
+
+### Added — biology-keyed filename in the notebook URL, plus a no-render `/meta` descriptor
+
+The base64-encoded-params notebook endpoint now accepts the biology-keyed
+filename as a real URL path segment, so JupyterLite (which names the
+saved file after the URL basename, ignoring `Content-Disposition`)
+stores it under the descriptive basename instead of literal `plot.ipynb`.
+
+* **New route** `GET /notebook/{b64params}/{filename}.ipynb`
+  — `filename` is purely cosmetic (the server still drives content
+  from the b64 blob) and must match `[A-Za-z0-9_-]{1,100}`. Otherwise
+  identical behaviour to the old fixed `/plot.ipynb` route.
+* **New route** `GET /notebook/{b64params}/meta` — returns just
+  `{title, filename, filename_truncated}` for the encoded params,
+  WITHOUT rendering the plot. Pure-Python / param-only, typically
+  <50 ms. Lets clients pre-compute the biology-keyed filename before
+  opening JupyterLite. Field kinds are not resolved against the DB
+  (this is the static-descriptor path), so for scatter/hexbin with no
+  explicit `x` the title's embedding falls back to "embedding" — the
+  filename token is still stable.
+* **Back-compat**: the legacy `GET /notebook/{b64params}/plot.ipynb`
+  URL keeps working unchanged (registered as a second decorator on
+  the same handler). The legacy query-string
+  `GET /databases/{id}/plot/{geom}/notebook[.ipynb]?…` URL is also
+  unchanged.
+
+Caller impact: purely additive.
+
+---
+
 ## 2.9.1 — 2026-06-22
 
 ### Changed — hexbin plots draw one silhouette instead of a per-hex grid
