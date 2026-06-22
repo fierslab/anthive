@@ -29,6 +29,73 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.11.0 — 2026-06-22
+
+### Changed — generated notebook content overhaul (8-cell layout, split params, de-novo snippet)
+
+The plot-to-notebook generator (`/api/notebook/{b64}/...ipynb`,
+`/api/databases/{id}/plot/{geom}/notebook[.ipynb]`) now returns an 8-cell
+notebook instead of the old 3-cell version. The endpoint URLs and
+response headers are unchanged — only the rendered `.ipynb` content
+changes.
+
+* **New cell order** (8 cells total, types
+  `[markdown, code, code, code, markdown, code, markdown, code]`):
+  1. markdown — title + caption + JupyterLite persistence disclaimer
+  2. code — connect to the anthive server (generic auth setup,
+     `"pyodide" in sys.modules` detection for the in-browser micropip
+     install path)
+  3. code — `DB_ID`, `GEOM`, `PLOT_PARAMS`, `RENDER_PARAMS`
+  4. code — render the plot via the API (PNG + caption inline)
+  5. markdown — "Pull the raw data" intro
+  6. code — fetch the data as a pandas DataFrame
+  7. markdown — "Render the plot yourself" intro
+  8. code — matplotlib/seaborn snippet re-rendering the plot from the
+     DataFrame
+* **`PLOT_PARAMS` (biology) vs `RENDER_PARAMS` (visual)** are emitted as
+  two separate `dict(...)` calls in cell 3 and merged at the call site
+  in cells 4 + 6:
+  ```python
+  img = c.get_plot(DB_ID, GEOM, **PLOT_PARAMS, **RENDER_PARAMS, format="png")
+  ```
+  Biology bucket covers selectors (`x`, `y`, `color`, `subset`, `layer`,
+  `study`, `term`, `contrast`, etc.) + hypothesis-level thresholds
+  (`padj_threshold`, `log2fc_threshold`). Render bucket covers visual
+  tweaks (`width`/`height`/`dpi`, `alpha`, palettes, clip ranges,
+  `n_label`, `window`, etc.). Unknown keys default to the biology
+  bucket.
+* **`dict(...)` syntax instead of `{...}`** for the params — reads
+  better and lets the user kwarg-unpack cleanly. Non-identifier keys
+  (rare) fall back to `**{"weird.key": "value"}` for that entry only.
+* **Generic auth cell** — the auth helper no longer branches on
+  Authelia / HTTP Basic / public; the active line
+  `c = AnthiveClient(BASE_URL)` works for all four deployment cases.
+  Inline comments point at the pyvark and vark CLI documentation
+  (`codeberg.org/mfiers/pyvark`, `codeberg.org/mfiers/vark`). The
+  `X-Anthive-Auth-Case` response header is kept for client telemetry.
+* **JupyterLite detection** uses `"pyodide" in sys.modules` instead of
+  the older `try: from vark import AnthiveClient / except ImportError:
+  micropip.install` pattern — avoids the misleading "ImportError →
+  install" code path when the real issue (outside JupyterLite) is that
+  the user needs to `pip install pyvark` first.
+* **De-novo snippet (cell 8)** — geom-specific matplotlib/seaborn
+  starting point that re-renders an approximation of the figure from
+  the DataFrame in cell 6. Eleven geoms get real code (`scatter`,
+  `hexbin`, `violin`, `box`, `bar`, `histogram`, `ecdf`, `kde`,
+  `kde2d`, `heatmap`, `rolling`). Four DE-driven geoms (`volcano`,
+  `ma`, `forest`, `de_heatmap`) get a comment-only stub pointing at
+  the server-rendered PNG from cell 4 and at `lib/plotting.py` as the
+  reference implementation.
+
+Caller impact: clients that consumed the notebook content positionally
+(e.g. "cell 1 = data pull", "cell 2 = render") need to follow the new
+cell order. Endpoint URLs, content type
+(`application/x-ipynb+json`), and response headers (`X-Plot-Title`,
+`X-Plot-Filename`, `X-Plot-Caption`, `X-Anthive-Auth-Case`) are all
+unchanged.
+
+---
+
 ## 2.10.0 — 2026-06-22
 
 ### Added — three new knobs on `/plot/de_heatmap`

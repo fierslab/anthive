@@ -1299,7 +1299,7 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.10.0"
+API_VERSION = "2.11.0"
 API_VERSION_RELEASED = "2026-06-22"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
@@ -5451,74 +5451,96 @@ def _notebook_base_url(request: Request) -> str:
     return f"{proto}://{host}/api"
 
 
-def _build_auth_block(case: str, remote_user: Optional[str]) -> str:
-    """Render the Cell-2 auth block as a Python source fragment.
+# Param classifier for the split PLOT_PARAMS (biology) vs RENDER_PARAMS
+# (visual tweaks) dicts emitted in the notebook. See doc/API_CHANGELOG.md
+# §2.11.0 for rationale.
+_NOTEBOOK_BIOLOGY_PARAMS = frozenset({
+    'x', 'y', 'color', 'subset', 'layer', 'sample',
+    'study', 'term', 'contrast', 'gene',
+    'contrasts', 'genes', 'value',
+    'sig_overlay', 'padj_threshold', 'log2fc_threshold',
+    'regline', 'marginals',
+    'group_by', 'bar_mode', 'normalize', 'facet',
+    'transform_x', 'transform_y', 'asinh_scale',
+    'sort', 'sort_desc',
+    'log_x', 'log_y', 'ci', 'n_genes',
+})
+_NOTEBOOK_RENDER_PARAMS = frozenset({
+    'width', 'height', 'dpi', 'alpha', 'point_size',
+    'gridsize', 'mincnt', 'bins', 'kde_n', 'kde_bw', 'n_levels',
+    'iso_overlay', 'point_overlay',
+    'palette_categorical', 'palette_continuous', 'palette_divergent',
+    'color_scale', 'font_family', 'font_size',
+    'vmin', 'vmax', 'vmin_quantile', 'vmax_quantile',
+    'log2fc_clip', 'neglog10p_clip', 'logmean_clip',
+    'n_label', 'window', 'show_band', 'zscore',
+})
 
-    The ACTIVE (uncommented) line is always
-    ``c = AnthiveClient(BASE_URL)`` — it works inside JupyterLite via the
-    Authelia cookie, and works on workstations via pyvark[vark-config]
-    auto-discovery. The commented line is the explicit-password fallback.
+
+def _is_biology_param(name: str) -> bool:
+    """Classify a notebook param key into the biology bucket (vs render).
+
+    Unknown params default to biology — they're more likely to be plot
+    selectors than visual knobs, and grouping them with PLOT_PARAMS keeps
+    rendering tweaks small + scannable.
     """
-    if case == 'public':
-        return (
-            "# Passwordless deployment — no credentials needed.\n"
-            "c = AnthiveClient(BASE_URL)"
-        )
-    if case == 'authelia':
-        user = remote_user or '<user>'
-        return (
-            "# Authelia-gated deployment. Inside JupyterLite at this server's\n"
-            "# origin, the Authelia session cookie carries the auth for you.\n"
-            "# When you copy this notebook elsewhere, uncomment and fill in the\n"
-            "# password (or install pyvark[vark-config] to reuse Go vark CLI\n"
-            "# credentials):\n"
-            "c = AnthiveClient(BASE_URL)\n"
-            f"# c = AnthiveClient(BASE_URL, auth=({user!r}, \"<your-password>\"))"
-        )
-    if case == 'basic':
-        user = remote_user or '<user>'
-        return (
-            "# HTTP Basic-gated deployment. The active line works inside\n"
-            "# JupyterLite at this server's origin (the browser sends the\n"
-            "# stored credentials with each fetch). Outside JupyterLite,\n"
-            "# uncomment and fill in the password (or install\n"
-            "# pyvark[vark-config] to reuse Go vark CLI credentials):\n"
-            "c = AnthiveClient(BASE_URL)\n"
-            f"# c = AnthiveClient(BASE_URL, auth=({user!r}, \"<your-password>\"))"
-        )
-    # Fallback — gated, unknown user.
-    return (
-        "# This server appears to be gated, but the request reaching ant-serve\n"
-        "# carried no auth headers we recognise. Uncomment and edit when\n"
-        "# running this notebook outside JupyterLite (or install\n"
-        "# pyvark[vark-config] to reuse Go vark CLI credentials):\n"
-        "c = AnthiveClient(BASE_URL)\n"
-        "# c = AnthiveClient(BASE_URL, auth=(\"<user>\", \"<password>\"))"
-    )
+    if name in _NOTEBOOK_RENDER_PARAMS:
+        return False
+    return True  # both known-biology and unknown go here
 
 
-def _build_notebook_for_plot(
-    *,
-    db_id: str,
-    geom: str,
+def _dict_call_literal(items: Dict[str, Any]) -> str:
+    """Render a dict as a ``dict(...)`` call expression.
+
+    Falls back to dict-literal syntax for individual non-identifier keys
+    via ``**{"weird.key": "value"}``. Returns ``dict()`` for an empty dict.
+    """
+    if not items:
+        return "dict()"
+    import keyword as _keyword
+    parts: list[str] = []
+    weird: Dict[str, Any] = {}
+    for key, val in items.items():
+        if isinstance(key, str) and key.isidentifier() and not _keyword.iskeyword(key):
+            parts.append(f"{key}={val!r}")
+        else:
+            weird[key] = val
+    if weird:
+        # Render the non-identifier keys as **{...}.
+        weird_literal = (
+            "{"
+            + ", ".join(f"{k!r}: {v!r}" for k, v in weird.items())
+            + "}"
+        )
+        parts.append(f"**{weird_literal}")
+    return "dict(" + ", ".join(parts) + ")"
+
+
+def _split_plot_render_params(
     plot_params: Dict[str, Any],
-    caption: str,
-    base_url: str,
-    auth_block: str,
-    title: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Assemble the nbformat-4 JSON dict for a plot URL.
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Split a flat params dict into (biology, render) sub-dicts.
 
-    Three cells: a markdown intro + caption + disclaimer, a code cell that
-    fetches the plot data as a pandas DataFrame, and a code cell that
-    renders the PNG inline with the caption underneath.
-
-    ``title`` is the biology-keyed X-Plot-Title for cell 0. Falls back to
-    ``"{db_id} - {geom}"`` for callers that don't provide it.
+    Order is preserved from the input — biology entries keep their
+    relative order, render entries keep theirs.
     """
-    heading = title if title else f"{db_id} - {geom}"
-    title_md = (
-        f"# {heading}\n"
+    biology: Dict[str, Any] = {}
+    render: Dict[str, Any] = {}
+    for key, val in plot_params.items():
+        if _is_biology_param(key):
+            biology[key] = val
+        else:
+            render[key] = val
+    return biology, render
+
+
+# ── notebook-cell builders ───────────────────────────────────────────────
+
+
+def _intro_md(title: str, caption: str) -> str:
+    """Cell 1 markdown: title + caption + JupyterLite persistence disclaimer."""
+    return (
+        f"# {title}\n"
         f"\n"
         f"{caption}\n"
         f"\n"
@@ -5531,70 +5553,421 @@ def _build_notebook_for_plot(
         f"credentials; the auth block below becomes a no-op."
     )
 
-    # Pretty-print the params dict for the source cell. repr() on a dict
-    # with stable key order gives a deterministic, copy-paste-safe Python
-    # literal.
-    params_literal = '{\n' + ''.join(
-        f"    {k!r}: {v!r},\n" for k, v in plot_params.items()
-    ) + '}'
-    if not plot_params:
-        params_literal = '{}'
 
-    fetch_data_src = (
-        "# Pull the same data the plot was rendered from, as a pandas DataFrame.\n"
-        "# In JupyterLite / Pyodide, pyvark is fetched from PyPI on first use\n"
-        "# via micropip (this cell auto-installs it). In a regular Jupyter\n"
-        "# kernel the first import succeeds and the micropip branch is skipped.\n"
-        "try:\n"
-        "    from vark import AnthiveClient\n"
-        "except ImportError:\n"
+def _auth_cell(base_url: str) -> str:
+    """Cell 2: connect to the anthive server.
+
+    Generic phrasing — does NOT mention Authelia or any specific gateway.
+    The active line is ``c = AnthiveClient(BASE_URL)`` which works for all
+    four deployment cases (public / JupyterLite cookie / vark-config /
+    explicit auth). The explicit-password line is provided as a commented
+    escape hatch.
+    """
+    return (
+        "# Connect to the anthive server.\n"
+        "#\n"
+        "# In JupyterLite (the in-browser flavour of this notebook) you're already\n"
+        "# authenticated via your browser session — no credentials below are needed.\n"
+        "#\n"
+        "# Anywhere else (a local Jupyter, your laptop's IDE, a CI runner):\n"
+        "#  - the easiest path is to install `pyvark[vark-config]` and let pyvark\n"
+        "#    pick up credentials stored by the Go `vark` CLI. See\n"
+        "#    https://codeberg.org/mfiers/pyvark#reusing-vark-cli-credentials\n"
+        "#  - or pass auth=(\"user\", \"password\") explicitly to AnthiveClient(...)\n"
+        "#\n"
+        "# Documentation:\n"
+        "#   pyvark: https://codeberg.org/mfiers/pyvark\n"
+        "#   vark:   https://codeberg.org/mfiers/vark\n"
+        "\n"
+        "# JupyterLite/Pyodide auto-installs pyvark from PyPI on first use:\n"
+        "import sys\n"
+        "if \"pyodide\" in sys.modules:\n"
         "    import micropip\n"
-        "    await micropip.install('pyvark')\n"
-        "    from vark import AnthiveClient\n"
-        "import pandas as pd, io\n"
+        "    await micropip.install(\"pyvark\")\n"
+        "from vark import AnthiveClient\n"
         "\n"
         f"BASE_URL = {base_url!r}\n"
-        f"DB_ID    = {db_id!r}\n"
-        f"GEOM     = {geom!r}\n"
-        f"PARAMS   = {params_literal}\n"
+        "c = AnthiveClient(BASE_URL)  # JupyterLite + vark-config both work without explicit auth=\n"
+        "# c = AnthiveClient(BASE_URL, auth=(\"<user>\", \"<password>\"))  # explicit-credentials fallback"
+    )
+
+
+def _params_cell(
+    db_id: str,
+    geom: str,
+    biology_params: Dict[str, Any],
+    render_params: Dict[str, Any],
+) -> str:
+    """Cell 3: define DB_ID, GEOM, PLOT_PARAMS (biology), RENDER_PARAMS (visual)."""
+    plot_literal = _dict_call_literal(biology_params)
+    render_literal = _dict_call_literal(render_params)
+    return (
+        f"DB_ID = {db_id!r}\n"
+        f"GEOM  = {geom!r}\n"
         "\n"
-        f"{auth_block}\n"
+        "# What to plot - dataset, fields, filters, etc.\n"
+        f"PLOT_PARAMS = {plot_literal}\n"
         "\n"
-        "result = c.get_plot(DB_ID, GEOM, format=\"csv\", **PARAMS)\n"
+        "# Visual rendering tweaks - change these freely.\n"
+        f"RENDER_PARAMS = {render_literal}"
+    )
+
+
+def _plot_render_cell() -> str:
+    """Cell 4: render the plot via the API + display the caption inline."""
+    return (
+        "# Render the plot via the anthive server (PNG + caption).\n"
+        "# The caption is the multi-sentence figure legend - it only exists here.\n"
+        "from IPython.display import Image, Markdown, display\n"
+        "\n"
+        "img = c.get_plot(DB_ID, GEOM, **PLOT_PARAMS, **RENDER_PARAMS, format=\"png\")\n"
+        "display(Image(data=img[\"bytes\"]))\n"
+        "display(Markdown(f\"**Caption.** {img['caption']}\"))"
+    )
+
+
+def _data_pull_intro_md() -> str:
+    """Cell 5 markdown: intro to the data-pull cell."""
+    return (
+        "## Pull the raw data\n"
+        "\n"
+        "The same `get_plot` call also exposes the underlying data frame "
+        "(via `format=\"csv\"`). Useful for downstream analysis or a custom "
+        "matplotlib pass."
+    )
+
+
+def _data_pull_cell() -> str:
+    """Cell 6: pull the data behind the plot as a pandas DataFrame."""
+    return (
+        "import pandas as pd, io\n"
+        "\n"
+        "result = c.get_plot(DB_ID, GEOM, **PLOT_PARAMS, **RENDER_PARAMS, format=\"csv\")\n"
         "df = pd.read_csv(io.BytesIO(result[\"bytes\"]))\n"
         "df.head()"
     )
 
-    render_plot_src = (
-        "# Render the plot inline. The same call also fetches the\n"
-        "# X-Plot-Caption (anthive's multi-sentence figure legend —\n"
-        "# the only place it exists).\n"
-        "from IPython.display import Image, Markdown, display\n"
+
+def _denovo_intro_md() -> str:
+    """Cell 7 markdown: intro to the de-novo plot snippet."""
+    return (
+        "## Render the plot yourself\n"
         "\n"
-        "img = c.get_plot(DB_ID, GEOM, format=\"png\", **PARAMS)\n"
-        "display(Image(data=img[\"bytes\"]))\n"
-        "display(Markdown(f\"**Caption.** {img['caption']}\"))"
+        "A minimal matplotlib/seaborn starting point that re-renders the same "
+        "plot from `df`. Not pixel-perfect — copy + tweak from here."
     )
+
+
+def _denovo_snippet_for(geom: str, plot_params: Dict[str, Any]) -> str:
+    """Geom-specific matplotlib snippet that re-renders the plot from ``df``.
+
+    For the 11 "real-code" geoms returns runnable matplotlib/seaborn. For
+    the DE-driven geoms (volcano / ma / forest / de_heatmap), returns a
+    comment-only stub that points at the server-rendered PNG from cell 4
+    and at ``lib/plotting.py``.
+    """
+    x_field = plot_params.get('x')
+    y_field = plot_params.get('y')
+    color_field = plot_params.get('color')
+
+    # ── DE-driven geoms: server-rendered is the easy path, stub only. ─────
+    if geom in {'volcano', 'ma', 'forest', 'de_heatmap'}:
+        return (
+            f"# {geom!r} is a DE-driven geom: a 100+ line implementation in\n"
+            "# lib/plotting.py (clamps, adjustText labels, significance overlays,\n"
+            "# divergent palettes with auto-zero centring).\n"
+            "#\n"
+            "# The server-rendered PNG in cell 4 IS the easy path. If you want\n"
+            "# to customise: branch off that figure, or read lib/plotting.py in\n"
+            "# the anthive4 repo for a reference implementation.\n"
+            "#\n"
+            "# `df` still holds the underlying numbers (effect sizes, p-values,\n"
+            "# row/column labels) so you can drive a fresh plot if you need to.\n"
+            "df.head()"
+        )
+
+    # ── scatter ───────────────────────────────────────────────────────────
+    if geom == 'scatter':
+        is_embedding = isinstance(x_field, str) and (
+            x_field.startswith('X_') or x_field.lower() == 'umap'
+        )
+        if is_embedding or x_field is None:
+            color = color_field
+            return (
+                "import matplotlib.pyplot as plt\n"
+                "import seaborn as sns\n"
+                "\n"
+                "# Embedding scatter: dim_0 / dim_1 are the projection axes.\n"
+                f"COLOR_FIELD = {color!r}\n"
+                "fig, ax = plt.subplots(figsize=(7, 6))\n"
+                "if COLOR_FIELD and COLOR_FIELD in df.columns:\n"
+                "    if df[COLOR_FIELD].dtype == 'object' or str(df[COLOR_FIELD].dtype).startswith('category'):\n"
+                "        sns.scatterplot(data=df, x='dim_0', y='dim_1', hue=COLOR_FIELD, s=4, ax=ax, linewidth=0)\n"
+                "    else:\n"
+                "        sc = ax.scatter(df['dim_0'], df['dim_1'], c=df[COLOR_FIELD], s=4, cmap='inferno_r')\n"
+                "        fig.colorbar(sc, ax=ax, label=COLOR_FIELD)\n"
+                "else:\n"
+                "    ax.scatter(df['dim_0'], df['dim_1'], s=4, color='steelblue')\n"
+                "ax.set_xlabel('dim_0'); ax.set_ylabel('dim_1')\n"
+                "plt.tight_layout()"
+            )
+        # XY scatter
+        return (
+            "import matplotlib.pyplot as plt\n"
+            "import seaborn as sns\n"
+            "\n"
+            f"X_FIELD = {x_field!r}\n"
+            f"Y_FIELD = {y_field!r}\n"
+            f"COLOR_FIELD = {color_field!r}\n"
+            "fig, ax = plt.subplots(figsize=(7, 6))\n"
+            "if COLOR_FIELD and COLOR_FIELD in df.columns:\n"
+            "    if df[COLOR_FIELD].dtype == 'object' or str(df[COLOR_FIELD].dtype).startswith('category'):\n"
+            "        sns.scatterplot(data=df, x=X_FIELD, y=Y_FIELD, hue=COLOR_FIELD, s=10, ax=ax, linewidth=0)\n"
+            "    else:\n"
+            "        sc = ax.scatter(df[X_FIELD], df[Y_FIELD], c=df[COLOR_FIELD], s=10, cmap='inferno_r')\n"
+            "        fig.colorbar(sc, ax=ax, label=COLOR_FIELD)\n"
+            "else:\n"
+            "    ax.scatter(df[X_FIELD], df[Y_FIELD], s=10, color='steelblue')\n"
+            "ax.set_xlabel(X_FIELD); ax.set_ylabel(Y_FIELD)\n"
+            "plt.tight_layout()"
+        )
+
+    # ── hexbin ────────────────────────────────────────────────────────────
+    if geom == 'hexbin':
+        is_embedding = isinstance(x_field, str) and (
+            x_field.startswith('X_') or x_field.lower() == 'umap'
+        )
+        x_col = "'dim_0'" if is_embedding or x_field is None else f"{x_field!r}"
+        y_col = "'dim_1'" if is_embedding or x_field is None else f"{y_field!r}"
+        return (
+            "import matplotlib.pyplot as plt\n"
+            "import numpy as np\n"
+            "\n"
+            f"X_COL = {x_col}\n"
+            f"Y_COL = {y_col}\n"
+            f"COLOR_FIELD = {color_field!r}\n"
+            "fig, ax = plt.subplots(figsize=(7, 6))\n"
+            "if COLOR_FIELD and COLOR_FIELD in df.columns:\n"
+            "    hb = ax.hexbin(df[X_COL], df[Y_COL], C=df[COLOR_FIELD],\n"
+            "                    reduce_C_function=np.mean, gridsize=30, cmap='inferno_r')\n"
+            "    fig.colorbar(hb, ax=ax, label=f'mean({COLOR_FIELD})')\n"
+            "else:\n"
+            "    hb = ax.hexbin(df[X_COL], df[Y_COL], gridsize=30, cmap='inferno_r', mincnt=1)\n"
+            "    fig.colorbar(hb, ax=ax, label='count')\n"
+            "ax.set_xlabel(X_COL); ax.set_ylabel(Y_COL)\n"
+            "plt.tight_layout()"
+        )
+
+    # ── violin / box ──────────────────────────────────────────────────────
+    if geom in {'violin', 'box'}:
+        fn = 'violinplot' if geom == 'violin' else 'boxplot'
+        return (
+            "import matplotlib.pyplot as plt\n"
+            "import seaborn as sns\n"
+            "\n"
+            f"X_FIELD = {x_field!r}\n"
+            f"Y_FIELD = {y_field!r}\n"
+            "fig, ax = plt.subplots(figsize=(8, 5))\n"
+            f"sns.{fn}(data=df, x=X_FIELD, y=Y_FIELD, ax=ax)\n"
+            "plt.xticks(rotation=30, ha='right')\n"
+            "plt.tight_layout()"
+        )
+
+    # ── bar ───────────────────────────────────────────────────────────────
+    if geom == 'bar':
+        return (
+            "import matplotlib.pyplot as plt\n"
+            "\n"
+            f"X_FIELD = {x_field!r}\n"
+            f"Y_FIELD = {y_field!r}\n"
+            "fig, ax = plt.subplots(figsize=(8, 5))\n"
+            "if Y_FIELD and Y_FIELD in df.columns:\n"
+            "    df.groupby(X_FIELD)[Y_FIELD].mean().plot.bar(ax=ax, color='steelblue')\n"
+            "    ax.set_ylabel(f'mean({Y_FIELD})')\n"
+            "else:\n"
+            "    df[X_FIELD].value_counts().plot.bar(ax=ax, color='steelblue')\n"
+            "    ax.set_ylabel('count')\n"
+            "ax.set_xlabel(X_FIELD)\n"
+            "plt.xticks(rotation=30, ha='right')\n"
+            "plt.tight_layout()"
+        )
+
+    # ── histogram ─────────────────────────────────────────────────────────
+    if geom == 'histogram':
+        return (
+            "import matplotlib.pyplot as plt\n"
+            "\n"
+            f"X_FIELD = {x_field!r}\n"
+            "fig, ax = plt.subplots(figsize=(7, 4))\n"
+            "ax.hist(df[X_FIELD].dropna(), bins=30, color='steelblue', edgecolor='white')\n"
+            "ax.set_xlabel(X_FIELD); ax.set_ylabel('count')\n"
+            "plt.tight_layout()"
+        )
+
+    # ── ecdf ──────────────────────────────────────────────────────────────
+    if geom == 'ecdf':
+        return (
+            "import matplotlib.pyplot as plt\n"
+            "import numpy as np\n"
+            "\n"
+            f"X_FIELD = {x_field!r}\n"
+            "values = np.sort(df[X_FIELD].dropna().values)\n"
+            "fig, ax = plt.subplots(figsize=(7, 5))\n"
+            "ax.plot(values, np.arange(len(values)) / max(len(values), 1), drawstyle='steps-post')\n"
+            "ax.set_xlabel(X_FIELD); ax.set_ylabel('ECDF')\n"
+            "plt.tight_layout()"
+        )
+
+    # ── kde (1-D) ─────────────────────────────────────────────────────────
+    if geom == 'kde':
+        return (
+            "import matplotlib.pyplot as plt\n"
+            "import seaborn as sns\n"
+            "\n"
+            f"X_FIELD = {x_field!r}\n"
+            f"COLOR_FIELD = {color_field!r}\n"
+            "fig, ax = plt.subplots(figsize=(7, 4))\n"
+            "if COLOR_FIELD and COLOR_FIELD in df.columns:\n"
+            "    sns.kdeplot(data=df, x=X_FIELD, hue=COLOR_FIELD, ax=ax, fill=False)\n"
+            "else:\n"
+            "    sns.kdeplot(data=df, x=X_FIELD, ax=ax, fill=True)\n"
+            "ax.set_xlabel(X_FIELD)\n"
+            "plt.tight_layout()"
+        )
+
+    # ── kde2d ─────────────────────────────────────────────────────────────
+    if geom == 'kde2d':
+        return (
+            "import matplotlib.pyplot as plt\n"
+            "import seaborn as sns\n"
+            "\n"
+            f"X_FIELD = {x_field!r}\n"
+            f"Y_FIELD = {y_field!r}\n"
+            "fig, ax = plt.subplots(figsize=(7, 6))\n"
+            "sns.kdeplot(data=df, x=X_FIELD, y=Y_FIELD, fill=True, cmap='inferno_r', ax=ax)\n"
+            "ax.set_xlabel(X_FIELD); ax.set_ylabel(Y_FIELD)\n"
+            "plt.tight_layout()"
+        )
+
+    # ── heatmap (gene × category) ─────────────────────────────────────────
+    if geom == 'heatmap':
+        return (
+            "import matplotlib.pyplot as plt\n"
+            "import seaborn as sns\n"
+            "\n"
+            "# Heatmap CSV is already pivoted (rows = category, cols = gene/module,\n"
+            "# values = mean expression). If the first column is the row label,\n"
+            "# set it as the index before plotting.\n"
+            "matrix = df.copy()\n"
+            "non_numeric = [c for c in matrix.columns if matrix[c].dtype == 'object']\n"
+            "if non_numeric:\n"
+            "    matrix = matrix.set_index(non_numeric[0])\n"
+            "fig, ax = plt.subplots(figsize=(max(6, 0.5 * matrix.shape[1]), max(4, 0.4 * matrix.shape[0])))\n"
+            "sns.heatmap(matrix, cmap='RdBu_r', center=0, ax=ax, cbar_kws={'label': 'mean expr'})\n"
+            "plt.tight_layout()"
+        )
+
+    # ── rolling (trajectory) ──────────────────────────────────────────────
+    if geom == 'rolling':
+        return (
+            "import matplotlib.pyplot as plt\n"
+            "\n"
+            f"X_FIELD = {x_field!r}\n"
+            f"Y_FIELD = {y_field!r}\n"
+            "window = 200\n"
+            "sorted_df = df.sort_values(X_FIELD).reset_index(drop=True)\n"
+            "rolled = sorted_df[Y_FIELD].rolling(window=window, min_periods=1).mean()\n"
+            "fig, ax = plt.subplots(figsize=(8, 4))\n"
+            "ax.plot(sorted_df[X_FIELD], rolled, color='steelblue', linewidth=2)\n"
+            "ax.set_xlabel(X_FIELD); ax.set_ylabel(f'rolling mean({Y_FIELD}, w={window})')\n"
+            "plt.tight_layout()"
+        )
+
+    # Defensive fallback — should be unreachable given the geom validator.
+    return (
+        f"# No de-novo snippet available for geom={geom!r}.\n"
+        "# The server-rendered PNG in cell 4 is the canonical output.\n"
+        "df.head()"
+    )
+
+
+def _build_notebook_for_plot(
+    *,
+    db_id: str,
+    geom: str,
+    plot_params: Dict[str, Any],
+    caption: str,
+    base_url: str,
+    title: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Assemble the nbformat-4 JSON dict for a plot URL.
+
+    Eight cells (API 2.11.0+):
+      1. markdown — title + caption + persistence disclaimer
+      2. code     — connect to the anthive server (generic auth setup)
+      3. code     — DB_ID / GEOM / PLOT_PARAMS (biology) / RENDER_PARAMS (visual)
+      4. code     — render the plot via the API (PNG + caption inline)
+      5. markdown — "Pull the raw data" intro
+      6. code     — fetch the data as a pandas DataFrame
+      7. markdown — "Render the plot yourself" intro
+      8. code     — matplotlib/seaborn snippet that re-renders from df
+
+    ``title`` is the biology-keyed X-Plot-Title for cell 1. Falls back to
+    ``"{db_id} - {geom}"`` for callers that don't provide it.
+    """
+    heading = title if title else f"{db_id} - {geom}"
+    biology_params, render_params = _split_plot_render_params(plot_params)
 
     cells = [
         {
             "cell_type": "markdown",
             "metadata": {},
-            "source": title_md,
+            "source": _intro_md(heading, caption),
         },
         {
             "cell_type": "code",
             "metadata": {},
             "execution_count": None,
             "outputs": [],
-            "source": fetch_data_src,
+            "source": _auth_cell(base_url),
         },
         {
             "cell_type": "code",
             "metadata": {},
             "execution_count": None,
             "outputs": [],
-            "source": render_plot_src,
+            "source": _params_cell(db_id, geom, biology_params, render_params),
+        },
+        {
+            "cell_type": "code",
+            "metadata": {},
+            "execution_count": None,
+            "outputs": [],
+            "source": _plot_render_cell(),
+        },
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": _data_pull_intro_md(),
+        },
+        {
+            "cell_type": "code",
+            "metadata": {},
+            "execution_count": None,
+            "outputs": [],
+            "source": _data_pull_cell(),
+        },
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": _denovo_intro_md(),
+        },
+        {
+            "cell_type": "code",
+            "metadata": {},
+            "execution_count": None,
+            "outputs": [],
+            "source": _denovo_snippet_for(geom, plot_params),
         },
     ]
 
@@ -5730,8 +6103,10 @@ async def _build_notebook_response(
         plot_response.headers.get('X-Plot-Filename-Truncated') == 'true'
     )
 
-    case, remote_user, _passwordless = _detect_notebook_auth(request)
-    auth_block = _build_auth_block(case, remote_user)
+    # The X-Anthive-Auth-Case header is kept for client telemetry, but the
+    # notebook content no longer branches on it — the generic auth cell
+    # works for all four cases.
+    case, _remote_user, _passwordless = _detect_notebook_auth(request)
     base_url = _notebook_base_url(request)
 
     notebook_dict = _build_notebook_for_plot(
@@ -5741,7 +6116,6 @@ async def _build_notebook_response(
         caption=caption,
         title=title,
         base_url=base_url,
-        auth_block=auth_block,
     )
 
     filename = f"{plot_filename}.ipynb"
