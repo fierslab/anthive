@@ -5721,17 +5721,53 @@ import re as _re_notebook_filename
 _NOTEBOOK_FILENAME_RE = _re_notebook_filename.compile(r'^[A-Za-z0-9_-]{1,100}$')
 
 
+# Shared notebook-generator docstring fragment, referenced by both
+# route handlers (the back-compat /plot.ipynb route and the
+# biology-keyed /{filename}.ipynb route).
+_NOTEBOOK_B64_DOC = (
+    "Notebook generator with all plot params encoded as a base64-url-safe "
+    "JSON blob in the URL path. Functionally equivalent to "
+    "``GET /databases/{db_id}/plot/{geom}/notebook.ipynb?<params>`` but with "
+    "NO query string — required for JupyterLite's ``?fromURL=`` deep link "
+    "to save the resulting notebook with a recognisable ``.ipynb`` basename.\n\n"
+    "Two URL shapes are accepted, with identical behaviour:\n\n"
+    "* ``/notebook/{b64}/plot.ipynb`` — back-compat for older clients.\n"
+    "* ``/notebook/{b64}/{filename}.ipynb`` — ``filename`` can be any "
+    "``[A-Za-z0-9_-]{1,100}`` token; lets the client pass the biology-keyed "
+    "filename (from ``/notebook/{b64}/meta``) so JupyterLite saves the "
+    "file under the descriptive basename instead of literal ``plot``."
+)
+
+
 @app.get(
     "/notebook/{b64params}/plot.ipynb",
     tags=["plots"],
     response_class=JSONResponse,
 )
+async def plot_notebook_b64_endpoint(
+    b64params: str = FastAPIPath(
+        ...,
+        description=(
+            "Base64-url-safe-encoded JSON of the plot params. MUST include "
+            "``db_id`` and ``geom`` keys; everything else maps to the same "
+            "params as ``/databases/{db_id}/plot/{geom}/notebook?...``."
+        ),
+    ),
+    request: Request = None,  # type: ignore[assignment]
+):
+    """Back-compat alias of ``/notebook/{b64params}/{filename}.ipynb`` with
+    ``filename=plot``. Pre-API-2.9.2 clients use this URL.
+    """
+    db_id, geom, params = _decode_b64_notebook_params(b64params)
+    return await _build_notebook_response(db_id, geom, params, request)
+
+
 @app.get(
     "/notebook/{b64params}/{filename}.ipynb",
     tags=["plots"],
     response_class=JSONResponse,
 )
-async def plot_notebook_b64_endpoint(
+async def plot_notebook_b64_named_endpoint(
     b64params: str = FastAPIPath(
         ...,
         description=(
@@ -5745,7 +5781,7 @@ async def plot_notebook_b64_endpoint(
         ),
     ),
     filename: str = FastAPIPath(
-        'plot',
+        ...,
         description=(
             "The saved filename basename in JupyterLite's in-browser FS "
             "(without the ``.ipynb`` extension). Server ignores it for the "
@@ -5757,18 +5793,8 @@ async def plot_notebook_b64_endpoint(
     request: Request = None,  # type: ignore[assignment]
 ):
     """Notebook generator with all plot params encoded as a base64-url-safe
-    JSON blob in the URL path. Functionally equivalent to
-    ``GET /databases/{db_id}/plot/{geom}/notebook.ipynb?<params>`` but with
-    NO query string — required for JupyterLite's ``?fromURL=`` deep link
-    to save the resulting notebook with a recognisable ``.ipynb`` basename.
-
-    Two URL shapes are accepted, with identical behaviour:
-
-    * ``/notebook/{b64}/plot.ipynb`` — back-compat for older clients.
-    * ``/notebook/{b64}/{filename}.ipynb`` — ``filename`` can be any
-      ``[A-Za-z0-9_-]{1,100}`` token; lets the client pass the biology-keyed
-      filename (from ``/notebook/{b64}/meta``) so JupyterLite saves the
-      file under the descriptive basename instead of literal ``plot``.
+    JSON blob in the URL path, plus a biology-keyed ``filename`` segment
+    that JupyterLite uses as the in-browser-FS basename.
 
     The encoded blob is a JSON object::
 
@@ -5780,6 +5806,12 @@ async def plot_notebook_b64_endpoint(
     (Python) or the JS equivalent (``btoa`` with ``+`` → ``-`` and
     ``/`` → ``_``). Trailing ``=`` padding is optional — the decoder is
     tolerant.
+
+    ``filename`` is purely cosmetic (the b64 blob still drives the
+    response). Use ``/notebook/{b64params}/meta`` to compute the
+    biology-keyed filename before opening JupyterLite, then put that
+    filename in this URL — JupyterLite saves the notebook under that
+    basename instead of literal ``plot.ipynb``.
     """
     # ``filename`` is cosmetic — the response body is driven entirely by
     # the b64 blob. Validate it just enough to refuse abuse / weird URLs.
