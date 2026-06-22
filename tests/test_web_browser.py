@@ -756,6 +756,16 @@ def test_plot_view_ma_axis_clamp(client):
     assert 'name="logmean_clip"' in resp.text
 
 
+def test_plot_view_notebook_button(client):
+    # "📓 notebook" opens the plot as a one-off JupyterLite notebook via the
+    # ant-serve /plot/{geom}/notebook endpoint + JupyterLite ?fromURL= (API 2.8).
+    resp = client.get("/browse/GroupA/ds1/plot/scatter")
+    assert resp.status_code == 200
+    assert 'id="open-notebook"' in resp.text
+    assert "/jupyter/lab/index.html?fromURL=" in resp.text
+    assert "'/notebook'" in resp.text
+
+
 def test_plot_view_forest_gene_input(client):
     resp = client.get("/browse/GroupA/ds1/plot/forest")
     assert resp.status_code == 200

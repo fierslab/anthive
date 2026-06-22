@@ -702,6 +702,7 @@
           </div>
         </div>
       </span>
+      <a id="open-notebook" href="#" title="Open this exact plot as a one-off JupyterLite notebook (runs in your browser; download it to keep changes)">📓 notebook</a>
       <a id="force-refresh" href="#" title="re-render this figure, bypassing the server + browser cache">↻ refresh</a>
       <a id="copy-url" href="#">copy URL</a>
     </div>
@@ -1099,6 +1100,30 @@
   document.getElementById('force-refresh').addEventListener('click', e => {
     e.preventDefault();
     refresh({ bust: true });
+  });
+
+  // ── open this exact plot as a one-off JupyterLite notebook
+  //   ant-serve's /plot/{geom}/notebook returns an .ipynb (data pull + plot +
+  //   caption + browser-only-persistence disclaimer). JupyterLite's ?fromURL=
+  //   fetches it (same-origin → the Authelia cookie carries) and opens it in a
+  //   new tab. Contract agreed with anthive4 (API 2.8.0).
+  document.getElementById('open-notebook').addEventListener('click', e => {
+    e.preventDefault();
+    if (!canRender()) {
+      status.innerHTML = `<span class="err">${renderHint()} before opening a notebook</span>`;
+      return;
+    }
+    // buildUrl() → …/databases/{db}/plot/{geom}?params ; insert /notebook before
+    // the query, keep it same-origin relative so JupyterLite fetches it
+    // authenticated through the user's session.
+    const u = new URL(buildUrl(), window.location.origin);
+    u.pathname = u.pathname + '/notebook';
+    const labUrl = '/jupyter/lab/index.html?fromURL=' +
+                   encodeURIComponent(u.pathname + u.search);
+    window.open(labUrl, '_blank', 'noopener');
+    const orig = e.target.textContent;
+    e.target.textContent = '📓 opening…';
+    setTimeout(() => e.target.textContent = orig, 1400);
   });
 
   // ── autocomplete (gene + obs fields) on free-text inputs

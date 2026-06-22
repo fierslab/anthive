@@ -132,6 +132,13 @@ nothing DE shows):
     `reflectDeCascade()` once the cascade settles. Mark a select
     `data-keep-select` to opt out (the geom switcher does); the `disabled`
     guard keeps removal safe with the polymorphic-scatter mode toggle.
+  - **"📓 notebook"** (`#open-notebook`) opens the current plot as a one-off
+    JupyterLite notebook: it takes `buildUrl()`, inserts `/notebook` before the
+    query (ant-serve `/databases/{id}/plot/{geom}/notebook`, API 2.8 — returns
+    an `.ipynb` with data-pull + plot + caption + browser-only-persistence
+    disclaimer), and `window.open`s `/jupyter/lab/index.html?fromURL=<that,
+    same-origin relative>`. JupyterLite fetches it through the user's Authelia
+    session (no creds in the URL). Guarded on `canRender()`.
   - **Downloads are blob-fetched** (`downloadBlob(fmt, ext)`), not `<a href>` —
     so the long API URL never shows in the browser status bar on hover, and a
     failed render surfaces inline. `copy URL` copies `window.location.href`
