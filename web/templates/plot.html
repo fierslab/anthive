@@ -927,6 +927,10 @@
       // may have undergone so accented characters render correctly.
       const rawCaption = response.headers.get('X-Plot-Caption') || '';
       captionEl.textContent = rawCaption;
+      // Biology-keyed tab title (ant-serve 2.9 X-Plot-Title), e.g.
+      // "S25/V6A: P2RY12 expression on X_umap" — sharper than the static title.
+      const plotTitle = response.headers.get('X-Plot-Title');
+      if (plotTitle) document.title = plotTitle + ' — anthive';
     } catch (e) {
       if (my !== renderToken) return;
       status.innerHTML = `<span class="err">${e.message}</span>`;
@@ -948,7 +952,10 @@
       const objUrl = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = objUrl;
-      a.download = `${DB_ID.replace('/', '_')}.${GEOM}.${ext}`;
+      // Biology-keyed filename (ant-serve 2.9 X-Plot-Filename, no extension),
+      // e.g. "S25_V6A_scatter_P2RY12.png"; fall back to the db.geom heuristic.
+      const baseName = r.headers.get('X-Plot-Filename') || `${DB_ID.replace('/', '_')}.${GEOM}`;
+      a.download = `${baseName}.${ext}`;
       document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(objUrl), 2000);
       status.textContent = '';
