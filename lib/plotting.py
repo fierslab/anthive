@@ -1450,16 +1450,13 @@ def plot_hexbin(
                 if vmin_quantile is not None: vmin = lo
                 if vmax_quantile is not None: vmax = hi
                 clip_used = (vmin_quantile, vmax_quantile)
-        # No per-hex border — a single silhouette is drawn after the
-        # fill (see _draw_hex_silhouette) so the eye sees the shape of
-        # the data, not a grid.
-        # antialiased=False kills the AA seam between adjacent hexes;
-        # otherwise even edgecolors='none' shows a ghost grid because
-        # matplotlib softens the polygon edges.
+        # Thin semi-transparent per-hex border for subtle contrast between
+        # adjacent hexes, with the full silhouette drawn ON TOP (see
+        # _draw_hex_silhouette) as the dominant outline. The 25% alpha
+        # keeps the border visible but never overwhelms low-contrast palettes.
         hb_kwargs: dict = dict(gridsize=gridsize, mincnt=mincnt,
                                cmap=cmap_name,
-                               edgecolors='none', linewidths=0,
-                               antialiaseds=False)
+                               edgecolors=(0, 0, 0, 0.25), linewidths=0.5)
         if vmin is not None: hb_kwargs['vmin'] = vmin
         if vmax is not None: hb_kwargs['vmax'] = vmax
         hb = ax.hexbin(xs, ys, **hb_kwargs)
@@ -1527,12 +1524,10 @@ def plot_hexbin(
             'mincnt': mincnt,
             'cmap': cmap_name,
             'alpha': alpha,
-            # No per-hex border — one silhouette drawn after the fill.
-            # antialiased=False suppresses the AA seam between hexes
-            # that otherwise leaves a visible grid.
-            'edgecolors': 'none',
-            'linewidths': 0,
-            'antialiaseds': False,
+            # Thin semi-transparent per-hex border for subtle inter-cell
+            # contrast; silhouette overlay drawn afterwards.
+            'edgecolors': (0, 0, 0, 0.25),
+            'linewidths': 0.5,
         }
         if used_kind == 'divergent':
             finite = cvals[np.isfinite(cvals)]
@@ -1667,14 +1662,12 @@ def plot_hexbin(
             face_colours[:, 3] = alphas_hex[used]  # set per-hex alpha
             coll = PolyCollection(
                 polys, facecolors=face_colours,
-                # No per-hex border; a single silhouette around the
-                # union of all used hexes is drawn after. The
-                # silhouette is fully opaque (structural outline) even
-                # though per-hex alpha varies with dominance.
-                # antialiased=False suppresses the AA seam between
-                # adjacent hexes that would otherwise read as a grid.
-                edgecolors='none', linewidths=0,
-                antialiaseds=False,
+                # Thin semi-transparent per-hex border. The silhouette
+                # drawn afterwards is fully opaque (structural outline);
+                # this inner grid stays subtle so per-hex alpha (which
+                # varies with dominance in the categorical mode) reads
+                # as the dominant signal.
+                edgecolors=(0, 0, 0, 0.25), linewidths=0.5,
             )
             ax.add_collection(coll)
             ax.set_xlim(xs.min(), xs.max())
