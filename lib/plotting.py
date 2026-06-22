@@ -1269,6 +1269,93 @@ def _cbar_extend(mappable, vmin, vmax) -> str:
     return 'neither'
 
 
+def _draw_hex_silhouette(ax, offsets, hex_polygon, *,
+                        color: str = 'black',
+                        linewidth: float = 0.6) -> None:
+    """Trace ONE outline around the union of all filled hexes.
+
+    Replaces the old per-hex `edgecolors='black'` styling. Each
+    connected region of filled hexes gets its own outline; internal
+    holes (gaps inside the filled blob) get their own inner outline.
+
+    Args:
+        ax:          matplotlib Axes to draw on.
+        offsets:     (n_hex, 2) array of hex CENTRES (already filtered
+                     to only the hexes that should be drawn — i.e.
+                     after `mincnt` / `used`).
+        hex_polygon: (k, 2) vertex array of ONE hex polygon in the
+                     "marker" frame (centred at the origin, in data
+                     units). Same shape for every hex.  Typically the
+                     value of ``hb.get_paths()[0].vertices``.
+        color:       outline colour.  Default black.
+        linewidth:   outline width in points.  0.6 reads well at the
+                     150-dpi server default without dominating.
+
+    Degenerate cases (no filled hexes, or a union that resolves to a
+    Point / LineString because hexes only touch at corners) are
+    silently skipped — the hex fill is still there, just unframed.
+    """
+    if offsets is None or len(offsets) == 0:
+        return
+    try:
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+    except ImportError:
+        # Pure soft-fail: if shapely isn't available, just skip the
+        # silhouette.  The hexes still render — caller already added
+        # them to the Axes.
+        return
+
+    # Buffer each hex outward by ~2 % of the hex apothem before
+    # unioning.  Without it, neighbouring hexes only touch along an
+    # edge — `unary_union` then leaves hairline holes wherever two
+    # hexes share a vertex with sub-ulp coordinate jitter, and the
+    # silhouette traces every one of those false holes as an internal
+    # grid line.  A small buffer is visually invisible (much smaller
+    # than the 0.6-point stroke width) but reliably fuses neighbours.
+    # We then erode by the same amount on the union so the exterior
+    # boundary lands back on the true hex edge.
+    hex_extent = float(max(np.abs(hex_polygon).max(), 1e-12))
+    buffer_amount = hex_extent * 0.02
+
+    polys = [
+        Polygon([(cx + dx, cy + dy) for (dx, dy) in hex_polygon])
+        .buffer(buffer_amount, join_style=2)
+        for cx, cy in offsets
+    ]
+    if not polys:
+        return
+    union = unary_union(polys)
+    if union.is_empty:
+        return
+    # Erode back so the exterior outline lands on the true hex edge.
+    union = union.buffer(-buffer_amount, join_style=2)
+    if union.is_empty:
+        return
+
+    def _stroke(geom) -> None:
+        if geom.geom_type != 'Polygon':
+            return  # skip Point / LineString edge cases
+        exterior_x, exterior_y = geom.exterior.xy
+        ax.plot(exterior_x, exterior_y,
+                color=color, linewidth=linewidth,
+                solid_capstyle='round', solid_joinstyle='round',
+                zorder=3)
+        for interior in geom.interiors:
+            interior_x, interior_y = interior.xy
+            ax.plot(interior_x, interior_y,
+                    color=color, linewidth=linewidth,
+                    solid_capstyle='round', solid_joinstyle='round',
+                    zorder=3)
+
+    if union.geom_type == 'Polygon':
+        _stroke(union)
+    elif union.geom_type == 'MultiPolygon':
+        for geom in union.geoms:
+            _stroke(geom)
+    # GeometryCollection / Point / LineString → nothing useful to draw.
+
+
 def plot_hexbin(
     embedding_df: pd.DataFrame,
     color_df: Optional[pd.DataFrame],
@@ -1363,14 +1450,24 @@ def plot_hexbin(
                 if vmin_quantile is not None: vmin = lo
                 if vmax_quantile is not None: vmax = hi
                 clip_used = (vmin_quantile, vmax_quantile)
-        # Thin black outline per hex — makes the cell grid visible
-        # against light backgrounds and at low data density.
+        # No per-hex border — a single silhouette is drawn after the
+        # fill (see _draw_hex_silhouette) so the eye sees the shape of
+        # the data, not a grid.
+        # antialiased=False kills the AA seam between adjacent hexes;
+        # otherwise even edgecolors='none' shows a ghost grid because
+        # matplotlib softens the polygon edges.
         hb_kwargs: dict = dict(gridsize=gridsize, mincnt=mincnt,
                                cmap=cmap_name,
-                               edgecolors='black', linewidths=0.4)
+                               edgecolors='none', linewidths=0,
+                               antialiaseds=False)
         if vmin is not None: hb_kwargs['vmin'] = vmin
         if vmax is not None: hb_kwargs['vmax'] = vmax
         hb = ax.hexbin(xs, ys, **hb_kwargs)
+        # One outline around the union of all filled hexes.
+        _hex_paths = hb.get_paths()
+        if _hex_paths:
+            _draw_hex_silhouette(ax, hb.get_offsets(),
+                                 _hex_paths[0].vertices)
         # Arrowhead only on a side that genuinely clips — a clip at the 0th/100th
         # percentile (or vmin/vmax outside the data range) caps nothing, so no
         # triangle there.
@@ -1430,9 +1527,12 @@ def plot_hexbin(
             'mincnt': mincnt,
             'cmap': cmap_name,
             'alpha': alpha,
-            # Thin black outline per hex (matches density-mode styling).
-            'edgecolors': 'black',
-            'linewidths': 0.4,
+            # No per-hex border — one silhouette drawn after the fill.
+            # antialiased=False suppresses the AA seam between hexes
+            # that otherwise leaves a visible grid.
+            'edgecolors': 'none',
+            'linewidths': 0,
+            'antialiaseds': False,
         }
         if used_kind == 'divergent':
             finite = cvals[np.isfinite(cvals)]
@@ -1445,6 +1545,20 @@ def plot_hexbin(
         if vmin is not None: hb_kwargs['vmin'] = vmin
         if vmax is not None: hb_kwargs['vmax'] = vmax
         hb = ax.hexbin(xs, ys, **hb_kwargs)
+        # One outline around the union of all filled hexes.  hexbin
+        # without mincnt-filtering uses ALL hexes including the empty
+        # ones; filter to hexes that actually got a value (non-NaN
+        # mean and mincnt-satisfied — matplotlib already drops sub-
+        # mincnt hexes from the returned offsets/array).
+        _hex_paths = hb.get_paths()
+        if _hex_paths:
+            _arr = hb.get_array()
+            _offsets_filled = hb.get_offsets()
+            if _arr is not None and len(_arr) == len(_offsets_filled):
+                _finite_mask = np.isfinite(np.asarray(_arr, dtype=float))
+                _offsets_filled = _offsets_filled[_finite_mask]
+            _draw_hex_silhouette(ax, _offsets_filled,
+                                 _hex_paths[0].vertices)
         label_kind = 'expression' if color_kind == 'gene' else 'value'
         label_suffix = ' (divergent)' if used_kind == 'divergent' else ''
         cbar_extend = _cbar_extend(hb, vmin, vmax)
@@ -1553,16 +1667,25 @@ def plot_hexbin(
             face_colours[:, 3] = alphas_hex[used]  # set per-hex alpha
             coll = PolyCollection(
                 polys, facecolors=face_colours,
-                # Thin black outline per hex (matches the
-                # numerical/gene + density paths). Categorical mode
-                # uses per-hex alpha for dominance; the outline stays
-                # opaque so cell boundaries are still legible on
-                # half-transparent hexes.
-                edgecolors='black', linewidths=0.4,
+                # No per-hex border; a single silhouette around the
+                # union of all used hexes is drawn after. The
+                # silhouette is fully opaque (structural outline) even
+                # though per-hex alpha varies with dominance.
+                # antialiased=False suppresses the AA seam between
+                # adjacent hexes that would otherwise read as a grid.
+                edgecolors='none', linewidths=0,
+                antialiaseds=False,
             )
             ax.add_collection(coll)
             ax.set_xlim(xs.min(), xs.max())
             ax.set_ylim(ys.min(), ys.max())
+
+            # One outline around the union of all used hexes.
+            _draw_hex_silhouette(
+                ax,
+                offsets[used],
+                hex_polygon,
+            )
 
             # Legend: one entry per category that wins at least one used hex.
             won = np.unique(modal_code[used])

@@ -12,6 +12,7 @@
 #   "seaborn>=0.13.0",
 #   "scipy>=1.10.0",
 #   "pyarrow>=14.0.0",
+#   "shapely>=2.0",
 # ]
 # ///
 """
@@ -1298,7 +1299,7 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.9.0"
+API_VERSION = "2.9.1"
 API_VERSION_RELEASED = "2026-06-22"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 

@@ -29,6 +29,22 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.9.1 — 2026-06-22
+
+### Changed — hexbin plots draw one silhouette instead of a per-hex grid
+
+`/plot/hexbin` (and the embedded hexbin path used by `/plot/scatter` with
+`geom=hexbin`) no longer outlines each individual hex. Instead, a single
+thin black line traces the perimeter of the union of all filled hexes;
+disconnected regions each get their own outline, and internal holes get
+their own inner outline. Affects all three colour modes (density,
+numerical / gene, categorical).
+
+Pure visual change — no contract change to query params or response
+headers. Hence `patch`.
+
+---
+
 ## 2.9.0 — 2026-06-22
 
 ### Added — biology-keyed `X-Plot-Title` and `X-Plot-Filename` response headers
