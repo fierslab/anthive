@@ -29,6 +29,56 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.9.0 — 2026-06-22
+
+### Added — biology-keyed `X-Plot-Title` and `X-Plot-Filename` response headers
+
+Every `/plot/{geom}` response (image AND data formats) and the
+`/plot/{geom}/notebook` endpoint now carry two new headers alongside the
+existing `X-Plot-Caption`:
+
+* **`X-Plot-Title`** — a short, human-readable one-line title that
+  describes **what** is plotted (biology), NOT the render knobs. Examples:
+  * `S25/V6A: P2RY12 expression on X_umap`
+  * `S25/V6A: cell density on X_umap - subset patient_geno_short=L276`
+  * `S25/V6A: Sex_donor / F (volcano)`
+  * `S25/V6W: DE matrix - patient_geno_short_relevel_sexreg`
+* **`X-Plot-Filename`** — a filesystem-safe basename (snake_case,
+  `[A-Za-z0-9_-]` only, no extension, capped at 80 chars). Examples:
+  * `S25_V6A_scatter_P2RY12`
+  * `S25_V6A_hexbin_density_patient_geno_short_L276`
+  * `S25_V6A_volcano_Sex_donor_F`
+
+Both headers are ASCII-safe (latin-1, same encoding pass as
+`X-Plot-Caption`). When the filename gets truncated to the 80-char cap,
+an extra header `X-Plot-Filename-Truncated: true` is emitted.
+
+`Content-Disposition: attachment; filename="…"` (CSV/TSV plot data and
+the notebook `.ipynb`) now uses the biology-keyed filename instead of
+the old `{db_id}_{geom}` heuristic — saved files reflect what they're
+of, not what knob produced them.
+
+The notebook's in-cell H1 markdown (`# {db_id} · {geom}`) was also
+changed to use the biology-keyed title.
+
+**Title templates by geom** — see `lib/plotting.build_plot_descriptor`
+for the canonical mapping (per-geom string template + filename recipe).
+
+**Caller impact**: purely additive. `X-Plot-Caption` semantics are
+unchanged. Clients still using the older `Content-Disposition` filename
+will start receiving a more descriptive basename — adjust hardcoded
+filename parsing accordingly (no schema change).
+
+### Cache shape
+
+The in-memory plot LRU now also stores `title` / `filename` /
+`filename_truncated`. Older cache entries (in flight at restart, or
+serialised in alternative implementations) without these fields fall
+back to rebuilding the descriptor from the raw `PlotRequest` — graceful
+degradation, no error.
+
+---
+
 ## 2.8.0 — 2026-06-22
 
 ### Added — plot-to-notebook endpoint

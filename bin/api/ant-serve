@@ -1298,7 +1298,7 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.8.0"
+API_VERSION = "2.9.0"
 API_VERSION_RELEASED = "2026-06-22"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
@@ -4337,13 +4337,95 @@ def _emit_dataframe(df, req) -> Tuple[bytes, str]:
     return buf.getvalue().encode('utf-8'), caption
 
 
+def _resolve_descriptor_inputs(
+    plot_req: PlotRequest,
+    ctx: 'PlotContext',
+) -> Dict[str, Any]:
+    """Resolve the biology-relevant fields of ``plot_req`` against ``ctx``
+    so ``plotting.build_plot_descriptor`` can produce a title/filename.
+
+    Pure dispatch — no DB queries beyond ``ctx.resolve`` (which itself just
+    looks at cached field lists). Failures resolve to ``None`` rather than
+    raising; the descriptor builder copes with missing kinds.
+    """
+    def _safe_resolve(name: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+        if not name:
+            return None, None
+        try:
+            resolved, kind = ctx.resolve(name)
+            return resolved, kind
+        except Exception:
+            return name, None
+
+    _x, x_kind = _safe_resolve(plot_req.x)
+    _y, y_kind = _safe_resolve(plot_req.y)
+    _color, color_kind = _safe_resolve(plot_req.color)
+
+    # Embedding-default fallback: scatter / hexbin with no x land on the
+    # dataset's default embedding (X_umap when present, else first
+    # available). Mirror the handler's choice so the title says e.g.
+    # "P2RY12 expression on X_umap" instead of "... on embedding".
+    x_for_descriptor = plot_req.x
+    if (
+        plot_req.geom in ('scatter', 'hexbin')
+        and not plot_req.x
+        and ctx.available_embeddings
+    ):
+        x_for_descriptor = (
+            'X_umap' if 'X_umap' in ctx.available_embeddings
+            else ctx.available_embeddings[0]
+        )
+        x_kind = 'embedding'
+
+    return {
+        'geom':         plot_req.geom,
+        'db_id':        plot_req.db_id,
+        'x':            x_for_descriptor,
+        'x_kind':       x_kind,
+        'y':            plot_req.y,
+        'y_kind':       y_kind,
+        'color':        plot_req.color,
+        'color_kind':   color_kind,
+        'filters':      plot_req.filters,
+        'de_study':     plot_req.de_study,
+        'de_term':      plot_req.de_term,
+        'de_contrast':  plot_req.de_contrast,
+        'de_gene':      plot_req.de_gene,
+    }
+
+
+def _descriptor_inputs_static(plot_req: PlotRequest) -> Dict[str, Any]:
+    """Best-effort descriptor inputs when no PlotContext is available
+    (cache HIT path before we open the DB). Falls back to the request's
+    raw field names with unknown kinds — the descriptor builder still
+    produces a sensible result, the embedding-vs-XY branch may be slightly
+    fuzzy for raw scatter/hexbin requests but the cached descriptor was
+    computed against the live ctx on MISS and is reused verbatim."""
+    return {
+        'geom':         plot_req.geom,
+        'db_id':        plot_req.db_id,
+        'x':            plot_req.x,
+        'x_kind':       None,
+        'y':            plot_req.y,
+        'y_kind':       None,
+        'color':        plot_req.color,
+        'color_kind':   None,
+        'filters':      plot_req.filters,
+        'de_study':     plot_req.de_study,
+        'de_term':      plot_req.de_term,
+        'de_contrast':  plot_req.de_contrast,
+        'de_gene':      plot_req.de_gene,
+    }
+
+
 async def _render_plot(plot_req: PlotRequest, request: Request) -> Response:
     """Cache-aware execution of a plot request.
 
     Hits the in-memory LRU first (keyed on db_id + normalised query string +
     format + file fingerprint).  On miss, runs the geom's handler in a worker
     thread, stores the result, returns a ``Response`` with the standard
-    ``X-Plot-Caption`` / ``X-Plot-Cache`` / ``ETag`` headers.
+    ``X-Plot-Caption`` / ``X-Plot-Title`` / ``X-Plot-Filename`` /
+    ``X-Plot-Cache`` / ``ETag`` headers.
 
     Per-geom endpoints don't need to know any of this — they call
     ``await _render_plot(req, common.request)`` and they're done.
@@ -4365,21 +4447,39 @@ async def _render_plot(plot_req: PlotRequest, request: Request) -> Response:
         # replacing each non-encodable codepoint with a '?' so the
         # caption is best-effort but never blocks the image.
         return s.encode('latin-1', errors='replace').decode('latin-1')
+
+    def _ext_for_format(fmt: str) -> str:
+        return fmt if fmt in _PLOT_DATA_FORMATS else fmt
+
     cached = _plot_cache_get(cache_key)
     if cached is not None:
+        # Older cache entries (pre-2.9.0) don't carry title/filename. Fall
+        # back to building them now from the raw request — kinds will be
+        # None so embedding-vs-XY may degrade, but the result is still
+        # readable and the next MISS will repopulate with full kinds.
+        cached_title = cached.get('title')
+        cached_filename = cached.get('filename')
+        cached_truncated = cached.get('filename_truncated', False)
+        if cached_title is None or cached_filename is None:
+            desc = plotting.build_plot_descriptor(**_descriptor_inputs_static(plot_req))
+            cached_title = desc['title']
+            cached_filename = desc['filename']
+            cached_truncated = desc['filename_truncated'] == '1'
         headers = {
             'X-Plot-Caption':   _ascii_safe(cached['caption']),
+            'X-Plot-Title':     _ascii_safe(cached_title),
+            'X-Plot-Filename':  _ascii_safe(cached_filename),
             'X-Plot-Format':    plot_req.output_format,
             'X-Source-URL':     cached['source_url'],
             'X-Plot-Cache':     'HIT',
             'ETag':             f'"{cache_key}"',
             'Cache-Control':    'public, max-age=3600',
         }
+        if cached_truncated:
+            headers['X-Plot-Filename-Truncated'] = 'true'
         if plot_req.output_format in _PLOT_DATA_FORMATS:
             headers['Content-Disposition'] = (
-                f'attachment; filename="'
-                f'{plot_req.db_id.replace("/", "_")}_{plot_req.geom}.'
-                f'{plot_req.output_format}"'
+                f'attachment; filename="{cached_filename}.{_ext_for_format(plot_req.output_format)}"'
             )
         return Response(
             content=cached['bytes'],
@@ -4397,10 +4497,12 @@ async def _render_plot(plot_req: PlotRequest, request: Request) -> Response:
                 categorical_fields=db._get_categorical_fields(),
                 numerical_fields=db._get_numerical_fields(),
             )
-            return handler(plot_req, ctx)
+            descriptor_inputs = _resolve_descriptor_inputs(plot_req, ctx)
+            image_bytes, caption = handler(plot_req, ctx)
+            return image_bytes, caption, descriptor_inputs
 
     try:
-        image_bytes, caption = await asyncio.to_thread(_sync_plot)
+        image_bytes, caption, descriptor_inputs = await asyncio.to_thread(_sync_plot)
     except HTTPException:
         raise
     except KeyError as e:
@@ -4410,12 +4512,20 @@ async def _render_plot(plot_req: PlotRequest, request: Request) -> Response:
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+    desc = plotting.build_plot_descriptor(**descriptor_inputs)
+    title = desc['title']
+    filename = desc['filename']
+    truncated = desc['filename_truncated'] == '1'
+
     mime = _PLOT_MIME_TYPES[plot_req.output_format]
     _plot_cache_put(cache_key, {
-        'bytes':      image_bytes,
-        'caption':    caption,
-        'source_url': plot_req.source_url,
-        'mime':       mime,
+        'bytes':              image_bytes,
+        'caption':            caption,
+        'title':              title,
+        'filename':           filename,
+        'filename_truncated': truncated,
+        'source_url':         plot_req.source_url,
+        'mime':               mime,
     })
     # Starlette runs BackgroundTask after the response has been sent — the
     # client doesn't wait on the trim.  Sync target is run in a threadpool,
@@ -4423,17 +4533,19 @@ async def _render_plot(plot_req: PlotRequest, request: Request) -> Response:
     # paths don't allocate anything worth trimming).
     headers = {
         'X-Plot-Caption':   _ascii_safe(caption),
+        'X-Plot-Title':     _ascii_safe(title),
+        'X-Plot-Filename':  _ascii_safe(filename),
         'X-Plot-Format':    plot_req.output_format,
         'X-Source-URL':     plot_req.source_url,
         'X-Plot-Cache':     'MISS',
         'ETag':             f'"{cache_key}"',
         'Cache-Control':    'public, max-age=3600',
     }
+    if truncated:
+        headers['X-Plot-Filename-Truncated'] = 'true'
     if plot_req.output_format in _PLOT_DATA_FORMATS:
         headers['Content-Disposition'] = (
-            f'attachment; filename="'
-            f'{plot_req.db_id.replace("/", "_")}_{plot_req.geom}.'
-            f'{plot_req.output_format}"'
+            f'attachment; filename="{filename}.{_ext_for_format(plot_req.output_format)}"'
         )
     return Response(
         content=image_bytes,
@@ -5239,15 +5351,20 @@ def _build_notebook_for_plot(
     caption: str,
     base_url: str,
     auth_block: str,
+    title: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Assemble the nbformat-4 JSON dict for a plot URL.
 
     Three cells: a markdown intro + caption + disclaimer, a code cell that
     fetches the plot data as a pandas DataFrame, and a code cell that
     renders the PNG inline with the caption underneath.
+
+    ``title`` is the biology-keyed X-Plot-Title for cell 0. Falls back to
+    ``"{db_id} - {geom}"`` for callers that don't provide it.
     """
+    heading = title if title else f"{db_id} - {geom}"
     title_md = (
-        f"# {db_id} · {geom}\n"
+        f"# {heading}\n"
         f"\n"
         f"{caption}\n"
         f"\n"
@@ -5450,6 +5567,14 @@ async def _build_notebook_response(
     plot_req = _plot_request_force_png(plot_req)
     plot_response = await _render_plot(plot_req, request)
     caption = plot_response.headers.get('X-Plot-Caption') or ''
+    title = plot_response.headers.get('X-Plot-Title') or f"{db_id}: {geom}"
+    plot_filename = (
+        plot_response.headers.get('X-Plot-Filename')
+        or f"{db_id.replace('/', '_')}_{geom}"
+    )
+    filename_truncated = (
+        plot_response.headers.get('X-Plot-Filename-Truncated') == 'true'
+    )
 
     case, remote_user, _passwordless = _detect_notebook_auth(request)
     auth_block = _build_auth_block(case, remote_user)
@@ -5460,19 +5585,26 @@ async def _build_notebook_response(
         geom=geom,
         plot_params=notebook_params,
         caption=caption,
+        title=title,
         base_url=base_url,
         auth_block=auth_block,
     )
 
-    filename = f"{db_id.replace('/', '_')}_{geom}.ipynb"
+    filename = f"{plot_filename}.ipynb"
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Cache-Control": "no-store",
+        "X-Anthive-Auth-Case": case,
+        "X-Plot-Title": title,
+        "X-Plot-Filename": plot_filename,
+        "X-Plot-Caption": caption,
+    }
+    if filename_truncated:
+        headers["X-Plot-Filename-Truncated"] = 'true'
     return Response(
         content=json.dumps(notebook_dict, indent=1),
         media_type="application/x-ipynb+json",
-        headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
-            "Cache-Control": "no-store",
-            "X-Anthive-Auth-Case": case,
-        },
+        headers=headers,
     )
 
 

@@ -633,6 +633,298 @@ def build_caption(
     return ' '.join(parts)
 
 
+# ── biology-keyed plot descriptors (X-Plot-Title / X-Plot-Filename) ──────────
+#
+# X-Plot-Caption answers "what render knobs are active"; X-Plot-Title and
+# X-Plot-Filename answer "what biology am I looking at". Both are short,
+# ASCII-safe, and produced by `build_plot_descriptor()` below.
+#
+# Both helpers are pure — no DB or filesystem I/O — so they're cheap on
+# every render AND on cache hits.
+
+import re as _re
+
+_FILENAME_MAX_LEN = 80
+
+# `_GEOM_COMPACT` lets a few wordy geom names render shorter in the
+# filename without sacrificing readability. Anything not listed falls
+# back to the geom name unchanged.
+_GEOM_COMPACT: Dict[str, str] = {
+    'histogram': 'hist',
+}
+
+
+def _filename_sanitise(token: Optional[str]) -> str:
+    """Strip to `[A-Za-z0-9_-]`, collapse repeated underscores, trim edges."""
+    if token is None:
+        return ''
+    cleaned = _re.sub(r'[^A-Za-z0-9_\-]+', '_', str(token))
+    cleaned = _re.sub(r'_+', '_', cleaned).strip('_')
+    return cleaned
+
+
+def _subset_summary(
+    filters: Optional[Dict[str, object]],
+    *,
+    max_value_len: int = 60,
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Summarise a ``filters`` dict for title / filename.
+
+    Returns ``(title_clause, filename_token, first_key)``:
+
+    * ``title_clause`` — short human suffix like ``"subset patient=X"`` or
+      ``"subset patient=X (+2 more)"`` (no leading separator).
+    * ``filename_token`` — sanitised ``"key_value"`` form for the first
+      subset clause (or just the key if the value is a list).
+    * ``first_key`` — the first key in the filters dict (or None).
+    """
+    if not filters:
+        return None, None, None
+    keys = list(filters.keys())
+    first_key = keys[0]
+    raw_value = filters[first_key]
+    # Render a representative value for the first clause.
+    if isinstance(raw_value, (list, tuple, set)):
+        items = list(raw_value)
+        if len(items) == 1:
+            value_text = str(items[0])
+        else:
+            value_text = f"{items[0]}+{len(items) - 1}"
+    else:
+        value_text = str(raw_value)
+    if len(value_text) > max_value_len:
+        value_text = value_text[:max_value_len] + '...'
+    title_clause = f"subset {first_key}={value_text}"
+    if len(keys) > 1:
+        title_clause += f" (+{len(keys) - 1} more)"
+    filename_token = _filename_sanitise(f"{first_key}_{value_text}")
+    return title_clause, filename_token, first_key
+
+
+def _first_token(value: Optional[str]) -> Optional[str]:
+    """Pick the first comma-separated token of a string param (e.g. for
+    heatmap's ``x`` which is a comma-list of genes)."""
+    if not value:
+        return None
+    parts = [p.strip() for p in str(value).split(',') if p.strip()]
+    return parts[0] if parts else None
+
+
+def _split_tokens(value: Optional[str], limit: int = 3) -> List[str]:
+    """Return up to ``limit`` non-empty comma-separated tokens."""
+    if not value:
+        return []
+    parts = [p.strip() for p in str(value).split(',') if p.strip()]
+    return parts[:limit]
+
+
+def build_plot_descriptor(
+    *,
+    geom: str,
+    db_id: str,
+    x: Optional[str] = None,
+    x_kind: Optional[str] = None,
+    y: Optional[str] = None,
+    y_kind: Optional[str] = None,
+    color: Optional[str] = None,
+    color_kind: Optional[str] = None,
+    filters: Optional[Dict[str, object]] = None,
+    # DE-driven geom selectors
+    de_study: Optional[str] = None,
+    de_term: Optional[str] = None,
+    de_contrast: Optional[str] = None,
+    de_gene: Optional[str] = None,
+    # heatmap-specific: comma-list of genes (in `x`); precomputed y_resolved label.
+    y_resolved: Optional[str] = None,
+) -> Dict[str, str]:
+    """Compose a biology-keyed title and filename for a plot response.
+
+    Inputs are the *biology* knobs of a plot request — what's plotted (geom),
+    what dataset (db_id), which fields are on which axis, which fields drive
+    colour, what subset filter was applied, and (for DE geoms) which study /
+    term / contrast was selected.
+
+    Returns ``{'title': ..., 'filename': ..., 'filename_truncated': '0'|'1'}``.
+
+    Both strings are pure ASCII; filename is `[A-Za-z0-9_-]` only, no
+    extension, snake_case, capped at ``_FILENAME_MAX_LEN`` characters.
+
+    See ``doc/API_CHANGELOG.md`` (2.9.0 entry) for the per-geom title
+    templates and filename recipes.
+    """
+    # ── TITLE ──────────────────────────────────────────────────────────────
+    # All title strings begin with "{db_id}: " — the dataset is the single
+    # most identifying biology fact about a plot.
+    prefix = f"{db_id}: "
+
+    # XY-mode (continuous x AND y) wins over embedding-mode for
+    # scatter/hexbin — same rule the handler uses.
+    is_xy = (
+        geom in ('scatter', 'hexbin', 'xy_scatter', 'xy_hexbin')
+        and x_kind in ('gene', 'numerical')
+        and y is not None
+    )
+
+    if geom in ('scatter', 'xy_scatter') and is_xy:
+        body = f"{y} vs {x}"
+        if color:
+            body += f" coloured by {color}"
+    elif geom in ('hexbin', 'xy_hexbin') and is_xy:
+        body = f"{y} vs {x}"
+        if color and color_kind == 'gene':
+            body += f", mean {color} per hex"
+        elif color:
+            body += f" coloured by {color}"
+        else:
+            body += " (hex density)"
+    elif geom == 'scatter':
+        embedding = x or 'embedding'
+        if not color:
+            body = f"cells on {embedding}"
+        elif color_kind == 'gene':
+            body = f"{color} expression on {embedding}"
+        else:
+            body = f"cells by {color} on {embedding}"
+    elif geom == 'hexbin':
+        embedding = x or 'embedding'
+        if not color:
+            body = f"cell density on {embedding}"
+        elif color_kind == 'gene':
+            body = f"mean {color} on {embedding}"
+        elif color_kind == 'categorical':
+            body = f"modal {color} on {embedding}"
+        else:
+            # numerical obs colour
+            body = f"mean {color} on {embedding}"
+    elif geom == 'kde2d':
+        body = f"density of {y} vs {x}"
+    elif geom in ('violin', 'box'):
+        if y:
+            body = f"{y} per {x}"
+        else:
+            body = f"cell counts per {x}"
+    elif geom == 'bar':
+        if y:
+            body = f"mean {y} per {x}"
+        else:
+            body = f"cell counts per {x}"
+    elif geom in ('histogram', 'ecdf', 'kde'):
+        body = f"{x} distribution"
+    elif geom == 'heatmap':
+        # `x` is a comma-list of genes; y is the categorical row axis.
+        x_tokens = _split_tokens(x, limit=3)
+        if x_tokens:
+            gene_label = ','.join(x_tokens)
+            if x and ',' in x and len(x_tokens) < len([p for p in x.split(',') if p.strip()]):
+                gene_label += '+'
+        else:
+            gene_label = 'top genes'
+        row_label = y_resolved or y or 'group'
+        body = f"expression heatmap of {gene_label} per {row_label}"
+    elif geom == 'rolling':
+        body = f"{y} along {x}"
+    elif geom == 'volcano':
+        term = de_term or '?'
+        contrast = de_contrast or '?'
+        body = f"{term} / {contrast} (volcano)"
+    elif geom == 'ma':
+        term = de_term or '?'
+        contrast = de_contrast or '?'
+        body = f"{term} / {contrast} (MA)"
+    elif geom == 'forest':
+        gene = de_gene or '?'
+        if de_term and not de_contrast and not de_study:
+            body = f"{gene} in {de_term}"
+        else:
+            body = f"{gene} across studies"
+    elif geom == 'de_heatmap':
+        term = de_term or '?'
+        body = f"DE matrix - {term}"
+    else:
+        body = geom
+
+    # Subset modifier (keep short — one clause).
+    subset_clause, subset_filename_token, _first_key = _subset_summary(filters)
+    title = prefix + body
+    if subset_clause:
+        title += f" - {subset_clause}"
+
+    # ── FILENAME ───────────────────────────────────────────────────────────
+    db_id_safe = _filename_sanitise(db_id.replace('/', '_'))
+    geom_compact = _GEOM_COMPACT.get(geom, geom)
+    bio_tokens: List[str] = []
+
+    if geom in ('scatter', 'hexbin', 'xy_scatter', 'xy_hexbin') and is_xy:
+        bio_tokens.append(f"{_filename_sanitise(y)}_vs_{_filename_sanitise(x)}")
+        if color:
+            bio_tokens.append(_filename_sanitise(color))
+    elif geom in ('scatter', 'hexbin'):
+        if color:
+            bio_tokens.append(_filename_sanitise(color))
+        else:
+            bio_tokens.append('density' if geom == 'hexbin' else 'cells')
+    elif geom == 'kde2d':
+        bio_tokens.append(f"{_filename_sanitise(y)}_vs_{_filename_sanitise(x)}")
+    elif geom in ('violin', 'box', 'bar'):
+        if y:
+            bio_tokens.append(f"{_filename_sanitise(y)}_per_{_filename_sanitise(x)}")
+        else:
+            bio_tokens.append(f"counts_per_{_filename_sanitise(x)}")
+    elif geom in ('histogram', 'ecdf', 'kde'):
+        if x:
+            bio_tokens.append(_filename_sanitise(x))
+    elif geom == 'heatmap':
+        x_tokens = _split_tokens(x, limit=3)
+        if x_tokens:
+            bio_tokens.append('_'.join(_filename_sanitise(t) for t in x_tokens))
+        elif y_resolved or y:
+            bio_tokens.append(_filename_sanitise(y_resolved or y))
+    elif geom == 'rolling':
+        if y and x:
+            y_tokens = _split_tokens(y, limit=2)
+            y_part = '_'.join(_filename_sanitise(t) for t in y_tokens) if y_tokens else _filename_sanitise(y)
+            bio_tokens.append(f"{y_part}_along_{_filename_sanitise(x)}")
+    elif geom in ('volcano', 'ma'):
+        if de_term:
+            bio_tokens.append(_filename_sanitise(de_term))
+        if de_contrast:
+            bio_tokens.append(_filename_sanitise(de_contrast))
+    elif geom == 'forest':
+        if de_gene:
+            bio_tokens.append(_filename_sanitise(de_gene))
+    elif geom == 'de_heatmap':
+        if de_term:
+            bio_tokens.append(_filename_sanitise(de_term))
+
+    if subset_filename_token:
+        bio_tokens.append(subset_filename_token)
+
+    # Drop empties; de-dupe consecutive identical tokens (e.g. heatmap when
+    # the gene list happens to equal the y label).
+    bio_tokens = [t for t in bio_tokens if t]
+
+    filename_parts: List[str] = [db_id_safe, _filename_sanitise(geom_compact)]
+    filename_parts.extend(bio_tokens)
+    filename = '_'.join(p for p in filename_parts if p)
+    # Final cleanup: any double-underscores produced by joining empty parts.
+    filename = _re.sub(r'_+', '_', filename).strip('_')
+
+    truncated = False
+    if len(filename) > _FILENAME_MAX_LEN:
+        filename = filename[:_FILENAME_MAX_LEN].rstrip('_-')
+        truncated = True
+
+    # ASCII-safe by construction (sanitiser strips non-ASCII), but stay
+    # defensive for the title — the X-Plot-Title HTTP header is latin-1.
+    title_ascii = title.encode('latin-1', errors='replace').decode('latin-1')
+
+    return {
+        'title': title_ascii,
+        'filename': filename,
+        'filename_truncated': '1' if truncated else '0',
+    }
+
+
 # Above this many cells, matplotlib's ax.scatter() becomes the dominant cost
 # of a scatter render (it builds a PathCollection of n offsets and renders
 # each marker individually).  ax.plot() with marker='.' is 5-10x faster

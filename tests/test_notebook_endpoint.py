@@ -222,3 +222,39 @@ def test_notebook_version_bumped_to_2_8():
     assert len(parts) >= 2, version
     major, minor = int(parts[0]), int(parts[1])
     assert (major, minor) >= (2, 8), version
+
+
+def test_notebook_carries_biology_title_and_filename_headers():
+    """API 2.9.0+: notebook response carries X-Plot-Title and
+    X-Plot-Filename so download UX matches what the user is looking at,
+    and the in-notebook H1 uses the biology-keyed title."""
+    r = _get(
+        f"/databases/{V6A}/plot/volcano/notebook",
+        study='DE_interpretable_glmm_vs_grandmean',
+        term='Sex_donor',
+        contrast='F',
+    )
+    assert r.status_code == 200
+
+    title = r.headers.get('x-plot-title', '')
+    filename = r.headers.get('x-plot-filename', '')
+    assert title, "X-Plot-Title header missing"
+    assert filename, "X-Plot-Filename header missing"
+    # Biology bits surfaced in the title.
+    assert 'Sex_donor' in title, title
+    assert 'F' in title, title
+    assert 'volcano' in title.lower(), title
+    # Filename is filesystem-safe: only [A-Za-z0-9_-].
+    import re
+    assert re.fullmatch(r'[A-Za-z0-9_\-]+', filename), filename
+    assert 'volcano' in filename
+    assert 'Sex_donor' in filename
+
+    # Content-Disposition uses the biology-keyed filename + .ipynb.
+    cd = r.headers.get('content-disposition', '')
+    assert f'{filename}.ipynb' in cd, cd
+
+    # Cell 0 H1 uses the biology title, not "{db_id} - {geom}".
+    nb = r.json()
+    h1_source = nb['cells'][0]['source']
+    assert title in h1_source, h1_source[:200]
