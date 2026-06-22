@@ -189,3 +189,114 @@ badge** (§4.6) — driven by the open-proposals list (C) or open-PRs/branches (
 - Option C (queue + write endpoint + git step): **ant-serve / anthive4**; the
   edit UI + dirty badges: **web**.
 - `lib/metadata.py` / `ant-md` validators: shared, already exist.
+
+---
+
+# Implementation plan (DEFERRED — decided 2026-06-22, not scheduled)
+
+This supersedes the exploratory tool-ranking in §5/Option A. Captured so it can
+be picked up cold later.
+
+## Decision: Decap CMS (not Sveltia) for the flat editable subset
+
+Recon (June 2026) flipped the earlier pick:
+- **Decap CMS has *shipped* native Gitea/Forgejo backend** — PKCE auth (no OAuth
+  proxy needed), **editorial workflow (opens PRs)**. Needs Forgejo ≥ 1.21.4 +
+  **CORS enabled on the instance**. (Codeberg runs recent Forgejo, so the
+  version is fine; CORS is the open question — see spike.)
+- **Sveltia's Forgejo backend is NOT built** (sveltia-cms issue #381, blocked on
+  upstream Forgejo API, parked at 1.0-RC). Nicer tool, but unusable on Codeberg
+  today → revisit later.
+- **Pages CMS** = GitHub-only → out (we're moving to Codeberg).
+- Refs: decapcms.org/docs/gitea-backend/ , decapcms.org/docs/backends-overview/ ,
+  github.com/sveltia/sveltia-cms/issues/381.
+
+## Scope (what the CMS owns)
+Flat/global catalogue fields on **collection `index.md`** + **dataset `*.md`**
+(and a few flat `*.mus` fields as a YAML data collection): organism, celltype,
+tissue, disease, technology, suspension_type (vocab selects from a fixed global
+list baked from `_mus_vocab.yaml`), year (int), authors (list), doi/pmid/
+accession/link, license, contributor, access, source, **description (NEW
+one-liner, both levels)**, markdown body.
+- **Declare EVERY key** — including read-only ones (`sha256`, `n_obs`, `n_vars`,
+  `version`, `created`) as `hidden` — or Decap drops undeclared frontmatter on
+  save.
+- **Out of CMS scope** (→ future in-house data-aware editor, §5 Option C):
+  per-dataset column/layer/embedding assignments, `obs_exclude` complement,
+  dependent fields, future per-column nice-names / per-category colours. A
+  static-config CMS cannot know per-dataset structure or do cross-field logic.
+
+## Auth / commit model
+- **Gate the `/edit` app behind Authelia** by an `admin` group:
+  - add the group in `config/authelia/users_database.yml` (users already carry
+    `groups:`);
+  - add an `access_control` rule (configuration.yml:`access_control:`) limiting
+    the editor path to `subject: 'group:admin'`;
+  - **map deny → 404 at the proxy** (Caddyfile/nginx) so it's *invisible* to
+    non-admins, not just 403;
+  - `/browse` hides the "✎ edit" affordances unless `Remote-Groups` (already
+    forwarded) contains `admin`.
+- **Commits**: native Decap PKCE → per-admin Codeberg OAuth (clean authorship).
+  **Fallback if Codeberg CORS blocks browser calls**: a tiny same-origin
+  **server-side API proxy holding a bot token** (forwards to codeberg.org/api),
+  stamping the Authelia user as commit author. Self-hosted Forgejo (we control
+  CORS) is the other fallback.
+
+## Content control (do this first — cheap, editor-independent)
+- Promote **`h5adstore/scripts/validate_md.py` to a required CI check** (Forgejo
+  Actions) + branch-protect `main`. Bad frontmatter then can't merge no matter
+  how it was edited.
+- **Single schema source of truth**: one YAML in the repo (field → type, vocab,
+  required, editable?) that drives BOTH `validate_md.py` AND the generated Decap
+  config → adding a field = one edit, no drift. This is the "easily extensible"
+  mechanism.
+- Markdown sanitization at render (body is rendered `|safe`).
+
+## Approval / submission route
+Decap `publish_mode: editorial_workflow` → each save = a **branch + PR** on
+Codeberg → CI runs the validator → **admin reviews diff + merges** → deployed
+checkout `git pull` + `POST /admin/rescan` → live. Merged branches auto-deleted.
+"Save ≠ live": edits are proposals until merged. Browse shows a **pending/dirty
+badge** driven by open PRs (or the Option-C queue if that path is taken).
+
+## THE SPIKE (make-or-break, ~1–2 h, throwaway, doesn't touch h5adstore)
+The only real unknown is **CORS on `codeberg.org`** (Decap's Gitea backend calls
+the Forgejo API directly from the browser).
+1. Throwaway Codeberg repo (e.g. `mfiers/cms-test`) with one `content/foo.md`.
+2. Register a Codeberg OAuth2 app (User Settings → Applications), redirect URI =
+   the admin page origin, **uncheck "Confidential Client"**, copy Client ID.
+3. Minimal `admin/index.html` (loads Decap) + `config.yml`:
+   ```yaml
+   backend:
+     name: gitea
+     repo: mfiers/cms-test
+     base_url: https://codeberg.org
+     api_root: https://codeberg.org/api/v1
+     app_id: <client-id>
+     auth_endpoint: login/oauth/authorize
+     branch: main
+   publish_mode: editorial_workflow
+   collections:
+     - {name: datasets, folder: content, extension: md, create: true,
+        fields: [{name: title, widget: string},
+                 {name: description, widget: string},
+                 {name: body, widget: markdown}]}
+   ```
+4. Serve at the redirect origin; decisive checks (watch browser console):
+   (a) PKCE login round-trips; (b) **file list loads ← the CORS test**;
+   (c) Save → branch+PR created on Codeberg; (d) merge → commit lands.
+- **All green** → native Decap-on-Codeberg viable, proceed.
+- **CORS fails (a/b)** → switch to the **bot-token server proxy** (or self-host
+  Forgejo). Editor stays Decap; only the transport changes.
+
+## Phasing (when resumed)
+0. **`description` field** (per-dataset + per-collection one-liner) — small,
+   standalone, useful now: frontmatter key + `validate_md.py` rule + show on
+   dataset/folder pages. Can land independently before any of the above.
+1. `validate_md.py` → required CI + branch protection (content control).
+2. Run THE SPIKE → decide native PKCE vs bot-proxy.
+3. Stand up Decap at `/edit`, Authelia admin-gated + invisible; vocab selects
+   from `_mus_vocab.yaml`; declare all keys (read-only as hidden).
+4. `/browse` pending/dirty badges from open PRs.
+5. (Later) Option C in-house data-aware editor for the structural/dependent/
+   per-dataset-unique fields the CMS can't do.
