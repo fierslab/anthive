@@ -86,11 +86,28 @@ build-jupyter:
 	@# Make source files read-only so JupyterLite cannot modify them
 	@chmod -R a-w frontend/jupyter/jupyter
 	@chmod -R a+rX frontend/jupyter/jupyter
+	@# Version pins (DO NOT BUMP without re-checking the matrix below):
+	@#   jupyterlite-core 0.7.6 ships JupyterLab 4.5.7 inside its app shell
+	@#   (see webapp/jupyter/lab/package.json `resolutions` after a build).
+	@#   `notebook` ships @jupyter-notebook/lab-extension as a federated
+	@#   module that bakes in a JupyterLab patch-level requirement at
+	@#   build time. The webpack-mf encoding `[1,4,5,N]` corresponds to
+	@#   `~4.5.N` (= `>=4.5.N <4.6.0`):
+	@#     notebook 7.5.6 → `~4.5.7`  ✓ matches host's 4.5.7
+	@#     notebook 7.5.7 → `~4.5.8`  ✗ host 4.5.7 < 4.5.8
+	@#     notebook 7.6.0 → `~4.6.0`  ✗ wrong minor
+	@#   A mismatch makes the shared-module getter for
+	@#   `@jupyterlab/docregistry` fail to initialise (#RUNTIME-012) and
+	@#   `INotebookPathOpener` from the lab-extension throws before
+	@#   registering, which silently breaks `?fromURL=` deep links — the
+	@#   lab UI loads but never fetches the requested notebook.
+	@#   So we pin notebook to exactly 7.5.6 against jupyterlite-core 0.7.6.
+	@#   When bumping either, re-check the matrix above and adjust both.
 	@DOIT_DB=tmp/.jupyterlite.doit.db \
-	uvx --from jupyterlite-core \
+	uvx --from 'jupyterlite-core==0.7.6' \
 		--with jupyterlite-pyodide-kernel \
 		--with jupyterlab-widgets \
-		--with notebook \
+		--with 'notebook==7.5.6' \
 		--with jupyter-server \
 		jupyter-lite build --force \
 			--contents frontend/jupyter/jupyter \
