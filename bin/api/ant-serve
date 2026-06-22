@@ -5271,7 +5271,15 @@ def _build_notebook_for_plot(
 
     fetch_data_src = (
         "# Pull the same data the plot was rendered from, as a pandas DataFrame.\n"
-        "from vark import AnthiveClient\n"
+        "# In JupyterLite / Pyodide, pyvark is fetched from PyPI on first use\n"
+        "# via micropip (this cell auto-installs it). In a regular Jupyter\n"
+        "# kernel the first import succeeds and the micropip branch is skipped.\n"
+        "try:\n"
+        "    from vark import AnthiveClient\n"
+        "except ImportError:\n"
+        "    import micropip\n"
+        "    await micropip.install('pyvark')\n"
+        "    from vark import AnthiveClient\n"
         "import pandas as pd, io\n"
         "\n"
         f"BASE_URL = {base_url!r}\n"
