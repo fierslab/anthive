@@ -29,6 +29,33 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.11.1 — 2026-06-22
+
+### Changed — prettier notebook params + real DE de-novo snippets
+
+Patch release on top of 2.11.0. Same endpoint contract; only the
+content of the generated `.ipynb` changes.
+
+* **Multi-line `PLOT_PARAMS` / `RENDER_PARAMS`** in cell 3 — non-empty
+  `dict(...)` calls now render one kwarg per line, 4-space indented,
+  with a trailing comma on the last entry. Empty dicts stay on one line
+  (`RENDER_PARAMS = dict()`). Easier to skim, easier to edit. The
+  non-identifier-key fallback (`**{"weird.key": "value"}`) gets the
+  same line-per-entry layout.
+* **Real matplotlib snippets for all 4 DE geoms** (`volcano`, `ma`,
+  `forest`, `de_heatmap`) — these previously emitted a comment-only
+  stub pointing at `lib/plotting.py`. They now produce a ~15-line
+  matplotlib snippet good enough to recognise the plot type. No
+  significance overlays, no `adjustText` labels, no auto-zero-centred
+  divergent palettes — those polish steps still live server-side; the
+  PNG from cell 4 remains the canonical rendering.
+
+Caller impact: none on the wire — only the rendered notebook content
+changes. Clients that were grepping the cell-8 source for the string
+`"lib/plotting.py"` need to drop that assertion.
+
+---
+
 ## 2.11.0 — 2026-06-22
 
 ### Changed — generated notebook content overhaul (8-cell layout, split params, de-novo snippet)

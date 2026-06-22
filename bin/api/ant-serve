@@ -1299,7 +1299,7 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.11.0"
+API_VERSION = "2.11.1"
 API_VERSION_RELEASED = "2026-06-22"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
@@ -5492,8 +5492,18 @@ def _is_biology_param(name: str) -> bool:
 def _dict_call_literal(items: Dict[str, Any]) -> str:
     """Render a dict as a ``dict(...)`` call expression.
 
+    Empty dicts collapse to ``dict()`` on a single line. Non-empty
+    dicts use one kwarg per line, 4-space indented, with a trailing
+    comma on the last entry, e.g.::
+
+        dict(
+            gene='MEmagenta',
+            study='Module_DE...',
+        )
+
     Falls back to dict-literal syntax for individual non-identifier keys
-    via ``**{"weird.key": "value"}``. Returns ``dict()`` for an empty dict.
+    via ``**{"weird.key": "value"}``; the ``**{...}`` chunk gets its own
+    line just like a normal kwarg.
     """
     if not items:
         return "dict()"
@@ -5513,7 +5523,8 @@ def _dict_call_literal(items: Dict[str, Any]) -> str:
             + "}"
         )
         parts.append(f"**{weird_literal}")
-    return "dict(" + ", ".join(parts) + ")"
+    indented = ",\n".join(f"    {part}" for part in parts)
+    return "dict(\n" + indented + ",\n)"
 
 
 def _split_plot_render_params(
@@ -5661,29 +5672,130 @@ def _denovo_intro_md() -> str:
 def _denovo_snippet_for(geom: str, plot_params: Dict[str, Any]) -> str:
     """Geom-specific matplotlib snippet that re-renders the plot from ``df``.
 
-    For the 11 "real-code" geoms returns runnable matplotlib/seaborn. For
-    the DE-driven geoms (volcano / ma / forest / de_heatmap), returns a
-    comment-only stub that points at the server-rendered PNG from cell 4
-    and at ``lib/plotting.py``.
+    Returns runnable matplotlib/seaborn for all 15 geoms. The DE-driven
+    geoms (volcano / ma / forest / de_heatmap) get a rough approximation
+    — no clamps, no adjustText labels, no significance overlays. Those
+    polish steps live server-side in ``lib/plotting.py``; the PNG from
+    cell 4 is the canonical version.
     """
     x_field = plot_params.get('x')
     y_field = plot_params.get('y')
     color_field = plot_params.get('color')
 
-    # ── DE-driven geoms: server-rendered is the easy path, stub only. ─────
-    if geom in {'volcano', 'ma', 'forest', 'de_heatmap'}:
+    # ── forest ────────────────────────────────────────────────────────────
+    if geom == 'forest':
         return (
-            f"# {geom!r} is a DE-driven geom: a 100+ line implementation in\n"
-            "# lib/plotting.py (clamps, adjustText labels, significance overlays,\n"
-            "# divergent palettes with auto-zero centring).\n"
-            "#\n"
-            "# The server-rendered PNG in cell 4 IS the easy path. If you want\n"
-            "# to customise: branch off that figure, or read lib/plotting.py in\n"
-            "# the anthive4 repo for a reference implementation.\n"
-            "#\n"
-            "# `df` still holds the underlying numbers (effect sizes, p-values,\n"
-            "# row/column labels) so you can drive a fresh plot if you need to.\n"
-            "df.head()"
+            "import matplotlib.pyplot as plt\n"
+            "import numpy as np\n"
+            "\n"
+            "# df already has: gene_name, term, contrast, log2fc, padj\n"
+            "# (and optionally ci_low / ci_high / estimate / SE — use when present)\n"
+            "sub = df.copy().sort_values('log2fc').reset_index(drop=True)\n"
+            "fig, ax = plt.subplots(figsize=(7, max(3, 0.25 * len(sub))))\n"
+            "y = np.arange(len(sub))\n"
+            "\n"
+            "# Confidence interval: ci_low/ci_high columns when present, else fall back to ±SE,\n"
+            "# else just point.\n"
+            "lo = sub.get('ci_low')\n"
+            "hi = sub.get('ci_high')\n"
+            "if lo is not None and hi is not None and lo.notna().any():\n"
+            "    xerr = np.array([sub['log2fc'] - lo, hi - sub['log2fc']])\n"
+            "    ax.errorbar(sub['log2fc'], y, xerr=xerr, fmt='o', capsize=3,\n"
+            "                color='#444', ecolor='#888')\n"
+            "else:\n"
+            "    ax.plot(sub['log2fc'], y, 'o', color='#444')\n"
+            "\n"
+            "# Highlight significant rows\n"
+            "sig = sub['padj'] <= 0.05\n"
+            "ax.plot(sub.loc[sig, 'log2fc'], y[sig], 'o', color='#cc4444')\n"
+            "\n"
+            "labels = [f\"{row['term']} / {row['contrast']}\" for _, row in sub.iterrows()]\n"
+            "ax.set_yticks(y)\n"
+            "ax.set_yticklabels(labels, fontsize=8)\n"
+            "ax.axvline(0, color='gray', lw=0.5, linestyle='--')\n"
+            "ax.set_xlabel('log2 fold change')\n"
+            "ax.set_title(f\"forest — {df['gene_name'].iloc[0] if 'gene_name' in df else '<gene>'}\")\n"
+            "plt.tight_layout()\n"
+            "plt.show()"
+        )
+
+    # ── volcano ───────────────────────────────────────────────────────────
+    if geom == 'volcano':
+        return (
+            "import matplotlib.pyplot as plt\n"
+            "import numpy as np\n"
+            "\n"
+            "# df has: gene_name, log2fc, padj (and possibly other DE columns)\n"
+            "floor = 1e-300\n"
+            "neg_log10p = -np.log10(df['padj'].clip(lower=floor))\n"
+            "sig = (df['padj'] <= 0.05) & (df['log2fc'].abs() >= 1.0)\n"
+            "up = sig & (df['log2fc'] > 0)\n"
+            "down = sig & (df['log2fc'] < 0)\n"
+            "\n"
+            "fig, ax = plt.subplots(figsize=(7, 5))\n"
+            "ax.scatter(df.loc[~sig, 'log2fc'], neg_log10p[~sig], s=3, color='#bbbbbb', alpha=0.5)\n"
+            "ax.scatter(df.loc[down, 'log2fc'], neg_log10p[down], s=8, color='#3b76b8', label='down')\n"
+            "ax.scatter(df.loc[up,   'log2fc'], neg_log10p[up],   s=8, color='#d95f5f', label='up')\n"
+            "ax.axvline(0,  color='#444', lw=0.6)\n"
+            "ax.axhline(-np.log10(0.05), color='#888', lw=0.6, ls='--')\n"
+            "ax.axvline( 1, color='#888', lw=0.6, ls='--')\n"
+            "ax.axvline(-1, color='#888', lw=0.6, ls='--')\n"
+            "ax.set_xlabel('log2 fold change')\n"
+            "ax.set_ylabel('-log10 adjusted p')\n"
+            "ax.legend(loc='best', fontsize=8)\n"
+            "plt.tight_layout(); plt.show()"
+        )
+
+    # ── ma ────────────────────────────────────────────────────────────────
+    if geom == 'ma':
+        return (
+            "import matplotlib.pyplot as plt\n"
+            "import numpy as np\n"
+            "\n"
+            "# df needs base_mean (DESeq2/edgeR) — gracefully fail when absent.\n"
+            "if 'base_mean' not in df or df['base_mean'].isna().all():\n"
+            "    raise RuntimeError(\n"
+            "        \"MA plot needs base_mean per gene. This study didn't emit it; \"\n"
+            "        \"use volcano instead, or backfill via ant-de-fill-base-mean.\"\n"
+            "    )\n"
+            "\n"
+            "x = np.log10(df['base_mean'].clip(lower=1e-6))\n"
+            "sig = (df['padj'] <= 0.05) & (df['log2fc'].abs() >= 1.0)\n"
+            "\n"
+            "fig, ax = plt.subplots(figsize=(7, 5))\n"
+            "ax.scatter(x[~sig], df.loc[~sig, 'log2fc'], s=3, color='#bbbbbb', alpha=0.5)\n"
+            "ax.scatter(x[sig], df.loc[sig, 'log2fc'], s=8, color='#d95f5f', label='sig')\n"
+            "ax.axhline(0, color='#444', lw=0.6)\n"
+            "ax.axhline( 1, color='#888', lw=0.6, ls='--')\n"
+            "ax.axhline(-1, color='#888', lw=0.6, ls='--')\n"
+            "ax.set_xlabel('log10 mean expression')\n"
+            "ax.set_ylabel('log2 fold change')\n"
+            "ax.legend(loc='best', fontsize=8)\n"
+            "plt.tight_layout(); plt.show()"
+        )
+
+    # ── de_heatmap ────────────────────────────────────────────────────────
+    if geom == 'de_heatmap':
+        return (
+            "import matplotlib.pyplot as plt\n"
+            "import numpy as np\n"
+            "\n"
+            "# The CSV from /plot/de_heatmap?format=csv arrives in long form:\n"
+            "# columns are (contrast, gene, value, padj). Pivot to matrix.\n"
+            "matrix = df.pivot_table(index='contrast', columns='gene',\n"
+            "                        values='value', aggfunc='first')\n"
+            "\n"
+            "vmax = float(np.nanmax(np.abs(matrix.values)))\n"
+            "fig, ax = plt.subplots(figsize=(max(6, 0.4 * matrix.shape[1] + 2),\n"
+            "                                max(4, 0.25 * matrix.shape[0] + 1)))\n"
+            "im = ax.imshow(matrix.values, cmap='RdBu_r', vmin=-vmax, vmax=vmax, aspect='auto')\n"
+            "\n"
+            "ax.set_xticks(np.arange(matrix.shape[1]))\n"
+            "ax.set_xticklabels(matrix.columns, rotation=90, fontsize=7)\n"
+            "ax.set_yticks(np.arange(matrix.shape[0]))\n"
+            "ax.set_yticklabels(matrix.index, fontsize=7)\n"
+            "plt.colorbar(im, ax=ax, label='value', shrink=0.7)\n"
+            "plt.tight_layout(); plt.show()"
         )
 
     # ── scatter ───────────────────────────────────────────────────────────

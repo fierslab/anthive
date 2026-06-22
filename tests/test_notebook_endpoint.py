@@ -9,8 +9,9 @@ intro + snippet cell). Also verifies:
 - the caption text from the underlying plot appears in cell 0,
 - PLOT_PARAMS / RENDER_PARAMS are split correctly (biology vs visual),
 - the auth cell is generic (no Authelia / basic-auth phrasing in the cell),
-- each "real-code" geom emits a de-novo snippet that AST-parses cleanly,
-- DE geoms emit the stub cell pointing back at cell 4.
+- every supported geom (incl. the 4 DE geoms) emits a de-novo snippet
+  that AST-parses cleanly,
+- non-empty params dicts render multi-line, empty dicts stay single-line.
 
 Skipped when ANTHIVE_TEST_URL is unset or the server isn't reachable —
 same pattern as test_plot_handlers_smoke.py.
@@ -285,9 +286,22 @@ def test_notebook_param_split_biology_vs_render(key: str, expected_bucket: str):
     ('kde2d', {'x': 'P2RY12', 'y': 'CX3CR1'}),
     ('heatmap', {'genes': 'P2RY12,CX3CR1', 'group_by': 'donor_sex'}),
     ('rolling', {'x': 'P2RY12', 'y': 'CX3CR1'}),
+    ('volcano', {'study': 'DE_interpretable_glmm_vs_grandmean',
+                 'term': 'Sex_donor', 'contrast': 'F'}),
+    ('ma',      {'study': 'DE_interpretable_glmm_vs_grandmean',
+                 'term': 'Sex_donor', 'contrast': 'F'}),
+    ('forest',  {'study': 'DE_interpretable_glmm_vs_grandmean',
+                 'term': 'Sex_donor', 'gene': 'P2RY12'}),
+    ('de_heatmap', {'study': 'DE_interpretable_glmm_vs_grandmean',
+                    'term': 'Sex_donor'}),
 ])
 def test_denovo_snippet_ast_parses(geom: str, extra: dict):
-    """Each real-code geom emits a de-novo snippet that AST-parses cleanly."""
+    """Every supported geom emits a de-novo snippet that AST-parses cleanly.
+
+    API 2.11.1+: all 15 geoms (including the 4 DE geoms) ship real
+    matplotlib code; the older "stub pointing at lib/plotting.py"
+    branch is gone.
+    """
     r = _get(f"/databases/{V6A}/plot/{geom}/notebook", **extra)
     # 4xx OK if a geom-specific param is missing; the AST check is only
     # meaningful when the notebook actually built.
@@ -301,35 +315,60 @@ def test_denovo_snippet_ast_parses(geom: str, extra: dict):
     except SyntaxError as exc:
         pytest.fail(f"de-novo snippet for {geom!r} doesn't parse: {exc}\n---\n{snippet}")
 
-    # Sanity: every real-code geom should mention matplotlib.
+    # Sanity: every snippet imports matplotlib.
     assert 'matplotlib' in snippet, f"{geom!r} snippet missing matplotlib:\n{snippet}"
 
 
-@pytest.mark.parametrize("geom,extra", [
-    ('volcano', {'study': 'DE_interpretable_glmm_vs_grandmean',
-                 'term': 'Sex_donor', 'contrast': 'F'}),
-    ('ma',      {'study': 'DE_interpretable_glmm_vs_grandmean',
-                 'term': 'Sex_donor', 'contrast': 'F'}),
-    ('forest',  {'study': 'DE_interpretable_glmm_vs_grandmean',
-                 'term': 'Sex_donor', 'gene': 'P2RY12'}),
-    ('de_heatmap', {'study': 'DE_interpretable_glmm_vs_grandmean',
-                    'term': 'Sex_donor'}),
-])
-def test_de_geoms_emit_stub_cell(geom: str, extra: dict):
-    """DE geoms emit a comment-only stub that points back at cell 4 + lib/plotting.py."""
-    r = _get(f"/databases/{V6A}/plot/{geom}/notebook", **extra)
-    if r.status_code != 200:
-        pytest.skip(f"server rejected {geom} with {r.status_code}: {r.text[:200]}")
+# ── params: multi-line dict() formatting (API 2.11.1+) ─────────────────────
 
-    nb = r.json()
-    snippet = nb['cells'][_DENOVO_CODE]['source']
 
-    # Must still parse as Python (comments + df.head()).
-    ast.parse(snippet)
+def test_notebook_plot_params_dict_is_multiline():
+    """Non-empty PLOT_PARAMS renders one kwarg per line, 4-space indented."""
+    r = _get(
+        f"/databases/{V6A}/plot/volcano/notebook",
+        study='DE_interpretable_glmm_vs_grandmean',
+        term='Sex_donor',
+        contrast='F',
+    )
+    assert r.status_code == 200
+    code = _params_cell(r.json())
 
-    # Points at lib/plotting.py and recommends the server-rendered figure.
-    assert 'lib/plotting.py' in snippet, snippet
-    assert 'cell 4' in snippet, snippet
+    m = re.search(
+        r'PLOT_PARAMS\s*=\s*dict\((?P<body>.*?)\n\)', code, re.DOTALL,
+    )
+    assert m, f"PLOT_PARAMS dict() not found in:\n{code}"
+    body = m.group('body')
+    # Each kwarg lives on its own 4-space-indented line.
+    assert '\n    ' in body, (
+        f"expected multi-line 4-space-indented kwargs; body was:\n{body!r}"
+    )
+    # And a trailing comma after the last kwarg (sits just before the
+    # closing newline + paren that re.search consumed).
+    assert body.rstrip().endswith(','), (
+        f"expected trailing comma on last kwarg; body was:\n{body!r}"
+    )
+
+
+def test_notebook_empty_render_params_is_oneline():
+    """Empty RENDER_PARAMS stays on a single line as ``dict()``."""
+    r = _get(
+        f"/databases/{V6A}/plot/volcano/notebook",
+        study='DE_interpretable_glmm_vs_grandmean',
+        term='Sex_donor',
+        contrast='F',
+    )
+    assert r.status_code == 200
+    code = _params_cell(r.json())
+
+    # Find the RENDER_PARAMS assignment and check the value is exactly
+    # ``dict()`` with no embedded newline.
+    m = re.search(r'^RENDER_PARAMS\s*=\s*(.+)$', code, re.MULTILINE)
+    assert m, f"RENDER_PARAMS line not found in:\n{code}"
+    value = m.group(1).strip()
+    assert value == 'dict()', (
+        f"expected RENDER_PARAMS = dict() on one line, got: {value!r}\n"
+        f"full cell:\n{code}"
+    )
 
 
 # ── back-compat (kept from older tests) ───────────────────────────────────
