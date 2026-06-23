@@ -39,11 +39,13 @@ import {$ANTHIVE_HTTP_REDIRECT_SNIPPET:caddy-http-redirect.dev}
 
 # Main site block — listens on ANTHIVE_LISTEN.
 #
-# Dev default:  ":8501" (all interfaces, TLS via Caddy's internal CA)
-# Prod:         "127.0.0.1:8500" with ANTHIVE_TLS_SNIPPET pointing at
-#               caddy-tls.prod (empty) so Caddy speaks plain HTTP and
-#               nginx terminates TLS on :443 in front.
-{$ANTHIVE_LISTEN:":8501"} {
+# Dev default: enumerates hostnames so `tls internal` issues a cert per
+# name and SNI-matches whichever the client uses (10.42.0.3, localhost, …).
+# A bare ":8501" leaves no hostname bound → TLS handshake fails with
+# `internal error` because Caddy can't pick a cert for the connection.
+# Prod overrides via env to "http://127.0.0.1:8500" (single address,
+# nginx in front terminates TLS).
+{$ANTHIVE_LISTEN::8501, localhost:8501, localhost.localdomain:8501, 127.0.0.1:8501, 10.42.0.3:8501} {
 	# Restrict which network interfaces Caddy accepts connections on.
 	# Default ("0.0.0.0 ::") = all v4 + v6 interfaces — fine for laptops,
 	# overridden on multi-homed boxes via ANTHIVE_CADDY_BIND. On prod the
