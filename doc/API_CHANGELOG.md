@@ -29,6 +29,77 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.13.0 — 2026-06-23
+
+### Added — `GET /databases/{db_id:path}/pseudobulk`
+
+Aggregated count matrix grouped by one or more obs categorical
+columns, in the shape DESeq2 / edgeR expect: rows = genes, columns =
+pseudobulk groups, plus a `gene_name` column.  The missing input for
+bulk-style downstream tools (DESeq2, edgeR, limma-voom) — previously
+callers had to round-trip the `.h5ad` themselves.
+
+Query parameters:
+
+* `group_by` (required) — comma-separated obs **categorical** column
+  names that define the groups.  `leiden` → one column per leiden
+  level; `leiden,donor` → one column per (leiden × donor) combination,
+  with group ids formatted as `<leiden>_x_<donor>` (separator `_x_`
+  chosen so it cannot clash with the values themselves).
+* `layer` — layer to aggregate, default `counts`.  Must be integer-
+  valued; the endpoint validates against the catalog `layer_stats`
+  and 400s with a helpful "this layer looks log-normalized, use
+  layer=counts" message when it isn't.
+* `min_cells` — drop groups with fewer cells (default 10, range
+  1..10000).  Dropped combinations are reported in the metadata so
+  callers can audit them.
+* `subset` — pre-filter applied BEFORE the GROUP BY, same format as
+  the plot endpoints (`field:value`, `field:v1,v2`, `field:min..max`).
+  Categorical only — numerical range filters are rejected with 400.
+* `max_inline_mb` — threshold (default 100) for auto-escalation to
+  async/temp-file mode.
+* `async` (alias) — force the async branch regardless of size.
+* `format` — `parquet` (default) | `csv` | `tsv`.  CSV/TSV are
+  always synchronous; the colData metadata is exposed via an
+  `X-Pseudobulk-Meta` header instead of being embedded in the body.
+
+Sync (inline) response:
+
+* Content-Type `application/x-parquet` (or `text/csv` / `text/tab-
+  separated-values`), `Content-Disposition: attachment`.
+* Parquet schema metadata key `anthive_pseudobulk_meta` carries the
+  colData as JSON: per-group `n_cells`, `column_index`, the original
+  obs-column values, plus dataset-level stats (`db_id`, `layer`,
+  `group_by`, `subset`, `n_genes`, `n_groups`, `n_dropped_groups`,
+  `dropped_groups`).
+* Response headers: `X-Pseudobulk-N-Groups`, `X-Pseudobulk-N-Genes`,
+  `X-Pseudobulk-Dropped-Groups`, `X-Pseudobulk-Layer`,
+  `X-Pseudobulk-Group-By`, `X-Plot-Caption` (Latin-1 safe).
+
+Async response (auto-escalated above `max_inline_mb` or via
+`?async=true`):
+
+* Content-Type `application/json`.
+* Body `{artifact_url, expires_at, expires_in, size_bytes, sha256,
+  db_id, layer, group_by, subset, min_cells, n_genes, n_groups,
+  n_dropped_groups, groups, dropped_groups, caption}`.
+* The parquet is written to
+  `webapp/artifacts/pseudobulk/<token>.parquet` with TTL 1 hour and
+  served by the reverse proxy at `/artifacts/pseudobulk/<token>.parquet`
+  — same Authelia gate as `/api/`.  A background task sweeps expired
+  files every 5 minutes.
+
+Reverse-proxy note: the deployment may need a new `location
+/artifacts/` block (see `config/nginx.conf` / `config/Caddyfile`).
+Existing static-site location blocks for `/plots/` are the model.
+
+Caller impact: purely additive.  Callers tracking `/version` will
+NOT see `pseudobulk` in `plot_geoms` — it isn't a plot geom; it sits
+under tag `data` alongside `/cells`.  vark and antomaton's
+`pseudobulk_deseq` workflow can now drop their mock-mode fallbacks.
+
+---
+
 ## 2.12.0 — 2026-06-22
 
 ### Added — `de_quadrant` plot geom (16th geom)

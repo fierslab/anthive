@@ -1268,6 +1268,7 @@ async def lifespan(app: FastAPI):
         print("ERROR: Registry or connection pool not initialized!")
         sys.exit(1)
     asyncio.create_task(_daily_metadata_refresh())
+    asyncio.create_task(_pseudobulk_cleanup_loop())
     if geneset_registry is not None:
         try:
             _build_score_index()
@@ -1299,8 +1300,8 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.12.0"
-API_VERSION_RELEASED = "2026-06-22"
+API_VERSION = "2.13.0"
+API_VERSION_RELEASED = "2026-06-23"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
 # Create FastAPI app with lifespan handler (Phase 2)
@@ -7199,6 +7200,744 @@ async def module_score(db_id: str, request: ModuleScoreRequest):
         'seed':            request.seed,
         'summary':         summary,
     })
+
+
+# ── Pseudobulk endpoint ────────────────────────────────────────────────────────
+#
+# Aggregates an integer-counts layer to a wide gene × group matrix grouped by
+# one or more obs categorical columns. Output is the DESeq2/edgeR-shaped
+# counts matrix (rows = genes, columns = groups, plus a gene_name column) plus
+# colData embedded as Arrow custom metadata, so a single fetch hands a bulk
+# DE consumer everything it needs.
+#
+# Default format is parquet. Sync inline body when the estimated payload fits
+# under `?max_inline_mb=` (default 100); otherwise the response is JSON with
+# an `artifact_url` and the parquet is written under
+# `webapp/artifacts/pseudobulk/<token>.parquet` (served by nginx at
+# `/artifacts/`, same Authelia gate as `/api/`).
+
+_PSEUDOBULK_ARTIFACT_SUBDIR = 'artifacts/pseudobulk'
+_PSEUDOBULK_ARTIFACT_TTL_S = 60 * 60          # 1 hour
+_PSEUDOBULK_CLEAN_INTERVAL_S = 5 * 60         # sweep every 5 min
+_PSEUDOBULK_GROUP_SEP = '_x_'                 # delimiter used in group_id
+
+
+def _pseudobulk_artifacts_dir() -> Path:
+    """Resolve the on-disk artifact directory. Mirrors `ant-mcp`'s `plots_dir`
+    convention: under `webapp/`, served by the reverse proxy.
+    """
+    cfg = get_config()
+    base = cfg.get('mcp', {}).get('plots_dir') if isinstance(cfg, dict) else None
+    if base:
+        base_path = Path(base).resolve()
+        # plots_dir is typically `./webapp/plots`; we want `./webapp/artifacts/pseudobulk`
+        if base_path.name == 'plots':
+            return base_path.parent / 'artifacts' / 'pseudobulk'
+        # Fallback: a sibling artifacts/pseudobulk under the same parent
+        return base_path.parent / 'artifacts' / 'pseudobulk'
+    # No plots_dir configured — fall back to repo `./webapp/artifacts/pseudobulk`
+    return Path(__file__).resolve().parent.parent.parent / 'webapp' / 'artifacts' / 'pseudobulk'
+
+
+def _layer_looks_integer(layer_stats: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
+    """Inspect a single layer's stats dict and decide if it looks like raw
+    integer counts.  Returns (is_integer, reason).
+
+    Heuristics (any one disqualifies):
+      * dtype is float* and min_nonzero < 1
+      * min_value < 0
+      * max_value < 2 (a normalized layer caps around log2 of small numbers)
+      * dtype is one of int8/16/32/64 → definitively integer
+    """
+    if not isinstance(layer_stats, dict):
+        return False, "no layer_stats recorded in catalog metadata"
+    dtype = str(layer_stats.get('dtype', '')).lower()
+    min_value = layer_stats.get('min_value')
+    min_nonzero = layer_stats.get('min_nonzero')
+    max_value = layer_stats.get('max_value')
+
+    if dtype.startswith('int') or dtype.startswith('uint'):
+        return True, f"dtype={dtype}"
+
+    # Float dtype: it MIGHT still be integer-valued. Check the nonzero floor.
+    if min_value is not None and min_value < -1e-6:
+        return False, (
+            f"layer has negative values (min={min_value}); "
+            "this looks like a transformed layer, not raw counts"
+        )
+    if min_nonzero is not None and 0 < min_nonzero < 0.999:
+        return False, (
+            f"layer has fractional nonzero values (min_nonzero={min_nonzero}); "
+            "this looks log-normalized — try ?layer=counts"
+        )
+    if max_value is not None and max_value < 20:
+        # A log-norm layer typically caps below ~20; raw counts go to thousands.
+        return False, (
+            f"layer's max_value is {max_value}, far below typical raw-counts "
+            "magnitude; this looks transformed — try ?layer=counts"
+        )
+    # Float but plausibly integer-valued (whole-number floats from a counts-as-float storage).
+    return True, f"dtype={dtype}, max={max_value}"
+
+
+def _split_group_by(group_by: str) -> List[str]:
+    """Parse `?group_by=col1,col2` into a list of column names. Rejects empty
+    or duplicate entries; preserves caller order so column-id construction
+    is reproducible."""
+    if not group_by:
+        raise HTTPException(422, detail="group_by is required (?group_by=col1[,col2,...])")
+    cols = [c.strip() for c in group_by.split(',') if c.strip()]
+    if not cols:
+        raise HTTPException(422, detail="group_by must contain at least one column name")
+    seen, out = set(), []
+    for col in cols:
+        if col in seen:
+            continue
+        seen.add(col)
+        out.append(col)
+    return out
+
+
+def _build_subset_where_obscat(
+    filters: Optional[Dict[str, Any]],
+    cat_fields: List[str],
+    num_fields: List[str],
+    obscat_alias: str,
+    obsnum_alias: Optional[str],
+) -> Tuple[str, List[Any], bool]:
+    """Build a WHERE-fragment + bound params from a parsed subset dict.
+
+    Returns (sql_fragment, params, needs_obsnum_join). The fragment is a
+    parenthesised AND-of-clauses suitable for splicing into `WHERE ... AND
+    (<fragment>)`. Empty when filters is None / empty.
+
+    Unknown fields raise 400 — the caller almost certainly typo'd a column
+    name and a silent skip would mask the bug.
+    """
+    if not filters:
+        return '', [], False
+    parts: List[str] = []
+    params: List[Any] = []
+    needs_num_join = False
+    for field, value in filters.items():
+        if field in cat_fields:
+            col_sql = f"{obscat_alias}.{safe_ident(field)}"
+        elif field in num_fields:
+            if obsnum_alias is None:
+                raise HTTPException(400, detail=(
+                    f"subset filter references numerical field '{field}' "
+                    "which requires an obsnum join; the pseudobulk endpoint "
+                    "currently supports categorical filters only"
+                ))
+            needs_num_join = True
+            col_sql = f"{obsnum_alias}.{safe_ident(field)}"
+        else:
+            raise HTTPException(400, detail=(
+                f"subset field '{field}' is not a known obs column "
+                "(check spelling and casing against /databases/{db_id}/info)"
+            ))
+
+        if isinstance(value, tuple) and len(value) == 2:
+            parts.append(f"{col_sql} BETWEEN ? AND ?")
+            params.extend([value[0], value[1]])
+        elif isinstance(value, list):
+            placeholders = ', '.join(['?'] * len(value))
+            parts.append(f"{col_sql} IN ({placeholders})")
+            params.extend(value)
+        else:
+            parts.append(f"{col_sql} = ?")
+            params.append(value)
+    if not parts:
+        return '', [], needs_num_join
+    return '(' + ' AND '.join(parts) + ')', params, needs_num_join
+
+
+# In-memory artifact registry: token -> {path, created_at, expires_at, db_id}.
+# The on-disk file IS the source of truth; the dict is purely a fast-path index
+# for the cleanup sweep so we don't restat every file every 5 min.
+_pseudobulk_artifacts: Dict[str, Dict[str, Any]] = {}
+_pseudobulk_artifacts_lock = Lock()
+
+
+def _pseudobulk_register_artifact(token: str, path: Path, db_id: str) -> None:
+    with _pseudobulk_artifacts_lock:
+        now = time.time()
+        _pseudobulk_artifacts[token] = {
+            'path': str(path),
+            'db_id': db_id,
+            'created_at': now,
+            'expires_at': now + _PSEUDOBULK_ARTIFACT_TTL_S,
+        }
+
+
+def _pseudobulk_sweep_artifacts() -> int:
+    """Delete expired artifact files. Returns the count removed."""
+    cutoff = time.time()
+    removed = 0
+    artifacts_dir = _pseudobulk_artifacts_dir()
+    if not artifacts_dir.exists():
+        return 0
+    # Walk the dir directly — survives server restarts that wipe the in-memory dict.
+    for file_path in artifacts_dir.iterdir():
+        try:
+            if not file_path.is_file():
+                continue
+            age = cutoff - file_path.stat().st_mtime
+            if age > _PSEUDOBULK_ARTIFACT_TTL_S:
+                file_path.unlink()
+                removed += 1
+        except OSError:
+            continue
+    if removed:
+        with _pseudobulk_artifacts_lock:
+            for tok in list(_pseudobulk_artifacts.keys()):
+                entry = _pseudobulk_artifacts[tok]
+                if not Path(entry['path']).exists():
+                    _pseudobulk_artifacts.pop(tok, None)
+    return removed
+
+
+async def _pseudobulk_cleanup_loop() -> None:
+    """Background task: sweep expired pseudobulk artifact files every 5 min."""
+    while True:
+        await asyncio.sleep(_PSEUDOBULK_CLEAN_INTERVAL_S)
+        try:
+            removed = await asyncio.to_thread(_pseudobulk_sweep_artifacts)
+            if removed:
+                log.info("pseudobulk: cleaned up %d expired artifact(s)", removed)
+        except Exception as exc:
+            log.warning("pseudobulk: cleanup sweep failed: %s", exc)
+
+
+def _pseudobulk_artifact_url(token: str, fmt: str, request: Optional[Request]) -> str:
+    """Return the public URL for an artifact. Constructed relative to the
+    reverse-proxy mount, NOT the FastAPI `root_path` (artifacts are served
+    statically by nginx at `/artifacts/`, parallel to `/api/`)."""
+    base = ''
+    if request is not None:
+        # The Authelia/Caddy gate fronts us at the same scheme + host. We need
+        # the *external* base, which the proxy passes via X-Forwarded-* or by
+        # rewriting `request.base_url` (FastAPI's root_path='/api' makes
+        # request.url_for return /api/... — wrong for static artifacts).
+        scheme = request.headers.get('x-forwarded-proto', request.url.scheme)
+        host = request.headers.get('x-forwarded-host') or request.headers.get('host', '')
+        if host:
+            base = f"{scheme}://{host}"
+    return f"{base}/{_PSEUDOBULK_ARTIFACT_SUBDIR}/{token}.{fmt}"
+
+
+def _pseudobulk_estimate_size_bytes(n_genes: int, n_groups: int) -> int:
+    """Rough estimate of the parquet payload size in bytes.
+
+    Wide matrix of int64 with parquet's typical ~2-3x compression for sparse
+    counts. We use: n_genes * n_groups * 8 bytes * 0.4 compression + 30%
+    overhead. Tuned to NOT under-estimate for the 25k genes × 300 groups case.
+    """
+    raw = n_genes * n_groups * 8
+    return int(raw * 0.4 * 1.3)
+
+
+def _pseudobulk_meta_dict(
+    *,
+    db_id: str,
+    layer: str,
+    group_by_cols: List[str],
+    subset_filters: Optional[Dict[str, Any]],
+    min_cells: int,
+    n_genes: int,
+    kept_sizes_df: 'pd.DataFrame',
+    dropped_sizes_df: 'pd.DataFrame',
+) -> Dict[str, Any]:
+    """Build the meta dict embedded in parquet Arrow metadata + mirrored in
+    async JSON response.  Pure pandas → dict; no IO."""
+    groups = []
+    for col_index, (_, row) in enumerate(kept_sizes_df.iterrows()):
+        entry = {
+            'group_id': row['group_id'],
+            'n_cells': int(row['n_cells']),
+            'column_index': col_index + 1,  # column 0 is gene_name
+        }
+        for col in group_by_cols:
+            entry[col] = None if pd.isna(row[col]) else row[col]
+        groups.append(entry)
+
+    dropped = []
+    for _, row in dropped_sizes_df.iterrows():
+        entry = {'n_cells': int(row['n_cells']), 'reason': 'below min_cells'}
+        for col in group_by_cols:
+            entry[col] = None if pd.isna(row[col]) else row[col]
+        dropped.append(entry)
+
+    return {
+        'db_id':            db_id,
+        'layer':            layer,
+        'group_by':         list(group_by_cols),
+        'subset':           subset_filters or {},
+        'min_cells':        int(min_cells),
+        'n_genes':          int(n_genes),
+        'n_groups':         len(groups),
+        'n_dropped_groups': len(dropped),
+        'groups':           groups,
+        'dropped_groups':   dropped,
+        'generated_at':     datetime.utcnow().isoformat() + 'Z',
+        'api_version':      API_VERSION,
+    }
+
+
+def _pseudobulk_to_parquet_bytes(
+    wide_df: 'pd.DataFrame', meta: Dict[str, Any],
+) -> bytes:
+    """Serialise the wide gene × group counts matrix as parquet bytes with
+    `anthive_pseudobulk_meta` embedded in the Arrow schema metadata."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    table = pa.Table.from_pandas(wide_df, preserve_index=False)
+    meta_json = json.dumps(meta, default=str).encode('utf-8')
+    new_metadata = dict(table.schema.metadata or {})
+    new_metadata[b'anthive_pseudobulk_meta'] = meta_json
+    table = table.replace_schema_metadata(new_metadata)
+    buf = BytesIO()
+    pq.write_table(table, buf, compression='zstd')
+    return buf.getvalue()
+
+
+def _pseudobulk_caption(
+    *, db_id: str, layer: str, group_by_cols: List[str],
+    n_genes: int, n_groups: int, n_dropped: int, min_cells: int,
+) -> str:
+    """One-line caption mirroring /plot's X-Plot-Caption pattern. Latin-1
+    safe (no em-dash / × / curly quotes) since it ships in an HTTP header."""
+    return (
+        f"Pseudobulk count matrix for {db_id} grouped by ({','.join(group_by_cols)}), "
+        f"layer {layer}. {n_genes:,} genes x {n_groups:,} groups; "
+        f"{n_dropped:,} (group,) combinations dropped below min_cells={min_cells}. "
+        f"Generated {datetime.utcnow().date().isoformat()}."
+    )
+
+
+def _pseudobulk_compute(
+    *,
+    db_id: str,
+    layer: str,
+    group_by_cols: List[str],
+    subset_filters: Optional[Dict[str, Any]],
+    min_cells: int,
+) -> Tuple['pd.DataFrame', Dict[str, Any], 'pd.DataFrame', 'pd.DataFrame']:
+    """Synchronous core: run the SQL aggregation and return
+    (wide_df, meta_dict, kept_sizes_df, dropped_sizes_df).
+
+    Runs entirely inside DuckDB (one GROUP BY + one pivot), so 25k×300
+    matrices come back in ~seconds even on the S25/V6A scale (235k cells).
+    """
+    with _pooled_db(db_id) as db:
+        conn = db._conn
+        cat_fields = db._get_categorical_fields()
+        num_fields = db._get_numerical_fields()
+        layers = db._get_layers()
+
+        if layer not in layers:
+            raise HTTPException(404, detail=(
+                f"layer '{layer}' not found in {db_id}. Available: "
+                + ', '.join(sorted(layers))
+            ))
+        for col in group_by_cols:
+            if col not in cat_fields:
+                raise HTTPException(400, detail=(
+                    f"group_by column '{col}' is not a categorical obs "
+                    f"column in {db_id}. Available categorical columns: "
+                    + ', '.join(sorted(cat_fields)[:20])
+                    + ('...' if len(cat_fields) > 20 else '')
+                ))
+
+        # Layer-integer validation: trust catalog layer_stats first; if
+        # missing, fall back to a single MIN/MAX/MIN-positive scan.
+        try:
+            md_path = registry.databases.get(db_id, {}).get('md_path')
+            file_meta = registry.metadata_cache.get(db_id, {}) or {}
+        except Exception:
+            file_meta = {}
+        layer_stats_all = file_meta.get('layer_stats', {}) if isinstance(file_meta, dict) else {}
+        layer_stats = layer_stats_all.get(layer) if isinstance(layer_stats_all, dict) else None
+
+        if layer_stats is None:
+            layer_table = safe_ident(f"__layer__{layer}")
+            row = conn.execute(
+                f"SELECT MIN(value), MAX(value), MIN(CASE WHEN value > 0 THEN value END) FROM {layer_table}"
+            ).fetchone() or (0, 0, None)
+            layer_stats = {
+                'dtype': 'float',  # we have to guess; treat as float and lean on heuristics
+                'min_value': float(row[0]) if row[0] is not None else 0.0,
+                'max_value': float(row[1]) if row[1] is not None else 0.0,
+                'min_nonzero': float(row[2]) if row[2] is not None else None,
+            }
+
+        is_int, reason = _layer_looks_integer(layer_stats)
+        if not is_int:
+            raise HTTPException(400, detail=(
+                f"layer '{layer}' does not look like integer counts: {reason}. "
+                "DESeq2/edgeR require raw integer counts; try ?layer=counts "
+                f"(available layers on {db_id}: {sorted(layers)})."
+            ))
+
+        # Compose group_id expression: oc."col1" || '_x_' || oc."col2"
+        casted_parts = [
+            f"CAST(oc.{safe_ident(c)} AS VARCHAR)" for c in group_by_cols
+        ]
+        sep_sql_literal = "'" + _PSEUDOBULK_GROUP_SEP + "'"
+        group_expr = (
+            casted_parts[0] if len(casted_parts) == 1
+            else (f" || {sep_sql_literal} || ".join(casted_parts))
+        )
+        not_null_clause = ' AND '.join(
+            f"oc.{safe_ident(c)} IS NOT NULL" for c in group_by_cols
+        )
+
+        # Subset WHERE
+        subset_frag, subset_params, needs_obsnum = _build_subset_where_obscat(
+            subset_filters, cat_fields, num_fields, 'oc',
+            obsnum_alias='onum' if num_fields else None,
+        )
+        obsnum_join = (
+            "LEFT JOIN __obsnum onum ON onum.cell_id = oc.cell_id"
+            if needs_obsnum else ""
+        )
+
+        where_parts = [not_null_clause]
+        if subset_frag:
+            where_parts.append(subset_frag)
+        where_sql = ' AND '.join(where_parts)
+
+        layer_table = safe_ident(f"__layer__{layer}")
+
+        # 1) Group sizes (cells per group, regardless of expression)
+        size_select_cols = ', '.join(
+            f"oc.{safe_ident(c)} AS {safe_ident(c)}" for c in group_by_cols
+        )
+        sql_sizes = f"""
+            SELECT
+                {group_expr} AS group_id,
+                COUNT(*) AS n_cells,
+                {size_select_cols}
+            FROM __obscat oc
+            {obsnum_join}
+            WHERE {where_sql}
+            GROUP BY group_id, {', '.join(safe_ident(c) for c in group_by_cols)}
+        """
+        sizes_df = conn.execute(sql_sizes, subset_params).fetchdf()
+        if sizes_df.empty:
+            raise HTTPException(404, detail=(
+                f"no cells matched (group_by={group_by_cols}, "
+                f"subset={subset_filters}). Verify the columns are populated."
+            ))
+
+        kept_df = sizes_df[sizes_df['n_cells'] >= min_cells].copy()
+        dropped_df = sizes_df[sizes_df['n_cells'] < min_cells].copy()
+        if kept_df.empty:
+            raise HTTPException(404, detail=(
+                f"every group has < min_cells={min_cells} cells. "
+                f"{len(sizes_df)} group(s) found; max group size = "
+                f"{int(sizes_df['n_cells'].max())}. "
+                "Lower min_cells or pick a coarser group_by."
+            ))
+
+        kept_ids = kept_df['group_id'].astype(str).tolist()
+        ids_placeholders = ','.join(['?'] * len(kept_ids))
+
+        # 2) Aggregated counts (long form). Use the layer's underlying integer
+        #    table __layer__<layer>(cell_id, gene_id, value).
+        sql_counts = f"""
+            WITH cells_in_groups AS (
+                SELECT
+                    oc.cell_id AS cell_id,
+                    {group_expr} AS group_id
+                FROM __obscat oc
+                {obsnum_join}
+                WHERE {where_sql}
+            )
+            SELECT
+                g.gene_name AS gene_name,
+                cig.group_id AS group_id,
+                SUM(l.value) AS counts
+            FROM {layer_table} l
+            JOIN cells_in_groups cig ON cig.cell_id = l.cell_id
+            JOIN __genes g ON g.gene_id = l.gene_id
+            WHERE cig.group_id IN ({ids_placeholders})
+            GROUP BY g.gene_name, cig.group_id
+        """
+        counts_long = conn.execute(
+            sql_counts, list(subset_params) + list(kept_ids),
+        ).fetchdf()
+
+        # 3) Gene catalog (all genes, even those with 0 counts in every kept group)
+        genes_df = conn.execute(
+            "SELECT gene_name FROM __genes ORDER BY gene_name"
+        ).fetchdf()
+        n_genes = len(genes_df)
+
+        # Pivot long → wide. Ensure every kept group has a column; fill zeros.
+        if counts_long.empty:
+            wide = pd.DataFrame({'gene_name': genes_df['gene_name']})
+            for gid in sorted(kept_ids):
+                wide[gid] = 0
+        else:
+            pivoted = counts_long.pivot_table(
+                index='gene_name', columns='group_id', values='counts',
+                aggfunc='sum', fill_value=0,
+            )
+            # Re-index against the FULL gene catalog so genes silent in every
+            # group still appear as a zero-filled row (DESeq2's filterByExpr
+            # expects the full matrix, not the post-filter one).
+            pivoted = pivoted.reindex(genes_df['gene_name'].values, fill_value=0)
+            # Add any kept group ids that ended up with literally zero expression.
+            for gid in kept_ids:
+                if gid not in pivoted.columns:
+                    pivoted[gid] = 0
+            pivoted = pivoted[sorted(pivoted.columns.tolist())]
+            wide = pivoted.reset_index()
+            wide = wide.rename(columns={'index': 'gene_name'})
+            if 'gene_name' not in wide.columns:
+                wide.insert(0, 'gene_name', genes_df['gene_name'].values)
+
+        # Coerce count columns to int64 (DESeq2 / edgeR want integers).
+        for col in wide.columns:
+            if col == 'gene_name':
+                continue
+            wide[col] = wide[col].fillna(0).round().astype('int64')
+
+        # Move gene_name to first column
+        cols = ['gene_name'] + [c for c in wide.columns if c != 'gene_name']
+        wide = wide[cols]
+
+        # Sort kept_df / dropped_df by group_id so the metadata `column_index`
+        # matches the parquet column order (which we already sorted above).
+        kept_df = kept_df.sort_values('group_id').reset_index(drop=True)
+        dropped_df = dropped_df.sort_values('group_id').reset_index(drop=True)
+
+        meta = _pseudobulk_meta_dict(
+            db_id=db_id, layer=layer, group_by_cols=group_by_cols,
+            subset_filters=subset_filters, min_cells=min_cells,
+            n_genes=n_genes,
+            kept_sizes_df=kept_df, dropped_sizes_df=dropped_df,
+        )
+        return wide, meta, kept_df, dropped_df
+
+
+@app.get("/databases/{db_id:path}/pseudobulk", tags=["data"])
+async def get_pseudobulk(
+    db_id: str,
+    request: Request,
+    group_by: str = Query(
+        ...,
+        description=(
+            "Comma-separated list of obs **categorical** columns that define "
+            "the pseudobulk groups. ``leiden`` → one column per leiden level; "
+            "``leiden,donor`` → one column per (leiden x donor) combination."
+        ),
+    ),
+    layer: str = Query(
+        'counts',
+        description=(
+            "Layer to aggregate. Must be integer-valued for DESeq2 / edgeR-"
+            "style downstream tooling; the endpoint validates layer_stats "
+            "and 400s with a helpful message if the layer looks log-norm."
+        ),
+    ),
+    min_cells: int = Query(
+        10, ge=1, le=10_000,
+        description="Drop groups with fewer than this many cells (default 10).",
+    ),
+    subset: List[str] = Query(
+        default=[],
+        description=(
+            "Pre-filter applied BEFORE the GROUP BY (repeatable). "
+            "Same format as the plot endpoints: ``field:value``, "
+            "``field:v1,v2``, ``field:min..max``. "
+            "Only categorical filters are supported here."
+        ),
+    ),
+    max_inline_mb: int = Query(
+        100, ge=1, le=2000,
+        description=(
+            "Auto-escalation threshold: if the estimated payload exceeds "
+            "this many megabytes, the response becomes JSON with an "
+            "``artifact_url`` pointing to the parquet on the server "
+            "(TTL 1 hour)."
+        ),
+    ),
+    async_mode: bool = Query(
+        False, alias='async',
+        description="Force async/temp-file mode regardless of estimated size.",
+    ),
+    output_format: str = Query(
+        'parquet', alias='format', regex='^(parquet|csv|tsv)$',
+        description=(
+            "Output format. ``parquet`` (default) embeds the colData via "
+            "Arrow custom metadata key ``anthive_pseudobulk_meta``. ``csv`` "
+            "and ``tsv`` force wide layout; the colData is gone from the "
+            "body — read it from the ``X-Pseudobulk-Meta`` response header."
+        ),
+    ),
+):
+    """Aggregate a counts layer to a wide gene x group matrix (rows = genes,
+    columns = groups, plus ``gene_name``) ready to feed DESeq2 / edgeR.
+
+    **Sync mode (default)** — returns the parquet bytes inline.  Arrow
+    schema metadata key ``anthive_pseudobulk_meta`` carries colData
+    (per-group cell counts + the obs-column values that defined the
+    group) so consumers don't need a second call.
+
+    **Async mode** — auto-engaged when the estimated payload exceeds
+    ``max_inline_mb`` (default 100 MB) or when ``?async=true``. Response
+    becomes JSON ``{artifact_url, expires_at, size_bytes, sha256,
+    groups, n_genes, n_groups, n_dropped_groups}``; the parquet is
+    written to ``webapp/artifacts/pseudobulk/<token>.parquet`` and
+    served at ``/artifacts/pseudobulk/<token>.parquet`` with TTL 1 h.
+
+    Layer-integer check: the endpoint reads ``layer_stats`` from the
+    catalog metadata and refuses to aggregate a log-normalized layer.
+    Pass ``?layer=counts`` for the canonical raw-counts layer.
+    """
+    group_by_cols = _split_group_by(group_by)
+    subset_filters = _parse_subset(subset)
+
+    try:
+        wide, meta, _kept_df, _dropped_df = await asyncio.to_thread(
+            _pseudobulk_compute,
+            db_id=db_id,
+            layer=layer,
+            group_by_cols=group_by_cols,
+            subset_filters=subset_filters,
+            min_cells=min_cells,
+        )
+    except HTTPException:
+        raise
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"db_id {db_id!r} not found: {exc}")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        log.exception("pseudobulk: compute failed for db_id=%s", db_id)
+        raise HTTPException(status_code=500, detail=f"pseudobulk failed: {exc}")
+
+    n_genes = meta['n_genes']
+    n_groups = meta['n_groups']
+    n_dropped = meta['n_dropped_groups']
+
+    caption = _pseudobulk_caption(
+        db_id=db_id, layer=layer, group_by_cols=group_by_cols,
+        n_genes=n_genes, n_groups=n_groups, n_dropped=n_dropped,
+        min_cells=min_cells,
+    )
+
+    base_headers = {
+        'X-Pseudobulk-N-Groups':         str(n_groups),
+        'X-Pseudobulk-N-Genes':          str(n_genes),
+        'X-Pseudobulk-Dropped-Groups':   str(n_dropped),
+        'X-Pseudobulk-Layer':            layer,
+        'X-Pseudobulk-Group-By':         ','.join(group_by_cols),
+        'X-Plot-Caption':                caption,
+    }
+
+    # CSV / TSV are always synchronous (text body — we don't write csv artifacts).
+    if output_format in ('csv', 'tsv'):
+        sep = '\t' if output_format == 'tsv' else ','
+        buf = StringIO()
+        wide.to_csv(buf, sep=sep, index=False)
+        body = buf.getvalue().encode('utf-8')
+        # Stash a compact meta hint in a header (truncated if too big).
+        compact_meta = {
+            k: v for k, v in meta.items()
+            if k in ('db_id', 'layer', 'group_by', 'min_cells',
+                     'n_genes', 'n_groups', 'n_dropped_groups')
+        }
+        header_meta = json.dumps(compact_meta, default=str)
+        if len(header_meta) > 4000:
+            header_meta = header_meta[:3996] + '...'
+        ct = (
+            'text/tab-separated-values; charset=utf-8'
+            if output_format == 'tsv' else 'text/csv; charset=utf-8'
+        )
+        fname = (
+            f"{db_id.replace('/', '_')}_pseudobulk_"
+            f"{'_'.join(group_by_cols)}.{output_format}"
+        )
+        return Response(
+            content=body,
+            media_type=ct,
+            headers={
+                **base_headers,
+                'X-Pseudobulk-Meta':       header_meta,
+                'Content-Disposition':     f'attachment; filename="{fname}"',
+            },
+        )
+
+    # parquet: build bytes once. May be inline or written to artifact.
+    parquet_bytes = await asyncio.to_thread(_pseudobulk_to_parquet_bytes, wide, meta)
+    size_bytes = len(parquet_bytes)
+
+    est_size = _pseudobulk_estimate_size_bytes(n_genes, n_groups)
+    threshold_bytes = max_inline_mb * 1024 * 1024
+    # Use the ACTUAL serialised size for the escalation decision — the rough
+    # estimate is only used as a hint. (We always serialise; even in async
+    # mode we'd serialise to write the file.)
+    must_escalate = async_mode or size_bytes > threshold_bytes
+
+    if not must_escalate:
+        fname = (
+            f"{db_id.replace('/', '_')}_pseudobulk_"
+            f"{'_'.join(group_by_cols)}.parquet"
+        )
+        return Response(
+            content=parquet_bytes,
+            media_type='application/x-parquet',
+            headers={
+                **base_headers,
+                'Content-Disposition':     f'attachment; filename="{fname}"',
+                'X-Pseudobulk-Size-Bytes': str(size_bytes),
+                'X-Pseudobulk-Estimated-Bytes': str(est_size),
+            },
+        )
+
+    # Async branch — write to disk + return JSON pointer.
+    import uuid as _uuid
+    import hashlib as _hl
+    artifacts_dir = _pseudobulk_artifacts_dir()
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    token = _uuid.uuid4().hex
+    artifact_path = artifacts_dir / f"{token}.parquet"
+    await asyncio.to_thread(artifact_path.write_bytes, parquet_bytes)
+    sha256 = _hl.sha256(parquet_bytes).hexdigest()
+    _pseudobulk_register_artifact(token, artifact_path, db_id)
+
+    expires_at = datetime.utcfromtimestamp(time.time() + _PSEUDOBULK_ARTIFACT_TTL_S)
+    body = {
+        'artifact_url':      _pseudobulk_artifact_url(token, 'parquet', request),
+        'expires_at':        expires_at.isoformat() + 'Z',
+        'expires_in':        _PSEUDOBULK_ARTIFACT_TTL_S,
+        'size_bytes':        size_bytes,
+        'sha256':            sha256,
+        'db_id':             meta['db_id'],
+        'layer':             meta['layer'],
+        'group_by':          meta['group_by'],
+        'subset':            meta['subset'],
+        'min_cells':         meta['min_cells'],
+        'n_genes':           meta['n_genes'],
+        'n_groups':          meta['n_groups'],
+        'n_dropped_groups':  meta['n_dropped_groups'],
+        'groups':            meta['groups'],
+        'dropped_groups':    meta['dropped_groups'],
+        'caption':           caption,
+    }
+    return JSONResponse(
+        content=json.loads(json.dumps(body, default=str)),
+        headers={
+            **base_headers,
+            'X-Pseudobulk-Async':           'true',
+            'X-Pseudobulk-Artifact-Token':  token,
+            'X-Pseudobulk-Size-Bytes':      str(size_bytes),
+        },
+    )
 
 
 @app.post("/admin/release/{db_id:path}", tags=["admin"])

@@ -73,7 +73,10 @@ localhost:8501, localhost.localdomain:8501, 127.0.0.1:8501, 10.42.0.3:8501 {
 	# /api/* gate: cookie OR HTTP basic. AuthRequest returns 401 on unauth
 	# which is what API clients (antclient, vark) expect — they can react
 	# to it directly. Logged-in browser XHRs ride their session cookie.
-	@api path /api/*
+	# /artifacts/* (pseudobulk parquet drop, TTL 1 h) shares the same
+	# gate as /api/* so antclient / vark / curl can fetch artifact
+	# URLs with the same basic-auth credentials they use for the API.
+	@api path /api/* /artifacts/*
 	forward_auth @api localhost:9091 {
 		uri /authelia/api/authz/auth-request-api
 		# AuthRequest impl needs the original URL header (Caddy doesn't
@@ -87,7 +90,7 @@ localhost:8501, localhost.localdomain:8501, 127.0.0.1:8501, 10.42.0.3:8501 {
 	# unauth, which the browser follows to the portal. The cookie-only
 	# strategy avoids the basic-auth challenge (WWW-Authenticate) that
 	# breaks the redirect AND the stale-basic-creds → ban risk.
-	@browser not path /api/* /authelia/* /.well-known/* /register /streamlit*
+	@browser not path /api/* /artifacts/* /authelia/* /.well-known/* /register /streamlit*
 	forward_auth @browser localhost:9091 {
 		uri /authelia/api/authz/forward-auth-cookie
 		copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
@@ -120,6 +123,11 @@ localhost:8501, localhost.localdomain:8501, 127.0.0.1:8501, 10.42.0.3:8501 {
 	# stlite playground). Explicit so they stay on file_server now that the
 	# fallback below proxies everything else to the browser app.
 	handle /plots/* {
+		file_server
+	}
+	# Pseudobulk parquet artifacts (TTL 1 h, unguessable UUID filenames).
+	# Lives behind the same authelia/basic-auth gate as /api/.
+	handle /artifacts/* {
 		file_server
 	}
 	handle /report/* {
