@@ -271,18 +271,82 @@ development laptops.
 
 ---
 
-## 5b. Reverse proxy: nginx (alternative)
+## 5b. Production topology — nginx-thin + Caddy-fat
 
-If your host already runs nginx for other services, use it instead:
+If your host already runs nginx for other vhosts (alzmap.org,
+data.bdslab.org, …), DON'T duplicate the anthive routing in nginx.
+Instead use this pattern:
+
+```
+client ──https──> nginx :443 (SSL term + Authelia auth_request)
+                                       │
+                                       │  proxy_pass http://127.0.0.1:8500
+                                       ▼
+                                  Caddy on 127.0.0.1:8500
+                                       │
+                                       ├ /api/*       → ant-serve  :8080
+                                       ├ /browse/*    → ant-browse :8081
+                                       ├ /mcp*        → ant-mcp    :8090
+                                       ├ /authelia/*  → authelia   :9091
+                                       ├ /jupyter/*   → static
+                                       ├ /artifacts/* → static
+                                       └ / (fallback) → ant-browse :8081
+```
+
+The nginx → Caddy hop is loopback (~1 ms).  The benefit is one Caddyfile
+defining what `/jupyter/`, `/api/`, `/artifacts/`, `/mcp/` look like —
+identical on dev and prod, and nginx never changes after this deploy.
+
+**Caddy in prod mode** (started by ant-supervisor with `--prod`):
+
+- Listens on `http://127.0.0.1:8500` (plain HTTP, no TLS — nginx does TLS).
+- `ANTHIVE_CADDY_BIND=127.0.0.1` locks it to loopback.
+- The `caddy-auth.prod` snippet is empty — Caddy trusts the `Remote-User /
+  Remote-Groups / Remote-Email` headers nginx already set via `auth_request`.
+- The `:8500` HTTPS-redirect block is omitted (would collide with the
+  prod listener on the same port).
+
+**Nginx** is a thin shim — see `config/nginx-intern-anthive.conf` for
+the drop-in slim vhost (~150 lines, of which only ~10 are anthive-
+specific routing). Step-by-step deploy recipe:
+
+→ **`doc/DEPLOY.md`** — has the systemd unit, the smoke-test commands,
+and a rollback procedure.
+
+Quick reference for the env-var split that drives `config/Caddyfile`:
+
+| Env var                          | Dev default                 | Prod value                  |
+| -------------------------------- | --------------------------- | --------------------------- |
+| `ANTHIVE_LISTEN`                 | `:8501`                     | `http://127.0.0.1:8500`     |
+| `ANTHIVE_TLS_SNIPPET`            | `caddy-tls.dev`             | `caddy-tls.prod` (empty)    |
+| `ANTHIVE_AUTH_SNIPPET`           | `caddy-auth.dev`            | `caddy-auth.prod` (empty)   |
+| `ANTHIVE_HTTP_REDIRECT_SNIPPET`  | `caddy-http-redirect.dev`   | `caddy-http-redirect.prod` (empty) |
+| `ANTHIVE_CADDY_BIND`             | `0.0.0.0 ::`                | `127.0.0.1`                 |
+
+These pair 1:1 with snippet files in `config/`. `ant-supervisor --prod`
+sets all of them; `ant-supervisor` (no flag) uses dev defaults so
+local behaviour is unchanged.
+
+### Standalone nginx (alternative — single-host dev box)
+
+If your host has no other vhosts and you'd rather not run two
+processes, you can still use nginx alone:
 
 ```sh
 make serve-nginx        # foreground nginx; reads config/nginx.conf
 ```
 
-For production, copy `config/nginx.conf` into your existing
-`/etc/nginx/sites-available/` and `systemctl reload nginx`. The
-file expects `localhost:8080` (api) and `localhost:8081` (browse) —
-matches the defaults in `anthive.yaml`.
+This still routes everything through a local Caddy at 127.0.0.1:8500
+(nginx is the SSL listener on :8501, Caddy does all path routing).
+Start them in two terminals:
+
+```sh
+# Terminal 1
+make serve-prod         # supervisor + Caddy in prod mode
+
+# Terminal 2
+make serve-nginx        # the thin shim
+```
 
 ---
 
@@ -330,6 +394,15 @@ make serve-stop         # stop the whole supervisor + all children
 
 **Production: run under systemd**
 
+There are two production shapes — pick one:
+
+1. **Nginx in front (recommended for multi-vhost hosts)** — Caddy on
+   127.0.0.1:8500, nginx terminates TLS + Authelia gate. Use
+   `--prod --caddy`. See `doc/DEPLOY.md` for the full recipe.
+2. **Caddy alone (single-host dev box / no other vhosts)** — Caddy on
+   :8501 with `tls internal`. Use bare `ant-supervisor` (no flags), or
+   `--caddy` to keep Caddy under the supervisor. No nginx involved.
+
 ```ini
 # /etc/systemd/system/anthive.service
 [Unit]
@@ -340,13 +413,16 @@ After=network.target
 Type=simple
 User=anthive
 WorkingDirectory=/opt/anthive/anthive4
-ExecStart=/opt/anthive/anthive4/bin/ops/ant-supervisor
+# Shape 1 — prod, nginx in front:
+ExecStart=/opt/anthive/anthive4/bin/ops/ant-supervisor --prod --caddy
+# Shape 2 — Caddy alone, no nginx (uncomment instead of the line above):
+# ExecStart=/opt/anthive/anthive4/bin/ops/ant-supervisor --caddy
 ExecStop=/opt/anthive/anthive4/bin/ops/ant-supervisor restart all
 Restart=on-failure
 RestartSec=5
 Environment=PATH=/home/anthive/.local/bin:/usr/local/bin:/usr/bin:/bin
 # Optional: restrict Caddy to specific interfaces (see section 5 above).
-# Without this, Caddy binds to every interface.
+# Without this, Caddy binds to every interface (dev) or 127.0.0.1 (prod).
 Environment=ANTHIVE_CADDY_BIND=127.0.0.1 10.42.0.3
 
 [Install]

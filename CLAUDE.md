@@ -53,7 +53,12 @@ lib/         shared core (anthive_db, plotting, …)  lib/CLAUDE.md
 frontend/
   jupyter/   JupyterLite source (Pyodide), vendors codeberg.org/mfiers/pyvark
              as `vark/`                              frontend/jupyter/CLAUDE.md
-config/      Caddyfile, nginx.conf, caddy-auth.example
+config/      Caddyfile (single source of path routing on dev + prod),
+             caddy-{tls,auth,http-redirect}.{dev,prod} (env-toggled snippets),
+             nginx.conf (thin shim → Caddy for `make serve-nginx`),
+             nginx-intern-anthive.conf (drop-in prod vhost),
+             Caddyfile-prod-snippet (annotated env-var reference),
+             caddy-auth.example (basic-auth template)
 ```
 
 The web UI is now a **top-level seam** (`./web/`), not an `ant` subcommand.

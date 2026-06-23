@@ -356,7 +356,12 @@ Coordinate via `pika message send --to anthive4`.
 
 - Shared core: `lib/` (anthive_db, plotting, config) — see `lib/CLAUDE.md`.
 - REST API talked to: `bin/api/ant-serve` — see `bin/api/CLAUDE.md`.
-- Reverse proxy: `config/Caddyfile` (debug) and `config/nginx.conf` (prod).
+- Reverse proxy: `config/Caddyfile` is the SINGLE source of path
+  routing on dev AND prod (env vars flip the listener/TLS/auth split
+  via the `caddy-{tls,auth,http-redirect}.{dev,prod}` snippets — see
+  `doc/DEPLOY.md`). On prod, nginx is a thin SSL+Authelia shim that
+  forwards every path to Caddy on `127.0.0.1:8500`
+  (`config/nginx-intern-anthive.conf`).
 - Companion in-browser notebooks: `frontend/jupyter/` (built into
   `webapp/jupyter/`, served as static files at `/jupyter/`).
 - **Auth (Authelia cookie SSO):** the proxy (`config/Caddyfile` / nginx)

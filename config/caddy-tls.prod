@@ -1,0 +1,9 @@
+# Prod TLS snippet — imported by config/Caddyfile when ANTHIVE_TLS_SNIPPET
+# is set to this path (done by ant-supervisor when ANTHIVE_PROD=1).
+#
+# Intentionally empty: on prod, nginx terminates TLS on :443 and forwards
+# plain HTTP to Caddy on 127.0.0.1:8500.  Caddy here speaks no TLS at all.
+#
+# The file MUST exist (Caddy errors out on a missing import target) but
+# it MUST be free of directives — the surrounding site block already
+# binds the listener via ANTHIVE_LISTEN.

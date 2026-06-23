@@ -1,0 +1,43 @@
+# Example: prod-mode invocation of config/Caddyfile.
+#
+# This file is NOT loaded by Caddy directly — it's a reference snippet
+# referenced from doc/DEPLOY.md.  Caddy is configured by ONE Caddyfile
+# (config/Caddyfile); prod vs dev is selected via env vars.
+#
+# What changes on prod:
+#
+#   ANTHIVE_LISTEN                 http://127.0.0.1:8500   (no TLS — nginx terminates)
+#   ANTHIVE_TLS_SNIPPET            caddy-tls.prod          (empty snippet)
+#   ANTHIVE_AUTH_SNIPPET           caddy-auth.prod         (empty — trust nginx headers)
+#   ANTHIVE_HTTP_REDIRECT_SNIPPET  caddy-http-redirect.prod (empty — no :8500 redirect block)
+#   ANTHIVE_CADDY_BIND             127.0.0.1               (localhost-only — nginx is in front)
+#
+# Equivalent shell invocation for a manual test:
+#
+#   cd /data/anthive/anthive4
+#   ANTHIVE_LISTEN="http://127.0.0.1:8500" \
+#   ANTHIVE_TLS_SNIPPET="caddy-tls.prod" \
+#   ANTHIVE_AUTH_SNIPPET="caddy-auth.prod" \
+#   ANTHIVE_HTTP_REDIRECT_SNIPPET="caddy-http-redirect.prod" \
+#   ANTHIVE_CADDY_BIND="127.0.0.1" \
+#       ./envs/caddy/caddy run --config config/Caddyfile
+#
+# Equivalent supervisor invocation (preferred — auto-restarts on crash):
+#
+#   ANTHIVE_PROD=1 ./bin/ops/ant-supervisor --caddy
+#
+# Equivalent systemd unit fragment (see doc/DEPLOY.md for full unit):
+#
+#   [Service]
+#   Environment=ANTHIVE_PROD=1
+#   ExecStart=/data/anthive/anthive4/bin/ops/ant-supervisor --caddy
+#
+# Smoke test once Caddy is up:
+#
+#   curl -sv http://127.0.0.1:8500/api/health -H 'Remote-User: smoke-test'
+#   # → expect: HTTP/1.1 200 OK with JSON body listing databases.
+#
+# Confirming no TLS attempts in the log (the dev mode's `tls internal`
+# stanza is OFF in prod — `caddy validate` and the startup log should
+# show "HTTP/2 skipped because it requires TLS" rather than any
+# certificate-management messages).

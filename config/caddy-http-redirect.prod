@@ -1,0 +1,10 @@
+# Prod HTTP-redirect snippet — imported by config/Caddyfile when
+# ANTHIVE_HTTP_REDIRECT_SNIPPET points at this file (done by
+# ant-supervisor when ANTHIVE_PROD=1).
+#
+# Intentionally empty: on prod, Caddy itself listens on :8500 to
+# receive plain HTTP from nginx (which is the TLS terminator on :443).
+# A separate HTTP-redirect block on :8500 would collide with the main
+# listener, so we omit it entirely.
+#
+# The file MUST exist (Caddy errors out on a missing import target).

@@ -1,53 +1,66 @@
-# Anthive4 Caddy Configuration
-# Serves static files and proxies API requests
+# Anthive4 Caddy Configuration — single source of truth for path routing
+#
+# Caddy owns ALL anthive path routing on both dev and prod. The split
+# between the two modes is controlled by three env vars, set by the
+# launcher (ant-supervisor) or systemd unit:
+#
+#   ANTHIVE_LISTEN        listen address      dev: ":8501"  prod: "127.0.0.1:8500"
+#   ANTHIVE_TLS_SNIPPET   TLS directives      dev: caddy-tls.dev (= "tls internal")
+#                                              prod: caddy-tls.prod (= empty; nginx terminates)
+#   ANTHIVE_AUTH_SNIPPET  auth directives     dev: caddy-auth.dev (= Authelia forward_auth)
+#                                              prod: caddy-auth.prod (= trust Remote-* headers
+#                                                                       already set by nginx)
+#
+# Everything else — handle blocks for /api, /browse, /mcp, /jupyter,
+# /artifacts, the fallback to ant-browse, /.well-known + /register
+# stubs, /streamlit 410 — is IDENTICAL between dev and prod.
+#
+# When ANTHIVE_PROD=1 is set, ant-supervisor exports the *.prod values
+# below; otherwise dev defaults apply and behaviour is byte-for-byte
+# what it was before this refactor.
 {
 	# Disable admin API to avoid port conflict with system Caddy
 	admin off
 
-	# Authelia v4.39 hard-requires https:// for cookie URLs, so Caddy
-	# terminates TLS via `tls internal` (self-signed by Caddy's local CA).
-	# `disable_redirects` keeps automatic cert provisioning ON (`tls
-	# internal` needs that) but skips the :80 → :443 redirect listener
-	# that fails as a non-root process. The ACME path is unused since
-	# the certs come from Caddy's local CA, not Let's Encrypt.
+	# Authelia v4.39 hard-requires https:// for cookie URLs, so on dev
+	# Caddy terminates TLS via `tls internal` (self-signed by Caddy's
+	# local CA). `disable_redirects` keeps automatic cert provisioning
+	# ON (`tls internal` needs that) but skips the :80 → :443 redirect
+	# listener that fails as a non-root process.  On prod ANTHIVE_TLS
+	# is empty and nginx terminates TLS in front of us.
 	auto_https disable_redirects
 }
 
-# HTTP companion on :8500 — redirects any plain-http hit to https:8501.
-# A single TCP listener can't serve both http and https on the same port,
-# so we offer a small adjacent HTTP listener whose only job is the 301.
-http://localhost:8500, http://localhost.localdomain:8500, http://127.0.0.1:8500, http://10.42.0.3:8500 {
-	bind {$ANTHIVE_CADDY_BIND:0.0.0.0 ::}
-	redir https://{host}:8501{uri} 301
-}
+# HTTP companion block — dev: :8500 → 301 to https://…:8501. Prod:
+# Caddy itself listens on :8500 (plain HTTP from nginx), so the
+# redirect block would conflict and is omitted entirely via an empty
+# snippet import.
+import {$ANTHIVE_HTTP_REDIRECT_SNIPPET:caddy-http-redirect.dev}
 
-# Site address enumerates the hostnames Caddy serves. `tls internal`
-# issues a self-signed cert for each one. Connecting clients see a cert
-# matching the hostname they used (no "wrong CN" warning beyond the
-# trust warning itself).
+# Main site block — listens on ANTHIVE_LISTEN.
 #
-# To add a hostname for another machine, append it here. The bind below
-# still controls WHICH interfaces accept connections.
-localhost:8501, localhost.localdomain:8501, 127.0.0.1:8501, 10.42.0.3:8501 {
-	# Restrict which network interfaces Caddy actually accepts connections
-	# on.  Default ("0.0.0.0 ::") = all IPv4 + IPv6 interfaces — fine for
-	# laptops, but typically too open on a multi-homed host where you want
-	# the stack reachable on (say) Nebula + localhost but NOT on the office
-	# LAN or Docker bridges.
+# Dev default:  ":8501" (all interfaces, TLS via Caddy's internal CA)
+# Prod:         "127.0.0.1:8500" with ANTHIVE_TLS_SNIPPET pointing at
+#               caddy-tls.prod (empty) so Caddy speaks plain HTTP and
+#               nginx terminates TLS on :443 in front.
+{$ANTHIVE_LISTEN:":8501"} {
+	# Restrict which network interfaces Caddy accepts connections on.
+	# Default ("0.0.0.0 ::") = all v4 + v6 interfaces — fine for laptops,
+	# overridden on multi-homed boxes via ANTHIVE_CADDY_BIND. On prod the
+	# supervisor sets this to "127.0.0.1" so Caddy is reachable only via
+	# the local nginx hop.
 	#
-	# Override at runtime via the ANTHIVE_CADDY_BIND env var.  Multiple
-	# space-separated IPs / hostnames bind to each one.
-	#
-	#   export ANTHIVE_CADDY_BIND="127.0.0.1 10.42.0.3"
-	#   # → reachable only on localhost + the Nebula IP
+	#   export ANTHIVE_CADDY_BIND="127.0.0.1 10.42.0.3"   # nebula + lo
 	#
 	# See INSTALL.md section 5 for the persistent-per-host pattern.
 	bind {$ANTHIVE_CADDY_BIND:0.0.0.0 ::}
 
-	# Caddy internal CA — Authelia v4.39 requires https:// for cookie URLs.
-	# Self-signed cert; clients accept once or run `caddy trust` on the
-	# server box to install the CA into the system trust store.
-	tls internal
+	# TLS directives — dev imports a snippet containing `tls internal`;
+	# prod imports an empty snippet so Caddy serves plain HTTP (nginx
+	# terminates TLS upstream).  Paths are relative to THIS Caddyfile
+	# (so `caddy-tls.dev` resolves to `config/caddy-tls.dev` from the
+	# repo root).
+	import {$ANTHIVE_TLS_SNIPPET:caddy-tls.dev}
 
 	# Root directory for static files
 	root * ./webapp
@@ -55,10 +68,8 @@ localhost:8501, localhost.localdomain:8501, 127.0.0.1:8501, 10.42.0.3:8501 {
 	# Authelia portal — always reachable, never gated by forward_auth
 	# (chicken-and-egg: this IS the gate). handle_path strips /authelia/
 	# so Authelia (which is configured with base path /authelia) sees the
-	# full path it expects.
-	# Authelia portal — pass-through, no body modification. Logo sizing
-	# is handled by serving a pre-cropped logo.png from asset_path; we
-	# don't need to inject CSS for layout overrides.
+	# full path it expects.  Identical dev/prod (prod nginx forwards
+	# /authelia/* through to us so the login UI keeps working).
 	handle /authelia/* {
 		reverse_proxy localhost:9091
 	}
@@ -68,33 +79,11 @@ localhost:8501, localhost.localdomain:8501, 127.0.0.1:8501, 10.42.0.3:8501 {
 	# the JSON 404 they need to parse.
 	@bypass_auth path /.well-known/* /register /streamlit*
 
-	# Split auth gates by client type — mirrors data.nevel.eu's nginx split.
-	#
-	# /api/* gate: cookie OR HTTP basic. AuthRequest returns 401 on unauth
-	# which is what API clients (antclient, vark) expect — they can react
-	# to it directly. Logged-in browser XHRs ride their session cookie.
-	# /artifacts/* (pseudobulk parquet drop, TTL 1 h) shares the same
-	# gate as /api/* so antclient / vark / curl can fetch artifact
-	# URLs with the same basic-auth credentials they use for the API.
-	@api path /api/* /artifacts/*
-	forward_auth @api localhost:9091 {
-		uri /authelia/api/authz/auth-request-api
-		# AuthRequest impl needs the original URL header (Caddy doesn't
-		# send X-Original-URL by default — nginx's auth_request does).
-		header_up X-Original-URL "{http.request.scheme}://{http.request.host}{http.request.uri}"
-		header_up X-Original-Method "{http.request.method}"
-		copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
-	}
-
-	# Browser gate: cookie-only. ForwardAuth returns 302 → /authelia/ on
-	# unauth, which the browser follows to the portal. The cookie-only
-	# strategy avoids the basic-auth challenge (WWW-Authenticate) that
-	# breaks the redirect AND the stale-basic-creds → ban risk.
-	@browser not path /api/* /artifacts/* /authelia/* /.well-known/* /register /streamlit*
-	forward_auth @browser localhost:9091 {
-		uri /authelia/api/authz/forward-auth-cookie
-		copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
-	}
+	# Auth snippet — dev imports forward_auth blocks (cookie/api split
+	# against local Authelia); prod imports a passthrough that trusts
+	# the Remote-User / Remote-Groups / Remote-Email headers set by nginx.
+	# Path is relative to THIS Caddyfile.
+	import {$ANTHIVE_AUTH_SNIPPET:caddy-auth.dev}
 
 	# Reverse proxy for API - strip /api prefix before forwarding
 	handle_path /api/* {

@@ -12,10 +12,24 @@ and auto-restarts any crashed child process.
 
 Subcommands (control plane):
   ant-supervisor                         # run all services (default)
-  ant-supervisor --caddy                 # run with Caddy on :8501
+  ant-supervisor --caddy                 # run with Caddy on :8501 (dev)
+  ant-supervisor --prod --caddy          # run with Caddy on 127.0.0.1:8500
+                                         #   (nginx terminates TLS upstream)
   ant-supervisor restart <name>…         # SIGTERM a running child by name
   ant-supervisor restart all             # SIGTERM every running child
   ant-supervisor status                  # show supervisor + child PIDs
+
+Prod mode (via --prod or ANTHIVE_PROD=1 in the environment):
+  - Caddy listens on http://127.0.0.1:8500 (plain HTTP, no TLS).
+  - nginx terminates TLS on :443 in front of Caddy and is the
+    Authelia auth_request gate.  See config/nginx-intern-anthive.conf.
+  - Caddy still owns ALL anthive path routing (single source of truth).
+  - The :8500 → :8501 HTTPS redirect block is disabled (would collide
+    with the prod listener on the same port).
+
+The flag is passed to Caddy via four env vars consumed by config/Caddyfile:
+  ANTHIVE_LISTEN, ANTHIVE_TLS_SNIPPET, ANTHIVE_AUTH_SNIPPET,
+  ANTHIVE_HTTP_REDIRECT_SNIPPET, ANTHIVE_CADDY_BIND.
 """
 
 import argparse
@@ -81,6 +95,10 @@ SERVICES: dict = {
         # so we can inject CSS into Authelia's portal HTML for the
         # logo-size override. Build script: see doc/HANDOFF_authelia.md.
         # The system caddy at /usr/bin/caddy stays untouched.
+        #
+        # Env vars for the prod/dev split are injected at startup —
+        # see `_caddy_env_for_mode()` and the `env_overrides` plumbing
+        # in `_run_service`.
         'cmd': ['./envs/caddy/caddy', 'run', '--config', 'config/Caddyfile'],
         'color': BLUE,
     },
@@ -111,6 +129,36 @@ SERVICES: dict = {
 # the interactive plot UI now. `/streamlit` on the reverse proxy returns
 # 410 for anyone with a bookmark.
 DEFAULT_SERVICES = ['api', 'browse', 'authelia']
+
+
+def _caddy_env_for_mode(prod: bool) -> dict[str, str]:
+    """Env vars consumed by config/Caddyfile to pick dev vs prod listener.
+
+    Dev (default): TLS-internal on :8501, local Authelia forward_auth,
+    :8500 HTTPS-redirect companion enabled.
+
+    Prod (when --prod or ANTHIVE_PROD=1): plain HTTP on 127.0.0.1:8500,
+    no Caddy-side auth (trust nginx's Remote-* headers), no :8500
+    redirect block (Caddy IS the :8500 listener).
+
+    These pair 1:1 with snippet files in config/:
+      caddy-tls.{dev,prod}            (TLS directives or empty)
+      caddy-auth.{dev,prod}           (forward_auth or empty)
+      caddy-http-redirect.{dev,prod}  (:8500 redirect block or empty)
+    """
+    if not prod:
+        # Leave the env untouched so config/Caddyfile picks its defaults
+        # (caddy-tls.dev, caddy-auth.dev, caddy-http-redirect.dev,
+        # ANTHIVE_LISTEN=:8501).
+        return {}
+    return {
+        'ANTHIVE_LISTEN':                'http://127.0.0.1:8500',
+        'ANTHIVE_TLS_SNIPPET':           'caddy-tls.prod',
+        'ANTHIVE_AUTH_SNIPPET':          'caddy-auth.prod',
+        'ANTHIVE_HTTP_REDIRECT_SNIPPET': 'caddy-http-redirect.prod',
+        # Lock Caddy to loopback in prod — only nginx reaches it.
+        'ANTHIVE_CADDY_BIND':            '127.0.0.1',
+    }
 
 # Back-off settings
 BACKOFF_INITIAL     = 2   # seconds
@@ -305,6 +353,14 @@ async def _run_service(
     cwd = str(_script_dir / config.get('cwd', '.'))
     cmd = config['cmd']
 
+    # Per-service env-var overrides (merged onto the parent env). Used to
+    # inject the prod/dev split for Caddy without forking the cmd list.
+    env_overrides = config.get('env') or {}
+    if env_overrides:
+        child_env = {**os.environ, **env_overrides}
+    else:
+        child_env = None  # asyncio.subprocess inherits parent env
+
     backoff_delay = BACKOFF_INITIAL
 
     while not shutdown_event.is_set():
@@ -315,6 +371,7 @@ async def _run_service(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
+                env=child_env,
             )
         except FileNotFoundError:
             print(
@@ -368,16 +425,37 @@ async def _main() -> None:
     parser.add_argument(
         '--caddy',
         action='store_true',
-        help='Also start Caddy as local reverse proxy on port 8501',
+        help='Also start Caddy as local reverse proxy '
+             '(dev: :8501 with TLS; prod: 127.0.0.1:8500 plain HTTP)',
+    )
+    parser.add_argument(
+        '--prod',
+        action='store_true',
+        default=os.environ.get('ANTHIVE_PROD') == '1',
+        help='Production mode — Caddy listens on 127.0.0.1:8500 without '
+             'TLS so an upstream nginx can terminate TLS + Authelia gate. '
+             'Also honoured via ANTHIVE_PROD=1 in the environment.',
     )
     args = parser.parse_args()
+
+    # Inject the dev/prod env split onto the Caddy service config so the
+    # spawn in _run_service picks it up.  Defaults match historical
+    # behaviour byte-for-byte when --prod is NOT set.
+    caddy_env = _caddy_env_for_mode(args.prod)
+    if caddy_env:
+        SERVICES['caddy']['env'] = caddy_env
 
     active_services = DEFAULT_SERVICES + (['caddy'] if args.caddy else [])
     label_width = max(len(name) for name in active_services + ['supervisor'])
     sup_prefix, _ = _make_prefix('supervisor', DIM, label_width)
 
     _started_at = datetime.now().isoformat(timespec='seconds')
-    mode = 'debug (caddy on :8501)' if args.caddy else 'deployment (nginx handles :8501)'
+    if args.prod and args.caddy:
+        mode = 'prod (caddy on 127.0.0.1:8500, nginx terminates TLS)'
+    elif args.caddy:
+        mode = 'debug (caddy on :8501)'
+    else:
+        mode = 'deployment (no caddy — nginx/reverse-proxy handles :8501)'
     print(f"{sup_prefix}{BOLD}starting anthive — {mode}{RESET}", flush=True)
     print(f"{sup_prefix}{DIM}state file: {STATE_FILE}{RESET}", flush=True)
     for service_name in active_services:

@@ -1,0 +1,25 @@
+# Prod auth snippet — imported by config/Caddyfile when ANTHIVE_AUTH_SNIPPET
+# points at this file (done by ant-supervisor when ANTHIVE_PROD=1).
+#
+# On prod, nginx is the SSL terminator AND the Authelia gate (via
+# auth_request).  By the time a request reaches Caddy on 127.0.0.1:8500
+# it is already authenticated and nginx has stamped Remote-User /
+# Remote-Groups / Remote-Email / Remote-Name onto the request.  Caddy
+# trusts those headers and does NOT call Authelia itself.
+#
+# Why not still call forward_auth here?
+#   - Double-gating doubles latency on every request.
+#   - The browser's session cookie is set against the public hostname
+#     (intern.bdslab.org). Caddy on 127.0.0.1:8500 would see a Host of
+#     intern.bdslab.org but cookies/redirects scoped at the public URL
+#     are already what nginx handled — re-running forward_auth here is
+#     redundant.
+#
+# Intentionally empty: the @bypass_auth matcher in Caddyfile still
+# ensures /.well-known/*, /register, /streamlit* are never blocked, but
+# the actual gate is upstream in nginx.  This file MUST exist (Caddy
+# errors out on a missing import target).
+#
+# IMPORTANT: 127.0.0.1:8500 MUST NOT be exposed to the outside world.
+# Caddy is bound localhost-only by ANTHIVE_CADDY_BIND=127.0.0.1 in prod
+# precisely because there's no auth at this layer.

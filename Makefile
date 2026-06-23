@@ -1,4 +1,4 @@
-.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-mcp serve-all serve-debug serve-stop caddy-passwd caddy-passwd-clear dev-jupyter sync-push sync-pull sync-pull-duckdb sync-pull-de sync-pull-all sync-status build-stale sync-update serve-status serve-restart h5adstore-push push-all
+.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-mcp serve-all serve-debug serve-prod serve-stop caddy-passwd caddy-passwd-clear dev-jupyter sync-push sync-pull sync-pull-duckdb sync-pull-de sync-pull-all sync-status build-stale sync-update serve-status serve-restart h5adstore-push push-all
 
 help:
 	@echo "Anthive4 Development Commands"
@@ -13,7 +13,8 @@ help:
 	@echo ""
 	@echo "All-in-one:"
 	@echo "  make serve-all     - Start all services (deployment, nginx already running)"
-	@echo "  make serve-debug   - Start all services + Caddy on port 8501"
+	@echo "  make serve-debug   - Start all services + Caddy on port 8501 (dev, TLS internal)"
+	@echo "  make serve-prod    - Start all services + Caddy on 127.0.0.1:8500 (prod, nginx in front)"
 	@echo "  make serve-status  - Show supervisor state + child PIDs"
 	@echo "  make serve-stop    - Stop the running supervisor + all children"
 	@echo "  make serve-restart SVC=browse        - Restart a single service"
@@ -161,17 +162,14 @@ serve:
 	@caddy run --config config/Caddyfile
 
 serve-nginx:
-	@echo "Starting Anthive webapp with Nginx on http://localhost:8501"
+	@echo "Starting Anthive thin-nginx shim on http://localhost:8501"
 	@echo ""
-	@echo "This serves:"
-	@echo "  - Browser interface at /"
-	@echo "  - JupyterLite at /jupyter"
-	@echo "  - API at /api"
+	@echo "Post-refactor: nginx forwards EVERY path to Caddy on 127.0.0.1:8500."
+	@echo "Caddy owns path routing — Caddyfile is the single source of truth."
 	@echo ""
-	@echo "Make sure backend servers are running (in other terminals):"
-	@echo "  Terminal 1: make serve-api (port 8080)"
-	@echo "  Terminal 2: make serve-browse (port 8081)"
-	@echo "  Terminal 3: make serve-nginx (this - port 8501)"
+	@echo "Make sure Caddy is running in PROD mode (in another terminal):"
+	@echo "  Terminal 1: make serve-prod      (or: ANTHIVE_PROD=1 ./bin/ops/ant-supervisor --caddy)"
+	@echo "  Terminal 2: make serve-nginx     (this - port 8501)"
 	@echo ""
 	@nginx -c $(PWD)/config/nginx.conf -p $(PWD)
 
@@ -204,8 +202,15 @@ serve-all:
 	@./bin/ops/ant-supervisor
 
 serve-debug:
-	@echo "Starting Anthive with Caddy on http://localhost:8501"
+	@echo "Starting Anthive with Caddy on https://localhost:8501 (dev, TLS internal)"
 	@./bin/ops/ant-supervisor --caddy
+
+# Production mode: Caddy listens on 127.0.0.1:8500 (plain HTTP), nginx in
+# front of it terminates TLS + Authelia gate. See doc/DEPLOY.md.
+serve-prod:
+	@echo "Starting Anthive in PROD mode — Caddy on http://127.0.0.1:8500"
+	@echo "(expects nginx in front; see doc/DEPLOY.md and config/nginx-intern-anthive.conf)"
+	@./bin/ops/ant-supervisor --prod --caddy
 
 # Restart one or more children of a running supervisor.
 #   make serve-restart SVC=browse

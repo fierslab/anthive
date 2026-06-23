@@ -1,0 +1,32 @@
+# Dev auth snippet — imported by config/Caddyfile when ANTHIVE_AUTH_SNIPPET
+# is unset (the default).
+#
+# Authelia runs locally on :9091 and Caddy enforces the auth split via
+# forward_auth.  Mirrors data.nevel.eu's nginx split:
+#
+#   /api/* + /artifacts/*   →  cookie OR HTTP basic (401 on unauth — clients react)
+#   everything else         →  cookie-only (302 → /authelia/ portal)
+#
+# The named matchers below MUST line up with the @bypass_auth matcher
+# declared in Caddyfile (so /.well-known/*, /register, /streamlit* are
+# never gated regardless of mode).
+
+@api path /api/* /artifacts/*
+forward_auth @api localhost:9091 {
+	uri /authelia/api/authz/auth-request-api
+	# AuthRequest impl needs the original URL header (Caddy doesn't
+	# send X-Original-URL by default — nginx's auth_request does).
+	header_up X-Original-URL "{http.request.scheme}://{http.request.host}{http.request.uri}"
+	header_up X-Original-Method "{http.request.method}"
+	copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
+}
+
+# Browser gate: cookie-only. ForwardAuth returns 302 → /authelia/ on
+# unauth, which the browser follows to the portal. The cookie-only
+# strategy avoids the basic-auth challenge (WWW-Authenticate) that
+# breaks the redirect AND the stale-basic-creds → ban risk.
+@browser not path /api/* /artifacts/* /authelia/* /.well-known/* /register /streamlit*
+forward_auth @browser localhost:9091 {
+	uri /authelia/api/authz/forward-auth-cookie
+	copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
+}

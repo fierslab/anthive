@@ -1,0 +1,11 @@
+# Dev TLS snippet — imported by config/Caddyfile when ANTHIVE_TLS_SNIPPET
+# is unset (the default).
+#
+# Caddy's internal CA issues a self-signed cert for each hostname the
+# site block declares.  Clients accept once, or run `caddy trust` on the
+# server to install the CA into the system trust store.
+#
+# Authelia v4.39 hard-requires https:// for cookie URLs, which is the
+# main reason we terminate TLS at Caddy in dev — otherwise we'd happily
+# run plain HTTP for a localhost-only stack.
+tls internal

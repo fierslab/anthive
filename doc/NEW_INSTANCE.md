@@ -4,8 +4,13 @@ A step-by-step runbook for deploying a new public anthive4 instance on a
 host, fronted by **system nginx** with **Authelia** auth. Written from the
 live `data.nevel.eu` and `prs.nevel.eu` deployments.
 
-This is the full-instance guide. For Authelia internals and gotchas, see
-[`HANDOFF_authelia.md`](HANDOFF_authelia.md).
+This doc describes the **legacy** per-instance nginx pattern where nginx
+holds the per-path routing. For new deploys (especially on a host running
+other vhosts you don't want to touch), see [`DEPLOY.md`](DEPLOY.md) — that
+recipe uses a thin nginx shim that forwards every anthive path to Caddy on
+loopback, leaving the routing in one place (`config/Caddyfile`).
+
+For Authelia internals and gotchas, see [`HANDOFF_authelia.md`](HANDOFF_authelia.md).
 
 ---
 
