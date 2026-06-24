@@ -901,6 +901,12 @@ def _resolve_target_h5ad(
         # Walk the project dir for any .md whose frontmatter has id:
         # matching. Tracks the opening/closing `---` fences explicitly;
         # only looks at lines INSIDE the frontmatter block.
+        #
+        # The frontmatter block is bounded by the closing `---` fence —
+        # no fixed line cap. Some .md files run 150+ lines of frontmatter
+        # because obscat_include / obsnum_include / layer_stats lists can
+        # be long; an arbitrary 60-line cap silently misses the `id:`
+        # field on those (bit us on Sun2026/AQB).
         for md_path in sorted(project_dir.rglob('*.md')):
             if md_path.name == 'index.md':
                 continue
@@ -911,7 +917,7 @@ def _resolve_target_h5ad(
             if not text.startswith('---\n'):
                 continue
             in_frontmatter = False
-            for line in text.split('\n', 60)[:60]:
+            for line in text.split('\n'):
                 stripped = line.strip()
                 if stripped == '---':
                     if not in_frontmatter:
@@ -1085,8 +1091,14 @@ def _process_de(
     # Study id: prefer mus-supplied if present, else file-stem.
     study_id = incoming_meta.get('de_study_id') or _de_study_id_from_basename(plan.basename)
 
+    # ant-de-ingest lives in bin/annot/, not bin/ingest/. Path was not
+    # updated when the bin/<domain>/ reorg happened — _SCRIPT_DIR points
+    # at bin/ingest/ here, which has no ant-de-ingest. Resolve via the
+    # repo root + annot/ instead.
+    ant_de_ingest = _REPO_ROOT / 'bin' / 'annot' / 'ant-de-ingest'
+
     cmd = [
-        str(_SCRIPT_DIR / 'ant-de-ingest'),
+        str(ant_de_ingest),
         str(target_duckdb),
         '--from', str(catalog_data),
         '--preset', de_format,
