@@ -774,7 +774,8 @@ def test_plot_view_de_quadrant_form(client):
     resp = client.get("/browse/GroupA/ds1/plot/de_quadrant")
     assert resp.status_code == 200
     for field in ("study", "term", "contrast", "db_y", "study_y", "term_y",
-                  "contrast_y", "axis_x", "axis_y", "mode", "n_label"):
+                  "contrast_y", "axis_x", "axis_y", "mode", "n_label",
+                  "clip_x", "clip_y"):
         assert f'name="{field}"' in resp.text
     assert "GLMM demo" in resp.text          # X-side study seeded from /de
     assert "initDeQuadrant" in resp.text     # dedicated dual-cascade init
