@@ -75,7 +75,7 @@ import {$ANTHIVE_HTTP_REDIRECT_SNIPPET:caddy-http-redirect.dev}
 	# full path it expects.  Identical dev/prod (prod nginx forwards
 	# /authelia/* through to us so the login UI keeps working).
 	handle /authelia/* {
-		reverse_proxy localhost:9091
+		reverse_proxy localhost:{$ANTHIVE_AUTHELIA_PORT:9091}
 	}
 
 	# Routes that MUST bypass auth — MCP discovery probes + the /streamlit
