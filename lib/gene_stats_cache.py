@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+import zlib
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -44,6 +45,22 @@ CREATE TABLE IF NOT EXISTS gene_stats (
     PRIMARY KEY (db_id, gene_query_lc, case_sensitive, layer, fingerprint)
 );
 CREATE INDEX IF NOT EXISTS idx_db_fingerprint ON gene_stats (db_id, fingerprint);
+
+-- Dataset-level gene distribution: q05 / q95 / per-gene mean for the whole
+-- layer. One blob per (db, layer, fingerprint). Stored zlib-compressed JSON
+-- (~10–50 KB per dataset for 25k genes vs ~500 KB raw). Lookup is O(1) by PK
+-- and the cached blob lets subsequent per-(db, gene) queries skip the
+-- per-gene-mean layer scan entirely.
+CREATE TABLE IF NOT EXISTS gene_distribution (
+    db_id       TEXT NOT NULL,
+    layer       TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    q05         REAL NOT NULL,
+    q95         REAL NOT NULL,
+    means_blob  BLOB NOT NULL,         -- zlib(json.dumps({gene_name: mean_expr}))
+    created_at  INTEGER NOT NULL,
+    PRIMARY KEY (db_id, layer, fingerprint)
+);
 """
 
 
@@ -133,6 +150,46 @@ class GeneStatsCache:
             ),
         )
 
+    # ── dataset-level distribution cache ──────────────────────────────────────
+
+    def get_distribution(
+        self, db_id: str, layer: str, fingerprint: str
+    ) -> Optional[Dict[str, Any]]:
+        """Return the cached ``{q05, q95, means: {gene: mean}}`` dict or None."""
+        row = self._conn.execute(
+            "SELECT q05, q95, means_blob, created_at FROM gene_distribution "
+            "WHERE db_id=? AND layer=? AND fingerprint=?",
+            (db_id, layer, fingerprint),
+        ).fetchone()
+        if not row:
+            return None
+        q05, q95, means_blob, created_at = row
+        if time.time() - created_at > CACHE_TTL_SECONDS:
+            return None
+        try:
+            means = json.loads(zlib.decompress(means_blob).decode('utf-8'))
+        except (ValueError, zlib.error):
+            return None
+        return {'q05': float(q05), 'q95': float(q95), 'means': means}
+
+    def put_distribution(
+        self, db_id: str, layer: str, fingerprint: str, dist: Dict[str, Any]
+    ) -> None:
+        q05 = float(dist.get('q05', 0.0))
+        q95 = float(dist.get('q95', 1.0))
+        means = dist.get('means') or {}
+        # Compact JSON (no spaces) + zlib level 6 → ~10x smaller than raw JSON.
+        means_blob = zlib.compress(
+            json.dumps(means, separators=(',', ':')).encode('utf-8'),
+            level=6,
+        )
+        self._conn.execute(
+            "INSERT OR REPLACE INTO gene_distribution "
+            "(db_id, layer, fingerprint, q05, q95, means_blob, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (db_id, layer, fingerprint, q05, q95, means_blob, int(time.time())),
+        )
+
     def gc_stale(self, keep_fingerprints_per_db: Dict[str, str]) -> int:
         """Drop entries whose fingerprint no longer matches the current one.
 
@@ -143,6 +200,11 @@ class GeneStatsCache:
         for db_id, current_fp in keep_fingerprints_per_db.items():
             cur = self._conn.execute(
                 "DELETE FROM gene_stats WHERE db_id=? AND fingerprint != ?",
+                (db_id, current_fp),
+            )
+            deleted += cur.rowcount or 0
+            cur = self._conn.execute(
+                "DELETE FROM gene_distribution WHERE db_id=? AND fingerprint != ?",
                 (db_id, current_fp),
             )
             deleted += cur.rowcount or 0
@@ -160,21 +222,26 @@ class GeneStatsCache:
         oldest = self._conn.execute(
             "SELECT MIN(created_at) FROM gene_stats"
         ).fetchone()[0]
+        n_dist = self._conn.execute(
+            "SELECT COUNT(*) FROM gene_distribution"
+        ).fetchone()[0]
         size = self.path.stat().st_size if self.path.exists() else 0
         return {
             "rows": n_rows,
             "distinct_databases": n_dbs,
             "distinct_genes": n_genes,
             "oldest_entry_unix": oldest,
+            "distributions_cached": n_dist,
             "ttl_seconds": CACHE_TTL_SECONDS,
             "db_path": str(self.path),
             "db_size_bytes": size,
         }
 
     def clear(self) -> int:
-        """Wipe every entry. Returns rows deleted."""
-        cur = self._conn.execute("DELETE FROM gene_stats")
-        return cur.rowcount or 0
+        """Wipe every entry (both tables). Returns rows deleted."""
+        n1 = self._conn.execute("DELETE FROM gene_stats").rowcount or 0
+        n2 = self._conn.execute("DELETE FROM gene_distribution").rowcount or 0
+        return n1 + n2
 
     def close(self) -> None:
         self._conn.close()

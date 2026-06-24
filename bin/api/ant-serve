@@ -1307,7 +1307,7 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.14.0"
+API_VERSION = "2.14.1"
 API_VERSION_RELEASED = "2026-06-24"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
@@ -2129,13 +2129,29 @@ async def get_gene_stats_all(
             misses = len(gene_list)
 
         # Compute the misses in one duckdb call (much cheaper than per-gene).
+        # If we have a cached dataset-level distribution for this (db, layer,
+        # fingerprint), pass it through so get_gene_stats skips the layer scan
+        # for rank_mean / scaled_mean. Otherwise the scan runs once and we
+        # write the resulting distribution back to cache for future genes.
         computed_stats: List[Dict[str, Any]] = []
         if missing_genes:
+            precomputed_dist: Optional[Dict[str, Any]] = None
+            if fingerprint and not refresh:
+                precomputed_dist = cache.get_distribution(db_id_inner, layer, fingerprint)
             try:
                 with _pooled_db(db_id_inner) as db:
                     computed_stats = db.get_gene_stats(
-                        missing_genes, layer=layer, case_sensitive=case_sensitive
+                        missing_genes, layer=layer, case_sensitive=case_sensitive,
+                        precomputed_dist=precomputed_dist,
                     )
+                    # If get_gene_stats ran a fresh layer scan it leaves the
+                    # distribution on db._last_distribution. Cache it.
+                    if (fingerprint
+                            and precomputed_dist is None
+                            and getattr(db, '_last_distribution', None)):
+                        cache.put_distribution(
+                            db_id_inner, layer, fingerprint, db._last_distribution
+                        )
             except Exception:
                 return None, hits, misses, writes
 

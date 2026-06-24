@@ -520,24 +520,32 @@ class AnthiveDB:
             )
 
     def get_gene_stats(self, gene_names: List[str], layer: str = 'X',
-                       case_sensitive: bool = True) -> List[Dict[str, Any]]:
+                       case_sensitive: bool = True,
+                       precomputed_dist: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
         Get expression statistics for one or more genes.
 
         Statistics over all cells (zeros included): mean, std.
         Statistics over expressing cells only: mean, std, median, q10, q90, max.
 
-        When the database has a ``__gene_bins`` table (built by ant-duckdb-check for
-        databases with a default_layer) two additional ranking fields are included:
+        Cross-dataset-comparable ranking fields included for every gene:
 
         - ``rank_mean`` (0–1): percentile rank of this gene's mean expression among
           all genes in the dataset (0 = lowest, 1 = highest).
-        - ``scaled_mean`` (0–1): mean expression rescaled and clipped to the
-          [q05, q95] range of all gene means, giving an intuitive abundance score.
+        - ``scaled_mean`` (0–1): mean expression clipped to the [q05, q95] range
+          of all gene means and rescaled to 0–1 — the canonical cross-dataset
+          abundance score used by anthive-web's atlas page.
+        - ``mean_expr_layer``: raw per-gene mean over the layer (zeros included)
+          in the layer's native units (log-norm for ``.X``).
 
-        Both metrics are derived from ``__gene_bins.mean_expr``, which is the
-        mean expression over all cells (zeros included) using the default layer.
-        Databases without ``__gene_bins`` do not include these fields.
+        Computed from the precomputed ``__gene_bins`` table when present (9/107
+        datasets currently); otherwise from a full layer scan (~800 ms cold).
+        Callers that batch many genes against the same dataset should cache the
+        distribution and pass it via ``precomputed_dist`` to skip the scan:
+
+            stats1 = db.get_gene_stats(['APOE'], layer='X')
+            dist   = db._last_distribution        # populated when scan ran
+            stats2 = db.get_gene_stats(['TREM2'], layer='X', precomputed_dist=dist)
 
         Args:
             gene_names: List of gene names
@@ -545,6 +553,10 @@ class AnthiveDB:
             case_sensitive: If False, resolve gene names case-insensitively (default: True).
                             Results include 'gene_found' with the actual stored name when
                             it differs from the queried name.
+            precomputed_dist: Optional pre-cached distribution dict from a prior
+                            call, of the form ``{'q05': ..., 'q95': ..., 'means':
+                            {gene_name: mean_expr, ...}}``. If provided, the
+                            method skips the layer-scan / __gene_bins lookup.
 
         Returns:
             List of dicts with stats per gene
@@ -566,42 +578,128 @@ class AnthiveDB:
                 ).fetchone()
             resolved[gene_name] = row[0] if row else None
 
-        # ── Step 2: batch rank/scale from __gene_bins (one query total) ───────
-        rank_ctx: Dict[str, Dict[str, float]] = {}   # stored_name → rank fields
-        has_bins = (self._conn.execute("""
-            SELECT COUNT(*) FROM information_schema.tables
-            WHERE table_name = '__gene_bins'
-        """).fetchone() or (0,))[0]
+        # ── Step 2: rank_mean + scaled_mean for the queried genes ─────────────
+        #
+        # rank_mean   = PERCENT_RANK of this gene's mean among all genes (0–1)
+        # scaled_mean = mean clipped to [q05, q95] of the cross-gene distribution,
+        #               rescaled to 0–1 — the cross-dataset-comparable abundance
+        #               score used by the atlas page (anthive-web #193).
+        # mean_expr_layer = raw per-gene mean over the layer (zeros included),
+        #               in the layer's units (log-norm for .X).
+        #
+        # Three paths:
+        #   (a) precomputed_dist passed in → constant-time lookup (the fast path
+        #       /gene_stats_all hits after first call against the dataset)
+        #   (b) __gene_bins table exists (9/107 datasets currently) → tiny window
+        #       query against the precomputed gene_id → mean_expr table
+        #   (c) neither → full layer scan to compute per-gene means + rank +
+        #       q05/q95 in one SQL pass. ~800 ms cold on a 300k-cell, 25k-gene
+        #       sparse layer. Result returned via self._last_distribution so
+        #       ant-serve can cache it for paths (a) on subsequent queries.
+        self._last_distribution: Optional[Dict[str, Any]] = None
+        rank_ctx: Dict[str, Dict[str, float]] = {}
+        stored_names = [s for s in resolved.values() if s is not None]
 
-        if has_bins:
-            q_row = self._conn.execute("""
-                SELECT QUANTILE_CONT(mean_expr, 0.05), QUANTILE_CONT(mean_expr, 0.95)
-                FROM __gene_bins
-            """).fetchone() or (0.0, 1.0)
-            q05, q95 = float(q_row[0]), float(q_row[1])
-            q_range = max(q95 - q05, 1e-9)
+        if stored_names:
+            placeholders = ','.join('?' * len(stored_names))
 
-            stored_names = [s for s in resolved.values() if s is not None]
-            if stored_names:
-                placeholders = ','.join('?' * len(stored_names))
-                bin_rows = self._conn.execute(f"""
-                    WITH ranked AS (
-                        SELECT gene_id,
-                               PERCENT_RANK() OVER (ORDER BY mean_expr) AS rank_mean,
-                               mean_expr
+            if precomputed_dist is not None:
+                # (a) Fast path: dist already cached at the call site.
+                q05 = float(precomputed_dist.get('q05', 0.0))
+                q95 = float(precomputed_dist.get('q95', 1.0))
+                q_range = max(q95 - q05, 1e-9)
+                means: Dict[str, float] = precomputed_dist.get('means', {}) or {}
+                # PERCENT_RANK = (# below) / (n - 1) — needs sorted means.
+                sorted_means = sorted(means.values())
+                n_genes_total = max(len(sorted_means) - 1, 1)
+                from bisect import bisect_left
+                for sn in stored_names:
+                    m = means.get(sn)
+                    if m is None:
+                        continue
+                    rank = bisect_left(sorted_means, m) / n_genes_total
+                    scaled = max(0.0, min(1.0, (m - q05) / q_range))
+                    rank_ctx[sn] = {
+                        'rank_mean':       round(rank, 4),
+                        'scaled_mean':     round(scaled, 4),
+                        'mean_expr_layer': round(m, 6),
+                    }
+            else:
+                has_bins = (self._conn.execute("""
+                    SELECT COUNT(*) FROM information_schema.tables
+                    WHERE table_name = '__gene_bins'
+                """).fetchone() or (0,))[0]
+
+                if has_bins:
+                    # (b) Precomputed bins.
+                    q_row = self._conn.execute("""
+                        SELECT QUANTILE_CONT(mean_expr, 0.05),
+                               QUANTILE_CONT(mean_expr, 0.95)
                         FROM __gene_bins
-                    )
-                    SELECT g.gene_name, r.rank_mean, r.mean_expr
-                    FROM ranked r
-                    JOIN __genes g USING (gene_id)
-                    WHERE g.gene_name IN ({placeholders})
-                """, stored_names).fetchall()
+                    """).fetchone() or (0.0, 1.0)
+                    q05, q95 = float(q_row[0]), float(q_row[1])
+                    bin_rows = self._conn.execute(f"""
+                        WITH ranked AS (
+                            SELECT gene_id, mean_expr,
+                                   PERCENT_RANK() OVER (ORDER BY mean_expr) AS rank_mean
+                            FROM __gene_bins
+                        )
+                        SELECT g.gene_name, r.rank_mean, r.mean_expr
+                        FROM ranked r
+                        JOIN __genes g USING (gene_id)
+                        WHERE g.gene_name IN ({placeholders})
+                    """, stored_names).fetchall()
+                else:
+                    # (c) Full layer scan + retain the distribution so the
+                    # caller can cache it.
+                    layer_tbl = safe_ident(f"layer__{layer}")
+                    all_means = self._conn.execute(f"""
+                        SELECT gene_name, SUM(value) / {n_cells}.0 AS mean_expr
+                        FROM {layer_tbl}
+                        GROUP BY gene_name
+                    """).fetchall()
+                    means_dict = {row[0]: float(row[1]) for row in all_means}
+                    if means_dict:
+                        sorted_vals = sorted(means_dict.values())
+                        n = len(sorted_vals)
+                        # q05/q95 by linear interpolation between the
+                        # bracketing values (same as DuckDB's QUANTILE_CONT).
+                        def _quant(p: float) -> float:
+                            if n == 0:
+                                return 0.0
+                            idx = p * (n - 1)
+                            lo = int(idx)
+                            hi = min(lo + 1, n - 1)
+                            frac = idx - lo
+                            return sorted_vals[lo] * (1 - frac) + sorted_vals[hi] * frac
+                        q05 = _quant(0.05)
+                        q95 = _quant(0.95)
+                    else:
+                        q05, q95 = 0.0, 1.0
 
+                    self._last_distribution = {
+                        'q05': q05, 'q95': q95, 'means': means_dict,
+                    }
+
+                    # Build bin_rows for queried genes only.
+                    sorted_vals = sorted(means_dict.values())
+                    n_total = max(len(sorted_vals) - 1, 1)
+                    from bisect import bisect_left
+                    bin_rows = []
+                    for sn in stored_names:
+                        m = means_dict.get(sn)
+                        if m is None:
+                            continue
+                        rank = bisect_left(sorted_vals, m) / n_total
+                        bin_rows.append((sn, rank, m))
+
+                q_range = max(q95 - q05, 1e-9)
                 for gname, rank_mean, mean_expr in bin_rows:
                     scaled = max(0.0, min(1.0, (float(mean_expr) - q05) / q_range))
                     rank_ctx[gname] = {
-                        'rank_mean':   round(float(rank_mean), 4),
-                        'scaled_mean': round(scaled, 4),
+                        'rank_mean':       round(float(rank_mean), 4),
+                        'scaled_mean':     round(scaled, 4),
+                        'mean_expr_layer': round(float(mean_expr), 6),
                     }
 
         # ── Step 3: per-gene expression statistics ────────────────────────────
