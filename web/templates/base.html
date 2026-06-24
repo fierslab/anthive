@@ -52,6 +52,13 @@
         }
         #topbar nav > a, #topbar nav .dropdown-toggle { color: var(--bar-link); font-size: 12px; }
         #topbar nav > a:hover, #topbar nav .dropdown-toggle:hover { color: var(--bar-link-hover); text-decoration: none; }
+        #topbar .gene-search { margin: 0; }
+        #topbar .gene-search input {
+            font-size: 12px; padding: 2px 8px; width: 120px; border: 1px solid #9fb2b8;
+            border-radius: 10px; background: #fff; color: var(--text); outline: none;
+            font-family: var(--font);
+        }
+        #topbar .gene-search input:focus { border-color: var(--link); width: 150px; }
 
         .dropdown { position: relative; }
         .dropdown-toggle { cursor: pointer; }
@@ -210,6 +217,10 @@
             <a href="/api/docs">api</a>
             <a href="/about">about</a>
         </nav>
+        <form class="gene-search" onsubmit="event.preventDefault(); var g=this.q.value.trim(); if(g) window.location='/genes/'+encodeURIComponent(g);"
+              title="Jump to a gene's cross-catalogue expression atlas">
+            <input name="q" type="text" placeholder="🔍 gene atlas…" autocomplete="off" spellcheck="false">
+        </form>
         {# Authelia identity + sign-out. Only shown when the request carries the
            Remote-User header Caddy/nginx forwards from Authelia — so direct
            (un-proxied) access shows nothing. Cookie SSO only: no basic auth. #}

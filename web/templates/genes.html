@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+
+{% block title %}{{ gene }} — gene atlas — anthive{% endblock %}
+
+{% block content %}
+<style>
+  .gene-hero { display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0 14px; }
+  .gene-hero .card {
+    flex: 1; min-width: 190px; border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; background: #fff;
+  }
+  .gene-hero .num { font-size: 18px; font-weight: 700; color: var(--link); line-height: 1.15; }
+  .gene-hero .lbl { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; margin-top: 3px; }
+
+  .gene-controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 6px 0 10px; font-size: 12px; }
+  .gene-controls .picks-label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; }
+  .gene-controls button {
+    font-size: 11px; padding: 2px 9px; border: 1px solid var(--border); background: #f8fafc;
+    border-radius: 10px; cursor: pointer; font-family: inherit; color: var(--text);
+  }
+  .gene-controls button:hover { background: #dbeafe; border-color: var(--link); }
+  .gene-controls button.active { background: var(--link); color: #fff; border-color: var(--link); }
+
+  /* one dataset per row: pills · name · scaled_mean bar · pct% */
+  a.gene-row {
+    display: grid; grid-template-columns: 210px 1fr 46px; gap: 8px; align-items: center;
+    padding: 3px 6px; border-bottom: 1px solid var(--border-light); text-decoration: none; color: var(--text);
+  }
+  a.gene-row:hover { background: var(--hover); text-decoration: none; }
+  .gene-row .who { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .gene-row .who .nm { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .gene-row .who .pills { display: flex; gap: 3px; flex-wrap: wrap; }
+  .gene-row .bar-wrap { background: #f1f5f9; border-radius: 3px; height: 15px; position: relative; overflow: hidden; }
+  .gene-row .bar { height: 100%; background: #1d4ed8; border-radius: 3px; }
+  .gene-row .bar-val { position: absolute; right: 5px; top: 0; font-size: 10px; line-height: 15px; color: #334155; font-family: var(--font-mono); }
+  .gene-row .pct { font-size: 11px; color: var(--text-muted); text-align: right; font-family: var(--font-mono); }
+
+  .gp { display: inline-block; padding: 0 6px; font-size: 10px; line-height: 1.5; border-radius: 9px; white-space: nowrap;
+        background: #eef2ff; color: #3730a3; border: 1px solid #e0e7ff; }
+  .gp.cell    { background: #dcfce7; color: #166534; border-color: #bbf7d0; }
+  .gp.disease { background: #fee2e2; color: #991b1b; border-color: #fecaca; }
+  @media (max-width: 640px) { a.gene-row { grid-template-columns: 1fr 40px; } a.gene-row .bar-wrap { grid-column: 1 / -1; } }
+</style>
+
+<div class="breadcrumb"><a href="/">datasets</a> / gene atlas</div>
+<h1 class="page-title">{{ gene }} <span class="muted" style="font-size:13px;font-weight:normal">— expression across the catalogue</span></h1>
+
+<div id="gene-hero" class="gene-hero"></div>
+
+<div id="gene-loading" class="plot-loading" style="min-height:140px">
+  <span class="spinner-lg"></span>
+  <span>computing <b>{{ gene }}</b> across the catalogue…<br>
+    <span class="muted" style="font-size:12px">first view of a gene can take ~10–60s; cached & instant after that</span></span>
+</div>
+
+<div id="gene-controls" class="gene-controls" style="display:none">
+  <span class="picks-label">sort by</span>
+  <button data-sort="scaled_mean" class="active">abundance</button>
+  <button data-sort="pct_nonzero">% cells</button>
+  <button data-sort="mean_nonzero">mean (non-zero)</button>
+  <button data-sort="rank_mean">rank in dataset</button>
+  <span style="flex:1"></span>
+  <span class="muted" id="gene-meta"></span>
+  <span class="info" title="Bar length = scaled_mean (0–1, cross-dataset-comparable abundance, clipped to the 5–95% range of all genes in that dataset). Bar opacity ∝ % of cells expressing. Right number = % of cells with non-zero expression. Click a row to open that dataset.">ⓘ</span>
+</div>
+
+<div id="gene-rows"></div>
+<div id="gene-missing" class="muted" style="font-size:11px; margin-top:10px"></div>
+<div id="gene-error" class="plot-status"></div>
+
+<script>
+(function () {
+  const GENE  = {{ gene|tojson }};
+  const PILLS = {{ pill_map|tojson }};
+  const loading  = document.getElementById('gene-loading');
+  const controls = document.getElementById('gene-controls');
+  const rowsBox  = document.getElementById('gene-rows');
+  const heroBox  = document.getElementById('gene-hero');
+  const missBox  = document.getElementById('gene-missing');
+  const errBox   = document.getElementById('gene-error');
+  const metaEl   = document.getElementById('gene-meta');
+
+  let found = [], missing = [], sortKey = 'scaled_mean';
+
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const pillsFor = dbId => {
+    const p = PILLS[dbId]; if (!p) return '';
+    const one = (d, cls) => (d && d.abbrev)
+      ? `<span class="gp ${cls}" title="${esc(d.full)}">${esc(d.abbrev)}</span>` : '';
+    return one(p.organism, '') + one(p.celltype, 'cell') + one(p.disease, 'disease');
+  };
+
+  function renderRows() {
+    found.sort((a, b) => (b[sortKey] ?? -Infinity) - (a[sortKey] ?? -Infinity));
+    rowsBox.innerHTML = found.map(r => {
+      const w = Math.max(2, Math.round((r.scaled_mean || 0) * 100));
+      const op = 0.30 + 0.70 * Math.min(1, (r.pct_nonzero || 0) / 100);   // pale = few cells
+      const parts = (r.db_id || '').split('/');
+      const href = `/browse/${encodeURIComponent(parts[0]||'')}/${encodeURIComponent(parts[1]||'')}/plot/histogram?x=${encodeURIComponent(GENE)}`;
+      return `<a class="gene-row" href="${href}" title="open ${esc(r.db_id)} — ${esc(GENE)} distribution">
+        <span class="who"><span class="nm">${esc(r.title || r.db_id)}</span><span class="pills">${pillsFor(r.db_id)}</span></span>
+        <span class="bar-wrap"><span class="bar" style="width:${w}%;opacity:${op.toFixed(2)}"></span><span class="bar-val">${(r.scaled_mean||0).toFixed(2)}</span></span>
+        <span class="pct">${(r.pct_nonzero||0).toFixed(0)}%</span>
+      </a>`;
+    }).join('');
+  }
+
+  function renderHero() {
+    const top = found[0];
+    const broad = found.filter(r => (r.pct_nonzero || 0) > 10).length;
+    const cv = found.length ? found[0].cross_db_cv : null;
+    const total = found.length + missing.length;
+    const card = (num, lbl) => `<div class="card"><div class="num">${num}</div><div class="lbl">${lbl}</div></div>`;
+    heroBox.innerHTML =
+      card(top ? esc(top.title || top.db_id) : '—', top ? `highest abundance (scaled ${top.scaled_mean.toFixed(2)})` : 'not detected') +
+      card(`${broad}/${found.length}`, 'datasets with &gt;10% cells expressing') +
+      card(cv != null ? cv.toFixed(2) : '—', 'cross-dataset CV (spread)') +
+      card(`${found.length}/${total}`, `detected (absent from ${missing.length})`);
+  }
+
+  fetch(`/api/gene_stats_all?genes=${encodeURIComponent(GENE)}`)
+    .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error(`HTTP ${r.status}: ${t.slice(0,200)}`); }))
+    .then(data => {
+      (data.results || []).forEach(res => {
+        const st = (res.stats || [])[0] || {};
+        const base = { db_id: res.db_id, title: res.title, group: res.group, n_cells: res.n_cells };
+        if (st.error) missing.push(base);
+        else found.push(Object.assign(base, st));
+      });
+      loading.style.display = 'none';
+      if (!found.length && !missing.length) { errBox.innerHTML = `<span class="err">no datasets returned</span>`; return; }
+      controls.style.display = '';
+      metaEl.textContent = `${data.n_databases ?? (found.length+missing.length)} datasets scanned`;
+      renderHero(); renderRows();
+      if (missing.length) {
+        const names = missing.map(m => esc(m.title || m.db_id)).join(', ');
+        missBox.innerHTML = `<b>Not detected</b> in ${missing.length} dataset(s): ${names}`;
+      }
+    })
+    .catch(e => { loading.style.display = 'none'; errBox.innerHTML = `<span class="err">could not load gene stats — ${esc(e.message)}</span>`; });
+
+  document.querySelectorAll('#gene-controls button[data-sort]').forEach(b => {
+    b.addEventListener('click', () => {
+      sortKey = b.getAttribute('data-sort');
+      document.querySelectorAll('#gene-controls button[data-sort]').forEach(x => x.classList.toggle('active', x === b));
+      renderRows();
+    });
+  });
+})();
+</script>
+{% endblock %}

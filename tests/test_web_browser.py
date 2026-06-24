@@ -842,6 +842,25 @@ def test_about_link_in_nav(client):
     assert 'href="/about"' in resp.text
 
 
+def test_gene_atlas_page_renders(client):
+    # /genes/{gene}: server-rendered shell; per-gene cross-dataset stats are
+    # fetched client-side from /api/gene_stats_all (API 2.14).
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    assert "gene atlas" in resp.text.lower()
+    assert "/api/gene_stats_all" in resp.text
+    assert "APOE" in resp.text
+    assert 'data-sort="scaled_mean"' in resp.text   # sort-by-abundance control
+
+
+def test_gene_search_box_in_topbar(client):
+    # topbar gene search → /genes/{gene} (present on every page incl. landing)
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert 'class="gene-search"' in resp.text
+    assert "'/genes/'" in resp.text
+
+
 def test_favicon_routes_served(client):
     # favicons/manifest are served by the app (from web/favicons/, since the
     # webapp/ static dir is gitignored). The reverse proxy routes these here.

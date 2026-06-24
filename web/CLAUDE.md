@@ -59,6 +59,7 @@ line-art logo (grayscale+alpha PNG), so it's shown on a dark hero panel.
 | `/genesets/{study}/{experiment}` | one experiment's geneset list | `geneset_experiment.html` |
 | `/genesets/{study}/{experiment}/{name}` | one geneset's gene table | `geneset.html` |
 | `/about` | logo hero + what-it-is + live dataset/collection counts | `about.html` |
+| `/genes/{gene}` | single-gene cross-catalogue expression atlas | `genes.html` |
 
 The plot page talks to the REST API directly from the browser via JS —
 the FastAPI router doesn't proxy plot requests.  It just hands the

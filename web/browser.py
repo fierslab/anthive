@@ -989,6 +989,35 @@ async def about_view(request: Request):
     })
 
 
+@router.get("/genes/{gene}", response_class=HTMLResponse)
+async def gene_view(request: Request, gene: str):
+    """Single-gene cross-catalogue atlas — where is {gene} expressed?
+
+    Server-renders the shell + a catalogue pill map (db_id → context pills,
+    fast/cached); the (possibly slow, cold ~10-60s) per-gene cross-dataset stats
+    are fetched client-side from /api/gene_stats_all so the page never blocks.
+    """
+    api_url = _api_url(request)
+    pill_map: Dict[str, Dict] = {}
+    try:
+        for db in _all_databases(api_url):
+            did = db.get('id') or ''
+            if not did:
+                continue
+            pill_map[did] = {
+                'group':    db.get('group_id') or did.split('/')[0],
+                'organism': _summarize_meta_field([db], 'organism', abbrev_map=_ORGANISM_ABBREV),
+                'celltype': _summarize_meta_field([db], 'celltype', abbrev_map=_CELLTYPE_ABBREV),
+                'disease':  _summarize_meta_field([db], 'disease',  abbrev_map=_DISEASE_ABBREV),
+            }
+    except Exception as error:
+        print(f"API error: {error}")
+    return templates.TemplateResponse(request, "genes.html", {
+        "gene": gene,
+        "pill_map": pill_map,
+    })
+
+
 @router.get("/genesets", response_class=HTMLResponse)
 async def genesets_index(request: Request):
     api_url = _api_url(request)
