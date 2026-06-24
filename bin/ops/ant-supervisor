@@ -151,13 +151,26 @@ def _caddy_env_for_mode(prod: bool) -> dict[str, str]:
         # (caddy-tls.dev, caddy-auth.dev, caddy-http-redirect.dev,
         # ANTHIVE_LISTEN=:8501).
         return {}
+    # Multi-instance: a second instance on the same host needs its own Caddy
+    # port (8500 is taken by the first). ANTHIVE_LISTEN / ANTHIVE_CADDY_BIND
+    # honour a pre-set environment value (e.g. from the systemd unit) and only
+    # fall back to the single-instance defaults. The api/browse upstream ports
+    # are exported from anthive.yaml so each instance's Caddy routes to ITS own
+    # services (the Caddyfile reads {$ANTHIVE_API_PORT}/{$ANTHIVE_BROWSE_PORT}).
     return {
-        'ANTHIVE_LISTEN':                'http://127.0.0.1:8500',
+        # Host-AGNOSTIC default (http://:PORT) — nginx forwards the real public
+        # Host, which a host-bound address (http://127.0.0.1:PORT) would fail to
+        # match → empty 200 / blank pages. `bind` below keeps it on loopback.
+        'ANTHIVE_LISTEN':       os.environ.get('ANTHIVE_LISTEN', 'http://:8500'),
         'ANTHIVE_TLS_SNIPPET':           'caddy-tls.prod',
         'ANTHIVE_AUTH_SNIPPET':          'caddy-auth.prod',
         'ANTHIVE_HTTP_REDIRECT_SNIPPET': 'caddy-http-redirect.prod',
         # Lock Caddy to loopback in prod — only nginx reaches it.
-        'ANTHIVE_CADDY_BIND':            '127.0.0.1',
+        'ANTHIVE_CADDY_BIND':   os.environ.get('ANTHIVE_CADDY_BIND', '127.0.0.1'),
+        # Upstream service ports (from anthive.yaml) so the shared Caddyfile
+        # routes to this instance's own api/browse, not the first instance's.
+        'ANTHIVE_API_PORT':              _API_PORT,
+        'ANTHIVE_BROWSE_PORT':           _BROWSE_PORT,
     }
 
 # Back-off settings
@@ -445,7 +458,13 @@ async def _main() -> None:
     if caddy_env:
         SERVICES['caddy']['env'] = caddy_env
 
-    active_services = DEFAULT_SERVICES + (['caddy'] if args.caddy else [])
+    # ANTHIVE_SERVICES (comma-separated) overrides DEFAULT_SERVICES — e.g. a
+    # public instance with no auth sets ANTHIVE_SERVICES=api,browse to skip
+    # authelia (and its :9091, which a co-located instance already owns).
+    _services_env = os.environ.get('ANTHIVE_SERVICES', '').strip()
+    base_services = ([s.strip() for s in _services_env.split(',') if s.strip()]
+                     if _services_env else DEFAULT_SERVICES)
+    active_services = base_services + (['caddy'] if args.caddy else [])
     label_width = max(len(name) for name in active_services + ['supervisor'])
     sup_prefix, _ = _make_prefix('supervisor', DIM, label_width)
 

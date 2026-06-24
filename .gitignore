@@ -36,6 +36,12 @@ rclone.conf
 # nginx active config (may contain secrets)
 config/default.conf
 
+# Per-instance / per-server live configuration (real hostnames, ports, paths,
+# cert locations, systemd units, nginx vhosts). Instance-specific — NOT for the
+# public repo. Tracked in a SEPARATE private repo mounted here. config/ keeps
+# only the generic mechanism + examples + the how-to README.
+config/server/
+
 # User config (may contain credentials)
 anthive.yaml
 

@@ -89,17 +89,17 @@ import {$ANTHIVE_HTTP_REDIRECT_SNIPPET:caddy-http-redirect.dev}
 
 	# Reverse proxy for API - strip /api prefix before forwarding
 	handle_path /api/* {
-		reverse_proxy localhost:8080
+		reverse_proxy localhost:{$ANTHIVE_API_PORT:8080}
 	}
 
 	# Reverse proxy for browser interface (dataset browsing)
 	handle /browse/* {
-		reverse_proxy localhost:8081
+		reverse_proxy localhost:{$ANTHIVE_BROWSE_PORT:8081}
 	}
 
 	# Home page - browser interface
 	handle / {
-		reverse_proxy localhost:8081
+		reverse_proxy localhost:{$ANTHIVE_BROWSE_PORT:8081}
 	}
 
 	# Serve static files for JupyterLite
@@ -163,7 +163,7 @@ import {$ANTHIVE_HTTP_REDIRECT_SNIPPET:caddy-http-redirect.dev}
 	# route not explicitly enumerated above (e.g. /about, /genesets). The app
 	# is the default; static bundles are the handled exceptions, just above.
 	handle {
-		reverse_proxy localhost:8081
+		reverse_proxy localhost:{$ANTHIVE_BROWSE_PORT:8081}
 	}
 
 	# Enable gzip compression

@@ -1,0 +1,33 @@
+# EXAMPLE — systemd unit for one anthive4 instance. Copy to
+# /etc/systemd/system/anthive-<instance>.service, fill <PLACEHOLDERS>,
+# then: sudo systemctl daemon-reload && sudo systemctl enable --now anthive-<instance>
+#
+# Keep the filled-in copy in your private server-config repo, NOT in anthive4.
+
+[Unit]
+Description=Anthive — <HOSTNAME> (ant-supervisor: api+browse[+authelia]+caddy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<USER>
+WorkingDirectory=<REPO_PATH>
+# uv must be on PATH (the supervisor + children are `uv run --script`); HOME is
+# needed for the uv cache (~/.cache/uv).
+Environment=HOME=<HOME>
+Environment=PATH=<HOME>/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Host-AGNOSTIC Caddy listener (http://:PORT, NOT http://127.0.0.1:PORT) so it
+# matches the public Host nginx forwards; bind stays loopback (set in --prod).
+Environment=ANTHIVE_LISTEN=http://:<CADDY_PORT>
+# Public/no-auth instance: drop authelia (also frees its port for another
+# instance). Omit this line for a gated instance.
+Environment=ANTHIVE_SERVICES=api,browse
+ExecStart=<REPO_PATH>/bin/ops/ant-supervisor --prod --caddy
+# Default KillMode=control-group SIGTERMs the whole cgroup → no orphans.
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

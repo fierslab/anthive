@@ -1,0 +1,44 @@
+# EXAMPLE — public (no-auth) anthive4 vhost. Copy, fill <PLACEHOLDERS>, deploy
+# to /etc/nginx/conf.d/. nginx terminates TLS and forwards EVERY path to this
+# instance's Caddy on a loopback port; Caddy owns path routing.
+#
+# Keep the filled-in copy in your private server-config repo, NOT in anthive4.
+
+server {
+    listen 80;
+    server_name <HOSTNAME>;
+    return 301 https://<HOSTNAME>$request_uri;
+}
+
+server {
+    # Combined `ssl http2` form works on nginx 1.24 AND 1.25+.
+    # (1.25.1+ also accepts the standalone `http2 on;` directive.)
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name <HOSTNAME>;
+
+    ssl_certificate         /etc/nginx/cert/<CERT>.crt;
+    ssl_certificate_key     /etc/nginx/cert/<CERT>.key;
+    ssl_trusted_certificate /etc/nginx/cert/<CA>.crt;
+
+    client_max_body_size 1024m;
+
+    access_log /var/log/nginx/<HOSTNAME>-access.log;
+    error_log  /var/log/nginx/<HOSTNAME>-error.log warn;
+
+    # EVERYTHING → Caddy. Path routing lives in config/Caddyfile.
+    location / {
+        proxy_pass http://127.0.0.1:<CADDY_PORT>;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # NOTE: do NOT add an unconditional `Connection: upgrade` here — on a
+        # normal GET it makes nginx drop the body (HTTP 200, 0 bytes → blank
+        # pages). Use an http-level `map $http_upgrade $connection_upgrade`
+        # only if a real WebSocket upstream is added.
+        proxy_buffering    off;
+        proxy_read_timeout 300s;
+    }
+}

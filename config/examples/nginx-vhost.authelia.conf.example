@@ -1,0 +1,103 @@
+# EXAMPLE — Authelia-gated anthive4 vhost. Copy, fill <PLACEHOLDERS>, deploy to
+# /etc/nginx/conf.d/. nginx terminates TLS, runs the Authelia auth_request gate,
+# and forwards every non-Authelia path to this instance's Caddy on a loopback
+# port. Browser routes use a cookie-only gate; /api/ also accepts HTTP Basic
+# (validated against the same Authelia users) for CLI clients (e.g. vark).
+#
+# Keep the filled-in copy in your private server-config repo, NOT in anthive4.
+# <CADDY_PORT> = this instance's Caddy listener; <AUTHELIA_PORT> = its Authelia.
+
+server {
+    listen 80;
+    server_name <HOSTNAME>;
+    return 301 https://<HOSTNAME>$request_uri;
+}
+
+server {
+    listen 443 ssl http2;            # combined form: nginx 1.24 and 1.25+
+    listen [::]:443 ssl http2;
+    server_name <HOSTNAME>;
+
+    ssl_certificate         /etc/nginx/cert/<CERT>.crt;
+    ssl_certificate_key     /etc/nginx/cert/<CERT>.key;
+    ssl_trusted_certificate /etc/nginx/cert/<CA>.crt;
+
+    client_max_body_size 1024m;
+
+    # ── Authelia gate (server-level; locations opt out with auth_request off) ──
+    auth_request /internal/authelia-verify;
+    error_page 401 = @authelia_redirect;
+    auth_request_set $auth_user   $upstream_http_remote_user;
+    auth_request_set $auth_groups $upstream_http_remote_groups;
+    auth_request_set $auth_email  $upstream_http_remote_email;
+
+    # Authelia portal — never gated; proxied through Caddy.
+    location ^~ /authelia/ {
+        auth_request off;
+        proxy_pass         http://127.0.0.1:<CADDY_PORT>;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_set_header   X-Forwarded-Host  $host;
+        proxy_set_header   X-Forwarded-Uri   $request_uri;
+    }
+
+    # Browser verify endpoint — COOKIE ONLY (stale cached basic-auth is ignored,
+    # so it can't trip Authelia's regulation/ban).
+    location = /internal/authelia-verify {
+        internal;
+        proxy_pass                http://127.0.0.1:<AUTHELIA_PORT>/authelia/api/authz/auth-request;
+        proxy_pass_request_body   off;
+        proxy_set_header          Content-Length     "";
+        proxy_set_header          Host               $host;
+        proxy_set_header          X-Original-URL     $scheme://$host$request_uri;
+        proxy_set_header          X-Original-Method  $request_method;
+        proxy_set_header          X-Forwarded-Proto  $scheme;
+    }
+
+    # API verify endpoint — cookie first, then HTTP Basic (forwards Authorization).
+    location = /internal/authelia-verify-api {
+        internal;
+        proxy_pass                http://127.0.0.1:<AUTHELIA_PORT>/authelia/api/authz/auth-request-api;
+        proxy_pass_request_body   off;
+        proxy_set_header          Content-Length     "";
+        proxy_set_header          Host               $host;
+        proxy_set_header          Authorization      $http_authorization;   # REQUIRED for basic
+        proxy_set_header          X-Original-URL     $scheme://$host$request_uri;
+        proxy_set_header          X-Original-Method  $request_method;
+        proxy_set_header          X-Forwarded-Proto  $scheme;
+    }
+
+    location @authelia_redirect {
+        return 302 https://$host/authelia/?rd=$scheme://$host$request_uri;
+    }
+
+    # REST API — cookie OR HTTP Basic. Forwarded to Caddy (strips /api).
+    location /api/ {
+        auth_request /internal/authelia-verify-api;
+        proxy_pass http://127.0.0.1:<CADDY_PORT>;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Remote-User       $auth_user;
+        proxy_set_header Remote-Groups     $auth_groups;
+        proxy_set_header Remote-Email      $auth_email;
+        proxy_buffering    off;
+        proxy_read_timeout 300s;
+    }
+
+    # Everything else → Caddy (cookie-gated by the server-level auth_request).
+    # NOTE: deliberately NO `Connection: upgrade` here — it would blank the body
+    # on normal GETs. Add a `map $http_upgrade $connection_upgrade` only for a
+    # real WebSocket upstream.
+    location / {
+        proxy_pass http://127.0.0.1:<CADDY_PORT>;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Remote-User       $auth_user;
+        proxy_set_header Remote-Groups     $auth_groups;
+        proxy_set_header Remote-Email      $auth_email;
+    }
+}

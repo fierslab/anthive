@@ -8,9 +8,10 @@
 #      config/authelia/configuration.yml
 #   # then edit:  AUTHELIA_PORT, PRIMARY_HOST
 #
-# Per-host values on the current deployments:
-#   data.nevel.eu : AUTHELIA_PORT=9091  api 8080 / browse 8081
-#   prs.nevel.eu  : AUTHELIA_PORT=9191  api 8180 / browse 8181
+# Per-host: pick a unique AUTHELIA_PORT (and unique api/browse/Caddy ports) for
+# each instance sharing a host, e.g.
+#   instance-a : AUTHELIA_PORT=9091  api 8080 / browse 8081
+#   instance-b : AUTHELIA_PORT=9191  api 8180 / browse 8181
 #
 # Secrets are NOT in this file — they are read from gitignored files via
 # env-vars set by ant-supervisor:
@@ -85,7 +86,7 @@ session:
   inactivity: '30 minutes'
   remember_me: '1 month'
   cookies:
-    - domain: 'PRIMARY_HOST'                                 # e.g. data.nevel.eu
+    - domain: 'PRIMARY_HOST'                                 # e.g. data.example.org
       authelia_url: 'https://PRIMARY_HOST/authelia/'
       default_redirection_url: 'https://PRIMARY_HOST/'
 
@@ -99,20 +100,20 @@ storage:
     path: './config/authelia/db.sqlite3'
 
 notifier:
-  # SMTP via Migadu (shared anthive@nevel.eu mailbox; password in the
-  # AUTHELIA_NOTIFIER_SMTP_PASSWORD_FILE). disable_startup_check keeps a
-  # flaky SMTP egress from crashing auth at boot. The IPv4 literal +
-  # tls.server_name work around this host's broken IPv6 egress to Migadu
-  # (587 only; 465/25 are firewall-blocked). Re-resolve smtp.migadu.com
-  # if that IP ever changes.
+  # SMTP for password-reset / notification email. Password is read from
+  # AUTHELIA_NOTIFIER_SMTP_PASSWORD_FILE (gitignored secret). Fill in your
+  # provider's submission host. disable_startup_check keeps a flaky SMTP
+  # egress from crashing auth at boot. If your host has broken IPv6 egress to
+  # the SMTP provider, use the provider's IPv4 literal in `address` and set
+  # `tls.server_name` to the real hostname for cert validation.
   disable_startup_check: true
   smtp:
-    address: 'submission://37.59.57.117:587'
+    address: 'submission://smtp.example.com:587'   # or submission://<IPv4>:587
     timeout: '30s'
-    username: 'anthive@nevel.eu'
-    sender: 'Anthive <anthive@nevel.eu>'
+    username: 'no-reply@example.com'
+    sender: 'Anthive <no-reply@example.com>'
     subject: '[Anthive] {title}'
-    startup_check_address: 'anthive@nevel.eu'
+    startup_check_address: 'no-reply@example.com'
     tls:
-      server_name: 'smtp.migadu.com'
+      server_name: 'smtp.example.com'
       minimum_version: 'TLS1.2'
