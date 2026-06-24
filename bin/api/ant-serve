@@ -82,6 +82,7 @@ from geneset import (
     parse_score_column,
     validate_registry as validate_geneset_registry,
 )
+from gene_stats_cache import GeneStatsCache
 from md_check import generate_file_id, generate_group_id
 from metadata import parse_md_file
 import mus
@@ -548,6 +549,12 @@ class DatabaseRegistry:
         # Phase 2: Enhanced caching
         self.gene_list_cache: Dict[str, List[str]] = {}
         self.metadata_stats_cache: Dict[str, Dict[str, Any]] = {}
+
+        # Persistent (SQLite, ~90-day TTL) per-(db, gene) stats cache.
+        # Keyed by mus sha256 + day-bucketed duckdb mtime — see
+        # GeneStatsCache.fingerprint. Lives next to the in-memory metadata
+        # cache so it co-locates with the data deposit.
+        self.gene_stats_cache = GeneStatsCache(Path('./tmp/gene_stats_cache.db'))
 
         # Metrics
         self.request_count = 0
@@ -1300,8 +1307,8 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.13.0"
-API_VERSION_RELEASED = "2026-06-23"
+API_VERSION = "2.14.0"
+API_VERSION_RELEASED = "2026-06-24"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
 # Create FastAPI app with lifespan handler (Phase 2)
@@ -2001,7 +2008,14 @@ async def get_gene_stats(
 @app.get("/gene_stats_all", tags=["genes"])
 async def get_gene_stats_all(
     genes: str = Query(..., description="Comma-separated gene names, e.g. APOE,CLU"),
-    case_sensitive: bool = Query(False, description="Case-sensitive gene name matching (default: False)")
+    case_sensitive: bool = Query(False, description="Case-sensitive gene name matching (default: False)"),
+    organism: Optional[str] = Query(None, description="Comma-separated organism filter (e.g. 'mouse' or 'human,mouse')"),
+    cell_type: Optional[str] = Query(None, description="Comma-separated mus cell_type filter (e.g. 'microglial cell,astrocyte')"),
+    source: Optional[str] = Query(None, description="Comma-separated source filter (e.g. 'internal' or 'internal,external')"),
+    access: Optional[str] = Query(None, description="Comma-separated access filter ('internal' / 'public')"),
+    tissue: Optional[str] = Query(None, description="Comma-separated tissue filter (free text; UBERON-aligned where available)"),
+    include_remote: bool = Query(False, description="Include S3-remote duckdbs (slow). Default false — only locally-resident datasets are queried."),
+    refresh: bool = Query(False, description="Bypass the cache; recompute and overwrite cached entries")
 ):
     """
     Get expression statistics for selected genes across **all** databases that have a `default_layer`.
@@ -2010,41 +2024,172 @@ async def get_gene_stats_all(
     Gene names are matched case-insensitively by default (so `APOE` matches `Apoe`).
     When the stored name differs from the queried name a `gene_found` field is included in the result.
 
+    **Filters** (all optional, comma-separated, AND-combined across params, OR within a param):
+    - `organism`: human, mouse, rat, macaque, zebrafish, drosophila
+    - `cell_type`: mus controlled vocab (microglial cell, astrocyte, oligodendrocyte, …)
+    - `source`: internal, external
+    - `access`: internal, public
+    - `tissue`: free text, UBERON-aligned where available (e.g. brain)
+    - `include_remote`: include S3-remote-only datasets (slow). Default off.
+
+    **Caching**: results are cached on disk per `(db_id, gene, layer, case_sensitive)`,
+    keyed by the dataset's mus sha256 + day-bucketed duckdb mtime. TTL 90 days.
+    Pass `refresh=true` to force recompute.
+
     Returns:
     - **results**: list of per-database entries, each with `db_id`, `title`, `n_cells`, `layer`, `stats`
     - **n_databases**: number of databases queried
     - **n_skipped**: number of databases skipped (no default_layer or error)
+    - **n_filtered**: number of databases excluded by filters / remote flag
+    - **cache_hits / cache_misses / cache_writes**: counters for visibility
 
     Example:
         GET /gene_stats_all?genes=APOE,TREM2
-        GET /gene_stats_all?genes=APOE,TREM2&case_sensitive=true
+        GET /gene_stats_all?genes=APOE,TREM2&organism=mouse&cell_type=microglial%20cell
+        GET /gene_stats_all?genes=APOE&source=internal&access=internal
     """
     gene_list = [g.strip() for g in genes.split(',') if g.strip()]
 
-    def _sync_query_all_dbs():
-        query_results = []
-        n_skip = 0
-        for db_id_inner, meta in registry.metadata_cache.items():
-            layer = meta.get('default_layer')
-            if not layer:
-                n_skip += 1
-                continue
+    def _csv_set(raw: Optional[str]) -> Optional[set]:
+        if not raw:
+            return None
+        # mus values often have spaces ("microglial cell") — strip but preserve case.
+        return {v.strip() for v in raw.split(',') if v.strip()}
+
+    organism_f = _csv_set(organism)
+    cell_type_f = _csv_set(cell_type)
+    source_f = _csv_set(source)
+    access_f = _csv_set(access)
+    tissue_f = _csv_set(tissue)
+
+    def _meta_matches(meta: Dict[str, Any]) -> bool:
+        def _has(field, allowed):
+            if allowed is None:
+                return True
+            return str(meta.get(field, '')).strip() in allowed
+        return (
+            _has('organism', organism_f)
+            and _has('cell_type', cell_type_f)
+            and _has('source', source_f)
+            and _has('access', access_f)
+            and _has('tissue', tissue_f)
+        )
+
+    # ── Build the work-list: dbs that survive filters and have a layer ────
+    targets: List[Tuple[str, Dict[str, Any], str, Optional[str]]] = []
+    n_filtered = 0
+    n_skipped_no_layer = 0
+    for db_id_inner, meta in registry.metadata_cache.items():
+        layer = meta.get('default_layer')
+        if not layer:
+            n_skipped_no_layer += 1
+            continue
+        db_url = registry.databases.get(db_id_inner, '')
+        if (not include_remote) and db_url.startswith('s3://'):
+            n_filtered += 1
+            continue
+        if not _meta_matches(meta):
+            n_filtered += 1
+            continue
+
+        # Compute the cache fingerprint for this db. Use mus sha256 + day-
+        # bucketed mtime. If either is missing, fingerprint=None → bypass cache.
+        mus_sha = str(meta.get('sha256') or '').strip()
+        duckdb_mtime = 0.0
+        if not db_url.startswith('s3://'):
+            try:
+                duckdb_mtime = Path(db_url).stat().st_mtime
+            except OSError:
+                duckdb_mtime = 0.0
+        fingerprint = GeneStatsCache.fingerprint(mus_sha or None, duckdb_mtime)
+        targets.append((db_id_inner, meta, layer, fingerprint))
+
+    cache = registry.gene_stats_cache
+
+    # ── Per-db worker: cache-aware gene_stats fetch ───────────────────────
+    def _query_one(db_id_inner: str, meta: Dict[str, Any], layer: str,
+                   fingerprint: Optional[str]) -> Tuple[Optional[Dict[str, Any]], int, int, int]:
+        """Returns (result_entry_or_None, hits, misses, writes) for this db."""
+        hits = misses = writes = 0
+        cached_stats: List[Dict[str, Any]] = []
+        missing_genes: List[str] = []
+
+        # Bucket each queried gene into hit / miss
+        if fingerprint and not refresh:
+            for g in gene_list:
+                hit = cache.get(db_id_inner, g, case_sensitive, layer, fingerprint)
+                if hit is not None:
+                    cached_stats.append(hit)
+                    hits += 1
+                else:
+                    missing_genes.append(g)
+                    misses += 1
+        else:
+            missing_genes = list(gene_list)
+            misses = len(gene_list)
+
+        # Compute the misses in one duckdb call (much cheaper than per-gene).
+        computed_stats: List[Dict[str, Any]] = []
+        if missing_genes:
             try:
                 with _pooled_db(db_id_inner) as db:
-                    stats = db.get_gene_stats(gene_list, layer=layer, case_sensitive=case_sensitive)
-                query_results.append({
-                    'db_id': db_id_inner,
-                    'group': registry._db_extra.get(db_id_inner, {}).get('group_id', ''),
-                    'title': meta.get('title', db_id_inner),
-                    'n_cells': meta.get('n_cells', 0),
-                    'layer': layer,
-                    'stats': stats,
-                })
+                    computed_stats = db.get_gene_stats(
+                        missing_genes, layer=layer, case_sensitive=case_sensitive
+                    )
             except Exception:
-                n_skip += 1
-        return query_results, n_skip
+                return None, hits, misses, writes
 
-    results, n_skipped = await asyncio.to_thread(_sync_query_all_dbs)
+            if fingerprint:
+                for s in computed_stats:
+                    queried = s.get('gene')
+                    if not queried:
+                        continue
+                    cache.put(db_id_inner, queried, case_sensitive, layer, fingerprint, s)
+                    writes += 1
+
+        # Re-order to match gene_list (so the response is stable per-call).
+        by_gene = {s.get('gene'): s for s in cached_stats + computed_stats if s.get('gene')}
+        ordered = [by_gene[g] for g in gene_list if g in by_gene]
+        # Genes that returned nothing at all (e.g. resolve failed) — pass through.
+        ordered.extend(s for s in cached_stats + computed_stats if s.get('gene') not in gene_list)
+
+        entry = {
+            'db_id': db_id_inner,
+            'group': registry._db_extra.get(db_id_inner, {}).get('group_id', ''),
+            'title': meta.get('title', db_id_inner),
+            'n_cells': meta.get('n_cells', 0),
+            'layer': layer,
+            'stats': ordered,
+        }
+        return entry, hits, misses, writes
+
+    # ── Run in parallel — duckdb queries release the GIL on .execute ──────
+    def _run_all_parallel():
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        results_local: List[Dict[str, Any]] = []
+        h_total = m_total = w_total = 0
+        skipped_local = 0
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            futures = {
+                pool.submit(_query_one, db_id_, meta_, layer_, fp_): db_id_
+                for (db_id_, meta_, layer_, fp_) in targets
+            }
+            for fut in as_completed(futures):
+                entry, h, m, w = fut.result()
+                h_total += h
+                m_total += m
+                w_total += w
+                if entry is None:
+                    skipped_local += 1
+                else:
+                    results_local.append(entry)
+        return results_local, skipped_local, h_total, m_total, w_total
+
+    results, n_skipped_err, cache_hits, cache_misses, cache_writes = await asyncio.to_thread(
+        _run_all_parallel
+    )
+    n_skipped = n_skipped_no_layer + n_skipped_err
 
     # ── Cross-database CV per gene ─────────────────────────────────────────
     # Collect mean expression per gene across all databases (skip not-found)
@@ -2085,6 +2230,21 @@ async def get_gene_stats_all(
         'case_sensitive': case_sensitive,
         'n_databases': len(results),
         'n_skipped': n_skipped,
+        'n_filtered': n_filtered,
+        'filters': {
+            'organism': sorted(organism_f) if organism_f else None,
+            'cell_type': sorted(cell_type_f) if cell_type_f else None,
+            'source': sorted(source_f) if source_f else None,
+            'access': sorted(access_f) if access_f else None,
+            'tissue': sorted(tissue_f) if tissue_f else None,
+            'include_remote': include_remote,
+        },
+        'cache': {
+            'hits': cache_hits,
+            'misses': cache_misses,
+            'writes': cache_writes,
+            'refresh': refresh,
+        },
         'results': results,
     }
 
@@ -8049,6 +8209,43 @@ async def plot_cache_clear():
     """Drop all cached plot responses."""
     n = _plot_cache_clear()
     return {'cleared': n}
+
+
+@app.get("/admin/gene-stats-cache/stats", tags=["admin"])
+async def gene_stats_cache_stats():
+    """Return the on-disk gene_stats cache stats (rows / distinct dbs / size)."""
+    return registry.gene_stats_cache.stats()
+
+
+@app.post("/admin/gene-stats-cache/clear", tags=["admin"])
+async def gene_stats_cache_clear():
+    """Wipe every gene_stats cache entry. Returns the row count that was dropped."""
+    n = registry.gene_stats_cache.clear()
+    return {'cleared': n}
+
+
+@app.post("/admin/gene-stats-cache/gc", tags=["admin"])
+async def gene_stats_cache_gc():
+    """Drop cache rows whose fingerprint no longer matches the current dataset state.
+
+    Called rarely — the cache stays correct without it (stale rows are simply
+    never re-fetched), but this reclaims space after a bulk ant-convert run.
+    """
+    keep: Dict[str, str] = {}
+    for db_id_inner, meta in registry.metadata_cache.items():
+        db_url = registry.databases.get(db_id_inner, '')
+        mus_sha = str(meta.get('sha256') or '').strip()
+        duckdb_mtime = 0.0
+        if not db_url.startswith('s3://'):
+            try:
+                duckdb_mtime = Path(db_url).stat().st_mtime
+            except OSError:
+                pass
+        fp = GeneStatsCache.fingerprint(mus_sha or None, duckdb_mtime)
+        if fp:
+            keep[db_id_inner] = fp
+    n = registry.gene_stats_cache.gc_stale(keep)
+    return {'gc_deleted': n, 'fingerprints_kept': len(keep)}
 
 
 # ── Genesets ───────────────────────────────────────────────────────────────────
