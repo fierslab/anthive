@@ -999,6 +999,10 @@ async def gene_view(request: Request, gene: str):
     """
     api_url = _api_url(request)
     pill_map: Dict[str, Dict] = {}
+    # distinct values for the in-page filter dropdowns (server-side filter params
+    # on /gene_stats_all: organism / cell_type / tissue), by frequency.
+    _opt: Dict[str, Dict[str, int]] = {'organism': {}, 'cell_type': {}, 'tissue': {}}
+    _field_for = {'organism': 'organism', 'cell_type': 'celltype', 'tissue': 'tissue'}
     try:
         for db in _all_databases(api_url):
             did = db.get('id') or ''
@@ -1010,11 +1014,19 @@ async def gene_view(request: Request, gene: str):
                 'celltype': _summarize_meta_field([db], 'celltype', abbrev_map=_CELLTYPE_ABBREV),
                 'disease':  _summarize_meta_field([db], 'disease',  abbrev_map=_DISEASE_ABBREV),
             }
+            for fkey, dbfield in _field_for.items():
+                raw = db.get(dbfield)
+                for item in (raw if isinstance(raw, list) else [raw]):
+                    if item:
+                        _opt[fkey][item] = _opt[fkey].get(item, 0) + 1
     except Exception as error:
         print(f"API error: {error}")
+    filter_opts = {k: [v for v, _ in sorted(c.items(), key=lambda kv: (-kv[1], kv[0]))]
+                   for k, c in _opt.items()}
     return templates.TemplateResponse(request, "genes.html", {
         "gene": gene,
         "pill_map": pill_map,
+        "filter_opts": filter_opts,
     })
 
 

@@ -57,10 +57,21 @@
   table.hm td.hm-cell a { display: block; padding: 3px 6px; font-family: var(--font-mono); text-decoration: none; min-width: 40px; }
   table.hm td.hm-cell a:hover { outline: 2px solid var(--link); outline-offset: -2px; }
   table.hm td.hm-na { text-align: center; padding: 3px 6px; }
+
+  .gene-filters { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 6px 0 4px; }
+  .gene-filters .picks-label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; }
+  .gene-filters select { font-size: 12px; padding: 2px 6px; border: 1px solid var(--border); border-radius: 4px; background: #fff; font-family: var(--font); color: var(--text); }
 </style>
 
 <div class="breadcrumb"><a href="/">datasets</a> / gene atlas</div>
 <h1 class="page-title">{{ gene }} <span class="muted" style="font-size:13px;font-weight:normal">— expression across the catalogue</span></h1>
+
+<div class="gene-filters">
+  <span class="picks-label">filter</span>
+  <select id="flt-organism"><option value="">organism: any</option>{% for v in filter_opts.organism %}<option value="{{ v }}">{{ v }}</option>{% endfor %}</select>
+  <select id="flt-cell_type"><option value="">cell type: any</option>{% for v in filter_opts.cell_type %}<option value="{{ v }}">{{ v }}</option>{% endfor %}</select>
+  <select id="flt-tissue"><option value="">tissue: any</option>{% for v in filter_opts.tissue %}<option value="{{ v }}">{{ v }}</option>{% endfor %}</select>
+</div>
 
 <div id="gene-hero" class="gene-hero"></div>
 
@@ -148,7 +159,7 @@
       else allMissing.push(res.title || res.db_id);
     });
     rows.sort((a, b) => b.rowmax - a.rowmax);
-    metaEl.textContent = `${GENES.length} genes × ${data.n_databases ?? rows.length} datasets`;
+    metaEl.textContent = `${GENES.length} genes × ${data.n_databases ?? rows.length} datasets${data.n_filtered ? ' (' + data.n_filtered + ' filtered out)' : ''}`;
     controls.style.display = 'none';
     heroBox.innerHTML = `<div class="hm-legend">each cell = scaled abundance (0–1) of that gene in that dataset; <span class="hm-na">·</span> = gene absent.
         <span class="muted">low</span> <span class="hm-scale"></span> <span class="muted">high</span></div>`;
@@ -165,28 +176,44 @@
     if (allMissing.length) missBox.innerHTML = `<b>None of these genes</b> in ${allMissing.length} dataset(s): ${allMissing.map(esc).join(', ')}`;
   }
 
-  fetch(`/api/gene_stats_all?genes=${encodeURIComponent(GENE)}`)
-    .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error(`HTTP ${r.status}: ${t.slice(0,200)}`); }))
-    .then(data => {
-      loading.style.display = 'none';
-      if (MULTI) { renderHeatmap(data); return; }
-      (data.results || []).forEach(res => {
-        const st = (res.stats || [])[0] || {};
-        const base = { db_id: res.db_id, title: res.title, group: res.group, n_cells: res.n_cells };
-        if (st.error) missing.push(base);
-        else found.push(Object.assign(base, st));
-      });
-      loading.style.display = 'none';
-      if (!found.length && !missing.length) { errBox.innerHTML = `<span class="err">no datasets returned</span>`; return; }
-      controls.style.display = '';
-      metaEl.textContent = `${data.n_databases ?? (found.length+missing.length)} datasets scanned`;
-      renderHero(); renderRows();
-      if (missing.length) {
-        const names = missing.map(m => esc(m.title || m.db_id)).join(', ');
-        missBox.innerHTML = `<b>Not detected</b> in ${missing.length} dataset(s): ${names}`;
-      }
-    })
-    .catch(e => { loading.style.display = 'none'; errBox.innerHTML = `<span class="err">could not load gene stats — ${esc(e.message)}</span>`; });
+  // Build the fetch URL from the gene(s) + the active filter dropdowns
+  // (organism / cell_type / tissue → server-side filter params on
+  // /gene_stats_all). Re-run on any filter change.
+  function fetchUrl() {
+    const params = new URLSearchParams(); params.set('genes', GENE);
+    ['organism', 'cell_type', 'tissue'].forEach(k => {
+      const el = document.getElementById('flt-' + k);
+      if (el && el.value) params.set(k, el.value);
+    });
+    return `/api/gene_stats_all?${params.toString()}`;
+  }
+
+  function load() {
+    found = []; missing = [];
+    loading.style.display = ''; controls.style.display = 'none';
+    rowsBox.innerHTML = ''; document.getElementById('gene-heatmap').innerHTML = '';
+    missBox.innerHTML = ''; errBox.innerHTML = ''; heroBox.innerHTML = '';
+    fetch(fetchUrl())
+      .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error(`HTTP ${r.status}: ${t.slice(0,200)}`); }))
+      .then(data => {
+        loading.style.display = 'none';
+        if (MULTI) { renderHeatmap(data); return; }
+        (data.results || []).forEach(res => {
+          const st = (res.stats || [])[0] || {};
+          const base = { db_id: res.db_id, title: res.title, group: res.group, n_cells: res.n_cells };
+          if (st.error) missing.push(base); else found.push(Object.assign(base, st));
+        });
+        if (!found.length && !missing.length) { errBox.innerHTML = `<span class="err">no datasets match these filters</span>`; return; }
+        controls.style.display = '';
+        const nf = data.n_filtered || 0;
+        metaEl.textContent = `${data.n_databases ?? (found.length + missing.length)} datasets` + (nf ? ` (${nf} filtered out)` : '');
+        renderHero(); renderRows();
+        if (missing.length) {
+          missBox.innerHTML = `<b>Not detected</b> in ${missing.length} dataset(s): ${missing.map(m => esc(m.title || m.db_id)).join(', ')}`;
+        }
+      })
+      .catch(e => { loading.style.display = 'none'; errBox.innerHTML = `<span class="err">could not load gene stats — ${esc(e.message)}</span>`; });
+  }
 
   document.querySelectorAll('#gene-controls button[data-sort]').forEach(b => {
     b.addEventListener('click', () => {
@@ -195,6 +222,11 @@
       renderRows();
     });
   });
+  ['flt-organism', 'flt-cell_type', 'flt-tissue'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', load);
+  });
+  load();
 })();
 </script>
 {% endblock %}

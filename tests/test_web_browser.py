@@ -853,6 +853,7 @@ def test_gene_atlas_page_renders(client):
     assert "APOE" in resp.text
     assert 'data-sort="scaled_mean"' in resp.text   # sort-by-abundance control
     assert "renderHeatmap" in resp.text             # multi-gene branch present
+    assert 'id="flt-cell_type"' in resp.text         # in-page filter bar (organism/cell_type/tissue)
 
 
 def test_gene_atlas_multigene_route(client):
