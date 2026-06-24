@@ -1,0 +1,122 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["boto3", "pyyaml"]
+# ///
+"""ant-write-manifest — emit s3://<bucket>/_catalog/manifest.json.
+
+Scans the local catalog (``data/h5adstore/``) and uploads a fresh
+``_catalog/manifest.json`` to S3 so that mus can validate sidecar
+fields against the authoritative list of data_projects / file_ids /
+basenames at sidecar-write time.
+
+Always rewrites — the manifest reflects the current local catalog
+state, not a diff.
+
+``ant-ingest`` invokes this same machinery automatically at the end
+of every successful run; use this standalone tool when:
+
+  - You hand-edited a ``.md`` and want the manifest re-synced before
+    the next ingest cycle.
+  - You toggled an ``.inactive`` sidecar.
+  - The previous ant-ingest run printed a manifest-refresh WARNING.
+
+Usage::
+
+    ant-write-manifest                              # default data folder
+    ant-write-manifest --data-folder ./data/h5adstore
+    ant-write-manifest --print                      # also print the JSON to stdout
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+# sys.path shim — same pattern as the other bin/ops tools.
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_LIB_DIR = _SCRIPT_DIR.parent.parent / 'lib'
+sys.path.insert(0, str(_LIB_DIR))
+
+from catalog_manifest import build_manifest, write_manifest_to_s3, DEFAULT_S3_KEY  # noqa: E402
+from config import get_config  # noqa: E402
+
+import boto3  # noqa: E402
+
+
+def _s3_client(s3_cfg: dict):
+    endpoint = s3_cfg.get('endpoint')
+    return boto3.client(
+        's3',
+        endpoint_url=f'https://{endpoint}' if endpoint else None,
+        region_name=s3_cfg.get('region', 'us-east-1'),
+        aws_access_key_id=s3_cfg.get('access_key_id'),
+        aws_secret_access_key=s3_cfg.get('secret_access_key'),
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description='Rebuild + upload the anthive catalog manifest to S3.',
+    )
+    parser.add_argument(
+        '--data-folder', default='./data/h5adstore',
+        help='Local h5adstore root (default: ./data/h5adstore).',
+    )
+    parser.add_argument(
+        '--key', default=DEFAULT_S3_KEY,
+        help=f'S3 key for the manifest (default: {DEFAULT_S3_KEY}).',
+    )
+    parser.add_argument(
+        '--print', dest='print_manifest', action='store_true',
+        help='Also print the resulting JSON to stdout.',
+    )
+    parser.add_argument(
+        '--no-upload', action='store_true',
+        help='Build the manifest but do not upload (useful for debugging).',
+    )
+    args = parser.parse_args()
+
+    data_folder = Path(args.data_folder)
+    if not data_folder.exists():
+        print(f'ERROR: data folder does not exist: {data_folder}', file=sys.stderr)
+        return 2
+
+    cfg = get_config()
+    s3_cfg = cfg.get('s3') or {}
+    bucket = s3_cfg.get('bucket')
+    if not bucket and not args.no_upload:
+        print('ERROR: anthive.yaml has no s3.bucket configured. '
+              'Use --no-upload to test locally.', file=sys.stderr)
+        return 2
+
+    manifest = build_manifest(data_folder)
+    n_proj = len(manifest['data_projects'])
+    n_ds = sum(len(p['datasets']) for p in manifest['data_projects'].values())
+    n_inactive = sum(
+        1
+        for p in manifest['data_projects'].values()
+        for d in p['datasets'].values()
+        if d.get('inactive')
+    )
+
+    if args.print_manifest:
+        print(json.dumps(manifest, indent=2, sort_keys=True))
+
+    # Summary always goes to stderr so --print's stdout stays pure JSON
+    # (pipeable into jq, etc.).
+    summary = f'{n_proj} data_project(s), {n_ds} dataset(s) ({n_inactive} inactive)'
+    if args.no_upload:
+        print(f'(no-upload) manifest built: {summary}', file=sys.stderr)
+        return 0
+
+    client = _s3_client(s3_cfg)
+    write_manifest_to_s3(manifest, client, bucket, key=args.key)
+    print(f'✓ uploaded s3://{bucket}/{args.key} — {summary}', file=sys.stderr)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

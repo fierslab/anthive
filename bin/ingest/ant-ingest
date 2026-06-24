@@ -1171,6 +1171,20 @@ def cmd_run(args: argparse.Namespace, s3_cfg: dict, data_folder: Path) -> int:
     _print_prune_hints(data_folder, results, client, bucket, args,
                        de_results=de_results)
 
+    # Always refresh the catalog manifest on S3 — mus reads it to validate
+    # sidecars at deposit time. Reflects the LOCAL catalog state regardless
+    # of whether this particular ingest run added or removed anything.
+    if not args.dry_run:
+        try:
+            from catalog_manifest import write_manifest
+            manifest = write_manifest(data_folder, client, bucket)
+            n_proj = len(manifest['data_projects'])
+            n_ds = sum(len(p['datasets']) for p in manifest['data_projects'].values())
+            print(f'\n  catalog manifest refreshed: {n_proj} data_project(s), {n_ds} dataset(s)')
+        except Exception as exc:
+            print(f'\n  WARNING: catalog manifest refresh failed: {exc}')
+            print('  (ingest itself succeeded; rerun or re-trigger via ant-build-all to retry the manifest)')
+
     any_failed = (
         any(r.status in {'failed', 'conflict'} for r in results)
         or any(r.status in {'failed', 'conflict'} for r in de_results)

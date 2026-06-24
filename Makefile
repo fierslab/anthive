@@ -1,4 +1,4 @@
-.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-mcp serve-all serve-debug serve-prod serve-stop caddy-passwd caddy-passwd-clear dev-jupyter sync-push sync-pull sync-pull-duckdb sync-pull-de sync-pull-all sync-status build-stale sync-update serve-status serve-restart h5adstore-push push-all ingest ingest-dry
+.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-mcp serve-all serve-debug serve-prod serve-stop caddy-passwd caddy-passwd-clear dev-jupyter sync-push sync-pull sync-pull-duckdb sync-pull-de sync-pull-all sync-status build-stale sync-update serve-status serve-restart h5adstore-push push-all ingest ingest-dry manifest
 
 help:
 	@echo "Anthive4 Development Commands"
@@ -33,6 +33,7 @@ help:
 	@echo "  make ingest          - End-to-end: S3 __incoming/ → catalog (.h5ad + DE), then rebuild any local stale duckdb"
 	@echo "  make ingest FILTER=Foo2025  - Restrict to one data project"
 	@echo "  make ingest-dry      - Show what would happen without writing anything"
+	@echo "  make manifest        - Rebuild + upload s3://anthive4a/_catalog/manifest.json (used by mus's sidecar validation)"
 	@echo ""
 	@echo "Sync (S3) — the maintenance workflow:"
 	@echo "  make sync-update     - Full cycle: pull h5ad → rebuild stale duckdb → push"
@@ -380,6 +381,15 @@ ingest-dry:
 	@./bin/ingest/ant-ingest --data-folder ./data/h5adstore --dry-run $(if $(FILTER),--filter $(FILTER),)
 	@echo ""
 	@echo "(ingest-dry: build-stale step skipped — run 'make ingest' for the real pass)"
+
+# Rebuild + upload s3://<bucket>/_catalog/manifest.json. This file is the
+# authoritative list of (data_project, group_id, file_id, basename, inactive)
+# that mus uses to validate sidecar fields at `mus de check` / `mus s3 upload`
+# time. ant-ingest writes it automatically at the end of every successful
+# run; this target is the manual escape hatch for after a hand-edit of a
+# .md or after toggling an .inactive sidecar.
+manifest:
+	@./bin/ops/ant-write-manifest --data-folder ./data/h5adstore
 
 # Full maintenance cycle: bring everything into a consistent state.
 sync-update:
