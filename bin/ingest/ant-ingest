@@ -683,14 +683,25 @@ def _human_size(client, bucket: str, key: str) -> str:
 # Catalog-orphan scan (used by prune --include-catalog-orphans)
 # ─────────────────────────────────────────────────────────────────────────
 
+_CATALOG_NONDATA_PREFIXES = ('_catalog/', '.staging/')
+
+
 def _catalog_orphans(client, bucket: str, data_folder: Path) -> List[str]:
-    """Return S3 keys outside __incoming/ that have no local counterpart."""
+    """Return S3 keys outside __incoming/ that have no local counterpart.
+
+    Also skips derived catalog-metadata keys that intentionally have no local
+    h5adstore counterpart: ``_catalog/manifest.json`` (written by every ingest
+    for mus's sidecar validation, has no on-disk twin by design), and stray
+    ``.staging/`` keys that may have leaked into the bucket.
+    """
     paginator = client.get_paginator('list_objects_v2')
     orphans: List[str] = []
     for page in paginator.paginate(Bucket=bucket):
         for obj in page.get('Contents', []):
             key = obj['Key']
             if key.startswith(INCOMING_PREFIX):
+                continue
+            if any(key.startswith(p) for p in _CATALOG_NONDATA_PREFIXES):
                 continue
             local_path = data_folder / key
             if not local_path.exists():
