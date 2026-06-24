@@ -74,11 +74,35 @@ def iter_h5adstore(root: Path) -> Iterator[H5adEntry]:
 
 def find_h5ad(root: Path, db_id_or_path: str) -> Optional[H5adEntry]:
     """
-    Resolve a db_id to an H5adEntry. Accepts both forms:
-      - canonical:  'S25/PhM'
-      - readable :  'Sierksma2025/Pharmacogenomics'
+    Resolve a db_id to an H5adEntry. Accepts three forms:
+      - canonical:   'S25/PhM'
+      - readable :   'Sierksma2025/Pharmacogenomics'
+      - file path:   '/abs/path/to/Foo.h5ad' or '.../Foo.duckdb' (also
+                     relative paths if they resolve to a real file).
+    The path form is what ``ant-ingest`` passes when invoking
+    ``ant-de-ingest`` (it carries the target_duckdb Path through directly);
+    without this branch every S3-ingested DE deposit fails with
+    "unknown db_id".
     """
     target = db_id_or_path.strip().strip('/')
+
+    # Path form — duckdb or h5ad. Resolve and match against entry paths.
+    candidate = Path(db_id_or_path)
+    if candidate.suffix in ('.h5ad', '.duckdb'):
+        try:
+            resolved = candidate.resolve()
+            if resolved.is_file():
+                for entry in iter_h5adstore(root):
+                    try:
+                        if resolved in (entry.h5ad_path.resolve(),
+                                        entry.duckdb_path.resolve()):
+                            return entry
+                    except OSError:
+                        continue
+        except OSError:
+            pass
+
+    # ID forms.
     for entry in iter_h5adstore(root):
         if entry.db_id == target:
             return entry
