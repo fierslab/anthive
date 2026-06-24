@@ -40,6 +40,23 @@
   .gp.cell    { background: #dcfce7; color: #166534; border-color: #bbf7d0; }
   .gp.disease { background: #fee2e2; color: #991b1b; border-color: #fecaca; }
   @media (max-width: 640px) { a.gene-row { grid-template-columns: 1fr 40px; } a.gene-row .bar-wrap { grid-column: 1 / -1; } }
+
+  /* multi-gene heatmap (rows = datasets, cols = genes) */
+  .hm-legend { font-size: 11px; color: var(--text-muted); }
+  .hm-scale { display: inline-block; width: 80px; height: 10px; vertical-align: middle;
+              background: linear-gradient(to right, rgba(29,78,216,.08), rgba(29,78,216,1)); border: 1px solid var(--border); border-radius: 2px; }
+  .hm-na { color: #cbd5e1; text-align: center; }
+  table.hm { border-collapse: collapse; font-size: 11px; }
+  table.hm th, table.hm td { border: 1px solid var(--border-light); padding: 0; }
+  table.hm th.hm-corner { text-align: left; padding: 3px 8px; }
+  table.hm th.hm-gene { padding: 3px 6px; font-family: var(--font-mono); writing-mode: horizontal-tb; white-space: nowrap; }
+  table.hm td.hm-row { padding: 2px 8px; white-space: nowrap; }
+  table.hm td.hm-row .nm { font-size: 11px; }
+  table.hm td.hm-row .pills { display: inline-flex; gap: 3px; margin-left: 6px; vertical-align: middle; }
+  table.hm td.hm-cell { text-align: center; }
+  table.hm td.hm-cell a { display: block; padding: 3px 6px; font-family: var(--font-mono); text-decoration: none; min-width: 40px; }
+  table.hm td.hm-cell a:hover { outline: 2px solid var(--link); outline-offset: -2px; }
+  table.hm td.hm-na { text-align: center; padding: 3px 6px; }
 </style>
 
 <div class="breadcrumb"><a href="/">datasets</a> / gene atlas</div>
@@ -65,12 +82,15 @@
 </div>
 
 <div id="gene-rows"></div>
+<div id="gene-heatmap"></div>
 <div id="gene-missing" class="muted" style="font-size:11px; margin-top:10px"></div>
 <div id="gene-error" class="plot-status"></div>
 
 <script>
 (function () {
   const GENE  = {{ gene|tojson }};
+  const GENES = GENE.split(',').map(s => s.trim()).filter(Boolean);
+  const MULTI = GENES.length > 1;   // comma-separated list → gene × dataset heatmap
   const PILLS = {{ pill_map|tojson }};
   const loading  = document.getElementById('gene-loading');
   const controls = document.getElementById('gene-controls');
@@ -118,9 +138,38 @@
       card(`${found.length}/${total}`, `detected (absent from ${missing.length})`);
   }
 
+  // ── multi-gene heatmap: rows = datasets, cols = genes, cell = scaled_mean ──
+  function renderHeatmap(data) {
+    const rows = [], allMissing = [];
+    (data.results || []).forEach(res => {
+      const vals = {}; let any = false;
+      (res.stats || []).forEach(s => { if (!s.error && s.scaled_mean != null) { vals[s.gene] = s.scaled_mean; any = true; } });
+      if (any) rows.push({ db_id: res.db_id, title: res.title, vals, rowmax: Math.max(...GENES.map(g => vals[g] ?? -1)) });
+      else allMissing.push(res.title || res.db_id);
+    });
+    rows.sort((a, b) => b.rowmax - a.rowmax);
+    metaEl.textContent = `${GENES.length} genes × ${data.n_databases ?? rows.length} datasets`;
+    controls.style.display = 'none';
+    heroBox.innerHTML = `<div class="hm-legend">each cell = scaled abundance (0–1) of that gene in that dataset; <span class="hm-na">·</span> = gene absent.
+        <span class="muted">low</span> <span class="hm-scale"></span> <span class="muted">high</span></div>`;
+    const cell = (sm, g, dbId) => {
+      if (sm == null) return `<td class="hm-na" title="${esc(g)} not in ${esc(dbId)}">·</td>`;
+      const op = (0.08 + 0.92 * sm).toFixed(2), fg = sm > 0.55 ? '#fff' : '#1e293b';
+      const pp = dbId.split('/');
+      const href = `/browse/${encodeURIComponent(pp[0]||'')}/${encodeURIComponent(pp[1]||'')}/plot/histogram?x=${encodeURIComponent(g)}`;
+      return `<td class="hm-cell"><a href="${href}" style="background:rgba(29,78,216,${op});color:${fg}" title="${esc(g)} in ${esc(dbId)}: scaled ${sm.toFixed(2)} — open distribution">${sm.toFixed(2)}</a></td>`;
+    };
+    const head = `<tr><th class="hm-corner">dataset</th>${GENES.map(g => `<th class="hm-gene">${esc(g)}</th>`).join('')}</tr>`;
+    const body = rows.map(r => `<tr><td class="hm-row"><span class="nm">${esc(r.title || r.db_id)}</span><span class="pills">${pillsFor(r.db_id)}</span></td>${GENES.map(g => cell(r.vals[g] ?? null, g, r.db_id)).join('')}</tr>`).join('');
+    document.getElementById('gene-heatmap').innerHTML = `<div class="table-wrap"><table class="hm">${head}${body}</table></div>`;
+    if (allMissing.length) missBox.innerHTML = `<b>None of these genes</b> in ${allMissing.length} dataset(s): ${allMissing.map(esc).join(', ')}`;
+  }
+
   fetch(`/api/gene_stats_all?genes=${encodeURIComponent(GENE)}`)
     .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error(`HTTP ${r.status}: ${t.slice(0,200)}`); }))
     .then(data => {
+      loading.style.display = 'none';
+      if (MULTI) { renderHeatmap(data); return; }
       (data.results || []).forEach(res => {
         const st = (res.stats || [])[0] || {};
         const base = { db_id: res.db_id, title: res.title, group: res.group, n_cells: res.n_cells };

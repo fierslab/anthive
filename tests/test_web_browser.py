@@ -852,6 +852,14 @@ def test_gene_atlas_page_renders(client):
     assert "/api/gene_stats_all" in resp.text
     assert "APOE" in resp.text
     assert 'data-sort="scaled_mean"' in resp.text   # sort-by-abundance control
+    assert "renderHeatmap" in resp.text             # multi-gene branch present
+
+
+def test_gene_atlas_multigene_route(client):
+    # a comma-separated gene list resolves (→ client renders the gene×dataset heatmap)
+    resp = client.get("/genes/APOE,TREM2,CX3CR1")
+    assert resp.status_code == 200
+    assert "renderHeatmap" in resp.text
 
 
 def test_gene_search_box_in_topbar(client):
