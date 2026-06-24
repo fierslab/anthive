@@ -2867,7 +2867,9 @@ class PlotRequest:
     de_gene: Optional[str]       # __genes.gene_name (forest)
     padj_threshold: float        # volcano / ma / forest: cutoff for sig colouring
     log2fc_threshold: float      # volcano / ma: |log2fc| cutoff
-    log2fc_clip: Optional[float] # volcano / ma: symmetric clamp of the log2fc axis
+    log2fc_clip: Optional[float] # volcano / ma / de_quadrant (back-compat): symmetric clamp of the log2fc axis. For de_quadrant prefer clip_x / clip_y.
+    clip_x: Optional[float]      # de_quadrant: per-axis symmetric clamp in axis_x's own units
+    clip_y: Optional[float]      # de_quadrant: per-axis symmetric clamp in axis_y's own units
     neglog10p_clip: Optional[float]  # volcano: upper clamp of -log10(padj)
     logmean_clip: Optional[float]    # ma: upper clamp of log10(mean expression)
     n_label: int                 # volcano / ma: top-N genes to label
@@ -4235,12 +4237,27 @@ def _handle_de_quadrant(req: 'PlotRequest', ctx: 'PlotContext') -> Tuple[bytes, 
         r_pearson = float('nan')
         r_spearman = float('nan')
 
+    # Visual clamp narration — prefer the per-axis values when set.
+    # log2fc_clip stays as the both-axes fallback for the legacy clients
+    # that haven't migrated to clip_x / clip_y.
+    eff_cx = req.clip_x if req.clip_x is not None else req.log2fc_clip
+    eff_cy = req.clip_y if req.clip_y is not None else req.log2fc_clip
     knobs: List[str] = []
-    if req.log2fc_clip is not None and req.log2fc_clip > 0:
+    if (eff_cx is not None and eff_cx > 0
+            and eff_cy is not None and eff_cy > 0
+            and eff_cx == eff_cy
+            and req.axis_x == req.axis_y):
         knobs.append(
-            f"both axes clamped to [-{req.log2fc_clip:g}, +{req.log2fc_clip:g}] "
-            f"(out-of-range points pinned to the boundary; significance "
-            f"and label-rank still use the raw values)"
+            f"both axes clamped to [-{eff_cx:g}, +{eff_cx:g}] (in {req.axis_x} units)"
+        )
+    else:
+        if eff_cx is not None and eff_cx > 0:
+            knobs.append(f"x axis ({req.axis_x}) clamped to [-{eff_cx:g}, +{eff_cx:g}]")
+        if eff_cy is not None and eff_cy > 0:
+            knobs.append(f"y axis ({req.axis_y}) clamped to [-{eff_cy:g}, +{eff_cy:g}]")
+    if knobs:
+        knobs.append(
+            "out-of-range points pinned to the boundary; significance and label-rank still use the raw values"
         )
     knobs_text = f" Visual clamps: {'; '.join(knobs)}." if knobs else ''
 
@@ -4271,6 +4288,8 @@ def _handle_de_quadrant(req: 'PlotRequest', ctx: 'PlotContext') -> Tuple[bytes, 
         axis_x=req.axis_x, axis_y=req.axis_y,
         label_x=label_x, label_y=label_y,
         log2fc_clip=req.log2fc_clip,
+        clip_x=req.clip_x,
+        clip_y=req.clip_y,
         n_label=req.n_label,
         mode=req.mode,
         width=req.width, height=req.height, dpi=req.dpi,
@@ -4819,6 +4838,8 @@ def _build_plot_request(
     padj_threshold: float = 0.05,
     log2fc_threshold: float = 1.0,
     log2fc_clip: Optional[float] = None,
+    clip_x: Optional[float] = None,
+    clip_y: Optional[float] = None,
     neglog10p_clip: Optional[float] = None,
     logmean_clip: Optional[float] = None,
     n_label: int = 20,
@@ -4879,6 +4900,8 @@ def _build_plot_request(
         padj_threshold=padj_threshold,
         log2fc_threshold=log2fc_threshold,
         log2fc_clip=log2fc_clip,
+        clip_x=clip_x,
+        clip_y=clip_y,
         neglog10p_clip=neglog10p_clip,
         logmean_clip=logmean_clip,
         n_label=n_label,
@@ -5845,10 +5868,27 @@ async def plot_de_quadrant_endpoint(
     log2fc_clip: Optional[float] = Query(
         None, gt=0.0, le=400.0,
         description=(
-            "Symmetric visual clamp applied to BOTH axes "
-            "(only meaningful when the same stat is used on both sides). "
-            "Points beyond the clamp are pinned to the boundary; "
-            "significance / label ranks still use the raw values."
+            "Back-compat symmetric clamp applied to BOTH axes — only "
+            "meaningful when the same stat is used on both sides. Prefer "
+            "the per-axis ``clip_x`` / ``clip_y`` when ``axis_x`` and "
+            "``axis_y`` differ. Points beyond the clamp are pinned to the "
+            "boundary; significance / label ranks still use the raw values."
+        ),
+    ),
+    clip_x: Optional[float] = Query(
+        None, gt=0.0, le=400.0,
+        description=(
+            "Symmetric visual clamp applied to the X axis in ``axis_x``'s "
+            "own units (e.g. log2fc, signed_log10p, or zeff). Overrides "
+            "``log2fc_clip`` on the X axis when both are set."
+        ),
+    ),
+    clip_y: Optional[float] = Query(
+        None, gt=0.0, le=400.0,
+        description=(
+            "Symmetric visual clamp applied to the Y axis in ``axis_y``'s "
+            "own units. Overrides ``log2fc_clip`` on the Y axis when both "
+            "are set."
         ),
     ),
 ):
@@ -5876,6 +5916,8 @@ async def plot_de_quadrant_endpoint(
         axis_x=axis_x, axis_y=axis_y,
         padj_threshold=padj_threshold,
         log2fc_clip=log2fc_clip,
+        clip_x=clip_x,
+        clip_y=clip_y,
         n_label=n_label,
         mode=mode,
     )

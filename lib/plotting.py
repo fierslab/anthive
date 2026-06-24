@@ -258,16 +258,27 @@ def pick_cmap(
 def _legend_outside(ax, title: Optional[str] = None, fontsize: float = 8) -> None:
     """Place a legend outside-top-right of the axes.
 
-    Works in two scenarios:
-      1. Seaborn / sns_* already created a legend → just relocate it.
-      2. Plot used raw `ax.plot(..., label=...)` with no `ax.legend()` call
-         → labelled artists exist but no legend yet; materialise one from
-         them and place it outside.
+    Works in three scenarios:
+      1. Seaborn already created a legend with standard label= artists →
+         relocate it; ``ax.legend(...)`` picks the handles back up via the
+         labelled artists.
+      2. Seaborn used a non-standard Legend object (notably ``histplot``
+         with ``hue=`` — entries live on ``legend.legend_handles`` /
+         ``legend.texts``, NOT discoverable via
+         ``ax.get_legend_handles_labels()``) → harvest the handles+labels
+         from the existing Legend before rebuilding, otherwise the
+         relocated legend keeps the title but loses every swatch.
+      3. Plot used raw ``ax.plot(..., label=...)`` with no ``ax.legend()``
+         call → labelled artists exist but no Legend yet; materialise one
+         from them.
 
     No-op only when there's neither an existing legend NOR any labelled
     artists on the axes — i.e. nothing meaningful to label.
     """
     legend = ax.get_legend()
+    extracted_handles: Optional[list] = None
+    extracted_labels: Optional[list] = None
+
     if legend is None:
         # No legend yet — check if there are labelled artists we should
         # materialise into one (plot_rolling and similar ax.plot-based
@@ -281,8 +292,20 @@ def _legend_outside(ax, title: Optional[str] = None, fontsize: float = 8) -> Non
         existing_title = (
             legend.get_title().get_text() if legend.get_title() else None
         )
+        # Test whether the axes can recover the legend's content on its
+        # own. If not (sns.histplot path), harvest from the Legend object
+        # directly so the rebuilt legend keeps its swatches.
+        probe_handles, _probe_labels = ax.get_legend_handles_labels()
+        if not probe_handles:
+            # Newer matplotlib (>= 3.7) → legend_handles; older → legendHandles.
+            extracted_handles = list(
+                getattr(legend, 'legend_handles', None)
+                or getattr(legend, 'legendHandles', [])
+            )
+            extracted_labels = [t.get_text() for t in legend.texts]
+
     new_title = title if title is not None else existing_title
-    ax.legend(
+    kwargs = dict(
         bbox_to_anchor=(1.02, 1.0), loc='upper left',
         borderaxespad=0.0,
         fontsize=fontsize,
@@ -290,6 +313,10 @@ def _legend_outside(ax, title: Optional[str] = None, fontsize: float = 8) -> Non
         title_fontsize=fontsize + 1,
         frameon=False,
     )
+    if extracted_handles and extracted_labels:
+        ax.legend(extracted_handles, extracted_labels, **kwargs)
+    else:
+        ax.legend(**kwargs)
 
 
 def _setup_style(
@@ -3297,6 +3324,8 @@ def plot_de_quadrant(
     label_x: Optional[str] = None,
     label_y: Optional[str] = None,
     log2fc_clip: Optional[float] = None,
+    clip_x: Optional[float] = None,
+    clip_y: Optional[float] = None,
     n_label: int = 8,
     mode: str = 'scatter',
     width: float = 8,
@@ -3330,10 +3359,16 @@ def plot_de_quadrant(
             ``signed_log10p``, ``zeff``) — drives axis labelling only.
         label_x / label_y: Optional human axis labels overriding the
             stat-name default (e.g. ``"log2fc Sex_donor / F"``).
-        log2fc_clip: Optional symmetric clamp applied to BOTH axes.
-            Points beyond the clamp are pinned to the boundary so
-            outliers don't drag the visible range; significance and
-            label selection still use the raw values.
+        log2fc_clip: Optional symmetric clamp applied to BOTH axes — only
+            meaningful when both axes are in log2fc units. Kept for
+            back-compat; prefer the per-axis ``clip_x`` / ``clip_y``.
+        clip_x / clip_y: Optional per-axis symmetric clamps in each
+            axis's own units. Use these when ``axis_x`` and ``axis_y``
+            differ (e.g. log2fc on x, zeff on y). When both ``clip_x``
+            and the legacy ``log2fc_clip`` are set, ``clip_x`` wins on
+            the x-axis (same for y). Points beyond the clamp are pinned
+            to the boundary; significance and label selection still use
+            the raw values.
         n_label: Top-N concordant + top-N discordant genes to label
             (by ``|stat_x * stat_y|``). 0 disables labelling.
         mode: ``scatter`` (default) or ``hex`` (hexbin density —
@@ -3384,11 +3419,18 @@ def plot_de_quadrant(
     # Visual clip — applied to a working copy of the stats, NOT to the
     # values used for significance or for the label-rank score. This
     # mirrors plot_volcano / plot_ma's clip semantics.
+    #
+    # clip_x / clip_y win over log2fc_clip when set — the legacy
+    # parameter remains the both-axes default for old callers.
+    effective_clip_x = clip_x if clip_x is not None else log2fc_clip
+    effective_clip_y = clip_y if clip_y is not None else log2fc_clip
+
     sx_plot = plot_df['stat_x'].copy()
     sy_plot = plot_df['stat_y'].copy()
-    if log2fc_clip is not None and log2fc_clip > 0:
-        sx_plot = sx_plot.clip(-log2fc_clip, +log2fc_clip)
-        sy_plot = sy_plot.clip(-log2fc_clip, +log2fc_clip)
+    if effective_clip_x is not None and effective_clip_x > 0:
+        sx_plot = sx_plot.clip(-effective_clip_x, +effective_clip_x)
+    if effective_clip_y is not None and effective_clip_y > 0:
+        sy_plot = sy_plot.clip(-effective_clip_y, +effective_clip_y)
 
     # Reference lines — drawn first so points overlay them. Light style
     # so they stay non-distracting in busy scatters.
@@ -3551,8 +3593,23 @@ def plot_de_quadrant(
         f'n={n_plot:,} (both: {n_both:,}, X-only: {n_x_only:,}, '
         f'Y-only: {n_y_only:,}, n.s.: {n_neither:,})',
     ]
-    if log2fc_clip is not None and log2fc_clip > 0:
-        title_bits.append(f'clipped |stat|≤{log2fc_clip:g}')
+    # Name the clamp(s) in the title using the actual units of each axis.
+    # x_label_short / y_label_short = the axis stat (log2fc / signed_log10p
+    # / zeff) so the user sees |log2fc|≤4 and |zeff|≤0.5 separately when
+    # they differ.
+    x_short = axis_x
+    y_short = axis_y
+    if effective_clip_x is not None and effective_clip_x > 0 \
+            and effective_clip_y is not None and effective_clip_y > 0 \
+            and effective_clip_x == effective_clip_y \
+            and axis_x == axis_y:
+        # both axes clipped at the same value in the same units
+        title_bits.append(f'clipped |{x_short}|≤{effective_clip_x:g}')
+    else:
+        if effective_clip_x is not None and effective_clip_x > 0:
+            title_bits.append(f'clipped |{x_short} (x)|≤{effective_clip_x:g}')
+        if effective_clip_y is not None and effective_clip_y > 0:
+            title_bits.append(f'clipped |{y_short} (y)|≤{effective_clip_y:g}')
     ax.set_title(_compose_title(title_bits, extra=title_extra))
     sns.despine(ax=ax)
     if mode == 'scatter':
