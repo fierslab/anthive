@@ -8,12 +8,12 @@
 What it does:
   - REQUIRES an email address (validated).
   - Auto-derives the login name from the email local part's initials:
-      mark.fiers@kuleuven.be  -> mf
-      bert.bobjes@nevel.eu    -> bb
-      jan.van.berg@x.eu       -> jvb
-      carlo@nevel.eu          -> carlo   (single token: used as-is)
+      jane.doe@example.org    -> jd
+      bert.bobjes@example.org -> bb
+      jan.van.berg@example.org-> jvb
+      carlo@example.org       -> carlo   (single token: used as-is)
     If that login is already taken by a DIFFERENT email, it falls back to
-    <first-initial><lastname> (mfiers), then <initials>2, 3, …  If it's
+    <first-initial><lastname> (jdoe), then <initials>2, 3, …  If it's
     taken by the SAME email, that's the same person -> error, unless
     --force is given (then the password is regenerated for that account,
     preserving its login / display name / groups).
@@ -36,11 +36,11 @@ Usage:
               [--url https://host/] [--force]
 
 Examples:
-  ant-adduser mark.fiers@kuleuven.be            # -> login mf
-  ant-adduser bert.bobjes@nevel.eu -g admins    # -> login bb, group admins
-  ant-adduser carlo@nevel.eu -u carlo2          # force the login name
-  ant-adduser jo@x.eu --url https://data.x.eu/  # override the auto-detected URL
-  ant-adduser mark.fiers@kuleuven.be --force    # reset mf's password, new one printed
+  ant-adduser jane.doe@example.org              # -> login jd
+  ant-adduser bert.bobjes@example.org -g admins # -> login bb, group admins
+  ant-adduser carlo@example.org -u carlo2       # force the login name
+  ant-adduser jo@example.org --url https://anthive.example.org/  # override auto-detected URL
+  ant-adduser jane.doe@example.org --force      # reset jd's password, new one printed
 """
 
 import argparse
@@ -71,7 +71,7 @@ def die(message: str) -> None:
 def candidate_logins(email: str) -> tuple[list[str], list[str]]:
     """Ordered login candidates derived from the email, plus the name tokens.
 
-    multi-token -> initials (mark.fiers -> mf); single token -> as-is (carlo).
+    multi-token -> initials (jane.doe -> jd); single token -> as-is (carlo).
     Fallbacks: <first-initial><lastname> (mfiers), then <initials>2, 3, …
     """
     local = email.split("@")[0]
@@ -118,7 +118,7 @@ def detect_instance_url(config_path: Path) -> str | None:
     """Best-effort public base URL of this instance, for the welcome email.
 
     Reads the first session cookie's `default_redirection_url` from the
-    Authelia config (e.g. https://intern.bdslab.org/); falls back to
+    Authelia config (e.g. https://anthive.example.org/); falls back to
     `authelia_url` with the trailing `authelia/` stripped. Returns None if
     the config is missing/unparseable so the caller can prompt for --url.
     """

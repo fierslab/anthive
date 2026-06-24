@@ -2,7 +2,7 @@
 # is unset (the default).
 #
 # Authelia runs locally on :9091 and Caddy enforces the auth split via
-# forward_auth.  Mirrors data.nevel.eu's nginx split:
+# forward_auth.  Mirrors the prod nginx cookie/basic split:
 #
 #   /api/* + /artifacts/*   →  cookie OR HTTP basic (401 on unauth — clients react)
 #   everything else         →  cookie-only (302 → /authelia/ portal)

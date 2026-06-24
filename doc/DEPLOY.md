@@ -1,7 +1,7 @@
 # Deploying anthive4 on a production host
 
 End-to-end recipe for deploying anthive on a host that ALREADY runs
-nginx fronting other vhosts (alzmap.org, data.bdslab.org, …).  The
+nginx fronting other vhosts (alzmap.org, data.example.org, …).  The
 goal of this recipe is to add ONE new anthive vhost without touching
 the unrelated nginx config.
 
@@ -33,7 +33,7 @@ identical on dev and prod.  Adding or renaming a path = editing
 ## Prerequisites
 
 - nginx already installed and running (managing other vhosts).
-- DNS for the new anthive hostname (e.g. `intern.bdslab.org`) points at
+- DNS for the new anthive hostname (e.g. `anthive.example.org`) points at
   this host.
 - A valid TLS cert in `/etc/nginx/cert/` (wildcard recommended).
 - `/data/anthive/anthive4` checked out — or any path; adjust the unit.
@@ -132,7 +132,7 @@ sudo cp config/nginx-intern-anthive.conf \
 sudo ln -sf /etc/nginx/sites-available/intern-bdslab.conf \
             /etc/nginx/sites-enabled/intern-bdslab.conf
 
-# If the host previously had a sprawling intern.bdslab.org config with
+# If the host previously had a sprawling anthive.example.org config with
 # /api/, /browse/, /jupyter/, … location blocks, REMOVE that old file
 # now — the new slim vhost replaces it entirely.
 # Example:
@@ -153,21 +153,21 @@ sudo systemctl reload nginx
 
 ### 7. Smoke test from a browser
 
-Visit `https://intern.bdslab.org/` and verify:
+Visit `https://anthive.example.org/` and verify:
 
 - [ ] Landing page loads (browse UI, owned by ant-browse via Caddy).
 - [ ] Click into a dataset → plot UI works.
-- [ ] `https://intern.bdslab.org/jupyter/` → JupyterLite loads with
+- [ ] `https://anthive.example.org/jupyter/` → JupyterLite loads with
       COOP/COEP headers (Pyodide kernel boots).
 - [ ] Generate a plot, then a notebook link → the "Open in JupyterLite"
       button on the plot page opens the notebook deep-link.
 - [ ] Trigger a pseudobulk artifact download from the API → file lands
       in `/artifacts/…` and downloads cleanly (auth flows through).
-- [ ] `https://intern.bdslab.org/mcp` → MCP endpoint responds (try
-      `curl -H 'Accept: text/event-stream' https://intern.bdslab.org/mcp`
+- [ ] `https://anthive.example.org/mcp` → MCP endpoint responds (try
+      `curl -H 'Accept: text/event-stream' https://anthive.example.org/mcp`
       while authenticated — should produce a non-empty SSE stream).
-- [ ] `https://intern.bdslab.org/api/version` → JSON `{ "version": ... }`.
-- [ ] Other vhosts on this nginx (alzmap.org, data.bdslab.org) still
+- [ ] `https://anthive.example.org/api/version` → JSON `{ "version": ... }`.
+- [ ] Other vhosts on this nginx (alzmap.org, data.example.org) still
       work — they live in their own server{} blocks and we didn't touch
       them.
 

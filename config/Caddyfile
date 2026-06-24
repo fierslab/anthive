@@ -40,19 +40,21 @@ import {$ANTHIVE_HTTP_REDIRECT_SNIPPET:caddy-http-redirect.dev}
 # Main site block — listens on ANTHIVE_LISTEN.
 #
 # Dev default: enumerates hostnames so `tls internal` issues a cert per
-# name and SNI-matches whichever the client uses (10.42.0.3, localhost, …).
+# name and SNI-matches whichever the client uses (localhost, …).
 # A bare ":8501" leaves no hostname bound → TLS handshake fails with
 # `internal error` because Caddy can't pick a cert for the connection.
-# Prod overrides via env to "http://127.0.0.1:8500" (single address,
-# nginx in front terminates TLS).
-{$ANTHIVE_LISTEN::8501, localhost:8501, localhost.localdomain:8501, 127.0.0.1:8501, 10.42.0.3:8501} {
+# To reach a dev box over a LAN/VPN address, add it here or via env — keep
+# host-specific addresses out of this shared file.
+# Prod overrides via env to a host-agnostic "http://:<port>" (single address;
+# nginx in front terminates TLS and forwards the public Host).
+{$ANTHIVE_LISTEN::8501, localhost:8501, localhost.localdomain:8501, 127.0.0.1:8501} {
 	# Restrict which network interfaces Caddy accepts connections on.
 	# Default ("0.0.0.0 ::") = all v4 + v6 interfaces — fine for laptops,
 	# overridden on multi-homed boxes via ANTHIVE_CADDY_BIND. On prod the
 	# supervisor sets this to "127.0.0.1" so Caddy is reachable only via
 	# the local nginx hop.
 	#
-	#   export ANTHIVE_CADDY_BIND="127.0.0.1 10.42.0.3"   # nebula + lo
+	#   export ANTHIVE_CADDY_BIND="127.0.0.1 <lan-or-vpn-ip>"   # peer + loopback
 	#
 	# See INSTALL.md section 5 for the persistent-per-host pattern.
 	bind {$ANTHIVE_CADDY_BIND:0.0.0.0 ::}

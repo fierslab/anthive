@@ -2,7 +2,7 @@
 
 A step-by-step runbook for deploying a new public anthive4 instance on a
 host, fronted by **system nginx** with **Authelia** auth. Written from the
-live `data.nevel.eu` and `prs.nevel.eu` deployments.
+live `anthive.example.org` and `anthive2.example.org` deployments.
 
 This doc describes the **legacy** per-instance nginx pattern where nginx
 holds the per-path routing. For new deploys (especially on a host running
@@ -31,8 +31,8 @@ browser ──https──▶ system nginx (:443, LE cert) ──auth_request─�
 
 | Instance | api | browse | authelia |
 | --- | --- | --- | --- |
-| data.nevel.eu | 8080 | 8081 | 9091 |
-| prs.nevel.eu | 8180 | 8181 | 9191 |
+| anthive.example.org | 8080 | 8081 | 9091 |
+| anthive2.example.org | 8180 | 8181 | 9191 |
 | *(new)* | 82xx | 82xx | 92xx |
 
 ---
@@ -75,7 +75,7 @@ s3:                          # only if datasets are served from S3
 (opens the `.duckdb` locally, or from S3 if absent + `s3:` is set).
 
 - **Share another instance's data**: symlink the dataset dirs you want, e.g.
-  `ln -s /data/data_nevel_eu/data/h5adstore/Sierksma2025/Village.6M \
+  `ln -s /data/anthive/data/h5adstore/Sierksma2025/Village.6M \
         data/h5adstore/<Group>/Village.6M`
   (Only what's symlinked is served. `.inactive` sidecars hide a dataset.)
 - **Pull from S3**: `make sync-pull` (h5ad) / `make sync-pull-all` (incl duckdb).
@@ -100,7 +100,7 @@ openssl rand -hex 64 > config/authelia/secrets/jwt
 openssl rand -hex 64 > config/authelia/secrets/session
 openssl rand -hex 32 > config/authelia/secrets/encryption
 # SMTP password (shared Migadu mailbox) — copy from an existing instance:
-cp /data/data_nevel_eu/config/authelia/secrets/smtp config/authelia/secrets/smtp
+cp /data/anthive/config/authelia/secrets/smtp config/authelia/secrets/smtp
 chmod 600 config/authelia/secrets/*
 
 # 3c. config from the template — fill PRIMARY_HOST and AUTHELIA_PORT
@@ -112,7 +112,7 @@ $EDITOR config/authelia/configuration.yml
 
 # 3d. seed the first user (login auto-derived from the email)
 printf 'users: {}\n' > config/authelia/users_database.yml   # only if new
-./bin/ops/ant-adduser you@kuleuven.be -g admins             # prints a random pw once
+./bin/ops/ant-adduser you@example.org -g admins             # prints a random pw once
 
 # 3e. validate
 AUTHELIA_SESSION_SECRET_FILE=$(pwd)/config/authelia/secrets/session \
@@ -132,7 +132,7 @@ Copy an existing instance's authelia nginx file as the starting point and
 adapt hostname / cert path / the three ports:
 
 ```bash
-cp config/nginx-data.nevel.eu.authelia.conf config/nginx-NEWHOST.conf
+cp config/nginx-anthive.example.org.authelia.conf config/nginx-NEWHOST.conf
 $EDITOR config/nginx-NEWHOST.conf
 #   server_name        -> NEWHOST
 #   ssl_certificate(_key) -> /etc/letsencrypt/live/NEWHOST/...

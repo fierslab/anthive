@@ -9,9 +9,9 @@
 #
 # Why not still call forward_auth here?
 #   - Double-gating doubles latency on every request.
-#   - The browser's session cookie is set against the public hostname
-#     (intern.bdslab.org). Caddy on 127.0.0.1:8500 would see a Host of
-#     intern.bdslab.org but cookies/redirects scoped at the public URL
+#   - The browser's session cookie is set against the public hostname.
+#     Caddy on the loopback port would see that public Host, but
+#     cookies/redirects scoped at the public URL
 #     are already what nginx handled — re-running forward_auth here is
 #     redundant.
 #

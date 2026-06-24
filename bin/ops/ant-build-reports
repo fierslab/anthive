@@ -169,7 +169,7 @@ def _build_quarto(repo_dir, dest_dir, report_cfg):
             "        href: index.html",
             "    right:",
             '      - text: "\u2302 anthive"',
-            '        href: https://data.nevel.eu/',
+            '        href: https://anthive.example.org/',
             "  sidebar:",
             "    style: docked",
             "    search: true",

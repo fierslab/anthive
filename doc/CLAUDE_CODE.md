@@ -10,7 +10,7 @@ or via `/anthive`.
 - The Anthive API must be running (`ant serve` or `make serve-api`)
 - If the server requires authentication, add credentials to `~/.netrc`:
   ```
-  machine data.nevel.eu
+  machine anthive.example.org
   login <your-username>
   password <your-password>
   ```
@@ -29,7 +29,7 @@ Claude Code config:
 
 ```bash
 mkdir -p ~/.claude/skills/anthive
-curl -n -s https://data.nevel.eu/api/skill -o ~/.claude/skills/anthive/SKILL.md
+curl -n -s https://anthive.example.org/api/skill -o ~/.claude/skills/anthive/SKILL.md
 ```
 
 Re-run the curl command any time to update to the latest version.
@@ -73,7 +73,7 @@ The skill is served from the API itself at `/api/skill`. When the API
 is updated with new endpoints or parameters, re-fetch the skill:
 
 ```bash
-curl -n -s https://data.nevel.eu/api/skill -o ~/.claude/skills/anthive/SKILL.md
+curl -n -s https://anthive.example.org/api/skill -o ~/.claude/skills/anthive/SKILL.md
 ```
 
 Repo users get updates automatically via `git pull`.

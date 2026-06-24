@@ -91,7 +91,7 @@ mcp:
 
   # Public-facing MCP URL shown at startup and passed to LLM clients.
   # Include the per-user token here, e.g.:
-  #   https://data.nevel.eu/mcp/<token>
+  #   https://your-host.example.org/mcp/<token>
   # Defaults to http://<host>:<port>/mcp when null.
   mcp_url: null
 

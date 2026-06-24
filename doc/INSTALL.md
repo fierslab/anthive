@@ -252,7 +252,7 @@ hostnames:
 
 ```sh
 # Localhost + a Nebula peer only:
-export ANTHIVE_CADDY_BIND="127.0.0.1 10.42.0.3"
+export ANTHIVE_CADDY_BIND="127.0.0.1 10.0.0.10"
 
 # Localhost + Tailscale only (substitute your TS IP):
 export ANTHIVE_CADDY_BIND="127.0.0.1 100.x.y.z"
@@ -274,7 +274,7 @@ development laptops.
 ## 5b. Production topology — nginx-thin + Caddy-fat
 
 If your host already runs nginx for other vhosts (alzmap.org,
-data.bdslab.org, …), DON'T duplicate the anthive routing in nginx.
+data.example.org, …), DON'T duplicate the anthive routing in nginx.
 Instead use this pattern:
 
 ```
@@ -423,7 +423,7 @@ RestartSec=5
 Environment=PATH=/home/anthive/.local/bin:/usr/local/bin:/usr/bin:/bin
 # Optional: restrict Caddy to specific interfaces (see section 5 above).
 # Without this, Caddy binds to every interface (dev) or 127.0.0.1 (prod).
-Environment=ANTHIVE_CADDY_BIND=127.0.0.1 10.42.0.3
+Environment=ANTHIVE_CADDY_BIND=127.0.0.1 10.0.0.10
 
 [Install]
 WantedBy=multi-user.target

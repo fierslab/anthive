@@ -556,7 +556,7 @@ the writer failed with:
 
 ```
 IOException: IO Error: Could not set lock on file "...duckdb":
-Conflicting lock is held in .../python3.11 (PID 2701820) by user u0089478.
+Conflicting lock is held in .../python3.11 (PID 2701820) by user <user>.
 However, you would be able to open this database in read-only mode.
 ```
 

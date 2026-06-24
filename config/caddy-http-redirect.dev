@@ -9,7 +9,7 @@
 # the main Caddy listener in prod — nginx terminates TLS on :443 and
 # forwards plain HTTP to 127.0.0.1:8500. A redirect block here would
 # fight the main site for the same port.
-http://localhost:8500, http://localhost.localdomain:8500, http://127.0.0.1:8500, http://10.42.0.3:8500 {
+http://localhost:8500, http://localhost.localdomain:8500, http://127.0.0.1:8500 {
 	bind {$ANTHIVE_CADDY_BIND:0.0.0.0 ::}
 	redir https://{host}:8501{uri} 301
 }

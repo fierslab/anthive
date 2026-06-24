@@ -27,7 +27,7 @@ Client configuration (add to ~/.claude/settings.json or Claude Desktop config):
       "mcpServers": {
         "anthive": {
           "type": "http",
-          "url": "https://data.nevel.eu/mcp",
+          "url": "https://anthive.example.org/mcp",
           "headers": { "Authorization": "Basic <base64(user:pass)>" }
         }
       }
@@ -133,7 +133,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         '--mcp-url', default=cfg.get('mcp_url'),
         help='Public-facing MCP URL shown at startup and passed to LLM clients '
-             '(e.g. https://data.nevel.eu/mcp/<token>)',
+             '(e.g. https://anthive.example.org/mcp/<token>)',
     )
     return parser.parse_args()
 

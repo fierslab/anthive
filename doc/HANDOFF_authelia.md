@@ -117,9 +117,9 @@ session:
       authelia_url: 'https://PRIMARY_HOST:PORT/authelia/'
       default_redirection_url: 'https://PRIMARY_HOST:PORT/'
     # add more domains if multiple access paths:
-    # - domain: '10.42.0.3'
-    #   authelia_url: 'https://10.42.0.3:PORT/authelia/'
-    #   default_redirection_url: 'https://10.42.0.3:PORT/'
+    # - domain: '10.0.0.10'
+    #   authelia_url: 'https://10.0.0.10:PORT/authelia/'
+    #   default_redirection_url: 'https://10.0.0.10:PORT/'
 
 regulation:
   max_retries: 5
@@ -188,11 +188,11 @@ upstream service ports as needed):
 
 # Plain-HTTP companion port. Catches users typing http:// and redirects.
 # Same listener cannot serve both http and https — separate port required.
-http://PRIMARY_HOST:8500, http://10.42.0.3:8500 {
+http://PRIMARY_HOST:8500, http://10.0.0.10:8500 {
     redir https://{host}:8501{uri} 301
 }
 
-PRIMARY_HOST:8501, 10.42.0.3:8501 {
+PRIMARY_HOST:8501, 10.0.0.10:8501 {
     bind {$ANTHIVE_CADDY_BIND:0.0.0.0 ::}
 
     # Self-signed cert via Caddy's internal CA. For real production,
@@ -324,7 +324,7 @@ rest (see `bin/ops/ant-supervisor`, look for `DEFAULT_SERVICES = [...]`). If
 this host needs Nebula+localhost-only binding:
 
 ```bash
-export ANTHIVE_CADDY_BIND="127.0.0.1 10.42.0.3"
+export ANTHIVE_CADDY_BIND="127.0.0.1 10.0.0.10"
 # then start the supervisor as above
 ```
 

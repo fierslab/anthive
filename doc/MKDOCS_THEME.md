@@ -90,11 +90,11 @@ Create `overrides/main.html`:
 
 {% block announce %}
 <div style="background:#1a1a2e; color:#e0e0e0; padding:4px 14px; font-size:12px; font-family:'Courier New',monospace; display:flex; align-items:center; gap:10px; border-bottom:1px solid #2a2a4e;">
-    <a href="https://data.nevel.eu/" style="color:#7dd3fc; font-weight:bold; text-decoration:none; letter-spacing:0.5px;">anthive</a>
+    <a href="https://anthive.example.org/" style="color:#7dd3fc; font-weight:bold; text-decoration:none; letter-spacing:0.5px;">anthive</a>
     <span style="color:#444;">|</span>
-    <a href="https://data.nevel.eu/" style="color:#aaa; text-decoration:none; font-size:12px;">datasets</a>
-    <a href="https://data.nevel.eu/streamlit" style="color:#aaa; text-decoration:none; font-size:12px;">streamlit</a>
-    <a href="https://data.nevel.eu/api/docs" style="color:#aaa; text-decoration:none; font-size:12px;">api</a>
+    <a href="https://anthive.example.org/" style="color:#aaa; text-decoration:none; font-size:12px;">datasets</a>
+    <a href="https://anthive.example.org/streamlit" style="color:#aaa; text-decoration:none; font-size:12px;">streamlit</a>
+    <a href="https://anthive.example.org/api/docs" style="color:#aaa; text-decoration:none; font-size:12px;">api</a>
 </div>
 {% endblock %}
 ```

@@ -8554,7 +8554,7 @@ async def get_skill():
     """Return the Anthive Claude Code skill file (SKILL.md).
 
     Collaborators can install it with:
-        curl -n https://data.nevel.eu/api/skill -o ~/.claude/skills/anthive/SKILL.md
+        curl -n https://anthive.example.org/api/skill -o ~/.claude/skills/anthive/SKILL.md
     """
     skill_path = script_dir.parent / ".claude" / "skills" / "anthive" / "SKILL.md"
     if not skill_path.exists():
