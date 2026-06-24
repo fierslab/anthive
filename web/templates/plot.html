@@ -1686,21 +1686,24 @@
         ...mergeSmart(topCat.slice(0, 4), clusterCols),
       });
       attachChips('color', { label: 'gene', curated: topGenes.slice(0, 4) });
-      // XY mode: x and y take continuous fields (numerical obs + genes).
-      // These target the #id (the embedding select shares name="x").
+      // XY mode: x and y take continuous fields (numerical obs + genes). Prefill
+      // them too (harmless in embedding mode — disabled fields aren't submitted)
+      // so a no-embedding dataset, which starts in XY mode, still renders on load.
+      setIfEmpty('#f-x-xy', topNum[0] || topGenes[0] || OBS_NUM[0]);
+      setIfEmpty('#f-y-xy', topNum[1] || topGenes[1] || topGenes[0] || OBS_NUM[1] || OBS_NUM[0]);
       const xyPicks = [...topNum.slice(0, 3), ...topGenes.slice(0, 3)];
       attachChips('#f-x-xy', { label: 'x', curated: xyPicks });
       attachChips('#f-y-xy', { label: 'y', curated: xyPicks });
 
     } else if (geom === 'violin' || geom === 'box' || geom === 'bar') {
-      setIfEmpty('form [name="x"]', clusterCols[0] || topCat[0]);
+      setIfEmpty('form [name="x"]', clusterCols[0] || topCat[0] || OBS_CAT[0]);
       attachChips('x', {
         label: 'group',
         ...mergeSmart(topCat.slice(0, 5), clusterCols),
       });
       if (geom !== 'bar') {
         // Bar with no y = count bars, which is meaningful; leave y empty.
-        setIfEmpty('form [name="y"]', topGenes[0] || topNum[0]);
+        setIfEmpty('form [name="y"]', topGenes[0] || topNum[0] || OBS_NUM[0]);
       }
       attachChips('y', { label: 'gene', curated: topGenes.slice(0, 5) });
       attachChips('y', { label: 'num',  curated: topNum.slice(0, 3) });
@@ -1711,7 +1714,7 @@
       });
 
     } else if (geom === 'histogram' || geom === 'ecdf' || geom === 'kde') {
-      setIfEmpty('form [name="x"]', topGenes[0] || topNum[0]);
+      setIfEmpty('form [name="x"]', topGenes[0] || topNum[0] || OBS_NUM[0]);
       attachChips('x', { label: 'gene', curated: topGenes.slice(0, 5) });
       attachChips('x', { label: 'num',  curated: topNum.slice(0, 5) });
       attachChips('color', {
@@ -1720,7 +1723,7 @@
       });
 
     } else if (geom === 'heatmap') {
-      setIfEmpty('form [name="y"]', clusterCols[0] || topCat[0]);
+      setIfEmpty('form [name="y"]', clusterCols[0] || topCat[0] || OBS_CAT[0]);
       attachChips('y', {
         label: 'group',
         ...mergeSmart(topCat.slice(0, 5), clusterCols),
@@ -1737,16 +1740,18 @@
       // x: smart pseudotime detection scans the FULL OBS_NUM (not just
       // topNum), so it works even when the curator hasn't called out
       // pseudotime in the .md.
-      setIfEmpty('form [name="x"]', trajectory[0] || topNum[0]);
+      setIfEmpty('form [name="x"]', trajectory[0] || topNum[0] || OBS_NUM[0]);
       attachChips('x', {
         label: 'axis',
         ...mergeSmart(topNum.slice(0, 3), trajectory),
       });
       // y: csv of continuous fields — both gene chips and num chips,
-      // both with append behaviour.
+      // both with append behaviour. Fall back to any numeric obs so the plot
+      // renders on first load even with no curated favourites.
       const yField = document.querySelector('form [name="y"]');
-      if (yField && !yField.value && topGenes.length) {
-        yField.value = topGenes.slice(0, 3).join(', ');
+      if (yField && !yField.value) {
+        if (topGenes.length) yField.value = topGenes.slice(0, 3).join(', ');
+        else if (OBS_NUM[0]) yField.value = OBS_NUM[0];
       }
       attachChips('y', { label: 'add gene', curated: topGenes.slice(0, 5) }, 'append');
       attachChips('y', { label: 'add num',  curated: topNum.slice(0, 3) },   'append');
@@ -1757,8 +1762,8 @@
       });
 
     } else if (geom === 'kde2d') {
-      setIfEmpty('form [name="x"]', topNum[0] || topGenes[0]);
-      setIfEmpty('form [name="y"]', topNum[1] || topGenes[1] || topGenes[0]);
+      setIfEmpty('form [name="x"]', topNum[0] || topGenes[0] || OBS_NUM[0]);
+      setIfEmpty('form [name="y"]', topNum[1] || topGenes[1] || topGenes[0] || OBS_NUM[1] || OBS_NUM[0]);
       const xyPicks = [...topNum.slice(0, 3), ...topGenes.slice(0, 3)];
       attachChips('x', { label: 'x', curated: xyPicks });
       attachChips('y', { label: 'y', curated: xyPicks });
