@@ -1,4 +1,4 @@
-.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-mcp serve-all serve-debug serve-prod serve-stop caddy-passwd caddy-passwd-clear dev-jupyter sync-push sync-pull sync-pull-duckdb sync-pull-de sync-pull-all sync-status build-stale sync-update serve-status serve-restart h5adstore-push push-all
+.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-mcp serve-all serve-debug serve-prod serve-stop caddy-passwd caddy-passwd-clear dev-jupyter sync-push sync-pull sync-pull-duckdb sync-pull-de sync-pull-all sync-status build-stale sync-update serve-status serve-restart h5adstore-push push-all ingest ingest-dry
 
 help:
 	@echo "Anthive4 Development Commands"
@@ -28,6 +28,11 @@ help:
 	@echo "  make serve-browse      - Run web browser server (port 8081)"
 	@echo "  make serve-mcp         - Run MCP server for LLM integration (port 8090, OPT-IN)"
 	@echo "  make dev-jupyter       - Run JupyterLab on frontend/jupyter/jupyter (port 9090)"
+	@echo ""
+	@echo "Ingest (new deposits + local rebuilds):"
+	@echo "  make ingest          - End-to-end: S3 __incoming/ → catalog (.h5ad + DE), then rebuild any local stale duckdb"
+	@echo "  make ingest FILTER=Foo2025  - Restrict to one data project"
+	@echo "  make ingest-dry      - Show what would happen without writing anything"
 	@echo ""
 	@echo "Sync (S3) — the maintenance workflow:"
 	@echo "  make sync-update     - Full cycle: pull h5ad → rebuild stale duckdb → push"
@@ -339,6 +344,42 @@ h5adstore-push:
 # One-shot: S3 data + h5adstore git, in that order so a stale .md never
 # blocks the S3 push that would have been fine anyway.
 push-all: sync-push h5adstore-push
+
+# ── Ingest ─────────────────────────────────────────────────────────────────
+# End-to-end pipeline for new deposits + local rebuilds.
+#
+# Step 1 (`ant-ingest`):
+#   Walks S3 __incoming/, pulls staged .h5ad + .h5ad.mus sidecars + DE files,
+#   runs ant-h5ad-check → ant-convert → ant-duckdb-check on each h5ad,
+#   runs ant-de-ingest on each DE file (deseq2 / edger / scanpy / long / …
+#   preset autodetected from sidecar), promotes the result to the catalog
+#   on S3, and re-stamps the sidecar with the catalog keys. Ledger at
+#   data/h5adstore/.ingest-ledger.json records what each pass did.
+#
+# Step 2 (`ant-build-all`):
+#   Catches the LOCAL case ant-ingest doesn't: an .h5ad already in the
+#   catalog (not under __incoming/) whose .duckdb is stale because someone
+#   edited the .md sidecar or hand-modified the h5ad. Refreshes the .md
+#   (sha256, n_obs, layer_stats) via ant-h5ad-check and rebuilds the duckdb.
+#
+# Override the data project filter with FILTER=:
+#   make ingest FILTER=Preman2024
+#
+# Filter is a STRING MATCH against __incoming/<DP>/ — exact (no globs).
+FILTER ?=
+ingest:
+	@echo "── 1/2  S3 __incoming/ → catalog (.h5ad + DE) ──────────────"
+	@./bin/ingest/ant-ingest --data-folder ./data/h5adstore $(if $(FILTER),--filter $(FILTER),)
+	@echo ""
+	@echo "── 2/2  rebuild any locally-stale .duckdb (and refresh .md) ─"
+	@./bin/ingest/ant-build-all --data-folder ./data/h5adstore
+
+# Plan-only variant — neither downloads, promotes, nor uploads. Useful before
+# a long ingest to confirm what's about to happen.
+ingest-dry:
+	@./bin/ingest/ant-ingest --data-folder ./data/h5adstore --dry-run $(if $(FILTER),--filter $(FILTER),)
+	@echo ""
+	@echo "(ingest-dry: build-stale step skipped — run 'make ingest' for the real pass)"
 
 # Full maintenance cycle: bring everything into a consistent state.
 sync-update:
