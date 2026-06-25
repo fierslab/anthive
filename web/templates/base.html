@@ -269,6 +269,7 @@
         #chat-input { flex: 1; font-family: var(--font); font-size: 11.5px; padding: 6px 9px; border: 1px solid var(--border); border-radius: 8px; outline: none; resize: none; min-height: 42px; max-height: 120px; line-height: 1.4; }
         #chat-input:focus { border-color: var(--link); }
         #chat-send { background: var(--link); color: #fff; border: none; border-radius: 8px; padding: 0 13px; cursor: pointer; font-size: 14px; }
+        #chat-usage { flex: none; font-size: 10px; color: var(--text-muted); font-family: var(--font-mono); padding: 3px 10px; border-top: 1px solid var(--border); background: #f8fafc; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: default; }
         #chat-send:disabled { opacity: .5; cursor: default; }
         @media (max-width: 560px) { #chat-panel { width: auto; left: 8px; right: 8px; bottom: 68px; height: 72vh; } }
 
@@ -468,6 +469,7 @@
         <button class="hbtn reset" id="chat-reset" title="reset / forget this conversation" aria-label="reset conversation">⟲</button>
         <button class="hbtn x" id="chat-close" title="close" aria-label="close">✕</button></div>
       <div id="chat-log"></div>
+      <div id="chat-usage" style="display:none" title=""></div>
       <form id="chat-form">
         <textarea id="chat-input" rows="2" placeholder="Ask about the data, or say what you'd like to see…" autocomplete="off" spellcheck="false"></textarea>
         <button id="chat-send" type="submit" title="send" aria-label="send">➤</button>
@@ -653,7 +655,29 @@
         dockBtn.textContent = isDocked ? '⇤' : '⇥';
         dockBtn.title = isDocked ? 'pop out to a floating window' : 'dock to the side';
       }
-      function openPanel()  { isOpen = true;  ss.set(OPEN, '1'); applyChrome(); input.focus(); logBox.scrollTop = logBox.scrollHeight; }
+      // Per-session usage/cost strip (GET /api/chat/usage). Refetched after each
+      // turn ('done'), on open, and on load. Hidden until there's usage. The
+      // cached % is the headline — it climbs once prompt-cache lands server-side.
+      var usageEl = document.getElementById('chat-usage');
+      function fmtCost(c) { return '$' + (c == null ? 0 : (c < 0.1 ? c.toFixed(4) : c.toFixed(2))); }
+      function fmtTok(n) { n = n || 0; return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(n); }
+      function fetchUsage() {
+        if (!chatEnabled || !usageEl) return;
+        fetch('/api/chat/usage?session_id=' + encodeURIComponent(sid), { credentials: 'same-origin' })
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (u) {
+            if (!u || !u.total_tokens) { usageEl.style.display = 'none'; return; }
+            var pct = Math.round((u.cached_fraction || 0) * 100);
+            usageEl.textContent = fmtCost(u.cost_usd) + ' · ' + fmtTok(u.total_tokens) + ' tokens (' + pct + '% cached)';
+            usageEl.title = (u.by_model || []).map(function (m) {
+              return (m.model || '').split('/').pop() + ': ' + fmtCost(m.cost_usd) + ' (' + (m.llm_calls || 0) + ' calls)';
+            }).join(' · ') || ((u.turns || 0) + ' turns · ' + (u.llm_calls || 0) + ' LLM calls');
+            usageEl.style.display = '';
+          })
+          .catch(function () {});
+      }
+
+      function openPanel()  { isOpen = true;  ss.set(OPEN, '1'); applyChrome(); input.focus(); logBox.scrollTop = logBox.scrollHeight; fetchUsage(); }
       function closePanel() { isOpen = false; ss.set(OPEN, '0'); applyChrome(); }
       function togglePanel() { isOpen ? closePanel() : openPanel(); }
       function toggleDock()  { isDocked = !isDocked; lsSet(DOCK, isDocked ? 'dock' : 'float'); applyChrome(); }
@@ -686,7 +710,7 @@
         sid = (window.crypto && crypto.randomUUID) ? crypto.randomUUID()
               : ('s' + Date.now() + Math.round(Math.random() * 1e9));
         ss.set(SID, sid); ss.set(LOG, '[]'); navRetry = 0;
-        renderHistory([]); input.focus();
+        renderHistory([]); input.focus(); fetchUsage();   // new session → counter resets/hides
       }
 
       launcher.addEventListener('click', togglePanel);
@@ -926,6 +950,7 @@
           function finish() {
             streaming = false; sendBtn.disabled = false; clearActivity(); stopIdle();
             if (asstText) { var a = localLog(); a.push({ role: 'assistant', content: asstText }); saveLocal(a); if (asstEl) renderAssistantInto(asstEl, asstText); }
+            fetchUsage();   // refresh cost/token counter after the turn
           }
           function pump() {
             return reader.read().then(function (res) {
@@ -964,7 +989,7 @@
           ss.set(ON, '1'); chatEnabled = true;
           if (d.model) { modelEl.textContent = d.model; chosenModel = chosenModel || d.model; }
           if (d.models && d.models.length) buildModelPicker(d.models, d.model);
-          rehydrate();
+          rehydrate(); fetchUsage();
           if (ss.get(OPEN) === '1') openPanel(); else applyChrome();
         })
         .catch(function () { /* status unreachable → leave dark */ });
