@@ -22,9 +22,11 @@ just-completed turn.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-from typing import Any, AsyncIterator, Dict, List, Optional
+import re
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -54,6 +56,63 @@ _MAX_TOOL_ROUNDS = 8
 # (Anthropic, OpenAI, etc.) — wide enough for the longest tool-round
 # answer, narrow enough that a stuck call doesn't hang ant-serve.
 _LLM_TIMEOUT_SECONDS = 120.0
+
+# Single retry-with-backoff on transient upstream errors (429 / 5xx).
+# Per anthive-web #231: OpenRouter 429s on claude-opus-4 are usually
+# momentary — one short backoff+retry hides most of them. Two retries
+# would only help on a sustained burst; for that the user needs to add
+# their own BYOK key to OpenRouter, which we cannot solve in code.
+_RETRY_BACKOFF_SECONDS = 2.0
+_RETRY_STATUSES = {429, 500, 502, 503, 504}
+
+
+def _classify_upstream_error(exc: Exception) -> Tuple[Optional[int], Optional[int], str]:
+    """Best-effort extraction of (status_code, retry_after_sec, friendly_message)
+    from an OpenAI-SDK exception. Used both to decide whether to retry and to
+    build the structured error frame web's client renders as a friendly card.
+    """
+    status_code: Optional[int] = None
+    retry_after: Optional[int] = None
+
+    # The OpenAI SDK exposes status_code on APIStatusError subclasses.
+    sc = getattr(exc, 'status_code', None)
+    if isinstance(sc, int):
+        status_code = sc
+
+    # Honour Retry-After if the provider set it.
+    resp = getattr(exc, 'response', None)
+    if resp is not None:
+        try:
+            ra = resp.headers.get('retry-after')
+            if ra:
+                # RFC 7231: integer seconds OR HTTP-date. We support seconds.
+                retry_after = int(float(ra))
+        except (AttributeError, ValueError, TypeError):
+            pass
+
+    # Best-guess fallback when no header — most OpenRouter 429s on opus
+    # clear within a few seconds.
+    if status_code == 429 and retry_after is None:
+        retry_after = 5
+
+    # Build a friendly message. The raw OpenRouter payload often includes
+    # the depositor's user_id + provider chain — strip it for the user-
+    # facing text but keep the upstream provider name when present.
+    raw = str(exc)
+    if status_code == 429:
+        provider_match = re.search(r"'provider_name':\s*'([^']+)'", raw)
+        provider = provider_match.group(1) if provider_match else None
+        friendly = (
+            "Model is temporarily rate-limited"
+            + (f" by the upstream provider ({provider})" if provider else "")
+            + ". Retry in a few seconds."
+        )
+    elif status_code and 500 <= status_code < 600:
+        friendly = f"Upstream model service returned a transient error ({status_code}). Retry in a few seconds."
+    else:
+        friendly = raw
+
+    return status_code, retry_after, friendly
 
 
 def _sse(payload: Dict[str, Any]) -> bytes:
@@ -181,14 +240,36 @@ async def run_turn(
         assistant_text_parts: List[str] = []
         action_frames_in_turn: List[Dict[str, Any]] = []
 
-        try:
-            for round_idx in range(_MAX_TOOL_ROUNDS):
-                stream = await ai.chat.completions.create(
+        async def _create_with_retry():
+            """One retry-with-backoff on transient upstream errors. Per
+            web #231: hides momentary OpenRouter 429s + 5xx without
+            silently swapping models. If both attempts fail, re-raise
+            the second exception so the outer except can build the
+            structured error frame."""
+            try:
+                return await ai.chat.completions.create(
                     model=cfg.model,
                     messages=openai_messages,
                     tools=TOOL_DEFS,
                     stream=True,
                 )
+            except Exception as exc:  # noqa: BLE001
+                status, _retry_after, _friendly = _classify_upstream_error(exc)
+                if status in _RETRY_STATUSES:
+                    log.info("chat: transient %s upstream — retrying once after %.1fs",
+                             status, _RETRY_BACKOFF_SECONDS)
+                    await asyncio.sleep(_RETRY_BACKOFF_SECONDS)
+                    return await ai.chat.completions.create(
+                        model=cfg.model,
+                        messages=openai_messages,
+                        tools=TOOL_DEFS,
+                        stream=True,
+                    )
+                raise
+
+        try:
+            for round_idx in range(_MAX_TOOL_ROUNDS):
+                stream = await _create_with_retry()
 
                 # Accumulator for this round's tool-call shape.
                 # OpenAI streams tool calls as fragments — collect by index.
@@ -287,7 +368,16 @@ async def run_turn(
 
         except Exception as exc:  # pylint: disable=broad-except
             log.warning("chat: agent error — %s", exc)
-            yield _sse({'type': 'error', 'message': f'chat agent error: {exc}'})
+            status, retry_after, friendly = _classify_upstream_error(exc)
+            # Structured error frame per web #231 — code + retry_after let
+            # the client render an exact countdown / retry button instead of
+            # parsing strings.
+            err: Dict[str, Any] = {'type': 'error', 'message': friendly}
+            if status is not None:
+                err['code'] = status
+            if retry_after is not None:
+                err['retry_after'] = retry_after
+            yield _sse(err)
 
         # 6. Persist the full assistant turn BEFORE emitting 'done'.
         #    Web client may navigate immediately on receiving an action,
