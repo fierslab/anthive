@@ -659,7 +659,8 @@
       // turn ('done'), on open, and on load. Hidden until there's usage. The
       // cached % is the headline — it climbs once prompt-cache lands server-side.
       var usageEl = document.getElementById('chat-usage');
-      function fmtCost(c) { return '$' + (c == null ? 0 : (c < 0.1 ? c.toFixed(4) : c.toFixed(2))); }
+      var USD_TO_EUR = 0.92;   // static approximation — the usage strip is indicative, not billing
+      function fmtCost(c) { var e = (c == null ? 0 : c) * USD_TO_EUR; return '≈€' + (e < 0.1 ? e.toFixed(4) : e.toFixed(2)); }
       function fmtTok(n) { n = n || 0; return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(n); }
       function fetchUsage() {
         if (!chatEnabled || !usageEl) return;
