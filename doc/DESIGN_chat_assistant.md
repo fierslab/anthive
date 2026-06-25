@@ -130,41 +130,91 @@ conversation; the server store maps `Remote-User → {session_id → transcript}
 
 ## 6. Ownership boundary (who builds what)
 
-- **web session (this scope):** the Deep Chat widget in `base.html`, the
-  client-side action tools (`navigate`/`set_plot_param`), the rehydrate-on-load
-  glue, and the `set_plot_param` hook into `plot.html`'s existing
-  `buildUrl`/form machinery.
+- **web session (this scope):** the Deep Chat widget in `base.html` **gated on
+  `GET /api/chat/status`** (no status → no widget), the client-side action tools
+  (`navigate`/`set_plot_param`), the rehydrate-on-load glue, and the
+  `set_plot_param` hook into `plot.html`'s existing `buildUrl`/form machinery.
 - **anthive4 / ant-serve session:** the `POST /api/chat` agent endpoint
   (Claude tool-calling + streaming), the server-side data tools (thin wrappers
-  over existing REST calls), the system-context assembly, and the session store.
-  **This is where the Anthropic API key lives** and where data access already
-  is — it does not belong in the web client.
+  over existing REST calls), the system-context assembly, the session store,
+  **and the enablement gate** (§7): the `chat.enabled` flag, the key read from
+  env/yaml, the `GET /api/chat/status` capability endpoint, and 404-when-off on
+  the chat endpoints. **This is where the Anthropic API key lives** and where
+  data access already is — it does not belong in the web client.
 
-The interface between them is the `POST /api/chat` SSE contract +
-`GET /api/chat/history` + the client tool-call schema. Spec that, hand the
-server half to anthive4.
+The interface between them is the `GET /api/chat/status` capability check, the
+`POST /api/chat` SSE contract, `GET /api/chat/history`, and the client tool-call
+schema. Spec that, hand the server half to anthive4.
 
-## 7. Security & privacy
+## 7. Enablement & key safety (off by default, opt-in)
+
+Hard requirements: the assistant is **off unless a deployment explicitly turns
+it on**, and the Anthropic API key is **optional and never committed**.
+
+**Config — matches existing `anthive.yaml` practice.** `anthive.yaml` is already
+**gitignored** and holds the S3 secrets; `anthive.default.yaml` (tracked) holds
+safe defaults and `config.py` falls back to it. So:
+
+- `anthive.default.yaml` ships `chat.enabled: false` — **off by default**; every
+  fresh deployment starts dark and stays dark until someone opts in.
+- A deployment opts in by setting `chat.enabled: true` in its **local, gitignored
+  `anthive.yaml`**.
+- The **API key comes from the environment** (`ANTHROPIC_API_KEY`) — preferred,
+  never in any file. As a fallback, `chat.api_key` may live in the gitignored
+  `anthive.yaml` (consistent with how `s3.secret_access_key` already lives
+  there). It **must never** appear in `anthive.default.yaml` or any tracked file.
+
+**Three-state availability (fail safe).** The server resolves one boolean at
+startup:
+
+| `chat.enabled` | key present (env or yaml) | result |
+|---|---|---|
+| false | — | **OFF** |
+| true | no | **OFF** + one-line warning logged (never crash) |
+| true | yes | **ON** |
+
+"Enabled but keyless" degrades **silently to off** — the feature is optional, so
+a missing key is never an error, never a 500, never a stub.
+
+**Key hygiene.** Read once at startup; **never logged, never returned in any
+response or error body, never sent to the client.** The browser learns only a
+boolean.
+
+**Two enforcement points (defense in depth):**
+
+1. **Capability endpoint** `GET /api/chat/status` → `{"enabled": bool}` (no key,
+   no secrets). `base.html` renders the chat widget **only when true** — a dark
+   deployment shows no chat affordance at all.
+2. **The endpoints themselves refuse when off.** `POST /api/chat` and
+   `GET /api/chat/history` return **404** (not 403 — 404 hides that the feature
+   exists) whenever availability is OFF. So a stale widget or a hand-crafted
+   request hits nothing.
+
+## 8. Security & privacy
 
 - **Behind Authelia** already; the assistant inherits the user's session and
   acts only through routes/endpoints that user can already reach. No privilege
   escalation surface beyond the existing API.
 - **No raw SQL / no DuckDB-h5ad path** — tools are bounded REST wrappers, so
   there's no injection surface into the data layer.
-- **Data egress**: questions + the catalogue digest + any tool results go to the
-  Anthropic API. The data is scRNA-seq dataset *metadata* (not patient data), so
-  this is very likely acceptable — but **confirm before wiring**, and document
-  it. No `.h5ad` cell-level data is ever sent (the tools return summaries/URLs).
+- **Data egress** — *approved (2026-06-25)*: questions + the catalogue digest +
+  tool results go to the Anthropic API. The data is scRNA-seq dataset *metadata*
+  (not patient data); no `.h5ad` cell-level data is ever sent (the tools return
+  summaries/URLs). Egress is acceptable for this internal tool.
 - **Rate / cost**: per-user rate limit on `/api/chat`; cap tool-call loops per
   turn; stream so a long turn is interruptible.
 
-## 8. Phased plan (when/if scheduled)
+## 9. Phased plan (when/if scheduled)
 
-1. **Spec the `/api/chat` contract** (SSE events, client tool-call schema,
-   history endpoint). Hand the server half to anthive4.
-2. **Server v1 (anthive4):** `/api/chat` with Claude + the five data tools +
-   `build_plot_url`, system context from `/databases`, in-memory session store.
-3. **Widget v1 (web):** Deep Chat in `base.html`, `navigate` action only,
+1. **Spec the contract** — `GET /api/chat/status`, the `POST /api/chat` SSE
+   events, `GET /api/chat/history`, the client tool-call schema, and the
+   `chat.enabled`/`ANTHROPIC_API_KEY` config keys (`chat.enabled: false` added to
+   `anthive.default.yaml`). Hand the server half to anthive4.
+2. **Server v1 (anthive4):** the enablement gate (§7) + `/api/chat/status`
+   first, then `/api/chat` with Claude + the five data tools + `build_plot_url`,
+   system context from `/databases`, in-memory session store.
+3. **Widget v1 (web):** Deep Chat in `base.html` **gated on `/api/chat/status`**,
+   `navigate` action only,
    rehydrate from `/api/chat/history`. End-to-end "ask → land on the right view,
    conversation persists across the jump."
 4. **`set_plot_param`** action wired into `plot.html` for in-place refinement
@@ -172,10 +222,15 @@ server half to anthive4.
 5. **Polish:** persistent session store (SQLite, TTL), htmx `hx-preserve` for
    flicker-free navigation, per-user rate limit, opt-out toggle.
 
-## 9. Open questions
+## 10. Decisions & open questions
 
-- **Anthropic API egress approval** for an internal KU Leuven tool — who signs
-  off? (Blocks everything; resolve first.)
+**Decided:**
+- **Anthropic API egress** — approved (2026-06-25).
+- **Off by default, explicit opt-in per deployment; key optional & never
+  committed** — see §7 (config in gitignored `anthive.yaml`, capability endpoint
+  + 404-when-off).
+
+**Open:**
 - **Session store lifetime** — per-browser-session only, or persistent history
   the user can revisit? Persistent is nicer but raises a "delete my chat data"
   obligation.
