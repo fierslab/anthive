@@ -41,6 +41,15 @@ try:
 except Exception:
     templates.env.globals['topbar_logo'] = ''
 
+# Chat-assistant mascot (RGBA PNG), shown in the chat window's empty state when
+# a fresh conversation opens. Base64-inlined once, same self-contained pattern.
+try:
+    templates.env.globals['chat_logo'] = 'data:image/png;base64,' + base64.b64encode(
+        (Path(__file__).parent / 'chat_logo.png').read_bytes()
+    ).decode('ascii')
+except Exception:
+    templates.env.globals['chat_logo'] = ''
+
 # Favicons / PWA manifest live under web/favicons/ (tracked — NOT the gitignored
 # webapp/ build dir) and are served by the app at their conventional root paths.
 # The reverse proxy routes unmatched root paths here (see config/Caddyfile,

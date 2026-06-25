@@ -224,10 +224,13 @@
             display: none; flex-direction: column; overflow: hidden;
         }
         #chat-panel.open { display: flex; }
-        #chat-head { display: flex; align-items: center; gap: 8px; padding: 9px 12px; background: #0f172a; color: #fff; font-size: 13px; font-weight: 600; }
+        #chat-head { display: flex; align-items: center; gap: 7px; padding: 9px 12px; background: #0f172a; color: #fff; font-size: 13px; font-weight: 600; }
         #chat-head .sub { font-weight: 400; font-size: 10px; color: #94a3b8; font-family: var(--font-mono); }
-        #chat-head .x { margin-left: auto; cursor: pointer; color: #cbd5e1; font-size: 15px; background: none; border: none; line-height: 1; }
-        #chat-head .x:hover { color: #fff; }
+        #chat-head .chat-logo-sm { height: 20px; width: auto; display: block; border-radius: 3px; }
+        #chat-head .hbtn { cursor: pointer; color: #cbd5e1; font-size: 14px; background: none; border: none; line-height: 1; padding: 2px 3px; }
+        #chat-head .hbtn:hover { color: #fff; }
+        #chat-head .reset { margin-left: auto; }      /* pushes reset + close to the right */
+        .chat-empty img.chat-mascot { display: block; width: 104px; height: auto; margin: 0 auto 12px; }
         #chat-log { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; font-size: 12.5px; line-height: 1.5; }
         .chat-msg { max-width: 86%; padding: 7px 10px; border-radius: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
         .chat-msg.user { align-self: flex-end; background: var(--link); color: #fff; border-bottom-right-radius: 3px; }
@@ -399,8 +402,9 @@
          authoritative transcript is the server's, keyed by Authelia user. -->
     <button id="chat-launcher" title="Ask the data assistant" aria-label="Open data assistant">💬</button>
     <div id="chat-panel" role="dialog" aria-label="Data assistant">
-      <div id="chat-head">assistant <span class="sub" id="chat-model"></span>
-        <button class="x" id="chat-close" title="close" aria-label="close">✕</button></div>
+      <div id="chat-head">{% if chat_logo %}<img class="chat-logo-sm" src="{{ chat_logo }}" alt="">{% endif %}assistant <span class="sub" id="chat-model"></span>
+        <button class="hbtn reset" id="chat-reset" title="reset / forget this conversation" aria-label="reset conversation">⟲</button>
+        <button class="hbtn x" id="chat-close" title="close" aria-label="close">✕</button></div>
       <div id="chat-log"></div>
       <form id="chat-form">
         <textarea id="chat-input" rows="1" placeholder="Ask about the data, or say what you'd like to see…" autocomplete="off" spellcheck="false"></textarea>
@@ -416,7 +420,9 @@
       var input    = document.getElementById('chat-input');
       var sendBtn  = document.getElementById('chat-send');
       var closeBtn = document.getElementById('chat-close');
+      var resetBtn = document.getElementById('chat-reset');
       var modelEl  = document.getElementById('chat-model');
+      var CHAT_LOGO = {{ chat_logo|tojson }};
       if (!launcher || !panel) return;
 
       var SID = 'anthive.chat.sid', OPEN = 'anthive.chat.open',
@@ -437,7 +443,9 @@
       function saveLocal(a) { ss.set(LOG, JSON.stringify(a.slice(-50))); }
 
       function showEmpty() {
-        logBox.innerHTML = '<div class="chat-empty">Ask about a gene, a dataset, or a plot — I can take you there.<br><br>' +
+        var logo = CHAT_LOGO ? '<img class="chat-mascot" src="' + CHAT_LOGO + '" alt="">' : '';
+        logBox.innerHTML = '<div class="chat-empty">' + logo +
+          'Ask about a gene, a dataset, or a plot — I can take you there.<br><br>' +
           'e.g. <i>“show TREM2 across the microglia datasets”</i></div>';
       }
       function addMsg(role, text) {
@@ -455,9 +463,27 @@
       }
       function openPanel()  { panel.classList.add('open'); ss.set(OPEN, '1'); input.focus(); logBox.scrollTop = logBox.scrollHeight; }
       function closePanel() { panel.classList.remove('open'); ss.set(OPEN, '0'); }
+      function togglePanel() { panel.classList.contains('open') ? closePanel() : openPanel(); }
 
-      launcher.addEventListener('click', openPanel);
+      // Reset / forget: a fresh session_id starts the server-side transcript
+      // over (it's keyed on user × session_id), wipe the local mirror, and
+      // best-effort ask the server to delete the old history. Then back to the
+      // empty state. (DELETE endpoint is anthive4's; ignored if not present.)
+      function resetChat() {
+        if (streaming) return;
+        try {
+          fetch('/api/chat/history?session_id=' + encodeURIComponent(sid),
+                { method: 'DELETE', credentials: 'same-origin' }).catch(function () {});
+        } catch (e) {}
+        sid = (window.crypto && crypto.randomUUID) ? crypto.randomUUID()
+              : ('s' + Date.now() + Math.round(Math.random() * 1e9));
+        ss.set(SID, sid); ss.set(LOG, '[]'); navRetry = 0;
+        renderHistory([]); input.focus();
+      }
+
+      launcher.addEventListener('click', togglePanel);
       closeBtn.addEventListener('click', closePanel);
+      resetBtn.addEventListener('click', resetChat);
       input.addEventListener('input', function () { input.style.height = 'auto'; input.style.height = Math.min(90, input.scrollHeight) + 'px'; });
       input.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); } });
 
