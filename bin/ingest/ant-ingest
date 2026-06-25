@@ -1113,6 +1113,13 @@ def _process_de(
     # repo root + annot/ instead.
     ant_de_ingest = _REPO_ROOT / 'bin' / 'annot' / 'ant-de-ingest'
 
+    # --replace: idempotent re-ingest. Without this, re-running ant-ingest
+    # against an __incoming/ deposit that's already landed (because the
+    # depositor didn't prune, or a partial run inserted some studies)
+    # would collide with "study exists". `--replace` deletes the prior
+    # rows for the same study_id and re-inserts — safe because the
+    # study_id key is stable per sidecar, and the source data file is
+    # sha-verified before promotion.
     cmd = [
         str(ant_de_ingest),
         str(target_duckdb),
@@ -1120,6 +1127,7 @@ def _process_de(
         '--preset', de_format,
         '--study-id', study_id,
         '--no-sidecar',           # we'll handle sidecar regen ourselves
+        '--replace',
     ]
     if de_method:
         cmd += ['--method', de_method]
