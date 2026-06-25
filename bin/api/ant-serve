@@ -1321,7 +1321,7 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.16.0"
+API_VERSION = "2.17.0"
 API_VERSION_RELEASED = "2026-06-25"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
@@ -1737,6 +1737,48 @@ async def chat_history(
     store = _get_chat_history(cfg)
     messages = store.list_messages(user, session_id)
     return {'messages': messages}
+
+
+@app.get("/chat/usage", tags=["chat"])
+async def chat_usage(
+    request: Request,
+    session_id: str = Query(..., description="Same session_id used by /chat and /chat/history."),
+):
+    """Cost + token usage for one (Remote-User, session_id).
+
+    Returns aggregate counters across every LLM call made in this
+    session. Useful for rendering a "$0.0024 · 12.4k tokens (3.2k
+    cached)" badge in the chat header.
+
+    Response shape::
+
+        {
+          "turns":             3,            // distinct user messages
+          "llm_calls":         7,            // total LLM round-trips
+          "prompt_tokens":     45123,
+          "completion_tokens": 3104,
+          "cached_tokens":     38400,        // prompt tokens served from cache
+          "cache_write_tokens":  600,        // tokens written to cache (one-off)
+          "total_tokens":      48227,
+          "cached_fraction":   0.851,        // cached / prompt — cache effectiveness
+          "cost_usd":          0.0024,
+          "by_model": [
+            {"model": "anthropic/claude-opus-4", "llm_calls": 5,
+             "prompt_tokens": ..., "completion_tokens": ...,
+             "cached_tokens": ..., "cost_usd": 0.0021},
+            ...
+          ]
+        }
+
+    Empty session returns the same shape with zero fields. Returns 404
+    when the chat assistant is not active.
+    """
+    cfg = load_chat_config(get_config())
+    if not cfg.active:
+        raise HTTPException(status_code=404, detail="chat assistant is not active")
+    user = _chat_user_from_request(request)
+    store = _get_chat_history(cfg)
+    return store.session_usage(user, session_id)
 
 
 @app.get("/version", tags=["info"])

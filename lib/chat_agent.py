@@ -271,8 +271,10 @@ async def run_turn(
     from openai import AsyncOpenAI  # type: ignore
 
     # 1. Persist the user message first so it lands in history even if
-    #    the LLM call fails.
-    history_store.append(user, session_id, 'user', message)
+    #    the LLM call fails. Capture its seq so every usage row produced
+    #    by this turn can carry the same `turn_seq` — lets us group
+    #    rounds by turn for the cost-counter aggregation.
+    turn_seq = history_store.append(user, session_id, 'user', message)
 
     # 2. Build the LLM messages array.
     async with httpx.AsyncClient(verify=False) as http_client:
@@ -359,14 +361,22 @@ async def run_turn(
             silently swapping models. If both attempts fail, re-raise
             the second exception so the outer except can build the
             structured error frame."""
+            # `stream_options.include_usage=true` — OpenRouter sends a
+            # final SSE chunk with a populated `.usage` (and per-token
+            # cost) only when this is set. `extra_body.usage.include=true`
+            # is the OpenRouter-side switch that surfaces cost +
+            # prompt_tokens_details.cached_tokens for Anthropic prompt-
+            # cache visibility.
             create_kwargs: Dict[str, Any] = dict(
                 model=active_model,
                 messages=openai_messages,
                 tools=TOOL_DEFS,
                 stream=True,
+                stream_options={'include_usage': True},
             )
-            if extra_body:
-                create_kwargs['extra_body'] = extra_body
+            usage_extra = dict(extra_body)
+            usage_extra['usage'] = {'include': True}
+            create_kwargs['extra_body'] = usage_extra
             try:
                 return await ai.chat.completions.create(**create_kwargs)
             except Exception as exc:  # noqa: BLE001
@@ -394,8 +404,18 @@ async def run_turn(
                 pending_tool_calls: Dict[int, Dict[str, Any]] = {}
                 round_text_parts: List[str] = []
                 finish_reason: Optional[str] = None
+                # Captured from the FINAL chunk when stream_options.include_
+                # usage=True. OpenRouter populates cost + cached-token
+                # details here too. Kept as an opaque object; we read it
+                # with getattr below.
+                round_usage: Any = None
 
                 async for chunk in stream:
+                    # OpenRouter sends a usage-only chunk at end of
+                    # stream when include_usage=True; it has no choices.
+                    chunk_usage = getattr(chunk, 'usage', None)
+                    if chunk_usage is not None:
+                        round_usage = chunk_usage
                     if not chunk.choices:
                         continue
                     choice = chunk.choices[0]
@@ -430,6 +450,32 @@ async def run_turn(
                 text_this_round = ''.join(round_text_parts)
                 if text_this_round:
                     assistant_text_parts.append(text_this_round)
+
+                # Persist this LLM call's usage if OpenRouter surfaced
+                # one. Pydantic/openai-typed object — read with getattr
+                # so OpenRouter's extra fields (cost, cached_tokens)
+                # don't trip a typed access. Best-effort; we never crash
+                # the turn over a missing field.
+                if round_usage is not None:
+                    try:
+                        prompt_tokens = int(getattr(round_usage, 'prompt_tokens', 0) or 0)
+                        completion_tokens = int(getattr(round_usage, 'completion_tokens', 0) or 0)
+                        cost_usd = float(getattr(round_usage, 'cost', 0.0) or 0.0)
+                        prompt_details = getattr(round_usage, 'prompt_tokens_details', None)
+                        cached_tokens = int(getattr(prompt_details, 'cached_tokens', 0) or 0) if prompt_details else 0
+                        cache_write_tokens = int(getattr(prompt_details, 'cache_write_tokens', 0) or 0) if prompt_details else 0
+                        history_store.append_usage(
+                            user=user, session_id=session_id,
+                            turn_seq=turn_seq, round_idx=round_idx,
+                            model=active_model,
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=completion_tokens,
+                            cached_tokens=cached_tokens,
+                            cache_write_tokens=cache_write_tokens,
+                            cost_usd=cost_usd,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("chat: usage persist failed — %s", exc)
 
                 # Build the assistant message with any tool calls so the
                 # next LLM round sees them.

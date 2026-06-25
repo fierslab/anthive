@@ -38,6 +38,26 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS idx_messages_user_session
     ON messages (user, session_id, seq);
+
+-- One row per LLM call (a single user message can produce N rows when the
+-- agent makes N tool rounds). `seq` is the seq of the user message that
+-- kicked off the turn, so you can group rows by turn.
+CREATE TABLE IF NOT EXISTS usage (
+    user                TEXT    NOT NULL,
+    session_id          TEXT    NOT NULL,
+    turn_seq            INTEGER NOT NULL,    -- seq of the user message
+    round_idx           INTEGER NOT NULL,    -- 0..N-1 within the turn
+    model               TEXT    NOT NULL,
+    prompt_tokens       INTEGER NOT NULL,
+    completion_tokens   INTEGER NOT NULL,
+    cached_tokens       INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens  INTEGER NOT NULL DEFAULT 0,
+    cost_usd            REAL    NOT NULL DEFAULT 0,
+    created_at          INTEGER NOT NULL,
+    PRIMARY KEY (user, session_id, turn_seq, round_idx)
+);
+CREATE INDEX IF NOT EXISTS idx_usage_user_session
+    ON usage (user, session_id);
 """
 
 
@@ -131,6 +151,91 @@ class ChatHistory:
             user, session_id, 'action',
             json.dumps(action_frame, separators=(',', ':')),
         )
+
+    # ── usage tracking (cost + tokens per LLM call) ──────────────────────────
+
+    def append_usage(
+        self,
+        user: str,
+        session_id: str,
+        turn_seq: int,
+        round_idx: int,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        cached_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        cost_usd: float = 0.0,
+    ) -> None:
+        """Record one LLM call's usage. Idempotent on (user, session_id, turn_seq, round_idx)."""
+        self._conn.execute(
+            "INSERT OR REPLACE INTO usage "
+            "(user, session_id, turn_seq, round_idx, model, "
+            " prompt_tokens, completion_tokens, cached_tokens, "
+            " cache_write_tokens, cost_usd, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (user, session_id, int(turn_seq), int(round_idx), model,
+             int(prompt_tokens), int(completion_tokens),
+             int(cached_tokens), int(cache_write_tokens),
+             float(cost_usd), int(time.time())),
+        )
+
+    def session_usage(self, user: str, session_id: str) -> Dict[str, Any]:
+        """Aggregate usage for one (user, session_id).
+
+        Returns totals (turns, llm_calls, tokens, cost) and a per-model
+        breakdown. ``cached_fraction`` is the share of prompt tokens that
+        landed in Anthropic's prompt cache — a clean signal for whether
+        the system-prompt cache is working.
+        """
+        agg = self._conn.execute(
+            "SELECT COUNT(DISTINCT turn_seq), COUNT(*), "
+            "       COALESCE(SUM(prompt_tokens), 0), "
+            "       COALESCE(SUM(completion_tokens), 0), "
+            "       COALESCE(SUM(cached_tokens), 0), "
+            "       COALESCE(SUM(cache_write_tokens), 0), "
+            "       COALESCE(SUM(cost_usd), 0.0) "
+            "FROM usage WHERE user=? AND session_id=?",
+            (user, session_id),
+        ).fetchone()
+        turns, calls, prompt, completion, cached, cache_write, cost = agg
+
+        by_model_rows = self._conn.execute(
+            "SELECT model, COUNT(*), "
+            "       SUM(prompt_tokens), SUM(completion_tokens), "
+            "       SUM(cached_tokens), SUM(cost_usd) "
+            "FROM usage WHERE user=? AND session_id=? "
+            "GROUP BY model ORDER BY model",
+            (user, session_id),
+        ).fetchall()
+
+        total_prompt = int(prompt or 0)
+        cached_fraction = (
+            float(cached or 0) / total_prompt if total_prompt > 0 else 0.0
+        )
+
+        return {
+            'turns':              int(turns or 0),
+            'llm_calls':          int(calls or 0),
+            'prompt_tokens':      total_prompt,
+            'completion_tokens':  int(completion or 0),
+            'cached_tokens':      int(cached or 0),
+            'cache_write_tokens': int(cache_write or 0),
+            'total_tokens':       total_prompt + int(completion or 0),
+            'cached_fraction':    round(cached_fraction, 4),
+            'cost_usd':           round(float(cost or 0.0), 6),
+            'by_model': [
+                {
+                    'model':             model,
+                    'llm_calls':         int(n_calls),
+                    'prompt_tokens':     int(p_toks),
+                    'completion_tokens': int(c_toks),
+                    'cached_tokens':     int(cach_toks),
+                    'cost_usd':          round(float(m_cost), 6),
+                }
+                for model, n_calls, p_toks, c_toks, cach_toks, m_cost in by_model_rows
+            ],
+        }
 
     # ── admin / inspection ───────────────────────────────────────────────────
 
