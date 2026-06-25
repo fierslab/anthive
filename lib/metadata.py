@@ -133,7 +133,14 @@ def parse_md_file(md_path: Path) -> Tuple[Dict[str, Any], str]:
 
 def write_md_file(md_path: Path, yaml_dict: Dict[str, Any], markdown_body: str) -> None:
     """
-    Write markdown file with YAML preamble
+    Write markdown file with YAML preamble — IDEMPOTENT.
+
+    If the serialised content matches what's already on disk byte-for-byte,
+    the file is NOT touched (mtime preserved). This breaks the snowball
+    in ``ant-build-all`` where re-running ``ant-h5ad-check`` was bumping
+    every .md's mtime, which then made every .duckdb look stale
+    (.md-newer-than-duckdb gate), which triggered a full-catalog
+    reconvert on the next pass.
 
     Args:
         md_path: Path to .md file
@@ -141,13 +148,31 @@ def write_md_file(md_path: Path, yaml_dict: Dict[str, Any], markdown_body: str) 
         markdown_body: Markdown content
     """
     try:
+        # Build the new content in memory first so we can diff against
+        # what's already on disk.
+        from io import StringIO
+        buf = StringIO()
+        buf.write('---\n')
+        yaml.dump(yaml_dict, buf, default_flow_style=False, sort_keys=False, allow_unicode=True)
+        buf.write('---\n\n')
+        buf.write(markdown_body)
+        if not markdown_body.endswith('\n'):
+            buf.write('\n')
+        new_content = buf.getvalue()
+
+        # No-op when the file already has identical content. Preserves
+        # the mtime, which is what downstream stale-checks (ant-build-all
+        # + ant-serve's metadata-cache fingerprint) rely on.
+        if md_path.exists():
+            try:
+                existing = md_path.read_text(encoding='utf-8')
+                if existing == new_content:
+                    return
+            except OSError:
+                pass  # fall through to write
+
         with open(md_path, 'w') as file:
-            file.write('---\n')
-            yaml.dump(yaml_dict, file, default_flow_style=False, sort_keys=False, allow_unicode=True)
-            file.write('---\n\n')
-            file.write(markdown_body)
-            if not markdown_body.endswith('\n'):
-                file.write('\n')
+            file.write(new_content)
     except Exception as error:
         raise MetadataError(
             f"ERROR: [Metadata] Failed to write metadata file\n"
