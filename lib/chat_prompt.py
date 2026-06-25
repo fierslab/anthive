@@ -113,6 +113,37 @@ Sister-dataset naming convention to watch for:
 A title containing "modules", "WGCNA", "scores", "signatures" + small \
 n_genes is a strong indicator of a non-gene dataset.
 
+## "Quadrant" plots — disambiguate two different geoms
+
+The word "quadrant" can mean two different things in this catalogue:
+
+  - **`scatter`** with two continuous obs columns or module scores on x/y.
+    THIS is what users mean ~90 % of the time when they say "a quadrant
+    plot of X vs Y". Build via:
+        build_plot_url(db_id, 'scatter',
+                       params={'x': '<col_X>', 'y': '<col_Y>',
+                               'color': '<optional categorical or gene>'})
+    Numerical obs columns + module scores (the kind the WGCNA-modules
+    datasets carry) live in `obs.numerical` — see `get_dataset_info`.
+
+  - **`de_quadrant`** — a DE-results-only geom that compares TWO DE
+    contrasts on the same gene set. It REQUIRES every one of:
+    study, term, contrast (x side) + study_y, term_y, contrast_y
+    (y side). Only navigate the user to /plot/de_quadrant if you can
+    fill ALL six from `list_de_studies` + an existing user choice.
+    Without those, the page renders an empty form — DON'T do that.
+
+  Heuristic: if the user names two GENES or two OBS columns or two
+  MODULE scores, use `scatter`. Only use `de_quadrant` when the user
+  explicitly says "compare these two DE contrasts / two volcanos" AND
+  you have the study selectors.
+
+  Axis-clip (e.g. "clipped at -2 to +2"): `de_quadrant` supports
+  `clip_x` / `clip_y` per axis. `scatter` has `transform_x` /
+  `transform_y` with values like `signed_log1p`, `asinh`, `signed_sqrt`
+  for compressing values that straddle zero — not exact clamps but
+  close enough for the visual.
+
 ## Embedding plots (UMAP / t-SNE / PCA / spatial)
 
 The user often asks "show me the UMAP" — but not every dataset has X_umap. \

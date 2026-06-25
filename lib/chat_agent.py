@@ -252,9 +252,32 @@ async def run_turn(
             extra_body['provider'] = {'order': cfg.provider_order}
 
         # 5. Tool-loop. Accumulates assistant text; emits SSE frames
-        #    in real time; appends history + emits 'done' at the end.
+        #    in real time; persists history + emits 'done' at the end.
+        #
+        # Persistence runs in a try/finally so the assistant turn lands
+        # in history EVEN IF the client disconnects mid-stream (which it
+        # does whenever an `action navigate` frame fires — the browser
+        # does window.location, drops the SSE socket, cancels this
+        # generator with CancelledError). Without the finally, the
+        # post-navigate page rehydrate finds an empty assistant row
+        # and the user thinks "the bot didn't reply".
         assistant_text_parts: List[str] = []
         action_frames_in_turn: List[Dict[str, Any]] = []
+        _persisted = False
+
+        def _persist_history_now() -> None:
+            nonlocal _persisted
+            if _persisted:
+                return
+            _persisted = True
+            try:
+                text = ''.join(assistant_text_parts).strip()
+                if text:
+                    history_store.append(user, session_id, 'assistant', text)
+                for frame in action_frames_in_turn:
+                    history_store.append_action(user, session_id, frame)
+            except Exception as p_exc:  # noqa: BLE001
+                log.warning("chat: history persist failed — %s", p_exc)
 
         async def _create_with_retry():
             """One retry-with-backoff on transient upstream errors. Per
@@ -380,6 +403,15 @@ async def run_turn(
                 yield _sse({'type': 'error',
                             'message': f"chat: model exceeded {_MAX_TOOL_ROUNDS} tool rounds without stopping"})
 
+        except asyncio.CancelledError:
+            # Client disconnected mid-stream — almost always happens
+            # right after a `navigate` action: the browser does
+            # window.location → SSE socket drops → asyncio cancels this
+            # generator. Persist whatever we have so the post-nav page
+            # rehydrate sees the just-completed turn, then re-raise so
+            # the runtime cleans up normally.
+            _persist_history_now()
+            raise
         except Exception as exc:  # pylint: disable=broad-except
             log.warning("chat: agent error — %s", exc)
             status, retry_after, friendly = _classify_upstream_error(exc)
@@ -392,16 +424,16 @@ async def run_turn(
             if retry_after is not None:
                 err['retry_after'] = retry_after
             yield _sse(err)
+        finally:
+            # Belt-and-suspenders: every exit path (success, error,
+            # cancellation) flushes the assistant turn to history. The
+            # _persist_history_now closure is idempotent so it's safe to
+            # call from both the happy-path block below AND here.
+            _persist_history_now()
 
         # 6. Persist the full assistant turn BEFORE emitting 'done'.
-        #    Web client may navigate immediately on receiving an action,
-        #    so the assistant text + each action frame must hit the DB
-        #    before the SSE stream closes (locked per pika #217 §9.3).
-        full_text = ''.join(assistant_text_parts).strip()
-        if full_text:
-            history_store.append(user, session_id, 'assistant', full_text)
-        for frame in action_frames_in_turn:
-            history_store.append_action(user, session_id, frame)
+        #    Idempotent — the finally above may have already run.
+        _persist_history_now()
 
         # 7. Done frame — signals end of stream to the client.
         yield _sse({'type': 'done'})
