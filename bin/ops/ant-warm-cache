@@ -1,0 +1,225 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["httpx>=0.27.0", "pyyaml>=6.0"]
+# ///
+"""ant-warm-cache — populate the gene_stats cache on this host.
+
+The cache (``tmp/gene_stats_cache.db``) is populated lazily — every
+``/api/gene_stats_all`` call writes new entries. ``ant-warm-cache``
+fires those calls in bulk so a fresh deployment doesn't make the
+first user pay the cold cost on every common gene.
+
+Per-dataset distribution blobs (the heavy lift — ~800 ms layer scan
+per dataset on first hit) are written when ANY gene query lands on
+that dataset. Subsequent gene queries against the same dataset are
+sub-millisecond bisect lookups. So warming with ~50 carefully-chosen
+genes pre-builds every dataset's distribution and gets the catalog
+to "any gene query is sub-second" state.
+
+Adding a new dataset later: this script doesn't need to re-run. The
+new dataset's distribution + per-gene rows fill in on first query.
+Existing datasets' cache rows are untouched (independent (db_id,
+gene_lc, fingerprint) keys).
+
+Usage::
+
+    ant-warm-cache                          # default panel, all filters off
+    ant-warm-cache --genes APOE,TREM2,…     # custom list (CSV or @file.txt)
+    ant-warm-cache --organism mouse         # filter to one organism
+    ant-warm-cache --max 0                  # remove the budget cap
+
+Runs against the LOCAL ant-serve on this host (rest_api_host /
+rest_api_port from ``anthive.yaml``). Set ``--base-url`` to override.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import sys
+import time
+
+# Line-buffer stdout so per-gene progress lines flush in real-time
+# when output is redirected (e.g. when the makefile target captures
+# output, or when run under `tee`).
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except (AttributeError, ValueError):
+    pass
+from pathlib import Path
+from typing import List, Optional
+
+import httpx
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_LIB_DIR = _SCRIPT_DIR.parent.parent / 'lib'
+sys.path.insert(0, str(_LIB_DIR))
+
+from config import get_config  # noqa: E402
+
+
+# ── Default curated gene panel ───────────────────────────────────────────────
+#
+# Built from the same suggestions in the gene-atlas warming discussion
+# (anthive-web pika #214). Heavy on AD-genetics + microglia/macrophage
+# markers + activation signatures since this catalogue is human-microglia/AD-
+# heavy. ~150 genes — enough to pre-build every dataset's distribution
+# without bloating the cache to multi-GB.
+DEFAULT_PANEL: List[str] = [
+    # AD GWAS / risk loci
+    'APOE', 'TREM2', 'BIN1', 'CR1', 'SORL1', 'PICALM', 'CLU', 'CD33',
+    'MS4A6A', 'MS4A4A', 'PLCG2', 'ABCA7', 'INPP5D', 'BCKDK', 'TREML2',
+    'SPI1', 'HLA-DRB1', 'PTK2B', 'EPHA1', 'CASS4', 'SLC24A4', 'HLA-DQA1',
+    'ADAM10', 'ADAMTS1', 'CR2', 'SCIMP', 'WWOX', 'CNTNAP2',
+    # Microglia identity / homeostasis
+    'P2RY12', 'TMEM119', 'CX3CR1', 'CSF1R', 'ITGAM', 'AIF1', 'CD68',
+    'C1QA', 'C1QB', 'C1QC', 'C3AR1', 'P2RY13', 'OLFML3', 'SALL1',
+    'HEXB', 'FCRLS', 'SIGLEC8', 'SIGLECH', 'GPR34', 'SELPLG', 'TGFBR1',
+    # DAM / activation signatures
+    'SPP1', 'GPNMB', 'CST7', 'ITGAX', 'LPL', 'AXL', 'LILRB4', 'CLEC7A',
+    'TYROBP', 'CD9', 'CD63', 'CSF1', 'IGF1', 'APOC1', 'CTSB', 'CTSD',
+    'CTSL', 'CTSS', 'LYZ', 'FTH1', 'FTL', 'CD74', 'HLA-DRA', 'HLA-DRB5',
+    'B2M', 'CD81', 'CD9', 'GAS6',
+    # Inflammatory / interferon response
+    'IL1B', 'IL6', 'TNF', 'NFKB1', 'NFKB2', 'IFI27', 'ISG15', 'IFIT2',
+    'IFIT3', 'IFITM3', 'STAT1', 'MX1', 'RSAD2', 'OAS1', 'IRF7', 'IRF8',
+    # Astrocytes / oligodendrocytes / neurons (for cross-cell-type pages)
+    'GFAP', 'AQP4', 'SLC1A2', 'SLC1A3', 'S100B', 'ALDH1L1',
+    'MBP', 'PLP1', 'OLIG2', 'CNP', 'MAG', 'MOG',
+    'RBFOX3', 'SNAP25', 'SYP', 'MAP2', 'TUBB3', 'CAMK2A',
+    # Endothelial / pericyte
+    'PECAM1', 'CDH5', 'CLDN5', 'VWF', 'PDGFRB', 'RGS5', 'KCNJ8',
+    # House-keeping (sanity baselines)
+    'ACTB', 'GAPDH', 'PPIA', 'HPRT1', 'RPL13A', 'B2M',
+    # Common requested genes that aren't in the categories above
+    'MAPT', 'APP', 'PSEN1', 'PSEN2', 'BACE1', 'GRN', 'PGRN', 'TARDBP',
+    'SNCA', 'PARK2', 'PARK7', 'LRRK2', 'HTT', 'SOD1', 'TBK1', 'CHCHD10',
+]
+
+
+async def warm_one(
+    client: httpx.AsyncClient,
+    base_url: str,
+    gene: str,
+    organism: Optional[str],
+    cell_type: Optional[str],
+    auth: Optional[tuple],
+) -> tuple[str, int, float, dict]:
+    """Fire one gene_stats_all call and return (gene, http_status, seconds, payload-summary)."""
+    params = {'genes': gene}
+    if organism:
+        params['organism'] = organism
+    if cell_type:
+        params['cell_type'] = cell_type
+    t0 = time.perf_counter()
+    resp = await client.get(
+        f'{base_url}/gene_stats_all',
+        params=params, auth=auth, timeout=300.0,
+    )
+    elapsed = time.perf_counter() - t0
+    try:
+        body = resp.json()
+    except ValueError:
+        body = {}
+    summary = {
+        'n_databases': body.get('n_databases'),
+        'cache': body.get('cache'),
+    }
+    return gene, resp.status_code, elapsed, summary
+
+
+async def main_async(args: argparse.Namespace) -> int:
+    if args.genes.startswith('@'):
+        gene_file = Path(args.genes[1:])
+        genes_raw = gene_file.read_text().strip().splitlines()
+    elif args.genes == 'DEFAULT':
+        genes_raw = DEFAULT_PANEL
+    else:
+        genes_raw = args.genes.split(',')
+
+    genes = [g.strip() for g in genes_raw if g.strip()]
+    if args.max and len(genes) > args.max:
+        genes = genes[: args.max]
+
+    print(f'  warming cache with {len(genes)} gene(s) against {args.base_url}')
+    print(f'  filters: organism={args.organism!r}  cell_type={args.cell_type!r}')
+
+    auth = tuple(args.auth.split(':', 1)) if args.auth else None
+
+    n_ok = n_err = 0
+    t_total0 = time.perf_counter()
+    async with httpx.AsyncClient(verify=False) as client:
+        for i, gene in enumerate(genes, 1):
+            try:
+                g, status, elapsed, summary = await warm_one(
+                    client, args.base_url, gene,
+                    args.organism, args.cell_type, auth,
+                )
+            except httpx.HTTPError as exc:
+                print(f'  [{i:>3}/{len(genes)}] ERR  {gene}  {exc}')
+                n_err += 1
+                continue
+            if status == 200:
+                cache = summary.get('cache') or {}
+                hits = cache.get('hits', 0)
+                misses = cache.get('misses', 0)
+                writes = cache.get('writes', 0)
+                print(f'  [{i:>3}/{len(genes)}] {elapsed:5.1f}s  {gene:<10}  '
+                      f'n_dbs={summary.get("n_databases")}  hits={hits} misses={misses} writes={writes}')
+                n_ok += 1
+            else:
+                print(f'  [{i:>3}/{len(genes)}] HTTP {status}  {gene}')
+                n_err += 1
+
+    elapsed = time.perf_counter() - t_total0
+    print()
+    print(f'  done in {elapsed:.0f}s — {n_ok} ok, {n_err} err')
+    return 0 if n_err == 0 else 1
+
+
+def main() -> int:
+    cfg = get_config()
+    default_host = cfg.get('rest_api_host', 'localhost')
+    default_port = cfg.get('rest_api_port', 8080)
+    default_base = f'http://{default_host}:{default_port}/api'
+    # If rest_api_host is the bind-all wildcard, prefer localhost loopback.
+    if default_host in ('0.0.0.0', '::'):
+        default_base = f'http://localhost:{default_port}/api'
+
+    parser = argparse.ArgumentParser(
+        description='Pre-populate the gene_stats cache for the curated panel + filters.',
+    )
+    parser.add_argument(
+        '--base-url', default=default_base,
+        help=f'ant-serve base URL (default {default_base}).',
+    )
+    parser.add_argument(
+        '--auth', default=None,
+        help='HTTP basic auth, "user:password". Omit when hitting localhost loopback.',
+    )
+    parser.add_argument(
+        '--genes', default='DEFAULT',
+        help=("Gene list. Default: the curated AD + microglia panel "
+              "(~150 genes). Pass CSV directly or '@/path/to/file.txt' "
+              "(one gene per line)."),
+    )
+    parser.add_argument(
+        '--organism', default=None,
+        help='Filter to one organism (mouse / human / …).',
+    )
+    parser.add_argument(
+        '--cell-type', default=None,
+        help='Filter to one mus-vocab cell_type (e.g. "microglial cell").',
+    )
+    parser.add_argument(
+        '--max', type=int, default=500,
+        help='Cap number of genes to warm (default 500, 0 = no cap).',
+    )
+    args = parser.parse_args()
+
+    return asyncio.run(main_async(args))
+
+
+if __name__ == '__main__':
+    sys.exit(main())

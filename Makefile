@@ -1,4 +1,4 @@
-.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-mcp serve-all serve-debug serve-prod serve-stop caddy-passwd caddy-passwd-clear dev-jupyter sync-push sync-pull sync-pull-duckdb sync-pull-de sync-pull-all sync-status build-stale sync-update serve-status serve-restart h5adstore-push push-all ingest ingest-dry manifest
+.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-mcp serve-all serve-debug serve-prod serve-stop caddy-passwd caddy-passwd-clear dev-jupyter sync-push sync-pull sync-pull-duckdb sync-pull-de sync-pull-all sync-status build-stale sync-update serve-status serve-restart h5adstore-push push-all ingest ingest-dry manifest cache-warm
 
 help:
 	@echo "Anthive4 Development Commands"
@@ -34,6 +34,10 @@ help:
 	@echo "  make ingest FILTER=Foo2025  - Restrict to one data project"
 	@echo "  make ingest-dry      - Show what would happen without writing anything"
 	@echo "  make manifest        - Rebuild + upload s3://anthive4a/_catalog/manifest.json (used by mus's sidecar validation)"
+	@echo ""
+	@echo "Cache (gene atlas):"
+	@echo "  make cache-warm        - Pre-populate tmp/gene_stats_cache.db on THIS host (curated panel, ~150 genes)"
+	@echo "  make cache-warm GENES=APOE,TREM2,…   - Warm a custom gene list (CSV or @file.txt)"
 	@echo ""
 	@echo "Sync (S3) — the maintenance workflow:"
 	@echo "  make sync-update     - Full cycle: pull h5ad → rebuild stale duckdb → push"
@@ -381,6 +385,34 @@ ingest-dry:
 	@./bin/ingest/ant-ingest --data-folder ./data/h5adstore --dry-run $(if $(FILTER),--filter $(FILTER),)
 	@echo ""
 	@echo "(ingest-dry: build-stale step skipped — run 'make ingest' for the real pass)"
+
+# ── Gene-atlas cache warm-up ────────────────────────────────────────────────
+# Pre-populate tmp/gene_stats_cache.db by firing /api/gene_stats_all calls
+# against the local ant-serve. The cache is host-local (lives outside
+# data/h5adstore, NOT synced by ant-sync), so this target should run on
+# whichever host serves users — typically prod.
+#
+# What gets warmed:
+#   - Per-dataset distribution blob (~800 ms cold layer scan) for every
+#     ingested dataset. Cached the FIRST time any gene query lands on
+#     that dataset, then reused for every subsequent gene.
+#   - Per-(db_id, gene) stats rows for the curated panel (~150 genes:
+#     AD GWAS + microglia identity/DAM/IFN + house-keeping).
+#
+# After this runs once, every dataset's "any gene" query is sub-second.
+#
+# Adding a new dataset later does NOT invalidate existing cache rows —
+# the new dataset's distribution + per-gene rows fill in lazily on first
+# query. Cache keys are (db_id, gene_lc, fingerprint), so other datasets'
+# rows are independent and stay valid. No need to re-run cache-warm
+# unless you want the new dataset pre-warmed too (pass GENES=…).
+#
+# Custom panel:
+#   make cache-warm GENES=APOE,TREM2,P2RY12
+#   make cache-warm GENES=@my_genes.txt
+GENES ?= DEFAULT
+cache-warm:
+	@./bin/ops/ant-warm-cache --genes '$(GENES)'
 
 # Rebuild + upload s3://<bucket>/_catalog/manifest.json. This file is the
 # authoritative list of (data_project, group_id, file_id, basename, inactive)
