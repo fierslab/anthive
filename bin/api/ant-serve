@@ -8800,9 +8800,11 @@ def main():
         print("The server will start but no databases will be available.")
 
     # Initialize geneset registry (optional)
+    # Repo root is two levels up: bin/api/ant-serve → bin/api/ → bin/ → repo
+    # (was `script_dir.parent` pre-2026-06 reorg, when ant-serve lived in bin/).
     geneset_store_value = config.get('geneset_store')
     if geneset_store_value:
-        geneset_path = (script_dir.parent / geneset_store_value).resolve()
+        geneset_path = (script_dir.parent.parent / geneset_store_value).resolve()
         if geneset_path.exists():
             print(f"Initializing geneset registry: {geneset_path}")
             geneset_registry = GenesetRegistry(geneset_path)

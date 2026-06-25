@@ -23,6 +23,7 @@ just-completed turn.
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import logging
 import re
@@ -48,9 +49,19 @@ from chat_tools import (
 log = logging.getLogger('anthive.chat')
 
 
-# Max tool-call iterations per turn. A reasonable cap so a misbehaving
-# model doesn't loop indefinitely; in practice good models settle in 1-3.
-_MAX_TOOL_ROUNDS = 8
+# Max tool-call iterations per turn. A genuinely-stuck model needs an
+# upper bound, but with SQL analytics in the toolset 8 was too tight:
+# search_genes → analytics_schema → analytics_query (wrong column case)
+# → analytics_query (fixed) → module_score → analytics_query is six
+# productive rounds on its own. Bumped to 16; loop detector below
+# catches the actual misbehaviour (same tool + same args repeated)
+# earlier than the cap would.
+_MAX_TOOL_ROUNDS = 16
+
+# Loop detector. Abort early when the model calls THE SAME TOOL with
+# THE SAME ARGS this many times back-to-back — that's stuck, not
+# productive work.
+_LOOP_DETECT_REPEAT = 3
 
 # Per-LLM-call timeout. OpenRouter forwards to upstream providers
 # (Anthropic, OpenAI, etc.) — wide enough for the longest tool-round
@@ -367,6 +378,13 @@ async def run_turn(
                     return await ai.chat.completions.create(**create_kwargs)
                 raise
 
+        # Rolling window of tool-call signatures across this turn. If the
+        # last _LOOP_DETECT_REPEAT entries are identical, the model is
+        # stuck — abort with a specific message instead of letting it
+        # ride to _MAX_TOOL_ROUNDS.
+        recent_tool_sigs: collections.deque = collections.deque(maxlen=_LOOP_DETECT_REPEAT)
+        loop_detected_tool: Optional[str] = None
+
         try:
             for round_idx in range(_MAX_TOOL_ROUNDS):
                 stream = await _create_with_retry()
@@ -443,6 +461,19 @@ async def run_turn(
                     except json.JSONDecodeError:
                         args = {}
 
+                    # Loop detector — track (tool name + args) sigs across
+                    # the whole turn. If the last N are identical, the
+                    # model is stuck; bail with a specific error.
+                    try:
+                        sig = f"{name}::{json.dumps(args, sort_keys=True, default=str)}"
+                    except Exception:
+                        sig = f"{name}::<unhashable args>"
+                    recent_tool_sigs.append(sig)
+                    if (len(recent_tool_sigs) >= _LOOP_DETECT_REPEAT
+                            and len(set(recent_tool_sigs)) == 1):
+                        loop_detected_tool = name
+                        break
+
                     if name in CLIENT_ACTION_TOOLS:
                         # Server-side preflight for `navigate` to plot URLs:
                         # GET the underlying /api/databases/<db>/plot/<geom>
@@ -500,10 +531,33 @@ async def run_turn(
                         'content':     json.dumps(tool_result),
                     })
 
+                if loop_detected_tool:
+                    # Same tool + same args called _LOOP_DETECT_REPEAT
+                    # times back-to-back — stuck. Emit a specific frame
+                    # and stop the outer loop. Use 'info' (additive,
+                    # web client treats it as soft notice) rather than
+                    # 'error' so the partial work the model produced
+                    # still renders without an alarming banner.
+                    yield _sse({
+                        'type':    'info',
+                        'kind':    'loop_detected',
+                        'message': (f"The assistant kept calling `{loop_detected_tool}` "
+                                    f"with the same arguments {_LOOP_DETECT_REPEAT}× in a "
+                                    f"row — stopping. Try a more specific question."),
+                    })
+                    break
+
             else:
-                # Hit _MAX_TOOL_ROUNDS without a 'stop' — model is looping.
-                yield _sse({'type': 'error',
-                            'message': f"chat: model exceeded {_MAX_TOOL_ROUNDS} tool rounds without stopping"})
+                # Hit _MAX_TOOL_ROUNDS without a 'stop' — productive but
+                # didn't converge. Soft notice, not an error: the partial
+                # work already streamed to the user is real.
+                yield _sse({
+                    'type':    'info',
+                    'kind':    'max_rounds',
+                    'message': (f"The assistant made {_MAX_TOOL_ROUNDS} tool calls "
+                                "and didn't reach a final answer. Send another "
+                                "message to continue, or try a more focused question."),
+                })
 
         except asyncio.CancelledError:
             # Client disconnected mid-stream — almost always happens
