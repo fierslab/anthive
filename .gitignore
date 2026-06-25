@@ -44,6 +44,13 @@ config/server/
 
 # User config (may contain credentials)
 anthive.yaml
+# Local secrets / env files (e.g. OPENROUTER_API_KEY for the chat assistant).
+# NOTE: nothing auto-loads these yet — the launching shell/systemd must export
+# them, or ant-serve must add dotenv loading. The .h5ad.mus `.env` cascade files
+# live in the separate h5adstore repo and are unaffected by this pattern.
+.env
+.env.*
+!.env.example
 
 # Deleted/broken DuckDB files
 *.duckdb.deleted
