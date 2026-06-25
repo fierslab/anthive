@@ -431,7 +431,7 @@
               : ('s' + Date.now() + Math.round(Math.random() * 1e9));
         ss.set(SID, sid);
       }
-      var streaming = false;
+      var streaming = false, navRetry = 0;
 
       function localLog()  { try { return JSON.parse(ss.get(LOG) || '[]'); } catch (e) { return []; } }
       function saveLocal(a) { ss.set(LOG, JSON.stringify(a.slice(-50))); }
@@ -471,12 +471,55 @@
           .catch(function () { renderHistory(localLog()); });
       }
 
+      // Normalise an assistant-supplied navigation target: map REST API paths
+      // to their web-UI equivalent (build_plot_url may hand back
+      // /[api/]databases/{id}/… whereas the browser route is /browse/{id}/…),
+      // and only ever allow same-origin in-app relative paths — so a navigate
+      // action can never bounce the user off-site or to a non-page.
+      function safeNavUrl(raw) {
+        if (!raw || typeof raw !== 'string') return null;
+        var u = raw.trim()
+          .replace(/^\/api\/databases\//, '/browse/')
+          .replace(/^\/databases\//, '/browse/');
+        if (u.charAt(0) !== '/' || u.charAt(1) === '/') return null;   // block //host, http(s)://, relative
+        return u;
+      }
+
+      function actionNote(text) {
+        addMsg('action', text);
+        var l = localLog(); l.push({ role: 'action', content: text }); saveLocal(l);
+      }
+
+      // Pre-flight the target before committing the page change: if it isn't
+      // reachable we DON'T navigate — the user stays put (chat window intact)
+      // and the failure is surfaced in the chat, then fed back to the assistant
+      // once so it can self-correct. This is what keeps the window up on a
+      // faulty redirect instead of dumping the user on a widget-less error page.
+      function tryNavigate(url) {
+        fetch(url, { credentials: 'same-origin', headers: { 'X-Ant-Preflight': '1' } })
+          .then(function (r) {
+            if (r.ok) {
+              actionNote('↪ opening ' + url);
+              ss.set(OPEN, '1');           // re-open after the reload
+              setTimeout(function () { window.location.href = url; }, 400);
+            } else { navFailed(url, r.status); }
+          })
+          .catch(function () { navFailed(url, 0); });
+      }
+      function navFailed(url, status) {
+        actionNote('⚠ couldn’t open ' + url + (status ? ' (HTTP ' + status + ')' : ' (unreachable)') + ' — staying here.');
+        if (navRetry < 1 && !streaming) {   // let the assistant fix it once; no loops
+          navRetry++;
+          send('[The page ' + url + ' could not be opened (HTTP ' + (status || 'error') +
+               '). Do not repeat that URL — pick a valid view or correct it.]', true);
+        }
+      }
+
       function doAction(ev) {
         if (ev.name === 'navigate' && ev.args && ev.args.url) {
-          addMsg('action', '↪ opening ' + ev.args.url);
-          var l = localLog(); l.push({ role: 'action', content: 'opening ' + ev.args.url }); saveLocal(l);
-          ss.set(OPEN, '1');           // re-open after the reload
-          setTimeout(function () { window.location.href = ev.args.url; }, 400);
+          var url = safeNavUrl(ev.args.url);
+          if (!url) { actionNote('⚠ ignored an invalid navigation target.'); return; }
+          tryNavigate(url);
         } else if (ev.name === 'set_plot_param' && window.__antApplyPlotParam) {
           window.__antApplyPlotParam(ev.args || {});      // in-place tweak (plot.html hook; optional)
           addMsg('action', '✎ ' + ((ev.args && ev.args.name) || 'updated'));
@@ -484,11 +527,15 @@
       }
 
       // POST + Server-Sent-Events streamed over fetch (EventSource is GET-only).
-      function send(message) {
+      // hidden=true → a system follow-up (e.g. nav-failure recovery): still sent
+      // to the server, but not shown/stored as a user bubble.
+      function send(message, hidden) {
         if (streaming) return;
         streaming = true; sendBtn.disabled = true;
-        addMsg('user', message);
-        var l = localLog(); l.push({ role: 'user', content: message }); saveLocal(l);
+        if (!hidden) {
+          addMsg('user', message);
+          var l = localLog(); l.push({ role: 'user', content: message }); saveLocal(l);
+        }
         var asstEl = null, asstText = '';
         fetch('/api/chat', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
@@ -532,6 +579,7 @@
         e.preventDefault();
         var v = input.value.trim(); if (!v || streaming) return;
         input.value = ''; input.style.height = 'auto';
+        navRetry = 0;          // fresh user turn → allow one nav-failure recovery again
         send(v);
       });
 
