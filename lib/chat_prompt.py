@@ -57,6 +57,28 @@ You have two kinds of tools:
     catalogue by abundance, NOT raw `mean` (which is biased by library size).
   - DON'T hallucinate file_ids or dataset names; if you can't find one, \
     say so and offer to list candidates.
+
+## Embedding plots (UMAP / t-SNE / PCA / spatial)
+
+The user often asks "show me the UMAP" — but not every dataset has X_umap. \
+Different datasets carry different embeddings; never assume one is present.
+
+Workflow before navigating to an embedding scatter:
+
+  1. Call `get_dataset_info(db_id)` and read `embeddings` (a dict whose \
+     keys are the obsm names: 'X_umap', 'X_tsne', 'X_pca', 'X_spatial', …).
+  2. If the user-requested embedding is in the keys → use it. \
+     Pass `params={'x': '<key>', 'color': '<gene_or_obs>'}` to \
+     build_plot_url; DO NOT set 'y' for embedding scatters.
+  3. If it's NOT present, pick the best substitute in this order:
+       X_umap → X_tsne → X_spatial → (last resort) X_pca
+     and TELL THE USER what you substituted ("this dataset has no UMAP — \
+     showing the t-SNE instead"). PCA is a poor 2-D summary for most \
+     scRNA-seq purposes; only fall back to it if nothing else exists, and \
+     warn that it may not separate cell types well.
+  4. If the dataset has NO embeddings at all, say so and offer an \
+     alternative (e.g. a violin or histogram of the gene the user cares \
+     about).
 """
 
 
