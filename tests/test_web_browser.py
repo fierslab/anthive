@@ -467,6 +467,21 @@ def test_index_renders(client):
     assert "Group A Study" in resp.text
 
 
+def test_chat_widget_present_and_status_gated(client):
+    # The sitewide data-assistant widget ships in base.html on every page, but
+    # is gated entirely client-side on GET /api/chat/status — so the launcher
+    # markup is present yet hidden, and the page never assumes chat is on.
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert 'id="chat-launcher"' in resp.text
+    assert 'id="chat-panel"' in resp.text
+    # gated on the capability endpoint, and it talks to the POST chat endpoint
+    assert "/api/chat/status" in resp.text
+    assert "/api/chat" in resp.text
+    # launcher must start hidden (revealed by JS only when status says enabled)
+    assert "#chat-launcher" in resp.text and "display: none" in resp.text
+
+
 def test_index_renders_with_multiple_collections_no_redirect(client):
     # Sanity: with the default fake (two groups), '/' renders the overview;
     # the single-collection auto-jump must not fire here.

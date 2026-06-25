@@ -57,9 +57,22 @@ The widget is the easy 20%. Surveyed options:
 | LibreChat / Open WebUI / Chatbot UI | rejected | Standalone apps, separate deploys — not embeddable. |
 | Intercom / Tidio / Botpress | rejected | Support-bot SaaS; third-party data egress (unacceptable behind Authelia) and not built to drive our UI. |
 
-**Decision: Deep Chat web component.** Inline it in `base.html` behind a small
-toggle button so it's on every page. If we later want richer action-rendering we
-can revisit CopilotKit, but it's not worth a React build for v1.
+**Decision (revised at implementation, 2026-06-25): a minimal inline vanilla
+widget — *not* Deep Chat.** Deep Chat (and every option above) was rejected once
+building started, because:
+
+- This codebase is **strictly self-contained** (`web/CLAUDE.md`: no `static/`
+  dir, inline CSS/JS, no external CDNs). An internal Authelia-gated box can't
+  depend on `unpkg`, and bundling a ~hundreds-of-KB web component contradicts the
+  inline convention.
+- The thing Deep Chat would save us — the message UI — is ~150 lines of vanilla
+  JS. The thing it *wouldn't* do — execute "agent emits action → browser
+  navigates" — is custom either way.
+
+So **v1 is a hand-written launcher + panel in `base.html`** (~CSS block + one
+`<script>` IIFE), streaming via `fetch`+SSE, persisting session in
+`sessionStorage` + server history. Built and verified 2026-06-25. If richer
+action-rendering is ever wanted, revisit CopilotKit — but it has not been needed.
 
 ## 5. Architecture
 
@@ -225,23 +238,61 @@ boolean.
 - **Rate / cost**: per-user rate limit on `/api/chat`; cap tool-call loops per
   turn; stream so a long turn is interruptible.
 
-## 9. Phased plan (when/if scheduled)
+## 9. Wire contract (LOCKED — the web client is built to this, 2026-06-25)
 
-1. **Spec the contract** — `GET /api/chat/status`, the `POST /api/chat` SSE
-   events, `GET /api/chat/history`, the client tool-call schema, and the
-   `chat.enabled`/`chat.model`/`chat.base_url` + `OPENROUTER_API_KEY` config keys
-   (`chat.enabled: false` + a default `chat.model` added to
-   `anthive.default.yaml`). Hand the server half to anthive4.
-2. **Server v1 (anthive4):** the enablement gate (§7) + `/api/chat/status`
-   first, then `/api/chat` — OpenAI-compatible client pointed at OpenRouter
-   (`chat.model`) + the five data tools + `build_plot_url`, system context from
-   `/databases`, in-memory session store.
-3. **Widget v1 (web):** Deep Chat in `base.html` **gated on `/api/chat/status`**,
-   `navigate` action only,
-   rehydrate from `/api/chat/history`. End-to-end "ask → land on the right view,
-   conversation persists across the jump."
-4. **`set_plot_param`** action wired into `plot.html` for in-place refinement
-   ("make it a violin", "split by genotype") without leaving the page.
+The client half (`base.html`) is implemented and ships dark. The server half
+(ant-serve) **must match these exactly** or the two won't meet. All three are
+under `/api/` (proxied to ant-serve) and return **404 when chat is OFF** (§7).
+
+**`GET /api/chat/status`** → `200 {"enabled": bool, "model"?: "<display string>"}`.
+The only endpoint reachable when OFF — returns `{"enabled": false}` (never a
+secret). The widget renders **only** when `enabled` is true.
+
+**`GET /api/chat/history?session_id=<id>`** →
+`200 {"messages": [{"role": "user"|"assistant"|"action", "content": "<text>"}]}`.
+Authoritative transcript, keyed server-side by Authelia `Remote-User` ×
+`session_id`. Empty list is fine (client falls back to its sessionStorage
+mirror). `role:"action"` rows render as a muted "↪ …" note.
+
+**`POST /api/chat`** body
+`{"session_id": "<id>", "message": "<user text>", "context": {"path": "<url path+query>"}}`
+→ **`text/event-stream`**. Each SSE frame is `data: <json>\n\n` where `<json>` is
+one of:
+
+| `type` | fields | client effect |
+|---|---|---|
+| `token` | `text` | append to the current assistant bubble (streaming) |
+| `action` | `name`, `args` | execute a client action (below) |
+| `error` | `message` | show a muted ⚠ note; turn ends |
+| `done` | — | end of turn (stream close also ends it) |
+
+**Client actions** (`type:"action"`):
+- `navigate` — `args:{url}`: the client shows "↪ opening …", sets the re-open
+  flag, and does `window.location.href = url` after ~400 ms. **The server MUST
+  persist the full assistant turn (text + any action note) to the history store
+  before the stream closes**, so the rehydrate on the next page is complete.
+- `set_plot_param` — `args:{name, value, …}`: in-place plot tweak via a
+  `window.__antApplyPlotParam` hook. **Hook not yet implemented** (phase 4);
+  unknown/absent → silently ignored. For now the server should drive plot
+  changes via `navigate` to a rebuilt plot URL.
+
+**Config keys** (ant-serve): `chat.enabled` (default `false` in
+`anthive.default.yaml`), `chat.model` (sane default), `chat.base_url` (default
+OpenRouter), key from `OPENROUTER_API_KEY` env or `chat.api_key` (gitignored
+yaml). See §7.
+
+## 9a. Phased plan (when/if scheduled)
+
+1. ~~Spec the contract~~ — **done** (§9, locked).
+2. ~~Widget v1 (web)~~ — **done 2026-06-25**: inline launcher + panel in
+   `base.html`, status-gated, SSE streaming, `navigate` action, session
+   persisted across navigation, rehydrate from history. Ships dark.
+3. **Server v1 (anthive4) — NEXT:** the enablement gate (§7) + `/api/chat/status`
+   first, then `/api/chat` (OpenAI-compatible client → OpenRouter `chat.model`) +
+   the five data tools + `build_plot_url`, system context from `/databases`,
+   in-memory session store keyed by `Remote-User` × `session_id`.
+4. **`set_plot_param`** — `window.__antApplyPlotParam` hook in `plot.html` for
+   in-place refinement ("make it a violin", "split by genotype").
 5. **Polish:** persistent session store (SQLite, TTL), htmx `hx-preserve` for
    flicker-free navigation, per-user rate limit, opt-out toggle.
 

@@ -201,6 +201,45 @@
         @media (max-width: 560px) {
             #storage-notice { left: 6px !important; right: 6px !important; max-width: none !important; max-height: 62vh; overflow-y: auto; }
         }
+
+        /* ── data-assistant chat widget (sitewide) ───────────────────────────
+           Launcher + panel live in base.html so the conversation follows the
+           user across pages. Entirely gated client-side on GET /api/chat/status:
+           the launcher stays display:none until the server reports enabled, so a
+           deployment with chat off shows no affordance. The server half
+           (/api/chat, /api/chat/status, /api/chat/history) is ant-serve's. */
+        #chat-launcher {
+            position: fixed; bottom: 16px; right: 16px; z-index: 1001;
+            width: 46px; height: 46px; border-radius: 50%; background: var(--link);
+            color: #fff; border: none; cursor: pointer; font-size: 20px;
+            box-shadow: 0 4px 14px rgba(15,23,42,.25);
+            display: none; align-items: center; justify-content: center;
+        }
+        #chat-launcher:hover { background: #1e40af; }
+        #chat-panel {
+            position: fixed; bottom: 72px; right: 16px; z-index: 1001;
+            width: 372px; max-width: calc(100vw - 24px); height: 70vh; max-height: 560px;
+            background: #fff; border: 1px solid var(--border); border-radius: 10px;
+            box-shadow: 0 10px 34px rgba(15,23,42,.28);
+            display: none; flex-direction: column; overflow: hidden;
+        }
+        #chat-panel.open { display: flex; }
+        #chat-head { display: flex; align-items: center; gap: 8px; padding: 9px 12px; background: #0f172a; color: #fff; font-size: 13px; font-weight: 600; }
+        #chat-head .sub { font-weight: 400; font-size: 10px; color: #94a3b8; font-family: var(--font-mono); }
+        #chat-head .x { margin-left: auto; cursor: pointer; color: #cbd5e1; font-size: 15px; background: none; border: none; line-height: 1; }
+        #chat-head .x:hover { color: #fff; }
+        #chat-log { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; font-size: 12.5px; line-height: 1.5; }
+        .chat-msg { max-width: 86%; padding: 7px 10px; border-radius: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+        .chat-msg.user { align-self: flex-end; background: var(--link); color: #fff; border-bottom-right-radius: 3px; }
+        .chat-msg.assistant { align-self: flex-start; background: #f1f5f9; color: var(--text); border-bottom-left-radius: 3px; }
+        .chat-msg.action { align-self: flex-start; background: #fef3c7; color: #92400e; font-size: 11px; border-radius: 8px; font-family: var(--font-mono); }
+        .chat-empty { margin: auto; color: var(--text-muted); font-size: 12px; text-align: center; padding: 14px; }
+        #chat-form { display: flex; gap: 6px; padding: 9px; border-top: 1px solid var(--border); }
+        #chat-input { flex: 1; font-family: var(--font); font-size: 12.5px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 8px; outline: none; resize: none; max-height: 90px; line-height: 1.4; }
+        #chat-input:focus { border-color: var(--link); }
+        #chat-send { background: var(--link); color: #fff; border: none; border-radius: 8px; padding: 0 13px; cursor: pointer; font-size: 14px; }
+        #chat-send:disabled { opacity: .5; cursor: default; }
+        @media (max-width: 560px) { #chat-panel { width: auto; left: 8px; right: 8px; bottom: 68px; height: 72vh; } }
     </style>
     <script>
     function initTable(id,o){o=o||{};var ps=o.pageSize||20,s=o.searchable!==false,t=document.getElementById(id);if(!t)return;var tb=t.querySelector('tbody');if(!tb)return;var c=document.createElement('div');c.className='tbl-controls';t.parentNode.insertBefore(c,t);var si=null;if(s){si=document.createElement('input');si.type='text';si.placeholder='Filter\u2026';si.addEventListener('input',function(){p=0;r()});c.appendChild(si)}var inf=document.createElement('span');inf.className='tbl-info';c.appendChild(inf);var pv=document.createElement('a');pv.className='tbl-pg';pv.href='#';pv.textContent='\u2039 prev';pv.style.display='none';pv.addEventListener('click',function(e){e.preventDefault();p--;r()});c.appendChild(pv);var nx=document.createElement('a');nx.className='tbl-pg';nx.href='#';nx.textContent='next \u203a';nx.style.display='none';nx.addEventListener('click',function(e){e.preventDefault();p++;r()});c.appendChild(nx);var p=0;function r(){var q=si?si.value.toLowerCase().trim():'',a=Array.from(tb.querySelectorAll('tr')),f=q?a.filter(function(r){return r.textContent.toLowerCase().includes(q)}):a,tp=Math.max(1,Math.ceil(f.length/ps));if(p>=tp)p=tp-1;if(p<0)p=0;var st=p*ps;a.forEach(function(r){r.style.display='none'});f.slice(st,st+ps).forEach(function(r){r.style.display=''});var sh=Math.min(ps,f.length-st);inf.textContent=f.length<=ps?f.length+' item'+(f.length!==1?'s':''):(st+1)+'\u2013'+(st+sh)+' of '+f.length;pv.style.display=p>0?'':'none';nx.style.display=p<tp-1?'':'none'}r()}
@@ -349,6 +388,165 @@
         detBody.style.display = open ? 'none' : 'block';
         det.textContent = open ? 'details ▾' : 'details ▴';
       });
+    })();
+    </script>
+
+    <!-- ── data-assistant chat widget ──────────────────────────────────────
+         Markup is always present but the launcher is hidden until
+         GET /api/chat/status reports {enabled:true}. Conversation state lives
+         in sessionStorage (session_id + open flag + a local transcript mirror)
+         so it survives the full-page navigations the assistant triggers; the
+         authoritative transcript is the server's, keyed by Authelia user. -->
+    <button id="chat-launcher" title="Ask the data assistant" aria-label="Open data assistant">💬</button>
+    <div id="chat-panel" role="dialog" aria-label="Data assistant">
+      <div id="chat-head">assistant <span class="sub" id="chat-model"></span>
+        <button class="x" id="chat-close" title="close" aria-label="close">✕</button></div>
+      <div id="chat-log"></div>
+      <form id="chat-form">
+        <textarea id="chat-input" rows="1" placeholder="Ask about the data, or say what you'd like to see…" autocomplete="off" spellcheck="false"></textarea>
+        <button id="chat-send" type="submit" title="send" aria-label="send">➤</button>
+      </form>
+    </div>
+    <script>
+    (function () {
+      var launcher = document.getElementById('chat-launcher');
+      var panel    = document.getElementById('chat-panel');
+      var logBox   = document.getElementById('chat-log');
+      var form     = document.getElementById('chat-form');
+      var input    = document.getElementById('chat-input');
+      var sendBtn  = document.getElementById('chat-send');
+      var closeBtn = document.getElementById('chat-close');
+      var modelEl  = document.getElementById('chat-model');
+      if (!launcher || !panel) return;
+
+      var SID = 'anthive.chat.sid', OPEN = 'anthive.chat.open',
+          LOG = 'anthive.chat.log', ON = 'anthive.chat.on';
+      var ss = {
+        get: function (k) { try { return sessionStorage.getItem(k); } catch (e) { return null; } },
+        set: function (k, v) { try { sessionStorage.setItem(k, v); } catch (e) {} }
+      };
+      var sid = ss.get(SID);
+      if (!sid) {
+        sid = (window.crypto && crypto.randomUUID) ? crypto.randomUUID()
+              : ('s' + Date.now() + Math.round(Math.random() * 1e9));
+        ss.set(SID, sid);
+      }
+      var streaming = false;
+
+      function localLog()  { try { return JSON.parse(ss.get(LOG) || '[]'); } catch (e) { return []; } }
+      function saveLocal(a) { ss.set(LOG, JSON.stringify(a.slice(-50))); }
+
+      function showEmpty() {
+        logBox.innerHTML = '<div class="chat-empty">Ask about a gene, a dataset, or a plot — I can take you there.<br><br>' +
+          'e.g. <i>“show TREM2 across the microglia datasets”</i></div>';
+      }
+      function addMsg(role, text) {
+        var e = logBox.querySelector('.chat-empty'); if (e) e.remove();
+        var d = document.createElement('div'); d.className = 'chat-msg ' + role; d.textContent = text;
+        logBox.appendChild(d); logBox.scrollTop = logBox.scrollHeight; return d;
+      }
+      function renderHistory(msgs) {
+        logBox.innerHTML = '';
+        if (!msgs || !msgs.length) { showEmpty(); return; }
+        msgs.forEach(function (m) {
+          if (m.role === 'action') addMsg('action', '↪ ' + (m.content || 'navigated'));
+          else addMsg(m.role, m.content);
+        });
+      }
+      function openPanel()  { panel.classList.add('open'); ss.set(OPEN, '1'); input.focus(); logBox.scrollTop = logBox.scrollHeight; }
+      function closePanel() { panel.classList.remove('open'); ss.set(OPEN, '0'); }
+
+      launcher.addEventListener('click', openPanel);
+      closeBtn.addEventListener('click', closePanel);
+      input.addEventListener('input', function () { input.style.height = 'auto'; input.style.height = Math.min(90, input.scrollHeight) + 'px'; });
+      input.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); } });
+
+      function rehydrate() {
+        fetch('/api/chat/history?session_id=' + encodeURIComponent(sid), { credentials: 'same-origin' })
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (d) {
+            if (d && d.messages && d.messages.length) { renderHistory(d.messages); saveLocal(d.messages); }
+            else renderHistory(localLog());
+          })
+          .catch(function () { renderHistory(localLog()); });
+      }
+
+      function doAction(ev) {
+        if (ev.name === 'navigate' && ev.args && ev.args.url) {
+          addMsg('action', '↪ opening ' + ev.args.url);
+          var l = localLog(); l.push({ role: 'action', content: 'opening ' + ev.args.url }); saveLocal(l);
+          ss.set(OPEN, '1');           // re-open after the reload
+          setTimeout(function () { window.location.href = ev.args.url; }, 400);
+        } else if (ev.name === 'set_plot_param' && window.__antApplyPlotParam) {
+          window.__antApplyPlotParam(ev.args || {});      // in-place tweak (plot.html hook; optional)
+          addMsg('action', '✎ ' + ((ev.args && ev.args.name) || 'updated'));
+        }
+      }
+
+      // POST + Server-Sent-Events streamed over fetch (EventSource is GET-only).
+      function send(message) {
+        if (streaming) return;
+        streaming = true; sendBtn.disabled = true;
+        addMsg('user', message);
+        var l = localLog(); l.push({ role: 'user', content: message }); saveLocal(l);
+        var asstEl = null, asstText = '';
+        fetch('/api/chat', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
+          body: JSON.stringify({ session_id: sid, message: message, context: { path: location.pathname + location.search } })
+        })
+        .then(function (resp) {
+          if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status);
+          var reader = resp.body.getReader(), dec = new TextDecoder(), buf = '';
+          function handle(ev) {
+            if (ev.type === 'token') {
+              if (!asstEl) asstEl = addMsg('assistant', '');
+              asstText += (ev.text || ''); asstEl.textContent = asstText; logBox.scrollTop = logBox.scrollHeight;
+            } else if (ev.type === 'action') { doAction(ev); }
+            else if (ev.type === 'error')   { addMsg('action', '⚠ ' + (ev.message || 'error')); }
+          }
+          function finish() {
+            streaming = false; sendBtn.disabled = false;
+            if (asstText) { var a = localLog(); a.push({ role: 'assistant', content: asstText }); saveLocal(a); }
+          }
+          function pump() {
+            return reader.read().then(function (res) {
+              if (res.done) { finish(); return; }
+              buf += dec.decode(res.value, { stream: true });
+              var parts = buf.split('\n\n'); buf = parts.pop();
+              parts.forEach(function (chunk) {
+                var data = chunk.split('\n').filter(function (ln) { return ln.indexOf('data:') === 0; })
+                                .map(function (ln) { return ln.slice(5).trim(); }).join('');
+                if (!data) return;
+                var ev; try { ev = JSON.parse(data); } catch (e) { return; }
+                handle(ev);
+              });
+              return pump();
+            });
+          }
+          return pump();
+        })
+        .catch(function () { streaming = false; sendBtn.disabled = false; addMsg('action', '⚠ assistant unavailable'); });
+      }
+
+      form.addEventListener('submit', function (e) {
+        e.preventDefault();
+        var v = input.value.trim(); if (!v || streaming) return;
+        input.value = ''; input.style.height = 'auto';
+        send(v);
+      });
+
+      // optimistic show (kills cross-navigation flicker), then confirm with the server
+      if (ss.get(ON) === '1') launcher.style.display = 'flex';
+      fetch('/api/chat/status', { credentials: 'same-origin' })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) {
+          if (!d || !d.enabled) { ss.set(ON, '0'); launcher.style.display = 'none'; return; }
+          ss.set(ON, '1'); launcher.style.display = 'flex';
+          if (d.model) modelEl.textContent = d.model;
+          rehydrate();
+          if (ss.get(OPEN) === '1') openPanel();
+        })
+        .catch(function () { /* status unreachable → leave dark */ });
     })();
     </script>
 </body>

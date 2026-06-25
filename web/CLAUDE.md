@@ -182,6 +182,21 @@ nothing DE shows):
   Authelia login mark), base64-inlined once and exposed as the Jinja **global**
   `topbar_logo` (`templates.env.globals`), so `base.html` shows it on every page
   without per-route context.
+- **Data-assistant chat widget** (`#chat-launcher` + `#chat-panel`, bottom-right)
+  is in `base.html` so the conversation follows the user across pages. It is
+  **gated entirely client-side on `GET /api/chat/status`**: the launcher is
+  `display:none` until the server reports `{enabled:true}` — a deployment with
+  chat off shows no affordance (markup is present but hidden; a test asserts
+  this). State (`session_id`, open flag, a 50-msg transcript mirror) lives in
+  `sessionStorage` so it survives the full-page navigations the assistant
+  triggers; the authoritative transcript is the server's (keyed by Authelia
+  user × session). Streams over `fetch`+SSE (`POST /api/chat`), renders `token`
+  bubbles, and executes `action` frames — `navigate` (sets the re-open flag then
+  `window.location`) and `set_plot_param` (via an optional
+  `window.__antApplyPlotParam` hook, not yet built). **The whole server half
+  (`/api/chat*`, OpenRouter, session store, the enable gate) is ant-serve's**,
+  not here — see `doc/DESIGN_chat_assistant.md` §9 for the locked wire contract
+  this client is built to.
 - **No-duplication rule on dataset.html:** headline biology (organism /
   technology / cell / tissue / disease / prep / year) lives ONLY in the coloured
   context pills (full names in their `title`); the **Biology** section shows only
