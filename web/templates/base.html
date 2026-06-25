@@ -542,7 +542,7 @@
       var DOCK = 'anthive.chat.dock';                 // float | dock (localStorage pref)
       var DOCKW = 'anthive.chat.dockw';               // docked rail width in px
       var resizeEl = document.getElementById('chat-resize');
-      var isOpen = false, isDocked = (lsGet(DOCK) === 'dock');
+      var isOpen = false, isDocked = (lsGet(DOCK) !== 'float');   // default = docked right pane; ⇥/⇤ toggles to floating
 
       // Apply a persisted docked width (clamped to the current viewport) to the
       // CSS var that drives BOTH the rail width and the body reflow padding.
