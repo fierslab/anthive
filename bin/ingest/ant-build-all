@@ -111,7 +111,11 @@ def scan_data_folder(data_folder: Path) -> List[FileSet]:
 def run_check(h5ad_path: Path, timeout: Optional[int] = None) -> Tuple[bool, str]:
     """Run ant check on an h5ad file"""
     try:
-        cmd = [str(Path(__file__).parent / 'ant-check'), str(h5ad_path)]
+        # ant-check lives in bin/meta/, not bin/ingest/ (since the
+        # 2026-06 domain reorg). Path(__file__).parent is bin/ingest/;
+        # walk up to bin/ and across to meta/.
+        ant_check = Path(__file__).parent.parent / 'meta' / 'ant-check'
+        cmd = [str(ant_check), str(h5ad_path)]
 
         # Stream output directly to terminal (no capture)
         result = subprocess.run(
