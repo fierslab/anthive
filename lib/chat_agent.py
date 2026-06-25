@@ -120,6 +120,69 @@ def _sse(payload: Dict[str, Any]) -> bytes:
     return f"data: {json.dumps(payload, separators=(',', ':'))}\n\n".encode('utf-8')
 
 
+async def _preflight_plot_url(
+    nav_url: str,
+    http_client: 'httpx.AsyncClient',
+    internal_api_url: str,
+    internal_api_auth: Optional[tuple],
+) -> Dict[str, Any]:
+    """Validate a `/browse/<db>/plot/<geom>?…` URL by GETting the underlying
+    `/api/databases/<db>/plot/<geom>?…` form with tiny dimensions.
+
+    Returns ``{'failed': bool, 'status': int|None, 'reason': str|None}``.
+    A pass returns ``{'failed': False, …}``; the caller emits the navigate
+    frame as usual. A fail surfaces the API's error body so the LLM can
+    diff its previous params against the actual error.
+
+    Latency: ~50-300 ms with width=2 height=2 — the params get validated
+    in full but the matplotlib render is degenerate. Real navigation
+    afterwards hits ant-serve's plot cache cleanly (different key, but
+    the params are now known-valid).
+    """
+    import re
+    from urllib.parse import urlsplit, urlunsplit, parse_qs, urlencode
+
+    # /browse/<group>/<file>/plot/<geom>?<params> →
+    # <internal>/databases/<group>/<file>/plot/<geom>?<params>+tiny dims
+    parts = urlsplit(nav_url)
+    m = re.match(r'^/browse/([^/]+/[^/]+)/plot/([a-z0-9_]+)$', parts.path)
+    if not m:
+        # Not a plot-page URL — skip preflight.
+        return {'failed': False, 'status': None, 'reason': 'not a plot URL'}
+
+    db_id, geom = m.group(1), m.group(2)
+    quoted_db = db_id.replace('/', '%2F')
+    api_path = f'/databases/{quoted_db}/plot/{geom}'
+
+    # Pile tiny dimensions on top of the user's params. dpi=20 + 2x2 gives
+    # an ~8 KB PNG; the full param validation happens regardless.
+    q = parse_qs(parts.query, keep_blank_values=True)
+    q.setdefault('width', ['2'])
+    q.setdefault('height', ['2'])
+    q.setdefault('dpi', ['20'])
+    qs = urlencode(q, doseq=True)
+    target = f'{internal_api_url.rstrip("/")}{api_path}?{qs}'
+
+    try:
+        resp = await http_client.get(
+            target, auth=internal_api_auth, timeout=15.0,
+        )
+        if 200 <= resp.status_code < 300:
+            return {'failed': False, 'status': resp.status_code, 'reason': None}
+        # Try to extract the FastAPI {detail: ...} JSON error body.
+        try:
+            detail = resp.json().get('detail') or resp.text[:300]
+        except (ValueError, AttributeError):
+            detail = resp.text[:300]
+        return {
+            'failed': True,
+            'status': resp.status_code,
+            'reason': str(detail),
+        }
+    except httpx.HTTPError as exc:
+        return {'failed': True, 'status': None, 'reason': f'preflight HTTP error: {exc}'}
+
+
 def _history_to_openai_messages(
     history: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -381,11 +444,50 @@ async def run_turn(
                         args = {}
 
                     if name in CLIENT_ACTION_TOOLS:
-                        # Emit action frame to the client; tell the LLM it queued.
-                        frame = {'type': 'action', 'name': name, 'args': args}
-                        action_frames_in_turn.append(frame)
-                        yield _sse(frame)
-                        tool_result: Dict[str, Any] = {'queued': True}
+                        # Server-side preflight for `navigate` to plot URLs:
+                        # GET the underlying /api/databases/<db>/plot/<geom>
+                        # form with tiny dimensions (validates params, near-
+                        # zero render cost). If 4xx/5xx, DON'T emit the
+                        # action; feed the error back to the LLM so it
+                        # corrects without landing the user on a broken page.
+                        # See _preflight_plot_url for the param translation.
+                        preflight_info: Dict[str, Any] = {}
+                        if name == 'navigate':
+                            url = args.get('url') if isinstance(args, dict) else None
+                            if isinstance(url, str) and '/plot/' in url:
+                                # Yield a short status frame so the client
+                                # can render a spinner during the silent
+                                # preflight window. The 'info' type is
+                                # additive per pika #235 — old clients can
+                                # safely ignore it.
+                                yield _sse({
+                                    'type': 'info',
+                                    'kind': 'preflight',
+                                    'message': 'Validating plot params…',
+                                })
+                                preflight_info = await _preflight_plot_url(
+                                    url, http_client,
+                                    internal_api_url, internal_api_auth,
+                                )
+
+                        if preflight_info.get('failed'):
+                            # Don't emit the action — feed the error back so
+                            # the LLM can adjust + retry within the same
+                            # turn (no need for the user to re-prompt).
+                            tool_result: Dict[str, Any] = {
+                                'navigate_blocked': True,
+                                'reason': preflight_info.get('reason'),
+                                'status': preflight_info.get('status'),
+                                'url':    args.get('url') if isinstance(args, dict) else None,
+                                'hint':   'The plot URL did not validate. '
+                                          'Inspect the error, fix the params (column names, '
+                                          'study/term/contrast, etc.) and try a corrected URL.',
+                            }
+                        else:
+                            frame = {'type': 'action', 'name': name, 'args': args}
+                            action_frames_in_turn.append(frame)
+                            yield _sse(frame)
+                            tool_result = {'queued': True}
                     else:
                         try:
                             tool_result = await dispatch_server_tool(name, args, tool_ctx)
