@@ -88,6 +88,7 @@ from metadata import parse_md_file
 import mus
 import plotting
 import analytics
+from chat_config import load_chat_config, warn_if_misconfigured, status_payload
 
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
@@ -1276,6 +1277,15 @@ async def lifespan(app: FastAPI):
         sys.exit(1)
     asyncio.create_task(_daily_metadata_refresh())
     asyncio.create_task(_pseudobulk_cleanup_loop())
+    # Chat assistant — emit a one-line warning when enabled but unkeyed.
+    # Locked per web's §7: never crash on a missing key.
+    try:
+        _chat_cfg = load_chat_config(get_config())
+        warn_if_misconfigured(_chat_cfg, log)
+        if _chat_cfg.active:
+            log.info("Chat assistant ACTIVE — model=%s", _chat_cfg.model)
+    except Exception as exc:
+        log.warning("chat-config load failed: %s", exc)
     if geneset_registry is not None:
         try:
             _build_score_index()
@@ -1563,6 +1573,27 @@ async def health_check():
             status_code=503,
             detail=f"Health check failed: {str(e)}"
         )
+
+
+@app.get("/chat/status", tags=["chat"])
+async def chat_status():
+    """Whether the in-app chat assistant is available on this deployment.
+
+    Always reachable (no 404 in any state). Returns
+    ``{"enabled": true, "model": "<id>"}`` when fully active, else
+    ``{"enabled": false}``. The web client polls this on every page
+    load and only renders the chat widget when ``enabled`` is true.
+
+    Three states roll up into the wire response:
+
+      - chat.enabled=true + api_key present → {enabled: true, model: …}
+      - chat.enabled=true + no api_key       → {enabled: false}   (silently off + startup warning)
+      - chat.enabled=false                   → {enabled: false}   (default)
+
+    Contract locked with anthive-web in pika #217/§9.
+    """
+    cfg = load_chat_config(get_config())
+    return status_payload(cfg)
 
 
 @app.get("/version", tags=["info"])
