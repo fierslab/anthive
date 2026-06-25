@@ -224,14 +224,14 @@
             display: none; flex-direction: column; overflow: hidden;
         }
         #chat-panel.open { display: flex; }
-        #chat-head { display: flex; align-items: center; gap: 7px; padding: 9px 12px; background: #0f172a; color: #fff; font-size: 13px; font-weight: 600; }
+        #chat-head { display: flex; align-items: center; gap: 7px; height: 32px; padding: 0 10px; background: #0f172a; color: #fff; font-size: 12px; font-weight: 600; flex: none; }
         #chat-head .sub { font-weight: 400; font-size: 10px; color: #94a3b8; font-family: var(--font-mono); }
         #chat-head .chat-logo-sm { height: 20px; width: auto; display: block; border-radius: 3px; }
         #chat-head .hbtn { cursor: pointer; color: #cbd5e1; font-size: 14px; background: none; border: none; line-height: 1; padding: 2px 3px; }
         #chat-head .hbtn:hover { color: #fff; }
         #chat-head .dock { margin-left: auto; }      /* pushes dock + reset + close to the right */
         .chat-empty img.chat-mascot { display: block; width: 104px; height: auto; margin: 0 auto 12px; }
-        #chat-log { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; font-size: 12.5px; line-height: 1.5; }
+        #chat-log { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; font-size: 11.5px; line-height: 1.5; }
         .chat-msg { max-width: 86%; padding: 7px 10px; border-radius: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
         .chat-msg.user { align-self: flex-end; background: var(--link); color: #fff; border-bottom-right-radius: 3px; }
         .chat-msg.assistant { align-self: flex-start; background: #f1f5f9; color: var(--text); border-bottom-left-radius: 3px; }
@@ -248,7 +248,7 @@
         .chat-msg.error .ce-details { margin-top: 6px; padding: 6px 8px; background: #fff; border: 1px solid #fecaca; border-radius: 6px; font-family: var(--font-mono); font-size: 10px; color: #7f1d1d; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 140px; overflow-y: auto; }
         .chat-empty { margin: auto; color: var(--text-muted); font-size: 12px; text-align: center; padding: 14px; }
         #chat-form { display: flex; gap: 6px; padding: 9px; border-top: 1px solid var(--border); }
-        #chat-input { flex: 1; font-family: var(--font); font-size: 12.5px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 8px; outline: none; resize: none; max-height: 90px; line-height: 1.4; }
+        #chat-input { flex: 1; font-family: var(--font); font-size: 11.5px; padding: 6px 9px; border: 1px solid var(--border); border-radius: 8px; outline: none; resize: none; min-height: 42px; max-height: 120px; line-height: 1.4; }
         #chat-input:focus { border-color: var(--link); }
         #chat-send { background: var(--link); color: #fff; border: none; border-radius: 8px; padding: 0 13px; cursor: pointer; font-size: 14px; }
         #chat-send:disabled { opacity: .5; cursor: default; }
@@ -256,15 +256,26 @@
 
         /* Docked mode: a full-height right rail that reflows the page instead of
            overlapping it (body gets padding-right equal to the rail). Toggled
-           via the ⇥/⇤ header button; preference persists in localStorage. */
-        #chat-panel.docked { top: 0; right: 0; bottom: 0; width: 384px; height: 100vh; max-height: none; border-radius: 0; border: none; border-left: 1px solid var(--border); box-shadow: -4px 0 18px rgba(15,23,42,.12); }
+           via the ⇥/⇤ header button; preference + width persist in localStorage.
+           The width is a CSS var so the rail and the body reflow stay in lockstep
+           while dragging the resize handle. */
+        :root { --chat-dock-w: 384px; }
+        #chat-panel.docked { top: 0; right: 0; bottom: 0; width: var(--chat-dock-w); height: 100vh; max-height: none; border-radius: 0; border: none; border-left: 1px solid var(--border); box-shadow: -4px 0 18px rgba(15,23,42,.12); }
         body { transition: padding-right .18s ease; }
-        @media (min-width: 761px) { body.chat-docked { padding-right: 384px; } }
+        @media (min-width: 761px) { body.chat-docked { padding-right: var(--chat-dock-w); } }
+        /* drag handle on the rail's left edge (the shared boundary) */
+        #chat-resize { position: absolute; left: -3px; top: 0; bottom: 0; width: 8px; cursor: ew-resize; z-index: 2; display: none; }
+        #chat-resize::before { content: ''; position: absolute; left: 3px; top: 0; bottom: 0; width: 2px; background: transparent; transition: background .1s; }
+        #chat-resize:hover::before, #chat-resize.dragging::before { background: var(--link); }
+        #chat-panel.docked #chat-resize { display: block; }
+        body.chat-resizing { user-select: none; }
+        body.chat-resizing, body.chat-resizing * { transition: none !important; }   /* no lag while dragging */
         /* On narrow screens docked falls back to the floating sheet (a 384px rail
            would overflow), and no body padding. */
         @media (max-width: 760px) {
             #chat-panel.docked { top: auto; left: 8px; right: 8px; bottom: 68px; width: auto; height: 72vh; border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 10px 34px rgba(15,23,42,.28); }
             body.chat-docked { padding-right: 0; }
+            #chat-panel.docked #chat-resize { display: none; }
         }
         /* Inline reset confirmation bar (pinned in the log). */
         .chat-confirm { align-self: stretch; max-width: 100%; background: #fffbeb; border: 1px solid #fde68a; color: #92400e; border-radius: 8px; padding: 8px 10px; font-size: 11.5px; }
@@ -433,13 +444,14 @@
          authoritative transcript is the server's, keyed by Authelia user. -->
     <button id="chat-launcher" title="Ask the data assistant" aria-label="Open data assistant">💬</button>
     <div id="chat-panel" role="dialog" aria-label="Data assistant">
+      <div id="chat-resize" title="drag to resize"></div>
       <div id="chat-head">{% if chat_logo %}<img class="chat-logo-sm" src="{{ chat_logo }}" alt="">{% endif %}assistant <span class="sub" id="chat-model"></span><select class="chat-model-pick" id="chat-model-pick" title="model" style="display:none"></select>
         <button class="hbtn dock" id="chat-dock" title="dock to the side" aria-label="dock to side">⇥</button>
         <button class="hbtn reset" id="chat-reset" title="reset / forget this conversation" aria-label="reset conversation">⟲</button>
         <button class="hbtn x" id="chat-close" title="close" aria-label="close">✕</button></div>
       <div id="chat-log"></div>
       <form id="chat-form">
-        <textarea id="chat-input" rows="1" placeholder="Ask about the data, or say what you'd like to see…" autocomplete="off" spellcheck="false"></textarea>
+        <textarea id="chat-input" rows="2" placeholder="Ask about the data, or say what you'd like to see…" autocomplete="off" spellcheck="false"></textarea>
         <button id="chat-send" type="submit" title="send" aria-label="send">➤</button>
       </form>
     </div>
@@ -528,7 +540,37 @@
         });
       }
       var DOCK = 'anthive.chat.dock';                 // float | dock (localStorage pref)
+      var DOCKW = 'anthive.chat.dockw';               // docked rail width in px
+      var resizeEl = document.getElementById('chat-resize');
       var isOpen = false, isDocked = (lsGet(DOCK) === 'dock');
+
+      // Apply a persisted docked width (clamped to the current viewport) to the
+      // CSS var that drives BOTH the rail width and the body reflow padding.
+      function dockBounds() { return { lo: 300, hi: Math.max(320, Math.min(720, window.innerWidth - 360)) }; }
+      function setDockWidth(px) {
+        var bnd = dockBounds(), w = Math.round(Math.max(bnd.lo, Math.min(px, bnd.hi)));
+        document.documentElement.style.setProperty('--chat-dock-w', w + 'px');
+        return w;
+      }
+      (function () { var stored = parseInt(lsGet(DOCKW), 10); if (stored) setDockWidth(stored); })();
+
+      // Drag the shared boundary: width = distance from the right edge to the
+      // cursor. Persist on release.
+      resizeEl.addEventListener('pointerdown', function (e) {
+        if (!isDocked) return;
+        e.preventDefault();
+        resizeEl.setPointerCapture(e.pointerId);
+        resizeEl.classList.add('dragging'); document.body.classList.add('chat-resizing');
+        function move(ev) { setDockWidth(window.innerWidth - ev.clientX); }
+        function up(ev) {
+          resizeEl.removeEventListener('pointermove', move);
+          resizeEl.removeEventListener('pointerup', up);
+          resizeEl.classList.remove('dragging'); document.body.classList.remove('chat-resizing');
+          var w = setDockWidth(window.innerWidth - ev.clientX); lsSet(DOCKW, String(w));
+        }
+        resizeEl.addEventListener('pointermove', move);
+        resizeEl.addEventListener('pointerup', up);
+      });
 
       // Single place that reconciles the chrome with (isOpen, isDocked, enabled):
       // panel classes, the body reflow padding (docked = right rail, no overlap),
@@ -582,7 +624,7 @@
       closeBtn.addEventListener('click', closePanel);
       resetBtn.addEventListener('click', resetChat);
       dockBtn.addEventListener('click', toggleDock);
-      input.addEventListener('input', function () { input.style.height = 'auto'; input.style.height = Math.min(90, input.scrollHeight) + 'px'; });
+      input.addEventListener('input', function () { input.style.height = 'auto'; input.style.height = Math.max(42, Math.min(120, input.scrollHeight)) + 'px'; });
       input.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); } });
 
       function rehydrate() {
