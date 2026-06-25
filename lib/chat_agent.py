@@ -140,7 +140,7 @@ async def _preflight_plot_url(
     the params are now known-valid).
     """
     import re
-    from urllib.parse import urlsplit, urlunsplit, parse_qs, urlencode
+    from urllib.parse import urlsplit, parse_qs, urlencode
 
     # /browse/<group>/<file>/plot/<geom>?<params> →
     # <internal>/databases/<group>/<file>/plot/<geom>?<params>+tiny dims
