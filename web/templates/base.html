@@ -229,7 +229,7 @@
         #chat-head .chat-logo-sm { height: 20px; width: auto; display: block; border-radius: 3px; }
         #chat-head .hbtn { cursor: pointer; color: #cbd5e1; font-size: 14px; background: none; border: none; line-height: 1; padding: 2px 3px; }
         #chat-head .hbtn:hover { color: #fff; }
-        #chat-head .reset { margin-left: auto; }      /* pushes reset + close to the right */
+        #chat-head .dock { margin-left: auto; }      /* pushes dock + reset + close to the right */
         .chat-empty img.chat-mascot { display: block; width: 104px; height: auto; margin: 0 auto 12px; }
         #chat-log { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; font-size: 12.5px; line-height: 1.5; }
         .chat-msg { max-width: 86%; padding: 7px 10px; border-radius: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -253,6 +253,27 @@
         #chat-send { background: var(--link); color: #fff; border: none; border-radius: 8px; padding: 0 13px; cursor: pointer; font-size: 14px; }
         #chat-send:disabled { opacity: .5; cursor: default; }
         @media (max-width: 560px) { #chat-panel { width: auto; left: 8px; right: 8px; bottom: 68px; height: 72vh; } }
+
+        /* Docked mode: a full-height right rail that reflows the page instead of
+           overlapping it (body gets padding-right equal to the rail). Toggled
+           via the ⇥/⇤ header button; preference persists in localStorage. */
+        #chat-panel.docked { top: 0; right: 0; bottom: 0; width: 384px; height: 100vh; max-height: none; border-radius: 0; border: none; border-left: 1px solid var(--border); box-shadow: -4px 0 18px rgba(15,23,42,.12); }
+        body { transition: padding-right .18s ease; }
+        @media (min-width: 761px) { body.chat-docked { padding-right: 384px; } }
+        /* On narrow screens docked falls back to the floating sheet (a 384px rail
+           would overflow), and no body padding. */
+        @media (max-width: 760px) {
+            #chat-panel.docked { top: auto; left: 8px; right: 8px; bottom: 68px; width: auto; height: 72vh; border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 10px 34px rgba(15,23,42,.28); }
+            body.chat-docked { padding-right: 0; }
+        }
+        /* Inline reset confirmation bar (pinned in the log). */
+        .chat-confirm { align-self: stretch; max-width: 100%; background: #fffbeb; border: 1px solid #fde68a; color: #92400e; border-radius: 8px; padding: 8px 10px; font-size: 11.5px; }
+        .chat-confirm .cc-actions { margin-top: 7px; display: flex; gap: 8px; }
+        .chat-confirm button { border: none; border-radius: 6px; padding: 3px 11px; font-size: 11px; cursor: pointer; font-family: inherit; }
+        .chat-confirm .cc-yes { background: #dc2626; color: #fff; }
+        .chat-confirm .cc-yes:hover { background: #b91c1c; }
+        .chat-confirm .cc-no { background: #f1f5f9; color: var(--text); }
+        .chat-confirm .cc-no:hover { background: #e2e8f0; }
     </style>
     <script>
     function initTable(id,o){o=o||{};var ps=o.pageSize||20,s=o.searchable!==false,t=document.getElementById(id);if(!t)return;var tb=t.querySelector('tbody');if(!tb)return;var c=document.createElement('div');c.className='tbl-controls';t.parentNode.insertBefore(c,t);var si=null;if(s){si=document.createElement('input');si.type='text';si.placeholder='Filter\u2026';si.addEventListener('input',function(){p=0;r()});c.appendChild(si)}var inf=document.createElement('span');inf.className='tbl-info';c.appendChild(inf);var pv=document.createElement('a');pv.className='tbl-pg';pv.href='#';pv.textContent='\u2039 prev';pv.style.display='none';pv.addEventListener('click',function(e){e.preventDefault();p--;r()});c.appendChild(pv);var nx=document.createElement('a');nx.className='tbl-pg';nx.href='#';nx.textContent='next \u203a';nx.style.display='none';nx.addEventListener('click',function(e){e.preventDefault();p++;r()});c.appendChild(nx);var p=0;function r(){var q=si?si.value.toLowerCase().trim():'',a=Array.from(tb.querySelectorAll('tr')),f=q?a.filter(function(r){return r.textContent.toLowerCase().includes(q)}):a,tp=Math.max(1,Math.ceil(f.length/ps));if(p>=tp)p=tp-1;if(p<0)p=0;var st=p*ps;a.forEach(function(r){r.style.display='none'});f.slice(st,st+ps).forEach(function(r){r.style.display=''});var sh=Math.min(ps,f.length-st);inf.textContent=f.length<=ps?f.length+' item'+(f.length!==1?'s':''):(st+1)+'\u2013'+(st+sh)+' of '+f.length;pv.style.display=p>0?'':'none';nx.style.display=p<tp-1?'':'none'}r()}
@@ -413,6 +434,7 @@
     <button id="chat-launcher" title="Ask the data assistant" aria-label="Open data assistant">💬</button>
     <div id="chat-panel" role="dialog" aria-label="Data assistant">
       <div id="chat-head">{% if chat_logo %}<img class="chat-logo-sm" src="{{ chat_logo }}" alt="">{% endif %}assistant <span class="sub" id="chat-model"></span><select class="chat-model-pick" id="chat-model-pick" title="model" style="display:none"></select>
+        <button class="hbtn dock" id="chat-dock" title="dock to the side" aria-label="dock to side">⇥</button>
         <button class="hbtn reset" id="chat-reset" title="reset / forget this conversation" aria-label="reset conversation">⟲</button>
         <button class="hbtn x" id="chat-close" title="close" aria-label="close">✕</button></div>
       <div id="chat-log"></div>
@@ -431,6 +453,7 @@
       var sendBtn  = document.getElementById('chat-send');
       var closeBtn = document.getElementById('chat-close');
       var resetBtn = document.getElementById('chat-reset');
+      var dockBtn  = document.getElementById('chat-dock');
       var modelEl  = document.getElementById('chat-model');
       var modelPick = document.getElementById('chat-model-pick');
       var CHAT_LOGO = {{ chat_logo|tojson }};
@@ -448,7 +471,7 @@
               : ('s' + Date.now() + Math.round(Math.random() * 1e9));
         ss.set(SID, sid);
       }
-      var streaming = false, navRetry = 0, lastUserMessage = '', chosenModel = '';
+      var streaming = false, navRetry = 0, lastUserMessage = '', chosenModel = '', chatEnabled = false;
       var MODEL_KEY = 'anthive.chat.model';   // remembered pick (localStorage, cross-session)
       function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
       function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
@@ -504,16 +527,47 @@
           else addMsg(m.role, m.content);
         });
       }
-      function openPanel()  { panel.classList.add('open'); ss.set(OPEN, '1'); input.focus(); logBox.scrollTop = logBox.scrollHeight; }
-      function closePanel() { panel.classList.remove('open'); ss.set(OPEN, '0'); }
-      function togglePanel() { panel.classList.contains('open') ? closePanel() : openPanel(); }
+      var DOCK = 'anthive.chat.dock';                 // float | dock (localStorage pref)
+      var isOpen = false, isDocked = (lsGet(DOCK) === 'dock');
+
+      // Single place that reconciles the chrome with (isOpen, isDocked, enabled):
+      // panel classes, the body reflow padding (docked = right rail, no overlap),
+      // the launcher (hidden only when the docked rail is open, since it covers
+      // the corner), and the dock button's icon/affordance.
+      function applyChrome() {
+        panel.classList.toggle('docked', isDocked);
+        panel.classList.toggle('open', isOpen);
+        document.body.classList.toggle('chat-docked', isDocked && isOpen);
+        launcher.style.display = (chatEnabled && !(isDocked && isOpen)) ? 'flex' : 'none';
+        dockBtn.textContent = isDocked ? '⇤' : '⇥';
+        dockBtn.title = isDocked ? 'pop out to a floating window' : 'dock to the side';
+      }
+      function openPanel()  { isOpen = true;  ss.set(OPEN, '1'); applyChrome(); input.focus(); logBox.scrollTop = logBox.scrollHeight; }
+      function closePanel() { isOpen = false; ss.set(OPEN, '0'); applyChrome(); }
+      function togglePanel() { isOpen ? closePanel() : openPanel(); }
+      function toggleDock()  { isDocked = !isDocked; lsSet(DOCK, isDocked ? 'dock' : 'float'); applyChrome(); }
 
       // Reset / forget: a fresh session_id starts the server-side transcript
       // over (it's keyed on user × session_id), wipe the local mirror, and
       // best-effort ask the server to delete the old history. Then back to the
       // empty state. (DELETE endpoint is anthive4's; ignored if not present.)
+      // Reset asks first (inline confirm bar pinned in the log), then forgets:
+      // a fresh session_id starts the server transcript over (keyed on user ×
+      // session_id), wipe the local mirror, best-effort DELETE the old history.
       function resetChat() {
         if (streaming) return;
+        var old = logBox.querySelector('.chat-confirm'); if (old) old.remove();
+        var bar = document.createElement('div'); bar.className = 'chat-confirm';
+        var q = document.createElement('div'); q.textContent = 'Reset this conversation? This clears the messages.'; bar.appendChild(q);
+        var acts = document.createElement('div'); acts.className = 'cc-actions';
+        var yes = document.createElement('button'); yes.type = 'button'; yes.className = 'cc-yes'; yes.textContent = 'reset';
+        var no  = document.createElement('button'); no.type = 'button'; no.className = 'cc-no'; no.textContent = 'cancel';
+        yes.addEventListener('click', doReset);
+        no.addEventListener('click', function () { bar.remove(); });
+        acts.appendChild(yes); acts.appendChild(no); bar.appendChild(acts);
+        logBox.appendChild(bar); logBox.scrollTop = logBox.scrollHeight;
+      }
+      function doReset() {
         try {
           fetch('/api/chat/history?session_id=' + encodeURIComponent(sid),
                 { method: 'DELETE', credentials: 'same-origin' }).catch(function () {});
@@ -527,6 +581,7 @@
       launcher.addEventListener('click', togglePanel);
       closeBtn.addEventListener('click', closePanel);
       resetBtn.addEventListener('click', resetChat);
+      dockBtn.addEventListener('click', toggleDock);
       input.addEventListener('input', function () { input.style.height = 'auto'; input.style.height = Math.min(90, input.scrollHeight) + 'px'; });
       input.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); } });
 
@@ -760,16 +815,16 @@
       });
 
       // optimistic show (kills cross-navigation flicker), then confirm with the server
-      if (ss.get(ON) === '1') launcher.style.display = 'flex';
+      if (ss.get(ON) === '1') { chatEnabled = true; applyChrome(); }
       fetch('/api/chat/status', { credentials: 'same-origin' })
         .then(function (r) { return r.ok ? r.json() : null; })
         .then(function (d) {
-          if (!d || !d.enabled) { ss.set(ON, '0'); launcher.style.display = 'none'; return; }
-          ss.set(ON, '1'); launcher.style.display = 'flex';
+          if (!d || !d.enabled) { ss.set(ON, '0'); chatEnabled = false; applyChrome(); return; }
+          ss.set(ON, '1'); chatEnabled = true;
           if (d.model) { modelEl.textContent = d.model; chosenModel = chosenModel || d.model; }
           if (d.models && d.models.length) buildModelPicker(d.models, d.model);
           rehydrate();
-          if (ss.get(OPEN) === '1') openPanel();
+          if (ss.get(OPEN) === '1') openPanel(); else applyChrome();
         })
         .catch(function () { /* status unreachable → leave dark */ });
     })();
