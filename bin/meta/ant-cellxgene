@@ -720,7 +720,7 @@ def cmd_import(args: argparse.Namespace, bin_dir: Path, data_folder: Path) -> No
 
     # h5ad-check → structural .md
     print("\nRunning h5ad-check…")
-    rc = _run([str(bin_dir / 'ant-h5ad-check'), str(h5ad_path)])
+    rc = _run([str(ingest_dir / 'ant-h5ad-check'), str(h5ad_path)])
     if rc != 0:
         print("h5ad-check failed — aborting.", file=sys.stderr)
         sys.exit(rc)
@@ -733,7 +733,7 @@ def cmd_import(args: argparse.Namespace, bin_dir: Path, data_folder: Path) -> No
     # Convert
     if not args.no_convert:
         print("\nRunning convert…")
-        rc = _run([str(bin_dir / 'ant-convert'), str(h5ad_path)])
+        rc = _run([str(ingest_dir / 'ant-convert'), str(h5ad_path)])
         if rc != 0:
             print("convert failed.", file=sys.stderr)
             sys.exit(rc)
@@ -838,7 +838,14 @@ def cmd_search(args: argparse.Namespace) -> None:
 
 def main() -> None:
     bin_dir     = Path(__file__).parent.resolve()
-    data_folder = (bin_dir.parent / 'data' / 'h5adstore').resolve()
+    # ant-h5ad-check and ant-convert moved to bin/ingest/ during the
+    # 2026-06 reorg. bin_dir points at bin/meta/; siblings are no
+    # longer the right path for those two.
+    ingest_dir  = bin_dir.parent / 'ingest'
+    # NOTE: data_folder is computed relative to the REPO ROOT, not bin/.
+    # bin_dir.parent is bin/, so go up TWO levels to the repo, then
+    # into data/h5adstore/.
+    data_folder = (bin_dir.parent.parent / 'data' / 'h5adstore').resolve()
 
     parser = argparse.ArgumentParser(
         prog='ant-cellxgene',

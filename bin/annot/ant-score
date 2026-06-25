@@ -666,8 +666,15 @@ def _organism_compatible(adata, organism: str) -> bool:
 
 # ── pipeline chaining ─────────────────────────────────────────────────────────
 
+# ant-convert lives in bin/ingest/, ant-sync in bin/ops/ — both outside
+# this script's home (bin/annot/). Domain reorg, 2026-06.
+_BIN_ROOT = script_dir.parent
+_ANT_CONVERT = _BIN_ROOT / 'ingest' / 'ant-convert'
+_ANT_SYNC = _BIN_ROOT / 'ops' / 'ant-sync'
+
+
 def _run_rebuild(entry: H5adEntry) -> int:
-    cmd = [str(script_dir / 'ant-convert'), str(entry.h5ad_path)]
+    cmd = [str(_ANT_CONVERT), str(entry.h5ad_path)]
     print(f"\n  $ {' '.join(cmd)}")
     return subprocess.call(cmd)
 
@@ -675,7 +682,7 @@ def _run_rebuild(entry: H5adEntry) -> int:
 def _run_push(entry: H5adEntry) -> int:
     files = [str(entry.h5ad_path), str(entry.duckdb_path)]
     files = [f for f in files if Path(f).exists()]
-    cmd = [str(script_dir / 'ant-sync'), 'push', *files]
+    cmd = [str(_ANT_SYNC), 'push', *files]
     print(f"\n  $ {' '.join(cmd)}")
     return subprocess.call(cmd)
 
