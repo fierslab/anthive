@@ -29,6 +29,11 @@ import pandas as pd
 
 # Add lib directory to Python path
 script_dir = Path(__file__).parent.resolve()
+
+# ant-h5ad-check and ant-duckdb-check live in bin/ingest/, not in
+# bin/meta/ where this script lives. (Domain reorg, 2026-06.) The
+# umbrella ant-check (here in bin/meta/) calls them as subprocesses.
+_INGEST_DIR = script_dir.parent / 'ingest'
 lib_dir = script_dir.parent.parent / 'lib'
 sys.path.insert(0, str(lib_dir))
 
@@ -992,7 +997,7 @@ For more control, run these tools separately.
 
         import subprocess
         result = subprocess.run(
-            [str(script_dir / 'ant-h5ad-check'), str(h5ad_path)],
+            [str(_INGEST_DIR / 'ant-h5ad-check'), str(h5ad_path)],
             capture_output=False
         )
 
@@ -1017,7 +1022,7 @@ For more control, run these tools separately.
         else:
             import subprocess
             result = subprocess.run(
-                [str(script_dir / 'ant-duckdb-check'), str(h5ad_path)],
+                [str(_INGEST_DIR / 'ant-duckdb-check'), str(h5ad_path)],
                 capture_output=False
             )
 
