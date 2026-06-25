@@ -83,22 +83,61 @@ def find_h5ad(root: Path, db_id_or_path: str) -> Optional[H5adEntry]:
     ``ant-de-ingest`` (it carries the target_duckdb Path through directly);
     without this branch every S3-ingested DE deposit fails with
     "unknown db_id".
+
+    The path form does NOT go through ``iter_h5adstore`` — that helper is
+    strict about requiring an explicit ``id:`` in the .md and a ``group_id:``
+    in the index.md, and silently skips entries that lack either. Plenty of
+    legitimate datasets in the catalog (e.g. Sierksma2020) have no explicit
+    ``id:`` and rely on ant-serve's auto-generator — those wouldn't be found
+    via iter_h5adstore even though they're in the catalog. So we synthesise
+    the H5adEntry directly from the resolved file path, falling back to
+    ``md_check.generate_file_id`` / ``generate_group_id`` for the missing
+    ID components.
     """
     target = db_id_or_path.strip().strip('/')
 
-    # Path form — duckdb or h5ad. Resolve and match against entry paths.
+    # Path form — duckdb or h5ad. Resolve and synthesize directly from
+    # the file's location + sibling .md without going through
+    # iter_h5adstore (which filters out entries lacking an explicit id).
     candidate = Path(db_id_or_path)
     if candidate.suffix in ('.h5ad', '.duckdb'):
+        root_resolved = root.resolve()
         try:
             resolved = candidate.resolve()
             if resolved.is_file():
-                for entry in iter_h5adstore(root):
+                md_path = resolved.with_suffix('.md')
+                if md_path.exists():
                     try:
-                        if resolved in (entry.h5ad_path.resolve(),
-                                        entry.duckdb_path.resolve()):
-                            return entry
-                    except OSError:
-                        continue
+                        rel = md_path.relative_to(root_resolved)
+                    except ValueError:
+                        rel = None
+                    if rel is not None and len(rel.parts) >= 1:
+                        # Local import to avoid a circular import at module load.
+                        from md_check import generate_file_id, generate_group_id  # noqa: E402
+                        data_meta, _ = parse_md_file(md_path)
+                        index_meta, _ = parse_md_file(md_path.parent / 'index.md')
+                        if not index_meta:
+                            index_meta, _ = parse_md_file(root_resolved / rel.parts[0] / 'index.md')
+                        study = rel.parts[0]
+                        stem = md_path.stem
+                        file_id = (
+                            str(data_meta.get('id') or '').strip()
+                            or generate_file_id(stem)
+                        )
+                        group_id = (
+                            str(index_meta.get('group_id') or '').strip()
+                            or generate_group_id(study)
+                        )
+                        return H5adEntry(
+                            db_id=f"{group_id}/{file_id}",
+                            md_path=md_path,
+                            h5ad_path=md_path.with_suffix('.h5ad'),
+                            duckdb_path=md_path.with_suffix('.duckdb'),
+                            group_id=group_id,
+                            file_id=file_id,
+                            study=study,
+                            stem=stem,
+                        )
         except OSError:
             pass
 

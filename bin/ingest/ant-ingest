@@ -1088,6 +1088,22 @@ def _process_de(
     de_covariates = incoming_meta.get('de_covariates')
     de_reference_type = incoming_meta.get('de_reference_type')
 
+    # Fall back to the preset's default_method when the sidecar didn't set
+    # one. ant-de-ingest requires --method for every preset; deseq2 / edger /
+    # scanpy / seurat / glmmseq / glmmtmb each declare a sensible default,
+    # but `long` has none — those deposits still hard-fail with a clear
+    # error message if the depositor didn't supply de_method explicitly.
+    if not de_method and de_format:
+        try:
+            sys.path.insert(0, str(_REPO_ROOT / 'lib'))
+            from de_presets import PRESETS as _DE_PRESETS  # noqa: E402
+            preset_obj = _DE_PRESETS.get(de_format)
+            if preset_obj and preset_obj.default_method:
+                de_method = preset_obj.default_method
+                _ok(f'no de_method in sidecar — using preset default {de_method!r}')
+        except ImportError:
+            pass
+
     # Study id: prefer mus-supplied if present, else file-stem.
     study_id = incoming_meta.get('de_study_id') or _de_study_id_from_basename(plan.basename)
 
@@ -1115,6 +1131,25 @@ def _process_de(
         cmd += ['--description', de_description]
     if de_covariates:
         cmd += ['--covariates', de_covariates]
+
+    # de_map_<TARGET>=<SRC> sidecar keys translate the source TSV/CSV
+    # column names to anthive's canonical __de columns. Required for the
+    # `long` preset (where the depositor's column names are arbitrary)
+    # and an override for other presets when a source column name doesn't
+    # match the preset's expected name. mus stamps these as separate keys
+    # per the design discussion (cleaner than a comma-encoded blob); we
+    # collect them all and emit a single --map gene=...,log2fc=...,... .
+    map_pairs: List[str] = []
+    for key, value in incoming_meta.items():
+        if not key.startswith('de_map_'):
+            continue
+        target = key[len('de_map_'):].strip()
+        source = str(value).strip()
+        if not target or not source:
+            continue
+        map_pairs.append(f'{target}={source}')
+    if map_pairs:
+        cmd += ['--map', ','.join(map_pairs)]
     if de_reference_type:
         cmd += ['--reference-type', de_reference_type]
 

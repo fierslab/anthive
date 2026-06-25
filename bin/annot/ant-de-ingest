@@ -138,6 +138,21 @@ def _build_stage_view(
     )
     where_sql = f" WHERE {where_filter}" if where_filter else ""
 
+    # Drop optional anthive columns whose source column doesn't exist in the
+    # file. Without this, the `long` preset (which carries identity-named
+    # defaults for every canonical column) builds a SELECT that references
+    # 'zeff', 'estimate', 'SE', etc. — and DuckDB's binder fails when those
+    # source columns aren't present. Pre-3 column-mapping behaviour forced
+    # the depositor to declare an explicit drop per missing column; that's
+    # busywork. Peek the actual file columns once, then keep only mappings
+    # whose source column is real.
+    try:
+        actual_cols = set(_peek_csv_columns(input_path))
+    except duckdb.Error:
+        actual_cols = None
+    if actual_cols is not None:
+        resolved = {s: a for s, a in resolved.items() if s in actual_cols}
+
     # Build SELECT clause renaming source → anthive.
     select_parts = []
     for src, dst in resolved.items():
