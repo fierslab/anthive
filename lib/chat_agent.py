@@ -183,6 +183,7 @@ async def run_turn(
     context: Dict[str, Any],
     internal_api_url: str,
     internal_api_auth: Optional[tuple] = None,
+    model_override: Optional[str] = None,
 ) -> AsyncIterator[bytes]:
     """Run one assistant turn and yield SSE frames.
 
@@ -235,6 +236,21 @@ async def run_turn(
             timeout=_LLM_TIMEOUT_SECONDS,
         )
 
+        # Resolve which model to use this turn — override (validated by
+        # the endpoint) wins over the configured default.
+        active_model = model_override or cfg.model
+
+        # OpenRouter routing preference: pin provider order so we skip
+        # the upstream provider tier that just 429'd us (Google Vertex AI
+        # on Anthropic). Passed via OpenAI SDK's extra_body — OpenRouter
+        # reads the `provider` field, every other compatible endpoint
+        # ignores it. Only set when configured AND the chosen model is
+        # from a multi-provider family (Anthropic). For non-Anthropic
+        # models OpenRouter handles routing internally.
+        extra_body: Dict[str, Any] = {}
+        if cfg.provider_order and active_model.startswith('anthropic/'):
+            extra_body['provider'] = {'order': cfg.provider_order}
+
         # 5. Tool-loop. Accumulates assistant text; emits SSE frames
         #    in real time; appends history + emits 'done' at the end.
         assistant_text_parts: List[str] = []
@@ -246,25 +262,23 @@ async def run_turn(
             silently swapping models. If both attempts fail, re-raise
             the second exception so the outer except can build the
             structured error frame."""
+            create_kwargs: Dict[str, Any] = dict(
+                model=active_model,
+                messages=openai_messages,
+                tools=TOOL_DEFS,
+                stream=True,
+            )
+            if extra_body:
+                create_kwargs['extra_body'] = extra_body
             try:
-                return await ai.chat.completions.create(
-                    model=cfg.model,
-                    messages=openai_messages,
-                    tools=TOOL_DEFS,
-                    stream=True,
-                )
+                return await ai.chat.completions.create(**create_kwargs)
             except Exception as exc:  # noqa: BLE001
                 status, _retry_after, _friendly = _classify_upstream_error(exc)
                 if status in _RETRY_STATUSES:
                     log.info("chat: transient %s upstream — retrying once after %.1fs",
                              status, _RETRY_BACKOFF_SECONDS)
                     await asyncio.sleep(_RETRY_BACKOFF_SECONDS)
-                    return await ai.chat.completions.create(
-                        model=cfg.model,
-                        messages=openai_messages,
-                        tools=TOOL_DEFS,
-                        stream=True,
-                    )
+                    return await ai.chat.completions.create(**create_kwargs)
                 raise
 
         try:

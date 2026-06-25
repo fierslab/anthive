@@ -128,11 +128,40 @@ chat:
   # an optional override; this yaml field is the canonical source.
   api_key: null
 
-  # Model identifier passed to the OpenAI-compatible endpoint. Defaults to
-  # Claude Opus 4 — strong tool-calling reliability matters more than cost
-  # for this low-traffic internal feature. Swap to a cheaper model later
-  # by setting this key in anthive.yaml.
+  # Model identifier passed to the OpenAI-compatible endpoint. This is
+  # the DEFAULT; users can pick any entry from allowed_models below at
+  # runtime via the chat widget. Strong tool-calling reliability matters
+  # more than cost for this low-traffic internal feature.
   model: anthropic/claude-opus-4
+
+  # Models the user picker exposes. Each entry must specify id (the
+  # OpenAI-compatible model identifier), label (display string in the
+  # picker), provider (display group), and tier ('top' or 'sub-top').
+  # Curated from openrouter.ai/api/v1/models, 2026-06; all support
+  # streaming chat completions + tool-calls. Prices are per million
+  # tokens (input / output) at the time of curation — comments only,
+  # OpenRouter is the live billing source.
+  allowed_models:
+    # Top tier — strongest tool-calling per provider
+    - {id: anthropic/claude-opus-4.8,    label: Claude Opus 4.8,     provider: Anthropic, tier: top}      # $5 / $25
+    - {id: openai/gpt-4.1,               label: GPT-4.1,             provider: OpenAI,    tier: top}      # $2 / $8
+    - {id: google/gemini-2.5-pro,        label: Gemini 2.5 Pro,      provider: Google,    tier: top}      # $1.25 / $10
+    - {id: deepseek/deepseek-v4-pro,     label: DeepSeek V4 Pro,     provider: DeepSeek,  tier: top}      # $0.43 / $0.87
+    - {id: z-ai/glm-5.2,                 label: GLM 5.2,             provider: Zhipu,     tier: top}      # $0.95 / $3
+    # Sub-top tier — cheaper / faster, still capable of clean tool calls
+    - {id: anthropic/claude-sonnet-4.5,  label: Claude Sonnet 4.5,   provider: Anthropic, tier: sub-top}  # $3 / $15
+    - {id: openai/gpt-4.1-mini,          label: GPT-4.1 Mini,        provider: OpenAI,    tier: sub-top}  # $0.40 / $1.60
+    - {id: google/gemini-2.5-flash,      label: Gemini 2.5 Flash,    provider: Google,    tier: sub-top}  # $0.30 / $2.50
+    - {id: deepseek/deepseek-v4-flash,   label: DeepSeek V4 Flash,   provider: DeepSeek,  tier: sub-top}  # $0.09 / $0.18
+    - {id: z-ai/glm-4.7,                 label: GLM 4.7,             provider: Zhipu,     tier: sub-top}  # $0.40 / $1.75
+
+  # OpenRouter routes Anthropic models through multiple upstream
+  # providers (Anthropic-direct, AWS Bedrock, Google Vertex AI). When
+  # Vertex AI is throttled, requests 429 even on a paid OpenRouter
+  # account. Pin the order so Anthropic-direct (then Bedrock) is tried
+  # first; non-Anthropic models ignore this and use OpenRouter's default
+  # routing. Leave as null / omit to keep OpenRouter's defaults.
+  provider_order: ["Anthropic", "Amazon Bedrock"]
 
   # Base URL of the OpenAI-compatible chat-completions API. OpenRouter is
   # the default; any compatible provider works (e.g. directly anthropic.com

@@ -169,7 +169,11 @@ def load_config() -> Dict[str, Any]:
     config.update(user_config)
 
     # Deep-merge nested sub-dicts so partial user overrides don't drop defaults
-    for subkey in ('s3', 'mcp'):
+    # (e.g. user yaml sets chat.api_key + chat.enabled; the allowed_models /
+    # provider_order / base_url / history_path defaults from
+    # anthive.default.yaml would otherwise be silently dropped by a shallow
+    # merge).
+    for subkey in ('s3', 'mcp', 'chat'):
         if isinstance(user_config.get(subkey), dict):
             merged = defaults.get(subkey, {}).copy()
             merged.update(user_config[subkey])

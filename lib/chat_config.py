@@ -24,20 +24,28 @@ the wire surface is the same in the SILENTLY-OFF and DISABLED cases.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 
 @dataclass(frozen=True)
 class ChatConfig:
     """Resolved chat-assistant runtime configuration."""
 
-    enabled: bool                    # config flag (chat.enabled in yaml)
-    api_key: Optional[str]           # from chat.api_key or OPENROUTER_API_KEY
-    model: str                       # OpenAI-compatible model identifier
-    base_url: str                    # OpenAI-compatible API endpoint
-    history_path: Path               # SQLite DB for per-user chat history
+    enabled: bool                              # config flag (chat.enabled in yaml)
+    api_key: Optional[str]                     # from chat.api_key or OPENROUTER_API_KEY
+    model: str                                 # default model id
+    allowed_models: List[Dict[str, str]] = field(default_factory=list)
+    # ↑ each entry: {id, label, provider, tier}. The picker on the web
+    #   side reads this list; POST /api/chat refuses a model override
+    #   that isn't in it.
+    provider_order: Optional[List[str]] = None
+    # ↑ OpenRouter provider-routing preference, e.g.
+    #   ["Anthropic", "Amazon Bedrock"]. Passed via extra_body to the
+    #   OpenAI-compatible /chat/completions call.
+    base_url: str = 'https://openrouter.ai/api/v1'
+    history_path: Path = Path('data/chat_history.db')
 
     @property
     def active(self) -> bool:
@@ -48,6 +56,13 @@ class ChatConfig:
         state must look identical to disabled on the wire.
         """
         return self.enabled and bool(self.api_key)
+
+    def allow_model(self, model_id: str) -> bool:
+        """Whether ``model_id`` is in the picker. Empty allowed_models
+        means 'no restriction' — only the default is in play."""
+        if not self.allowed_models:
+            return model_id == self.model
+        return any(m.get('id') == model_id for m in self.allowed_models)
 
 
 def _coerce_bool(value: Any) -> bool:
@@ -91,10 +106,34 @@ def load_chat_config(
                 or 'https://openrouter.ai/api/v1').strip()
     history_path = Path(chat_block.get('history_path') or 'data/chat_history.db')
 
+    # allowed_models: validate shape lightly — keep entries that have
+    # at least an 'id', so a malformed user yaml degrades to default-only.
+    raw_models = chat_block.get('allowed_models') or []
+    allowed_models: List[Dict[str, str]] = []
+    if isinstance(raw_models, list):
+        for entry in raw_models:
+            if isinstance(entry, dict) and entry.get('id'):
+                allowed_models.append({
+                    'id':       str(entry.get('id')).strip(),
+                    'label':    str(entry.get('label') or entry.get('id')).strip(),
+                    'provider': str(entry.get('provider') or '').strip(),
+                    'tier':     str(entry.get('tier') or '').strip(),
+                })
+
+    provider_order = chat_block.get('provider_order')
+    if isinstance(provider_order, list):
+        provider_order = [str(p).strip() for p in provider_order if str(p).strip()]
+        if not provider_order:
+            provider_order = None
+    else:
+        provider_order = None
+
     return ChatConfig(
         enabled=enabled,
         api_key=api_key,
         model=model,
+        allowed_models=allowed_models,
+        provider_order=provider_order,
         base_url=base_url,
         history_path=history_path,
     )
@@ -119,12 +158,22 @@ def warn_if_misconfigured(cfg: ChatConfig, logger) -> None:
 def status_payload(cfg: ChatConfig) -> Dict[str, Any]:
     """Build the ``GET /api/chat/status`` JSON body.
 
-    Locked contract: ``{enabled: bool, model?: str}``. ``model`` is
-    only returned when ``enabled`` is true so the web client can render
-    the model name in the widget — never returned in the off path
-    (could leak the configured default to a deployment that hasn't
-    intentionally opted in).
+    Locked contract: ``{enabled: bool, model?: str, models?: [...]}``.
+    Off state returns ``{enabled: false}`` — never leaks the configured
+    default to a deployment that hasn't intentionally opted in.
+
+    When active, ``models`` carries the picker entries
+    (``[{id, label, provider, tier}, ...]``) so the web widget can
+    render a model selector. Backward-compatible with the original
+    ``{enabled, model}`` shape (clients that don't know about
+    ``models`` ignore the field).
     """
     if not cfg.active:
         return {'enabled': False}
-    return {'enabled': True, 'model': cfg.model}
+    payload: Dict[str, Any] = {
+        'enabled': True,
+        'model':   cfg.model,
+    }
+    if cfg.allowed_models:
+        payload['models'] = cfg.allowed_models
+    return payload

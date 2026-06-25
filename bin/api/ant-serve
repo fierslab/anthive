@@ -1638,10 +1638,17 @@ async def chat_status():
 
 
 class _ChatPostBody(BaseModel):
-    """POST /api/chat request body — locked per pika #217 §9.3."""
+    """POST /api/chat request body — locked per pika #217 §9.3.
+
+    ``model`` is an optional per-turn override: if set AND it's in
+    ``chat.allowed_models``, the turn uses that model instead of the
+    configured default. Unknown/disallowed models 400 with a list of
+    valid ids.
+    """
     session_id: str
     message: str
     context: Dict[str, Any] = {}
+    model: Optional[str] = None
 
 
 @app.post("/chat", tags=["chat"])
@@ -1659,6 +1666,19 @@ async def chat_post(request: Request, body: _ChatPostBody):
         raise HTTPException(status_code=404, detail="chat assistant is not active")
     user = _chat_user_from_request(request)
     store = _get_chat_history(cfg)
+
+    # Validate the optional model override against allowed_models. Empty
+    # allowed_models means "no picker" — only the default may be used.
+    model_override: Optional[str] = None
+    if body.model and body.model != cfg.model:
+        if not cfg.allow_model(body.model):
+            valid_ids = [m.get('id') for m in cfg.allowed_models] or [cfg.model]
+            raise HTTPException(
+                status_code=400,
+                detail=f"model {body.model!r} is not in chat.allowed_models. "
+                       f"Valid: {valid_ids}",
+            )
+        model_override = body.model
 
     # Internal API base = the same host:port ant-serve is listening on,
     # so the tool's self-call doesn't traverse Caddy + Authelia. The
@@ -1682,6 +1702,7 @@ async def chat_post(request: Request, body: _ChatPostBody):
             context=body.context,
             internal_api_url=internal_api_url,
             internal_api_auth=None,        # localhost loopback — no auth needed
+            model_override=model_override,
         ):
             yield frame
 
