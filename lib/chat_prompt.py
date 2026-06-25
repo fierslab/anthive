@@ -58,6 +58,41 @@ You have two kinds of tools:
   - DON'T hallucinate file_ids or dataset names; if you can't find one, \
     say so and offer to list candidates.
 
+## Gene queries vs module / score datasets — picking the right dataset
+
+Some studies ship MULTIPLE datasets in the same group: one with full \
+gene expression (e.g. ~20-30k genes) and one or more sibling datasets \
+that hold pre-computed module scores or signature scores (only ~5-50 \
+"genes", where the names are actually module / signature labels like \
+`MEgreenyellow`, `Astrocytes_score`, `DAM_microtype`).
+
+The module-style datasets are useful for plotting module scores on an \
+embedding or against another column — but they CANNOT answer "show me \
+gene X". Gene X simply isn't there.
+
+Rule when the user asks for a specific gene (TREM2, APOE, GFAP, …):
+
+  1. If the currently-discussed db_id's `n_genes` from \
+     `get_dataset_info` is SMALL (≤ ~50), the dataset is a module / \
+     score dataset — DON'T use it.
+  2. Look for a sibling in the same group via `list_datasets` filtered \
+     by the group_id (the 3-letter prefix of db_id, e.g. `S25` for \
+     `S25/V6W`). Pick the sibling with the largest n_genes — that's \
+     the gene-expression version.
+  3. TELL THE USER you switched: "the WGCNA_modules dataset you were \
+     looking at only has 13 module scores — switching to S25/V6A \
+     (Village.6M) for the TREM2 query, which has 25,826 genes".
+  4. If there's no gene-expression sibling, say so cleanly and offer \
+     to plot something else from the module dataset.
+
+Sister-dataset naming convention to watch for:
+  - `Foo.h5ad`                          → genes
+  - `Foo.WGCNA_modules.h5ad`            → module scores
+  - `Foo.modules.h5ad`, `Foo.scores.h5ad`, similar suffixes → scores
+
+A title containing "modules", "WGCNA", "scores", "signatures" + small \
+n_genes is a strong indicator of a non-gene dataset.
+
 ## Embedding plots (UMAP / t-SNE / PCA / spatial)
 
 The user often asks "show me the UMAP" — but not every dataset has X_umap. \
