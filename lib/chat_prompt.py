@@ -50,7 +50,27 @@ You have two kinds of tools:
   - When unsure between two datasets, list both and let the user pick.
   - When the user asks about a gene without specifying a dataset, use \
     `gene_stats` with the appropriate organism + cell_type filter (the \
-    user's current path is in the per-turn context — extract it from there).
+    user's current view is in the per-turn `(currently viewing: ...)` \
+    appendix — read it).
+
+## Reacting to the current view
+
+Every user turn is annotated with a compact `(currently viewing: ...)` \
+appendix that names the page type and its key parameters (db_id, geom, \
+query knobs, gene, study, etc.). Use it:
+
+  - "what am I looking at?" → answer from the appendix without calling \
+    tools (cheap; correct).
+  - "recolor this by TREM2" → call `build_plot_url(db_id, geom, params=…)` \
+    with the SAME db_id+geom+query from the appendix, only `color` swapped. \
+    Don't start from scratch.
+  - "show this gene in other datasets" → take the gene from the appendix \
+    (or query.color when on a plot), pass it to `gene_stats(genes=...)` \
+    with the same organism/cell_type filter inferable from the current \
+    dataset.
+  - "open the WGCNA-modules version of this dataset" → look up the \
+    sibling in the same group via list_datasets / get_dataset_info, \
+    then navigate.
   - When a gene query returns a gene-not-found result for some datasets, \
     say so briefly — it's normal for the catalogue to span organisms.
   - Use `scaled_mean` (0-1, cross-dataset-comparable) when ranking the \
@@ -186,14 +206,71 @@ def build_system_prompt(databases: Iterable[Dict[str, Any]]) -> str:
 
 
 def build_user_envelope(message: str, context: Dict[str, Any]) -> str:
-    """Wrap the user's message with per-turn context (URL they're on).
+    """Wrap the user's message with per-turn context — what page they're on.
 
-    The web client sends ``context.path`` per pika #217 §9.3. We put it
-    as a small prefix so the model knows where the user is looking without
-    treating it as a free-text instruction.
+    Web's structured context (per pika #234, additive over #217's plain
+    ``path``):
+
+      {
+        path, query:{...}, title, heading,
+        view: home|about|catalog|collection|dataset|plot|de_browser|gene_atlas|genesets,
+        db_id, group, file,      # on browse pages
+        geom,                    # on plot pages
+        gene,                    # on /genes/{gene}
+        study,                   # on de_browser / genesets
+      }
+
+    Rendered as a compact appendix so the model can:
+      - answer "what am I looking at?" without calling tools
+      - TWEAK the current plot ("recolor by TREM2") via build_plot_url
+        with just one param flipped, instead of starting from scratch
+      - cross-reference the current gene/study against other datasets
     """
     parts = [message.strip()]
-    path = (context or {}).get('path')
-    if path:
-        parts.append(f"\n\n(user is currently at: {path})")
+
+    ctx = context or {}
+    lines: List[str] = []
+    view = str(ctx.get('view') or '').strip()
+    path = str(ctx.get('path') or '').strip()
+    heading = str(ctx.get('heading') or '').strip()
+    db_id = str(ctx.get('db_id') or '').strip()
+    geom = str(ctx.get('geom') or '').strip()
+    gene = str(ctx.get('gene') or '').strip()
+    study = str(ctx.get('study') or '').strip()
+    query = ctx.get('query') if isinstance(ctx.get('query'), dict) else None
+
+    if view:
+        # First line — punchy one-liner with the most-specific fields.
+        if view == 'plot' and db_id and geom:
+            head = f"plot page — {geom} on {db_id}"
+            if query:
+                head += f" with " + ", ".join(f"{k}={v}" for k, v in query.items())
+            lines.append(head)
+        elif view == 'dataset' and db_id:
+            lines.append(f"dataset page — {db_id}")
+        elif view == 'collection' and ctx.get('group'):
+            lines.append(f"collection page — {ctx.get('group')}")
+        elif view == 'gene_atlas' and gene:
+            lines.append(f"gene atlas — {gene} across the whole catalogue")
+        elif view == 'de_browser' and study:
+            lines.append(f"DE browser — study {study!r}"
+                         + (f" on {db_id}" if db_id else ""))
+        elif view == 'genesets' and study:
+            lines.append(f"genesets — {study}")
+        elif view == 'catalog':
+            lines.append("catalogue browser")
+        elif view == 'home':
+            lines.append("home / landing page")
+        elif view == 'about':
+            lines.append("about / help page")
+        else:
+            lines.append(f"view: {view}")
+    if heading and (not lines or heading not in lines[0]):
+        lines.append(f"heading: {heading}")
+    if path and not view:
+        # Older clients without structured context — fall back to just path.
+        lines.append(f"at: {path}")
+
+    if lines:
+        parts.append("\n\n(currently viewing: " + " · ".join(lines) + ")")
     return "".join(parts)
