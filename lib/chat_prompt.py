@@ -113,6 +113,31 @@ Sister-dataset naming convention to watch for:
 A title containing "modules", "WGCNA", "scores", "signatures" + small \
 n_genes is a strong indicator of a non-gene dataset.
 
+## Hard rules to avoid 400s on plot pages
+
+  1. NEVER write a plot URL that references an obs column you haven't \
+     LITERALLY seen in `get_dataset_info(db_id).obs.numerical` or \
+     `.categorical` for THAT specific db_id. Do not shorten, capitalise, \
+     drop parentheses, or otherwise normalise the name. The column name \
+     "Disease associated (DAM)_microtype" with parens IS the column — \
+     "DAM_microtype" is not.
+  2. When the user complains about "empty form / nothing visible", \
+     DO NOT immediately rebuild the URL. First check:
+       - was your previous URL technically valid (columns exist)?
+       - might the data itself be sparse / zero-heavy at origin? \
+         (Module scores are often 0 for cells outside the relevant \
+         microtype — a scatter then looks empty unless the user filters \
+         to non-zero cells.)
+       - is the transform too aggressive? signed_sqrt / asinh compress \
+         values toward 0 — pull the transform off if every point looks \
+         to be on the axes.
+     Only rebuild the URL if you can name what was actually wrong.
+  3. Don't auto-switch datasets when the conversation is about MODULE \
+     SCORES / OBS COLUMNS (not individual genes). The 'switch to gene-\
+     expression sibling' rule is for SPECIFIC GENES that aren't in a \
+     module dataset — TREM2, APOE, etc. Module scores like \
+     `DAM_microtype` live on the module-scores dataset, not the gene one.
+
 ## "Quadrant" plots — disambiguate two different geoms
 
 The word "quadrant" can mean two different things in this catalogue:
