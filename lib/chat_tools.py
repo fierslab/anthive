@@ -185,6 +185,47 @@ TOOL_DEFS: List[Dict[str, Any]] = [
     {
         'type': 'function',
         'function': {
+            'name': 'module_score',
+            'description': (
+                "Compute Seurat-style per-cell module scores on the fly for an "
+                "arbitrary gene list against the dataset's log-normalized layer. "
+                "Score = mean(module genes) − mean(expression-matched control genes); "
+                "controls drawn from the same expression bins via __gene_bins.\n"
+                "\n"
+                "Returns summary stats {mean, std, q25, median, q75, min, max}, "
+                "n_cells, genes_found, genes_missing, and a session_id that can be "
+                "passed to subsequent analytics queries / visualisations.\n"
+                "\n"
+                "Useful for: 'how does the DAM signature distribute in this dataset?', "
+                "'score these microglia activation genes across the cells', etc. "
+                "Requires __gene_bins on the target dataset (only some datasets have "
+                "it precomputed today — 400 means the dataset can't run module_score "
+                "yet)."
+            ),
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'db_id': {
+                        'type': 'string',
+                        'description': "Dataset id, e.g. 'S25/V6W'.",
+                    },
+                    'genes': {
+                        'type': 'array',
+                        'items': {'type': 'string'},
+                        'description': "Gene names to score (e.g. ['APOE','TREM2','CST7','GPNMB']).",
+                    },
+                    'n_control': {
+                        'type': 'integer',
+                        'description': 'Control genes sampled per expression bin (default 100).',
+                    },
+                },
+                'required': ['db_id', 'genes'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
             'name': 'build_plot_url',
             'description': (
                 "Construct (don't render) a USER-FACING plot URL. Returns a "
@@ -266,6 +307,7 @@ async def dispatch_server_tool(
         'gene_stats':       _gene_stats,
         'list_de_studies':  _list_de_studies,
         'build_plot_url':   _build_plot_url,
+        'module_score':     _module_score,
     }
     handler = handlers.get(name)
     if handler is None:
@@ -375,6 +417,47 @@ async def _list_de_studies(ctx: ToolContext, db_id: str) -> Dict[str, Any]:
     )
     resp.raise_for_status()
     return resp.json()
+
+
+async def _module_score(
+    ctx: ToolContext,
+    db_id: str,
+    genes: List[str],
+    n_control: int = 100,
+) -> Dict[str, Any]:
+    """POST /databases/<db>/module_score → on-the-fly Seurat AddModuleScore.
+
+    Filters the response to what the LLM actually needs (summary + ids +
+    found/missing gene lists + session_id). Surfaces the 'requires
+    __gene_bins' 400 as a structured error so the model can suggest a
+    sibling dataset that has them.
+    """
+    quoted = db_id.replace('/', '%2F')
+    payload = {'genes': list(genes), 'n_control': int(n_control)}
+    try:
+        resp = await ctx.client.post(
+            f'{ctx.base_url}/databases/{quoted}/module_score',
+            json=payload, auth=ctx.auth, timeout=180.0,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        # 400 commonly means '__gene_bins missing on this duckdb' — surface
+        # that clearly so the model can suggest an alternative dataset.
+        try:
+            detail = exc.response.json().get('detail', str(exc))
+        except ValueError:
+            detail = str(exc)
+        return {'error': f'module_score on {db_id} failed: {detail}'}
+    data = resp.json()
+    return {
+        'session_id':      data.get('session_id'),
+        'db_id':           data.get('db_id'),
+        'n_cells':         data.get('n_cells'),
+        'genes_found':     data.get('genes_found'),
+        'genes_missing':   data.get('genes_missing'),
+        'n_control_genes': data.get('n_control_genes'),
+        'summary':         data.get('summary'),
+    }
 
 
 async def _build_plot_url(
