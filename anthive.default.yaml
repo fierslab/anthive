@@ -112,3 +112,33 @@ reports: []
   #   slug: microglia-states          # URL slug: /report/microglia-states/
   #   folder: doc                     # for quarto: input dir (default "doc"); for static: output subfolder
   #   bib: doc/literature/refs.bib    # optional: path to .bib file (quarto auto-detects common locations)
+
+# In-app chat assistant (ant-serve /api/chat/*)
+# ---------------------------------------------
+# Three-state gate:
+#   enabled=false                → widget OFF (catalog never advertises chat)
+#   enabled=true + no api_key     → silently OFF + one-line warning at startup
+#   enabled=true + api_key        → ON
+chat:
+  # Master switch. Default false — opt in via this key in anthive.yaml.
+  enabled: false
+
+  # OpenRouter (or any OpenAI-compatible) API key. Put the real key ONLY in
+  # the gitignored anthive.yaml — never here. Env var OPENROUTER_API_KEY is
+  # an optional override; this yaml field is the canonical source.
+  api_key: null
+
+  # Model identifier passed to the OpenAI-compatible endpoint. Defaults to
+  # Claude Opus 4 — strong tool-calling reliability matters more than cost
+  # for this low-traffic internal feature. Swap to a cheaper model later
+  # by setting this key in anthive.yaml.
+  model: anthropic/claude-opus-4
+
+  # Base URL of the OpenAI-compatible chat-completions API. OpenRouter is
+  # the default; any compatible provider works (e.g. directly anthropic.com
+  # via their OpenAI-compatible endpoint, or a self-hosted proxy).
+  base_url: https://openrouter.ai/api/v1
+
+  # Persistent SQLite path for chat history, keyed on (Remote-User,
+  # session_id). Must survive tmp/ cleans + ant-serve restarts.
+  history_path: data/chat_history.db
