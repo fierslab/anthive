@@ -236,6 +236,20 @@
         .chat-msg { max-width: 86%; padding: 7px 10px; border-radius: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
         .chat-msg.user { align-self: flex-end; background: var(--link); color: #fff; border-bottom-right-radius: 3px; }
         .chat-msg.assistant { align-self: flex-start; background: #f1f5f9; color: var(--text); border-bottom-left-radius: 3px; }
+        /* rendered-markdown assistant bubbles (analytics tables, lists, code) */
+        .chat-msg.assistant.md { white-space: normal; }
+        .chat-msg.assistant.md p { margin: 0 0 6px; } .chat-msg.assistant.md p:last-child { margin-bottom: 0; }
+        .chat-msg.assistant.md ul, .chat-msg.assistant.md ol { margin: 3px 0 6px 18px; }
+        .chat-msg.assistant.md code { background: rgba(15,23,42,.08); padding: 0 3px; border-radius: 3px; font-family: var(--font-mono); font-size: 10.5px; }
+        .chat-msg.assistant.md pre { background: #0f172a; color: #e2e8f0; padding: 7px 9px; border-radius: 6px; overflow-x: auto; margin: 4px 0; }
+        .chat-msg.assistant.md pre code { background: none; padding: 0; color: inherit; }
+        .chat-msg.assistant.md table { border-collapse: collapse; font-size: 10.5px; margin: 4px 0; display: block; overflow-x: auto; max-width: 100%; }
+        .chat-msg.assistant.md th, .chat-msg.assistant.md td { border: 1px solid #cbd5e1; padding: 2px 6px; text-align: left; white-space: nowrap; }
+        .chat-msg.assistant.md th { background: rgba(15,23,42,.05); font-weight: 600; }
+        .chat-msg.assistant.md a { color: var(--link); text-decoration: underline; }
+        .chat-msg.assistant.md h1, .chat-msg.assistant.md h2, .chat-msg.assistant.md h3 { font-size: 12px; margin: 6px 0 3px; }
+        .chat-msg.assistant.md blockquote { border-left: 3px solid #cbd5e1; margin: 4px 0; padding: 0 8px; color: var(--text-muted); }
+        .chat-msg.assistant.md hr { border: none; border-top: 1px solid #cbd5e1; margin: 6px 0; }
         .chat-msg.action { align-self: flex-start; background: #fef3c7; color: #92400e; font-size: 11px; border-radius: 8px; font-family: var(--font-mono); }
         .chat-info { align-self: flex-start; font-size: 11px; color: var(--text-muted); font-style: italic; padding: 2px 4px; animation: chatpulse 1.1s ease-in-out infinite; }
         @keyframes chatpulse { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
@@ -534,11 +548,62 @@
         var d = document.createElement('div'); d.className = 'chat-msg ' + role; d.textContent = text;
         logBox.appendChild(d); logBox.scrollTop = logBox.scrollHeight; return d;
       }
+
+      // ── safe markdown for assistant replies (GFM tables, lists, code, bold,
+      //    links). The bot's analytics answers are often markdown tables, so a
+      //    plain-text bubble shows pipe-soup. Everything is HTML-escaped FIRST,
+      //    then a known-safe subset of tags is produced (no raw model HTML), and
+      //    links are restricted to http(s)/relative — so this can't inject. ──
+      function mdEsc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+      function mdInline(s) {
+        var codes = [];
+        s = s.replace(/`([^`]+)`/g, function (m, p) { codes.push(p); return ' ' + (codes.length - 1) + ' '; });
+        s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/__([^_]+)__/g, '<strong>$1</strong>');
+        s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>').replace(/(^|[^_\w])_([^_\n]+)_/g, '$1<em>$2</em>');
+        s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function (m, t, u) {
+          u = u.trim();
+          return /^(https?:\/\/|\/)/i.test(u) ? '<a href="' + u.replace(/"/g, '%22') + '" target="_blank" rel="noopener">' + t + '</a>' : t;
+        });
+        return s.replace(/ (\d+) /g, function (m, i) { return '<code>' + codes[+i] + '</code>'; });
+      }
+      function mdRow(l) { return l.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(function (c) { return c.trim(); }); }
+      function mdToHtml(src) {
+        var lines = mdEsc(src).split('\n'), out = [], i = 0;
+        var isSep = function (l) { return /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/.test(l); };
+        while (i < lines.length) {
+          var line = lines[i];
+          if (/^\s*```/.test(line)) { var buf = []; i++; while (i < lines.length && !/^\s*```/.test(lines[i])) buf.push(lines[i++]); i++; out.push('<pre><code>' + buf.join('\n') + '</code></pre>'); continue; }
+          if (line.indexOf('|') >= 0 && i + 1 < lines.length && isSep(lines[i + 1])) {
+            var head = mdRow(line); i += 2; var rows = [];
+            while (i < lines.length && lines[i].indexOf('|') >= 0 && lines[i].trim() !== '') rows.push(mdRow(lines[i++]));
+            out.push('<table><tr>' + head.map(function (c) { return '<th>' + mdInline(c) + '</th>'; }).join('') + '</tr>' +
+              rows.map(function (r) { return '<tr>' + r.map(function (c) { return '<td>' + mdInline(c) + '</td>'; }).join('') + '</tr>'; }).join('') + '</table>'); continue;
+          }
+          var hm = line.match(/^(#{1,3})\s+(.*)$/);
+          if (hm) { out.push('<h' + hm[1].length + '>' + mdInline(hm[2]) + '</h' + hm[1].length + '>'); i++; continue; }
+          if (/^\s*([-*_])\1{2,}\s*$/.test(line)) { out.push('<hr>'); i++; continue; }
+          if (/^\s*[-*+]\s+/.test(line)) { var it = []; while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) it.push(lines[i++].replace(/^\s*[-*+]\s+/, '')); out.push('<ul>' + it.map(function (x) { return '<li>' + mdInline(x) + '</li>'; }).join('') + '</ul>'); continue; }
+          if (/^\s*\d+\.\s+/.test(line)) { var oi = []; while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) oi.push(lines[i++].replace(/^\s*\d+\.\s+/, '')); out.push('<ol>' + oi.map(function (x) { return '<li>' + mdInline(x) + '</li>'; }).join('') + '</ol>'); continue; }
+          if (line.trim() === '') { i++; continue; }
+          var para = [];
+          while (i < lines.length && lines[i].trim() !== '' && !/^\s*```/.test(lines[i]) && !/^#{1,3}\s/.test(lines[i]) &&
+                 !/^\s*[-*+]\s/.test(lines[i]) && !/^\s*\d+\.\s/.test(lines[i]) &&
+                 !(lines[i].indexOf('|') >= 0 && i + 1 < lines.length && isSep(lines[i + 1]))) para.push(lines[i++]);
+          out.push('<p>' + mdInline(para.join('\n')).replace(/\n/g, '<br>') + '</p>');
+        }
+        return out.join('');
+      }
+      function renderAssistantInto(el, text) {
+        try { el.innerHTML = mdToHtml(text); el.classList.add('md'); }
+        catch (e) { el.textContent = text; }   // renderer bug must never break the chat
+      }
+
       function renderHistory(msgs) {
         logBox.innerHTML = '';
         if (!msgs || !msgs.length) { showEmpty(); return; }
         msgs.forEach(function (m) {
           if (m.role === 'action') addMsg('action', '↪ ' + (m.content || 'navigated'));
+          else if (m.role === 'assistant') renderAssistantInto(addMsg('assistant', ''), m.content || '');
           else addMsg(m.role, m.content);
         });
       }
@@ -844,7 +909,7 @@
           }
           function finish() {
             streaming = false; sendBtn.disabled = false; clearInfo();
-            if (asstText) { var a = localLog(); a.push({ role: 'assistant', content: asstText }); saveLocal(a); }
+            if (asstText) { var a = localLog(); a.push({ role: 'assistant', content: asstText }); saveLocal(a); if (asstEl) renderAssistantInto(asstEl, asstText); }
           }
           function pump() {
             return reader.read().then(function (res) {
