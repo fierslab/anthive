@@ -187,13 +187,13 @@ TOOL_DEFS: List[Dict[str, Any]] = [
         'function': {
             'name': 'build_plot_url',
             'description': (
-                "Construct (don't render) a plot URL for the user. Use when "
-                "you want to give the user a clickable link, or chain into "
-                "`navigate` to auto-redirect. The URL takes the form "
-                "/databases/<db_id>/plot/<geom>?<params>. Common geoms: "
-                "scatter, violin, hexbin, kde2d, histogram, heatmap, volcano, "
-                "ma, forest, de_quadrant, de_heatmap. Optional params depend "
-                "on the geom — see /api/version for the contract."
+                "Construct (don't render) a USER-FACING plot URL. Returns a "
+                "URL of the form /browse/<db_id>/plot/<geom>?<params> — the "
+                "web UI route, NOT the REST API. Pass the result straight to "
+                "`navigate` to take the user there. Common geoms: scatter, "
+                "violin, hexbin, kde2d, histogram, heatmap, volcano, ma, "
+                "forest, de_quadrant, de_heatmap. Never hand-construct plot "
+                "URLs — always use this tool."
             ),
             'parameters': {
                 'type': 'object',
@@ -370,12 +370,20 @@ async def _build_plot_url(
     geom: str,
     params: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    # Pure URL construction — no HTTP call needed. We URL-encode the params
-    # via httpx's params machinery to get correct quoting.
-    quoted_db = db_id.replace('/', '%2F')
-    url = f'/databases/{quoted_db}/plot/{geom}'
+    # Pure URL construction — no HTTP call needed.
+    #
+    # IMPORTANT: must emit the WEB UI path (/browse/...), NOT the REST API
+    # path (/databases/...). The /databases/<db_id>/plot/<geom> form is the
+    # ant-serve REST endpoint (returns PNG bytes); the user-facing route
+    # at the same path-shape but rooted at /browse/<db_id>/plot/<geom>
+    # is what `navigate` should hand to the client. Web sees a 404 if we
+    # mix them up — bug surfaced by anthive-web #228.
+    #
+    # db_id is already "group/file" so it slots straight into the path. We
+    # leave the slash unquoted because the web router consumes it as a
+    # path parameter, not a single segment.
+    url = f'/browse/{db_id}/plot/{geom}'
     if params:
-        # httpx.QueryParams handles all the encoding correctly.
         from urllib.parse import urlencode
         url = f'{url}?{urlencode(params, doseq=True)}'
     return {'url': url}

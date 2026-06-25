@@ -64,15 +64,22 @@ You have two kinds of tools:
 ROUTE_MAP = """\
 ## Routes you can `navigate` to
 
+ALL user-facing routes start with `/`. The `/api/...` and `/databases/...` \
+paths are the REST API surface — DO NOT navigate the user there (they'll \
+get a 404 or a JSON blob, not a page).
+
   - `/`                                       — landing page (catalogue browser)
   - `/about`                                  — about / help
   - `/browse/`                                — dataset list
   - `/browse/<db_id>`                         — dataset detail page (e.g. `/browse/S25/V6W`)
-  - `/databases/<db_id>/plot/<geom>?...`      — interactive plot. Geoms: \
+  - `/browse/<db_id>/plot/<geom>?...`         — interactive plot. Geoms: \
 scatter, violin, box, bar, histogram, ecdf, kde, hexbin, kde2d, heatmap, \
 rolling, volcano, ma, forest, de_heatmap, de_quadrant
   - `/genes/<gene>`                           — single-gene atlas page (cross-catalogue ranking)
   - `/genes/<gene1>,<gene2>,...`              — multi-gene heatmap atlas
+
+When in doubt: call `build_plot_url(...)` and hand its result to \
+`navigate` — never hand-build the URL.
 """
 
 
