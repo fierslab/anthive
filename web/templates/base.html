@@ -242,6 +242,8 @@
         .chat-msg.error .ce-actions { margin-top: 7px; display: flex; gap: 10px; align-items: center; }
         .chat-msg.error .ce-retry { background: #dc2626; color: #fff; border: none; border-radius: 6px; padding: 3px 11px; font-size: 11px; cursor: pointer; font-family: inherit; }
         .chat-msg.error .ce-retry:hover { background: #b91c1c; }
+        .chat-msg.error .ce-retry:disabled { opacity: .55; cursor: default; }
+        #chat-head .chat-model-pick { background: #1e293b; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; font-size: 10px; padding: 1px 4px; max-width: 156px; font-family: var(--font); cursor: pointer; }
         .chat-msg.error .ce-details-btn { background: none; border: none; color: #b91c1c; font-size: 10px; cursor: pointer; text-decoration: underline; padding: 0; font-family: inherit; }
         .chat-msg.error .ce-details { margin-top: 6px; padding: 6px 8px; background: #fff; border: 1px solid #fecaca; border-radius: 6px; font-family: var(--font-mono); font-size: 10px; color: #7f1d1d; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 140px; overflow-y: auto; }
         .chat-empty { margin: auto; color: var(--text-muted); font-size: 12px; text-align: center; padding: 14px; }
@@ -410,7 +412,7 @@
          authoritative transcript is the server's, keyed by Authelia user. -->
     <button id="chat-launcher" title="Ask the data assistant" aria-label="Open data assistant">💬</button>
     <div id="chat-panel" role="dialog" aria-label="Data assistant">
-      <div id="chat-head">{% if chat_logo %}<img class="chat-logo-sm" src="{{ chat_logo }}" alt="">{% endif %}assistant <span class="sub" id="chat-model"></span>
+      <div id="chat-head">{% if chat_logo %}<img class="chat-logo-sm" src="{{ chat_logo }}" alt="">{% endif %}assistant <span class="sub" id="chat-model"></span><select class="chat-model-pick" id="chat-model-pick" title="model" style="display:none"></select>
         <button class="hbtn reset" id="chat-reset" title="reset / forget this conversation" aria-label="reset conversation">⟲</button>
         <button class="hbtn x" id="chat-close" title="close" aria-label="close">✕</button></div>
       <div id="chat-log"></div>
@@ -430,6 +432,7 @@
       var closeBtn = document.getElementById('chat-close');
       var resetBtn = document.getElementById('chat-reset');
       var modelEl  = document.getElementById('chat-model');
+      var modelPick = document.getElementById('chat-model-pick');
       var CHAT_LOGO = {{ chat_logo|tojson }};
       if (!launcher || !panel) return;
 
@@ -445,7 +448,39 @@
               : ('s' + Date.now() + Math.round(Math.random() * 1e9));
         ss.set(SID, sid);
       }
-      var streaming = false, navRetry = 0, lastUserMessage = '';
+      var streaming = false, navRetry = 0, lastUserMessage = '', chosenModel = '';
+      var MODEL_KEY = 'anthive.chat.model';   // remembered pick (localStorage, cross-session)
+      function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+      function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+
+      // Build the grouped model picker from /api/chat/status's `models` array.
+      // Default to the remembered pick (if still allowed) else the server
+      // default; persist changes; the chosen id rides on every POST /api/chat.
+      function buildModelPicker(models, defaultId) {
+        var ids = models.map(function (m) { return m.id; });
+        var stored = lsGet(MODEL_KEY);
+        chosenModel = (stored && ids.indexOf(stored) >= 0) ? stored
+                    : (defaultId && ids.indexOf(defaultId) >= 0 ? defaultId : ids[0]);
+        var TIERS = [['top', 'Top tier'], ['sub-top', 'Faster / cheaper']];
+        var seen = {}, html = '';
+        TIERS.forEach(function (t) {
+          var grp = models.filter(function (m) { return m.tier === t[0]; });
+          if (!grp.length) return;
+          html += '<optgroup label="' + t[1] + '">';
+          grp.forEach(function (m) { seen[m.id] = 1;
+            html += '<option value="' + m.id + '">' + (m.label || m.id) + ' · ' + (m.provider || '') + '</option>'; });
+          html += '</optgroup>';
+        });
+        var rest = models.filter(function (m) { return !seen[m.id]; });   // any other tiers
+        if (rest.length) { html += '<optgroup label="Other">';
+          rest.forEach(function (m) { html += '<option value="' + m.id + '">' + (m.label || m.id) + '</option>'; });
+          html += '</optgroup>'; }
+        modelPick.innerHTML = html;
+        modelPick.value = chosenModel;
+        modelEl.style.display = 'none';        // replace static text with the picker
+        modelPick.style.display = '';
+        modelPick.addEventListener('change', function () { chosenModel = modelPick.value; lsSet(MODEL_KEY, chosenModel); });
+      }
 
       function localLog()  { try { return JSON.parse(ss.get(LOG) || '[]'); } catch (e) { return []; } }
       function saveLocal(a) { ss.set(LOG, JSON.stringify(a.slice(-50))); }
@@ -542,19 +577,44 @@
           return { head: 'The model provider had a problem', body: 'A temporary upstream error — retrying usually works.', retry: true };
         return { head: 'The assistant hit an error', body: 'Something went wrong handling that request.', retry: true };
       }
-      function showError(raw) {
-        var c = classifyError(raw);
+      // Headline by HTTP status when the server sends a structured error frame
+      // ({code, retry_after, message}) — the `message` is already a clean,
+      // user-safe string (raw payload + user_id stripped server-side), so we
+      // show it as the body and skip the details toggle.
+      function classifyByCode(code) {
+        if (code === 429) return { head: 'The assistant is busy right now', retry: true };
+        if (code === 401 || code === 403) return { head: 'The assistant isn’t set up correctly', retry: false };
+        if (code >= 500) return { head: 'The model provider had a problem', retry: true };
+        if (code >= 400) return { head: 'The assistant couldn’t handle that', retry: true };
+        return { head: 'The assistant hit an error', retry: true };
+      }
+      // raw: friendly message (structured) or raw blob (legacy); code/retryAfter
+      // present only on structured frames.
+      function showError(raw, code, retryAfter) {
+        var structured = (typeof code === 'number');
+        var c = structured
+          ? { head: classifyByCode(code).head, body: (raw && String(raw)) || 'Something went wrong.', retry: classifyByCode(code).retry }
+          : classifyError(raw);
         var e = logBox.querySelector('.chat-empty'); if (e) e.remove();
         var wrap = document.createElement('div'); wrap.className = 'chat-msg error';
         var h = document.createElement('div'); h.className = 'ce-head'; h.textContent = '⚠ ' + c.head; wrap.appendChild(h);
         var b = document.createElement('div'); b.className = 'ce-body'; b.textContent = c.body; wrap.appendChild(b);
         var actions = document.createElement('div'); actions.className = 'ce-actions';
         if (c.retry && lastUserMessage) {
-          var rb = document.createElement('button'); rb.type = 'button'; rb.className = 'ce-retry'; rb.textContent = '↻ retry';
-          rb.addEventListener('click', function () { if (!streaming) send(lastUserMessage); });
+          var rb = document.createElement('button'); rb.type = 'button'; rb.className = 'ce-retry';
+          rb.addEventListener('click', function () { if (!rb.disabled && !streaming) send(lastUserMessage); });
+          var wait = (retryAfter && retryAfter > 0) ? Math.min(60, Math.round(retryAfter)) : 0;
+          if (wait) {   // honour the server's Retry-After: count down before re-enabling
+            rb.disabled = true; rb.textContent = 'retry in ' + wait + 's';
+            var iv = setInterval(function () {
+              wait--;
+              if (wait <= 0) { clearInterval(iv); rb.disabled = false; rb.textContent = '↻ retry'; }
+              else rb.textContent = 'retry in ' + wait + 's';
+            }, 1000);
+          } else { rb.textContent = '↻ retry'; }
           actions.appendChild(rb);
         }
-        if (raw) {
+        if (!structured && raw) {   // legacy raw blob → keep it behind a details toggle
           var db = document.createElement('button'); db.type = 'button'; db.className = 'ce-details-btn'; db.textContent = 'details';
           var pre = document.createElement('div'); pre.className = 'ce-details'; pre.textContent = String(raw); pre.style.display = 'none';
           db.addEventListener('click', function () {
@@ -618,7 +678,9 @@
         var asstEl = null, asstText = '';
         fetch('/api/chat', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
-          body: JSON.stringify({ session_id: sid, message: message, context: { path: location.pathname + location.search } })
+          body: JSON.stringify(Object.assign(
+            { session_id: sid, message: message, context: { path: location.pathname + location.search } },
+            chosenModel ? { model: chosenModel } : {}))
         })
         .then(function (resp) {
           if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status);
@@ -628,7 +690,7 @@
               if (!asstEl) asstEl = addMsg('assistant', '');
               asstText += (ev.text || ''); asstEl.textContent = asstText; logBox.scrollTop = logBox.scrollHeight;
             } else if (ev.type === 'action') { doAction(ev); }
-            else if (ev.type === 'error')   { showError(ev.message); }
+            else if (ev.type === 'error')   { showError(ev.message, ev.code, ev.retry_after); }
           }
           function finish() {
             streaming = false; sendBtn.disabled = false;
@@ -669,7 +731,8 @@
         .then(function (d) {
           if (!d || !d.enabled) { ss.set(ON, '0'); launcher.style.display = 'none'; return; }
           ss.set(ON, '1'); launcher.style.display = 'flex';
-          if (d.model) modelEl.textContent = d.model;
+          if (d.model) { modelEl.textContent = d.model; chosenModel = chosenModel || d.model; }
+          if (d.models && d.models.length) buildModelPicker(d.models, d.model);
           rehydrate();
           if (ss.get(OPEN) === '1') openPanel();
         })
