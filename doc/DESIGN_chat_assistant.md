@@ -67,7 +67,7 @@ can revisit CopilotKit, but it's not worth a React build for v1.
  browser (Deep Chat widget in base.html)
    │  POST /api/chat  {session_id, message}           (SSE stream back)
    ▼
- agent backend  ── Claude (tool-calling, streaming) ──┐
+ agent backend  ── LLM via OpenRouter (OpenAI-compatible, tools, stream) ─┐
    │   executes SERVER tools ───────────────────┐     │
    │     list_datasets / get_dataset_info /      │     │
    │     gene_stats / list_de_studies /          ▼     │
@@ -78,6 +78,20 @@ can revisit CopilotKit, but it's not worth a React build for v1.
    │
    └─ widget executes client tool calls: window.location = url / param tweak
 ```
+
+### 5.0 LLM provider — OpenRouter (model-agnostic)
+
+The agent talks to the model through **OpenRouter** (`https://openrouter.ai/api/v1`),
+which is **OpenAI-compatible** — so the backend uses any OpenAI-style SDK/HTTP
+client (Chat Completions, OpenAI-style `tools` + `tool_calls`, SSE streaming) and
+the **model is a config string** (`chat.model`, e.g. `anthropic/claude-opus-4`,
+`openai/gpt-...`, etc.). One key, swappable models, no provider lock-in. Caveats:
+
+- **Tool-calling fidelity varies by model** — pick a strong tool-calling model
+  (Claude- or GPT-4-class). Weak models mangle the action protocol.
+- OpenRouter is an **extra intermediary** in the data path (see §8).
+- The tool format is **OpenAI-style** (`tools`/`tool_calls`), not Anthropic's
+  native blocks — relevant only to the server implementation.
 
 ### 5.1 Two tiers of tools
 
@@ -139,7 +153,7 @@ conversation; the server store maps `Remote-User → {session_id → transcript}
   over existing REST calls), the system-context assembly, the session store,
   **and the enablement gate** (§7): the `chat.enabled` flag, the key read from
   env/yaml, the `GET /api/chat/status` capability endpoint, and 404-when-off on
-  the chat endpoints. **This is where the Anthropic API key lives** and where
+  the chat endpoints. **This is where the OpenRouter key lives** and where
   data access already is — it does not belong in the web client.
 
 The interface between them is the `GET /api/chat/status` capability check, the
@@ -149,7 +163,7 @@ schema. Spec that, hand the server half to anthive4.
 ## 7. Enablement & key safety (off by default, opt-in)
 
 Hard requirements: the assistant is **off unless a deployment explicitly turns
-it on**, and the Anthropic API key is **optional and never committed**.
+it on**, and the OpenRouter API key is **optional and never committed**.
 
 **Config — matches existing `anthive.yaml` practice.** `anthive.yaml` is already
 **gitignored** and holds the S3 secrets; `anthive.default.yaml` (tracked) holds
@@ -159,10 +173,14 @@ safe defaults and `config.py` falls back to it. So:
   fresh deployment starts dark and stays dark until someone opts in.
 - A deployment opts in by setting `chat.enabled: true` in its **local, gitignored
   `anthive.yaml`**.
-- The **API key comes from the environment** (`ANTHROPIC_API_KEY`) — preferred,
+- The **API key comes from the environment** (`OPENROUTER_API_KEY`) — preferred,
   never in any file. As a fallback, `chat.api_key` may live in the gitignored
   `anthive.yaml` (consistent with how `s3.secret_access_key` already lives
   there). It **must never** appear in `anthive.default.yaml` or any tracked file.
+- The **model is config**: `chat.model` (e.g. `anthropic/claude-opus-4`) in
+  `anthive.default.yaml` with a sane default; `chat.base_url` defaults to
+  OpenRouter but is overridable (any OpenAI-compatible endpoint). The model
+  string is **not** a secret.
 
 **Three-state availability (fail safe).** The server resolves one boolean at
 startup:
@@ -198,9 +216,12 @@ boolean.
 - **No raw SQL / no DuckDB-h5ad path** — tools are bounded REST wrappers, so
   there's no injection surface into the data layer.
 - **Data egress** — *approved (2026-06-25)*: questions + the catalogue digest +
-  tool results go to the Anthropic API. The data is scRNA-seq dataset *metadata*
-  (not patient data); no `.h5ad` cell-level data is ever sent (the tools return
-  summaries/URLs). Egress is acceptable for this internal tool.
+  tool results go to **OpenRouter and the model provider it routes to**. The data
+  is scRNA-seq dataset *metadata* (not patient data); no `.h5ad` cell-level data
+  is ever sent (the tools return summaries/URLs). Egress is acceptable for this
+  internal tool. Note OpenRouter is an **added intermediary** — set its
+  account-level data policy to **disable prompt logging / opt out of training**,
+  and avoid free models that mandate logging.
 - **Rate / cost**: per-user rate limit on `/api/chat`; cap tool-call loops per
   turn; stream so a long turn is interruptible.
 
@@ -208,11 +229,13 @@ boolean.
 
 1. **Spec the contract** — `GET /api/chat/status`, the `POST /api/chat` SSE
    events, `GET /api/chat/history`, the client tool-call schema, and the
-   `chat.enabled`/`ANTHROPIC_API_KEY` config keys (`chat.enabled: false` added to
+   `chat.enabled`/`chat.model`/`chat.base_url` + `OPENROUTER_API_KEY` config keys
+   (`chat.enabled: false` + a default `chat.model` added to
    `anthive.default.yaml`). Hand the server half to anthive4.
 2. **Server v1 (anthive4):** the enablement gate (§7) + `/api/chat/status`
-   first, then `/api/chat` with Claude + the five data tools + `build_plot_url`,
-   system context from `/databases`, in-memory session store.
+   first, then `/api/chat` — OpenAI-compatible client pointed at OpenRouter
+   (`chat.model`) + the five data tools + `build_plot_url`, system context from
+   `/databases`, in-memory session store.
 3. **Widget v1 (web):** Deep Chat in `base.html` **gated on `/api/chat/status`**,
    `navigate` action only,
    rehydrate from `/api/chat/history`. End-to-end "ask → land on the right view,
@@ -225,7 +248,8 @@ boolean.
 ## 10. Decisions & open questions
 
 **Decided:**
-- **Anthropic API egress** — approved (2026-06-25).
+- **LLM egress via OpenRouter** — approved (2026-06-25). Model is config
+  (`chat.model`), provider-agnostic through OpenRouter's OpenAI-compatible API.
 - **Off by default, explicit opt-in per deployment; key optional & never
   committed** — see §7 (config in gitignored `anthive.yaml`, capability endpoint
   + 404-when-off).
