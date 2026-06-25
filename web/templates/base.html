@@ -251,8 +251,9 @@
         .chat-msg.assistant.md blockquote { border-left: 3px solid #cbd5e1; margin: 4px 0; padding: 0 8px; color: var(--text-muted); }
         .chat-msg.assistant.md hr { border: none; border-top: 1px solid #cbd5e1; margin: 6px 0; }
         .chat-msg.action { align-self: flex-start; background: #fef3c7; color: #92400e; font-size: 11px; border-radius: 8px; font-family: var(--font-mono); }
-        .chat-info { align-self: flex-start; font-size: 11px; color: var(--text-muted); font-style: italic; padding: 2px 4px; animation: chatpulse 1.1s ease-in-out infinite; }
-        @keyframes chatpulse { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
+        .chat-activity { align-self: flex-start; display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-muted); font-style: italic; padding: 2px 4px; }
+        .chat-activity .spin { width: 11px; height: 11px; flex: none; border: 2px solid #cbd5e1; border-top-color: var(--link); border-radius: 50%; animation: chatspin .7s linear infinite; }
+        @keyframes chatspin { to { transform: rotate(360deg); } }
         .chat-msg.error { align-self: stretch; max-width: 100%; background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; border-radius: 8px; padding: 8px 10px; font-size: 11.5px; }
         .chat-msg.error .ce-head { font-weight: 700; }
         .chat-msg.error .ce-body { margin-top: 2px; color: #b91c1c; }
@@ -724,18 +725,31 @@
         var l = localLog(); l.push({ role: 'action', content: text }); saveLocal(l);
       }
 
-      // Transient working status (e.g. the server's plot-preflight 'info' frame).
-      // Not persisted to history — purely a live "I'm doing something" annunciator
-      // shown until the next token/action/error/done frame.
-      var infoEl = null;
-      function showInfo(text) {
-        clearInfo();
+      // Live activity indicator (spinner + label). Not persisted — purely a
+      // "the assistant is working" annunciator. Three triggers:
+      //   • on send, before any frame arrives ("Thinking…")
+      //   • a silence gap mid-turn (tool calls / the 120s SQL query) → "Working…"
+      //   • an explicit server 'info' frame (e.g. preflight) → its message
+      // Cleared by the next token/action/error and on finish.
+      var actEl = null, idleTimer = null;
+      function showActivity(text) {
         var e = logBox.querySelector('.chat-empty'); if (e) e.remove();
-        infoEl = document.createElement('div'); infoEl.className = 'chat-info';
-        infoEl.textContent = '⏳ ' + (text || 'working…');
-        logBox.appendChild(infoEl); logBox.scrollTop = logBox.scrollHeight;
+        if (!actEl) {
+          actEl = document.createElement('div'); actEl.className = 'chat-activity';
+          actEl.innerHTML = '<span class="spin"></span><span class="lbl"></span>';
+        }
+        logBox.appendChild(actEl);   // (re)pin at the bottom
+        actEl.querySelector('.lbl').textContent = text || 'Working…';
+        logBox.scrollTop = logBox.scrollHeight;
       }
-      function clearInfo() { if (infoEl) { infoEl.remove(); infoEl = null; } }
+      function clearActivity() { if (actEl) { actEl.remove(); actEl = null; } }
+      // While a turn is streaming, re-show "Working…" if it goes quiet for a beat
+      // (covers the silent gaps between tool calls).
+      function armIdle() {
+        if (idleTimer) clearTimeout(idleTimer);
+        idleTimer = setTimeout(function () { if (streaming) showActivity('Working…'); }, 1100);
+      }
+      function stopIdle() { if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; } }
 
       // Turn a raw agent/provider error into a plain-language card. Recognises
       // the common upstream failures (rate-limit, auth, provider 5xx, timeout,
@@ -889,6 +903,7 @@
           var l = localLog(); l.push({ role: 'user', content: message }); saveLocal(l);
         }
         var asstEl = null, asstText = '';
+        showActivity('Thinking…');     // immediate feedback before the first frame
         fetch('/api/chat', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
           body: JSON.stringify(Object.assign(
@@ -899,16 +914,17 @@
           if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status);
           var reader = resp.body.getReader(), dec = new TextDecoder(), buf = '';
           function handle(ev) {
-            if (ev.type !== 'info') clearInfo();   // any real frame ends the transient status
             if (ev.type === 'token') {
+              clearActivity();
               if (!asstEl) asstEl = addMsg('assistant', '');
               asstText += (ev.text || ''); asstEl.textContent = asstText; logBox.scrollTop = logBox.scrollHeight;
-            } else if (ev.type === 'action') { doAction(ev); }
-            else if (ev.type === 'error')   { showError(ev.message, ev.code, ev.retry_after); }
-            else if (ev.type === 'info')    { showInfo(ev.message); }   // e.g. {kind:'preflight'} — transient
+              armIdle();                         // re-show "Working…" if it goes quiet again
+            } else if (ev.type === 'action') { clearActivity(); stopIdle(); doAction(ev); }
+            else if (ev.type === 'error')   { clearActivity(); stopIdle(); showError(ev.message, ev.code, ev.retry_after); }
+            else if (ev.type === 'info')    { showActivity(ev.message || 'Working…'); }   // explicit server status (e.g. preflight)
           }
           function finish() {
-            streaming = false; sendBtn.disabled = false; clearInfo();
+            streaming = false; sendBtn.disabled = false; clearActivity(); stopIdle();
             if (asstText) { var a = localLog(); a.push({ role: 'assistant', content: asstText }); saveLocal(a); if (asstEl) renderAssistantInto(asstEl, asstText); }
           }
           function pump() {
@@ -928,7 +944,7 @@
           }
           return pump();
         })
-        .catch(function (err) { streaming = false; sendBtn.disabled = false; clearInfo(); showError('failed to fetch — ' + (err && err.message || 'assistant unavailable')); });
+        .catch(function (err) { streaming = false; sendBtn.disabled = false; clearActivity(); stopIdle(); showError('failed to fetch — ' + (err && err.message || 'assistant unavailable')); });
       }
 
       form.addEventListener('submit', function (e) {
