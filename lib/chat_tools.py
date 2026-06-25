@@ -167,8 +167,10 @@ TOOL_DEFS: List[Dict[str, Any]] = [
         'function': {
             'name': 'list_de_studies',
             'description': (
-                "List differential-expression studies registered against one "
-                "dataset. Returns study_id, method, n_contrasts, terms."
+                "STEP 1 of DE-quadrant drilldown: list differential-expression "
+                "studies registered against a dataset. Returns study_id + method "
+                "+ count of terms and contrasts. To get the actual TERM names, "
+                "follow up with get_de_study_terms(db_id, study_id)."
             ),
             'parameters': {
                 'type': 'object',
@@ -179,6 +181,51 @@ TOOL_DEFS: List[Dict[str, Any]] = [
                     },
                 },
                 'required': ['db_id'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'get_de_study_terms',
+            'description': (
+                "STEP 2 of DE-quadrant drilldown: list the TERM names of one "
+                "DE study (e.g. 'sex_mouse', 'Sex_donor', 'patient_geno_short', "
+                "'batch_group', …). Each term has its own set of contrasts; "
+                "follow up with list_de_contrasts(db_id, study_id, term) to "
+                "get the contrast names."
+            ),
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'db_id':    {'type': 'string', 'description': 'Dataset id.'},
+                    'study_id': {'type': 'string', 'description': 'Study id from list_de_studies.'},
+                },
+                'required': ['db_id', 'study_id'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'list_de_contrasts',
+            'description': (
+                "STEP 3 of DE-quadrant drilldown: list the CONTRAST names "
+                "within one (study, term). Each contrast is one comparison "
+                "(often a single level, e.g. term='Sex_donor' → contrasts=['F'] "
+                "means 'F vs reference'). REQUIRED before building a de_quadrant "
+                "URL — contrast names look like single levels ('F', 'm', "
+                "'APOE4_vs_APOE3'), NOT term+level concatenations ('Sex_donor_M'). "
+                "If you guess, the de_quadrant page renders empty."
+            ),
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'db_id':    {'type': 'string'},
+                    'study_id': {'type': 'string'},
+                    'term':     {'type': 'string', 'description': 'Term name from get_de_study_terms.'},
+                },
+                'required': ['db_id', 'study_id', 'term'],
             },
         },
     },
@@ -302,12 +349,14 @@ async def dispatch_server_tool(
     in ``{"error": "..."}`` so the LLM can recover gracefully.
     """
     handlers = {
-        'list_datasets':    _list_datasets,
-        'get_dataset_info': _get_dataset_info,
-        'gene_stats':       _gene_stats,
-        'list_de_studies':  _list_de_studies,
-        'build_plot_url':   _build_plot_url,
-        'module_score':     _module_score,
+        'list_datasets':      _list_datasets,
+        'get_dataset_info':   _get_dataset_info,
+        'gene_stats':         _gene_stats,
+        'list_de_studies':    _list_de_studies,
+        'get_de_study_terms': _get_de_study_terms,
+        'list_de_contrasts':  _list_de_contrasts,
+        'build_plot_url':     _build_plot_url,
+        'module_score':       _module_score,
     }
     handler = handlers.get(name)
     if handler is None:
@@ -413,6 +462,42 @@ async def _list_de_studies(ctx: ToolContext, db_id: str) -> Dict[str, Any]:
     quoted = db_id.replace('/', '%2F')
     resp = await ctx.client.get(
         f'{ctx.base_url}/databases/{quoted}/de',
+        auth=ctx.auth, timeout=20.0,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _get_de_study_terms(
+    ctx: ToolContext, db_id: str, study_id: str,
+) -> Dict[str, Any]:
+    """GET /databases/<db>/de/<study> — returns the terms array with names + counts."""
+    quoted_db = db_id.replace('/', '%2F')
+    quoted_st = study_id.replace('/', '%2F')
+    resp = await ctx.client.get(
+        f'{ctx.base_url}/databases/{quoted_db}/de/{quoted_st}',
+        auth=ctx.auth, timeout=20.0,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    # Trim — bot just needs terms[].term + n_contrasts per term.
+    return {
+        'study_id': data.get('study_id'),
+        'method':   data.get('method'),
+        'description': data.get('description'),
+        'terms':    data.get('terms') or [],
+    }
+
+
+async def _list_de_contrasts(
+    ctx: ToolContext, db_id: str, study_id: str, term: str,
+) -> Dict[str, Any]:
+    """GET /databases/<db>/de/<study>/terms/<term> — returns the contrasts array."""
+    quoted_db = db_id.replace('/', '%2F')
+    quoted_st = study_id.replace('/', '%2F')
+    quoted_tm = term.replace('/', '%2F')
+    resp = await ctx.client.get(
+        f'{ctx.base_url}/databases/{quoted_db}/de/{quoted_st}/terms/{quoted_tm}',
         auth=ctx.auth, timeout=20.0,
     )
     resp.raise_for_status()

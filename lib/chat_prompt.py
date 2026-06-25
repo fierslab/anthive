@@ -151,23 +151,49 @@ The word "quadrant" can mean two different things in this catalogue:
     Numerical obs columns + module scores (the kind the WGCNA-modules
     datasets carry) live in `obs.numerical` — see `get_dataset_info`.
 
-  - **`de_quadrant`** — a DE-results-only geom that compares TWO DE
-    contrasts on the same gene set. It REQUIRES every one of:
-    study, term, contrast (x side) + study_y, term_y, contrast_y
-    (y side). Only navigate the user to /plot/de_quadrant if you can
-    fill ALL six from `list_de_studies` + an existing user choice.
-    Without those, the page renders an empty form — DON'T do that.
+  - **`de_quadrant`** — a DE-results-only geom that compares two DE
+    CONTRASTS on the same gene set. See the de_quadrant workflow below.
 
-  Heuristic: if the user names two GENES or two OBS columns or two
+  Heuristic: if the user names two GENES, two OBS columns, or two
   MODULE scores, use `scatter`. Only use `de_quadrant` when the user
-  explicitly says "compare these two DE contrasts / two volcanos" AND
-  you have the study selectors.
+  explicitly says "compare these two DE contrasts / two volcanos /
+  X-effect vs Y-effect".
 
-  Axis-clip (e.g. "clipped at -2 to +2"): `de_quadrant` supports
-  `clip_x` / `clip_y` per axis. `scatter` has `transform_x` /
-  `transform_y` with values like `signed_log1p`, `asinh`, `signed_sqrt`
-  for compressing values that straddle zero — not exact clamps but
-  close enough for the visual.
+## de_quadrant — mandatory three-step drilldown BEFORE building the URL
+
+DO NOT guess term or contrast names. They look like simple level labels
+('F', 'm', 'APOE4_vs_APOE3'), NOT term+suffix concatenations
+('Sex_donor_M' is wrong, it's just 'F' or 'M'). Without exact names the
+page renders an empty form. Workflow:
+
+  1. `list_de_studies(db_id)` → study_id options
+  2. `get_de_study_terms(db_id, study_id)` → returns terms[] with each
+     term's name and number of contrasts
+  3. `list_de_contrasts(db_id, study_id, term)` → returns contrasts[]
+     with each contrast's exact name
+
+Do this for BOTH sides of the quadrant (x and y can come from the same
+study + different term, or from different studies entirely). Only after
+all six selectors are confirmed, call:
+
+  build_plot_url(db_id, 'de_quadrant', params={
+      'study':      <X side study_id>,
+      'term':       <X side term name>,
+      'contrast':   <X side contrast name>,
+      'study_y':    <Y side study_id>,
+      'term_y':     <Y side term name>,
+      'contrast_y': <Y side contrast name>,
+      'axis_x':     'log2fc' | 'signed_log10p' | 'zeff',   # optional, default 'log2fc'
+      'axis_y':     'log2fc' | 'signed_log10p' | 'zeff',   # optional, default 'log2fc'
+      'clip_x':     <number>,    # OPTIONAL symmetric ± clamp in axis_x units
+      'clip_y':     <number>,    # OPTIONAL symmetric ± clamp in axis_y units
+  })
+
+EXACT param names — clip is SYMMETRIC (clip_x=2 means clamp to [-2, +2]).
+There is NO `clip_x_max`, `clip_x_min`, `xmin`, or `xmax`. Do not invent
+them.
+
+When the user says "clipped at -2 to +2", that's `clip_x=2, clip_y=2`.
 
 ## Embedding plots (UMAP / t-SNE / PCA / spatial)
 
