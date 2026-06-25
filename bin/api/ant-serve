@@ -89,6 +89,7 @@ import mus
 import plotting
 import analytics
 from chat_config import load_chat_config, warn_if_misconfigured, status_payload
+from chat_history import ChatHistory
 
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
@@ -1575,6 +1576,43 @@ async def health_check():
         )
 
 
+# ── chat assistant — singleton state ──────────────────────────────────────────
+#
+# The chat history store is created lazily on first request that needs it.
+# Lazy init keeps ant-serve's startup snappy when chat is disabled.
+_chat_history: Optional[ChatHistory] = None
+
+
+def _get_chat_history(cfg) -> ChatHistory:
+    """Lazy-create the ChatHistory singleton at first use."""
+    global _chat_history
+    if _chat_history is None:
+        _chat_history = ChatHistory(cfg.history_path)
+    return _chat_history
+
+
+def _chat_user_from_request(request: Request) -> str:
+    """Pull the Authelia/nginx Remote-User header off an incoming request.
+
+    Locked per pika #217 §9: chat history is keyed on Authelia Remote-User
+    × session_id. If Remote-User is missing the request is unauthenticated
+    — refuse the chat endpoint with 401 (the public auth gate should
+    already have blocked it; we re-verify here as defence in depth).
+    """
+    # Caddy / nginx upstream both forward the header lowercased through
+    # FastAPI's case-insensitive ``request.headers`` view.
+    user = (request.headers.get('Remote-User')
+            or request.headers.get('X-Remote-User')
+            or '').strip()
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail="chat endpoint requires authentication "
+                   "(Remote-User header not set)",
+        )
+    return user
+
+
 @app.get("/chat/status", tags=["chat"])
 async def chat_status():
     """Whether the in-app chat assistant is available on this deployment.
@@ -1594,6 +1632,28 @@ async def chat_status():
     """
     cfg = load_chat_config(get_config())
     return status_payload(cfg)
+
+
+@app.get("/chat/history", tags=["chat"])
+async def chat_history(
+    request: Request,
+    session_id: str = Query(..., description="Client-chosen session id; the transcript is keyed on (Remote-User, session_id)."),
+):
+    """Return the transcript for one (Remote-User, session_id) pair.
+
+    Locked contract: ``{"messages": [{"role": "user"|"assistant"|"action", "content": "..."}]}``.
+    Empty list when there's no history yet.
+
+    Returns 404 when the chat assistant is not active on this deployment
+    (matches the web spec: only ``/chat/status`` is reachable when off).
+    """
+    cfg = load_chat_config(get_config())
+    if not cfg.active:
+        raise HTTPException(status_code=404, detail="chat assistant is not active")
+    user = _chat_user_from_request(request)
+    store = _get_chat_history(cfg)
+    messages = store.list_messages(user, session_id)
+    return {'messages': messages}
 
 
 @app.get("/version", tags=["info"])
