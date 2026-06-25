@@ -667,6 +667,41 @@
       // POST + Server-Sent-Events streamed over fetch (EventSource is GET-only).
       // hidden=true → a system follow-up (e.g. nav-failure recovery): still sent
       // to the server, but not shown/stored as a user bubble.
+      // Structured snapshot of the page the user is looking at, so the
+      // assistant can adapt to the current view (answer "what am I seeing?",
+      // tweak the current plot, etc.) instead of parsing a raw URL. Derived from
+      // the path + query + page heading; a page may augment/override it by
+      // setting window.__antPageContext (e.g. plot.html exposing live form
+      // state). Kept compact — the query object already captures plot params.
+      function pageContext() {
+        var q = {};
+        try { new URLSearchParams(location.search).forEach(function (v, k) { q[k] = v; }); } catch (e) {}
+        var seg = location.pathname.split('/').filter(Boolean).map(function (s) {
+          try { return decodeURIComponent(s); } catch (e) { return s; }
+        });
+        var ctx = { path: location.pathname + location.search, query: q, title: document.title };
+        var h1 = document.querySelector('.page-title, h1');
+        if (h1) ctx.heading = (h1.textContent || '').trim().slice(0, 160);
+        if (!seg.length) ctx.view = 'home';
+        else if (seg[0] === 'about') ctx.view = 'about';
+        else if (seg[0] === 'genes') { ctx.view = 'gene_atlas'; if (seg[1]) ctx.gene = seg[1]; }
+        else if (seg[0] === 'genesets') { ctx.view = 'genesets'; if (seg[1]) ctx.study = seg[1]; }
+        else if (seg[0] === 'browse') {
+          ctx.group = seg[1];
+          if (seg.length <= 2) ctx.view = 'collection';
+          else {
+            ctx.file = seg[2]; ctx.db_id = seg[1] + '/' + seg[2];
+            if (seg[3] === 'plot') { ctx.view = 'plot'; ctx.geom = seg[4] || ''; }
+            else if (seg[3] === 'de') { ctx.view = 'de_browser'; ctx.study = seg[4] || ''; }
+            else ctx.view = 'dataset';
+          }
+        }
+        if (window.__antPageContext && typeof window.__antPageContext === 'object') {
+          try { Object.assign(ctx, window.__antPageContext); } catch (e) {}
+        }
+        return ctx;
+      }
+
       function send(message, hidden) {
         if (streaming) return;
         streaming = true; sendBtn.disabled = true;
@@ -679,7 +714,7 @@
         fetch('/api/chat', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
           body: JSON.stringify(Object.assign(
-            { session_id: sid, message: message, context: { path: location.pathname + location.search } },
+            { session_id: sid, message: message, context: pageContext() },
             chosenModel ? { model: chosenModel } : {}))
         })
         .then(function (resp) {
