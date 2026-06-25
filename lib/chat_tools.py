@@ -24,8 +24,13 @@ import httpx
 
 
 # ── Client actions — server NEVER executes, emits SSE action frame ──────────
-
-CLIENT_ACTION_TOOLS: Set[str] = {'navigate', 'set_plot_param'}
+#
+# ``set_plot_param`` USED to live here but was removed: the browser-side
+# hook (``window.__antApplyPlotParam``) was never wired in plot.html, so
+# the tool's "navigate"-equivalent fallback was the only thing that ever
+# happened. Re-add when web ships the hook (tracked in pika to
+# anthive-web).
+CLIENT_ACTION_TOOLS: Set[str] = {'navigate'}
 
 
 # ── OpenAI-style tool schemas ────────────────────────────────────────────────
@@ -57,29 +62,6 @@ TOOL_DEFS: List[Dict[str, Any]] = [
                     },
                 },
                 'required': ['url'],
-            },
-        },
-    },
-    {
-        'type': 'function',
-        'function': {
-            'name': 'set_plot_param',
-            'description': (
-                "Update a plot parameter on the current plot page. The web "
-                "client's hook for this isn't fully wired yet (locked per "
-                "pika #217); prefer `navigate` with a fully-built plot URL "
-                "until this lights up."
-            ),
-            'parameters': {
-                'type': 'object',
-                'properties': {
-                    'params': {
-                        'type': 'object',
-                        'description': 'Map of plot-param-name → value '
-                                       '(e.g. {"color": "APOE_SNP", "log_x": true}).',
-                    },
-                },
-                'required': ['params'],
             },
         },
     },
@@ -273,6 +255,145 @@ TOOL_DEFS: List[Dict[str, Any]] = [
     {
         'type': 'function',
         'function': {
+            'name': 'search_genes',
+            'description': (
+                "Substring-match gene names in one dataset. Useful when the "
+                "user types a partial name ('apo', 'trem') or you're unsure "
+                "of the exact capitalization. Returns up to `limit` matches. "
+                "Mouse genes are lower-case (Apoe, Trem2); human are upper "
+                "(APOE, TREM2) — this tool matches case-insensitively by "
+                "default."
+            ),
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'db_id': {'type': 'string', 'description': 'Dataset id, e.g. "S25/V6W".'},
+                    'q':     {'type': 'string', 'description': 'Substring or prefix.'},
+                    'limit': {'type': 'integer', 'description': 'Max results (default 20).'},
+                },
+                'required': ['db_id', 'q'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'analytics_schema',
+            'description': (
+                "Return the DuckDB tables in a dataset — every table's "
+                "columns, types, row count, and a 3-row sample. ALWAYS call "
+                "this before writing an `analytics_query` SQL statement, "
+                "because the obs columns vary per dataset and you need the "
+                "EXACT column names + types.\n"
+                "\n"
+                "Tables you'll typically see:\n"
+                "  - `obscat`  — categorical obs columns (varchar)\n"
+                "  - `obsnum`  — numerical obs columns + module scores\n"
+                "  - `__genes`, `__cells` — gene/cell lookup tables\n"
+                "  - `layer__<name>` — sparse expression views (cell_id, gene_id, value)"
+            ),
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'db_id': {'type': 'string'},
+                },
+                'required': ['db_id'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'analytics_query',
+            'description': (
+                "Run a SELECT-only DuckDB query against the dataset. THE most "
+                "powerful tool — use it when no other tool answers the "
+                "question. Examples of questions only this can answer:\n"
+                "  • 'what % of cells in cluster M3 express APOE > 2?'\n"
+                "  • 'median DAM_score by cell type, ranked by sample'\n"
+                "  • 'distribution of cell counts per donor'\n"
+                "  • 'cells where Disease == AD AND CD68 > 1 AND TREM2 < 0.5'\n"
+                "\n"
+                "WORKFLOW:\n"
+                "  1. Call `analytics_schema(db_id)` first to learn the exact "
+                "     column names + types in `obscat` and `obsnum`.\n"
+                "  2. Write a focused SQL. The result is capped at 500 000 "
+                "     rows and 120s; aggregate when you can.\n"
+                "  3. To query module scores you just computed via "
+                "     `module_score`, pass its session_id in `attach_sessions` "
+                "     — the scores arrive as a table called `scores` with "
+                "     columns (cell_name, module_score). Join on cell_name.\n"
+                "\n"
+                "ONLY a small preview (first 10 rows + column metadata) is "
+                "returned to you — DON'T expect the full 500k. The query "
+                "result is persisted server-side; the `session_id` it "
+                "returns can be chained into further queries or visualised."
+            ),
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'db_id': {'type': 'string'},
+                    'sql':   {
+                        'type': 'string',
+                        'description': 'SELECT or WITH … SELECT only. Write/DDL is rejected.',
+                    },
+                    'attach_sessions': {
+                        'type': 'array',
+                        'items': {'type': 'string'},
+                        'description': "Optional session_ids from prior module_score / analytics_query calls. The first attached session becomes table `scores`.",
+                    },
+                },
+                'required': ['db_id', 'sql'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'list_genesets',
+            'description': (
+                "Browse the geneset catalogue — named signatures (WGCNA "
+                "modules, DAM markers, IFN signatures, …) curated as "
+                "{study, experiment, name} triples. Each entry includes "
+                "`scored_in`: a list of db_ids where the signature is "
+                "already a pre-scored obs column (no on-the-fly module_score "
+                "needed). Filter to relevant ones."
+            ),
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'organism': {'type': 'string', 'description': 'Optional filter.'},
+                    'method':   {'type': 'string', 'description': 'Optional method filter (WGCNA, DEG, …).'},
+                    'study':    {'type': 'string', 'description': 'Optional study filter.'},
+                },
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'get_geneset',
+            'description': (
+                "Get the full gene list of one named geneset, plus its "
+                "`scored_in` (datasets where it's pre-scored as an obs "
+                "column called `<study>::<experiment>::<name>`). Useful "
+                "as input to `module_score` on a dataset that doesn't have "
+                "the signature pre-scored yet."
+            ),
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'study':      {'type': 'string'},
+                    'experiment': {'type': 'string'},
+                    'name':       {'type': 'string'},
+                },
+                'required': ['study', 'experiment', 'name'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
             'name': 'build_plot_url',
             'description': (
                 "Construct (don't render) a USER-FACING plot URL. Returns a "
@@ -352,9 +473,14 @@ async def dispatch_server_tool(
         'list_datasets':      _list_datasets,
         'get_dataset_info':   _get_dataset_info,
         'gene_stats':         _gene_stats,
+        'search_genes':       _search_genes,
         'list_de_studies':    _list_de_studies,
         'get_de_study_terms': _get_de_study_terms,
         'list_de_contrasts':  _list_de_contrasts,
+        'analytics_schema':   _analytics_schema,
+        'analytics_query':    _analytics_query,
+        'list_genesets':      _list_genesets,
+        'get_geneset':        _get_geneset,
         'build_plot_url':     _build_plot_url,
         'module_score':       _module_score,
     }
@@ -502,6 +628,127 @@ async def _list_de_contrasts(
     )
     resp.raise_for_status()
     return resp.json()
+
+
+async def _search_genes(
+    ctx: ToolContext, db_id: str, q: str, limit: int = 20,
+) -> Dict[str, Any]:
+    """GET /databases/<db>/genes?q=…&limit=… — substring/prefix gene search."""
+    quoted = db_id.replace('/', '%2F')
+    resp = await ctx.client.get(
+        f'{ctx.base_url}/databases/{quoted}/genes',
+        params={'q': q, 'limit': int(limit)},
+        auth=ctx.auth, timeout=20.0,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _analytics_schema(ctx: ToolContext, db_id: str) -> Dict[str, Any]:
+    """GET /databases/<db>/analytics/schema — table/column inventory."""
+    quoted = db_id.replace('/', '%2F')
+    resp = await ctx.client.get(
+        f'{ctx.base_url}/databases/{quoted}/analytics/schema',
+        auth=ctx.auth, timeout=30.0,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    # Trim sample rows to first 2 each to keep the model context bounded —
+    # full schemas with 100+ obs columns can blow past 30 KB otherwise.
+    tables = data.get('tables') or []
+    trimmed_tables = []
+    for table in tables:
+        sample = table.get('sample') or []
+        trimmed_tables.append({
+            'name':      table.get('name'),
+            'row_count': table.get('row_count'),
+            'columns':   table.get('columns'),
+            'sample':    sample[:2],
+        })
+    return {'db_id': data.get('db_id'), 'tables': trimmed_tables}
+
+
+async def _analytics_query(
+    ctx: ToolContext,
+    db_id: str,
+    sql: str,
+    attach_sessions: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """POST /databases/<db>/analytics/query — SELECT-only SQL.
+
+    Returns the small preview the REST endpoint produces (first ~10 rows +
+    column metadata + session_id). The full result set is persisted
+    server-side; the model can chain it via further attach_sessions.
+    """
+    quoted = db_id.replace('/', '%2F')
+    payload: Dict[str, Any] = {'sql': sql}
+    if attach_sessions:
+        payload['attach_sessions'] = list(attach_sessions)
+    try:
+        resp = await ctx.client.post(
+            f'{ctx.base_url}/databases/{quoted}/analytics/query',
+            json=payload, auth=ctx.auth, timeout=150.0,  # >server-side 120s timeout
+        )
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        try:
+            detail = exc.response.json().get('detail', str(exc))
+        except ValueError:
+            detail = str(exc)
+        return {'error': f'analytics_query failed: {detail}'}
+    return resp.json()
+
+
+async def _list_genesets(
+    ctx: ToolContext,
+    organism: Optional[str] = None,
+    method: Optional[str] = None,
+    study: Optional[str] = None,
+) -> Dict[str, Any]:
+    """GET /genesets — browse the curated geneset registry."""
+    params: Dict[str, Any] = {}
+    if organism:
+        params['organism'] = organism
+    if method:
+        params['method'] = method
+    if study:
+        params['study'] = study
+    resp = await ctx.client.get(
+        f'{ctx.base_url}/genesets', params=params,
+        auth=ctx.auth, timeout=20.0,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    # Trim — drop verbose `markdown` bodies if any creep in.
+    genesets = data.get('genesets') or []
+    trimmed = []
+    for geneset in genesets:
+        trimmed.append({
+            k: v for k, v in geneset.items()
+            if k in ('geneset_id', 'study', 'experiment', 'name',
+                     'organism', 'method', 'n_genes', 'scored_in')
+        })
+    return {'count': data.get('count'), 'genesets': trimmed}
+
+
+async def _get_geneset(
+    ctx: ToolContext, study: str, experiment: str, name: str,
+) -> Dict[str, Any]:
+    """GET /genesets/<study>/<experiment>/<name> — one geneset's gene list."""
+    from urllib.parse import quote
+    resp = await ctx.client.get(
+        f'{ctx.base_url}/genesets/{quote(study)}/{quote(experiment)}/{quote(name)}',
+        auth=ctx.auth, timeout=20.0,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    # Keep only the keys the model needs to reason about.
+    return {
+        k: v for k, v in data.items()
+        if k in ('geneset_id', 'study', 'experiment', 'name', 'organism',
+                 'method', 'n_genes', 'genes', 'scored_in', 'column_name',
+                 'description', 'metadata')
+    }
 
 
 async def _module_score(
