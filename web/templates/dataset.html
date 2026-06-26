@@ -205,32 +205,34 @@
 <div class="md-body" style="margin-bottom:6px">{{ markdown_content|safe }}</div>
 {% endif %}
 
-<!-- Data — promoted from inside the old Overview block.  This is the
-     numeric snapshot of every layer in the duckdb, useful for sanity-checking
-     before plotting. -->
-{% if layer_stats_rows %}
-<h2>Data</h2>
-<div class="table-wrap">
-<table class="auto" style="font-size:12px">
-    <thead><tr>
-        <th>layer</th><th>dtype</th><th>min</th><th>min(nz)</th><th>max</th><th>median</th><th>q90</th><th>% zeros</th>
-    </tr></thead>
-    <tbody>
-    {% for row in layer_stats_rows %}
-    <tr>
-        <td><code>{{ row.name }}</code></td>
-        <td style="color:#888">{{ row.dtype }}</td>
-        <td style="color:#555">{{ row.min }}</td>
-        <td style="color:#555">{{ row.min_nz }}</td>
-        <td style="color:#555">{{ row.max }}</td>
-        <td style="color:#555">{{ row.median }}</td>
-        <td style="color:#555">{{ row.q90 }}</td>
-        <td style="color:#555">{{ row.pct_zeros }}%</td>
-    </tr>
+<!-- Explore — curated quick-viz favourites (genes / categories / numerical).
+     Moved near the top: it's the most actionable content on the page. -->
+{% if dataset_meta and (dataset_meta.top_genes or dataset_meta.top_cat or dataset_meta.top_num) %}
+<h2>Explore</h2>
+{% if dataset_meta.top_genes %}
+<div style="margin-bottom:4px">
+    <span class="mk" style="display:inline-block;vertical-align:middle">genes</span>
+    {% for gene in dataset_meta.top_genes %}
+    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ gene | urlencode }}" class="chip">{{ gene }}</a>
     {% endfor %}
-    </tbody>
-</table>
 </div>
+{% endif %}
+{% if dataset_meta.top_cat %}
+<div style="margin-bottom:4px">
+    <span class="mk" style="display:inline-block;vertical-align:middle">categories</span>
+    {% for col in dataset_meta.top_cat %}
+    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/bar?x={{ col | urlencode }}" class="chip">{{ col }}</a>
+    {% endfor %}
+</div>
+{% endif %}
+{% if dataset_meta.top_num %}
+<div style="margin-bottom:4px">
+    <span class="mk" style="display:inline-block;vertical-align:middle">numerical</span>
+    {% for col in dataset_meta.top_num %}
+    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ col | urlencode }}" class="chip">{{ col }}</a>
+    {% endfor %}
+</div>
+{% endif %}
 {% endif %}
 
 <!-- Biology — sample attributes beyond the headline pills (organism / tech /
@@ -335,33 +337,31 @@
 </div>
 {% endif %}
 
-<!-- Explore -->
-{% if dataset_meta and (dataset_meta.top_genes or dataset_meta.top_cat or dataset_meta.top_num) %}
-<h2>Explore</h2>
-{% if dataset_meta.top_genes %}
-<div style="margin-bottom:4px">
-    <span class="mk" style="display:inline-block;vertical-align:middle">genes</span>
-    {% for gene in dataset_meta.top_genes %}
-    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ gene | urlencode }}" class="chip">{{ gene }}</a>
+<!-- Data — per-layer numeric snapshot (dtype / min / max / median / % zeros).
+     Moved down: a sanity-check detail, not headline info. -->
+{% if layer_stats_rows %}
+<h2>Data</h2>
+<div class="table-wrap">
+<table class="auto" style="font-size:12px">
+    <thead><tr>
+        <th>layer</th><th>dtype</th><th>min</th><th>min(nz)</th><th>max</th><th>median</th><th>q90</th><th>% zeros</th>
+    </tr></thead>
+    <tbody>
+    {% for row in layer_stats_rows %}
+    <tr>
+        <td><code>{{ row.name }}</code></td>
+        <td style="color:#888">{{ row.dtype }}</td>
+        <td style="color:#555">{{ row.min }}</td>
+        <td style="color:#555">{{ row.min_nz }}</td>
+        <td style="color:#555">{{ row.max }}</td>
+        <td style="color:#555">{{ row.median }}</td>
+        <td style="color:#555">{{ row.q90 }}</td>
+        <td style="color:#555">{{ row.pct_zeros }}%</td>
+    </tr>
     {% endfor %}
+    </tbody>
+</table>
 </div>
-{% endif %}
-{% if dataset_meta.top_cat %}
-<div style="margin-bottom:4px">
-    <span class="mk" style="display:inline-block;vertical-align:middle">categories</span>
-    {% for col in dataset_meta.top_cat %}
-    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/bar?x={{ col | urlencode }}" class="chip">{{ col }}</a>
-    {% endfor %}
-</div>
-{% endif %}
-{% if dataset_meta.top_num %}
-<div style="margin-bottom:4px">
-    <span class="mk" style="display:inline-block;vertical-align:middle">numerical</span>
-    {% for col in dataset_meta.top_num %}
-    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ col | urlencode }}" class="chip">{{ col }}</a>
-    {% endfor %}
-</div>
-{% endif %}
 {% endif %}
 
 <!-- Resources — programmatic entry points for this dataset. -->
