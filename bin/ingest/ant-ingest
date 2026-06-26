@@ -72,7 +72,7 @@ from botocore.exceptions import ClientError
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _SCRIPT_DIR.parent.parent
 sys.path.insert(0, str(_REPO_ROOT / 'lib'))
-from config import get_config                                       # noqa: E402
+from config import get_config, require_primary                      # noqa: E402
 from sidecar_merge import (                                         # noqa: E402
     Conflict,
     merge_sidecars,
@@ -1399,6 +1399,14 @@ def main() -> int:
     if 's3' not in cfg:
         _err('No [s3] block in anthive.yaml')
         return 2
+
+    # Slave gate. Both the ingest run and prune modify the local
+    # catalog + S3 state. Slaves are read-only mirrors and need a
+    # clear refusal before any S3 client is constructed. Dry-run is
+    # also blocked — the principle is "no catalog ops on slaves" and
+    # a dry-run could be misleading about the slave's actual capacity
+    # to perform the action.
+    require_primary(cfg, tool='ant-ingest')
 
     data_folder = (Path.cwd() / args.data_folder).resolve()
     if not data_folder.exists():

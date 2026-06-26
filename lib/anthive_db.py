@@ -1017,6 +1017,18 @@ class AnnotationWriter:
                          'http://localhost:8080/api'). Used together with
                          db_id to negotiate writer-vs-server lock contention.
         """
+        # Slave-mode gate. Any AnnotationWriter creates a r/w handle on the
+        # duckdb and would be overwritten on the next sync-pull. Refuse at
+        # construction so the caller fails fast with a clear message.
+        # Local import to avoid a cycle on module import.
+        from config import is_slave  # noqa: PLC0415
+        if is_slave():
+            raise AnnotationWriterError(
+                f"refusing to open {duckdb_path} for write — this deployment "
+                f"is configured as a slave (sync_policy.role=slave in "
+                f"anthive.yaml). Annotation writes happen on the primary."
+            )
+
         self.duckdb_path = Path(duckdb_path)
         if not self.duckdb_path.exists():
             raise AnnotationWriterError(f"duckdb not found: {self.duckdb_path}")

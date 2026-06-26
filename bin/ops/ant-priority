@@ -44,7 +44,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 _LIB_DIR = _SCRIPT_DIR.parent.parent / 'lib'
 sys.path.insert(0, str(_LIB_DIR))
 
-from config import get_config           # noqa: E402
+from config import get_config, require_primary  # noqa: E402
 from h5adstore import iter_h5adstore, find_h5ad, H5adEntry   # noqa: E402
 from metadata import (                   # noqa: E402
     PRIORITY_DEFAULT,
@@ -231,6 +231,11 @@ def cmd_show(args: argparse.Namespace) -> int:
 
 
 def cmd_set(args: argparse.Namespace) -> int:
+    # Slave guard. Priority lives in .md frontmatter (git-tracked on the
+    # primary); editing on a slave would just be force-overwritten the
+    # next time h5adstore git syncs.
+    require_primary(tool='ant-priority set')
+
     data_root = _data_root()
     default = _priority_default()
     entries = _resolve_targets(data_root, args.db_id)
