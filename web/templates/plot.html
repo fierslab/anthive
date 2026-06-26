@@ -896,6 +896,13 @@
   // Hits the per-geom endpoint at /databases/{id}/plot/{geom} (REST API 2.2+).
   // The geom is encoded in the path, NOT in the query string — keeps URL
   // params focused on what actually shapes the plot.
+  // attach_sessions: repeatable, NON-form query params (module-score / analytics
+  // virtual obs columns — REST 2.19.0). Captured from the page URL and passed
+  // through on every plot request + kept in the address bar, so a bot-navigated
+  // session-coloured UMAP actually renders (buildUrl otherwise only emits form
+  // fields). Survives form edits until the session ages out → clean 400 in-status.
+  const ATTACH_SESSIONS = new URLSearchParams(window.location.search).getAll('attach_sessions');
+
   function buildUrl(format) {
     format = format || 'png';
     const params = new URLSearchParams();
@@ -926,6 +933,7 @@
         params.set(k, s[k]);
       }
     }
+    ATTACH_SESSIONS.forEach(s => params.append('attach_sessions', s));   // non-form passthrough
     return `${API_URL.replace(/\/$/, '')}/databases/${DB_ID}/plot/${GEOM}?${params.toString()}`;
   }
 
@@ -1081,6 +1089,7 @@
       if (value === '' || value == null) return;
       params.set(name, value);
     });
+    ATTACH_SESSIONS.forEach(s => params.append('attach_sessions', s));   // keep session passthrough in the address bar
     const qs = params.toString();
     const newUrl = window.location.pathname + (qs ? '?' + qs : '');
     history.replaceState(null, '', newUrl);
