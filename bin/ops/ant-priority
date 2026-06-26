@@ -1,0 +1,202 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["pyyaml>=6.0"]
+# ///
+"""ant-priority — view and edit per-dataset retention priority.
+
+The `priority` field in a dataset's .md frontmatter (integer 0..100)
+drives ant-sync's tiered local-cache policy:
+
+  100 → always-keep; only evicted if size caps force it
+   50 → default; evictable under disk pressure
+    0 → effectively inactive; never pulled, always evicted
+
+USAGE
+
+  ant-priority                          # list every dataset's priority
+  ant-priority list                     # same
+  ant-priority list --below 30          # only those below threshold
+  ant-priority list --above 80          # only above
+  ant-priority list --sort priority     # sort by priority asc
+  ant-priority show <db_id>             # one dataset (db_id or path)
+  ant-priority set  <db_id> <0..100>    # update the .md priority
+
+EXAMPLES
+
+  ant-priority set S25/V6A 95           # always keep this dataset local
+  ant-priority set Hou2025/EBR 10       # nearly cold; first to evict
+  ant-priority set L25/B5L 0            # inactive; never pulled
+
+Updates the `priority:` key in the data .md frontmatter only — does
+NOT touch S3, the duckdb, or trigger any sync. Run `make sync-pull-
+evict` afterwards to apply the new policy to disk.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_LIB_DIR = _SCRIPT_DIR.parent.parent / 'lib'
+sys.path.insert(0, str(_LIB_DIR))
+
+from config import get_config           # noqa: E402
+from h5adstore import iter_h5adstore, find_h5ad, H5adEntry   # noqa: E402
+from metadata import (                   # noqa: E402
+    PRIORITY_DEFAULT,
+    get_priority,
+    set_priority,
+    parse_md_file,
+    write_md_file,
+)
+
+
+def _data_root() -> Path:
+    cfg = get_config()
+    return Path(cfg.get('data_folder', './data/h5adstore')).resolve()
+
+
+def _priority_default() -> int:
+    cfg = get_config()
+    return int((cfg.get('sync_policy') or {}).get('priority_default', PRIORITY_DEFAULT))
+
+
+def _entries(data_root: Path) -> List[H5adEntry]:
+    return sorted(iter_h5adstore(data_root), key=lambda h: h.db_id)
+
+
+def _resolve(data_root: Path, arg: str) -> H5adEntry:
+    entry = find_h5ad(data_root, arg)
+    if entry is None:
+        sys.exit(f"ant-priority: dataset not found — {arg!r}")
+    return entry
+
+
+# ── commands ─────────────────────────────────────────────────────────────────
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    data_root = _data_root()
+    default = _priority_default()
+    entries = _entries(data_root)
+
+    rows = []
+    for entry in entries:
+        try:
+            md_data, _ = parse_md_file(entry.md_path)
+        except Exception as exc:
+            rows.append((entry.db_id, -1, f'(unreadable: {exc})'))
+            continue
+        # Distinguish "explicit value" from "default"
+        explicit = isinstance(md_data.get('priority'), (int, str))
+        priority = get_priority(md_data, default=default)
+        rows.append((entry.db_id, priority, '' if explicit else '(default)'))
+
+    if args.below is not None:
+        rows = [r for r in rows if r[1] < args.below]
+    if args.above is not None:
+        rows = [r for r in rows if r[1] > args.above]
+
+    if args.sort == 'priority':
+        rows.sort(key=lambda r: (r[1], r[0]))
+    elif args.sort == 'priority-desc':
+        rows.sort(key=lambda r: (-r[1], r[0]))
+
+    if not rows:
+        print('  (no matching datasets)')
+        return 0
+
+    print(f"  default priority: {default}")
+    print(f"  {'db_id':<16}  {'priority':>8}  source")
+    print(f"  {'-' * 16}  {'-' * 8}  ------")
+    for db_id, priority, source in rows:
+        print(f"  {db_id:<16}  {priority:>8}  {source}")
+    return 0
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    data_root = _data_root()
+    default = _priority_default()
+    entry = _resolve(data_root, args.db_id)
+    md_data, _ = parse_md_file(entry.md_path)
+    explicit = isinstance(md_data.get('priority'), (int, str))
+    priority = get_priority(md_data, default=default)
+    print(f"  db_id    : {entry.db_id}")
+    print(f"  readable : {entry.readable_id}")
+    print(f"  md       : {entry.md_path.relative_to(data_root)}")
+    print(f"  priority : {priority}  ({'explicit' if explicit else f'default {default}'})")
+    return 0
+
+
+def cmd_set(args: argparse.Namespace) -> int:
+    data_root = _data_root()
+    entry = _resolve(data_root, args.db_id)
+    md_data, body = parse_md_file(entry.md_path)
+    old = get_priority(md_data, default=_priority_default())
+    try:
+        new = set_priority(md_data, args.value)
+    except ValueError as exc:
+        sys.exit(f"ant-priority: {exc}")
+    if old == new and isinstance(md_data.get('priority'), int):
+        print(f"  {entry.db_id}: priority already {new} — no change")
+        return 0
+    write_md_file(entry.md_path, md_data, body)
+    print(f"  {entry.db_id}: priority {old} → {new}")
+    return 0
+
+
+# ── argparse glue ────────────────────────────────────────────────────────────
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog='ant-priority',
+        description='View / edit per-dataset retention priority (0..100).',
+    )
+    subparsers = parser.add_subparsers(dest='cmd')
+
+    # list (default when no subcommand)
+    list_parser = subparsers.add_parser('list', help='List all datasets + priorities.')
+    list_parser.add_argument('--below', type=int, help='Only show priority < N.')
+    list_parser.add_argument('--above', type=int, help='Only show priority > N.')
+    list_parser.add_argument(
+        '--sort', choices=('priority', 'priority-desc', 'db_id'),
+        default='db_id', help='Sort order (default db_id).',
+    )
+
+    # show
+    show_parser = subparsers.add_parser('show', help='Show one dataset.')
+    show_parser.add_argument('db_id', help='Dataset id, readable name, or duckdb path.')
+
+    # set
+    set_parser = subparsers.add_parser('set', help='Set priority on one dataset.')
+    set_parser.add_argument('db_id', help='Dataset id, readable name, or duckdb path.')
+    set_parser.add_argument('value', type=int, help='New priority (0..100).')
+
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.cmd is None or args.cmd == 'list':
+        # Defaults for the optional list flags when invoked bare
+        if not hasattr(args, 'below'):
+            args.below = None
+            args.above = None
+            args.sort = 'db_id'
+        return cmd_list(args)
+    if args.cmd == 'show':
+        return cmd_show(args)
+    if args.cmd == 'set':
+        return cmd_set(args)
+    parser.error(f"unknown subcommand: {args.cmd}")
+    return 2  # unreachable
+
+
+if __name__ == '__main__':
+    sys.exit(main())
