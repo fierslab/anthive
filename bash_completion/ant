@@ -183,7 +183,7 @@ _ant_completion()
         # ── sync: subcommand then optional glob filter ─────────────────────
         sync)
             if [[ $cword -eq 2 ]]; then
-                COMPREPLY=($(compgen -W "push pull evict status" -- "$cur"))
+                COMPREPLY=($(compgen -W "push pull evict plan status" -- "$cur"))
                 return
             fi
             local sync_sub="${words[2]}"
@@ -203,6 +203,13 @@ _ant_completion()
                 evict)
                     if [[ "$cur" == -* ]]; then
                         COMPREPLY=($(compgen -W "--dry-run" -- "$cur"))
+                        return
+                    fi
+                    return
+                    ;;
+                plan)
+                    if [[ "$cur" == -* ]]; then
+                        COMPREPLY=($(compgen -W "--local" -- "$cur"))
                         return
                     fi
                     return
