@@ -118,6 +118,19 @@ mcp:
 # priority_default → priority used when an .md has no `priority:` key.
 #                    50 by default — middle of the range, evictable.
 #
+# role:
+#   primary  → normal full-control deployment (default). Pushes to S3,
+#              annotation writes allowed, priority edits allowed.
+#   slave    → read-only mirror. NEVER pushes. Annotation writes
+#              (ant-score, ant-starcat, ant-annotate, ant-merge-h5ad,
+#              ant-de-ingest, ant-convert, make ingest) refuse with a
+#              clear error. ant-priority set refuses. sync-pull
+#              force-overwrites any local drift — incoming always wins.
+#              git operations on the h5adstore repo are NOT touched by
+#              this flag (handled outside ant-sync's scope).
+#   Always explicit: an unset/null role behaves as 'primary'. There is
+#   no auto-detection — slaves must opt in via anthive.yaml.
+#
 # TODO: add `min_priority` (hard floor — datasets with priority < N
 # are NEVER pulled, regardless of available disk). Today the same
 # effect is achieved by setting those datasets to `priority: 0` in
@@ -126,6 +139,7 @@ mcp:
 # 10s to never come back even if there's plenty of room".
 sync_policy:
   mode: all
+  role: primary
   max_local_gb: null
   min_free_space: 84    # GB (= 2 × 42) — sane floor for OS / logs / tmp /
                         # plot cache / analytics session parquets / DuckDB

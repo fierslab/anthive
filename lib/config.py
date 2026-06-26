@@ -6,7 +6,7 @@ Loads configuration from anthive.yaml or uses defaults from anthive.default.yaml
 
 import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import yaml
 
@@ -180,6 +180,41 @@ def load_config() -> Dict[str, Any]:
             config[subkey] = merged
 
     return config
+
+
+def is_slave(cfg: Optional[Dict[str, Any]] = None) -> bool:
+    """True iff anthive.yaml declares this deployment as a slave mirror.
+
+    Slave mode is OPT-IN ONLY — an unset / null / missing role is
+    treated as primary. There is no auto-detection. See
+    anthive.default.yaml's sync_policy.role block for the contract.
+
+    Importers should call this at the top of any operation that
+    WRITES (sync-push, AnnotationWriter, ant-priority set, ingest
+    pipelines, etc.) and refuse with a clear error.
+    """
+    cfg = cfg if cfg is not None else load_config()
+    role = (cfg.get('sync_policy') or {}).get('role')
+    return str(role or '').strip().lower() == 'slave'
+
+
+def require_primary(cfg: Optional[Dict[str, Any]] = None,
+                    tool: str = 'this tool') -> None:
+    """Exit-2 with a clear error message when running under slave mode.
+
+    Centralised guard for every write-path entry point. ``tool`` is
+    the name printed in the refusal message — pass the script's name
+    (e.g. 'ant-score') so the user sees which command refused.
+    """
+    if is_slave(cfg):
+        msg = (
+            f"{tool}: refusing to write — this deployment is configured "
+            f"as a slave (sync_policy.role=slave in anthive.yaml). "
+            f"Edit on the primary deployment instead; any change here "
+            f"would be overwritten on the next sync-pull."
+        )
+        print(msg, file=sys.stderr)
+        sys.exit(2)
 
 
 def get_config() -> Dict[str, Any]:
