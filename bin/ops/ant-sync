@@ -486,7 +486,11 @@ def cmd_pull(args, s3_cfg: dict, data_folder: Path) -> None:
 
     # --evict: do evictions FIRST so the freed space is available for
     # subsequent pulls. Safety: only delete when same-name key exists on
-    # S3 with matching size.
+    # S3. On a PRIMARY we also require size-match (local divergence
+    # might be uncommitted work). On a SLAVE size mismatch is exactly
+    # what we expect — local has drifted from S3 and S3 is the source
+    # of truth — so the size check is dropped.
+    slave_mode = is_slave(cfg)
     if args.evict and evict_set:
         print()
         print(f"Evicting {len(evict_set)} .duckdb(s) below policy cutoff…")
@@ -496,12 +500,17 @@ def cmd_pull(args, s3_cfg: dict, data_folder: Path) -> None:
                 continue
             local_size = local_path.stat().st_size
             s3_size = s3_index.get(rel)
-            if s3_size is None or s3_size != local_size:
+            if s3_size is None:
+                print(f"  SKIP evict {rel}: NOT on S3 — refusing to delete")
+                continue
+            if s3_size != local_size and not slave_mode:
                 print(f"  SKIP evict {rel}: not safely on S3 "
-                      f"(s3_size={s3_size}, local={local_size})")
+                      f"(s3_size={s3_size}, local={local_size}; "
+                      f"set sync_policy.role=slave to override)")
                 continue
             local_path.unlink()
-            print(f"  EVICTED {rel}  ({_fmt_size(local_size)})")
+            note = " (slave: size mismatch ignored)" if (slave_mode and s3_size != local_size) else ""
+            print(f"  EVICTED {rel}  ({_fmt_size(local_size)}){note}")
 
     slave_mode = is_slave(cfg)
 
@@ -603,6 +612,10 @@ def cmd_evict(args, s3_cfg: dict, data_folder: Path) -> None:
         return
 
     print(f"\nEviction candidates: {len(to_remove)} .duckdb(s)")
+    # Slave deployments: S3 is the source of truth. Local size != S3
+    # size is exactly what we expect to see (drift to be wiped), so
+    # the size-match safety check is dropped under slave mode.
+    slave_mode = is_slave(cfg)
     n_evicted = n_skipped = bytes_freed = 0
     for rel in to_remove:
         local_path = data_folder / rel
@@ -613,15 +626,17 @@ def cmd_evict(args, s3_cfg: dict, data_folder: Path) -> None:
             print(f"  SKIP {rel}  (priority={priority}, NOT on S3 — refusing to evict)")
             n_skipped += 1
             continue
-        if s3_size != local_size:
-            print(f"  SKIP {rel}  (priority={priority}, S3 size {s3_size} != local {local_size})")
+        if s3_size != local_size and not slave_mode:
+            print(f"  SKIP {rel}  (priority={priority}, S3 size {s3_size} != local {local_size}; "
+                  f"set sync_policy.role=slave to override)")
             n_skipped += 1
             continue
+        note = " (slave: size mismatch ignored)" if (slave_mode and s3_size != local_size) else ""
         if args.dry_run:
-            print(f"  [dry-run] would evict {rel}  (priority={priority}, {_fmt_size(local_size)})")
+            print(f"  [dry-run] would evict {rel}  (priority={priority}, {_fmt_size(local_size)}){note}")
         else:
             local_path.unlink()
-            print(f"  EVICTED {rel}  (priority={priority}, {_fmt_size(local_size)})")
+            print(f"  EVICTED {rel}  (priority={priority}, {_fmt_size(local_size)}){note}")
         n_evicted += 1
         bytes_freed += local_size
 
