@@ -117,6 +117,13 @@ mcp:
 #
 # priority_default → priority used when an .md has no `priority:` key.
 #                    50 by default — middle of the range, evictable.
+#
+# TODO: add `min_priority` (hard floor — datasets with priority < N
+# are NEVER pulled, regardless of available disk). Today the same
+# effect is achieved by setting those datasets to `priority: 0` in
+# their .md, which is already gated as "inactive, never pulled".
+# min_priority would give a cleaner declarative cutoff for "I want
+# 10s to never come back even if there's plenty of room".
 sync_policy:
   mode: all
   max_local_gb: null
