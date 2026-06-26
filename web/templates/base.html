@@ -251,6 +251,8 @@
         .chat-msg.assistant.md blockquote { border-left: 3px solid #cbd5e1; margin: 4px 0; padding: 0 8px; color: var(--text-muted); }
         .chat-msg.assistant.md hr { border: none; border-top: 1px solid #cbd5e1; margin: 6px 0; }
         .chat-msg.action { align-self: flex-start; background: #fef3c7; color: #92400e; font-size: 11px; border-radius: 8px; font-family: var(--font-mono); }
+        /* subtle navigation breadcrumb (the bot moved the view) — deliberately quiet */
+        .chat-nav { align-self: flex-start; font-size: 10px; color: var(--text-muted); opacity: .8; padding: 1px 4px; }
         .chat-activity { align-self: flex-start; display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-muted); font-style: italic; padding: 2px 4px; }
         .chat-activity .spin { width: 11px; height: 11px; flex: none; border: 2px solid #cbd5e1; border-top-color: var(--link); border-radius: 50%; animation: chatspin .7s linear infinite; }
         @keyframes chatspin { to { transform: rotate(360deg); } }
@@ -622,10 +624,18 @@
         logBox.innerHTML = '';
         if (!msgs || !msgs.length) { showEmpty(); return; }
         msgs.forEach(function (m) {
-          if (m.type === 'ui' || m.role === 'ui') renderUi(m);   // re-render persisted choice/link (best-effort; text fallback covers it)
-          else if (m.role === 'action') addMsg('action', '↪ ' + (m.content || 'navigated'));
-          else if (m.role === 'assistant') renderAssistantInto(addMsg('assistant', ''), m.content || '');
-          else addMsg(m.role, m.content);
+          if (m.role === 'assistant') { renderAssistantInto(addMsg('assistant', ''), m.content || ''); return; }
+          if (m.role !== 'action') { addMsg(m.role, m.content); return; }
+          // action role: content is the JSON-stringified SSE frame (anthive4 #248).
+          // Discriminate on the parsed payload so nothing shows as raw JSON.
+          var f = null; try { f = JSON.parse(m.content); } catch (e) {}
+          if (f && f.type === 'ui') { renderUi(f); }
+          else if (f && f.type === 'action' && f.name === 'navigate' && f.args && f.args.url) { navNote(f.args.url); }
+          else {
+            var t = String(m.content || '');
+            if (/^⚠/.test(t)) addMsg('action', t);            // keep warnings prominent
+            else { var d = document.createElement('div'); d.className = 'chat-nav'; d.textContent = /^↪/.test(t) ? t : ('↪ ' + t); logBox.appendChild(d); }
+          }
         });
       }
       var DOCK = 'anthive.chat.dock';                 // float | dock (localStorage pref)
@@ -903,11 +913,35 @@
       // and the failure is surfaced in the chat, then fed back to the assistant
       // once so it can self-correct. This is what keeps the window up on a
       // faulty redirect instead of dumping the user on a widget-less error page.
+      // Short human label for a navigation breadcrumb (drops query noise like
+      // dpi/colour params). Rendered as a subtle muted line, NOT the prominent
+      // amber action chip — the bot moving the view shouldn't shout.
+      function navLabel(url) {
+        var path = String(url || '').split('?')[0];
+        var s = path.split('/').filter(Boolean);
+        try { s = s.map(decodeURIComponent); } catch (e) {}
+        if (s[0] === 'browse') {
+          if (s[3] === 'plot') return s[4] + ' · ' + s[1] + '/' + s[2];
+          if (s[3] === 'de')   return 'DE · ' + s[1] + '/' + s[2];
+          if (s.length >= 3)   return 'dataset · ' + s[1] + '/' + s[2];
+          return 'collection · ' + s[1];
+        }
+        if (s[0] === 'genes') return 'gene atlas · ' + (s[1] || '');
+        return path;
+      }
+      function navNote(url) {
+        var e = logBox.querySelector('.chat-empty'); if (e) e.remove();
+        var d = document.createElement('div'); d.className = 'chat-nav';
+        d.textContent = '↪ opened ' + navLabel(url); d.title = url;   // full URL on hover
+        logBox.appendChild(d); logBox.scrollTop = logBox.scrollHeight; return d;
+      }
+
       function tryNavigate(url) {
         fetch(url, { credentials: 'same-origin', headers: { 'X-Ant-Preflight': '1' } })
           .then(function (r) {
             if (r.ok) {
-              actionNote('↪ opening ' + url);
+              navNote(url);   // subtle breadcrumb (was a JSON-y amber chip)
+              var l = localLog(); l.push({ role: 'action', content: JSON.stringify({ type: 'action', name: 'navigate', args: { url: url } }) }); saveLocal(l);
               ss.set(OPEN, '1');           // re-open after the reload
               setTimeout(function () { window.location.href = url; }, 400);
             } else { navFailed(url, r.status); }
