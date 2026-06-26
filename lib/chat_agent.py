@@ -165,12 +165,17 @@ async def _preflight_plot_url(
     quoted_db = db_id.replace('/', '%2F')
     api_path = f'/databases/{quoted_db}/plot/{geom}'
 
-    # Pile tiny dimensions on top of the user's params. dpi=20 + 2x2 gives
-    # an ~8 KB PNG; the full param validation happens regardless.
+    # Pile tiny dimensions on top of the user's params. The per-geom
+    # endpoint enforces dpi ∈ [72, 600] (matplotlib raster minimum), so
+    # the probe MUST use dpi ≥ 72 or preflight 422s on its own probe
+    # rather than the user's params — that bug caused the "screen did
+    # not change" + bot-hallucinated-success failure mode on
+    # 2026-06-25/26. 2×2 inches at 72 dpi is still a 144×144 px render
+    # → ~8 KB PNG, cost is rounding-error.
     q = parse_qs(parts.query, keep_blank_values=True)
-    q.setdefault('width', ['2'])
-    q.setdefault('height', ['2'])
-    q.setdefault('dpi', ['20'])
+    q['width'] = ['2']
+    q['height'] = ['2']
+    q['dpi'] = ['72']
     qs = urlencode(q, doseq=True)
     target = f'{internal_api_url.rstrip("/")}{api_path}?{qs}'
 
@@ -206,21 +211,40 @@ def _history_to_openai_messages(
     full action history is on the web side; we just need enough for
     coherent continuation.
     """
+    # Strip the legacy "[performed client action ...]" annotation that
+    # the previous replay implementation appended directly to assistant
+    # content — and that the model started MIMICKING when navigate was
+    # preflight-blocked, claiming it had navigated when it hadn't. Old
+    # sessions have these baked into stored assistant rows; scrubbing on
+    # replay prevents the model from copying its own past hallucinations.
+    legacy_action_re = re.compile(r"\s*\[performed client action[^\]]*\]\s*", re.IGNORECASE)
+
     out: List[Dict[str, Any]] = []
     for entry in history:
         role = entry.get('role')
         content = entry.get('content', '')
+        if role == 'assistant' and isinstance(content, str):
+            content = legacy_action_re.sub('', content).strip()
         if role in ('user', 'assistant', 'system'):
             out.append({'role': role, 'content': content})
         elif role == 'action':
             # Compact replay note attached to the last assistant message
-            # (if any). Avoids the LLM seeing a raw tool_call shape it
-            # didn't make this turn.
+            # so the model has memory of what client actions actually
+            # fired. CRITICAL: the format MUST be unmistakably out-of-
+            # voice — earlier versions used "[performed client action
+            # navigate({'url': ...})]" and the model started mimicking
+            # that string when a fresh navigate was BLOCKED by preflight,
+            # pretending it had navigated when it hadn't. The HTML-ish
+            # `<server-log …/>` tag is unlike anything the model writes
+            # naturally, so it doesn't get copied. The prompt also tells
+            # the model never to emit `<server-log` themselves.
             try:
                 frame = json.loads(content)
-                desc = f"[performed client action {frame.get('name')}({frame.get('args', {})})]"
+                name = frame.get('name', '?')
+                args = frame.get('args', {})
+                desc = f"<server-log action={name} args={json.dumps(args, separators=(',', ':'))}/>"
             except (ValueError, TypeError):
-                desc = "[performed client action]"
+                desc = "<server-log action=?/>"
             if out and out[-1]['role'] == 'assistant':
                 out[-1]['content'] = (out[-1]['content'] + "\n" + desc).strip()
             else:
@@ -561,7 +585,28 @@ async def run_turn(
                                           'study/term/contrast, etc.) and try a corrected URL.',
                             }
                         else:
-                            frame = {'type': 'action', 'name': name, 'args': args}
+                            # Build the SSE frame per tool. `navigate` is
+                            # an action frame; `ui_choice` / `ui_link` are
+                            # rendering hints under type:'ui' so web can
+                            # branch on the discriminator without
+                            # action-frame collision.
+                            if name == 'ui_choice':
+                                frame = {
+                                    'type':     'ui',
+                                    'kind':     'choice',
+                                    'question': args.get('question', '') if isinstance(args, dict) else '',
+                                    'options':  args.get('options', []) if isinstance(args, dict) else [],
+                                }
+                            elif name == 'ui_link':
+                                frame = {
+                                    'type':        'ui',
+                                    'kind':        'link',
+                                    'url':         args.get('url', '') if isinstance(args, dict) else '',
+                                    'label':       args.get('label', '') if isinstance(args, dict) else '',
+                                    'description': (args.get('description', '') if isinstance(args, dict) else '') or None,
+                                }
+                            else:
+                                frame = {'type': 'action', 'name': name, 'args': args}
                             action_frames_in_turn.append(frame)
                             yield _sse(frame)
                             tool_result = {'queued': True}

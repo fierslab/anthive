@@ -30,7 +30,14 @@ import httpx
 # the tool's "navigate"-equivalent fallback was the only thing that ever
 # happened. Re-add when web ships the hook (tracked in pika to
 # anthive-web).
-CLIENT_ACTION_TOOLS: Set[str] = {'navigate'}
+#
+# ``ui_choice`` / ``ui_link`` are RENDERING HINTS — the agent loop emits
+# an SSE ``{type:'ui', kind:'choice'|'link', …}`` frame and the bot
+# ALSO writes a readable text fallback in its assistant content first.
+# A web client that knows the protocol can render rich buttons / cards;
+# one that doesn't sees the readable fallback in the token stream and
+# everything still works.
+CLIENT_ACTION_TOOLS: Set[str] = {'navigate', 'ui_choice', 'ui_link'}
 
 
 # ── OpenAI-style tool schemas ────────────────────────────────────────────────
@@ -62,6 +69,84 @@ TOOL_DEFS: List[Dict[str, Any]] = [
                     },
                 },
                 'required': ['url'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'ui_choice',
+            'description': (
+                "Ask the user to pick from 2-6 options. The web client "
+                "renders this as a button group; clients that don't "
+                "know the rich protocol see your readable text fallback.\n"
+                "\n"
+                "PROTOCOL:\n"
+                "  1. FIRST write a readable numbered list of the options "
+                "     in your assistant text — that's the universal "
+                "     fallback (some clients render markdown only).\n"
+                "  2. THEN call ui_choice(question, options) to emit the "
+                "     rendering hint. Don't repeat the question after.\n"
+                "  3. Stop. Wait for the user's next message.\n"
+                "\n"
+                "Use sparingly — when ambiguity is real (multiple "
+                "datasets match, multiple genes share a prefix, …). "
+                "Don't use for yes/no — just ask."
+            ),
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'question': {'type': 'string', 'description': 'Short one-line question.'},
+                    'options': {
+                        'type': 'array',
+                        'items': {
+                            'type': 'object',
+                            'properties': {
+                                'id':          {'type': 'string', 'description': 'Short slug (e.g. "v6a", "trem2").'},
+                                'label':       {'type': 'string', 'description': 'Button label (1–6 words).'},
+                                'description': {'type': 'string', 'description': 'Optional one-line context shown under the button.'},
+                            },
+                            'required': ['id', 'label'],
+                        },
+                        'minItems': 2,
+                        'maxItems': 6,
+                    },
+                },
+                'required': ['question', 'options'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'ui_link',
+            'description': (
+                "Offer the user an EXTERNAL link (paper DOI, gene "
+                "database, geneset source, etc.). The web client "
+                "renders this as a card with title + description + "
+                "open-in-new-tab; clients without the protocol see "
+                "your markdown link in the text stream.\n"
+                "\n"
+                "PROTOCOL:\n"
+                "  1. ALWAYS write a readable markdown link "
+                "     `[label](url)` in your assistant text first — "
+                "     never rely on the SSE frame alone.\n"
+                "  2. THEN call ui_link(url, label, description?) to "
+                "     emit the rich rendering hint.\n"
+                "\n"
+                "Only emit URLs you have HIGH confidence in (canonical "
+                "domains: doi.org, ncbi.nlm.nih.gov, ensembl.org, "
+                "uniprot.org, omim.org, ebi.ac.uk, genecards.org, "
+                "scimagojr.com, ucsc.edu). Never fabricate a URL."
+            ),
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'url':         {'type': 'string', 'description': 'Full https:// URL.'},
+                    'label':       {'type': 'string', 'description': 'Short title for the card.'},
+                    'description': {'type': 'string', 'description': 'Optional one-line context (what the user finds at the link).'},
+                },
+                'required': ['url', 'label'],
             },
         },
     },

@@ -1321,8 +1321,8 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.17.0"
-API_VERSION_RELEASED = "2026-06-25"
+API_VERSION = "2.18.0"
+API_VERSION_RELEASED = "2026-06-26"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
 # Create FastAPI app with lifespan handler (Phase 2)
