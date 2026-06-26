@@ -522,7 +522,7 @@
               : ('s' + Date.now() + Math.round(Math.random() * 1e9));
         ss.set(SID, sid);
       }
-      var streaming = false, navRetry = 0, lastUserMessage = '', chosenModel = '', chatEnabled = false;
+      var streaming = false, navRetry = 0, lastUserMessage = '', chosenModel = '', chatEnabled = false, navFired = false;
       var MODEL_KEY = 'anthive.chat.model';   // remembered pick (localStorage, cross-session)
       function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
       function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
@@ -589,8 +589,18 @@
         return s.replace(/ (\d+) /g, function (m, i) { return '<code>' + codes[+i] + '</code>'; });
       }
       function mdRow(l) { return l.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(function (c) { return c.trim(); }); }
+      // The bot is told never to write <server-log .../> (that's an out-of-voice
+      // replay annotation), but it sometimes leaks it as text. Strip it from
+      // display; a navigate it describes is recovered separately (see finish()).
+      function stripServerLog(s) { return String(s == null ? '' : s).replace(/<server-log\b[^>]*>/gi, '').replace(/<\/server-log>/gi, ''); }
+      function serverLogNavUrl(s) {
+        var m = String(s || '').match(/<server-log\b[^>]*\baction=navigate\b[^>]*>/i);
+        if (!m) return null;
+        var u = m[0].match(/["']?url["']?\s*:\s*["']([^"']+)["']/i);
+        return u ? u[1] : null;
+      }
       function mdToHtml(src) {
-        var lines = mdEsc(src).split('\n'), out = [], i = 0;
+        var lines = mdEsc(stripServerLog(src)).split('\n'), out = [], i = 0;
         var isSep = function (l) { return /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/.test(l); };
         while (i < lines.length) {
           var line = lines[i];
@@ -961,6 +971,7 @@
         if (ev.name === 'navigate' && ev.args && ev.args.url) {
           var url = safeNavUrl(ev.args.url);
           if (!url) { actionNote('⚠ ignored an invalid navigation target.'); return; }
+          navFired = true;          // a real navigate frame arrived → no <server-log> fallback needed
           tryNavigate(url);
         } else if (ev.name === 'set_plot_param' && window.__antApplyPlotParam) {
           window.__antApplyPlotParam(ev.args || {});      // in-place tweak (plot.html hook; optional)
@@ -1008,7 +1019,7 @@
 
       function send(message, hidden) {
         if (streaming) return;
-        streaming = true; sendBtn.disabled = true;
+        streaming = true; sendBtn.disabled = true; navFired = false;
         if (!hidden) {
           lastUserMessage = message;     // for the error-card retry button
           addMsg('user', message);
@@ -1039,6 +1050,13 @@
           function finish() {
             streaming = false; sendBtn.disabled = false; clearActivity(); stopIdle();
             if (asstText) { var a = localLog(); a.push({ role: 'assistant', content: asstText }); saveLocal(a); if (asstEl) renderAssistantInto(asstEl, asstText); }
+            // Recover a navigate the bot described in a leaked <server-log/> tag but
+            // never fired as a real action frame (anthive4 #246 mimicry bug). Guarded
+            // by safeNavUrl + preflight, and only when no real navigate happened.
+            if (!navFired && asstText) {
+              var slu = serverLogNavUrl(asstText), su = slu && safeNavUrl(slu);
+              if (su) { navFired = true; tryNavigate(su); }
+            }
             fetchUsage();   // refresh cost/token counter after the turn
           }
           function pump() {
