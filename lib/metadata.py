@@ -181,6 +181,61 @@ def write_md_file(md_path: Path, yaml_dict: Dict[str, Any], markdown_body: str) 
         )
 
 
+# ── priority (per-dataset retention priority for tiered local storage) ──
+#
+# Integer 0..100 stored as the `priority:` key in the data .md frontmatter.
+# Read by `bin/ops/ant-sync` to decide which `.duckdb` files to pull / evict
+# under the configured `sync_policy` (anthive.yaml). Higher = keep local.
+#
+#   0   → effectively inactive; never pulled, always evicted
+#   50  → default for .md files without an explicit priority
+#   100 → always-must-have; never evicted unless cap forces it
+#
+# Scope is per-dataset (per .md file), not per-group. Editable via
+# `bin/ops/ant-priority`.
+
+PRIORITY_DEFAULT = 50
+PRIORITY_MIN = 0
+PRIORITY_MAX = 100
+
+
+def get_priority(yaml_dict: Dict[str, Any], default: int = PRIORITY_DEFAULT) -> int:
+    """Return the integer `priority:` from a parsed .md, or ``default``.
+
+    Tolerates a missing key, ``None`` value, or a value that parses as
+    int via ``int()``. Out-of-range values are clamped into [0, 100]
+    and the in-memory dict is NOT mutated — the caller decides whether
+    to write the clamped value back.
+    """
+    raw = yaml_dict.get('priority')
+    if raw is None:
+        return int(default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return int(default)
+    return max(PRIORITY_MIN, min(PRIORITY_MAX, value))
+
+
+def set_priority(yaml_dict: Dict[str, Any], value: int) -> int:
+    """Write `priority: <int>` into the dict in place. Returns the value stored.
+
+    Raises ``ValueError`` for non-integer or out-of-range input. Use this
+    rather than direct dict access so the [0, 100] invariant is enforced
+    at the boundary that writes the .md file.
+    """
+    try:
+        i = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"priority must be an integer, got {value!r}") from exc
+    if i < PRIORITY_MIN or i > PRIORITY_MAX:
+        raise ValueError(
+            f"priority must be in [{PRIORITY_MIN}, {PRIORITY_MAX}], got {i}"
+        )
+    yaml_dict['priority'] = i
+    return i
+
+
 def ensure_in_list(yaml_dict: Dict[str, Any], key: str, value: str) -> bool:
     """
     Ensure value is in list, add if missing
