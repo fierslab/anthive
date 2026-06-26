@@ -299,6 +299,27 @@ Density binning (hexbin / kde2d):
   - `vmin_quantile=<0..1>`, `vmax_quantile=<0..1>` — colour-scale percentile \
     clipping to suppress outliers.
 
+Rolling-mean trajectory (`rolling` geom):
+  - For pseudotime / trajectory plots. Sorts cells by `x` ascending, \
+    takes a rolling mean of `window` cells along it, plots one line.
+  - `x=<continuous>` — typically a pseudotime obs column (e.g. \
+    `dpt_pseudotime`, `latent_time`), but any monotonic continuous \
+    obs / gene works.
+  - `y=<CSV>` — **comma-separated** list of genes or numerical obs. \
+    One rolling-mean line PER field. Example: \
+    `params={'x': 'pseudotime', 'y': 'TREM2,APOE,GPNMB,SPP1'}` draws \
+    four lines (each gene's smoothed expression along the trajectory).
+  - `color=<categorical>` — optional. Splits each y line into one \
+    sub-line per group (e.g. `color=condition` → wild-type vs AD).
+  - `window=<int>` — smoothing window in cells (default 200). Bigger \
+    = smoother; smaller = more responsive to local change.
+  - `show_band=true` — overlay an IQR ribbon (q25..q75) under each \
+    line to show within-window spread.
+
+  When user wants to "compare these N genes along pseudotime / a \
+  trajectory / by some continuous obs", reach for `rolling` with a \
+  CSV y. Don't draw four separate scatters.
+
 When the user describes intent fuzzily ("compress the axis", "kill the \
 outliers", "show the trend"), pick a sensible default — `asinh` for axis \
 compression, `vmax_quantile=0.95` for outlier clipping, `regline=true` for \
