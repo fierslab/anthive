@@ -457,9 +457,16 @@ def run_ingest_for_study(
         stage_con.close()
 
     try:
+        # Pass the CANONICAL db_id (e.g. "S25/V6A") from the resolved
+        # h5ad_entry, NOT args.db_id — args.db_id can be a filesystem
+        # path (the CLI accepts both forms), and DEWriter uses it
+        # verbatim to build POST /admin/release/{db_id}. A path produces
+        # "/admin/release//data/1/project/.../file.duckdb" which ant-
+        # serve 404s on. h5ad_entry.db_id always resolves to the
+        # "{group_id}/{file_id}" form regardless of input.
         with DEWriter(
             h5ad_entry.duckdb_path,
-            db_id=args.db_id, ant_serve_url=args.ant_serve_url,
+            db_id=h5ad_entry.db_id, ant_serve_url=args.ant_serve_url,
         ) as writer:
             writer.conn.execute(
                 f"CREATE OR REPLACE VIEW _stage AS "
