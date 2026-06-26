@@ -12,8 +12,9 @@ _ant_completion()
     local cur prev words cword
     _init_completion || return
 
-    # Available ant subcommands
-    local subcommands="api-check browse build-all cellxgene check convert db duckdb-check h5ad-check inactive mcp md md-check s3-check serve supervisor sync"
+    # Available ant subcommands (dispatcher walks bin/<domain>/ant-*; keep
+    # this list aligned with what's actually shipped).
+    local subcommands="annotate api-check browse build-all build-reports cellxgene check convert db de-ingest de-pseudobulk duckdb-check h5ad-check inactive ingest mcp md md-check merge-h5ad priority s3-check score serve starcat suggest-tops supervisor sync warm-cache write-manifest"
 
     # Complete the subcommand itself
     if [[ $cword -eq 1 ]]; then
@@ -182,9 +183,31 @@ _ant_completion()
         # ── sync: subcommand then optional glob filter ─────────────────────
         sync)
             if [[ $cword -eq 2 ]]; then
-                COMPREPLY=($(compgen -W "push pull status" -- "$cur"))
+                COMPREPLY=($(compgen -W "push pull evict status" -- "$cur"))
                 return
             fi
+            local sync_sub="${words[2]}"
+            case "$sync_sub" in
+                pull)
+                    if [[ "$cur" == -* ]]; then
+                        COMPREPLY=($(compgen -W "--evict --include-duckdb --only --max-bandwidth --max-concurrency" -- "$cur"))
+                        return
+                    fi
+                    ;;
+                push)
+                    if [[ "$cur" == -* ]]; then
+                        COMPREPLY=($(compgen -W "--skip-no-mtime --max-bandwidth --max-concurrency" -- "$cur"))
+                        return
+                    fi
+                    ;;
+                evict)
+                    if [[ "$cur" == -* ]]; then
+                        COMPREPLY=($(compgen -W "--dry-run" -- "$cur"))
+                        return
+                    fi
+                    return
+                    ;;
+            esac
             if [[ "$prev" == "--data-folder" ]]; then
                 _filedir -d
                 return
@@ -193,6 +216,53 @@ _ant_completion()
                 COMPREPLY=($(compgen -W "--data-folder" -- "$cur"))
                 return
             fi
+            return
+            ;;
+
+        # ── priority: per-dataset retention priority (0..100) ──────────────
+        priority)
+            local priority_subcommands="list show set"
+
+            if [[ $cword -eq 2 ]]; then
+                COMPREPLY=($(compgen -W "$priority_subcommands" -- "$cur"))
+                return
+            fi
+
+            local prio_sub="${words[2]}"
+            case "$prio_sub" in
+                list)
+                    if [[ "$prev" == "--sort" ]]; then
+                        COMPREPLY=($(compgen -W "priority priority-desc db_id" -- "$cur"))
+                        return
+                    fi
+                    if [[ "$cur" == -* ]]; then
+                        COMPREPLY=($(compgen -W "--below --above --sort" -- "$cur"))
+                        return
+                    fi
+                    return
+                    ;;
+                show)
+                    # Target: db_id OR path (.md / .h5ad / .duckdb / dir).
+                    # _filedir's @() glob accepts the three file types and
+                    # the -d fallback below picks up directories too.
+                    _filedir '@(md|h5ad|duckdb)'
+                    return
+                    ;;
+                set)
+                    # Two positional args after `set`: target (cword=3),
+                    # then numeric value (cword=4); --dry-run anywhere after.
+                    if [[ "$cur" == -* ]]; then
+                        COMPREPLY=($(compgen -W "--dry-run" -- "$cur"))
+                        return
+                    fi
+                    if [[ $cword -eq 3 ]]; then
+                        _filedir '@(md|h5ad|duckdb)'
+                        return
+                    fi
+                    # cword >= 4: numeric value — no completion to offer
+                    return
+                    ;;
+            esac
             return
             ;;
 
