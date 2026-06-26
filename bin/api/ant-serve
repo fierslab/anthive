@@ -1299,6 +1299,24 @@ async def lifespan(app: FastAPI):
             )
         except Exception as exc:
             log.warning("Failed to build module-score index: %s", exc)
+    # Slave-mode banner — make the deployment role obvious in the logs
+    # so it's the first thing visible when debugging "why won't this
+    # write?". Banner ONLY fires when role=slave is opt-in; primaries
+    # see no change.
+    try:
+        from config import is_slave  # noqa: PLC0415
+        if is_slave():
+            log.warning(
+                "── DEPLOYMENT ROLE = SLAVE ──"
+                "  reads + plot serving allowed; ALL writes refused "
+                "(sync-push, annotation writers, ant-priority set, "
+                "ant-ingest). Edit on the primary."
+            )
+            print("  ── DEPLOYMENT ROLE = SLAVE ──")
+            print("     reads + plots allowed; ALL writes refused on this host")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("slave-banner check failed: %s", exc)
+
     log.info("Server startup complete — %d databases", len(registry.databases))
     print("Server startup complete")
     yield

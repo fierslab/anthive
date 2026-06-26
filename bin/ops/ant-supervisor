@@ -476,6 +476,26 @@ async def _main() -> None:
     else:
         mode = 'deployment (no caddy — nginx/reverse-proxy handles :8501)'
     print(f"{sup_prefix}{BOLD}starting anthive — {mode}{RESET}", flush=True)
+
+    # Slave-mode banner — surface the deployment role at the very top
+    # so it's the first thing readable when scanning supervisor logs.
+    # Best-effort: a config-load error doesn't block startup.
+    try:
+        sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'lib'))
+        from config import is_slave  # noqa: PLC0415
+        if is_slave():
+            print(
+                f"{sup_prefix}{BOLD}{RED}── DEPLOYMENT ROLE = SLAVE ──{RESET}",
+                flush=True,
+            )
+            print(
+                f"{sup_prefix}{DIM}reads + plot serving allowed; all writes "
+                f"refused on this host. Edit on the primary.{RESET}",
+                flush=True,
+            )
+    except Exception as _exc:  # noqa: BLE001
+        pass
+
     print(f"{sup_prefix}{DIM}state file: {STATE_FILE}{RESET}", flush=True)
     for service_name in active_services:
         svc = SERVICES[service_name]
