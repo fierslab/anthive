@@ -300,6 +300,11 @@ async def run_turn(
     #    rounds by turn for the cost-counter aggregation.
     turn_seq = history_store.append(user, session_id, 'user', message)
 
+    # Resolve which model to use this turn — override (validated by
+    # the endpoint) wins over the configured default. Needed up front
+    # because the cache_control wrapping below conditions on it.
+    active_model = model_override or cfg.model
+
     # 2. Build the LLM messages array.
     async with httpx.AsyncClient(verify=False) as http_client:
         catalog = await _list_catalog_for_digest(
@@ -316,8 +321,31 @@ async def run_turn(
                 prior_messages[i]['content'] = build_user_envelope(message, context)
                 break
 
+        # System message — wrap as a content-block list with
+        # cache_control: ephemeral when talking to an Anthropic model.
+        # The system prompt + catalogue digest is the largest stable
+        # payload across a session (~11k tokens today, dominated by the
+        # ~150-dataset digest). Anthropic's prompt cache serves it at
+        # ~10% of input price on subsequent calls within ~5 minutes,
+        # which is the natural pace of an interactive chat. Non-Anthropic
+        # models ignore the cache_control field; we keep the string form
+        # for them so they don't see an unfamiliar shape.
+        if active_model.startswith('anthropic/'):
+            system_message: Dict[str, Any] = {
+                'role': 'system',
+                'content': [
+                    {
+                        'type': 'text',
+                        'text': system_prompt,
+                        'cache_control': {'type': 'ephemeral'},
+                    }
+                ],
+            }
+        else:
+            system_message = {'role': 'system', 'content': system_prompt}
+
         openai_messages: List[Dict[str, Any]] = [
-            {'role': 'system', 'content': system_prompt},
+            system_message,
             *prior_messages,
         ]
 
@@ -335,10 +363,6 @@ async def run_turn(
             base_url=cfg.base_url,
             timeout=_LLM_TIMEOUT_SECONDS,
         )
-
-        # Resolve which model to use this turn — override (validated by
-        # the endpoint) wins over the configured default.
-        active_model = model_override or cfg.model
 
         # OpenRouter routing preference: pin provider order so we skip
         # the upstream provider tier that just 429'd us (Google Vertex AI
