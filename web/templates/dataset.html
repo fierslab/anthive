@@ -291,7 +291,7 @@
 <table class="auto" style="font-size:12px">
     <thead><tr>
         <th>Study</th><th>Method</th><th>Target</th><th>Terms</th>
-        <th>Contrasts</th><th>Rows</th><th></th>
+        <th>Contrasts</th><th>Rows</th><th>Visualize</th>
     </tr></thead>
     <tbody>
     {% for s in de_studies %}
@@ -302,7 +302,12 @@
         <td style="color:#555">{{ s.n_terms if s.n_terms is not none else '—' }}</td>
         <td style="color:#555">{{ s.n_contrasts if s.n_contrasts is not none else '—' }}</td>
         <td style="color:#555;font-family:var(--font-mono);font-size:11px">{{ "{:,}".format(s.n_rows) if s.n_rows else '—' }}</td>
-        <td><a href="/browse/{{ folder_browse_id }}/{{ file_id }}/de/{{ s.study_id | urlencode }}" class="chip">browse →</a></td>
+        <td style="white-space:nowrap">
+            <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/volcano?study={{ s.study_id | urlencode }}" class="chip" title="volcano plot — log2FC vs −log10(padj) for a contrast">🌋 volcano</a>
+            <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/ma?study={{ s.study_id | urlencode }}" class="chip" title="MA plot — effect size vs mean expression">📊 MA</a>
+            <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/de_heatmap?study={{ s.study_id | urlencode }}" class="chip" title="DE heatmap — contrasts × genes/modules">🔥 heatmap</a>
+            <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/de/{{ s.study_id | urlencode }}" class="chip" title="browse terms, contrasts, gene tables">🔬 browse</a>
+        </td>
     </tr>
     {% endfor %}
     </tbody>
