@@ -56,8 +56,22 @@ from metadata import (                   # noqa: E402
 
 
 def _data_root() -> Path:
+    """Resolve the configured data_folder anchored on the REPO root.
+
+    The yaml default is ``./data/h5adstore`` — a relative path. Resolving
+    that against cwd would break the moment the user runs the tool from
+    inside the store itself (cwd-relative would point at a subfolder).
+    Anchor against the repo root (two parents up from this script:
+    bin/ops/ant-priority → bin/ops → bin → REPO_ROOT) so the workflow
+    ``cd data/h5adstore && ant-priority …`` Just Works.
+    """
     cfg = get_config()
-    return Path(cfg.get('data_folder', './data/h5adstore')).resolve()
+    raw = cfg.get('data_folder', './data/h5adstore')
+    p = Path(raw)
+    if not p.is_absolute():
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        p = (repo_root / p)
+    return p.resolve()
 
 
 def _priority_default() -> int:
@@ -70,10 +84,89 @@ def _entries(data_root: Path) -> List[H5adEntry]:
 
 
 def _resolve(data_root: Path, arg: str) -> H5adEntry:
+    """Resolve a single-dataset arg. Sys.exits when no match.
+
+    Used by `show` / `set` for the legacy one-dataset path. The
+    multi-target path (folder / .md / glob) goes through
+    ``_resolve_targets`` instead.
+    """
     entry = find_h5ad(data_root, arg)
     if entry is None:
         sys.exit(f"ant-priority: dataset not found — {arg!r}")
     return entry
+
+
+def _resolve_targets(data_root: Path, arg: str) -> List[H5adEntry]:
+    """Resolve one user argument into a LIST of H5adEntry.
+
+    Resolution order:
+      1. Path to a directory (absolute or relative to cwd): every
+         dataset whose .md lives anywhere under that directory.
+      2. Path to a ``.md`` file: the single dataset that owns it.
+      3. Glob pattern (contains ``*`` / ``?``): match against
+         canonical db_id and readable_id.
+      4. Otherwise: delegate to ``find_h5ad`` (.duckdb / .h5ad path
+         OR db_id / readable form).
+    """
+    import fnmatch as _fnmatch
+
+    # Try filesystem-path interpretations first if the arg LOOKS like a path
+    # (contains a slash or starts with '.', '~', or '/').
+    looks_like_path = (
+        '/' in arg or arg.startswith('.') or arg.startswith('~')
+        or Path(arg).exists()
+    )
+    if looks_like_path:
+        p = Path(arg).expanduser()
+        if not p.is_absolute():
+            # Try cwd-relative first, then data_root-relative (for the
+            # `cd data/h5adstore && ant-priority set Sierksma2025/Village.6M`
+            # workflow).
+            for candidate in (Path.cwd() / p, data_root / p):
+                if candidate.exists():
+                    p = candidate
+                    break
+        if p.exists():
+            p = p.resolve()
+            data_root_r = data_root.resolve()
+            try:
+                p.relative_to(data_root_r)
+            except ValueError:
+                sys.exit(
+                    f"ant-priority: path {p} is not inside the h5adstore "
+                    f"({data_root_r})"
+                )
+            if p.is_dir():
+                results: List[H5adEntry] = []
+                for entry in iter_h5adstore(data_root):
+                    try:
+                        entry.md_path.resolve().relative_to(p)
+                        results.append(entry)
+                    except ValueError:
+                        pass
+                return results
+            if p.suffix == '.md':
+                for entry in iter_h5adstore(data_root):
+                    if entry.md_path.resolve() == p:
+                        return [entry]
+                return []
+            # .duckdb / .h5ad — fall through to find_h5ad below with the
+            # absolute path it understands.
+            arg = str(p)
+
+    # Glob fall-through: any '*' or '?' in the original arg → match across
+    # canonical + readable forms.
+    if '*' in arg or '?' in arg:
+        matches: List[H5adEntry] = []
+        for entry in iter_h5adstore(data_root):
+            if (_fnmatch.fnmatch(entry.db_id, arg)
+                    or _fnmatch.fnmatch(entry.readable_id, arg)):
+                matches.append(entry)
+        return matches
+
+    # Single-target fallback via find_h5ad.
+    entry = find_h5ad(data_root, arg)
+    return [entry] if entry else []
 
 
 # ── commands ─────────────────────────────────────────────────────────────────
@@ -121,31 +214,65 @@ def cmd_list(args: argparse.Namespace) -> int:
 def cmd_show(args: argparse.Namespace) -> int:
     data_root = _data_root()
     default = _priority_default()
-    entry = _resolve(data_root, args.db_id)
-    md_data, _ = parse_md_file(entry.md_path)
-    explicit = isinstance(md_data.get('priority'), (int, str))
-    priority = get_priority(md_data, default=default)
-    print(f"  db_id    : {entry.db_id}")
-    print(f"  readable : {entry.readable_id}")
-    print(f"  md       : {entry.md_path.relative_to(data_root)}")
-    print(f"  priority : {priority}  ({'explicit' if explicit else f'default {default}'})")
+    entries = _resolve_targets(data_root, args.db_id)
+    if not entries:
+        sys.exit(f"ant-priority: dataset not found — {args.db_id!r}")
+    for i, entry in enumerate(entries):
+        if i > 0:
+            print()
+        md_data, _ = parse_md_file(entry.md_path)
+        explicit = isinstance(md_data.get('priority'), (int, str))
+        priority = get_priority(md_data, default=default)
+        print(f"  db_id    : {entry.db_id}")
+        print(f"  readable : {entry.readable_id}")
+        print(f"  md       : {entry.md_path.relative_to(data_root)}")
+        print(f"  priority : {priority}  ({'explicit' if explicit else f'default {default}'})")
     return 0
 
 
 def cmd_set(args: argparse.Namespace) -> int:
     data_root = _data_root()
-    entry = _resolve(data_root, args.db_id)
-    md_data, body = parse_md_file(entry.md_path)
-    old = get_priority(md_data, default=_priority_default())
+    default = _priority_default()
+    entries = _resolve_targets(data_root, args.db_id)
+    if not entries:
+        sys.exit(f"ant-priority: no datasets matched — {args.db_id!r}")
+
+    # Pre-validate the value so a multi-target run fails fast.
     try:
-        new = set_priority(md_data, args.value)
-    except ValueError as exc:
-        sys.exit(f"ant-priority: {exc}")
-    if old == new and isinstance(md_data.get('priority'), int):
-        print(f"  {entry.db_id}: priority already {new} — no change")
+        target_value = int(args.value)
+        if target_value < 0 or target_value > 100:
+            raise ValueError(f"out of range [0, 100]: {target_value}")
+    except (TypeError, ValueError) as exc:
+        sys.exit(f"ant-priority: invalid value — {exc}")
+
+    if len(entries) > 1:
+        print(f"ant-priority: {len(entries)} datasets matched.")
+    if args.dry_run:
+        for entry in entries:
+            md_data, _ = parse_md_file(entry.md_path)
+            old = get_priority(md_data, default=default)
+            arrow = '=' if old == target_value else '→'
+            print(f"  [dry-run] {entry.db_id}: {old} {arrow} {target_value}")
         return 0
-    write_md_file(entry.md_path, md_data, body)
-    print(f"  {entry.db_id}: priority {old} → {new}")
+
+    n_changed = n_noop = 0
+    for entry in entries:
+        md_data, body = parse_md_file(entry.md_path)
+        old = get_priority(md_data, default=default)
+        try:
+            set_priority(md_data, target_value)
+        except ValueError as exc:
+            sys.exit(f"ant-priority: {exc}")
+        if old == target_value and isinstance(md_data.get('priority'), int):
+            print(f"  {entry.db_id}: priority already {target_value} — no change")
+            n_noop += 1
+            continue
+        write_md_file(entry.md_path, md_data, body)
+        print(f"  {entry.db_id}: priority {old} → {target_value}")
+        n_changed += 1
+    if len(entries) > 1:
+        print()
+        print(f"  done.  changed={n_changed}  unchanged={n_noop}")
     return 0
 
 
@@ -169,13 +296,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # show
-    show_parser = subparsers.add_parser('show', help='Show one dataset.')
-    show_parser.add_argument('db_id', help='Dataset id, readable name, or duckdb path.')
+    show_parser = subparsers.add_parser(
+        'show',
+        help=("Show priority for one or many datasets. Same target syntax "
+              "as `set` (db_id / path / folder / glob)."),
+    )
+    show_parser.add_argument(
+        'db_id',
+        help='Dataset id, readable name, file path, folder path, or glob.',
+    )
 
     # set
-    set_parser = subparsers.add_parser('set', help='Set priority on one dataset.')
-    set_parser.add_argument('db_id', help='Dataset id, readable name, or duckdb path.')
+    set_parser = subparsers.add_parser(
+        'set',
+        help=("Set priority on one OR many datasets. Target can be: "
+              "a db_id (S25/V6A), a readable form (Sierksma2025/Village.6M), "
+              "a path to a .md / .h5ad / .duckdb, a path to a FOLDER (every "
+              "dataset under it recursively), or a glob pattern ('S25/*')."),
+    )
+    set_parser.add_argument(
+        'db_id',
+        help='Dataset id, readable name, file path, folder path, or glob.',
+    )
     set_parser.add_argument('value', type=int, help='New priority (0..100).')
+    set_parser.add_argument(
+        '--dry-run', action='store_true',
+        help='Print what would change without writing any .md files.',
+    )
 
     return parser
 
