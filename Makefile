@@ -1,4 +1,4 @@
-.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-mcp serve-all serve-debug serve-prod serve-stop caddy-passwd caddy-passwd-clear dev-jupyter sync-push sync-pull sync-pull-duckdb sync-pull-de sync-pull-all sync-status build-stale sync-update serve-status serve-restart h5adstore-push push-all ingest ingest-dry manifest cache-warm
+.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-mcp serve-all serve-debug serve-prod serve-stop caddy-passwd caddy-passwd-clear dev-jupyter sync-push sync-pull sync-pull-evict sync-evict sync-pull-duckdb sync-pull-de sync-pull-all sync-status build-stale sync-update serve-status serve-restart h5adstore-push push-all ingest ingest-dry manifest cache-warm
 
 help:
 	@echo "Anthive4 Development Commands"
@@ -41,7 +41,9 @@ help:
 	@echo ""
 	@echo "Sync (S3) — the maintenance workflow:"
 	@echo "  make sync-update     - Full cycle: pull h5ad → rebuild stale duckdb → push"
-	@echo "  make sync-pull         - Pull .h5ad + .de.parquet from S3 (duckdb rebuilt locally)"
+	@echo "  make sync-pull         - Pull per sync_policy in anthive.yaml (legacy default: h5ad + de.parquet)"
+	@echo "  make sync-pull-evict   - sync-pull + evict local .duckdbs below the policy cutoff"
+	@echo "  make sync-evict        - Evict only (requires sync_policy.mode='priority')"
 	@echo "  make sync-pull-duckdb  - Pull ONLY .duckdb files from S3 (skip h5ad / de.parquet)"
 	@echo "  make sync-pull-de      - Pull ONLY .de.parquet sidecars from S3"
 	@echo "  make build-stale       - Rebuild .duckdb for any h5ad newer than its duckdb"
@@ -287,10 +289,25 @@ dev-jupyter:
 
 # ── Sync workflow (S3 = canonical for .h5ad; .duckdb is rebuilt locally) ──
 
-# Default pull: h5ad + .de.parquet. .duckdb is derived; rebuild it via
-# `make build-stale` (or pull it explicitly with sync-pull-duckdb / -all).
+# Default pull. Behaviour depends on sync_policy.mode in anthive.yaml:
+#   all       → legacy: h5ad + .de.parquet (.duckdb rebuilt via make build-stale)
+#   duckdb    → all .duckdbs
+#   priority  → only .duckdbs that fit under the priority + size cap
+#               (see ant-priority for editing per-dataset priority).
 sync-pull:
 	@./bin/ops/ant-sync pull
+
+# Combined: pull per policy AND evict local .duckdbs that fell below the cutoff.
+# Eviction is safety-checked — refuses to delete unless the same key is on S3
+# with matching size. The right command after a priority bump that downgrades
+# a dataset (or after raising max_local_gb caps).
+sync-pull-evict:
+	@./bin/ops/ant-sync pull --evict
+
+# Evict only, no pull. Useful when you've already pulled what you want and
+# just need to free disk space. Requires sync_policy.mode='priority'.
+sync-evict:
+	@./bin/ops/ant-sync evict
 
 # Pull ONLY the .duckdb files from S3 — leave .h5ad / .de.parquet alone.
 # Use when local .h5ad files are current but the .duckdb cache is stale
