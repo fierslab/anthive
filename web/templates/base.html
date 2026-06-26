@@ -254,6 +254,23 @@
         .chat-activity { align-self: flex-start; display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-muted); font-style: italic; padding: 2px 4px; }
         .chat-activity .spin { width: 11px; height: 11px; flex: none; border: 2px solid #cbd5e1; border-top-color: var(--link); border-radius: 50%; animation: chatspin .7s linear infinite; }
         @keyframes chatspin { to { transform: rotate(360deg); } }
+        /* ui frames: choice button-group + external-link card */
+        .chat-ui-choice { align-self: stretch; max-width: 100%; display: flex; flex-direction: column; gap: 5px; margin: 2px 0; }
+        .chat-ui-choice .q { font-size: 11px; color: var(--text-muted); }
+        .chat-ui-choice .opts { display: flex; flex-direction: column; gap: 5px; }
+        .chat-ui-choice button { text-align: left; background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 5px 9px; cursor: pointer; font-family: inherit; font-size: 11px; color: var(--text); }
+        .chat-ui-choice button:hover { border-color: var(--link); background: #eff6ff; }
+        .chat-ui-choice button .od { display: block; font-size: 10px; color: var(--text-muted); margin-top: 1px; }
+        .chat-ui-choice button.chosen { background: var(--link); color: #fff; border-color: var(--link); }
+        .chat-ui-choice button.chosen .od { color: #dbeafe; }
+        .chat-ui-choice.done button:not(.chosen) { opacity: .5; cursor: default; }
+        .chat-ui-link { align-self: flex-start; max-width: 100%; }
+        .chat-ui-link a { display: flex; align-items: center; gap: 8px; border: 1px solid var(--border); border-radius: 8px; padding: 6px 9px; background: #fff; text-decoration: none; }
+        .chat-ui-link a:hover { border-color: var(--link); background: #eff6ff; text-decoration: none; }
+        .chat-ui-link .col { display: flex; flex-direction: column; min-width: 0; }
+        .chat-ui-link .t { font-size: 11.5px; font-weight: 600; color: var(--link); }
+        .chat-ui-link .d { font-size: 10px; color: var(--text-muted); }
+        .chat-ui-link .ext { margin-left: auto; color: var(--text-muted); flex: none; }
         .chat-msg.error { align-self: stretch; max-width: 100%; background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; border-radius: 8px; padding: 8px 10px; font-size: 11.5px; }
         .chat-msg.error .ce-head { font-weight: 700; }
         .chat-msg.error .ce-body { margin-top: 2px; color: #b91c1c; }
@@ -605,7 +622,8 @@
         logBox.innerHTML = '';
         if (!msgs || !msgs.length) { showEmpty(); return; }
         msgs.forEach(function (m) {
-          if (m.role === 'action') addMsg('action', '↪ ' + (m.content || 'navigated'));
+          if (m.type === 'ui' || m.role === 'ui') renderUi(m);   // re-render persisted choice/link (best-effort; text fallback covers it)
+          else if (m.role === 'action') addMsg('action', '↪ ' + (m.content || 'navigated'));
           else if (m.role === 'assistant') renderAssistantInto(addMsg('assistant', ''), m.content || '');
           else addMsg(m.role, m.content);
         });
@@ -845,6 +863,41 @@
         var l = localLog(); l.push({ role: 'action', content: '⚠ ' + c.head }); saveLocal(l);
       }
 
+      // Rich rendering of a 'ui' frame (choice button-group | external link card).
+      // The bot always writes a text fallback BEFORE this frame, so not rendering
+      // is a graceful no-op. choice → clicking posts the label as the next user
+      // message and the bot continues.
+      function renderUi(ev) {
+        var e = logBox.querySelector('.chat-empty'); if (e) e.remove();
+        if (ev.kind === 'choice' && ev.options && ev.options.length) {
+          var wrap = document.createElement('div'); wrap.className = 'chat-ui-choice';
+          if (ev.question) { var q = document.createElement('div'); q.className = 'q'; q.textContent = ev.question; wrap.appendChild(q); }
+          var opts = document.createElement('div'); opts.className = 'opts';
+          ev.options.forEach(function (o) {
+            var bt = document.createElement('button'); bt.type = 'button';
+            var lab = document.createElement('span'); lab.textContent = o.label || o.id || ''; bt.appendChild(lab);
+            if (o.description) { var od = document.createElement('span'); od.className = 'od'; od.textContent = o.description; bt.appendChild(od); }
+            bt.addEventListener('click', function () {
+              if (wrap.classList.contains('done') || streaming) return;
+              wrap.classList.add('done'); bt.classList.add('chosen');
+              send(o.label || o.id || '');
+            });
+            opts.appendChild(bt);
+          });
+          wrap.appendChild(opts); logBox.appendChild(wrap); logBox.scrollTop = logBox.scrollHeight;
+        } else if (ev.kind === 'link') {
+          var url = String(ev.url || '').trim(); if (!/^https?:\/\//i.test(url)) return;   // external links only
+          var card = document.createElement('div'); card.className = 'chat-ui-link';
+          var a = document.createElement('a'); a.href = url; a.target = '_blank'; a.rel = 'noopener';
+          var col = document.createElement('span'); col.className = 'col';
+          var t = document.createElement('span'); t.className = 't'; t.textContent = ev.label || url; col.appendChild(t);
+          if (ev.description) { var d = document.createElement('span'); d.className = 'd'; d.textContent = ev.description; col.appendChild(d); }
+          var ext = document.createElement('span'); ext.className = 'ext'; ext.textContent = '↗';
+          a.appendChild(col); a.appendChild(ext); card.appendChild(a);
+          logBox.appendChild(card); logBox.scrollTop = logBox.scrollHeight;
+        }
+      }
+
       // Pre-flight the target before committing the page change: if it isn't
       // reachable we DON'T navigate — the user stays put (chat window intact)
       // and the failure is surfaced in the chat, then fed back to the assistant
@@ -947,6 +1000,7 @@
             } else if (ev.type === 'action') { clearActivity(); stopIdle(); doAction(ev); }
             else if (ev.type === 'error')   { clearActivity(); stopIdle(); showError(ev.message, ev.code, ev.retry_after); }
             else if (ev.type === 'info')    { showActivity(ev.message || 'Working…'); }   // explicit server status (e.g. preflight)
+            else if (ev.type === 'ui')      { clearActivity(); renderUi(ev); armIdle(); }   // rich rendering hint (choice/link)
           }
           function finish() {
             streaming = false; sendBtn.disabled = false; clearActivity(); stopIdle();
