@@ -95,6 +95,34 @@ mcp:
   # Defaults to http://<host>:<port>/mcp when null.
   mcp_url: null
 
+# S3 sync policy — what to pull locally, how to cap the local store
+# -----------------------------------------------------------------
+# The h5adstore is canonical on S3. ``ant-sync pull`` decides what to
+# copy locally per the policy below. Use the priority knob in each .md
+# (``priority: 0..100``) to drive eviction order under the cap.
+#
+# mode:
+#   priority  → pull duckdbs respecting per-dataset priority + caps
+#               (the production-disk case). h5ads are NOT pulled.
+#   duckdb    → pull ALL duckdbs (ignore priority); h5ads still skipped
+#   all       → pull h5ads + duckdbs (legacy; effectively unbounded)
+#
+# Caps (only consulted in mode: priority). Whichever is tighter wins.
+# Either or both can be null to disable that cap:
+#   max_local_gb   → hard upper bound on (h5ad + duckdb) bytes locally
+#   min_free_space → keep at least this many GB free on the h5adstore
+#                    filesystem after the pull. Reactive: a high-priority
+#                    pull that doesn't fit triggers eviction of lower-
+#                    priority duckdbs to make room (sync-pull-evict).
+#
+# priority_default → priority used when an .md has no `priority:` key.
+#                    50 by default — middle of the range, evictable.
+sync_policy:
+  mode: all
+  max_local_gb: null
+  min_free_space: null
+  priority_default: 50
+
 # Geneset store (curated gene sets / ranked lists tied to studies)
 # ----------------------------------------------------------------
 # Path to the geneset store root. Default is `data/genesetstore`

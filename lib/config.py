@@ -173,7 +173,7 @@ def load_config() -> Dict[str, Any]:
     # provider_order / base_url / history_path defaults from
     # anthive.default.yaml would otherwise be silently dropped by a shallow
     # merge).
-    for subkey in ('s3', 'mcp', 'chat'):
+    for subkey in ('s3', 'mcp', 'chat', 'sync_policy'):
         if isinstance(user_config.get(subkey), dict):
             merged = defaults.get(subkey, {}).copy()
             merged.update(user_config[subkey])
