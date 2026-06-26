@@ -32,7 +32,7 @@ import boto3
 from boto3.s3.transfer import TransferConfig
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'lib'))
-from config import get_config  # noqa: E402
+from config import get_config, is_slave, require_primary  # noqa: E402
 from h5adstore import iter_h5adstore  # noqa: E402
 from metadata import get_priority, parse_md_file, PRIORITY_DEFAULT  # noqa: E402
 
@@ -211,6 +211,10 @@ class _ProgressCallback:
 
 
 def cmd_push(args, s3_cfg: dict, data_folder: Path) -> None:
+    # Slaves are read-only mirrors — pushing would propagate local
+    # divergence back to the primary, defeating the point of the mode.
+    require_primary(tool='ant-sync push')
+
     client   = _s3_client(s3_cfg)
     bucket   = s3_cfg['bucket']
     prefix   = s3_cfg.get('prefix', '') or ''
@@ -499,13 +503,30 @@ def cmd_pull(args, s3_cfg: dict, data_folder: Path) -> None:
             local_path.unlink()
             print(f"  EVICTED {rel}  ({_fmt_size(local_size)})")
 
+    slave_mode = is_slave(cfg)
+
     for rel in pull_list:
         s3_size = s3_index[rel]
         local_path = data_folder / rel
 
         if local_path.exists() and local_path.stat().st_size == s3_size:
-            skipped += 1
-            continue
+            # Slave mode: same size isn't enough — also check S3 mtime
+            # metadata. If S3 says the file is different (mtime drift),
+            # force re-download. Adds one HEAD per same-size file but
+            # only on slaves where correctness > speed.
+            if slave_mode:
+                s3_mt = _s3_mtime(client, bucket, _s3_key(rel, prefix))
+                local_mt = _local_mtime(local_path)
+                if s3_mt is not None and s3_mt != local_mt:
+                    print(f'[FORCE]    {rel}  (slave: mtime drift, '
+                          f'Δ={abs(s3_mt - local_mt)}s — overwriting)')
+                    # Fall through to download below by NOT continuing
+                else:
+                    skipped += 1
+                    continue
+            else:
+                skipped += 1
+                continue
 
         # min_free_space safety: don't pull a file that would push the
         # filesystem below the configured floor. Without --evict, we
