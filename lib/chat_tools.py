@@ -500,7 +500,20 @@ TOOL_DEFS: List[Dict[str, Any]] = [
                 "    are actually present — datasets may have X_umap, X_tsne,\n"
                 "    X_pca, X_spatial, or a custom name, and only some.\n"
                 "  - Gene-vs-gene scatter: params={'x': '<gene>', 'y': '<gene>'}.\n"
-                "  - Default (no x/y): the dataset's default embedding."
+                "  - Default (no x/y): the dataset's default embedding.\n"
+                "\n"
+                "Session-attached scores: pass `attach_sessions` (a list of "
+                "session_id strings from a prior module_score / "
+                "analytics_query call) AND use the session's column name as "
+                "`color`. Example: after module_score returned "
+                "session_id='abc123' with column 'module_score', call\n"
+                "  build_plot_url('D25/HAR', 'scatter', params={\n"
+                "      'x': 'X_umap',\n"
+                "      'color': 'module_score',\n"
+                "      'attach_sessions': 'abc123',\n"
+                "  })\n"
+                "Embedding scatter + hexbin support session columns as "
+                "`color=` today; other geoms / xy-mode coming."
             ),
             'parameters': {
                 'type': 'object',

@@ -355,9 +355,19 @@ upgrade, not the content.
     `column_name`) — use that DIRECTLY (as a column in plots / SQL) \
     instead of re-running `module_score`.
   - **User asks "score these genes here":** if no pre-scored sibling \
-    exists, call `module_score(db_id, genes)` → get `session_id` → then \
-    optionally `analytics_query(..., attach_sessions=[session_id])` to \
-    aggregate the scores by another obs column.
+    exists, call `module_score(db_id, genes)` → get `session_id`. \
+    From the session_id you can do TWO things:
+      a. **Aggregate by obs:** `analytics_query(..., \
+         attach_sessions=[session_id])` joins the scores against obs \
+         columns. The scores arrive as a table `scores(cell_name, \
+         module_score)`. E.g. median module_score per cell_type.
+      b. **Visualise on the embedding:** \
+         `build_plot_url(db_id, 'scatter', params={'x': 'X_umap', \
+         'color': 'module_score', 'attach_sessions': session_id})` \
+         renders the per-cell score on the UMAP. Same pattern works \
+         on hexbin. The plot URL's session is ephemeral — re-runs of \
+         module_score produce a new session_id; old session URLs \
+         eventually 404 when the tmp parquet ages out.
 """
 
 

@@ -1321,7 +1321,7 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.18.0"
+API_VERSION = "2.19.0"
 API_VERSION_RELEASED = "2026-06-26"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
@@ -3114,6 +3114,7 @@ class PlotRequest:
     color_scale: Optional[str]   # explicit cmap family: 'auto'|'sequential'|'divergent'
     filters: Optional[Dict[str, Any]]
     sample: Optional[int]
+    attach_sessions: List[str]
     source_url: str
 
 
@@ -3124,8 +3125,17 @@ class PlotContext:
     available_embeddings: List[str]
     categorical_fields: List[str]
     numerical_fields: List[str]
+    # column_name → DataFrame[cell_name, <value>] resolved from any
+    # attach_sessions on the request. Empty when no sessions were
+    # attached. Looked up FIRST by resolve(): a session column shadows
+    # an obs / gene of the same name, because the caller explicitly
+    # passed the session.
+    session_columns: Dict[str, 'pd.DataFrame']
 
     def resolve(self, field_name: str):
+        # Session columns take precedence — caller asked for them.
+        if field_name in self.session_columns:
+            return field_name, 'numerical'
         return _resolve_field_kind(
             field_name, self.available_embeddings,
             self.categorical_fields, self.numerical_fields, self.db,
@@ -3188,7 +3198,13 @@ def _handle_scatter(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         if sampled_cells:
             color_filters['cell_name'] = sampled_cells
         used_filters = color_filters if sampled_cells else req.filters
-        if color_kind == 'gene':
+        if color_field_name in ctx.session_columns:
+            # Attached session column — values come from the parquet,
+            # not the DB. resolve() returned 'numerical' for these.
+            # plotting.plot_scatter joins by cell_name internally so we
+            # just hand over the per-cell frame.
+            color_df = ctx.session_columns[color_field_name]
+        elif color_kind == 'gene':
             color_df = ctx.db.get_cell_table(genes=[color_field_name], layer=req.layer, filters=used_filters)
         else:
             color_df = ctx.db.get_cell_table(metadata_fields=[color_field_name], filters=used_filters)
@@ -3286,7 +3302,9 @@ def _handle_hexbin(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         if sampled_cells:
             color_filters['cell_name'] = sampled_cells
         used_filters = color_filters if sampled_cells else req.filters
-        if color_kind == 'gene':
+        if color_field_name in ctx.session_columns:
+            color_df = ctx.session_columns[color_field_name]
+        elif color_kind == 'gene':
             color_df = ctx.db.get_cell_table(genes=[color_field_name], layer=req.layer, filters=used_filters)
         else:
             color_df = ctx.db.get_cell_table(metadata_fields=[color_field_name], filters=used_filters)
@@ -3360,6 +3378,17 @@ def _handle_xy(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         raise HTTPException(400, detail=(
             f"geom='{req.geom}' requires x and y to be continuous (gene or numerical). "
             f"For categorical x use violin/box/bar; for embedding use scatter/hexbin."
+        ))
+    if x_name in ctx.session_columns or y_name in ctx.session_columns:
+        # XY-mode (gene-vs-gene / numerical-vs-numerical) session-column
+        # support is not yet wired through _handle_xy's data fetch path.
+        # Embedding-mode color=<session_col> works today; ship that
+        # first and revisit XY in a follow-up.
+        raise HTTPException(400, detail=(
+            f"attach_sessions columns currently work as `color=` on "
+            f"embedding scatter/hexbin only, not as `x` or `y`. To "
+            f"visualise a session column against an embedding, pass it "
+            f"as color and omit y."
         ))
 
     # Fetch x + y values for every cell.  Genes go via the layer, numerical
@@ -4986,6 +5015,21 @@ class CommonPlotParams:
                 "filters). Example: ``sample=10000``."
             ),
         ),
+        attach_sessions: List[str] = Query(
+            default=[],
+            description=(
+                "Attach analytics-session Parquet files produced by a prior "
+                "``POST /analytics/query`` or ``POST /module_score``. Each "
+                "session contributes one or more (cell_name, value) columns "
+                "that become first-class plottable fields — pass the column "
+                "name as ``color=`` / ``x=`` / ``y=`` to colour or axis-by it. "
+                "First session's non-cell_name columns are exposed under "
+                "their own names; second/third sessions get ``session_1::`` "
+                "/ ``session_2::`` prefixes to avoid collisions. Sessions "
+                "are local + ephemeral — the URL is not a permalink (the "
+                "underlying tmp/<id>.parquet eventually ages out)."
+            ),
+        ),
         request: Request = None,  # type: ignore[assignment]
     ):
         if output_format not in _PLOT_MIME_TYPES:
@@ -5008,6 +5052,7 @@ class CommonPlotParams:
         self.font_size = font_size
         self.subset = subset
         self.sample = sample
+        self.attach_sessions = attach_sessions
         self.request = request
 
 
@@ -5144,6 +5189,7 @@ def _build_plot_request(
         color_scale=color_scale if color_scale is not None else common.color_scale,
         filters=_parse_subset(common.subset),
         sample=common.sample,
+        attach_sessions=list(common.attach_sessions),
         source_url=str(common.request.url) if common.request is not None else '',
     )
 
@@ -5261,6 +5307,70 @@ def _descriptor_inputs_static(plot_req: PlotRequest) -> Dict[str, Any]:
     }
 
 
+def _load_plot_session_columns(session_ids: List[str]) -> Dict[str, 'pd.DataFrame']:
+    """Read attach_sessions Parquet files into a flat {col_name → DataFrame[cell_name, value]} map.
+
+    Each session at ``tmp/<session_id>.parquet`` was written by
+    ``/analytics/query`` (which materialises a SELECT result) or
+    ``/module_score`` (which materialises the per-cell scores). Both
+    write a frame with a ``cell_name`` column plus one or more value
+    columns. Here we surface each value column as a separate
+    plottable field.
+
+    Naming:
+      - First session's value columns appear under their own names.
+      - Second/third session's columns get ``session_1::col`` /
+        ``session_2::col`` prefixes to avoid collisions.
+
+    Errors:
+      - Missing parquet → 400 (session expired / typo). Caller sees a
+        clean error rather than a silent fallthrough.
+      - No ``cell_name`` column → 400 (the parquet doesn't follow the
+        plottable contract — e.g. an analytics_query that aggregated
+        across all cells).
+    """
+    columns_map: Dict[str, 'pd.DataFrame'] = {}
+    if not session_ids:
+        return columns_map
+    import pandas as _pd  # local import to keep startup light
+    tmp_dir = analytics._get_tmp_dir()
+    for idx, session_id in enumerate(session_ids):
+        pq_path = tmp_dir / f'{session_id}.parquet'
+        if not pq_path.exists():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"attach_sessions: session '{session_id}' not found "
+                    f"(expired or never existed)."
+                ),
+            )
+        try:
+            df = _pd.read_parquet(pq_path)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"attach_sessions: failed to read session '{session_id}': {exc}",
+            )
+        if 'cell_name' not in df.columns:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"attach_sessions: session '{session_id}' has no "
+                    f"'cell_name' column — not a per-cell result, can't "
+                    f"plot it. (Use the session in analytics_query instead.)"
+                ),
+            )
+        prefix = f'session_{idx}::' if idx > 0 else ''
+        for col in df.columns:
+            if col == 'cell_name':
+                continue
+            exposed_name = f'{prefix}{col}' if prefix else col
+            columns_map[exposed_name] = df[['cell_name', col]].rename(
+                columns={col: exposed_name}
+            )
+    return columns_map
+
+
 async def _render_plot(plot_req: PlotRequest, request: Request) -> Response:
     """Cache-aware execution of a plot request.
 
@@ -5332,6 +5442,13 @@ async def _render_plot(plot_req: PlotRequest, request: Request) -> Response:
 
     handler = _PLOT_HANDLERS[plot_req.geom]
 
+    # Resolve attach_sessions BEFORE opening the DB — each session id maps to
+    # tmp/<id>.parquet (written by /analytics/query or /module_score). Each
+    # non-cell_name column becomes a virtual obs column that the handler can
+    # `color=` / `x=` / `y=` by. Reuses analytics._get_tmp_dir() so the
+    # session pool is shared with the SQL sandbox.
+    session_columns = _load_plot_session_columns(plot_req.attach_sessions)
+
     def _sync_plot():
         with _pooled_db(plot_req.db_id) as db:
             ctx = PlotContext(
@@ -5339,6 +5456,7 @@ async def _render_plot(plot_req: PlotRequest, request: Request) -> Response:
                 available_embeddings=db._get_embeddings(),
                 categorical_fields=db._get_categorical_fields(),
                 numerical_fields=db._get_numerical_fields(),
+                session_columns=session_columns,
             )
             descriptor_inputs = _resolve_descriptor_inputs(plot_req, ctx)
             image_bytes, caption = handler(plot_req, ctx)
