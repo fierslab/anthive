@@ -127,7 +127,10 @@ mcp:
 sync_policy:
   mode: all
   max_local_gb: null
-  min_free_space: null
+  min_free_space: 84    # GB (= 2 × 42) — sane floor for OS / logs / tmp /
+                        # plot cache / analytics session parquets / DuckDB
+                        # spill. Only consulted under mode='priority';
+                        # harmless in other modes.
   priority_default: 50
 
 # Geneset store (curated gene sets / ranked lists tied to studies)
