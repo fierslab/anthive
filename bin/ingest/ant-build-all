@@ -40,25 +40,30 @@ class FileSet:
 
     @property
     def needs_conversion(self) -> bool:
-        """Check if conversion is needed based on timestamps"""
+        """True iff the .duckdb is genuinely out of sync with the .h5ad.
+
+        Criterion: ONLY ``h5ad_mtime > duckdb_mtime``. The .md mtime is
+        intentionally NOT consulted.
+
+        Why: .md files get auto-created / refreshed by ant-h5ad-check and
+        sidecar-management tooling (e.g. mus, ant-md). A newly-skeletoned
+        .md is "newer than the duckdb" by mtime but the actual source
+        data — the .h5ad — hasn't moved an inch. Treating that as a
+        staleness signal was triggering full-catalog reconverts on every
+        scan and burning days of CPU on duckdbs whose content was
+        already correct.
+
+        Trade-off (intentional, per Mark 2026-06-26): if a user edits
+        the .md in a way that DOES affect the duckdb (e.g. removing an
+        obs column from obscat_include), the rebuild must be triggered
+        manually via ``ant-convert --force``. Those edits are rare and
+        deliberate; the cost of getting them wrong (manual rebuild)
+        is much lower than the cost of false-positive staleness
+        (rebuilding the whole catalog).
+        """
         if self.duckdb is None or not self.duckdb.exists():
             return True
-
-        # Get modification times
-        duckdb_mtime = self.duckdb.stat().st_mtime
-        h5ad_mtime = self.h5ad.stat().st_mtime
-
-        # DuckDB is outdated if h5ad is newer
-        if h5ad_mtime > duckdb_mtime:
-            return True
-
-        # DuckDB is outdated if .md exists and is newer
-        if self.md and self.md.exists():
-            md_mtime = self.md.stat().st_mtime
-            if md_mtime > duckdb_mtime:
-                return True
-
-        return False
+        return self.h5ad.stat().st_mtime > self.duckdb.stat().st_mtime
 
     @property
     def h5ad_newer_than_md(self) -> bool:
