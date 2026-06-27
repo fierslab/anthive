@@ -1,4 +1,9 @@
-# DESIGN — end-user metadata editing (OPTIONAL / exploratory)
+# DESIGN — end-user metadata editing (exploration + spike log)
+
+> **The build-ready design is now `DESIGN_metadata_cms.md`.** This doc retains
+> the exploration: why Decap, why Codeberg, the options comparison, and the
+> (now-complete, all-green) spike log.
+
 
 Status: **proposal, not scheduled.** Captures options for letting non-technical
 curators edit dataset catalogue metadata with review + audit, instead of editing
