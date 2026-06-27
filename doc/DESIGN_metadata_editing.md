@@ -201,9 +201,18 @@ be picked up cold later.
 
 Recon (June 2026) flipped the earlier pick:
 - **Decap CMS has *shipped* native Gitea/Forgejo backend** — PKCE auth (no OAuth
-  proxy needed), **editorial workflow (opens PRs)**. Needs Forgejo ≥ 1.21.4 +
-  **CORS enabled on the instance**. (Codeberg runs recent Forgejo, so the
-  version is fine; CORS is the open question — see spike.)
+  proxy needed). Needs Forgejo ≥ 1.21.4 + **CORS enabled on the instance**.
+  (Codeberg runs recent Forgejo, so the version is fine; CORS confirmed — see
+  spike.)
+- **CORRECTION (2026-06-27 spike):** the Gitea backend does **NOT** support
+  `editorial_workflow` (PR-per-save) — that's GitHub/GitLab/git-gateway only.
+  Decap's Gitea backend commits **directly to the configured `branch`**. So the
+  "nothing reaches canonical unchecked" gate is NOT per-edit PRs. Instead point
+  `branch:` at a dedicated **`cms-staging`** branch: CMS edits land there, never
+  on `main`; a maintainer merges `cms-staging → main` via a forge PR after CI
+  (`validate_md.py`) passes. Review is batched, not per-save — acceptable, and
+  arguably simpler. (If per-edit PRs are ever required, add a small bot-token
+  server proxy that opens one PR per save; editor stays Decap.)
 - **Sveltia's Forgejo backend is NOT built** (sveltia-cms issue #381, blocked on
   upstream Forgejo API, parked at 1.0-RC). Nicer tool, but unusable on Codeberg
   today → revisit later.
