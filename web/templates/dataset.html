@@ -470,6 +470,34 @@ document.addEventListener('DOMContentLoaded', function() {
             input.addEventListener('input', update);
             update();
         }
+
+        // Enrich the .ostat cells with per-column summary stats (REST 2.21 bulk
+        // obs_summary). Until this resolves the cell shows the type word; a slow
+        // or absent response just leaves that — non-blocking.
+        var DB_ID = {{ db_id|tojson }};
+        var fnum = function (n) {
+            if (n == null) return '?';
+            if (Number.isInteger(n)) return String(n);
+            var a = Math.abs(n);
+            return a >= 100 ? n.toFixed(0) : a >= 1 ? n.toFixed(2) : Number(n).toPrecision(2);
+        };
+        fetch('/api/databases/' + DB_ID.split('/').map(encodeURIComponent).join('/') + '/obs_summary', { credentials: 'same-origin' })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (d) {
+                if (!d || !d.columns) return;
+                var byName = {};
+                Object.keys(d.columns).forEach(function (k) { byName[k.toLowerCase()] = d.columns[k]; });
+                items.forEach(function (el) {
+                    var s = byName[el.dataset.name]; if (!s) return;
+                    var cell = el.querySelector('.ostat'); if (!cell) return;
+                    var txt, title;
+                    if (s.type === 'cat') { txt = s.n_unique + ' cats'; title = s.n_unique + ' categories'; }
+                    else { txt = fnum(s.min) + '–' + fnum(s.max); title = 'min ' + s.min + ' · median ' + s.median + ' · max ' + s.max; }
+                    if (s.pct_missing > 0) { txt += ' · ' + Math.round(s.pct_missing) + '% NA'; title += ' · ' + s.pct_missing + '% missing'; }
+                    cell.textContent = txt; cell.title = title;
+                });
+            })
+            .catch(function () {});
     })();
     {% endif %}
 });
