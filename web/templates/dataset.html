@@ -126,6 +126,18 @@
   .btn-grey:hover { background: #334155; color: #fff; text-decoration: none; }
   .btn-grey .caret { font-size: 9px; opacity: .8; margin-left: 3px; }
   .btn-grey.btn-icon { padding: 6px 11px; }
+  .ds-acc { font-size: 16px; cursor: default; align-self: center; padding: 0 1px; }
+  /* title header below the breadcrumb — present but not oversized */
+  .ds-title { font-size: 17px; font-weight: 600; color: var(--text); margin: 2px 0 6px; line-height: 1.3; }
+  .ds-title .ds-title-base { font-size: 13px; font-weight: normal; color: #94a3b8; font-family: var(--font-mono); margin-left: 6px; }
+  /* split obs stat tables */
+  .obs-stats-tbl { width: auto; font-size: 12px; margin: 4px 0 2px; }
+  .obs-stats-tbl th { font-size: 10px; }
+  .obs-stats-tbl td { font-family: var(--font-mono); color: #555; white-space: nowrap; }
+  .obs-stats-tbl td.colname { font-family: var(--font); }
+  .obs-sub { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; margin: 10px 0 2px; }
+  .cat-top { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+  .cat-top .ct { background: #f1f5f9; border: 1px solid var(--border); border-radius: 9px; padding: 0 7px; font-family: var(--font); cursor: default; }
 </style>
 
 <!-- Consolidated header: breadcrumb with click-to-copy ids + action buttons. -->
@@ -137,9 +149,10 @@
     <span class="bc-sep">/</span>
     <span class="ds-cur">{{ dataset_name }}</span>
     <span class="idcopy" data-copy="{{ file_id }}" title="click to copy {{ file_id }}">[{{ file_id }}]</span>
-    {% if basename and basename != dataset_name %}<span class="ds-basename" title="file basename">{{ basename }}</span>{% endif %}
   </div>
   <div class="ds-actions">
+    {% if context_bar and context_bar.access and context_bar.access.abbrev %}<span class="ds-acc" title="access: {{ context_bar.access.full }}">{{ context_bar.access.abbrev }}</span>{% endif %}
+    {% if context_bar and context_bar.source and context_bar.source.abbrev %}<span class="ds-acc" title="source: {{ context_bar.source.full }}">{{ context_bar.source.abbrev }}</span>{% endif %}
     {% if has_duckdb %}
     <div class="viz-menu" id="viz-menu">
       <button type="button" class="btn-grey" id="viz-menu-btn" aria-haspopup="true" aria-expanded="false">📊 visualize <span class="caret">▾</span></button>
@@ -200,11 +213,12 @@
   </div>
 </div>
 
-<!-- Provenance — compact row under the header. -->
-{% if dataset_meta and (dataset_meta.access or dataset_meta.source or dataset_meta.license or dataset_meta.contributor or dataset_meta.doi or dataset_meta.pmid or dataset_meta.accession or dataset_meta.link) %}
+<!-- Title — below the breadcrumb; falls back to the basename when there's no title. -->
+<h1 class="ds-title">{{ info.title or basename or file_id }}{% if basename and info.title and basename != info.title %}<span class="ds-title-base" title="file basename">{{ basename }}</span>{% endif %}</h1>
+
+<!-- Provenance — compact row (access/source moved to icons by the visualize button). -->
+{% if dataset_meta and (dataset_meta.license or dataset_meta.contributor or dataset_meta.doi or dataset_meta.pmid or dataset_meta.accession or dataset_meta.link) %}
 <div class="ds-prov">
-  {% if dataset_meta.access %}<span><span class="pk">access</span> <span class="pv">{{ dataset_meta.access }}</span></span>{% endif %}
-  {% if dataset_meta.source %}<span><span class="pk">source</span> <span class="pv">{{ dataset_meta.source }}</span></span>{% endif %}
   {% if dataset_meta.license %}<span><span class="pk">license</span> <span class="pv">{{ dataset_meta.license }}</span></span>{% endif %}
   {% if dataset_meta.contributor %}<span><span class="pk">contributor</span> <span class="pv">{{ dataset_meta.contributor if dataset_meta.contributor is string else dataset_meta.contributor|join(', ') }}</span></span>{% endif %}
   {% for doi_item in dataset_meta.doi %}<a class="lnk" href="https://doi.org/{{ doi_item }}" target="_blank" rel="noopener" title="{{ doi_item }}">🔗 doi</a>{% endfor %}
@@ -357,17 +371,39 @@
     <input id="obs-filter" type="text" placeholder="filter…" style="padding:2px 6px;font-family:inherit;font-size:12px;border:1px solid #ccc;outline:none;width:160px">
     <span id="obs-count" class="muted" style="font-size:11px"></span>
   </div>
-  <div class="obs-table" id="obs-table">
-    {% for col in obs_columns %}
-    <div class="ocol obs-item" data-name="{{ col.name|lower }}">
-      <span class="otype {{ col.type }}" title="{{ 'categorical' if col.type == 'cat' else 'numerical' }}">{{ '≡' if col.type == 'cat' else '#' }}</span>
-      {% if col.type == 'cat' and has_duckdb %}<a class="oname" href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/bar?x={{ col.name|urlencode }}">{{ col.name }}</a>
-      {% elif col.type == 'num' and has_duckdb %}<a class="oname" href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ col.name|urlencode }}">{{ col.name }}</a>
-      {% else %}<span class="oname">{{ col.name }}</span>{% endif %}
-      <span class="ostat">{{ 'categorical' if col.type == 'cat' else 'numerical' }}</span>
-    </div>
+
+  {# Numerical columns — stats filled client-side from obs_summary (REST 2.22). #}
+  {% set _num = obs_columns | selectattr('type', 'equalto', 'num') | list %}
+  {% set _cat = obs_columns | selectattr('type', 'equalto', 'cat') | list %}
+  {% if _num %}
+  <div class="obs-sub">numerical ({{ _num|length }})</div>
+  <div class="table-wrap"><table class="obs-stats-tbl auto">
+    <thead><tr><th>column</th><th>min</th><th>Q05</th><th>mean</th><th>median</th><th>Q95</th><th>max</th></tr></thead>
+    <tbody>
+    {% for col in _num %}
+    <tr class="obs-item" data-name="{{ col.name|lower }}">
+      <td class="colname">{% if has_duckdb %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ col.name|urlencode }}">{{ col.name }}</a>{% else %}{{ col.name }}{% endif %}</td>
+      <td class="s-min"></td><td class="s-q05"></td><td class="s-mean"></td><td class="s-median"></td><td class="s-q95"></td><td class="s-max"></td>
+    </tr>
     {% endfor %}
-  </div>
+    </tbody>
+  </table></div>
+  {% endif %}
+
+  {% if _cat %}
+  <div class="obs-sub">categorical ({{ _cat|length }})</div>
+  <div class="table-wrap"><table class="obs-stats-tbl auto">
+    <thead><tr><th>column</th><th># cats</th><th>top categories</th></tr></thead>
+    <tbody>
+    {% for col in _cat %}
+    <tr class="obs-item" data-name="{{ col.name|lower }}">
+      <td class="colname">{% if has_duckdb %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/bar?x={{ col.name|urlencode }}">{{ col.name }}</a>{% else %}{{ col.name }}{% endif %}</td>
+      <td class="s-nuniq"></td><td class="s-top"></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% endif %}
 </div>
 {% else %}
 <p style="color:#888;font-size:12px"><em>none</em></p>
@@ -495,30 +531,63 @@ document.addEventListener('DOMContentLoaded', function() {
             update();
         }
 
-        // Enrich the .ostat cells with per-column summary stats (REST 2.21 bulk
-        // obs_summary). Until this resolves the cell shows the type word; a slow
-        // or absent response just leaves that — non-blocking.
+        // Fill the numerical/categorical stat tables + favourite tooltips from
+        // the bulk obs_summary (REST 2.22). Numerical cells: min/Q05/mean/median/
+        // Q95/max. Categorical: # cats + top-3 categories (hover = count + %).
+        // Fields not yet returned by the API stay blank — non-blocking.
         var DB_ID = {{ db_id|tojson }};
+        var esc = function (s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); };
         var fnum = function (n) {
-            if (n == null) return '?';
+            if (n == null || n === '' || isNaN(n)) return '–';
             if (Number.isInteger(n)) return String(n);
             var a = Math.abs(n);
-            return a >= 100 ? n.toFixed(0) : a >= 1 ? n.toFixed(2) : Number(n).toPrecision(2);
+            return a >= 100 ? Number(n).toFixed(0) : a >= 1 ? Number(n).toFixed(2) : Number(n).toPrecision(2);
         };
+        // compact text summary used for the collapsed favourite/chip tooltips
+        function statSummary(s) {
+            if (!s) return '';
+            if (s.type === 'cat') {
+                var tops = (s.top || s.top_categories || []).slice(0, 3).map(function (t) { return (t.value != null ? t.value : t.name); });
+                return (s.n_unique != null ? s.n_unique + ' cats' : 'categorical') + (tops.length ? ': ' + tops.join(', ') : '');
+            }
+            return 'min ' + fnum(s.min) + ' · median ' + fnum(s.median) + ' · max ' + fnum(s.max)
+                 + (s.mean != null ? ' · mean ' + fnum(s.mean) : '');
+        }
+        var OBS_STATS = {};   // shared with the favourite-tooltip pass below
         fetch('/api/databases/' + DB_ID.split('/').map(encodeURIComponent).join('/') + '/obs_summary', { credentials: 'same-origin' })
             .then(function (r) { return r.ok ? r.json() : null; })
             .then(function (d) {
                 if (!d || !d.columns) return;
-                var byName = {};
-                Object.keys(d.columns).forEach(function (k) { byName[k.toLowerCase()] = d.columns[k]; });
+                Object.keys(d.columns).forEach(function (k) { OBS_STATS[k.toLowerCase()] = d.columns[k]; });
                 items.forEach(function (el) {
-                    var s = byName[el.dataset.name]; if (!s) return;
-                    var cell = el.querySelector('.ostat'); if (!cell) return;
-                    var txt, title;
-                    if (s.type === 'cat') { txt = s.n_unique + ' cats'; title = s.n_unique + ' categories'; }
-                    else { txt = fnum(s.min) + '–' + fnum(s.max); title = 'min ' + s.min + ' · median ' + s.median + ' · max ' + s.max; }
-                    if (s.pct_missing > 0) { txt += ' · ' + Math.round(s.pct_missing) + '% NA'; title += ' · ' + s.pct_missing + '% missing'; }
-                    cell.textContent = txt; cell.title = title;
+                    var s = OBS_STATS[el.dataset.name]; if (!s) return;
+                    var set = function (sel, v) { var c = el.querySelector(sel); if (c) c.textContent = v; };
+                    if (s.type === 'num') {
+                        set('.s-min', fnum(s.min)); set('.s-q05', fnum(s.q05)); set('.s-mean', fnum(s.mean));
+                        set('.s-median', fnum(s.median)); set('.s-q95', fnum(s.q95)); set('.s-max', fnum(s.max));
+                    } else {
+                        set('.s-nuniq', s.n_unique == null ? '–' : s.n_unique);
+                        var topCell = el.querySelector('.s-top');
+                        var tops = (s.top || s.top_categories || []);
+                        if (topCell && tops.length) {
+                            topCell.innerHTML = '<span class="cat-top">' + tops.slice(0, 3).map(function (t) {
+                                var val = (t.value != null ? t.value : t.name), cnt = t.count, pct = t.pct;
+                                var tip = (cnt != null ? cnt.toLocaleString() : '') + (pct != null ? ' (' + (Math.round(pct * 10) / 10) + '%)' : '');
+                                return '<span class="ct" title="' + esc(tip) + '">' + esc(val) + '</span>';
+                            }).join('') + '</span>';
+                        }
+                    }
+                });
+                // collapsed view: tooltip the favourite + frequently-used chips
+                ['obs-fav', 'obs-freq'].forEach(function (id) {
+                    var box = document.getElementById(id); if (!box) return;
+                    box.querySelectorAll('a[href*="/plot/"]').forEach(function (a) {
+                        try {
+                            var col = new URL(a.getAttribute('href'), location.origin).searchParams.get('x');
+                            var s = col && OBS_STATS[col.toLowerCase()];
+                            if (s) a.title = statSummary(s);
+                        } catch (e) {}
+                    });
                 });
             })
             .catch(function () {});
