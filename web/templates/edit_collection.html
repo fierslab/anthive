@@ -10,6 +10,8 @@
   .ef-row input[type=text] { width: 100%; padding: 5px 8px; border: 1px solid var(--border); border-radius: 5px; font-family: var(--font); font-size: 13px; outline: none; }
   .ef-row input:focus { border-color: var(--link); }
   .ef-row .ef-static { padding: 5px 8px; border: 1px dashed var(--border); border-radius: 5px; font-size: 13px; color: var(--text-muted); background: #f8fafc; font-family: var(--font-mono); }
+  .ef-row .ef-select { width: 100%; padding: 5px 8px; border: 1px solid var(--border); border-radius: 5px; font-family: var(--font); font-size: 13px; background: #fff; }
+  .ef-row .ef-select:focus { border-color: var(--link); }
   .md-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   #md-body { width: 100%; min-height: 360px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; font-family: var(--font-mono); font-size: 12px; line-height: 1.5; resize: vertical; outline: none; }
   #md-body:focus { border-color: var(--link); }
@@ -32,11 +34,10 @@
   <h2>Metadata</h2>
   <div id="ef-fields" class="ef-grid"></div>
 
-  <h2 style="margin-top:14px">Markdown <span class="ed-note">— the collection's index.md body</span></h2>
-  <div class="md-split">
-    <textarea id="md-body" spellcheck="true" placeholder="# Collection notes…"></textarea>
-    <div id="md-preview"></div>
-  </div>
+  <h2 style="margin-top:14px">Markdown <span class="ed-note">— the collection's index.md body</span>
+    <button id="md-toggle" type="button" class="chip" style="font-size:11px;font-weight:normal;vertical-align:middle">👁 preview</button></h2>
+  <textarea id="md-body" spellcheck="true" placeholder="# Collection notes…"></textarea>
+  <div id="md-preview" style="display:none"></div>
 
   <div class="edit-actions">
     <button id="ed-save" type="button">Save to disk</button>
@@ -78,19 +79,36 @@
       return '<p>' + inline(blk).replace(/\n/g, '<br>') + '</p>';
     }).join('');
   }
-  function syncPreview() { preview.innerHTML = md(body.value); }
-  body.addEventListener('input', syncPreview);
+  // Preview is behind a button (no live split) — just a plain markdown textarea.
+  const mdToggle = document.getElementById('md-toggle');
+  let previewing = false;
+  mdToggle.addEventListener('click', () => {
+    previewing = !previewing;
+    if (previewing) { preview.innerHTML = md(body.value); preview.style.display = ''; body.style.display = 'none'; mdToggle.textContent = '✎ edit'; }
+    else { preview.style.display = 'none'; body.style.display = ''; mdToggle.textContent = '👁 preview'; }
+  });
 
   const isScalar = v => v === null || ['string', 'number', 'boolean'].includes(typeof v);
   const isScalarList = v => Array.isArray(v) && v.every(isScalar);
 
+  const DATASETS = {{ datasets|tojson }};  // {value:file_id, label} for the default_dataset dropdown
   const RO_KEYS = ['group', 'group_id'];   // identity — shown read-only, never editable (also locked server-side)
   const HIDE_KEYS = ['experiment'];        // deprecated pre-migration field → hide, but preserve in the file
+  const HANDLED = RO_KEYS.concat(HIDE_KEYS, ['description', 'default_dataset']);  // rendered specially or not at all
 
-  // Read-only identity rows + editable scalar/scalar-list fields. Complex keys
-  // (dicts e.g. `annotation`) and HIDE_KEYS stay untouched in `original`.
+  function addField(key, value, kind, label) {
+    const row = document.createElement('div'); row.className = 'ef-row';
+    const lab = document.createElement('label'); lab.textContent = label; row.appendChild(lab);
+    const inp = document.createElement('input'); inp.type = 'text'; inp.dataset.key = key; inp.dataset.kind = kind;
+    inp.value = value; row.appendChild(inp); fields.appendChild(row);
+  }
+
+  // Read-only identity, then a fixed `description`, the generic scalar/list
+  // fields, and the `default_dataset` dropdown. Complex keys (dicts e.g.
+  // `annotation`) and HIDE_KEYS stay untouched in `original`.
   function renderFields(fm) {
     fields.innerHTML = '';
+    // locked identity
     RO_KEYS.forEach(k => {
       if (!(k in fm)) return;
       const row = document.createElement('div'); row.className = 'ef-row';
@@ -99,24 +117,36 @@
       val.textContent = fm[k] == null ? '' : String(fm[k]);
       val.title = 'fixed identifier — not editable'; row.appendChild(val); fields.appendChild(row);
     });
+    // description — always editable, even when absent from the file
+    addField('description', fm.description == null ? '' : String(fm.description), 'scalar', 'description (one line)');
+    // remaining generic scalar/list fields (authors, year, …)
     Object.keys(fm).forEach(k => {
-      if (RO_KEYS.includes(k) || HIDE_KEYS.includes(k)) return;
+      if (HANDLED.includes(k)) return;
       const v = fm[k];
       if (!(isScalar(v) || isScalarList(v))) return;
-      const row = document.createElement('div'); row.className = 'ef-row';
-      const lab = document.createElement('label'); lab.textContent = k + (isScalarList(v) ? ' (comma-separated)' : ''); row.appendChild(lab);
-      const inp = document.createElement('input'); inp.type = 'text'; inp.dataset.key = k;
-      inp.dataset.kind = isScalarList(v) ? 'list' : (typeof v === 'number' ? 'number' : 'scalar');
-      inp.value = isScalarList(v) ? v.join(', ') : (v == null ? '' : String(v));
-      row.appendChild(inp); fields.appendChild(row);
+      addField(k, isScalarList(v) ? v.join(', ') : (v == null ? '' : String(v)),
+               isScalarList(v) ? 'list' : (typeof v === 'number' ? 'number' : 'scalar'),
+               k + (isScalarList(v) ? ' (comma-separated)' : ''));
     });
+    // default_dataset — dropdown of the datasets in this collection
+    const row = document.createElement('div'); row.className = 'ef-row';
+    const lab = document.createElement('label'); lab.textContent = 'default_dataset'; row.appendChild(lab);
+    const sel = document.createElement('select'); sel.dataset.key = 'default_dataset'; sel.dataset.kind = 'nullable'; sel.className = 'ef-select';
+    const none = document.createElement('option'); none.value = ''; none.textContent = '— none —'; sel.appendChild(none);
+    const cur = fm.default_dataset == null ? '' : String(fm.default_dataset);
+    DATASETS.forEach(d => { const o = document.createElement('option'); o.value = d.value; o.textContent = d.label; if (d.value === cur) o.selected = true; sel.appendChild(o); });
+    if (cur && !DATASETS.some(d => d.value === cur)) {   // stale value not in the folder → keep it, don't silently drop
+      const o = document.createElement('option'); o.value = cur; o.textContent = cur + ' (not in folder)'; o.selected = true; sel.appendChild(o);
+    }
+    row.appendChild(sel); fields.appendChild(row);
   }
   function collectFrontmatter() {
-    const fm = Object.assign({}, original);   // keeps complex keys
-    fields.querySelectorAll('input[data-key]').forEach(inp => {
-      const k = inp.dataset.key, kind = inp.dataset.kind, raw = inp.value.trim();
+    const fm = Object.assign({}, original);   // keeps complex + locked keys (group/group_id/experiment)
+    fields.querySelectorAll('[data-key]').forEach(el => {   // inputs AND selects
+      const k = el.dataset.key, kind = el.dataset.kind, raw = (el.value || '').trim();
       if (kind === 'list') fm[k] = raw === '' ? [] : raw.split(',').map(x => x.trim()).filter(Boolean);
       else if (kind === 'number') fm[k] = raw === '' ? null : (isNaN(Number(raw)) ? raw : Number(raw));
+      else if (kind === 'nullable') fm[k] = raw === '' ? null : raw;
       else fm[k] = raw;
     });
     return fm;
@@ -128,7 +158,7 @@
       loading.style.display = 'none'; formBox.style.display = '';
       original = d.frontmatter || {};
       renderFields(original);
-      body.value = d.body || ''; syncPreview();
+      body.value = d.body || '';
       if (!d.exists) statusEl.innerHTML = '<span class="muted">no index.md yet — saving will create it</span>';
     })
     .catch(e => { loading.style.display = 'none'; errBox.innerHTML = '<span class="err">could not load index.md — ' + esc(e.message) + '</span>'; });

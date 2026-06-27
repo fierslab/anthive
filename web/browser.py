@@ -654,8 +654,23 @@ async def edit_collection_view(request: Request, browse_id: str):
             {"folders": [], "error": "Not authorized — admin only."},
             status_code=403,
         )
+    # Datasets in this collection → options for the default_dataset dropdown
+    # (value = file_id, the collection-relative id, e.g. "AQB").
+    dataset_opts = []
+    try:
+        for db in _all_databases(_api_url(request)):
+            gid = db.get('group_id') or db.get('id', '').split('/')[0]
+            if gid != group_id:
+                continue
+            file_id = db.get('file_id') or db.get('id', '').split('/')[-1]
+            title = db.get('title') or db.get('name')
+            dataset_opts.append({'value': file_id, 'label': file_id + (f' — {title}' if title else '')})
+    except Exception:
+        pass
+    dataset_opts.sort(key=lambda d: d['value'])
     return templates.TemplateResponse(request, "edit_collection.html", {
         "group_id": group_id,
+        "datasets": dataset_opts,
     })
 
 
