@@ -14,7 +14,7 @@ _ant_completion()
 
     # Available ant subcommands (dispatcher walks bin/<domain>/ant-*; keep
     # this list aligned with what's actually shipped).
-    local subcommands="adduser annotate api-check browse build-all build-reports cellxgene check convert db de-ingest de-pseudobulk duckdb-check edituser h5ad-check inactive ingest mcp md md-check merge-h5ad priority s3-check score serve starcat suggest-tops supervisor sync warm-cache write-manifest"
+    local subcommands="adduser annotate api-check browse build-all build-reports cellxgene check convert db de-ingest de-pseudobulk duckdb-check edituser h5ad-check inactive ingest listusers mcp md md-check merge-h5ad priority s3-check score serve starcat suggest-tops supervisor sync warm-cache write-manifest"
 
     # Complete the subcommand itself
     if [[ $cword -eq 1 ]]; then

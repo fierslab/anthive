@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# ant-listusers — thin wrapper that prints the user table. Currently delegates
+# to `ant-edituser --list`; the actual logic lives there so we don't carry
+# two readers of users_database.yml.
+#
+# Any args (e.g. -f path/to/other.yml) pass straight through to ant-edituser.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "$SCRIPT_DIR/ant-edituser" --list "$@"
