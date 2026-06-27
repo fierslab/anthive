@@ -327,6 +327,8 @@
 {% if obs_columns %}
 {% set _favcat = dataset_meta.top_cat or [] %}
 {% set _favnum = dataset_meta.top_num or [] %}
+<!-- frequently used — populated client-side from /obs_top (most-plotted columns) -->
+<div id="obs-freq" style="display:none;margin-bottom:6px;line-height:1.9"></div>
 <div id="obs-fav" style="margin-bottom:6px;line-height:1.9">
   {% if _favcat or _favnum %}
     {% for col in _favcat %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/bar?x={{ col|urlencode }}" class="chip" title="categorical — bar">≡ {{ col }}</a>{% endfor %}
@@ -496,6 +498,52 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (s.pct_missing > 0) { txt += ' · ' + Math.round(s.pct_missing) + '% NA'; title += ' · ' + s.pct_missing + '% missing'; }
                     cell.textContent = txt; cell.title = title;
                 });
+            })
+            .catch(function () {});
+
+        // ── click tracking + "frequently used" (REST 2.22) ──────────────────
+        // Fire-and-forget POST on every obs-column plot click (keepalive so it
+        // survives the navigation); GET /obs_top renders the most-plotted columns
+        // as a row above the curated favourites. No-ops until the endpoints exist.
+        var apiBase = '/api/databases/' + DB_ID.split('/').map(encodeURIComponent).join('/');
+        function trackClick(href) {
+            try {
+                var col = new URL(href, location.origin).searchParams.get('x');
+                if (col) fetch(apiBase + '/obs_click', { method: 'POST', keepalive: true, credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ column: col }) }).catch(function () {});
+            } catch (e) {}
+        }
+        [document.getElementById('obs-fav'), document.getElementById('obs-freq'), all].forEach(function (box) {
+            if (!box) return;
+            box.addEventListener('click', function (e) {
+                var a = e.target.closest && e.target.closest('a[href*="/plot/"]');
+                if (a) trackClick(a.getAttribute('href'));
+            });
+        });
+        // Build a name → {type, href} map from the full table to render freq chips.
+        var meta = {};
+        items.forEach(function (el) {
+            var a = el.querySelector('.oname');
+            meta[el.dataset.name] = {
+                type: el.querySelector('.otype').classList.contains('cat') ? 'cat' : 'num',
+                href: (a && a.getAttribute) ? a.getAttribute('href') : null,
+                name: (a ? a.textContent : el.dataset.name)
+            };
+        });
+        fetch(apiBase + '/obs_top?n=8', { credentials: 'same-origin' })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (d) {
+                var cols = d && (d.columns || d); if (!cols || !cols.length) return;
+                var freq = document.getElementById('obs-freq'); if (!freq) return;
+                var html = '<span class="mk" style="display:inline-block;vertical-align:middle">frequently used</span>';
+                var n = 0;
+                cols.forEach(function (c) {
+                    var nm = (typeof c === 'string') ? c : (c.column || c.name); if (!nm) return;
+                    var m = meta[nm.toLowerCase()]; if (!m || !m.href) return;
+                    html += '<a href="' + m.href + '" class="chip" title="' + (m.type === 'cat' ? 'categorical' : 'numerical') + '">' + (m.type === 'cat' ? '≡ ' : '# ') + m.name + '</a>';
+                    n++;
+                });
+                if (n) { freq.innerHTML = html; freq.style.display = ''; }
             })
             .catch(function () {});
     })();
