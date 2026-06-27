@@ -1029,6 +1029,12 @@ class DatabaseRegistry:
             'group_id': extra['group_id'],
             'file_id': extra['file_id'],
             'path': extra['rel_path'],
+            # basename = the .md filename stem (no dir, no extension), e.g.
+            # 'Village.6M' for S25/V6A. Per anthive-web pika YakYak #1: the
+            # dataset page greys it next to the title when they differ,
+            # so the curator can see what's on-disk vs the human-facing
+            # title. Distinct from file_id (V6A) and title (anything).
+            'basename': md_path.stem,
             'title': file_metadata.get('title', md_path.stem),
             'n_cells': n_cells,
             'n_genes': n_genes,
@@ -1344,7 +1350,7 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.20.0"
+API_VERSION = "2.21.0"
 API_VERSION_RELEASED = "2026-06-27"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
@@ -2391,6 +2397,40 @@ async def get_database_info(db_id: str):
     try:
         metadata = registry.get_database_metadata(db_id)
         return metadata
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/databases/{db_id:path}/obs_summary", tags=["databases"])
+async def get_obs_summary(db_id: str):
+    """Bulk per-obs-column summary stats (anthive-web pika YakYak #2).
+
+    One call, all obs columns, light stats:
+      - categorical: ``type, n_unique, pct_missing``
+      - numerical:   ``type, min, max, median, pct_missing``
+
+    Shape::
+
+        {
+          "db_id": "...",
+          "columns": {
+            "<col>": {"type": "cat", "n_unique": 12, "pct_missing": 0.0},
+            "<col>": {"type": "num", "min": 0.0, "max": 1.0, "median": 0.5, "pct_missing": 1.3},
+            ...
+          }
+        }
+
+    Implementation: single ``SUMMARIZE`` scan per obscat / obsnum view
+    (DuckDB native). For 200+-column datasets this stays sub-second.
+    """
+    try:
+        def _sync():
+            with _pooled_db(db_id) as db:
+                return db.obs_summary()
+        cols = await asyncio.to_thread(_sync)
+        return {'db_id': db_id, 'columns': cols}
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:

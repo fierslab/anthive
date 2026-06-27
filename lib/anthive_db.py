@@ -189,6 +189,86 @@ class AnthiveDB:
 
         return [row[0] for row in result]
 
+    def obs_summary(self) -> Dict[str, Dict[str, Any]]:
+        """Per-obs-column summary stats for the dataset-page right-column.
+
+        One bulk call. Uses DuckDB's ``SUMMARIZE`` on the ``obscat`` and
+        ``obsnum`` views, which is a single scan per view yielding
+        min/max/q25/q50/q75/approx_unique/null_percentage per column.
+
+        Returns a dict keyed on column name:
+          - categorical: {'type': 'cat', 'n_unique': int, 'pct_missing': float}
+          - numerical:   {'type': 'num', 'min': num, 'max': num,
+                          'median': num, 'pct_missing': float}
+
+        Missing values are reported as ``pct_missing`` (0-100). Empty
+        when neither obscat nor obsnum exists in this dataset.
+        """
+        out: Dict[str, Dict[str, Any]] = {}
+        skip_cols = {'cell_name', 'cell_id'}
+
+        for view_name, kind in (('obscat', 'cat'), ('obsnum', 'num')):
+            exists = (self._conn.execute(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+                [view_name],
+            ).fetchone() or (0,))[0]
+            if not exists:
+                continue
+
+            try:
+                rows = self._conn.execute(
+                    f"SUMMARIZE SELECT * FROM {view_name}"
+                ).fetchall()
+            except Exception:
+                continue
+
+            cols = [
+                desc[0] for desc in self._conn.execute(
+                    f"SUMMARIZE SELECT * FROM {view_name}"
+                ).description
+            ]
+
+            # Find the indices we care about — SUMMARIZE's column set is
+            # stable in DuckDB but we look them up by name to be robust.
+            try:
+                ix_name = cols.index('column_name')
+                ix_min = cols.index('min')
+                ix_max = cols.index('max')
+                ix_q50 = cols.index('q50')
+                ix_unique = cols.index('approx_unique')
+                ix_nullpct = cols.index('null_percentage')
+            except ValueError:
+                continue
+
+            for row in rows:
+                name = row[ix_name]
+                if name in skip_cols:
+                    continue
+                null_pct_raw = row[ix_nullpct]
+                pct_missing = float(null_pct_raw) if null_pct_raw is not None else 0.0
+                if kind == 'cat':
+                    out[name] = {
+                        'type': 'cat',
+                        'n_unique': int(row[ix_unique]) if row[ix_unique] is not None else 0,
+                        'pct_missing': round(pct_missing, 2),
+                    }
+                else:
+                    def _coerce_num(value):
+                        if value is None:
+                            return None
+                        try:
+                            return float(value)
+                        except (ValueError, TypeError):
+                            return None
+                    out[name] = {
+                        'type': 'num',
+                        'min': _coerce_num(row[ix_min]),
+                        'max': _coerce_num(row[ix_max]),
+                        'median': _coerce_num(row[ix_q50]),
+                        'pct_missing': round(pct_missing, 2),
+                    }
+        return out
+
     def search_genes(self, query: str, case_sensitive: bool = False,
                     limit: Optional[int] = None, exact: bool = False) -> List[str]:
         """
