@@ -54,7 +54,7 @@ from datetime import datetime
 from io import BytesIO, StringIO
 from pathlib import Path
 from threading import Lock
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 import uvicorn
@@ -1115,6 +1115,11 @@ class DatabaseRegistry:
                 'accession': collection_metadata.get('accession'),
                 'default_dataset': collection_metadata.get('default_dataset'),
                 'description': collection_body or None,
+                # 'summary' is the NEW one-line frontmatter `description`
+                # exposed by the metadata editor (anthive-web pika #262).
+                # Kept separate from 'description' above which carries the
+                # full markdown body — don't conflate.
+                'summary': collection_metadata.get('description'),
             }
 
         return metadata
@@ -1969,6 +1974,172 @@ async def put_collection_source(
 
     rel = index_path.relative_to(registry.data_folder)
     return {'ok': True, 'path': str(rel)}
+
+
+# ── Dataset (.md) editor ──────────────────────────────────────────────────────
+#
+# Sibling pair of the collection endpoints above. Per anthive-web pika #263 /
+# #264 — Mark's lean dataset editor needs admin-gated GET + PUT on the
+# per-dataset .md frontmatter. Read/write is straightforward; the catch is
+# server-side READ-ONLY ENFORCEMENT — most fields are machine-computed and
+# must not be mutable through this endpoint (sha256/n_obs/etc define dataset
+# integrity).
+
+# Fields the editor is allowed to change. Everything else: locked to the
+# existing file's value on PUT (or dropped on creation when missing).
+_DATASET_EDITABLE_FIELDS: Set[str] = {
+    'title', 'description', 'year',
+    'top_genes', 'top_cat', 'top_num',
+}
+
+# Machine fields that define identity / integrity / layer schema. PUT MUST
+# preserve these from the existing file regardless of what the client sends.
+_DATASET_LOCKED_FIELDS: Set[str] = {
+    'id', 'version', 'sha256', 'date',
+    'n_obs', 'n_vars',
+    'layer_stats', 'layer_description',
+    'embedding_description', 'default_layer',
+    'obscat_include', 'obsnum_include',
+    'obscat_exclude', 'obsnum_exclude',
+}
+
+
+def _resolve_dataset_md_path(db_id: str) -> Tuple[Optional[Path], Optional[str], Optional[str]]:
+    """Locate the .md file owning ``db_id`` (group_id/file_id form).
+
+    Returns (md_path, group_id, file_id). Falls back to (None, group, file)
+    when no existing dataset claims the id — the PUT path needs that to
+    decide whether to create.
+    """
+    from h5adstore import find_h5ad  # noqa: PLC0415
+    entry = find_h5ad(registry.data_folder, db_id)
+    if entry is None:
+        # Split for the not-found case so the caller can still construct a
+        # sane skeleton response on GET.
+        parts = db_id.split('/', 1)
+        return None, parts[0] if parts else db_id, parts[1] if len(parts) > 1 else ''
+    return entry.md_path, entry.group_id, entry.file_id
+
+
+@app.get("/databases/{db_id:path}/source", tags=["databases"])
+async def get_dataset_source(db_id: str, request: Request):
+    """Read a dataset's ``.md`` for the admin editor (admin-gated).
+
+    Returns ``{exists, db_id, frontmatter, body}``. Non-existent dataset
+    returns ``exists=false`` (NOT 404) with a skeleton frontmatter carrying
+    at least ``id`` derived from the URL — the editor can populate the
+    rest and create on PUT (though create-from-zero is unusual; most
+    edits target an existing dataset already in the catalog).
+    """
+    _require_admin(request)
+    from metadata import parse_md_file  # noqa: PLC0415
+
+    md_path, group_id, file_id = _resolve_dataset_md_path(db_id)
+    if md_path is None or not md_path.is_file():
+        # Skeleton response — keep it minimal; the editor barely creates
+        # datasets from scratch (.h5ad has to exist first), this branch
+        # is mostly for typo'd db_ids.
+        return {
+            'exists': False,
+            'db_id': db_id,
+            'frontmatter': {'id': file_id or db_id},
+            'body': '',
+        }
+    try:
+        fm, body = parse_md_file(md_path)
+    except Exception as exc:
+        raise HTTPException(status_code=500,
+                            detail=f"failed to parse {md_path}: {exc}")
+    return {
+        'exists': True,
+        'db_id': db_id,
+        'frontmatter': fm,
+        'body': body or '',
+    }
+
+
+class DatasetSourceBody(BaseModel):
+    frontmatter: Dict[str, Any]
+    body: str = ''
+
+
+@app.put("/databases/{db_id:path}/source", tags=["databases"])
+async def put_dataset_source(
+    db_id: str,
+    payload: DatasetSourceBody,
+    request: Request,
+):
+    """Write a dataset's ``.md``, with strict server-side field-level locks.
+
+    Read-only / machine-computed fields (id, sha256, n_obs, layer_stats, …)
+    are taken from the EXISTING file and forced into the written
+    frontmatter regardless of what the client sends. The deprecated
+    ``annotation`` block is preserved verbatim from the existing file (or
+    dropped if absent). Only the editor's whitelist
+    (``_DATASET_EDITABLE_FIELDS``) may be set from client input.
+
+    Refuses to create a brand-new .md from this endpoint — there must
+    be an existing dataset (a real .h5ad on disk) for write to succeed.
+    Creating a dataset from zero is an ingest concern (ant-ingest /
+    ant-convert), not a metadata-editor one.
+    """
+    _require_admin(request)
+    from metadata import parse_md_file, write_md_file  # noqa: PLC0415
+
+    md_path, _gid, _fid = _resolve_dataset_md_path(db_id)
+    if md_path is None or not md_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=(f"no .md exists for db_id={db_id!r}; the dataset editor "
+                    f"only edits existing datasets — use the ingest pipeline "
+                    f"(ant-ingest / ant-convert) to create new ones."),
+        )
+
+    try:
+        existing_fm, _existing_body = parse_md_file(md_path)
+    except Exception as exc:
+        raise HTTPException(status_code=500,
+                            detail=f"failed to parse {md_path}: {exc}")
+
+    client_fm = dict(payload.frontmatter or {})
+
+    # Start from the existing frontmatter (preserves every key — locked,
+    # unknown, deprecated) byte-for-byte. Then overlay ONLY the whitelist
+    # of editable fields from the client. This is "verbatim preserve +
+    # selective overlay" rather than "client-wins" — exactly the
+    # locked-fields contract from pika #263.
+    new_fm = dict(existing_fm)
+    overlay_fields = []
+    for key in _DATASET_EDITABLE_FIELDS:
+        if key in client_fm:
+            new_fm[key] = client_fm[key]
+            overlay_fields.append(key)
+
+    # Defense-in-depth: if the client tried to send any locked field with
+    # a different value, log it (the verbatim preserve above already
+    # guarantees the existing value wins, so no behavioural effect — but
+    # surfacing the attempt in the audit log is useful).
+    if log is not None:
+        for key in _DATASET_LOCKED_FIELDS:
+            if key in client_fm and client_fm[key] != existing_fm.get(key):
+                log.warning(
+                    "dataset edit: client tried to mutate locked field "
+                    "%r on %s (ignored; kept existing value)",
+                    key, db_id,
+                )
+
+    try:
+        write_md_file(md_path, new_fm, payload.body or '')
+    except Exception as exc:
+        raise HTTPException(status_code=500,
+                            detail=f"failed to write {md_path}: {exc}")
+
+    rel = md_path.relative_to(registry.data_folder)
+    return {
+        'ok': True,
+        'path': str(rel),
+        'overlaid_fields': overlay_fields,
+    }
 
 
 @app.get("/version", tags=["info"])
