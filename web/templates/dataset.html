@@ -126,7 +126,13 @@
   .btn-grey:hover { background: #334155; color: #fff; text-decoration: none; }
   .btn-grey .caret { font-size: 9px; opacity: .8; margin-left: 3px; }
   .btn-grey.btn-icon { padding: 6px 11px; }
-  .ds-acc { font-size: 16px; cursor: default; align-self: center; padding: 0 1px; }
+  .ds-acc { font-size: 15px; cursor: default; align-self: center; padding: 0 1px; filter: grayscale(1); }   /* monochrome */
+  #viz-menu-panel a { filter: grayscale(1); }   /* b/w the plot-category emoji in the dropdown */
+  /* descriptive biology metadata — responsive grid, more columns as width grows */
+  .ds-meta { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 6px; margin: 6px 0 10px; }
+  .ds-meta .mi { display: flex; gap: 7px; align-items: baseline; border: 1px solid var(--border); border-radius: 5px; padding: 4px 9px; font-size: 12px; background: #fff; min-width: 0; }
+  .ds-meta .mk { color: var(--text-muted); font-size: 10px; text-transform: uppercase; letter-spacing: .4px; flex: none; }
+  .ds-meta .mv { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* title header below the breadcrumb — present but not oversized */
   .ds-title { font-size: 17px; font-weight: 600; color: var(--text); margin: 2px 0 6px; line-height: 1.3; }
   .ds-title .ds-title-base { font-size: 13px; font-weight: normal; color: #94a3b8; font-family: var(--font-mono); margin-left: 6px; }
@@ -155,7 +161,7 @@
     {% if context_bar and context_bar.source and context_bar.source.abbrev %}<span class="ds-acc" title="source: {{ context_bar.source.full }}">{{ context_bar.source.abbrev }}</span>{% endif %}
     {% if has_duckdb %}
     <div class="viz-menu" id="viz-menu">
-      <button type="button" class="btn-grey" id="viz-menu-btn" aria-haspopup="true" aria-expanded="false">📊 visualize <span class="caret">▾</span></button>
+      <button type="button" class="btn-grey" id="viz-menu-btn" aria-haspopup="true" aria-expanded="false">visualize <span class="caret">▾</span></button>
     <div class="viz-menu-panel" id="viz-menu-panel" role="menu">
       {% set _base = '/browse/' + folder_browse_id + '/' + file_id %}
       {% if info and info.obsm_keys %}
@@ -216,6 +222,20 @@
 <!-- Title — below the breadcrumb; falls back to the basename when there's no title. -->
 <h1 class="ds-title">{{ info.title or basename or file_id }}{% if basename and info.title and basename != info.title %}<span class="ds-title-base" title="file basename">{{ basename }}</span>{% endif %}</h1>
 
+<!-- Biology metadata — descriptive ("Organism: mouse"), responsive grid. -->
+{% if context_bar %}
+{% set _cb = context_bar %}
+<div class="ds-meta">
+  {% if _cb.organism.full %}<span class="mi"><span class="mk">organism</span><span class="mv" title="{{ _cb.organism.full }}">{{ _cb.organism.full }}</span></span>{% endif %}
+  {% if _cb.technology.full %}<span class="mi"><span class="mk">technology</span><span class="mv" title="{{ _cb.technology.full }}">{{ _cb.technology.full }}</span></span>{% endif %}
+  {% if _cb.celltype.full %}<span class="mi"><span class="mk">cell type</span><span class="mv" title="{{ _cb.celltype.full }}">{{ _cb.celltype.full }}</span></span>{% endif %}
+  {% if _cb.tissue.full %}<span class="mi"><span class="mk">tissue</span><span class="mv" title="{{ _cb.tissue.full }}">{{ _cb.tissue.full }}</span></span>{% endif %}
+  {% if _cb.disease.full %}<span class="mi"><span class="mk">disease</span><span class="mv" title="{{ _cb.disease.full }}">{{ _cb.disease.full }}</span></span>{% endif %}
+  {% if _cb.suspension_type.full %}<span class="mi"><span class="mk">prep</span><span class="mv" title="{{ _cb.suspension_type.full }}">{{ _cb.suspension_type.full }}</span></span>{% endif %}
+  {% if _cb.year %}<span class="mi"><span class="mk">year</span><span class="mv">{{ _cb.year }}</span></span>{% endif %}
+</div>
+{% endif %}
+
 <!-- Provenance — compact row (access/source moved to icons by the visualize button). -->
 {% if dataset_meta and (dataset_meta.license or dataset_meta.contributor or dataset_meta.doi or dataset_meta.pmid or dataset_meta.accession or dataset_meta.link) %}
 <div class="ds-prov">
@@ -231,19 +251,6 @@
 <!-- Description — the .md prose. Shown only when it's more than the title
      heading (heading-only / no-description bodies suppressed server-side). -->
 {% if markdown_content %}<div class="ds-desc md-body">{{ markdown_content|safe }}</div>{% endif %}
-
-{% if context_bar %}
-{% set _cb = context_bar %}
-<div class="ds-ctx">
-    {% if _cb.organism.abbrev %}<span class="pill"         title="organism: {{ _cb.organism.full }}">{{ _cb.organism.abbrev }}</span>{% endif %}
-    {% if _cb.technology.abbrev %}<span class="pill tech"   title="technology: {{ _cb.technology.full }}">{{ _cb.technology.abbrev }}</span>{% endif %}
-    {% if _cb.celltype.abbrev %}<span class="pill cell"     title="cell type: {{ _cb.celltype.full }}">{{ _cb.celltype.abbrev }}</span>{% endif %}
-    {% if _cb.tissue.abbrev %}<span class="pill tissue"     title="tissue: {{ _cb.tissue.full }}">{{ _cb.tissue.abbrev }}</span>{% endif %}
-    {% if _cb.disease.abbrev %}<span class="pill disease"   title="disease: {{ _cb.disease.full }}">{{ _cb.disease.abbrev }}</span>{% endif %}
-    {% if _cb.suspension_type.abbrev %}<span class="pill prep" title="prep: {{ _cb.suspension_type.full }}">{{ _cb.suspension_type.abbrev }}</span>{% endif %}
-    {% if _cb.year %}<span class="pill year" title="publication year">{{ _cb.year }}</span>{% endif %}
-</div>
-{% endif %}
 
 {% if info %}
 <div class="stats-row">
@@ -611,14 +618,16 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (a) trackClick(a.getAttribute('href'));
             });
         });
-        // Build a name → {type, href} map from the full table to render freq chips.
+        // Build a name → {type, href} map from the split tables to render freq
+        // chips. Type is derived from the plot link (bar = cat, histogram = num).
         var meta = {};
         items.forEach(function (el) {
-            var a = el.querySelector('.oname');
+            var a = el.querySelector('.colname a') || el.querySelector('a');
+            var href = a ? a.getAttribute('href') : null;
             meta[el.dataset.name] = {
-                type: el.querySelector('.otype').classList.contains('cat') ? 'cat' : 'num',
-                href: (a && a.getAttribute) ? a.getAttribute('href') : null,
-                name: (a ? a.textContent : el.dataset.name)
+                type: (href && href.indexOf('/plot/bar') >= 0) ? 'cat' : 'num',
+                href: href,
+                name: a ? a.textContent.trim() : el.dataset.name
             };
         });
         fetch(apiBase + '/obs_top?n=8', { credentials: 'same-origin' })
