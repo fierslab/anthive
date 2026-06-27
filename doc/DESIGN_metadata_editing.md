@@ -262,6 +262,18 @@ badge** driven by open PRs (or the Option-C queue if that path is taken).
 ## THE SPIKE (make-or-break, ~1–2 h, throwaway, doesn't touch h5adstore)
 The only real unknown is **CORS on `codeberg.org`** (Decap's Gitea backend calls
 the Forgejo API directly from the browser).
+
+> **SPIKE RESULT — CORS: ✅ PASS (probed 2026-06-27).** Codeberg's Forgejo API
+> (`https://codeberg.org/api/v1`) returns `Access-Control-Allow-Origin: *` on both
+> the CORS preflight (OPTIONS) and the actual request, allows the `Authorization`
+> header, and permits **every method Decap needs — GET/POST/PATCH/PUT/DELETE**
+> (each echoed in `Access-Control-Allow-Methods`, `Access-Control-Max-Age: 600`).
+> So the browser-direct read+write transport works with **no CORS/OAuth proxy**
+> and no self-hosted Forgejo. Wildcard origin + token-in-`Authorization` is the
+> right combo (no cookie/credentials mode, so `*` is fine).
+> **Still unverified** (needs a registered OAuth app — can't curl it): step 4(a)
+> the PKCE login round-trip and 4(c/d) Save→PR→merge in the live Decap UI; both
+> are standard documented Decap-Gitea flows, and the transport blocker is gone.
 1. Throwaway Codeberg repo (e.g. `mfiers/cms-test`) with one `content/foo.md`.
 2. Register a Codeberg OAuth2 app (User Settings → Applications), redirect URI =
    the admin page origin, **uncheck "Confidential Client"**, copy Client ID.
