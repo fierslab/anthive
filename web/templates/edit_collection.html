@@ -9,6 +9,7 @@
   .ef-row label { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--text-muted); margin-bottom: 2px; }
   .ef-row input[type=text] { width: 100%; padding: 5px 8px; border: 1px solid var(--border); border-radius: 5px; font-family: var(--font); font-size: 13px; outline: none; }
   .ef-row input:focus { border-color: var(--link); }
+  .ef-row .ef-static { padding: 5px 8px; border: 1px dashed var(--border); border-radius: 5px; font-size: 13px; color: var(--text-muted); background: #f8fafc; font-family: var(--font-mono); }
   .md-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   #md-body { width: 100%; min-height: 360px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; font-family: var(--font-mono); font-size: 12px; line-height: 1.5; resize: vertical; outline: none; }
   #md-body:focus { border-color: var(--link); }
@@ -83,11 +84,23 @@
   const isScalar = v => v === null || ['string', 'number', 'boolean'].includes(typeof v);
   const isScalarList = v => Array.isArray(v) && v.every(isScalar);
 
-  // Render scalar + scalar-list frontmatter as text inputs; leave complex keys
-  // (dicts, lists-of-objects e.g. `annotation`) untouched in `original`.
+  const RO_KEYS = ['group', 'group_id'];   // identity — shown read-only, never editable (also locked server-side)
+  const HIDE_KEYS = ['experiment'];        // deprecated pre-migration field → hide, but preserve in the file
+
+  // Read-only identity rows + editable scalar/scalar-list fields. Complex keys
+  // (dicts e.g. `annotation`) and HIDE_KEYS stay untouched in `original`.
   function renderFields(fm) {
     fields.innerHTML = '';
+    RO_KEYS.forEach(k => {
+      if (!(k in fm)) return;
+      const row = document.createElement('div'); row.className = 'ef-row';
+      const lab = document.createElement('label'); lab.textContent = k + ' 🔒'; row.appendChild(lab);
+      const val = document.createElement('div'); val.className = 'ef-static';
+      val.textContent = fm[k] == null ? '' : String(fm[k]);
+      val.title = 'fixed identifier — not editable'; row.appendChild(val); fields.appendChild(row);
+    });
     Object.keys(fm).forEach(k => {
+      if (RO_KEYS.includes(k) || HIDE_KEYS.includes(k)) return;
       const v = fm[k];
       if (!(isScalar(v) || isScalarList(v))) return;
       const row = document.createElement('div'); row.className = 'ef-row';
