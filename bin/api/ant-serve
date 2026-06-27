@@ -1339,8 +1339,8 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.19.0"
-API_VERSION_RELEASED = "2026-06-26"
+API_VERSION = "2.20.0"
+API_VERSION_RELEASED = "2026-06-27"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
 # Create FastAPI app with lifespan handler (Phase 2)
@@ -1797,6 +1797,166 @@ async def chat_usage(
     user = _chat_user_from_request(request)
     store = _get_chat_history(cfg)
     return store.session_usage(user, session_id)
+
+
+# ── Collection (index.md) editor ──────────────────────────────────────────────
+#
+# Pair of admin-gated endpoints backing the lean metadata editor (anthive-web
+# pika #256 / #257). GET reads {group_dir}/index.md; PUT writes it back. The
+# data h5adstore is a git repo; this endpoint INTENTIONALLY does not commit,
+# add, or push — admins handle git themselves after a save batch.
+
+
+def _require_admin(request: Request) -> str:
+    """Refuse anyone not in the Authelia 'admins' group. Returns the user.
+
+    Reads ``Remote-Groups`` (preferred) or ``X-Remote-Groups`` (legacy /
+    Caddy alternative) and accepts comma-separated values. ant-browse's
+    UI also gates the link client-side, but the write itself MUST be
+    enforced here — per pika #256: 'don't trust the client'.
+    """
+    raw_groups = (request.headers.get('Remote-Groups')
+                  or request.headers.get('X-Remote-Groups')
+                  or '')
+    groups = {g.strip().lower() for g in raw_groups.split(',') if g.strip()}
+    if 'admins' not in groups:
+        raise HTTPException(
+            status_code=403,
+            detail="admins-only endpoint (must be in Authelia 'admins' group)",
+        )
+    return (request.headers.get('Remote-User')
+            or request.headers.get('X-Remote-User')
+            or 'unknown')
+
+
+def _resolve_collection_dir(group_id: str) -> Tuple[Optional[Path], Optional[str]]:
+    """Locate the data_folder/<group>/ directory that owns this group_id.
+
+    Returns (path, group_name). When no existing folder claims the
+    group_id, returns (None, None) — the caller decides whether to
+    create a new folder (PUT) or report missing (GET shape).
+    """
+    from metadata import parse_md_file  # noqa: PLC0415  — local to skip on cold paths
+    root = registry.data_folder
+    for index_path in sorted(root.glob('*/index.md')):
+        try:
+            meta, _ = parse_md_file(index_path)
+        except Exception:
+            continue
+        if str(meta.get('group_id') or '').strip() == group_id:
+            return index_path.parent, str(meta.get('group') or index_path.parent.name)
+    return None, None
+
+
+@app.get("/collections/{group_id}/source", tags=["collections"])
+async def get_collection_source(group_id: str, request: Request):
+    """Read a collection's ``index.md`` for the admin editor.
+
+    Returns ``{exists, group, group_id, frontmatter, body}``. When no
+    index.md exists for this group_id, ``exists=False`` and
+    ``frontmatter`` carries sane defaults (group, group_id, year). Never
+    returns 404 for a missing file — the editor can create one via PUT.
+    """
+    _require_admin(request)
+    from metadata import parse_md_file  # noqa: PLC0415
+    import datetime as _dt  # noqa: PLC0415
+
+    folder, group_name = _resolve_collection_dir(group_id)
+    if folder is None:
+        # No existing folder claims this group_id. Return a skeleton so
+        # the editor can populate + create on PUT.
+        return {
+            'exists': False,
+            'group': group_id,        # fallback display name
+            'group_id': group_id,
+            'frontmatter': {
+                'group': group_id,
+                'group_id': group_id,
+                'year': _dt.datetime.now().year,
+            },
+            'body': '',
+        }
+
+    index_path = folder / 'index.md'
+    if not index_path.is_file():
+        return {
+            'exists': False,
+            'group': group_name or folder.name,
+            'group_id': group_id,
+            'frontmatter': {
+                'group': group_name or folder.name,
+                'group_id': group_id,
+                'year': _dt.datetime.now().year,
+            },
+            'body': '',
+        }
+    try:
+        meta, body = parse_md_file(index_path)
+    except Exception as exc:
+        raise HTTPException(status_code=500,
+                            detail=f"failed to parse {index_path}: {exc}")
+    return {
+        'exists': True,
+        'group': str(meta.get('group') or folder.name),
+        'group_id': group_id,
+        'frontmatter': meta,
+        'body': body or '',
+    }
+
+
+class CollectionSourceBody(BaseModel):
+    frontmatter: Dict[str, Any]
+    body: str = ''
+
+
+@app.put("/collections/{group_id}/source", tags=["collections"])
+async def put_collection_source(
+    group_id: str,
+    payload: CollectionSourceBody,
+    request: Request,
+):
+    """Write a collection's ``index.md``. Creates folder + file if missing.
+
+    The full frontmatter dict the client sends is written as the YAML
+    block — unknown / complex keys (e.g. ``annotation: {...}``) are
+    preserved verbatim, since the client roundtrips them. The data
+    h5adstore is a git repo and this endpoint does NOT commit; the
+    admin runs git themselves after a save batch.
+    """
+    _require_admin(request)
+    from metadata import write_md_file  # noqa: PLC0415
+
+    fm = dict(payload.frontmatter or {})
+    # Lock the group_id field to the URL value — prevents an editor
+    # from accidentally renaming the collection via a typo here.
+    fm['group_id'] = group_id
+    body = payload.body or ''
+
+    folder, _group_name = _resolve_collection_dir(group_id)
+    if folder is None:
+        # New collection — folder name comes from fm['group'] when
+        # provided, else the group_id itself. We never let it leave
+        # the data_folder root.
+        new_name = str(fm.get('group') or group_id).strip()
+        if (not new_name or '/' in new_name or new_name.startswith('.')
+                or new_name.startswith('_')):
+            raise HTTPException(
+                status_code=400,
+                detail=(f"refusing to create folder for group_id={group_id!r}: "
+                        f"frontmatter.group={new_name!r} is not a safe folder name."),
+            )
+        folder = registry.data_folder / new_name
+        folder.mkdir(parents=True, exist_ok=True)
+
+    index_path = folder / 'index.md'
+    try:
+        write_md_file(index_path, fm, body)
+    except Exception as exc:
+        raise HTTPException(status_code=500,
+                            detail=f"failed to write {index_path}: {exc}")
+
+    rel = index_path.relative_to(registry.data_folder)
+    return {'ok': True, 'path': str(rel)}
 
 
 @app.get("/version", tags=["info"])
