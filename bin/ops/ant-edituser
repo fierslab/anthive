@@ -1,0 +1,316 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["ruamel.yaml"]
+# ///
+"""ant-edituser — edit (or inspect) an existing Authelia user.
+
+Companion to ant-adduser. Resolves the user by LOGIN or EMAIL (whichever
+you happen to know) and applies one or more field changes. Authelia
+watches the database file (watch: true), so changes go live within a
+second; no restart needed.
+
+OPERATIONS
+
+  --name "Display Name"   Change displayname.
+  --email new@addr        Change the registered email.
+  --add-group GROUP       Add the user to a group. Repeatable: pass
+                          --add-group multiple times.
+  --remove-group GROUP    Remove the user from a group. Repeatable.
+  --set-groups G1,G2,…    Replace the group list wholesale (comma-
+                          separated OR pass --set-groups multiple times).
+                          Cannot be combined with --add-group / --remove-
+                          group; the all-or-nothing replacement is the
+                          point of this flag.
+  --admin                 Shorthand for `--add-group admins`.
+  --reset-password        Generate a new random password (printed once
+                          like ant-adduser does) and replace the hash.
+
+INSPECTION (read-only)
+
+  --list                  List all users with their groups + email.
+  --show                  Just show the user's current record. Default
+                          when no edit flags are passed.
+
+USAGE
+
+  ant-edituser <login_or_email>                          # show record
+  ant-edituser <login_or_email> --add-group admins       # add a group
+  ant-edituser <login_or_email> --remove-group users
+  ant-edituser <login_or_email> --set-groups admins,curators
+  ant-edituser <login_or_email> --name "Mark Fiers"
+  ant-edituser <login_or_email> --email mark@new.org
+  ant-edituser <login_or_email> --reset-password
+  ant-edituser --list                                    # bulk view
+
+Renaming the login itself is NOT supported here — that would invalidate
+any access_control rules / session cookies tied to the old login.
+Workaround: ant-adduser the new login, ant-edituser the old to drop
+groups, then delete the old entry by hand.
+"""
+
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+from pathlib import Path
+
+from ruamel.yaml import YAML
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent.parent
+AUTHELIA_BIN = REPO_ROOT / "envs" / "authelia" / "authelia"
+DEFAULT_USERS_FILE = REPO_ROOT / "config" / "authelia" / "users_database.yml"
+
+
+def die(message: str) -> int:
+    """Print an error to stderr; return non-zero (caller wraps in sys.exit)."""
+    print(f"error: {message}", file=sys.stderr)
+    return 1
+
+
+def load_users(users_path: Path) -> tuple[YAML, dict, dict]:
+    """Round-trip-parse users_database.yml and return (yaml, data, users_map)."""
+    yaml = YAML()
+    yaml.preserve_quotes = True
+    data = yaml.load(users_path) or {}
+    users = data.get("users")
+    if users is None:
+        die(f"{users_path} has no top-level 'users:' mapping")
+        raise SystemExit(1)
+    return yaml, data, users
+
+
+def resolve_login(users: dict, identifier: str) -> str:
+    """Find the login key matching ``identifier`` either by exact login or by email."""
+    if identifier in users:
+        return identifier
+    matches = [
+        login for login, entry in users.items()
+        if ((entry or {}).get("email") or "").lower() == identifier.lower()
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        die(f"{identifier!r} matches {len(matches)} users by email: "
+            f"{', '.join(matches)} — pass the explicit login instead")
+        raise SystemExit(1)
+    die(f"no user found with login or email {identifier!r}")
+    raise SystemExit(1)
+
+
+def format_groups(entry: dict) -> str:
+    groups = entry.get("groups") or []
+    return ", ".join(groups) if groups else "—"
+
+
+def print_record(login: str, entry: dict) -> None:
+    print(f"  login        : {login}")
+    print(f"  display name : {entry.get('displayname') or '—'}")
+    print(f"  email        : {entry.get('email') or '—'}")
+    print(f"  groups       : {format_groups(entry)}")
+
+
+def cmd_list(users: dict) -> int:
+    if not users:
+        print("  (no users)")
+        return 0
+    width_login = max(len(login) for login in users)
+    width_name = max(len((entry or {}).get("displayname") or "") for entry in users.values())
+    width_email = max(len((entry or {}).get("email") or "") for entry in users.values())
+    width_login = max(width_login, len("login"))
+    width_name = max(width_name, len("display name"))
+    width_email = max(width_email, len("email"))
+    print(f"  {'login':<{width_login}}  {'display name':<{width_name}}  "
+          f"{'email':<{width_email}}  groups")
+    print(f"  {'-' * width_login}  {'-' * width_name}  "
+          f"{'-' * width_email}  {'-' * 6}")
+    for login in sorted(users):
+        entry = users[login] or {}
+        print(f"  {login:<{width_login}}  "
+              f"{(entry.get('displayname') or ''):<{width_name}}  "
+              f"{(entry.get('email') or ''):<{width_email}}  "
+              f"{format_groups(entry)}")
+    return 0
+
+
+def collect_set_groups(raw_values: list[str] | None) -> list[str]:
+    """Flatten a list of comma-separated --set-groups values into one ordered list.
+
+    Accepts both ``--set-groups a,b,c`` and ``--set-groups a --set-groups b``
+    (and combinations). Preserves insertion order, dedupes.
+    """
+    out: list[str] = []
+    if not raw_values:
+        return out
+    for raw in raw_values:
+        for token in raw.split(","):
+            name = token.strip()
+            if name and name not in out:
+                out.append(name)
+    return out
+
+
+def generate_password_and_hash() -> tuple[str, str]:
+    """Run the Authelia crypto helper to mint a random password + argon2 digest."""
+    result = subprocess.run(
+        [str(AUTHELIA_BIN), "crypto", "hash", "generate", "argon2",
+         "--random", "--random.length", "12", "--random.charset", "alphanumeric",
+         "--no-confirm"],
+        capture_output=True, text=True, check=True,
+    )
+    password = digest = None
+    for line in result.stdout.splitlines():
+        if line.startswith("Random Password: "):
+            password = line[len("Random Password: "):].strip()
+        elif line.startswith("Digest: "):
+            digest = line[len("Digest: "):].strip()
+    if not password or not digest:
+        die("could not parse password/hash from authelia output:\n" + result.stdout)
+        raise SystemExit(1)
+    return password, digest
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="ant-edituser",
+        description="Edit (or inspect) an existing Authelia user.",
+    )
+    parser.add_argument("identifier", nargs="?", default=None,
+                        help="login OR email of an existing user")
+    parser.add_argument("-f", "--file", default=str(DEFAULT_USERS_FILE),
+                        help="users database path (default: this instance's)")
+
+    # Field edits
+    parser.add_argument("--name", default=None, help="set displayname")
+    parser.add_argument("--email", default=None, help="set email")
+    parser.add_argument("--add-group", action="append", default=None,
+                        metavar="GROUP", help="add group (repeatable)")
+    parser.add_argument("--remove-group", action="append", default=None,
+                        metavar="GROUP", help="remove group (repeatable)")
+    parser.add_argument("--set-groups", action="append", default=None,
+                        metavar="GROUPS",
+                        help="replace group list wholesale (comma-separated "
+                             "or repeat the flag)")
+    parser.add_argument("--admin", action="store_true",
+                        help="shortcut for --add-group admins")
+    parser.add_argument("--reset-password", action="store_true",
+                        help="generate + assign a new random password "
+                             "(printed once like ant-adduser)")
+
+    # Read-only modes
+    parser.add_argument("--list", action="store_true",
+                        help="list all users + their groups, then exit")
+    parser.add_argument("--show", action="store_true",
+                        help="just print the user's current record (default "
+                             "when no edit flags are passed)")
+
+    args = parser.parse_args()
+
+    users_path = Path(args.file)
+    if not users_path.is_file():
+        return die(f"users database not found at {users_path}")
+    yaml, data, users = load_users(users_path)
+
+    if args.list:
+        return cmd_list(users)
+
+    if not args.identifier:
+        return die("must give a login or email (or use --list)")
+
+    login = resolve_login(users, args.identifier)
+    entry = users[login] or {}
+
+    # Determine if there's anything to do
+    set_groups_input = collect_set_groups(args.set_groups)
+    add_groups = [
+        g.strip() for g in (args.add_group or [])
+        for g in g.split(",")
+        if g.strip()
+    ]
+    if args.admin and "admins" not in add_groups:
+        add_groups.append("admins")
+    remove_groups = [g.strip() for g in (args.remove_group or []) if g.strip()]
+    has_edit = (
+        args.name is not None
+        or args.email is not None
+        or add_groups
+        or remove_groups
+        or set_groups_input
+        or args.reset_password
+    )
+
+    # Reject incompatible group operations
+    if set_groups_input and (add_groups or remove_groups):
+        return die("--set-groups cannot be combined with --add-group / "
+                   "--remove-group (it replaces the entire list)")
+
+    if not has_edit or args.show:
+        print_record(login, entry)
+        return 0
+
+    changes: list[str] = []
+
+    if args.name is not None:
+        old = entry.get("displayname") or "—"
+        entry["displayname"] = args.name
+        changes.append(f"displayname: {old!r} → {args.name!r}")
+
+    if args.email is not None:
+        old = entry.get("email") or "—"
+        entry["email"] = args.email
+        changes.append(f"email: {old!r} → {args.email!r}")
+
+    # Group mutations
+    current_groups = list(entry.get("groups") or [])
+    if set_groups_input:
+        before = list(current_groups)
+        entry["groups"] = list(set_groups_input)
+        changes.append(f"groups: {before} → {entry['groups']}")
+    else:
+        new_groups = list(current_groups)
+        for group in add_groups:
+            if group not in new_groups:
+                new_groups.append(group)
+                changes.append(f"added group {group!r}")
+        for group in remove_groups:
+            if group in new_groups:
+                new_groups.remove(group)
+                changes.append(f"removed group {group!r}")
+            else:
+                # Noisy on a no-op — but the user asked for it, so flag it.
+                changes.append(f"(noop) {login} was not in group {group!r}")
+        if new_groups != current_groups:
+            entry["groups"] = new_groups
+
+    plaintext_password: str | None = None
+    if args.reset_password:
+        if not AUTHELIA_BIN.is_file():
+            return die(f"authelia binary not found at {AUTHELIA_BIN}")
+        plaintext_password, digest = generate_password_and_hash()
+        entry["password"] = digest
+        changes.append("password: regenerated")
+
+    yaml.dump(data, users_path)
+    users_path.chmod(0o600)
+
+    print("================================================================")
+    print(f"  Authelia user updated  ({login})")
+    print("----------------------------------------------------------------")
+    for change in changes:
+        print(f"  - {change}")
+    print("----------------------------------------------------------------")
+    print("  current record:")
+    print_record(login, entry)
+    print(f"  file: {users_path}")
+    if plaintext_password:
+        print("----------------------------------------------------------------")
+        print(f"  NEW PASSWORD (printed ONCE):  {plaintext_password}")
+        print("  Share it over a secure channel; it is not stored.")
+    print("================================================================")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

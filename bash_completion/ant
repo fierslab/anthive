@@ -14,7 +14,7 @@ _ant_completion()
 
     # Available ant subcommands (dispatcher walks bin/<domain>/ant-*; keep
     # this list aligned with what's actually shipped).
-    local subcommands="annotate api-check browse build-all build-reports cellxgene check convert db de-ingest de-pseudobulk duckdb-check h5ad-check inactive ingest mcp md md-check merge-h5ad priority s3-check score serve starcat suggest-tops supervisor sync warm-cache write-manifest"
+    local subcommands="adduser annotate api-check browse build-all build-reports cellxgene check convert db de-ingest de-pseudobulk duckdb-check edituser h5ad-check inactive ingest mcp md md-check merge-h5ad priority s3-check score serve starcat suggest-tops supervisor sync warm-cache write-manifest"
 
     # Complete the subcommand itself
     if [[ $cword -eq 1 ]]; then
@@ -223,6 +223,55 @@ _ant_completion()
                 COMPREPLY=($(compgen -W "--data-folder" -- "$cur"))
                 return
             fi
+            return
+            ;;
+
+        # ── adduser: Authelia user creation ────────────────────────────────
+        adduser)
+            if [[ "$prev" == "-g" || "$prev" == "--group" ]]; then
+                # Suggest the common groups we use. Free text still works.
+                COMPREPLY=($(compgen -W "admins users curators" -- "$cur"))
+                return
+            fi
+            if [[ "$prev" == "-u" || "$prev" == "--login" \
+                  || "$prev" == "-n" || "$prev" == "--name" \
+                  || "$prev" == "-f" || "$prev" == "--file" \
+                  || "$prev" == "--url" ]]; then
+                # Free-text args — no completion offered.
+                if [[ "$prev" == "-f" || "$prev" == "--file" ]]; then
+                    _filedir yml
+                fi
+                return
+            fi
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=($(compgen -W "-u --login -n --name -g --group --admin -f --file --url --force" -- "$cur"))
+                return
+            fi
+            return
+            ;;
+
+        # ── edituser: Authelia user editing + inspection ───────────────────
+        edituser)
+            if [[ "$prev" == "--add-group" || "$prev" == "--remove-group" \
+                  || "$prev" == "--set-groups" ]]; then
+                COMPREPLY=($(compgen -W "admins users curators" -- "$cur"))
+                return
+            fi
+            if [[ "$prev" == "-f" || "$prev" == "--file" ]]; then
+                _filedir yml
+                return
+            fi
+            if [[ "$prev" == "--name" || "$prev" == "--email" ]]; then
+                # Free-text args.
+                return
+            fi
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=($(compgen -W "--name --email --add-group --remove-group --set-groups --admin --reset-password --list --show -f --file" -- "$cur"))
+                return
+            fi
+            # First positional: the login or email. No way to enumerate
+            # logins without parsing the users file at completion time, so
+            # leave it open.
             return
             ;;
 

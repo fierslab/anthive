@@ -32,12 +32,15 @@ Existing users are preserved untouched. Authelia watches the file
 (watch: true), so a new user can log in within ~a second; no restart.
 
 Usage:
-  ant-adduser <email> [-u login] [-n "Display Name"] [-g group] [-f users_file]
-              [--url https://host/] [--force]
+  ant-adduser <email> [-u login] [-n "Display Name"] [-g group ...] [--admin]
+              [-f users_file] [--url https://host/] [--force]
 
 Examples:
-  ant-adduser jane.doe@example.org              # -> login jd
+  ant-adduser jane.doe@example.org              # -> login jd, group users
   ant-adduser bert.bobjes@example.org -g admins # -> login bb, group admins
+  ant-adduser carlo@example.org --admin         # -> shorthand for -g admins
+  ant-adduser jo@example.org --admin -g curators# -> in both 'admins' and 'curators'
+  ant-adduser jo@example.org -g a,b             # -> comma-list also accepted
   ant-adduser carlo@example.org -u carlo2       # force the login name
   ant-adduser jo@example.org --url https://anthive.example.org/  # override auto-detected URL
   ant-adduser jane.doe@example.org --force      # reset jd's password, new one printed
@@ -164,9 +167,17 @@ def main() -> None:
                         help="explicit login name (overrides the auto-derived one)")
     parser.add_argument("-n", "--name", default="",
                         help="display name (default: derived from email)")
-    parser.add_argument("-g", "--group", default=None,
-                        help="group (default: 'users' for new accounts; "
-                             "preserved on --force unless given)")
+    parser.add_argument("-g", "--group", action="append", default=None,
+                        metavar="GROUP",
+                        help="Authelia group membership. Repeatable: pass -g "
+                             "multiple times for multiple groups. Default for "
+                             "new accounts: 'users' (single group). Preserved "
+                             "on --force unless any -g is given (then "
+                             "replaced wholesale).")
+    parser.add_argument("--admin", action="store_true",
+                        help="Shortcut for `-g admins`. Stackable with other "
+                             "-g flags — `--admin -g curators` lands the user "
+                             "in both groups.")
     parser.add_argument("-f", "--file", default=str(DEFAULT_USERS_FILE),
                         help="users database path (default: this instance's)")
     parser.add_argument("--url", default="",
@@ -177,6 +188,20 @@ def main() -> None:
                              "its password instead of erroring (preserves the "
                              "existing login, display name and groups)")
     args = parser.parse_args()
+
+    # Normalize the group list. argparse hands us a list (or None when no -g
+    # was passed). --admin is a shorthand that gets folded in. De-dupe but
+    # preserve insertion order so the YAML reads in the order the operator
+    # typed.
+    requested_groups: list[str] = []
+    if args.admin:
+        requested_groups.append("admins")
+    if args.group:
+        for entry in args.group:
+            for raw in entry.split(","):
+                group_name = raw.strip()
+                if group_name and group_name not in requested_groups:
+                    requested_groups.append(group_name)
 
     if not AUTHELIA_BIN.is_file():
         die(f"authelia binary not found at {AUTHELIA_BIN}")
@@ -239,27 +264,27 @@ def main() -> None:
 
     if is_reset:
         # Mutate the existing entry: swap only the password (and display
-        # name / group if explicitly given), preserving any other fields
+        # name / groups if explicitly given), preserving any other fields
         # and the file's formatting.
         entry = users[login]
         entry["password"] = digest
         if args.name:
             entry["displayname"] = args.name
-        if args.group:
-            entry["groups"] = [args.group]
+        if requested_groups:
+            entry["groups"] = list(requested_groups)
         display_name = entry.get("displayname") or login
-        group_display = ",".join(entry.get("groups") or []) or "—"
+        group_display = ", ".join(entry.get("groups") or []) or "—"
     else:
         display_name = args.name or (
             " ".join(token.capitalize() for token in tokens) if tokens else login)
-        group = args.group or "users"
+        groups = list(requested_groups) if requested_groups else ["users"]
         users[login] = {
             "displayname": display_name,
             "password": digest,
             "email": args.email,
-            "groups": [group],
+            "groups": groups,
         }
-        group_display = group
+        group_display = ", ".join(groups)
 
     yaml.dump(data, users_path)
     users_path.chmod(0o600)
@@ -273,7 +298,7 @@ def main() -> None:
   password:     {password}
   email:        {args.email}
   display name: {display_name}
-  group:        {group_display}
+  groups:       {group_display}
   file:         {users_path}
 ----------------------------------------------------------------
   Share the password over a secure channel. It is NOT stored;
