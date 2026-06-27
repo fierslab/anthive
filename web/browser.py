@@ -405,6 +405,11 @@ def get_collection_list(api_url: str) -> List[Dict]:
             'update_pending': 0,
             'last_modified': last_modified,
             'description': None,
+            # one-line collection summary (index.md frontmatter `description`,
+            # exposed by the API as collection.summary — distinct from
+            # collection.description which is the index.md body). Shown on the
+            # landing page under the collection name.
+            'summary': collection_meta.get('summary'),
             # Group-level summaries: single shared value → that value;
             # multiple values across datasets → "mix". Used by index.html.
             'organism':        _summarize_meta_field(dbs, 'organism',        abbrev_map=_ORGANISM_ABBREV),

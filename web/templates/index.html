@@ -121,7 +121,7 @@
       <td data-label="ID" class="muted-2 mono" style="font-size:11px">{{ folder.group_id or "—" }}</td>
       <td class="card-title">
         {% if _acc.abbrev %}<span class="acc-src" title="access: {{ _acc.full }}">{{ _acc.abbrev }}</span>{% endif %}{% if _src.abbrev %}<span class="acc-src" title="source: {{ _src.full }}">{{ _src.abbrev }}</span>{% endif %}<a href="/browse/{{ folder.browse_id }}"><strong>{{ folder.name }}</strong></a>
-        {% if folder.description and folder.description != 'na' %}<br><span class="muted-2 coll-desc" title="{{ folder.description }}">{{ folder.description }}</span>{% endif %}
+        {% if folder.summary and folder.summary != 'na' %}<br><span class="muted-2 coll-desc" title="{{ folder.summary }}">{{ folder.summary }}</span>{% endif %}
       </td>
       <td data-label="Datasets" class="muted">{{ folder.dataset_count }}</td>
       <td data-label="Cells" class="muted mono" style="font-size:11px">{{ format_count(folder.total_cells) or "—" }}</td>
