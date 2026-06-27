@@ -110,44 +110,39 @@
   .obs-table .ocol .otype.cat { color: #e65100; } .obs-table .ocol .otype.num { color: #0277bd; }
   .obs-table .ocol .oname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .obs-table .ocol .ostat { margin-left: auto; color: var(--text-muted); font-family: var(--font-mono); font-size: 10px; flex: none; }
+
+  /* Consolidated header row: breadcrumb (click-to-copy ids) + action buttons. */
+  .ds-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 4px 0 8px; }
+  .ds-bc { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 14px; color: var(--text); min-width: 0; }
+  .ds-bc a { color: var(--link); }
+  .ds-bc .ds-cur { font-weight: 600; }
+  .ds-bc .bc-sep { color: #cbd5e1; }
+  .ds-bc .ds-basename { color: #94a3b8; font-family: var(--font-mono); font-size: 12px; }
+  .idcopy { font-family: var(--font-mono); font-size: 11px; color: var(--text); cursor: pointer; padding: 0 3px; border-radius: 3px; }
+  .idcopy:hover { background: #e0e7ff; }
+  .idcopy.copied { background: #bbf7d0; color: #166534; }
+  .ds-actions { display: flex; align-items: stretch; gap: 6px; flex-shrink: 0; }
+  .btn-grey { display: inline-flex; align-items: center; background: #475569; color: #fff; border: 1px solid #475569; border-radius: 5px; padding: 6px 13px; font-size: 13px; font-weight: 500; cursor: pointer; font-family: inherit; text-decoration: none; white-space: nowrap; }
+  .btn-grey:hover { background: #334155; color: #fff; text-decoration: none; }
+  .btn-grey .caret { font-size: 9px; opacity: .8; margin-left: 3px; }
+  .btn-grey.btn-icon { padding: 6px 11px; }
 </style>
 
-<div class="breadcrumb">
-    <a href="/">datasets</a> /
+<!-- Consolidated header: breadcrumb with click-to-copy ids + action buttons. -->
+<div class="ds-top">
+  <div class="ds-bc">
+    <span class="idcopy" data-copy="{{ db_id }}" title="click to copy {{ db_id }}">[{{ db_id }}]</span>
     <a href="/browse/{{ folder_browse_id }}">{{ folder_name }}</a>
-    {% if group_id and group_id != folder_name %}<span class="slug">({{ group_id }})</span>{% endif %} /
-    {{ dataset_name }}
-    {% if file_id and file_id != dataset_name %}<span class="slug">({{ file_id }})</span>{% endif %}
-</div>
-
-<!-- ID strip — copy-pasteable identifiers (hover explains each); edit icon at right. -->
-<div class="id-strip">
-  <span class="idchip" title="data project — the collection folder this dataset belongs to"><span class="idk">project</span><span class="idv">{{ data_project }}</span></span>
-  <span class="idchip" title="group id — short identifier for the collection"><span class="idk">group</span><span class="idv">{{ group_id }}</span></span>
-  <span class="idchip" title="dataset id — the file id within the collection"><span class="idk">dataset</span><span class="idv">{{ file_id }}</span></span>
-  <span class="idchip" title="full id — group/dataset, as used by the API & CLI"><span class="idk">id</span><span class="idv">{{ db_id }}</span></span>
-  {% if is_admin %}<a class="id-edit" href="/admin/edit/{{ group_id|urlencode }}/{{ file_id|urlencode }}" title="edit this dataset's .md (admin)">✎</a>{% endif %}
-</div>
-
-<!-- Provenance — kept up top, just after the ids. -->
-{% if dataset_meta and (dataset_meta.access or dataset_meta.source or dataset_meta.license or dataset_meta.contributor or dataset_meta.doi or dataset_meta.pmid or dataset_meta.accession or dataset_meta.link) %}
-<div class="ds-prov">
-  {% if dataset_meta.access %}<span><span class="pk">access</span> <span class="pv">{{ dataset_meta.access }}</span></span>{% endif %}
-  {% if dataset_meta.source %}<span><span class="pk">source</span> <span class="pv">{{ dataset_meta.source }}</span></span>{% endif %}
-  {% if dataset_meta.license %}<span><span class="pk">license</span> <span class="pv">{{ dataset_meta.license }}</span></span>{% endif %}
-  {% if dataset_meta.contributor %}<span><span class="pk">contributor</span> <span class="pv">{{ dataset_meta.contributor if dataset_meta.contributor is string else dataset_meta.contributor|join(', ') }}</span></span>{% endif %}
-  {% for doi_item in dataset_meta.doi %}<a class="lnk" href="https://doi.org/{{ doi_item }}" target="_blank" rel="noopener" title="{{ doi_item }}">🔗 doi</a>{% endfor %}
-  {% for p in dataset_meta.pmid %}<a class="lnk" href="https://pubmed.ncbi.nlm.nih.gov/{{ p }}" target="_blank" rel="noopener" title="PMID {{ p }}">🔗 pubmed</a>{% endfor %}
-  {% if dataset_meta.accession and dataset_meta.accession_url %}<a class="lnk" href="{{ dataset_meta.accession_url }}" target="_blank" rel="noopener" title="accession {{ dataset_meta.accession }}">🔗 {{ dataset_meta.accession }}</a>{% endif %}
-  {% for url_item in dataset_meta.link %}<a class="lnk" href="{{ url_item }}" target="_blank" rel="noopener" title="{{ url_item }}">🔗 link</a>{% endfor %}
-</div>
-{% endif %}
-
-<div class="title-row">
-  <h1 class="page-title">{{ dataset_name }}{% if basename and basename != dataset_name %} <span class="basename" title="file basename">{{ basename }}</span>{% endif %}</h1>
-  {% if has_duckdb %}
-  <div class="viz-menu" id="viz-menu">
-    <button type="button" class="viz-menu-btn" id="viz-menu-btn" aria-haspopup="true" aria-expanded="false">📊 visualize <span class="caret">▾</span></button>
+    <span class="idcopy" data-copy="{{ group_id }}" title="click to copy {{ group_id }}">[{{ group_id }}]</span>
+    <span class="bc-sep">/</span>
+    <span class="ds-cur">{{ dataset_name }}</span>
+    <span class="idcopy" data-copy="{{ file_id }}" title="click to copy {{ file_id }}">[{{ file_id }}]</span>
+    {% if basename and basename != dataset_name %}<span class="ds-basename" title="file basename">{{ basename }}</span>{% endif %}
+  </div>
+  <div class="ds-actions">
+    {% if has_duckdb %}
+    <div class="viz-menu" id="viz-menu">
+      <button type="button" class="btn-grey" id="viz-menu-btn" aria-haspopup="true" aria-expanded="false">📊 visualize <span class="caret">▾</span></button>
     <div class="viz-menu-panel" id="viz-menu-panel" role="menu">
       {% set _base = '/browse/' + folder_browse_id + '/' + file_id %}
       {% if info and info.obsm_keys %}
@@ -201,10 +196,26 @@
     </div>
   </div>
   {% endif %}
+  {% if is_admin %}<a class="btn-grey btn-icon" href="/admin/edit/{{ group_id|urlencode }}/{{ file_id|urlencode }}" title="edit this dataset's .md (admin)">✎</a>{% endif %}
+  </div>
 </div>
 
-<!-- Description — the .md prose, below the title. Shown only when it's more than
-     the title heading (heading-only / no-description bodies suppressed server-side). -->
+<!-- Provenance — compact row under the header. -->
+{% if dataset_meta and (dataset_meta.access or dataset_meta.source or dataset_meta.license or dataset_meta.contributor or dataset_meta.doi or dataset_meta.pmid or dataset_meta.accession or dataset_meta.link) %}
+<div class="ds-prov">
+  {% if dataset_meta.access %}<span><span class="pk">access</span> <span class="pv">{{ dataset_meta.access }}</span></span>{% endif %}
+  {% if dataset_meta.source %}<span><span class="pk">source</span> <span class="pv">{{ dataset_meta.source }}</span></span>{% endif %}
+  {% if dataset_meta.license %}<span><span class="pk">license</span> <span class="pv">{{ dataset_meta.license }}</span></span>{% endif %}
+  {% if dataset_meta.contributor %}<span><span class="pk">contributor</span> <span class="pv">{{ dataset_meta.contributor if dataset_meta.contributor is string else dataset_meta.contributor|join(', ') }}</span></span>{% endif %}
+  {% for doi_item in dataset_meta.doi %}<a class="lnk" href="https://doi.org/{{ doi_item }}" target="_blank" rel="noopener" title="{{ doi_item }}">🔗 doi</a>{% endfor %}
+  {% for p in dataset_meta.pmid %}<a class="lnk" href="https://pubmed.ncbi.nlm.nih.gov/{{ p }}" target="_blank" rel="noopener" title="PMID {{ p }}">🔗 pubmed</a>{% endfor %}
+  {% if dataset_meta.accession and dataset_meta.accession_url %}<a class="lnk" href="{{ dataset_meta.accession_url }}" target="_blank" rel="noopener" title="accession {{ dataset_meta.accession }}">🔗 {{ dataset_meta.accession }}</a>{% endif %}
+  {% for url_item in dataset_meta.link %}<a class="lnk" href="{{ url_item }}" target="_blank" rel="noopener" title="{{ url_item }}">🔗 link</a>{% endfor %}
+</div>
+{% endif %}
+
+<!-- Description — the .md prose. Shown only when it's more than the title
+     heading (heading-only / no-description bodies suppressed server-side). -->
 {% if markdown_content %}<div class="ds-desc md-body">{{ markdown_content|safe }}</div>{% endif %}
 
 {% if context_bar %}
@@ -422,6 +433,17 @@
 
 <script>
 document.addEventListener('DOMContentLoaded', function() {
+    // ── click an [id] to copy it to the clipboard ────────────────────────
+    document.querySelectorAll('.idcopy').forEach(function(el) {
+        el.addEventListener('click', function() {
+            var txt = el.getAttribute('data-copy') || '';
+            var done = function() { el.classList.add('copied'); setTimeout(function() { el.classList.remove('copied'); }, 900); };
+            var fallback = function() { try { var t = document.createElement('textarea'); t.value = txt; t.style.position = 'fixed'; t.style.opacity = '0'; document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove(); done(); } catch (e) {} };
+            if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(done).catch(fallback);
+            else fallback();
+        });
+    });
+
     // ── visualize dropdown toggle ────────────────────────────────────────
     (function() {
         var menu = document.getElementById('viz-menu');

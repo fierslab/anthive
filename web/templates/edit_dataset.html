@@ -31,13 +31,14 @@
   <h2>Editable</h2>
   <div id="ef-fields" class="ef-grid"></div>
 
-  <h2 style="margin-top:14px">Description <span class="ed-note">— the dataset's .md body (markdown)</span>
+  <h2 style="margin-top:14px">Long Description <span class="ed-note">— the dataset's .md body (markdown)</span>
     <button id="md-toggle" type="button" class="chip" style="font-size:11px;font-weight:normal;vertical-align:middle">👁 preview</button></h2>
   <textarea id="md-body" spellcheck="true" placeholder="# Dataset notes…"></textarea>
   <div id="md-preview" style="display:none"></div>
 
   <div class="edit-actions">
-    <button id="ed-save" type="button">Save to disk</button>
+    <button id="ed-save" type="button">Save &amp; return</button>
+    <span class="ed-note">⌘/Ctrl-S to save without leaving</span>
     <span id="ed-status"></span>
   </div>
 
@@ -145,15 +146,26 @@
     })
     .catch(e => { loading.style.display = 'none'; errBox.innerHTML = '<span class="err">could not load .md — ' + esc(e.message) + '</span>'; });
 
-  saveBtn.addEventListener('click', () => {
-    saveBtn.disabled = true; statusEl.innerHTML = '<span class="muted">saving…</span>';
-    fetch(SRC, {
+  // redirect=true → return to the dataset page after saving (the Save button);
+  // redirect=false → intermediate save, stay put (Cmd/Ctrl-S).
+  var saving = false;
+  function doSave(redirect) {
+    if (saving) return;
+    saving = true; saveBtn.disabled = true; statusEl.innerHTML = '<span class="muted">saving…</span>';
+    return fetch(SRC, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
       body: JSON.stringify({ frontmatter: collectFrontmatter(), body: body.value })
     })
       .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 180)); }))
-      .then(() => { saveBtn.disabled = false; statusEl.innerHTML = '<span style="color:#16a34a">✓ saved to disk</span>'; })
-      .catch(e => { saveBtn.disabled = false; statusEl.innerHTML = '<span class="err">save failed — ' + esc(e.message) + '</span>'; });
+      .then(() => {
+        if (redirect) { statusEl.innerHTML = '<span style="color:#16a34a">✓ saved — returning…</span>'; window.location = '/browse/{{ group_id|urlencode }}/{{ file_id|urlencode }}'; }
+        else { saving = false; saveBtn.disabled = false; statusEl.innerHTML = '<span style="color:#16a34a">✓ saved (⌘/Ctrl-S)</span>'; }
+      })
+      .catch(e => { saving = false; saveBtn.disabled = false; statusEl.innerHTML = '<span class="err">save failed — ' + esc(e.message) + '</span>'; });
+  }
+  saveBtn.addEventListener('click', function () { doSave(true); });   // Save → back to the dataset page
+  document.addEventListener('keydown', function (e) {                  // Cmd/Ctrl-S → intermediate save
+    if ((e.metaKey || e.ctrlKey) && (e.key === 's' || e.key === 'S')) { e.preventDefault(); doSave(false); }
   });
 })();
 </script>
