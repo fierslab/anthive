@@ -280,9 +280,14 @@ the Forgejo API directly from the browser).
 > So the browser-direct read+write transport works with **no CORS/OAuth proxy**
 > and no self-hosted Forgejo. Wildcard origin + token-in-`Authorization` is the
 > right combo (no cookie/credentials mode, so `*` is fine).
-> **Still unverified** (needs a registered OAuth app — can't curl it): step 4(a)
-> the PKCE login round-trip and 4(c/d) Save→PR→merge in the live Decap UI; both
-> are standard documented Decap-Gitea flows, and the transport blocker is gone.
+>
+> **SPIKE COMPLETE — ✅ ALL GREEN (live, 2026-06-27).** Ran the full throwaway
+> spike (`~/cms-spike`, Decap UI against `mfiers/cms-test`): PKCE login
+> round-trips, the entry lists, and **edit → Save commits directly to the branch
+> on Codeberg** — confirmed working. The only surprise was that the Gitea backend
+> has no `editorial_workflow` (see correction in the Decision section); review is
+> therefore the `cms-staging`-branch + forge-PR model, not per-save PRs.
+> **Verdict: Decap-on-Codeberg is viable; the real build can proceed.**
 1. Throwaway Codeberg repo (e.g. `mfiers/cms-test`) with one `content/foo.md`.
 2. Register a Codeberg OAuth2 app (User Settings → Applications), redirect URI =
    the admin page origin, **uncheck "Confidential Client"**, copy Client ID.
