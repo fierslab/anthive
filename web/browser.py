@@ -956,8 +956,14 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         'top_num':         _as_list(db.get('top_num')),
     }
 
-    raw_md = db.get('markdown')
-    markdown_content = markdown.markdown(raw_md, extensions=['tables', 'fenced_code']) if raw_md else None
+    # Description = the .md body MINUS a leading "# <title>" heading (which just
+    # repeats the title). If nothing substantive remains (the common "no real
+    # description" case where the body is only the heading), show no description.
+    raw_md = db.get('markdown') or ''
+    _md_lines = raw_md.lstrip().split('\n')
+    _desc_md = ('\n'.join(_md_lines[1:]) if (_md_lines and _md_lines[0].lstrip().startswith('#'))
+                else raw_md).strip()
+    markdown_content = markdown.markdown(_desc_md, extensions=['tables', 'fenced_code']) if _desc_md else None
 
     # Context bar — same abbrev maps as landing / folder pages.  Uses single-db
     # summarise so 'mix' never appears (one dataset → one value).  Empty
@@ -999,6 +1005,8 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "folder_name": friendly_group,
         "folder_browse_id": group_id,
         "group_id": group_id,
+        "data_project": friendly_group,          # collection folder name (e.g. Sierksma2025)
+        "basename": db.get('basename'),           # .md filename stem (from API when available)
         "dataset_name": dataset_title,
         "file_id": file_id,
         "db_id": db_id,

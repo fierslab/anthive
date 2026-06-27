@@ -1118,11 +1118,11 @@ def test_folder_external_link_icons(client):
 
 
 def test_dataset_quick_links(client):
-    # DOI / PubMed / accession surfaced as compact badges up top (.ds-links),
-    # in addition to the verbose Provenance section.
+    # DOI / PubMed / accession surfaced as compact badges in the top provenance
+    # row (.ds-prov), just after the id strip.
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
-    assert 'class="ds-links"' in resp.text
+    assert 'class="ds-prov"' in resp.text
     assert "https://doi.org/10.1/abc" in resp.text
     assert "pubmed.ncbi.nlm.nih.gov/123456" in resp.text
 

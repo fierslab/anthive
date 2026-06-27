@@ -197,13 +197,19 @@ nothing DE shows):
   (`/api/chat*`, OpenRouter, session store, the enable gate) is ant-serve's**,
   not here — see `doc/DESIGN_chat_assistant.md` §9 for the locked wire contract
   this client is built to.
-- **No-duplication rule on dataset.html:** headline biology (organism /
-  technology / cell / tissue / disease / prep / year) lives ONLY in the coloured
-  context pills (full names in their `title`); the **Biology** section shows only
-  the remaining sample attributes (condition / sex / age / strain); **Provenance**
-  shows only descriptive metadata (access / source / license / contributor);
-  external resources (doi / pubmed / accession / url) are ONLY the `.ds-links`
-  badges under the title. Each datum appears once. Sections hide when empty.
+- **dataset.html top layout (2026-06):** breadcrumb → **`.id-strip`** (copy-paste
+  ids: data_project · group_id · dataset_id · db_id, each `user-select:all`, hover
+  explains; admin **`.id-edit`** ✎ at the right) → **`.ds-prov`** provenance row
+  (access / source / license / contributor + doi/pubmed/accession/link badges) →
+  **title-row** (`<h1>` title + greyed `.basename` when it differs + visualize ▾)
+  → **`.ds-desc`** description (the `.md` body minus its leading `# title`
+  heading; suppressed server-side when nothing remains, so a heading-only "no
+  description" body shows nothing) → context pills → stats row. **No-duplication:**
+  headline biology lives ONLY in the context pills; the **Biology** section shows
+  only condition/sex/age/strain; provenance + external links live ONLY in the top
+  `.ds-prov` row. Each datum appears once; sections hide when empty.
+- **Section order:** Explore → Biology → **Differential expression** (above the
+  obs columns) → Observation columns → Embeddings → Data → Resources.
 
 ## Vocabulary shared across pages
 
@@ -232,9 +238,13 @@ nothing DE shows):
   `_TISSUE_ABBREV`, `_DISEASE_ABBREV`, `_ORGANISM_ABBREV`,
   `_TECHNOLOGY_ABBREV`, `_ACCESS_ABBREV`, `_SOURCE_ABBREV`,
   `_SUSPENSION_ABBREV`.  Hover-tooltip carries the full term.
-- **Collapsible obs-prefix groups** on the dataset page: items sharing
-  a `::`- or `__`-delimited prefix collapse into a `[+] prefix:: (N)`
-  chip.  Purely client-side JS in `dataset.html`.
+- **Collapsible observation columns** on the dataset page: a few **favourites**
+  (curated `top_cat`/`top_num`, else the first 8 columns) show first; the full
+  set is collapsed behind a **`#obs-expand`** toggle that reveals **`.obs-table`**
+  — a 2-column-on-wide grid of `.ocol` rows (type icon · name link · `.ostat`)
+  with a filter box. (Replaced the old `::`/`__` prefix-grouping chips.) The
+  `.ostat` currently shows the type word; richer per-column stats (n_unique /
+  numeric range) await an ant-serve obs-summary endpoint.
 - **Suggestion chips** under each plot-form input: curated favourites
   (blue) + pattern-detected smart picks (amber, e.g. pseudotime) +
   append-mode green chips for CSV fields (heatmap genes, rolling y).
