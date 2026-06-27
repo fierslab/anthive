@@ -92,7 +92,9 @@
     {% if file_id and file_id != dataset_name %}<span class="slug">({{ file_id }})</span>{% endif %}
 </div>
 <div class="title-row">
-  <h1 class="page-title">{{ dataset_name }}</h1>
+  <h1 class="page-title">{{ dataset_name }}
+    {% if is_admin %}<a href="/admin/edit/{{ group_id|urlencode }}/{{ file_id|urlencode }}" class="chip" style="font-size:11px;font-weight:normal;vertical-align:middle" title="edit this dataset's .md (admin)">✎ edit</a>{% endif %}
+  </h1>
   {% if has_duckdb %}
   <div class="viz-menu" id="viz-menu">
     <button type="button" class="viz-menu-btn" id="viz-menu-btn" aria-haspopup="true" aria-expanded="false">📊 visualize <span class="caret">▾</span></button>

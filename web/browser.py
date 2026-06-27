@@ -1014,6 +1014,28 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "update_pending": False,
         "de_studies": de_studies,
         "de_total_contrasts": de_total_contrasts,
+        "is_admin": _is_admin(request),
+    })
+
+
+@router.get("/admin/edit/{folder_browse_id}/{dataset_browse_id}", response_class=HTMLResponse)
+async def edit_dataset_view(request: Request, folder_browse_id: str, dataset_browse_id: str):
+    """Admin-only editor for a dataset's .md (curatable fields + markdown body).
+    Most of the .md is machine-generated (id/sha256/n_obs/layer_stats/…) and is
+    shown read-only or hidden; biology annotation lives in the .mus sidecar, not
+    here. Loads/saves via ant-serve GET/PUT /databases/{db_id}/source."""
+    group_id = unquote(folder_browse_id)
+    file_id = unquote(dataset_browse_id)
+    if not _is_admin(request):
+        return templates.TemplateResponse(
+            request, "index.html",
+            {"folders": [], "error": "Not authorized — admin only."},
+            status_code=403,
+        )
+    return templates.TemplateResponse(request, "edit_dataset.html", {
+        "group_id": group_id,
+        "file_id": file_id,
+        "db_id": f"{group_id}/{file_id}",
     })
 
 

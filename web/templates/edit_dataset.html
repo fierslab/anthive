@@ -1,0 +1,160 @@
+{% extends "base.html" %}
+
+{% block title %}Edit {{ db_id }} — anthive admin{% endblock %}
+
+{% block content %}
+<style>
+  .edit-wrap { max-width: 920px; }
+  .ef-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; }
+  .ef-row label { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--text-muted); margin-bottom: 2px; }
+  .ef-row input[type=text] { width: 100%; padding: 5px 8px; border: 1px solid var(--border); border-radius: 5px; font-family: var(--font); font-size: 13px; outline: none; }
+  .ef-row input:focus { border-color: var(--link); }
+  .ef-row .ef-static { padding: 5px 8px; border: 1px dashed var(--border); border-radius: 5px; font-size: 12px; color: var(--text-muted); background: #f8fafc; font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #md-body { width: 100%; min-height: 320px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; font-family: var(--font-mono); font-size: 12px; line-height: 1.5; resize: vertical; outline: none; }
+  #md-body:focus { border-color: var(--link); }
+  #md-preview { border: 1px solid var(--border-light); border-radius: 6px; padding: 10px 12px; min-height: 320px; background: #fff; font-size: 13px; line-height: 1.6; }
+  .edit-actions { display: flex; gap: 12px; align-items: center; margin: 12px 0; }
+  #ed-save { background: var(--link); color: #fff; border: none; border-radius: 6px; padding: 7px 18px; font-size: 13px; cursor: pointer; }
+  #ed-save:disabled { opacity: .5; cursor: default; }
+  #ed-status { font-size: 12px; }
+  .ed-note { font-size: 11px; color: var(--text-muted); }
+  @media (max-width: 700px) { .ef-grid { grid-template-columns: 1fr; } }
+</style>
+
+<div class="breadcrumb"><a href="/">datasets</a> / <a href="/browse/{{ group_id|urlencode }}">{{ group_id }}</a> / <a href="/browse/{{ group_id|urlencode }}/{{ file_id|urlencode }}">{{ file_id }}</a> / edit</div>
+<h1 class="page-title">Edit dataset <span class="mono">{{ db_id }}</span>
+  <span class="info" title="Admin only. Writes the dataset .md to disk. Most fields are machine-generated (id, hashes, counts, layer stats) and are read-only; biology annotation lives in the .mus sidecar, not here. It's a git repo — commit the change yourself.">ⓘ</span></h1>
+
+<div id="ed-loading" class="muted" style="font-size:12px">loading .md…</div>
+
+<div id="ed-form" class="edit-wrap" style="display:none">
+  <h2>Editable</h2>
+  <div id="ef-fields" class="ef-grid"></div>
+
+  <h2 style="margin-top:14px">Description <span class="ed-note">— the dataset's .md body (markdown)</span>
+    <button id="md-toggle" type="button" class="chip" style="font-size:11px;font-weight:normal;vertical-align:middle">👁 preview</button></h2>
+  <textarea id="md-body" spellcheck="true" placeholder="# Dataset notes…"></textarea>
+  <div id="md-preview" style="display:none"></div>
+
+  <div class="edit-actions">
+    <button id="ed-save" type="button">Save to disk</button>
+    <span id="ed-status"></span>
+  </div>
+
+  <h2 style="margin-top:14px">Read-only <span class="ed-note">— machine-generated, not editable</span></h2>
+  <div id="ef-ro" class="ef-grid"></div>
+  <div class="ed-note" style="margin-top:8px">Biology annotation (organism, tissue, cell type, …) lives in the <code>.h5ad.mus</code> sidecar, edited separately — not here.</div>
+</div>
+
+<div id="ed-error" class="plot-status"></div>
+
+<script>
+(function () {
+  const DB_ID = {{ db_id|tojson }};
+  const SRC = '/api/databases/' + DB_ID.split('/').map(encodeURIComponent).join('/') + '/source';
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+  // Whitelist of editable fields (everything else is read-only or hidden — safer
+  // than a blacklist given how many machine fields a dataset .md carries).
+  const EDITABLE = [
+    { key: 'title',       label: 'title',                       kind: 'scalar' },
+    { key: 'description', label: 'description (one line)',      kind: 'scalar' },
+    { key: 'year',        label: 'year',                        kind: 'number' },
+    { key: 'top_genes',   label: 'top genes (comma-separated)', kind: 'list' },
+    { key: 'top_cat',     label: 'top categories (comma-separated)', kind: 'list' },
+    { key: 'top_num',     label: 'top numeric (comma-separated)',    kind: 'list' },
+  ];
+  // Machine-generated identity/computed fields — shown read-only for context.
+  const RO_SHOW = ['id', 'version', 'sha256', 'date', 'n_obs', 'n_vars', 'default_layer'];
+
+  let original = {};   // full loaded frontmatter — everything not in EDITABLE round-trips untouched
+
+  const loading = document.getElementById('ed-loading'),
+        formBox = document.getElementById('ed-form'),
+        fields  = document.getElementById('ef-fields'),
+        roBox   = document.getElementById('ef-ro'),
+        body    = document.getElementById('md-body'),
+        preview = document.getElementById('md-preview'),
+        saveBtn = document.getElementById('ed-save'),
+        statusEl= document.getElementById('ed-status'),
+        errBox  = document.getElementById('ed-error');
+
+  function inline(s) {
+    return s.replace(/`([^`]+)`/g, '<code>$1</code>')
+            .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+            .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+            .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, t, u) => /^https?:\/\//.test(u) ? '<a href="' + esc(u) + '" target="_blank" rel="noopener">' + t + '</a>' : t);
+  }
+  function md(src) {
+    return esc(src).split(/\n{2,}/).map(blk => {
+      const h = blk.match(/^\s*(#{1,3})\s+(.*)$/);
+      if (h) return '<h' + h[1].length + '>' + inline(h[2]) + '</h' + h[1].length + '>';
+      if (/^\s*[-*]\s/.test(blk)) return '<ul>' + blk.split(/\n/).map(l => '<li>' + inline(l.replace(/^\s*[-*]\s+/, '')) + '</li>').join('') + '</ul>';
+      return '<p>' + inline(blk).replace(/\n/g, '<br>') + '</p>';
+    }).join('');
+  }
+  const mdToggle = document.getElementById('md-toggle');
+  let previewing = false;
+  mdToggle.addEventListener('click', () => {
+    previewing = !previewing;
+    if (previewing) { preview.innerHTML = md(body.value); preview.style.display = ''; body.style.display = 'none'; mdToggle.textContent = '✎ edit'; }
+    else { preview.style.display = 'none'; body.style.display = ''; mdToggle.textContent = '👁 preview'; }
+  });
+
+  function addEditable(fm) {
+    fields.innerHTML = '';
+    EDITABLE.forEach(f => {
+      const v = fm[f.key];
+      const row = document.createElement('div'); row.className = 'ef-row';
+      const lab = document.createElement('label'); lab.textContent = f.label; row.appendChild(lab);
+      const inp = document.createElement('input'); inp.type = 'text'; inp.dataset.key = f.key; inp.dataset.kind = f.kind;
+      inp.value = Array.isArray(v) ? v.join(', ') : (v == null ? '' : String(v));
+      row.appendChild(inp); fields.appendChild(row);
+    });
+  }
+  function addReadonly(fm) {
+    roBox.innerHTML = '';
+    RO_SHOW.forEach(k => {
+      if (!(k in fm)) return;
+      const row = document.createElement('div'); row.className = 'ef-row';
+      const lab = document.createElement('label'); lab.textContent = k + ' 🔒'; row.appendChild(lab);
+      const val = document.createElement('div'); val.className = 'ef-static';
+      val.textContent = fm[k] == null ? '' : String(fm[k]); val.title = String(fm[k]);
+      row.appendChild(val); roBox.appendChild(row);
+    });
+  }
+  function collectFrontmatter() {
+    const fm = Object.assign({}, original);   // everything else (machine fields, annotation, include-lists) untouched
+    fields.querySelectorAll('input[data-key]').forEach(inp => {
+      const k = inp.dataset.key, kind = inp.dataset.kind, raw = inp.value.trim();
+      if (kind === 'list') fm[k] = raw === '' ? null : raw.split(',').map(x => x.trim()).filter(Boolean);
+      else if (kind === 'number') fm[k] = raw === '' ? null : (isNaN(Number(raw)) ? raw : Number(raw));
+      else fm[k] = raw;
+    });
+    return fm;
+  }
+
+  fetch(SRC, { credentials: 'same-origin' })
+    .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 140)); }))
+    .then(d => {
+      loading.style.display = 'none'; formBox.style.display = '';
+      original = d.frontmatter || {};
+      addEditable(original); addReadonly(original);
+      body.value = d.body || '';
+      if (!d.exists) statusEl.innerHTML = '<span class="muted">no .md yet — saving will create it</span>';
+    })
+    .catch(e => { loading.style.display = 'none'; errBox.innerHTML = '<span class="err">could not load .md — ' + esc(e.message) + '</span>'; });
+
+  saveBtn.addEventListener('click', () => {
+    saveBtn.disabled = true; statusEl.innerHTML = '<span class="muted">saving…</span>';
+    fetch(SRC, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
+      body: JSON.stringify({ frontmatter: collectFrontmatter(), body: body.value })
+    })
+      .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 180)); }))
+      .then(() => { saveBtn.disabled = false; statusEl.innerHTML = '<span style="color:#16a34a">✓ saved to disk</span>'; })
+      .catch(e => { saveBtn.disabled = false; statusEl.innerHTML = '<span class="err">save failed — ' + esc(e.message) + '</span>'; });
+  });
+})();
+</script>
+{% endblock %}
