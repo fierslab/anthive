@@ -591,6 +591,15 @@ async def index(request: Request):
     })
 
 
+def _is_admin(request: Request) -> bool:
+    """True when Authelia forwarded a Remote-Groups header containing 'admins'.
+    The proxy (Caddy/nginx) sets it from the SSO session; un-proxied access has
+    no header → not admin. This only gates SHOWING/serving the admin UI — the
+    authoritative write gate is server-side in ant-serve."""
+    groups = request.headers.get('remote-groups') or ''
+    return 'admins' in [g.strip() for g in groups.split(',') if g.strip()]
+
+
 @router.get("/browse/{browse_id}", response_class=HTMLResponse)
 async def folder_view(request: Request, browse_id: str):
     group_id = unquote(browse_id)
@@ -629,6 +638,24 @@ async def folder_view(request: Request, browse_id: str):
         "datasets": datasets,
         "collection_pills": collection_meta['pills'],
         "var_fields": collection_meta['var_fields'],
+        "is_admin": _is_admin(request),
+    })
+
+
+@router.get("/admin/edit/{browse_id}", response_class=HTMLResponse)
+async def edit_collection_view(request: Request, browse_id: str):
+    """Admin-only editor for a collection's index.md (frontmatter + markdown
+    body). Loads/saves via ant-serve's /collections/{group}/source endpoint,
+    which writes to disk. The /admin/* path is also gated at the proxy."""
+    group_id = unquote(browse_id)
+    if not _is_admin(request):
+        return templates.TemplateResponse(
+            request, "index.html",
+            {"folders": [], "error": "Not authorized — admin only."},
+            status_code=403,
+        )
+    return templates.TemplateResponse(request, "edit_collection.html", {
+        "group_id": group_id,
     })
 
 

@@ -1,6 +1,15 @@
 # DESIGN — Metadata editing CMS (build design)
 
-Status: **approach proven, ready to schedule.** The make-or-break spike passed
+> **SUPERSEDED for v1 (2026-06-27).** Mark chose a far leaner path than the
+> Decap/Codeberg CMS below: a **minimal in-app admin editor** — an Authelia
+> admins-only page in the web UI that edits a collection's `index.md`
+> (frontmatter fields + a markdown body editor) and **writes it straight to disk**
+> on the server; the admin handles git. Built: web `/admin/edit/{group}` +
+> `edit_collection.html` (admins-gated); needs ant-serve `GET/PUT
+> /collections/{group}/source`. The Decap/Codeberg design below is kept as the
+> heavier alternative if requirements ever grow (multi-curator, PR review, etc.).
+
+Status: **(Decap path) approach proven, not the chosen v1.** The make-or-break spike passed
 live on 2026-06-27 (CORS + PKCE login + browser-direct write to Codeberg — see
 `DESIGN_metadata_editing.md` for the exploration trail, options comparison, and
 spike log). This doc is the build-ready design: what to build, who owns each

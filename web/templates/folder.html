@@ -41,7 +41,9 @@
     {{ folder_name }}
     {% if group_id and group_id != folder_name %}<span class="slug">({{ group_id }})</span>{% endif %}
 </div>
-<h1 class="page-title">{{ folder_name }}</h1>
+<h1 class="page-title">{{ folder_name }}
+  {% if is_admin %}<a href="/admin/edit/{{ group_id|urlencode }}" class="chip" style="font-size:11px;font-weight:normal;vertical-align:middle" title="edit this collection's index.md (admin)">✎ edit</a>{% endif %}
+</h1>
 
 {% if collection_pills %}
 <div class="coll-meta" title="metadata shared by every dataset in this collection">

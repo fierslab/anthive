@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+
+{% block title %}Edit {{ group_id }} — anthive admin{% endblock %}
+
+{% block content %}
+<style>
+  .edit-wrap { max-width: 920px; }
+  .ef-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; }
+  .ef-row label { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--text-muted); margin-bottom: 2px; }
+  .ef-row input[type=text] { width: 100%; padding: 5px 8px; border: 1px solid var(--border); border-radius: 5px; font-family: var(--font); font-size: 13px; outline: none; }
+  .ef-row input:focus { border-color: var(--link); }
+  .md-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  #md-body { width: 100%; min-height: 360px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; font-family: var(--font-mono); font-size: 12px; line-height: 1.5; resize: vertical; outline: none; }
+  #md-body:focus { border-color: var(--link); }
+  #md-preview { border: 1px solid var(--border-light); border-radius: 6px; padding: 10px 12px; overflow: auto; min-height: 360px; background: #fff; font-size: 13px; line-height: 1.6; }
+  .edit-actions { display: flex; gap: 12px; align-items: center; margin: 12px 0; }
+  #ed-save { background: var(--link); color: #fff; border: none; border-radius: 6px; padding: 7px 18px; font-size: 13px; cursor: pointer; }
+  #ed-save:disabled { opacity: .5; cursor: default; }
+  #ed-status { font-size: 12px; }
+  .ed-note { font-size: 11px; color: var(--text-muted); }
+  @media (max-width: 700px) { .ef-grid, .md-split { grid-template-columns: 1fr; } }
+</style>
+
+<div class="breadcrumb"><a href="/">datasets</a> / <a href="/browse/{{ group_id|urlencode }}">{{ group_id }}</a> / edit</div>
+<h1 class="page-title">Edit collection <span class="mono">{{ group_id }}</span>
+  <span class="info" title="Admin only. Writes index.md directly to disk on the server. The data store is a git repo — commit/push the change yourself afterwards.">ⓘ</span></h1>
+
+<div id="ed-loading" class="muted" style="font-size:12px">loading index.md…</div>
+
+<div id="ed-form" class="edit-wrap" style="display:none">
+  <h2>Metadata</h2>
+  <div id="ef-fields" class="ef-grid"></div>
+
+  <h2 style="margin-top:14px">Markdown <span class="ed-note">— the collection's index.md body</span></h2>
+  <div class="md-split">
+    <textarea id="md-body" spellcheck="true" placeholder="# Collection notes…"></textarea>
+    <div id="md-preview"></div>
+  </div>
+
+  <div class="edit-actions">
+    <button id="ed-save" type="button">Save to disk</button>
+    <span id="ed-status"></span>
+  </div>
+  <div class="ed-note">Saved directly to <code>{{ group_id }}/index.md</code> in the data repo. It's git — review &amp; commit the change yourself.</div>
+</div>
+
+<div id="ed-error" class="plot-status"></div>
+
+<script>
+(function () {
+  const GROUP = {{ group_id|tojson }};
+  const SRC = '/api/collections/' + encodeURIComponent(GROUP) + '/source';
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  let original = {};   // full loaded frontmatter — preserves complex keys we don't render
+
+  const loading = document.getElementById('ed-loading'),
+        formBox = document.getElementById('ed-form'),
+        fields  = document.getElementById('ef-fields'),
+        body    = document.getElementById('md-body'),
+        preview = document.getElementById('md-preview'),
+        saveBtn = document.getElementById('ed-save'),
+        statusEl= document.getElementById('ed-status'),
+        errBox  = document.getElementById('ed-error');
+
+  // tiny markdown preview (headings / bold / italic / code / lists / links)
+  function inline(s) {
+    return s.replace(/`([^`]+)`/g, '<code>$1</code>')
+            .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+            .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+            .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, t, u) => /^https?:\/\//.test(u) ? '<a href="' + esc(u) + '" target="_blank" rel="noopener">' + t + '</a>' : t);
+  }
+  function md(src) {
+    return esc(src).split(/\n{2,}/).map(blk => {
+      const h = blk.match(/^\s*(#{1,3})\s+(.*)$/);
+      if (h) return '<h' + h[1].length + '>' + inline(h[2]) + '</h' + h[1].length + '>';
+      if (/^\s*[-*]\s/.test(blk)) return '<ul>' + blk.split(/\n/).map(l => '<li>' + inline(l.replace(/^\s*[-*]\s+/, '')) + '</li>').join('') + '</ul>';
+      return '<p>' + inline(blk).replace(/\n/g, '<br>') + '</p>';
+    }).join('');
+  }
+  function syncPreview() { preview.innerHTML = md(body.value); }
+  body.addEventListener('input', syncPreview);
+
+  const isScalar = v => v === null || ['string', 'number', 'boolean'].includes(typeof v);
+  const isScalarList = v => Array.isArray(v) && v.every(isScalar);
+
+  // Render scalar + scalar-list frontmatter as text inputs; leave complex keys
+  // (dicts, lists-of-objects e.g. `annotation`) untouched in `original`.
+  function renderFields(fm) {
+    fields.innerHTML = '';
+    Object.keys(fm).forEach(k => {
+      const v = fm[k];
+      if (!(isScalar(v) || isScalarList(v))) return;
+      const row = document.createElement('div'); row.className = 'ef-row';
+      const lab = document.createElement('label'); lab.textContent = k + (isScalarList(v) ? ' (comma-separated)' : ''); row.appendChild(lab);
+      const inp = document.createElement('input'); inp.type = 'text'; inp.dataset.key = k;
+      inp.dataset.kind = isScalarList(v) ? 'list' : (typeof v === 'number' ? 'number' : 'scalar');
+      inp.value = isScalarList(v) ? v.join(', ') : (v == null ? '' : String(v));
+      row.appendChild(inp); fields.appendChild(row);
+    });
+  }
+  function collectFrontmatter() {
+    const fm = Object.assign({}, original);   // keeps complex keys
+    fields.querySelectorAll('input[data-key]').forEach(inp => {
+      const k = inp.dataset.key, kind = inp.dataset.kind, raw = inp.value.trim();
+      if (kind === 'list') fm[k] = raw === '' ? [] : raw.split(',').map(x => x.trim()).filter(Boolean);
+      else if (kind === 'number') fm[k] = raw === '' ? null : (isNaN(Number(raw)) ? raw : Number(raw));
+      else fm[k] = raw;
+    });
+    return fm;
+  }
+
+  fetch(SRC, { credentials: 'same-origin' })
+    .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 140)); }))
+    .then(d => {
+      loading.style.display = 'none'; formBox.style.display = '';
+      original = d.frontmatter || {};
+      renderFields(original);
+      body.value = d.body || ''; syncPreview();
+      if (!d.exists) statusEl.innerHTML = '<span class="muted">no index.md yet — saving will create it</span>';
+    })
+    .catch(e => { loading.style.display = 'none'; errBox.innerHTML = '<span class="err">could not load index.md — ' + esc(e.message) + '</span>'; });
+
+  saveBtn.addEventListener('click', () => {
+    saveBtn.disabled = true; statusEl.innerHTML = '<span class="muted">saving…</span>';
+    fetch(SRC, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
+      body: JSON.stringify({ frontmatter: collectFrontmatter(), body: body.value })
+    })
+      .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 180)); }))
+      .then(() => { saveBtn.disabled = false; statusEl.innerHTML = '<span style="color:#16a34a">✓ saved to disk</span>'; })
+      .catch(e => { saveBtn.disabled = false; statusEl.innerHTML = '<span class="err">save failed — ' + esc(e.message) + '</span>'; });
+  });
+})();
+</script>
+{% endblock %}
