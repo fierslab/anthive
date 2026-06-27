@@ -563,6 +563,47 @@ def _print_priority_plan(rows: list, policy: dict, free_now: int,
         print(f"  projected free afterwards: {_fmt_size(rows[-1]['projected_free'])}")
 
 
+def _ant_serve_url(cfg: dict) -> str:
+    """Base URL of this instance's ant-serve, from anthive.yaml."""
+    host = cfg.get('rest_api_host') or 'localhost'
+    if host in ('0.0.0.0', '::'):
+        host = 'localhost'
+    return f"http://{host}:{cfg.get('rest_api_port', 8080)}"
+
+
+def _admin_post(base_url: str, path: str, timeout: float = 120.0):
+    """Best-effort POST to an ant-serve /admin endpoint.
+
+    Returns the HTTP status (int) or None if ant-serve is unreachable. Never
+    raises — the sync must proceed even when the server is down (in which case
+    no handles are held, so there is nothing to coordinate anyway).
+    """
+    import urllib.request
+    import urllib.error
+    try:
+        req = urllib.request.Request(base_url + path, method='POST')
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status
+    except urllib.error.HTTPError as exc:
+        return exc.code            # e.g. 404 (db not in the catalog) — fine
+    except Exception:
+        return None                # server down / unreachable — fine
+
+
+def _db_id_from_rel(rel: str) -> str:
+    return rel[:-len('.duckdb')] if rel.endswith('.duckdb') else rel
+
+
+def _release_db(base_url: str, rel: str) -> None:
+    """Tell ant-serve to drop its handle on a duckdb BEFORE we unlink/overwrite
+    it, so the freed blocks are actually reclaimed (an open fd on a deleted file
+    pins ~its full size until the process closes it — the leak we saw)."""
+    import urllib.parse
+    db_id = urllib.parse.quote(_db_id_from_rel(rel), safe='/')
+    _admin_post(base_url, f"/admin/release/{db_id}"
+                          "?duration_seconds=3600&drain_timeout_seconds=15")
+
+
 def _run_priority(args, policy: dict, s3_cfg: dict, data_folder: Path, *,
                   do_evict: bool, do_pull: bool, dry_run: bool) -> None:
     """Unified mode='priority' driver — fill the disk with the highest-priority
@@ -590,6 +631,8 @@ def _run_priority(args, policy: dict, s3_cfg: dict, data_folder: Path, *,
 
     import os
     evicted = freed = pulled = skipped_no_room = touched = 0
+    api_url = _ant_serve_url(get_config())
+    overwritten_ids: list = []   # PULL* db_ids → restore (reopen fresh) afterwards
 
     # Realign timestamps for size-matching local files (no transfer) so they
     # read as current next run — kills spurious re-pulls and any rotation.
@@ -607,6 +650,7 @@ def _run_priority(args, policy: dict, s3_cfg: dict, data_folder: Path, *,
                 continue
             path = data_folder / row['rel']
             if path.exists():
+                _release_db(api_url, row['rel'])   # close ant-serve's fd first
                 path.unlink()
                 evicted += 1
                 freed += row['local_size']
@@ -632,6 +676,9 @@ def _run_priority(args, policy: dict, s3_cfg: dict, data_folder: Path, *,
                     skipped_no_room += 1
                     continue
             path.parent.mkdir(parents=True, exist_ok=True)
+            if row['status'] == 'PULL*':
+                _release_db(api_url, row['rel'])   # close handle before overwrite
+                overwritten_ids.append(_db_id_from_rel(row['rel']))
             verb = 'OVERWRITE' if row['status'] == 'PULL*' else 'DOWNLOAD'
             print(f"  {verb} {row['rel']}  ({_fmt_size(row['size'])})")
             client.download_file(
@@ -642,6 +689,18 @@ def _run_priority(args, policy: dict, s3_cfg: dict, data_folder: Path, *,
             # next run (idempotent — no re-pull of an unchanged file).
             os.utime(path, (row['mtime'], row['mtime']))
             pulled += 1
+
+    # Reopen overwritten dbs + refresh the catalog so ant-serve serves the
+    # fresh files and forgets the evicted ones (best-effort; skipped silently
+    # if ant-serve isn't running).
+    if evicted or pulled:
+        import urllib.parse
+        for db_id in overwritten_ids:
+            _admin_post(api_url, f"/admin/restore/{urllib.parse.quote(db_id, safe='/')}")
+        status = _admin_post(api_url, "/admin/rescan", timeout=600)
+        print("ant-serve catalog refresh: "
+              + ("ok" if status == 200
+                 else f"skipped (ant-serve not reachable / status={status})"))
 
     print(f"\nDone.  pulled={pulled}  realigned={touched}  "
           f"evicted={evicted} ({_fmt_size(freed)})"
