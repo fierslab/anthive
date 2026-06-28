@@ -9,6 +9,10 @@
   .ef-row label { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--text-muted); margin-bottom: 2px; }
   .ef-row input[type=text] { width: 100%; padding: 5px 8px; border: 1px solid var(--border); border-radius: 5px; font-family: var(--font); font-size: 13px; outline: none; }
   .ef-row input:focus { border-color: var(--link); }
+  .ai-chip { display: inline-block; margin-top: 3px; background: #f5f3ff; border: 1px solid #ddd6fe; color: #6d28d9; border-radius: 8px; padding: 1px 8px; font-size: 11px; cursor: pointer; font-family: inherit; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+  .ai-chip:hover { background: #ede9fe; }
+  .ai-chip.applied { background: #dcfce7; border-color: #bbf7d0; color: #166534; cursor: default; }
+  #ai-mus-note { display: none; font-size: 11px; color: var(--text-muted); margin: 8px 0; }
   .ef-row .ef-static { padding: 5px 8px; border: 1px dashed var(--border); border-radius: 5px; font-size: 12px; color: var(--text-muted); background: #f8fafc; font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #md-body { width: 100%; min-height: 320px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; font-family: var(--font-mono); font-size: 12px; line-height: 1.5; resize: vertical; outline: none; }
   #md-body:focus { border-color: var(--link); }
@@ -30,6 +34,7 @@
 <div id="ed-form" class="edit-wrap" style="display:none">
   <h2>Editable</h2>
   <div id="ef-fields" class="ef-grid"></div>
+  <div id="ai-mus-note" title="biology annotation lives in the .h5ad.mus sidecar — no editor for it yet"></div>
 
   <h2 style="margin-top:14px">Long Description <span class="ed-note">— the dataset's .md body (markdown)</span>
     <button id="md-toggle" type="button" class="chip" style="font-size:11px;font-weight:normal;vertical-align:middle">👁 preview</button></h2>
@@ -135,6 +140,46 @@
     return fm;
   }
 
+  // AI curation (REST 2.22): GET /curation → for each .md.<field> proposal,
+  // show a "✨ AI suggests" chip on that input (click fills it; reject = ignore).
+  // .mus.* proposals (biology, in the sidecar) can't be applied here yet — list
+  // them as a pending note. Restrained by design, so usually only a field or two.
+  function fmtProposed(v) { return Array.isArray(v) ? v.join(', ') : (v == null ? '' : String(v)); }
+  function loadCuration() {
+    fetch('/api/databases/' + DB_ID.split('/').map(encodeURIComponent).join('/') + '/curation', { credentials: 'same-origin' })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (!d || !d.proposals) return;
+        var musNotes = [];
+        Object.keys(d.proposals).forEach(function (path) {
+          var p = d.proposals[path];
+          var conf = (p.confidence != null) ? Math.round(p.confidence * 100) + '%' : '';
+          if (path.indexOf('.md.') === 0) {
+            var inp = fields.querySelector('input[data-key="' + path.slice(4) + '"]');
+            var row = inp && inp.closest('.ef-row'); if (!row) return;
+            var proposed = fmtProposed(p.proposed);
+            var chip = document.createElement('button');
+            chip.type = 'button'; chip.className = 'ai-chip';
+            chip.textContent = '✨ ' + proposed;
+            chip.title = (p.rationale || 'AI suggestion') + (conf ? ' · confidence ' + conf : '') + ' — click to use';
+            chip.addEventListener('click', function () {
+              if (chip.classList.contains('applied')) return;
+              inp.value = proposed; inp.focus();
+              chip.classList.add('applied'); chip.textContent = '✓ applied';
+            });
+            row.appendChild(chip);
+          } else if (path.indexOf('.mus.') === 0) {
+            musNotes.push(path.slice(5) + ' → ' + esc(fmtProposed(p.proposed)) + (conf ? ' (' + conf + ')' : ''));
+          }
+        });
+        if (musNotes.length) {
+          var note = document.getElementById('ai-mus-note');
+          if (note) { note.innerHTML = '✨ AI also suggests (biology — edit via the .mus sidecar, not wired here yet): ' + musNotes.join(' · '); note.style.display = 'block'; }
+        }
+      })
+      .catch(function () {});
+  }
+
   fetch(SRC, { credentials: 'same-origin' })
     .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 140)); }))
     .then(d => {
@@ -143,6 +188,7 @@
       addEditable(original); addReadonly(original);
       body.value = d.body || '';
       if (!d.exists) statusEl.innerHTML = '<span class="muted">no .md yet — saving will create it</span>';
+      loadCuration();
     })
     .catch(e => { loading.style.display = 'none'; errBox.innerHTML = '<span class="err">could not load .md — ' + esc(e.message) + '</span>'; });
 
