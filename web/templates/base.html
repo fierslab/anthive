@@ -235,7 +235,16 @@
         #chat-log { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; font-size: 11.5px; line-height: 1.5; }
         .chat-msg { max-width: 86%; padding: 7px 10px; border-radius: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
         .chat-msg.user { align-self: flex-end; background: var(--link); color: #fff; border-bottom-right-radius: 3px; }
-        .chat-msg.assistant { align-self: flex-start; background: #f1f5f9; color: var(--text); border-bottom-left-radius: 3px; }
+        .chat-msg.assistant { align-self: flex-start; background: #f1f5f9; color: var(--text); border-bottom-left-radius: 3px; position: relative; }
+        .msg-flag { position: absolute; top: 1px; right: 3px; border: none; background: none; cursor: pointer; font-size: 11px; color: #94a3b8; opacity: 0; transition: opacity .1s; padding: 0 2px; line-height: 1; }
+        .chat-msg.assistant:hover .msg-flag { opacity: .55; }
+        .msg-flag:hover { opacity: 1; color: #dc2626; }
+        .flag-form { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+        .flag-form select, .flag-form input { font-size: 10.5px; padding: 2px 4px; border: 1px solid #cbd5e1; border-radius: 5px; font-family: var(--font); background: #fff; color: var(--text); }
+        .flag-form input { flex: 1; min-width: 90px; }
+        .flag-send { font-size: 10.5px; padding: 2px 10px; background: var(--link); color: #fff; border: none; border-radius: 5px; cursor: pointer; }
+        .flag-send:disabled { opacity: .5; }
+        .flag-thanks { font-size: 10.5px; color: #16a34a; }
         /* rendered-markdown assistant bubbles (analytics tables, lists, code) */
         .chat-msg.assistant.md { white-space: normal; }
         .chat-msg.assistant.md p { margin: 0 0 6px; } .chat-msg.assistant.md p:last-child { margin-bottom: 0; }
@@ -571,6 +580,47 @@
         logBox.appendChild(d); logBox.scrollTop = logBox.scrollHeight; return d;
       }
 
+      // ── per-message feedback flag (REST 2.24) ──────────────────────────────
+      // A subtle ⚑ on each assistant reply opens a tiny "this could be better"
+      // form → POST /api/chat/feedback {session_id, turn_seq, round_idx, category,
+      // comment?}. Private dev-team signal, not a public vote. Needs the message's
+      // turn_seq/round_idx (from the message_start frame, or the history row).
+      var FEEDBACK_CATS = ['could be better', 'wrong answer', 'bad plot', 'misinterpreted me'];
+      // Record the turn/round on the bubble (survives textContent/innerHTML
+      // rewrites during streaming). The ⚑ button is added LATER (addFlagButton),
+      // after the final markdown render, so it isn't wiped by content updates.
+      function tagFlaggable(el, turnSeq, roundIdx) {
+        if (el && turnSeq != null) { el.dataset.turn = turnSeq; el.dataset.round = (roundIdx == null ? 0 : roundIdx); }
+      }
+      function addFlagButton(el) {
+        if (!el || el.dataset.turn == null || el.querySelector('.msg-flag')) return;
+        var btn = document.createElement('button');
+        btn.type = 'button'; btn.className = 'msg-flag'; btn.title = 'flag this reply for the dev team'; btn.textContent = '⚑';
+        btn.addEventListener('click', function (ev) { ev.stopPropagation(); openFlagForm(el); });
+        el.appendChild(btn);
+      }
+      function openFlagForm(el) {
+        if (el.querySelector('.flag-form')) return;
+        var form = document.createElement('div'); form.className = 'flag-form';
+        var sel = document.createElement('select');
+        FEEDBACK_CATS.forEach(function (c) { var o = document.createElement('option'); o.value = c; o.textContent = c; sel.appendChild(o); });
+        var inp = document.createElement('input'); inp.type = 'text'; inp.placeholder = 'optional comment'; inp.maxLength = 1024;
+        var send = document.createElement('button'); send.type = 'button'; send.className = 'flag-send'; send.textContent = 'send';
+        send.addEventListener('click', function () {
+          send.disabled = true;
+          fetch('/api/chat/feedback', {
+            method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(Object.assign({ session_id: sid, turn_seq: +el.dataset.turn, round_idx: +el.dataset.round, category: sel.value },
+                                               inp.value.trim() ? { comment: inp.value.trim() } : {}))
+          })
+            .then(function (r) { return r.ok; })
+            .then(function (ok) { form.innerHTML = ok ? '<span class="flag-thanks">✓ thanks — flagged for review</span>' : '<span class="flag-thanks">⚠ couldn’t send</span>'; })
+            .catch(function () { form.innerHTML = '<span class="flag-thanks">⚠ couldn’t send</span>'; });
+        });
+        form.appendChild(sel); form.appendChild(inp); form.appendChild(send);
+        el.appendChild(form); logBox.scrollTop = logBox.scrollHeight; sel.focus();
+      }
+
       // ── safe markdown for assistant replies (GFM tables, lists, code, bold,
       //    links). The bot's analytics answers are often markdown tables, so a
       //    plain-text bubble shows pipe-soup. Everything is HTML-escaped FIRST,
@@ -634,7 +684,7 @@
         logBox.innerHTML = '';
         if (!msgs || !msgs.length) { showEmpty(); return; }
         msgs.forEach(function (m) {
-          if (m.role === 'assistant') { renderAssistantInto(addMsg('assistant', ''), m.content || ''); return; }
+          if (m.role === 'assistant') { var ab = addMsg('assistant', ''); renderAssistantInto(ab, m.content || ''); tagFlaggable(ab, m.turn_seq, m.round_idx); addFlagButton(ab); return; }
           if (m.role !== 'action') { addMsg(m.role, m.content); return; }
           // action role: content is the JSON-stringified SSE frame (anthive4 #248).
           // Discriminate on the parsed payload so nothing shows as raw JSON.
@@ -1025,7 +1075,17 @@
           addMsg('user', message);
           var l = localLog(); l.push({ role: 'user', content: message }); saveLocal(l);
         }
-        var asstEl = null, asstText = '';
+        var asstEl = null, asstText = '', turnText = '', curTurn = null, curRound = 0;
+        // Render+persist the current round's bubble and close it (so the next
+        // round starts a fresh, separately-flaggable bubble).
+        function finalizeAsst() {
+          if (asstEl && asstText) {
+            renderAssistantInto(asstEl, asstText);
+            addFlagButton(asstEl);   // ⚑ added after the final render so it isn't wiped
+            var a = localLog(); a.push({ role: 'assistant', content: asstText }); saveLocal(a);
+          }
+          asstEl = null; asstText = '';
+        }
         showActivity('Thinking…');     // immediate feedback before the first frame
         fetch('/api/chat', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
@@ -1037,10 +1097,13 @@
           if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status);
           var reader = resp.body.getReader(), dec = new TextDecoder(), buf = '';
           function handle(ev) {
-            if (ev.type === 'token') {
+            if (ev.type === 'message_start') {
+              finalizeAsst();   // close the previous tool round's bubble
+              curTurn = ev.turn_seq; curRound = (ev.round_idx == null ? 0 : ev.round_idx);
+            } else if (ev.type === 'token') {
               clearActivity();
-              if (!asstEl) asstEl = addMsg('assistant', '');
-              asstText += (ev.text || ''); asstEl.textContent = asstText; logBox.scrollTop = logBox.scrollHeight;
+              if (!asstEl) { asstEl = addMsg('assistant', ''); tagFlaggable(asstEl, curTurn, curRound); }
+              asstText += (ev.text || ''); turnText += (ev.text || ''); asstEl.textContent = asstText; logBox.scrollTop = logBox.scrollHeight;
               armIdle();                         // re-show "Working…" if it goes quiet again
             } else if (ev.type === 'action') { clearActivity(); stopIdle(); doAction(ev); }
             else if (ev.type === 'error')   { clearActivity(); stopIdle(); showError(ev.message, ev.code, ev.retry_after); }
@@ -1049,12 +1112,12 @@
           }
           function finish() {
             streaming = false; sendBtn.disabled = false; clearActivity(); stopIdle();
-            if (asstText) { var a = localLog(); a.push({ role: 'assistant', content: asstText }); saveLocal(a); if (asstEl) renderAssistantInto(asstEl, asstText); }
+            finalizeAsst();   // render + persist the last round's bubble
             // Recover a navigate the bot described in a leaked <server-log/> tag but
             // never fired as a real action frame (anthive4 #246 mimicry bug). Guarded
             // by safeNavUrl + preflight, and only when no real navigate happened.
-            if (!navFired && asstText) {
-              var slu = serverLogNavUrl(asstText), su = slu && safeNavUrl(slu);
+            if (!navFired && turnText) {
+              var slu = serverLogNavUrl(turnText), su = slu && safeNavUrl(slu);
               if (su) { navFired = true; tryNavigate(su); }
             }
             fetchUsage();   // refresh cost/token counter after the turn
