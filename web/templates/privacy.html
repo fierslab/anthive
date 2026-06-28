@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+
+{% block title %}Privacy &amp; data — anthive{% endblock %}
+
+{% block content %}
+<style>
+  .priv { max-width: 760px; }
+  .priv h1 { font-size: 20px; font-weight: 600; margin: 4px 0 4px; }
+  .priv .draft { font-size: 11px; color: #b45309; background: #fffbeb; border: 1px solid #fde68a; border-radius: 5px; padding: 5px 9px; margin: 6px 0 14px; }
+  .priv h2 { font-size: 14px; margin: 16px 0 4px; border-bottom: 1px solid var(--border); padding-bottom: 2px; }
+  .priv p, .priv li { font-size: 13px; line-height: 1.6; }
+  .priv ul { margin: 4px 0 4px 18px; }
+  .priv .k { font-weight: 600; }
+</style>
+
+<div class="breadcrumb"><a href="/">datasets</a> / privacy</div>
+
+<div class="priv">
+  <h1>Chat assistant — privacy &amp; data handling</h1>
+  <div class="draft">Draft wording — under review. The mechanics are live; the text below may change.</div>
+
+  <p>This note covers the in-app <strong>data assistant</strong> (the chat box). It does
+     not change how the rest of the catalogue works.</p>
+
+  <h2>What we store</h2>
+  <ul>
+    <li>Every message you send, the assistant's replies, the tool calls it runs and
+        their results, and per-message token/cost counts.</li>
+    <li>Held in a database on this server, linked to your KU&nbsp;Leuven (Authelia) login,
+        kept indefinitely.</li>
+  </ul>
+
+  <h2>Who can see it</h2>
+  <p>The deployment admins (Mark Fiers &amp; co.), for debugging, improving the
+     assistant, and reviewing feedback you flag. Not public; not shared with third
+     parties beyond the AI provider below.</p>
+
+  <h2>Who processes your prompts</h2>
+  <p>To generate a reply, your message plus catalogue context are sent to
+     <span class="k">OpenRouter</span>, which routes to an upstream model provider
+     (Anthropic, OpenAI, Google, … depending on the chosen model). These providers
+     have their own retention and training policies — assume your text may be
+     retained unless an opt-out is configured.</p>
+
+  <h2>What we never send</h2>
+  <p>Your single-cell <strong>data itself never leaves this server</strong>. The tools
+     return summarised numbers and chart links to the model — never raw expression
+     matrices or cell-level data.</p>
+
+  <h2>Your controls</h2>
+  <ul>
+    <li>If you don't open the chat, or don't send a message, nothing is transmitted.</li>
+    <li>To review or delete your stored chat history, contact
+        <a href="mailto:mark.fiers@kuleuven.be">Mark Fiers</a>.</li>
+  </ul>
+
+  <h2>Legal basis</h2>
+  <p><em>To confirm — internal research tool, processed under GDPR Art.&nbsp;6(1)(f)
+     (legitimate interest). This line will be finalised by the data owner.</em></p>
+</div>
+{% endblock %}

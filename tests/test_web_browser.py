@@ -482,6 +482,24 @@ def test_chat_widget_present_and_status_gated(client):
     assert "#chat-launcher" in resp.text and "display: none" in resp.text
 
 
+def test_chat_consent_gate_present(client):
+    # One-time privacy consent gate lives in the panel and acks via POST.
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert 'id="chat-gate"' in resp.text
+    assert 'id="chat-ack-btn"' in resp.text
+    assert "/api/chat/ack" in resp.text
+    # links to the standalone privacy note
+    assert 'href="/privacy"' in resp.text
+
+
+def test_privacy_page_renders(client):
+    resp = client.get("/privacy")
+    assert resp.status_code == 200
+    assert "privacy" in resp.text.lower()
+    assert "never leaves this server" in resp.text
+
+
 def test_index_renders_with_multiple_collections_no_redirect(client):
     # Sanity: with the default fake (two groups), '/' renders the overview;
     # the single-collection auto-jump must not fire here.

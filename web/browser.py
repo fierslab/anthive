@@ -1075,6 +1075,12 @@ async def about_view(request: Request):
     })
 
 
+@router.get("/privacy", response_class=HTMLResponse)
+async def privacy_view(request: Request):
+    """Chat-assistant privacy & data-handling note. Draft copy — to be revised."""
+    return templates.TemplateResponse(request, "privacy.html", {})
+
+
 @router.get("/genes/{gene}", response_class=HTMLResponse)
 async def gene_view(request: Request, gene: str):
     """Single-gene cross-catalogue atlas — where is {gene} expressed?
