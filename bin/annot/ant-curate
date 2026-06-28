@@ -1,0 +1,362 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "openai>=1.30.0",
+#   "pyyaml>=6.0",
+# ]
+# ///
+"""ant-curate — propose curation edits for one dataset using an LLM.
+
+Phase 1 (this version): single-shot call. The LLM reads the dataset's
+.md + .h5ad.mus + a sample of obs columns and proposes curation edits
+for a small set of fields:
+
+  Catalog (.md):
+    - title         (one-line human title)
+    - description   (one-line summary; new field per the editor work)
+    - top_genes     (proposed gene panel based on organism + cell_type)
+    - top_cat       (highlight-worthy categorical obs columns)
+    - top_num       (highlight-worthy numerical obs columns)
+
+  Annotation (.h5ad.mus) — only when MISSING in the existing sidecar:
+    - organism
+    - tissue
+    - cell_type
+    - disease
+    - suspension_type
+    - technology
+
+Output: tmp/curation/<db_id>.yaml (gitignored, ephemeral). NEVER writes
+to .md or .h5ad.mus directly — that's the editor's job. The structure
+is designed so the metadata editor can render each proposal next to the
+current value with an accept/reject button.
+
+USAGE
+
+  ant-curate <db_id>                 # propose, write tmp/curation/<db_id>.yaml
+  ant-curate <db_id> --print         # also print the YAML to stdout
+  ant-curate <db_id> --model MODEL   # override anthive.yaml chat.model
+  ant-curate <db_id> --show-prompt   # print the prompt + payload, no LLM call
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
+import json
+import sys
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import yaml
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_LIB_DIR = _SCRIPT_DIR.parent.parent / 'lib'
+sys.path.insert(0, str(_LIB_DIR))
+
+from chat_config import load_chat_config        # noqa: E402
+from config import get_config                   # noqa: E402
+from h5adstore import find_h5ad                  # noqa: E402
+from metadata import parse_md_file               # noqa: E402
+from mus import parse_mus_file, read_cascade     # noqa: E402
+
+
+# ── prompt ────────────────────────────────────────────────────────────────────
+
+SYSTEM_PROMPT = """\
+You are a curation assistant for the anthive single-cell RNA-seq catalogue.
+You are looking at ONE dataset. Your job is to propose curation edits to
+its catalogue metadata and its experimental annotation sidecar.
+
+RULES
+
+- You output ONE JSON object with a "proposals" key. No prose. No markdown.
+- For every field listed in the field set, EITHER propose a value OR set
+  it to null. NEVER hallucinate. A null is always better than a guess.
+- If the current value is already set and reasonable, propose null (leave
+  it). Only propose a NEW value when you can improve on what's there or
+  the field is missing.
+- For each proposal, include `confidence` (0.0..1.0) and a one-line
+  `rationale` quoting what evidence led to the value.
+- Stay within the controlled vocabulary where one exists (mus vocab for
+  organism/tissue/cell_type/disease/suspension_type/technology).
+- top_genes / top_cat / top_num: 5–12 entries each. For top_cat / top_num,
+  the values must EXACTLY MATCH a column name in the dataset's obs sample
+  you were shown — never invent column names.
+
+FIELD SET + VOCAB
+
+  .md.title           — one-line human title; defaults to file basename
+  .md.description     — one-line plain-English summary (≤ 200 chars)
+  .md.top_genes       — list of gene symbols, organism-appropriate
+  .md.top_cat         — list of obs categorical column names
+  .md.top_num         — list of obs numerical column names
+
+  .mus.organism       — "human" | "mouse" | "rat" | ... (mus vocab)
+  .mus.tissue         — mus vocab term (often "brain" subterms)
+  .mus.cell_type      — mus vocab term (often "microglial cell", etc.)
+  .mus.disease        — mus vocab term ("Alzheimer disease", "control", ...)
+  .mus.suspension_type — "cell" | "nucleus"
+  .mus.technology     — mus vocab term ("10x_chromium", "10x_chromium_v3", ...)
+
+OUTPUT SHAPE
+
+{
+  "proposals": {
+    "<field_path>": {
+      "current": <existing value or null>,
+      "proposed": <new value or null>,
+      "confidence": <float 0..1>,
+      "rationale": "<one sentence>"
+    },
+    ...
+  }
+}
+
+Where <field_path> is one of:
+  ".md.title", ".md.description", ".md.top_genes", ".md.top_cat", ".md.top_num",
+  ".mus.organism", ".mus.tissue", ".mus.cell_type", ".mus.disease",
+  ".mus.suspension_type", ".mus.technology"
+
+Omit fields you cannot judge — partial output is fine.
+"""
+
+
+def build_user_payload(db_id: str, md: Dict[str, Any], mus: Dict[str, Any],
+                       obs_sample: Dict[str, Any]) -> str:
+    """Render the per-dataset context as a compact, structured user message."""
+    lines: List[str] = [
+        f"DATASET: {db_id}",
+        "",
+        "── Current .md catalog metadata ──",
+        f"  title:        {md.get('title')!r}",
+        f"  description:  {md.get('description')!r}",
+        f"  year:         {md.get('year')!r}",
+        f"  doi:          {md.get('doi')!r}",
+        f"  default_layer:{md.get('default_layer')!r}",
+        f"  top_genes:    {md.get('top_genes')!r}",
+        f"  top_cat:      {md.get('top_cat')!r}",
+        f"  top_num:      {md.get('top_num')!r}",
+        "",
+        "── Current .h5ad.mus annotation (resolved with .env cascade) ──",
+        f"  organism:        {mus.get('organism')!r}",
+        f"  tissue:          {mus.get('tissue')!r}",
+        f"  cell_type:       {mus.get('cell_type')!r}",
+        f"  disease:         {mus.get('disease')!r}",
+        f"  suspension_type: {mus.get('suspension_type')!r}",
+        f"  technology:      {mus.get('technology')!r}",
+        f"  source:          {mus.get('source')!r}",
+        f"  access:          {mus.get('access')!r}",
+        "",
+        "── obs column sample (first 60 columns, types only) ──",
+    ]
+    cats = obs_sample.get('categorical') or []
+    nums = obs_sample.get('numerical') or []
+    if cats:
+        lines.append("  categorical: " + ", ".join(cats[:60]))
+    if nums:
+        lines.append("  numerical:   " + ", ".join(nums[:60]))
+    body = md.get('markdown_body')
+    if body:
+        lines.append("")
+        lines.append("── Existing .md markdown body (first 1200 chars) ──")
+        lines.append(str(body)[:1200])
+    return "\n".join(lines)
+
+
+# ── obs sample reader (light — no expression data) ────────────────────────────
+
+
+def read_obs_sample(duckdb_path: Path) -> Dict[str, List[str]]:
+    """Pull the categorical + numerical obs column NAMES (not values) from the
+    duckdb. We avoid sending actual cell values — the column LIST is enough
+    for the LLM to propose top_cat / top_num.
+
+    Returns ``{'categorical': [...], 'numerical': [...]}``. Empty lists
+    when the duckdb is missing or read fails — the LLM just skips those
+    fields.
+    """
+    out: Dict[str, List[str]] = {'categorical': [], 'numerical': []}
+    if not duckdb_path.exists():
+        return out
+    try:
+        import duckdb  # noqa: PLC0415 — heavy import; only when we have a file
+    except ImportError:
+        return out
+    conn = duckdb.connect(str(duckdb_path), read_only=True)
+    try:
+        for view, key in (('obscat', 'categorical'), ('obsnum', 'numerical')):
+            try:
+                rows = conn.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = ? AND column_name NOT IN ('cell_name', 'cell_id') "
+                    "ORDER BY column_name",
+                    [view],
+                ).fetchall()
+                out[key] = [row[0] for row in rows]
+            except Exception:
+                pass
+    finally:
+        conn.close()
+    return out
+
+
+# ── proposal post-processing ──────────────────────────────────────────────────
+
+
+_VALID_FIELD_PATHS = {
+    '.md.title', '.md.description',
+    '.md.top_genes', '.md.top_cat', '.md.top_num',
+    '.mus.organism', '.mus.tissue', '.mus.cell_type',
+    '.mus.disease', '.mus.suspension_type', '.mus.technology',
+}
+
+
+def filter_proposals(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep only well-shaped proposals — drop hallucinated field_paths or
+    entries missing a `proposed` value. The editor renders only what we keep.
+    """
+    proposals = raw.get('proposals') or {}
+    if not isinstance(proposals, dict):
+        return {}
+    keep: Dict[str, Any] = {}
+    for field_path, entry in proposals.items():
+        if field_path not in _VALID_FIELD_PATHS:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if entry.get('proposed') is None:
+            continue
+        # Coerce confidence into [0, 1].
+        confidence = entry.get('confidence')
+        try:
+            confidence = float(confidence) if confidence is not None else 0.5
+            confidence = max(0.0, min(1.0, confidence))
+        except (TypeError, ValueError):
+            confidence = 0.5
+        keep[field_path] = {
+            'current': entry.get('current'),
+            'proposed': entry.get('proposed'),
+            'confidence': round(confidence, 2),
+            'rationale': str(entry.get('rationale') or '')[:280],
+        }
+    return keep
+
+
+# ── main ──────────────────────────────────────────────────────────────────────
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog='ant-curate',
+        description='Propose curation edits for one dataset (single-shot LLM).',
+    )
+    parser.add_argument('db_id',
+                        help='Dataset id (e.g. S25/V6A) or path to .duckdb / .h5ad / .md')
+    parser.add_argument('--model', default=None,
+                        help='Override anthive.yaml chat.model for this call.')
+    parser.add_argument('--print', dest='print_proposals', action='store_true',
+                        help='Print the proposals YAML to stdout as well as writing.')
+    parser.add_argument('--show-prompt', action='store_true',
+                        help='Print the prompt + payload that WOULD be sent and exit.')
+    args = parser.parse_args()
+
+    cfg = get_config()
+    data_root = Path(cfg.get('data_folder', './data/h5adstore')).resolve()
+
+    entry = find_h5ad(data_root, args.db_id)
+    if entry is None:
+        print(f"ant-curate: dataset not found — {args.db_id!r}", file=sys.stderr)
+        return 1
+
+    # Read current state.
+    md, md_body = parse_md_file(entry.md_path)
+    md['markdown_body'] = md_body
+    # mus uses cascade: parent .env's contribute, then per-dataset .h5ad.mus.
+    h5ad_path = entry.h5ad_path
+    mus_data = read_cascade(h5ad_path.parent, root=data_root)
+    direct_mus = parse_mus_file(h5ad_path.with_suffix('.h5ad.mus'))
+    mus_data.update(direct_mus)
+
+    obs_sample = read_obs_sample(entry.duckdb_path)
+
+    user_payload = build_user_payload(entry.db_id, md, mus_data, obs_sample)
+
+    if args.show_prompt:
+        print("── SYSTEM ──")
+        print(SYSTEM_PROMPT)
+        print()
+        print("── USER ──")
+        print(user_payload)
+        return 0
+
+    # LLM call.
+    chat_cfg = load_chat_config(cfg)
+    if not chat_cfg.api_key:
+        print("ant-curate: chat.api_key not set in anthive.yaml — "
+              "ant-curate uses the chat agent's OpenRouter creds. "
+              "Configure chat.api_key (and chat.enabled=true) first.",
+              file=sys.stderr)
+        return 2
+
+    model = args.model or chat_cfg.model
+    try:
+        from openai import OpenAI  # noqa: PLC0415
+    except ImportError:
+        print("ant-curate: openai package missing — should be in this "
+              "script's PEP-723 deps. uv lock probably needs a refresh.",
+              file=sys.stderr)
+        return 2
+
+    client = OpenAI(api_key=chat_cfg.api_key, base_url=chat_cfg.base_url)
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {'role': 'system', 'content': SYSTEM_PROMPT},
+            {'role': 'user',   'content': user_payload},
+        ],
+        response_format={'type': 'json_object'},
+        temperature=0.2,
+    )
+    raw_content = response.choices[0].message.content or '{}'
+    try:
+        raw = json.loads(raw_content)
+    except json.JSONDecodeError as exc:
+        print(f"ant-curate: model returned non-JSON content: {exc}",
+              file=sys.stderr)
+        print(raw_content, file=sys.stderr)
+        return 3
+
+    proposals = filter_proposals(raw)
+
+    # Persist to tmp/curation/<db_id>.yaml. The slash in db_id is fine on
+    # POSIX, but we replace it with __ to keep a flat file structure under
+    # tmp/curation/ — easy to scan / wipe.
+    out_dir = _SCRIPT_DIR.parent.parent / 'tmp' / 'curation'
+    out_dir.mkdir(parents=True, exist_ok=True)
+    safe_id = entry.db_id.replace('/', '__')
+    out_path = out_dir / f"{safe_id}.yaml"
+
+    record: Dict[str, Any] = {
+        'db_id': entry.db_id,
+        'generated_at': _dt.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'model': model,
+        'n_proposals': len(proposals),
+        'proposals': proposals,
+    }
+    with out_path.open('w', encoding='utf-8') as f:
+        yaml.dump(record, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+    print(f"  ✓ wrote {out_path.relative_to(_SCRIPT_DIR.parent.parent)} "
+          f"({len(proposals)} proposal(s))")
+
+    if args.print_proposals or len(proposals) == 0:
+        print()
+        print(yaml.dump(record, default_flow_style=False, sort_keys=False, allow_unicode=True))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

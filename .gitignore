@@ -103,3 +103,4 @@ config/authelia/assets/logo.original.png
 # (= codeberg.org/mfiers/pyvark) is NOT excluded.
 /vark/
 .vark/
+tmp/curation/
