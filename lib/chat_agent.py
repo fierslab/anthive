@@ -385,8 +385,16 @@ async def run_turn(
         # generator with CancelledError). Without the finally, the
         # post-navigate page rehydrate finds an empty assistant row
         # and the user thinks "the bot didn't reply".
+        # Per-round persistence: each tool round that emits assistant
+        # text becomes its OWN assistant row, tagged with (turn_seq,
+        # round_idx). Per anthive-web pika #260 — per-message feedback
+        # needs stable per-message ids exposed on /chat/history. Same
+        # split for action frames: each action belongs to the round
+        # whose tool call produced it.
+        round_texts: Dict[int, List[str]] = {}                 # round_idx → text parts
+        round_actions: List[Tuple[int, Dict[str, Any]]] = []   # (round_idx, frame)
+        # Back-compat alias the rest of the loop still appends to.
         assistant_text_parts: List[str] = []
-        action_frames_in_turn: List[Dict[str, Any]] = []
         _persisted = False
 
         def _persist_history_now() -> None:
@@ -395,11 +403,21 @@ async def run_turn(
                 return
             _persisted = True
             try:
-                text = ''.join(assistant_text_parts).strip()
-                if text:
-                    history_store.append(user, session_id, 'assistant', text)
-                for frame in action_frames_in_turn:
-                    history_store.append_action(user, session_id, frame)
+                # One assistant row per non-empty round. Empty rounds
+                # (pure tool calls, no text) get skipped.
+                for r_idx in sorted(round_texts.keys()):
+                    text = ''.join(round_texts[r_idx]).strip()
+                    if text:
+                        history_store.append(
+                            user, session_id, 'assistant', text,
+                            turn_seq=turn_seq, round_idx=r_idx,
+                        )
+                # Action rows tagged with their owning round.
+                for r_idx, frame in round_actions:
+                    history_store.append_action(
+                        user, session_id, frame,
+                        turn_seq=turn_seq, round_idx=r_idx,
+                    )
             except Exception as p_exc:  # noqa: BLE001
                 log.warning("chat: history persist failed — %s", p_exc)
 
@@ -471,6 +489,18 @@ async def run_turn(
 
                     # Plain text tokens.
                     if delta.content:
+                        # Emit a per-message marker on the FIRST token of
+                        # this round (and never again until the next round
+                        # that produces text). The web client uses this to
+                        # group tokens under a stable (turn_seq, round_idx)
+                        # message id — needed for per-message feedback
+                        # targeting (anthive-web pika #260).
+                        if not round_text_parts:
+                            yield _sse({
+                                'type': 'message_start',
+                                'turn_seq': turn_seq,
+                                'round_idx': round_idx,
+                            })
                         round_text_parts.append(delta.content)
                         yield _sse({'type': 'token', 'text': delta.content})
 
@@ -498,6 +528,11 @@ async def run_turn(
                 text_this_round = ''.join(round_text_parts)
                 if text_this_round:
                     assistant_text_parts.append(text_this_round)
+                    # Stash per-round text so _persist_history_now can write
+                    # ONE assistant row per round (with its turn_seq/round_idx)
+                    # — per pika #260, the web needs per-message identity for
+                    # the feedback flag.
+                    round_texts[round_idx] = round_text_parts
 
                 # Persist this LLM call's usage if OpenRouter surfaced
                 # one. Pydantic/openai-typed object — read with getattr
@@ -631,7 +666,7 @@ async def run_turn(
                                 }
                             else:
                                 frame = {'type': 'action', 'name': name, 'args': args}
-                            action_frames_in_turn.append(frame)
+                            round_actions.append((round_idx, frame))
                             yield _sse(frame)
                             tool_result = {'queued': True}
                     else:

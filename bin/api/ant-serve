@@ -1350,7 +1350,7 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.23.0"
+API_VERSION = "2.24.0"
 API_VERSION_RELEASED = "2026-06-28"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
@@ -1646,24 +1646,114 @@ def _chat_user_from_request(request: Request) -> str:
 
 
 @app.get("/chat/status", tags=["chat"])
-async def chat_status():
-    """Whether the in-app chat assistant is available on this deployment.
+async def chat_status(request: Request):
+    """Whether the in-app chat assistant is available + (per-user) ack state.
 
     Always reachable (no 404 in any state). Returns
-    ``{"enabled": true, "model": "<id>"}`` when fully active, else
-    ``{"enabled": false}``. The web client polls this on every page
-    load and only renders the chat widget when ``enabled`` is true.
+    ``{"enabled": true, "model": "<id>", "acknowledged": <bool>}``
+    when fully active, else ``{"enabled": false}``. The web client
+    polls this on every page load: only renders the chat widget when
+    ``enabled`` is true, AND only unblocks input when ``acknowledged``
+    is true (the privacy-notice gate, per pika 2026-06-28 #260).
 
     Three states roll up into the wire response:
 
-      - chat.enabled=true + api_key present → {enabled: true, model: …}
+      - chat.enabled=true + api_key present → {enabled: true, model: …, acknowledged: bool}
       - chat.enabled=true + no api_key       → {enabled: false}   (silently off + startup warning)
       - chat.enabled=false                   → {enabled: false}   (default)
-
-    Contract locked with anthive-web in pika #217/§9.
     """
     cfg = load_chat_config(get_config())
-    return status_payload(cfg)
+    payload = status_payload(cfg)
+    if payload.get('enabled'):
+        # Look up the per-user acknowledgement. Robust to missing
+        # Remote-User (returns acknowledged=False for unauthenticated /
+        # probe traffic — those callers shouldn't be opening the chat
+        # widget anyway).
+        try:
+            user = _chat_user_from_request(request)
+            store = _get_chat_history(cfg)
+            payload['acknowledged'] = bool(store.is_acknowledged(user))
+        except Exception:
+            payload['acknowledged'] = False
+    return payload
+
+
+@app.post("/chat/ack", tags=["chat"], status_code=204)
+async def chat_ack(request: Request):
+    """Record that the current user has acknowledged the privacy notice.
+
+    Per pika 2026-06-28 #260: server-side ack keyed on Remote-User so it
+    survives across browsers / devices. Idempotent — re-acking is a
+    no-op. The web blocks the chat panel behind the privacy notice
+    until /chat/status returns ``acknowledged: true``.
+
+    Returns 204. 404 when the chat assistant is not active.
+    """
+    cfg = load_chat_config(get_config())
+    if not cfg.active:
+        raise HTTPException(status_code=404, detail="chat assistant is not active")
+    user = _chat_user_from_request(request)
+    store = _get_chat_history(cfg)
+    store.acknowledge(user)
+    return Response(status_code=204)
+
+
+class _ChatFeedbackBody(BaseModel):
+    """POST /chat/feedback — per-message feedback flag (pika #260)."""
+    session_id: str
+    turn_seq: int
+    round_idx: int
+    category: str          # one of ChatHistory.VALID_FEEDBACK_CATEGORIES
+    comment: Optional[str] = None
+
+
+@app.post("/chat/feedback", tags=["chat"])
+async def chat_feedback_post(request: Request, body: _ChatFeedbackBody):
+    """Record a user-submitted feedback flag against ONE assistant message.
+
+    Identifies the target message by (session_id, turn_seq, round_idx) —
+    same identifiers the SSE ``message_start`` frame and /chat/history
+    rows expose. Stored attributed to Remote-User; never shown back to
+    users.
+
+    Returns ``{ok: true}``. 400 on invalid category, 404 when chat off.
+    """
+    cfg = load_chat_config(get_config())
+    if not cfg.active:
+        raise HTTPException(status_code=404, detail="chat assistant is not active")
+    user = _chat_user_from_request(request)
+    store = _get_chat_history(cfg)
+    # Trim comments. Comments live in chat_history.db; a runaway essay
+    # there is dead weight.
+    comment = (body.comment or '').strip()[:1024] or None
+    try:
+        store.append_feedback(
+            user, body.session_id, body.turn_seq, body.round_idx,
+            body.category, comment,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {'ok': True}
+
+
+@app.get("/chat/feedback", tags=["chat"])
+async def chat_feedback_list(request: Request, limit: int = 50):
+    """Admin-gated triage view of recent feedback flags.
+
+    Returns ``{count, items: [{...}]}`` with the most recent rows first.
+    Each item carries the surrounding assistant message content so the
+    reviewer doesn't have to chase it down.
+
+    Refuses non-admin callers — per pika #260, feedback content is for
+    the dev team only.
+    """
+    cfg = load_chat_config(get_config())
+    if not cfg.active:
+        raise HTTPException(status_code=404, detail="chat assistant is not active")
+    _require_admin(request)
+    store = _get_chat_history(cfg)
+    items = store.recent_feedback(limit=limit)
+    return {'count': len(items), 'items': items}
 
 
 class _ChatPostBody(BaseModel):
