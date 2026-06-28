@@ -1350,7 +1350,7 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.22.0"
+API_VERSION = "2.23.0"
 API_VERSION_RELEASED = "2026-06-28"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
@@ -2435,6 +2435,72 @@ async def get_obs_summary(db_id: str):
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── obs-column click tracking (anthive-web pika #259 — Mark go) ──────────────
+#
+# Tiny SQLite counter. POST increments on every user plot click; GET returns
+# the most-popular obs columns per dataset. The dataset page renders these as
+# a "frequently used" chip row above the curated favourites.
+#
+# Storage: tmp/obs_clicks.db. Survives ant-serve restarts but is per-host
+# (not synced to S3). Wipe at any time — purely usage data.
+
+_obs_click_store_instance: 'Optional[Any]' = None
+
+
+def _get_obs_click_store():
+    """Lazy singleton. Path is fixed at tmp/obs_clicks.db under repo root."""
+    global _obs_click_store_instance
+    if _obs_click_store_instance is None:
+        from obs_clicks import ObsClickStore  # noqa: PLC0415
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        _obs_click_store_instance = ObsClickStore(repo_root / 'tmp' / 'obs_clicks.db')
+    return _obs_click_store_instance
+
+
+class ObsClickBody(BaseModel):
+    column: str
+
+
+@app.post("/databases/{db_id:path}/obs_click", tags=["databases"], status_code=204)
+async def post_obs_click(db_id: str, body: ObsClickBody):
+    """Fire-and-forget: bump the click counter for (db_id, column).
+
+    Intentionally NOT admin-gated — any plot interaction by any visitor
+    counts as usage. Response is 204 (no content) so the keepalive fetch
+    from the navigating browser doesn't waste bytes on a body.
+
+    Rejects unsafe column names (anything with a slash, leading dot, or
+    over 200 chars) — basic sanity check. We don't validate the column
+    exists in the dataset; a stale click on a recently-renamed column
+    just sits in the counter table until next wipe.
+    """
+    column = (body.column or '').strip()
+    if not column or '/' in column or column.startswith('.') or len(column) > 200:
+        raise HTTPException(status_code=400, detail="invalid column name")
+    try:
+        store = _get_obs_click_store()
+        await asyncio.to_thread(store.click, db_id, column)
+    except Exception as exc:
+        # Don't fail the click — log + swallow.
+        log.warning("obs_click store write failed: %s", exc)
+    return Response(status_code=204)
+
+
+@app.get("/databases/{db_id:path}/obs_top", tags=["databases"])
+async def get_obs_top(db_id: str, n: int = 8):
+    """Top-N most-clicked obs columns for ``db_id``.
+
+    Returns ``{"columns": [{"column": "...", "count": N}, ...]}`` ordered
+    by count desc. Empty list when nothing's been clicked yet (the web
+    just hides the "frequently used" row in that case).
+    """
+    if n < 1 or n > 100:
+        raise HTTPException(status_code=400, detail="n must be between 1 and 100")
+    store = _get_obs_click_store()
+    columns = await asyncio.to_thread(store.top, db_id, n)
+    return {'columns': columns}
 
 
 # ── curation proposals (AI-suggested edits, read-only here) ──────────────────

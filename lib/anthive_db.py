@@ -189,23 +189,38 @@ class AnthiveDB:
 
         return [row[0] for row in result]
 
-    def obs_summary(self) -> Dict[str, Dict[str, Any]]:
+    def obs_summary(self, top_n_categories: int = 3) -> Dict[str, Dict[str, Any]]:
         """Per-obs-column summary stats for the dataset-page right-column.
 
-        One bulk call. Uses DuckDB's ``SUMMARIZE`` on the ``obscat`` and
-        ``obsnum`` views, which is a single scan per view yielding
-        min/max/q25/q50/q75/approx_unique/null_percentage per column.
+        Uses DuckDB's ``SUMMARIZE`` on ``obscat`` and ``obsnum`` for the
+        cheap aggregates, plus two follow-up queries to fill in the stats
+        SUMMARIZE doesn't carry:
+
+          - q05 / q95 on numerical columns (one bulk SELECT with
+            quantile_cont calls — one scan over obsnum).
+          - top-N value frequency on categorical columns (one
+            small GROUP BY per column; per-column scan but fast on
+            obscat which is narrow).
 
         Returns a dict keyed on column name:
-          - categorical: {'type': 'cat', 'n_unique': int, 'pct_missing': float}
-          - numerical:   {'type': 'num', 'min': num, 'max': num,
-                          'median': num, 'pct_missing': float}
+          - categorical: {'type': 'cat', 'n_unique', 'pct_missing',
+                          'top': [{value, count, pct}, ...]}
+          - numerical:   {'type': 'num', 'min', 'q05', 'mean', 'median',
+                          'q95', 'max', 'pct_missing'}
 
         Missing values are reported as ``pct_missing`` (0-100). Empty
         when neither obscat nor obsnum exists in this dataset.
         """
         out: Dict[str, Dict[str, Any]] = {}
         skip_cols = {'cell_name', 'cell_id'}
+
+        def _coerce_num(value):
+            if value is None:
+                return None
+            try:
+                return float(value)
+            except (ValueError, TypeError):
+                return None
 
         for view_name, kind in (('obscat', 'cat'), ('obsnum', 'num')):
             exists = (self._conn.execute(
@@ -235,15 +250,20 @@ class AnthiveDB:
                 ix_min = cols.index('min')
                 ix_max = cols.index('max')
                 ix_q50 = cols.index('q50')
+                ix_avg = cols.index('avg')
                 ix_unique = cols.index('approx_unique')
                 ix_nullpct = cols.index('null_percentage')
             except ValueError:
                 continue
 
+            # Collect the per-column rows + the column-name list (we need
+            # it for the follow-up q05/q95 + top-categories queries).
+            col_names: list = []
             for row in rows:
                 name = row[ix_name]
                 if name in skip_cols:
                     continue
+                col_names.append(name)
                 null_pct_raw = row[ix_nullpct]
                 pct_missing = float(null_pct_raw) if null_pct_raw is not None else 0.0
                 if kind == 'cat':
@@ -251,22 +271,75 @@ class AnthiveDB:
                         'type': 'cat',
                         'n_unique': int(row[ix_unique]) if row[ix_unique] is not None else 0,
                         'pct_missing': round(pct_missing, 2),
+                        'top': [],   # populated below
                     }
                 else:
-                    def _coerce_num(value):
-                        if value is None:
-                            return None
-                        try:
-                            return float(value)
-                        except (ValueError, TypeError):
-                            return None
                     out[name] = {
                         'type': 'num',
                         'min': _coerce_num(row[ix_min]),
                         'max': _coerce_num(row[ix_max]),
                         'median': _coerce_num(row[ix_q50]),
+                        'mean': _coerce_num(row[ix_avg]),
+                        # q05 / q95 are filled in by the follow-up scan below.
+                        'q05': None, 'q95': None,
                         'pct_missing': round(pct_missing, 2),
                     }
+
+            # ─── follow-up #1: q05 / q95 on numerical columns (bulk) ───
+            if kind == 'num' and col_names:
+                quant_exprs = []
+                for name in col_names:
+                    ident = safe_ident(name)
+                    quant_exprs.append(f'quantile_cont({ident}, 0.05)')
+                    quant_exprs.append(f'quantile_cont({ident}, 0.95)')
+                try:
+                    quant_row = self._conn.execute(
+                        f"SELECT {', '.join(quant_exprs)} FROM {view_name}"
+                    ).fetchone()
+                except Exception:
+                    quant_row = None
+                if quant_row is not None:
+                    for idx, name in enumerate(col_names):
+                        out[name]['q05'] = _coerce_num(quant_row[idx * 2])
+                        out[name]['q95'] = _coerce_num(quant_row[idx * 2 + 1])
+
+            # ─── follow-up #2: top-N categorical values per column ───
+            # Per-column GROUP BY query. obscat is narrow and DuckDB is
+            # fast; with ~50 categorical columns this completes in
+            # ~hundreds of ms. The endpoint is called once per dataset-
+            # page load, not per user interaction.
+            if kind == 'cat' and col_names and top_n_categories > 0:
+                # Total non-missing count (per column) needed for `pct`.
+                # We re-derive it from pct_missing instead of issuing
+                # another COUNT — saves a roundtrip.
+                total_rows = (self._conn.execute(
+                    f"SELECT COUNT(*) FROM {view_name}"
+                ).fetchone() or (0,))[0]
+                for name in col_names:
+                    ident = safe_ident(name)
+                    try:
+                        rows_top = self._conn.execute(
+                            f"SELECT {ident}, COUNT(*) AS n "
+                            f"FROM {view_name} WHERE {ident} IS NOT NULL "
+                            f"GROUP BY {ident} ORDER BY n DESC LIMIT ?",
+                            [top_n_categories],
+                        ).fetchall()
+                    except Exception:
+                        continue
+                    non_missing = max(
+                        0,
+                        int(total_rows * (1.0 - out[name]['pct_missing'] / 100.0)),
+                    ) if total_rows else 0
+                    top_items = []
+                    for value, count in rows_top:
+                        pct = (100.0 * count / non_missing) if non_missing else 0.0
+                        top_items.append({
+                            'value': str(value) if value is not None else None,
+                            'count': int(count),
+                            'pct': round(pct, 2),
+                        })
+                    out[name]['top'] = top_items
+
         return out
 
     def search_genes(self, query: str, case_sensitive: bool = False,
