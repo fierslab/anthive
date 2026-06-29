@@ -139,6 +139,61 @@ def parse_mus_file(path: Path) -> Annotation:
     return out
 
 
+def _serialize_value(value: VocValue) -> str:
+    """Render a Python value back to the `.h5ad.mus` KEY=VALUE form.
+
+    - List → comma-separated. Items containing commas / quotes get
+      double-quoted.
+    - String → as-is. Empty string OK (round-trips an explicit empty).
+    - None  → empty string.
+    Other types are stringified via str().
+    """
+    if value is None:
+        return ''
+    if isinstance(value, list):
+        items = []
+        for entry in value:
+            entry_str = str(entry)
+            needs_quote = (',' in entry_str) or ('"' in entry_str)
+            if needs_quote:
+                escaped = entry_str.replace('"', '\\"')
+                items.append(f'"{escaped}"')
+            else:
+                items.append(entry_str)
+        return ','.join(items)
+    return str(value)
+
+
+def write_mus_file(path: Path, annotation: Annotation) -> None:
+    """Write a per-dataset ``.h5ad.mus`` sidecar (KEY=VALUE format).
+
+    Behaviour:
+      - Keys sorted alphabetically for stable diffs.
+      - Existing file content is REPLACED (not merged). The caller is
+        responsible for round-tripping any pre-existing keys it wants
+        to preserve — typical pattern: call ``parse_mus_file(path)``,
+        update the dict in place, pass to ``write_mus_file()``.
+      - Empty values are written as ``key=`` (explicit). Drop the key
+        from ``annotation`` instead if you want to remove it.
+      - Atomic via write-tmp-then-rename so a concurrent reader never
+        sees a partial file.
+
+    Validation is the CALLER'S job. ``lib.mus.validate_value()`` is
+    the right pre-write gate; this helper only handles serialization
+    + atomic write.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for key in sorted(annotation.keys()):
+        value = annotation[key]
+        lines.append(f"{key}={_serialize_value(value)}")
+    body = '\n'.join(lines) + '\n'
+    tmp_path = path.with_suffix(path.suffix + '.tmp')
+    tmp_path.write_text(body, encoding='utf-8')
+    tmp_path.replace(path)
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # Cascade resolution
 # ─────────────────────────────────────────────────────────────────────────

@@ -1350,7 +1350,7 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.24.0"
+API_VERSION = "2.25.0"
 API_VERSION_RELEASED = "2026-06-28"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
@@ -2235,6 +2235,160 @@ async def put_dataset_source(
         'ok': True,
         'path': str(rel),
         'overlaid_fields': overlay_fields,
+    }
+
+
+# ── .h5ad.mus sidecar editor (admin-only) ────────────────────────────────────
+#
+# Sibling pair to /databases/{db_id}/source — same shape, same admin
+# gate. Edits the PER-DATASET .h5ad.mus sidecar (NOT the .env cascade).
+# Editor uses this to apply curation proposals against fields like
+# cell_type, organism, tissue, disease, suspension_type, technology —
+# anthive-web pika 2026-06-28 #260 → #263.
+#
+# Vocab gate: every field with a controlled vocabulary (via
+# lib.mus.is_controlled() + validate_value()) is checked before write.
+# Hallucinated values from the LLM curator can't land here even if
+# the editor passes them through.
+
+# Fields locked from client edits on the .mus side: machine-generated
+# identity / integrity / timestamp keys that this endpoint must
+# preserve verbatim.
+_MUS_LOCKED_FIELDS: Set[str] = {
+    'sha256', 'created', 'updated',
+}
+
+
+@app.get("/databases/{db_id:path}/source.mus", tags=["databases"])
+async def get_dataset_mus_source(db_id: str, request: Request):
+    """Read a dataset's per-dataset ``.h5ad.mus`` sidecar.
+
+    Returns the PER-DATASET fields (what's literally in the sidecar
+    file) AND the cascade-RESOLVED view (per-dataset + folder-level
+    .env cascade). The editor uses ``fields`` to show what the user
+    can directly edit and ``resolved`` to show the effective value
+    (incl. inherited-from-folder).
+
+    Missing sidecar → ``exists: false`` with empty fields. Never 404
+    on the existence axis.
+    """
+    _require_admin(request)
+    from h5adstore import find_h5ad   # noqa: PLC0415
+    from mus import parse_mus_file, read_cascade, sidecar_path  # noqa: PLC0415
+
+    entry = find_h5ad(registry.data_folder, db_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"unknown db_id {db_id!r}")
+    mus_path = sidecar_path(entry.h5ad_path)
+    direct_fields = parse_mus_file(mus_path)
+    # Cascade-resolved (per-dataset overlays the folder .env cascade).
+    cascade = read_cascade(entry.h5ad_path.parent, root=registry.data_folder)
+    resolved = dict(cascade)
+    resolved.update(direct_fields)
+    rel = mus_path.relative_to(registry.data_folder) if mus_path.is_absolute() and registry.data_folder in mus_path.parents else mus_path.name
+    return {
+        'exists': mus_path.is_file(),
+        'db_id': entry.db_id,
+        'path': str(rel),
+        'fields': direct_fields,
+        'resolved': resolved,
+    }
+
+
+class DatasetMusBody(BaseModel):
+    fields: Dict[str, Any]
+
+
+@app.put("/databases/{db_id:path}/source.mus", tags=["databases"])
+async def put_dataset_mus_source(
+    db_id: str,
+    payload: DatasetMusBody,
+    request: Request,
+):
+    """Write a dataset's ``.h5ad.mus`` sidecar.
+
+    Mechanics (mirrors the .md editor's verbatim-preserve + selective-
+    overlay contract — pika #260):
+
+      1. Read existing per-dataset .h5ad.mus into a dict.
+      2. Force machine fields (sha256/created/updated) back to their
+         existing values — the client cannot mutate them. ``updated``
+         is bumped to NOW server-side so downstream tooling can tell
+         "the curator touched this".
+      3. Vocab-gate every client field via lib.mus.validate_value().
+         Any controlled field with an out-of-vocab value rejects the
+         whole write with 400 + the list of bad fields.
+      4. Overlay the client fields onto the existing dict.
+      5. Write atomically via ``write_mus_file``.
+
+    Returns {ok, path, written_fields}.
+    """
+    _require_admin(request)
+    from h5adstore import find_h5ad   # noqa: PLC0415
+    from mus import (   # noqa: PLC0415
+        parse_mus_file, sidecar_path, write_mus_file,
+        is_controlled, validate_value, _as_list,
+    )
+    import datetime as _dt  # noqa: PLC0415
+
+    entry = find_h5ad(registry.data_folder, db_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"unknown db_id {db_id!r}")
+    mus_path = sidecar_path(entry.h5ad_path)
+    existing = parse_mus_file(mus_path) if mus_path.is_file() else {}
+
+    client_fields = dict(payload.fields or {})
+
+    # Strip locked fields from client input — log the attempt.
+    for key in list(client_fields.keys()):
+        if key in _MUS_LOCKED_FIELDS:
+            client_value = client_fields.pop(key)
+            existing_value = existing.get(key)
+            if client_value != existing_value and log is not None:
+                log.warning(
+                    "dataset .mus edit: client tried to mutate locked field "
+                    "%r on %s (ignored; kept %r)",
+                    key, db_id, existing_value,
+                )
+
+    # Vocab gate. For controlled fields, every list item must be in vocab.
+    invalid: list = []
+    for key, value in client_fields.items():
+        if not is_controlled(key):
+            continue
+        for item in _as_list(value):
+            item_str = str(item)
+            if not validate_value(key, item_str):
+                invalid.append(f"{key}={item_str!r}")
+    if invalid:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"mus vocab gate refused {len(invalid)} field value(s) — "
+                    f"not in the controlled vocabulary: {', '.join(invalid)}"),
+        )
+
+    # Merge: existing + client overrides + machine-preserved fields.
+    new_fields = dict(existing)
+    new_fields.update(client_fields)
+    # Re-pin the locked fields verbatim from existing (sha256 / created
+    # / updated). 'updated' gets bumped to now since the curator
+    # touched the file.
+    for key in _MUS_LOCKED_FIELDS:
+        if key in existing:
+            new_fields[key] = existing[key]
+    new_fields['updated'] = _dt.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    try:
+        write_mus_file(mus_path, new_fields)
+    except Exception as exc:
+        raise HTTPException(status_code=500,
+                            detail=f"failed to write {mus_path}: {exc}")
+
+    rel = mus_path.relative_to(registry.data_folder) if (mus_path.is_absolute() and registry.data_folder in mus_path.parents) else mus_path.name
+    return {
+        'ok': True,
+        'path': str(rel),
+        'written_fields': sorted(client_fields.keys()),
     }
 
 
