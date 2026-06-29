@@ -23,6 +23,17 @@
   #ed-status { font-size: 12px; }
   .ed-note { font-size: 11px; color: var(--text-muted); }
   @media (max-width: 700px) { .ef-grid { grid-template-columns: 1fr; } }
+  .ef-row select { width: 100%; padding: 5px 8px; border: 1px solid var(--border); border-radius: 5px; font-family: var(--font); font-size: 13px; outline: none; background: #fff; }
+  .ef-row select:focus { border-color: var(--link); }
+  .req-star { color: #dc2626; margin-left: 2px; }
+  .mus-tag { font-size: 9px; text-transform: uppercase; letter-spacing: .3px; padding: 0 4px; border-radius: 6px; margin-left: 6px; vertical-align: middle; }
+  .mus-tag.inherited { color: #92400e; background: #fef3c7; }
+  .mus-tag.ctrl { color: #3730a3; background: #e0e7ff; }
+  .ef-row input.off-vocab { border-color: #f59e0b; background: #fffbeb; }
+  #mus-loading { font-size: 12px; }
+  #mus-save { background: var(--link); color: #fff; border: none; border-radius: 6px; padding: 7px 18px; font-size: 13px; cursor: pointer; }
+  #mus-save:disabled { opacity: .5; cursor: default; }
+  #mus-status { font-size: 12px; }
 </style>
 
 <div class="breadcrumb"><a href="/">datasets</a> / <a href="/browse/{{ group_id|urlencode }}">{{ group_id }}</a> / <a href="/browse/{{ group_id|urlencode }}/{{ file_id|urlencode }}">{{ file_id }}</a> / edit</div>
@@ -34,7 +45,20 @@
 <div id="ed-form" class="edit-wrap" style="display:none">
   <h2>Editable</h2>
   <div id="ef-fields" class="ef-grid"></div>
-  <div id="ai-mus-note" title="biology annotation lives in the .h5ad.mus sidecar — no editor for it yet"></div>
+  <div id="ai-mus-note" title="biology annotation lives in the .h5ad.mus sidecar"></div>
+
+  <h2 style="margin-top:18px">Biology annotation <span class="ed-note">— the <code>.h5ad.mus</code> sidecar (organism, tissue, cell type, …)</span>
+    <span class="info" title="Controlled fields are vocab-gated server-side: a value outside the controlled vocabulary rejects the whole save. Fields shown faded are inherited from the folder .env cascade — set one here to override it for this dataset. Saves write the .h5ad.mus sidecar (a separate file from the .md above); it's a git repo, commit yourself.">ⓘ</span></h2>
+  <div id="mus-loading" class="muted">loading .mus…</div>
+  <div id="mus-box" style="display:none">
+    <div id="mus-fields" class="ef-grid"></div>
+    <div class="edit-actions">
+      <button id="mus-save" type="button">Save annotation</button>
+      <span class="ed-note">writes the <code>.h5ad.mus</code> sidecar</span>
+      <span id="mus-status"></span>
+    </div>
+  </div>
+  <div id="mus-error" class="plot-status"></div>
 
   <h2 style="margin-top:14px">Long Description <span class="ed-note">— the dataset's .md body (markdown)</span>
     <button id="md-toggle" type="button" class="chip" style="font-size:11px;font-weight:normal;vertical-align:middle">👁 preview</button></h2>
@@ -49,7 +73,6 @@
 
   <h2 style="margin-top:14px">Read-only <span class="ed-note">— machine-generated, not editable</span></h2>
   <div id="ef-ro" class="ef-grid"></div>
-  <div class="ed-note" style="margin-top:8px">Biology annotation (organism, tissue, cell type, …) lives in the <code>.h5ad.mus</code> sidecar, edited separately — not here.</div>
 </div>
 
 <div id="ed-error" class="plot-status"></div>
@@ -140,42 +163,71 @@
     return fm;
   }
 
-  // AI curation (REST 2.22): GET /curation → for each .md.<field> proposal,
-  // show a "✨ AI suggests" chip on that input (click fills it; reject = ignore).
-  // .mus.* proposals (biology, in the sidecar) can't be applied here yet — list
-  // them as a pending note. Restrained by design, so usually only a field or two.
+  // AI curation (REST 2.22): GET /curation → for each proposal, show a
+  // "✨ AI suggests" chip on the matching field (click fills it; reject =
+  // ignore). `.md.<field>` chips land on the catalog inputs above; `.mus.<field>`
+  // chips land on the biology-annotation inputs/selects below (REST 2.25 made
+  // the .mus sidecar writable). Both attach lazily: curation and the .mus
+  // editor load in parallel, so whichever finishes second triggers the attach.
   function fmtProposed(v) { return Array.isArray(v) ? v.join(', ') : (v == null ? '' : String(v)); }
+  var curationProposals = null;   // {path: {proposed, confidence, rationale}}
+  function chipTitle(p, conf) { return (p.rationale || 'AI suggestion') + (conf ? ' · confidence ' + conf : '') + ' — click to use'; }
+  function attachMdChips() {
+    if (!curationProposals) return;
+    Object.keys(curationProposals).forEach(function (path) {
+      if (path.indexOf('.md.') !== 0) return;
+      var p = curationProposals[path];
+      var inp = fields.querySelector('input[data-key="' + path.slice(4) + '"]');
+      var row = inp && inp.closest('.ef-row'); if (!row || row.querySelector('.ai-chip')) return;
+      var conf = (p.confidence != null) ? Math.round(p.confidence * 100) + '%' : '';
+      var proposed = fmtProposed(p.proposed);
+      var chip = document.createElement('button');
+      chip.type = 'button'; chip.className = 'ai-chip';
+      chip.textContent = '✨ ' + proposed; chip.title = chipTitle(p, conf);
+      chip.addEventListener('click', function () {
+        if (chip.classList.contains('applied')) return;
+        inp.value = proposed; inp.focus();
+        chip.classList.add('applied'); chip.textContent = '✓ applied';
+      });
+      row.appendChild(chip);
+    });
+  }
+  // .mus chips need the mus fields rendered; if not yet, fall back to a note.
+  function attachMusChips() {
+    if (!curationProposals) return;
+    var orphan = [];
+    Object.keys(curationProposals).forEach(function (path) {
+      if (path.indexOf('.mus.') !== 0) return;
+      var p = curationProposals[path], key = path.slice(5);
+      var conf = (p.confidence != null) ? Math.round(p.confidence * 100) + '%' : '';
+      var proposed = fmtProposed(p.proposed);
+      var control = musLoaded ? musFields.querySelector('[data-mkey="' + key + '"]') : null;
+      var row = control && control.closest('.ef-row');
+      if (!row || row.querySelector('.ai-chip')) {
+        if (!musLoaded) orphan.push(key + ' → ' + esc(proposed) + (conf ? ' (' + conf + ')' : ''));
+        return;
+      }
+      var chip = document.createElement('button');
+      chip.type = 'button'; chip.className = 'ai-chip';
+      chip.textContent = '✨ ' + proposed; chip.title = chipTitle(p, conf);
+      chip.addEventListener('click', function () {
+        if (chip.classList.contains('applied')) return;
+        setMusControl(control, proposed); control.focus();
+        chip.classList.add('applied'); chip.textContent = '✓ applied';
+      });
+      row.appendChild(chip);
+    });
+    var note = document.getElementById('ai-mus-note');
+    if (note && orphan.length) { note.innerHTML = '✨ AI also suggests (biology): ' + orphan.join(' · '); note.style.display = 'block'; }
+    else if (note) { note.style.display = 'none'; }
+  }
   function loadCuration() {
     fetch('/api/databases/' + DB_ID.split('/').map(encodeURIComponent).join('/') + '/curation', { credentials: 'same-origin' })
       .then(r => r.ok ? r.json() : null)
       .then(d => {
         if (!d || !d.proposals) return;
-        var musNotes = [];
-        Object.keys(d.proposals).forEach(function (path) {
-          var p = d.proposals[path];
-          var conf = (p.confidence != null) ? Math.round(p.confidence * 100) + '%' : '';
-          if (path.indexOf('.md.') === 0) {
-            var inp = fields.querySelector('input[data-key="' + path.slice(4) + '"]');
-            var row = inp && inp.closest('.ef-row'); if (!row) return;
-            var proposed = fmtProposed(p.proposed);
-            var chip = document.createElement('button');
-            chip.type = 'button'; chip.className = 'ai-chip';
-            chip.textContent = '✨ ' + proposed;
-            chip.title = (p.rationale || 'AI suggestion') + (conf ? ' · confidence ' + conf : '') + ' — click to use';
-            chip.addEventListener('click', function () {
-              if (chip.classList.contains('applied')) return;
-              inp.value = proposed; inp.focus();
-              chip.classList.add('applied'); chip.textContent = '✓ applied';
-            });
-            row.appendChild(chip);
-          } else if (path.indexOf('.mus.') === 0) {
-            musNotes.push(path.slice(5) + ' → ' + esc(fmtProposed(p.proposed)) + (conf ? ' (' + conf + ')' : ''));
-          }
-        });
-        if (musNotes.length) {
-          var note = document.getElementById('ai-mus-note');
-          if (note) { note.innerHTML = '✨ AI also suggests (biology — edit via the .mus sidecar, not wired here yet): ' + musNotes.join(' · '); note.style.display = 'block'; }
-        }
+        curationProposals = d.proposals;
+        attachMdChips(); attachMusChips();
       })
       .catch(function () {});
   }
@@ -212,6 +264,156 @@
   saveBtn.addEventListener('click', function () { doSave(true); });   // Save → back to the dataset page
   document.addEventListener('keydown', function (e) {                  // Cmd/Ctrl-S → intermediate save
     if ((e.metaKey || e.ctrlKey) && (e.key === 's' || e.key === 'S')) { e.preventDefault(); doSave(false); }
+  });
+
+  // ─── Biology annotation: the .h5ad.mus sidecar (REST 2.25) ──────────────
+  // GET /source.mus → {exists, fields (per-dataset, editable), resolved (the
+  // folder .env cascade merged in)}. Controlled fields are vocab-gated on PUT;
+  // GET /mus/vocab (optional) gives the allowed values so we can render real
+  // dropdowns / datalists. No vocab endpoint → free-text, and the server's 400
+  // is the safety net. We only PUT fields the curator actually changed, so
+  // inherited values stay inherited unless explicitly overridden.
+  var MUS_SRC = '/api/databases/' + DB_ID.split('/').map(encodeURIComponent).join('/') + '/source.mus';
+  var MUS_REQUIRED = ['organism', 'tissue', 'cell_type', 'technology', 'suspension_type', 'access', 'source'];
+  var MUS_SOFT = ['disease', 'condition', 'sex', 'age', 'strain', 'contributor', 'doi', 'pmid', 'accession', 'link', 'license', 'source_description'];
+  var MUS_SELECT = ['organism', 'access', 'source', 'suspension_type', 'sex'];   // single-value, small vocab → <select>
+  var MUS_CTRL_FALLBACK = ['organism', 'access', 'source', 'suspension_type', 'sex', 'cell_type', 'technology', 'tissue', 'disease'];
+  var MUS_HIDE = ['title', 'year', 'sha256', 'created', 'updated', 'schema_version'];   // machine/duplicated — edited via .md or locked
+
+  var musFields  = document.getElementById('mus-fields'),
+      musBox     = document.getElementById('mus-box'),
+      musLoading = document.getElementById('mus-loading'),
+      musStatus  = document.getElementById('mus-status'),
+      musErr     = document.getElementById('mus-error'),
+      musSaveBtn = document.getElementById('mus-save');
+  var musLoaded = false, musVocab = null, musData = {}, musSaving = false;
+
+  function ser(v) { return Array.isArray(v) ? v.join(', ') : (v == null ? '' : String(v)); }
+  function musControlled(key) {
+    if (musVocab && musVocab.vocabulary) return Object.prototype.hasOwnProperty.call(musVocab.vocabulary, key);
+    return MUS_CTRL_FALLBACK.indexOf(key) >= 0;
+  }
+  function musAllowed(key) { return (musVocab && musVocab.vocabulary && musVocab.vocabulary[key]) ? musVocab.vocabulary[key] : null; }
+  function musRequired(key) { return ((musVocab && musVocab.required) ? musVocab.required : MUS_REQUIRED).indexOf(key) >= 0; }
+  function musNorm(s) { return String(s).toLowerCase().replace(/[\s_]+/g, ' ').trim(); }   // visual hint only; server is authoritative
+  function markVocab(control, key) {
+    var allowed = musAllowed(key);
+    if (!allowed) { control.classList.remove('off-vocab'); return; }
+    var items = control.value.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+    var bad = items.some(function (it) { return !allowed.some(function (v) { return musNorm(v) === musNorm(it); }); });
+    control.classList.toggle('off-vocab', bad);
+  }
+  function setMusControl(control, val) {
+    if (control.tagName === 'SELECT') {
+      var has = Array.prototype.some.call(control.options, function (o) { return o.value === val; });
+      if (!has) { var o = document.createElement('option'); o.value = val; o.textContent = val + ' (proposed)'; control.appendChild(o); }
+      control.value = val;
+    } else {
+      control.value = val;
+      if (control.dataset.ctrl === '1') markVocab(control, control.dataset.mkey);
+    }
+  }
+
+  function renderMusFields() {
+    musFields.innerHTML = '';
+    var fieldsD = musData.fields || {}, resolvedD = musData.resolved || {};
+    var ordered = [];
+    function pushUniq(k) { if (MUS_HIDE.indexOf(k) < 0 && ordered.indexOf(k) < 0) ordered.push(k); }
+    ((musVocab && musVocab.required) ? musVocab.required : MUS_REQUIRED).forEach(pushUniq);
+    ((musVocab && musVocab.soft) ? musVocab.soft : MUS_SOFT).forEach(pushUniq);
+    Object.keys(resolvedD).forEach(pushUniq);
+    Object.keys(fieldsD).forEach(pushUniq);
+
+    ordered.forEach(function (key) {
+      var direct = fieldsD[key], resolved = resolvedD[key];
+      var inherited = (direct == null) && (resolved != null);
+      var row = document.createElement('div'); row.className = 'ef-row';
+      var lab = document.createElement('label'); lab.textContent = key;
+      if (musRequired(key)) { var st = document.createElement('span'); st.className = 'req-star'; st.textContent = '*'; lab.appendChild(st); }
+      if (musControlled(key)) { var ct = document.createElement('span'); ct.className = 'mus-tag ctrl'; ct.textContent = 'vocab'; ct.title = 'controlled vocabulary — a value outside it is rejected on save'; lab.appendChild(ct); }
+      if (inherited) { var ih = document.createElement('span'); ih.className = 'mus-tag inherited'; ih.textContent = 'inherited'; ih.title = 'inherited from the folder .env cascade — set a value to override it for this dataset'; lab.appendChild(ih); }
+      row.appendChild(lab);
+
+      var allowed = musAllowed(key), control;
+      if (allowed && MUS_SELECT.indexOf(key) >= 0) {
+        control = document.createElement('select');
+        var blank = document.createElement('option');
+        blank.value = ''; blank.textContent = inherited ? '(inherit: ' + ser(resolved) + ')' : '—';
+        control.appendChild(blank);
+        allowed.forEach(function (v) { var o = document.createElement('option'); o.value = v; o.textContent = v; control.appendChild(o); });
+        var dv = ser(direct);
+        if (dv) {
+          if (!allowed.some(function (v) { return v === dv; })) { var off = document.createElement('option'); off.value = dv; off.textContent = dv + ' (off-vocab)'; control.appendChild(off); }
+          control.value = dv;
+        }
+      } else {
+        control = document.createElement('input'); control.type = 'text';
+        control.value = ser(direct);
+        if (inherited) control.placeholder = ser(resolved) + ' (inherited)';
+        if (allowed) {
+          var dlId = 'mus-dl-' + key, dl = document.createElement('datalist'); dl.id = dlId;
+          allowed.forEach(function (v) { var o = document.createElement('option'); o.value = v; dl.appendChild(o); });
+          control.setAttribute('list', dlId); row.appendChild(dl);
+          control.addEventListener('input', function () { markVocab(control, key); });
+        }
+      }
+      control.dataset.mkey = key;
+      control.dataset.ctrl = musControlled(key) ? '1' : '0';
+      control.dataset.orig = ser(direct);
+      if (control.dataset.ctrl === '1' && control.tagName === 'INPUT') markVocab(control, key);
+      row.appendChild(control);
+      musFields.appendChild(row);
+    });
+  }
+
+  function collectMusChanges() {
+    var changes = {};
+    musFields.querySelectorAll('[data-mkey]').forEach(function (c) {
+      var key = c.dataset.mkey, orig = c.dataset.orig || '', raw = (c.value || '').trim();
+      if (raw === orig) return;                       // untouched
+      if (raw === '') { if (orig !== '') changes[key] = ''; return; }   // cleared a direct value
+      changes[key] = raw.indexOf(',') >= 0 ? raw.split(',').map(function (s) { return s.trim(); }).filter(Boolean) : raw;
+    });
+    return changes;
+  }
+
+  function saveMus() {
+    if (musSaving) return;
+    var changes = collectMusChanges();
+    if (!Object.keys(changes).length) { musStatus.innerHTML = '<span class="muted">no changes</span>'; return; }
+    musSaving = true; musSaveBtn.disabled = true; musStatus.innerHTML = '<span class="muted">saving…</span>';
+    fetch(MUS_SRC, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
+      body: JSON.stringify({ fields: changes })
+    })
+      .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 220)); }))
+      .then(function (res) {
+        musSaving = false; musSaveBtn.disabled = false;
+        var n = (res.written_fields || Object.keys(changes)).length;
+        musStatus.innerHTML = '<span style="color:#16a34a">✓ saved ' + n + ' field' + (n === 1 ? '' : 's') + '</span>';
+        musFields.querySelectorAll('[data-mkey]').forEach(function (c) { if (c.dataset.mkey in changes) c.dataset.orig = (c.value || '').trim(); });
+      })
+      .catch(function (e) { musSaving = false; musSaveBtn.disabled = false; musStatus.innerHTML = '<span class="err">save failed — ' + esc(e.message) + '</span>'; });
+  }
+  musSaveBtn.addEventListener('click', saveMus);
+
+  // load vocab (optional) + .mus in parallel, then render
+  Promise.all([
+    fetch('/api/mus/vocab', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : null).catch(function () { return null; }),
+    fetch(MUS_SRC, { credentials: 'same-origin' })
+      .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 140)); }))
+      .catch(function (e) { return { __err: e }; })
+  ]).then(function (res) {
+    musVocab = res[0];
+    var m = res[1];
+    musLoading.style.display = 'none';
+    if (m && m.__err) { musErr.innerHTML = '<span class="err">could not load .mus — ' + esc(m.__err.message) + '</span>'; return; }
+    musData = m || {};
+    renderMusFields();
+    musBox.style.display = '';
+    if (!musData.exists) musStatus.innerHTML = '<span class="muted">no .mus yet — saving will create it</span>';
+    musLoaded = true;
+    attachMusChips();   // curation may have arrived first
   });
 })();
 </script>

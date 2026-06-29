@@ -500,6 +500,26 @@ def test_privacy_page_renders(client):
     assert "never leaves this server" in resp.text
 
 
+def test_dataset_editor_requires_admin(client):
+    # Without the Authelia admins group the edit page is refused.
+    resp = client.get("/admin/edit/GroupA/ds1", follow_redirects=False)
+    assert resp.status_code == 403
+
+
+def test_dataset_editor_mus_section_present(client):
+    # Admin → the dataset editor renders, including the .mus biology-annotation
+    # editor (REST 2.25) that talks to /source.mus and the optional /mus/vocab.
+    resp = client.get("/admin/edit/GroupA/ds1",
+                      headers={"Remote-Groups": "admins, users"})
+    assert resp.status_code == 200
+    assert 'id="mus-fields"' in resp.text
+    assert 'id="mus-save"' in resp.text
+    assert "/source.mus" in resp.text
+    assert "/api/mus/vocab" in resp.text
+    # the old "edited separately — not here" dead-end note is gone
+    assert "not wired here yet" not in resp.text
+
+
 def test_index_renders_with_multiple_collections_no_redirect(client):
     # Sanity: with the default fake (two groups), '/' renders the overview;
     # the single-collection auto-jump must not fire here.
