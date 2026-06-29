@@ -1350,7 +1350,7 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.25.0"
+API_VERSION = "2.26.0"
 API_VERSION_RELEASED = "2026-06-28"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
@@ -2389,6 +2389,54 @@ async def put_dataset_mus_source(
         'ok': True,
         'path': str(rel),
         'written_fields': sorted(client_fields.keys()),
+    }
+
+
+# ── mus vocab (read-only) ─────────────────────────────────────────────────────
+
+
+@app.get("/mus/vocab", tags=["databases"])
+async def get_mus_vocab():
+    """Read-only mus vocabulary — what the .mus editor renders as dropdowns.
+
+    Per anthive-web pika 2026-06-29 #265: the .mus annotation editor
+    populates ``<select>`` widgets for controlled fields (organism /
+    cell_type / tissue / disease / suspension_type / technology / …)
+    from the SAME source the PUT-time vocab gate uses, so client-side
+    options can never drift from server-side validation.
+
+    Not admin-gated — the vocab itself is non-sensitive and shipped in
+    the codebase (``lib/_mus_vocab.yaml``); refusing reads here would
+    just push curators to scrape the file themselves.
+
+    Shape::
+
+        {
+          "required":   [<field>, ...],
+          "soft":       [<field>, ...],
+          "vocabulary": {<controlled_field>: [<allowed_value>, ...], ...}
+        }
+    """
+    from mus import (   # noqa: PLC0415
+        required_fields, soft_fields, allowed_values, is_controlled,
+        load_vocabulary,
+    )
+    vocab_data = load_vocabulary() or {}
+    # The yaml's controlled-vocab payload lives under 'vocabulary', not at
+    # the top level. We also union with required + soft so soft controlled
+    # fields (like 'disease') aren't missed if listed under a different key.
+    candidates = set(required_fields()) | set(soft_fields()) | set(
+        (vocab_data.get('vocabulary') or {}).keys()
+    )
+    vocab: Dict[str, List[str]] = {}
+    for field in candidates:
+        if is_controlled(field):
+            allowed = allowed_values(field) or []
+            vocab[field] = list(allowed)
+    return {
+        'required':   list(required_fields()),
+        'soft':       list(soft_fields()),
+        'vocabulary': vocab,
     }
 
 

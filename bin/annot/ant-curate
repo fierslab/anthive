@@ -321,8 +321,19 @@ def main() -> int:
         temperature=0.2,
     )
     raw_content = response.choices[0].message.content or '{}'
+    # Be robust to the LLM ignoring response_format=json_object and
+    # returning prose + fenced JSON instead of pure JSON. Strategy:
+    # find the first '{' and the matching last '}' — everything outside
+    # is treated as commentary the model added against the system prompt.
+    # response_format works for some providers but OpenRouter's pass-
+    # through to Anthropic doesn't always enforce it (verified live).
+    stripped = raw_content.strip()
+    first = stripped.find('{')
+    last = stripped.rfind('}')
+    if first >= 0 and last > first:
+        stripped = stripped[first:last + 1]
     try:
-        raw = json.loads(raw_content)
+        raw = json.loads(stripped)
     except json.JSONDecodeError as exc:
         print(f"ant-curate: model returned non-JSON content: {exc}",
               file=sys.stderr)
