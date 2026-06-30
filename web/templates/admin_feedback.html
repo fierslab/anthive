@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+
+{% block title %}Chat feedback — anthive admin{% endblock %}
+
+{% block content %}
+<style>
+  .fb-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin: 4px 0 10px; }
+  .fb-head h1 { font-size: 20px; font-weight: 600; margin: 0; }
+  .fb-count { font-size: 12px; color: var(--text-muted); }
+  .fb-ctrls { margin-left: auto; font-size: 12px; }
+  .fb-ctrls select { font-family: var(--font); font-size: 12px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 5px; }
+  #fb-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  #fb-table th, #fb-table td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  #fb-table th { font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--text-muted); font-weight: 600; }
+  .fb-when { white-space: nowrap; color: var(--text-muted); font-size: 12px; }
+  .fb-user { font-family: var(--font-mono); font-size: 12px; }
+  .fb-cat { display: inline-block; border-radius: 8px; padding: 1px 8px; font-size: 11px; white-space: nowrap; }
+  .fb-cat.wrong   { background: #fee2e2; color: #991b1b; }   /* wrong answer */
+  .fb-cat.plot    { background: #ffedd5; color: #9a3412; }   /* bad plot */
+  .fb-cat.misint  { background: #fef9c3; color: #854d0e; }   /* misinterpreted me */
+  .fb-cat.better  { background: #e0e7ff; color: #3730a3; }   /* could be better */
+  .fb-cat.other   { background: #f1f5f9; color: #475569; }
+  .fb-comment { color: var(--text); max-width: 320px; }
+  .fb-comment.empty { color: var(--text-muted); font-style: italic; }
+  .fb-msg { color: var(--text-muted); max-width: 420px; }
+  .fb-msg .fb-msg-text { display: block; max-height: 4.4em; overflow: hidden; position: relative; line-height: 1.45; }
+  .fb-msg.open .fb-msg-text { max-height: none; }
+  .fb-msg .fb-more { font-size: 11px; color: var(--link); cursor: pointer; background: none; border: none; padding: 0; margin-top: 2px; font-family: inherit; }
+  .fb-ref { font-family: var(--font-mono); font-size: 10px; color: #94a3b8; white-space: nowrap; }
+  .fb-empty, .fb-state { color: var(--text-muted); font-size: 13px; padding: 16px 2px; }
+  .fb-state.err { color: #b91c1c; }
+</style>
+
+<div class="breadcrumb"><a href="/">datasets</a> / admin / feedback</div>
+
+<div class="fb-head">
+  <h1>Chat feedback</h1>
+  <span class="fb-count" id="fb-count"></span>
+  <span class="info" title="User-flagged assistant messages from the data-assistant chat. Each row is one flag, newest first, with the assistant message that was flagged. Attributed to the Authelia user. Source: GET /chat/feedback (admin-gated).">ⓘ</span>
+  <span class="fb-ctrls">show
+    <select id="fb-limit">
+      <option value="50">50</option>
+      <option value="100">100</option>
+      <option value="500">500</option>
+    </select>
+  </span>
+</div>
+
+<div id="fb-state" class="fb-state">loading…</div>
+
+<div class="table-wrap" id="fb-wrap" style="display:none">
+  <table id="fb-table" class="card-table">
+    <thead>
+      <tr>
+        <th>When</th><th>User</th><th>Category</th><th>Comment</th>
+        <th>Flagged message</th><th>Ref</th>
+      </tr>
+    </thead>
+    <tbody id="fb-body"></tbody>
+  </table>
+</div>
+
+<script>
+(function () {
+  var stateEl = document.getElementById('fb-state'),
+      wrap    = document.getElementById('fb-wrap'),
+      bodyEl  = document.getElementById('fb-body'),
+      countEl = document.getElementById('fb-count'),
+      limitEl = document.getElementById('fb-limit');
+
+  var esc = function (s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); };
+
+  // map the locked category strings → a colour class + label
+  var CAT_CLASS = { 'wrong answer': 'wrong', 'bad plot': 'plot', 'misinterpreted me': 'misint', 'could be better': 'better' };
+
+  function fmtWhen(ts) {
+    if (!ts) return '';
+    var d = new Date(ts * 1000);
+    if (isNaN(d.getTime())) return String(ts);
+    var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+  }
+
+  function row(it) {
+    var tr = document.createElement('tr');
+    var cat = it.category || '';
+    var catCls = CAT_CLASS[cat] || 'other';
+    var comment = (it.comment || '').trim();
+    var msg = (it.message_content || '').trim();
+
+    tr.innerHTML =
+      '<td class="card-title fb-when" data-label="when">' + esc(fmtWhen(it.created_at)) + '</td>' +
+      '<td class="fb-user" data-label="user">' + esc(it.user || '—') + '</td>' +
+      '<td data-label="category"><span class="fb-cat ' + catCls + '">' + esc(cat || '—') + '</span></td>' +
+      '<td class="fb-comment ' + (comment ? '' : 'empty') + '" data-label="comment">' + (comment ? esc(comment) : 'no comment') + '</td>' +
+      '<td class="fb-msg" data-label="flagged message"></td>' +
+      '<td class="fb-ref" data-label="ref">t' + esc(it.turn_seq) + '·r' + esc(it.round_idx) + '<br>' + esc(String(it.session_id || '').slice(0, 8)) + '</td>';
+
+    // flagged-message cell: truncated with an expand toggle when long
+    var msgCell = tr.querySelector('.fb-msg');
+    if (msg) {
+      var span = document.createElement('span'); span.className = 'fb-msg-text'; span.textContent = msg;
+      msgCell.appendChild(span);
+      // reveal the toggle only if the text actually overflows the clamp
+      requestAnimationFrame(function () {
+        if (span.scrollHeight > span.clientHeight + 2) {
+          var btn = document.createElement('button');
+          btn.type = 'button'; btn.className = 'fb-more'; btn.textContent = 'show more';
+          btn.addEventListener('click', function () {
+            var open = msgCell.classList.toggle('open');
+            btn.textContent = open ? 'show less' : 'show more';
+          });
+          msgCell.appendChild(btn);
+        }
+      });
+    } else {
+      msgCell.innerHTML = '<span class="muted">— (message not found)</span>';
+    }
+    return tr;
+  }
+
+  function load() {
+    var limit = limitEl.value || '50';
+    stateEl.style.display = ''; stateEl.className = 'fb-state'; stateEl.textContent = 'loading…';
+    wrap.style.display = 'none';
+    fetch('/api/chat/feedback?limit=' + encodeURIComponent(limit), { credentials: 'same-origin' })
+      .then(function (r) {
+        if (r.status === 404) throw new Error('the chat assistant is not active on this deployment');
+        if (r.status === 403) throw new Error('not authorized — admin only');
+        if (!r.ok) return r.text().then(function (t) { throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 160)); });
+        return r.json();
+      })
+      .then(function (d) {
+        var items = (d && d.items) || [];
+        countEl.textContent = (d && d.count != null ? d.count : items.length) + ' flag' + ((d && d.count) === 1 ? '' : 's');
+        bodyEl.innerHTML = '';
+        if (!items.length) { stateEl.textContent = 'No feedback flagged yet.'; return; }
+        items.forEach(function (it) { bodyEl.appendChild(row(it)); });
+        stateEl.style.display = 'none'; wrap.style.display = '';
+      })
+      .catch(function (e) { stateEl.className = 'fb-state err'; stateEl.textContent = e.message; });
+  }
+
+  limitEl.addEventListener('change', load);
+  load();
+})();
+</script>
+{% endblock %}

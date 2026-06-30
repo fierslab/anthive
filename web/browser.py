@@ -1081,6 +1081,21 @@ async def privacy_view(request: Request):
     return templates.TemplateResponse(request, "privacy.html", {})
 
 
+@router.get("/admin/feedback", response_class=HTMLResponse)
+async def admin_feedback_view(request: Request):
+    """Admin-only triage of chat-assistant feedback flags. The rows are fetched
+    client-side from the admin-gated GET /chat/feedback (which carries the
+    flagged assistant message content); this route only renders the shell and
+    gates SHOWING it on the Authelia admins group."""
+    if not _is_admin(request):
+        return templates.TemplateResponse(
+            request, "index.html",
+            {"folders": [], "error": "Not authorized — admin only."},
+            status_code=403,
+        )
+    return templates.TemplateResponse(request, "admin_feedback.html", {})
+
+
 @router.get("/genes/{gene}", response_class=HTMLResponse)
 async def gene_view(request: Request, gene: str):
     """Single-gene cross-catalogue atlas — where is {gene} expressed?

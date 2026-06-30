@@ -500,6 +500,30 @@ def test_privacy_page_renders(client):
     assert "never leaves this server" in resp.text
 
 
+def test_admin_feedback_requires_admin(client):
+    # Non-admin → 403 (the triage page is admin-only).
+    resp = client.get("/admin/feedback", follow_redirects=False)
+    assert resp.status_code == 403
+
+
+def test_admin_feedback_page_renders(client):
+    resp = client.get("/admin/feedback", headers={"Remote-Groups": "admins"})
+    assert resp.status_code == 200
+    assert 'id="fb-table"' in resp.text
+    assert "/api/chat/feedback" in resp.text
+    # wrapped for responsive scroll per the table convention
+    assert 'class="table-wrap"' in resp.text
+
+
+def test_admin_feedback_link_shown_only_to_admins(client):
+    # The topbar feedback link appears for admins…
+    admin = client.get("/", headers={"Remote-User": "mf", "Remote-Groups": "admins"})
+    assert '/admin/feedback' in admin.text
+    # …and not for a signed-in non-admin.
+    plain = client.get("/", headers={"Remote-User": "mf", "Remote-Groups": "users"})
+    assert '/admin/feedback' not in plain.text
+
+
 def test_dataset_editor_requires_admin(client):
     # Without the Authelia admins group the edit page is refused.
     resp = client.get("/admin/edit/GroupA/ds1", follow_redirects=False)

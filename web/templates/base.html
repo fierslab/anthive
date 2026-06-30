@@ -370,6 +370,10 @@
             <span class="dropdown">
                 <span class="dropdown-toggle" title="signed in{% if request.headers.get('remote-email') %} — {{ request.headers.get('remote-email') }}{% endif %}">👤 {{ _auth_user }}</span>
                 <span class="dropdown-menu right">
+                    {% set _groups = (request.headers.get('remote-groups') or '').split(',') | map('trim') | list %}
+                    {% if 'admins' in _groups %}
+                    <a href="/admin/feedback">chat feedback</a>
+                    {% endif %}
                     <a href="/authelia/" target="_blank" rel="noopener">account settings</a>
                     <a href="#" id="authelia-signout">sign out</a>
                 </span>
