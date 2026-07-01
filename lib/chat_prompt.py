@@ -162,6 +162,67 @@ n_genes is a strong indicator of a non-gene dataset.
      module dataset — TREM2, APOE, etc. Module scores like \
      `DAM_microtype` live on the module-scores dataset, not the gene one.
 
+## Pre-computed module scores (parquet sidecar → virtual obs columns)
+
+Many microglia datasets carry precomputed score columns that behave \
+exactly like numerical obs — they appear in \
+`get_dataset_info(db_id).obs.numerical` and are usable as `color=`, \
+`x=`, `y=`, `genes=`, and in SQL. Two families:
+
+  1. **Sierksma 2025 WGCNA modules** — 13 modules named after the \
+     WGCNA colour + putative function. Column names use `::` as the \
+     separator:
+       `Sierksma2025::WGCNA::Black_Mito`
+       `Sierksma2025::WGCNA::Blue_Innate_IR`
+       `Sierksma2025::WGCNA::Brown_Lysosome`
+       `Sierksma2025::WGCNA::Green_ER_immune`
+       `Sierksma2025::WGCNA::Greenyellow_migration`
+       `Sierksma2025::WGCNA::Magenta_AG_presentation`
+       `Sierksma2025::WGCNA::Pink_Morphology_Imm`
+       `Sierksma2025::WGCNA::Purple_Cell_division`
+       `Sierksma2025::WGCNA::Red_Immune_response`
+       `Sierksma2025::WGCNA::Salmon_Y_linked`
+       `Sierksma2025::WGCNA::Tan_cytokine_activation`
+       `Sierksma2025::WGCNA::Turquoise_Translation`
+       `Sierksma2025::WGCNA::Yellow_Cytokine`
+
+  2. **MICROGLIA_V1 starCAT programs** — 21 spectra usage columns + \
+     derived scores. Names use `__` as the separator:
+       `starcat__MICROGLIA_V1__DAM_progression`
+       `starcat__MICROGLIA_V1__Activation_index`
+       `starcat__MICROGLIA_V1__Disease_burden`
+       `starcat__MICROGLIA_V1__DC_total`
+       `starcat__MICROGLIA_V1__Identity_Homeostatic_pos`, `..._DAM_pos`, \
+       `..._IRM_pos`, `..._HLA_MHCII_pos`, `..._HeatShock_high`, \
+       `..._UPR_Activated_high`, `..._HIF_EarlyMetabolic_high` (etc.)
+       Per-program usage: \
+       `starcat__MICROGLIA_V1__usage__Microglia_Homeostatic`, \
+       `..._Microglia_DAM`, `..._Microglia_IRM`, `..._Microglia_Lipid_LAM`, \
+       `..._Microglia_HLA_MHCII`, `..._Microglia_UPR_Activated`, ... (21 \
+       total; see the sample_ids in `get_dataset_info` for the exact list \
+       per dataset).
+
+**When to use pre-computed vs the `module_score` tool:**
+  - If the column is already in `obs.numerical`, USE IT DIRECTLY — no \
+    tool call, no session. Just pass the column name in `build_plot_url` \
+    or `analytics_query`.
+  - Only call `module_score(db_id, genes=[...])` when the user asks for \
+    a NEW ad-hoc panel that isn't precomputed (e.g. "score my custom \
+    5-gene panel").
+  - The precomputed Sierksma / starcat columns live in a per-dataset \
+    parquet SIDECAR (`<basename>.scores.parquet`) alongside the duckdb, \
+    but the API surfaces them as normal obs columns — clients see no \
+    difference. Coverage varies per dataset; ~32 human microglia sets \
+    currently carry both families, more are being added.
+
+**Cross-dataset queries:** for questions like "which datasets show the \
+DAM signature in AD context?", enumerate microglia datasets via \
+`list_datasets`, then for each call `get_dataset_info` and check \
+whether `starcat__MICROGLIA_V1__DAM_progression` (or similar) is in \
+`obs.numerical`. A single `Sierksma2025::WGCNA::Magenta_AG_presentation` \
+across many datasets forms a comparable module — that's the point of \
+scoring against a fixed catalog.
+
 ## "Quadrant" plots — disambiguate two different geoms
 
 The word "quadrant" can mean two different things in this catalogue:
