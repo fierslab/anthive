@@ -672,11 +672,19 @@ class DatabaseRegistry:
             search = search.parent
 
         duckdb_mtime = 0.0
+        scores_mtime = 0.0
         if not db_url.startswith('s3://'):
             duckdb_path = Path(db_url)
             duckdb_mtime = duckdb_path.stat().st_mtime if duckdb_path.exists() else 0.0
+            # Score sidecar — if present, changes to it must invalidate the
+            # metadata cache so /info picks up new virtual obs columns.
+            scores_path = duckdb_path.with_name(
+                duckdb_path.name[: -len('.duckdb')] + '.scores.parquet'
+            )
+            scores_mtime = scores_path.stat().st_mtime if scores_path.exists() else 0.0
 
-        return {'md_mtime': md_mtime, 'index_mtime': index_mtime, 'duckdb_mtime': duckdb_mtime}
+        return {'md_mtime': md_mtime, 'index_mtime': index_mtime,
+                'duckdb_mtime': duckdb_mtime, 'scores_mtime': scores_mtime}
 
     def _is_cache_entry_valid(
         self, db_id: str, cached_entry: Dict[str, Any], fingerprint: Dict[str, float],
@@ -688,7 +696,16 @@ class DatabaseRegistry:
         if db_url.startswith('s3://'):
             # No reliable mtime for S3 — fall back to 24 h TTL
             return time.time() - cached_entry.get('cached_at', 0) < _METADATA_CACHE_TTL_S3
-        return cached_entry.get('duckdb_mtime') == fingerprint['duckdb_mtime']
+        if cached_entry.get('duckdb_mtime') != fingerprint['duckdb_mtime']:
+            return False
+        # Score sidecar invalidation. `scores_mtime` was introduced later,
+        # so an older cache entry lacking the key should also be rebuilt.
+        cached_scores = cached_entry.get('scores_mtime')
+        if cached_scores is None and fingerprint.get('scores_mtime', 0.0) > 0.0:
+            return False
+        if cached_scores is not None and cached_scores != fingerprint.get('scores_mtime', 0.0):
+            return False
+        return True
 
     # ── database scanning ──────────────────────────────────────────────────────
 
@@ -975,6 +992,30 @@ class DatabaseRegistry:
                     ORDER BY column_name
                 """).fetchall()
                 obs_numerical = [row[0] for row in num_fields]
+
+            # Merge in parquet-sidecar score columns (`<basename>.scores.parquet`).
+            # These behave exactly like numerical obs columns everywhere
+            # downstream. See lib/anthive_db.py::_load_score_index for the
+            # (source, catalog, module) → name mapping.
+            score_sidecar = db_url.replace('.duckdb', '.scores.parquet')
+            try:
+                if Path(score_sidecar).exists():
+                    triples = conn.execute(
+                        "SELECT DISTINCT source, catalog, module FROM read_parquet(?)",
+                        [score_sidecar]
+                    ).fetchall()
+                    for source, catalog, module in triples:
+                        if source == 'geneset':
+                            col_name = f"{catalog.replace('/', '::')}::{module}"
+                        elif source == 'starcat':
+                            col_name = f"starcat__{catalog}__{module}"
+                        else:
+                            col_name = f"{source}__{catalog}__{module}"
+                        if col_name not in obs_numerical:
+                            obs_numerical.append(col_name)
+                    obs_numerical = sorted(obs_numerical)
+            except Exception as exc:
+                logger.warning(f"Failed to read score sidecar {score_sidecar}: {exc}")
 
             # Get obs columns (categorical)
             obs_categorical = []
@@ -1350,8 +1391,8 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.26.0"
-API_VERSION_RELEASED = "2026-06-28"
+API_VERSION = "2.27.0"
+API_VERSION_RELEASED = "2026-07-01"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
 # Create FastAPI app with lifespan handler (Phase 2)
@@ -1558,7 +1599,10 @@ def _pooled_db(db_id: str):
             headers={"Retry-After": "5"},
         )
     try:
-        yield AnthiveDB(conn=conn, owns_conn=False)
+        # Pass db_url as db_path so AnthiveDB can locate the sibling
+        # scores.parquet sidecar (score-virtual obs columns).
+        db_path_for_sidecar = db_url if not db_url.startswith('s3://') else None
+        yield AnthiveDB(db_path=db_path_for_sidecar, conn=conn, owns_conn=False)
     finally:
         connection_pool.return_connection(db_url, conn)
 

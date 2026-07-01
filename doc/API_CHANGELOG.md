@@ -29,6 +29,61 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.27.0 — 2026-07-01
+
+### Added — External score sidecar (`<basename>.scores.parquet`) exposed as virtual obs columns
+
+Module scores (Sierksma WGCNA, MICROGLIA_V1 starcat, future scorers)
+now live in a **long-format parquet sidecar** next to each dataset's
+`.duckdb`, keyed on `(cell_id, source, catalog, module, score)`. See
+`lib/scores_parquet.py` and `bin/annot/ant-score-ext` /
+`bin/annot/ant-starcat-ext` for the write path.
+
+The API reads them transparently. Each `(source, catalog, module)`
+row appears as a **virtual numerical obs column** with the legacy
+naming convention that pre-sidecar callers already used:
+
+* `source=geneset`  → `<catalog with / → ::>::<module>`
+  (e.g. `Sierksma2025::WGCNA::Magenta_AG_presentation`)
+* `source=starcat`  → `starcat__<catalog>__<module>`
+  (e.g. `starcat__MICROGLIA_V1__DAM_progression`)
+
+Impact on clients: **none** (additive). Score columns appear in
+`GET /databases/{db_id}/info` `obs.numerical` alongside real obsnum
+fields; `GET /plot/…?color=<score>` and analytics queries JOIN them
+transparently.
+
+Internal change of note: the metadata-cache fingerprint now includes
+the sidecar's mtime so a new/updated `.scores.parquet` invalidates
+cached entries on the next scan.
+
+### Deprecated (soft) — writing new scores into the duckdb via `AnnotationWriter`
+
+`ant-score` and `ant-starcat` still work, but **new module scores
+should be written to the parquet sidecar** via `ant-score-ext` /
+`ant-starcat-ext`. This decouples score compute from duckdb rebuilds
+and lets a dataset carry different score panels without a full h5ad
+→ duckdb round-trip. Existing in-duckdb score columns keep working;
+the drop-and-remigrate tooling (`tmp/drop_conflicting_duckdb_scores.py`)
+can move them out.
+
+### Added — obs-column tag vocabulary (`.md` `obs_tags`)
+
+New `.md` frontmatter field `obs_tags: {column: [tag, …]}` where each
+tag is drawn from a curated 5-item vocab (`sex`, `braak`, `cluster`,
+`age`, `genotype` — see `lib/obscol_tags_vocab.yaml`). Purely
+additive; not surfaced in `/info` yet.
+
+Tools:
+* `ant md tag COLUMN=TAG1[,TAG2] FILE` — add tags (vocab-gated,
+  hard-fails when column isn't in `obsnum_include ∪ obscat_include`)
+* `ant md untag COLUMN[=TAG] FILE` — remove
+* `ant md tags FILE [--by-tag TAG]` — list / reverse-lookup
+* `ant md tag-vocab` — show the vocab
+* `ant tag-propose DB_ID [--apply]` — heuristic proposer
+
+---
+
 ## 2.13.0 — 2026-06-23
 
 ### Added — `GET /databases/{db_id:path}/pseudobulk`

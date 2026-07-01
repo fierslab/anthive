@@ -17,6 +17,10 @@ Usage:
   ant md include-layer LAYER [LAYER ...] FILE
   ant md exclude-embedding KEY [KEY ...] FILE
   ant md include-embedding KEY [KEY ...] FILE
+  ant md tag COLUMN=TAG1[,TAG2...] [COL2=TAG3...] FILE
+  ant md untag COLUMN[=TAG1[,TAG2]] [...] FILE
+  ant md tags FILE [--by-tag TAG]
+  ant md tag-vocab
 
 Examples:
   ant md set experiment='Sierksma 2025' group='kidney' index.md
@@ -41,6 +45,10 @@ lib_dir = script_dir.parent.parent / 'lib'
 sys.path.insert(0, str(lib_dir))
 
 from metadata import ANNOTATION_FIELDS, ANNOTATION_LIST_FIELDS, parse_md_file, validate_annotation_field, write_md_file
+from obscol_tags import (
+    ObsColTagError, known_tags, tag_description,
+    validate_obs_tags, get_columns_by_tag,
+)
 
 
 def parse_assignment(arg: str) -> tuple[str, str]:
@@ -436,6 +444,167 @@ def cmd_include_embedding(args: list[str]) -> int:
     return _cmd_embedding(args, 'include')
 
 
+# ─────────────────────────── obs-column tags ──────────────────────────
+
+def _parse_tag_assignments(assignments: list[str]) -> dict:
+    """Parse 'column=tag1,tag2' arguments → {column: [tag1, tag2]}. Errors on bad shape."""
+    parsed: dict = {}
+    for arg in assignments:
+        if '=' not in arg:
+            print(f"Error: bad tag assignment {arg!r} — expected COLUMN=TAG1[,TAG2...]",
+                  file=sys.stderr)
+            sys.exit(1)
+        col, rhs = arg.split('=', 1)
+        col = col.strip()
+        if not col:
+            print(f"Error: empty column in {arg!r}", file=sys.stderr)
+            sys.exit(1)
+        tags = [t.strip() for t in rhs.split(',') if t.strip()]
+        if not tags:
+            print(f"Error: no tags given for {col!r}. To clear, use `ant md untag {col} FILE`",
+                  file=sys.stderr)
+            sys.exit(1)
+        parsed[col] = tags
+    return parsed
+
+
+def cmd_tag(args: list[str]) -> int:
+    """Tag obs column(s) with axis-of-variation tags. Vocab-gated."""
+    if len(args) < 2:
+        print("Error: Usage: ant md tag COLUMN=TAG1[,TAG2...] [COL2=TAG3...] FILE",
+              file=sys.stderr)
+        return 1
+    file_path = Path(args[-1])
+    assignments = _parse_tag_assignments(args[:-1])
+    if not file_path.exists():
+        print(f"Error: File not found: {file_path}", file=sys.stderr)
+        return 1
+
+    try:
+        metadata, body = parse_md_file(file_path)
+    except Exception as exc:
+        print(f"Error reading file: {exc}", file=sys.stderr)
+        return 1
+
+    obs_tags = dict(metadata.get('obs_tags') or {})
+    known_obs = set(metadata.get('obsnum_include') or []) | set(metadata.get('obscat_include') or [])
+    for col, new_tags in assignments.items():
+        if col not in known_obs:
+            print(f"Error: {col!r} is not in obsnum_include ∪ obscat_include — "
+                  f"the column is not in the duckdb so tagging is refused.",
+                  file=sys.stderr)
+            if known_obs:
+                # Show a small hint about available columns
+                sample = sorted(known_obs)[:20]
+                print(f"       Available: {', '.join(sample)}"
+                      f"{'…' if len(known_obs) > 20 else ''}", file=sys.stderr)
+            return 1
+        existing = list(obs_tags.get(col) or [])
+        # merge, dedupe, preserve order
+        combined = existing + [t for t in new_tags if t not in existing]
+        obs_tags[col] = combined
+    try:
+        obs_tags_norm = validate_obs_tags(obs_tags)
+    except ObsColTagError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        print(f"       (valid tags: {sorted(known_tags())})", file=sys.stderr)
+        return 1
+
+    metadata['obs_tags'] = obs_tags_norm
+    write_md_file(file_path, metadata, body)
+    print(f"✓ Updated obs_tags on {file_path.name}")
+    for col, tags in sorted(obs_tags_norm.items()):
+        marker = ' ←' if col in assignments else ''
+        print(f"    {col}: {tags}{marker}")
+    return 0
+
+
+def cmd_untag(args: list[str]) -> int:
+    """Remove tags. `ant md untag COLUMN FILE` removes all tags on COLUMN.
+    `ant md untag COLUMN=TAG FILE` removes just TAG (or comma-separated list)."""
+    if len(args) < 2:
+        print("Error: Usage: ant md untag COLUMN[=TAG1[,TAG2]] [...] FILE",
+              file=sys.stderr)
+        return 1
+    file_path = Path(args[-1])
+    targets = args[:-1]
+    if not file_path.exists():
+        print(f"Error: File not found: {file_path}", file=sys.stderr)
+        return 1
+
+    metadata, body = parse_md_file(file_path)
+    obs_tags = dict(metadata.get('obs_tags') or {})
+
+    changed = False
+    for target in targets:
+        if '=' in target:
+            col, rhs = target.split('=', 1)
+            col = col.strip()
+            to_remove = {t.strip() for t in rhs.split(',') if t.strip()}
+            current = list(obs_tags.get(col) or [])
+            kept = [t for t in current if t not in to_remove]
+            if kept:
+                obs_tags[col] = kept
+            else:
+                obs_tags.pop(col, None)
+            changed = changed or (kept != current)
+        else:
+            col = target.strip()
+            if col in obs_tags:
+                obs_tags.pop(col, None)
+                changed = True
+    if not changed:
+        print("(no changes)")
+        return 0
+    metadata['obs_tags'] = obs_tags
+    write_md_file(file_path, metadata, body)
+    print(f"✓ Updated obs_tags on {file_path.name}")
+    return 0
+
+
+def cmd_tags(args: list[str]) -> int:
+    """List obs_tags on one .md, or show reverse map when passed --by-tag."""
+    if not args:
+        print("Error: Usage: ant md tags FILE [--by-tag TAG]", file=sys.stderr)
+        return 1
+    file_path = Path(args[0])
+    if not file_path.exists():
+        print(f"Error: File not found: {file_path}", file=sys.stderr)
+        return 1
+    metadata, _ = parse_md_file(file_path)
+    obs_tags = metadata.get('obs_tags') or {}
+
+    if len(args) >= 3 and args[1] == '--by-tag':
+        tag = args[2]
+        cols = get_columns_by_tag(metadata, tag)
+        for col in cols:
+            print(col)
+        return 0
+
+    if not obs_tags:
+        print(f"(no obs_tags on {file_path.name})")
+        return 0
+    for col in sorted(obs_tags):
+        print(f"{col}: {', '.join(obs_tags[col])}")
+    return 0
+
+
+def cmd_tag_vocab(args: list[str]) -> int:
+    """Show the obs-column tag vocabulary."""
+    tags = sorted(known_tags())
+    if not tags:
+        print("(no tags in vocabulary)")
+        return 0
+    for tag in tags:
+        desc = tag_description(tag)
+        print(f"{tag}:")
+        if desc:
+            for line in desc.splitlines():
+                print(f"  {line.strip()}")
+        print()
+    return 0
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -453,6 +622,10 @@ def main():
         'include-layer': cmd_include_layer,
         'exclude-embedding': cmd_exclude_embedding,
         'include-embedding': cmd_include_embedding,
+        'tag': cmd_tag,
+        'untag': cmd_untag,
+        'tags': cmd_tags,
+        'tag-vocab': cmd_tag_vocab,
     }
 
     if command not in commands:

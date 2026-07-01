@@ -1,0 +1,90 @@
+# obs-column tag vocabulary — anthive-local, catalog-side annotation.
+#
+# Purpose
+# -------
+# Tag each obs column (and, later, each DE contrast) with the biological
+# axis-of-variation it describes. A cross-dataset semantic index: querying
+# `tag == 'sex'` returns every "sex-carrying" obs column across the
+# catalog, regardless of what the column happens to be called
+# ('Sex', 'sex', 'donor_sex', 'Sex_donor', ...).
+#
+# Where the tags live on disk
+# ---------------------------
+# In the per-dataset `.md` frontmatter, as a dict:
+#
+#     obs_tags:
+#       donor_id: [donor]
+#       Braak_stage: [braak]
+#       leiden: [cluster]
+#       Sex: [sex]
+#
+# A single column may carry multiple tags (a column that is both a
+# donor identifier AND a batch key: `[donor, batch]`).
+#
+# Scope
+# -----
+# Anthive-specific. NOT part of the mus joint vocabulary — that's for
+# experiment-level metadata (organism, tissue, ...). Obs-column tagging
+# is one level finer and lives here.
+#
+# Starter set
+# -----------
+# We start deliberately narrow. Extend as concrete cross-dataset queries
+# emerge (age, disease_stage, genotype, treatment, batch, region, ...).
+
+version: 1
+
+tags:
+  sex:
+    label: Sex
+    description: >
+      Biological sex of the donor / animal. Column typically carries
+      values like 'male' / 'female' / 'M' / 'F' / 'mixed'. Applies to
+      per-cell obs when every cell inherits its donor's sex.
+
+  braak:
+    label: Braak stage
+    description: >
+      Neuropathological staging of tau / neurofibrillary-tangle
+      distribution (Braak & Braak 1991). Ordinal 0–6 for AD context;
+      Braak I–VI in original notation. Also used for α-synuclein Braak
+      staging in PD studies. If the column mixes both, split it before
+      tagging.
+
+  cluster:
+    label: Cluster
+    description: >
+      An unsupervised or curated cell-grouping label (leiden, louvain,
+      seurat_clusters, cell_type_reclust, ...). Marks the column as
+      "this is a grouping of cells" so plot endpoints know to treat it
+      as a discrete grouping axis rather than an ordinal covariate.
+
+  age:
+    label: Age
+    description: >
+      Donor age at sample collection. Continuous (years) or binned
+      ('60-70', 'aged'). Applies to per-cell obs when every cell
+      inherits its donor's age. For post-mortem cohorts this is the
+      age-at-death; declare separately if you also carry
+      age-at-onset.
+
+  genotype:
+    label: Genotype / model
+    description: >
+      Genetic background or model that discriminates samples — mouse
+      lines (WT vs AppNLGF vs 5xFAD vs P301L), human variant carriers
+      (APOE ε4 vs ε3, PSEN1 variants, TREM2 R47H), or xenograft
+      donor genotype. Distinct from disease staging (see 'braak') and
+      distinct from disease-status flags. If a column mixes disease
+      state and genotype, split it before tagging.
+
+  donor:
+    label: Donor
+    description: >
+      Per-cell identifier of the biological donor / animal / library
+      the cell came from — the natural random-effect grouping for
+      linear mixed-effects models. Deliberately kept separate from
+      'genotype': a donor's genotype is a fixed attribute; the donor
+      column itself is a nuisance grouping to control for
+      pseudoreplication. Typical column names: 'donor_id',
+      'sample_id', 'individualID', 'library', 'orig.ident'.

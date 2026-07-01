@@ -1,0 +1,181 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "duckdb>=0.10.0",
+#   "pandas>=2.0.0",
+#   "pyyaml>=6.0",
+# ]
+# ///
+"""ant-score-ext — external module scoring → <basename>.scores.parquet sidecar.
+
+Same maths as ``ant score`` (uses ``db.score_module`` which reads the
+precomputed ``__gene_bins`` table) but writes to the parquet sidecar
+next to the .duckdb instead of ALTER-TABLE-ing into ``__obsnum``. No
+lock coordination with ant-serve needed — this is read-only against
+the duckdb.
+
+Usage:
+  ant-score-ext <db_id> <experiment_id_or_geneset_id> [<id>...] [options]
+
+Examples:
+  ant-score-ext ZE5/ZM Sierksma2025/WGCNA
+  ant-score-ext ZE5/ZM Sierksma2025/WGCNA/Magenta_AG_presentation
+  ant-score-ext ZE5/ZM Sierksma2025/WGCNA --dry-run
+
+Options:
+  --layer NAME     expression layer (default: X — must be log-normalized)
+  --n-control N    scanpy score_genes control-set size (default 100)
+  --seed N         seed for reproducible control-gene sampling (default 42)
+  --dry-run        compute but do not write the parquet
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+from pathlib import Path
+
+script_dir = Path(__file__).resolve().parent
+lib_dir = script_dir.parent.parent / 'lib'
+sys.path.insert(0, str(lib_dir))
+
+from anthive_db import AnthiveDB  # noqa: E402
+from geneset import GenesetRegistry  # noqa: E402
+from h5adstore import find_h5ad  # noqa: E402
+from metadata import parse_md_file  # noqa: E402
+from scores_parquet import summarize, upsert_scores  # noqa: E402
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog='ant-score-ext')
+    parser.add_argument('db_id')
+    parser.add_argument('geneset_ids', nargs='+',
+                        help='experiment ids (e.g. Sierksma2025/WGCNA) or full '
+                             'geneset ids (e.g. Sierksma2025/WGCNA/Magenta_AG_presentation)')
+    parser.add_argument('--layer', default=None,
+                        help='expression layer (default: .md default_layer, '
+                             'else X)')
+    parser.add_argument('--n-control', type=int, default=100)
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--h5adstore-root', default='data/h5adstore')
+    parser.add_argument('--genesetstore-root', default='data/genesetstore')
+    parser.add_argument('--dry-run', action='store_true')
+    args = parser.parse_args()
+
+    root = Path(args.h5adstore_root).resolve()
+    entry = find_h5ad(root, args.db_id)
+    if entry is None:
+        print(f"ERROR: db_id not found in {root}: {args.db_id}", file=sys.stderr)
+        return 1
+    if not entry.duckdb_path.exists():
+        print(f"ERROR: sibling .duckdb missing: {entry.duckdb_path}", file=sys.stderr)
+        return 1
+
+    registry = GenesetRegistry(Path(args.genesetstore_root).resolve())
+    registry.scan()
+
+    # Expand experiment ids to their child genesets; leave explicit geneset ids alone.
+    genesets = []
+    for gid in args.geneset_ids:
+        exp = registry.get_experiment(gid)
+        if exp is not None:
+            children = [g for g in registry.genesets.values()
+                        if g.experiment.experiment_id == exp.experiment_id]
+            if not children:
+                print(f"WARNING: experiment {gid!r} has no genesets", file=sys.stderr)
+                continue
+            genesets.extend(children)
+            continue
+        gs = registry.get(gid)
+        if gs is None:
+            print(f"ERROR: not found in genesetstore: {gid!r}", file=sys.stderr)
+            return 1
+        genesets.append(gs)
+
+    if not genesets:
+        print("ERROR: no genesets to score", file=sys.stderr)
+        return 1
+
+    # Group by (experiment) → one (source, catalog) pair per experiment.
+    # source is always 'geneset' from this tool; catalog is the experiment_id.
+    by_exp: dict[str, list] = {}
+    for gs in genesets:
+        by_exp.setdefault(gs.experiment.experiment_id, []).append(gs)
+
+    # Resolve layer: --layer > .md default_layer > 'X'
+    layer = args.layer
+    if layer is None:
+        try:
+            md, _ = parse_md_file(entry.md_path)
+            layer = md.get('default_layer') or 'X'
+        except Exception:
+            layer = 'X'
+
+    print(f"[ant-score-ext] {entry.db_id} — {len(genesets)} geneset(s) "
+          f"across {len(by_exp)} experiment(s) — layer={layer!r}")
+
+    with AnthiveDB(str(entry.duckdb_path)) as db:
+        db.require_gene_bins()
+        cell_map = db._conn.execute(
+            "SELECT cell_id, cell_name FROM __cells"
+        ).df().set_index('cell_name')['cell_id']
+
+        for experiment_id, group in by_exp.items():
+            catalog = experiment_id
+            rows = []
+            t0 = time.time()
+            for gs in group:
+                genes = gs.genes
+                try:
+                    scores_df, meta = db.score_module(
+                        module_genes=genes,
+                        layer=layer,
+                        n_control=args.n_control,
+                        seed=args.seed,
+                    )
+                except ValueError as exc:
+                    print(f"  ✗ {gs.name}: {exc}", file=sys.stderr)
+                    continue
+                # Join cell_name → cell_id
+                merged = scores_df.merge(
+                    cell_map.rename('cell_id'), left_on='cell_name',
+                    right_index=True, how='inner')
+                merged = merged.rename(columns={'module_score': 'score'})
+                merged['module'] = gs.name
+                rows.append(merged[['cell_id', 'module', 'score']])
+                print(f"  {gs.name:38s}  n_cells={len(merged):>7d}  "
+                      f"genes_found={len(meta['genes_found'])}/{len(genes)}  "
+                      f"n_control={meta['n_control_genes']}")
+
+            if not rows:
+                print(f"  (no scorable modules for {catalog})", file=sys.stderr)
+                continue
+
+            import pandas as pd
+            all_rows = pd.concat(rows, ignore_index=True)
+            if args.dry_run:
+                print(f"  [dry-run] would upsert {len(all_rows)} rows "
+                      f"({len(group)} modules × {len(all_rows) // max(len(group), 1)} cells) "
+                      f"→ source=geneset catalog={catalog}")
+            else:
+                n = upsert_scores(
+                    duckdb_path=entry.duckdb_path,
+                    source='geneset',
+                    catalog=catalog,
+                    rows=all_rows,
+                )
+                dt = time.time() - t0
+                print(f"  wrote {n} rows → source=geneset catalog={catalog} "
+                      f"({dt:.1f}s)")
+
+    if not args.dry_run:
+        summary = summarize(entry.duckdb_path)
+        if not summary.empty:
+            print(f"\n[sidecar summary — {entry.duckdb_path.name.replace('.duckdb', '.scores.parquet')}]")
+            print(summary.to_string(index=False))
+
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

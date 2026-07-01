@@ -1,0 +1,213 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "duckdb>=0.10.0",
+#   "requests>=2.31.0",
+#   "pyyaml>=6.0",
+# ]
+# ///
+"""ant-score-microglia-fleet — batch-score every microglia dataset
+into its parquet sidecar with Sierksma2025/WGCNA + MICROGLIA_V1 starcat.
+
+Not intended for reuse — one-off fleet backfill. Discovers datasets via
+lib.mus (cell_type contains 'microglial cell' / 'microglia'). Human-only
+for both scorers.
+
+For each dataset it:
+  1. Ensures __gene_bins exists on the duckdb (via ant-serve release +
+     ant duckdb-check + restore).
+  2. Runs ant-score-ext Sierksma2025/WGCNA.
+  3. Runs ant-starcat-ext.
+
+Failures are logged; the loop continues.
+
+Usage:
+  ant-score-microglia-fleet [--only D1,D2,...] [--skip D1,D2,...]
+                            [--skip-score] [--skip-starcat] [--dry-run]
+"""
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import List
+
+import duckdb
+import requests   # type: ignore
+
+script_dir = Path(__file__).resolve().parent
+repo_root = script_dir.parent.parent
+lib_dir = repo_root / 'lib'
+sys.path.insert(0, str(lib_dir))
+
+from h5adstore import iter_h5adstore   # type: ignore
+from mus import resolve_annotation     # type: ignore
+
+ANT = repo_root / 'bin' / 'ant'
+ANT_SERVE_URL = 'http://localhost:8080'
+LOG_PATH = repo_root / 'tmp' / f'score-fleet-{int(time.time())}.log'
+
+
+def _log(msg: str) -> None:
+    print(msg, flush=True)
+    with open(LOG_PATH, 'a') as fh:
+        fh.write(msg + '\n')
+
+
+def enumerate_microglia(root: Path) -> List[tuple]:
+    """Return list of (db_id, h5ad_path, duckdb_path, is_human)."""
+    out = []
+    for entry in iter_h5adstore(root):
+        if not entry.duckdb_path.exists():
+            continue
+        ann = resolve_annotation(entry.h5ad_path, root=root)
+        ct = ann.get('cell_type')
+        ct_list = ct if isinstance(ct, list) else [ct] if ct else []
+        ct_lower = {str(x).lower() for x in ct_list}
+        if 'microglial cell' in ct_lower or 'microglia' in ct_lower:
+            org = ann.get('organism')
+            org_list = org if isinstance(org, list) else [org] if org else []
+            is_human = 'human' in {str(x).lower() for x in org_list}
+            out.append((entry.db_id, entry.h5ad_path, entry.duckdb_path, is_human))
+    return sorted(out, key=lambda row: row[0])
+
+
+def has_gene_bins(duckdb_path: Path) -> bool:
+    """Read-only check for __gene_bins table."""
+    conn = duckdb.connect(str(duckdb_path), read_only=True)
+    try:
+        rows = conn.execute(
+            "SELECT 1 FROM information_schema.tables WHERE table_name = '__gene_bins'"
+        ).fetchall()
+        return bool(rows)
+    finally:
+        conn.close()
+
+
+def ensure_gene_bins(db_id: str, h5ad_path: Path, duckdb_path: Path) -> bool:
+    """If __gene_bins missing, run ant duckdb-check via release/restore.
+    Returns True on success (or already-present)."""
+    try:
+        if has_gene_bins(duckdb_path):
+            return True
+    except duckdb.IOException:
+        # Locked by ant-serve; release and try again
+        pass
+
+    _log(f"  · __gene_bins missing — building via ant duckdb-check")
+    try:
+        requests.post(f"{ANT_SERVE_URL}/admin/release/{db_id}", timeout=10)
+    except Exception:
+        pass
+
+    result = subprocess.run(
+        [str(ANT), 'duckdb-check', str(h5ad_path)],
+        capture_output=True, text=True,
+    )
+    ok = 'CHECK COMPLETED SUCCESSFULLY' in result.stdout
+
+    try:
+        requests.post(f"{ANT_SERVE_URL}/admin/restore/{db_id}", timeout=10)
+    except Exception:
+        pass
+
+    if not ok:
+        _log(f"  ✗ duckdb-check failed:")
+        _log('\n'.join(result.stdout.splitlines()[-15:]))
+        _log(result.stderr.strip()[-500:])
+    return ok
+
+
+def run_score_ext(db_id: str) -> bool:
+    _log(f"  · ant-score-ext {db_id} Sierksma2025/WGCNA")
+    result = subprocess.run(
+        [str(ANT), 'score-ext', db_id, 'Sierksma2025/WGCNA'],
+        capture_output=True, text=True,
+    )
+    _log(result.stdout)
+    if result.returncode != 0:
+        _log(f"  ✗ score-ext failed: {result.stderr.strip()[-500:]}")
+        return False
+    return True
+
+
+def run_starcat_ext(db_id: str) -> bool:
+    _log(f"  · ant-starcat-ext {db_id}")
+    result = subprocess.run(
+        [str(ANT), 'starcat-ext', db_id],
+        capture_output=True, text=True,
+    )
+    _log(result.stdout)
+    if result.returncode != 0:
+        _log(f"  ✗ starcat-ext failed: {result.stderr.strip()[-500:]}")
+        return False
+    return True
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog='ant-score-microglia-fleet')
+    parser.add_argument('--only', default=None, help='comma-separated db_ids')
+    parser.add_argument('--skip', default=None, help='comma-separated db_ids')
+    parser.add_argument('--skip-score', action='store_true')
+    parser.add_argument('--skip-starcat', action='store_true')
+    parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--h5adstore-root', default='data/h5adstore')
+    args = parser.parse_args()
+
+    root = Path(args.h5adstore_root).resolve()
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    datasets = enumerate_microglia(root)
+    if args.only:
+        keep = set(args.only.split(','))
+        datasets = [d for d in datasets if d[0] in keep]
+    if args.skip:
+        drop = set(args.skip.split(','))
+        datasets = [d for d in datasets if d[0] not in drop]
+
+    _log(f"[fleet] {len(datasets)} microglia datasets found — log at {LOG_PATH}")
+    stats = {'total': len(datasets), 'gene_bins_ok': 0, 'score_ok': 0,
+             'starcat_ok': 0, 'starcat_skipped_nonhuman': 0, 'starcat_failed': 0,
+             'score_failed': 0, 'gene_bins_failed': 0}
+
+    for i, (db_id, h5ad_path, duckdb_path, is_human) in enumerate(datasets, 1):
+        _log(f"\n[{i:>3}/{len(datasets)}] {db_id}  (human={is_human})")
+
+        if args.dry_run:
+            continue
+
+        # Both scorers require __gene_bins
+        gb_ok = ensure_gene_bins(db_id, h5ad_path, duckdb_path)
+        if gb_ok:
+            stats['gene_bins_ok'] += 1
+        else:
+            stats['gene_bins_failed'] += 1
+            continue
+
+        if not args.skip_score and is_human:
+            if run_score_ext(db_id):
+                stats['score_ok'] += 1
+            else:
+                stats['score_failed'] += 1
+
+        if not args.skip_starcat:
+            if not is_human:
+                _log(f"  · skipping starcat (non-human)")
+                stats['starcat_skipped_nonhuman'] += 1
+            else:
+                if run_starcat_ext(db_id):
+                    stats['starcat_ok'] += 1
+                else:
+                    stats['starcat_failed'] += 1
+
+    _log(f"\n===== FLEET SUMMARY =====")
+    for key, val in stats.items():
+        _log(f"  {key:32s}  {val}")
+    _log(f"log: {LOG_PATH}")
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

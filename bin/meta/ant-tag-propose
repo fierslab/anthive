@@ -1,0 +1,430 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "duckdb>=0.10.0",
+#   "pyyaml>=6.0",
+# ]
+# ///
+"""ant-tag-propose — propose obs-column tags per dataset (heuristic pass).
+
+Reads a dataset's `.md` + `.duckdb`, scans every column in
+``obsnum_include ∪ obscat_include``, and proposes matching tags from
+the anthive-local vocab (``lib/obscol_tags_vocab.yaml``). Writes a
+per-dataset YAML at ``tmp/tag-proposals/<safe-db-id>.yaml`` for a
+human to review, edit (flip ``apply: false`` on anything wrong), and
+apply via ``ant md tag ...`` or the built-in ``--apply`` flag.
+
+Heuristics only — no LLM. Two signals per column:
+
+  * Name pattern     (regex on the column name)
+  * Value pattern    (distinct values for categorical columns; range /
+                     integrality for numerical)
+
+Confidence is ``high`` when both signals agree, ``medium`` when one
+does, ``low`` for weak matches. Nothing is applied unless the caller
+opts in.
+
+Usage:
+  ant-tag-propose <db_id> [--apply] [--all-microglia] [--dry-run]
+
+Examples:
+  ant-tag-propose ZE5/ZM
+  ant-tag-propose ZE5/ZM --apply
+  ant-tag-propose --all-microglia               # write proposals for every microglia set
+  ant-tag-propose --all-microglia --apply       # apply high-conf proposals too
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, List, Optional
+
+import duckdb
+import yaml
+
+script_dir = Path(__file__).resolve().parent
+lib_dir = script_dir.parent.parent / 'lib'
+sys.path.insert(0, str(lib_dir))
+
+from h5adstore import find_h5ad, iter_h5adstore   # type: ignore
+from metadata import parse_md_file, write_md_file  # type: ignore
+from mus import resolve_annotation                 # type: ignore
+from obscol_tags import known_tags, validate_obs_tags   # type: ignore
+
+
+PROPOSALS_DIR = script_dir.parent.parent / 'tmp' / 'tag-proposals'
+
+# ------------------------- heuristics --------------------------------
+
+# All regex are case-insensitive.
+#
+# NAME_PATTERNS: any match yields at least ``medium``.
+# NAME_SIGNATURES: a stricter subset — a match yields ``high`` even
+#                  without a value-level confirmation. Reserved for
+#                  patterns that unambiguously name-what-they-are
+#                  (a column literally called `leiden` isn't
+#                  ambiguously anything else).
+NAME_PATTERNS: Dict[str, List[re.Pattern]] = {
+    'cluster': [
+        re.compile(r'^(leiden|louvain)([_.-].*)?$', re.I),
+        re.compile(r'^seurat[_.]?clusters?$', re.I),
+        re.compile(r'^(sub_?)?cluster([_.-]?\d*)?$', re.I),
+        re.compile(r'^([A-Za-z]+_)?snn_res\.', re.I),   # Seurat resolution columns
+    ],
+    'sex':      [re.compile(r'\bsex\b|(^|_)sex($|_)|sex_donor', re.I)],
+    'age':      [re.compile(r'\bage\b|age_at_?(death|onset|coll|dx)|donor_?age', re.I)],
+    'braak':    [re.compile(r'braak', re.I)],
+    'genotype': [
+        re.compile(r'(^|_)(genotype|geno|strain|line|mouse_?model|model)($|_)', re.I),
+        re.compile(r'\b(apoe|psen|trem2|app|mapt|tau)_?(genotype|status|snp)\b', re.I),
+    ],
+    'donor':    [
+        re.compile(r'^donor(_?id)?$', re.I),
+        re.compile(r'^(sample|patient|subject|animal|mouse|individual)(_?id)?$', re.I),
+        re.compile(r'^(orig\.ident|library|library_id|library_name|batch_id)$', re.I),
+    ],
+}
+
+NAME_SIGNATURES: Dict[str, List[re.Pattern]] = {
+    'cluster': [
+        re.compile(r'^(leiden|louvain)([_.-].*)?$', re.I),
+        re.compile(r'^seurat[_.]?clusters?$', re.I),
+        re.compile(r'^([A-Za-z]+_)?snn_res\.\d', re.I),
+    ],
+    'sex':  [re.compile(r'^(sex|donor_?sex|sex_donor|sex_mouse)$', re.I)],
+    'age':  [re.compile(r'^(age|donor_?age|age_at_?death|age_at_?onset)$', re.I)],
+    'braak': [re.compile(r'braak', re.I)],
+    'genotype': [
+        re.compile(r'^(genotype|strain|mouse_?model|patient_geno(_short)?)$', re.I),
+    ],
+    'donor': [
+        re.compile(r'^donor(_?id)?$', re.I),
+        re.compile(r'^(sample|patient|subject|animal|mouse|individual)_?id$', re.I),
+        re.compile(r'^(orig\.ident|library_id|library_name)$', re.I),
+    ],
+}
+
+# Categorical VALUE patterns — a set of expected values (lower-case) that
+# strongly suggest a tag when the column's DISTINCT VALUES are a subset.
+VALUE_HINTS: Dict[str, set] = {
+    'sex':      {'m', 'f', 'male', 'female', 'mixed', 'na', 'unknown',
+                 'undetermined', 'other'},
+    'genotype': {
+        # human-carrier lines
+        'apoe22', 'apoe23', 'apoe33', 'apoe34', 'apoe44',
+        'e2/e2', 'e2/e3', 'e3/e3', 'e3/e4', 'e4/e4',
+        # mouse models (broad — non-exhaustive)
+        'wt', 'wild-type', 'wildtype', 'nlgf', 'apphuhu', 'apphu',
+        'appnlgf', '5xfad', 'p301l', 'p301s', 'thy1', 'j20',
+        # xenograft-vs-host common terms
+        'human', 'mouse', 'donor', 'host',
+    },
+}
+
+# Regex over the joined-lowercase distinct values (e.g. 'wt|nlgf|apphu' → genotype)
+VALUE_REGEX: Dict[str, re.Pattern] = {
+    'genotype': re.compile(
+        r'\b(wt|wild.?type|nlgf|5xfad|p301|apoe[234]|trem2|psen[12]|app[a-z]*|tau[a-z]*)\b',
+        re.I,
+    ),
+    'braak': re.compile(r'^(braak[_ ]?)?(0|i{1,3}v?|iv|v|vi)$', re.I),   # "0", "III", "IV"
+}
+
+
+def _fetch_distinct_values(conn, table: str, column: str, limit: int = 30) -> List[str]:
+    """Return up to ``limit`` distinct values (as strings) for a column."""
+    q = f'''SELECT DISTINCT CAST("{column}" AS VARCHAR) AS v
+            FROM "{table}" WHERE "{column}" IS NOT NULL
+            ORDER BY v LIMIT {limit}'''
+    return [row[0] for row in conn.execute(q).fetchall()]
+
+
+def _propose_for_column(
+    column: str,
+    kind: str,                   # 'num' | 'cat'
+    distinct_values: List[str],
+) -> List[dict]:
+    """Return a list of proposal dicts for this column. Empty if no match."""
+    proposals: List[dict] = []
+    lower_values = {v.strip().lower() for v in distinct_values}
+
+    for tag in sorted(known_tags()):
+        name_hit = any(pat.search(column) for pat in NAME_PATTERNS.get(tag, []))
+        signature_hit = any(pat.search(column) for pat in NAME_SIGNATURES.get(tag, []))
+
+        value_hit = False
+        value_rationale = ''
+        if kind == 'cat' and lower_values:
+            hint_set = VALUE_HINTS.get(tag)
+            if hint_set and lower_values.issubset(hint_set):
+                # require at least 2 distinct hint-set matches so that a
+                # single 'unknown' or 'na' cannot single-handedly imply a
+                # tag (celltype_scanvi = {'unknown'} was mis-tagged as sex)
+                intersect = lower_values & hint_set
+                # exclude "empty" tokens that appear in most hint sets
+                strong = intersect - {'na', 'unknown', 'undetermined', 'other', 'mixed'}
+                if len(strong) >= 2 or (len(strong) >= 1 and len(intersect) >= 2):
+                    value_hit = True
+                    value_rationale = (f"distinct values ⊆ {tag} vocabulary "
+                                       f"(saw {sorted(lower_values)[:6]})")
+            regex = VALUE_REGEX.get(tag)
+            if regex is not None and any(regex.search(v) for v in distinct_values):
+                # Percentage of values matched
+                matched = sum(1 for v in distinct_values if regex.search(v))
+                if matched >= len(distinct_values) * 0.6:
+                    value_hit = True
+                    value_rationale = (f"{matched}/{len(distinct_values)} "
+                                       f"distinct values match {tag} regex")
+
+        # Numerical-value hints (very light — age typically 0<=x<=120)
+        if tag == 'age' and kind == 'num':
+            # Can't inspect range without another query; skip. Name-only is fine.
+            pass
+
+        # Decide confidence:
+        #  - signature match alone → high (name is essentially a signature)
+        #  - name + value together  → high
+        #  - name-only or value-only → medium
+        if signature_hit or (name_hit and value_hit):
+            confidence = 'high'
+        elif name_hit or value_hit:
+            confidence = 'medium'
+        else:
+            continue   # neither → no proposal
+
+        # Special exclusions
+        if tag == 'cluster' and column.lower() in {'cell_type', 'celltype', 'annotation'}:
+            # cell_type is identity, not clustering — skip
+            continue
+        if tag == 'age' and re.search(r'(page|damage|passage|percentage)', column, re.I):
+            # avoid false positives on 'age' substring
+            continue
+
+        parts = []
+        if name_hit:
+            parts.append(f"column name matches {tag} pattern")
+        if value_rationale:
+            parts.append(value_rationale)
+        rationale = '; '.join(parts) or f"name suggests {tag}"
+
+        proposals.append({
+            'column': column,
+            'tag': tag,
+            'confidence': confidence,
+            'rationale': rationale,
+        })
+
+    return proposals
+
+
+def _collate(proposals: List[dict]) -> List[dict]:
+    """Merge same-column proposals into one entry with a tag list.
+    Preserves the highest confidence seen for each column."""
+    by_col: Dict[str, dict] = {}
+    for p in proposals:
+        entry = by_col.setdefault(p['column'], {
+            'column': p['column'],
+            'tags': [],
+            'confidence': 'low',
+            'rationale': [],
+            'apply': True,
+        })
+        if p['tag'] not in entry['tags']:
+            entry['tags'].append(p['tag'])
+        # bump confidence to the highest seen
+        conf_order = {'low': 0, 'medium': 1, 'high': 2}
+        if conf_order[p['confidence']] > conf_order[entry['confidence']]:
+            entry['confidence'] = p['confidence']
+        entry['rationale'].append(f"{p['tag']}: {p['rationale']}")
+    for entry in by_col.values():
+        entry['rationale'] = '; '.join(entry['rationale'])
+    return sorted(by_col.values(), key=lambda e: e['column'])
+
+
+def propose(db_id: str, h5ad_root: Path) -> Optional[dict]:
+    entry = find_h5ad(h5ad_root, db_id)
+    if entry is None:
+        print(f"ERROR: db_id not found: {db_id}", file=sys.stderr)
+        return None
+    if not entry.duckdb_path.exists():
+        print(f"ERROR: duckdb missing: {entry.duckdb_path}", file=sys.stderr)
+        return None
+
+    metadata, _body = parse_md_file(entry.md_path)
+    obsnum = list(metadata.get('obsnum_include') or [])
+    obscat = list(metadata.get('obscat_include') or [])
+    already_tagged = metadata.get('obs_tags') or {}
+
+    # Open duckdb read-only for value inspection. If another process
+    # holds the write lock (e.g. mid-convert), skip gracefully — a
+    # subsequent proposer run will pick it up.
+    try:
+        conn = duckdb.connect(str(entry.duckdb_path), read_only=True)
+    except duckdb.IOException as exc:
+        print(f"[{db_id}] skipped (duckdb locked): {exc}", file=sys.stderr)
+        return None
+    try:
+        raw_proposals: List[dict] = []
+        for column in obsnum:
+            props = _propose_for_column(column, 'num', distinct_values=[])
+            raw_proposals.extend(props)
+        for column in obscat:
+            try:
+                values = _fetch_distinct_values(conn, '__obscat', column, limit=30)
+            except duckdb.CatalogException:
+                values = []
+            props = _propose_for_column(column, 'cat', distinct_values=values)
+            raw_proposals.extend(props)
+    finally:
+        conn.close()
+
+    collated = _collate(raw_proposals)
+
+    # Annotate proposals with the already-tagged state so the reviewer
+    # can see which columns are new vs. amendments.
+    for entry_dict in collated:
+        col = entry_dict['column']
+        existing = list(already_tagged.get(col) or [])
+        entry_dict['existing_tags'] = existing
+        # Only propose tags not already applied
+        new_only = [t for t in entry_dict['tags'] if t not in existing]
+        entry_dict['tags_new'] = new_only
+        # If nothing new to add, apply defaults to False
+        if not new_only:
+            entry_dict['apply'] = False
+
+    return {
+        'db_id': db_id,
+        'md_path': str(entry.md_path),
+        'generated_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+        'vocab_version': 1,
+        'proposals': collated,
+    }
+
+
+def apply_proposals(db_id: str, proposals: List[dict], h5ad_root: Path) -> int:
+    """Apply proposals where apply=True. Returns count of columns touched."""
+    entry = find_h5ad(h5ad_root, db_id)
+    if entry is None:
+        print(f"ERROR: db_id not found: {db_id}", file=sys.stderr)
+        return 0
+    metadata, body = parse_md_file(entry.md_path)
+    known_obs = set(metadata.get('obsnum_include') or []) | set(metadata.get('obscat_include') or [])
+    obs_tags = dict(metadata.get('obs_tags') or {})
+
+    touched = 0
+    for prop in proposals:
+        if not prop.get('apply'):
+            continue
+        col = prop['column']
+        if col not in known_obs:
+            print(f"  skip {col!r} (not in obsnum/obscat include)", file=sys.stderr)
+            continue
+        merged = list(obs_tags.get(col) or [])
+        for tag in prop.get('tags_new') or prop.get('tags', []):
+            if tag not in merged:
+                merged.append(tag)
+        if merged and merged != (obs_tags.get(col) or []):
+            obs_tags[col] = merged
+            touched += 1
+
+    if touched == 0:
+        return 0
+    try:
+        obs_tags_norm = validate_obs_tags(obs_tags)
+    except Exception as exc:
+        print(f"ERROR: validation failed: {exc}", file=sys.stderr)
+        return 0
+    metadata['obs_tags'] = obs_tags_norm
+    write_md_file(entry.md_path, metadata, body)
+    return touched
+
+
+def _short_db_id(db_id: str) -> str:
+    return db_id.replace('/', '__')
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog='ant-tag-propose')
+    parser.add_argument('db_id', nargs='?', help='dataset (e.g. ZE5/ZM). Omit with --all-microglia.')
+    parser.add_argument('--all-microglia', action='store_true',
+                        help='propose for every microglia dataset (cell_type=microglial cell)')
+    parser.add_argument('--apply', action='store_true',
+                        help='immediately write high-confidence proposals to the .md')
+    parser.add_argument('--min-confidence', default='high',
+                        choices=['low', 'medium', 'high'],
+                        help='minimum confidence required for --apply (default: high)')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='compute proposals but do not write anything')
+    parser.add_argument('--h5adstore-root', default='data/h5adstore')
+    args = parser.parse_args()
+
+    root = Path(args.h5adstore_root).resolve()
+    PROPOSALS_DIR.mkdir(parents=True, exist_ok=True)
+
+    if not args.db_id and not args.all_microglia:
+        parser.error("give a db_id or --all-microglia")
+
+    if args.all_microglia:
+        db_ids = []
+        for entry in iter_h5adstore(root):
+            if not entry.duckdb_path.exists():
+                continue
+            ann = resolve_annotation(entry.h5ad_path, root=root)
+            ct = ann.get('cell_type')
+            ct_list = ct if isinstance(ct, list) else [ct] if ct else []
+            if any(str(x).lower() in ('microglial cell', 'microglia') for x in ct_list):
+                db_ids.append(entry.db_id)
+        db_ids.sort()
+    else:
+        db_ids = [args.db_id]
+
+    conf_order = {'low': 0, 'medium': 1, 'high': 2}
+    min_conf = conf_order[args.min_confidence]
+
+    grand_total_props = 0
+    grand_total_applied = 0
+
+    for db_id in db_ids:
+        result = propose(db_id, root)
+        if result is None:
+            continue
+
+        # write yaml
+        out_path = PROPOSALS_DIR / f'{_short_db_id(db_id)}.yaml'
+        if not args.dry_run:
+            with open(out_path, 'w') as fh:
+                yaml.safe_dump(result, fh, sort_keys=False, allow_unicode=True, width=100)
+
+        # summary line + per-proposal
+        n_new = sum(1 for p in result['proposals'] if p.get('tags_new'))
+        n_existing = sum(1 for p in result['proposals'] if p.get('existing_tags'))
+        print(f"[{db_id}] {len(result['proposals'])} column(s) proposed "
+              f"({n_new} with new tags, {n_existing} already tagged) → {out_path.name}")
+        for p in result['proposals']:
+            new_marker = ''
+            if not p.get('tags_new') and p.get('existing_tags'):
+                new_marker = ' (already tagged)'
+            print(f"    {p['column']:32s} → {p['tags']} [{p['confidence']}]{new_marker}")
+
+        grand_total_props += n_new
+
+        if args.apply and not args.dry_run:
+            # Filter proposals by min-confidence before applying
+            to_apply = [p for p in result['proposals']
+                        if p.get('apply') and conf_order[p['confidence']] >= min_conf]
+            touched = apply_proposals(db_id, to_apply, root)
+            grand_total_applied += touched
+            print(f"    → applied {touched} columns (min_confidence={args.min_confidence})")
+
+    print(f"\nTotal proposed (new): {grand_total_props}")
+    if args.apply:
+        print(f"Total applied:        {grand_total_applied}")
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

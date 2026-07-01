@@ -43,12 +43,12 @@ from metadata import get_priority, parse_md_file, PRIORITY_DEFAULT  # noqa: E402
 # doc/DESIGN_var_and_de.md). It does NOT round-trip into the h5ad, so it
 # lives alongside the h5ad and is shipped to S3 as part of the source-of-
 # truth set (alongside .h5ad). It's also pulled back by default.
-SYNC_EXTENSIONS      = {'.h5ad', '.duckdb', '.de.parquet'}
+SYNC_EXTENSIONS      = {'.h5ad', '.duckdb', '.de.parquet', '.scores.parquet'}
 # Pull defaults to .h5ad + .de.parquet. .duckdb is derived (rebuilt
 # locally via `ant-build-all` — which auto-re-ingests the .de.parquet
 # sidecar). Use `pull --include-duckdb` to override (e.g., disaster
 # recovery where rebuilding everything would be expensive).
-PULL_DEFAULT_EXTS    = {'.h5ad', '.de.parquet'}
+PULL_DEFAULT_EXTS    = {'.h5ad', '.de.parquet', '.scores.parquet'}
 SKIP_SUFFIXES        = {'.wal', '.deleted', '.partial'}
 # S3 object metadata key holding the source file's mtime (integer seconds).
 # Set on every push so we can detect content-without-size-change drift

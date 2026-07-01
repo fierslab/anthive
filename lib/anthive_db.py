@@ -143,8 +143,98 @@ class AnthiveDB:
         embeddings = [row[0].replace('obsm__', '') for row in result]
         return sorted(embeddings)
 
+    # -------- score sidecar (external <basename>.scores.parquet) --------
+    #
+    # The sidecar holds long-format per-cell module scores that used to be
+    # ALTER-TABLE'd into __obsnum. See lib/scores_parquet.py and
+    # bin/annot/ant-score-ext / ant-starcat-ext for the write path.
+    #
+    # From ant-serve's perspective the sidecar is transparent: score rows
+    # appear as virtual obsnum columns with names built by _score_col_name
+    # (matching the legacy `Sierksma2025::WGCNA::<mod>` /
+    # `starcat__MICROGLIA_V1__<prog>` convention). Cache invalidation
+    # piggybacks on the sidecar's mtime.
+
+    @staticmethod
+    def _score_col_name(source: str, catalog: str, module: str) -> str:
+        """Virtual obs-column name for a (source, catalog, module) triple."""
+        if source == 'geneset':
+            return f"{catalog.replace('/', '::')}::{module}"
+        if source == 'starcat':
+            return f"starcat__{catalog}__{module}"
+        return f"{source}__{catalog}__{module}"
+
+    def _scores_sidecar_path(self) -> Optional[Path]:
+        """Return the sibling `.scores.parquet` if it exists, else None."""
+        if self.db_path is None:
+            return None
+        p = Path(self.db_path)
+        if not p.name.endswith('.duckdb'):
+            return None
+        sc = p.with_name(p.name[: -len('.duckdb')] + '.scores.parquet')
+        return sc if sc.exists() else None
+
+    def _load_score_index(self) -> Dict[str, Tuple[str, str, str]]:
+        """Return {virtual_col_name: (source, catalog, module)}.
+
+        Cached on the AnthiveDB instance (pooled connections reuse it).
+        Cache key = sidecar mtime; on staleness we rebuild.
+        """
+        sidecar = self._scores_sidecar_path()
+        if sidecar is None:
+            self._score_index_mtime = None
+            self._score_index_cache = {}
+            return self._score_index_cache
+
+        mtime = sidecar.stat().st_mtime
+        prev_mtime = getattr(self, '_score_index_mtime', None)
+        if prev_mtime == mtime and hasattr(self, '_score_index_cache'):
+            return self._score_index_cache
+
+        rows = self._conn.execute(
+            "SELECT DISTINCT source, catalog, module FROM read_parquet(?)",
+            [str(sidecar)]
+        ).fetchall()
+        index = {
+            self._score_col_name(source, catalog, module): (source, catalog, module)
+            for source, catalog, module in rows
+        }
+        self._score_index_cache = index
+        self._score_index_mtime = mtime
+        return index
+
+    def _get_score_fields(self) -> List[str]:
+        """Sorted list of virtual score column names (empty if no sidecar)."""
+        return sorted(self._load_score_index().keys())
+
+    def _fetch_score_values(self, virtual_col: str) -> pd.DataFrame:
+        """Return a DataFrame [cell_name, <virtual_col>] for one score column.
+
+        Cells with no row in the sidecar for this triple get NaN.
+        """
+        idx = self._load_score_index()
+        if virtual_col not in idx:
+            raise KeyError(f"unknown score column: {virtual_col!r}")
+        source, catalog, module = idx[virtual_col]
+        sidecar = self._scores_sidecar_path()
+        # Read only the matching triple's rows, join to __cells for the name.
+        df = self._conn.execute(
+            """
+            SELECT c.cell_name, s.score AS "{col}"
+            FROM __cells c
+            LEFT JOIN (
+                SELECT cell_id, score
+                FROM read_parquet(?)
+                WHERE source = ? AND catalog = ? AND module = ?
+            ) s ON s.cell_id = c.cell_id
+            ORDER BY c.cell_id
+            """.format(col=virtual_col.replace('"', '""')),
+            [str(sidecar), source, catalog, module],
+        ).df()
+        return df
+
     def _get_numerical_fields(self) -> List[str]:
-        """Get numerical metadata fields"""
+        """Get numerical metadata fields (union of duckdb obsnum + parquet scores)."""
 
         # Check if obsnum view exists
         exists = (self._conn.execute("""
@@ -153,18 +243,27 @@ class AnthiveDB:
             WHERE table_name = 'obsnum'
         """).fetchone() or (0,))[0]
 
-        if not exists:
-            return []
+        duckdb_cols: List[str] = []
+        if exists:
+            result = self._conn.execute("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'obsnum'
+                AND column_name NOT IN ('cell_name', 'cell_id')
+            """).fetchall()
+            duckdb_cols = [row[0] for row in result]
 
-        # Get columns except cell_name and cell_id
-        result = self._conn.execute("""
-            SELECT column_name
-            FROM information_schema.columns
-            WHERE table_name = 'obsnum'
-            AND column_name NOT IN ('cell_name', 'cell_id')
-        """).fetchall()
-
-        return [row[0] for row in result]
+        # Score-sidecar virtual columns get merged in — they behave exactly
+        # like obsnum columns from the caller's perspective. Order: duckdb
+        # native first (backwards-compatible), then score fields.
+        score_fields = self._get_score_fields()
+        seen = set(duckdb_cols)
+        merged = list(duckdb_cols)
+        for name in score_fields:
+            if name not in seen:
+                merged.append(name)
+                seen.add(name)
+        return merged
 
     def _get_categorical_fields(self) -> List[str]:
         """Get categorical metadata fields"""
@@ -452,30 +551,37 @@ class AnthiveDB:
                 """)
                 params.append(gene)
 
-        # Add metadata columns if requested
+        # Add metadata columns if requested. Score fields (parquet sidecar)
+        # are handled AFTER the SQL executes — they need a separate read.
         metadata_joins = []
+        score_fields_to_merge: List[str] = []
+        score_index = self._load_score_index()
+        # num_fields returned by _get_numerical_fields already includes score
+        # virtuals — separate them so we don't try to select them from obsnum.
+        num_fields_all = self._get_numerical_fields()
+        num_fields_real = [f for f in num_fields_all if f not in score_index]
         if metadata_fields:
             if metadata_fields == ["*"]:
-                # Add all numerical fields
-                num_fields = self._get_numerical_fields()
-                for field in num_fields:
+                for field in num_fields_real:
                     select_parts.append(f'n."{field}"')
-                if num_fields:
+                if num_fields_real:
                     metadata_joins.append("LEFT JOIN obsnum n ON c.cell_name = n.cell_name")
 
-                # Add all categorical fields
                 cat_fields = self._get_categorical_fields()
                 for field in cat_fields:
                     select_parts.append(f'cat."{field}"')
                 if cat_fields:
                     metadata_joins.append("LEFT JOIN obscat cat ON c.cell_name = cat.cell_name")
-            else:
-                # Add specific fields
-                num_fields = self._get_numerical_fields()
-                cat_fields = self._get_categorical_fields()
 
-                has_num = any(f in num_fields for f in metadata_fields)
-                has_cat = any(f in cat_fields for f in metadata_fields)
+                # All score fields when the caller asks for "*"
+                score_fields_to_merge = list(score_index.keys())
+            else:
+                cat_fields = self._get_categorical_fields()
+                real_num_set = set(num_fields_real)
+                cat_set = set(cat_fields)
+
+                has_num = any(f in real_num_set for f in metadata_fields)
+                has_cat = any(f in cat_set for f in metadata_fields)
 
                 if has_num:
                     metadata_joins.append("LEFT JOIN obsnum n ON c.cell_name = n.cell_name")
@@ -483,10 +589,12 @@ class AnthiveDB:
                     metadata_joins.append("LEFT JOIN obscat cat ON c.cell_name = cat.cell_name")
 
                 for field in metadata_fields:
-                    if field in num_fields:
+                    if field in real_num_set:
                         select_parts.append(f'n."{field}"')
-                    elif field in cat_fields:
+                    elif field in cat_set:
                         select_parts.append(f'cat."{field}"')
+                    elif field in score_index:
+                        score_fields_to_merge.append(field)
 
         # Build WHERE clause from filters
         where_parts = []
@@ -550,6 +658,15 @@ class AnthiveDB:
             sql += f" LIMIT {int(limit)}"
 
         df = self._conn.execute(sql, params).fetchdf()
+
+        # Merge in any parquet-sidecar score columns the caller asked for.
+        # We fetch per column so predicate pushdown in DuckDB keeps the read
+        # narrow; then merge on cell_name so downstream code doesn't have to
+        # know the difference.
+        if score_fields_to_merge:
+            for virtual_col in score_fields_to_merge:
+                score_df = self._fetch_score_values(virtual_col)
+                df = df.merge(score_df, on='cell_name', how='left')
         return df
 
     def get_embedding_data(self, embedding_id: str,
