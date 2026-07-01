@@ -239,6 +239,8 @@
         .msg-flag { position: absolute; top: 1px; right: 3px; border: none; background: none; cursor: pointer; font-size: 11px; color: #94a3b8; opacity: 0; transition: opacity .1s; padding: 0 2px; line-height: 1; }
         .chat-msg.assistant:hover .msg-flag { opacity: .55; }
         .msg-flag:hover { opacity: 1; color: #dc2626; }
+        /* once flagged, stay visibly red so the user sees it stuck */
+        .msg-flag.flagged, .chat-msg.assistant:hover .msg-flag.flagged { opacity: 1; color: #dc2626; }
         .flag-form { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
         .flag-form select, .flag-form input { font-size: 10.5px; padding: 2px 4px; border: 1px solid #cbd5e1; border-radius: 5px; font-family: var(--font); background: #fff; color: var(--text); }
         .flag-form input { flex: 1; min-width: 90px; }
@@ -647,7 +649,10 @@
                                                inp.value.trim() ? { comment: inp.value.trim() } : {}))
           })
             .then(function (r) { return r.ok; })
-            .then(function (ok) { form.innerHTML = ok ? '<span class="flag-thanks">✓ thanks — flagged for review</span>' : '<span class="flag-thanks">⚠ couldn’t send</span>'; })
+            .then(function (ok) {
+              form.innerHTML = ok ? '<span class="flag-thanks">✓ thanks — flagged for review</span>' : '<span class="flag-thanks">⚠ couldn’t send</span>';
+              if (ok) { var fb = el.querySelector('.msg-flag'); if (fb) { fb.classList.add('flagged'); fb.title = 'you flagged this reply for the dev team'; } }
+            })
             .catch(function () { form.innerHTML = '<span class="flag-thanks">⚠ couldn’t send</span>'; });
         });
         form.appendChild(sel); form.appendChild(inp); form.appendChild(send);
