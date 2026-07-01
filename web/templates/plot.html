@@ -300,10 +300,15 @@
       <input type="number" name="gridsize" id="f-gridsize" value="60" min="10" max="200">
       <label style="margin-top:4px">min cells per hex</label>
       <input type="number" name="mincnt" id="f-mincnt" value="1" min="1" max="100">
-      <label style="margin-top:4px">vmin (colorbar lower clip — blank = auto)</label>
+      {% endif %}
+      {# vmin/vmax clip the continuous colour scale — supported for both the
+         embedding scatter and hexbin (server _handle_scatter/_handle_hexbin
+         pass them through). Ignored for categorical or no colour. #}
+      <label style="margin-top:4px">vmin (colour scale lower clip — blank = auto) {{ info('Clamp the low end of the continuous colour scale so a few extreme cells do not wash out the gradient. Applies to gene / numerical colour; ignored for categorical colour or plain density.') }}</label>
       <input type="number" name="vmin" id="f-vmin" step="any" placeholder="auto">
-      <label style="margin-top:4px">vmax (colorbar upper clip — blank = auto)</label>
+      <label style="margin-top:4px">vmax (colour scale upper clip — blank = auto)</label>
       <input type="number" name="vmax" id="f-vmax" step="any" placeholder="auto">
+      {% if geom == 'hexbin' %}
       {# Density-mode (no colour) quantile clip — big readability win on
          200k+ cell plots where a few dense hexes wash out the gradient. #}
       <label style="margin-top:6px"><input type="checkbox" id="f-autoclip" name="_autoclip"> clip density to percentiles {{ info('Clips the colour scale to the lower/upper density quantiles below, so a few ultra-dense hexes do not wash out the gradient. Ticking pre-fills 0.10 / 0.90 — edit either bound to taste.') }}</label>
