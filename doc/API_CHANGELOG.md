@@ -29,6 +29,41 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.29.0 — 2026-07-02
+
+### Fixed / added — `attach_sessions` columns usable as `x` / `y` in XY plots
+
+`_handle_xy` (which powers `plot/scatter?x=<a>&y=<b>` and
+`plot/hexbin?x=<a>&y=<b>` — the non-embedding XY modes) previously
+refused any request where x or y was an `attach_sessions` column.
+The color= embedding path worked already; the XY path was a
+deferred TODO.
+
+Now supported — all combinations:
+
+* **session-vs-gene** e.g. `?x=<DAM_session_col>&y=SPP1`
+* **session-vs-numerical-obs** e.g. `?x=<DAM_session>&y=microglia_score`
+* **session-vs-session** e.g. `?x=<DAM_session>&y=<Homeo_session>`
+  (works as long as the two sessions don't emit a column of the same
+  name — the loader prefixes collisions with `session_1::` etc.)
+
+Implementation: `_handle_xy` now categorises each axis into
+`{gene, numerical, session}`, fetches genes+obs via
+`get_cell_table` as before, then LEFT-merges each session frame
+onto `data_df` by `cell_name`. Filter + sample constraints stay
+correct because they're applied on the base fetch; missing cells
+in the session land as NaN and get dropped by the existing
+finite-value guard. CSV export (`_raw_df`) works transparently
+since the columns are on `data_df` regardless of source.
+
+No client change required — plot.html already passes
+`attach_sessions` on all plot requests, and the previous 400 was
+rendered as an error card. Users get a plot instead now.
+Chat assistant's earlier "DAM score vs SPP1" refusal path now
+succeeds.
+
+---
+
 ## 2.28.0 — 2026-07-02
 
 ### Added — `GET /module-variability`
