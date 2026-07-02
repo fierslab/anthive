@@ -1154,34 +1154,44 @@ async def genesets_index(request: Request):
             geneset['experiment'], []
         ).append(geneset)
 
-    # starCAT programs are a SECOND module source, not in the geneset registry.
-    # Their gene-level definitions aren't exposed over REST yet (see the pending
-    # /catalogs request), but /module-variability carries their names + which
-    # datasets they're scored in — enough for a discovery listing that links to
-    # the variability heatmap. Degrade silently if the parquet isn't present.
-    starcat_catalogs: Dict[str, list] = {}
-    try:
-        mv = _api_get(
-            api_url,
-            '/module-variability?source=starcat&statistic=mean_score&min_abs=0&limit=5000',
-        )
-        coverage: Dict[tuple, set] = {}
-        catalog_of: Dict[str, str] = {}
-        for row in mv.get('rows', []):
-            key = (row['catalog'], row['module'])
-            coverage.setdefault(key, set()).add(row['dataset'])
-            catalog_of[row['module']] = row['catalog']
-        grouped: Dict[str, list] = {}
-        for (catalog, module), datasets in coverage.items():
-            grouped.setdefault(catalog, []).append(
-                {"module": module, "n_datasets": len(datasets)}
-            )
-        for catalog, modules in grouped.items():
-            starcat_catalogs[catalog] = sorted(modules, key=lambda m: m["module"])
-    except Exception as error:
-        print(f"API error (starcat module list): {error}")
+    active_group = request.query_params.get("group")
 
-    starcat_total = sum(len(mods) for mods in starcat_catalogs.values())
+    # starCAT programs are a SECOND module source, served by the /catalogs
+    # endpoint (REST 2.30) — the authoritative definitions (modules with gene
+    # weights + group + biological description, plus derived score recipes).
+    # /catalogs lists all catalogs cheaply (for the tab count); the per-catalog
+    # module/score detail is only fetched when the starCAT group is active.
+    starcat_summaries: list = []
+    starcat_detail: list = []
+    try:
+        catalogs = _api_get(api_url, '/catalogs').get('catalogs', [])
+        starcat_summaries = [c for c in catalogs if c.get('source') == 'starcat']
+    except Exception as error:
+        print(f"API error (/catalogs): {error}")
+
+    starcat_total = sum(c.get('n_modules', 0) for c in starcat_summaries)
+
+    if active_group == 'starcat':
+        for summary in starcat_summaries:
+            try:
+                detail = _api_get(api_url, f"/catalogs/starcat/{summary['catalog_id']}")
+            except Exception as error:
+                print(f"API error (/catalogs/{summary.get('catalog_id')}): {error}")
+                continue
+            # group modules by their curated `group` for display
+            by_group: Dict[str, list] = {}
+            for module in detail.get('modules', []):
+                by_group.setdefault(module.get('group') or 'other', []).append(module)
+            starcat_detail.append({
+                "catalog_id": summary['catalog_id'],
+                "name": detail.get('name') or summary.get('name') or summary['catalog_id'],
+                "description": detail.get('description') or summary.get('description'),
+                "n_modules": detail.get('n_modules'),
+                "n_scores": detail.get('n_scores'),
+                "n_genes": detail.get('n_genes'),
+                "modules_by_group": dict(sorted(by_group.items())),
+                "scores": detail.get('scores', []),
+            })
 
     # Group selector: one tab per module source (gene sets / starCAT; more to
     # follow). Only groups that actually have content are offered. The active
@@ -1189,17 +1199,16 @@ async def genesets_index(request: Request):
     groups = []
     if by_study:
         groups.append({"key": "genesets", "label": "Gene sets", "count": len(genesets)})
-    if starcat_catalogs:
+    if starcat_summaries:
         groups.append({"key": "starcat", "label": "starCAT", "count": starcat_total})
     valid_keys = {g["key"] for g in groups}
-    active_group = request.query_params.get("group")
     if active_group not in valid_keys:
         active_group = groups[0]["key"] if groups else "genesets"
 
     return templates.TemplateResponse(request, "genesets.html", {
         "by_study": by_study,
         "total": len(genesets),
-        "starcat_catalogs": starcat_catalogs,
+        "starcat_detail": starcat_detail,
         "starcat_total": starcat_total,
         "groups": groups,
         "active_group": active_group,
@@ -1218,15 +1227,15 @@ async def geneset_variability_view(request: Request):
     return templates.TemplateResponse(request, "geneset_variability.html", {})
 
 
-@router.get("/genesets/starcat/{catalog}/{module}", response_class=HTMLResponse)
-async def geneset_starcat_view(request: Request, catalog: str, module: str):
-    """One starCAT program: its top-N genes with weights. Data comes client-side
-    from /api/catalogs/{catalog}/{module} (pending endpoint) — until that ships
-    the page shows a 'weights pending' state. Registered BEFORE the generic
+@router.get("/genesets/starcat/{catalog_id}/modules/{module_name}", response_class=HTMLResponse)
+async def geneset_starcat_module_view(request: Request, catalog_id: str, module_name: str):
+    """One starCAT program (module): its top-N genes with weights, group, and
+    biological description. Fetches /api/catalogs/starcat/{catalog_id}/modules/
+    {module_name} client-side (REST 2.30). Registered BEFORE the generic
     /{study}/{experiment}/{name} route so 'starcat' isn't read as a study id."""
     return templates.TemplateResponse(request, "geneset_starcat.html", {
-        "catalog": catalog,
-        "module": module,
+        "catalog_id": catalog_id,
+        "module_name": module_name,
     })
 
 

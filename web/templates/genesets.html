@@ -62,28 +62,54 @@
 {% endif %}
 
 {% if active_group == 'starcat' %}
-  {% if not starcat_catalogs %}
-  <p class="muted">No starCAT programs scored yet.</p>
+  {% if not starcat_detail %}
+  <p class="muted">No starCAT catalogs available.</p>
   {% else %}
-  <p class="muted" style="font-size:12px;margin:0 0 10px">starCAT programs (NMF cell-state usages). Open a program to see its top genes and weights.
+  {% for cat in starcat_detail %}
+  <h2 style="margin-top:16px">{{ cat.name }}</h2>
+  {% if cat.description %}<p class="muted" style="font-size:12px;margin:2px 0 4px">{{ cat.description }}</p>{% endif %}
+  <p class="muted" style="font-size:12px;margin:0 0 12px">{{ cat.n_modules }} programs · {{ cat.n_scores }} derived scores · {{ cat.n_genes }} genes ·
      <a href="/genesets/variability?source=starcat">variability across datasets →</a></p>
-  {% for catalog, modules in starcat_catalogs.items() %}
-  <h3 class="muted" style="margin:10px 0 2px">{{ catalog }} <span style="font-size:11px;font-weight:normal">· {{ modules|length }} programs</span></h3>
+
+  <h3 style="margin:12px 0 4px">Programs
+      <span class="info" title="starCAT programs are NMF gene-expression usages — each is a weighted gene signature learned from reference data. Open one to see its top genes by weight. Grouped by biological category.">ⓘ</span></h3>
+  {% for group, modules in cat.modules_by_group.items() %}
+  <h4 class="muted" style="margin:8px 0 2px;text-transform:capitalize">{{ group|replace('_', ' ') }}</h4>
   <div class="table-wrap">
-  <table class="auto card-table" style="margin-bottom:10px">
-      <thead>
-          <tr><th>Program</th><th>Datasets scored</th></tr>
-      </thead>
+  <table class="auto card-table" style="margin-bottom:8px">
+      <thead><tr><th>Program</th><th>Description</th></tr></thead>
       <tbody>
       {% for m in modules %}
           <tr>
-              <td class="card-title mono" style="font-size:12px"><a href="/genesets/starcat/{{ catalog }}/{{ m.module }}">{{ m.module }}</a></td>
-              <td data-label="Datasets scored" class="muted">{{ m.n_datasets }}</td>
+              <td class="card-title mono" style="font-size:12px"><a href="/genesets/starcat/{{ cat.catalog_id }}/modules/{{ m.name }}">{{ m.name }}</a></td>
+              <td data-label="Description" class="muted">{{ m.description or '—' }}</td>
           </tr>
       {% endfor %}
       </tbody>
   </table>
   </div>
+  {% endfor %}
+
+  {% if cat.scores %}
+  <h3 style="margin:14px 0 4px">Derived scores
+      <span class="info" title="Scores computed on datasets and shown in the variability heatmap. Each is a recipe over one or more programs: continuous = weighted combination; discrete = program above a threshold. These are what the fleet is actually scored on.">ⓘ</span></h3>
+  <div class="table-wrap">
+  <table class="auto card-table" style="margin-bottom:10px">
+      <thead><tr><th>Score</th><th>Kind</th><th>Recipe</th></tr></thead>
+      <tbody>
+      {% for s in cat.scores %}
+          <tr>
+              <td class="card-title mono" style="font-size:12px">{{ s.name }}</td>
+              <td data-label="Kind" class="muted">{{ s.kind }}</td>
+              <td data-label="Recipe" class="muted" style="font-size:12px">
+                  {% for col in s.columns %}{% if not loop.first %} · {% endif %}{% if s.weights and s.weights[loop.index0] not in (1, 1.0) %}{{ s.weights[loop.index0] }}×{% endif %}<a href="/genesets/starcat/{{ cat.catalog_id }}/modules/{{ col }}">{{ col }}</a>{% endfor %}{% if s.threshold is not none %} <span class="muted-2">(&gt; {{ '%.4g'|format(s.threshold) }})</span>{% endif %}
+              </td>
+          </tr>
+      {% endfor %}
+      </tbody>
+  </table>
+  </div>
+  {% endif %}
   {% endfor %}
   {% endif %}
 {% endif %}

@@ -10,7 +10,9 @@
   .mv-ctrls select { font-family: var(--font); font-size: 13px; padding: 4px 8px; border: 1px solid var(--border); border-radius: 5px; background: #fff; }
   .mv-legend { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text-muted); margin-left: auto; }
   .mv-legend .bar { width: 140px; height: 12px; border: 1px solid var(--border); border-radius: 2px; }
+  .mv-caveat { font-size: 12px; line-height: 1.5; color: #713f12; background: #fefce8; border: 1px solid #fde68a; border-radius: 6px; padding: 8px 12px; margin: 0 0 12px; max-width: 900px; }
   .mv-summary { font-size: 12px; color: var(--text-muted); margin: 4px 0 8px; }
+  .mv-warn { font-size: 12px; color: #92400e; background: #fef3c7; border-radius: 5px; padding: 4px 9px; margin: 0 0 8px; display: inline-block; }
   .mv-state { font-size: 13px; color: var(--text-muted); padding: 16px 2px; }
   .mv-state.err { color: #b91c1c; }
 
@@ -39,7 +41,17 @@
 
 <p class="mv-intro">Which gene-set / starCAT modules track a biological axis, and in which datasets. Pick a
 <b>tag</b> (e.g. braak stage) and a <b>statistic</b>; each cell shows how strongly that module’s
-score varies with the tag in that dataset. Hotter = more of the module’s variance is explained.</p>
+score co-varies with the tag in that dataset. Hotter = stronger association.</p>
+
+<div class="mv-caveat">
+  <b>Exploratory, read with care.</b> These statistics are computed <b>per cell</b>, with the
+  donor-level tag broadcast to every cell — so cells are treated as independent when they are not
+  (pseudoreplication). Values are therefore <b>cell-count-weighted</b> and not donor-level effect
+  sizes, and are only loosely comparable across datasets (composition, design, and donor count all
+  differ). Use this to <b>spot candidates</b>, not to quantify effects; confirm anything interesting
+  with a donor-level (pseudobulk) test. <b>ω²</b> is bias-corrected; the raw <b>F</b> statistic is
+  hidden because with 10⁵+ cells it is meaningless.
+</div>
 
 <div class="mv-ctrls">
   <div>
@@ -66,6 +78,7 @@ score varies with the tag in that dataset. Hotter = more of the module’s varia
 </div>
 
 <div class="mv-summary" id="mv-summary"></div>
+<div class="mv-warn" id="mv-warn" style="display:none"></div>
 <div class="mv-state" id="mv-state">loading…</div>
 <div class="mv-wrap" id="mv-wrap" style="display:none">
   <table class="mv" id="mv-table"></table>
@@ -79,9 +92,13 @@ score varies with the tag in that dataset. Hotter = more of the module’s varia
   // (age / genotype / donor …) appear automatically once the server exposes them.
   var FALLBACK = {
     tags: ['braak', 'sex', 'host_sex', 'cluster'],
-    statistics: ['R2', 'spearman', 'eta2', 'omega2', 'mean_range', 'mean_score', 'F', 'total_var'],
+    statistics: ['omega2', 'R2', 'spearman', 'eta2', 'mean_range', 'mean_score', 'total_var'],
   };
-  // Natural default statistic per tag: numerical → R2, categorical → eta2.
+  // F is deliberately excluded from the UI: with 10^5+ cells it is astronomically
+  // large and conveys nothing but n (see the caveat banner re: pseudoreplication).
+  var DROP_STATS = { F: 1 };
+  // Natural default statistic per tag: numerical → R2, categorical → omega2
+  // (bias-corrected η²; plain eta2 is upward-biased with few groups / large n).
   var NUMERIC_TAGS = { braak: 1, age: 1, braak_stage: 1 };
   var BOUNDED01 = { eta2: 1, omega2: 1, R2: 1 };   // already [0,1]
   var SIGNED = { spearman: 1 };                     // [-1,1] → diverging
@@ -93,6 +110,7 @@ score varies with the tag in that dataset. Hotter = more of the module’s varia
       wrap = document.getElementById('mv-wrap'),
       table = document.getElementById('mv-table'),
       summary = document.getElementById('mv-summary'),
+      warnEl = document.getElementById('mv-warn'),
       loEl = document.getElementById('mv-lo'), hiEl = document.getElementById('mv-hi'),
       barEl = document.getElementById('mv-bar');
 
@@ -129,7 +147,7 @@ score varies with the tag in that dataset. Hotter = more of the module’s varia
   }
 
   function defaultStat(tag, stats) {
-    var want = NUMERIC_TAGS[tag] ? 'R2' : 'eta2';
+    var want = NUMERIC_TAGS[tag] ? 'R2' : 'omega2';
     return stats.indexOf(want) >= 0 ? want : stats[0];
   }
 
@@ -138,9 +156,11 @@ score varies with the tag in that dataset. Hotter = more of the module’s varia
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (d) {
         var dim = (d && (d.dimensions || d)) || {};
+        var stats = (dim.statistics && dim.statistics.length) ? dim.statistics : FALLBACK.statistics;
+        stats = stats.filter(function (s) { return !DROP_STATS[s]; });
         return {
           tags: (dim.tags && dim.tags.length) ? dim.tags : FALLBACK.tags,
-          statistics: (dim.statistics && dim.statistics.length) ? dim.statistics : FALLBACK.statistics,
+          statistics: stats,
         };
       })
       .catch(function () { return { tags: FALLBACK.tags, statistics: FALLBACK.statistics }; });
@@ -169,7 +189,7 @@ score varies with the tag in that dataset. Hotter = more of the module’s varia
     if (!modList.length) {
       wrap.style.display = 'none'; stateEl.className = 'mv-state';
       stateEl.textContent = 'No variability rows for tag=' + tag + ', statistic=' + stat + '.';
-      summary.textContent = ''; return;
+      summary.textContent = ''; warnEl.style.display = 'none'; return;
     }
 
     // colour domain
@@ -220,6 +240,12 @@ score varies with the tag in that dataset. Hotter = more of the module’s varia
     table.innerHTML = thead + body;
     summary.textContent = modList.length + ' modules × ' + dsList.length + ' datasets · tag ‘' + tag + '’ · ' + stat
       + ' · cells = max over tag columns; blank = not scored/tagged';
+    // under-powered tags: a "fleet" view over ≤3 datasets isn't a fleet
+    if (dsList.length <= 3) {
+      warnEl.style.display = '';
+      warnEl.textContent = '⚠ Only ' + dsList.length + ' dataset' + (dsList.length === 1 ? '' : 's')
+        + ' carry the ‘' + tag + '’ tag — this is not a fleet-wide comparison, treat it as anecdotal.';
+    } else { warnEl.style.display = 'none'; }
     stateEl.style.display = 'none'; wrap.style.display = '';
   }
 

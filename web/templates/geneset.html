@@ -35,6 +35,19 @@
     </div>
 </div>
 
+{% if payload.scored_in %}
+<div style="margin:8px 0">
+    <span class="mk">scored in</span>
+    {% for dbid in payload.scored_in %}
+    {% set parts = dbid.split('/') %}
+    {% if parts|length == 2 %}<a href="/browse/{{ parts[0]|urlencode }}/{{ parts[1]|urlencode }}" class="chip">{{ dbid }}</a>{% else %}<span class="chip">{{ dbid }}</span>{% endif %}
+    {% endfor %}
+    <span class="muted" style="font-size:11px">· pre-computed as a module score in {{ payload.scored_in|length }} dataset{{ '' if payload.scored_in|length == 1 else 's' }} · <a href="/genesets/variability">module variability →</a></span>
+</div>
+{% else %}
+<div class="muted" style="margin:8px 0;font-size:12px">Not pre-scored on any dataset yet — <a href="/genesets/variability">see module variability →</a></div>
+{% endif %}
+
 {% if payload.geneset_metadata.get('top_go') %}
 <div style="margin:6px 0">
     <span class="mk">top_go</span>

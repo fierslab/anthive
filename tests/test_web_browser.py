@@ -321,6 +321,35 @@ _GENESET_PAYLOAD = {
 }
 
 
+# /catalogs (REST 2.30): one starcat catalog + one geneset catalog.
+_CATALOGS = {
+    "count": 2,
+    "catalogs": [
+        {"catalog_id": "MICROGLIA_T", "source": "starcat", "name": "Microglia Test",
+         "description": "test starcat catalog", "n_modules": 2, "n_scores": 1, "n_genes": 100,
+         "metadata": {"organism": "human"}},
+        {"catalog_id": "StudyX/Exp1", "source": "geneset", "name": "StudyX Exp1",
+         "description": "", "n_modules": 1, "n_scores": 0, "n_genes": 50, "metadata": {}},
+    ],
+}
+_CATALOG_STARCAT = {
+    "catalog_id": "MICROGLIA_T", "source": "starcat", "name": "Microglia Test",
+    "description": "test starcat catalog", "n_modules": 2, "n_scores": 1, "n_genes": 100,
+    "metadata": {"organism": "human"},
+    "modules": [
+        {"name": "Microglia_DAM", "group": "states", "description": "DAM program; APOE, TREM2",
+         "n_genes": 100, "has_weights": True},
+        {"name": "Microglia_Homeostatic", "group": "identity", "description": "Homeostatic; P2RY12",
+         "n_genes": 100, "has_weights": True},
+    ],
+    "scores": [
+        {"name": "DAM_progression", "kind": "continuous",
+         "columns": ["Microglia_DAM", "Microglia_Homeostatic"], "weights": [1, -1],
+         "threshold": None, "normalization": "normalized"},
+    ],
+}
+
+
 # DE study list returned by the fake /databases/{id}/de endpoint.
 _DE_STUDIES = {
     "studies": [
@@ -357,6 +386,10 @@ def _fake_api_get(api_url, path):  # pyright: ignore
         if db_id in _INFO:
             return _INFO[db_id]
         raise requests.HTTPError(f"404 for {db_id}")
+    if path == "/catalogs":
+        return _CATALOGS
+    if path == "/catalogs/starcat/MICROGLIA_T":
+        return _CATALOG_STARCAT
     if path.startswith("/module-variability"):
         return {"rows": [
             {"catalog": "MICROGLIA_V1", "module": "DAM_pos", "dataset": "GroupA/ds1"},
@@ -531,22 +564,26 @@ def test_genesets_group_selector(client):
     assert "StudyX" in home.text                     # geneset content (default group)
 
 
-def test_genesets_starcat_group_lists_programs(client):
-    # The starCAT group lists programs per catalog, each linking to its detail.
+def test_genesets_starcat_group_lists_modules_and_scores(client):
+    # The starCAT group (from /catalogs) lists modules grouped by category, with
+    # descriptions, plus the derived-score recipes; modules link to their detail.
     resp = client.get("/genesets?group=starcat")
     assert resp.status_code == 200
-    assert "MICROGLIA_V1" in resp.text
-    assert "DAM_pos" in resp.text
-    assert "/genesets/starcat/MICROGLIA_V1/DAM_pos" in resp.text
+    assert "Microglia_DAM" in resp.text
+    assert "DAM program; APOE, TREM2" in resp.text          # module description
+    assert "/genesets/starcat/MICROGLIA_T/modules/Microglia_DAM" in resp.text
+    # derived score recipe with its component modules
+    assert "DAM_progression" in resp.text
+    assert "Derived scores" in resp.text
 
 
-def test_geneset_starcat_detail_renders(client):
-    # Detail page renders and is not swallowed by the generic
-    # /genesets/{study}/{experiment}/{name} route; fetches /catalogs client-side.
-    resp = client.get("/genesets/starcat/MICROGLIA_V1/DAM_pos")
+def test_geneset_starcat_module_detail_renders(client):
+    # Module detail page renders and isn't swallowed by the generic
+    # /genesets/{study}/{experiment}/{name} route; fetches the module endpoint.
+    resp = client.get("/genesets/starcat/MICROGLIA_T/modules/Microglia_DAM")
     assert resp.status_code == 200
     assert 'id="sc-top"' in resp.text
-    assert "/catalogs/" in resp.text
+    assert "/catalogs/starcat/" in resp.text
     assert "starCAT program" in resp.text
 
 
