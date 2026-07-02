@@ -521,16 +521,33 @@ def test_genesets_index_links_variability(client):
     assert '/genesets/variability' in resp.text
 
 
-def test_genesets_index_lists_starcat_programs(client):
-    # starCAT programs (from /module-variability) show as a second source, with
-    # per-program dataset-coverage counts.
-    resp = client.get("/genesets")
+def test_genesets_group_selector(client):
+    # The index offers a group selector; the starCAT tab is always present,
+    # geneset content shows on the default group.
+    home = client.get("/genesets")
+    assert home.status_code == 200
+    assert "grp-tab" in home.text
+    assert "/genesets?group=starcat" in home.text   # the starCAT tab href
+    assert "StudyX" in home.text                     # geneset content (default group)
+
+
+def test_genesets_starcat_group_lists_programs(client):
+    # The starCAT group lists programs per catalog, each linking to its detail.
+    resp = client.get("/genesets?group=starcat")
     assert resp.status_code == 200
-    assert "starCAT programs" in resp.text
     assert "MICROGLIA_V1" in resp.text
     assert "DAM_pos" in resp.text
-    # DAM_pos is scored in 2 datasets in the fake
-    assert "/genesets/variability?source=starcat" in resp.text
+    assert "/genesets/starcat/MICROGLIA_V1/DAM_pos" in resp.text
+
+
+def test_geneset_starcat_detail_renders(client):
+    # Detail page renders and is not swallowed by the generic
+    # /genesets/{study}/{experiment}/{name} route; fetches /catalogs client-side.
+    resp = client.get("/genesets/starcat/MICROGLIA_V1/DAM_pos")
+    assert resp.status_code == 200
+    assert 'id="sc-top"' in resp.text
+    assert "/catalogs/" in resp.text
+    assert "starCAT program" in resp.text
 
 
 def test_admin_feedback_requires_admin(client):

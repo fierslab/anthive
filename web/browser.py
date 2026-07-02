@@ -1183,11 +1183,26 @@ async def genesets_index(request: Request):
 
     starcat_total = sum(len(mods) for mods in starcat_catalogs.values())
 
+    # Group selector: one tab per module source (gene sets / starCAT; more to
+    # follow). Only groups that actually have content are offered. The active
+    # group comes from ?group=, defaulting to the first available.
+    groups = []
+    if by_study:
+        groups.append({"key": "genesets", "label": "Gene sets", "count": len(genesets)})
+    if starcat_catalogs:
+        groups.append({"key": "starcat", "label": "starCAT", "count": starcat_total})
+    valid_keys = {g["key"] for g in groups}
+    active_group = request.query_params.get("group")
+    if active_group not in valid_keys:
+        active_group = groups[0]["key"] if groups else "genesets"
+
     return templates.TemplateResponse(request, "genesets.html", {
         "by_study": by_study,
         "total": len(genesets),
         "starcat_catalogs": starcat_catalogs,
         "starcat_total": starcat_total,
+        "groups": groups,
+        "active_group": active_group,
     })
 
 
@@ -1201,6 +1216,18 @@ async def geneset_variability_view(request: Request):
     Registered BEFORE the /{study}/{experiment} route so 'variability' isn't
     swallowed as a study id."""
     return templates.TemplateResponse(request, "geneset_variability.html", {})
+
+
+@router.get("/genesets/starcat/{catalog}/{module}", response_class=HTMLResponse)
+async def geneset_starcat_view(request: Request, catalog: str, module: str):
+    """One starCAT program: its top-N genes with weights. Data comes client-side
+    from /api/catalogs/{catalog}/{module} (pending endpoint) — until that ships
+    the page shows a 'weights pending' state. Registered BEFORE the generic
+    /{study}/{experiment}/{name} route so 'starcat' isn't read as a study id."""
+    return templates.TemplateResponse(request, "geneset_starcat.html", {
+        "catalog": catalog,
+        "module": module,
+    })
 
 
 @router.get("/genesets/{study}/{experiment}", response_class=HTMLResponse)

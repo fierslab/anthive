@@ -1,82 +1,90 @@
 {% extends "base.html" %}
 
-{% block title %}genesets — anthive{% endblock %}
+{% block title %}gene sets & programs — anthive{% endblock %}
 
 {% block content %}
-{% if error %}
-<p style="color:#dc2626">{{ error }}</p>
-{% endif %}
+<style>
+  .grp-tabs { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 14px; }
+  .grp-tab { display: inline-flex; align-items: baseline; gap: 6px; padding: 6px 15px; border: 1px solid var(--border); border-radius: 20px; font-size: 13px; color: var(--text); background: #fff; }
+  .grp-tab:hover { border-color: var(--link); text-decoration: none; }
+  .grp-tab.active { background: var(--text); color: #fff; border-color: var(--text); }
+  .grp-tab .n { font-size: 11px; opacity: .7; }
+</style>
+
+{% if error %}<p style="color:#dc2626">{{ error }}</p>{% endif %}
 
 <div class="stats-row">
-    <div>genesets: <span class="val">{{ total }}</span></div>
-    <div>studies: <span class="val">{{ by_study|length }}</span></div>
+    <div>gene sets: <span class="val">{{ total }}</span></div>
+    <div>starCAT programs: <span class="val">{{ starcat_total }}</span></div>
     <div style="margin-left:auto"><a href="/genesets/variability">📊 module variability across datasets →</a></div>
 </div>
 
-{% if not by_study %}
-<p class="muted">No genesets in the store.</p>
-{% else %}
-
-{% for study, experiments in by_study.items() %}
-<h2>{{ study }}</h2>
-{% for experiment, genesets in experiments.items() %}
-<h3 class="muted" style="margin:10px 0 2px">
-    <a href="/genesets/{{ study }}/{{ experiment }}">{{ experiment }}</a>
-</h3>
-<div class="table-wrap">
-<table class="auto card-table" style="margin-bottom:10px">
-    <thead>
-        <tr>
-            <th>Geneset</th>
-            <th>Format</th>
-            <th>n genes</th>
-            <th>Organism</th>
-            <th>Method</th>
-            <th>Parent dataset</th>
-        </tr>
-    </thead>
-    <tbody>
-    {% for g in genesets %}
-        <tr>
-            <td class="card-title"><a href="/genesets/{{ study }}/{{ experiment }}/{{ g.name }}">{{ g.display_name }}</a></td>
-            <td data-label="Format" class="muted">{{ g.format }}</td>
-            <td data-label="n genes" class="muted">{{ g.n_genes }}</td>
-            <td data-label="Organism" class="muted">{% if g.organism %}{{ g.organism }}{% else %}—{% endif %}</td>
-            <td data-label="Method" class="muted">{% if g.method %}{{ g.method }}{% else %}—{% endif %}</td>
-            <td data-label="Parent dataset" class="muted mono" style="font-size:11px">{% if g.parent_dataset %}{{ g.parent_dataset }}{% else %}—{% endif %}</td>
-        </tr>
+{% if groups %}
+<div class="grp-tabs">
+    {% for g in groups %}
+    <a class="grp-tab {% if g.key == active_group %}active{% endif %}" href="/genesets?group={{ g.key }}">{{ g.label }} <span class="n">{{ g.count }}</span></a>
     {% endfor %}
-    </tbody>
-</table>
 </div>
-{% endfor %}
-{% endfor %}
-
 {% endif %}
 
-{% if starcat_catalogs %}
-<h2 style="margin-top:22px">starCAT programs
-    <span class="info" title="starCAT programs (NMF cell-state usages), a second module source scored across the fleet. Gene-level definitions are not yet exposed over the API — for now this lists the programs and how many datasets each is scored in, linking to the variability heatmap. Gene tables will follow once the catalog endpoint ships.">ⓘ</span>
-    <span class="muted" style="font-size:12px;font-weight:normal">— {{ starcat_total }} programs · <a href="/genesets/variability?source=starcat">variability across datasets →</a></span>
-</h2>
-{% for catalog, modules in starcat_catalogs.items() %}
-<h3 class="muted" style="margin:10px 0 2px">{{ catalog }}</h3>
-<div class="table-wrap">
-<table class="auto card-table" style="margin-bottom:10px">
-    <thead>
-        <tr><th>Program</th><th>Source</th><th>Datasets scored</th></tr>
-    </thead>
-    <tbody>
-    {% for m in modules %}
-        <tr>
-            <td class="card-title mono" style="font-size:12px">{{ m.module }}</td>
-            <td data-label="Source" class="muted">starCAT</td>
-            <td data-label="Datasets scored" class="muted">{{ m.n_datasets }}</td>
-        </tr>
-    {% endfor %}
-    </tbody>
-</table>
-</div>
-{% endfor %}
+{% if active_group == 'genesets' %}
+  {% if not by_study %}
+  <p class="muted">No gene sets in the store.</p>
+  {% else %}
+  {% for study, experiments in by_study.items() %}
+  <h2>{{ study }}</h2>
+  {% for experiment, genesets in experiments.items() %}
+  <h3 class="muted" style="margin:10px 0 2px">
+      <a href="/genesets/{{ study }}/{{ experiment }}">{{ experiment }}</a>
+  </h3>
+  <div class="table-wrap">
+  <table class="auto card-table" style="margin-bottom:10px">
+      <thead>
+          <tr><th>Geneset</th><th>Format</th><th>n genes</th><th>Organism</th><th>Method</th><th>Parent dataset</th></tr>
+      </thead>
+      <tbody>
+      {% for g in genesets %}
+          <tr>
+              <td class="card-title"><a href="/genesets/{{ study }}/{{ experiment }}/{{ g.name }}">{{ g.display_name }}</a></td>
+              <td data-label="Format" class="muted">{{ g.format }}</td>
+              <td data-label="n genes" class="muted">{{ g.n_genes }}</td>
+              <td data-label="Organism" class="muted">{% if g.organism %}{{ g.organism }}{% else %}—{% endif %}</td>
+              <td data-label="Method" class="muted">{% if g.method %}{{ g.method }}{% else %}—{% endif %}</td>
+              <td data-label="Parent dataset" class="muted mono" style="font-size:11px">{% if g.parent_dataset %}{{ g.parent_dataset }}{% else %}—{% endif %}</td>
+          </tr>
+      {% endfor %}
+      </tbody>
+  </table>
+  </div>
+  {% endfor %}
+  {% endfor %}
+  {% endif %}
+{% endif %}
+
+{% if active_group == 'starcat' %}
+  {% if not starcat_catalogs %}
+  <p class="muted">No starCAT programs scored yet.</p>
+  {% else %}
+  <p class="muted" style="font-size:12px;margin:0 0 10px">starCAT programs (NMF cell-state usages). Open a program to see its top genes and weights.
+     <a href="/genesets/variability?source=starcat">variability across datasets →</a></p>
+  {% for catalog, modules in starcat_catalogs.items() %}
+  <h3 class="muted" style="margin:10px 0 2px">{{ catalog }} <span style="font-size:11px;font-weight:normal">· {{ modules|length }} programs</span></h3>
+  <div class="table-wrap">
+  <table class="auto card-table" style="margin-bottom:10px">
+      <thead>
+          <tr><th>Program</th><th>Datasets scored</th></tr>
+      </thead>
+      <tbody>
+      {% for m in modules %}
+          <tr>
+              <td class="card-title mono" style="font-size:12px"><a href="/genesets/starcat/{{ catalog }}/{{ m.module }}">{{ m.module }}</a></td>
+              <td data-label="Datasets scored" class="muted">{{ m.n_datasets }}</td>
+          </tr>
+      {% endfor %}
+      </tbody>
+  </table>
+  </div>
+  {% endfor %}
+  {% endif %}
 {% endif %}
 {% endblock %}

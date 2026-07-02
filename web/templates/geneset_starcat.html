@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+
+{% block title %}{{ module }} — starCAT program{% endblock %}
+
+{% block content %}
+<style>
+  .sc-ctrls { margin: 8px 0 6px; font-size: 13px; color: var(--text-muted); }
+  .sc-ctrls select { font-family: var(--font); font-size: 13px; padding: 3px 7px; border: 1px solid var(--border); border-radius: 5px; }
+  .sc-meta { font-size: 12px; color: var(--text-muted); margin: 2px 0; }
+  .sc-scored { font-size: 12px; color: var(--text-muted); margin: 6px 0 10px; }
+  .sc-state { font-size: 13px; color: var(--text-muted); padding: 16px 2px; line-height: 1.55; }
+  .sc-state.err { color: #b91c1c; }
+  table.wtable { border-collapse: collapse; width: 100%; max-width: 640px; font-size: 13px; }
+  table.wtable th, table.wtable td { padding: 3px 8px; border-bottom: 1px solid #eef2f7; text-align: left; }
+  table.wtable th { font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--text-muted); }
+  table.wtable td.r { color: #94a3b8; text-align: right; width: 34px; font-size: 11px; }
+  table.wtable td.w { text-align: right; font-family: var(--font-mono); font-size: 12px; width: 78px; white-space: nowrap; }
+  table.wtable td.bar { width: 45%; }
+  .wbar { display: inline-block; height: 10px; background: var(--link); border-radius: 2px; vertical-align: middle; min-width: 1px; }
+  .wbar.neg { background: #dc2626; }
+</style>
+
+<div class="breadcrumb">
+    <a href="/genesets">gene sets &amp; programs</a> &rsaquo;
+    <a href="/genesets?group=starcat">starCAT</a> &rsaquo;
+    {{ catalog }} &rsaquo; <strong>{{ module }}</strong>
+</div>
+
+<h1 class="page-title">{{ module }}
+    <span class="muted" style="font-size:13px;font-weight:normal">— {{ catalog }} starCAT program</span></h1>
+<div class="sc-meta" id="sc-meta"></div>
+
+<div class="sc-ctrls">
+    show top
+    <select id="sc-top">
+        <option value="25">25</option>
+        <option value="50" selected>50</option>
+        <option value="100">100</option>
+        <option value="200">200</option>
+    </select>
+    genes by weight
+</div>
+
+<div class="sc-state" id="sc-state">loading…</div>
+<div id="sc-body" style="display:none">
+    <div class="sc-scored" id="sc-scored"></div>
+    <table class="wtable" id="sc-table"></table>
+</div>
+
+<script>
+(function () {
+  var CATALOG = {{ catalog|tojson }}, MODULE = {{ module|tojson }}, API = '/api';
+  var topSel = document.getElementById('sc-top'),
+      stateEl = document.getElementById('sc-state'),
+      bodyEl = document.getElementById('sc-body'),
+      table = document.getElementById('sc-table'),
+      metaEl = document.getElementById('sc-meta'),
+      scoredEl = document.getElementById('sc-scored');
+
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+
+  function render(d) {
+    var genes = d.top_genes || [];
+    if (!genes.length) { stateEl.className = 'sc-state'; stateEl.textContent = 'No genes returned for this program.'; bodyEl.style.display = 'none'; return; }
+    metaEl.textContent = (d.n_genes_total ? d.n_genes_total + ' genes total · ' : '') + 'showing top ' + genes.length
+      + (d.display_name && d.display_name !== MODULE ? ' · ' + d.display_name : '');
+    if (d.scored_in && d.scored_in.length) {
+      scoredEl.innerHTML = 'scored in ' + d.scored_in.length + ' dataset' + (d.scored_in.length === 1 ? '' : 's') + ': '
+        + d.scored_in.map(function (id) { var p = String(id).split('/'); return p.length === 2 ? '<a href="/browse/' + encodeURIComponent(p[0]) + '/' + encodeURIComponent(p[1]) + '">' + esc(id) + '</a>' : esc(id); }).join(', ');
+    } else { scoredEl.innerHTML = ''; }
+
+    var maxW = 0;
+    genes.forEach(function (g) { var w = (g.weight == null ? 0 : g.weight); maxW = Math.max(maxW, Math.abs(w)); });
+    if (!maxW) maxW = 1;
+    var rows = genes.map(function (g, i) {
+      var w = (g.weight == null ? null : g.weight);
+      var pct = w == null ? 0 : Math.abs(w) / maxW * 100;
+      var neg = w != null && w < 0;
+      return '<tr><td class="r">' + (i + 1) + '</td>'
+        + '<td><code>' + esc(g.gene) + '</code></td>'
+        + '<td class="w">' + (w == null ? '—' : w.toFixed(4)) + '</td>'
+        + '<td class="bar"><span class="wbar' + (neg ? ' neg' : '') + '" style="width:' + pct.toFixed(1) + '%" title="' + (w == null ? '' : w.toFixed(4)) + '"></span></td></tr>';
+    }).join('');
+    table.innerHTML = '<thead><tr><th class="r">#</th><th>Gene</th><th class="w">Weight</th><th>&nbsp;</th></tr></thead><tbody>' + rows + '</tbody>';
+    stateEl.style.display = 'none'; bodyEl.style.display = '';
+  }
+
+  function load() {
+    var n = topSel.value;
+    stateEl.style.display = ''; stateEl.className = 'sc-state'; stateEl.textContent = 'loading…';
+    bodyEl.style.display = 'none';
+    fetch(API + '/catalogs/' + encodeURIComponent(CATALOG) + '/' + encodeURIComponent(MODULE) + '?top=' + encodeURIComponent(n), { credentials: 'same-origin' })
+      .then(function (r) {
+        if (r.status === 404) { var e = new Error('pending'); e.pending = true; throw e; }
+        if (!r.ok) return r.text().then(function (t) { throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 140)); });
+        return r.json();
+      })
+      .then(render)
+      .catch(function (e) {
+        stateEl.style.display = '';
+        if (e && e.pending) {
+          stateEl.className = 'sc-state';
+          stateEl.innerHTML = 'Gene weights for starCAT programs aren’t exposed by the API yet — this view lights up automatically once the '
+            + '<code>/catalogs</code> endpoint ships (requested). Meanwhile, see '
+            + '<a href="/genesets/variability?source=starcat">where this program is active across datasets →</a>';
+        } else {
+          stateEl.className = 'sc-state err';
+          stateEl.textContent = 'could not load — ' + (e && e.message ? e.message : e);
+        }
+      });
+  }
+
+  topSel.addEventListener('change', load);
+  load();
+})();
+</script>
+{% endblock %}
