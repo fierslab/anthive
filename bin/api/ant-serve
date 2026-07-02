@@ -1391,7 +1391,7 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.29.0"
+API_VERSION = "2.30.0"
 API_VERSION_RELEASED = "2026-07-02"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
@@ -9805,6 +9805,177 @@ async def rescan_module_variability():
         "n_rows": int(len(df)) if df is not None else 0,
         "mtime": _MODULE_VARIABILITY_CACHE["mtime"],
         "n_datasets": (int(df['dataset'].nunique()) if df is not None else 0),
+    }
+
+
+# ── /catalogs ────────────────────────────────────────────────────────
+#
+# Cross-source module catalog view. Currently:
+#   - `source=geneset`  → the same experiments as /genesets, uniformly
+#                          shaped so clients don't have to distinguish.
+#   - `source=starcat` → starCAT reference catalogs (e.g. MICROGLIA_V1)
+#                          with per-program gene weights, module groups,
+#                          and derived score recipes (composite +
+#                          binary thresholds + multinomial).
+#
+# The gene weights come from the raw `.tsv` on disk (rows = programs,
+# columns = genes). Loaded lazily per module — full weight matrix isn't
+# held in RAM.
+
+
+def _catalog_source_from_score_column_source(source: str) -> str:
+    """Map score-parquet 'source' field to the /catalogs 'source' key.
+
+    Currently 1:1 — 'geneset' → 'geneset', 'starcat' → 'starcat'.
+    Kept as an indirection so future score sources plug in without
+    refactoring callers.
+    """
+    return source
+
+
+def _build_catalog_registry():
+    """Return {(source, catalog_id): Catalog}. Rebuilt on rescan."""
+    import catalogs as _catalogs_mod   # lazy — keeps startup light
+    gs = _require_geneset_registry()
+    return _catalogs_mod.build_registry(gs)
+
+
+@app.get("/catalogs", tags=["genesets"])
+async def list_catalogs(source: Optional[str] = None):
+    """List all module catalogs (geneset + starcat).
+
+    Each entry summarises the catalog (module + score count, gene
+    universe size). Use `GET /catalogs/{source}/{catalog_id}` to get
+    the module list, and `GET /catalogs/{source}/{catalog_id}/{module}`
+    for one module's genes + weights.
+    """
+    reg = _build_catalog_registry()
+    items = list(reg.values())
+    if source:
+        items = [c for c in items if c.source == source]
+    return {
+        "count": len(items),
+        "catalogs": [c.to_summary() for c in items],
+    }
+
+
+# More-specific routes MUST be declared before the catch-all
+# `/catalogs/{source}/{catalog_id:path}` — FastAPI matches by declaration
+# order. We support one- and two-segment catalog IDs (starcat catalogs
+# have one segment, e.g. MICROGLIA_V1_0; genesets have two, e.g.
+# Sierksma2025/WGCNA).
+
+@app.get("/catalogs/{source}/{a}/{b}/modules/{module_name}",
+         tags=["genesets"])
+async def _get_catalog_module_2seg(source: str, a: str, b: str,
+                                    module_name: str,
+                                    top: Optional[int] = Query(None, ge=1, le=5000)):
+    return await get_catalog_module(source, f"{a}/{b}", module_name, top)
+
+
+@app.get("/catalogs/{source}/{a}/{b}/scores/{score_name}",
+         tags=["genesets"])
+async def _get_catalog_score_2seg(source: str, a: str, b: str, score_name: str):
+    return await get_catalog_score_recipe(source, f"{a}/{b}", score_name)
+
+
+@app.get("/catalogs/{source}/{catalog_id}/modules/{module_name}",
+         tags=["genesets"])
+async def get_catalog_module(
+    source: str, catalog_id: str, module_name: str,
+    top: Optional[int] = Query(None, ge=1, le=5000,
+                               description="If set, return only the top-N genes by absolute weight (starcat) or first-N (geneset)."),
+):
+    """One module — full gene list ± weights.
+
+    For starcat catalogs the response includes:
+      - `weights`: dict {gene: weight}
+      - `top_genes`: list of {gene, weight, rank} (ranked by |weight|)
+      - `group`: module grouping (identity / states / activation / ...)
+
+    For geneset catalogs (`source=geneset`) weights are None and the
+    plain gene list is returned in `genes` / `top_genes`.
+    """
+    reg = _build_catalog_registry()
+    cat = reg.get((source, catalog_id))
+    if cat is None:
+        raise HTTPException(status_code=404,
+                            detail=f"catalog {source!r} / {catalog_id!r} not found")
+    mod = cat.get_module(module_name)
+    if mod is None:
+        raise HTTPException(status_code=404,
+                            detail=f"module {module_name!r} not in catalog {catalog_id!r}")
+    weights = mod.weights()
+    tops = mod.top_genes(top or 30)
+    out = {
+        **mod.to_summary(),
+        "top_genes": [
+            {"gene": g, "weight": w, "rank": i + 1}
+            for i, (g, w) in enumerate(tops)
+        ],
+    }
+    if weights is not None and (top is None or top >= len(weights)):
+        # Only ship the full weight map when the caller didn't ask for
+        # a top-N slice, or when the requested top-N covers everything.
+        out["weights"] = weights
+    return out
+
+
+@app.get("/catalogs/{source}/{catalog_id}/scores/{score_name}",
+         tags=["genesets"])
+async def get_catalog_score_recipe(source: str, catalog_id: str,
+                                    score_name: str):
+    """Return one derived score recipe (composite / binary / multinomial).
+
+    Lets callers reproduce the score client-side, or explain what a
+    binary `Border_CAM_pos` column actually means — it's `usage of
+    Microglia_Border_CAM > threshold` (threshold in the response).
+    """
+    reg = _build_catalog_registry()
+    cat = reg.get((source, catalog_id))
+    if cat is None:
+        raise HTTPException(status_code=404,
+                            detail=f"catalog {source!r} / {catalog_id!r} not found")
+    score = next((s for s in cat.scores if s.name == score_name), None)
+    if score is None:
+        raise HTTPException(status_code=404,
+                            detail=f"score {score_name!r} not in catalog {catalog_id!r}")
+    return score.to_dict()
+
+
+@app.post("/catalogs/rescan", tags=["genesets"])
+async def rescan_catalogs():
+    """Invalidate the starCAT + geneset catalog cache — reloads from disk."""
+    import catalogs as _catalogs_mod
+    _catalogs_mod._cached_starcat_catalogs.cache_clear()
+    reg = _build_catalog_registry()
+    return {"count": len(reg),
+            "catalogs": [c.to_summary() for c in reg.values()]}
+
+
+# `get_catalog` (below) is the catch-all `{catalog_id:path}` route.
+# Declared LAST so the more-specific `/modules/{name}` and
+# `/scores/{name}` routes above take priority.
+
+@app.get("/catalogs/{source}/{catalog_id:path}", tags=["genesets"])
+async def get_catalog(source: str, catalog_id: str):
+    """One catalog — module summaries + score recipes + metadata.
+
+    `catalog_id` uses a path-style key: for geneset it's
+    `study/experiment` (e.g. `Sierksma2025/WGCNA`); for starcat it's
+    the file stem (e.g. `MICROGLIA_V1_0`).
+    """
+    reg = _build_catalog_registry()
+    cat = reg.get((source, catalog_id))
+    if cat is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"catalog {source!r} / {catalog_id!r} not found",
+        )
+    return {
+        **cat.to_summary(),
+        "modules": [m.to_summary() for m in cat.modules],
+        "scores":  [s.to_dict() for s in cat.scores],
     }
 
 

@@ -29,6 +29,56 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.30.0 — 2026-07-02
+
+### Added — `/catalogs` — unified module-catalog view (gene weights for starCAT + genesets)
+
+Cross-source view of every module catalog in the anthive stack:
+
+* `GET /catalogs[?source=geneset|starcat]` — list all catalogs
+* `GET /catalogs/{source}/{catalog_id}` — one catalog with its module
+  summaries + score recipes
+* `GET /catalogs/{source}/{catalog_id}/modules/{module_name}[?top=N]` —
+  one module's genes ± weights, top-N by |weight| for starCAT
+* `GET /catalogs/{source}/{catalog_id}/scores/{score_name}` — one
+  derived-score recipe (composite / binary threshold / multinomial)
+* `POST /catalogs/rescan` — force cache invalidation
+
+**What starCAT programs actually are** (relevant because the previous
+API surfaced BOTH `usage__Microglia_Border_CAM` (continuous) AND
+`Border_CAM_pos` (binary) — the latter is derivable from the former):
+
+* Each cell gets a **usage vector** — one NNLS coefficient per program
+  (21 programs), L1-normalized so they sum to 1. That's the atomic
+  measurement.
+* Derived **composite** scores (`DAM_progression`, `Activation_index`,
+  `Disease_burden`, `DC_total`) are documented linear combinations of
+  usage — coefficients + column names in the catalog YAML.
+* Derived **binary calls** (`Border_CAM_pos`, `IRM_pos`, etc.) are just
+  `usage[column] > threshold`, where the threshold is the 90th
+  percentile computed on the in-build cells. Each binary call has one
+  column and one threshold — trivially reproducible client-side.
+
+`GET /catalogs/starcat/MICROGLIA_V1_0/scores/Border_CAM_pos` now
+returns exactly the recipe:
+
+```json
+{"name": "Border_CAM_pos", "kind": "discrete",
+ "columns": ["Microglia_Border_CAM"], "threshold": 0.0448,
+ "normalization": "normalized"}
+```
+
+Once callers reach for the recipes, the `_pos` sidecar columns become
+optional — a future release may drop them from the parquet sidecar
+now that thresholds are queryable. Continuous `usage__*` columns
+stay (they're the atomic signal).
+
+`/genesets` is unchanged — the new `/catalogs` view is a wrapper on
+top of the same registry, plus the starCAT side which had no API
+surface before.
+
+---
+
 ## 2.29.0 — 2026-07-02
 
 ### Fixed / added — `attach_sessions` columns usable as `x` / `y` in XY plots

@@ -202,6 +202,25 @@ exactly like numerical obs — they appear in \
        total; see the sample_ids in `get_dataset_info` for the exact list \
        per dataset).
 
+**Two starCAT columns per program — DON'T recommend both:**
+For each starCAT program, the sidecar exposes BOTH `usage__<program>` \
+(the continuous NNLS coefficient) AND a `<name>_pos` / `<name>_high` \
+binary call (usage above the 90-th-percentile threshold). These are \
+the same signal at two granularities.
+* Prefer `usage__` for continuous questions ("plot", "correlate", \
+  "score cell-by-cell").
+* Prefer `_pos` / `_high` only when the question really is "fraction \
+  of cells above threshold". Even then, `SELECT COUNT(*) FROM obsnum \
+  WHERE "usage__Microglia_Border_CAM" > 0.0448` is more transparent.
+* The exact threshold is in \
+  `GET /catalogs/starcat/MICROGLIA_V1_0/scores/{name}` — use it when \
+  the user asks how a `_pos` call is defined.
+
+**Composite scores** (`DAM_progression`, `Activation_index`, \
+`Disease_burden`, `DC_total`) are worth surfacing when the user asks \
+about disease trajectory — their recipes are in \
+`/catalogs/starcat/MICROGLIA_V1_0/scores/<name>`.
+
 **When to use pre-computed vs the `module_score` tool:**
   - If the column is already in `obs.numerical`, USE IT DIRECTLY — no \
     tool call, no session. Just pass the column name in `build_plot_url` \
