@@ -828,8 +828,11 @@ def convert_embeddings(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict) -
 
             original_dims = embedding.shape[1]
 
-            # Limit to maximum 4 dimensions
-            MAX_EMBEDDING_DIMS = 4
+            # Cap ridiculous dimensionalities (a 1000-D obsm is very unusual);
+            # 50 covers standard scanpy PCA (`n_comps=50`) and any UMAP up to
+            # `n_components=50`. Was 4, which silently truncated 5-D+ UMAPs
+            # and full 50-D PCA — see 2026-07 catalog note.
+            MAX_EMBEDDING_DIMS = 50
             if original_dims > MAX_EMBEDDING_DIMS:
                 embedding = embedding[:, :MAX_EMBEDDING_DIMS]
                 num_dims = MAX_EMBEDDING_DIMS
