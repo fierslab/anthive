@@ -1,0 +1,128 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "duckdb>=0.10.0",
+#   "pandas>=2.0.0",
+#   "pyarrow>=14.0",
+#   "pyyaml>=6.0",
+# ]
+# ///
+"""ant-score-ingest — merge a scores parquet artifact into a dataset's
+`<basename>.scores.parquet` sidecar. Intended for antomaton's
+`kind=module_score` ingest handler.
+
+Input parquet layout (from the antomaton workflow):
+  cell_id BIGINT, source VARCHAR, catalog VARCHAR, module VARCHAR, score DOUBLE
+
+The artifact is expected to carry a SINGLE (source, catalog) group — one
+tool invocation writes one panel. `--source`/`--catalog` are asserted
+against the artifact rows: if they disagree we refuse.
+
+Usage:
+  ant-score-ingest <db_id> --from <parquet> --source <s> --catalog <c> \\
+                   [--overwrite]
+
+Idempotency: uses `lib.scores_parquet.upsert_scores`, which removes any
+existing rows for (source, catalog) before appending the artifact's rows.
+Passing --overwrite is redundant with the default upsert semantics — it
+only makes the intent explicit in logs.
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import duckdb
+import pandas as pd
+
+script_dir = Path(__file__).resolve().parent
+lib_dir = script_dir.parent.parent / 'lib'
+sys.path.insert(0, str(lib_dir))
+
+from h5adstore import find_h5ad                    # type: ignore
+from scores_parquet import upsert_scores, summarize   # type: ignore
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog='ant-score-ingest')
+    parser.add_argument('db_id', help='target dataset (e.g. S25/V6A)')
+    parser.add_argument('--from', dest='src', required=True,
+                        help='path to the scores parquet artifact')
+    parser.add_argument('--source', required=True,
+                        help='(source, catalog, module) tuple: source label')
+    parser.add_argument('--catalog', required=True,
+                        help='(source, catalog, module) tuple: catalog label')
+    parser.add_argument('--overwrite', action='store_true',
+                        help='no-op for upsert; documents intent')
+    parser.add_argument('--h5adstore-root', default='data/h5adstore')
+    args = parser.parse_args()
+
+    root = Path(args.h5adstore_root).resolve()
+    entry = find_h5ad(root, args.db_id)
+    if entry is None:
+        print(f'ERROR: db_id not found: {args.db_id}', file=sys.stderr); return 1
+    if not entry.duckdb_path.exists():
+        print(f'ERROR: sibling duckdb missing: {entry.duckdb_path}', file=sys.stderr); return 1
+
+    src_path = Path(args.src).resolve()
+    if not src_path.exists():
+        print(f'ERROR: artifact not found: {src_path}', file=sys.stderr); return 1
+
+    conn = duckdb.connect(':memory:')
+    try:
+        rows = conn.execute(
+            'SELECT source, catalog FROM read_parquet(?)',
+            [str(src_path)]
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        print(f'ERROR: artifact has 0 rows', file=sys.stderr); return 1
+
+    sources  = {r[0] for r in rows}
+    catalogs = {r[1] for r in rows}
+    if sources != {args.source}:
+        print(f'ERROR: artifact carries source={sources!r} but --source={args.source!r}',
+              file=sys.stderr)
+        return 1
+    if catalogs != {args.catalog}:
+        print(f'ERROR: artifact carries catalog={catalogs!r} but --catalog={args.catalog!r}',
+              file=sys.stderr)
+        return 1
+
+    # Load rows from the artifact — upsert_scores expects columns
+    # cell_id, module, score. It stamps (source, catalog) itself.
+    df = pd.read_parquet(src_path)
+    missing_cols = {'cell_id', 'module', 'score'} - set(df.columns)
+    if missing_cols:
+        print(f'ERROR: artifact missing columns: {sorted(missing_cols)}',
+              file=sys.stderr)
+        return 1
+
+    print(f'[ant-score-ingest] {args.db_id} — merging {len(df):,} rows '
+          f'(source={args.source}, catalog={args.catalog}, '
+          f'modules={df["module"].nunique()})')
+
+    n = upsert_scores(
+        duckdb_path=entry.duckdb_path,
+        source=args.source,
+        catalog=args.catalog,
+        rows=df,
+    )
+    print(f'  wrote {n} rows total for ({args.source}, {args.catalog})')
+
+    summary = summarize(entry.duckdb_path)
+    if not summary.empty:
+        mine = summary[
+            (summary['source'] == args.source)
+            & (summary['catalog'] == args.catalog)
+        ]
+        for _, row in mine.iterrows():
+            print(f'  {row["module"]:38s}  n_cells={row["n_cells"]:>7d}  '
+                  f'mean={row["mean_score"]:.4f}')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
