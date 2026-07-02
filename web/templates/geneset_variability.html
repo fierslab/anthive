@@ -253,9 +253,17 @@ score varies with the tag in that dataset. Hotter = more of the module’s varia
   srcSel.addEventListener('change', load);
 
   loadDimensions().then(function (dim) {
-    var tag0 = dim.tags.indexOf('braak') >= 0 ? 'braak' : dim.tags[0];
+    // honour ?tag= / ?statistic= / ?source= deep-links (e.g. from the starCAT
+    // section on /genesets); fall back to sensible defaults otherwise.
+    var qp = new URLSearchParams(window.location.search);
+    var tag0 = qp.get('tag');
+    if (!tag0 || dim.tags.indexOf(tag0) < 0) tag0 = dim.tags.indexOf('braak') >= 0 ? 'braak' : dim.tags[0];
     populate(tagSel, dim.tags, tag0);
-    populate(statSel, dim.statistics, defaultStat(tag0, dim.statistics));
+    var stat0 = qp.get('statistic');
+    if (!stat0 || dim.statistics.indexOf(stat0) < 0) stat0 = defaultStat(tag0, dim.statistics);
+    populate(statSel, dim.statistics, stat0);
+    var src0 = qp.get('source');
+    if (src0 && Array.prototype.some.call(srcSel.options, function (o) { return o.value === src0; })) srcSel.value = src0;
     load();
   });
 })();

@@ -357,6 +357,12 @@ def _fake_api_get(api_url, path):  # pyright: ignore
         if db_id in _INFO:
             return _INFO[db_id]
         raise requests.HTTPError(f"404 for {db_id}")
+    if path.startswith("/module-variability"):
+        return {"rows": [
+            {"catalog": "MICROGLIA_V1", "module": "DAM_pos", "dataset": "GroupA/ds1"},
+            {"catalog": "MICROGLIA_V1", "module": "DAM_pos", "dataset": "GroupA/ds2"},
+            {"catalog": "MICROGLIA_V1", "module": "Cycling_pos", "dataset": "GroupA/ds1"},
+        ]}
     if path == "/genesets":
         return {"genesets": _GENESETS}
     if path == "/genesets/StudyX/Exp1":
@@ -513,6 +519,18 @@ def test_genesets_index_links_variability(client):
     resp = client.get("/genesets")
     assert resp.status_code == 200
     assert '/genesets/variability' in resp.text
+
+
+def test_genesets_index_lists_starcat_programs(client):
+    # starCAT programs (from /module-variability) show as a second source, with
+    # per-program dataset-coverage counts.
+    resp = client.get("/genesets")
+    assert resp.status_code == 200
+    assert "starCAT programs" in resp.text
+    assert "MICROGLIA_V1" in resp.text
+    assert "DAM_pos" in resp.text
+    # DAM_pos is scored in 2 datasets in the fake
+    assert "/genesets/variability?source=starcat" in resp.text
 
 
 def test_admin_feedback_requires_admin(client):

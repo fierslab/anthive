@@ -1154,9 +1154,40 @@ async def genesets_index(request: Request):
             geneset['experiment'], []
         ).append(geneset)
 
+    # starCAT programs are a SECOND module source, not in the geneset registry.
+    # Their gene-level definitions aren't exposed over REST yet (see the pending
+    # /catalogs request), but /module-variability carries their names + which
+    # datasets they're scored in — enough for a discovery listing that links to
+    # the variability heatmap. Degrade silently if the parquet isn't present.
+    starcat_catalogs: Dict[str, list] = {}
+    try:
+        mv = _api_get(
+            api_url,
+            '/module-variability?source=starcat&statistic=mean_score&min_abs=0&limit=5000',
+        )
+        coverage: Dict[tuple, set] = {}
+        catalog_of: Dict[str, str] = {}
+        for row in mv.get('rows', []):
+            key = (row['catalog'], row['module'])
+            coverage.setdefault(key, set()).add(row['dataset'])
+            catalog_of[row['module']] = row['catalog']
+        grouped: Dict[str, list] = {}
+        for (catalog, module), datasets in coverage.items():
+            grouped.setdefault(catalog, []).append(
+                {"module": module, "n_datasets": len(datasets)}
+            )
+        for catalog, modules in grouped.items():
+            starcat_catalogs[catalog] = sorted(modules, key=lambda m: m["module"])
+    except Exception as error:
+        print(f"API error (starcat module list): {error}")
+
+    starcat_total = sum(len(mods) for mods in starcat_catalogs.values())
+
     return templates.TemplateResponse(request, "genesets.html", {
         "by_study": by_study,
         "total": len(genesets),
+        "starcat_catalogs": starcat_catalogs,
+        "starcat_total": starcat_total,
     })
 
 

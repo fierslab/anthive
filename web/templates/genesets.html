@@ -53,4 +53,30 @@
 {% endfor %}
 
 {% endif %}
+
+{% if starcat_catalogs %}
+<h2 style="margin-top:22px">starCAT programs
+    <span class="info" title="starCAT programs (NMF cell-state usages), a second module source scored across the fleet. Gene-level definitions are not yet exposed over the API — for now this lists the programs and how many datasets each is scored in, linking to the variability heatmap. Gene tables will follow once the catalog endpoint ships.">ⓘ</span>
+    <span class="muted" style="font-size:12px;font-weight:normal">— {{ starcat_total }} programs · <a href="/genesets/variability?source=starcat">variability across datasets →</a></span>
+</h2>
+{% for catalog, modules in starcat_catalogs.items() %}
+<h3 class="muted" style="margin:10px 0 2px">{{ catalog }}</h3>
+<div class="table-wrap">
+<table class="auto card-table" style="margin-bottom:10px">
+    <thead>
+        <tr><th>Program</th><th>Source</th><th>Datasets scored</th></tr>
+    </thead>
+    <tbody>
+    {% for m in modules %}
+        <tr>
+            <td class="card-title mono" style="font-size:12px">{{ m.module }}</td>
+            <td data-label="Source" class="muted">starCAT</td>
+            <td data-label="Datasets scored" class="muted">{{ m.n_datasets }}</td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+</div>
+{% endfor %}
+{% endif %}
 {% endblock %}
