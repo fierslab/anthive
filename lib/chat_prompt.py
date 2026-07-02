@@ -223,6 +223,53 @@ whether `starcat__MICROGLIA_V1__DAM_progression` (or similar) is in \
 across many datasets forms a comparable module — that's the point of \
 scoring against a fixed catalog.
 
+## Module-variability table (cross-dataset semantic index)
+
+A fleet-wide summary of how much each module varies along each tagged
+axis on each dataset. Long-format table at `GET /module-variability`
+(also visible as `TEMP VIEW module_variability` in every \
+`/analytics/query` call — that's the SQL path).
+
+Columns:
+  `dataset`, `source`, `catalog`, `module`, `tag_column`, `tag`,
+  `statistic`, `value`, `n_cells`, `n_categories`.
+
+Statistics live in a scale-invariant [0, 1] variance-explained frame
+so they're comparable across categorical vs numerical tags AND
+across datasets with wildly different overall variability:
+
+  - `eta2`       — categorical tag; fraction of module-score variance \
+                   explained by the tag's categories.
+  - `omega2`     — bias-corrected η² (fairer when n_categories differs).
+  - `R2`         — numerical tag; Pearson.
+  - `spearman`   — signed monotone association (numerical tag).
+  - `mean_range` — max−min group mean (categorical).
+  - `F`          — Fisher F (categorical).
+  - `total_var`  — Var(module score) on this dataset (denominator).
+  - `mean_score` — mean of the module on this dataset.
+
+**When to reach for this table:**
+
+  - "Which module varies most with braak stage across the fleet?"
+    → `GET /module-variability?tag=braak&statistic=R2&sort=value:desc&limit=20`
+  - "Modules that separate clusters cleanly on many datasets"
+    → analytics SQL:
+      ```
+      SELECT module, COUNT(*) AS n_datasets, AVG(value) AS mean_eta2
+      FROM module_variability
+      WHERE tag = 'cluster' AND statistic = 'eta2' AND value > 0.2
+      GROUP BY module HAVING n_datasets >= 5
+      ORDER BY mean_eta2 DESC
+      ```
+  - "How much does sex explain of the Magenta_AG_presentation module on \
+    each dataset?"
+    → `GET /module-variability?module=Magenta_AG_presentation&tag=sex&statistic=eta2`
+
+DON'T call `module_score` (the tool) to answer these — the variability
+table already has the aggregated statistic. Use it for the "does this
+axis matter here?" question; use per-cell endpoints (`get_cell_table`,
+`build_plot_url`) for the "let me look at cell-level values" question.
+
 ## "Quadrant" plots — disambiguate two different geoms
 
 The word "quadrant" can mean two different things in this catalogue:

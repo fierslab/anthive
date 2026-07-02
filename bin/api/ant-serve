@@ -1391,8 +1391,8 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.27.0"
-API_VERSION_RELEASED = "2026-07-01"
+API_VERSION = "2.28.0"
+API_VERSION_RELEASED = "2026-07-02"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
 # Create FastAPI app with lifespan handler (Phase 2)
@@ -8489,12 +8489,16 @@ async def analytics_query(db_id: str, request: AnalyticsQueryRequest):
     # analytics.run_query opens and closes its own dedicated connection so that
     # closing it on timeout actually cancels the in-flight DuckDB query.
     try:
+        _mv_path = _module_variability_path()
+        _extra_views = ({"module_variability": str(_mv_path)}
+                        if _mv_path.exists() else None)
         result = await asyncio.to_thread(
             lambda: analytics.run_query(
                 db_url, request.sql, request.session_id,
                 s3_config=registry._s3_config,
                 timeout=request.timeout,
                 attach_sessions=request.attach_sessions,
+                extra_parquet_views=_extra_views,
             )
         )
     except (ValueError, RuntimeError) as exc:
@@ -9655,6 +9659,140 @@ async def rescan_genesets():
         "scored_databases": len(_score_index_by_db),
         "errors": errors,
         "warnings": warnings,
+    }
+
+
+# ── /module-variability ──────────────────────────────────────────────
+#
+# Fleet-wide, per-(dataset × module × tag × statistic) table produced by
+# `bin/annot/ant-module-variability`. Long-format parquet at
+# <h5adstore>/module_variability.parquet.
+#
+# Kept in memory (a few MB) and reloaded when the file's mtime changes.
+
+_MODULE_VARIABILITY_CACHE: Dict[str, Any] = {
+    "df": None,       # pandas DataFrame or None
+    "mtime": 0.0,     # last-seen mtime on disk
+}
+
+
+def _module_variability_path() -> Path:
+    return Path(registry.data_folder) / "module_variability.parquet"
+
+
+def _load_module_variability(force: bool = False):
+    """Return the cached DataFrame; reload lazily on mtime change."""
+    import pandas as _pd
+    path = _module_variability_path()
+    if not path.exists():
+        _MODULE_VARIABILITY_CACHE["df"] = None
+        _MODULE_VARIABILITY_CACHE["mtime"] = 0.0
+        return None
+    mtime = path.stat().st_mtime
+    if (not force and _MODULE_VARIABILITY_CACHE["df"] is not None
+            and _MODULE_VARIABILITY_CACHE["mtime"] == mtime):
+        return _MODULE_VARIABILITY_CACHE["df"]
+    df = _pd.read_parquet(path)
+    _MODULE_VARIABILITY_CACHE["df"] = df
+    _MODULE_VARIABILITY_CACHE["mtime"] = mtime
+    return df
+
+
+@app.get("/module-variability", tags=["genesets"])
+async def get_module_variability(
+    dataset: Optional[str] = Query(None, description="Filter by db_id."),
+    source: Optional[str] = Query(None, description="'geneset' or 'starcat'."),
+    catalog: Optional[str] = Query(None, description="E.g. 'Sierksma2025/WGCNA' or 'MICROGLIA_V1'."),
+    module: Optional[str] = Query(None, description="Module / program name."),
+    tag: Optional[str] = Query(None, description="Tag from the obscol_tags vocab."),
+    tag_column: Optional[str] = Query(None, description="Original obs column name that carries the tag."),
+    statistic: Optional[str] = Query(None, description="'eta2' | 'omega2' | 'R2' | 'spearman' | 'F' | 'mean_range' | 'total_var' | 'mean_score'."),
+    min: Optional[float] = Query(None, alias="min", description="Lower bound on `value`."),
+    max: Optional[float] = Query(None, alias="max", description="Upper bound on `value`."),
+    min_abs: Optional[float] = Query(None, description="Lower bound on |value| (for signed stats like spearman)."),
+    sort: str = Query("value:desc", description="'value:desc' (default), 'value:asc', 'abs_value:desc'."),
+    limit: int = Query(500, ge=1, le=100000, description="Max rows returned."),
+    format: str = Query("json", pattern="^(json|csv|tsv)$"),
+):
+    """Per-(dataset × source × catalog × module × tag × statistic) statistics.
+
+    Statistics — variance-explained frame, comparable across categorical /
+    numerical tags AND across datasets with different overall variability:
+      - `eta2`, `omega2` — for categorical tags (fraction of module-score
+                          variance explained by the tag categories).
+      - `R2`             — for numerical tags (Pearson).
+      - `spearman`       — signed monotone association (numerical tags).
+      - `mean_range`     — max−min group mean (categorical).
+      - `F`              — Fisher F statistic (categorical).
+      - `total_var`      — Var(module score) on this dataset (denominator).
+      - `mean_score`     — mean of the module on this dataset.
+
+    Also see the [/analytics/query] endpoint — the same table is attached
+    there as a view named `module_variability` for full SQL access.
+    """
+    df = _load_module_variability()
+    if df is None or df.empty:
+        raise HTTPException(status_code=503, detail=(
+            "module_variability.parquet not present under "
+            f"{registry.data_folder}. Run `ant module-variability` to generate."
+        ))
+
+    # Filter
+    working = df
+    if dataset:   working = working[working['dataset']    == dataset]
+    if source:    working = working[working['source']     == source]
+    if catalog:   working = working[working['catalog']    == catalog]
+    if module:    working = working[working['module']     == module]
+    if tag:       working = working[working['tag']        == tag]
+    if tag_column: working = working[working['tag_column'] == tag_column]
+    if statistic: working = working[working['statistic']  == statistic]
+    if min is not None: working = working[working['value'] >= min]
+    if max is not None: working = working[working['value'] <= max]
+    if min_abs is not None:
+        import numpy as _np
+        working = working[_np.abs(working['value']) >= min_abs]
+
+    # Sort
+    if sort == "value:asc":
+        working = working.sort_values('value', ascending=True)
+    elif sort == "abs_value:desc":
+        import numpy as _np
+        working = working.assign(_abs=_np.abs(working['value'])).sort_values(
+            '_abs', ascending=False).drop(columns=['_abs'])
+    else:   # value:desc default
+        working = working.sort_values('value', ascending=False)
+
+    truncated = len(working) > limit
+    working = working.head(limit)
+
+    if format in ("csv", "tsv"):
+        sep = "," if format == "csv" else "\t"
+        csv = working.to_csv(index=False, sep=sep)
+        return Response(
+            content=csv,
+            media_type="text/csv" if format == "csv" else "text/tab-separated-values",
+            headers={"X-Total-Available": str(len(df)),
+                     "X-Rows-Returned": str(len(working)),
+                     "X-Truncated": "true" if truncated else "false"},
+        )
+    return {
+        "n_rows": int(len(working)),
+        "n_total": int(len(df)),
+        "truncated": bool(truncated),
+        "sort": sort,
+        "rows": working.to_dict(orient="records"),
+    }
+
+
+@app.post("/module-variability/rescan", tags=["genesets"])
+async def rescan_module_variability():
+    """Force a reload of module_variability.parquet from disk."""
+    df = _load_module_variability(force=True)
+    return {
+        "loaded": df is not None,
+        "n_rows": int(len(df)) if df is not None else 0,
+        "mtime": _MODULE_VARIABILITY_CACHE["mtime"],
+        "n_datasets": (int(df['dataset'].nunique()) if df is not None else 0),
     }
 
 

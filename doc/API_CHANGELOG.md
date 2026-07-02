@@ -29,6 +29,64 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.28.0 — 2026-07-02
+
+### Added — `GET /module-variability`
+
+Fleet-wide per-`(dataset × source × catalog × module × tag × statistic)`
+variability table. Sourced from `data/h5adstore/module_variability.parquet`
+(produced by `bin/annot/ant-module-variability`).
+
+Statistics — in a scale-invariant `[0, 1]` variance-explained frame so
+categorical (η²/ω²) and numerical (R²/spearman) tags are directly
+comparable, AND datasets with wildly different overall variability are on
+the same scale (the statistics are ratios by construction).
+
+Query params (all optional AND-composed):
+
+* Filters: `dataset`, `source`, `catalog`, `module`, `tag`, `tag_column`,
+  `statistic`.
+* Value bounds: `min=`, `max=` (raw value), `min_abs=` (for signed stats
+  like `spearman`).
+* Sort: `sort=value:desc` (default), `value:asc`, `abs_value:desc`.
+* Paging: `limit=N` (max 100 000, default 500).
+* `format=json` (default), `csv`, or `tsv`.
+
+Example — top 20 (dataset, module) where braak explains ≥ 10 % of
+module-score variance:
+
+```
+GET /module-variability?tag=braak&statistic=R2&min=0.1&limit=20
+```
+
+`POST /module-variability/rescan` forces a reload from disk.
+
+### Added — `module_variability` visible in the analytics SQL sandbox
+
+The same table is now attached as a `TEMP VIEW module_variability` in
+every `/analytics/query` call. Full SQL: JOIN with obs, aggregate,
+group-by, whatever. E.g.:
+
+```sql
+SELECT dataset, AVG(value) AS mean_r2
+FROM module_variability
+WHERE tag = 'braak' AND statistic = 'R2'
+GROUP BY dataset
+ORDER BY mean_r2 DESC
+LIMIT 10
+```
+
+### Deferred (behind-the-scenes)
+
+* Added the `extra_parquet_views` argument to `lib/analytics.run_query`
+  so ant-serve can attach ad-hoc parquets as SQL views. Composable —
+  more global tables can be added later (e.g. per-DE-study summaries)
+  without further signature churn.
+* `bin/ops/ant-sync` now syncs `module_variability.parquet` (added to
+  `SYNC_EXTENSIONS` + `PULL_DEFAULT_EXTS` as a specific-basename allow).
+
+---
+
 ## 2.27.0 — 2026-07-01
 
 ### Added — External score sidecar (`<basename>.scores.parquet`) exposed as virtual obs columns

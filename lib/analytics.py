@@ -338,6 +338,7 @@ def run_query(
     s3_config: Optional[Dict[str, Any]] = None,
     timeout: Optional[int] = None,
     attach_sessions: Optional[List[str]] = None,
+    extra_parquet_views: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Execute a validated SELECT query, persist results as Parquet, and return metadata.
 
@@ -418,9 +419,23 @@ def run_query(
                             f"CREATE OR REPLACE TEMP VIEW {view_name} AS "
                             f"SELECT * FROM read_parquet('{pq_path}')"
                         )
+
             else:
                 # Standard path: dedicated read-only connection
                 query_conn = _open_analytics_connection(db_url, s3_config)
+
+            # Global/extra parquet views (e.g. module_variability). Each
+            # entry becomes a TEMP VIEW so callers can join against them
+            # in the same query — cross-dataset analyses become one SQL.
+            # Applied to BOTH branches — read-only connections still allow
+            # CREATE TEMP VIEW (temp namespace, not the underlying db).
+            if extra_parquet_views:
+                for view_name, pq_path in extra_parquet_views.items():
+                    if Path(pq_path).exists():
+                        query_conn.execute(
+                            f"CREATE OR REPLACE TEMP VIEW {view_name} AS "
+                            f"SELECT * FROM read_parquet('{pq_path}')"
+                        )
 
             conn_holder['conn'] = query_conn
             result_holder['df'] = query_conn.execute(limited_sql).df()
