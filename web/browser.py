@@ -1160,6 +1160,18 @@ async def genesets_index(request: Request):
     })
 
 
+@router.get("/genesets/variability", response_class=HTMLResponse)
+async def geneset_variability_view(request: Request):
+    """Fleet-wide module-variability heatmap (REST 2.28 GET /module-variability):
+    module × dataset, coloured by how much a chosen tag (braak / sex / cluster /
+    …) explains of each module score's variance. Data is fetched client-side
+    from /api/module-variability so this route only renders the shell.
+
+    Registered BEFORE the /{study}/{experiment} route so 'variability' isn't
+    swallowed as a study id."""
+    return templates.TemplateResponse(request, "geneset_variability.html", {})
+
+
 @router.get("/genesets/{study}/{experiment}", response_class=HTMLResponse)
 async def geneset_experiment_view(request: Request, study: str, experiment: str):
     api_url = _api_url(request)

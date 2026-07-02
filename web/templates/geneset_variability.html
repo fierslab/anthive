@@ -1,0 +1,263 @@
+{% extends "base.html" %}
+
+{% block title %}module variability — anthive{% endblock %}
+
+{% block content %}
+<style>
+  .mv-intro { max-width: 780px; font-size: 13px; color: var(--text-muted); line-height: 1.55; margin: 2px 0 12px; }
+  .mv-ctrls { display: flex; flex-wrap: wrap; gap: 14px 18px; align-items: flex-end; margin-bottom: 10px; }
+  .mv-ctrls label { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--text-muted); margin-bottom: 2px; }
+  .mv-ctrls select { font-family: var(--font); font-size: 13px; padding: 4px 8px; border: 1px solid var(--border); border-radius: 5px; background: #fff; }
+  .mv-legend { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text-muted); margin-left: auto; }
+  .mv-legend .bar { width: 140px; height: 12px; border: 1px solid var(--border); border-radius: 2px; }
+  .mv-summary { font-size: 12px; color: var(--text-muted); margin: 4px 0 8px; }
+  .mv-state { font-size: 13px; color: var(--text-muted); padding: 16px 2px; }
+  .mv-state.err { color: #b91c1c; }
+
+  .mv-wrap { overflow: auto; max-height: 78vh; border: 1px solid var(--border); border-radius: 6px; }
+  table.mv { border-collapse: separate; border-spacing: 0; font-size: 11px; }
+  table.mv th, table.mv td { border-right: 1px solid #eef2f7; border-bottom: 1px solid #eef2f7; }
+  /* module row labels — sticky left */
+  table.mv th.mv-row { position: sticky; left: 0; z-index: 2; background: #fff; text-align: left; padding: 2px 8px; white-space: nowrap; max-width: 240px; overflow: hidden; text-overflow: ellipsis; font-weight: 400; }
+  table.mv th.mv-row a { color: var(--link); }
+  table.mv th.mv-row .mv-src { color: #94a3b8; font-size: 9px; text-transform: uppercase; letter-spacing: .3px; margin-left: 4px; }
+  /* dataset column headers — sticky top, vertical text */
+  table.mv thead th { position: sticky; top: 0; z-index: 3; background: #fff; }
+  table.mv thead th.mv-col { height: 92px; padding: 0; vertical-align: bottom; }
+  table.mv thead th.mv-col span { display: inline-block; writing-mode: vertical-rl; transform: rotate(180deg); padding: 4px 0; font-weight: 500; font-family: var(--font-mono); font-size: 10px; }
+  table.mv thead th.mv-col a { color: var(--text); }
+  table.mv thead th.mv-corner { left: 0; top: 0; z-index: 4; background: #fff; }
+  table.mv td.mv-cell { width: 22px; min-width: 22px; height: 22px; cursor: default; }
+  table.mv td.mv-cell.link { cursor: pointer; }
+  table.mv td.mv-cell.empty { background: repeating-linear-gradient(45deg, #fafafa, #fafafa 3px, #f0f0f0 3px, #f0f0f0 6px); }
+  table.mv td.mv-cell:hover { outline: 2px solid #111; outline-offset: -2px; }
+</style>
+
+<div class="breadcrumb"><a href="/genesets">genesets</a> &rsaquo; module variability</div>
+<h1 class="page-title">Module variability across the fleet
+  <span class="info" title="For each module score (WGCNA gene sets + starCAT usages), how much of its per-cell variance is explained by a chosen sample tag — computed per dataset. Values are in a scale-invariant [0,1] variance-explained frame (eta2/omega2/R2), so categorical and numerical tags are comparable, as are datasets with different overall variability. spearman is signed [-1,1].">ⓘ</span></h1>
+
+<p class="mv-intro">Which gene-set / starCAT modules track a biological axis, and in which datasets. Pick a
+<b>tag</b> (e.g. braak stage) and a <b>statistic</b>; each cell shows how strongly that module’s
+score varies with the tag in that dataset. Hotter = more of the module’s variance is explained.</p>
+
+<div class="mv-ctrls">
+  <div>
+    <label for="mv-tag">tag</label>
+    <select id="mv-tag"></select>
+  </div>
+  <div>
+    <label for="mv-stat">statistic</label>
+    <select id="mv-stat"></select>
+  </div>
+  <div>
+    <label for="mv-source">source</label>
+    <select id="mv-source">
+      <option value="">all</option>
+      <option value="geneset">geneset (WGCNA)</option>
+      <option value="starcat">starCAT</option>
+    </select>
+  </div>
+  <div class="mv-legend">
+    <span id="mv-lo">0</span>
+    <span class="bar" id="mv-bar"></span>
+    <span id="mv-hi">1</span>
+  </div>
+</div>
+
+<div class="mv-summary" id="mv-summary"></div>
+<div class="mv-state" id="mv-state">loading…</div>
+<div class="mv-wrap" id="mv-wrap" style="display:none">
+  <table class="mv" id="mv-table"></table>
+</div>
+
+<script>
+(function () {
+  var API = '/api';
+  // Fallback dimension lists (used until /module-variability/dimensions ships).
+  // Kept minimal + documented: the client prefers the live endpoint so new tags
+  // (age / genotype / donor …) appear automatically once the server exposes them.
+  var FALLBACK = {
+    tags: ['braak', 'sex', 'host_sex', 'cluster'],
+    statistics: ['R2', 'spearman', 'eta2', 'omega2', 'mean_range', 'mean_score', 'F', 'total_var'],
+  };
+  // Natural default statistic per tag: numerical → R2, categorical → eta2.
+  var NUMERIC_TAGS = { braak: 1, age: 1, braak_stage: 1 };
+  var BOUNDED01 = { eta2: 1, omega2: 1, R2: 1 };   // already [0,1]
+  var SIGNED = { spearman: 1 };                     // [-1,1] → diverging
+
+  var tagSel = document.getElementById('mv-tag'),
+      statSel = document.getElementById('mv-stat'),
+      srcSel = document.getElementById('mv-source'),
+      stateEl = document.getElementById('mv-state'),
+      wrap = document.getElementById('mv-wrap'),
+      table = document.getElementById('mv-table'),
+      summary = document.getElementById('mv-summary'),
+      loEl = document.getElementById('mv-lo'), hiEl = document.getElementById('mv-hi'),
+      barEl = document.getElementById('mv-bar');
+
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+
+  // ── colour ramps ──────────────────────────────────────────────────────
+  function lerp(a, b, t) { return Math.round(a + (b - a) * t); }
+  function seqColor(t) {   // white → deep blue
+    t = Math.max(0, Math.min(1, t));
+    return 'rgb(' + lerp(247, 12, t) + ',' + lerp(250, 74, t) + ',' + lerp(255, 173, t) + ')';
+  }
+  function divColor(t) {   // t in [-1,1]: blue ← white → red
+    if (t >= 0) return 'rgb(' + lerp(247, 185, t) + ',' + lerp(250, 28, t) + ',' + lerp(255, 28, t) + ')';
+    var u = -t; return 'rgb(' + lerp(247, 12, u) + ',' + lerp(250, 74, u) + ',' + lerp(255, 173, u) + ')';
+  }
+
+  function setLegend(stat, domain) {
+    if (SIGNED[stat]) {
+      loEl.textContent = (-domain).toFixed(2); hiEl.textContent = domain.toFixed(2);
+      barEl.style.background = 'linear-gradient(to right, ' + divColor(-1) + ',' + divColor(0) + ',' + divColor(1) + ')';
+    } else {
+      loEl.textContent = '0'; hiEl.textContent = (domain <= 1.0001 ? domain.toFixed(2) : domain.toPrecision(3));
+      barEl.style.background = 'linear-gradient(to right, ' + seqColor(0) + ',' + seqColor(1) + ')';
+    }
+  }
+
+  function populate(sel, values, chosen) {
+    sel.innerHTML = '';
+    values.forEach(function (v) {
+      var o = document.createElement('option'); o.value = v; o.textContent = v;
+      if (v === chosen) o.selected = true;
+      sel.appendChild(o);
+    });
+  }
+
+  function defaultStat(tag, stats) {
+    var want = NUMERIC_TAGS[tag] ? 'R2' : 'eta2';
+    return stats.indexOf(want) >= 0 ? want : stats[0];
+  }
+
+  function loadDimensions() {
+    return fetch(API + '/module-variability/dimensions', { credentials: 'same-origin' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        var dim = (d && (d.dimensions || d)) || {};
+        return {
+          tags: (dim.tags && dim.tags.length) ? dim.tags : FALLBACK.tags,
+          statistics: (dim.statistics && dim.statistics.length) ? dim.statistics : FALLBACK.statistics,
+        };
+      })
+      .catch(function () { return { tags: FALLBACK.tags, statistics: FALLBACK.statistics }; });
+  }
+
+  // ── render ────────────────────────────────────────────────────────────
+  function render(rows, tag, stat) {
+    // aggregate to one value per (module, dataset): max by abs value (a module
+    // can have several tag_columns for one tag, e.g. Sex_donor + host sex).
+    var modules = {}, datasets = {}, cell = {};
+    rows.forEach(function (r) {
+      var m = r.module, ds = r.dataset, v = r.value;
+      if (v == null || !isFinite(v)) return;
+      if (!modules[m]) modules[m] = { module: m, source: r.source, catalog: r.catalog, max: -Infinity };
+      modules[m].max = Math.max(modules[m].max, Math.abs(v));
+      datasets[ds] = datasets[ds] || { ds: ds, max: -Infinity };
+      datasets[ds].max = Math.max(datasets[ds].max, Math.abs(v));
+      var key = m + ' ' + ds, cur = cell[key];
+      if (!cur || Math.abs(v) > Math.abs(cur.value)) cell[key] = { value: v, n_cells: r.n_cells };
+    });
+    var modList = Object.keys(modules).map(function (k) { return modules[k]; })
+      .sort(function (a, b) { return b.max - a.max; });
+    var dsList = Object.keys(datasets).map(function (k) { return datasets[k]; })
+      .sort(function (a, b) { return b.max - a.max; });
+
+    if (!modList.length) {
+      wrap.style.display = 'none'; stateEl.className = 'mv-state';
+      stateEl.textContent = 'No variability rows for tag=' + tag + ', statistic=' + stat + '.';
+      summary.textContent = ''; return;
+    }
+
+    // colour domain
+    var maxAbs = 0;
+    Object.keys(cell).forEach(function (k) { maxAbs = Math.max(maxAbs, Math.abs(cell[k].value)); });
+    var domain = SIGNED[stat] ? (maxAbs || 1) : (BOUNDED01[stat] ? 1 : (maxAbs || 1));
+    setLegend(stat, domain);
+
+    function colorFor(v) {
+      if (SIGNED[stat]) return divColor(v / domain);
+      return seqColor(v / domain);
+    }
+
+    // build table
+    var thead = '<thead><tr><th class="mv-corner mv-row"></th>';
+    dsList.forEach(function (d) {
+      var parts = d.ds.split('/');
+      var href = parts.length === 2 ? '/browse/' + encodeURIComponent(parts[0]) + '/' + encodeURIComponent(parts[1]) : null;
+      thead += '<th class="mv-col"><span>' + (href ? '<a href="' + href + '" title="open dataset ' + esc(d.ds) + '">' + esc(d.ds) + '</a>' : esc(d.ds)) + '</span></th>';
+    });
+    thead += '</tr></thead>';
+
+    var body = '<tbody>';
+    modList.forEach(function (mod) {
+      var label = esc(mod.module);
+      // geneset modules deep-link to the geneset detail (catalog = study/experiment)
+      if (mod.source === 'geneset' && mod.catalog && mod.catalog.indexOf('/') > 0) {
+        var cp = mod.catalog.split('/');
+        label = '<a href="/genesets/' + encodeURIComponent(cp[0]) + '/' + encodeURIComponent(cp[1]) + '/' + encodeURIComponent(mod.module) + '">' + esc(mod.module) + '</a>';
+      }
+      body += '<tr><th class="mv-row" title="' + esc(mod.module) + ' (' + esc(mod.source) + (mod.catalog ? ' · ' + esc(mod.catalog) : '') + ')">'
+            + label + '<span class="mv-src">' + esc(mod.source) + '</span></th>';
+      dsList.forEach(function (d) {
+        var c = cell[mod.module + ' ' + d.ds];
+        if (!c) { body += '<td class="mv-cell empty"></td>'; return; }
+        var v = c.value;
+        // Note: a variability value does NOT imply a persisted module-score obs
+        // column on that dataset (the parquet is computed on the fly), so cells
+        // are not deep-linked to a UMAP — that would 422 for on-the-fly rows.
+        // Navigation is via the row (geneset) and column (dataset) headers.
+        var title = mod.module + ' × ' + d.ds + '\n' + stat + ' = ' + v.toFixed(3) + '  (' + tag + ')' + (c.n_cells ? '\n' + c.n_cells + ' cells' : '');
+        body += '<td class="mv-cell" style="background:' + colorFor(v) + '" title="' + esc(title) + '"></td>';
+      });
+      body += '</tr>';
+    });
+    body += '</tbody>';
+
+    table.innerHTML = thead + body;
+    summary.textContent = modList.length + ' modules × ' + dsList.length + ' datasets · tag ‘' + tag + '’ · ' + stat
+      + ' · cells = max over tag columns; blank = not scored/tagged';
+    stateEl.style.display = 'none'; wrap.style.display = '';
+  }
+
+  function load() {
+    var tag = tagSel.value, stat = statSel.value, src = srcSel.value;
+    stateEl.style.display = ''; stateEl.className = 'mv-state'; stateEl.textContent = 'loading…';
+    wrap.style.display = 'none';
+    // min_abs=0 drops NaN rows server-side (a NaN value means the stat could
+    // not be computed for that dataset — e.g. no braak variance). This is also
+    // a workaround for a serialization 500 on NaN rows at higher limits; it
+    // preserves negative values so signed stats (spearman) stay correct.
+    var qs = 'tag=' + encodeURIComponent(tag) + '&statistic=' + encodeURIComponent(stat)
+           + '&min_abs=0&limit=5000&sort=abs_value:desc';
+    if (src) qs += '&source=' + encodeURIComponent(src);
+    fetch(API + '/module-variability?' + qs, { credentials: 'same-origin' })
+      .then(function (r) {
+        if (!r.ok) return r.text().then(function (t) { throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 160)); });
+        return r.json();
+      })
+      .then(function (d) { render(d.rows || [], tag, stat); })
+      .catch(function (e) { stateEl.className = 'mv-state err'; stateEl.textContent = 'could not load — ' + e.message; });
+  }
+
+  tagSel.addEventListener('change', function () {
+    // when the tag changes, snap the statistic to the sensible default for it
+    var stats = Array.prototype.map.call(statSel.options, function (o) { return o.value; });
+    statSel.value = defaultStat(tagSel.value, stats);
+    load();
+  });
+  statSel.addEventListener('change', load);
+  srcSel.addEventListener('change', load);
+
+  loadDimensions().then(function (dim) {
+    var tag0 = dim.tags.indexOf('braak') >= 0 ? 'braak' : dim.tags[0];
+    populate(tagSel, dim.tags, tag0);
+    populate(statSel, dim.statistics, defaultStat(tag0, dim.statistics));
+    load();
+  });
+})();
+</script>
+{% endblock %}

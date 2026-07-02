@@ -500,6 +500,21 @@ def test_privacy_page_renders(client):
     assert "never leaves this server" in resp.text
 
 
+def test_geneset_variability_page_renders(client):
+    resp = client.get("/genesets/variability")
+    assert resp.status_code == 200
+    assert 'id="mv-table"' in resp.text
+    assert "/module-variability" in resp.text
+    # 'variability' must not be swallowed as a study id by the 2-seg route
+    assert "module variability" in resp.text.lower()
+
+
+def test_genesets_index_links_variability(client):
+    resp = client.get("/genesets")
+    assert resp.status_code == 200
+    assert '/genesets/variability' in resp.text
+
+
 def test_admin_feedback_requires_admin(client):
     # Non-admin → 403 (the triage page is admin-only).
     resp = client.get("/admin/feedback", follow_redirects=False)
