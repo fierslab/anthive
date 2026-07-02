@@ -74,7 +74,10 @@ NAME_PATTERNS: Dict[str, List[re.Pattern]] = {
         re.compile(r'^(sub_?)?cluster([_.-]?\d*)?$', re.I),
         re.compile(r'^([A-Za-z]+_)?snn_res\.', re.I),   # Seurat resolution columns
     ],
-    'sex':      [re.compile(r'\bsex\b|(^|_)sex($|_)|sex_donor', re.I)],
+    'sex':      [re.compile(r'\bsex\b|(^|_)sex($|_)|sex_donor|donor_sex', re.I)],
+    'host_sex': [
+        re.compile(r'sex_mouse|mouse_sex|sex_host|host_sex', re.I),
+    ],
     'age':      [re.compile(r'\bage\b|age_at_?(death|onset|coll|dx)|donor_?age', re.I)],
     'braak':    [re.compile(r'braak', re.I)],
     'genotype': [
@@ -94,7 +97,8 @@ NAME_SIGNATURES: Dict[str, List[re.Pattern]] = {
         re.compile(r'^seurat[_.]?clusters?$', re.I),
         re.compile(r'^([A-Za-z]+_)?snn_res\.\d', re.I),
     ],
-    'sex':  [re.compile(r'^(sex|donor_?sex|sex_donor|sex_mouse)$', re.I)],
+    'sex':  [re.compile(r'^(sex|donor_?sex|sex_donor)$', re.I)],
+    'host_sex': [re.compile(r'^(sex_mouse|mouse_sex|sex_host|host_sex)$', re.I)],
     'age':  [re.compile(r'^(age|donor_?age|age_at_?death|age_at_?onset)$', re.I)],
     'braak': [re.compile(r'braak', re.I)],
     'genotype': [

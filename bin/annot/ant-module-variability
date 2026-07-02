@@ -1,0 +1,325 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "duckdb>=0.10.0",
+#   "pandas>=2.0.0",
+#   "numpy>=1.24.0",
+#   "scipy>=1.10.0",
+#   "pyarrow>=14.0",
+#   "pyyaml>=6.0",
+# ]
+# ///
+"""ant-module-variability — per-(dataset × module × tag) variability
+statistics, in a scale-invariant [0,1] variance-explained frame that
+lets you compare across categorical vs numerical tags AND across
+datasets with wildly different expression / variability levels.
+
+For every dataset that carries both a `.scores.parquet` sidecar and
+tagged obs columns:
+
+  * η² (eta squared) — fraction of module-score variance explained by
+    the tag categories. Categorical tags only. [0,1].
+  * ω² (omega squared) — bias-corrected η², compensates for the
+    number of categories. Fairer for cross-dataset comparison when
+    n_categories differs (e.g. cluster resolutions).
+  * R² — same idea but for numerical tags (Pearson).
+  * spearman ρ — signed monotone association for numerical tags.
+  * mean_range — max group mean minus min group mean (categorical).
+    Reflects DIRECTION-agnostic effect size.
+  * total_var — Var(score) on this dataset. Denominator. Absolute
+    magnitude — filter downstream to catch "module effectively dead".
+  * n_cells, n_categories — context.
+
+All rows written to `<h5adstore>/module_variability.parquet` as a
+long-format table keyed on
+(dataset, source, catalog, module, tag_column, tag, statistic, value).
+
+Tag_column is included so that datasets with multiple columns for
+the same tag (e.g. `Sex_donor` + `sex_mouse` if you hadn't yet
+retagged the latter to host_sex) produce a row per column.
+
+Usage:
+  ant-module-variability [--only DB1,DB2,...] [--tags sex,braak,cluster,...]
+                        [--out PATH] [--dry-run]
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+from pathlib import Path
+from typing import Optional
+
+import duckdb
+import numpy as np
+import pandas as pd
+from scipy import stats
+
+script_dir = Path(__file__).resolve().parent
+lib_dir = script_dir.parent.parent / 'lib'
+sys.path.insert(0, str(lib_dir))
+
+from h5adstore import iter_h5adstore   # type: ignore
+from metadata import parse_md_file      # type: ignore
+from scores_parquet import scores_path  # type: ignore
+
+
+NUMERICAL_TAGS = {'age', 'braak'}       # ordinal / continuous
+CATEGORICAL_TAGS = {'sex', 'host_sex', 'cluster', 'genotype', 'donor'}
+
+
+def _numerical_column_kind(db: duckdb.DuckDBPyConnection, column: str) -> str:
+    """Return 'num' if the column is in __obsnum, 'cat' if in __obscat, else '?'.
+    Uses `information_schema` which is cheap."""
+    for table, kind in (('__obsnum', 'num'), ('__obscat', 'cat')):
+        rows = db.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = ? AND column_name = ? LIMIT 1",
+            [table, column],
+        ).fetchone()
+        if rows:
+            return kind
+    return '?'
+
+
+def _eta_squared(values: np.ndarray, groups: np.ndarray) -> tuple[float, float, float, float]:
+    """Return (eta2, omega2, mean_range, F).
+
+    η² = SS_between / SS_total
+    ω² = (SS_between - (k-1) * MS_within) / (SS_total + MS_within)
+    """
+    if len(values) < 3:
+        return (float('nan'),) * 4
+    mask = ~np.isnan(values)
+    values = values[mask]
+    groups = np.asarray(groups)[mask]
+    unique = pd.unique(groups)
+    k = len(unique)
+    n = len(values)
+    if k < 2 or n <= k:
+        return (float('nan'),) * 4
+
+    grand_mean = float(values.mean())
+    ss_total   = float(((values - grand_mean) ** 2).sum())
+    if ss_total == 0.0:
+        return (0.0, 0.0, 0.0, 0.0)
+
+    ss_between = 0.0
+    group_means = []
+    for level in unique:
+        vals = values[groups == level]
+        if len(vals) == 0:
+            continue
+        m = float(vals.mean())
+        group_means.append(m)
+        ss_between += len(vals) * (m - grand_mean) ** 2
+    ss_within = ss_total - ss_between
+    mean_range = float(max(group_means) - min(group_means)) if group_means else 0.0
+
+    eta2 = ss_between / ss_total
+    if n <= k or ss_within < 0:
+        omega2 = float('nan')
+        f_stat = float('nan')
+    else:
+        ms_within = ss_within / (n - k)
+        ms_between = ss_between / (k - 1) if k > 1 else 0.0
+        omega2 = (ss_between - (k - 1) * ms_within) / (ss_total + ms_within) if (ss_total + ms_within) > 0 else float('nan')
+        f_stat = ms_between / ms_within if ms_within > 0 else float('inf')
+    return (float(eta2), float(omega2), float(mean_range), float(f_stat))
+
+
+def _r_squared(values: np.ndarray, x: np.ndarray) -> tuple[float, float, float]:
+    """Return (r2, spearman_rho, spearman_p) for a numerical predictor."""
+    mask = ~(np.isnan(values) | np.isnan(x))
+    values, x = values[mask], x[mask]
+    if len(values) < 3 or np.std(x) == 0 or np.std(values) == 0:
+        return (float('nan'), float('nan'), float('nan'))
+
+    slope, intercept, r_value, _, _ = stats.linregress(x, values)
+    r2 = float(r_value * r_value)
+    rho, p = stats.spearmanr(x, values, nan_policy='omit')
+    return (r2, float(rho), float(p))
+
+
+def compute_for_dataset(db_id: str, duckdb_path: Path, md_path: Path) -> pd.DataFrame:
+    """Return one long-format DataFrame of variability rows for the dataset."""
+    md, _ = parse_md_file(md_path)
+    obs_tags = md.get('obs_tags') or {}
+    if not obs_tags:
+        return pd.DataFrame()
+
+    sidecar = scores_path(duckdb_path)
+    if not sidecar.exists():
+        return pd.DataFrame()
+
+    # Load all score triples in one shot.
+    conn = duckdb.connect(str(duckdb_path), read_only=True)
+    scores_long = conn.execute(
+        "SELECT c.cell_name, s.source, s.catalog, s.module, s.score "
+        "FROM read_parquet(?) s "
+        "JOIN __cells c ON c.cell_id = s.cell_id",
+        [str(sidecar)],
+    ).df()
+    if scores_long.empty:
+        conn.close()
+        return pd.DataFrame()
+
+    # Pre-fetch all tagged obs columns in one query per kind, indexed by cell_name.
+    obs_frames: dict[str, pd.DataFrame] = {}
+    for column in obs_tags.keys():
+        kind = _numerical_column_kind(conn, column)
+        if kind == '?':
+            continue
+        table = '__obsnum' if kind == 'num' else '__obscat'
+        df = conn.execute(
+            f'SELECT c.cell_name, o."{column}" AS "{column}" '
+            f'FROM {table} o JOIN __cells c ON c.cell_id = o.cell_id',
+        ).df().set_index('cell_name')
+        obs_frames[column] = df
+    conn.close()
+
+    rows: list[dict] = []
+    # For each (source, catalog, module), pivot to cell_name → score, then per tag_column compute stats
+    for (source, catalog, module), sub in scores_long.groupby(
+        ['source', 'catalog', 'module'], observed=True,
+    ):
+        scores_by_cell = sub.set_index('cell_name')['score']
+        total_var = float(scores_by_cell.var(ddof=1))
+        n_cells   = int(len(scores_by_cell))
+
+        for column, tags in obs_tags.items():
+            if column not in obs_frames:
+                continue
+            col_series = obs_frames[column][column]
+            joined = pd.concat([scores_by_cell, col_series], axis=1, join='inner').dropna()
+            if joined.empty:
+                continue
+            score_arr = joined.iloc[:, 0].to_numpy(dtype=float)
+            tag_arr   = joined.iloc[:, 1]
+
+            for tag in tags:
+                if tag in NUMERICAL_TAGS:
+                    x = pd.to_numeric(tag_arr, errors='coerce').to_numpy(dtype=float)
+                    if np.isnan(x).all():
+                        # Categorical string being tagged numerical? try one-way anova as fallback
+                        eta2, omega2, mean_range, f_stat = _eta_squared(score_arr, tag_arr.to_numpy())
+                        n_cat = int(pd.Series(tag_arr).nunique())
+                        stats_here = [
+                            ('eta2', eta2), ('omega2', omega2), ('mean_range', mean_range),
+                            ('F', f_stat),
+                        ]
+                    else:
+                        r2, rho, _ = _r_squared(score_arr, x)
+                        stats_here = [
+                            ('R2', r2), ('spearman', rho),
+                        ]
+                        n_cat = 0
+                else:
+                    tag_vals = tag_arr.astype(str).to_numpy()
+                    eta2, omega2, mean_range, f_stat = _eta_squared(score_arr, tag_vals)
+                    n_cat = int(pd.Series(tag_vals).nunique())
+                    stats_here = [
+                        ('eta2', eta2), ('omega2', omega2), ('mean_range', mean_range),
+                        ('F', f_stat),
+                    ]
+
+                # Common context rows
+                stats_here.append(('total_var', total_var))
+                stats_here.append(('mean_score', float(score_arr.mean())))
+
+                for stat_name, value in stats_here:
+                    rows.append({
+                        'dataset':      db_id,
+                        'source':       source,
+                        'catalog':      catalog,
+                        'module':       module,
+                        'tag_column':   column,
+                        'tag':          tag,
+                        'statistic':    stat_name,
+                        'value':        value,
+                        'n_cells':      n_cells,
+                        'n_categories': n_cat,
+                    })
+
+    return pd.DataFrame(rows)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog='ant-module-variability')
+    parser.add_argument('--h5adstore-root', default='data/h5adstore')
+    parser.add_argument('--only', default=None,
+                        help='comma-separated db_ids to process (else all)')
+    parser.add_argument('--tags', default=None,
+                        help='comma-separated tag subset (else all)')
+    parser.add_argument('--out', default=None,
+                        help='output parquet path (default: '
+                             '<h5adstore>/module_variability.parquet)')
+    parser.add_argument('--dry-run', action='store_true')
+    args = parser.parse_args()
+
+    root = Path(args.h5adstore_root).resolve()
+    only = set(args.only.split(',')) if args.only else None
+    keep_tags: Optional[set[str]] = set(args.tags.split(',')) if args.tags else None
+    out = Path(args.out).resolve() if args.out else (root / 'module_variability.parquet')
+
+    all_rows: list[pd.DataFrame] = []
+    stats_summary = {'processed': 0, 'skipped_no_scores': 0, 'skipped_no_tags': 0,
+                     'errored': 0}
+    for entry in sorted(iter_h5adstore(root), key=lambda e: e.db_id):
+        if only and entry.db_id not in only:
+            continue
+        if not entry.duckdb_path.exists():
+            continue
+        t0 = time.time()
+        try:
+            df = compute_for_dataset(entry.db_id, entry.duckdb_path, entry.md_path)
+        except Exception as exc:
+            print(f'  ✗ {entry.db_id}: {exc}', file=sys.stderr)
+            stats_summary['errored'] += 1
+            continue
+
+        if df.empty:
+            # Try to distinguish reason
+            sidecar_ok = scores_path(entry.duckdb_path).exists()
+            if not sidecar_ok:
+                stats_summary['skipped_no_scores'] += 1
+            else:
+                stats_summary['skipped_no_tags'] += 1
+            continue
+
+        if keep_tags is not None:
+            df = df[df['tag'].isin(keep_tags)]
+            if df.empty:
+                continue
+
+        stats_summary['processed'] += 1
+        all_rows.append(df)
+        n_stats = len(df)
+        n_mod = df['module'].nunique()
+        n_tag = df['tag_column'].nunique()
+        print(f'  ✓ {entry.db_id:16s}  modules={n_mod:3d}  '
+              f'tag_cols={n_tag}  stats={n_stats:5d}  ({time.time()-t0:.1f}s)')
+
+    if not all_rows:
+        print('no rows produced', file=sys.stderr)
+        return 1
+
+    combined = pd.concat(all_rows, ignore_index=True)
+    print(f'\n=== {len(combined):,} rows across {combined["dataset"].nunique()} datasets')
+    print(combined.groupby(['tag', 'statistic']).size().unstack(fill_value=0))
+
+    if args.dry_run:
+        print(f'\n[dry-run] would write to {out}')
+        return 0
+
+    # Atomic write
+    tmp = out.with_suffix(out.suffix + '.tmp')
+    combined.to_parquet(tmp, engine='pyarrow', compression='zstd')
+    tmp.replace(out)
+    print(f'\nwrote → {out}')
+    print(f'summary: {stats_summary}')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

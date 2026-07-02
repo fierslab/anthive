@@ -78,6 +78,16 @@ tags:
       distinct from disease-status flags. If a column mixes disease
       state and genotype, split it before tagging.
 
+  host_sex:
+    label: Host sex (xenograft)
+    description: >
+      For xenograft studies where cells from a human (or other)
+      donor are grafted into a host animal: the HOST's sex.
+      Kept separate from `sex` — the two tags represent different
+      biological subjects. Use `sex` for the donor / biological
+      subject, `host_sex` for the graft recipient. If the study
+      is not a xenograft, this tag doesn't apply — use `sex`.
+
   donor:
     label: Donor
     description: >
