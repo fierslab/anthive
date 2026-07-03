@@ -555,13 +555,23 @@ def test_genesets_index_links_variability(client):
 
 
 def test_genesets_group_selector(client):
-    # The index offers a group selector; the starCAT tab is always present,
-    # geneset content shows on the default group.
+    # The index offers a group selector; the starCAT + find-by-gene tabs are
+    # present, geneset content shows on the default group.
     home = client.get("/genesets")
     assert home.status_code == 200
     assert "grp-tab" in home.text
     assert "/genesets?group=starcat" in home.text   # the starCAT tab href
+    assert "/genesets?group=bygene" in home.text     # the find-by-gene tab href
     assert "StudyX" in home.text                     # geneset content (default group)
+
+
+def test_genesets_find_by_gene_mode(client):
+    # The 'find by gene' mode renders a search box wired to the reverse-lookup
+    # endpoint (results are fetched + rendered client-side).
+    resp = client.get("/genesets?group=bygene")
+    assert resp.status_code == 200
+    assert 'id="bg-gene"' in resp.text
+    assert "/genesets/by-gene/" in resp.text
 
 
 def test_genesets_starcat_group_lists_modules_and_scores(client):

@@ -15,6 +15,7 @@
   .gs-static { font-size: 14px; font-weight: 600; }
   .gs-count { font-size: 12px; color: var(--text-muted); margin: 0 0 6px; }
   .gs-desc { font-size: 12px; color: var(--text-muted); margin: 0 0 8px; max-width: 780px; }
+  .gs-desc.err { color: #b91c1c; }
   details.sc-scores > summary { cursor: pointer; font-weight: 600; font-size: 14px; margin: 14px 0 4px; }
 </style>
 
@@ -29,7 +30,7 @@
 {% if groups %}
 <div class="grp-tabs">
     {% for g in groups %}
-    <a class="grp-tab {% if g.key == active_group %}active{% endif %}" href="/genesets?group={{ g.key }}">{{ g.label }} <span class="n">{{ g.count }}</span></a>
+    <a class="grp-tab {% if g.key == active_group %}active{% endif %}" href="/genesets?group={{ g.key }}">{{ g.label }}{% if g.count is not none %} <span class="n">{{ g.count }}</span>{% endif %}</a>
     {% endfor %}
 </div>
 {% endif %}
@@ -66,6 +67,81 @@
   </details>
   <script id="sc-data" type="application/json">{{ starcat_detail|tojson }}</script>
   {% endif %}
+{% endif %}
+
+{% if active_group == 'bygene' %}
+<div class="gs-desc" style="max-width:720px">Enter a gene symbol to find every gene set and starCAT program that contains it.</div>
+<form id="bg-form" class="gs-controls" style="align-items:center" autocomplete="off">
+  <span class="gs-ctrl"><label>gene symbol</label>
+    <input type="text" id="bg-gene" placeholder="e.g. TREM2, APOE, P2RY12" style="font-family:var(--font-mono);font-size:14px;padding:5px 9px;border:1px solid var(--border);border-radius:5px;min-width:200px">
+  </span>
+  <button type="submit" id="bg-go" style="background:var(--link);color:#fff;border:none;border-radius:6px;padding:7px 16px;font-size:13px;cursor:pointer">search</button>
+</form>
+<div id="bg-state" class="gs-desc" style="display:none"></div>
+<div id="bg-results"></div>
+
+<script>
+(function () {
+  var form = document.getElementById('bg-form'); if (!form) return;
+  var input = document.getElementById('bg-gene'), stateEl = document.getElementById('bg-state'),
+      results = document.getElementById('bg-results'), API = '/api';
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  function setState(html, cls) { stateEl.style.display = ''; stateEl.className = 'gs-desc' + (cls ? ' ' + cls : ''); stateEl.innerHTML = html; }
+
+  function linkFor(m) {
+    if (m.kind === 'starcat_module')
+      return '/genesets/starcat/' + encodeURIComponent(m.catalog_id) + '/modules/' + encodeURIComponent(m.name);
+    return '/genesets/' + encodeURIComponent(m.study) + '/' + encodeURIComponent(m.experiment) + '/' + encodeURIComponent(m.name);
+  }
+  function render(gene, matches) {
+    if (!matches.length) { results.innerHTML = ''; setState('No gene sets or programs contain <code>' + esc(gene) + '</code>.'); return; }
+    var gsets = matches.filter(function (m) { return m.kind !== 'starcat_module'; });
+    var progs = matches.filter(function (m) { return m.kind === 'starcat_module'; });
+    var html = '';
+    if (gsets.length) {
+      html += '<h3 style="margin:12px 0 4px">Gene sets <span class="muted" style="font-size:12px;font-weight:normal">(' + gsets.length + ')</span></h3>';
+      html += '<div class="table-wrap"><table class="auto card-table"><thead><tr><th>Geneset</th><th>Study / experiment</th><th>Rank</th></tr></thead><tbody>';
+      gsets.forEach(function (m) {
+        html += '<tr><td class="card-title"><a href="' + linkFor(m) + '">' + esc(m.display_name || m.name) + '</a></td>'
+          + '<td data-label="Study / experiment" class="muted mono" style="font-size:11px">' + esc(m.study) + ' / ' + esc(m.experiment) + '</td>'
+          + '<td data-label="Rank" class="muted">' + (m.rank == null ? '—' : m.rank) + '</td></tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    if (progs.length) {
+      html += '<h3 style="margin:14px 0 4px">starCAT programs <span class="muted" style="font-size:12px;font-weight:normal">(' + progs.length + ')</span></h3>';
+      html += '<div class="table-wrap"><table class="auto card-table"><thead><tr><th>Program</th><th>Catalog</th><th>Weight</th></tr></thead><tbody>';
+      progs.forEach(function (m) {
+        html += '<tr><td class="card-title mono" style="font-size:12px"><a href="' + linkFor(m) + '">' + esc(m.name) + '</a></td>'
+          + '<td data-label="Catalog" class="muted mono" style="font-size:11px">' + esc(m.catalog_id) + '</td>'
+          + '<td data-label="Weight" class="muted">' + (m.weight == null ? '—' : (+m.weight).toFixed(3)) + '</td></tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    results.innerHTML = html;
+    setState('<code>' + esc(gene) + '</code> found in <b>' + matches.length + '</b> set' + (matches.length === 1 ? '' : 's') + '.');
+  }
+  function search() {
+    var gene = (input.value || '').trim(); if (!gene) return;
+    results.innerHTML = ''; setState('searching…');
+    fetch(API + '/genesets/by-gene/' + encodeURIComponent(gene), { credentials: 'same-origin' })
+      .then(function (r) {
+        if (r.status === 404) { var e = new Error('pending'); e.pending = true; throw e; }
+        if (!r.ok) return r.text().then(function (t) { throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 140)); });
+        return r.json();
+      })
+      .then(function (d) { render(d.gene || gene, d.matches || []); })
+      .catch(function (e) {
+        if (e && e.pending) setState('Gene → gene-set lookup isn’t available from the API yet — this search lights up automatically once <code>/genesets/by-gene</code> ships (requested).');
+        else setState('search failed — ' + esc(e && e.message ? e.message : e), 'err');
+      });
+  }
+  form.addEventListener('submit', function (ev) { ev.preventDefault(); search(); });
+  // deep-link support: /genesets?group=bygene&gene=TREM2
+  var qp = new URLSearchParams(window.location.search);
+  if (qp.get('gene')) { input.value = qp.get('gene'); search(); }
+})();
+</script>
 {% endif %}
 
 <script>

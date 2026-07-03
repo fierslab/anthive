@@ -1201,6 +1201,10 @@ async def genesets_index(request: Request):
         groups.append({"key": "genesets", "label": "Gene sets", "count": len(genesets)})
     if starcat_summaries:
         groups.append({"key": "starcat", "label": "starCAT", "count": starcat_total})
+    if by_study or starcat_summaries:
+        # reverse lookup: which sets/programs contain a given gene (client-side
+        # search against GET /genesets/by-gene/{gene}). No count.
+        groups.append({"key": "bygene", "label": "🔍 find by gene", "count": None})
     valid_keys = {g["key"] for g in groups}
     if active_group not in valid_keys:
         active_group = groups[0]["key"] if groups else "genesets"
