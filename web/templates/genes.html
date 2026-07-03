@@ -122,6 +122,19 @@
 </div>
 
 <div id="gene-grid" class="gene-grid"></div>
+<div id="gene-hm-controls" class="gene-controls" style="display:none">
+  <span class="picks-label">cell value</span>
+  <select id="hm-metric">
+    <option value="scaled_mean">abundance (scaled 0–1)</option>
+    <option value="pct_nonzero">% cells expressing</option>
+    <option value="rank_mean">rank in dataset (0–1)</option>
+    <option value="mean">mean, all cells (per-dataset)</option>
+    <option value="mean_nonzero">mean among expressing (per-dataset)</option>
+  </select>
+  <span style="flex:1"></span>
+  <span class="muted" id="gene-meta-hm"></span>
+  <span class="info" title="Pick which per-(gene, dataset) statistic the heatmap shows. abundance (scaled_mean) = mean log-norm expression clipped to the dataset's 5–95th cross-gene percentile and rescaled 0–1 (comparable across datasets). % cells expressing = fraction of cells with non-zero counts. mean = raw mean log-norm over ALL cells. mean among expressing = mean over non-zero cells only. rank = percentile of this gene's mean vs all genes in that dataset.">ⓘ</span>
+</div>
 <div id="gene-heatmap"></div>
 <div id="gene-missing" class="muted" style="font-size:11px; margin-top:10px"></div>
 <div id="gene-error" class="plot-status"></div>
@@ -237,29 +250,60 @@
       card(`${found.length}/${total}`, `detected (absent from ${missing.length})`);
   }
 
-  // ── multi-gene heatmap: rows = datasets, cols = genes, cell = scaled_mean ──
+  // ── multi-gene heatmap: rows = datasets, cols = genes ──────────────────
+  // The cell value is a user-chosen per-(gene, dataset) statistic (all present
+  // in the /gene_stats_all response). scaling: unit stats [0,1] map opacity
+  // directly; % maps /100; unbounded means normalise to the max across cells.
+  function hmNum(v) {   // compact: large raw means → scientific, small → 2dp
+    if (v == null || !isFinite(v)) return '—';
+    var a = Math.abs(v);
+    if (a !== 0 && (a >= 1000 || a < 0.01)) return v.toExponential(1);
+    if (a >= 100) return v.toFixed(0);
+    if (a >= 10) return v.toFixed(1);
+    return v.toFixed(2);
+  }
+  // 'unit' = already [0,1] & cross-dataset comparable; 'pct' = 0–100 comparable;
+  // 'rownorm' = raw per-dataset value (NOT comparable across datasets — e.g. some
+  // served layers aren't log-norm), so colour is normalised within each row.
+  const HM_METRICS = {
+    scaled_mean:  { label: 'scaled abundance (0–1)',              norm: 'unit' },
+    pct_nonzero:  { label: '% of cells expressing',               norm: 'pct'  },
+    rank_mean:    { label: 'expression rank vs all genes (0–1)',  norm: 'unit' },
+    mean:         { label: 'mean expression, all cells (per-dataset)',   norm: 'rownorm' },
+    mean_nonzero: { label: 'mean among expressing cells (per-dataset)',  norm: 'rownorm' },
+  };
+  function hmFmt(cfg, v) { return cfg.norm === 'pct' ? v.toFixed(1) + '%' : cfg.norm === 'unit' ? v.toFixed(2) : hmNum(v); }
+  let _hmData = null;
   function renderHeatmap(data) {
+    if (data) _hmData = data;
+    const metricSel = document.getElementById('hm-metric');
+    const metric = (metricSel && metricSel.value) || 'scaled_mean';
+    const cfg = HM_METRICS[metric] || HM_METRICS.scaled_mean;
+    const vals_ok = v => v != null && isFinite(v);
     const rows = [], allMissing = [];
-    (data.results || []).forEach(res => {
+    (_hmData.results || []).forEach(res => {
       const vals = {}; let any = false;
-      (res.stats || []).forEach(s => { if (!s.error && s.scaled_mean != null) { vals[s.gene] = s.scaled_mean; any = true; } });
-      if (any) rows.push({ db_id: res.db_id, title: res.title, vals, rowmax: Math.max(...GENES.map(g => vals[g] ?? -1)) });
+      (res.stats || []).forEach(s => { if (!s.error && vals_ok(s[metric])) { vals[s.gene] = s[metric]; any = true; } });
+      if (any) rows.push({ db_id: res.db_id, title: res.title, vals, rowmax: Math.max(...GENES.map(g => vals[g] ?? -Infinity)) });
       else allMissing.push(res.title || res.db_id);
     });
     rows.sort((a, b) => b.rowmax - a.rowmax);
-    metaEl.textContent = `${GENES.length} genes × ${data.n_databases ?? rows.length} datasets${data.n_filtered ? ' (' + data.n_filtered + ' filtered out)' : ''}`;
+    metaEl.textContent = `${GENES.length} genes × ${data && data.n_databases != null ? data.n_databases : rows.length} datasets${data && data.n_filtered ? ' (' + data.n_filtered + ' filtered out)' : ''}`;
+    document.getElementById('gene-meta-hm').textContent = metaEl.textContent;
     controls.style.display = 'none';
-    heroBox.innerHTML = `<div class="hm-legend">each cell = scaled abundance (0–1) of that gene in that dataset; <span class="hm-na">·</span> = gene absent.
+    document.getElementById('gene-hm-controls').style.display = '';
+    heroBox.innerHTML = `<div class="hm-legend">each cell = ${esc(cfg.label)} of that gene in that dataset; <span class="hm-na">·</span> = gene absent.${cfg.norm === 'rownorm' ? ' <b>Colour normalised per row</b> (raw values aren’t comparable across datasets).' : ''}
         <span class="muted">low</span> <span class="hm-scale"></span> <span class="muted">high</span></div>`;
-    const cell = (sm, g, dbId) => {
-      if (sm == null) return `<td class="hm-na" title="${esc(g)} not in ${esc(dbId)}">·</td>`;
-      const op = (0.08 + 0.92 * sm).toFixed(2), fg = sm > 0.55 ? '#fff' : '#1e293b';
+    const cell = (v, g, dbId, denom) => {
+      if (!vals_ok(v)) return `<td class="hm-na" title="${esc(g)} not in ${esc(dbId)}">·</td>`;
+      let t = cfg.norm === 'pct' ? v / 100 : cfg.norm === 'rownorm' ? (denom > 0 ? v / denom : 0) : v;
+      const op = (0.08 + 0.92 * Math.max(0, Math.min(1, t))).toFixed(2), fg = t > 0.55 ? '#fff' : '#1e293b';
       const pp = dbId.split('/');
       const href = `/browse/${encodeURIComponent(pp[0]||'')}/${encodeURIComponent(pp[1]||'')}/plot/histogram?x=${encodeURIComponent(g)}`;
-      return `<td class="hm-cell"><a href="${href}" style="background:rgba(29,78,216,${op});color:${fg}" title="${esc(g)} in ${esc(dbId)}: scaled ${sm.toFixed(2)} — open distribution">${sm.toFixed(2)}</a></td>`;
+      return `<td class="hm-cell"><a href="${href}" style="background:rgba(29,78,216,${op});color:${fg}" title="${esc(g)} in ${esc(dbId)}: ${hmFmt(cfg, v)} (${esc(cfg.label)}) — open distribution">${hmFmt(cfg, v)}</a></td>`;
     };
     const head = `<tr><th class="hm-corner">dataset</th>${GENES.map(g => `<th class="hm-gene">${esc(g)}</th>`).join('')}</tr>`;
-    const body = rows.map(r => `<tr><td class="hm-row"><span class="nm">${esc(r.title || r.db_id)}</span><span class="pills">${pillsFor(r.db_id)}</span></td>${GENES.map(g => cell(r.vals[g] ?? null, g, r.db_id)).join('')}</tr>`).join('');
+    const body = rows.map(r => { const denom = cfg.norm === 'rownorm' ? (r.rowmax > 0 ? r.rowmax : 1) : 1; return `<tr><td class="hm-row"><span class="nm">${esc(r.title || r.db_id)}</span><span class="pills">${pillsFor(r.db_id)}</span></td>${GENES.map(g => cell(r.vals[g] ?? null, g, r.db_id, denom)).join('')}</tr>`; }).join('');
     document.getElementById('gene-heatmap').innerHTML = `<div class="table-wrap"><table class="hm">${head}${body}</table></div>`;
     if (allMissing.length) missBox.innerHTML = `<b>None of these genes</b> in ${allMissing.length} dataset(s): ${allMissing.map(esc).join(', ')}`;
   }
@@ -314,6 +358,12 @@
     const el = document.getElementById(id);
     if (el) el.addEventListener('change', load);
   });
+  // multi-gene heatmap: switch the cell statistic (re-renders from cache, no refetch)
+  const hmMetric = document.getElementById('hm-metric');
+  if (hmMetric) {
+    if (window.antRemember) antRemember.bindSelect(hmMetric, 'genes.hm.metric');
+    hmMetric.addEventListener('change', () => { if (window.antRemember) antRemember.set('genes.hm.metric', hmMetric.value); if (_hmData) renderHeatmap(null); });
+  }
   load();
 })();
 </script>
