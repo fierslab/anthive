@@ -4,11 +4,18 @@
 
 {% block content %}
 <style>
-  .grp-tabs { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 14px; }
+  .grp-tabs { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 12px; }
   .grp-tab { display: inline-flex; align-items: baseline; gap: 6px; padding: 6px 15px; border: 1px solid var(--border); border-radius: 20px; font-size: 13px; color: var(--text); background: #fff; }
   .grp-tab:hover { border-color: var(--link); text-decoration: none; }
   .grp-tab.active { background: var(--text); color: #fff; border-color: var(--text); }
   .grp-tab .n { font-size: 11px; opacity: .7; }
+  .gs-controls { display: flex; gap: 18px; flex-wrap: wrap; align-items: flex-end; margin: 12px 0 14px; }
+  .gs-ctrl label { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--text-muted); margin-bottom: 2px; }
+  .gs-ctrl select { font-family: var(--font); font-size: 13px; padding: 4px 8px; border: 1px solid var(--border); border-radius: 5px; background: #fff; min-width: 170px; }
+  .gs-static { font-size: 14px; font-weight: 600; }
+  .gs-count { font-size: 12px; color: var(--text-muted); margin: 0 0 6px; }
+  .gs-desc { font-size: 12px; color: var(--text-muted); margin: 0 0 8px; max-width: 780px; }
+  details.sc-scores > summary { cursor: pointer; font-weight: 600; font-size: 14px; margin: 14px 0 4px; }
 </style>
 
 {% if error %}<p style="color:#dc2626">{{ error }}</p>{% endif %}
@@ -31,33 +38,12 @@
   {% if not by_study %}
   <p class="muted">No gene sets in the store.</p>
   {% else %}
-  {% for study, experiments in by_study.items() %}
-  <h2>{{ study }}</h2>
-  {% for experiment, genesets in experiments.items() %}
-  <h3 class="muted" style="margin:10px 0 2px">
-      <a href="/genesets/{{ study }}/{{ experiment }}">{{ experiment }}</a>
-  </h3>
-  <div class="table-wrap">
-  <table class="auto card-table" style="margin-bottom:10px">
-      <thead>
-          <tr><th>Geneset</th><th>Format</th><th>n genes</th><th>Organism</th><th>Method</th><th>Parent dataset</th></tr>
-      </thead>
-      <tbody>
-      {% for g in genesets %}
-          <tr>
-              <td class="card-title"><a href="/genesets/{{ study }}/{{ experiment }}/{{ g.name }}">{{ g.display_name }}</a></td>
-              <td data-label="Format" class="muted">{{ g.format }}</td>
-              <td data-label="n genes" class="muted">{{ g.n_genes }}</td>
-              <td data-label="Organism" class="muted">{% if g.organism %}{{ g.organism }}{% else %}—{% endif %}</td>
-              <td data-label="Method" class="muted">{% if g.method %}{{ g.method }}{% else %}—{% endif %}</td>
-              <td data-label="Parent dataset" class="muted mono" style="font-size:11px">{% if g.parent_dataset %}{{ g.parent_dataset }}{% else %}—{% endif %}</td>
-          </tr>
-      {% endfor %}
-      </tbody>
-  </table>
+  <div class="gs-controls">
+    <span class="gs-ctrl"><label>study</label><select id="gs-study"></select><span class="gs-static" id="gs-study-static" style="display:none"></span></span>
+    <span class="gs-ctrl"><label>experiment</label><select id="gs-exp"></select><span class="gs-static" id="gs-exp-static" style="display:none"></span></span>
   </div>
-  {% endfor %}
-  {% endfor %}
+  <div id="gs-content"></div>
+  <script id="gs-data" type="application/json">{{ by_study|tojson }}</script>
   {% endif %}
 {% endif %}
 
@@ -65,52 +51,132 @@
   {% if not starcat_detail %}
   <p class="muted">No starCAT catalogs available.</p>
   {% else %}
-  {% for cat in starcat_detail %}
-  <h2 style="margin-top:16px">{{ cat.name }}</h2>
-  {% if cat.description %}<p class="muted" style="font-size:12px;margin:2px 0 4px">{{ cat.description }}</p>{% endif %}
-  <p class="muted" style="font-size:12px;margin:0 0 12px">{{ cat.n_modules }} programs · {{ cat.n_scores }} derived scores · {{ cat.n_genes }} genes ·
-     <a href="/genesets/variability?source=starcat">variability across datasets →</a></p>
-
-  <h3 style="margin:12px 0 4px">Programs
-      <span class="info" title="starCAT programs are NMF gene-expression usages — each is a weighted gene signature learned from reference data. Open one to see its top genes by weight. Grouped by biological category.">ⓘ</span></h3>
-  {% for group, modules in cat.modules_by_group.items() %}
-  <h4 class="muted" style="margin:8px 0 2px;text-transform:capitalize">{{ group|replace('_', ' ') }}</h4>
-  <div class="table-wrap">
-  <table class="auto card-table" style="margin-bottom:8px">
-      <thead><tr><th>Program</th><th>Description</th></tr></thead>
-      <tbody>
-      {% for m in modules %}
-          <tr>
-              <td class="card-title mono" style="font-size:12px"><a href="/genesets/starcat/{{ cat.catalog_id }}/modules/{{ m.name }}">{{ m.name }}</a></td>
-              <td data-label="Description" class="muted">{{ m.description or '—' }}</td>
-          </tr>
-      {% endfor %}
-      </tbody>
-  </table>
+  <div class="gs-controls">
+    <span class="gs-ctrl"><label>catalog</label><select id="sc-cat"></select><span class="gs-static" id="sc-cat-static" style="display:none"></span></span>
+    <span class="gs-ctrl"><label>category
+        <span class="info" title="starCAT programs are NMF gene-expression usages, grouped by biological category. Pick a category to narrow, or show all.">ⓘ</span>
+      </label><select id="sc-group"></select></span>
   </div>
-  {% endfor %}
-
-  {% if cat.scores %}
-  <h3 style="margin:14px 0 4px">Derived scores
-      <span class="info" title="Scores computed on datasets and shown in the variability heatmap. Each is a recipe over one or more programs: continuous = weighted combination; discrete = program above a threshold. These are what the fleet is actually scored on.">ⓘ</span></h3>
-  <div class="table-wrap">
-  <table class="auto card-table" style="margin-bottom:10px">
-      <thead><tr><th>Score</th><th>Kind</th><th>Recipe</th></tr></thead>
-      <tbody>
-      {% for s in cat.scores %}
-          <tr>
-              <td class="card-title mono" style="font-size:12px">{{ s.name }}</td>
-              <td data-label="Kind" class="muted">{{ s.kind }}</td>
-              <td data-label="Recipe" class="muted" style="font-size:12px">
-                  {% for col in s.columns %}{% if not loop.first %} · {% endif %}{% if s.weights and s.weights[loop.index0] not in (1, 1.0) %}{{ s.weights[loop.index0] }}×{% endif %}<a href="/genesets/starcat/{{ cat.catalog_id }}/modules/{{ col }}">{{ col }}</a>{% endfor %}{% if s.threshold is not none %} <span class="muted-2">(&gt; {{ '%.4g'|format(s.threshold) }})</span>{% endif %}
-              </td>
-          </tr>
-      {% endfor %}
-      </tbody>
-  </table>
-  </div>
-  {% endif %}
-  {% endfor %}
+  <div class="gs-desc" id="sc-catdesc"></div>
+  <div id="sc-content"></div>
+  <details class="sc-scores" id="sc-scores-wrap" style="margin-top:8px">
+    <summary id="sc-scores-summary">Derived scores</summary>
+    <p class="gs-desc" style="margin-top:6px">Scores computed on datasets (shown in the variability heatmap). Each is a recipe over one or more programs.</p>
+    <div id="sc-scores"></div>
+  </details>
+  <script id="sc-data" type="application/json">{{ starcat_detail|tojson }}</script>
   {% endif %}
 {% endif %}
+
+<script>
+  function _gsEsc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  // single-choice dropdowns collapse to a static label (autoselect)
+  function _gsReflect(sel, staticEl) {
+    if (sel.options.length <= 1) {
+      sel.style.display = 'none';
+      staticEl.textContent = sel.options.length ? sel.options[0].textContent : '—';
+      staticEl.style.display = '';
+    } else { sel.style.display = ''; staticEl.style.display = 'none'; }
+  }
+  function _gsOptions(sel, values) {
+    sel.innerHTML = '';
+    values.forEach(function (v) { var o = document.createElement('option'); o.value = v; o.textContent = v; sel.appendChild(o); });
+  }
+
+  // ── Gene sets: study → experiment → table ──────────────────────────────
+  (function () {
+    var el = document.getElementById('gs-data'); if (!el) return;
+    var data = JSON.parse(el.textContent);   // {study: {experiment: [geneset, ...]}}
+    var studySel = document.getElementById('gs-study'), studyStatic = document.getElementById('gs-study-static'),
+        expSel = document.getElementById('gs-exp'), expStatic = document.getElementById('gs-exp-static'),
+        content = document.getElementById('gs-content');
+
+    function renderTable(study, exp) {
+      var list = (data[study] && data[study][exp]) || [];
+      var rows = list.map(function (g) {
+        var href = '/genesets/' + encodeURIComponent(study) + '/' + encodeURIComponent(exp) + '/' + encodeURIComponent(g.name);
+        return '<tr><td class="card-title"><a href="' + href + '">' + _gsEsc(g.display_name || g.name) + '</a></td>'
+          + '<td data-label="Format" class="muted">' + _gsEsc(g.format) + '</td>'
+          + '<td data-label="n genes" class="muted">' + (g.n_genes == null ? '—' : g.n_genes) + '</td>'
+          + '<td data-label="Organism" class="muted">' + _gsEsc(g.organism || '—') + '</td>'
+          + '<td data-label="Method" class="muted">' + _gsEsc(g.method || '—') + '</td>'
+          + '<td data-label="Parent dataset" class="muted mono" style="font-size:11px">' + _gsEsc(g.parent_dataset || '—') + '</td></tr>';
+      }).join('');
+      content.innerHTML = '<div class="gs-count">' + list.length + ' gene set' + (list.length === 1 ? '' : 's') + ' in ' + _gsEsc(study) + ' / ' + _gsEsc(exp) + '</div>'
+        + '<div class="table-wrap"><table class="auto card-table"><thead><tr><th>Geneset</th><th>Format</th><th>n genes</th><th>Organism</th><th>Method</th><th>Parent dataset</th></tr></thead><tbody>'
+        + rows + '</tbody></table></div>';
+    }
+    function fillExp(study) {
+      _gsOptions(expSel, Object.keys(data[study] || {})); _gsReflect(expSel, expStatic);
+      renderTable(study, expSel.value);
+    }
+    _gsOptions(studySel, Object.keys(data)); _gsReflect(studySel, studyStatic);
+    studySel.addEventListener('change', function () { fillExp(studySel.value); });
+    expSel.addEventListener('change', function () { renderTable(studySel.value, expSel.value); });
+    fillExp(studySel.value);
+  })();
+
+  // ── starCAT: catalog → category → programs (+ collapsible scores) ───────
+  (function () {
+    var el = document.getElementById('sc-data'); if (!el) return;
+    var cats = JSON.parse(el.textContent);   // [{catalog_id, name, description, modules_by_group, scores, ...}]
+    var catSel = document.getElementById('sc-cat'), catStatic = document.getElementById('sc-cat-static'),
+        groupSel = document.getElementById('sc-group'), content = document.getElementById('sc-content'),
+        catDesc = document.getElementById('sc-catdesc'), scoresBox = document.getElementById('sc-scores'),
+        scoresWrap = document.getElementById('sc-scores-wrap'), scoresSummary = document.getElementById('sc-scores-summary');
+
+    function renderPrograms(cat, group) {
+      var groups = cat.modules_by_group || {};
+      var keys = group === '__all__' ? Object.keys(groups) : [group];
+      var html = '';
+      keys.forEach(function (gk) {
+        var mods = groups[gk] || []; if (!mods.length) return;
+        html += '<h4 class="muted" style="margin:8px 0 2px;text-transform:capitalize">' + _gsEsc(gk.replace(/_/g, ' ')) + '</h4>';
+        html += '<div class="table-wrap"><table class="auto card-table" style="margin-bottom:8px"><thead><tr><th>Program</th><th>Description</th></tr></thead><tbody>';
+        mods.forEach(function (m) {
+          var href = '/genesets/starcat/' + encodeURIComponent(cat.catalog_id) + '/modules/' + encodeURIComponent(m.name);
+          html += '<tr><td class="card-title mono" style="font-size:12px"><a href="' + href + '">' + _gsEsc(m.name) + '</a></td>'
+            + '<td data-label="Description" class="muted">' + _gsEsc(m.description || '—') + '</td></tr>';
+        });
+        html += '</tbody></table></div>';
+      });
+      content.innerHTML = html || '<p class="muted">No programs in this category.</p>';
+    }
+    function renderScores(cat) {
+      var scores = cat.scores || [];
+      if (!scores.length) { scoresWrap.style.display = 'none'; return; }
+      scoresWrap.style.display = '';
+      scoresSummary.textContent = 'Derived scores (' + scores.length + ')';
+      var rows = scores.map(function (s) {
+        var recipe = (s.columns || []).map(function (col, i) {
+          var w = (s.weights && s.weights[i] != null && s.weights[i] !== 1 && s.weights[i] !== 1.0) ? (s.weights[i] + '× ') : '';
+          return w + '<a href="/genesets/starcat/' + encodeURIComponent(cat.catalog_id) + '/modules/' + encodeURIComponent(col) + '">' + _gsEsc(col) + '</a>';
+        }).join(' · ');
+        if (s.threshold != null) recipe += ' <span class="muted-2">(&gt; ' + (+s.threshold).toPrecision(3) + ')</span>';
+        return '<tr><td class="card-title mono" style="font-size:12px">' + _gsEsc(s.name) + '</td>'
+          + '<td data-label="Kind" class="muted">' + _gsEsc(s.kind) + '</td>'
+          + '<td data-label="Recipe" class="muted" style="font-size:12px">' + recipe + '</td></tr>';
+      }).join('');
+      scoresBox.innerHTML = '<div class="table-wrap"><table class="auto card-table"><thead><tr><th>Score</th><th>Kind</th><th>Recipe</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+    }
+    function selectCat() {
+      var cat = cats[+catSel.value];
+      catDesc.textContent = cat.description || '';
+      var groups = cat.modules_by_group || {};
+      var total = Object.keys(groups).reduce(function (a, g) { return a + groups[g].length; }, 0);
+      groupSel.innerHTML = '';
+      var oAll = document.createElement('option'); oAll.value = '__all__'; oAll.textContent = 'all programs (' + total + ')'; groupSel.appendChild(oAll);
+      Object.keys(groups).forEach(function (g) { var o = document.createElement('option'); o.value = g; o.textContent = g.replace(/_/g, ' ') + ' (' + groups[g].length + ')'; groupSel.appendChild(o); });
+      groupSel.value = '__all__';
+      renderPrograms(cat, '__all__'); renderScores(cat);
+    }
+    // catalog dropdown keyed by index (names may repeat conceptually)
+    catSel.innerHTML = '';
+    cats.forEach(function (c, i) { var o = document.createElement('option'); o.value = i; o.textContent = c.name || c.catalog_id; catSel.appendChild(o); });
+    _gsReflect(catSel, catStatic);
+    catSel.addEventListener('change', selectCat);
+    groupSel.addEventListener('change', function () { renderPrograms(cats[+catSel.value], groupSel.value); });
+    selectCat();
+  })();
+</script>
 {% endblock %}

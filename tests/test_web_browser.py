@@ -565,15 +565,17 @@ def test_genesets_group_selector(client):
 
 
 def test_genesets_starcat_group_lists_modules_and_scores(client):
-    # The starCAT group (from /catalogs) lists modules grouped by category, with
-    # descriptions, plus the derived-score recipes; modules link to their detail.
+    # The starCAT group (from /catalogs) embeds the catalog data for the
+    # dropdown-driven client view: catalog/category selectors + module data +
+    # descriptions + the derived-score names. Rows are rendered client-side, so
+    # we assert on the embedded JSON + the controls, not built URLs.
     resp = client.get("/genesets?group=starcat")
     assert resp.status_code == 200
+    assert 'id="sc-cat"' in resp.text and 'id="sc-group"' in resp.text   # dropdowns
+    assert 'id="sc-data"' in resp.text                                   # embedded catalog data
     assert "Microglia_DAM" in resp.text
     assert "DAM program; APOE, TREM2" in resp.text          # module description
-    assert "/genesets/starcat/MICROGLIA_T/modules/Microglia_DAM" in resp.text
-    # derived score recipe with its component modules
-    assert "DAM_progression" in resp.text
+    assert "DAM_progression" in resp.text                   # derived score
     assert "Derived scores" in resp.text
 
 
@@ -1066,11 +1068,14 @@ def test_plot_view_info_tooltips_and_collapse(client):
 
 
 def test_genesets_index_renders_grouped(client):
+    # Gene-set group is now dropdown-driven: the study/experiment selectors +
+    # the embedded by_study JSON (which carries the study names + display names).
     resp = client.get("/genesets")
     assert resp.status_code == 200
-    assert "StudyX" in resp.text
+    assert 'id="gs-study"' in resp.text and 'id="gs-exp"' in resp.text
+    assert "StudyX" in resp.text          # study key (embedded JSON)
     assert "StudyY" in resp.text
-    assert "Up genes" in resp.text
+    assert "Up genes" in resp.text        # geneset display_name (embedded JSON)
 
 
 def test_genesets_index_survives_api_failure(client, monkeypatch):
