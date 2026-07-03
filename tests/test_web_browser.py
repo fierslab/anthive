@@ -1112,7 +1112,7 @@ def test_geneset_detail_has_variability_panel(client):
     assert resp.status_code == 200
     assert "Where it varies most" in resp.text
     assert 'id="gv-stat"' in resp.text
-    assert "/module-variability?source=geneset" in resp.text
+    assert "/module-variability?statistic=" in resp.text
 
 
 def test_geneset_experiment_view_404(client):
