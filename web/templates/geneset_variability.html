@@ -10,7 +10,10 @@
   .mv-ctrls select { font-family: var(--font); font-size: 13px; padding: 4px 8px; border: 1px solid var(--border); border-radius: 5px; background: #fff; }
   .mv-legend { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text-muted); margin-left: auto; }
   .mv-legend .bar { width: 140px; height: 12px; border: 1px solid var(--border); border-radius: 2px; }
-  .mv-caveat { font-size: 12px; line-height: 1.5; color: #713f12; background: #fefce8; border: 1px solid #fde68a; border-radius: 6px; padding: 8px 12px; margin: 0 0 12px; max-width: 900px; }
+  .mv-caveat { display: flex; gap: 10px; align-items: flex-start; font-size: 11px; line-height: 1.45; color: #713f12; background: #fefce8; border: 1px solid #fde68a; border-radius: 6px; padding: 6px 10px; margin: 0 0 10px; max-width: 900px; }
+  .mv-caveat button { flex: none; align-self: center; font-size: 11px; padding: 3px 10px; border: 1px solid #d6b45f; background: #fff; color: #713f12; border-radius: 5px; cursor: pointer; white-space: nowrap; }
+  .mv-caveat button:hover { background: #fef3c7; }
+  .mv-caveat-mini { display: inline-block; font-size: 11px; color: #a16207; margin: 0 0 10px; }
   .mv-summary { font-size: 12px; color: var(--text-muted); margin: 4px 0 8px; }
   .mv-warn { font-size: 12px; color: #92400e; background: #fef3c7; border-radius: 5px; padding: 4px 9px; margin: 0 0 8px; display: inline-block; }
   .mv-state { font-size: 13px; color: var(--text-muted); padding: 16px 2px; }
@@ -43,15 +46,27 @@
 <b>tag</b> (e.g. braak stage) and a <b>statistic</b>; each cell shows how strongly that module’s
 score co-varies with the tag in that dataset. Hotter = stronger association.</p>
 
-<div class="mv-caveat">
-  <b>Exploratory, read with care.</b> These statistics are computed <b>per cell</b>, with the
-  donor-level tag broadcast to every cell — so cells are treated as independent when they are not
-  (pseudoreplication). Values are therefore <b>cell-count-weighted</b> and not donor-level effect
-  sizes, and are only loosely comparable across datasets (composition, design, and donor count all
-  differ). Use this to <b>spot candidates</b>, not to quantify effects; confirm anything interesting
-  with a donor-level (pseudobulk) test. <b>ω²</b> is bias-corrected; the raw <b>F</b> statistic is
-  hidden because with 10⁵+ cells it is meaningless.
+<div class="mv-caveat" id="mv-caveat">
+  <span><b>Exploratory.</b> Statistics are per-cell (the donor tag is broadcast to every cell →
+  pseudoreplication), so they’re cell-count-weighted and only loosely comparable across datasets.
+  Spot candidates, don’t quantify effects — confirm with a donor-level test. ω² is bias-corrected;
+  F is hidden (meaningless at 10⁵+ cells).</span>
+  <button type="button" id="mv-caveat-ack">Got it — hide for a month</button>
 </div>
+<a href="#" class="mv-caveat-mini" id="mv-caveat-mini" style="display:none">ⓘ exploratory — why read with care?</a>
+<script>
+(function () {
+  var KEY = 'anthive.mv.caveat.ackAt', MONTH = 30 * 24 * 3600 * 1000;
+  var box = document.getElementById('mv-caveat'), mini = document.getElementById('mv-caveat-mini'),
+      ack = document.getElementById('mv-caveat-ack');
+  if (!box) return;
+  function acked() { try { var t = +localStorage.getItem(KEY); return t && (Date.now() - t) < MONTH; } catch (e) { return false; } }
+  function showMini() { box.style.display = 'none'; mini.style.display = 'inline-block'; }
+  if (acked()) showMini();
+  ack.addEventListener('click', function () { try { localStorage.setItem(KEY, String(Date.now())); } catch (e) {} showMini(); });
+  mini.addEventListener('click', function (e) { e.preventDefault(); box.style.display = ''; mini.style.display = 'none'; });
+})();
+</script>
 
 <div class="mv-ctrls">
   <div>
@@ -65,9 +80,20 @@ score co-varies with the tag in that dataset. Hotter = stronger association.</p>
   <div>
     <label for="mv-source">source</label>
     <select id="mv-source">
-      <option value="">all</option>
-      <option value="geneset">geneset (WGCNA)</option>
-      <option value="starcat">starCAT</option>
+      <option value="">all sources</option>
+      <option value="starcat">starCAT only</option>
+      <option value="geneset">gene sets only</option>
+    </select>
+  </div>
+  <div>
+    <label for="mv-cscale">colour scale
+      <span class="info" title="A few modules (e.g. the Y-linked set on the sex tag) reach the maximum and wash out the rest. Clipping the colour scale to a high percentile of the values makes the bulk of the map readable; cells above the clip get the top colour.">ⓘ</span>
+    </label>
+    <select id="mv-cscale">
+      <option value="0.98" selected>robust (98th pct)</option>
+      <option value="0.95">95th pct</option>
+      <option value="0.99">99th pct</option>
+      <option value="1">full (max)</option>
     </select>
   </div>
   <div class="mv-legend">
@@ -111,6 +137,7 @@ score co-varies with the tag in that dataset. Hotter = stronger association.</p>
       table = document.getElementById('mv-table'),
       summary = document.getElementById('mv-summary'),
       warnEl = document.getElementById('mv-warn'),
+      cscaleSel = document.getElementById('mv-cscale'),
       loEl = document.getElementById('mv-lo'), hiEl = document.getElementById('mv-hi'),
       barEl = document.getElementById('mv-bar');
 
@@ -123,18 +150,28 @@ score co-varies with the tag in that dataset. Hotter = stronger association.</p>
     return 'rgb(' + lerp(247, 12, t) + ',' + lerp(250, 74, t) + ',' + lerp(255, 173, t) + ')';
   }
   function divColor(t) {   // t in [-1,1]: blue ← white → red
+    t = Math.max(-1, Math.min(1, t));
     if (t >= 0) return 'rgb(' + lerp(247, 185, t) + ',' + lerp(250, 28, t) + ',' + lerp(255, 28, t) + ')';
     var u = -t; return 'rgb(' + lerp(247, 12, u) + ',' + lerp(250, 74, u) + ',' + lerp(255, 173, u) + ')';
   }
+  // p-quantile of an ascending-sorted array (linear interpolation)
+  function quantile(sortedAsc, p) {
+    if (!sortedAsc.length) return 0;
+    if (p >= 1) return sortedAsc[sortedAsc.length - 1];
+    var idx = (sortedAsc.length - 1) * p, lo = Math.floor(idx), hi = Math.ceil(idx);
+    return lo === hi ? sortedAsc[lo] : sortedAsc[lo] + (sortedAsc[hi] - sortedAsc[lo]) * (idx - lo);
+  }
 
-  function setLegend(stat, domain) {
+  function setLegend(stat, domain, clipped) {
+    var suffix = clipped ? '+' : '';
     if (SIGNED[stat]) {
-      loEl.textContent = (-domain).toFixed(2); hiEl.textContent = domain.toFixed(2);
+      loEl.textContent = '−' + domain.toPrecision(2) + suffix; hiEl.textContent = domain.toPrecision(2) + suffix;
       barEl.style.background = 'linear-gradient(to right, ' + divColor(-1) + ',' + divColor(0) + ',' + divColor(1) + ')';
     } else {
-      loEl.textContent = '0'; hiEl.textContent = (domain <= 1.0001 ? domain.toFixed(2) : domain.toPrecision(3));
+      loEl.textContent = '0'; hiEl.textContent = domain.toPrecision(2) + suffix;
       barEl.style.background = 'linear-gradient(to right, ' + seqColor(0) + ',' + seqColor(1) + ')';
     }
+    hiEl.title = clipped ? 'colour scale clipped here; higher values get the top colour' : '';
   }
 
   function populate(sel, values, chosen) {
@@ -167,7 +204,9 @@ score co-varies with the tag in that dataset. Hotter = stronger association.</p>
   }
 
   // ── render ────────────────────────────────────────────────────────────
+  var _lastRows = null, _lastTag = null, _lastStat = null;
   function render(rows, tag, stat) {
+    _lastRows = rows; _lastTag = tag; _lastStat = stat;   // re-render on colour-scale change without refetch
     // aggregate to one value per (module, dataset): max by abs value (a module
     // can have several tag_columns for one tag, e.g. Sex_donor + host sex).
     var modules = {}, datasets = {}, cell = {};
@@ -192,11 +231,16 @@ score co-varies with the tag in that dataset. Hotter = stronger association.</p>
       summary.textContent = ''; warnEl.style.display = 'none'; return;
     }
 
-    // colour domain
-    var maxAbs = 0;
-    Object.keys(cell).forEach(function (k) { maxAbs = Math.max(maxAbs, Math.abs(cell[k].value)); });
-    var domain = SIGNED[stat] ? (maxAbs || 1) : (BOUNDED01[stat] ? 1 : (maxAbs || 1));
-    setLegend(stat, domain);
+    // colour domain — data-driven, clipped to a percentile so one saturating
+    // module (e.g. the Y-linked set on sex) doesn't wash out the rest. NOT the
+    // fixed [0,1] frame: real values are often ≪1, so pinning at 1 left the map
+    // near-white. Cells above the clip get the top colour.
+    var absVals = Object.keys(cell).map(function (k) { return Math.abs(cell[k].value); }).sort(function (a, b) { return a - b; });
+    var maxAbs = absVals.length ? absVals[absVals.length - 1] : 1;
+    var p = parseFloat(cscaleSel.value); if (!(p > 0)) p = 0.98;
+    var domain = quantile(absVals, p) || maxAbs || 1;
+    var clipped = domain < maxAbs - 1e-9;
+    setLegend(stat, domain, clipped);
 
     function colorFor(v) {
       if (SIGNED[stat]) return divColor(v / domain);
@@ -277,6 +321,7 @@ score co-varies with the tag in that dataset. Hotter = stronger association.</p>
   });
   statSel.addEventListener('change', load);
   srcSel.addEventListener('change', load);
+  cscaleSel.addEventListener('change', function () { if (_lastRows) render(_lastRows, _lastTag, _lastStat); });
 
   loadDimensions().then(function (dim) {
     // honour ?tag= / ?statistic= / ?source= deep-links (e.g. from the starCAT

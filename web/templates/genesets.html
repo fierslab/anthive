@@ -229,7 +229,8 @@
           return w + '<a href="/genesets/starcat/' + encodeURIComponent(cat.catalog_id) + '/modules/' + encodeURIComponent(col) + '">' + _gsEsc(col) + '</a>';
         }).join(' · ');
         if (s.threshold != null) recipe += ' <span class="muted-2">(&gt; ' + (+s.threshold).toPrecision(3) + ')</span>';
-        return '<tr><td class="card-title mono" style="font-size:12px">' + _gsEsc(s.name) + '</td>'
+        var desc = s.description ? '<div class="muted" style="font-weight:normal;font-size:11px;margin-top:2px">' + _gsEsc(s.description) + '</div>' : '';
+        return '<tr><td class="card-title mono" style="font-size:12px">' + _gsEsc(s.name) + desc + '</td>'
           + '<td data-label="Kind" class="muted">' + _gsEsc(s.kind) + '</td>'
           + '<td data-label="Recipe" class="muted" style="font-size:12px">' + recipe + '</td></tr>';
       }).join('');

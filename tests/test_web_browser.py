@@ -546,6 +546,9 @@ def test_geneset_variability_page_renders(client):
     assert "/module-variability" in resp.text
     # 'variability' must not be swallowed as a study id by the 2-seg route
     assert "module variability" in resp.text.lower()
+    # configurable colour-scale clip + dismissable exploratory caveat
+    assert 'id="mv-cscale"' in resp.text
+    assert 'id="mv-caveat-ack"' in resp.text
 
 
 def test_genesets_index_links_variability(client):
