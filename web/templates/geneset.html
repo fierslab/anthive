@@ -61,6 +61,53 @@
 <div class="md-body">{{ geneset_body_html|safe }}</div>
 {% endif %}
 
+<h2 style="margin-top:16px">Where it varies most
+  <span class="info" title="Across datasets where this gene set is scored, the sample tags its module score co-varies with most strongly — a shortcut to the most interesting study/axis for this set. Same exploratory, per-cell caveat as the variability heatmap.">ⓘ</span>
+  <select id="gv-stat" style="font-family:var(--font);font-size:12px;padding:2px 6px;border:1px solid var(--border);border-radius:5px;margin-left:6px;font-weight:normal">
+    <option value="omega2" selected>ω² (categorical)</option>
+    <option value="R2">R² (numerical)</option>
+    <option value="spearman">spearman (signed)</option>
+  </select>
+</h2>
+<div id="gv-state" class="muted" style="font-size:12px">loading…</div>
+<div id="gv-list"></div>
+<script>
+(function () {
+  var NAME = {{ name|tojson }}, API = '/api';
+  var statSel = document.getElementById('gv-stat'), stateEl = document.getElementById('gv-state'), listEl = document.getElementById('gv-list');
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  function load() {
+    var stat = statSel.value;
+    stateEl.style.display = ''; stateEl.textContent = 'loading…'; listEl.innerHTML = '';
+    // module-variability keys geneset rows on the geneset name; min_abs=0 dodges
+    // the NaN-serialization 500 and drops uncomputable rows.
+    fetch(API + '/module-variability?source=geneset&module=' + encodeURIComponent(NAME) + '&statistic=' + encodeURIComponent(stat) + '&min_abs=0&sort=abs_value:desc&limit=200', { credentials: 'same-origin' })
+      .then(function (r) { return r.ok ? r.json() : r.text().then(function (t) { throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 120)); }); })
+      .then(function (d) {
+        var rows = (d.rows || []).slice(0, 15);
+        if (!rows.length) { stateEl.textContent = 'Not scored on any tagged dataset for this statistic.'; return; }
+        var maxAbs = rows.reduce(function (a, r) { return Math.max(a, Math.abs(r.value)); }, 0) || 1;
+        var html = '<div class="table-wrap"><table class="auto"><thead><tr><th>Dataset</th><th>Tag</th><th style="text-align:right">' + esc(stat) + '</th><th style="width:38%"></th></tr></thead><tbody>';
+        rows.forEach(function (r) {
+          var parts = String(r.dataset).split('/');
+          var dsLink = parts.length === 2 ? '<a href="/browse/' + encodeURIComponent(parts[0]) + '/' + encodeURIComponent(parts[1]) + '">' + esc(r.dataset) + '</a>' : esc(r.dataset);
+          var pct = Math.abs(r.value) / maxAbs * 100, neg = r.value < 0;
+          html += '<tr><td class="mono" style="font-size:11px">' + dsLink + '</td>'
+            + '<td class="muted">' + esc(r.tag) + '</td>'
+            + '<td class="mono" style="font-size:11px;text-align:right">' + (+r.value).toFixed(3) + '</td>'
+            + '<td><span style="display:inline-block;height:9px;border-radius:2px;background:' + (neg ? '#dc2626' : 'var(--link)') + ';width:' + pct.toFixed(1) + '%;min-width:1px"></span></td></tr>';
+        });
+        html += '</tbody></table></div><div class="muted" style="font-size:11px;margin-top:2px">top ' + rows.length + ' dataset × tag associations · <a href="/genesets/variability">full heatmap →</a> · exploratory (per-cell)</div>';
+        listEl.innerHTML = html;
+        stateEl.style.display = 'none';
+      })
+      .catch(function (e) { stateEl.textContent = 'could not load — ' + e.message; });
+  }
+  statSel.addEventListener('change', load);
+  load();
+})();
+</script>
+
 <h2>Genes</h2>
 {% if payload.format == 'rnk' and payload.ranks %}
 <div class="table-wrap">
