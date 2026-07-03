@@ -317,24 +317,29 @@ score co-varies with the tag in that dataset. Hotter = stronger association.</p>
     // when the tag changes, snap the statistic to the sensible default for it
     var stats = Array.prototype.map.call(statSel.options, function (o) { return o.value; });
     statSel.value = defaultStat(tagSel.value, stats);
+    antRemember.set('mv.tag', tagSel.value); antRemember.set('mv.stat', statSel.value);
     load();
   });
-  statSel.addEventListener('change', load);
-  srcSel.addEventListener('change', load);
-  cscaleSel.addEventListener('change', function () { if (_lastRows) render(_lastRows, _lastTag, _lastStat); });
+  statSel.addEventListener('change', function () { antRemember.set('mv.stat', statSel.value); load(); });
+  srcSel.addEventListener('change', function () { antRemember.set('mv.source', srcSel.value); load(); });
+  cscaleSel.addEventListener('change', function () { antRemember.set('mv.cscale', cscaleSel.value); if (_lastRows) render(_lastRows, _lastTag, _lastStat); });
 
   loadDimensions().then(function (dim) {
-    // honour ?tag= / ?statistic= / ?source= deep-links (e.g. from the starCAT
-    // section on /genesets); fall back to sensible defaults otherwise.
+    // selection priority: ?tag=/… deep-link > last-used (remembered) > default.
     var qp = new URLSearchParams(window.location.search);
+    var inList = function (v, list) { return v && list.indexOf(v) >= 0; };
     var tag0 = qp.get('tag');
-    if (!tag0 || dim.tags.indexOf(tag0) < 0) tag0 = dim.tags.indexOf('braak') >= 0 ? 'braak' : dim.tags[0];
+    if (!inList(tag0, dim.tags)) tag0 = antRemember.get('mv.tag');
+    if (!inList(tag0, dim.tags)) tag0 = dim.tags.indexOf('braak') >= 0 ? 'braak' : dim.tags[0];
     populate(tagSel, dim.tags, tag0);
     var stat0 = qp.get('statistic');
-    if (!stat0 || dim.statistics.indexOf(stat0) < 0) stat0 = defaultStat(tag0, dim.statistics);
+    if (!inList(stat0, dim.statistics)) stat0 = antRemember.get('mv.stat');
+    if (!inList(stat0, dim.statistics)) stat0 = defaultStat(tag0, dim.statistics);
     populate(statSel, dim.statistics, stat0);
-    var src0 = qp.get('source');
-    if (src0 && Array.prototype.some.call(srcSel.options, function (o) { return o.value === src0; })) srcSel.value = src0;
+    var src0 = qp.get('source') || antRemember.get('mv.source') || '';
+    if (Array.prototype.some.call(srcSel.options, function (o) { return o.value === src0; })) srcSel.value = src0;
+    var cs0 = antRemember.get('mv.cscale');
+    if (cs0 && Array.prototype.some.call(cscaleSel.options, function (o) { return o.value === cs0; })) cscaleSel.value = cs0;
     load();
   });
 })();

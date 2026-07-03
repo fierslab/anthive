@@ -33,6 +33,18 @@
     <a class="grp-tab {% if g.key == active_group %}active{% endif %}" href="/genesets?group={{ g.key }}">{{ g.label }}{% if g.count is not none %} <span class="n">{{ g.count }}</span>{% endif %}</a>
     {% endfor %}
 </div>
+<script>
+// Remember the last group tab: on a bare /genesets (no ?group), jump to the
+// last-used group so a reload restores the same overview.
+(function () {
+  var active = {{ active_group|tojson }};
+  if (!new URLSearchParams(location.search).get('group')) {
+    var rem = antRemember.get('gs.tab');
+    if (rem && rem !== active) { location.replace('/genesets?group=' + encodeURIComponent(rem)); return; }
+  }
+  antRemember.set('gs.tab', active);
+})();
+</script>
 {% endif %}
 
 {% if active_group == 'genesets' %}
@@ -183,12 +195,18 @@
         + rows + '</tbody></table></div>';
     }
     function fillExp(study) {
-      _gsOptions(expSel, Object.keys(data[study] || {})); _gsReflect(expSel, expStatic);
+      _gsOptions(expSel, Object.keys(data[study] || {}));
+      var remExp = antRemember.get('gs.exp');   // restore last experiment if it exists in this study
+      if (remExp && data[study] && data[study][remExp]) expSel.value = remExp;
+      _gsReflect(expSel, expStatic);
       renderTable(study, expSel.value);
     }
-    _gsOptions(studySel, Object.keys(data)); _gsReflect(studySel, studyStatic);
-    studySel.addEventListener('change', function () { fillExp(studySel.value); });
-    expSel.addEventListener('change', function () { renderTable(studySel.value, expSel.value); });
+    _gsOptions(studySel, Object.keys(data));
+    var remStudy = antRemember.get('gs.study');   // restore last study
+    if (remStudy && data[remStudy]) studySel.value = remStudy;
+    _gsReflect(studySel, studyStatic);
+    studySel.addEventListener('change', function () { antRemember.set('gs.study', studySel.value); fillExp(studySel.value); });
+    expSel.addEventListener('change', function () { antRemember.set('gs.exp', expSel.value); renderTable(studySel.value, expSel.value); });
     fillExp(studySel.value);
   })();
 
@@ -245,14 +263,18 @@
       var oAll = document.createElement('option'); oAll.value = '__all__'; oAll.textContent = 'all programs (' + total + ')'; groupSel.appendChild(oAll);
       Object.keys(groups).forEach(function (g) { var o = document.createElement('option'); o.value = g; o.textContent = g.replace(/_/g, ' ') + ' (' + groups[g].length + ')'; groupSel.appendChild(o); });
       groupSel.value = '__all__';
-      renderPrograms(cat, '__all__'); renderScores(cat);
+      var remGrp = antRemember.get('sc.group');   // restore last category if present in this catalog
+      if (remGrp) { for (var i = 0; i < groupSel.options.length; i++) { if (groupSel.options[i].value === remGrp) { groupSel.value = remGrp; break; } } }
+      renderPrograms(cat, groupSel.value); renderScores(cat);
     }
     // catalog dropdown keyed by index (names may repeat conceptually)
     catSel.innerHTML = '';
     cats.forEach(function (c, i) { var o = document.createElement('option'); o.value = i; o.textContent = c.name || c.catalog_id; catSel.appendChild(o); });
+    var remCat = antRemember.get('sc.cat');   // restore last catalog
+    if (remCat != null) { for (var j = 0; j < catSel.options.length; j++) { if (catSel.options[j].value === remCat) { catSel.value = remCat; break; } } }
     _gsReflect(catSel, catStatic);
-    catSel.addEventListener('change', selectCat);
-    groupSel.addEventListener('change', function () { renderPrograms(cats[+catSel.value], groupSel.value); });
+    catSel.addEventListener('change', function () { antRemember.set('sc.cat', catSel.value); selectCat(); });
+    groupSel.addEventListener('change', function () { antRemember.set('sc.group', groupSel.value); renderPrograms(cats[+catSel.value], groupSel.value); });
     selectCat();
   })();
 </script>

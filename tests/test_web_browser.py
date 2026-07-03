@@ -1105,6 +1105,14 @@ def test_geneset_experiment_view_renders(client):
     assert "Up genes" in resp.text
 
 
+def test_ui_state_helper_is_sitewide(client):
+    # The antRemember localStorage helper ships in base.html so any page can
+    # persist dropdown/filter state across reloads.
+    resp = client.get("/genesets")
+    assert resp.status_code == 200
+    assert "window.antRemember" in resp.text
+
+
 def test_geneset_detail_has_variability_panel(client):
     # The geneset detail page includes the 'where it varies most' panel, which
     # fetches /module-variability for this geneset name client-side.

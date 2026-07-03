@@ -397,6 +397,33 @@
         });
     })();
     </script>
+    <script>
+    // Sitewide UI-state persistence: remember a control's last value across
+    // reloads/navigation (localStorage). Selection state that isn't in the URL
+    // (dropdowns, filters) should survive a reload — use this everywhere.
+    //   antRemember.get(key)            → stored string or null
+    //   antRemember.set(key, value)     → persist
+    //   antRemember.bindSelect(sel, key[, onApply]) → restore (if the option
+    //       exists) + persist on change; calls onApply(value) if it changed the
+    //       value so the page can react. Returns the effective value.
+    window.antRemember = {
+        _k: function (key) { return 'ant.remember.' + key; },
+        get: function (key) { try { return localStorage.getItem(this._k(key)); } catch (e) { return null; } },
+        set: function (key, value) { try { localStorage.setItem(this._k(key), value); } catch (e) {} },
+        bindSelect: function (sel, key, onApply) {
+            if (!sel) return null;
+            var stored = this.get(key), applied = false, self = this;
+            if (stored != null) {
+                for (var i = 0; i < sel.options.length; i++) {
+                    if (sel.options[i].value === stored) { sel.value = stored; applied = true; break; }
+                }
+            }
+            sel.addEventListener('change', function () { self.set(key, sel.value); });
+            if (applied && typeof onApply === 'function') onApply(sel.value);
+            return sel.value;
+        }
+    };
+    </script>
     <main>
         {% block content %}{% endblock %}
     </main>

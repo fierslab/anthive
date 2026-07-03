@@ -122,7 +122,9 @@
       })
       .catch(function (e) { stateEl.textContent = 'could not load — ' + e.message; });
   }
-  statSel.addEventListener('change', load);
+  var remStat = antRemember.get('gv.stat');   // restore last-used statistic
+  if (remStat) { for (var i = 0; i < statSel.options.length; i++) { if (statSel.options[i].value === remStat) { statSel.value = remStat; break; } } }
+  statSel.addEventListener('change', function () { antRemember.set('gv.stat', statSel.value); load(); });
   load();
 })();
 </script>
