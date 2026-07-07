@@ -1132,8 +1132,24 @@
   function refreshDownloadLinks() {}
 
   // ── geom switcher
+  // Carry over as much state as possible to the new geom. The address bar
+  // (location.search) already holds the #plot-form fields (kept in sync); the
+  // settings-panel values (palette_*, color_scale, width/height/dpi, point_size,
+  // alpha, fonts) live OUTSIDE the form and syncURL doesn't write them — so
+  // without this the colormap etc. reset on every switch. Overlay them from
+  // readSettingsFromForm() on top of the current query so the new geom keeps
+  // the same field AND the same appearance. Params the target geom lacks are
+  // just ignored by its form.
   document.getElementById('geom-switcher').addEventListener('change', e => {
-    window.location = BROWSE + e.target.value + window.location.search;
+    const params = new URLSearchParams(window.location.search);
+    const settings = readSettingsFromForm();
+    Object.keys(settings).forEach(k => {
+      if (k === 'color_scale' && settings[k] === 'auto') { params.delete(k); return; }  // auto = server default
+      if (settings[k] !== '' && settings[k] != null) params.set(k, settings[k]);
+    });
+    params.delete('format');
+    const qs = params.toString();
+    window.location = BROWSE + e.target.value + (qs ? '?' + qs : '');
   });
 
   // ── URL sync — every form change is also pushed into window.location's
