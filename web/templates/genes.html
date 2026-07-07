@@ -354,9 +354,13 @@
       renderCards();
     });
   });
+  // Atlas filters persist across gene navigations (keep the view stable when
+  // you jump from one gene to another). Restored before the first load().
   ['flt-organism', 'flt-cell_type', 'flt-tissue'].forEach(id => {
     const el = document.getElementById(id);
-    if (el) el.addEventListener('change', load);
+    if (!el) return;
+    if (window.antRemember) antRemember.bindSelect(el, 'genes.' + id);
+    el.addEventListener('change', load);
   });
   // multi-gene heatmap: switch the cell statistic (re-renders from cache, no refetch)
   const hmMetric = document.getElementById('hm-metric');
