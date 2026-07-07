@@ -1,4 +1,4 @@
-.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-mcp serve-all serve-debug serve-prod serve-stop caddy-passwd caddy-passwd-clear dev-jupyter sync-push sync-pull sync-plan sync-pull-evict sync-evict sync-pull-duckdb sync-pull-de sync-pull-all sync-status build-stale sync-update serve-status serve-restart h5adstore-push push-all ingest ingest-dry manifest cache-warm
+.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-mcp serve-all serve-debug serve-prod serve-stop caddy-passwd caddy-passwd-clear dev-jupyter recycle-instance sync-push sync-pull sync-plan sync-pull-evict sync-evict sync-pull-duckdb sync-pull-de sync-pull-all sync-status build-stale sync-update serve-status serve-restart h5adstore-push push-all ingest ingest-dry manifest cache-warm
 
 help:
 	@echo "Anthive4 Development Commands"
@@ -42,6 +42,7 @@ help:
 	@echo "Sync (S3) — the maintenance workflow:"
 	@echo "  make sync-update     - Full cycle: pull h5ad → rebuild stale duckdb → push"
 	@echo "  make sync-pull         - Pull per sync_policy in anthive.yaml (legacy default: h5ad + de.parquet)"
+	@echo "  make recycle-instance  - Full cycle for THIS instance: upgrade → restart → pull datastores"
 	@echo "  make sync-plan         - Dry-run: show the ordered priority fill plan (no transfers)"
 	@echo "  make sync-pull-evict   - sync-pull + evict local .duckdbs below the policy cutoff"
 	@echo "  make sync-evict        - Evict only (requires sync_policy.mode='priority')"
@@ -316,6 +317,47 @@ sync-pull-evict:
 # just need to free disk space. Requires sync_policy.mode='priority'.
 sync-evict:
 	@./bin/ops/ant-sync evict
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RECYCLE-INSTANCE — the full maintenance cycle for THIS instance, in the ONLY
+# correct order:
+#   [1] upgrade  — git pull --ff-only (so the NEW ant-sync runs the pull below)
+#   [2] restart  — reload the whole stack: new server code goes live, the
+#                  catalog is rebuilt, and any deleted-but-held duckdb handles
+#                  are released (reclaiming disk)
+#   [3] pull     — sync-pull-evict: fill highest-priority-first to ~min_free,
+#                  coordinating /admin/release + /admin/rescan with the fresh
+#                  server it now talks to
+# Order matters: upgrading before pulling ensures correct code; restarting
+# between them means the pull runs against real free space and a new server.
+#
+# Single instance only (runs in the current clone). To cycle every instance on
+# a host, run `make recycle-instance` in each clone — the multi-instance loop
+# is deployment-specific and deliberately kept OUT of this (public) Makefile.
+#
+# The systemd unit is derived from the folder name (<name>.bdslab.org →
+# anthive-<name>); the restart uses sudo systemctl (prompts once). Without a
+# unit (e.g. a dev box) it falls back to a non-sudo supervisor child-restart.
+#
+# NB: if the upgrade pulled web/ or frontend/ changes, also rebuild the static
+# bundles: `make build-jupyter` and/or `make build-webapp`.
+ANTHIVE_UNIT := anthive-$(firstword $(subst ., ,$(notdir $(CURDIR))))
+recycle-instance:
+	@echo "==> [1/3] upgrade — git pull --ff-only origin main"
+	@git pull --ff-only origin main
+	@echo "==> [2/3] restart stack ($(ANTHIVE_UNIT))"
+	@if [ -f /etc/systemd/system/$(ANTHIVE_UNIT).service ]; then \
+		echo "    sudo systemctl restart $(ANTHIVE_UNIT) (loads new code, frees held fds, fresh catalog)"; \
+		sudo systemctl restart $(ANTHIVE_UNIT); \
+		printf '    waiting for API'; for i in 1 2 3 4 5 6 7 8; do sleep 1; printf '.'; done; echo; \
+	else \
+		echo "    no systemd unit $(ANTHIVE_UNIT) — restarting children via supervisor (non-sudo)"; \
+		./bin/ops/ant-supervisor restart all; \
+		sleep 4; \
+	fi
+	@echo "==> [3/3] pull datastores — sync-pull-evict"
+	@$(MAKE) --no-print-directory sync-pull-evict
+	@echo "==> recycle-instance complete ($(ANTHIVE_UNIT))"
 
 # Pull ONLY the .duckdb files from S3 — leave .h5ad / .de.parquet alone.
 # Use when local .h5ad files are current but the .duckdb cache is stale
