@@ -1,4 +1,4 @@
-.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-mcp serve-all serve-debug serve-prod serve-stop caddy-passwd caddy-passwd-clear dev-jupyter recycle-instance sync-push sync-pull sync-plan sync-pull-evict sync-evict sync-pull-duckdb sync-pull-de sync-pull-all sync-status build-stale sync-update serve-status serve-restart h5adstore-push push-all ingest ingest-dry manifest cache-warm
+.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-mcp serve-all serve-debug serve-prod serve-stop caddy-passwd caddy-passwd-clear dev-jupyter recycle-instance sync-push sync-pull sync-plan sync-pull-evict sync-evict sync-pull-duckdb sync-pull-de sync-pull-all sync-status build-stale sync-update serve-status serve-restart h5adstore-push push-all ingest ingest-dry manifest cache-warm docker-build docker-run docker-smoketest docker-clean
 
 help:
 	@echo "Anthive4 Development Commands"
@@ -528,3 +528,37 @@ sync-update:
 # 	rclone copy bds_dedata:/ data/h5adstore/ \
 # 	    --exclude "**/*.h5ad" --exclude "**/*.duckdb.wal" \
 # 	    --transfers 2 --checkers 4 --timeout 500s --progress
+
+
+# ============================================================================
+# Docker — single-container image for reproducible paper deployments.
+# See docker/README.md and doc/DOCKER.md for details.
+# ============================================================================
+
+DOCKER_IMAGE ?= anthive
+DOCKER_TAG   ?= latest
+DOCKER_PORT  ?= 8501
+
+## docker-build - Build the anthive:latest image (~5-10 min first time)
+docker-build:
+	docker build --pull -f docker/Dockerfile -t $(DOCKER_IMAGE):$(DOCKER_TAG) .
+
+## docker-run - Run the image against ./data/h5adstore + ./data/genesetstore on $(DOCKER_PORT)
+docker-run:
+	@[ -d "$(PWD)/data/h5adstore" ] || (echo "no data/h5adstore/ in cwd — set H5ADSTORE for a different path" >&2; exit 1)
+	@[ -d "$(PWD)/data/genesetstore" ] || (echo "no data/genesetstore/ in cwd — set GENESETSTORE for a different path" >&2; exit 1)
+	docker run --rm -it \
+	    --name anthive-$(DOCKER_TAG) \
+	    -p $(DOCKER_PORT):$(DOCKER_PORT) \
+	    -e ANTHIVEPORT=$(DOCKER_PORT) \
+	    -v "$(PWD)/data/h5adstore:/data/h5adstore" \
+	    -v "$(PWD)/data/genesetstore:/data/genesetstore" \
+	    $(DOCKER_IMAGE):$(DOCKER_TAG)
+
+## docker-smoketest - Boot the image, hit /api/health, tear down. Returns non-zero on failure.
+docker-smoketest:
+	@bash docker/smoketest.sh $(DOCKER_IMAGE):$(DOCKER_TAG) $(DOCKER_PORT)
+
+## docker-clean - Remove the local anthive image
+docker-clean:
+	docker image rm -f $(DOCKER_IMAGE):$(DOCKER_TAG) || true

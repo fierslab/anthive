@@ -1,0 +1,63 @@
+# Only the source tree needs to go into the build context.
+# Everything below is either large, secret, host-specific, or generated.
+
+# Version control + editor + OS cruft
+.git
+.gitignore
+.gitattributes
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.DS_Store
+**/*.swp
+**/*~
+**/#*#
+**/.#*
+.vscode
+.idea
+
+# Local data caches — the container gets its stores via bind mounts.
+data/h5adstore
+data/genesetstore
+data/starcatstore
+data/reports
+data/*.h5ad
+data/*.duckdb
+data/*.parquet
+
+# Local run state
+tmp
+logs
+*.log
+.venv
+venv
+node_modules
+
+# Test / build outputs
+dist
+build
+htmlcov
+.pytest_cache
+.mypy_cache
+.ruff_cache
+*.egg-info
+
+# Secrets — must never end up in a redistributable image
+anthive.yaml
+config/caddy-auth-basic.conf
+config/authelia/secrets
+**/.env
+**/*.secret
+
+# Docs / reports not needed at runtime (keep small — the image doesn't
+# serve these, and the source is on git anyway)
+report
+
+# Host-specific work-in-progress
+fix.txt
+plans
+
+# Docker artifacts themselves — build context already includes docker/
+# but the Dockerfile lives elsewhere in the tree so keep it out of the
+# copy step's noise.
+docker/build
