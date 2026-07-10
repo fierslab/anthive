@@ -1,4 +1,4 @@
-.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-mcp serve-all serve-debug serve-prod serve-stop caddy-passwd caddy-passwd-clear dev-jupyter refresh-viewer sync-push sync-pull sync-plan sync-pull-evict sync-evict sync-pull-duckdb sync-pull-de sync-pull-all sync-status build-stale sync-update serve-status serve-restart h5adstore-push push-all ingest ingest-dry manifest cache-warm docker-build docker-run docker-smoketest docker-clean
+.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-mcp serve-all serve-debug serve-prod serve-stop caddy-passwd caddy-passwd-clear dev-jupyter refresh-viewer symlink sync-push sync-pull sync-plan sync-pull-evict sync-evict sync-pull-duckdb sync-pull-de sync-pull-all sync-status build-stale sync-update serve-status serve-restart h5adstore-push push-all ingest ingest-dry manifest cache-warm docker-build docker-run docker-smoketest docker-clean
 
 help:
 	@echo "Anthive4 Development Commands"
@@ -43,6 +43,7 @@ help:
 	@echo "  make sync-update     - Full cycle: pull h5ad → rebuild stale duckdb → push"
 	@echo "  make sync-pull         - Pull per sync_policy in anthive.yaml (legacy default: h5ad + de.parquet)"
 	@echo "  make refresh-viewer  - Full cycle for THIS instance: upgrade → restart → pull datastores"
+	@echo "  make symlink TARGET=Sierksma2025  - Share a dataset from the main store into THIS viewer (symlinks)"
 	@echo "  make sync-plan         - Dry-run: show the ordered priority fill plan (no transfers)"
 	@echo "  make sync-pull-evict   - sync-pull + evict local .duckdbs below the policy cutoff"
 	@echo "  make sync-evict        - Evict only (requires sync_policy.mode='priority')"
@@ -368,6 +369,38 @@ refresh-viewer:
 		echo "         (mode: priority) auto-pulls here; manage this viewer's data by hand."; \
 	fi
 	@echo "==> refresh-viewer complete ($(ANTHIVE_UNIT))"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# symlink — share one dataset (group or sub-path) from the data-owning viewer's
+# h5adstore into THIS viewer's store, as symlinks (no data duplication). Run in
+# the sharing viewer, e.g. review:
+#     make symlink TARGET=Sierksma2025                 # a whole group
+#     make symlink TARGET=Sierksma2025/Village.6M      # one sub-path/dataset
+# Recreates the folder tree and symlinks EVERY file (.duckdb, .md, .h5ad.mus,
+# .de.parquet, index.md, …) with ABSOLUTE links so they always resolve; then
+# best-effort /admin/rescan so ant-serve picks the dataset up. Refuses if the
+# target already exists here (remove it first to re-link).
+#
+# MAIN_STORE points at the data-owning viewer's store; override if it's not the
+# default sibling. DO NOT run this in the data-owning viewer itself.
+MAIN_STORE ?= ../intern.bdslab.org/data/h5adstore
+symlink:
+	@test -n "$(TARGET)" || { echo "usage: make symlink TARGET=<Group>[/<sub>]  [MAIN_STORE=<path>]"; exit 2; }
+	@src="$(abspath $(MAIN_STORE))/$(TARGET)"; dest="data/h5adstore/$(TARGET)"; \
+	test "$(abspath $(MAIN_STORE))" != "$(abspath data/h5adstore)" || { echo "error: MAIN_STORE is THIS viewer's own store — nothing to share"; exit 2; }; \
+	test -e "$$src" || { echo "error: not found in main store: $$src"; exit 2; }; \
+	if [ -e "$$dest" ] || [ -L "$$dest" ]; then echo "error: '$$dest' already exists here — remove it first to re-link"; exit 2; fi; \
+	mkdir -p "$$(dirname "$$dest")"; \
+	cp -rs "$$src" "$$dest"; \
+	n=$$(find -L "$$dest" -type f 2>/dev/null | wc -l); \
+	d=$$(find -L "$$dest" -name '*.duckdb' 2>/dev/null | wc -l); \
+	echo "symlinked $$n file(s) ($$d duckdb) into $$dest → $$src"; \
+	port=$$(awk '/^rest_api_port:/{print $$2}' anthive.yaml 2>/dev/null); \
+	if [ -n "$$port" ] && curl -fsS -X POST "http://127.0.0.1:$$port/admin/rescan" >/dev/null 2>&1; then \
+		echo "rescanned ant-serve on :$$port — dataset live"; \
+	else \
+		echo "(restart the viewer or POST /admin/rescan to make it visible)"; \
+	fi
 
 # Pull ONLY the .duckdb files from S3 — leave .h5ad / .de.parquet alone.
 # Use when local .h5ad files are current but the .duckdb cache is stale
