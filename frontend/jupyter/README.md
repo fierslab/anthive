@@ -11,7 +11,7 @@ built into `../webapp/`.
 - **`jupyter/`** — JupyterLite notebooks and content.
   Source for the browser-based Python notebook environment. Built to
   `../webapp/jupyter/` by `make build-jupyter`. Contains:
-  - `Getting_Started.ipynb`, `Empty.ipynb`, `Emily.ipynb`
+  - `Getting_Started.ipynb`, `Empty.ipynb`
   - `examples/` — themed notebooks
   - `vark/` — vendored copy of the Python client
     ([`codeberg.org/mfiers/pyvark`](https://codeberg.org/mfiers/pyvark))
