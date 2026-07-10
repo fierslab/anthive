@@ -380,8 +380,11 @@ refresh-viewer:
 # .de.parquet, index.md, …) with ABSOLUTE links so they always resolve; then
 # best-effort /admin/rescan so ant-serve picks the dataset up. Refuses if the
 # target already exists here (remove it first to re-link).
-# NB: `.inactive` markers are NOT inherited — a dataset you deliberately share
-# into a viewer is made ACTIVE there, regardless of its status in the source.
+# NB: `.inactive` status IS inherited from the source. ant-serve checks the
+# sidecar at the symlink-RESOLVED (source) path, so a dataset marked inactive
+# in the main store stays inactive here regardless of the viewer-local files.
+# To serve an otherwise-inactive dataset here, copy it in as real files (own
+# `.inactive` control) or drop the marker in the source store.
 #
 # MAIN_STORE points at the data-owning viewer's store; override if it's not the
 # default sibling. DO NOT run this in the data-owning viewer itself.
@@ -394,9 +397,6 @@ symlink:
 	if [ -e "$$dest" ] || [ -L "$$dest" ]; then echo "error: '$$dest' already exists here — remove it first to re-link"; exit 2; fi; \
 	mkdir -p "$$(dirname "$$dest")"; \
 	cp -rs "$$src" "$$dest"; \
-	inact=$$(find "$$dest" -name '*.inactive' 2>/dev/null | wc -l); \
-	find "$$dest" -name '*.inactive' -delete 2>/dev/null; \
-	[ "$$inact" -gt 0 ] && echo "dropped $$inact inherited .inactive marker(s) — shared datasets are active here"; \
 	n=$$(find -L "$$dest" -type f 2>/dev/null | wc -l); \
 	d=$$(find -L "$$dest" -name '*.duckdb' 2>/dev/null | wc -l); \
 	echo "symlinked $$n file(s) ($$d duckdb) into $$dest → $$src"; \

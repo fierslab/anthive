@@ -895,11 +895,15 @@ class DatabaseRegistry:
         # per-subfolder index.md files for nested datasets, and the walk-up
         # would pick the closest (subfolder) one rather than the collection
         # root that carries the citation / study description.
-        try:
-            relpath = md_path.relative_to(self.data_folder)
-            data_project = relpath.parts[0] if relpath.parts else None
-        except ValueError:
-            data_project = None
+        #
+        # Derive <dp> from the STORE-LOCAL rel_path recorded during the scan,
+        # NOT from md_path: md_path is the symlink-RESOLVED absolute path, so
+        # for a dataset symlinked in from another viewer's store it points
+        # outside this data_folder and relative_to() raises ValueError —
+        # silently dropping the collection blurb (citation + study description)
+        # on secondary viewers. rel_path is always relative to data_folder.
+        rel_str = self._db_extra.get(db_id, {}).get('rel_path')
+        data_project = Path(rel_str).parts[0] if rel_str else None
         index_path = (
             self.data_folder / data_project / 'index.md'
             if data_project else None
@@ -8006,6 +8010,15 @@ def _common_plot_params_from_dict(
         common.subset = list(raw_subset) if raw_subset else []
     s = params.get('sample')
     common.sample = int(s) if s is not None else None
+    # attach_sessions: added to CommonPlotParams after this hand-rolled
+    # __new__ constructor; must be set here too or _build_plot_request()
+    # AttributeErrors (500) on every notebook build. Notebooks don't carry
+    # sessions, so default to [] but honour the key if a caller passes it.
+    raw_attach = params.get('attach_sessions', [])
+    if isinstance(raw_attach, str):
+        common.attach_sessions = [raw_attach]
+    else:
+        common.attach_sessions = list(raw_attach) if raw_attach else []
     common.request = request
     if common.output_format not in _PLOT_MIME_TYPES:
         raise HTTPException(

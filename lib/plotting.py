@@ -21,6 +21,22 @@ import seaborn as sns
 import pandas as pd
 
 
+def _get_cmap(name):
+    """Look up a colormap by name, version-agnostically.
+
+    matplotlib 3.9 removed ``matplotlib.cm.get_cmap``; the supported lookup is
+    the ``matplotlib.colormaps`` registry (present since 3.5). An already-
+    resolved ``Colormap`` is returned unchanged and ``None`` yields the
+    rcParams default — matching the lenient contract the call sites were
+    written against under the old ``get_cmap``.
+    """
+    if isinstance(name, matplotlib.colors.Colormap):
+        return name
+    if name is None:
+        name = matplotlib.rcParams['image.cmap']
+    return matplotlib.colormaps[name]
+
+
 # Three palette families.  The right one is picked from the data kind:
 #
 #   categorical  — discrete labels (cell types, clusters, samples)
@@ -1189,7 +1205,7 @@ def plot_scatter(
                 ys_all = np.asarray(plot_df[y_col], dtype=float)
                 cats = plot_df[color_field].values
                 unique_cats = sorted(np.unique(cats[cats != 'nan']).tolist())
-                cmap_obj = matplotlib.cm.get_cmap(cmap_name)
+                cmap_obj = _get_cmap(cmap_name)
                 n_palette = getattr(cmap_obj, 'N', 256)
                 for idx, cat in enumerate(unique_cats):
                     mask = cats == cat
@@ -1693,7 +1709,7 @@ def plot_hexbin(
                 palette_div=palette_div,
                 n_categories=len(unique_cats),
             )
-            cmap_obj = matplotlib.cm.get_cmap(cat_palette)
+            cmap_obj = _get_cmap(cat_palette)
             n_palette = getattr(cmap_obj, 'N', 256)
             colors = cmap_obj(np.array([m % n_palette for m in modal_code]) / max(n_palette - 1, 1))
 
@@ -2153,7 +2169,7 @@ def plot_grouped(
             hue_order = col_totals.sort_values(ascending=False).index.tolist()
         cmap_name, _ = pick_cmap('categorical', palette_cat=palette_cat,
                                  n_categories=max(len(hue_order), 1))
-        cmap_obj = matplotlib.cm.get_cmap(cmap_name)
+        cmap_obj = _get_cmap(cmap_name)
         cmap_n = getattr(cmap_obj, 'N', 256)
         hue_colour_index = {h: i for i, h in enumerate(hue_order)}
 
@@ -2371,7 +2387,7 @@ def plot_rolling(
             palette_div=palette_div,
             n_categories=int(data_df[color_field].nunique()),
         )
-        cmap_obj = matplotlib.cm.get_cmap(cat_palette)
+        cmap_obj = _get_cmap(cat_palette)
         groups = list(pd.Series(data_df[color_field]).dropna().unique())
         groups = sorted(groups, key=str)
         n_palette = getattr(cmap_obj, 'N', 256)
@@ -2406,7 +2422,7 @@ def plot_rolling(
             palette_div=palette_div,
             n_categories=len(y_fields),
         )
-        cmap_obj = matplotlib.cm.get_cmap(cat_palette)
+        cmap_obj = _get_cmap(cat_palette)
         n_palette = getattr(cmap_obj, 'N', 256)
         for yi, y in enumerate(y_fields):
             colour = cmap_obj((yi % n_palette) / max(n_palette - 1, 1))
@@ -2681,7 +2697,7 @@ def plot_volcano(
     df['_direction'] = np.where(df['_effect'] > 0, 'up', 'down')
     df['_category'] = np.where(df['_sig'], df['_direction'], 'ns')
 
-    cmap_obj = matplotlib.cm.get_cmap(
+    cmap_obj = _get_cmap(
         palette_cat if palette_cat in _QUALITATIVE_PALETTES else _DEFAULT_CATEGORICAL
     )
     colors = {
@@ -2821,7 +2837,7 @@ def plot_ma(
         df['_logmean'] = df['_logmean'].clip(upper=logmean_clip)
         ma_clip_marks.append(f'log₁₀mean≤{logmean_clip:g}')
 
-    cmap_obj = matplotlib.cm.get_cmap(
+    cmap_obj = _get_cmap(
         palette_cat if palette_cat in _QUALITATIVE_PALETTES else _DEFAULT_CATEGORICAL
     )
     colors = {'ns': '#bbbbbb', 'down': cmap_obj(0.0), 'up': cmap_obj(0.1)}
@@ -2977,7 +2993,7 @@ def plot_forest(
     height_dyn = max(height, 0.25 * len(df) + 1.5)
     fig, ax = plt.subplots(figsize=(width, height_dyn))
 
-    cmap_obj = matplotlib.cm.get_cmap(
+    cmap_obj = _get_cmap(
         palette_cat if palette_cat in _QUALITATIVE_PALETTES else _DEFAULT_CATEGORICAL
     )
     sig_color = cmap_obj(0.1)
@@ -3117,7 +3133,7 @@ def attach_regression(ax, xs, ys,
         }
 
     cmap_name = palette_cat if palette_cat in _QUALITATIVE_PALETTES else _DEFAULT_CATEGORICAL
-    cmap_obj = matplotlib.cm.get_cmap(cmap_name)
+    cmap_obj = _get_cmap(cmap_name)
 
     if groups is None or kind == 'global':
         stats = _fit_and_draw(xs, ys, color='#1d4ed8')
@@ -3457,7 +3473,7 @@ def plot_de_quadrant(
     # the qualitative palette family beyond "take 3 distinct colours
     # from the chosen tab10/tab20/Set1/...". Neither-sig stays grey for
     # consistency with the volcano / MA convention.
-    cmap_obj = matplotlib.cm.get_cmap(
+    cmap_obj = _get_cmap(
         palette_cat if palette_cat in _QUALITATIVE_PALETTES else _DEFAULT_CATEGORICAL
     )
     colors = {
