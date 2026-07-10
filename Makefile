@@ -325,9 +325,12 @@ sync-evict:
 #   [2] restart  — reload the whole stack: new server code goes live, the
 #                  catalog is rebuilt, and any deleted-but-held duckdb handles
 #                  are released (reclaiming disk)
-#   [3] pull     — sync-pull-evict: fill highest-priority-first to ~min_free,
-#                  coordinating /admin/release + /admin/rescan with the fresh
-#                  server it now talks to
+#   [3] pull     — ONLY if sync_policy.mode=='priority' (the data-owning viewer):
+#                  sync-pull-evict, filling highest-priority-first to ~min_free.
+#                  On a viewer WITHOUT a priority policy (mode 'all'/absent) the
+#                  pull is SKIPPED — otherwise it would fetch the whole catalog.
+#                  Those viewers curate their datastore by hand; the cycle is
+#                  just upgrade + restart for them.
 # Order matters: upgrading before pulling ensures correct code; restarting
 # between them means the pull runs against real free space and a new server.
 #
@@ -355,8 +358,15 @@ refresh-viewer:
 		./bin/ops/ant-supervisor restart all; \
 		sleep 4; \
 	fi
-	@echo "==> [3/3] pull datastores — sync-pull-evict"
-	@$(MAKE) --no-print-directory sync-pull-evict
+	@if grep -qE '^[[:space:]]*mode:[[:space:]]*priority' anthive.yaml 2>/dev/null; then \
+		echo "==> [3/3] pull datastores — sync-pull-evict (sync_policy.mode=priority)"; \
+		$(MAKE) --no-print-directory sync-pull-evict; \
+	else \
+		echo "==> [3/3] SKIP data pull — sync_policy.mode is NOT 'priority' in anthive.yaml."; \
+		echo "         This viewer does not own a bounded priority datastore, so pulling"; \
+		echo "         would fetch the WHOLE catalog. Only the data-owning instance"; \
+		echo "         (mode: priority) auto-pulls here; manage this viewer's data by hand."; \
+	fi
 	@echo "==> refresh-viewer complete ($(ANTHIVE_UNIT))"
 
 # Pull ONLY the .duckdb files from S3 — leave .h5ad / .de.parquet alone.
