@@ -1063,7 +1063,11 @@ class AnthiveDB:
             stem = db_path.stem
             by_gene = db_path.parent / f"{stem}.layer.{layer}.by_gene.parquet"
             if by_gene.exists():
-                return f"read_parquet('{by_gene.resolve()!s}')"
+                # Escape single quotes in the path (SQL string-literal rules)
+                # so a dataset in a directory named e.g. `O'Brien2025` still
+                # produces a valid SELECT.
+                escaped = str(by_gene.resolve()).replace("'", "''")
+                return f"read_parquet('{escaped}')"
         # Fallback: legacy in-DuckDB table
         return f'"__layer__{safe}"'
 

@@ -298,7 +298,8 @@ def _layer_source(con: duckdb.DuckDBPyConnection, layer: str,
     if db_path is not None:
         by_gene = db_path.parent / f"{db_path.stem}.layer.{layer}.by_gene.parquet"
         if by_gene.exists():
-            return f"read_parquet('{by_gene.resolve()!s}')"
+            escaped = str(by_gene.resolve()).replace("'", "''")
+            return f"read_parquet('{escaped}')"
     return f"__layer__{safe}"
 
 

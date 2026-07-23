@@ -477,6 +477,10 @@ def convert_layers(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict,
     DuckDB views over these files are created inside the .duckdb so queries are
     transparent to callers.
 
+    NOTE: explicit zeros are dropped during melt (`value != 0`), matching the
+    sparse-CSR semantics of the source. A layer that stores meaningful zeros
+    (e.g. signed residuals, z-scores) is NOT round-trippable through this path.
+
     Args:
         conn: Open DuckDB connection (read-write).
         adata: AnnData object.
@@ -620,19 +624,31 @@ def convert_layers(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict,
 
         conn.execute(f"DROP TABLE IF EXISTS {staging_table}")
 
-        # Register views over the two parquets (absolute paths required so
-        # the view works regardless of the cwd when duckdb is opened later).
+        # Register views over the two parquets. Absolute paths required so
+        # the view works regardless of the cwd when duckdb is opened later.
+        # Single quotes in the path are doubled per SQL string-literal escape
+        # rules (defensive — no failure observed yet, but a user directory
+        # containing an apostrophe would otherwise break the CREATE VIEW).
+        by_gene_sql = str(by_gene_path.resolve()).replace("'", "''")
+        by_cell_sql = str(by_cell_path.resolve()).replace("'", "''")
         conn.execute(f"""
             CREATE VIEW layer__{safe_layer_key} AS
             SELECT c.cell_name, g.gene_name, l.value
-            FROM read_parquet('{by_gene_path.resolve()!s}') l
+            FROM read_parquet('{by_gene_sql}') l
             JOIN __cells c ON l.cell_id = c.cell_id
             JOIN __genes g ON l.gene_id = g.gene_id
+        """)
+        # Symmetric alias: analytics users reasonably expect layer__X_by_gene
+        # to exist next to layer__X_by_cell — otherwise `FROM layer__X_by_gene`
+        # in a hand-written query hits "table does not exist".
+        conn.execute(f"""
+            CREATE VIEW layer__{safe_layer_key}_by_gene AS
+            SELECT * FROM layer__{safe_layer_key}
         """)
         conn.execute(f"""
             CREATE VIEW layer__{safe_layer_key}_by_cell AS
             SELECT c.cell_name, g.gene_name, l.value
-            FROM read_parquet('{by_cell_path.resolve()!s}') l
+            FROM read_parquet('{by_cell_sql}') l
             JOIN __cells c ON l.cell_id = c.cell_id
             JOIN __genes g ON l.gene_id = g.gene_id
         """)

@@ -9095,8 +9095,9 @@ def _pseudobulk_compute(
         kept_ids = kept_df['group_id'].astype(str).tolist()
         ids_placeholders = ','.join(['?'] * len(kept_ids))
 
-        # 2) Aggregated counts (long form). Use the layer's underlying integer
-        #    table __layer__<layer>(cell_id, gene_id, value).
+        # 2) Aggregated counts (long form). Use the layer__<layer> view
+        #    (Parquet-backed since the 2026-07 migration; joins __cells/__genes
+        #    to expose cell_name and gene_name).
         sql_counts = f"""
             WITH cells_in_groups AS (
                 SELECT

@@ -123,12 +123,18 @@ def _list_legacy_layers(conn: duckdb.DuckDBPyConnection) -> List[str]:
     return [row[0][len('__layer__'):] for row in rows]
 
 
-def _row_count(conn: duckdb.DuckDBPyConnection, table_or_view: str) -> int:
-    """Return COUNT(*) for a table or view; -1 on error."""
+def _row_count(conn: duckdb.DuckDBPyConnection, table_or_view: str,
+               missing_ok: bool = False) -> int | None:
+    """Return COUNT(*) for a table or view.
+
+    On any error (typically table/view does not exist): return -1, or None if
+    missing_ok=True — the latter is useful when the caller wants to distinguish
+    "missing" from "count is -1 for real".
+    """
     try:
         return conn.execute(f"SELECT COUNT(*) FROM {table_or_view}").fetchone()[0]
     except Exception:
-        return -1
+        return None if missing_ok else -1
 
 
 def _migrate_layer(
@@ -161,6 +167,49 @@ def _migrate_layer(
         'success': False,
         'error': None,
     }
+
+    # Repair mode: parquets already exist (from a prior interrupted migration)
+    # but the views are missing → skip the export, just recreate the views.
+    legacy_present = _row_count(conn, table_name, missing_ok=True) is not None
+    if not legacy_present and by_gene_path.exists() and by_cell_path.exists():
+        log.info(f"  layer '{layer_key}': parquets present, legacy table gone — "
+                 f"repairing missing views only")
+        n_pq = conn.execute(
+            f"SELECT COUNT(*) FROM read_parquet('{str(by_gene_path.resolve()).replace(chr(39), chr(39)*2)}')"
+        ).fetchone()[0]
+        result['rows_before'] = n_pq
+        result['by_gene_size'] = by_gene_path.stat().st_size
+        result['by_cell_size'] = by_cell_path.stat().st_size
+
+        if dry_run:
+            log.info(f"  [dry-run] would recreate views {view_name}, {view_name}_by_gene, {view_by_cell}")
+            result['success'] = True
+            return result
+
+        conn.execute(f"DROP VIEW IF EXISTS {view_name}")
+        conn.execute(f"DROP VIEW IF EXISTS {view_name}_by_gene")
+        conn.execute(f"DROP VIEW IF EXISTS {view_by_cell}")
+        by_gene_sql = str(by_gene_path.resolve()).replace("'", "''")
+        by_cell_sql = str(by_cell_path.resolve()).replace("'", "''")
+        conn.execute(f"""
+            CREATE VIEW {view_name} AS
+            SELECT c.cell_name, g.gene_name, l.value
+            FROM read_parquet('{by_gene_sql}') l
+            JOIN __cells c ON l.cell_id = c.cell_id
+            JOIN __genes g ON l.gene_id = g.gene_id
+        """)
+        conn.execute(f"CREATE VIEW {view_name}_by_gene AS SELECT * FROM {view_name}")
+        conn.execute(f"""
+            CREATE VIEW {view_by_cell} AS
+            SELECT c.cell_name, g.gene_name, l.value
+            FROM read_parquet('{by_cell_sql}') l
+            JOIN __cells c ON l.cell_id = c.cell_id
+            JOIN __genes g ON l.gene_id = g.gene_id
+        """)
+        result['rows_after'] = _row_count(conn, view_name)
+        result['success'] = True
+        log.info(f"  ✓ views recreated ({result['rows_after']:,} rows)")
+        return result
 
     try:
         rows_before = _row_count(conn, table_name)
@@ -221,20 +270,31 @@ def _migrate_layer(
         # Drop the old table and any existing views
         conn.execute(f"DROP TABLE IF EXISTS {table_name}")
         conn.execute(f"DROP VIEW IF EXISTS {view_name}")
+        conn.execute(f"DROP VIEW IF EXISTS {view_name}_by_gene")
         conn.execute(f"DROP VIEW IF EXISTS {view_by_cell}")
 
-        # Create the two new views (absolute paths in the SQL)
+        # Create views (absolute paths in SQL; single-quote-escape to keep
+        # SQL string literals well-formed for paths containing apostrophes).
+        by_gene_sql = str(by_gene_path.resolve()).replace("'", "''")
+        by_cell_sql = str(by_cell_path.resolve()).replace("'", "''")
         conn.execute(f"""
             CREATE VIEW {view_name} AS
             SELECT c.cell_name, g.gene_name, l.value
-            FROM read_parquet('{by_gene_path.resolve()!s}') l
+            FROM read_parquet('{by_gene_sql}') l
             JOIN __cells c ON l.cell_id = c.cell_id
             JOIN __genes g ON l.gene_id = g.gene_id
+        """)
+        # Symmetric alias so `layer__X_by_gene` resolves (users hit it in
+        # hand-written analytics queries when the sibling `_by_cell` view
+        # is already visible in the schema).
+        conn.execute(f"""
+            CREATE VIEW {view_name}_by_gene AS
+            SELECT * FROM {view_name}
         """)
         conn.execute(f"""
             CREATE VIEW {view_by_cell} AS
             SELECT c.cell_name, g.gene_name, l.value
-            FROM read_parquet('{by_cell_path.resolve()!s}') l
+            FROM read_parquet('{by_cell_sql}') l
             JOIN __cells c ON l.cell_id = c.cell_id
             JOIN __genes g ON l.gene_id = g.gene_id
         """)
@@ -360,18 +420,37 @@ def migrate_dataset(
         log.info(f"  {'PASS' if ok else 'FAIL'}")
         return ok
 
-    # Check which layers still have the legacy __layer__ table
+    # Check which layers still have the legacy __layer__ table AND which
+    # are half-migrated (parquets exist but views were never created — can
+    # happen if the process was killed between DROP TABLE and CREATE VIEW).
     try:
         conn_ro = duckdb.connect(str(duckdb_path), read_only=True)
         legacy_layers = _list_legacy_layers(conn_ro)
+        existing_views = {
+            row[0] for row in conn_ro.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_type='VIEW' AND table_name LIKE 'layer\\_\\_%' ESCAPE '\\'"
+            ).fetchall()
+        }
         conn_ro.close()
     except Exception as exc:
         log.error(f"  Cannot open (r/o) {duckdb_path.name}: {exc}")
         return False
 
-    # Filter to layers that are in layers_include AND still have a legacy table
-    to_migrate = [lk for lk in layers_include if lk in legacy_layers
-                  or _sanitize(lk) in legacy_layers]
+    def _needs_migration(lk: str) -> bool:
+        # Full migration needed if legacy table still present
+        if lk in legacy_layers or _sanitize(lk) in legacy_layers:
+            return True
+        # Repair needed if parquets exist but any of the three views is missing
+        # (the primary view + the _by_gene alias + the _by_cell alias).
+        by_gene, by_cell = _layer_parquet_paths(duckdb_path, lk)
+        safe = _sanitize(lk)
+        need = {f"layer__{safe}", f"layer__{safe}_by_gene", f"layer__{safe}_by_cell"}
+        if by_gene.exists() and by_cell.exists() and not need.issubset(existing_views):
+            return True
+        return False
+
+    to_migrate = [lk for lk in layers_include if _needs_migration(lk)]
 
     if not to_migrate:
         log.info("  All layers already Parquet-backed — nothing to do")
@@ -416,9 +495,13 @@ def migrate_dataset(
                 success = False
 
         if success:
-            conn.execute("VACUUM")
+            # NOTE: DuckDB does not reclaim pages on DROP TABLE, so VACUUM
+            # here is a slow no-op (potentially minutes on huge files). To
+            # actually shrink the .duckdb, re-run `ant-convert` on the h5ad
+            # — that produces a fresh compact file. We only checkpoint to
+            # flush the WAL for cleanliness.
             conn.execute("CHECKPOINT")
-            log.info("  VACUUMED + CHECKPOINT")
+            log.info("  CHECKPOINT")
 
     finally:
         conn.close()
