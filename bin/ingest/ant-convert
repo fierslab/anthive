@@ -271,6 +271,17 @@ def convert_h5ad_to_duckdb(h5ad_path: Path, config: Dict[str, Any],
         # Connect to new database
         print(f"[3/7] Initializing database...")
         conn = duckdb.connect(str(duckdb_path))
+        # Apply memory_limit from anthive.yaml if set. DuckDB's default
+        # (~80% of RAM) can trigger OOM on very-large-nnz layer melts
+        # where the primary-key index build accumulates a lot of state;
+        # capping here forces earlier spill-to-disk on huge ingests.
+        mem_limit = config.get('duckdb_memory_limit')
+        if mem_limit and str(mem_limit).lower() != 'auto':
+            conn.execute(f"SET memory_limit = '{mem_limit}'")
+            print(f"  ✓ memory_limit = {mem_limit}")
+        threads = config.get('duckdb_threads')
+        if threads:
+            conn.execute(f"SET threads = {int(threads)}")
         initialize_database(conn)
         print(f"  ✓ Schema version: 1")
 

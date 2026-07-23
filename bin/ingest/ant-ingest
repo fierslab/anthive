@@ -66,6 +66,7 @@ from typing import Dict, List, Optional, Tuple
 
 import boto3
 from boto3.s3.transfer import TransferConfig
+from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
 
 # Repo-relative imports (lib/ shim).
@@ -187,12 +188,22 @@ class DEResult:
 
 def _s3_client(s3_cfg: dict):
     endpoint = s3_cfg.get('endpoint')
+    # Adaptive retries with a bigger budget — Hetzner S3 in particular
+    # returns transient 5xx / socket errors on large multipart downloads,
+    # and the default max_attempts=5 blows up whole downloads on a single
+    # flake. `adaptive` mode also backs off on client-side throttling.
+    # read_timeout is bumped for very large parts.
     return boto3.client(
         's3',
         endpoint_url=f'https://{endpoint}' if endpoint else None,
         region_name=s3_cfg.get('region', 'us-east-1'),
         aws_access_key_id=s3_cfg.get('access_key_id'),
         aws_secret_access_key=s3_cfg.get('secret_access_key'),
+        config=BotoConfig(
+            retries={'max_attempts': 20, 'mode': 'adaptive'},
+            connect_timeout=30,
+            read_timeout=300,
+        ),
     )
 
 
@@ -364,9 +375,150 @@ def _group_into_de_plans(objects: List[dict]) -> Tuple[List[DEPlan], List[str]]:
     return plans, malformed
 
 
+# Resumable-download threshold: files larger than this use range-GET chunks
+# with a per-chunk progress sidecar so an interrupted download can resume
+# without re-transferring anything already on disk. Below this, boto3's
+# multipart transfer is fine (its internal retries handle small blips).
+RESUMABLE_THRESHOLD = 1 * 1024 ** 3   # 1 GB
+RESUMABLE_CHUNK     = 256 * 1024 ** 2 # 256 MB per range-GET
+RESUMABLE_WORKERS   = 4               # concurrent chunks
+RESUMABLE_RETRIES   = 15              # per-chunk retries on top of boto3's own
+
+
 def _download(client, bucket: str, key: str, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    client.download_file(bucket, key, str(dest), Config=_transfer_config())
+    try:
+        head = client.head_object(Bucket=bucket, Key=key)
+        size = head['ContentLength']
+    except Exception:
+        size = None
+    if size is not None and size >= RESUMABLE_THRESHOLD:
+        _download_resumable(client, bucket, key, dest, size)
+    else:
+        client.download_file(bucket, key, str(dest), Config=_transfer_config())
+
+
+def _download_resumable(client, bucket: str, key: str, dest: Path, size: int) -> None:
+    """Concurrent range-GET download with per-chunk resume state.
+
+    Chunks are written directly at their file offset via ``os.pwrite``. A
+    JSON sidecar next to the destination (``<dest>.progress``) tracks
+    which chunk indices are done, so an interrupted run continues without
+    re-downloading anything already on disk.
+
+    Rationale: boto3's built-in ``download_file`` uses multipart concurrent
+    downloads but if a single part exhausts its own retries the whole
+    download fails and the file is discarded. On a Hetzner-flavoured 125
+    GB pull that means paying for the whole file every attempt. This
+    variant lets us pay only for the parts that actually failed.
+    """
+    import json
+    import os
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    n_chunks = (size + RESUMABLE_CHUNK - 1) // RESUMABLE_CHUNK
+    progress_path = dest.with_suffix(dest.suffix + '.progress')
+    done: set[int] = set()
+
+    if progress_path.exists() and dest.exists():
+        try:
+            state = json.loads(progress_path.read_text())
+            if state.get('key') == key and state.get('size') == size:
+                done = set(state.get('done', []))
+        except (OSError, ValueError):
+            done = set()
+
+    if not dest.exists() or dest.stat().st_size != size:
+        with open(dest, 'wb') as fh:
+            fh.truncate(size)
+        done = set()   # size mismatch → start over
+
+    def _fetch(idx: int) -> int:
+        start = idx * RESUMABLE_CHUNK
+        end = min(start + RESUMABLE_CHUNK, size) - 1
+        expected = end - start + 1
+        last_exc: Optional[BaseException] = None
+        for attempt in range(RESUMABLE_RETRIES):
+            try:
+                resp = client.get_object(
+                    Bucket=bucket, Key=key, Range=f'bytes={start}-{end}',
+                )
+                body = resp['Body'].read()
+                if len(body) != expected:
+                    raise IOError(
+                        f'chunk {idx}: got {len(body)} bytes, expected {expected}'
+                    )
+                fd = os.open(dest, os.O_WRONLY)
+                try:
+                    os.pwrite(fd, body, start)
+                finally:
+                    os.close(fd)
+                return idx
+            except (ClientError, IOError, OSError) as exc:
+                last_exc = exc
+                if attempt < RESUMABLE_RETRIES - 1:
+                    time.sleep(min(60, 2 ** attempt))
+        raise last_exc if last_exc is not None else IOError(f'chunk {idx} failed')
+
+    missing = [i for i in range(n_chunks) if i not in done]
+    if not missing:
+        try:
+            progress_path.unlink()
+        except FileNotFoundError:
+            pass
+        print(_dim(f'  resumable: all {n_chunks} chunks already on disk — skipping download'))
+        return
+
+    print(_dim(
+        f'  resumable download: {size / 1024**3:.1f} GB in {n_chunks} chunks '
+        f'of {RESUMABLE_CHUNK / 1024**2:.0f} MB '
+        f'({len(done)} already done, {len(missing)} to fetch, '
+        f'{RESUMABLE_WORKERS} workers)'
+    ))
+
+    n_completed = len(done)
+    last_report = n_completed
+    with ThreadPoolExecutor(max_workers=RESUMABLE_WORKERS) as ex:
+        futures = {ex.submit(_fetch, i): i for i in missing}
+        try:
+            for fut in as_completed(futures):
+                idx = fut.result()
+                done.add(idx)
+                n_completed += 1
+                # Persist progress every chunk (cheap — small JSON write).
+                progress_path.write_text(json.dumps({
+                    'key':  key,
+                    'size': size,
+                    'done': sorted(done),
+                }))
+                if n_completed - last_report >= 10 or n_completed == n_chunks:
+                    pct = 100 * n_completed / n_chunks
+                    print(_dim(
+                        f'  progress: {n_completed}/{n_chunks} chunks ({pct:.1f}%)'
+                    ))
+                    last_report = n_completed
+        except BaseException:
+            # Any thread failed (or user hit Ctrl-C). Cancel remaining
+            # work, persist the current state, and re-raise so the caller
+            # sees the failure. `.progress` stays on disk → next run
+            # resumes from here.
+            for f in futures:
+                f.cancel()
+            progress_path.write_text(json.dumps({
+                'key':  key,
+                'size': size,
+                'done': sorted(done),
+            }))
+            raise
+
+    if len(done) != n_chunks:
+        raise IOError(
+            f'resumable download incomplete: {len(done)}/{n_chunks} chunks done'
+        )
+    try:
+        progress_path.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def _sha256_file(path: Path) -> str:

@@ -159,13 +159,48 @@ import {$ANTHIVE_HTTP_REDIRECT_SNIPPET:caddy-http-redirect.dev}
 		respond `{"error":"gone","error_description":"The Streamlit dashboard has been removed. Use the per-dataset plot UI at /browse/ instead."}` 410
 	}
 
+	# Custom 404 page assets — must be handled BEFORE the ant-browse
+	# fallback below (which would proxy them to ant-browse and get its
+	# own 404 back). file_server serves them directly from ./webapp.
+	handle /anthive404.png {
+		file_server
+	}
+	handle /404.html {
+		file_server
+	}
+
 	# Fallback — the browser app (ant-browse) owns every remaining path:
 	# /, /browse/*, /genesets*, /about, and the favicon / webmanifest routes
 	# it serves. Previously this was file_server, which 404'd any browser
 	# route not explicitly enumerated above (e.g. /about, /genesets). The app
 	# is the default; static bundles are the handled exceptions, just above.
+	#
+	# handle_response converts any 404 ant-browse returns into a
+	# Caddy-side error, which handle_errors below then renders as our
+	# static 404 page (webapp/404.html + webapp/anthive404.png).
+	# /api/* is intentionally NOT intercepted so API consumers still see
+	# the FastAPI JSON error body.
 	handle {
-		reverse_proxy localhost:{$ANTHIVE_BROWSE_PORT:8081}
+		reverse_proxy localhost:{$ANTHIVE_BROWSE_PORT:8081} {
+			@notfound status 404
+			handle_response @notfound {
+				error 404
+			}
+		}
+	}
+
+	# Central 404 renderer. Catches BOTH:
+	#   - Caddy-generated errors (file_server misses on /jupyter/*,
+	#     /plots/*, /artifacts/*, /report/*, /stlite/*)
+	#   - ant-browse 404s converted to `error 404` in handle_response above
+	handle_errors {
+		@notfound expression `{err.status_code} == 404`
+		handle @notfound {
+			rewrite * /404.html
+			file_server {
+				status 404
+			}
+		}
 	}
 
 	# Enable gzip compression
