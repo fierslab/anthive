@@ -9008,9 +9008,10 @@ def _pseudobulk_compute(
         layer_stats = layer_stats_all.get(layer) if isinstance(layer_stats_all, dict) else None
 
         if layer_stats is None:
-            layer_table = safe_ident(f"__layer__{layer}")
+            # Use the layer view (works for both Parquet-backed and legacy dbs)
+            layer_view = safe_ident(f"layer__{layer}")
             row = conn.execute(
-                f"SELECT MIN(value), MAX(value), MIN(CASE WHEN value > 0 THEN value END) FROM {layer_table}"
+                f"SELECT MIN(value), MAX(value), MIN(CASE WHEN value > 0 THEN value END) FROM {layer_view}"
             ).fetchone() or (0, 0, None)
             layer_stats = {
                 'dtype': 'float',  # we have to guess; treat as float and lean on heuristics
@@ -9055,7 +9056,10 @@ def _pseudobulk_compute(
             where_parts.append(subset_frag)
         where_sql = ' AND '.join(where_parts)
 
-        layer_table = safe_ident(f"__layer__{layer}")
+        # Use the by-gene parquet view for the layer aggregation —
+        # it is sorted by gene_id which makes the GROUP BY gene_name fast.
+        # For legacy in-DuckDB dbs the view backs through __layer__<layer>.
+        layer_table = safe_ident(f"layer__{layer}")
 
         # 1) Group sizes (cells per group, regardless of expression)
         size_select_cols = ', '.join(

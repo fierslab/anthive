@@ -1,0 +1,581 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "duckdb>=0.10.0",
+#   "pandas>=2.0.0",
+#   "numpy>=1.24.0",
+#   "pyyaml>=6.0",
+# ]
+# ///
+"""
+ant-migrate-to-parquet - Migrate existing __layer__* DuckDB tables to Parquet sidecars.
+
+For each .duckdb in the h5adstore that has in-DuckDB __layer__<name> tables:
+  1. Extract each layer to two sorted Parquet sidecars:
+       <stem>.layer.<name>.by_gene.parquet  (sorted by gene_id)
+       <stem>.layer.<name>.by_cell.parquet  (sorted by cell_id)
+  2. Drop the __layer__<name> table and any old layer__<name> view.
+  3. Create two new views over the parquets.
+  4. Verify row counts match before and after.
+
+Coordinates with ant-serve via /admin/release and /admin/restore unless
+--no-coordinate is given.
+
+Usage:
+  ant-migrate-to-parquet [--dry-run] [--only DB_ID] [--skip DB_ID ...]
+                         [--verify-only] [--no-coordinate]
+
+Examples:
+  ant-migrate-to-parquet --dry-run
+  ant-migrate-to-parquet --only SalaFrigerio2019/carlo_mg_raw
+  ant-migrate-to-parquet --verify-only
+"""
+
+import argparse
+import logging
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import duckdb
+import numpy as np
+import pandas as pd
+
+# Add lib directory to Python path
+script_dir = Path(__file__).parent.resolve()
+lib_dir = script_dir.parent.parent / 'lib'
+sys.path.insert(0, str(lib_dir))
+
+from config import get_config
+from h5adstore import iter_h5adstore
+from metadata import parse_md_file, MetadataError
+
+
+PARQUET_ROW_GROUP_SIZE = 1_000_000
+PARQUET_COMPRESSION = 'ZSTD'
+
+
+def _sanitize(key: str) -> str:
+    """Match the sanitization used by ant-convert for layer key → table/view name."""
+    return ''.join(c if c.isalnum() else '_' for c in key)
+
+
+def _fmt_size(num_bytes: int) -> str:
+    for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
+        if num_bytes < 1024 or unit == 'TB':
+            return f'{num_bytes:.1f} {unit}'
+        num_bytes /= 1024
+    return str(num_bytes)
+
+
+def _ant_serve_url(cfg: dict) -> str:
+    host = cfg.get('rest_api_host') or 'localhost'
+    if host in ('0.0.0.0', '::'):
+        host = 'localhost'
+    return f"http://{host}:{cfg.get('rest_api_port', 8080)}"
+
+
+def _admin_post(base_url: str, path: str, timeout: float = 120.0) -> Optional[int]:
+    """POST to an ant-serve /admin endpoint. Returns HTTP status or None on error."""
+    try:
+        req = urllib.request.Request(base_url + path, method='POST')
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
+    except Exception:
+        return None
+
+
+def _release_db(api_url: str, db_id: str) -> None:
+    """Ask ant-serve to release a duckdb before we open it r/w."""
+    quoted = urllib.parse.quote(db_id, safe='/')
+    _admin_post(api_url, f"/admin/release/{quoted}?duration_seconds=3600&drain_timeout_seconds=15")
+
+
+def _restore_db(api_url: str, db_id: str) -> None:
+    """Ask ant-serve to restore a duckdb after we finish writing."""
+    quoted = urllib.parse.quote(db_id, safe='/')
+    _admin_post(api_url, f"/admin/restore/{quoted}")
+
+
+def _layer_parquet_paths(duckdb_path: Path, layer_key: str) -> Tuple[Path, Path]:
+    """Return (by_gene, by_cell) parquet paths for a layer (may not exist yet)."""
+    stem = duckdb_path.stem
+    by_gene = duckdb_path.parent / f"{stem}.layer.{layer_key}.by_gene.parquet"
+    by_cell = duckdb_path.parent / f"{stem}.layer.{layer_key}.by_cell.parquet"
+    return by_gene, by_cell
+
+
+def _list_legacy_layers(conn: duckdb.DuckDBPyConnection) -> List[str]:
+    """Return layer keys for all __layer__<key> tables present in the duckdb.
+
+    Returns the raw key by stripping the '__layer__' prefix.
+    """
+    rows = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '__layer__%'"
+    ).fetchall()
+    return [row[0][len('__layer__'):] for row in rows]
+
+
+def _row_count(conn: duckdb.DuckDBPyConnection, table_or_view: str) -> int:
+    """Return COUNT(*) for a table or view; -1 on error."""
+    try:
+        return conn.execute(f"SELECT COUNT(*) FROM {table_or_view}").fetchone()[0]
+    except Exception:
+        return -1
+
+
+def _migrate_layer(
+    conn: duckdb.DuckDBPyConnection,
+    duckdb_path: Path,
+    layer_key: str,
+    *,
+    dry_run: bool,
+    log: logging.Logger,
+) -> Dict:
+    """Migrate one layer from __layer__<key> table to two Parquet sidecars.
+
+    Returns a dict with:
+      layer_key, rows_before, rows_after, by_gene_size, by_cell_size,
+      success (bool), error (str or None).
+    """
+    safe = _sanitize(layer_key)
+    table_name = f"__layer__{safe}"
+    view_name = f"layer__{safe}"
+    view_by_cell = f"layer__{safe}_by_cell"
+    by_gene_path, by_cell_path = _layer_parquet_paths(duckdb_path, layer_key)
+    staging_path = by_gene_path.parent / (by_gene_path.name + '.staging')
+
+    result: Dict = {
+        'layer_key': layer_key,
+        'rows_before': 0,
+        'rows_after': 0,
+        'by_gene_size': 0,
+        'by_cell_size': 0,
+        'success': False,
+        'error': None,
+    }
+
+    try:
+        rows_before = _row_count(conn, table_name)
+        result['rows_before'] = rows_before
+        log.info(f"  layer '{layer_key}': {rows_before:,} rows in __layer__ table")
+
+        if dry_run:
+            log.info(f"  [dry-run] would write → {by_gene_path.name}, {by_cell_path.name}")
+            result['success'] = True
+            return result
+
+        # Remove any stale partial output
+        for partial in (by_gene_path, by_cell_path, staging_path):
+            if partial.exists():
+                partial.unlink()
+
+        log.info(f"  Exporting by_gene → {by_gene_path.name} …")
+        t0 = time.monotonic()
+        conn.execute(f"""
+            COPY (
+                SELECT cell_id, gene_id, value
+                FROM {table_name}
+                ORDER BY gene_id, cell_id
+            ) TO '{by_gene_path!s}'
+            (FORMAT PARQUET, COMPRESSION {PARQUET_COMPRESSION},
+             ROW_GROUP_SIZE {PARQUET_ROW_GROUP_SIZE})
+        """)
+        log.info(f"    by_gene done in {time.monotonic() - t0:.1f}s  "
+                 f"({_fmt_size(by_gene_path.stat().st_size)})")
+
+        log.info(f"  Exporting by_cell → {by_cell_path.name} …")
+        t0 = time.monotonic()
+        conn.execute(f"""
+            COPY (
+                SELECT cell_id, gene_id, value
+                FROM {table_name}
+                ORDER BY cell_id, gene_id
+            ) TO '{by_cell_path!s}'
+            (FORMAT PARQUET, COMPRESSION {PARQUET_COMPRESSION},
+             ROW_GROUP_SIZE {PARQUET_ROW_GROUP_SIZE})
+        """)
+        log.info(f"    by_cell done in {time.monotonic() - t0:.1f}s  "
+                 f"({_fmt_size(by_cell_path.stat().st_size)})")
+
+        # Verify parquet row counts match
+        n_gene = conn.execute(
+            f"SELECT COUNT(*) FROM read_parquet('{by_gene_path!s}')"
+        ).fetchone()[0]
+        n_cell = conn.execute(
+            f"SELECT COUNT(*) FROM read_parquet('{by_cell_path!s}')"
+        ).fetchone()[0]
+        if n_gene != rows_before or n_cell != rows_before:
+            raise RuntimeError(
+                f"Row count mismatch after export: "
+                f"table={rows_before:,}, by_gene={n_gene:,}, by_cell={n_cell:,}"
+            )
+
+        # Drop the old table and any existing views
+        conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+        conn.execute(f"DROP VIEW IF EXISTS {view_name}")
+        conn.execute(f"DROP VIEW IF EXISTS {view_by_cell}")
+
+        # Create the two new views (absolute paths in the SQL)
+        conn.execute(f"""
+            CREATE VIEW {view_name} AS
+            SELECT c.cell_name, g.gene_name, l.value
+            FROM read_parquet('{by_gene_path.resolve()!s}') l
+            JOIN __cells c ON l.cell_id = c.cell_id
+            JOIN __genes g ON l.gene_id = g.gene_id
+        """)
+        conn.execute(f"""
+            CREATE VIEW {view_by_cell} AS
+            SELECT c.cell_name, g.gene_name, l.value
+            FROM read_parquet('{by_cell_path.resolve()!s}') l
+            JOIN __cells c ON l.cell_id = c.cell_id
+            JOIN __genes g ON l.gene_id = g.gene_id
+        """)
+
+        # Final row count verification via the view
+        rows_after = _row_count(conn, view_name)
+        result['rows_after'] = rows_after
+        result['by_gene_size'] = by_gene_path.stat().st_size
+        result['by_cell_size'] = by_cell_path.stat().st_size
+
+        if rows_after != rows_before:
+            raise RuntimeError(
+                f"View row count mismatch: view={rows_after:,} != table={rows_before:,}"
+            )
+
+        log.info(f"  ✓ layer '{layer_key}': {rows_after:,} rows — "
+                 f"{_fmt_size(result['by_gene_size'] + result['by_cell_size'])} parquet")
+        result['success'] = True
+
+    except Exception as exc:
+        result['error'] = str(exc)
+        log.error(f"  ✗ layer '{layer_key}': {exc}")
+        # Remove partial outputs on failure
+        for partial in (by_gene_path, by_cell_path, staging_path):
+            if partial.exists():
+                partial.unlink()
+
+    return result
+
+
+def _verify_dataset(duckdb_path: Path, layers_include: List[str],
+                    log: logging.Logger) -> bool:
+    """Verify Parquet sidecars and views exist for all expected layers.
+
+    Returns True if all checks pass.
+    """
+    all_ok = True
+    try:
+        conn = duckdb.connect(str(duckdb_path), read_only=True)
+    except Exception as exc:
+        log.error(f"  Cannot open {duckdb_path.name}: {exc}")
+        return False
+
+    try:
+        views = set(row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='view'"
+        ).fetchall())
+
+        for layer_key in layers_include:
+            safe = _sanitize(layer_key)
+            by_gene, by_cell = _layer_parquet_paths(duckdb_path, layer_key)
+            view_name = f"layer__{safe}"
+            view_by_cell = f"layer__{safe}_by_cell"
+
+            ok = True
+            if not by_gene.exists():
+                log.error(f"  MISSING: {by_gene.name}")
+                ok = False
+            if not by_cell.exists():
+                log.error(f"  MISSING: {by_cell.name}")
+                ok = False
+            if view_name not in views:
+                log.error(f"  MISSING view: {view_name}")
+                ok = False
+            if view_by_cell not in views:
+                log.error(f"  MISSING view: {view_by_cell}")
+                ok = False
+
+            if ok and by_gene.exists() and by_cell.exists():
+                try:
+                    n_gene = conn.execute(
+                        f"SELECT COUNT(*) FROM read_parquet('{by_gene!s}')"
+                    ).fetchone()[0]
+                    n_cell = conn.execute(
+                        f"SELECT COUNT(*) FROM read_parquet('{by_cell!s}')"
+                    ).fetchone()[0]
+                    if n_gene != n_cell:
+                        log.error(f"  ROW COUNT MISMATCH: {layer_key} "
+                                  f"by_gene={n_gene:,} by_cell={n_cell:,}")
+                        ok = False
+                    else:
+                        log.info(f"  ✓ {layer_key}: {n_gene:,} rows, both parquets match")
+                except Exception as exc:
+                    log.error(f"  ERROR reading parquet for {layer_key}: {exc}")
+                    ok = False
+
+            # Check no legacy __layer__ table remains
+            has_table = conn.execute(
+                f"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+                [f"__layer__{safe}"],
+            ).fetchone()[0]
+            if has_table:
+                log.warning(f"  WARN: legacy __layer__{safe} table still present")
+
+            if not ok:
+                all_ok = False
+
+    finally:
+        conn.close()
+
+    return all_ok
+
+
+def migrate_dataset(
+    duckdb_path: Path,
+    layers_include: List[str],
+    db_id: str,
+    *,
+    dry_run: bool,
+    verify_only: bool,
+    coordinate: bool,
+    api_url: str,
+    log: logging.Logger,
+) -> bool:
+    """Run the full migration for one dataset. Returns True on success."""
+    log.info(f"\n{'='*60}")
+    log.info(f"Dataset: {db_id}")
+    log.info(f"DuckDB:  {duckdb_path}")
+
+    if verify_only:
+        log.info("Mode: verify-only (no writes)")
+        ok = _verify_dataset(duckdb_path, layers_include, log)
+        log.info(f"  {'PASS' if ok else 'FAIL'}")
+        return ok
+
+    # Check which layers still have the legacy __layer__ table
+    try:
+        conn_ro = duckdb.connect(str(duckdb_path), read_only=True)
+        legacy_layers = _list_legacy_layers(conn_ro)
+        conn_ro.close()
+    except Exception as exc:
+        log.error(f"  Cannot open (r/o) {duckdb_path.name}: {exc}")
+        return False
+
+    # Filter to layers that are in layers_include AND still have a legacy table
+    to_migrate = [lk for lk in layers_include if lk in legacy_layers
+                  or _sanitize(lk) in legacy_layers]
+
+    if not to_migrate:
+        log.info("  All layers already Parquet-backed — nothing to do")
+        return True
+
+    log.info(f"  Layers to migrate: {to_migrate}")
+
+    if dry_run:
+        log.info(f"  [dry-run] would migrate {len(to_migrate)} layer(s) to Parquet")
+        return True
+
+    # Coordinate with ant-serve: release before opening r/w.
+    # We retry the open with exponential backoff to handle the drain window.
+    if coordinate and db_id:
+        log.info("  Releasing from ant-serve …")
+        _release_db(api_url, db_id)
+        time.sleep(1.0)
+
+    success = True
+    # Retry the r/w open — ant-serve's drain_timeout may need a few seconds
+    conn = None
+    for retry_delay in (0, 2, 5, 10, 20):
+        if retry_delay > 0:
+            log.info(f"  Retrying open in {retry_delay}s …")
+            time.sleep(retry_delay)
+        try:
+            conn = duckdb.connect(str(duckdb_path), read_only=False)
+            break
+        except Exception as exc:
+            last_exc = exc
+    if conn is None:
+        log.error(f"  Cannot open r/w {duckdb_path.name}: {last_exc}")
+        if coordinate and db_id:
+            _restore_db(api_url, db_id)
+        return False
+
+    try:
+        for layer_key in to_migrate:
+            result = _migrate_layer(conn, duckdb_path, layer_key,
+                                    dry_run=dry_run, log=log)
+            if not result['success']:
+                success = False
+
+        if success:
+            conn.execute("VACUUM")
+            conn.execute("CHECKPOINT")
+            log.info("  VACUUMED + CHECKPOINT")
+
+    finally:
+        conn.close()
+        if coordinate and db_id:
+            log.info("  Restoring to ant-serve …")
+            _restore_db(api_url, db_id)
+
+    return success
+
+
+def _setup_log(log_path: Path) -> logging.Logger:
+    """Configure a logger that writes to both stdout and a file."""
+    logger = logging.getLogger('migrate')
+    logger.setLevel(logging.DEBUG)
+    fmt = logging.Formatter('%(asctime)s %(levelname)s %(message)s',
+                            datefmt='%H:%M:%S')
+
+    # Console handler
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(logging.DEBUG)
+    ch.setFormatter(fmt)
+    logger.addHandler(ch)
+
+    # File handler
+    fh = logging.FileHandler(str(log_path), mode='a')
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(fmt)
+    logger.addHandler(fh)
+
+    return logger
+
+
+def main() -> None:
+    """Main entry point."""
+    parser = argparse.ArgumentParser(
+        description='Migrate __layer__* DuckDB tables to Parquet sidecars',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument(
+        '--data-folder', default='./data/h5adstore',
+        help='Root of the h5adstore (default: ./data/h5adstore)',
+    )
+    parser.add_argument(
+        '--dry-run', action='store_true',
+        help='Report what would be migrated; no writes.',
+    )
+    parser.add_argument(
+        '--only', metavar='DB_ID',
+        help='Migrate only this dataset (e.g. SalaFrigerio2019/carlo_mg_raw).',
+    )
+    parser.add_argument(
+        '--skip', metavar='DB_ID', nargs='+', default=[],
+        help='Exclude these dataset(s) from migration.',
+    )
+    parser.add_argument(
+        '--verify-only', action='store_true',
+        help='Check that parquet sidecars exist and row counts match; no writes.',
+    )
+    parser.add_argument(
+        '--no-coordinate', action='store_true',
+        help='Skip ant-serve release/restore coordination. Use when the server is down.',
+    )
+    parser.add_argument(
+        '--ant-serve-url', default=None,
+        help='Override ant-serve URL (default: read from anthive.yaml)',
+    )
+
+    args = parser.parse_args()
+    data_folder = Path(args.data_folder).resolve()
+
+    if not data_folder.exists():
+        print(f"ERROR: data folder not found: {data_folder}", file=sys.stderr)
+        sys.exit(1)
+
+    # Set up logging
+    log_dir = Path.cwd() / 'tmp'
+    log_dir.mkdir(exist_ok=True)
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_path = log_dir / f"migrate-to-parquet-{ts}.log"
+    log = _setup_log(log_path)
+
+    cfg = get_config()
+    api_url = args.ant_serve_url or (
+        f"http://{cfg.get('rest_api_host', 'localhost')}:{cfg.get('rest_api_port', 8080)}"
+    )
+    coordinate = not args.no_coordinate
+
+    skip_set = set(args.skip)
+
+    log.info(f"ant-migrate-to-parquet  started {datetime.now().isoformat()}")
+    log.info(f"  data_folder = {data_folder}")
+    log.info(f"  dry_run     = {args.dry_run}")
+    log.info(f"  verify_only = {args.verify_only}")
+    log.info(f"  coordinate  = {coordinate}")
+    log.info(f"  log         = {log_path}")
+
+    total = succeeded = skipped = failed = 0
+
+    for entry in iter_h5adstore(data_folder):
+        duckdb_path = entry.duckdb_path
+        if not duckdb_path.exists():
+            continue
+
+        # H5adEntry already carries the canonical ant-serve db_id
+        db_id = entry.db_id  # e.g. 'SF9/CMR'
+        # Also derive a human-readable path-based id for --only matching
+        try:
+            rel = duckdb_path.relative_to(data_folder)
+            path_db_id = str(rel.with_suffix(''))  # e.g. 'SalaFrigerio2019/carlo_mg_raw'
+        except ValueError:
+            path_db_id = duckdb_path.stem
+
+        # Accept both catalog db_id (SF9/CMR) and path-based id for --only
+        if args.only and args.only not in (db_id, path_db_id):
+            continue
+        if db_id in skip_set or path_db_id in skip_set:
+            log.info(f"Skipping {db_id} (--skip)")
+            skipped += 1
+            continue
+
+        # Read layers_include from metadata
+        md_path = entry.md_path
+        try:
+            metadata, _ = parse_md_file(md_path)
+            layers_include = metadata.get('layers_include', [])
+        except (MetadataError, Exception) as exc:
+            log.warning(f"Cannot read metadata for {db_id}: {exc} — skipping")
+            skipped += 1
+            continue
+
+        if not layers_include:
+            log.info(f"Skipping {db_id}: no layers_include")
+            skipped += 1
+            continue
+
+        total += 1
+        ok = migrate_dataset(
+            duckdb_path, layers_include, db_id,
+            dry_run=args.dry_run,
+            verify_only=args.verify_only,
+            coordinate=coordinate,
+            api_url=api_url,
+            log=log,
+        )
+        if ok:
+            succeeded += 1
+        else:
+            failed += 1
+
+    log.info(f"\n{'='*60}")
+    log.info(f"Summary: total={total}, succeeded={succeeded}, "
+             f"failed={failed}, skipped={skipped}")
+    log.info(f"Log: {log_path}")
+
+    sys.exit(1 if failed else 0)
+
+
+if __name__ == '__main__':
+    main()

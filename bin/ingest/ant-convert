@@ -294,7 +294,7 @@ def convert_h5ad_to_duckdb(h5ad_path: Path, config: Dict[str, Any],
         # Convert layers
         print(f"\n[4/7] Converting layers...")
         if metadata.get('layers_include'):
-            convert_layers(conn, adata, metadata, config)
+            convert_layers(conn, adata, metadata, config, h5ad_path)
         else:
             print("  (no layers to convert)")
 
@@ -375,6 +375,16 @@ def convert_h5ad_to_duckdb(h5ad_path: Path, config: Dict[str, Any],
             print(f"\nRemoving partial database: {duckdb_path}", file=sys.stderr)
             duckdb_path.unlink()
 
+        # Also remove any partially-written parquet sidecars
+        base_stem = h5ad_path.stem
+        for partial in h5ad_path.parent.glob(f"{base_stem}.layer.*"):
+            if partial.suffix == '.parquet' or partial.name.endswith('.parquet'):
+                try:
+                    partial.unlink()
+                    print(f"Removing partial parquet: {partial.name}", file=sys.stderr)
+                except FileNotFoundError:
+                    pass
+
         raise ConversionError(str(error))
 
     finally:
@@ -453,11 +463,33 @@ def create_gene_index(conn: duckdb.DuckDBPyConnection, adata) -> None:
     conn.execute("CREATE VIEW genes AS SELECT * FROM __genes")
 
 
-def convert_layers(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict, config: Dict) -> None:
-    """Convert expression layers using chunked processing"""
+def convert_layers(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict,
+                   config: Dict, h5ad_path: Path) -> None:
+    """Write each expression layer to two Parquet sidecars sorted by gene_id and cell_id.
+
+    Replaces the old in-DuckDB __layer__<name> table approach with external
+    Parquet files for dramatically smaller storage and faster ingest on large
+    datasets. Two files per layer are created:
+      <name>.layer.<layer>.by_gene.parquet  — sorted by gene_id (gene-filter queries)
+      <name>.layer.<layer>.by_cell.parquet  — sorted by cell_id (cell-filter queries)
+
+    Both have schema: (cell_id INTEGER, gene_id INTEGER, value FLOAT or dtype-matched).
+    DuckDB views over these files are created inside the .duckdb so queries are
+    transparent to callers.
+
+    Args:
+        conn: Open DuckDB connection (read-write).
+        adata: AnnData object.
+        metadata: Dataset metadata dict (contains layers_include, layer_description).
+        config: Config dict (contains melt_chunk_size).
+        h5ad_path: Absolute path to the .h5ad file; parquets are written as siblings.
+    """
     layers_include = metadata['layers_include']
     chunk_size = config['melt_chunk_size']
     layer_description = metadata.get('layer_description', {})
+
+    # Base path for sidecar files — siblings of the .h5ad, strip the .h5ad suffix.
+    base_path = h5ad_path.parent / h5ad_path.stem
 
     for layer_key in layers_include:
         # Get layer data
@@ -472,22 +504,48 @@ def convert_layers(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict, confi
                 continue
             layer_data = adata.layers[layer_key]
 
-        # Use layer key for table name (not description)
         safe_layer_key = sanitize_identifier(layer_key)
         print(f"  layer__{layer_key} ({layer_description.get(layer_key, layer_key)}):")
         start_time = time.time()
 
-        # Create table
+        # Determine value dtype from source to preserve precision (counts as int, X as float)
+        if scipy.sparse.issparse(layer_data):
+            src_dtype = layer_data.dtype
+        else:
+            src_dtype = np.array(layer_data).dtype
+        # Use float32 for float layers, preserve integer type for count layers
+        if np.issubdtype(src_dtype, np.integer):
+            value_dtype = src_dtype
+        else:
+            value_dtype = np.float32
+
+        # Staging table in the duckdb itself — DuckDB handles spill-to-disk
+        # so this approach is memory-safe for large datasets. We INSERT chunks
+        # as we process them, then use COPY TO for two sorted parquets.
+        staging_table = f"__staging_layer_{safe_layer_key}"
+        by_gene_path = base_path.parent / f"{base_path.name}.layer.{layer_key}.by_gene.parquet"
+        by_cell_path = base_path.parent / f"{base_path.name}.layer.{layer_key}.by_cell.parquet"
+
+        # Determine DuckDB SQL type for the value column
+        if np.issubdtype(value_dtype, np.integer):
+            sql_value_type = "BIGINT"
+        else:
+            sql_value_type = "FLOAT"
+
+        # Clean up any previous partial files and staging table
+        for partial in (by_gene_path, by_cell_path):
+            if partial.exists():
+                partial.unlink()
+        conn.execute(f"DROP TABLE IF EXISTS {staging_table}")
+
         conn.execute(f"""
-            CREATE TABLE __layer__{safe_layer_key} (
+            CREATE TEMP TABLE {staging_table} (
                 cell_id INTEGER NOT NULL,
                 gene_id INTEGER NOT NULL,
-                value FLOAT NOT NULL,
-                PRIMARY KEY (cell_id, gene_id)
+                value {sql_value_type} NOT NULL
             )
         """)
 
-        # Process in chunks
         num_cells = adata.n_obs
         num_genes = adata.n_vars
         total_nonzero = 0
@@ -497,61 +555,95 @@ def convert_layers(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict, confi
             chunk_end = min(chunk_start + chunk_size, num_cells)
             chunk_count += 1
 
-            # Load chunk
             chunk_data = layer_data[chunk_start:chunk_end, :]
 
-            # Convert to COO format if needed
             if scipy.sparse.issparse(chunk_data):
                 chunk_coo = chunk_data.tocoo()
             else:
                 chunk_coo = scipy.sparse.coo_matrix(chunk_data)
 
-            # Create dataframe with integer indices
-            # Adjust row indices by chunk_start
-            melted = pd.DataFrame({
-                'cell_id': chunk_coo.row + chunk_start,
-                'gene_id': chunk_coo.col,
-                'value': chunk_coo.data
-            })
+            if chunk_coo.nnz == 0:
+                del chunk_data, chunk_coo
+                gc.collect()
+                continue
 
-            # Remove zeros (safety check)
+            melted = pd.DataFrame({
+                'cell_id': (chunk_coo.row + chunk_start).astype(np.int32),
+                'gene_id': chunk_coo.col.astype(np.int32),
+                'value': chunk_coo.data.astype(value_dtype),
+            })
+            # Safety: drop explicit zeros
             melted = melted[melted['value'] != 0]
             total_nonzero += len(melted)
 
-            # Insert into database
             if len(melted) > 0:
-                melted = normalize_dataframe_dtypes(melted)
-                conn.register('temp_layer', melted)
-                conn.execute(f"INSERT INTO __layer__{safe_layer_key} SELECT * FROM temp_layer")
-                conn.unregister('temp_layer')
+                conn.register('_chunk', melted)
+                conn.execute(f"INSERT INTO {staging_table} SELECT * FROM _chunk")
+                conn.unregister('_chunk')
 
-            # Free memory
             del chunk_data, chunk_coo, melted
             gc.collect()
 
-        print(f"    Processed {chunk_count} chunks, {total_nonzero:,} non-zero values")
+        if total_nonzero == 0:
+            print(f"  ⚠ Layer '{layer_key}' is all zeros — creating empty parquets")
+            conn.execute(f"""
+                COPY (SELECT * FROM {staging_table} ORDER BY gene_id, cell_id)
+                TO '{by_gene_path!s}'
+                (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 1000000)
+            """)
+            conn.execute(f"""
+                COPY (SELECT * FROM {staging_table} ORDER BY cell_id, gene_id)
+                TO '{by_cell_path!s}'
+                (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 1000000)
+            """)
+        else:
+            print(f"    Processed {chunk_count} chunks, {total_nonzero:,} non-zero values")
+            print(f"    Sorting by gene_id → {by_gene_path.name}")
+            # DuckDB COPY handles arbitrary sizes via spill-to-disk
+            conn.execute(f"""
+                COPY (
+                    SELECT cell_id, gene_id, value
+                    FROM {staging_table}
+                    ORDER BY gene_id, cell_id
+                ) TO '{by_gene_path!s}'
+                (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 1000000)
+            """)
+            print(f"    Sorting by cell_id → {by_cell_path.name}")
+            conn.execute(f"""
+                COPY (
+                    SELECT cell_id, gene_id, value
+                    FROM {staging_table}
+                    ORDER BY cell_id, gene_id
+                ) TO '{by_cell_path!s}'
+                (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 1000000)
+            """)
 
-        # Create gene index (cell index omitted — not used by query patterns)
-        conn.execute(f"CREATE INDEX idx_layer_{safe_layer_key}_gene ON __layer__{safe_layer_key}(gene_id)")
+        conn.execute(f"DROP TABLE IF EXISTS {staging_table}")
 
-        # Create view
+        # Register views over the two parquets (absolute paths required so
+        # the view works regardless of the cwd when duckdb is opened later).
         conn.execute(f"""
             CREATE VIEW layer__{safe_layer_key} AS
-            SELECT
-                c.cell_name,
-                g.gene_name,
-                l.value
-            FROM __layer__{safe_layer_key} l
+            SELECT c.cell_name, g.gene_name, l.value
+            FROM read_parquet('{by_gene_path.resolve()!s}') l
+            JOIN __cells c ON l.cell_id = c.cell_id
+            JOIN __genes g ON l.gene_id = g.gene_id
+        """)
+        conn.execute(f"""
+            CREATE VIEW layer__{safe_layer_key}_by_cell AS
+            SELECT c.cell_name, g.gene_name, l.value
+            FROM read_parquet('{by_cell_path.resolve()!s}') l
             JOIN __cells c ON l.cell_id = c.cell_id
             JOIN __genes g ON l.gene_id = g.gene_id
         """)
 
-        # Calculate sparsity
         total_elements = num_cells * num_genes
-        sparsity = (1 - total_nonzero / total_elements) * 100
-
+        sparsity = (1 - total_nonzero / total_elements) * 100 if total_elements > 0 else 0.0
+        by_gene_size = by_gene_path.stat().st_size if by_gene_path.exists() else 0
+        by_cell_size = by_cell_path.stat().st_size if by_cell_path.exists() else 0
         total_time = time.time() - start_time
-        print(f"  ✓ {layer_key}: {total_nonzero:,} values, {sparsity:.1f}% sparse, {total_time:.1f}s")
+        print(f"  ✓ {layer_key}: {total_nonzero:,} values, {sparsity:.1f}% sparse, "
+              f"{total_time:.1f}s  ({format_size(by_gene_size + by_cell_size)} parquet)")
 
 
 def convert_observations(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict) -> None:

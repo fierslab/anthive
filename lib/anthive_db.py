@@ -1037,6 +1037,36 @@ class AnthiveDB:
 
         return results
 
+    def _layer_source_for_gene_filter(self, layer: str) -> str:
+        """Return the SQL table/view/parquet expression best suited for a gene-filter query.
+
+        For Parquet-backed datasets the by-gene parquet is sorted by gene_id, making
+        gene-filter queries 4-100× faster than the by-cell ordering.  For legacy
+        in-DuckDB datasets we return the ``__layer__<safe>`` table name directly so
+        callers that do ``WHERE gene_id IN (...)`` continue to work.
+
+        The rule is conservative: if we cannot find a Parquet sidecar, we fall
+        back to the old ``__layer__`` table so this helper is safe to call from
+        any context.
+
+        Args:
+            layer: Layer key (e.g. 'X', 'counts').
+
+        Returns:
+            A SQL expression suitable for use in ``FROM <expr>``, either a
+            ``read_parquet('...')`` call (Parquet-backed) or a quoted table name
+            (legacy).
+        """
+        safe = ''.join(c if c.isalnum() else '_' for c in layer)
+        if self.db_path is not None:
+            db_path = Path(self.db_path)
+            stem = db_path.stem
+            by_gene = db_path.parent / f"{stem}.layer.{layer}.by_gene.parquet"
+            if by_gene.exists():
+                return f"read_parquet('{by_gene.resolve()!s}')"
+        # Fallback: legacy in-DuckDB table
+        return f'"__layer__{safe}"'
+
     def score_module(
         self,
         module_genes: List[str],
@@ -1079,7 +1109,9 @@ class AnthiveDB:
             )
 
         gene_id_list = ', '.join(str(found_map[g]) for g in genes_found)
-        layer_table = safe_ident(f"__layer__{layer}")
+        # score_module is always a gene-centric query (filter by gene_id) so
+        # we use the by-gene view for Parquet-backed datasets.
+        layer_source = self._layer_source_for_gene_filter(layer)
 
         # Count control genes that will be selected
         n_control_genes = self._conn.execute(f"""
@@ -1122,17 +1154,17 @@ class AnthiveDB:
                 SELECT COUNT(*) AS n FROM control
             ),
             module_avg AS (
-                -- SUM/n_genes (not AVG) because sparse table omits zeros
+                -- SUM/n_genes (not AVG) because sparse storage omits zeros
                 SELECT cell_id,
                        SUM(value) / {len(genes_found)}.0 AS m
-                FROM {layer_table}
+                FROM {layer_source}
                 WHERE gene_id IN ({gene_id_list})
                 GROUP BY cell_id
             ),
             control_avg AS (
                 SELECT cell_id,
                        SUM(value) / (SELECT n FROM n_control_total)::DOUBLE AS c
-                FROM {layer_table}
+                FROM {layer_source}
                 WHERE gene_id IN (SELECT gene_id FROM control)
                 GROUP BY cell_id
             )

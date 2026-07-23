@@ -254,11 +254,20 @@ def _has_de(con: duckdb.DuckDBPyConnection) -> bool:
 
 
 def _has_layer(con: duckdb.DuckDBPyConnection, layer: str) -> bool:
-    n = con.execute(
-        "SELECT count(*) FROM information_schema.tables WHERE table_name=?",
-        [f'__layer__{layer}'],
+    """Return True if the layer is accessible via its view or legacy table."""
+    safe = ''.join(c if c.isalnum() else '_' for c in layer)
+    # New Parquet-backed datasets expose a view; legacy ones have a table.
+    n_view = con.execute(
+        "SELECT count(*) FROM information_schema.tables WHERE table_name=? AND table_type='VIEW'",
+        [f'layer__{safe}'],
     ).fetchone()[0]
-    return bool(n)
+    if n_view:
+        return True
+    n_table = con.execute(
+        "SELECT count(*) FROM information_schema.tables WHERE table_name=?",
+        [f'__layer__{safe}'],
+    ).fetchone()[0]
+    return bool(n_table)
 
 
 def _de_studies(con: duckdb.DuckDBPyConnection,
@@ -275,18 +284,41 @@ def _de_studies(con: duckdb.DuckDBPyConnection,
     return [{'study_id': r[0], 'target': r[1] or 'gene'} for r in rows]
 
 
+def _layer_source(con: duckdb.DuckDBPyConnection, layer: str,
+                  db_path: 'Path | None' = None) -> str:
+    """Return SQL table/parquet expression for joining against (cell_id, gene_id, value).
+
+    Prefers the by-gene Parquet sidecar (sorted by gene_id) for the AVG
+    aggregation; falls back to the legacy ``__layer__<layer>`` table.
+
+    The view (``layer__<safe>``) joins __cells/__genes and exposes cell_name /
+    gene_name — we need the raw integer IDs here, so we bypass the view.
+    """
+    safe = ''.join(c if c.isalnum() else '_' for c in layer)
+    if db_path is not None:
+        by_gene = db_path.parent / f"{db_path.stem}.layer.{layer}.by_gene.parquet"
+        if by_gene.exists():
+            return f"read_parquet('{by_gene.resolve()!s}')"
+    return f"__layer__{safe}"
+
+
 def _compute_gene_means(
     con: duckdb.DuckDBPyConnection, layer: str,
+    db_path: 'Path | None' = None,
 ) -> int:
     """Materialise a temp table `_gene_means(gene_id, base_mean)` covering
-    every gene in __genes (zero for genes absent from __layer__<layer>).
+    every gene in __genes (zero for genes absent from the layer).
 
     Layer storage is sparse — only non-zero values are stored. Mean per
     gene = SUM(value) / n_cells (zeros count toward the denominator).
 
+    Works for both Parquet-backed layers (db_path is provided and by-gene
+    parquet exists) and legacy in-DuckDB layers.
+
     Returns the count of genes for which a mean was computed.
     """
     n_cells = con.execute("SELECT count(*) FROM __cells").fetchone()[0]
+    layer_src = _layer_source(con, layer, db_path)
     con.execute("DROP TABLE IF EXISTS _gene_means")
     con.execute(f"""
         CREATE TEMP TABLE _gene_means AS
@@ -294,7 +326,7 @@ def _compute_gene_means(
             g.gene_id,
             COALESCE(SUM(l.value), 0.0) / {n_cells}::DOUBLE AS base_mean
         FROM __genes g
-        LEFT JOIN __layer__{layer} l USING (gene_id)
+        LEFT JOIN {layer_src} l USING (gene_id)
         GROUP BY g.gene_id
     """)
     return con.execute("SELECT count(*) FROM _gene_means").fetchone()[0]
@@ -445,7 +477,7 @@ def main() -> int:
             if not _has_de(con):
                 continue
             if not _has_layer(con, args.layer):
-                _eprint(f"  skip {label}: no __layer__{args.layer}")
+                _eprint(f"  skip {label}: no layer '{args.layer}' (neither view nor __layer__ table)")
                 continue
             studies = _de_studies(con, args.study_id)
             if not studies:
@@ -495,7 +527,7 @@ def main() -> int:
 
         try:
             t0 = time.monotonic()
-            n_genes = _compute_gene_means(con, args.layer)
+            n_genes = _compute_gene_means(con, args.layer, db_path=path)
             print(f"  computed mean({args.layer}) for {n_genes} genes "
                   f"in {time.monotonic() - t0:.1f}s")
             for s in studies:

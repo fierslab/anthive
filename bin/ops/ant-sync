@@ -43,14 +43,20 @@ from metadata import get_priority, parse_md_file, PRIORITY_DEFAULT  # noqa: E402
 # doc/DESIGN_var_and_de.md). It does NOT round-trip into the h5ad, so it
 # lives alongside the h5ad and is shipped to S3 as part of the source-of-
 # truth set (alongside .h5ad). It's also pulled back by default.
+# .layer.*.by_gene.parquet / .layer.*.by_cell.parquet are the new Parquet-
+# backed expression layer sidecars (derived from .h5ad, treated like .duckdb:
+# evictable/rebuildable, not pulled by default).
 SYNC_EXTENSIONS      = {'.h5ad', '.duckdb', '.de.parquet', '.scores.parquet',
+                        # Parquet-backed expression layers (two files per layer,
+                        # matched via endswith since they contain multi-dot names
+                        # like '.layer.X.by_gene.parquet').
+                        '.by_gene.parquet', '.by_cell.parquet',
                         # Fleet-wide summary tables at repo root — one
                         # file per resource; specific-name allow.
                         'module_variability.parquet'}
-# Pull defaults to .h5ad + .de.parquet. .duckdb is derived (rebuilt
-# locally via `ant-build-all` — which auto-re-ingests the .de.parquet
-# sidecar). Use `pull --include-duckdb` to override (e.g., disaster
-# recovery where rebuilding everything would be expensive).
+# Pull defaults to .h5ad + .de.parquet. .duckdb and .layer.*.parquet sidecars
+# are derived (rebuilt locally via `ant-build-all`). Use `pull --include-duckdb`
+# to override for disaster recovery.
 PULL_DEFAULT_EXTS    = {'.h5ad', '.de.parquet', '.scores.parquet',
                         'module_variability.parquet'}
 SKIP_SUFFIXES        = {'.wal', '.deleted', '.partial'}
@@ -136,9 +142,19 @@ def _local_files(
         rel = str(path.relative_to(data_folder))
         if not _is_syncable(rel, allowed_exts):
             continue
-        # Never push a .duckdb whose dataset is marked inactive
+        # Never push a .duckdb or layer parquet whose dataset is marked inactive
         if path.suffix == '.duckdb' and path.with_suffix('.inactive').exists():
             continue
+        # Layer parquets inherit the inactivity of their parent dataset.
+        # e.g. foo.layer.X.by_gene.parquet → foo.inactive
+        if rel.endswith('.by_gene.parquet') or rel.endswith('.by_cell.parquet'):
+            # Derive the base stem by stripping from the first '.layer.' segment
+            import re as _re
+            base_match = _re.match(r'^(.*?)\.layer\..+\.parquet$', path.name)
+            if base_match:
+                inactive_sidecar = path.parent / (base_match.group(1) + '.inactive')
+                if inactive_sidecar.exists():
+                    continue
         if filter_pattern and not fnmatch.fnmatch(rel, filter_pattern):
             continue
         results.append((path, rel))
