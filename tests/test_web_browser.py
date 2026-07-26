@@ -729,6 +729,16 @@ def test_dataset_view_renders(client):
     assert "markdown" in resp.text.lower()
 
 
+def test_dataset_view_downloads_section(client):
+    # Downloads section: client fetches /files and links to /download/{kind}
+    # (presigned S3 or streamed local).
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    assert 'id="ds-files"' in resp.text
+    assert "/files" in resp.text
+    assert "/download/" in resp.text
+
+
 def test_dataset_view_nested_path_id(client):
     # {dataset_browse_id:path} must accept multi-segment ids
     resp = client.get("/browse/GroupA/sub/ds4")

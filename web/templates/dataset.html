@@ -463,6 +463,11 @@
 </div>
 {% endif %}
 
+<!-- Downloads — the raw stored files for this dataset (h5ad + duckdb + sidecars). -->
+<h2>Downloads
+  <span class="info" title="The raw stored files behind this dataset. h5ad = the source AnnData (raw + log-norm expression); duckdb = the served database; sidecars = module scores / annotation. S3-hosted files download straight from object storage; large files can take a while.">ⓘ</span></h2>
+<div id="ds-files" class="muted" style="font-size:12px;padding:2px 0">loading files…</div>
+
 <!-- Resources — programmatic entry points for this dataset. -->
 <h2>Resources</h2>
 <div style="padding:4px 0;display:flex;gap:14px;flex-wrap:wrap;font-size:12px;align-items:center">
@@ -604,6 +609,38 @@ document.addEventListener('DOMContentLoaded', function() {
         // survives the navigation); GET /obs_top renders the most-plotted columns
         // as a row above the curated favourites. No-ops until the endpoints exist.
         var apiBase = '/api/databases/' + DB_ID.split('/').map(encodeURIComponent).join('/');
+
+        // ── Downloads: raw stored files (h5ad + duckdb + sidecars) ──────────
+        // GET /files lists what exists; each links to /download/{kind}, which
+        // 307-redirects to a presigned S3 URL (browser pulls straight from
+        // object storage) or streams a local file. No-op if nothing available.
+        (function loadFiles() {
+            var box = document.getElementById('ds-files');
+            if (!box) return;
+            var KINDS = { h5ad: 'raw AnnData (.h5ad)', duckdb: 'served database (.duckdb)',
+                          scores: 'module scores (.scores.parquet)', mus: 'annotation sidecar (.h5ad.mus)' };
+            function fmtSize(n) {
+                if (n == null) return '';
+                var u = ['B', 'KB', 'MB', 'GB', 'TB'], i = 0;
+                while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+                return (n >= 100 || i === 0 ? n.toFixed(0) : n.toFixed(1)) + ' ' + u[i];
+            }
+            function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+            fetch(apiBase + '/files', { credentials: 'same-origin' })
+                .then(function (r) { return r.ok ? r.json() : null; })
+                .then(function (d) {
+                    var files = (d && d.files) || [];
+                    if (!files.length) { box.textContent = 'No downloadable files for this dataset.'; return; }
+                    box.innerHTML = files.map(function (f) {
+                        var label = KINDS[f.kind] || f.kind;
+                        return '<div style="padding:2px 0"><a href="' + apiBase + '/download/' + encodeURIComponent(f.kind) + '" download>⬇ ' + esc(label) + '</a>'
+                            + ' <span class="muted-2" style="font-size:11px">' + fmtSize(f.size_bytes)
+                            + ' · ' + esc(f.filename) + (f.source === 's3' ? ' · object storage' : '') + '</span></div>';
+                    }).join('');
+                })
+                .catch(function () { box.textContent = ''; });
+        })();
+
         function trackClick(href) {
             try {
                 var col = new URL(href, location.origin).searchParams.get('x');

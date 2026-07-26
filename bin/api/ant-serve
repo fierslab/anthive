@@ -612,14 +612,94 @@ class DatabaseRegistry:
 
     def _s3_key_exists(self, s3_client, duckdb_rel: Path) -> bool:
         """Return True if the S3 object exists (HEAD request)"""
+        return self._s3_head_size(s3_client, duckdb_rel) is not None
+
+    def _s3_head_size(self, s3_client, rel: Path) -> Optional[int]:
+        """ContentLength of an S3 object (relative key), or None if absent."""
         bucket = self._s3_config['bucket']
         prefix = (self._s3_config.get('prefix') or '').strip('/')
-        key = f"{prefix}/{duckdb_rel}" if prefix else str(duckdb_rel)
+        key = f"{prefix}/{rel}" if prefix else str(rel)
         try:
-            s3_client.head_object(Bucket=bucket, Key=key)
-            return True
+            resp = s3_client.head_object(Bucket=bucket, Key=key)
+            return int(resp['ContentLength'])
         except Exception:
-            return False
+            return None
+
+    # ── downloadable stored ("static") artifacts ───────────────────────────
+    # Per-dataset files that live in the store: the raw .h5ad, the served
+    # .duckdb, and sidecars. Exposed for download to anyone who can see the
+    # dataset (download == catalog visibility). Preferred delivery is a
+    # presigned S3 URL (browser pulls straight from object storage, no proxy);
+    # local-only files fall back to a streamed FileResponse. Keys derive from
+    # the dataset's rel_path base (recorded during the scan as the .duckdb path).
+    _ARTIFACT_SUFFIXES = {
+        'h5ad':   '.h5ad',
+        'duckdb': '.duckdb',
+        'scores': '.scores.parquet',
+        'mus':    '.h5ad.mus',
+    }
+
+    def _artifact_rel(self, db_id: str, kind: str) -> Optional[Path]:
+        suffix = self._ARTIFACT_SUFFIXES.get(kind)
+        extra = self._db_extra.get(db_id)
+        if suffix is None or not extra or not extra.get('rel_path'):
+            return None
+        base = Path(extra['rel_path'])
+        if base.suffix == '.duckdb':
+            base = base.with_suffix('')
+        return base.with_name(base.name + suffix)
+
+    def list_artifacts(self, db_id: str) -> List[Dict[str, Any]]:
+        """Downloadable stored artifacts that actually exist (local or in S3)."""
+        out: List[Dict[str, Any]] = []
+        s3_client = None
+        s3_enabled = bool(self._s3_config.get('bucket'))
+        for kind in self._ARTIFACT_SUFFIXES:
+            rel = self._artifact_rel(db_id, kind)
+            if rel is None:
+                continue
+            local = self.data_folder / rel
+            if local.exists():
+                out.append({'kind': kind, 'filename': rel.name,
+                            'size_bytes': local.stat().st_size, 'source': 'local'})
+                continue
+            if s3_enabled:
+                if s3_client is None:
+                    s3_client = self._make_s3_client()
+                size = self._s3_head_size(s3_client, rel)
+                if size is not None:
+                    out.append({'kind': kind, 'filename': rel.name,
+                                'size_bytes': size, 'source': 's3'})
+        return out
+
+    def artifact_download(self, db_id: str, kind: str, expires: int = 300):
+        """Resolve one artifact for download.
+
+        Returns ``('s3', presigned_url, filename)`` when the object is in the
+        bucket (short-lived presigned GET with a Content-Disposition filename),
+        ``('local', Path, filename)`` for a local-only file, or None if absent.
+        """
+        rel = self._artifact_rel(db_id, kind)
+        if rel is None:
+            return None
+        local = self.data_folder / rel
+        if local.exists():
+            return ('local', local, rel.name)
+        if not self._s3_config.get('bucket'):
+            return None
+        client = self._make_s3_client()
+        if self._s3_head_size(client, rel) is None:
+            return None
+        bucket = self._s3_config['bucket']
+        prefix = (self._s3_config.get('prefix') or '').strip('/')
+        key = f"{prefix}/{rel}" if prefix else str(rel)
+        url = client.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': bucket, 'Key': key,
+                    'ResponseContentDisposition': f'attachment; filename="{rel.name}"'},
+            ExpiresIn=expires,
+        )
+        return ('s3', url, rel.name)
 
     # ── persistent metadata cache ──────────────────────────────────────────────
 
@@ -10086,6 +10166,42 @@ async def get_database_module_scores(db_id: str):
         },
         "scored_genesets": out,
     }
+
+
+@app.get("/databases/{db_id:path}/files", tags=["databases"])
+async def list_database_files(db_id: str):
+    """List downloadable stored ("static") artifacts for one dataset — the raw
+    ``.h5ad``, the served ``.duckdb``, and sidecars (``.scores.parquet``,
+    ``.h5ad.mus``) that actually exist. Available to anyone who can see the
+    dataset (download == catalog visibility). Each entry:
+    ``{kind, filename, size_bytes, source}`` where source is ``s3`` | ``local``.
+    """
+    if registry is None or db_id not in registry.databases:
+        raise HTTPException(status_code=404, detail=f"Database not found: {db_id}")
+    return {"db_id": db_id, "files": registry.list_artifacts(db_id)}
+
+
+@app.get("/databases/{db_id:path}/download/{kind}", tags=["databases"])
+async def download_database_file(db_id: str, kind: str):
+    """Download one stored artifact (``kind`` ∈ h5ad | duckdb | scores | mus).
+
+    S3-backed objects 307-redirect to a short-lived (5 min) presigned URL so the
+    browser pulls straight from object storage (no multi-GB proxy through the
+    server); local-only objects stream via FileResponse. Gate == catalog
+    visibility: any dataset the caller can see is downloadable.
+    """
+    if registry is None or db_id not in registry.databases:
+        raise HTTPException(status_code=404, detail=f"Database not found: {db_id}")
+    resolved = registry.artifact_download(db_id, kind)
+    if resolved is None:
+        raise HTTPException(status_code=404,
+                            detail=f"No '{kind}' file available for {db_id}")
+    from fastapi.responses import FileResponse, RedirectResponse  # noqa: PLC0415
+    source, target, filename = resolved
+    if source == 's3':
+        return RedirectResponse(url=target, status_code=307)
+    return FileResponse(str(target), filename=filename,
+                        media_type='application/octet-stream')
 
 
 @app.get("/skill", tags=["info"], response_class=Response)
