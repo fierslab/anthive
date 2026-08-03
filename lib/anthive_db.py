@@ -538,16 +538,20 @@ class AnthiveDB:
         select_parts = ["c.cell_name"]
         params: List[Any] = []
 
-        # Add gene expression columns if requested
+        # Add gene expression columns if requested. Resolve the layer source
+        # from the duckdb's own directory so a duckdb pulled from S3 works on
+        # any host (see _layer_source_with_names — do NOT read through the
+        # persisted layer__X view; it bakes the migrating host's absolute
+        # path into the SQL, breaking every intern refresh).
         if genes:
-            layer_table = safe_ident(f"layer__{layer}")
+            layer_src = self._layer_source_with_names(layer)
             for gene in genes:
                 gene_alias = safe_ident(gene)
                 select_parts.append(f"""
                     (SELECT value
-                     FROM {layer_table}
-                     WHERE cell_name = c.cell_name
-                     AND gene_name = ?) AS {gene_alias}
+                     FROM {layer_src} _l
+                     WHERE _l.cell_name = c.cell_name
+                     AND _l.gene_name = ?) AS {gene_alias}
                 """)
                 params.append(gene)
 
@@ -921,11 +925,14 @@ class AnthiveDB:
                     """, stored_names).fetchall()
                 else:
                     # (c) Full layer scan + retain the distribution so the
-                    # caller can cache it.
-                    layer_tbl = safe_ident(f"layer__{layer}")
+                    # caller can cache it. Read from the local parquet
+                    # sidecar (via _layer_source_with_names) rather than the
+                    # persisted view — the view has a host-baked absolute
+                    # path that breaks on any host other than the migrator.
+                    layer_src = self._layer_source_with_names(layer)
                     all_means = self._conn.execute(f"""
                         SELECT gene_name, SUM(value) / {n_cells}.0 AS mean_expr
-                        FROM {layer_tbl}
+                        FROM {layer_src}
                         GROUP BY gene_name
                     """).fetchall()
                     means_dict = {row[0]: float(row[1]) for row in all_means}
@@ -987,7 +994,8 @@ class AnthiveDB:
             if stored_name in rank_ctx:
                 base.update(rank_ctx[stored_name])
 
-            layer_table = safe_ident(f"layer__{layer}")
+            # Local parquet resolution — see _layer_source_with_names.
+            layer_src = self._layer_source_with_names(layer)
             row = self._conn.execute(f"""
                 SELECT
                     COUNT(*)                          AS n_nonzero,
@@ -999,7 +1007,7 @@ class AnthiveDB:
                     QUANTILE_CONT(value, 0.1)         AS q10_nz,
                     QUANTILE_CONT(value, 0.9)         AS q90_nz,
                     MAX(value)                        AS max_val
-                FROM {layer_table}
+                FROM {layer_src}
                 WHERE gene_name = ?
             """, [stored_name]).fetchone()
 
@@ -1070,6 +1078,45 @@ class AnthiveDB:
                 return f"read_parquet('{escaped}')"
         # Fallback: legacy in-DuckDB table
         return f'"__layer__{safe}"'
+
+    def _layer_source_with_names(self, layer: str) -> str:
+        """Return a SQL ``FROM`` expression yielding ``(cell_name, gene_name, value)``.
+
+        Portable across hosts: resolves the parquet sidecar from the duckdb's
+        OWN directory at query time (never bakes a host-absolute path). Prefers
+        the by_gene parquet (gene-filter queries dominate). Falls back to the
+        persisted ``layer__<safe>`` view for legacy in-DuckDB datasets with no
+        parquet sidecar.
+
+        This is the anti-view read path: ``ant-migrate-to-parquet`` writes each
+        ``layer__*`` view with a hardcoded absolute path to the sidecar, which
+        breaks the moment the duckdb is copied to a host with a different
+        h5adstore mount. Every gene-fetch, gene-stats and mean-expression query
+        in this module now goes through this helper instead of ``FROM layer__X``.
+        """
+        safe = ''.join(c if c.isalnum() else '_' for c in layer)
+        if self.db_path is not None:
+            db_path = Path(self.db_path)
+            stem = db_path.stem
+            by_gene = db_path.parent / f"{stem}.layer.{layer}.by_gene.parquet"
+            if by_gene.exists():
+                escaped = str(by_gene.resolve()).replace("'", "''")
+                # Predicate pushdown: DuckDB pushes WHERE gene_name = ? and
+                # WHERE cell_name = ? down into the JOINs on __genes/__cells,
+                # so a gene-filter query only touches the matching gene's rows
+                # in the by_gene parquet.
+                return (
+                    f"(SELECT c.cell_name, g.gene_name, l.value "
+                    f"FROM read_parquet('{escaped}') l "
+                    f"JOIN __cells c ON l.cell_id = c.cell_id "
+                    f"JOIN __genes g ON l.gene_id = g.gene_id)"
+                )
+        # Legacy fallback: the persisted layer__ view. The view carries a
+        # (broken-on-non-migrator-hosts) absolute path if parquet-migrated,
+        # but the branch above avoids that case entirely. For truly legacy
+        # datasets that never went through migration, this is the in-DuckDB
+        # table wrapped by a view with (cell_name, gene_name, value).
+        return f'"layer__{safe}"'
 
     def score_module(
         self,
@@ -1218,17 +1265,20 @@ class AnthiveDB:
 # discard-pending guard and with ant-merge-h5ad's audit:
 #   'ant-score', 'ant-annotate', 'ant-starcat'
 
-_ANNO_COL_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+_ANNO_COL_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)*$')
 
 
 def _validate_anno_col_name(col_name: str) -> None:
-    """Stricter than safe_ident — annotator-created columns must be bare
-    identifiers (letters, digits, underscores; start with letter/underscore).
-    No quoting needed in raw SQL anywhere."""
+    """Annotator-created columns must be one or more bare identifiers
+    (letters, digits, underscores; start with letter/underscore) joined by
+    the ``::`` separator. Existing fleet columns follow the legacy
+    ``<study>::<experiment>::<module>`` naming (e.g.
+    ``Sierksma2025::WGCNA::Black_Mito``); we keep quoting via ``safe_ident``
+    in every SQL path, so ``::`` is safe."""
     if not isinstance(col_name, str) or not _ANNO_COL_RE.fullmatch(col_name):
         raise ValueError(
             f"Annotation column name must match {_ANNO_COL_RE.pattern!r} "
-            f"(bare SQL identifier); got {col_name!r}"
+            f"(bare identifier or ``::``-joined identifiers); got {col_name!r}"
         )
     if col_name.lower() in {'cell_id', 'cell_name', 'gene_id', 'gene_name'}:
         raise ValueError(f"Reserved column name: {col_name!r}")

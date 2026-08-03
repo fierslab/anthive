@@ -1475,7 +1475,7 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.30.0"
+API_VERSION = "2.31.0"
 API_VERSION_RELEASED = "2026-07-02"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
@@ -4024,7 +4024,11 @@ class PlotRequest:
     marginals: bool              # univariate KDE strips on each axis
     regline: Optional[str]       # 'global' | 'by_group' | None
     window: int          # rolling: window size in cells
+    step_size: int       # rolling: stride between plotted window centers (1 = every cell)
     show_band: bool      # rolling: show IQR ribbon around the line
+    show_ci: bool        # rolling: show a 95% CI band around the mean (parametric, 1.96·SE)
+    show_ci_corrected: bool  # rolling: 95% CI corrected for overlap-induced autocorrelation between adjacent windows
+    rank_x: bool         # rolling: replace x with rank position (cells sorted by x)
     zscore: bool         # heatmap: z-score per gene (centred divergent) vs raw means
     # DE-driven geoms (volcano / ma / forest): selectors + visual thresholds.
     de_study: Optional[str]      # __de_study.study_id (volcano / ma / forest)
@@ -4863,10 +4867,14 @@ def _handle_rolling(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         ', '.join(y_resolved), color_field_name, req.layer,
         n_cells=n_cells, n_groups=n_groups,
         sample=req.sample, subset=_subset_for_caption(req),
-        window=req.window, show_band=req.show_band,
+        window=req.window, step_size=req.step_size,
+        show_band=req.show_band, show_ci=req.show_ci,
+        show_ci_corrected=req.show_ci_corrected,
+        rank_x=req.rank_x,
         log_x=req.log_x, log_y=req.log_y,
         palette_cat=req.palette_cat,
-    )
+    )  # step_size threads to plot_rolling for both plotting stride + n_eff formula
+
     image_bytes = plotting.plot_rolling(
         data_df=data_df,
         x_field=x_name,
@@ -4874,7 +4882,11 @@ def _handle_rolling(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         color_field=color_field_name,
         color_kind=color_kind,
         window=req.window,
+        step_size=req.step_size,
         show_band=req.show_band,
+        show_ci=req.show_ci,
+        show_ci_corrected=req.show_ci_corrected,
+        rank_x=req.rank_x,
         width=req.width, height=req.height, dpi=req.dpi,
         output_format=req.output_format,
         palette_cat=req.palette_cat,
@@ -6042,7 +6054,11 @@ def _build_plot_request(
     vmin_quantile: Optional[float] = None,
     vmax_quantile: Optional[float] = None,
     window: int = 200,
+    step_size: int = 1,
     show_band: bool = False,
+    show_ci: bool = False,
+    show_ci_corrected: bool = False,
+    rank_x: bool = False,
     zscore: bool = True,
     # kde2d-specific knobs
     kde_n: int = 15_000,
@@ -6113,7 +6129,9 @@ def _build_plot_request(
         asinh_scale=asinh_scale,
         vmin=vmin, vmax=vmax,
         vmin_quantile=vmin_quantile, vmax_quantile=vmax_quantile,
-        window=window, show_band=show_band,
+        window=window, step_size=step_size,
+        show_band=show_band, show_ci=show_ci,
+        show_ci_corrected=show_ci_corrected, rank_x=rank_x,
         zscore=zscore,
         kde_n=kde_n, kde_bw=kde_bw, n_levels=n_levels,
         iso_overlay=iso_overlay, point_overlay=point_overlay,
@@ -6854,9 +6872,48 @@ async def plot_rolling_endpoint(
         200, ge=2, le=50_000,
         description="Rolling-window size in cells along ``x`` (higher = smoother line).",
     ),
+    step_size: int = Query(
+        1, ge=1, le=50_000,
+        description=(
+            "Stride between plotted rolling-window centers (1 = one point per cell). "
+            "Larger values subsample the plot (faster render, less visual clutter) AND "
+            "feed into `show_ci_corrected`'s n_eff formula: "
+            "`n_eff = min(window, actual_n) · step_size / window`. "
+            "For a truly-independent-windows CI, set step_size == window."
+        ),
+    ),
     show_band: bool = Query(
         False,
         description="Shade an IQR (q25..q75) ribbon under the rolling mean to visualise within-window spread.",
+    ),
+    show_ci: bool = Query(
+        False,
+        description=(
+            "Shade a 95% confidence interval around the rolling mean "
+            "(±1.96·SE, where SE = rolling_std / √window). Complements "
+            "`show_band` (IQR); both may be shown simultaneously."
+        ),
+    ),
+    show_ci_corrected: bool = Query(
+        False,
+        description=(
+            "Shade a 95% CI band corrected for the autocorrelation between "
+            "adjacent rolling windows (which share window-1 observations). "
+            "Uses n_eff = min(window, actual_n) · (step_size / window) — with "
+            "step_size=1 (every point plotted) n_eff collapses to ≈1, so the "
+            "band widens to roughly ±1.96·std. The naive `show_ci` band is "
+            "too narrow for that reason. Rendered on top of `show_ci` when "
+            "both are set."
+        ),
+    ),
+    rank_x: bool = Query(
+        False,
+        description=(
+            "Plot against cell-order along x (rank) instead of the raw x values. "
+            "Each cell gets its position after sorting by x, so evenly-spaced-in-rank "
+            "regions of pseudotime get equal visual weight. With `color`, cells are "
+            "ranked per group. Useful when pseudotime is clumped."
+        ),
     ),
 ):
     """Rolling-mean trajectory plot — for each ``y`` field, sort cells by
@@ -6864,7 +6921,9 @@ async def plot_rolling_endpoint(
     req = _build_plot_request(
         common, 'rolling',
         x=x, y=y, color=color,
-        window=window, show_band=show_band,
+        window=window, step_size=step_size,
+        show_band=show_band, show_ci=show_ci,
+        show_ci_corrected=show_ci_corrected, rank_x=rank_x,
     )
     return await _render_plot(req, common.request)
 

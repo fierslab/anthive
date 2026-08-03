@@ -423,10 +423,18 @@
     <fieldset>
       <legend>y fields (continuous)</legend>
       <label>comma-separated genes or numerical obs — one line per field</label>
-      <input type="text" name="y" id="f-y" autocomplete="off" placeholder="e.g. TREM2, APOE, CST7">
+      <div class="ac-wrap">
+        <input type="text" name="y" id="f-y" autocomplete="off" placeholder="e.g. TREM2, APOE, CST7">
+        <div class="ac-suggest" id="ac-y"></div>
+      </div>
       <label style="margin-top:4px">window size (cells, rolling)</label>
       <input type="number" name="window" id="f-window" value="200" min="2" max="50000">
-      <label style="margin-top:4px"><input type="checkbox" name="show_band" id="f-show_band"> show IQR band</label>
+      <label style="margin-top:4px">step size {{ info("Stride between plotted rolling-window centers. 1 = every cell (default). Higher values subsample the line for speed AND enter the 95% CI corrected formula: n_eff = min(window, actual_n) · step_size / window. Setting step_size = window gives independent windows (n_eff = window).") }}</label>
+      <input type="number" name="step_size" id="f-step_size" value="1" min="1" max="50000">
+      <label style="margin-top:4px"><input type="checkbox" name="show_band" id="f-show_band"> show IQR band {{ info("Wide band: q25..q75 within each rolling window — visualises within-window spread.") }}</label>
+      <label style="margin-top:4px"><input type="checkbox" name="show_ci" id="f-show_ci"> show 95% CI {{ info("Narrow band: 95% confidence interval of the rolling mean (±1.96·SE, SE = rolling std / √window). Complements the IQR band; both may be shown together.") }}</label>
+      <label style="margin-top:4px"><input type="checkbox" name="show_ci_corrected" id="f-show_ci_corrected"> show 95% CI corrected {{ info("Wide band: 95% CI corrected for autocorrelation between adjacent rolling windows (which overlap by window-1). Uses n_eff = min(window, actual_n) · step_size / window (step_size=1 for every-point plotting → n_eff ≈ 1), so SE ≈ rolling_std. Prefer this over the naive CI on large windows. n_eff is logged server-side per trace.") }}</label>
+      <label style="margin-top:4px"><input type="checkbox" name="rank_x" id="f-rank_x"> rank x-axis {{ info("Plot against cell-order along x (rank) instead of raw x values. Each cell gets its sorted position; evenly-spaced-in-rank regions get equal visual weight. Useful when pseudotime is clumped. Per-group when 'split by' is set.") }}</label>
     </fieldset>
     <fieldset>
       <legend>split by (optional)</legend>

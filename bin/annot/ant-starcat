@@ -82,7 +82,7 @@ MIN_GENE_OVERLAP = 1500
 
 def _h5adstore_root() -> Path:
     """Find data/h5adstore relative to this script."""
-    candidate = script_dir.parent / 'data' / 'h5adstore'
+    candidate = script_dir.parent.parent / 'data' / 'h5adstore'
     if not candidate.exists():
         sys.exit(f"ERROR: h5adstore not found at {candidate}")
     return candidate
@@ -505,7 +505,7 @@ def main() -> int:
     print(f"  ℹ run `ant-merge-h5ad {entry.md_path}` to sync into the h5ad.")
 
     # --- Sub-report ---
-    report_path = script_dir.parent / 'report' / 'starcat' / f'{entry.study}__{entry.stem}.md'
+    report_path = script_dir.parent.parent / 'report' / 'starcat' / f'{entry.study}__{entry.stem}.md'
     _write_subreport(
         report_path,
         entry_id=entry.readable_id,

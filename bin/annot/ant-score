@@ -113,7 +113,7 @@ def _load_geneset_registry() -> GenesetRegistry:
     store_value = config.get('geneset_store')
     if not store_value:
         sys.exit("ERROR: geneset_store is not configured (anthive.yaml)")
-    store_path = (script_dir.parent / store_value).resolve()
+    store_path = (script_dir.parent.parent / store_value).resolve()
     if not store_path.exists():
         sys.exit(f"ERROR: geneset store does not exist: {store_path}")
     registry = GenesetRegistry(store_path)
@@ -128,7 +128,7 @@ def _load_geneset_registry() -> GenesetRegistry:
 def _h5adstore_root() -> Path:
     config = get_config()
     h5ad_root_value = config.get('h5ad_store') or 'data/h5adstore'
-    root = (script_dir.parent / h5ad_root_value).resolve()
+    root = (script_dir.parent.parent / h5ad_root_value).resolve()
     if not root.exists():
         sys.exit(f"ERROR: h5ad store does not exist: {root}")
     return root

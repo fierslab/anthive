@@ -29,6 +29,47 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.31.0 — 2026-07-29
+
+### Added — `/plot/rolling` — `rank_x`, `show_ci`, `show_ci_corrected`, `step_size`
+
+Two new optional booleans on `GET /databases/{id}/plot/rolling`:
+
+* `rank_x` (default `false`) — plot against the cell rank along `x`
+  (0..n-1 after sorting) instead of the raw `x` values. With `color`,
+  ranks are computed per group. The axis label becomes `rank(<x>)` and
+  the caption reflects the change. Motivation: pseudotime is often
+  clumped (bimodal / saturated); rank-x gives each cell equal visual
+  weight so the rolling mean isn't dominated by dense pseudotime
+  regions.
+
+* `show_ci` (default `false`) — shade a **95% confidence interval**
+  around the rolling mean (±1.96·SE, where SE = rolling_std / √window).
+  Complements the existing `show_band` (IQR); both may be enabled
+  simultaneously — the CI band is narrower and slightly more opaque so
+  they read as distinct layers.
+
+* `show_ci_corrected` (default `false`) — shade a **95% CI corrected for
+  autocorrelation between adjacent windows** (which overlap by
+  window-1). Uses `n_eff = min(window, actual_n) · step_size / window`
+  — with the default `step_size=1` (every point plotted) n_eff ≈ 1, so
+  `SE_corrected = rolling_std / √n_eff ≈ rolling_std`. Prefer this over
+  the naive `show_ci` on large windows — the naive band is too tight
+  because it assumes each of the `window` cells is an independent draw.
+  The interior median `n_eff` per trace is written to stdout for
+  sanity-checking the correction factor.
+
+* `step_size` (default `1`, range 1..50000) — stride between plotted
+  rolling-window centers. Larger values subsample the plot (faster
+  render, less clutter) AND scale n_eff in `show_ci_corrected`. Set
+  `step_size == window` for independent, non-overlapping windows
+  (`n_eff = window`, corrected CI ≈ naive CI).
+
+**Client impact:** additive. Older clients that don't send these params
+still get the raw-x, IQR-only behaviour (unchanged).
+
+---
+
 ## 2.30.0 — 2026-07-02
 
 ### Added — `/catalogs` — unified module-catalog view (gene weights for starCAT + genesets)

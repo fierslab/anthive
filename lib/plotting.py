@@ -456,7 +456,11 @@ def build_caption(
     group_by: Optional[str] = None,
     bins: Optional[int] = None,
     window: Optional[int] = None,
+    step_size: Optional[int] = None,
     show_band: Optional[bool] = None,
+    show_ci: Optional[bool] = None,
+    show_ci_corrected: Optional[bool] = None,
+    rank_x: Optional[bool] = None,
     zscore: Optional[bool] = None,
     gridsize: Optional[int] = None,
     mincnt: Optional[int] = None,
@@ -569,13 +573,27 @@ def build_caption(
         zsc = 'z-scored per gene' if zscore else 'raw mean'
         sent = f'Heatmap of {zsc} expression per {y} for dataset {db_id} (genes on the y-axis)'
     elif geom == 'rolling':
-        sent = f'Rolling-mean trajectory of {y} along ordered {x} for dataset {db_id}'
+        axis_desc = f'rank order of {x}' if rank_x else f'ordered {x}'
+        sent = f'Rolling-mean trajectory of {y} along {axis_desc} for dataset {db_id}'
         if color:
             sent += f', with one trace per level of {color}'
         if window:
             sent += f'; window size = {window} cells'
+        if step_size and step_size > 1:
+            sent += f'; step size = {step_size} cells between plotted window centers'
         if show_band:
-            sent += '; IQR shown as a shaded band around each trace'
+            sent += '; IQR (q25..q75) shown as a shaded band around each trace'
+        if show_ci:
+            sent += '; 95% CI (mean ± 1.96·SE) shown as a narrow band around each trace'
+        if show_ci_corrected:
+            sent += (
+                '; 95% CI corrected for adjacent-window autocorrelation '
+                '(n_eff = min(window, n) · step_size / window; step_size=1) '
+                'shown as a wide band around each trace'
+            )
+        if rank_x:
+            sent += '; x-axis is the cell rank (0..n-1) after sorting by ' + str(x) + \
+                    (' per group' if color else '')
     else:
         sent = f'{geom} plot of dataset {db_id}'
     if not sent.endswith('.'):
@@ -2326,6 +2344,10 @@ def plot_rolling(
     color_kind: str = 'categorical',
     window: int = 200,
     show_band: bool = False,
+    show_ci: bool = False,
+    show_ci_corrected: bool = False,
+    step_size: int = 1,
+    rank_x: bool = False,
     width: float = 9,
     height: float = 5,
     dpi: int = 150,
@@ -2393,28 +2415,65 @@ def plot_rolling(
         n_palette = getattr(cmap_obj, 'N', 256)
         dash_cycle = ['-', '--', ':', '-.']
 
+        # For rank_x, rank ONCE across the full frame so each group's x
+        # positions reflect its cells' rank in the overall ordering (not a
+        # per-group 0..n rescale that hides where each group actually sits).
+        if rank_x:
+            global_rank = data_df[x_field].rank(method='first').to_numpy(dtype=float) - 1
+            data_df = data_df.assign(_global_rank_x=global_rank)
         for gi, grp in enumerate(groups):
             sub = data_df[data_df[color_field] == grp].sort_values(x_field)
             if len(sub) < 2:
                 continue
             colour = cmap_obj((gi % n_palette) / max(n_palette - 1, 1))
-            x_vals = sub[x_field].to_numpy(dtype=float)
+            if rank_x:
+                x_vals = sub['_global_rank_x'].to_numpy(dtype=float)
+            else:
+                x_vals = sub[x_field].to_numpy(dtype=float)
             for yi, y in enumerate(y_fields):
-                rolled = (pd.Series(sub[y].to_numpy(dtype=float))
-                          .rolling(eff_window, min_periods=1, center=True).mean())
+                series = pd.Series(sub[y].to_numpy(dtype=float))
+                rolled = series.rolling(eff_window, min_periods=1, center=True).mean().to_numpy()
+                # Subsample everything (line + bands) at step_size stride.
+                sel = slice(None, None, max(1, step_size))
+                x_plot = x_vals[sel]
+                rolled_plot = rolled[sel]
                 label = f'{y} · {grp}' if len(y_fields) > 1 else str(grp)
-                ax.plot(x_vals, rolled, color=colour,
+                ax.plot(x_plot, rolled_plot, color=colour,
                         linestyle=dash_cycle[yi % len(dash_cycle)],
                         linewidth=1.4, label=label)
                 if show_band:
-                    series = pd.Series(sub[y].to_numpy(dtype=float))
-                    q25 = series.rolling(eff_window, min_periods=1, center=True).quantile(0.25)
-                    q75 = series.rolling(eff_window, min_periods=1, center=True).quantile(0.75)
-                    ax.fill_between(x_vals, q25, q75, color=colour, alpha=0.15, linewidth=0)
+                    q25 = series.rolling(eff_window, min_periods=1, center=True).quantile(0.25).to_numpy()[sel]
+                    q75 = series.rolling(eff_window, min_periods=1, center=True).quantile(0.75).to_numpy()[sel]
+                    ax.fill_between(x_plot, q25, q75, color=colour, alpha=0.15, linewidth=0)
+                if show_ci:
+                    rolled_std = series.rolling(eff_window, min_periods=2, center=True).std().to_numpy()[sel]
+                    se = rolled_std / np.sqrt(eff_window)
+                    ax.fill_between(x_plot, rolled_plot - 1.96 * se, rolled_plot + 1.96 * se,
+                                    color=colour, alpha=0.30, linewidth=0)
+                if show_ci_corrected:
+                    rolled_std = series.rolling(eff_window, min_periods=2, center=True).std().to_numpy()
+                    rolled_cnt = series.rolling(eff_window, min_periods=1, center=True).count().to_numpy()
+                    step_used = max(1, step_size)
+                    n_eff_arr = np.minimum(eff_window, rolled_cnt) * (step_used / eff_window)
+                    n_eff_arr = np.maximum(n_eff_arr, 1e-6)
+                    se_corr = rolled_std / np.sqrt(n_eff_arr)
+                    ax.fill_between(x_plot,
+                                    rolled_plot - 1.96 * se_corr[sel],
+                                    rolled_plot + 1.96 * se_corr[sel],
+                                    color=colour, alpha=0.15, linewidth=0)
+                    interior = rolled_cnt >= eff_window
+                    n_eff_interior = float(np.median(n_eff_arr[interior])) if interior.any() \
+                                     else float(np.median(n_eff_arr))
+                    print(f"[rolling ci_corrected] {grp}/{y}: window={eff_window} "
+                          f"step_size={step_used} n_eff_per_window≈{n_eff_interior:.3g} "
+                          f"(interior median; edges wider)", flush=True)
     else:
         # No grouping — one line per y field on a single subset.
         ordered = data_df.sort_values(x_field)
-        x_vals = ordered[x_field].to_numpy(dtype=float)
+        if rank_x:
+            x_vals = np.arange(len(ordered), dtype=float)
+        else:
+            x_vals = ordered[x_field].to_numpy(dtype=float)
         cat_palette, _ = pick_cmap(
             'categorical',
             palette_cat=palette_cat,
@@ -2424,21 +2483,46 @@ def plot_rolling(
         )
         cmap_obj = _get_cmap(cat_palette)
         n_palette = getattr(cmap_obj, 'N', 256)
+        sel = slice(None, None, max(1, step_size))
+        x_plot = x_vals[sel]
         for yi, y in enumerate(y_fields):
             colour = cmap_obj((yi % n_palette) / max(n_palette - 1, 1))
             series = pd.Series(ordered[y].to_numpy(dtype=float))
-            rolled = series.rolling(eff_window, min_periods=1, center=True).mean()
-            ax.plot(x_vals, rolled, color=colour, linewidth=1.6, label=y)
+            rolled = series.rolling(eff_window, min_periods=1, center=True).mean().to_numpy()
+            rolled_plot = rolled[sel]
+            ax.plot(x_plot, rolled_plot, color=colour, linewidth=1.6, label=y)
             if show_band:
-                q25 = series.rolling(eff_window, min_periods=1, center=True).quantile(0.25)
-                q75 = series.rolling(eff_window, min_periods=1, center=True).quantile(0.75)
-                ax.fill_between(x_vals, q25, q75, color=colour, alpha=0.18, linewidth=0)
+                q25 = series.rolling(eff_window, min_periods=1, center=True).quantile(0.25).to_numpy()[sel]
+                q75 = series.rolling(eff_window, min_periods=1, center=True).quantile(0.75).to_numpy()[sel]
+                ax.fill_between(x_plot, q25, q75, color=colour, alpha=0.18, linewidth=0)
+            if show_ci:
+                rolled_std = series.rolling(eff_window, min_periods=2, center=True).std().to_numpy()[sel]
+                se = rolled_std / np.sqrt(eff_window)
+                ax.fill_between(x_plot, rolled_plot - 1.96 * se, rolled_plot + 1.96 * se,
+                                color=colour, alpha=0.32, linewidth=0)
+            if show_ci_corrected:
+                rolled_std = series.rolling(eff_window, min_periods=2, center=True).std().to_numpy()
+                rolled_cnt = series.rolling(eff_window, min_periods=1, center=True).count().to_numpy()
+                step_used = max(1, step_size)
+                n_eff_arr = np.minimum(eff_window, rolled_cnt) * (step_used / eff_window)
+                n_eff_arr = np.maximum(n_eff_arr, 1e-6)
+                se_corr = rolled_std / np.sqrt(n_eff_arr)
+                ax.fill_between(x_plot,
+                                rolled_plot - 1.96 * se_corr[sel],
+                                rolled_plot + 1.96 * se_corr[sel],
+                                color=colour, alpha=0.17, linewidth=0)
+                interior = rolled_cnt >= eff_window
+                n_eff_interior = float(np.median(n_eff_arr[interior])) if interior.any() \
+                                 else float(np.median(n_eff_arr))
+                print(f"[rolling ci_corrected] {y}: window={eff_window} step_size={step_used} "
+                      f"n_eff_per_window≈{n_eff_interior:.3g} (interior median; edges wider)",
+                      flush=True)
 
-    ax.set_xlabel(x_field)
+    ax.set_xlabel(f'rank({x_field})' if rank_x else x_field)
     ax.set_ylabel('rolling mean')
     title_bits = [
         ', '.join(y_fields[:3]) + ('…' if len(y_fields) > 3 else ''),
-        f'along {x_field}',
+        f'along rank({x_field})' if rank_x else f'along {x_field}',
         f'window={eff_window}',
         f'n={_fmt_n(n_cells)}',
     ]
