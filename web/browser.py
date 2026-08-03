@@ -6,9 +6,11 @@ Data is sourced entirely from the ant-serve REST API.
 """
 
 import base64
+import html as html_lib
+import re
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
-from urllib.parse import quote as url_quote, unquote
+from urllib.parse import parse_qsl, quote as url_quote, unquote, urlencode
 
 import markdown
 import requests
@@ -102,6 +104,61 @@ def _as_list(value) -> list:
     if not value:
         return []
     return value if isinstance(value, list) else [value]
+
+
+# Embed a live plot thumbnail in markdown with a compact scheme:
+#     ![caption](plot:GEOM?param=value&...)
+# On a dataset page the target dataset is implicit; in collection markdown (or
+# to reference another dataset) add ``&db=<group>/<file>``. The rendered markdown
+# is post-processed here: the <img> becomes a clickable thumbnail whose src is
+# the plot PNG endpoint (small width/height/dpi injected if absent) wrapped in a
+# link to the full interactive plot page. Authors get the token from the plot
+# page's "copy thumbnail" button, so they never hand-write it.
+_PLOT_IMG_RE = re.compile(r'<img\b[^>]*\bsrc="plot:([^"]*)"[^>]*>', re.IGNORECASE)
+_PLOT_ALT_RE = re.compile(r'\balt="([^"]*)"', re.IGNORECASE)
+_PLOT_THUMB_DEFAULTS = {'width': '4', 'height': '3', 'dpi': '80'}
+
+
+def _expand_plot_thumbnails(html_text: Optional[str], default_db: Optional[str] = None) -> Optional[str]:
+    """Rewrite ``<img src="plot:GEOM?QUERY">`` into a clickable plot thumbnail.
+
+    No-op for images without the ``plot:`` scheme, and leaves the tag untouched
+    if no dataset can be resolved (no ``db=`` and no ``default_db``)."""
+    if not html_text or 'src="plot:' not in html_text:
+        return html_text
+
+    def _sub(match: "re.Match") -> str:
+        tag = match.group(0)
+        raw = html_lib.unescape(match.group(1))          # 'GEOM?QUERY' (&amp; → &)
+        alt_match = _PLOT_ALT_RE.search(tag)
+        alt = alt_match.group(1) if alt_match else ''
+        geom, _, query_string = raw.partition('?')
+        geom = geom.strip()
+        if not geom:
+            return tag
+        params = dict(parse_qsl(query_string, keep_blank_values=False))
+        db_id = (params.pop('db', '') or default_db or '').strip()
+        params.pop('format', None)
+        if '/' not in db_id:
+            # unresolved dataset (collection markdown without &db=…) → guide, not a broken img
+            return ('<span class="muted" style="font-size:12px">[plot thumbnail needs '
+                    '<code>&amp;db=group/file</code>]</span>')
+        group, file = db_id.split('/', 1)
+        group_q, file_q, geom_q = url_quote(group, safe=''), url_quote(file, safe=''), url_quote(geom, safe='')
+        # interactive-page link keeps the author's params verbatim
+        page_query = urlencode(params)
+        # thumbnail image: author's params + small-size defaults + png
+        img_params = dict(params)
+        for key, value in _PLOT_THUMB_DEFAULTS.items():
+            img_params.setdefault(key, value)
+        img_params['format'] = 'png'
+        src = f"/api/databases/{group_q}/{file_q}/plot/{geom_q}?{urlencode(img_params)}"
+        href = f"/browse/{group_q}/{file_q}/plot/{geom_q}" + (f"?{page_query}" if page_query else '')
+        esc = lambda value: html_lib.escape(value, quote=True)
+        return (f'<a href="{esc(href)}" class="md-plot-link" title="open interactive plot">'
+                f'<img class="md-plot-thumb" src="{esc(src)}" alt="{esc(alt)}" loading="lazy"></a>')
+
+    return _PLOT_IMG_RE.sub(_sub, html_text)
 
 
 def _accession_url(accession: str) -> Optional[str]:
@@ -486,6 +543,9 @@ def get_collection_datasets(api_url: str, group_id: str) -> tuple:
                 description_html = markdown.markdown(
                     body, extensions=['tables', 'fenced_code']
                 )
+                # collection markdown has no implicit dataset — plot: tokens
+                # must carry &db=<group>/<file>.
+                description_html = _expand_plot_thumbnails(description_html, default_db=None)
 
         layers = list(db.get('layers', {}).keys())
         embeddings = list(db.get('embeddings', {}).keys())
@@ -964,6 +1024,7 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
     _desc_md = ('\n'.join(_md_lines[1:]) if (_md_lines and _md_lines[0].lstrip().startswith('#'))
                 else raw_md).strip()
     markdown_content = markdown.markdown(_desc_md, extensions=['tables', 'fenced_code']) if _desc_md else None
+    markdown_content = _expand_plot_thumbnails(markdown_content, default_db=db_id)
 
     # Context bar — same abbrev maps as landing / folder pages.  Uses single-db
     # summarise so 'mix' never appears (one dataset → one value).  Empty

@@ -808,6 +808,7 @@
       <a id="open-notebook" href="#" title="Open this exact plot as a one-off JupyterLite notebook (runs in your browser; download it to keep changes)">📓 notebook</a>
       <a id="force-refresh" href="#" title="re-render this figure, bypassing the server + browser cache">↻ refresh</a>
       <a id="copy-url" href="#">copy URL</a>
+      <a id="copy-thumb" href="#" title="Copy a markdown snippet that embeds this plot as a thumbnail in a dataset/collection description">🖼 copy thumbnail md</a>
     </div>
     <div class="plot-img" id="plot-img">
       <span style="color:#aaa;font-size:13px">configure on the left to render</span>
@@ -1287,6 +1288,28 @@
     const orig = e.target.textContent;
     e.target.textContent = '✓ copied';
     setTimeout(() => e.target.textContent = orig, 900);
+  });
+
+  // ── copy thumbnail markdown
+  // Emits `![](plot:GEOM?params&db=DB)` for the current plot. Size params are
+  // dropped so the server renders a small thumbnail; everything else (field,
+  // colour, palette, transforms…) is kept. Paste into a dataset/collection .md;
+  // it renders as a clickable thumbnail linking back to the interactive plot.
+  document.getElementById('copy-thumb').addEventListener('click', e => {
+    e.preventDefault();
+    if (!canRender()) {
+      status.innerHTML = `<span class="err">${renderHint()} before copying a thumbnail</span>`;
+      return;
+    }
+    const u = new URL(buildUrl(), window.location.origin);
+    const p = u.searchParams;
+    ['format', 'width', 'height', 'dpi'].forEach(k => p.delete(k));   // let the server size the thumbnail
+    p.set('db', DB_ID);
+    const token = `![](plot:${GEOM}?${p.toString()})`;
+    navigator.clipboard?.writeText(token);
+    const orig = e.target.textContent;
+    e.target.textContent = '✓ copied markdown';
+    setTimeout(() => e.target.textContent = orig, 1200);
   });
 
   // ── force refresh — re-render bypassing caches (server fixes, changed data)

@@ -158,6 +158,11 @@
         .md-body tr:hover td { background: inherit; }
         .md-body pre { background: var(--border-light); padding: 8px; overflow-x: auto; margin: 4px 0; }
         .md-body ul, .md-body ol { margin: 4px 0 4px 18px; }
+        .md-body img { max-width: 100%; height: auto; }
+        /* embedded plot thumbnails (markdown `plot:` scheme) */
+        .md-plot-link { display: inline-block; margin: 4px 8px 4px 0; vertical-align: top; }
+        .md-plot-thumb { max-width: 340px; height: auto; border: 1px solid var(--border); border-radius: 6px; background: #fff; }
+        .md-plot-link:hover .md-plot-thumb { border-color: var(--link); }
 
         .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 0 20px; }
         @media (max-width: 700px) { .two-col { grid-template-columns: 1fr; } }

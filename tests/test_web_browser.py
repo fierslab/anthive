@@ -54,6 +54,39 @@ def test_as_list(value, expected):
     assert browser._as_list(value) == expected
 
 
+# ── unit tests: _expand_plot_thumbnails ─────────────────────────────────────────
+
+def test_plot_thumbnail_expands_with_default_db():
+    html = '<p><img alt="umap" src="plot:scatter?x=X_umap&amp;color=TREM2" /></p>'
+    out = browser._expand_plot_thumbnails(html, default_db="GroupA/ds1")
+    # wrapped in a link to the interactive plot page…
+    assert 'href="/browse/GroupA/ds1/plot/scatter?' in out
+    # …with a thumbnail img pointing at the PNG endpoint (size + png injected)
+    assert 'src="/api/databases/GroupA/ds1/plot/scatter?' in out
+    assert "format=png" in out and "dpi=80" in out
+    assert 'class="md-plot-thumb"' in out and 'alt="umap"' in out
+    assert "color=TREM2" in out and "plot:" not in out
+
+
+def test_plot_thumbnail_explicit_db_overrides_default():
+    html = '<img src="plot:hexbin?color=SPP1&amp;db=GroupB/ds3" />'
+    out = browser._expand_plot_thumbnails(html, default_db="GroupA/ds1")
+    assert "/databases/GroupB/ds3/plot/hexbin?" in out
+    assert "GroupA" not in out
+
+
+def test_plot_thumbnail_unresolved_db_gives_hint():
+    html = '<img src="plot:scatter?color=TREM2" />'
+    out = browser._expand_plot_thumbnails(html, default_db=None)
+    assert "needs" in out and "db=group/file" in out
+    assert "<img" not in out          # no broken image left behind
+
+
+def test_plot_thumbnail_noop_without_scheme():
+    html = '<p><img src="https://x.org/f.png" /></p>'
+    assert browser._expand_plot_thumbnails(html, default_db="GroupA/ds1") == html
+
+
 # ── unit tests: _accession_url ─────────────────────────────────────────────────
 
 @pytest.mark.parametrize("accession, fragment", [
