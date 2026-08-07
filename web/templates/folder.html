@@ -34,16 +34,28 @@
      in the ≤760px card layout so a narrow card never forces horizontal scroll. */
   td.cells-genes { white-space: nowrap; }
   @media (max-width: 760px) { td.cells-genes { white-space: normal; } }
+
+  /* Top-right header row: breadcrumb+title on the left, admin action on the right. */
+  .grp-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .grp-top-main { flex: 1; min-width: 0; }
+  .grp-actions { flex-shrink: 0; display: flex; gap: 6px; align-items: center; }
 </style>
 
-<div class="breadcrumb">
-    <a href="/">datasets</a> /
-    {{ folder_name }}
-    {% if group_id and group_id != folder_name %}<span class="slug">({{ group_id }})</span>{% endif %}
+<div class="grp-top">
+  <div class="grp-top-main">
+    <div class="breadcrumb">
+        <a href="/">datasets</a> /
+        {{ folder_name }}
+        {% if group_id and group_id != folder_name %}<span class="slug">({{ group_id }})</span>{% endif %}
+    </div>
+    <h1 class="page-title">{{ folder_name }}</h1>
+  </div>
+  {% if is_admin %}
+  <div class="grp-actions">
+    <a href="/admin/edit/{{ group_id|urlencode }}" class="btn-edit" title="edit this collection's index.md (admin)">✎ edit</a>
+  </div>
+  {% endif %}
 </div>
-<h1 class="page-title">{{ folder_name }}
-  {% if is_admin %}<a href="/admin/edit/{{ group_id|urlencode }}" class="chip" style="font-size:11px;font-weight:normal;vertical-align:middle" title="edit this collection's index.md (admin)">✎ edit</a>{% endif %}
-</h1>
 
 {% if collection_pills %}
 <div class="coll-meta" title="metadata shared by every dataset in this collection">
@@ -128,6 +140,19 @@
     </tbody>
 </table>
 </div>
+
+{% if static_files %}
+<h2>Downloads
+  <span class="info" title="Files placed under data/h5adstore/{{ group_id }}/static/ — supplementary tables, PDFs, etc. Raw .h5ad and .duckdb are on the dataset pages.">ⓘ</span></h2>
+<div class="static-files">
+  {% for f in static_files %}
+    <div class="static-file">
+      <a href="/browse/{{ group_id|urlencode }}/static/{{ f.name|urlencode }}" download>⬇ {{ f.name }}</a>
+      {% if f.size_bytes is not none %}<span class="muted-2 mono" style="font-size:11px;margin-left:6px">{{ f.size_bytes|filesize }}</span>{% endif %}
+    </div>
+  {% endfor %}
+</div>
+{% endif %}
 
 <script>
 document.addEventListener('DOMContentLoaded', function() {

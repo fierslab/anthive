@@ -189,6 +189,63 @@
             border: 1px solid #1d4ed8; transition: background .1s;
         }
         .viz-btn:hover { background: #1e40af; color: #fff; text-decoration: none; }
+
+        /* Muted-red Edit button — used on group + dataset pages to differentiate
+           an admin-write affordance from the neutral action buttons around it. */
+        .btn-edit {
+            display: inline-flex; align-items: center; justify-content: center;
+            background: #c26b6b; color: #fff; border: 1px solid #b85555;
+            border-radius: 5px; padding: 6px 13px; font-size: 13px; font-weight: 500;
+            cursor: pointer; font-family: inherit; text-decoration: none;
+            white-space: nowrap; line-height: 1.2;
+        }
+        .btn-edit:hover { background: #a54a4a; border-color: #944040; color: #fff; text-decoration: none; }
+        .btn-edit.btn-icon { padding: 6px 11px; }
+
+        /* Sitewide tabs (used on dataset page + edit_dataset page).
+           Sticky bar; url-hash deep-linking (#overview, #data, …); mobile scrolls
+           horizontally. */
+        .tab-bar {
+            position: sticky; top: 0; z-index: 5;
+            display: flex; flex-wrap: wrap; gap: 2px;
+            background: var(--bg);
+            border-bottom: 1px solid var(--border);
+            padding: 8px 0 0 0;
+            margin: 8px 0 12px 0;
+        }
+        .tab-btn {
+            background: transparent; border: 1px solid transparent; border-bottom: none;
+            padding: 6px 14px; font-size: 12px; font-family: var(--font);
+            color: var(--text-muted); cursor: pointer;
+            border-radius: 6px 6px 0 0;
+            position: relative;
+        }
+        .tab-btn:hover { color: var(--text); background: var(--hover); }
+        .tab-btn.active {
+            color: var(--text); background: #fff;
+            border-color: var(--border); border-bottom-color: #fff;
+            margin-bottom: -1px;
+        }
+        .tab-btn .tab-count {
+            display: inline-block; font-size: 10px; color: var(--text-muted);
+            margin-left: 4px; font-family: var(--font-mono);
+        }
+        .tab-btn.active .tab-count { color: var(--text); }
+        .tab-btn .tab-dirty {
+            display: none;
+            width: 6px; height: 6px; border-radius: 50%;
+            background: #f59e0b;
+            margin-left: 6px; vertical-align: middle;
+        }
+        .tab-btn.dirty .tab-dirty { display: inline-block; }
+        .tab-panel { display: none; }
+        .tab-panel.active { display: block; }
+        .tab-panel h2:first-child { margin-top: 0; }
+        @media (max-width: 760px) {
+            .tab-bar { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+            .tab-btn { flex: none; }
+        }
+
         /* Sitewide utilities (DRY — replace scattered inline color styles). */
         .muted    { color: var(--text-muted); }
         .muted-2  { color: #94a3b8; }

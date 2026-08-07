@@ -1433,3 +1433,194 @@ def test_landing_mobile_card_markup(client):
     assert 'class="card-span"' in resp.text
     assert 'data-label="Datasets"' in resp.text
     assert 'data-label="Cells"' in resp.text
+
+
+# ── shared .btn-edit class (muted-red admin action) ────────────────────────────
+
+def test_btn_edit_class_defined_sitewide(client):
+    # The muted-red .btn-edit style lives in base.html so both the group and
+    # dataset pages render the Edit affordance with identical treatment.
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert ".btn-edit" in resp.text
+    # background hex — anchor colour of the muted-red palette
+    assert "#c26b6b" in resp.text
+
+
+def test_dataset_edit_button_uses_btn_edit(client):
+    # Admin sees a top-right ✎ edit button that uses the shared .btn-edit class
+    # (muted-red), not a chip.
+    resp = client.get("/browse/GroupA/ds1",
+                      headers={"Remote-Groups": "admins"})
+    assert resp.status_code == 200
+    assert 'class="btn-edit' in resp.text
+    assert '/admin/edit/GroupA/ds1' in resp.text
+
+
+def test_folder_edit_button_top_right(client):
+    # Group page also carries the muted-red Edit button top-right, admin-gated.
+    admin = client.get("/browse/GroupA", headers={"Remote-Groups": "admins"})
+    assert admin.status_code == 200
+    assert 'class="btn-edit' in admin.text
+    assert '/admin/edit/GroupA' in admin.text
+    # Non-admin sees no Edit affordance on the group page.
+    plain = client.get("/browse/GroupA")
+    assert plain.status_code == 200
+    assert 'class="btn-edit' not in plain.text
+
+
+# ── sitewide tab-bar CSS (used by dataset + edit_dataset pages) ────────────────
+
+def test_tab_bar_css_shared_in_base(client):
+    # The .tab-bar / .tab-btn / .tab-panel styles live in base.html so both the
+    # dataset page and the edit page pick them up.
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert ".tab-bar" in resp.text
+    assert ".tab-btn" in resp.text
+    assert ".tab-panel" in resp.text
+
+
+# ── dataset page: tab refactor ─────────────────────────────────────────────────
+
+def test_dataset_view_has_tab_bar(client):
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    # Tab bar container + at least the always-visible tabs
+    assert 'id="ds-tab-bar"' in resp.text
+    assert 'data-tab="overview"' in resp.text
+    assert 'data-tab="data"' in resp.text
+    assert 'data-tab="num"' in resp.text
+    assert 'data-tab="cat"' in resp.text
+    # Header items live ABOVE the tab bar
+    assert resp.text.index('id="ds-tab-bar"') > resp.text.index('class="ds-top"')
+
+
+def test_dataset_view_de_tab_only_when_de_present(client, monkeypatch):
+    # DE tab appears when the dataset has DE data …
+    resp_de = client.get("/browse/GroupA/ds1")
+    assert 'data-tab="de"' in resp_de.text
+    # … and is absent when it does not.
+    def no_de(api_url, path):
+        if path.endswith("/de"):
+            raise requests.HTTPError("no DE")
+        return _fake_api_get(api_url, path)
+    monkeypatch.setattr(browser, "_api_get", no_de)
+    resp_no = client.get("/browse/GroupA/ds1")
+    assert 'data-tab="de"' not in resp_no.text
+
+
+def test_dataset_view_downloads_tab_hidden_by_default(client):
+    # The Downloads tab is display:none until the /files fetch confirms an
+    # h5ad exists (JS reveals it). Server-render should carry the hidden state.
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    assert 'id="tab-btn-downloads"' in resp.text
+    # rendered with style="display:none" until JS proves otherwise
+    idx = resp.text.index('id="tab-btn-downloads"')
+    button_snippet = resp.text[idx:idx + 200]
+    assert 'display:none' in button_snippet
+
+
+def test_dataset_view_embed_tab_gated_on_obsm(client):
+    # ds1 has X_umap + X_pca in the fake — Embeddings tab shown.
+    resp = client.get("/browse/GroupA/ds1")
+    assert 'data-tab="embed"' in resp.text
+
+
+def test_dataset_view_downloads_client_filters_to_h5ad(client):
+    # The Downloads JS must filter /files output to kind == 'h5ad' only and
+    # additionally suppress .duckdb / .layer.*.parquet / .h5ad.mus / .md /
+    # dotfile / underscore-prefixed entries.
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    assert "f.kind !== 'h5ad'" in resp.text
+    assert ".duckdb" in resp.text
+    assert ".layer." in resp.text
+    assert ".h5ad.mus" in resp.text
+
+
+# ── group page: static folder + Downloads section ──────────────────────────────
+
+def test_is_download_hidden():
+    hide = browser._is_download_hidden
+    assert hide('foo.duckdb')
+    assert hide('foo.h5ad.mus')
+    assert hide('foo.md')
+    assert hide('foo.inactive')
+    assert hide('foo.layer.counts.parquet')
+    assert hide('_staging.txt')
+    assert hide('.hidden')
+    assert not hide('supplement.pdf')
+    assert not hide('table.csv')
+    assert not hide('archive.zip')
+
+
+def test_group_static_files_missing_dir_empty(tmp_path, monkeypatch):
+    # No h5adstore/<group>/static directory → empty list, never raises.
+    monkeypatch.setattr(browser, "_H5ADSTORE_ROOT", tmp_path)
+    assert browser._group_static_files("Nope") == []
+
+
+def test_group_static_files_lists_only_visible(tmp_path, monkeypatch):
+    static = tmp_path / "GroupA" / "static"
+    static.mkdir(parents=True)
+    (static / "supplement.pdf").write_bytes(b"pdf")
+    (static / "results.csv").write_bytes(b"csv")
+    (static / "internal.duckdb").write_bytes(b"x")   # hidden by suffix
+    (static / "_draft.txt").write_bytes(b"x")         # hidden by prefix
+    (static / ".DS_Store").write_bytes(b"x")          # hidden by prefix
+    monkeypatch.setattr(browser, "_H5ADSTORE_ROOT", tmp_path)
+    names = [f["name"] for f in browser._group_static_files("GroupA")]
+    assert names == ["results.csv", "supplement.pdf"]
+
+
+def test_folder_view_hides_downloads_when_static_empty(client):
+    # Default fake has no static/ dir → the group page must not render a
+    # "Downloads" heading.
+    resp = client.get("/browse/GroupA")
+    assert resp.status_code == 200
+    assert "<h2>Downloads" not in resp.text
+
+
+def test_folder_view_shows_static_downloads(client, tmp_path, monkeypatch):
+    # With a populated static/ dir, the group page renders a Downloads section
+    # and each file links to the group_static_download route.
+    static = tmp_path / "GroupA" / "static"
+    static.mkdir(parents=True)
+    (static / "supplement.pdf").write_bytes(b"pdf-bytes")
+    monkeypatch.setattr(browser, "_H5ADSTORE_ROOT", tmp_path)
+    resp = client.get("/browse/GroupA")
+    assert resp.status_code == 200
+    assert "<h2>Downloads" in resp.text
+    assert "/browse/GroupA/static/supplement.pdf" in resp.text
+
+
+def test_group_static_download_serves_file(client, tmp_path, monkeypatch):
+    static = tmp_path / "GroupA" / "static"
+    static.mkdir(parents=True)
+    (static / "hello.txt").write_text("hi there")
+    monkeypatch.setattr(browser, "_H5ADSTORE_ROOT", tmp_path)
+    resp = client.get("/browse/GroupA/static/hello.txt")
+    assert resp.status_code == 200
+    assert resp.text == "hi there"
+
+
+def test_group_static_download_rejects_traversal(client, tmp_path, monkeypatch):
+    static = tmp_path / "GroupA" / "static"
+    static.mkdir(parents=True)
+    (static / "ok.txt").write_text("ok")
+    (tmp_path / "secret.txt").write_text("secret")
+    monkeypatch.setattr(browser, "_H5ADSTORE_ROOT", tmp_path)
+    # `..` in the filename is rejected before disk access
+    resp = client.get("/browse/GroupA/static/..%2Fsecret.txt")
+    assert resp.status_code == 404
+
+
+def test_group_static_download_rejects_hidden_suffix(client, tmp_path, monkeypatch):
+    static = tmp_path / "GroupA" / "static"
+    static.mkdir(parents=True)
+    (static / "x.duckdb").write_bytes(b"x")
+    monkeypatch.setattr(browser, "_H5ADSTORE_ROOT", tmp_path)
+    resp = client.get("/browse/GroupA/static/x.duckdb")
+    assert resp.status_code == 404

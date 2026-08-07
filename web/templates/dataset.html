@@ -4,29 +4,6 @@
 
 {% block content %}
 <style>
-  /* Collapsible obs-prefix groups (rendered by the script at the bottom of
-     this page).  A group is auto-created when ≥2 obs columns share the same
-     prefix delimited by `::` or `__` — the prefix is shown once with a
-     `[+]` toggle; expanded view shows each child indented on the next row. */
-  .obs-group {
-    display: inline-flex; align-items: baseline; gap: 4px;
-    margin-right: 14px; white-space: nowrap;
-  }
-  .obs-toggle {
-    cursor: pointer; user-select: none; font-size: 11px;
-    color: #555; background: #f5f5f5; padding: 0 5px;
-    border-radius: 3px; font-family: var(--font-mono);
-  }
-  .obs-toggle:hover { background: #e5e7eb; color: #1f2937; }
-  .obs-group.open .obs-toggle { background: #e0e7ff; color: #3730a3; }
-  .obs-group-body {
-    display: none; flex-wrap: wrap; gap: 1px 0; line-height: 1.8;
-    margin-left: 4px;
-  }
-  .obs-group.open .obs-group-body { display: inline-flex; }
-  .obs-group-body .obs-item { font-size: 11px; }
-  /* Items still rendered as children inside .obs-group-body — keep margin. */
-
   /* Context bar — same pill vocabulary as landing/folder pages.
      Colors must mirror .ctx-pill in index.html. */
   .ds-ctx { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 10px; }
@@ -88,8 +65,6 @@
   .idchip { display: inline-flex; align-items: baseline; gap: 5px; font-size: 11px; border: 1px solid var(--border); border-radius: 5px; padding: 1px 7px; background: #f8fafc; cursor: default; }
   .idchip .idk { color: #94a3b8; text-transform: uppercase; letter-spacing: .4px; font-size: 9px; }
   .idchip .idv { font-family: var(--font-mono); color: var(--text); user-select: all; }  /* one-click select to copy */
-  .id-edit { margin-left: auto; font-size: 14px; text-decoration: none; color: var(--text-muted); border: 1px solid var(--border); border-radius: 5px; padding: 1px 8px; line-height: 1.6; }
-  .id-edit:hover { color: var(--link); border-color: var(--link); text-decoration: none; }
   /* greyed file basename next to the title */
   .page-title .basename { font-size: 14px; font-weight: normal; color: #94a3b8; font-family: var(--font-mono); margin-left: 6px; }
   /* compact provenance row up top */
@@ -101,8 +76,7 @@
   .ds-desc { margin: 2px 0 10px; font-size: 13px; }
   .ds-desc > :first-child { margin-top: 0; }
 
-  /* Observation columns: favourites first, full set collapsed into a table. */
-  #obs-expand { cursor: pointer; }
+  /* Observation columns: filterable table (per tab). */
   .obs-table { display: grid; grid-template-columns: 1fr 1fr; gap: 1px 24px; margin-top: 6px; }
   @media (max-width: 760px) { .obs-table { grid-template-columns: 1fr; } }
   .obs-table .ocol { display: flex; align-items: baseline; gap: 6px; padding: 2px 0; border-bottom: 1px solid var(--border-light); font-size: 12px; min-width: 0; }
@@ -121,8 +95,9 @@
   .idcopy { font-family: var(--font-mono); font-size: 11px; color: var(--text); cursor: pointer; padding: 0 3px; border-radius: 3px; }
   .idcopy:hover { background: #e0e7ff; }
   .idcopy.copied { background: #bbf7d0; color: #166534; }
-  .ds-actions { display: flex; align-items: stretch; gap: 6px; flex-shrink: 0; }
-  .btn-grey { display: inline-flex; align-items: center; background: #475569; color: #fff; border: 1px solid #475569; border-radius: 5px; padding: 6px 13px; font-size: 13px; font-weight: 500; cursor: pointer; font-family: inherit; text-decoration: none; white-space: nowrap; }
+  /* Align Visualize + Edit buttons on the same baseline — matched padding + line-height. */
+  .ds-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+  .btn-grey { display: inline-flex; align-items: center; justify-content: center; background: #475569; color: #fff; border: 1px solid #475569; border-radius: 5px; padding: 6px 13px; font-size: 13px; font-weight: 500; cursor: pointer; font-family: inherit; text-decoration: none; white-space: nowrap; line-height: 1.2; }
   .btn-grey:hover { background: #334155; color: #fff; text-decoration: none; }
   .btn-grey .caret { font-size: 9px; opacity: .8; margin-left: 3px; }
   .btn-grey.btn-icon { padding: 6px 11px; }
@@ -144,6 +119,8 @@
   .obs-sub { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; margin: 10px 0 2px; }
   .cat-top { display: inline-flex; gap: 4px; flex-wrap: wrap; }
   .cat-top .ct { background: #f1f5f9; border: 1px solid var(--border); border-radius: 9px; padding: 0 7px; font-family: var(--font); cursor: default; }
+  /* Empty-state placeholder inside a tab */
+  .tab-empty { font-size: 12px; color: var(--text-muted); font-style: italic; padding: 8px 0; }
 </style>
 
 <!-- Consolidated header: breadcrumb with click-to-copy ids + action buttons. -->
@@ -215,7 +192,7 @@
     </div>
   </div>
   {% endif %}
-  {% if is_admin %}<a class="btn-grey btn-icon" href="/admin/edit/{{ group_id|urlencode }}/{{ file_id|urlencode }}" title="edit this dataset's .md (admin)">✎</a>{% endif %}
+  {% if is_admin %}<a class="btn-edit btn-icon" href="/admin/edit/{{ group_id|urlencode }}/{{ file_id|urlencode }}" title="edit this dataset's .md (admin)">✎ edit</a>{% endif %}
   </div>
 </div>
 
@@ -248,10 +225,6 @@
 </div>
 {% endif %}
 
-<!-- Description — the .md prose. Shown only when it's more than the title
-     heading (heading-only / no-description bodies suppressed server-side). -->
-{% if markdown_content %}<div class="ds-desc md-body">{{ markdown_content|safe }}</div>{% endif %}
-
 {% if info %}
 <div class="stats-row">
     {% if info.n_cells %}<div>cells: <span class="val">{{ "{:,}".format(info.n_cells) }}</span></div>{% endif %}
@@ -276,118 +249,145 @@
 </div>
 {% endif %}
 
-<!-- Explore — curated quick-viz favourites (genes / categories / numerical).
-     Moved near the top: it's the most actionable content on the page. -->
-{% if dataset_meta and (dataset_meta.top_genes or dataset_meta.top_cat or dataset_meta.top_num) %}
-<h2>Explore</h2>
-{% if dataset_meta.top_genes %}
-<div style="margin-bottom:4px">
-    <span class="mk" style="display:inline-block;vertical-align:middle">genes</span>
-    {% for gene in dataset_meta.top_genes %}
-    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ gene | urlencode }}" class="chip">{{ gene }}</a>
-    {% endfor %}
-</div>
-{% endif %}
-{% if dataset_meta.top_cat %}
-<div style="margin-bottom:4px">
-    <span class="mk" style="display:inline-block;vertical-align:middle">categories</span>
-    {% for col in dataset_meta.top_cat %}
-    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/bar?x={{ col | urlencode }}" class="chip">{{ col }}</a>
-    {% endfor %}
-</div>
-{% endif %}
-{% if dataset_meta.top_num %}
-<div style="margin-bottom:4px">
-    <span class="mk" style="display:inline-block;vertical-align:middle">numerical</span>
-    {% for col in dataset_meta.top_num %}
-    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ col | urlencode }}" class="chip">{{ col }}</a>
-    {% endfor %}
-</div>
-{% endif %}
-{% endif %}
+{# ═══════════════════════════════════════════════════════════════════════
+   Tab bar — persistent header above; tabs deep-link via URL hash.
+   Order: Overview, Data, Numerical cols, Categorical cols, Embeddings,
+   Differential expression (only when data present), Downloads (only when a
+   downloadable h5ad is available — filled by JS from /files).
+   ═══════════════════════════════════════════════════════════════════════ #}
+{% set _num_cols = obs_columns | selectattr('type', 'equalto', 'num') | list %}
+{% set _cat_cols = obs_columns | selectattr('type', 'equalto', 'cat') | list %}
 
-<!-- Biology — sample attributes beyond the headline pills (organism / tech /
-     cell / tissue / disease / prep) shown in the context bar above. -->
-{% if dataset_meta and (dataset_meta.condition or dataset_meta.sex or dataset_meta.age or dataset_meta.strain) %}
-<h2>Biology <span class="info" title="Headline biology — organism, technology, cell type, tissue, disease, prep — is in the coloured pills under the title (hover for full names).">ⓘ</span></h2>
-<div class="info-col">
-    {% if dataset_meta.condition %}<div class="info-row"><span class="mk">condition</span><span>{{ dataset_meta.condition|join(', ') }}</span></div>{% endif %}
-    {% if dataset_meta.sex %}<div class="info-row"><span class="mk">sex</span><span>{{ dataset_meta.sex }}</span></div>{% endif %}
-    {% if dataset_meta.age %}<div class="info-row"><span class="mk">age</span><span>{{ dataset_meta.age }}</span></div>{% endif %}
-    {% if dataset_meta.strain %}<div class="info-row"><span class="mk">strain</span><span>{{ dataset_meta.strain }}</span></div>{% endif %}
-</div>
-{% endif %}
-
-{% if info %}
-
-{% if de_studies %}
-{# DE section — placed ABOVE the observation columns #}
-<h2>Differential expression <span class="muted" style="font-weight:normal;font-size:13px">({{ de_studies|length }} {{ 'study' if de_studies|length == 1 else 'studies' }})</span></h2>
-<div class="table-wrap">
-<table class="auto" style="font-size:12px">
-    <thead><tr>
-        <th>Study</th><th>Method</th><th>Target</th><th>Terms</th>
-        <th>Contrasts</th><th>Rows</th><th>Visualize</th>
-    </tr></thead>
-    <tbody>
-    {% for s in de_studies %}
-    <tr>
-        <td><a href="/browse/{{ folder_browse_id }}/{{ file_id }}/de/{{ s.study_id | urlencode }}"><strong>{{ s.name or s.study_id }}</strong></a></td>
-        <td style="color:#555">{{ s.method or '—' }}</td>
-        <td style="color:#555">{{ s.target or '—' }}</td>
-        <td style="color:#555">{{ s.n_terms if s.n_terms is not none else '—' }}</td>
-        <td style="color:#555">{{ s.n_contrasts if s.n_contrasts is not none else '—' }}</td>
-        <td style="color:#555;font-family:var(--font-mono);font-size:11px">{{ "{:,}".format(s.n_rows) if s.n_rows else '—' }}</td>
-        <td style="white-space:nowrap">
-            <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/volcano?study={{ s.study_id | urlencode }}" class="chip" title="volcano plot — log2FC vs −log10(padj) for a contrast">🌋 volcano</a>
-            <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/ma?study={{ s.study_id | urlencode }}" class="chip" title="MA plot — effect size vs mean expression">📊 MA</a>
-            <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/de_heatmap?study={{ s.study_id | urlencode }}" class="chip" title="DE heatmap — contrasts × genes/modules">🔥 heatmap</a>
-            <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/de/{{ s.study_id | urlencode }}" class="chip" title="browse terms, contrasts, gene tables">🔬 browse</a>
-        </td>
-    </tr>
-    {% endfor %}
-    </tbody>
-</table>
-</div>
-{% endif %}
-
-<!-- Observation columns — favourites first; the full set collapses into a table. -->
-<h2>Observation columns
-    <span class="muted" style="font-size:12px;font-weight:normal">({{ n_cat_cols }} cat · {{ n_num_cols }} num)</span>
-    <span class="info" title="≡ categorical · # numerical. Favourites shown first; expand for the full set as a filterable table. Click a column to plot it.">ⓘ</span>
-</h2>
-{% if obs_columns %}
-{% set _favcat = dataset_meta.top_cat or [] %}
-{% set _favnum = dataset_meta.top_num or [] %}
-<!-- frequently used — populated client-side from /obs_top (most-plotted columns) -->
-<div id="obs-freq" style="display:none;margin-bottom:6px;line-height:1.9"></div>
-<div id="obs-fav" style="margin-bottom:6px;line-height:1.9">
-  {% if _favcat or _favnum %}
-    {% for col in _favcat %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/bar?x={{ col|urlencode }}" class="chip" title="categorical — bar">≡ {{ col }}</a>{% endfor %}
-    {% for col in _favnum %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ col|urlencode }}" class="chip" title="numerical — histogram"># {{ col }}</a>{% endfor %}
-  {% else %}
-    {% for col in obs_columns[:8] %}
-      {% if col.type == 'cat' and has_duckdb %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/bar?x={{ col.name|urlencode }}" class="chip" title="categorical — bar">≡ {{ col.name }}</a>
-      {% elif col.type == 'num' and has_duckdb %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ col.name|urlencode }}" class="chip" title="numerical — histogram"># {{ col.name }}</a>{% endif %}
-    {% endfor %}
+<div class="tab-bar" id="ds-tab-bar" role="tablist">
+  <button type="button" class="tab-btn active" data-tab="overview" role="tab">Overview</button>
+  <button type="button" class="tab-btn"        data-tab="data"     role="tab">Data</button>
+  <button type="button" class="tab-btn"        data-tab="num"      role="tab">Numerical<span class="tab-count">{{ _num_cols|length }}</span></button>
+  <button type="button" class="tab-btn"        data-tab="cat"      role="tab">Categorical<span class="tab-count">{{ _cat_cols|length }}</span></button>
+  {% if info and info.obsm_keys %}
+  <button type="button" class="tab-btn"        data-tab="embed"    role="tab">Embeddings<span class="tab-count">{{ info.obsm_keys|length }}</span></button>
   {% endif %}
+  {% if de_studies %}
+  <button type="button" class="tab-btn"        data-tab="de"       role="tab">Differential expression<span class="tab-count">{{ de_studies|length }}</span></button>
+  {% endif %}
+  {# Downloads tab hidden until JS confirms a filtered h5ad is available. #}
+  <button type="button" class="tab-btn"        data-tab="downloads" role="tab" id="tab-btn-downloads" style="display:none">Downloads</button>
 </div>
-<button id="obs-expand" class="chip" type="button" aria-expanded="false">show all {{ info.n_obs_columns }} columns ▾</button>
-<div id="obs-all" style="display:none;margin-top:8px">
-  <div style="margin-bottom:4px;display:flex;align-items:center;gap:8px">
-    <input id="obs-filter" type="text" placeholder="filter…" style="padding:2px 6px;font-family:inherit;font-size:12px;border:1px solid #ccc;outline:none;width:160px">
-    <span id="obs-count" class="muted" style="font-size:11px"></span>
-  </div>
 
-  {# Numerical columns — stats filled client-side from obs_summary (REST 2.22). #}
-  {% set _num = obs_columns | selectattr('type', 'equalto', 'num') | list %}
-  {% set _cat = obs_columns | selectattr('type', 'equalto', 'cat') | list %}
-  {% if _num %}
-  <div class="obs-sub">numerical ({{ _num|length }})</div>
-  <div class="table-wrap"><table class="obs-stats-tbl auto">
+{# ── Overview tab ────────────────────────────────────────────────────── #}
+<section class="tab-panel active" id="tab-overview" role="tabpanel">
+  {% if markdown_content %}<div class="ds-desc md-body">{{ markdown_content|safe }}</div>{% endif %}
+
+  {# Explore — curated quick-viz favourites (genes / categories / numerical). #}
+  {% if dataset_meta and (dataset_meta.top_genes or dataset_meta.top_cat or dataset_meta.top_num) %}
+  <h2>Explore</h2>
+  {% if dataset_meta.top_genes %}
+  <div style="margin-bottom:4px">
+      <span class="mk" style="display:inline-block;vertical-align:middle">genes</span>
+      {% for gene in dataset_meta.top_genes %}
+      <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ gene | urlencode }}" class="chip">{{ gene }}</a>
+      {% endfor %}
+  </div>
+  {% endif %}
+  {% if dataset_meta.top_cat %}
+  <div style="margin-bottom:4px">
+      <span class="mk" style="display:inline-block;vertical-align:middle">categories</span>
+      {% for col in dataset_meta.top_cat %}
+      <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/bar?x={{ col | urlencode }}" class="chip">{{ col }}</a>
+      {% endfor %}
+  </div>
+  {% endif %}
+  {% if dataset_meta.top_num %}
+  <div style="margin-bottom:4px">
+      <span class="mk" style="display:inline-block;vertical-align:middle">numerical</span>
+      {% for col in dataset_meta.top_num %}
+      <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ col | urlencode }}" class="chip">{{ col }}</a>
+      {% endfor %}
+  </div>
+  {% endif %}
+  {% endif %}
+
+  {# Biology — sample attributes beyond the headline pills #}
+  {% if dataset_meta and (dataset_meta.condition or dataset_meta.sex or dataset_meta.age or dataset_meta.strain) %}
+  <h2>Biology <span class="info" title="Headline biology — organism, technology, cell type, tissue, disease, prep — is in the coloured pills under the title (hover for full names).">ⓘ</span></h2>
+  <div class="info-col">
+      {% if dataset_meta.condition %}<div class="info-row"><span class="mk">condition</span><span>{{ dataset_meta.condition|join(', ') }}</span></div>{% endif %}
+      {% if dataset_meta.sex %}<div class="info-row"><span class="mk">sex</span><span>{{ dataset_meta.sex }}</span></div>{% endif %}
+      {% if dataset_meta.age %}<div class="info-row"><span class="mk">age</span><span>{{ dataset_meta.age }}</span></div>{% endif %}
+      {% if dataset_meta.strain %}<div class="info-row"><span class="mk">strain</span><span>{{ dataset_meta.strain }}</span></div>{% endif %}
+  </div>
+  {% endif %}
+
+  {# Resources — programmatic entry points for this dataset. #}
+  <h2>Resources</h2>
+  <div style="padding:4px 0;display:flex;gap:14px;flex-wrap:wrap;font-size:12px;align-items:center">
+      <span>dataset id: <code>{{ db_id }}</code></span>
+      <a href="/api/databases/{{ db_id }}/info">api info</a>
+      <a href="/api/docs#/default/get_cells_databases__db_id__cells_get">api docs → /cells</a>
+      <a href="/jupyter">open in jupyterlite</a>
+  </div>
+</section>
+
+{# ── Data tab ─────────────────────────────────────────────────────────── #}
+<section class="tab-panel" id="tab-data" role="tabpanel">
+  <h2>Layers
+    <span class="info" title="X = the expression matrix served to plots (log-normalised by convention). Additional named layers (e.g. counts, sqrt) may be present.">ⓘ</span></h2>
+  {% if layer_stats_rows %}
+  <div class="table-wrap">
+  <table class="auto" style="font-size:12px">
+      <thead><tr>
+          <th>layer</th><th>dtype</th><th>min</th><th>min(nz)</th><th>max</th><th>median</th><th>q90</th><th>% zeros</th>
+      </tr></thead>
+      <tbody>
+      {% for row in layer_stats_rows %}
+      <tr>
+          <td><code>{{ row.name }}</code></td>
+          <td style="color:#888">{{ row.dtype }}</td>
+          <td style="color:#555">{{ row.min }}</td>
+          <td style="color:#555">{{ row.min_nz }}</td>
+          <td style="color:#555">{{ row.max }}</td>
+          <td style="color:#555">{{ row.median }}</td>
+          <td style="color:#555">{{ row.q90 }}</td>
+          <td style="color:#555">{{ row.pct_zeros }}%</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+  </table>
+  </div>
+  {% elif info.layers %}
+  <div style="padding:4px 0">
+      {% for layer in info.layers %}<code>{{ layer }}</code> {% endfor %}
+  </div>
+  {% else %}
+  <div class="tab-empty">no layers</div>
+  {% endif %}
+
+  <h2>Storage</h2>
+  <div class="info-col">
+    <div class="info-row"><span class="mk">db id</span><span class="mono">{{ db_id }}</span></div>
+    {% if info.file_id %}<div class="info-row"><span class="mk">file id</span><span class="mono">{{ info.file_id }}</span></div>{% endif %}
+    {% if info.group_id %}<div class="info-row"><span class="mk">group id</span><span class="mono">{{ info.group_id }}</span></div>{% endif %}
+    <div class="info-row"><span class="mk">default layer</span><span class="mono">{{ info.default_layer if info.default_layer else 'X' }}</span></div>
+    {% if info.n_cells %}<div class="info-row"><span class="mk">cells (n_obs)</span><span class="mono">{{ "{:,}".format(info.n_cells) }}</span></div>{% endif %}
+    {% if info.n_genes %}<div class="info-row"><span class="mk">genes (n_vars)</span><span class="mono">{{ "{:,}".format(info.n_genes) }}</span></div>{% endif %}
+    {% if info.modified %}<div class="info-row"><span class="mk">last modified</span><span class="mono">{{ info.modified[:10] }}</span></div>{% endif %}
+  </div>
+</section>
+
+{# ── Numerical columns tab ────────────────────────────────────────────── #}
+<section class="tab-panel" id="tab-num" role="tabpanel">
+  <h2>Numerical observation columns
+    <span class="muted" style="font-size:12px;font-weight:normal">({{ _num_cols|length }})</span>
+    <span class="info" title="Continuous per-cell values (e.g. n_counts, pseudotime, module scores). Click a column to plot its histogram.">ⓘ</span>
+  </h2>
+  {% if _num_cols %}
+  <div style="margin-bottom:6px;display:flex;align-items:center;gap:8px">
+    <input class="obs-filter" data-target="num" type="text" placeholder="filter…" style="padding:2px 6px;font-family:inherit;font-size:12px;border:1px solid #ccc;outline:none;width:160px">
+    <span class="obs-count muted" data-target="num" style="font-size:11px"></span>
+  </div>
+  <div class="table-wrap"><table class="obs-stats-tbl auto" id="obs-tbl-num">
     <thead><tr><th>column</th><th>min</th><th>Q05</th><th>mean</th><th>median</th><th>Q95</th><th>max</th></tr></thead>
     <tbody>
-    {% for col in _num %}
+    {% for col in _num_cols %}
     <tr class="obs-item" data-name="{{ col.name|lower }}">
       <td class="colname">{% if has_duckdb %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ col.name|urlencode }}">{{ col.name }}</a>{% else %}{{ col.name }}{% endif %}</td>
       <td class="s-min"></td><td class="s-q05"></td><td class="s-mean"></td><td class="s-median"></td><td class="s-q95"></td><td class="s-max"></td>
@@ -395,14 +395,26 @@
     {% endfor %}
     </tbody>
   </table></div>
+  {% else %}
+  <div class="tab-empty">no numerical columns in obs</div>
   {% endif %}
+</section>
 
-  {% if _cat %}
-  <div class="obs-sub">categorical ({{ _cat|length }})</div>
-  <div class="table-wrap"><table class="obs-stats-tbl auto">
+{# ── Categorical columns tab ──────────────────────────────────────────── #}
+<section class="tab-panel" id="tab-cat" role="tabpanel">
+  <h2>Categorical observation columns
+    <span class="muted" style="font-size:12px;font-weight:normal">({{ _cat_cols|length }})</span>
+    <span class="info" title="Discrete per-cell labels (cluster, donor, condition, …). Click a column to plot its bar chart.">ⓘ</span>
+  </h2>
+  {% if _cat_cols %}
+  <div style="margin-bottom:6px;display:flex;align-items:center;gap:8px">
+    <input class="obs-filter" data-target="cat" type="text" placeholder="filter…" style="padding:2px 6px;font-family:inherit;font-size:12px;border:1px solid #ccc;outline:none;width:160px">
+    <span class="obs-count muted" data-target="cat" style="font-size:11px"></span>
+  </div>
+  <div class="table-wrap"><table class="obs-stats-tbl auto" id="obs-tbl-cat">
     <thead><tr><th>column</th><th># cats</th><th>top categories</th></tr></thead>
     <tbody>
-    {% for col in _cat %}
+    {% for col in _cat_cols %}
     <tr class="obs-item" data-name="{{ col.name|lower }}">
       <td class="colname">{% if has_duckdb %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/bar?x={{ col.name|urlencode }}">{{ col.name }}</a>{% else %}{{ col.name }}{% endif %}</td>
       <td class="s-nuniq"></td><td class="s-top"></td>
@@ -410,74 +422,63 @@
     {% endfor %}
     </tbody>
   </table></div>
+  {% else %}
+  <div class="tab-empty">no categorical columns in obs</div>
   {% endif %}
-</div>
-{% else %}
-<p style="color:#888;font-size:12px"><em>none</em></p>
+</section>
+
+{# ── Embeddings tab ───────────────────────────────────────────────────── #}
+{% if info and info.obsm_keys %}
+<section class="tab-panel" id="tab-embed" role="tabpanel">
+  <h2>Embeddings <span class="muted" style="font-size:12px;font-weight:normal">({{ info.obsm_keys|length }})</span>
+    <span class="info" title="Per-cell 2D layouts (UMAP, PCA, tSNE, custom). Each links to a scatter plot on that embedding.">ⓘ</span></h2>
+  <div style="padding:4px 0">
+      {% for emb in info.obsm_keys %}
+        {% if has_duckdb %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/scatter?embedding={{ emb|urlencode }}" class="chip" title="scatter on {{ emb }}">🗺 {{ emb }}</a>{% else %}<code>{{ emb }}</code>{% endif %}
+      {% endfor %}
+  </div>
+</section>
 {% endif %}
 
-{% if not layer_stats_rows and info.layers %}
-<!-- Layers fallback — only when the Data section didn't get rendered (no
-     layer_stats in the .md).  Plain list, no stats. -->
-<h2>Layers</h2>
-<div style="padding:4px 0">
-    {% for layer in info.layers %}<code>{{ layer }}</code> {% endfor %}
-</div>
+{# ── Differential expression tab ──────────────────────────────────────── #}
+{% if de_studies %}
+<section class="tab-panel" id="tab-de" role="tabpanel">
+  <h2>Differential expression <span class="muted" style="font-weight:normal;font-size:13px">({{ de_studies|length }} {{ 'study' if de_studies|length == 1 else 'studies' }})</span></h2>
+  <div class="table-wrap">
+  <table class="auto" style="font-size:12px">
+      <thead><tr>
+          <th>Study</th><th>Method</th><th>Target</th><th>Terms</th>
+          <th>Contrasts</th><th>Rows</th><th>Visualize</th>
+      </tr></thead>
+      <tbody>
+      {% for s in de_studies %}
+      <tr>
+          <td><a href="/browse/{{ folder_browse_id }}/{{ file_id }}/de/{{ s.study_id | urlencode }}"><strong>{{ s.name or s.study_id }}</strong></a></td>
+          <td style="color:#555">{{ s.method or '—' }}</td>
+          <td style="color:#555">{{ s.target or '—' }}</td>
+          <td style="color:#555">{{ s.n_terms if s.n_terms is not none else '—' }}</td>
+          <td style="color:#555">{{ s.n_contrasts if s.n_contrasts is not none else '—' }}</td>
+          <td style="color:#555;font-family:var(--font-mono);font-size:11px">{{ "{:,}".format(s.n_rows) if s.n_rows else '—' }}</td>
+          <td style="white-space:nowrap">
+              <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/volcano?study={{ s.study_id | urlencode }}" class="chip" title="volcano plot — log2FC vs −log10(padj) for a contrast">🌋 volcano</a>
+              <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/ma?study={{ s.study_id | urlencode }}" class="chip" title="MA plot — effect size vs mean expression">📊 MA</a>
+              <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/de_heatmap?study={{ s.study_id | urlencode }}" class="chip" title="DE heatmap — contrasts × genes/modules">🔥 heatmap</a>
+              <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/de/{{ s.study_id | urlencode }}" class="chip" title="browse terms, contrasts, gene tables">🔬 browse</a>
+          </td>
+      </tr>
+      {% endfor %}
+      </tbody>
+  </table>
+  </div>
+</section>
 {% endif %}
 
-<!-- Embeddings -->
-{% if info.obsm_keys %}
-<h2>Embeddings ({{ info.obsm_keys|length }})</h2>
-<div style="padding:4px 0">
-    {% for emb in info.obsm_keys %}<code>{{ emb }}</code> {% endfor %}
-    {% if has_duckdb %}
-    <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/scatter" class="chip" style="margin-left:8px">open scatter →</a>
-    {% endif %}
-</div>
-{% endif %}
-
-<!-- Data — per-layer numeric snapshot (dtype / min / max / median / % zeros).
-     Moved down: a sanity-check detail, not headline info. -->
-{% if layer_stats_rows %}
-<h2>Data</h2>
-<div class="table-wrap">
-<table class="auto" style="font-size:12px">
-    <thead><tr>
-        <th>layer</th><th>dtype</th><th>min</th><th>min(nz)</th><th>max</th><th>median</th><th>q90</th><th>% zeros</th>
-    </tr></thead>
-    <tbody>
-    {% for row in layer_stats_rows %}
-    <tr>
-        <td><code>{{ row.name }}</code></td>
-        <td style="color:#888">{{ row.dtype }}</td>
-        <td style="color:#555">{{ row.min }}</td>
-        <td style="color:#555">{{ row.min_nz }}</td>
-        <td style="color:#555">{{ row.max }}</td>
-        <td style="color:#555">{{ row.median }}</td>
-        <td style="color:#555">{{ row.q90 }}</td>
-        <td style="color:#555">{{ row.pct_zeros }}%</td>
-    </tr>
-    {% endfor %}
-    </tbody>
-</table>
-</div>
-{% endif %}
-
-<!-- Downloads — the raw stored files for this dataset (h5ad + duckdb + sidecars). -->
-<h2>Downloads
-  <span class="info" title="The raw stored files behind this dataset. h5ad = the source AnnData (raw + log-norm expression); duckdb = the served database; sidecars = module scores / annotation. S3-hosted files download straight from object storage; large files can take a while.">ⓘ</span></h2>
-<div id="ds-files" class="muted" style="font-size:12px;padding:2px 0">loading files…</div>
-
-<!-- Resources — programmatic entry points for this dataset. -->
-<h2>Resources</h2>
-<div style="padding:4px 0;display:flex;gap:14px;flex-wrap:wrap;font-size:12px;align-items:center">
-    <span>dataset id: <code>{{ db_id }}</code></span>
-    <a href="/api/databases/{{ db_id }}/info">api info</a>
-    <a href="/api/docs#/default/get_cells_databases__db_id__cells_get">api docs → /cells</a>
-    <a href="/jupyter">open in jupyterlite</a>
-</div>
-
-{% endif %}
+{# ── Downloads tab ────────────────────────────────────────────────────── #}
+<section class="tab-panel" id="tab-downloads" role="tabpanel">
+  <h2>Downloads
+    <span class="info" title="The raw AnnData (.h5ad) file for this dataset. Additional files — the served .duckdb, layer sidecars, .mus annotation — are internal artifacts and are intentionally not exposed here.">ⓘ</span></h2>
+  <div id="ds-files" class="muted" style="font-size:12px;padding:2px 0">loading files…</div>
+</section>
 
 <script>
 document.addEventListener('DOMContentLoaded', function() {
@@ -511,42 +512,38 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     })();
 
+    // ── Tab bar wiring (URL-hash deep-linking) ───────────────────────────
+    (function() {
+        var bar = document.getElementById('ds-tab-bar');
+        if (!bar) return;
+        var btns = Array.from(bar.querySelectorAll('.tab-btn'));
+        var panels = {};
+        btns.forEach(function(b) {
+            var name = b.dataset.tab;
+            var panel = document.getElementById('tab-' + name);
+            if (panel) panels[name] = panel;
+            b.addEventListener('click', function() { activateTab(name, true); });
+        });
+        function activateTab(name, push) {
+            if (!panels[name]) name = 'overview';
+            btns.forEach(function(b) { b.classList.toggle('active', b.dataset.tab === name); });
+            Object.keys(panels).forEach(function(k) { panels[k].classList.toggle('active', k === name); });
+            if (push) {
+                try { history.replaceState(null, '', '#' + name); }
+                catch (_) { location.hash = name; }
+            }
+        }
+        window.addEventListener('hashchange', function() {
+            var h = (location.hash || '').replace(/^#/, '');
+            if (h) activateTab(h, false);
+        });
+        var initHash = (location.hash || '').replace(/^#/, '');
+        if (initHash) activateTab(initHash, false);
+    })();
+
     {% if obs_columns|length > 0 %}
     (function() {
-        // The full obs set is collapsed; "show all" expands it into a filterable
-        // table.  (Replaces the old prefix-grouping chip list.)
-        var expand = document.getElementById('obs-expand');
-        var all    = document.getElementById('obs-all');
-        var input  = document.getElementById('obs-filter');
-        var count  = document.getElementById('obs-count');
-        var items  = all ? Array.from(all.querySelectorAll('.obs-item')) : [];
-        if (expand && all) {
-            expand.addEventListener('click', function() {
-                var open = all.style.display === 'none';
-                all.style.display = open ? '' : 'none';
-                expand.setAttribute('aria-expanded', open ? 'true' : 'false');
-                expand.textContent = open ? 'hide columns \u25b4' : ('show all ' + items.length + ' columns \u25be');
-                if (open && input) input.focus();
-            });
-        }
-        if (input && count) {
-            function update() {
-                var q = (input.value || '').toLowerCase(), shown = 0;
-                items.forEach(function(el) {
-                    var vis = !q || (el.dataset.name || '').indexOf(q) >= 0;
-                    el.style.display = vis ? '' : 'none';
-                    if (vis) shown++;
-                });
-                count.textContent = (shown < items.length) ? (shown + ' / ' + items.length) : (items.length + ' cols');
-            }
-            input.addEventListener('input', update);
-            update();
-        }
-
-        // Fill the numerical/categorical stat tables + favourite tooltips from
-        // the bulk obs_summary (REST 2.22). Numerical cells: min/Q05/mean/median/
-        // Q95/max. Categorical: # cats + top-3 categories (hover = count + %).
-        // Fields not yet returned by the API stay blank — non-blocking.
+        // ── obs-column filter + stats hydration ──────────────────────────
         var DB_ID = {{ db_id|tojson }};
         var esc = function (s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); };
         var fnum = function (n) {
@@ -555,23 +552,38 @@ document.addEventListener('DOMContentLoaded', function() {
             var a = Math.abs(n);
             return a >= 100 ? Number(n).toFixed(0) : a >= 1 ? Number(n).toFixed(2) : Number(n).toPrecision(2);
         };
-        // compact text summary used for the collapsed favourite/chip tooltips
-        function statSummary(s) {
-            if (!s) return '';
-            if (s.type === 'cat') {
-                var tops = (s.top || s.top_categories || []).slice(0, 3).map(function (t) { return (t.value != null ? t.value : t.name); });
-                return (s.n_unique != null ? s.n_unique + ' cats' : 'categorical') + (tops.length ? ': ' + tops.join(', ') : '');
+        var apiBase = '/api/databases/' + DB_ID.split('/').map(encodeURIComponent).join('/');
+
+        // Per-tab filter box wired to its own table's .obs-item rows.
+        document.querySelectorAll('.obs-filter').forEach(function(input) {
+            var target = input.dataset.target;   // 'num' or 'cat'
+            var table = document.getElementById('obs-tbl-' + target);
+            if (!table) return;
+            var items = Array.from(table.querySelectorAll('.obs-item'));
+            var count = document.querySelector('.obs-count[data-target="' + target + '"]');
+            function update() {
+                var q = (input.value || '').toLowerCase(), shown = 0;
+                items.forEach(function(el) {
+                    var vis = !q || (el.dataset.name || '').indexOf(q) >= 0;
+                    el.style.display = vis ? '' : 'none';
+                    if (vis) shown++;
+                });
+                if (count) count.textContent = (shown < items.length) ? (shown + ' / ' + items.length) : (items.length + ' cols');
             }
-            return 'min ' + fnum(s.min) + ' · median ' + fnum(s.median) + ' · max ' + fnum(s.max)
-                 + (s.mean != null ? ' · mean ' + fnum(s.mean) : '');
-        }
-        var OBS_STATS = {};   // shared with the favourite-tooltip pass below
-        fetch('/api/databases/' + DB_ID.split('/').map(encodeURIComponent).join('/') + '/obs_summary', { credentials: 'same-origin' })
+            input.addEventListener('input', update);
+            update();
+        });
+
+        // Hydrate stats from /obs_summary (REST 2.22). Fields not returned by
+        // the API stay blank — non-blocking.
+        var allItems = Array.from(document.querySelectorAll('#tab-num .obs-item, #tab-cat .obs-item'));
+        fetch(apiBase + '/obs_summary', { credentials: 'same-origin' })
             .then(function (r) { return r.ok ? r.json() : null; })
             .then(function (d) {
                 if (!d || !d.columns) return;
+                var OBS_STATS = {};
                 Object.keys(d.columns).forEach(function (k) { OBS_STATS[k.toLowerCase()] = d.columns[k]; });
-                items.forEach(function (el) {
+                allItems.forEach(function (el) {
                     var s = OBS_STATS[el.dataset.name]; if (!s) return;
                     var set = function (sel, v) { var c = el.querySelector(sel); if (c) c.textContent = v; };
                     if (s.type === 'num') {
@@ -590,35 +602,46 @@ document.addEventListener('DOMContentLoaded', function() {
                         }
                     }
                 });
-                // collapsed view: tooltip the favourite + frequently-used chips
-                ['obs-fav', 'obs-freq'].forEach(function (id) {
-                    var box = document.getElementById(id); if (!box) return;
-                    box.querySelectorAll('a[href*="/plot/"]').forEach(function (a) {
-                        try {
-                            var col = new URL(a.getAttribute('href'), location.origin).searchParams.get('x');
-                            var s = col && OBS_STATS[col.toLowerCase()];
-                            if (s) a.title = statSummary(s);
-                        } catch (e) {}
-                    });
+                // Tooltip the Explore-tab favourite chips with their stats too.
+                document.querySelectorAll('#tab-overview a[href*="/plot/"]').forEach(function (a) {
+                    try {
+                        var col = new URL(a.getAttribute('href'), location.origin).searchParams.get('x');
+                        var s = col && OBS_STATS[col.toLowerCase()];
+                        if (s) a.title = summary(s);
+                    } catch (e) {}
                 });
+                function summary(s) {
+                    if (!s) return '';
+                    if (s.type === 'cat') {
+                        var tops = (s.top || s.top_categories || []).slice(0, 3).map(function (t) { return (t.value != null ? t.value : t.name); });
+                        return (s.n_unique != null ? s.n_unique + ' cats' : 'categorical') + (tops.length ? ': ' + tops.join(', ') : '');
+                    }
+                    return 'min ' + fnum(s.min) + ' · median ' + fnum(s.median) + ' · max ' + fnum(s.max) + (s.mean != null ? ' · mean ' + fnum(s.mean) : '');
+                }
             })
             .catch(function () {});
 
-        // ── click tracking + "frequently used" (REST 2.22) ──────────────────
-        // Fire-and-forget POST on every obs-column plot click (keepalive so it
-        // survives the navigation); GET /obs_top renders the most-plotted columns
-        // as a row above the curated favourites. No-ops until the endpoints exist.
-        var apiBase = '/api/databases/' + DB_ID.split('/').map(encodeURIComponent).join('/');
+        // Click tracking on obs-plot links (fire-and-forget POST /obs_click).
+        function trackClick(href) {
+            try {
+                var col = new URL(href, location.origin).searchParams.get('x');
+                if (col) fetch(apiBase + '/obs_click', { method: 'POST', keepalive: true, credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ column: col }) }).catch(function () {});
+            } catch (e) {}
+        }
+        document.body.addEventListener('click', function (e) {
+            var a = e.target.closest && e.target.closest('a[href*="/plot/"]');
+            if (a) trackClick(a.getAttribute('href'));
+        });
 
-        // ── Downloads: raw stored files (h5ad + duckdb + sidecars) ──────────
-        // GET /files lists what exists; each links to /download/{kind}, which
-        // 307-redirects to a presigned S3 URL (browser pulls straight from
-        // object storage) or streams a local file. No-op if nothing available.
+        // ── Downloads: raw h5ad ONLY (per anthive4 web tab-refactor spec).
+        //    Sidecars (.duckdb / .layer.*.parquet / .h5ad.mus / .md) are
+        //    hidden from the UI. Tab reveals only when at least one h5ad
+        //    entry is returned; otherwise it stays hidden entirely.
         (function loadFiles() {
             var box = document.getElementById('ds-files');
+            var tabBtn = document.getElementById('tab-btn-downloads');
             if (!box) return;
-            var KINDS = { h5ad: 'raw AnnData (.h5ad)', duckdb: 'served database (.duckdb)',
-                          scores: 'module scores (.scores.parquet)', mus: 'annotation sidecar (.h5ad.mus)' };
             function fmtSize(n) {
                 if (n == null) return '';
                 var u = ['B', 'KB', 'MB', 'GB', 'TB'], i = 0;
@@ -629,60 +652,35 @@ document.addEventListener('DOMContentLoaded', function() {
             fetch(apiBase + '/files', { credentials: 'same-origin' })
                 .then(function (r) { return r.ok ? r.json() : null; })
                 .then(function (d) {
-                    var files = (d && d.files) || [];
-                    if (!files.length) { box.textContent = 'No downloadable files for this dataset.'; return; }
+                    // Filter to raw h5ad only; per-file names undergo the sitewide
+                    // hidden-download filter (server may name the file *.duckdb by
+                    // mistake, or _-prefixed).
+                    var files = ((d && d.files) || []).filter(function (f) {
+                        if (f.kind !== 'h5ad') return false;
+                        var n = (f.filename || '').toLowerCase();
+                        if (!n) return true;
+                        if (n.startsWith('_') || n.startsWith('.')) return false;
+                        if (n.endsWith('.duckdb') || n.endsWith('.h5ad.mus') || n.endsWith('.md') || n.endsWith('.inactive')) return false;
+                        if (n.indexOf('.layer.') >= 0 && n.endsWith('.parquet')) return false;
+                        return true;
+                    });
+                    if (!files.length) {
+                        // Nothing to show → hide the tab entirely.
+                        if (tabBtn) tabBtn.style.display = 'none';
+                        return;
+                    }
+                    if (tabBtn) tabBtn.style.display = '';
                     box.innerHTML = files.map(function (f) {
-                        var label = KINDS[f.kind] || f.kind;
-                        return '<div style="padding:2px 0"><a href="' + apiBase + '/download/' + encodeURIComponent(f.kind) + '" download>⬇ ' + esc(label) + '</a>'
+                        return '<div style="padding:2px 0"><a href="' + apiBase + '/download/' + encodeURIComponent(f.kind) + '" download>⬇ raw AnnData (.h5ad)</a>'
                             + ' <span class="muted-2" style="font-size:11px">' + fmtSize(f.size_bytes)
                             + ' · ' + esc(f.filename) + (f.source === 's3' ? ' · object storage' : '') + '</span></div>';
                     }).join('');
                 })
-                .catch(function () { box.textContent = ''; });
-        })();
-
-        function trackClick(href) {
-            try {
-                var col = new URL(href, location.origin).searchParams.get('x');
-                if (col) fetch(apiBase + '/obs_click', { method: 'POST', keepalive: true, credentials: 'same-origin',
-                    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ column: col }) }).catch(function () {});
-            } catch (e) {}
-        }
-        [document.getElementById('obs-fav'), document.getElementById('obs-freq'), all].forEach(function (box) {
-            if (!box) return;
-            box.addEventListener('click', function (e) {
-                var a = e.target.closest && e.target.closest('a[href*="/plot/"]');
-                if (a) trackClick(a.getAttribute('href'));
-            });
-        });
-        // Build a name → {type, href} map from the split tables to render freq
-        // chips. Type is derived from the plot link (bar = cat, histogram = num).
-        var meta = {};
-        items.forEach(function (el) {
-            var a = el.querySelector('.colname a') || el.querySelector('a');
-            var href = a ? a.getAttribute('href') : null;
-            meta[el.dataset.name] = {
-                type: (href && href.indexOf('/plot/bar') >= 0) ? 'cat' : 'num',
-                href: href,
-                name: a ? a.textContent.trim() : el.dataset.name
-            };
-        });
-        fetch(apiBase + '/obs_top?n=8', { credentials: 'same-origin' })
-            .then(function (r) { return r.ok ? r.json() : null; })
-            .then(function (d) {
-                var cols = d && (d.columns || d); if (!cols || !cols.length) return;
-                var freq = document.getElementById('obs-freq'); if (!freq) return;
-                var html = '<span class="mk" style="display:inline-block;vertical-align:middle">frequently used</span>';
-                var n = 0;
-                cols.forEach(function (c) {
-                    var nm = (typeof c === 'string') ? c : (c.column || c.name); if (!nm) return;
-                    var m = meta[nm.toLowerCase()]; if (!m || !m.href) return;
-                    html += '<a href="' + m.href + '" class="chip" title="' + (m.type === 'cat' ? 'categorical' : 'numerical') + '">' + (m.type === 'cat' ? '≡ ' : '# ') + m.name + '</a>';
-                    n++;
+                .catch(function () {
+                    box.textContent = '';
+                    if (tabBtn) tabBtn.style.display = 'none';
                 });
-                if (n) { freq.innerHTML = html; freq.style.display = ''; }
-            })
-            .catch(function () {});
+        })();
     })();
     {% endif %}
 });

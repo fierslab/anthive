@@ -361,8 +361,23 @@ def _short_count(n: Optional[int]) -> str:
     return f'{n/1_000_000:.1f}M'
 
 
+def _filesize(n: Optional[int]) -> str:
+    """Humanise a byte count for download listings: 1.2 KB, 340 MB, 4.1 GB."""
+    if n is None:
+        return ''
+    if n < 1024:
+        return f'{n} B'
+    size = float(n)
+    for unit in ('KB', 'MB', 'GB', 'TB'):
+        size /= 1024
+        if size < 1024 or unit == 'TB':
+            return f'{size:.1f} {unit}' if size < 100 else f'{size:.0f} {unit}'
+    return f'{size:.0f} TB'
+
+
 # Register Jinja2 helpers — templates use {{ value|short_count }} / {{ format_count(n) }}
 templates.env.filters['short_count'] = _short_count
+templates.env.filters['filesize'] = _filesize
 templates.env.globals['format_count'] = _short_count
 
 
@@ -665,6 +680,56 @@ def _is_admin(request: Request) -> bool:
     return 'admins' in [g.strip() for g in groups.split(',') if g.strip()]
 
 
+_H5ADSTORE_ROOT = Path(__file__).parent.parent / 'data' / 'h5adstore'
+
+
+# Files hidden from any downloads listing across the site — internal artifacts
+# users shouldn't reach for. Kept in one place so filter logic can't drift.
+_DOWNLOAD_HIDE_SUFFIXES = ('.duckdb', '.h5ad.mus', '.md', '.inactive')
+_DOWNLOAD_HIDE_INFIX = '.layer.'          # x.layer.<name>.parquet sidecars
+
+
+def _is_download_hidden(name: str) -> bool:
+    """True if ``name`` should be hidden from any UI downloads list."""
+    if not name or name.startswith(('_', '.')):
+        return True
+    lower = name.lower()
+    if any(lower.endswith(suffix) for suffix in _DOWNLOAD_HIDE_SUFFIXES):
+        return True
+    if _DOWNLOAD_HIDE_INFIX in lower and lower.endswith('.parquet'):
+        return True
+    return False
+
+
+def _group_static_files(group_id: str) -> List[Dict]:
+    """List files under data/h5adstore/{group}/static/ eligible for download.
+
+    Returns a list of ``{name, size_bytes}`` sorted by name. Empty when the
+    folder does not exist or contains only hidden entries.
+    """
+    static_dir = _H5ADSTORE_ROOT / group_id / 'static'
+    try:
+        if not static_dir.is_dir():
+            return []
+    except OSError:
+        return []
+    out: List[Dict] = []
+    try:
+        for entry in sorted(static_dir.iterdir()):
+            if not entry.is_file():
+                continue
+            if _is_download_hidden(entry.name):
+                continue
+            try:
+                size = entry.stat().st_size
+            except OSError:
+                size = None
+            out.append({'name': entry.name, 'size_bytes': size})
+    except OSError:
+        return []
+    return out
+
+
 @router.get("/browse/{browse_id}", response_class=HTMLResponse)
 async def folder_view(request: Request, browse_id: str):
     group_id = unquote(browse_id)
@@ -695,6 +760,10 @@ async def folder_view(request: Request, browse_id: str):
     except Exception:
         pass
 
+    # Group-level static downloads (data/h5adstore/{group}/static/). Empty list
+    # → the Downloads section is hidden on the folder page entirely.
+    static_files = _group_static_files(group_id)
+
     return templates.TemplateResponse(request, "folder.html", {
         "folder_name": friendly_group or group_id,
         "folder_browse_id": group_id,
@@ -704,7 +773,35 @@ async def folder_view(request: Request, browse_id: str):
         "collection_pills": collection_meta['pills'],
         "var_fields": collection_meta['var_fields'],
         "is_admin": _is_admin(request),
+        "static_files": static_files,
     })
+
+
+@router.get("/browse/{browse_id}/static/{filename}")
+async def group_static_download(request: Request, browse_id: str, filename: str):
+    """Serve a file from ``data/h5adstore/{group}/static/`` as a download.
+
+    Safety: rejects any name that would escape the static dir (path segments,
+    absolute paths) or that matches the sitewide hidden-download filter. The
+    file must actually live under the resolved static directory."""
+    from fastapi import HTTPException
+    group_id = unquote(browse_id)
+    name = unquote(filename)
+    if '/' in name or '\\' in name or name in ('.', '..') or _is_download_hidden(name):
+        raise HTTPException(status_code=404, detail="not found")
+    static_dir = (_H5ADSTORE_ROOT / group_id / 'static').resolve()
+    try:
+        target = (static_dir / name).resolve()
+    except OSError:
+        raise HTTPException(status_code=404, detail="not found")
+    # containment check — the resolved path must sit inside static_dir
+    try:
+        target.relative_to(static_dir)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="not found")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="not found")
+    return FileResponse(target, filename=name)
 
 
 @router.get("/admin/edit/{browse_id}", response_class=HTMLResponse)
