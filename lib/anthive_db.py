@@ -41,6 +41,17 @@ def safe_ident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
+def _q(name: str) -> str:
+    """Permissive double-quote ident wrap for TRUSTED identifiers (names
+    that come from information_schema or the caller has already validated
+    against the duckdb schema). Legacy stored col names include ``#`` /
+    spaces / ``.`` / etc. — ``safe_ident``'s strict regex refuses them,
+    which is right for user-supplied strings but wrong when the string
+    IS the stored name. Never use with user-supplied strings — those go
+    through ``safe_ident``."""
+    return '"' + str(name).replace('"', '""') + '"'
+
+
 def build_obs_view_sql(
     view_name: str,
     underscore_table: str,
@@ -63,14 +74,10 @@ def build_obs_view_sql(
     value_rename = api.get('obs_value_rename', {}) or {}
     value_hidden = api.get('obs_value_hidden', {}) or {}
 
-    # Legacy stored col names include spaces / '#' / '.' etc. — safe_ident's
-    # strict regex refuses them. Since these names come from information_schema
-    # (trusted, already-stored identifiers) we quote them permissively. Public
-    # rename targets still go through safe_ident (strict) so a malicious .md
-    # can't inject SQL via a crafted alias.
-    def _q(name: str) -> str:
-        return '"' + str(name).replace('"', '""') + '"'
-
+    # Legacy stored col names include spaces / '#' / '.' etc. — see _q()
+    # module-level docstring for the permissive-quote rationale. Public
+    # rename targets still go through safe_ident (strict) so a malicious
+    # .md can't inject SQL via a crafted alias.
     def _sql_str(v: Any) -> str:
         """Escape a Python value for a SQL string literal."""
         return "'" + str(v).replace("'", "''") + "'"
@@ -497,7 +504,7 @@ class AnthiveDB:
             if kind == 'num' and col_names:
                 quant_exprs = []
                 for name in col_names:
-                    ident = safe_ident(name)
+                    ident = _q(name)   # legacy stored col names may have '#'/space; trusted (comes from information_schema)
                     quant_exprs.append(f'quantile_cont({ident}, 0.05)')
                     quant_exprs.append(f'quantile_cont({ident}, 0.95)')
                 try:
@@ -524,7 +531,7 @@ class AnthiveDB:
                     f"SELECT COUNT(*) FROM {view_name}"
                 ).fetchone() or (0,))[0]
                 for name in col_names:
-                    ident = safe_ident(name)
+                    ident = _q(name)   # legacy stored col names may have '#'/space; trusted (comes from information_schema)
                     try:
                         rows_top = self._conn.execute(
                             f"SELECT {ident}, COUNT(*) AS n "

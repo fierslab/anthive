@@ -2824,7 +2824,7 @@ async def get_database_info(db_id: str):
 
 
 @app.get("/databases/{db_id:path}/obs_summary", tags=["databases"])
-async def get_obs_summary(db_id: str):
+async def get_obs_summary(db_id: str, top_n: int = 3):
     """Bulk per-obs-column summary stats (anthive-web pika YakYak #2).
 
     One call, all obs columns, light stats:
@@ -2848,7 +2848,7 @@ async def get_obs_summary(db_id: str):
     try:
         def _sync():
             with _pooled_db(db_id) as db:
-                return db.obs_summary()
+                return db.obs_summary(top_n_categories=max(0, min(int(top_n), 200)))
         cols = await asyncio.to_thread(_sync)
         return {'db_id': db_id, 'columns': cols}
     except KeyError as e:

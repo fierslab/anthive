@@ -4,7 +4,7 @@
 
 {% block content %}
 <style>
-  .edit-wrap { max-width: 920px; }
+  .edit-wrap { max-width: 960px; }
   .ef-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; }
   .ef-row label { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--text-muted); margin-bottom: 2px; }
   .ef-row input[type=text] { width: 100%; padding: 5px 8px; border: 1px solid var(--border); border-radius: 5px; font-family: var(--font); font-size: 13px; outline: none; }
@@ -18,9 +18,9 @@
   #md-body:focus { border-color: var(--link); }
   #md-preview { border: 1px solid var(--border-light); border-radius: 6px; padding: 10px 12px; min-height: 320px; background: #fff; font-size: 13px; line-height: 1.6; }
   .edit-actions { display: flex; gap: 12px; align-items: center; margin: 12px 0; }
-  #ed-save { background: var(--link); color: #fff; border: none; border-radius: 6px; padding: 7px 18px; font-size: 13px; cursor: pointer; }
-  #ed-save:disabled { opacity: .5; cursor: default; }
-  #ed-status { font-size: 12px; }
+  #ed-save, #mus-save { background: var(--link); color: #fff; border: none; border-radius: 6px; padding: 7px 18px; font-size: 13px; cursor: pointer; }
+  #ed-save:disabled, #mus-save:disabled { opacity: .5; cursor: default; }
+  #ed-status, #mus-status { font-size: 12px; }
   .ed-note { font-size: 11px; color: var(--text-muted); }
   @media (max-width: 700px) { .ef-grid { grid-template-columns: 1fr; } }
   .ef-row select { width: 100%; padding: 5px 8px; border: 1px solid var(--border); border-radius: 5px; font-family: var(--font); font-size: 13px; outline: none; background: #fff; }
@@ -31,67 +31,261 @@
   .mus-tag.ctrl { color: #3730a3; background: #e0e7ff; }
   .ef-row input.off-vocab { border-color: #f59e0b; background: #fffbeb; }
   #mus-loading { font-size: 12px; }
-  #mus-save { background: var(--link); color: #fff; border: none; border-radius: 6px; padding: 7px 18px; font-size: 13px; cursor: pointer; }
-  #mus-save:disabled { opacity: .5; cursor: default; }
-  #mus-status { font-size: 12px; }
+
+  /* ── Tabs ────────────────────────────────────────────────── */
+  .tab-bar {
+    position: sticky; top: 0; z-index: 5;
+    display: flex; flex-wrap: wrap; gap: 2px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    padding: 8px 0 0 0;
+    margin: 8px 0 16px 0;
+  }
+  .tab-btn {
+    background: transparent; border: 1px solid transparent; border-bottom: none;
+    padding: 6px 14px; font-size: 12px; font-family: var(--font);
+    color: var(--text-muted); cursor: pointer;
+    border-radius: 6px 6px 0 0;
+    position: relative;
+  }
+  .tab-btn:hover { color: var(--text); background: var(--hover); }
+  .tab-btn.active {
+    color: var(--text); background: #fff;
+    border-color: var(--border); border-bottom-color: #fff;
+    margin-bottom: -1px;
+  }
+  .tab-btn .tab-dirty {
+    display: none;
+    width: 6px; height: 6px; border-radius: 50%;
+    background: #f59e0b;
+    margin-left: 6px; vertical-align: middle;
+  }
+  .tab-btn.dirty .tab-dirty { display: inline-block; }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+  .tab-panel h2:first-child { margin-top: 0; }
+
+  /* ── API section ─────────────────────────────────────────── */
+  .api-toolbar { display: flex; align-items: center; gap: 10px; margin: 8px 0 12px 0; flex-wrap: wrap; }
+  #api-filter {
+    flex: 1; min-width: 200px;
+    padding: 5px 10px; border: 1px solid var(--border); border-radius: 5px;
+    font-family: var(--font); font-size: 13px; outline: none;
+  }
+  #api-filter:focus { border-color: var(--link); }
+  .api-summary { font-size: 11px; color: var(--text-muted); }
+
+  .api-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .api-table thead th {
+    text-align: left; font-weight: 500; font-size: 10px;
+    text-transform: uppercase; letter-spacing: .4px;
+    color: var(--text-muted); padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+    background: var(--border-light);
+  }
+  .api-table td {
+    padding: 5px 8px; border-bottom: 1px solid var(--border-light);
+    vertical-align: middle;
+  }
+  .api-row.api-hidden td .api-col-name,
+  .api-row.api-hidden td .api-rename-input {
+    opacity: 0.5;
+    text-decoration: line-through;
+  }
+  .api-row.api-hidden td .api-rename-input { text-decoration: none; }
+  .api-col-name {
+    font-family: var(--font-mono); font-size: 12px;
+    word-break: break-all;
+  }
+  .api-col-name .api-type {
+    display: inline-block; font-size: 9px; text-transform: uppercase;
+    letter-spacing: .3px; padding: 0 4px; border-radius: 6px;
+    margin-right: 6px; vertical-align: middle;
+    color: var(--text-muted); background: var(--border-light);
+  }
+  .api-col-name .api-type.cat { color: #6d28d9; background: #f5f3ff; }
+  .api-col-name .api-type.num { color: #0369a1; background: #e0f2fe; }
+  .api-rename-input {
+    width: 100%; padding: 4px 7px; border: 1px solid var(--border); border-radius: 4px;
+    font-family: var(--font-mono); font-size: 12px; outline: none;
+    background: #fff;
+  }
+  .api-rename-input:focus { border-color: var(--link); }
+  .api-rename-input::placeholder { color: #cbd5e1; font-style: italic; }
+  .api-stats { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+  .api-stats .badge { display: inline-block; padding: 0 5px; border-radius: 3px; background: var(--border-light); margin-right: 3px; }
+  .api-values-btn {
+    background: transparent; border: 1px solid var(--border); border-radius: 4px;
+    padding: 2px 8px; font-size: 11px; cursor: pointer; color: var(--text-muted);
+    font-family: var(--font);
+  }
+  .api-values-btn:hover:not(:disabled) { border-color: var(--link); color: var(--link); }
+  .api-values-btn:disabled { opacity: .3; cursor: not-allowed; }
+  .api-values-panel {
+    margin: 0; padding: 8px 12px 12px 24px;
+    background: #fafbfc; border-bottom: 1px solid var(--border-light);
+  }
+  .api-values-panel .api-vals-note {
+    font-size: 11px; color: var(--text-muted); margin-bottom: 6px;
+  }
+  .api-values-panel table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .api-values-panel th, .api-values-panel td {
+    text-align: left; padding: 3px 8px;
+    border-bottom: 1px solid var(--border-light);
+  }
+  .api-values-panel th {
+    font-size: 10px; text-transform: uppercase; letter-spacing: .3px;
+    color: var(--text-muted); font-weight: 500;
+  }
+  .api-val-name { font-family: var(--font-mono); font-size: 12px; word-break: break-all; }
+  .api-val-count { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+  .api-val-rename {
+    width: 100%; padding: 3px 6px; border: 1px solid var(--border); border-radius: 4px;
+    font-family: var(--font-mono); font-size: 12px; outline: none; background: #fff;
+  }
+  .api-val-rename:focus { border-color: var(--link); }
+  .api-val-carry {
+    font-size: 10px; color: #92400e; background: #fef3c7;
+    padding: 0 4px; border-radius: 3px; margin-left: 4px; vertical-align: middle;
+  }
+
+  /* Toast for save feedback */
+  #save-toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    padding: 10px 18px; border-radius: 6px; font-size: 13px;
+    background: #1e293b; color: #fff;
+    box-shadow: 0 4px 12px rgba(0,0,0,.15);
+    z-index: 100; display: none;
+  }
+  #save-toast.ok { background: #16a34a; }
+  #save-toast.err { background: #dc2626; }
 </style>
 
 <div class="breadcrumb"><a href="/">datasets</a> / <a href="/browse/{{ group_id|urlencode }}">{{ group_id }}</a> / <a href="/browse/{{ group_id|urlencode }}/{{ file_id|urlencode }}">{{ file_id }}</a> / edit</div>
 <h1 class="page-title">Edit dataset <span class="mono">{{ db_id }}</span>
-  <span class="info" title="Admin only. Writes the dataset .md to disk. Most fields are machine-generated (id, hashes, counts, layer stats) and are read-only; biology annotation lives in the .mus sidecar, not here. It's a git repo — commit the change yourself.">ⓘ</span></h1>
+  <span class="info" title="Admin only. Writes the dataset .md to disk. Most fields are machine-generated (id, hashes, counts, layer stats) and are read-only; biology annotation lives in the .mus sidecar. It's a git repo — commit the change yourself.">ⓘ</span></h1>
 
 <div id="ed-loading" class="muted" style="font-size:12px">loading .md…</div>
 
 <div id="ed-form" class="edit-wrap" style="display:none">
-  <h2>Editable</h2>
-  <div id="ef-fields" class="ef-grid"></div>
-  <div id="ai-mus-note" title="biology annotation lives in the .h5ad.mus sidecar"></div>
-
-  <h2 style="margin-top:18px">Biology annotation <span class="ed-note">— the <code>.h5ad.mus</code> sidecar (organism, tissue, cell type, …)</span>
-    <span class="info" title="Controlled fields are vocab-gated server-side: a value outside the controlled vocabulary rejects the whole save. Fields shown faded are inherited from the folder .env cascade — set one here to override it for this dataset. Saves write the .h5ad.mus sidecar (a separate file from the .md above); it's a git repo, commit yourself.">ⓘ</span></h2>
-  <div id="mus-loading" class="muted">loading .mus…</div>
-  <div id="mus-box" style="display:none">
-    <div id="mus-fields" class="ef-grid"></div>
-    <div class="edit-actions">
-      <button id="mus-save" type="button">Save annotation</button>
-      <span class="ed-note">writes the <code>.h5ad.mus</code> sidecar</span>
-      <span id="mus-status"></span>
-    </div>
+  <!-- Tab bar -->
+  <div class="tab-bar" id="tab-bar" role="tablist">
+    <button type="button" class="tab-btn active" data-tab="basics"    role="tab">Basics<span class="tab-dirty"></span></button>
+    <button type="button" class="tab-btn"        data-tab="favorites" role="tab">Favorites<span class="tab-dirty"></span></button>
+    <button type="button" class="tab-btn"        data-tab="biology"   role="tab">Biology<span class="tab-dirty"></span></button>
+    <button type="button" class="tab-btn"        data-tab="api"       role="tab">API<span class="tab-dirty"></span></button>
+    <button type="button" class="tab-btn"        data-tab="desc"      role="tab">Description<span class="tab-dirty"></span></button>
+    <button type="button" class="tab-btn"        data-tab="info"      role="tab">Info<span class="tab-dirty"></span></button>
   </div>
-  <div id="mus-error" class="plot-status"></div>
 
-  <h2 style="margin-top:14px">Long Description <span class="ed-note">— the dataset's .md body (markdown)</span>
-    <button id="md-toggle" type="button" class="chip" style="font-size:11px;font-weight:normal;vertical-align:middle">👁 preview</button></h2>
-  <textarea id="md-body" spellcheck="true" placeholder="# Dataset notes…"></textarea>
-  <div id="md-preview" style="display:none"></div>
+  <!-- Tab: Basics — title / description / year -->
+  <section class="tab-panel active" id="tab-basics" role="tabpanel" aria-labelledby="tab-basics-btn">
+    <h2>Basics
+      <span class="info" title="Curated dataset metadata. Title and one-line description are what users see on the dataset page. Year is the publication year.">ⓘ</span></h2>
+    <div id="ef-fields-basics" class="ef-grid"></div>
+  </section>
 
-  <div class="edit-actions">
+  <!-- Tab: Favorites — top_genes / top_cat / top_num -->
+  <section class="tab-panel" id="tab-favorites" role="tabpanel">
+    <h2>Favorites
+      <span class="info" title="Curated defaults that drive the plot form's pre-population and the dataset page's context chips. Comma-separated lists. Auto-suggested by ant-suggest-tops.">ⓘ</span></h2>
+    <div id="ef-fields-favorites" class="ef-grid"></div>
+  </section>
+
+  <!-- Tab: Biology — the .h5ad.mus sidecar -->
+  <section class="tab-panel" id="tab-biology" role="tabpanel">
+    <h2>Biology annotation <span class="ed-note">— the <code>.h5ad.mus</code> sidecar (organism, tissue, cell type, …)</span>
+      <span class="info" title="Controlled fields are vocab-gated server-side: a value outside the controlled vocabulary rejects the whole save. Fields shown faded are inherited from the folder .env cascade — set one here to override it for this dataset. Saves write the .h5ad.mus sidecar (a separate file from the .md); it's a git repo, commit yourself.">ⓘ</span></h2>
+    <div id="ai-mus-note" title="biology annotation lives in the .h5ad.mus sidecar"></div>
+    <div id="mus-loading" class="muted">loading .mus…</div>
+    <div id="mus-box" style="display:none">
+      <div id="mus-fields" class="ef-grid"></div>
+      <div class="edit-actions">
+        <button id="mus-save" type="button">Save annotation</button>
+        <span class="ed-note">writes the <code>.h5ad.mus</code> sidecar</span>
+        <span id="mus-status"></span>
+      </div>
+    </div>
+    <div id="mus-error" class="plot-status"></div>
+  </section>
+
+  <!-- Tab: API — obs column rename / hide (per-column + per-value) -->
+  <section class="tab-panel" id="tab-api" role="tabpanel">
+    <h2>API surface
+      <span class="info" title="Rename or hide obs columns before they reach public API consumers (vark, pyvark, plot endpoints). Also rename/hide individual values inside categorical columns. Applied by rebuilding the obscat/obsnum DuckDB views. NOTE: any bookmarked URL or notebook that referenced the old column name will 400 after a rename — anthive does not auto-map old to new.">ⓘ</span>
+    </h2>
+    <p class="ed-note" style="margin: -4px 0 10px 0">
+      Renames/hides apply immediately on save. The <code>.md</code>'s
+      <code>api:</code> section is rewritten and the DuckDB views rebuilt.
+      Old URLs/notebooks that reference the internal name will 400.
+    </p>
+
+    <div class="api-toolbar">
+      <input id="api-filter" type="search" placeholder="filter columns by internal name…" autocomplete="off">
+      <span class="api-summary" id="api-summary"></span>
+    </div>
+
+    <div id="api-loading" class="muted" style="font-size:12px">loading obs summary…</div>
+    <div class="table-wrap" id="api-table-wrap" style="display:none">
+      <table class="api-table" id="api-table">
+        <thead>
+          <tr>
+            <th style="width:60px">hide</th>
+            <th>column</th>
+            <th style="width:32%">public alias</th>
+            <th style="width:16%">stats</th>
+            <th style="width:80px">values</th>
+          </tr>
+        </thead>
+        <tbody id="api-tbody"></tbody>
+      </table>
+    </div>
+    <div id="api-error" class="plot-status"></div>
+  </section>
+
+  <!-- Tab: Description — the .md markdown body -->
+  <section class="tab-panel" id="tab-desc" role="tabpanel">
+    <h2>Long Description <span class="ed-note">— the dataset's .md body (markdown)</span>
+      <button id="md-toggle" type="button" class="chip" style="font-size:11px;font-weight:normal;vertical-align:middle">👁 preview</button></h2>
+    <textarea id="md-body" spellcheck="true" placeholder="# Dataset notes…"></textarea>
+    <div id="md-preview" style="display:none"></div>
+  </section>
+
+  <!-- Tab: Info — read-only machine-generated fields -->
+  <section class="tab-panel" id="tab-info" role="tabpanel">
+    <h2>Read-only <span class="ed-note">— machine-generated, not editable</span></h2>
+    <div id="ef-ro" class="ef-grid"></div>
+  </section>
+
+  <!-- Sticky save bar (always visible; collects state from all tabs) -->
+  <div class="edit-actions" style="border-top:1px solid var(--border); padding-top: 12px; margin-top: 20px">
     <button id="ed-save" type="button">Save &amp; return</button>
     <span class="ed-note">⌘/Ctrl-S to save without leaving</span>
     <span id="ed-status"></span>
   </div>
-
-  <h2 style="margin-top:14px">Read-only <span class="ed-note">— machine-generated, not editable</span></h2>
-  <div id="ef-ro" class="ef-grid"></div>
 </div>
 
 <div id="ed-error" class="plot-status"></div>
+<div id="save-toast"></div>
 
 <script>
 (function () {
   const DB_ID = {{ db_id|tojson }};
   const SRC = '/api/databases/' + DB_ID.split('/').map(encodeURIComponent).join('/') + '/source';
+  const OBS_SUMMARY_URL = '/api/databases/' + DB_ID.split('/').map(encodeURIComponent).join('/') + '/obs_summary';
+  const API_CONFIG_URL  = '/api/admin/api-config/' + DB_ID.split('/').map(encodeURIComponent).join('/');
   const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
-  // Whitelist of editable fields (everything else is read-only or hidden — safer
-  // than a blacklist given how many machine fields a dataset .md carries).
+  // Whitelist of editable fields, split by tab (all round-tripped via /source
+  // PUT). Every field also carries its tab so the "dirty" indicator on the
+  // tab bar knows where an unsaved change lives.
   const EDITABLE = [
-    { key: 'title',       label: 'title',                       kind: 'scalar' },
-    { key: 'description', label: 'description (one line)',      kind: 'scalar' },
-    { key: 'year',        label: 'year',                        kind: 'number' },
-    { key: 'top_genes',   label: 'top genes (comma-separated)', kind: 'list' },
-    { key: 'top_cat',     label: 'top categories (comma-separated)', kind: 'list' },
-    { key: 'top_num',     label: 'top numeric (comma-separated)',    kind: 'list' },
+    { key: 'title',       label: 'title',                             kind: 'scalar', tab: 'basics' },
+    { key: 'description', label: 'description (one line)',            kind: 'scalar', tab: 'basics' },
+    { key: 'year',        label: 'year',                              kind: 'number', tab: 'basics' },
+    { key: 'top_genes',   label: 'top genes (comma-separated)',       kind: 'list',   tab: 'favorites' },
+    { key: 'top_cat',     label: 'top categories (comma-separated)',  kind: 'list',   tab: 'favorites' },
+    { key: 'top_num',     label: 'top numeric (comma-separated)',     kind: 'list',   tab: 'favorites' },
   ];
   // Machine-generated identity/computed fields — shown read-only for context.
   const RO_SHOW = ['id', 'version', 'sha256', 'date', 'n_obs', 'n_vars', 'default_layer'];
@@ -100,13 +294,15 @@
 
   const loading = document.getElementById('ed-loading'),
         formBox = document.getElementById('ed-form'),
-        fields  = document.getElementById('ef-fields'),
+        basicsFields    = document.getElementById('ef-fields-basics'),
+        favoritesFields = document.getElementById('ef-fields-favorites'),
         roBox   = document.getElementById('ef-ro'),
         body    = document.getElementById('md-body'),
         preview = document.getElementById('md-preview'),
         saveBtn = document.getElementById('ed-save'),
         statusEl= document.getElementById('ed-status'),
-        errBox  = document.getElementById('ed-error');
+        errBox  = document.getElementById('ed-error'),
+        toastEl = document.getElementById('save-toast');
 
   function inline(s) {
     return s.replace(/`([^`]+)`/g, '<code>$1</code>')
@@ -129,16 +325,53 @@
     if (previewing) { preview.innerHTML = md(body.value); preview.style.display = ''; body.style.display = 'none'; mdToggle.textContent = '✎ edit'; }
     else { preview.style.display = 'none'; body.style.display = ''; mdToggle.textContent = '👁 preview'; }
   });
+  body.addEventListener('input', () => markDirty('desc'));
+
+  // ── Tab bar wiring ────────────────────────────────────────────
+  // URL fragment (#api, #biology, …) deep-links the initial tab; switching
+  // tabs updates the fragment without a full history entry.
+  const tabBtns = Array.from(document.querySelectorAll('.tab-btn'));
+  const tabPanels = new Map();
+  tabBtns.forEach(btn => {
+    const name = btn.dataset.tab;
+    const panel = document.getElementById('tab-' + name);
+    if (panel) tabPanels.set(name, panel);
+    btn.addEventListener('click', () => activateTab(name, { push: true }));
+  });
+  function activateTab(name, opts) {
+    if (!tabPanels.has(name)) name = 'basics';
+    tabBtns.forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+    tabPanels.forEach((panel, key) => panel.classList.toggle('active', key === name));
+    if (opts && opts.push) {
+      try {
+        history.replaceState(null, '', '#' + name);
+      } catch (_) { location.hash = name; }
+    }
+  }
+  function markDirty(tabName) {
+    const btn = tabBtns.find(b => b.dataset.tab === tabName);
+    if (btn) btn.classList.add('dirty');
+  }
+  function clearDirty() { tabBtns.forEach(b => b.classList.remove('dirty')); }
+  window.addEventListener('hashchange', () => {
+    const h = (location.hash || '').replace(/^#/, '');
+    if (h) activateTab(h, { push: false });
+  });
 
   function addEditable(fm) {
-    fields.innerHTML = '';
+    basicsFields.innerHTML = '';
+    favoritesFields.innerHTML = '';
     EDITABLE.forEach(f => {
       const v = fm[f.key];
       const row = document.createElement('div'); row.className = 'ef-row';
       const lab = document.createElement('label'); lab.textContent = f.label; row.appendChild(lab);
-      const inp = document.createElement('input'); inp.type = 'text'; inp.dataset.key = f.key; inp.dataset.kind = f.kind;
+      const inp = document.createElement('input');
+      inp.type = 'text'; inp.dataset.key = f.key; inp.dataset.kind = f.kind; inp.dataset.tab = f.tab;
       inp.value = Array.isArray(v) ? v.join(', ') : (v == null ? '' : String(v));
-      row.appendChild(inp); fields.appendChild(row);
+      inp.addEventListener('input', () => markDirty(f.tab));
+      row.appendChild(inp);
+      const target = (f.tab === 'favorites') ? favoritesFields : basicsFields;
+      target.appendChild(row);
     });
   }
   function addReadonly(fm) {
@@ -154,13 +387,23 @@
   }
   function collectFrontmatter() {
     const fm = Object.assign({}, original);   // everything else (machine fields, annotation, include-lists) untouched
-    fields.querySelectorAll('input[data-key]').forEach(inp => {
+    document.querySelectorAll('#tab-basics input[data-key], #tab-favorites input[data-key]').forEach(inp => {
       const k = inp.dataset.key, kind = inp.dataset.kind, raw = inp.value.trim();
       if (kind === 'list') fm[k] = raw === '' ? null : raw.split(',').map(x => x.trim()).filter(Boolean);
       else if (kind === 'number') fm[k] = raw === '' ? null : (isNaN(Number(raw)) ? raw : Number(raw));
       else fm[k] = raw;
     });
     return fm;
+  }
+
+  // ── Toast ─────────────────────────────────────────────────────
+  let toastTimer = null;
+  function showToast(msg, kind) {
+    toastEl.textContent = msg;
+    toastEl.className = kind || '';
+    toastEl.style.display = 'block';
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { toastEl.style.display = 'none'; }, 4500);
   }
 
   // AI curation (REST 2.22): GET /curation → for each proposal, show a
@@ -177,7 +420,8 @@
     Object.keys(curationProposals).forEach(function (path) {
       if (path.indexOf('.md.') !== 0) return;
       var p = curationProposals[path];
-      var inp = fields.querySelector('input[data-key="' + path.slice(4) + '"]');
+      // Look up by data-key across the two tabs holding editable fields.
+      var inp = document.querySelector('#tab-basics input[data-key="' + path.slice(4) + '"], #tab-favorites input[data-key="' + path.slice(4) + '"]');
       var row = inp && inp.closest('.ef-row'); if (!row || row.querySelector('.ai-chip')) return;
       var conf = (p.confidence != null) ? Math.round(p.confidence * 100) + '%' : '';
       var proposed = fmtProposed(p.proposed);
@@ -187,6 +431,7 @@
       chip.addEventListener('click', function () {
         if (chip.classList.contains('applied')) return;
         inp.value = proposed; inp.focus();
+        markDirty(inp.dataset.tab);
         chip.classList.add('applied'); chip.textContent = '✓ applied';
       });
       row.appendChild(chip);
@@ -240,26 +485,66 @@
       addEditable(original); addReadonly(original);
       body.value = d.body || '';
       if (!d.exists) statusEl.innerHTML = '<span class="muted">no .md yet — saving will create it</span>';
+      // .md carries the api: section — render the API tab from it.
+      renderApiTab(original.api || {});
       loadCuration();
+      // Deep-link the initial tab from the URL fragment.
+      var initHash = (location.hash || '').replace(/^#/, '');
+      if (initHash) activateTab(initHash, { push: false });
     })
     .catch(e => { loading.style.display = 'none'; errBox.innerHTML = '<span class="err">could not load .md — ' + esc(e.message) + '</span>'; });
 
   // redirect=true → return to the dataset page after saving (the Save button);
   // redirect=false → intermediate save, stay put (Cmd/Ctrl-S).
+  //
+  // Save is ordered: PUT /source (frontmatter/body) FIRST, then POST
+  // /admin/api-config (only if the API tab has changes). Sequencing matters:
+  // /admin/api-config's response IS the fresh api_config, and it rebuilds views
+  // → refreshing to reflect it is the honest confirmation. We do NOT collapse
+  // the api section into the /source PUT because ant-serve's _DATASET_LOCKED
+  // fields don't include `api`, but the api-config endpoint owns validation
+  // (obs_rename collision, value-rename shape, etc.) — using the specific
+  // endpoint keeps the safety net in place.
   var saving = false;
   function doSave(redirect) {
     if (saving) return;
     saving = true; saveBtn.disabled = true; statusEl.innerHTML = '<span class="muted">saving…</span>';
-    return fetch(SRC, {
+    var apiChanges = collectApiChanges();
+    var hasApiChanges = apiChanges !== null;
+
+    var frontPromise = fetch(SRC, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
       body: JSON.stringify({ frontmatter: collectFrontmatter(), body: body.value })
     })
-      .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 180)); }))
-      .then(() => {
-        if (redirect) { statusEl.innerHTML = '<span style="color:#16a34a">✓ saved — returning…</span>'; window.location = '/browse/{{ group_id|urlencode }}/{{ file_id|urlencode }}'; }
-        else { saving = false; saveBtn.disabled = false; statusEl.innerHTML = '<span style="color:#16a34a">✓ saved (⌘/Ctrl-S)</span>'; }
+      .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error('/source: HTTP ' + r.status + ': ' + t.slice(0, 180)); }));
+
+    var apiPromise = frontPromise.then(function () {
+      if (!hasApiChanges) return null;
+      return fetch(API_CONFIG_URL, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
+        body: JSON.stringify(apiChanges)
+      }).then(r => r.ok ? r.json() : r.text().then(t => { throw new Error('/admin/api-config: HTTP ' + r.status + ': ' + t.slice(0, 220)); }));
+    });
+
+    return apiPromise
+      .then(function () {
+        if (redirect) {
+          statusEl.innerHTML = '<span style="color:#16a34a">✓ saved — returning…</span>';
+          showToast('✓ saved', 'ok');
+          window.location = '/browse/{{ group_id|urlencode }}/{{ file_id|urlencode }}';
+        } else {
+          saving = false; saveBtn.disabled = false;
+          statusEl.innerHTML = '<span style="color:#16a34a">✓ saved (⌘/Ctrl-S)</span>';
+          showToast('✓ saved — reloading', 'ok');
+          // Refresh so tabs reflect the new state (esp. API views rebuilt).
+          setTimeout(function () { window.location.reload(); }, 400);
+        }
       })
-      .catch(e => { saving = false; saveBtn.disabled = false; statusEl.innerHTML = '<span class="err">save failed — ' + esc(e.message) + '</span>'; });
+      .catch(e => {
+        saving = false; saveBtn.disabled = false;
+        statusEl.innerHTML = '<span class="err">save failed — ' + esc(e.message) + '</span>';
+        showToast('save failed — ' + e.message, 'err');
+      });
   }
   saveBtn.addEventListener('click', function () { doSave(true); });   // Save → back to the dataset page
   document.addEventListener('keydown', function (e) {                  // Cmd/Ctrl-S → intermediate save
@@ -312,6 +597,7 @@
       control.value = val;
       if (control.dataset.ctrl === '1') markVocab(control, control.dataset.mkey);
     }
+    markDirty('biology');
   }
 
   function renderMusFields() {
@@ -360,6 +646,8 @@
       control.dataset.mkey = key;
       control.dataset.ctrl = musControlled(key) ? '1' : '0';
       control.dataset.orig = ser(direct);
+      control.addEventListener('input',  function () { markDirty('biology'); });
+      control.addEventListener('change', function () { markDirty('biology'); });
       if (control.dataset.ctrl === '1' && control.tagName === 'INPUT') markVocab(control, key);
       row.appendChild(control);
       musFields.appendChild(row);
@@ -415,6 +703,362 @@
     musLoaded = true;
     attachMusChips();   // curation may have arrived first
   });
+
+  // ─── API surface editor (obs rename / hide + value-level) ────────────
+  // Reads the api: section from the .md (via /source) for the *current*
+  // rename/hide config, and /obs_summary for per-column stats (n_unique,
+  // pct_missing, top-N observed values). Server caps top-N to 3 in the
+  // current /obs_summary implementation, so value-level editing shows
+  // the top-3 observed + any values ALREADY renamed/hidden in the api
+  // section (so a curator can un-do a hide on a value that isn't in the
+  // observed top). Categorical cols with n_unique > VALUE_EXPAND_MAX
+  // don't offer value-level expand (would require editing the .md).
+  var VALUE_EXPAND_MAX = 50;
+  var apiTbody       = document.getElementById('api-tbody');
+  var apiTableWrap   = document.getElementById('api-table-wrap');
+  var apiLoading     = document.getElementById('api-loading');
+  var apiSummary     = document.getElementById('api-summary');
+  var apiErr         = document.getElementById('api-error');
+  var apiFilter      = document.getElementById('api-filter');
+
+  // apiCurrent: the api: section as loaded from the .md (baseline). We compute
+  // changes from this baseline at save time.
+  var apiCurrent = null;
+  // apiSummaryByCol: {col: {type, n_unique, pct_missing, top: [{value,count,pct}]}}
+  var apiSummaryByCol = null;
+  // For each col, the input elements — filled in by renderApiTab().
+  var apiRowRefs = {};
+
+  function normalizeApi(api) {
+    api = api || {};
+    return {
+      obs_rename:       Object.assign({}, api.obs_rename || {}),
+      obs_hidden:       (api.obs_hidden || []).slice(),
+      obs_value_rename: JSON.parse(JSON.stringify(api.obs_value_rename || {})),
+      obs_value_hidden: JSON.parse(JSON.stringify(api.obs_value_hidden || {})),
+    };
+  }
+
+  function renderApiTab(apiFromMd) {
+    apiCurrent = normalizeApi(apiFromMd);
+    // Fetch obs_summary; on failure show a status but leave the panel usable
+    // if we somehow have prior state.
+    fetch(OBS_SUMMARY_URL, { credentials: 'same-origin' })
+      .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 180)); }))
+      .then(d => {
+        apiSummaryByCol = d.columns || {};
+        drawApiRows();
+        apiLoading.style.display = 'none';
+        apiTableWrap.style.display = '';
+      })
+      .catch(e => {
+        apiLoading.style.display = 'none';
+        apiErr.innerHTML = '<span class="err">could not load obs summary — ' + esc(e.message) + '</span>';
+        // Still draw rows (with empty stats) so hides/renames remain editable.
+        apiSummaryByCol = {};
+        drawApiRows();
+        apiTableWrap.style.display = '';
+      });
+  }
+
+  function drawApiRows() {
+    apiTbody.innerHTML = '';
+    apiRowRefs = {};
+
+    // Collect the union of columns we know about:
+    //   - obs_summary columns (the definitive live schema)
+    //   - anything already referenced by the current api: section (so a
+    //     curator can un-hide / un-rename a column that isn't in the summary)
+    var cols = Object.keys(apiSummaryByCol || {}).slice();
+    (apiCurrent.obs_hidden || []).forEach(function (c) { if (cols.indexOf(c) < 0) cols.push(c); });
+    Object.keys(apiCurrent.obs_rename || {}).forEach(function (c) { if (cols.indexOf(c) < 0) cols.push(c); });
+    Object.keys(apiCurrent.obs_value_rename || {}).forEach(function (c) { if (cols.indexOf(c) < 0) cols.push(c); });
+    Object.keys(apiCurrent.obs_value_hidden || {}).forEach(function (c) { if (cols.indexOf(c) < 0) cols.push(c); });
+
+    // Stable sort: cat then num, then alpha.
+    cols.sort(function (a, b) {
+      var ta = (apiSummaryByCol[a] || {}).type || 'z';
+      var tb = (apiSummaryByCol[b] || {}).type || 'z';
+      if (ta !== tb) return ta < tb ? -1 : 1;
+      return a < b ? -1 : (a > b ? 1 : 0);
+    });
+
+    cols.forEach(function (col) { apiTbody.appendChild(makeApiRow(col)); });
+    updateApiSummary();
+    applyApiFilter();
+  }
+
+  function makeApiRow(col) {
+    var summary = (apiSummaryByCol || {})[col] || null;
+    var kind = (summary && summary.type) || 'unknown';
+    var isCat = kind === 'cat';
+    var isHidden = (apiCurrent.obs_hidden || []).indexOf(col) >= 0;
+    var renameTo = (apiCurrent.obs_rename || {})[col] || '';
+
+    var tr = document.createElement('tr');
+    tr.className = 'api-row' + (isHidden ? ' api-hidden' : '');
+    tr.dataset.col = col;
+
+    // hide checkbox
+    var tdHide = document.createElement('td');
+    var cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.className = 'api-hide-cb'; cb.checked = isHidden;
+    cb.title = 'hide this column from the public API';
+    cb.addEventListener('change', function () {
+      tr.classList.toggle('api-hidden', cb.checked);
+      markDirty('api');
+      updateApiSummary();
+    });
+    tdHide.appendChild(cb);
+    tr.appendChild(tdHide);
+
+    // column name + type badge
+    var tdName = document.createElement('td');
+    var nameSpan = document.createElement('span');
+    nameSpan.className = 'api-col-name';
+    var typeBadge = document.createElement('span');
+    typeBadge.className = 'api-type ' + (isCat ? 'cat' : (kind === 'num' ? 'num' : ''));
+    typeBadge.textContent = kind;
+    nameSpan.appendChild(typeBadge);
+    nameSpan.appendChild(document.createTextNode(col));
+    tdName.appendChild(nameSpan);
+    tr.appendChild(tdName);
+
+    // rename input
+    var tdRename = document.createElement('td');
+    var renameInp = document.createElement('input');
+    renameInp.type = 'text'; renameInp.className = 'api-rename-input';
+    renameInp.placeholder = col;
+    renameInp.value = renameTo;
+    renameInp.addEventListener('input', function () {
+      markDirty('api');
+      updateApiSummary();
+    });
+    tdRename.appendChild(renameInp);
+    tr.appendChild(tdRename);
+
+    // stats badges
+    var tdStats = document.createElement('td');
+    var stats = document.createElement('span');
+    stats.className = 'api-stats';
+    if (summary) {
+      if (isCat) {
+        var badge = document.createElement('span');
+        badge.className = 'badge';
+        badge.textContent = summary.n_unique + ' uniq';
+        stats.appendChild(badge);
+      }
+      if (summary.pct_missing != null && summary.pct_missing > 0) {
+        var nullBadge = document.createElement('span');
+        nullBadge.className = 'badge';
+        nullBadge.textContent = (Math.round(summary.pct_missing * 10) / 10) + '% null';
+        stats.appendChild(nullBadge);
+      }
+    } else {
+      stats.textContent = '—';
+    }
+    tdStats.appendChild(stats);
+    tr.appendChild(tdStats);
+
+    // values expand button
+    var tdVals = document.createElement('td');
+    var expandBtn = document.createElement('button');
+    expandBtn.type = 'button'; expandBtn.className = 'api-values-btn';
+    var canExpand = isCat && summary && summary.n_unique != null && summary.n_unique <= VALUE_EXPAND_MAX;
+    expandBtn.disabled = !canExpand;
+    var hasVal = (
+      (apiCurrent.obs_value_rename[col] && Object.keys(apiCurrent.obs_value_rename[col]).length) ||
+      (apiCurrent.obs_value_hidden[col] && apiCurrent.obs_value_hidden[col].length)
+    );
+    expandBtn.textContent = '↓ values' + (hasVal ? ' •' : '');
+    if (!canExpand) {
+      if (!isCat) expandBtn.title = 'numerical column — no value-level editing';
+      else if (!summary) expandBtn.title = 'no summary available for this column';
+      else expandBtn.title = summary.n_unique + ' distinct values — too many for inline editing (>' + VALUE_EXPAND_MAX + '); edit the .md directly';
+    } else {
+      expandBtn.title = 'edit value-level rename / hide';
+    }
+    expandBtn.addEventListener('click', function () { toggleValuesPanel(tr, col); });
+    tdVals.appendChild(expandBtn);
+    tr.appendChild(tdVals);
+
+    apiRowRefs[col] = { tr: tr, hideCb: cb, renameInp: renameInp, expandBtn: expandBtn, valuesTr: null, valuesInputs: null };
+    return tr;
+  }
+
+  function toggleValuesPanel(tr, col) {
+    var refs = apiRowRefs[col];
+    if (refs.valuesTr) {
+      // collapse — but preserve state so re-opening keeps unsaved edits.
+      // Simpler: rip it out and rebuild from apiCurrent + pending state.
+      refs.valuesTr.remove();
+      refs.valuesTr = null; refs.valuesInputs = null;
+      return;
+    }
+    var summary = apiSummaryByCol[col];
+    var top = (summary && summary.top) || [];
+    // Merge in values that are already in the api section but might not be in `top`.
+    var seen = {};
+    var mergedValues = [];
+    top.forEach(function (t) { seen[t.value] = true; mergedValues.push({ value: t.value, count: t.count, pct: t.pct }); });
+    var existingRename = apiCurrent.obs_value_rename[col] || {};
+    var existingHidden = (apiCurrent.obs_value_hidden[col] || []).slice();
+    Object.keys(existingRename).forEach(function (v) { if (!seen[v]) { seen[v] = true; mergedValues.push({ value: v, count: null, pct: null, _carry: true }); } });
+    existingHidden.forEach(function (v) { if (!seen[v]) { seen[v] = true; mergedValues.push({ value: v, count: null, pct: null, _carry: true }); } });
+
+    var vtr = document.createElement('tr');
+    vtr.className = 'api-values-tr';
+    var td = document.createElement('td'); td.colSpan = 5;
+    var panel = document.createElement('div'); panel.className = 'api-values-panel';
+    var note = document.createElement('div'); note.className = 'api-vals-note';
+    note.innerHTML = 'Observed top ' + top.length + ' values (server currently caps at 3)' +
+      (mergedValues.length > top.length ? '; extra rows are values already remapped/hidden in the .md' : '') +
+      '. Editing beyond the observed set requires editing the .md directly.';
+    panel.appendChild(note);
+
+    var tbl = document.createElement('table');
+    var thead = document.createElement('thead');
+    thead.innerHTML = '<tr><th>observed value</th><th>count</th><th style="width:40%">rename to</th><th style="width:80px">hide</th></tr>';
+    tbl.appendChild(thead);
+    var tbody = document.createElement('tbody');
+    var valInputs = [];
+    mergedValues.forEach(function (v) {
+      var row = document.createElement('tr');
+      // observed value
+      var tdVal = document.createElement('td');
+      var span = document.createElement('span'); span.className = 'api-val-name';
+      span.textContent = v.value;
+      tdVal.appendChild(span);
+      if (v._carry) {
+        var tag = document.createElement('span'); tag.className = 'api-val-carry';
+        tag.textContent = 'not in top-N';
+        tag.title = 'This value is not in the observed top values from obs_summary — it comes from the .md.';
+        tdVal.appendChild(tag);
+      }
+      row.appendChild(tdVal);
+      // count
+      var tdCnt = document.createElement('td');
+      tdCnt.className = 'api-val-count';
+      tdCnt.textContent = (v.count == null) ? '—' : (v.count.toLocaleString() + (v.pct != null ? ' (' + v.pct + '%)' : ''));
+      row.appendChild(tdCnt);
+      // rename to
+      var tdRen = document.createElement('td');
+      var renInp = document.createElement('input');
+      renInp.type = 'text'; renInp.className = 'api-val-rename';
+      renInp.placeholder = v.value;
+      renInp.value = existingRename[v.value] || '';
+      renInp.addEventListener('input', function () { markDirty('api'); });
+      tdRen.appendChild(renInp);
+      row.appendChild(tdRen);
+      // hide
+      var tdHide = document.createElement('td');
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = existingHidden.indexOf(v.value) >= 0;
+      cb.addEventListener('change', function () { markDirty('api'); });
+      tdHide.appendChild(cb);
+      row.appendChild(tdHide);
+      tbody.appendChild(row);
+      valInputs.push({ value: v.value, renInp: renInp, hideCb: cb });
+    });
+    tbl.appendChild(tbody);
+    panel.appendChild(tbl);
+    td.appendChild(panel);
+    vtr.appendChild(td);
+    tr.parentNode.insertBefore(vtr, tr.nextSibling);
+    refs.valuesTr = vtr; refs.valuesInputs = valInputs;
+  }
+
+  function updateApiSummary() {
+    if (!apiSummary) return;
+    var total = 0, hidden = 0, renamed = 0;
+    Object.keys(apiRowRefs).forEach(function (col) {
+      total += 1;
+      var r = apiRowRefs[col];
+      if (r.hideCb.checked) hidden += 1;
+      if ((r.renameInp.value || '').trim() !== '') renamed += 1;
+    });
+    apiSummary.textContent = total + ' columns · ' + hidden + ' hidden · ' + renamed + ' renamed';
+  }
+
+  function applyApiFilter() {
+    var q = (apiFilter.value || '').trim().toLowerCase();
+    Object.keys(apiRowRefs).forEach(function (col) {
+      var match = q === '' || col.toLowerCase().indexOf(q) >= 0;
+      var r = apiRowRefs[col];
+      r.tr.style.display = match ? '' : 'none';
+      if (r.valuesTr) r.valuesTr.style.display = match ? '' : 'none';
+    });
+  }
+  apiFilter.addEventListener('input', applyApiFilter);
+
+  // Diff the current UI state against the baseline (apiCurrent) and return
+  // the FULL new api-config body (or null when there are no changes). The
+  // /admin/api-config endpoint interprets a missing field as "leave alone",
+  // so we send ONLY the fields we actually changed — but each field goes
+  // in as the FULL desired list/dict, not a delta.
+  function collectApiChanges() {
+    if (!apiCurrent) return null;
+    var newRename = {}, newHidden = [], newValRename = {}, newValHidden = {};
+    Object.keys(apiRowRefs).forEach(function (col) {
+      var r = apiRowRefs[col];
+      var renameVal = (r.renameInp.value || '').trim();
+      if (renameVal !== '' && renameVal !== col) newRename[col] = renameVal;
+      if (r.hideCb.checked) newHidden.push(col);
+      // Values panel: only reflected if the panel was expanded during this session.
+      // Otherwise carry existing entries forward from apiCurrent verbatim.
+      if (r.valuesInputs) {
+        var perColRename = {}, perColHidden = [];
+        r.valuesInputs.forEach(function (vi) {
+          var rn = (vi.renInp.value || '').trim();
+          if (rn !== '' && rn !== vi.value) perColRename[vi.value] = rn;
+          if (vi.hideCb.checked) perColHidden.push(vi.value);
+        });
+        if (Object.keys(perColRename).length) newValRename[col] = perColRename;
+        if (perColHidden.length) newValHidden[col] = perColHidden;
+      } else {
+        if (apiCurrent.obs_value_rename[col]) newValRename[col] = apiCurrent.obs_value_rename[col];
+        if (apiCurrent.obs_value_hidden[col]) newValHidden[col] = apiCurrent.obs_value_hidden[col];
+      }
+    });
+
+    // Any column in apiCurrent that isn't in our render loop (shouldn't happen —
+    // makeApiRow covers them — but defensive) is preserved verbatim.
+
+    // Change detection against baseline. Only include the fields that actually changed.
+    var changes = {};
+    if (!shallowDictEqual(newRename, apiCurrent.obs_rename)) changes.obs_rename = newRename;
+    if (!shallowArrayEqualAsSet(newHidden, apiCurrent.obs_hidden)) changes.obs_hidden = newHidden;
+    if (!deepDictOfDictEqual(newValRename, apiCurrent.obs_value_rename)) changes.obs_value_rename = newValRename;
+    if (!deepDictOfArrayEqual(newValHidden, apiCurrent.obs_value_hidden)) changes.obs_value_hidden = newValHidden;
+
+    return Object.keys(changes).length ? changes : null;
+  }
+  function shallowDictEqual(a, b) {
+    var ka = Object.keys(a || {}), kb = Object.keys(b || {});
+    if (ka.length !== kb.length) return false;
+    for (var i = 0; i < ka.length; i++) { if (a[ka[i]] !== b[ka[i]]) return false; }
+    return true;
+  }
+  function shallowArrayEqualAsSet(a, b) {
+    a = (a || []).slice().sort(); b = (b || []).slice().sort();
+    if (a.length !== b.length) return false;
+    for (var i = 0; i < a.length; i++) { if (a[i] !== b[i]) return false; }
+    return true;
+  }
+  function deepDictOfDictEqual(a, b) {
+    var ka = Object.keys(a || {}), kb = Object.keys(b || {});
+    if (ka.length !== kb.length) return false;
+    for (var i = 0; i < ka.length; i++) { if (!shallowDictEqual(a[ka[i]], (b || {})[ka[i]])) return false; }
+    return true;
+  }
+  function deepDictOfArrayEqual(a, b) {
+    var ka = Object.keys(a || {}), kb = Object.keys(b || {});
+    if (ka.length !== kb.length) return false;
+    for (var i = 0; i < ka.length; i++) { if (!shallowArrayEqualAsSet(a[ka[i]], (b || {})[ka[i]])) return false; }
+    return true;
+  }
+
 })();
 </script>
 {% endblock %}
