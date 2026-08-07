@@ -1475,7 +1475,7 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.31.0"
+API_VERSION = "2.32.0"
 API_VERSION_RELEASED = "2026-07-02"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
@@ -9580,6 +9580,145 @@ async def restore_database(db_id: str):
     result = connection_pool.restore(db_url)
     log.info("admin.restore db_id=%s result=%s", db_id, result)
     return result
+
+
+@app.post("/admin/refresh-views/{db_id:path}", tags=["admin"])
+async def refresh_views(db_id: str):
+    """Rebuild the obscat/obsnum views on this dataset's duckdb from the
+    current .md ``api:`` section (obs_rename / obs_hidden).
+
+    Useful after editing the .md's api section out-of-band (via a text
+    editor or a git pull) — the views need a rebuild for the change to
+    take effect. Called internally by /admin/api-config after a write;
+    can be called directly for a manual refresh.
+
+    Applies the release → open r/w → CREATE OR REPLACE VIEW → restore
+    dance so an in-flight query completes cleanly.
+    """
+    from anthive_db import build_obs_view_sql, safe_ident  # noqa: PLC0415
+    from metadata import parse_md_file, get_api_config, MetadataError  # noqa: PLC0415
+    import duckdb as _duckdb  # noqa: PLC0415
+
+    try:
+        duckdb_url = registry.get_database_path(db_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"db_id {db_id!r} not found")
+
+    md_path = registry._db_md_bases.get(db_id)
+    if md_path is None or not md_path.exists():
+        raise HTTPException(400, detail=f"no .md on disk for {db_id}")
+    duckdb_path = Path(str(duckdb_url).replace('file://', ''))
+    if not duckdb_path.exists():
+        raise HTTPException(400, detail=f"duckdb not local: {duckdb_path}")
+
+    try:
+        yaml_dict, _ = parse_md_file(md_path)
+        api_config = get_api_config(yaml_dict)
+    except MetadataError as exc:
+        raise HTTPException(400, detail=f"invalid api: section in {md_path.name}: {exc}")
+
+    # Release from pool so we can open r/w.
+    release_result = connection_pool.release(
+        duckdb_url, duration_seconds=60.0, drain_timeout_seconds=30.0,
+    )
+    if not release_result.get('ok'):
+        raise HTTPException(503, detail=f"could not release {db_id} from pool: {release_result}")
+
+    try:
+        conn = _duckdb.connect(str(duckdb_path), read_only=False)
+        try:
+            rebuilt = []
+            for view_name, underscore in (('obsnum', '__obsnum'), ('obscat', '__obscat')):
+                # Only rebuild if the underscore table actually exists — a
+                # dataset with no obsnum/obscat won't have the view either.
+                exists = conn.execute(
+                    "SELECT COUNT(*) FROM information_schema.tables "
+                    "WHERE table_name = ? AND table_type = 'BASE TABLE'",
+                    [underscore],
+                ).fetchone()[0]
+                if not exists:
+                    continue
+                cols = [r[0] for r in conn.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = ?", [underscore]
+                ).fetchall()]
+                conn.execute(f"DROP VIEW IF EXISTS {safe_ident(view_name)}")
+                conn.execute(build_obs_view_sql(view_name, underscore, cols, api_config))
+                rebuilt.append(view_name)
+            conn.execute("CHECKPOINT")
+        finally:
+            conn.close()
+    finally:
+        connection_pool.restore(duckdb_url)
+
+    # Invalidate the cached obs col list for this dataset so /info picks up
+    # the renamed/hidden cols. Without this the view is fresh on disk but
+    # ant-serve's per-dataset metadata cache still shows the old cols.
+    try:
+        extra = registry._db_extra.get(db_id, {})
+        registry.metadata_cache[db_id] = registry._load_database_metadata(db_id, extra)
+        registry._databases_list_cache = None
+    except Exception as exc:
+        log.warning("admin.refresh-views: metadata reload failed for %s: %s", db_id, exc)
+
+    log.info("admin.refresh-views db_id=%s rebuilt=%s", db_id, rebuilt)
+    return {
+        'status': 'success',
+        'db_id': db_id,
+        'rebuilt': rebuilt,
+        'obs_rename': api_config['obs_rename'],
+        'obs_hidden': api_config['obs_hidden'],
+    }
+
+
+@app.post("/admin/api-config/{db_id:path}", tags=["admin"])
+async def set_api_config(db_id: str, request: Request):
+    """Update the ``api:`` section in this dataset's .md and rebuild views.
+
+    Body (JSON): ``{"obs_rename": {...}, "obs_hidden": [...]}``. Either
+    field may be omitted; existing values are then left alone. To CLEAR a
+    field, pass an empty ``{}`` or ``[]``.
+
+    Writes only to the .md file — the git commit is the admin's job
+    (h5adstore is a separate repo). Rebuilds the obscat/obsnum views
+    so the change is live immediately.
+    """
+    from metadata import parse_md_file, write_md_file, get_api_config, MetadataError  # noqa: PLC0415
+
+    md_path = registry._db_md_bases.get(db_id)
+    if md_path is None or not md_path.exists():
+        raise HTTPException(404, detail=f"no .md on disk for {db_id}")
+
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, detail="body must be a JSON object")
+    new_rename = body.get('obs_rename')
+    new_hidden = body.get('obs_hidden')
+
+    yaml_dict, body_md = parse_md_file(md_path)
+    api_section = dict(yaml_dict.get('api') or {})
+    if new_rename is not None:
+        if not isinstance(new_rename, dict):
+            raise HTTPException(400, detail="'obs_rename' must be a JSON object")
+        api_section['obs_rename'] = dict(new_rename)
+    if new_hidden is not None:
+        if not isinstance(new_hidden, list):
+            raise HTTPException(400, detail="'obs_hidden' must be a JSON array")
+        api_section['obs_hidden'] = list(new_hidden)
+    yaml_dict['api'] = api_section
+
+    # Validate BEFORE writing to disk. If we accepted a bad api section and
+    # crashed on the next view rebuild, the .md would need manual repair.
+    try:
+        get_api_config(yaml_dict)
+    except MetadataError as exc:
+        raise HTTPException(400, detail=str(exc))
+
+    write_md_file(md_path, yaml_dict, body_md)
+    log.info("admin.api-config db_id=%s wrote %s", db_id, md_path.name)
+
+    # Rebuild views to make the new rename+hide live immediately.
+    return await refresh_views(db_id)
 
 
 @app.post("/admin/rescan", tags=["admin"])

@@ -29,6 +29,59 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.32.0 — 2026-08-07
+
+### Added — `.md` `api:` section + admin endpoints for column rename/hide
+
+New optional section in dataset `.md` YAML frontmatter:
+
+```yaml
+api:
+  obs_rename:
+    Gender: sex               # internal → public
+    Cognitive.Status: cognitive_status
+  obs_hidden:
+    - internal_qc_col
+```
+
+Applied at the `obscat` / `obsnum` **view** projection layer in DuckDB:
+
+* Renamed cols surface under the public alias in every API surface
+  (`/info`, `/plot/*`, `/cells/*`, `/analytics/query` SELECT-side, CSV export).
+* The old internal name is unreachable via the API — any endpoint that
+  references it returns 400 "column not found".
+* `obs_hidden` cols are omitted from the view entirely (same effect as
+  rename, no public alias offered).
+* A rename automatically hides the internal name — no separate hide
+  entry needed.
+* Cols stay unchanged in the underlying `__obsnum` / `__obscat` tables,
+  so internal tools (`ant-annotate`, `ant-score`, direct SQL against
+  `__obsnum`) continue to see the original names.
+
+**Two new admin endpoints:**
+
+* `POST /admin/api-config/{db_id}` — body `{obs_rename, obs_hidden}`
+  writes the api section to the `.md` and rebuilds the views. Both keys
+  are optional; omit to leave existing values alone; pass `{}`/`[]` to
+  clear. Validates: no two renames targeting the same public name; no
+  target colliding with `cell_id`/`cell_name`.
+* `POST /admin/refresh-views/{db_id}` — rebuild the views from the
+  current `.md` without touching it. Useful after an out-of-band
+  edit (text editor, git pull).
+
+Both go through the connection-pool release/restore dance so an
+in-flight query completes before the r/w rebuild.
+
+**h5adstore git**: the `.md` file is written to disk but NOT
+auto-committed — the admin's job to commit + push separately.
+
+**Client impact**: additive. Existing datasets without an `api:`
+section behave unchanged. Clients that read `/info` will see whatever
+names are exposed (rename applied) — they should treat those as the
+canonical names for that dataset.
+
+---
+
 ## 2.31.0 — 2026-07-29
 
 ### Added — `/plot/rolling` — `rank_x`, `show_ci`, `show_ci_corrected`, `step_size`

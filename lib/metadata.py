@@ -304,6 +304,67 @@ def remove_from_lists(yaml_dict: Dict[str, Any], list_keys: List[str], value: st
                 yaml_dict[key].remove(value)
 
 
+_RESERVED_VIEW_COLS = {'cell_id', 'cell_name'}
+
+
+def get_api_config(yaml_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the validated ``api:`` section from a .md's YAML frontmatter.
+
+    Shape:
+        api:
+          obs_rename:
+            <internal_col>: <public_col>       # dict; internal → public
+          obs_hidden:
+            - <internal_col>                    # list of names to drop entirely
+
+    A rename automatically hides the internal name (there is no way to
+    reach the old name from the API once it's renamed). ``obs_hidden`` is
+    for cols that get no public alias.
+
+    Returns:
+        Dict with keys 'obs_rename' (dict) and 'obs_hidden' (list). Both
+        are always present; empty container when not configured.
+
+    Raises:
+        MetadataError on validation failures:
+          - two obs_rename entries mapping to the same public name
+          - a rename target that's a reserved column name (cell_id / cell_name)
+          - a rename target string that's not a valid bare identifier
+    """
+    api = yaml_dict.get('api') or {}
+    if not isinstance(api, dict):
+        raise MetadataError(
+            f"ERROR: [Metadata] 'api:' must be a mapping, got {type(api).__name__}"
+        )
+    rename = api.get('obs_rename') or {}
+    hidden = api.get('obs_hidden') or []
+    if rename and not isinstance(rename, dict):
+        raise MetadataError("ERROR: [Metadata] 'api.obs_rename' must be a mapping")
+    if hidden and not isinstance(hidden, list):
+        raise MetadataError("ERROR: [Metadata] 'api.obs_hidden' must be a list")
+
+    # No duplicate public targets
+    seen_targets = {}
+    for internal, public in rename.items():
+        if not isinstance(public, str) or not public:
+            raise MetadataError(
+                f"ERROR: [Metadata] api.obs_rename['{internal}'] must be a non-empty string"
+            )
+        if public in _RESERVED_VIEW_COLS:
+            raise MetadataError(
+                f"ERROR: [Metadata] api.obs_rename['{internal}'] target '{public}' "
+                f"collides with a reserved view column name"
+            )
+        if public in seen_targets:
+            raise MetadataError(
+                f"ERROR: [Metadata] api.obs_rename collision — "
+                f"both '{seen_targets[public]}' and '{internal}' map to '{public}'"
+            )
+        seen_targets[public] = internal
+
+    return {'obs_rename': dict(rename), 'obs_hidden': list(hidden)}
+
+
 def get_obs_column_assignment(yaml_dict: Dict[str, Any], column_name: str) -> Optional[str]:
     """
     Get which list an obs column is assigned to

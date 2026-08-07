@@ -41,6 +41,73 @@ def safe_ident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
+def build_obs_view_sql(
+    view_name: str,
+    underscore_table: str,
+    columns: List[str],
+    api_config: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Return the ``CREATE VIEW`` SQL for the obscat/obsnum view.
+
+    Applies the ``api_config`` rename+hide to the column projection so the
+    resulting view exposes only public names — internal renamed names are
+    unreachable from any consumer that reads the view. ``cell_id`` is
+    dropped (it's the join key, not a public col); ``cell_name`` is added.
+
+    Shared by ant-convert (initial view build) and AnnotationWriter
+    (view rebuild after ALTER TABLE ADD COLUMN).
+    """
+    api = api_config or {}
+    rename = api.get('obs_rename', {}) or {}
+    hidden = set(api.get('obs_hidden', []) or [])
+
+    # Legacy stored col names include spaces / '#' / '.' etc. — safe_ident's
+    # strict regex refuses them. Since these names come from information_schema
+    # (trusted, already-stored identifiers) we quote them permissively. Public
+    # rename targets still go through safe_ident (strict) so a malicious .md
+    # can't inject SQL via a crafted alias.
+    def _q(name: str) -> str:
+        return '"' + str(name).replace('"', '""') + '"'
+
+    projections = ['c.cell_name']
+    for col in columns:
+        if col == 'cell_id':
+            continue
+        if col in hidden:
+            continue
+        if col in rename:
+            projections.append(f'o.{_q(col)} AS {safe_ident(rename[col])}')
+        else:
+            projections.append(f'o.{_q(col)}')
+    return (
+        f"CREATE VIEW {safe_ident(view_name)} AS "
+        f"SELECT {', '.join(projections)} "
+        f"FROM {_q(underscore_table)} o "
+        f"JOIN __cells c ON o.cell_id = c.cell_id"
+    )
+
+
+def _load_api_config_for(duckdb_path: Path) -> Dict[str, Any]:
+    """Load the api: section from the sibling .md (same stem as the duckdb).
+
+    Best-effort: any error (missing file, YAML issue, validation failure) is
+    swallowed and returns the empty-config dict, since view builds must not
+    crash on a malformed .md. Callers wanting to validate an .md's api
+    section should use ``metadata.get_api_config`` directly.
+    """
+    empty = {'obs_rename': {}, 'obs_hidden': []}
+    try:
+        # Local import to avoid a top-level cycle.
+        from metadata import parse_md_file, get_api_config  # noqa: PLC0415
+        md_path = Path(duckdb_path).with_suffix('.md')
+        if not md_path.exists():
+            return empty
+        yaml_dict, _ = parse_md_file(md_path)
+        return get_api_config(yaml_dict)
+    except Exception:
+        return empty
+
+
 class AnthiveDB:
     """Interface to a single Anthive DuckDB database"""
 
@@ -56,6 +123,10 @@ class AnthiveDB:
         self.db_path = db_path
         self.conn: Optional[duckdb.DuckDBPyConnection] = conn
         self._owns_conn = owns_conn
+        # Loaded lazily on demand — currently only used when _refresh_view is
+        # called from an r/w path (via AnnotationWriter). Read-only AnthiveDB
+        # never rebuilds views, so this stays at the default empty config.
+        self.api_config: Dict[str, Any] = {'obs_rename': {}, 'obs_hidden': []}
 
     def __enter__(self):
         """Context manager entry"""
@@ -1393,6 +1464,10 @@ class AnnotationWriter:
         self.catalog = catalog
         self.db_id = db_id
         self.ant_serve_url = ant_serve_url.rstrip('/') if ant_serve_url else None
+        # Load the .md's api: config so view rebuilds preserve the current
+        # rename+hide. Best-effort — if the sibling .md is missing (fresh
+        # ingest before .md written), we fall back to no-op api_config.
+        self.api_config = _load_api_config_for(self.duckdb_path)
         self.lock_path = self.duckdb_path.with_suffix(self.duckdb_path.suffix + '.lock')
         self.rebuilding_path = self.duckdb_path.with_suffix(
             self.duckdb_path.suffix + '.rebuilding'
@@ -1752,14 +1827,20 @@ class AnnotationWriter:
 
     def _refresh_view(self, view_name: str, underscore_table: str) -> None:
         """DROP & re-CREATE the obscat/obsnum view so new columns are visible.
-        DuckDB binds `o.*` at view creation time."""
+        DuckDB binds ``o.*`` at view creation time, so re-CREATE also
+        applies the current api-config rename+hide from ``self.api_config``.
+        Renamed cols surface under their public alias; hidden cols are
+        omitted from the view entirely — that's how the API layer enforces
+        "old internal names not accessible from outside"."""
+        cols = [row[0] for row in self._conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = ?", [underscore_table]
+        ).fetchall()]
         self._conn.execute(f"DROP VIEW IF EXISTS {safe_ident(view_name)}")
-        self._conn.execute(
-            f"CREATE VIEW {safe_ident(view_name)} AS "
-            f"SELECT c.cell_name, o.* "
-            f"FROM {safe_ident(underscore_table)} o "
-            f"JOIN __cells c ON o.cell_id = c.cell_id"
-        )
+        self._conn.execute(build_obs_view_sql(
+            view_name, underscore_table, cols,
+            getattr(self, 'api_config', None),
+        ))
 
     def _record_pending(
         self,
