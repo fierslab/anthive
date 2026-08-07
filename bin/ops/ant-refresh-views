@@ -144,7 +144,9 @@ def main() -> int:
     if not args.skip_rescan:
         print(f'\nrescanning catalog …')
         try:
-            r = requests.post(f'{base}/admin/rescan', timeout=60)
+            # Rescan iterates the whole store to detect adds/removes and can
+            # take minutes on a fleet with S3-backed catalog entries.
+            r = requests.post(f'{base}/admin/rescan', timeout=600)
             r.raise_for_status()
             body = r.json()
             print(f'  previous → current: {body["previous_count"]} → {body["current_count"]}')
