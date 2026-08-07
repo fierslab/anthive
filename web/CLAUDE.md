@@ -19,8 +19,21 @@ web/
     dataset.html    # one dataset — info, biology, provenance, obs cols, viz
     plot.html       # in-app plot UI (form + preview + downloads)
     about.html      # /about — logo hero, what-it-is, live catalogue counts
-    genesets.html, geneset.html, geneset_experiment.html
+    de_browser.html # term→contrast→gene DE explorer
+    genes.html      # /genes/{g[,g,…]} single-gene atlas OR multi-gene heatmap
+    privacy.html    # /privacy — chat data-handling note (draft copy)
+    # gene-set & module browser:
+    genesets.html          # group selector (gene sets / starCAT / find-by-gene)
+    geneset.html           # one gene set (+ "where it varies most" panel)
+    geneset_experiment.html
+    geneset_starcat.html   # one starCAT program: top-N genes × weight bars
+    geneset_variability.html  # module × dataset variance-explained heatmap
+    # admin (Authelia `admins` only):
+    edit_collection.html   # /admin/edit/{group} — index.md editor
+    edit_dataset.html      # /admin/edit/{group}/{file} — .md + .mus editor
+    admin_feedback.html    # /admin/feedback — chat feedback triage
   anthive_logo.png  # the (white) brand logo — grayscale+alpha, for dark bg
+  topbar_logo.png   # dark-recoloured topbar mark (base64-inlined Jinja global)
   __init__.py       # so the directory imports cleanly if ever needed
   README.md         # user-facing overview
 ```
@@ -55,11 +68,21 @@ line-art logo (grayscale+alpha PNG), so it's shown on a dark hero panel.
 | `/browse/{group}/{file}` | one dataset (info + viz launcher) | `dataset.html` |
 | `/browse/{group}/{file}/plot/{geom}` | interactive plot UI for one geom on one dataset | `plot.html` |
 | `/browse/{group}/{file}/de/{study}` | differential-expression explorer for one study | `de_browser.html` |
-| `/genesets` | top-level geneset study list | `genesets.html` |
+| `/genesets` `?group=genesets\|starcat\|bygene` | group-selector browser | `genesets.html` |
+| `/genesets/variability` `?tag=&statistic=&source=` | module × dataset variance-explained heatmap | `geneset_variability.html` |
+| `/genesets/starcat/{catalog_id}/modules/{module_name}` | one starCAT program (top-N genes × weight) | `geneset_starcat.html` |
 | `/genesets/{study}/{experiment}` | one experiment's geneset list | `geneset_experiment.html` |
-| `/genesets/{study}/{experiment}/{name}` | one geneset's gene table | `geneset.html` |
+| `/genesets/{study}/{experiment}/{name}` | one geneset (+ "where it varies most") | `geneset.html` |
 | `/about` | logo hero + what-it-is + live dataset/collection counts | `about.html` |
-| `/genes/{gene}` | single-gene cross-catalogue expression atlas | `genes.html` |
+| `/genes/{gene[,gene…]}` | single-gene atlas OR multi-gene heatmap (comma list) | `genes.html` |
+| `/privacy` | chat data-handling note (draft) | `privacy.html` |
+| `/admin/edit/{group}` · `/admin/edit/{group}/{file}` | index.md · dataset .md/.mus editors (admin) | `edit_*.html` |
+| `/admin/feedback` | chat-feedback triage (admin) | `admin_feedback.html` |
+
+**Route ordering, geneset routes:** `/genesets/variability` and
+`/genesets/starcat/{catalog_id}/modules/{name}` are registered *before* the
+greedy `/genesets/{study}/{experiment}[/{name}]` routes so `variability` /
+`starcat` aren't read as a study id. Same greedy-converter rule as `/browse`.
 
 The plot page talks to the REST API directly from the browser via JS —
 the FastAPI router doesn't proxy plot requests.  It just hands the
@@ -170,6 +193,93 @@ nothing DE shows):
   persisted). This is why the Sierksma Fig-2 hexbin links render in their
   per-module colours.
 
+## Gene-set & module browser (`/genesets*`)
+
+`/genesets` is a **group-selector** (`?group=`), rendered client-side from JSON
+the server embeds (server fetches `/genesets` + `/catalogs` and passes the data):
+
+- **`genesets`** — gene sets from the registry. Study → experiment **dropdowns**
+  (`antRemember`-persisted), then that experiment's gene-set table. 128 sets
+  across 4 studies made the old dump-everything view unusable; dropdowns show
+  one slice (~15–20 rows). Single-choice dropdowns auto-collapse to a static
+  label.
+- **`starcat`** — starCAT programs from `/catalogs`. Modules grouped by
+  biological `group` with descriptions; derived-score recipes (columns ·
+  weights · threshold) in a `<details>`. Each module links to
+  `geneset_starcat.html` (top-N genes × **weight bars**, from
+  `/catalogs/starcat/{cat}/modules/{name}?top=N`).
+- **`bygene`** — reverse lookup: type a gene → every set/program containing it,
+  split gene-set vs starCAT. Backed by `GET /genesets/by-gene/{gene}`
+  (**pending ant-serve** — shows a graceful "lookup pending" state until it
+  ships; `?gene=` deep-links).
+
+**`geneset.html`** shows `scored_in` (datasets where the set is a pre-computed
+module score) + a **"where it varies most"** panel: top dataset × tag
+associations for that set from `/module-variability?statistic=…`, with a
+value-vs-all-modules range bar (per-(dataset,tag) min/max across all modules).
+
+**`geneset_variability.html`** — fleet-wide **module × dataset heatmap**
+(REST 2.28 `/module-variability`), colour = variance-explained of a chosen
+`tag`. Critical framing (the stats are **per-cell / pseudoreplicated**, not
+donor-level): a dismissable caveat banner (30-day `localStorage` ack), the raw
+`F` statistic is hidden, categorical default is bias-corrected **ω²** (not
+eta²), a warning fires when a tag covers ≤3 datasets, and the colour domain is
+**percentile-clipped** (default 98th, configurable) so one saturating module
+doesn't wash the map. Selectors persisted via `antRemember`.
+
+`/module-variability` gotchas: it NaN-500s at `limit≳5000` → always pass
+`min_abs=0` (drops NaN rows, dodges the 500). `/module-variability/dimensions`
+(selector lists) and a donor-level (pseudobulk) statistic are **pending
+ant-serve** — the client uses a hardcoded tag/statistic fallback meanwhile.
+Naming trap: `/module-variability` keys starCAT rows on **score** names
+(`DAM_pos`) under catalog `MICROGLIA_V1`; `/catalogs` uses **module** names
+(`Microglia_DAM`) under `MICROGLIA_V1_0` — different spelling + module≠score.
+
+## Downloads — raw h5ad + stored files (ant-serve endpoints ADDED here)
+
+Dataset page has a **Downloads** section: fetches `GET /databases/{id}/files`
+(lists the stored artifacts that exist: `h5ad` / `duckdb` / `scores` / `mus`,
+each `{kind, filename, size_bytes, source: s3|local}`) and links each to
+`GET /databases/{id}/download/{kind}`. That endpoint **307-redirects to a
+short-TTL presigned S3 URL** (browser pulls straight from Hetzner object
+storage — no multi-GB proxy) or streams a local `FileResponse`. Gate == catalog
+visibility (any dataset the caller can see is downloadable — public + internal,
+no admin gate). **These two endpoints live in `bin/api/ant-serve`** (registry
+`list_artifacts` / `artifact_download` / `_s3_head_size`) — built from this
+session because the S3 creds are there; see the multi-session note below.
+
+## Plot thumbnails in markdown
+
+Any dataset/collection `.md` can embed a live plot thumbnail with a compact
+scheme: **`![caption](plot:GEOM?params&db=group/file)`** (on a dataset page
+`db` defaults to that dataset; collection markdown must pass `&db=`).
+`browser._expand_plot_thumbnails()` post-processes the rendered markdown:
+`<img src="plot:…">` → `<a href=interactive-plot-page><img src=PNG-endpoint>`
+with small `width/height/dpi` injected if absent, everything else (field,
+colour, palette, transforms) preserved; unresolved `db` → an inline hint, not a
+broken image. Authors never hand-write it — the plot toolbar's **🖼 copy
+thumbnail md** button emits the token (drops size/format, appends `&db=`).
+No ant-serve change: the plot PNG endpoint already exists.
+(Markdown is rendered **unsanitised** — raw HTML/`<script>` passes through and
+there is no CSP; acceptable only because `.md` editing is admin-gated. Harden
+with `nh3`/`bleach` + a CSP if editing ever widens.)
+
+## Admin editors (Authelia `admins` group, `_is_admin(request)`)
+
+- **`/admin/edit/{group}`** (`edit_collection.html`) — collection `index.md`:
+  group/group_id read-only, generic fields, markdown body + preview,
+  `default_dataset` dropdown.
+- **`/admin/edit/{group}/{file}`** (`edit_dataset.html`) — dataset `.md`
+  (curatable whitelist + "Long Description" body) AND a **`.mus` biology-
+  annotation editor** (REST 2.25 `/source.mus`): controlled fields as
+  `<select>`/datalist from `GET /mus/vocab`, minimal-diff PUT, 400 vocab-gate
+  surfaced inline. AI-curation chips (`/curation`) fill both `.md` and `.mus`.
+- **`/admin/feedback`** (`admin_feedback.html`) — triage of chat feedback flags
+  (`GET /chat/feedback`), colour-coded category + flagged message; topbar
+  account menu shows the link only to admins.
+- Non-admin → 403 (`index.html` with an error); the server-side write gate in
+  ant-serve is authoritative. Never add HTTP Basic Auth (see Auth note).
+
 ## Sitewide UI conventions (base.html)
 
 - **Help → hover `ⓘ`.** Verbose/explanatory prose hides behind a small `ⓘ`
@@ -178,6 +288,19 @@ nothing DE shows):
   `info(text)` Jinja macro. Prefer this over inline `<small>` help blocks.
 - **Utility classes** (base.html, DRY — don't inline colors): `.muted`
   (`--text-muted`), `.muted-2` (#94a3b8), `.mono` (monospace).
+- **Remember selection state across reloads — `window.antRemember`** (base.html,
+  `localStorage`): `get(key)` / `set(key,val)` / `bindSelect(sel,key)`. Selection
+  state that ISN'T in the URL (dropdowns, filters) should survive a reload — use
+  this everywhere. Already applied to: `/genesets` group tab + study/experiment
+  + starCAT catalog/category, the variability heatmap tag/statistic/source/
+  colour-scale, the gene-atlas organism/cell/tissue filters + heatmap metric.
+  Per-browser, not per-account.
+- **View switches carry state.** When switching views, keep as much stable as
+  possible. The plot **geom switcher** carries the address-bar params PLUS the
+  settings-panel values (`readSettingsFromForm()` — palette/color_scale/size/
+  fonts, which `syncURL` does NOT write to the URL), so colormap etc. don't
+  reset on switch. Base it on `location.search`, not `buildUrl()`, so
+  auto-prefilled defaults (a smart `y`) don't leak in and misroute the mode.
 - **Topbar brand logo** is `web/topbar_logo.png` (a dark-recoloured crop of the
   Authelia login mark), base64-inlined once and exposed as the Jinja **global**
   `topbar_logo` (`templates.env.globals`), so `base.html` shows it on every page
@@ -197,6 +320,15 @@ nothing DE shows):
   (`/api/chat*`, OpenRouter, session store, the enable gate) is ant-serve's**,
   not here — see `doc/DESIGN_chat_assistant.md` §9 for the locked wire contract
   this client is built to.
+  - **One-time consent gate** (`#chat-gate`): blocks the chat body behind a
+    data-handling notice until `POST /api/chat/ack`; driven by
+    `GET /chat/status.acknowledged` (server-side per-user). `/privacy` has the
+    full note.
+  - **Per-message feedback flag** (`.msg-flag` ⚑ on each assistant bubble):
+    category + optional comment → `POST /api/chat/feedback {session_id,
+    turn_seq, round_idx, category, comment?}`; stays red once flagged.
+    Requires per-message ids from the `message_start` SSE frame + history rows.
+    Triaged at `/admin/feedback`.
 - **dataset.html top layout (2026-06):** breadcrumb → **`.id-strip`** (copy-paste
   ids: data_project · group_id · dataset_id · db_id, each `user-select:all`, hover
   explains; admin **`.id-edit`** ✎ at the right) → **`.ds-prov`** provenance row
@@ -296,7 +428,7 @@ supervisor is alive — in that case `kill -TERM` the `ant-browse` child PID
 directly (find it with `ps -eo pid,cmd | grep ant-browse`) and the running
 supervisor respawns it (and rewrites the state file).
 
-**Tests** live in `tests/test_web_browser.py` (~100 tests, the whole web
+**Tests** live in `tests/test_web_browser.py` (~150 tests, the whole web
 contract). They load `browser.py` via `importlib` (web/ isn't an importable
 package), monkeypatch `browser._api_get` with an in-process fake so **no live
 ant-serve is needed**, drive all routes through a FastAPI `TestClient`, and
@@ -345,10 +477,27 @@ plots at 100 bars", "volcano should fall back to a z-effect axis when log2fc is
 null"), **request it there** instead of working around it in the client — the
 server already returns helpful 400s that `plot.html` surfaces in-status.
 
+Default is to **request** the endpoint from the API session and build the
+client. Occasionally you'll build a server endpoint yourself when the user asks
+and the substance is small (e.g. the `/databases/{id}/files` + `/download/{kind}`
+downloads this session) — the sessions share the worktree so it's possible;
+when you do, **claim it via pika first** so you don't collide, and flag the
+shared-file edits.
+
 Sessions share one git worktree + HEAD, so: **branch before committing**
 (`web/<topic>` for UI work), commit eagerly (keeps `git checkout` safe for the
 other session), FF-merge to `main` + delete the branch + push when shippable.
-Coordinate via `pika message send --to anthive4`.
+Coordinate via pika — the API session reads as **`anthive`** on this host
+(`pika message send --to anthive --from anthive-web …`; `pm` = check inbox
+with `pika message list --me anthive-web --all`).
+
+**Open ant-serve requests the client already consumes (graceful fallback until
+they land):** `GET /genesets/by-gene/{gene}` (find-by-gene search);
+`GET /module-variability/dimensions` + a **donor-level (pseudobulk)** statistic
+(the pseudoreplication fix) + the NaN-500 fix; user-set **`xmin/xmax/ymin/ymax`**
+axis limits on continuous-axis plots; biology-friendly **descriptions** on
+starCAT modules/scores (`.description` on `/catalogs`). Wire each up when shipped
+— no client change needed for most (the fallback path already renders).
 
 ## Gotchas worth keeping in mind
 
