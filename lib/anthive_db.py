@@ -86,12 +86,17 @@ def build_obs_view_sql(
         """
         col_sql = f'o.{_q(col)}'
         alias = rename.get(col, col)
+        # Public rename targets go through the strict safe_ident (defense
+        # against SQL injection via a crafted .md). The default alias
+        # (=stored col name from information_schema) is trusted and can
+        # contain legacy characters like '#' or spaces — quote permissively.
+        alias_sql = safe_ident(alias) if col in rename else _q(alias)
         vhide = list(value_hidden.get(col, []) or [])
         vren = dict(value_rename.get(col, {}) or {})
 
         if not vhide and not vren:
             # Plain projection — same as pre-phase-2 behavior.
-            return f'{col_sql} AS {safe_ident(alias)}'
+            return f'{col_sql} AS {alias_sql}'
 
         branches = []
         if vhide:
@@ -103,7 +108,7 @@ def build_obs_view_sql(
                 f'THEN {"NULL" if new_val is None else _sql_str(new_val)}'
             )
         case_expr = f'CASE {" ".join(branches)} ELSE {col_sql} END'
-        return f'{case_expr} AS {safe_ident(alias)}'
+        return f'{case_expr} AS {alias_sql}'
 
     projections = ['c.cell_name']
     for col in columns:
