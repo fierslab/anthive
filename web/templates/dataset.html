@@ -251,9 +251,10 @@
 
 {# ═══════════════════════════════════════════════════════════════════════
    Tab bar — persistent header above; tabs deep-link via URL hash.
-   Order: Overview, Data, Numerical cols, Categorical cols, Embeddings,
-   Differential expression (only when data present), Downloads (only when a
-   downloadable h5ad is available — filled by JS from /files).
+   Order: Overview, Data (includes Embeddings), Numerical cols,
+   Categorical cols, Differential expression (only when data present),
+   Downloads (only when a downloadable h5ad is available — filled by JS
+   from /files).
    ═══════════════════════════════════════════════════════════════════════ #}
 {% set _num_cols = obs_columns | selectattr('type', 'equalto', 'num') | list %}
 {% set _cat_cols = obs_columns | selectattr('type', 'equalto', 'cat') | list %}
@@ -263,9 +264,6 @@
   <button type="button" class="tab-btn"        data-tab="data"     role="tab">Data</button>
   <button type="button" class="tab-btn"        data-tab="num"      role="tab">Numerical<span class="tab-count">{{ _num_cols|length }}</span></button>
   <button type="button" class="tab-btn"        data-tab="cat"      role="tab">Categorical<span class="tab-count">{{ _cat_cols|length }}</span></button>
-  {% if info and info.obsm_keys %}
-  <button type="button" class="tab-btn"        data-tab="embed"    role="tab">Embeddings<span class="tab-count">{{ info.obsm_keys|length }}</span></button>
-  {% endif %}
   {% if de_studies %}
   <button type="button" class="tab-btn"        data-tab="de"       role="tab">Differential expression<span class="tab-count">{{ de_studies|length }}</span></button>
   {% endif %}
@@ -363,14 +361,20 @@
 
   <h2>Storage</h2>
   <div class="info-col">
-    <div class="info-row"><span class="mk">db id</span><span class="mono">{{ db_id }}</span></div>
-    {% if info.file_id %}<div class="info-row"><span class="mk">file id</span><span class="mono">{{ info.file_id }}</span></div>{% endif %}
-    {% if info.group_id %}<div class="info-row"><span class="mk">group id</span><span class="mono">{{ info.group_id }}</span></div>{% endif %}
     <div class="info-row"><span class="mk">default layer</span><span class="mono">{{ info.default_layer if info.default_layer else 'X' }}</span></div>
-    {% if info.n_cells %}<div class="info-row"><span class="mk">cells (n_obs)</span><span class="mono">{{ "{:,}".format(info.n_cells) }}</span></div>{% endif %}
-    {% if info.n_genes %}<div class="info-row"><span class="mk">genes (n_vars)</span><span class="mono">{{ "{:,}".format(info.n_genes) }}</span></div>{% endif %}
-    {% if info.modified %}<div class="info-row"><span class="mk">last modified</span><span class="mono">{{ info.modified[:10] }}</span></div>{% endif %}
   </div>
+
+  {# Embeddings — merged into the Data tab (used to be its own tab). The
+     subheading + chip list are omitted entirely when no obsm keys exist. #}
+  {% if info and info.obsm_keys %}
+  <h2>Embeddings <span class="muted" style="font-size:12px;font-weight:normal">({{ info.obsm_keys|length }})</span>
+    <span class="info" title="Per-cell 2D layouts (UMAP, PCA, tSNE, custom). Each links to a scatter plot on that embedding.">ⓘ</span></h2>
+  <div style="padding:4px 0">
+      {% for emb in info.obsm_keys %}
+        {% if has_duckdb %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/scatter?embedding={{ emb|urlencode }}" class="chip" title="scatter on {{ emb }}">🗺 {{ emb }}</a>{% else %}<code>{{ emb }}</code>{% endif %}
+      {% endfor %}
+  </div>
+  {% endif %}
 </section>
 
 {# ── Numerical columns tab ────────────────────────────────────────────── #}
@@ -426,19 +430,6 @@
   <div class="tab-empty">no categorical columns in obs</div>
   {% endif %}
 </section>
-
-{# ── Embeddings tab ───────────────────────────────────────────────────── #}
-{% if info and info.obsm_keys %}
-<section class="tab-panel" id="tab-embed" role="tabpanel">
-  <h2>Embeddings <span class="muted" style="font-size:12px;font-weight:normal">({{ info.obsm_keys|length }})</span>
-    <span class="info" title="Per-cell 2D layouts (UMAP, PCA, tSNE, custom). Each links to a scatter plot on that embedding.">ⓘ</span></h2>
-  <div style="padding:4px 0">
-      {% for emb in info.obsm_keys %}
-        {% if has_duckdb %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/scatter?embedding={{ emb|urlencode }}" class="chip" title="scatter on {{ emb }}">🗺 {{ emb }}</a>{% else %}<code>{{ emb }}</code>{% endif %}
-      {% endfor %}
-  </div>
-</section>
-{% endif %}
 
 {# ── Differential expression tab ──────────────────────────────────────── #}
 {% if de_studies %}

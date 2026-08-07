@@ -1522,10 +1522,40 @@ def test_dataset_view_downloads_tab_hidden_by_default(client):
     assert 'display:none' in button_snippet
 
 
-def test_dataset_view_embed_tab_gated_on_obsm(client):
-    # ds1 has X_umap + X_pca in the fake — Embeddings tab shown.
+def test_dataset_view_embeddings_merged_into_data_tab(client):
+    # The standalone Embeddings tab was removed; its content now lives inside
+    # the Data tab as a subsection. When obsm keys exist we expect the
+    # Embeddings subheading + a scatter chip inside the #tab-data panel, and
+    # NO Embeddings tab button.
     resp = client.get("/browse/GroupA/ds1")
-    assert 'data-tab="embed"' in resp.text
+    assert resp.status_code == 200
+    assert 'data-tab="embed"' not in resp.text
+    assert 'id="tab-embed"' not in resp.text
+    # Embeddings subheading appears within the Data tab
+    data_start = resp.text.index('id="tab-data"')
+    data_end = resp.text.index('</section>', data_start)
+    data_panel = resp.text[data_start:data_end]
+    assert '<h2>Embeddings' in data_panel
+    # ds1's fake exposes X_umap → a scatter chip must be inside the Data tab
+    assert 'plot/scatter?embedding=X_umap' in data_panel
+
+
+def test_dataset_view_embeddings_subheading_hidden_when_no_obsm(client, monkeypatch):
+    # If the dataset has no obsm keys, the Embeddings subheading must not
+    # render (but the Data tab itself stays present).
+    def no_obsm(api_url, path):
+        result = _fake_api_get(api_url, path)
+        if path.endswith("/info") and isinstance(result, dict):
+            result = dict(result)
+            result["embeddings"] = {}
+        return result
+    monkeypatch.setattr(browser, "_api_get", no_obsm)
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    # Data tab still present
+    assert 'data-tab="data"' in resp.text
+    # But no Embeddings heading anywhere on the page
+    assert '<h2>Embeddings' not in resp.text
 
 
 def test_dataset_view_downloads_client_filters_to_h5ad(client):
