@@ -313,23 +313,45 @@ def get_api_config(yaml_dict: Dict[str, Any]) -> Dict[str, Any]:
     Shape:
         api:
           obs_rename:
-            <internal_col>: <public_col>       # dict; internal → public
+            <internal_col>: <public_col>       # column-level rename
           obs_hidden:
-            - <internal_col>                    # list of names to drop entirely
+            - <internal_col>                    # drop the col entirely
+          obs_value_rename:
+            <internal_col>:                     # value-level rename
+              <old_value>: <new_value>          # per (col, old-value)
+          obs_value_hidden:
+            <internal_col>:                     # NULL specific values
+              - <value>
 
-    A rename automatically hides the internal name (there is no way to
-    reach the old name from the API once it's renamed). ``obs_hidden`` is
-    for cols that get no public alias.
+    Semantics:
+      * ``obs_rename``: internal → public column name. A rename implicitly
+        hides the internal name (there is no way to reach the old name
+        from the API once it's renamed).
+      * ``obs_hidden``: cols that get no public alias — dropped from the
+        view entirely.
+      * ``obs_value_rename``: rewrites individual values inside a
+        categorical column via a per-column mapping. Multiple old values
+        can map to the same new value ("M"→"male", "male"→"male") — the
+        collapse behavior lets you clean up mixed vocabularies.
+      * ``obs_value_hidden``: values that get NULL'd. Applied BEFORE
+        value_rename, so a hidden value never enters the rename branch.
+
+    The key of ``obs_value_*`` is always the INTERNAL col name (matches
+    ``obs_rename``'s key namespace). Value-level ops apply to categorical
+    cols only (obscat) — silently no-op on obsnum since numeric values
+    don't have vocabularies.
 
     Returns:
-        Dict with keys 'obs_rename' (dict) and 'obs_hidden' (list). Both
-        are always present; empty container when not configured.
+        Dict with keys 'obs_rename' (dict), 'obs_hidden' (list),
+        'obs_value_rename' (dict of dicts), 'obs_value_hidden' (dict of
+        lists). All always present; empty container when not configured.
 
     Raises:
         MetadataError on validation failures:
           - two obs_rename entries mapping to the same public name
-          - a rename target that's a reserved column name (cell_id / cell_name)
-          - a rename target string that's not a valid bare identifier
+          - a rename target that's a reserved column name
+          - obs_value_rename entry that's not str → str
+          - obs_value_hidden entry that's not a list
     """
     api = yaml_dict.get('api') or {}
     if not isinstance(api, dict):
@@ -338,12 +360,19 @@ def get_api_config(yaml_dict: Dict[str, Any]) -> Dict[str, Any]:
         )
     rename = api.get('obs_rename') or {}
     hidden = api.get('obs_hidden') or []
+    value_rename = api.get('obs_value_rename') or {}
+    value_hidden = api.get('obs_value_hidden') or {}
+
     if rename and not isinstance(rename, dict):
         raise MetadataError("ERROR: [Metadata] 'api.obs_rename' must be a mapping")
     if hidden and not isinstance(hidden, list):
         raise MetadataError("ERROR: [Metadata] 'api.obs_hidden' must be a list")
+    if value_rename and not isinstance(value_rename, dict):
+        raise MetadataError("ERROR: [Metadata] 'api.obs_value_rename' must be a mapping")
+    if value_hidden and not isinstance(value_hidden, dict):
+        raise MetadataError("ERROR: [Metadata] 'api.obs_value_hidden' must be a mapping")
 
-    # No duplicate public targets
+    # No duplicate public targets for column-level rename
     seen_targets = {}
     for internal, public in rename.items():
         if not isinstance(public, str) or not public:
@@ -362,7 +391,31 @@ def get_api_config(yaml_dict: Dict[str, Any]) -> Dict[str, Any]:
             )
         seen_targets[public] = internal
 
-    return {'obs_rename': dict(rename), 'obs_hidden': list(hidden)}
+    # Value-level renames: per-column dict of str → str
+    for col, mapping in value_rename.items():
+        if not isinstance(mapping, dict):
+            raise MetadataError(
+                f"ERROR: [Metadata] api.obs_value_rename['{col}'] must be a mapping"
+            )
+        for old_val, new_val in mapping.items():
+            if new_val is not None and not isinstance(new_val, str):
+                # allow int/float new values by coercing to string,
+                # since DuckDB stores obscat values as VARCHAR anyway.
+                mapping[old_val] = str(new_val)
+
+    # Value-level hidden: per-column list
+    for col, vals in value_hidden.items():
+        if not isinstance(vals, list):
+            raise MetadataError(
+                f"ERROR: [Metadata] api.obs_value_hidden['{col}'] must be a list"
+            )
+
+    return {
+        'obs_rename': dict(rename),
+        'obs_hidden': list(hidden),
+        'obs_value_rename': dict(value_rename),
+        'obs_value_hidden': dict(value_hidden),
+    }
 
 
 def get_obs_column_assignment(yaml_dict: Dict[str, Any], column_name: str) -> Optional[str]:

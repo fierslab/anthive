@@ -29,6 +29,41 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.33.0 — 2026-08-07
+
+### Added — value-level rename + hide (`obs_value_rename`, `obs_value_hidden`)
+
+Extends the `api:` section from 2.32 with two more knobs, applied
+inside the same obscat view via `CASE` expressions:
+
+```yaml
+api:
+  obs_value_rename:
+    Gender:                         # collapse mixed vocab
+      M: male
+      F: female
+      Male: male
+      Female: female
+  obs_value_hidden:
+    Gender: [None, Unknown, ""]     # values that get NULL'd
+```
+
+Applied in this order inside the view's CASE for each affected col:
+1. Hidden values → NULL (hide wins over rename if a value is in both)
+2. Rename branches (many→one collapse supported)
+3. Passthrough
+
+Zero-cost to plain (unaffected) cols. Adds a few nanoseconds per row
+per query on cols with a CASE — imperceptible next to plot render
+time. Predicate pushdown still works: `WHERE sex = 'male'` on the
+aliased col gets pushed to `Gender IN ('M', 'male', 'Male')` on the
+underlying table.
+
+Both endpoints (`POST /admin/api-config/{db_id}`,
+`POST /admin/refresh-views/{db_id}`) now accept + echo these fields.
+
+---
+
 ## 2.32.0 — 2026-08-07
 
 ### Added — `.md` `api:` section + admin endpoints for column rename/hide

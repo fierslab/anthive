@@ -60,6 +60,8 @@ def build_obs_view_sql(
     api = api_config or {}
     rename = api.get('obs_rename', {}) or {}
     hidden = set(api.get('obs_hidden', []) or [])
+    value_rename = api.get('obs_value_rename', {}) or {}
+    value_hidden = api.get('obs_value_hidden', {}) or {}
 
     # Legacy stored col names include spaces / '#' / '.' etc. — safe_ident's
     # strict regex refuses them. Since these names come from information_schema
@@ -69,16 +71,47 @@ def build_obs_view_sql(
     def _q(name: str) -> str:
         return '"' + str(name).replace('"', '""') + '"'
 
+    def _sql_str(v: Any) -> str:
+        """Escape a Python value for a SQL string literal."""
+        return "'" + str(v).replace("'", "''") + "'"
+
+    def _projection_for(col: str) -> str:
+        """Build the SELECT-list projection for a single stored column.
+
+        Adds value-level rename+hide via a CASE expression when the col is
+        configured in ``obs_value_rename`` / ``obs_value_hidden``. Ordering
+        inside the CASE: hidden values → NULL FIRST, then rename branches,
+        else passthrough. That way a value that's both hidden and renamed
+        stays NULL (hide wins).
+        """
+        col_sql = f'o.{_q(col)}'
+        alias = rename.get(col, col)
+        vhide = list(value_hidden.get(col, []) or [])
+        vren = dict(value_rename.get(col, {}) or {})
+
+        if not vhide and not vren:
+            # Plain projection — same as pre-phase-2 behavior.
+            return f'{col_sql} AS {safe_ident(alias)}'
+
+        branches = []
+        if vhide:
+            in_list = ', '.join(_sql_str(v) for v in vhide)
+            branches.append(f'WHEN {col_sql} IN ({in_list}) THEN NULL')
+        for old_val, new_val in vren.items():
+            branches.append(
+                f'WHEN {col_sql} = {_sql_str(old_val)} '
+                f'THEN {"NULL" if new_val is None else _sql_str(new_val)}'
+            )
+        case_expr = f'CASE {" ".join(branches)} ELSE {col_sql} END'
+        return f'{case_expr} AS {safe_ident(alias)}'
+
     projections = ['c.cell_name']
     for col in columns:
         if col == 'cell_id':
             continue
         if col in hidden:
             continue
-        if col in rename:
-            projections.append(f'o.{_q(col)} AS {safe_ident(rename[col])}')
-        else:
-            projections.append(f'o.{_q(col)}')
+        projections.append(_projection_for(col))
     return (
         f"CREATE VIEW {safe_ident(view_name)} AS "
         f"SELECT {', '.join(projections)} "

@@ -1475,7 +1475,7 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.32.0"
+API_VERSION = "2.33.0"
 API_VERSION_RELEASED = "2026-07-02"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
@@ -9666,8 +9666,10 @@ async def refresh_views(db_id: str):
         'status': 'success',
         'db_id': db_id,
         'rebuilt': rebuilt,
-        'obs_rename': api_config['obs_rename'],
-        'obs_hidden': api_config['obs_hidden'],
+        'obs_rename':       api_config.get('obs_rename', {}),
+        'obs_hidden':       api_config.get('obs_hidden', []),
+        'obs_value_rename': api_config.get('obs_value_rename', {}),
+        'obs_value_hidden': api_config.get('obs_value_hidden', {}),
     }
 
 
@@ -9692,19 +9694,25 @@ async def set_api_config(db_id: str, request: Request):
     body = await request.json()
     if not isinstance(body, dict):
         raise HTTPException(400, detail="body must be a JSON object")
-    new_rename = body.get('obs_rename')
-    new_hidden = body.get('obs_hidden')
 
     yaml_dict, body_md = parse_md_file(md_path)
     api_section = dict(yaml_dict.get('api') or {})
-    if new_rename is not None:
-        if not isinstance(new_rename, dict):
-            raise HTTPException(400, detail="'obs_rename' must be a JSON object")
-        api_section['obs_rename'] = dict(new_rename)
-    if new_hidden is not None:
-        if not isinstance(new_hidden, list):
-            raise HTTPException(400, detail="'obs_hidden' must be a JSON array")
-        api_section['obs_hidden'] = list(new_hidden)
+
+    _FIELDS = {
+        'obs_rename':       dict,   # {internal → public}
+        'obs_hidden':       list,   # [internal names to drop]
+        'obs_value_rename': dict,   # {col: {old_val → new_val}}
+        'obs_value_hidden': dict,   # {col: [values to NULL]}
+    }
+    for name, expected_type in _FIELDS.items():
+        val = body.get(name)
+        if val is None:
+            continue
+        if not isinstance(val, expected_type):
+            raise HTTPException(400,
+                detail=f"'{name}' must be a JSON {expected_type.__name__}")
+        # copy so we don't share the request body's mutable object
+        api_section[name] = expected_type(val) if expected_type is list else dict(val)
     yaml_dict['api'] = api_section
 
     # Validate BEFORE writing to disk. If we accepted a bad api section and
