@@ -1,0 +1,164 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = ["requests>=2.31.0", "pyyaml>=6.0"]
+# ///
+"""ant-refresh-views — rebuild every duckdb's obscat/obsnum views from the
+current .md api: sections, then rescan the catalog.
+
+The obscat/obsnum views bake in the .md's ``api:`` section (obs_rename +
+obs_hidden + obs_value_rename + obs_value_hidden). When you edit an .md
+by hand (text editor, git pull), the .md changes but the persisted view
+in the duckdb stays stale until ant-serve is asked to rebuild it. This
+script hits POST /admin/refresh-views/{db_id} for every dataset in the
+catalog, then POST /admin/rescan.
+
+Usage:
+  ant refresh-views                          # everything
+  ant refresh-views --filter S25/            # only S25/* datasets
+  ant refresh-views --filter Sierksma2026    # match by group name
+  ant refresh-views --dry-run                # list what would refresh
+  ant refresh-views --api-url URL            # override server URL
+
+Exit code is non-zero if any refresh failed (rescan is still attempted).
+"""
+from __future__ import annotations
+import argparse
+import sys
+import time
+from pathlib import Path
+
+import requests
+import yaml
+
+
+def _api_url_from_config() -> str:
+    """Read anthive.yaml → rest_api_host + rest_api_port; default localhost:8080."""
+    try:
+        script_dir = Path(__file__).resolve().parent
+        cfg_path = script_dir.parent.parent / 'anthive.yaml'
+        if cfg_path.exists():
+            cfg = yaml.safe_load(cfg_path.read_text()) or {}
+            host = cfg.get('rest_api_host', 'localhost')
+            port = cfg.get('rest_api_port', 8080)
+            # 0.0.0.0 → localhost for outbound calls
+            if host in ('0.0.0.0', ''):
+                host = 'localhost'
+            return f'http://{host}:{port}'
+    except Exception:
+        pass
+    return 'http://localhost:8080'
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog='ant refresh-views',
+        description='Rebuild all duckdb obscat/obsnum views from .md api: sections, then rescan.',
+    )
+    parser.add_argument('--filter', default=None,
+        help='Only refresh db_ids or paths matching this substring '
+             '(e.g. "S25/", "Sierksma2026", "F26/MSC")')
+    parser.add_argument('--dry-run', action='store_true',
+        help='List targets without refreshing')
+    parser.add_argument('--api-url', default=None,
+        help='Override the ant-serve URL (default: from anthive.yaml)')
+    parser.add_argument('--skip-rescan', action='store_true',
+        help='Skip the final /admin/rescan (view refresh only)')
+    args = parser.parse_args()
+
+    base = (args.api_url or _api_url_from_config()).rstrip('/')
+
+    try:
+        resp = requests.get(f'{base}/databases', timeout=30)
+        resp.raise_for_status()
+    except Exception as exc:
+        print(f'ERROR: could not reach ant-serve at {base}: {exc}', file=sys.stderr)
+        return 2
+    entries = resp.json().get('databases', [])
+    print(f'Found {len(entries)} datasets on {base}')
+
+    if args.filter:
+        needle = args.filter
+        entries = [e for e in entries
+                   if needle in e.get('id', '') or needle in e.get('path', '')]
+        print(f'After filter {needle!r}: {len(entries)} to refresh')
+    else:
+        print('Refreshing all datasets')
+
+    if args.dry_run:
+        for e in entries:
+            print(f'  [dry-run] {e["id"]}  ({e.get("path", "?")})')
+        return 0
+
+    n_ok, n_fail, n_skip = 0, 0, 0
+    failures = []
+    t0 = time.time()
+    for i, e in enumerate(entries, 1):
+        db_id = e['id']
+        try:
+            r = requests.post(f'{base}/admin/refresh-views/{db_id}',
+                              timeout=60)
+        except Exception as exc:
+            n_fail += 1
+            failures.append((db_id, f'network: {exc}'))
+            print(f'  [{i:>3d}/{len(entries)}] ✗ {db_id}  network: {exc}')
+            continue
+
+        if r.status_code == 200:
+            body = r.json()
+            rebuilt = body.get('rebuilt', [])
+            rename_n = len(body.get('obs_rename') or {})
+            hidden_n = len(body.get('obs_hidden') or [])
+            vrename_n = sum(len(v) for v in (body.get('obs_value_rename') or {}).values())
+            vhidden_n = sum(len(v) for v in (body.get('obs_value_hidden') or {}).values())
+            has_api = bool(rename_n or hidden_n or vrename_n or vhidden_n)
+            if has_api:
+                summary = f'rename={rename_n} hidden={hidden_n} vrename={vrename_n} vhidden={vhidden_n}'
+            else:
+                summary = 'no api section'
+            marker = '✓' if rebuilt else '·'
+            print(f'  [{i:>3d}/{len(entries)}] {marker} {db_id}  rebuilt={rebuilt}  {summary}')
+            n_ok += 1
+        elif r.status_code == 400 and '400' in str(r.text) and 'no .md' in r.text.lower():
+            n_skip += 1
+            print(f'  [{i:>3d}/{len(entries)}] · {db_id}  (no local .md)')
+        else:
+            n_fail += 1
+            detail = ''
+            try:
+                detail = r.json().get('detail', r.text)[:200]
+            except Exception:
+                detail = r.text[:200]
+            failures.append((db_id, f'{r.status_code}: {detail}'))
+            print(f'  [{i:>3d}/{len(entries)}] ✗ {db_id}  {r.status_code}: {detail}')
+
+    dt = time.time() - t0
+    print(f'\nrefresh summary: {n_ok} ok, {n_skip} skipped, {n_fail} failed  ({dt:.1f}s)')
+
+    if failures:
+        print('\nfailures:')
+        for db_id, msg in failures[:10]:
+            print(f'  {db_id}: {msg}')
+        if len(failures) > 10:
+            print(f'  … and {len(failures) - 10} more')
+
+    if not args.skip_rescan:
+        print(f'\nrescanning catalog …')
+        try:
+            r = requests.post(f'{base}/admin/rescan', timeout=60)
+            r.raise_for_status()
+            body = r.json()
+            print(f'  previous → current: {body["previous_count"]} → {body["current_count"]}')
+            if body.get('added'):
+                print(f'  added:   {body["added"][:5]}{"…" if len(body["added"]) > 5 else ""}')
+            if body.get('removed'):
+                print(f'  removed: {body["removed"][:5]}{"…" if len(body["removed"]) > 5 else ""}')
+            print(f'  plot cache cleared: {body.get("plot_cache_cleared", 0)}')
+        except Exception as exc:
+            print(f'  ERROR: rescan failed: {exc}')
+            return 3
+
+    return 0 if n_fail == 0 else 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

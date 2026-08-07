@@ -346,6 +346,18 @@ sync-evict:
 # NB: if the upgrade pulled web/ or frontend/ changes, also rebuild the static
 # bundles: `make build-jupyter` and/or `make build-webapp`.
 ANTHIVE_UNIT := anthive-$(firstword $(subst ., ,$(notdir $(CURDIR))))
+
+# refresh-views — rebuild every duckdb's obscat/obsnum view from the
+# current .md api: sections, then rescan the API catalog. Use after
+# hand-edited .md changes (text editor / git pull) that ant-serve
+# hasn't seen yet.
+#
+# Pass FILTER=<substring> to limit scope, e.g.:
+#   make refresh-views FILTER=Sierksma2026
+#   make refresh-views FILTER=F26/
+refresh-views:
+	@./bin/ops/ant-refresh-views $(if $(FILTER),--filter $(FILTER))
+
 refresh-viewer:
 	@echo "==> [1/3] upgrade — git pull --ff-only origin main"
 	@git pull --ff-only origin main
