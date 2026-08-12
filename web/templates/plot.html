@@ -23,6 +23,25 @@
    contain a double-quote (it's an HTML attribute value). #}
 {% macro info(text) %}<span class="info" title="{{ text }}" aria-label="{{ text }}">ⓘ</span>{% endmacro %}
 
+{# Bin-continuous-colour widget (REST API 2.34+). Rendered inside the colour /
+   split-by fieldset it augments — reads as an option of that selector, not a
+   separate section. N blank = don't bin (use as continuous). The client-side
+   logic in the trailing <script> disables the whole block when colour is empty
+   or categorical; on rolling, disables the method select when N is empty (so
+   buildUrl doesn't emit bin_color_method alone). #}
+{% macro bin_color_widget() %}
+<div class="bin-color-widget" id="bin-color-widget" hidden>
+  <label>bin colour into N groups {{ info('Only for continuous colour (numerical obs or gene). Discretises the colour into N equal-count (quantile) or equal-width bins. Leave N blank to keep the colour continuous. On rolling plots with a continuous split-by, N is REQUIRED — the server rejects continuous colour without a bin count.') }}</label>
+  <div class="bin-color-row">
+    <input type="number" name="bin_color" id="f-bin_color" min="2" max="20" step="1" placeholder="don't bin">
+    <select name="bin_color_method" id="f-bin_color_method" title="quantile = equal-count bins (pd.qcut); width = equal-width bins (pd.cut)">
+      <option value="quantile">quantile</option>
+      <option value="width">width</option>
+    </select>
+  </div>
+</div>
+{% endmacro %}
+
 {% block content %}
 <style>
   /* Plot-page-specific styles — kept inline so the rest of the site is unaffected */
@@ -175,6 +194,17 @@
   }
   /* Orientation toggle in the settings size presets. */
   .orient-btn.active { background: #1d4ed8; color: #fff; border-color: #1d4ed8; }
+
+  /* Bin-color widget — visually merged with the colour-by/split-by field it
+     augments.  Sits below the colour input INSIDE the same fieldset (no
+     nested fieldset frame, no extra border), so it reads as an option of
+     that selector, not a separate section. Greys out when disabled. */
+  .bin-color-widget { margin-top: 6px; }
+  .bin-color-widget[hidden] { display: none; }
+  .bin-color-widget.disabled { opacity: 0.45; pointer-events: none; }
+  .bin-color-widget .bin-color-row {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 4px; align-items: end;
+  }
 </style>
 
 <div class="breadcrumb">
@@ -295,6 +325,7 @@
         <input type="text" name="color" id="f-color" autocomplete="off" placeholder="gene name or obs field">
         <div class="ac-suggest" id="ac-color"></div>
       </div>
+      {{ bin_color_widget() }}
       {% if geom == 'hexbin' %}
       <label style="margin-top:4px">grid size (hex columns)</label>
       <input type="number" name="gridsize" id="f-gridsize" value="60" min="10" max="200">
@@ -384,11 +415,13 @@
       {% endif %}
     </fieldset>
     <fieldset>
-      <legend>group by (optional)</legend>
-      <select name="color" id="f-color">
-        <option value="">— none —</option>
-        {% for c in plot_meta.cat_fields %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
-      </select>
+      <legend>group by (optional) {{ info('Categorical → one overlay per group. Continuous field (numerical obs or gene) → REQUIRES bin_color=N (2–20) to bin into groups; else the server rejects with 400.') }}</legend>
+      <label>categorical, OR continuous field to bin</label>
+      <div class="ac-wrap">
+        <input type="text" name="color" id="f-color" autocomplete="off" placeholder="obs field or gene (blank = one overlay)">
+        <div class="ac-suggest" id="ac-color"></div>
+      </div>
+      {{ bin_color_widget() }}
     </fieldset>
 
     {% elif geom == 'heatmap' %}
@@ -438,11 +471,12 @@
     </fieldset>
     <fieldset>
       <legend>split by (optional)</legend>
-      <label>categorical — one line per group, per y field</label>
-      <select name="color" id="f-color">
-        <option value="">— none —</option>
-        {% for c in plot_meta.cat_fields %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
-      </select>
+      <label>categorical (one line per group) — OR a continuous field to bin</label>
+      <div class="ac-wrap">
+        <input type="text" name="color" id="f-color" autocomplete="off" placeholder="obs field or gene (blank = one line per y)">
+        <div class="ac-suggest" id="ac-color"></div>
+      </div>
+      {{ bin_color_widget() }}
     </fieldset>
 
     {% elif geom == 'kde2d' %}
@@ -467,12 +501,13 @@
       {{ transform_select('y') }}
     </fieldset>
     <fieldset>
-      <legend>group by (optional)</legend>
-      <label>categorical → one density per group</label>
-      <select name="color" id="f-color">
-        <option value="">— none —</option>
-        {% for c in plot_meta.cat_fields %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
-      </select>
+      <legend>group by (optional) {{ info('Categorical → one density per group (≤8). Continuous field (numerical obs or gene) → REQUIRES bin_color=N (2–20) to bin into groups; else the server rejects with 400.') }}</legend>
+      <label>categorical, OR continuous field to bin</label>
+      <div class="ac-wrap">
+        <input type="text" name="color" id="f-color" autocomplete="off" placeholder="obs field or gene (blank = one density)">
+        <div class="ac-suggest" id="ac-color"></div>
+      </div>
+      {{ bin_color_widget() }}
     </fieldset>
     <fieldset>
       <legend>density</legend>
@@ -1488,6 +1523,97 @@
       }
     });
   }
+
+  // ── bin-continuous-colour widget (REST API 2.34 / 2.36)
+  // The server accepts bin_color / bin_color_method on scatter, hexbin,
+  // rolling, kde2d, histogram, ecdf, and kde — but ONLY when the resolved
+  // colour is continuous (numerical obs or gene). On rolling / kde2d /
+  // histogram / ecdf / kde, a continuous colour REQUIRES bin_color (else 400).
+  //
+  // Client-side classification of the colour field value:
+  //   '' → OFF   (disable widget entirely)
+  //   value ∈ OBS_CAT   → categorical (disable widget — bin_color ignored server-side)
+  //   value ∈ OBS_NUM   → continuous  (enable widget)
+  //   otherwise         → assume gene (continuous) — we can't verify without
+  //                       hitting /genes, and mistakes just fail on the API
+  //                       side with a clean 400 that showRenderError surfaces.
+  //
+  // Widget behaviour:
+  //   - bin_color empty → disable bin_color_method (so it isn't emitted alone).
+  //   - On rolling with continuous colour + bin_color empty → block render
+  //     with an in-status hint (avoid the server 400 users can't act on).
+  (function () {
+    const BIN_GEOMS = new Set(['scatter', 'hexbin', 'rolling', 'kde2d', 'histogram', 'ecdf', 'kde']);
+    // Geoms where a continuous colour REQUIRES bin_color (server 400 otherwise).
+    // Scatter/hexbin allow continuous colour without binning (just a gradient).
+    const BIN_REQUIRED_GEOMS = new Set(['rolling', 'kde2d', 'histogram', 'ecdf', 'kde']);
+    if (!BIN_GEOMS.has(GEOM)) return;
+    const wrap    = document.getElementById('bin-color-widget');
+    const nInput  = document.getElementById('f-bin_color');
+    const method  = document.getElementById('f-bin_color_method');
+    const colorEl = document.querySelector('#plot-form [name="color"]');
+    if (!wrap || !nInput || !method || !colorEl) return;
+
+    function classifyColor(value) {
+      const v = (value || '').trim();
+      if (!v) return 'none';
+      if (OBS_CAT.includes(v)) return 'categorical';
+      if (OBS_NUM.includes(v)) return 'continuous';
+      return 'gene';   // best-effort — treated as continuous
+    }
+    // Publicly exposed so buildUrl/canRender/etc. can read the current state
+    // without re-classifying — a single source of truth.
+    window.__antBinColorKind = 'none';
+
+    function syncBinColorWidget() {
+      const kind = classifyColor(colorEl.value);
+      window.__antBinColorKind = kind;
+      const continuous = (kind === 'continuous' || kind === 'gene');
+      // Reveal only when the current colour is (likely) continuous — no
+      // grey ghost widget when it can never apply. For scatter/hexbin
+      // (where color is optional) we also hide when there's no colour.
+      wrap.hidden = !continuous;
+      wrap.classList.toggle('disabled', !continuous);
+      // Disable the inputs when hidden — buildUrl/syncURL skip disabled, so
+      // stale values (e.g. after switching from a numerical to a categorical
+      // colour) don't leak into the URL.
+      nInput.disabled = !continuous;
+      // method is only meaningful when N is set — disable it otherwise so it
+      // isn't emitted alone.
+      const nSet = !!(nInput.value || '').trim();
+      method.disabled = !continuous || !nSet;
+    }
+    colorEl.addEventListener('input',  syncBinColorWidget);
+    colorEl.addEventListener('change', syncBinColorWidget);
+    nInput.addEventListener('input',   syncBinColorWidget);
+    nInput.addEventListener('change',  syncBinColorWidget);
+    // Initial sync — run after prefillFromURL/prefillAndChips have populated
+    // the colour field. Those run synchronously earlier in this IIFE cascade,
+    // so a direct call here reflects the seeded value.
+    syncBinColorWidget();
+
+    // ── rolling / kde2d / histogram / ecdf / kde: continuous colour without a
+    //    bin count → server 400. Block the render before it flies and surface a
+    //    helpful hint in the status line (uses the same canRender()/renderHint()
+    //    escape hatch as DE geoms).
+    if (BIN_REQUIRED_GEOMS.has(GEOM)) {
+      const _canOrig  = canRender;
+      const _hintOrig = renderHint;
+      canRender = function () {
+        if (!_canOrig()) return false;
+        const kind = window.__antBinColorKind;
+        if ((kind === 'continuous' || kind === 'gene') && !(nInput.value || '').trim())
+          return false;
+        return true;
+      };
+      renderHint = function () {
+        const kind = window.__antBinColorKind;
+        if ((kind === 'continuous' || kind === 'gene') && !(nInput.value || '').trim())
+          return 'a continuous group-by needs a bin count — set N (2–20) in the widget';
+        return _hintOrig();
+      };
+    }
+  })();
 
   // ── hexbin density auto-clip (one-click 10–90% quantile clip)
   (function() {

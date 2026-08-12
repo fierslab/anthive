@@ -29,6 +29,102 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.36.1 — 2026-08-08
+
+### Fixed — `/notebook` endpoint 500 on `bin_color` and other recently-added params
+
+`_NOTEBOOK_PARAM_TYPES` (the coercion table that turns raw query-string
+values into typed Python for the notebook builder) was stale. Any URL
+param not listed there was passed to the plot handler as `str`, so
+`?bin_color=3` became `bin_color="3"` and blew up inside `pd.qcut` with
+a numpy `str >= int` comparison. Same class of bug for any recently-
+added param.
+
+Added coercion for: `bin_color` (int), `step_size` (int),
+`clip_x`/`clip_y` (float), `show_ci`/`show_ci_corrected`/`rank_x`/
+`sort_desc` (bool).
+
+Callers that already worked continue to work; this is strictly a
+bug-fix for the notebook path.
+
+---
+
+## 2.36.0 — 2026-08-07
+
+### Added — `bin_color` on `/plot/histogram`, `/plot/ecdf`, `/plot/kde`
+
+Extends the numerical-to-categorical binning pattern (2.34 for
+scatter/hexbin/rolling; 2.35 for kde2d) to the three univariate
+distribution geoms. `color` may now be numerical or gene when paired
+with `bin_color=N`; the distribution is then split into N per-group
+overlays. Requiring `bin_color` for continuous `color` (else 400) also
+closes a soft failure where a raw numerical hue silently produced an
+un-plottable per-value legend.
+
+Additive.
+
+---
+
+## 2.35.0 — 2026-08-07
+
+### Added — multi-category overlay on `/plot/kde2d`
+
+`/plot/kde2d` now accepts `color`, `bin_color`, and `bin_color_method`
+(same semantics as scatter/hexbin/rolling). When `color` is set:
+
+- Categorical → one line-contour set per group, overlaid on shared
+  axes; distinct palette colour per group + category legend.
+- Numerical or gene → require `bin_color=N` to bin first (else 400).
+
+Groups are capped at 8 (readable overlay ceiling). Groups with fewer
+than 5 finite points appear in the legend as ``(n=X, no KDE)`` without
+drawn contours. Filled-contour density + colorbar are only shown in
+single-group (no `color`) mode; multi-group renders line contours with
+faint 10% α fills so overlapping regions read cleanly.
+
+Bandwidth, transforms, and the evaluation grid are shared across
+groups so contours can be visually compared 1:1.
+
+Additive.
+
+---
+
+## 2.34.0 — 2026-08-07
+
+### Added — on-the-fly binning of continuous colour fields (`bin_color`, `bin_color_method`)
+
+Two new optional query params on `/plot/scatter` and `/plot/hexbin`:
+
+| Param | Values | Effect |
+| --- | --- | --- |
+| `bin_color` | int, 2–20 | Bin a numerical-obs or gene `color` into N categorical bins before plotting. Ignored when `color` is already categorical or unset. |
+| `bin_color_method` | `quantile` (default) or `width` | `quantile` = equal-count bins (`pd.qcut`); `width` = equal-width bins (`pd.cut`). |
+
+Bin labels are formatted `"[NN] lo-hi"` with a zero-padded index prefix
+so the alphabetical legend sort respects bin order. The colour field
+name is rewritten to `"<col> · N method bins"` so the legend title
+and figure caption self-document.
+
+Example — colour a UMAP by age binned into 3 equal-count groups:
+
+```
+GET /api/databases/S25/PhM/plot/scatter?color=Age&bin_color=3
+```
+
+Example — colour by CX3CR1 expression, 5 equal-width bins:
+
+```
+GET /api/databases/S25/PhM/plot/hexbin?color=CX3CR1&bin_color=5&bin_color_method=width
+```
+
+Quantile binning uses `duplicates='drop'`; if many values coincide (dropout
+genes, discrete metadata), the actual bin count is smaller than requested
+and the resulting field name / caption reflects it.
+
+Additive. Callers that don't pass `bin_color` see identical behaviour to 2.33.
+
+---
+
 ## 2.33.0 — 2026-08-07
 
 ### Added — value-level rename + hide (`obs_value_rename`, `obs_value_hidden`)

@@ -1,0 +1,5388 @@
+[
+  {
+    "study": "AlbertiniZielonka2025",
+    "stem": "scrna_lecMicro_cleaned_integrated_sctransform",
+    "title": "scrna_lecMicro_cleaned_integrated_sctransform",
+    "n_cells": 22420,
+    "tech": "10x_chromium",
+    "pending": 43,
+    "qa": {
+      "cells": "22,420",
+      "overlap": "2,041 / 2,727",
+      "residual": "1.972  (high > 0.7 = poor coverage)",
+      "wc_pct": "47.4% \u26a0 likely whole-cell",
+      "dc_pct": "53.7% \u26a0 DC contamination"
+    },
+    "identity_dist": [
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 10549
+      },
+      {
+        "label": "Homeostatic",
+        "n": 3231
+      },
+      {
+        "label": "Lipid_LAM",
+        "n": 2098
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 1725
+      },
+      {
+        "label": "IRM",
+        "n": 1602
+      },
+      {
+        "label": "DC_pDC",
+        "n": 1043
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 758
+      },
+      {
+        "label": "Border_CAM",
+        "n": 624
+      },
+      {
+        "label": "Cycling",
+        "n": 241
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 203
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 163
+      },
+      {
+        "label": "DAM",
+        "n": 146
+      },
+      {
+        "label": "DC_Mature",
+        "n": 37
+      }
+    ],
+    "state_score_cols": [
+      [
+        "HM",
+        "HM_enriched1"
+      ],
+      [
+        "DAM",
+        "DAM_enriched1"
+      ],
+      [
+        "IRM",
+        "IRM_enriched1"
+      ],
+      [
+        "HLA",
+        "HLA_enriched1"
+      ],
+      [
+        "CRM",
+        "tCRM_enriched1"
+      ],
+      [
+        "RM",
+        "TRM_enriched1"
+      ]
+    ],
+    "state_score_table": [
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 10549,
+        "HM": 0.299,
+        "DAM": 0.18,
+        "IRM": 0.07,
+        "HLA": 0.491,
+        "CRM": 0.23,
+        "RM": 0.497
+      },
+      {
+        "label": "Homeostatic",
+        "n": 3231,
+        "HM": 0.257,
+        "DAM": 0.216,
+        "IRM": 0.089,
+        "HLA": 0.538,
+        "CRM": 0.237,
+        "RM": 0.525
+      },
+      {
+        "label": "Lipid_LAM",
+        "n": 2098,
+        "HM": 0.054,
+        "DAM": 0.423,
+        "IRM": 0.113,
+        "HLA": 0.718,
+        "CRM": 0.151,
+        "RM": 0.681
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 1725,
+        "HM": 0.135,
+        "DAM": 0.284,
+        "IRM": 0.117,
+        "HLA": 0.751,
+        "CRM": 0.22,
+        "RM": 0.707
+      },
+      {
+        "label": "IRM",
+        "n": 1602,
+        "HM": 0.157,
+        "DAM": 0.25,
+        "IRM": 0.279,
+        "HLA": 0.61,
+        "CRM": 0.217,
+        "RM": 0.603
+      },
+      {
+        "label": "DC_pDC",
+        "n": 1043,
+        "HM": 0.149,
+        "DAM": 0.258,
+        "IRM": 0.094,
+        "HLA": 0.702,
+        "CRM": 0.202,
+        "RM": 0.745
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 758,
+        "HM": 0.12,
+        "DAM": 0.257,
+        "IRM": 0.078,
+        "HLA": 0.761,
+        "CRM": 0.158,
+        "RM": 0.83
+      },
+      {
+        "label": "Border_CAM",
+        "n": 624,
+        "HM": 0.21,
+        "DAM": 0.23,
+        "IRM": 0.094,
+        "HLA": 0.613,
+        "CRM": 0.249,
+        "RM": 0.624
+      },
+      {
+        "label": "Cycling",
+        "n": 241,
+        "HM": 0.138,
+        "DAM": 0.216,
+        "IRM": 0.09,
+        "HLA": 0.578,
+        "CRM": 0.162,
+        "RM": 0.638
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 203,
+        "HM": 0.095,
+        "DAM": 0.269,
+        "IRM": 0.109,
+        "HLA": 0.76,
+        "CRM": 0.194,
+        "RM": 0.797
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 163,
+        "HM": 0.127,
+        "DAM": 0.256,
+        "IRM": 0.09,
+        "HLA": 0.736,
+        "CRM": 0.191,
+        "RM": 0.801
+      },
+      {
+        "label": "DAM",
+        "n": 146,
+        "HM": 0.205,
+        "DAM": 0.259,
+        "IRM": 0.106,
+        "HLA": 0.635,
+        "CRM": 0.263,
+        "RM": 0.611
+      },
+      {
+        "label": "DC_Mature",
+        "n": 37,
+        "HM": 0.12,
+        "DAM": 0.276,
+        "IRM": 0.154,
+        "HLA": 0.687,
+        "CRM": 0.25,
+        "RM": 0.707
+      }
+    ],
+    "label_col": "Cluster_coarse",
+    "label_xtab": [
+      {
+        "starcat_label": "Border_CAM",
+        "C3-high": 24.0,
+        "CRM": 144.0,
+        "DAM": 19.0,
+        "HLA": 30.0,
+        "HM": 177.0,
+        "IRM": 29.0,
+        "Prolif": 3.0,
+        "RM": 103.0,
+        "tCRM": 95.0
+      },
+      {
+        "starcat_label": "Cycling",
+        "C3-high": 4.0,
+        "CRM": 22.0,
+        "DAM": 1.0,
+        "HLA": 0.0,
+        "HM": 21.0,
+        "IRM": 6.0,
+        "Prolif": 156.0,
+        "RM": 15.0,
+        "tCRM": 16.0
+      },
+      {
+        "starcat_label": "DAM",
+        "C3-high": 4.0,
+        "CRM": 41.0,
+        "DAM": 12.0,
+        "HLA": 1.0,
+        "HM": 41.0,
+        "IRM": 7.0,
+        "Prolif": 1.0,
+        "RM": 16.0,
+        "tCRM": 23.0
+      },
+      {
+        "starcat_label": "DC_Mature",
+        "C3-high": 0.0,
+        "CRM": 12.0,
+        "DAM": 0.0,
+        "HLA": 1.0,
+        "HM": 2.0,
+        "IRM": 12.0,
+        "Prolif": 0.0,
+        "RM": 7.0,
+        "tCRM": 3.0
+      },
+      {
+        "starcat_label": "DC_cDC1",
+        "C3-high": 0.0,
+        "CRM": 30.0,
+        "DAM": 7.0,
+        "HLA": 23.0,
+        "HM": 23.0,
+        "IRM": 14.0,
+        "Prolif": 0.0,
+        "RM": 52.0,
+        "tCRM": 14.0
+      },
+      {
+        "starcat_label": "DC_cDC2",
+        "C3-high": 12.0,
+        "CRM": 81.0,
+        "DAM": 30.0,
+        "HLA": 111.0,
+        "HM": 132.0,
+        "IRM": 31.0,
+        "Prolif": 2.0,
+        "RM": 306.0,
+        "tCRM": 53.0
+      },
+      {
+        "starcat_label": "DC_pDC",
+        "C3-high": 23.0,
+        "CRM": 194.0,
+        "DAM": 49.0,
+        "HLA": 95.0,
+        "HM": 171.0,
+        "IRM": 71.0,
+        "Prolif": 10.0,
+        "RM": 305.0,
+        "tCRM": 125.0
+      },
+      {
+        "starcat_label": "HLA_MHCII",
+        "C3-high": 26.0,
+        "CRM": 296.0,
+        "DAM": 413.0,
+        "HLA": 203.0,
+        "HM": 216.0,
+        "IRM": 93.0,
+        "Prolif": 8.0,
+        "RM": 268.0,
+        "tCRM": 202.0
+      },
+      {
+        "starcat_label": "Homeostatic",
+        "C3-high": 146.0,
+        "CRM": 386.0,
+        "DAM": 377.0,
+        "HLA": 57.0,
+        "HM": 1192.0,
+        "IRM": 188.0,
+        "Prolif": 25.0,
+        "RM": 400.0,
+        "tCRM": 460.0
+      },
+      {
+        "starcat_label": "Homeostatic_MERTK",
+        "C3-high": 460.0,
+        "CRM": 1255.0,
+        "DAM": 296.0,
+        "HLA": 172.0,
+        "HM": 4918.0,
+        "IRM": 569.0,
+        "Prolif": 57.0,
+        "RM": 1582.0,
+        "tCRM": 1240.0
+      },
+      {
+        "starcat_label": "IRM",
+        "C3-high": 13.0,
+        "CRM": 192.0,
+        "DAM": 36.0,
+        "HLA": 41.0,
+        "HM": 64.0,
+        "IRM": 1095.0,
+        "Prolif": 1.0,
+        "RM": 81.0,
+        "tCRM": 79.0
+      },
+      {
+        "starcat_label": "Lipid_LAM",
+        "C3-high": 24.0,
+        "CRM": 253.0,
+        "DAM": 1344.0,
+        "HLA": 8.0,
+        "HM": 81.0,
+        "IRM": 55.0,
+        "Prolif": 3.0,
+        "RM": 245.0,
+        "tCRM": 85.0
+      },
+      {
+        "starcat_label": "Monocyte_Derived",
+        "C3-high": 3.0,
+        "CRM": 34.0,
+        "DAM": 16.0,
+        "HLA": 46.0,
+        "HM": 16.0,
+        "IRM": 18.0,
+        "Prolif": 1.0,
+        "RM": 42.0,
+        "tCRM": 27.0
+      }
+    ],
+    "label_xtab_cols": [
+      "C3-high",
+      "CRM",
+      "DAM",
+      "HLA",
+      "HM",
+      "IRM",
+      "Prolif",
+      "RM",
+      "tCRM"
+    ]
+  },
+  {
+    "study": "Blackburn2026",
+    "stem": "seurat_obj_final",
+    "title": "seurat_obj_final",
+    "n_cells": 73888,
+    "tech": "10x_chromium",
+    "pending": 43,
+    "qa": {
+      "cells": "73,888",
+      "overlap": "2,724 / 2,727",
+      "residual": "2.408  (high > 0.7 = poor coverage)",
+      "wc_pct": "17.8%",
+      "dc_pct": "61.1% \u26a0 DC contamination"
+    },
+    "identity_dist": [
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 54316
+      },
+      {
+        "label": "Homeostatic",
+        "n": 8655
+      },
+      {
+        "label": "Lipid_LAM",
+        "n": 4845
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 1982
+      },
+      {
+        "label": "IRM",
+        "n": 1187
+      },
+      {
+        "label": "DC_pDC",
+        "n": 1116
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 601
+      },
+      {
+        "label": "Cycling",
+        "n": 580
+      },
+      {
+        "label": "Border_CAM",
+        "n": 330
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 203
+      },
+      {
+        "label": "DAM",
+        "n": 51
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 19
+      },
+      {
+        "label": "DC_Mature",
+        "n": 3
+      }
+    ],
+    "state_score_cols": [
+      [
+        "HM",
+        "HM8"
+      ],
+      [
+        "DAM",
+        "DAM6"
+      ],
+      [
+        "IRM",
+        "IRM9"
+      ],
+      [
+        "HLA",
+        "HLA7"
+      ],
+      [
+        "CRM",
+        "CRM5"
+      ],
+      [
+        "RM",
+        "RM10"
+      ],
+      [
+        "prolif",
+        "proliferating2"
+      ],
+      [
+        "DC",
+        "dendritic1"
+      ],
+      [
+        "macro",
+        "macrophage3"
+      ]
+    ],
+    "state_score_table": [
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 54316,
+        "HM": 0.741,
+        "DAM": 0.278,
+        "IRM": 0.086,
+        "HLA": 0.82,
+        "CRM": 0.259,
+        "RM": 0.694,
+        "prolif": -0.048,
+        "DC": -0.009,
+        "macro": 0.001
+      },
+      {
+        "label": "Homeostatic",
+        "n": 8655,
+        "HM": 0.653,
+        "DAM": 0.35,
+        "IRM": 0.092,
+        "HLA": 0.834,
+        "CRM": 0.308,
+        "RM": 0.628,
+        "prolif": -0.045,
+        "DC": -0.079,
+        "macro": -0.133
+      },
+      {
+        "label": "Lipid_LAM",
+        "n": 4845,
+        "HM": 0.355,
+        "DAM": 0.774,
+        "IRM": 0.091,
+        "HLA": 1.08,
+        "CRM": 0.321,
+        "RM": 1.04,
+        "prolif": 0.07,
+        "DC": -0.068,
+        "macro": -0.168
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 1982,
+        "HM": 0.494,
+        "DAM": 0.469,
+        "IRM": 0.117,
+        "HLA": 1.217,
+        "CRM": 0.398,
+        "RM": 1.084,
+        "prolif": 0.014,
+        "DC": -0.04,
+        "macro": -0.131
+      },
+      {
+        "label": "IRM",
+        "n": 1187,
+        "HM": 0.507,
+        "DAM": 0.368,
+        "IRM": 0.716,
+        "HLA": 0.897,
+        "CRM": 0.405,
+        "RM": 0.796,
+        "prolif": -0.03,
+        "DC": -0.042,
+        "macro": 0.061
+      },
+      {
+        "label": "DC_pDC",
+        "n": 1116,
+        "HM": 0.474,
+        "DAM": 0.393,
+        "IRM": 0.103,
+        "HLA": 1.165,
+        "CRM": 0.403,
+        "RM": 1.194,
+        "prolif": 0.029,
+        "DC": 0.19,
+        "macro": -0.103
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 601,
+        "HM": 0.454,
+        "DAM": 0.38,
+        "IRM": 0.112,
+        "HLA": 1.28,
+        "CRM": 0.301,
+        "RM": 1.347,
+        "prolif": 0.032,
+        "DC": 0.209,
+        "macro": -0.114
+      },
+      {
+        "label": "Cycling",
+        "n": 580,
+        "HM": 0.503,
+        "DAM": 0.284,
+        "IRM": 0.117,
+        "HLA": 0.821,
+        "CRM": 0.169,
+        "RM": 0.742,
+        "prolif": 0.759,
+        "DC": -0.052,
+        "macro": -0.074
+      },
+      {
+        "label": "Border_CAM",
+        "n": 330,
+        "HM": 0.492,
+        "DAM": 0.381,
+        "IRM": 0.148,
+        "HLA": 0.989,
+        "CRM": 0.384,
+        "RM": 0.93,
+        "prolif": 0.056,
+        "DC": 0.096,
+        "macro": 0.365
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 203,
+        "HM": 0.363,
+        "DAM": 0.369,
+        "IRM": 0.134,
+        "HLA": 1.336,
+        "CRM": 0.419,
+        "RM": 1.339,
+        "prolif": 0.025,
+        "DC": 0.394,
+        "macro": -0.137
+      },
+      {
+        "label": "DAM",
+        "n": 51,
+        "HM": 0.474,
+        "DAM": 0.47,
+        "IRM": 0.165,
+        "HLA": 1.046,
+        "CRM": 0.366,
+        "RM": 0.874,
+        "prolif": 0.017,
+        "DC": -0.055,
+        "macro": -0.09
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 19,
+        "HM": 0.475,
+        "DAM": 0.363,
+        "IRM": 0.105,
+        "HLA": 1.15,
+        "CRM": 0.388,
+        "RM": 1.275,
+        "prolif": 0.071,
+        "DC": 0.07,
+        "macro": 0.004
+      },
+      {
+        "label": "DC_Mature",
+        "n": 3,
+        "HM": 0.477,
+        "DAM": 0.371,
+        "IRM": 0.172,
+        "HLA": 0.656,
+        "CRM": 0.707,
+        "RM": 0.557,
+        "prolif": -0.101,
+        "DC": -0.072,
+        "macro": 0.1
+      }
+    ],
+    "label_col": "seurat_clusters",
+    "label_xtab": [
+      {
+        "starcat_label": "Border_CAM",
+        "0": 34.0,
+        "1": 44.0,
+        "2": 82.0,
+        "3": 66.0,
+        "4": 25.0,
+        "5": 27.0,
+        "6": 29.0,
+        "7": 5.0,
+        "8": 18.0
+      },
+      {
+        "starcat_label": "Cycling",
+        "0": 0.0,
+        "1": 0.0,
+        "2": 1.0,
+        "3": 0.0,
+        "4": 2.0,
+        "5": 1.0,
+        "6": 576.0,
+        "7": 0.0,
+        "8": 0.0
+      },
+      {
+        "starcat_label": "DAM",
+        "0": 4.0,
+        "1": 6.0,
+        "2": 3.0,
+        "3": 31.0,
+        "4": 5.0,
+        "5": 1.0,
+        "6": 0.0,
+        "7": 1.0,
+        "8": 0.0
+      },
+      {
+        "starcat_label": "DC_Mature",
+        "0": 0.0,
+        "1": 1.0,
+        "2": 0.0,
+        "3": 0.0,
+        "4": 2.0,
+        "5": 0.0,
+        "6": 0.0,
+        "7": 0.0,
+        "8": 0.0
+      },
+      {
+        "starcat_label": "DC_cDC1",
+        "0": 7.0,
+        "1": 1.0,
+        "2": 3.0,
+        "3": 1.0,
+        "4": 3.0,
+        "5": 4.0,
+        "6": 0.0,
+        "7": 0.0,
+        "8": 0.0
+      },
+      {
+        "starcat_label": "DC_cDC2",
+        "0": 117.0,
+        "1": 43.0,
+        "2": 35.0,
+        "3": 79.0,
+        "4": 25.0,
+        "5": 284.0,
+        "6": 10.0,
+        "7": 0.0,
+        "8": 8.0
+      },
+      {
+        "starcat_label": "DC_pDC",
+        "0": 101.0,
+        "1": 224.0,
+        "2": 120.0,
+        "3": 70.0,
+        "4": 40.0,
+        "5": 484.0,
+        "6": 55.0,
+        "7": 0.0,
+        "8": 22.0
+      },
+      {
+        "starcat_label": "HLA_MHCII",
+        "0": 136.0,
+        "1": 255.0,
+        "2": 213.0,
+        "3": 1103.0,
+        "4": 88.0,
+        "5": 125.0,
+        "6": 7.0,
+        "7": 0.0,
+        "8": 55.0
+      },
+      {
+        "starcat_label": "Homeostatic",
+        "0": 2382.0,
+        "1": 2069.0,
+        "2": 813.0,
+        "3": 1846.0,
+        "4": 558.0,
+        "5": 326.0,
+        "6": 185.0,
+        "7": 371.0,
+        "8": 105.0
+      },
+      {
+        "starcat_label": "Homeostatic_MERTK",
+        "0": 20744.0,
+        "1": 13377.0,
+        "2": 8288.0,
+        "3": 2198.0,
+        "4": 3916.0,
+        "5": 2652.0,
+        "6": 1050.0,
+        "7": 1474.0,
+        "8": 617.0
+      },
+      {
+        "starcat_label": "IRM",
+        "0": 7.0,
+        "1": 39.0,
+        "2": 38.0,
+        "3": 107.0,
+        "4": 929.0,
+        "5": 49.0,
+        "6": 12.0,
+        "7": 1.0,
+        "8": 5.0
+      },
+      {
+        "starcat_label": "Lipid_LAM",
+        "0": 79.0,
+        "1": 180.0,
+        "2": 507.0,
+        "3": 3868.0,
+        "4": 59.0,
+        "5": 57.0,
+        "6": 9.0,
+        "7": 10.0,
+        "8": 76.0
+      },
+      {
+        "starcat_label": "Monocyte_Derived",
+        "0": 7.0,
+        "1": 1.0,
+        "2": 5.0,
+        "3": 30.0,
+        "4": 4.0,
+        "5": 152.0,
+        "6": 0.0,
+        "7": 2.0,
+        "8": 2.0
+      }
+    ],
+    "label_xtab_cols": [
+      "0",
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7",
+      "8"
+    ]
+  },
+  {
+    "study": "Blackburn2026",
+    "stem": "seurat_obj_trisomy_initial",
+    "title": "seurat_obj_trisomy_initial",
+    "n_cells": 88582,
+    "tech": "10x_chromium",
+    "pending": 43,
+    "qa": {
+      "cells": "88,582",
+      "overlap": "2,724 / 2,727",
+      "residual": "2.647  (high > 0.7 = poor coverage)",
+      "wc_pct": "14.2%",
+      "dc_pct": "72.1% \u26a0 DC contamination"
+    },
+    "identity_dist": [
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 60326
+      },
+      {
+        "label": "Homeostatic",
+        "n": 9482
+      },
+      {
+        "label": "Lipid_LAM",
+        "n": 5769
+      },
+      {
+        "label": "Border_CAM",
+        "n": 4441
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 2502
+      },
+      {
+        "label": "DC_pDC",
+        "n": 2070
+      },
+      {
+        "label": "IRM",
+        "n": 1551
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 1250
+      },
+      {
+        "label": "Cycling",
+        "n": 770
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 272
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 76
+      },
+      {
+        "label": "DAM",
+        "n": 67
+      },
+      {
+        "label": "DC_Mature",
+        "n": 6
+      }
+    ],
+    "state_score_cols": [],
+    "state_score_table": [],
+    "label_col": null,
+    "label_xtab": [],
+    "label_xtab_cols": []
+  },
+  {
+    "study": "Blackburn2026",
+    "stem": "trisomy_seurat_obj_w_umap",
+    "title": "trisomy_seurat_obj_w_umap",
+    "n_cells": 73888,
+    "tech": "10x_chromium",
+    "pending": 0,
+    "qa": {
+      "cells": "73,888",
+      "overlap": "2,700 / 2,727",
+      "residual": "3.256  (high > 0.7 = poor coverage)",
+      "wc_pct": "21.2%",
+      "dc_pct": "54.0% \u26a0 DC contamination"
+    },
+    "identity_dist": [
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 52810
+      },
+      {
+        "label": "Homeostatic",
+        "n": 8762
+      },
+      {
+        "label": "Lipid_LAM",
+        "n": 5418
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 2452
+      },
+      {
+        "label": "IRM",
+        "n": 1379
+      },
+      {
+        "label": "DC_pDC",
+        "n": 1125
+      },
+      {
+        "label": "Cycling",
+        "n": 707
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 601
+      },
+      {
+        "label": "Border_CAM",
+        "n": 294
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 267
+      },
+      {
+        "label": "DAM",
+        "n": 46
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 26
+      },
+      {
+        "label": "DC_Mature",
+        "n": 1
+      }
+    ],
+    "state_score_cols": [
+      [
+        "HM",
+        "HM8"
+      ],
+      [
+        "DAM",
+        "DAM6"
+      ],
+      [
+        "IRM",
+        "IRM9"
+      ],
+      [
+        "HLA",
+        "HLA7"
+      ],
+      [
+        "CRM",
+        "CRM5"
+      ],
+      [
+        "RM",
+        "RM10"
+      ],
+      [
+        "prolif",
+        "proliferating2"
+      ],
+      [
+        "DC",
+        "dendritic1"
+      ],
+      [
+        "macro",
+        "macrophage3"
+      ]
+    ],
+    "state_score_table": [
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 52810,
+        "HM": 0.744,
+        "DAM": 0.275,
+        "IRM": 0.084,
+        "HLA": 0.817,
+        "CRM": 0.257,
+        "RM": 0.693,
+        "prolif": -0.049,
+        "DC": -0.009,
+        "macro": 0.004
+      },
+      {
+        "label": "Homeostatic",
+        "n": 8762,
+        "HM": 0.664,
+        "DAM": 0.342,
+        "IRM": 0.09,
+        "HLA": 0.823,
+        "CRM": 0.303,
+        "RM": 0.616,
+        "prolif": -0.05,
+        "DC": -0.078,
+        "macro": -0.13
+      },
+      {
+        "label": "Lipid_LAM",
+        "n": 5418,
+        "HM": 0.372,
+        "DAM": 0.755,
+        "IRM": 0.091,
+        "HLA": 1.074,
+        "CRM": 0.324,
+        "RM": 1.029,
+        "prolif": 0.064,
+        "DC": -0.067,
+        "macro": -0.167
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 2452,
+        "HM": 0.51,
+        "DAM": 0.455,
+        "IRM": 0.117,
+        "HLA": 1.192,
+        "CRM": 0.4,
+        "RM": 1.05,
+        "prolif": 0.008,
+        "DC": -0.041,
+        "macro": -0.125
+      },
+      {
+        "label": "IRM",
+        "n": 1379,
+        "HM": 0.53,
+        "DAM": 0.362,
+        "IRM": 0.696,
+        "HLA": 0.885,
+        "CRM": 0.399,
+        "RM": 0.769,
+        "prolif": -0.031,
+        "DC": -0.04,
+        "macro": 0.069
+      },
+      {
+        "label": "DC_pDC",
+        "n": 1125,
+        "HM": 0.491,
+        "DAM": 0.383,
+        "IRM": 0.103,
+        "HLA": 1.15,
+        "CRM": 0.411,
+        "RM": 1.156,
+        "prolif": 0.016,
+        "DC": 0.199,
+        "macro": -0.113
+      },
+      {
+        "label": "Cycling",
+        "n": 707,
+        "HM": 0.525,
+        "DAM": 0.29,
+        "IRM": 0.116,
+        "HLA": 0.814,
+        "CRM": 0.179,
+        "RM": 0.723,
+        "prolif": 0.719,
+        "DC": -0.05,
+        "macro": -0.065
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 601,
+        "HM": 0.484,
+        "DAM": 0.374,
+        "IRM": 0.113,
+        "HLA": 1.255,
+        "CRM": 0.318,
+        "RM": 1.291,
+        "prolif": 0.019,
+        "DC": 0.223,
+        "macro": -0.114
+      },
+      {
+        "label": "Border_CAM",
+        "n": 294,
+        "HM": 0.512,
+        "DAM": 0.386,
+        "IRM": 0.144,
+        "HLA": 1.0,
+        "CRM": 0.389,
+        "RM": 0.934,
+        "prolif": 0.061,
+        "DC": 0.101,
+        "macro": 0.388
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 267,
+        "HM": 0.369,
+        "DAM": 0.37,
+        "IRM": 0.128,
+        "HLA": 1.364,
+        "CRM": 0.417,
+        "RM": 1.366,
+        "prolif": 0.018,
+        "DC": 0.444,
+        "macro": -0.161
+      },
+      {
+        "label": "DAM",
+        "n": 46,
+        "HM": 0.473,
+        "DAM": 0.478,
+        "IRM": 0.175,
+        "HLA": 1.053,
+        "CRM": 0.366,
+        "RM": 0.891,
+        "prolif": 0.04,
+        "DC": -0.065,
+        "macro": -0.078
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 26,
+        "HM": 0.547,
+        "DAM": 0.348,
+        "IRM": 0.098,
+        "HLA": 1.077,
+        "CRM": 0.382,
+        "RM": 1.061,
+        "prolif": -0.033,
+        "DC": 0.207,
+        "macro": -0.144
+      },
+      {
+        "label": "DC_Mature",
+        "n": 1,
+        "HM": 0.528,
+        "DAM": 0.438,
+        "IRM": 0.19,
+        "HLA": 0.75,
+        "CRM": 0.831,
+        "RM": 0.663,
+        "prolif": -0.282,
+        "DC": -0.083,
+        "macro": 0.607
+      }
+    ],
+    "label_col": "seurat_clusters",
+    "label_xtab": [
+      {
+        "starcat_label": "Border_CAM",
+        "0": 31.0,
+        "1": 32.0,
+        "2": 79.0,
+        "3": 57.0,
+        "4": 21.0,
+        "5": 28.0,
+        "6": 27.0,
+        "7": 2.0,
+        "8": 17.0
+      },
+      {
+        "starcat_label": "Cycling",
+        "0": 0.0,
+        "1": 1.0,
+        "2": 3.0,
+        "3": 0.0,
+        "4": 1.0,
+        "5": 1.0,
+        "6": 700.0,
+        "7": 0.0,
+        "8": 1.0
+      },
+      {
+        "starcat_label": "DAM",
+        "0": 2.0,
+        "1": 7.0,
+        "2": 4.0,
+        "3": 25.0,
+        "4": 5.0,
+        "5": 0.0,
+        "6": 2.0,
+        "7": 0.0,
+        "8": 1.0
+      },
+      {
+        "starcat_label": "DC_Mature",
+        "0": 0.0,
+        "1": 0.0,
+        "2": 0.0,
+        "3": 0.0,
+        "4": 1.0,
+        "5": 0.0,
+        "6": 0.0,
+        "7": 0.0,
+        "8": 0.0
+      },
+      {
+        "starcat_label": "DC_cDC1",
+        "0": 3.0,
+        "1": 3.0,
+        "2": 4.0,
+        "3": 2.0,
+        "4": 3.0,
+        "5": 11.0,
+        "6": 0.0,
+        "7": 0.0,
+        "8": 0.0
+      },
+      {
+        "starcat_label": "DC_cDC2",
+        "0": 90.0,
+        "1": 57.0,
+        "2": 43.0,
+        "3": 71.0,
+        "4": 29.0,
+        "5": 296.0,
+        "6": 8.0,
+        "7": 0.0,
+        "8": 7.0
+      },
+      {
+        "starcat_label": "DC_pDC",
+        "0": 91.0,
+        "1": 227.0,
+        "2": 98.0,
+        "3": 47.0,
+        "4": 34.0,
+        "5": 548.0,
+        "6": 55.0,
+        "7": 0.0,
+        "8": 25.0
+      },
+      {
+        "starcat_label": "HLA_MHCII",
+        "0": 186.0,
+        "1": 350.0,
+        "2": 281.0,
+        "3": 1277.0,
+        "4": 118.0,
+        "5": 165.0,
+        "6": 9.0,
+        "7": 0.0,
+        "8": 66.0
+      },
+      {
+        "starcat_label": "Homeostatic",
+        "0": 2547.0,
+        "1": 2169.0,
+        "2": 824.0,
+        "3": 1720.0,
+        "4": 559.0,
+        "5": 322.0,
+        "6": 166.0,
+        "7": 357.0,
+        "8": 98.0
+      },
+      {
+        "starcat_label": "Homeostatic_MERTK",
+        "0": 20536.0,
+        "1": 13083.0,
+        "2": 8113.0,
+        "3": 1882.0,
+        "4": 3740.0,
+        "5": 2433.0,
+        "6": 938.0,
+        "7": 1493.0,
+        "8": 592.0
+      },
+      {
+        "starcat_label": "IRM",
+        "0": 7.0,
+        "1": 67.0,
+        "2": 45.0,
+        "3": 113.0,
+        "4": 1064.0,
+        "5": 62.0,
+        "6": 15.0,
+        "7": 0.0,
+        "8": 6.0
+      },
+      {
+        "starcat_label": "Lipid_LAM",
+        "0": 123.0,
+        "1": 242.0,
+        "2": 607.0,
+        "3": 4178.0,
+        "4": 77.0,
+        "5": 75.0,
+        "6": 12.0,
+        "7": 11.0,
+        "8": 93.0
+      },
+      {
+        "starcat_label": "Monocyte_Derived",
+        "0": 2.0,
+        "1": 2.0,
+        "2": 7.0,
+        "3": 27.0,
+        "4": 4.0,
+        "5": 221.0,
+        "6": 1.0,
+        "7": 1.0,
+        "8": 2.0
+      }
+    ],
+    "label_xtab_cols": [
+      "0",
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7",
+      "8"
+    ]
+  },
+  {
+    "study": "Borrie2025",
+    "stem": "LOF.sc.teset.counts",
+    "title": "LOF.sc.teset.counts",
+    "n_cells": 77684,
+    "tech": "10x_chromium",
+    "pending": 43,
+    "qa": {
+      "cells": "77,684",
+      "overlap": "2,058 / 2,727",
+      "residual": "2.353  (high > 0.7 = poor coverage)",
+      "wc_pct": "39.8% \u26a0 likely whole-cell",
+      "dc_pct": "54.8% \u26a0 DC contamination"
+    },
+    "identity_dist": [
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 40891
+      },
+      {
+        "label": "Homeostatic",
+        "n": 12580
+      },
+      {
+        "label": "Lipid_LAM",
+        "n": 5729
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 5142
+      },
+      {
+        "label": "IRM",
+        "n": 4912
+      },
+      {
+        "label": "DC_pDC",
+        "n": 3089
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 1785
+      },
+      {
+        "label": "Border_CAM",
+        "n": 1732
+      },
+      {
+        "label": "Cycling",
+        "n": 587
+      },
+      {
+        "label": "DAM",
+        "n": 467
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 397
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 330
+      },
+      {
+        "label": "DC_Mature",
+        "n": 43
+      }
+    ],
+    "state_score_cols": [],
+    "state_score_table": [],
+    "label_col": null,
+    "label_xtab": [],
+    "label_xtab_cols": []
+  },
+  {
+    "study": "Davis2025",
+    "stem": "20240812_sexmicroglia",
+    "title": "20240812_sexmicroglia",
+    "n_cells": 43552,
+    "tech": "10x_chromium",
+    "pending": 43,
+    "qa": {
+      "cells": "43,552",
+      "overlap": "2,727 / 2,727",
+      "residual": "1.333  (high > 0.7 = poor coverage)",
+      "wc_pct": "25.0%",
+      "dc_pct": "49.9% \u26a0 DC contamination"
+    },
+    "identity_dist": [
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 25108
+      },
+      {
+        "label": "Homeostatic",
+        "n": 6696
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 4038
+      },
+      {
+        "label": "Lipid_LAM",
+        "n": 3981
+      },
+      {
+        "label": "IRM",
+        "n": 1609
+      },
+      {
+        "label": "DC_pDC",
+        "n": 1089
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 371
+      },
+      {
+        "label": "Border_CAM",
+        "n": 229
+      },
+      {
+        "label": "Cycling",
+        "n": 168
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 138
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 60
+      },
+      {
+        "label": "DC_Mature",
+        "n": 39
+      },
+      {
+        "label": "DAM",
+        "n": 26
+      }
+    ],
+    "state_score_cols": [
+      [
+        "HM",
+        "HM"
+      ],
+      [
+        "DAM",
+        "DAM"
+      ],
+      [
+        "IRM",
+        "IRM"
+      ],
+      [
+        "HLA",
+        "HLA"
+      ],
+      [
+        "CRM",
+        "CRM"
+      ],
+      [
+        "RM",
+        "TRM"
+      ],
+      [
+        "prolif",
+        "proliferating"
+      ]
+    ],
+    "state_score_table": [
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 25108,
+        "HM": 0.704,
+        "DAM": 0.178,
+        "IRM": 0.107,
+        "HLA": 0.728,
+        "CRM": 0.228,
+        "RM": 0.718,
+        "prolif": -0.043
+      },
+      {
+        "label": "Homeostatic",
+        "n": 6696,
+        "HM": 0.631,
+        "DAM": 0.239,
+        "IRM": 0.124,
+        "HLA": 0.784,
+        "CRM": 0.259,
+        "RM": 0.677,
+        "prolif": -0.013
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 4038,
+        "HM": 0.489,
+        "DAM": 0.336,
+        "IRM": 0.197,
+        "HLA": 1.216,
+        "CRM": 0.332,
+        "RM": 1.126,
+        "prolif": 0.11
+      },
+      {
+        "label": "Lipid_LAM",
+        "n": 3981,
+        "HM": 0.382,
+        "DAM": 0.583,
+        "IRM": 0.163,
+        "HLA": 1.108,
+        "CRM": 0.289,
+        "RM": 1.036,
+        "prolif": 0.22
+      },
+      {
+        "label": "IRM",
+        "n": 1609,
+        "HM": 0.455,
+        "DAM": 0.311,
+        "IRM": 0.553,
+        "HLA": 1.032,
+        "CRM": 0.41,
+        "RM": 0.988,
+        "prolif": 0.067
+      },
+      {
+        "label": "DC_pDC",
+        "n": 1089,
+        "HM": 0.514,
+        "DAM": 0.297,
+        "IRM": 0.133,
+        "HLA": 1.069,
+        "CRM": 0.351,
+        "RM": 1.18,
+        "prolif": 0.146
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 371,
+        "HM": 0.521,
+        "DAM": 0.297,
+        "IRM": 0.126,
+        "HLA": 1.156,
+        "CRM": 0.262,
+        "RM": 1.285,
+        "prolif": 0.157
+      },
+      {
+        "label": "Border_CAM",
+        "n": 229,
+        "HM": 0.504,
+        "DAM": 0.269,
+        "IRM": 0.145,
+        "HLA": 0.9,
+        "CRM": 0.277,
+        "RM": 0.983,
+        "prolif": 0.076
+      },
+      {
+        "label": "Cycling",
+        "n": 168,
+        "HM": 0.505,
+        "DAM": 0.294,
+        "IRM": 0.128,
+        "HLA": 1.062,
+        "CRM": 0.295,
+        "RM": 1.193,
+        "prolif": 0.334
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 138,
+        "HM": 0.511,
+        "DAM": 0.287,
+        "IRM": 0.111,
+        "HLA": 1.065,
+        "CRM": 0.348,
+        "RM": 1.165,
+        "prolif": 0.126
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 60,
+        "HM": 0.374,
+        "DAM": 0.358,
+        "IRM": 0.174,
+        "HLA": 1.214,
+        "CRM": 0.282,
+        "RM": 1.266,
+        "prolif": 0.304
+      },
+      {
+        "label": "DC_Mature",
+        "n": 39,
+        "HM": 0.488,
+        "DAM": 0.281,
+        "IRM": 0.12,
+        "HLA": 1.047,
+        "CRM": 0.395,
+        "RM": 1.221,
+        "prolif": 0.053
+      },
+      {
+        "label": "DAM",
+        "n": 26,
+        "HM": 0.471,
+        "DAM": 0.362,
+        "IRM": 0.216,
+        "HLA": 0.896,
+        "CRM": 0.342,
+        "RM": 0.81,
+        "prolif": 0.121
+      }
+    ],
+    "label_col": "annotations",
+    "label_xtab": [
+      {
+        "starcat_label": "Border_CAM",
+        "CRM": 28.0,
+        "DAM": 17.0,
+        "HLA": 5.0,
+        "HM": 46.0,
+        "IRM": 15.0,
+        "RM": 21.0,
+        "tCRM": 97.0
+      },
+      {
+        "starcat_label": "Cycling",
+        "CRM": 17.0,
+        "DAM": 0.0,
+        "HLA": 5.0,
+        "HM": 22.0,
+        "IRM": 1.0,
+        "RM": 22.0,
+        "tCRM": 101.0
+      },
+      {
+        "starcat_label": "DAM",
+        "CRM": 1.0,
+        "DAM": 3.0,
+        "HLA": 3.0,
+        "HM": 6.0,
+        "IRM": 4.0,
+        "RM": 2.0,
+        "tCRM": 7.0
+      },
+      {
+        "starcat_label": "DC_Mature",
+        "CRM": 3.0,
+        "DAM": 0.0,
+        "HLA": 0.0,
+        "HM": 3.0,
+        "IRM": 4.0,
+        "RM": 3.0,
+        "tCRM": 26.0
+      },
+      {
+        "starcat_label": "DC_cDC1",
+        "CRM": 10.0,
+        "DAM": 1.0,
+        "HLA": 5.0,
+        "HM": 17.0,
+        "IRM": 6.0,
+        "RM": 12.0,
+        "tCRM": 87.0
+      },
+      {
+        "starcat_label": "DC_cDC2",
+        "CRM": 36.0,
+        "DAM": 7.0,
+        "HLA": 17.0,
+        "HM": 82.0,
+        "IRM": 7.0,
+        "RM": 69.0,
+        "tCRM": 153.0
+      },
+      {
+        "starcat_label": "DC_pDC",
+        "CRM": 162.0,
+        "DAM": 1.0,
+        "HLA": 91.0,
+        "HM": 109.0,
+        "IRM": 21.0,
+        "RM": 86.0,
+        "tCRM": 619.0
+      },
+      {
+        "starcat_label": "HLA_MHCII",
+        "CRM": 710.0,
+        "DAM": 82.0,
+        "HLA": 734.0,
+        "HM": 713.0,
+        "IRM": 89.0,
+        "RM": 707.0,
+        "tCRM": 1003.0
+      },
+      {
+        "starcat_label": "Homeostatic",
+        "CRM": 1730.0,
+        "DAM": 127.0,
+        "HLA": 856.0,
+        "HM": 3041.0,
+        "IRM": 119.0,
+        "RM": 365.0,
+        "tCRM": 458.0
+      },
+      {
+        "starcat_label": "Homeostatic_MERTK",
+        "CRM": 7584.0,
+        "DAM": 125.0,
+        "HLA": 1639.0,
+        "HM": 10882.0,
+        "IRM": 356.0,
+        "RM": 610.0,
+        "tCRM": 3912.0
+      },
+      {
+        "starcat_label": "IRM",
+        "CRM": 446.0,
+        "DAM": 16.0,
+        "HLA": 44.0,
+        "HM": 114.0,
+        "IRM": 595.0,
+        "RM": 112.0,
+        "tCRM": 282.0
+      },
+      {
+        "starcat_label": "Lipid_LAM",
+        "CRM": 113.0,
+        "DAM": 2006.0,
+        "HLA": 944.0,
+        "HM": 357.0,
+        "IRM": 30.0,
+        "RM": 375.0,
+        "tCRM": 156.0
+      },
+      {
+        "starcat_label": "Monocyte_Derived",
+        "CRM": 2.0,
+        "DAM": 12.0,
+        "HLA": 3.0,
+        "HM": 10.0,
+        "IRM": 1.0,
+        "RM": 16.0,
+        "tCRM": 16.0
+      }
+    ],
+    "label_xtab_cols": [
+      "CRM",
+      "DAM",
+      "HLA",
+      "HM",
+      "IRM",
+      "RM",
+      "tCRM"
+    ]
+  },
+  {
+    "study": "Davis2025",
+    "stem": "davis2025.20250619",
+    "title": "davis2025.20250619",
+    "n_cells": 43552,
+    "tech": "10x_chromium",
+    "pending": 43,
+    "qa": {
+      "cells": "43,552",
+      "overlap": "2,727 / 2,727",
+      "residual": "1.333  (high > 0.7 = poor coverage)",
+      "wc_pct": "25.0%",
+      "dc_pct": "49.9% \u26a0 DC contamination"
+    },
+    "identity_dist": [
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 25108
+      },
+      {
+        "label": "Homeostatic",
+        "n": 6696
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 4038
+      },
+      {
+        "label": "Lipid_LAM",
+        "n": 3981
+      },
+      {
+        "label": "IRM",
+        "n": 1609
+      },
+      {
+        "label": "DC_pDC",
+        "n": 1089
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 371
+      },
+      {
+        "label": "Border_CAM",
+        "n": 229
+      },
+      {
+        "label": "Cycling",
+        "n": 168
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 138
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 60
+      },
+      {
+        "label": "DC_Mature",
+        "n": 39
+      },
+      {
+        "label": "DAM",
+        "n": 26
+      }
+    ],
+    "state_score_cols": [
+      [
+        "HM",
+        "HM"
+      ],
+      [
+        "DAM",
+        "DAM"
+      ],
+      [
+        "IRM",
+        "IRM"
+      ],
+      [
+        "HLA",
+        "HLA"
+      ],
+      [
+        "CRM",
+        "CRM"
+      ],
+      [
+        "RM",
+        "TRM"
+      ],
+      [
+        "prolif",
+        "proliferating"
+      ]
+    ],
+    "state_score_table": [
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 25108,
+        "HM": 0.704,
+        "DAM": 0.178,
+        "IRM": 0.107,
+        "HLA": 0.728,
+        "CRM": 0.228,
+        "RM": 0.718,
+        "prolif": -0.043
+      },
+      {
+        "label": "Homeostatic",
+        "n": 6696,
+        "HM": 0.631,
+        "DAM": 0.239,
+        "IRM": 0.124,
+        "HLA": 0.784,
+        "CRM": 0.259,
+        "RM": 0.677,
+        "prolif": -0.013
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 4038,
+        "HM": 0.489,
+        "DAM": 0.336,
+        "IRM": 0.197,
+        "HLA": 1.216,
+        "CRM": 0.332,
+        "RM": 1.126,
+        "prolif": 0.11
+      },
+      {
+        "label": "Lipid_LAM",
+        "n": 3981,
+        "HM": 0.382,
+        "DAM": 0.583,
+        "IRM": 0.163,
+        "HLA": 1.108,
+        "CRM": 0.289,
+        "RM": 1.036,
+        "prolif": 0.22
+      },
+      {
+        "label": "IRM",
+        "n": 1609,
+        "HM": 0.455,
+        "DAM": 0.311,
+        "IRM": 0.553,
+        "HLA": 1.032,
+        "CRM": 0.41,
+        "RM": 0.988,
+        "prolif": 0.067
+      },
+      {
+        "label": "DC_pDC",
+        "n": 1089,
+        "HM": 0.514,
+        "DAM": 0.297,
+        "IRM": 0.133,
+        "HLA": 1.069,
+        "CRM": 0.351,
+        "RM": 1.18,
+        "prolif": 0.146
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 371,
+        "HM": 0.521,
+        "DAM": 0.297,
+        "IRM": 0.126,
+        "HLA": 1.156,
+        "CRM": 0.262,
+        "RM": 1.285,
+        "prolif": 0.157
+      },
+      {
+        "label": "Border_CAM",
+        "n": 229,
+        "HM": 0.504,
+        "DAM": 0.269,
+        "IRM": 0.145,
+        "HLA": 0.9,
+        "CRM": 0.277,
+        "RM": 0.983,
+        "prolif": 0.076
+      },
+      {
+        "label": "Cycling",
+        "n": 168,
+        "HM": 0.505,
+        "DAM": 0.294,
+        "IRM": 0.128,
+        "HLA": 1.062,
+        "CRM": 0.295,
+        "RM": 1.193,
+        "prolif": 0.334
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 138,
+        "HM": 0.511,
+        "DAM": 0.287,
+        "IRM": 0.111,
+        "HLA": 1.065,
+        "CRM": 0.348,
+        "RM": 1.165,
+        "prolif": 0.126
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 60,
+        "HM": 0.374,
+        "DAM": 0.358,
+        "IRM": 0.174,
+        "HLA": 1.214,
+        "CRM": 0.282,
+        "RM": 1.266,
+        "prolif": 0.304
+      },
+      {
+        "label": "DC_Mature",
+        "n": 39,
+        "HM": 0.488,
+        "DAM": 0.281,
+        "IRM": 0.12,
+        "HLA": 1.047,
+        "CRM": 0.395,
+        "RM": 1.221,
+        "prolif": 0.053
+      },
+      {
+        "label": "DAM",
+        "n": 26,
+        "HM": 0.471,
+        "DAM": 0.362,
+        "IRM": 0.216,
+        "HLA": 0.896,
+        "CRM": 0.342,
+        "RM": 0.81,
+        "prolif": 0.121
+      }
+    ],
+    "label_col": "annotations",
+    "label_xtab": [
+      {
+        "starcat_label": "Border_CAM",
+        "CRM": 28.0,
+        "DAM": 17.0,
+        "HLA": 5.0,
+        "HM": 46.0,
+        "IRM": 15.0,
+        "RM": 21.0,
+        "tCRM": 97.0
+      },
+      {
+        "starcat_label": "Cycling",
+        "CRM": 17.0,
+        "DAM": 0.0,
+        "HLA": 5.0,
+        "HM": 22.0,
+        "IRM": 1.0,
+        "RM": 22.0,
+        "tCRM": 101.0
+      },
+      {
+        "starcat_label": "DAM",
+        "CRM": 1.0,
+        "DAM": 3.0,
+        "HLA": 3.0,
+        "HM": 6.0,
+        "IRM": 4.0,
+        "RM": 2.0,
+        "tCRM": 7.0
+      },
+      {
+        "starcat_label": "DC_Mature",
+        "CRM": 3.0,
+        "DAM": 0.0,
+        "HLA": 0.0,
+        "HM": 3.0,
+        "IRM": 4.0,
+        "RM": 3.0,
+        "tCRM": 26.0
+      },
+      {
+        "starcat_label": "DC_cDC1",
+        "CRM": 10.0,
+        "DAM": 1.0,
+        "HLA": 5.0,
+        "HM": 17.0,
+        "IRM": 6.0,
+        "RM": 12.0,
+        "tCRM": 87.0
+      },
+      {
+        "starcat_label": "DC_cDC2",
+        "CRM": 36.0,
+        "DAM": 7.0,
+        "HLA": 17.0,
+        "HM": 82.0,
+        "IRM": 7.0,
+        "RM": 69.0,
+        "tCRM": 153.0
+      },
+      {
+        "starcat_label": "DC_pDC",
+        "CRM": 162.0,
+        "DAM": 1.0,
+        "HLA": 91.0,
+        "HM": 109.0,
+        "IRM": 21.0,
+        "RM": 86.0,
+        "tCRM": 619.0
+      },
+      {
+        "starcat_label": "HLA_MHCII",
+        "CRM": 710.0,
+        "DAM": 82.0,
+        "HLA": 734.0,
+        "HM": 713.0,
+        "IRM": 89.0,
+        "RM": 707.0,
+        "tCRM": 1003.0
+      },
+      {
+        "starcat_label": "Homeostatic",
+        "CRM": 1730.0,
+        "DAM": 127.0,
+        "HLA": 856.0,
+        "HM": 3041.0,
+        "IRM": 119.0,
+        "RM": 365.0,
+        "tCRM": 458.0
+      },
+      {
+        "starcat_label": "Homeostatic_MERTK",
+        "CRM": 7584.0,
+        "DAM": 125.0,
+        "HLA": 1639.0,
+        "HM": 10882.0,
+        "IRM": 356.0,
+        "RM": 610.0,
+        "tCRM": 3912.0
+      },
+      {
+        "starcat_label": "IRM",
+        "CRM": 446.0,
+        "DAM": 16.0,
+        "HLA": 44.0,
+        "HM": 114.0,
+        "IRM": 595.0,
+        "RM": 112.0,
+        "tCRM": 282.0
+      },
+      {
+        "starcat_label": "Lipid_LAM",
+        "CRM": 113.0,
+        "DAM": 2006.0,
+        "HLA": 944.0,
+        "HM": 357.0,
+        "IRM": 30.0,
+        "RM": 375.0,
+        "tCRM": 156.0
+      },
+      {
+        "starcat_label": "Monocyte_Derived",
+        "CRM": 2.0,
+        "DAM": 12.0,
+        "HLA": 3.0,
+        "HM": 10.0,
+        "IRM": 1.0,
+        "RM": 16.0,
+        "tCRM": 16.0
+      }
+    ],
+    "label_xtab_cols": [
+      "CRM",
+      "DAM",
+      "HLA",
+      "HM",
+      "IRM",
+      "RM",
+      "tCRM"
+    ]
+  },
+  {
+    "study": "Gabitto2024",
+    "stem": "Seattle_MTG_MG",
+    "title": "Seattle_MTG_MG",
+    "n_cells": 40000,
+    "tech": "10x_chromium",
+    "pending": 43,
+    "qa": {
+      "cells": "40,000",
+      "overlap": "2,727 / 2,727",
+      "residual": "1.090  (high > 0.7 = poor coverage)",
+      "wc_pct": "0.8%",
+      "dc_pct": "64.7% \u26a0 DC contamination"
+    },
+    "identity_dist": [
+      {
+        "label": "Homeostatic",
+        "n": 22236
+      },
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 6244
+      },
+      {
+        "label": "Lipid_LAM",
+        "n": 2937
+      },
+      {
+        "label": "DAM",
+        "n": 2670
+      },
+      {
+        "label": "Border_CAM",
+        "n": 1812
+      },
+      {
+        "label": "DC_pDC",
+        "n": 1208
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 1017
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 666
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 348
+      },
+      {
+        "label": "IRM",
+        "n": 346
+      },
+      {
+        "label": "Cycling",
+        "n": 256
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 231
+      },
+      {
+        "label": "DC_Mature",
+        "n": 29
+      }
+    ],
+    "state_score_cols": [],
+    "state_score_table": [],
+    "label_col": null,
+    "label_xtab": [],
+    "label_xtab_cols": []
+  },
+  {
+    "study": "Gabitto2024",
+    "stem": "Seattle_PFC_MG",
+    "title": "Seattle_PFC_MG",
+    "n_cells": 42486,
+    "tech": "10x_chromium",
+    "pending": 43,
+    "qa": {
+      "cells": "42,486",
+      "overlap": "2,727 / 2,727",
+      "residual": "1.095  (high > 0.7 = poor coverage)",
+      "wc_pct": "0.7%",
+      "dc_pct": "67.1% \u26a0 DC contamination"
+    },
+    "identity_dist": [
+      {
+        "label": "Homeostatic",
+        "n": 24208
+      },
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 5670
+      },
+      {
+        "label": "Lipid_LAM",
+        "n": 3247
+      },
+      {
+        "label": "DAM",
+        "n": 2715
+      },
+      {
+        "label": "Border_CAM",
+        "n": 2152
+      },
+      {
+        "label": "DC_pDC",
+        "n": 1366
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 1095
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 725
+      },
+      {
+        "label": "IRM",
+        "n": 358
+      },
+      {
+        "label": "Cycling",
+        "n": 357
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 348
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 213
+      },
+      {
+        "label": "DC_Mature",
+        "n": 32
+      }
+    ],
+    "state_score_cols": [],
+    "state_score_table": [],
+    "label_col": null,
+    "label_xtab": [],
+    "label_xtab_cols": []
+  },
+  {
+    "study": "Gazestani2023",
+    "stem": "microglia",
+    "title": "Gazestani 2023 NPH microglia",
+    "n_cells": 67513,
+    "tech": "10x_chromium",
+    "pending": 43,
+    "qa": {
+      "cells": "67,513",
+      "overlap": "2,727 / 2,727",
+      "residual": "1.226  (high > 0.7 = poor coverage)",
+      "wc_pct": "0.3%",
+      "dc_pct": "44.8% \u26a0 DC contamination"
+    },
+    "identity_dist": [
+      {
+        "label": "Homeostatic",
+        "n": 39952
+      },
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 18768
+      },
+      {
+        "label": "Lipid_LAM",
+        "n": 3866
+      },
+      {
+        "label": "Border_CAM",
+        "n": 2094
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 1012
+      },
+      {
+        "label": "DAM",
+        "n": 801
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 462
+      },
+      {
+        "label": "DC_pDC",
+        "n": 216
+      },
+      {
+        "label": "IRM",
+        "n": 143
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 99
+      },
+      {
+        "label": "Cycling",
+        "n": 70
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 22
+      },
+      {
+        "label": "DC_Mature",
+        "n": 8
+      }
+    ],
+    "state_score_cols": [],
+    "state_score_table": [],
+    "label_col": "anno_orig_state",
+    "label_xtab": [
+      {
+        "starcat_label": "Border_CAM",
+        "Macrophage_CD200R1": 1531.0,
+        "Microglia_BRIP1": 2.0,
+        "Microglia_CCL3": 3.0,
+        "Microglia_FTH1_LYVE1": 21.0,
+        "Microglia_GPNMB_LPL": 89.0,
+        "Microglia_GPNMB_PLAT": 14.0,
+        "Microglia_GPR126_HCG22": 217.0,
+        "Microglia_IFIT2": 0.0,
+        "Microglia_LYVE1_CECR2": 3.0,
+        "Microglia_MGAM": 7.0,
+        "Microglia_PAQR5": 1.0,
+        "Microglia_TNFAIP3": 12.0,
+        "Myeloid_CD300E": 4.0
+      },
+      {
+        "starcat_label": "Cycling",
+        "Macrophage_CD200R1": 0.0,
+        "Microglia_BRIP1": 53.0,
+        "Microglia_CCL3": 1.0,
+        "Microglia_FTH1_LYVE1": 6.0,
+        "Microglia_GPNMB_LPL": 0.0,
+        "Microglia_GPNMB_PLAT": 0.0,
+        "Microglia_GPR126_HCG22": 1.0,
+        "Microglia_IFIT2": 0.0,
+        "Microglia_LYVE1_CECR2": 1.0,
+        "Microglia_MGAM": 1.0,
+        "Microglia_PAQR5": 1.0,
+        "Microglia_TNFAIP3": 0.0,
+        "Myeloid_CD300E": 0.0
+      },
+      {
+        "starcat_label": "DAM",
+        "Macrophage_CD200R1": 7.0,
+        "Microglia_BRIP1": 1.0,
+        "Microglia_CCL3": 5.0,
+        "Microglia_FTH1_LYVE1": 81.0,
+        "Microglia_GPNMB_LPL": 257.0,
+        "Microglia_GPNMB_PLAT": 126.0,
+        "Microglia_GPR126_HCG22": 104.0,
+        "Microglia_IFIT2": 3.0,
+        "Microglia_LYVE1_CECR2": 6.0,
+        "Microglia_MGAM": 70.0,
+        "Microglia_PAQR5": 11.0,
+        "Microglia_TNFAIP3": 64.0,
+        "Myeloid_CD300E": 0.0
+      },
+      {
+        "starcat_label": "DC_Mature",
+        "Macrophage_CD200R1": 0.0,
+        "Microglia_BRIP1": 0.0,
+        "Microglia_CCL3": 5.0,
+        "Microglia_FTH1_LYVE1": 0.0,
+        "Microglia_GPNMB_LPL": 0.0,
+        "Microglia_GPNMB_PLAT": 0.0,
+        "Microglia_GPR126_HCG22": 0.0,
+        "Microglia_IFIT2": 0.0,
+        "Microglia_LYVE1_CECR2": 0.0,
+        "Microglia_MGAM": 0.0,
+        "Microglia_PAQR5": 0.0,
+        "Microglia_TNFAIP3": 1.0,
+        "Myeloid_CD300E": 0.0
+      },
+      {
+        "starcat_label": "DC_cDC1",
+        "Macrophage_CD200R1": 0.0,
+        "Microglia_BRIP1": 1.0,
+        "Microglia_CCL3": 0.0,
+        "Microglia_FTH1_LYVE1": 5.0,
+        "Microglia_GPNMB_LPL": 0.0,
+        "Microglia_GPNMB_PLAT": 0.0,
+        "Microglia_GPR126_HCG22": 2.0,
+        "Microglia_IFIT2": 0.0,
+        "Microglia_LYVE1_CECR2": 0.0,
+        "Microglia_MGAM": 2.0,
+        "Microglia_PAQR5": 0.0,
+        "Microglia_TNFAIP3": 1.0,
+        "Myeloid_CD300E": 3.0
+      },
+      {
+        "starcat_label": "DC_cDC2",
+        "Macrophage_CD200R1": 2.0,
+        "Microglia_BRIP1": 0.0,
+        "Microglia_CCL3": 0.0,
+        "Microglia_FTH1_LYVE1": 20.0,
+        "Microglia_GPNMB_LPL": 0.0,
+        "Microglia_GPNMB_PLAT": 9.0,
+        "Microglia_GPR126_HCG22": 15.0,
+        "Microglia_IFIT2": 1.0,
+        "Microglia_LYVE1_CECR2": 5.0,
+        "Microglia_MGAM": 23.0,
+        "Microglia_PAQR5": 1.0,
+        "Microglia_TNFAIP3": 14.0,
+        "Myeloid_CD300E": 2.0
+      },
+      {
+        "starcat_label": "DC_pDC",
+        "Macrophage_CD200R1": 1.0,
+        "Microglia_BRIP1": 1.0,
+        "Microglia_CCL3": 1.0,
+        "Microglia_FTH1_LYVE1": 44.0,
+        "Microglia_GPNMB_LPL": 2.0,
+        "Microglia_GPNMB_PLAT": 8.0,
+        "Microglia_GPR126_HCG22": 17.0,
+        "Microglia_IFIT2": 0.0,
+        "Microglia_LYVE1_CECR2": 3.0,
+        "Microglia_MGAM": 14.0,
+        "Microglia_PAQR5": 3.0,
+        "Microglia_TNFAIP3": 6.0,
+        "Myeloid_CD300E": 42.0
+      },
+      {
+        "starcat_label": "HLA_MHCII",
+        "Macrophage_CD200R1": 1.0,
+        "Microglia_BRIP1": 3.0,
+        "Microglia_CCL3": 3.0,
+        "Microglia_FTH1_LYVE1": 528.0,
+        "Microglia_GPNMB_LPL": 4.0,
+        "Microglia_GPNMB_PLAT": 62.0,
+        "Microglia_GPR126_HCG22": 95.0,
+        "Microglia_IFIT2": 3.0,
+        "Microglia_LYVE1_CECR2": 27.0,
+        "Microglia_MGAM": 159.0,
+        "Microglia_PAQR5": 22.0,
+        "Microglia_TNFAIP3": 29.0,
+        "Myeloid_CD300E": 0.0
+      },
+      {
+        "starcat_label": "Homeostatic",
+        "Macrophage_CD200R1": 4.0,
+        "Microglia_BRIP1": 430.0,
+        "Microglia_CCL3": 535.0,
+        "Microglia_FTH1_LYVE1": 2357.0,
+        "Microglia_GPNMB_LPL": 75.0,
+        "Microglia_GPNMB_PLAT": 3444.0,
+        "Microglia_GPR126_HCG22": 507.0,
+        "Microglia_IFIT2": 78.0,
+        "Microglia_LYVE1_CECR2": 5164.0,
+        "Microglia_MGAM": 5608.0,
+        "Microglia_PAQR5": 16072.0,
+        "Microglia_TNFAIP3": 905.0,
+        "Myeloid_CD300E": 0.0
+      },
+      {
+        "starcat_label": "Homeostatic_MERTK",
+        "Macrophage_CD200R1": 19.0,
+        "Microglia_BRIP1": 194.0,
+        "Microglia_CCL3": 117.0,
+        "Microglia_FTH1_LYVE1": 1919.0,
+        "Microglia_GPNMB_LPL": 34.0,
+        "Microglia_GPNMB_PLAT": 1209.0,
+        "Microglia_GPR126_HCG22": 1566.0,
+        "Microglia_IFIT2": 27.0,
+        "Microglia_LYVE1_CECR2": 7813.0,
+        "Microglia_MGAM": 1973.0,
+        "Microglia_PAQR5": 1235.0,
+        "Microglia_TNFAIP3": 582.0,
+        "Myeloid_CD300E": 0.0
+      },
+      {
+        "starcat_label": "IRM",
+        "Macrophage_CD200R1": 1.0,
+        "Microglia_BRIP1": 0.0,
+        "Microglia_CCL3": 0.0,
+        "Microglia_FTH1_LYVE1": 31.0,
+        "Microglia_GPNMB_LPL": 3.0,
+        "Microglia_GPNMB_PLAT": 10.0,
+        "Microglia_GPR126_HCG22": 28.0,
+        "Microglia_IFIT2": 35.0,
+        "Microglia_LYVE1_CECR2": 2.0,
+        "Microglia_MGAM": 13.0,
+        "Microglia_PAQR5": 0.0,
+        "Microglia_TNFAIP3": 13.0,
+        "Myeloid_CD300E": 0.0
+      },
+      {
+        "starcat_label": "Lipid_LAM",
+        "Macrophage_CD200R1": 2.0,
+        "Microglia_BRIP1": 4.0,
+        "Microglia_CCL3": 307.0,
+        "Microglia_FTH1_LYVE1": 282.0,
+        "Microglia_GPNMB_LPL": 1174.0,
+        "Microglia_GPNMB_PLAT": 1295.0,
+        "Microglia_GPR126_HCG22": 84.0,
+        "Microglia_IFIT2": 9.0,
+        "Microglia_LYVE1_CECR2": 6.0,
+        "Microglia_MGAM": 69.0,
+        "Microglia_PAQR5": 26.0,
+        "Microglia_TNFAIP3": 61.0,
+        "Myeloid_CD300E": 0.0
+      },
+      {
+        "starcat_label": "Monocyte_Derived",
+        "Macrophage_CD200R1": 0.0,
+        "Microglia_BRIP1": 1.0,
+        "Microglia_CCL3": 0.0,
+        "Microglia_FTH1_LYVE1": 5.0,
+        "Microglia_GPNMB_LPL": 1.0,
+        "Microglia_GPNMB_PLAT": 1.0,
+        "Microglia_GPR126_HCG22": 2.0,
+        "Microglia_IFIT2": 0.0,
+        "Microglia_LYVE1_CECR2": 1.0,
+        "Microglia_MGAM": 3.0,
+        "Microglia_PAQR5": 0.0,
+        "Microglia_TNFAIP3": 2.0,
+        "Myeloid_CD300E": 393.0
+      }
+    ],
+    "label_xtab_cols": [
+      "Macrophage_CD200R1",
+      "Microglia_BRIP1",
+      "Microglia_CCL3",
+      "Microglia_FTH1_LYVE1",
+      "Microglia_GPNMB_LPL",
+      "Microglia_GPNMB_PLAT",
+      "Microglia_GPR126_HCG22",
+      "Microglia_IFIT2",
+      "Microglia_LYVE1_CECR2",
+      "Microglia_MGAM",
+      "Microglia_PAQR5",
+      "Microglia_TNFAIP3",
+      "Myeloid_CD300E"
+    ]
+  },
+  {
+    "study": "GreenFujita2024",
+    "stem": "microglia",
+    "title": "Green/Fujita 2024 ROSMAP DLPFC microglia",
+    "n_cells": 86612,
+    "tech": "10x_chromium",
+    "pending": 43,
+    "qa": {
+      "cells": "86,612",
+      "overlap": "2,727 / 2,727",
+      "residual": "1.229  (high > 0.7 = poor coverage)",
+      "wc_pct": "0.0%",
+      "dc_pct": "63.4% \u26a0 DC contamination"
+    },
+    "identity_dist": [
+      {
+        "label": "Homeostatic",
+        "n": 54864
+      },
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 10135
+      },
+      {
+        "label": "DAM",
+        "n": 5309
+      },
+      {
+        "label": "Border_CAM",
+        "n": 4892
+      },
+      {
+        "label": "Lipid_LAM",
+        "n": 4710
+      },
+      {
+        "label": "DC_pDC",
+        "n": 2677
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 1143
+      },
+      {
+        "label": "Cycling",
+        "n": 863
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 666
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 545
+      },
+      {
+        "label": "IRM",
+        "n": 423
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 350
+      },
+      {
+        "label": "DC_Mature",
+        "n": 35
+      }
+    ],
+    "state_score_cols": [],
+    "state_score_table": [],
+    "label_col": "state",
+    "label_xtab": [
+      {
+        "starcat_label": "Border_CAM",
+        "Macrophages": 1843.0,
+        "Mic.1": 11.0,
+        "Mic.10": 129.0,
+        "Mic.11": 106.0,
+        "Mic.12": 943.0,
+        "Mic.13": 8.0,
+        "Mic.14": 3.0,
+        "Mic.15": 68.0,
+        "Mic.16": 20.0,
+        "Mic.2": 86.0,
+        "Mic.3": 43.0,
+        "Mic.4": 3.0,
+        "Mic.5": 419.0,
+        "Mic.6": 688.0,
+        "Mic.7": 338.0,
+        "Mic.8": 107.0,
+        "Mic.9": 76.0,
+        "Monocytes": 1.0
+      },
+      {
+        "starcat_label": "Cycling",
+        "Macrophages": 0.0,
+        "Mic.1": 825.0,
+        "Mic.10": 12.0,
+        "Mic.11": 0.0,
+        "Mic.12": 0.0,
+        "Mic.13": 0.0,
+        "Mic.14": 0.0,
+        "Mic.15": 2.0,
+        "Mic.16": 0.0,
+        "Mic.2": 3.0,
+        "Mic.3": 0.0,
+        "Mic.4": 0.0,
+        "Mic.5": 5.0,
+        "Mic.6": 11.0,
+        "Mic.7": 2.0,
+        "Mic.8": 3.0,
+        "Mic.9": 0.0,
+        "Monocytes": 0.0
+      },
+      {
+        "starcat_label": "DAM",
+        "Macrophages": 74.0,
+        "Mic.1": 12.0,
+        "Mic.10": 473.0,
+        "Mic.11": 7.0,
+        "Mic.12": 825.0,
+        "Mic.13": 138.0,
+        "Mic.14": 0.0,
+        "Mic.15": 132.0,
+        "Mic.16": 54.0,
+        "Mic.2": 55.0,
+        "Mic.3": 32.0,
+        "Mic.4": 11.0,
+        "Mic.5": 374.0,
+        "Mic.6": 1660.0,
+        "Mic.7": 1044.0,
+        "Mic.8": 364.0,
+        "Mic.9": 54.0,
+        "Monocytes": 0.0
+      },
+      {
+        "starcat_label": "DC_Mature",
+        "Macrophages": 0.0,
+        "Mic.1": 0.0,
+        "Mic.10": 2.0,
+        "Mic.11": 0.0,
+        "Mic.12": 0.0,
+        "Mic.13": 0.0,
+        "Mic.14": 0.0,
+        "Mic.15": 3.0,
+        "Mic.16": 0.0,
+        "Mic.2": 0.0,
+        "Mic.3": 0.0,
+        "Mic.4": 0.0,
+        "Mic.5": 1.0,
+        "Mic.6": 28.0,
+        "Mic.7": 0.0,
+        "Mic.8": 1.0,
+        "Mic.9": 0.0,
+        "Monocytes": 0.0
+      },
+      {
+        "starcat_label": "DC_cDC1",
+        "Macrophages": 0.0,
+        "Mic.1": 0.0,
+        "Mic.10": 49.0,
+        "Mic.11": 5.0,
+        "Mic.12": 12.0,
+        "Mic.13": 3.0,
+        "Mic.14": 0.0,
+        "Mic.15": 23.0,
+        "Mic.16": 14.0,
+        "Mic.2": 30.0,
+        "Mic.3": 27.0,
+        "Mic.4": 6.0,
+        "Mic.5": 139.0,
+        "Mic.6": 154.0,
+        "Mic.7": 157.0,
+        "Mic.8": 30.0,
+        "Mic.9": 16.0,
+        "Monocytes": 1.0
+      },
+      {
+        "starcat_label": "DC_cDC2",
+        "Macrophages": 3.0,
+        "Mic.1": 0.0,
+        "Mic.10": 43.0,
+        "Mic.11": 5.0,
+        "Mic.12": 18.0,
+        "Mic.13": 2.0,
+        "Mic.14": 0.0,
+        "Mic.15": 11.0,
+        "Mic.16": 4.0,
+        "Mic.2": 23.0,
+        "Mic.3": 14.0,
+        "Mic.4": 4.0,
+        "Mic.5": 42.0,
+        "Mic.6": 80.0,
+        "Mic.7": 66.0,
+        "Mic.8": 16.0,
+        "Mic.9": 18.0,
+        "Monocytes": 1.0
+      },
+      {
+        "starcat_label": "DC_pDC",
+        "Macrophages": 5.0,
+        "Mic.1": 8.0,
+        "Mic.10": 125.0,
+        "Mic.11": 60.0,
+        "Mic.12": 70.0,
+        "Mic.13": 14.0,
+        "Mic.14": 3.0,
+        "Mic.15": 77.0,
+        "Mic.16": 46.0,
+        "Mic.2": 147.0,
+        "Mic.3": 132.0,
+        "Mic.4": 19.0,
+        "Mic.5": 828.0,
+        "Mic.6": 475.0,
+        "Mic.7": 480.0,
+        "Mic.8": 108.0,
+        "Mic.9": 79.0,
+        "Monocytes": 1.0
+      },
+      {
+        "starcat_label": "HLA_MHCII",
+        "Macrophages": 0.0,
+        "Mic.1": 1.0,
+        "Mic.10": 56.0,
+        "Mic.11": 1.0,
+        "Mic.12": 20.0,
+        "Mic.13": 7.0,
+        "Mic.14": 0.0,
+        "Mic.15": 5.0,
+        "Mic.16": 4.0,
+        "Mic.2": 45.0,
+        "Mic.3": 26.0,
+        "Mic.4": 6.0,
+        "Mic.5": 40.0,
+        "Mic.6": 132.0,
+        "Mic.7": 103.0,
+        "Mic.8": 66.0,
+        "Mic.9": 33.0,
+        "Monocytes": 0.0
+      },
+      {
+        "starcat_label": "Homeostatic",
+        "Macrophages": 7.0,
+        "Mic.1": 394.0,
+        "Mic.10": 1961.0,
+        "Mic.11": 412.0,
+        "Mic.12": 575.0,
+        "Mic.13": 1280.0,
+        "Mic.14": 696.0,
+        "Mic.15": 936.0,
+        "Mic.16": 666.0,
+        "Mic.2": 11199.0,
+        "Mic.3": 7027.0,
+        "Mic.4": 4391.0,
+        "Mic.5": 7026.0,
+        "Mic.6": 2831.0,
+        "Mic.7": 8521.0,
+        "Mic.8": 4190.0,
+        "Mic.9": 2733.0,
+        "Monocytes": 19.0
+      },
+      {
+        "starcat_label": "Homeostatic_MERTK",
+        "Macrophages": 6.0,
+        "Mic.1": 49.0,
+        "Mic.10": 485.0,
+        "Mic.11": 385.0,
+        "Mic.12": 162.0,
+        "Mic.13": 73.0,
+        "Mic.14": 31.0,
+        "Mic.15": 177.0,
+        "Mic.16": 58.0,
+        "Mic.2": 1937.0,
+        "Mic.3": 941.0,
+        "Mic.4": 433.0,
+        "Mic.5": 1141.0,
+        "Mic.6": 1279.0,
+        "Mic.7": 1808.0,
+        "Mic.8": 763.0,
+        "Mic.9": 404.0,
+        "Monocytes": 3.0
+      },
+      {
+        "starcat_label": "IRM",
+        "Macrophages": 3.0,
+        "Mic.1": 3.0,
+        "Mic.10": 46.0,
+        "Mic.11": 2.0,
+        "Mic.12": 26.0,
+        "Mic.13": 4.0,
+        "Mic.14": 119.0,
+        "Mic.15": 10.0,
+        "Mic.16": 1.0,
+        "Mic.2": 12.0,
+        "Mic.3": 16.0,
+        "Mic.4": 0.0,
+        "Mic.5": 25.0,
+        "Mic.6": 109.0,
+        "Mic.7": 25.0,
+        "Mic.8": 6.0,
+        "Mic.9": 15.0,
+        "Monocytes": 1.0
+      },
+      {
+        "starcat_label": "Lipid_LAM",
+        "Macrophages": 117.0,
+        "Mic.1": 2.0,
+        "Mic.10": 192.0,
+        "Mic.11": 42.0,
+        "Mic.12": 1211.0,
+        "Mic.13": 1154.0,
+        "Mic.14": 7.0,
+        "Mic.15": 449.0,
+        "Mic.16": 79.0,
+        "Mic.2": 179.0,
+        "Mic.3": 70.0,
+        "Mic.4": 31.0,
+        "Mic.5": 388.0,
+        "Mic.6": 314.0,
+        "Mic.7": 284.0,
+        "Mic.8": 85.0,
+        "Mic.9": 104.0,
+        "Monocytes": 2.0
+      },
+      {
+        "starcat_label": "Monocyte_Derived",
+        "Macrophages": 12.0,
+        "Mic.1": 2.0,
+        "Mic.10": 61.0,
+        "Mic.11": 4.0,
+        "Mic.12": 19.0,
+        "Mic.13": 0.0,
+        "Mic.14": 0.0,
+        "Mic.15": 8.0,
+        "Mic.16": 6.0,
+        "Mic.2": 4.0,
+        "Mic.3": 5.0,
+        "Mic.4": 2.0,
+        "Mic.5": 37.0,
+        "Mic.6": 152.0,
+        "Mic.7": 37.0,
+        "Mic.8": 4.0,
+        "Mic.9": 6.0,
+        "Monocytes": 784.0
+      }
+    ],
+    "label_xtab_cols": [
+      "Macrophages",
+      "Mic.1",
+      "Mic.10",
+      "Mic.11",
+      "Mic.12",
+      "Mic.13",
+      "Mic.14",
+      "Mic.15",
+      "Mic.16",
+      "Mic.2",
+      "Mic.3",
+      "Mic.4",
+      "Mic.5",
+      "Mic.6",
+      "Mic.7",
+      "Mic.8",
+      "Mic.9",
+      "Monocytes"
+    ]
+  },
+  {
+    "study": "HouZielonka2023",
+    "stem": "LPS_sema_micro_invitro",
+    "title": "LPS_sema_micro_invitro",
+    "n_cells": 8395,
+    "tech": "10x_chromium",
+    "pending": 43,
+    "qa": {
+      "cells": "8,395",
+      "overlap": "2,697 / 2,727",
+      "residual": "2.885  (high > 0.7 = poor coverage)",
+      "wc_pct": "0.0%",
+      "dc_pct": "99.6% \u26a0 DC contamination"
+    },
+    "identity_dist": [
+      {
+        "label": "DC_pDC",
+        "n": 3255
+      },
+      {
+        "label": "Lipid_LAM",
+        "n": 3113
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 1149
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 327
+      },
+      {
+        "label": "DAM",
+        "n": 192
+      },
+      {
+        "label": "Border_CAM",
+        "n": 154
+      },
+      {
+        "label": "IRM",
+        "n": 100
+      },
+      {
+        "label": "Homeostatic",
+        "n": 34
+      },
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 23
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 18
+      },
+      {
+        "label": "Cycling",
+        "n": 15
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 15
+      }
+    ],
+    "state_score_cols": [
+      [
+        "HM",
+        "HM_enriched1"
+      ]
+    ],
+    "state_score_table": [
+      {
+        "label": "DC_pDC",
+        "n": 3255,
+        "HM": 0.22
+      },
+      {
+        "label": "Lipid_LAM",
+        "n": 3113,
+        "HM": 0.191
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 1149,
+        "HM": 0.237
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 327,
+        "HM": 0.219
+      },
+      {
+        "label": "DAM",
+        "n": 192,
+        "HM": 0.272
+      },
+      {
+        "label": "Border_CAM",
+        "n": 154,
+        "HM": 0.312
+      },
+      {
+        "label": "IRM",
+        "n": 100,
+        "HM": 0.232
+      },
+      {
+        "label": "Homeostatic",
+        "n": 34,
+        "HM": 0.276
+      },
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 23,
+        "HM": 0.311
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 18,
+        "HM": 0.215
+      },
+      {
+        "label": "Cycling",
+        "n": 15,
+        "HM": 0.232
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 15,
+        "HM": 0.225
+      }
+    ],
+    "label_col": "cluster",
+    "label_xtab": [
+      {
+        "starcat_label": "Border_CAM",
+        "0": 14.0,
+        "1": 136.0,
+        "2": 4.0
+      },
+      {
+        "starcat_label": "Cycling",
+        "0": 2.0,
+        "1": 13.0,
+        "2": 0.0
+      },
+      {
+        "starcat_label": "DAM",
+        "0": 21.0,
+        "1": 170.0,
+        "2": 1.0
+      },
+      {
+        "starcat_label": "DC_cDC1",
+        "0": 9.0,
+        "1": 9.0,
+        "2": 0.0
+      },
+      {
+        "starcat_label": "DC_cDC2",
+        "0": 268.0,
+        "1": 872.0,
+        "2": 9.0
+      },
+      {
+        "starcat_label": "DC_pDC",
+        "0": 1216.0,
+        "1": 2025.0,
+        "2": 14.0
+      },
+      {
+        "starcat_label": "HLA_MHCII",
+        "0": 0.0,
+        "1": 15.0,
+        "2": 0.0
+      },
+      {
+        "starcat_label": "Homeostatic",
+        "0": 28.0,
+        "1": 6.0,
+        "2": 0.0
+      },
+      {
+        "starcat_label": "Homeostatic_MERTK",
+        "0": 5.0,
+        "1": 18.0,
+        "2": 0.0
+      },
+      {
+        "starcat_label": "IRM",
+        "0": 4.0,
+        "1": 11.0,
+        "2": 85.0
+      },
+      {
+        "starcat_label": "Lipid_LAM",
+        "0": 2651.0,
+        "1": 448.0,
+        "2": 14.0
+      },
+      {
+        "starcat_label": "Monocyte_Derived",
+        "0": 106.0,
+        "1": 221.0,
+        "2": 0.0
+      }
+    ],
+    "label_xtab_cols": [
+      "0",
+      "1",
+      "2"
+    ]
+  },
+  {
+    "study": "HouZielonka2023",
+    "stem": "noLPS_sema_micro_invitro",
+    "title": "noLPS_sema_micro_invitro",
+    "n_cells": 8611,
+    "tech": "10x_chromium",
+    "pending": 43,
+    "qa": {
+      "cells": "8,611",
+      "overlap": "2,697 / 2,727",
+      "residual": "2.543  (high > 0.7 = poor coverage)",
+      "wc_pct": "0.8%",
+      "dc_pct": "99.7% \u26a0 DC contamination"
+    },
+    "identity_dist": [
+      {
+        "label": "Lipid_LAM",
+        "n": 4638
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 1372
+      },
+      {
+        "label": "DC_pDC",
+        "n": 1256
+      },
+      {
+        "label": "Border_CAM",
+        "n": 414
+      },
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 301
+      },
+      {
+        "label": "Homeostatic",
+        "n": 251
+      },
+      {
+        "label": "DAM",
+        "n": 125
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 117
+      },
+      {
+        "label": "IRM",
+        "n": 54
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 54
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 19
+      },
+      {
+        "label": "Cycling",
+        "n": 9
+      },
+      {
+        "label": "DC_Mature",
+        "n": 1
+      }
+    ],
+    "state_score_cols": [
+      [
+        "HM",
+        "HM_enriched1"
+      ]
+    ],
+    "state_score_table": [
+      {
+        "label": "Lipid_LAM",
+        "n": 4638,
+        "HM": 0.265
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 1372,
+        "HM": 0.352
+      },
+      {
+        "label": "DC_pDC",
+        "n": 1256,
+        "HM": 0.324
+      },
+      {
+        "label": "Border_CAM",
+        "n": 414,
+        "HM": 0.412
+      },
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 301,
+        "HM": 0.431
+      },
+      {
+        "label": "Homeostatic",
+        "n": 251,
+        "HM": 0.379
+      },
+      {
+        "label": "DAM",
+        "n": 125,
+        "HM": 0.329
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 117,
+        "HM": 0.256
+      },
+      {
+        "label": "IRM",
+        "n": 54,
+        "HM": 0.342
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 54,
+        "HM": 0.322
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 19,
+        "HM": 0.32
+      },
+      {
+        "label": "Cycling",
+        "n": 9,
+        "HM": 0.329
+      },
+      {
+        "label": "DC_Mature",
+        "n": 1,
+        "HM": 0.063
+      }
+    ],
+    "label_col": "cluster",
+    "label_xtab": [
+      {
+        "starcat_label": "Border_CAM",
+        "0": 32.0,
+        "1": 382.0,
+        "2": 0.0
+      },
+      {
+        "starcat_label": "Cycling",
+        "0": 2.0,
+        "1": 7.0,
+        "2": 0.0
+      },
+      {
+        "starcat_label": "DAM",
+        "0": 21.0,
+        "1": 104.0,
+        "2": 0.0
+      },
+      {
+        "starcat_label": "DC_Mature",
+        "0": 1.0,
+        "1": 0.0,
+        "2": 0.0
+      },
+      {
+        "starcat_label": "DC_cDC1",
+        "0": 5.0,
+        "1": 14.0,
+        "2": 0.0
+      },
+      {
+        "starcat_label": "DC_cDC2",
+        "0": 377.0,
+        "1": 994.0,
+        "2": 1.0
+      },
+      {
+        "starcat_label": "DC_pDC",
+        "0": 509.0,
+        "1": 747.0,
+        "2": 0.0
+      },
+      {
+        "starcat_label": "HLA_MHCII",
+        "0": 15.0,
+        "1": 38.0,
+        "2": 1.0
+      },
+      {
+        "starcat_label": "Homeostatic",
+        "0": 196.0,
+        "1": 55.0,
+        "2": 0.0
+      },
+      {
+        "starcat_label": "Homeostatic_MERTK",
+        "0": 107.0,
+        "1": 194.0,
+        "2": 0.0
+      },
+      {
+        "starcat_label": "IRM",
+        "0": 10.0,
+        "1": 9.0,
+        "2": 35.0
+      },
+      {
+        "starcat_label": "Lipid_LAM",
+        "0": 3829.0,
+        "1": 802.0,
+        "2": 7.0
+      },
+      {
+        "starcat_label": "Monocyte_Derived",
+        "0": 87.0,
+        "1": 30.0,
+        "2": 0.0
+      }
+    ],
+    "label_xtab_cols": [
+      "0",
+      "1",
+      "2"
+    ]
+  },
+  {
+    "study": "LuChen2025",
+    "stem": "101010sn.1.micro",
+    "title": "101010sn.1.micro",
+    "n_cells": 6033,
+    "tech": "10x_chromium",
+    "pending": 0,
+    "qa": {
+      "cells": "6,033",
+      "overlap": "2,727 / 2,727",
+      "residual": "1.547  (high > 0.7 = poor coverage)",
+      "wc_pct": "0.4%",
+      "dc_pct": "57.7% \u26a0 DC contamination"
+    },
+    "identity_dist": [
+      {
+        "label": "Homeostatic",
+        "n": 3002
+      },
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 1179
+      },
+      {
+        "label": "DAM",
+        "n": 564
+      },
+      {
+        "label": "Lipid_LAM",
+        "n": 418
+      },
+      {
+        "label": "Border_CAM",
+        "n": 299
+      },
+      {
+        "label": "DC_pDC",
+        "n": 178
+      },
+      {
+        "label": "Cycling",
+        "n": 89
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 81
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 78
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 55
+      },
+      {
+        "label": "IRM",
+        "n": 52
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 34
+      },
+      {
+        "label": "DC_Mature",
+        "n": 4
+      }
+    ],
+    "state_score_cols": [],
+    "state_score_table": [],
+    "label_col": "first_subtypes",
+    "label_xtab": [
+      {
+        "starcat_label": "Border_CAM",
+        "micro_0": 126.0,
+        "micro_1": 22.0,
+        "micro_2": 15.0,
+        "micro_3": 60.0,
+        "micro_4": 29.0,
+        "micro_5": 32.0,
+        "micro_6": 15.0
+      },
+      {
+        "starcat_label": "Cycling",
+        "micro_0": 31.0,
+        "micro_1": 9.0,
+        "micro_2": 8.0,
+        "micro_3": 14.0,
+        "micro_4": 20.0,
+        "micro_5": 4.0,
+        "micro_6": 3.0
+      },
+      {
+        "starcat_label": "DAM",
+        "micro_0": 208.0,
+        "micro_1": 29.0,
+        "micro_2": 117.0,
+        "micro_3": 50.0,
+        "micro_4": 88.0,
+        "micro_5": 45.0,
+        "micro_6": 27.0
+      },
+      {
+        "starcat_label": "DC_Mature",
+        "micro_0": 0.0,
+        "micro_1": 0.0,
+        "micro_2": 0.0,
+        "micro_3": 3.0,
+        "micro_4": 0.0,
+        "micro_5": 0.0,
+        "micro_6": 1.0
+      },
+      {
+        "starcat_label": "DC_cDC1",
+        "micro_0": 10.0,
+        "micro_1": 3.0,
+        "micro_2": 8.0,
+        "micro_3": 13.0,
+        "micro_4": 13.0,
+        "micro_5": 5.0,
+        "micro_6": 3.0
+      },
+      {
+        "starcat_label": "DC_cDC2",
+        "micro_0": 12.0,
+        "micro_1": 0.0,
+        "micro_2": 6.0,
+        "micro_3": 2.0,
+        "micro_4": 5.0,
+        "micro_5": 6.0,
+        "micro_6": 3.0
+      },
+      {
+        "starcat_label": "DC_pDC",
+        "micro_0": 58.0,
+        "micro_1": 22.0,
+        "micro_2": 17.0,
+        "micro_3": 40.0,
+        "micro_4": 20.0,
+        "micro_5": 18.0,
+        "micro_6": 3.0
+      },
+      {
+        "starcat_label": "HLA_MHCII",
+        "micro_0": 24.0,
+        "micro_1": 6.0,
+        "micro_2": 21.0,
+        "micro_3": 0.0,
+        "micro_4": 20.0,
+        "micro_5": 9.0,
+        "micro_6": 1.0
+      },
+      {
+        "starcat_label": "Homeostatic",
+        "micro_0": 404.0,
+        "micro_1": 678.0,
+        "micro_2": 748.0,
+        "micro_3": 638.0,
+        "micro_4": 314.0,
+        "micro_5": 207.0,
+        "micro_6": 13.0
+      },
+      {
+        "starcat_label": "Homeostatic_MERTK",
+        "micro_0": 286.0,
+        "micro_1": 440.0,
+        "micro_2": 71.0,
+        "micro_3": 128.0,
+        "micro_4": 145.0,
+        "micro_5": 102.0,
+        "micro_6": 7.0
+      },
+      {
+        "starcat_label": "IRM",
+        "micro_0": 10.0,
+        "micro_1": 4.0,
+        "micro_2": 21.0,
+        "micro_3": 2.0,
+        "micro_4": 8.0,
+        "micro_5": 5.0,
+        "micro_6": 2.0
+      },
+      {
+        "starcat_label": "Lipid_LAM",
+        "micro_0": 173.0,
+        "micro_1": 12.0,
+        "micro_2": 113.0,
+        "micro_3": 36.0,
+        "micro_4": 29.0,
+        "micro_5": 44.0,
+        "micro_6": 11.0
+      },
+      {
+        "starcat_label": "Monocyte_Derived",
+        "micro_0": 26.0,
+        "micro_1": 5.0,
+        "micro_2": 9.0,
+        "micro_3": 12.0,
+        "micro_4": 7.0,
+        "micro_5": 14.0,
+        "micro_6": 5.0
+      }
+    ],
+    "label_xtab_cols": [
+      "micro_0",
+      "micro_1",
+      "micro_2",
+      "micro_3",
+      "micro_4",
+      "micro_5",
+      "micro_6"
+    ]
+  },
+  {
+    "study": "Mancuso2024",
+    "stem": "Mancuso_2023",
+    "title": "Mancuso_2023",
+    "n_cells": 127755,
+    "tech": "10x_chromium",
+    "pending": 43,
+    "qa": {
+      "cells": "127,755",
+      "overlap": "2,723 / 2,727",
+      "residual": "1.954  (high > 0.7 = poor coverage)",
+      "wc_pct": "56.0% \u26a0 likely whole-cell",
+      "dc_pct": "60.8% \u26a0 DC contamination"
+    },
+    "identity_dist": [
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 60091
+      },
+      {
+        "label": "Homeostatic",
+        "n": 18332
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 13181
+      },
+      {
+        "label": "Lipid_LAM",
+        "n": 10224
+      },
+      {
+        "label": "DC_pDC",
+        "n": 7151
+      },
+      {
+        "label": "IRM",
+        "n": 6165
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 6057
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 2019
+      },
+      {
+        "label": "Border_CAM",
+        "n": 2014
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 1004
+      },
+      {
+        "label": "Cycling",
+        "n": 839
+      },
+      {
+        "label": "DAM",
+        "n": 466
+      },
+      {
+        "label": "DC_Mature",
+        "n": 212
+      }
+    ],
+    "state_score_cols": [],
+    "state_score_table": [],
+    "label_col": "cell.state_v2.1",
+    "label_xtab": [
+      {
+        "starcat_label": "Border_CAM",
+        "Antigen-presenting response (HLA)": 114.0,
+        "Cytokines response 1 (CRM-1)": 39.0,
+        "Cytokines response 2 (CRM-2)": 297.0,
+        "Disease associated (DAM)": 237.0,
+        "Homeostatic (HM)": 550.0,
+        "Interferon response (IRM)": 337.0,
+        "Transitioning CRM": 264.0,
+        "Translational response (TRM)": 176.0
+      },
+      {
+        "starcat_label": "Cycling",
+        "Antigen-presenting response (HLA)": 20.0,
+        "Cytokines response 1 (CRM-1)": 41.0,
+        "Cytokines response 2 (CRM-2)": 161.0,
+        "Disease associated (DAM)": 49.0,
+        "Homeostatic (HM)": 276.0,
+        "Interferon response (IRM)": 21.0,
+        "Transitioning CRM": 169.0,
+        "Translational response (TRM)": 102.0
+      },
+      {
+        "starcat_label": "DAM",
+        "Antigen-presenting response (HLA)": 36.0,
+        "Cytokines response 1 (CRM-1)": 21.0,
+        "Cytokines response 2 (CRM-2)": 106.0,
+        "Disease associated (DAM)": 73.0,
+        "Homeostatic (HM)": 119.0,
+        "Interferon response (IRM)": 22.0,
+        "Transitioning CRM": 59.0,
+        "Translational response (TRM)": 30.0
+      },
+      {
+        "starcat_label": "DC_Mature",
+        "Antigen-presenting response (HLA)": 11.0,
+        "Cytokines response 1 (CRM-1)": 19.0,
+        "Cytokines response 2 (CRM-2)": 95.0,
+        "Disease associated (DAM)": 25.0,
+        "Homeostatic (HM)": 31.0,
+        "Interferon response (IRM)": 1.0,
+        "Transitioning CRM": 25.0,
+        "Translational response (TRM)": 5.0
+      },
+      {
+        "starcat_label": "DC_cDC1",
+        "Antigen-presenting response (HLA)": 47.0,
+        "Cytokines response 1 (CRM-1)": 40.0,
+        "Cytokines response 2 (CRM-2)": 187.0,
+        "Disease associated (DAM)": 101.0,
+        "Homeostatic (HM)": 262.0,
+        "Interferon response (IRM)": 11.0,
+        "Transitioning CRM": 197.0,
+        "Translational response (TRM)": 159.0
+      },
+      {
+        "starcat_label": "DC_cDC2",
+        "Antigen-presenting response (HLA)": 399.0,
+        "Cytokines response 1 (CRM-1)": 182.0,
+        "Cytokines response 2 (CRM-2)": 856.0,
+        "Disease associated (DAM)": 693.0,
+        "Homeostatic (HM)": 1884.0,
+        "Interferon response (IRM)": 87.0,
+        "Transitioning CRM": 698.0,
+        "Translational response (TRM)": 1258.0
+      },
+      {
+        "starcat_label": "DC_pDC",
+        "Antigen-presenting response (HLA)": 285.0,
+        "Cytokines response 1 (CRM-1)": 324.0,
+        "Cytokines response 2 (CRM-2)": 1091.0,
+        "Disease associated (DAM)": 609.0,
+        "Homeostatic (HM)": 2345.0,
+        "Interferon response (IRM)": 145.0,
+        "Transitioning CRM": 1218.0,
+        "Translational response (TRM)": 1134.0
+      },
+      {
+        "starcat_label": "HLA_MHCII",
+        "Antigen-presenting response (HLA)": 4603.0,
+        "Cytokines response 1 (CRM-1)": 743.0,
+        "Cytokines response 2 (CRM-2)": 1533.0,
+        "Disease associated (DAM)": 1343.0,
+        "Homeostatic (HM)": 2153.0,
+        "Interferon response (IRM)": 463.0,
+        "Transitioning CRM": 1797.0,
+        "Translational response (TRM)": 546.0
+      },
+      {
+        "starcat_label": "Homeostatic",
+        "Antigen-presenting response (HLA)": 1377.0,
+        "Cytokines response 1 (CRM-1)": 834.0,
+        "Cytokines response 2 (CRM-2)": 1661.0,
+        "Disease associated (DAM)": 2308.0,
+        "Homeostatic (HM)": 7340.0,
+        "Interferon response (IRM)": 544.0,
+        "Transitioning CRM": 2923.0,
+        "Translational response (TRM)": 1345.0
+      },
+      {
+        "starcat_label": "Homeostatic_MERTK",
+        "Antigen-presenting response (HLA)": 1490.0,
+        "Cytokines response 1 (CRM-1)": 1315.0,
+        "Cytokines response 2 (CRM-2)": 2974.0,
+        "Disease associated (DAM)": 1694.0,
+        "Homeostatic (HM)": 34989.0,
+        "Interferon response (IRM)": 1553.0,
+        "Transitioning CRM": 8740.0,
+        "Translational response (TRM)": 7336.0
+      },
+      {
+        "starcat_label": "IRM",
+        "Antigen-presenting response (HLA)": 183.0,
+        "Cytokines response 1 (CRM-1)": 221.0,
+        "Cytokines response 2 (CRM-2)": 1034.0,
+        "Disease associated (DAM)": 400.0,
+        "Homeostatic (HM)": 353.0,
+        "Interferon response (IRM)": 3470.0,
+        "Transitioning CRM": 386.0,
+        "Translational response (TRM)": 118.0
+      },
+      {
+        "starcat_label": "Lipid_LAM",
+        "Antigen-presenting response (HLA)": 661.0,
+        "Cytokines response 1 (CRM-1)": 561.0,
+        "Cytokines response 2 (CRM-2)": 966.0,
+        "Disease associated (DAM)": 6408.0,
+        "Homeostatic (HM)": 575.0,
+        "Interferon response (IRM)": 163.0,
+        "Transitioning CRM": 337.0,
+        "Translational response (TRM)": 553.0
+      },
+      {
+        "starcat_label": "Monocyte_Derived",
+        "Antigen-presenting response (HLA)": 150.0,
+        "Cytokines response 1 (CRM-1)": 91.0,
+        "Cytokines response 2 (CRM-2)": 831.0,
+        "Disease associated (DAM)": 437.0,
+        "Homeostatic (HM)": 218.0,
+        "Interferon response (IRM)": 103.0,
+        "Transitioning CRM": 106.0,
+        "Translational response (TRM)": 83.0
+      }
+    ],
+    "label_xtab_cols": [
+      "Antigen-presenting response (HLA)",
+      "Cytokines response 1 (CRM-1)",
+      "Cytokines response 2 (CRM-2)",
+      "Disease associated (DAM)",
+      "Homeostatic (HM)",
+      "Interferon response (IRM)",
+      "Transitioning CRM",
+      "Translational response (TRM)"
+    ]
+  },
+  {
+    "study": "Mathys2024",
+    "stem": "multiregion_microglia",
+    "title": "Mathys 2024 Multiregion Microglia (ROSMAP)",
+    "n_cells": 92800,
+    "tech": "10x_chromium",
+    "pending": 43,
+    "qa": {
+      "cells": "92,800",
+      "overlap": "2,727 / 2,727",
+      "residual": "1.280  (high > 0.7 = poor coverage)",
+      "wc_pct": "0.0%",
+      "dc_pct": "50.4% \u26a0 DC contamination"
+    },
+    "identity_dist": [
+      {
+        "label": "Homeostatic",
+        "n": 60234
+      },
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 12921
+      },
+      {
+        "label": "Lipid_LAM",
+        "n": 5683
+      },
+      {
+        "label": "DAM",
+        "n": 4915
+      },
+      {
+        "label": "Border_CAM",
+        "n": 2846
+      },
+      {
+        "label": "DC_pDC",
+        "n": 1465
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 1281
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 1024
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 633
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 595
+      },
+      {
+        "label": "Cycling",
+        "n": 554
+      },
+      {
+        "label": "IRM",
+        "n": 553
+      },
+      {
+        "label": "DC_Mature",
+        "n": 96
+      }
+    ],
+    "state_score_cols": [],
+    "state_score_table": [],
+    "label_col": "cell_type_high_resolution",
+    "label_xtab": [
+      {
+        "starcat_label": "Border_CAM",
+        "CAMs": 305.0,
+        "Mic DUSP1": 170.0,
+        "Mic MKI67": 2.0,
+        "Mic P2RY12": 2152.0,
+        "Mic TPT1": 214.0,
+        "T cells": 3.0
+      },
+      {
+        "starcat_label": "Cycling",
+        "CAMs": 0.0,
+        "Mic DUSP1": 53.0,
+        "Mic MKI67": 238.0,
+        "Mic P2RY12": 235.0,
+        "Mic TPT1": 27.0,
+        "T cells": 1.0
+      },
+      {
+        "starcat_label": "DAM",
+        "CAMs": 153.0,
+        "Mic DUSP1": 317.0,
+        "Mic MKI67": 0.0,
+        "Mic P2RY12": 4123.0,
+        "Mic TPT1": 322.0,
+        "T cells": 0.0
+      },
+      {
+        "starcat_label": "DC_Mature",
+        "CAMs": 0.0,
+        "Mic DUSP1": 59.0,
+        "Mic MKI67": 0.0,
+        "Mic P2RY12": 31.0,
+        "Mic TPT1": 6.0,
+        "T cells": 0.0
+      },
+      {
+        "starcat_label": "DC_cDC1",
+        "CAMs": 1.0,
+        "Mic DUSP1": 57.0,
+        "Mic MKI67": 0.0,
+        "Mic P2RY12": 495.0,
+        "Mic TPT1": 42.0,
+        "T cells": 0.0
+      },
+      {
+        "starcat_label": "DC_cDC2",
+        "CAMs": 5.0,
+        "Mic DUSP1": 55.0,
+        "Mic MKI67": 1.0,
+        "Mic P2RY12": 526.0,
+        "Mic TPT1": 46.0,
+        "T cells": 0.0
+      },
+      {
+        "starcat_label": "DC_pDC",
+        "CAMs": 3.0,
+        "Mic DUSP1": 153.0,
+        "Mic MKI67": 0.0,
+        "Mic P2RY12": 1216.0,
+        "Mic TPT1": 84.0,
+        "T cells": 9.0
+      },
+      {
+        "starcat_label": "HLA_MHCII",
+        "CAMs": 8.0,
+        "Mic DUSP1": 83.0,
+        "Mic MKI67": 0.0,
+        "Mic P2RY12": 1030.0,
+        "Mic TPT1": 160.0,
+        "T cells": 0.0
+      },
+      {
+        "starcat_label": "Homeostatic",
+        "CAMs": 63.0,
+        "Mic DUSP1": 1751.0,
+        "Mic MKI67": 53.0,
+        "Mic P2RY12": 55207.0,
+        "Mic TPT1": 3154.0,
+        "T cells": 6.0
+      },
+      {
+        "starcat_label": "Homeostatic_MERTK",
+        "CAMs": 9.0,
+        "Mic DUSP1": 309.0,
+        "Mic MKI67": 12.0,
+        "Mic P2RY12": 11696.0,
+        "Mic TPT1": 892.0,
+        "T cells": 3.0
+      },
+      {
+        "starcat_label": "IRM",
+        "CAMs": 7.0,
+        "Mic DUSP1": 46.0,
+        "Mic MKI67": 0.0,
+        "Mic P2RY12": 442.0,
+        "Mic TPT1": 58.0,
+        "T cells": 0.0
+      },
+      {
+        "starcat_label": "Lipid_LAM",
+        "CAMs": 50.0,
+        "Mic DUSP1": 345.0,
+        "Mic MKI67": 0.0,
+        "Mic P2RY12": 4914.0,
+        "Mic TPT1": 374.0,
+        "T cells": 0.0
+      },
+      {
+        "starcat_label": "Monocyte_Derived",
+        "CAMs": 23.0,
+        "Mic DUSP1": 137.0,
+        "Mic MKI67": 0.0,
+        "Mic P2RY12": 735.0,
+        "Mic TPT1": 118.0,
+        "T cells": 11.0
+      }
+    ],
+    "label_xtab_cols": [
+      "CAMs",
+      "Mic DUSP1",
+      "Mic MKI67",
+      "Mic P2RY12",
+      "Mic TPT1",
+      "T cells"
+    ]
+  },
+  {
+    "study": "Olah2020",
+    "stem": "olah2020_microglia",
+    "title": "Olah 2020 Live Human Microglia",
+    "n_cells": 16245,
+    "tech": "10x_chromium",
+    "pending": 43,
+    "qa": {
+      "cells": "16,245",
+      "overlap": "2,723 / 2,727",
+      "residual": "4.099  (high > 0.7 = poor coverage)",
+      "wc_pct": "11.8%",
+      "dc_pct": "56.3% \u26a0 DC contamination"
+    },
+    "identity_dist": [
+      {
+        "label": "HLA_MHCII",
+        "n": 5450
+      },
+      {
+        "label": "Homeostatic",
+        "n": 3698
+      },
+      {
+        "label": "Lipid_LAM",
+        "n": 1789
+      },
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 1005
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 997
+      },
+      {
+        "label": "DC_pDC",
+        "n": 920
+      },
+      {
+        "label": "IRM",
+        "n": 710
+      },
+      {
+        "label": "DAM",
+        "n": 473
+      },
+      {
+        "label": "Border_CAM",
+        "n": 438
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 320
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 219
+      },
+      {
+        "label": "Cycling",
+        "n": 170
+      },
+      {
+        "label": "DC_Mature",
+        "n": 56
+      }
+    ],
+    "state_score_cols": [],
+    "state_score_table": [],
+    "label_col": "cell_type",
+    "label_xtab": [
+      {
+        "starcat_label": "Border_CAM",
+        "B cell": 0.0,
+        "T cell": 1.0,
+        "erythrocyte": 0.0,
+        "microglial cell": 427.0,
+        "monocyte": 0.0,
+        "neural cell": 10.0
+      },
+      {
+        "starcat_label": "Cycling",
+        "B cell": 0.0,
+        "T cell": 2.0,
+        "erythrocyte": 0.0,
+        "microglial cell": 167.0,
+        "monocyte": 0.0,
+        "neural cell": 1.0
+      },
+      {
+        "starcat_label": "DAM",
+        "B cell": 0.0,
+        "T cell": 0.0,
+        "erythrocyte": 0.0,
+        "microglial cell": 473.0,
+        "monocyte": 0.0,
+        "neural cell": 0.0
+      },
+      {
+        "starcat_label": "DC_Mature",
+        "B cell": 0.0,
+        "T cell": 0.0,
+        "erythrocyte": 0.0,
+        "microglial cell": 56.0,
+        "monocyte": 0.0,
+        "neural cell": 0.0
+      },
+      {
+        "starcat_label": "DC_cDC1",
+        "B cell": 0.0,
+        "T cell": 1.0,
+        "erythrocyte": 5.0,
+        "microglial cell": 313.0,
+        "monocyte": 0.0,
+        "neural cell": 1.0
+      },
+      {
+        "starcat_label": "DC_cDC2",
+        "B cell": 0.0,
+        "T cell": 1.0,
+        "erythrocyte": 1.0,
+        "microglial cell": 994.0,
+        "monocyte": 0.0,
+        "neural cell": 1.0
+      },
+      {
+        "starcat_label": "DC_pDC",
+        "B cell": 8.0,
+        "T cell": 8.0,
+        "erythrocyte": 0.0,
+        "microglial cell": 898.0,
+        "monocyte": 0.0,
+        "neural cell": 6.0
+      },
+      {
+        "starcat_label": "HLA_MHCII",
+        "B cell": 0.0,
+        "T cell": 1.0,
+        "erythrocyte": 0.0,
+        "microglial cell": 5449.0,
+        "monocyte": 0.0,
+        "neural cell": 0.0
+      },
+      {
+        "starcat_label": "Homeostatic",
+        "B cell": 0.0,
+        "T cell": 9.0,
+        "erythrocyte": 4.0,
+        "microglial cell": 3683.0,
+        "monocyte": 0.0,
+        "neural cell": 2.0
+      },
+      {
+        "starcat_label": "Homeostatic_MERTK",
+        "B cell": 0.0,
+        "T cell": 3.0,
+        "erythrocyte": 0.0,
+        "microglial cell": 1002.0,
+        "monocyte": 0.0,
+        "neural cell": 0.0
+      },
+      {
+        "starcat_label": "IRM",
+        "B cell": 0.0,
+        "T cell": 2.0,
+        "erythrocyte": 0.0,
+        "microglial cell": 708.0,
+        "monocyte": 0.0,
+        "neural cell": 0.0
+      },
+      {
+        "starcat_label": "Lipid_LAM",
+        "B cell": 0.0,
+        "T cell": 1.0,
+        "erythrocyte": 4.0,
+        "microglial cell": 1784.0,
+        "monocyte": 0.0,
+        "neural cell": 0.0
+      },
+      {
+        "starcat_label": "Monocyte_Derived",
+        "B cell": 0.0,
+        "T cell": 43.0,
+        "erythrocyte": 1.0,
+        "microglial cell": 145.0,
+        "monocyte": 25.0,
+        "neural cell": 5.0
+      }
+    ],
+    "label_xtab_cols": [
+      "B cell",
+      "T cell",
+      "erythrocyte",
+      "microglial cell",
+      "monocyte",
+      "neural cell"
+    ]
+  },
+  {
+    "study": "Pan2024",
+    "stem": "Microglia",
+    "title": "Microglia",
+    "n_cells": 1621,
+    "tech": "10x_chromium",
+    "pending": 43,
+    "qa": {
+      "cells": "1,621",
+      "overlap": "2,727 / 2,727",
+      "residual": "1.872  (high > 0.7 = poor coverage)",
+      "wc_pct": "0.0%",
+      "dc_pct": "37.8% \u26a0 DC contamination"
+    },
+    "identity_dist": [
+      {
+        "label": "Homeostatic",
+        "n": 711
+      },
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 256
+      },
+      {
+        "label": "Lipid_LAM",
+        "n": 220
+      },
+      {
+        "label": "DAM",
+        "n": 158
+      },
+      {
+        "label": "Border_CAM",
+        "n": 145
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 61
+      },
+      {
+        "label": "DC_pDC",
+        "n": 27
+      },
+      {
+        "label": "Cycling",
+        "n": 16
+      },
+      {
+        "label": "IRM",
+        "n": 8
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 7
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 6
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 6
+      }
+    ],
+    "state_score_cols": [],
+    "state_score_table": [],
+    "label_col": null,
+    "label_xtab": [],
+    "label_xtab_cols": []
+  },
+  {
+    "study": "Schirmer2019",
+    "stem": "schirmer2019_microglia",
+    "title": "Schirmer 2019 MS Microglia",
+    "n_cells": 1425,
+    "tech": "snRNA-seq",
+    "pending": 43,
+    "qa": {
+      "cells": "1,425",
+      "overlap": "2,727 / 2,727",
+      "residual": "1.700  (high > 0.7 = poor coverage)",
+      "wc_pct": "0.0%",
+      "dc_pct": "29.1% \u26a0 DC contamination"
+    },
+    "identity_dist": [
+      {
+        "label": "Homeostatic",
+        "n": 851
+      },
+      {
+        "label": "DAM",
+        "n": 241
+      },
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 146
+      },
+      {
+        "label": "Lipid_LAM",
+        "n": 72
+      },
+      {
+        "label": "Border_CAM",
+        "n": 49
+      },
+      {
+        "label": "DC_pDC",
+        "n": 19
+      },
+      {
+        "label": "Cycling",
+        "n": 18
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 18
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 5
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 3
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 2
+      },
+      {
+        "label": "IRM",
+        "n": 1
+      }
+    ],
+    "state_score_cols": [],
+    "state_score_table": [],
+    "label_col": null,
+    "label_xtab": [],
+    "label_xtab_cols": []
+  },
+  {
+    "study": "Simpson2025",
+    "stem": "module_scored_sorl1",
+    "title": "module_scored_sorl1",
+    "n_cells": 42270,
+    "tech": "10x_chromium",
+    "pending": 43,
+    "qa": {
+      "cells": "42,270",
+      "overlap": "2,716 / 2,727",
+      "residual": "2.974  (high > 0.7 = poor coverage)",
+      "wc_pct": "18.9%",
+      "dc_pct": "44.7% \u26a0 DC contamination"
+    },
+    "identity_dist": [
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 31749
+      },
+      {
+        "label": "Homeostatic",
+        "n": 5726
+      },
+      {
+        "label": "Lipid_LAM",
+        "n": 2567
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 618
+      },
+      {
+        "label": "IRM",
+        "n": 607
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 300
+      },
+      {
+        "label": "DC_pDC",
+        "n": 257
+      },
+      {
+        "label": "Cycling",
+        "n": 233
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 115
+      },
+      {
+        "label": "Border_CAM",
+        "n": 71
+      },
+      {
+        "label": "DAM",
+        "n": 14
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 11
+      },
+      {
+        "label": "DC_Mature",
+        "n": 2
+      }
+    ],
+    "state_score_cols": [
+      [
+        "HM",
+        "HM8"
+      ],
+      [
+        "DAM",
+        "DAM6"
+      ],
+      [
+        "IRM",
+        "IRM9"
+      ],
+      [
+        "HLA",
+        "HLA7"
+      ],
+      [
+        "CRM",
+        "CRM5"
+      ],
+      [
+        "RM",
+        "RM10"
+      ],
+      [
+        "prolif",
+        "proliferating2"
+      ],
+      [
+        "DC",
+        "dendritic1"
+      ],
+      [
+        "macro",
+        "macrophage3"
+      ]
+    ],
+    "state_score_table": [
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 31749,
+        "HM": 0.816,
+        "DAM": 0.274,
+        "IRM": 0.072,
+        "HLA": 0.794,
+        "CRM": 0.105,
+        "RM": 0.936,
+        "prolif": -0.071,
+        "DC": -0.017,
+        "macro": 0.087
+      },
+      {
+        "label": "Homeostatic",
+        "n": 5726,
+        "HM": 0.726,
+        "DAM": 0.331,
+        "IRM": 0.089,
+        "HLA": 0.796,
+        "CRM": 0.155,
+        "RM": 0.81,
+        "prolif": -0.07,
+        "DC": -0.006,
+        "macro": -0.112
+      },
+      {
+        "label": "Lipid_LAM",
+        "n": 2567,
+        "HM": 0.443,
+        "DAM": 0.752,
+        "IRM": 0.098,
+        "HLA": 1.045,
+        "CRM": 0.146,
+        "RM": 1.268,
+        "prolif": 0.055,
+        "DC": -0.058,
+        "macro": -0.131
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 618,
+        "HM": 0.553,
+        "DAM": 0.453,
+        "IRM": 0.129,
+        "HLA": 1.231,
+        "CRM": 0.226,
+        "RM": 1.233,
+        "prolif": -0.006,
+        "DC": 0.042,
+        "macro": -0.084
+      },
+      {
+        "label": "IRM",
+        "n": 607,
+        "HM": 0.615,
+        "DAM": 0.386,
+        "IRM": 0.693,
+        "HLA": 0.886,
+        "CRM": 0.23,
+        "RM": 1.067,
+        "prolif": -0.046,
+        "DC": -0.045,
+        "macro": 0.126
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 300,
+        "HM": 0.498,
+        "DAM": 0.355,
+        "IRM": 0.104,
+        "HLA": 1.327,
+        "CRM": 0.19,
+        "RM": 1.572,
+        "prolif": 0.018,
+        "DC": 0.469,
+        "macro": -0.059
+      },
+      {
+        "label": "DC_pDC",
+        "n": 257,
+        "HM": 0.544,
+        "DAM": 0.392,
+        "IRM": 0.112,
+        "HLA": 1.245,
+        "CRM": 0.255,
+        "RM": 1.516,
+        "prolif": -0.003,
+        "DC": 0.403,
+        "macro": -0.032
+      },
+      {
+        "label": "Cycling",
+        "n": 233,
+        "HM": 0.597,
+        "DAM": 0.281,
+        "IRM": 0.094,
+        "HLA": 0.73,
+        "CRM": 0.071,
+        "RM": 0.824,
+        "prolif": 0.698,
+        "DC": -0.077,
+        "macro": -0.042
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 115,
+        "HM": 0.466,
+        "DAM": 0.325,
+        "IRM": 0.142,
+        "HLA": 1.225,
+        "CRM": 0.383,
+        "RM": 1.244,
+        "prolif": 0.007,
+        "DC": 0.82,
+        "macro": -0.137
+      },
+      {
+        "label": "Border_CAM",
+        "n": 71,
+        "HM": 0.59,
+        "DAM": 0.365,
+        "IRM": 0.115,
+        "HLA": 0.928,
+        "CRM": 0.206,
+        "RM": 1.131,
+        "prolif": 0.092,
+        "DC": 0.167,
+        "macro": 0.397
+      },
+      {
+        "label": "DAM",
+        "n": 14,
+        "HM": 0.526,
+        "DAM": 0.437,
+        "IRM": 0.2,
+        "HLA": 1.029,
+        "CRM": 0.317,
+        "RM": 1.041,
+        "prolif": -0.025,
+        "DC": -0.06,
+        "macro": -0.054
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 11,
+        "HM": 0.535,
+        "DAM": 0.426,
+        "IRM": 0.101,
+        "HLA": 1.195,
+        "CRM": 0.131,
+        "RM": 1.398,
+        "prolif": 0.035,
+        "DC": 0.354,
+        "macro": -0.108
+      },
+      {
+        "label": "DC_Mature",
+        "n": 2,
+        "HM": 0.522,
+        "DAM": 0.41,
+        "IRM": 0.187,
+        "HLA": 1.205,
+        "CRM": 0.454,
+        "RM": 1.498,
+        "prolif": 0.12,
+        "DC": -0.123,
+        "macro": 0.26
+      }
+    ],
+    "label_col": "cluster_id",
+    "label_xtab": [
+      {
+        "starcat_label": "Border_CAM",
+        "0": 28.0,
+        "1": 4.0,
+        "2": 0.0,
+        "3": 12.0,
+        "4": 11.0,
+        "5": 3.0,
+        "6": 2.0,
+        "7": 11.0
+      },
+      {
+        "starcat_label": "Cycling",
+        "0": 0.0,
+        "1": 0.0,
+        "2": 0.0,
+        "3": 2.0,
+        "4": 1.0,
+        "5": 0.0,
+        "6": 0.0,
+        "7": 230.0
+      },
+      {
+        "starcat_label": "DAM",
+        "0": 0.0,
+        "1": 7.0,
+        "2": 0.0,
+        "3": 6.0,
+        "4": 0.0,
+        "5": 1.0,
+        "6": 0.0,
+        "7": 0.0
+      },
+      {
+        "starcat_label": "DC_Mature",
+        "0": 0.0,
+        "1": 0.0,
+        "2": 0.0,
+        "3": 2.0,
+        "4": 0.0,
+        "5": 0.0,
+        "6": 0.0,
+        "7": 0.0
+      },
+      {
+        "starcat_label": "DC_cDC1",
+        "0": 0.0,
+        "1": 3.0,
+        "2": 0.0,
+        "3": 0.0,
+        "4": 4.0,
+        "5": 1.0,
+        "6": 1.0,
+        "7": 2.0
+      },
+      {
+        "starcat_label": "DC_cDC2",
+        "0": 8.0,
+        "1": 21.0,
+        "2": 1.0,
+        "3": 14.0,
+        "4": 189.0,
+        "5": 1.0,
+        "6": 64.0,
+        "7": 2.0
+      },
+      {
+        "starcat_label": "DC_pDC",
+        "0": 11.0,
+        "1": 22.0,
+        "2": 0.0,
+        "3": 31.0,
+        "4": 143.0,
+        "5": 2.0,
+        "6": 44.0,
+        "7": 4.0
+      },
+      {
+        "starcat_label": "HLA_MHCII",
+        "0": 27.0,
+        "1": 401.0,
+        "2": 12.0,
+        "3": 60.0,
+        "4": 81.0,
+        "5": 7.0,
+        "6": 27.0,
+        "7": 3.0
+      },
+      {
+        "starcat_label": "Homeostatic",
+        "0": 894.0,
+        "1": 2036.0,
+        "2": 986.0,
+        "3": 794.0,
+        "4": 615.0,
+        "5": 282.0,
+        "6": 49.0,
+        "7": 70.0
+      },
+      {
+        "starcat_label": "Homeostatic_MERTK",
+        "0": 12215.0,
+        "1": 3288.0,
+        "2": 6354.0,
+        "3": 5485.0,
+        "4": 1756.0,
+        "5": 1451.0,
+        "6": 804.0,
+        "7": 396.0
+      },
+      {
+        "starcat_label": "IRM",
+        "0": 0.0,
+        "1": 22.0,
+        "2": 0.0,
+        "3": 40.0,
+        "4": 23.0,
+        "5": 506.0,
+        "6": 13.0,
+        "7": 3.0
+      },
+      {
+        "starcat_label": "Lipid_LAM",
+        "0": 13.0,
+        "1": 2147.0,
+        "2": 2.0,
+        "3": 184.0,
+        "4": 33.0,
+        "5": 33.0,
+        "6": 150.0,
+        "7": 5.0
+      },
+      {
+        "starcat_label": "Monocyte_Derived",
+        "0": 1.0,
+        "1": 8.0,
+        "2": 0.0,
+        "3": 4.0,
+        "4": 102.0,
+        "5": 0.0,
+        "6": 0.0,
+        "7": 0.0
+      }
+    ],
+    "label_xtab_cols": [
+      "0",
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7"
+    ]
+  },
+  {
+    "study": "Simpson2025",
+    "stem": "seurat_obj_sorl1_final",
+    "title": "seurat_obj_sorl1_final",
+    "n_cells": 42270,
+    "tech": "10x_chromium",
+    "pending": 43,
+    "qa": {
+      "cells": "42,270",
+      "overlap": "2,723 / 2,727",
+      "residual": "1.663  (high > 0.7 = poor coverage)",
+      "wc_pct": "16.8%",
+      "dc_pct": "56.4% \u26a0 DC contamination"
+    },
+    "identity_dist": [
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 32584
+      },
+      {
+        "label": "Homeostatic",
+        "n": 5059
+      },
+      {
+        "label": "Lipid_LAM",
+        "n": 2333
+      },
+      {
+        "label": "IRM",
+        "n": 555
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 510
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 453
+      },
+      {
+        "label": "DC_pDC",
+        "n": 329
+      },
+      {
+        "label": "Cycling",
+        "n": 204
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 101
+      },
+      {
+        "label": "Border_CAM",
+        "n": 97
+      },
+      {
+        "label": "DAM",
+        "n": 22
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 20
+      },
+      {
+        "label": "DC_Mature",
+        "n": 3
+      }
+    ],
+    "state_score_cols": [
+      [
+        "HM",
+        "HM8"
+      ],
+      [
+        "DAM",
+        "DAM6"
+      ],
+      [
+        "IRM",
+        "IRM9"
+      ],
+      [
+        "HLA",
+        "HLA7"
+      ],
+      [
+        "CRM",
+        "CRM5"
+      ],
+      [
+        "RM",
+        "RM10"
+      ],
+      [
+        "prolif",
+        "proliferating2"
+      ],
+      [
+        "DC",
+        "dendritic1"
+      ],
+      [
+        "macro",
+        "macrophage3"
+      ]
+    ],
+    "state_score_table": [
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 32584,
+        "HM": 0.818,
+        "DAM": 0.275,
+        "IRM": 0.073,
+        "HLA": 0.79,
+        "CRM": 0.108,
+        "RM": 0.924,
+        "prolif": -0.072,
+        "DC": -0.015,
+        "macro": 0.082
+      },
+      {
+        "label": "Homeostatic",
+        "n": 5059,
+        "HM": 0.715,
+        "DAM": 0.338,
+        "IRM": 0.092,
+        "HLA": 0.805,
+        "CRM": 0.158,
+        "RM": 0.817,
+        "prolif": -0.067,
+        "DC": -0.008,
+        "macro": -0.119
+      },
+      {
+        "label": "Lipid_LAM",
+        "n": 2333,
+        "HM": 0.43,
+        "DAM": 0.766,
+        "IRM": 0.099,
+        "HLA": 1.044,
+        "CRM": 0.144,
+        "RM": 1.272,
+        "prolif": 0.061,
+        "DC": -0.059,
+        "macro": -0.132
+      },
+      {
+        "label": "IRM",
+        "n": 555,
+        "HM": 0.597,
+        "DAM": 0.39,
+        "IRM": 0.702,
+        "HLA": 0.891,
+        "CRM": 0.239,
+        "RM": 1.074,
+        "prolif": -0.04,
+        "DC": -0.043,
+        "macro": 0.129
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 510,
+        "HM": 0.54,
+        "DAM": 0.466,
+        "IRM": 0.13,
+        "HLA": 1.253,
+        "CRM": 0.221,
+        "RM": 1.255,
+        "prolif": -0.007,
+        "DC": 0.014,
+        "macro": -0.091
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 453,
+        "HM": 0.437,
+        "DAM": 0.385,
+        "IRM": 0.1,
+        "HLA": 1.391,
+        "CRM": 0.146,
+        "RM": 1.765,
+        "prolif": 0.041,
+        "DC": 0.339,
+        "macro": -0.036
+      },
+      {
+        "label": "DC_pDC",
+        "n": 329,
+        "HM": 0.465,
+        "DAM": 0.424,
+        "IRM": 0.097,
+        "HLA": 1.347,
+        "CRM": 0.152,
+        "RM": 1.765,
+        "prolif": 0.03,
+        "DC": 0.232,
+        "macro": -0.009
+      },
+      {
+        "label": "Cycling",
+        "n": 204,
+        "HM": 0.567,
+        "DAM": 0.277,
+        "IRM": 0.087,
+        "HLA": 0.741,
+        "CRM": 0.073,
+        "RM": 0.852,
+        "prolif": 0.729,
+        "DC": -0.067,
+        "macro": -0.042
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 101,
+        "HM": 0.45,
+        "DAM": 0.317,
+        "IRM": 0.124,
+        "HLA": 1.208,
+        "CRM": 0.345,
+        "RM": 1.291,
+        "prolif": -0.001,
+        "DC": 0.743,
+        "macro": -0.117
+      },
+      {
+        "label": "Border_CAM",
+        "n": 97,
+        "HM": 0.537,
+        "DAM": 0.366,
+        "IRM": 0.103,
+        "HLA": 1.0,
+        "CRM": 0.173,
+        "RM": 1.294,
+        "prolif": 0.065,
+        "DC": 0.156,
+        "macro": 0.316
+      },
+      {
+        "label": "DAM",
+        "n": 22,
+        "HM": 0.551,
+        "DAM": 0.409,
+        "IRM": 0.127,
+        "HLA": 0.935,
+        "CRM": 0.246,
+        "RM": 0.913,
+        "prolif": -0.047,
+        "DC": -0.013,
+        "macro": 0.014
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 20,
+        "HM": 0.397,
+        "DAM": 0.37,
+        "IRM": 0.052,
+        "HLA": 1.385,
+        "CRM": 0.099,
+        "RM": 1.94,
+        "prolif": 0.007,
+        "DC": 0.263,
+        "macro": 0.066
+      },
+      {
+        "label": "DC_Mature",
+        "n": 3,
+        "HM": 0.526,
+        "DAM": 0.423,
+        "IRM": 0.159,
+        "HLA": 1.249,
+        "CRM": 0.313,
+        "RM": 1.578,
+        "prolif": 0.174,
+        "DC": -0.12,
+        "macro": 0.133
+      }
+    ],
+    "label_col": "seurat_clusters",
+    "label_xtab": [
+      {
+        "starcat_label": "Border_CAM",
+        "0": 31.0,
+        "1": 5.0,
+        "2": 5.0,
+        "3": 12.0,
+        "4": 14.0,
+        "5": 4.0,
+        "6": 15.0,
+        "7": 11.0
+      },
+      {
+        "starcat_label": "Cycling",
+        "0": 2.0,
+        "1": 1.0,
+        "2": 0.0,
+        "3": 2.0,
+        "4": 1.0,
+        "5": 0.0,
+        "6": 3.0,
+        "7": 195.0
+      },
+      {
+        "starcat_label": "DAM",
+        "0": 2.0,
+        "1": 13.0,
+        "2": 1.0,
+        "3": 5.0,
+        "4": 0.0,
+        "5": 1.0,
+        "6": 0.0,
+        "7": 0.0
+      },
+      {
+        "starcat_label": "DC_Mature",
+        "0": 0.0,
+        "1": 0.0,
+        "2": 0.0,
+        "3": 2.0,
+        "4": 0.0,
+        "5": 0.0,
+        "6": 1.0,
+        "7": 0.0
+      },
+      {
+        "starcat_label": "DC_cDC1",
+        "0": 1.0,
+        "1": 0.0,
+        "2": 1.0,
+        "3": 1.0,
+        "4": 4.0,
+        "5": 0.0,
+        "6": 13.0,
+        "7": 0.0
+      },
+      {
+        "starcat_label": "DC_cDC2",
+        "0": 21.0,
+        "1": 39.0,
+        "2": 3.0,
+        "3": 21.0,
+        "4": 197.0,
+        "5": 2.0,
+        "6": 168.0,
+        "7": 2.0
+      },
+      {
+        "starcat_label": "DC_pDC",
+        "0": 22.0,
+        "1": 28.0,
+        "2": 3.0,
+        "3": 22.0,
+        "4": 102.0,
+        "5": 1.0,
+        "6": 148.0,
+        "7": 3.0
+      },
+      {
+        "starcat_label": "HLA_MHCII",
+        "0": 21.0,
+        "1": 348.0,
+        "2": 8.0,
+        "3": 50.0,
+        "4": 53.0,
+        "5": 5.0,
+        "6": 22.0,
+        "7": 3.0
+      },
+      {
+        "starcat_label": "Homeostatic",
+        "0": 744.0,
+        "1": 1899.0,
+        "2": 826.0,
+        "3": 699.0,
+        "4": 518.0,
+        "5": 261.0,
+        "6": 41.0,
+        "7": 71.0
+      },
+      {
+        "starcat_label": "Homeostatic_MERTK",
+        "0": 12335.0,
+        "1": 3626.0,
+        "2": 6505.0,
+        "3": 5636.0,
+        "4": 1949.0,
+        "5": 1526.0,
+        "6": 577.0,
+        "7": 430.0
+      },
+      {
+        "starcat_label": "IRM",
+        "0": 4.0,
+        "1": 21.0,
+        "2": 0.0,
+        "3": 34.0,
+        "4": 20.0,
+        "5": 456.0,
+        "6": 15.0,
+        "7": 5.0
+      },
+      {
+        "starcat_label": "Lipid_LAM",
+        "0": 9.0,
+        "1": 1972.0,
+        "2": 2.0,
+        "3": 149.0,
+        "4": 22.0,
+        "5": 30.0,
+        "6": 143.0,
+        "7": 6.0
+      },
+      {
+        "starcat_label": "Monocyte_Derived",
+        "0": 5.0,
+        "1": 7.0,
+        "2": 1.0,
+        "3": 1.0,
+        "4": 78.0,
+        "5": 1.0,
+        "6": 8.0,
+        "7": 0.0
+      }
+    ],
+    "label_xtab_cols": [
+      "0",
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7"
+    ]
+  },
+  {
+    "study": "Smajic2022",
+    "stem": "smajic2022_microglia",
+    "title": "Smajic 2022 Microglia (PD midbrain)",
+    "n_cells": 3903,
+    "tech": "snRNA-seq",
+    "pending": 43,
+    "qa": {
+      "cells": "3,903",
+      "overlap": "2,727 / 2,727",
+      "residual": "1.183  (high > 0.7 = poor coverage)",
+      "wc_pct": "0.0%",
+      "dc_pct": "42.9% \u26a0 DC contamination"
+    },
+    "identity_dist": [
+      {
+        "label": "Homeostatic",
+        "n": 2767
+      },
+      {
+        "label": "DAM",
+        "n": 538
+      },
+      {
+        "label": "Lipid_LAM",
+        "n": 149
+      },
+      {
+        "label": "Homeostatic_MERTK",
+        "n": 113
+      },
+      {
+        "label": "Border_CAM",
+        "n": 84
+      },
+      {
+        "label": "DC_pDC",
+        "n": 60
+      },
+      {
+        "label": "HLA_MHCII",
+        "n": 50
+      },
+      {
+        "label": "DC_cDC2",
+        "n": 37
+      },
+      {
+        "label": "Monocyte_Derived",
+        "n": 33
+      },
+      {
+        "label": "Cycling",
+        "n": 32
+      },
+      {
+        "label": "IRM",
+        "n": 22
+      },
+      {
+        "label": "DC_cDC1",
+        "n": 16
+      },
+      {
+        "label": "DC_Mature",
+        "n": 2
+      }
+    ],
+    "state_score_cols": [],
+    "state_score_table": [],
+    "label_col": null,
+    "label_xtab": [],
+    "label_xtab_cols": []
+  }
+]

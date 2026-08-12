@@ -1475,8 +1475,8 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.33.0"
-API_VERSION_RELEASED = "2026-07-02"
+API_VERSION = "2.36.1"
+API_VERSION_RELEASED = "2026-08-08"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
 # Create FastAPI app with lifespan handler (Phase 2)
@@ -3727,6 +3727,102 @@ _PLOT_GEOMS = {
 }
 
 
+def _fmt_bin_edge(value: float) -> str:
+    """Compact numeric formatter for bin-edge labels shown in plot legends."""
+    import math
+    if value is None:
+        return '?'
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return '?'
+    if math.isnan(v) or math.isinf(v):
+        return '?'
+    if v == 0:
+        return '0'
+    absv = abs(v)
+    if absv >= 1000 or absv < 0.1:
+        return f'{v:.2g}'
+    if absv >= 100:
+        return f'{v:.0f}'
+    if absv >= 10:
+        return f'{v:.1f}'
+    return f'{v:.2f}'
+
+
+def _bin_numerical_column(
+    df: 'pd.DataFrame',
+    src_col: str,
+    n_bins: int,
+    method: str,
+) -> Tuple['pd.DataFrame', str, str]:
+    """Bin a numerical column into ``n_bins`` categorical labels.
+
+    - ``method='quantile'`` (default): equal-count bins via ``pd.qcut``.
+    - ``method='width'``: equal-width bins via ``pd.cut``.
+
+    Labels are ``"[NN] lo-hi"`` with a zero-padded index prefix so the
+    downstream alphabetical legend sort matches numerical bin order
+    without needing an explicit ``hue_order`` plumbed through plotting.
+
+    Returns ``(new_df, new_field_name, note)`` where ``new_field_name``
+    encodes the binning (e.g. ``"Age · 3 quantile bins"``) so the
+    caption + legend title self-document, and ``note`` is a compact
+    human summary for logs.  ``duplicates='drop'`` on qcut may reduce
+    the actual bin count below the request; the returned name reflects
+    the actual count.
+    """
+    import pandas as pd
+    method = 'width' if method == 'width' else 'quantile'
+    values = pd.to_numeric(df[src_col], errors='coerce')
+    finite = values.dropna()
+    if finite.empty:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot bin column {src_col!r}: no finite numerical values."
+            ),
+        )
+    try:
+        if method == 'quantile':
+            cats = pd.qcut(values, n_bins, duplicates='drop')
+        else:
+            cats = pd.cut(values, n_bins, duplicates='drop')
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Failed to bin {src_col!r} into {n_bins} {method} bins: {exc}. "
+                f"Try a smaller bin_color, or method=width."
+            ),
+        )
+    intervals = list(cats.cat.categories)
+    n_actual = len(intervals)
+    if n_actual < 2:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Binning {src_col!r} into {n_bins} {method} bins collapsed to "
+                f"{n_actual} bin(s) — too many duplicate values."
+            ),
+        )
+    idx_width = len(str(n_actual))
+    label_by_interval: Dict[Any, str] = {}
+    for i, iv in enumerate(intervals):
+        label_by_interval[iv] = (
+            f'[{i + 1:0{idx_width}d}] '
+            f'{_fmt_bin_edge(iv.left)}-{_fmt_bin_edge(iv.right)}'
+        )
+    labels = cats.map(label_by_interval).astype('object')
+    new_field = f'{src_col} · {n_actual} {method} bins'
+    out = df.copy()
+    out[new_field] = labels
+    if new_field != src_col and src_col in out.columns:
+        out = out.drop(columns=[src_col])
+    note = f'binned into {n_actual} {method} bins'
+    return out, new_field, note
+
+
 def _resolve_field_kind(
     field_name: str,
     available_embeddings: List[str],
@@ -4070,6 +4166,12 @@ class PlotRequest:
     sample: Optional[int]
     attach_sessions: List[str]
     source_url: str
+    # Bin a continuous colour field (numerical obs or gene) into N
+    # categorical bins before plotting. Ignored when color is categorical
+    # or unset. ``bin_color_method``: 'quantile' (equal-count, default) or
+    # 'width' (equal-width). Currently honoured by scatter + hexbin.
+    bin_color: Optional[int] = None
+    bin_color_method: str = 'quantile'
 
 
 @_plot_dataclass
@@ -4162,6 +4264,12 @@ def _handle_scatter(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
             color_df = ctx.db.get_cell_table(genes=[color_field_name], layer=req.layer, filters=used_filters)
         else:
             color_df = ctx.db.get_cell_table(metadata_fields=[color_field_name], filters=used_filters)
+
+        if req.bin_color and color_kind in ('numerical', 'gene'):
+            color_df, color_field_name, _ = _bin_numerical_column(
+                color_df, color_field_name, req.bin_color, req.bin_color_method,
+            )
+            color_kind = 'categorical'
 
     x_label = str(embedding_df.columns[-2]).replace('dim_', 'Dim ')
     y_label = str(embedding_df.columns[-1]).replace('dim_', 'Dim ')
@@ -4262,6 +4370,12 @@ def _handle_hexbin(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
             color_df = ctx.db.get_cell_table(genes=[color_field_name], layer=req.layer, filters=used_filters)
         else:
             color_df = ctx.db.get_cell_table(metadata_fields=[color_field_name], filters=used_filters)
+
+        if req.bin_color and color_kind in ('numerical', 'gene'):
+            color_df, color_field_name, _ = _bin_numerical_column(
+                color_df, color_field_name, req.bin_color, req.bin_color_method,
+            )
+            color_kind = 'categorical'
 
     x_label = str(embedding_df.columns[-2]).replace('dim_', 'Dim ')
     y_label = str(embedding_df.columns[-1]).replace('dim_', 'Dim ')
@@ -4512,7 +4626,10 @@ def _handle_kde2d(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     """2-D Gaussian kernel density of two continuous obs/gene fields.
 
     Same input contract as the XY-mode scatter/hexbin: x and y must
-    both resolve to continuous fields (gene or numerical obs).
+    both resolve to continuous fields (gene or numerical obs).  Optional
+    ``color`` is a categorical (or continuous + ``bin_color``) that
+    splits the plot into one line-contour set per group, overlaid on
+    shared axes with a category legend.
     """
     if not req.x or not req.y:
         raise HTTPException(400, detail=(
@@ -4526,12 +4643,36 @@ def _handle_kde2d(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
             f"numerical). Got x='{req.x}' ({x_kind}) and y='{req.y}' ({y_kind})."
         ))
 
-    # Pull both axes in one go.
+    # Resolve optional per-group split.  Categorical → one line-contour
+    # set per group; continuous → require bin_color to categorise.
+    color_field_name: Optional[str] = None
+    color_kind: Optional[str] = None
+    if req.color:
+        color_field_name, color_kind = ctx.resolve(req.color)
+        if color_kind not in ('categorical', 'numerical', 'gene'):
+            raise HTTPException(400, detail=(
+                f"geom='kde2d' color must be categorical, numerical, or a "
+                f"gene; '{req.color}' resolved as '{color_kind}'."
+            ))
+        if color_kind != 'categorical' and not req.bin_color:
+            raise HTTPException(400, detail=(
+                f"geom='kde2d' color must be categorical to split by group. "
+                f"'{req.color}' resolved as '{color_kind}' — pass bin_color=N "
+                f"(2..20) with an optional bin_color_method=quantile|width to "
+                f"bin it into N categorical groups."
+            ))
+
+    # Pull axes + optional color in one go.
     genes, metas = [], []
     if x_kind == 'gene':   genes.append(x_name)
     else:                  metas.append(x_name)
     if y_kind == 'gene':   genes.append(y_name)
     else:                  metas.append(y_name)
+    if color_field_name:
+        if color_kind == 'gene':
+            genes.append(color_field_name)
+        else:
+            metas.append(color_field_name)
     data_df = ctx.db.get_cell_table(
         genes=list(dict.fromkeys(genes)) or None,
         metadata_fields=list(dict.fromkeys(metas)) or None,
@@ -4539,6 +4680,15 @@ def _handle_kde2d(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         filters=req.filters,
         sample=req.sample,
     )
+
+    # Bin the color column into N categorical groups if requested AND
+    # the resolved kind is continuous.  Rewrites color_field_name to
+    # 'X · N method bins' so caption + legend self-document.
+    if color_field_name and color_kind in ('numerical', 'gene') and req.bin_color:
+        data_df, color_field_name, _ = _bin_numerical_column(
+            data_df, color_field_name, req.bin_color, req.bin_color_method,
+        )
+        color_kind = 'categorical'
 
     # Resolve transforms (legacy log_x/log_y → 'log1p' if transform is unset).
     tx = req.transform_x or 'linear'
@@ -4549,11 +4699,15 @@ def _handle_kde2d(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         ty = 'log1p'
 
     n_cells = int(len(data_df))
+    n_groups = (int(data_df[color_field_name].nunique())
+                if color_field_name and color_kind == 'categorical' else None)
     if req.output_format in _PLOT_DATA_FORMATS:
         return _emit_dataframe(data_df, req)
     caption = plotting.build_caption(
-        req.db_id, req.geom, req.x, x_kind, req.y, None, req.layer,
-        n_cells=n_cells, sample=req.sample, subset=_subset_for_caption(req),
+        req.db_id, req.geom, req.x, x_kind, req.y, color_field_name, req.layer,
+        n_cells=n_cells, n_groups=n_groups,
+        sample=req.sample, subset=_subset_for_caption(req),
+        color_kind=color_kind if color_field_name else None,
         kde_n=req.kde_n, kde_bw=req.kde_bw, n_levels=req.n_levels,
         iso_overlay=req.iso_overlay, point_overlay=req.point_overlay,
         transform_x=req.transform_x, transform_y=req.transform_y,
@@ -4561,17 +4715,20 @@ def _handle_kde2d(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         log_x=req.log_x, log_y=req.log_y,
         color_scale=req.color_scale,
         palette_cont=req.palette_cont,
+        palette_cat=req.palette_cat,
         marginals=req.marginals, regline=req.regline,
     )
     image_bytes = plotting.plot_kde2d(
         data_df=data_df,
         x_field=x_name,
         y_field=y_name,
+        color_field=color_field_name,
         transform_x=tx, transform_y=ty,
         asinh_scale=req.asinh_scale or 1.0,
         kde_n=req.kde_n, kde_bw=req.kde_bw,
         n_levels=req.n_levels,
         palette_cont=req.palette_cont,
+        palette_cat=req.palette_cat,
         color_scale=req.color_scale,
         iso_overlay=req.iso_overlay,
         point_overlay=req.point_overlay,
@@ -4746,22 +4903,50 @@ def _handle_distribution(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str
     if not req.x:
         raise HTTPException(400, detail=f"geom='{req.geom}' requires x (gene or numerical field)")
     x_name, x_kind = ctx.resolve(req.x)
-    color_name = None
+    color_name: Optional[str] = None
+    color_kind: Optional[str] = None
     if req.color:
-        color_name, _ = ctx.resolve(req.color)
-        if x_kind == 'gene':
-            data_df = ctx.db.get_cell_table(genes=[x_name], metadata_fields=[color_name],
-                                            layer=req.layer, filters=req.filters, sample=req.sample)
+        color_name, color_kind = ctx.resolve(req.color)
+        if color_kind not in ('categorical', 'numerical', 'gene'):
+            raise HTTPException(400, detail=(
+                f"geom='{req.geom}' color must be categorical, numerical, or "
+                f"a gene; '{req.color}' resolved as '{color_kind}'."
+            ))
+        if color_kind != 'categorical' and not req.bin_color:
+            raise HTTPException(400, detail=(
+                f"geom='{req.geom}' color must be categorical to split the "
+                f"distribution. '{req.color}' resolved as '{color_kind}' — "
+                f"pass bin_color=N (2..20) with optional bin_color_method="
+                f"quantile|width to bin it into N categorical groups."
+            ))
+
+    # Assemble the fetch list: x + optional color, each on the correct
+    # side (genes vs metadata).
+    genes: List[str] = []
+    metas: List[str] = []
+    if x_kind == 'gene':   genes.append(x_name)
+    else:                  metas.append(x_name)
+    if color_name:
+        if color_kind == 'gene':
+            genes.append(color_name)
         else:
-            data_df = ctx.db.get_cell_table(metadata_fields=[x_name, color_name],
-                                            filters=req.filters, sample=req.sample)
-    else:
-        if x_kind == 'gene':
-            data_df = ctx.db.get_cell_table(genes=[x_name], layer=req.layer,
-                                            filters=req.filters, sample=req.sample)
-        else:
-            data_df = ctx.db.get_cell_table(metadata_fields=[x_name],
-                                            filters=req.filters, sample=req.sample)
+            metas.append(color_name)
+    data_df = ctx.db.get_cell_table(
+        genes=list(dict.fromkeys(genes)) or None,
+        metadata_fields=list(dict.fromkeys(metas)) or None,
+        layer=req.layer,
+        filters=req.filters,
+        sample=req.sample,
+    )
+
+    # Bin continuous color into N categorical groups if requested.
+    # Rewrites color_name (and drops the source col) so downstream sees
+    # a clean categorical hue.
+    if color_name and color_kind in ('numerical', 'gene') and req.bin_color:
+        data_df, color_name, _ = _bin_numerical_column(
+            data_df, color_name, req.bin_color, req.bin_color_method,
+        )
+        color_kind = 'categorical'
 
     n_cells = int(len(data_df))
     n_groups = int(data_df[color_name].nunique()) if color_name else None
@@ -4825,15 +5010,23 @@ def _handle_rolling(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     if not y_resolved:
         raise HTTPException(400, detail="geom='rolling' needs at least one y field.")
 
-    # Optional grouping.
+    # Optional grouping.  Categorical → one line per group.  Numerical /
+    # gene → require bin_color so we can categorise it below.
     color_field_name: Optional[str] = None
     color_kind = 'categorical'
     if req.color:
         color_field_name, color_kind = ctx.resolve(req.color)
-        if color_kind != 'categorical':
+        if color_kind not in ('categorical', 'numerical', 'gene'):
             raise HTTPException(400, detail=(
-                f"geom='rolling' color must be categorical (group split); "
-                f"'{req.color}' resolved as '{color_kind}'."
+                f"geom='rolling' color must be categorical, numerical, or a "
+                f"gene; '{req.color}' resolved as '{color_kind}'."
+            ))
+        if color_kind != 'categorical' and not req.bin_color:
+            raise HTTPException(400, detail=(
+                f"geom='rolling' color must be categorical to split by group. "
+                f"'{req.color}' resolved as '{color_kind}' — pass "
+                f"bin_color=N (2..20) with an optional bin_color_method="
+                f"quantile|width to bin it into N categorical groups."
             ))
 
     # Fetch x + all y values + optional grouping in a single trip.  Genes
@@ -4845,7 +5038,10 @@ def _handle_rolling(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     for name, kind in zip(y_resolved, y_kinds):
         (genes if kind == 'gene' else metas).append(name)
     if color_field_name:
-        metas.append(color_field_name)
+        if color_kind == 'gene':
+            genes.append(color_field_name)
+        else:
+            metas.append(color_field_name)
     # de-dupe preserving order
     genes = list(dict.fromkeys(genes))
     metas = list(dict.fromkeys(metas))
@@ -4856,6 +5052,16 @@ def _handle_rolling(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         filters=req.filters,
         sample=req.sample,
     )
+
+    # Post-fetch: bin the color column into N categorical groups if the
+    # caller asked for it AND the resolved kind is continuous.  Colour
+    # field name is rewritten (e.g. 'Age · 3 quantile bins') so caption +
+    # legend self-document.
+    if color_field_name and color_kind in ('numerical', 'gene') and req.bin_color:
+        data_df, color_field_name, _ = _bin_numerical_column(
+            data_df, color_field_name, req.bin_color, req.bin_color_method,
+        )
+        color_kind = 'categorical'
 
     n_cells = int(len(data_df))
     n_groups = (int(data_df[color_field_name].nunique())
@@ -6103,6 +6309,8 @@ def _build_plot_request(
     facet: Optional[str] = None,
     group_by: Optional[str] = None,
     color_scale: Optional[str] = None,
+    bin_color: Optional[int] = None,
+    bin_color_method: str = 'quantile',
 ) -> PlotRequest:
     """Fold ``CommonPlotParams`` + geom-specific kwargs into a ``PlotRequest``.
 
@@ -6171,6 +6379,8 @@ def _build_plot_request(
         sample=common.sample,
         attach_sessions=list(common.attach_sessions),
         source_url=str(common.request.url) if common.request is not None else '',
+        bin_color=bin_color,
+        bin_color_method=bin_color_method,
     )
 
 
@@ -6555,6 +6765,22 @@ async def plot_scatter_endpoint(
             "``global`` for one line; ``by_group`` for one per categorical-colour group (cap 30)."
         ),
     ),
+    bin_color: Optional[int] = Query(
+        None, ge=2, le=20,
+        description=(
+            "Bin a continuous ``color`` (numerical obs or gene) into N "
+            "categorical bins before plotting.  Ignored when ``color`` is "
+            "already categorical or unset."
+        ),
+    ),
+    bin_color_method: str = Query(
+        'quantile',
+        regex='^(quantile|width)$',
+        description=(
+            "How ``bin_color`` cuts the range: ``quantile`` (equal-count, "
+            "default) or ``width`` (equal-width)."
+        ),
+    ),
 ):
     """Cell-level scatter, **polymorphic**:
 
@@ -6573,6 +6799,7 @@ async def plot_scatter_endpoint(
         asinh_scale=asinh_scale,
         vmin=vmin, vmax=vmax,
         marginals=marginals, regline=regline,
+        bin_color=bin_color, bin_color_method=bin_color_method,
     )
     return await _render_plot(req, common.request)
 
@@ -6640,6 +6867,23 @@ async def plot_hexbin_endpoint(
         None,
         description="XY-mode overlay: ``global`` for one regression line, ``by_group`` for per-categorical-colour-group (cap 30).",
     ),
+    bin_color: Optional[int] = Query(
+        None, ge=2, le=20,
+        description=(
+            "Bin a continuous ``color`` (numerical obs or gene) into N "
+            "categorical bins before aggregation.  Ignored when ``color`` "
+            "is already categorical or unset — for categorical colour "
+            "the modal-category-per-hex rule still applies."
+        ),
+    ),
+    bin_color_method: str = Query(
+        'quantile',
+        regex='^(quantile|width)$',
+        description=(
+            "How ``bin_color`` cuts the range: ``quantile`` (equal-count, "
+            "default) or ``width`` (equal-width)."
+        ),
+    ),
 ):
     """Hex-aggregated scatter — same polymorphism as ``/plot/scatter``,
     cells aggregated into hex bins instead of one marker per cell."""
@@ -6653,6 +6897,7 @@ async def plot_hexbin_endpoint(
         vmin=vmin, vmax=vmax,
         vmin_quantile=vmin_quantile, vmax_quantile=vmax_quantile,
         marginals=marginals, regline=regline,
+        bin_color=bin_color, bin_color_method=bin_color_method,
     )
     return await _render_plot(req, common.request)
 
@@ -6676,8 +6921,8 @@ async def plot_kde2d_endpoint(
         0.22, gt=0.0, le=10.0,
         description="Bandwidth (Gaussian KDE scale). Lower = sharper. Set 0 / omit for Scott's rule.",
     ),
-    n_levels: int = Query(10, ge=2, le=30, description="Number of filled contour levels."),
-    iso_overlay: bool = Query(True, description="Draw thin white iso-density lines over the filled contours."),
+    n_levels: int = Query(10, ge=2, le=30, description="Number of contour levels (per group in multi-category mode)."),
+    iso_overlay: bool = Query(True, description="Draw thin white iso-density lines over the filled contours (single-group mode only)."),
     point_overlay: bool = Query(False, description="Raster scatter under the contours (off by default for clarity)."),
     marginals: bool = Query(False, description="Add univariate KDE strips on top of x and right of y."),
     regline: Optional[str] = Query(
@@ -6685,8 +6930,32 @@ async def plot_kde2d_endpoint(
         regex='^global$',
         description=(
             "Overlay a regression line + R² / Pearson / Spearman / slope. "
-            "Only ``global`` is supported on kde2d (no categorical colour "
-            "input). ``by_group`` returns 422."
+            "Only ``global`` is supported on kde2d."
+        ),
+    ),
+    color: Optional[str] = Query(
+        None,
+        description=(
+            "Optional grouping field.  Categorical → one line-contour set "
+            "per group, overlaid on shared axes with a category legend "
+            "(cap 8 groups).  Continuous → pair with ``bin_color=N`` to "
+            "bin into categorical groups first."
+        ),
+    ),
+    bin_color: Optional[int] = Query(
+        None, ge=2, le=20,
+        description=(
+            "Bin a continuous ``color`` (numerical obs or gene) into N "
+            "categorical groups before splitting the density.  Required "
+            "when ``color`` is not already categorical."
+        ),
+    ),
+    bin_color_method: str = Query(
+        'quantile',
+        regex='^(quantile|width)$',
+        description=(
+            "How ``bin_color`` cuts the range: ``quantile`` (equal-count, "
+            "default) or ``width`` (equal-width)."
         ),
     ),
 ):
@@ -6697,12 +6966,14 @@ async def plot_kde2d_endpoint(
 
     * apply the per-axis transform (default linear)
     * fit a Gaussian KDE on a ``kde_n``-cell subsample
-    * evaluate the density on a 200×200 grid
-    * render as ``n_levels`` filled magma contours + optional iso-density overlay
+    * evaluate the density on a shared 200×200 grid
+    * single-group → filled sequential contours + optional iso lines
+    * multi-group (``color`` set) → one line-contour set per group in
+      distinct palette colors, with a categorical legend
     """
     req = _build_plot_request(
         common, 'kde2d',
-        x=x, y=y,
+        x=x, y=y, color=color,
         transform_x=transform_x, transform_y=transform_y,
         asinh_scale=asinh_scale,
         kde_n=kde_n, kde_bw=kde_bw if kde_bw and kde_bw > 0 else None,
@@ -6711,6 +6982,7 @@ async def plot_kde2d_endpoint(
         point_overlay=point_overlay,
         marginals=marginals,
         regline=regline,
+        bin_color=bin_color, bin_color_method=bin_color_method,
     )
     return await _render_plot(req, common.request)
 
@@ -6790,15 +7062,31 @@ async def plot_bar_endpoint(
     return await _render_plot(req, common.request)
 
 
+_BIN_COLOR_DESC = (
+    "Bin a continuous ``color`` (numerical obs or gene) into N categorical "
+    "groups before splitting the distribution.  Required when ``color`` is "
+    "not already categorical."
+)
+_BIN_COLOR_METHOD_DESC = (
+    "How ``bin_color`` cuts the range: ``quantile`` (equal-count, default) "
+    "or ``width`` (equal-width)."
+)
+
+
 @app.get("/databases/{db_id:path}/plot/histogram", tags=["plots"])
 async def plot_histogram_endpoint(
     common: CommonPlotParams = Depends(),
     x: str = Query(..., description="Continuous field (gene or numerical obs) to histogram."),
     color: Optional[str] = Query(None, description="Categorical for overlaid per-group histograms."),
     bins: int = Query(20, ge=2, le=500, description="Number of histogram bins."),
+    bin_color: Optional[int] = Query(None, ge=2, le=20, description=_BIN_COLOR_DESC),
+    bin_color_method: str = Query('quantile', regex='^(quantile|width)$', description=_BIN_COLOR_METHOD_DESC),
 ):
     """Univariate histogram of ``x``, optionally split by a categorical ``color``."""
-    req = _build_plot_request(common, 'histogram', x=x, color=color, bins=bins)
+    req = _build_plot_request(
+        common, 'histogram', x=x, color=color, bins=bins,
+        bin_color=bin_color, bin_color_method=bin_color_method,
+    )
     return await _render_plot(req, common.request)
 
 
@@ -6807,9 +7095,14 @@ async def plot_ecdf_endpoint(
     common: CommonPlotParams = Depends(),
     x: str = Query(..., description="Continuous field to plot the empirical CDF of."),
     color: Optional[str] = Query(None, description="Categorical for overlaid per-group ECDFs."),
+    bin_color: Optional[int] = Query(None, ge=2, le=20, description=_BIN_COLOR_DESC),
+    bin_color_method: str = Query('quantile', regex='^(quantile|width)$', description=_BIN_COLOR_METHOD_DESC),
 ):
     """Empirical CDF of ``x``, optionally split by a categorical ``color``."""
-    req = _build_plot_request(common, 'ecdf', x=x, color=color)
+    req = _build_plot_request(
+        common, 'ecdf', x=x, color=color,
+        bin_color=bin_color, bin_color_method=bin_color_method,
+    )
     return await _render_plot(req, common.request)
 
 
@@ -6818,9 +7111,14 @@ async def plot_kde_endpoint(
     common: CommonPlotParams = Depends(),
     x: str = Query(..., description="Continuous field to estimate a kernel density of."),
     color: Optional[str] = Query(None, description="Categorical for overlaid per-group KDEs."),
+    bin_color: Optional[int] = Query(None, ge=2, le=20, description=_BIN_COLOR_DESC),
+    bin_color_method: str = Query('quantile', regex='^(quantile|width)$', description=_BIN_COLOR_METHOD_DESC),
 ):
     """Kernel-density estimate of ``x``, optionally split by a categorical ``color``."""
-    req = _build_plot_request(common, 'kde', x=x, color=color)
+    req = _build_plot_request(
+        common, 'kde', x=x, color=color,
+        bin_color=bin_color, bin_color_method=bin_color_method,
+    )
     return await _render_plot(req, common.request)
 
 
@@ -6866,7 +7164,28 @@ async def plot_rolling_endpoint(
     ),
     color: Optional[str] = Query(
         None,
-        description="Categorical field — splits each y into one line per group (e.g. wild-type vs knockout).",
+        description=(
+            "Categorical field — splits each y into one line per group (e.g. "
+            "wild-type vs knockout).  Pass a numerical obs field or gene "
+            "together with ``bin_color=N`` to split by binned quantile/width "
+            "of a continuous variable."
+        ),
+    ),
+    bin_color: Optional[int] = Query(
+        None, ge=2, le=20,
+        description=(
+            "Bin a continuous ``color`` (numerical obs or gene) into N "
+            "categorical bins before splitting.  Required if ``color`` is "
+            "not already categorical."
+        ),
+    ),
+    bin_color_method: str = Query(
+        'quantile',
+        regex='^(quantile|width)$',
+        description=(
+            "How ``bin_color`` cuts the range: ``quantile`` (equal-count, "
+            "default) or ``width`` (equal-width)."
+        ),
     ),
     window: int = Query(
         200, ge=2, le=50_000,
@@ -6924,6 +7243,7 @@ async def plot_rolling_endpoint(
         window=window, step_size=step_size,
         show_band=show_band, show_ci=show_ci,
         show_ci_corrected=show_ci_corrected, rank_x=rank_x,
+        bin_color=bin_color, bin_color_method=bin_color_method,
     )
     return await _render_plot(req, common.request)
 
@@ -7369,17 +7689,22 @@ def _coerce_bool(value: str) -> bool:
 _NOTEBOOK_PARAM_TYPES = {
     # numeric
     'bins': int, 'n_genes': int, 'gridsize': int, 'mincnt': int,
-    'window': int, 'kde_n': int, 'n_levels': int, 'n_label': int,
+    'window': int, 'step_size': int,
+    'kde_n': int, 'n_levels': int, 'n_label': int,
+    'bin_color': int,
     'point_size': float, 'alpha': float, 'asinh_scale': float,
     'vmin': float, 'vmax': float, 'vmin_quantile': float, 'vmax_quantile': float,
     'kde_bw': float,
     'padj_threshold': float, 'log2fc_threshold': float,
     'log2fc_clip': float, 'neglog10p_clip': float, 'logmean_clip': float,
+    'clip_x': float, 'clip_y': float,
     # booleans
     'log_x': _coerce_bool, 'log_y': _coerce_bool, 'ci': _coerce_bool,
     'iso_overlay': _coerce_bool, 'point_overlay': _coerce_bool,
     'marginals': _coerce_bool, 'show_band': _coerce_bool, 'zscore': _coerce_bool,
     'sig_overlay': _coerce_bool, 'normalize': _coerce_bool,
+    'show_ci': _coerce_bool, 'show_ci_corrected': _coerce_bool,
+    'rank_x': _coerce_bool, 'sort_desc': _coerce_bool,
 }
 
 # Params handled by CommonPlotParams already (we re-use the Depends-built

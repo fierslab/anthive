@@ -251,7 +251,7 @@
 
 {# ═══════════════════════════════════════════════════════════════════════
    Tab bar — persistent header above; tabs deep-link via URL hash.
-   Order: Overview, Data (includes Embeddings), Numerical cols,
+   Order: Overview (includes Embeddings), Data, Numerical cols,
    Categorical cols, Differential expression (only when data present),
    Downloads (only when a downloadable h5ad is available — filled by JS
    from /files).
@@ -275,10 +275,10 @@
 <section class="tab-panel active" id="tab-overview" role="tabpanel">
   {% if markdown_content %}<div class="ds-desc md-body">{{ markdown_content|safe }}</div>{% endif %}
 
-  {# Explore — curated quick-viz favourites (genes / categories / numerical). #}
-  {% if dataset_meta and (dataset_meta.top_genes or dataset_meta.top_cat or dataset_meta.top_num) %}
+  {# Explore — curated quick-viz favourites (genes / categories / numerical / embeddings). #}
+  {% if dataset_meta and (dataset_meta.top_genes or dataset_meta.top_cat or dataset_meta.top_num) or (info and info.obsm_keys) %}
   <h2>Explore</h2>
-  {% if dataset_meta.top_genes %}
+  {% if dataset_meta and dataset_meta.top_genes %}
   <div style="margin-bottom:4px">
       <span class="mk" style="display:inline-block;vertical-align:middle">genes</span>
       {% for gene in dataset_meta.top_genes %}
@@ -286,7 +286,7 @@
       {% endfor %}
   </div>
   {% endif %}
-  {% if dataset_meta.top_cat %}
+  {% if dataset_meta and dataset_meta.top_cat %}
   <div style="margin-bottom:4px">
       <span class="mk" style="display:inline-block;vertical-align:middle">categories</span>
       {% for col in dataset_meta.top_cat %}
@@ -294,11 +294,19 @@
       {% endfor %}
   </div>
   {% endif %}
-  {% if dataset_meta.top_num %}
+  {% if dataset_meta and dataset_meta.top_num %}
   <div style="margin-bottom:4px">
       <span class="mk" style="display:inline-block;vertical-align:middle">numerical</span>
       {% for col in dataset_meta.top_num %}
       <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ col | urlencode }}" class="chip">{{ col }}</a>
+      {% endfor %}
+  </div>
+  {% endif %}
+  {% if info and info.obsm_keys %}
+  <div style="margin-bottom:4px">
+      <span class="mk" style="display:inline-block;vertical-align:middle" title="Per-cell 2D layouts (UMAP, PCA, tSNE, custom). Each links to a scatter plot on that embedding.">embeddings</span>
+      {% for emb in info.obsm_keys %}
+        {% if has_duckdb %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/scatter?embedding={{ emb|urlencode }}" class="chip" title="scatter on {{ emb }}">{{ emb }}</a>{% else %}<code>{{ emb }}</code>{% endif %}
       {% endfor %}
   </div>
   {% endif %}
@@ -363,18 +371,6 @@
   <div class="info-col">
     <div class="info-row"><span class="mk">default layer</span><span class="mono">{{ info.default_layer if info.default_layer else 'X' }}</span></div>
   </div>
-
-  {# Embeddings — merged into the Data tab (used to be its own tab). The
-     subheading + chip list are omitted entirely when no obsm keys exist. #}
-  {% if info and info.obsm_keys %}
-  <h2>Embeddings <span class="muted" style="font-size:12px;font-weight:normal">({{ info.obsm_keys|length }})</span>
-    <span class="info" title="Per-cell 2D layouts (UMAP, PCA, tSNE, custom). Each links to a scatter plot on that embedding.">ⓘ</span></h2>
-  <div style="padding:4px 0">
-      {% for emb in info.obsm_keys %}
-        {% if has_duckdb %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/scatter?embedding={{ emb|urlencode }}" class="chip" title="scatter on {{ emb }}">🗺 {{ emb }}</a>{% else %}<code>{{ emb }}</code>{% endif %}
-      {% endfor %}
-  </div>
-  {% endif %}
 </section>
 
 {# ── Numerical columns tab ────────────────────────────────────────────── #}

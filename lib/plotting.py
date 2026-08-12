@@ -16,6 +16,7 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')  # non-interactive backend — must precede pyplot import
 import matplotlib.pyplot as plt
+import matplotlib.lines as mlines
 from matplotlib.figure import Figure as MplFigure
 import seaborn as sns
 import pandas as pd
@@ -3269,6 +3270,7 @@ def plot_kde2d(
     x_field: str,
     y_field: str,
     *,
+    color_field: Optional[str] = None,  # optional categorical → per-group line contours
     transform_x: str = 'linear',
     transform_y: str = 'linear',
     asinh_scale: float = 1.0,
@@ -3281,6 +3283,7 @@ def plot_kde2d(
     # is ignored here because diverging contours on a density don't
     # mean anything.
     palette_cont: str = _DEFAULT_SEQUENTIAL,
+    palette_cat: str = _DEFAULT_CATEGORICAL,  # legend colours in multi-group mode
     color_scale: Optional[str] = None,     # accepted + ignored (density is always sequential)
     iso_overlay: bool = True,        # thin white iso-density contours
     point_overlay: bool = False,     # raster scatter behind the contours
@@ -3323,7 +3326,8 @@ def plot_kde2d(
     _setup_style(font_family, font_size)
     fig, ax = plt.subplots(figsize=(width, height))
 
-    df = data_df[[x_field, y_field]].dropna()
+    cols_needed = [x_field, y_field] + ([color_field] if color_field else [])
+    df = data_df[cols_needed].dropna(subset=[x_field, y_field])
     if len(df) < 5:
         ax.text(0.5, 0.5, 'too few cells for a KDE',
                 transform=ax.transAxes, ha='center', va='center', color='#888')
@@ -3331,74 +3335,146 @@ def plot_kde2d(
 
     xs = apply_axis_transform(df[x_field].to_numpy(), transform_x, asinh_scale)
     ys = apply_axis_transform(df[y_field].to_numpy(), transform_y, asinh_scale)
+    cat_all = (
+        df[color_field].fillna('(missing)').astype(str).to_numpy()
+        if color_field else None
+    )
     finite = np.isfinite(xs) & np.isfinite(ys)
-    xs, ys = xs[finite], ys[finite]
     n_total = int(finite.sum())
     if n_total < 5:
         ax.text(0.5, 0.5, 'too few finite values after transform',
                 transform=ax.transAxes, ha='center', va='center', color='#888')
         return _render_figure(fig, dpi, output_format, caption, source_url)
-
-    # Subsample for the KDE fit (default 15k cells).  The grid evaluation
-    # uses the full bandwidth from the subsampled fit, so the density
-    # estimate is unbiased — the subsample only reduces fit cost.
+    xs_f = xs[finite]
+    ys_f = ys[finite]
+    cat_f = cat_all[finite] if cat_all is not None else None
     rng = np.random.default_rng(seed)
-    if n_total > kde_n:
-        idx = rng.choice(n_total, size=kde_n, replace=False)
-        fit_xs, fit_ys = xs[idx], ys[idx]
-    else:
-        fit_xs, fit_ys = xs, ys
-
-    bw_method = kde_bw if kde_bw is not None else 'scott'
-    kde = gaussian_kde(np.vstack([fit_xs, fit_ys]), bw_method=bw_method)
 
     # Evaluation grid spans the FULL data range (not the subsample's),
-    # padded by 3% on each side so contours don't clip at the edges.
+    # padded by 3% on each side so contours don't clip at the edges.  In
+    # multi-group mode this grid is shared across groups so their
+    # contours can be visually compared 1:1.
     pad = 0.03
-    xmin, xmax = xs.min(), xs.max()
-    ymin, ymax = ys.min(), ys.max()
+    xmin, xmax = xs_f.min(), xs_f.max()
+    ymin, ymax = ys_f.min(), ys_f.max()
     xrange, yrange = (xmax - xmin) or 1.0, (ymax - ymin) or 1.0
     xmin -= pad * xrange; xmax += pad * xrange
     ymin -= pad * yrange; ymax += pad * yrange
     grid_x = np.linspace(xmin, xmax, grid_res)
     grid_y = np.linspace(ymin, ymax, grid_res)
     grid_xx, grid_yy = np.meshgrid(grid_x, grid_y)
-    z = kde(np.vstack([grid_xx.ravel(), grid_yy.ravel()])).reshape(grid_res, grid_res)
 
-    if point_overlay:
-        ax.plot(xs, ys, marker='.', linestyle='none', markersize=1.5,
-                color='#444444', alpha=point_alpha, rasterized=True)
+    bw_method = kde_bw if kde_bw is not None else 'scott'
 
-    # Honour palette_cont for the density colormap. pick_cmap handles
-    # the qualitative-palette / divergent-palette fallbacks defensively
-    # — kde2d density is one-sided so we always want sequential.
-    cmap_name, _ = pick_cmap(
-        'continuous', palette_cont=palette_cont,
-        color_scale='sequential',
-    )
-    cs = ax.contourf(grid_xx, grid_yy, z, levels=n_levels, cmap=cmap_name)
-    if iso_overlay:
-        ax.contour(grid_xx, grid_yy, z, levels=n_levels,
-                   colors='white', linewidths=0.4, alpha=0.6)
+    def _fit_and_eval(sub_xs, sub_ys):
+        n_sub = len(sub_xs)
+        if n_sub > kde_n:
+            idx = rng.choice(n_sub, size=kde_n, replace=False)
+            fit_xs, fit_ys = sub_xs[idx], sub_ys[idx]
+        else:
+            fit_xs, fit_ys = sub_xs, sub_ys
+        kde = gaussian_kde(np.vstack([fit_xs, fit_ys]), bw_method=bw_method)
+        z = kde(np.vstack([grid_xx.ravel(), grid_yy.ravel()])).reshape(grid_res, grid_res)
+        return z, len(fit_xs)
 
-    cbar = plt.colorbar(cs, ax=ax, shrink=0.7)
-    cbar.set_label('density', fontsize=9)
+    if color_field and cat_f is not None:
+        # ── Multi-group overlay: one line-contour set per category.
+        groups = sorted(np.unique(cat_f).tolist())
+        max_groups = 8
+        if len(groups) > max_groups:
+            plt.close(fig)
+            raise ValueError(
+                f"kde2d multi-group overlay: got {len(groups)} groups in "
+                f"'{color_field}', cap is {max_groups}. Either aggregate "
+                f"categories or use bin_color=N with N<={max_groups}."
+            )
+        cmap_name, _ = pick_cmap(
+            'categorical', palette_cat=palette_cat,
+            palette_cont=palette_cont,
+            n_categories=len(groups),
+        )
+        cmap_obj = _get_cmap(cmap_name)
+        n_palette = getattr(cmap_obj, 'N', 256)
+
+        legend_handles: List[Any] = []
+        n_fits = []
+        for idx_grp, grp in enumerate(groups):
+            mask = cat_f == grp
+            sub_xs = xs_f[mask]
+            sub_ys = ys_f[mask]
+            group_color = cmap_obj((idx_grp % n_palette) / max(n_palette - 1, 1))
+            n_grp = int(len(sub_xs))
+            if n_grp < 5:
+                legend_handles.append(
+                    mlines.Line2D([], [], color=group_color, linewidth=1.4,
+                                  label=f'{grp}  (n={n_grp}, no KDE)')
+                )
+                continue
+            z_grp, n_fit_grp = _fit_and_eval(sub_xs, sub_ys)
+            n_fits.append(n_fit_grp)
+            # Draw filled contours faintly (visual separation of dense
+            # regions per group) plus solid line contours for structure.
+            ax.contourf(grid_xx, grid_yy, z_grp, levels=n_levels,
+                        colors=[group_color] * n_levels,
+                        alpha=0.10)
+            ax.contour(grid_xx, grid_yy, z_grp, levels=n_levels,
+                       colors=[group_color], linewidths=1.0, alpha=0.9)
+            if point_overlay:
+                ax.plot(sub_xs, sub_ys, marker='.', linestyle='none',
+                        markersize=1.5, color=group_color,
+                        alpha=point_alpha, rasterized=True)
+            legend_handles.append(
+                mlines.Line2D([], [], color=group_color, linewidth=1.4,
+                              label=f'{grp}  (n={_fmt_n(n_grp)})')
+            )
+
+        n_fit_repr = min(n_fits) if n_fits else 0
+        title_bits = [
+            '2-D KDE',
+            f'{y_field} vs {x_field}',
+            f'by {color_field}',
+            f'n={_fmt_n(n_total)}{" (per-grp fit ≥"+_fmt_n(n_fit_repr)+")" if n_total > kde_n else ""}',
+        ]
+        ax.legend(
+            handles=legend_handles, title=color_field,
+            bbox_to_anchor=(1.02, 1.0), loc='upper left',
+            borderaxespad=0.0, fontsize=8,
+            title_fontsize=9, frameon=False,
+        )
+    else:
+        # ── Single-group: filled sequential contours + optional iso lines.
+        z, n_fit = _fit_and_eval(xs_f, ys_f)
+        if point_overlay:
+            ax.plot(xs_f, ys_f, marker='.', linestyle='none', markersize=1.5,
+                    color='#444444', alpha=point_alpha, rasterized=True)
+        cmap_name, _ = pick_cmap(
+            'continuous', palette_cont=palette_cont,
+            color_scale='sequential',
+        )
+        cs = ax.contourf(grid_xx, grid_yy, z, levels=n_levels, cmap=cmap_name)
+        if iso_overlay:
+            ax.contour(grid_xx, grid_yy, z, levels=n_levels,
+                       colors='white', linewidths=0.4, alpha=0.6)
+        cbar = plt.colorbar(cs, ax=ax, shrink=0.7)
+        cbar.set_label('density', fontsize=9)
+        title_bits = [
+            '2-D KDE',
+            f'{y_field} vs {x_field}',
+            f'n={_fmt_n(n_total)}{" (fit "+_fmt_n(n_fit)+")" if n_total > kde_n else ""}',
+        ]
 
     ax.set_xlabel(_axis_label_with_transform(x_field, transform_x))
     ax.set_ylabel(_axis_label_with_transform(y_field, transform_y))
-    title_bits = [
-        '2-D KDE',
-        f'{y_field} vs {x_field}',
-        f'n={_fmt_n(n_total)}{" (fit "+_fmt_n(len(fit_xs))+")" if n_total > kde_n else ""}',
-    ]
     ax.set_title(_compose_title(title_bits, extra=title_extra))
     sns.despine(ax=ax)
 
     # Overlays — drawn AFTER the title so they read on top of the contours.
+    # Regression + marginals stay global (pooled across groups) — the
+    # user asked for a density comparison, not per-group trend lines.
     if regline:
-        attach_regression(ax, xs, ys, kind='global')
+        attach_regression(ax, xs_f, ys_f, kind='global')
     if marginals:
-        attach_marginals(fig, ax, xs, ys, color='#666666')
+        attach_marginals(fig, ax, xs_f, ys_f, color='#666666')
 
     fig.tight_layout()
 
