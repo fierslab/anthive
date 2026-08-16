@@ -729,11 +729,25 @@ class AnthiveDB:
             layer_src = self._layer_source_with_names(layer)
             for gene in genes:
                 gene_alias = safe_ident(gene)
+                # COALESCE the scalar subquery to 0. The layer table is
+                # sparse (only non-zero entries stored), so a cell absent
+                # from that table means "expression == 0", NOT "missing
+                # data". Dropping to NaN would (silently) filter zeros out
+                # of every plot — biasing means, hiding the ~95% zero-mass
+                # in violin/KDE, and producing "TREM2 by condition" means
+                # that are actually mean_nonzero_by_condition. Zero-fill
+                # here matches the scanpy / CellxGene convention.
+                #
+                # NOTE: only apply to gene columns. Obs columns MUST keep
+                # NaN — a missing category is real missing data, not zero.
                 select_parts.append(f"""
-                    (SELECT value
-                     FROM {layer_src} _l
-                     WHERE _l.cell_name = c.cell_name
-                     AND _l.gene_name = ?) AS {gene_alias}
+                    COALESCE(
+                        (SELECT value
+                         FROM {layer_src} _l
+                         WHERE _l.cell_name = c.cell_name
+                         AND _l.gene_name = ?),
+                        0.0
+                    ) AS {gene_alias}
                 """)
                 params.append(gene)
 
