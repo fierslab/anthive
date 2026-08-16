@@ -3726,6 +3726,17 @@ _PLOT_MIME_TYPES = {
 # exact data behind the plotted image.
 _PLOT_DATA_FORMATS = ('csv', 'tsv')
 
+# Default random-subsample size for per-cell scatter plots (scatter and
+# numerical-vs-numerical xy). Above this, matplotlib's per-point cost
+# dominates render time AND the visual quality actively degrades as dots
+# overplot into solid ink — you lose signal, not gain it. 25k is a UMAP
+# sweet spot: cluster shapes stay clean, states ≥0.2% of cells stay
+# visible, render is ~1 s. Users override with ?sample=N (up to 1e6),
+# or effectively "all" by passing a value larger than the dataset.
+# Does NOT apply to hexbin/violin/box/kde/bar/histogram/ecdf — those
+# aggregate server-side and benefit from more cells, not fewer.
+_DEFAULT_SCATTER_SAMPLE = 25_000
+
 _PLOT_GEOMS = {
     'scatter',     # 2-axis scatter — embedding when x is an obsm key,
                    # gene-vs-gene/continuous when x and y are both fields
@@ -4250,7 +4261,12 @@ def _handle_scatter(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
                        else (ctx.available_embeddings[0] if ctx.available_embeddings else None))
     if not emb_id:
         raise HTTPException(400, detail="No embeddings available for scatter plot")
-    embedding_df = ctx.db.get_embedding_data(emb_id, n_dims=2, filters=req.filters, sample=req.sample)
+    # Default random-subsample for scatter (see _DEFAULT_SCATTER_SAMPLE
+    # comment). DuckDB reservoir sampling short-circuits if the post-filter
+    # cell count is below the sample size — small datasets pass through
+    # untouched. Users override with ?sample=N.
+    effective_sample = req.sample if req.sample is not None else _DEFAULT_SCATTER_SAMPLE
+    embedding_df = ctx.db.get_embedding_data(emb_id, n_dims=2, filters=req.filters, sample=effective_sample)
 
     color_df = None
     color_field_name = None
@@ -4266,7 +4282,7 @@ def _handle_scatter(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
                 f"color={req.color!r} resolved as '{color_kind}'; "
                 f"color must be a categorical / numerical obs field or a gene."
             ))
-        sampled_cells = embedding_df['cell_name'].tolist() if req.sample else None
+        sampled_cells = embedding_df['cell_name'].tolist() if effective_sample else None
         color_filters = dict(req.filters) if req.filters else {}
         if sampled_cells:
             color_filters['cell_name'] = sampled_cells
@@ -4305,7 +4321,7 @@ def _handle_scatter(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         req.db_id, req.geom, emb_id, 'embedding',
         None, color_field_name, req.layer,
         n_cells=n_cells, n_groups=n_groups,
-        sample=req.sample, subset=_subset_for_caption(req),
+        sample=effective_sample, subset=_subset_for_caption(req),
         color_kind=color_kind if color_field_name else None,
         vmin=req.vmin, vmax=req.vmax,
         color_scale=req.color_scale,
@@ -4485,12 +4501,18 @@ def _handle_xy(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     metas_to_fetch = list(dict.fromkeys(metas_to_fetch))
     session_axes  = list(dict.fromkeys(session_axes))
 
+    # Auto-sample for per-cell scatter (not hexbin — hexbin aggregates).
+    # See _DEFAULT_SCATTER_SAMPLE comment.
+    xy_scatter = req.geom == 'scatter' or req.geom == 'xy_scatter'
+    effective_sample = req.sample
+    if effective_sample is None and xy_scatter:
+        effective_sample = _DEFAULT_SCATTER_SAMPLE
     data_df = ctx.db.get_cell_table(
         genes=genes_to_fetch or None,
         metadata_fields=metas_to_fetch or None,
         layer=req.layer,
         filters=req.filters,
-        sample=req.sample,
+        sample=effective_sample,
     )
 
     # Merge session-column values in on cell_name. Left-join preserves the
@@ -4557,12 +4579,12 @@ def _handle_xy(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
             if color_kind == 'gene':
                 color_df = ctx.db.get_cell_table(
                     genes=[color_field_name], layer=req.layer,
-                    filters=req.filters, sample=req.sample,
+                    filters=req.filters, sample=effective_sample,
                 )
             else:
                 color_df = ctx.db.get_cell_table(
                     metadata_fields=[color_field_name],
-                    filters=req.filters, sample=req.sample,
+                    filters=req.filters, sample=effective_sample,
                 )
             # Align to the cells we fetched for x/y (in case the colour
             # query path landed a different sample).
@@ -4586,7 +4608,7 @@ def _handle_xy(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     caption = plotting.build_caption(
         req.db_id, req.geom, req.x, x_kind, req.y, color_field_name, req.layer,
         n_cells=n_cells, n_groups=n_groups,
-        sample=req.sample, subset=_subset_for_caption(req),
+        sample=effective_sample, subset=_subset_for_caption(req),
         color_kind=color_kind if color_field_name else None,
         gridsize=req.gridsize, mincnt=req.mincnt,
         vmin=req.vmin, vmax=req.vmax,
