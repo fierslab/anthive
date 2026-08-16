@@ -1,0 +1,487 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "anndata>=0.10.0",
+#   "numpy>=1.24.0,<2.0",
+#   "pandas>=2.0.0",
+#   "pyarrow>=14.0.0",
+#   "duckdb>=0.10.0",
+#   "pyyaml>=6.0",
+#   "decoupler>=1.6.0,<2.0",
+# ]
+# ///
+"""ant-aucell — AUCell scoring from the genesetstore into scores.parquet.
+
+Uses decoupler-py's run_aucell (rank-based AUC enrichment) instead of
+scanpy.tl.score_genes. Scores are written to the dataset's
+<basename>.scores.parquet sidecar with source='aucell' so they coexist
+with scanpy scores (source='geneset') and starcat scores (source='starcat').
+
+Key differences from ant-score:
+  - Does NOT write to __obsnum/__obscat in the duckdb.
+  - Does NOT need AnnotationWriter or ant-serve coordination.
+  - Writes only to the parquet sidecar.
+  - Scores are 0–1 rank-based AUCs (not scanpy signed-mean scores).
+  - use_raw=False is mandatory (X is log-norm per anthive convention).
+
+The sidecar is immediately queryable via:
+  GET /databases/<db>/module_score?source=aucell&catalog=<experiment>
+
+Usage:
+  ant aucell <db_id> <experiment_or_geneset_id> [<id>...]
+
+Examples:
+  ant aucell Z20/MIC Sierksma2025/WGCNA
+  ant aucell Z20/MIC Sierksma2025/WGCNA Mancuso2024/Cell_states
+  ant aucell Z20/MIC Sierksma2025/WGCNA --overwrite
+  ant aucell Z20/MIC Sierksma2025/WGCNA --dry-run
+  ant aucell Z20/MIC Sierksma2025/WGCNA --min-n 3
+
+Options:
+  --seed N           random_state for tie-breaking (default 42)
+  --min-n N          minimum gene overlap required to score a module (default 5)
+  --overwrite        re-score even if (source='aucell', catalog=<experiment>)
+                     already exists in scores.parquet
+  --gene-column COL  if var_names are Ensembl IDs, use this adata.var column
+                     as gene symbols (auto-detected for CellxGene-style files)
+  --dry-run          score but do not write
+  -v, --verbose      per-module stats
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent.parent / 'lib'
+sys.path.insert(0, str(LIB_DIR))
+
+import anndata as ad
+import duckdb
+import numpy as np
+import pandas as pd
+import decoupler as dc
+
+from config import get_config          # type: ignore
+from geneset import (                  # type: ignore
+    Experiment, Geneset, GenesetRegistry,
+)
+from h5adstore import H5adEntry, find_h5ad   # type: ignore
+from metadata import parse_md_file           # type: ignore
+from scores_parquet import read_scores, summarize, upsert_scores  # type: ignore
+
+TOOL_VERSION = 'ant-aucell/0.1'
+
+# Columns in adata.var that may hold gene symbols when var_names are Ensembl IDs
+_GENE_SYMBOL_COLUMN_CANDIDATES = (
+    'feature_name', 'gene_symbol', 'Symbol',
+    'gene_symbols', 'gene_name', 'symbol',
+)
+
+
+# ── registry helpers ──────────────────────────────────────────────────────────
+
+def _load_geneset_registry() -> GenesetRegistry:
+    config = get_config()
+    store_value = config.get('geneset_store')
+    if not store_value:
+        sys.exit('ERROR: geneset_store not configured in anthive.yaml')
+    store_path = (SCRIPT_DIR.parent.parent / store_value).resolve()
+    if not store_path.exists():
+        sys.exit(f'ERROR: geneset store does not exist: {store_path}')
+    registry = GenesetRegistry(store_path)
+    registry.scan()
+    if registry.errors:
+        for err in registry.errors:
+            print(f'  store error: {err}', file=sys.stderr)
+        sys.exit('ERROR: geneset store has errors — fix with `ant geneset validate`')
+    return registry
+
+
+def _h5adstore_root() -> Path:
+    config = get_config()
+    h5ad_root_value = config.get('h5ad_store') or 'data/h5adstore'
+    root = (SCRIPT_DIR.parent.parent / h5ad_root_value).resolve()
+    if not root.exists():
+        sys.exit(f'ERROR: h5ad store does not exist: {root}')
+    return root
+
+
+def _resolve_target(
+    registry: GenesetRegistry, target: str
+) -> List[Tuple[Experiment, List[Geneset]]]:
+    """Resolve '<study>/<exp>' → all genesets, or '<study>/<exp>/<gs>' → one."""
+    target = target.strip().strip('/')
+    parts = target.split('/')
+
+    if len(parts) == 2:
+        experiment = registry.get_experiment(target)
+        if experiment is None:
+            sys.exit(f'ERROR: experiment {target!r} not found in geneset store')
+        members = [
+            g for g in registry.list_genesets()
+            if g.experiment.experiment_id == target
+        ]
+        if not members:
+            sys.exit(f'ERROR: experiment {target!r} contains no genesets')
+        return [(experiment, members)]
+
+    if len(parts) == 3:
+        geneset = registry.get(target)
+        if geneset is None:
+            sys.exit(f'ERROR: geneset {target!r} not found in geneset store')
+        return [(geneset.experiment, [geneset])]
+
+    sys.exit(
+        f"ERROR: target {target!r} must be '<study>/<experiment>' "
+        f"or '<study>/<experiment>/<geneset>'"
+    )
+
+
+# ── var_names remapping (mirrors ant-score logic) ─────────────────────────────
+
+def _swap_var_names(adata: ad.AnnData, column: str, source_label: str) -> ad.AnnData:
+    """Replace adata.var_names with values from `column`, deduplicating."""
+    old_name = adata.var.index.name or '_var_index'
+    adata.var[old_name + '_orig'] = adata.var.index.values
+    new_names = pd.Index(adata.var[column].astype(str).values, name=old_name)
+    keep_mask = ~new_names.duplicated(keep='first')
+    n_dups = int((~keep_mask).sum())
+    adata.var.index = new_names
+    if n_dups:
+        adata = adata[:, keep_mask].copy()
+        print(
+            f'  var_names swapped to {column!r} ({source_label}); '
+            f'dropped {n_dups:,} duplicates (kept first).'
+        )
+    else:
+        print(f'  var_names swapped to {column!r} ({source_label}).')
+    return adata
+
+
+def _maybe_remap_var_names(
+    adata: ad.AnnData, explicit_column: Optional[str]
+) -> ad.AnnData:
+    if explicit_column:
+        if explicit_column not in adata.var.columns:
+            sys.exit(
+                f'ERROR: --gene-column {explicit_column!r} not in adata.var. '
+                f'Available: {list(adata.var.columns)}'
+            )
+        return _swap_var_names(adata, explicit_column, 'CLI override')
+
+    sample = list(adata.var_names[:200])
+    if not sample:
+        return adata
+    fraction_ensembl = sum(
+        1 for s in sample
+        if isinstance(s, str) and (s.startswith('ENSG') or s.startswith('ENSMUS'))
+    ) / len(sample)
+    if fraction_ensembl < 0.5:
+        return adata
+
+    for cand in _GENE_SYMBOL_COLUMN_CANDIDATES:
+        if cand in adata.var.columns:
+            return _swap_var_names(adata, cand, 'autodetected Ensembl IDs')
+
+    print(
+        '  WARNING: var_names look like Ensembl IDs but no symbol column found. '
+        'Scoring will likely fail.',
+        file=sys.stderr,
+    )
+    return adata
+
+
+# ── core AUCell scoring ───────────────────────────────────────────────────────
+
+def _build_network(genesets: List[Geneset]) -> pd.DataFrame:
+    """Long-format (source, target, weight) network for decoupler."""
+    rows = []
+    for gs in genesets:
+        for gene in gs.genes:
+            rows.append({'source': gs.name, 'target': gene, 'weight': 1.0})
+    return pd.DataFrame(rows)
+
+
+def _aucell_one_experiment(
+    adata: ad.AnnData,
+    experiment: Experiment,
+    genesets: List[Geneset],
+    entry: H5adEntry,
+    seed: int,
+    min_n: int,
+    verbose: bool,
+    dry_run: bool,
+) -> Dict:
+    """Score one experiment on adata, write to parquet. Returns a result dict."""
+    catalog_id = experiment.experiment_id
+    print(f'\n  Experiment: {catalog_id}')
+
+    net = _build_network(genesets)
+    print(f'  Network: {len(genesets)} modules, {len(net):,} (module, gene) pairs')
+
+    var_names = set(adata.var_names)
+    module_gene_counts = {gs.name: sum(1 for g in gs.genes if g in var_names)
+                          for gs in genesets}
+    skipped_modules = [name for name, cnt in module_gene_counts.items() if cnt < min_n]
+    if skipped_modules:
+        print(
+            f'  WARNING: {len(skipped_modules)} modules have <{min_n} genes in '
+            f'var_names and will be absent from AUCell output: {skipped_modules}',
+            file=sys.stderr,
+        )
+
+    t_score = time.time()
+    try:
+        dc.run_aucell(
+            adata, net,
+            source='source', target='target',
+            use_raw=False,   # X is log-norm per anthive convention
+            seed=seed,
+            min_n=min_n,
+            verbose=False,
+        )
+    except Exception as exc:
+        return {
+            'catalog': catalog_id,
+            'status': 'error',
+            'error': str(exc),
+            'n_rows': 0,
+        }
+
+    elapsed = time.time() - t_score
+    print(f'  AUCell finished in {elapsed:.1f}s')
+
+    obsm_key = 'aucell_estimate'
+    if obsm_key not in adata.obsm:
+        return {
+            'catalog': catalog_id,
+            'status': 'error',
+            'error': f'{obsm_key!r} not in adata.obsm after run_aucell',
+            'n_rows': 0,
+        }
+
+    raw_scores = adata.obsm[obsm_key]
+    if hasattr(raw_scores, 'to_df'):
+        scores_df = raw_scores.to_df()
+    elif isinstance(raw_scores, pd.DataFrame):
+        scores_df = raw_scores
+    else:
+        module_names = [gs.name for gs in genesets if module_gene_counts.get(gs.name, 0) >= min_n]
+        scores_df = pd.DataFrame(
+            np.asarray(raw_scores),
+            index=adata.obs_names,
+            columns=module_names,
+        )
+
+    if verbose:
+        for col in scores_df.columns:
+            vals = scores_df[col].dropna()
+            print(
+                f'    {col}: n={len(vals)}  '
+                f'range=[{vals.min():.3f}, {vals.max():.3f}]  '
+                f'mean={vals.mean():.3f}'
+            )
+    else:
+        print(f'  Scored {len(scores_df.columns)} modules × {len(scores_df):,} cells')
+
+    # Melt to long format. reset_index() may produce an unnamed column ('index')
+    # or one named after the index — normalise to 'cell_name' before melt.
+    scores_reset = scores_df.reset_index()
+    # The first column is the former index (cell obs names)
+    first_col = scores_reset.columns[0]
+    scores_reset = scores_reset.rename(columns={first_col: 'cell_name'})
+    long_df = scores_reset.melt(
+        id_vars='cell_name',
+        var_name='module',
+        value_name='score',
+    )
+    long_df = long_df.dropna(subset=['score'])
+
+    # Map cell_name → cell_id via the duckdb __cells table
+    conn = duckdb.connect(str(entry.duckdb_path), read_only=True)
+    try:
+        cellmap = conn.execute('SELECT cell_id, cell_name FROM __cells').df()
+    finally:
+        conn.close()
+
+    n_before = len(long_df)
+    long_df = long_df.merge(cellmap, on='cell_name', how='inner')
+    n_dropped = n_before - len(long_df)
+    if n_dropped:
+        print(
+            f'  WARNING: {n_dropped} rows dropped in cell_name→cell_id join '
+            f'(obs_names / __cells mismatch)',
+            file=sys.stderr,
+        )
+
+    long_df = long_df[['cell_id', 'module', 'score']]
+
+    if dry_run:
+        print(f'  (dry-run) would write {len(long_df):,} rows for {catalog_id}')
+        return {
+            'catalog': catalog_id,
+            'status': 'dry-run',
+            'n_rows': len(long_df),
+        }
+
+    n_written = upsert_scores(
+        duckdb_path=entry.duckdb_path,
+        source='aucell',
+        catalog=catalog_id,
+        rows=long_df,
+    )
+    print(f'  Wrote {n_written:,} rows → source=aucell catalog={catalog_id}')
+    return {
+        'catalog': catalog_id,
+        'status': 'ok',
+        'n_rows': n_written,
+    }
+
+
+# ── main ──────────────────────────────────────────────────────────────────────
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description='AUCell scoring (decoupler-py) from the genesetstore.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument(
+        'db_id',
+        help='h5adstore dataset to score, e.g. Z20/MIC or Zeisel2020/Microglia',
+    )
+    parser.add_argument(
+        'genesets', nargs='+',
+        help='one or more experiment_id or geneset_id, e.g. Sierksma2025/WGCNA',
+    )
+    parser.add_argument('--seed',        type=int,   default=42)
+    parser.add_argument('--min-n',       type=int,   default=5,
+                        help='minimum gene overlap to score a module (default 5)')
+    parser.add_argument('--gene-column', default=None,
+                        help='adata.var column to use as gene symbols when var_names '
+                             'are Ensembl IDs. Auto-detected for CellxGene-style files.')
+    parser.add_argument('--overwrite',   action='store_true',
+                        help='re-score even if (source=aucell, catalog=<experiment>) '
+                             'already exists in the sidecar')
+    parser.add_argument('--dry-run',     action='store_true',
+                        help='score but do not write the sidecar')
+    parser.add_argument('-v', '--verbose', action='store_true')
+    args = parser.parse_args()
+
+    registry = _load_geneset_registry()
+    h5ad_root = _h5adstore_root()
+
+    entry = find_h5ad(h5ad_root, args.db_id)
+    if entry is None:
+        sys.exit(f'ERROR: dataset {args.db_id!r} not found in h5adstore ({h5ad_root})')
+
+    if not entry.h5ad_path.exists():
+        sys.exit(
+            f'ERROR: {entry.h5ad_path} not found locally. '
+            f'Pull the h5ad before scoring.'
+        )
+    if not entry.duckdb_path.exists():
+        sys.exit(
+            f'ERROR: {entry.duckdb_path} not found. '
+            f'Run `ant-convert {entry.h5ad_path}` first.'
+        )
+
+    # Collect (experiment, [genesets]) pairs, deduplicating across inputs
+    by_experiment: Dict[str, List[Geneset]] = {}
+    experiments_by_id: Dict[str, Experiment] = {}
+    seen_geneset_ids: set = set()
+    for raw_id in args.genesets:
+        for experiment, members in _resolve_target(registry, raw_id):
+            experiments_by_id[experiment.experiment_id] = experiment
+            for gs in members:
+                if gs.geneset_id not in seen_geneset_ids:
+                    seen_geneset_ids.add(gs.geneset_id)
+                    by_experiment.setdefault(experiment.experiment_id, []).append(gs)
+
+    if not by_experiment:
+        sys.exit('ERROR: no genesets resolved')
+
+    # Filter out already-scored (source=aucell, catalog=experiment) unless --overwrite
+    if not args.overwrite:
+        existing = read_scores(entry.duckdb_path, source='aucell')
+        already_done = set(existing['catalog'].unique()) if not existing.empty else set()
+        skipped_experiments = []
+        for exp_id in list(by_experiment):
+            if exp_id in already_done:
+                print(
+                    f'  SKIP {exp_id}: already scored with source=aucell '
+                    f'(use --overwrite to redo)'
+                )
+                skipped_experiments.append(exp_id)
+                del by_experiment[exp_id]
+        if not by_experiment:
+            print('All requested experiments already scored. Nothing to do.')
+            return 0
+
+    n_total_modules = sum(len(gss) for gss in by_experiment.values())
+    print(
+        f'Plan: {entry.db_id} ({entry.readable_id}) ← '
+        f'{len(by_experiment)} experiment(s), {n_total_modules} module(s)'
+    )
+
+    # Read the h5ad once for all experiments
+    md_metadata, _ = parse_md_file(entry.md_path)
+    has_lognorm = md_metadata.get('has_lognorm', True)
+    if has_lognorm is False:
+        sys.exit(
+            f'ERROR: {entry.md_path.name} declares has_lognorm: false — '
+            f'no log-normalised layer. AUCell requires log-norm or raw '
+            f'expression; cannot proceed.'
+        )
+
+    print(f'\n=== {entry.db_id} ({entry.readable_id}) ===')
+    print(f'  h5ad: {entry.h5ad_path}')
+    t_load = time.time()
+    adata = ad.read_h5ad(entry.h5ad_path)
+    print(
+        f'  Loaded {adata.n_obs:,} cells × {adata.n_vars:,} genes '
+        f'({time.time()-t_load:.1f}s)'
+    )
+
+    adata = _maybe_remap_var_names(adata, args.gene_column)
+
+    all_results = []
+    for exp_id, genesets in by_experiment.items():
+        experiment = experiments_by_id[exp_id]
+        result = _aucell_one_experiment(
+            adata=adata,
+            experiment=experiment,
+            genesets=genesets,
+            entry=entry,
+            seed=args.seed,
+            min_n=args.min_n,
+            verbose=args.verbose,
+            dry_run=args.dry_run,
+        )
+        all_results.append(result)
+
+    # Summary
+    print(f'\n[summary for {entry.db_id}]')
+    for res in all_results:
+        status = res['status']
+        catalog = res['catalog']
+        n_rows = res['n_rows']
+        if status == 'error':
+            print(f'  ERROR  {catalog}: {res["error"]}')
+        elif status == 'dry-run':
+            print(f'  DRY    {catalog}: {n_rows:,} rows (not written)')
+        else:
+            print(f'  OK     {catalog}: {n_rows:,} rows written')
+
+    n_errors = sum(1 for r in all_results if r['status'] == 'error')
+    return 1 if n_errors else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
