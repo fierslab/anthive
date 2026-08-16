@@ -28,6 +28,15 @@
   .ext-lnk { font-size:10px; margin-left:4px; text-decoration:none;
              filter:grayscale(1); opacity:.5; }
   .ext-lnk:hover { opacity:1; filter:none; text-decoration:none; }
+  /* ⚠ caveats marker — small badge AFTER the external-link icons; colour
+     mirrors the severity accent from dataset.html (subdued to match the
+     monochrome list view). Hover reveals count + highest level. */
+  .cv-mark { display:inline-block; margin-left:5px; font-size:11px;
+             padding:0 4px; border-radius:3px; cursor:help; line-height:1.4;
+             border:1px solid transparent; text-decoration:none; }
+  .cv-mark.lvl-low    { color:#475569; background:#f1f5f9; border-color:#e2e8f0; }
+  .cv-mark.lvl-medium { color:#92400e; background:#fef3c7; border-color:#fde68a; }
+  .cv-mark.lvl-high   { color:#991b1b; background:#fee2e2; border-color:#fecaca; }
   /* Mobile card layout (≤760px) is the shared `.card-table` rule in base.html;
      the cells below carry the data-label / card-title hooks it consumes. */
   /* Cells × Genes stays on one line on wide screens, but is allowed to wrap
@@ -103,7 +112,7 @@
         {% set _src  = dataset.source          or {} %}
         <tr>
             <td class="card-title">
-                {% if 'access' in var_fields and _acc.abbrev %}<span class="acc-src" title="access: {{ _acc.full }}">{{ _acc.abbrev }}</span>{% endif %}{% if 'source' in var_fields and _src.abbrev %}<span class="acc-src" title="source: {{ _src.full }}">{{ _src.abbrev }}</span>{% endif %}<a href="/browse/{{ folder_browse_id }}/{{ dataset.browse_id }}" title="{{ dataset.file_id }}"><strong>{{ dataset.name }}</strong></a>{% for doi_item in dataset.doi %}<a class="ext-lnk" href="https://doi.org/{{ doi_item }}" target="_blank" rel="noopener" title="DOI: {{ doi_item }}">🔗</a>{% endfor %}{% if dataset.accession_url %}<a class="ext-lnk" href="{{ dataset.accession_url }}" target="_blank" rel="noopener" title="accession: {{ dataset.accession }}">🔗</a>{% endif %}{% for url_item in dataset.link %}<a class="ext-lnk" href="{{ url_item }}" target="_blank" rel="noopener" title="{{ url_item }}">🔗</a>{% endfor %}
+                {% if 'access' in var_fields and _acc.abbrev %}<span class="acc-src" title="access: {{ _acc.full }}">{{ _acc.abbrev }}</span>{% endif %}{% if 'source' in var_fields and _src.abbrev %}<span class="acc-src" title="source: {{ _src.full }}">{{ _src.abbrev }}</span>{% endif %}<a href="/browse/{{ folder_browse_id }}/{{ dataset.browse_id }}" title="{{ dataset.file_id }}"><strong>{{ dataset.name }}</strong></a>{% for doi_item in dataset.doi %}<a class="ext-lnk" href="https://doi.org/{{ doi_item }}" target="_blank" rel="noopener" title="DOI: {{ doi_item }}">🔗</a>{% endfor %}{% if dataset.accession_url %}<a class="ext-lnk" href="{{ dataset.accession_url }}" target="_blank" rel="noopener" title="accession: {{ dataset.accession }}">🔗</a>{% endif %}{% for url_item in dataset.link %}<a class="ext-lnk" href="{{ url_item }}" target="_blank" rel="noopener" title="{{ url_item }}">🔗</a>{% endfor %}{% set _cv = dataset.caveats_summary or {} %}{% if _cv.n %}<a class="cv-mark lvl-{{ _cv.max_level }}" href="/browse/{{ folder_browse_id }}/{{ dataset.browse_id }}#tab-overview" title="{{ _cv.n }} caveat{{ 's' if _cv.n > 1 else '' }} (highest: {{ _cv.max_level }})">⚠</a>{% endif %}
                 {% if dataset.subfolder %}<br><span class="muted-2" style="font-size:11px">{{ dataset.subfolder }}</span>{% endif %}
             </td>
             <td data-label="Cells × Genes" class="card-span cells-genes mono" style="color:#555;font-size:11px">

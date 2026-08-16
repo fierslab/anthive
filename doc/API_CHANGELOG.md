@@ -29,6 +29,55 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.37.0 — 2026-08-13
+
+### Added — `obs_derive`: value-map a new obs column at view time
+
+Extends the `api:` section with `obs_derive` — publish a NEW obs
+column computed from an existing one via a value mapping, without
+touching the h5ad or the underlying duckdb tables.
+
+```yaml
+api:
+  obs_derive:
+    braak:                       # new column name (public)
+      source: braak_stage        # existing obs col
+      dtype: numerical           # → obsnum view (categorical → obscat)
+      map:
+        "0": 0
+        "I": 1
+        "II": 2
+        "III": 3
+        "IV": 4
+        "V": 5
+        "VI": 6
+      default: null              # optional; unmapped values → NULL
+```
+
+The mapping compiles into a `CASE WHEN` expression inside the target
+view's SELECT. When the `source` column lives in the sibling __obs*
+table (e.g. an obscat string → obsnum numeric derivation), the view
+now `LEFT JOIN`s that table too.
+
+Rules:
+- `source` must exist in either `__obscat` or `__obsnum` at rebuild
+  time; unresolvable sources silently skip (log-friendly).
+- `dtype`: `numerical` → the derived col lands in `obsnum`;
+  `categorical` → `obscat`.
+- `map` values are coerced to `float` (dtype=numerical) or `str`
+  (dtype=categorical). Values not in `map` fall back to `default`
+  (or NULL if `default` is omitted).
+- New col names go through `safe_ident` — must be `[A-Za-z_][A-Za-z0-9_]*`.
+
+Writeable via `POST /admin/api-config/{db_id}` alongside the existing
+`obs_rename` / `obs_hidden` / `obs_value_{rename,hidden}` fields.
+Reversible in one API call (`{"obs_derive": {}}`).
+
+Additive; existing views without `obs_derive` are byte-for-byte
+identical.
+
+---
+
 ## 2.36.1 — 2026-08-08
 
 ### Fixed — `/notebook` endpoint 500 on `bin_color` and other recently-added params

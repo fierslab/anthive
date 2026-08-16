@@ -1,0 +1,125 @@
+# Parent-child hierarchy for tissue (UBERON) and disease (MONDO) terms
+# actually used in the anthive catalog. Small subset of the full
+# ontologies — only what we need for filter-by-parent queries.
+#
+# Format: each term maps to its DIRECT parent (or null if root within our
+# scope). Query "all descendants of X" = transitive walk over children.
+# UBERON/MONDO IDs are informative only; matching in code is by label.
+
+tissue:
+  # Roots
+  brain: null
+  spinal cord: null
+  csf: null                                     # cerebrospinal fluid
+  # Non-brain organs (root-level for now)
+  blood: null
+  bone marrow: null
+  lung: null
+  liver: null
+  kidney: null
+  heart: null
+  retina: null
+  skin: null
+
+  # Brain subregions
+  cortex: brain                                 # UBERON:0000956 cerebral cortex
+  hippocampus: brain
+  basal ganglia: brain                          # UBERON:0002420 — includes striatum, GPi/e, STN
+  striatum: basal ganglia                       # dorsal striatum: caudate + putamen
+  thalamus: brain
+  hypothalamus: brain
+  cerebellum: brain
+  midbrain: brain
+  substantia nigra: midbrain
+  subventricular zone: brain
+  brainstem: brain
+  caudate nucleus: striatum
+  facial nucleus: brainstem
+  olfactory bulb: brain                         # UBERON:0002264
+  gray matter: brain                            # UBERON:0002020 — subset relation used loosely
+
+  # Cortical subdivisions
+  prefrontal cortex: frontal cortex             # UBERON:0000451
+  frontal cortex: cortex
+  motor cortex: frontal cortex                  # UBERON:0001384 — precentral gyrus
+  occipital cortex: cortex
+  temporal cortex: cortex
+  parietal cortex: cortex
+  dorsolateral prefrontal cortex: prefrontal cortex
+  middle temporal gyrus: temporal cortex
+  inferior temporal gyrus: temporal cortex
+  entorhinal cortex: temporal cortex            # UBERON:0002728 — medial temporal
+  angular gyrus: parietal cortex                # UBERON:0002687 — BA39
+  occipitotemporal cortex: cortex               # sits at temporal-occipital junction (BA37 fusiform)
+  cortical layer 2/3: cortex                    # laminar-only slice; not a subregion
+  cerebral cortex: cortex                       # alias — legacy value in some CxG imports
+  # Brodmann areas (all cortical; DLPFC = BA9/46)
+  "Brodmann (1909) area 4": motor cortex        # M1
+  "Brodmann (1909) area 7": parietal cortex     # somatosensory
+  "Brodmann (1909) area 9": dorsolateral prefrontal cortex
+  "Brodmann (1909) area 10": frontal cortex     # frontal pole
+  "Brodmann (1909) area 17": occipital cortex   # V1
+  "Brodmann (1909) area 18": occipital cortex   # V2
+  "Brodmann (1909) area 46": dorsolateral prefrontal cortex
+
+  # White matter (subregion of brain, cross-cortical)
+  white matter: brain
+  white matter of frontal lobe: white matter
+  white matter of occipital lobe: white matter
+  white matter of parietal lobe: white matter
+  white matter of temporal lobe: white matter
+  white matter of cerebellum: white matter
+  cervical spinal cord white matter: spinal cord
+  corpus callosum: white matter                 # UBERON:0002336 — commissural WM tract
+
+disease:
+  normal: null                                  # PATO:0000461 — no disease
+
+  # Neurodegenerative
+  neurodegenerative disease: null               # MONDO:0005559
+  Alzheimer disease: neurodegenerative disease
+  Parkinson disease: neurodegenerative disease
+  Lewy body dementia: neurodegenerative disease
+  amyotrophic lateral sclerosis: neurodegenerative disease
+  Huntington disease: neurodegenerative disease
+  frontotemporal dementia: neurodegenerative disease
+  dementia: neurodegenerative disease           # unspecified umbrella
+  vascular dementia: dementia
+  progressive supranuclear palsy: neurodegenerative disease
+  tauopathy: neurodegenerative disease
+  argyrophilic grain disease: neurodegenerative disease
+
+  # Neuroinflammatory
+  neuroinflammatory disease: null
+  multiple sclerosis: neuroinflammatory disease
+  experimental autoimmune encephalomyelitis: neuroinflammatory disease
+  viral encephalitis: neuroinflammatory disease
+
+  # Neurodevelopmental / genetic
+  Down syndrome: null
+  "leukoencephalopathy, diffuse hereditary, with spheroids 1": neurodegenerative disease
+  Aicardi-Goutières syndrome: neuroinflammatory disease
+  autism spectrum disorder: null
+
+  # Psychiatric (root-level; not typically related to neurodegen)
+  schizophrenia: null
+  bipolar disorder: null
+  major depressive disorder: null
+
+  # Structural / other
+  focal cortical dysplasia: null
+  hippocampal sclerosis: null
+  epilepsy: null
+  temporal lobe epilepsy: epilepsy
+  stroke disorder: null
+  head injury: null
+  normal pressure hydrocephalus: null
+  graft-versus-host disease: null
+  brain neoplasm: null                          # tumor umbrella
+  glioma: brain neoplasm
+  glioblastoma: brain neoplasm
+  oligodendroglioma: brain neoplasm
+  astrocytoma: brain neoplasm
+
+  # COVID-era
+  COVID-19: null

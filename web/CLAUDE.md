@@ -342,6 +342,16 @@ with `nh3`/`bleach` + a CSP if editing ever widens.)
   `.ds-prov` row. Each datum appears once; sections hide when empty.
 - **Section order:** Explore → Biology → **Differential expression** (above the
   obs columns) → Observation columns → Embeddings → Data → Resources.
+- **Known caveats card** (dataset.html): rendered above the tab bar when
+  `/info` returns a non-empty `caveats: [...]`. The Python side (`dataset_view`
+  in `browser.py`) reduces the list to a `caveats_summary = {n, max_level}`
+  via `_summarize_caveats(...)` — max-severity reduce is cleaner in Python
+  than Jinja, and the same helper feeds `get_collection_datasets` so the
+  folder page's `⚠` marker uses the identical ranking. Severity accents
+  (`.caveat-{low,medium,high}`) are subdued monochrome tints + a coloured
+  left border only — no garish fills; match the page palette. The folder
+  page's marker (`.cv-mark.lvl-{low,medium,high}` in `folder.html`) links
+  into `#tab-overview` so the caveat card is in view on landing.
 
 ## Vocabulary shared across pages
 

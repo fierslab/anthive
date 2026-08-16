@@ -322,6 +322,13 @@ def get_api_config(yaml_dict: Dict[str, Any]) -> Dict[str, Any]:
           obs_value_hidden:
             <internal_col>:                     # NULL specific values
               - <value>
+          obs_derive:
+            <new_col_name>:                     # publish a new derived col
+              source: <existing_col>            # required: source col name
+              dtype: numerical | categorical    # required: target view
+              map:                              # required: value mapping
+                <old_value>: <new_value>        # unmapped values → default
+              default: <value>                  # optional: fallback (else NULL)
 
     Semantics:
       * ``obs_rename``: internal → public column name. A rename implicitly
@@ -362,6 +369,7 @@ def get_api_config(yaml_dict: Dict[str, Any]) -> Dict[str, Any]:
     hidden = api.get('obs_hidden') or []
     value_rename = api.get('obs_value_rename') or {}
     value_hidden = api.get('obs_value_hidden') or {}
+    derive = api.get('obs_derive') or {}
 
     if rename and not isinstance(rename, dict):
         raise MetadataError("ERROR: [Metadata] 'api.obs_rename' must be a mapping")
@@ -371,6 +379,8 @@ def get_api_config(yaml_dict: Dict[str, Any]) -> Dict[str, Any]:
         raise MetadataError("ERROR: [Metadata] 'api.obs_value_rename' must be a mapping")
     if value_hidden and not isinstance(value_hidden, dict):
         raise MetadataError("ERROR: [Metadata] 'api.obs_value_hidden' must be a mapping")
+    if derive and not isinstance(derive, dict):
+        raise MetadataError("ERROR: [Metadata] 'api.obs_derive' must be a mapping")
 
     # No duplicate public targets for column-level rename
     seen_targets = {}
@@ -410,12 +420,158 @@ def get_api_config(yaml_dict: Dict[str, Any]) -> Dict[str, Any]:
                 f"ERROR: [Metadata] api.obs_value_hidden['{col}'] must be a list"
             )
 
+    # obs_derive: publish a new column derived from an existing one via
+    # a value map. Requires source (existing col), dtype (target view),
+    # and a non-empty map. Coerce map values based on dtype.
+    validated_derive: Dict[str, Any] = {}
+    rename_targets = set(seen_targets.keys())
+    for new_col, spec in derive.items():
+        if not isinstance(new_col, str) or not new_col:
+            raise MetadataError(
+                "ERROR: [Metadata] api.obs_derive keys must be non-empty strings"
+            )
+        if new_col in _RESERVED_VIEW_COLS:
+            raise MetadataError(
+                f"ERROR: [Metadata] api.obs_derive['{new_col}'] collides with a reserved view column name"
+            )
+        if new_col in rename_targets:
+            raise MetadataError(
+                f"ERROR: [Metadata] api.obs_derive['{new_col}'] collides with an obs_rename target"
+            )
+        if not isinstance(spec, dict):
+            raise MetadataError(
+                f"ERROR: [Metadata] api.obs_derive['{new_col}'] must be a mapping"
+            )
+        source = spec.get('source')
+        dtype = spec.get('dtype')
+        mapping = spec.get('map') or {}
+        default = spec.get('default')
+        if not isinstance(source, str) or not source:
+            raise MetadataError(
+                f"ERROR: [Metadata] api.obs_derive['{new_col}'].source must be a non-empty string"
+            )
+        if dtype not in ('numerical', 'categorical'):
+            raise MetadataError(
+                f"ERROR: [Metadata] api.obs_derive['{new_col}'].dtype must be "
+                f"'numerical' or 'categorical' (got {dtype!r})"
+            )
+        if not isinstance(mapping, dict) or not mapping:
+            raise MetadataError(
+                f"ERROR: [Metadata] api.obs_derive['{new_col}'].map must be a non-empty mapping"
+            )
+        coerced_map: Dict[Any, Any] = {}
+        for old_val, new_val in mapping.items():
+            if dtype == 'numerical':
+                if new_val is None:
+                    coerced_map[str(old_val)] = None
+                else:
+                    try:
+                        coerced_map[str(old_val)] = float(new_val)
+                    except (TypeError, ValueError):
+                        raise MetadataError(
+                            f"ERROR: [Metadata] api.obs_derive['{new_col}'].map: "
+                            f"value {new_val!r} for '{old_val}' must be numeric (dtype=numerical)"
+                        )
+            else:
+                coerced_map[str(old_val)] = None if new_val is None else str(new_val)
+        coerced_default: Any = default
+        if default is not None:
+            if dtype == 'numerical':
+                try:
+                    coerced_default = float(default)
+                except (TypeError, ValueError):
+                    raise MetadataError(
+                        f"ERROR: [Metadata] api.obs_derive['{new_col}'].default "
+                        f"must be numeric (dtype=numerical)"
+                    )
+            else:
+                coerced_default = str(default)
+        validated_derive[new_col] = {
+            'source': source,
+            'dtype': dtype,
+            'map': coerced_map,
+            'default': coerced_default,
+        }
+
     return {
         'obs_rename': dict(rename),
         'obs_hidden': list(hidden),
         'obs_value_rename': dict(value_rename),
         'obs_value_hidden': dict(value_hidden),
+        'obs_derive': validated_derive,
     }
+
+
+CAVEAT_LEVELS = ('low', 'medium', 'high')
+CAVEAT_KINDS = (
+    'contamination',       # co-expression of foreign cell-type markers
+    'ambient_rna',         # neuronal/glial transcript spillover
+    'integration_artifact',# combat/harmony/etc.-driven 100% marker patterns
+    'small_n',             # not enough cells / donors for the intended claim
+    'qc_missing',          # standard metadata missing (disease, donor, etc.)
+    'donor_overlap',       # donor pool shared with another dataset
+    'derived_from',        # secondary working copy of another primary
+    'wrong_var_names',     # var_names use Ensembl IDs instead of symbols
+    'note',                # free-text advisory (no automated detection)
+)
+
+
+def get_caveats(yaml_dict: Dict[str, Any]) -> list:
+    """Return the validated top-level ``caveats:`` list from a .md's YAML.
+
+    Each caveat describes a known issue / quirk for that dataset (or a slice
+    of it) that a downstream consumer should be aware of. The web UI, CLI
+    clients, and MCP tools all read this and can render / gate on it.
+
+    Shape:
+        caveats:
+          - level: low | medium | high
+            kind: contamination | ambient_rna | integration_artifact |
+                  small_n | qc_missing | donor_overlap | derived_from |
+                  wrong_var_names | note
+            scope: object                     # or 'cluster=N' | 'obs=col:val' | free-form
+            obs_flag: <obs_col_name>          # optional: bool obs col marking affected cells
+            message: <free-text explanation>
+            detected_at: '2026-08-16'         # optional ISO 8601 date
+            detected_by: <tool or 'human'>    # optional provenance
+
+    Validation is deliberately lenient: unknown fields pass through so the
+    field is forwards-compatible, but `level`, `kind`, and `message` are
+    required. Legacy .md files without a `caveats:` block just get [].
+    """
+    caveats = yaml_dict.get('caveats')
+    if caveats is None:
+        return []
+    if not isinstance(caveats, list):
+        raise MetadataError(
+            f"ERROR: [Metadata] 'caveats:' must be a list, "
+            f"got {type(caveats).__name__}"
+        )
+    out = []
+    for i, entry in enumerate(caveats):
+        if not isinstance(entry, dict):
+            raise MetadataError(
+                f"ERROR: [Metadata] caveats[{i}] must be a mapping"
+            )
+        level = entry.get('level')
+        kind = entry.get('kind')
+        message = entry.get('message')
+        if level not in CAVEAT_LEVELS:
+            raise MetadataError(
+                f"ERROR: [Metadata] caveats[{i}].level must be one of "
+                f"{CAVEAT_LEVELS}, got {level!r}"
+            )
+        if kind not in CAVEAT_KINDS:
+            raise MetadataError(
+                f"ERROR: [Metadata] caveats[{i}].kind must be one of "
+                f"{CAVEAT_KINDS}, got {kind!r}"
+            )
+        if not isinstance(message, str) or not message.strip():
+            raise MetadataError(
+                f"ERROR: [Metadata] caveats[{i}].message must be a non-empty string"
+            )
+        out.append(dict(entry))
+    return out
 
 
 def get_obs_column_assignment(yaml_dict: Dict[str, Any], column_name: str) -> Optional[str]:

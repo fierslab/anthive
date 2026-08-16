@@ -121,6 +121,60 @@
   .cat-top .ct { background: #f1f5f9; border: 1px solid var(--border); border-radius: 9px; padding: 0 7px; font-family: var(--font); cursor: default; }
   /* Empty-state placeholder inside a tab */
   .tab-empty { font-size: 12px; color: var(--text-muted); font-style: italic; padding: 8px 0; }
+
+  /* ── Known caveats card ──────────────────────────────────────────────
+     Prominent-but-subdued warning surfaced above the tab bar when the
+     dataset's /info exposes any `caveats: [...]`. Border/accent follow
+     the highest severity (high / medium / low); body stays monochrome
+     to match the rest of the page. */
+  .caveats-card {
+    border: 1px solid var(--border);
+    border-left-width: 4px;
+    border-radius: 6px;
+    background: #fafafa;
+    margin: 10px 0 12px;
+    padding: 8px 12px;
+    font-size: 12px;
+  }
+  .caveats-card .cv-header {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12px; font-weight: 600; color: var(--text);
+    margin-bottom: 6px;
+  }
+  .caveats-card .cv-sigil { font-size: 13px; filter: grayscale(1); opacity: .85; }
+  .caveats-card .cv-count { color: var(--text-muted); font-weight: 500; }
+  .caveats-card .cv-list { display: flex; flex-direction: column; gap: 8px; }
+  .caveats-card .cv-item {
+    padding-top: 6px;
+    border-top: 1px dotted var(--border);
+  }
+  .caveats-card .cv-item:first-child { border-top: 0; padding-top: 0; }
+  .caveats-card .cv-row1 {
+    display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap;
+    margin-bottom: 2px;
+  }
+  .caveats-card .cv-chip {
+    display: inline-block; padding: 0 6px; font-size: 10px;
+    line-height: 1.5; border-radius: 3px; font-family: var(--font-mono);
+    background: #f1f5f9; color: #334155; border: 1px solid var(--border);
+    text-transform: lowercase; letter-spacing: .2px;
+  }
+  .caveats-card .cv-chip.lvl { text-transform: uppercase; letter-spacing: .3px; font-size: 9px; }
+  .caveats-card .cv-scope   { font-family: var(--font-mono); font-size: 11px; color: #475569; }
+  .caveats-card .cv-obsflag { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); }
+  .caveats-card .cv-msg    { color: var(--text); font-size: 12px; line-height: 1.4; }
+  .caveats-card .cv-foot   {
+    margin-top: 3px; font-size: 10px; color: var(--text-muted);
+    display: flex; gap: 10px; flex-wrap: wrap;
+  }
+  .caveats-card .cv-foot .fk { color: #94a3b8; text-transform: uppercase; letter-spacing: .3px; font-size: 9px; margin-right: 3px; }
+  /* Severity accents — subdued, monochrome-adjacent. */
+  .caveats-card.caveat-low    { border-left-color: #94a3b8; background: #f8fafc; }
+  .caveats-card.caveat-low    .cv-chip.lvl { background: #f1f5f9; color: #475569; border-color: #cbd5e1; }
+  .caveats-card.caveat-medium { border-left-color: #d97706; background: #fffbeb; }
+  .caveats-card.caveat-medium .cv-chip.lvl { background: #fef3c7; color: #92400e; border-color: #fde68a; }
+  .caveats-card.caveat-high   { border-left-color: #b91c1c; background: #fef2f2; }
+  .caveats-card.caveat-high   .cv-chip.lvl { background: #fee2e2; color: #991b1b; border-color: #fecaca; }
 </style>
 
 <!-- Consolidated header: breadcrumb with click-to-copy ids + action buttons. -->
@@ -246,6 +300,40 @@
         <span class="dot dot-warn" title="not converted"></span> not converted
         {% endif %}
     </div>
+</div>
+{% endif %}
+
+{# ── Known caveats ─────────────────────────────────────────────────────
+   Warning card, accent from the highest severity across caveats. Card
+   colour is a subtle background tint + a left accent bar (matches the
+   monochrome page palette — no garish fills). #}
+{% if caveats %}
+<div class="caveats-card caveat-{{ caveats_summary.max_level or 'low' }}"
+     role="note" aria-label="Known caveats for this dataset">
+  <div class="cv-header">
+    <span class="cv-sigil" aria-hidden="true">⚠</span>
+    <span>Known caveats</span>
+    <span class="cv-count">({{ caveats_summary.n }}{% if caveats_summary.n > 1 %} · highest {{ caveats_summary.max_level }}{% endif %})</span>
+  </div>
+  <div class="cv-list">
+    {% for cv in caveats %}
+    <div class="cv-item">
+      <div class="cv-row1">
+        <span class="cv-chip lvl" title="severity">{{ cv.level or 'low' }}</span>
+        {% if cv.kind %}<span class="cv-chip" title="caveat type">{{ cv.kind }}</span>{% endif %}
+        {% if cv.scope %}<span class="cv-scope" title="scope">{{ cv.scope }}</span>{% endif %}
+        {% if cv.obs_flag %}<span class="cv-obsflag" title="boolean obs column ('yes'/'no') that flags affected cells">obs:{{ cv.obs_flag }}</span>{% endif %}
+      </div>
+      {% if cv.message %}<div class="cv-msg">{{ cv.message }}</div>{% endif %}
+      {% if cv.detected_by or cv.detected_at %}
+      <div class="cv-foot">
+        {% if cv.detected_by %}<span><span class="fk">detected by</span>{{ cv.detected_by }}</span>{% endif %}
+        {% if cv.detected_at %}<span><span class="fk">on</span><span class="mono">{{ cv.detected_at }}</span></span>{% endif %}
+      </div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
 </div>
 {% endif %}
 

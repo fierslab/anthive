@@ -57,13 +57,22 @@ def build_obs_view_sql(
     underscore_table: str,
     columns: List[str],
     api_config: Optional[Dict[str, Any]] = None,
+    sibling_underscore_table: Optional[str] = None,
+    sibling_columns: Optional[List[str]] = None,
 ) -> str:
     """Return the ``CREATE VIEW`` SQL for the obscat/obsnum view.
 
-    Applies the ``api_config`` rename+hide to the column projection so the
-    resulting view exposes only public names — internal renamed names are
-    unreachable from any consumer that reads the view. ``cell_id`` is
-    dropped (it's the join key, not a public col); ``cell_name`` is added.
+    Applies the ``api_config`` rename+hide+derive to the column projection
+    so the resulting view exposes only public names — internal renamed
+    names are unreachable from any consumer that reads the view.
+    ``cell_id`` is dropped (it's the join key, not a public col);
+    ``cell_name`` is added.
+
+    ``obs_derive`` publishes new columns via a value-map CASE expression.
+    A derivation whose ``dtype`` matches this view is emitted here.
+    If the derivation's ``source`` column lives in the sibling __obs*
+    table (obsnum-sourced obscat derivation, or vice versa), pass the
+    sibling table + column list so we can JOIN it in.
 
     Shared by ant-convert (initial view build) and AnnotationWriter
     (view rebuild after ALTER TABLE ADD COLUMN).
@@ -73,6 +82,28 @@ def build_obs_view_sql(
     hidden = set(api.get('obs_hidden', []) or [])
     value_rename = api.get('obs_value_rename', {}) or {}
     value_hidden = api.get('obs_value_hidden', {}) or {}
+    derive_all = api.get('obs_derive', {}) or {}
+
+    # Match this view's dtype to the derivations that target it.
+    view_dtype = 'categorical' if view_name.endswith('obscat') else 'numerical'
+    own_cols = set(columns)
+    sibling_cols = set(sibling_columns or [])
+    active_derive = {}
+    join_sibling = False
+    for new_col, spec in derive_all.items():
+        if spec.get('dtype') != view_dtype:
+            continue
+        source = spec.get('source')
+        if source in own_cols:
+            spec = {**spec, '_source_table': 'o'}     # this view's alias
+        elif source in sibling_cols and sibling_underscore_table:
+            spec = {**spec, '_source_table': 's'}     # sibling alias
+            join_sibling = True
+        else:
+            # Source column not found anywhere — silently skip (source
+            # may be an obs col not in either projection table yet).
+            continue
+        active_derive[new_col] = spec
 
     # Legacy stored col names include spaces / '#' / '.' etc. — see _q()
     # module-level docstring for the permissive-quote rationale. Public
@@ -124,11 +155,46 @@ def build_obs_view_sql(
         if col in hidden:
             continue
         projections.append(_projection_for(col))
+
+    # obs_derive projections — one CASE expression per active derivation.
+    # The alias is validated by safe_ident (strict) since it's a
+    # user-supplied string that lands in the public schema.
+    for new_col, spec in active_derive.items():
+        src_table_alias = spec['_source_table']
+        source = spec['source']
+        col_sql = f"{src_table_alias}.{_q(source)}"
+        mapping = spec.get('map', {}) or {}
+        default = spec.get('default')
+        dtype = spec.get('dtype')
+
+        def _lit(val: Any) -> str:
+            if val is None:
+                return 'NULL'
+            if dtype == 'numerical':
+                return f'{float(val)}'
+            return "'" + str(val).replace("'", "''") + "'"
+
+        branches = []
+        for old_val, new_val in mapping.items():
+            branches.append(
+                f"WHEN {col_sql} = {_sql_str(old_val)} THEN {_lit(new_val)}"
+            )
+        case_expr = (
+            f"CASE {' '.join(branches)} ELSE {_lit(default)} END"
+        )
+        projections.append(f"{case_expr} AS {safe_ident(new_col)}")
+
+    join_sql = f"JOIN __cells c ON o.cell_id = c.cell_id"
+    if join_sibling and sibling_underscore_table:
+        join_sql += (
+            f" LEFT JOIN {_q(sibling_underscore_table)} s "
+            f"ON o.cell_id = s.cell_id"
+        )
     return (
         f"CREATE VIEW {safe_ident(view_name)} AS "
         f"SELECT {', '.join(projections)} "
         f"FROM {_q(underscore_table)} o "
-        f"JOIN __cells c ON o.cell_id = c.cell_id"
+        f"{join_sql}"
     )
 
 
@@ -1873,18 +1939,33 @@ class AnnotationWriter:
     def _refresh_view(self, view_name: str, underscore_table: str) -> None:
         """DROP & re-CREATE the obscat/obsnum view so new columns are visible.
         DuckDB binds ``o.*`` at view creation time, so re-CREATE also
-        applies the current api-config rename+hide from ``self.api_config``.
-        Renamed cols surface under their public alias; hidden cols are
-        omitted from the view entirely — that's how the API layer enforces
-        "old internal names not accessible from outside"."""
+        applies the current api-config rename+hide+derive from
+        ``self.api_config``. Renamed cols surface under their public
+        alias; hidden cols are omitted from the view entirely — that's
+        how the API layer enforces "old internal names not accessible
+        from outside". Derivation sources may live in the sibling
+        __obs* table; look up sibling columns so cross-table CASE
+        expressions can reference them."""
         cols = [row[0] for row in self._conn.execute(
             "SELECT column_name FROM information_schema.columns "
             "WHERE table_name = ?", [underscore_table]
         ).fetchall()]
+        sibling_underscore = (
+            '__obsnum' if underscore_table.endswith('obscat') else '__obscat'
+        )
+        try:
+            sibling_cols = [row[0] for row in self._conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = ?", [sibling_underscore]
+            ).fetchall()]
+        except Exception:
+            sibling_cols = []
         self._conn.execute(f"DROP VIEW IF EXISTS {safe_ident(view_name)}")
         self._conn.execute(build_obs_view_sql(
             view_name, underscore_table, cols,
             getattr(self, 'api_config', None),
+            sibling_underscore_table=sibling_underscore,
+            sibling_columns=sibling_cols,
         ))
 
     def _record_pending(

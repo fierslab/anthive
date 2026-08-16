@@ -86,7 +86,7 @@ from geneset import (
 )
 from gene_stats_cache import GeneStatsCache
 from md_check import generate_file_id, generate_group_id
-from metadata import parse_md_file
+from metadata import parse_md_file, get_caveats
 import mus
 import plotting
 import analytics
@@ -529,6 +529,19 @@ def _json_serial(obj: object) -> str:
     if hasattr(obj, 'isoformat'):
         return obj.isoformat()
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+def _caveats_or_empty(file_metadata: dict, md_path) -> list:
+    """Return get_caveats(file_metadata), or [] on any validation error.
+
+    Soft-fail so a malformed ``caveats:`` block never breaks the /info
+    endpoint — the error is logged and the page loads without warnings.
+    """
+    try:
+        return get_caveats(file_metadata)
+    except Exception as exc:
+        logger.warning(f"caveats parse error in {md_path}: {exc}")
+        return []
 
 
 class DatabaseRegistry:
@@ -1228,6 +1241,10 @@ class DatabaseRegistry:
 
             # Layer statistics from .md frontmatter
             'layer_stats': file_metadata.get('layer_stats') or {},
+
+            # Known caveats (contamination, ambient RNA, small_n, etc.)
+            # Rendered as a warning card by the web UI. See lib.metadata.get_caveats.
+            'caveats': _caveats_or_empty(file_metadata, md_path),
         }
 
         # Add collection metadata if present. The full frontmatter + prose
@@ -1475,8 +1492,8 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.36.1"
-API_VERSION_RELEASED = "2026-08-08"
+API_VERSION = "2.37.0"
+API_VERSION_RELEASED = "2026-08-13"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
 # Create FastAPI app with lifespan handler (Phase 2)
@@ -9953,22 +9970,56 @@ async def refresh_views(db_id: str):
         conn = _duckdb.connect(str(duckdb_path), read_only=False)
         try:
             rebuilt = []
+            # Cache sibling column lists so obs_derive can reference the
+            # other __obs* table (e.g. an obscat 'braak_stage' → obsnum
+            # 'braak' derivation).
+            _sibling_cols: Dict[str, list] = {}
+            # If an obs_derive targets a dtype whose __obs* table doesn't
+            # exist (e.g. a numerical derivation on a dataset with zero
+            # numerical native cols), auto-create an empty stub keyed by
+            # cell_id so the derived view has a home. The stub carries no
+            # data — the CASE expression pulls from the sibling table.
+            derive_by_dtype = {'numerical': set(), 'categorical': set()}
+            for new_col, spec in (api_config.get('obs_derive') or {}).items():
+                dt = spec.get('dtype')
+                if dt in derive_by_dtype:
+                    derive_by_dtype[dt].add(new_col)
             for view_name, underscore in (('obsnum', '__obsnum'), ('obscat', '__obscat')):
-                # Only rebuild if the underscore table actually exists — a
-                # dataset with no obsnum/obscat won't have the view either.
                 exists = conn.execute(
                     "SELECT COUNT(*) FROM information_schema.tables "
                     "WHERE table_name = ? AND table_type = 'BASE TABLE'",
                     [underscore],
                 ).fetchone()[0]
-                if not exists:
+                dtype = 'numerical' if underscore.endswith('obsnum') else 'categorical'
+                needs_stub = (not exists) and derive_by_dtype[dtype]
+                if not exists and not needs_stub:
                     continue
+                if needs_stub:
+                    conn.execute(
+                        f"CREATE TABLE {safe_ident(underscore)} AS "
+                        f"SELECT cell_id FROM __cells"
+                    )
                 cols = [r[0] for r in conn.execute(
                     "SELECT column_name FROM information_schema.columns "
                     "WHERE table_name = ?", [underscore]
                 ).fetchall()]
+                _sibling_cols[underscore] = cols
+                sibling_underscore = '__obsnum' if underscore.endswith('obscat') else '__obscat'
+                sibling_cols = _sibling_cols.get(sibling_underscore)
+                if sibling_cols is None:
+                    try:
+                        sibling_cols = [r[0] for r in conn.execute(
+                            "SELECT column_name FROM information_schema.columns "
+                            "WHERE table_name = ?", [sibling_underscore]
+                        ).fetchall()]
+                    except Exception:
+                        sibling_cols = []
                 conn.execute(f"DROP VIEW IF EXISTS {safe_ident(view_name)}")
-                conn.execute(build_obs_view_sql(view_name, underscore, cols, api_config))
+                conn.execute(build_obs_view_sql(
+                    view_name, underscore, cols, api_config,
+                    sibling_underscore_table=sibling_underscore,
+                    sibling_columns=sibling_cols,
+                ))
                 rebuilt.append(view_name)
             conn.execute("CHECKPOINT")
         finally:
@@ -9995,6 +10046,7 @@ async def refresh_views(db_id: str):
         'obs_hidden':       api_config.get('obs_hidden', []),
         'obs_value_rename': api_config.get('obs_value_rename', {}),
         'obs_value_hidden': api_config.get('obs_value_hidden', {}),
+        'obs_derive':       api_config.get('obs_derive', {}),
     }
 
 
@@ -10028,6 +10080,7 @@ async def set_api_config(db_id: str, request: Request):
         'obs_hidden':       list,   # [internal names to drop]
         'obs_value_rename': dict,   # {col: {old_val → new_val}}
         'obs_value_hidden': dict,   # {col: [values to NULL]}
+        'obs_derive':       dict,   # {new_col: {source, dtype, map, default}}
     }
     for name, expected_type in _FIELDS.items():
         val = body.get(name)

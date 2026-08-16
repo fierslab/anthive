@@ -448,6 +448,30 @@ def _modified_ts(db: Dict) -> str:
     return ''
 
 
+# Level severity ordering — higher wins the "highest level" reduce on a group.
+_CAVEAT_LEVEL_RANK: Dict[str, int] = {'low': 1, 'medium': 2, 'high': 3}
+
+
+def _summarize_caveats(caveats: Optional[List[Dict]]) -> Dict[str, Any]:
+    """Reduce a caveat list to (n, max_level) for group-index badges.
+
+    Unknown/missing levels are treated as 'low' so a badly-formed entry never
+    silently disappears from the count but also doesn't spuriously escalate.
+    Returns ``{'n': 0, 'max_level': None}`` when there are no caveats.
+    """
+    if not caveats:
+        return {'n': 0, 'max_level': None}
+    max_rank = 0
+    max_level: Optional[str] = None
+    for c in caveats:
+        lvl = (c.get('level') if isinstance(c, dict) else None) or 'low'
+        rank = _CAVEAT_LEVEL_RANK.get(lvl, 1)
+        if rank > max_rank:
+            max_rank = rank
+            max_level = lvl
+    return {'n': len(caveats), 'max_level': max_level or 'low'}
+
+
 def get_collection_list(api_url: str) -> List[Dict]:
     """Build collection list by grouping API databases by group_id."""
     databases = _all_databases(api_url)
@@ -592,6 +616,10 @@ def get_collection_datasets(api_url: str, group_id: str) -> tuple:
             'link':            _as_list(db.get('link')),
             'accession':       db.get('accession'),
             'accession_url':   _accession_url(str(db.get('accession'))) if db.get('accession') else None,
+            # Caveats summary → ⚠ badge next to the dataset name; folder.html
+            # only needs (n, max_level), not the full body (that lives on the
+            # dataset page).
+            'caveats_summary': _summarize_caveats(db.get('caveats')),
         })
 
     # Constant-across-collection fields → header pills; varying fields → columns.
@@ -1159,6 +1187,13 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
     friendly_group = collection.get('group') or group_id
     dataset_title = db.get('title') or file_id
 
+    # Known caveats (REST /info `caveats: []`) — surfaced as a warning card
+    # near the top of the dataset page. The Python side reduces to a max
+    # severity so the card's accent colour follows the highest-level entry
+    # (cleaner than doing a max-reduce in Jinja).
+    caveats = db.get('caveats') or []
+    caveats_summary = _summarize_caveats(caveats)
+
     return templates.TemplateResponse(request, "dataset.html", {
         "folder_name": friendly_group,
         "folder_browse_id": group_id,
@@ -1180,6 +1215,8 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "update_pending": False,
         "de_studies": de_studies,
         "de_total_contrasts": de_total_contrasts,
+        "caveats": caveats,
+        "caveats_summary": caveats_summary,
         "is_admin": _is_admin(request),
     })
 

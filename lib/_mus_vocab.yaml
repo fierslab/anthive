@@ -101,6 +101,32 @@ vocabulary:
     - nucleus
     - na              # bulk, spatial, non-cellular
 
+  # Primary vs derived-working-copy flag. UNSET is treated as 'yes'
+  # (assume primary by default). Set to 'no' when this file is a
+  # secondary representation of another dataset (e.g. a .sct-normalised
+  # or .wgcna-modules variant of a canonical h5ad). Pair with
+  # ``derived_from`` (below) to name the primary. A user querying the
+  # catalog for "one working copy per underlying dataset" filters on
+  # ``is_primary != 'no'``.
+  is_primary:
+    - 'yes'
+    - 'no'
+
+  # WHERE the sequenced cells actually lived when sampled. Discriminates
+  # true human post-mortem tissue from xenografts (human iPSC-derived
+  # cells hosted in a mouse brain), organoids, in-vitro cultures, and
+  # live-surgical biopsies. Filterable at the catalog level so a user
+  # querying "human post-mortem microglia" can cleanly exclude the
+  # non-post-mortem experimental systems.
+  experimental_system:
+    - post_mortem_tissue    # default — autopsy human/mouse tissue
+    - live_biopsy           # surgical, still-alive tissue (e.g. Olah 2020)
+    - xenograft             # iPSC/ESC-derived cells hosted in a non-native brain
+    - chimera               # developmental xenograft (Mancuso CH9 pattern)
+    - in_vitro_2d           # dish/plate culture, no host
+    - organoid              # 3D culture
+    - bulk_tissue           # bulk RNA-seq, no single-cell resolution
+
   sex:
     - female
     - male
@@ -164,19 +190,34 @@ vocabulary:
     # UBERON-style labels. Mostly brain-focused for now (lab scope).
     # Extend as needed when other organs come into the catalog.
     - brain
+    - brainstem
     - cortex
+    - frontal cortex
     - prefrontal cortex
+    - dorsolateral prefrontal cortex
     - motor cortex
     - occipital cortex
     - temporal cortex
     - parietal cortex
+    - middle temporal gyrus
+    - inferior temporal gyrus
+    - entorhinal cortex
+    - angular gyrus
+    - occipitotemporal cortex
+    - cortical layer 2/3
     - hippocampus
     - striatum
+    - caudate nucleus
+    - basal ganglia
     - thalamus
     - hypothalamus
     - cerebellum
     - midbrain
     - substantia nigra
+    - facial nucleus
+    - olfactory bulb
+    - corpus callosum
+    - gray matter
     - white matter
     - white matter of frontal lobe
     - white matter of occipital lobe
@@ -190,7 +231,10 @@ vocabulary:
     - Brodmann (1909) area 4
     - Brodmann (1909) area 7
     - Brodmann (1909) area 9
+    - Brodmann (1909) area 10
     - Brodmann (1909) area 17
+    - Brodmann (1909) area 18
+    - Brodmann (1909) area 46
     # Non-brain organs.
     - blood
     - bone marrow
