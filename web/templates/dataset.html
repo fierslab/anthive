@@ -175,6 +175,39 @@
   .caveats-card.caveat-medium .cv-chip.lvl { background: #fef3c7; color: #92400e; border-color: #fde68a; }
   .caveats-card.caveat-high   { border-left-color: #b91c1c; background: #fef2f2; }
   .caveats-card.caveat-high   .cv-chip.lvl { background: #fee2e2; color: #991b1b; border-color: #fecaca; }
+
+  /* Module-score tab — per-method chips + legend swatches.
+     Monochrome-adjacent palette matching the site look (see web/CLAUDE.md):
+     three subdued hues so the eye can distinguish the three methods without
+     overwhelming the table. Absent methods render as a dim em-dash. */
+  .mod-chip {
+    display: inline-block; padding: 1px 8px; border-radius: 10px;
+    font-size: 11px; font-family: var(--font); line-height: 1.5;
+    border: 1px solid transparent; text-decoration: none;
+    letter-spacing: .1px;
+  }
+  .mod-chip.scanpy  { background: #eef2f7; color: #334155; border-color: #cbd5e1; }
+  .mod-chip.starcat { background: #f5f0eb; color: #57422d; border-color: #d6c8b6; }
+  .mod-chip.aucell  { background: #ecf3ee; color: #2f5a3d; border-color: #b8d4be; }
+  .mod-chip:hover { filter: brightness(.96); text-decoration: none; }
+  .mod-chip.absent { color: #c8cdd3; background: transparent; border-color: transparent; cursor: default; padding: 1px 4px; }
+
+  .mod-swatch {
+    display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+    vertical-align: -1px; margin-right: 4px; border: 1px solid #cbd5e1;
+  }
+  .mod-swatch.scanpy  { background: #94a3b8; }
+  .mod-swatch.starcat { background: #a58c6c; border-color: #d6c8b6; }
+  .mod-swatch.aucell  { background: #6d9c7d; border-color: #b8d4be; }
+
+  .mod-legend-item {
+    cursor: pointer; user-select: none; padding: 1px 6px;
+    border-radius: 6px; border: 1px solid transparent;
+  }
+  .mod-legend-item:hover  { background: #f5f7fa; border-color: #e5e7eb; }
+  .mod-legend-item.active { background: #eef2f7; border-color: #cbd5e1; }
+  .mod-legend-item[data-absent="1"] { color: #c8cdd3; cursor: not-allowed; }
+  .mod-legend-item[data-absent="1"]:hover { background: transparent; border-color: transparent; }
 </style>
 
 <!-- Consolidated header: breadcrumb with click-to-copy ids + action buttons. -->
@@ -350,6 +383,9 @@
 <div class="tab-bar" id="ds-tab-bar" role="tablist">
   <button type="button" class="tab-btn active" data-tab="overview" role="tab">Overview</button>
   <button type="button" class="tab-btn"        data-tab="data"     role="tab">Data</button>
+  {% if n_module_scores %}
+  <button type="button" class="tab-btn"        data-tab="modules"  role="tab">Module scores<span class="tab-count">{{ n_module_scores }}</span></button>
+  {% endif %}
   <button type="button" class="tab-btn"        data-tab="num"      role="tab">Numerical<span class="tab-count">{{ _num_cols|length }}</span></button>
   <button type="button" class="tab-btn"        data-tab="cat"      role="tab">Categorical<span class="tab-count">{{ _cat_cols|length }}</span></button>
   {% if de_studies %}
@@ -461,11 +497,80 @@
   </div>
 </section>
 
+{# ── Module scores tab ────────────────────────────────────────────────
+   One row per (catalog, module); columns are the three scoring methods
+   (scanpy / starcat / aucell). The score parquet sidecar exposes each
+   method as a virtual obs column (see lib/anthive_db._score_col_name):
+     scanpy  → "<study>::<experiment>::<module>"
+     starcat → "starcat__<catalog>__<program>"
+     aucell  → "aucell__<catalog>__<module>"
+   Method chip = link to a histogram plot on that column. Datasets with
+   no aucell rows in the parquet get a blank cell — the option greys out
+   only when zero modules have aucell data. #}
+{% if n_module_scores %}
+<section class="tab-panel" id="tab-modules" role="tabpanel">
+  <h2>Module scores
+    <span class="muted" style="font-size:12px;font-weight:normal">({{ n_module_scores }} modules)</span>
+    <span class="info" title="Per-cell module scores computed by scanpy (sc.tl.score_genes), starCAT, or AUCell. Each row = one module; chips link to a histogram of that method's score. Empty cell = that method hasn't scored this module on this dataset.">ⓘ</span>
+  </h2>
+  <div class="mod-legend" style="margin-bottom:6px;display:flex;align-items:center;gap:14px;font-size:11px;color:#555;flex-wrap:wrap">
+    <span>methods on this dataset:</span>
+    <span class="mod-legend-item" data-method="scanpy" {% if not score_method_counts.scanpy %}data-absent="1"{% endif %}>
+      <span class="mod-swatch scanpy"></span>scanpy <span class="muted-2">({{ score_method_counts.scanpy or 0 }})</span>
+    </span>
+    <span class="mod-legend-item" data-method="starcat" {% if not score_method_counts.starcat %}data-absent="1"{% endif %}>
+      <span class="mod-swatch starcat"></span>starCAT <span class="muted-2">({{ score_method_counts.starcat or 0 }})</span>
+    </span>
+    <span class="mod-legend-item" data-method="aucell" {% if not score_method_counts.aucell %}data-absent="1"{% endif %}>
+      <span class="mod-swatch aucell"></span>AUCell <span class="muted-2">({{ score_method_counts.aucell or 0 }})</span>
+    </span>
+    <span class="muted-2" id="mod-filter-hint" style="margin-left:auto">click a badge above to filter</span>
+  </div>
+  <div style="margin-bottom:6px;display:flex;align-items:center;gap:8px">
+    <input class="obs-filter" data-target="modules" type="text" placeholder="filter modules…" style="padding:2px 6px;font-family:inherit;font-size:12px;border:1px solid #ccc;outline:none;width:200px">
+    <span class="obs-count muted" data-target="modules" style="font-size:11px"></span>
+  </div>
+  <div class="table-wrap">
+  <table class="auto" id="mod-tbl" style="font-size:12px">
+    <thead><tr><th>Catalog</th><th>Module</th><th style="width:75px" title="scanpy sc.tl.score_genes">scanpy</th><th style="width:75px" title="starCAT program score">starCAT</th><th style="width:75px" title="AUCell rank-based score">AUCell</th></tr></thead>
+    <tbody>
+    {% for mod in module_scores %}
+    {% set _mods = mod.methods %}
+    <tr class="mod-item"
+        data-name="{{ (mod.catalog ~ ' ' ~ mod.module)|lower }}"
+        data-has-scanpy="{{ 1 if _mods.scanpy else 0 }}"
+        data-has-starcat="{{ 1 if _mods.starcat else 0 }}"
+        data-has-aucell="{{ 1 if _mods.aucell else 0 }}">
+      <td class="mono" style="font-size:11px;color:#555">
+        {% if mod.catalog and '/' in mod.catalog %}
+          {% set _cparts = mod.catalog.split('/') %}
+          <a href="/genesets/{{ _cparts[0]|urlencode }}/{{ _cparts[1]|urlencode }}" title="browse this catalog's gene sets">{{ mod.catalog }}</a>
+        {% elif mod.catalog %}
+          <a href="/genesets?group=starcat" title="starCAT catalog">{{ mod.catalog }}</a>
+        {% else %}—{% endif %}
+      </td>
+      <td>{{ mod.module }}</td>
+      <td>{% if _mods.scanpy %}<a class="mod-chip scanpy" href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ _mods.scanpy|urlencode }}" title="scanpy score column: {{ _mods.scanpy }}">scanpy</a>{% else %}<span class="mod-chip absent" title="not scored with scanpy">—</span>{% endif %}</td>
+      <td>{% if _mods.starcat %}<a class="mod-chip starcat" href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ _mods.starcat|urlencode }}" title="starCAT column: {{ _mods.starcat }}">starCAT</a>{% else %}<span class="mod-chip absent" title="not scored with starCAT">—</span>{% endif %}</td>
+      <td>{% if _mods.aucell %}<a class="mod-chip aucell" href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ _mods.aucell|urlencode }}" title="AUCell column: {{ _mods.aucell }}">AUCell</a>{% else %}<span class="mod-chip absent" title="not scored with AUCell">—</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <div class="muted" style="margin-top:6px;font-size:11px">
+    Click a method to open a histogram of that per-cell score. Underlying obs-column
+    naming: <code>&lt;study&gt;::&lt;experiment&gt;::&lt;module&gt;</code> (scanpy) ·
+    <code>starcat__&lt;catalog&gt;__&lt;program&gt;</code> · <code>aucell__&lt;catalog&gt;__&lt;module&gt;</code>.
+  </div>
+</section>
+{% endif %}
+
 {# ── Numerical columns tab ────────────────────────────────────────────── #}
 <section class="tab-panel" id="tab-num" role="tabpanel">
   <h2>Numerical observation columns
     <span class="muted" style="font-size:12px;font-weight:normal">({{ _num_cols|length }})</span>
-    <span class="info" title="Continuous per-cell values (e.g. n_counts, pseudotime, module scores). Click a column to plot its histogram.">ⓘ</span>
+    <span class="info" title="Continuous per-cell values (e.g. n_counts, pseudotime). Module scores are in their own tab. Click a column to plot its histogram.">ⓘ</span>
   </h2>
   {% if _num_cols %}
   <div style="margin-bottom:6px;display:flex;align-items:center;gap:8px">
@@ -616,7 +721,7 @@ document.addEventListener('DOMContentLoaded', function() {
         if (initHash) activateTab(initHash, false);
     })();
 
-    {% if obs_columns|length > 0 %}
+    {% if obs_columns|length > 0 or n_module_scores > 0 %}
     (function() {
         // ── obs-column filter + stats hydration ──────────────────────────
         var DB_ID = {{ db_id|tojson }};
@@ -632,6 +737,7 @@ document.addEventListener('DOMContentLoaded', function() {
         // Per-tab filter box wired to its own table's .obs-item rows.
         document.querySelectorAll('.obs-filter').forEach(function(input) {
             var target = input.dataset.target;   // 'num' or 'cat'
+            if (target === 'modules') return;    // module-scores tab has its own combined filter, below
             var table = document.getElementById('obs-tbl-' + target);
             if (!table) return;
             var items = Array.from(table.querySelectorAll('.obs-item'));
@@ -648,6 +754,48 @@ document.addEventListener('DOMContentLoaded', function() {
             input.addEventListener('input', update);
             update();
         });
+
+        // Module-scores tab: text filter + method-legend toggles (multi-select).
+        // Clicking a legend badge (scanpy / starCAT / AUCell) restricts the table
+        // to modules that have at least one active method. Absent-on-this-dataset
+        // methods aren't clickable. Filter state is NOT persisted — each visit
+        // starts unfiltered so the whole picture is visible.
+        (function () {
+            var modTbl = document.getElementById('mod-tbl');
+            if (!modTbl) return;
+            var input = document.querySelector('.obs-filter[data-target="modules"]');
+            var count = document.querySelector('.obs-count[data-target="modules"]');
+            var rows = Array.from(modTbl.querySelectorAll('.mod-item'));
+            var legendItems = Array.from(document.querySelectorAll('.mod-legend-item'));
+            var active = { scanpy: false, starcat: false, aucell: false };
+            function update() {
+                var q = (input && input.value || '').toLowerCase();
+                var anyActive = active.scanpy || active.starcat || active.aucell;
+                var shown = 0;
+                rows.forEach(function (row) {
+                    var textOk = !q || (row.dataset.name || '').indexOf(q) >= 0;
+                    var methodOk = !anyActive
+                        || (active.scanpy  && row.dataset.hasScanpy  === '1')
+                        || (active.starcat && row.dataset.hasStarcat === '1')
+                        || (active.aucell  && row.dataset.hasAucell  === '1');
+                    var vis = textOk && methodOk;
+                    row.style.display = vis ? '' : 'none';
+                    if (vis) shown++;
+                });
+                if (count) count.textContent = (shown < rows.length) ? (shown + ' / ' + rows.length + ' modules') : (rows.length + ' modules');
+            }
+            if (input) input.addEventListener('input', update);
+            legendItems.forEach(function (el) {
+                if (el.dataset.absent === '1') return;
+                el.addEventListener('click', function () {
+                    var m = el.dataset.method;
+                    active[m] = !active[m];
+                    el.classList.toggle('active', active[m]);
+                    update();
+                });
+            });
+            update();
+        })();
 
         // Hydrate stats from /obs_summary (REST 2.22). Fields not returned by
         // the API stay blank — non-blocking.

@@ -1496,6 +1496,105 @@ def test_dataset_view_has_tab_bar(client):
     assert resp.text.index('id="ds-tab-bar"') > resp.text.index('class="ds-top"')
 
 
+def test_dataset_view_no_module_scores_tab_when_no_score_columns(client):
+    # Baseline ds1 has only n_genes / pseudotime — no scored modules. The
+    # "Module scores" tab must not render, and the total obs count is
+    # unaffected. Guards against the score-classifier grabbing plain columns.
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    assert 'data-tab="modules"' not in resp.text
+    assert 'id="mod-tbl"' not in resp.text
+
+
+def test_dataset_view_module_scores_tab_groups_three_methods(client, monkeypatch):
+    # A dataset with all three scoring methods on the SAME (catalog, module)
+    # tuple must collapse to one row with three method chips (scanpy /
+    # starCAT / AUCell). Absent-methods on other modules show as em-dashes.
+    def with_scores(api_url, path):
+        result = _fake_api_get(api_url, path)
+        if path.endswith("/info") and isinstance(result, dict):
+            result = dict(result)
+            result["obs"] = {
+                "categorical": ["cell_type"],
+                "numerical": [
+                    "n_genes", "pseudotime",
+                    "Sierksma2025::WGCNA::Brown_Lysosome",             # scanpy
+                    "starcat__MICROGLIA_V1__DAM_pos",                  # starcat
+                    "aucell__Sierksma2025/WGCNA__Brown_Lysosome",      # aucell
+                    "aucell__Mancuso2024/Cell_states__CRM1",           # aucell-only module
+                ],
+            }
+        return result
+    monkeypatch.setattr(browser, "_api_get", with_scores)
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    # Tab is present
+    assert 'data-tab="modules"' in resp.text
+    assert 'id="mod-tbl"' in resp.text
+    # Legend surfaces per-method counts
+    assert 'scanpy <span class="muted-2">(1)' in resp.text
+    assert 'starCAT <span class="muted-2">(1)' in resp.text
+    assert 'AUCell <span class="muted-2">(2)' in resp.text
+    # The scanpy + aucell "Brown_Lysosome" collapse to ONE row
+    # (checks the grouping key), so table has 3 module rows total
+    assert resp.text.count('class="mod-item"') == 3
+    # Each method's obs-column name appears in a plot link (the "chip")
+    assert 'plot/histogram?x=Sierksma2025%3A%3AWGCNA%3A%3ABrown_Lysosome' in resp.text
+    assert 'plot/histogram?x=starcat__MICROGLIA_V1__DAM_pos' in resp.text
+    # Jinja's urlencode = urllib.parse.quote(safe='/') → forward slashes stay
+    assert 'plot/histogram?x=aucell__Sierksma2025/WGCNA__Brown_Lysosome' in resp.text
+    # Plain-numerical columns (n_genes, pseudotime) are still on the Numerical
+    # tab and NOT swept into module scores.
+    assert '>n_genes</a>' in resp.text or 'x=n_genes' in resp.text
+    # …and there's no scanpy chip for Mancuso Cell_states CRM1 (aucell-only)
+    idx = resp.text.index('aucell__Mancuso2024')
+    row_start = resp.text.rfind('<tr class="mod-item"', 0, idx)
+    row_end = resp.text.index('</tr>', idx)
+    row_html = resp.text[row_start:row_end]
+    assert 'data-has-scanpy="0"' in row_html
+    assert 'data-has-aucell="1"' in row_html
+
+
+def test_dataset_view_module_scores_absent_method_greyed(client, monkeypatch):
+    # A dataset with ONLY aucell scores (per the task's Z20/MIC case) — the
+    # scanpy and starCAT legend badges render as unclickable (data-absent=1)
+    # so users don't get a filter that empties the table.
+    def aucell_only(api_url, path):
+        result = _fake_api_get(api_url, path)
+        if path.endswith("/info") and isinstance(result, dict):
+            result = dict(result)
+            result["obs"] = {
+                "categorical": ["cell_type"],
+                "numerical": [
+                    "n_genes",
+                    "aucell__Sierksma2025/WGCNA__Brown_Lysosome",
+                    "aucell__Sierksma2025/WGCNA__Blue_Innate_IR",
+                ],
+            }
+        return result
+    monkeypatch.setattr(browser, "_api_get", aucell_only)
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    assert 'data-tab="modules"' in resp.text
+    assert 'method="scanpy"  data-absent="1"' in resp.text \
+        or 'method="scanpy" data-absent="1"' in resp.text
+    assert 'method="starcat"  data-absent="1"' in resp.text \
+        or 'method="starcat" data-absent="1"' in resp.text
+    # AUCell must NOT be absent (it has 2 modules)
+    assert 'AUCell <span class="muted-2">(2)' in resp.text
+
+
+def test_geneset_variability_page_offers_aucell_source(client):
+    resp = client.get("/genesets/variability")
+    assert resp.status_code == 200
+    # AUCell now sits alongside scanpy (gene sets) and starCAT as a source
+    # filter — required so the fleet heatmap can distinguish scoring methods
+    # once the AUCell batch finishes across the ~74 datasets.
+    assert 'value="aucell"' in resp.text
+    assert 'value="starcat"' in resp.text
+    assert 'value="geneset"' in resp.text
+
+
 def test_dataset_view_de_tab_only_when_de_present(client, monkeypatch):
     # DE tab appears when the dataset has DE data …
     resp_de = client.get("/browse/GroupA/ds1")

@@ -161,6 +161,92 @@ def _expand_plot_thumbnails(html_text: Optional[str], default_db: Optional[str] 
     return _PLOT_IMG_RE.sub(_sub, html_text)
 
 
+# ── module-score column classification ───────────────────────────────────
+#
+# Score sidecar columns show up in /info's numerical obs list under one of
+# three name conventions (see lib/anthive_db._score_col_name):
+#   scanpy/geneset : "Sierksma2025::WGCNA::Brown_Lysosome"
+#   starcat        : "starcat__MICROGLIA_V1__DAM_pos"
+#   aucell         : "aucell__Sierksma2025/WGCNA__Brown_Lysosome"
+#
+# _classify_score_column parses one column name; _group_module_scores
+# collapses a full list into a per-module structure exposing which methods
+# actually scored it on this dataset, so the dataset page can render a
+# unified "module scores" table with per-method chips.
+
+_STARCAT_PREFIX = 'starcat__'
+_AUCELL_PREFIX = 'aucell__'
+
+
+def _classify_score_column(col: str) -> Optional[Dict[str, str]]:
+    """Return {method, catalog, module} for a score column, else None.
+
+    ``catalog`` is the human-facing catalog id (``Sierksma2025/WGCNA`` or
+    ``MICROGLIA_V1``); ``module`` is the module / program name.
+    """
+    if col.startswith(_STARCAT_PREFIX):
+        rest = col[len(_STARCAT_PREFIX):]
+        catalog, sep, module = rest.rpartition('__')
+        if not sep or not catalog or not module:
+            return None
+        return {'method': 'starcat', 'catalog': catalog, 'module': module}
+    if col.startswith(_AUCELL_PREFIX):
+        rest = col[len(_AUCELL_PREFIX):]
+        catalog, sep, module = rest.rpartition('__')
+        if not sep or not catalog or not module:
+            return None
+        return {'method': 'aucell', 'catalog': catalog, 'module': module}
+    # scanpy / geneset: "<study>::<experiment>::<module>"
+    parts = col.split('::')
+    if len(parts) == 3 and all(p for p in parts):
+        return {
+            'method': 'scanpy',
+            'catalog': f"{parts[0]}/{parts[1]}",
+            'module': parts[2],
+        }
+    return None
+
+
+def _group_module_scores(numerical_cols: List[str]) -> Dict[str, Any]:
+    """Group score columns by (catalog, module).
+
+    Returns a dict with:
+      - ``modules``: list of {catalog, module, key, methods}. ``methods`` maps
+        one of ``scanpy|starcat|aucell`` → the actual obs-column name.
+      - ``non_score_cols``: list of column names that are NOT module scores
+        (native numerical obs — n_counts, pseudotime, …).
+      - ``method_counts``: {method → int} number of modules scored by that method.
+    """
+    by_key: Dict[tuple, Dict[str, Any]] = {}
+    non_score: List[str] = []
+    for col in numerical_cols:
+        info = _classify_score_column(col)
+        if info is None:
+            non_score.append(col)
+            continue
+        key = (info['catalog'], info['module'])
+        entry = by_key.setdefault(key, {
+            'catalog': info['catalog'],
+            'module':  info['module'],
+            'key':     f"{info['catalog']}/{info['module']}",
+            'methods': {},
+        })
+        entry['methods'][info['method']] = col
+
+    # Deterministic order: catalog then module.
+    modules = sorted(by_key.values(), key=lambda m: (m['catalog'].lower(), m['module'].lower()))
+    counts = {
+        'scanpy':  sum(1 for m in modules if 'scanpy'  in m['methods']),
+        'starcat': sum(1 for m in modules if 'starcat' in m['methods']),
+        'aucell':  sum(1 for m in modules if 'aucell'  in m['methods']),
+    }
+    return {
+        'modules':        modules,
+        'non_score_cols': non_score,
+        'method_counts':  counts,
+    }
+
+
 def _accession_url(accession: str) -> Optional[str]:
     """Return a browse URL for a known accession prefix, else None."""
     s = str(accession).upper()
@@ -1094,8 +1180,16 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
     layers = list(db.get('layers', {}).keys())
     embeddings = list(db.get('embeddings', {}).keys())
     obs = db.get('obs', {})
+
+    # Split numerical obs columns into module-score triples (grouped by
+    # (catalog, module) so scanpy/starcat/aucell for the same module collapse
+    # to one row with per-method chips) vs everything else.
+    score_grouped = _group_module_scores(obs.get('numerical', []) or [])
+    module_scores = score_grouped['modules']
+    method_counts = score_grouped['method_counts']
+
     obs_columns = (
-        [{'name': col, 'type': 'num'} for col in obs.get('numerical', [])] +
+        [{'name': col, 'type': 'num'} for col in score_grouped['non_score_cols']] +
         [{'name': col, 'type': 'cat'} for col in obs.get('categorical', [])]
     )
 
@@ -1166,7 +1260,10 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         'year':            db.get('year'),
     }
     n_cat = len(obs.get('categorical') or [])
-    n_num = len(obs.get('numerical') or [])
+    # n_num = the plain (non-score) numerical columns shown in the Numerical
+    # tab; module-score columns get their own "Module scores" tab now.
+    n_num = len(score_grouped['non_score_cols'])
+    n_modules = len(module_scores)
 
     layer_stats = db.get('layer_stats') or {}
     layer_stats_rows = [
@@ -1211,6 +1308,9 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "context_bar": context_bar,
         "n_cat_cols": n_cat,
         "n_num_cols": n_num,
+        "module_scores": module_scores,
+        "n_module_scores": n_modules,
+        "score_method_counts": method_counts,
         "has_duckdb": True,
         "update_pending": False,
         "de_studies": de_studies,
