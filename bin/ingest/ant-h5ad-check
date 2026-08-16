@@ -202,49 +202,86 @@ def remove_from_exclude(metadata: dict, key: str, item: str) -> bool:
     return False
 
 
+# Fields regenerated from the current h5ad state on every check pass.
+# Everything in old_metadata NOT in this set is preserved as-is —
+# id, year, api (obs_rename/hidden/derive), caveats, doi, journal,
+# custom user fields, everything.
+REGENERATED_FIELDS = frozenset({
+    'sha256',           # from checksum
+    'n_obs',            # from adata.n_obs
+    'n_vars',           # from adata.n_vars
+    'version',          # from __version__
+    'date',             # today
+    'layer_stats',      # recomputed
+    'layers_include',   # derived from adata.layers + X
+    'obsm_include',     # derived from adata.obsm
+    'obsnum_include',   # derived from adata.obs dtypes
+    'obscat_include',   # same
+    'default_layer',    # derived from what's log-normed
+})
+
+
 def preserve_user_customizations(old_metadata: dict, new_metadata: dict) -> None:
     """
-    Preserve user customizations when regenerating metadata
+    Merge ``old_metadata`` into ``new_metadata`` — inverted whitelist.
 
-    Preserves:
-    - Title and description fields
-    - Layer and embedding descriptions
-    - All exclude lists (will be cleaned separately)
+    Historical bug (see doc/UPGRADE_PROCEDURE.md §4 gotcha): this function
+    used to preserve only a fixed WHITELIST of 4 fields (title, description,
+    layer_description, embedding_description). Everything else got silently
+    dropped when ant-h5ad-check triggered a regeneration (i.e. every time
+    the h5ad's sha256 changed). Fields that were routinely lost: ``id``,
+    ``year``, ``api``, ``caveats``, DOI info, provenance markers.
+
+    The pre-commit hook in the h5adstore repo catches missing ``id`` fields,
+    but silent drops of ``caveats`` / ``api`` slipped through.
+
+    The fix: preserve EVERYTHING from ``old_metadata`` unless the field is
+    in ``REGENERATED_FIELDS`` (values that must be re-derived from the
+    current h5ad state). This is a blacklist model, not a whitelist.
+
+    Special handling still applies to a few structural fields whose content
+    is a subset of the h5ad's current state:
+
+    - ``layer_description`` / ``embedding_description``: prune entries for
+      layers / embeddings that no longer exist in the h5ad, keep the rest.
+    - ``layers_exclude`` / ``obs_exclude`` / ``var_exclude`` / ``obsm_exclude``:
+      copied through (``clean_exclude_lists`` prunes stale entries later).
 
     Args:
-        old_metadata: Previous metadata dictionary
-        new_metadata: New metadata dictionary (modified in place)
+        old_metadata: Previous metadata dictionary (from disk)
+        new_metadata: New metadata dictionary (freshly initialized from h5ad;
+                      modified in place)
     """
-    # Preserve title and description
-    if 'title' in old_metadata:
-        new_metadata['title'] = old_metadata['title']
-    if 'description' in old_metadata:
-        new_metadata['description'] = old_metadata['description']
+    for key, value in old_metadata.items():
+        if key in REGENERATED_FIELDS:
+            # Force-recompute — do not preserve
+            continue
 
-    # Preserve layer descriptions
-    if 'layer_description' in old_metadata:
-        if 'layer_description' not in new_metadata:
-            new_metadata['layer_description'] = {}
-        # Preserve descriptions for layers that still exist
-        for key in new_metadata.get('layers_include', []):
-            if key in old_metadata['layer_description']:
-                new_metadata['layer_description'][key] = old_metadata['layer_description'][key]
+        if key == 'layer_description':
+            # Only keep entries whose layer still exists
+            merged = new_metadata.get('layer_description') or {}
+            for k, v in (value or {}).items():
+                if k in new_metadata.get('layers_include', []):
+                    merged[k] = v
+            new_metadata['layer_description'] = merged
+            continue
 
-    # Preserve embedding descriptions
-    if 'embedding_description' in old_metadata:
-        if 'embedding_description' not in new_metadata:
-            new_metadata['embedding_description'] = {}
-        # Preserve descriptions for embeddings that still exist
-        for key in new_metadata.get('obsm_include', []):
-            if key in old_metadata['embedding_description']:
-                new_metadata['embedding_description'][key] = old_metadata['embedding_description'][key]
+        if key == 'embedding_description':
+            merged = new_metadata.get('embedding_description') or {}
+            for k, v in (value or {}).items():
+                if k in new_metadata.get('obsm_include', []):
+                    merged[k] = v
+            new_metadata['embedding_description'] = merged
+            continue
 
-    # Note: layer_stats are NOT preserved - always recalculated on regeneration
+        if key in ('layers_exclude', 'obs_exclude', 'var_exclude', 'obsm_exclude'):
+            # Copy through; clean_exclude_lists prunes stale entries.
+            new_metadata[key] = value.copy() if hasattr(value, 'copy') else value
+            continue
 
-    # Preserve all exclude lists (will be cleaned by clean_exclude_lists)
-    for exclude_key in ['layers_exclude', 'obs_exclude', 'var_exclude', 'obsm_exclude']:
-        if exclude_key in old_metadata:
-            new_metadata[exclude_key] = old_metadata[exclude_key].copy()
+        # Everything else: preserve as-is (id, year, api, caveats, doi,
+        # journal, paper_title, custom fields, ...).
+        new_metadata[key] = value
 
 
 def clean_exclude_lists(metadata: dict, adata) -> None:
