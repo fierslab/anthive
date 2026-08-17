@@ -1,0 +1,723 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "pyyaml>=6.0",
+#   "requests>=2.31.0",
+# ]
+# ///
+"""
+ant-grist — sync anthive4 catalog with Grist spreadsheet.
+
+Subcommands:
+
+  ant grist pull [--dry-run] [--apply] [--only <db_id>]
+      Pull Grist → local .md / .h5ad.mus. Computes diff, prints changes.
+      --dry-run is the default (safe). --apply writes to disk.
+
+  ant grist push --new-only [--dry-run] [--apply]
+      Append datasets that are in the anthive catalog but NOT yet in Grist.
+      Existing Grist rows are NEVER modified. --dry-run is the default.
+
+Config:
+  anthive.yaml must have a `grist:` section with url, doc_id, table keys.
+  API key is read from the GRIST_API_KEY environment variable (never stored
+  in a file).
+
+Usage:
+  ant grist pull
+  ant grist pull --apply
+  ant grist pull --only M24/M23
+  ant grist push --new-only
+  ant grist push --new-only --apply
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import urllib.request
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import requests
+import yaml
+
+# ── sys.path shim — two levels up to reach lib/ ──────────────────────────────
+_SCRIPT_DIR = Path(__file__).parent.resolve()
+_LIB_DIR = _SCRIPT_DIR.parent.parent / 'lib'
+sys.path.insert(0, str(_LIB_DIR))
+
+from metadata import parse_md_file, write_md_file  # noqa: E402
+from mus import parse_mus_file, write_mus_file, sidecar_path  # noqa: E402
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+
+_H5ADSTORE_ROOT = _SCRIPT_DIR.parent.parent / 'data' / 'h5adstore'
+_ANTHIVE_YAML = _SCRIPT_DIR.parent.parent / 'anthive.yaml'
+_ANT_SERVE_BASE = 'http://127.0.0.1:8080'
+
+# Fields whose authoritative source in Grist → local is index.md
+_INDEX_MD_FIELDS = {
+    'doi', 'journal', 'paper_title', 'year', 'accession',
+    'publication_status', 'first_author',
+}
+
+# Fields whose authoritative source in Grist → local is the data .md
+_DATA_MD_FIELDS = {
+    'title',
+}
+
+# Fields whose authoritative source is the .h5ad.mus sidecar
+_MUS_FIELDS = {
+    'is_primary', 'derived_from', 'cell_type', 'tissue', 'disease',
+    'organism', 'condition', 'sex', 'age', 'experimental_system',
+    'suspension_type', 'technology', 'source', 'access', 'contributor',
+}
+
+# These Grist columns are computed/derived — never written back locally
+_READONLY_GRIST_COLS = {
+    'db_id', 'group', 'file', 'n_cells', 'n_individuals',
+    'cells_per_ind_avg', 'has_braak', 'n_caveats', 'max_caveat_level',
+    'caveats_summary', 'url', 'cohort_bank',
+    # id is Grist's internal row id
+    'id',
+}
+
+# Grist columns written to .md / .mus — writable subset
+_ALL_WRITABLE_GRIST_COLS = _INDEX_MD_FIELDS | _DATA_MD_FIELDS | _MUS_FIELDS
+
+
+# ── Config loading ────────────────────────────────────────────────────────────
+
+def load_config() -> dict:
+    """Load anthive.yaml and return the full config dict."""
+    if not _ANTHIVE_YAML.exists():
+        print(f"ERROR: anthive.yaml not found at {_ANTHIVE_YAML}", file=sys.stderr)
+        sys.exit(1)
+    with open(_ANTHIVE_YAML) as fh:
+        cfg = yaml.safe_load(fh)
+    return cfg or {}
+
+
+def load_grist_config(cfg: dict) -> dict:
+    """Extract and validate the grist: section from the config."""
+    grist_cfg = cfg.get('grist')
+    if not grist_cfg:
+        print(
+            "ERROR: No 'grist:' section in anthive.yaml. Add:\n"
+            "  grist:\n"
+            "    url: https://grist.fie.rs\n"
+            "    doc_id: <docId>\n"
+            "    table: <tableId>",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    for required_key in ('url', 'doc_id', 'table'):
+        if not grist_cfg.get(required_key):
+            print(
+                f"ERROR: grist.{required_key} is missing from anthive.yaml",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    return grist_cfg
+
+
+def require_api_key() -> str:
+    """Read GRIST_API_KEY from env, exit with a clear message if absent."""
+    api_key = os.environ.get('GRIST_API_KEY', '').strip()
+    if not api_key:
+        print(
+            "ERROR: GRIST_API_KEY environment variable is not set.\n"
+            "  export GRIST_API_KEY=<your_key>\n"
+            "  (Rotate at https://grist.fie.rs → Profile → API Key)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return api_key
+
+
+# ── Grist API helpers ─────────────────────────────────────────────────────────
+
+class GristClient:
+    """Minimal Grist API client covering the operations ant-grist needs."""
+
+    def __init__(self, base_url: str, doc_id: str, table_id: str, api_key: str):
+        self.base_url = base_url.rstrip('/')
+        self.doc_id = doc_id
+        self.table_id = table_id
+        self._session = requests.Session()
+        self._session.headers.update({
+            'Authorization': f'Bearer {api_key}',
+            'Content-Type': 'application/json',
+        })
+
+    def _table_url(self) -> str:
+        return f"{self.base_url}/api/docs/{self.doc_id}/tables/{self.table_id}/records"
+
+    def fetch_all_records(self) -> List[Dict]:
+        """GET all records. Returns list of {id, fields} dicts."""
+        resp = self._session.get(self._table_url(), timeout=30)
+        resp.raise_for_status()
+        return resp.json().get('records', [])
+
+    def add_records(self, field_dicts: List[Dict]) -> Dict:
+        """POST new records. field_dicts is a list of field mappings."""
+        body = {'records': [{'fields': f} for f in field_dicts]}
+        resp = self._session.post(self._table_url(), json=body, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+
+
+# ── h5adstore helpers ─────────────────────────────────────────────────────────
+
+def _index_md_path(group_folder: str) -> Path:
+    return _H5ADSTORE_ROOT / group_folder / 'index.md'
+
+
+def _find_dataset_paths(db_id: str) -> Optional[Tuple[Path, Path, Path]]:
+    """Resolve a db_id to (index_md_path, data_md_path, h5ad_mus_path).
+
+    Walks all study folders looking for an index.md with group_id and a data
+    .md with id matching the db_id components. Returns None if not found.
+    """
+    if '/' not in db_id:
+        return None
+    group_id, file_id = db_id.split('/', 1)
+
+    for study_dir in sorted(_H5ADSTORE_ROOT.iterdir()):
+        if not study_dir.is_dir() or study_dir.name.startswith('_'):
+            continue
+        index_md = study_dir / 'index.md'
+        if not index_md.exists():
+            continue
+        idx_meta, _ = parse_md_file(index_md)
+        if str(idx_meta.get('group_id', '')).strip() != group_id:
+            continue
+        # Correct study folder — now find the data .md with matching file_id
+        for data_md in study_dir.glob('*.md'):
+            if data_md.name == 'index.md':
+                continue
+            try:
+                data_meta, _ = parse_md_file(data_md)
+            except Exception:
+                continue
+            if str(data_meta.get('id', '')).strip() == file_id:
+                h5ad_path = data_md.with_suffix('.h5ad')
+                mus_path = sidecar_path(h5ad_path)
+                return index_md, data_md, mus_path
+    return None
+
+
+def _read_local_fields(db_id: str) -> Optional[Dict[str, Any]]:
+    """Return a flat dict of all writable fields for one db_id from local files.
+
+    Returns None if the db_id cannot be resolved to local files.
+    """
+    paths = _find_dataset_paths(db_id)
+    if paths is None:
+        return None
+    index_md_path, data_md_path, mus_path = paths
+
+    idx_meta, _ = parse_md_file(index_md_path)
+    data_meta, _ = parse_md_file(data_md_path)
+    mus_ann = parse_mus_file(mus_path)
+
+    fields: Dict[str, Any] = {}
+
+    # index.md fields
+    for field in _INDEX_MD_FIELDS:
+        if field == 'first_author':
+            authors = idx_meta.get('authors') or []
+            fields['first_author'] = str(authors[0]) if authors else ''
+        else:
+            val = idx_meta.get(field)
+            fields[field] = _to_grist_value(val)
+
+    # data .md fields
+    for field in _DATA_MD_FIELDS:
+        val = data_meta.get(field)
+        fields[field] = _to_grist_value(val)
+
+    # .h5ad.mus fields
+    for field in _MUS_FIELDS:
+        val = mus_ann.get(field)
+        fields[field] = _to_grist_value(val)
+
+    return fields
+
+
+def _to_grist_value(val: Any) -> str:
+    """Normalise a Python value into a Grist-friendly string (pipe-joined for lists)."""
+    if val is None:
+        return ''
+    if isinstance(val, list):
+        return ' | '.join(str(v) for v in val)
+    if isinstance(val, bool):
+        return 'yes' if val else 'no'
+    return str(val)
+
+
+def _from_grist_value(field: str, raw: Any) -> Any:
+    """Convert a Grist cell value back to local representation.
+
+    List fields (from mus._LIST_FIELDS) that contain ' | ' are split back
+    to Python lists. Single values stay as strings (mus write_mus_file handles
+    both).
+    """
+    from mus import _LIST_FIELDS
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    if field in _LIST_FIELDS and ' | ' in text:
+        return [v.strip() for v in text.split(' | ') if v.strip()]
+    return text
+
+
+# ── Diff logic ────────────────────────────────────────────────────────────────
+
+def compute_diff(
+    grist_records: List[Dict],
+    only_db_id: Optional[str] = None,
+) -> List[Tuple[str, str, str, str]]:
+    """Compare Grist rows against local files.
+
+    Returns list of (db_id, field, local_value, grist_value) tuples where
+    Grist differs from local. Only writable fields are compared.
+    """
+    diffs: List[Tuple[str, str, str, str]] = []
+
+    for record in grist_records:
+        fields = record.get('fields', {})
+        db_id = fields.get('db_id', '').strip()
+        if not db_id:
+            continue
+        if only_db_id and db_id != only_db_id:
+            continue
+
+        local_fields = _read_local_fields(db_id)
+        if local_fields is None:
+            print(f"  WARN  {db_id}  no local files found — skipping", file=sys.stderr)
+            continue
+
+        for field in sorted(_ALL_WRITABLE_GRIST_COLS):
+            if field not in fields:
+                # Column not present in this Grist row (user may have
+                # added extra columns); skip gracefully.
+                continue
+            grist_val = _to_grist_value(fields[field])
+            local_val = local_fields.get(field, '')
+            if grist_val != local_val:
+                diffs.append((db_id, field, local_val, grist_val))
+
+    return diffs
+
+
+# ── Apply pull ────────────────────────────────────────────────────────────────
+
+def apply_pull(diffs: List[Tuple[str, str, str, str]]) -> None:
+    """Write Grist values back to local .md / .h5ad.mus files.
+
+    Groups diffs by db_id, then by destination file, then does a single
+    read-modify-write per file.
+    """
+    # Collect changes per db_id
+    changes_by_db_id: Dict[str, Dict[str, Any]] = {}
+    for db_id, field, _local_val, grist_val in diffs:
+        changes_by_db_id.setdefault(db_id, {})[field] = grist_val
+
+    refreshed_db_ids: List[str] = []
+
+    for db_id, field_map in changes_by_db_id.items():
+        paths = _find_dataset_paths(db_id)
+        if paths is None:
+            print(f"  ERROR  {db_id}  cannot locate local files — skipping", file=sys.stderr)
+            continue
+        index_md_path, data_md_path, mus_path = paths
+
+        index_md_changes: Dict[str, Any] = {}
+        data_md_changes: Dict[str, Any] = {}
+        mus_changes: Dict[str, Any] = {}
+
+        for field, raw_grist_val in field_map.items():
+            converted = _from_grist_value(field, raw_grist_val)
+            if field in _INDEX_MD_FIELDS:
+                if field == 'first_author':
+                    # first_author maps to authors[0] in index.md — read/modify
+                    index_md_changes['__first_author'] = converted
+                else:
+                    index_md_changes[field] = converted
+            elif field in _DATA_MD_FIELDS:
+                data_md_changes[field] = converted
+            elif field in _MUS_FIELDS:
+                mus_changes[field] = converted
+
+        # Apply index.md changes
+        if index_md_changes:
+            idx_meta, idx_body = parse_md_file(index_md_path)
+            first_author_update = index_md_changes.pop('__first_author', None)
+            if first_author_update is not None:
+                authors = list(idx_meta.get('authors') or [])
+                if not authors:
+                    authors = [first_author_update]
+                else:
+                    authors[0] = first_author_update
+                idx_meta['authors'] = authors
+            idx_meta.update(index_md_changes)
+            write_md_file(index_md_path, idx_meta, idx_body)
+            print(f"  WROTE  {index_md_path.relative_to(_H5ADSTORE_ROOT)}")
+
+        # Apply data .md changes
+        if data_md_changes:
+            data_meta, data_body = parse_md_file(data_md_path)
+            data_meta.update(data_md_changes)
+            write_md_file(data_md_path, data_meta, data_body)
+            print(f"  WROTE  {data_md_path.relative_to(_H5ADSTORE_ROOT)}")
+
+        # Apply .h5ad.mus changes
+        if mus_changes:
+            mus_ann = parse_mus_file(mus_path)
+            mus_ann.update(mus_changes)
+            write_mus_file(mus_path, mus_ann)
+            print(f"  WROTE  {mus_path.relative_to(_H5ADSTORE_ROOT)}")
+
+        refreshed_db_ids.append(db_id)
+
+    # Refresh ant-serve views for each modified dataset
+    for db_id in refreshed_db_ids:
+        _refresh_view(db_id)
+
+
+def _refresh_view(db_id: str) -> None:
+    """POST to ant-serve's refresh-views endpoint. Non-fatal on failure."""
+    url = f"{_ANT_SERVE_BASE}/admin/refresh-views/{db_id}"
+    try:
+        result = subprocess.run(
+            ['curl', '-sX', 'POST', url],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            print(f"  REFRESH  {db_id}")
+        else:
+            print(f"  REFRESH FAILED  {db_id}: {result.stderr.strip()}", file=sys.stderr)
+    except Exception as exc:
+        print(f"  REFRESH ERROR  {db_id}: {exc}", file=sys.stderr)
+
+
+# ── Push logic ────────────────────────────────────────────────────────────────
+
+def build_new_rows(
+    existing_grist_db_ids: set,
+    catalog_databases: List[Dict],
+) -> List[Dict]:
+    """Build Grist row dicts for datasets not yet in Grist.
+
+    Applies the same filter as build_micro_sheet_v8.py:
+      - organism includes 'human'
+      - cell_type includes 'microglial cell' OR 'myeloid cell'
+      - experimental_system in {post_mortem_tissue, live_biopsy, chimera} — all pass
+      - experimental_system == xenograft — only if n_cells >= 20,000
+      - excludes: in_vitro_2d, organoid, bulk_tissue (and any other system)
+    """
+    include_systems = {'post_mortem_tissue', 'live_biopsy', 'chimera'}
+    xenograft_min_cells = 20_000
+
+    cells_by_id = {d['id']: d.get('n_cells') or 0 for d in catalog_databases}
+
+    new_rows: List[Dict] = []
+
+    # We need to iterate h5adstore to get annotation
+    try:
+        sys.path.insert(0, str(_LIB_DIR))
+        from h5adstore import iter_h5adstore
+        from mus import resolve_annotation
+        from metadata import get_caveats
+    except ImportError as exc:
+        print(f"ERROR: cannot import lib modules: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    def as_str(x: Any) -> str:
+        if x is None:
+            return ''
+        if isinstance(x, list):
+            return ' | '.join(str(v) for v in x)
+        return str(x)
+
+    def as_list(x: Any) -> List[str]:
+        if x is None:
+            return []
+        if isinstance(x, list):
+            return [str(v) for v in x]
+        return [str(x)]
+
+    for entry in sorted(iter_h5adstore(_H5ADSTORE_ROOT), key=lambda e: e.db_id):
+        db_id = entry.db_id
+
+        # Skip already-in-Grist
+        if db_id in existing_grist_db_ids:
+            continue
+
+        # Skip if not in the live catalog
+        if db_id not in cells_by_id:
+            continue
+
+        try:
+            ann = resolve_annotation(entry.h5ad_path, root=_H5ADSTORE_ROOT)
+        except Exception:
+            ann = {}
+
+        # Organism filter
+        organisms = [x.lower() for x in as_list(ann.get('organism'))]
+        if 'human' not in organisms:
+            continue
+
+        # Cell-type filter
+        cell_types = [x.lower() for x in as_list(ann.get('cell_type'))]
+        if not any(('microglial' in ct) or (ct == 'myeloid cell') for ct in cell_types):
+            continue
+
+        # Experimental system filter
+        exp_sys = as_str(ann.get('experimental_system'))
+        n_cells = cells_by_id.get(db_id, 0)
+        if exp_sys == 'xenograft':
+            if n_cells < xenograft_min_cells:
+                continue
+        elif exp_sys and exp_sys not in include_systems:
+            continue
+
+        # Caveats — read from the data .md
+        try:
+            data_meta, _ = parse_md_file(entry.md_path)
+            caveats_list = get_caveats(data_meta)
+        except Exception:
+            caveats_list = []
+
+        caveat_levels = {'low': 1, 'medium': 2, 'high': 3}
+        max_level = ''
+        if caveats_list:
+            max_level = max(
+                caveats_list,
+                key=lambda c: caveat_levels.get(c.get('level', ''), 0),
+            ).get('level', '')
+        caveats_summary = ' | '.join(
+            f"{c.get('level', '?')}:{c.get('kind', '?')}" for c in caveats_list
+        )
+
+        # Group-level metadata from index.md
+        gmeta, _ = parse_md_file(_index_md_path(entry.study))
+        authors = gmeta.get('authors') or []
+        first_author = str(authors[0]) if authors else ''
+
+        row = {
+            # identity
+            'db_id': db_id,
+            'group': entry.study,
+            'file': entry.h5ad_path.name,
+            'url': f'https://intern.bdslab.org/browse/{db_id}',
+            # size (n_individuals and cells_per_ind_avg require a live API query;
+            # leave blank here — user can fill in Grist or we can add later)
+            'n_cells': n_cells,
+            'n_individuals': '',
+            'cells_per_ind_avg': '',
+            # biology
+            'tissue': as_str(ann.get('tissue')),
+            'cell_type': as_str(ann.get('cell_type')),
+            'disease': as_str(ann.get('disease')),
+            'condition': as_str(ann.get('condition')),
+            'experimental_system': exp_sys,
+            'suspension_type': as_str(ann.get('suspension_type')),
+            'technology': as_str(ann.get('technology')),
+            'sex': as_str(ann.get('sex')),
+            'age': as_str(ann.get('age')),
+            'has_braak': '',  # requires API query; left blank
+            # publication
+            'first_author': first_author,
+            'paper_title': gmeta.get('paper_title', ''),
+            'year': as_str(ann.get('year') or gmeta.get('year')),
+            'journal': gmeta.get('journal', ''),
+            'doi': gmeta.get('doi', ''),
+            'accession': as_str(ann.get('accession') or gmeta.get('accession')),
+            'cohort_bank': gmeta.get('cohort_bank', ''),
+            'publication_status': gmeta.get('publication_status', ''),
+            # curation
+            'is_primary': as_str(ann.get('is_primary')),
+            'derived_from': as_str(ann.get('derived_from')),
+            'source': as_str(ann.get('source')),
+            'access': as_str(ann.get('access')),
+            'contributor': as_str(ann.get('contributor')),
+            # caveats
+            'n_caveats': len(caveats_list),
+            'max_caveat_level': max_level,
+            'caveats_summary': caveats_summary,
+        }
+        new_rows.append(row)
+
+    return new_rows
+
+
+def _fetch_catalog(api_base: str) -> List[Dict]:
+    """GET /databases from the running ant-serve. Returns list of db dicts."""
+    url = f"{api_base}/databases"
+    try:
+        with urllib.request.urlopen(url, timeout=30) as resp:
+            data = json.load(resp)
+        return data.get('databases', [])
+    except Exception as exc:
+        print(f"ERROR: cannot reach ant-serve at {api_base}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+# ── Subcommand: pull ──────────────────────────────────────────────────────────
+
+def cmd_pull(args: argparse.Namespace, client: GristClient) -> int:
+    """Pull Grist → local files."""
+    print("Fetching Grist records…")
+    records = client.fetch_all_records()
+    print(f"  {len(records)} rows in Grist")
+
+    diffs = compute_diff(records, only_db_id=args.only)
+
+    if not diffs:
+        print("No differences found — local files match Grist.")
+        return 0
+
+    print(f"\n{len(diffs)} difference(s) between Grist and local files:\n")
+    for db_id, field, local_val, grist_val in diffs:
+        local_display = repr(local_val) if local_val else "''"
+        grist_display = repr(grist_val) if grist_val else "''"
+        print(f"  {db_id:30s}  {field:30s}  local={local_display}  →  grist={grist_display}")
+
+    if args.dry_run and not args.apply:
+        print(
+            f"\n[dry-run] {len(diffs)} field(s) would be updated. "
+            "Pass --apply to write changes."
+        )
+        return 0
+
+    print(f"\nApplying {len(diffs)} change(s)…")
+    apply_pull(diffs)
+    print("Done.")
+    return 0
+
+
+# ── Subcommand: push ──────────────────────────────────────────────────────────
+
+def cmd_push(args: argparse.Namespace, client: GristClient) -> int:
+    """Push new datasets to Grist (append-only)."""
+    print("Fetching existing Grist records…")
+    records = client.fetch_all_records()
+    existing_db_ids = {
+        r['fields'].get('db_id', '').strip()
+        for r in records
+        if r.get('fields', {}).get('db_id', '').strip()
+    }
+    print(f"  {len(existing_db_ids)} db_ids already in Grist")
+
+    print("Fetching anthive catalog from ant-serve…")
+    catalog_dbs = _fetch_catalog(_ANT_SERVE_BASE)
+    print(f"  {len(catalog_dbs)} datasets in catalog")
+
+    print("Identifying new rows to append…")
+    new_rows = build_new_rows(existing_db_ids, catalog_dbs)
+
+    if not new_rows:
+        print("No new datasets to push — Grist is up to date.")
+        return 0
+
+    print(f"\n{len(new_rows)} new dataset(s) would be added to Grist:\n")
+    for row in new_rows:
+        print(f"  {row['db_id']:30s}  {row.get('cell_type', ''):25s}  n_cells={row.get('n_cells', '')}")
+
+    if args.dry_run and not args.apply:
+        print(
+            f"\n[dry-run] {len(new_rows)} row(s) would be appended. "
+            "Pass --apply to write to Grist."
+        )
+        return 0
+
+    print(f"\nAppending {len(new_rows)} row(s) to Grist…")
+    result = client.add_records(new_rows)
+    added_ids = [r.get('id') for r in result.get('records', [])]
+    print(f"Done. Grist row IDs: {added_ids}")
+    return 0
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog='ant grist',
+        description='Sync anthive4 catalog with Grist spreadsheet.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    subparsers = parser.add_subparsers(dest='subcommand', required=True)
+
+    # pull
+    pull_parser = subparsers.add_parser(
+        'pull',
+        help='Pull Grist → local .md / .h5ad.mus (diff-then-confirm)',
+    )
+    pull_parser.add_argument(
+        '--dry-run', action='store_true', default=True,
+        help='Print diff without writing (default)',
+    )
+    pull_parser.add_argument(
+        '--apply', action='store_true', default=False,
+        help='Write Grist values to local files',
+    )
+    pull_parser.add_argument(
+        '--only', metavar='DB_ID', default=None,
+        help='Restrict to one dataset, e.g. M24/M23',
+    )
+
+    # push
+    push_parser = subparsers.add_parser(
+        'push',
+        help='Append new datasets to Grist (never modifies existing rows)',
+    )
+    push_parser.add_argument(
+        '--new-only', action='store_true', required=True,
+        help='Required safety flag: only append; never modify existing rows',
+    )
+    push_parser.add_argument(
+        '--dry-run', action='store_true', default=True,
+        help='Print what would be appended without writing (default)',
+    )
+    push_parser.add_argument(
+        '--apply', action='store_true', default=False,
+        help='POST new rows to Grist',
+    )
+
+    return parser
+
+
+def main() -> int:
+    parser = build_arg_parser()
+    args = parser.parse_args()
+
+    # Load config
+    cfg = load_config()
+    grist_cfg = load_grist_config(cfg)
+    api_key = require_api_key()
+
+    client = GristClient(
+        base_url=grist_cfg['url'],
+        doc_id=grist_cfg['doc_id'],
+        table_id=grist_cfg['table'],
+        api_key=api_key,
+    )
+
+    if args.subcommand == 'pull':
+        return cmd_pull(args, client)
+    elif args.subcommand == 'push':
+        return cmd_push(args, client)
+    else:
+        parser.print_help()
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

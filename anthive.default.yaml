@@ -223,3 +223,10 @@ chat:
   # Persistent SQLite path for chat history, keyed on (Remote-User,
   # session_id). Must survive tmp/ cleans + ant-serve restarts.
   history_path: data/chat_history.db
+
+# Grist sync (bin/meta/ant-grist).
+# API key is read from GRIST_API_KEY env var — never put the token here.
+grist:
+  url: null                    # e.g. https://grist.fie.rs
+  doc_id: null                 # e.g. 6dMbv7Qi9Zy8
+  table: null                  # e.g. Micro_v8
