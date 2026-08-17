@@ -1130,22 +1130,20 @@ def apply_axis_transform(values: 'np.ndarray', kind: str,
 
 
 def _axis_label_with_transform(field: str, kind: str) -> str:
-    """Compose an axis label that reflects the applied transform."""
-    if kind in (None, 'linear'):
+    """Compose an axis label that reflects the applied transform.
+
+    Format: bracket-suffix, e.g. ``"TREM2 [log1p]"``. The transform tag
+    is a compact hint appended in ``[…]``; ``linear`` (or missing kind)
+    is a no-op and returns the bare field name. Kept short on purpose —
+    the axis already carries enough decoration.
+    """
+    if kind in (None, 'linear', ''):
         return field
-    if kind == 'signed_log1p':
-        return f'sign(x) · log1p(|{field}|)'
-    if kind == 'log1p':
-        return f'log1p({field})'
-    if kind == 'log':
-        return f'log({field})'
-    if kind == 'asinh':
-        return f'asinh({field})'
-    if kind == 'signed_sqrt':
-        return f'sign(x) · √|{field}|'
-    if kind == 'rank':
-        return f'rank({field}) [0..1]'
-    return f'{kind}({field})'
+    if kind not in TRANSFORMS:
+        # Unknown transform tag — surface it verbatim rather than
+        # silently swallowing the caller's intent.
+        return f'{field} [{kind}]'
+    return f'{field} [{kind}]'
 
 
 def _fast_scatter(ax, xs, ys, *, point_size: float, alpha: float,
@@ -1236,6 +1234,10 @@ def plot_scatter(
             # category — honest about data quality without dropping cells.
             plot_df[color_field] = plot_df[color_field].fillna('(missing)').astype(str)
             n_cats = int(plot_df[color_field].nunique())
+            # Per-class cell counts (post-sample, post-filter) for the legend.
+            # value_counts() ignores no strings — '(missing)' is already a
+            # real string category at this point, so it's included.
+            class_counts = plot_df[color_field].value_counts()
             cmap_name, _ = pick_cmap('categorical', palette_cat=palette_cat,
                                      palette_cont=palette_cont,
                                      palette_div=palette_div,
@@ -1263,8 +1265,26 @@ def plot_scatter(
                     hue=color_field, linewidth=0, s=point_size, alpha=alpha,
                     palette=cmap_name, ax=ax,
                 )
+            # Enrich legend labels with per-class cell counts. Applied to
+            # BOTH the fastpath (raw ax.plot labels) and the seaborn path
+            # (seaborn attached its own legend by now). Look up counts on
+            # the exact label text; unknown labels stay untouched so this
+            # never destroys information.
+            _existing_legend = ax.get_legend()
+            _handles, _labels = ax.get_legend_handles_labels()
+            if not _handles and _existing_legend is not None:
+                _handles = list(
+                    getattr(_existing_legend, 'legend_handles', None)
+                    or getattr(_existing_legend, 'legendHandles', [])
+                )
+                _labels = [t.get_text() for t in _existing_legend.texts]
+            _labels_enriched = [
+                f'{lab} (n={class_counts[lab]:,})' if lab in class_counts.index else lab
+                for lab in _labels
+            ]
             legend_fontsize = 6 if n_cats > 12 else 8
             ax.legend(
+                _handles, _labels_enriched,
                 bbox_to_anchor=(1.02, 1.0), loc='upper left',
                 borderaxespad=0.0,
                 fontsize=legend_fontsize, markerscale=2,
