@@ -141,12 +141,61 @@ def _r_squared(values: np.ndarray, x: np.ndarray) -> tuple[float, float, float]:
     return (r2, float(rho), float(p))
 
 
+#: Canonical columns that get a variability sweep on EVERY dataset that has
+#: them under those exact names in the view (obscat/obsnum after obs_rename
+#: is applied). Each is mapped to its tag id. Extends via obs_tags: entries.
+_CANONICAL_TAGS = {
+    'sex':       'sex',
+    'braak':     'braak',
+    'donor_id':  'donor',
+    'cluster':   'cluster',
+    'age':       'age',
+    'disease':   'disease',
+    'condition': 'condition',
+    'apoe':      'apoe',
+    'pmi':       'pmi',
+    'region':    'region',
+}
+
+
+def _view_column_kind(conn, column: str) -> str:
+    """Same as `_numerical_column_kind` but for the VIEWs (obscat/obsnum)
+    which surface canonical, post-rename column names."""
+    for view, kind in (('obsnum', 'num'), ('obscat', 'cat')):
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM information_schema.columns "
+                "WHERE table_name = ? AND column_name = ?",
+                [view, column],
+            ).fetchone()
+            if row and row[0]:
+                return kind
+        except Exception:
+            pass
+    return '?'
+
+
 def compute_for_dataset(db_id: str, duckdb_path: Path, md_path: Path) -> pd.DataFrame:
     """Return one long-format DataFrame of variability rows for the dataset."""
     md, _ = parse_md_file(md_path)
     obs_tags = md.get('obs_tags') or {}
-    if not obs_tags:
-        return pd.DataFrame()
+
+    # Build the effective (column → [tag,...]) mapping:
+    # 1. Canonical columns from the view get their canonical tag.
+    # 2. obs_tags entries augment, keyed by whatever column name they use
+    #    (canonical is preferred; a raw name will only fire if that raw
+    #    column still exists in the view, which it won't after obs_rename —
+    #    those entries become dead weight and can be dropped later).
+    tag_targets: dict[str, list[str]] = {}
+    for col, tag in _CANONICAL_TAGS.items():
+        tag_targets.setdefault(col, [])
+        if tag not in tag_targets[col]:
+            tag_targets[col].append(tag)
+    for col, tags in obs_tags.items():
+        tag_targets.setdefault(col, [])
+        for t in (tags or []):
+            if t not in tag_targets[col]:
+                tag_targets[col].append(t)
 
     sidecar = scores_path(duckdb_path)
     if not sidecar.exists():
@@ -164,19 +213,27 @@ def compute_for_dataset(db_id: str, duckdb_path: Path, md_path: Path) -> pd.Data
         conn.close()
         return pd.DataFrame()
 
-    # Pre-fetch all tagged obs columns in one query per kind, indexed by cell_name.
+    # Pre-fetch each tag column via the VIEW (obscat/obsnum) so that
+    # obs_rename/obs_derive is applied — canonical column names win.
     obs_frames: dict[str, pd.DataFrame] = {}
-    for column in obs_tags.keys():
-        kind = _numerical_column_kind(conn, column)
+    for column in list(tag_targets.keys()):
+        kind = _view_column_kind(conn, column)
         if kind == '?':
             continue
-        table = '__obsnum' if kind == 'num' else '__obscat'
-        df = conn.execute(
-            f'SELECT c.cell_name, o."{column}" AS "{column}" '
-            f'FROM {table} o JOIN __cells c ON c.cell_id = o.cell_id',
-        ).df().set_index('cell_name')
+        view = 'obsnum' if kind == 'num' else 'obscat'
+        try:
+            df = conn.execute(
+                f'SELECT cell_name, "{column}" AS "{column}" FROM {view}'
+            ).df().set_index('cell_name')
+        except Exception:
+            continue
         obs_frames[column] = df
     conn.close()
+
+    # Drop tag_targets entries with no data (col not in view or query failed)
+    tag_targets = {c: t for c, t in tag_targets.items() if c in obs_frames}
+    if not tag_targets:
+        return pd.DataFrame()
 
     rows: list[dict] = []
     # For each (source, catalog, module), pivot to cell_name → score, then per tag_column compute stats
@@ -187,7 +244,7 @@ def compute_for_dataset(db_id: str, duckdb_path: Path, md_path: Path) -> pd.Data
         total_var = float(scores_by_cell.var(ddof=1))
         n_cells   = int(len(scores_by_cell))
 
-        for column, tags in obs_tags.items():
+        for column, tags in tag_targets.items():
             if column not in obs_frames:
                 continue
             col_series = obs_frames[column][column]
