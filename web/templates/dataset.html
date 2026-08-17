@@ -364,9 +364,9 @@
 {% set _cat_cols = obs_columns | selectattr('type', 'equalto', 'cat') | list %}
 
 <div class="tab-bar" id="ds-tab-bar" role="tablist">
-  <button type="button" class="tab-btn active" data-tab="overview" role="tab">Overview</button>
+  {% if markdown_content %}<button type="button" class="tab-btn active" data-tab="overview" role="tab">Overview</button>{% endif %}
   {% if caveats %}<button type="button" class="tab-btn caveat-tab lvl-{{ caveats_summary.max_level or 'low' }}" data-tab="caveats" role="tab">⚠ Caveats<span class="tab-count">{{ caveats_summary.n }}</span></button>{% endif %}
-  <button type="button" class="tab-btn"        data-tab="data"     role="tab">Data</button>
+  <button type="button" class="tab-btn{% if not markdown_content %} active{% endif %}" data-tab="data" role="tab">Data</button>
   {% if gene_panel and gene_panel.genes %}
   <button type="button" class="tab-btn"        data-tab="genes"    role="tab">Genes<span class="tab-count">{{ gene_panel.genes|length }}</span></button>
   {% endif %}
@@ -387,9 +387,11 @@
    dropped — same information is one click away in the Categorical / Numerical
    tabs, with proper stats. If markdown_content is empty the tab-init JS
    below auto-jumps to Data. #}
+{% if markdown_content %}
 <section class="tab-panel active" id="tab-overview" role="tabpanel">
-  {% if markdown_content %}<div class="ds-desc md-body">{{ markdown_content|safe }}</div>{% endif %}
+  <div class="ds-desc md-body">{{ markdown_content|safe }}</div>
 </section>
+{% endif %}
 
 {# ── Caveats tab (only rendered when caveats present) ────────────────── #}
 {% if caveats %}
@@ -474,7 +476,7 @@
 {% endif %}
 
 {# ── Data tab ─────────────────────────────────────────────────────────── #}
-<section class="tab-panel" id="tab-data" role="tabpanel">
+<section class="tab-panel{% if not markdown_content %} active{% endif %}" id="tab-data" role="tabpanel">
   <div class="data-cards">
   {% if info %}
   <div class="data-card">
@@ -830,14 +832,10 @@ document.addEventListener('DOMContentLoaded', function() {
         var initHash = (location.hash || '').replace(/^#/, '');
         if (initHash) {
             activateTab(initHash, false);
-        } else {
-            // Default to Overview unless it's empty (no markdown + no
-            // top_cat + no top_num) — then jump straight to Data so the
-            // page opens on something useful.
-            var overviewPanel = panels['overview'];
-            var empty = overviewPanel && !overviewPanel.textContent.trim();
-            if (empty && panels['data']) activateTab('data', false);
         }
+        // No auto-jump: the Overview tab is only rendered when it has
+        // markdown_content, and the template sets `.active` on Data
+        // otherwise.
     })();
 
     {% if obs_columns|length > 0 or n_module_scores > 0 %}
