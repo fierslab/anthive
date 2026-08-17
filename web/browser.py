@@ -1578,6 +1578,13 @@ async def plot_view(request: Request, folder_browse_id: str,
     top_genes = db.get('top_genes') or []
     top_cat   = db.get('top_cat')   or []
     top_num   = db.get('top_num')   or []
+
+    # Caveats banner (task #254) — surface the SAME warning list that
+    # dataset.html shows, above the plot preview. A caveat like SP4/MPF's
+    # astro-doublets applies directly to the plot the user is about to look
+    # at; hiding it on the dataset overview page is dangerous.
+    caveats = db.get('caveats') or []
+    caveats_summary = _summarize_caveats(caveats)
     plot_meta = {
         'embeddings':  sorted(list((db.get('embeddings') or {}).keys())),
         'layers':      sorted(list((db.get('layers') or {}).keys())),
@@ -1608,6 +1615,10 @@ async def plot_view(request: Request, folder_browse_id: str,
         "all_geoms":        _PLOT_GEOMS_UI,
         # gates DE geoms in the switcher — only shown when the dataset has DE.
         "has_de":           has_de,
+        # caveats surfaced ABOVE the plot preview (task #254). Same format
+        # dataset.html renders, reduced summary for the header accent.
+        "caveats":          caveats,
+        "caveats_summary":  caveats_summary,
         "api_url":          "/api",
     })
 

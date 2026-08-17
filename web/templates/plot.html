@@ -215,6 +215,102 @@
 </div>
 <h1 class="page-title">{{ geom_icon }} {{ geom_label }} — {{ dataset_name }}</h1>
 
+{# ── Known caveats banner (task #254) ──────────────────────────────────
+   Same list dataset.html shows, placed here above the plot preview so
+   caveats that directly bias the current plot (e.g. SP4/MPF astro-
+   doublets) can't be missed. Reuses the .caveats-card CSS from
+   dataset.html — cloned here so plot.html stays self-contained. #}
+{% if caveats %}
+<style>
+  .caveats-card {
+    border: 1px solid var(--border); border-left-width: 4px; border-radius: 6px;
+    background: #fafafa; margin: 8px 0 10px; padding: 8px 12px; font-size: 12px;
+  }
+  .caveats-card .cv-header {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12px; font-weight: 600; color: var(--text); margin-bottom: 6px;
+  }
+  .caveats-card .cv-sigil { font-size: 13px; filter: grayscale(1); opacity: .85; }
+  .caveats-card .cv-count { color: var(--text-muted); font-weight: 500; }
+  .caveats-card .cv-list { display: flex; flex-direction: column; gap: 6px; }
+  .caveats-card .cv-item { padding-top: 6px; border-top: 1px dotted var(--border); }
+  .caveats-card .cv-item:first-child { border-top: 0; padding-top: 0; }
+  .caveats-card .cv-row1 {
+    display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; margin-bottom: 2px;
+  }
+  .caveats-card .cv-chip {
+    display: inline-block; padding: 0 6px; font-size: 10px;
+    line-height: 1.5; border-radius: 3px; font-family: var(--font-mono);
+    background: #f1f5f9; color: #334155; border: 1px solid var(--border);
+    text-transform: lowercase; letter-spacing: .2px;
+  }
+  .caveats-card .cv-chip.lvl { text-transform: uppercase; letter-spacing: .3px; font-size: 9px; }
+  .caveats-card .cv-scope   { font-family: var(--font-mono); font-size: 11px; color: #475569; }
+  .caveats-card .cv-obsflag { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); }
+  .caveats-card .cv-msg    { color: var(--text); font-size: 12px; line-height: 1.4; }
+  /* "Filter these out" chip — one-click plot restart with the obs_flag
+     baked into subset. Small, monospace, subtly clickable. */
+  .caveats-card .cv-filter-chip {
+    display: inline-block; margin-left: 6px; padding: 0 6px; font-size: 10px;
+    line-height: 1.6; border-radius: 3px; font-family: var(--font-mono);
+    background: #eef2ff; color: #3730a3; border: 1px solid #c7d2fe;
+    text-decoration: none; cursor: pointer;
+  }
+  .caveats-card .cv-filter-chip:hover { background: #e0e7ff; text-decoration: none; }
+  .caveats-card.caveat-low    { border-left-color: #94a3b8; background: #f8fafc; }
+  .caveats-card.caveat-low    .cv-chip.lvl { background: #f1f5f9; color: #475569; border-color: #cbd5e1; }
+  .caveats-card.caveat-medium { border-left-color: #d97706; background: #fffbeb; }
+  .caveats-card.caveat-medium .cv-chip.lvl { background: #fef3c7; color: #92400e; border-color: #fde68a; }
+  .caveats-card.caveat-high   { border-left-color: #b91c1c; background: #fef2f2; }
+  .caveats-card.caveat-high   .cv-chip.lvl { background: #fee2e2; color: #991b1b; border-color: #fecaca; }
+</style>
+<div class="caveats-card caveat-{{ caveats_summary.max_level or 'low' }}"
+     role="note" aria-label="Known caveats for this dataset">
+  <div class="cv-header">
+    <span class="cv-sigil" aria-hidden="true">⚠</span>
+    <span>Known caveats — apply to the plot below</span>
+    <span class="cv-count">({{ caveats_summary.n }}{% if caveats_summary.n > 1 %} · highest {{ caveats_summary.max_level }}{% endif %})</span>
+  </div>
+  <div class="cv-list">
+    {% for cv in caveats %}
+    <div class="cv-item">
+      <div class="cv-row1">
+        <span class="cv-chip lvl" title="severity">{{ cv.level or 'low' }}</span>
+        {% if cv.kind %}<span class="cv-chip" title="caveat type">{{ cv.kind }}</span>{% endif %}
+        {% if cv.scope %}<span class="cv-scope" title="scope">{{ cv.scope }}</span>{% endif %}
+        {% if cv.obs_flag %}<span class="cv-obsflag" title="boolean obs column ('yes'/'no') that flags affected cells">obs:{{ cv.obs_flag }}</span>{% endif %}
+      </div>
+      {% if cv.message %}
+      <div class="cv-msg">{{ cv.message }}{% if cv.obs_flag %}<a class="cv-filter-chip" href="#" data-obs-flag="{{ cv.obs_flag }}" role="button" title="Prepend subset={{ cv.obs_flag }}:no to the current URL and reload the plot">Filter these out</a>{% endif %}</div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</div>
+<script>
+  // Filter-chip handler — prepends subset=<obs_flag>:no to the current URL
+  // and reloads. Preserves any existing subset/params. Task #254.
+  (function() {
+    document.querySelectorAll('.cv-filter-chip').forEach(function(chip) {
+      chip.addEventListener('click', function(ev) {
+        ev.preventDefault();
+        var flag = chip.dataset.obsFlag;
+        if (!flag) return;
+        var url = new URL(window.location.href);
+        var existing = url.searchParams.getAll('subset');
+        var addition = flag + ':no';
+        // De-dup: if the exact predicate is already there (either
+        // form), do nothing.
+        if (existing.indexOf(addition) !== -1) { return; }
+        if (existing.some(function(s) { return s.trim() === flag + "=='no'"; })) { return; }
+        url.searchParams.append('subset', addition);
+        window.location.href = url.toString();
+      });
+    });
+  })();
+</script>
+{% endif %}
+
 <div class="plot-page">
 
   {# ── Sidebar form ─────────────────────────────────────────────────────────── #}
@@ -367,6 +463,18 @@
       </div>
       {% if geom == 'bar' %}
       <label style="margin-top:4px"><input type="checkbox" name="ci" id="f-ci" checked> show 95% CI</label>
+      {# stat= (task #252). Controls how y is aggregated per bar. Default
+         'mean' matches scanpy — includes the zero-mass. 'mean_nonzero'
+         drops zero cells before the mean; 'pct_expressing' shows
+         %-of-cells-expressing on a 0..100 axis. Only meaningful when y
+         resolves to a gene; server silently coerces back to 'mean' when
+         y is a numerical obs field. #}
+      <label style="margin-top:4px">statistic (when y is a gene) {{ info('Default mean includes zero cells (scanpy convention, the correct log-norm mean). mean_nonzero drops zero cells before averaging. pct_expressing shows the fraction of cells with y > 0 per group on a 0..100 axis. Ignored for numerical obs y and for stacked bars.') }}</label>
+      <select name="stat" id="f-stat">
+        <option value="mean">mean (all cells, incl. zeros)</option>
+        <option value="mean_nonzero">mean_nonzero (y > 0 only)</option>
+        <option value="pct_expressing">pct_expressing (% y > 0)</option>
+      </select>
       {% endif %}
     </fieldset>
     <fieldset>
@@ -412,6 +520,11 @@
       {% if geom == 'histogram' %}
       <label style="margin-top:4px">bins</label>
       <input type="number" name="bins" id="f-bins" value="20" min="2" max="500">
+      {% endif %}
+      {% if geom in ('histogram', 'kde') %}
+      {# task #251 — drop y=0 cells before binning / KDE fit. Only meaningful
+         when x is a gene; server silently ignores it for numerical obs. #}
+      <label style="margin-top:4px"><input type="checkbox" name="exclude_zero" id="f-exclude_zero"> exclude zeros (shape of expressers) {{ info('When x is a gene, drop cells with expression == 0 before fitting. Reveals the shape of the expressing population without the zero-mass swamping the picture. Ignored for numerical obs x (zeros there may be meaningful).') }}</label>
       {% endif %}
     </fieldset>
     <fieldset>
@@ -519,6 +632,9 @@
       <input type="number" name="kde_n" id="f-kde_n" placeholder="auto" min="16" max="512">
       <label style="margin-top:6px"><input type="checkbox" name="iso_overlay" id="f-iso_overlay"> iso contour lines</label>
       <label><input type="checkbox" name="point_overlay" id="f-point_overlay"> overlay raw points</label>
+      {# task #251 — exclude zeros for KDE2D. When either axis is a gene,
+         drop cells where that gene axis == 0 before fitting. #}
+      <label style="margin-top:4px"><input type="checkbox" name="exclude_zero" id="f-exclude_zero"> exclude zeros (shape of co-expressers) {{ info('When x or y is a gene, drop cells where that axis == 0 before fitting the KDE. Reveals the shape of the co-expressing population. Ignored on numerical obs axes.') }}</label>
     </fieldset>
 
     {% elif geom in ('volcano', 'ma') %}

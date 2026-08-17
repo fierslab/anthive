@@ -486,6 +486,10 @@ def build_caption(
     kde_n: Optional[int] = None,
     kde_bw: Optional[float] = None,
     n_levels: Optional[int] = None,
+    stat: Optional[str] = None,
+    exclude_zero: Optional[bool] = None,
+    n_excluded_zero: Optional[int] = None,
+    n_total_pre_zero: Optional[int] = None,
 ) -> str:
     """Build a multi-sentence figure caption — describe the plot, the data,
     and every knob the caller actually exercised.
@@ -548,7 +552,13 @@ def build_caption(
     elif geom == 'bar':
         if y:
             mode_phrase = {'stack': 'Stacked bar plot', 'dodge': 'Bar plot'}.get(bar_mode or 'dodge', 'Bar plot')
-            sent = f'{mode_phrase} of mean {y} per {x} for dataset {db_id}'
+            # stat= reshapes what a bar reports. Default 'mean' keeps the
+            # historical wording; 'mean_nonzero' / 'pct_expressing' say so.
+            stat_phrase = {
+                'mean_nonzero':   f'mean {y} over expressing cells (y > 0)',
+                'pct_expressing': f'fraction of cells expressing {y} (y > 0)',
+            }.get(stat or 'mean', f'mean {y}')
+            sent = f'{mode_phrase} of {stat_phrase} per {x} for dataset {db_id}'
             if ci and bar_mode != 'stack':
                 sent += ' with bootstrap 95% confidence intervals'
         else:
@@ -691,6 +701,19 @@ def build_caption(
 
     if knobs:
         parts.append('Visual parameters: ' + '; '.join(knobs) + '.')
+
+    # exclude_zero — the geoms where dropping zero cells reshapes what the
+    # picture reports (KDE / histogram / kde2d). We call it out prominently
+    # so a reader doesn't confuse this with a "the population lacks zeros"
+    # dataset.
+    if exclude_zero and n_excluded_zero and n_total_pre_zero:
+        kept = n_total_pre_zero - n_excluded_zero
+        pct_kept = 100.0 * kept / max(n_total_pre_zero, 1)
+        parts.append(
+            f'exclude_zero: kernel fit on {kept:,} cells with expression > 0 '
+            f'({pct_kept:.1f}% of {n_total_pre_zero:,} total; '
+            f'{n_excluded_zero:,} zero-valued cells dropped).'
+        )
 
     return ' '.join(parts)
 
@@ -2051,6 +2074,61 @@ def _place_group_band_labels(fig, ax, group_by_labels) -> None:
         )
 
 
+def _annotate_pct_expressing(
+    ax,
+    panel_df: pd.DataFrame,
+    *,
+    x_field: str,
+    y_field: str,
+    hue: Optional[str],
+    cat_order: List,
+    hue_order: Optional[List],
+    pct_expr_by_group: Dict,
+    n_expr_by_group: Optional[Dict] = None,
+) -> None:
+    """Render "% expressing" tiny grey labels above each column.
+
+    Small (fontsize 7), grey, no background. Positioned just above the
+    top of the axis data range so the labels sit right above the top
+    of each violin / box / bar without eating into it. Called once per
+    panel; skips silently if the group key isn't in ``pct_expr_by_group``.
+    """
+    # Reserve a bit of headroom above the current axis limits so the
+    # labels don't collide with the drawing.
+    y_lo, y_hi = ax.get_ylim()
+    pad = (y_hi - y_lo) * 0.02
+    y_text = y_hi + pad
+    ax.set_ylim(y_lo, y_hi + pad * 4)  # extend upper limit so text has room
+
+    n_cats = len(cat_order)
+    hue_levels: List = list(hue_order) if hue else [None]
+    n_hues = max(len(hue_levels), 1)
+    # Seaborn dodges bars/violins at x = i, with width dodge_width / n_hues
+    # centred on each hue offset. The dodge width defaults to 0.8.
+    dodge_width = 0.8
+    for i, cat in enumerate(cat_order):
+        for j, hue_val in enumerate(hue_levels):
+            key = cat if hue is None else (cat, hue_val)
+            if key not in pct_expr_by_group:
+                continue
+            frac = pct_expr_by_group[key]
+            if hue is None:
+                x_pos = float(i)
+            else:
+                # Centre of the j-th dodge slot.
+                offset = -dodge_width / 2 + (j + 0.5) * dodge_width / n_hues
+                x_pos = float(i) + offset
+            # Prefer the compact "47%" label; the n=/N form would overlap
+            # on any real number of groups.
+            label = f'{frac * 100:.0f}%'
+            ax.text(
+                x_pos, y_text, label,
+                ha='center', va='bottom',
+                fontsize=7, color='#6b7280',   # muted grey
+                clip_on=False,
+            )
+
+
 def plot_grouped(
     data_df: pd.DataFrame,
     x_field: str,
@@ -2068,9 +2146,12 @@ def plot_grouped(
     hue_field: Optional[str] = None,
     bar_mode: str = 'dodge',
     normalize: bool = False,
+    stat: str = 'mean',
     palette_cat: str = _DEFAULT_CATEGORICAL,
     facet_field: Optional[str] = None,
     group_by_field: Optional[str] = None,
+    pct_expr_by_group: Optional[Dict] = None,
+    n_expr_by_group: Optional[Dict] = None,
 ) -> bytes:
     """Values grouped by a categorical field: bar (with CI), box, or violin.
 
@@ -2098,10 +2179,47 @@ def plot_grouped(
         normalize: When ``bar_mode='stack'`` and ``y_field is None``, scale
                    each bar to 100% so segments show within-x composition
                    fractions instead of raw counts.
+        stat:      Bar-plot aggregation (ignored for box/violin and stacked
+                   bars). 'mean' (default) = mean over all cells including
+                   zeros — the correct scanpy convention for a log-norm
+                   layer. 'mean_nonzero' = mean over cells with y > 0 only
+                   (drops zero-mass before aggregation). 'pct_expressing' =
+                   fraction of cells with y > 0 per group (0..1 range,
+                   rendered on a percent-scale label).
+        pct_expr_by_group: {group_key -> fraction expressing} where
+                   group_key = x_value  or  (x_value, hue_value). Used by
+                   violin/box/bar to annotate each column with tiny grey
+                   text (e.g. "47%"). Bar plots ALSO consume this to
+                   render stat='pct_expressing' cheaply without a second
+                   groupby pass.
+        n_expr_by_group: {group_key -> (n_expr, n_total)} — same shape,
+                   used to render "n=137/580" tooltips in the caption on
+                   hover-less exports.
         output_format: 'png' | 'svg' | 'pdf'.
         caption:   Figure caption.
     """
     _setup_style(font_family, font_size)
+
+    # stat != 'mean' rewrites the y column BEFORE the panel loop so
+    # every downstream code path (seaborn bar, stack, group_by clustering)
+    # sees the pre-baked values. Only sensible for bar plots with a y.
+    # Also normalise the y-axis label so the resulting figure self-documents.
+    stat_label_override: Optional[str] = None
+    if (geom == 'bar' and y_field and y_field in data_df.columns
+            and stat in ('mean_nonzero', 'pct_expressing')
+            and not (hue_field and bar_mode == 'stack')):
+        if stat == 'mean_nonzero':
+            # Drop rows where y == 0 so seaborn's bootstrap CI is honest
+            # (bootstrapping over the zero+nonzero mixture would return
+            # the plain mean).
+            data_df = data_df.loc[data_df[y_field] > 0].copy()
+            stat_label_override = f'mean {y_field} | y>0'
+        else:  # pct_expressing
+            # Replace y with a 0/1 indicator so a mean bar = fraction
+            # expressing; multiply by 100 so the tick labels read as %.
+            data_df = data_df.copy()
+            data_df[y_field] = (data_df[y_field] > 0).astype(float) * 100.0
+            stat_label_override = f'% cells expressing {y_field}'
 
     # Resolve the shared orderings from the FULL dataset (so panels
     # show the same x-positions / hue colours even when a panel is
@@ -2220,6 +2338,11 @@ def plot_grouped(
         ) or is_stacked
         ax.set_xlabel(x_field)
         plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
+        # y-label override: when stat rewrote the y column, seaborn's
+        # default 'y_field' label is misleading. Only override on the
+        # per-panel path (sharey=True → each panel shows the label).
+        if stat_label_override and y_field:
+            ax.set_ylabel(stat_label_override)
         if facet_value is not None:
             ax.set_title(f'{facet} = {facet_value}')
         sns.despine(ax=ax)
@@ -2228,6 +2351,20 @@ def plot_grouped(
         leg = ax.get_legend()
         if leg is not None and ax is not axes[-1]:
             leg.remove()
+
+        # %expressing annotation — tiny grey text above each column.
+        # Only rendered when we have per-group fractions and the geom
+        # supports column-anchored text (violin / box / dodged bar).
+        # Skips stacked bars (labels would collide with segments).
+        if (pct_expr_by_group and y_field
+                and geom in ('violin', 'box', 'bar')
+                and not (geom == 'bar' and hue and bar_mode == 'stack')):
+            _annotate_pct_expressing(
+                ax, panel_df, x_field=x_field, y_field=y_field,
+                hue=hue, cat_order=cat_order, hue_order=hue_order,
+                pct_expr_by_group=pct_expr_by_group,
+                n_expr_by_group=n_expr_by_group,
+            )
 
     n_cells = int(len(data_df))
     title_bits = [

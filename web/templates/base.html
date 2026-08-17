@@ -439,14 +439,13 @@
 </head>
 <body>
     <div id="topbar">
-        <a href="/" class="brand">{% if topbar_logo %}<img src="{{ topbar_logo }}" alt="">{% endif %}anthive</a>
+        <a href="/about" class="brand">{% if topbar_logo %}<img src="{{ topbar_logo }}" alt="">{% endif %}anthive</a>
         <nav>
             <a href="/">datasets</a>
             {% if request.app.state.genesets_available %}
             <a href="/genesets">genesets</a>
             {% endif %}
             <a href="/api/docs">api</a>
-            <a href="/about">about</a>
         </nav>
         <form class="gene-search" onsubmit="event.preventDefault(); var g=this.q.value.trim(); if(g) window.location='/genes/'+encodeURIComponent(g);"
               title="Jump to a gene's cross-catalogue expression atlas">

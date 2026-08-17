@@ -3939,11 +3939,24 @@ def _parse_subset(subset_params: List[str]) -> Optional[Dict[str, Any]]:
 
     merged: Dict[str, Any] = {}
     for param in subset_params:
-        if ':' not in param:
+        # Accept both ``field:value`` (canonical) and ``field=='value'`` /
+        # ``field=='value'``-style predicates so caveat messages using
+        # Python-y comparison syntax paste verbatim into the subset field.
+        # The '==' form has priority over ':' when both appear so that
+        # ``astro_contaminated=='no'`` isn't split at the first ':'.
+        if '==' in param:
+            field, _, raw = param.partition('==')
+        elif ':' in param:
+            field, _, raw = param.partition(':')
+        else:
             continue
-        field, _, raw = param.partition(':')
         field = field.strip()
         raw = raw.strip()
+        # Strip matching surrounding quotes (single OR double) — a caveat
+        # message may write ``astro_contaminated=='no'`` where the value
+        # is quoted; unquoted DuckDB matching is what the filters dict wants.
+        if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ('"', "'"):
+            raw = raw[1:-1]
         if not field or not raw:
             continue
 
@@ -4200,6 +4213,19 @@ class PlotRequest:
     # 'width' (equal-width). Currently honoured by scatter + hexbin.
     bin_color: Optional[int] = None
     bin_color_method: str = 'quantile'
+    # kde / kde2d / histogram: drop y == 0 cells before KDE fit / histogram
+    # binning. Post-fix guard for log-normalised scRNA-seq gene axes where
+    # the zero-mass swamps the shape of the expressing population.
+    # Only honoured when the value axis is a gene (numerical obs zeros can
+    # be meaningful — skipping them silently would mislead).
+    exclude_zero: bool = False
+    # bar-geom statistic — how y is aggregated per (x, hue) group.
+    #   'mean'           : include zero-mass cells (scanpy convention)
+    #   'mean_nonzero'   : mean over cells with y > 0 only
+    #   'pct_expressing' : fraction of cells with y > 0 (0..1)
+    # Ignored for cell-count bars (y is None). ``mean_nonzero`` and
+    # ``pct_expressing`` only make biological sense when y is a gene.
+    stat: str = 'mean'
 
 
 @_plot_dataclass
@@ -4729,6 +4755,21 @@ def _handle_kde2d(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         )
         color_kind = 'categorical'
 
+    # exclude_zero — drop cells where the gene axis (x, y, or both) is 0.
+    # Only applies to gene axes; a numerical obs axis is kept intact
+    # (zeros there may be meaningful).
+    n_total_pre_zero = int(len(data_df))
+    n_dropped_zero = 0
+    if getattr(req, 'exclude_zero', False) and (x_kind == 'gene' or y_kind == 'gene'):
+        mask = pd.Series(True, index=data_df.index)
+        if x_kind == 'gene' and x_name in data_df.columns:
+            mask &= data_df[x_name] > 0
+        if y_kind == 'gene' and y_name in data_df.columns:
+            mask &= data_df[y_name] > 0
+        n_dropped_zero = int((~mask).sum())
+        if n_dropped_zero:
+            data_df = data_df.loc[mask].copy()
+
     # Resolve transforms (legacy log_x/log_y → 'log1p' if transform is unset).
     tx = req.transform_x or 'linear'
     ty = req.transform_y or 'linear'
@@ -4756,6 +4797,9 @@ def _handle_kde2d(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         palette_cont=req.palette_cont,
         palette_cat=req.palette_cat,
         marginals=req.marginals, regline=req.regline,
+        exclude_zero=(True if n_dropped_zero else None),
+        n_excluded_zero=(n_dropped_zero if n_dropped_zero else None),
+        n_total_pre_zero=(n_total_pre_zero if n_dropped_zero else None),
     )
     image_bytes = plotting.plot_kde2d(
         data_df=data_df,
@@ -4828,6 +4872,7 @@ def _handle_grouped(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         + ([group_by_name] if group_by_name else [])
     )
     y_name = None
+    y_kind = None
     if req.y:
         y_name, y_kind = ctx.resolve(req.y)
         if y_kind == 'gene':
@@ -4845,6 +4890,15 @@ def _handle_grouped(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
             metadata_fields=extra_meta,
             filters=req.filters, sample=req.sample,
         )
+
+    # stat= is only meaningful when y is a gene AND we're not stacking.
+    # For non-gene y or count-only bars, silently coerce back to 'mean' so
+    # the caption + rendering stay honest.
+    stat = getattr(req, 'stat', 'mean') or 'mean'
+    is_stacked_bar = (req.geom == 'bar' and hue_name is not None
+                      and req.bar_mode == 'stack')
+    if stat != 'mean' and (y_kind != 'gene' or is_stacked_bar):
+        stat = 'mean'
 
     n_cells = int(len(data_df))
     n_groups = int(data_df[x_name].nunique())
@@ -4909,6 +4963,28 @@ def _handle_grouped(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     if req.output_format in _PLOT_DATA_FORMATS:
         return _emit_dataframe(data_df, req)
 
+    # %expressing annotation — only when y is a gene. Fraction of cells
+    # per (x, hue) group with y > 0. Passed to plot_grouped for tiny grey
+    # text above each violin/box/bar. For bar plots we ALSO reuse this to
+    # implement stat='pct_expressing' / 'mean_nonzero' directly (below).
+    pct_expr_by_group: Optional[Dict[Tuple[Any, ...], float]] = None
+    n_expr_by_group: Optional[Dict[Tuple[Any, ...], Tuple[int, int]]] = None
+    if y_name and y_kind == 'gene' and req.geom in ('violin', 'box', 'bar'):
+        # Compute per-(x [, hue]) fraction of cells with y > 0.
+        group_keys = [x_name] + ([hue_name] if hue_name else [])
+        try:
+            grouped = data_df.groupby(group_keys, observed=True)[y_name]
+            n_total = grouped.size()
+            n_expr  = grouped.apply(lambda s: int((s > 0).sum()))
+            frac    = (n_expr / n_total.replace(0, 1)).astype(float)
+            pct_expr_by_group = frac.to_dict()
+            n_expr_by_group   = {k: (int(n_expr[k]), int(n_total[k]))
+                                 for k in n_total.index}
+        except Exception as exc:  # pragma: no cover — defensive
+            log.warning("pct_expressing calc failed: %s", exc)
+            pct_expr_by_group = None
+            n_expr_by_group = None
+
     caption = plotting.build_caption(
         req.db_id, req.geom, x_name, x_kind, y_name, hue_name, req.layer,
         n_cells=n_cells, n_groups=n_groups,
@@ -4918,6 +4994,7 @@ def _handle_grouped(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         ci=(req.ci if req.geom == 'bar' and req.bar_mode != 'stack' else None),
         bar_mode=req.bar_mode if req.geom == 'bar' else None,
         normalize=req.normalize if req.geom == 'bar' else None,
+        stat=stat if req.geom == 'bar' else None,
         facet=req.facet, group_by=req.group_by,
         palette_cat=req.palette_cat,
         log_x=req.log_x, log_y=req.log_y,
@@ -4926,6 +5003,9 @@ def _handle_grouped(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
         data_df=data_df, x_field=x_name, y_field=y_name, hue_field=hue_name,
         geom=req.geom, ci=req.ci,
         bar_mode=req.bar_mode, normalize=req.normalize,
+        stat=stat,
+        pct_expr_by_group=pct_expr_by_group,
+        n_expr_by_group=n_expr_by_group,
         facet_field=facet_name,
         group_by_field=group_by_name,
         width=req.width, height=req.height, dpi=req.dpi,
@@ -4987,6 +5067,20 @@ def _handle_distribution(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str
         )
         color_kind = 'categorical'
 
+    # exclude_zero — drop cells where the (gene) x axis is 0. Only for
+    # kde and histogram (ecdf zeros are a legitimate visible feature).
+    # Numerical obs zeros are silently kept (may be meaningful).
+    n_total_pre_zero = int(len(data_df))
+    n_dropped_zero = 0
+    if (getattr(req, 'exclude_zero', False)
+            and x_kind == 'gene'
+            and req.geom in ('kde', 'histogram')
+            and x_name in data_df.columns):
+        # Use a boolean mask so we handle NaN safely.
+        keep_mask = data_df[x_name] > 0
+        n_dropped_zero = int((~keep_mask).sum())
+        data_df = data_df.loc[keep_mask].copy()
+
     n_cells = int(len(data_df))
     n_groups = int(data_df[color_name].nunique()) if color_name else None
     if req.output_format in _PLOT_DATA_FORMATS:
@@ -4998,6 +5092,9 @@ def _handle_distribution(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str
         bins=req.bins if req.geom == 'histogram' else None,
         log_x=req.log_x, log_y=req.log_y,
         palette_cat=req.palette_cat,
+        exclude_zero=(True if n_dropped_zero else None),
+        n_excluded_zero=(n_dropped_zero if n_dropped_zero else None),
+        n_total_pre_zero=(n_total_pre_zero if n_dropped_zero else None),
     )
     image_bytes = plotting.plot_distribution(
         data_df=data_df, x_field=x_name,
@@ -6345,11 +6442,15 @@ def _build_plot_request(
     # bar-geom: 'dodge' (default) | 'stack' for composition plots
     bar_mode: str = 'dodge',
     normalize: bool = False,
+    stat: str = 'mean',
     facet: Optional[str] = None,
     group_by: Optional[str] = None,
     color_scale: Optional[str] = None,
     bin_color: Optional[int] = None,
     bin_color_method: str = 'quantile',
+    # kde / kde2d / histogram: drop zero-valued cells before fitting / binning
+    # (only meaningful when the value axis is a gene).
+    exclude_zero: bool = False,
 ) -> PlotRequest:
     """Fold ``CommonPlotParams`` + geom-specific kwargs into a ``PlotRequest``.
 
@@ -6408,6 +6509,7 @@ def _build_plot_request(
         mode=mode,
         bar_mode=bar_mode,
         normalize=normalize,
+        stat=stat,
         facet=facet,
         group_by=group_by,
         # color_scale: per-geom override (rarely set explicitly) falls
@@ -6420,6 +6522,7 @@ def _build_plot_request(
         source_url=str(common.request.url) if common.request is not None else '',
         bin_color=bin_color,
         bin_color_method=bin_color_method,
+        exclude_zero=exclude_zero,
     )
 
 
@@ -6997,6 +7100,14 @@ async def plot_kde2d_endpoint(
             "default) or ``width`` (equal-width)."
         ),
     ),
+    exclude_zero: bool = Query(
+        False,
+        description=(
+            "When x AND/OR y is a gene, drop cells where the gene axis "
+            "== 0 before fitting the KDE. Reveals the shape of the "
+            "co-expressing population. Ignored on numerical obs axes."
+        ),
+    ),
 ):
     """2-D Gaussian kernel-density estimate over two continuous fields
     (e.g. two WGCNA module scores, or two gene expressions).
@@ -7022,6 +7133,7 @@ async def plot_kde2d_endpoint(
         marginals=marginals,
         regline=regline,
         bin_color=bin_color, bin_color_method=bin_color_method,
+        exclude_zero=exclude_zero,
     )
     return await _render_plot(req, common.request)
 
@@ -7076,6 +7188,19 @@ async def plot_bar_endpoint(
         False,
         description="Stacked bar only: scale each bar to 100% so segments show within-group proportions instead of raw counts. Ignored in dodge mode.",
     ),
+    stat: str = Query(
+        'mean',
+        regex='^(mean|mean_nonzero|pct_expressing)$',
+        description=(
+            "Aggregation statistic per (x, split) group when y is set. "
+            "'mean' (default, scanpy convention) averages over ALL cells "
+            "including zeros — this is the correct log-norm mean. "
+            "'mean_nonzero' averages only over cells with y > 0 (useful "
+            "when the zero-mass swamps the signal). 'pct_expressing' "
+            "returns the fraction of cells with y > 0 (0..1 range). "
+            "Ignored for cell-count bars (y omitted) and stacked bars."
+        ),
+    ),
     facet: Optional[str] = Query(
         None,
         description="Optional 3rd categorical for small-multiples — one panel per facet value, shared x order / hue colours / y axis. Capped at 8 panels.",
@@ -7095,7 +7220,7 @@ async def plot_bar_endpoint(
     lines stay under the cap."""
     req = _build_plot_request(
         common, 'bar', x=x, y=y, color=color, ci=ci,
-        bar_mode=bar_mode, normalize=normalize,
+        bar_mode=bar_mode, normalize=normalize, stat=stat,
         facet=facet, group_by=group_by,
     )
     return await _render_plot(req, common.request)
@@ -7120,11 +7245,21 @@ async def plot_histogram_endpoint(
     bins: int = Query(20, ge=2, le=500, description="Number of histogram bins."),
     bin_color: Optional[int] = Query(None, ge=2, le=20, description=_BIN_COLOR_DESC),
     bin_color_method: str = Query('quantile', regex='^(quantile|width)$', description=_BIN_COLOR_METHOD_DESC),
+    exclude_zero: bool = Query(
+        False,
+        description=(
+            "When x is a gene, drop cells with expression == 0 before "
+            "binning — reveals the shape of the expressing population. "
+            "Ignored when x is a numerical obs field (zeros there may be "
+            "meaningful — e.g. cell counts)."
+        ),
+    ),
 ):
     """Univariate histogram of ``x``, optionally split by a categorical ``color``."""
     req = _build_plot_request(
         common, 'histogram', x=x, color=color, bins=bins,
         bin_color=bin_color, bin_color_method=bin_color_method,
+        exclude_zero=exclude_zero,
     )
     return await _render_plot(req, common.request)
 
@@ -7152,11 +7287,21 @@ async def plot_kde_endpoint(
     color: Optional[str] = Query(None, description="Categorical for overlaid per-group KDEs."),
     bin_color: Optional[int] = Query(None, ge=2, le=20, description=_BIN_COLOR_DESC),
     bin_color_method: str = Query('quantile', regex='^(quantile|width)$', description=_BIN_COLOR_METHOD_DESC),
+    exclude_zero: bool = Query(
+        False,
+        description=(
+            "When x is a gene, drop cells with expression == 0 before "
+            "fitting the KDE — reveals the shape of the expressing "
+            "population. Ignored when x is a numerical obs (zeros may "
+            "be meaningful there)."
+        ),
+    ),
 ):
     """Kernel-density estimate of ``x``, optionally split by a categorical ``color``."""
     req = _build_plot_request(
         common, 'kde', x=x, color=color,
         bin_color=bin_color, bin_color_method=bin_color_method,
+        exclude_zero=exclude_zero,
     )
     return await _render_plot(req, common.request)
 

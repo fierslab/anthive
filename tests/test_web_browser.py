@@ -590,6 +590,17 @@ _INFO = {
             "X": {"dtype": "float32", "min_value": 0.0, "min_nonzero": 0.01,
                   "max_value": 9.2, "median": 0.0, "q90": 3.1, "pct_zeros": 88.5},
         },
+        "caveats": [
+            {
+                "level": "medium", "kind": "contamination",
+                "scope": "microglia_subcluster=4",
+                "obs_flag": "astro_contaminated",
+                "message": ("5,827 cells (7.7%) co-express astrocyte markers. "
+                            "Filter astro_contaminated:no for a pure-microglia subset."),
+                "detected_at": "2026-08-16",
+                "detected_by": "catalog audit v6",
+            },
+        ],
         "markdown": "## Notes\nSome **markdown**.",
     },
     "GroupA/sub/ds4": {
@@ -597,6 +608,16 @@ _INFO = {
         "file_id": "sub/ds4", "group_id": "GroupA", "title": "Nested Dataset",
         "n_cells": 300, "n_genes": 12000, "collection": {"group": "Group A Study"},
         "organism": "human", "obs": {"categorical": [], "numerical": []},
+        "layers": {"X": {}}, "embeddings": {"X_umap": {}}, "default_layer": "X",
+        "top_genes": [], "top_cat": [], "top_num": [], "layer_stats": {},
+        "markdown": None,
+    },
+    "GroupA/ds2": {
+        # No caveats — plot page should render a caveats-less banner.
+        "file_id": "ds2", "group_id": "GroupA", "title": "Dataset Two",
+        "n_cells": 500_000, "n_genes": 20000,
+        "collection": {"group": "Group A Study"},
+        "organism": "mouse", "obs": {"categorical": [], "numerical": []},
         "layers": {"X": {}}, "embeddings": {"X_umap": {}}, "default_layer": "X",
         "top_genes": [], "top_cat": [], "top_num": [], "layer_stats": {},
         "markdown": None,
@@ -1319,6 +1340,75 @@ def test_plot_view_de_heatmap_form(client):
     assert "to EXCLUDE" in resp.text   # the '-' exclude-syntax help (API 2.10)
 
 
+# ── Task #251/#252/#254 — UX batch for the zero-fill bug fallout ─────────────
+
+def test_plot_view_kde_exclude_zero_checkbox(client):
+    """kde has an exclude-zero checkbox that submits with buildUrl."""
+    resp = client.get("/browse/GroupA/ds1/plot/kde")
+    assert resp.status_code == 200
+    assert 'name="exclude_zero"' in resp.text
+    assert 'id="f-exclude_zero"' in resp.text
+    assert 'shape of expressers' in resp.text.lower()
+
+
+def test_plot_view_histogram_exclude_zero_checkbox(client):
+    """histogram has the same exclude-zero affordance."""
+    resp = client.get("/browse/GroupA/ds1/plot/histogram")
+    assert resp.status_code == 200
+    assert 'name="exclude_zero"' in resp.text
+
+
+def test_plot_view_ecdf_has_no_exclude_zero(client):
+    """ecdf zeros are a legitimate visible feature — no exclude-zero checkbox."""
+    resp = client.get("/browse/GroupA/ds1/plot/ecdf")
+    assert resp.status_code == 200
+    assert 'name="exclude_zero"' not in resp.text
+
+
+def test_plot_view_kde2d_exclude_zero_checkbox(client):
+    """kde2d also exposes exclude-zero (bi-axis gene support)."""
+    resp = client.get("/browse/GroupA/ds1/plot/kde2d")
+    assert resp.status_code == 200
+    assert 'name="exclude_zero"' in resp.text
+    assert 'co-expressers' in resp.text.lower()
+
+
+def test_plot_view_bar_stat_dropdown(client):
+    """bar form exposes the stat= dropdown with the three modes."""
+    resp = client.get("/browse/GroupA/ds1/plot/bar")
+    assert resp.status_code == 200
+    assert 'name="stat"' in resp.text
+    assert 'id="f-stat"' in resp.text
+    for opt in ('value="mean"', 'value="mean_nonzero"', 'value="pct_expressing"'):
+        assert opt in resp.text
+    # Only bar exposes stat — box/violin don't have it (box/violin already show
+    # the full distribution shape).
+    resp_box = client.get("/browse/GroupA/ds1/plot/box")
+    assert 'id="f-stat"' not in resp_box.text
+    resp_violin = client.get("/browse/GroupA/ds1/plot/violin")
+    assert 'id="f-stat"' not in resp_violin.text
+
+
+def test_plot_view_shows_caveats_banner(client):
+    """Caveats surface above the plot preview when /info exposes any (task #254)."""
+    resp = client.get("/browse/GroupA/ds1/plot/violin")
+    assert resp.status_code == 200
+    # The banner card structure + the actual message from _INFO.
+    assert 'caveats-card' in resp.text
+    assert 'astro_contaminated' in resp.text
+    # Filter chip is present because the caveat has an obs_flag.
+    assert 'cv-filter-chip' in resp.text
+    assert 'data-obs-flag="astro_contaminated"' in resp.text
+
+
+def test_plot_view_caveats_banner_absent_without_data(client):
+    """No caveats in /info → no card at all (avoid empty header noise)."""
+    # GroupA/ds2 has no caveats key in _INFO.
+    resp = client.get("/browse/GroupA/ds2/plot/scatter")
+    assert resp.status_code == 200
+    assert 'caveats-card' not in resp.text
+
+
 def test_plot_view_color_scale_control(client):
     # The continuous-colour-ramp override (auto/sequential/divergent) and the
     # new named single-hue cmaps live in the settings panel of every plot page.
@@ -1341,11 +1431,13 @@ def test_about_page_renders(client):
     assert "REST API" in resp.text
 
 
-def test_about_link_in_nav(client):
-    # the topbar nav links to /about
+def test_about_link_on_brand_logo(client):
+    # the topbar brand/logo links to /about (no standalone About nav item)
     resp = client.get("/")
     assert resp.status_code == 200
-    assert 'href="/about"' in resp.text
+    assert 'href="/about" class="brand"' in resp.text
+    # the standalone "about" nav link was removed
+    assert '<a href="/about">about</a>' not in resp.text
 
 
 def test_gene_atlas_page_renders(client):
