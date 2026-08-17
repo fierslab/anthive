@@ -2309,6 +2309,11 @@ async def genesets_index(request: Request):
 
     active_group = request.query_params.get("group")
 
+    # starCAT UI temporarily hidden while users get comfortable with the
+    # gene-set model. Server code kept intact — flip this back to True to
+    # re-expose the tab (or remove the guard entirely).
+    STARCAT_UI_ENABLED = False
+
     # starCAT programs are a SECOND module source, served by the /catalogs
     # endpoint (REST 2.30) — the authoritative definitions (modules with gene
     # weights + group + biological description, plus derived score recipes).
@@ -2316,11 +2321,12 @@ async def genesets_index(request: Request):
     # module/score detail is only fetched when the starCAT group is active.
     starcat_summaries: list = []
     starcat_detail: list = []
-    try:
-        catalogs = _api_get(api_url, '/catalogs').get('catalogs', [])
-        starcat_summaries = [c for c in catalogs if c.get('source') == 'starcat']
-    except Exception as error:
-        print(f"API error (/catalogs): {error}")
+    if STARCAT_UI_ENABLED:
+        try:
+            catalogs = _api_get(api_url, '/catalogs').get('catalogs', [])
+            starcat_summaries = [c for c in catalogs if c.get('source') == 'starcat']
+        except Exception as error:
+            print(f"API error (/catalogs): {error}")
 
     starcat_total = sum(c.get('n_modules', 0) for c in starcat_summaries)
 
