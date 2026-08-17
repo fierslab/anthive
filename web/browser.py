@@ -455,25 +455,38 @@ _SOURCE_ABBREV = {
 _PUB_COLOR_PUBLISHED   = '#588157'    # muted green (public/published)
 _PUB_COLOR_UNPUBLISHED = '#9E2A2B'    # muted red (palette)
 
-# Inline SVG icons — fill:currentColor so CSS `color:` applies. This
-# deliberately avoids color-emoji fonts, which override `color:`.
-# 16×16 viewBox; ap-icon container is 1.2em wide so alignment is stable.
+# Inline SVG icons — a filled disc in the status colour with the access glyph
+# drawn in WHITE on top. The disc uses fill:currentColor so callers still set
+# the status colour via the outer span's `style="color:…"` (same contract as
+# before). Colour-emoji fonts would override `color:` — this design keeps
+# emoji-safe rendering.
+# 16×16 viewBox; ap-icon container is 1em wide so alignment is stable.
 _ACCESS_SVG_PUBLIC = (
     '<svg viewBox="0 0 16 16" width="1em" height="1em" '
-    'fill="none" stroke="currentColor" stroke-width="1.4" '
-    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
-    '<circle cx="8" cy="8" r="6.2"/>'
-    '<ellipse cx="8" cy="8" rx="2.8" ry="6.2"/>'
-    '<path d="M1.8 8 h12.4 M2.8 4.6 h10.4 M2.8 11.4 h10.4"/>'
+    'aria-hidden="true">'
+    # filled colored disc (fills the viewBox)
+    '<circle cx="8" cy="8" r="8" fill="currentColor"/>'
+    # globe glyph in white on top
+    '<g fill="none" stroke="white" stroke-width="1.2" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    '<circle cx="8" cy="8" r="4.6"/>'
+    '<ellipse cx="8" cy="8" rx="2.1" ry="4.6"/>'
+    '<path d="M3.4 8 h9.2 M4.2 5.4 h7.6 M4.2 10.6 h7.6"/>'
+    '</g>'
     '</svg>'
 )
 _ACCESS_SVG_INTERNAL = (
     '<svg viewBox="0 0 16 16" width="1em" height="1em" '
-    'fill="none" stroke="currentColor" stroke-width="1.4" '
-    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
-    '<path d="M2 8 L8 3 L14 8"/>'
-    '<path d="M3.5 8 v5.5 h9 v-5.5"/>'
-    '<path d="M6.8 13.5 v-3.2 h2.4 v3.2"/>'
+    'aria-hidden="true">'
+    # filled colored disc
+    '<circle cx="8" cy="8" r="8" fill="currentColor"/>'
+    # house glyph in white on top
+    '<g fill="none" stroke="white" stroke-width="1.2" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M3.4 8.2 L8 4.4 L12.6 8.2"/>'
+    '<path d="M4.6 8.2 v4.2 h6.8 v-4.2"/>'
+    '<path d="M7.1 12.4 v-2.4 h1.8 v2.4"/>'
+    '</g>'
     '</svg>'
 )
 _ACCESS_SVG = {'public': _ACCESS_SVG_PUBLIC, 'internal': _ACCESS_SVG_INTERNAL}
@@ -1229,11 +1242,30 @@ def get_collection_datasets(api_url: str, group_id: str) -> tuple:
         ('access',          _ACCESS_ABBREV,      'icon',    'access'),
         ('source',          _SOURCE_ABBREV,      'icon',    'source'),
     ]
+    # `tissue` has its own dedicated column and `suspension_type` (prep) info
+    # is folded into the Tech tooltip — neither should appear as a header
+    # context pill, and the tissue column must render unconditionally.
+    _NO_HEADER_PILL = {'tissue', 'suspension_type'}
+    _ALWAYS_COLUMN = {'tissue'}
     header_pills: List[Dict] = []
     var_fields: List[str] = []
     for field, abbrev_map, css, label in _coll_fields:
         summary = _summarize_meta_field(group_dbs, field, abbrev_map=abbrev_map)
         abbrev, full = summary['abbrev'], summary['full']
+        if field in _ALWAYS_COLUMN:
+            # Column shows regardless of variability (Tissue column stays even
+            # when constant across the collection). Skip for empty groups —
+            # no datasets means no table, and the empty-group contract
+            # returns an empty var_fields.
+            if group_dbs:
+                var_fields.append(field)
+            continue
+        if field in _NO_HEADER_PILL:
+            # No header pill; fall back to the mix→column behaviour so the
+            # column still appears when the field actually varies.
+            if abbrev == 'mix':
+                var_fields.append(field)
+            continue
         if abbrev and abbrev != 'mix':
             # single shared value across the whole collection → header pill
             is_icon = css == 'icon'

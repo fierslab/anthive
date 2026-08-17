@@ -802,13 +802,17 @@ def test_get_collection_datasets_filters_and_builds_description(fake_api):  # py
     assert "<h1" not in description_html          # leading H1 stripped
     assert "Pharmacogenomics" not in description_html  # experiment NOT used as blurb
     # GroupA: ds1 (human/microglia/PFC/AD/nucleus) + ds2 (mouse/astrocyte/PFC/normal)
-    # → tissue + suspension_type are constant (header pills); organism, celltype,
-    #   disease vary (stay as columns).
+    # → organism, celltype, disease vary (stay as columns).
+    # Post-Aug-2026: tissue is excluded from the header-pill hoist and always
+    #   appears as a column; suspension_type (prep) is also excluded (info now
+    #   folds into the Tech tooltip). Only access (constant "public") remains
+    #   as a header pill here.
     pill_titles = " ".join(p["title"] for p in collection_meta["pills"])
-    assert "prefrontal cortex" in pill_titles      # tissue constant → header
+    assert "prefrontal cortex" not in pill_titles  # tissue is NOT hoisted anymore
+    assert "prep" not in pill_titles                # suspension_type is NOT hoisted
     assert "organism" in collection_meta["var_fields"]
     assert "celltype" in collection_meta["var_fields"]
-    assert "tissue" not in collection_meta["var_fields"]
+    assert "tissue" in collection_meta["var_fields"]  # tissue column always present
 
 
 def test_get_collection_datasets_unknown_group_is_empty(fake_api):  # pyright: ignore
@@ -1673,15 +1677,19 @@ def test_landing_access_pub_icon_inline(client):
 
 
 def test_folder_collection_pills_hoist_constants(client):
-    # GroupA: tissue (prefrontal cortex) + prep (nucleus) + access (public) are
-    # constant across both datasets → hoisted to inert header pills and their
-    # columns dropped; organism/celltype/disease vary → columns kept.
+    # GroupA: access (public) is constant across both datasets → hoisted to
+    # inert header pills; organism/celltype/disease vary → columns kept.
+    # Tissue is now excluded from the header-pill hoist and always renders as
+    # a column (so a collection-wide tissue still gets its own column). Prep
+    # (suspension_type) is also excluded from the pill hoist — its info is
+    # folded into the Tech column tooltip.
     resp = client.get("/browse/GroupA")
     assert resp.status_code == 200
     assert 'class="coll-meta"' in resp.text          # header pill row
-    assert "prefrontal cortex" in resp.text            # tissue constant → pill
-    assert 'data-label="Tissue"' not in resp.text      # tissue column dropped
-    assert 'data-label="Prep"' not in resp.text        # prep column dropped
+    # Tissue is a Tissue column (not a header pill) — see Tissue column below.
+    assert 'data-label="Tissue"' in resp.text          # tissue column always present
+    assert "prefrontal cortex" in resp.text            # tissue value rendered in column tooltip
+    assert 'data-label="Prep"' not in resp.text        # prep never a column here (constant → hidden)
     assert 'data-label="Org"' in resp.text             # organism varies → kept
     assert 'data-label="Cell"' in resp.text            # celltype varies → kept
 
