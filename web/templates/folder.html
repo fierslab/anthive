@@ -15,7 +15,6 @@
   .grp-pill.cell    { background:#dcfce7; color:#166534; border-color:#bbf7d0; }
   .grp-pill.tissue  { background:#e0f2fe; color:#075985; border-color:#bae6fd; }
   .grp-pill.disease { background:#fee2e2; color:#991b1b; border-color:#fecaca; }
-  .grp-pill.prep    { background:#fce7f3; color:#9d174d; border-color:#fbcfe8; }
   .grp-pill.icon    { background:#f3f4f6; color:#374151; border-color:#e5e7eb; }
   /* Organism letter-chips (Hs / Mm / …) — mirrors index.html's .org-chip. */
   .org-chips { display:inline-flex; gap:2px; flex-wrap:nowrap; vertical-align:middle; }
@@ -152,7 +151,6 @@
             {% if 'celltype' in var_fields %}<th title="cell type">Cell</th>{% endif %}
             {% if 'tissue' in var_fields %}<th title="tissue / brain region">Tissue</th>{% endif %}
             {% if 'disease' in var_fields %}<th title="disease state">Disease</th>{% endif %}
-            {% if 'suspension_type' in var_fields %}<th title="suspension type (cell / nucleus / na)">Prep</th>{% endif %}
             <th title="layer count — hover to list">L</th>
             <th title="embedding count — hover to list">E</th>
         </tr>
@@ -181,11 +179,10 @@
             </td>
             <td data-label="Date" data-sort-ts="{{ _date.sort_ts or 0 }}" style="color:#666;font-size:11px;font-family:var(--font-mono);white-space:nowrap">{{ _date.iso or '—' }}</td>
             {% if 'organism' in var_fields %}<td data-label="Org">{% set _oc = dataset.organism_chips or [] %}{% if _oc %}<span class="org-chips">{% for chip in _oc %}<span class="org-chip {{ chip.cls }}" title="organism: {{ chip.full }}">{{ chip.abbrev }}</span>{% endfor %}</span>{% endif %}</td>{% endif %}
-            {% if 'technology' in var_fields %}{% set _tcl = dataset.tech_class or '' %}{% set _tcls_slug = _tcl.replace('sc/sn RNA','sc-sn').replace('bulk RNA','bulk').replace(' ','-')|lower %}{% set _prep = _sus.full or _sus.abbrev or '' %}<td data-label="Tech">{% if _tcl %}<span class="tech-class {{ _tcls_slug }}" title="tech class: {{ _tcl }}{% if _tech.full %} · {{ _tech.full }}{% endif %}{% if _prep %} · prep: {{ _prep }}{% endif %}">{{ _tcl }}</span>{% endif %}</td>{% endif %}
+            {% if 'technology' in var_fields %}{% set _tcl = dataset.tech_class or '' %}{% set _tcls_slug = _tcl.replace('sc/sn RNA','sc-sn').replace('bulk RNA','bulk').replace(' ','-')|lower %}{% set _prep = _sus.full or _sus.abbrev or '' %}<td data-label="Tech">{% if _tcl %}<span class="tech-class {{ _tcls_slug }}" title="tech class: {{ _tcl }}{% if _tech.full %} · {{ _tech.full }}{% endif %}{% if _prep %} · prep: {{ _prep }}{% endif %}">{{ _tcl }}{% if _prep %} · {{ _prep }}{% endif %}</span>{% endif %}</td>{% endif %}
             {% if 'celltype' in var_fields %}<td data-label="Cell">{% if _cell.abbrev %}<span class="grp-pill cell"     title="cell type: {{ _cell.full }}">{{ _cell.abbrev }}</span>{% endif %}</td>{% endif %}
             {% if 'tissue' in var_fields %}<td data-label="Tissue">{% if _tis.abbrev  %}<span class="grp-pill tissue"   title="tissue: {{ _tis.full }}">{{ _tis.abbrev }}</span>{% endif %}</td>{% endif %}
             {% if 'disease' in var_fields %}<td data-label="Disease">{% if _dis.abbrev  %}<span class="grp-pill disease"  title="disease: {{ _dis.full }}">{{ _dis.abbrev }}</span>{% endif %}</td>{% endif %}
-            {% if 'suspension_type' in var_fields %}<td data-label="Prep">{% if _sus.abbrev  %}<span class="grp-pill prep"     title="prep: {{ _sus.full }}">{{ _sus.abbrev }}</span>{% endif %}</td>{% endif %}
             <td data-label="Layers" style="color:#555;font-size:11px" title="{{ dataset.layers|join(', ') if dataset.layers else 'none' }}">
                 {{ dataset.layers|length if dataset.layers else 0 }}
             </td>
