@@ -1973,16 +1973,17 @@ def test_dataset_view_module_scores_tab_groups_three_methods(client, monkeypatch
     # Tab is present
     assert 'data-tab="modules"' in resp.text
     assert 'id="mod-tbl"' in resp.text
-    # Legend surfaces per-method counts
+    # Legend surfaces per-method counts (starCAT UI is hidden — 2026-08).
     assert 'scanpy <span class="muted-2">(1)' in resp.text
-    assert 'starCAT <span class="muted-2">(1)' in resp.text
+    assert 'starCAT' not in resp.text
     assert 'AUCell <span class="muted-2">(2)' in resp.text
     # The scanpy + aucell "Brown_Lysosome" collapse to ONE row
-    # (checks the grouping key), so table has 3 module rows total
+    # (checks the grouping key). starCAT-only DAM_pos still contributes
+    # a row so the /module_scores counters + score-parquet stay whole,
+    # but its column in the table is gone.
     assert resp.text.count('class="mod-item"') == 3
     # Each method's obs-column name appears in a plot link (the "chip")
     assert 'plot/histogram?x=Sierksma2025%3A%3AWGCNA%3A%3ABrown_Lysosome' in resp.text
-    assert 'plot/histogram?x=starcat__MICROGLIA_V1__DAM_pos' in resp.text
     # Jinja's urlencode = urllib.parse.quote(safe='/') → forward slashes stay
     assert 'plot/histogram?x=aucell__Sierksma2025/WGCNA__Brown_Lysosome' in resp.text
     # Plain-numerical columns (n_genes, pseudotime) are still on the Numerical
@@ -1999,8 +2000,8 @@ def test_dataset_view_module_scores_tab_groups_three_methods(client, monkeypatch
 
 def test_dataset_view_module_scores_absent_method_greyed(client, monkeypatch):
     # A dataset with ONLY aucell scores (per the task's Z20/MIC case) — the
-    # scanpy and starCAT legend badges render as unclickable (data-absent=1)
-    # so users don't get a filter that empties the table.
+    # scanpy legend badge renders as unclickable (data-absent=1) so users
+    # don't get a filter that empties the table. (starCAT UI dropped 2026-08.)
     def aucell_only(api_url, path):
         result = _fake_api_get(api_url, path)
         if path.endswith("/info") and isinstance(result, dict):
@@ -2020,8 +2021,8 @@ def test_dataset_view_module_scores_absent_method_greyed(client, monkeypatch):
     assert 'data-tab="modules"' in resp.text
     assert 'method="scanpy"  data-absent="1"' in resp.text \
         or 'method="scanpy" data-absent="1"' in resp.text
-    assert 'method="starcat"  data-absent="1"' in resp.text \
-        or 'method="starcat" data-absent="1"' in resp.text
+    # starCAT badge fully dropped
+    assert 'method="starcat"' not in resp.text
     # AUCell must NOT be absent (it has 2 modules)
     assert 'AUCell <span class="muted-2">(2)' in resp.text
 

@@ -612,10 +612,6 @@
       <span class="mod-swatch scanpy"></span>scanpy <span class="muted-2">({{ score_method_counts.scanpy or 0 }})</span>
       <span class="info" title="Z-scored mean of the gene set vs a random control set (scanpy.tl.score_genes). Higher = the cell expresses the set's genes more than a matched-length random panel.">ⓘ</span>
     </span>
-    <span class="mod-legend-item" data-method="starcat" {% if not score_method_counts.starcat %}data-absent="1"{% endif %}>
-      <span class="mod-swatch starcat"></span>starCAT <span class="muted-2">({{ score_method_counts.starcat or 0 }})</span>
-      <span class="info" title="Regression-based score against a precomputed program (starCAT). Higher = the cell fits the program's expression signature.">ⓘ</span>
-    </span>
     <span class="mod-legend-item" data-method="aucell" {% if not score_method_counts.aucell %}data-absent="1"{% endif %}>
       <span class="mod-swatch aucell"></span>AUCell <span class="muted-2">({{ score_method_counts.aucell or 0 }})</span>
       <span class="info" title="Rank-based enrichment (AUCell). Higher = the set's genes are consistently among the top-expressed in the cell. Independent of overall expression magnitude.">ⓘ</span>
@@ -650,7 +646,6 @@
         <thead><tr>
           <th>Module</th>
           <th class="obs-plots-th" title="scanpy sc.tl.score_genes">scanpy</th>
-          <th class="obs-plots-th" title="starCAT program score">starCAT</th>
           <th class="obs-plots-th" title="AUCell rank-based score">AUCell</th>
           <th title="ω² — how well the module score splits by sex (0..1)">sex</th>
           <th title="signed spearman ρ — module score vs braak stage (-1..+1)">braak</th>
@@ -679,7 +674,6 @@
             </span>{% else %}<span class="mod-chip absent" title="not scored with {{ method_label }}">—</span>{% endif %}
           {%- endmacro %}
           <td class="obs-plots">{{ _score_cell(_mods.scanpy, 'scanpy') }}</td>
-          <td class="obs-plots">{{ _score_cell(_mods.starcat, 'starCAT') }}</td>
           <td class="obs-plots">{{ _score_cell(_mods.aucell, 'AUCell') }}</td>
           {# Tag cells — populated client-side via /module-variability #}
           <td class="mv-cell" data-tag="sex"></td>
@@ -1067,7 +1061,7 @@ document.addEventListener('DOMContentLoaded', function() {
             var STAT_FOR_TAG = function (tag) {
                 return (tag in NUMERICAL_TAGS) ? 'spearman' : 'omega2';
             };
-            var METHOD_PRIORITY = ['geneset', 'aucell', 'starcat'];
+            var METHOD_PRIORITY = ['geneset', 'aucell'];   // starCAT dropped from the UI
             fetch('/api/module-variability?dataset=' + encodeURIComponent(DB_ID) + '&limit=100000',
                   { credentials: 'same-origin' })
                 .then(function (r) { return r.ok ? r.json() : null; })

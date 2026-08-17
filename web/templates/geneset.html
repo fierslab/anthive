@@ -63,10 +63,18 @@
 
 <h2 style="margin-top:16px">Where it varies most
   <span class="info" title="Across datasets where this gene set is scored, the sample tags its module score co-varies with most strongly — a shortcut to the most interesting study/axis for this set. Same exploratory, per-cell caveat as the variability heatmap.">ⓘ</span>
+  <select id="gv-source" style="font-family:var(--font);font-size:12px;padding:2px 6px;border:1px solid var(--border);border-radius:5px;margin-left:6px;font-weight:normal" title="Which scoring method to compare against">
+    <option value="geneset" selected>scanpy</option>
+    <option value="aucell">AUCell</option>
+  </select>
   <select id="gv-stat" style="font-family:var(--font);font-size:12px;padding:2px 6px;border:1px solid var(--border);border-radius:5px;margin-left:6px;font-weight:normal">
     <option value="omega2" selected>ω² (categorical)</option>
     <option value="R2">R² (numerical)</option>
     <option value="spearman">spearman (signed)</option>
+  </select>
+  <select id="gv-sort" style="font-family:var(--font);font-size:12px;padding:2px 6px;border:1px solid var(--border);border-radius:5px;margin-left:6px;font-weight:normal" title="How to order the top-15 rows">
+    <option value="strength" selected>by |value| (strength)</option>
+    <option value="specificity">by rank vs peers (specificity)</option>
   </select>
 </h2>
 <div id="gv-state" class="muted" style="font-size:12px">loading…</div>
@@ -74,31 +82,50 @@
 <script>
 (function () {
   var NAME = {{ name|tojson }}, API = '/api';
-  var statSel = document.getElementById('gv-stat'), stateEl = document.getElementById('gv-state'), listEl = document.getElementById('gv-list');
+  var srcSel = document.getElementById('gv-source'),
+      statSel = document.getElementById('gv-stat'),
+      sortSel = document.getElementById('gv-sort'),
+      stateEl = document.getElementById('gv-state'),
+      listEl = document.getElementById('gv-list');
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
   function load() {
-    var stat = statSel.value;
+    var stat = statSel.value, source = srcSel.value, sortMode = sortSel.value;
     stateEl.style.display = ''; stateEl.textContent = 'loading…'; listEl.innerHTML = '';
-    // Fetch the WHOLE statistic slice (all modules, all datasets) once: it lets
-    // us both pick this geneset's rows AND show, per (dataset, tag), the min/max
-    // across all scored modules — so a value can be judged high/low vs its peers
-    // in the same dataset. min_abs=0 dodges the NaN-serialization 500.
-    fetch(API + '/module-variability?statistic=' + encodeURIComponent(stat) + '&min_abs=0&limit=5000', { credentials: 'same-origin' })
+    // Fetch stat × source in one shot. Peer range is computed per
+    // (dataset, tag) WITHIN this source only — so scanpy is compared to
+    // other scanpy scores, AUCell to other AUCell scores. Mixing methods
+    // would compare incomparable numerical scales.
+    var params = 'statistic=' + encodeURIComponent(stat)
+      + '&source=' + encodeURIComponent(source)
+      + '&min_abs=0&limit=100000';
+    fetch(API + '/module-variability?' + params, { credentials: 'same-origin' })
       .then(function (r) { return r.ok ? r.json() : r.text().then(function (t) { throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 120)); }); })
       .then(function (d) {
         var all = d.rows || [];
-        // per (dataset, tag) range across ALL modules scored there (geneset + starCAT)
+        // per (dataset, tag) range across all modules scored with THIS
+        // source on THIS dataset — apples-to-apples numerical range.
         var ctx = {};
         all.forEach(function (r) {
           var k = r.dataset + '|' + r.tag, c = ctx[k] || (ctx[k] = { min: Infinity, max: -Infinity, n: 0 });
           c.min = Math.min(c.min, r.value); c.max = Math.max(c.max, r.value); c.n++;
         });
-        var mine = all.filter(function (r) { return r.module === NAME; })
-          .sort(function (a, b) { return Math.abs(b.value) - Math.abs(a.value); }).slice(0, 15);
-        if (!mine.length) { stateEl.textContent = 'Not scored on any tagged dataset for this statistic.'; return; }
+        // Annotate each row with position (0..1) within its (dataset, tag) peer range
+        function positionOf(r) {
+          var c = ctx[r.dataset + '|' + r.tag]; if (!c) return 0.5;
+          var span = c.max - c.min; return span ? (r.value - c.min) / span : 0.5;
+        }
+        var mine = all.filter(function (r) { return r.module === NAME; });
+        if (sortMode === 'specificity') {
+          // rank vs peers (top of range = 1.0 = standout). Sort desc.
+          mine.sort(function (a, b) { return positionOf(b) - positionOf(a); });
+        } else {
+          mine.sort(function (a, b) { return Math.abs(b.value) - Math.abs(a.value); });
+        }
+        mine = mine.slice(0, 15);
+        if (!mine.length) { stateEl.textContent = 'Not scored on any tagged dataset for this (source, statistic).'; return; }
         var html = '<div class="table-wrap"><table class="auto"><thead><tr><th>Dataset</th><th>Tag</th>'
           + '<th style="text-align:right">' + esc(stat) + '</th>'
-          + '<th style="width:40%">vs all modules in that dataset <span class="info" title="Where this gene set’s value sits among ALL module scores for the same dataset and tag. Marker = this set; bar spans the min–max across modules.">ⓘ</span></th></tr></thead><tbody>';
+          + '<th style="width:40%">vs peer modules (' + esc(source === 'geneset' ? 'scanpy' : source) + ') in that dataset <span class="info" title="Where this gene set’s value sits among all modules scored with the SAME method on the same (dataset, tag). Marker = this set; bar spans the min–max across peer modules.">ⓘ</span></th></tr></thead><tbody>';
         mine.forEach(function (r) {
           var parts = String(r.dataset).split('/');
           var dsLink = parts.length === 2 ? '<a href="/browse/' + encodeURIComponent(parts[0]) + '/' + encodeURIComponent(parts[1]) + '">' + esc(r.dataset) + '</a>' : esc(r.dataset);
@@ -106,8 +133,7 @@
           var lo = c.min, hi = c.max, span = (hi - lo) || 1;
           var pos = Math.max(0, Math.min(100, (r.value - lo) / span * 100));
           var neg = r.value < 0;
-          // track spanning [min,max] across modules with a marker at this set's value
-          var track = '<span title="this set ' + (+r.value).toFixed(3) + ' · across ' + c.n + ' modules: min ' + (+lo).toFixed(3) + ', max ' + (+hi).toFixed(3) + '" '
+          var track = '<span title="this set ' + (+r.value).toFixed(3) + ' · across ' + c.n + ' ' + (source === 'geneset' ? 'scanpy' : source) + ' modules: min ' + (+lo).toFixed(3) + ', max ' + (+hi).toFixed(3) + '" '
             + 'style="position:relative;display:inline-block;width:70%;height:10px;background:#eef2f7;border-radius:2px;vertical-align:middle">'
             + '<span style="position:absolute;left:calc(' + pos.toFixed(1) + '% - 3px);top:-1px;width:6px;height:12px;border-radius:2px;background:' + (neg ? '#dc2626' : 'var(--link)') + '"></span></span>'
             + ' <span class="muted-2" style="font-size:10px">' + (+lo).toFixed(2) + '–' + (+hi).toFixed(2) + '</span>';
@@ -116,15 +142,21 @@
             + '<td class="mono" style="font-size:11px;text-align:right">' + (+r.value).toFixed(3) + '</td>'
             + '<td>' + track + '</td></tr>';
         });
-        html += '</tbody></table></div><div class="muted" style="font-size:11px;margin-top:2px">top ' + mine.length + ' dataset × tag associations for this set · bar = range across all modules in that dataset · <a href="/genesets/variability">full heatmap →</a> · exploratory (per-cell)</div>';
+        html += '</tbody></table></div><div class="muted" style="font-size:11px;margin-top:2px">top ' + mine.length + ' dataset × tag associations · sorted by ' + esc(sortMode) + ' · peer range across ' + esc(source === 'geneset' ? 'scanpy' : source) + ' modules on the same dataset · <a href="/genesets/variability">full heatmap →</a> · exploratory (per-cell)</div>';
         listEl.innerHTML = html;
         stateEl.style.display = 'none';
       })
       .catch(function (e) { stateEl.textContent = 'could not load — ' + e.message; });
   }
-  var remStat = antRemember.get('gv.stat');   // restore last-used statistic
-  if (remStat) { for (var i = 0; i < statSel.options.length; i++) { if (statSel.options[i].value === remStat) { statSel.value = remStat; break; } } }
+  // Restore last-used selections
+  ['gv.source', 'gv.stat', 'gv.sort'].forEach(function (key) {
+    var rem = antRemember.get(key); if (!rem) return;
+    var sel = ({'gv.source': srcSel, 'gv.stat': statSel, 'gv.sort': sortSel})[key];
+    for (var i = 0; i < sel.options.length; i++) { if (sel.options[i].value === rem) { sel.value = rem; break; } }
+  });
+  srcSel.addEventListener('change', function () { antRemember.set('gv.source', srcSel.value); load(); });
   statSel.addEventListener('change', function () { antRemember.set('gv.stat', statSel.value); load(); });
+  sortSel.addEventListener('change', function () { antRemember.set('gv.sort', sortSel.value); load(); });
   load();
 })();
 </script>

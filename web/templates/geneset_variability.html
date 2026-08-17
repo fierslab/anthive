@@ -345,7 +345,13 @@ module's per-cell score co-varies with the tag in that dataset.</p>
         if (!r.ok) return r.text().then(function (t) { throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 160)); });
         return r.json();
       })
-      .then(function (d) { render(d.rows || [], tag, stat); })
+      .then(function (d) {
+        // starCAT temporarily hidden from the interface — drop its rows even
+        // when "all sources" is selected. Toggle in browser.py's
+        // STARCAT_UI_ENABLED to re-expose.
+        var rows = (d.rows || []).filter(function (r) { return r.source !== 'starcat'; });
+        render(rows, tag, stat);
+      })
       .catch(function (e) { stateEl.className = 'mv-state err'; stateEl.textContent = 'could not load — ' + e.message; });
   }
 
