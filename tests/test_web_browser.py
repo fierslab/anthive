@@ -2029,12 +2029,13 @@ def test_dataset_view_module_scores_absent_method_greyed(client, monkeypatch):
 def test_geneset_variability_page_offers_aucell_source(client):
     resp = client.get("/genesets/variability")
     assert resp.status_code == 200
-    # AUCell now sits alongside scanpy (gene sets) and starCAT as a source
-    # filter — required so the fleet heatmap can distinguish scoring methods
-    # once the AUCell batch finishes across the ~74 datasets.
+    # AUCell + scanpy (gene sets) source-filter options are present.
+    # starCAT is temporarily hidden alongside its /genesets tab (2026-08 —
+    # STARCAT_UI_ENABLED in browser.py); restore the assertion when the
+    # flag flips back.
     assert 'value="aucell"' in resp.text
-    assert 'value="starcat"' in resp.text
     assert 'value="geneset"' in resp.text
+    assert 'value="starcat"' not in resp.text
 
 
 def test_dataset_view_de_tab_only_when_de_present(client, monkeypatch):
