@@ -126,8 +126,12 @@
   .obs-stats-tbl th { font-size: 10px; }
   .obs-stats-tbl td { font-family: var(--font-mono); color: #555; white-space: nowrap; }
   .obs-stats-tbl td.colname { font-family: var(--font); }
-  .obs-plots-th { text-align: center; }
-  .obs-stats-tbl td.obs-plots { text-align: center; padding: 0 6px; }
+  .obs-plots-th { text-align: center; border-left: 1px solid var(--border); border-right: 1px solid var(--border); }
+  .obs-stats-tbl td.obs-plots {
+    text-align: center; padding: 0 6px; white-space: nowrap;
+    border-left: 1px solid var(--border-light); border-right: 1px solid var(--border-light);
+  }
+  .obs-plots .obs-plots { border: none; padding: 0; }   /* nested cell macro (module scores): no double border */
   .obs-plot-icon {
     display: inline-flex; align-items: center; justify-content: center;
     text-decoration: none; color: var(--text-muted);
@@ -136,6 +140,9 @@
   }
   .obs-plot-icon svg { width: 1em; height: 1em; display: block; }
   .obs-plot-icon:hover { color: var(--link); text-decoration: none; }
+  /* Module-scores table — three method columns each carry their own icon
+     triplet + stats, so let each row be as wide as it needs to be. */
+  #obs-tbl-mod td, #obs-tbl-mod th { white-space: nowrap; }
   .obs-sub { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; margin: 10px 0 2px; }
   .cat-top { display: inline-flex; gap: 4px; flex-wrap: wrap; }
   .cat-top .ct { background: #f1f5f9; border: 1px solid var(--border); border-radius: 9px; padding: 0 7px; font-family: var(--font); cursor: default; }
@@ -305,21 +312,7 @@
 
 <!-- Title — below the breadcrumb; falls back to the basename when there's no title.
      Unified access + publication icon sits directly before the title. -->
-<h1 class="ds-title">{% if pub_icon and pub_icon.glyph %}<span class="ds-pub-icon" style="color:{{ pub_icon.color }}" title="{{ pub_icon.tooltip }}">{{ pub_icon.glyph|safe }}</span>{% endif %}{{ info.title or basename or file_id }}{% if basename and info.title and basename != info.title %}<span class="ds-title-base" title="file basename">{{ basename }}</span>{% endif %}</h1>
-
-<!-- Biology metadata — descriptive ("Organism: mouse"), responsive grid. -->
-{% if context_bar %}
-{% set _cb = context_bar %}
-<div class="ds-meta">
-  {% if _cb.organism.full %}<span class="mi"><span class="mk">organism</span><span class="mv" title="{{ _cb.organism.full }}">{{ _cb.organism.full }}</span></span>{% endif %}
-  {% if _cb.technology.full %}<span class="mi"><span class="mk">technology</span><span class="mv" title="{{ _cb.technology.full }}">{{ _cb.technology.full }}</span></span>{% endif %}
-  {% if _cb.celltype.full %}<span class="mi"><span class="mk">cell type</span><span class="mv" title="{{ _cb.celltype.full }}">{{ _cb.celltype.full }}</span></span>{% endif %}
-  {% if _cb.tissue.full %}<span class="mi"><span class="mk">tissue</span><span class="mv" title="{{ _cb.tissue.full }}">{{ _cb.tissue.full }}</span></span>{% endif %}
-  {% if _cb.disease.full %}<span class="mi"><span class="mk">disease</span><span class="mv" title="{{ _cb.disease.full }}">{{ _cb.disease.full }}</span></span>{% endif %}
-  {% if _cb.suspension_type.full %}<span class="mi"><span class="mk">prep</span><span class="mv" title="{{ _cb.suspension_type.full }}">{{ _cb.suspension_type.full }}</span></span>{% endif %}
-  {% if _cb.year %}<span class="mi"><span class="mk">year</span><span class="mv">{{ _cb.year }}</span></span>{% endif %}
-</div>
-{% endif %}
+<h1 class="ds-title">{% if pub_icon and pub_icon.glyph %}<span class="ds-pub-icon" style="color:{{ pub_icon.color }}" title="{{ pub_icon.tooltip }}">{{ pub_icon.glyph|safe }}</span>{% endif %}{{ info.title or basename or file_id }}</h1>
 
 <!-- Provenance — compact row (access/source moved to icons by the visualize button). -->
 {% if dataset_meta and (dataset_meta.license or dataset_meta.contributor or dataset_meta.doi or dataset_meta.pmid or dataset_meta.accession or dataset_meta.link) %}
@@ -468,6 +461,7 @@
       <td class="obs-plots">
         {% if has_duckdb %}
         <a class="obs-plot-icon" href="{{ _b }}/plot/histogram?x={{ gene|urlencode }}" title="histogram of {{ gene }}">{{ chart_icon('bar') }}</a>
+        <a class="obs-plot-icon" href="{{ _b }}/plot/ecdf?x={{ gene|urlencode }}" title="ECDF of {{ gene }}">{{ chart_icon('line') }}</a>
         {% if default_embedding %}<a class="obs-plot-icon" href="{{ _b }}/plot/scatter?embedding={{ default_embedding|urlencode }}&color={{ gene|urlencode }}" title="{{ default_embedding }} scatter, coloured by {{ gene }}">{{ chart_icon('umap') }}</a>{% endif %}
         {% endif %}
       </td>
@@ -535,9 +529,23 @@
   </div>
   {% endif %}
 
-  {# Biology — sample attributes beyond the headline pills. Moved from Overview. #}
+  {# Biology — headline metadata grid + sample attributes. Moved from top of
+     page (used to be the .ds-meta big-buttons row) so the top of the page
+     stays uncluttered. #}
+  <h2>Biology <span class="info" title="Headline biology — organism, technology, cell type, tissue, disease, prep — plus per-donor attributes when known.">ⓘ</span></h2>
+  {% if context_bar %}
+  {% set _cb = context_bar %}
+  <div class="ds-meta">
+    {% if _cb.organism.full %}<span class="mi"><span class="mk">organism</span><span class="mv" title="{{ _cb.organism.full }}">{{ _cb.organism.full }}</span></span>{% endif %}
+    {% if _cb.technology.full %}<span class="mi"><span class="mk">technology</span><span class="mv" title="{{ _cb.technology.full }}">{{ _cb.technology.full }}</span></span>{% endif %}
+    {% if _cb.celltype.full %}<span class="mi"><span class="mk">cell type</span><span class="mv" title="{{ _cb.celltype.full }}">{{ _cb.celltype.full }}</span></span>{% endif %}
+    {% if _cb.tissue.full %}<span class="mi"><span class="mk">tissue</span><span class="mv" title="{{ _cb.tissue.full }}">{{ _cb.tissue.full }}</span></span>{% endif %}
+    {% if _cb.disease.full %}<span class="mi"><span class="mk">disease</span><span class="mv" title="{{ _cb.disease.full }}">{{ _cb.disease.full }}</span></span>{% endif %}
+    {% if _cb.suspension_type.full %}<span class="mi"><span class="mk">prep</span><span class="mv" title="{{ _cb.suspension_type.full }}">{{ _cb.suspension_type.full }}</span></span>{% endif %}
+    {% if _cb.year %}<span class="mi"><span class="mk">year</span><span class="mv">{{ _cb.year }}</span></span>{% endif %}
+  </div>
+  {% endif %}
   {% if dataset_meta and (dataset_meta.condition or dataset_meta.sex or dataset_meta.age or dataset_meta.strain) %}
-  <h2>Biology <span class="info" title="Headline biology — organism, technology, cell type, tissue, disease, prep — is in the pills under the title (hover for full names).">ⓘ</span></h2>
   <div class="info-col">
       {% if dataset_meta.condition %}<div class="info-row"><span class="mk">condition</span><span>{{ dataset_meta.condition|join(', ') }}</span></div>{% endif %}
       {% if dataset_meta.sex %}<div class="info-row"><span class="mk">sex</span><span>{{ dataset_meta.sex }}</span></div>{% endif %}
@@ -607,8 +615,16 @@
         <span class="muted-2" style="margin-left:4px">· {{ cat_group.n }} module{{ '' if cat_group.n == 1 else 's' }}</span>
       </summary>
       <div class="table-wrap" style="margin-top:4px">
-      <table class="auto mod-cat-table" style="font-size:12px">
-        <thead><tr><th>Module</th><th style="width:75px" title="scanpy sc.tl.score_genes">scanpy</th><th style="width:75px" title="starCAT program score">starCAT</th><th style="width:75px" title="AUCell rank-based score">AUCell</th></tr></thead>
+      <table class="auto mod-cat-table" id="obs-tbl-mod" style="font-size:12px">
+        <thead><tr>
+          <th>Module</th>
+          <th class="obs-plots-th" title="scanpy sc.tl.score_genes">scanpy</th>
+          <th title="scanpy stats">mean · min · max</th>
+          <th class="obs-plots-th" title="starCAT program score">starCAT</th>
+          <th title="starCAT stats">mean · min · max</th>
+          <th class="obs-plots-th" title="AUCell rank-based score">AUCell</th>
+          <th title="AUCell stats">mean · min · max</th>
+        </tr></thead>
         <tbody>
         {% for mod in cat_group.modules %}
         {% set _mods = mod.methods %}
@@ -626,9 +642,15 @@
               {% if default_embedding %}<a class="obs-plot-icon" href="{{ _b }}/plot/scatter?embedding={{ default_embedding|urlencode }}&color={{ score_col|urlencode }}" title="{{ default_embedding }} scatter · coloured by {{ method_label }} · {{ score_col }}">{{ chart_icon('umap') }}</a>{% endif %}
             </span>{% else %}<span class="mod-chip absent" title="not scored with {{ method_label }}">—</span>{% endif %}
           {%- endmacro %}
+          {% macro _score_stats(score_col) -%}
+            {% if score_col %}<span class="mod-stats" data-col="{{ score_col }}" style="color:#555;font-family:var(--font-mono);font-size:10.5px"></span>{% else %}<span style="color:#c8cdd3">—</span>{% endif %}
+          {%- endmacro %}
           <td>{{ _score_cell(_mods.scanpy, 'scanpy') }}</td>
+          <td>{{ _score_stats(_mods.scanpy) }}</td>
           <td>{{ _score_cell(_mods.starcat, 'starCAT') }}</td>
+          <td>{{ _score_stats(_mods.starcat) }}</td>
           <td>{{ _score_cell(_mods.aucell, 'AUCell') }}</td>
+          <td>{{ _score_stats(_mods.aucell) }}</td>
         </tr>
         {% endfor %}
         </tbody>
@@ -824,7 +846,12 @@ document.addEventListener('DOMContentLoaded', function() {
             if (n == null || n === '' || isNaN(n)) return '–';
             if (Number.isInteger(n)) return String(n);
             var a = Math.abs(n);
-            return a >= 100 ? Number(n).toFixed(0) : a >= 1 ? Number(n).toFixed(2) : Number(n).toPrecision(2);
+            if (a === 0)   return '0';
+            if (a >= 1e5)  return Number(n).toExponential(1);   // 1.2e+5
+            if (a < 1e-3)  return Number(n).toExponential(1);   // 1.2e-6
+            if (a >= 100)  return Number(n).toFixed(0);
+            if (a >= 1)    return Number(n).toFixed(2);
+            return Number(n).toPrecision(2);
         };
         var apiBase = '/api/databases/' + DB_ID.split('/').map(encodeURIComponent).join('/');
 
@@ -919,6 +946,18 @@ document.addEventListener('DOMContentLoaded', function() {
                         }
                     }
                 });
+                // Module scores tab — fill the "mean · min · max" cell for
+                // each per-method score column (they're numerical obs).
+                document.querySelectorAll('#tab-modules .mod-stats').forEach(function (cell) {
+                    var col = cell.getAttribute('data-col');
+                    var s = col && OBS_STATS[col.toLowerCase()];
+                    if (!s) return;
+                    cell.textContent = fnum(s.mean) + ' · ' + fnum(s.min) + ' · ' + fnum(s.max);
+                    cell.title = 'min ' + fnum(s.min) + ' · Q05 ' + fnum(s.q05)
+                        + ' · median ' + fnum(s.median) + ' · Q95 ' + fnum(s.q95)
+                        + ' · max ' + fnum(s.max) + ' · mean ' + fnum(s.mean);
+                });
+
                 // Tooltip the Explore-tab favourite chips with their stats too.
                 document.querySelectorAll('#tab-overview a[href*="/plot/"]').forEach(function (a) {
                     try {
