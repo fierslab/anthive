@@ -642,18 +642,28 @@
          auto-picked per tag on the client side. Value comes from the
          "primary" method score present in this dataset for the module,
          preferring scanpy > aucell > starCAT. #}
+      <div class="muted" style="font-size:11px;line-height:1.5;margin:4px 0 6px;max-width:900px">
+        Tag columns below show how strongly each module's per-cell score
+        <b>co-varies with the sample tag on this dataset</b>. Categorical tags
+        (sex, disease, cluster, condition, braak_grp) show <b>ω²</b> (0..1 —
+        fraction of module-score variance explained). Numerical tags (braak,
+        age) show signed <b>spearman ρ</b> (−1..+1 — rank correlation).
+        Empty cell = tag absent or not enough data. Colour intensity ∝ |value|;
+        red = negative ρ, blue = positive. Value comes from scanpy score
+        (falls back to AUCell). Hover a cell for the raw number + method.
+      </div>
       <table class="obs-stats-tbl auto mod-cat-table" id="obs-tbl-mod" style="font-size:12px">
         <thead><tr>
           <th>Module</th>
           <th class="obs-plots-th" title="scanpy sc.tl.score_genes">scanpy</th>
           <th class="obs-plots-th" title="AUCell rank-based score">AUCell</th>
-          <th title="ω² — how well the module score splits by sex (0..1)">sex</th>
-          <th title="signed spearman ρ — module score vs braak stage (-1..+1)">braak</th>
-          <th title="ω² — module score vs braak_group (low/med/high)">braak_grp</th>
-          <th title="ω² — module score vs disease (0..1)">disease</th>
-          <th title="ω² — module score vs cluster (0..1)">cluster</th>
-          <th title="ω² — module score vs condition (0..1)">condition</th>
-          <th title="signed spearman ρ — module score vs age (-1..+1)">age</th>
+          <th class="mv-tag-col mv-tag-sex"         title="ω² — how well the module score splits by sex (0..1)">sex</th>
+          <th class="mv-tag-col mv-tag-braak"       title="signed spearman ρ — module score vs braak stage (-1..+1)">braak</th>
+          <th class="mv-tag-col mv-tag-braak_group" title="ω² — module score vs braak_group (low/med/high)">braak_grp</th>
+          <th class="mv-tag-col mv-tag-disease"     title="ω² — module score vs disease (0..1)">disease</th>
+          <th class="mv-tag-col mv-tag-cluster"     title="ω² — module score vs cluster (0..1)">cluster</th>
+          <th class="mv-tag-col mv-tag-condition"   title="ω² — module score vs condition (0..1)">condition</th>
+          <th class="mv-tag-col mv-tag-age"         title="signed spearman ρ — module score vs age (-1..+1)">age</th>
         </tr></thead>
         <tbody>
         {% for mod in cat_group.modules %}
@@ -676,13 +686,13 @@
           <td class="obs-plots">{{ _score_cell(_mods.scanpy, 'scanpy') }}</td>
           <td class="obs-plots">{{ _score_cell(_mods.aucell, 'AUCell') }}</td>
           {# Tag cells — populated client-side via /module-variability #}
-          <td class="mv-cell" data-tag="sex"></td>
-          <td class="mv-cell" data-tag="braak"></td>
-          <td class="mv-cell" data-tag="braak_group"></td>
-          <td class="mv-cell" data-tag="disease"></td>
-          <td class="mv-cell" data-tag="cluster"></td>
-          <td class="mv-cell" data-tag="condition"></td>
-          <td class="mv-cell" data-tag="age"></td>
+          <td class="mv-cell mv-tag-col mv-tag-sex"         data-tag="sex"></td>
+          <td class="mv-cell mv-tag-col mv-tag-braak"       data-tag="braak"></td>
+          <td class="mv-cell mv-tag-col mv-tag-braak_group" data-tag="braak_group"></td>
+          <td class="mv-cell mv-tag-col mv-tag-disease"     data-tag="disease"></td>
+          <td class="mv-cell mv-tag-col mv-tag-cluster"     data-tag="cluster"></td>
+          <td class="mv-cell mv-tag-col mv-tag-condition"   data-tag="condition"></td>
+          <td class="mv-cell mv-tag-col mv-tag-age"         data-tag="age"></td>
         </tr>
         {% endfor %}
         </tbody>
@@ -1099,9 +1109,20 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (!d || !d.rows) return;
                     // Index rows: key = (catalog::module, source, tag, statistic) → value
                     var byKey = {};
+                    var tagsWithData = {};
                     d.rows.forEach(function (r) {
                         var mkey = r.catalog + '::' + r.module;
                         byKey[mkey + '|' + r.source + '|' + r.tag + '|' + r.statistic] = r.value;
+                        tagsWithData[r.tag] = true;
+                    });
+                    // Hide tag columns (both <th> and <td>) whose tag has zero
+                    // rows in this dataset — keeps the table compact.
+                    ['sex','braak','braak_group','disease','cluster','condition','age'].forEach(function (tag) {
+                        if (!tagsWithData[tag]) {
+                            document.querySelectorAll('#tab-modules .mv-tag-' + tag).forEach(function (el) {
+                                el.style.display = 'none';
+                            });
+                        }
                     });
                     modRows.forEach(function (row) {
                         var modKey = row.dataset.modKey;
