@@ -1810,15 +1810,17 @@ def test_plot_pdf_label_and_no_source_line(client):
 
 def test_landing_mobile_card_markup(client):
     # The landing collection table is also a card-table: collection name is
-    # the card title, the context pill cluster spans full width (card-span),
-    # and the scalar columns are labelled for the 2-column card grid.
+    # the card title, and the scalar columns are labelled for the 2-column
+    # card grid. Cell + Disease are their own columns (no longer packed into
+    # a card-span "context" cluster).
     resp = client.get("/")
     assert resp.status_code == 200
     assert 'id="coll-table" class="card-table"' in resp.text
     assert 'class="card-title"' in resp.text
-    assert 'class="card-span"' in resp.text
     assert 'data-label="Datasets"' in resp.text
     assert 'data-label="Cells"' in resp.text
+    assert 'data-label="Cell"' in resp.text
+    assert 'data-label="Disease"' in resp.text
 
 
 # ── shared .btn-edit class (muted-red admin action) ────────────────────────────

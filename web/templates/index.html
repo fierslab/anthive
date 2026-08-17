@@ -8,8 +8,7 @@
   .summary-row { display:flex; gap:14px; align-items:center; margin:2px 0 6px; font-size:12px; color:var(--text-muted); flex-wrap:wrap; }
   .summary-row .val { font-weight:600; color:var(--text); }
 
-  /* compact "context" cell — organism + tech + celltype + tissue + disease + prep */
-  .ctx-cell { display:inline-flex; gap:3px; flex-wrap:wrap; font-size:10px; line-height:1.2; }
+  /* pill palette shared by Cell + Disease columns (and dataset/folder pages). */
   .ctx-pill {
     display:inline-block; padding:0 4px; border-radius:2px;
     background:#eef2ff; color:#1d4ed8; border:1px solid #bfdbfe;
@@ -127,9 +126,12 @@
       <th class="sortable" data-col="tissue" data-help="Ordered by ontology hierarchy (brain → cortex → subregions → CSF/spinal cord at the bottom). Choose 'anatomical (brain tree)' in the sort dropdown for the full tree order.">Tissue <span class="info" title="Sort tissues by ontology position (or pick 'anatomical' in the sort dropdown)">ⓘ</span><span class="sort-ind"></span></th>
       <th class="sortable" data-col="organism" data-help="Organism(s) in the collection. Chips: Hs=human, Mm=mouse, Rn=rat, Dr=zebrafish, Dm=drosophila, Mf=macaque, Ce=C.elegans." data-filter-fields="organism">Org <span class="info" title="Click to sort or filter by organism">ⓘ</span><span class="sort-ind"></span></th>
       <th class="sortable" data-col="tech_class" data-help="Top-level technology class: sc/sn RNA · bulk RNA · proteomics · spatial · other." data-filter-fields="tech_class">Tech <span class="info" title="Click to sort or filter by technology class">ⓘ</span><span class="sort-ind"></span></th>
-      <th class="sortable" data-col="context"
-          data-help="Compact summary: cell type · disease · prep. Organism and technology have their own columns to the left."
-          data-filter-fields="celltype,tissue,disease,suspension_type">Context <span class="info" title="Click to filter by cell type, tissue, disease or prep">ⓘ</span><span class="sort-ind"></span></th>
+      <th class="sortable" data-col="celltype"
+          data-help="Cell type(s) represented in the collection. Hover a pill to see the full ontology term."
+          data-filter-fields="celltype">Cell <span class="info" title="Click to sort or filter by cell type">ⓘ</span><span class="sort-ind"></span></th>
+      <th class="sortable" data-col="disease"
+          data-help="Disease / condition(s) represented in the collection. Hover a pill to see the full term."
+          data-filter-fields="disease">Disease <span class="info" title="Click to sort or filter by disease">ⓘ</span><span class="sort-ind"></span></th>
     </tr>
   </thead>
   <tbody>
@@ -181,12 +183,11 @@
       <td data-label="Tech">
         {% if _tech_class %}<span class="tech-class {{ _tech_cls_slug }}" title="tech class: {{ _tech_class }}{% if _tech.full %} · {{ _tech.full }}{% endif %}">{{ _tech_class }}</span>{% endif %}
       </td>
-      <td class="card-span">
-        <span class="ctx-cell">
-          {% if _cell.abbrev %}<span class="ctx-pill cell"    title="cell type: {{ _cell.full }}">{{ _cell.abbrev }}</span>{% endif %}
-          {% if _dis.abbrev %}<span class="ctx-pill disease" title="disease: {{ _dis.full }}">{{ _dis.abbrev }}</span>{% endif %}
-          {% if _sus.abbrev and _sus.abbrev != '—' %}<span class="ctx-pill prep" title="prep: {{ _sus.full }}">{{ _sus.abbrev }}</span>{% endif %}
-        </span>
+      <td data-label="Cell">
+        {% if _cell.abbrev %}<span class="ctx-pill cell" title="cell type: {{ _cell.full }}">{{ _cell.abbrev }}</span>{% endif %}
+      </td>
+      <td data-label="Disease">
+        {% if _dis.abbrev %}<span class="ctx-pill disease" title="disease: {{ _dis.full }}">{{ _dis.abbrev }}</span>{% endif %}
       </td>
     </tr>
     {% endfor %}
