@@ -103,7 +103,8 @@
   .idcopy:hover { background: #e0e7ff; }
   .idcopy.copied { background: #bbf7d0; color: #166534; }
   /* Align Visualize + Edit buttons on the same baseline — matched padding + line-height. */
-  .ds-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+  .ds-actions { display: flex; align-items: stretch; gap: 6px; flex-shrink: 0; }
+  .ds-actions > * { align-self: stretch; display: inline-flex; align-items: center; }
   .btn-grey { display: inline-flex; align-items: center; justify-content: center; background: #475569; color: #fff; border: 1px solid #475569; border-radius: 5px; padding: 6px 13px; font-size: 13px; font-weight: 500; cursor: pointer; font-family: inherit; text-decoration: none; white-space: nowrap; line-height: 1.2; }
   .btn-grey:hover { background: #334155; color: #fff; text-decoration: none; }
   .btn-grey .caret { font-size: 9px; opacity: .8; margin-left: 3px; }
@@ -111,7 +112,12 @@
   .ds-acc { font-size: 15px; cursor: default; align-self: center; padding: 0 1px; filter: grayscale(1); }   /* monochrome */
   /* Header pub icon — larger version of the same fixed-width glyph as the
      row-level indicator, so the visual language stays consistent. */
-  .ds-pub-icon { display: inline-block; width: 1.4em; text-align: center; font-size: 20px; vertical-align: middle; cursor: help; margin-right: 6px; }
+  .ds-pub-icon {
+    display: inline-flex; align-items: center; justify-content: center;
+    padding: 0 8px; font-size: 22px; line-height: 1;
+    cursor: help; box-sizing: border-box;
+  }
+  .ds-pub-icon svg { width: 22px; height: 22px; display: block; }
   #viz-menu-panel a { filter: grayscale(1); }   /* b/w the plot-category emoji in the dropdown */
   /* descriptive biology metadata — responsive grid, more columns as width grows */
   .ds-meta { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 6px; margin: 6px 0 10px; }
@@ -255,6 +261,8 @@
     <span class="idcopy" data-copy="{{ db_id }}" title="click to copy {{ db_id }}">[{{ db_id }}]</span>
   </div>
   <div class="ds-actions">
+    {% if pub_icon and pub_icon.glyph %}<span class="ds-pub-icon" style="color:{{ pub_icon.color }}" title="{{ pub_icon.tooltip }}">{{ pub_icon.glyph|safe }}</span>{% endif %}
+    {% if has_duckdb %}<a class="btn-grey btn-icon" href="/jupyter/" target="_blank" rel="noopener" title="open dataset in JupyterLite">📓 notebook</a>{% endif %}
     {% if has_duckdb %}
     <div class="viz-menu" id="viz-menu">
       <button type="button" class="btn-grey" id="viz-menu-btn" aria-haspopup="true" aria-expanded="false">visualize <span class="caret">▾</span></button>
@@ -311,8 +319,6 @@
     </div>
   </div>
   {% endif %}
-  {% if pub_icon and pub_icon.glyph %}<span class="ds-pub-icon" style="color:{{ pub_icon.color }};margin-right:0" title="{{ pub_icon.tooltip }}">{{ pub_icon.glyph|safe }}</span>{% endif %}
-  {% if has_duckdb %}<a class="btn-grey btn-icon" href="/jupyter/" target="_blank" rel="noopener" title="open dataset in JupyterLite">📓 notebook</a>{% endif %}
   {% if is_admin %}<a class="btn-edit btn-icon" href="/admin/edit/{{ group_id|urlencode }}/{{ file_id|urlencode }}" title="edit this dataset's .md (admin)">✎ edit</a>{% endif %}
   </div>
 </div>
