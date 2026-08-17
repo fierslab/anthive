@@ -17,6 +17,33 @@
   .grp-pill.disease { background:#fee2e2; color:#991b1b; border-color:#fecaca; }
   .grp-pill.prep    { background:#fce7f3; color:#9d174d; border-color:#fbcfe8; }
   .grp-pill.icon    { background:#f3f4f6; color:#374151; border-color:#e5e7eb; }
+  /* Organism letter-chips (Hs / Mm / …) — mirrors index.html's .org-chip. */
+  .org-chips { display:inline-flex; gap:2px; flex-wrap:nowrap; vertical-align:middle; }
+  .org-chip {
+    display:inline-block; padding:0 4px; border-radius:2px;
+    font-family:var(--font-mono); font-size:9.5px; letter-spacing:.2px;
+    background:#f5f5f5; color:#555; border:1px solid #e5e5e5;
+  }
+  .org-chip.hs { background:#dbeafe; color:#0f3a63; border-color:#bcd7f6; }
+  .org-chip.mm { background:#f6d6d6; color:#7a1e1e; border-color:#e5b5b5; }
+  .org-chip.rn { background:#efe1cf; color:#78440b; border-color:#e0cba7; }
+  .org-chip.dr { background:#d3e9d5; color:#1e5c2a; border-color:#b6dabb; }
+  .org-chip.dm { background:#e6d9f2; color:#4b1d7a; border-color:#cebbec; }
+  .org-chip.mf { background:#d9ede8; color:#0e4a3d; border-color:#b6dccf; }
+  .org-chip.ce { background:#f2e6cd; color:#6b4a06; border-color:#dcc78e; }
+  .org-chip.other { background:#eeeeee; color:#555; border-color:#d5d5d5; }
+  /* Tech-class pill — mirrors index.html's .tech-class. */
+  .tech-class {
+    display:inline-block; padding:1px 6px; border-radius:2px;
+    font-size:10px; letter-spacing:.1px;
+    background:#fff7e6; color:#7a4a06; border:1px solid #f2d68a;
+    white-space:nowrap;
+  }
+  .tech-class.spatial    { background:#e7f0fb; color:#1f3f6b; border-color:#c2d6ee; }
+  .tech-class.bulk       { background:#f0eaf9; color:#3f245b; border-color:#d5c4ea; }
+  .tech-class.proteomics { background:#e2f0e8; color:#1e4d33; border-color:#bfe0cc; }
+  .tech-class.other      { background:#f2f2f2; color:#5b5b5b; border-color:#dcdcdc; }
+  .tech-class.mixed      { background:#f5f5f5; color:#666; border-color:#dcdcdc; font-style:italic; }
   /* Collection-level constant metadata: shown once as inert pills under the
      title (rather than repeated down a column for every dataset). */
   .coll-meta { display:flex; flex-wrap:wrap; gap:4px; margin:4px 0 8px; }
@@ -120,8 +147,8 @@
             <th class="sortable" data-col="name">Dataset<span class="sort-ind"></span></th>
             <th class="sortable" data-col="cells" title="cells × genes">Cells × Genes<span class="sort-ind"></span></th>
             <th class="sortable" data-col="date" title="publication year, or upload date when unpublished">Date<span class="sort-ind"></span></th>
-            {% if 'organism' in var_fields %}<th title="organism">Org</th>{% endif %}
-            {% if 'technology' in var_fields %}<th title="technology">Tech</th>{% endif %}
+            {% if 'organism' in var_fields %}<th title="organism (Hs=human, Mm=mouse, …)">Org</th>{% endif %}
+            {% if 'technology' in var_fields %}<th title="top-level technology class (sc/sn RNA · bulk RNA · proteomics · spatial · other)">Tech</th>{% endif %}
             {% if 'celltype' in var_fields %}<th title="cell type">Cell</th>{% endif %}
             {% if 'tissue' in var_fields %}<th title="tissue / brain region">Tissue</th>{% endif %}
             {% if 'disease' in var_fields %}<th title="disease state">Disease</th>{% endif %}
@@ -144,7 +171,7 @@
             data-cells="{{ dataset.n_obs or 0 }}"
             data-sort-ts="{{ _date.sort_ts or 0 }}">
             <td class="card-title">
-                {% if _icon.glyph %}<span class="ap-icon" style="color:{{ _icon.color }}" title="{{ _icon.tooltip }}">{{ _icon.glyph }}</span>{% endif %}<a href="/browse/{{ folder_browse_id }}/{{ dataset.browse_id }}" title="{% if dataset.description %}{{ dataset.description }}{% else %}{{ dataset.file_id }}{% endif %}"><strong>{{ dataset.name }}</strong></a>{% for doi_item in dataset.doi %}<a class="ext-lnk" href="https://doi.org/{{ doi_item }}" target="_blank" rel="noopener" title="DOI: {{ doi_item }}">🔗</a>{% endfor %}{% if dataset.accession_url %}<a class="ext-lnk" href="{{ dataset.accession_url }}" target="_blank" rel="noopener" title="accession: {{ dataset.accession }}">🔗</a>{% endif %}{% for url_item in dataset.link %}<a class="ext-lnk" href="{{ url_item }}" target="_blank" rel="noopener" title="{{ url_item }}">🔗</a>{% endfor %}{% set _cv = dataset.caveats_summary or {} %}{% if _cv.n %}<a class="cv-mark lvl-{{ _cv.max_level }}" href="/browse/{{ folder_browse_id }}/{{ dataset.browse_id }}#tab-overview" title="{{ _cv.n }} caveat{{ 's' if _cv.n > 1 else '' }} (highest: {{ _cv.max_level }})">⚠</a>{% endif %}
+                {% if _icon.glyph %}<span class="ap-icon" style="color:{{ _icon.color }}" title="{{ _icon.tooltip }}">{{ _icon.glyph|safe }}</span>{% endif %}<a href="/browse/{{ folder_browse_id }}/{{ dataset.browse_id }}" title="{% if dataset.description %}{{ dataset.description }}{% else %}{{ dataset.file_id }}{% endif %}"><strong>{{ dataset.name }}</strong></a>{% for doi_item in dataset.doi %}<a class="ext-lnk" href="https://doi.org/{{ doi_item }}" target="_blank" rel="noopener" title="DOI: {{ doi_item }}">🔗</a>{% endfor %}{% if dataset.accession_url %}<a class="ext-lnk" href="{{ dataset.accession_url }}" target="_blank" rel="noopener" title="accession: {{ dataset.accession }}">🔗</a>{% endif %}{% for url_item in dataset.link %}<a class="ext-lnk" href="{{ url_item }}" target="_blank" rel="noopener" title="{{ url_item }}">🔗</a>{% endfor %}{% set _cv = dataset.caveats_summary or {} %}{% if _cv.n %}<a class="cv-mark lvl-{{ _cv.max_level }}" href="/browse/{{ folder_browse_id }}/{{ dataset.browse_id }}#tab-overview" title="{{ _cv.n }} caveat{{ 's' if _cv.n > 1 else '' }} (highest: {{ _cv.max_level }})">⚠</a>{% endif %}
                 {% if dataset.subfolder %}<br><span class="muted-2" style="font-size:11px">{{ dataset.subfolder }}</span>{% endif %}
             </td>
             <td data-label="Cells × Genes" class="card-span cells-genes mono" style="color:#555;font-size:11px">
@@ -153,8 +180,8 @@
                 {% endif %}
             </td>
             <td data-label="Date" data-sort-ts="{{ _date.sort_ts or 0 }}" style="color:#666;font-size:11px;font-family:var(--font-mono);white-space:nowrap">{{ _date.iso or '—' }}</td>
-            {% if 'organism' in var_fields %}<td data-label="Org">{% if _org.abbrev  %}<span class="grp-pill"          title="organism: {{ _org.full }}">{{ _org.abbrev }}</span>{% endif %}</td>{% endif %}
-            {% if 'technology' in var_fields %}<td data-label="Tech">{% if _tech.abbrev %}<span class="grp-pill tech"     title="technology: {{ _tech.full }}">{{ _tech.abbrev }}</span>{% endif %}</td>{% endif %}
+            {% if 'organism' in var_fields %}<td data-label="Org">{% set _oc = dataset.organism_chips or [] %}{% if _oc %}<span class="org-chips">{% for chip in _oc %}<span class="org-chip {{ chip.cls }}" title="organism: {{ chip.full }}">{{ chip.abbrev }}</span>{% endfor %}</span>{% endif %}</td>{% endif %}
+            {% if 'technology' in var_fields %}{% set _tcl = dataset.tech_class or '' %}{% set _tcls_slug = _tcl.replace('sc/sn RNA','sc-sn').replace('bulk RNA','bulk').replace(' ','-')|lower %}<td data-label="Tech">{% if _tcl %}<span class="tech-class {{ _tcls_slug }}" title="tech class: {{ _tcl }}{% if _tech.full %} · {{ _tech.full }}{% endif %}">{{ _tcl }}</span>{% endif %}</td>{% endif %}
             {% if 'celltype' in var_fields %}<td data-label="Cell">{% if _cell.abbrev %}<span class="grp-pill cell"     title="cell type: {{ _cell.full }}">{{ _cell.abbrev }}</span>{% endif %}</td>{% endif %}
             {% if 'tissue' in var_fields %}<td data-label="Tissue">{% if _tis.abbrev  %}<span class="grp-pill tissue"   title="tissue: {{ _tis.full }}">{{ _tis.abbrev }}</span>{% endif %}</td>{% endif %}
             {% if 'disease' in var_fields %}<td data-label="Disease">{% if _dis.abbrev  %}<span class="grp-pill disease"  title="disease: {{ _dis.full }}">{{ _dis.abbrev }}</span>{% endif %}</td>{% endif %}

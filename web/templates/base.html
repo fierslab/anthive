@@ -54,9 +54,13 @@
             font-size: 13px;
             border-bottom: 1px solid #274a52;
         }
-        #topbar .brand { display: inline-flex; align-items: center; gap: 8px; font-weight: 500; color: var(--bar-text); font-size: 15px; text-decoration: none; letter-spacing: .3px; }
+        #topbar .brand { display: inline-flex; align-items: center; gap: 8px; font-weight: 500; color: #FFF3B0; font-size: 15px; text-decoration: none; letter-spacing: .3px; }
         #topbar .brand:hover { text-decoration: none; color: #ffffff; }
-        #topbar .brand img { height: 30px; width: auto; display: block; }
+        /* Force the topbar logo to render as (near-)white on the dark-teal bar.
+           The source PNG is a dark-recoloured crop that reads as low-contrast on
+           the dark background — invert + brightness pushes it to white/cream so
+           it clears WCAG AA contrast against #335C67. */
+        #topbar .brand img { height: 30px; width: auto; display: block; filter: brightness(0) invert(1); }
         #topbar nav { display: flex; gap: 16px; }
         /* Topbar wraps instead of overflowing on narrow screens. */
         @media (max-width: 560px) {
@@ -100,10 +104,12 @@
            row alignment survives the two possible glyphs. Colour set inline
            per-icon from the _access_pub_icon helper. */
         .ap-icon {
-            display: inline-block; width: 1.2em; text-align: center;
+            display: inline-flex; align-items: center; justify-content: center;
+            width: 1.2em; text-align: center;
             font-size: 13px; vertical-align: middle; cursor: help;
             filter: none;
         }
+        .ap-icon svg { display: block; width: 1em; height: 1em; }
         table.narrow { max-width: 480px; }
         table.auto { width: auto; }
 

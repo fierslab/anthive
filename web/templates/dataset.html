@@ -288,7 +288,7 @@
 
 <!-- Title — below the breadcrumb; falls back to the basename when there's no title.
      Unified access + publication icon sits directly before the title. -->
-<h1 class="ds-title">{% if pub_icon and pub_icon.glyph %}<span class="ds-pub-icon" style="color:{{ pub_icon.color }}" title="{{ pub_icon.tooltip }}">{{ pub_icon.glyph }}</span>{% endif %}{{ info.title or basename or file_id }}{% if basename and info.title and basename != info.title %}<span class="ds-title-base" title="file basename">{{ basename }}</span>{% endif %}</h1>
+<h1 class="ds-title">{% if pub_icon and pub_icon.glyph %}<span class="ds-pub-icon" style="color:{{ pub_icon.color }}" title="{{ pub_icon.tooltip }}">{{ pub_icon.glyph|safe }}</span>{% endif %}{{ info.title or basename or file_id }}{% if basename and info.title and basename != info.title %}<span class="ds-title-base" title="file basename">{{ basename }}</span>{% endif %}</h1>
 
 <!-- Biology metadata — descriptive ("Organism: mouse"), responsive grid. -->
 {% if context_bar %}

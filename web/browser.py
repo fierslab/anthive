@@ -452,37 +452,209 @@ _SOURCE_ABBREV = {
 # One-line grep-parse; cached at import so we don't stat 60 files per request.
 
 # Muted palette, subdued not saturated.
-_PUB_COLOR_PUBLISHED   = '#4a7c59'    # desaturated green
+_PUB_COLOR_PUBLISHED   = '#588157'    # muted green (public/published)
 _PUB_COLOR_UNPUBLISHED = '#9E2A2B'    # muted red (palette)
 
-# Globe = public (world-visible), house = internal (in-lab). Plain HTML glyphs
-# so no external font/icon dependency.
-_ACCESS_GLYPH = {'public': '🌐', 'internal': '🏠'}
+# Inline SVG icons — fill:currentColor so CSS `color:` applies. This
+# deliberately avoids color-emoji fonts, which override `color:`.
+# 16×16 viewBox; ap-icon container is 1.2em wide so alignment is stable.
+_ACCESS_SVG_PUBLIC = (
+    '<svg viewBox="0 0 16 16" width="1em" height="1em" '
+    'fill="none" stroke="currentColor" stroke-width="1.4" '
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<circle cx="8" cy="8" r="6.2"/>'
+    '<ellipse cx="8" cy="8" rx="2.8" ry="6.2"/>'
+    '<path d="M1.8 8 h12.4 M2.8 4.6 h10.4 M2.8 11.4 h10.4"/>'
+    '</svg>'
+)
+_ACCESS_SVG_INTERNAL = (
+    '<svg viewBox="0 0 16 16" width="1em" height="1em" '
+    'fill="none" stroke="currentColor" stroke-width="1.4" '
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<path d="M2 8 L8 3 L14 8"/>'
+    '<path d="M3.5 8 v5.5 h9 v-5.5"/>'
+    '<path d="M6.8 13.5 v-3.2 h2.4 v3.2"/>'
+    '</svg>'
+)
+_ACCESS_SVG = {'public': _ACCESS_SVG_PUBLIC, 'internal': _ACCESS_SVG_INTERNAL}
 
 
 def _access_pub_icon(access: Optional[str], publication_status: Optional[str]) -> Dict[str, str]:
-    """Return {glyph, color, tooltip, access, publication} for the unified icon.
+    """Return {svg, color, tooltip, access, publication} for the unified icon.
 
     Missing ``access`` defaults to ``internal`` (the safer default — a dataset
     without explicit access is not shareable). Missing ``publication_status``
     means "published" (unpublished must be explicitly set).
+
+    The rendered glyph is inline SVG with ``fill: currentColor`` so CSS
+    ``color:`` applies — color-emoji fonts would override it, which is the
+    bug this replaces.
     """
     acc = (access or 'internal').lower()
-    if acc not in _ACCESS_GLYPH:
+    if acc not in _ACCESS_SVG:
         acc = 'internal'
     pub_raw = (publication_status or '').lower()
     unpublished = pub_raw == 'unpublished'
-    glyph = _ACCESS_GLYPH[acc]
+    svg = _ACCESS_SVG[acc]
     color = _PUB_COLOR_UNPUBLISHED if unpublished else _PUB_COLOR_PUBLISHED
     access_word = 'external' if acc == 'public' else 'internal'
     pub_word = 'unpublished' if unpublished else 'published'
     return {
-        'glyph': glyph,
+        'svg': svg,
+        # Retain 'glyph' for backward compatibility — same SVG string.
+        'glyph': svg,
         'color': color,
         'access': access_word,
         'publication': pub_word,
         'tooltip': f'{access_word} · {pub_word}',
     }
+
+
+# ── technology classification ──────────────────────────────────────────────
+# Map the many technology strings to a small set of top-level classes shown
+# as a "Tech" column on the landing / folder pages. Keep this deliberately
+# coarse — the fine-grained tech name is still in the abbrev chip and the
+# tooltip; this is for grouping/filtering only.
+
+_TECH_CLASS_MAP: Dict[str, str] = {
+    # sc / sn RNA — single-cell / single-nucleus RNA
+    '10x_chromium': 'sc/sn RNA',
+    '10x': 'sc/sn RNA',
+    '10x_chromium_3p_v2': 'sc/sn RNA',
+    '10x_chromium_3p_v3': 'sc/sn RNA',
+    '10x_chromium_5p': 'sc/sn RNA',
+    '10x_multiome': 'sc/sn RNA',
+    '10x_scrna': 'sc/sn RNA',
+    '10x_snrna': 'sc/sn RNA',
+    'smart-seq2': 'sc/sn RNA',
+    'smart-seq3': 'sc/sn RNA',
+    'cel-seq2': 'sc/sn RNA',
+    'parse_evercode': 'sc/sn RNA',
+    'bd_rhapsody': 'sc/sn RNA',
+    'mars-seq': 'sc/sn RNA',
+    'microwell-seq': 'sc/sn RNA',
+    'drop-seq': 'sc/sn RNA',
+    'snrna-seq': 'sc/sn RNA',
+    'scrna-seq': 'sc/sn RNA',
+    'snrna-seq (10x)': 'sc/sn RNA',
+    'multiome': 'sc/sn RNA',
+    # bulk
+    'bulk_rna-seq': 'bulk RNA',
+    'bulk': 'bulk RNA',
+    # proteomics
+    'mass-spectrometry': 'proteomics',
+    'proteomics': 'proteomics',
+    # spatial
+    '10x_visium': 'spatial',
+    '10x_xenium': 'spatial',
+    'visium': 'spatial',
+    'xenium': 'spatial',
+    'merfish': 'spatial',
+    'cosmx': 'spatial',
+    'stereo-seq': 'spatial',
+    'slide-seq': 'spatial',
+    'slide-seqv2': 'spatial',
+    'slide-tag': 'spatial',
+    'slide-tags': 'spatial',
+    'novast': 'spatial',
+}
+
+
+def _tech_class(technology) -> str:
+    """Return a coarse top-level class for a technology value.
+
+    Accepts a string, a list of strings, or None. If a list, the first
+    class encountered is returned; when the list mixes classes 'mixed' is
+    returned. Unknown technologies fall back to 'other'. Empty → ''.
+    """
+    if technology is None:
+        return ''
+    if isinstance(technology, list):
+        seen: List[str] = []
+        for value in technology:
+            single = _tech_class(value)
+            if single and single not in seen:
+                seen.append(single)
+        if not seen:
+            return ''
+        if len(seen) == 1:
+            return seen[0]
+        return 'mixed'
+    text = str(technology).strip().lower()
+    if not text:
+        return ''
+    return _TECH_CLASS_MAP.get(text, 'other')
+
+
+# Organism display — small mono-letter chip. `Hs` for human, `Mm` for mouse,
+# etc. Multi-organism datasets get one chip per organism. Colour scheme uses
+# CSS classes (.org-chip.hs / .mm / …) defined in the templates.
+_ORGANISM_CHIP: Dict[str, Dict[str, str]] = {
+    'human':        {'abbrev': 'Hs', 'cls': 'hs'},
+    'homo sapiens': {'abbrev': 'Hs', 'cls': 'hs'},
+    'mouse':        {'abbrev': 'Mm', 'cls': 'mm'},
+    'mus musculus': {'abbrev': 'Mm', 'cls': 'mm'},
+    'rat':          {'abbrev': 'Rn', 'cls': 'rn'},
+    'rattus norvegicus': {'abbrev': 'Rn', 'cls': 'rn'},
+    'zebrafish':    {'abbrev': 'Dr', 'cls': 'dr'},
+    'danio rerio':  {'abbrev': 'Dr', 'cls': 'dr'},
+    'drosophila':   {'abbrev': 'Dm', 'cls': 'dm'},
+    'drosophila melanogaster': {'abbrev': 'Dm', 'cls': 'dm'},
+    'macaque':      {'abbrev': 'Mf', 'cls': 'mf'},
+    'rhesus macaque': {'abbrev': 'Mf', 'cls': 'mf'},
+    'macaca fascicularis': {'abbrev': 'Mf', 'cls': 'mf'},
+    'c. elegans':   {'abbrev': 'Ce', 'cls': 'ce'},
+    'caenorhabditis elegans': {'abbrev': 'Ce', 'cls': 'ce'},
+}
+
+
+def _organism_chips(organism) -> List[Dict[str, str]]:
+    """Return a list of {abbrev, cls, full} chips for the organism field.
+
+    Accepts a string or list. Unknown organisms get a passthrough chip with
+    the raw value as abbrev and cls='other'. Multi-organism datasets return
+    multiple chips, deduped in first-seen order.
+    """
+    if organism is None:
+        return []
+    if isinstance(organism, list):
+        values: List = organism
+    elif isinstance(organism, str):
+        # Sometimes stored as "human | mouse" or "human, mouse"
+        raw = organism.strip()
+        if not raw:
+            return []
+        # Try common list delimiters first
+        for sep in ('|', ','):
+            if sep in raw:
+                values = [v.strip() for v in raw.split(sep) if v.strip()]
+                break
+        else:
+            values = [raw]
+    else:
+        return []
+    out: List[Dict[str, str]] = []
+    seen_abbrev: set = set()   # dedup by resulting abbrev (so 'human' and
+                                # 'Homo sapiens' collapse to one Hs chip)
+    for value in values:
+        if not value:
+            continue
+        key = str(value).strip().lower()
+        if not key:
+            continue
+        chip = _ORGANISM_CHIP.get(key)
+        if chip:
+            abbrev = chip['abbrev']
+            cls = chip['cls']
+        else:
+            # Unknown — fall back to first 3 chars, class 'other'
+            abbrev = str(value)[:3].strip() or '?'
+            cls = 'other'
+        if abbrev in seen_abbrev:
+            continue
+        seen_abbrev.add(abbrev)
+        out.append({'abbrev': abbrev, 'cls': cls, 'full': str(value)})
+    return out
 
 
 # Cache the publication_status field parsed from data/h5adstore/<group>/index.md
@@ -902,6 +1074,23 @@ def get_collection_list(api_url: str) -> List[Dict]:
             'disease':         _summarize_meta_field(dbs, 'disease',         abbrev_map=_DISEASE_ABBREV),
             'source':          _summarize_meta_field(dbs, 'source',          abbrev_map=_SOURCE_ABBREV),
             'access':          _summarize_meta_field(dbs, 'access',          abbrev_map=_ACCESS_ABBREV),
+            # Per-organism chips — one letter chip per organism (Hs, Mm, …),
+            # so a multi-species collection ("human | mouse") gets two chips
+            # side by side instead of a "mix" placeholder.
+            'organism_chips': _organism_chips(sorted({
+                item.strip().lower()
+                for db in dbs
+                for item in _as_list(db.get('organism'))
+                if item and str(item).strip()
+            } - {''})),
+            # Top-level tech classification (sc/sn RNA, bulk RNA, spatial, …).
+            # Multi-tech collections resolve to 'mixed'.
+            'tech_class': _tech_class(sorted({
+                str(item).strip().lower()
+                for db in dbs
+                for item in _as_list(db.get('technology'))
+                if item and str(item).strip()
+            } - {''})),
         })
 
     # Default sort: newest-first by last_modified (empty values sink to the
@@ -1015,6 +1204,8 @@ def get_collection_datasets(api_url: str, group_id: str) -> tuple:
             'disease':         _summarize_meta_field([db], 'disease',         abbrev_map=_DISEASE_ABBREV),
             'access':          _summarize_meta_field([db], 'access',          abbrev_map=_ACCESS_ABBREV),
             'source':          _summarize_meta_field([db], 'source',          abbrev_map=_SOURCE_ABBREV),
+            'organism_chips':  _organism_chips(db.get('organism')),
+            'tech_class':      _tech_class(db.get('technology')),
             # External resources — surfaced as small link icons after the name.
             'doi':             _as_list(db.get('doi')),
             'link':            _as_list(db.get('link')),

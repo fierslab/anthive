@@ -247,7 +247,9 @@ def test_modified_ts_empty_when_nothing():
 
 def test_access_pub_icon_public_published():
     icon = browser._access_pub_icon("public", None)
-    assert icon["glyph"] == "🌐"                             # world
+    # Inline SVG (fill:currentColor) — NOT a color-emoji glyph, so CSS
+    # `color:` applies. See docstring on _access_pub_icon.
+    assert icon["glyph"].startswith("<svg") and "currentColor" in icon["glyph"]
     assert icon["color"] == browser._PUB_COLOR_PUBLISHED     # muted green
     assert "external" in icon["tooltip"] and "published" in icon["tooltip"]
     assert icon["access"] == "external"
@@ -255,34 +257,34 @@ def test_access_pub_icon_public_published():
 
 def test_access_pub_icon_public_unpublished():
     icon = browser._access_pub_icon("public", "unpublished")
-    assert icon["glyph"] == "🌐"
+    assert icon["glyph"].startswith("<svg")
     assert icon["color"] == browser._PUB_COLOR_UNPUBLISHED   # muted red
     assert icon["tooltip"] == "external · unpublished"
 
 
 def test_access_pub_icon_internal_published():
     icon = browser._access_pub_icon("internal", "published")
-    assert icon["glyph"] == "🏠"
+    assert icon["glyph"].startswith("<svg")
     assert icon["color"] == browser._PUB_COLOR_PUBLISHED
     assert icon["tooltip"] == "internal · published"
 
 
 def test_access_pub_icon_internal_unpublished():
     icon = browser._access_pub_icon("internal", "unpublished")
-    assert icon["glyph"] == "🏠"
+    assert icon["glyph"].startswith("<svg")
     assert icon["color"] == browser._PUB_COLOR_UNPUBLISHED
 
 
 def test_access_pub_icon_missing_access_defaults_internal():
     icon = browser._access_pub_icon(None, None)
-    assert icon["glyph"] == "🏠"                   # missing = safer default
+    assert icon["glyph"].startswith("<svg")     # missing = safer default
     assert icon["access"] == "internal"
 
 
 def test_access_pub_icon_unknown_access_falls_back():
     # non-vocab value (typo) should still yield a rendered icon, not crash
     icon = browser._access_pub_icon("bogus", None)
-    assert icon["glyph"] == "🏠" and icon["access"] == "internal"
+    assert icon["glyph"].startswith("<svg") and icon["access"] == "internal"
 
 
 # ── unit tests: _dataset_date ──────────────────────────────────────────────────
@@ -365,6 +367,163 @@ def test_tissue_sort_key_multi_uses_first():
 
 def test_tissue_sort_key_case_insensitive():
     assert browser._tissue_sort_key(["Brain"]) == browser._tissue_sort_key(["brain"])
+
+
+def test_tissue_sort_key_orders_expected_list():
+    """Concrete sort assertion: for a known heterogeneous tissue list the
+    resulting order must be brain-first, cortex-family middle, tail terms
+    (spinal cord / csf) last, unknown after everything."""
+    inputs = [
+        (["spinal cord"], "spinal cord"),
+        (["dorsolateral prefrontal cortex"], "dlpfc"),
+        (["brain"], "brain"),
+        (["cortex"], "cortex"),
+        (["not_a_tissue_ever"], "unknown"),
+        (["csf"], "csf"),
+    ]
+    ranked = sorted(inputs, key=lambda tissues_label: browser._tissue_sort_key(tissues_label[0]))
+    labels_in_order = [pair[1] for pair in ranked]
+    # brain first; cortex before dlpfc; spinal cord + csf before unknown
+    assert labels_in_order.index("brain") == 0
+    assert labels_in_order.index("cortex") < labels_in_order.index("dlpfc")
+    assert labels_in_order.index("spinal cord") < labels_in_order.index("unknown")
+    assert labels_in_order.index("csf") < labels_in_order.index("unknown")
+
+
+# ── unit tests: _tech_class ────────────────────────────────────────────────────
+
+def test_tech_class_sc_sn_rna():
+    assert browser._tech_class("10x_chromium") == "sc/sn RNA"
+    assert browser._tech_class("10x_chromium_3p_v3") == "sc/sn RNA"
+    assert browser._tech_class("Smart-seq2") == "sc/sn RNA"
+    assert browser._tech_class("smart-seq2") == "sc/sn RNA"
+    assert browser._tech_class("snRNA-seq") == "sc/sn RNA"
+    assert browser._tech_class("parse_evercode") == "sc/sn RNA"
+    assert browser._tech_class("BD_rhapsody") == "sc/sn RNA"
+    assert browser._tech_class("Drop-seq") == "sc/sn RNA"
+
+
+def test_tech_class_bulk_rna():
+    assert browser._tech_class("bulk_RNA-seq") == "bulk RNA"
+    assert browser._tech_class("bulk") == "bulk RNA"
+
+
+def test_tech_class_proteomics():
+    assert browser._tech_class("mass-spectrometry") == "proteomics"
+    assert browser._tech_class("proteomics") == "proteomics"
+
+
+def test_tech_class_spatial():
+    assert browser._tech_class("10x_visium") == "spatial"
+    assert browser._tech_class("10x_xenium") == "spatial"
+    assert browser._tech_class("MERFISH") == "spatial"
+    assert browser._tech_class("CosMx") == "spatial"
+    assert browser._tech_class("Stereo-seq") == "spatial"
+
+
+def test_tech_class_unknown_falls_back_to_other():
+    assert browser._tech_class("some_new_tech_2099") == "other"
+    assert browser._tech_class("nanopore") == "other"
+
+
+def test_tech_class_empty_returns_empty():
+    assert browser._tech_class(None) == ""
+    assert browser._tech_class("") == ""
+    assert browser._tech_class([]) == ""
+
+
+def test_tech_class_list_single_class():
+    # a list of same-class techs collapses to that class
+    assert browser._tech_class(["10x_chromium", "10x_chromium_3p_v3"]) == "sc/sn RNA"
+
+
+def test_tech_class_list_mixed():
+    # a list mixing sc/sn RNA + spatial → 'mixed'
+    assert browser._tech_class(["10x_chromium", "10x_visium"]) == "mixed"
+
+
+# ── unit tests: _organism_chips ────────────────────────────────────────────────
+
+def test_organism_chips_human_single():
+    chips = browser._organism_chips("human")
+    assert chips == [{"abbrev": "Hs", "cls": "hs", "full": "human"}]
+
+
+def test_organism_chips_scientific_name():
+    chips = browser._organism_chips("Homo sapiens")
+    assert len(chips) == 1
+    assert chips[0]["abbrev"] == "Hs"
+
+
+def test_organism_chips_multi_pipe():
+    # "human | mouse" — the pipe-separated form used in some catalog rows
+    chips = browser._organism_chips("human | mouse")
+    abbrevs = [chip["abbrev"] for chip in chips]
+    assert abbrevs == ["Hs", "Mm"]
+
+
+def test_organism_chips_multi_comma():
+    chips = browser._organism_chips("human, mouse")
+    abbrevs = [chip["abbrev"] for chip in chips]
+    assert abbrevs == ["Hs", "Mm"]
+
+
+def test_organism_chips_list_input():
+    chips = browser._organism_chips(["human", "mouse", "rat"])
+    abbrevs = [chip["abbrev"] for chip in chips]
+    assert abbrevs == ["Hs", "Mm", "Rn"]
+
+
+def test_organism_chips_empty():
+    assert browser._organism_chips(None) == []
+    assert browser._organism_chips("") == []
+    assert browser._organism_chips([]) == []
+
+
+def test_organism_chips_unknown_species_passthrough():
+    chips = browser._organism_chips("axolotl")
+    assert len(chips) == 1
+    assert chips[0]["cls"] == "other"
+    assert chips[0]["full"] == "axolotl"
+
+
+def test_organism_chips_deduplicates():
+    # duplicate entries in a list collapse to a single chip
+    chips = browser._organism_chips(["human", "Homo sapiens", "human"])
+    assert len(chips) == 1
+    assert chips[0]["abbrev"] == "Hs"
+
+
+# ── unit tests: _access_pub_icon ───────────────────────────────────────────────
+
+def test_access_pub_icon_returns_inline_svg_not_emoji():
+    """Regression: emoji glyphs (🌐 / 🏠) get rendered by color-emoji fonts,
+    which override CSS `color:`. The icon MUST use inline SVG with
+    `fill: currentColor` (or `stroke=currentColor`) so `color:` applies."""
+    for access in ("public", "internal"):
+        icon = browser._access_pub_icon(access, "published")
+        assert icon["glyph"].startswith("<svg")
+        assert "currentColor" in icon["glyph"]
+        # no color-emoji leaking through
+        assert "🌐" not in icon["glyph"]
+        assert "🏠" not in icon["glyph"]
+
+
+def test_access_pub_icon_published_muted_green():
+    icon = browser._access_pub_icon("public", "published")
+    assert icon["color"] == browser._PUB_COLOR_PUBLISHED
+    assert icon["publication"] == "published"
+
+
+def test_access_pub_icon_unpublished_muted_red():
+    icon = browser._access_pub_icon("public", "unpublished")
+    assert icon["color"] == browser._PUB_COLOR_UNPUBLISHED
+    assert icon["publication"] == "unpublished"
+
+
+def test_access_pub_icon_missing_access_defaults_internal():
+    icon = browser._access_pub_icon(None, None)
+    assert icon["access"] == "internal"
 
 
 # ── fake REST API ──────────────────────────────────────────────────────────────
