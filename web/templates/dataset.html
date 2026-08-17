@@ -4,20 +4,16 @@
 
 {% block content %}
 <style>
-  /* Context bar — same pill vocabulary as landing/folder pages.
-     Colors must mirror .ctx-pill in index.html. */
-  /* Context pills — uniform muted look; no per-category rainbow.
-     Dark teal text on cream background so the eye reads them as one family. */
+  /* Context bar — uniform neutral pill; no per-category colours (the label
+     under each pill's tooltip already identifies the field). */
   .ds-ctx { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 10px; }
   .ds-ctx .pill {
     display: inline-block; padding: 1px 7px; font-size: 11px;
     line-height: 1.5; border-radius: 10px; white-space: nowrap;
-    background: #fbf5d3;             /* cream at low opacity */
-    color: #335C67;
-    border: 1px solid #e6dca9;
+    background: #f3f4f6; color: #374151; border: 1px solid #e5e7eb;
   }
-  .ds-ctx .pill.icon    { background: #f5f5f5; color: #444; border-color: #e5e5e5; font-size: 13px; line-height: 1.2; }
-  .ds-ctx .pill.year    { background: #f3f4f6; color: #374151; border-color: #e5e7eb; font-family: var(--font-mono); }
+  .ds-ctx .pill.icon { font-size: 13px; line-height: 1.2; }
+  .ds-ctx .pill.year { font-family: var(--font-mono); }
 
   /* Quick external-link badges (DOI / PubMed / accession / URL) under the
      context bar — small and inconspicuous (plain links, not filled pills). */

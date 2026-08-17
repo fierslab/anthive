@@ -19,26 +19,18 @@
     font-family:var(--font-mono); font-size:9.5px; letter-spacing:.2px;
     background:#f5f5f5; color:#555; border:1px solid #e5e5e5;
   }
-  .org-chip.hs { background:#dbeafe; color:#0f3a63; border-color:#bcd7f6; }
-  .org-chip.mm { background:#f6d6d6; color:#7a1e1e; border-color:#e5b5b5; }
-  .org-chip.rn { background:#efe1cf; color:#78440b; border-color:#e0cba7; }
-  .org-chip.dr { background:#d3e9d5; color:#1e5c2a; border-color:#b6dabb; }
-  .org-chip.dm { background:#e6d9f2; color:#4b1d7a; border-color:#cebbec; }
-  .org-chip.mf { background:#d9ede8; color:#0e4a3d; border-color:#b6dccf; }
-  .org-chip.ce { background:#f2e6cd; color:#6b4a06; border-color:#dcc78e; }
-  .org-chip.other { background:#eeeeee; color:#555; border-color:#d5d5d5; }
+  /* Per-organism colours dropped — the abbrev (Hs/Mm/…) already identifies
+     the organism and colour didn't add info. */
   /* Tech-class pill — mirrors index.html's .tech-class. */
   .tech-class {
     display:inline-block; padding:1px 6px; border-radius:2px;
     font-size:10px; letter-spacing:.1px;
-    background:#fff7e6; color:#7a4a06; border:1px solid #f2d68a;
+    background:#f5f5f5; color:#555; border:1px solid #e5e5e5;
     white-space:nowrap;
   }
-  .tech-class.spatial    { background:#e7f0fb; color:#1f3f6b; border-color:#c2d6ee; }
-  .tech-class.bulk       { background:#f0eaf9; color:#3f245b; border-color:#d5c4ea; }
-  .tech-class.proteomics { background:#e2f0e8; color:#1e4d33; border-color:#bfe0cc; }
-  .tech-class.other      { background:#f2f2f2; color:#5b5b5b; border-color:#dcdcdc; }
-  .tech-class.mixed      { background:#f5f5f5; color:#666; border-color:#dcdcdc; font-style:italic; }
+  /* Per-tech-class colours dropped — column label already says "Tech";
+     the .mixed italic hint is preserved for the aggregated case. */
+  .tech-class.mixed      { font-style:italic; }
   /* Collection-level constant metadata: shown once as inert pills under the
      title (rather than repeated down a column for every dataset). */
   .coll-meta { display:flex; flex-wrap:wrap; gap:4px; margin:4px 0 8px; }
