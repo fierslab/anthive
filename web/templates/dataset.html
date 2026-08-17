@@ -1121,7 +1121,9 @@ document.addEventListener('DOMContentLoaded', function() {
                 return (tag in NUMERICAL_TAGS) ? 'spearman' : 'omega2';
             };
             var METHOD_PRIORITY = ['geneset', 'aucell'];   // starCAT dropped from the UI
-            fetch('/api/module-variability?dataset=' + encodeURIComponent(DB_ID) + '&limit=100000',
+            // `min_abs=0` drops NaN rows server-side — without it the
+            // endpoint 500s on JSON-serialising NaN in large responses.
+            fetch('/api/module-variability?dataset=' + encodeURIComponent(DB_ID) + '&min_abs=0&limit=100000',
                   { credentials: 'same-origin' })
                 .then(function (r) { return r.ok ? r.json() : null; })
                 .then(function (d) {
