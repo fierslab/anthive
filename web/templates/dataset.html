@@ -878,14 +878,44 @@ document.addEventListener('DOMContentLoaded', function() {
                 catch (_) { location.hash = name; }
             }
         }
-        window.addEventListener('hashchange', function() {
-            var h = (location.hash || '').replace(/^#/, '');
-            if (h) activateTab(h, false);
-        });
-        var initHash = (location.hash || '').replace(/^#/, '');
-        if (initHash) {
-            activateTab(initHash, false);
+        // Extended hash: `modules-<catalog::module>` → activate the modules
+        // tab AND open the matching catalog <details>, scroll to the row,
+        // briefly highlight it. Used by cross-page deep-links (e.g. the
+        // Modules-tab jump on the geneset "Where it varies most" panel).
+        function focusModulesRow(modKey) {
+            var tab = panels['modules']; if (!tab) return;
+            var target = null;
+            tab.querySelectorAll('tr.mod-item').forEach(function (row) {
+                if (row.dataset.modKey === modKey) target = row;
+            });
+            if (!target) return;
+            // Open the enclosing <details> (per-catalog group)
+            var det = target.closest('details.mod-cat-group');
+            if (det) det.open = true;
+            // Scroll + brief highlight
+            setTimeout(function () {
+                target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                target.style.transition = 'background 0.4s';
+                target.style.background = '#fef3c7';
+                setTimeout(function () { target.style.background = ''; }, 2000);
+            }, 60);
         }
+        function handleHash(hash) {
+            var h = (hash || '').replace(/^#/, '');
+            if (!h) return;
+            // Support "modules-<catalog::module>" syntax
+            var m = h.match(/^modules-(.+)$/);
+            if (m) {
+                activateTab('modules', false);
+                try { focusModulesRow(decodeURIComponent(m[1])); }
+                catch (_) { focusModulesRow(m[1]); }
+                return;
+            }
+            activateTab(h, false);
+        }
+        window.addEventListener('hashchange', function() { handleHash(location.hash); });
+        var initHash = location.hash || '';
+        if (initHash) handleHash(initHash);
         // No auto-jump: the Overview tab is only rendered when it has
         // markdown_content, and the template sets `.active` on Data
         // otherwise.

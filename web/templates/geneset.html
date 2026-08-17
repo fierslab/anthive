@@ -144,10 +144,13 @@
           }
           return null;
         }
+        function baseUrlFor(row) {
+          var parts = String(row.dataset).split('/'); if (parts.length !== 2) return null;
+          return '/browse/' + encodeURIComponent(parts[0]) + '/' + encodeURIComponent(parts[1]);
+        }
         function plotUrlFor(row) {
           var col = scoreColFor(row); if (!col) return null;
-          var parts = String(row.dataset).split('/'); if (parts.length !== 2) return null;
-          var base = '/browse/' + encodeURIComponent(parts[0]) + '/' + encodeURIComponent(parts[1]);
+          var base = baseUrlFor(row); if (!base) return null;
           var tagCol = row.tag_column || row.tag;
           if (NUMERICAL[row.tag]) {
             // scatter: tag on x, module score on y
@@ -156,10 +159,26 @@
           // categorical → violin split by tag
           return base + '/plot/violin?x=' + encodeURIComponent(tagCol) + '&y=' + encodeURIComponent(col);
         }
+        function umapUrlFor(row) {
+          var col = scoreColFor(row); if (!col) return null;
+          var base = baseUrlFor(row); if (!base) return null;
+          // Embedding scatter, coloured by module score. `embedding=` omitted so
+          // ant-serve picks the dataset's default (X_umap → X_tsne → first).
+          return base + '/plot/scatter?color=' + encodeURIComponent(col);
+        }
+        function modulesTabUrlFor(row) {
+          var base = baseUrlFor(row); if (!base) return null;
+          // Deep link into the Modules tab, targeting a specific
+          // (catalog::module) row so the dataset page can open the right
+          // <details> and highlight the row.
+          return base + '#modules-' + encodeURIComponent(row.catalog + '::' + row.module);
+        }
         var html = '<div class="table-wrap"><table class="auto"><thead><tr><th>Dataset</th><th>Tag</th>'
           + '<th style="text-align:right">' + esc(stat) + '</th>'
           + '<th style="width:40%">vs peer modules (' + esc(source === 'geneset' ? 'scanpy' : source) + ') in that dataset <span class="info" title="Where this gene set’s value sits among all modules scored with the SAME method on the same (dataset, tag). Marker = this set; bar spans the min–max across peer modules.">ⓘ</span></th>'
-          + '<th title="Open the plot showing this module vs this tag on this dataset">plot</th></tr></thead><tbody>';
+          + '<th title="Open the plot showing this module vs this tag on this dataset" style="text-align:center">plot</th>'
+          + '<th title="Open an embedding scatter (UMAP), coloured by this module\'s score" style="text-align:center">umap</th>'
+          + '<th title="Jump to the Modules tab on this dataset, focused on this catalog + module" style="text-align:center">modules</th></tr></thead><tbody>';
         mine.forEach(function (r) {
           var parts = String(r.dataset).split('/');
           var dsLink = parts.length === 2 ? '<a href="/browse/' + encodeURIComponent(parts[0]) + '/' + encodeURIComponent(parts[1]) + '">' + esc(r.dataset) + '</a>' : esc(r.dataset);
@@ -171,20 +190,29 @@
             + 'style="position:relative;display:inline-block;width:70%;height:10px;background:#eef2f7;border-radius:2px;vertical-align:middle">'
             + '<span style="position:absolute;left:calc(' + pos.toFixed(1) + '% - 3px);top:-1px;width:6px;height:12px;border-radius:2px;background:' + (neg ? '#dc2626' : 'var(--link)') + '"></span></span>'
             + ' <span class="muted-2" style="font-size:10px">' + (+lo).toFixed(2) + '–' + (+hi).toFixed(2) + '</span>';
-          var url = plotUrlFor(r);
-          // Inline SVG icons — same set as web/templates/dataset.html's
-          // chart_icon macro (barplot / umap-dots). Sized 1em; hover uses
-          // fill:currentColor so hover colour flows via CSS.
+          // Inline SVG icons — same set as dataset.html's chart_icon macro.
           var SVG_BAR  = '<svg viewBox="0 0 16 16" width="1em" height="1em" fill="currentColor" aria-hidden="true"><rect x="1.5" y="8" width="3" height="6"/><rect x="6.5" y="5" width="3" height="9"/><rect x="11.5" y="2" width="3" height="12"/></svg>';
+          var SVG_LINE = '<svg viewBox="0 0 16 16" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M1.5 13 L5.5 8.5 L9 10.5 L14.5 3"/></svg>';
           var SVG_UMAP = '<svg viewBox="0 0 16 16" width="1em" height="1em" fill="currentColor" aria-hidden="true"><circle cx="3.4" cy="4.2" r="1.5"/><circle cx="6.2" cy="2.6" r="1.5"/><circle cx="5.6" cy="7" r="1.5"/><circle cx="10.6" cy="9.6" r="1.5"/><circle cx="13.2" cy="7.6" r="1.5"/><circle cx="12.4" cy="12.6" r="1.5"/><circle cx="8.6" cy="13" r="1.5"/></svg>';
-          var plotIcon = url
-            ? '<a href="' + url + '" title="Open ' + (NUMERICAL[r.tag] ? 'scatter' : 'violin') + ' of ' + esc(r.tag) + ' × this module on ' + esc(r.dataset) + '" style="text-decoration:none;color:var(--text-muted);display:inline-flex;align-items:center;justify-content:center;font-size:15px" onmouseover="this.style.color=\'var(--link)\'" onmouseout="this.style.color=\'var(--text-muted)\'">' + (NUMERICAL[r.tag] ? SVG_UMAP : SVG_BAR) + '</a>'
-            : '<span class="muted-2">—</span>';
+          // arrow-into-box for the Modules-tab deep-link — visually distinct from the chart glyphs.
+          var SVG_JUMP = '<svg viewBox="0 0 16 16" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3h4a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8"/><path d="M2 6l4-4m0 0h-3m3 0v3"/></svg>';
+          function iconLink(url, svg, ariaTitle) {
+            if (!url) return '<span class="muted-2">—</span>';
+            return '<a href="' + url + '" title="' + esc(ariaTitle) + '" style="text-decoration:none;color:var(--text-muted);display:inline-flex;align-items:center;justify-content:center;font-size:15px" onmouseover="this.style.color=\'var(--link)\'" onmouseout="this.style.color=\'var(--text-muted)\'">' + svg + '</a>';
+          }
+          var plotUrl = plotUrlFor(r), umapUrl = umapUrlFor(r), modUrl = modulesTabUrlFor(r);
+          // pick violin (bar) for categorical, line for numerical scatter
+          var plotSvg = NUMERICAL[r.tag] ? SVG_LINE : SVG_BAR;
+          var plotDesc = (NUMERICAL[r.tag] ? 'scatter' : 'violin') + ' of ' + r.tag + ' × this module on ' + r.dataset;
+          var umapDesc = 'embedding scatter (UMAP) on ' + r.dataset + ' coloured by this module score';
+          var modDesc  = 'Modules tab on ' + r.dataset + ' — this catalog + module';
           html += '<tr><td class="mono" style="font-size:11px">' + dsLink + '</td>'
             + '<td class="muted">' + esc(r.tag) + '</td>'
             + '<td class="mono" style="font-size:11px;text-align:right">' + (+r.value).toFixed(3) + '</td>'
             + '<td>' + track + '</td>'
-            + '<td style="text-align:center;font-size:14px">' + plotIcon + '</td></tr>';
+            + '<td style="text-align:center">' + iconLink(plotUrl, plotSvg, plotDesc) + '</td>'
+            + '<td style="text-align:center">' + iconLink(umapUrl, SVG_UMAP, umapDesc) + '</td>'
+            + '<td style="text-align:center">' + iconLink(modUrl, SVG_JUMP, modDesc) + '</td></tr>';
         });
         html += '</tbody></table></div><div class="muted" style="font-size:11px;margin-top:2px">top ' + mine.length + ' dataset × tag associations · sorted by ' + esc(sortMode) + ' · peer range across ' + esc(source === 'geneset' ? 'scanpy' : source) + ' modules on the same dataset · <a href="/genesets/variability">full heatmap →</a> · exploratory (per-cell)</div>';
         listEl.innerHTML = html;
