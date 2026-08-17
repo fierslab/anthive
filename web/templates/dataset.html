@@ -641,20 +641,30 @@
         <span class="muted-2" style="margin-left:4px">· {{ cat_group.n }} module{{ '' if cat_group.n == 1 else 's' }}</span>
       </summary>
       <div class="table-wrap" style="margin-top:4px">
+      {# 7 canonical tag columns replace the per-method IQR columns.
+         Each cell holds ω² (categorical) or spearman ρ (numerical) —
+         auto-picked per tag on the client side. Value comes from the
+         "primary" method score present in this dataset for the module,
+         preferring scanpy > aucell > starCAT. #}
       <table class="obs-stats-tbl auto mod-cat-table" id="obs-tbl-mod" style="font-size:12px">
         <thead><tr>
           <th>Module</th>
           <th class="obs-plots-th" title="scanpy sc.tl.score_genes">scanpy</th>
-          <th title="scanpy interquartile range: median [q25 – q75]">IQR</th>
           <th class="obs-plots-th" title="starCAT program score">starCAT</th>
-          <th title="starCAT interquartile range: median [q25 – q75]">IQR</th>
           <th class="obs-plots-th" title="AUCell rank-based score">AUCell</th>
-          <th title="AUCell interquartile range: median [q25 – q75]">IQR</th>
+          <th title="ω² — how well the module score splits by sex (0..1)">sex</th>
+          <th title="signed spearman ρ — module score vs braak stage (-1..+1)">braak</th>
+          <th title="ω² — module score vs braak_group (low/med/high)">braak_grp</th>
+          <th title="ω² — module score vs disease (0..1)">disease</th>
+          <th title="ω² — module score vs cluster (0..1)">cluster</th>
+          <th title="ω² — module score vs condition (0..1)">condition</th>
+          <th title="signed spearman ρ — module score vs age (-1..+1)">age</th>
         </tr></thead>
         <tbody>
         {% for mod in cat_group.modules %}
         {% set _mods = mod.methods %}
         <tr class="mod-item"
+            data-mod-key="{{ mod.catalog }}::{{ mod.module }}"
             data-name="{{ (mod.catalog ~ ' ' ~ mod.module)|lower }}"
             data-has-scanpy="{{ 1 if _mods.scanpy else 0 }}"
             data-has-starcat="{{ 1 if _mods.starcat else 0 }}"
@@ -668,15 +678,17 @@
               {% if default_embedding %}<a class="obs-plot-icon" href="{{ _b }}/plot/scatter?embedding={{ default_embedding|urlencode }}&color={{ score_col|urlencode }}" title="{{ default_embedding }} scatter · coloured by {{ method_label }} · {{ score_col }}">{{ chart_icon('umap') }}</a>{% endif %}
             </span>{% else %}<span class="mod-chip absent" title="not scored with {{ method_label }}">—</span>{% endif %}
           {%- endmacro %}
-          {% macro _score_stats(score_col) -%}
-            {% if score_col %}<span class="mod-stats" data-col="{{ score_col }}" style="color:#555;font-family:var(--font-mono);font-size:10.5px"></span>{% else %}<span style="color:#c8cdd3">—</span>{% endif %}
-          {%- endmacro %}
           <td class="obs-plots">{{ _score_cell(_mods.scanpy, 'scanpy') }}</td>
-          <td>{{ _score_stats(_mods.scanpy) }}</td>
           <td class="obs-plots">{{ _score_cell(_mods.starcat, 'starCAT') }}</td>
-          <td>{{ _score_stats(_mods.starcat) }}</td>
           <td class="obs-plots">{{ _score_cell(_mods.aucell, 'AUCell') }}</td>
-          <td>{{ _score_stats(_mods.aucell) }}</td>
+          {# Tag cells — populated client-side via /module-variability #}
+          <td class="mv-cell" data-tag="sex"></td>
+          <td class="mv-cell" data-tag="braak"></td>
+          <td class="mv-cell" data-tag="braak_group"></td>
+          <td class="mv-cell" data-tag="disease"></td>
+          <td class="mv-cell" data-tag="cluster"></td>
+          <td class="mv-cell" data-tag="condition"></td>
+          <td class="mv-cell" data-tag="age"></td>
         </tr>
         {% endfor %}
         </tbody>
@@ -994,18 +1006,8 @@ document.addEventListener('DOMContentLoaded', function() {
                         }
                     }
                 });
-                // Module scores tab — fill the IQR summary per method
-                // (median [q25 – q75]). Full quantile ladder in the tooltip.
-                document.querySelectorAll('#tab-modules .mod-stats').forEach(function (cell) {
-                    var col = cell.getAttribute('data-col');
-                    var s = col && OBS_STATS[col.toLowerCase()];
-                    if (!s) return;
-                    cell.textContent = fnum(s.median) + ' [' + fnum(s.q25) + ' – ' + fnum(s.q75) + ']';
-                    cell.title = 'min ' + fnum(s.min) + ' · Q05 ' + fnum(s.q05)
-                        + ' · Q25 ' + fnum(s.q25) + ' · median ' + fnum(s.median)
-                        + ' · Q75 ' + fnum(s.q75) + ' · Q95 ' + fnum(s.q95)
-                        + ' · max ' + fnum(s.max) + ' · mean ' + fnum(s.mean);
-                });
+                // (Module IQR column removed 2026-08 — replaced by
+                //  per-tag variability cells populated below.)
 
                 // Tooltip the Explore-tab favourite chips with their stats too.
                 document.querySelectorAll('#tab-overview a[href*="/plot/"]').forEach(function (a) {
@@ -1049,6 +1051,56 @@ document.addEventListener('DOMContentLoaded', function() {
                         set('.g-mean',    fnum(s.mean));
                         set('.g-mean-nz', fnum(s.mean_nonzero));
                         set('.g-max',     fnum(s.max));
+                    });
+                })
+                .catch(function () {});
+        })();
+
+        // Modules tab — hydrate per-tag variability cells from
+        // /module-variability. Categorical tags use ω²; numerical use spearman ρ.
+        // Value comes from the "primary" method score present for the module
+        // (scanpy > aucell > starcat).
+        (function () {
+            var modRows = Array.from(document.querySelectorAll('#tab-modules tr.mod-item'));
+            if (!modRows.length) return;
+            var NUMERICAL_TAGS = { braak: 1, age: 1, pmi: 1 };
+            var STAT_FOR_TAG = function (tag) {
+                return (tag in NUMERICAL_TAGS) ? 'spearman' : 'omega2';
+            };
+            var METHOD_PRIORITY = ['geneset', 'aucell', 'starcat'];
+            fetch('/api/module-variability?dataset=' + encodeURIComponent(DB_ID) + '&limit=100000',
+                  { credentials: 'same-origin' })
+                .then(function (r) { return r.ok ? r.json() : null; })
+                .then(function (d) {
+                    if (!d || !d.rows) return;
+                    // Index rows: key = (catalog::module, source, tag, statistic) → value
+                    var byKey = {};
+                    d.rows.forEach(function (r) {
+                        var mkey = r.catalog + '::' + r.module;
+                        byKey[mkey + '|' + r.source + '|' + r.tag + '|' + r.statistic] = r.value;
+                    });
+                    modRows.forEach(function (row) {
+                        var modKey = row.dataset.modKey;
+                        row.querySelectorAll('td.mv-cell').forEach(function (cell) {
+                            var tag = cell.dataset.tag;
+                            var stat = STAT_FOR_TAG(tag);
+                            // Try methods in priority order
+                            for (var i = 0; i < METHOD_PRIORITY.length; i++) {
+                                var v = byKey[modKey + '|' + METHOD_PRIORITY[i] + '|' + tag + '|' + stat];
+                                if (v != null) {
+                                    var abs = Math.abs(v);
+                                    // Colour intensity by |value| on 0..1 (both stats fit that)
+                                    var alpha = Math.min(1, abs / 0.5);
+                                    var hue = (stat === 'spearman' && v < 0) ? 350 : 210;
+                                    cell.style.backgroundColor = 'hsla(' + hue + ', 70%, 55%, ' + alpha + ')';
+                                    cell.textContent = (stat === 'spearman' ? (v >= 0 ? '+' : '') + v.toFixed(2) : v.toFixed(2));
+                                    cell.title = tag + ' (' + stat + '): ' + v.toFixed(4) + '  · via ' + METHOD_PRIORITY[i];
+                                    return;
+                                }
+                            }
+                            cell.textContent = '';
+                            cell.title = tag + ': not scored / tag absent in this dataset';
+                        });
                     });
                 })
                 .catch(function () {});

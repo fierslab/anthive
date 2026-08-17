@@ -145,16 +145,17 @@ def _r_squared(values: np.ndarray, x: np.ndarray) -> tuple[float, float, float]:
 #: them under those exact names in the view (obscat/obsnum after obs_rename
 #: is applied). Each is mapped to its tag id. Extends via obs_tags: entries.
 _CANONICAL_TAGS = {
-    'sex':       'sex',
-    'braak':     'braak',
-    'donor_id':  'donor',
-    'cluster':   'cluster',
-    'age':       'age',
-    'disease':   'disease',
-    'condition': 'condition',
-    'apoe':      'apoe',
-    'pmi':       'pmi',
-    'region':    'region',
+    'sex':         'sex',
+    'braak':       'braak',
+    'braak_group': 'braak_group',
+    'donor_id':    'donor',
+    'cluster':     'cluster',
+    'age':         'age',
+    'disease':     'disease',
+    'condition':   'condition',
+    'apoe':        'apoe',
+    'pmi':         'pmi',
+    'region':      'region',
 }
 
 
