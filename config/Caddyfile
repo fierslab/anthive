@@ -106,6 +106,12 @@ import {$ANTHIVE_HTTP_REDIRECT_SNIPPET:caddy-http-redirect.dev}
 
 	# Serve static files for JupyterLite
 	# COOP/COEP headers are required for SharedArrayBuffer (Pyodide kernel)
+	# `/jupyter` (no trailing slash) doesn't match `/jupyter/*` globs, so
+	# redirect first — otherwise it falls through to the browser proxy
+	# and 404s.
+	handle /jupyter {
+		redir /jupyter/ 301
+	}
 	handle /jupyter/* {
 		header Cross-Origin-Opener-Policy "same-origin"
 		header Cross-Origin-Embedder-Policy "require-corp"

@@ -2221,16 +2221,20 @@ def test_folder_page_uses_unified_icon(client):
     assert " · published" in resp.text or " · unpublished" in resp.text
 
 
-def test_dataset_page_has_unified_icon_next_to_title(client):
+def test_dataset_page_has_unified_icon_next_to_actions(client):
+    # 2026-08 layout: <h1> title dropped (breadcrumb carries the name); the
+    # unified access/publication icon moved to the top-right action row,
+    # just left of the visualize + notebook + edit buttons.
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
-    # header uses the larger variant of the same class family
     assert 'class="ds-pub-icon"' in resp.text
-    # icon sits INSIDE the <h1 class="ds-title"> so it renders next to the title
-    idx_h1 = resp.text.find('<h1 class="ds-title"')
+    # icon lives inside `.ds-actions`
+    idx_actions = resp.text.find('class="ds-actions"')
     idx_span = resp.text.find('class="ds-pub-icon"')
-    assert idx_h1 > 0 and idx_span > idx_h1
-    # and the old two-glyph access/source pair is gone
+    assert idx_actions > 0 and idx_span > idx_actions
+    # standalone <h1> is gone
+    assert '<h1 class="ds-title"' not in resp.text
+    # old two-glyph access/source pair still gone
     assert 'class="ds-acc"' not in resp.text
 
 

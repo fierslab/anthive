@@ -94,9 +94,9 @@
 
   /* Consolidated header row: breadcrumb (click-to-copy ids) + action buttons. */
   .ds-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 4px 0 8px; }
-  .ds-bc { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 14px; color: var(--text); min-width: 0; }
+  .ds-bc { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 17px; color: var(--text); min-width: 0; }
   .ds-bc a { color: var(--link); }
-  .ds-bc .ds-cur { font-weight: 600; }
+  .ds-bc .ds-cur { font-weight: 600; font-size: 19px; }
   .ds-bc .bc-sep { color: #cbd5e1; }
   .ds-bc .ds-basename { color: #94a3b8; font-family: var(--font-mono); font-size: 12px; }
   .idcopy { font-family: var(--font-mono); font-size: 11px; color: var(--text); cursor: pointer; padding: 0 3px; border-radius: 3px; }
@@ -311,13 +311,11 @@
     </div>
   </div>
   {% endif %}
+  {% if pub_icon and pub_icon.glyph %}<span class="ds-pub-icon" style="color:{{ pub_icon.color }};margin-right:0" title="{{ pub_icon.tooltip }}">{{ pub_icon.glyph|safe }}</span>{% endif %}
+  {% if has_duckdb %}<a class="btn-grey btn-icon" href="/jupyter/" target="_blank" rel="noopener" title="open dataset in JupyterLite">📓 notebook</a>{% endif %}
   {% if is_admin %}<a class="btn-edit btn-icon" href="/admin/edit/{{ group_id|urlencode }}/{{ file_id|urlencode }}" title="edit this dataset's .md (admin)">✎ edit</a>{% endif %}
   </div>
 </div>
-
-<!-- Title — below the breadcrumb; falls back to the basename when there's no title.
-     Unified access + publication icon sits directly before the title. -->
-<h1 class="ds-title">{% if pub_icon and pub_icon.glyph %}<span class="ds-pub-icon" style="color:{{ pub_icon.color }}" title="{{ pub_icon.tooltip }}">{{ pub_icon.glyph|safe }}</span>{% endif %}{{ info.title or basename or file_id }}</h1>
 
 <!-- Provenance — compact row (access/source moved to icons by the visualize button). -->
 {% if dataset_meta and (dataset_meta.license or dataset_meta.contributor or dataset_meta.doi or dataset_meta.pmid or dataset_meta.accession or dataset_meta.link) %}
@@ -533,15 +531,6 @@
   </div>
   {% endif %}
 
-  <div class="data-card">
-    <h2>Resources</h2>
-    <div style="padding:4px 0;display:flex;flex-direction:column;gap:6px;font-size:12px">
-        <span>dataset id: <code>{{ db_id }}</code></span>
-        <a href="/api/databases/{{ db_id }}/info">api info</a>
-        <a href="/api/docs#/default/get_cells_databases__db_id__cells_get">api docs → /cells</a>
-        <a href="/jupyter">open in jupyterlite</a>
-    </div>
-  </div>
   </div>
 </section>
 
