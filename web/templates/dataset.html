@@ -379,12 +379,12 @@
 
 <div class="tab-bar" id="ds-tab-bar" role="tablist">
   <button type="button" class="tab-btn active" data-tab="overview" role="tab">Overview</button>
+  <button type="button" class="tab-btn"        data-tab="data"     role="tab">Data</button>
   {% if gene_panel and gene_panel.genes %}
   <button type="button" class="tab-btn"        data-tab="genes"    role="tab">Genes<span class="tab-count">{{ gene_panel.genes|length }}</span></button>
   {% endif %}
-  <button type="button" class="tab-btn"        data-tab="data"     role="tab">Data</button>
   {% if n_module_scores %}
-  <button type="button" class="tab-btn"        data-tab="modules"  role="tab">Module scores<span class="tab-count">{{ n_module_scores }}</span></button>
+  <button type="button" class="tab-btn"        data-tab="modules"  role="tab">Modules<span class="tab-count">{{ n_module_scores }}</span></button>
   {% endif %}
   <button type="button" class="tab-btn"        data-tab="num"      role="tab">Numerical<span class="tab-count">{{ _num_cols|length }}</span></button>
   <button type="button" class="tab-btn"        data-tab="cat"      role="tab">Categorical<span class="tab-count">{{ _cat_cols|length }}</span></button>
@@ -437,11 +437,18 @@
     {% else %}<em>Generic {{ gene_panel.label.split(' ', 1)[1] if ' ' in gene_panel.label else gene_panel.label }}</em> — dataset did not precompute a favourite list.{% endif %}
   </div>
   <div class="table-wrap"><table class="obs-stats-tbl auto" id="obs-tbl-genes">
-    <thead><tr><th>gene</th><th class="obs-plots-th">plot</th></tr></thead>
+    <thead><tr>
+      <th>gene</th>
+      <th class="obs-plots-th">plot</th>
+      <th title="fraction of cells with expression > 0">% expr</th>
+      <th title="mean expression across ALL cells (zeros included)">mean</th>
+      <th title="mean expression among expressing cells (zeros excluded)">mean(nz)</th>
+      <th title="max expression observed in any single cell">max</th>
+    </tr></thead>
     <tbody>
     {% for gene in gene_panel.genes %}
     {% set _b = '/browse/' ~ folder_browse_id ~ '/' ~ file_id %}
-    <tr>
+    <tr class="gene-item" data-gene="{{ gene }}">
       <td class="colname">{{ gene }}</td>
       <td class="obs-plots">
         {% if has_duckdb %}
@@ -449,10 +456,18 @@
         {% if default_embedding %}<a class="obs-plot-icon" href="{{ _b }}/plot/scatter?embedding={{ default_embedding|urlencode }}&color={{ gene|urlencode }}" title="{{ default_embedding }} scatter, coloured by {{ gene }}">◉</a>{% endif %}
         {% endif %}
       </td>
+      <td class="g-pct" style="color:#555"></td>
+      <td class="g-mean" style="color:#555"></td>
+      <td class="g-mean-nz" style="color:#555"></td>
+      <td class="g-max" style="color:#555"></td>
     </tr>
     {% endfor %}
     </tbody>
   </table></div>
+  <div class="muted" style="font-size:11px;margin-top:4px">
+    Stats fetched from <code>/gene_stats</code> on the served (log-normalised
+    by convention) X layer. Genes missing from this dataset show blank rows.
+  </div>
 </section>
 {% endif %}
 
@@ -907,6 +922,34 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
             })
             .catch(function () {});
+
+        // Hydrate the Genes tab from /gene_stats. Batches ALL panel genes in
+        // one request (the endpoint takes comma-list). Missing genes stay
+        // blank. Log-normalised X layer is the served default.
+        (function () {
+            var rows = Array.from(document.querySelectorAll('#tab-genes .gene-item'));
+            if (!rows.length) return;
+            var genes = rows.map(function (r) { return r.dataset.gene; }).filter(Boolean);
+            if (!genes.length) return;
+            fetch(apiBase + '/gene_stats?genes=' + encodeURIComponent(genes.join(',')),
+                  { credentials: 'same-origin' })
+                .then(function (r) { return r.ok ? r.json() : null; })
+                .then(function (d) {
+                    if (!d || !d.stats) return;
+                    var byGene = {};
+                    d.stats.forEach(function (s) { byGene[s.gene.toLowerCase()] = s; });
+                    rows.forEach(function (row) {
+                        var s = byGene[row.dataset.gene.toLowerCase()];
+                        if (!s) return;
+                        var set = function (sel, v) { var c = row.querySelector(sel); if (c) c.textContent = v; };
+                        set('.g-pct',     s.pct_nonzero != null ? s.pct_nonzero.toFixed(1) + '%' : '');
+                        set('.g-mean',    fnum(s.mean));
+                        set('.g-mean-nz', fnum(s.mean_nonzero));
+                        set('.g-max',     fnum(s.max));
+                    });
+                })
+                .catch(function () {});
+        })();
 
         // Click tracking on obs-plot links (fire-and-forget POST /obs_click).
         function trackClick(href) {
