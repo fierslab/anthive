@@ -1942,6 +1942,24 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
     ]
     obs = db.get('obs', {})
 
+    # Default embedding for the "quick scatter" icons on the obs table:
+    #   1. `h5ad_embedding` from .h5ad.mus if present + still visual
+    #   2. else X_umap if present
+    #   3. else X_tsne if present
+    #   4. else the first remaining visual embedding
+    #   5. else None (no scatter icon rendered)
+    _hint = db.get('h5ad_embedding')
+    if _hint and _hint in embeddings:
+        default_embedding = _hint
+    elif 'X_umap' in embeddings:
+        default_embedding = 'X_umap'
+    elif 'X_tsne' in embeddings:
+        default_embedding = 'X_tsne'
+    elif embeddings:
+        default_embedding = embeddings[0]
+    else:
+        default_embedding = None
+
     # Split numerical obs columns into module-score triples (grouped by
     # (catalog, module) so scanpy/starcat/aucell for the same module collapse
     # to one row with per-method chips) vs everything else.
@@ -2094,6 +2112,7 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "info": info,
         "markdown_content": markdown_content,
         "obs_columns": obs_columns,
+        "default_embedding": default_embedding,
         "layer_stats_rows": layer_stats_rows,
         "dataset_meta": dataset_meta,
         "context_bar": context_bar,

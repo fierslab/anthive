@@ -114,6 +114,13 @@
   .obs-stats-tbl th { font-size: 10px; }
   .obs-stats-tbl td { font-family: var(--font-mono); color: #555; white-space: nowrap; }
   .obs-stats-tbl td.colname { font-family: var(--font); }
+  .obs-plots-th { text-align: center; }
+  .obs-stats-tbl td.obs-plots { text-align: center; padding: 0 6px; }
+  .obs-plot-icon {
+    display: inline-block; text-decoration: none; color: var(--text-muted);
+    font-size: 13px; padding: 0 4px; line-height: 1; cursor: pointer;
+  }
+  .obs-plot-icon:hover { color: var(--link); text-decoration: none; }
   .obs-sub { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; margin: 10px 0 2px; }
   .cat-top { display: inline-flex; gap: 4px; flex-wrap: wrap; }
   .cat-top .ct { background: #f1f5f9; border: 1px solid var(--border); border-radius: 9px; padding: 0 7px; font-family: var(--font); cursor: default; }
@@ -554,9 +561,17 @@
             data-has-starcat="{{ 1 if _mods.starcat else 0 }}"
             data-has-aucell="{{ 1 if _mods.aucell else 0 }}">
           <td>{{ mod.module }}</td>
-          <td>{% if _mods.scanpy %}<a class="mod-chip scanpy" href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ _mods.scanpy|urlencode }}" title="scanpy score column: {{ _mods.scanpy }}">scanpy</a>{% else %}<span class="mod-chip absent" title="not scored with scanpy">—</span>{% endif %}</td>
-          <td>{% if _mods.starcat %}<a class="mod-chip starcat" href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ _mods.starcat|urlencode }}" title="starCAT column: {{ _mods.starcat }}">starCAT</a>{% else %}<span class="mod-chip absent" title="not scored with starCAT">—</span>{% endif %}</td>
-          <td>{% if _mods.aucell %}<a class="mod-chip aucell" href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ _mods.aucell|urlencode }}" title="AUCell column: {{ _mods.aucell }}">AUCell</a>{% else %}<span class="mod-chip absent" title="not scored with AUCell">—</span>{% endif %}</td>
+          {% set _b = '/browse/' ~ folder_browse_id ~ '/' ~ file_id %}
+          {% macro _score_cell(score_col, method_label) -%}
+            {% if score_col %}<span class="obs-plots">
+              <a class="obs-plot-icon" href="{{ _b }}/plot/histogram?x={{ score_col|urlencode }}" title="histogram · {{ method_label }} · {{ score_col }}">▬</a>
+              <a class="obs-plot-icon" href="{{ _b }}/plot/ecdf?x={{ score_col|urlencode }}" title="ECDF · {{ method_label }} · {{ score_col }}">◢</a>
+              {% if default_embedding %}<a class="obs-plot-icon" href="{{ _b }}/plot/scatter?embedding={{ default_embedding|urlencode }}&color={{ score_col|urlencode }}" title="{{ default_embedding }} scatter · coloured by {{ method_label }} · {{ score_col }}">◉</a>{% endif %}
+            </span>{% else %}<span class="mod-chip absent" title="not scored with {{ method_label }}">—</span>{% endif %}
+          {%- endmacro %}
+          <td>{{ _score_cell(_mods.scanpy, 'scanpy') }}</td>
+          <td>{{ _score_cell(_mods.starcat, 'starCAT') }}</td>
+          <td>{{ _score_cell(_mods.aucell, 'AUCell') }}</td>
         </tr>
         {% endfor %}
         </tbody>
@@ -585,11 +600,19 @@
     <span class="obs-count muted" data-target="num" style="font-size:11px"></span>
   </div>
   <div class="table-wrap"><table class="obs-stats-tbl auto" id="obs-tbl-num">
-    <thead><tr><th>column</th><th>min</th><th>Q05</th><th>mean</th><th>median</th><th>Q95</th><th>max</th></tr></thead>
+    <thead><tr><th>column</th><th class="obs-plots-th">plot</th><th>min</th><th>Q05</th><th>mean</th><th>median</th><th>Q95</th><th>max</th></tr></thead>
     <tbody>
     {% for col in _num_cols %}
+    {% set _base = '/browse/' ~ folder_browse_id ~ '/' ~ file_id %}
     <tr class="obs-item" data-name="{{ col.name|lower }}">
-      <td class="colname">{% if has_duckdb %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ col.name|urlencode }}">{{ col.name }}</a>{% else %}{{ col.name }}{% endif %}</td>
+      <td class="colname">{{ col.name }}</td>
+      <td class="obs-plots">
+        {% if has_duckdb %}
+        <a class="obs-plot-icon" href="{{ _base }}/plot/histogram?x={{ col.name|urlencode }}" title="histogram of {{ col.name }}">▬</a>
+        <a class="obs-plot-icon" href="{{ _base }}/plot/ecdf?x={{ col.name|urlencode }}" title="ECDF of {{ col.name }}">◢</a>
+        {% if default_embedding %}<a class="obs-plot-icon" href="{{ _base }}/plot/scatter?embedding={{ default_embedding|urlencode }}&color={{ col.name|urlencode }}" title="{{ default_embedding }} scatter, coloured by {{ col.name }}">◉</a>{% endif %}
+        {% endif %}
+      </td>
       <td class="s-min"></td><td class="s-q05"></td><td class="s-mean"></td><td class="s-median"></td><td class="s-q95"></td><td class="s-max"></td>
     </tr>
     {% endfor %}
@@ -612,11 +635,18 @@
     <span class="obs-count muted" data-target="cat" style="font-size:11px"></span>
   </div>
   <div class="table-wrap"><table class="obs-stats-tbl auto" id="obs-tbl-cat">
-    <thead><tr><th>column</th><th># cats</th><th>top categories</th></tr></thead>
+    <thead><tr><th>column</th><th class="obs-plots-th">plot</th><th># cats</th><th>top categories</th></tr></thead>
     <tbody>
     {% for col in _cat_cols %}
+    {% set _base = '/browse/' ~ folder_browse_id ~ '/' ~ file_id %}
     <tr class="obs-item" data-name="{{ col.name|lower }}">
-      <td class="colname">{% if has_duckdb %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/bar?x={{ col.name|urlencode }}">{{ col.name }}</a>{% else %}{{ col.name }}{% endif %}</td>
+      <td class="colname">{{ col.name }}</td>
+      <td class="obs-plots">
+        {% if has_duckdb %}
+        <a class="obs-plot-icon" href="{{ _base }}/plot/bar?x={{ col.name|urlencode }}" title="bar plot: cells per {{ col.name }} category">▬</a>
+        {% if default_embedding %}<a class="obs-plot-icon" href="{{ _base }}/plot/scatter?embedding={{ default_embedding|urlencode }}&color={{ col.name|urlencode }}" title="{{ default_embedding }} scatter, coloured by {{ col.name }}">◉</a>{% endif %}
+        {% endif %}
+      </td>
       <td class="s-nuniq"></td><td class="s-top"></td>
     </tr>
     {% endfor %}
