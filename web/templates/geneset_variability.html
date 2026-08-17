@@ -40,9 +40,9 @@
 
 <div class="breadcrumb"><a href="/genesets">genesets</a> &rsaquo; module variability</div>
 <h1 class="page-title">Module variability across the fleet
-  <span class="info" title="For each module score (WGCNA gene sets + starCAT usages), how much of its per-cell variance is explained by a chosen sample tag — computed per dataset. Values are in a scale-invariant [0,1] variance-explained frame (eta2/omega2/R2), so categorical and numerical tags are comparable, as are datasets with different overall variability. spearman is signed [-1,1].">ⓘ</span></h1>
+  <span class="info" title="For each module score, how much of its per-cell variance is explained by a chosen sample tag — computed per dataset. Values are in a scale-invariant [0,1] variance-explained frame (eta2/omega2/R2), so categorical and numerical tags are comparable, as are datasets with different overall variability. spearman is signed [-1,1].">ⓘ</span></h1>
 
-<p class="mv-intro">Which gene-set / starCAT modules track a biological axis, and in which datasets. Pick a
+<p class="mv-intro">Which modules track a biological axis, and in which datasets. Pick a
 <b>tag</b> (e.g. braak stage) and a <b>statistic</b>; each cell shows how strongly that module’s
 score co-varies with the tag in that dataset. Hotter = stronger association.</p>
 
@@ -82,7 +82,6 @@ score co-varies with the tag in that dataset. Hotter = stronger association.</p>
     <select id="mv-source">
       <option value="">all sources</option>
       <option value="geneset">scanpy (gene sets) only</option>
-      <option value="starcat">starCAT only</option>
       <option value="aucell">AUCell only</option>
     </select>
   </div>

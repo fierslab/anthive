@@ -98,7 +98,7 @@
         if (!mine.length) { stateEl.textContent = 'Not scored on any tagged dataset for this statistic.'; return; }
         var html = '<div class="table-wrap"><table class="auto"><thead><tr><th>Dataset</th><th>Tag</th>'
           + '<th style="text-align:right">' + esc(stat) + '</th>'
-          + '<th style="width:40%">vs all modules in that dataset <span class="info" title="Where this gene set’s value sits among ALL module scores (gene sets + starCAT) for the same dataset and tag. Marker = this set; bar spans the min–max across modules.">ⓘ</span></th></tr></thead><tbody>';
+          + '<th style="width:40%">vs all modules in that dataset <span class="info" title="Where this gene set’s value sits among ALL module scores for the same dataset and tag. Marker = this set; bar spans the min–max across modules.">ⓘ</span></th></tr></thead><tbody>';
         mine.forEach(function (r) {
           var parts = String(r.dataset).split('/');
           var dsLink = parts.length === 2 ? '<a href="/browse/' + encodeURIComponent(parts[0]) + '/' + encodeURIComponent(parts[1]) + '">' + esc(r.dataset) + '</a>' : esc(r.dataset);
