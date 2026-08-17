@@ -4,7 +4,9 @@
 # ///
 
 """
-ant-sync — push/pull .h5ad and .duckdb files to/from S3.
+ant-sync — push/pull .h5ad, .duckdb, .scores.parquet, layer-parquet
+sidecars, AND per-group `<Group>/static/**` (paper PDFs, supp tables)
+to/from S3. `.md` / `.h5ad.mus` frontmatter is git-tracked and never touched.
 
 Usage:
   ant-sync push   [FILTER]   Upload local files to S3
@@ -113,19 +115,42 @@ def _rel_from_s3_key(s3_key: str, prefix: str) -> str:
     return s3_key[len(prefix_str):] if prefix_str else s3_key
 
 
-def _is_syncable(rel: str, allowed_exts: set[str] | None = None) -> bool:
+def _is_static_path(rel: str) -> bool:
+    """True if the relative path lives under a per-group `static/` folder.
+
+    Layout: `data/h5adstore/<Group>/static/<anything>`. These carry paper
+    PDFs, supplementary tables, etc. — catalog metadata that mirrors to S3
+    regardless of file extension. Always synced, always pulled, never
+    priority-gated.
+    """
+    parts = Path(rel).parts
+    # <Group>/static/... — 'static' as the 2nd path segment or deeper.
+    return 'static' in parts[:-1]
+
+
+def _is_syncable(
+    rel: str,
+    allowed_exts: set[str] | None = None,
+    include_static: bool = True,
+) -> bool:
     path = Path(rel)
     if path.name.startswith('.'):
         return False
+    # Skip _-prefixed folders (e.g. _synapse_raw) — staging / archive areas.
+    if any(part.startswith('_') for part in path.parts[:-1]):
+        return False
+    # `<Group>/static/**` files bypass the extension gate — they're
+    # catalog metadata (PDFs, supp tables) and can be any file type.
+    # Callers that want only a specific ext (--only .duckdb) pass
+    # include_static=False to opt out.
+    if include_static and _is_static_path(rel):
+        return True
     allowed = allowed_exts if allowed_exts is not None else SYNC_EXTENSIONS
     # endswith() (not path.suffix) because some extensions have multiple
     # dots: '.de.parquet' must match without also matching every '.parquet'.
     if not any(rel.endswith(ext) for ext in allowed):
         return False
     if any(rel.endswith(suffix) for suffix in SKIP_SUFFIXES):
-        return False
-    # Skip _-prefixed folders (e.g. _synapse_raw) — staging / archive areas.
-    if any(part.startswith('_') for part in path.parts[:-1]):
         return False
     return True
 
@@ -134,13 +159,14 @@ def _local_files(
     data_folder: Path,
     filter_pattern: str | None,
     allowed_exts: set[str] | None = None,
+    include_static: bool = True,
 ) -> list[tuple[Path, str]]:
     results = []
     for path in sorted(data_folder.rglob('*')):
         if not path.is_file():
             continue
         rel = str(path.relative_to(data_folder))
-        if not _is_syncable(rel, allowed_exts):
+        if not _is_syncable(rel, allowed_exts, include_static=include_static):
             continue
         # Never push a .duckdb or layer parquet whose dataset is marked inactive
         if path.suffix == '.duckdb' and path.with_suffix('.inactive').exists():
@@ -166,6 +192,7 @@ def _s3_objects(
     bucket: str,
     prefix: str,
     allowed_exts: set[str] | None = None,
+    include_static: bool = True,
 ) -> dict[str, int]:
     """Return {relative_path: size} for all syncable S3 objects."""
     paginator = client.get_paginator('list_objects_v2')
@@ -174,7 +201,7 @@ def _s3_objects(
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix_str):
         for obj in page.get('Contents', []):
             rel = _rel_from_s3_key(obj['Key'], prefix)
-            if rel and _is_syncable(rel, allowed_exts):
+            if rel and _is_syncable(rel, allowed_exts, include_static=include_static):
                 index[rel] = obj['Size']
     return index
 
@@ -783,8 +810,13 @@ def cmd_pull(args, s3_cfg: dict, data_folder: Path) -> None:
         allowed = PULL_DEFAULT_EXTS
         print('(skipping .duckdb — pass --include-duckdb or --only .duckdb to override)')
 
+    # `--only` / priority / duckdb modes want ONLY the requested ext.
+    # Default + include_duckdb pulls also include per-group `static/**`
+    # (paper PDFs, supp tables — small, always-present catalog metadata).
+    include_static = args.only is None and mode not in ('priority', 'duckdb')
     print('Scanning S3…')
-    s3_index = _s3_objects(client, bucket, prefix, allowed_exts=allowed)
+    s3_index = _s3_objects(client, bucket, prefix, allowed_exts=allowed,
+                           include_static=include_static)
 
     if args.filter:
         s3_index = {rel: size for rel, size in s3_index.items()
