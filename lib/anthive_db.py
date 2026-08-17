@@ -621,6 +621,53 @@ class AnthiveDB:
                         })
                     out[name]['top'] = top_items
 
+        # ─── extension: include score-parquet columns as numerical stats ───
+        # obs_summary walks obscat/obsnum but the score sidecar (aucell,
+        # starcat, geneset) lives in <basename>.scores.parquet — read it
+        # here so the modules-tab stats row can hydrate from the same
+        # /obs_summary payload.
+        sidecar = self._scores_sidecar_path()
+        if sidecar is not None:
+            try:
+                score_index = self._load_score_index()
+                if score_index:
+                    # One SUMMARIZE over the pivoted parquet would be ideal
+                    # but the parquet is long-form (cell_name, source,
+                    # catalog, module, value). Aggregate per (source,
+                    # catalog, module) — one bulk scan with GROUP BY.
+                    triples_rows = self._conn.execute(f"""
+                        SELECT source, catalog, module,
+                               MIN(score)  AS min_v,
+                               MAX(score)  AS max_v,
+                               AVG(score)  AS mean_v,
+                               MEDIAN(score) AS median_v,
+                               quantile_cont(score, 0.05) AS q05_v,
+                               quantile_cont(score, 0.95) AS q95_v,
+                               COUNT(*)    AS n_v,
+                               SUM(CASE WHEN score IS NULL THEN 1 ELSE 0 END) AS n_null
+                        FROM read_parquet(?)
+                        GROUP BY source, catalog, module
+                    """, [str(sidecar)]).fetchall()
+                    # Invert score_index: (source, catalog, module) → col_name
+                    reverse_index = {v: k for k, v in score_index.items()}
+                    for source, catalog, module, mn, mx, mean_v, med, q05, q95, n_v, n_null in triples_rows:
+                        col_name = reverse_index.get((source, catalog, module))
+                        if not col_name or col_name in out:
+                            continue
+                        pct_missing = round(100.0 * (n_null or 0) / n_v, 2) if n_v else 0.0
+                        out[col_name] = {
+                            'type': 'num',
+                            'min':    _coerce_num(mn),
+                            'max':    _coerce_num(mx),
+                            'mean':   _coerce_num(mean_v),
+                            'median': _coerce_num(med),
+                            'q05':    _coerce_num(q05),
+                            'q95':    _coerce_num(q95),
+                            'pct_missing': pct_missing,
+                        }
+            except Exception:
+                pass   # non-fatal — sidecar shape drift shouldn't kill the endpoint
+
         return out
 
     def search_genes(self, query: str, case_sensitive: bool = False,

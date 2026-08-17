@@ -126,11 +126,16 @@
   .obs-stats-tbl th { font-size: 10px; }
   .obs-stats-tbl td { font-family: var(--font-mono); color: #555; white-space: nowrap; }
   .obs-stats-tbl td.colname { font-family: var(--font); }
-  .obs-plots-th { text-align: center; border-left: 1px solid var(--border); border-right: 1px solid var(--border); }
+  .obs-plots-th { text-align: center; border-left: 1px solid #94a3b8; border-right: 1px solid #94a3b8; }
   .obs-stats-tbl td.obs-plots {
     text-align: center; padding: 0 6px; white-space: nowrap;
-    border-left: 1px solid var(--border-light); border-right: 1px solid var(--border-light);
+    border-left: 1px solid #cbd5e1; border-right: 1px solid #cbd5e1;
   }
+  .obs-stats-tbl td, .obs-stats-tbl th { border-bottom: 1px solid #e2e8f0; }
+  /* Data tab: auto-wrapping two-column card layout. */
+  .data-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 14px; margin-top: 8px; }
+  .data-card { border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; background: #fff; }
+  .data-card > h2:first-child { margin-top: 0; }
   .obs-plots .obs-plots { border: none; padding: 0; }   /* nested cell macro (module scores): no double border */
   .obs-plot-icon {
     display: inline-flex; align-items: center; justify-content: center;
@@ -407,11 +412,11 @@
 <section class="tab-panel active" id="tab-overview" role="tabpanel">
   {% if markdown_content %}<div class="ds-desc md-body">{{ markdown_content|safe }}</div>{% endif %}
 
-  {# Explore — curated quick-viz favourites (categories / numerical only).
+  {# Curated quick-viz favourites (categories / numerical only). No heading —
+     the chip rows self-identify by their "categories" / "numerical" labels.
      Genes moved to the Genes tab; embeddings + biology + resources moved
      to the Data tab. #}
   {% if dataset_meta and (dataset_meta.top_cat or dataset_meta.top_num) %}
-  <h2>Explore</h2>
   {% if dataset_meta.top_cat %}
   <div style="margin-bottom:4px">
       <span class="mk" style="display:inline-block;vertical-align:middle">categories</span>
@@ -482,85 +487,84 @@
 
 {# ── Data tab ─────────────────────────────────────────────────────────── #}
 <section class="tab-panel" id="tab-data" role="tabpanel">
-  <h2>Layers
-    <span class="info" title="X = the expression matrix served to plots (log-normalised by convention). Additional named layers (e.g. counts, sqrt) may be present.">ⓘ</span></h2>
-  {% if layer_stats_rows %}
-  <div class="table-wrap">
-  <table class="auto" style="font-size:12px">
-      <thead><tr>
-          <th>layer</th><th>dtype</th><th>min</th><th>min(nz)</th><th>max</th><th>median</th><th>q90</th><th>% zeros</th>
-      </tr></thead>
+  <div class="data-cards">
+  <div class="data-card">
+    <h2>Biology <span class="info" title="Headline biology — organism, technology, cell type, tissue, disease, prep — plus per-donor attributes when known.">ⓘ</span></h2>
+    <table class="obs-stats-tbl auto" style="font-size:12px">
       <tbody>
-      {% for row in layer_stats_rows %}
-      <tr>
-          <td><code>{{ row.name }}</code></td>
-          <td style="color:#888">{{ row.dtype }}</td>
-          <td style="color:#555">{{ row.min }}</td>
-          <td style="color:#555">{{ row.min_nz }}</td>
-          <td style="color:#555">{{ row.max }}</td>
-          <td style="color:#555">{{ row.median }}</td>
-          <td style="color:#555">{{ row.q90 }}</td>
-          <td style="color:#555">{{ row.pct_zeros }}%</td>
-      </tr>
-      {% endfor %}
+      {% if context_bar %}{% set _cb = context_bar %}
+        {% if _cb.organism.full %}<tr><td class="colname">organism</td><td title="{{ _cb.organism.full }}">{{ _cb.organism.full }}</td></tr>{% endif %}
+        {% if _cb.technology.full %}<tr><td class="colname">technology</td><td title="{{ _cb.technology.full }}">{{ _cb.technology.full }}</td></tr>{% endif %}
+        {% if _cb.celltype.full %}<tr><td class="colname">cell type</td><td title="{{ _cb.celltype.full }}">{{ _cb.celltype.full }}</td></tr>{% endif %}
+        {% if _cb.tissue.full %}<tr><td class="colname">tissue</td><td title="{{ _cb.tissue.full }}">{{ _cb.tissue.full }}</td></tr>{% endif %}
+        {% if _cb.disease.full %}<tr><td class="colname">disease</td><td title="{{ _cb.disease.full }}">{{ _cb.disease.full }}</td></tr>{% endif %}
+        {% if _cb.suspension_type.full %}<tr><td class="colname">prep</td><td title="{{ _cb.suspension_type.full }}">{{ _cb.suspension_type.full }}</td></tr>{% endif %}
+        {% if _cb.year %}<tr><td class="colname">year</td><td>{{ _cb.year }}</td></tr>{% endif %}
+      {% endif %}
+      {% if dataset_meta %}
+        {% if dataset_meta.condition %}<tr><td class="colname">condition</td><td>{{ dataset_meta.condition|join(', ') }}</td></tr>{% endif %}
+        {% if dataset_meta.sex %}<tr><td class="colname">sex</td><td>{{ dataset_meta.sex }}</td></tr>{% endif %}
+        {% if dataset_meta.age %}<tr><td class="colname">age</td><td>{{ dataset_meta.age }}</td></tr>{% endif %}
+        {% if dataset_meta.strain %}<tr><td class="colname">strain</td><td>{{ dataset_meta.strain }}</td></tr>{% endif %}
+      {% endif %}
       </tbody>
-  </table>
-  </div>
-  {% elif info.layers %}
-  <div style="padding:4px 0">
-      {% for layer in info.layers %}<code>{{ layer }}</code> {% endfor %}
-  </div>
-  {% else %}
-  <div class="tab-empty">no layers</div>
-  {% endif %}
-
-  <h2>Storage</h2>
-  <div class="info-col">
-    <div class="info-row"><span class="mk">default layer</span><span class="mono">{{ info.default_layer if info.default_layer else 'X' }}</span></div>
+    </table>
   </div>
 
-  {# Embeddings — moved from Overview. Chip row of scatter-launch links. #}
+  <div class="data-card">
+    <h2>Layers <span class="info" title="X = the expression matrix served to plots (log-normalised by convention). Additional named layers (e.g. counts, sqrt) may be present.">ⓘ</span></h2>
+    {% if layer_stats_rows %}
+    <div class="table-wrap">
+    <table class="auto" style="font-size:12px">
+        <thead><tr>
+            <th>layer</th><th>dtype</th><th>min</th><th>min(nz)</th><th>max</th><th>median</th><th>q90</th><th>% zeros</th>
+        </tr></thead>
+        <tbody>
+        {% for row in layer_stats_rows %}
+        <tr>
+            <td><code>{{ row.name }}</code></td>
+            <td style="color:#888">{{ row.dtype }}</td>
+            <td style="color:#555">{{ row.min }}</td>
+            <td style="color:#555">{{ row.min_nz }}</td>
+            <td style="color:#555">{{ row.max }}</td>
+            <td style="color:#555">{{ row.median }}</td>
+            <td style="color:#555">{{ row.q90 }}</td>
+            <td style="color:#555">{{ row.pct_zeros }}%</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+    {% elif info.layers %}
+    <div style="padding:4px 0">
+        {% for layer in info.layers %}<code>{{ layer }}</code> {% endfor %}
+    </div>
+    {% else %}
+    <div class="tab-empty">no layers</div>
+    {% endif %}
+    <div style="margin-top:6px;font-size:11px;color:var(--text-muted)">default layer: <span class="mono" style="color:var(--text)">{{ info.default_layer if info.default_layer else 'X' }}</span></div>
+  </div>
+
   {% if info and info.obsm_keys %}
-  <h2>Embeddings <span class="info" title="Per-cell 2D layouts (UMAP, tSNE, custom). Each links to a scatter plot on that embedding.">ⓘ</span></h2>
-  <div style="margin-bottom:4px">
-    {% for emb in info.obsm_keys %}
-      {% if has_duckdb %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/scatter?embedding={{ emb|urlencode }}" class="chip" title="scatter on {{ emb }}">{{ emb }}</a>{% else %}<code>{{ emb }}</code>{% endif %}
-    {% endfor %}
+  <div class="data-card">
+    <h2>Embeddings <span class="info" title="Per-cell 2D layouts (UMAP, tSNE, custom). Each links to a scatter plot on that embedding.">ⓘ</span></h2>
+    <div style="margin-bottom:4px">
+      {% for emb in info.obsm_keys %}
+        {% if has_duckdb %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/scatter?embedding={{ emb|urlencode }}" class="chip" title="scatter on {{ emb }}">{{ emb }}</a>{% else %}<code>{{ emb }}</code>{% endif %}
+      {% endfor %}
+    </div>
   </div>
   {% endif %}
 
-  {# Biology — headline metadata grid + sample attributes. Moved from top of
-     page (used to be the .ds-meta big-buttons row) so the top of the page
-     stays uncluttered. #}
-  <h2>Biology <span class="info" title="Headline biology — organism, technology, cell type, tissue, disease, prep — plus per-donor attributes when known.">ⓘ</span></h2>
-  {% if context_bar %}
-  {% set _cb = context_bar %}
-  <div class="ds-meta">
-    {% if _cb.organism.full %}<span class="mi"><span class="mk">organism</span><span class="mv" title="{{ _cb.organism.full }}">{{ _cb.organism.full }}</span></span>{% endif %}
-    {% if _cb.technology.full %}<span class="mi"><span class="mk">technology</span><span class="mv" title="{{ _cb.technology.full }}">{{ _cb.technology.full }}</span></span>{% endif %}
-    {% if _cb.celltype.full %}<span class="mi"><span class="mk">cell type</span><span class="mv" title="{{ _cb.celltype.full }}">{{ _cb.celltype.full }}</span></span>{% endif %}
-    {% if _cb.tissue.full %}<span class="mi"><span class="mk">tissue</span><span class="mv" title="{{ _cb.tissue.full }}">{{ _cb.tissue.full }}</span></span>{% endif %}
-    {% if _cb.disease.full %}<span class="mi"><span class="mk">disease</span><span class="mv" title="{{ _cb.disease.full }}">{{ _cb.disease.full }}</span></span>{% endif %}
-    {% if _cb.suspension_type.full %}<span class="mi"><span class="mk">prep</span><span class="mv" title="{{ _cb.suspension_type.full }}">{{ _cb.suspension_type.full }}</span></span>{% endif %}
-    {% if _cb.year %}<span class="mi"><span class="mk">year</span><span class="mv">{{ _cb.year }}</span></span>{% endif %}
+  <div class="data-card">
+    <h2>Resources</h2>
+    <div style="padding:4px 0;display:flex;flex-direction:column;gap:6px;font-size:12px">
+        <span>dataset id: <code>{{ db_id }}</code></span>
+        <a href="/api/databases/{{ db_id }}/info">api info</a>
+        <a href="/api/docs#/default/get_cells_databases__db_id__cells_get">api docs → /cells</a>
+        <a href="/jupyter">open in jupyterlite</a>
+    </div>
   </div>
-  {% endif %}
-  {% if dataset_meta and (dataset_meta.condition or dataset_meta.sex or dataset_meta.age or dataset_meta.strain) %}
-  <div class="info-col">
-      {% if dataset_meta.condition %}<div class="info-row"><span class="mk">condition</span><span>{{ dataset_meta.condition|join(', ') }}</span></div>{% endif %}
-      {% if dataset_meta.sex %}<div class="info-row"><span class="mk">sex</span><span>{{ dataset_meta.sex }}</span></div>{% endif %}
-      {% if dataset_meta.age %}<div class="info-row"><span class="mk">age</span><span>{{ dataset_meta.age }}</span></div>{% endif %}
-      {% if dataset_meta.strain %}<div class="info-row"><span class="mk">strain</span><span>{{ dataset_meta.strain }}</span></div>{% endif %}
-  </div>
-  {% endif %}
-
-  {# Resources — programmatic entry points. Moved from Overview. #}
-  <h2>Resources</h2>
-  <div style="padding:4px 0;display:flex;gap:14px;flex-wrap:wrap;font-size:12px;align-items:center">
-      <span>dataset id: <code>{{ db_id }}</code></span>
-      <a href="/api/databases/{{ db_id }}/info">api info</a>
-      <a href="/api/docs#/default/get_cells_databases__db_id__cells_get">api docs → /cells</a>
-      <a href="/jupyter">open in jupyterlite</a>
   </div>
 </section>
 
@@ -834,7 +838,16 @@ document.addEventListener('DOMContentLoaded', function() {
             if (h) activateTab(h, false);
         });
         var initHash = (location.hash || '').replace(/^#/, '');
-        if (initHash) activateTab(initHash, false);
+        if (initHash) {
+            activateTab(initHash, false);
+        } else {
+            // Default to Overview unless it's empty (no markdown + no
+            // top_cat + no top_num) — then jump straight to Data so the
+            // page opens on something useful.
+            var overviewPanel = panels['overview'];
+            var empty = overviewPanel && !overviewPanel.textContent.trim();
+            if (empty && panels['data']) activateTab('data', false);
+        }
     })();
 
     {% if obs_columns|length > 0 or n_module_scores > 0 %}
