@@ -2,6 +2,18 @@
 
 {% block title %}{{ dataset_name }} — anthive{% endblock %}
 
+{# Chart-type SVG icons for the obs/genes/modules tables. Sized via
+   CSS (.obs-plot-icon svg { width: 1em; height: 1em }). #}
+{% macro chart_icon(kind) -%}
+  {%- if kind == 'bar' -%}
+    <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="1.5" y="8" width="3" height="6"/><rect x="6.5" y="5" width="3" height="9"/><rect x="11.5" y="2" width="3" height="12"/></svg>
+  {%- elif kind == 'line' -%}
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M1.5 13 L5.5 8.5 L9 10.5 L14.5 3"/></svg>
+  {%- elif kind == 'umap' -%}
+    <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3.4" cy="4.2" r="1.5"/><circle cx="6.2" cy="2.6" r="1.5"/><circle cx="5.6" cy="7" r="1.5"/><circle cx="10.6" cy="9.6" r="1.5"/><circle cx="13.2" cy="7.6" r="1.5"/><circle cx="12.4" cy="12.6" r="1.5"/><circle cx="8.6" cy="13" r="1.5"/></svg>
+  {%- endif -%}
+{%- endmacro %}
+
 {% block content %}
 <style>
   /* Context bar — uniform neutral pill; no per-category colours (the label
@@ -117,9 +129,12 @@
   .obs-plots-th { text-align: center; }
   .obs-stats-tbl td.obs-plots { text-align: center; padding: 0 6px; }
   .obs-plot-icon {
-    display: inline-block; text-decoration: none; color: var(--text-muted);
-    font-size: 13px; padding: 0 4px; line-height: 1; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+    text-decoration: none; color: var(--text-muted);
+    font-size: 14px; padding: 0 4px; line-height: 1; cursor: pointer;
+    vertical-align: middle;
   }
+  .obs-plot-icon svg { width: 1em; height: 1em; display: block; }
   .obs-plot-icon:hover { color: var(--link); text-decoration: none; }
   .obs-sub { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; margin: 10px 0 2px; }
   .cat-top { display: inline-flex; gap: 4px; flex-wrap: wrap; }
@@ -452,8 +467,8 @@
       <td class="colname">{{ gene }}</td>
       <td class="obs-plots">
         {% if has_duckdb %}
-        <a class="obs-plot-icon" href="{{ _b }}/plot/histogram?x={{ gene|urlencode }}" title="histogram of {{ gene }}">▬</a>
-        {% if default_embedding %}<a class="obs-plot-icon" href="{{ _b }}/plot/scatter?embedding={{ default_embedding|urlencode }}&color={{ gene|urlencode }}" title="{{ default_embedding }} scatter, coloured by {{ gene }}">◉</a>{% endif %}
+        <a class="obs-plot-icon" href="{{ _b }}/plot/histogram?x={{ gene|urlencode }}" title="histogram of {{ gene }}">{{ chart_icon('bar') }}</a>
+        {% if default_embedding %}<a class="obs-plot-icon" href="{{ _b }}/plot/scatter?embedding={{ default_embedding|urlencode }}&color={{ gene|urlencode }}" title="{{ default_embedding }} scatter, coloured by {{ gene }}">{{ chart_icon('umap') }}</a>{% endif %}
         {% endif %}
       </td>
       <td class="g-pct" style="color:#555"></td>
@@ -606,9 +621,9 @@
           {% set _b = '/browse/' ~ folder_browse_id ~ '/' ~ file_id %}
           {% macro _score_cell(score_col, method_label) -%}
             {% if score_col %}<span class="obs-plots">
-              <a class="obs-plot-icon" href="{{ _b }}/plot/histogram?x={{ score_col|urlencode }}" title="histogram · {{ method_label }} · {{ score_col }}">▬</a>
-              <a class="obs-plot-icon" href="{{ _b }}/plot/ecdf?x={{ score_col|urlencode }}" title="ECDF · {{ method_label }} · {{ score_col }}">◢</a>
-              {% if default_embedding %}<a class="obs-plot-icon" href="{{ _b }}/plot/scatter?embedding={{ default_embedding|urlencode }}&color={{ score_col|urlencode }}" title="{{ default_embedding }} scatter · coloured by {{ method_label }} · {{ score_col }}">◉</a>{% endif %}
+              <a class="obs-plot-icon" href="{{ _b }}/plot/histogram?x={{ score_col|urlencode }}" title="histogram · {{ method_label }} · {{ score_col }}">{{ chart_icon('bar') }}</a>
+              <a class="obs-plot-icon" href="{{ _b }}/plot/ecdf?x={{ score_col|urlencode }}" title="ECDF · {{ method_label }} · {{ score_col }}">{{ chart_icon('line') }}</a>
+              {% if default_embedding %}<a class="obs-plot-icon" href="{{ _b }}/plot/scatter?embedding={{ default_embedding|urlencode }}&color={{ score_col|urlencode }}" title="{{ default_embedding }} scatter · coloured by {{ method_label }} · {{ score_col }}">{{ chart_icon('umap') }}</a>{% endif %}
             </span>{% else %}<span class="mod-chip absent" title="not scored with {{ method_label }}">—</span>{% endif %}
           {%- endmacro %}
           <td>{{ _score_cell(_mods.scanpy, 'scanpy') }}</td>
@@ -650,9 +665,9 @@
       <td class="colname">{{ col.name }}</td>
       <td class="obs-plots">
         {% if has_duckdb %}
-        <a class="obs-plot-icon" href="{{ _base }}/plot/histogram?x={{ col.name|urlencode }}" title="histogram of {{ col.name }}">▬</a>
-        <a class="obs-plot-icon" href="{{ _base }}/plot/ecdf?x={{ col.name|urlencode }}" title="ECDF of {{ col.name }}">◢</a>
-        {% if default_embedding %}<a class="obs-plot-icon" href="{{ _base }}/plot/scatter?embedding={{ default_embedding|urlencode }}&color={{ col.name|urlencode }}" title="{{ default_embedding }} scatter, coloured by {{ col.name }}">◉</a>{% endif %}
+        <a class="obs-plot-icon" href="{{ _base }}/plot/histogram?x={{ col.name|urlencode }}" title="histogram of {{ col.name }}">{{ chart_icon('bar') }}</a>
+        <a class="obs-plot-icon" href="{{ _base }}/plot/ecdf?x={{ col.name|urlencode }}" title="ECDF of {{ col.name }}">{{ chart_icon('line') }}</a>
+        {% if default_embedding %}<a class="obs-plot-icon" href="{{ _base }}/plot/scatter?embedding={{ default_embedding|urlencode }}&color={{ col.name|urlencode }}" title="{{ default_embedding }} scatter, coloured by {{ col.name }}">{{ chart_icon('umap') }}</a>{% endif %}
         {% endif %}
       </td>
       <td class="s-min"></td><td class="s-q05"></td><td class="s-mean"></td><td class="s-median"></td><td class="s-q95"></td><td class="s-max"></td>
@@ -685,8 +700,8 @@
       <td class="colname">{{ col.name }}</td>
       <td class="obs-plots">
         {% if has_duckdb %}
-        <a class="obs-plot-icon" href="{{ _base }}/plot/bar?x={{ col.name|urlencode }}" title="bar plot: cells per {{ col.name }} category">▬</a>
-        {% if default_embedding %}<a class="obs-plot-icon" href="{{ _base }}/plot/scatter?embedding={{ default_embedding|urlencode }}&color={{ col.name|urlencode }}" title="{{ default_embedding }} scatter, coloured by {{ col.name }}">◉</a>{% endif %}
+        <a class="obs-plot-icon" href="{{ _base }}/plot/bar?x={{ col.name|urlencode }}" title="bar plot: cells per {{ col.name }} category">{{ chart_icon('bar') }}</a>
+        {% if default_embedding %}<a class="obs-plot-icon" href="{{ _base }}/plot/scatter?embedding={{ default_embedding|urlencode }}&color={{ col.name|urlencode }}" title="{{ default_embedding }} scatter, coloured by {{ col.name }}">{{ chart_icon('umap') }}</a>{% endif %}
         {% endif %}
       </td>
       <td class="s-nuniq"></td><td class="s-top"></td>
