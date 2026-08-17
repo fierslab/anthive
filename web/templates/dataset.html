@@ -394,7 +394,12 @@
   <h2>Explore</h2>
   {% if dataset_meta and dataset_meta.top_genes %}
   <div style="margin-bottom:4px">
+      {% if top_genes_fallback %}
+      <span class="mk" style="display:inline-block;vertical-align:middle" title="This dataset has no precomputed marker genes — showing a generic canonical microglia panel so you still have something to click.">generic microglia markers</span>
+      <span class="muted-2" style="font-size:11px;margin-left:4px">click to plot; dataset did not precompute markers</span>
+      {% else %}
       <span class="mk" style="display:inline-block;vertical-align:middle">genes</span>
+      {% endif %}
       {% for gene in dataset_meta.top_genes %}
       <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ gene | urlencode }}" class="chip">{{ gene }}</a>
       {% endfor %}
@@ -507,12 +512,15 @@
     <span>methods on this dataset:</span>
     <span class="mod-legend-item" data-method="scanpy" {% if not score_method_counts.scanpy %}data-absent="1"{% endif %}>
       <span class="mod-swatch scanpy"></span>scanpy <span class="muted-2">({{ score_method_counts.scanpy or 0 }})</span>
+      <span class="info" title="Z-scored mean of the gene set vs a random control set (scanpy.tl.score_genes). Higher = the cell expresses the set's genes more than a matched-length random panel.">ⓘ</span>
     </span>
     <span class="mod-legend-item" data-method="starcat" {% if not score_method_counts.starcat %}data-absent="1"{% endif %}>
       <span class="mod-swatch starcat"></span>starCAT <span class="muted-2">({{ score_method_counts.starcat or 0 }})</span>
+      <span class="info" title="Regression-based score against a precomputed program (starCAT). Higher = the cell fits the program's expression signature.">ⓘ</span>
     </span>
     <span class="mod-legend-item" data-method="aucell" {% if not score_method_counts.aucell %}data-absent="1"{% endif %}>
       <span class="mod-swatch aucell"></span>AUCell <span class="muted-2">({{ score_method_counts.aucell or 0 }})</span>
+      <span class="info" title="Rank-based enrichment (AUCell). Higher = the set's genes are consistently among the top-expressed in the cell. Independent of overall expression magnitude.">ⓘ</span>
     </span>
     <span class="muted-2" id="mod-filter-hint" style="margin-left:auto">click a badge above to filter</span>
   </div>
@@ -520,33 +528,42 @@
     <input class="obs-filter" data-target="modules" type="text" placeholder="filter modules…" style="padding:2px 6px;font-family:inherit;font-size:12px;border:1px solid #ccc;outline:none;width:200px">
     <span class="obs-count muted" data-target="modules" style="font-size:11px"></span>
   </div>
-  <div class="table-wrap">
-  <table class="auto" id="mod-tbl" style="font-size:12px">
-    <thead><tr><th>Catalog</th><th>Module</th><th style="width:75px" title="scanpy sc.tl.score_genes">scanpy</th><th style="width:75px" title="starCAT program score">starCAT</th><th style="width:75px" title="AUCell rank-based score">AUCell</th></tr></thead>
-    <tbody>
-    {% for mod in module_scores %}
-    {% set _mods = mod.methods %}
-    <tr class="mod-item"
-        data-name="{{ (mod.catalog ~ ' ' ~ mod.module)|lower }}"
-        data-has-scanpy="{{ 1 if _mods.scanpy else 0 }}"
-        data-has-starcat="{{ 1 if _mods.starcat else 0 }}"
-        data-has-aucell="{{ 1 if _mods.aucell else 0 }}">
-      <td class="mono" style="font-size:11px;color:#555">
-        {% if mod.catalog and '/' in mod.catalog %}
-          {% set _cparts = mod.catalog.split('/') %}
-          <a href="/genesets/{{ _cparts[0]|urlencode }}/{{ _cparts[1]|urlencode }}" title="browse this catalog's gene sets">{{ mod.catalog }}</a>
-        {% elif mod.catalog %}
-          <a href="/genesets?group=starcat" title="starCAT catalog">{{ mod.catalog }}</a>
-        {% else %}—{% endif %}
-      </td>
-      <td>{{ mod.module }}</td>
-      <td>{% if _mods.scanpy %}<a class="mod-chip scanpy" href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ _mods.scanpy|urlencode }}" title="scanpy score column: {{ _mods.scanpy }}">scanpy</a>{% else %}<span class="mod-chip absent" title="not scored with scanpy">—</span>{% endif %}</td>
-      <td>{% if _mods.starcat %}<a class="mod-chip starcat" href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ _mods.starcat|urlencode }}" title="starCAT column: {{ _mods.starcat }}">starCAT</a>{% else %}<span class="mod-chip absent" title="not scored with starCAT">—</span>{% endif %}</td>
-      <td>{% if _mods.aucell %}<a class="mod-chip aucell" href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ _mods.aucell|urlencode }}" title="AUCell column: {{ _mods.aucell }}">AUCell</a>{% else %}<span class="mod-chip absent" title="not scored with AUCell">—</span>{% endif %}</td>
-    </tr>
+  <div id="mod-tbl">
+    {% for cat_group in module_scores_by_catalog %}
+    <details class="mod-cat-group" {% if loop.first %}open{% endif %} style="margin-bottom:6px">
+      <summary style="cursor:pointer;padding:4px 6px;background:#f7f7f8;border:1px solid #e5e7eb;border-radius:4px;font-size:12px">
+        {% if cat_group.catalog and '/' in cat_group.catalog %}
+          {% set _cparts = cat_group.catalog.split('/') %}
+          <a href="/genesets/{{ _cparts[0]|urlencode }}/{{ _cparts[1]|urlencode }}" title="browse this catalog's gene sets" onclick="event.stopPropagation()">{{ cat_group.catalog }}</a>
+        {% elif cat_group.catalog and cat_group.catalog != '(uncategorised)' %}
+          <a href="/genesets?group=starcat" title="starCAT catalog" onclick="event.stopPropagation()">{{ cat_group.catalog }}</a>
+        {% else %}
+          {{ cat_group.catalog }}
+        {% endif %}
+        <span class="muted-2" style="margin-left:4px">· {{ cat_group.n }} module{{ '' if cat_group.n == 1 else 's' }}</span>
+      </summary>
+      <div class="table-wrap" style="margin-top:4px">
+      <table class="auto mod-cat-table" style="font-size:12px">
+        <thead><tr><th>Module</th><th style="width:75px" title="scanpy sc.tl.score_genes">scanpy</th><th style="width:75px" title="starCAT program score">starCAT</th><th style="width:75px" title="AUCell rank-based score">AUCell</th></tr></thead>
+        <tbody>
+        {% for mod in cat_group.modules %}
+        {% set _mods = mod.methods %}
+        <tr class="mod-item"
+            data-name="{{ (mod.catalog ~ ' ' ~ mod.module)|lower }}"
+            data-has-scanpy="{{ 1 if _mods.scanpy else 0 }}"
+            data-has-starcat="{{ 1 if _mods.starcat else 0 }}"
+            data-has-aucell="{{ 1 if _mods.aucell else 0 }}">
+          <td>{{ mod.module }}</td>
+          <td>{% if _mods.scanpy %}<a class="mod-chip scanpy" href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ _mods.scanpy|urlencode }}" title="scanpy score column: {{ _mods.scanpy }}">scanpy</a>{% else %}<span class="mod-chip absent" title="not scored with scanpy">—</span>{% endif %}</td>
+          <td>{% if _mods.starcat %}<a class="mod-chip starcat" href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ _mods.starcat|urlencode }}" title="starCAT column: {{ _mods.starcat }}">starCAT</a>{% else %}<span class="mod-chip absent" title="not scored with starCAT">—</span>{% endif %}</td>
+          <td>{% if _mods.aucell %}<a class="mod-chip aucell" href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ _mods.aucell|urlencode }}" title="AUCell column: {{ _mods.aucell }}">AUCell</a>{% else %}<span class="mod-chip absent" title="not scored with AUCell">—</span>{% endif %}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    </details>
     {% endfor %}
-    </tbody>
-  </table>
   </div>
   <div class="muted" style="margin-top:6px;font-size:11px">
     Click a method to open a histogram of that per-cell score. Underlying obs-column

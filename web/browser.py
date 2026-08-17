@@ -113,6 +113,37 @@ def _as_list(value) -> list:
     return value if isinstance(value, list) else [value]
 
 
+# Embeddings that are scVI / PCA / other latent spaces produce dense-blob
+# scatter plots and are not useful for the visual chip row on the dataset
+# page. Filter them out. Keep UMAP / tSNE / FDG / diffmap / pymde / spatial /
+# custom names.
+_LATENT_EMBEDDING_RE = re.compile(
+    r'^(x_)?(pca|scvi|scanvi|harmony|bbknn|latent|hvg|counts_pca)($|_)',
+    re.IGNORECASE,
+)
+
+
+def _is_visual_embedding(name: str) -> bool:
+    """True when this obsm key is a meaningful 2D layout to plot; False for
+    latent spaces (X_scVI, X_pca, scvi_latents, latent_z, X_harmony, …)."""
+    if not name:
+        return False
+    return _LATENT_EMBEDDING_RE.match(str(name)) is None
+
+
+# When a microglia dataset has no precomputed top_genes, fall back to this
+# curated list of canonical microglia markers so the Explore chip row still
+# has something clickable. The template labels the section as "generic"
+# markers so we're not implying they're this dataset's own signature.
+_MICROGLIA_MARKER_FALLBACK = [
+    "CX3CR1", "P2RY12", "TMEM119", "C1QA", "C1QB", "C1QC", "CSF1R",
+    "ITGAM", "AIF1", "TREM2", "TYROBP", "HEXB", "CST3", "CTSD",
+    "APOE", "SPP1", "GPNMB", "IL1B", "TNF", "FCGR3A",
+]
+
+_MICROGLIA_CELLTYPE_TERMS = {"microglial cell", "microglia"}
+
+
 # Embed a live plot thumbnail in markdown with a compact scheme:
 #     ![caption](plot:GEOM?param=value&...)
 # On a dataset page the target dataset is implicit; in collection markdown (or
@@ -1732,7 +1763,11 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
     de_total_contrasts = sum((s.get('n_contrasts') or 0) for s in de_studies)
 
     layers = list(db.get('layers', {}).keys())
-    embeddings = list(db.get('embeddings', {}).keys())
+    # Filter out latent-space obsm keys (X_scVI, X_pca, scvi_latents, …) — they
+    # scatter to meaningless dense blobs. See _is_visual_embedding above.
+    embeddings = [
+        name for name in db.get('embeddings', {}).keys() if _is_visual_embedding(name)
+    ]
     obs = db.get('obs', {})
 
     # Split numerical obs columns into module-score triples (grouped by
@@ -1741,6 +1776,20 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
     score_grouped = _group_module_scores(obs.get('numerical', []) or [])
     module_scores = score_grouped['modules']
     method_counts = score_grouped['method_counts']
+
+    # Group modules by catalog so the Module-scores tab can render one
+    # collapsible <details> block per catalog. First catalog opens by default.
+    module_scores_by_catalog: List[Dict[str, Any]] = []
+    if module_scores:
+        by_cat: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for mod in module_scores:
+            by_cat[mod.get('catalog') or ''].append(mod)
+        for cat_name in sorted(by_cat.keys(), key=lambda s: s.lower()):
+            module_scores_by_catalog.append({
+                'catalog': cat_name or '(uncategorised)',
+                'modules': by_cat[cat_name],
+                'n':       len(by_cat[cat_name]),
+            })
 
     obs_columns = (
         [{'name': col, 'type': 'num'} for col in score_grouped['non_score_cols']] +
@@ -1760,11 +1809,20 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
     }
 
     accession = db.get('accession')
+    _celltype = db.get('cell_type') or db.get('celltype')
+    _top_genes = _as_list(db.get('top_genes'))
+    # Fallback: when a microglia dataset has no precomputed markers, show a
+    # curated canonical marker set so the Explore chip row is still useful.
+    # Only for microglia — do NOT do this for other cell types.
+    top_genes_fallback = False
+    if not _top_genes and isinstance(_celltype, str) and _celltype.lower() in _MICROGLIA_CELLTYPE_TERMS:
+        _top_genes = list(_MICROGLIA_MARKER_FALLBACK)
+        top_genes_fallback = True
     dataset_meta = {
         # Biology
         'organism':        db.get('organism'),
         'tissue':          _as_list(db.get('tissue')),
-        'celltype':        db.get('cell_type') or db.get('celltype'),
+        'celltype':        _celltype,
         'suspension_type': db.get('suspension_type'),
         'disease':         _as_list(db.get('disease')),
         'condition':       _as_list(db.get('condition')),
@@ -1784,7 +1842,7 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         'pmid':            _as_list(db.get('pmid')),
         'link':            _as_list(db.get('link')),
         # UI hints from .md
-        'top_genes':       _as_list(db.get('top_genes')),
+        'top_genes':       _top_genes,
         'top_cat':         _as_list(db.get('top_cat')),
         'top_num':         _as_list(db.get('top_num')),
     }
@@ -1870,8 +1928,10 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "n_cat_cols": n_cat,
         "n_num_cols": n_num,
         "module_scores": module_scores,
+        "module_scores_by_catalog": module_scores_by_catalog,
         "n_module_scores": n_modules,
         "score_method_counts": method_counts,
+        "top_genes_fallback": top_genes_fallback,
         "has_duckdb": True,
         "update_pending": False,
         "de_studies": de_studies,
