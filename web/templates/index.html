@@ -8,11 +8,6 @@
   .summary-row { display:flex; gap:14px; align-items:center; margin:2px 0 6px; font-size:12px; color:var(--text-muted); flex-wrap:wrap; }
   .summary-row .val { font-weight:600; color:var(--text); }
 
-  /* per-collection description: keep to one line, full text in title= */
-  .coll-desc { display:inline-block; max-width:520px; overflow:hidden;
-               text-overflow:ellipsis; white-space:nowrap; vertical-align:bottom;
-               font-size:11px; }
-
   /* compact "context" cell — organism + tech + celltype + tissue + disease + prep */
   .ctx-cell { display:inline-flex; gap:3px; flex-wrap:wrap; font-size:10px; line-height:1.2; }
   .ctx-pill {
@@ -84,11 +79,12 @@
     <tr>
       <th class="sortable" data-col="id" data-help="3-char study identifier">ID <span class="info" title="Click to sort by study ID">ⓘ</span><span class="sort-ind"></span></th>
       <th class="sortable" data-col="name"
-          data-help="Friendly collection name (the study). The 🌐/🔒 (access) and 🏠/↓ (source) icons sit after the name; filter by them here."
-          data-filter-fields="acc,src">Collection <span class="info" title="Click to sort by name or filter by access / source">ⓘ</span><span class="sort-ind"></span></th>
+          data-help="Friendly collection name (the study). Icon before the name is a globe (public) or house (internal); colour red = unpublished, green = published."
+          data-filter-fields="acc,pub">Collection <span class="info" title="Click to sort by name or filter by access / publication">ⓘ</span><span class="sort-ind"></span></th>
       <th class="sortable" data-col="n_datasets" data-help="Number of distinct .h5ad datasets in this collection">Datasets <span class="info" title="Click to sort by number of datasets in the collection">ⓘ</span><span class="sort-ind"></span></th>
       <th class="sortable" data-col="cells" data-help="Total cells summed across the collection's datasets">Cells <span class="info" title="Click to sort by total cells across the collection">ⓘ</span><span class="sort-ind"></span></th>
-      <th class="sortable" data-col="modified" data-help="Most recent modification across this collection's datasets (mus 'updated' or .md 'date')">Modified <span class="info" title="Click to sort by last modification date">ⓘ</span><span class="sort-ind"></span></th>
+      <th class="sortable" data-col="date" data-help="Publication year (when known and published), or upload date (mtime) otherwise">Date <span class="info" title="Click to sort by publication year / upload date">ⓘ</span><span class="sort-ind"></span></th>
+      <th class="sortable" data-col="tissue" data-help="Ordered by ontology hierarchy (brain → cortex → subregions → CSF/spinal cord at the bottom).">Region <span class="info" title="Sort tissues by ontology position">ⓘ</span><span class="sort-ind"></span></th>
       <th class="sortable" data-col="context"
           data-help="Compact summary: organism · technology · cell type · tissue · disease · prep. Each pill shows 'mix' when the collection's datasets disagree on that field."
           data-filter-fields="organism,technology,celltype,tissue,disease,suspension_type">Context <span class="info" title="Click to filter by organism, technology, cell type, tissue, disease or prep">ⓘ</span><span class="sort-ind"></span></th>
@@ -103,35 +99,39 @@
     {% set _tis = folder.tissue or {} %}
     {% set _dis = folder.disease or {} %}
     {% set _acc = folder.access or {} %}
-    {% set _src = folder.source or {} %}
+    {% set _icon = folder.pub_icon or {} %}
+    {% set _date = folder.dataset_date or {} %}
     <tr
       data-id="{{ folder.group_id or '' }}"
       data-name="{{ folder.name or '' }}"
       data-n_datasets="{{ folder.dataset_count }}"
       data-cells="{{ folder.total_cells or 0 }}"
       data-modified="{{ folder.last_modified or '' }}"
+      data-date="{{ _date.sort_ts or 0 }}"
       data-organism="{{ _org.full or '' }}"
       data-technology="{{ _tech.full or '' }}"
       data-celltype="{{ _cell.full or '' }}"
       data-suspension_type="{{ _sus.full or '' }}"
       data-tissue="{{ _tis.full or '' }}"
+      data-tissue-rank="{{ folder.tissue_rank or 0 }}"
       data-disease="{{ _dis.full or '' }}"
-      data-acc="{{ _acc.full or '' }}"
-      data-src="{{ _src.full or '' }}">
+      data-acc="{{ _icon.access or '' }}"
+      data-pub="{{ _icon.publication or '' }}">
       <td data-label="ID" class="muted-2 mono" style="font-size:11px">{{ folder.group_id or "—" }}</td>
       <td class="card-title">
-        {% if _acc.abbrev %}<span class="acc-src" title="access: {{ _acc.full }}">{{ _acc.abbrev }}</span>{% endif %}{% if _src.abbrev %}<span class="acc-src" title="source: {{ _src.full }}">{{ _src.abbrev }}</span>{% endif %}<a href="/browse/{{ folder.browse_id }}"><strong>{{ folder.name }}</strong></a>
-        {% if folder.summary and folder.summary != 'na' %}<br><span class="muted-2 coll-desc" title="{{ folder.summary }}">{{ folder.summary }}</span>{% endif %}
+        {% if _icon.glyph %}<span class="ap-icon" style="color:{{ _icon.color }}" title="{{ _icon.tooltip }}">{{ _icon.glyph }}</span>{% endif %}<a href="/browse/{{ folder.browse_id }}"{% if folder.summary and folder.summary != 'na' %} title="{{ folder.summary }}"{% endif %}><strong>{{ folder.name }}</strong></a>
       </td>
       <td data-label="Datasets" class="muted">{{ folder.dataset_count }}</td>
       <td data-label="Cells" class="muted mono" style="font-size:11px">{{ format_count(folder.total_cells) or "—" }}</td>
-      <td data-label="Modified" class="muted mono" style="font-size:11px;white-space:nowrap">{{ (folder.last_modified or '')[:10] or "—" }}</td>
+      <td data-label="Date" data-sort-ts="{{ _date.sort_ts or 0 }}" class="muted mono" style="font-size:11px;white-space:nowrap">{{ _date.iso or "—" }}</td>
+      <td data-label="Region" data-sort-tissue="{{ folder.tissue_rank or 0 }}" class="muted" style="font-size:11px">
+        {% if _tis.abbrev %}<span class="ctx-pill tissue" title="tissue: {{ _tis.full }}">{{ _tis.abbrev }}</span>{% endif %}
+      </td>
       <td class="card-span">
         <span class="ctx-cell">
           {% if _org.abbrev %}<span class="ctx-pill"         title="organism: {{ _org.full }}">{{ _org.abbrev }}</span>{% endif %}
           {% if _tech.abbrev %}<span class="ctx-pill tech"    title="technology: {{ _tech.full }}">{{ _tech.abbrev }}</span>{% endif %}
           {% if _cell.abbrev %}<span class="ctx-pill cell"    title="cell type: {{ _cell.full }}">{{ _cell.abbrev }}</span>{% endif %}
-          {% if _tis.abbrev %}<span class="ctx-pill tissue"  title="tissue: {{ _tis.full }}">{{ _tis.abbrev }}</span>{% endif %}
           {% if _dis.abbrev %}<span class="ctx-pill disease" title="disease: {{ _dis.full }}">{{ _dis.abbrev }}</span>{% endif %}
           {% if _sus.abbrev and _sus.abbrev != '—' %}<span class="ctx-pill prep" title="prep: {{ _sus.full }}">{{ _sus.abbrev }}</span>{% endif %}
         </span>
@@ -156,8 +156,8 @@
   // Map: { columnKey: Set<value> }. Empty/missing = no filter.
   const valueFilters = {};
 
-  // Current sort. Default: modified desc.
-  let sortCol = 'modified', sortDir = 'desc';
+  // Current sort. Default: date desc (canonical dataset_date).
+  let sortCol = 'date', sortDir = 'desc';
 
   function getRowVal(row, col) {
     return (row.getAttribute('data-' + col) || '').toLowerCase();
@@ -165,7 +165,9 @@
   function getRowSortVal(row, col) {
     const raw = row.getAttribute('data-' + col) || '';
     // Numeric columns: parse, fall back to 0
-    if (col === 'cells' || col === 'n_datasets') return Number(raw) || 0;
+    if (col === 'cells' || col === 'n_datasets' || col === 'date') return Number(raw) || 0;
+    // Tissue: DFS rank from the ontology hierarchy (lower = earlier).
+    if (col === 'tissue') return Number(row.getAttribute('data-tissue-rank') || 0);
     return raw.toLowerCase();
   }
 
@@ -294,7 +296,7 @@
       // Value filter — one section per component field, each with its own
       // <h5> heading and its own checklist + clear link.
       const filterableCols = new Set(
-        ['organism','technology','celltype','suspension_type','tissue','disease','acc','src']
+        ['organism','technology','celltype','suspension_type','tissue','disease','acc','pub']
       );
       const sectionLabels = {
         organism:        'organism',
@@ -304,7 +306,7 @@
         disease:         'disease',
         suspension_type: 'prep',
         acc:             'access',
-        src:             'source',
+        pub:             'publication',
       };
       const filterableFields = filterFields.filter(f => filterableCols.has(f));
       if (filterableFields.length) {

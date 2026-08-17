@@ -9,56 +9,68 @@
     <link rel="shortcut icon" href="/favicon.ico">
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
     <link rel="manifest" href="/site.webmanifest">
-    <meta name="theme-color" content="#0f172a">
+    <meta name="theme-color" content="#335C67">
+    <!-- Roboto — swaps out the system-font stack for a single consistent
+         typeface across pages. Falls back gracefully if the CDN is blocked. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bar-bg: #bacacf;
-            --bar-text: #333;
-            --bar-link: #444;
-            --bar-link-hover: #000;
-            --link: #2563eb;
-            --text: #1e293b;
-            --text-muted: #64748b;
-            --bg: #f8fafc;
-            --border: #e2e8f0;
-            --border-light: #f1f5f9;
-            --hover: #f1f5f9;
-            --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, sans-serif;
-            --font-mono: 'SF Mono', 'Fira Code', Consolas, monospace;
+            /* Palette refresh — dark teal is the new primary, cream for warn
+               backgrounds, amber medium, red high, dark red high accent. */
+            --bar-bg: #335C67;
+            --bar-text: #f5f7f6;
+            --bar-link: #e6ecec;
+            --bar-link-hover: #ffffff;
+            --link: #335C67;                /* dark teal — the new anchor */
+            --text: #1a1a1a;
+            --text-muted: #6b7280;
+            --bg: #FFFFFF;                  /* white background */
+            --border: #e2e5e8;
+            --border-light: #f1f3f5;
+            --hover: #f7f9fa;
+            --accent-cream: #FFF3B0;        /* warning bg */
+            --accent-amber: #E09F3E;        /* medium caveat */
+            --accent-red:   #9E2A2B;        /* high caveat / unpublished */
+            --accent-red-dark: #540B0E;     /* high-severity accent */
+            --font: "Roboto", -apple-system, system-ui, "Helvetica Neue", Helvetica, Arial, sans-serif;
+            --font-mono: "Roboto Mono", 'SF Mono', 'Fira Code', Consolas, monospace;
         }
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: var(--font); font-size: 13px; color: var(--text); background: var(--bg); line-height: 1.5; }
+        html { font-size: 15px; }
+        body { font-family: var(--font); font-size: 1rem; color: var(--text); background: var(--bg); line-height: 1.5; font-weight: 400; }
         a { color: var(--link); text-decoration: none; }
         a:hover { text-decoration: underline; }
 
         #topbar {
             background: var(--bar-bg);
             color: var(--bar-text);
-            padding: 0 16px;
-            height: 32px;
+            padding: 10px 20px;
+            min-height: 46px;
             display: flex;
             align-items: center;
-            gap: 14px;
-            font-size: 12px;
-            border-bottom: 1px solid #a8b8be;
+            gap: 16px;
+            font-size: 13px;
+            border-bottom: 1px solid #274a52;
         }
-        #topbar .brand { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; color: #333; font-size: 13px; text-decoration: none; }
-        #topbar .brand:hover { text-decoration: none; color: #000; }
-        #topbar .brand img { height: 20px; width: auto; display: block; }
-        #topbar nav { display: flex; gap: 14px; }
+        #topbar .brand { display: inline-flex; align-items: center; gap: 8px; font-weight: 500; color: var(--bar-text); font-size: 15px; text-decoration: none; letter-spacing: .3px; }
+        #topbar .brand:hover { text-decoration: none; color: #ffffff; }
+        #topbar .brand img { height: 30px; width: auto; display: block; }
+        #topbar nav { display: flex; gap: 16px; }
         /* Topbar wraps instead of overflowing on narrow screens. */
         @media (max-width: 560px) {
-            #topbar { height: auto; min-height: 32px; flex-wrap: wrap; padding: 4px 12px; gap: 8px 12px; }
+            #topbar { min-height: 46px; flex-wrap: wrap; padding: 8px 14px; gap: 8px 14px; }
         }
-        #topbar nav > a, #topbar nav .dropdown-toggle { color: var(--bar-link); font-size: 12px; }
+        #topbar nav > a, #topbar nav .dropdown-toggle { color: var(--bar-link); font-size: 13px; }
         #topbar nav > a:hover, #topbar nav .dropdown-toggle:hover { color: var(--bar-link-hover); text-decoration: none; }
         #topbar .gene-search { margin: 0; }
         #topbar .gene-search input {
-            font-size: 12px; padding: 2px 8px; width: 120px; border: 1px solid #9fb2b8;
-            border-radius: 10px; background: #fff; color: var(--text); outline: none;
+            font-size: 12px; padding: 3px 10px; width: 130px; border: 1px solid #4b7d88;
+            border-radius: 3px; background: #ffffff; color: var(--text); outline: none;
             font-family: var(--font);
         }
-        #topbar .gene-search input:focus { border-color: var(--link); width: 150px; }
+        #topbar .gene-search input:focus { border-color: var(--accent-cream); width: 160px; }
 
         .dropdown { position: relative; }
         .dropdown-toggle { cursor: pointer; }
@@ -76,12 +88,22 @@
         #topbar .topbar-auth .dropdown-toggle { color: var(--bar-link); }
         #topbar .topbar-auth .dropdown-toggle:hover { color: var(--bar-link-hover); }
 
-        main { padding: 10px 16px; max-width: 1200px; margin: 0 auto; }
+        main { padding: 12px 18px; max-width: 1200px; margin: 0 auto; }
 
-        table { width: 100%; border-collapse: collapse; font-size: 12px; }
-        th { text-align: left; padding: 5px 8px; border-bottom: 2px solid var(--border); color: var(--text-muted); font-weight: 600; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; }
+        /* Table cells stay tight — don't inherit the bumped body line-height. */
+        table { width: 100%; border-collapse: collapse; font-size: 12px; line-height: 1.4; }
+        th { text-align: left; padding: 5px 8px; border-bottom: 2px solid var(--border); color: var(--text-muted); font-weight: 500; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; }
         td { padding: 4px 8px; border-bottom: 1px solid var(--border-light); vertical-align: middle; }
         tr:hover td { background: var(--hover); }
+
+        /* Unified access + publication-status icon. Fixed-width container so
+           row alignment survives the two possible glyphs. Colour set inline
+           per-icon from the _access_pub_icon helper. */
+        .ap-icon {
+            display: inline-block; width: 1.2em; text-align: center;
+            font-size: 13px; vertical-align: middle; cursor: help;
+            filter: none;
+        }
         table.narrow { max-width: 480px; }
         table.auto { width: auto; }
 
@@ -175,8 +197,8 @@
         .info-row { display: flex; gap: 6px; line-height: 1.7; font-size: 12px; }
         .info-row > span:last-child { color: var(--text); flex: 1; }
 
-        .chip { display: inline-block; background: #eef2ff; color: #1d4ed8; border: 1px solid #bfdbfe; padding: 1px 6px; font-size: 11px; margin: 1px 3px 1px 0; text-decoration: none; }
-        .chip:hover { background: #dbeafe; text-decoration: none; }
+        .chip { display: inline-block; background: #eef2f2; color: #335C67; border: 1px solid #cfdcdd; padding: 1px 6px; font-size: 11px; margin: 1px 3px 1px 0; text-decoration: none; }
+        .chip:hover { background: #dde8e9; text-decoration: none; }
 
         /* Visualize action row on the dataset page */
         .viz-row { display: flex; gap: 14px; align-items: center; margin: 6px 0 10px; flex-wrap: wrap; }

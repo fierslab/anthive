@@ -6,19 +6,18 @@
 <style>
   /* Context bar — same pill vocabulary as landing/folder pages.
      Colors must mirror .ctx-pill in index.html. */
+  /* Context pills — uniform muted look; no per-category rainbow.
+     Dark teal text on cream background so the eye reads them as one family. */
   .ds-ctx { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 10px; }
   .ds-ctx .pill {
     display: inline-block; padding: 1px 7px; font-size: 11px;
     line-height: 1.5; border-radius: 10px; white-space: nowrap;
-    background: #eef2ff; color: #3730a3; border: 1px solid #e0e7ff;
+    background: #fbf5d3;             /* cream at low opacity */
+    color: #335C67;
+    border: 1px solid #e6dca9;
   }
-  .ds-ctx .pill.tech    { background:#fef3c7; color:#92400e; border-color:#fde68a; }
-  .ds-ctx .pill.cell    { background:#dcfce7; color:#166534; border-color:#bbf7d0; }
-  .ds-ctx .pill.tissue  { background:#e0f2fe; color:#075985; border-color:#bae6fd; }
-  .ds-ctx .pill.disease { background:#fee2e2; color:#991b1b; border-color:#fecaca; }
-  .ds-ctx .pill.prep    { background:#fce7f3; color:#9d174d; border-color:#fbcfe8; }
-  .ds-ctx .pill.icon    { background:#f5f5f5; color:#444; border-color:#e5e5e5; font-size:13px; line-height:1.2; }
-  .ds-ctx .pill.year    { background:#f3f4f6; color:#374151; border-color:#e5e7eb; font-family:var(--font-mono); }
+  .ds-ctx .pill.icon    { background: #f5f5f5; color: #444; border-color: #e5e5e5; font-size: 13px; line-height: 1.2; }
+  .ds-ctx .pill.year    { background: #f3f4f6; color: #374151; border-color: #e5e7eb; font-family: var(--font-mono); }
 
   /* Quick external-link badges (DOI / PubMed / accession / URL) under the
      context bar — small and inconspicuous (plain links, not filled pills). */
@@ -102,6 +101,9 @@
   .btn-grey .caret { font-size: 9px; opacity: .8; margin-left: 3px; }
   .btn-grey.btn-icon { padding: 6px 11px; }
   .ds-acc { font-size: 15px; cursor: default; align-self: center; padding: 0 1px; filter: grayscale(1); }   /* monochrome */
+  /* Header pub icon — larger version of the same fixed-width glyph as the
+     row-level indicator, so the visual language stays consistent. */
+  .ds-pub-icon { display: inline-block; width: 1.4em; text-align: center; font-size: 20px; vertical-align: middle; cursor: help; margin-right: 6px; }
   #viz-menu-panel a { filter: grayscale(1); }   /* b/w the plot-category emoji in the dropdown */
   /* descriptive biology metadata — responsive grid, more columns as width grows */
   .ds-meta { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 6px; margin: 6px 0 10px; }
@@ -213,16 +215,17 @@
 <!-- Consolidated header: breadcrumb with click-to-copy ids + action buttons. -->
 <div class="ds-top">
   <div class="ds-bc">
-    <span class="idcopy" data-copy="{{ db_id }}" title="click to copy {{ db_id }}">[{{ db_id }}]</span>
+    <!-- file_id first (the 3-letter dataset code, e.g. MIC/MPF/SGM) — this is
+         the short-form users cite. db_id lives at the tail, folder link + name
+         in the middle. Fixed monospace so it visually anchors the row. -->
+    <span class="idcopy" data-copy="{{ file_id }}" title="click to copy {{ file_id }}" style="min-width:3.5em;text-align:center">[{{ file_id }}]</span>
     <a href="/browse/{{ folder_browse_id }}">{{ folder_name }}</a>
     <span class="idcopy" data-copy="{{ group_id }}" title="click to copy {{ group_id }}">[{{ group_id }}]</span>
     <span class="bc-sep">/</span>
     <span class="ds-cur">{{ dataset_name }}</span>
-    <span class="idcopy" data-copy="{{ file_id }}" title="click to copy {{ file_id }}">[{{ file_id }}]</span>
+    <span class="idcopy" data-copy="{{ db_id }}" title="click to copy {{ db_id }}">[{{ db_id }}]</span>
   </div>
   <div class="ds-actions">
-    {% if context_bar and context_bar.access and context_bar.access.abbrev %}<span class="ds-acc" title="access: {{ context_bar.access.full }}">{{ context_bar.access.abbrev }}</span>{% endif %}
-    {% if context_bar and context_bar.source and context_bar.source.abbrev %}<span class="ds-acc" title="source: {{ context_bar.source.full }}">{{ context_bar.source.abbrev }}</span>{% endif %}
     {% if has_duckdb %}
     <div class="viz-menu" id="viz-menu">
       <button type="button" class="btn-grey" id="viz-menu-btn" aria-haspopup="true" aria-expanded="false">visualize <span class="caret">▾</span></button>
@@ -283,8 +286,9 @@
   </div>
 </div>
 
-<!-- Title — below the breadcrumb; falls back to the basename when there's no title. -->
-<h1 class="ds-title">{{ info.title or basename or file_id }}{% if basename and info.title and basename != info.title %}<span class="ds-title-base" title="file basename">{{ basename }}</span>{% endif %}</h1>
+<!-- Title — below the breadcrumb; falls back to the basename when there's no title.
+     Unified access + publication icon sits directly before the title. -->
+<h1 class="ds-title">{% if pub_icon and pub_icon.glyph %}<span class="ds-pub-icon" style="color:{{ pub_icon.color }}" title="{{ pub_icon.tooltip }}">{{ pub_icon.glyph }}</span>{% endif %}{{ info.title or basename or file_id }}{% if basename and info.title and basename != info.title %}<span class="ds-title-base" title="file basename">{{ basename }}</span>{% endif %}</h1>
 
 <!-- Biology metadata — descriptive ("Organism: mouse"), responsive grid. -->
 {% if context_bar %}
@@ -324,15 +328,6 @@
         <span class="val">{{ de_total_contrasts }}</span> contrasts
     </div>
     {% endif %}
-    <div>
-        {% if update_pending %}
-        <span class="dot dot-pending" title="update pending"></span> update pending
-        {% elif has_duckdb %}
-        <span class="dot dot-ok" title="ready"></span> ready
-        {% else %}
-        <span class="dot dot-warn" title="not converted"></span> not converted
-        {% endif %}
-    </div>
 </div>
 {% endif %}
 

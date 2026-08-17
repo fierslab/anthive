@@ -97,6 +97,13 @@ def _reports(request: Request) -> list:
     return getattr(request.app.state, 'reports', [])
 
 
+# On-disk root of the .md / .h5ad.mus / .h5ad files. Used to read frontmatter
+# fields ant-serve doesn't currently expose (publication_status) and to stat
+# dataset files for the on-disk-mtime fallback in _dataset_date. Also serves
+# per-collection static/ downloads (see _group_static_files below).
+_H5ADSTORE_ROOT = Path(__file__).parent.parent / 'data' / 'h5adstore'
+
+
 # ── misc helpers ───────────────────────────────────────────────────────────────
 
 def _as_list(value) -> list:
@@ -434,6 +441,269 @@ _SOURCE_ABBREV = {
 }
 
 
+# ── unified access + publication-status icon ─────────────────────────────────
+# One glyph replaces the old two-icon (access + source) system. Shape encodes
+# access (public → globe, internal → house); colour encodes publication_status
+# (unpublished → muted red, published → muted green). Container width is fixed
+# so row alignment survives regardless of glyph choice.
+#
+# publication_status is NOT exposed by ant-serve (2026-08) — read it directly
+# from the collection's ``data/h5adstore/<group>/index.md`` YAML frontmatter.
+# One-line grep-parse; cached at import so we don't stat 60 files per request.
+
+# Muted palette, subdued not saturated.
+_PUB_COLOR_PUBLISHED   = '#4a7c59'    # desaturated green
+_PUB_COLOR_UNPUBLISHED = '#9E2A2B'    # muted red (palette)
+
+# Globe = public (world-visible), house = internal (in-lab). Plain HTML glyphs
+# so no external font/icon dependency.
+_ACCESS_GLYPH = {'public': '🌐', 'internal': '🏠'}
+
+
+def _access_pub_icon(access: Optional[str], publication_status: Optional[str]) -> Dict[str, str]:
+    """Return {glyph, color, tooltip, access, publication} for the unified icon.
+
+    Missing ``access`` defaults to ``internal`` (the safer default — a dataset
+    without explicit access is not shareable). Missing ``publication_status``
+    means "published" (unpublished must be explicitly set).
+    """
+    acc = (access or 'internal').lower()
+    if acc not in _ACCESS_GLYPH:
+        acc = 'internal'
+    pub_raw = (publication_status or '').lower()
+    unpublished = pub_raw == 'unpublished'
+    glyph = _ACCESS_GLYPH[acc]
+    color = _PUB_COLOR_UNPUBLISHED if unpublished else _PUB_COLOR_PUBLISHED
+    access_word = 'external' if acc == 'public' else 'internal'
+    pub_word = 'unpublished' if unpublished else 'published'
+    return {
+        'glyph': glyph,
+        'color': color,
+        'access': access_word,
+        'publication': pub_word,
+        'tooltip': f'{access_word} · {pub_word}',
+    }
+
+
+# Cache the publication_status field parsed from data/h5adstore/<group>/index.md
+# frontmatter. Loaded lazily on first read per group; each entry is either a
+# string ('unpublished', 'published', …) or None (field absent). Cleared by
+# calling ``_pub_status_cache.clear()`` if needed.
+_pub_status_cache: Dict[str, Optional[str]] = {}
+
+
+def _publication_status_for_group(group_name: Optional[str]) -> Optional[str]:
+    """Read ``publication_status`` from ``data/h5adstore/<group>/index.md``.
+
+    ``group_name`` is the folder name (``collection.group`` from the API — the
+    long-form like ``Blackburn2026``, NOT the short ``group_id``). Returns the
+    frontmatter value (lower-cased) or None if the file/field is missing.
+    """
+    if not group_name:
+        return None
+    if group_name in _pub_status_cache:
+        return _pub_status_cache[group_name]
+    result: Optional[str] = None
+    try:
+        path = _H5ADSTORE_ROOT / group_name / 'index.md'
+        if path.is_file():
+            # Minimal one-line YAML parse. The frontmatter is small and
+            # well-formed; we only need one field. Avoids a yaml dep.
+            with path.open('r', encoding='utf-8', errors='replace') as fh:
+                in_fm = False
+                for lineno, line in enumerate(fh):
+                    if line.startswith('---'):
+                        if not in_fm:
+                            in_fm = True
+                            continue
+                        break   # end of frontmatter
+                    if not in_fm:
+                        continue
+                    if line.lower().lstrip().startswith('publication_status:'):
+                        _, _, value = line.partition(':')
+                        result = value.strip().strip("'\"").lower() or None
+                        break
+                    if lineno > 500:   # frontmatter should be tiny
+                        break
+    except (OSError, UnicodeError):
+        result = None
+    _pub_status_cache[group_name] = result
+    return result
+
+
+# ── canonical dataset date ──────────────────────────────────────────────────
+# Preferred date shown next to a dataset row: the study's publication year
+# when known (and NOT unpublished — otherwise we're claiming a fake publication
+# date), else the file's on-disk mtime (upload date). Kept as a small helper so
+# both landing + folder templates can render the same value.
+
+import time as _time
+
+
+def _dataset_date(dataset_info: Dict, group_name: Optional[str] = None,
+                  publication_status: Optional[str] = None) -> Dict[str, Any]:
+    """Return {iso, sort_ts} — the canonical date + a sortable epoch float.
+
+    Rules (in order):
+      1. ``year`` in the dataset .md AND publication_status != 'unpublished'
+         → ISO date built from year/month/day (year alone → 'YYYY-01-01').
+      2. otherwise → file mtime on disk (upload / last-modification date).
+      3. neither available → empty iso, sort_ts = 0.
+    """
+    pub = (publication_status or '').lower()
+    year = dataset_info.get('year')
+    # normalize year: API sometimes hands it back as a string
+    if isinstance(year, str) and year.isdigit():
+        year_int: Optional[int] = int(year)
+    elif isinstance(year, int):
+        year_int = year
+    else:
+        year_int = None
+    if year_int and pub != 'unpublished':
+        month = dataset_info.get('month') or 1
+        day = dataset_info.get('day') or 1
+        try:
+            month = int(month); day = int(day)
+        except (TypeError, ValueError):
+            month, day = 1, 1
+        iso = f'{year_int:04d}-{month:02d}-{day:02d}'
+        try:
+            ts = _time.mktime((year_int, month, day, 0, 0, 0, 0, 0, -1))
+        except (OverflowError, ValueError):
+            ts = 0.0
+        return {'iso': iso, 'sort_ts': ts}
+
+    # Fall back to on-disk mtime of the .duckdb (best proxy for "upload").
+    path_str = dataset_info.get('path') or ''
+    if path_str and group_name is not None:
+        for candidate in (
+            _H5ADSTORE_ROOT / path_str,
+            _H5ADSTORE_ROOT / group_name / Path(path_str).name,
+        ):
+            try:
+                if candidate.is_file():
+                    mtime = candidate.stat().st_mtime
+                    iso = _time.strftime('%Y-%m-%d', _time.localtime(mtime))
+                    return {'iso': iso, 'sort_ts': mtime}
+            except OSError:
+                continue
+    return {'iso': '', 'sort_ts': 0.0}
+
+
+# ── brain-region tree sort ──────────────────────────────────────────────────
+# Order tissues by their DFS position in the anthive ontology hierarchy
+# (lib/_ontology_hierarchy.yaml). CSF + spinal cord sink to the bottom; anything
+# not in the hierarchy sorts alphabetically after everything else. Multi-region
+# datasets use their FIRST tissue's DFS position as the sort key.
+_ONTOLOGY_PATH = Path(__file__).parent.parent / 'lib' / '_ontology_hierarchy.yaml'
+
+
+def _load_tissue_hierarchy() -> Dict[str, Optional[str]]:
+    """Parse the tissue: block out of ``_ontology_hierarchy.yaml``.
+
+    Minimal parser (no PyYAML in the web scope): reads ``child: parent`` under
+    the ``tissue:`` heading. Blank / comment / non-key lines are skipped.
+    Returns ``{}`` when the file is absent.
+    """
+    out: Dict[str, Optional[str]] = {}
+    try:
+        if not _ONTOLOGY_PATH.is_file():
+            return out
+        with _ONTOLOGY_PATH.open('r', encoding='utf-8', errors='replace') as fh:
+            section: Optional[str] = None
+            for line in fh:
+                # strip trailing comment
+                comment_idx = line.find('#')
+                if comment_idx >= 0:
+                    line = line[:comment_idx]
+                stripped = line.rstrip('\n')
+                if not stripped.strip():
+                    continue
+                # top-level key: no indent, ends in ':'
+                if not stripped.startswith(' ') and not stripped.startswith('\t'):
+                    key = stripped.rstrip().rstrip(':').strip()
+                    section = key if key in ('tissue', 'disease') else None
+                    continue
+                if section != 'tissue':
+                    continue
+                # child: parent line under `tissue:`
+                content = stripped.strip()
+                if ':' not in content:
+                    continue
+                child, _, parent = content.partition(':')
+                child = child.strip().strip('"').strip("'")
+                parent = parent.strip().strip('"').strip("'")
+                if not child:
+                    continue
+                out[child.lower()] = parent.lower() if parent and parent.lower() != 'null' else None
+    except (OSError, UnicodeError):
+        return {}
+    return out
+
+
+# Bottom-drawer tissues (sink to the end but before "unknown"). Lower-case.
+_TISSUE_TAIL = ('spinal cord', 'csf')
+
+
+def _build_tissue_dfs_order() -> Dict[str, int]:
+    """Compute a DFS ordering of the tissue hierarchy: {lower(term): rank}.
+
+    Roots are visited in a stable order (brain first, other CNS/organs next,
+    tail terms last). Children walked alphabetically for reproducibility.
+    Unknown tissues get rank = LARGE_INT so they sort after everything.
+    """
+    hierarchy = _load_tissue_hierarchy()
+    if not hierarchy:
+        return {}
+    # build parent → children map
+    children: Dict[Optional[str], List[str]] = defaultdict(list)
+    for child, parent in hierarchy.items():
+        children[parent].append(child)
+    for lst in children.values():
+        lst.sort()   # deterministic
+    order: Dict[str, int] = {}
+    counter = [0]
+
+    def visit(node: str) -> None:
+        if node in order:
+            return
+        order[node] = counter[0]
+        counter[0] += 1
+        for child in children.get(node, ()):
+            visit(child)
+
+    # Roots (parent == None). Put 'brain' first (the vast majority of the
+    # catalog is brain), then the rest alphabetically, tail terms last.
+    roots = [r for r in children.get(None, []) if r not in _TISSUE_TAIL]
+    if 'brain' in roots:
+        roots.remove('brain')
+        roots = ['brain'] + sorted(roots)
+    else:
+        roots = sorted(roots)
+    for root in roots:
+        visit(root)
+    for tail in _TISSUE_TAIL:
+        if tail in hierarchy:
+            visit(tail)
+    return order
+
+
+_TISSUE_DFS_ORDER: Dict[str, int] = _build_tissue_dfs_order()
+_TISSUE_UNKNOWN_RANK = 10_000_000   # sinks unknowns; alpha-sort applied after
+
+
+def _tissue_sort_key(tissues) -> int:
+    """Rank for the first tissue of a dataset by its DFS position in the
+    ontology hierarchy. Unknown / missing → ``_TISSUE_UNKNOWN_RANK`` (so they
+    sort after every known term; caller adds a secondary alpha sort)."""
+    if not tissues:
+        return _TISSUE_UNKNOWN_RANK
+    first = tissues[0] if isinstance(tissues, list) else tissues
+    if not first:
+        return _TISSUE_UNKNOWN_RANK
+    return _TISSUE_DFS_ORDER.get(str(first).lower(), _TISSUE_UNKNOWN_RANK)
+
+
 def _short_count(n: Optional[int]) -> str:
     """Humanize a cell-count: 999, 1.4k, 144k, 2.3M."""
     if not n:
@@ -574,6 +844,28 @@ def get_collection_list(api_url: str) -> List[Dict]:
         # Group modification = most recent member modification.
         last_modified = max((_modified_ts(db) for db in dbs), default='')
 
+        # publication_status is a collection-level attribute (index.md
+        # frontmatter). Ant-serve doesn't expose it yet; read from disk.
+        pub_status = _publication_status_for_group(collection_meta.get('group'))
+
+        # Unified access+publication icon (one glyph per collection). Access
+        # is a per-dataset field; when it varies inside the collection we fall
+        # back to 'internal' (the safer default). If any dataset is public we
+        # keep the 'public' semantic for the header icon.
+        access_values = sorted({(db.get('access') or 'internal').lower() for db in dbs})
+        coll_access = 'public' if 'public' in access_values else access_values[0]
+        pub_icon = _access_pub_icon(coll_access, pub_status)
+
+        # Canonical dataset date: for the collection use the newest date
+        # across its datasets (published year OR most-recent mtime).
+        member_dates = [
+            _dataset_date(db, group_name=collection_meta.get('group'),
+                          publication_status=pub_status)
+            for db in dbs
+        ]
+        best = max(member_dates, key=lambda d: d['sort_ts']) if member_dates else {'iso': '', 'sort_ts': 0.0}
+        dataset_date = {'iso': best['iso'], 'sort_ts': best['sort_ts']}
+
         collections.append({
             'name': name,
             'group_id': group_id,
@@ -586,6 +878,13 @@ def get_collection_list(api_url: str) -> List[Dict]:
             'duckdb_count': len(dbs),
             'update_pending': 0,
             'last_modified': last_modified,
+            'publication_status': pub_status,
+            'pub_icon': pub_icon,
+            'dataset_date': dataset_date,
+            # Sort key for a per-collection tissue-hierarchy sort — highest =
+            # sinks to the bottom. Multi-region collections use the first
+            # dataset's first tissue.
+            'tissue_rank': _tissue_sort_key([db.get('tissue') for db in dbs if db.get('tissue')]),
             'description': None,
             # one-line collection summary (index.md frontmatter `description`,
             # exposed by the API as collection.summary — distinct from
@@ -649,6 +948,16 @@ def get_collection_datasets(api_url: str, group_id: str) -> tuple:
     description_html = None
     group_dbs = []
 
+    # publication_status is collection-level (index.md frontmatter).
+    # Read it once — we need it for the icon + canonical date on every row.
+    pub_status: Optional[str] = None
+    group_folder: Optional[str] = None
+    for db in databases:
+        if (db.get('group_id') or db['id'].split('/')[0]) == group_id:
+            group_folder = (db.get('collection') or {}).get('group')
+            break
+    pub_status = _publication_status_for_group(group_folder)
+
     for db in databases:
         if (db.get('group_id') or db['id'].split('/')[0]) != group_id:
             continue
@@ -676,6 +985,10 @@ def get_collection_datasets(api_url: str, group_id: str) -> tuple:
         embeddings = list(db.get('embeddings', {}).keys())
         file_id = db.get('file_id', '')
 
+        # Description (one-line summary) — moved from a grey sub-line under
+        # the name to a title= tooltip on the link itself.
+        description_summary = (db.get('description') or db.get('summary') or '').strip()
+
         datasets.append({
             'name': db.get('title') or file_id,
             'file_id': file_id,
@@ -689,6 +1002,11 @@ def get_collection_datasets(api_url: str, group_id: str) -> tuple:
             'has_metadata': True,
             'has_duckdb': True,
             'update_pending': False,
+            'description': description_summary,
+            'pub_icon': _access_pub_icon(db.get('access'), pub_status),
+            'dataset_date': _dataset_date(db, group_name=group_folder,
+                                          publication_status=pub_status),
+            'tissue_rank': _tissue_sort_key(_as_list(db.get('tissue'))),
             'organism':        _summarize_meta_field([db], 'organism',        abbrev_map=_ORGANISM_ABBREV),
             'technology':      _summarize_meta_field([db], 'technology',      abbrev_map=_TECHNOLOGY_ABBREV),
             'celltype':        _summarize_meta_field([db], 'celltype',        abbrev_map=_CELLTYPE_ABBREV),
@@ -736,10 +1054,15 @@ def get_collection_datasets(api_url: str, group_id: str) -> tuple:
         elif abbrev == 'mix':
             var_fields.append(field)   # differs between datasets → keep column
 
-    # Newest-first: most-recently-modified dataset on top (lexical ISO sort).
-    datasets.sort(key=lambda d: (d.get('modified') or '', d['name']), reverse=True)
+    # Newest-first by canonical dataset_date (published year OR upload mtime);
+    # ties broken by name ASC.
+    datasets.sort(key=lambda d: (-(d.get('dataset_date') or {}).get('sort_ts', 0.0), d['name']))
 
-    collection_meta = {'pills': header_pills, 'var_fields': var_fields}
+    collection_meta = {
+        'pills': header_pills,
+        'var_fields': var_fields,
+        'publication_status': pub_status,
+    }
     return datasets, description_html, collection_meta
 
 
@@ -792,9 +1115,6 @@ def _is_admin(request: Request) -> bool:
     authoritative write gate is server-side in ant-serve."""
     groups = request.headers.get('remote-groups') or ''
     return 'admins' in [g.strip() for g in groups.split(',') if g.strip()]
-
-
-_H5ADSTORE_ROOT = Path(__file__).parent.parent / 'data' / 'h5adstore'
 
 
 # Files hidden from any downloads listing across the site — internal artifacts
@@ -1291,6 +1611,13 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
     caveats = db.get('caveats') or []
     caveats_summary = _summarize_caveats(caveats)
 
+    # Unified access + publication-status icon (shape=access, colour=pub).
+    # publication_status is a collection-level index.md field ant-serve doesn't
+    # yet expose — read straight from disk (cached).
+    group_folder = (db.get('collection') or {}).get('group') or group_id
+    pub_status = _publication_status_for_group(group_folder)
+    pub_icon = _access_pub_icon(db.get('access'), pub_status)
+
     return templates.TemplateResponse(request, "dataset.html", {
         "folder_name": friendly_group,
         "folder_browse_id": group_id,
@@ -1317,6 +1644,8 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "de_total_contrasts": de_total_contrasts,
         "caveats": caveats,
         "caveats_summary": caveats_summary,
+        "publication_status": pub_status,
+        "pub_icon": pub_icon,
         "is_admin": _is_admin(request),
     })
 

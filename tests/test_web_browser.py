@@ -243,6 +243,130 @@ def test_modified_ts_empty_when_nothing():
     assert browser._modified_ts({}) == ""
 
 
+# ── unit tests: _access_pub_icon ───────────────────────────────────────────────
+
+def test_access_pub_icon_public_published():
+    icon = browser._access_pub_icon("public", None)
+    assert icon["glyph"] == "🌐"                             # world
+    assert icon["color"] == browser._PUB_COLOR_PUBLISHED     # muted green
+    assert "external" in icon["tooltip"] and "published" in icon["tooltip"]
+    assert icon["access"] == "external"
+
+
+def test_access_pub_icon_public_unpublished():
+    icon = browser._access_pub_icon("public", "unpublished")
+    assert icon["glyph"] == "🌐"
+    assert icon["color"] == browser._PUB_COLOR_UNPUBLISHED   # muted red
+    assert icon["tooltip"] == "external · unpublished"
+
+
+def test_access_pub_icon_internal_published():
+    icon = browser._access_pub_icon("internal", "published")
+    assert icon["glyph"] == "🏠"
+    assert icon["color"] == browser._PUB_COLOR_PUBLISHED
+    assert icon["tooltip"] == "internal · published"
+
+
+def test_access_pub_icon_internal_unpublished():
+    icon = browser._access_pub_icon("internal", "unpublished")
+    assert icon["glyph"] == "🏠"
+    assert icon["color"] == browser._PUB_COLOR_UNPUBLISHED
+
+
+def test_access_pub_icon_missing_access_defaults_internal():
+    icon = browser._access_pub_icon(None, None)
+    assert icon["glyph"] == "🏠"                   # missing = safer default
+    assert icon["access"] == "internal"
+
+
+def test_access_pub_icon_unknown_access_falls_back():
+    # non-vocab value (typo) should still yield a rendered icon, not crash
+    icon = browser._access_pub_icon("bogus", None)
+    assert icon["glyph"] == "🏠" and icon["access"] == "internal"
+
+
+# ── unit tests: _dataset_date ──────────────────────────────────────────────────
+
+def test_dataset_date_year_published():
+    out = browser._dataset_date({"year": 2024})
+    assert out["iso"] == "2024-01-01"
+    assert out["sort_ts"] > 0
+
+
+def test_dataset_date_year_with_month_day():
+    out = browser._dataset_date({"year": 2024, "month": 6, "day": 15})
+    assert out["iso"] == "2024-06-15"
+
+
+def test_dataset_date_year_string_ok():
+    # API sometimes hands year back as a string; parse defensively.
+    out = browser._dataset_date({"year": "2023"})
+    assert out["iso"] == "2023-01-01"
+
+
+def test_dataset_date_unpublished_skips_year():
+    # unpublished → NEVER emit a year (don't claim a false publication date);
+    # falls through to file mtime → 0/'' when no file to stat.
+    out = browser._dataset_date({"year": 2024}, publication_status="unpublished")
+    assert out["iso"] == ""
+    assert out["sort_ts"] == 0.0
+
+
+def test_dataset_date_missing_year_and_file_is_empty():
+    out = browser._dataset_date({})
+    assert out["iso"] == ""
+    assert out["sort_ts"] == 0.0
+
+
+# ── unit tests: tissue-hierarchy sort ─────────────────────────────────────────
+
+def test_tissue_hierarchy_yaml_loaded():
+    # sanity: the ontology file exists in this repo, so the DFS map is populated
+    hierarchy = browser._load_tissue_hierarchy()
+    assert "brain" in hierarchy
+    assert hierarchy["brain"] is None
+    assert hierarchy["cortex"] == "brain"
+
+
+def test_tissue_dfs_root_brain_first():
+    # brain must precede its own subregions AND every other root
+    ranks = browser._TISSUE_DFS_ORDER
+    assert ranks["brain"] < ranks["cortex"] < ranks["prefrontal cortex"]
+
+
+def test_tissue_dfs_cortex_hierarchy():
+    ranks = browser._TISSUE_DFS_ORDER
+    # cortex must come before its cortical children
+    assert ranks["cortex"] < ranks["frontal cortex"]
+    assert ranks["frontal cortex"] < ranks["prefrontal cortex"]
+    assert ranks["prefrontal cortex"] < ranks["dorsolateral prefrontal cortex"]
+
+
+def test_tissue_dfs_tail_regions_last():
+    ranks = browser._TISSUE_DFS_ORDER
+    # spinal cord + csf sink to the end
+    assert ranks["brain"] < ranks["spinal cord"]
+    assert ranks["brain"] < ranks["csf"]
+
+
+def test_tissue_sort_key_unknown_last():
+    # anything not in the hierarchy → unknown rank (sinks to the bottom)
+    assert browser._tissue_sort_key(["not_a_tissue_ever"]) == browser._TISSUE_UNKNOWN_RANK
+    assert browser._tissue_sort_key(None) == browser._TISSUE_UNKNOWN_RANK
+    assert browser._tissue_sort_key([]) == browser._TISSUE_UNKNOWN_RANK
+
+
+def test_tissue_sort_key_multi_uses_first():
+    # multi-region → first value wins
+    rank_brain = browser._tissue_sort_key(["brain", "csf"])
+    rank_csf = browser._tissue_sort_key(["csf", "brain"])
+    assert rank_brain < rank_csf
+
+
+def test_tissue_sort_key_case_insensitive():
+    assert browser._tissue_sort_key(["Brain"]) == browser._tissue_sort_key(["brain"])
+
+
 # ── fake REST API ──────────────────────────────────────────────────────────────
 
 # Two collections. GroupA mixes organism/celltype/disease across its two
@@ -1244,13 +1368,14 @@ def test_card_table_rule_defined(client):
 def test_folder_mobile_card_markup(client):
     # The folder table opts into the card layout and carries the per-cell
     # hooks it consumes: card-title on the dataset name, data-labels on the
-    # metadata cells.
+    # metadata cells. Status column removed (always "ready" upstream); Date
+    # replaces Modified.
     resp = client.get("/browse/GroupA")
     assert resp.status_code == 200
     assert 'id="datasets-table" class="card-table"' in resp.text
     assert 'class="card-title"' in resp.text
     assert 'data-label="Org"' in resp.text
-    assert 'data-label="Status"' in resp.text
+    assert 'data-label="Date"' in resp.text
 
 
 def test_topbar_authelia_identity_and_signout(client):
@@ -1283,16 +1408,17 @@ def test_landing_popover_filter_guard(client):
     assert "activePopover.contains(e.target)" in resp.text
 
 
-def test_landing_access_source_inline(client):
-    # Acc/Source are no longer their own columns; the icons sit inline after the
-    # collection name (.acc-src) and their filters fold into the Collection
-    # header popover (data-filter-fields="acc,src").
+def test_landing_access_pub_icon_inline(client):
+    # Access and publication_status collapse to a single .ap-icon inline before
+    # the collection name; their filters live under the Collection header
+    # popover (data-filter-fields="acc,pub"). Old .acc-src two-glyph pair gone.
     resp = client.get("/")
     assert resp.status_code == 200
-    assert 'class="acc-src"' in resp.text
-    assert 'data-filter-fields="acc,src"' in resp.text
+    assert 'class="ap-icon"' in resp.text
+    assert 'data-filter-fields="acc,pub"' in resp.text
     assert 'data-label="Access"' not in resp.text   # column removed
     assert 'data-label="Source"' not in resp.text
+    assert 'class="acc-src"' not in resp.text       # old two-glyph system gone
 
 
 def test_folder_collection_pills_hoist_constants(client):
@@ -1309,23 +1435,24 @@ def test_folder_collection_pills_hoist_constants(client):
     assert 'data-label="Cell"' in resp.text            # celltype varies → kept
 
 
-def test_folder_access_source_inline_only_when_variable(client):
-    # source varies (internal vs external) → inline glyph before the name;
-    # access is constant (public) → it's a header pill, not inline.
+def test_folder_access_pub_icon_inline(client):
+    # Every row carries the unified access + publication_status icon (.ap-icon)
+    # inline before the dataset name. No more per-row Access/Source columns.
     resp = client.get("/browse/GroupA")
     assert resp.status_code == 200
-    assert 'class="acc-src"' in resp.text              # source inline (varies)
+    assert 'class="ap-icon"' in resp.text
     assert 'data-label="Access"' not in resp.text      # never a column
     assert 'data-label="Source"' not in resp.text
+    assert 'class="acc-src"' not in resp.text           # old two-glyph gone
 
 
-def test_folder_modified_column_and_newest_first(client):
-    # Each dataset shows a Modified date; the list is sorted newest-first.
+def test_folder_date_column_and_newest_first(client):
+    # Each dataset shows a canonical Date; the list is sorted newest-first by
+    # the dataset_date sort_ts (published year OR upload mtime).
     resp = client.get("/browse/GroupA")
     assert resp.status_code == 200
-    assert 'data-label="Modified"' in resp.text
-    assert "2026-05-01" in resp.text          # ds1's updated date
-    # ds1 (2026-05-01) sorts above ds2 (2026-04-01)
+    assert 'data-label="Date"' in resp.text
+    # ds1 (year=2025, published) comes before ds2 (year=2024, published)
     assert resp.text.index("Dataset One") < resp.text.index("Dataset Two")
 
 
@@ -1763,3 +1890,155 @@ def test_group_static_download_rejects_hidden_suffix(client, tmp_path, monkeypat
     monkeypatch.setattr(browser, "_H5ADSTORE_ROOT", tmp_path)
     resp = client.get("/browse/GroupA/static/x.duckdb")
     assert resp.status_code == 404
+
+
+# ── template structural tests for the unified icon + folder reorg + dataset id ──
+
+def test_landing_uses_unified_icon(client):
+    # index.html renders the new .ap-icon (single glyph with fixed-width
+    # container) — no more two-glyph access/source pair.
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "ap-icon" in resp.text
+    # class definition ships in base.html (sitewide)
+    assert ".ap-icon" in resp.text
+    # tooltip vocabulary
+    assert "internal · published" in resp.text or "external · published" in resp.text
+
+
+def test_folder_page_uses_unified_icon(client):
+    resp = client.get("/browse/GroupA")
+    assert resp.status_code == 200
+    assert 'class="ap-icon"' in resp.text
+    # each row's icon carries a title tooltip encoding access + publication
+    assert " · published" in resp.text or " · unpublished" in resp.text
+
+
+def test_dataset_page_has_unified_icon_next_to_title(client):
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    # header uses the larger variant of the same class family
+    assert 'class="ds-pub-icon"' in resp.text
+    # icon sits INSIDE the <h1 class="ds-title"> so it renders next to the title
+    idx_h1 = resp.text.find('<h1 class="ds-title"')
+    idx_span = resp.text.find('class="ds-pub-icon"')
+    assert idx_h1 > 0 and idx_span > idx_h1
+    # and the old two-glyph access/source pair is gone
+    assert 'class="ds-acc"' not in resp.text
+
+
+def test_folder_page_date_column_present_modified_absent(client):
+    resp = client.get("/browse/GroupA")
+    assert resp.status_code == 200
+    # new Date column
+    assert 'data-col="date"' in resp.text
+    # old Modified column is gone
+    assert '>Modified<' not in resp.text
+    assert 'data-label="Modified"' not in resp.text
+
+
+def test_folder_page_status_column_removed(client):
+    # Status column removed — every API-registered dataset has has_duckdb=True
+    # so the dot always showed "ready". Confirm no Status header + no per-row
+    # status cell. (`.dot-ok` still exists as a shared utility class in
+    # base.html for other pages.)
+    resp = client.get("/browse/GroupA")
+    assert resp.status_code == 200
+    assert '>Status<' not in resp.text
+    assert 'data-label="Status"' not in resp.text
+
+
+def test_folder_page_filter_and_stats_toolbar(client):
+    # filter box top-left, stats block top-right (both live in .grp-toolbar).
+    resp = client.get("/browse/GroupA")
+    assert resp.status_code == 200
+    assert 'class="grp-toolbar"' in resp.text
+    assert 'id="ds-filter"' in resp.text
+    assert 'class="grp-stats"' in resp.text
+
+
+def test_folder_page_default_sort_date_desc(client):
+    # The rows carry data-sort-ts on the Date cell; default JS sort is date DESC.
+    resp = client.get("/browse/GroupA")
+    assert resp.status_code == 200
+    assert 'data-sort-ts=' in resp.text
+    # default sort variable
+    assert "sortCol = 'date'" in resp.text and "sortDir = 'desc'" in resp.text
+
+
+def test_landing_description_moved_to_title_attr(client):
+    # The grey per-collection description block is gone; the summary rides on
+    # the <a> title= tooltip instead.
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert 'coll-desc' not in resp.text
+
+
+def test_landing_removed_modified_column(client):
+    # New Region + Date columns replace Modified.
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert 'data-col="date"' in resp.text
+    assert 'data-col="tissue"' in resp.text          # new Region column
+    # Modified column is gone
+    assert '>Modified <' not in resp.text
+    assert 'data-col="modified"' not in resp.text
+
+
+def test_dataset_page_file_id_first_in_breadcrumb(client):
+    # The 3-letter file_id is the primary identifier — first idcopy chip.
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    # Extract just the .ds-bc block so we're not fooled by other idcopy chips
+    # elsewhere on the page (there are none, but be defensive).
+    import re
+    m = re.search(r'<div class="ds-bc">(.*?)</div>', resp.text, re.S)
+    assert m, "ds-bc breadcrumb block not found"
+    bc = m.group(1)
+    # first idcopy in the breadcrumb should copy file_id ('ds1')
+    first_idcopy = re.search(r'idcopy" data-copy="([^"]+)"', bc)
+    assert first_idcopy is not None
+    assert first_idcopy.group(1) == "ds1"
+
+
+def test_dataset_page_ready_indicator_removed(client):
+    # The always-"ready" dot indicator is gone from the stats row.
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    # extract just the stats-row so we don't match the /jupyter tab-bar bg etc.
+    import re
+    m = re.search(r'<div class="stats-row">(.*?)</div>\s*(?:\{|</section>|<!)', resp.text, re.S)
+    if m:
+        assert 'dot-ok' not in m.group(1)
+        assert '>ready<' not in m.group(1)
+
+
+def test_dataset_page_context_pills_uniform_color(client):
+    # Rainbow chips replaced by uniform muted teal-on-cream pills.
+    # We verify the .ds-ctx .pill CSS no longer has per-category background
+    # overrides (.pill.tech, .pill.cell, .pill.tissue, .pill.disease, .pill.prep).
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    # each of these class-specific overrides was rainbow-colouring the chip;
+    # they must be gone (or replaced with the uniform rule).
+    for override in (".ds-ctx .pill.tech", ".ds-ctx .pill.cell",
+                     ".ds-ctx .pill.tissue", ".ds-ctx .pill.disease",
+                     ".ds-ctx .pill.prep"):
+        assert override not in resp.text, f"expected {override} rainbow rule gone"
+
+
+def test_base_html_dark_teal_palette(client):
+    # Palette refresh — dark teal (#335C67) is the primary --link colour.
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "#335C67" in resp.text
+    # cream + red + amber tokens present
+    assert "#FFF3B0" in resp.text
+    assert "#9E2A2B" in resp.text
+
+
+def test_base_html_roboto_loaded(client):
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "fonts.googleapis.com" in resp.text
+    assert "family=Roboto" in resp.text

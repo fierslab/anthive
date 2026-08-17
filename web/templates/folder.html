@@ -48,6 +48,30 @@
   .grp-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
   .grp-top-main { flex: 1; min-width: 0; }
   .grp-actions { flex-shrink: 0; display: flex; gap: 6px; align-items: center; }
+
+  /* Row above the dataset table — filter (top-left) + stats (top-right). */
+  .grp-toolbar {
+    display: flex; align-items: center; gap: 12px;
+    margin: 6px 0 8px; flex-wrap: wrap;
+  }
+  .grp-toolbar .grp-filter {
+    padding: 4px 10px; font-family: inherit; font-size: 12px;
+    border: 1px solid var(--border); border-radius: 3px;
+    width: 260px; outline: none; background: #fff;
+  }
+  .grp-toolbar .grp-filter:focus { border-color: var(--link); }
+  .grp-toolbar .grp-stats {
+    margin-left: auto; display: flex; gap: 14px; align-items: center;
+    font-size: 12px; color: var(--text-muted);
+  }
+  .grp-toolbar .grp-stats .val { color: var(--text); font-weight: 500; }
+
+  /* Sortable header. Mirror index.html's minimal sort UX (click to toggle). */
+  th.sortable { cursor: pointer; user-select: none; }
+  th.sortable:hover { background: var(--hover); }
+  th.sortable .sort-ind { display: inline-block; width: 8px; color: #bbb; margin-left: 2px; font-size: 9px; }
+  th.sortable.sort-asc  .sort-ind::before  { content:'▲'; color: var(--text); }
+  th.sortable.sort-desc .sort-ind::before  { content:'▼'; color: var(--text); }
 </style>
 
 <div class="grp-top">
@@ -72,8 +96,15 @@
 </div>
 {% endif %}
 
-<div class="stats-row">
-    <div>datasets: <span class="val">{{ datasets|length }}</span></div>
+<!-- Toolbar: filter (top-left), stats (top-right). -->
+{% set _total_cells = namespace(n=0) %}
+{% for d in datasets %}{% if d.n_obs %}{% set _total_cells.n = _total_cells.n + d.n_obs %}{% endif %}{% endfor %}
+<div class="grp-toolbar">
+    <input type="text" id="ds-filter" class="grp-filter" placeholder="filter datasets…" autocomplete="off">
+    <div class="grp-stats">
+        <div>datasets: <span class="val">{{ datasets|length }}</span></div>
+        {% if _total_cells.n %}<div>cells: <span class="val">{{ "{:,}".format(_total_cells.n) }}</span></div>{% endif %}
+    </div>
 </div>
 
 {% if description_html %}
@@ -86,9 +117,9 @@
 <table id="datasets-table" class="card-table">
     <thead>
         <tr>
-            <th>Dataset</th>
-            <th title="cells × genes">Cells × Genes</th>
-            <th title="last updated">Modified</th>
+            <th class="sortable" data-col="name">Dataset<span class="sort-ind"></span></th>
+            <th class="sortable" data-col="cells" title="cells × genes">Cells × Genes<span class="sort-ind"></span></th>
+            <th class="sortable" data-col="date" title="publication year, or upload date when unpublished">Date<span class="sort-ind"></span></th>
             {% if 'organism' in var_fields %}<th title="organism">Org</th>{% endif %}
             {% if 'technology' in var_fields %}<th title="technology">Tech</th>{% endif %}
             {% if 'celltype' in var_fields %}<th title="cell type">Cell</th>{% endif %}
@@ -97,7 +128,6 @@
             {% if 'suspension_type' in var_fields %}<th title="suspension type (cell / nucleus / na)">Prep</th>{% endif %}
             <th title="layer count — hover to list">L</th>
             <th title="embedding count — hover to list">E</th>
-            <th>Status</th>
         </tr>
     </thead>
     <tbody>
@@ -108,11 +138,13 @@
         {% set _tis  = dataset.tissue          or {} %}
         {% set _dis  = dataset.disease         or {} %}
         {% set _sus  = dataset.suspension_type or {} %}
-        {% set _acc  = dataset.access          or {} %}
-        {% set _src  = dataset.source          or {} %}
-        <tr>
+        {% set _icon = dataset.pub_icon        or {} %}
+        {% set _date = dataset.dataset_date    or {} %}
+        <tr data-name="{{ (dataset.name or '')|lower }}"
+            data-cells="{{ dataset.n_obs or 0 }}"
+            data-sort-ts="{{ _date.sort_ts or 0 }}">
             <td class="card-title">
-                {% if 'access' in var_fields and _acc.abbrev %}<span class="acc-src" title="access: {{ _acc.full }}">{{ _acc.abbrev }}</span>{% endif %}{% if 'source' in var_fields and _src.abbrev %}<span class="acc-src" title="source: {{ _src.full }}">{{ _src.abbrev }}</span>{% endif %}<a href="/browse/{{ folder_browse_id }}/{{ dataset.browse_id }}" title="{{ dataset.file_id }}"><strong>{{ dataset.name }}</strong></a>{% for doi_item in dataset.doi %}<a class="ext-lnk" href="https://doi.org/{{ doi_item }}" target="_blank" rel="noopener" title="DOI: {{ doi_item }}">🔗</a>{% endfor %}{% if dataset.accession_url %}<a class="ext-lnk" href="{{ dataset.accession_url }}" target="_blank" rel="noopener" title="accession: {{ dataset.accession }}">🔗</a>{% endif %}{% for url_item in dataset.link %}<a class="ext-lnk" href="{{ url_item }}" target="_blank" rel="noopener" title="{{ url_item }}">🔗</a>{% endfor %}{% set _cv = dataset.caveats_summary or {} %}{% if _cv.n %}<a class="cv-mark lvl-{{ _cv.max_level }}" href="/browse/{{ folder_browse_id }}/{{ dataset.browse_id }}#tab-overview" title="{{ _cv.n }} caveat{{ 's' if _cv.n > 1 else '' }} (highest: {{ _cv.max_level }})">⚠</a>{% endif %}
+                {% if _icon.glyph %}<span class="ap-icon" style="color:{{ _icon.color }}" title="{{ _icon.tooltip }}">{{ _icon.glyph }}</span>{% endif %}<a href="/browse/{{ folder_browse_id }}/{{ dataset.browse_id }}" title="{% if dataset.description %}{{ dataset.description }}{% else %}{{ dataset.file_id }}{% endif %}"><strong>{{ dataset.name }}</strong></a>{% for doi_item in dataset.doi %}<a class="ext-lnk" href="https://doi.org/{{ doi_item }}" target="_blank" rel="noopener" title="DOI: {{ doi_item }}">🔗</a>{% endfor %}{% if dataset.accession_url %}<a class="ext-lnk" href="{{ dataset.accession_url }}" target="_blank" rel="noopener" title="accession: {{ dataset.accession }}">🔗</a>{% endif %}{% for url_item in dataset.link %}<a class="ext-lnk" href="{{ url_item }}" target="_blank" rel="noopener" title="{{ url_item }}">🔗</a>{% endfor %}{% set _cv = dataset.caveats_summary or {} %}{% if _cv.n %}<a class="cv-mark lvl-{{ _cv.max_level }}" href="/browse/{{ folder_browse_id }}/{{ dataset.browse_id }}#tab-overview" title="{{ _cv.n }} caveat{{ 's' if _cv.n > 1 else '' }} (highest: {{ _cv.max_level }})">⚠</a>{% endif %}
                 {% if dataset.subfolder %}<br><span class="muted-2" style="font-size:11px">{{ dataset.subfolder }}</span>{% endif %}
             </td>
             <td data-label="Cells × Genes" class="card-span cells-genes mono" style="color:#555;font-size:11px">
@@ -120,7 +152,7 @@
                 {{ format_count(dataset.n_obs) }} × {{ format_count(dataset.n_vars) }}
                 {% endif %}
             </td>
-            <td data-label="Modified" style="color:#666;font-size:11px;font-family:var(--font-mono);white-space:nowrap">{{ (dataset.modified or '')[:10] or '—' }}</td>
+            <td data-label="Date" data-sort-ts="{{ _date.sort_ts or 0 }}" style="color:#666;font-size:11px;font-family:var(--font-mono);white-space:nowrap">{{ _date.iso or '—' }}</td>
             {% if 'organism' in var_fields %}<td data-label="Org">{% if _org.abbrev  %}<span class="grp-pill"          title="organism: {{ _org.full }}">{{ _org.abbrev }}</span>{% endif %}</td>{% endif %}
             {% if 'technology' in var_fields %}<td data-label="Tech">{% if _tech.abbrev %}<span class="grp-pill tech"     title="technology: {{ _tech.full }}">{{ _tech.abbrev }}</span>{% endif %}</td>{% endif %}
             {% if 'celltype' in var_fields %}<td data-label="Cell">{% if _cell.abbrev %}<span class="grp-pill cell"     title="cell type: {{ _cell.full }}">{{ _cell.abbrev }}</span>{% endif %}</td>{% endif %}
@@ -132,17 +164,6 @@
             </td>
             <td data-label="Embeddings" style="color:#555;font-size:11px" title="{{ dataset.embeddings|join(', ') if dataset.embeddings else 'none' }}">
                 {{ dataset.embeddings|length if dataset.embeddings else 0 }}
-            </td>
-            <td data-label="Status">
-                {% if dataset.update_pending %}
-                <span class="dot dot-pending" title="update pending: h5ad or md newer than duckdb"></span>
-                {% elif dataset.has_duckdb %}
-                <span class="dot dot-ok" title="ready"></span>
-                {% elif dataset.has_metadata %}
-                <span class="dot dot-warn" title="not converted"></span>
-                {% else %}
-                <span class="dot dot-err" title="not checked"></span>
-                {% endif %}
             </td>
         </tr>
         {% endfor %}
@@ -164,8 +185,56 @@
 {% endif %}
 
 <script>
-document.addEventListener('DOMContentLoaded', function() {
-    initTable('datasets-table', { pageSize: 20 });
+document.addEventListener('DOMContentLoaded', function () {
+    // Small sort + filter — replaces the shared initTable pagination for this
+    // table so the Date column can sort by data-sort-ts (epoch seconds) while
+    // still rendering the ISO string. Default sort: date DESC, then name ASC.
+    var tbl = document.getElementById('datasets-table');
+    if (!tbl) return;
+    var tbody = tbl.querySelector('tbody');
+    var rows  = Array.from(tbody.querySelectorAll('tr'));
+    var headers = Array.from(tbl.querySelectorAll('th.sortable'));
+    var filterEl = document.getElementById('ds-filter');
+    var sortCol = 'date', sortDir = 'desc';
+
+    function rowKey(row, col) {
+        if (col === 'date')  return Number(row.getAttribute('data-sort-ts') || 0);
+        if (col === 'cells') return Number(row.getAttribute('data-cells') || 0);
+        return (row.getAttribute('data-name') || '').toLowerCase();
+    }
+    function applySort() {
+        rows.sort(function (a, b) {
+            var av = rowKey(a, sortCol), bv = rowKey(b, sortCol);
+            var cmp = av < bv ? -1 : av > bv ? 1 : 0;
+            if (cmp === 0 && sortCol !== 'name')
+                cmp = rowKey(a, 'name') < rowKey(b, 'name') ? -1
+                    : rowKey(a, 'name') > rowKey(b, 'name') ? 1 : 0;
+            return sortDir === 'desc' ? -cmp : cmp;
+        });
+        rows.forEach(function (r) { tbody.appendChild(r); });
+        headers.forEach(function (h) {
+            h.classList.remove('sort-asc', 'sort-desc');
+            if (h.getAttribute('data-col') === sortCol) h.classList.add('sort-' + sortDir);
+        });
+    }
+    function applyFilter() {
+        var q = (filterEl && filterEl.value || '').toLowerCase().trim();
+        rows.forEach(function (r) {
+            var hit = !q || r.textContent.toLowerCase().indexOf(q) >= 0;
+            r.style.display = hit ? '' : 'none';
+        });
+    }
+    headers.forEach(function (h) {
+        h.addEventListener('click', function () {
+            var col = h.getAttribute('data-col');
+            if (sortCol === col) sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+            else { sortCol = col; sortDir = (col === 'date' || col === 'cells') ? 'desc' : 'asc'; }
+            applySort();
+        });
+    });
+    if (filterEl) filterEl.addEventListener('input', applyFilter);
+    applySort();
+    applyFilter();
 });
 </script>
 {% endblock %}
