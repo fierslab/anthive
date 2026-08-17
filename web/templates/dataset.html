@@ -181,12 +181,11 @@
   .mod-chip {
     display: inline-block; padding: 1px 8px; border-radius: 10px;
     font-size: 11px; font-family: var(--font); line-height: 1.5;
-    border: 1px solid transparent; text-decoration: none;
-    letter-spacing: .1px;
+    background: #f3f4f6; color: #374151; border: 1px solid #e5e7eb;
+    text-decoration: none; letter-spacing: .1px;
   }
-  .mod-chip.scanpy  { background: #eef2f7; color: #334155; border-color: #cbd5e1; }
-  .mod-chip.starcat { background: #f5f0eb; color: #57422d; border-color: #d6c8b6; }
-  .mod-chip.aucell  { background: #ecf3ee; color: #2f5a3d; border-color: #b8d4be; }
+  /* Per-method colours dropped — each chip's inner text ("scanpy" /
+     "starCAT" / "AUCell") already identifies the method. */
   .mod-chip:hover { filter: brightness(.96); text-decoration: none; }
   .mod-chip.absent { color: #c8cdd3; background: transparent; border-color: transparent; cursor: default; padding: 1px 4px; }
 
