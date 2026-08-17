@@ -58,10 +58,17 @@
   td.cells-genes { white-space: nowrap; }
   @media (max-width: 760px) { td.cells-genes { white-space: normal; } }
 
-  /* Top-right header row: breadcrumb+title on the left, admin action on the right. */
-  .grp-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  /* Top-right header row: breadcrumb (name is heading-sized) on the left,
+     admin action on the right. Standalone <h1> dropped 2026-08 — the
+     breadcrumb's current-collection span is the visual title. */
+  .grp-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
   .grp-top-main { flex: 1; min-width: 0; }
   .grp-actions { flex-shrink: 0; display: flex; gap: 6px; align-items: center; }
+  .grp-bc { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; font-size: 17px; color: var(--text); }
+  .grp-bc a { color: var(--link); }
+  .grp-bc .bc-sep { color: #cbd5e1; }
+  .grp-bc .grp-cur { font-weight: 600; font-size: 19px; }
+  .grp-bc .slug { font-family: var(--font-mono); font-size: 13px; color: var(--text-muted); }
 
   /* Row above the dataset table — filter (top-left) + stats (top-right). */
   .grp-toolbar {
@@ -90,12 +97,12 @@
 
 <div class="grp-top">
   <div class="grp-top-main">
-    <div class="breadcrumb">
-        <a href="/">datasets</a> /
-        {{ folder_name }}
+    <div class="breadcrumb grp-bc">
+        <a href="/">datasets</a>
+        <span class="bc-sep">/</span>
+        <span class="grp-cur">{{ folder_name }}</span>
         {% if group_id and group_id != folder_name %}<span class="slug">({{ group_id }})</span>{% endif %}
     </div>
-    <h1 class="page-title">{{ folder_name }}</h1>
   </div>
   {% if is_admin %}
   <div class="grp-actions">
