@@ -1,8 +1,8 @@
 # starCAT annotation — Olah2020/olah2020_microglia
 
 - catalog: `MICROGLIA_V1`
-- run_id: `sc-ad22f3`
-- timestamp: 2026-05-25T18:57:11+00:00
+- run_id: `sc-b5dcaa`
+- timestamp: 2026-08-17T13:02:17+00:00
 - cells annotated: 16,245
 - gene overlap: 2,723 / 2,727
 - median per-cell residual: 4.099  (high > 0.7 = poor coverage)
