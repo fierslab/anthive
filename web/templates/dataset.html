@@ -103,8 +103,23 @@
   .idcopy:hover { background: #e0e7ff; }
   .idcopy.copied { background: #bbf7d0; color: #166534; }
   /* Align Visualize + Edit buttons on the same baseline — matched padding + line-height. */
-  .ds-actions { display: flex; align-items: stretch; gap: 6px; flex-shrink: 0; }
+  .ds-actions { display: flex; align-items: stretch; gap: 6px; flex-shrink: 0; position: relative; }
   .ds-actions > * { align-self: stretch; display: inline-flex; align-items: center; }
+  .ds-actions-group { display: flex; align-items: stretch; gap: 6px; }
+  .ds-actions-toggle { display: none; font-size: 16px; padding: 6px 11px; }
+  /* Below 760px the buttons collapse behind a ☰ hamburger — the row
+     stops fighting the breadcrumb for horizontal space. */
+  @media (max-width: 760px) {
+    .ds-actions-toggle { display: inline-flex; }
+    .ds-actions-group {
+      display: none; position: absolute; right: 0; top: calc(100% + 4px);
+      z-index: 100; background: #fff; border: 1px solid var(--border);
+      border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.14);
+      padding: 8px; flex-direction: column; align-items: stretch; gap: 6px;
+      min-width: 160px;
+    }
+    .ds-actions.open .ds-actions-group { display: flex; }
+  }
   .btn-grey { display: inline-flex; align-items: center; justify-content: center; background: #475569; color: #fff; border: 1px solid #475569; border-radius: 5px; padding: 6px 13px; font-size: 13px; font-weight: 500; cursor: pointer; font-family: inherit; text-decoration: none; white-space: nowrap; line-height: 1.2; }
   .btn-grey:hover { background: #334155; color: #fff; text-decoration: none; }
   .btn-grey .caret { font-size: 9px; opacity: .8; margin-left: 3px; }
@@ -279,6 +294,8 @@
   </div>
   <div class="ds-actions">
     {% if pub_icon and pub_icon.glyph %}<span class="ds-pub-icon" style="color:{{ pub_icon.color }}" title="{{ pub_icon.tooltip }}">{{ pub_icon.glyph|safe }}</span>{% endif %}
+    <button type="button" class="btn-grey ds-actions-toggle" id="ds-actions-toggle" title="actions" aria-haspopup="true" aria-expanded="false">☰</button>
+    <div class="ds-actions-group">
     {% if has_duckdb %}<a class="btn-grey btn-icon" href="/jupyter/" target="_blank" rel="noopener" title="open dataset in JupyterLite">📓 notebook</a>{% endif %}
     {% if has_duckdb %}
     <div class="viz-menu" id="viz-menu">
@@ -337,6 +354,7 @@
   </div>
   {% endif %}
   {% if is_admin %}<a class="btn-edit btn-icon" href="/admin/edit/{{ group_id|urlencode }}/{{ file_id|urlencode }}" title="edit this dataset's .md (admin)">✎ edit</a>{% endif %}
+    </div>{# /.ds-actions-group #}
   </div>
 </div>
 
@@ -789,19 +807,36 @@ document.addEventListener('DOMContentLoaded', function() {
     (function() {
         var menu = document.getElementById('viz-menu');
         var btn  = document.getElementById('viz-menu-btn');
-        if (!menu || !btn) return;
-        btn.addEventListener('click', function(e) {
-            e.stopPropagation();
-            var open = menu.classList.toggle('open');
-            btn.setAttribute('aria-expanded', open ? 'true' : 'false');
-        });
-        // Close on outside click or Escape.
-        document.addEventListener('click', function(e) {
-            if (!menu.contains(e.target)) { menu.classList.remove('open'); btn.setAttribute('aria-expanded', 'false'); }
-        });
-        document.addEventListener('keydown', function(e) {
-            if (e.key === 'Escape') { menu.classList.remove('open'); btn.setAttribute('aria-expanded', 'false'); }
-        });
+        if (menu && btn) {
+            btn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                var open = menu.classList.toggle('open');
+                btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+            });
+            document.addEventListener('click', function(e) {
+                if (!menu.contains(e.target)) { menu.classList.remove('open'); btn.setAttribute('aria-expanded', 'false'); }
+            });
+            document.addEventListener('keydown', function(e) {
+                if (e.key === 'Escape') { menu.classList.remove('open'); btn.setAttribute('aria-expanded', 'false'); }
+            });
+        }
+        // Hamburger for narrow screens — collapses notebook/visualize/edit
+        // behind ☰ when the top-right action row would otherwise wrap.
+        var acts = document.querySelector('.ds-actions');
+        var actsBtn = document.getElementById('ds-actions-toggle');
+        if (acts && actsBtn) {
+            actsBtn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                var open = acts.classList.toggle('open');
+                actsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+            });
+            document.addEventListener('click', function(e) {
+                if (!acts.contains(e.target)) { acts.classList.remove('open'); actsBtn.setAttribute('aria-expanded', 'false'); }
+            });
+            document.addEventListener('keydown', function(e) {
+                if (e.key === 'Escape') { acts.classList.remove('open'); actsBtn.setAttribute('aria-expanded', 'false'); }
+            });
+        }
     })();
 
     // ── Tab bar wiring (URL-hash deep-linking) ───────────────────────────
