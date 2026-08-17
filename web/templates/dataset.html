@@ -899,10 +899,29 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (row.dataset.modKey === modKey) target = row;
             });
             if (!target) return;
-            // Open the enclosing <details> (per-catalog group)
             var det = target.closest('details.mod-cat-group');
             if (det) det.open = true;
-            // Scroll + brief highlight
+            // Hide every OTHER catalog group so the user sees only the
+            // catalog they jumped to. Add a "show all catalogs" affordance.
+            var allGroups = tab.querySelectorAll('details.mod-cat-group');
+            var hidden = 0;
+            allGroups.forEach(function (g) {
+                if (g !== det) { g.style.display = 'none'; hidden++; }
+            });
+            if (hidden > 0 && !document.getElementById('mod-cat-restore')) {
+                var container = det.parentNode;
+                var restore = document.createElement('div');
+                restore.id = 'mod-cat-restore';
+                restore.style.cssText = 'margin:6px 0 10px;font-size:12px;color:var(--text-muted)';
+                restore.innerHTML = 'Showing only this catalog (jumped here from a geneset link). '
+                  + '<a href="#" style="color:var(--link)">Show all ' + (allGroups.length) + ' catalogs</a>';
+                container.insertBefore(restore, allGroups[0]);
+                restore.querySelector('a').addEventListener('click', function (ev) {
+                    ev.preventDefault();
+                    allGroups.forEach(function (g) { g.style.display = ''; });
+                    restore.remove();
+                });
+            }
             setTimeout(function () {
                 target.scrollIntoView({ behavior: 'smooth', block: 'center' });
                 target.style.transition = 'background 0.4s';
