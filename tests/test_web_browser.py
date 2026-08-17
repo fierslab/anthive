@@ -1774,10 +1774,12 @@ def test_folder_date_column_and_newest_first(client):
 
 
 def test_dataset_page_shows_modified(client):
+    # `modified` moved from the top stats row into the Stats card in the
+    # Data tab (2026-08).
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
-    assert "modified:" in resp.text
-    assert "2025-01-01" in resp.text   # _INFO has year=2025 → _modified_ts year-cast
+    assert ">modified<" in resp.text        # table `<td>modified</td>` row
+    assert "2025-01-01" in resp.text        # _INFO has year=2025 → _modified_ts year-cast
 
 
 def test_folder_external_link_icons(client):
@@ -1889,8 +1891,9 @@ def test_btn_edit_class_defined_sitewide(client):
     resp = client.get("/")
     assert resp.status_code == 200
     assert ".btn-edit" in resp.text
+    # (line below is the palette-amber recolour done 2026-08)
     # background hex — anchor colour of the muted-red palette
-    assert "#c26b6b" in resp.text
+    assert "#E09F3E" in resp.text   # palette amber (was muted red)
 
 
 def test_dataset_edit_button_uses_btn_edit(client):

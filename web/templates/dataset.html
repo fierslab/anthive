@@ -140,6 +140,21 @@
   .obs-stats-tbl td, .obs-stats-tbl th { border-bottom: 1px solid #e2e8f0; }
   /* Data tab: auto-wrapping two-column card layout. */
   .data-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 14px; margin-top: 8px; }
+  /* Caveats tab-button — filled palette-red pill so it reads instantly
+     as a warning. Not shy. */
+  .tab-btn.caveat-tab {
+    background: #9E2A2B; color: #fff; border-color: #7c1e1f;
+    font-weight: 600; letter-spacing: .2px;
+  }
+  .tab-btn.caveat-tab:hover        { background: #7c1e1f; color: #fff; }
+  .tab-btn.caveat-tab.active       { background: #540B0E; color: #fff; }
+  .tab-btn.caveat-tab .tab-count   { color: #fff; background: rgba(255,255,255,.18); }
+  .tab-btn.caveat-tab.lvl-medium   { background: #E09F3E; border-color: #c8892d; color: #3f2b0e; }
+  .tab-btn.caveat-tab.lvl-medium:hover  { background: #c8892d; color: #fff; }
+  .tab-btn.caveat-tab.lvl-medium.active { background: #a97525; color: #fff; }
+  .tab-btn.caveat-tab.lvl-low      { background: #FFF3B0; border-color: #e6dca9; color: #6b5a1c; font-weight: 500; }
+  .tab-btn.caveat-tab.lvl-low:hover    { background: #f0e29a; color: #4d420f; }
+  .tab-btn.caveat-tab.lvl-low.active   { background: #e6dca9; color: #4d420f; }
   .data-card { border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; background: #fff; }
   .data-card > h2:first-child { margin-top: 0; }
   .obs-plots .obs-plots { border: none; padding: 0; }   /* nested cell macro (module scores): no double border */
@@ -335,54 +350,6 @@
 </div>
 {% endif %}
 
-{% if info %}
-<div class="stats-row">
-    {% if info.n_cells %}<div>cells: <span class="val">{{ "{:,}".format(info.n_cells) }}</span></div>{% endif %}
-    {% if info.n_genes %}<div>genes: <span class="val">{{ "{:,}".format(info.n_genes) }}</span></div>{% endif %}
-    <div>obs cols: <span class="val">{{ info.n_obs_columns }}</span></div>
-    {% if info.modified %}<div title="last updated">modified: <span class="val">{{ info.modified[:10] }}</span></div>{% endif %}
-    {% if de_studies %}
-    <div title="differential-expression results available">
-        DE: <span class="val">{{ de_studies|length }}</span> stud{{ 'y' if de_studies|length == 1 else 'ies' }},
-        <span class="val">{{ de_total_contrasts }}</span> contrasts
-    </div>
-    {% endif %}
-</div>
-{% endif %}
-
-{# ── Known caveats ─────────────────────────────────────────────────────
-   Warning card, accent from the highest severity across caveats. Card
-   colour is a subtle background tint + a left accent bar (matches the
-   monochrome page palette — no garish fills). #}
-{% if caveats %}
-<div class="caveats-card caveat-{{ caveats_summary.max_level or 'low' }}"
-     role="note" aria-label="Known caveats for this dataset">
-  <div class="cv-header">
-    <span class="cv-sigil" aria-hidden="true">⚠</span>
-    <span>Known caveats</span>
-    <span class="cv-count">({{ caveats_summary.n }}{% if caveats_summary.n > 1 %} · highest {{ caveats_summary.max_level }}{% endif %})</span>
-  </div>
-  <div class="cv-list">
-    {% for cv in caveats %}
-    <div class="cv-item">
-      <div class="cv-row1">
-        <span class="cv-chip lvl" title="severity">{{ cv.level or 'low' }}</span>
-        {% if cv.kind %}<span class="cv-chip" title="caveat type">{{ cv.kind }}</span>{% endif %}
-        {% if cv.scope %}<span class="cv-scope" title="scope">{{ cv.scope }}</span>{% endif %}
-        {% if cv.obs_flag %}<span class="cv-obsflag" title="boolean obs column ('yes'/'no') that flags affected cells">obs:{{ cv.obs_flag }}</span>{% endif %}
-      </div>
-      {% if cv.message %}<div class="cv-msg">{{ cv.message }}</div>{% endif %}
-      {% if cv.detected_by or cv.detected_at %}
-      <div class="cv-foot">
-        {% if cv.detected_by %}<span><span class="fk">detected by</span>{{ cv.detected_by }}</span>{% endif %}
-        {% if cv.detected_at %}<span><span class="fk">on</span><span class="mono">{{ cv.detected_at }}</span></span>{% endif %}
-      </div>
-      {% endif %}
-    </div>
-    {% endfor %}
-  </div>
-</div>
-{% endif %}
 
 {# ═══════════════════════════════════════════════════════════════════════
    Tab bar — persistent header above; tabs deep-link via URL hash.
@@ -396,6 +363,7 @@
 
 <div class="tab-bar" id="ds-tab-bar" role="tablist">
   <button type="button" class="tab-btn active" data-tab="overview" role="tab">Overview</button>
+  {% if caveats %}<button type="button" class="tab-btn caveat-tab lvl-{{ caveats_summary.max_level or 'low' }}" data-tab="caveats" role="tab">⚠ Caveats<span class="tab-count">{{ caveats_summary.n }}</span></button>{% endif %}
   <button type="button" class="tab-btn"        data-tab="data"     role="tab">Data</button>
   {% if gene_panel and gene_panel.genes %}
   <button type="button" class="tab-btn"        data-tab="genes"    role="tab">Genes<span class="tab-count">{{ gene_panel.genes|length }}</span></button>
@@ -420,6 +388,39 @@
 <section class="tab-panel active" id="tab-overview" role="tabpanel">
   {% if markdown_content %}<div class="ds-desc md-body">{{ markdown_content|safe }}</div>{% endif %}
 </section>
+
+{# ── Caveats tab (only rendered when caveats present) ────────────────── #}
+{% if caveats %}
+<section class="tab-panel" id="tab-caveats" role="tabpanel">
+  <div class="caveats-card caveat-{{ caveats_summary.max_level or 'low' }}"
+       role="note" aria-label="Known caveats for this dataset">
+    <div class="cv-header">
+      <span class="cv-sigil" aria-hidden="true">⚠</span>
+      <span>Known caveats</span>
+      <span class="cv-count">({{ caveats_summary.n }}{% if caveats_summary.n > 1 %} · highest {{ caveats_summary.max_level }}{% endif %})</span>
+    </div>
+    <div class="cv-list">
+      {% for cv in caveats %}
+      <div class="cv-item">
+        <div class="cv-row1">
+          <span class="cv-chip lvl" title="severity">{{ cv.level or 'low' }}</span>
+          {% if cv.kind %}<span class="cv-chip" title="caveat type">{{ cv.kind }}</span>{% endif %}
+          {% if cv.scope %}<span class="cv-scope" title="scope">{{ cv.scope }}</span>{% endif %}
+          {% if cv.obs_flag %}<span class="cv-obsflag" title="boolean obs column ('yes'/'no') that flags affected cells">obs:{{ cv.obs_flag }}</span>{% endif %}
+        </div>
+        {% if cv.message %}<div class="cv-msg">{{ cv.message }}</div>{% endif %}
+        {% if cv.detected_by or cv.detected_at %}
+        <div class="cv-foot">
+          {% if cv.detected_by %}<span><span class="fk">detected by</span>{{ cv.detected_by }}</span>{% endif %}
+          {% if cv.detected_at %}<span><span class="fk">on</span><span class="mono">{{ cv.detected_at }}</span></span>{% endif %}
+        </div>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+{% endif %}
 
 {# ── Genes tab ────────────────────────────────────────────────────────
    Precomputed favourites when the dataset defines them; otherwise a
@@ -473,6 +474,21 @@
 {# ── Data tab ─────────────────────────────────────────────────────────── #}
 <section class="tab-panel" id="tab-data" role="tabpanel">
   <div class="data-cards">
+  {% if info %}
+  <div class="data-card">
+    <h2>Stats</h2>
+    <table class="obs-stats-tbl auto" style="font-size:12px">
+      <tbody>
+        {% if info.n_cells %}<tr><td class="colname">cells</td><td>{{ "{:,}".format(info.n_cells) }}</td></tr>{% endif %}
+        {% if info.n_genes %}<tr><td class="colname">genes</td><td>{{ "{:,}".format(info.n_genes) }}</td></tr>{% endif %}
+        <tr><td class="colname">obs cols</td><td>{{ info.n_obs_columns }}</td></tr>
+        {% if info.modified %}<tr><td class="colname">modified</td><td>{{ info.modified[:10] }}</td></tr>{% endif %}
+        {% if de_studies %}<tr><td class="colname">DE</td><td>{{ de_studies|length }} stud{{ 'y' if de_studies|length == 1 else 'ies' }} · {{ de_total_contrasts }} contrasts</td></tr>{% endif %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
   <div class="data-card">
     <h2>Biology <span class="info" title="Headline biology — organism, technology, cell type, tissue, disease, prep — plus per-donor attributes when known.">ⓘ</span></h2>
     <table class="obs-stats-tbl auto" style="font-size:12px">
