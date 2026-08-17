@@ -725,9 +725,12 @@ def main() -> int:
     parser.add_argument('db_id',
                         help='h5adstore dataset to score onto, e.g. S25/PhM '
                              'or Sierksma2025/Pharmacogenomics')
-    parser.add_argument('genesets', nargs='+',
+    parser.add_argument('genesets', nargs='*',
                         help='one or more experiment_id or geneset_id values, e.g. '
-                             'Sierksma2025/WGCNA  or  Sierksma2025/WGCNA/Brown_Lysosome')
+                             'Sierksma2025/WGCNA  or  Sierksma2025/WGCNA/Brown_Lysosome. '
+                             'When omitted, auto-picks every experiment whose '
+                             '`celltypes:` matches the dataset\'s cell_type and whose '
+                             '`organism:` matches the dataset\'s organism.')
     parser.add_argument('--ctrl-size', type=int, default=50)
     parser.add_argument('--n-bins',    type=int, default=25)
     parser.add_argument('--seed',      type=int, default=0)
@@ -767,6 +770,52 @@ def main() -> int:
     entry = find_h5ad(h5ad_root, args.db_id)
     if entry is None:
         sys.exit(f"ERROR: dataset {args.db_id!r} not found in h5adstore ({h5ad_root})")
+
+    # Auto-pick mode: when the caller omits `genesets`, look at the dataset's
+    # cell_type + organism (from .h5ad.mus / .env cascade) and match every
+    # experiment in the registry whose `celltypes:` list includes this cell
+    # type AND whose organism matches. Empty `celltypes:` on an experiment
+    # is treated as "applies broadly" — included.
+    if not args.genesets:
+        h5adstore_root_early = _h5adstore_root()
+        mus_ann = mus.resolve_annotation(entry.h5ad_path, root=h5adstore_root_early)
+        ds_celltype_raw = mus_ann.get('cell_type')
+        ds_organism_raw = mus_ann.get('organism')
+        if isinstance(ds_celltype_raw, list):
+            ds_celltypes = {str(c).lower() for c in ds_celltype_raw}
+        elif ds_celltype_raw:
+            ds_celltypes = {str(ds_celltype_raw).lower()}
+        else:
+            ds_celltypes = set()
+        if isinstance(ds_organism_raw, list):
+            ds_organisms = {str(o).lower() for o in ds_organism_raw}
+        elif ds_organism_raw:
+            ds_organisms = {str(ds_organism_raw).lower()}
+        else:
+            ds_organisms = set()
+        if not ds_celltypes:
+            sys.exit(f"ERROR: dataset {args.db_id!r} has no cell_type in its "
+                     f".h5ad.mus / .env cascade — cannot auto-pick experiments. "
+                     f"Pass explicit experiment_ids instead.")
+        picked: List[str] = []
+        for exp in registry.list_experiments():
+            exp_ct = {c.lower() for c in exp.celltypes}
+            # empty celltypes = "applies broadly" (kept)
+            if exp_ct and not (exp_ct & ds_celltypes):
+                continue
+            # organism gate — same rule as the later loop applies here.
+            if exp.organism and ds_organisms and exp.organism.lower() not in ds_organisms:
+                continue
+            picked.append(exp.experiment_id)
+        if not picked:
+            sys.exit(f"ERROR: auto-pick found no experiments matching cell_type "
+                     f"{sorted(ds_celltypes)!r} + organism {sorted(ds_organisms)!r}. "
+                     f"Pass explicit experiment_ids instead.")
+        print(f"  Auto-picked {len(picked)} experiment(s) for cell_type "
+              f"{sorted(ds_celltypes)!r} + organism {sorted(ds_organisms)!r}:")
+        for exp_id in picked:
+            print(f"    · {exp_id}")
+        args.genesets = picked
 
     # Collect (experiment, [genesets]) for every requested geneset/experiment id.
     # Multiple ids referencing the same experiment merge — each geneset appears once.

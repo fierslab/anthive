@@ -179,6 +179,25 @@ class Experiment:
     def gene_id_type(self) -> str:
         return self.metadata.get('gene_id_type', 'symbol')
 
+    @property
+    def celltypes(self) -> List[str]:
+        """Cell type(s) this experiment's genesets are relevant to.
+
+        Empty when the experiment declares no cell-type applicability (treat
+        as: applies broadly / not yet tagged). Consumers (ant-score, the
+        Genes tab filter) match against a dataset's `cell_type` field.
+
+        Values should use the same vocabulary as `.h5ad.mus` `cell_type=`
+        (e.g. "microglial cell", "astrocyte", "excitatory neuron"). See
+        lib/_mus_vocab.yaml → cell_type.
+        """
+        raw = self.metadata.get('celltypes') or self.metadata.get('cell_type')
+        if raw is None:
+            return []
+        if isinstance(raw, str):
+            return [x.strip() for x in raw.split(',') if x.strip()]
+        return list(raw)
+
 
 @dataclass
 class Geneset:
@@ -244,6 +263,7 @@ class Geneset:
             'organism': self.organism,
             'method': self.experiment.method,
             'parent_dataset': self.experiment.parent_dataset,
+            'celltypes': self.experiment.celltypes,
             'direction': self.metadata.get('direction'),
         }
 
