@@ -123,9 +123,37 @@
         }
         mine = mine.slice(0, 15);
         if (!mine.length) { stateEl.textContent = 'Not scored on any tagged dataset for this (source, statistic).'; return; }
+        // Which tags are numerical (for picking violin vs scatter as the
+        // click-through plot). Must match ant-module-variability's
+        // NUMERICAL_TAGS.
+        var NUMERICAL = { braak: 1, age: 1, pmi: 1 };
+        function scoreColFor(row) {
+          if (row.source === 'geneset') {
+            // scanpy col = "<study>::<experiment>::<module>". catalog is
+            // "Study/Experiment", so replace the slash.
+            return String(row.catalog).replace('/', '::') + '::' + row.module;
+          }
+          if (row.source === 'aucell') {
+            return 'aucell__' + row.catalog + '__' + row.module;
+          }
+          return null;
+        }
+        function plotUrlFor(row) {
+          var col = scoreColFor(row); if (!col) return null;
+          var parts = String(row.dataset).split('/'); if (parts.length !== 2) return null;
+          var base = '/browse/' + encodeURIComponent(parts[0]) + '/' + encodeURIComponent(parts[1]);
+          var tagCol = row.tag_column || row.tag;
+          if (NUMERICAL[row.tag]) {
+            // scatter: tag on x, module score on y
+            return base + '/plot/scatter?x=' + encodeURIComponent(tagCol) + '&y=' + encodeURIComponent(col);
+          }
+          // categorical → violin split by tag
+          return base + '/plot/violin?x=' + encodeURIComponent(tagCol) + '&y=' + encodeURIComponent(col);
+        }
         var html = '<div class="table-wrap"><table class="auto"><thead><tr><th>Dataset</th><th>Tag</th>'
           + '<th style="text-align:right">' + esc(stat) + '</th>'
-          + '<th style="width:40%">vs peer modules (' + esc(source === 'geneset' ? 'scanpy' : source) + ') in that dataset <span class="info" title="Where this gene set’s value sits among all modules scored with the SAME method on the same (dataset, tag). Marker = this set; bar spans the min–max across peer modules.">ⓘ</span></th></tr></thead><tbody>';
+          + '<th style="width:40%">vs peer modules (' + esc(source === 'geneset' ? 'scanpy' : source) + ') in that dataset <span class="info" title="Where this gene set’s value sits among all modules scored with the SAME method on the same (dataset, tag). Marker = this set; bar spans the min–max across peer modules.">ⓘ</span></th>'
+          + '<th title="Open the plot showing this module vs this tag on this dataset">plot</th></tr></thead><tbody>';
         mine.forEach(function (r) {
           var parts = String(r.dataset).split('/');
           var dsLink = parts.length === 2 ? '<a href="/browse/' + encodeURIComponent(parts[0]) + '/' + encodeURIComponent(parts[1]) + '">' + esc(r.dataset) + '</a>' : esc(r.dataset);
@@ -137,10 +165,15 @@
             + 'style="position:relative;display:inline-block;width:70%;height:10px;background:#eef2f7;border-radius:2px;vertical-align:middle">'
             + '<span style="position:absolute;left:calc(' + pos.toFixed(1) + '% - 3px);top:-1px;width:6px;height:12px;border-radius:2px;background:' + (neg ? '#dc2626' : 'var(--link)') + '"></span></span>'
             + ' <span class="muted-2" style="font-size:10px">' + (+lo).toFixed(2) + '–' + (+hi).toFixed(2) + '</span>';
+          var url = plotUrlFor(r);
+          var plotIcon = url
+            ? '<a href="' + url + '" title="Open ' + (NUMERICAL[r.tag] ? 'scatter' : 'violin') + ' of ' + esc(r.tag) + ' × this module on ' + esc(r.dataset) + '" style="text-decoration:none">' + (NUMERICAL[r.tag] ? '◉' : '▬') + '</a>'
+            : '<span class="muted-2">—</span>';
           html += '<tr><td class="mono" style="font-size:11px">' + dsLink + '</td>'
             + '<td class="muted">' + esc(r.tag) + '</td>'
             + '<td class="mono" style="font-size:11px;text-align:right">' + (+r.value).toFixed(3) + '</td>'
-            + '<td>' + track + '</td></tr>';
+            + '<td>' + track + '</td>'
+            + '<td style="text-align:center;font-size:14px">' + plotIcon + '</td></tr>';
         });
         html += '</tbody></table></div><div class="muted" style="font-size:11px;margin-top:2px">top ' + mine.length + ' dataset × tag associations · sorted by ' + esc(sortMode) + ' · peer range across ' + esc(source === 'geneset' ? 'scanpy' : source) + ' modules on the same dataset · <a href="/genesets/variability">full heatmap →</a> · exploratory (per-cell)</div>';
         listEl.innerHTML = html;
