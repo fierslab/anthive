@@ -36,14 +36,20 @@
 </div>
 
 {% if payload.scored_in %}
-<div style="margin:8px 0">
-    <span class="mk">scored in</span>
+<details style="margin:8px 0" {% if payload.scored_in|length <= 3 %}open{% endif %}>
+    <summary style="cursor:pointer;font-size:12px;color:var(--text-muted)">
+      <span class="mk" style="display:inline">scored in</span>
+      <span style="color:var(--text);font-weight:500">{{ payload.scored_in|length }}</span>
+      dataset{{ '' if payload.scored_in|length == 1 else 's' }}
+      <span class="muted" style="font-size:11px">· pre-computed as a module score · <a href="/genesets/variability" onclick="event.stopPropagation()">module variability →</a></span>
+    </summary>
+    <div style="margin-top:6px">
     {% for dbid in payload.scored_in %}
     {% set parts = dbid.split('/') %}
     {% if parts|length == 2 %}<a href="/browse/{{ parts[0]|urlencode }}/{{ parts[1]|urlencode }}" class="chip">{{ dbid }}</a>{% else %}<span class="chip">{{ dbid }}</span>{% endif %}
     {% endfor %}
-    <span class="muted" style="font-size:11px">· pre-computed as a module score in {{ payload.scored_in|length }} dataset{{ '' if payload.scored_in|length == 1 else 's' }} · <a href="/genesets/variability">module variability →</a></span>
-</div>
+    </div>
+</details>
 {% else %}
 <div class="muted" style="margin:8px 0;font-size:12px">Not pre-scored on any dataset yet — <a href="/genesets/variability">see module variability →</a></div>
 {% endif %}
