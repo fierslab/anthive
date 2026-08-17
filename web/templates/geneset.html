@@ -166,8 +166,13 @@
             + '<span style="position:absolute;left:calc(' + pos.toFixed(1) + '% - 3px);top:-1px;width:6px;height:12px;border-radius:2px;background:' + (neg ? '#dc2626' : 'var(--link)') + '"></span></span>'
             + ' <span class="muted-2" style="font-size:10px">' + (+lo).toFixed(2) + '–' + (+hi).toFixed(2) + '</span>';
           var url = plotUrlFor(r);
+          // Inline SVG icons — same set as web/templates/dataset.html's
+          // chart_icon macro (barplot / umap-dots). Sized 1em; hover uses
+          // fill:currentColor so hover colour flows via CSS.
+          var SVG_BAR  = '<svg viewBox="0 0 16 16" width="1em" height="1em" fill="currentColor" aria-hidden="true"><rect x="1.5" y="8" width="3" height="6"/><rect x="6.5" y="5" width="3" height="9"/><rect x="11.5" y="2" width="3" height="12"/></svg>';
+          var SVG_UMAP = '<svg viewBox="0 0 16 16" width="1em" height="1em" fill="currentColor" aria-hidden="true"><circle cx="3.4" cy="4.2" r="1.5"/><circle cx="6.2" cy="2.6" r="1.5"/><circle cx="5.6" cy="7" r="1.5"/><circle cx="10.6" cy="9.6" r="1.5"/><circle cx="13.2" cy="7.6" r="1.5"/><circle cx="12.4" cy="12.6" r="1.5"/><circle cx="8.6" cy="13" r="1.5"/></svg>';
           var plotIcon = url
-            ? '<a href="' + url + '" title="Open ' + (NUMERICAL[r.tag] ? 'scatter' : 'violin') + ' of ' + esc(r.tag) + ' × this module on ' + esc(r.dataset) + '" style="text-decoration:none">' + (NUMERICAL[r.tag] ? '◉' : '▬') + '</a>'
+            ? '<a href="' + url + '" title="Open ' + (NUMERICAL[r.tag] ? 'scatter' : 'violin') + ' of ' + esc(r.tag) + ' × this module on ' + esc(r.dataset) + '" style="text-decoration:none;color:var(--text-muted);display:inline-flex;align-items:center;justify-content:center;font-size:15px" onmouseover="this.style.color=\'var(--link)\'" onmouseout="this.style.color=\'var(--text-muted)\'">' + (NUMERICAL[r.tag] ? SVG_UMAP : SVG_BAR) + '</a>'
             : '<span class="muted-2">—</span>';
           html += '<tr><td class="mono" style="font-size:11px">' + dsLink + '</td>'
             + '<td class="muted">' + esc(r.tag) + '</td>'
