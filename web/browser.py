@@ -452,7 +452,7 @@ _SOURCE_ABBREV = {
 # One-line grep-parse; cached at import so we don't stat 60 files per request.
 
 # Muted palette, subdued not saturated.
-_PUB_COLOR_PUBLISHED   = '#588157'    # muted green (public/published)
+_PUB_COLOR_PUBLISHED   = '#335C67'    # deep teal (palette; matches topbar)
 _PUB_COLOR_UNPUBLISHED = '#9E2A2B'    # muted red (palette)
 
 # Inline SVG icons — a filled disc in the status colour with the access glyph

@@ -8,49 +8,30 @@
   .summary-row { display:flex; gap:14px; align-items:center; margin:2px 0 6px; font-size:12px; color:var(--text-muted); flex-wrap:wrap; }
   .summary-row .val { font-weight:600; color:var(--text); }
 
-  /* pill palette shared by Cell + Disease columns (and dataset/folder pages). */
+  /* Uniform neutral pill for all landing-page columns — colour didn't
+     disambiguate; column headers already say what each is. */
   .ctx-pill {
     display:inline-block; padding:0 4px; border-radius:2px;
-    background:#eef2ff; color:#1d4ed8; border:1px solid #bfdbfe;
+    background:#f3f4f6; color:#374151; border:1px solid #e5e7eb;
     font-family:var(--font-mono); font-size:9.5px; letter-spacing:.2px;
   }
-  .ctx-pill.muted   { background:#f5f5f5; color:#888;    border-color:#e5e5e5; }
-  .ctx-pill.tech    { background:#fef3c7; color:#92400e; border-color:#fde68a; }
-  .ctx-pill.cell    { background:#dcfce7; color:#166534; border-color:#bbf7d0; }
-  .ctx-pill.tissue  { background:#e0f2fe; color:#075985; border-color:#bae6fd; }
-  .ctx-pill.disease { background:#fee2e2; color:#991b1b; border-color:#fecaca; }
-  .ctx-pill.prep    { background:#fce7f3; color:#9d174d; border-color:#fbcfe8; }
 
-  /* Organism letter-chip (Hs / Mm / …). Small, mono-glyph, one per species.
-     Colour classes are muted, distinct per organism so a multi-species
-     collection reads at a glance. */
   .org-chips { display:inline-flex; gap:2px; flex-wrap:nowrap; vertical-align:middle; }
   .org-chip {
     display:inline-block; padding:0 4px; border-radius:2px;
     font-family:var(--font-mono); font-size:9.5px; letter-spacing:.2px;
-    background:#f5f5f5; color:#555; border:1px solid #e5e5e5;
+    background:#f3f4f6; color:#374151; border:1px solid #e5e7eb;
   }
-  .org-chip.hs { background:#dbeafe; color:#0f3a63; border-color:#bcd7f6; }   /* dark teal-blue */
-  .org-chip.mm { background:#f6d6d6; color:#7a1e1e; border-color:#e5b5b5; }   /* muted dark red */
-  .org-chip.rn { background:#efe1cf; color:#78440b; border-color:#e0cba7; }
-  .org-chip.dr { background:#d3e9d5; color:#1e5c2a; border-color:#b6dabb; }
-  .org-chip.dm { background:#e6d9f2; color:#4b1d7a; border-color:#cebbec; }
-  .org-chip.mf { background:#d9ede8; color:#0e4a3d; border-color:#b6dccf; }
-  .org-chip.ce { background:#f2e6cd; color:#6b4a06; border-color:#dcc78e; }
-  .org-chip.other { background:#eeeeee; color:#555; border-color:#d5d5d5; }
+  /* Per-organism colours dropped — the abbrev (Hs/Mm/…) identifies it. */
 
-  /* Top-level tech class chip (sc/sn RNA, bulk RNA, proteomics, spatial, …). */
   .tech-class {
     display:inline-block; padding:1px 6px; border-radius:2px;
     font-size:10px; letter-spacing:.1px;
-    background:#fff7e6; color:#7a4a06; border:1px solid #f2d68a;
+    background:#f3f4f6; color:#374151; border:1px solid #e5e7eb;
     white-space:nowrap;
   }
-  .tech-class.spatial    { background:#e7f0fb; color:#1f3f6b; border-color:#c2d6ee; }
-  .tech-class.bulk       { background:#f0eaf9; color:#3f245b; border-color:#d5c4ea; }
-  .tech-class.proteomics { background:#e2f0e8; color:#1e4d33; border-color:#bfe0cc; }
-  .tech-class.other      { background:#f2f2f2; color:#5b5b5b; border-color:#dcdcdc; }
-  .tech-class.mixed      { background:#f5f5f5; color:#666; border-color:#dcdcdc; font-style:italic; }
+  /* Per-tech-class colours dropped; .mixed keeps its italic hint. */
+  .tech-class.mixed      { font-style:italic; }
 
   /* access / source glyphs: small, desaturated (B&W), just before the name */
   .acc-src { font-size:10px; margin-right:3px; vertical-align:baseline; cursor:default;
