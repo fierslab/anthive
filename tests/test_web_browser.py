@@ -1530,12 +1530,17 @@ def test_ui_state_helper_is_sitewide(client):
 
 def test_geneset_detail_has_variability_panel(client):
     # The geneset detail page includes the 'where it varies most' panel, which
-    # fetches /module-variability for this geneset name client-side.
+    # fetches /module-variability for this geneset name client-side. 2026-08
+    # added source + sort selectors and now builds the URL by concatenation,
+    # so we assert on the parts, not the whole literal.
     resp = client.get("/genesets/StudyX/Exp1/gs_up")
     assert resp.status_code == 200
     assert "Where it varies most" in resp.text
     assert 'id="gv-stat"' in resp.text
-    assert "/module-variability?statistic=" in resp.text
+    assert 'id="gv-source"' in resp.text
+    assert 'id="gv-sort"' in resp.text
+    assert "/module-variability?" in resp.text
+    assert "'statistic=' + encodeURIComponent(stat)" in resp.text
 
 
 def test_geneset_experiment_view_404(client):
@@ -1975,7 +1980,10 @@ def test_dataset_view_module_scores_tab_groups_three_methods(client, monkeypatch
     assert 'id="mod-tbl"' in resp.text
     # Legend surfaces per-method counts (starCAT UI is hidden — 2026-08).
     assert 'scanpy <span class="muted-2">(1)' in resp.text
-    assert 'starCAT' not in resp.text
+    # starCAT legend chip + column dropped from the visible UI (still may
+    # appear in inline CSS comments about how the legend used to work).
+    assert 'data-method="starcat"' not in resp.text
+    assert '>starCAT<' not in resp.text
     assert 'AUCell <span class="muted-2">(2)' in resp.text
     # The scanpy + aucell "Brown_Lysosome" collapse to ONE row
     # (checks the grouping key). starCAT-only DAM_pos still contributes
