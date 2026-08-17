@@ -561,17 +561,19 @@ class AnthiveDB:
                         'max': _coerce_num(row[ix_max]),
                         'median': _coerce_num(row[ix_q50]),
                         'mean': _coerce_num(row[ix_avg]),
-                        # q05 / q95 are filled in by the follow-up scan below.
-                        'q05': None, 'q95': None,
+                        # q05 / q25 / q75 / q95 filled in by the follow-up scan.
+                        'q05': None, 'q25': None, 'q75': None, 'q95': None,
                         'pct_missing': round(pct_missing, 2),
                     }
 
-            # ─── follow-up #1: q05 / q95 on numerical columns (bulk) ───
+            # ─── follow-up #1: q05 / q25 / q75 / q95 on numerical columns (bulk) ───
             if kind == 'num' and col_names:
                 quant_exprs = []
                 for name in col_names:
                     ident = _q(name)   # legacy stored col names may have '#'/space; trusted (comes from information_schema)
                     quant_exprs.append(f'quantile_cont({ident}, 0.05)')
+                    quant_exprs.append(f'quantile_cont({ident}, 0.25)')
+                    quant_exprs.append(f'quantile_cont({ident}, 0.75)')
                     quant_exprs.append(f'quantile_cont({ident}, 0.95)')
                 try:
                     quant_row = self._conn.execute(
@@ -581,8 +583,10 @@ class AnthiveDB:
                     quant_row = None
                 if quant_row is not None:
                     for idx, name in enumerate(col_names):
-                        out[name]['q05'] = _coerce_num(quant_row[idx * 2])
-                        out[name]['q95'] = _coerce_num(quant_row[idx * 2 + 1])
+                        out[name]['q05'] = _coerce_num(quant_row[idx * 4])
+                        out[name]['q25'] = _coerce_num(quant_row[idx * 4 + 1])
+                        out[name]['q75'] = _coerce_num(quant_row[idx * 4 + 2])
+                        out[name]['q95'] = _coerce_num(quant_row[idx * 4 + 3])
 
             # ─── follow-up #2: top-N categorical values per column ───
             # Per-column GROUP BY query. obscat is narrow and DuckDB is
@@ -642,6 +646,8 @@ class AnthiveDB:
                                AVG(score)  AS mean_v,
                                MEDIAN(score) AS median_v,
                                quantile_cont(score, 0.05) AS q05_v,
+                               quantile_cont(score, 0.25) AS q25_v,
+                               quantile_cont(score, 0.75) AS q75_v,
                                quantile_cont(score, 0.95) AS q95_v,
                                COUNT(*)    AS n_v,
                                SUM(CASE WHEN score IS NULL THEN 1 ELSE 0 END) AS n_null
@@ -650,7 +656,7 @@ class AnthiveDB:
                     """, [str(sidecar)]).fetchall()
                     # Invert score_index: (source, catalog, module) → col_name
                     reverse_index = {v: k for k, v in score_index.items()}
-                    for source, catalog, module, mn, mx, mean_v, med, q05, q95, n_v, n_null in triples_rows:
+                    for source, catalog, module, mn, mx, mean_v, med, q05, q25, q75, q95, n_v, n_null in triples_rows:
                         col_name = reverse_index.get((source, catalog, module))
                         if not col_name or col_name in out:
                             continue
@@ -662,6 +668,8 @@ class AnthiveDB:
                             'mean':   _coerce_num(mean_v),
                             'median': _coerce_num(med),
                             'q05':    _coerce_num(q05),
+                            'q25':    _coerce_num(q25),
+                            'q75':    _coerce_num(q75),
                             'q95':    _coerce_num(q95),
                             'pct_missing': pct_missing,
                         }

@@ -600,11 +600,11 @@
         <thead><tr>
           <th>Module</th>
           <th class="obs-plots-th" title="scanpy sc.tl.score_genes">scanpy</th>
-          <th title="scanpy stats">mean · min · max</th>
+          <th title="scanpy interquartile range: median [q25 – q75]">IQR</th>
           <th class="obs-plots-th" title="starCAT program score">starCAT</th>
-          <th title="starCAT stats">mean · min · max</th>
+          <th title="starCAT interquartile range: median [q25 – q75]">IQR</th>
           <th class="obs-plots-th" title="AUCell rank-based score">AUCell</th>
-          <th title="AUCell stats">mean · min · max</th>
+          <th title="AUCell interquartile range: median [q25 – q75]">IQR</th>
         </tr></thead>
         <tbody>
         {% for mod in cat_group.modules %}
@@ -936,15 +936,16 @@ document.addEventListener('DOMContentLoaded', function() {
                         }
                     }
                 });
-                // Module scores tab — fill the "mean · min · max" cell for
-                // each per-method score column (they're numerical obs).
+                // Module scores tab — fill the IQR summary per method
+                // (median [q25 – q75]). Full quantile ladder in the tooltip.
                 document.querySelectorAll('#tab-modules .mod-stats').forEach(function (cell) {
                     var col = cell.getAttribute('data-col');
                     var s = col && OBS_STATS[col.toLowerCase()];
                     if (!s) return;
-                    cell.textContent = fnum(s.mean) + ' · ' + fnum(s.min) + ' · ' + fnum(s.max);
+                    cell.textContent = fnum(s.median) + ' [' + fnum(s.q25) + ' – ' + fnum(s.q75) + ']';
                     cell.title = 'min ' + fnum(s.min) + ' · Q05 ' + fnum(s.q05)
-                        + ' · median ' + fnum(s.median) + ' · Q95 ' + fnum(s.q95)
+                        + ' · Q25 ' + fnum(s.q25) + ' · median ' + fnum(s.median)
+                        + ' · Q75 ' + fnum(s.q75) + ' · Q95 ' + fnum(s.q95)
                         + ' · max ' + fnum(s.max) + ' · mean ' + fnum(s.mean);
                 });
 
