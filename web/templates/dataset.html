@@ -596,7 +596,7 @@
         <span class="muted-2" style="margin-left:4px">· {{ cat_group.n }} module{{ '' if cat_group.n == 1 else 's' }}</span>
       </summary>
       <div class="table-wrap" style="margin-top:4px">
-      <table class="auto mod-cat-table" id="obs-tbl-mod" style="font-size:12px">
+      <table class="obs-stats-tbl auto mod-cat-table" id="obs-tbl-mod" style="font-size:12px">
         <thead><tr>
           <th>Module</th>
           <th class="obs-plots-th" title="scanpy sc.tl.score_genes">scanpy</th>
@@ -626,11 +626,11 @@
           {% macro _score_stats(score_col) -%}
             {% if score_col %}<span class="mod-stats" data-col="{{ score_col }}" style="color:#555;font-family:var(--font-mono);font-size:10.5px"></span>{% else %}<span style="color:#c8cdd3">—</span>{% endif %}
           {%- endmacro %}
-          <td>{{ _score_cell(_mods.scanpy, 'scanpy') }}</td>
+          <td class="obs-plots">{{ _score_cell(_mods.scanpy, 'scanpy') }}</td>
           <td>{{ _score_stats(_mods.scanpy) }}</td>
-          <td>{{ _score_cell(_mods.starcat, 'starCAT') }}</td>
+          <td class="obs-plots">{{ _score_cell(_mods.starcat, 'starCAT') }}</td>
           <td>{{ _score_stats(_mods.starcat) }}</td>
-          <td>{{ _score_cell(_mods.aucell, 'AUCell') }}</td>
+          <td class="obs-plots">{{ _score_cell(_mods.aucell, 'AUCell') }}</td>
           <td>{{ _score_stats(_mods.aucell) }}</td>
         </tr>
         {% endfor %}
