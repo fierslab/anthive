@@ -1594,17 +1594,56 @@ def _is_download_hidden(name: str) -> bool:
     return False
 
 
+def _resolve_static_dir(group_key: str) -> Optional[Path]:
+    """Return the on-disk static/ folder for a collection.
+
+    `group_key` can be either the short browse-id (e.g. `S25`) or the
+    friendly folder name (`Sierksma2025`). Both map to
+    `data/h5adstore/<friendly>/static/` — we try the key as-is first, then
+    look it up in the API catalog by matching group_id.
+    """
+    candidate = _H5ADSTORE_ROOT / group_key / 'static'
+    try:
+        if candidate.is_dir():
+            return candidate
+    except OSError:
+        pass
+    # Resolve short → friendly via the catalog. Best-effort.
+    try:
+        for db in _all_databases_cached():
+            if (db.get('group_id') or db['id'].split('/')[0]) == group_key:
+                friendly = (db.get('collection') or {}).get('group')
+                if friendly:
+                    fpath = _H5ADSTORE_ROOT / friendly / 'static'
+                    try:
+                        if fpath.is_dir():
+                            return fpath
+                    except OSError:
+                        pass
+                break
+    except Exception:
+        pass
+    return None
+
+
+def _all_databases_cached():
+    """Small local wrapper — _all_databases uses the request api_url; the
+    static-file lookup doesn't have request context, so hit the default."""
+    from config import get_config
+    cfg = get_config()
+    api_url = f"http://{cfg.get('rest_api_host','localhost')}:{cfg.get('rest_api_port',8080)}"
+    return _all_databases(api_url)
+
+
 def _group_static_files(group_id: str) -> List[Dict]:
     """List files under data/h5adstore/{group}/static/ eligible for download.
 
     Returns a list of ``{name, size_bytes}`` sorted by name. Empty when the
-    folder does not exist or contains only hidden entries.
+    folder does not exist or contains only hidden entries. Accepts either
+    short browse-id (S25) or friendly folder name (Sierksma2025).
     """
-    static_dir = _H5ADSTORE_ROOT / group_id / 'static'
-    try:
-        if not static_dir.is_dir():
-            return []
-    except OSError:
+    static_dir = _resolve_static_dir(group_id)
+    if static_dir is None:
         return []
     out: List[Dict] = []
     try:
@@ -1682,7 +1721,10 @@ async def group_static_download(request: Request, browse_id: str, filename: str)
     name = unquote(filename)
     if '/' in name or '\\' in name or name in ('.', '..') or _is_download_hidden(name):
         raise HTTPException(status_code=404, detail="not found")
-    static_dir = (_H5ADSTORE_ROOT / group_id / 'static').resolve()
+    resolved = _resolve_static_dir(group_id)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="not found")
+    static_dir = resolved.resolve()
     try:
         target = (static_dir / name).resolve()
     except OSError:
