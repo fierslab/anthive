@@ -2067,30 +2067,18 @@ def test_dataset_view_downloads_tab_hidden_by_default(client):
     assert 'display:none' in button_snippet
 
 
-def test_dataset_view_embeddings_on_overview_tab(client):
-    # The standalone Embeddings tab was removed; its content is now merged
-    # INTO the Explore section on the Overview tab as a fourth sibling row
-    # (genes / categories / numerical / embeddings), promoted 2026-08. When
-    # obsm keys exist we expect an "embeddings" label + scatter chip inside
-    # the #tab-overview panel's Explore block, and NO Embeddings tab button
-    # and NO standalone <h2>Embeddings heading.
+def test_dataset_view_embeddings_on_data_tab(client):
+    # Embeddings moved from the Overview tab's Explore block to the Data tab
+    # in 2026-08 (alongside Biology + Resources). Overview stays lean.
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
     assert 'data-tab="embed"' not in resp.text
     assert 'id="tab-embed"' not in resp.text
-    # Embeddings row lives inside the Explore section on the Overview tab.
-    overview_start = resp.text.index('id="tab-overview"')
-    overview_end = resp.text.index('</section>', overview_start)
-    overview_panel = resp.text[overview_start:overview_end]
-    explore_start = overview_panel.index('<h2>Explore</h2>')
-    # Bound the Explore block by the next <h2> (Biology) or Resources.
-    next_h2 = overview_panel.find('<h2>', explore_start + 1)
-    explore_panel = overview_panel[explore_start:next_h2 if next_h2 != -1 else None]
-    assert '>embeddings<' in explore_panel  # the <span class="mk"> label
-    # ds1's fake exposes X_umap → a scatter chip must be inside Explore
-    assert 'plot/scatter?embedding=X_umap' in explore_panel
-    # And there must be no standalone <h2>Embeddings anywhere.
-    assert '<h2>Embeddings' not in resp.text
+    data_start = resp.text.index('id="tab-data"')
+    data_end = resp.text.index('</section>', data_start)
+    data_panel = resp.text[data_start:data_end]
+    assert '<h2>Embeddings' in data_panel
+    assert 'plot/scatter?embedding=X_umap' in data_panel
 
 
 def test_dataset_view_embeddings_subheading_hidden_when_no_obsm(client, monkeypatch):

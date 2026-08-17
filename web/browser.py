@@ -141,7 +141,40 @@ _MICROGLIA_MARKER_FALLBACK = [
     "APOE", "SPP1", "GPNMB", "IL1B", "TNF", "FCGR3A",
 ]
 
+_ASTROCYTE_MARKER_FALLBACK = [
+    "GFAP", "AQP4", "S100B", "ALDH1L1", "SLC1A2", "SLC1A3", "GJA1",
+    "SOX9", "VIM", "GLUL", "FGFR3", "MLC1", "CLU", "APOE", "SPARCL1",
+    "CD44", "MFGE8", "MERTK", "HES5", "AGT",
+]
+
+_NEURON_MARKER_FALLBACK = [
+    "RBFOX3", "SNAP25", "SYP", "MAP2", "NEFL", "NEFM", "NEFH", "TUBB3",
+    "SYT1", "VAMP2", "GRIA1", "GRIN1", "SLC17A7", "GAD1", "GAD2", "DLG4",
+    "CAMK2A", "HOMER1", "NEUROD2", "STMN2",
+]
+
 _MICROGLIA_CELLTYPE_TERMS = {"microglial cell", "microglia"}
+_ASTROCYTE_CELLTYPE_TERMS = {"astrocyte", "astrocytes"}
+_NEURON_CELLTYPE_TERMS   = {"neuron", "neurons", "gabaergic neuron",
+                            "glutamatergic neuron", "cortical neuron"}
+
+
+def _resolve_gene_panel(top_genes, cell_type_term):
+    """Return (genes: List[str], source: str) for the Genes tab.
+
+    source ∈ {'precomputed', 'microglia_fallback', 'astrocyte_fallback',
+              'neuron_fallback', 'none'}.
+    """
+    if top_genes:
+        return list(top_genes), 'precomputed'
+    ct = (cell_type_term or '').lower()
+    if ct in _MICROGLIA_CELLTYPE_TERMS:
+        return list(_MICROGLIA_MARKER_FALLBACK), 'microglia_fallback'
+    if ct in _ASTROCYTE_CELLTYPE_TERMS:
+        return list(_ASTROCYTE_MARKER_FALLBACK), 'astrocyte_fallback'
+    if ct in _NEURON_CELLTYPE_TERMS:
+        return list(_NEURON_MARKER_FALLBACK), 'neuron_fallback'
+    return [], 'none'
 
 
 # Embed a live plot thumbnail in markdown with a compact scheme:
@@ -2000,14 +2033,24 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
 
     accession = db.get('accession')
     _celltype = db.get('cell_type') or db.get('celltype')
-    _top_genes = _as_list(db.get('top_genes'))
-    # Fallback: when a microglia dataset has no precomputed markers, show a
-    # curated canonical marker set so the Explore chip row is still useful.
-    # Only for microglia — do NOT do this for other cell types.
-    top_genes_fallback = False
-    if not _top_genes and isinstance(_celltype, str) and _celltype.lower() in _MICROGLIA_CELLTYPE_TERMS:
-        _top_genes = list(_MICROGLIA_MARKER_FALLBACK)
-        top_genes_fallback = True
+    _top_genes_raw = _as_list(db.get('top_genes'))
+    # Gene panel for the Genes tab: prefer dataset's precomputed favourites,
+    # else a canonical curated panel keyed on cell type (microglia / astrocyte
+    # / neuron). Non-matching cell types get no panel (source='none').
+    _panel_genes, _panel_source = _resolve_gene_panel(_top_genes_raw, _celltype)
+    _top_genes = _panel_genes                 # legacy alias for the Explore chip
+    top_genes_fallback = _panel_source != 'precomputed' and bool(_panel_genes)
+    gene_panel = {
+        'genes':  _panel_genes,
+        'source': _panel_source,
+        'label':  {
+            'precomputed':          'dataset favourites',
+            'microglia_fallback':   'generic microglia markers',
+            'astrocyte_fallback':   'generic astrocyte markers',
+            'neuron_fallback':      'generic neuron markers',
+            'none':                 '',
+        }[_panel_source],
+    }
     dataset_meta = {
         # Biology
         'organism':        db.get('organism'),
@@ -2113,6 +2156,7 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "markdown_content": markdown_content,
         "obs_columns": obs_columns,
         "default_embedding": default_embedding,
+        "gene_panel": gene_panel,
         "layer_stats_rows": layer_stats_rows,
         "dataset_meta": dataset_meta,
         "context_bar": context_bar,

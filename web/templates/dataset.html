@@ -379,6 +379,9 @@
 
 <div class="tab-bar" id="ds-tab-bar" role="tablist">
   <button type="button" class="tab-btn active" data-tab="overview" role="tab">Overview</button>
+  {% if gene_panel and gene_panel.genes %}
+  <button type="button" class="tab-btn"        data-tab="genes"    role="tab">Genes<span class="tab-count">{{ gene_panel.genes|length }}</span></button>
+  {% endif %}
   <button type="button" class="tab-btn"        data-tab="data"     role="tab">Data</button>
   {% if n_module_scores %}
   <button type="button" class="tab-btn"        data-tab="modules"  role="tab">Module scores<span class="tab-count">{{ n_module_scores }}</span></button>
@@ -396,23 +399,12 @@
 <section class="tab-panel active" id="tab-overview" role="tabpanel">
   {% if markdown_content %}<div class="ds-desc md-body">{{ markdown_content|safe }}</div>{% endif %}
 
-  {# Explore — curated quick-viz favourites (genes / categories / numerical / embeddings). #}
-  {% if dataset_meta and (dataset_meta.top_genes or dataset_meta.top_cat or dataset_meta.top_num) or (info and info.obsm_keys) %}
+  {# Explore — curated quick-viz favourites (categories / numerical only).
+     Genes moved to the Genes tab; embeddings + biology + resources moved
+     to the Data tab. #}
+  {% if dataset_meta and (dataset_meta.top_cat or dataset_meta.top_num) %}
   <h2>Explore</h2>
-  {% if dataset_meta and dataset_meta.top_genes %}
-  <div style="margin-bottom:4px">
-      {% if top_genes_fallback %}
-      <span class="mk" style="display:inline-block;vertical-align:middle" title="This dataset has no precomputed marker genes — showing a generic canonical microglia panel so you still have something to click.">generic microglia markers</span>
-      <span class="muted-2" style="font-size:11px;margin-left:4px">click to plot; dataset did not precompute markers</span>
-      {% else %}
-      <span class="mk" style="display:inline-block;vertical-align:middle">genes</span>
-      {% endif %}
-      {% for gene in dataset_meta.top_genes %}
-      <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ gene | urlencode }}" class="chip">{{ gene }}</a>
-      {% endfor %}
-  </div>
-  {% endif %}
-  {% if dataset_meta and dataset_meta.top_cat %}
+  {% if dataset_meta.top_cat %}
   <div style="margin-bottom:4px">
       <span class="mk" style="display:inline-block;vertical-align:middle">categories</span>
       {% for col in dataset_meta.top_cat %}
@@ -420,7 +412,7 @@
       {% endfor %}
   </div>
   {% endif %}
-  {% if dataset_meta and dataset_meta.top_num %}
+  {% if dataset_meta.top_num %}
   <div style="margin-bottom:4px">
       <span class="mk" style="display:inline-block;vertical-align:middle">numerical</span>
       {% for col in dataset_meta.top_num %}
@@ -428,36 +420,41 @@
       {% endfor %}
   </div>
   {% endif %}
-  {% if info and info.obsm_keys %}
-  <div style="margin-bottom:4px">
-      <span class="mk" style="display:inline-block;vertical-align:middle" title="Per-cell 2D layouts (UMAP, PCA, tSNE, custom). Each links to a scatter plot on that embedding.">embeddings</span>
-      {% for emb in info.obsm_keys %}
-        {% if has_duckdb %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/scatter?embedding={{ emb|urlencode }}" class="chip" title="scatter on {{ emb }}">{{ emb }}</a>{% else %}<code>{{ emb }}</code>{% endif %}
-      {% endfor %}
-  </div>
   {% endif %}
-  {% endif %}
-
-  {# Biology — sample attributes beyond the headline pills #}
-  {% if dataset_meta and (dataset_meta.condition or dataset_meta.sex or dataset_meta.age or dataset_meta.strain) %}
-  <h2>Biology <span class="info" title="Headline biology — organism, technology, cell type, tissue, disease, prep — is in the coloured pills under the title (hover for full names).">ⓘ</span></h2>
-  <div class="info-col">
-      {% if dataset_meta.condition %}<div class="info-row"><span class="mk">condition</span><span>{{ dataset_meta.condition|join(', ') }}</span></div>{% endif %}
-      {% if dataset_meta.sex %}<div class="info-row"><span class="mk">sex</span><span>{{ dataset_meta.sex }}</span></div>{% endif %}
-      {% if dataset_meta.age %}<div class="info-row"><span class="mk">age</span><span>{{ dataset_meta.age }}</span></div>{% endif %}
-      {% if dataset_meta.strain %}<div class="info-row"><span class="mk">strain</span><span>{{ dataset_meta.strain }}</span></div>{% endif %}
-  </div>
-  {% endif %}
-
-  {# Resources — programmatic entry points for this dataset. #}
-  <h2>Resources</h2>
-  <div style="padding:4px 0;display:flex;gap:14px;flex-wrap:wrap;font-size:12px;align-items:center">
-      <span>dataset id: <code>{{ db_id }}</code></span>
-      <a href="/api/databases/{{ db_id }}/info">api info</a>
-      <a href="/api/docs#/default/get_cells_databases__db_id__cells_get">api docs → /cells</a>
-      <a href="/jupyter">open in jupyterlite</a>
-  </div>
 </section>
+
+{# ── Genes tab ────────────────────────────────────────────────────────
+   Precomputed favourites when the dataset defines them; otherwise a
+   canonical curated panel keyed on cell type. Each gene: histogram +
+   embedding scatter icon. #}
+{% if gene_panel and gene_panel.genes %}
+<section class="tab-panel" id="tab-genes" role="tabpanel">
+  <h2>Genes
+    <span class="muted" style="font-size:12px;font-weight:normal">({{ gene_panel.genes|length }})</span>
+    <span class="info" title="Click ▬ for a histogram of the gene's expression, or ◉ for an embedding scatter coloured by the gene. Panel source: precomputed dataset favourites, or a canonical curated panel keyed on cell type (microglia / astrocyte / neuron).">ⓘ</span></h2>
+  <div class="muted" style="font-size:11px;margin-bottom:6px">
+    {% if gene_panel.source == 'precomputed' %}Curated favourites shipped with this dataset.
+    {% else %}<em>Generic {{ gene_panel.label.split(' ', 1)[1] if ' ' in gene_panel.label else gene_panel.label }}</em> — dataset did not precompute a favourite list.{% endif %}
+  </div>
+  <div class="table-wrap"><table class="obs-stats-tbl auto" id="obs-tbl-genes">
+    <thead><tr><th>gene</th><th class="obs-plots-th">plot</th></tr></thead>
+    <tbody>
+    {% for gene in gene_panel.genes %}
+    {% set _b = '/browse/' ~ folder_browse_id ~ '/' ~ file_id %}
+    <tr>
+      <td class="colname">{{ gene }}</td>
+      <td class="obs-plots">
+        {% if has_duckdb %}
+        <a class="obs-plot-icon" href="{{ _b }}/plot/histogram?x={{ gene|urlencode }}" title="histogram of {{ gene }}">▬</a>
+        {% if default_embedding %}<a class="obs-plot-icon" href="{{ _b }}/plot/scatter?embedding={{ default_embedding|urlencode }}&color={{ gene|urlencode }}" title="{{ default_embedding }} scatter, coloured by {{ gene }}">◉</a>{% endif %}
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+</section>
+{% endif %}
 
 {# ── Data tab ─────────────────────────────────────────────────────────── #}
 <section class="tab-panel" id="tab-data" role="tabpanel">
@@ -496,6 +493,36 @@
   <h2>Storage</h2>
   <div class="info-col">
     <div class="info-row"><span class="mk">default layer</span><span class="mono">{{ info.default_layer if info.default_layer else 'X' }}</span></div>
+  </div>
+
+  {# Embeddings — moved from Overview. Chip row of scatter-launch links. #}
+  {% if info and info.obsm_keys %}
+  <h2>Embeddings <span class="info" title="Per-cell 2D layouts (UMAP, tSNE, custom). Each links to a scatter plot on that embedding.">ⓘ</span></h2>
+  <div style="margin-bottom:4px">
+    {% for emb in info.obsm_keys %}
+      {% if has_duckdb %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/scatter?embedding={{ emb|urlencode }}" class="chip" title="scatter on {{ emb }}">{{ emb }}</a>{% else %}<code>{{ emb }}</code>{% endif %}
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {# Biology — sample attributes beyond the headline pills. Moved from Overview. #}
+  {% if dataset_meta and (dataset_meta.condition or dataset_meta.sex or dataset_meta.age or dataset_meta.strain) %}
+  <h2>Biology <span class="info" title="Headline biology — organism, technology, cell type, tissue, disease, prep — is in the pills under the title (hover for full names).">ⓘ</span></h2>
+  <div class="info-col">
+      {% if dataset_meta.condition %}<div class="info-row"><span class="mk">condition</span><span>{{ dataset_meta.condition|join(', ') }}</span></div>{% endif %}
+      {% if dataset_meta.sex %}<div class="info-row"><span class="mk">sex</span><span>{{ dataset_meta.sex }}</span></div>{% endif %}
+      {% if dataset_meta.age %}<div class="info-row"><span class="mk">age</span><span>{{ dataset_meta.age }}</span></div>{% endif %}
+      {% if dataset_meta.strain %}<div class="info-row"><span class="mk">strain</span><span>{{ dataset_meta.strain }}</span></div>{% endif %}
+  </div>
+  {% endif %}
+
+  {# Resources — programmatic entry points. Moved from Overview. #}
+  <h2>Resources</h2>
+  <div style="padding:4px 0;display:flex;gap:14px;flex-wrap:wrap;font-size:12px;align-items:center">
+      <span>dataset id: <code>{{ db_id }}</code></span>
+      <a href="/api/databases/{{ db_id }}/info">api info</a>
+      <a href="/api/docs#/default/get_cells_databases__db_id__cells_get">api docs → /cells</a>
+      <a href="/jupyter">open in jupyterlite</a>
   </div>
 </section>
 
