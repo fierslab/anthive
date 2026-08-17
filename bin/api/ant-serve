@@ -4290,8 +4290,14 @@ def _handle_scatter(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     # Default random-subsample for scatter (see _DEFAULT_SCATTER_SAMPLE
     # comment). DuckDB reservoir sampling short-circuits if the post-filter
     # cell count is below the sample size — small datasets pass through
-    # untouched. Users override with ?sample=N.
-    effective_sample = req.sample if req.sample is not None else _DEFAULT_SCATTER_SAMPLE
+    # untouched. Users override with ?sample=N. Explicit ?sample=0 opts
+    # out of subsampling entirely (renders all matching cells).
+    if req.sample is None:
+        effective_sample = _DEFAULT_SCATTER_SAMPLE
+    elif req.sample == 0:
+        effective_sample = None
+    else:
+        effective_sample = req.sample
     embedding_df = ctx.db.get_embedding_data(emb_id, n_dims=2, filters=req.filters, sample=effective_sample)
 
     color_df = None
@@ -4528,11 +4534,14 @@ def _handle_xy(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
     session_axes  = list(dict.fromkeys(session_axes))
 
     # Auto-sample for per-cell scatter (not hexbin — hexbin aggregates).
-    # See _DEFAULT_SCATTER_SAMPLE comment.
+    # See _DEFAULT_SCATTER_SAMPLE comment. sample=0 opts out entirely.
     xy_scatter = req.geom == 'scatter' or req.geom == 'xy_scatter'
-    effective_sample = req.sample
-    if effective_sample is None and xy_scatter:
+    if req.sample == 0:
+        effective_sample = None
+    elif req.sample is None and xy_scatter:
         effective_sample = _DEFAULT_SCATTER_SAMPLE
+    else:
+        effective_sample = req.sample
     data_df = ctx.db.get_cell_table(
         genes=genes_to_fetch or None,
         metadata_fields=metas_to_fetch or None,
@@ -6324,11 +6333,14 @@ class CommonPlotParams:
             ),
         ),
         sample: Optional[int] = Query(
-            None, ge=1, le=1_000_000,
+            None, ge=0, le=1_000_000,
             description=(
                 "Random subsample: draw at most this many cells using DuckDB "
                 "reservoir sampling (near-zero overhead, applied after subset "
-                "filters). Example: ``sample=10000``."
+                "filters). Example: ``sample=10000``. Special values: unset "
+                "(omit) = default; sample=0 = disable subsampling (return "
+                "all matching cells). On scatter geoms, unset triggers an "
+                "auto-subsample of 25,000 cells for performance."
             ),
         ),
         attach_sessions: List[str] = Query(

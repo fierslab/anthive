@@ -870,8 +870,14 @@
         <option value="{{ layer }}" {% if layer == plot_meta.default_layer %}selected{% endif %}>{{ layer }}</option>
         {% endfor %}
       </select>
-      <label style="margin-top:4px">sample N cells (optional)</label>
-      <input type="number" name="sample" id="f-sample" placeholder="e.g. 10000" min="100" max="1000000">
+      <label style="margin-top:4px">sample N cells (optional) {{ info('Random subsample using DuckDB reservoir sampling. Scatter and xy_scatter auto-subsample to 25,000 cells when this is empty (renders in ~1s on multi-100k datasets). Type 0 to render all cells; or a specific N to override. Other geoms (hexbin/kde2d/violin/box/bar/…) do not auto-subsample.') }}</label>
+      <input type="number" name="sample" id="f-sample" placeholder="{% if geom in ('scatter','xy_scatter') %}auto (25000){% else %}e.g. 10000{% endif %}" min="0" max="1000000">
+      {% if geom in ('scatter','xy_scatter') %}
+      <div id="sample-hint" data-auto-sample="25000" style="font-size:10px; color:var(--text-muted); margin-top:2px;">
+        <span id="sample-hint-msg">Auto-sampled to 25,000 cells for speed.</span>
+        <a href="#" id="sample-show-all" style="color:var(--link); text-decoration:none; margin-left:4px">Show all cells</a>
+      </div>
+      {% endif %}
       <label style="margin-top:4px">subset (advanced)</label>
       <input type="text" name="subset" id="f-subset" autocomplete="off" placeholder="field:value or field:v1,v2">
     </fieldset>
@@ -1355,6 +1361,43 @@
     if (el.tagName === 'INPUT') el.addEventListener('input', scheduleRefresh);
   });
   document.getElementById('apply-btn').addEventListener('click', () => { syncURL(); refreshDownloadLinks(); refresh(); });
+
+  // Sample-field hint: reflects what the SERVER will actually do given the
+  // current sample value on the scatter geoms. Sync on load + on any change.
+  (function () {
+    const sampleInput = document.getElementById('f-sample');
+    const hint = document.getElementById('sample-hint');
+    if (!sampleInput || !hint) return;   // non-scatter geoms have no hint
+    const hintMsg = document.getElementById('sample-hint-msg');
+    const showAll = document.getElementById('sample-show-all');
+    function syncHint() {
+      const raw = sampleInput.value.trim();
+      if (raw === '') {
+        hintMsg.textContent = 'Auto-sampled to 25,000 cells for speed.';
+        showAll.style.display = '';
+        showAll.textContent = 'Show all cells';
+      } else if (raw === '0') {
+        hintMsg.textContent = 'Rendering all cells (no subsample).';
+        showAll.style.display = '';
+        showAll.textContent = 'Restore auto-sample';
+      } else {
+        hintMsg.textContent = `Sampled to ${Number(raw).toLocaleString()} cells.`;
+        showAll.style.display = '';
+        showAll.textContent = 'Show all cells';
+      }
+    }
+    sampleInput.addEventListener('input', syncHint);
+    showAll.addEventListener('click', ev => {
+      ev.preventDefault();
+      const raw = sampleInput.value.trim();
+      // Click toggles between "show all" and "restore auto":
+      //   currently 0 → clear the field (auto)
+      //   anything else → set to 0 (all)
+      sampleInput.value = (raw === '0') ? '' : '0';
+      sampleInput.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    syncHint();
+  })();
 
   // ── settings panel
   const panel = document.getElementById('settings-panel');
