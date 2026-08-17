@@ -4,7 +4,15 @@
 
 {% block content %}
 <style>
-  .mv-intro { max-width: 780px; font-size: 13px; color: var(--text-muted); line-height: 1.55; margin: 2px 0 12px; }
+  .mv-intro { max-width: 900px; font-size: 13px; color: var(--text-muted); line-height: 1.55; margin: 2px 0 8px; }
+  details.mv-stats-help { max-width: 900px; margin: 0 0 12px; font-size: 12px; }
+  details.mv-stats-help summary { cursor: pointer; color: var(--link); font-size: 12px; padding: 2px 0; }
+  details.mv-stats-help summary:hover { text-decoration: underline; }
+  table.mv-stats-table { font-size: 12px; margin: 8px 0 4px; border-collapse: collapse; }
+  table.mv-stats-table th, table.mv-stats-table td { border: 1px solid var(--border-light); padding: 4px 8px; vertical-align: top; text-align: left; }
+  table.mv-stats-table th { background: #f8fafc; font-weight: 600; font-size: 11px; }
+  table.mv-stats-table td:first-child { white-space: nowrap; font-family: var(--font-mono); }
+  table.mv-stats-table td:nth-child(2), table.mv-stats-table td:nth-child(3) { white-space: nowrap; }
   .mv-ctrls { display: flex; flex-wrap: wrap; gap: 14px 18px; align-items: flex-end; margin-bottom: 10px; }
   .mv-ctrls label { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--text-muted); margin-bottom: 2px; }
   .mv-ctrls select { font-family: var(--font); font-size: 13px; padding: 4px 8px; border: 1px solid var(--border); border-radius: 5px; background: #fff; }
@@ -40,11 +48,39 @@
 
 <div class="breadcrumb"><a href="/genesets">genesets</a> &rsaquo; module variability</div>
 <h1 class="page-title">Module variability across the fleet
-  <span class="info" title="For each module score, how much of its per-cell variance is explained by a chosen sample tag — computed per dataset. Values are in a scale-invariant [0,1] variance-explained frame (eta2/omega2/R2), so categorical and numerical tags are comparable, as are datasets with different overall variability. spearman is signed [-1,1].">ⓘ</span></h1>
+  <span class="info" title="For each (module × dataset × tag), a per-cell statistic of how the module score co-varies with the tag. Rows = modules, columns = datasets, colour = statistic value. Hotter = stronger association.">ⓘ</span></h1>
 
 <p class="mv-intro">Which modules track a biological axis, and in which datasets. Pick a
-<b>tag</b> (e.g. braak stage) and a <b>statistic</b>; each cell shows how strongly that module’s
-score co-varies with the tag in that dataset. Hotter = stronger association.</p>
+<b>tag</b> (e.g. braak, sex) and a <b>statistic</b> below; each heat-map cell shows how strongly that
+module's per-cell score co-varies with the tag in that dataset.</p>
+
+<details class="mv-stats-help">
+  <summary>Which statistic should I pick?</summary>
+  <table class="mv-stats-table">
+    <thead><tr><th>statistic</th><th>tag kind</th><th>range</th><th>reads as</th></tr></thead>
+    <tbody>
+      <tr><td><b>ω²</b> (omega²)</td><td>categorical <span class="muted-2">(sex, disease, cluster, …)</span></td><td>0 .. 1</td>
+        <td>fraction of module-score variance explained by the categories.
+            <b>Bias-corrected</b> for group-count — prefer over η² when a tag has few groups or the count differs across datasets.</td></tr>
+      <tr><td><b>η²</b> (eta²)</td><td>categorical</td><td>0 .. 1</td>
+        <td>uncorrected variance-explained. Cheap, but inflates on small groups. Use only if you specifically want the naive number.</td></tr>
+      <tr><td><b>R²</b></td><td>numerical <span class="muted-2">(braak, age, pmi, …)</span></td><td>0 .. 1</td>
+        <td>fraction of variance from a <b>linear</b> fit. Unsigned — high R² can mean either direction.</td></tr>
+      <tr><td><b>spearman</b> ρ</td><td>numerical</td><td>−1 .. +1</td>
+        <td>rank correlation. <b>Signed</b> (tells you direction) and robust to non-linear-but-monotone shapes (thresholds, plateaus).
+            Pair with R² — see below.</td></tr>
+      <tr><td><b>mean_range</b></td><td>categorical</td><td>score units</td>
+        <td>max category-mean minus min category-mean. Direction-agnostic effect size in the score's own units.</td></tr>
+    </tbody>
+  </table>
+  <p class="muted" style="font-size:11px;margin:6px 0 0">
+    <b>Reading R² + spearman together</b> — different views of the same numerical axis:
+    high R² + high |ρ| = clean linear association;
+    low R² + high |ρ| = monotone but non-linear (threshold, saturation, staircase);
+    high R² + low |ρ| = odd, usually a discrete input pretending to be numeric;
+    both low = no association.
+  </p>
+</details>
 
 <div class="mv-caveat" id="mv-caveat">
   <span><b>Exploratory.</b> Statistics are per-cell (the donor tag is broadcast to every cell →
