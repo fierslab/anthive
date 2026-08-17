@@ -408,32 +408,13 @@
   <button type="button" class="tab-btn"        data-tab="downloads" role="tab" id="tab-btn-downloads" style="display:none">Downloads</button>
 </div>
 
-{# ── Overview tab ────────────────────────────────────────────────────── #}
+{# ── Overview tab ──────────────────────────────────────────────────────
+   Nothing but the rendered index.md. Curated top_cat / top_num chip rows
+   dropped — same information is one click away in the Categorical / Numerical
+   tabs, with proper stats. If markdown_content is empty the tab-init JS
+   below auto-jumps to Data. #}
 <section class="tab-panel active" id="tab-overview" role="tabpanel">
   {% if markdown_content %}<div class="ds-desc md-body">{{ markdown_content|safe }}</div>{% endif %}
-
-  {# Curated quick-viz favourites (categories / numerical only). No heading —
-     the chip rows self-identify by their "categories" / "numerical" labels.
-     Genes moved to the Genes tab; embeddings + biology + resources moved
-     to the Data tab. #}
-  {% if dataset_meta and (dataset_meta.top_cat or dataset_meta.top_num) %}
-  {% if dataset_meta.top_cat %}
-  <div style="margin-bottom:4px">
-      <span class="mk" style="display:inline-block;vertical-align:middle">categories</span>
-      {% for col in dataset_meta.top_cat %}
-      <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/bar?x={{ col | urlencode }}" class="chip">{{ col }}</a>
-      {% endfor %}
-  </div>
-  {% endif %}
-  {% if dataset_meta.top_num %}
-  <div style="margin-bottom:4px">
-      <span class="mk" style="display:inline-block;vertical-align:middle">numerical</span>
-      {% for col in dataset_meta.top_num %}
-      <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/histogram?x={{ col | urlencode }}" class="chip">{{ col }}</a>
-      {% endfor %}
-  </div>
-  {% endif %}
-  {% endif %}
 </section>
 
 {# ── Genes tab ────────────────────────────────────────────────────────
@@ -514,27 +495,23 @@
   <div class="data-card">
     <h2>Layers <span class="info" title="X = the expression matrix served to plots (log-normalised by convention). Additional named layers (e.g. counts, sqrt) may be present.">ⓘ</span></h2>
     {% if layer_stats_rows %}
-    <div class="table-wrap">
-    <table class="auto" style="font-size:12px">
+    {# Transposed: each layer becomes a column, stats become rows. Datasets
+       usually have 1–3 layers so this fits in the card without scrolling. #}
+    <table class="obs-stats-tbl auto" style="font-size:12px">
         <thead><tr>
-            <th>layer</th><th>dtype</th><th>min</th><th>min(nz)</th><th>max</th><th>median</th><th>q90</th><th>% zeros</th>
+            <th style="text-align:left">stat</th>
+            {% for row in layer_stats_rows %}<th style="text-align:right"><code>{{ row.name }}</code></th>{% endfor %}
         </tr></thead>
         <tbody>
-        {% for row in layer_stats_rows %}
-        <tr>
-            <td><code>{{ row.name }}</code></td>
-            <td style="color:#888">{{ row.dtype }}</td>
-            <td style="color:#555">{{ row.min }}</td>
-            <td style="color:#555">{{ row.min_nz }}</td>
-            <td style="color:#555">{{ row.max }}</td>
-            <td style="color:#555">{{ row.median }}</td>
-            <td style="color:#555">{{ row.q90 }}</td>
-            <td style="color:#555">{{ row.pct_zeros }}%</td>
-        </tr>
-        {% endfor %}
+        <tr><td class="colname">dtype</td>{% for row in layer_stats_rows %}<td style="color:#888;text-align:right">{{ row.dtype }}</td>{% endfor %}</tr>
+        <tr><td class="colname">min</td>{% for row in layer_stats_rows %}<td style="color:#555;text-align:right">{{ row.min }}</td>{% endfor %}</tr>
+        <tr><td class="colname">min(nz)</td>{% for row in layer_stats_rows %}<td style="color:#555;text-align:right">{{ row.min_nz }}</td>{% endfor %}</tr>
+        <tr><td class="colname">max</td>{% for row in layer_stats_rows %}<td style="color:#555;text-align:right">{{ row.max }}</td>{% endfor %}</tr>
+        <tr><td class="colname">median</td>{% for row in layer_stats_rows %}<td style="color:#555;text-align:right">{{ row.median }}</td>{% endfor %}</tr>
+        <tr><td class="colname">q90</td>{% for row in layer_stats_rows %}<td style="color:#555;text-align:right">{{ row.q90 }}</td>{% endfor %}</tr>
+        <tr><td class="colname">% zeros</td>{% for row in layer_stats_rows %}<td style="color:#555;text-align:right">{{ row.pct_zeros }}%</td>{% endfor %}</tr>
         </tbody>
     </table>
-    </div>
     {% elif info.layers %}
     <div style="padding:4px 0">
         {% for layer in info.layers %}<code>{{ layer }}</code> {% endfor %}
