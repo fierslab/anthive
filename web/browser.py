@@ -920,6 +920,176 @@ def _tissue_sort_key(tissues) -> int:
     return _TISSUE_DFS_ORDER.get(str(first).lower(), _TISSUE_UNKNOWN_RANK)
 
 
+def _tissue_descendants(node: str,
+                        hierarchy: Optional[Dict[str, Optional[str]]] = None
+                        ) -> set:
+    """Return all transitive descendants of ``node`` in the tissue hierarchy
+    (child → parent) — the set does NOT include ``node`` itself. Matching is
+    case-insensitive on the ontology labels; the returned strings are the
+    lower-cased ontology forms."""
+    if hierarchy is None:
+        hierarchy = _load_tissue_hierarchy()
+    if not hierarchy:
+        return set()
+    target = str(node).lower()
+    children: Dict[str, List[str]] = defaultdict(list)
+    for child, parent in hierarchy.items():
+        if parent:
+            children[parent].append(child)
+    out: set = set()
+    stack = list(children.get(target, ()))
+    while stack:
+        term = stack.pop()
+        if term in out:
+            continue
+        out.add(term)
+        stack.extend(children.get(term, ()))
+    return out
+
+
+def build_tissue_tree(collections: List[Dict]) -> List[Dict]:
+    """Return the tissue ontology as a nested tree annotated with per-node
+    collection counts.
+
+    Shape::
+
+        [{"name": "brain", "count": 156, "children": [
+            {"name": "forebrain", "count": 120, "children": [
+                {"name": "cortex", "count": 89, "children": [
+                    {"name": "dorsolateral prefrontal cortex", "count": 42,
+                     "children": []},
+                    ...
+                ]}, ...
+            ]}, ...
+        ]},
+         {"name": "tumor", "count": 1, "children": []},
+         ...]
+
+    ``count`` is the aggregate number of collections whose (any) tissue value
+    falls under that subtree — including the node itself when a collection is
+    labelled with the parent term. Collections with tissue values that aren't
+    in the hierarchy at all get added as extra ROOT leaves (so a novel
+    catalogue term is still filterable). The name field preserves the
+    ontology's original casing (as read from the YAML), so the client can
+    render user-facing labels; matching against ``data-tissue`` attributes on
+    the client is case-insensitive.
+    """
+    hierarchy = _load_tissue_hierarchy()   # lower-case → lower-case | None
+    # Build children map keyed by lower-case names.
+    children_lc: Dict[Optional[str], List[str]] = defaultdict(list)
+    for child, parent in hierarchy.items():
+        children_lc[parent].append(child)
+    for lst in children_lc.values():
+        lst.sort()
+
+    # Load the original casing of every ontology term (so the UI shows
+    # "Brodmann (1909) area 17" rather than a lower-cased version).
+    display_name: Dict[str, str] = _load_tissue_display_names()
+
+    # Direct-hit collection counts keyed by lower-case tissue value.
+    direct_lc: Dict[str, int] = defaultdict(int)
+    catalog_lc_terms: set = set()
+    for c in collections:
+        full = (c.get('tissue') or {}).get('full') or ''
+        if not full:
+            continue
+        vals = {v.strip().lower() for v in full.split(',') if v.strip()}
+        for v in vals:
+            direct_lc[v] += 1
+            catalog_lc_terms.add(v)
+
+    # Descendants map (lower-case → set of lower-case descendant terms).
+    descendants_lc: Dict[str, set] = {}
+    for term in hierarchy:
+        descendants_lc[term] = _tissue_descendants(term, hierarchy)
+
+    def subtree_count(term_lc: str) -> int:
+        """Number of DISTINCT collections whose tissue is term or any descendant."""
+        matched: set = set()
+        subtree_terms = {term_lc} | descendants_lc.get(term_lc, set())
+        for idx, c in enumerate(collections):
+            full = (c.get('tissue') or {}).get('full') or ''
+            if not full:
+                continue
+            vals = {v.strip().lower() for v in full.split(',') if v.strip()}
+            if vals & subtree_terms:
+                matched.add(idx)
+        return len(matched)
+
+    def render(term_lc: str) -> Dict:
+        kids_lc = children_lc.get(term_lc, [])
+        kids = [render(k) for k in kids_lc]
+        return {
+            'name': display_name.get(term_lc, term_lc),
+            'name_lc': term_lc,
+            'count': subtree_count(term_lc),
+            'children': kids,
+        }
+
+    # Roots — same ordering the sort uses: brain first, other CNS/organs
+    # alphabetically, tail terms (spinal cord, csf) last.
+    roots_hier = [r for r in children_lc.get(None, []) if r not in _TISSUE_TAIL]
+    if 'brain' in roots_hier:
+        roots_hier.remove('brain')
+        roots_hier = ['brain'] + sorted(roots_hier)
+    else:
+        roots_hier = sorted(roots_hier)
+    tail_roots = [t for t in _TISSUE_TAIL if t in hierarchy]
+
+    tree: List[Dict] = []
+    for r in roots_hier + tail_roots:
+        tree.append(render(r))
+
+    # Orphan catalog terms not covered by the hierarchy — render as root leaves
+    # so novel values still filter.
+    hierarchy_lc = set(hierarchy.keys())
+    orphans = sorted(catalog_lc_terms - hierarchy_lc)
+    for orphan in orphans:
+        tree.append({
+            'name': orphan,
+            'name_lc': orphan,
+            'count': direct_lc.get(orphan, 0),
+            'children': [],
+        })
+    return tree
+
+
+def _load_tissue_display_names() -> Dict[str, str]:
+    """Return {lower(term): original_casing_term} for every tissue label in
+    the ontology YAML. Uses the same minimal parser as
+    ``_load_tissue_hierarchy`` so we don't depend on PyYAML."""
+    out: Dict[str, str] = {}
+    try:
+        if not _ONTOLOGY_PATH.is_file():
+            return out
+        with _ONTOLOGY_PATH.open('r', encoding='utf-8', errors='replace') as fh:
+            section: Optional[str] = None
+            for line in fh:
+                comment_idx = line.find('#')
+                if comment_idx >= 0:
+                    line = line[:comment_idx]
+                stripped = line.rstrip('\n')
+                if not stripped.strip():
+                    continue
+                if not stripped.startswith(' ') and not stripped.startswith('\t'):
+                    key = stripped.rstrip().rstrip(':').strip()
+                    section = key if key in ('tissue', 'disease') else None
+                    continue
+                if section != 'tissue':
+                    continue
+                content = stripped.strip()
+                if ':' not in content:
+                    continue
+                child, _, _parent = content.partition(':')
+                child = child.strip().strip('"').strip("'")
+                if not child:
+                    continue
+                out[child.lower()] = child
+    except (OSError, UnicodeError):
+        return {}
+    return out
+
+
 def _short_count(n: Optional[int]) -> str:
     """Humanize a cell-count: 999, 1.4k, 144k, 2.3M."""
     if not n:
@@ -1352,6 +1522,7 @@ async def index(request: Request):
     total_cells = sum(c['total_cells'] for c in collections if c['total_cells']) or None
 
     filter_options = get_filter_options(collections)
+    tissue_tree = build_tissue_tree(collections)
 
     return templates.TemplateResponse(request, "index.html", {
         "folders": collections,
@@ -1359,6 +1530,7 @@ async def index(request: Request):
         "total_folders": len(collections),
         "total_cells": total_cells,
         "filter_options": filter_options,
+        "tissue_tree": tissue_tree,
     })
 
 

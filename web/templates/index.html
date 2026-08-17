@@ -70,7 +70,33 @@
   .col-popover .vals { max-height:160px; overflow-y:auto; }
   .col-popover .vals label { display:block; padding:1px 0; cursor:pointer; }
   .col-popover .clear-link { font-size:10px; color:#888; }
+
+  /* Hierarchical tissue-tree filter (nested <ul>). Each level is indented
+     via padding-left rather than nested-list default margins so the disclosure
+     triangle stays aligned with the label. */
+  .col-popover .tree { max-height:280px; overflow-y:auto; overflow-x:hidden;
+                       min-width:260px; }
+  .col-popover .tree ul { list-style:none; padding:0; margin:0; }
+  .col-popover .tree li { padding:1px 0; }
+  .col-popover .tree .tw-node { display:flex; align-items:center; gap:3px;
+                                 white-space:nowrap; }
+  .col-popover .tree .tw-toggle {
+    display:inline-block; width:12px; text-align:center; cursor:pointer;
+    color:#94a3b8; font-size:9px; user-select:none;
+  }
+  .col-popover .tree .tw-toggle.leaf { visibility:hidden; }
+  .col-popover .tree label { flex:1; cursor:pointer; padding:0;
+                             overflow:hidden; text-overflow:ellipsis; }
+  .col-popover .tree .tw-count { color:#94a3b8; font-size:10px; }
+  .col-popover .tree ul ul { padding-left:14px; }
+  .col-popover .tree li.collapsed > ul { display:none; }
 </style>
+
+{# Ontology tissue tree — used by the Tissue column popover to render the
+   nested filter. Also carries a lower-cased term → descendants map so the
+   client can expand a subtree selection into the flat value set the existing
+   filter machinery understands. #}
+<script type="application/json" id="tissue-tree-data">{{ (tissue_tree if tissue_tree is defined else [])|tojson }}</script>
 
 <div class="summary-row">
   <div>collections: <span class="val">{{ total_folders }}</span></div>
@@ -104,7 +130,7 @@
       <th class="sortable" data-col="n_datasets" data-help="Number of distinct .h5ad datasets in this collection">Datasets <span class="info" title="Click to sort by number of datasets in the collection">ⓘ</span><span class="sort-ind"></span></th>
       <th class="sortable" data-col="cells" data-help="Total cells summed across the collection's datasets">Cells <span class="info" title="Click to sort by total cells across the collection">ⓘ</span><span class="sort-ind"></span></th>
       <th class="sortable" data-col="date" data-help="Publication year (when known and published), or upload date (mtime) otherwise">Date <span class="info" title="Click to sort by publication year / upload date">ⓘ</span><span class="sort-ind"></span></th>
-      <th class="sortable" data-col="tissue" data-help="Ordered by ontology hierarchy (brain → cortex → subregions → CSF/spinal cord at the bottom). Choose 'anatomical (brain tree)' in the sort dropdown for the full tree order.">Tissue <span class="info" title="Sort tissues by ontology position (or pick 'anatomical' in the sort dropdown)">ⓘ</span><span class="sort-ind"></span></th>
+      <th class="sortable" data-col="tissue" data-help="Ordered by ontology hierarchy (brain → cortex → subregions → CSF/spinal cord at the bottom). Choose 'anatomical (brain tree)' in the sort dropdown for the full tree order. Filter picks a subtree — ticking a parent (e.g. cortex) auto-selects every descendant." data-filter-fields="tissue">Tissue <span class="info" title="Click to sort by ontology, or filter by a subtree (tick 'cortex' to include every cortical subregion)">ⓘ</span><span class="sort-ind"></span></th>
       <th class="sortable" data-col="organism" data-help="Organism(s) in the collection. Chips: Hs=human, Mm=mouse, Rn=rat, Dr=zebrafish, Dm=drosophila, Mf=macaque, Ce=C.elegans." data-filter-fields="organism">Org <span class="info" title="Click to sort or filter by organism">ⓘ</span><span class="sort-ind"></span></th>
       <th class="sortable" data-col="tech_class" data-help="Top-level technology class: sc/sn RNA · bulk RNA · proteomics · spatial · other." data-filter-fields="tech_class">Tech <span class="info" title="Click to sort or filter by technology class">ⓘ</span><span class="sort-ind"></span></th>
       <th class="sortable" data-col="celltype"
@@ -190,6 +216,181 @@
   // Map: { columnKey: Set<value> }. Empty/missing = no filter.
   const valueFilters = {};
 
+  // Load the tissue ontology tree the server embedded (see the
+  // #tissue-tree-data script tag). Nodes: {name, name_lc, count, children}.
+  // A flat descendants map is derived once so ticking "cortex" can expand to
+  // its 20+ subregions client-side.
+  (function loadTissueTree() {
+    try {
+      const el = document.getElementById('tissue-tree-data');
+      if (!el) return;
+      const tree = JSON.parse(el.textContent || '[]');
+      if (!Array.isArray(tree) || !tree.length) return;
+      const descendants = {};
+      const walk = (node) => {
+        const out = new Set();
+        (node.children || []).forEach(child => {
+          out.add(child.name_lc);
+          walk(child).forEach(v => out.add(v));
+        });
+        descendants[node.name_lc] = out;
+        return out;
+      };
+      tree.forEach(walk);
+      window.__antTissueTree = { tree: tree, descendants: descendants };
+    } catch (err) {
+      console.warn('tissue-tree parse failed', err);
+    }
+  })();
+
+  // Compare a row's data-tissue value(s) against the current tissue filter
+  // (case-insensitive). The row attribute stores a comma-separated 'full'
+  // value that mixes original casing; the filter set stores lower-case terms.
+  function rowTissueMatch(row, wantedLc) {
+    const raw = row.getAttribute('data-tissue') || '';
+    const vals = raw.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+    return vals.some(v => wantedLc.has(v));
+  }
+
+  // Build the hierarchical Tissue filter section. Ticking a parent auto-ticks
+  // every descendant; unticking one child of a fully-selected parent leaves
+  // the parent in an indeterminate state.
+  function buildTissueTreeSection() {
+    const data = window.__antTissueTree;
+    if (!data) return null;
+    if (!valueFilters.tissue) valueFilters.tissue = new Set();
+    const selected = valueFilters.tissue;   // lower-case names
+
+    const section = document.createElement('div');
+    section.className = 'filter-section';
+    const h5 = document.createElement('h5');
+    h5.textContent = 'tissue';
+    section.appendChild(h5);
+
+    const tree = document.createElement('div');
+    tree.className = 'tree';
+    const rootUl = document.createElement('ul');
+
+    // Any node with descendants of its own starts collapsed; leaves are always
+    // "open". Nodes on the path of a currently-selected term auto-expand so
+    // the user can see what they filtered by.
+    const nodeCbs = new Map();   // name_lc → checkbox element
+
+    function recomputeAll() {
+      // Walk from leaves upward: parent = all|none|indeterminate based on
+      // its DIRECT DOM children checkboxes.
+      const walk = (li) => {
+        const cb = li.querySelector(':scope > .tw-node > input[type=checkbox]');
+        const kidsUl = li.querySelector(':scope > ul');
+        if (!kidsUl) return;
+        Array.from(kidsUl.children).forEach(walk);
+        const kidCbs = Array.from(kidsUl.querySelectorAll(':scope > li > .tw-node > input[type=checkbox]'));
+        if (!kidCbs.length) return;
+        const nchecked = kidCbs.filter(c => c.checked).length;
+        const nindet   = kidCbs.filter(c => c.indeterminate).length;
+        if (nchecked === kidCbs.length && !nindet) {
+          cb.checked = true; cb.indeterminate = false;
+        } else if (nchecked === 0 && !nindet) {
+          cb.checked = false; cb.indeterminate = false;
+        } else {
+          cb.checked = false; cb.indeterminate = true;
+        }
+      };
+      Array.from(rootUl.children).forEach(walk);
+    }
+
+    function renderNode(node, parentUl) {
+      const li = document.createElement('li');
+      const nodeRow = document.createElement('div');
+      nodeRow.className = 'tw-node';
+
+      const kids = node.children || [];
+      const toggle = document.createElement('span');
+      toggle.className = 'tw-toggle' + (kids.length ? '' : ' leaf');
+      toggle.textContent = kids.length ? '▸' : '·';
+      nodeRow.appendChild(toggle);
+
+      const lbl = document.createElement('label');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.value = node.name_lc;
+      cb.checked = selected.has(node.name_lc);
+      nodeCbs.set(node.name_lc, cb);
+
+      cb.addEventListener('change', (ev) => {
+        ev.stopPropagation();
+        const shouldSelect = cb.checked;
+        // Include this node itself + every descendant in the selection edit.
+        const subtree = new Set([node.name_lc]);
+        (window.__antTissueTree.descendants[node.name_lc] || new Set())
+          .forEach(v => subtree.add(v));
+        subtree.forEach(term => {
+          const kidCb = nodeCbs.get(term);
+          if (kidCb) {
+            kidCb.checked = shouldSelect;
+            kidCb.indeterminate = false;
+          }
+          if (shouldSelect) selected.add(term);
+          else selected.delete(term);
+        });
+        recomputeAll();
+        update();
+      });
+
+      lbl.appendChild(cb);
+      lbl.appendChild(document.createTextNode(' ' + node.name));
+      const cnt = document.createElement('span');
+      cnt.className = 'tw-count';
+      cnt.textContent = ' (' + (node.count || 0) + ')';
+      lbl.appendChild(cnt);
+      nodeRow.appendChild(lbl);
+
+      li.appendChild(nodeRow);
+
+      if (kids.length) {
+        const kidsUl = document.createElement('ul');
+        kids.forEach(child => renderNode(child, kidsUl));
+        li.appendChild(kidsUl);
+        // Start collapsed unless a descendant is selected.
+        let hasSelectedDesc = false;
+        const subtree = window.__antTissueTree.descendants[node.name_lc] || new Set();
+        subtree.forEach(t => { if (selected.has(t)) hasSelectedDesc = true; });
+        if (!hasSelectedDesc && !selected.has(node.name_lc)) {
+          li.classList.add('collapsed');
+          toggle.textContent = '▸';
+        } else {
+          toggle.textContent = '▾';
+        }
+        toggle.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          const nowCollapsed = li.classList.toggle('collapsed');
+          toggle.textContent = nowCollapsed ? '▸' : '▾';
+        });
+      }
+      parentUl.appendChild(li);
+    }
+
+    data.tree.forEach(root => renderNode(root, rootUl));
+    tree.appendChild(rootUl);
+    section.appendChild(tree);
+    recomputeAll();
+
+    if (selected.size) {
+      const clr = document.createElement('a');
+      clr.className = 'clear-link';
+      clr.href = '#';
+      clr.textContent = '× clear tissue';
+      clr.onclick = (ev) => {
+        ev.preventDefault(); ev.stopPropagation();
+        valueFilters.tissue = new Set();
+        nodeCbs.forEach(cb => { cb.checked = false; cb.indeterminate = false; });
+        update();
+      };
+      section.appendChild(clr);
+    }
+    return section;
+  }
+
   // Current sort. Default: date desc (canonical dataset_date).
   // 'tissue-tree' is a first-class named mode (ontology DFS ASC) that the
   // sort dropdown exposes. Column header clicks map to (col, asc|desc).
@@ -262,6 +463,14 @@
     for (const col in valueFilters) {
       const wanted = valueFilters[col];
       if (!wanted || !wanted.size) continue;
+      // The tissue filter is populated from the ontology tree (lower-case)
+      // while the row's data-tissue keeps original casing — match with a
+      // case-insensitive helper. Other filters match verbatim, keeping the
+      // existing behaviour for organism/tech/celltype/disease/…
+      if (col === 'tissue') {
+        if (!rowTissueMatch(row, wanted)) return false;
+        continue;
+      }
       const raw = row.getAttribute('data-' + col) || '';
       // multi-valued data attrs are stored as comma-separated 'full' strings
       const vals = raw.split(',').map(s => s.trim()).filter(Boolean);
@@ -382,6 +591,13 @@
       const filterableFields = filterFields.filter(f => filterableCols.has(f));
       if (filterableFields.length) {
         filterableFields.forEach((field) => {
+          // Tissue column: hierarchical tree from the ontology. See the
+          // #tissue-tree-data script tag and buildTissueTreeSection below.
+          if (field === 'tissue' && window.__antTissueTree) {
+            const section = buildTissueTreeSection();
+            if (section) pop.appendChild(section);
+            return;
+          }
           const vals = uniqueValuesFor([field]);
           if (!vals.length) return;
           const section = document.createElement('div');

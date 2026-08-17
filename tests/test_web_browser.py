@@ -1663,6 +1663,64 @@ def test_landing_popover_filter_guard(client):
     assert "activePopover.contains(e.target)" in resp.text
 
 
+def test_tissue_popover_is_hierarchical(client):
+    # The Tissue column popover renders the ontology hierarchy as a nested
+    # tree. The server embeds the tree as JSON under #tissue-tree-data; the
+    # client walks it to render nested checkboxes so ticking a parent (cortex)
+    # selects every descendant (dorsolateral prefrontal cortex, Brodmann 46,
+    # angular gyrus, …).
+    import json as _json
+
+    resp = client.get("/")
+    assert resp.status_code == 200
+    # Column now advertises tissue as a filter target
+    assert 'data-col="tissue"' in resp.text
+    assert 'data-filter-fields="tissue"' in resp.text
+    # Tree data is embedded and the client-side builder is wired up
+    assert 'id="tissue-tree-data"' in resp.text
+    assert "buildTissueTreeSection" in resp.text
+
+    # Extract and parse the embedded JSON — confirm the nested shape and that
+    # cortex is an ancestor of dorsolateral prefrontal cortex.
+    marker = 'id="tissue-tree-data">'
+    start = resp.text.index(marker) + len(marker)
+    end = resp.text.index("</script>", start)
+    payload = _json.loads(resp.text[start:end])
+    assert isinstance(payload, list) and payload, "tree must be a non-empty list"
+
+    def find(nodes, name_lc):
+        for node in nodes:
+            if node.get("name_lc") == name_lc:
+                return node
+            hit = find(node.get("children") or [], name_lc)
+            if hit:
+                return hit
+        return None
+
+    def path_to(nodes, name_lc, trail):
+        for node in nodes:
+            new_trail = trail + [node["name_lc"]]
+            if node["name_lc"] == name_lc:
+                return new_trail
+            deeper = path_to(node.get("children") or [], name_lc, new_trail)
+            if deeper:
+                return deeper
+        return None
+
+    brain = find(payload, "brain")
+    assert brain is not None and brain.get("children"), \
+        "expected brain as an inner root with subtree"
+    cortex = find(payload, "cortex")
+    assert cortex is not None, "cortex should be present in the tree"
+    # cortex must have real descendants
+    assert cortex.get("children"), "cortex should have child regions"
+    # dorsolateral prefrontal cortex is a descendant of cortex
+    trail = path_to(cortex.get("children") or [],
+                    "dorsolateral prefrontal cortex", [])
+    assert trail is not None, \
+        "dorsolateral prefrontal cortex must sit under cortex"
+
+
 def test_landing_access_pub_icon_inline(client):
     # Access and publication_status collapse to a single .ap-icon inline before
     # the collection name; their filters live under the Collection header
