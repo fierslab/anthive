@@ -47,7 +47,7 @@ import {$ANTHIVE_HTTP_REDIRECT_SNIPPET:caddy-http-redirect.dev}
 # host-specific addresses out of this shared file.
 # Prod overrides via env to a host-agnostic "http://:<port>" (single address;
 # nginx in front terminates TLS and forwards the public Host).
-{$ANTHIVE_LISTEN::8501, localhost:8501, localhost.localdomain:8501, 127.0.0.1:8501} {
+{$ANTHIVE_LISTEN::8501, localhost:8501, localhost.localdomain:8501, 127.0.0.1:8501, 10.42.0.3:8501} {
 	# Restrict which network interfaces Caddy accepts connections on.
 	# Default ("0.0.0.0 ::") = all v4 + v6 interfaces — fine for laptops,
 	# overridden on multi-homed boxes via ANTHIVE_CADDY_BIND. On prod the
