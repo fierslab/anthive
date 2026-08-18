@@ -2219,6 +2219,33 @@ def test_geneset_variability_page_offers_aucell_source(client):
     assert 'value="starcat"' not in resp.text
 
 
+def test_geneset_variability_page_canonical_tags_in_js(client):
+    """All 13 canonical tags from lib/canonical_columns.py must appear in the
+    JS FALLBACK blob served by /genesets/variability, so the tag dropdown
+    shows the full set when /module-variability/dimensions is unreachable."""
+    import sys, os
+    # Ensure lib/ is importable (mirrors the shim in browser.py / ant-browse).
+    lib_dir = os.path.join(os.path.dirname(__file__), '..', 'lib')
+    if lib_dir not in sys.path:
+        sys.path.insert(0, lib_dir)
+    from canonical_columns import CANONICAL_TAGS, NUMERICAL_TAGS
+
+    resp = client.get("/genesets/variability")
+    assert resp.status_code == 200
+    html = resp.text
+
+    # Every canonical tag must appear as a JSON string inside the FALLBACK tags array.
+    for tag in CANONICAL_TAGS:
+        assert f'"{tag}"' in html, f'canonical tag "{tag}" not found in /genesets/variability JS blob'
+
+    # Every numerical tag must appear in the _numTagList array.
+    for tag in NUMERICAL_TAGS:
+        assert f'"{tag}"' in html, f'numerical tag "{tag}" not found in /genesets/variability JS blob'
+
+    # The old hardcoded NUMERIC_TAGS object with wrong keys must not be present.
+    assert '"braak_stage"' not in html, '"braak_stage" (non-canonical) should not appear in JS'
+
+
 def test_dataset_view_de_tab_only_when_de_present(client, monkeypatch):
     # DE tab appears when the dataset has DE data …
     resp_de = client.get("/browse/GroupA/ds1")

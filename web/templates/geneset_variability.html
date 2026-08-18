@@ -153,7 +153,7 @@ module's per-cell score co-varies with the tag in that dataset.</p>
   // Kept minimal + documented: the client prefers the live endpoint so new tags
   // (age / genotype / donor …) appear automatically once the server exposes them.
   var FALLBACK = {
-    tags: ['braak', 'sex', 'host_sex', 'cluster'],
+    tags: {{ canonical_tags | tojson }},
     statistics: ['omega2', 'R2', 'spearman', 'eta2', 'mean_range', 'mean_score', 'total_var'],
   };
   // F is deliberately excluded from the UI: with 10^5+ cells it is astronomically
@@ -161,7 +161,10 @@ module's per-cell score co-varies with the tag in that dataset.</p>
   var DROP_STATS = { F: 1 };
   // Natural default statistic per tag: numerical → R2, categorical → omega2
   // (bias-corrected η²; plain eta2 is upward-biased with few groups / large n).
-  var NUMERIC_TAGS = { braak: 1, age: 1, braak_stage: 1 };
+  // NUMERIC_TAGS is injected from lib/canonical_columns.py (NUMERICAL_TAGS).
+  var _numTagList = {{ numerical_tags | tojson }};
+  var NUMERIC_TAGS = {};
+  _numTagList.forEach(function (t) { NUMERIC_TAGS[t] = 1; });
   var BOUNDED01 = { eta2: 1, omega2: 1, R2: 1 };   // already [0,1]
   var SIGNED = { spearman: 1 };                     // [-1,1] → diverging
 

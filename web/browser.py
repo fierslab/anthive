@@ -2548,7 +2548,11 @@ async def geneset_variability_view(request: Request):
 
     Registered BEFORE the /{study}/{experiment} route so 'variability' isn't
     swallowed as a study id."""
-    return templates.TemplateResponse(request, "geneset_variability.html", {})
+    from canonical_columns import CANONICAL_TAGS, NUMERICAL_TAGS
+    return templates.TemplateResponse(request, "geneset_variability.html", {
+        "canonical_tags": list(CANONICAL_TAGS),
+        "numerical_tags": sorted(NUMERICAL_TAGS),
+    })
 
 
 @router.get("/genesets/starcat/{catalog_id}/modules/{module_name}", response_class=HTMLResponse)
