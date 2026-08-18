@@ -48,15 +48,6 @@ spec.loader.exec_module(browser_module)
 browser_router = browser_module.router
 
 
-def _probe_genesets(api_url: str) -> bool:
-    """Return True if /genesets responds 200 (geneset store is configured)."""
-    try:
-        response = requests.get(f"{api_url.rstrip('/')}/genesets", timeout=3)
-        return response.status_code == 200
-    except requests.RequestException:
-        return False
-
-
 def create_app(api_url: str) -> FastAPI:
     """Create FastAPI app for browser"""
 
@@ -96,13 +87,24 @@ def create_app(api_url: str) -> FastAPI:
 
     app.add_middleware(_NoCacheHTMLMiddleware)
 
+    # Refresh genesets availability on every request with a short TTL so a
+    # startup race (ant-serve not yet ready when browse boots) self-heals
+    # within 5 s without requiring a browse restart.
+    class _GenесetsProbeMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            browser_module.refresh_genesets_available(request.app.state)
+            return await call_next(request)
+
+    app.add_middleware(_GenесetsProbeMiddleware)
+
     # Store API URL and config in app state for routes to access
     app.state.api_url = api_url
     config = get_config()
     app.state.reports = config.get('reports', [])
 
-    # Probe API for geneset availability (used by topbar)
-    app.state.genesets_available = _probe_genesets(api_url)
+    # Initialise geneset state so the first request TTL check sees t=0 and probes.
+    app.state.genesets_available = False
+    app.state._genesets_probe_ts = 0.0
 
     # Include browser router
     app.include_router(browser_router)

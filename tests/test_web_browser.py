@@ -2705,3 +2705,132 @@ def test_module_view_history_push_state_called(client):
     assert "history.replaceState" in resp.text, (
         "history.replaceState missing — URL won't update on clear"
     )
+
+
+# ── unit tests: refresh_genesets_available TTL cache ──────────────────────────
+
+class _FakeState:
+    """Minimal app.state stand-in for probe-cache unit tests."""
+
+    def __init__(self, api_url: str = "http://testapi") -> None:
+        self.api_url = api_url
+        self.genesets_available: bool = False
+        self._genesets_probe_ts: float = 0.0
+
+
+def test_refresh_genesets_probes_when_stale(monkeypatch):
+    """First call (ts=0) always probes regardless of current value."""
+    calls = []
+
+    def _fake_probe(api_url: str) -> bool:
+        calls.append(api_url)
+        return True
+
+    monkeypatch.setattr(browser, "_probe_genesets_once", _fake_probe)
+    state = _FakeState()
+
+    result = browser.refresh_genesets_available(state)
+
+    assert result is True
+    assert state.genesets_available is True
+    assert len(calls) == 1
+
+
+def test_refresh_genesets_caches_true_for_60s(monkeypatch):
+    """After a True result, subsequent calls within 60 s skip the probe."""
+    import time
+
+    probe_count = [0]
+
+    def _fake_probe(api_url: str) -> bool:
+        probe_count[0] += 1
+        return True
+
+    monkeypatch.setattr(browser, "_probe_genesets_once", _fake_probe)
+    state = _FakeState()
+
+    # First call probes and caches True.
+    browser.refresh_genesets_available(state)
+    assert probe_count[0] == 1
+
+    # Second call within TTL window must NOT probe again.
+    browser.refresh_genesets_available(state)
+    assert probe_count[0] == 1, "probe fired again within True TTL window"
+
+    # Simulate TTL expiry.
+    state._genesets_probe_ts -= browser._GENESETS_TTL_TRUE + 1
+    browser.refresh_genesets_available(state)
+    assert probe_count[0] == 2, "probe did not fire after True TTL expired"
+
+
+def test_refresh_genesets_caches_false_for_only_5s(monkeypatch):
+    """A False result is cached only 5 s so startup races self-heal quickly."""
+    probe_results = [False, True]
+    probe_calls = [0]
+
+    def _fake_probe(api_url: str) -> bool:
+        result = probe_results[min(probe_calls[0], len(probe_results) - 1)]
+        probe_calls[0] += 1
+        return result
+
+    monkeypatch.setattr(browser, "_probe_genesets_once", _fake_probe)
+    state = _FakeState()
+
+    # First probe → False, cached for 5 s.
+    browser.refresh_genesets_available(state)
+    assert state.genesets_available is False
+    assert probe_calls[0] == 1
+
+    # Within 5 s → no second probe.
+    browser.refresh_genesets_available(state)
+    assert probe_calls[0] == 1, "probe fired within False TTL window"
+
+    # Simulate 5 s elapsed → probe again, now returns True.
+    state._genesets_probe_ts -= browser._GENESETS_TTL_FALSE + 1
+    browser.refresh_genesets_available(state)
+    assert state.genesets_available is True, "availability did not recover after False TTL"
+    assert probe_calls[0] == 2
+
+
+def test_refresh_genesets_does_not_cache_false_for_60s(monkeypatch):
+    """False TTL must be shorter than True TTL — this is the whole point."""
+    assert browser._GENESETS_TTL_FALSE < browser._GENESETS_TTL_TRUE, (
+        f"False TTL ({browser._GENESETS_TTL_FALSE}s) must be < "
+        f"True TTL ({browser._GENESETS_TTL_TRUE}s)"
+    )
+
+
+def test_probe_genesets_once_returns_false_on_network_error(monkeypatch):
+    """A network error in _probe_genesets_once must return False, not raise."""
+    import requests as _requests
+
+    def _raise(*args, **kwargs):
+        raise _requests.ConnectionError("unreachable")
+
+    monkeypatch.setattr(_requests, "get", _raise)
+    result = browser._probe_genesets_once("http://testapi")
+    assert result is False
+
+
+def test_probe_genesets_once_returns_false_on_non_200(monkeypatch):
+    """A non-200 response must yield False."""
+    import requests as _requests
+
+    class _FakeResp:
+        status_code = 503
+
+    monkeypatch.setattr(_requests, "get", lambda *a, **kw: _FakeResp())
+    result = browser._probe_genesets_once("http://testapi")
+    assert result is False
+
+
+def test_probe_genesets_once_returns_true_on_200(monkeypatch):
+    """A 200 response must yield True."""
+    import requests as _requests
+
+    class _FakeResp:
+        status_code = 200
+
+    monkeypatch.setattr(_requests, "get", lambda *a, **kw: _FakeResp())
+    result = browser._probe_genesets_once("http://testapi")
+    assert result is True

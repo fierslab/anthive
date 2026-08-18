@@ -9,6 +9,7 @@ import base64
 import html as html_lib
 import re
 import sys
+import time
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qsl, quote as url_quote, unquote, urlencode
@@ -126,6 +127,55 @@ def _api_get(api_url: str, path: str) -> Any:
 
 def _api_url(request: Request) -> str:
     return request.app.state.api_url
+
+
+# TTL for the genesets-availability probe: cache True for 60 s, False for 5 s.
+# This means a startup race self-heals within 5 s on the next request without
+# requiring a browse restart.
+_GENESETS_TTL_TRUE = 60.0
+_GENESETS_TTL_FALSE = 5.0
+
+
+def _probe_genesets_once(api_url: str) -> bool:
+    """Probe /genesets on ant-serve; return True iff it responds 200.
+
+    Args:
+        api_url: Base URL for the ant-serve REST API.
+
+    Returns:
+        True when the geneset store is reachable and configured.
+    """
+    try:
+        resp = requests.get(f"{api_url.rstrip('/')}/genesets", timeout=3)
+        return resp.status_code == 200
+    except requests.RequestException:
+        return False
+
+
+def refresh_genesets_available(app_state) -> bool:
+    """Update ``app_state.genesets_available`` with a TTL-cached probe.
+
+    Caches True for 60 s and False for only 5 s so a startup race (browse
+    boots before ant-serve is ready) self-heals on the next page load.
+
+    Args:
+        app_state: The FastAPI ``app.state`` object; reads and writes
+            ``genesets_available``, ``_genesets_probe_ts``, and ``api_url``.
+
+    Returns:
+        The (possibly refreshed) boolean availability value.
+    """
+    now = time.monotonic()
+    last_ts: float = getattr(app_state, '_genesets_probe_ts', 0.0)
+    current: bool = getattr(app_state, 'genesets_available', False)
+
+    ttl = _GENESETS_TTL_TRUE if current else _GENESETS_TTL_FALSE
+    if now - last_ts >= ttl:
+        current = _probe_genesets_once(app_state.api_url)
+        app_state.genesets_available = current
+        app_state._genesets_probe_ts = now
+
+    return current
 
 
 def _reports(request: Request) -> list:
