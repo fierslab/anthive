@@ -72,9 +72,12 @@
 </style>
 
 <div class="breadcrumb">
-  <a href="/">datasets</a> &rsaquo;
-  <a href="/browse/{{ folder_browse_id }}">{{ folder_name }}</a> &rsaquo;
-  <a href="/browse/{{ folder_browse_id }}/{{ file_id }}">{{ dataset_name }}</a> &rsaquo;
+  <a href="/">datasets</a>
+  <span class="bc-sep">/</span>
+  <a href="/browse/{{ folder_browse_id }}">{{ folder_name }}</a>
+  <span class="bc-sep">/</span>
+  <a href="/browse/{{ folder_browse_id }}/{{ file_id }}">{{ dataset_name }}</a>
+  <span class="bc-sep">/</span>
   <span>DE</span>
 </div>
 <h1 class="page-title">🔬 {{ study.name or study_id }}</h1>

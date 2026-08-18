@@ -130,7 +130,7 @@
   #save-toast.err { background: #dc2626; }
 </style>
 
-<div class="breadcrumb"><a href="/">datasets</a> / <a href="/browse/{{ group_id|urlencode }}">{{ group_id }}</a> / <a href="/browse/{{ group_id|urlencode }}/{{ file_id|urlencode }}">{{ file_id }}</a> / edit</div>
+<div class="breadcrumb"><a href="/">datasets</a><span class="bc-sep">/</span><a href="/browse/{{ group_id|urlencode }}">{{ group_id }}</a><span class="bc-sep">/</span><a href="/browse/{{ group_id|urlencode }}/{{ file_id|urlencode }}">{{ file_id }}</a><span class="bc-sep">/</span>edit</div>
 <h1 class="page-title">Edit dataset <span class="mono">{{ db_id }}</span>
   <span class="info" title="Admin only. Writes the dataset .md to disk. Most fields are machine-generated (id, hashes, counts, layer stats) and are read-only; biology annotation lives in the .mus sidecar. It's a git repo — commit the change yourself.">ⓘ</span></h1>
 

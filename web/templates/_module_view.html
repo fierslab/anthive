@@ -53,8 +53,12 @@ Consumer passes a `mv_ctx` Jinja var — a dict:
     {% endif %}
     {% if _mv.scope != 'module' %}
     <div><label>group</label><select class="mv-flt-group"><option value="">all</option></select></div>
-    <div><label>module</label><select class="mv-flt-module"><option value="">all</option></select></div>
     {% endif %}
+    {# In module scope: show group as hidden preset; show module dropdown for drill-down #}
+    {% if _mv.scope == 'module' %}
+    <input type="hidden" class="mv-flt-group-hidden" value="{{ _mv.module_catalog }}">
+    {% endif %}
+    <div {% if _mv.scope == 'module' %}{%endif%}><label>module</label><select class="mv-flt-module"><option value="">all</option></select></div>
     <div><label>tag</label><select class="mv-flt-tag"><option value="">all</option></select></div>
     <div><label>method</label>
       <select class="mv-flt-method">
@@ -73,10 +77,11 @@ Consumer passes a `mv_ctx` Jinja var — a dict:
     <div style="margin-left:auto"><span class="mv-summary"></span></div>
   </div>
   <div class="mv-state muted" style="font-size:12px">loading…</div>
-  <div class="mv-body" style="overflow-y:auto;max-height:70vh;display:none">
+  <div class="mv-body" style="overflow-x:auto;overflow-y:auto;max-height:70vh;display:none">
     <table class="mv-table">
       <thead><tr>
-        {% if _mv.scope != 'module' %}<th>group</th><th>module</th>{% endif %}
+        {% if _mv.scope != 'module' %}<th>group</th>{% endif %}
+        <th>module</th>
         {% if _mv.scope != 'dataset' %}<th>dataset</th>{% endif %}
         <th>tag</th>
         <th>method</th>
@@ -236,8 +241,9 @@ Consumer passes a `mv_ctx` Jinja var — a dict:
       var tds = [];
       if (CTX.scope !== 'module') {
         tds.push('<td class="mv-group">' + esc(r.catalog) + '</td>');
-        tds.push('<td class="mv-mod">' + esc(r.module) + '</td>');
       }
+      // Module column always shown (in module scope it's the primary identifier).
+      tds.push('<td class="mv-mod">' + esc(r.module) + '</td>');
       if (CTX.scope !== 'dataset') tds.push('<td class="mv-ds">' + dsLink + '</td>');
       tds.push('<td class="mv-tag">' + esc(r.tag) + '</td>');
       tds.push('<td class="mv-method">' + esc(METHOD_LABEL[r.source] || r.source) + '</td>');
@@ -254,29 +260,42 @@ Consumer passes a `mv_ctx` Jinja var — a dict:
   function load() {
     stateEl.style.display = ''; stateEl.textContent = 'loading…'; bodyEl.style.display = 'none';
     var params = 'min_abs=0&limit=100000';
-    if (CTX.scope === 'dataset' && CTX.dataset) params += '&dataset=' + encodeURIComponent(CTX.dataset);
-    if (CTX.scope === 'module' && CTX.module_name)   params += '&module='  + encodeURIComponent(CTX.module_name);
-    if (CTX.scope === 'module' && CTX.module_catalog) params += '&catalog=' + encodeURIComponent(CTX.module_catalog);
+    if (CTX.scope === 'dataset' && CTX.dataset) {
+      params += '&dataset=' + encodeURIComponent(CTX.dataset);
+    }
+    if (CTX.scope === 'module' && CTX.module_catalog) {
+      // Fetch the whole catalog so peer stats have real spread across all modules.
+      // The module dropdown lets the user narrow to a single module after load.
+      params += '&catalog=' + encodeURIComponent(CTX.module_catalog);
+    }
     fetch('/api/module-variability?' + params, { credentials: 'same-origin' })
       .then(function (r) { return r.ok ? r.json() : r.text().then(function (t) { throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 160)); }); })
       .then(function (d) {
         // Drop starCAT rows entirely (UI temporarily hidden)
         ALL_ROWS = (d.rows || []).filter(function (r) { return r.source !== 'starcat'; });
-        // Filter to canonical stats only (ω² for cat, spearman for num) — the
-        // render() layer does the finer per-(row) pick.
         var groups = {}, modules = {}, datasets = {}, tags = {};
         ALL_ROWS.forEach(function (r) {
           groups[r.catalog] = 1; modules[r.module] = 1;
           datasets[r.dataset] = 1; tags[r.tag] = 1;
         });
+        // Peer index built over canonical stats per tag type — ω² for categorical,
+        // spearman for numerical. This gives meaningful min/max with full catalog data.
         PEER_INDEX = computePeerIndex(ALL_ROWS.filter(function (r) {
           var isNum = NUMERICAL_TAGS[r.tag];
           return r.statistic === (isNum ? 'spearman' : 'omega2');
         }));
         fillSelect(flt.dataset, Object.keys(datasets));
         fillSelect(flt.group,   Object.keys(groups));
-        fillSelect(flt.module,  Object.keys(modules));
+        // In module scope: pre-select module to the landing geneset so the initial
+        // view shows that module's rows — but peer stats are computed against the
+        // whole catalog so the bar position is meaningful. User can clear to see all.
+        fillSelect(flt.module, Object.keys(modules),
+          CTX.scope === 'module' ? CTX.module_name : null);
         fillSelect(flt.tag,     Object.keys(tags));
+        // In module scope: also pre-select the group filter (hidden) to the catalog.
+        if (CTX.scope === 'module' && flt.group) {
+          flt.group.value = CTX.module_catalog || '';
+        }
         stateEl.style.display = 'none';
         render();
       })

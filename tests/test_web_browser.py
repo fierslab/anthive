@@ -1540,12 +1540,45 @@ def test_geneset_detail_has_variability_panel(client):
     assert 'class="mv-flt-method"' in resp.text
     assert 'class="mv-flt-tag"' in resp.text
     assert 'class="mv-flt-sort"' in resp.text
+    # Module dropdown is visible in module scope (for drill-down within catalog).
+    assert 'class="mv-flt-module"' in resp.text
     # Partial fetches module-variability scoped to this module + catalog
     assert "/api/module-variability?" in resp.text
     assert '"scope": "module"' in resp.text or '"scope":"module"' in resp.text or 'scope' in resp.text
     # mv_ctx carries the catalog (study/experiment) and module name
     assert "StudyX/Exp1" in resp.text
     assert "gs_up" in resp.text
+
+
+def test_geneset_detail_fetch_uses_catalog_not_module_name(client):
+    # Issue 1 fix: in module scope the JS fetches by catalog only (not module_name)
+    # so peer stats have real spread across all modules in the family.
+    resp = client.get("/genesets/StudyX/Exp1/gs_up")
+    assert resp.status_code == 200
+    # The fetch URL in the JS should include catalog= but NOT module= as a fetch param.
+    # We look for the JS load() function's params construction: only catalog is added.
+    assert 'catalog=' in resp.text                    # catalog-wide fetch
+    # module_name appears in CTX (for the pre-select) but not as a fetch param key.
+    # The fetch params string should NOT have '&module=' followed by the module name.
+    assert "'&module='" not in resp.text              # no per-module narrowing in fetch
+
+
+def test_geneset_breadcrumb_uses_bc_sep_style(client):
+    # Issue 3: geneset detail breadcrumb should use bc-sep separators like dataset page.
+    resp = client.get("/genesets/StudyX/Exp1/gs_up")
+    assert resp.status_code == 200
+    assert 'class="bc-sep"' in resp.text
+    assert 'href="/genesets"' in resp.text
+    # study/experiment link present
+    assert 'href="/genesets/StudyX/Exp1"' in resp.text
+
+
+def test_geneset_experiment_breadcrumb_uses_bc_sep_style(client):
+    # Issue 3: geneset experiment page breadcrumb should also use bc-sep separators.
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    assert 'class="bc-sep"' in resp.text
+    assert 'href="/genesets"' in resp.text
 
 
 def test_geneset_experiment_view_404(client):

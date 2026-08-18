@@ -22,9 +22,13 @@
 </style>
 
 <div class="breadcrumb">
-    <a href="/genesets">gene sets &amp; programs</a> &rsaquo;
-    <a href="/genesets?group=starcat">starCAT</a> &rsaquo;
-    {{ catalog_id }} &rsaquo; <strong>{{ module_name }}</strong>
+    <a href="/genesets">gene sets</a>
+    <span class="bc-sep">/</span>
+    <a href="/genesets?group=starcat">starCAT</a>
+    <span class="bc-sep">/</span>
+    {{ catalog_id }}
+    <span class="bc-sep">/</span>
+    <strong>{{ module_name }}</strong>
 </div>
 
 <h1 class="page-title">{{ module_name }}<span class="sc-group" id="sc-group" style="display:none"></span></h1>
@@ -45,7 +49,9 @@
 
 <div class="sc-state" id="sc-state">loading…</div>
 <div id="sc-body" style="display:none">
-    <table class="wtable" id="sc-table"></table>
+    <div class="table-wrap">
+        <table class="wtable" id="sc-table"></table>
+    </div>
 </div>
 
 <script>
