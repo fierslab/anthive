@@ -1634,6 +1634,38 @@ def test_geneset_view_404(client):
     assert resp.status_code == 404
 
 
+def test_module_view_celltype_tissue_method_change_listeners_are_explicit(client):
+    """Regression: celltype/tissue/method filter dropdowns must have explicit
+    addEventListener('change', render) bindings in the emitted JS.
+
+    The generic Object.keys(flt).forEach(...) loop was replaced with named
+    bindings (2026-08 fix) so static analysis and tests can assert each filter
+    class is wired — a silent typo in the flt key would have made the generic
+    loop bind nothing for that control.  This test greps the rendered HTML for
+    the three bindings that were previously invisible.
+    """
+    # Geneset detail page — has dataset_annotations → celltype + tissue selects
+    # are rendered; method is always rendered.
+    resp = client.get("/genesets/StudyX/Exp1/gs_up")
+    assert resp.status_code == 200
+    assert "flt.celltype.addEventListener('change', render)" in resp.text, (
+        "celltype change listener not found — filter will be a no-op"
+    )
+    assert "flt.tissue.addEventListener('change', render)" in resp.text, (
+        "tissue change listener not found — filter will be a no-op"
+    )
+    assert "flt.method.addEventListener('change', render)" in resp.text, (
+        "method change listener not found — filter will be a no-op"
+    )
+
+    # Geneset experiment page — same partial, same requirement.
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    assert "flt.celltype.addEventListener('change', render)" in resp.text
+    assert "flt.tissue.addEventListener('change', render)" in resp.text
+    assert "flt.method.addEventListener('change', render)" in resp.text
+
+
 # ── DE study browser page ──────────────────────────────────────────────────────
 
 def test_de_study_view_renders(client):

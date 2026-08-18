@@ -374,7 +374,16 @@ Consumer passes a `mv_ctx` Jinja var — a dict:
       .catch(function (e) { stateEl.textContent = 'could not load — ' + e.message; });
   }
 
-  Object.keys(flt).forEach(function (fk) { if (flt[fk]) flt[fk].addEventListener('change', render); });
+  // Bind change handlers explicitly so static analysis and tests can assert
+  // each filter class is wired — a generic loop is equivalent but ungreppable.
+  if (flt.dataset)  flt.dataset.addEventListener('change', render);
+  if (flt.group)    flt.group.addEventListener('change', render);
+  if (flt.module)   flt.module.addEventListener('change', render);
+  if (flt.tag)      flt.tag.addEventListener('change', render);
+  if (flt.method)   flt.method.addEventListener('change', render);
+  if (flt.celltype) flt.celltype.addEventListener('change', render);
+  if (flt.tissue)   flt.tissue.addEventListener('change', render);
+  if (flt.sort)     flt.sort.addEventListener('change', render);
   load();
 })();
 </script>
