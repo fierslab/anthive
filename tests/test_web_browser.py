@@ -564,12 +564,17 @@ def test_build_dataset_annotations_flattens_list_values():
         browser._all_databases = _orig
 
     # system field is included alongside celltype and tissue.
-    assert result["A/ds1"] == {"celltype": "microglial cell", "tissue": "brain",
-                                "system": "post_mortem_tissue"}
+    # Extra keys (title, n_cells, contributor) are also present; check core fields.
+    assert result["A/ds1"]["celltype"] == "microglial cell"
+    assert result["A/ds1"]["tissue"] == "brain"
+    assert result["A/ds1"]["system"] == "post_mortem_tissue"
     # List values must be flat strings — JS .toLowerCase() would throw on arrays.
-    assert result["A/ds2"] == {"celltype": "microglial cell,macrophage",
-                                "tissue": "cortex,hippocampus", "system": ""}
-    assert result["A/ds3"] == {"celltype": "", "tissue": "", "system": "xenograft"}
+    assert result["A/ds2"]["celltype"] == "microglial cell,macrophage"
+    assert result["A/ds2"]["tissue"] == "cortex,hippocampus"
+    assert result["A/ds2"]["system"] == ""
+    assert result["A/ds3"]["celltype"] == ""
+    assert result["A/ds3"]["tissue"] == ""
+    assert result["A/ds3"]["system"] == "xenograft"
 
 
 def test_build_dataset_annotations_system_field_in_all_entries():
@@ -1718,12 +1723,13 @@ def test_module_view_celltype_tissue_method_change_listeners_are_explicit(client
     assert "flt.method.addEventListener('change'" in resp.text, (
         "method change listener not found — filter will be a no-op"
     )
-    # Filter uses indexOf (substring) not === so comma-joined multi-values work.
+    # celltype filter uses indexOf (substring) for comma-joined multi-values.
     assert ".indexOf(ctVal) !== -1" in resp.text, (
         "celltype filter must use indexOf for multi-value datasets"
     )
-    assert ".indexOf(tissueVal) !== -1" in resp.text, (
-        "tissue filter must use indexOf for multi-value datasets"
+    # tissue filter uses hierarchical ancestor matching instead of indexOf.
+    assert "TISSUE_ANCESTORS" in resp.text, (
+        "tissue filter must use TISSUE_ANCESTORS for hierarchical matching"
     )
 
     # Geneset experiment page — same partial, same requirement.
@@ -2834,3 +2840,187 @@ def test_probe_genesets_once_returns_true_on_200(monkeypatch):
     monkeypatch.setattr(_requests, "get", lambda *a, **kw: _FakeResp())
     result = browser._probe_genesets_once("http://testapi")
     assert result is True
+
+
+# ── tissue hierarchy ancestors ────────────────────────────────────────────────
+
+def test_tissue_ancestors_brain_has_no_ancestors():
+    """Brain is a root — its ancestor list must be empty."""
+    ancestors = browser._TISSUE_ANCESTORS
+    assert "brain" in ancestors
+    assert ancestors["brain"] == []
+
+
+def test_tissue_ancestors_prefrontal_cortex():
+    """prefrontal cortex → frontal cortex → cortex → brain (bottom-up)."""
+    ancestors = browser._TISSUE_ANCESTORS
+    pfc = ancestors.get("prefrontal cortex", [])
+    # frontal cortex must be the immediate parent (first in the list)
+    assert pfc[0] == "frontal cortex"
+    assert "cortex" in pfc
+    assert "brain" in pfc
+
+
+def test_tissue_ancestors_cortex_parent_is_brain():
+    ancestors = browser._TISSUE_ANCESTORS
+    assert ancestors["cortex"] == ["brain"]
+
+
+def test_tissue_ancestors_leaf_terms_carry_full_chain():
+    """dorsolateral prefrontal cortex is 4 levels deep — chain must be complete."""
+    ancestors = browser._TISSUE_ANCESTORS
+    dlpfc = ancestors.get("dorsolateral prefrontal cortex", [])
+    assert "prefrontal cortex" in dlpfc
+    assert "frontal cortex" in dlpfc
+    assert "cortex" in dlpfc
+    assert "brain" in dlpfc
+
+
+def test_tissue_ancestors_root_terms_have_empty_list():
+    """All hierarchy roots (parent == null) must map to []."""
+    ancestors = browser._TISSUE_ANCESTORS
+    hierarchy = browser._load_tissue_hierarchy()
+    roots = [term for term, parent in hierarchy.items() if parent is None]
+    for root_lc in roots:
+        # ancestors uses display casing; find matching key case-insensitively
+        match = next((k for k in ancestors if k.lower() == root_lc), None)
+        if match is not None:
+            assert ancestors[match] == [], f"root '{root_lc}' should have empty ancestor list"
+
+
+# ── module view: tissue hierarchy in template context ─────────────────────────
+
+def test_module_view_tissue_ancestors_in_js_context(client):
+    """The geneset module view must embed TISSUE_ANCESTORS in the mv_ctx JSON
+    so the JS filter can do hierarchical matching."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    assert "tissue_ancestors" in resp.text, (
+        "tissue_ancestors not found in page JS — hierarchical tissue filter will not work"
+    )
+
+
+def test_module_view_tissue_ancestors_in_geneset_detail(client):
+    """Geneset detail page also carries tissue_ancestors in its mv_ctx."""
+    resp = client.get("/genesets/StudyX/Exp1/gs_up")
+    assert resp.status_code == 200
+    assert "tissue_ancestors" in resp.text
+
+
+def test_module_view_tissue_dropdown_uses_fill_tissue_select(client):
+    """fillTissueSelect must appear in the rendered HTML (replaces plain fillSelect
+    for tissue so indented hierarchy options are emitted)."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    assert "fillTissueSelect" in resp.text, (
+        "fillTissueSelect not present — tissue dropdown will be flat, not hierarchical"
+    )
+
+
+def test_module_view_tissue_filter_uses_ancestor_lookup(client):
+    """The tissue filter must check TISSUE_ANCESTORS so selecting 'brain'
+    matches datasets tagged 'prefrontal cortex'."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    assert "TISSUE_ANCESTORS" in resp.text, (
+        "TISSUE_ANCESTORS JS variable missing — ancestor matching unavailable"
+    )
+    # The filter must walk the ancestor chain, not just indexOf.
+    assert "ancestors.indexOf(selectedTissue)" in resp.text or "TISSUE_ANCESTORS[t]" in resp.text, (
+        "Ancestor-based tissue filter logic not found"
+    )
+
+
+# ── module view: tag column prominence ────────────────────────────────────────
+
+def test_module_view_tag_column_has_prominent_style(client):
+    """The .mv-tag CSS rule must specify a larger font-size than the table body
+    baseline (11.5px), making the tag the visual primary axis of each row."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    # Look for any font-size on .mv-tag that is >= 13px (we used 14px).
+    import re
+    mv_tag_css = re.search(r'\.mv-tag\s*\{[^}]+\}', resp.text)
+    assert mv_tag_css, ".mv-tag CSS rule not found"
+    # font-size value must be present and > 12px baseline
+    size_match = re.search(r'font-size:\s*(\d+)px', mv_tag_css.group(0))
+    assert size_match, "font-size not set on .mv-tag"
+    assert int(size_match.group(1)) >= 13, f"tag font-size {size_match.group(1)}px is too small"
+
+
+def test_module_view_tag_column_header_has_accent_class(client):
+    """The tag <th> must carry mv-th-tag for visual accent."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    assert 'class="mv-th-tag"' in resp.text, "mv-th-tag class missing from tag <th>"
+
+
+def test_module_view_tag_chip_css_present(client):
+    """The .mv-tag-chip styling rule must be present (light chip background)."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    assert "mv-tag-chip" in resp.text
+
+
+# ── module view: dataset hover popover ────────────────────────────────────────
+
+def test_module_view_dataset_popover_css_present(client):
+    """The .mv-ds-pop and .mv-ds-tip CSS rules must be present for the hover
+    popover to function."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    assert "mv-ds-pop" in resp.text, ".mv-ds-pop CSS/markup missing"
+    assert "mv-ds-tip" in resp.text, ".mv-ds-tip CSS/markup missing"
+
+
+def test_module_view_dataset_annotations_include_title(client):
+    """DS_ANNOT carried in the page must include title, n_cells, and contributor
+    so the hover popover can display them."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    # The fake _DATABASES fixture has title="Dataset One" for GroupA/ds1.
+    assert "Dataset One" in resp.text, "dataset title not found in page annotations"
+
+
+def test_build_dataset_annotations_includes_title_and_ncells():
+    """_build_dataset_annotations must now return title + n_cells + contributor."""
+
+    class _FakeModule:
+        @staticmethod
+        def _api_get(api_url, path):
+            if path == "/databases":
+                return {"databases": [
+                    {"id": "G/d1", "title": "My Dataset", "n_obs": 42_000,
+                     "contributor": "Smith Lab",
+                     "celltype": "microglial cell", "tissue": "brain",
+                     "experimental_system": "post_mortem_tissue"},
+                ]}
+            raise ValueError(f"unexpected {path}")
+
+    import unittest.mock as mock
+    with mock.patch.object(browser, "_api_get", _FakeModule._api_get):
+        result = browser._build_dataset_annotations("http://dummy")
+
+    assert result["G/d1"]["title"] == "My Dataset"
+    assert result["G/d1"]["n_cells"] == "42000"
+    assert result["G/d1"]["contributor"] == "Smith Lab"
+    assert result["G/d1"]["tissue"] == "brain"
+
+
+def test_build_dataset_annotations_n_obs_fallback():
+    """n_cells key in the API response (not n_obs) should also work."""
+    import unittest.mock as mock
+
+    def fake_get(api_url, path):
+        if path == "/databases":
+            return {"databases": [
+                {"id": "G/d2", "n_cells": 100, "n_obs": None,
+                 "title": None, "contributor": None,
+                 "celltype": None, "tissue": None, "experimental_system": None},
+            ]}
+        raise ValueError(path)
+
+    with mock.patch.object(browser, "_api_get", fake_get):
+        result = browser._build_dataset_annotations("http://dummy")
+
+    assert result["G/d2"]["n_cells"] == "100"

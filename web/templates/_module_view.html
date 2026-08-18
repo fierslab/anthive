@@ -40,8 +40,21 @@ URL hash scheme (feature: back-button / shareable filter state):
     .mv-panel .mv-group { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-muted); }
     .mv-panel .mv-mod   { font-weight: 500; }
     .mv-panel .mv-ds a  { font-family: var(--font-mono); font-size: 11px; }
-    .mv-panel .mv-tag   { font-size: 10.5px; color: var(--text-muted); }
+    .mv-panel .mv-tag   { font-size: 14px; font-weight: 600; }
+    .mv-panel .mv-tag .canonical-pill { font-size: 9px; font-weight: 400; vertical-align: middle; margin-left: 4px; }
+    .mv-panel .mv-tag .mv-tag-chip { display: inline-block; background: #f1f5f9; padding: 2px 7px; border-radius: 4px; border: 1px solid #e2e8f0; }
+    .mv-panel .mv-th-tag { text-transform: uppercase; letter-spacing: .04em; color: var(--link, #475569); }
     .mv-panel .mv-method { font-size: 10.5px; color: #64748b; }
+    /* Dataset hover popover */
+    .mv-panel .mv-ds-pop { position: relative; display: inline-block; }
+    .mv-panel .mv-ds-tip { display: none; position: absolute; top: calc(100% + 4px); left: 0; z-index: 200;
+      min-width: 240px; max-width: 340px; background: #fff; border: 1px solid #e5e7eb;
+      border-radius: 6px; padding: 8px 12px; box-shadow: 0 4px 12px rgba(0,0,0,.08);
+      font-size: 11px; line-height: 1.5; white-space: normal; pointer-events: none; }
+    .mv-panel .mv-ds-pop:hover .mv-ds-tip { display: block; }
+    .mv-panel .mv-ds-tip .tip-title { font-weight: 600; font-size: 12px; margin-bottom: 4px; color: #1e293b; }
+    .mv-panel .mv-ds-tip .tip-row { color: #475569; }
+    .mv-panel .mv-ds-tip .tip-id { font-family: var(--font-mono); color: var(--text-muted); font-size: 10px; margin-top: 4px; }
     .mv-panel .mv-val    { font-family: var(--font-mono); text-align: right; }
     .mv-panel .mv-pos    { min-width: 160px; }
     .mv-panel .mv-track  { position: relative; display: inline-block; width: 140px; height: 10px; background: #eef2f7; border-radius: 2px; vertical-align: middle; }
@@ -94,7 +107,7 @@ URL hash scheme (feature: back-button / shareable filter state):
         {% if _mv.scope != 'module' %}<th>group</th>{% endif %}
         <th>module</th>
         {% if _mv.scope != 'dataset' %}<th>dataset</th>{% endif %}
-        <th>tag</th>
+        <th class="mv-th-tag">tag</th>
         <th>method</th>
         <th style="text-align:right">score</th>
         <th class="mv-pos">vs peer modules <span class="info" title="Peers = other modules scored with the SAME method on the SAME (dataset, tag). Marker = this row's value; bar spans min–max across peer modules. Position drives the default sort.">ⓘ</span></th>
@@ -127,10 +140,13 @@ URL hash scheme (feature: back-button / shareable filter state):
     sort:     root.querySelector('.mv-flt-sort'),
   };
 
-  // dataset_annotations: {db_id: {celltype, tissue, system}} — present when ctx carries it.
+  // dataset_annotations: {db_id: {celltype, tissue, system, title, n_cells, contributor}}
   var DS_ANNOT = CTX.dataset_annotations || {};
   // preselect_cell_types: [] or [ct, ...] — OR-filter applied on first render.
   var PRESELECT_CTS = CTX.preselect_cell_types || [];
+  // tissue_ancestors: {term: [parent, grandparent, ...]} for hierarchical filtering.
+  // Keys and values use original casing from the ontology; matching is case-insensitive.
+  var TISSUE_ANCESTORS = CTX.tissue_ancestors || {};
 
   // SVG icons — mirrors dataset.html's chart_icon macro
   var SVG_BAR = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="1.5" y="8" width="3" height="6"/><rect x="6.5" y="5" width="3" height="9"/><rect x="11.5" y="2" width="3" height="12"/></svg>';
@@ -151,10 +167,12 @@ URL hash scheme (feature: back-button / shareable filter state):
    * @returns {string} HTML string safe to set as innerHTML.
    */
   function formatColLabel(name) {
-    if (!name || !name.startsWith('ant_')) return esc(name);
+    if (!name) return '';
+    if (!name.startsWith('ant_')) {
+      return '<span class="mv-tag-chip">' + esc(name) + '</span>';
+    }
     var tag = name.slice(4);   // strip 'ant_'
-    // Only decorate names that look like a real canonical tag (no nested underscores are fine)
-    return '<span class="canonical-col" title="canonical annotation `' + esc(name) + '`, standardised across datasets">'
+    return '<span class="mv-tag-chip canonical-col" title="canonical annotation `' + esc(name) + '`, standardised across datasets">'
       + '<b>' + esc(tag) + '</b>'
       + '<span class="canonical-pill">canonical</span>'
       + '</span>';
@@ -209,6 +227,69 @@ URL hash scheme (feature: back-button / shareable filter state):
       if (sel === flt.method) lab = METHOD_LABEL[v] || v;
       opts.push('<option value="' + esc(v) + '">' + esc(lab) + '</option>');
     });
+    sel.innerHTML = opts.join('');
+    if (wanted) sel.value = wanted;
+  }
+
+  /**
+   * Populate the tissue dropdown with DFS-ordered, indented options.
+   *
+   * Options are ordered by their position in the ontology hierarchy (parents
+   * before children). Indentation depth is shown with em-spaces. Ancestor
+   * nodes are included even when no dataset is directly tagged with them, so
+   * the tree structure stays readable and selecting a parent still captures
+   * all descendants.
+   *
+   * @param {HTMLSelectElement} sel - The tissue <select> element.
+   * @param {string[]} leafTerms - Tissue values actually present in DS_ANNOT.
+   * @param {string|null} currentVal - Value to restore after rebuild, or null.
+   */
+  function fillTissueSelect(sel, leafTerms, currentVal) {
+    if (!sel) return;
+    var wanted = currentVal != null ? currentVal : sel.value;
+
+    // Build a set of terms that should appear: the leaf terms AND all their
+    // ancestors (so that "brain" appears even when no dataset says "brain").
+    var termSet = {};
+    leafTerms.forEach(function (t) {
+      termSet[t] = true;
+      (TISSUE_ANCESTORS[t] || []).forEach(function (anc) { termSet[anc] = true; });
+    });
+
+    // Build parent → children map from TISSUE_ANCESTORS (inverted).
+    // Also track which terms are roots (no parent in termSet).
+    var children = {};   // parent display-term → [child display-term]
+    var hasParent = {};
+    Object.keys(TISSUE_ANCESTORS).forEach(function (term) {
+      var ancs = TISSUE_ANCESTORS[term];
+      if (!termSet[term]) return;
+      var parent = ancs.length ? ancs[0] : null;  // immediate parent = first ancestor
+      if (parent && termSet[parent]) {
+        if (!children[parent]) children[parent] = [];
+        children[parent].push(term);
+        hasParent[term] = true;
+      }
+    });
+
+    // Roots = terms in termSet with no parent in termSet.
+    var roots = Object.keys(termSet).filter(function (t) { return !hasParent[t]; });
+    roots.sort();
+    // Brain first among roots.
+    var brainIdx = roots.indexOf('brain');
+    if (brainIdx > 0) { roots.splice(brainIdx, 1); roots.unshift('brain'); }
+
+    // DFS emit with depth-based indentation.
+    var EM = ' ';  // em space (U+2003)
+    var opts = ['<option value="">all</option>'];
+    function dfsEmit(term, depth) {
+      var indent = '';
+      for (var di = 0; di < depth; di++) indent += EM;
+      opts.push('<option value="' + esc(term) + '">' + esc(indent + term) + '</option>');
+      var kids = (children[term] || []).slice().sort();
+      kids.forEach(function (child) { dfsEmit(child, depth + 1); });
+    }
+    roots.forEach(function (root) { dfsEmit(root, 0); });
+
     sel.innerHTML = opts.join('');
     if (wanted) sel.value = wanted;
   }
@@ -367,10 +448,17 @@ URL hash scheme (feature: back-button / shareable filter state):
       });
     }
     if (flt.tissue && flt.tissue.value) {
-      var tissueVal = flt.tissue.value.toLowerCase();
+      var selectedTissue = flt.tissue.value.toLowerCase();
       rows = rows.filter(function (r) {
         var ann = DS_ANNOT[r.dataset] || {};
-        return (ann.tissue || '').toLowerCase().indexOf(tissueVal) !== -1;
+        var rowTissues = (ann.tissue || '').split(',').map(function (t) { return t.trim(); }).filter(Boolean);
+        return rowTissues.some(function (t) {
+          if (!t) return false;
+          if (t.toLowerCase() === selectedTissue) return true;
+          // Accept if selectedTissue is an ancestor of t.
+          var ancestors = (TISSUE_ANCESTORS[t] || []).map(function (a) { return a.toLowerCase(); });
+          return ancestors.indexOf(selectedTissue) !== -1;
+        });
       });
     }
     if (flt.system && flt.system.value) {
@@ -419,9 +507,19 @@ URL hash scheme (feature: back-button / shareable filter state):
         + (neg ? '#dc2626' : 'var(--link)') + '"></span></span>';
       var dsParts = String(r.dataset).split('/');
       var dsHref = datasetUrl(r);
+      var dsAnn = DS_ANNOT[r.dataset] || {};
+      var dsTipRows = '';
+      if (dsAnn.title) dsTipRows += '<div class="tip-title">' + esc(dsAnn.title) + '</div>';
+      if (dsAnn.celltype) dsTipRows += '<div class="tip-row">Cell type: ' + esc(dsAnn.celltype) + '</div>';
+      if (dsAnn.tissue)   dsTipRows += '<div class="tip-row">Tissue: '    + esc(dsAnn.tissue)   + '</div>';
+      if (dsAnn.system)   dsTipRows += '<div class="tip-row">System: '    + esc(dsAnn.system)   + '</div>';
+      if (dsAnn.n_cells)  dsTipRows += '<div class="tip-row">Cells: '     + esc(dsAnn.n_cells)  + '</div>';
+      if (dsAnn.contributor) dsTipRows += '<div class="tip-row">Contributor: ' + esc(dsAnn.contributor) + '</div>';
+      dsTipRows += '<div class="tip-id">' + esc(r.dataset) + '</div>';
+      var dsTip = '<div class="mv-ds-tip">' + dsTipRows + '</div>';
       var dsLink = dsHref
-        ? '<a href="' + esc(dsHref) + '">' + esc(r.dataset) + '</a>'
-        : esc(r.dataset);
+        ? '<span class="mv-ds-pop"><a href="' + esc(dsHref) + '">' + esc(r.dataset) + '</a>' + dsTip + '</span>'
+        : '<span class="mv-ds-pop">' + esc(r.dataset) + dsTip + '</span>';
       var plotSvg = NUMERICAL_TAGS[r.tag] ? SVG_LINE : SVG_BAR;
       var pu = plotUrl(r), uu = umapUrl(r);
       var tds = [];
@@ -496,7 +594,7 @@ URL hash scheme (feature: back-button / shareable filter state):
             if (ann.system)   ann.system  .split(',').forEach(function (v) { var t = v.trim(); if (t) systems[t]   = 1; });
           });
           fillSelect(flt.celltype, Object.keys(celltypes));
-          fillSelect(flt.tissue,   Object.keys(tissues));
+          fillTissueSelect(flt.tissue, Object.keys(tissues), null);
           fillSelect(flt.system,   Object.keys(systems));
           // Apply preselect_cell_types: if a single type matches a dropdown option,
           // select it; multiple types → select the first that has a matching option.

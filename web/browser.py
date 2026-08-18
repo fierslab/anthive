@@ -1208,6 +1208,39 @@ def _load_tissue_display_names() -> Dict[str, str]:
     return out
 
 
+def _build_tissue_ancestors() -> Dict[str, List[str]]:
+    """Return ``{term: [ancestor, …]}`` for every tissue in the ontology.
+
+    The ancestor list runs from the immediate parent up to the root (exclusive
+    of the term itself), in bottom-up order.  Terms are stored in their
+    original (mixed-case) form from the YAML.  Lower-case matching is the
+    caller's responsibility.
+
+    Returns:
+        Dict mapping each ontology label to its ordered ancestor list.
+        Root terms map to ``[]``.
+    """
+    hierarchy = _load_tissue_hierarchy()   # lower-case child → lower-case parent | None
+    display = _load_tissue_display_names()  # lower-case → original casing
+
+    def display_of(term_lc: str) -> str:
+        return display.get(term_lc, term_lc)
+
+    out: Dict[str, List[str]] = {}
+    for term_lc in hierarchy:
+        ancestors: List[str] = []
+        current = hierarchy[term_lc]
+        while current is not None:
+            ancestors.append(display_of(current))
+            current = hierarchy.get(current)
+        out[display_of(term_lc)] = ancestors
+    return out
+
+
+# Module-level cache: {display_term: [ancestor_display, ...]}
+_TISSUE_ANCESTORS: Dict[str, List[str]] = _build_tissue_ancestors()
+
+
 def _short_count(n: Optional[int]) -> str:
     """Humanize a cell-count: 999, 1.4k, 144k, 2.3M."""
     if not n:
@@ -2552,19 +2585,18 @@ def _flatten_annotation_field(value: object) -> str:
 
 
 def _build_dataset_annotations(api_url: str) -> Dict[str, Dict[str, str]]:
-    """Return a {db_id: {celltype, tissue, system}} map for all known datasets.
+    """Return a {db_id: {celltype, tissue, system, title, n_cells, contributor}} map.
 
-    Used by the module view's client-side facet filters. Values are always
-    plain strings (never lists) so the JS filter's .toLowerCase() call is safe.
-    Multi-valued fields are comma-joined, e.g. ``"microglial cell,macrophage"``.
-    ``system`` is the experimental_system mus field (post_mortem_tissue,
-    xenograft, in_vitro_2d, organoid, …). Best-effort: fields may be empty.
+    Used by the module view's client-side facet filters and hover popover.
+    Values are always plain strings (never lists) so the JS .toLowerCase()
+    call is safe.  Multi-valued fields are comma-joined, e.g.
+    ``"microglial cell,macrophage"``.  Best-effort: fields may be empty.
 
     Args:
         api_url: Base URL for the ant-serve REST API.
 
     Returns:
-        Dict mapping db_id to {celltype, tissue, system} annotation strings.
+        Dict mapping db_id to annotation + display-info strings.
     """
     try:
         databases = _all_databases(api_url)
@@ -2575,10 +2607,14 @@ def _build_dataset_annotations(api_url: str) -> Dict[str, Dict[str, str]]:
         db_id = db.get('id') or ''
         if not db_id:
             continue
+        n_obs = db.get('n_obs') or db.get('n_cells') or ''
         result[db_id] = {
             'celltype': _flatten_annotation_field(db.get('celltype')),
             'tissue': _flatten_annotation_field(db.get('tissue')),
             'system': _flatten_annotation_field(db.get('experimental_system')),
+            'title': str(db.get('title') or ''),
+            'n_cells': str(n_obs) if n_obs else '',
+            'contributor': str(db.get('contributor') or ''),
         }
     return result
 
@@ -2626,6 +2662,7 @@ async def geneset_experiment_view(request: Request, study: str, experiment: str)
             "module_name": None,
             "id": "mv-experiment",
             "dataset_annotations": dataset_annotations,
+            "tissue_ancestors": _TISSUE_ANCESTORS,
             "preselect_cell_types": _preselect_cell_types(meta),
         },
     })
@@ -2667,6 +2704,7 @@ async def geneset_view(request: Request, study: str, experiment: str, name: str)
             "module_name": name,
             "id": "mv-varies-most",
             "dataset_annotations": dataset_annotations,
+            "tissue_ancestors": _TISSUE_ANCESTORS,
             "preselect_cell_types": preselect_cts,
         },
     })
