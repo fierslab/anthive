@@ -2480,12 +2480,40 @@ async def geneset_starcat_module_view(request: Request, catalog_id: str, module_
     })
 
 
+def _flatten_annotation_field(value: object) -> str:
+    """Flatten a possibly-list annotation value to a comma-joined string.
+
+    The REST API returns celltype/tissue as a string for single-valued datasets
+    and as a list for multi-valued ones.  The JS filter calls .toLowerCase() on
+    these values, which throws TypeError on arrays.  This helper ensures the
+    embedded DS_ANNOT always contains plain strings.
+
+    Args:
+        value: A string, list of strings, or None/falsy.
+
+    Returns:
+        Comma-joined string, e.g. ``"microglial cell,macrophage"`` or ``""``.
+    """
+    if not value:
+        return ''
+    if isinstance(value, list):
+        return ','.join(str(v) for v in value if v)
+    return str(value)
+
+
 def _build_dataset_annotations(api_url: str) -> Dict[str, Dict[str, str]]:
     """Return a {db_id: {celltype, tissue}} map for all known datasets.
 
-    Used by the module view's client-side facet filters. Values are the
-    canonical (un-abbreviated) strings so the JS filter can match them.
-    Best-effort: fields may be None/missing for some datasets.
+    Used by the module view's client-side facet filters. Values are always
+    plain strings (never lists) so the JS filter's .toLowerCase() call is safe.
+    Multi-valued fields are comma-joined, e.g. ``"microglial cell,macrophage"``.
+    Best-effort: fields may be empty for some datasets.
+
+    Args:
+        api_url: Base URL for the ant-serve REST API.
+
+    Returns:
+        Dict mapping db_id to {celltype, tissue} annotation strings.
     """
     try:
         databases = _all_databases(api_url)
@@ -2497,8 +2525,8 @@ def _build_dataset_annotations(api_url: str) -> Dict[str, Dict[str, str]]:
         if not db_id:
             continue
         result[db_id] = {
-            'celltype': db.get('celltype') or '',
-            'tissue': db.get('tissue') or '',
+            'celltype': _flatten_annotation_field(db.get('celltype')),
+            'tissue': _flatten_annotation_field(db.get('tissue')),
         }
     return result
 

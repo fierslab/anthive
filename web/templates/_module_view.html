@@ -228,19 +228,22 @@ Consumer passes a `mv_ctx` Jinja var — a dict:
       else if (key === 'dataset') rows = rows.filter(function (r) { return r.dataset === v; });
       else if (key === 'tag') rows = rows.filter(function (r) { return r.tag === v; });
     });
-    // Filter — dataset annotation facets (celltype / tissue)
+    // Filter — dataset annotation facets (celltype / tissue).
+    // DS_ANNOT values are always flat strings (multi-valued fields are
+    // comma-joined server-side), so .toLowerCase() is always safe.
+    // Use indexOf so "microglial cell" matches "microglial cell,macrophage".
     if (flt.celltype && flt.celltype.value) {
-      var ctVal = flt.celltype.value;
+      var ctVal = flt.celltype.value.toLowerCase();
       rows = rows.filter(function (r) {
         var ann = DS_ANNOT[r.dataset] || {};
-        return (ann.celltype || '').toLowerCase() === ctVal.toLowerCase();
+        return (ann.celltype || '').toLowerCase().indexOf(ctVal) !== -1;
       });
     }
     if (flt.tissue && flt.tissue.value) {
-      var tissueVal = flt.tissue.value;
+      var tissueVal = flt.tissue.value.toLowerCase();
       rows = rows.filter(function (r) {
         var ann = DS_ANNOT[r.dataset] || {};
-        return (ann.tissue || '').toLowerCase() === tissueVal.toLowerCase();
+        return (ann.tissue || '').toLowerCase().indexOf(tissueVal) !== -1;
       });
     }
     // Only keep one row per (mod × dataset × tag × source) — pick the
@@ -346,12 +349,15 @@ Consumer passes a `mv_ctx` Jinja var — a dict:
           flt.group.value = CTX.module_catalog || '';
         }
         // Populate celltype / tissue facet dropdowns from DS_ANNOT values.
+        // DS_ANNOT values are flat comma-joined strings (server-side normalised).
+        // Split on comma so each individual term gets its own option — a dataset
+        // annotated "microglial cell,macrophage" contributes two options, not one.
         if (flt.celltype || flt.tissue) {
           var celltypes = {}, tissues = {};
           Object.keys(DS_ANNOT).forEach(function (dbId) {
             var ann = DS_ANNOT[dbId];
-            if (ann.celltype) celltypes[ann.celltype] = 1;
-            if (ann.tissue)   tissues[ann.tissue]     = 1;
+            if (ann.celltype) ann.celltype.split(',').forEach(function (v) { var t = v.trim(); if (t) celltypes[t] = 1; });
+            if (ann.tissue)   ann.tissue  .split(',').forEach(function (v) { var t = v.trim(); if (t) tissues[t]   = 1; });
           });
           fillSelect(flt.celltype, Object.keys(celltypes));
           fillSelect(flt.tissue,   Object.keys(tissues));

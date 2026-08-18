@@ -526,6 +526,49 @@ def test_access_pub_icon_missing_access_defaults_internal():
     assert icon["access"] == "internal"
 
 
+# ── unit tests: _flatten_annotation_field ─────────────────────────────────────
+
+def test_flatten_annotation_field_string_passthrough():
+    assert browser._flatten_annotation_field("microglial cell") == "microglial cell"
+
+
+def test_flatten_annotation_field_list_joins():
+    assert browser._flatten_annotation_field(
+        ["microglial cell", "macrophage", "monocyte"]
+    ) == "microglial cell,macrophage,monocyte"
+
+
+def test_flatten_annotation_field_none_returns_empty():
+    assert browser._flatten_annotation_field(None) == ""
+    assert browser._flatten_annotation_field("") == ""
+    assert browser._flatten_annotation_field([]) == ""
+
+
+def test_flatten_annotation_field_list_with_empty_entries_skips_them():
+    assert browser._flatten_annotation_field(["brain", "", None]) == "brain"
+
+
+def test_build_dataset_annotations_flattens_list_values():
+    """Regression: list-valued celltype/tissue threw TypeError in JS filter."""
+    import importlib.util as _ilu
+    # monkeypatch _all_databases inline — no TestClient needed
+    _orig = browser._all_databases
+    browser._all_databases = lambda api_url: [
+        {"id": "A/ds1", "celltype": "microglial cell", "tissue": "brain"},
+        {"id": "A/ds2", "celltype": ["microglial cell", "macrophage"], "tissue": ["cortex", "hippocampus"]},
+        {"id": "A/ds3", "celltype": None, "tissue": None},
+    ]
+    try:
+        result = browser._build_dataset_annotations("http://x")
+    finally:
+        browser._all_databases = _orig
+
+    assert result["A/ds1"] == {"celltype": "microglial cell", "tissue": "brain"}
+    # List values must be flat strings — JS .toLowerCase() would throw on arrays.
+    assert result["A/ds2"] == {"celltype": "microglial cell,macrophage", "tissue": "cortex,hippocampus"}
+    assert result["A/ds3"] == {"celltype": "", "tissue": ""}
+
+
 # ── fake REST API ──────────────────────────────────────────────────────────────
 
 # Two collections. GroupA mixes organism/celltype/disease across its two
@@ -1656,6 +1699,13 @@ def test_module_view_celltype_tissue_method_change_listeners_are_explicit(client
     )
     assert "flt.method.addEventListener('change', render)" in resp.text, (
         "method change listener not found — filter will be a no-op"
+    )
+    # Filter uses indexOf (substring) not === so comma-joined multi-values work.
+    assert ".indexOf(ctVal) !== -1" in resp.text, (
+        "celltype filter must use indexOf for multi-value datasets"
+    )
+    assert ".indexOf(tissueVal) !== -1" in resp.text, (
+        "tissue filter must use indexOf for multi-value datasets"
     )
 
     # Geneset experiment page — same partial, same requirement.
