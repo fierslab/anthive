@@ -786,8 +786,13 @@ document.addEventListener('DOMContentLoaded', function() {
             btns.forEach(function(b) { b.classList.toggle('active', b.dataset.tab === name); });
             Object.keys(panels).forEach(function(k) { panels[k].classList.toggle('active', k === name); });
             if (push) {
-                try { history.replaceState(null, '', '#' + name); }
-                catch (_) { location.hash = name; }
+                // Preserve any &mv=… state already in the hash so switching
+                // tabs doesn't discard the module-view filter state.
+                var curHash = (location.hash || '').replace(/^#/, '');
+                var curAmp = curHash.indexOf('&');
+                var mvSuffix = curAmp >= 0 ? curHash.slice(curAmp) : '';
+                try { history.replaceState(null, '', '#' + name + mvSuffix); }
+                catch (_) { location.hash = name + mvSuffix; }
             }
         }
         // Extended hash: `modules-<catalog::module>` → activate the modules
@@ -834,15 +839,18 @@ document.addEventListener('DOMContentLoaded', function() {
         function handleHash(hash) {
             var h = (hash || '').replace(/^#/, '');
             if (!h) return;
+            // The mv= filter state is appended as `&mv=...`; strip it for tab lookup.
+            var ampIdx = h.indexOf('&');
+            var tabPart = ampIdx >= 0 ? h.slice(0, ampIdx) : h;
             // Support "modules-<catalog::module>" syntax
-            var m = h.match(/^modules-(.+)$/);
+            var m = tabPart.match(/^modules-(.+)$/);
             if (m) {
                 activateTab('modules', false);
                 try { focusModulesRow(decodeURIComponent(m[1])); }
                 catch (_) { focusModulesRow(m[1]); }
                 return;
             }
-            activateTab(h, false);
+            activateTab(tabPart, false);
         }
         window.addEventListener('hashchange', function() { handleHash(location.hash); });
         var initHash = location.hash || '';

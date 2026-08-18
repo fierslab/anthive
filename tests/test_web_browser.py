@@ -3051,3 +3051,41 @@ def test_build_dataset_annotations_n_obs_fallback():
         result = browser._build_dataset_annotations("http://dummy")
 
     assert result["G/d2"]["n_cells"] == "100"
+
+
+# ── dataset.html: handleHash strips &mv= before tab lookup ───────────────────
+
+def test_dataset_html_handlehash_strips_mv_suffix(client):
+    """handleHash must split on '&' before matching a tab name so that a URL
+    fragment like #modules&mv=tag=braak_group;sort=position activates the
+    modules tab, not falls back to overview."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+
+    html = resp.text
+    # The indexOf('&') guard that strips the mv= state must be present.
+    assert "indexOf('&')" in html, (
+        "handleHash must use indexOf('&') to strip &mv= suffix before tab lookup"
+    )
+    # The tabPart variable (or equivalent slice) must be used for the
+    # modules-<key> match and the activateTab call, not the raw `h`.
+    assert "tabPart" in html, (
+        "handleHash must extract tabPart (the fragment up to '&') for tab lookup"
+    )
+
+
+def test_dataset_html_activatetab_preserves_mv_suffix(client):
+    """activateTab must read the existing mv= suffix from the current hash and
+    re-append it when writing back, so switching tabs doesn't erase filter state."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+
+    html = resp.text
+    # The mv-preserving logic: read curHash, find '&', extract mvSuffix,
+    # append it when calling replaceState.
+    assert "mvSuffix" in html, (
+        "activateTab must preserve mvSuffix from the current hash on tab switch"
+    )
+    assert "name + mvSuffix" in html, (
+        "activateTab must write '#' + name + mvSuffix to replaceState"
+    )
