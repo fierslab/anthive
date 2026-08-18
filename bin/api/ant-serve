@@ -1445,6 +1445,10 @@ _score_index_by_db: Dict[str, List[str]] = {}
 _score_index_by_geneset: Dict[str, List[str]] = {}
 _score_columns: Dict[Tuple[str, str], str] = {}    # (db_id, geneset_id) -> column_name
 
+# Gene → (geneset | starcat) reverse index, built at startup / rescan.
+# Key: UPPER(gene_symbol) → list of match dicts (kind, catalog_id, name, …)
+_by_gene_index: Dict[str, List[Dict[str, Any]]] = {}
+
 
 async def _daily_metadata_refresh() -> None:
     """Background task: re-scan and refresh any stale metadata entries once per day."""
@@ -1486,6 +1490,10 @@ async def lifespan(app: FastAPI):
             )
         except Exception as exc:
             log.warning("Failed to build module-score index: %s", exc)
+        try:
+            _build_by_gene_index()
+        except Exception as exc:
+            log.warning("Failed to build by-gene index: %s", exc)
     # Slave-mode banner — make the deployment role obvious in the logs
     # so it's the first thing visible when debugging "why won't this
     # write?". Banner ONLY fires when role=slave is opt-in; primaries
@@ -10372,9 +10380,10 @@ async def rescan_databases():
     """
     try:
         result = registry.rescan()
-        # rebuild module-score reverse index too
+        # rebuild module-score and by-gene reverse indices too
         if geneset_registry is not None:
             _build_score_index()
+            _build_by_gene_index()
             result['scored_databases'] = len(_score_index_by_db)
         # Drop the plot-response cache — any cached image may now be stale.
         result['plot_cache_cleared'] = _plot_cache_clear()
@@ -10510,6 +10519,84 @@ def _build_score_index() -> None:
     )
 
 
+def _build_by_gene_index() -> None:
+    """Build UPPER(gene) → [{match}] reverse lookup across genesets + starCAT.
+
+    Loads every geneset gene list and the full starCAT weight table once.
+    Results are cached in ``_by_gene_index`` and survive until the next
+    rescan.  Typical footprint: a few thousand entries × a few dozen matches
+    each = well under 50 MB.
+    """
+    global _by_gene_index
+    new_index: Dict[str, List[Dict[str, Any]]] = {}
+
+    # ── genesets ────────────────────────────────────────────────────────
+    if geneset_registry is not None:
+        for geneset in geneset_registry.genesets.values():
+            try:
+                gene_list = geneset.genes
+            except Exception as exc:
+                log.warning("by-gene index: skip geneset %s (%s)", geneset.geneset_id, exc)
+                continue
+            summary = geneset.to_summary()
+            for position, gene_symbol in enumerate(gene_list, start=1):
+                key = gene_symbol.upper()
+                entry: Dict[str, Any] = {
+                    'kind': 'geneset',
+                    'study': summary['study'],
+                    'experiment': summary['experiment'],
+                    'name': summary['name'],
+                    'display_name': summary.get('display_name') or summary['name'],
+                    'description': summary.get('description', ''),
+                    'n_genes': summary['n_genes'],
+                    'rank': position,
+                    # starCAT-only fields absent here
+                    'catalog_id': None,
+                    'weight': None,
+                }
+                new_index.setdefault(key, []).append(entry)
+
+    # ── starCAT ─────────────────────────────────────────────────────────
+    try:
+        import catalogs as _catalogs_mod  # noqa: PLC0415
+        import os
+        starcat_root_str = str(_catalogs_mod.DEFAULT_STARCATSTORE_ROOT)
+        starcat_catalogs = _catalogs_mod._cached_starcat_catalogs(starcat_root_str)
+        for catalog in starcat_catalogs:
+            for module in catalog.modules:
+                try:
+                    weight_map = module.weights()  # Dict[gene, float]
+                except Exception as exc:
+                    log.warning("by-gene index: skip starcat %s/%s (%s)",
+                                catalog.catalog_id, module.name, exc)
+                    continue
+                if not weight_map:
+                    continue
+                for gene_symbol, weight in weight_map.items():
+                    key = gene_symbol.upper()
+                    entry = {
+                        'kind': 'starcat_module',
+                        'catalog_id': catalog.catalog_id,
+                        'name': module.name,
+                        'display_name': module.name,
+                        'description': module.description,
+                        'n_genes': module.n_genes,
+                        'weight': weight,
+                        'rank': None,
+                        # geneset-only fields absent here
+                        'study': None,
+                        'experiment': None,
+                    }
+                    new_index.setdefault(key, []).append(entry)
+    except Exception as exc:
+        log.warning("by-gene index: starCAT scan failed: %s", exc)
+
+    _by_gene_index = new_index
+    n_genes = len(new_index)
+    n_matches = sum(len(v) for v in new_index.values())
+    log.info("by-gene index: %d gene keys, %d total match entries", n_genes, n_matches)
+
+
 def _annotate_with_scored_in(summary: Dict[str, Any]) -> Dict[str, Any]:
     """Mutate a geneset summary dict to include scored_in (list of db_ids)."""
     summary['scored_in'] = list(_score_index_by_geneset.get(summary['geneset_id'], []))
@@ -10537,6 +10624,74 @@ async def list_genesets(
             "example":   "Sierksma2025::WGCNA::Brown_Lysosome",
         },
         "genesets": [_annotate_with_scored_in(g.to_summary()) for g in items],
+    }
+
+
+@app.get("/genesets/by-gene/{gene}", tags=["genesets"])
+async def get_genesets_by_gene(gene: str):
+    """Case-insensitive gene-symbol lookup across all genesets and starCAT programs.
+
+    Returns every geneset and starCAT module that contains the requested gene.
+    The index is built at startup (and on every rescan) — queries are O(1).
+    Always returns 200; unknown genes return ``total: 0`` and empty lists.
+
+    Args:
+        gene: Gene symbol (case-insensitive, e.g. ``APOE``, ``apoe``).
+
+    Returns:
+        JSON with keys:
+          - ``gene``: canonicalised (upper-case) gene symbol.
+          - ``matches``: flat list consumed by the web UI, discriminated by
+            ``kind`` (``geneset`` | ``starcat_module``).
+          - ``genesets``: structured list for API consumers (geneset matches only).
+          - ``starcat``: structured list for API consumers (starCAT matches only).
+          - ``total``: total match count across both sources.
+    """
+    gene_upper = gene.strip().upper()
+    matches = list(_by_gene_index.get(gene_upper, []))
+
+    # Sort: starCAT by descending |weight|; genesets alphabetically by
+    # study/experiment/name (rank within the set is already stored).
+    def _sort_key(match: Dict[str, Any]) -> tuple:
+        if match['kind'] == 'starcat_module':
+            weight = match.get('weight') or 0.0
+            return (0, -abs(weight), match.get('catalog_id', ''), match.get('name', ''))
+        return (1, 0.0, match.get('study', ''), match.get('experiment', ''), match.get('name', ''))
+
+    matches.sort(key=_sort_key)
+
+    geneset_matches = [m for m in matches if m['kind'] == 'geneset']
+    starcat_matches  = [m for m in matches if m['kind'] == 'starcat_module']
+
+    # Structured shapes for REST consumers (trimmed to what's meaningful per kind)
+    genesets_out = [
+        {
+            'study':        m['study'],
+            'experiment':   m['experiment'],
+            'name':         m['name'],
+            'display_name': m.get('display_name') or m['name'],
+            'description':  m.get('description', ''),
+            'n_genes':      m.get('n_genes'),
+            'rank':         m.get('rank'),
+        }
+        for m in geneset_matches
+    ]
+    starcat_out = [
+        {
+            'catalog':  m['catalog_id'],
+            'module':   m['name'],
+            'weight':   m.get('weight'),
+            'n_genes':  m.get('n_genes'),
+        }
+        for m in starcat_matches
+    ]
+
+    return {
+        'gene':     gene_upper,
+        'matches':  matches,
+        'genesets': genesets_out,
+        'starcat':  starcat_out,
+        'total':    len(matches),
     }
 
 
@@ -10589,10 +10744,12 @@ async def rescan_genesets():
     h5ad_db_ids = set(globals()['registry'].databases.keys()) if globals().get('registry') else None
     errors, warnings = validate_geneset_registry(geneset_reg, h5ad_db_ids=h5ad_db_ids)
     _build_score_index()
+    _build_by_gene_index()
     return {
         "experiments": len(geneset_reg.experiments),
         "genesets": len(geneset_reg.genesets),
         "scored_databases": len(_score_index_by_db),
+        "by_gene_keys": len(_by_gene_index),
         "errors": errors,
         "warnings": warnings,
     }
