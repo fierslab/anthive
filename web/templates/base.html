@@ -288,6 +288,17 @@
         }
         .info:hover { color: var(--link); }
         legend .info, th .info, h2 .info { font-size: 10px; }
+        /* Canonical-column display: ant_* columns get a subdued grey pill
+           ("canonical") and their label is shown bold without the ant_ prefix.
+           The wrapper carries the hover tooltip via title=. */
+        .canonical-col { display: inline; }
+        .canonical-pill {
+            display: inline-block; margin-left: 4px;
+            padding: 0 4px; font-size: 9px; line-height: 1.6;
+            border-radius: 3px; vertical-align: baseline;
+            background: #f1f5f9; color: #64748b; border: 1px solid #cbd5e1;
+            font-weight: 400; letter-spacing: .2px; white-space: nowrap;
+        }
         /* GDPR notice: full-width, scrollable bottom sheet on small screens
            (the inline desktop styling is a fixed 380px corner card). */
         @media (max-width: 560px) {

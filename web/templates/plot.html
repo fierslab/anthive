@@ -2009,6 +2009,20 @@
     return { curated: curatedList, smart: extra };
   }
 
+  // ── chip label formatter — mirrors the Jinja col_label macro ────────────
+  // Returns HTML to display as a chip label.  ant_* columns get a bold
+  // stripped label + canonical pill; everything else is plain-escaped text.
+  // The actual `value` submitted to the API always stays the raw ant_* name.
+  function formatColLabel(name) {
+    function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function(c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+    if (!name || !name.startsWith('ant_')) return esc(name);
+    var tag = name.slice(4);
+    return '<span class="canonical-col" title="canonical annotation `' + esc(name) + '`, standardised across datasets">'
+      + '<b>' + esc(tag) + '</b>'
+      + '<span class="canonical-pill">canonical</span>'
+      + '</span>';
+  }
+
   // ── chip injection helper
   // Inserts a row of clickable chips beneath an input.  ``mode``:
   //   'replace' (default) — chip click sets input.value to the chip text
@@ -2035,7 +2049,7 @@
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'pick-chip' + (klass ? ' ' + klass : '');
-      btn.textContent = value;
+      btn.innerHTML = formatColLabel(value);
       if (title) btn.title = title;
       btn.addEventListener('click', () => {
         if (field.tagName === 'SELECT') {

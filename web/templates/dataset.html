@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import col_label %}
 
 {% block title %}{{ dataset_name }} — anthive{% endblock %}
 
@@ -627,7 +628,7 @@
     {% for col in _num_cols %}
     {% set _base = '/browse/' ~ folder_browse_id ~ '/' ~ file_id %}
     <tr class="obs-item" data-name="{{ col.name|lower }}">
-      <td class="colname">{{ col.name }}</td>
+      <td class="colname">{{ col_label(col.name) }}</td>
       <td class="obs-plots">
         {% if has_duckdb %}
         <a class="obs-plot-icon" href="{{ _base }}/plot/histogram?x={{ col.name|urlencode }}" title="histogram of {{ col.name }}">{{ chart_icon('bar') }}</a>
@@ -662,7 +663,7 @@
     {% for col in _cat_cols %}
     {% set _base = '/browse/' ~ folder_browse_id ~ '/' ~ file_id %}
     <tr class="obs-item" data-name="{{ col.name|lower }}">
-      <td class="colname">{{ col.name }}</td>
+      <td class="colname">{{ col_label(col.name) }}</td>
       <td class="obs-plots">
         {% if has_duckdb %}
         <a class="obs-plot-icon" href="{{ _base }}/plot/bar?x={{ col.name|urlencode }}" title="bar plot: cells per {{ col.name }} category">{{ chart_icon('bar') }}</a>

@@ -1,0 +1,21 @@
+{# Sitewide Jinja macros — import with:
+       {% from "_macros.html" import col_label %}
+   in any template that renders obs column names.
+#}
+
+{# col_label(name): display transform for obs column names.
+
+   canonical (ant_*) → bold stripped label + subdued "canonical" pill + hover ⓘ
+   non-canonical      → plain text, unchanged
+
+   The ant_* value is always the real form used in URLs/API calls — this macro
+   only affects what the user sees on screen.
+#}
+{% macro col_label(name) -%}
+{%- set _ci = obs_col_info(name) -%}
+{%- if _ci.is_canonical -%}
+<span class="canonical-col" title="canonical annotation `{{ name }}`, standardised across datasets"><b>{{ _ci.display_name }}</b><span class="canonical-pill">canonical</span></span>
+{%- else -%}
+{{ name }}
+{%- endif -%}
+{%- endmacro %}

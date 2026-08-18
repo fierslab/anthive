@@ -582,7 +582,7 @@ _INFO = {
         "license": "CC-BY", "year": 2025, "contributor": "Lab X",
         "accession": "GSE12345", "doi": "10.1/abc", "pmid": "123456",
         "link": [], "suspension_type": "nucleus",
-        "obs": {"categorical": ["cell_type", "sample"], "numerical": ["n_genes", "pseudotime"]},
+        "obs": {"categorical": ["cell_type", "sample", "ant_braak", "ant_cluster"], "numerical": ["n_genes", "pseudotime", "ant_age"]},
         "layers": {"X": {}, "counts": {}}, "embeddings": {"X_umap": {}, "X_pca": {}},
         "default_layer": "X",
         "top_genes": ["AIF1", "P2RY12"], "top_cat": ["cell_type"], "top_num": ["pseudotime"],
@@ -2424,4 +2424,108 @@ def test_base_html_roboto_loaded(client):
     resp = client.get("/")
     assert resp.status_code == 200
     assert "fonts.googleapis.com" in resp.text
+
+
+# ── unit tests: _obs_col_info ──────────────────────────────────────────────────
+
+def test_obs_col_info_canonical_column():
+    info = browser._obs_col_info('ant_braak')
+    assert info['is_canonical'] is True
+    assert info['tag'] == 'braak'
+    assert info['display_name'] == 'braak'
+
+
+def test_obs_col_info_non_canonical_column():
+    info = browser._obs_col_info('cell_type')
+    assert info['is_canonical'] is False
+    assert info['tag'] is None
+    assert info['display_name'] == 'cell_type'
+
+
+def test_obs_col_info_ant_prefix_unknown_tag():
+    # ant_xyz is not in CANONICAL_TAGS — should not be canonical
+    info = browser._obs_col_info('ant_xyz')
+    assert info['is_canonical'] is False
+    assert info['display_name'] == 'ant_xyz'
+
+
+@pytest.mark.parametrize("col_name", [
+    'ant_braak', 'ant_sex', 'ant_cluster', 'ant_disease',
+    'ant_condition', 'ant_age', 'ant_donor', 'ant_region',
+])
+def test_obs_col_info_all_canonical_tags(col_name):
+    info = browser._obs_col_info(col_name)
+    assert info['is_canonical'] is True
+    assert info['display_name'] == col_name[4:]   # strip 'ant_'
+
+
+# ── route tests: canonical-pill rendering in dataset obs tables ────────────────
+
+def test_dataset_canonical_col_renders_pill(client):
+    """ant_braak in the obs list → canonical-pill + bold stripped label in HTML."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    # The pill class must appear (ant_braak, ant_cluster, ant_age are all in _INFO)
+    assert 'canonical-pill' in html
+
+
+def test_dataset_canonical_col_has_bold_tag_label(client):
+    """The visible label for ant_braak must be <b>braak</b>, not 'ant_braak'."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    assert '<b>braak</b>' in html or '<b>age</b>' in html or '<b>cluster</b>' in html
+
+
+def test_dataset_canonical_col_ant_prefix_not_in_label(client):
+    """The text inside the bold label must NOT start with 'ant_'."""
+    import re as _re
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    # Extract all bold-tag label texts from canonical-col spans
+    labels = _re.findall(r'<b>(.*?)</b>', resp.text)
+    canonical_labels = [lb for lb in labels if 'ant_' in lb]
+    assert canonical_labels == [], (
+        f"Found bold labels that still contain 'ant_': {canonical_labels}"
+    )
+
+
+def test_dataset_canonical_col_title_contains_full_name(client):
+    """Hover title= attribute must contain the full 'ant_braak' column name."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    assert 'ant_braak' in resp.text
+    # The title attribute on the canonical-col span carries the full name
+    assert 'title="canonical annotation `ant_braak`' in resp.text
+
+
+def test_dataset_non_canonical_col_no_pill(client):
+    """cell_type and sample (non-canonical) must NOT have a canonical-pill."""
+    import re as _re
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    # Locate the cell_type row and confirm no canonical-pill near it
+    # (we check the colname td specifically, not the whole page)
+    cell_type_idx = html.find('>cell_type<')
+    assert cell_type_idx != -1, "cell_type colname not found in page"
+    # pill should not appear in close proximity to plain cell_type label
+    surrounding = html[max(0, cell_type_idx - 100): cell_type_idx + 200]
+    assert 'canonical-pill' not in surrounding
+
+
+def test_dataset_canonical_col_css_present(client):
+    """base.html must define the .canonical-pill CSS rule."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    assert '.canonical-pill' in resp.text
+
+
+def test_dataset_canonical_col_data_name_attr_unmodified(client):
+    """data-name on the obs-item row keeps the raw ant_* value for JS filtering."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    # data-name must use the lowercased full column name for the JS filter to work
+    assert 'data-name="ant_braak"' in resp.text
     assert "family=Roboto" in resp.text

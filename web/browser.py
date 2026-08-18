@@ -8,6 +8,7 @@ Data is sourced entirely from the ant-serve REST API.
 import base64
 import html as html_lib
 import re
+import sys
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qsl, quote as url_quote, unquote, urlencode
@@ -19,10 +20,44 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pathlib import Path
 
+# lib/ is one level up from web/
+_lib_dir = Path(__file__).parent.parent / 'lib'
+if str(_lib_dir) not in sys.path:
+    sys.path.insert(0, str(_lib_dir))
+
+from canonical_columns import is_canonical_column, strip_ant_prefix  # noqa: E402
+
 router = APIRouter()
 templates_dir = Path(__file__).parent / 'templates'
 templates = Jinja2Templates(directory=str(templates_dir))
 templates.env.filters['urlencode'] = url_quote
+
+
+def _obs_col_info(name: str) -> dict:
+    """Return display metadata for an obs column name.
+
+    Used as a Jinja global so templates can decide how to render a column
+    label without importing Python logic.
+
+    Args:
+        name: The raw obs column name (e.g. ``'ant_braak'`` or ``'cell_type'``).
+
+    Returns:
+        A dict with keys:
+        - ``is_canonical`` (bool): True when the name matches the ``ant_<tag>`` pattern.
+        - ``tag`` (str | None): The bare tag without prefix (``'braak'``), or None.
+        - ``display_name`` (str): Label to show — stripped prefix for canonical cols,
+          unchanged otherwise.
+    """
+    canonical = is_canonical_column(name)
+    return {
+        'is_canonical': canonical,
+        'tag': strip_ant_prefix(name) if canonical else None,
+        'display_name': strip_ant_prefix(name) if canonical else name,
+    }
+
+
+templates.env.globals['obs_col_info'] = _obs_col_info
 
 # The (white) anthive logo, base64-inlined once at import so the About page
 # stays self-contained — no static/ dir or asset route (see web/CLAUDE.md).

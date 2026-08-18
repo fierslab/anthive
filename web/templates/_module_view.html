@@ -138,6 +138,24 @@ Consumer passes a `mv_ctx` Jinja var — a dict:
 
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
 
+  /**
+   * Format a column name for display — adds bold + canonical pill for ant_* columns.
+   * Non-canonical names are returned as escaped plain text.
+   * The ant_* value is still used in URLs/API calls; this is display-only.
+   *
+   * @param {string} name - Raw obs column name (e.g. 'ant_braak' or 'cell_type').
+   * @returns {string} HTML string safe to set as innerHTML.
+   */
+  function formatColLabel(name) {
+    if (!name || !name.startsWith('ant_')) return esc(name);
+    var tag = name.slice(4);   // strip 'ant_'
+    // Only decorate names that look like a real canonical tag (no nested underscores are fine)
+    return '<span class="canonical-col" title="canonical annotation `' + esc(name) + '`, standardised across datasets">'
+      + '<b>' + esc(tag) + '</b>'
+      + '<span class="canonical-pill">canonical</span>'
+      + '</span>';
+  }
+
   function scoreColFor(row) {
     if (row.source === 'geneset') return String(row.catalog).replace('/', '::') + '::' + row.module;
     if (row.source === 'aucell')  return 'aucell__' + row.catalog + '__' + row.module;
@@ -275,7 +293,7 @@ Consumer passes a `mv_ctx` Jinja var — a dict:
       // Module column always shown (in module scope it's the primary identifier).
       tds.push('<td class="mv-mod">' + esc(r.module) + '</td>');
       if (CTX.scope !== 'dataset') tds.push('<td class="mv-ds">' + dsLink + '</td>');
-      tds.push('<td class="mv-tag">' + esc(r.tag) + '</td>');
+      tds.push('<td class="mv-tag">' + formatColLabel(r.tag_column || r.tag) + '</td>');
       tds.push('<td class="mv-method">' + esc(METHOD_LABEL[r.source] || r.source) + '</td>');
       tds.push('<td class="mv-val">' + (+r.value).toFixed(3) + '<span class="muted-2" style="font-size:9px;margin-left:3px">' + esc(r.statistic) + '</span></td>');
       tds.push('<td class="mv-pos">' + track + ' <span class="muted-2" style="font-size:10px">' + (+g.min).toFixed(2) + '–' + (+g.max).toFixed(2) + '</span></td>');
