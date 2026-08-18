@@ -550,23 +550,41 @@ def test_flatten_annotation_field_list_with_empty_entries_skips_them():
 
 def test_build_dataset_annotations_flattens_list_values():
     """Regression: list-valued celltype/tissue threw TypeError in JS filter."""
-    import importlib.util as _ilu
-    # monkeypatch _all_databases inline — no TestClient needed
     _orig = browser._all_databases
     browser._all_databases = lambda api_url: [
-        {"id": "A/ds1", "celltype": "microglial cell", "tissue": "brain"},
-        {"id": "A/ds2", "celltype": ["microglial cell", "macrophage"], "tissue": ["cortex", "hippocampus"]},
-        {"id": "A/ds3", "celltype": None, "tissue": None},
+        {"id": "A/ds1", "celltype": "microglial cell", "tissue": "brain",
+         "experimental_system": "post_mortem_tissue"},
+        {"id": "A/ds2", "celltype": ["microglial cell", "macrophage"],
+         "tissue": ["cortex", "hippocampus"], "experimental_system": None},
+        {"id": "A/ds3", "celltype": None, "tissue": None, "experimental_system": "xenograft"},
     ]
     try:
         result = browser._build_dataset_annotations("http://x")
     finally:
         browser._all_databases = _orig
 
-    assert result["A/ds1"] == {"celltype": "microglial cell", "tissue": "brain"}
+    # system field is included alongside celltype and tissue.
+    assert result["A/ds1"] == {"celltype": "microglial cell", "tissue": "brain",
+                                "system": "post_mortem_tissue"}
     # List values must be flat strings — JS .toLowerCase() would throw on arrays.
-    assert result["A/ds2"] == {"celltype": "microglial cell,macrophage", "tissue": "cortex,hippocampus"}
-    assert result["A/ds3"] == {"celltype": "", "tissue": ""}
+    assert result["A/ds2"] == {"celltype": "microglial cell,macrophage",
+                                "tissue": "cortex,hippocampus", "system": ""}
+    assert result["A/ds3"] == {"celltype": "", "tissue": "", "system": "xenograft"}
+
+
+def test_build_dataset_annotations_system_field_in_all_entries():
+    """Every entry must have a 'system' key, even when experimental_system absent."""
+    _orig = browser._all_databases
+    browser._all_databases = lambda api_url: [
+        {"id": "B/ds1", "celltype": "neuron", "tissue": "cortex"},  # no experimental_system key
+    ]
+    try:
+        result = browser._build_dataset_annotations("http://x")
+    finally:
+        browser._all_databases = _orig
+
+    assert "system" in result["B/ds1"]
+    assert result["B/ds1"]["system"] == ""
 
 
 # ── fake REST API ──────────────────────────────────────────────────────────────
@@ -1691,13 +1709,13 @@ def test_module_view_celltype_tissue_method_change_listeners_are_explicit(client
     # are rendered; method is always rendered.
     resp = client.get("/genesets/StudyX/Exp1/gs_up")
     assert resp.status_code == 200
-    assert "flt.celltype.addEventListener('change', render)" in resp.text, (
+    assert "flt.celltype.addEventListener('change'" in resp.text, (
         "celltype change listener not found — filter will be a no-op"
     )
-    assert "flt.tissue.addEventListener('change', render)" in resp.text, (
+    assert "flt.tissue.addEventListener('change'" in resp.text, (
         "tissue change listener not found — filter will be a no-op"
     )
-    assert "flt.method.addEventListener('change', render)" in resp.text, (
+    assert "flt.method.addEventListener('change'" in resp.text, (
         "method change listener not found — filter will be a no-op"
     )
     # Filter uses indexOf (substring) not === so comma-joined multi-values work.
@@ -1711,9 +1729,9 @@ def test_module_view_celltype_tissue_method_change_listeners_are_explicit(client
     # Geneset experiment page — same partial, same requirement.
     resp = client.get("/genesets/StudyX/Exp1")
     assert resp.status_code == 200
-    assert "flt.celltype.addEventListener('change', render)" in resp.text
-    assert "flt.tissue.addEventListener('change', render)" in resp.text
-    assert "flt.method.addEventListener('change', render)" in resp.text
+    assert "flt.celltype.addEventListener('change'" in resp.text
+    assert "flt.tissue.addEventListener('change'" in resp.text
+    assert "flt.method.addEventListener('change'" in resp.text
 
 
 # ── DE study browser page ──────────────────────────────────────────────────────
@@ -2611,3 +2629,79 @@ def test_dataset_canonical_col_data_name_attr_unmodified(client):
     # data-name must use the lowercased full column name for the JS filter to work
     assert 'data-name="ant_braak"' in resp.text
     assert "family=Roboto" in resp.text
+
+
+# ── module view: system facet + URL hash features ─────────────────────────────
+
+def test_module_view_system_facet_rendered(client):
+    """The 'system' (experimental_system) filter dropdown must appear in the
+    module view partial when dataset_annotations are provided."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    assert 'class="mv-flt-system"' in resp.text, (
+        "system filter select not rendered — check _module_view.html template"
+    )
+
+
+def test_module_view_system_facet_listener_bound(client):
+    """flt.system must have an explicit addEventListener binding."""
+    resp = client.get("/genesets/StudyX/Exp1/gs_up")
+    assert resp.status_code == 200
+    assert "flt.system.addEventListener('change'" in resp.text, (
+        "system filter change listener not found — filter will be a no-op"
+    )
+
+
+def test_module_view_system_filter_uses_indexof(client):
+    """System filter uses indexOf so comma-joined multi-values work (same pattern
+    as celltype/tissue)."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    assert ".indexOf(sysVal) !== -1" in resp.text, (
+        "system filter must use indexOf for multi-value experimental_system fields"
+    )
+
+
+def test_module_view_url_hash_functions_present(client):
+    """URL hash persistence helpers (parseHashFilters, buildHashFromFilters,
+    updateHash) must be present in the rendered module view JS."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    assert "parseHashFilters" in resp.text, "parseHashFilters missing"
+    assert "buildHashFromFilters" in resp.text, "buildHashFromFilters missing"
+    assert "updateHash" in resp.text, "updateHash missing"
+
+
+def test_module_view_popstate_listener_registered(client):
+    """Browser back/forward (popstate) handler must be registered so navigating
+    back restores filter state."""
+    resp = client.get("/genesets/StudyX/Exp1/gs_up")
+    assert resp.status_code == 200
+    assert "addEventListener('popstate'" in resp.text, (
+        "popstate handler not registered — back button won't restore filters"
+    )
+
+
+def test_module_view_dataset_link_includes_mv_hash(client):
+    """Dataset links in the module view table must embed a #mv= hash so the
+    dataset page's Modules tab pre-selects the group/module the user was at."""
+    resp = client.get("/genesets/StudyX/Exp1/gs_up")
+    assert resp.status_code == 200
+    # The datasetUrl() helper must produce a URL with #mv=group=...;module=...
+    assert "datasetUrl" in resp.text, "datasetUrl helper not found"
+    # The hash scheme uses '#mv=' with group= and module= pairs.
+    assert "'#mv='" in resp.text or '"#mv="' in resp.text or "'mv='" in resp.text, (
+        "#mv= hash scheme not found in datasetUrl implementation"
+    )
+
+
+def test_module_view_history_push_state_called(client):
+    """history.pushState must be used for navigation-worthy filter changes."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    assert "history.pushState" in resp.text, (
+        "history.pushState missing — back button won't work after filter changes"
+    )
+    assert "history.replaceState" in resp.text, (
+        "history.replaceState missing — URL won't update on clear"
+    )

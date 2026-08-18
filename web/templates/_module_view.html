@@ -5,12 +5,7 @@ score · peer-position). Each row is a (module × dataset × tag × method)
 combination. Sort default: peer-position descending — most variable
 modules-vs-their-peers on that dataset+tag+method float to the top.
 
-Peers = other modules scored with the same METHOD on the same (dataset,
-tag). Mixing methods would compare incomparable numerical ranges.
-Mixing statistics (ω²/spearman/R²) IS allowed because the peer-position
-normalises to 0..1 within a like-with-like group.
-
-Filter controls at top: group · tag · method · dataset · cell type · tissue.
+Filter controls at top: group · tag · method · dataset · cell type · tissue · system.
 Any pre-set context (dataset scope or module scope) hides its own control.
 
 Consumer passes a `mv_ctx` Jinja var — a dict:
@@ -20,10 +15,17 @@ Consumer passes a `mv_ctx` Jinja var — a dict:
     "module_catalog": "Sierksma2025/WGCNA",  # required if scope=="module"
     "module_name": "Brown_Lysosome",         # optional; null = show all modules
     "id": "mv-panel",                 # DOM id prefix (unique per instance)
-    "dataset_annotations": {"db_id": {"celltype": "...", "tissue": "..."}},
-                                      # optional; enables celltype/tissue facets
+    "dataset_annotations": {"db_id": {"celltype": "...", "tissue": "...", "system": "..."}},
+                                      # optional; enables celltype/tissue/system facets
     "preselect_cell_type": "microglial cell",  # optional; pre-fills celltype facet
   }
+
+URL hash scheme (feature: back-button / shareable filter state):
+  #mv=key1=val1;key2=val2
+  Keys match filter names: group, module, dataset, tag, method, celltype, tissue, system, sort.
+  Semicolons separate pairs; values are encodeURIComponent-encoded.
+  When co-existing with a tab anchor (e.g. #tab-modules), the mv= part is
+  appended: #tab-modules-mv=...  The JS strips the -mv= suffix before parsing.
 #}
 {% set _mv = mv_ctx %}
 {% set _id = _mv.get('id', 'mv-panel') %}
@@ -62,10 +64,11 @@ Consumer passes a `mv_ctx` Jinja var — a dict:
     <input type="hidden" class="mv-flt-group-hidden" value="{{ _mv.module_catalog }}">
     {% endif %}
     <div {% if _mv.scope == 'module' %}{%endif%}><label>module</label><select class="mv-flt-module"><option value="">all</option></select></div>
-    {# Cell type and tissue facets — populated from dataset_annotations when provided #}
+    {# Cell type, tissue, and system facets — populated from dataset_annotations when provided #}
     {% if _mv.get('dataset_annotations') %}
     <div><label>cell type</label><select class="mv-flt-celltype"><option value="">all</option></select></div>
     <div><label>tissue</label><select class="mv-flt-tissue"><option value="">all</option></select></div>
+    <div><label>system</label><select class="mv-flt-system"><option value="">all</option></select></div>
     {% endif %}
     <div><label>tag</label><select class="mv-flt-tag"><option value="">all</option></select></div>
     <div><label>method</label>
@@ -118,12 +121,13 @@ Consumer passes a `mv_ctx` Jinja var — a dict:
     module:   root.querySelector('.mv-flt-module'),
     celltype: root.querySelector('.mv-flt-celltype'),
     tissue:   root.querySelector('.mv-flt-tissue'),
+    system:   root.querySelector('.mv-flt-system'),
     tag:      root.querySelector('.mv-flt-tag'),
     method:   root.querySelector('.mv-flt-method'),
     sort:     root.querySelector('.mv-flt-sort'),
   };
 
-  // dataset_annotations: {db_id: {celltype, tissue}} — present when ctx carries it.
+  // dataset_annotations: {db_id: {celltype, tissue, system}} — present when ctx carries it.
   var DS_ANNOT = CTX.dataset_annotations || {};
   // preselect_cell_types: [] or [ct, ...] — OR-filter applied on first render.
   var PRESELECT_CTS = CTX.preselect_cell_types || [];
@@ -176,6 +180,16 @@ Consumer passes a `mv_ctx` Jinja var — a dict:
     return b + '/plot/scatter?color=' + encodeURIComponent(col);
   }
 
+  // Build the dataset browse URL with a #mv= hash so the dataset page's Modules
+  // tab pre-selects the group and module the user was looking at.
+  function datasetUrl(row) {
+    var b = baseUrl(row); if (!b) return null;
+    var mvPairs = [];
+    if (row.catalog) mvPairs.push('group=' + encodeURIComponent(row.catalog));
+    if (row.module)  mvPairs.push('module=' + encodeURIComponent(row.module));
+    return b + (mvPairs.length ? '#mv=' + mvPairs.join(';') : '');
+  }
+
   // Peer group key — matched to how "peers" is defined: same (dataset, tag,
   // source, statistic). Different statistics keep different peer groups so
   // ω² isn't compared to spearman's [-1,+1] range.
@@ -216,6 +230,119 @@ Consumer passes a `mv_ctx` Jinja var — a dict:
     var span = g.max - g.min; return span ? (r.value - g.min) / span : 0.5;
   }
 
+  // ── URL hash filter state ────────────────────────────────────────────────────
+  // Hash scheme: #mv=key=val;key=val  OR  #prefix-mv=key=val;key=val
+  // Values are encodeURIComponent-encoded; keys are the flt.* names.
+  // We preserve any non-mv prefix (e.g. a tab anchor) so tab-switching and
+  // filter-state don't collide.
+
+  /** Parse #…mv=… out of the current location hash. Returns {key: val} or {}. */
+  function parseHashFilters() {
+    var hash = window.location.hash || '';
+    var mvIdx = hash.indexOf('mv=');
+    if (mvIdx === -1) return {};
+    var mvStr = hash.slice(mvIdx + 3);  // everything after "mv="
+    var result = {};
+    mvStr.split(';').forEach(function (pair) {
+      var eqIdx = pair.indexOf('=');
+      if (eqIdx === -1) return;
+      var key = pair.slice(0, eqIdx);
+      var val = decodeURIComponent(pair.slice(eqIdx + 1));
+      if (key) result[key] = val;
+    });
+    return result;
+  }
+
+  /** Rebuild the URL hash from current filter values, preserving any non-mv prefix. */
+  function buildHashFromFilters() {
+    var pairs = [];
+    var filterKeys = ['group', 'module', 'dataset', 'tag', 'method', 'celltype', 'tissue', 'system', 'sort'];
+    filterKeys.forEach(function (key) {
+      var sel = flt[key];
+      if (!sel) return;
+      var val = sel.value;
+      if (val) pairs.push(key + '=' + encodeURIComponent(val));
+    });
+    // Preserve any existing non-mv hash prefix (e.g. "#tab-modules")
+    var hash = window.location.hash || '';
+    var mvIdx = hash.indexOf('-mv=');
+    var prefix = '';
+    if (mvIdx !== -1) {
+      prefix = hash.slice(1, mvIdx);  // the part before "-mv="
+    } else {
+      mvIdx = hash.indexOf('#mv=');
+      // pure mv= hash — no prefix
+    }
+    if (!prefix) {
+      // check if there's a non-mv fragment before any mv= part
+      var rawMvIdx = hash.indexOf('mv=');
+      if (rawMvIdx > 1) {
+        // e.g. "#tab-modules-mv=..."
+        prefix = hash.slice(1, rawMvIdx - 1);  // strip leading '#' and trailing '-'
+      }
+    }
+    var mvPart = pairs.length ? 'mv=' + pairs.join(';') : '';
+    if (!mvPart) return prefix ? '#' + prefix : '';
+    return '#' + (prefix ? prefix + '-' : '') + mvPart;
+  }
+
+  /** Apply parsed hash values to the filter dropdowns (before first render). */
+  function applyHashFilters(parsed) {
+    var filterKeys = ['group', 'module', 'dataset', 'tag', 'method', 'celltype', 'tissue', 'system', 'sort'];
+    filterKeys.forEach(function (key) {
+      var sel = flt[key];
+      if (!sel || !parsed[key]) return;
+      // The option may not exist yet (dropdowns populated after load).
+      // Store the desired value on the element; fillSelect will honour it.
+      sel.setAttribute('data-mv-pending', parsed[key]);
+    });
+  }
+
+  /** Push or replace state when a filter changes.
+   *  Pushing when value is newly non-empty; replacing when clearing. */
+  function updateHash(isNavigation) {
+    var newHash = buildHashFromFilters();
+    var currentHash = window.location.hash || '';
+    if (newHash === currentHash) return;
+    if (isNavigation) {
+      history.pushState({}, '', newHash || window.location.pathname + window.location.search);
+    } else {
+      history.replaceState({}, '', newHash || window.location.pathname + window.location.search);
+    }
+  }
+
+  /** Restore pending hash values into selects that now have the right options. */
+  function flushPendingHashValues() {
+    var filterKeys = ['group', 'module', 'dataset', 'tag', 'method', 'celltype', 'tissue', 'system', 'sort'];
+    filterKeys.forEach(function (key) {
+      var sel = flt[key];
+      if (!sel) return;
+      var pending = sel.getAttribute('data-mv-pending');
+      if (!pending) return;
+      // Try to set — will silently no-op if option not present.
+      sel.value = pending;
+      if (sel.value === pending) {
+        sel.removeAttribute('data-mv-pending');
+      }
+    });
+  }
+
+  // Parse and apply hash early — before load() so values are ready when dropdowns populate.
+  var _initialHash = parseHashFilters();
+  applyHashFilters(_initialHash);
+
+  // Handle browser back/forward navigation
+  window.addEventListener('popstate', function () {
+    var parsed = parseHashFilters();
+    var filterKeys = ['group', 'module', 'dataset', 'tag', 'method', 'celltype', 'tissue', 'system', 'sort'];
+    filterKeys.forEach(function (key) {
+      var sel = flt[key];
+      if (!sel) return;
+      sel.value = parsed[key] || '';
+    });
+    render();
+  });
+
   function render() {
     var rows = ALL_ROWS.slice();
     // Filter — core row fields
@@ -228,7 +355,7 @@ Consumer passes a `mv_ctx` Jinja var — a dict:
       else if (key === 'dataset') rows = rows.filter(function (r) { return r.dataset === v; });
       else if (key === 'tag') rows = rows.filter(function (r) { return r.tag === v; });
     });
-    // Filter — dataset annotation facets (celltype / tissue).
+    // Filter — dataset annotation facets (celltype / tissue / system).
     // DS_ANNOT values are always flat strings (multi-valued fields are
     // comma-joined server-side), so .toLowerCase() is always safe.
     // Use indexOf so "microglial cell" matches "microglial cell,macrophage".
@@ -244,6 +371,13 @@ Consumer passes a `mv_ctx` Jinja var — a dict:
       rows = rows.filter(function (r) {
         var ann = DS_ANNOT[r.dataset] || {};
         return (ann.tissue || '').toLowerCase().indexOf(tissueVal) !== -1;
+      });
+    }
+    if (flt.system && flt.system.value) {
+      var sysVal = flt.system.value.toLowerCase();
+      rows = rows.filter(function (r) {
+        var ann = DS_ANNOT[r.dataset] || {};
+        return (ann.system || '').toLowerCase().indexOf(sysVal) !== -1;
       });
     }
     // Only keep one row per (mod × dataset × tag × source) — pick the
@@ -284,8 +418,9 @@ Consumer passes a `mv_ctx` Jinja var — a dict:
         + '"><span class="mv-mark" style="left:calc(' + markL.toFixed(1) + '% - 3px);background:'
         + (neg ? '#dc2626' : 'var(--link)') + '"></span></span>';
       var dsParts = String(r.dataset).split('/');
-      var dsLink = dsParts.length === 2
-        ? '<a href="/browse/' + encodeURIComponent(dsParts[0]) + '/' + encodeURIComponent(dsParts[1]) + '">' + esc(r.dataset) + '</a>'
+      var dsHref = datasetUrl(r);
+      var dsLink = dsHref
+        ? '<a href="' + esc(dsHref) + '">' + esc(r.dataset) + '</a>'
         : esc(r.dataset);
       var plotSvg = NUMERICAL_TAGS[r.tag] ? SVG_LINE : SVG_BAR;
       var pu = plotUrl(r), uu = umapUrl(r);
@@ -348,19 +483,21 @@ Consumer passes a `mv_ctx` Jinja var — a dict:
         if (CTX.scope === 'module' && flt.group) {
           flt.group.value = CTX.module_catalog || '';
         }
-        // Populate celltype / tissue facet dropdowns from DS_ANNOT values.
+        // Populate celltype / tissue / system facet dropdowns from DS_ANNOT values.
         // DS_ANNOT values are flat comma-joined strings (server-side normalised).
         // Split on comma so each individual term gets its own option — a dataset
         // annotated "microglial cell,macrophage" contributes two options, not one.
-        if (flt.celltype || flt.tissue) {
-          var celltypes = {}, tissues = {};
+        if (flt.celltype || flt.tissue || flt.system) {
+          var celltypes = {}, tissues = {}, systems = {};
           Object.keys(DS_ANNOT).forEach(function (dbId) {
             var ann = DS_ANNOT[dbId];
             if (ann.celltype) ann.celltype.split(',').forEach(function (v) { var t = v.trim(); if (t) celltypes[t] = 1; });
             if (ann.tissue)   ann.tissue  .split(',').forEach(function (v) { var t = v.trim(); if (t) tissues[t]   = 1; });
+            if (ann.system)   ann.system  .split(',').forEach(function (v) { var t = v.trim(); if (t) systems[t]   = 1; });
           });
           fillSelect(flt.celltype, Object.keys(celltypes));
           fillSelect(flt.tissue,   Object.keys(tissues));
+          fillSelect(flt.system,   Object.keys(systems));
           // Apply preselect_cell_types: if a single type matches a dropdown option,
           // select it; multiple types → select the first that has a matching option.
           if (PRESELECT_CTS.length > 0 && flt.celltype) {
@@ -374,22 +511,36 @@ Consumer passes a `mv_ctx` Jinja var — a dict:
             }
           }
         }
+        // Flush any URL-hash-pending values now that options are populated.
+        flushPendingHashValues();
         stateEl.style.display = 'none';
         render();
       })
       .catch(function (e) { stateEl.textContent = 'could not load — ' + e.message; });
   }
 
-  // Bind change handlers explicitly so static analysis and tests can assert
-  // each filter class is wired — a generic loop is equivalent but ungreppable.
-  if (flt.dataset)  flt.dataset.addEventListener('change', render);
-  if (flt.group)    flt.group.addEventListener('change', render);
-  if (flt.module)   flt.module.addEventListener('change', render);
-  if (flt.tag)      flt.tag.addEventListener('change', render);
-  if (flt.method)   flt.method.addEventListener('change', render);
-  if (flt.celltype) flt.celltype.addEventListener('change', render);
-  if (flt.tissue)   flt.tissue.addEventListener('change', render);
-  if (flt.sort)     flt.sort.addEventListener('change', render);
+  // Bind change handlers. On filter change: update the URL hash and re-render.
+  // Clearing a filter → replaceState (not navigating away); setting a value → pushState.
+  function onFilterChange() {
+    var wasEmpty = !this.dataset.mvPrev;
+    var isEmpty = !this.value;
+    // Navigate (pushState) when moving from a value to another value or empty→value.
+    // Replace (replaceState) only when clearing (value→empty).
+    var isNavigation = !(wasEmpty && isEmpty) && !isEmpty;
+    this.dataset.mvPrev = this.value;
+    updateHash(isNavigation);
+    render();
+  }
+
+  if (flt.dataset)  { flt.dataset.addEventListener('change',  onFilterChange.bind(flt.dataset));  }
+  if (flt.group)    { flt.group.addEventListener('change',    onFilterChange.bind(flt.group));    }
+  if (flt.module)   { flt.module.addEventListener('change',   onFilterChange.bind(flt.module));   }
+  if (flt.tag)      { flt.tag.addEventListener('change',      onFilterChange.bind(flt.tag));      }
+  if (flt.method)   { flt.method.addEventListener('change',   onFilterChange.bind(flt.method));   }
+  if (flt.celltype) { flt.celltype.addEventListener('change', onFilterChange.bind(flt.celltype)); }
+  if (flt.tissue)   { flt.tissue.addEventListener('change',   onFilterChange.bind(flt.tissue));   }
+  if (flt.system)   { flt.system.addEventListener('change',   onFilterChange.bind(flt.system));   }
+  if (flt.sort)     { flt.sort.addEventListener('change',     onFilterChange.bind(flt.sort));     }
   load();
 })();
 </script>

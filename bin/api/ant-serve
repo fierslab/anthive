@@ -1240,6 +1240,7 @@ class DatabaseRegistry:
             # Biology & study annotation (resolved from .h5ad.mus + .env cascade)
             'organism':         ann.get('organism'),
             'tissue':           ann.get('tissue'),
+            'experimental_system': ann.get('experimental_system'),
             'cell_type':        ann.get('cell_type'),
             'celltype':         ann.get('celltype'),          # legacy alias
             'suspension_type':  ann.get('suspension_type'),   # cell | nucleus | na

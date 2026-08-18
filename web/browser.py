@@ -2502,18 +2502,19 @@ def _flatten_annotation_field(value: object) -> str:
 
 
 def _build_dataset_annotations(api_url: str) -> Dict[str, Dict[str, str]]:
-    """Return a {db_id: {celltype, tissue}} map for all known datasets.
+    """Return a {db_id: {celltype, tissue, system}} map for all known datasets.
 
     Used by the module view's client-side facet filters. Values are always
     plain strings (never lists) so the JS filter's .toLowerCase() call is safe.
     Multi-valued fields are comma-joined, e.g. ``"microglial cell,macrophage"``.
-    Best-effort: fields may be empty for some datasets.
+    ``system`` is the experimental_system mus field (post_mortem_tissue,
+    xenograft, in_vitro_2d, organoid, …). Best-effort: fields may be empty.
 
     Args:
         api_url: Base URL for the ant-serve REST API.
 
     Returns:
-        Dict mapping db_id to {celltype, tissue} annotation strings.
+        Dict mapping db_id to {celltype, tissue, system} annotation strings.
     """
     try:
         databases = _all_databases(api_url)
@@ -2527,6 +2528,7 @@ def _build_dataset_annotations(api_url: str) -> Dict[str, Dict[str, str]]:
         result[db_id] = {
             'celltype': _flatten_annotation_field(db.get('celltype')),
             'tissue': _flatten_annotation_field(db.get('tissue')),
+            'system': _flatten_annotation_field(db.get('experimental_system')),
         }
     return result
 
