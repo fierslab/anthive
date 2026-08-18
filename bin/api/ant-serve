@@ -74,6 +74,7 @@ lib_dir = script_dir.parent.parent / 'lib'
 sys.path.insert(0, str(lib_dir))
 
 from anthive_db import AnthiveDB, safe_ident
+from canonical_columns import BACKCOMPAT_LEGACY_NAMES  # type: ignore
 from config import get_config
 import de_storage as lib_de_storage
 from geneset import (
@@ -93,6 +94,38 @@ import analytics
 from chat_config import load_chat_config, warn_if_misconfigured, status_payload
 from chat_history import ChatHistory
 from chat_agent import run_turn as _chat_run_turn
+
+
+# ── Canonical-column back-compat alias ────────────────────────────────────────
+
+
+def _alias_canonical(
+    name: Optional[str],
+    available: Set[str],
+) -> tuple[Optional[str], Optional[str]]:
+    """Rewrite a legacy bare canonical tag name to its ``ant_*`` column.
+
+    Returns ``(resolved_name, deprecated_alias_str_or_None)``.
+    The alias string is ``"old → new"`` when a rewrite occurred, else
+    ``None``.  A rewrite only fires when the bare name is *not* itself a
+    real column in ``available`` and the ``ant_*`` form *is*.
+
+    Args:
+        name: The raw query-param value supplied by the caller.
+        available: Column names present in the target view.
+
+    Returns:
+        Tuple of the (possibly rewritten) name and a deprecation notice
+        string if a rewrite occurred, or ``(name, None)`` otherwise.
+    """
+    if name is None:
+        return None, None
+    if name in available:
+        return name, None  # bare name is a real column — trust it
+    new_name = BACKCOMPAT_LEGACY_NAMES.get(name)
+    if new_name and new_name in available:
+        return new_name, f"{name} -> {new_name}"
+    return name, None  # unknown — let the endpoint 404/400 normally
 
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
@@ -6794,20 +6827,47 @@ async def _render_plot(plot_req: PlotRequest, request: Request) -> Response:
     session_columns = _load_plot_session_columns(plot_req.attach_sessions)
 
     def _sync_plot():
+        from dataclasses import replace as _dc_replace
         with _pooled_db(plot_req.db_id) as db:
+            cat_fields = db._get_categorical_fields()
+            num_fields = db._get_numerical_fields()
             ctx = PlotContext(
                 db=db,
                 available_embeddings=db._get_embeddings(),
-                categorical_fields=db._get_categorical_fields(),
-                numerical_fields=db._get_numerical_fields(),
+                categorical_fields=cat_fields,
+                numerical_fields=num_fields,
                 session_columns=session_columns,
             )
-            descriptor_inputs = _resolve_descriptor_inputs(plot_req, ctx)
-            image_bytes, caption = handler(plot_req, ctx)
-            return image_bytes, caption, descriptor_inputs
+            # Back-compat: rewrite legacy bare canonical names to ant_* when
+            # the ant_* column exists in this dataset's view.
+            available_obs: Set[str] = set(cat_fields) | set(num_fields)
+            alias_notices: list[str] = []
+            resolved_x, notice_x = _alias_canonical(plot_req.x, available_obs)
+            resolved_y, notice_y = _alias_canonical(plot_req.y, available_obs)
+            resolved_color, notice_color = _alias_canonical(plot_req.color, available_obs)
+            resolved_facet, notice_facet = _alias_canonical(plot_req.facet, available_obs)
+            resolved_group_by, notice_group_by = _alias_canonical(
+                plot_req.group_by, available_obs
+            )
+            for notice in (notice_x, notice_y, notice_color, notice_facet, notice_group_by):
+                if notice:
+                    alias_notices.append(notice)
+            active_req = _dc_replace(
+                plot_req,
+                x=resolved_x,
+                y=resolved_y,
+                color=resolved_color,
+                facet=resolved_facet,
+                group_by=resolved_group_by,
+            )
+            descriptor_inputs = _resolve_descriptor_inputs(active_req, ctx)
+            image_bytes, caption = handler(active_req, ctx)
+            return image_bytes, caption, descriptor_inputs, alias_notices
 
     try:
-        image_bytes, caption, descriptor_inputs = await asyncio.to_thread(_sync_plot)
+        image_bytes, caption, descriptor_inputs, alias_notices = await asyncio.to_thread(
+            _sync_plot
+        )
     except HTTPException:
         raise
     except KeyError as e:
@@ -6848,6 +6908,8 @@ async def _render_plot(plot_req: PlotRequest, request: Request) -> Response:
     }
     if truncated:
         headers['X-Plot-Filename-Truncated'] = 'true'
+    if alias_notices:
+        headers['X-Anthive-Deprecated-Alias'] = ', '.join(alias_notices)
     if plot_req.output_format in _PLOT_DATA_FORMATS:
         headers['Content-Disposition'] = (
             f'attachment; filename="{filename}.{_ext_for_format(plot_req.output_format)}"'
@@ -10610,6 +10672,16 @@ async def get_module_variability(
             f"{registry.data_folder}. Run `ant module-variability` to generate."
         ))
 
+    # Back-compat alias: ?tag_column=braak → ant_braak when ant_braak exists
+    # in the parquet's tag_column values and braak itself does not.
+    alias_notices: list[str] = []
+    if tag_column is not None:
+        available_tag_columns: Set[str] = set(df['tag_column'].unique())
+        resolved_tag_column, tc_notice = _alias_canonical(tag_column, available_tag_columns)
+        if tc_notice:
+            alias_notices.append(tc_notice)
+        tag_column = resolved_tag_column
+
     # Filter
     working = df
     if dataset:   working = working[working['dataset']    == dataset]
@@ -10638,23 +10710,33 @@ async def get_module_variability(
     truncated = len(working) > limit
     working = working.head(limit)
 
+    extra_headers: Dict[str, str] = {}
+    if alias_notices:
+        extra_headers['X-Anthive-Deprecated-Alias'] = ', '.join(alias_notices)
+
     if format in ("csv", "tsv"):
         sep = "," if format == "csv" else "\t"
         csv = working.to_csv(index=False, sep=sep)
         return Response(
             content=csv,
             media_type="text/csv" if format == "csv" else "text/tab-separated-values",
-            headers={"X-Total-Available": str(len(df)),
-                     "X-Rows-Returned": str(len(working)),
-                     "X-Truncated": "true" if truncated else "false"},
+            headers={
+                "X-Total-Available": str(len(df)),
+                "X-Rows-Returned": str(len(working)),
+                "X-Truncated": "true" if truncated else "false",
+                **extra_headers,
+            },
         )
-    return {
+    payload: Dict[str, Any] = {
         "n_rows": int(len(working)),
         "n_total": int(len(df)),
         "truncated": bool(truncated),
         "sort": sort,
         "rows": working.to_dict(orient="records"),
     }
+    if extra_headers:
+        return JSONResponse(content=payload, headers=extra_headers)
+    return payload
 
 
 @app.post("/module-variability/rescan", tags=["genesets"])
