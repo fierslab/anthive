@@ -2445,6 +2445,41 @@ async def geneset_starcat_module_view(request: Request, catalog_id: str, module_
     })
 
 
+def _build_dataset_annotations(api_url: str) -> Dict[str, Dict[str, str]]:
+    """Return a {db_id: {celltype, tissue}} map for all known datasets.
+
+    Used by the module view's client-side facet filters. Values are the
+    canonical (un-abbreviated) strings so the JS filter can match them.
+    Best-effort: fields may be None/missing for some datasets.
+    """
+    try:
+        databases = _all_databases(api_url)
+    except Exception:
+        return {}
+    result: Dict[str, Dict[str, str]] = {}
+    for db in databases:
+        db_id = db.get('id') or ''
+        if not db_id:
+            continue
+        result[db_id] = {
+            'celltype': db.get('celltype') or '',
+            'tissue': db.get('tissue') or '',
+        }
+    return result
+
+
+def _preselect_cell_types(metadata: Dict[str, Any]) -> List[str]:
+    """Return the cell-type preselection list from experiment metadata.
+
+    Reads ``celltypes`` from the experiment's index.md frontmatter (ant-serve
+    passes it through as ``metadata.celltypes``). Returns the list as-is when
+    non-empty; empty list means no preselection. The JS treats a single-entry
+    list the same as a scalar preselect, and OR-selects multiple entries.
+    """
+    celltypes = metadata.get('celltypes') or []
+    return [ct for ct in celltypes if ct] if isinstance(celltypes, list) else []
+
+
 @router.get("/genesets/{study}/{experiment}", response_class=HTMLResponse)
 async def geneset_experiment_view(request: Request, study: str, experiment: str):
     api_url = _api_url(request)
@@ -2459,13 +2494,25 @@ async def geneset_experiment_view(request: Request, study: str, experiment: str)
         )
 
     body_html = markdown.markdown(payload.get('body') or '', extensions=['tables'])
+    meta = payload.get('metadata', {})
+    catalog = f"{study}/{experiment}"
+    dataset_annotations = _build_dataset_annotations(api_url)
 
     return templates.TemplateResponse(request, "geneset_experiment.html", {
         "study": study,
         "experiment": experiment,
-        "metadata": payload.get('metadata', {}),
+        "metadata": meta,
         "body_html": body_html,
         "genesets": payload.get('genesets', []),
+        "dataset_annotations": dataset_annotations,
+        "mv_ctx": {
+            "scope": "module",
+            "module_catalog": catalog,
+            "module_name": None,
+            "id": "mv-experiment",
+            "dataset_annotations": dataset_annotations,
+            "preselect_cell_types": _preselect_cell_types(meta),
+        },
     })
 
 
@@ -2486,6 +2533,12 @@ async def geneset_view(request: Request, study: str, experiment: str, name: str)
     experiment_body_html = markdown.markdown(payload.get('experiment_body') or '', extensions=['tables'])
 
     catalog = f"{study}/{experiment}"
+    dataset_annotations = _build_dataset_annotations(api_url)
+    # Prefer experiment-level celltypes (from experiment_metadata); fall back to
+    # the top-level geneset metadata if the server merges them differently.
+    exp_meta = payload.get('experiment_metadata') or payload.get('metadata') or {}
+    preselect_cts = _preselect_cell_types(exp_meta)
+
     return templates.TemplateResponse(request, "geneset.html", {
         "study": study,
         "experiment": experiment,
@@ -2498,5 +2551,7 @@ async def geneset_view(request: Request, study: str, experiment: str, name: str)
             "module_catalog": catalog,
             "module_name": name,
             "id": "mv-varies-most",
+            "dataset_annotations": dataset_annotations,
+            "preselect_cell_types": preselect_cts,
         },
     })

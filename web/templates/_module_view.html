@@ -10,16 +10,19 @@ tag). Mixing methods would compare incomparable numerical ranges.
 Mixing statistics (ω²/spearman/R²) IS allowed because the peer-position
 normalises to 0..1 within a like-with-like group.
 
-Filter controls at top: group · tag · method · dataset. Any pre-set
-context (dataset scope or module scope) hides its own control.
+Filter controls at top: group · tag · method · dataset · cell type · tissue.
+Any pre-set context (dataset scope or module scope) hides its own control.
 
 Consumer passes a `mv_ctx` Jinja var — a dict:
   {
     "scope": "dataset" | "module" | "global",
     "dataset": "MY4/MTH",             # required if scope=="dataset"
     "module_catalog": "Sierksma2025/WGCNA",  # required if scope=="module"
-    "module_name": "Brown_Lysosome",         # required if scope=="module"
+    "module_name": "Brown_Lysosome",         # optional; null = show all modules
     "id": "mv-panel",                 # DOM id prefix (unique per instance)
+    "dataset_annotations": {"db_id": {"celltype": "...", "tissue": "..."}},
+                                      # optional; enables celltype/tissue facets
+    "preselect_cell_type": "microglial cell",  # optional; pre-fills celltype facet
   }
 #}
 {% set _mv = mv_ctx %}
@@ -59,6 +62,11 @@ Consumer passes a `mv_ctx` Jinja var — a dict:
     <input type="hidden" class="mv-flt-group-hidden" value="{{ _mv.module_catalog }}">
     {% endif %}
     <div {% if _mv.scope == 'module' %}{%endif%}><label>module</label><select class="mv-flt-module"><option value="">all</option></select></div>
+    {# Cell type and tissue facets — populated from dataset_annotations when provided #}
+    {% if _mv.get('dataset_annotations') %}
+    <div><label>cell type</label><select class="mv-flt-celltype"><option value="">all</option></select></div>
+    <div><label>tissue</label><select class="mv-flt-tissue"><option value="">all</option></select></div>
+    {% endif %}
     <div><label>tag</label><select class="mv-flt-tag"><option value="">all</option></select></div>
     <div><label>method</label>
       <select class="mv-flt-method">
@@ -105,13 +113,20 @@ Consumer passes a `mv_ctx` Jinja var — a dict:
   var rowsEl  = root.querySelector('.mv-rows');
   var summaryEl = root.querySelector('.mv-summary');
   var flt = {
-    dataset: root.querySelector('.mv-flt-dataset'),
-    group:   root.querySelector('.mv-flt-group'),
-    module:  root.querySelector('.mv-flt-module'),
-    tag:     root.querySelector('.mv-flt-tag'),
-    method:  root.querySelector('.mv-flt-method'),
-    sort:    root.querySelector('.mv-flt-sort'),
+    dataset:  root.querySelector('.mv-flt-dataset'),
+    group:    root.querySelector('.mv-flt-group'),
+    module:   root.querySelector('.mv-flt-module'),
+    celltype: root.querySelector('.mv-flt-celltype'),
+    tissue:   root.querySelector('.mv-flt-tissue'),
+    tag:      root.querySelector('.mv-flt-tag'),
+    method:   root.querySelector('.mv-flt-method'),
+    sort:     root.querySelector('.mv-flt-sort'),
   };
+
+  // dataset_annotations: {db_id: {celltype, tissue}} — present when ctx carries it.
+  var DS_ANNOT = CTX.dataset_annotations || {};
+  // preselect_cell_types: [] or [ct, ...] — OR-filter applied on first render.
+  var PRESELECT_CTS = CTX.preselect_cell_types || [];
 
   // SVG icons — mirrors dataset.html's chart_icon macro
   var SVG_BAR = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="1.5" y="8" width="3" height="6"/><rect x="6.5" y="5" width="3" height="9"/><rect x="11.5" y="2" width="3" height="12"/></svg>';
@@ -185,7 +200,7 @@ Consumer passes a `mv_ctx` Jinja var — a dict:
 
   function render() {
     var rows = ALL_ROWS.slice();
-    // Filter
+    // Filter — core row fields
     ['dataset','group','module','tag','method'].forEach(function (key) {
       var sel = flt[key]; if (!sel || !sel.value) return;
       var v = sel.value;
@@ -195,6 +210,21 @@ Consumer passes a `mv_ctx` Jinja var — a dict:
       else if (key === 'dataset') rows = rows.filter(function (r) { return r.dataset === v; });
       else if (key === 'tag') rows = rows.filter(function (r) { return r.tag === v; });
     });
+    // Filter — dataset annotation facets (celltype / tissue)
+    if (flt.celltype && flt.celltype.value) {
+      var ctVal = flt.celltype.value;
+      rows = rows.filter(function (r) {
+        var ann = DS_ANNOT[r.dataset] || {};
+        return (ann.celltype || '').toLowerCase() === ctVal.toLowerCase();
+      });
+    }
+    if (flt.tissue && flt.tissue.value) {
+      var tissueVal = flt.tissue.value;
+      rows = rows.filter(function (r) {
+        var ann = DS_ANNOT[r.dataset] || {};
+        return (ann.tissue || '').toLowerCase() === tissueVal.toLowerCase();
+      });
+    }
     // Only keep one row per (mod × dataset × tag × source) — pick the
     // "canonical" statistic for that tag: ω² for categorical, spearman
     // for numerical (spearman preferred over R² because it's signed).
@@ -286,15 +316,39 @@ Consumer passes a `mv_ctx` Jinja var — a dict:
         }));
         fillSelect(flt.dataset, Object.keys(datasets));
         fillSelect(flt.group,   Object.keys(groups));
-        // In module scope: pre-select module to the landing geneset so the initial
-        // view shows that module's rows — but peer stats are computed against the
-        // whole catalog so the bar position is meaningful. User can clear to see all.
+        // In module scope: pre-select module to the landing geneset when module_name
+        // is provided so the initial view shows that module's rows — peer stats are
+        // computed against the whole catalog so the bar position remains meaningful.
+        // When module_name is null (experiment-level view), start on "all modules".
         fillSelect(flt.module, Object.keys(modules),
-          CTX.scope === 'module' ? CTX.module_name : null);
+          (CTX.scope === 'module' && CTX.module_name) ? CTX.module_name : null);
         fillSelect(flt.tag,     Object.keys(tags));
         // In module scope: also pre-select the group filter (hidden) to the catalog.
         if (CTX.scope === 'module' && flt.group) {
           flt.group.value = CTX.module_catalog || '';
+        }
+        // Populate celltype / tissue facet dropdowns from DS_ANNOT values.
+        if (flt.celltype || flt.tissue) {
+          var celltypes = {}, tissues = {};
+          Object.keys(DS_ANNOT).forEach(function (dbId) {
+            var ann = DS_ANNOT[dbId];
+            if (ann.celltype) celltypes[ann.celltype] = 1;
+            if (ann.tissue)   tissues[ann.tissue]     = 1;
+          });
+          fillSelect(flt.celltype, Object.keys(celltypes));
+          fillSelect(flt.tissue,   Object.keys(tissues));
+          // Apply preselect_cell_types: if a single type matches a dropdown option,
+          // select it; multiple types → select the first that has a matching option.
+          if (PRESELECT_CTS.length > 0 && flt.celltype) {
+            var opts = Array.from(flt.celltype.options).map(function (o) { return o.value.toLowerCase(); });
+            for (var pci = 0; pci < PRESELECT_CTS.length; pci++) {
+              var pct = PRESELECT_CTS[pci];
+              if (opts.indexOf(pct.toLowerCase()) !== -1) {
+                flt.celltype.value = pct;
+                break;
+              }
+            }
+          }
         }
         stateEl.style.display = 'none';
         render();
@@ -302,7 +356,7 @@ Consumer passes a `mv_ctx` Jinja var — a dict:
       .catch(function (e) { stateEl.textContent = 'could not load — ' + e.message; });
   }
 
-  Object.keys(flt).forEach(function (k) { if (flt[k]) flt[k].addEventListener('change', render); });
+  Object.keys(flt).forEach(function (fk) { if (flt[fk]) flt[fk].addEventListener('change', render); });
   load();
 })();
 </script>

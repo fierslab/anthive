@@ -641,7 +641,8 @@ _GENESETS = [
 
 _EXPERIMENT_PAYLOAD = {
     "metadata": {"name": "Experiment One", "organism": "human", "method": "DESeq2",
-                 "parent_dataset": "GroupA/ds1", "parameters": {"fdr": "0.05"}},
+                 "parent_dataset": "GroupA/ds1", "parameters": {"fdr": "0.05"},
+                 "celltypes": ["microglial cell"]},
     "body": "## Experiment\nDescription.",
     "genesets": [g for g in _GENESETS if g["experiment"] == "Exp1"],
 }
@@ -1518,6 +1519,40 @@ def test_geneset_experiment_view_renders(client):
     assert resp.status_code == 200
     assert "Experiment One" in resp.text
     assert "Up genes" in resp.text
+
+
+def test_geneset_experiment_has_module_view(client):
+    # Ask 1: the experiment page must include the _module_view.html partial so
+    # the variability drilldown is available without navigating into a module.
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    # Partial injects its filter controls
+    assert 'class="mv-flt-method"' in resp.text
+    assert 'class="mv-flt-module"' in resp.text
+    assert 'class="mv-flt-tag"' in resp.text
+    # mv_ctx scope=module is emitted into the page JS
+    assert '"scope"' in resp.text
+    assert 'mv-experiment' in resp.text   # the id we assign
+    # module_name is null — module dropdown starts on "all modules"
+    assert '"module_name": null' in resp.text or '"module_name":null' in resp.text
+
+
+def test_geneset_experiment_module_view_has_celltype_tissue_facets(client):
+    # Ask 2: celltype and tissue facets appear when dataset_annotations are provided.
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    assert 'class="mv-flt-celltype"' in resp.text
+    assert 'class="mv-flt-tissue"' in resp.text
+
+
+def test_geneset_experiment_preselects_cell_type(client):
+    # Ask 3: when the experiment carries a single celltypes entry, the JS
+    # preselect_cell_types list in mv_ctx is populated with that value.
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    # The metadata fixture carries celltypes: [microglial cell] → must appear in ctx.
+    assert "microglial cell" in resp.text
+    assert "preselect_cell_types" in resp.text
 
 
 def test_ui_state_helper_is_sitewide(client):
