@@ -312,18 +312,47 @@ URL hash scheme (feature: back-button / shareable filter state):
   }
 
   // ── URL hash filter state ────────────────────────────────────────────────────
-  // Hash scheme: #mv=key=val;key=val  OR  #prefix-mv=key=val;key=val
+  // Hash scheme: #prefix&mv=key=val;key=val  OR  #mv=key=val;key=val (no prefix)
+  // Separator between page anchor and mv-state is '&' — unambiguous even when
+  // the prefix contains '-' (e.g. '#modules-Sierksma2025/WGCNA::Blue').
   // Values are encodeURIComponent-encoded; keys are the flt.* names.
-  // We preserve any non-mv prefix (e.g. a tab anchor) so tab-switching and
-  // filter-state don't collide.
+  // The browser treats everything after '#' as a fragment — '&' within it does
+  // NOT become a query-string separator, so this is safe.
 
-  /** Parse #…mv=… out of the current location hash. Returns {key: val} or {}. */
-  function parseHashFilters() {
-    var hash = window.location.hash || '';
-    var mvIdx = hash.indexOf('mv=');
-    if (mvIdx === -1) return {};
-    var mvStr = hash.slice(mvIdx + 3);  // everything after "mv="
+  var MV_SEP = '&mv=';  // prefix anchor &mv= filter-state
+
+  /** Extract the page-anchor prefix and the mv= state string from a hash.
+   *  Returns {prefix: string, mvStr: string} — either may be empty.
+   *
+   *  Canonical format: #prefix&mv=key=val  or  #mv=key=val (no prefix).
+   *  Legacy format:    #prefix-mv=key=val  (old commits — still parsed for back-compat).
+   */
+  function splitHash(hash) {
+    var raw = hash || '';
+    // Strip leading '#' if present.
+    if (raw.charAt(0) === '#') raw = raw.slice(1);
+    // Canonical separator: '&mv='
+    var sepIdx = raw.indexOf('&mv=');
+    if (sepIdx !== -1) {
+      return { prefix: raw.slice(0, sepIdx), mvStr: raw.slice(sepIdx + 4) };
+    }
+    // Legacy separator: '-mv='
+    var legacyIdx = raw.indexOf('-mv=');
+    if (legacyIdx !== -1) {
+      return { prefix: raw.slice(0, legacyIdx), mvStr: raw.slice(legacyIdx + 4) };
+    }
+    // Bare '#mv=...' — no prefix.
+    if (raw.indexOf('mv=') === 0) {
+      return { prefix: '', mvStr: raw.slice(3) };
+    }
+    // No mv= at all — entire hash is a page anchor.
+    return { prefix: raw, mvStr: '' };
+  }
+
+  /** Parse filter key=val pairs from a mv-state string. Returns {key: val} or {}. */
+  function parseMvStr(mvStr) {
     var result = {};
+    if (!mvStr) return result;
     mvStr.split(';').forEach(function (pair) {
       var eqIdx = pair.indexOf('=');
       if (eqIdx === -1) return;
@@ -332,6 +361,11 @@ URL hash scheme (feature: back-button / shareable filter state):
       if (key) result[key] = val;
     });
     return result;
+  }
+
+  /** Parse #…mv=… out of the current location hash. Returns {key: val} or {}. */
+  function parseHashFilters() {
+    return parseMvStr(splitHash(window.location.hash).mvStr);
   }
 
   /** Rebuild the URL hash from current filter values, preserving any non-mv prefix. */
@@ -344,27 +378,14 @@ URL hash scheme (feature: back-button / shareable filter state):
       var val = sel.value;
       if (val) pairs.push(key + '=' + encodeURIComponent(val));
     });
-    // Preserve any existing non-mv hash prefix (e.g. "#tab-modules")
-    var hash = window.location.hash || '';
-    var mvIdx = hash.indexOf('-mv=');
-    var prefix = '';
-    if (mvIdx !== -1) {
-      prefix = hash.slice(1, mvIdx);  // the part before "-mv="
-    } else {
-      mvIdx = hash.indexOf('#mv=');
-      // pure mv= hash — no prefix
-    }
-    if (!prefix) {
-      // check if there's a non-mv fragment before any mv= part
-      var rawMvIdx = hash.indexOf('mv=');
-      if (rawMvIdx > 1) {
-        // e.g. "#tab-modules-mv=..."
-        prefix = hash.slice(1, rawMvIdx - 1);  // strip leading '#' and trailing '-'
-      }
-    }
-    var mvPart = pairs.length ? 'mv=' + pairs.join(';') : '';
-    if (!mvPart) return prefix ? '#' + prefix : '';
-    return '#' + (prefix ? prefix + '-' : '') + mvPart;
+    // Preserve the existing page-anchor prefix (e.g. 'modules', 'tab-modules').
+    var parts = splitHash(window.location.hash);
+    var prefix = parts.prefix;
+    var mvPairsStr = pairs.join(';');  // e.g. "tag=braak;sort=position"
+    if (!mvPairsStr) return prefix ? '#' + prefix : '';
+    // MV_SEP = '&mv=' when prefix exists, 'mv=' otherwise.
+    var mvFull = 'mv=' + mvPairsStr;
+    return '#' + (prefix ? prefix + '&' + mvFull : mvFull);
   }
 
   /** Apply parsed hash values to the filter dropdowns (before first render). */
