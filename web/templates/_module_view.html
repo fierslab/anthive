@@ -1,0 +1,289 @@
+{# Shared "module variability" long-list view.
+
+Renders one long list of (module group · module · dataset · tag · method ·
+score · peer-position). Each row is a (module × dataset × tag × method)
+combination. Sort default: peer-position descending — most variable
+modules-vs-their-peers on that dataset+tag+method float to the top.
+
+Peers = other modules scored with the same METHOD on the same (dataset,
+tag). Mixing methods would compare incomparable numerical ranges.
+Mixing statistics (ω²/spearman/R²) IS allowed because the peer-position
+normalises to 0..1 within a like-with-like group.
+
+Filter controls at top: group · tag · method · dataset. Any pre-set
+context (dataset scope or module scope) hides its own control.
+
+Consumer passes a `mv_ctx` Jinja var — a dict:
+  {
+    "scope": "dataset" | "module" | "global",
+    "dataset": "MY4/MTH",             # required if scope=="dataset"
+    "module_catalog": "Sierksma2025/WGCNA",  # required if scope=="module"
+    "module_name": "Brown_Lysosome",         # required if scope=="module"
+    "id": "mv-panel",                 # DOM id prefix (unique per instance)
+  }
+#}
+{% set _mv = mv_ctx %}
+{% set _id = _mv.get('id', 'mv-panel') %}
+<div id="{{ _id }}" class="mv-panel">
+  <style>
+    .mv-panel .mv-ctrls { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin: 6px 0 10px; font-size: 12px; }
+    .mv-panel .mv-ctrls label { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--text-muted); margin-bottom: 2px; }
+    .mv-panel .mv-ctrls select { font-family: var(--font); font-size: 12px; padding: 3px 8px; border: 1px solid var(--border); border-radius: 5px; background: #fff; min-width: 140px; }
+    .mv-panel .mv-table { font-size: 11.5px; border-collapse: collapse; width: 100%; }
+    .mv-panel .mv-table th { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); font-weight: 600; background: #f8fafc; position: sticky; top: 0; }
+    .mv-panel .mv-table td { padding: 3px 8px; border-bottom: 1px solid var(--border-light); vertical-align: middle; }
+    .mv-panel .mv-group { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-muted); }
+    .mv-panel .mv-mod   { font-weight: 500; }
+    .mv-panel .mv-ds a  { font-family: var(--font-mono); font-size: 11px; }
+    .mv-panel .mv-tag   { font-size: 10.5px; color: var(--text-muted); }
+    .mv-panel .mv-method { font-size: 10.5px; color: #64748b; }
+    .mv-panel .mv-val    { font-family: var(--font-mono); text-align: right; }
+    .mv-panel .mv-pos    { min-width: 160px; }
+    .mv-panel .mv-track  { position: relative; display: inline-block; width: 140px; height: 10px; background: #eef2f7; border-radius: 2px; vertical-align: middle; }
+    .mv-panel .mv-track .mv-mark { position: absolute; top: -1px; width: 6px; height: 12px; border-radius: 2px; }
+    .mv-panel .mv-icons a { display: inline-flex; text-decoration: none; color: var(--text-muted); font-size: 14px; padding: 0 3px; }
+    .mv-panel .mv-icons a:hover { color: var(--link); }
+    .mv-panel .mv-icons svg { width: 1em; height: 1em; }
+    .mv-panel .mv-empty  { color: var(--text-muted); font-style: italic; padding: 12px 4px; font-size: 12px; }
+    .mv-panel .mv-summary { color: var(--text-muted); font-size: 11px; margin: 6px 0; }
+  </style>
+  <div class="mv-ctrls">
+    {% if _mv.scope != 'dataset' %}
+    <div><label>dataset</label><select class="mv-flt-dataset"><option value="">all</option></select></div>
+    {% endif %}
+    {% if _mv.scope != 'module' %}
+    <div><label>group</label><select class="mv-flt-group"><option value="">all</option></select></div>
+    <div><label>module</label><select class="mv-flt-module"><option value="">all</option></select></div>
+    {% endif %}
+    <div><label>tag</label><select class="mv-flt-tag"><option value="">all</option></select></div>
+    <div><label>method</label>
+      <select class="mv-flt-method">
+        <option value="">all</option>
+        <option value="geneset">scanpy</option>
+        <option value="aucell">AUCell</option>
+      </select>
+    </div>
+    <div><label>sort</label>
+      <select class="mv-flt-sort">
+        <option value="position" selected>peer position ↓</option>
+        <option value="value_abs">|value| ↓</option>
+        <option value="value_signed">value ↓ (signed)</option>
+      </select>
+    </div>
+    <div style="margin-left:auto"><span class="mv-summary"></span></div>
+  </div>
+  <div class="mv-state muted" style="font-size:12px">loading…</div>
+  <div class="mv-body" style="overflow-y:auto;max-height:70vh;display:none">
+    <table class="mv-table">
+      <thead><tr>
+        {% if _mv.scope != 'module' %}<th>group</th><th>module</th>{% endif %}
+        {% if _mv.scope != 'dataset' %}<th>dataset</th>{% endif %}
+        <th>tag</th>
+        <th>method</th>
+        <th style="text-align:right">score</th>
+        <th class="mv-pos">vs peer modules <span class="info" title="Peers = other modules scored with the SAME method on the SAME (dataset, tag). Marker = this row's value; bar spans min–max across peer modules. Position drives the default sort.">ⓘ</span></th>
+        <th style="text-align:center">plot</th>
+        <th style="text-align:center">umap</th>
+      </tr></thead>
+      <tbody class="mv-rows"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+(function () {
+  var CTX = {{ _mv|tojson }};
+  var root = document.getElementById(CTX.id);
+  if (!root) return;
+  var stateEl = root.querySelector('.mv-state');
+  var bodyEl  = root.querySelector('.mv-body');
+  var rowsEl  = root.querySelector('.mv-rows');
+  var summaryEl = root.querySelector('.mv-summary');
+  var flt = {
+    dataset: root.querySelector('.mv-flt-dataset'),
+    group:   root.querySelector('.mv-flt-group'),
+    module:  root.querySelector('.mv-flt-module'),
+    tag:     root.querySelector('.mv-flt-tag'),
+    method:  root.querySelector('.mv-flt-method'),
+    sort:    root.querySelector('.mv-flt-sort'),
+  };
+
+  // SVG icons — mirrors dataset.html's chart_icon macro
+  var SVG_BAR = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="1.5" y="8" width="3" height="6"/><rect x="6.5" y="5" width="3" height="9"/><rect x="11.5" y="2" width="3" height="12"/></svg>';
+  var SVG_LINE = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M1.5 13 L5.5 8.5 L9 10.5 L14.5 3"/></svg>';
+  var SVG_UMAP = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3.4" cy="4.2" r="1.5"/><circle cx="6.2" cy="2.6" r="1.5"/><circle cx="5.6" cy="7" r="1.5"/><circle cx="10.6" cy="9.6" r="1.5"/><circle cx="13.2" cy="7.6" r="1.5"/><circle cx="12.4" cy="12.6" r="1.5"/><circle cx="8.6" cy="13" r="1.5"/></svg>';
+
+  var NUMERICAL_TAGS = { braak: 1, age: 1, pmi: 1 };
+  var METHOD_LABEL = { geneset: 'scanpy', aucell: 'AUCell' };
+
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+
+  function scoreColFor(row) {
+    if (row.source === 'geneset') return String(row.catalog).replace('/', '::') + '::' + row.module;
+    if (row.source === 'aucell')  return 'aucell__' + row.catalog + '__' + row.module;
+    return null;
+  }
+  function baseUrl(row) {
+    var parts = String(row.dataset).split('/'); if (parts.length !== 2) return null;
+    return '/browse/' + encodeURIComponent(parts[0]) + '/' + encodeURIComponent(parts[1]);
+  }
+  function plotUrl(row) {
+    var col = scoreColFor(row); var b = baseUrl(row); if (!col || !b) return null;
+    var tagCol = row.tag_column || row.tag;
+    var geom = NUMERICAL_TAGS[row.tag] ? 'scatter' : 'violin';
+    return b + '/plot/' + geom + '?x=' + encodeURIComponent(tagCol) + '&y=' + encodeURIComponent(col);
+  }
+  function umapUrl(row) {
+    var col = scoreColFor(row); var b = baseUrl(row); if (!col || !b) return null;
+    return b + '/plot/scatter?color=' + encodeURIComponent(col);
+  }
+
+  // Peer group key — matched to how "peers" is defined: same (dataset, tag,
+  // source, statistic). Different statistics keep different peer groups so
+  // ω² isn't compared to spearman's [-1,+1] range.
+  function peerKey(r) { return r.dataset + '|' + r.tag + '|' + r.source + '|' + r.statistic; }
+  // Which statistic each (tag, source) row's variability is best captured
+  // by — we keep only ONE stat per row to avoid duplicate rows.
+  var CAT_STATS = { omega2: 1 };            // categorical: ω² only
+  var NUM_STATS = { spearman: 1, R2: 1 };   // numerical: spearman + R²
+
+  function fillSelect(sel, values, currentVal) {
+    if (!sel) return;
+    var wanted = currentVal != null ? currentVal : sel.value;
+    // Preserve first option (usually "all") and rebuild the rest.
+    var opts = ['<option value="">all</option>'];
+    values.sort().forEach(function (v) {
+      var lab = v;
+      if (sel === flt.method) lab = METHOD_LABEL[v] || v;
+      opts.push('<option value="' + esc(v) + '">' + esc(lab) + '</option>');
+    });
+    sel.innerHTML = opts.join('');
+    if (wanted) sel.value = wanted;
+  }
+
+  var ALL_ROWS = [];      // raw fetched rows
+  var PEER_INDEX = {};    // peerKey → {min, max, n}
+
+  function computePeerIndex(rows) {
+    var idx = {};
+    rows.forEach(function (r) {
+      var k = peerKey(r);
+      var g = idx[k] || (idx[k] = { min: Infinity, max: -Infinity, n: 0 });
+      g.min = Math.min(g.min, r.value); g.max = Math.max(g.max, r.value); g.n++;
+    });
+    return idx;
+  }
+  function positionOf(r, idx) {
+    var g = idx[peerKey(r)]; if (!g) return 0.5;
+    var span = g.max - g.min; return span ? (r.value - g.min) / span : 0.5;
+  }
+
+  function render() {
+    var rows = ALL_ROWS.slice();
+    // Filter
+    ['dataset','group','module','tag','method'].forEach(function (key) {
+      var sel = flt[key]; if (!sel || !sel.value) return;
+      var v = sel.value;
+      if (key === 'group') rows = rows.filter(function (r) { return r.catalog === v; });
+      else if (key === 'module') rows = rows.filter(function (r) { return r.module === v; });
+      else if (key === 'method') rows = rows.filter(function (r) { return r.source === v; });
+      else if (key === 'dataset') rows = rows.filter(function (r) { return r.dataset === v; });
+      else if (key === 'tag') rows = rows.filter(function (r) { return r.tag === v; });
+    });
+    // Only keep one row per (mod × dataset × tag × source) — pick the
+    // "canonical" statistic for that tag: ω² for categorical, spearman
+    // for numerical (spearman preferred over R² because it's signed).
+    var preferred = {};
+    rows.forEach(function (r) {
+      var isNum = NUMERICAL_TAGS[r.tag];
+      var wantsStat = isNum ? 'spearman' : 'omega2';
+      if (r.statistic !== wantsStat) return;
+      var k = r.module + '|' + r.catalog + '|' + r.dataset + '|' + r.tag + '|' + r.source;
+      preferred[k] = r;
+    });
+    rows = Object.keys(preferred).map(function (k) { return preferred[k]; });
+    // Sort
+    var mode = flt.sort.value;
+    if (mode === 'position') {
+      rows.sort(function (a, b) { return positionOf(b, PEER_INDEX) - positionOf(a, PEER_INDEX); });
+    } else if (mode === 'value_signed') {
+      rows.sort(function (a, b) { return b.value - a.value; });
+    } else {
+      rows.sort(function (a, b) { return Math.abs(b.value) - Math.abs(a.value); });
+    }
+    rows = rows.slice(0, 500);   // cap for render sanity
+    summaryEl.textContent = rows.length + (rows.length === 500 ? '+' : '') + ' rows';
+    if (!rows.length) {
+      bodyEl.style.display = ''; rowsEl.innerHTML = '<tr><td colspan="8" class="mv-empty">No rows match — widen the filters.</td></tr>';
+      return;
+    }
+    // Render
+    var html = rows.map(function (r) {
+      var pos = positionOf(r, PEER_INDEX);
+      var g = PEER_INDEX[peerKey(r)] || { min: r.value, max: r.value, n: 1 };
+      var neg = r.value < 0;
+      var markL = Math.max(0, Math.min(100, pos * 100));
+      var track = '<span class="mv-track" title="this module ' + (+r.value).toFixed(3)
+        + ' · across ' + g.n + ' peer modules: ' + (+g.min).toFixed(3) + '…' + (+g.max).toFixed(3)
+        + '"><span class="mv-mark" style="left:calc(' + markL.toFixed(1) + '% - 3px);background:'
+        + (neg ? '#dc2626' : 'var(--link)') + '"></span></span>';
+      var dsParts = String(r.dataset).split('/');
+      var dsLink = dsParts.length === 2
+        ? '<a href="/browse/' + encodeURIComponent(dsParts[0]) + '/' + encodeURIComponent(dsParts[1]) + '">' + esc(r.dataset) + '</a>'
+        : esc(r.dataset);
+      var plotSvg = NUMERICAL_TAGS[r.tag] ? SVG_LINE : SVG_BAR;
+      var pu = plotUrl(r), uu = umapUrl(r);
+      var tds = [];
+      if (CTX.scope !== 'module') {
+        tds.push('<td class="mv-group">' + esc(r.catalog) + '</td>');
+        tds.push('<td class="mv-mod">' + esc(r.module) + '</td>');
+      }
+      if (CTX.scope !== 'dataset') tds.push('<td class="mv-ds">' + dsLink + '</td>');
+      tds.push('<td class="mv-tag">' + esc(r.tag) + '</td>');
+      tds.push('<td class="mv-method">' + esc(METHOD_LABEL[r.source] || r.source) + '</td>');
+      tds.push('<td class="mv-val">' + (+r.value).toFixed(3) + '<span class="muted-2" style="font-size:9px;margin-left:3px">' + esc(r.statistic) + '</span></td>');
+      tds.push('<td class="mv-pos">' + track + ' <span class="muted-2" style="font-size:10px">' + (+g.min).toFixed(2) + '–' + (+g.max).toFixed(2) + '</span></td>');
+      tds.push('<td class="mv-icons" style="text-align:center">' + (pu ? '<a href="' + pu + '" title="plot ' + esc(r.tag) + ' × ' + esc(r.module) + '">' + plotSvg + '</a>' : '') + '</td>');
+      tds.push('<td class="mv-icons" style="text-align:center">' + (uu ? '<a href="' + uu + '" title="UMAP coloured by ' + esc(r.module) + '">' + SVG_UMAP + '</a>' : '') + '</td>');
+      return '<tr>' + tds.join('') + '</tr>';
+    }).join('');
+    rowsEl.innerHTML = html;
+    bodyEl.style.display = '';
+  }
+
+  function load() {
+    stateEl.style.display = ''; stateEl.textContent = 'loading…'; bodyEl.style.display = 'none';
+    var params = 'min_abs=0&limit=100000';
+    if (CTX.scope === 'dataset' && CTX.dataset) params += '&dataset=' + encodeURIComponent(CTX.dataset);
+    if (CTX.scope === 'module' && CTX.module_name)   params += '&module='  + encodeURIComponent(CTX.module_name);
+    if (CTX.scope === 'module' && CTX.module_catalog) params += '&catalog=' + encodeURIComponent(CTX.module_catalog);
+    fetch('/api/module-variability?' + params, { credentials: 'same-origin' })
+      .then(function (r) { return r.ok ? r.json() : r.text().then(function (t) { throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 160)); }); })
+      .then(function (d) {
+        // Drop starCAT rows entirely (UI temporarily hidden)
+        ALL_ROWS = (d.rows || []).filter(function (r) { return r.source !== 'starcat'; });
+        // Filter to canonical stats only (ω² for cat, spearman for num) — the
+        // render() layer does the finer per-(row) pick.
+        var groups = {}, modules = {}, datasets = {}, tags = {};
+        ALL_ROWS.forEach(function (r) {
+          groups[r.catalog] = 1; modules[r.module] = 1;
+          datasets[r.dataset] = 1; tags[r.tag] = 1;
+        });
+        PEER_INDEX = computePeerIndex(ALL_ROWS.filter(function (r) {
+          var isNum = NUMERICAL_TAGS[r.tag];
+          return r.statistic === (isNum ? 'spearman' : 'omega2');
+        }));
+        fillSelect(flt.dataset, Object.keys(datasets));
+        fillSelect(flt.group,   Object.keys(groups));
+        fillSelect(flt.module,  Object.keys(modules));
+        fillSelect(flt.tag,     Object.keys(tags));
+        stateEl.style.display = 'none';
+        render();
+      })
+      .catch(function (e) { stateEl.textContent = 'could not load — ' + e.message; });
+  }
+
+  Object.keys(flt).forEach(function (k) { if (flt[k]) flt[k].addEventListener('change', render); });
+  load();
+})();
+</script>

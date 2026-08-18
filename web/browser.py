@@ -2218,6 +2218,7 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "publication_status": pub_status,
         "pub_icon": pub_icon,
         "is_admin": _is_admin(request),
+        "mv_ctx": {"scope": "dataset", "dataset": db_id, "id": "mv-modules-tab"},
     })
 
 
@@ -2484,6 +2485,7 @@ async def geneset_view(request: Request, study: str, experiment: str, name: str)
     geneset_body_html = markdown.markdown(payload.get('geneset_body') or '', extensions=['tables'])
     experiment_body_html = markdown.markdown(payload.get('experiment_body') or '', extensions=['tables'])
 
+    catalog = f"{study}/{experiment}"
     return templates.TemplateResponse(request, "geneset.html", {
         "study": study,
         "experiment": experiment,
@@ -2491,4 +2493,10 @@ async def geneset_view(request: Request, study: str, experiment: str, name: str)
         "payload": payload,
         "geneset_body_html": geneset_body_html,
         "experiment_body_html": experiment_body_html,
+        "mv_ctx": {
+            "scope": "module",
+            "module_catalog": catalog,
+            "module_name": name,
+            "id": "mv-varies-most",
+        },
     })

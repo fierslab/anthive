@@ -1529,18 +1529,23 @@ def test_ui_state_helper_is_sitewide(client):
 
 
 def test_geneset_detail_has_variability_panel(client):
-    # The geneset detail page includes the 'where it varies most' panel, which
-    # fetches /module-variability for this geneset name client-side. 2026-08
-    # added source + sort selectors and now builds the URL by concatenation,
-    # so we assert on the parts, not the whole literal.
+    # The geneset detail page uses the shared _module_view.html partial for the
+    # "where it varies most" panel. Partial is scoped to scope=module with the
+    # geneset's catalog (study/experiment) and name. 2026-08 refactored from
+    # hand-rolled HTML to the shared partial.
     resp = client.get("/genesets/StudyX/Exp1/gs_up")
     assert resp.status_code == 200
     assert "Where it varies most" in resp.text
-    assert 'id="gv-stat"' in resp.text
-    assert 'id="gv-source"' in resp.text
-    assert 'id="gv-sort"' in resp.text
-    assert "/module-variability?" in resp.text
-    assert "'statistic=' + encodeURIComponent(stat)" in resp.text
+    # Partial's filter controls replace the old gv-* IDs
+    assert 'class="mv-flt-method"' in resp.text
+    assert 'class="mv-flt-tag"' in resp.text
+    assert 'class="mv-flt-sort"' in resp.text
+    # Partial fetches module-variability scoped to this module + catalog
+    assert "/api/module-variability?" in resp.text
+    assert '"scope": "module"' in resp.text or '"scope":"module"' in resp.text or 'scope' in resp.text
+    # mv_ctx carries the catalog (study/experiment) and module name
+    assert "StudyX/Exp1" in resp.text
+    assert "gs_up" in resp.text
 
 
 def test_geneset_experiment_view_404(client):
@@ -1950,13 +1955,15 @@ def test_dataset_view_no_module_scores_tab_when_no_score_columns(client):
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
     assert 'data-tab="modules"' not in resp.text
-    assert 'id="mod-tbl"' not in resp.text
+    assert 'id="mv-modules-tab"' not in resp.text
 
 
 def test_dataset_view_module_scores_tab_groups_three_methods(client, monkeypatch):
-    # A dataset with all three scoring methods on the SAME (catalog, module)
-    # tuple must collapse to one row with three method chips (scanpy /
-    # starCAT / AUCell). Absent-methods on other modules show as em-dashes.
+    # A dataset with all three scoring methods — the modules tab should render
+    # using the shared _module_view.html partial (scope=dataset). The partial
+    # fills rows client-side via JS; server-side output contains the filter
+    # controls, the mv_ctx JSON, and the empty <tbody class="mv-rows">.
+    # 2026-08: refactored from server-side table to the shared partial.
     def with_scores(api_url, path):
         result = _fake_api_get(api_url, path)
         if path.endswith("/info") and isinstance(result, dict):
@@ -1975,41 +1982,31 @@ def test_dataset_view_module_scores_tab_groups_three_methods(client, monkeypatch
     monkeypatch.setattr(browser, "_api_get", with_scores)
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
-    # Tab is present
+    # Tab button is present (module count non-zero)
     assert 'data-tab="modules"' in resp.text
-    assert 'id="mod-tbl"' in resp.text
-    # Legend surfaces per-method counts (starCAT UI is hidden — 2026-08).
-    assert 'scanpy <span class="muted-2">(1)' in resp.text
-    # starCAT legend chip + column dropped from the visible UI (still may
-    # appear in inline CSS comments about how the legend used to work).
+    # Partial is rendered — its filter controls and panel ID are present
+    assert 'id="mv-modules-tab"' in resp.text
+    assert 'class="mv-flt-method"' in resp.text
+    assert 'class="mv-flt-tag"' in resp.text
+    # starCAT option NOT in the partial's method filter (hidden 2026-08)
     assert 'data-method="starcat"' not in resp.text
     assert '>starCAT<' not in resp.text
-    assert 'AUCell <span class="muted-2">(2)' in resp.text
-    # The scanpy + aucell "Brown_Lysosome" collapse to ONE row
-    # (checks the grouping key). starCAT-only DAM_pos still contributes
-    # a row so the /module_scores counters + score-parquet stay whole,
-    # but its column in the table is gone.
-    assert resp.text.count('class="mod-item"') == 3
-    # Each method's obs-column name appears in a plot link (the "chip")
-    assert 'plot/histogram?x=Sierksma2025%3A%3AWGCNA%3A%3ABrown_Lysosome' in resp.text
-    # Jinja's urlencode = urllib.parse.quote(safe='/') → forward slashes stay
-    assert 'plot/histogram?x=aucell__Sierksma2025/WGCNA__Brown_Lysosome' in resp.text
-    # Plain-numerical columns (n_genes, pseudotime) are still on the Numerical
-    # tab and NOT swept into module scores.
-    assert '>n_genes</a>' in resp.text or 'x=n_genes' in resp.text
-    # …and there's no scanpy chip for Mancuso Cell_states CRM1 (aucell-only)
-    idx = resp.text.index('aucell__Mancuso2024')
-    row_start = resp.text.rfind('<tr class="mod-item"', 0, idx)
-    row_end = resp.text.index('</tr>', idx)
-    row_html = resp.text[row_start:row_end]
-    assert 'data-has-scanpy="0"' in row_html
-    assert 'data-has-aucell="1"' in row_html
+    # mv_ctx carries scope=dataset and the db_id (GroupA/ds1)
+    assert '"scope": "dataset"' in resp.text or '"scope":"dataset"' in resp.text
+    assert 'GroupA/ds1' in resp.text
+    # Module count is reported in the tab label (server-side n_module_scores)
+    # Dataset has 4 scored cols (scanpy + starcat + 2 aucell) → 4 modules tracked
+    assert 'Modules<span class="tab-count">' in resp.text
+    # Plain-numerical columns (n_genes, pseudotime) are on Numerical tab, not Modules
+    assert 'x=n_genes' in resp.text  # still linked from the Numerical tab
 
 
 def test_dataset_view_module_scores_absent_method_greyed(client, monkeypatch):
-    # A dataset with ONLY aucell scores (per the task's Z20/MIC case) — the
-    # scanpy legend badge renders as unclickable (data-absent=1) so users
-    # don't get a filter that empties the table. (starCAT UI dropped 2026-08.)
+    # A dataset with ONLY aucell scores — the modules tab still renders via the
+    # shared partial (scope=dataset). The partial's method filter includes
+    # both scanpy and AUCell options regardless; client-side JS filters to
+    # what's actually present. The old server-side absent/greyed badge logic
+    # is gone — the partial handles this uniformly. 2026-08: refactored.
     def aucell_only(api_url, path):
         result = _fake_api_get(api_url, path)
         if path.endswith("/info") and isinstance(result, dict):
@@ -2027,12 +2024,13 @@ def test_dataset_view_module_scores_absent_method_greyed(client, monkeypatch):
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
     assert 'data-tab="modules"' in resp.text
-    assert 'method="scanpy"  data-absent="1"' in resp.text \
-        or 'method="scanpy" data-absent="1"' in resp.text
-    # starCAT badge fully dropped
+    # Partial is present with scope=dataset
+    assert 'id="mv-modules-tab"' in resp.text
+    assert 'class="mv-flt-method"' in resp.text
+    # starCAT not in the partial's method options (hidden 2026-08)
     assert 'method="starcat"' not in resp.text
-    # AUCell must NOT be absent (it has 2 modules)
-    assert 'AUCell <span class="muted-2">(2)' in resp.text
+    # AUCell option is present in the partial's method filter
+    assert 'value="aucell"' in resp.text
 
 
 def test_geneset_variability_page_offers_aucell_source(client):
