@@ -1,0 +1,208 @@
+# Design — canonical columns as `ant_*`
+
+Status: **draft — awaiting sign-off before implementation**
+Date: 2026-08-18
+
+## Problem
+
+Anthive treats a handful of column names as *canonical annotations* across
+datasets — `braak`, `sex`, `disease`, `cluster`, `condition`, `braak_group`,
+`age`, `pmi`, `donor_id`, etc. Two failure modes:
+
+1. A user-supplied `.h5ad` may already contain a column literally named
+   `braak` with values in some non-canonical shape (`'?'`, `'nan'`, roman
+   numerals, floats). The current pipeline can be led to treat that column
+   as canonical when it shouldn't.
+2. A `.md`'s `api.obs_rename` mapping quietly renames a user column to
+   `braak` in the DuckDB view. From the user's point of view, the
+   post-download `.h5ad` no longer has the meaning they expected under
+   the name `braak` (the physical `__obscat` table keeps the original
+   column, but the semantics are confusing).
+
+**Root cause:** the canonical *tag* namespace and the user's *column-name*
+namespace overlap.
+
+## Decision
+
+Canonical annotation columns are exposed under an **`ant_` prefix** in the
+public `obsnum` / `obscat` VIEWs.
+
+- Tag vocabulary (`lib/obscol_tags_vocab.yaml`) stays as-is — short semantic
+  names: `braak`, `sex`, `cluster`, `age`, …
+- Canonical column names in the DuckDB VIEWs become `ant_braak`, `ant_sex`,
+  `ant_cluster`, `ant_age`, `ant_disease`, `ant_condition`, `ant_braak_group`,
+  `ant_pmi`, `ant_donor_id`, `ant_apoe`, `ant_region`.
+- A user's original obs column (whatever its name) is **never overwritten** —
+  it stays in the physical `__obscat`/`__obsnum` table under its original
+  name and is exposed through the view alongside its `ant_*` alias.
+- The `api.obs_rename` mapping in each `.md` becomes the explicit,
+  auditable declaration of "this user column IS the canonical `ant_*`
+  column" (possibly with value coercion via `obs_value_rename`).
+
+## Why the prefix is cheap
+
+The recon (2026-08-18) confirmed:
+
+- **Canonical columns don't physically exist in the DuckDB.** They live only
+  in the `obscat` / `obsnum` VIEWs, created at ingest by
+  `build_obs_view_sql()` from each `.md`'s `api.obs_rename` dict.
+- **No h5ad rebuild** is needed. The physical `__obscat`/`__obsnum` tables
+  keep the user's original names. The migration is DROP VIEW + CREATE VIEW
+  per dataset — a metadata operation.
+- **Only one production file hardcodes canonical column names**:
+  `bin/annot/ant-module-variability` (`_CANONICAL_TAGS`, `NUMERICAL_TAGS`,
+  `CATEGORICAL_TAGS`, lines 67–159). `ant-serve` and the web UI discover
+  columns dynamically from `information_schema`, so they pick up whatever
+  the view exposes.
+
+## Public surface — what does and doesn't change
+
+**Stays the same:**
+
+- Tag vocabulary in `obscol_tags_vocab.yaml` (`braak`, `sex`, `cluster`, …)
+- REST query params by tag: `?tag=braak` still works (aliased server-side
+  for one release; deprecated in the release after)
+- User-supplied obs columns in the .h5ad (never touched)
+- Physical `__obscat`/`__obsnum` table schemas
+- Module-variability API path and shape
+
+**Changes:**
+
+- View columns: `braak → ant_braak`, `sex → ant_sex`, etc.
+- Every `.md`'s `api.obs_rename` targets migrate to `ant_*`
+- `ant-module-variability`'s `_CANONICAL_TAGS` dict values become
+  `ant_*` (tag keys stay bare)
+- Module-variability parquet is rebuilt (tag_column values change from
+  `braak` → `ant_braak`)
+- Web UI displays `ant_*` columns as **bold `braak`** with a small
+  `[canonical]` pill and a hover-ⓘ showing the real column name (per
+  `web/CLAUDE.md` info-hover convention)
+- Column-name filters in `?color=`, `?x=`, `?tag_column=` — must be
+  aliased for the one back-compat release
+
+## Naming rule
+
+- Prefix `ant_`, snake_case (matches DuckDB unquoted-identifier convention).
+- One-to-one with the tag vocabulary: `ant_<tag>` for every tag in
+  `obscol_tags_vocab.yaml`.
+- No `ant_*` name is emitted unless the `.md`'s `api.obs_rename` explicitly
+  declares the mapping — a user h5ad with a column literally named
+  `ant_braak` (unlikely) would either error at ingest or be silently
+  passed through under its own name; TBD in the sanity check.
+
+## UI
+
+- The `obs` column listings and plot-form dropdowns render `ant_*` columns
+  with `font-weight: 600` and a small pill `canonical` after the label.
+- The label shown to the user drops the `ant_` prefix: `braak` (bold),
+  `cluster` (bold), etc.
+- Hover ⓘ (sitewide `.info` pattern) — "canonical annotation `ant_braak`,
+  standardised across datasets".
+- The user's original column (if any, e.g., `Braak_Stage`) shows unformatted
+  in the same list.
+
+## Back-compat contract
+
+**One-release window** (this migration + one point release afterwards):
+
+- `ant-serve` accepts `?tag=braak` and `?tag_column=braak` (bare) and
+  transparently rewrites to `ant_braak` internally.
+- `ant-serve` accepts `?color=braak`, `?x=braak`, etc. and rewrites to
+  `ant_braak` **iff** `braak` is not itself a column in the view.
+- `/api/module-variability` accepts both `braak` and `ant_braak` on input;
+  emits `ant_braak` on output.
+- Bookmarks in the wild (Sierksma Fig 2 hexbin links, user notebooks,
+  vark/pyvark scripts) keep working through the alias.
+
+The next release removes the alias. `vark` and `pyvark` releases can
+retire their bare references in the interim.
+
+## Migration stages
+
+1. **Design + vocabulary lock** (this doc, awaiting sign-off)
+2. **`lib/`** — add `CANONICAL_TAGS` list + `canonical_column(tag)` helper
+   returning `f'ant_{tag}'`. Single source of truth.
+3. **Ingest** — `ant-convert` is unchanged (it already reads `obs_rename`
+   from the `.md`). Sanity check in `ant-h5ad-check` optional: warn if a
+   user h5ad already has a `ant_*` column.
+4. **`.md` migration** — mechanical rewrite of `api.obs_rename` targets
+   in 105 dataset `.md` files: `braak → ant_braak`, `sex → ant_sex`, etc.
+   Script: `bin/ops/ant-migrate-obs-rename` (one-shot; leaves a git commit).
+5. **`ant-module-variability`** — update `_CANONICAL_TAGS`,
+   `NUMERICAL_TAGS`, `CATEGORICAL_TAGS` to use `ant_*` column identifiers.
+   Query logic: dynamic (`SELECT ant_braak FROM obscat`), no other changes.
+6. **`ant-serve` back-compat alias** — a small `_alias_canonical(name)`
+   helper wraps tag/column params in the relevant endpoints for one
+   release. Deprecation-warn header.
+7. **Web UI** — render `ant_*` columns bold + `[canonical]` pill + hover.
+   Strip prefix on display. Also on the module-variability facet dropdowns.
+8. **DuckDB VIEW rebuild** — one-shot script that iterates every `.duckdb`
+   in the store, DROP + CREATE the `obscat`/`obsnum` views with the new
+   `.md`. Fast (metadata only).
+9. **Module-variability parquet rebuild** — re-run `ant-module-variability`
+   fleet-wide. Produces new tag_column values (`ant_braak`, …). ~15 min.
+10. **E2E test on one dataset** — MY4/MTH: fresh ingest, view rebuild,
+    module-variability rebuild, browse the dataset page, verify obs list,
+    plot with `?color=ant_braak`, module view, back-compat with
+    `?color=braak`.
+11. **Batch rebuild views + parquet** across all ~184 datasets.
+12. **Test suite** — full run.
+
+## Rollback
+
+- Every stage is a separate commit.
+- The `.md` rewrite is git-tracked (`data/h5adstore` is a git repo).
+- The DuckDB view rebuild is idempotent — running the pre-migration
+  view-build against the pre-migration `.md` restores the old shape.
+- The parquet is regenerated from the DuckDB, not authoritative.
+- Original user obs columns are never touched, so h5ad round-trip is safe
+  throughout.
+
+## Open questions
+
+1. **`obs_derive` columns** — several `.md` files use `obs_derive:` to
+   compute a categorical (e.g., `braak_group` from `braak`). Should the
+   `braak_group` target be renamed to `ant_braak_group`? Yes — same
+   principle; the migration script handles it uniformly.
+2. **Non-canonical `obs_rename` targets** — some datasets rename user
+   columns to non-canonical short names (e.g., `Cell_type_full → celltype`).
+   Those stay untouched — only tags in the canonical vocabulary get the
+   `ant_` prefix.
+3. **`api.obs_hidden`** — untouched.
+4. **`__pending_cols` audit trail** — its rows reference column names
+   that are then renamed. Cross-check that the audit path isn't broken.
+   Likely benign (`__pending_cols` records the PHYSICAL column name in
+   the underscore table, not the view alias).
+
+## Vocabulary — the initial set
+
+Canonical tag → view column mapping (source of truth: `lib/CANONICAL_TAGS`):
+
+| tag              | view column           |
+|------------------|-----------------------|
+| `braak`          | `ant_braak`           |
+| `braak_group`    | `ant_braak_group`     |
+| `sex`            | `ant_sex`             |
+| `age`            | `ant_age`             |
+| `cluster`        | `ant_cluster`         |
+| `disease`        | `ant_disease`         |
+| `condition`      | `ant_condition`       |
+| `pmi`            | `ant_pmi`             |
+| `donor_id`       | `ant_donor_id`        |
+| `apoe`           | `ant_apoe`            |
+| `region`         | `ant_region`          |
+| `genotype`       | `ant_genotype`        |
+| `host_sex`       | `ant_host_sex`        |
+
+`ant_donor` vs `ant_donor_id`: the tag is `donor`, the column becomes
+`ant_donor` (following `ant_<tag>` exactly). One-to-one, no exceptions.
+`donor_id` in the current code is a legacy misnomer — the migration
+canonicalises to `ant_donor`.
+
+## Sign-off checklist before I execute stage 4+
+
+- [ ] Naming (`ant_<tag>`) and display (bold + `[canonical]` pill) confirmed
+- [ ] Vocabulary table above (initial 13 tags) confirmed complete
+- [ ] Back-compat alias for one release confirmed acceptable
+- [ ] `ant_donor` vs `ant_donor_id` — is losing the `_id` suffix OK?
+- [ ] Ready to run the mechanical `.md` rewrite across 105 files

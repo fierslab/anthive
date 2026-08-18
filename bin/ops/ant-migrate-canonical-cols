@@ -1,0 +1,218 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "pyyaml",
+# ]
+# ///
+"""Rewrite dataset `.md` frontmatter to use `ant_*` canonical column names.
+
+For every `data/h5adstore/*/*.md`:
+  * `api.obs_rename` — values matching a canonical tag (`braak`, `sex`, …)
+    or a legacy alias (`donor_id` → `donor`) get the `ant_` prefix
+    (`braak` → `ant_braak`; `donor_id` → `ant_donor`).
+  * `api.obs_derive` — dict KEYS matching the canonical set are prefixed
+    the same way. If a derive key was `donor_id`, it becomes `ant_donor`.
+  * `api.obs_value_rename` — untouched (keyed by the PHYSICAL source
+    column, which we're not renaming).
+  * Everything else — untouched.
+
+Usage:
+  ant-migrate-canonical-cols --dry-run          # print planned diffs
+  ant-migrate-canonical-cols                    # rewrite in place
+  ant-migrate-canonical-cols --commit "msg"     # rewrite + git commit
+                                                  in data/h5adstore
+
+The YAML frontmatter is delimited by `---` markers at the top of the file.
+We do NOT round-trip YAML with a library — a targeted text-level rewrite
+preserves the file's original ordering, comments, and quoting. Every
+rewrite is idempotent (a second run is a no-op).
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+script_dir = Path(__file__).resolve().parent
+lib_dir = script_dir.parent.parent / 'lib'
+sys.path.insert(0, str(lib_dir))
+
+from canonical_columns import (   # type: ignore
+    CANONICAL_TAGS,
+    LEGACY_ALIASES,
+    canonicalise_legacy_target,
+)
+
+
+FRONTMATTER_RE = re.compile(r'\A---\n(.*?)\n---\n', re.DOTALL)
+
+#: Set of every legacy target that should be rewritten.
+LEGACY_TARGETS = set(CANONICAL_TAGS) | set(LEGACY_ALIASES.keys())
+
+
+def _rewrite_frontmatter(fm: str) -> tuple[str, list[str]]:
+    """Rewrite a YAML frontmatter string. Returns (new_fm, diagnostics).
+
+    We operate line by line rather than via a YAML round-trip so ordering
+    and comments survive. This means we need a small state machine to
+    know whether we're inside `api.obs_rename` or `api.obs_derive`.
+    """
+    diagnostics: list[str] = []
+    lines = fm.splitlines()
+    out: list[str] = []
+
+    in_api = False
+    in_obs_rename = False
+    in_obs_derive = False
+    api_indent = 0
+
+    for line in lines:
+        stripped = line.rstrip()
+
+        # Enter / leave api: block. api: sits at column 0.
+        if re.match(r'^api:\s*$', line):
+            in_api = True
+            in_obs_rename = False
+            in_obs_derive = False
+            api_indent = 0
+            out.append(line)
+            continue
+
+        # Any zero-indented non-blank line other than `api:` ends the api block.
+        if in_api and stripped and not line.startswith(' '):
+            in_api = False
+            in_obs_rename = False
+            in_obs_derive = False
+            out.append(line)
+            continue
+
+        if in_api:
+            # Enter obs_rename / obs_derive (2-space indent under api:).
+            if re.match(r'^  obs_rename:\s*(\{\})?\s*$', line):
+                in_obs_rename = True
+                in_obs_derive = False
+                out.append(line)
+                continue
+            if re.match(r'^  obs_derive:\s*(\{\})?\s*$', line):
+                in_obs_derive = True
+                in_obs_rename = False
+                out.append(line)
+                continue
+            # Any 2-space-indented key that isn't obs_rename/obs_derive
+            # closes both blocks (obs_hidden, obs_value_rename, …).
+            if re.match(r'^  [a-zA-Z_]', line):
+                in_obs_rename = False
+                in_obs_derive = False
+                out.append(line)
+                continue
+
+            if in_obs_rename:
+                # Look for `    SourceCol: TargetName`
+                match = re.match(r'^(    [^:\s]+:\s*)([A-Za-z_][A-Za-z_0-9]*)\s*$', line)
+                if match:
+                    prefix, target = match.group(1), match.group(2)
+                    new_target = canonicalise_legacy_target(target)
+                    if new_target != target:
+                        diagnostics.append(f'obs_rename: {target} → {new_target}')
+                        out.append(f'{prefix}{new_target}')
+                        continue
+                out.append(line)
+                continue
+
+            if in_obs_derive:
+                # Look for `    <derive_key>:` (with optional value); 4-space indent.
+                match = re.match(r'^(    )([A-Za-z_][A-Za-z_0-9]*)(:\s*.*)$', line)
+                if match:
+                    indent, key, rest = match.group(1), match.group(2), match.group(3)
+                    if key in LEGACY_TARGETS:
+                        new_key = canonicalise_legacy_target(key)
+                        if new_key != key:
+                            diagnostics.append(f'obs_derive key: {key} → {new_key}')
+                            out.append(f'{indent}{new_key}{rest}')
+                            continue
+                out.append(line)
+                continue
+
+        out.append(line)
+
+    return '\n'.join(out) + ('\n' if fm.endswith('\n') else ''), diagnostics
+
+
+def _rewrite_file(path: Path, dry_run: bool) -> list[str]:
+    text = path.read_text()
+    match = FRONTMATTER_RE.match(text)
+    if not match:
+        return []
+    fm_original = match.group(1)
+    fm_new, diagnostics = _rewrite_frontmatter(fm_original)
+    if fm_new.rstrip() == fm_original.rstrip():
+        return []
+    new_text = f'---\n{fm_new.rstrip()}\n---\n' + text[match.end():]
+    if not dry_run:
+        path.write_text(new_text)
+    return diagnostics
+
+
+def _find_md_files(root: Path) -> list[Path]:
+    return sorted(root.glob('*/*.md'))
+
+
+def _git_commit(store_root: Path, message: str) -> None:
+    subprocess.run(['git', '-C', str(store_root), 'add', '-A'], check=True)
+    result = subprocess.run(
+        ['git', '-C', str(store_root), 'diff', '--cached', '--quiet'],
+    )
+    if result.returncode == 0:
+        print('  (no staged changes — nothing to commit)')
+        return
+    subprocess.run(
+        ['git', '-C', str(store_root), 'commit', '-m', message],
+        check=True,
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument('--dry-run', action='store_true',
+                        help='report planned changes without writing')
+    parser.add_argument('--store', default='data/h5adstore',
+                        help='h5adstore root (default: data/h5adstore)')
+    parser.add_argument('--commit', metavar='MSG',
+                        help='after writing, git commit in the store with MSG')
+    args = parser.parse_args()
+
+    store_root = Path(args.store).resolve()
+    if not store_root.is_dir():
+        print(f'ERROR: {store_root} not found', file=sys.stderr)
+        return 2
+
+    md_files = _find_md_files(store_root)
+    print(f'Scanning {len(md_files)} .md files under {store_root} '
+          f'({"dry-run" if args.dry_run else "in-place"})')
+
+    n_touched = 0
+    total_changes = 0
+    for md in md_files:
+        diagnostics = _rewrite_file(md, dry_run=args.dry_run)
+        if diagnostics:
+            n_touched += 1
+            total_changes += len(diagnostics)
+            rel = md.relative_to(store_root)
+            print(f'\n[{rel}]')
+            for line in diagnostics:
+                print(f'  {line}')
+
+    print(f'\nSummary: {n_touched} file(s) touched, {total_changes} rename(s).')
+
+    if args.commit and not args.dry_run and n_touched:
+        print(f'\nCommitting to {store_root}...')
+        _git_commit(store_root, args.commit)
+
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

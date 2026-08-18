@@ -59,13 +59,21 @@ script_dir = Path(__file__).resolve().parent
 lib_dir = script_dir.parent.parent / 'lib'
 sys.path.insert(0, str(lib_dir))
 
-from h5adstore import iter_h5adstore   # type: ignore
-from metadata import parse_md_file      # type: ignore
-from scores_parquet import scores_path  # type: ignore
+from h5adstore import iter_h5adstore                              # type: ignore
+from metadata import parse_md_file                                 # type: ignore
+from scores_parquet import scores_path                             # type: ignore
+from canonical_columns import (                                    # type: ignore
+    CANONICAL_TAGS as _CANONICAL_TAG_IDS,
+    NUMERICAL_TAGS as _NUMERICAL_TAG_IDS,
+    CATEGORICAL_TAGS as _CATEGORICAL_TAG_IDS,
+    canonical_column,
+)
 
 
-NUMERICAL_TAGS = {'age', 'braak'}       # ordinal / continuous
-CATEGORICAL_TAGS = {'sex', 'host_sex', 'cluster', 'genotype', 'donor'}
+#: Numerical tag ids (ordinal / continuous). Kept as bare tag ids —
+#: the view column each maps to is `ant_<tag>`.
+NUMERICAL_TAGS = set(_NUMERICAL_TAG_IDS)
+CATEGORICAL_TAGS = set(_CATEGORICAL_TAG_IDS)
 
 
 def _numerical_column_kind(db: duckdb.DuckDBPyConnection, column: str) -> str:
@@ -141,21 +149,10 @@ def _r_squared(values: np.ndarray, x: np.ndarray) -> tuple[float, float, float]:
     return (r2, float(rho), float(p))
 
 
-#: Canonical columns that get a variability sweep on EVERY dataset that has
-#: them under those exact names in the view (obscat/obsnum after obs_rename
-#: is applied). Each is mapped to its tag id. Extends via obs_tags: entries.
+#: Canonical view column → tag id. Post-2026-08 the view column is
+#: `ant_<tag>` for every canonical tag. Extends via obs_tags: entries.
 _CANONICAL_TAGS = {
-    'sex':         'sex',
-    'braak':       'braak',
-    'braak_group': 'braak_group',
-    'donor_id':    'donor',
-    'cluster':     'cluster',
-    'age':         'age',
-    'disease':     'disease',
-    'condition':   'condition',
-    'apoe':        'apoe',
-    'pmi':         'pmi',
-    'region':      'region',
+    canonical_column(tag): tag for tag in _CANONICAL_TAG_IDS
 }
 
 

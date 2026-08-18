@@ -1,0 +1,110 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "requests",
+# ]
+# ///
+"""Rebuild the obscat/obsnum views on every dataset's .duckdb.
+
+Iterates all datasets from ant-serve's ``GET /databases`` and hits
+``POST /admin/refresh-views/{db_id}`` for each. Uses ant-serve's release
+→ rebuild → restore dance so in-flight queries complete cleanly.
+
+Prerequisite: ant-serve must be running.
+
+Usage:
+    ant-rebuild-obs-views                              # rebuild all
+    ant-rebuild-obs-views --only 'MY4/MTH'             # one db
+    ant-rebuild-obs-views --host http://127.0.0.1:8080 # override
+    ant-rebuild-obs-views --dry-run                    # list, don't touch
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import requests
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument('--host', default='http://127.0.0.1:8080',
+                        help='ant-serve URL (default: %(default)s)')
+    parser.add_argument('--only', metavar='DB_ID',
+                        help='only rebuild this db_id (e.g. MY4/MTH)')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='list what would be rebuilt without touching')
+    parser.add_argument('--stop-on-error', action='store_true',
+                        help='abort on first failure (default: continue)')
+    args = parser.parse_args()
+
+    session = requests.Session()
+
+    try:
+        r = session.get(f'{args.host}/api/databases', timeout=10)
+        r.raise_for_status()
+    except requests.RequestException as exc:
+        print(f'ERROR: cannot reach ant-serve at {args.host}: {exc}',
+              file=sys.stderr)
+        return 2
+
+    databases = r.json().get('databases', [])
+    if args.only:
+        databases = [d for d in databases if d.get('id') == args.only]
+        if not databases:
+            print(f'ERROR: no dataset with id {args.only!r}', file=sys.stderr)
+            return 2
+
+    print(f'{"Dry-run: " if args.dry_run else ""}Rebuilding views on '
+          f'{len(databases)} dataset(s)...')
+
+    failed = []
+    for i, db in enumerate(databases, start=1):
+        db_id = db['id']
+        if args.dry_run:
+            print(f'  [{i:3d}/{len(databases)}] {db_id}  (would rebuild)')
+            continue
+
+        try:
+            resp = session.post(
+                f'{args.host}/api/admin/refresh-views/{db_id}',
+                timeout=120,
+            )
+            if resp.status_code == 200:
+                body = resp.json()
+                rebuilt = body.get('rebuilt', [])
+                print(f'  [{i:3d}/{len(databases)}] {db_id:<30}  '
+                      f'ok — rebuilt {rebuilt}')
+            else:
+                detail = ''
+                try:
+                    detail = resp.json().get('detail', '')
+                except Exception:
+                    detail = resp.text[:200]
+                print(f'  [{i:3d}/{len(databases)}] {db_id:<30}  '
+                      f'FAILED ({resp.status_code}): {detail}',
+                      file=sys.stderr)
+                failed.append((db_id, resp.status_code, detail))
+                if args.stop_on_error:
+                    return 1
+        except requests.RequestException as exc:
+            print(f'  [{i:3d}/{len(databases)}] {db_id:<30}  '
+                  f'FAILED (network): {exc}', file=sys.stderr)
+            failed.append((db_id, 0, str(exc)))
+            if args.stop_on_error:
+                return 1
+
+    print()
+    print(f'Done: {len(databases) - len(failed)} ok, {len(failed)} failed.')
+    if failed:
+        print('\nFailures:')
+        for db_id, code, detail in failed:
+            print(f'  {db_id}: {code} {detail[:120]}')
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

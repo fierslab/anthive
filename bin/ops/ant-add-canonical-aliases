@@ -1,0 +1,284 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "requests",
+#     "pyyaml",
+# ]
+# ///
+"""Second-pass migration: add explicit `obs_rename` entries for bare
+canonical column names still surfacing in the DuckDB views.
+
+Some datasets have `.h5ad` obs columns already named `sex` / `braak` /
+`donor_id` / `cluster` etc. Their `.md` never needed an `obs_rename`
+because the name was already what we wanted. After the first-pass
+migration renamed all *explicit* obs_rename targets to `ant_<tag>`,
+these datasets STILL expose the bare short name in the view — so
+`ant-module-variability` can't find them under `ant_*`.
+
+This script queries ant-serve for each dataset's view columns; when a
+bare canonical name is present, it appends `<bare>: ant_<canonical>`
+to the dataset's `.md` `api.obs_rename` block.
+
+Usage:
+    ant-add-canonical-aliases --dry-run           # inspect
+    ant-add-canonical-aliases                     # rewrite in place
+    ant-add-canonical-aliases --commit "msg"      # + git commit in store
+    ant-add-canonical-aliases --host http://...   # override ant-serve URL
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+import requests
+
+script_dir = Path(__file__).resolve().parent
+lib_dir = script_dir.parent.parent / 'lib'
+sys.path.insert(0, str(lib_dir))
+
+from canonical_columns import (   # type: ignore
+    CANONICAL_TAGS,
+    LEGACY_ALIASES,
+    canonical_column,
+)
+
+
+#: bare name → canonical target name
+BARE_TO_CANONICAL = {
+    **{tag: canonical_column(tag) for tag in CANONICAL_TAGS},
+    **{legacy: canonical_column(canonical) for legacy, canonical in LEGACY_ALIASES.items()},
+}
+# Strip the ant_* names — they're already canonical, don't try to re-rename.
+BARE_TO_CANONICAL = {k: v for k, v in BARE_TO_CANONICAL.items()
+                     if not k.startswith('ant_')}
+
+
+FRONTMATTER_RE = re.compile(r'\A---\n(.*?)\n---\n', re.DOTALL)
+
+
+def _get_view_column_names(host: str, db_id: str) -> set[str]:
+    """Return the set of view column names as ant-serve reports them."""
+    r = requests.get(
+        f'{host}/api/databases/{db_id}/info',
+        timeout=10,
+    )
+    r.raise_for_status()
+    info = r.json()
+    obs = info.get('obs', {})
+    names: set[str] = set()
+    for k in ('numerical', 'categorical'):
+        items = obs.get(k, []) or []
+        for item in items:
+            if isinstance(item, str):
+                names.add(item)
+            elif isinstance(item, dict):
+                names.add(item.get('name', ''))
+    return {n for n in names if n}
+
+
+def _md_path_from_db(db: dict, store_root: Path) -> Path | None:
+    """Resolve a database dict → its .md file path."""
+    path = db.get('path')
+    if not path:
+        return None
+    # `.duckdb` next to `.md` under the store; swap extension.
+    md_path = store_root / path
+    md_path = md_path.with_suffix('.md')
+    return md_path if md_path.exists() else None
+
+
+def _add_obs_rename_entries(
+    fm: str,
+    to_add: dict[str, str],
+) -> tuple[str, list[str]]:
+    """Add entries to the obs_rename block. Returns (new_fm, diagnostics).
+
+    Handles three cases:
+    * `obs_rename: {}` — replace with a full block
+    * `obs_rename:` followed by indented entries — append entries
+    * no `obs_rename` — no-op (won't happen for our targets)
+    """
+    diagnostics: list[str] = []
+    lines = fm.splitlines()
+
+    # Locate the obs_rename block AND collect obs_derive keys so we can
+    # avoid the derive/rename-target collision the metadata validator
+    # rejects.
+    in_api = False
+    in_od = False
+    obs_rename_idx = None
+    obs_derive_keys: set[str] = set()
+    for i, line in enumerate(lines):
+        if re.match(r'^api:\s*$', line):
+            in_api = True
+            continue
+        if in_api and line and not line.startswith(' '):
+            in_api = False
+            in_od = False
+        if in_api and re.match(r'^  obs_rename:\s*(\{\})?\s*$', line):
+            if obs_rename_idx is None:
+                obs_rename_idx = i
+            continue
+        if in_api and re.match(r'^  obs_derive:\s*(\{\})?\s*$', line):
+            in_od = True
+            continue
+        if in_api and re.match(r'^  [a-zA-Z_]', line):
+            in_od = False
+        if in_od:
+            m = re.match(r'^    ([A-Za-z_][A-Za-z_0-9]*):\s*', line)
+            if m:
+                obs_derive_keys.add(m.group(1))
+
+    if obs_rename_idx is None:
+        return fm, []
+
+    # Drop any to_add whose target is already claimed by obs_derive —
+    # the metadata validator (get_api_config) rejects the .md otherwise.
+    filtered: dict[str, str] = {}
+    for bare, target in to_add.items():
+        if target in obs_derive_keys:
+            diagnostics.append(
+                f'skip {bare} → {target} (obs_derive already produces it)'
+            )
+            continue
+        filtered[bare] = target
+    to_add = filtered
+
+    original = lines[obs_rename_idx]
+    is_inline_empty = original.strip().endswith('{}')
+
+    if is_inline_empty:
+        # Replace `obs_rename: {}` with a proper block and add entries.
+        new_lines = ['  obs_rename:']
+        for bare, target in sorted(to_add.items()):
+            new_lines.append(f'    {bare}: {target}')
+            diagnostics.append(f'add obs_rename: {bare} → {target}')
+        lines[obs_rename_idx:obs_rename_idx + 1] = new_lines
+    else:
+        # Find where the existing obs_rename block ends and append.
+        insert_at = obs_rename_idx + 1
+        while insert_at < len(lines) and lines[insert_at].startswith('    '):
+            insert_at += 1
+        # Existing source keys + targets — for both idempotence and
+        # collision detection.
+        existing_sources: set[str] = set()
+        existing_targets: set[str] = set()
+        for j in range(obs_rename_idx + 1, insert_at):
+            m = re.match(r'^    ([^:]+):\s*([^\s#]+)\s*', lines[j])
+            if m:
+                existing_sources.add(m.group(1).strip())
+                existing_targets.add(m.group(2).strip())
+        added_lines = []
+        for bare, target in sorted(to_add.items()):
+            if bare in existing_sources:
+                continue
+            if target in existing_targets:
+                # Another source is already renamed to this ant_* target;
+                # emitting a duplicate would break the view. Skip — leave
+                # the bare column visible as a passthrough. Manual review
+                # of the resulting duplicate columns is a follow-up.
+                diagnostics.append(
+                    f'skip {bare} → {target} (target already claimed)'
+                )
+                continue
+            added_lines.append(f'    {bare}: {target}')
+            diagnostics.append(f'add obs_rename: {bare} → {target}')
+        if added_lines:
+            lines[insert_at:insert_at] = added_lines
+
+    return '\n'.join(lines), diagnostics
+
+
+def _rewrite_md(path: Path, to_add: dict[str, str], dry_run: bool) -> list[str]:
+    text = path.read_text()
+    match = FRONTMATTER_RE.match(text)
+    if not match:
+        return []
+    fm_original = match.group(1)
+    fm_new, diagnostics = _add_obs_rename_entries(fm_original, to_add)
+    if not diagnostics:
+        return []
+    new_text = f'---\n{fm_new.rstrip()}\n---\n' + text[match.end():]
+    if not dry_run:
+        path.write_text(new_text)
+    return diagnostics
+
+
+def _git_commit(store_root: Path, message: str) -> None:
+    subprocess.run(['git', '-C', str(store_root), 'add', '-A'], check=True)
+    result = subprocess.run(
+        ['git', '-C', str(store_root), 'diff', '--cached', '--quiet'],
+    )
+    if result.returncode == 0:
+        print('  (no staged changes — nothing to commit)')
+        return
+    subprocess.run(
+        ['git', '-C', str(store_root), 'commit', '-m', message],
+        check=True,
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument('--host', default='http://127.0.0.1:8080')
+    parser.add_argument('--store', default='data/h5adstore')
+    parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--commit', metavar='MSG',
+                        help='after writing, git commit in the store with MSG')
+    args = parser.parse_args()
+
+    store_root = Path(args.store).resolve()
+    if not store_root.is_dir():
+        print(f'ERROR: {store_root} not found', file=sys.stderr)
+        return 2
+
+    r = requests.get(f'{args.host}/api/databases', timeout=10)
+    r.raise_for_status()
+    databases = r.json().get('databases', [])
+    print(f'Scanning {len(databases)} datasets from {args.host}')
+    print(f'Bare-canonical → ant_ mapping: {sorted(BARE_TO_CANONICAL.items())}')
+
+    n_touched = 0
+    for i, db in enumerate(databases, start=1):
+        db_id = db['id']
+        try:
+            view_cols = _get_view_column_names(args.host, db_id)
+        except requests.RequestException as exc:
+            print(f'  [{i:3d}/{len(databases)}] {db_id:<30}  '
+                  f'skip (info: {exc})', file=sys.stderr)
+            continue
+
+        bare_present = {n: BARE_TO_CANONICAL[n]
+                        for n in sorted(view_cols)
+                        if n in BARE_TO_CANONICAL}
+        if not bare_present:
+            continue
+
+        md_path = _md_path_from_db(db, store_root)
+        if md_path is None:
+            print(f'  [{i:3d}/{len(databases)}] {db_id:<30}  '
+                  f'skip (no .md)', file=sys.stderr)
+            continue
+
+        diagnostics = _rewrite_md(md_path, bare_present, dry_run=args.dry_run)
+        if diagnostics:
+            n_touched += 1
+            print(f'\n[{md_path.relative_to(store_root)}]')
+            for line in diagnostics:
+                print(f'  {line}')
+
+    print(f'\nSummary: {n_touched} file(s) touched.')
+
+    if args.commit and not args.dry_run and n_touched:
+        print(f'\nCommitting to {store_root}...')
+        _git_commit(store_root, args.commit)
+
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
