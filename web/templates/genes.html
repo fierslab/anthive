@@ -33,7 +33,10 @@
   .gv-table th.gv-sort-asc::after  { content: ' ▲'; font-size: 9px; color: var(--link); }
   .gv-table th.gv-sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--link); }
   .gv-table td { padding: 3px 8px; border-bottom: 1px solid var(--border-light); vertical-align: middle; }
-  .gv-table .gv-val { font-family: var(--font-mono); text-align: right; }
+  .gv-table td.gv-narrow {
+    max-width: 12ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .gv-table .gv-val { font-family: var(--font-mono); text-align: right; font-variant-numeric: tabular-nums; }
   .gv-table .gv-icons a {
     display: inline-flex; text-decoration: none; color: var(--text-muted);
     font-size: 14px; padding: 0 3px;
@@ -226,9 +229,32 @@
   }
 
   // ── sparkline: minimal grey bar + black tick at the given fraction (0–1) ──
-  function sparkline(frac) {
+  // val, statMax, statLabel, gene are used to compose the hover tooltip.
+  function sparkline(frac, val, statMax, statLabel, gene) {
     var pct = Math.max(0, Math.min(100, (frac || 0) * 100));
-    return '<span class="ss"><span class="ss-tick" style="left:' + pct.toFixed(1) + '%"></span></span>';
+    var tip = '';
+    if (statLabel && gene) {
+      var valStr  = val  != null ? num(val,  statLabel === 'pct_nonzero' ? 1 : 3) : '—';
+      var maxStr  = statMax != null ? num(statMax, statLabel === 'pct_nonzero' ? 1 : 3) : '—';
+      if (statLabel === 'pct_nonzero') {
+        tip = 'pct_nonzero = ' + valStr + '%'
+            + '  ·  fraction of cells with detectable UMIs of ' + gene
+            + ' in this dataset'
+            + '  ·  scale: 0–100%';
+      } else if (statLabel === 'mean') {
+        tip = 'mean = ' + valStr
+            + '  ·  avg log-norm expression across all cells (incl. zeros)'
+            + '  ·  position on the range 0–' + maxStr
+            + ' across all genes in this dataset';
+      } else if (statLabel === 'mean_nonzero') {
+        tip = 'mean_nonzero = ' + valStr
+            + '  ·  avg expression among cells that express ' + gene
+            + '  ·  position on the range 0–' + maxStr
+            + ' across all genes in this dataset';
+      }
+    }
+    var titleAttr = tip ? ' title="' + tip.replace(/"/g, '&quot;') + '"' : '';
+    return '<span class="ss"' + titleAttr + '><span class="ss-tick" style="left:' + pct.toFixed(1) + '%"></span></span>';
   }
 
   // SVG icons
@@ -486,15 +512,18 @@
       // We embed organism full name from PILLS for display; cell_type / tissue / system from DS_ANNOT.
       var orgPill  = p.organism ? '<span title="' + esc(((p.organism || {}).full || '')) + '">' + esc(((p.organism || {}).abbrev || '')) + '</span>' : '—';
       // sparklines: position of the value within the across-dataset range
-      var pctSpark  = sparkline((r.pct_nonzero  || 0) / STAT_MAX.pct_nonzero);
-      var meanSpark = sparkline((r.mean         || 0) / STAT_MAX.mean);
-      var mnzSpark  = sparkline((r.mean_nonzero || 0) / STAT_MAX.mean_nonzero);
+      var pctSpark  = sparkline((r.pct_nonzero  || 0) / STAT_MAX.pct_nonzero,
+                                r.pct_nonzero,  STAT_MAX.pct_nonzero,  'pct_nonzero',  GENE);
+      var meanSpark = sparkline((r.mean         || 0) / STAT_MAX.mean,
+                                r.mean,         STAT_MAX.mean,         'mean',          GENE);
+      var mnzSpark  = sparkline((r.mean_nonzero || 0) / STAT_MAX.mean_nonzero,
+                                r.mean_nonzero, STAT_MAX.mean_nonzero, 'mean_nonzero',  GENE);
       return '<tr>'
         + '<td>' + dsCell(r.db_id) + '</td>'
         + '<td>' + orgPill + '</td>'
-        + '<td class="muted" style="font-size:11px">' + esc(ann.celltype || '') + '</td>'
-        + '<td class="muted" style="font-size:11px">' + esc(ann.tissue || '')   + '</td>'
-        + '<td class="muted" style="font-size:11px">' + esc(ann.system || '')   + '</td>'
+        + '<td class="muted gv-narrow" style="font-size:11px" title="' + esc(ann.celltype || '') + '">' + esc(ann.celltype || '') + '</td>'
+        + '<td class="muted gv-narrow" style="font-size:11px" title="' + esc(ann.tissue   || '') + '">' + esc(ann.tissue   || '') + '</td>'
+        + '<td class="muted gv-narrow" style="font-size:11px" title="' + esc(ann.system   || '') + '">' + esc(ann.system   || '') + '</td>'
         + '<td class="gv-val">' + num(r.pct_nonzero, 1) + '% ' + pctSpark  + '</td>'
         + '<td class="gv-val">' + num(r.mean, 3)        + ' '  + meanSpark + '</td>'
         + '<td class="gv-val">' + num(r.mean_nonzero, 2)+ ' '  + mnzSpark  + '</td>'

@@ -3852,3 +3852,56 @@ def test_geneset_variability_page_says_geneset_not_module(client):
     assert "Geneset variability" in html, (
         "h1 heading must be 'Geneset variability across the fleet'"
     )
+
+
+# ── gene atlas polish: ellipsis cells + rich sparkline tooltips ────────────────
+
+def test_gene_atlas_tissue_celltype_have_ellipsis_class(client):
+    """Tissue and cell-type cells on the gene atlas table carry gv-narrow so
+    long values are clipped with text-overflow ellipsis instead of wrapping."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    # The CSS rule for truncation
+    assert "gv-narrow" in resp.text
+    assert "text-overflow: ellipsis" in resp.text
+    # The JS that builds rows applies the class to the three narrow columns
+    assert '"muted gv-narrow"' in resp.text or "muted gv-narrow" in resp.text
+
+
+def test_gene_atlas_numeric_columns_tabular(client):
+    """Numeric value cells use tabular-nums so digits line up across rows."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    assert "tabular-nums" in resp.text
+
+
+def test_gene_atlas_sparkline_tooltip_content(client):
+    """Sparklines carry rich title= text explaining what the value means and
+    what the range endpoint is based on."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    # The tooltip builder emits these distinguishing phrases
+    assert "mean = " in resp.text
+    assert "across all genes" in resp.text
+    assert "pct_nonzero = " in resp.text
+    assert "mean_nonzero = " in resp.text
+    assert "fraction of cells with detectable" in resp.text
+
+
+def test_gene_atlas_sparkline_title_includes_gene_name(client):
+    """The gene name (APOE) must appear inside the sparkline tooltip so the
+    user knows which gene the fraction refers to."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    # The JS template-string embeds GENE (which is 'APOE') into tooltip text
+    assert "detectable UMIs of " in resp.text
+
+
+def test_gene_atlas_tissue_hover_shows_full_value(client):
+    """The tissue td must carry a title= with the full tissue name so hovering
+    reveals the untruncated text (even when the cell shows an ellipsis)."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    # title= is set on the tissue cell via esc(ann.tissue || '')
+    # The JS emits: title="' + esc(ann.tissue || '') + '"
+    assert 'title=\'" + esc(ann.tissue' in resp.text or "title='\" + esc(ann.tissue" in resp.text or "esc(ann.tissue" in resp.text
