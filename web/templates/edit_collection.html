@@ -24,7 +24,11 @@
   @media (max-width: 700px) { .ef-grid, .md-split { grid-template-columns: 1fr; } }
 </style>
 
-<div class="breadcrumb"><a href="/">datasets</a><span class="bc-sep">/</span><a href="/browse/{{ group_id|urlencode }}">{{ group_id }}</a><span class="bc-sep">/</span>edit</div>
+{% from "_macros.html" import breadcrumb %}
+{{ breadcrumb([
+    (group_id, "/browse/" ~ (group_id | urlencode)),
+    ("edit", None)
+], ids=[("collection", group_id)]) }}
 <h1 class="page-title">Edit collection <span class="mono">{{ group_id }}</span>
   <span class="info" title="Admin only. Writes index.md directly to disk on the server. The data store is a git repo — commit/push the change yourself afterwards.">ⓘ</span></h1>
 

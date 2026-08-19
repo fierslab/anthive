@@ -3,13 +3,12 @@
 {% block title %}{{ study }}/{{ experiment }} — genesets{% endblock %}
 
 {% block content %}
-<div class="breadcrumb">
-    <a href="/genesets">gene sets</a>
-    <span class="bc-sep">/</span>
-    {{ study }}
-    <span class="bc-sep">/</span>
-    <strong>{{ experiment }}</strong>
-</div>
+{% from "_macros.html" import breadcrumb %}
+{{ breadcrumb([
+    ("gene sets", "/genesets"),
+    (study, ""),
+    (experiment, None)
+]) }}
 
 <h1 class="page-title">{{ metadata.get('name', experiment) }}</h1>
 {% if metadata.get('description') %}

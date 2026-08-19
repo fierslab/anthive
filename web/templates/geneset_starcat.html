@@ -21,15 +21,13 @@
   .wbar.neg { background: #dc2626; }
 </style>
 
-<div class="breadcrumb">
-    <a href="/genesets">gene sets</a>
-    <span class="bc-sep">/</span>
-    <a href="/genesets?group=starcat">starCAT</a>
-    <span class="bc-sep">/</span>
-    {{ catalog_id }}
-    <span class="bc-sep">/</span>
-    <strong>{{ module_name }}</strong>
-</div>
+{% from "_macros.html" import breadcrumb %}
+{{ breadcrumb([
+    ("gene sets", "/genesets"),
+    ("starCAT", "/genesets?group=starcat"),
+    (catalog_id, ""),
+    (module_name, None)
+]) }}
 
 <h1 class="page-title">{{ module_name }}<span class="sc-group" id="sc-group" style="display:none"></span></h1>
 <div class="sc-desc" id="sc-desc"></div>

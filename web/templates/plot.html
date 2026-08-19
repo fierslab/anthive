@@ -207,15 +207,12 @@
   }
 </style>
 
-<div class="breadcrumb">
-  <a href="/">datasets</a>
-  <span class="bc-sep">/</span>
-  <a href="/browse/{{ folder_browse_id }}">{{ folder_name }}</a>
-  <span class="bc-sep">/</span>
-  <a href="/browse/{{ folder_browse_id }}/{{ file_id }}">{{ dataset_name }}</a>
-  <span class="bc-sep">/</span>
-  <span>{{ geom_icon }} {{ geom_label }}</span>
-</div>
+{% from "_macros.html" import breadcrumb %}
+{{ breadcrumb([
+    (folder_name, "/browse/" ~ folder_browse_id),
+    (dataset_name, "/browse/" ~ folder_browse_id ~ "/" ~ file_id),
+    (geom_icon ~ " " ~ geom_label, None)
+], ids=[("collection", group_id), ("dataset", file_id)]) }}
 <h1 class="page-title">{{ geom_icon }} {{ geom_label }} — {{ dataset_name }}</h1>
 
 {# ── Known caveats banner (task #254) ──────────────────────────────────

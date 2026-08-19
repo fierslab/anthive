@@ -13,7 +13,8 @@
   .priv .k { font-weight: 600; }
 </style>
 
-<div class="breadcrumb"><a href="/">datasets</a><span class="bc-sep">/</span>privacy</div>
+{% from "_macros.html" import breadcrumb %}
+{{ breadcrumb([("privacy", None)]) }}
 
 <div class="priv">
   <h1>Chat assistant — privacy &amp; data handling</h1>

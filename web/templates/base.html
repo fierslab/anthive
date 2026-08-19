@@ -166,10 +166,39 @@
         .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; }
         .dot-ok { background: #16a34a; } .dot-warn { background: #ea580c; } .dot-err { background: #dc2626; } .dot-pending { background: #2563eb; }
 
-        .breadcrumb { font-size: 12px; color: var(--text-muted); margin-bottom: 2px; }
+        /* ── Unified breadcrumb (all pages) ────────────────────────────────
+           .breadcrumb        — the row container
+           .bc-home           — home link (always leftmost, href="/")
+           .bc-sep            — "/" separator
+           .bc-current        — bold last/active crumb
+           .bc-ids            — right-aligned id-copy chip cluster
+           .bc-id-chip        — one copyable id (monospace grey, user-select:all)
+           .bc-id-chip.copied — brief green flash on copy
+        ───────────────────────────────────────────────────────────────── */
+        .breadcrumb {
+            font-size: 12px; color: var(--text-muted); margin-bottom: 2px;
+            display: flex; align-items: center; flex-wrap: wrap; gap: 0 2px;
+        }
         .breadcrumb a { color: var(--text-muted); }
-        .breadcrumb .slug { color: #bbb; font-size: 11px; font-family: var(--font-mono); margin-left: 2px; }
+        .breadcrumb a:hover { color: var(--link); text-decoration: underline; }
+        .breadcrumb .bc-home { font-size: 12px; color: var(--text-muted); }
         .breadcrumb .bc-sep { color: #cbd5e1; margin: 0 2px; }
+        .breadcrumb .bc-current { font-size: 12px; font-weight: 700; color: var(--text); }
+        .breadcrumb .bc-inert { font-size: 12px; color: var(--text-muted); }
+        .breadcrumb .slug { color: #bbb; font-size: 11px; font-family: var(--font-mono); margin-left: 2px; }
+        /* ID-copy chips — float to the right of the trail */
+        .breadcrumb .bc-ids { margin-left: auto; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+        .bc-id-chip {
+            display: inline-flex; align-items: center; gap: 4px;
+            font-family: var(--font-mono); font-size: 11px; color: #94a3b8;
+            background: #f8fafc; border: 1px solid var(--border);
+            border-radius: 4px; padding: 1px 6px; cursor: pointer;
+            user-select: all; white-space: nowrap;
+            transition: background .1s, color .1s;
+        }
+        .bc-id-chip:hover { background: #e0e7ff; color: var(--text); }
+        .bc-id-chip.copied { background: #bbf7d0; color: #166534; border-color: #86efac; }
+        .bc-id-chip .bc-id-key { font-size: 9px; text-transform: uppercase; letter-spacing: .4px; color: #cbd5e1; }
 
         .page-title { font-size: 18px; font-weight: 600; color: var(--text); margin: 2px 0 6px; line-height: 1.25; }
 
@@ -525,6 +554,25 @@
             return sel.value;
         }
     };
+    </script>
+    <script>
+    // Breadcrumb ID-copy chips — .bc-id-chip elements (rendered by the
+    // breadcrumb() macro). Click copies the chip's data-copy value to the
+    // clipboard and flashes a "copied" state for 1 second.
+    document.addEventListener('click', function (evt) {
+        var chip = evt.target.closest('.bc-id-chip');
+        if (!chip) return;
+        var text = chip.dataset.copy || chip.textContent.trim();
+        navigator.clipboard.writeText(text).then(function () {
+            chip.classList.add('copied');
+            var orig = chip.title;
+            chip.title = 'copied!';
+            setTimeout(function () {
+                chip.classList.remove('copied');
+                chip.title = orig;
+            }, 1000);
+        }).catch(function () {});
+    });
     </script>
     <main>
         {% block content %}{% endblock %}

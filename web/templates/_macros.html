@@ -1,7 +1,51 @@
 {# Sitewide Jinja macros — import with:
-       {% from "_macros.html" import col_label %}
-   in any template that renders obs column names.
+       {% from "_macros.html" import col_label, breadcrumb %}
+   in any template that renders obs column names or a breadcrumb trail.
 #}
+
+{# breadcrumb(trail, ids=None)
+
+   Renders a unified breadcrumb row used on every page.
+
+   Args:
+     trail: List of (label, href) tuples. Three possible href values:
+              - a non-empty string  → rendered as a link
+              - ""  (empty string)  → plain muted text, no link, not bold
+                                      (intermediate label without a page)
+              - None                → bold .bc-current span (the active page)
+            A "home" link (href="/") is always prepended automatically.
+     ids:   Optional list of (key, value) tuples for copy-chip IDs shown
+            right-aligned on the same row. Example: [("collection", "SP4"),
+            ("dataset", "SP4/MTH")]. Each chip is clickable and copies its
+            value to the clipboard (JS in base.html handles the click).
+
+   The home icon is the word "home" styled as a muted link — keeps it subtle
+   and screen-reader-friendly.
+#}
+{% macro breadcrumb(trail, ids=None) -%}
+<nav class="breadcrumb" aria-label="breadcrumb">
+  <a class="bc-home" href="/" title="catalogue home">home</a>
+  {%- for label, href in trail -%}
+  <span class="bc-sep">/</span>
+  {%- if href is none -%}
+  <span class="bc-current">{{ label }}</span>
+  {%- elif href -%}
+  <a href="{{ href }}">{{ label }}</a>
+  {%- else -%}
+  <span class="bc-inert">{{ label }}</span>
+  {%- endif -%}
+  {%- endfor -%}
+  {%- if ids -%}
+  <span class="bc-ids">
+    {%- for key, value in ids -%}
+    <span class="bc-id-chip" data-copy="{{ value }}" title="click to copy {{ key }}: {{ value }}">
+      <span class="bc-id-key">{{ key }}</span>{{ value }}
+    </span>
+    {%- endfor -%}
+  </span>
+  {%- endif -%}
+</nav>
+{%- endmacro %}
 
 {# col_label(name): display transform for obs column names.
 

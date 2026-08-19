@@ -92,7 +92,8 @@
   .gene-filters select { font-size: 12px; padding: 2px 6px; border: 1px solid var(--border); border-radius: 4px; background: #fff; font-family: var(--font); color: var(--text); }
 </style>
 
-<div class="breadcrumb"><a href="/">datasets</a><span class="bc-sep">/</span>gene atlas</div>
+{% from "_macros.html" import breadcrumb %}
+{{ breadcrumb([("gene atlas", None)]) }}
 <h1 class="page-title">{{ gene }} <span class="muted" style="font-size:13px;font-weight:normal">— expression across the catalogue</span></h1>
 
 <div class="gene-filters">
