@@ -49,12 +49,16 @@
   .gv-ds-pop { position: relative; display: inline-block; }
   .gv-ds-tip {
     display: none; position: absolute; top: calc(100% + 4px); left: 0; z-index: 200;
-    min-width: 240px; max-width: 340px; background: #fff; border: 1px solid #e5e7eb;
+    min-width: 260px; max-width: 400px; background: #fff; border: 1px solid #e5e7eb;
     border-radius: 6px; padding: 8px 12px; box-shadow: 0 4px 12px rgba(0,0,0,.08);
     font-size: 11px; line-height: 1.5; white-space: normal; pointer-events: none;
   }
   .gv-ds-pop:hover .gv-ds-tip { display: block; }
-  .gv-ds-tip .tip-title { font-weight: 600; font-size: 12px; margin-bottom: 4px; color: #1e293b; }
+  .gv-ds-tip .tip-coll-name { font-weight: 700; font-size: 12px; color: #1e293b; }
+  .gv-ds-tip .tip-coll-desc { color: #64748b; font-size: 10.5px; margin-bottom: 5px; }
+  .gv-ds-tip .tip-sep       { border: none; border-top: 1px solid #e5e7eb; margin: 5px 0; }
+  .gv-ds-tip .tip-title { font-weight: 600; font-size: 12px; margin-bottom: 2px; color: #1e293b; }
+  .gv-ds-tip .tip-ds-desc { color: #64748b; font-size: 10.5px; margin-bottom: 4px; }
   .gv-ds-tip .tip-row   { color: #475569; }
   .gv-ds-tip .tip-id    { font-family: var(--font-mono); color: var(--text-muted); font-size: 10px; margin-top: 4px; }
 
@@ -123,11 +127,21 @@
   </div>
 </div>
 
-{# ── Row 2: cell type · tissue · system ── #}
+{# ── Row 2: cell type · tissue · technology · biosample · n cells ── #}
 <div class="gv-filter-row">
   <div><label>cell type</label><select id="gv-flt-cell_type"><option value="">any</option>{% for v in filter_opts.cell_type %}<option value="{{ v }}">{{ v }}</option>{% endfor %}</select></div>
   <div><label>tissue</label><select id="gv-flt-tissue"><option value="">any</option>{% for v in filter_opts.tissue %}<option value="{{ v }}">{{ v }}</option>{% endfor %}</select></div>
-  <div><label>system</label><select id="gv-flt-system"><option value="">any</option></select></div>
+  <div><label>technology</label><select id="gv-flt-technology"><option value="">any</option></select></div>
+  <div><label>biosample</label><select id="gv-flt-biosample"><option value="">any</option></select></div>
+  <div><label>n cells</label>
+    <select id="gv-flt-n_cells">
+      <option value="">any</option>
+      <option value="lt1k">&lt;1k</option>
+      <option value="1k-10k">1k–10k</option>
+      <option value="10k-100k">10k–100k</option>
+      <option value="gt100k">&gt;100k</option>
+    </select>
+  </div>
 </div>
 
 <div class="gv-summary-row"><span id="gv-summary"></span></div>
@@ -149,7 +163,7 @@
       <th data-sortcol="organism">organism</th>
       <th data-sortcol="cell_type">cell type</th>
       <th data-sortcol="tissue">tissue</th>
-      <th data-sortcol="system">system</th>
+      <th data-sortcol="biosample">biosample</th>
       <th data-sortcol="pct_nonzero" style="text-align:right">%expr</th>
       <th data-sortcol="mean" style="text-align:right">mean</th>
       <th data-sortcol="mean_nonzero" style="text-align:right">meannz</th>
@@ -196,11 +210,13 @@
 
   // Filter selects
   var flt = {
-    pct:       document.getElementById('gv-flt-pct'),
-    organism:  document.getElementById('gv-flt-organism'),
-    cell_type: document.getElementById('gv-flt-cell_type'),
-    tissue:    document.getElementById('gv-flt-tissue'),
-    system:    document.getElementById('gv-flt-system'),
+    pct:        document.getElementById('gv-flt-pct'),
+    organism:   document.getElementById('gv-flt-organism'),
+    cell_type:  document.getElementById('gv-flt-cell_type'),
+    tissue:     document.getElementById('gv-flt-tissue'),
+    technology: document.getElementById('gv-flt-technology'),
+    biosample:  document.getElementById('gv-flt-biosample'),
+    n_cells:    document.getElementById('gv-flt-n_cells'),
   };
 
   // Sort state for single-gene table
@@ -266,10 +282,17 @@
   function dsTip(dbId) {
     var ann = DS_ANNOT[dbId] || {};
     var rows = '';
+    // Collection header
+    if (ann.collection_name) rows += '<div class="tip-coll-name">' + esc(ann.collection_name) + '</div>';
+    if (ann.collection_desc) rows += '<div class="tip-coll-desc">' + esc(ann.collection_desc) + '</div>';
+    if (ann.collection_name || ann.collection_desc) rows += '<hr class="tip-sep">';
+    // Dataset section
     if (ann.title)       rows += '<div class="tip-title">' + esc(ann.title) + '</div>';
+    if (ann.dataset_desc) rows += '<div class="tip-ds-desc">' + esc(ann.dataset_desc) + '</div>';
     if (ann.celltype)    rows += '<div class="tip-row">Cell type: ' + esc(ann.celltype) + '</div>';
     if (ann.tissue)      rows += '<div class="tip-row">Tissue: '    + esc(ann.tissue)   + '</div>';
-    if (ann.system)      rows += '<div class="tip-row">System: '    + esc(ann.system)   + '</div>';
+    if (ann.technology)  rows += '<div class="tip-row">Technology: ' + esc(ann.technology) + '</div>';
+    if (ann.biosample)   rows += '<div class="tip-row">Biosample: '  + esc(ann.biosample)  + '</div>';
     if (ann.n_cells)     rows += '<div class="tip-row">Cells: '     + esc(ann.n_cells)  + '</div>';
     rows += '<div class="tip-id">' + esc(dbId) + '</div>';
     return '<div class="gv-ds-tip">' + rows + '</div>';
@@ -337,7 +360,7 @@
   function buildHashFromFilters() {
     var pairs = [];
     // filter values
-    ['organism', 'cell_type', 'tissue', 'system'].forEach(function (k) {
+    ['organism', 'cell_type', 'tissue', 'technology', 'biosample', 'n_cells'].forEach(function (k) {
       var sel = flt[k]; if (!sel || !sel.value) return;
       pairs.push(k + '=' + encodeURIComponent(sel.value));
     });
@@ -357,11 +380,13 @@
   }
 
   function applyHashFilters(parsed) {
-    if (parsed.organism  && flt.organism)  flt.organism.value  = parsed.organism;
-    if (parsed.cell_type && flt.cell_type) flt.cell_type.value = parsed.cell_type;
-    if (parsed.tissue    && flt.tissue)    flt.tissue.value    = parsed.tissue;
-    if (parsed.system    && flt.system)    flt.system.value    = parsed.system;
-    if (parsed.pct       && flt.pct)       flt.pct.value       = parsed.pct;
+    if (parsed.organism   && flt.organism)   flt.organism.value   = parsed.organism;
+    if (parsed.cell_type  && flt.cell_type)  flt.cell_type.value  = parsed.cell_type;
+    if (parsed.tissue     && flt.tissue)     flt.tissue.value     = parsed.tissue;
+    if (parsed.technology && flt.technology) flt.technology.value = parsed.technology;
+    if (parsed.biosample  && flt.biosample)  flt.biosample.value  = parsed.biosample;
+    if (parsed.n_cells    && flt.n_cells)    flt.n_cells.value    = parsed.n_cells;
+    if (parsed.pct        && flt.pct)        flt.pct.value        = parsed.pct;
     if (parsed.sort) {
       var sp = parsed.sort.split(':');
       if (sp.length === 2) { sortState.col = sp[0]; sortState.dir = sp[1] === 'asc' ? 'asc' : 'desc'; }
@@ -416,21 +441,25 @@
   });
   updateSortIndicators();
 
-  // ── populate the system dropdown from DS_ANNOT (server only sends cell_type / tissue) ──
+  // ── populate technology and biosample dropdowns from DS_ANNOT ──────────────
   (function () {
-    var systems = {};
+    var technologies = {}, biosamples = {};
     Object.keys(DS_ANNOT).forEach(function (dbId) {
-      var sys = DS_ANNOT[dbId].system || '';
-      sys.split(',').forEach(function (v) { var t = v.trim(); if (t) systems[t] = 1; });
+      var ann = DS_ANNOT[dbId];
+      (ann.technology || '').split(',').forEach(function (v) { var t = v.trim(); if (t) technologies[t] = 1; });
+      (ann.biosample  || '').split(',').forEach(function (v) { var t = v.trim(); if (t) biosamples[t]   = 1; });
     });
-    var opts = ['<option value="">any</option>'];
-    Object.keys(systems).sort().forEach(function (v) {
-      opts.push('<option value="' + esc(v) + '">' + esc(v) + '</option>');
-    });
-    flt.system.innerHTML = opts.join('');
-    // Re-apply hash value now that options exist.
+    function buildOpts(map) {
+      var opts = ['<option value="">any</option>'];
+      Object.keys(map).sort().forEach(function (v) { opts.push('<option value="' + esc(v) + '">' + esc(v) + '</option>'); });
+      return opts.join('');
+    }
+    if (flt.technology) flt.technology.innerHTML = buildOpts(technologies);
+    if (flt.biosample)  flt.biosample.innerHTML  = buildOpts(biosamples);
+    // Re-apply hash values now that options exist.
     var parsed = parseHashFilters();
-    if (parsed.system) flt.system.value = parsed.system;
+    if (parsed.technology && flt.technology) flt.technology.value = parsed.technology;
+    if (parsed.biosample  && flt.biosample)  flt.biosample.value  = parsed.biosample;
   }());
 
   // ── single-gene render ──────────────────────────────────────────────────────
@@ -468,12 +497,35 @@
       });
     }
 
-    // Filter: system
-    if (flt.system && flt.system.value) {
-      var sysVal = flt.system.value.toLowerCase();
+    // Filter: technology
+    if (flt.technology && flt.technology.value) {
+      var techFltVal = flt.technology.value.toLowerCase();
       rows = rows.filter(function (r) {
         var ann = DS_ANNOT[r.db_id] || {};
-        return (ann.system || '').toLowerCase().indexOf(sysVal) !== -1;
+        return (ann.technology || '').toLowerCase().indexOf(techFltVal) !== -1;
+      });
+    }
+
+    // Filter: biosample
+    if (flt.biosample && flt.biosample.value) {
+      var bioFltVal = flt.biosample.value.toLowerCase();
+      rows = rows.filter(function (r) {
+        var ann = DS_ANNOT[r.db_id] || {};
+        return (ann.biosample || '').toLowerCase().indexOf(bioFltVal) !== -1;
+      });
+    }
+
+    // Filter: n_cells bucket
+    if (flt.n_cells && flt.n_cells.value) {
+      var ncBucket = flt.n_cells.value;
+      rows = rows.filter(function (r) {
+        var ann = DS_ANNOT[r.db_id] || {};
+        var nc = parseInt(ann.n_cells || '0', 10) || 0;
+        if (ncBucket === 'lt1k')     return nc < 1000;
+        if (ncBucket === '1k-10k')   return nc >= 1000 && nc < 10000;
+        if (ncBucket === '10k-100k') return nc >= 10000 && nc < 100000;
+        if (ncBucket === 'gt100k')   return nc >= 100000;
+        return true;
       });
     }
 
@@ -491,7 +543,7 @@
         return mul * String((pa.organism || {}).full || '').localeCompare(String((pb.organism || {}).full || ''));
       });
     } else {
-      // cell_type / tissue / system — sort via DS_ANNOT
+      // cell_type / tissue / biosample — sort via DS_ANNOT
       rows.sort(function (a, b) {
         var annA = DS_ANNOT[a.db_id] || {}, annB = DS_ANNOT[b.db_id] || {};
         var va = annA[col] || annA.celltype || '', vb = annB[col] || annB.celltype || '';
@@ -509,7 +561,7 @@
       var ann   = DS_ANNOT[r.db_id] || {};
       var p     = PILLS[r.db_id] || {};
       var orgFull  = ((p.organism || {}).full || ann.celltype || '');
-      // We embed organism full name from PILLS for display; cell_type / tissue / system from DS_ANNOT.
+      // We embed organism full name from PILLS for display; cell_type / tissue / biosample from DS_ANNOT.
       var orgPill  = p.organism ? '<span title="' + esc(((p.organism || {}).full || '')) + '">' + esc(((p.organism || {}).abbrev || '')) + '</span>' : '—';
       // sparklines: position of the value within the across-dataset range
       var pctSpark  = sparkline((r.pct_nonzero  || 0) / STAT_MAX.pct_nonzero,
@@ -523,7 +575,7 @@
         + '<td>' + orgPill + '</td>'
         + '<td class="muted gv-narrow" style="font-size:11px" title="' + esc(ann.celltype || '') + '">' + esc(ann.celltype || '') + '</td>'
         + '<td class="muted gv-narrow" style="font-size:11px" title="' + esc(ann.tissue   || '') + '">' + esc(ann.tissue   || '') + '</td>'
-        + '<td class="muted gv-narrow" style="font-size:11px" title="' + esc(ann.system   || '') + '">' + esc(ann.system   || '') + '</td>'
+        + '<td class="muted gv-narrow" style="font-size:11px" title="' + esc(ann.biosample || '') + '">' + esc(ann.biosample || '') + '</td>'
         + '<td class="gv-val">' + num(r.pct_nonzero, 1) + '% ' + pctSpark  + '</td>'
         + '<td class="gv-val">' + num(r.mean, 3)        + ' '  + meanSpark + '</td>'
         + '<td class="gv-val">' + num(r.mean_nonzero, 2)+ ' '  + mnzSpark  + '</td>'

@@ -2594,13 +2594,170 @@ def _flatten_annotation_field(value: object) -> str:
     return str(value)
 
 
-def _build_dataset_annotations(api_url: str) -> Dict[str, Dict[str, str]]:
-    """Return a {db_id: {celltype, tissue, system, title, n_cells, contributor}} map.
+# ── drilldown facet derivation ─────────────────────────────────────────────
+# The old "system" facet conflated assay type (bulk, spatial, sc) with
+# biosample preparation (xenograft, post-mortem, fresh brain). Split into two
+# clean axes for the module-view and gene-atlas drilldowns.
 
-    Used by the module view's client-side facet filters and hover popover.
-    Values are always plain strings (never lists) so the JS .toLowerCase()
-    call is safe.  Multi-valued fields are comma-joined, e.g.
-    ``"microglial cell,macrophage"``.  Best-effort: fields may be empty.
+_SPATIAL_TECH_TOKENS = frozenset({
+    'visium', 'xenium', 'merfish', 'cosmx', 'stereo', 'novast',
+    'slide-seq', 'slide-tags', 'slide_tags', 'slide_seq',
+})
+
+_BULK_TECH_TOKENS = frozenset({
+    'bulk', 'bulk_rna', 'bulk-rna',
+})
+
+
+def _derive_technology(db: Dict[str, Any]) -> str:
+    """Derive a coarse technology category for drilldown faceting.
+
+    Priority order:
+    1. ``suspension_type`` = nucleus → "single nucleus"
+    2. ``suspension_type`` = cell   → "single cell" (unless overridden below)
+    3. Technology string contains a spatial token → "spatial"
+    4. Technology string contains a bulk token → "bulk"
+    5. Fallback → "single cell" (safe default for 10x etc.)
+
+    ``chimera`` and ``xenograft`` entries carry ``suspension_type=cell`` and
+    10x technology, so they correctly land in "single cell".
+
+    Args:
+        db: A single database-info dict from the REST API.
+
+    Returns:
+        One of: ``"single cell"``, ``"single nucleus"``, ``"spatial"``,
+        ``"bulk"``, or ``""`` (empty string when technology is absent/unknown).
+    """
+    tech_raw = _flatten_annotation_field(db.get('technology')).lower()
+    susp = str(db.get('suspension_type') or '').strip().lower()
+
+    # Bulk and spatial override suspension_type because suspension_type='na'
+    # for both; check them first.
+    for token in _SPATIAL_TECH_TOKENS:
+        if token in tech_raw:
+            return 'spatial'
+    for token in _BULK_TECH_TOKENS:
+        if token in tech_raw:
+            return 'bulk'
+    if 'mass-spectrometry' in tech_raw or 'mass_spectrometry' in tech_raw:
+        return 'bulk'
+
+    # Single-cell vs single-nucleus is determined by suspension_type.
+    if susp == 'nucleus':
+        return 'single nucleus'
+    if susp == 'cell':
+        return 'single cell'
+    if susp == 'na':
+        # Fallback: bulk or spatial already handled above; na alone with no
+        # recognisable spatial/bulk token — treat as bulk (conservative).
+        return 'bulk'
+    # No useful data.
+    if not tech_raw:
+        return ''
+    return 'single cell'
+
+
+# Biosample display-name map.  Raw mus vocab values → human-readable labels.
+# ``chimera`` is a xenograft variant (developmental iPSC-in-mouse host);
+# collapse to "xenograft" in the display layer; raw mus value is unchanged.
+_BIOSAMPLE_MAP: Dict[str, str] = {
+    'xenograft':         'xenograft',
+    'chimera':           'xenograft',  # chimera = developmental xenograft
+    'post_mortem_tissue': 'post-mortem',
+    'post-mortem':       'post-mortem',
+    'post_mortem':       'post-mortem',
+    'live_biopsy':       'fresh',
+    'fresh':             'fresh',
+    'in_vitro_2d':       'in-vitro',
+    'in_vitro':          'in-vitro',
+    'organoid':          'in-vitro',
+    'bulk_tissue':       '',  # biosample undefined for pure bulk — omit
+}
+
+
+def _derive_biosample(db: Dict[str, Any]) -> str:
+    """Derive a display-level biosample category from experimental_system.
+
+    Maps the mus ``experimental_system`` vocabulary to a clean set of
+    display labels.  ``chimera`` is collapsed to ``xenograft`` because both
+    represent iPSC/ESC-derived cells hosted in a non-native brain.
+    ``bulk_tissue`` is left empty — the biosample axis is not meaningful for
+    bulk RNA-seq that has no single-cell resolution.
+
+    Args:
+        db: A single database-info dict from the REST API.
+
+    Returns:
+        One of: ``"xenograft"``, ``"post-mortem"``, ``"fresh"``,
+        ``"in-vitro"``, or ``""`` (empty for bulk or unmapped values).
+    """
+    raw = str(db.get('experimental_system') or '').strip().lower().replace('-', '_').replace(' ', '_')
+    return _BIOSAMPLE_MAP.get(raw, raw.replace('_', '-') if raw else '')
+
+
+def _md_first_paragraph(markdown_body: str, max_chars: int) -> str:
+    """Extract the first non-heading paragraph from a markdown body.
+
+    Skips leading ``# Title`` lines and returns the first non-blank paragraph
+    as plain text (strip markdown emphasis), truncated to ``max_chars``.
+
+    Args:
+        markdown_body: Raw markdown string (may be empty or None-cast).
+        max_chars: Maximum character count before an ellipsis is appended.
+
+    Returns:
+        Plain-text first paragraph or empty string.
+    """
+    if not markdown_body:
+        return ''
+    lines = markdown_body.split('\n')
+    # Skip leading heading lines and blanks.
+    para_lines: list = []
+    in_para = False
+    for line in lines:
+        stripped = line.strip()
+        if not in_para:
+            if not stripped or stripped.startswith('#'):
+                continue
+            in_para = True
+        else:
+            if not stripped:
+                break  # end of first paragraph
+        # Strip markdown emphasis (*bold*, _italic_) — naive but good enough.
+        cleaned = re.sub(r'[*_`]', '', stripped)
+        para_lines.append(cleaned)
+    text = ' '.join(para_lines).strip()
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip() + '…'
+    return text
+
+
+def _build_dataset_annotations(api_url: str) -> Dict[str, Dict[str, str]]:
+    """Return a per-db_id annotation map for client-side facet filtering and popovers.
+
+    Keys returned per entry:
+
+    - ``celltype``, ``tissue``: comma-joined strings for facet filters.
+    - ``technology``: derived coarse tech category — "single cell", "single
+      nucleus", "spatial", or "bulk".  Derived from ``suspension_type`` +
+      ``technology`` via :func:`_derive_technology`.
+    - ``biosample``: derived biosample category — "xenograft", "post-mortem",
+      "fresh", or "in-vitro".  Derived from ``experimental_system`` via
+      :func:`_derive_biosample`.  Empty for bulk datasets.
+    - ``system``: **deprecated**; kept for one release as the biosample value
+      (callers that read ``system`` still work, but prefer ``biosample``).
+    - ``title``: dataset display title.
+    - ``n_cells``: cell count as a string (empty when unknown).
+    - ``contributor``: contributor name string.
+    - ``collection_name``: display name of the parent collection.
+    - ``collection_desc``: first paragraph of the collection's markdown body
+      (plain text, up to 200 chars).
+    - ``dataset_desc``: first paragraph of the dataset's description field
+      (plain text, up to 300 chars).
+
+    All values are plain strings so JS ``.toLowerCase()`` is safe. Multi-valued
+    fields are comma-joined (e.g. ``"microglial cell,macrophage"``).
 
     Args:
         api_url: Base URL for the ant-serve REST API.
@@ -2618,13 +2775,26 @@ def _build_dataset_annotations(api_url: str) -> Dict[str, Dict[str, str]]:
         if not db_id:
             continue
         n_obs = db.get('n_obs') or db.get('n_cells') or ''
+        collection_meta = db.get('collection') or {}
+        collection_name = str(collection_meta.get('group') or '').strip()
+        coll_desc_raw = str(collection_meta.get('description') or '').strip()
+        collection_desc = _md_first_paragraph(coll_desc_raw, 200)
+        ds_desc_raw = str(db.get('description') or db.get('summary') or '').strip()
+        dataset_desc = _md_first_paragraph(ds_desc_raw, 300)
+        technology = _derive_technology(db)
+        biosample = _derive_biosample(db)
         result[db_id] = {
             'celltype': _flatten_annotation_field(db.get('celltype')),
             'tissue': _flatten_annotation_field(db.get('tissue')),
-            'system': _flatten_annotation_field(db.get('experimental_system')),
+            'technology': technology,
+            'biosample': biosample,
+            'system': biosample,  # deprecated alias — remove in a future release
             'title': str(db.get('title') or ''),
             'n_cells': str(n_obs) if n_obs else '',
             'contributor': str(db.get('contributor') or ''),
+            'collection_name': collection_name,
+            'collection_desc': collection_desc,
+            'dataset_desc': dataset_desc,
         }
     return result
 

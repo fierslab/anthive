@@ -5,7 +5,7 @@ score · peer-position). Each row is a (module × dataset × tag × method)
 combination. Sort default: peer-position descending — most variable
 modules-vs-their-peers on that dataset+tag+method float to the top.
 
-Filter controls at top: group · tag · method · dataset · cell type · tissue · system.
+Filter controls at top: group · tag · method · dataset · cell type · tissue · technology · biosample.
 Any pre-set context (dataset scope or module scope) hides its own control.
 
 Consumer passes a `mv_ctx` Jinja var — a dict:
@@ -15,14 +15,14 @@ Consumer passes a `mv_ctx` Jinja var — a dict:
     "module_catalog": "Sierksma2025/WGCNA",  # required if scope=="module"
     "module_name": "Brown_Lysosome",         # optional; null = show all modules
     "id": "mv-panel",                 # DOM id prefix (unique per instance)
-    "dataset_annotations": {"db_id": {"celltype": "...", "tissue": "...", "system": "..."}},
-                                      # optional; enables celltype/tissue/system facets
+    "dataset_annotations": {"db_id": {"celltype": "...", "tissue": "...", "technology": "...", "biosample": "..."}},
+                                      # optional; enables celltype/tissue/technology/biosample facets
     "preselect_cell_type": "microglial cell",  # optional; pre-fills celltype facet
   }
 
 URL hash scheme (feature: back-button / shareable filter state):
   #mv=key1=val1;key2=val2
-  Keys match filter names: group, module, dataset, tag, method, celltype, tissue, system, sort.
+  Keys match filter names: group, module, dataset, tag, method, celltype, tissue, technology, biosample, sort.
   Semicolons separate pairs; values are encodeURIComponent-encoded.
   When co-existing with a tab anchor (e.g. #tab-modules), the mv= part is
   appended: #tab-modules-mv=...  The JS strips the -mv= suffix before parsing.
@@ -53,11 +53,15 @@ URL hash scheme (feature: back-button / shareable filter state):
     /* Dataset hover popover */
     .mv-panel .mv-ds-pop { position: relative; display: inline-block; }
     .mv-panel .mv-ds-tip { display: none; position: absolute; top: calc(100% + 4px); left: 0; z-index: 200;
-      min-width: 240px; max-width: 340px; background: #fff; border: 1px solid #e5e7eb;
+      min-width: 260px; max-width: 400px; background: #fff; border: 1px solid #e5e7eb;
       border-radius: 6px; padding: 8px 12px; box-shadow: 0 4px 12px rgba(0,0,0,.08);
       font-size: 11px; line-height: 1.5; white-space: normal; pointer-events: none; }
     .mv-panel .mv-ds-pop:hover .mv-ds-tip { display: block; }
-    .mv-panel .mv-ds-tip .tip-title { font-weight: 600; font-size: 12px; margin-bottom: 4px; color: #1e293b; }
+    .mv-panel .mv-ds-tip .tip-coll-name { font-weight: 700; font-size: 12px; color: #1e293b; }
+    .mv-panel .mv-ds-tip .tip-coll-desc { color: #64748b; font-size: 10.5px; margin-bottom: 5px; }
+    .mv-panel .mv-ds-tip .tip-sep { border: none; border-top: 1px solid #e5e7eb; margin: 5px 0; }
+    .mv-panel .mv-ds-tip .tip-title { font-weight: 600; font-size: 12px; margin-bottom: 2px; color: #1e293b; }
+    .mv-panel .mv-ds-tip .tip-ds-desc { color: #64748b; font-size: 10.5px; margin-bottom: 4px; }
     .mv-panel .mv-ds-tip .tip-row { color: #475569; }
     .mv-panel .mv-ds-tip .tip-id { font-family: var(--font-mono); color: var(--text-muted); font-size: 10px; margin-top: 4px; }
     .mv-panel .mv-val    { font-family: var(--font-mono); text-align: right; }
@@ -88,16 +92,28 @@ URL hash scheme (feature: back-button / shareable filter state):
     <div {% if _mv.scope == 'module' %}{%endif%}><label>geneset</label><select class="mv-flt-module"><option value="">all</option></select></div>
     <div><label>canonical tag <span class="info" title="Standardised biological annotation aliased to ant_&lt;tag&gt; across datasets — e.g. braak, sex, cluster, disease. Each datasets raw obs column is aliased to ant_&lt;tag&gt;.">ⓘ</span></label><select class="mv-flt-tag"><option value="">all</option></select></div>
   </div>
-  {# Row 2: group (if not module scope) · cell type · tissue · system · method #}
+  {# Row 2: group (if not module scope) · cell type · tissue · technology · biosample · method #}
   <div class="mv-filter-row mv-filter-row-2">
     {% if _mv.scope != 'module' %}
     <div><label>group</label><select class="mv-flt-group"><option value="">all</option></select></div>
     {% endif %}
-    {# Cell type, tissue, and system facets — populated from dataset_annotations when provided #}
+    {# Cell type, tissue, technology, and biosample facets — populated from dataset_annotations when provided #}
     {% if _mv.get('dataset_annotations') %}
     <div><label>cell type</label><select class="mv-flt-celltype"><option value="">all</option></select></div>
     <div><label>tissue</label><select class="mv-flt-tissue"><option value="">all</option></select></div>
-    <div><label>system</label><select class="mv-flt-system"><option value="">all</option></select></div>
+    <div><label>technology</label><select class="mv-flt-technology"><option value="">all</option></select></div>
+    <div><label>biosample</label><select class="mv-flt-biosample"><option value="">all</option></select></div>
+    {% endif %}
+    {% if _mv.get('dataset_annotations') %}
+    <div><label>n cells</label>
+      <select class="mv-flt-n_cells">
+        <option value="">all</option>
+        <option value="lt1k">&lt;1k</option>
+        <option value="1k-10k">1k–10k</option>
+        <option value="10k-100k">10k–100k</option>
+        <option value="gt100k">&gt;100k</option>
+      </select>
+    </div>
     {% endif %}
     <div><label>method</label>
       <select class="mv-flt-method">
@@ -137,15 +153,17 @@ URL hash scheme (feature: back-button / shareable filter state):
   var rowsEl  = root.querySelector('.mv-rows');
   var summaryEl = root.querySelector('.mv-summary');
   var flt = {
-    dataset:  root.querySelector('.mv-flt-dataset'),
-    group:    root.querySelector('.mv-flt-group'),
-    module:   root.querySelector('.mv-flt-module'),
-    celltype: root.querySelector('.mv-flt-celltype'),
-    tissue:   root.querySelector('.mv-flt-tissue'),
-    system:   root.querySelector('.mv-flt-system'),
-    tag:      root.querySelector('.mv-flt-tag'),
-    method:   root.querySelector('.mv-flt-method'),
-    sort:     null,  // sort is now driven by column-header clicks, not a dropdown
+    dataset:    root.querySelector('.mv-flt-dataset'),
+    group:      root.querySelector('.mv-flt-group'),
+    module:     root.querySelector('.mv-flt-module'),
+    celltype:   root.querySelector('.mv-flt-celltype'),
+    tissue:     root.querySelector('.mv-flt-tissue'),
+    technology: root.querySelector('.mv-flt-technology'),
+    biosample:  root.querySelector('.mv-flt-biosample'),
+    n_cells:    root.querySelector('.mv-flt-n_cells'),
+    tag:        root.querySelector('.mv-flt-tag'),
+    method:     root.querySelector('.mv-flt-method'),
+    sort:       null,  // sort is now driven by column-header clicks, not a dropdown
   };
 
   // Column-header sort state: {col: string, dir: 'asc'|'desc'}
@@ -179,7 +197,7 @@ URL hash scheme (feature: back-button / shareable filter state):
   });
   updateSortIndicators();
 
-  // dataset_annotations: {db_id: {celltype, tissue, system, title, n_cells, contributor}}
+  // dataset_annotations: {db_id: {celltype, tissue, technology, biosample, title, n_cells, contributor}}
   var DS_ANNOT = CTX.dataset_annotations || {};
   // preselect_cell_types: [] or [ct, ...] — OR-filter applied on first render.
   var PRESELECT_CTS = CTX.preselect_cell_types || [];
@@ -422,7 +440,7 @@ URL hash scheme (feature: back-button / shareable filter state):
   /** Rebuild the URL hash from current filter values, preserving any non-mv prefix. */
   function buildHashFromFilters() {
     var pairs = [];
-    var filterKeys = ['group', 'module', 'dataset', 'tag', 'method', 'celltype', 'tissue', 'system'];
+    var filterKeys = ['group', 'module', 'dataset', 'tag', 'method', 'celltype', 'tissue', 'technology', 'biosample', 'n_cells'];
     filterKeys.forEach(function (key) {
       var sel = flt[key];
       if (!sel) return;
@@ -446,7 +464,7 @@ URL hash scheme (feature: back-button / shareable filter state):
 
   /** Apply parsed hash values to the filter dropdowns and sort state (before first render). */
   function applyHashFilters(parsed) {
-    var filterKeys = ['group', 'module', 'dataset', 'tag', 'method', 'celltype', 'tissue', 'system'];
+    var filterKeys = ['group', 'module', 'dataset', 'tag', 'method', 'celltype', 'tissue', 'technology', 'biosample', 'n_cells'];
     filterKeys.forEach(function (key) {
       var sel = flt[key];
       if (!sel || !parsed[key]) return;
@@ -480,7 +498,7 @@ URL hash scheme (feature: back-button / shareable filter state):
 
   /** Restore pending hash values into selects that now have the right options. */
   function flushPendingHashValues() {
-    var filterKeys = ['group', 'module', 'dataset', 'tag', 'method', 'celltype', 'tissue', 'system'];
+    var filterKeys = ['group', 'module', 'dataset', 'tag', 'method', 'celltype', 'tissue', 'technology', 'biosample'];
     filterKeys.forEach(function (key) {
       var sel = flt[key];
       if (!sel) return;
@@ -501,7 +519,7 @@ URL hash scheme (feature: back-button / shareable filter state):
   // Handle browser back/forward navigation
   window.addEventListener('popstate', function () {
     var parsed = parseHashFilters();
-    var filterKeys = ['group', 'module', 'dataset', 'tag', 'method', 'celltype', 'tissue', 'system'];
+    var filterKeys = ['group', 'module', 'dataset', 'tag', 'method', 'celltype', 'tissue', 'technology', 'biosample', 'n_cells'];
     filterKeys.forEach(function (key) {
       var sel = flt[key];
       if (!sel) return;
@@ -530,7 +548,7 @@ URL hash scheme (feature: back-button / shareable filter state):
       else if (key === 'dataset') rows = rows.filter(function (r) { return r.dataset === v; });
       else if (key === 'tag') rows = rows.filter(function (r) { return r.tag === v; });
     });
-    // Filter — dataset annotation facets (celltype / tissue / system).
+    // Filter — dataset annotation facets (celltype / tissue / technology / biosample).
     // DS_ANNOT values are always flat strings (multi-valued fields are
     // comma-joined server-side), so .toLowerCase() is always safe.
     // Use indexOf so "microglial cell" matches "microglial cell,macrophage".
@@ -555,11 +573,30 @@ URL hash scheme (feature: back-button / shareable filter state):
         });
       });
     }
-    if (flt.system && flt.system.value) {
-      var sysVal = flt.system.value.toLowerCase();
+    if (flt.technology && flt.technology.value) {
+      var techVal = flt.technology.value.toLowerCase();
       rows = rows.filter(function (r) {
         var ann = DS_ANNOT[r.dataset] || {};
-        return (ann.system || '').toLowerCase().indexOf(sysVal) !== -1;
+        return (ann.technology || '').toLowerCase().indexOf(techVal) !== -1;
+      });
+    }
+    if (flt.biosample && flt.biosample.value) {
+      var bioVal = flt.biosample.value.toLowerCase();
+      rows = rows.filter(function (r) {
+        var ann = DS_ANNOT[r.dataset] || {};
+        return (ann.biosample || '').toLowerCase().indexOf(bioVal) !== -1;
+      });
+    }
+    if (flt.n_cells && flt.n_cells.value) {
+      var bucket = flt.n_cells.value;
+      rows = rows.filter(function (r) {
+        var ann = DS_ANNOT[r.dataset] || {};
+        var nc = parseInt(ann.n_cells || '0', 10) || 0;
+        if (bucket === 'lt1k')     return nc < 1000;
+        if (bucket === '1k-10k')   return nc >= 1000 && nc < 10000;
+        if (bucket === '10k-100k') return nc >= 10000 && nc < 100000;
+        if (bucket === 'gt100k')   return nc >= 100000;
+        return true;
       });
     }
     // Only keep one row per (mod × dataset × tag × source) — pick the
@@ -615,11 +652,18 @@ URL hash scheme (feature: back-button / shareable filter state):
       var dsHref = datasetUrl(r);
       var dsAnn = DS_ANNOT[r.dataset] || {};
       var dsTipRows = '';
+      // Collection header (name + description)
+      if (dsAnn.collection_name) dsTipRows += '<div class="tip-coll-name">' + esc(dsAnn.collection_name) + '</div>';
+      if (dsAnn.collection_desc) dsTipRows += '<div class="tip-coll-desc">' + esc(dsAnn.collection_desc) + '</div>';
+      if (dsAnn.collection_name || dsAnn.collection_desc) dsTipRows += '<hr class="tip-sep">';
+      // Dataset section
       if (dsAnn.title) dsTipRows += '<div class="tip-title">' + esc(dsAnn.title) + '</div>';
-      if (dsAnn.celltype) dsTipRows += '<div class="tip-row">Cell type: ' + esc(dsAnn.celltype) + '</div>';
-      if (dsAnn.tissue)   dsTipRows += '<div class="tip-row">Tissue: '    + esc(dsAnn.tissue)   + '</div>';
-      if (dsAnn.system)   dsTipRows += '<div class="tip-row">System: '    + esc(dsAnn.system)   + '</div>';
-      if (dsAnn.n_cells)  dsTipRows += '<div class="tip-row">Cells: '     + esc(dsAnn.n_cells)  + '</div>';
+      if (dsAnn.dataset_desc) dsTipRows += '<div class="tip-ds-desc">' + esc(dsAnn.dataset_desc) + '</div>';
+      if (dsAnn.celltype)   dsTipRows += '<div class="tip-row">Cell type: '  + esc(dsAnn.celltype)   + '</div>';
+      if (dsAnn.tissue)     dsTipRows += '<div class="tip-row">Tissue: '     + esc(dsAnn.tissue)     + '</div>';
+      if (dsAnn.technology) dsTipRows += '<div class="tip-row">Technology: ' + esc(dsAnn.technology) + '</div>';
+      if (dsAnn.biosample)  dsTipRows += '<div class="tip-row">Biosample: '  + esc(dsAnn.biosample)  + '</div>';
+      if (dsAnn.n_cells)    dsTipRows += '<div class="tip-row">Cells: '      + esc(dsAnn.n_cells)    + '</div>';
       if (dsAnn.contributor) dsTipRows += '<div class="tip-row">Contributor: ' + esc(dsAnn.contributor) + '</div>';
       dsTipRows += '<div class="tip-id">' + esc(r.dataset) + '</div>';
       var dsTip = '<div class="mv-ds-tip">' + dsTipRows + '</div>';
@@ -689,21 +733,23 @@ URL hash scheme (feature: back-button / shareable filter state):
         if (CTX.scope === 'module' && flt.group) {
           flt.group.value = CTX.module_catalog || '';
         }
-        // Populate celltype / tissue / system facet dropdowns from DS_ANNOT values.
-        // DS_ANNOT values are flat comma-joined strings (server-side normalised).
+        // Populate celltype / tissue / technology / biosample facet dropdowns from
+        // DS_ANNOT values. Values are flat comma-joined strings (server-side normalised).
         // Split on comma so each individual term gets its own option — a dataset
         // annotated "microglial cell,macrophage" contributes two options, not one.
-        if (flt.celltype || flt.tissue || flt.system) {
-          var celltypes = {}, tissues = {}, systems = {};
+        if (flt.celltype || flt.tissue || flt.technology || flt.biosample) {
+          var celltypes = {}, tissues = {}, technologies = {}, biosamples = {};
           Object.keys(DS_ANNOT).forEach(function (dbId) {
             var ann = DS_ANNOT[dbId];
-            if (ann.celltype) ann.celltype.split(',').forEach(function (v) { var t = v.trim(); if (t) celltypes[t] = 1; });
-            if (ann.tissue)   ann.tissue  .split(',').forEach(function (v) { var t = v.trim(); if (t) tissues[t]   = 1; });
-            if (ann.system)   ann.system  .split(',').forEach(function (v) { var t = v.trim(); if (t) systems[t]   = 1; });
+            if (ann.celltype)   ann.celltype.split(',').forEach(function (v) { var t = v.trim(); if (t) celltypes[t]    = 1; });
+            if (ann.tissue)     ann.tissue  .split(',').forEach(function (v) { var t = v.trim(); if (t) tissues[t]      = 1; });
+            if (ann.technology) ann.technology.split(',').forEach(function (v) { var t = v.trim(); if (t) technologies[t] = 1; });
+            if (ann.biosample)  ann.biosample .split(',').forEach(function (v) { var t = v.trim(); if (t) biosamples[t]  = 1; });
           });
-          fillSelect(flt.celltype, Object.keys(celltypes));
+          fillSelect(flt.celltype,   Object.keys(celltypes));
           fillTissueSelect(flt.tissue, Object.keys(tissues), null);
-          fillSelect(flt.system,   Object.keys(systems));
+          fillSelect(flt.technology, Object.keys(technologies));
+          fillSelect(flt.biosample,  Object.keys(biosamples));
           // Apply preselect_cell_types: if a single type matches a dropdown option,
           // select it; multiple types → select the first that has a matching option.
           if (PRESELECT_CTS.length > 0 && flt.celltype) {
@@ -738,14 +784,16 @@ URL hash scheme (feature: back-button / shareable filter state):
     render();
   }
 
-  if (flt.dataset)  { flt.dataset.addEventListener('change',  onFilterChange.bind(flt.dataset));  }
-  if (flt.group)    { flt.group.addEventListener('change',    onFilterChange.bind(flt.group));    }
-  if (flt.module)   { flt.module.addEventListener('change',   onFilterChange.bind(flt.module));   }
-  if (flt.tag)      { flt.tag.addEventListener('change',      onFilterChange.bind(flt.tag));      }
-  if (flt.method)   { flt.method.addEventListener('change',   onFilterChange.bind(flt.method));   }
-  if (flt.celltype) { flt.celltype.addEventListener('change', onFilterChange.bind(flt.celltype)); }
-  if (flt.tissue)   { flt.tissue.addEventListener('change',   onFilterChange.bind(flt.tissue));   }
-  if (flt.system)   { flt.system.addEventListener('change',   onFilterChange.bind(flt.system));   }
+  if (flt.dataset)    { flt.dataset.addEventListener('change',    onFilterChange.bind(flt.dataset));    }
+  if (flt.group)      { flt.group.addEventListener('change',      onFilterChange.bind(flt.group));      }
+  if (flt.module)     { flt.module.addEventListener('change',     onFilterChange.bind(flt.module));     }
+  if (flt.tag)        { flt.tag.addEventListener('change',        onFilterChange.bind(flt.tag));        }
+  if (flt.method)     { flt.method.addEventListener('change',     onFilterChange.bind(flt.method));     }
+  if (flt.celltype)   { flt.celltype.addEventListener('change',   onFilterChange.bind(flt.celltype));   }
+  if (flt.tissue)     { flt.tissue.addEventListener('change',     onFilterChange.bind(flt.tissue));     }
+  if (flt.technology) { flt.technology.addEventListener('change', onFilterChange.bind(flt.technology)); }
+  if (flt.biosample)  { flt.biosample.addEventListener('change',  onFilterChange.bind(flt.biosample));  }
+  if (flt.n_cells)    { flt.n_cells.addEventListener('change',    onFilterChange.bind(flt.n_cells));    }
   // Sort is now handled by column-header click listeners bound above — no select to bind.
   load();
 })();

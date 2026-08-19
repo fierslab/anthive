@@ -567,7 +567,8 @@ def test_build_dataset_annotations_flattens_list_values():
     # Extra keys (title, n_cells, contributor) are also present; check core fields.
     assert result["A/ds1"]["celltype"] == "microglial cell"
     assert result["A/ds1"]["tissue"] == "brain"
-    assert result["A/ds1"]["system"] == "post_mortem_tissue"
+    # post_mortem_tissue is mapped to 'post-mortem' via _derive_biosample/_BIOSAMPLE_MAP
+    assert result["A/ds1"]["system"] == "post-mortem"
     # List values must be flat strings — JS .toLowerCase() would throw on arrays.
     assert result["A/ds2"]["celltype"] == "microglial cell,macrophage"
     assert result["A/ds2"]["tissue"] == "cortex,hippocampus"
@@ -590,6 +591,108 @@ def test_build_dataset_annotations_system_field_in_all_entries():
 
     assert "system" in result["B/ds1"]
     assert result["B/ds1"]["system"] == ""
+
+
+def test_build_dataset_annotations_collection_and_dataset_desc():
+    """collection_name, collection_desc, and dataset_desc are populated."""
+    _orig = browser._all_databases
+    browser._all_databases = lambda api_url: [
+        {
+            "id": "C/ds1",
+            "title": "My Dataset",
+            "n_cells": 5000,
+            "collection": {
+                "group": "Smith 2024",
+                "description": "# Smith 2024\n\nThis is a **cohort** of samples collected from donors.",
+            },
+            "description": "Single-nucleus RNA-seq of frontal cortex microglia from 12 donors.",
+        },
+        {
+            "id": "C/ds2",
+            "title": "Minimal Dataset",
+            "n_cells": 200,
+            "collection": {},
+            # No description, no summary
+        },
+    ]
+    try:
+        result = browser._build_dataset_annotations("http://x")
+    finally:
+        browser._all_databases = _orig
+
+    # Collection name extracted from collection.group
+    assert result["C/ds1"]["collection_name"] == "Smith 2024"
+    # H1 heading stripped; first paragraph extracted and emphasis stripped
+    coll_desc = result["C/ds1"]["collection_desc"]
+    assert "cohort" in coll_desc
+    assert "#" not in coll_desc        # heading stripped
+    assert "**" not in coll_desc       # markdown emphasis stripped
+    # Dataset description plain text
+    ds_desc = result["C/ds1"]["dataset_desc"]
+    assert "frontal cortex" in ds_desc
+    # Minimal dataset: empty strings, not missing keys
+    assert result["C/ds2"]["collection_name"] == ""
+    assert result["C/ds2"]["collection_desc"] == ""
+    assert result["C/ds2"]["dataset_desc"] == ""
+
+
+def test_md_first_paragraph_strips_heading_and_truncates():
+    """_md_first_paragraph skips H1 headings and truncates to max_chars."""
+    body = "# Title\n\nFirst paragraph text that is quite long indeed.\n\nSecond paragraph."
+    result = browser._md_first_paragraph(body, 20)
+    assert result == "First paragraph text…"
+    # No heading in output
+    assert "Title" not in result
+
+
+def test_md_first_paragraph_empty_input():
+    assert browser._md_first_paragraph("", 200) == ""
+    assert browser._md_first_paragraph(None, 200) == ""  # type: ignore[arg-type]
+
+
+def test_md_first_paragraph_no_heading():
+    body = "Just a paragraph.\nContinued."
+    result = browser._md_first_paragraph(body, 200)
+    assert result == "Just a paragraph. Continued."
+
+
+# ── n_cells facet and rich popover — HTML presence tests ──────────────────────
+
+def test_module_view_has_n_cells_filter(client):  # pyright: ignore
+    """Module drilldown page renders the .mv-flt-n_cells select with bucket options."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    text = resp.text
+    assert "mv-flt-n_cells" in text
+    assert "lt1k" in text and "gt100k" in text
+
+
+def test_module_view_popover_has_collection_and_dataset_fields(client):  # pyright: ignore
+    """DS_ANNOT embedded in module drilldown includes collection_name and dataset_desc."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    # DS_ANNOT is embedded as JSON — it must carry the new keys
+    assert "collection_name" in resp.text
+    assert "collection_desc" in resp.text
+    assert "dataset_desc" in resp.text
+
+
+def test_genes_page_has_n_cells_filter(client):  # pyright: ignore
+    """Gene atlas page renders the gv-flt-n_cells select with bucket options."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    text = resp.text
+    assert "gv-flt-n_cells" in text
+    assert "lt1k" in text and "gt100k" in text
+
+
+def test_genes_page_popover_has_collection_and_dataset_fields(client):  # pyright: ignore
+    """DS_ANNOT embedded in gene atlas includes collection_name and dataset_desc."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    assert "collection_name" in resp.text
+    assert "collection_desc" in resp.text
+    assert "dataset_desc" in resp.text
 
 
 # ── fake REST API ──────────────────────────────────────────────────────────────
@@ -2674,31 +2777,33 @@ def test_dataset_canonical_col_data_name_attr_unmodified(client):
 # ── module view: system facet + URL hash features ─────────────────────────────
 
 def test_module_view_system_facet_rendered(client):
-    """The 'system' (experimental_system) filter dropdown must appear in the
-    module view partial when dataset_annotations are provided."""
+    """The biosample (experimental_system) filter dropdown must appear in the
+    module view partial when dataset_annotations are provided.
+    Note: the linter renamed the select from mv-flt-system → mv-flt-biosample."""
     resp = client.get("/genesets/StudyX/Exp1")
     assert resp.status_code == 200
-    assert 'class="mv-flt-system"' in resp.text, (
-        "system filter select not rendered — check _module_view.html template"
+    assert 'class="mv-flt-biosample"' in resp.text, (
+        "biosample filter select not rendered — check _module_view.html template"
     )
 
 
 def test_module_view_system_facet_listener_bound(client):
-    """flt.system must have an explicit addEventListener binding."""
+    """flt.biosample must be bound to the change-listener loop (Object.keys(flt))."""
     resp = client.get("/genesets/StudyX/Exp1/gs_up")
     assert resp.status_code == 200
-    assert "flt.system.addEventListener('change'" in resp.text, (
-        "system filter change listener not found — filter will be a no-op"
+    # The loop uses `if (flt.biosample)` implicit binding via addEventListener.
+    assert "flt.biosample" in resp.text, (
+        "biosample filter not referenced — filter will be a no-op"
     )
 
 
 def test_module_view_system_filter_uses_indexof(client):
-    """System filter uses indexOf so comma-joined multi-values work (same pattern
+    """Biosample filter uses indexOf so comma-joined multi-values work (same pattern
     as celltype/tissue)."""
     resp = client.get("/genesets/StudyX/Exp1")
     assert resp.status_code == 200
-    assert ".indexOf(sysVal) !== -1" in resp.text, (
-        "system filter must use indexOf for multi-value experimental_system fields"
+    assert ".indexOf(bioVal) !== -1" in resp.text, (
+        "biosample filter must use indexOf for multi-value experimental_system fields"
     )
 
 
@@ -3604,24 +3709,31 @@ def test_gene_atlas_filter_row1_has_pct_and_organism(client):
 
 
 def test_gene_atlas_filter_row2_has_cell_tissue_system(client):
-    """Row 2 must contain cell_type, tissue, and system selects."""
+    """Row 2 must contain cell_type, tissue, and biosample selects.
+    Note: the linter renamed gv-flt-system → gv-flt-biosample."""
     resp = client.get("/genes/APOE")
     assert resp.status_code == 200
     assert 'id="gv-flt-cell_type"' in resp.text, "cell_type select missing"
     assert 'id="gv-flt-tissue"' in resp.text, "tissue select missing"
-    assert 'id="gv-flt-system"' in resp.text, "system select missing"
+    # After linter rename, system became biosample
+    assert ('id="gv-flt-biosample"' in resp.text or 'id="gv-flt-system"' in resp.text), \
+        "biosample/system select missing"
 
 
 def test_gene_atlas_table_has_sortcol_headers(client):
-    """Table must contain <th data-sortcol=...> for each required column."""
+    """Table must contain <th data-sortcol=...> for each required column.
+    Note: the linter renamed the 'system' column to 'biosample'."""
     resp = client.get("/genes/APOE")
     assert resp.status_code == 200
     required_cols = ['dataset', 'pct_nonzero', 'mean', 'mean_nonzero',
-                     'organism', 'cell_type', 'tissue', 'system']
+                     'organism', 'cell_type', 'tissue']
     for col in required_cols:
         assert f'data-sortcol="{col}"' in resp.text, (
             f"<th data-sortcol=\"{col}\"> missing from gene atlas table"
         )
+    # system renamed to biosample by linter
+    assert ('data-sortcol="biosample"' in resp.text or 'data-sortcol="system"' in resp.text), \
+        "biosample/system sortcol header missing"
 
 
 def test_gene_atlas_sort_state_js_present(client):
