@@ -4081,3 +4081,138 @@ def test_gene_atlas_tissue_hover_shows_full_value(client):
     # title= is set on the tissue cell via esc(ann.tissue || '')
     # The JS emits: title="' + esc(ann.tissue || '') + '"
     assert 'title=\'" + esc(ann.tissue' in resp.text or "title='\" + esc(ann.tissue" in resp.text or "esc(ann.tissue" in resp.text
+
+
+# ── "single cell + nucleus" combined technology option ────────────────────────
+# The fake _DATABASES has:
+#   GroupA/ds1 → suspension_type=nucleus → "single nucleus"
+#   GroupA/ds2 → suspension_type=nucleus → "single nucleus"
+#   GroupB/ds3 → suspension_type=cell   → "single cell"
+# So both base values are present → the synthetic option must appear.
+
+def test_genes_page_technology_has_combined_option(client):  # pyright: ignore
+    """When both 'single cell' and 'single nucleus' appear in DS_ANNOT, the
+    technology dropdown on /genes/* includes the synthetic 'single cell + nucleus'
+    combined option."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    assert "single cell + nucleus" in resp.text
+
+
+def test_genes_page_technology_combined_option_precedes_base_values(client):  # pyright: ignore
+    """The combined option is injected before the sorted real values — i.e. it
+    must appear in the HTML before 'single cell' or 'single nucleus'."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    combined_idx = resp.text.index("single cell + nucleus")
+    # At least one of the base values follows the combined option.
+    sc_idx  = resp.text.find("single cell", combined_idx + 1)
+    sn_idx  = resp.text.find("single nucleus", combined_idx + 1)
+    assert sc_idx != -1 or sn_idx != -1
+
+
+def test_genes_page_technology_combined_filter_logic_present(client):  # pyright: ignore
+    """The JS filter branch for the combined option must use exact-match OR
+    ('single cell' || 'single nucleus') rather than an indexOf substring match,
+    so that 'single cell + nucleus' itself is not matched as a substring."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    # The combined-branch guard string
+    assert "single cell + nucleus" in resp.text
+    # The OR filter logic is emitted
+    assert "'single cell'" in resp.text and "'single nucleus'" in resp.text
+
+
+def test_module_view_technology_has_combined_option(client):  # pyright: ignore
+    """Geneset experiment page (_module_view.html partial) also carries the
+    combined technology option when both base values are in DS_ANNOT."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    assert "single cell + nucleus" in resp.text
+
+
+def test_module_view_technology_combined_filter_logic_present(client):  # pyright: ignore
+    """The OR-branch filter for 'single cell + nucleus' is emitted in the
+    _module_view.html JS section."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    assert "single cell + nucleus" in resp.text
+    assert "'single cell'" in resp.text and "'single nucleus'" in resp.text
+
+
+def test_module_view_combined_option_absent_when_one_tech_missing(client, monkeypatch):  # pyright: ignore
+    """When only one of the two base tech values is present in DS_ANNOT, the
+    DS_ANNOT JSON embedded in the page must NOT contain 'single cell' as a
+    technology value — so the JS injection condition evaluates false client-side.
+    """
+    def single_tech_annot(api_url):
+        return {
+            "GroupA/ds1": {"celltype": "microglial cell", "tissue": "brain",
+                           "technology": "single nucleus", "biosample": "post-mortem",
+                           "system": "post-mortem", "n_cells": "1500",
+                           "collection_name": "", "collection_desc": "", "dataset_desc": "",
+                           "title": "", "contributor": ""},
+            "GroupA/ds2": {"celltype": "microglial cell", "tissue": "brain",
+                           "technology": "single nucleus", "biosample": "post-mortem",
+                           "system": "post-mortem", "n_cells": "500000",
+                           "collection_name": "", "collection_desc": "", "dataset_desc": "",
+                           "title": "", "contributor": ""},
+        }
+
+    monkeypatch.setattr(browser, "_build_dataset_annotations", single_tech_annot)
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    # The client-side injection condition is:
+    #   if (technologies['single cell'] && technologies['single nucleus']) { ... }
+    # With only "single nucleus" DS_ANNOT entries, technologies["single cell"]
+    # is falsy — the option won't be pushed into techKeys.
+    # Verify the embedded CTX (mv_ctx|tojson) does not contain a "single cell"
+    # technology value for any dataset.
+    # The CTX JSON is emitted as: var CTX = {...} on one line.
+    # Check that '"technology": "single cell"' (JSON form) is absent.
+    assert '"technology": "single cell"' not in resp.text
+    assert '"technology":"single cell"' not in resp.text
+
+
+# ── Geneset list collapsed by default on experiment page ──────────────────────
+
+def test_geneset_experiment_list_is_collapsed_by_default(client):  # pyright: ignore
+    """The geneset list on the experiment page is wrapped in a <details> element
+    that has NO 'open' attribute — collapsed on initial render."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    text = resp.text
+    # <details id="gs-list-details" ...> without open=""
+    assert 'id="gs-list-details"' in text
+    # The element must NOT carry the open attribute — so it starts collapsed.
+    # Locate the details tag and assert no 'open' before the next '>'.
+    details_pos = text.index('id="gs-list-details"')
+    tag_start = text.rfind('<details', 0, details_pos)
+    tag_end = text.index('>', details_pos)
+    tag_text = text[tag_start:tag_end + 1]
+    assert ' open' not in tag_text
+
+
+def test_geneset_experiment_list_summary_text(client):  # pyright: ignore
+    """The <summary> label shows 'Genesets (N)' where N is the count."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    # Exp1 has 2 genesets in _GENESETS fixture
+    assert "Genesets (2)" in resp.text
+
+
+def test_geneset_experiment_drilldown_outside_collapsed_block(client):  # pyright: ignore
+    """The variability drilldown mv-panel appears AFTER the closing </details>
+    tag of the geneset list, so it is visible without expanding the list."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    text = resp.text
+    # Find the closing </details> of the gs-list-details block.
+    details_pos = text.index('id="gs-list-details"')
+    # After the opening <details...> there must be a </details> before 'mv-panel'.
+    after_details_open = text[details_pos:]
+    close_tag_pos = after_details_open.index('</details>')
+    mv_panel_pos  = after_details_open.find('mv-panel')
+    assert mv_panel_pos > close_tag_pos, (
+        "mv-panel drilldown must come AFTER the closing </details> of the geneset list"
+    )

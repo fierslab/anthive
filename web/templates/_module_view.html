@@ -574,11 +574,19 @@ URL hash scheme (feature: back-button / shareable filter state):
       });
     }
     if (flt.technology && flt.technology.value) {
-      var techVal = flt.technology.value.toLowerCase();
-      rows = rows.filter(function (r) {
-        var ann = DS_ANNOT[r.dataset] || {};
-        return (ann.technology || '').toLowerCase().indexOf(techVal) !== -1;
-      });
+      var techVal = flt.technology.value;
+      if (techVal === 'single cell + nucleus') {
+        rows = rows.filter(function (r) {
+          var t = (DS_ANNOT[r.dataset] || {}).technology || '';
+          return t === 'single cell' || t === 'single nucleus';
+        });
+      } else {
+        var techValLc = techVal.toLowerCase();
+        rows = rows.filter(function (r) {
+          var ann = DS_ANNOT[r.dataset] || {};
+          return (ann.technology || '').toLowerCase().indexOf(techValLc) !== -1;
+        });
+      }
     }
     if (flt.biosample && flt.biosample.value) {
       var bioVal = flt.biosample.value.toLowerCase();
@@ -748,7 +756,13 @@ URL hash scheme (feature: back-button / shareable filter state):
           });
           fillSelect(flt.celltype,   Object.keys(celltypes));
           fillTissueSelect(flt.tissue, Object.keys(tissues), null);
-          fillSelect(flt.technology, Object.keys(technologies));
+          // Inject synthetic "single cell + nucleus" option when both base
+          // values are present — must come before fillSelect so it sorts first.
+          var techKeys = Object.keys(technologies).sort();
+          if (technologies['single cell'] && technologies['single nucleus']) {
+            techKeys = ['single cell + nucleus'].concat(techKeys);
+          }
+          fillSelect(flt.technology, techKeys);
           fillSelect(flt.biosample,  Object.keys(biosamples));
           // Apply preselect_cell_types: if a single type matches a dropdown option,
           // select it; multiple types → select the first that has a matching option.

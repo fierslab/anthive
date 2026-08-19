@@ -60,7 +60,9 @@
 </div>
 </details>
 
-<h2>Genesets ({{ genesets|length }})</h2>
+<details id="gs-list-details" style="margin:4px 0 10px;font-size:13px">
+<summary style="cursor:pointer;color:var(--text-muted);font-size:12px">Genesets ({{ genesets|length }})</summary>
+<div style="margin-top:6px">
 <div class="table-wrap">
 <table class="auto card-table">
     <thead>
@@ -85,6 +87,8 @@
     </tbody>
 </table>
 </div>
+</div>
+</details>
 
 <h2 style="margin-top:20px">Geneset variability across datasets
   <span class="info" title="All genesets in this experiment, ranked by how strongly their score co-varies with each dataset tag. Use the facets to narrow by cell type, tissue, or tag. Same exploratory, per-cell caveat as the variability heatmap.">ⓘ</span>

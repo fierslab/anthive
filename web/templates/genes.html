@@ -449,13 +449,17 @@
       (ann.technology || '').split(',').forEach(function (v) { var t = v.trim(); if (t) technologies[t] = 1; });
       (ann.biosample  || '').split(',').forEach(function (v) { var t = v.trim(); if (t) biosamples[t]   = 1; });
     });
-    function buildOpts(map) {
+    function buildOpts(map, syntheticFirst) {
       var opts = ['<option value="">any</option>'];
+      if (syntheticFirst) opts.push('<option value="' + esc(syntheticFirst) + '">' + esc(syntheticFirst) + '</option>');
       Object.keys(map).sort().forEach(function (v) { opts.push('<option value="' + esc(v) + '">' + esc(v) + '</option>'); });
       return opts.join('');
     }
-    if (flt.technology) flt.technology.innerHTML = buildOpts(technologies);
-    if (flt.biosample)  flt.biosample.innerHTML  = buildOpts(biosamples);
+    // Inject "single cell + nucleus" combined option when both base values exist.
+    var techSynthetic = (technologies['single cell'] && technologies['single nucleus'])
+      ? 'single cell + nucleus' : null;
+    if (flt.technology) flt.technology.innerHTML = buildOpts(technologies, techSynthetic);
+    if (flt.biosample)  flt.biosample.innerHTML  = buildOpts(biosamples, null);
     // Re-apply hash values now that options exist.
     var parsed = parseHashFilters();
     if (parsed.technology && flt.technology) flt.technology.value = parsed.technology;
@@ -497,13 +501,21 @@
       });
     }
 
-    // Filter: technology
+    // Filter: technology (with special combined "single cell + nucleus" option)
     if (flt.technology && flt.technology.value) {
-      var techFltVal = flt.technology.value.toLowerCase();
-      rows = rows.filter(function (r) {
-        var ann = DS_ANNOT[r.db_id] || {};
-        return (ann.technology || '').toLowerCase().indexOf(techFltVal) !== -1;
-      });
+      var techFltVal = flt.technology.value;
+      if (techFltVal === 'single cell + nucleus') {
+        rows = rows.filter(function (r) {
+          var t = (DS_ANNOT[r.db_id] || {}).technology || '';
+          return t === 'single cell' || t === 'single nucleus';
+        });
+      } else {
+        var techFltValLc = techFltVal.toLowerCase();
+        rows = rows.filter(function (r) {
+          var ann = DS_ANNOT[r.db_id] || {};
+          return (ann.technology || '').toLowerCase().indexOf(techFltValLc) !== -1;
+        });
+      }
     }
 
     // Filter: biosample
