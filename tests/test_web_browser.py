@@ -4283,3 +4283,72 @@ def test_geneset_experiment_drilldown_outside_collapsed_block(client):  # pyrigh
     assert mv_panel_pos > close_tag_pos, (
         "mv-panel drilldown must come AFTER the closing </details> of the geneset list"
     )
+
+
+# ── Hexbin plot icon on module drilldown + gene atlas ─────────────────────────
+
+
+def test_module_view_svg_hex_constant_present(client):
+    """SVG_HEX constant must be defined in _module_view.html (included on the experiment page)."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    assert 'SVG_HEX' in resp.text, "SVG_HEX constant missing from _module_view.html"
+    assert '<polygon' in resp.text, "SVG_HEX must contain polygon elements"
+
+
+def test_module_view_hex_url_function_present(client):
+    """hexUrl() helper must be defined in _module_view.html."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    assert 'function hexUrl' in resp.text, "hexUrl function missing from _module_view.html"
+    assert 'plot/hexbin' in resp.text, "hexUrl must reference plot/hexbin endpoint"
+    assert 'embedding=X_umap' in resp.text, "hexUrl must pass embedding=X_umap"
+
+
+def test_module_view_hex_only_for_numerical_tags(client):
+    """hexUrl() must return null for non-numerical tags (categorical rows get no hexbin icon)."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    html = resp.text
+    # The function guard: if (!NUMERICAL_TAGS[row.tag]) return null;
+    assert 'NUMERICAL_TAGS' in html, "NUMERICAL_TAGS lookup must guard hexUrl"
+    # hu variable computed per row
+    assert 'hu = hexUrl' in html or 'hu=hexUrl' in html, (
+        "hexUrl result (hu) must be computed per row in render()"
+    )
+    # hu is conditionally included in plotCell only when truthy
+    assert '(hu ?' in html or '(hu?' in html, (
+        "hexbin icon must be gated on hu being truthy"
+    )
+
+
+def test_gene_atlas_svg_hex_constant_present(client):
+    """SVG_HEX constant must be defined in genes.html."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    assert 'SVG_HEX' in resp.text, "SVG_HEX constant missing from genes.html"
+    assert '<polygon' in resp.text, "SVG_HEX must contain polygon elements"
+
+
+def test_gene_atlas_hex_url_function_present(client):
+    """hexUrl() helper must be defined in genes.html."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    assert 'function hexUrl' in resp.text, "hexUrl function missing from genes.html"
+    assert 'plot/hexbin' in resp.text, "hexUrl must reference plot/hexbin endpoint"
+    assert 'embedding=X_umap' in resp.text, "hexUrl must pass embedding=X_umap"
+
+
+def test_gene_atlas_plot_icons_include_hexbin(client):
+    """plotLinks() on the gene atlas must now include four icons: histogram, ECDF, hexbin, UMAP."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    html = resp.text
+    assert '/plot/histogram' in html, "histogram link missing"
+    assert '/plot/ecdf' in html,      "ECDF link missing"
+    assert '/plot/hexbin' in html,    "hexbin link missing"
+    assert '/plot/scatter' in html,   "UMAP scatter link missing"
+    # hexbin link must include the gene color param
+    assert 'plot/hexbin?embedding=X_umap&color=' in html, (
+        "hexbin URL must include embedding=X_umap&color= param"
+    )

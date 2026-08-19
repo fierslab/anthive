@@ -209,6 +209,14 @@ URL hash scheme (feature: back-button / shareable filter state):
   var SVG_BAR = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="1.5" y="8" width="3" height="6"/><rect x="6.5" y="5" width="3" height="9"/><rect x="11.5" y="2" width="3" height="12"/></svg>';
   var SVG_LINE = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M1.5 13 L5.5 8.5 L9 10.5 L14.5 3"/></svg>';
   var SVG_UMAP = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3.4" cy="4.2" r="1.5"/><circle cx="6.2" cy="2.6" r="1.5"/><circle cx="5.6" cy="7" r="1.5"/><circle cx="10.6" cy="9.6" r="1.5"/><circle cx="13.2" cy="7.6" r="1.5"/><circle cx="12.4" cy="12.6" r="1.5"/><circle cx="8.6" cy="13" r="1.5"/></svg>';
+  // Hexbin density icon: 5 flat-top hexagons in a honeycomb pattern, varying opacity = density hint.
+  var SVG_HEX = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">'
+    + '<polygon points="4,1.5 6.3,2.8 6.3,5.2 4,6.5 1.7,5.2 1.7,2.8" fill-opacity="0.35"/>'
+    + '<polygon points="11.5,1.5 13.8,2.8 13.8,5.2 11.5,6.5 9.2,5.2 9.2,2.8" fill-opacity="0.65"/>'
+    + '<polygon points="7.75,4.5 10.05,5.8 10.05,8.2 7.75,9.5 5.45,8.2 5.45,5.8" fill-opacity="1.0"/>'
+    + '<polygon points="4,7.5 6.3,8.8 6.3,11.2 4,12.5 1.7,11.2 1.7,8.8" fill-opacity="0.5"/>'
+    + '<polygon points="11.5,7.5 13.8,8.8 13.8,11.2 11.5,12.5 9.2,11.2 9.2,8.8" fill-opacity="0.25"/>'
+    + '</svg>';
 
   var NUMERICAL_TAGS = { braak: 1, age: 1, pmi: 1 };
   var METHOD_LABEL = { geneset: 'scanpy', aucell: 'AUCell' };
@@ -275,6 +283,14 @@ URL hash scheme (feature: back-button / shareable filter state):
     if (NUMERICAL_TAGS[row.tag]) return null;  // numerical tags → not an ECDF-by-category plot
     var tagCol = row.tag_column || row.tag;
     return b + '/plot/ecdf?x=' + encodeURIComponent(col) + '&color=' + encodeURIComponent(tagCol);
+  }
+
+  // Build a hexbin density URL: module score on the default UMAP embedding.
+  // Only for numerical tags — density requires a continuous color axis.
+  function hexUrl(row) {
+    var col = scoreColFor(row); var b = baseUrl(row); if (!col || !b) return null;
+    if (!NUMERICAL_TAGS[row.tag]) return null;
+    return b + '/plot/hexbin?embedding=X_umap&color=' + encodeURIComponent(col);
   }
 
   // Peer group key — matched to how "peers" is defined: same (dataset, tag,
@@ -679,7 +695,7 @@ URL hash scheme (feature: back-button / shareable filter state):
         ? '<span class="mv-ds-pop"><a href="' + esc(dsHref) + '">' + esc(r.dataset) + '</a>' + dsTip + '</span>'
         : '<span class="mv-ds-pop">' + esc(r.dataset) + dsTip + '</span>';
       var plotSvg = NUMERICAL_TAGS[r.tag] ? SVG_LINE : SVG_BAR;
-      var pu = plotUrl(r), uu = umapUrl(r), eu = ecdfUrl(r);
+      var pu = plotUrl(r), uu = umapUrl(r), eu = ecdfUrl(r), hu = hexUrl(r);
       var tds = [];
       if (CTX.scope !== 'module') {
         tds.push('<td class="mv-group">' + esc(r.catalog) + '</td>');
@@ -692,7 +708,8 @@ URL hash scheme (feature: back-button / shareable filter state):
       tds.push('<td class="mv-val">' + (+r.value).toFixed(3) + '<span class="muted-2" style="font-size:9px;margin-left:3px">' + esc(r.statistic) + '</span></td>');
       tds.push('<td class="mv-pos">' + track + ' <span class="muted-2" style="font-size:10px">' + (+g.min).toFixed(2) + '–' + (+g.max).toFixed(2) + '</span></td>');
       var plotCell = (pu ? '<a href="' + pu + '" title="plot ' + esc(r.tag) + ' × ' + esc(r.module) + '">' + plotSvg + '</a>' : '')
-        + (eu ? '<a href="' + eu + '" title="ECDF of ' + esc(r.module) + ' split by ' + esc(r.tag) + '">' + SVG_LINE + '</a>' : '');
+        + (eu ? '<a href="' + eu + '" title="ECDF of ' + esc(r.module) + ' split by ' + esc(r.tag) + '">' + SVG_LINE + '</a>' : '')
+        + (hu ? '<a href="' + hu + '" title="hexbin (density) of ' + esc(r.module) + ' in embedding">' + SVG_HEX + '</a>' : '');
       tds.push('<td class="mv-icons" style="text-align:center">' + plotCell + '</td>');
       tds.push('<td class="mv-icons" style="text-align:center">' + (uu ? '<a href="' + uu + '" title="UMAP coloured by ' + esc(r.module) + '">' + SVG_UMAP + '</a>' : '') + '</td>');
       return '<tr>' + tds.join('') + '</tr>';
