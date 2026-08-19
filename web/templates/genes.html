@@ -4,6 +4,87 @@
 
 {% block content %}
 <style>
+  /* ── two-row filter bar (mirrors _module_view.html) ── */
+  .gv-filter-row {
+    display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end;
+    margin: 4px 0 4px; font-size: 12px;
+  }
+  .gv-filter-row + .gv-filter-row { margin-top: 2px; }
+  .gv-filter-row label {
+    display: block; font-size: 10px; text-transform: uppercase;
+    letter-spacing: .4px; color: var(--text-muted); margin-bottom: 2px;
+  }
+  .gv-filter-row select, .gv-filter-row input[type="number"] {
+    font-family: var(--font); font-size: 12px; padding: 3px 8px;
+    border: 1px solid var(--border); border-radius: 5px; background: #fff;
+    min-width: 140px;
+  }
+  .gv-filter-row input[type="number"] { min-width: 80px; }
+  .gv-summary-row { font-size: 11px; color: var(--text-muted); margin: 4px 0 8px; }
+
+  /* ── sortable table (mirrors .mv-table) ── */
+  .gv-table { font-size: 11.5px; border-collapse: collapse; width: 100%; }
+  .gv-table th {
+    text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border);
+    font-weight: 600; background: #f8fafc; position: sticky; top: 0;
+    cursor: pointer; user-select: none; white-space: nowrap;
+  }
+  .gv-table th:hover { background: #f1f5f9; }
+  .gv-table th.gv-sort-asc::after  { content: ' ▲'; font-size: 9px; color: var(--link); }
+  .gv-table th.gv-sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--link); }
+  .gv-table td { padding: 3px 8px; border-bottom: 1px solid var(--border-light); vertical-align: middle; }
+  .gv-table .gv-val { font-family: var(--font-mono); text-align: right; }
+  .gv-table .gv-icons a {
+    display: inline-flex; text-decoration: none; color: var(--text-muted);
+    font-size: 14px; padding: 0 3px;
+  }
+  .gv-table .gv-icons a:hover { color: var(--link); }
+  .gv-table .gv-icons svg { width: 1em; height: 1em; }
+  .gv-empty { color: var(--text-muted); font-style: italic; padding: 12px 4px; font-size: 12px; }
+
+  /* ── dataset hover popover (identical to .mv-ds-pop / .mv-ds-tip) ── */
+  .gv-ds-pop { position: relative; display: inline-block; }
+  .gv-ds-tip {
+    display: none; position: absolute; top: calc(100% + 4px); left: 0; z-index: 200;
+    min-width: 240px; max-width: 340px; background: #fff; border: 1px solid #e5e7eb;
+    border-radius: 6px; padding: 8px 12px; box-shadow: 0 4px 12px rgba(0,0,0,.08);
+    font-size: 11px; line-height: 1.5; white-space: normal; pointer-events: none;
+  }
+  .gv-ds-pop:hover .gv-ds-tip { display: block; }
+  .gv-ds-tip .tip-title { font-weight: 600; font-size: 12px; margin-bottom: 4px; color: #1e293b; }
+  .gv-ds-tip .tip-row   { color: #475569; }
+  .gv-ds-tip .tip-id    { font-family: var(--font-mono); color: var(--text-muted); font-size: 10px; margin-top: 4px; }
+
+  /* ── minimal sparkline: 4-char wide grey line + black tick ── */
+  .ss {
+    display: inline-block; position: relative; width: 36px; height: 10px;
+    background: #e2e8f0; border-radius: 2px; vertical-align: middle;
+  }
+  .ss .ss-tick {
+    position: absolute; top: -1px; width: 2px; height: 12px;
+    background: #0f172a; border-radius: 1px;
+  }
+
+  /* ── multi-gene heatmap (preserved, styled consistently) ── */
+  .hm-legend { font-size: 11px; color: var(--text-muted); margin: 6px 0; }
+  .hm-scale {
+    display: inline-block; width: 80px; height: 10px; vertical-align: middle;
+    background: linear-gradient(to right, rgba(29,78,216,.08), rgba(29,78,216,1));
+    border: 1px solid var(--border); border-radius: 2px;
+  }
+  table.hm { border-collapse: collapse; font-size: 11px; }
+  table.hm th, table.hm td { border: 1px solid var(--border-light); padding: 0; }
+  table.hm th.hm-corner { text-align: left; padding: 3px 8px; }
+  table.hm th.hm-gene { padding: 3px 6px; font-family: var(--font-mono); white-space: nowrap; }
+  table.hm td.hm-row { padding: 2px 8px; white-space: nowrap; }
+  table.hm td.hm-row .nm { font-size: 11px; }
+  table.hm td.hm-row .pills { display: inline-flex; gap: 3px; margin-left: 6px; vertical-align: middle; }
+  table.hm td.hm-cell { text-align: center; }
+  table.hm td.hm-cell a { display: block; padding: 3px 6px; font-family: var(--font-mono); text-decoration: none; min-width: 40px; }
+  table.hm td.hm-cell a:hover { outline: 2px solid var(--link); outline-offset: -2px; }
+  table.hm td.hm-na { text-align: center; padding: 3px 6px; color: #cbd5e1; }
+
+  /* ── gene-hero summary cards ── */
   .gene-hero { display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0 14px; }
   .gene-hero .card {
     flex: 1; min-width: 190px; border: 1px solid var(--border); border-radius: 8px;
@@ -12,118 +93,71 @@
   .gene-hero .num { font-size: 18px; font-weight: 700; color: var(--link); line-height: 1.15; }
   .gene-hero .lbl { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; margin-top: 3px; }
 
-  .gene-controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 6px 0 10px; font-size: 12px; }
-  .gene-controls .picks-label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; }
-  .gene-controls button {
-    font-size: 11px; padding: 2px 9px; border: 1px solid var(--border); background: #f8fafc;
-    border-radius: 10px; cursor: pointer; font-family: inherit; color: var(--text);
-  }
-  .gene-controls button:hover { background: #dbeafe; border-color: var(--link); }
-  .gene-controls button.active { background: var(--link); color: #fff; border-color: var(--link); }
-
-  /* ── single-gene card grid: one dataset per card ── */
-  .gene-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(255px, 1fr)); gap: 10px; margin-top: 6px; }
-  .gcard {
-    position: relative; border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px;
-    background: #fff; text-decoration: none; color: var(--text);
-    display: flex; flex-direction: column; gap: 8px; transition: box-shadow .12s, border-color .12s, transform .12s;
-  }
-  .gcard:hover { border-color: var(--link); box-shadow: 0 3px 12px rgba(15,23,42,.10); text-decoration: none; transform: translateY(-1px); }
-  .gcard .gc-title { font-size: 12.5px; font-weight: 600; line-height: 1.25;
-    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .gcard .gc-pills { display: flex; gap: 3px; flex-wrap: wrap; min-height: 16px; }
-
-  .gc-metric { display: flex; flex-direction: column; gap: 2px; }
-  .gc-mrow { display: flex; justify-content: space-between; align-items: baseline; font-size: 10px; color: var(--text-muted); }
-  .gc-mrow .v { font-family: var(--font-mono); font-size: 11px; color: var(--text); }
-  .gc-track { background: #f1f5f9; border-radius: 3px; height: 7px; overflow: hidden; }
-  .gc-fill { height: 100%; border-radius: 3px; }
-  .gc-fill.abund { background: #1d4ed8; }
-  .gc-fill.expr  { background: #0d9488; }
-
-  /* rank-in-dataset chip */
-  .gc-rank { font-size: 10px; color: var(--text-muted); display: flex; align-items: center; gap: 5px; }
-  .gc-rank b { color: #b45309; font-family: var(--font-mono); }
-
-  /* distribution sparkline (expressing cells): track 0..max, box q10–q90, tick at median */
-  .gc-dist { position: relative; height: 13px; background: #f8fafc; border: 1px solid var(--border-light); border-radius: 3px; }
-  .gc-dist .box { position: absolute; top: 2px; bottom: 2px; background: #c7d2fe; border-radius: 2px; }
-  .gc-dist .med { position: absolute; top: 0; bottom: 0; width: 2px; background: #4338ca; }
-  .gc-dist .maxlbl { position: absolute; right: 3px; top: 0; line-height: 13px; font-size: 9px; color: #94a3b8; font-family: var(--font-mono); }
-
-  .gp { display: inline-block; padding: 0 6px; font-size: 10px; line-height: 1.5; border-radius: 9px; white-space: nowrap;
-        background: #eef2ff; color: #3730a3; border: 1px solid #e0e7ff; }
+  /* ── context pills (organism / cell) ── */
+  .gp { display: inline-block; padding: 0 6px; font-size: 10px; line-height: 1.5; border-radius: 9px;
+        white-space: nowrap; background: #eef2ff; color: #3730a3; border: 1px solid #e0e7ff; }
   .gp.cell    { background: #dcfce7; color: #166534; border-color: #bbf7d0; }
   .gp.disease { background: #fee2e2; color: #991b1b; border-color: #fecaca; }
 
-  /* floating hover panel — plain-language explanation of every number */
-  #gene-tip {
-    position: fixed; z-index: 90; max-width: 320px; pointer-events: none; opacity: 0;
-    transition: opacity .1s; background: #0f172a; color: #e2e8f0; border-radius: 7px;
-    padding: 9px 11px; font-size: 11px; line-height: 1.45; box-shadow: 0 6px 24px rgba(0,0,0,.35);
-  }
-  #gene-tip.show { opacity: 1; }
-  #gene-tip .tt-h { font-weight: 700; font-size: 12px; margin-bottom: 2px; color: #fff; }
-  #gene-tip .tt-sub { color: #94a3b8; font-size: 10px; margin-bottom: 6px; }
-  #gene-tip dl { display: grid; grid-template-columns: auto 1fr; gap: 1px 8px; margin: 0; }
-  #gene-tip dt { color: #cbd5e1; }
-  #gene-tip dd { margin: 0; font-family: var(--font-mono); color: #fff; text-align: right; }
-  #gene-tip .tt-note { margin-top: 6px; color: #94a3b8; font-size: 10px; }
-
-  /* multi-gene heatmap (rows = datasets, cols = genes) */
-  .hm-legend { font-size: 11px; color: var(--text-muted); }
-  .hm-scale { display: inline-block; width: 80px; height: 10px; vertical-align: middle;
-              background: linear-gradient(to right, rgba(29,78,216,.08), rgba(29,78,216,1)); border: 1px solid var(--border); border-radius: 2px; }
-  .hm-na { color: #cbd5e1; text-align: center; }
-  table.hm { border-collapse: collapse; font-size: 11px; }
-  table.hm th, table.hm td { border: 1px solid var(--border-light); padding: 0; }
-  table.hm th.hm-corner { text-align: left; padding: 3px 8px; }
-  table.hm th.hm-gene { padding: 3px 6px; font-family: var(--font-mono); writing-mode: horizontal-tb; white-space: nowrap; }
-  table.hm td.hm-row { padding: 2px 8px; white-space: nowrap; }
-  table.hm td.hm-row .nm { font-size: 11px; }
-  table.hm td.hm-row .pills { display: inline-flex; gap: 3px; margin-left: 6px; vertical-align: middle; }
-  table.hm td.hm-cell { text-align: center; }
-  table.hm td.hm-cell a { display: block; padding: 3px 6px; font-family: var(--font-mono); text-decoration: none; min-width: 40px; }
-  table.hm td.hm-cell a:hover { outline: 2px solid var(--link); outline-offset: -2px; }
-  table.hm td.hm-na { text-align: center; padding: 3px 6px; }
-
-  .gene-filters { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 6px 0 4px; }
-  .gene-filters .picks-label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; }
-  .gene-filters select { font-size: 12px; padding: 2px 6px; border: 1px solid var(--border); border-radius: 4px; background: #fff; font-family: var(--font); color: var(--text); }
+  /* ── heatmap metric controls ── */
+  .gv-hm-controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 6px 0 10px; font-size: 12px; }
+  .gv-hm-controls .picks-label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; }
 </style>
 
 {% from "_macros.html" import breadcrumb %}
 {{ breadcrumb([("gene atlas", None)]) }}
 <h1 class="page-title">{{ gene }} <span class="muted" style="font-size:13px;font-weight:normal">— expression across the catalogue</span></h1>
 
-<div class="gene-filters">
-  <span class="picks-label">filter</span>
-  <select id="flt-organism"><option value="">organism: any</option>{% for v in filter_opts.organism %}<option value="{{ v }}">{{ v }}</option>{% endfor %}</select>
-  <select id="flt-cell_type"><option value="">cell type: any</option>{% for v in filter_opts.cell_type %}<option value="{{ v }}">{{ v }}</option>{% endfor %}</select>
-  <select id="flt-tissue"><option value="">tissue: any</option>{% for v in filter_opts.tissue %}<option value="{{ v }}">{{ v }}</option>{% endfor %}</select>
+{# ── Row 1: %expr threshold · organism · (multi-gene: metric picker) ── #}
+<div class="gv-filter-row">
+  <div>
+    <label>min % cells expressing</label>
+    <input type="number" id="gv-flt-pct" min="0" max="100" step="1" value="0" placeholder="0">
+  </div>
+  <div>
+    <label>organism</label>
+    <select id="gv-flt-organism"><option value="">any</option>{% for v in filter_opts.organism %}<option value="{{ v }}">{{ v }}</option>{% endfor %}</select>
+  </div>
 </div>
 
+{# ── Row 2: cell type · tissue · system ── #}
+<div class="gv-filter-row">
+  <div><label>cell type</label><select id="gv-flt-cell_type"><option value="">any</option>{% for v in filter_opts.cell_type %}<option value="{{ v }}">{{ v }}</option>{% endfor %}</select></div>
+  <div><label>tissue</label><select id="gv-flt-tissue"><option value="">any</option>{% for v in filter_opts.tissue %}<option value="{{ v }}">{{ v }}</option>{% endfor %}</select></div>
+  <div><label>system</label><select id="gv-flt-system"><option value="">any</option></select></div>
+</div>
+
+<div class="gv-summary-row"><span id="gv-summary"></span></div>
+
+{# ── hero cards (single-gene only) ── #}
 <div id="gene-hero" class="gene-hero"></div>
 
 <div id="gene-loading" class="plot-loading" style="min-height:140px">
   <span class="spinner-lg"></span>
   <span>computing <b>{{ gene }}</b> across the catalogue…<br>
-    <span class="muted" style="font-size:12px">first view of a gene can take ~10–60s; cached & instant after that</span></span>
+    <span class="muted" style="font-size:12px">first view can take ~10–60s; cached &amp; instant after that</span></span>
 </div>
 
-<div id="gene-controls" class="gene-controls" style="display:none">
-  <span class="picks-label">sort by</span>
-  <button data-sort="scaled_mean" class="active">abundance</button>
-  <button data-sort="pct_nonzero">% cells</button>
-  <button data-sort="mean_nonzero">mean (non-zero)</button>
-  <button data-sort="rank_mean">rank in dataset</button>
-  <span style="flex:1"></span>
-  <span class="muted" id="gene-meta"></span>
-  <span class="info" title="Each card is one dataset. The blue bar is scaled_mean (cross-dataset-comparable abundance, 0–1). The teal bar is the % of cells expressing the gene. The little track at the bottom shows the spread of expression among expressing cells (box = 10–90%, line = median). Hover a card for the full numbers; click to open the distribution.">ⓘ</span>
+{# ── single-gene sortable table ── #}
+<div id="gv-body" style="overflow-x:auto;overflow-y:auto;max-height:70vh;display:none">
+  <table class="gv-table">
+    <thead><tr>
+      <th data-sortcol="dataset" class="gv-sort-desc">dataset</th>
+      <th data-sortcol="organism">organism</th>
+      <th data-sortcol="cell_type">cell type</th>
+      <th data-sortcol="tissue">tissue</th>
+      <th data-sortcol="system">system</th>
+      <th data-sortcol="pct_nonzero" style="text-align:right">%expr</th>
+      <th data-sortcol="mean" style="text-align:right">mean</th>
+      <th data-sortcol="mean_nonzero" style="text-align:right">meannz</th>
+      <th style="text-align:center;cursor:default">plots</th>
+    </tr></thead>
+    <tbody id="gv-rows"></tbody>
+  </table>
 </div>
 
-<div id="gene-grid" class="gene-grid"></div>
-<div id="gene-hm-controls" class="gene-controls" style="display:none">
+{# ── multi-gene heatmap ── #}
+<div id="gv-hm-controls" class="gv-hm-controls" style="display:none">
   <span class="picks-label">cell value</span>
   <select id="hm-metric">
     <option value="scaled_mean">abundance (scaled 0–1)</option>
@@ -139,134 +173,361 @@
 <div id="gene-heatmap"></div>
 <div id="gene-missing" class="muted" style="font-size:11px; margin-top:10px"></div>
 <div id="gene-error" class="plot-status"></div>
-<div id="gene-tip"></div>
 
 <script>
 (function () {
-  const GENE  = {{ gene|tojson }};
-  const GENES = GENE.split(',').map(s => s.trim()).filter(Boolean);
-  const MULTI = GENES.length > 1;   // comma-separated list → gene × dataset heatmap
-  const PILLS = {{ pill_map|tojson }};
-  const loading  = document.getElementById('gene-loading');
-  const controls = document.getElementById('gene-controls');
-  const gridBox  = document.getElementById('gene-grid');
-  const heroBox  = document.getElementById('gene-hero');
-  const missBox  = document.getElementById('gene-missing');
-  const errBox   = document.getElementById('gene-error');
-  const metaEl   = document.getElementById('gene-meta');
-  const tip      = document.getElementById('gene-tip');
+  var GENE  = {{ gene|tojson }};
+  var GENES = GENE.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+  var MULTI = GENES.length > 1;
+  var PILLS = {{ pill_map|tojson }};
+  var DS_ANNOT = {{ dataset_annotations|tojson }};
 
-  let found = [], missing = [], sortKey = 'scaled_mean';
+  // DOM references
+  var loading   = document.getElementById('gene-loading');
+  var gvBody    = document.getElementById('gv-body');
+  var gvRows    = document.getElementById('gv-rows');
+  var heroBox   = document.getElementById('gene-hero');
+  var missBox   = document.getElementById('gene-missing');
+  var errBox    = document.getElementById('gene-error');
+  var summaryEl = document.getElementById('gv-summary');
 
-  const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-  const num = (x, d=2) => (x == null || isNaN(x)) ? '—' : Number(x).toFixed(d);
-  const intc = x => (x == null || isNaN(x)) ? '—' : Math.round(x).toLocaleString();
-  const pillsFor = dbId => {
-    const p = PILLS[dbId]; if (!p) return '';
-    const one = (d, cls) => (d && d.abbrev)
-      ? `<span class="gp ${cls}" title="${esc(d.full)}">${esc(d.abbrev)}</span>` : '';
-    return one(p.organism, '') + one(p.celltype, 'cell') + one(p.disease, 'disease');
+  // Filter selects
+  var flt = {
+    pct:       document.getElementById('gv-flt-pct'),
+    organism:  document.getElementById('gv-flt-organism'),
+    cell_type: document.getElementById('gv-flt-cell_type'),
+    tissue:    document.getElementById('gv-flt-tissue'),
+    system:    document.getElementById('gv-flt-system'),
   };
 
-  // ── single-gene: a graphical card per dataset ──
-  function renderCards() {
-    found.sort((a, b) => (b[sortKey] ?? -Infinity) - (a[sortKey] ?? -Infinity));
-    gridBox.innerHTML = found.map((r, i) => {
-      const abund = Math.max(2, Math.round((r.scaled_mean || 0) * 100));
-      const pct   = Math.max(1.5, Math.min(100, r.pct_nonzero || 0));
-      const rank  = r.rank_mean != null ? Math.round((1 - r.rank_mean) * 100) : null; // top X%
-      const mx    = r.max || r.q90_nonzero || 1;
-      const boxL  = Math.max(0, Math.min(100, (r.q10_nonzero || 0) / mx * 100));
-      const boxR  = Math.max(boxL, Math.min(100, (r.q90_nonzero || 0) / mx * 100));
-      const medL  = Math.max(0, Math.min(100, (r.median_nonzero || 0) / mx * 100));
-      const parts = (r.db_id || '').split('/');
-      const href  = `/browse/${encodeURIComponent(parts[0]||'')}/${encodeURIComponent(parts[1]||'')}/plot/histogram?x=${encodeURIComponent(GENE)}`;
-      const dist  = (r.n_nonzero > 0)
-        ? `<div class="gc-dist"><span class="box" style="left:${boxL}%;width:${(boxR-boxL).toFixed(1)}%"></span><span class="med" style="left:${medL}%"></span><span class="maxlbl">max ${num(mx,1)}</span></div>`
-        : '';
-      return `<a class="gcard" href="${href}" data-i="${i}">
-        <div class="gc-title">${esc(r.title || r.db_id)}</div>
-        <div class="gc-pills">${pillsFor(r.db_id)}</div>
-        <div class="gc-metric">
-          <div class="gc-mrow"><span>abundance</span><span class="v">${num(r.scaled_mean)}</span></div>
-          <div class="gc-track"><span class="gc-fill abund" style="width:${abund}%"></span></div>
-        </div>
-        <div class="gc-metric">
-          <div class="gc-mrow"><span>cells expressing</span><span class="v">${num(r.pct_nonzero,1)}%</span></div>
-          <div class="gc-track"><span class="gc-fill expr" style="width:${pct}%"></span></div>
-        </div>
-        ${rank != null ? `<div class="gc-rank">in-dataset rank <b>top ${rank}%</b> of genes</div>` : ''}
-        ${dist}
-      </a>`;
+  // Sort state for single-gene table
+  var sortState = { col: 'pct_nonzero', dir: 'desc' };
+
+  var found = [], missing = [];
+
+  // ── helpers ─────────────────────────────────────────────────────────────────
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  }
+  function num(x, d) {
+    d = d == null ? 2 : d;
+    return (x == null || isNaN(x)) ? '—' : Number(x).toFixed(d);
+  }
+  function intc(x) { return (x == null || isNaN(x)) ? '—' : Math.round(x).toLocaleString(); }
+
+  function pillsFor(dbId) {
+    var p = PILLS[dbId]; if (!p) return '';
+    function one(d, cls) {
+      return (d && d.abbrev) ? '<span class="gp ' + cls + '" title="' + esc(d.full) + '">' + esc(d.abbrev) + '</span>' : '';
+    }
+    return one(p.organism, '') + one(p.celltype, 'cell') + one(p.disease, 'disease');
+  }
+
+  // ── sparkline: minimal grey bar + black tick at the given fraction (0–1) ──
+  function sparkline(frac) {
+    var pct = Math.max(0, Math.min(100, (frac || 0) * 100));
+    return '<span class="ss"><span class="ss-tick" style="left:' + pct.toFixed(1) + '%"></span></span>';
+  }
+
+  // SVG icons
+  var SVG_BAR  = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="1.5" y="8" width="3" height="6"/><rect x="6.5" y="5" width="3" height="9"/><rect x="11.5" y="2" width="3" height="12"/></svg>';
+  var SVG_LINE = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M1.5 13 L5.5 8.5 L9 10.5 L14.5 3"/></svg>';
+  var SVG_UMAP = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3.4" cy="4.2" r="1.5"/><circle cx="6.2" cy="2.6" r="1.5"/><circle cx="5.6" cy="7" r="1.5"/><circle cx="10.6" cy="9.6" r="1.5"/><circle cx="13.2" cy="7.6" r="1.5"/><circle cx="12.4" cy="12.6" r="1.5"/><circle cx="8.6" cy="13" r="1.5"/></svg>';
+
+  // ── dataset popover HTML ────────────────────────────────────────────────────
+  function dsTip(dbId) {
+    var ann = DS_ANNOT[dbId] || {};
+    var rows = '';
+    if (ann.title)       rows += '<div class="tip-title">' + esc(ann.title) + '</div>';
+    if (ann.celltype)    rows += '<div class="tip-row">Cell type: ' + esc(ann.celltype) + '</div>';
+    if (ann.tissue)      rows += '<div class="tip-row">Tissue: '    + esc(ann.tissue)   + '</div>';
+    if (ann.system)      rows += '<div class="tip-row">System: '    + esc(ann.system)   + '</div>';
+    if (ann.n_cells)     rows += '<div class="tip-row">Cells: '     + esc(ann.n_cells)  + '</div>';
+    rows += '<div class="tip-id">' + esc(dbId) + '</div>';
+    return '<div class="gv-ds-tip">' + rows + '</div>';
+  }
+  function dsCell(dbId) {
+    var parts = String(dbId).split('/');
+    var href = '/browse/' + encodeURIComponent(parts[0] || '') + '/' + encodeURIComponent(parts[1] || '');
+    return '<span class="gv-ds-pop"><a href="' + esc(href) + '">' + esc(dbId) + '</a>' + dsTip(dbId) + '</span>';
+  }
+
+  // ── plot links per row ──────────────────────────────────────────────────────
+  function plotLinks(dbId) {
+    var parts = String(dbId).split('/');
+    var base  = '/browse/' + encodeURIComponent(parts[0] || '') + '/' + encodeURIComponent(parts[1] || '');
+    var gene  = encodeURIComponent(GENE);
+    var hist  = base + '/plot/histogram?x=' + gene;
+    var ecdf  = base + '/plot/ecdf?x=' + gene;
+    var umap  = base + '/plot/scatter?embedding=X_umap&color=' + gene;
+    return '<a href="' + hist + '" title="histogram of ' + esc(GENE) + '">' + SVG_BAR  + '</a>'
+         + '<a href="' + ecdf + '" title="ECDF of '      + esc(GENE) + '">' + SVG_LINE + '</a>'
+         + '<a href="' + umap + '" title="UMAP coloured by ' + esc(GENE) + '">' + SVG_UMAP + '</a>';
+  }
+
+  // ── cross-dataset range for sparklines (set after data loads) ─────────────
+  var STAT_MAX = { pct_nonzero: 100, mean: 1, mean_nonzero: 1 };  // updated after load
+
+  function computeStatMax(rows) {
+    var pmax = 0, mmax = 0, mnmax = 0;
+    rows.forEach(function (r) {
+      if (r.pct_nonzero  > pmax)  pmax  = r.pct_nonzero;
+      if (r.mean         > mmax)  mmax  = r.mean;
+      if (r.mean_nonzero > mnmax) mnmax = r.mean_nonzero;
+    });
+    STAT_MAX.pct_nonzero  = pmax  > 0 ? pmax  : 1;
+    STAT_MAX.mean         = mmax  > 0 ? mmax  : 1;
+    STAT_MAX.mean_nonzero = mnmax > 0 ? mnmax : 1;
+  }
+
+  // ── URL hash state (scheme: #gv=key=val;key=val) ───────────────────────────
+  var GV_SEP = '&gv=';
+
+  function splitHash(hash) {
+    var raw = (hash || '').replace(/^#/, '');
+    var sepIdx = raw.indexOf('&gv=');
+    if (sepIdx !== -1) return { prefix: raw.slice(0, sepIdx), gvStr: raw.slice(sepIdx + 4) };
+    if (raw.indexOf('gv=') === 0) return { prefix: '', gvStr: raw.slice(3) };
+    return { prefix: raw, gvStr: '' };
+  }
+
+  function parseGvStr(gvStr) {
+    var result = {};
+    if (!gvStr) return result;
+    gvStr.split(';').forEach(function (pair) {
+      var eqIdx = pair.indexOf('=');
+      if (eqIdx === -1) return;
+      var key = pair.slice(0, eqIdx);
+      var val = decodeURIComponent(pair.slice(eqIdx + 1));
+      if (key) result[key] = val;
+    });
+    return result;
+  }
+
+  function parseHashFilters() { return parseGvStr(splitHash(window.location.hash).gvStr); }
+
+  function buildHashFromFilters() {
+    var pairs = [];
+    // filter values
+    ['organism', 'cell_type', 'tissue', 'system'].forEach(function (k) {
+      var sel = flt[k]; if (!sel || !sel.value) return;
+      pairs.push(k + '=' + encodeURIComponent(sel.value));
+    });
+    // pct threshold (only when non-zero)
+    if (flt.pct && flt.pct.value && parseFloat(flt.pct.value) > 0) {
+      pairs.push('pct=' + encodeURIComponent(flt.pct.value));
+    }
+    // sort state (only when not default)
+    if (!(sortState.col === 'pct_nonzero' && sortState.dir === 'desc')) {
+      pairs.push('sort=' + encodeURIComponent(sortState.col + ':' + sortState.dir));
+    }
+    var parts = splitHash(window.location.hash);
+    var gvPairsStr = pairs.join(';');
+    if (!gvPairsStr) return parts.prefix ? '#' + parts.prefix : '';
+    var gvFull = 'gv=' + gvPairsStr;
+    return '#' + (parts.prefix ? parts.prefix + '&' + gvFull : gvFull);
+  }
+
+  function applyHashFilters(parsed) {
+    if (parsed.organism  && flt.organism)  flt.organism.value  = parsed.organism;
+    if (parsed.cell_type && flt.cell_type) flt.cell_type.value = parsed.cell_type;
+    if (parsed.tissue    && flt.tissue)    flt.tissue.value    = parsed.tissue;
+    if (parsed.system    && flt.system)    flt.system.value    = parsed.system;
+    if (parsed.pct       && flt.pct)       flt.pct.value       = parsed.pct;
+    if (parsed.sort) {
+      var sp = parsed.sort.split(':');
+      if (sp.length === 2) { sortState.col = sp[0]; sortState.dir = sp[1] === 'asc' ? 'asc' : 'desc'; }
+    }
+  }
+
+  function updateHash(isNavigation) {
+    var newHash   = buildHashFromFilters();
+    var curHash   = window.location.hash || '';
+    if (newHash === curHash) return;
+    if (isNavigation) {
+      history.pushState({}, '', newHash || window.location.pathname + window.location.search);
+    } else {
+      history.replaceState({}, '', newHash || window.location.pathname + window.location.search);
+    }
+  }
+
+  // Apply stored filter state early, before data loads.
+  applyHashFilters(parseHashFilters());
+
+  window.addEventListener('popstate', function () {
+    var parsed = parseHashFilters();
+    applyHashFilters(parsed);
+    updateSortIndicators();
+    render();
+  });
+
+  // ── sort indicators ─────────────────────────────────────────────────────────
+  function updateSortIndicators() {
+    document.querySelectorAll('.gv-table th[data-sortcol]').forEach(function (th) {
+      th.classList.remove('gv-sort-asc', 'gv-sort-desc');
+      if (th.getAttribute('data-sortcol') === sortState.col) {
+        th.classList.add(sortState.dir === 'asc' ? 'gv-sort-asc' : 'gv-sort-desc');
+      }
+    });
+  }
+
+  // Bind column-header click → sort
+  document.querySelectorAll('.gv-table th[data-sortcol]').forEach(function (th) {
+    var col = th.getAttribute('data-sortcol');
+    th.addEventListener('click', function () {
+      if (sortState.col === col) {
+        sortState.dir = sortState.dir === 'desc' ? 'asc' : 'desc';
+      } else {
+        sortState.col = col;
+        sortState.dir = 'desc';
+      }
+      updateSortIndicators();
+      updateHash(false);
+      render();
+    });
+  });
+  updateSortIndicators();
+
+  // ── populate the system dropdown from DS_ANNOT (server only sends cell_type / tissue) ──
+  (function () {
+    var systems = {};
+    Object.keys(DS_ANNOT).forEach(function (dbId) {
+      var sys = DS_ANNOT[dbId].system || '';
+      sys.split(',').forEach(function (v) { var t = v.trim(); if (t) systems[t] = 1; });
+    });
+    var opts = ['<option value="">any</option>'];
+    Object.keys(systems).sort().forEach(function (v) {
+      opts.push('<option value="' + esc(v) + '">' + esc(v) + '</option>');
+    });
+    flt.system.innerHTML = opts.join('');
+    // Re-apply hash value now that options exist.
+    var parsed = parseHashFilters();
+    if (parsed.system) flt.system.value = parsed.system;
+  }());
+
+  // ── single-gene render ──────────────────────────────────────────────────────
+  function render() {
+    var rows = found.slice();
+
+    // Filter: min %expr
+    var minPct = flt.pct ? parseFloat(flt.pct.value) || 0 : 0;
+    if (minPct > 0) rows = rows.filter(function (r) { return (r.pct_nonzero || 0) >= minPct; });
+
+    // Filter: organism (server-side filter on /gene_stats_all; client-side label match via PILLS)
+    if (flt.organism && flt.organism.value) {
+      var orgVal = flt.organism.value.toLowerCase();
+      rows = rows.filter(function (r) {
+        var p = PILLS[r.db_id] || {};
+        return (((p.organism || {}).full || '') + '').toLowerCase().indexOf(orgVal) !== -1;
+      });
+    }
+
+    // Filter: cell_type from DS_ANNOT
+    if (flt.cell_type && flt.cell_type.value) {
+      var ctVal = flt.cell_type.value.toLowerCase();
+      rows = rows.filter(function (r) {
+        var ann = DS_ANNOT[r.db_id] || {};
+        return (ann.celltype || '').toLowerCase().indexOf(ctVal) !== -1;
+      });
+    }
+
+    // Filter: tissue
+    if (flt.tissue && flt.tissue.value) {
+      var tVal = flt.tissue.value.toLowerCase();
+      rows = rows.filter(function (r) {
+        var ann = DS_ANNOT[r.db_id] || {};
+        return (ann.tissue || '').toLowerCase().indexOf(tVal) !== -1;
+      });
+    }
+
+    // Filter: system
+    if (flt.system && flt.system.value) {
+      var sysVal = flt.system.value.toLowerCase();
+      rows = rows.filter(function (r) {
+        var ann = DS_ANNOT[r.db_id] || {};
+        return (ann.system || '').toLowerCase().indexOf(sysVal) !== -1;
+      });
+    }
+
+    // Sort
+    var mul = sortState.dir === 'asc' ? 1 : -1;
+    var col = sortState.col;
+    var numericCols = { pct_nonzero: 1, mean: 1, mean_nonzero: 1, scaled_mean: 1 };
+    if (numericCols[col]) {
+      rows.sort(function (a, b) { return mul * ((a[col] || 0) - (b[col] || 0)); });
+    } else if (col === 'dataset') {
+      rows.sort(function (a, b) { return mul * String(a.db_id).localeCompare(String(b.db_id)); });
+    } else if (col === 'organism') {
+      rows.sort(function (a, b) {
+        var pa = PILLS[a.db_id] || {}, pb = PILLS[b.db_id] || {};
+        return mul * String((pa.organism || {}).full || '').localeCompare(String((pb.organism || {}).full || ''));
+      });
+    } else {
+      // cell_type / tissue / system — sort via DS_ANNOT
+      rows.sort(function (a, b) {
+        var annA = DS_ANNOT[a.db_id] || {}, annB = DS_ANNOT[b.db_id] || {};
+        var va = annA[col] || annA.celltype || '', vb = annB[col] || annB.celltype || '';
+        return mul * va.localeCompare(vb);
+      });
+    }
+
+    summaryEl.textContent = rows.length + ' datasets';
+    if (!rows.length) {
+      gvBody.style.display = '';
+      gvRows.innerHTML = '<tr><td colspan="9" class="gv-empty">No datasets match — widen the filters.</td></tr>';
+      return;
+    }
+    gvRows.innerHTML = rows.map(function (r) {
+      var ann   = DS_ANNOT[r.db_id] || {};
+      var p     = PILLS[r.db_id] || {};
+      var orgFull  = ((p.organism || {}).full || ann.celltype || '');
+      // We embed organism full name from PILLS for display; cell_type / tissue / system from DS_ANNOT.
+      var orgPill  = p.organism ? '<span title="' + esc(((p.organism || {}).full || '')) + '">' + esc(((p.organism || {}).abbrev || '')) + '</span>' : '—';
+      // sparklines: position of the value within the across-dataset range
+      var pctSpark  = sparkline((r.pct_nonzero  || 0) / STAT_MAX.pct_nonzero);
+      var meanSpark = sparkline((r.mean         || 0) / STAT_MAX.mean);
+      var mnzSpark  = sparkline((r.mean_nonzero || 0) / STAT_MAX.mean_nonzero);
+      return '<tr>'
+        + '<td>' + dsCell(r.db_id) + '</td>'
+        + '<td>' + orgPill + '</td>'
+        + '<td class="muted" style="font-size:11px">' + esc(ann.celltype || '') + '</td>'
+        + '<td class="muted" style="font-size:11px">' + esc(ann.tissue || '')   + '</td>'
+        + '<td class="muted" style="font-size:11px">' + esc(ann.system || '')   + '</td>'
+        + '<td class="gv-val">' + num(r.pct_nonzero, 1) + '% ' + pctSpark  + '</td>'
+        + '<td class="gv-val">' + num(r.mean, 3)        + ' '  + meanSpark + '</td>'
+        + '<td class="gv-val">' + num(r.mean_nonzero, 2)+ ' '  + mnzSpark  + '</td>'
+        + '<td class="gv-icons" style="text-align:center">' + plotLinks(r.db_id) + '</td>'
+        + '</tr>';
     }).join('');
+    gvBody.style.display = '';
   }
 
-  // floating hover panel — plain-language explanation of one card's numbers
-  function tipHTML(r) {
-    const rank = r.rank_mean != null ? Math.round((1 - r.rank_mean) * 100) : null;
-    const rows = [
-      ['abundance (scaled)', num(r.scaled_mean), 'comparable across datasets, 0–1'],
-      ['% cells expressing', num(r.pct_nonzero,1) + '%', `${intc(r.n_nonzero)} of ${intc(r.n_cells)} cells`],
-      rank != null ? ['rank in dataset', 'top ' + rank + '%', 'more abundant than ' + (100-rank) + '% of genes here'] : null,
-      ['mean (all cells)', num(r.mean,3), 'raw, log-norm layer'],
-      ['among expressing', num(r.mean_nonzero,2), `median ${num(r.median_nonzero,1)} · 10–90% ${num(r.q10_nonzero,1)}–${num(r.q90_nonzero,1)} · max ${num(r.max,1)}`],
-      ['cross-dataset CV', num(r.cross_db_cv), 'spread of this gene across all datasets'],
-    ].filter(Boolean);
-    const dl = rows.map(([k,v,note]) =>
-      `<dt>${esc(k)}</dt><dd>${esc(v)}</dd><dt class="tt-note" style="grid-column:1/-1;margin:0 0 3px">${esc(note)}</dt>`).join('');
-    return `<div class="tt-h">${esc(r.title || r.db_id)}</div>
-      <div class="tt-sub">${esc(r.db_id)} · ${intc(r.n_cells)} cells</div>
-      <dl>${dl}</dl>
-      <div class="tt-note">click to open the ${esc(GENE)} distribution →</div>`;
-  }
-
-  function positionTip(ev) {
-    const pad = 14, w = tip.offsetWidth, h = tip.offsetHeight;
-    let x = ev.clientX + pad, y = ev.clientY + pad;
-    if (x + w > innerWidth - 8)  x = ev.clientX - w - pad;
-    if (y + h > innerHeight - 8) y = innerHeight - h - 8;
-    tip.style.left = Math.max(8, x) + 'px';
-    tip.style.top  = Math.max(8, y) + 'px';
-  }
-  gridBox.addEventListener('mouseover', e => {
-    const card = e.target.closest('.gcard'); if (!card) return;
-    const r = found[+card.getAttribute('data-i')]; if (!r) return;
-    tip.innerHTML = tipHTML(r); tip.classList.add('show'); positionTip(e);
-  });
-  gridBox.addEventListener('mousemove', e => { if (tip.classList.contains('show')) positionTip(e); });
-  gridBox.addEventListener('mouseout', e => {
-    if (!e.relatedTarget || !e.relatedTarget.closest || !e.relatedTarget.closest('.gcard')) tip.classList.remove('show');
-  });
-
+  // ── hero summary (single-gene) ──────────────────────────────────────────────
   function renderHero() {
-    const top = found[0];
-    const broad = found.filter(r => (r.pct_nonzero || 0) > 10).length;
-    const cv = found.length ? found[0].cross_db_cv : null;
-    const total = found.length + missing.length;
-    const card = (n, lbl) => `<div class="card"><div class="num">${n}</div><div class="lbl">${lbl}</div></div>`;
+    var top   = found[0];
+    var broad = found.filter(function (r) { return (r.pct_nonzero || 0) > 10; }).length;
+    var cv    = found.length ? found[0].cross_db_cv : null;
+    var total = found.length + missing.length;
+    function card(n, lbl) { return '<div class="card"><div class="num">' + n + '</div><div class="lbl">' + lbl + '</div></div>'; }
     heroBox.innerHTML =
-      card(top ? esc(top.title || top.db_id) : '—', top ? `highest abundance (scaled ${top.scaled_mean.toFixed(2)})` : 'not detected') +
-      card(`${broad}/${found.length}`, 'datasets with &gt;10% cells expressing') +
+      card(top ? esc(top.title || top.db_id) : '—', top ? 'highest abundance (scaled ' + (top.scaled_mean || 0).toFixed(2) + ')' : 'not detected') +
+      card(broad + '/' + found.length, 'datasets with &gt;10% cells expressing') +
       card(cv != null ? cv.toFixed(2) : '—', 'cross-dataset CV (spread)') +
-      card(`${found.length}/${total}`, `detected (absent from ${missing.length})`);
+      card(found.length + '/' + total, 'detected (absent from ' + missing.length + ')');
   }
 
-  // ── multi-gene heatmap: rows = datasets, cols = genes ──────────────────
-  // The cell value is a user-chosen per-(gene, dataset) statistic (all present
-  // in the /gene_stats_all response). scaling: unit stats [0,1] map opacity
-  // directly; % maps /100; unbounded means normalise to the max across cells.
-  function hmNum(v) {   // compact: large raw means → scientific, small → 2dp
+  // ── multi-gene heatmap (unchanged logic, consistent styling) ───────────────
+  function hmNum(v) {
     if (v == null || !isFinite(v)) return '—';
     var a = Math.abs(v);
     if (a !== 0 && (a >= 1000 || a < 0.01)) return v.toExponential(1);
     if (a >= 100) return v.toFixed(0);
-    if (a >= 10) return v.toFixed(1);
+    if (a >= 10)  return v.toFixed(1);
     return v.toFixed(2);
   }
-  // 'unit' = already [0,1] & cross-dataset comparable; 'pct' = 0–100 comparable;
-  // 'rownorm' = raw per-dataset value (NOT comparable across datasets — e.g. some
-  // served layers aren't log-norm), so colour is normalised within each row.
-  const HM_METRICS = {
+  var HM_METRICS = {
     scaled_mean:  { label: 'scaled abundance (0–1)',              norm: 'unit' },
     pct_nonzero:  { label: '% of cells expressing',               norm: 'pct'  },
     rank_mean:    { label: 'expression rank vs all genes (0–1)',  norm: 'unit' },
@@ -274,102 +535,125 @@
     mean_nonzero: { label: 'mean among expressing cells (per-dataset)',  norm: 'rownorm' },
   };
   function hmFmt(cfg, v) { return cfg.norm === 'pct' ? v.toFixed(1) + '%' : cfg.norm === 'unit' ? v.toFixed(2) : hmNum(v); }
-  let _hmData = null;
+  var _hmData = null;
+
   function renderHeatmap(data) {
     if (data) _hmData = data;
-    const metricSel = document.getElementById('hm-metric');
-    const metric = (metricSel && metricSel.value) || 'scaled_mean';
-    const cfg = HM_METRICS[metric] || HM_METRICS.scaled_mean;
-    const vals_ok = v => v != null && isFinite(v);
-    const rows = [], allMissing = [];
-    (_hmData.results || []).forEach(res => {
-      const vals = {}; let any = false;
-      (res.stats || []).forEach(s => { if (!s.error && vals_ok(s[metric])) { vals[s.gene] = s[metric]; any = true; } });
-      if (any) rows.push({ db_id: res.db_id, title: res.title, vals, rowmax: Math.max(...GENES.map(g => vals[g] ?? -Infinity)) });
+    var metricSel = document.getElementById('hm-metric');
+    var metric = (metricSel && metricSel.value) || 'scaled_mean';
+    var cfg    = HM_METRICS[metric] || HM_METRICS.scaled_mean;
+    var valsOk = function (v) { return v != null && isFinite(v); };
+    var rows = [], allMissing = [];
+    (_hmData.results || []).forEach(function (res) {
+      var vals = {}; var any = false;
+      (res.stats || []).forEach(function (s) { if (!s.error && valsOk(s[metric])) { vals[s.gene] = s[metric]; any = true; } });
+      if (any) rows.push({ db_id: res.db_id, title: res.title, vals: vals, rowmax: Math.max.apply(Math, GENES.map(function (g) { return vals[g] != null ? vals[g] : -Infinity; })) });
       else allMissing.push(res.title || res.db_id);
     });
-    rows.sort((a, b) => b.rowmax - a.rowmax);
-    metaEl.textContent = `${GENES.length} genes × ${data && data.n_databases != null ? data.n_databases : rows.length} datasets${data && data.n_filtered ? ' (' + data.n_filtered + ' filtered out)' : ''}`;
-    document.getElementById('gene-meta-hm').textContent = metaEl.textContent;
-    controls.style.display = 'none';
-    document.getElementById('gene-hm-controls').style.display = '';
-    heroBox.innerHTML = `<div class="hm-legend">each cell = ${esc(cfg.label)} of that gene in that dataset; <span class="hm-na">·</span> = gene absent.${cfg.norm === 'rownorm' ? ' <b>Colour normalised per row</b> (raw values aren’t comparable across datasets).' : ''}
-        <span class="muted">low</span> <span class="hm-scale"></span> <span class="muted">high</span></div>`;
-    const cell = (v, g, dbId, denom) => {
-      if (!vals_ok(v)) return `<td class="hm-na" title="${esc(g)} not in ${esc(dbId)}">·</td>`;
-      let t = cfg.norm === 'pct' ? v / 100 : cfg.norm === 'rownorm' ? (denom > 0 ? v / denom : 0) : v;
-      const op = (0.08 + 0.92 * Math.max(0, Math.min(1, t))).toFixed(2), fg = t > 0.55 ? '#fff' : '#1e293b';
-      const pp = dbId.split('/');
-      const href = `/browse/${encodeURIComponent(pp[0]||'')}/${encodeURIComponent(pp[1]||'')}/plot/histogram?x=${encodeURIComponent(g)}`;
-      return `<td class="hm-cell"><a href="${href}" style="background:rgba(29,78,216,${op});color:${fg}" title="${esc(g)} in ${esc(dbId)}: ${hmFmt(cfg, v)} (${esc(cfg.label)}) — open distribution">${hmFmt(cfg, v)}</a></td>`;
+    rows.sort(function (a, b) { return b.rowmax - a.rowmax; });
+    document.getElementById('gene-meta-hm').textContent = GENES.length + ' genes × ' + (data && data.n_databases != null ? data.n_databases : rows.length) + ' datasets';
+    heroBox.innerHTML = '<div class="hm-legend">each cell = ' + esc(cfg.label) + ' of that gene in that dataset; <span style="color:#cbd5e1">·</span> = gene absent.'
+      + (cfg.norm === 'rownorm' ? ' <b>Colour normalised per row</b> (raw values aren\'t comparable across datasets).' : '')
+      + ' <span class="muted">low</span> <span class="hm-scale"></span> <span class="muted">high</span></div>';
+    var cellFn = function (v, g, dbId, denom) {
+      if (!valsOk(v)) return '<td class="hm-na" title="' + esc(g) + ' not in ' + esc(dbId) + '">·</td>';
+      var t = cfg.norm === 'pct' ? v / 100 : cfg.norm === 'rownorm' ? (denom > 0 ? v / denom : 0) : v;
+      var op = (0.08 + 0.92 * Math.max(0, Math.min(1, t))).toFixed(2);
+      var fg = t > 0.55 ? '#fff' : '#1e293b';
+      var pp = dbId.split('/');
+      var href = '/browse/' + encodeURIComponent(pp[0] || '') + '/' + encodeURIComponent(pp[1] || '') + '/plot/histogram?x=' + encodeURIComponent(g);
+      return '<td class="hm-cell"><a href="' + href + '" style="background:rgba(29,78,216,' + op + ');color:' + fg + '" title="' + esc(g) + ' in ' + esc(dbId) + ': ' + hmFmt(cfg, v) + ' (' + esc(cfg.label) + ') — open distribution">' + hmFmt(cfg, v) + '</a></td>';
     };
-    const head = `<tr><th class="hm-corner">dataset</th>${GENES.map(g => `<th class="hm-gene">${esc(g)}</th>`).join('')}</tr>`;
-    const body = rows.map(r => { const denom = cfg.norm === 'rownorm' ? (r.rowmax > 0 ? r.rowmax : 1) : 1; return `<tr><td class="hm-row"><span class="nm">${esc(r.title || r.db_id)}</span><span class="pills">${pillsFor(r.db_id)}</span></td>${GENES.map(g => cell(r.vals[g] ?? null, g, r.db_id, denom)).join('')}</tr>`; }).join('');
-    document.getElementById('gene-heatmap').innerHTML = `<div class="table-wrap"><table class="hm">${head}${body}</table></div>`;
-    if (allMissing.length) missBox.innerHTML = `<b>None of these genes</b> in ${allMissing.length} dataset(s): ${allMissing.map(esc).join(', ')}`;
+    var head = '<tr><th class="hm-corner">dataset</th>' + GENES.map(function (g) { return '<th class="hm-gene">' + esc(g) + '</th>'; }).join('') + '</tr>';
+    var body = rows.map(function (r) {
+      var denom = cfg.norm === 'rownorm' ? (r.rowmax > 0 ? r.rowmax : 1) : 1;
+      return '<tr><td class="hm-row"><span class="nm">' + esc(r.title || r.db_id) + '</span><span class="pills">' + pillsFor(r.db_id) + '</span></td>'
+        + GENES.map(function (g) { return cellFn(r.vals[g] != null ? r.vals[g] : null, g, r.db_id, denom); }).join('') + '</tr>';
+    }).join('');
+    document.getElementById('gene-heatmap').innerHTML = '<div class="table-wrap"><table class="hm">' + head + body + '</table></div>';
+    if (allMissing.length) {
+      missBox.innerHTML = '<b>None of these genes</b> in ' + allMissing.length + ' dataset(s): ' + allMissing.map(esc).join(', ');
+    }
   }
 
-  // Build the fetch URL from the gene(s) + the active filter dropdowns
-  // (organism / cell_type / tissue → server-side filter params on
-  // /gene_stats_all). Re-run on any filter change.
+  // ── fetch ────────────────────────────────────────────────────────────────────
   function fetchUrl() {
-    const params = new URLSearchParams(); params.set('genes', GENE);
-    ['organism', 'cell_type', 'tissue'].forEach(k => {
-      const el = document.getElementById('flt-' + k);
+    var params = new URLSearchParams(); params.set('genes', GENE);
+    // Pass server-side filter params (organism / cell_type / tissue).
+    ['organism', 'cell_type', 'tissue'].forEach(function (k) {
+      var el = flt[k === 'cell_type' ? 'cell_type' : k];
       if (el && el.value) params.set(k, el.value);
     });
-    return `/api/gene_stats_all?${params.toString()}`;
+    return '/api/gene_stats_all?' + params.toString();
   }
 
   function load() {
-    found = []; missing = []; tip.classList.remove('show');
-    loading.style.display = ''; controls.style.display = 'none';
-    gridBox.innerHTML = ''; document.getElementById('gene-heatmap').innerHTML = '';
+    found = []; missing = [];
+    loading.style.display = ''; gvBody.style.display = 'none';
+    document.getElementById('gene-heatmap').innerHTML = '';
     missBox.innerHTML = ''; errBox.innerHTML = ''; heroBox.innerHTML = '';
+    summaryEl.textContent = '';
     fetch(fetchUrl())
-      .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error(`HTTP ${r.status}: ${t.slice(0,200)}`); }))
-      .then(data => {
+      .then(function (r) {
+        return r.ok ? r.json() : r.text().then(function (t) { throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 200)); });
+      })
+      .then(function (data) {
         loading.style.display = 'none';
-        if (MULTI) { renderHeatmap(data); return; }
-        (data.results || []).forEach(res => {
-          const st = (res.stats || [])[0] || {};
-          const base = { db_id: res.db_id, title: res.title, group: res.group, n_cells: res.n_cells };
+        if (MULTI) {
+          document.getElementById('gv-hm-controls').style.display = '';
+          renderHeatmap(data);
+          return;
+        }
+        (data.results || []).forEach(function (res) {
+          var st = (res.stats || [])[0] || {};
+          var base = { db_id: res.db_id, title: res.title, group: res.group, n_cells: res.n_cells };
           if (st.error) missing.push(base); else found.push(Object.assign(base, st));
         });
-        if (!found.length && !missing.length) { errBox.innerHTML = `<span class="err">no datasets match these filters</span>`; return; }
-        controls.style.display = '';
-        const nf = data.n_filtered || 0;
-        metaEl.textContent = `${data.n_databases ?? (found.length + missing.length)} datasets` + (nf ? ` (${nf} filtered out)` : '');
-        renderHero(); renderCards();
+        if (!found.length && !missing.length) {
+          errBox.innerHTML = '<span class="err">no datasets match these filters</span>';
+          return;
+        }
+        computeStatMax(found);
+        // Default sort: %expr descending
+        found.sort(function (a, b) { return (b.pct_nonzero || 0) - (a.pct_nonzero || 0); });
+        renderHero();
+        render();
         if (missing.length) {
-          missBox.innerHTML = `<b>Not detected</b> in ${missing.length} dataset(s): ${missing.map(m => esc(m.title || m.db_id)).join(', ')}`;
+          missBox.innerHTML = '<b>Not detected</b> in ' + missing.length + ' dataset(s): ' + missing.map(function (m) { return esc(m.title || m.db_id); }).join(', ');
         }
       })
-      .catch(e => { loading.style.display = 'none'; errBox.innerHTML = `<span class="err">could not load gene stats — ${esc(e.message)}</span>`; });
+      .catch(function (e) {
+        loading.style.display = 'none';
+        errBox.innerHTML = '<span class="err">could not load gene stats — ' + esc(e.message) + '</span>';
+      });
   }
 
-  document.querySelectorAll('#gene-controls button[data-sort]').forEach(b => {
-    b.addEventListener('click', () => {
-      sortKey = b.getAttribute('data-sort');
-      document.querySelectorAll('#gene-controls button[data-sort]').forEach(x => x.classList.toggle('active', x === b));
-      renderCards();
-    });
+  // ── filter change handler (URL-persistent) ──────────────────────────────────
+  function onFilterChange() {
+    var isEmpty = !this.value && !(this === flt.pct && parseFloat(this.value) > 0);
+    var isNavigation = !isEmpty;
+    updateHash(isNavigation);
+    render();
+  }
+
+  Object.keys(flt).forEach(function (k) {
+    var el = flt[k]; if (!el) return;
+    var evt = el.tagName === 'INPUT' ? 'input' : 'change';
+    el.addEventListener(evt, onFilterChange.bind(el));
+    if (window.antRemember && el.tagName === 'SELECT') antRemember.bindSelect(el, 'genes.gv.' + k);
   });
-  // Atlas filters persist across gene navigations (keep the view stable when
-  // you jump from one gene to another). Restored before the first load().
-  ['flt-organism', 'flt-cell_type', 'flt-tissue'].forEach(id => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    if (window.antRemember) antRemember.bindSelect(el, 'genes.' + id);
-    el.addEventListener('change', load);
-  });
-  // multi-gene heatmap: switch the cell statistic (re-renders from cache, no refetch)
-  const hmMetric = document.getElementById('hm-metric');
+
+  // heatmap metric switcher
+  var hmMetric = document.getElementById('hm-metric');
   if (hmMetric) {
     if (window.antRemember) antRemember.bindSelect(hmMetric, 'genes.hm.metric');
-    hmMetric.addEventListener('change', () => { if (window.antRemember) antRemember.set('genes.hm.metric', hmMetric.value); if (_hmData) renderHeatmap(null); });
+    hmMetric.addEventListener('change', function () {
+      if (window.antRemember) antRemember.set('genes.hm.metric', hmMetric.value);
+      if (_hmData) renderHeatmap(null);
+    });
   }
+
   load();
-})();
+}());
 </script>
 {% endblock %}

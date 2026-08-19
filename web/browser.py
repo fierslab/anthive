@@ -2417,6 +2417,10 @@ async def gene_view(request: Request, gene: str):
     Server-renders the shell + a catalogue pill map (db_id → context pills,
     fast/cached); the (possibly slow, cold ~10-60s) per-gene cross-dataset stats
     are fetched client-side from /api/gene_stats_all so the page never blocks.
+
+    Also passes dataset_annotations (same structure as the module view) so the
+    client-side table can render hover popovers and populate facet filters
+    (cell_type / tissue / system).
     """
     api_url = _api_url(request)
     pill_map: Dict[str, Dict] = {}
@@ -2444,10 +2448,12 @@ async def gene_view(request: Request, gene: str):
         print(f"API error: {error}")
     filter_opts = {k: [v for v, _ in sorted(c.items(), key=lambda kv: (-kv[1], kv[0]))]
                    for k, c in _opt.items()}
+    dataset_annotations = _build_dataset_annotations(api_url)
     return templates.TemplateResponse(request, "genes.html", {
         "gene": gene,
         "pill_map": pill_map,
         "filter_opts": filter_opts,
+        "dataset_annotations": dataset_annotations,
     })
 
 

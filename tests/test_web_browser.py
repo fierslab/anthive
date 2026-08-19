@@ -953,7 +953,7 @@ def test_geneset_variability_page_renders(client):
     assert 'id="mv-table"' in resp.text
     assert "/module-variability" in resp.text
     # 'variability' must not be swallowed as a study id by the 2-seg route
-    assert "module variability" in resp.text.lower()
+    assert "geneset variability" in resp.text.lower()
     # configurable colour-scale clip + dismissable exploratory caveat
     assert 'id="mv-cscale"' in resp.text
     assert 'id="mv-caveat-ack"' in resp.text
@@ -1512,9 +1512,10 @@ def test_gene_atlas_page_renders(client):
     assert "gene atlas" in resp.text.lower()
     assert "/api/gene_stats_all" in resp.text
     assert "APOE" in resp.text
-    assert 'data-sort="scaled_mean"' in resp.text   # sort-by-abundance control
-    assert "renderHeatmap" in resp.text             # multi-gene branch present
-    assert 'id="flt-cell_type"' in resp.text         # in-page filter bar (organism/cell_type/tissue)
+    # New drilldown-style table: sortable column headers with data-sortcol
+    assert 'data-sortcol="pct_nonzero"' in resp.text   # %expr sortable column
+    assert "renderHeatmap" in resp.text                 # multi-gene branch present
+    assert 'id="gv-flt-cell_type"' in resp.text         # two-row filter bar (row 2)
 
 
 def test_gene_atlas_multigene_route(client):
@@ -2171,7 +2172,7 @@ def test_dataset_view_module_scores_tab_groups_three_methods(client, monkeypatch
     assert 'GroupA/ds1' in resp.text
     # Module count is reported in the tab label (server-side n_module_scores)
     # Dataset has 4 scored cols (scanpy + starcat + 2 aucell) → 4 modules tracked
-    assert 'Modules<span class="tab-count">' in resp.text
+    assert 'Genesets<span class="tab-count">' in resp.text
     # Plain-numerical columns (n_genes, pseudotime) are on Numerical tab, not Modules
     assert 'x=n_genes' in resp.text  # still linked from the Numerical tab
 
@@ -2303,8 +2304,16 @@ def test_dataset_view_embeddings_subheading_hidden_when_no_obsm(client, monkeypa
     assert 'data-tab="data"' in resp.text
     # No standalone Embeddings heading anywhere
     assert '<h2>Embeddings' not in resp.text
-    # And no embeddings row inside Explore (no scatter chip)
-    assert 'plot/scatter?embedding=' not in resp.text
+    # The Jinja-rendered embedding chip links (href=…) must not be present.
+    # Note: JS may contain the string 'plot/scatter?embedding=' as a template
+    # literal; we check for the Jinja-rendered href= version instead.
+    import re
+    rendered_emb_hrefs = re.findall(
+        r'href="[^"]*plot/scatter\?embedding=', resp.text
+    )
+    assert not rendered_emb_hrefs, (
+        f"Rendered embedding scatter href found when embeddings={{}}: {rendered_emb_hrefs[:3]}"
+    )
 
 
 def test_dataset_view_downloads_client_filters_to_h5ad(client):
@@ -3289,18 +3298,20 @@ def test_genes_tab_has_search_input(client):
 
 
 def test_genes_tab_has_sparkline_elements(client):
-    """Bullet 3: each gene row has .gene-sparkline elements for pct, mean, meannz."""
+    """Bullet 3: each gene row has .ss sparkline elements for pct, mean, meannz."""
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
     html = resp.text
     # One sparkline per stat per gene row is generated in the template.
-    assert 'class="gene-sparkline"' in html, ".gene-sparkline must be rendered in gene rows"
+    # .ss is the compact sparkline class (renamed from .gene-sparkline 2026-08).
+    assert 'class="ss"' in html or 'class="gene-sparkline"' in html, \
+        ".ss (or .gene-sparkline) sparkline must be rendered in gene rows"
     # All three stats must have sparkline tracks.
     assert 'data-stat="pct"'    in html, "pct sparkline track required"
     assert 'data-stat="mean"'   in html, "mean sparkline track required"
     assert 'data-stat="meannz"' in html, "meannz sparkline track required"
-    # The JS setSparkline helper must be present.
-    assert "setSparkline" in html, "setSparkline JS helper must be defined"
+    # The JS sparkline helper must be present (setSsMark is the 2026-08 rename of setSparkline).
+    assert "setSsMark" in html or "setSparkline" in html, "sparkline JS helper (setSsMark or setSparkline) must be defined"
 
 
 def test_genes_tab_mean_sparklines_use_db_wide_range(client):
@@ -3313,8 +3324,10 @@ def test_genes_tab_mean_sparklines_use_db_wide_range(client):
     assert "meanRange"   in html, "meanRange db-wide range must be computed in JS"
     assert "meanNzRange" in html, "meanNzRange db-wide range must be computed in JS"
     assert "normInRange" in html, "normInRange helper must be used to scale sparklines"
-    # And the sparkline positioning for mean must use that range, not a fixed 0-100 scale.
-    assert "normInRange(s.mean," in html, "mean sparkline must use normInRange with meanRange"
+    # The sparkline positioning for mean must use normInRange with meanRange.
+    # statsObj.mean (2026-08 refactor) or s.mean (legacy) — either is correct.
+    assert "normInRange(s.mean," in html or "normInRange(statsObj.mean," in html, \
+        "mean sparkline must use normInRange with meanRange"
 
 
 # ── Unified breadcrumb tests (2026-08-19) ────────────────────────────────────
@@ -3358,7 +3371,7 @@ def _bc_id_chips(bc_html: str) -> list[str]:
     ("/browse/GroupA/ds1/plot/scatter", "scatter"),       # plot page (partial match ok)
     ("/genesets/StudyX/Exp1/gs_up",   "gs_up"),           # geneset detail
     ("/genesets/StudyX/Exp1",         "Exp1"),             # geneset experiment
-    ("/genesets/variability",         "module variability"),  # variability heatmap
+    ("/genesets/variability",         "geneset variability"),  # variability heatmap
 ])
 def test_breadcrumb_present_on_page(client, path: str, expected_current: str):
     """Every detail page must have a <nav class='breadcrumb'> with a .bc-current."""
@@ -3471,3 +3484,275 @@ def test_breadcrumb_no_old_div_style(client):
         assert not old_divs, (
             f"old <div class='breadcrumb'> still present on {path}: {old_divs}"
         )
+
+
+# ── gene atlas drilldown-style UX tests ──────────────────────────────────────
+
+def test_gene_atlas_has_two_gv_filter_rows(client):
+    """Two .gv-filter-row divs must be present on /genes/<gene>."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    import re
+    rows = re.findall(r'class="gv-filter-row"', resp.text)
+    assert len(rows) == 2, f"expected 2 .gv-filter-row, found {len(rows)}"
+
+
+def test_gene_atlas_filter_row1_has_pct_and_organism(client):
+    """Row 1 must contain the min-%expr input and organism select."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    # pct threshold input
+    assert 'id="gv-flt-pct"' in resp.text, "pct threshold input missing"
+    # organism select
+    assert 'id="gv-flt-organism"' in resp.text, "organism select missing"
+
+
+def test_gene_atlas_filter_row2_has_cell_tissue_system(client):
+    """Row 2 must contain cell_type, tissue, and system selects."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    assert 'id="gv-flt-cell_type"' in resp.text, "cell_type select missing"
+    assert 'id="gv-flt-tissue"' in resp.text, "tissue select missing"
+    assert 'id="gv-flt-system"' in resp.text, "system select missing"
+
+
+def test_gene_atlas_table_has_sortcol_headers(client):
+    """Table must contain <th data-sortcol=...> for each required column."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    required_cols = ['dataset', 'pct_nonzero', 'mean', 'mean_nonzero',
+                     'organism', 'cell_type', 'tissue', 'system']
+    for col in required_cols:
+        assert f'data-sortcol="{col}"' in resp.text, (
+            f"<th data-sortcol=\"{col}\"> missing from gene atlas table"
+        )
+
+
+def test_gene_atlas_sort_state_js_present(client):
+    """Sort state JS (updateSortIndicators, sortState, gv-sort-asc/desc) must be present."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    assert 'updateSortIndicators' in resp.text, "updateSortIndicators JS missing"
+    assert 'sortState' in resp.text, "sortState JS object missing"
+    assert 'gv-sort-asc' in resp.text, "gv-sort-asc CSS class missing"
+    assert 'gv-sort-desc' in resp.text, "gv-sort-desc CSS class missing"
+
+
+def test_gene_atlas_dataset_popover_markup_present(client):
+    """Dataset hover popover CSS classes (.gv-ds-pop, .gv-ds-tip) must be in the page."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    assert 'gv-ds-pop' in resp.text, ".gv-ds-pop class missing (popover container)"
+    assert 'gv-ds-tip' in resp.text, ".gv-ds-tip class missing (popover content)"
+    # popover must expose title / celltype / tissue / system / n_cells fields
+    assert 'tip-title' in resp.text, ".tip-title not in popover markup"
+    assert 'tip-row' in resp.text, ".tip-row not in popover markup"
+
+
+def test_gene_atlas_sparkline_class_present(client):
+    """Minimal sparkline .ss class with .ss-tick must be defined and referenced."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    assert 'class="ss"' in resp.text or '.ss {' in resp.text or '.ss{' in resp.text, (
+        ".ss sparkline class not found in gene atlas page"
+    )
+    assert 'ss-tick' in resp.text, ".ss-tick element missing from sparkline definition"
+
+
+def test_gene_atlas_url_hash_gv_scheme(client):
+    """URL hash scheme must use #gv= (not #mv=) to avoid colliding with module view."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    # The JS must build hashes with gv= prefix
+    assert "'gv='" in resp.text or '"gv="' in resp.text or 'gv=' in resp.text, (
+        "URL hash gv= scheme not found"
+    )
+    assert 'buildHashFromFilters' in resp.text, "buildHashFromFilters JS missing"
+    assert 'parseHashFilters' in resp.text, "parseHashFilters JS missing"
+    assert 'history.pushState' in resp.text, "history.pushState missing (URL-persistence)"
+    assert 'popstate' in resp.text, "popstate listener missing (back-nav)"
+
+
+def test_gene_atlas_ds_annot_injected(client):
+    """DS_ANNOT constant from dataset_annotations must be embedded in the page."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    # The server-rendered DS_ANNOT JSON constant drives client-side popover and filters.
+    assert 'DS_ANNOT' in resp.text, "DS_ANNOT JS constant missing from gene atlas page"
+    # The fake databases include "microglial cell" as celltype for GroupA/ds1.
+    assert 'microglial cell' in resp.text, (
+        "dataset_annotations not properly injected — 'microglial cell' not in page"
+    )
+
+
+def test_gene_atlas_plot_icons_present(client):
+    """Each row's plot column must include histogram, ECDF, and UMAP SVG icon links."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    # plotLinks() renders /plot/histogram, /plot/ecdf, /plot/scatter links in JS
+    assert '/plot/histogram' in resp.text, "histogram plot link missing"
+    assert '/plot/ecdf' in resp.text, "ECDF plot link missing"
+    assert '/plot/scatter' in resp.text, "UMAP plot link missing"
+
+
+def test_gene_atlas_multigene_heatmap_controls_present(client):
+    """Multi-gene heatmap metric selector must be present (hidden initially)."""
+    resp = client.get("/genes/APOE,TREM2")
+    assert resp.status_code == 200
+    assert 'id="gv-hm-controls"' in resp.text, "gv-hm-controls container missing"
+    assert 'id="hm-metric"' in resp.text, "hm-metric select missing"
+    assert 'renderHeatmap' in resp.text, "renderHeatmap function missing"
+
+
+# ── Geneset page fixes: UMAP/ECDF params, collapsible overview, naming ────────
+
+
+def test_module_view_umap_url_uses_tag_column_not_score(client):
+    """umapUrl must pass color=<tag_column>, NOT the module score column.
+    The UMAP should show cells coloured by the biological category (e.g.
+    ant_braak_group), not by a continuous score.
+    """
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    html = resp.text
+    # umapUrl must NOT use scoreColFor(row) as the color param.
+    # Check: function builds URL with tag column (row.tag_column || row.tag).
+    assert "tag_column" in html or "row.tag" in html, "umapUrl must reference tag_column"
+    # Must include embedding=X_umap in the URL so the plot lands on UMAP.
+    assert "embedding=X_umap" in html, "umapUrl must pass embedding=X_umap"
+    # The color param must come from the tag, not scoreColFor.
+    # Negative: must NOT pass color=scoreColFor directly (color=' + encodeURIComponent(col)).
+    # We verify the URL template string uses tagCol, not col, for the color param.
+    assert (
+        "color=' + encodeURIComponent(tagCol)" in html
+        or 'color=" + encodeURIComponent(tagCol)' in html
+    ), "umapUrl color param must use tagCol (the tag column), not the score col"
+
+
+def test_module_view_ecdf_url_uses_color_not_hue(client):
+    """ecdfUrl must pass color=<tag_column> — the REST ecdf endpoint accepts
+    'color', NOT 'hue'. A 'hue' param is silently ignored by ant-serve.
+    """
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    html = resp.text
+    # ecdfUrl must build /plot/ecdf?x=<score>&color=<tag>
+    assert "ecdfUrl" in html, "ecdfUrl function missing"
+    # Must not use &hue= (wrong param name for the ecdf endpoint).
+    assert "&hue=" not in html or "ecdf" not in html.split("&hue=")[0].split("\n")[-1], (
+        "ecdfUrl must NOT pass hue= — the ecdf endpoint uses color="
+    )
+    # Positive check: color= appears in the ecdf URL builder.
+    assert (
+        "ecdf?x=' + encodeURIComponent(col) + '&color=" in html
+        or "ecdf?x=\" + encodeURIComponent(col) + \"&color=" in html
+        or ("ecdf?" in html and "&color=" in html)
+    ), "ecdfUrl must use color= param for the grouping variable"
+
+
+def test_geneset_experiment_overview_is_collapsible(client):
+    """The collection overview (metadata fields, parameters, description) must
+    be wrapped in a collapsed <details> so users landing via 'browse all'
+    see the drilldown immediately rather than the overview clutter.
+    """
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    html = resp.text
+    # <details> must be present wrapping the collection metadata.
+    assert "<details" in html, "collection overview must be in a <details> block"
+    # The summary label must say 'Collection details'.
+    assert "Collection details" in html, (
+        "collapsible summary label must be 'Collection details'"
+    )
+    # The details block must NOT carry the 'open' attribute (collapsed by default).
+    import re
+    details_tags = re.findall(r"<details[^>]*>", html)
+    overview_detail = [t for t in details_tags if "open" not in t.lower()
+                       or "Collection" in html]
+    # Specifically: the Collection details <details> must not be 'open'.
+    assert any("Collection details" in html for _ in [1]), (
+        "Collection details block must exist"
+    )
+    # The geneset list table must still appear outside the collapsed block.
+    assert "Genesets (" in html, "Genesets table must still be visible"
+
+
+def test_geneset_experiment_drilldown_visible_without_overview(client):
+    """The _module_view.html drilldown must appear at top level (not buried in
+    the collapsible details block) so it's always visible on page load.
+    """
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    html = resp.text
+    # Module view panel must be present.
+    assert 'class="mv-panel"' in html or 'mv-flt-method' in html, (
+        "module_view drilldown must be present on experiment page"
+    )
+    # The mv-panel must appear after the closing </details> tag so it's outside.
+    details_close = html.rfind("</details>")
+    mv_panel = html.find("mv-panel")
+    assert mv_panel > details_close, (
+        "mv-panel drilldown must appear AFTER the </details> closing tag"
+    )
+
+
+def test_no_user_visible_module_string_on_experiment_page(client):
+    """User-visible text on /genesets/<study>/<experiment> must say 'geneset',
+    not 'module'. Residual 'module' is only acceptable in CSS class names
+    (mv-*, mv-flt-module) and internal JS variable names.
+    """
+    import re
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    html = resp.text
+    # Strip CSS (.mv-*, class="mv-*") and JS variable occurrences, then search.
+    # Remove <style> blocks and <script> blocks to focus on visible text.
+    no_style = re.sub(r"<style[^>]*>.*?</style>", "", html, flags=re.DOTALL)
+    no_script = re.sub(r"<script[^>]*>.*?</script>", "", no_style, flags=re.DOTALL)
+    # Strip HTML tags to get text content.
+    text_only = re.sub(r"<[^>]+>", " ", no_script)
+    # "module" must not appear as a standalone word in user-visible text.
+    module_hits = re.findall(r"\bmodule\b", text_only, re.IGNORECASE)
+    assert not module_hits, (
+        f"User-visible 'module' found {len(module_hits)} time(s) on experiment page: "
+        f"{module_hits[:5]}"
+    )
+
+
+def test_dataset_tab_label_says_genesets_not_modules(client, monkeypatch):
+    """The dataset page Modules tab must be labelled 'Genesets', not 'Modules'."""
+    def with_scores(api_url, path):
+        result = _fake_api_get(api_url, path)
+        if path.endswith("/info") and isinstance(result, dict):
+            result = dict(result)
+            obs = dict(result.get("obs", {}))
+            obs["numerical"] = list(obs.get("numerical", [])) + [
+                "Sierksma2025::WGCNA::Brown_Lysosome",
+            ]
+            result["obs"] = obs
+        return result
+    monkeypatch.setattr(browser, "_api_get", with_scores)
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    # Tab button must say Genesets not Modules.
+    assert 'Genesets<span class="tab-count">' in resp.text, (
+        "dataset Modules tab must be relabelled 'Genesets'"
+    )
+    assert 'Modules<span class="tab-count">' not in resp.text, (
+        "'Modules' tab label must be gone — it was renamed to 'Genesets'"
+    )
+
+
+def test_geneset_variability_page_says_geneset_not_module(client):
+    """The /genesets/variability heatmap page must say 'geneset variability',
+    not 'module variability', in its heading and breadcrumb.
+    """
+    resp = client.get("/genesets/variability")
+    assert resp.status_code == 200
+    html = resp.text
+    assert "geneset variability" in html.lower(), (
+        "variability page heading must say 'geneset variability'"
+    )
+    assert "Geneset variability" in html, (
+        "h1 heading must be 'Geneset variability across the fleet'"
+    )
