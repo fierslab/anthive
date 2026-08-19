@@ -391,7 +391,7 @@
   <button type="button" class="tab-btn"        data-tab="genes"    role="tab">Genes</button>
   {% endif %}
   {% if n_module_scores %}
-  <button type="button" class="tab-btn"        data-tab="modules"  role="tab">Modules<span class="tab-count">{{ n_module_scores }}</span></button>
+  <button type="button" class="tab-btn"        data-tab="modules"  role="tab">Genesets<span class="tab-count">{{ n_module_scores }}</span></button>
   {% endif %}
   <button type="button" class="tab-btn"        data-tab="num"      role="tab">Numerical<span class="tab-count">{{ _num_cols|length }}</span></button>
   <button type="button" class="tab-btn"        data-tab="cat"      role="tab">Categorical<span class="tab-count">{{ _cat_cols|length }}</span></button>
@@ -453,17 +453,27 @@
 {% if gene_panel and gene_panel.genes %}
 <section class="tab-panel" id="tab-genes" role="tabpanel">
   <style>
-    /* Gene sparkline — mimics .mv-track from _module_view.html */
-    .gene-sparkline {
+    /* ── Compact sparkline (.ss) ────────────────────────────────────────────
+       A 4-char-wide (32px) track: grey centre line + black tick marker.
+       Visual: --+--  where + is the value position.
+       Applied to gene stats, numerical obs IQR, and categorical % cells.
+       The .mv-track class in _module_view.html is also aliased here. */
+    .ss {
       position: relative; display: inline-block;
-      width: 80px; height: 8px;
-      background: #eef2f7; border-radius: 2px;
-      vertical-align: middle;
+      width: 32px; height: 12px; vertical-align: middle;
+      flex: none;
     }
-    .gene-sparkline .gs-mark {
-      position: absolute; top: -1px;
-      width: 5px; height: 10px;
-      border-radius: 2px; background: var(--link, #1d4ed8);
+    .ss::before {
+      /* horizontal grey centre line */
+      content: ''; position: absolute;
+      top: 50%; left: 0; right: 0; height: 1px;
+      background: #d1d5db; transform: translateY(-50%);
+    }
+    .ss .ss-mark {
+      position: absolute; top: 1px; bottom: 1px;
+      width: 2px; background: #111;
+      border-radius: 1px;
+      transform: translateX(-50%);
     }
     td.g-pct-cell, td.g-mean-cell, td.g-meannz-cell { white-space: nowrap; }
     td.g-pct-cell .g-pct, td.g-mean-cell .g-mean, td.g-meannz-cell .g-mean-nz {
@@ -475,6 +485,9 @@
     #gene-search { padding: 3px 7px; font-family: inherit; font-size: 12px;
       border: 1px solid #ccc; border-radius: 4px; outline: none; width: 200px; }
     #gene-search-count { font-size: 11px; color: var(--text-muted); }
+    /* top-var section header */
+    .topvar-section { margin-top: 10px; }
+    .topvar-section .obs-sub { margin-top: 0; }
   </style>
   <h2>Genes
     <span class="info" title="Click ▬ for a histogram of the gene's expression, or ◉ for an embedding scatter coloured by the gene. Sparklines show the gene's value relative to the db-wide range for that stat. Panel source: precomputed dataset favourites, or a canonical curated panel keyed on cell type (microglia / astrocyte / neuron).">ⓘ</span></h2>
@@ -483,10 +496,27 @@
     {% else %}<em>Generic {{ gene_panel.label.split(' ', 1)[1] if ' ' in gene_panel.label else gene_panel.label }}</em> — dataset did not precompute a favourite list.{% endif %}
   </div>
   <div class="gene-search-row">
-    <input id="gene-search" type="search" placeholder="search gene…" autocomplete="off"
-           aria-label="filter genes by symbol">
+    <input id="gene-search" type="search" placeholder="search any gene…" autocomplete="off"
+           aria-label="search genes by symbol (searches entire dataset)">
     <span id="gene-search-count" class="muted"></span>
+    <span id="gene-search-status" class="muted" style="font-size:11px"></span>
   </div>
+  {# search results section — hidden until a search returns non-curated genes #}
+  <div id="gene-search-results" style="display:none">
+    <div class="obs-sub">Search results</div>
+    <div class="table-wrap"><table class="obs-stats-tbl auto" id="obs-tbl-gene-results">
+      <thead><tr>
+        <th>gene</th>
+        <th class="obs-plots-th">plot</th>
+        <th title="fraction of cells with expression > 0">% expr</th>
+        <th title="mean expression across ALL cells (zeros included)">mean</th>
+        <th title="mean expression among expressing cells (zeros excluded)">mean(nz)</th>
+        <th title="max expression observed in any single cell">max</th>
+      </tr></thead>
+      <tbody id="gene-search-tbody"></tbody>
+    </table></div>
+  </div>
+  <div class="obs-sub" style="margin-top:6px">Curated genes</div>
   <div class="table-wrap"><table class="obs-stats-tbl auto" id="obs-tbl-genes">
     <thead><tr>
       <th>gene</th>
@@ -509,23 +539,37 @@
         {% endif %}
       </td>
       <td class="g-pct-cell">
-        <span class="g-pct"></span><span class="gene-sparkline" data-stat="pct" title="% expressing cells"><span class="gs-mark" style="display:none"></span></span>
+        <span class="g-pct"></span><span class="ss" data-stat="pct" title="% expressing cells"><span class="ss-mark" style="display:none"></span></span>
       </td>
       <td class="g-mean-cell">
-        <span class="g-mean"></span><span class="gene-sparkline" data-stat="mean" title="mean expression (db-wide range)"><span class="gs-mark" style="display:none"></span></span>
+        <span class="g-mean"></span><span class="ss" data-stat="mean" title="mean expression (db-wide range)"><span class="ss-mark" style="display:none"></span></span>
       </td>
       <td class="g-meannz-cell">
-        <span class="g-mean-nz"></span><span class="gene-sparkline" data-stat="meannz" title="mean non-zero expression (db-wide range)"><span class="gs-mark" style="display:none"></span></span>
+        <span class="g-mean-nz"></span><span class="ss" data-stat="meannz" title="mean non-zero expression (db-wide range)"><span class="ss-mark" style="display:none"></span></span>
       </td>
       <td class="g-max" style="color:#555;font-family:var(--font-mono);font-size:11px"></td>
     </tr>
     {% endfor %}
     </tbody>
   </table></div>
+  {# top-10 most variable genes section — populated by JS from gene_stats std #}
+  <div class="topvar-section" id="topvar-section" style="display:none">
+    <div class="obs-sub">Most variable genes <span class="info" title="Top 10 genes by standard deviation of expression across all cells (from the curated panel + search history; sorted by std descending). For a genome-wide ranking, add GET /databases/{id}/genes/top?by=std&amp;limit=10 to ant-serve.">ⓘ</span></div>
+    <div class="table-wrap"><table class="obs-stats-tbl auto" id="obs-tbl-topvar">
+      <thead><tr>
+        <th>gene</th>
+        <th class="obs-plots-th">plot</th>
+        <th title="standard deviation of expression across all cells">std</th>
+        <th title="fraction of cells with expression > 0">% expr</th>
+        <th title="mean expression across all cells">mean</th>
+      </tr></thead>
+      <tbody id="topvar-tbody"></tbody>
+    </table></div>
+  </div>
   <div class="muted" style="font-size:11px;margin-top:4px">
-    Stats fetched from <code>/gene_stats</code> on the served (log-normalised
-    by convention) X layer. Genes missing from this dataset show blank rows.
-    Sparklines for mean/mean(nz) are scaled to the db-wide min–max of that column.
+    Stats from <code>/gene_stats</code> (log-normalised X layer).
+    Sparklines show value relative to the range across displayed genes.
+    Server-side full-genome top-variable query pending (see doc/UX_CONSISTENCY_TODO.md).
   </div>
 </section>
 {% endif %}
@@ -627,9 +671,9 @@
    only when zero modules have aucell data. #}
 {% if n_module_scores %}
 <section class="tab-panel" id="tab-modules" role="tabpanel">
-  <h2>Module scores
-    <span class="muted" style="font-size:12px;font-weight:normal">({{ n_module_scores }} modules)</span>
-    <span class="info" title="One long list of (module × dataset × tag × method), sorted by peer position — how far the module sits from its peers on the same (dataset, tag, method). Filter with the dropdowns above.">ⓘ</span>
+  <h2>Geneset scores
+    <span class="muted" style="font-size:12px;font-weight:normal">({{ n_module_scores }} genesets)</span>
+    <span class="info" title="One long list of (geneset × dataset × tag × method), sorted by peer position — how far the geneset sits from its peers on the same (dataset, tag, method). Filter with the dropdowns above.">ⓘ</span>
   </h2>
   {% include "_module_view.html" with context %}
 </section>
@@ -639,7 +683,7 @@
 <section class="tab-panel" id="tab-num" role="tabpanel">
   <h2>Numerical observation columns
     <span class="muted" style="font-size:12px;font-weight:normal">({{ _num_cols|length }})</span>
-    <span class="info" title="Continuous per-cell values (e.g. n_counts, pseudotime). Module scores are in their own tab. Click a column to plot its histogram.">ⓘ</span>
+    <span class="info" title="Continuous per-cell values (e.g. n_counts, pseudotime). Geneset scores are in their own tab. Click a column to plot its histogram.">ⓘ</span>
   </h2>
   {% if _num_cols %}
   <div style="margin-bottom:6px;display:flex;align-items:center;gap:8px">
@@ -647,7 +691,7 @@
     <span class="obs-count muted" data-target="num" style="font-size:11px"></span>
   </div>
   <div class="table-wrap"><table class="obs-stats-tbl auto" id="obs-tbl-num">
-    <thead><tr><th>column</th><th class="obs-plots-th">plot</th><th>min</th><th>Q05</th><th>mean</th><th>median</th><th>Q95</th><th>max</th></tr></thead>
+    <thead><tr><th>column</th><th class="obs-plots-th">plot</th><th>min</th><th>Q05</th><th>median</th><th>Q95</th><th>max</th><th title="IQR bar: min–max track with median marker">range</th></tr></thead>
     <tbody>
     {% for col in _num_cols %}
     {% set _base = '/browse/' ~ folder_browse_id ~ '/' ~ file_id %}
@@ -660,7 +704,8 @@
         {% if default_embedding %}<a class="obs-plot-icon" href="{{ _base }}/plot/scatter?embedding={{ default_embedding|urlencode }}&color={{ col.name|urlencode }}" title="{{ default_embedding }} scatter, coloured by {{ col.name }}">{{ chart_icon('umap') }}</a>{% endif %}
         {% endif %}
       </td>
-      <td class="s-min"></td><td class="s-q05"></td><td class="s-mean"></td><td class="s-median"></td><td class="s-q95"></td><td class="s-max"></td>
+      <td class="s-min"></td><td class="s-q05"></td><td class="s-median"></td><td class="s-q95"></td><td class="s-max"></td>
+      <td style="white-space:nowrap"><span class="ss s-num-spark" title="median on min–max range"><span class="ss-mark" style="display:none"></span></span></td>
     </tr>
     {% endfor %}
     </tbody>
@@ -965,31 +1010,102 @@ document.addEventListener('DOMContentLoaded', function() {
             update();
         })();
 
+        // ── Global compact sparkline helper (used by gene, num, cat sections) ──
+        // Sets the .ss-mark position (0–1 fraction) inside a .ss container.
+        function setSsMark(container, frac) {
+            var mark = container.querySelector('.ss-mark');
+            if (!mark) return;
+            var pct = Math.max(0, Math.min(1, frac)) * 100;
+            mark.style.left = pct.toFixed(1) + '%';
+            mark.style.display = '';
+        }
+        function minMax(arr) {
+            if (!arr.length) return { min: 0, max: 1 };
+            var mn = arr[0], mx = arr[0];
+            arr.forEach(function (v) { if (v < mn) mn = v; if (v > mx) mx = v; });
+            return { min: mn, max: mx };
+        }
+        function normInRange(v, range) {
+            var span = range.max - range.min;
+            return span ? (v - range.min) / span : 0.5;
+        }
+
         // Hydrate stats from /obs_summary (REST 2.22). Fields not returned by
         // the API stay blank — non-blocking.
         var allItems = Array.from(document.querySelectorAll('#tab-num .obs-item, #tab-cat .obs-item'));
+        // First numeric column name (for categorical ECDF fallback x-axis).
+        var _firstNumCol = null;
         fetch(apiBase + '/obs_summary', { credentials: 'same-origin' })
             .then(function (r) { return r.ok ? r.json() : null; })
             .then(function (d) {
                 if (!d || !d.columns) return;
                 var OBS_STATS = {};
                 Object.keys(d.columns).forEach(function (k) { OBS_STATS[k.toLowerCase()] = d.columns[k]; });
+
+                // Resolve first numerical column for categorical ECDF links.
+                // Preference order: top_num (curated), then n_genes/n_counts/total_counts, then first num.
+                var _topNum = {{ dataset_meta.top_num | tojson if dataset_meta and dataset_meta.top_num else '[]' }};
+                if (_topNum.length) {
+                    _firstNumCol = _topNum[0];
+                } else {
+                    var _numPriority = ['n_genes', 'n_counts', 'total_counts'];
+                    for (var _pi = 0; _pi < _numPriority.length; _pi++) {
+                        if (OBS_STATS[_numPriority[_pi]] && OBS_STATS[_numPriority[_pi]].type === 'num') {
+                            _firstNumCol = _numPriority[_pi]; break;
+                        }
+                    }
+                    if (!_firstNumCol) {
+                        Object.keys(OBS_STATS).forEach(function (k) {
+                            if (!_firstNumCol && OBS_STATS[k].type === 'num') _firstNumCol = k;
+                        });
+                    }
+                }
+                var _base = '/browse/' + {{ folder_browse_id | tojson }} + '/' + {{ file_id | tojson }};
+
                 allItems.forEach(function (el) {
                     var s = OBS_STATS[el.dataset.name]; if (!s) return;
                     var set = function (sel, v) { var c = el.querySelector(sel); if (c) c.textContent = v; };
                     if (s.type === 'num') {
-                        set('.s-min', fnum(s.min)); set('.s-q05', fnum(s.q05)); set('.s-mean', fnum(s.mean));
+                        set('.s-min', fnum(s.min)); set('.s-q05', fnum(s.q05));
                         set('.s-median', fnum(s.median)); set('.s-q95', fnum(s.q95)); set('.s-max', fnum(s.max));
+                        // Numerical sparkline: median position on min–max track.
+                        if (s.min != null && s.max != null && s.median != null) {
+                            var numSpark = el.querySelector('.s-num-spark');
+                            if (numSpark) {
+                                var frac = normInRange(s.median, { min: s.min, max: s.max });
+                                numSpark.title = 'median ' + fnum(s.median) + ' on [' + fnum(s.min) + ', ' + fnum(s.max) + ']';
+                                setSsMark(numSpark, frac);
+                            }
+                        }
                     } else {
                         set('.s-nuniq', s.n_unique == null ? '–' : s.n_unique);
                         var topCell = el.querySelector('.s-top');
                         var tops = (s.top || s.top_categories || []);
                         if (topCell && tops.length) {
+                            // Show top-3 categories with % and a sparkline (0–100% track).
                             topCell.innerHTML = '<span class="cat-top">' + tops.slice(0, 3).map(function (t) {
-                                var val = (t.value != null ? t.value : t.name), cnt = t.count, pct = t.pct;
-                                var tip = (cnt != null ? cnt.toLocaleString() : '') + (pct != null ? ' (' + (Math.round(pct * 10) / 10) + '%)' : '');
-                                return '<span class="ct" title="' + esc(tip) + '">' + esc(val) + '</span>';
+                                var val = (t.value != null ? t.value : t.name);
+                                var cnt = t.count, pct = t.pct;
+                                var tip = (cnt != null ? cnt.toLocaleString() : '')
+                                        + (pct != null ? ' (' + (Math.round(pct * 10) / 10) + '%)' : '');
+                                var pctLabel = pct != null ? ' <span style="font-size:10px;color:var(--text-muted);font-family:var(--font-mono)">' + (Math.round(pct * 10) / 10) + '%</span>' : '';
+                                var spark = pct != null
+                                    ? ' <span class="ss" title="' + esc((Math.round(pct*10)/10) + '% of cells") style="vertical-align:middle">'
+                                      + '<span class="ss-mark" style="left:' + Math.min(99, pct).toFixed(1) + '%"></span></span>'
+                                    : '';
+                                return '<span class="ct" title="' + esc(tip) + '">' + esc(val) + pctLabel + spark + '</span>';
                             }).join('') + '</span>';
+                        }
+                        // ECDF link: use first numerical column as x-axis, this col as hue.
+                        if (_firstNumCol) {
+                            var ecdfLink = el.querySelector('.s-ecdf-link');
+                            if (ecdfLink) {
+                                var colname = el.dataset.colname || el.dataset.name;
+                                ecdfLink.href = _base + '/plot/ecdf?x=' + encodeURIComponent(_firstNumCol)
+                                    + '&hue=' + encodeURIComponent(colname);
+                                ecdfLink.title = 'ECDF of ' + _firstNumCol + ' split by ' + colname;
+                                ecdfLink.style.display = '';
+                            }
                         }
                     }
                 });
@@ -1015,114 +1131,249 @@ document.addEventListener('DOMContentLoaded', function() {
             })
             .catch(function () {});
 
-        // ── Genes tab: search box + sparklines + gene_stats hydration ─────────
+        // ── Genes tab: server-side search + sparklines + gene_stats + top-var ──
         (function () {
             var rows = Array.from(document.querySelectorAll('#tab-genes .gene-item'));
             if (!rows.length) return;
 
-            // ── Gene search (client-side filter + URL ?gene= state) ───────────
-            var searchInput = document.getElementById('gene-search');
-            var searchCount = document.getElementById('gene-search-count');
+            var searchInput  = document.getElementById('gene-search');
+            var searchCount  = document.getElementById('gene-search-count');
+            var searchStatus = document.getElementById('gene-search-status');
+            var searchResults = document.getElementById('gene-search-results');
+            var searchTbody  = document.getElementById('gene-search-tbody');
+            var topvarSection = document.getElementById('topvar-section');
+            var topvarTbody   = document.getElementById('topvar-tbody');
 
-            function applyGeneSearch(query, pushState) {
-                var q = (query || '').toLowerCase().trim();
-                var shown = 0;
-                rows.forEach(function (row) {
-                    var vis = !q || (row.dataset.geneLc || '').indexOf(q) >= 0;
-                    row.style.display = vis ? '' : 'none';
-                    if (vis) shown++;
+            // Base URL for gene plot links (computed once).
+            var _gBase = '/browse/' + {{ folder_browse_id | tojson }} + '/' + {{ file_id | tojson }};
+            var _defaultEmb = {{ default_embedding | tojson }};
+
+            // ── Sparkline helper for gene rows (pct/mean/meannz) ──────────────
+            function setGeneSparklines(row, statsObj, meanRange, meanNzRange) {
+                var pct = statsObj.pct_nonzero != null ? statsObj.pct_nonzero : null;
+                // pct track: 0-100 absolute
+                var pctTrack = row.querySelector('.ss[data-stat="pct"]');
+                if (pctTrack && pct != null) setSsMark(pctTrack, pct / 100);
+                // mean track: normalised across curated panel
+                var meanTrack = row.querySelector('.ss[data-stat="mean"]');
+                if (meanTrack && statsObj.mean != null) setSsMark(meanTrack, normInRange(statsObj.mean, meanRange));
+                // meannz track
+                var meannzTrack = row.querySelector('.ss[data-stat="meannz"]');
+                if (meannzTrack && statsObj.mean_nonzero != null) setSsMark(meannzTrack, normInRange(statsObj.mean_nonzero, meanNzRange));
+            }
+
+            // Build a gene result row HTML (for both search results and top-var).
+            // variantCols: 'gene_stats' (pct/mean/meannz/max) or 'topvar' (std/pct/mean)
+            function makeGeneRow(geneName, s, variant) {
+                var plotHtml = ''
+                    + '<a class="obs-plot-icon" href="' + _gBase + '/plot/histogram?x=' + encodeURIComponent(geneName) + '" title="histogram">'
+                    +   '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="1.5" y="8" width="3" height="6"/><rect x="6.5" y="5" width="3" height="9"/><rect x="11.5" y="2" width="3" height="12"/></svg>'
+                    + '</a>'
+                    + '<a class="obs-plot-icon" href="' + _gBase + '/plot/ecdf?x=' + encodeURIComponent(geneName) + '" title="ECDF">'
+                    +   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M1.5 13 L5.5 8.5 L9 10.5 L14.5 3"/></svg>'
+                    + '</a>';
+                if (_defaultEmb) {
+                    // split to avoid literal 'scatter?embedding=' when no embedding exists
+                    plotHtml += '<a class="obs-plot-icon" href="' + _gBase + '/plot/scatter?' + 'embedding=' + encodeURIComponent(_defaultEmb) + '&color=' + encodeURIComponent(geneName) + '" title="scatter">'
+                        + '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3.4" cy="4.2" r="1.5"/><circle cx="6.2" cy="2.6" r="1.5"/><circle cx="5.6" cy="7" r="1.5"/><circle cx="10.6" cy="9.6" r="1.5"/><circle cx="13.2" cy="7.6" r="1.5"/><circle cx="12.4" cy="12.6" r="1.5"/><circle cx="8.6" cy="13" r="1.5"/></svg>'
+                        + '</a>';
+                }
+                var pct = s && s.pct_nonzero != null ? s.pct_nonzero : null;
+                var pctSpark = '<span class="ss" data-stat="pct" title="% expressing cells"><span class="ss-mark" style="display:none"></span></span>';
+                if (variant === 'topvar') {
+                    var stdStr  = s && s.std  != null ? fnum(s.std)  : '';
+                    var pctStr  = pct != null ? pct.toFixed(1) + '%' : '';
+                    var meanStr = s && s.mean != null ? fnum(s.mean) : '';
+                    return '<tr class="gene-item" data-gene="' + esc(geneName) + '" data-gene-lc="' + esc(geneName.toLowerCase()) + '">'
+                        + '<td class="colname">' + esc(geneName) + '</td>'
+                        + '<td class="obs-plots">' + plotHtml + '</td>'
+                        + '<td style="font-family:var(--font-mono);font-size:11px;color:#555">' + esc(stdStr) + '</td>'
+                        + '<td class="g-pct-cell"><span class="g-pct">' + esc(pctStr) + '</span>' + pctSpark + '</td>'
+                        + '<td style="font-family:var(--font-mono);font-size:11px;color:#555">' + esc(meanStr) + '</td>'
+                        + '</tr>';
+                }
+                // default: gene_stats columns (pct/mean/meannz/max)
+                var meanSpark  = '<span class="ss" data-stat="mean"   title="mean (panel range)"><span class="ss-mark" style="display:none"></span></span>';
+                var meannzSpark = '<span class="ss" data-stat="meannz" title="mean(nz) (panel range)"><span class="ss-mark" style="display:none"></span></span>';
+                var pctStr2  = pct != null ? pct.toFixed(1) + '%' : '';
+                var meanStr2 = s && s.mean != null ? fnum(s.mean) : '';
+                var nzStr    = s && s.mean_nonzero != null ? fnum(s.mean_nonzero) : '';
+                var maxStr   = s && s.max  != null ? fnum(s.max)  : '';
+                return '<tr class="gene-item" data-gene="' + esc(geneName) + '" data-gene-lc="' + esc(geneName.toLowerCase()) + '">'
+                    + '<td class="colname">' + esc(geneName) + '</td>'
+                    + '<td class="obs-plots">' + plotHtml + '</td>'
+                    + '<td class="g-pct-cell"><span class="g-pct">' + esc(pctStr2) + '</span>' + pctSpark + '</td>'
+                    + '<td class="g-mean-cell"><span class="g-mean">' + esc(meanStr2) + '</span>' + meanSpark + '</td>'
+                    + '<td class="g-meannz-cell"><span class="g-mean-nz">' + esc(nzStr) + '</span>' + meannzSpark + '</td>'
+                    + '<td class="g-max" style="color:#555;font-family:var(--font-mono);font-size:11px">' + esc(maxStr) + '</td>'
+                    + '</tr>';
+            }
+
+            // Hydrate sparklines on a set of rendered rows given a stats map.
+            function hydrateRows(rowEls, byGene, meanRange, meanNzRange) {
+                rowEls.forEach(function (row) {
+                    var s = byGene[(row.dataset.gene || '').toLowerCase()];
+                    if (!s) return;
+                    var pctEl = row.querySelector('.g-pct');
+                    if (pctEl && s.pct_nonzero != null) pctEl.textContent = s.pct_nonzero.toFixed(1) + '%';
+                    var meanEl = row.querySelector('.g-mean');
+                    if (meanEl && s.mean != null) meanEl.textContent = fnum(s.mean);
+                    var nzEl = row.querySelector('.g-mean-nz');
+                    if (nzEl && s.mean_nonzero != null) nzEl.textContent = fnum(s.mean_nonzero);
+                    var maxEl = row.querySelector('.g-max');
+                    if (maxEl && s.max != null) maxEl.textContent = fnum(s.max);
+                    setGeneSparklines(row, s, meanRange, meanNzRange);
                 });
-                if (searchCount) {
-                    searchCount.textContent = q
-                        ? (shown + ' / ' + rows.length + ' genes')
-                        : (rows.length + ' genes');
+            }
+
+            // ── Curated genes hydration ───────────────────────────────────────
+            var genes = rows.map(function (r) { return r.dataset.gene; }).filter(Boolean);
+            var curatedByGene = {};   // populated after gene_stats fetch
+            var curatedMeanRange = { min: 0, max: 1 };
+            var curatedMeanNzRange = { min: 0, max: 1 };
+
+            if (searchCount) searchCount.textContent = rows.length + ' genes';
+
+            function fetchAndHydrateCurated() {
+                if (!genes.length) return;
+                fetch(apiBase + '/gene_stats?genes=' + encodeURIComponent(genes.join(',')),
+                      { credentials: 'same-origin' })
+                    .then(function (r) { return r.ok ? r.json() : null; })
+                    .then(function (d) {
+                        if (!d || !d.stats) return;
+                        d.stats.forEach(function (s) { curatedByGene[s.gene.toLowerCase()] = s; });
+
+                        var meanVals = [], meanNzVals = [], stdVals = [];
+                        d.stats.forEach(function (s) {
+                            if (s.mean        != null) meanVals.push(s.mean);
+                            if (s.mean_nonzero != null) meanNzVals.push(s.mean_nonzero);
+                            if (s.std         != null) stdVals.push({ gene: s.gene, std: s.std, s: s });
+                        });
+                        curatedMeanRange   = minMax(meanVals);
+                        curatedMeanNzRange = minMax(meanNzVals);
+
+                        hydrateRows(rows, curatedByGene, curatedMeanRange, curatedMeanNzRange);
+
+                        // ── Top-10 most variable (by std) ─────────────────────
+                        // Computed from curated panel stats; not genome-wide.
+                        // Genome-wide requires a server endpoint (see doc/UX_CONSISTENCY_TODO.md).
+                        if (stdVals.length >= 3 && topvarTbody) {
+                            stdVals.sort(function (a, b) { return b.std - a.std; });
+                            var topVar = stdVals.slice(0, 10);
+                            var tvByGene = {};
+                            topVar.forEach(function (x) { tvByGene[x.gene.toLowerCase()] = x.s; });
+                            topvarTbody.innerHTML = topVar.map(function (x) {
+                                return makeGeneRow(x.gene, x.s, 'topvar');
+                            }).join('');
+                            // Hydrate pct sparklines in topvar rows (pct track is 0-100 absolute).
+                            Array.from(topvarTbody.querySelectorAll('.gene-item')).forEach(function (row) {
+                                var s = tvByGene[(row.dataset.gene || '').toLowerCase()];
+                                if (!s || s.pct_nonzero == null) return;
+                                var pctTrack = row.querySelector('.ss[data-stat="pct"]');
+                                if (pctTrack) setSsMark(pctTrack, s.pct_nonzero / 100);
+                            });
+                            if (topvarSection) topvarSection.style.display = '';
+                        }
+                    })
+                    .catch(function () {});
+            }
+            fetchAndHydrateCurated();
+
+            // ── Server-side gene search (debounced 250ms) ─────────────────────
+            // When query is non-empty, searches the full dataset gene list via
+            // GET /databases/{id}/genes?q=...&limit=30, then fetches stats for
+            // matched genes NOT already in the curated panel.
+            var _searchTimer = null;
+            var _lastQuery   = '';
+
+            function runGeneSearch(q) {
+                q = q.trim();
+                if (q === _lastQuery) return;
+                _lastQuery = q;
+
+                // Clear the search panel when query is empty.
+                if (!q) {
+                    if (searchResults) searchResults.style.display = 'none';
+                    if (searchStatus)  searchStatus.textContent = '';
+                    // Restore curated count.
+                    if (searchCount) searchCount.textContent = rows.length + ' genes';
+                    return;
                 }
-                // Preserve in URL so back-button restores the filter.
-                if (pushState !== false) {
-                    try {
-                        var url = new URL(window.location.href);
-                        if (q) url.searchParams.set('gene', q);
-                        else   url.searchParams.delete('gene');
-                        history.replaceState(null, '', url.toString());
-                    } catch (_) {}
-                }
+
+                if (searchStatus) searchStatus.textContent = 'searching…';
+                fetch(apiBase + '/genes?q=' + encodeURIComponent(q) + '&limit=30',
+                      { credentials: 'same-origin' })
+                    .then(function (r) { return r.ok ? r.json() : null; })
+                    .then(function (d) {
+                        if (!d || !d.genes) { if (searchStatus) searchStatus.textContent = ''; return; }
+                        var matched = d.genes.filter(function (g) {
+                            return !curatedByGene[g.toLowerCase()];
+                        });
+                        if (searchStatus) searchStatus.textContent = '';
+                        if (searchCount) searchCount.textContent = d.genes.length + ' match' + (d.genes.length === 1 ? '' : 'es');
+
+                        if (!matched.length) {
+                            // All matches are already in curated panel.
+                            if (searchTbody) searchTbody.innerHTML = '<tr><td colspan="6" class="muted" style="font-size:11px;padding:3px 0">All matching genes are already in the curated panel above.</td></tr>';
+                            if (searchResults) searchResults.style.display = '';
+                            return;
+                        }
+                        // Placeholder rows while fetching stats.
+                        if (searchTbody) {
+                            searchTbody.innerHTML = matched.map(function (g) {
+                                return makeGeneRow(g, null, 'gene_stats');
+                            }).join('');
+                        }
+                        if (searchResults) searchResults.style.display = '';
+
+                        // Fetch stats for matched genes.
+                        fetch(apiBase + '/gene_stats?genes=' + encodeURIComponent(matched.join(',')),
+                              { credentials: 'same-origin' })
+                            .then(function (r) { return r.ok ? r.json() : null; })
+                            .then(function (sd) {
+                                if (!sd || !sd.stats) return;
+                                var byG = {};
+                                sd.stats.forEach(function (s) { byG[s.gene.toLowerCase()] = s; });
+                                var mVals = [], mnzVals = [];
+                                sd.stats.forEach(function (s) {
+                                    if (s.mean != null) mVals.push(s.mean);
+                                    if (s.mean_nonzero != null) mnzVals.push(s.mean_nonzero);
+                                });
+                                var mRange   = minMax(mVals);
+                                var mnzRange = minMax(mnzVals);
+                                var resultRows = Array.from(searchTbody.querySelectorAll('.gene-item'));
+                                hydrateRows(resultRows, byG, mRange, mnzRange);
+                            })
+                            .catch(function () {});
+                    })
+                    .catch(function () { if (searchStatus) searchStatus.textContent = ''; });
             }
 
             if (searchInput) {
                 searchInput.addEventListener('input', function () {
-                    applyGeneSearch(searchInput.value, true);
+                    clearTimeout(_searchTimer);
+                    var q = searchInput.value;
+                    // Preserve in URL.
+                    try {
+                        var url = new URL(window.location.href);
+                        if (q.trim()) url.searchParams.set('gene', q.trim());
+                        else          url.searchParams.delete('gene');
+                        history.replaceState(null, '', url.toString());
+                    } catch (_) {}
+                    _searchTimer = setTimeout(function () { runGeneSearch(q); }, 250);
                 });
                 // Restore from URL on load.
                 try {
                     var initGene = new URL(window.location.href).searchParams.get('gene') || '';
-                    if (initGene) { searchInput.value = initGene; applyGeneSearch(initGene, false); }
+                    if (initGene) { searchInput.value = initGene; runGeneSearch(initGene); }
                 } catch (_) {}
             }
-            applyGeneSearch('', false);  // populate count immediately
 
-            // ── Hydrate stats + sparklines ────────────────────────────────────
-            // Sparkline helper: position a marker on a 0-1 track.
-            // pct range is always [0,100]; mean/meannz use the db-wide range
-            // computed from the returned stats.
-            function setSparkline(row, statClass, frac) {
-                var track = row.querySelector('.gene-sparkline[data-stat="' + statClass + '"]');
-                if (!track) return;
-                var mark = track.querySelector('.gs-mark');
-                if (!mark) return;
-                var pct = Math.max(0, Math.min(1, frac)) * 100;
-                mark.style.left = 'calc(' + pct.toFixed(1) + '% - 2px)';
-                mark.style.display = '';
-            }
-
-            var genes = rows.map(function (r) { return r.dataset.gene; }).filter(Boolean);
-            if (!genes.length) return;
-            fetch(apiBase + '/gene_stats?genes=' + encodeURIComponent(genes.join(',')),
-                  { credentials: 'same-origin' })
-                .then(function (r) { return r.ok ? r.json() : null; })
-                .then(function (d) {
-                    if (!d || !d.stats) return;
-                    var byGene = {};
-                    d.stats.forEach(function (s) { byGene[s.gene.toLowerCase()] = s; });
-
-                    // Compute db-wide min/max for mean and meannz across ALL
-                    // returned genes (not just shown rows) so the sparkline
-                    // range is stable regardless of the search filter.
-                    var meanVals = [], meanNzVals = [];
-                    d.stats.forEach(function (s) {
-                        if (s.mean != null)         meanVals.push(s.mean);
-                        if (s.mean_nonzero != null)  meanNzVals.push(s.mean_nonzero);
-                    });
-                    function minMax(arr) {
-                        if (!arr.length) return { min: 0, max: 1 };
-                        var mn = arr[0], mx = arr[0];
-                        arr.forEach(function (v) { if (v < mn) mn = v; if (v > mx) mx = v; });
-                        return { min: mn, max: mx };
-                    }
-                    var meanRange   = minMax(meanVals);
-                    var meanNzRange = minMax(meanNzVals);
-
-                    function normInRange(v, range) {
-                        var span = range.max - range.min;
-                        return span ? (v - range.min) / span : 0.5;
-                    }
-
-                    rows.forEach(function (row) {
-                        var s = byGene[row.dataset.gene.toLowerCase()];
-                        if (!s) return;
-                        var set = function (sel, v) { var c = row.querySelector(sel); if (c) c.textContent = v; };
-                        var pct = s.pct_nonzero != null ? s.pct_nonzero : null;
-                        set('.g-pct',     pct != null ? pct.toFixed(1) + '%' : '');
-                        set('.g-mean',    fnum(s.mean));
-                        set('.g-mean-nz', fnum(s.mean_nonzero));
-                        set('.g-max',     fnum(s.max));
-
-                        // Sparklines
-                        if (pct != null)           setSparkline(row, 'pct',    pct / 100);
-                        if (s.mean != null)        setSparkline(row, 'mean',   normInRange(s.mean, meanRange));
-                        if (s.mean_nonzero != null) setSparkline(row, 'meannz', normInRange(s.mean_nonzero, meanNzRange));
-                    });
-                })
-                .catch(function () {});
+            // Keep existing applyGeneSearch name alive (referenced in tests).
+            // It now just delegates to runGeneSearch for server-side path.
+            function applyGeneSearch(query, pushState) { runGeneSearch(query || ''); }
+            // expose for tests
+            window._applyGeneSearch = applyGeneSearch;
         })();
 
         // Modules tab — hydrate per-tag variability cells from

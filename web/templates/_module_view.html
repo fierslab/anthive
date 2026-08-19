@@ -62,8 +62,14 @@ URL hash scheme (feature: back-button / shareable filter state):
     .mv-panel .mv-ds-tip .tip-id { font-family: var(--font-mono); color: var(--text-muted); font-size: 10px; margin-top: 4px; }
     .mv-panel .mv-val    { font-family: var(--font-mono); text-align: right; }
     .mv-panel .mv-pos    { min-width: 160px; }
-    .mv-panel .mv-track  { position: relative; display: inline-block; width: 140px; height: 10px; background: #eef2f7; border-radius: 2px; vertical-align: middle; }
-    .mv-panel .mv-track .mv-mark { position: absolute; top: -1px; width: 6px; height: 12px; border-radius: 2px; }
+    /* .mv-track — now uses the global .ss compact sparkline style (dataset.html).
+       Kept here so the module view still works when loaded standalone; the
+       important rules come from .ss defined in dataset.html's <style> block.
+       The width is slightly wider (80px) than the gene sparkline (32px) so the
+       peer-position column stays legible across 500+ rows. */
+    .mv-panel .mv-track  { position: relative; display: inline-block; width: 80px; height: 12px; vertical-align: middle; }
+    .mv-panel .mv-track::before { content:''; position:absolute; top:50%; left:0; right:0; height:1px; background:#d1d5db; transform:translateY(-50%); }
+    .mv-panel .mv-track .mv-mark { position: absolute; top: 1px; bottom: 1px; width: 2px; border-radius: 1px; transform: translateX(-50%); }
     .mv-panel .mv-icons a { display: inline-flex; text-decoration: none; color: var(--text-muted); font-size: 14px; padding: 0 3px; }
     .mv-panel .mv-icons a:hover { color: var(--link); }
     .mv-panel .mv-icons svg { width: 1em; height: 1em; }
@@ -79,7 +85,7 @@ URL hash scheme (feature: back-button / shareable filter state):
     {% if _mv.scope == 'module' %}
     <input type="hidden" class="mv-flt-group-hidden" value="{{ _mv.module_catalog }}">
     {% endif %}
-    <div {% if _mv.scope == 'module' %}{%endif%}><label>module</label><select class="mv-flt-module"><option value="">all</option></select></div>
+    <div {% if _mv.scope == 'module' %}{%endif%}><label>geneset</label><select class="mv-flt-module"><option value="">all</option></select></div>
     <div><label>canonical tag <span class="info" title="Standardised biological annotation aliased to ant_&lt;tag&gt; across datasets — e.g. braak, sex, cluster, disease. Each datasets raw obs column is aliased to ant_&lt;tag&gt;.">ⓘ</span></label><select class="mv-flt-tag"><option value="">all</option></select></div>
   </div>
   {# Row 2: group (if not module scope) · cell type · tissue · system · method #}
@@ -107,7 +113,7 @@ URL hash scheme (feature: back-button / shareable filter state):
     <table class="mv-table">
       <thead><tr>
         {% if _mv.scope != 'module' %}<th data-sortcol="catalog">group</th>{% endif %}
-        <th data-sortcol="module">module</th>
+        <th data-sortcol="module">geneset</th>
         {% if _mv.scope != 'dataset' %}<th data-sortcol="dataset">dataset</th>{% endif %}
         <th class="mv-th-tag" data-sortcol="tag">canonical tag</th>
         <th data-sortcol="method">method</th>
@@ -227,8 +233,10 @@ URL hash scheme (feature: back-button / shareable filter state):
     return b + '/plot/' + geom + '?x=' + encodeURIComponent(tagCol) + '&y=' + encodeURIComponent(col);
   }
   function umapUrl(row) {
-    var col = scoreColFor(row); var b = baseUrl(row); if (!col || !b) return null;
-    return b + '/plot/scatter?color=' + encodeURIComponent(col);
+    var b = baseUrl(row); if (!b) return null;
+    var tagCol = row.tag_column || row.tag;
+    if (!tagCol) return null;
+    return b + '/plot/scatter?embedding=X_umap&color=' + encodeURIComponent(tagCol);
   }
 
   // Build the dataset browse URL landing on the Modules tab with the group/module pre-selected.
@@ -248,7 +256,7 @@ URL hash scheme (feature: back-button / shareable filter state):
     var col = scoreColFor(row); var b = baseUrl(row); if (!col || !b) return null;
     if (NUMERICAL_TAGS[row.tag]) return null;  // numerical tags → not an ECDF-by-category plot
     var tagCol = row.tag_column || row.tag;
-    return b + '/plot/ecdf?x=' + encodeURIComponent(col) + '&hue=' + encodeURIComponent(tagCol);
+    return b + '/plot/ecdf?x=' + encodeURIComponent(col) + '&color=' + encodeURIComponent(tagCol);
   }
 
   // Peer group key — matched to how "peers" is defined: same (dataset, tag,

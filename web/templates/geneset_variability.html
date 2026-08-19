@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}module variability — anthive{% endblock %}
+{% block title %}geneset variability — anthive{% endblock %}
 
 {% block content %}
 <style>
@@ -47,13 +47,13 @@
 </style>
 
 {% from "_macros.html" import breadcrumb %}
-{{ breadcrumb([("gene sets", "/genesets"), ("module variability", None)]) }}
-<h1 class="page-title">Module variability across the fleet
-  <span class="info" title="For each (module × dataset × tag), a per-cell statistic of how the module score co-varies with the tag. Rows = modules, columns = datasets, colour = statistic value. Hotter = stronger association.">ⓘ</span></h1>
+{{ breadcrumb([("gene sets", "/genesets"), ("geneset variability", None)]) }}
+<h1 class="page-title">Geneset variability across the fleet
+  <span class="info" title="For each (geneset × dataset × tag), a per-cell statistic of how the geneset score co-varies with the tag. Rows = genesets, columns = datasets, colour = statistic value. Hotter = stronger association.">ⓘ</span></h1>
 
-<p class="mv-intro">Which modules track a biological axis, and in which datasets. Pick a
+<p class="mv-intro">Which genesets track a biological axis, and in which datasets. Pick a
 <b>tag</b> (e.g. braak, sex) and a <b>statistic</b> below; each heat-map cell shows how strongly that
-module's per-cell score co-varies with the tag in that dataset.</p>
+geneset's per-cell score co-varies with the tag in that dataset.</p>
 
 <details class="mv-stats-help">
   <summary>Which statistic should I pick?</summary>
@@ -61,7 +61,7 @@ module's per-cell score co-varies with the tag in that dataset.</p>
     <thead><tr><th>statistic</th><th>tag kind</th><th>range</th><th>reads as</th></tr></thead>
     <tbody>
       <tr><td><b>ω²</b> (omega²)</td><td>categorical <span class="muted-2">(sex, disease, cluster, …)</span></td><td>0 .. 1</td>
-        <td>fraction of module-score variance explained by the categories.
+        <td>fraction of geneset-score variance explained by the categories.
             <b>Bias-corrected</b> for group-count — prefer over η² when a tag has few groups or the count differs across datasets.</td></tr>
       <tr><td><b>η²</b> (eta²)</td><td>categorical</td><td>0 .. 1</td>
         <td>uncorrected variance-explained. Cheap, but inflates on small groups. Use only if you specifically want the naive number.</td></tr>
@@ -124,7 +124,7 @@ module's per-cell score co-varies with the tag in that dataset.</p>
   </div>
   <div>
     <label for="mv-cscale">colour scale
-      <span class="info" title="A few modules (e.g. the Y-linked set on the sex tag) reach the maximum and wash out the rest. Clipping the colour scale to a high percentile of the values makes the bulk of the map readable; cells above the clip get the top colour.">ⓘ</span>
+      <span class="info" title="A few genesets (e.g. the Y-linked set on the sex tag) reach the maximum and wash out the rest. Clipping the colour scale to a high percentile of the values makes the bulk of the map readable; cells above the clip get the top colour.">ⓘ</span>
     </label>
     <select id="mv-cscale">
       <option value="0.98" selected>robust (98th pct)</option>
@@ -322,8 +322,8 @@ module's per-cell score co-varies with the tag in that dataset.</p>
     body += '</tbody>';
 
     table.innerHTML = thead + body;
-    summary.textContent = modList.length + ' modules × ' + dsList.length + ' datasets · tag ‘' + tag + '’ · ' + stat
-      + ' · cells = max over tag columns; blank = not scored/tagged';
+    summary.textContent = modList.length + ‘ genesets × ‘ + dsList.length + ‘ datasets · tag ‘’ + tag + ‘’ · ‘ + stat
+      + ‘ · cells = max over tag columns; blank = not scored/tagged’;
     // under-powered tags: a "fleet" view over ≤3 datasets isn't a fleet
     if (dsList.length <= 3) {
       warnEl.style.display = '';

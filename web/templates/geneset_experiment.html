@@ -15,7 +15,10 @@
 <p class="muted">{{ metadata.description }}</p>
 {% endif %}
 
-<div class="two-col" style="margin:8px 0 12px">
+<details style="margin:4px 0 10px;font-size:13px">
+<summary style="cursor:pointer;color:var(--text-muted);font-size:12px">Collection details</summary>
+<div style="margin-top:8px">
+<div class="two-col" style="margin:0 0 10px">
     <div>
         {% if metadata.get('organism') %}<div><span class="mk">organism</span> {{ metadata.organism }}</div>{% endif %}
         {% if metadata.get('method') %}<div><span class="mk">method</span> {{ metadata.method }}</div>{% endif %}
@@ -54,6 +57,8 @@
 {% if body_html %}
 <div class="md-body">{{ body_html|safe }}</div>
 {% endif %}
+</div>
+</details>
 
 <h2>Genesets ({{ genesets|length }})</h2>
 <div class="table-wrap">
@@ -81,8 +86,8 @@
 </table>
 </div>
 
-<h2 style="margin-top:20px">Module variability across datasets
-  <span class="info" title="All modules in this experiment, ranked by how strongly their score co-varies with each dataset tag. Use the facets to narrow by cell type, tissue, or tag. Same exploratory, per-cell caveat as the variability heatmap.">ⓘ</span>
+<h2 style="margin-top:20px">Geneset variability across datasets
+  <span class="info" title="All genesets in this experiment, ranked by how strongly their score co-varies with each dataset tag. Use the facets to narrow by cell type, tissue, or tag. Same exploratory, per-cell caveat as the variability heatmap.">ⓘ</span>
 </h2>
 {% include "_module_view.html" with context %}
 {% endblock %}

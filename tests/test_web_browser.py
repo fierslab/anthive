@@ -3330,6 +3330,102 @@ def test_genes_tab_mean_sparklines_use_db_wide_range(client):
         "mean sparkline must use normInRange with meanRange"
 
 
+# ── Dataset tab enhancements (2026-08-19) ────────────────────────────────────
+
+def test_genes_tab_server_side_search(client):
+    """Genes tab: server-side search hits /genes?q= endpoint (debounced, 250ms)."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    # Server-side search: fetch to /genes endpoint.
+    assert "'/genes?q='" in html or '"/genes?q="' in html or "apiBase + '/genes?q='" in html or "/genes?q=" in html, \
+        "gene search must hit /genes?q= API endpoint"
+    # Debounce: setTimeout used.
+    assert "setTimeout" in html, "gene search must be debounced (setTimeout)"
+    # Search results section present.
+    assert 'id="gene-search-results"' in html, "#gene-search-results section must exist"
+
+
+def test_genes_tab_topvar_section_present(client):
+    """Genes tab: top-10 most-variable section present, populated by JS from std."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    assert 'id="topvar-section"' in html, "topvar section must be present"
+    assert 'id="topvar-tbody"'   in html, "topvar tbody must exist"
+    # Top-var requires std from gene_stats.
+    assert ".std" in html or "s.std" in html or "x.std" in html, "topvar must sort by std field"
+
+
+def test_numerical_tab_sparkline(client):
+    """Numerical obs tab: each row has a .ss range sparkline for IQR/median."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    # The numerical table should have the sparkline class.
+    assert 's-num-spark' in html, ".s-num-spark sparkline must be present in numerical tab"
+    # JS must set the mark based on median vs min/max range.
+    assert "s-num-spark" in html and "setSsMark" in html, \
+        "numerical sparkline must be positioned by setSsMark"
+    # Median column present in numerical tab.
+    assert 'median' in html, "median column must appear in numerical tab"
+
+
+def test_categorical_tab_ecdf_link(client):
+    """Categorical tab: each column has an ECDF link icon (revealed by JS when a numeric col exists)."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    # ECDF icon present in categorical tab (hidden by default, shown by JS).
+    assert 's-ecdf-link' in html, ".s-ecdf-link ECDF icon must be in categorical rows"
+    # JS must choose a first numerical column and set href.
+    assert "_firstNumCol" in html, "_firstNumCol JS variable must select the numeric x-axis for ECDF"
+
+
+def test_categorical_tab_top_categories_pct_sparkline(client):
+    """Categorical tab: top categories show % label and .ss sparkline in JS render."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    # JS renders % of cells next to each top category with a sparkline.
+    assert "pct" in html, "pct value must appear in categorical top-category rendering"
+    # Sparkline class emitted in JS string for top-category rendering.
+    assert 'class="ss"' in html, ".ss sparkline class must appear in page"
+
+
+def test_compact_sparkline_css_present(client):
+    """Global .ss compact sparkline CSS must be declared in dataset page."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    assert '.ss {' in html or '.ss{' in html, ".ss CSS rule must be present"
+    assert '.ss::before' in html, ".ss::before grey line must be declared"
+    assert '.ss-mark' in html, ".ss-mark tick must be declared"
+
+
+def test_module_view_sparkline_restyle(client, monkeypatch):
+    """Module view track uses new compact ::before line + 2px tick, not old pill.
+    Requires the _module_view.html partial to be included, which only happens
+    when n_module_scores > 0. We monkeypatch a minimal score column list.
+    """
+    def _with_scores(api_url, path):
+        result = _fake_api_get(api_url, path)
+        if path.endswith('/info') and isinstance(result, dict):
+            result = dict(result)
+            # Add a scanpy score column (naming convention) so n_module_scores > 0
+            # and the _module_view.html partial gets included.
+            obs = dict(result.get('obs', {}))
+            obs['numerical'] = ['n_genes', 'pseudotime', 'studyA::expB::Mod1']
+            result['obs'] = obs
+        return result
+    monkeypatch.setattr(browser, '_api_get', _with_scores)
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    # New style: ::before pseudo-element grey line in the module view track.
+    assert '.mv-track::before' in html, ".mv-track::before must define the grey line"
+
+
 # ── Unified breadcrumb tests (2026-08-19) ────────────────────────────────────
 #
 # Three invariants across every page:

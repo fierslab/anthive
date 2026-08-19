@@ -22,6 +22,15 @@ Items **already fixed in this session** are marked ✓.
 - ✓ `_module_view.html` `mv-body` — added `overflow-x:auto` (was `overflow-y`
   only); wide table would overflow on narrow screens.
 
+## Pending ant-serve endpoints (web UI graceful-fallback, implement in API session)
+
+8. **Genes tab: genome-wide top-variable genes** — the Genes tab shows top-10 most
+   variable genes by `std` from the *curated panel only*. For a true genome-wide
+   ranking, add `GET /databases/{id}/genes/top?by=std&limit=10` (or `by=mean`,
+   `by=pct`). The client already handles the result shape from `/gene_stats`; wire
+   it in `dataset.html` JS under `fetchAndHydrateCurated` once the endpoint lands.
+   Fallback: current curated-panel std sort (good enough for typical 20–30 gene panels).
+
 ## Remaining (non-trivial or out of scope for this session)
 
 1. **`genesets.html` has no `<h1>` / page title** (`geneset_variability.html`,
