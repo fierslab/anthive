@@ -133,8 +133,20 @@
     results.innerHTML = html;
     setState('<code>' + esc(gene) + '</code> found in <b>' + matches.length + '</b> set' + (matches.length === 1 ? '' : 's') + '.');
   }
+  /** Push a ?gene=SYMBOL URL so back-button works. */
+  function pushGeneUrl(gene) {
+    var sp = new URLSearchParams(window.location.search);
+    sp.set('group', 'bygene');
+    if (gene) { sp.set('gene', gene); } else { sp.delete('gene'); }
+    var newUrl = window.location.pathname + '?' + sp.toString();
+    if (window.location.pathname + window.location.search !== newUrl) {
+      history.pushState({ gene: gene }, '', newUrl);
+    }
+  }
+
   function search() {
     var gene = (input.value || '').trim(); if (!gene) return;
+    pushGeneUrl(gene);
     results.innerHTML = ''; setState('searching…');
     fetch(API + '/genesets/by-gene/' + encodeURIComponent(gene), { credentials: 'same-origin' })
       .then(function (r) {
@@ -144,11 +156,18 @@
       })
       .then(function (d) { render(d.gene || gene, d.matches || []); })
       .catch(function (e) {
-        if (e && e.pending) setState('Gene → gene-set lookup isn’t available from the API yet — this search lights up automatically once <code>/genesets/by-gene</code> ships (requested).');
+        if (e && e.pending) setState('Gene → gene-set lookup isn\'t available from the API yet — this search lights up automatically once <code>/genesets/by-gene</code> ships (requested).');
         else setState('search failed — ' + esc(e && e.message ? e.message : e), 'err');
       });
   }
   form.addEventListener('submit', function (ev) { ev.preventDefault(); search(); });
+  // Restore gene from popstate (back-button navigation within the page).
+  window.addEventListener('popstate', function (ev) {
+    var g = (ev.state && ev.state.gene) ? ev.state.gene
+            : new URLSearchParams(window.location.search).get('gene') || '';
+    input.value = g;
+    if (g) { search(); } else { results.innerHTML = ''; stateEl.style.display = 'none'; }
+  });
   // deep-link support: /genesets?group=bygene&gene=TREM2
   var qp = new URLSearchParams(window.location.search);
   if (qp.get('gene')) { input.value = qp.get('gene'); search(); }
@@ -181,8 +200,9 @@
 
     function renderTable(study, exp) {
       var list = (data[study] && data[study][exp]) || [];
+      var expHref = '/genesets/' + encodeURIComponent(study) + '/' + encodeURIComponent(exp);
       var rows = list.map(function (g) {
-        var href = '/genesets/' + encodeURIComponent(study) + '/' + encodeURIComponent(exp) + '/' + encodeURIComponent(g.name);
+        var href = expHref + '/' + encodeURIComponent(g.name);
         return '<tr><td class="card-title"><a href="' + href + '">' + _gsEsc(g.display_name || g.name) + '</a></td>'
           + '<td data-label="Format" class="muted">' + _gsEsc(g.format) + '</td>'
           + '<td data-label="n genes" class="muted">' + (g.n_genes == null ? '—' : g.n_genes) + '</td>'
@@ -190,7 +210,8 @@
           + '<td data-label="Method" class="muted">' + _gsEsc(g.method || '—') + '</td>'
           + '<td data-label="Parent dataset" class="muted mono" style="font-size:11px">' + _gsEsc(g.parent_dataset || '—') + '</td></tr>';
       }).join('');
-      content.innerHTML = '<div class="gs-count">' + list.length + ' gene set' + (list.length === 1 ? '' : 's') + ' in ' + _gsEsc(study) + ' / ' + _gsEsc(exp) + '</div>'
+      content.innerHTML = '<div class="gs-count">' + list.length + ' gene set' + (list.length === 1 ? '' : 's') + ' in ' + _gsEsc(study) + ' / ' + _gsEsc(exp)
+        + ' — <a href="' + expHref + '">browse all in this collection →</a></div>'
         + '<div class="table-wrap"><table class="auto card-table"><thead><tr><th>Geneset</th><th>Format</th><th>n genes</th><th>Organism</th><th>Method</th><th>Parent dataset</th></tr></thead><tbody>'
         + rows + '</tbody></table></div>';
     }

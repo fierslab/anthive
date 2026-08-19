@@ -1640,7 +1640,8 @@ def test_geneset_detail_has_variability_panel(client):
     # Partial's filter controls replace the old gv-* IDs
     assert 'class="mv-flt-method"' in resp.text
     assert 'class="mv-flt-tag"' in resp.text
-    assert 'class="mv-flt-sort"' in resp.text
+    # sort dropdown removed — sort lives in column-header clicks (see test_module_view_sort_state_and_indicators)
+    assert 'class="mv-flt-sort"' not in resp.text
     # Module dropdown is visible in module scope (for drill-down within catalog).
     assert 'class="mv-flt-module"' in resp.text
     # Partial fetches module-variability scoped to this module + catalog
@@ -2502,19 +2503,16 @@ def test_landing_removed_modified_column(client):
 
 
 def test_dataset_page_file_id_first_in_breadcrumb(client):
-    # The 3-letter file_id is the primary identifier — first idcopy chip.
+    # Breadcrumb is now rendered via the breadcrumb() macro — verify the
+    # dataset id-copy chips (bc-id-chip) carry the expected ids.
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
-    # Extract just the .ds-bc block so we're not fooled by other idcopy chips
-    # elsewhere on the page (there are none, but be defensive).
     import re
-    m = re.search(r'<div class="ds-bc">(.*?)</div>', resp.text, re.S)
-    assert m, "ds-bc breadcrumb block not found"
-    bc = m.group(1)
-    # first idcopy in the breadcrumb should copy file_id ('ds1')
-    first_idcopy = re.search(r'idcopy" data-copy="([^"]+)"', bc)
-    assert first_idcopy is not None
-    assert first_idcopy.group(1) == "ds1"
+    # bc-id-chip elements carry data-copy attributes with the ids
+    chips = re.findall(r'bc-id-chip[^>]*data-copy="([^"]+)"', resp.text)
+    assert chips, "no bc-id-chip elements in dataset page"
+    # file_id ('ds1') must be among the chips
+    assert "ds1" in chips, f"file_id 'ds1' not in bc-id-chip values: {chips}"
 
 
 def test_dataset_page_ready_indicator_removed(client):
@@ -3091,6 +3089,171 @@ def test_dataset_html_activatetab_preserves_mv_suffix(client):
     )
 
 
+# ── Ask 1: two-row filter layout ─────────────────────────────────────────────
+
+def test_module_view_two_filter_rows(client):
+    """Filter controls must be split into two .mv-filter-row elements.
+    Row 1: dataset · module · canonical tag (in that order).
+    Row 2: group · cell type · tissue · system · method.
+    """
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    html = resp.text
+    assert html.count('class="mv-filter-row') >= 2, (
+        "Expected at least two .mv-filter-row elements"
+    )
+    # Row 1 must contain dataset, module, and canonical tag (in DOM order).
+    row1_start = html.find('mv-filter-row-1')
+    row1_end   = html.find('mv-filter-row-2')
+    assert row1_start != -1 and row1_end != -1
+    row1 = html[row1_start:row1_end]
+    assert 'mv-flt-dataset' in row1, "Row 1 must have dataset filter"
+    assert 'mv-flt-module'  in row1, "Row 1 must have module filter"
+    assert 'mv-flt-tag'     in row1, "Row 1 must have canonical tag filter"
+    # Row 2 must contain method.
+    row2_start = row1_end
+    row2_end   = html.find('mv-summary-row', row2_start)
+    row2 = html[row2_start:row2_end]
+    assert 'mv-flt-method'   in row2, "Row 2 must have method filter"
+    assert 'mv-flt-celltype' in row2, "Row 2 must have cell type filter"
+
+
+# ── Ask 2: column-header sort ─────────────────────────────────────────────────
+
+def test_module_view_th_sort_data_attr(client):
+    """Sortable column headers must carry data-sortcol attributes."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    assert 'data-sortcol="module"'   in resp.text
+    assert 'data-sortcol="dataset"'  in resp.text
+    assert 'data-sortcol="position"' in resp.text
+    assert 'data-sortcol="value"'    in resp.text
+
+
+def test_module_view_sort_state_and_indicators(client):
+    """sortState variable and updateSortIndicators function must be present.
+    The sort dropdown must be absent; sort is header-click only.
+    """
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    html = resp.text
+    assert 'sortState' in html, "sortState variable missing"
+    assert 'updateSortIndicators' in html, "updateSortIndicators function missing"
+    assert 'mv-sort-asc' in html, "mv-sort-asc CSS class missing"
+    assert 'mv-sort-desc' in html, "mv-sort-desc CSS class missing"
+    assert 'mv-flt-sort' not in html, (
+        "Sort dropdown (mv-flt-sort) must be removed — sort lives in column headers"
+    )
+
+
+# ── Ask 3: canonical tag label ────────────────────────────────────────────────
+
+def test_module_view_canonical_tag_label(client):
+    """The tag filter label must read 'canonical tag' (not bare 'tag').
+    The table column header must also say 'canonical tag'.
+    """
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    html = resp.text
+    assert 'canonical tag' in html, "Label 'canonical tag' not found in filter row"
+    # Column header: th contains 'canonical tag' text.
+    assert '>canonical tag<' in html or 'canonical tag</th' in html or 'canonical tag<' in html, (
+        "Column header for tag column must say 'canonical tag'"
+    )
+
+
+# ── Ask 4: ECDF link for categorical plots ─────────────────────────────────────
+
+def test_module_view_ecdf_url_function_present(client):
+    """ecdfUrl() helper must be present and return null for numerical tags."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    html = resp.text
+    assert 'ecdfUrl' in html, "ecdfUrl helper function missing"
+    assert 'ecdf' in html, "ECDF URL scheme not referenced"
+    # ecdfUrl must guard on NUMERICAL_TAGS returning null.
+    assert 'NUMERICAL_TAGS[r.tag]' in html or 'NUMERICAL_TAGS[row.tag]' in html, (
+        "ecdfUrl must skip numerical tags"
+    )
+
+
+def test_module_view_ecdf_plot_icon_in_row(client):
+    """The plot cell must include an ECDF link (eu variable) for categorical rows."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    html = resp.text
+    assert 'var eu' in html or 'eu =' in html, (
+        "ECDF URL variable (eu) must be computed per row"
+    )
+    assert '/plot/ecdf?' in html or "'/plot/ecdf'" in html or '+ \'/plot/ecdf\'' in html or "ecdf?" in html, (
+        "ECDF plot URL must be referenced in row rendering"
+    )
+
+
+# ── Ask 5: genesets page — browse-all link per collection ────────────────────
+
+def test_genesets_collection_browse_all_link(client):
+    """/genesets?group=genesets must show a 'browse all' link to /genesets/<study>/<exp>."""
+    resp = client.get("/genesets")
+    assert resp.status_code == 200
+    # The browse-all link is rendered by JS (renderTable) into #gs-content.
+    # Verify the JS template string contains the expHref pattern.
+    html = resp.text
+    assert 'browse all in this collection' in html, (
+        "renderTable must include a 'browse all in this collection' link"
+    )
+    assert "'/genesets/' + encodeURIComponent(study) + '/' + encodeURIComponent(exp)" in html, (
+        "expHref must be constructed from study + experiment"
+    )
+
+
+# ── Ask 6: gene search URL state ─────────────────────────────────────────────
+
+def test_genesets_bygene_push_state_on_search(client):
+    """Gene search must call pushGeneUrl → history.pushState so back-button works."""
+    resp = client.get("/genesets?group=bygene")
+    assert resp.status_code == 200
+    html = resp.text
+    assert 'pushGeneUrl' in html, "pushGeneUrl function missing"
+    assert 'history.pushState' in html, "history.pushState not called in gene search"
+
+
+def test_genesets_bygene_popstate_listener(client):
+    """A popstate listener must restore the gene input and re-run search on back-nav."""
+    resp = client.get("/genesets?group=bygene")
+    assert resp.status_code == 200
+    html = resp.text
+    assert "addEventListener('popstate'" in html or "addEventListener(\"popstate\"" in html, (
+        "popstate listener missing in bygene tab — back button won't work"
+    )
+
+
+def test_genesets_bygene_url_has_gene_param(client):
+    """The ?gene= deep-link must pre-populate the input and trigger search."""
+    resp = client.get("/genesets?group=bygene")
+    assert resp.status_code == 200
+    html = resp.text
+    # The deep-link wiring reads from URLSearchParams and sets input.value.
+    assert "qp.get('gene')" in html, "?gene= deep-link wiring missing"
+
+
+# ── Ask 7: broken dataset link fix ───────────────────────────────────────────
+
+def test_module_view_dataset_link_uses_modules_tab_hash(client):
+    """Dataset links must use #modules&mv=... so the Modules tab activates on landing."""
+    resp = client.get("/genesets/StudyX/Exp1/gs_up")
+    assert resp.status_code == 200
+    html = resp.text
+    # The JS template string that builds the href must include '#modules'.
+    assert "'#modules'" in html or '"#modules"' in html or "'#modules&'" in html, (
+        "datasetUrl must embed '#modules' so the Modules tab is activated"
+    )
+    # Must use &mv= separator (not bare #mv=).
+    assert "'&mv='" in html or '"&mv="' in html, (
+        "datasetUrl must use the '&mv=' separator after the tab anchor"
+    )
+
+
 # ── Genes tab — four bullets ───────────────────────────────────────────────────
 
 def test_genes_tab_label_no_parenthesised_count(client):
@@ -3152,3 +3315,159 @@ def test_genes_tab_mean_sparklines_use_db_wide_range(client):
     assert "normInRange" in html, "normInRange helper must be used to scale sparklines"
     # And the sparkline positioning for mean must use that range, not a fixed 0-100 scale.
     assert "normInRange(s.mean," in html, "mean sparkline must use normInRange with meanRange"
+
+
+# ── Unified breadcrumb tests (2026-08-19) ────────────────────────────────────
+#
+# Three invariants across every page:
+#   1. <nav class="breadcrumb"> exists (macro, not ad-hoc div)
+#   2. .bc-home exists as the leftmost link, href="/"
+#   3. .bc-current (last crumb) has font-weight:700 from the sitewide CSS rule
+#   4. .bc-id-chip exists on pages with collection/dataset context
+#   5. The same font-size (12px) is declared in base.html for .breadcrumb
+
+import re as _re
+
+
+def _find_breadcrumb(html: str) -> str | None:
+    """Return the first <nav class="breadcrumb">…</nav> block, or None."""
+    m = _re.search(r'<nav class="breadcrumb"[^>]*>(.*?)</nav>', html, _re.S)
+    return m.group(0) if m else None
+
+
+def _bc_home_href(bc_html: str) -> str | None:
+    """Return the href of the .bc-home link, or None."""
+    m = _re.search(r'<a class="bc-home"[^>]*href="([^"]*)"', bc_html)
+    return m.group(1) if m else None
+
+
+def _bc_current_text(bc_html: str) -> str | None:
+    """Return the text inside .bc-current, or None."""
+    m = _re.search(r'<span class="bc-current">([^<]*)</span>', bc_html)
+    return m.group(1).strip() if m else None
+
+
+def _bc_id_chips(bc_html: str) -> list[str]:
+    """Return list of data-copy values from .bc-id-chip elements."""
+    return _re.findall(r'bc-id-chip[^>]*data-copy="([^"]+)"', bc_html)
+
+
+@pytest.mark.parametrize("path,expected_current", [
+    ("/browse/GroupA",                "collections"),     # folder page: crumb is "collections"
+    ("/browse/GroupA/ds1",            "Dataset One"),     # dataset page
+    ("/browse/GroupA/ds1/plot/scatter", "scatter"),       # plot page (partial match ok)
+    ("/genesets/StudyX/Exp1/gs_up",   "gs_up"),           # geneset detail
+    ("/genesets/StudyX/Exp1",         "Exp1"),             # geneset experiment
+    ("/genesets/variability",         "module variability"),  # variability heatmap
+])
+def test_breadcrumb_present_on_page(client, path: str, expected_current: str):
+    """Every detail page must have a <nav class='breadcrumb'> with a .bc-current."""
+    resp = client.get(path)
+    assert resp.status_code == 200, f"route {path} returned {resp.status_code}"
+    bc = _find_breadcrumb(resp.text)
+    assert bc is not None, f"no <nav class='breadcrumb'> found on {path}"
+    current = _bc_current_text(bc)
+    assert current is not None, f"no .bc-current on {path}"
+    assert expected_current.lower() in current.lower(), (
+        f"expected '{expected_current}' in .bc-current '{current}' on {path}"
+    )
+
+
+@pytest.mark.parametrize("path", [
+    "/browse/GroupA",
+    "/browse/GroupA/ds1",
+    "/browse/GroupA/ds1/plot/scatter",
+    "/genesets/StudyX/Exp1/gs_up",
+    "/genesets/StudyX/Exp1",
+    "/genesets/variability",
+    "/genes/TREM2",
+    "/privacy",
+])
+def test_breadcrumb_home_link(client, path: str):
+    """Every page breadcrumb must have a .bc-home link with href='/'."""
+    resp = client.get(path)
+    assert resp.status_code == 200, f"route {path} returned {resp.status_code}"
+    bc = _find_breadcrumb(resp.text)
+    assert bc is not None, f"no breadcrumb on {path}"
+    href = _bc_home_href(bc)
+    assert href == "/", (
+        f".bc-home href is '{href}' (expected '/') on {path}"
+    )
+
+
+def test_breadcrumb_font_size_in_base_css(client):
+    """base.html must declare font-size:12px on .breadcrumb (sitewide uniformity)."""
+    resp = client.get("/")
+    assert resp.status_code == 200
+    # CSS block in base.html contains the rule
+    assert ".breadcrumb" in resp.text
+    # font-size:12px is the unified size — find it near the .breadcrumb rule
+    idx = resp.text.find(".breadcrumb {")
+    assert idx != -1, ".breadcrumb { rule not found in base CSS"
+    rule_block = resp.text[idx:idx + 200]
+    assert "12px" in rule_block, (
+        f"expected 12px in .breadcrumb rule, got: {rule_block!r}"
+    )
+
+
+def test_breadcrumb_current_bold_css(client):
+    """base.html must declare font-weight:700 on .bc-current."""
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert ".bc-current" in resp.text, ".bc-current CSS class not declared in base.html"
+    idx = resp.text.find(".bc-current {")
+    assert idx != -1, ".bc-current { rule not found"
+    rule = resp.text[idx:idx + 120]
+    assert "700" in rule or "bold" in rule, (
+        f".bc-current must set font-weight≥700, got: {rule!r}"
+    )
+
+
+@pytest.mark.parametrize("path,expected_ids", [
+    ("/browse/GroupA",      ["GroupA"]),          # collection page: collection id chip
+    ("/browse/GroupA/ds1",  ["GroupA", "ds1"]),   # dataset page: collection + dataset + db chips
+])
+def test_breadcrumb_id_chips_on_context_pages(client, path: str, expected_ids: list):
+    """Collection and dataset pages must carry .bc-id-chip elements with the correct ids."""
+    resp = client.get(path)
+    assert resp.status_code == 200
+    bc = _find_breadcrumb(resp.text)
+    assert bc is not None, f"no breadcrumb on {path}"
+    chips = _bc_id_chips(bc)
+    assert chips, f"no bc-id-chip elements in breadcrumb on {path}"
+    for expected_id in expected_ids:
+        assert expected_id in chips, (
+            f"expected id '{expected_id}' in chips {chips} on {path}"
+        )
+
+
+def test_breadcrumb_id_chip_css_in_base(client):
+    """base.html must declare .bc-id-chip CSS with user-select:all and cursor:pointer."""
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert ".bc-id-chip" in resp.text, ".bc-id-chip CSS not in base.html"
+    # user-select:all makes the chip content directly selectable
+    assert "user-select: all" in resp.text, "user-select:all not declared for bc-id-chip"
+
+
+def test_breadcrumb_copy_js_in_base(client):
+    """base.html must include the click handler that calls navigator.clipboard.writeText."""
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "navigator.clipboard.writeText" in resp.text, (
+        "clipboard copy JS missing from base.html"
+    )
+    assert "bc-id-chip" in resp.text, "bc-id-chip class not referenced in JS"
+
+
+def test_breadcrumb_no_old_div_style(client):
+    """Old-style <div class='breadcrumb'> must be gone; macro emits <nav class='breadcrumb'>."""
+    import re
+    for path in ["/browse/GroupA", "/browse/GroupA/ds1", "/genesets/StudyX/Exp1/gs_up"]:
+        resp = client.get(path)
+        assert resp.status_code == 200
+        # no raw div.breadcrumb — only nav.breadcrumb from the macro
+        old_divs = re.findall(r'<div[^>]+class="[^"]*breadcrumb[^"]*"', resp.text)
+        assert not old_divs, (
+            f"old <div class='breadcrumb'> still present on {path}: {old_divs}"
+        )

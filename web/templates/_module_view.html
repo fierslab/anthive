@@ -31,11 +31,16 @@ URL hash scheme (feature: back-button / shareable filter state):
 {% set _id = _mv.get('id', 'mv-panel') %}
 <div id="{{ _id }}" class="mv-panel">
   <style>
-    .mv-panel .mv-ctrls { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin: 6px 0 10px; font-size: 12px; }
-    .mv-panel .mv-ctrls label { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--text-muted); margin-bottom: 2px; }
-    .mv-panel .mv-ctrls select { font-family: var(--font); font-size: 12px; padding: 3px 8px; border: 1px solid var(--border); border-radius: 5px; background: #fff; min-width: 140px; }
+    .mv-panel .mv-filter-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin: 4px 0 4px; font-size: 12px; }
+    .mv-panel .mv-filter-row + .mv-filter-row { margin-top: 2px; }
+    .mv-panel .mv-filter-row label { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--text-muted); margin-bottom: 2px; }
+    .mv-panel .mv-filter-row select { font-family: var(--font); font-size: 12px; padding: 3px 8px; border: 1px solid var(--border); border-radius: 5px; background: #fff; min-width: 140px; }
+    .mv-panel .mv-summary-row { font-size: 11px; color: var(--text-muted); margin: 4px 0 8px; }
     .mv-panel .mv-table { font-size: 11.5px; border-collapse: collapse; width: 100%; }
-    .mv-panel .mv-table th { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); font-weight: 600; background: #f8fafc; position: sticky; top: 0; }
+    .mv-panel .mv-table th { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); font-weight: 600; background: #f8fafc; position: sticky; top: 0; cursor: pointer; user-select: none; white-space: nowrap; }
+    .mv-panel .mv-table th:hover { background: #f1f5f9; }
+    .mv-panel .mv-table th.mv-sort-asc::after  { content: ' ▲'; font-size: 9px; color: var(--link); }
+    .mv-panel .mv-table th.mv-sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--link); }
     .mv-panel .mv-table td { padding: 3px 8px; border-bottom: 1px solid var(--border-light); vertical-align: middle; }
     .mv-panel .mv-group { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-muted); }
     .mv-panel .mv-mod   { font-weight: 500; }
@@ -65,25 +70,29 @@ URL hash scheme (feature: back-button / shareable filter state):
     .mv-panel .mv-empty  { color: var(--text-muted); font-style: italic; padding: 12px 4px; font-size: 12px; }
     .mv-panel .mv-summary { color: var(--text-muted); font-size: 11px; margin: 6px 0; }
   </style>
-  <div class="mv-ctrls">
+  {# Row 1: dataset · module · canonical tag #}
+  <div class="mv-filter-row mv-filter-row-1">
     {% if _mv.scope != 'dataset' %}
     <div><label>dataset</label><select class="mv-flt-dataset"><option value="">all</option></select></div>
-    {% endif %}
-    {% if _mv.scope != 'module' %}
-    <div><label>group</label><select class="mv-flt-group"><option value="">all</option></select></div>
     {% endif %}
     {# In module scope: show group as hidden preset; show module dropdown for drill-down #}
     {% if _mv.scope == 'module' %}
     <input type="hidden" class="mv-flt-group-hidden" value="{{ _mv.module_catalog }}">
     {% endif %}
     <div {% if _mv.scope == 'module' %}{%endif%}><label>module</label><select class="mv-flt-module"><option value="">all</option></select></div>
+    <div><label>canonical tag <span class="info" title="Standardised biological annotation aliased to ant_&lt;tag&gt; across datasets — e.g. braak, sex, cluster, disease. Each datasets raw obs column is aliased to ant_&lt;tag&gt;.">ⓘ</span></label><select class="mv-flt-tag"><option value="">all</option></select></div>
+  </div>
+  {# Row 2: group (if not module scope) · cell type · tissue · system · method #}
+  <div class="mv-filter-row mv-filter-row-2">
+    {% if _mv.scope != 'module' %}
+    <div><label>group</label><select class="mv-flt-group"><option value="">all</option></select></div>
+    {% endif %}
     {# Cell type, tissue, and system facets — populated from dataset_annotations when provided #}
     {% if _mv.get('dataset_annotations') %}
     <div><label>cell type</label><select class="mv-flt-celltype"><option value="">all</option></select></div>
     <div><label>tissue</label><select class="mv-flt-tissue"><option value="">all</option></select></div>
     <div><label>system</label><select class="mv-flt-system"><option value="">all</option></select></div>
     {% endif %}
-    <div><label>tag</label><select class="mv-flt-tag"><option value="">all</option></select></div>
     <div><label>method</label>
       <select class="mv-flt-method">
         <option value="">all</option>
@@ -91,28 +100,21 @@ URL hash scheme (feature: back-button / shareable filter state):
         <option value="aucell">AUCell</option>
       </select>
     </div>
-    <div><label>sort</label>
-      <select class="mv-flt-sort">
-        <option value="position" selected>peer position ↓</option>
-        <option value="value_abs">|value| ↓</option>
-        <option value="value_signed">value ↓ (signed)</option>
-      </select>
-    </div>
-    <div style="margin-left:auto"><span class="mv-summary"></span></div>
   </div>
+  <div class="mv-summary-row"><span class="mv-summary"></span></div>
   <div class="mv-state muted" style="font-size:12px">loading…</div>
   <div class="mv-body" style="overflow-x:auto;overflow-y:auto;max-height:70vh;display:none">
     <table class="mv-table">
       <thead><tr>
-        {% if _mv.scope != 'module' %}<th>group</th>{% endif %}
-        <th>module</th>
-        {% if _mv.scope != 'dataset' %}<th>dataset</th>{% endif %}
-        <th class="mv-th-tag">tag</th>
-        <th>method</th>
-        <th style="text-align:right">score</th>
-        <th class="mv-pos">vs peer modules <span class="info" title="Peers = other modules scored with the SAME method on the SAME (dataset, tag). Marker = this row's value; bar spans min–max across peer modules. Position drives the default sort.">ⓘ</span></th>
-        <th style="text-align:center">plot</th>
-        <th style="text-align:center">umap</th>
+        {% if _mv.scope != 'module' %}<th data-sortcol="catalog">group</th>{% endif %}
+        <th data-sortcol="module">module</th>
+        {% if _mv.scope != 'dataset' %}<th data-sortcol="dataset">dataset</th>{% endif %}
+        <th class="mv-th-tag" data-sortcol="tag">canonical tag</th>
+        <th data-sortcol="method">method</th>
+        <th data-sortcol="value" style="text-align:right">score</th>
+        <th class="mv-pos mv-sort-desc" data-sortcol="position">vs peer modules <span class="info" title="Peers = other modules scored with the SAME method on the SAME (dataset, tag). Marker = this row's value; bar spans min–max across peer modules. Click to sort by this column.">ⓘ</span></th>
+        <th style="text-align:center;cursor:default">plot</th>
+        <th style="text-align:center;cursor:default">umap</th>
       </tr></thead>
       <tbody class="mv-rows"></tbody>
     </table>
@@ -137,8 +139,39 @@ URL hash scheme (feature: back-button / shareable filter state):
     system:   root.querySelector('.mv-flt-system'),
     tag:      root.querySelector('.mv-flt-tag'),
     method:   root.querySelector('.mv-flt-method'),
-    sort:     root.querySelector('.mv-flt-sort'),
+    sort:     null,  // sort is now driven by column-header clicks, not a dropdown
   };
+
+  // Column-header sort state: {col: string, dir: 'asc'|'desc'}
+  var sortState = { col: 'position', dir: 'desc' };
+
+  /** Apply sort-indicator CSS classes to the sortable column headers. */
+  function updateSortIndicators() {
+    root.querySelectorAll('.mv-table th[data-sortcol]').forEach(function (th) {
+      th.classList.remove('mv-sort-asc', 'mv-sort-desc');
+      if (th.getAttribute('data-sortcol') === sortState.col) {
+        th.classList.add(sortState.dir === 'asc' ? 'mv-sort-asc' : 'mv-sort-desc');
+      }
+    });
+  }
+
+  // Bind click handlers to sortable column headers.
+  root.querySelectorAll('.mv-table th[data-sortcol]').forEach(function (th) {
+    var col = th.getAttribute('data-sortcol');
+    // Non-sortable columns: plot, umap (no data-sortcol, cursor:default above).
+    th.addEventListener('click', function () {
+      if (sortState.col === col) {
+        sortState.dir = sortState.dir === 'desc' ? 'asc' : 'desc';
+      } else {
+        sortState.col = col;
+        sortState.dir = 'desc';
+      }
+      updateSortIndicators();
+      updateHash(false);
+      render();
+    });
+  });
+  updateSortIndicators();
 
   // dataset_annotations: {db_id: {celltype, tissue, system, title, n_cells, contributor}}
   var DS_ANNOT = CTX.dataset_annotations || {};
@@ -198,14 +231,24 @@ URL hash scheme (feature: back-button / shareable filter state):
     return b + '/plot/scatter?color=' + encodeURIComponent(col);
   }
 
-  // Build the dataset browse URL with a #mv= hash so the dataset page's Modules
-  // tab pre-selects the group and module the user was looking at.
+  // Build the dataset browse URL landing on the Modules tab with the group/module pre-selected.
+  // Hash format: #modules&mv=group=<catalog>;module=<module>
+  // The dataset page's activateTab reads the prefix up to '&' as the tab name.
   function datasetUrl(row) {
     var b = baseUrl(row); if (!b) return null;
     var mvPairs = [];
     if (row.catalog) mvPairs.push('group=' + encodeURIComponent(row.catalog));
     if (row.module)  mvPairs.push('module=' + encodeURIComponent(row.module));
-    return b + (mvPairs.length ? '#mv=' + mvPairs.join(';') : '');
+    return b + '#modules' + (mvPairs.length ? '&mv=' + mvPairs.join(';') : '');
+  }
+
+  // Build an ECDF plot URL using the module score as x-axis, categorical tag as hue.
+  // Only for non-numerical (categorical) tags.
+  function ecdfUrl(row) {
+    var col = scoreColFor(row); var b = baseUrl(row); if (!col || !b) return null;
+    if (NUMERICAL_TAGS[row.tag]) return null;  // numerical tags → not an ECDF-by-category plot
+    var tagCol = row.tag_column || row.tag;
+    return b + '/plot/ecdf?x=' + encodeURIComponent(col) + '&hue=' + encodeURIComponent(tagCol);
   }
 
   // Peer group key — matched to how "peers" is defined: same (dataset, tag,
@@ -371,26 +414,31 @@ URL hash scheme (feature: back-button / shareable filter state):
   /** Rebuild the URL hash from current filter values, preserving any non-mv prefix. */
   function buildHashFromFilters() {
     var pairs = [];
-    var filterKeys = ['group', 'module', 'dataset', 'tag', 'method', 'celltype', 'tissue', 'system', 'sort'];
+    var filterKeys = ['group', 'module', 'dataset', 'tag', 'method', 'celltype', 'tissue', 'system'];
     filterKeys.forEach(function (key) {
       var sel = flt[key];
       if (!sel) return;
       var val = sel.value;
       if (val) pairs.push(key + '=' + encodeURIComponent(val));
     });
+    // Persist column-header sort state as sort=col:dir.
+    var defaultSort = sortState.col === 'position' && sortState.dir === 'desc';
+    if (!defaultSort) {
+      pairs.push('sort=' + encodeURIComponent(sortState.col + ':' + sortState.dir));
+    }
     // Preserve the existing page-anchor prefix (e.g. 'modules', 'tab-modules').
     var parts = splitHash(window.location.hash);
     var prefix = parts.prefix;
-    var mvPairsStr = pairs.join(';');  // e.g. "tag=braak;sort=position"
+    var mvPairsStr = pairs.join(';');  // e.g. "tag=braak;sort=position:desc"
     if (!mvPairsStr) return prefix ? '#' + prefix : '';
     // MV_SEP = '&mv=' when prefix exists, 'mv=' otherwise.
     var mvFull = 'mv=' + mvPairsStr;
     return '#' + (prefix ? prefix + '&' + mvFull : mvFull);
   }
 
-  /** Apply parsed hash values to the filter dropdowns (before first render). */
+  /** Apply parsed hash values to the filter dropdowns and sort state (before first render). */
   function applyHashFilters(parsed) {
-    var filterKeys = ['group', 'module', 'dataset', 'tag', 'method', 'celltype', 'tissue', 'system', 'sort'];
+    var filterKeys = ['group', 'module', 'dataset', 'tag', 'method', 'celltype', 'tissue', 'system'];
     filterKeys.forEach(function (key) {
       var sel = flt[key];
       if (!sel || !parsed[key]) return;
@@ -398,6 +446,15 @@ URL hash scheme (feature: back-button / shareable filter state):
       // Store the desired value on the element; fillSelect will honour it.
       sel.setAttribute('data-mv-pending', parsed[key]);
     });
+    // Restore sort state from hash: sort=col:dir
+    if (parsed.sort) {
+      var sortParts = parsed.sort.split(':');
+      if (sortParts.length === 2) {
+        sortState.col = sortParts[0];
+        sortState.dir = sortParts[1] === 'asc' ? 'asc' : 'desc';
+        updateSortIndicators();
+      }
+    }
   }
 
   /** Push or replace state when a filter changes.
@@ -415,7 +472,7 @@ URL hash scheme (feature: back-button / shareable filter state):
 
   /** Restore pending hash values into selects that now have the right options. */
   function flushPendingHashValues() {
-    var filterKeys = ['group', 'module', 'dataset', 'tag', 'method', 'celltype', 'tissue', 'system', 'sort'];
+    var filterKeys = ['group', 'module', 'dataset', 'tag', 'method', 'celltype', 'tissue', 'system'];
     filterKeys.forEach(function (key) {
       var sel = flt[key];
       if (!sel) return;
@@ -436,12 +493,20 @@ URL hash scheme (feature: back-button / shareable filter state):
   // Handle browser back/forward navigation
   window.addEventListener('popstate', function () {
     var parsed = parseHashFilters();
-    var filterKeys = ['group', 'module', 'dataset', 'tag', 'method', 'celltype', 'tissue', 'system', 'sort'];
+    var filterKeys = ['group', 'module', 'dataset', 'tag', 'method', 'celltype', 'tissue', 'system'];
     filterKeys.forEach(function (key) {
       var sel = flt[key];
       if (!sel) return;
       sel.value = parsed[key] || '';
     });
+    // Restore sort state.
+    if (parsed.sort) {
+      var sp = parsed.sort.split(':');
+      if (sp.length === 2) { sortState.col = sp[0]; sortState.dir = sp[1] === 'asc' ? 'asc' : 'desc'; }
+    } else {
+      sortState.col = 'position'; sortState.dir = 'desc';
+    }
+    updateSortIndicators();
     render();
   });
 
@@ -501,14 +566,26 @@ URL hash scheme (feature: back-button / shareable filter state):
       preferred[k] = r;
     });
     rows = Object.keys(preferred).map(function (k) { return preferred[k]; });
-    // Sort
-    var mode = flt.sort.value;
-    if (mode === 'position') {
-      rows.sort(function (a, b) { return positionOf(b, PEER_INDEX) - positionOf(a, PEER_INDEX); });
-    } else if (mode === 'value_signed') {
-      rows.sort(function (a, b) { return b.value - a.value; });
+    // Sort — driven by sortState (column-header clicks).
+    var sortMul = sortState.dir === 'asc' ? 1 : -1;
+    var col = sortState.col;
+    if (col === 'position') {
+      rows.sort(function (a, b) { return sortMul * (positionOf(a, PEER_INDEX) - positionOf(b, PEER_INDEX)); });
+    } else if (col === 'value') {
+      rows.sort(function (a, b) { return sortMul * (a.value - b.value); });
+    } else if (col === 'catalog') {
+      rows.sort(function (a, b) { return sortMul * String(a.catalog).localeCompare(String(b.catalog)); });
+    } else if (col === 'module') {
+      rows.sort(function (a, b) { return sortMul * String(a.module).localeCompare(String(b.module)); });
+    } else if (col === 'dataset') {
+      rows.sort(function (a, b) { return sortMul * String(a.dataset).localeCompare(String(b.dataset)); });
+    } else if (col === 'tag') {
+      rows.sort(function (a, b) { return sortMul * String(a.tag).localeCompare(String(b.tag)); });
+    } else if (col === 'method') {
+      rows.sort(function (a, b) { return sortMul * String(a.source).localeCompare(String(b.source)); });
     } else {
-      rows.sort(function (a, b) { return Math.abs(b.value) - Math.abs(a.value); });
+      // Fallback: peer position descending.
+      rows.sort(function (a, b) { return positionOf(b, PEER_INDEX) - positionOf(a, PEER_INDEX); });
     }
     rows = rows.slice(0, 500);   // cap for render sanity
     summaryEl.textContent = rows.length + (rows.length === 500 ? '+' : '') + ' rows';
@@ -542,7 +619,7 @@ URL hash scheme (feature: back-button / shareable filter state):
         ? '<span class="mv-ds-pop"><a href="' + esc(dsHref) + '">' + esc(r.dataset) + '</a>' + dsTip + '</span>'
         : '<span class="mv-ds-pop">' + esc(r.dataset) + dsTip + '</span>';
       var plotSvg = NUMERICAL_TAGS[r.tag] ? SVG_LINE : SVG_BAR;
-      var pu = plotUrl(r), uu = umapUrl(r);
+      var pu = plotUrl(r), uu = umapUrl(r), eu = ecdfUrl(r);
       var tds = [];
       if (CTX.scope !== 'module') {
         tds.push('<td class="mv-group">' + esc(r.catalog) + '</td>');
@@ -554,7 +631,9 @@ URL hash scheme (feature: back-button / shareable filter state):
       tds.push('<td class="mv-method">' + esc(METHOD_LABEL[r.source] || r.source) + '</td>');
       tds.push('<td class="mv-val">' + (+r.value).toFixed(3) + '<span class="muted-2" style="font-size:9px;margin-left:3px">' + esc(r.statistic) + '</span></td>');
       tds.push('<td class="mv-pos">' + track + ' <span class="muted-2" style="font-size:10px">' + (+g.min).toFixed(2) + '–' + (+g.max).toFixed(2) + '</span></td>');
-      tds.push('<td class="mv-icons" style="text-align:center">' + (pu ? '<a href="' + pu + '" title="plot ' + esc(r.tag) + ' × ' + esc(r.module) + '">' + plotSvg + '</a>' : '') + '</td>');
+      var plotCell = (pu ? '<a href="' + pu + '" title="plot ' + esc(r.tag) + ' × ' + esc(r.module) + '">' + plotSvg + '</a>' : '')
+        + (eu ? '<a href="' + eu + '" title="ECDF of ' + esc(r.module) + ' split by ' + esc(r.tag) + '">' + SVG_LINE + '</a>' : '');
+      tds.push('<td class="mv-icons" style="text-align:center">' + plotCell + '</td>');
       tds.push('<td class="mv-icons" style="text-align:center">' + (uu ? '<a href="' + uu + '" title="UMAP coloured by ' + esc(r.module) + '">' + SVG_UMAP + '</a>' : '') + '</td>');
       return '<tr>' + tds.join('') + '</tr>';
     }).join('');
@@ -659,7 +738,7 @@ URL hash scheme (feature: back-button / shareable filter state):
   if (flt.celltype) { flt.celltype.addEventListener('change', onFilterChange.bind(flt.celltype)); }
   if (flt.tissue)   { flt.tissue.addEventListener('change',   onFilterChange.bind(flt.tissue));   }
   if (flt.system)   { flt.system.addEventListener('change',   onFilterChange.bind(flt.system));   }
-  if (flt.sort)     { flt.sort.addEventListener('change',     onFilterChange.bind(flt.sort));     }
+  // Sort is now handled by column-header click listeners bound above — no select to bind.
   load();
 })();
 </script>
