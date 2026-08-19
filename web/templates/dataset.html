@@ -731,12 +731,13 @@
     <tbody>
     {% for col in _cat_cols %}
     {% set _base = '/browse/' ~ folder_browse_id ~ '/' ~ file_id %}
-    <tr class="obs-item" data-name="{{ col.name|lower }}">
+    <tr class="obs-item" data-name="{{ col.name|lower }}" data-colname="{{ col.name }}">
       <td class="colname">{{ col_label(col.name) }}</td>
       <td class="obs-plots">
         {% if has_duckdb %}
         <a class="obs-plot-icon" href="{{ _base }}/plot/bar?x={{ col.name|urlencode }}" title="bar plot: cells per {{ col.name }} category">{{ chart_icon('bar') }}</a>
         {% if default_embedding %}<a class="obs-plot-icon" href="{{ _base }}/plot/scatter?embedding={{ default_embedding|urlencode }}&color={{ col.name|urlencode }}" title="{{ default_embedding }} scatter, coloured by {{ col.name }}">{{ chart_icon('umap') }}</a>{% endif %}
+        <a class="obs-plot-icon s-ecdf-link" href="#" title="ECDF plot (set after obs stats load)" style="display:none">{{ chart_icon('line') }}</a>
         {% endif %}
       </td>
       <td class="s-nuniq"></td><td class="s-top"></td>
@@ -1090,7 +1091,7 @@ document.addEventListener('DOMContentLoaded', function() {
                                         + (pct != null ? ' (' + (Math.round(pct * 10) / 10) + '%)' : '');
                                 var pctLabel = pct != null ? ' <span style="font-size:10px;color:var(--text-muted);font-family:var(--font-mono)">' + (Math.round(pct * 10) / 10) + '%</span>' : '';
                                 var spark = pct != null
-                                    ? ' <span class="ss" title="' + esc((Math.round(pct*10)/10) + '% of cells") style="vertical-align:middle">'
+                                    ? ' <span class="ss" title="' + esc((Math.round(pct*10)/10) + '% of cells') + '" style="vertical-align:middle">'
                                       + '<span class="ss-mark" style="left:' + Math.min(99, pct).toFixed(1) + '%"></span></span>'
                                     : '';
                                 return '<span class="ct" title="' + esc(tip) + '">' + esc(val) + pctLabel + spark + '</span>';
