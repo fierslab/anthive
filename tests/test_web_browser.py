@@ -3876,6 +3876,63 @@ def test_gene_atlas_multigene_heatmap_controls_present(client):
     assert 'renderHeatmap' in resp.text, "renderHeatmap function missing"
 
 
+def test_gene_atlas_mean_sparkline_uses_rank_not_cross_db_max(client):
+    """mean / mean_nonzero sparklines must use per-dataset percentile rank (unit-invariant).
+
+    Previously the position was mean / cross-db-max which broke for proteomics datasets
+    whose intensities are 6+ orders of magnitude larger than scRNA-seq log-norm values.
+    Now mean sparkline uses r.rank_mean (0–1 PERCENT_RANK from server) and
+    mean_nonzero uses a client-computed cross-dataset rank (computeRankMeanNonzero).
+    """
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    text = resp.text
+
+    # rank_mean field is consumed directly (comes from server as PERCENT_RANK 0–1)
+    assert 'r.rank_mean' in text, (
+        "mean sparkline must use r.rank_mean (server-side percentile rank)"
+    )
+
+    # Client-side rank computation for mean_nonzero must be present
+    assert 'computeRankMeanNonzero' in text, (
+        "computeRankMeanNonzero function missing — mean_nonzero sparkline uses client-side rank"
+    )
+    assert '_rank_mean_nonzero' in text, (
+        "_rank_mean_nonzero field missing — rank must be stored on each row"
+    )
+
+    # Tooltip must include 'rank' and '%' text for mean sparkline
+    assert "rank '" in text or "'rank '" in text or "rank '" in text or "· rank" in text, (
+        "tooltip for mean sparkline must mention 'rank'"
+    )
+    assert "rankPct" in text or "rank_pct" in text or "rkStr" in text, (
+        "tooltip rank percentage variable missing from sparkline JS"
+    )
+
+    # The old cross-db max tracking for mean/mean_nonzero must be gone
+    assert 'STAT_MAX.mean_nonzero' not in text, (
+        "STAT_MAX.mean_nonzero still present — sparkline now uses rank, not cross-db max"
+    )
+    assert 'STAT_MAX.mean ' not in text and 'STAT_MAX.mean\n' not in text and (
+        'STAT_MAX.mean,' not in text and 'STAT_MAX.mean;' not in text
+    ), "STAT_MAX.mean still tracked — should be dropped for rank-based sparklines"
+
+
+def test_gene_atlas_mean_sparkline_tooltip_has_rank_and_pct(client):
+    """Sparkline tooltip text must reference both 'rank' and '%' so users see the scale."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    text = resp.text
+    # The tooltip string for mean must mention both rank and % of genes
+    assert 'rank' in text and '%' in text, (
+        "Gene atlas page missing 'rank' or '%' — tooltip must explain rank position"
+    )
+    # Specifically the tooltip format string must include the rank percentage
+    assert "% of" in text or "% of '" in text or "toFixed" in text, (
+        "rank percentage format (.toFixed) or '% of' phrase missing from tooltip"
+    )
+
+
 # ── Geneset page fixes: UMAP/ECDF params, collapsible overview, naming ────────
 
 
@@ -4052,16 +4109,26 @@ def test_gene_atlas_numeric_columns_tabular(client):
 
 
 def test_gene_atlas_sparkline_tooltip_content(client):
-    """Sparklines carry rich title= text explaining what the value means and
-    what the range endpoint is based on."""
+    """Sparklines carry rich title= text explaining value and rank position.
+
+    mean / mean_nonzero tooltips now show percentile rank (unit-invariant)
+    instead of the old cross-db max range (which broke for proteomics datasets).
+    """
     resp = client.get("/genes/APOE")
     assert resp.status_code == 200
+    text = resp.text
     # The tooltip builder emits these distinguishing phrases
-    assert "mean = " in resp.text
-    assert "across all genes" in resp.text
-    assert "pct_nonzero = " in resp.text
-    assert "mean_nonzero = " in resp.text
-    assert "fraction of cells with detectable" in resp.text
+    assert "mean = " in text, "mean tooltip prefix missing"
+    # New rank-based tooltip text
+    assert "rank" in text, "rank keyword missing from tooltip"
+    assert "% of" in text, "rank-percentage phrase missing from tooltip"
+    assert "pct_nonzero = " in text, "pct_nonzero tooltip prefix missing"
+    assert "mean_nonzero = " in text, "mean_nonzero tooltip prefix missing"
+    assert "fraction of cells with detectable" in text, "pct_nonzero tooltip explanation missing"
+    # Old cross-db-max phrasing must be gone
+    assert "across all genes" not in text, (
+        "old 'across all genes' tooltip text still present — should use rank now"
+    )
 
 
 def test_gene_atlas_sparkline_title_includes_gene_name(client):

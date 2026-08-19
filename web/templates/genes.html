@@ -245,28 +245,31 @@
   }
 
   // ── sparkline: minimal grey bar + black tick at the given fraction (0–1) ──
-  // val, statMax, statLabel, gene are used to compose the hover tooltip.
-  function sparkline(frac, val, statMax, statLabel, gene) {
+  // For mean/mean_nonzero the fraction IS the rank (0–1); for pct_nonzero it
+  // is pct/STAT_MAX.pct_nonzero.  rankPct (0–100) is pre-computed by the
+  // caller and passed in so the tooltip can display it.
+  function sparkline(frac, val, rankPct, nGenes, statLabel, gene) {
     var pct = Math.max(0, Math.min(100, (frac || 0) * 100));
     var tip = '';
     if (statLabel && gene) {
-      var valStr  = val  != null ? num(val,  statLabel === 'pct_nonzero' ? 1 : 3) : '—';
-      var maxStr  = statMax != null ? num(statMax, statLabel === 'pct_nonzero' ? 1 : 3) : '—';
+      var valStr = val != null ? num(val, statLabel === 'pct_nonzero' ? 1 : 3) : '—';
       if (statLabel === 'pct_nonzero') {
         tip = 'pct_nonzero = ' + valStr + '%'
             + '  ·  fraction of cells with detectable UMIs of ' + gene
             + ' in this dataset'
             + '  ·  scale: 0–100%';
       } else if (statLabel === 'mean') {
+        var rkStr = rankPct != null ? rankPct.toFixed(1) : '?';
+        var ngStr = nGenes  != null ? nGenes.toLocaleString() : '?';
         tip = 'mean = ' + valStr
-            + '  ·  avg log-norm expression across all cells (incl. zeros)'
-            + '  ·  position on the range 0–' + maxStr
-            + ' across all genes in this dataset';
+            + '  ·  rank ' + rkStr + '% of ' + ngStr + ' genes in this dataset'
+            + '  ·  higher = this gene is more highly expressed than most others here';
       } else if (statLabel === 'mean_nonzero') {
+        var rkStr = rankPct != null ? rankPct.toFixed(1) : '?';
+        var ngStr = nGenes  != null ? nGenes.toLocaleString() : '?';
         tip = 'mean_nonzero = ' + valStr
-            + '  ·  avg expression among cells that express ' + gene
-            + '  ·  position on the range 0–' + maxStr
-            + ' across all genes in this dataset';
+            + '  ·  rank ' + rkStr + '% of ' + ngStr + ' genes in this dataset'
+            + '  ·  rank among expressing cells only; higher = more highly expressed';
       }
     }
     var titleAttr = tip ? ' title="' + tip.replace(/"/g, '&quot;') + '"' : '';
@@ -277,6 +280,14 @@
   var SVG_BAR  = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="1.5" y="8" width="3" height="6"/><rect x="6.5" y="5" width="3" height="9"/><rect x="11.5" y="2" width="3" height="12"/></svg>';
   var SVG_LINE = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M1.5 13 L5.5 8.5 L9 10.5 L14.5 3"/></svg>';
   var SVG_UMAP = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3.4" cy="4.2" r="1.5"/><circle cx="6.2" cy="2.6" r="1.5"/><circle cx="5.6" cy="7" r="1.5"/><circle cx="10.6" cy="9.6" r="1.5"/><circle cx="13.2" cy="7.6" r="1.5"/><circle cx="12.4" cy="12.6" r="1.5"/><circle cx="8.6" cy="13" r="1.5"/></svg>';
+  // Hexbin density icon: 5 flat-top hexagons in a honeycomb pattern, varying opacity = density hint.
+  var SVG_HEX  = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">'
+    + '<polygon points="4,1.5 6.3,2.8 6.3,5.2 4,6.5 1.7,5.2 1.7,2.8" fill-opacity="0.35"/>'
+    + '<polygon points="11.5,1.5 13.8,2.8 13.8,5.2 11.5,6.5 9.2,5.2 9.2,2.8" fill-opacity="0.65"/>'
+    + '<polygon points="7.75,4.5 10.05,5.8 10.05,8.2 7.75,9.5 5.45,8.2 5.45,5.8" fill-opacity="1.0"/>'
+    + '<polygon points="4,7.5 6.3,8.8 6.3,11.2 4,12.5 1.7,11.2 1.7,8.8" fill-opacity="0.5"/>'
+    + '<polygon points="11.5,7.5 13.8,8.8 13.8,11.2 11.5,12.5 9.2,11.2 9.2,8.8" fill-opacity="0.25"/>'
+    + '</svg>';
 
   // ── dataset popover HTML ────────────────────────────────────────────────────
   function dsTip(dbId) {
@@ -304,31 +315,55 @@
   }
 
   // ── plot links per row ──────────────────────────────────────────────────────
+  function hexUrl(dbId) {
+    var parts = String(dbId).split('/');
+    var base  = '/browse/' + encodeURIComponent(parts[0] || '') + '/' + encodeURIComponent(parts[1] || '');
+    return base + '/plot/hexbin?embedding=X_umap&color=' + encodeURIComponent(GENE);
+  }
   function plotLinks(dbId) {
     var parts = String(dbId).split('/');
     var base  = '/browse/' + encodeURIComponent(parts[0] || '') + '/' + encodeURIComponent(parts[1] || '');
     var gene  = encodeURIComponent(GENE);
     var hist  = base + '/plot/histogram?x=' + gene;
     var ecdf  = base + '/plot/ecdf?x=' + gene;
+    var hex   = hexUrl(dbId);
     var umap  = base + '/plot/scatter?embedding=X_umap&color=' + gene;
     return '<a href="' + hist + '" title="histogram of ' + esc(GENE) + '">' + SVG_BAR  + '</a>'
          + '<a href="' + ecdf + '" title="ECDF of '      + esc(GENE) + '">' + SVG_LINE + '</a>'
+         + '<a href="' + hex  + '" title="hexbin (density) of ' + esc(GENE) + ' in embedding">' + SVG_HEX  + '</a>'
          + '<a href="' + umap + '" title="UMAP coloured by ' + esc(GENE) + '">' + SVG_UMAP + '</a>';
   }
 
-  // ── cross-dataset range for sparklines (set after data loads) ─────────────
-  var STAT_MAX = { pct_nonzero: 100, mean: 1, mean_nonzero: 1 };  // updated after load
+  // ── cross-dataset stats for sparklines (set after data loads) ──────────────
+  // pct_nonzero: natural 0–100 scale; mean / mean_nonzero use per-dataset
+  // PERCENT_RANK (rank_mean from server; rank_mean_nonzero computed client-side).
+  var STAT_MAX = { pct_nonzero: 100 };  // only pct_nonzero needs a cross-db max
 
   function computeStatMax(rows) {
-    var pmax = 0, mmax = 0, mnmax = 0;
+    var pmax = 0;
     rows.forEach(function (r) {
-      if (r.pct_nonzero  > pmax)  pmax  = r.pct_nonzero;
-      if (r.mean         > mmax)  mmax  = r.mean;
-      if (r.mean_nonzero > mnmax) mnmax = r.mean_nonzero;
+      if (r.pct_nonzero > pmax) pmax = r.pct_nonzero;
     });
-    STAT_MAX.pct_nonzero  = pmax  > 0 ? pmax  : 1;
-    STAT_MAX.mean         = mmax  > 0 ? mmax  : 1;
-    STAT_MAX.mean_nonzero = mnmax > 0 ? mnmax : 1;
+    STAT_MAX.pct_nonzero = pmax > 0 ? pmax : 1;
+  }
+
+  // Compute client-side percentile rank (0–1) for mean_nonzero across rows.
+  // The server already returns rank_mean; mean_nonzero has no server-side rank,
+  // so we derive it here from the loaded cross-dataset rows.
+  // NOTE: this ranks this gene's mean_nonzero ACROSS datasets (not across genes
+  // within one dataset), which is a different but still unit-invariant signal.
+  // The per-dataset rank_mean (from server) is used for the mean sparkline.
+  function computeRankMeanNonzero(rows) {
+    var sorted = rows.slice().filter(function (r) { return r.mean_nonzero != null; });
+    sorted.sort(function (a, b) { return (a.mean_nonzero || 0) - (b.mean_nonzero || 0); });
+    var n = sorted.length;
+    var rankMap = {};
+    sorted.forEach(function (r, i) {
+      rankMap[r.db_id] = n > 1 ? i / (n - 1) : 0.5;
+    });
+    rows.forEach(function (r) {
+      if (r.db_id in rankMap) r._rank_mean_nonzero = rankMap[r.db_id];
+    });
   }
 
   // ── URL hash state (scheme: #gv=key=val;key=val) ───────────────────────────
@@ -575,13 +610,20 @@
       var orgFull  = ((p.organism || {}).full || ann.celltype || '');
       // We embed organism full name from PILLS for display; cell_type / tissue / biosample from DS_ANNOT.
       var orgPill  = p.organism ? '<span title="' + esc(((p.organism || {}).full || '')) + '">' + esc(((p.organism || {}).abbrev || '')) + '</span>' : '—';
-      // sparklines: position of the value within the across-dataset range
+      // sparklines: pct_nonzero uses cross-db max; mean / mean_nonzero use
+      // per-dataset percentile rank so the bar is unit-invariant across
+      // scRNA-seq and proteomics/bulk datasets.
+      var nGenes    = ann.n_genes != null ? ann.n_genes : null;
       var pctSpark  = sparkline((r.pct_nonzero  || 0) / STAT_MAX.pct_nonzero,
-                                r.pct_nonzero,  STAT_MAX.pct_nonzero,  'pct_nonzero',  GENE);
-      var meanSpark = sparkline((r.mean         || 0) / STAT_MAX.mean,
-                                r.mean,         STAT_MAX.mean,         'mean',          GENE);
-      var mnzSpark  = sparkline((r.mean_nonzero || 0) / STAT_MAX.mean_nonzero,
-                                r.mean_nonzero, STAT_MAX.mean_nonzero, 'mean_nonzero',  GENE);
+                                r.pct_nonzero, null, null, 'pct_nonzero', GENE);
+      var meanRank01 = r.rank_mean != null ? r.rank_mean : null;
+      var meanRankPct = meanRank01 != null ? meanRank01 * 100 : null;
+      var meanSpark = sparkline(meanRank01 != null ? meanRank01 : 0,
+                                r.mean, meanRankPct, nGenes, 'mean', GENE);
+      var mnzRank01  = r._rank_mean_nonzero != null ? r._rank_mean_nonzero : null;
+      var mnzRankPct = mnzRank01 != null ? mnzRank01 * 100 : null;
+      var mnzSpark  = sparkline(mnzRank01 != null ? mnzRank01 : 0,
+                                r.mean_nonzero, mnzRankPct, nGenes, 'mean_nonzero', GENE);
       return '<tr>'
         + '<td>' + dsCell(r.db_id) + '</td>'
         + '<td>' + orgPill + '</td>'
@@ -707,6 +749,7 @@
           return;
         }
         computeStatMax(found);
+        computeRankMeanNonzero(found);
         // Default sort: %expr descending
         found.sort(function (a, b) { return (b.pct_nonzero || 0) - (a.pct_nonzero || 0); });
         renderHero();
