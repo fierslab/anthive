@@ -3089,3 +3089,66 @@ def test_dataset_html_activatetab_preserves_mv_suffix(client):
     assert "name + mvSuffix" in html, (
         "activateTab must write '#' + name + mvSuffix to replaceState"
     )
+
+
+# ── Genes tab — four bullets ───────────────────────────────────────────────────
+
+def test_genes_tab_label_no_parenthesised_count(client):
+    """Bullet 1: the Genes tab button must say 'Genes' with NO '(N)' count."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    # The tab button must contain the word Genes but must NOT have a tab-count
+    # badge inside the Genes tab button.  We look for the specific button markup
+    # and verify that no parenthesised number or tab-count span follows 'Genes'
+    # on that button.
+    import re
+    # Extract the raw tab-btn for the genes tab.
+    genes_btn = re.search(r'<button[^>]*data-tab="genes"[^>]*>(.*?)</button>', html, re.DOTALL)
+    assert genes_btn is not None, "Genes tab button not found in dataset page HTML"
+    btn_inner = genes_btn.group(1)
+    assert "Genes" in btn_inner
+    # Must NOT contain a tab-count span or a parenthesised digit.
+    assert "tab-count" not in btn_inner, "Genes tab must not show a count badge"
+    assert not re.search(r'\(\d+\)', btn_inner), "Genes tab must not show a parenthesised count"
+
+
+def test_genes_tab_has_search_input(client):
+    """Bullet 2: the Genes tab contains a gene search <input> and URL-state JS."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    # Search input element.
+    assert 'id="gene-search"' in html, "<input id='gene-search'> must be present in Genes tab"
+    # Client-side filter JS that writes ?gene= into the URL.
+    assert "applyGeneSearch" in html, "applyGeneSearch JS function must be present"
+    assert 'searchParams.set' in html, "URL gene search-param update must be in the JS"
+
+
+def test_genes_tab_has_sparkline_elements(client):
+    """Bullet 3: each gene row has .gene-sparkline elements for pct, mean, meannz."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    # One sparkline per stat per gene row is generated in the template.
+    assert 'class="gene-sparkline"' in html, ".gene-sparkline must be rendered in gene rows"
+    # All three stats must have sparkline tracks.
+    assert 'data-stat="pct"'    in html, "pct sparkline track required"
+    assert 'data-stat="mean"'   in html, "mean sparkline track required"
+    assert 'data-stat="meannz"' in html, "meannz sparkline track required"
+    # The JS setSparkline helper must be present.
+    assert "setSparkline" in html, "setSparkline JS helper must be defined"
+
+
+def test_genes_tab_mean_sparklines_use_db_wide_range(client):
+    """Bullet 4: mean/meannz sparklines are scaled to the db-wide min/max
+    computed across ALL returned gene stats (not just shown rows)."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    # The JS must compute a db-wide range object for mean and meannz.
+    assert "meanRange"   in html, "meanRange db-wide range must be computed in JS"
+    assert "meanNzRange" in html, "meanNzRange db-wide range must be computed in JS"
+    assert "normInRange" in html, "normInRange helper must be used to scale sparklines"
+    # And the sparkline positioning for mean must use that range, not a fixed 0-100 scale.
+    assert "normInRange(s.mean," in html, "mean sparkline must use normInRange with meanRange"

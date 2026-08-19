@@ -93,16 +93,9 @@
   .obs-table .ocol .oname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .obs-table .ocol .ostat { margin-left: auto; color: var(--text-muted); font-family: var(--font-mono); font-size: 10px; flex: none; }
 
-  /* Consolidated header row: breadcrumb (click-to-copy ids) + action buttons. */
+  /* Consolidated header row: breadcrumb (macro) + action buttons. */
   .ds-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 4px 0 8px; }
-  .ds-bc { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 17px; color: var(--text); min-width: 0; }
-  .ds-bc a { color: var(--link); }
-  .ds-bc .ds-cur { font-weight: 600; font-size: 19px; }
-  .ds-bc .bc-sep { color: #cbd5e1; }
-  .ds-bc .ds-basename { color: #94a3b8; font-family: var(--font-mono); font-size: 12px; }
-  .idcopy { font-family: var(--font-mono); font-size: 11px; color: var(--text); cursor: pointer; padding: 0 3px; border-radius: 3px; }
-  .idcopy:hover { background: #e0e7ff; }
-  .idcopy.copied { background: #bbf7d0; color: #166534; }
+  .ds-bc { flex: 1; min-width: 0; }
   /* Align Visualize + Edit buttons on the same baseline — matched padding + line-height. */
   .ds-actions { display: flex; align-items: stretch; gap: 6px; flex-shrink: 0; position: relative; }
   .ds-actions > * { align-self: stretch; display: inline-flex; align-items: center; }
@@ -292,18 +285,14 @@
   .mod-legend-item[data-absent="1"]:hover { background: transparent; border-color: transparent; }
 </style>
 
+{% from "_macros.html" import breadcrumb %}
 <!-- Consolidated header: breadcrumb with click-to-copy ids + action buttons. -->
 <div class="ds-top">
   <div class="ds-bc">
-    <!-- file_id first (the 3-letter dataset code, e.g. MIC/MPF/SGM) — this is
-         the short-form users cite. db_id lives at the tail, folder link + name
-         in the middle. Fixed monospace so it visually anchors the row. -->
-    <span class="idcopy" data-copy="{{ file_id }}" title="click to copy {{ file_id }}" style="min-width:3.5em;text-align:center">[{{ file_id }}]</span>
-    <a href="/browse/{{ folder_browse_id }}">{{ folder_name }}</a>
-    <span class="idcopy" data-copy="{{ group_id }}" title="click to copy {{ group_id }}">[{{ group_id }}]</span>
-    <span class="bc-sep">/</span>
-    <span class="ds-cur">{{ dataset_name }}</span>
-    <span class="idcopy" data-copy="{{ db_id }}" title="click to copy {{ db_id }}">[{{ db_id }}]</span>
+    {{ breadcrumb([
+        (folder_name, "/browse/" ~ folder_browse_id),
+        (dataset_name, None)
+    ], ids=[("collection", group_id), ("dataset", file_id), ("db", db_id)]) }}
   </div>
   <div class="ds-actions">
     {% if pub_icon and pub_icon.glyph %}<span class="ds-pub-icon" style="color:{{ pub_icon.color }}" title="{{ pub_icon.tooltip }}">{{ pub_icon.glyph|safe }}</span>{% endif %}
@@ -399,7 +388,7 @@
   {% if caveats %}<button type="button" class="tab-btn caveat-tab lvl-{{ caveats_summary.max_level or 'low' }}" data-tab="caveats" role="tab">⚠ Caveats<span class="tab-count">{{ caveats_summary.n }}</span></button>{% endif %}
   <button type="button" class="tab-btn{% if not markdown_content %} active{% endif %}" data-tab="data" role="tab">Data</button>
   {% if gene_panel and gene_panel.genes %}
-  <button type="button" class="tab-btn"        data-tab="genes"    role="tab">Genes<span class="tab-count">{{ gene_panel.genes|length }}</span></button>
+  <button type="button" class="tab-btn"        data-tab="genes"    role="tab">Genes</button>
   {% endif %}
   {% if n_module_scores %}
   <button type="button" class="tab-btn"        data-tab="modules"  role="tab">Modules<span class="tab-count">{{ n_module_scores }}</span></button>
@@ -460,15 +449,43 @@
 {# ── Genes tab ────────────────────────────────────────────────────────
    Precomputed favourites when the dataset defines them; otherwise a
    canonical curated panel keyed on cell type. Each gene: histogram +
-   embedding scatter icon. #}
+   embedding scatter icon + sparkline bars for %expr, mean, meannz. #}
 {% if gene_panel and gene_panel.genes %}
 <section class="tab-panel" id="tab-genes" role="tabpanel">
+  <style>
+    /* Gene sparkline — mimics .mv-track from _module_view.html */
+    .gene-sparkline {
+      position: relative; display: inline-block;
+      width: 80px; height: 8px;
+      background: #eef2f7; border-radius: 2px;
+      vertical-align: middle;
+    }
+    .gene-sparkline .gs-mark {
+      position: absolute; top: -1px;
+      width: 5px; height: 10px;
+      border-radius: 2px; background: var(--link, #1d4ed8);
+    }
+    td.g-pct-cell, td.g-mean-cell, td.g-meannz-cell { white-space: nowrap; }
+    td.g-pct-cell .g-pct, td.g-mean-cell .g-mean, td.g-meannz-cell .g-mean-nz {
+      display: inline-block; width: 4em; text-align: right;
+      font-family: var(--font-mono); font-size: 11px; color: #555;
+      margin-right: 4px; vertical-align: middle;
+    }
+    .gene-search-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+    #gene-search { padding: 3px 7px; font-family: inherit; font-size: 12px;
+      border: 1px solid #ccc; border-radius: 4px; outline: none; width: 200px; }
+    #gene-search-count { font-size: 11px; color: var(--text-muted); }
+  </style>
   <h2>Genes
-    <span class="muted" style="font-size:12px;font-weight:normal">({{ gene_panel.genes|length }})</span>
-    <span class="info" title="Click ▬ for a histogram of the gene's expression, or ◉ for an embedding scatter coloured by the gene. Panel source: precomputed dataset favourites, or a canonical curated panel keyed on cell type (microglia / astrocyte / neuron).">ⓘ</span></h2>
+    <span class="info" title="Click ▬ for a histogram of the gene's expression, or ◉ for an embedding scatter coloured by the gene. Sparklines show the gene's value relative to the db-wide range for that stat. Panel source: precomputed dataset favourites, or a canonical curated panel keyed on cell type (microglia / astrocyte / neuron).">ⓘ</span></h2>
   <div class="muted" style="font-size:11px;margin-bottom:6px">
     {% if gene_panel.source == 'precomputed' %}Curated favourites shipped with this dataset.
     {% else %}<em>Generic {{ gene_panel.label.split(' ', 1)[1] if ' ' in gene_panel.label else gene_panel.label }}</em> — dataset did not precompute a favourite list.{% endif %}
+  </div>
+  <div class="gene-search-row">
+    <input id="gene-search" type="search" placeholder="search gene…" autocomplete="off"
+           aria-label="filter genes by symbol">
+    <span id="gene-search-count" class="muted"></span>
   </div>
   <div class="table-wrap"><table class="obs-stats-tbl auto" id="obs-tbl-genes">
     <thead><tr>
@@ -482,7 +499,7 @@
     <tbody>
     {% for gene in gene_panel.genes %}
     {% set _b = '/browse/' ~ folder_browse_id ~ '/' ~ file_id %}
-    <tr class="gene-item" data-gene="{{ gene }}">
+    <tr class="gene-item" data-gene="{{ gene }}" data-gene-lc="{{ gene|lower }}">
       <td class="colname">{{ gene }}</td>
       <td class="obs-plots">
         {% if has_duckdb %}
@@ -491,10 +508,16 @@
         {% if default_embedding %}<a class="obs-plot-icon" href="{{ _b }}/plot/scatter?embedding={{ default_embedding|urlencode }}&color={{ gene|urlencode }}" title="{{ default_embedding }} scatter, coloured by {{ gene }}">{{ chart_icon('umap') }}</a>{% endif %}
         {% endif %}
       </td>
-      <td class="g-pct" style="color:#555"></td>
-      <td class="g-mean" style="color:#555"></td>
-      <td class="g-mean-nz" style="color:#555"></td>
-      <td class="g-max" style="color:#555"></td>
+      <td class="g-pct-cell">
+        <span class="g-pct"></span><span class="gene-sparkline" data-stat="pct" title="% expressing cells"><span class="gs-mark" style="display:none"></span></span>
+      </td>
+      <td class="g-mean-cell">
+        <span class="g-mean"></span><span class="gene-sparkline" data-stat="mean" title="mean expression (db-wide range)"><span class="gs-mark" style="display:none"></span></span>
+      </td>
+      <td class="g-meannz-cell">
+        <span class="g-mean-nz"></span><span class="gene-sparkline" data-stat="meannz" title="mean non-zero expression (db-wide range)"><span class="gs-mark" style="display:none"></span></span>
+      </td>
+      <td class="g-max" style="color:#555;font-family:var(--font-mono);font-size:11px"></td>
     </tr>
     {% endfor %}
     </tbody>
@@ -502,6 +525,7 @@
   <div class="muted" style="font-size:11px;margin-top:4px">
     Stats fetched from <code>/gene_stats</code> on the served (log-normalised
     by convention) X layer. Genes missing from this dataset show blank rows.
+    Sparklines for mean/mean(nz) are scaled to the db-wide min–max of that column.
   </div>
 </section>
 {% endif %}
@@ -991,12 +1015,65 @@ document.addEventListener('DOMContentLoaded', function() {
             })
             .catch(function () {});
 
-        // Hydrate the Genes tab from /gene_stats. Batches ALL panel genes in
-        // one request (the endpoint takes comma-list). Missing genes stay
-        // blank. Log-normalised X layer is the served default.
+        // ── Genes tab: search box + sparklines + gene_stats hydration ─────────
         (function () {
             var rows = Array.from(document.querySelectorAll('#tab-genes .gene-item'));
             if (!rows.length) return;
+
+            // ── Gene search (client-side filter + URL ?gene= state) ───────────
+            var searchInput = document.getElementById('gene-search');
+            var searchCount = document.getElementById('gene-search-count');
+
+            function applyGeneSearch(query, pushState) {
+                var q = (query || '').toLowerCase().trim();
+                var shown = 0;
+                rows.forEach(function (row) {
+                    var vis = !q || (row.dataset.geneLc || '').indexOf(q) >= 0;
+                    row.style.display = vis ? '' : 'none';
+                    if (vis) shown++;
+                });
+                if (searchCount) {
+                    searchCount.textContent = q
+                        ? (shown + ' / ' + rows.length + ' genes')
+                        : (rows.length + ' genes');
+                }
+                // Preserve in URL so back-button restores the filter.
+                if (pushState !== false) {
+                    try {
+                        var url = new URL(window.location.href);
+                        if (q) url.searchParams.set('gene', q);
+                        else   url.searchParams.delete('gene');
+                        history.replaceState(null, '', url.toString());
+                    } catch (_) {}
+                }
+            }
+
+            if (searchInput) {
+                searchInput.addEventListener('input', function () {
+                    applyGeneSearch(searchInput.value, true);
+                });
+                // Restore from URL on load.
+                try {
+                    var initGene = new URL(window.location.href).searchParams.get('gene') || '';
+                    if (initGene) { searchInput.value = initGene; applyGeneSearch(initGene, false); }
+                } catch (_) {}
+            }
+            applyGeneSearch('', false);  // populate count immediately
+
+            // ── Hydrate stats + sparklines ────────────────────────────────────
+            // Sparkline helper: position a marker on a 0-1 track.
+            // pct range is always [0,100]; mean/meannz use the db-wide range
+            // computed from the returned stats.
+            function setSparkline(row, statClass, frac) {
+                var track = row.querySelector('.gene-sparkline[data-stat="' + statClass + '"]');
+                if (!track) return;
+                var mark = track.querySelector('.gs-mark');
+                if (!mark) return;
+                var pct = Math.max(0, Math.min(1, frac)) * 100;
+                mark.style.left = 'calc(' + pct.toFixed(1) + '% - 2px)';
+                mark.style.display = '';
+            }
+
             var genes = rows.map(function (r) { return r.dataset.gene; }).filter(Boolean);
             if (!genes.length) return;
             fetch(apiBase + '/gene_stats?genes=' + encodeURIComponent(genes.join(',')),
@@ -1006,14 +1083,43 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (!d || !d.stats) return;
                     var byGene = {};
                     d.stats.forEach(function (s) { byGene[s.gene.toLowerCase()] = s; });
+
+                    // Compute db-wide min/max for mean and meannz across ALL
+                    // returned genes (not just shown rows) so the sparkline
+                    // range is stable regardless of the search filter.
+                    var meanVals = [], meanNzVals = [];
+                    d.stats.forEach(function (s) {
+                        if (s.mean != null)         meanVals.push(s.mean);
+                        if (s.mean_nonzero != null)  meanNzVals.push(s.mean_nonzero);
+                    });
+                    function minMax(arr) {
+                        if (!arr.length) return { min: 0, max: 1 };
+                        var mn = arr[0], mx = arr[0];
+                        arr.forEach(function (v) { if (v < mn) mn = v; if (v > mx) mx = v; });
+                        return { min: mn, max: mx };
+                    }
+                    var meanRange   = minMax(meanVals);
+                    var meanNzRange = minMax(meanNzVals);
+
+                    function normInRange(v, range) {
+                        var span = range.max - range.min;
+                        return span ? (v - range.min) / span : 0.5;
+                    }
+
                     rows.forEach(function (row) {
                         var s = byGene[row.dataset.gene.toLowerCase()];
                         if (!s) return;
                         var set = function (sel, v) { var c = row.querySelector(sel); if (c) c.textContent = v; };
-                        set('.g-pct',     s.pct_nonzero != null ? s.pct_nonzero.toFixed(1) + '%' : '');
+                        var pct = s.pct_nonzero != null ? s.pct_nonzero : null;
+                        set('.g-pct',     pct != null ? pct.toFixed(1) + '%' : '');
                         set('.g-mean',    fnum(s.mean));
                         set('.g-mean-nz', fnum(s.mean_nonzero));
                         set('.g-max',     fnum(s.max));
+
+                        // Sparklines
+                        if (pct != null)           setSparkline(row, 'pct',    pct / 100);
+                        if (s.mean != null)        setSparkline(row, 'mean',   normInRange(s.mean, meanRange));
+                        if (s.mean_nonzero != null) setSparkline(row, 'meannz', normInRange(s.mean_nonzero, meanNzRange));
                     });
                 })
                 .catch(function () {});
