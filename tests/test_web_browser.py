@@ -553,33 +553,41 @@ def test_build_dataset_annotations_flattens_list_values():
     _orig = browser._all_databases
     browser._all_databases = lambda api_url: [
         {"id": "A/ds1", "celltype": "microglial cell", "tissue": "brain",
-         "experimental_system": "post_mortem_tissue"},
+         "experimental_system": "post_mortem_tissue", "suspension_type": "cell",
+         "technology": "10x_chromium"},
         {"id": "A/ds2", "celltype": ["microglial cell", "macrophage"],
-         "tissue": ["cortex", "hippocampus"], "experimental_system": None},
-        {"id": "A/ds3", "celltype": None, "tissue": None, "experimental_system": "xenograft"},
+         "tissue": ["cortex", "hippocampus"], "experimental_system": None,
+         "suspension_type": "nucleus", "technology": "10x_chromium_3p_v3"},
+        {"id": "A/ds3", "celltype": None, "tissue": None,
+         "experimental_system": "xenograft", "suspension_type": "cell",
+         "technology": "10x_chromium"},
     ]
     try:
         result = browser._build_dataset_annotations("http://x")
     finally:
         browser._all_databases = _orig
 
-    # system field is included alongside celltype and tissue.
     # Extra keys (title, n_cells, contributor) are also present; check core fields.
     assert result["A/ds1"]["celltype"] == "microglial cell"
     assert result["A/ds1"]["tissue"] == "brain"
-    # post_mortem_tissue is mapped to 'post-mortem' via _derive_biosample/_BIOSAMPLE_MAP
-    assert result["A/ds1"]["system"] == "post-mortem"
+    # post_mortem_tissue → "post-mortem" via _derive_biosample
+    assert result["A/ds1"]["biosample"] == "post-mortem"
+    # system is the deprecated alias for biosample
+    assert result["A/ds1"]["system"] == result["A/ds1"]["biosample"]
+    # suspension_type=nucleus → "single nucleus"
+    assert result["A/ds2"]["technology"] == "single nucleus"
     # List values must be flat strings — JS .toLowerCase() would throw on arrays.
     assert result["A/ds2"]["celltype"] == "microglial cell,macrophage"
     assert result["A/ds2"]["tissue"] == "cortex,hippocampus"
-    assert result["A/ds2"]["system"] == ""
+    assert result["A/ds2"]["biosample"] == ""
     assert result["A/ds3"]["celltype"] == ""
     assert result["A/ds3"]["tissue"] == ""
-    assert result["A/ds3"]["system"] == "xenograft"
+    # xenograft → "xenograft"
+    assert result["A/ds3"]["biosample"] == "xenograft"
 
 
 def test_build_dataset_annotations_system_field_in_all_entries():
-    """Every entry must have a 'system' key, even when experimental_system absent."""
+    """Every entry must have 'biosample' and deprecated 'system' keys even when absent."""
     _orig = browser._all_databases
     browser._all_databases = lambda api_url: [
         {"id": "B/ds1", "celltype": "neuron", "tissue": "cortex"},  # no experimental_system key
@@ -591,6 +599,48 @@ def test_build_dataset_annotations_system_field_in_all_entries():
 
     assert "system" in result["B/ds1"]
     assert result["B/ds1"]["system"] == ""
+    assert "biosample" in result["B/ds1"]
+    assert result["B/ds1"]["biosample"] == ""
+    assert "technology" in result["B/ds1"]
+
+
+# ── unit tests: _derive_technology / _derive_biosample ────────────────────────
+
+@pytest.mark.parametrize("suspension_type,technology,expected", [
+    ("cell",    "10x_chromium",      "single cell"),
+    ("nucleus", "10x_chromium_3p_v3", "single nucleus"),
+    ("na",      "10x_visium",        "spatial"),
+    ("na",      "bulk_RNA-seq",      "bulk"),
+    ("na",      "Stereo-seq",        "spatial"),
+    ("na",      "NovaST",            "spatial"),
+    ("na",      "MERFISH",           "spatial"),
+    ("na",      "CosMx",             "spatial"),
+    ("na",      "mass-spectrometry", "bulk"),
+    ("cell",    "Smart-seq2",        "single cell"),
+    ("nucleus", "snRNA-seq",         "single nucleus"),
+    ("",        "",                  ""),
+])
+def test_derive_technology(suspension_type, technology, expected):
+    """_derive_technology maps suspension_type + technology to coarse category."""
+    db = {"suspension_type": suspension_type, "technology": technology}
+    assert browser._derive_technology(db) == expected
+
+
+@pytest.mark.parametrize("experimental_system,expected", [
+    ("post_mortem_tissue", "post-mortem"),
+    ("xenograft",          "xenograft"),
+    ("chimera",            "xenograft"),   # chimera collapses to xenograft
+    ("live_biopsy",        "fresh"),
+    ("in_vitro_2d",        "in-vitro"),
+    ("organoid",           "in-vitro"),
+    ("bulk_tissue",        ""),            # bulk has no biosample
+    (None,                 ""),
+    ("",                   ""),
+])
+def test_derive_biosample(experimental_system, expected):
+    """_derive_biosample maps experimental_system to display labels."""
+    db = {"experimental_system": experimental_system}
+    assert browser._derive_biosample(db) == expected
 
 
 def test_build_dataset_annotations_collection_and_dataset_desc():
@@ -2774,37 +2824,55 @@ def test_dataset_canonical_col_data_name_attr_unmodified(client):
     assert "family=Roboto" in resp.text
 
 
-# ── module view: system facet + URL hash features ─────────────────────────────
+# ── module view: technology + biosample facets + URL hash features ────────────
 
-def test_module_view_system_facet_rendered(client):
-    """The biosample (experimental_system) filter dropdown must appear in the
-    module view partial when dataset_annotations are provided.
-    Note: the linter renamed the select from mv-flt-system → mv-flt-biosample."""
+def test_module_view_technology_facet_rendered(client):
+    """technology and biosample filter dropdowns replace the old system facet."""
     resp = client.get("/genesets/StudyX/Exp1")
     assert resp.status_code == 200
+    assert 'class="mv-flt-technology"' in resp.text, (
+        "technology filter select not rendered — check _module_view.html template"
+    )
     assert 'class="mv-flt-biosample"' in resp.text, (
         "biosample filter select not rendered — check _module_view.html template"
     )
-
-
-def test_module_view_system_facet_listener_bound(client):
-    """flt.biosample must be bound to the change-listener loop (Object.keys(flt))."""
-    resp = client.get("/genesets/StudyX/Exp1/gs_up")
-    assert resp.status_code == 200
-    # The loop uses `if (flt.biosample)` implicit binding via addEventListener.
-    assert "flt.biosample" in resp.text, (
-        "biosample filter not referenced — filter will be a no-op"
+    assert 'class="mv-flt-system"' not in resp.text, (
+        "deprecated system filter still rendered — remove from _module_view.html"
     )
 
 
-def test_module_view_system_filter_uses_indexof(client):
-    """Biosample filter uses indexOf so comma-joined multi-values work (same pattern
-    as celltype/tissue)."""
+# Keep old name as alias so existing CI that references the old function name
+# still works — both point to the same assertion.
+test_module_view_system_facet_rendered = test_module_view_technology_facet_rendered
+
+
+def test_module_view_technology_biosample_listeners_bound(client):
+    """flt.technology and flt.biosample have explicit addEventListener bindings."""
+    resp = client.get("/genesets/StudyX/Exp1/gs_up")
+    assert resp.status_code == 200
+    assert "flt.technology.addEventListener('change'" in resp.text, (
+        "technology filter change listener not found"
+    )
+    assert "flt.biosample.addEventListener('change'" in resp.text, (
+        "biosample filter change listener not found"
+    )
+
+
+# Legacy alias kept for CI compatibility.
+test_module_view_system_facet_listener_bound = test_module_view_technology_biosample_listeners_bound
+
+
+def test_module_view_biosample_filter_uses_indexof(client):
+    """Biosample filter uses indexOf so comma-joined multi-values work."""
     resp = client.get("/genesets/StudyX/Exp1")
     assert resp.status_code == 200
     assert ".indexOf(bioVal) !== -1" in resp.text, (
-        "biosample filter must use indexOf for multi-value experimental_system fields"
+        "biosample filter must use indexOf for multi-value fields"
     )
+
+
+# Legacy alias.
+test_module_view_system_filter_uses_indexof = test_module_view_biosample_filter_uses_indexof
 
 
 def test_module_view_url_hash_functions_present(client):
@@ -3709,31 +3777,27 @@ def test_gene_atlas_filter_row1_has_pct_and_organism(client):
 
 
 def test_gene_atlas_filter_row2_has_cell_tissue_system(client):
-    """Row 2 must contain cell_type, tissue, and biosample selects.
-    Note: the linter renamed gv-flt-system → gv-flt-biosample."""
+    """Row 2 must contain cell_type, tissue, technology, and biosample selects."""
     resp = client.get("/genes/APOE")
     assert resp.status_code == 200
     assert 'id="gv-flt-cell_type"' in resp.text, "cell_type select missing"
     assert 'id="gv-flt-tissue"' in resp.text, "tissue select missing"
-    # After linter rename, system became biosample
-    assert ('id="gv-flt-biosample"' in resp.text or 'id="gv-flt-system"' in resp.text), \
-        "biosample/system select missing"
+    assert 'id="gv-flt-technology"' in resp.text, "technology select missing"
+    assert 'id="gv-flt-biosample"' in resp.text, "biosample select missing"
+    assert 'id="gv-flt-system"' not in resp.text, "deprecated system select still present"
 
 
 def test_gene_atlas_table_has_sortcol_headers(client):
-    """Table must contain <th data-sortcol=...> for each required column.
-    Note: the linter renamed the 'system' column to 'biosample'."""
+    """Table must contain <th data-sortcol=...> for each required column."""
     resp = client.get("/genes/APOE")
     assert resp.status_code == 200
     required_cols = ['dataset', 'pct_nonzero', 'mean', 'mean_nonzero',
-                     'organism', 'cell_type', 'tissue']
+                     'organism', 'cell_type', 'tissue', 'biosample']
     for col in required_cols:
         assert f'data-sortcol="{col}"' in resp.text, (
             f"<th data-sortcol=\"{col}\"> missing from gene atlas table"
         )
-    # system renamed to biosample by linter
-    assert ('data-sortcol="biosample"' in resp.text or 'data-sortcol="system"' in resp.text), \
-        "biosample/system sortcol header missing"
+    assert 'data-sortcol="system"' not in resp.text, "deprecated system sortcol still present"
 
 
 def test_gene_atlas_sort_state_js_present(client):
