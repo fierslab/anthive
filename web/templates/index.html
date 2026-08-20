@@ -52,11 +52,13 @@
   th.sortable.sort-asc  .sort-ind::before  { content:'▲'; color:var(--text); }
   th.sortable.sort-desc .sort-ind::before  { content:'▼'; color:var(--text); }
 
-  /* column-header popover (help + sort + value filter) */
+  /* column-header popover (help + sort + value filter).
+     Fixed positioning so it escapes overflow:auto ancestors (e.g. .table-wrap)
+     and is never clipped when the table has only a few rows. */
   .col-popover {
-    position:absolute; top:100%; left:0; min-width:200px; max-width:280px;
+    position:fixed; min-width:200px; max-width:280px;
     background:#fff; border:1px solid var(--border); box-shadow:0 4px 12px rgba(0,0,0,.12);
-    padding:8px 10px; z-index:50; font-size:11px; font-weight:400; color:var(--text);
+    padding:8px 10px; z-index:9999; font-size:11px; font-weight:400; color:var(--text);
     text-transform:none; letter-spacing:0; line-height:1.4;
   }
   .col-popover h4 { font-size:11px; margin-bottom:4px; color:var(--text); }
@@ -510,6 +512,10 @@
     if (activePopover && !activePopover.contains(e.target)
         && !e.target.closest('th.sortable')) closePopover();
   });
+  // Close on scroll or resize so the fixed-positioned popover doesn't drift
+  // away from its anchor (auto-close is simpler and acceptable UX).
+  window.addEventListener('scroll', closePopover, { passive: true, capture: true });
+  window.addEventListener('resize', closePopover, { passive: true });
 
   function uniqueValuesFor(fields) {
     const out = new Set();
@@ -549,8 +555,13 @@
       const pop = document.createElement('div');
       pop.className = 'col-popover';
       pop.dataset.col = col;
-      // Position in the th
-      th.appendChild(pop);
+      // Append to <body> so the popover is never clipped by an overflow:auto
+      // ancestor (.table-wrap). Coordinates come from the anchor th's viewport
+      // rectangle; z-index:9999 keeps it on top of everything.
+      document.body.appendChild(pop);
+      const thRect = th.getBoundingClientRect();
+      pop.style.top  = (thRect.bottom + 4) + 'px';
+      pop.style.left = thRect.left + 'px';
 
       // Help
       const desc = document.createElement('div');
