@@ -1156,14 +1156,14 @@ def test_genesets_index_links_variability(client):
 
 
 def test_genesets_group_selector(client):
-    # The index offers a group selector with the find-by-gene tab; starCAT
-    # UI temporarily hidden (STARCAT_UI_ENABLED=False in browser.py — 2026-08).
-    # Re-enable in browser.py and update this assertion when starCAT is back.
+    # The index offers three group tabs: gene sets, starCAT, find-by-gene.
+    # starCAT UI was hidden 2026-08 (STARCAT_UI_ENABLED=False); re-enabled
+    # same day in the BLOCKER-3 fix.
     home = client.get("/genesets")
     assert home.status_code == 200
     assert "grp-tab" in home.text
     assert "/genesets?group=bygene" in home.text     # the find-by-gene tab href
-    assert "/genesets?group=starcat" not in home.text  # starCAT tab hidden
+    assert "/genesets?group=starcat" in home.text    # starCAT tab now enabled
     assert "StudyX" in home.text                     # geneset content (default group)
 
 
@@ -1177,10 +1177,13 @@ def test_genesets_find_by_gene_mode(client):
 
 
 def test_genesets_starcat_group_lists_modules_and_scores(client):
-    # starCAT UI temporarily hidden (STARCAT_UI_ENABLED=False, 2026-08). When
-    # re-enabled, restore the pre-2026-08 assertion set — see git blame.
-    import pytest
-    pytest.skip("starCAT UI temporarily hidden via STARCAT_UI_ENABLED flag")
+    # starCAT group renders the catalog selector and module/score detail
+    # (STARCAT_UI_ENABLED=True, re-enabled 2026-08-20).
+    resp = client.get("/genesets?group=starcat")
+    assert resp.status_code == 200
+    assert 'id="sc-cat"' in resp.text           # catalog dropdown
+    assert 'id="sc-content"' in resp.text       # module listing area
+    assert 'id="sc-data"' in resp.text          # embedded JSON for JS
 
 
 def test_geneset_starcat_module_detail_renders(client):
