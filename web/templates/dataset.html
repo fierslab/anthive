@@ -1078,18 +1078,14 @@ document.addEventListener('DOMContentLoaded', function() {
                         var topCell = el.querySelector('.s-top');
                         var tops = (s.top || s.top_categories || []);
                         if (topCell && tops.length) {
-                            // Show top-3 categories with % and a sparkline (0–100% track).
+                            // Show top-3 categories with % text (no sparkline — visual overload).
                             topCell.innerHTML = '<span class="cat-top">' + tops.slice(0, 3).map(function (t) {
                                 var val = (t.value != null ? t.value : t.name);
                                 var cnt = t.count, pct = t.pct;
                                 var tip = (cnt != null ? cnt.toLocaleString() : '')
                                         + (pct != null ? ' (' + (Math.round(pct * 10) / 10) + '%)' : '');
                                 var pctLabel = pct != null ? ' <span style="font-size:10px;color:var(--text-muted);font-family:var(--font-mono)">' + (Math.round(pct * 10) / 10) + '%</span>' : '';
-                                var spark = pct != null
-                                    ? ' <span class="ss" title="' + esc((Math.round(pct*10)/10) + '% of cells') + '" style="vertical-align:middle">'
-                                      + '<span class="ss-mark" style="left:' + Math.min(99, pct).toFixed(1) + '%"></span></span>'
-                                    : '';
-                                return '<span class="ct" title="' + esc(tip) + '">' + esc(val) + pctLabel + spark + '</span>';
+                                return '<span class="ct" title="' + esc(tip) + '">' + esc(val) + pctLabel + '</span>';
                             }).join('') + '</span>';
                         }
                         // ECDF link: use first numerical column as x-axis, this col as hue.

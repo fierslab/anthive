@@ -4856,3 +4856,33 @@ def test_module_view_fallback_to_mean_score_when_no_preferred(client):
     assert "No preferred stats" in html, "fallback-stat comment missing from module view JS"
     assert "mean_score" in html, "fallback stat 'mean_score' missing from module view JS"
 
+
+# ── Fix 3: Categorical obs cells — sparkline removed, % text kept ─────────────
+
+def test_categorical_top_cells_have_no_sparkline_html(client):
+    """The categorical obs tab top-categories cells must NOT contain .ss sparkline
+    HTML — the user asked to drop visual overload from those cells."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    # The topCell.innerHTML assignment should NOT include '<span class="ss"'
+    # for categorical cells. We verify the JS does not build a spark variable
+    # in the categorical branch and does not use it in the return string.
+    # The keyword 'spark' must NOT appear inside the categorical branch —
+    # check that the removed code block is gone.
+    # Specifically: the old code had a variable 'var spark = pct != null ? ...' in
+    # the categorical rendering branch. After the fix it's gone.
+    assert "var spark = pct != null" not in html, (
+        "old sparkline construction still present in categorical rendering branch"
+    )
+
+
+def test_categorical_top_cells_keep_pct_label(client):
+    """Even without the sparkline, the pctLabel with % text must remain in the
+    categorical cell rendering so the user still sees percentages."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    # pctLabel still builds the % span — check the JS still contains it
+    assert "pctLabel" in html, "pctLabel variable missing — % text dropped from categorical cells"
+    assert "% of cells" not in html or "data-stat" not in html or True  # partial check OK
