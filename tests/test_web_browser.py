@@ -3201,13 +3201,50 @@ def test_module_view_tissue_ancestors_in_geneset_detail(client):
     assert "tissue_ancestors" in resp.text
 
 
-def test_module_view_tissue_dropdown_uses_fill_tissue_select(client):
-    """fillTissueSelect must appear in the rendered HTML (replaces plain fillSelect
-    for tissue so indented hierarchy options are emitted)."""
+def test_module_view_tissue_dropdown_uses_fill_tissue_mff(client):
+    """fillTissueMff must appear in the rendered HTML (multi-select widget for
+    tissue — provides indented hierarchy options; fillTissueSelect was the old
+    plain-select API removed in the multi-select refactor)."""
     resp = client.get("/genesets/StudyX/Exp1")
     assert resp.status_code == 200
-    assert "fillTissueSelect" in resp.text, (
-        "fillTissueSelect not present — tissue dropdown will be flat, not hierarchical"
+    assert "fillTissueMff" in resp.text, (
+        "fillTissueMff not present — tissue mff widget will not be populated"
+    )
+    assert "fillTissueSelect" not in resp.text, (
+        "fillTissueSelect still present — stale pre-refactor call site remains"
+    )
+
+
+def test_module_view_no_fill_select_call_sites(client):
+    """fillSelect must not appear in any module-view page — it was replaced by
+    fillMff/fillTissueMff in the multi-select refactor.  Regression guard:
+    a remaining fillSelect call causes 'ReferenceError: fillSelect is not defined'
+    at first render, which breaks the entire drilldown panel."""
+    for path in ("/genesets/StudyX/Exp1", "/genesets/StudyX/Exp1/gs_up"):
+        resp = client.get(path)
+        assert resp.status_code == 200, f"{path} returned {resp.status_code}"
+        assert "fillSelect(" not in resp.text, (
+            f"fillSelect( call site found in {path} — will cause ReferenceError at runtime"
+        )
+
+
+def test_dataset_page_no_fill_select_call_sites(client):
+    """fillSelect must not appear on the dataset page — regression guard for
+    the multi-select refactor that may have been partially applied."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    assert "fillSelect(" not in resp.text, (
+        "fillSelect( call site found in dataset page — will cause ReferenceError at runtime"
+    )
+
+
+def test_genes_page_no_fill_select_call_sites(client):
+    """fillSelect must not appear on the genes page — regression guard for
+    the multi-select refactor."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    assert "fillSelect(" not in resp.text, (
+        "fillSelect( call site found in genes page — will cause ReferenceError at runtime"
     )
 
 
