@@ -506,6 +506,7 @@
     <div class="obs-sub">Search results</div>
     <div class="table-wrap"><table class="obs-stats-tbl auto" id="obs-tbl-gene-results">
       <thead><tr>
+        <th style="width:1.2em"></th>
         <th>gene</th>
         <th class="obs-plots-th">plot</th>
         <th title="fraction of cells with expression > 0">% expr</th>
@@ -516,9 +517,10 @@
       <tbody id="gene-search-tbody"></tbody>
     </table></div>
   </div>
-  <div class="obs-sub" style="margin-top:6px">Curated genes</div>
+  {# Single merged table: curated genes first (★ marked), then top-variable appended by JS #}
   <div class="table-wrap"><table class="obs-stats-tbl auto" id="obs-tbl-genes">
     <thead><tr>
+      <th title="★ = curated favourite" style="width:1.2em;text-align:center">★</th>
       <th>gene</th>
       <th class="obs-plots-th">plot</th>
       <th title="fraction of cells with expression > 0">% expr</th>
@@ -529,7 +531,8 @@
     <tbody>
     {% for gene in gene_panel.genes %}
     {% set _b = '/browse/' ~ folder_browse_id ~ '/' ~ file_id %}
-    <tr class="gene-item" data-gene="{{ gene }}" data-gene-lc="{{ gene|lower }}">
+    <tr class="gene-item gene-curated" data-gene="{{ gene }}" data-gene-lc="{{ gene|lower }}">
+      <td style="text-align:center;font-size:13px"><span title="curated favourite">★</span></td>
       <td class="colname">{{ gene }}</td>
       <td class="obs-plots">
         {% if has_duckdb %}
@@ -550,22 +553,12 @@
       <td class="g-max" style="color:#555;font-family:var(--font-mono);font-size:11px"></td>
     </tr>
     {% endfor %}
+    {# top-variable rows appended here by JS (id="topvar-tbody") #}
+    <tbody id="topvar-tbody"></tbody>
     </tbody>
   </table></div>
-  {# top-10 most variable genes section — populated by JS from gene_stats std #}
-  <div class="topvar-section" id="topvar-section" style="display:none">
-    <div class="obs-sub">Most variable genes <span class="info" title="Top 10 genes by standard deviation of expression across all cells (from the curated panel + search history; sorted by std descending). For a genome-wide ranking, add GET /databases/{id}/genes/top?by=std&amp;limit=10 to ant-serve.">ⓘ</span></div>
-    <div class="table-wrap"><table class="obs-stats-tbl auto" id="obs-tbl-topvar">
-      <thead><tr>
-        <th>gene</th>
-        <th class="obs-plots-th">plot</th>
-        <th title="standard deviation of expression across all cells">std</th>
-        <th title="fraction of cells with expression > 0">% expr</th>
-        <th title="mean expression across all cells">mean</th>
-      </tr></thead>
-      <tbody id="topvar-tbody"></tbody>
-    </table></div>
-  </div>
+  {# topvar-section wrapper kept for JS show/hide; visually invisible (no heading) #}
+  <div id="topvar-section" style="display:none"></div>
   <div class="muted" style="font-size:11px;margin-top:4px">
     Stats from <code>/gene_stats</code> (log-normalised X layer).
     Sparklines show value relative to the range across displayed genes.
@@ -1186,14 +1179,16 @@ document.addEventListener('DOMContentLoaded', function() {
                     var pctStr  = pct != null ? pct.toFixed(1) + '%' : '';
                     var meanStr = s && s.mean != null ? fnum(s.mean) : '';
                     return '<tr class="gene-item" data-gene="' + esc(geneName) + '" data-gene-lc="' + esc(geneName.toLowerCase()) + '">'
+                        + '<td></td>'
                         + '<td class="colname">' + esc(geneName) + '</td>'
                         + '<td class="obs-plots">' + plotHtml + '</td>'
                         + '<td style="font-family:var(--font-mono);font-size:11px;color:#555">' + esc(stdStr) + '</td>'
                         + '<td class="g-pct-cell"><span class="g-pct">' + esc(pctStr) + '</span>' + pctSpark + '</td>'
                         + '<td style="font-family:var(--font-mono);font-size:11px;color:#555">' + esc(meanStr) + '</td>'
+                        + '<td></td>'
                         + '</tr>';
                 }
-                // default: gene_stats columns (pct/mean/meannz/max)
+                // default: gene_stats columns (pct/mean/meannz/max) — used by search results
                 var meanSpark  = '<span class="ss" data-stat="mean"   title="mean (panel range)"><span class="ss-mark" style="display:none"></span></span>';
                 var meannzSpark = '<span class="ss" data-stat="meannz" title="mean(nz) (panel range)"><span class="ss-mark" style="display:none"></span></span>';
                 var pctStr2  = pct != null ? pct.toFixed(1) + '%' : '';
@@ -1201,6 +1196,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 var nzStr    = s && s.mean_nonzero != null ? fnum(s.mean_nonzero) : '';
                 var maxStr   = s && s.max  != null ? fnum(s.max)  : '';
                 return '<tr class="gene-item" data-gene="' + esc(geneName) + '" data-gene-lc="' + esc(geneName.toLowerCase()) + '">'
+                    + '<td></td>'
                     + '<td class="colname">' + esc(geneName) + '</td>'
                     + '<td class="obs-plots">' + plotHtml + '</td>'
                     + '<td class="g-pct-cell"><span class="g-pct">' + esc(pctStr2) + '</span>' + pctSpark + '</td>'

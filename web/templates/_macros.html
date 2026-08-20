@@ -1,7 +1,175 @@
 {# Sitewide Jinja macros — import with:
-       {% from "_macros.html" import col_label, breadcrumb %}
+       {% from "_macros.html" import col_label, breadcrumb, mff_styles %}
    in any template that renders obs column names or a breadcrumb trail.
 #}
+
+{# mff_styles(): emit shared CSS for multi-filter-facet (mff) popover widgets.
+   Call once per page inside a <style> block or as a bare macro call.
+   The JS helper (window.mffWidget) is defined separately in mff_scripts().
+#}
+{% macro mff_styles() %}
+<style>
+  /* ── multi-filter-facet (mff) popover widgets ───────────────────────────── */
+  .mff-widget { position: relative; display: inline-block; }
+  .mff-btn {
+    font-family: var(--font); font-size: 12px; padding: 3px 8px;
+    border: 1px solid var(--border); border-radius: 5px; background: #fff;
+    cursor: pointer; white-space: nowrap; min-width: 140px; text-align: left;
+    color: var(--text);
+  }
+  .mff-btn:hover { background: var(--hover); }
+  .mff-btn.mff-active { border-color: var(--link); background: #dbeafe; }
+  .mff-popover {
+    position: absolute; top: calc(100% + 3px); left: 0; z-index: 300;
+    background: #fff; border: 1px solid var(--border);
+    box-shadow: 0 4px 12px rgba(0,0,0,.12);
+    border-radius: 6px; padding: 6px 8px; min-width: 200px; max-width: 320px;
+    font-size: 12px;
+  }
+  .mff-actions { display: flex; gap: 6px; margin-bottom: 5px; }
+  .mff-actions button {
+    flex: 1; font-size: 11px; padding: 2px 6px; cursor: pointer;
+    border: 1px solid var(--border); border-radius: 3px; background: #f8fafc;
+    font-family: var(--font); color: var(--text);
+  }
+  .mff-actions button:hover { background: var(--hover); border-color: var(--link); }
+  .mff-list { list-style: none; max-height: 220px; overflow-y: auto; margin: 0; padding: 0; }
+  .mff-list li { padding: 1px 0; }
+  .mff-list label { display: flex; align-items: baseline; gap: 5px; cursor: pointer; padding: 1px 2px; }
+  .mff-list label:hover { background: var(--hover); border-radius: 3px; }
+  .mff-list input[type="checkbox"] { flex-shrink: 0; margin: 0; }
+</style>
+{% endmacro %}
+
+{# mff_scripts(): emit shared JS helper (window.mffWidget) for popover widgets.
+   Call once per page, after <body>. Usage:
+     var widget = mffWidget(rootEl, key, labelText, options, onChange);
+     widget.getValues()    → Set of checked string values, or null (= all)
+     widget.setValues(arr) → check items in arr; empty arr = all checked (= null)
+     widget.populate(opts, indent) → replace option list; opts is [{value, label, indent}]
+#}
+{% macro mff_scripts() %}
+<script>
+(function () {
+  if (window.mffWidget) return;  // only define once if macro called twice
+
+  /**
+   * Build a multi-select popover widget inside `rootEl`.
+   *
+   * @param {HTMLElement} rootEl - Container with class "mff-widget".
+   * @param {string} key - Filter key name (used for aria labels).
+   * @param {string} labelText - Human-readable label shown in the button.
+   * @param {string[]} initialOptions - Initial option values to populate.
+   * @param {function} onChange - Called whenever selection changes.
+   * @returns {{ '{{' }} getValues: function, setValues: function, populate: function {{ '}}' }}
+   */
+  window.mffWidget = function mffWidget(rootEl, key, labelText, initialOptions, onChange) {
+    var btn     = rootEl.querySelector('.mff-btn');
+    var popover = rootEl.querySelector('.mff-popover');
+    var allBtn  = rootEl.querySelector('.mff-all');
+    var noneBtn = rootEl.querySelector('.mff-none');
+    var list    = rootEl.querySelector('.mff-list');
+
+    var options = [];   // [{value, label, indent}]
+
+    function updateLabel() {
+      var checked = list.querySelectorAll('input[type="checkbox"]:checked');
+      var total   = list.querySelectorAll('input[type="checkbox"]').length;
+      if (!total || checked.length === total || checked.length === 0) {
+        btn.textContent = labelText + ': all ▾';
+        btn.classList.remove('mff-active');
+      } else if (checked.length === 1) {
+        btn.textContent = labelText + ': ' + checked[0].value + ' ▾';
+        btn.classList.add('mff-active');
+      } else {
+        btn.textContent = labelText + ': ' + checked.length + ' selected ▾';
+        btn.classList.add('mff-active');
+      }
+    }
+
+    function getValues() {
+      var checked = Array.from(list.querySelectorAll('input[type="checkbox"]:checked')).map(function (cb) { return cb.value; });
+      var total   = list.querySelectorAll('input[type="checkbox"]').length;
+      if (!total || checked.length === total) return null;  // null = all
+      if (!checked.length) return null;  // no selection = all
+      return new Set(checked);
+    }
+
+    function fireChange() { updateLabel(); onChange(getValues()); }
+
+    function setValues(arr) {
+      var valueSet = arr && arr.length ? new Set(arr) : null;
+      list.querySelectorAll('input[type="checkbox"]').forEach(function (cb) {
+        cb.checked = !valueSet || valueSet.has(cb.value);
+      });
+      updateLabel();
+    }
+
+    function populate(opts, keepValues) {
+      var prevValues = keepValues ? getValues() : null;
+      options = opts;
+      var html = opts.map(function (opt) {
+        var indent = opt.indent ? 'padding-left:' + (opt.indent * 14) + 'px;' : '';
+        return '<li><label style="' + indent + '">'
+          + '<input type="checkbox" value="' + opt.value.replace(/"/g, '&quot;') + '" checked> '
+          + opt.label.replace(/[&<>]/g, function (c) { return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c]; })
+          + '</label></li>';
+      }).join('');
+      list.innerHTML = html;
+      list.querySelectorAll('input[type="checkbox"]').forEach(function (cb) {
+        cb.addEventListener('change', fireChange);
+      });
+      if (prevValues) setValues(Array.from(prevValues));
+      updateLabel();
+    }
+
+    // Toggle popover open/close
+    btn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var isHidden = popover.hasAttribute('hidden');
+      // Close any other open mff popovers on the page first.
+      document.querySelectorAll('.mff-popover:not([hidden])').forEach(function (p) {
+        if (p !== popover) p.setAttribute('hidden', '');
+        var sibling = p.closest('.mff-widget');
+        if (sibling) { var b = sibling.querySelector('.mff-btn'); if (b) b.setAttribute('aria-expanded', 'false'); }
+      });
+      if (isHidden) {
+        popover.removeAttribute('hidden');
+        btn.setAttribute('aria-expanded', 'true');
+      } else {
+        popover.setAttribute('hidden', '');
+        btn.setAttribute('aria-expanded', 'false');
+      }
+    });
+
+    // Keep clicks inside popover from bubbling to the document close handler.
+    popover.addEventListener('click', function (e) { e.stopPropagation(); });
+
+    // Close on outside click.
+    document.addEventListener('click', function () {
+      popover.setAttribute('hidden', '');
+      btn.setAttribute('aria-expanded', 'false');
+    });
+
+    allBtn.addEventListener('click', function () {
+      list.querySelectorAll('input[type="checkbox"]').forEach(function (cb) { cb.checked = true; });
+      fireChange();
+    });
+    noneBtn.addEventListener('click', function () {
+      list.querySelectorAll('input[type="checkbox"]').forEach(function (cb) { cb.checked = false; });
+      fireChange();
+    });
+
+    if (initialOptions && initialOptions.length) {
+      populate(initialOptions.map(function (v) { return { value: v, label: v, indent: 0 }; }), false);
+    }
+    updateLabel();
+
+    return { getValues: getValues, setValues: setValues, populate: populate };
+  };
+}());
+</script>
+{% endmacro %}
 
 {# breadcrumb(trail, ids=None)
 

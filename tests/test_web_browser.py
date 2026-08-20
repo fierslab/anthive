@@ -3617,6 +3617,103 @@ def test_genes_tab_topvar_section_present(client):
     assert ".std" in html or "s.std" in html or "x.std" in html, "topvar must sort by std field"
 
 
+# ── Genes tab — merged curated + top-variable table (2026-08-20) ──────────────
+
+def test_genes_tab_single_table(client):
+    """Curated and top-variable genes share ONE table (#obs-tbl-genes), not two."""
+    import re
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    # Locate the Genes tab panel.
+    tab_start = html.find('id="tab-genes"')
+    tab_end   = html.find('id="tab-data"', tab_start)
+    assert tab_start != -1, "tab-genes panel not found"
+    genes_html = html[tab_start:tab_end] if tab_end != -1 else html[tab_start:]
+    # Exactly ONE obs-stats-tbl table (the merged one). The search-results
+    # table (#obs-tbl-gene-results) is inside a hidden div BEFORE the tab
+    # panel, so it won't appear in genes_html.
+    tables = re.findall(r'<table\b[^>]*class="obs-stats-tbl[^"]*"', genes_html)
+    assert len(tables) == 1, (
+        f"Expected exactly 1 obs-stats-tbl table in Genes panel, found {len(tables)}"
+    )
+    # The single table must have id="obs-tbl-genes".
+    assert 'id="obs-tbl-genes"' in genes_html, "#obs-tbl-genes must be the one table"
+    # There must be NO separate "Most variable genes" heading in the panel
+    # (the two sections are merged into one table now).
+    assert "Most variable genes" not in genes_html, (
+        "Separate 'Most variable genes' heading must not appear in Genes panel"
+    )
+
+
+def test_genes_tab_curated_rows_have_star(client):
+    """Each server-rendered curated gene row must contain a ★ marker."""
+    import re
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    # All gene-curated rows should contain the star glyph.
+    curated_rows = re.findall(
+        r'<tr class="gene-item gene-curated"[^>]*>.*?</tr>', html, re.DOTALL
+    )
+    assert len(curated_rows) > 0, "gene-curated rows not found (ds1 has top_genes)"
+    for row in curated_rows:
+        assert '★' in row, f"Curated gene row missing ★ marker: {row[:120]}"
+
+
+def test_genes_tab_star_column_header(client):
+    """The merged genes table has a ★ column header (narrow, titled)."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    # The thead of #obs-tbl-genes must have a ★ column header.
+    tbl_start = html.find('id="obs-tbl-genes"')
+    assert tbl_start != -1
+    thead_end = html.find('</thead>', tbl_start)
+    thead = html[tbl_start:thead_end]
+    assert '★' in thead, "★ column header must appear in #obs-tbl-genes <thead>"
+
+
+def test_genes_tab_star_hover_title(client):
+    """The ★ in curated rows has a title= attribute so readers learn what it means."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    # The curated star glyph must carry a title attribute.
+    assert 'title="curated favourite"' in html, (
+        'Star cell must have title="curated favourite" hover text'
+    )
+
+
+def test_genes_tab_topvar_rows_have_no_star(client):
+    """The JS-generated topvar row template must NOT include a ★ glyph."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    # The topvar row is built by makeGeneRow with variant='topvar'.
+    # Locate the topvar branch of makeGeneRow in the JS.
+    topvar_branch_start = html.find("variant === 'topvar'")
+    assert topvar_branch_start != -1, "topvar branch not found in JS"
+    # The topvar branch ends at the 'return' statement; grab the return string.
+    # We look for the HTML string assembled just after this check.
+    topvar_branch_end = html.find("gene_stats columns", topvar_branch_start)
+    topvar_js = html[topvar_branch_start:topvar_branch_end]
+    assert '★' not in topvar_js, "Top-variable JS rows must not emit a ★ glyph"
+
+
+def test_genes_tab_search_still_works(client):
+    """The gene search input and server-side search JS are still present after the merge."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    assert 'id="gene-search"' in html, "gene-search input must remain present"
+    assert 'id="gene-search-results"' in html, "gene-search-results section must remain"
+    assert "applyGeneSearch" in html, "applyGeneSearch JS must remain"
+    # The search table and the merged genes table are both present.
+    assert 'id="obs-tbl-gene-results"' in html, "search results table must exist"
+    assert 'id="obs-tbl-genes"' in html, "merged genes table must exist"
+
+
 def test_numerical_tab_sparkline(client):
     """Numerical obs tab: each row has a .ss range sparkline for IQR/median."""
     resp = client.get("/browse/GroupA/ds1")
