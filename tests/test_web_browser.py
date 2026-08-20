@@ -1784,10 +1784,11 @@ def test_geneset_experiment_has_module_view(client):
     # the variability drilldown is available without navigating into a module.
     resp = client.get("/genesets/StudyX/Exp1")
     assert resp.status_code == 200
-    # Partial injects its filter controls
+    # Partial injects its filter controls (method/n_cells remain <select>; others are mff widgets)
     assert 'class="mv-flt-method"' in resp.text
-    assert 'class="mv-flt-module"' in resp.text
-    assert 'class="mv-flt-tag"' in resp.text
+    # module, tag are now mff widgets — look for their container class
+    assert 'mv-flt-module-w' in resp.text
+    assert 'mv-flt-tag-w' in resp.text
     # mv_ctx scope=module is emitted into the page JS
     assert '"scope"' in resp.text
     assert 'mv-experiment' in resp.text   # the id we assign
@@ -1799,8 +1800,9 @@ def test_geneset_experiment_module_view_has_celltype_tissue_facets(client):
     # Ask 2: celltype and tissue facets appear when dataset_annotations are provided.
     resp = client.get("/genesets/StudyX/Exp1")
     assert resp.status_code == 200
-    assert 'class="mv-flt-celltype"' in resp.text
-    assert 'class="mv-flt-tissue"' in resp.text
+    # celltype and tissue are now mff widgets — check for their container classes
+    assert 'mv-flt-celltype-w' in resp.text
+    assert 'mv-flt-tissue-w' in resp.text
 
 
 def test_geneset_experiment_preselects_cell_type(client):
@@ -1831,11 +1833,11 @@ def test_geneset_detail_has_variability_panel(client):
     assert "Where it varies most" in resp.text
     # Partial's filter controls replace the old gv-* IDs
     assert 'class="mv-flt-method"' in resp.text
-    assert 'class="mv-flt-tag"' in resp.text
+    assert 'mv-flt-tag-w' in resp.text  # tag is now an mff widget
     # sort dropdown removed — sort lives in column-header clicks (see test_module_view_sort_state_and_indicators)
     assert 'class="mv-flt-sort"' not in resp.text
     # Module dropdown is visible in module scope (for drill-down within catalog).
-    assert 'class="mv-flt-module"' in resp.text
+    assert 'mv-flt-module-w' in resp.text  # module is now an mff widget
     # Partial fetches module-variability scoped to this module + catalog
     assert "/api/module-variability?" in resp.text
     assert '"scope": "module"' in resp.text or '"scope":"module"' in resp.text or 'scope' in resp.text
@@ -1907,18 +1909,18 @@ def test_module_view_celltype_tissue_method_change_listeners_are_explicit(client
     # are rendered; method is always rendered.
     resp = client.get("/genesets/StudyX/Exp1/gs_up")
     assert resp.status_code == 200
-    assert "flt.celltype.addEventListener('change'" in resp.text, (
-        "celltype change listener not found — filter will be a no-op"
-    )
-    assert "flt.tissue.addEventListener('change'" in resp.text, (
-        "tissue change listener not found — filter will be a no-op"
-    )
+    # celltype/tissue are now mff widgets — onChange is wired inside mffWidget factory.
+    # method is still a single-select with an explicit listener.
     assert "flt.method.addEventListener('change'" in resp.text, (
         "method change listener not found — filter will be a no-op"
     )
-    # celltype filter uses indexOf (substring) for comma-joined multi-values.
-    assert ".indexOf(ctVal) !== -1" in resp.text, (
-        "celltype filter must use indexOf for multi-value datasets"
+    # mff widget factory wires its own onChange — check it's defined on the page.
+    assert "window.mffWidget" in resp.text, (
+        "mffWidget factory missing — celltype/tissue onChange won't fire"
+    )
+    # celltype filter uses indexOf / ctArr for comma-joined multi-values.
+    assert "ctArr" in resp.text, (
+        "celltype mff filter must use ctArr (OR logic across checked values)"
     )
     # tissue filter uses hierarchical ancestor matching instead of indexOf.
     assert "TISSUE_ANCESTORS" in resp.text, (
@@ -1928,9 +1930,8 @@ def test_module_view_celltype_tissue_method_change_listeners_are_explicit(client
     # Geneset experiment page — same partial, same requirement.
     resp = client.get("/genesets/StudyX/Exp1")
     assert resp.status_code == 200
-    assert "flt.celltype.addEventListener('change'" in resp.text
-    assert "flt.tissue.addEventListener('change'" in resp.text
     assert "flt.method.addEventListener('change'" in resp.text
+    assert "window.mffWidget" in resp.text
 
 
 # ── DE study browser page ──────────────────────────────────────────────────────
@@ -2404,7 +2405,7 @@ def test_dataset_view_module_scores_tab_groups_three_methods(client, monkeypatch
     # Partial is rendered — its filter controls and panel ID are present
     assert 'id="mv-modules-tab"' in resp.text
     assert 'class="mv-flt-method"' in resp.text
-    assert 'class="mv-flt-tag"' in resp.text
+    assert 'mv-flt-tag-w' in resp.text  # tag is now an mff widget
     # starCAT option NOT in the partial's method filter (hidden 2026-08)
     assert 'data-method="starcat"' not in resp.text
     assert '>starCAT<' not in resp.text
@@ -2918,11 +2919,11 @@ def test_module_view_technology_facet_rendered(client):
     """technology and biosample filter dropdowns replace the old system facet."""
     resp = client.get("/genesets/StudyX/Exp1")
     assert resp.status_code == 200
-    assert 'class="mv-flt-technology"' in resp.text, (
-        "technology filter select not rendered — check _module_view.html template"
+    assert 'mv-flt-technology-w' in resp.text, (
+        "technology mff widget not rendered — check _module_view.html template"
     )
-    assert 'class="mv-flt-biosample"' in resp.text, (
-        "biosample filter select not rendered — check _module_view.html template"
+    assert 'mv-flt-biosample-w' in resp.text, (
+        "biosample mff widget not rendered — check _module_view.html template"
     )
     assert 'class="mv-flt-system"' not in resp.text, (
         "deprecated system filter still rendered — remove from _module_view.html"
@@ -2935,14 +2936,18 @@ test_module_view_system_facet_rendered = test_module_view_technology_facet_rende
 
 
 def test_module_view_technology_biosample_listeners_bound(client):
-    """flt.technology and flt.biosample have explicit addEventListener bindings."""
+    """technology and biosample are now mff widgets — onChange is wired by mffWidget factory."""
     resp = client.get("/genesets/StudyX/Exp1/gs_up")
     assert resp.status_code == 200
-    assert "flt.technology.addEventListener('change'" in resp.text, (
-        "technology filter change listener not found"
+    # mff widgets wire onChange internally — check factory and widget containers present
+    assert "window.mffWidget" in resp.text, (
+        "mffWidget factory missing — technology/biosample onChange won't fire"
     )
-    assert "flt.biosample.addEventListener('change'" in resp.text, (
-        "biosample filter change listener not found"
+    assert "mv-flt-technology-w" in resp.text, (
+        "technology mff widget container not found"
+    )
+    assert "mv-flt-biosample-w" in resp.text, (
+        "biosample mff widget container not found"
     )
 
 
@@ -2951,11 +2956,12 @@ test_module_view_system_facet_listener_bound = test_module_view_technology_biosa
 
 
 def test_module_view_biosample_filter_uses_indexof(client):
-    """Biosample filter uses indexOf so comma-joined multi-values work."""
+    """Biosample mff filter uses bioArr with OR logic across checked values."""
     resp = client.get("/genesets/StudyX/Exp1")
     assert resp.status_code == 200
-    assert ".indexOf(bioVal) !== -1" in resp.text, (
-        "biosample filter must use indexOf for multi-value fields"
+    # mff biosample filter uses bioArr (Array.from(mffBio)) instead of single bioVal
+    assert "bioArr" in resp.text, (
+        "biosample mff filter must use bioArr for OR logic across checked values"
     )
 
 
@@ -3414,15 +3420,15 @@ def test_module_view_two_filter_rows(client):
     row1_end   = html.find('mv-filter-row-2')
     assert row1_start != -1 and row1_end != -1
     row1 = html[row1_start:row1_end]
-    assert 'mv-flt-dataset' in row1, "Row 1 must have dataset filter"
-    assert 'mv-flt-module'  in row1, "Row 1 must have module filter"
-    assert 'mv-flt-tag'     in row1, "Row 1 must have canonical tag filter"
+    assert 'mv-flt-dataset-w' in row1, "Row 1 must have dataset mff widget"
+    assert 'mv-flt-module-w'  in row1, "Row 1 must have module mff widget"
+    assert 'mv-flt-tag-w'     in row1, "Row 1 must have canonical tag mff widget"
     # Row 2 must contain method.
     row2_start = row1_end
     row2_end   = html.find('mv-summary-row', row2_start)
     row2 = html[row2_start:row2_end]
-    assert 'mv-flt-method'   in row2, "Row 2 must have method filter"
-    assert 'mv-flt-celltype' in row2, "Row 2 must have cell type filter"
+    assert 'mv-flt-method'    in row2, "Row 2 must have method filter (single-select)"
+    assert 'mv-flt-celltype-w' in row2, "Row 2 must have cell type mff widget"
 
 
 # ── Ask 2: column-header sort ─────────────────────────────────────────────────
@@ -3669,7 +3675,8 @@ def test_genes_tab_topvar_section_present(client):
 # ── Genes tab — merged curated + top-variable table (2026-08-20) ──────────────
 
 def test_genes_tab_single_table(client):
-    """Curated and top-variable genes share ONE table (#obs-tbl-genes), not two."""
+    """Curated and top-variable genes share ONE merged table (#obs-tbl-genes),
+    plus one hidden search-results table — exactly 2 obs-stats-tbl tables total."""
     import re
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
@@ -3679,15 +3686,17 @@ def test_genes_tab_single_table(client):
     tab_end   = html.find('id="tab-data"', tab_start)
     assert tab_start != -1, "tab-genes panel not found"
     genes_html = html[tab_start:tab_end] if tab_end != -1 else html[tab_start:]
-    # Exactly ONE obs-stats-tbl table (the merged one). The search-results
-    # table (#obs-tbl-gene-results) is inside a hidden div BEFORE the tab
-    # panel, so it won't appear in genes_html.
+    # Exactly TWO obs-stats-tbl tables: the hidden search-results table
+    # (#obs-tbl-gene-results) and the merged curated+topvar table (#obs-tbl-genes).
     tables = re.findall(r'<table\b[^>]*class="obs-stats-tbl[^"]*"', genes_html)
-    assert len(tables) == 1, (
-        f"Expected exactly 1 obs-stats-tbl table in Genes panel, found {len(tables)}"
+    assert len(tables) == 2, (
+        f"Expected exactly 2 obs-stats-tbl tables in Genes panel "
+        f"(search-results + merged), found {len(tables)}"
     )
-    # The single table must have id="obs-tbl-genes".
-    assert 'id="obs-tbl-genes"' in genes_html, "#obs-tbl-genes must be the one table"
+    # The merged table must have id="obs-tbl-genes".
+    assert 'id="obs-tbl-genes"' in genes_html, "#obs-tbl-genes must be present"
+    # The search table is hidden.
+    assert 'id="obs-tbl-gene-results"' in genes_html, "#obs-tbl-gene-results must be present"
     # There must be NO separate "Most variable genes" heading in the panel
     # (the two sections are merged into one table now).
     assert "Most variable genes" not in genes_html, (
