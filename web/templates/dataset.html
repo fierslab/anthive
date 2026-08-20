@@ -449,7 +449,7 @@
 {# ── Genes tab ────────────────────────────────────────────────────────
    Precomputed favourites when the dataset defines them; otherwise a
    canonical curated panel keyed on cell type. Each gene: histogram +
-   embedding scatter icon + sparkline bars for %expr, mean, meannz. #}
+   embedding scatter icon + sparkline bars for %expr, rank expr, variability. #}
 {% if gene_panel and gene_panel.genes %}
 <section class="tab-panel" id="tab-genes" role="tabpanel">
   <style>
@@ -475,8 +475,8 @@
       border-radius: 1px;
       transform: translateX(-50%);
     }
-    td.g-pct-cell, td.g-mean-cell, td.g-meannz-cell { white-space: nowrap; }
-    td.g-pct-cell .g-pct, td.g-mean-cell .g-mean, td.g-meannz-cell .g-mean-nz {
+    td.g-pct-cell, td.g-rank-cell, td.g-var-cell { white-space: nowrap; }
+    td.g-pct-cell .g-pct, td.g-rank-cell .g-rank, td.g-var-cell .g-var {
       display: inline-block; width: 4em; text-align: right;
       font-family: var(--font-mono); font-size: 11px; color: #555;
       margin-right: 4px; vertical-align: middle;
@@ -510,9 +510,8 @@
         <th>gene</th>
         <th class="obs-plots-th">plot</th>
         <th title="fraction of cells with expression > 0">% expr</th>
-        <th title="mean expression across ALL cells (zeros included)">mean</th>
-        <th title="mean expression among expressing cells (zeros excluded)">mean(nz)</th>
-        <th title="max expression observed in any single cell">max</th>
+        <th title="percentile rank of this gene's mean expression among all genes in the dataset (0 = lowest, 1 = highest)">rank expr</th>
+        <th title="variability: rank of std across displayed genes (higher = more variable)">variability</th>
       </tr></thead>
       <tbody id="gene-search-tbody"></tbody>
     </table></div>
@@ -524,9 +523,8 @@
       <th>gene</th>
       <th class="obs-plots-th">plot</th>
       <th title="fraction of cells with expression > 0">% expr</th>
-      <th title="mean expression across ALL cells (zeros included)">mean</th>
-      <th title="mean expression among expressing cells (zeros excluded)">mean(nz)</th>
-      <th title="max expression observed in any single cell">max</th>
+      <th title="percentile rank of this gene's mean expression among all genes in the dataset (0 = lowest, 1 = highest)">rank expr</th>
+      <th title="variability: rank of std across displayed genes (higher = more variable)">variability</th>
     </tr></thead>
     <tbody>
     {% for gene in gene_panel.genes %}
@@ -544,13 +542,12 @@
       <td class="g-pct-cell">
         <span class="g-pct"></span><span class="ss" data-stat="pct" title="% expressing cells"><span class="ss-mark" style="display:none"></span></span>
       </td>
-      <td class="g-mean-cell">
-        <span class="g-mean"></span><span class="ss" data-stat="mean" title="mean expression (db-wide range)"><span class="ss-mark" style="display:none"></span></span>
+      <td class="g-rank-cell">
+        <span class="g-rank"></span><span class="ss" data-stat="rank" title="rank expression (db-wide percentile rank of mean)"><span class="ss-mark" style="display:none"></span></span>
       </td>
-      <td class="g-meannz-cell">
-        <span class="g-mean-nz"></span><span class="ss" data-stat="meannz" title="mean non-zero expression (db-wide range)"><span class="ss-mark" style="display:none"></span></span>
+      <td class="g-var-cell">
+        <span class="g-var"></span><span class="ss" data-stat="var" title="variability (rank of std within displayed genes)"><span class="ss-mark" style="display:none"></span></span>
       </td>
-      <td class="g-max" style="color:#555;font-family:var(--font-mono);font-size:11px"></td>
     </tr>
     {% endfor %}
     {# top-variable rows appended here by JS (id="topvar-tbody") #}
@@ -561,8 +558,8 @@
   <div id="topvar-section" style="display:none"></div>
   <div class="muted" style="font-size:11px;margin-top:4px">
     Stats from <code>/gene_stats</code> (log-normalised X layer).
-    Sparklines show value relative to the range across displayed genes.
-    Server-side full-genome top-variable query pending (see doc/UX_CONSISTENCY_TODO.md).
+    <b>rank expr</b>: percentile rank of the gene's mean among all genes in the dataset.
+    <b>variability</b>: rank of std within the displayed gene panel.
   </div>
 </section>
 {% endif %}
@@ -1142,23 +1139,27 @@ document.addEventListener('DOMContentLoaded', function() {
             var _gBase = '/browse/' + {{ folder_browse_id | tojson }} + '/' + {{ file_id | tojson }};
             var _defaultEmb = {{ default_embedding | tojson }};
 
-            // ── Sparkline helper for gene rows (pct/mean/meannz) ──────────────
-            function setGeneSparklines(row, statsObj, meanRange, meanNzRange) {
+            // ── Sparkline helper for gene rows (pct / rank_mean / rank_std) ──
+            // stdRankFrac: pre-computed fraction 0-1 for this gene's std rank
+            //              within the displayed panel (undefined → skip).
+            function setGeneSparklines(row, statsObj, stdRankFrac) {
                 var pct = statsObj.pct_nonzero != null ? statsObj.pct_nonzero : null;
                 // pct track: 0-100 absolute
                 var pctTrack = row.querySelector('.ss[data-stat="pct"]');
                 if (pctTrack && pct != null) setSsMark(pctTrack, pct / 100);
-                // mean track: normalised across curated panel
-                var meanTrack = row.querySelector('.ss[data-stat="mean"]');
-                if (meanTrack && statsObj.mean != null) setSsMark(meanTrack, normInRange(statsObj.mean, meanRange));
-                // meannz track
-                var meannzTrack = row.querySelector('.ss[data-stat="meannz"]');
-                if (meannzTrack && statsObj.mean_nonzero != null) setSsMark(meannzTrack, normInRange(statsObj.mean_nonzero, meanNzRange));
+                // rank_mean: server returns 0-1 percentile rank among ALL genes
+                var rankTrack = row.querySelector('.ss[data-stat="rank"]');
+                if (rankTrack && statsObj.rank_mean != null) setSsMark(rankTrack, statsObj.rank_mean);
+                // variability: rank of std within the displayed panel (0-1)
+                var varTrack = row.querySelector('.ss[data-stat="var"]');
+                if (varTrack && stdRankFrac != null) setSsMark(varTrack, stdRankFrac);
             }
 
-            // Build a gene result row HTML (for both search results and top-var).
-            // variantCols: 'gene_stats' (pct/mean/meannz/max) or 'topvar' (std/pct/mean)
-            function makeGeneRow(geneName, s, variant) {
+            // Build a gene result row HTML (for both search results, top-var, and curated).
+            // Uniform columns: ★ | gene | plot | % expr | rank expr | variability
+            // starHtml: pass '★' for curated, '' for others.
+            // stdRankFrac: 0-1 fraction for variability sparkline (null if unknown).
+            function makeGeneRow(geneName, s, starHtml, stdRankFrac) {
                 var plotHtml = ''
                     + '<a class="obs-plot-icon" href="' + _gBase + '/plot/histogram?x=' + encodeURIComponent(geneName) + '" title="histogram">'
                     +   '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="1.5" y="8" width="3" height="6"/><rect x="6.5" y="5" width="3" height="9"/><rect x="11.5" y="2" width="3" height="12"/></svg>'
@@ -1173,61 +1174,66 @@ document.addEventListener('DOMContentLoaded', function() {
                         + '</a>';
                 }
                 var pct = s && s.pct_nonzero != null ? s.pct_nonzero : null;
-                var pctSpark = '<span class="ss" data-stat="pct" title="% expressing cells"><span class="ss-mark" style="display:none"></span></span>';
-                if (variant === 'topvar') {
-                    var stdStr  = s && s.std  != null ? fnum(s.std)  : '';
-                    var pctStr  = pct != null ? pct.toFixed(1) + '%' : '';
-                    var meanStr = s && s.mean != null ? fnum(s.mean) : '';
-                    return '<tr class="gene-item" data-gene="' + esc(geneName) + '" data-gene-lc="' + esc(geneName.toLowerCase()) + '">'
-                        + '<td></td>'
-                        + '<td class="colname">' + esc(geneName) + '</td>'
-                        + '<td class="obs-plots">' + plotHtml + '</td>'
-                        + '<td style="font-family:var(--font-mono);font-size:11px;color:#555">' + esc(stdStr) + '</td>'
-                        + '<td class="g-pct-cell"><span class="g-pct">' + esc(pctStr) + '</span>' + pctSpark + '</td>'
-                        + '<td style="font-family:var(--font-mono);font-size:11px;color:#555">' + esc(meanStr) + '</td>'
-                        + '<td></td>'
-                        + '</tr>';
-                }
-                // default: gene_stats columns (pct/mean/meannz/max) — used by search results
-                var meanSpark  = '<span class="ss" data-stat="mean"   title="mean (panel range)"><span class="ss-mark" style="display:none"></span></span>';
-                var meannzSpark = '<span class="ss" data-stat="meannz" title="mean(nz) (panel range)"><span class="ss-mark" style="display:none"></span></span>';
-                var pctStr2  = pct != null ? pct.toFixed(1) + '%' : '';
-                var meanStr2 = s && s.mean != null ? fnum(s.mean) : '';
-                var nzStr    = s && s.mean_nonzero != null ? fnum(s.mean_nonzero) : '';
-                var maxStr   = s && s.max  != null ? fnum(s.max)  : '';
-                return '<tr class="gene-item" data-gene="' + esc(geneName) + '" data-gene-lc="' + esc(geneName.toLowerCase()) + '">'
-                    + '<td></td>'
+                var pctStr   = pct != null ? pct.toFixed(1) + '%' : '';
+                var rankStr  = s && s.rank_mean != null ? (s.rank_mean * 100).toFixed(0) + '%' : '';
+                // variability: show std value in muted text (sparkline does the comparison)
+                var varStr   = s && s.std != null ? fnum(s.std) : '';
+                var pctSpark  = '<span class="ss" data-stat="pct"  title="% expressing cells"><span class="ss-mark" style="display:none"></span></span>';
+                var rankSpark = '<span class="ss" data-stat="rank" title="rank expression (db-wide percentile rank of mean)"><span class="ss-mark" style="display:none"></span></span>';
+                var varSpark  = '<span class="ss" data-stat="var"  title="variability: rank of std within displayed genes"><span class="ss-mark" style="display:none"></span></span>';
+                var varFrac   = stdRankFrac != null ? stdRankFrac : null;
+                var row = '<tr class="gene-item" data-gene="' + esc(geneName) + '" data-gene-lc="' + esc(geneName.toLowerCase()) + '">'
+                    + '<td style="text-align:center;font-size:13px">' + (starHtml || '') + '</td>'
                     + '<td class="colname">' + esc(geneName) + '</td>'
                     + '<td class="obs-plots">' + plotHtml + '</td>'
-                    + '<td class="g-pct-cell"><span class="g-pct">' + esc(pctStr2) + '</span>' + pctSpark + '</td>'
-                    + '<td class="g-mean-cell"><span class="g-mean">' + esc(meanStr2) + '</span>' + meanSpark + '</td>'
-                    + '<td class="g-meannz-cell"><span class="g-mean-nz">' + esc(nzStr) + '</span>' + meannzSpark + '</td>'
-                    + '<td class="g-max" style="color:#555;font-family:var(--font-mono);font-size:11px">' + esc(maxStr) + '</td>'
+                    + '<td class="g-pct-cell"><span class="g-pct">' + esc(pctStr) + '</span>' + pctSpark + '</td>'
+                    + '<td class="g-rank-cell"><span class="g-rank">' + esc(rankStr) + '</span>' + rankSpark + '</td>'
+                    + '<td class="g-var-cell"><span class="g-var">' + esc(varStr) + '</span>' + varSpark + '</td>'
                     + '</tr>';
+                // Immediately position sparklines for cells we already know.
+                // (The DOM element doesn't exist yet — caller must call setGeneSparklines
+                // after inserting the row. stdRankFrac stored on the row via data attr.)
+                return row;
             }
 
-            // Hydrate sparklines on a set of rendered rows given a stats map.
-            function hydrateRows(rowEls, byGene, meanRange, meanNzRange) {
+            // ── variant shims (old call sites) ───────────────────────────────
+            // top-var rows: star='', stdRankFrac computed by caller
+            // gene_stats (search) rows: star='', stdRankFrac=null until hydrated
+            // curated rows: hydrated in-place by hydrateRows (not via makeGeneRow)
+
+            // Compute std-rank fractions for a set of stats objects.
+            // Returns a map: gene_lower → fraction 0-1 within the set.
+            function computeStdRanks(statsArr) {
+                var pairs = statsArr
+                    .filter(function (s) { return s.std != null; })
+                    .map(function (s) { return { gene: s.gene.toLowerCase(), std: s.std }; });
+                if (!pairs.length) return {};
+                pairs.sort(function (a, b) { return a.std - b.std; });
+                var n = pairs.length - 1;
+                var result = {};
+                pairs.forEach(function (p, i) { result[p.gene] = n > 0 ? i / n : 0; });
+                return result;
+            }
+
+            // Hydrate text + sparklines on rendered rows given a stats map + std-rank map.
+            function hydrateRows(rowEls, byGene, stdRankMap) {
                 rowEls.forEach(function (row) {
                     var s = byGene[(row.dataset.gene || '').toLowerCase()];
                     if (!s) return;
                     var pctEl = row.querySelector('.g-pct');
                     if (pctEl && s.pct_nonzero != null) pctEl.textContent = s.pct_nonzero.toFixed(1) + '%';
-                    var meanEl = row.querySelector('.g-mean');
-                    if (meanEl && s.mean != null) meanEl.textContent = fnum(s.mean);
-                    var nzEl = row.querySelector('.g-mean-nz');
-                    if (nzEl && s.mean_nonzero != null) nzEl.textContent = fnum(s.mean_nonzero);
-                    var maxEl = row.querySelector('.g-max');
-                    if (maxEl && s.max != null) maxEl.textContent = fnum(s.max);
-                    setGeneSparklines(row, s, meanRange, meanNzRange);
+                    var rankEl = row.querySelector('.g-rank');
+                    if (rankEl && s.rank_mean != null) rankEl.textContent = (s.rank_mean * 100).toFixed(0) + '%';
+                    var varEl = row.querySelector('.g-var');
+                    if (varEl && s.std != null) varEl.textContent = fnum(s.std);
+                    var stdRankFrac = stdRankMap[(row.dataset.gene || '').toLowerCase()];
+                    setGeneSparklines(row, s, stdRankFrac != null ? stdRankFrac : null);
                 });
             }
 
             // ── Curated genes hydration ───────────────────────────────────────
             var genes = rows.map(function (r) { return r.dataset.gene; }).filter(Boolean);
             var curatedByGene = {};   // populated after gene_stats fetch
-            var curatedMeanRange = { min: 0, max: 1 };
-            var curatedMeanNzRange = { min: 0, max: 1 };
 
             if (searchCount) searchCount.textContent = rows.length + ' genes';
 
@@ -1240,34 +1246,30 @@ document.addEventListener('DOMContentLoaded', function() {
                         if (!d || !d.stats) return;
                         d.stats.forEach(function (s) { curatedByGene[s.gene.toLowerCase()] = s; });
 
-                        var meanVals = [], meanNzVals = [], stdVals = [];
-                        d.stats.forEach(function (s) {
-                            if (s.mean        != null) meanVals.push(s.mean);
-                            if (s.mean_nonzero != null) meanNzVals.push(s.mean_nonzero);
-                            if (s.std         != null) stdVals.push({ gene: s.gene, std: s.std, s: s });
-                        });
-                        curatedMeanRange   = minMax(meanVals);
-                        curatedMeanNzRange = minMax(meanNzVals);
-
-                        hydrateRows(rows, curatedByGene, curatedMeanRange, curatedMeanNzRange);
+                        var stdRankMap = computeStdRanks(d.stats);
+                        hydrateRows(rows, curatedByGene, stdRankMap);
 
                         // ── Top-10 most variable (by std) ─────────────────────
                         // Computed from curated panel stats; not genome-wide.
-                        // Genome-wide requires a server endpoint (see doc/UX_CONSISTENCY_TODO.md).
+                        var stdVals = d.stats
+                            .filter(function (s) { return s.std != null; })
+                            .map(function (s) { return s; });
                         if (stdVals.length >= 3 && topvarTbody) {
                             stdVals.sort(function (a, b) { return b.std - a.std; });
                             var topVar = stdVals.slice(0, 10);
-                            var tvByGene = {};
-                            topVar.forEach(function (x) { tvByGene[x.gene.toLowerCase()] = x.s; });
+                            // std-rank within the top-var subset
+                            var tvStdRankMap = computeStdRanks(topVar);
                             topvarTbody.innerHTML = topVar.map(function (x) {
-                                return makeGeneRow(x.gene, x.s, 'topvar');
+                                return makeGeneRow(x.gene, x, '', tvStdRankMap[x.gene.toLowerCase()]);
                             }).join('');
-                            // Hydrate pct sparklines in topvar rows (pct track is 0-100 absolute).
+                            // Hydrate sparklines in topvar rows.
+                            var tvByGene = {};
+                            topVar.forEach(function (x) { tvByGene[x.gene.toLowerCase()] = x; });
                             Array.from(topvarTbody.querySelectorAll('.gene-item')).forEach(function (row) {
                                 var s = tvByGene[(row.dataset.gene || '').toLowerCase()];
-                                if (!s || s.pct_nonzero == null) return;
-                                var pctTrack = row.querySelector('.ss[data-stat="pct"]');
-                                if (pctTrack) setSsMark(pctTrack, s.pct_nonzero / 100);
+                                if (!s) return;
+                                var frac = tvStdRankMap[(row.dataset.gene || '').toLowerCase()];
+                                setGeneSparklines(row, s, frac != null ? frac : null);
                             });
                             if (topvarSection) topvarSection.style.display = '';
                         }
@@ -1318,7 +1320,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         // Placeholder rows while fetching stats.
                         if (searchTbody) {
                             searchTbody.innerHTML = matched.map(function (g) {
-                                return makeGeneRow(g, null, 'gene_stats');
+                                return makeGeneRow(g, null, '', null);
                             }).join('');
                         }
                         if (searchResults) searchResults.style.display = '';
@@ -1331,15 +1333,9 @@ document.addEventListener('DOMContentLoaded', function() {
                                 if (!sd || !sd.stats) return;
                                 var byG = {};
                                 sd.stats.forEach(function (s) { byG[s.gene.toLowerCase()] = s; });
-                                var mVals = [], mnzVals = [];
-                                sd.stats.forEach(function (s) {
-                                    if (s.mean != null) mVals.push(s.mean);
-                                    if (s.mean_nonzero != null) mnzVals.push(s.mean_nonzero);
-                                });
-                                var mRange   = minMax(mVals);
-                                var mnzRange = minMax(mnzVals);
+                                var srStdRankMap = computeStdRanks(sd.stats);
                                 var resultRows = Array.from(searchTbody.querySelectorAll('.gene-item'));
-                                hydrateRows(resultRows, byG, mRange, mnzRange);
+                                hydrateRows(resultRows, byG, srStdRankMap);
                             })
                             .catch(function () {});
                     })

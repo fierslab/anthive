@@ -111,7 +111,9 @@
   .gv-hm-controls .picks-label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; }
 </style>
 
-{% from "_macros.html" import breadcrumb %}
+{% from "_macros.html" import breadcrumb, mff_styles, mff_scripts %}
+{{ mff_styles() }}
+{{ mff_scripts() }}
 {{ breadcrumb([("gene atlas", None)]) }}
 <h1 class="page-title">{{ gene }} <span class="muted" style="font-size:13px;font-weight:normal">— expression across the catalogue</span></h1>
 
@@ -128,13 +130,61 @@
 </div>
 
 {# ── Row 2: cell type · tissue · technology · biosample · n cells ── #}
-<div class="gv-filter-row">
-  <div><label>cell type</label><select id="gv-flt-cell_type"><option value="">any</option>{% for v in filter_opts.cell_type %}<option value="{{ v }}">{{ v }}</option>{% endfor %}</select></div>
-  <div><label>tissue</label><select id="gv-flt-tissue"><option value="">any</option>{% for v in filter_opts.tissue %}<option value="{{ v }}">{{ v }}</option>{% endfor %}</select></div>
-  <div><label>technology</label><select id="gv-flt-technology"><option value="">any</option></select></div>
-  <div><label>biosample</label><select id="gv-flt-biosample"><option value="">any</option></select></div>
+<div class="gv-filter-row" style="align-items:flex-start">
+  <div>
+    <label>cell type</label>
+    <div class="mff-widget gv-flt-cell_type-w" id="gv-flt-cell_type-w">
+      <button class="mff-btn" type="button" aria-haspopup="listbox" aria-expanded="false">cell type: all ▾</button>
+      <div class="mff-popover" hidden>
+        <div class="mff-actions">
+          <button class="mff-all" type="button">select all</button>
+          <button class="mff-none" type="button">select none</button>
+        </div>
+        <ul class="mff-list" role="listbox" aria-multiselectable="true"></ul>
+      </div>
+    </div>
+  </div>
+  <div>
+    <label>tissue</label>
+    <div class="mff-widget gv-flt-tissue-w" id="gv-flt-tissue-w">
+      <button class="mff-btn" type="button" aria-haspopup="listbox" aria-expanded="false">tissue: all ▾</button>
+      <div class="mff-popover" hidden>
+        <div class="mff-actions">
+          <button class="mff-all" type="button">select all</button>
+          <button class="mff-none" type="button">select none</button>
+        </div>
+        <ul class="mff-list" role="listbox" aria-multiselectable="true"></ul>
+      </div>
+    </div>
+  </div>
+  <div>
+    <label>technology</label>
+    <div class="mff-widget gv-flt-technology-w" id="gv-flt-technology-w">
+      <button class="mff-btn" type="button" aria-haspopup="listbox" aria-expanded="false">technology: all ▾</button>
+      <div class="mff-popover" hidden>
+        <div class="mff-actions">
+          <button class="mff-all" type="button">select all</button>
+          <button class="mff-none" type="button">select none</button>
+        </div>
+        <ul class="mff-list" role="listbox" aria-multiselectable="true"></ul>
+      </div>
+    </div>
+  </div>
+  <div>
+    <label>biosample</label>
+    <div class="mff-widget gv-flt-biosample-w" id="gv-flt-biosample-w">
+      <button class="mff-btn" type="button" aria-haspopup="listbox" aria-expanded="false">biosample: all ▾</button>
+      <div class="mff-popover" hidden>
+        <div class="mff-actions">
+          <button class="mff-all" type="button">select all</button>
+          <button class="mff-none" type="button">select none</button>
+        </div>
+        <ul class="mff-list" role="listbox" aria-multiselectable="true"></ul>
+      </div>
+    </div>
+  </div>
   <div><label>n cells</label>
-    <select id="gv-flt-n_cells">
+    <select id="gv-flt-n_cells" class="gv-flt-n_cells">
       <option value="">any</option>
       <option value="lt1k">&lt;1k</option>
       <option value="1k-10k">1k–10k</option>
@@ -208,16 +258,31 @@
   var errBox    = document.getElementById('gene-error');
   var summaryEl = document.getElementById('gv-summary');
 
-  // Filter selects
+  // Single-select / number filters
   var flt = {
-    pct:        document.getElementById('gv-flt-pct'),
-    organism:   document.getElementById('gv-flt-organism'),
-    cell_type:  document.getElementById('gv-flt-cell_type'),
-    tissue:     document.getElementById('gv-flt-tissue'),
-    technology: document.getElementById('gv-flt-technology'),
-    biosample:  document.getElementById('gv-flt-biosample'),
-    n_cells:    document.getElementById('gv-flt-n_cells'),
+    pct:      document.getElementById('gv-flt-pct'),
+    organism: document.getElementById('gv-flt-organism'),
+    n_cells:  document.getElementById('gv-flt-n_cells'),
   };
+  // Multi-select mff widgets (populated after DS_ANNOT is available)
+  var mff = { cell_type: null, tissue: null, technology: null, biosample: null };
+  (function initMffs() {
+    [
+      ['gv-flt-cell_type-w',   'cell_type',  'cell type'],
+      ['gv-flt-tissue-w',      'tissue',     'tissue'],
+      ['gv-flt-technology-w',  'technology', 'technology'],
+      ['gv-flt-biosample-w',   'biosample',  'biosample'],
+    ].forEach(function (spec) {
+      var id = spec[0], key = spec[1], label = spec[2];
+      var el = document.getElementById(id);
+      if (el && window.mffWidget) {
+        mff[key] = mffWidget(el, key, label, [], function () {
+          updateHash(true);
+          render();
+        });
+      }
+    });
+  }());
 
   // Sort state for single-gene table
   var sortState = { col: 'pct_nonzero', dir: 'desc' };
@@ -398,12 +463,20 @@
 
   function parseHashFilters() { return parseGvStr(splitHash(window.location.hash).gvStr); }
 
+  /**
+   * Rebuild the #gv= URL hash from current filter state.
+   * mff widgets are comma-joined; single-selects/number are plain values.
+   */
   function buildHashFromFilters() {
     var pairs = [];
-    // filter values
-    ['organism', 'cell_type', 'tissue', 'technology', 'biosample', 'n_cells'].forEach(function (k) {
-      var sel = flt[k]; if (!sel || !sel.value) return;
-      pairs.push(k + '=' + encodeURIComponent(sel.value));
+    // single-select filters
+    if (flt.organism && flt.organism.value) pairs.push('organism=' + encodeURIComponent(flt.organism.value));
+    if (flt.n_cells  && flt.n_cells.value)  pairs.push('n_cells='  + encodeURIComponent(flt.n_cells.value));
+    // mff widgets: null=all (omit), Set=comma-joined
+    Object.keys(mff).forEach(function (key) {
+      var widget = mff[key]; if (!widget) return;
+      var vals = widget.getValues();
+      if (vals && vals.size) pairs.push(key + '=' + encodeURIComponent(Array.from(vals).join(',')));
     });
     // pct threshold (only when non-zero)
     if (flt.pct && flt.pct.value && parseFloat(flt.pct.value) > 0) {
@@ -420,18 +493,27 @@
     return '#' + (parts.prefix ? parts.prefix + '&' + gvFull : gvFull);
   }
 
+  /** Store pending hash values; mff widgets apply them after populate. */
+  var _pendingHashVals = {};
+
   function applyHashFilters(parsed) {
-    if (parsed.organism   && flt.organism)   flt.organism.value   = parsed.organism;
-    if (parsed.cell_type  && flt.cell_type)  flt.cell_type.value  = parsed.cell_type;
-    if (parsed.tissue     && flt.tissue)     flt.tissue.value     = parsed.tissue;
-    if (parsed.technology && flt.technology) flt.technology.value = parsed.technology;
-    if (parsed.biosample  && flt.biosample)  flt.biosample.value  = parsed.biosample;
-    if (parsed.n_cells    && flt.n_cells)    flt.n_cells.value    = parsed.n_cells;
-    if (parsed.pct        && flt.pct)        flt.pct.value        = parsed.pct;
+    _pendingHashVals = parsed;
+    if (parsed.organism && flt.organism) flt.organism.value = parsed.organism;
+    if (parsed.n_cells  && flt.n_cells)  flt.n_cells.value  = parsed.n_cells;
+    if (parsed.pct      && flt.pct)      flt.pct.value      = parsed.pct;
     if (parsed.sort) {
       var sp = parsed.sort.split(':');
       if (sp.length === 2) { sortState.col = sp[0]; sortState.dir = sp[1] === 'asc' ? 'asc' : 'desc'; }
     }
+  }
+
+  /** After mff widgets are populated, flush pending comma-joined hash values. */
+  function flushHashToMff() {
+    Object.keys(mff).forEach(function (key) {
+      var widget = mff[key]; if (!widget) return;
+      var raw = _pendingHashVals[key]; if (!raw) return;
+      widget.setValues(raw.split(',').map(function (v) { return v.trim(); }).filter(Boolean));
+    });
   }
 
   function updateHash(isNavigation) {
@@ -451,6 +533,7 @@
   window.addEventListener('popstate', function () {
     var parsed = parseHashFilters();
     applyHashFilters(parsed);
+    flushHashToMff();
     updateSortIndicators();
     render();
   });
@@ -482,29 +565,32 @@
   });
   updateSortIndicators();
 
-  // ── populate technology and biosample dropdowns from DS_ANNOT ──────────────
+  // ── populate mff widgets from DS_ANNOT ──────────────────────────────────────
   (function () {
-    var technologies = {}, biosamples = {};
+    var celltypes = {}, tissues = {}, technologies = {}, biosamples = {};
     Object.keys(DS_ANNOT).forEach(function (dbId) {
       var ann = DS_ANNOT[dbId];
+      (ann.celltype   || '').split(',').forEach(function (v) { var t = v.trim(); if (t) celltypes[t]    = 1; });
+      (ann.tissue     || '').split(',').forEach(function (v) { var t = v.trim(); if (t) tissues[t]      = 1; });
       (ann.technology || '').split(',').forEach(function (v) { var t = v.trim(); if (t) technologies[t] = 1; });
       (ann.biosample  || '').split(',').forEach(function (v) { var t = v.trim(); if (t) biosamples[t]   = 1; });
     });
-    function buildOpts(map, syntheticFirst) {
-      var opts = ['<option value="">any</option>'];
-      if (syntheticFirst) opts.push('<option value="' + esc(syntheticFirst) + '">' + esc(syntheticFirst) + '</option>');
-      Object.keys(map).sort().forEach(function (v) { opts.push('<option value="' + esc(v) + '">' + esc(v) + '</option>'); });
-      return opts.join('');
-    }
     // Inject "single cell + nucleus" combined option when both base values exist.
-    var techSynthetic = (technologies['single cell'] && technologies['single nucleus'])
-      ? 'single cell + nucleus' : null;
-    if (flt.technology) flt.technology.innerHTML = buildOpts(technologies, techSynthetic);
-    if (flt.biosample)  flt.biosample.innerHTML  = buildOpts(biosamples, null);
-    // Re-apply hash values now that options exist.
-    var parsed = parseHashFilters();
-    if (parsed.technology && flt.technology) flt.technology.value = parsed.technology;
-    if (parsed.biosample  && flt.biosample)  flt.biosample.value  = parsed.biosample;
+    var techKeys = Object.keys(technologies).sort();
+    if (technologies['single cell'] && technologies['single nucleus']) {
+      techKeys = ['single cell + nucleus'].concat(techKeys);
+    }
+    function fillMffOpts(key, vals) {
+      var widget = mff[key]; if (!widget) return;
+      var opts = vals.map(function (v) { return { value: v, label: v, indent: 0 }; });
+      widget.populate(opts, false);
+    }
+    fillMffOpts('cell_type',  Object.keys(celltypes).sort());
+    fillMffOpts('tissue',     Object.keys(tissues).sort());
+    fillMffOpts('technology', techKeys);
+    fillMffOpts('biosample',  Object.keys(biosamples).sort());
+    // Flush URL-hash-pending values now that options exist.
+    flushHashToMff();
   }());
 
   // ── single-gene render ──────────────────────────────────────────────────────
@@ -774,20 +860,30 @@
       });
   }
 
-  // ── filter change handler (URL-persistent) ──────────────────────────────────
-  function onFilterChange() {
-    var isEmpty = !this.value && !(this === flt.pct && parseFloat(this.value) > 0);
-    var isNavigation = !isEmpty;
-    updateHash(isNavigation);
-    render();
+  // ── filter change handlers ──────────────────────────────────────────────────
+  // organism changes the server request — re-fetch.
+  if (flt.organism) {
+    flt.organism.addEventListener('change', function () {
+      updateHash(!!this.value);
+      load();
+    });
+    if (window.antRemember) antRemember.bindSelect(flt.organism, 'genes.gv.organism');
   }
-
-  Object.keys(flt).forEach(function (k) {
-    var el = flt[k]; if (!el) return;
-    var evt = el.tagName === 'INPUT' ? 'input' : 'change';
-    el.addEventListener(evt, onFilterChange.bind(el));
-    if (window.antRemember && el.tagName === 'SELECT') antRemember.bindSelect(el, 'genes.gv.' + k);
-  });
+  // n_cells and pct are client-side filters — re-render only.
+  if (flt.n_cells) {
+    flt.n_cells.addEventListener('change', function () {
+      updateHash(!!this.value);
+      render();
+    });
+    if (window.antRemember) antRemember.bindSelect(flt.n_cells, 'genes.gv.n_cells');
+  }
+  if (flt.pct) {
+    flt.pct.addEventListener('input', function () {
+      var hasVal = parseFloat(this.value) > 0;
+      updateHash(hasVal);
+      render();
+    });
+  }
 
   // heatmap metric switcher
   var hmMetric = document.getElementById('hm-metric');

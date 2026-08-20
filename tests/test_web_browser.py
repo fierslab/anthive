@@ -1705,7 +1705,8 @@ def test_gene_atlas_page_renders(client):
     # New drilldown-style table: sortable column headers with data-sortcol
     assert 'data-sortcol="pct_nonzero"' in resp.text   # %expr sortable column
     assert "renderHeatmap" in resp.text                 # multi-gene branch present
-    assert 'id="gv-flt-cell_type"' in resp.text         # two-row filter bar (row 2)
+    # cell_type is now an mff widget (id on the widget div, not a <select>)
+    assert 'id="gv-flt-cell_type-w"' in resp.text      # two-row filter bar (row 2)
 
 
 def test_gene_atlas_multigene_route(client):
@@ -3595,36 +3596,47 @@ def test_genes_tab_has_search_input(client):
 
 
 def test_genes_tab_has_sparkline_elements(client):
-    """Bullet 3: each gene row has .ss sparkline elements for pct, mean, meannz."""
+    """Each gene row has .ss sparkline elements for pct, rank, and variability."""
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
     html = resp.text
-    # One sparkline per stat per gene row is generated in the template.
-    # .ss is the compact sparkline class (renamed from .gene-sparkline 2026-08).
+    # .ss is the compact sparkline class.
     assert 'class="ss"' in html or 'class="gene-sparkline"' in html, \
-        ".ss (or .gene-sparkline) sparkline must be rendered in gene rows"
-    # All three stats must have sparkline tracks.
-    assert 'data-stat="pct"'    in html, "pct sparkline track required"
-    assert 'data-stat="mean"'   in html, "mean sparkline track required"
-    assert 'data-stat="meannz"' in html, "meannz sparkline track required"
-    # The JS sparkline helper must be present (setSsMark is the 2026-08 rename of setSparkline).
-    assert "setSsMark" in html or "setSparkline" in html, "sparkline JS helper (setSsMark or setSparkline) must be defined"
+        ".ss sparkline must be rendered in gene rows"
+    # Uniform sparkline tracks: pct / rank / var.
+    assert 'data-stat="pct"'  in html, "pct sparkline track required"
+    assert 'data-stat="rank"' in html, "rank sparkline track required"
+    assert 'data-stat="var"'  in html, "variability sparkline track required"
+    # No raw mean or meannz tracks.
+    assert 'data-stat="mean"'   not in html, "mean sparkline track must not appear"
+    assert 'data-stat="meannz"' not in html, "meannz sparkline track must not appear"
+    # The JS sparkline helper must be present.
+    assert "setSsMark" in html or "setSparkline" in html, \
+        "sparkline JS helper (setSsMark or setSparkline) must be defined"
 
 
-def test_genes_tab_mean_sparklines_use_db_wide_range(client):
-    """Bullet 4: mean/meannz sparklines are scaled to the db-wide min/max
-    computed across ALL returned gene stats (not just shown rows)."""
+def test_genes_tab_rank_expr_uses_server_rank_mean(client):
+    """rank expr column is populated from server-returned rank_mean (0-1),
+    not computed client-side from a range — no normInRange call for mean."""
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
     html = resp.text
-    # The JS must compute a db-wide range object for mean and meannz.
-    assert "meanRange"   in html, "meanRange db-wide range must be computed in JS"
-    assert "meanNzRange" in html, "meanNzRange db-wide range must be computed in JS"
-    assert "normInRange" in html, "normInRange helper must be used to scale sparklines"
-    # The sparkline positioning for mean must use normInRange with meanRange.
-    # statsObj.mean (2026-08 refactor) or s.mean (legacy) — either is correct.
-    assert "normInRange(s.mean," in html or "normInRange(statsObj.mean," in html, \
-        "mean sparkline must use normInRange with meanRange"
+    # rank_mean is directly positioned on the sparkline.
+    assert "rank_mean" in html, "rank_mean field from gene_stats must be consumed in JS"
+    # No normInRange for mean (that was the old approach).
+    assert "normInRange(s.mean," not in html and "normInRange(statsObj.mean," not in html, \
+        "mean sparkline must not use normInRange (replaced by rank_mean)"
+
+
+def test_genes_tab_variability_uses_std_rank(client):
+    """variability column uses rank of std within the displayed panel, not raw std as axis."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    # computeStdRanks helper must be defined.
+    assert "computeStdRanks" in html, "computeStdRanks JS helper must be defined"
+    # std field must be read from gene_stats response.
+    assert ".std" in html or "s.std" in html, "std field must be consumed from gene_stats"
 
 
 # ── Dataset tab enhancements (2026-08-19) ────────────────────────────────────
@@ -3723,19 +3735,17 @@ def test_genes_tab_star_hover_title(client):
 
 
 def test_genes_tab_topvar_rows_have_no_star(client):
-    """The JS-generated topvar row template must NOT include a ★ glyph."""
+    """The JS-generated topvar row calls makeGeneRow with empty star argument."""
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
     html = resp.text
-    # The topvar row is built by makeGeneRow with variant='topvar'.
-    # Locate the topvar branch of makeGeneRow in the JS.
-    topvar_branch_start = html.find("variant === 'topvar'")
-    assert topvar_branch_start != -1, "topvar branch not found in JS"
-    # The topvar branch ends at the 'return' statement; grab the return string.
-    # We look for the HTML string assembled just after this check.
-    topvar_branch_end = html.find("gene_stats columns", topvar_branch_start)
-    topvar_js = html[topvar_branch_start:topvar_branch_end]
-    assert '★' not in topvar_js, "Top-variable JS rows must not emit a ★ glyph"
+    # makeGeneRow is the unified row builder; topvar calls it with '' as starHtml.
+    # Check the topvar build call passes empty string for the star argument.
+    assert "makeGeneRow(x.gene, x, '', " in html, \
+        "topvar makeGeneRow call must pass empty string '' for the star column"
+    # The topvar call must NOT pass a literal '★'.
+    assert "makeGeneRow(x.gene, x, '★'" not in html, \
+        "topvar makeGeneRow call must not emit a ★ glyph"
 
 
 def test_genes_tab_search_still_works(client):
@@ -3749,6 +3759,69 @@ def test_genes_tab_search_still_works(client):
     # The search table and the merged genes table are both present.
     assert 'id="obs-tbl-gene-results"' in html, "search results table must exist"
     assert 'id="obs-tbl-genes"' in html, "merged genes table must exist"
+
+
+# ── Genes tab — uniform columns (star / gene / %expr / rank / variability) ───
+
+def test_genes_tab_uniform_column_headers(client):
+    """Both #obs-tbl-genes and #obs-tbl-gene-results have identical column headers:
+    star / gene / plot / % expr / rank expr / variability.  No mean or mean(nz)."""
+    import re
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    for tbl_id in ('obs-tbl-genes', 'obs-tbl-gene-results'):
+        tbl_start = html.find(f'id="{tbl_id}"')
+        assert tbl_start != -1, f"#{tbl_id} not found"
+        thead_end = html.find('</thead>', tbl_start)
+        thead = html[tbl_start:thead_end]
+        assert '% expr'     in thead or 'pct'  in thead.lower(), \
+            f"#{tbl_id} thead missing % expr column"
+        assert 'rank expr'  in thead, f"#{tbl_id} thead missing 'rank expr' column"
+        assert 'variability' in thead, f"#{tbl_id} thead missing 'variability' column"
+        # No raw mean or mean(nz) column headers.
+        assert '>mean<' not in thead and '>mean(nz)<' not in thead, \
+            f"#{tbl_id} thead must not contain raw mean or mean(nz) column"
+
+
+def test_genes_tab_no_mean_columns_visible(client):
+    """Neither 'mean' nor 'mean(nz)' appear as column headers in the Genes tab."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    tab_start = html.find('id="tab-genes"')
+    tab_end   = html.find('id="tab-data"', tab_start)
+    genes_html = html[tab_start:tab_end] if tab_end != -1 else html[tab_start:]
+    assert '>mean<' not in genes_html, "raw 'mean' column header must not appear in Genes tab"
+    assert '>mean(nz)<' not in genes_html, "mean(nz) column header must not appear in Genes tab"
+
+
+def test_genes_tab_curated_rows_have_pct_rank_var_cells(client):
+    """Curated gene rows (Jinja-rendered) have .g-pct-cell, .g-rank-cell, .g-var-cell."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    assert 'g-pct-cell'  in html, "curated rows must have .g-pct-cell"
+    assert 'g-rank-cell' in html, "curated rows must have .g-rank-cell"
+    assert 'g-var-cell'  in html, "curated rows must have .g-var-cell"
+    # Old mean cells must be gone.
+    assert 'g-mean-cell'   not in html, ".g-mean-cell must be removed"
+    assert 'g-meannz-cell' not in html, ".g-meannz-cell must be removed"
+    assert 'g-max'         not in html, ".g-max must be removed"
+
+
+def test_genes_tab_js_makeGeneRow_unified(client):
+    """makeGeneRow JS function has a single return path (no variant branch)."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    # New unified signature: makeGeneRow(geneName, s, starHtml, stdRankFrac)
+    assert "makeGeneRow" in html, "makeGeneRow must be defined"
+    assert "starHtml" in html, "makeGeneRow must accept starHtml parameter"
+    assert "stdRankFrac" in html, "makeGeneRow must accept stdRankFrac parameter"
+    # No old variant branches.
+    assert "variant === 'topvar'" not in html, "old topvar variant branch must be removed"
+    assert "gene_stats columns" not in html, "old gene_stats variant comment must be removed"
 
 
 def test_numerical_tab_sparkline(client):
@@ -4573,3 +4646,121 @@ def test_gene_atlas_plot_icons_include_hexbin(client):
     assert 'plot/hexbin?embedding=X_umap&color=' in html, (
         "hexbin URL must include embedding=X_umap&color= param"
     )
+
+
+# ── mff multi-select filter widget tests ──────────────────────────────────────
+
+def test_module_view_has_mff_widgets_not_selects(client):
+    """Module drilldown filter row: dataset/group/module/tag/celltype/tissue/technology/biosample
+    are mff-widget popovers, NOT plain <select> elements."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    html = resp.text
+    # mff widgets present for multi-value facets
+    for css_class in ("mv-flt-dataset-w", "mv-flt-module-w", "mv-flt-tag-w",
+                      "mv-flt-celltype-w", "mv-flt-tissue-w",
+                      "mv-flt-technology-w", "mv-flt-biosample-w"):
+        assert css_class in html, f"mff widget container {css_class!r} missing"
+    # each popover has select-all / select-none buttons
+    assert "select all" in html
+    assert "select none" in html
+    # core mff machinery present
+    assert "mff-btn" in html
+    assert "mff-popover" in html
+    assert "mff-list" in html
+    assert "window.mffWidget" in html
+
+
+def test_module_view_n_cells_is_still_select(client):
+    """n_cells and method stay as single-select <select> — they have single-choice semantics."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    html = resp.text
+    # n_cells is a plain <select>, not an mff widget
+    assert "mv-flt-n_cells" in html
+    assert 'class="mv-flt-n_cells"' in html or 'class="mv-flt-n_cells ' in html
+    # method is a plain <select>
+    assert "mv-flt-method" in html
+
+
+def test_module_view_no_old_select_for_multi_facets(client):
+    """The old <select class='mv-flt-celltype'> etc. must not appear — replaced by mff widgets."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    html = resp.text
+    # Old single-select class names must be gone
+    for old_cls in ("mv-flt-celltype\"", "mv-flt-tissue\"",
+                    "mv-flt-technology\"", "mv-flt-biosample\"",
+                    "mv-flt-dataset\"", "mv-flt-group\""):
+        assert f'class="{old_cls}' not in html and f"'{old_cls}" not in html, (
+            f"old single-select class {old_cls!r} still present"
+        )
+
+
+def test_module_view_mff_select_all_none_buttons(client):
+    """Every mff widget popover must contain both 'select all' and 'select none' buttons."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    html = resp.text
+    assert html.count("select all") >= 7, "expected ≥7 'select all' buttons (one per mff widget)"
+    assert html.count("select none") >= 7, "expected ≥7 'select none' buttons (one per mff widget)"
+    assert "mff-all" in html
+    assert "mff-none" in html
+
+
+def test_module_view_mff_hash_serialization_in_js(client):
+    """JS buildHashFromFilters must emit comma-joined values for mff widgets."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    html = resp.text
+    # The new hash builder uses Array.from(vals).join(',')
+    assert "Array.from(vals).join(',')" in html
+    # mff.dataset, mff.group etc. should be accessed via .getValues()
+    assert "mff.dataset" in html or "mff['dataset']" in html
+    assert "getValues" in html
+
+
+def test_genes_page_has_mff_widgets_not_selects(client):
+    """Gene atlas filter row: cell_type/tissue/technology/biosample are mff-widget popovers."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    html = resp.text
+    for widget_id in ("gv-flt-cell_type-w", "gv-flt-tissue-w",
+                      "gv-flt-technology-w", "gv-flt-biosample-w"):
+        assert widget_id in html, f"mff widget id {widget_id!r} missing from genes.html"
+    # select-all / select-none buttons
+    assert "select all" in html
+    assert "select none" in html
+    assert "mff-btn" in html
+    assert "mff-popover" in html
+
+
+def test_genes_page_n_cells_is_still_select(client):
+    """n_cells stays as a single-select <select> in the gene atlas."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    html = resp.text
+    assert "gv-flt-n_cells" in html
+    # n_cells must be a <select>, not an mff widget div
+    assert 'id="gv-flt-n_cells"' in html
+
+
+def test_genes_page_no_old_select_for_mff_facets(client):
+    """Old <select id='gv-flt-cell_type'> etc. must not appear — replaced by mff widgets."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    html = resp.text
+    # The old select ids must be gone (replaced by *-w widget container ids)
+    for old_id in ('id="gv-flt-cell_type"', 'id="gv-flt-tissue"',
+                   'id="gv-flt-technology"', 'id="gv-flt-biosample"'):
+        assert old_id not in html, f"old select {old_id!r} still present"
+
+
+def test_genes_page_mff_macro_injected(client):
+    """mff_styles and mff_scripts macros must be called — CSS class and JS factory present."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    html = resp.text
+    assert "window.mffWidget" in html, "mffWidget JS factory not injected by macro"
+    assert "mff-popover" in html, "mff CSS class not injected"
+    assert "mff-list" in html

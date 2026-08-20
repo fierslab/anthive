@@ -7,6 +7,9 @@ modules-vs-their-peers on that dataset+tag+method float to the top.
 
 Filter controls at top: group · tag · method · dataset · cell type · tissue · technology · biosample.
 Any pre-set context (dataset scope or module scope) hides its own control.
+Multi-select facets: dataset, geneset, canonical tag, group, cell type, tissue,
+technology, biosample — selecting multiple values OR-filters rows.
+Single-select: n cells (range bucket), method (single-choice semantics).
 
 Consumer passes a `mv_ctx` Jinja var — a dict:
   {
@@ -24,17 +27,23 @@ URL hash scheme (feature: back-button / shareable filter state):
   #mv=key1=val1;key2=val2
   Keys match filter names: group, module, dataset, tag, method, celltype, tissue, technology, biosample, sort.
   Semicolons separate pairs; values are encodeURIComponent-encoded.
+  Multi-value filters: comma-separated within the value (e.g. celltype=microglial+cell,astrocyte).
   When co-existing with a tab anchor (e.g. #tab-modules), the mv= part is
   appended: #tab-modules-mv=...  The JS strips the -mv= suffix before parsing.
 #}
+{% from "_macros.html" import mff_styles, mff_scripts %}
 {% set _mv = mv_ctx %}
 {% set _id = _mv.get('id', 'mv-panel') %}
+{{ mff_styles() }}
+{{ mff_scripts() }}
 <div id="{{ _id }}" class="mv-panel">
   <style>
     .mv-panel .mv-filter-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin: 4px 0 4px; font-size: 12px; }
     .mv-panel .mv-filter-row + .mv-filter-row { margin-top: 2px; }
     .mv-panel .mv-filter-row label { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--text-muted); margin-bottom: 2px; }
     .mv-panel .mv-filter-row select { font-family: var(--font); font-size: 12px; padding: 3px 8px; border: 1px solid var(--border); border-radius: 5px; background: #fff; min-width: 140px; }
+    /* Ensure mff-widget label aligns with the filter-row pattern */
+    .mv-panel .mv-filter-row .mff-widget > label { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--text-muted); margin-bottom: 2px; }
     .mv-panel .mv-summary-row { font-size: 11px; color: var(--text-muted); margin: 4px 0 8px; }
     .mv-panel .mv-table { font-size: 11.5px; border-collapse: collapse; width: 100%; }
     .mv-panel .mv-table th { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); font-weight: 600; background: #f8fafc; position: sticky; top: 0; cursor: pointer; user-select: none; white-space: nowrap; }
@@ -83,26 +92,122 @@ URL hash scheme (feature: back-button / shareable filter state):
   {# Row 1: dataset · module · canonical tag #}
   <div class="mv-filter-row mv-filter-row-1">
     {% if _mv.scope != 'dataset' %}
-    <div><label>dataset</label><select class="mv-flt-dataset"><option value="">all</option></select></div>
+    <div>
+      <label>dataset</label>
+      <div class="mff-widget mv-flt-dataset-w">
+        <button class="mff-btn" type="button" aria-expanded="false">dataset: all ▾</button>
+        <div class="mff-popover" hidden>
+          <div class="mff-actions">
+            <button type="button" class="mff-all">select all</button>
+            <button type="button" class="mff-none">select none</button>
+          </div>
+          <ul class="mff-list"></ul>
+        </div>
+      </div>
+    </div>
     {% endif %}
     {# In module scope: show group as hidden preset; show module dropdown for drill-down #}
     {% if _mv.scope == 'module' %}
     <input type="hidden" class="mv-flt-group-hidden" value="{{ _mv.module_catalog }}">
     {% endif %}
-    <div {% if _mv.scope == 'module' %}{%endif%}><label>geneset</label><select class="mv-flt-module"><option value="">all</option></select></div>
-    <div><label>canonical tag <span class="info" title="Standardised biological annotation aliased to ant_&lt;tag&gt; across datasets — e.g. braak, sex, cluster, disease. Each datasets raw obs column is aliased to ant_&lt;tag&gt;.">ⓘ</span></label><select class="mv-flt-tag"><option value="">all</option></select></div>
+    <div>
+      <label>geneset</label>
+      <div class="mff-widget mv-flt-module-w">
+        <button class="mff-btn" type="button" aria-expanded="false">geneset: all ▾</button>
+        <div class="mff-popover" hidden>
+          <div class="mff-actions">
+            <button type="button" class="mff-all">select all</button>
+            <button type="button" class="mff-none">select none</button>
+          </div>
+          <ul class="mff-list"></ul>
+        </div>
+      </div>
+    </div>
+    <div>
+      <label>canonical tag <span class="info" title="Standardised biological annotation aliased to ant_&lt;tag&gt; across datasets — e.g. braak, sex, cluster, disease. Each datasets raw obs column is aliased to ant_&lt;tag&gt;.">ⓘ</span></label>
+      <div class="mff-widget mv-flt-tag-w">
+        <button class="mff-btn" type="button" aria-expanded="false">canonical tag: all ▾</button>
+        <div class="mff-popover" hidden>
+          <div class="mff-actions">
+            <button type="button" class="mff-all">select all</button>
+            <button type="button" class="mff-none">select none</button>
+          </div>
+          <ul class="mff-list"></ul>
+        </div>
+      </div>
+    </div>
   </div>
   {# Row 2: group (if not module scope) · cell type · tissue · technology · biosample · method #}
   <div class="mv-filter-row mv-filter-row-2">
     {% if _mv.scope != 'module' %}
-    <div><label>group</label><select class="mv-flt-group"><option value="">all</option></select></div>
+    <div>
+      <label>group</label>
+      <div class="mff-widget mv-flt-group-w">
+        <button class="mff-btn" type="button" aria-expanded="false">group: all ▾</button>
+        <div class="mff-popover" hidden>
+          <div class="mff-actions">
+            <button type="button" class="mff-all">select all</button>
+            <button type="button" class="mff-none">select none</button>
+          </div>
+          <ul class="mff-list"></ul>
+        </div>
+      </div>
+    </div>
     {% endif %}
     {# Cell type, tissue, technology, and biosample facets — populated from dataset_annotations when provided #}
     {% if _mv.get('dataset_annotations') %}
-    <div><label>cell type</label><select class="mv-flt-celltype"><option value="">all</option></select></div>
-    <div><label>tissue</label><select class="mv-flt-tissue"><option value="">all</option></select></div>
-    <div><label>technology</label><select class="mv-flt-technology"><option value="">all</option></select></div>
-    <div><label>biosample</label><select class="mv-flt-biosample"><option value="">all</option></select></div>
+    <div>
+      <label>cell type</label>
+      <div class="mff-widget mv-flt-celltype-w">
+        <button class="mff-btn" type="button" aria-expanded="false">cell type: all ▾</button>
+        <div class="mff-popover" hidden>
+          <div class="mff-actions">
+            <button type="button" class="mff-all">select all</button>
+            <button type="button" class="mff-none">select none</button>
+          </div>
+          <ul class="mff-list"></ul>
+        </div>
+      </div>
+    </div>
+    <div>
+      <label>tissue</label>
+      <div class="mff-widget mv-flt-tissue-w">
+        <button class="mff-btn" type="button" aria-expanded="false">tissue: all ▾</button>
+        <div class="mff-popover" hidden>
+          <div class="mff-actions">
+            <button type="button" class="mff-all">select all</button>
+            <button type="button" class="mff-none">select none</button>
+          </div>
+          <ul class="mff-list"></ul>
+        </div>
+      </div>
+    </div>
+    <div>
+      <label>technology</label>
+      <div class="mff-widget mv-flt-technology-w">
+        <button class="mff-btn" type="button" aria-expanded="false">technology: all ▾</button>
+        <div class="mff-popover" hidden>
+          <div class="mff-actions">
+            <button type="button" class="mff-all">select all</button>
+            <button type="button" class="mff-none">select none</button>
+          </div>
+          <ul class="mff-list"></ul>
+        </div>
+      </div>
+    </div>
+    <div>
+      <label>biosample</label>
+      <div class="mff-widget mv-flt-biosample-w">
+        <button class="mff-btn" type="button" aria-expanded="false">biosample: all ▾</button>
+        <div class="mff-popover" hidden>
+          <div class="mff-actions">
+            <button type="button" class="mff-all">select all</button>
+            <button type="button" class="mff-none">select none</button>
+          </div>
+          <ul class="mff-list"></ul>
+        </div>
+      </div>
+    </div>
     {% endif %}
     {% if _mv.get('dataset_annotations') %}
     <div><label>n cells</label>
@@ -152,19 +257,36 @@ URL hash scheme (feature: back-button / shareable filter state):
   var bodyEl  = root.querySelector('.mv-body');
   var rowsEl  = root.querySelector('.mv-rows');
   var summaryEl = root.querySelector('.mv-summary');
-  var flt = {
-    dataset:    root.querySelector('.mv-flt-dataset'),
-    group:      root.querySelector('.mv-flt-group'),
-    module:     root.querySelector('.mv-flt-module'),
-    celltype:   root.querySelector('.mv-flt-celltype'),
-    tissue:     root.querySelector('.mv-flt-tissue'),
-    technology: root.querySelector('.mv-flt-technology'),
-    biosample:  root.querySelector('.mv-flt-biosample'),
-    n_cells:    root.querySelector('.mv-flt-n_cells'),
-    tag:        root.querySelector('.mv-flt-tag'),
-    method:     root.querySelector('.mv-flt-method'),
-    sort:       null,  // sort is now driven by column-header clicks, not a dropdown
+
+  // Multi-filter-facet widgets. Each is a {getValues, setValues, populate} object.
+  // null = scope hides that control. getValues() returns null (=all) or a Set.
+  var mff = {
+    dataset: null, group: null, module: null, tag: null,
+    celltype: null, tissue: null, technology: null, biosample: null,
   };
+
+  // Single-select controls that keep <select> (range / categorical-single semantics).
+  var flt = {
+    n_cells: root.querySelector('.mv-flt-n_cells'),
+    method:  root.querySelector('.mv-flt-method'),
+  };
+
+  function onMffChange() { updateHash(true); render(); }
+
+  function initMff(cssClass, key, labelText) {
+    var wEl = root.querySelector('.' + cssClass);
+    if (!wEl || !window.mffWidget) return;
+    mff[key] = window.mffWidget(wEl, key, labelText, [], onMffChange);
+  }
+
+  initMff('mv-flt-dataset-w',    'dataset',    'dataset');
+  initMff('mv-flt-group-w',      'group',      'group');
+  initMff('mv-flt-module-w',     'module',     'geneset');
+  initMff('mv-flt-celltype-w',   'celltype',   'cell type');
+  initMff('mv-flt-tissue-w',     'tissue',     'tissue');
+  initMff('mv-flt-technology-w', 'technology', 'technology');
+  initMff('mv-flt-biosample-w',  'biosample',  'biosample');
+  initMff('mv-flt-tag-w',        'tag',        'canonical tag');
 
   // Column-header sort state: {col: string, dir: 'asc'|'desc'}
   var sortState = { col: 'position', dir: 'desc' };
@@ -302,53 +424,44 @@ URL hash scheme (feature: back-button / shareable filter state):
   var CAT_STATS = { omega2: 1 };            // categorical: ω² only
   var NUM_STATS = { spearman: 1, R2: 1 };   // numerical: spearman + R²
 
-  function fillSelect(sel, values, currentVal) {
-    if (!sel) return;
-    var wanted = currentVal != null ? currentVal : sel.value;
-    // Preserve first option (usually "all") and rebuild the rest.
-    var opts = ['<option value="">all</option>'];
-    values.sort().forEach(function (v) {
-      var lab = v;
-      if (sel === flt.method) lab = METHOD_LABEL[v] || v;
-      opts.push('<option value="' + esc(v) + '">' + esc(lab) + '</option>');
+  /**
+   * Populate a multi-select mff widget with sorted flat options.
+   *
+   * @param {string} key - Key in the `mff` map.
+   * @param {string[]} values - Option values (will be sorted alphabetically).
+   * @param {string[]|null} currentVals - Pre-selected values, or null (=all).
+   */
+  function fillMff(key, values, currentVals) {
+    var widget = mff[key];
+    if (!widget) return;
+    var opts = values.slice().sort().map(function (v) {
+      return { value: v, label: v, indent: 0 };
     });
-    sel.innerHTML = opts.join('');
-    if (wanted) sel.value = wanted;
+    widget.populate(opts, false);
+    if (currentVals && currentVals.length) widget.setValues(currentVals);
   }
 
   /**
-   * Populate the tissue dropdown with DFS-ordered, indented options.
+   * Populate the tissue mff widget with DFS-ordered, indented options.
    *
-   * Options are ordered by their position in the ontology hierarchy (parents
-   * before children). Indentation depth is shown with em-spaces. Ancestor
-   * nodes are included even when no dataset is directly tagged with them, so
-   * the tree structure stays readable and selecting a parent still captures
-   * all descendants.
-   *
-   * @param {HTMLSelectElement} sel - The tissue <select> element.
    * @param {string[]} leafTerms - Tissue values actually present in DS_ANNOT.
-   * @param {string|null} currentVal - Value to restore after rebuild, or null.
+   * @param {string[]|null} currentVals - Pre-selected values, or null (=all).
    */
-  function fillTissueSelect(sel, leafTerms, currentVal) {
-    if (!sel) return;
-    var wanted = currentVal != null ? currentVal : sel.value;
+  function fillTissueMff(leafTerms, currentVals) {
+    var widget = mff.tissue; if (!widget) return;
 
-    // Build a set of terms that should appear: the leaf terms AND all their
-    // ancestors (so that "brain" appears even when no dataset says "brain").
     var termSet = {};
     leafTerms.forEach(function (t) {
       termSet[t] = true;
       (TISSUE_ANCESTORS[t] || []).forEach(function (anc) { termSet[anc] = true; });
     });
 
-    // Build parent → children map from TISSUE_ANCESTORS (inverted).
-    // Also track which terms are roots (no parent in termSet).
-    var children = {};   // parent display-term → [child display-term]
+    var children = {};
     var hasParent = {};
     Object.keys(TISSUE_ANCESTORS).forEach(function (term) {
       var ancs = TISSUE_ANCESTORS[term];
       if (!termSet[term]) return;
-      var parent = ancs.length ? ancs[0] : null;  // immediate parent = first ancestor
+      var parent = ancs.length ? ancs[0] : null;
       if (parent && termSet[parent]) {
         if (!children[parent]) children[parent] = [];
         children[parent].push(term);
@@ -356,27 +469,21 @@ URL hash scheme (feature: back-button / shareable filter state):
       }
     });
 
-    // Roots = terms in termSet with no parent in termSet.
     var roots = Object.keys(termSet).filter(function (t) { return !hasParent[t]; });
     roots.sort();
-    // Brain first among roots.
     var brainIdx = roots.indexOf('brain');
     if (brainIdx > 0) { roots.splice(brainIdx, 1); roots.unshift('brain'); }
 
-    // DFS emit with depth-based indentation.
-    var EM = ' ';  // em space (U+2003)
-    var opts = ['<option value="">all</option>'];
+    var opts = [];
     function dfsEmit(term, depth) {
-      var indent = '';
-      for (var di = 0; di < depth; di++) indent += EM;
-      opts.push('<option value="' + esc(term) + '">' + esc(indent + term) + '</option>');
+      opts.push({ value: term, label: term, indent: depth });
       var kids = (children[term] || []).slice().sort();
       kids.forEach(function (child) { dfsEmit(child, depth + 1); });
     }
     roots.forEach(function (root) { dfsEmit(root, 0); });
 
-    sel.innerHTML = opts.join('');
-    if (wanted) sel.value = wanted;
+    widget.populate(opts, false);
+    if (currentVals && currentVals.length) widget.setValues(currentVals);
   }
 
   var ALL_ROWS = [];      // raw fetched rows
@@ -453,41 +560,42 @@ URL hash scheme (feature: back-button / shareable filter state):
     return parseMvStr(splitHash(window.location.hash).mvStr);
   }
 
-  /** Rebuild the URL hash from current filter values, preserving any non-mv prefix. */
+  /**
+   * Rebuild the URL hash from mff widgets + single-select filters.
+   * Multi-value filters are comma-joined: celltype=microglial+cell,astrocyte
+   */
   function buildHashFromFilters() {
     var pairs = [];
-    var filterKeys = ['group', 'module', 'dataset', 'tag', 'method', 'celltype', 'tissue', 'technology', 'biosample', 'n_cells'];
-    filterKeys.forEach(function (key) {
-      var sel = flt[key];
-      if (!sel) return;
-      var val = sel.value;
-      if (val) pairs.push(key + '=' + encodeURIComponent(val));
+    // mff widgets: null=all (omit), Set=comma-joined values
+    Object.keys(mff).forEach(function (key) {
+      var widget = mff[key]; if (!widget) return;
+      var vals = widget.getValues();
+      if (vals && vals.size) {
+        pairs.push(key + '=' + encodeURIComponent(Array.from(vals).join(',')));
+      }
     });
-    // Persist column-header sort state as sort=col:dir.
+    // single-select (method, n_cells)
+    if (flt.method && flt.method.value) pairs.push('method=' + encodeURIComponent(flt.method.value));
+    if (flt.n_cells && flt.n_cells.value) pairs.push('n_cells=' + encodeURIComponent(flt.n_cells.value));
+    // sort state
     var defaultSort = sortState.col === 'position' && sortState.dir === 'desc';
-    if (!defaultSort) {
-      pairs.push('sort=' + encodeURIComponent(sortState.col + ':' + sortState.dir));
-    }
-    // Preserve the existing page-anchor prefix (e.g. 'modules', 'tab-modules').
+    if (!defaultSort) pairs.push('sort=' + encodeURIComponent(sortState.col + ':' + sortState.dir));
     var parts = splitHash(window.location.hash);
     var prefix = parts.prefix;
-    var mvPairsStr = pairs.join(';');  // e.g. "tag=braak;sort=position:desc"
+    var mvPairsStr = pairs.join(';');
     if (!mvPairsStr) return prefix ? '#' + prefix : '';
-    // MV_SEP = '&mv=' when prefix exists, 'mv=' otherwise.
     var mvFull = 'mv=' + mvPairsStr;
     return '#' + (prefix ? prefix + '&' + mvFull : mvFull);
   }
 
-  /** Apply parsed hash values to the filter dropdowns and sort state (before first render). */
+  /**
+   * Store parsed hash values for mff widgets and single-selects.
+   * Called before options are populated; mff widgets receive values after populate.
+   */
+  var _pendingHashVals = {};
+
   function applyHashFilters(parsed) {
-    var filterKeys = ['group', 'module', 'dataset', 'tag', 'method', 'celltype', 'tissue', 'technology', 'biosample', 'n_cells'];
-    filterKeys.forEach(function (key) {
-      var sel = flt[key];
-      if (!sel || !parsed[key]) return;
-      // The option may not exist yet (dropdowns populated after load).
-      // Store the desired value on the element; fillSelect will honour it.
-      sel.setAttribute('data-mv-pending', parsed[key]);
-    });
+    _pendingHashVals = parsed;
     // Restore sort state from hash: sort=col:dir
     if (parsed.sort) {
       var sortParts = parsed.sort.split(':');
@@ -497,10 +605,24 @@ URL hash scheme (feature: back-button / shareable filter state):
         updateSortIndicators();
       }
     }
+    // Apply single-select values immediately (options are static HTML).
+    if (parsed.method  && flt.method)  flt.method.value  = parsed.method;
+    if (parsed.n_cells && flt.n_cells) flt.n_cells.value = parsed.n_cells;
   }
 
-  /** Push or replace state when a filter changes.
-   *  Pushing when value is newly non-empty; replacing when clearing. */
+  /**
+   * After mff widgets are populated with options, apply any pending hash values.
+   * Comma-joined values are split and set on the widget.
+   */
+  function flushPendingHashValues() {
+    Object.keys(mff).forEach(function (key) {
+      var widget = mff[key]; if (!widget) return;
+      var raw = _pendingHashVals[key]; if (!raw) return;
+      widget.setValues(raw.split(',').map(function (v) { return v.trim(); }).filter(Boolean));
+    });
+  }
+
+  /** Push/replace history state when a filter changes. */
   function updateHash(isNavigation) {
     var newHash = buildHashFromFilters();
     var currentHash = window.location.hash || '';
@@ -512,105 +634,91 @@ URL hash scheme (feature: back-button / shareable filter state):
     }
   }
 
-  /** Restore pending hash values into selects that now have the right options. */
-  function flushPendingHashValues() {
-    var filterKeys = ['group', 'module', 'dataset', 'tag', 'method', 'celltype', 'tissue', 'technology', 'biosample'];
-    filterKeys.forEach(function (key) {
-      var sel = flt[key];
-      if (!sel) return;
-      var pending = sel.getAttribute('data-mv-pending');
-      if (!pending) return;
-      // Try to set — will silently no-op if option not present.
-      sel.value = pending;
-      if (sel.value === pending) {
-        sel.removeAttribute('data-mv-pending');
-      }
-    });
-  }
-
-  // Parse and apply hash early — before load() so values are ready when dropdowns populate.
+  // Parse and apply hash early — before load() so sort is ready before first render.
   var _initialHash = parseHashFilters();
   applyHashFilters(_initialHash);
 
   // Handle browser back/forward navigation
   window.addEventListener('popstate', function () {
     var parsed = parseHashFilters();
-    var filterKeys = ['group', 'module', 'dataset', 'tag', 'method', 'celltype', 'tissue', 'technology', 'biosample', 'n_cells'];
-    filterKeys.forEach(function (key) {
-      var sel = flt[key];
-      if (!sel) return;
-      sel.value = parsed[key] || '';
-    });
-    // Restore sort state.
-    if (parsed.sort) {
-      var sp = parsed.sort.split(':');
-      if (sp.length === 2) { sortState.col = sp[0]; sortState.dir = sp[1] === 'asc' ? 'asc' : 'desc'; }
-    } else {
-      sortState.col = 'position'; sortState.dir = 'desc';
-    }
+    applyHashFilters(parsed);
+    flushPendingHashValues();
     updateSortIndicators();
     render();
   });
 
+  /**
+   * Apply mff and single-select filters to a row slice, then sort and render.
+   * mff widgets: null=all; Set=OR across checked values.
+   * single-select: empty=all.
+   */
   function render() {
     var rows = ALL_ROWS.slice();
-    // Filter — core row fields
-    ['dataset','group','module','tag','method'].forEach(function (key) {
-      var sel = flt[key]; if (!sel || !sel.value) return;
-      var v = sel.value;
-      if (key === 'group') rows = rows.filter(function (r) { return r.catalog === v; });
-      else if (key === 'module') rows = rows.filter(function (r) { return r.module === v; });
-      else if (key === 'method') rows = rows.filter(function (r) { return r.source === v; });
-      else if (key === 'dataset') rows = rows.filter(function (r) { return r.dataset === v; });
-      else if (key === 'tag') rows = rows.filter(function (r) { return r.tag === v; });
-    });
-    // Filter — dataset annotation facets (celltype / tissue / technology / biosample).
-    // DS_ANNOT values are always flat strings (multi-valued fields are
-    // comma-joined server-side), so .toLowerCase() is always safe.
-    // Use indexOf so "microglial cell" matches "microglial cell,macrophage".
-    if (flt.celltype && flt.celltype.value) {
-      var ctVal = flt.celltype.value.toLowerCase();
+
+    // mff: dataset, group (catalog), module, tag — core row fields
+    var mffDataset = mff.dataset ? mff.dataset.getValues() : null;
+    var mffGroup   = mff.group   ? mff.group.getValues()   : null;
+    var mffModule  = mff.module  ? mff.module.getValues()  : null;
+    var mffTag     = mff.tag     ? mff.tag.getValues()     : null;
+    if (mffDataset) rows = rows.filter(function (r) { return mffDataset.has(r.dataset); });
+    if (mffGroup)   rows = rows.filter(function (r) { return mffGroup.has(r.catalog); });
+    if (mffModule)  rows = rows.filter(function (r) { return mffModule.has(r.module); });
+    if (mffTag)     rows = rows.filter(function (r) { return mffTag.has(r.tag); });
+
+    // single-select: method
+    if (flt.method && flt.method.value) {
+      var methodVal = flt.method.value;
+      rows = rows.filter(function (r) { return r.source === methodVal; });
+    }
+
+    // mff: dataset annotation facets (celltype / tissue / technology / biosample)
+    // DS_ANNOT values are comma-joined flat strings; OR logic across checked values.
+    var mffCT   = mff.celltype   ? mff.celltype.getValues()   : null;
+    var mffTis  = mff.tissue     ? mff.tissue.getValues()     : null;
+    var mffTech = mff.technology ? mff.technology.getValues() : null;
+    var mffBio  = mff.biosample  ? mff.biosample.getValues()  : null;
+
+    if (mffCT) {
+      var ctArr = Array.from(mffCT).map(function (v) { return v.toLowerCase(); });
       rows = rows.filter(function (r) {
         var ann = DS_ANNOT[r.dataset] || {};
-        return (ann.celltype || '').toLowerCase().indexOf(ctVal) !== -1;
+        var dsCtLc = (ann.celltype || '').toLowerCase();
+        return ctArr.some(function (ct) { return dsCtLc.indexOf(ct) !== -1; });
       });
     }
-    if (flt.tissue && flt.tissue.value) {
-      var selectedTissue = flt.tissue.value.toLowerCase();
+    if (mffTis) {
+      var tisArr = Array.from(mffTis).map(function (v) { return v.toLowerCase(); });
       rows = rows.filter(function (r) {
         var ann = DS_ANNOT[r.dataset] || {};
         var rowTissues = (ann.tissue || '').split(',').map(function (t) { return t.trim(); }).filter(Boolean);
-        return rowTissues.some(function (t) {
-          if (!t) return false;
-          if (t.toLowerCase() === selectedTissue) return true;
-          // Accept if selectedTissue is an ancestor of t.
-          var ancestors = (TISSUE_ANCESTORS[t] || []).map(function (a) { return a.toLowerCase(); });
-          return ancestors.indexOf(selectedTissue) !== -1;
+        return tisArr.some(function (selectedTissue) {
+          return rowTissues.some(function (t) {
+            if (t.toLowerCase() === selectedTissue) return true;
+            var ancestors = (TISSUE_ANCESTORS[t] || []).map(function (a) { return a.toLowerCase(); });
+            return ancestors.indexOf(selectedTissue) !== -1;
+          });
         });
       });
     }
-    if (flt.technology && flt.technology.value) {
-      var techVal = flt.technology.value;
-      if (techVal === 'single cell + nucleus') {
-        rows = rows.filter(function (r) {
-          var t = (DS_ANNOT[r.dataset] || {}).technology || '';
-          return t === 'single cell' || t === 'single nucleus';
-        });
-      } else {
-        var techValLc = techVal.toLowerCase();
-        rows = rows.filter(function (r) {
-          var ann = DS_ANNOT[r.dataset] || {};
-          return (ann.technology || '').toLowerCase().indexOf(techValLc) !== -1;
-        });
-      }
-    }
-    if (flt.biosample && flt.biosample.value) {
-      var bioVal = flt.biosample.value.toLowerCase();
+    if (mffTech) {
+      var techArr = Array.from(mffTech);
       rows = rows.filter(function (r) {
-        var ann = DS_ANNOT[r.dataset] || {};
-        return (ann.biosample || '').toLowerCase().indexOf(bioVal) !== -1;
+        var dsT = (DS_ANNOT[r.dataset] || {}).technology || '';
+        return techArr.some(function (tv) {
+          if (tv === 'single cell + nucleus') return dsT === 'single cell' || dsT === 'single nucleus';
+          return dsT.toLowerCase().indexOf(tv.toLowerCase()) !== -1;
+        });
       });
     }
+    if (mffBio) {
+      var bioArr = Array.from(mffBio).map(function (v) { return v.toLowerCase(); });
+      rows = rows.filter(function (r) {
+        var dsB = ((DS_ANNOT[r.dataset] || {}).biosample || '').toLowerCase();
+        return bioArr.some(function (bv) { return dsB.indexOf(bv) !== -1; });
+      });
+    }
+
+    // single-select: n_cells bucket
     if (flt.n_cells && flt.n_cells.value) {
       var bucket = flt.n_cells.value;
       rows = rows.filter(function (r) {
@@ -718,6 +826,10 @@ URL hash scheme (feature: back-button / shareable filter state):
     bodyEl.style.display = '';
   }
 
+  /**
+   * Fetch module-variability rows, populate all mff widgets, and render.
+   * mff widgets are populated here because options come from the API response.
+   */
   function load() {
     stateEl.style.display = ''; stateEl.textContent = 'loading…'; bodyEl.style.display = 'none';
     var params = 'min_abs=0&limit=100000';
@@ -726,74 +838,72 @@ URL hash scheme (feature: back-button / shareable filter state):
     }
     if (CTX.scope === 'module' && CTX.module_catalog) {
       // Fetch the whole catalog so peer stats have real spread across all modules.
-      // The module dropdown lets the user narrow to a single module after load.
       params += '&catalog=' + encodeURIComponent(CTX.module_catalog);
     }
     fetch('/api/module-variability?' + params, { credentials: 'same-origin' })
       .then(function (r) { return r.ok ? r.json() : r.text().then(function (t) { throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 160)); }); })
       .then(function (d) {
-        // Drop starCAT rows entirely (UI temporarily hidden)
         ALL_ROWS = (d.rows || []).filter(function (r) { return r.source !== 'starcat'; });
         var groups = {}, modules = {}, datasets = {}, tags = {};
         ALL_ROWS.forEach(function (r) {
           groups[r.catalog] = 1; modules[r.module] = 1;
           datasets[r.dataset] = 1; tags[r.tag] = 1;
         });
-        // Peer index built over canonical stats per tag type — ω² for categorical,
-        // spearman for numerical. This gives meaningful min/max with full catalog data.
         PEER_INDEX = computePeerIndex(ALL_ROWS.filter(function (r) {
           var isNum = NUMERICAL_TAGS[r.tag];
           return r.statistic === (isNum ? 'spearman' : 'omega2');
         }));
-        fillSelect(flt.dataset, Object.keys(datasets));
-        fillSelect(flt.group,   Object.keys(groups));
-        // In module scope: pre-select module to the landing geneset when module_name
-        // is provided so the initial view shows that module's rows — peer stats are
-        // computed against the whole catalog so the bar position remains meaningful.
-        // When module_name is null (experiment-level view), start on "all modules".
-        fillSelect(flt.module, Object.keys(modules),
-          (CTX.scope === 'module' && CTX.module_name) ? CTX.module_name : null);
-        fillSelect(flt.tag,     Object.keys(tags));
-        // In module scope: also pre-select the group filter (hidden) to the catalog.
-        if (CTX.scope === 'module' && flt.group) {
-          flt.group.value = CTX.module_catalog || '';
+
+        // Populate mff widgets for core row facets.
+        fillMff('dataset', Object.keys(datasets));
+        fillMff('group',   Object.keys(groups));
+        fillMff('tag',     Object.keys(tags));
+        // In module scope: pre-select the module widget to the landing geneset.
+        var preselectModule = (CTX.scope === 'module' && CTX.module_name) ? [CTX.module_name] : null;
+        fillMff('module', Object.keys(modules), preselectModule);
+        // In module scope: also narrow the group widget to the catalog.
+        if (CTX.scope === 'module' && CTX.module_catalog && mff.group) {
+          mff.group.setValues([CTX.module_catalog]);
         }
-        // Populate celltype / tissue / technology / biosample facet dropdowns from
-        // DS_ANNOT values. Values are flat comma-joined strings (server-side normalised).
-        // Split on comma so each individual term gets its own option — a dataset
-        // annotated "microglial cell,macrophage" contributes two options, not one.
-        if (flt.celltype || flt.tissue || flt.technology || flt.biosample) {
-          var celltypes = {}, tissues = {}, technologies = {}, biosamples = {};
-          Object.keys(DS_ANNOT).forEach(function (dbId) {
-            var ann = DS_ANNOT[dbId];
-            if (ann.celltype)   ann.celltype.split(',').forEach(function (v) { var t = v.trim(); if (t) celltypes[t]    = 1; });
-            if (ann.tissue)     ann.tissue  .split(',').forEach(function (v) { var t = v.trim(); if (t) tissues[t]      = 1; });
-            if (ann.technology) ann.technology.split(',').forEach(function (v) { var t = v.trim(); if (t) technologies[t] = 1; });
-            if (ann.biosample)  ann.biosample .split(',').forEach(function (v) { var t = v.trim(); if (t) biosamples[t]  = 1; });
-          });
-          fillSelect(flt.celltype,   Object.keys(celltypes));
-          fillTissueSelect(flt.tissue, Object.keys(tissues), null);
-          // Inject synthetic "single cell + nucleus" option when both base
-          // values are present — must come before fillSelect so it sorts first.
-          var techKeys = Object.keys(technologies).sort();
-          if (technologies['single cell'] && technologies['single nucleus']) {
-            techKeys = ['single cell + nucleus'].concat(techKeys);
-          }
-          fillSelect(flt.technology, techKeys);
-          fillSelect(flt.biosample,  Object.keys(biosamples));
-          // Apply preselect_cell_types: if a single type matches a dropdown option,
-          // select it; multiple types → select the first that has a matching option.
-          if (PRESELECT_CTS.length > 0 && flt.celltype) {
-            var opts = Array.from(flt.celltype.options).map(function (o) { return o.value.toLowerCase(); });
-            for (var pci = 0; pci < PRESELECT_CTS.length; pci++) {
-              var pct = PRESELECT_CTS[pci];
-              if (opts.indexOf(pct.toLowerCase()) !== -1) {
-                flt.celltype.value = pct;
-                break;
-              }
+
+        // Populate annotation facet widgets from DS_ANNOT.
+        var celltypes = {}, tissues = {}, technologies = {}, biosamples = {};
+        Object.keys(DS_ANNOT).forEach(function (dbId) {
+          var ann = DS_ANNOT[dbId];
+          if (ann.celltype)   ann.celltype.split(',').forEach(function (v) { var t = v.trim(); if (t) celltypes[t]    = 1; });
+          if (ann.tissue)     ann.tissue  .split(',').forEach(function (v) { var t = v.trim(); if (t) tissues[t]      = 1; });
+          if (ann.technology) ann.technology.split(',').forEach(function (v) { var t = v.trim(); if (t) technologies[t] = 1; });
+          if (ann.biosample)  ann.biosample .split(',').forEach(function (v) { var t = v.trim(); if (t) biosamples[t]  = 1; });
+        });
+        fillMff('celltype',   Object.keys(celltypes));
+        fillTissueMff(Object.keys(tissues), null);
+        var techKeys = Object.keys(technologies).sort();
+        if (technologies['single cell'] && technologies['single nucleus']) {
+          techKeys = ['single cell + nucleus'].concat(techKeys);
+        }
+        fillMff('technology', techKeys);
+        fillMff('biosample',  Object.keys(biosamples));
+
+        // preselect_cell_types: if a cell type matches a widget option, select it.
+        if (PRESELECT_CTS.length > 0 && mff.celltype) {
+          var ctWidget = mff.celltype;
+          var available = ctWidget.getValues() === null
+            ? null  // all still checked after populate — inspect options directly
+            : null;
+          // Re-read all option values from the widget's list.
+          var ctList = root.querySelector('.mv-flt-celltype-w .mff-list');
+          var ctOpts = ctList
+            ? Array.from(ctList.querySelectorAll('input[type="checkbox"]')).map(function (cb) { return cb.value.toLowerCase(); })
+            : [];
+          for (var pci = 0; pci < PRESELECT_CTS.length; pci++) {
+            var pct = PRESELECT_CTS[pci];
+            if (ctOpts.indexOf(pct.toLowerCase()) !== -1) {
+              ctWidget.setValues([pct]);
+              break;
             }
           }
         }
+
         // Flush any URL-hash-pending values now that options are populated.
         flushPendingHashValues();
         stateEl.style.display = 'none';
@@ -802,30 +912,11 @@ URL hash scheme (feature: back-button / shareable filter state):
       .catch(function (e) { stateEl.textContent = 'could not load — ' + e.message; });
   }
 
-  // Bind change handlers. On filter change: update the URL hash and re-render.
-  // Clearing a filter → replaceState (not navigating away); setting a value → pushState.
-  function onFilterChange() {
-    var wasEmpty = !this.dataset.mvPrev;
-    var isEmpty = !this.value;
-    // Navigate (pushState) when moving from a value to another value or empty→value.
-    // Replace (replaceState) only when clearing (value→empty).
-    var isNavigation = !(wasEmpty && isEmpty) && !isEmpty;
-    this.dataset.mvPrev = this.value;
-    updateHash(isNavigation);
-    render();
-  }
+  // Single-select filters (method, n_cells) fire onChange directly.
+  if (flt.method)  { flt.method.addEventListener('change',  function () { updateHash(!!this.value); render(); }); }
+  if (flt.n_cells) { flt.n_cells.addEventListener('change', function () { updateHash(!!this.value); render(); }); }
 
-  if (flt.dataset)    { flt.dataset.addEventListener('change',    onFilterChange.bind(flt.dataset));    }
-  if (flt.group)      { flt.group.addEventListener('change',      onFilterChange.bind(flt.group));      }
-  if (flt.module)     { flt.module.addEventListener('change',     onFilterChange.bind(flt.module));     }
-  if (flt.tag)        { flt.tag.addEventListener('change',        onFilterChange.bind(flt.tag));        }
-  if (flt.method)     { flt.method.addEventListener('change',     onFilterChange.bind(flt.method));     }
-  if (flt.celltype)   { flt.celltype.addEventListener('change',   onFilterChange.bind(flt.celltype));   }
-  if (flt.tissue)     { flt.tissue.addEventListener('change',     onFilterChange.bind(flt.tissue));     }
-  if (flt.technology) { flt.technology.addEventListener('change', onFilterChange.bind(flt.technology)); }
-  if (flt.biosample)  { flt.biosample.addEventListener('change',  onFilterChange.bind(flt.biosample));  }
-  if (flt.n_cells)    { flt.n_cells.addEventListener('change',    onFilterChange.bind(flt.n_cells));    }
-  // Sort is now handled by column-header click listeners bound above — no select to bind.
+  // Sort is handled by column-header click listeners bound above.
   load();
 })();
 </script>
