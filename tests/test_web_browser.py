@@ -4080,13 +4080,14 @@ def test_gene_atlas_filter_row1_has_pct_and_organism(client):
 
 
 def test_gene_atlas_filter_row2_has_cell_tissue_system(client):
-    """Row 2 must contain cell_type, tissue, technology, and biosample selects."""
+    """Row 2 must contain cell_type, tissue, technology, and biosample mff widgets."""
     resp = client.get("/genes/APOE")
     assert resp.status_code == 200
-    assert 'id="gv-flt-cell_type"' in resp.text, "cell_type select missing"
-    assert 'id="gv-flt-tissue"' in resp.text, "tissue select missing"
-    assert 'id="gv-flt-technology"' in resp.text, "technology select missing"
-    assert 'id="gv-flt-biosample"' in resp.text, "biosample select missing"
+    # cell_type/tissue/technology/biosample are now mff widget containers
+    assert 'id="gv-flt-cell_type-w"' in resp.text, "cell_type mff widget missing"
+    assert 'id="gv-flt-tissue-w"' in resp.text, "tissue mff widget missing"
+    assert 'id="gv-flt-technology-w"' in resp.text, "technology mff widget missing"
+    assert 'id="gv-flt-biosample-w"' in resp.text, "biosample mff widget missing"
     assert 'id="gv-flt-system"' not in resp.text, "deprecated system select still present"
 
 
