@@ -322,13 +322,13 @@ geneset's per-cell score co-varies with the tag in that dataset.</p>
     body += '</tbody>';
 
     table.innerHTML = thead + body;
-    summary.textContent = modList.length + ‘ genesets × ‘ + dsList.length + ‘ datasets · tag ‘’ + tag + ‘’ · ‘ + stat
-      + ‘ · cells = max over tag columns; blank = not scored/tagged’;
+    summary.textContent = modList.length + ' genesets × ' + dsList.length + ' datasets · tag \u2018' + tag + '\u2019 · ' + stat
+      + ' · cells = max over tag columns; blank = not scored/tagged';
     // under-powered tags: a "fleet" view over ≤3 datasets isn't a fleet
     if (dsList.length <= 3) {
       warnEl.style.display = '';
       warnEl.textContent = '⚠ Only ' + dsList.length + ' dataset' + (dsList.length === 1 ? '' : 's')
-        + ' carry the ‘' + tag + '’ tag — this is not a fleet-wide comparison, treat it as anecdotal.';
+        + ' carry the \u2018' + tag + '\u2019 tag — this is not a fleet-wide comparison, treat it as anecdotal.';
     } else { warnEl.style.display = 'none'; }
     stateEl.style.display = 'none'; wrap.style.display = '';
   }
