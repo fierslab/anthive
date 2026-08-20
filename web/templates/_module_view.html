@@ -734,6 +734,9 @@ URL hash scheme (feature: back-button / shareable filter state):
     // Only keep one row per (mod × dataset × tag × source) — pick the
     // "canonical" statistic for that tag: ω² for categorical, spearman
     // for numerical (spearman preferred over R² because it's signed).
+    // Fallback: if the catalog has no omega2/spearman rows (e.g. older ingests
+    // that only computed mean_score/F/eta2), use mean_score so the panel still
+    // renders instead of showing "No rows match — widen the filters."
     var preferred = {};
     rows.forEach(function (r) {
       var isNum = NUMERICAL_TAGS[r.tag];
@@ -742,6 +745,14 @@ URL hash scheme (feature: back-button / shareable filter state):
       var k = r.module + '|' + r.catalog + '|' + r.dataset + '|' + r.tag + '|' + r.source;
       preferred[k] = r;
     });
+    if (!Object.keys(preferred).length) {
+      // No preferred stats — fall back to mean_score (most universally present).
+      rows.forEach(function (r) {
+        if (r.statistic !== 'mean_score') return;
+        var k = r.module + '|' + r.catalog + '|' + r.dataset + '|' + r.tag + '|' + r.source;
+        preferred[k] = r;
+      });
+    }
     rows = Object.keys(preferred).map(function (k) { return preferred[k]; });
     // Sort — driven by sortState (column-header clicks).
     var sortMul = sortState.dir === 'asc' ? 1 : -1;
@@ -885,11 +896,12 @@ URL hash scheme (feature: back-button / shareable filter state):
         fillMff('biosample',  Object.keys(biosamples));
 
         // preselect_cell_types: if a cell type matches a widget option, select it.
-        if (PRESELECT_CTS.length > 0 && mff.celltype) {
+        // Skip in module scope — the catalog spans many cell types so preselecting
+        // the geneset's own cell type silently hides datasets where it's scored
+        // under a different cell-type context (e.g. LuChen WGCNA modules scored
+        // in microglia datasets but the geneset's celltypes list includes astrocyte).
+        if (CTX.scope !== 'module' && PRESELECT_CTS.length > 0 && mff.celltype) {
           var ctWidget = mff.celltype;
-          var available = ctWidget.getValues() === null
-            ? null  // all still checked after populate — inspect options directly
-            : null;
           // Re-read all option values from the widget's list.
           var ctList = root.querySelector('.mv-flt-celltype-w .mff-list');
           var ctOpts = ctList

@@ -4830,3 +4830,29 @@ def test_genes_tab_curated_rows_have_sort_data_attrs(client):
     # (populated by JS after gene_stats fetch; empty string is the initial value).
     assert 'data-pct=""' in html and 'data-rank=""' in html and 'data-var=""' in html
 
+
+# ── Fix 2: Module view — empty-set preselect doesn't hide all rows ─────────────
+
+def test_module_view_preselect_cell_type_skipped_in_module_scope(client):
+    """In module scope (geneset.html) the preselect_cell_types guard must include
+    CTX.scope !== 'module' so a mismatch between experiment celltypes and scored
+    dataset celltypes doesn't silently filter all rows to zero."""
+    resp = client.get("/genesets/StudyX/Exp1/gs_up")
+    assert resp.status_code == 200
+    html = resp.text
+    # The guard must appear in the rendered JS.
+    assert "CTX.scope !== 'module'" in html, (
+        "module-scope guard missing from preselect_cell_types block in _module_view.html"
+    )
+
+
+def test_module_view_fallback_to_mean_score_when_no_preferred(client):
+    """When all rows lack omega2/spearman, render() falls back to mean_score rows
+    rather than showing 'No rows match — widen the filters.'"""
+    resp = client.get("/genesets/StudyX/Exp1/gs_up")
+    assert resp.status_code == 200
+    html = resp.text
+    # The fallback block comment and mean_score stat name must be in the JS.
+    assert "No preferred stats" in html, "fallback-stat comment missing from module view JS"
+    assert "mean_score" in html, "fallback stat 'mean_score' missing from module view JS"
+
