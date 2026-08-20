@@ -4774,3 +4774,59 @@ def test_genes_page_mff_macro_injected(client):
     assert "window.mffWidget" in html, "mffWidget JS factory not injected by macro"
     assert "mff-popover" in html, "mff CSS class not injected"
     assert "mff-list" in html
+
+
+# ── Fix 1: Genes tab — sortable columns + default variability desc ─────────────
+
+def test_genes_tab_has_sortable_column_headers(client):
+    """Each <th> in #obs-tbl-genes carries data-sortcol for client-side sorting."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    # All five clickable columns must carry data-sortcol
+    for col in ("star", "gene", "pct", "rank", "var"):
+        assert f'data-sortcol="{col}"' in html, (
+            f"<th data-sortcol=\"{col}\"> missing from #obs-tbl-genes"
+        )
+
+
+def test_genes_tab_default_sort_is_variability_desc(client):
+    """Variability <th> ships with g-sort-desc so the table opens sorted high→low."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    # The variability header must have the g-sort-desc indicator class on first load.
+    assert 'data-sortcol="var" class="g-sort-desc"' in html, (
+        "variability <th> does not carry g-sort-desc on initial render"
+    )
+
+
+def test_genes_tab_sort_css_rules_present(client):
+    """Sort indicator CSS (.g-sort-asc / .g-sort-desc) is injected on the dataset page."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    assert "g-sort-asc" in html
+    assert "g-sort-desc" in html
+    # Arrow content for the indicator pseudo-elements
+    assert "▲" in html and "▼" in html
+
+
+def test_genes_tab_sort_js_function_present(client):
+    """applySortToTable and geneSortState are emitted as JS in the dataset page."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    assert "applySortToTable" in html, "sort function missing from page JS"
+    assert "geneSortState" in html, "sort state variable missing from page JS"
+
+
+def test_genes_tab_curated_rows_have_sort_data_attrs(client):
+    """Curated gene <tr> elements carry data-pct, data-rank, data-var attributes."""
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    html = resp.text
+    # Template emits data-pct="" data-rank="" data-var="" on each curated row
+    # (populated by JS after gene_stats fetch; empty string is the initial value).
+    assert 'data-pct=""' in html and 'data-rank=""' in html and 'data-var=""' in html
+

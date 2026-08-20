@@ -481,6 +481,11 @@
       font-family: var(--font-mono); font-size: 11px; color: #555;
       margin-right: 4px; vertical-align: middle;
     }
+    /* Sortable gene-table column headers */
+    #obs-tbl-genes thead th[data-sortcol] { cursor: pointer; user-select: none; white-space: nowrap; }
+    #obs-tbl-genes thead th[data-sortcol]:hover { background: #f1f5f9; }
+    #obs-tbl-genes thead th.g-sort-asc::after  { content: ' ▲'; font-size: 9px; color: var(--link); }
+    #obs-tbl-genes thead th.g-sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--link); }
     .gene-search-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
     #gene-search { padding: 3px 7px; font-family: inherit; font-size: 12px;
       border: 1px solid #ccc; border-radius: 4px; outline: none; width: 200px; }
@@ -519,17 +524,17 @@
   {# Single merged table: curated genes first (★ marked), then top-variable appended by JS #}
   <div class="table-wrap"><table class="obs-stats-tbl auto" id="obs-tbl-genes">
     <thead><tr>
-      <th title="★ = curated favourite" style="width:1.2em;text-align:center">★</th>
-      <th>gene</th>
+      <th data-sortcol="star" title="★ = curated favourite; click to sort" style="width:1.2em;text-align:center">★</th>
+      <th data-sortcol="gene">gene</th>
       <th class="obs-plots-th">plot</th>
-      <th title="fraction of cells with expression > 0">% expr</th>
-      <th title="percentile rank of this gene's mean expression among all genes in the dataset (0 = lowest, 1 = highest)">rank expr</th>
-      <th title="variability: rank of std across displayed genes (higher = more variable)">variability</th>
+      <th data-sortcol="pct" title="fraction of cells with expression > 0; click to sort">% expr</th>
+      <th data-sortcol="rank" title="percentile rank of this gene's mean expression among all genes in the dataset (0 = lowest, 1 = highest); click to sort">rank expr</th>
+      <th data-sortcol="var" class="g-sort-desc" title="variability: std across cells — higher = more variable; click to sort">variability</th>
     </tr></thead>
     <tbody>
     {% for gene in gene_panel.genes %}
     {% set _b = '/browse/' ~ folder_browse_id ~ '/' ~ file_id %}
-    <tr class="gene-item gene-curated" data-gene="{{ gene }}" data-gene-lc="{{ gene|lower }}">
+    <tr class="gene-item gene-curated" data-gene="{{ gene }}" data-gene-lc="{{ gene|lower }}" data-pct="" data-rank="" data-var="">
       <td style="text-align:center;font-size:13px"><span title="curated favourite">★</span></td>
       <td class="colname">{{ gene }}</td>
       <td class="obs-plots">
@@ -1182,7 +1187,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 var rankSpark = '<span class="ss" data-stat="rank" title="rank expression (db-wide percentile rank of mean)"><span class="ss-mark" style="display:none"></span></span>';
                 var varSpark  = '<span class="ss" data-stat="var"  title="variability: rank of std within displayed genes"><span class="ss-mark" style="display:none"></span></span>';
                 var varFrac   = stdRankFrac != null ? stdRankFrac : null;
-                var row = '<tr class="gene-item" data-gene="' + esc(geneName) + '" data-gene-lc="' + esc(geneName.toLowerCase()) + '">'
+                // data-pct/rank/var hold numeric sort keys (empty = unknown, sorts last).
+                var dataPct  = s && s.pct_nonzero != null  ? ' data-pct="'  + s.pct_nonzero + '"' : ' data-pct=""';
+                var dataRank = s && s.rank_mean   != null  ? ' data-rank="' + s.rank_mean   + '"' : ' data-rank=""';
+                var dataVar  = s && s.std         != null  ? ' data-var="'  + s.std         + '"' : ' data-var=""';
+                var row = '<tr class="gene-item" data-gene="' + esc(geneName) + '" data-gene-lc="' + esc(geneName.toLowerCase()) + '"' + dataPct + dataRank + dataVar + '>'
                     + '<td style="text-align:center;font-size:13px">' + (starHtml || '') + '</td>'
                     + '<td class="colname">' + esc(geneName) + '</td>'
                     + '<td class="obs-plots">' + plotHtml + '</td>'
@@ -1216,16 +1225,26 @@ document.addEventListener('DOMContentLoaded', function() {
             }
 
             // Hydrate text + sparklines on rendered rows given a stats map + std-rank map.
+            // Also stamps data-pct / data-rank / data-var onto each row for sort.
             function hydrateRows(rowEls, byGene, stdRankMap) {
                 rowEls.forEach(function (row) {
                     var s = byGene[(row.dataset.gene || '').toLowerCase()];
                     if (!s) return;
                     var pctEl = row.querySelector('.g-pct');
-                    if (pctEl && s.pct_nonzero != null) pctEl.textContent = s.pct_nonzero.toFixed(1) + '%';
+                    if (pctEl && s.pct_nonzero != null) {
+                        pctEl.textContent = s.pct_nonzero.toFixed(1) + '%';
+                        row.dataset.pct = String(s.pct_nonzero);
+                    }
                     var rankEl = row.querySelector('.g-rank');
-                    if (rankEl && s.rank_mean != null) rankEl.textContent = (s.rank_mean * 100).toFixed(0) + '%';
+                    if (rankEl && s.rank_mean != null) {
+                        rankEl.textContent = (s.rank_mean * 100).toFixed(0) + '%';
+                        row.dataset.rank = String(s.rank_mean);
+                    }
                     var varEl = row.querySelector('.g-var');
-                    if (varEl && s.std != null) varEl.textContent = fnum(s.std);
+                    if (varEl && s.std != null) {
+                        varEl.textContent = fnum(s.std);
+                        row.dataset.var = String(s.std);
+                    }
                     var stdRankFrac = stdRankMap[(row.dataset.gene || '').toLowerCase()];
                     setGeneSparklines(row, s, stdRankFrac != null ? stdRankFrac : null);
                 });
@@ -1248,6 +1267,8 @@ document.addEventListener('DOMContentLoaded', function() {
 
                         var stdRankMap = computeStdRanks(d.stats);
                         hydrateRows(rows, curatedByGene, stdRankMap);
+                        // Sort the table now that variability values are hydrated.
+                        applySortToTable();
 
                         // ── Top-10 most variable (by std) ─────────────────────
                         // Computed from curated panel stats; not genome-wide.
@@ -1276,6 +1297,75 @@ document.addEventListener('DOMContentLoaded', function() {
                     })
                     .catch(function () {});
             }
+            // ── Sortable gene table ───────────────────────────────────────────
+            // sortState: col ∈ {star, gene, pct, rank, var}, dir ∈ {asc, desc}
+            // Default: variability descending (set by .g-sort-desc on the th).
+            var geneSortState = { col: 'var', dir: 'desc' };
+            var genesTable = document.getElementById('obs-tbl-genes');
+            var genesTbody = genesTable ? genesTable.querySelector('tbody') : null;
+
+            /** Update ▲/▼ indicators on <th> elements. */
+            function updateGeneSortIndicators() {
+                if (!genesTable) return;
+                genesTable.querySelectorAll('thead th[data-sortcol]').forEach(function (th) {
+                    th.classList.remove('g-sort-asc', 'g-sort-desc');
+                    if (th.getAttribute('data-sortcol') === geneSortState.col) {
+                        th.classList.add(geneSortState.dir === 'asc' ? 'g-sort-asc' : 'g-sort-desc');
+                    }
+                });
+            }
+
+            /**
+             * Re-order all <tr class="gene-item"> rows inside the main tbody
+             * according to geneSortState.  Rows with no sort value sort last.
+             */
+            function applySortToTable() {
+                if (!genesTbody) return;
+                var allRows = Array.from(genesTbody.querySelectorAll('tr.gene-item'));
+                var mul = geneSortState.dir === 'asc' ? 1 : -1;
+                var col = geneSortState.col;
+
+                function numVal(row, attr) {
+                    var v = row.dataset[attr];
+                    return (v !== '' && v != null) ? parseFloat(v) : null;
+                }
+
+                allRows.sort(function (a, b) {
+                    var av, bv;
+                    if (col === 'pct')  { av = numVal(a, 'pct');  bv = numVal(b, 'pct');  }
+                    else if (col === 'rank') { av = numVal(a, 'rank'); bv = numVal(b, 'rank'); }
+                    else if (col === 'var')  { av = numVal(a, 'var');  bv = numVal(b, 'var');  }
+                    else if (col === 'gene') { return mul * (a.dataset.gene || '').localeCompare(b.dataset.gene || ''); }
+                    else if (col === 'star') { return mul * ((b.classList.contains('gene-curated') ? 1 : 0) - (a.classList.contains('gene-curated') ? 1 : 0)); }
+                    else { return 0; }
+                    // Numeric: null values sort last regardless of direction.
+                    if (av == null && bv == null) return 0;
+                    if (av == null) return 1;
+                    if (bv == null) return -1;
+                    return mul * (av - bv);
+                });
+                // Re-insert sorted rows (DOM append moves existing nodes).
+                allRows.forEach(function (row) { genesTbody.appendChild(row); });
+            }
+
+            // Bind column-header click handlers.
+            if (genesTable) {
+                genesTable.querySelectorAll('thead th[data-sortcol]').forEach(function (th) {
+                    th.addEventListener('click', function () {
+                        var col = th.getAttribute('data-sortcol');
+                        if (geneSortState.col === col) {
+                            geneSortState.dir = geneSortState.dir === 'desc' ? 'asc' : 'desc';
+                        } else {
+                            geneSortState.col = col;
+                            geneSortState.dir = 'desc';
+                        }
+                        updateGeneSortIndicators();
+                        applySortToTable();
+                    });
+                });
+                updateGeneSortIndicators();
+            }
+
             fetchAndHydrateCurated();
 
             // ── Server-side gene search (debounced 250ms) ─────────────────────
