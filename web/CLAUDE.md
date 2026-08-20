@@ -340,8 +340,15 @@ with `nh3`/`bleach` + a CSP if editing ever widens.)
   headline biology lives ONLY in the context pills; the **Biology** section shows
   only condition/sex/age/strain; provenance + external links live ONLY in the top
   `.ds-prov` row. Each datum appears once; sections hide when empty.
-- **Section order:** Explore → Biology → **Differential expression** (above the
-  obs columns) → Observation columns → Embeddings → Data → Resources.
+- **Actual tab bar (2026-08):** `Overview` (only when markdown) · `⚠ Caveats`
+  (only when caveats) · `Data` · `Genes` (only when n_genes > 0) · `Genesets`
+  (only when module scores) · `Numerical` · `Categorical` · `Differential
+  expression` (only when DE data) · `Downloads` (JS-revealed when h5ad exists).
+  **Embeddings** live inside the Data tab as a card (`#obsm_keys`), not a
+  separate tab. **Resources** and a standalone **Differential expression** tab
+  exist when data is present (DE tab is conditional). Deep-links `#tab-embeddings`
+  / `#tab-resources` are NOT implemented — those were a spec artifact; the
+  actual anchors are `#tab-data` (for embeddings) and `#tab-de` (for DE).
 - **Known caveats card** (dataset.html): rendered above the tab bar when
   `/info` returns a non-empty `caveats: [...]`. The Python side (`dataset_view`
   in `browser.py`) reduces the list to a `caveats_summary = {n, max_level}`

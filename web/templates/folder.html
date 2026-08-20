@@ -112,8 +112,9 @@
 {% for d in datasets %}{% if d.n_obs %}{% set _total_cells.n = _total_cells.n + d.n_obs %}{% endif %}{% endfor %}
 <div class="grp-toolbar">
     <input type="text" id="ds-filter" class="grp-filter" placeholder="filter datasets…" autocomplete="off">
+    <button id="ds-filter-clear" title="clear filter" style="display:none;background:none;border:1px solid var(--border);border-radius:3px;padding:2px 8px;font-size:11px;color:var(--text-muted);cursor:pointer">✕ clear</button>
     <div class="grp-stats">
-        <div>datasets: <span class="val">{{ datasets|length }}</span></div>
+        <div>datasets: <span id="ds-visible-count" class="val">{{ datasets|length }}</span> / <span class="muted">{{ datasets|length }}</span></div>
         {% if _total_cells.n %}<div>cells: <span class="val">{{ "{:,}".format(_total_cells.n) }}</span></div>{% endif %}
     </div>
 </div>
@@ -227,12 +228,19 @@ document.addEventListener('DOMContentLoaded', function () {
             if (h.getAttribute('data-col') === sortCol) h.classList.add('sort-' + sortDir);
         });
     }
+    var clearBtn  = document.getElementById('ds-filter-clear');
+    var countEl   = document.getElementById('ds-visible-count');
+
     function applyFilter() {
         var q = (filterEl && filterEl.value || '').toLowerCase().trim();
+        var visible = 0;
         rows.forEach(function (r) {
             var hit = !q || r.textContent.toLowerCase().indexOf(q) >= 0;
             r.style.display = hit ? '' : 'none';
+            if (hit) visible++;
         });
+        if (countEl) countEl.textContent = visible;
+        if (clearBtn) clearBtn.style.display = q ? '' : 'none';
     }
     headers.forEach(function (h) {
         h.addEventListener('click', function () {
@@ -243,6 +251,10 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     });
     if (filterEl) filterEl.addEventListener('input', applyFilter);
+    if (clearBtn) clearBtn.addEventListener('click', function () {
+        if (filterEl) { filterEl.value = ''; filterEl.focus(); }
+        applyFilter();
+    });
     applySort();
     applyFilter();
 });

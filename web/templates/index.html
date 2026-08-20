@@ -117,6 +117,7 @@
     </select>
   </label>
   <input type="text" id="coll-search" placeholder="filter collections…" style="width:220px;padding:3px 8px;font-size:12px;border:1px solid var(--border);font-family:inherit;outline:none">
+  <button id="coll-clear-filters" title="clear all active filters" style="display:none;background:none;border:1px solid var(--border);border-radius:3px;padding:2px 8px;font-size:11px;color:var(--text-muted);cursor:pointer">✕ clear filters</button>
   <span id="coll-info" style="font-size:11px;color:var(--text-muted)"></span>
   <a href="#" id="show-all-link" style="font-size:11px;color:#999;display:none">show all {{ total_folders }}</a>
 </div>
@@ -208,9 +209,10 @@
 (function() {
   const DEFAULT_SHOW = 50;
   let   showAll = false;
-  const searchEl = document.getElementById('coll-search');
-  const infoEl   = document.getElementById('coll-info');
-  const showAllLink = document.getElementById('show-all-link');
+  const searchEl      = document.getElementById('coll-search');
+  const infoEl        = document.getElementById('coll-info');
+  const showAllLink   = document.getElementById('show-all-link');
+  const clearFiltersBtn = document.getElementById('coll-clear-filters');
   const rows = Array.from(document.querySelectorAll('#coll-table tbody tr'));
   const headers = Array.from(document.querySelectorAll('#coll-table th.sortable'));
 
@@ -498,10 +500,24 @@
       showAllLink.style.display = 'none';
     }
     infoEl.textContent = `${shown} of ${visible.length}`;
+    if (clearFiltersBtn) clearFiltersBtn.style.display = anyFilter ? '' : 'none';
   }
 
   searchEl.addEventListener('input', update);
   showAllLink.addEventListener('click', e => { e.preventDefault(); showAll = true; update(); });
+  if (clearFiltersBtn) clearFiltersBtn.addEventListener('click', function () {
+    // Clear text search
+    if (searchEl) searchEl.value = '';
+    // Clear all value filters
+    for (const col in valueFilters) {
+      if (valueFilters[col]) valueFilters[col].clear();
+    }
+    // Uncheck all filter checkboxes in any open popover
+    document.querySelectorAll('.col-popover input[type="checkbox"]').forEach(function (cb) {
+      cb.checked = false; cb.indeterminate = false;
+    });
+    update();
+  });
 
   // ── header popovers (help + sort + value filter) ──────────────────────────
   let activePopover = null;

@@ -24,12 +24,9 @@ Items **already fixed in this session** are marked ✓.
 
 ## Pending ant-serve endpoints (web UI graceful-fallback, implement in API session)
 
-8. **Genes tab: genome-wide top-variable genes** — the Genes tab shows top-10 most
-   variable genes by `std` from the *curated panel only*. For a true genome-wide
-   ranking, add `GET /databases/{id}/genes/top?by=std&limit=10` (or `by=mean`,
-   `by=pct`). The client already handles the result shape from `/gene_stats`; wire
-   it in `dataset.html` JS under `fetchAndHydrateCurated` once the endpoint lands.
-   Fallback: current curated-panel std sort (good enough for typical 20–30 gene panels).
+8. ✓ **Genes tab: genome-wide top-variable genes** — DONE (2026-08-20). Added
+   `?top=N` to `/databases/{id}/gene_stats`; `dataset.html` JS now calls it for
+   datasets with no curated panel.
 
 ## Remaining (non-trivial or out of scope for this session)
 
@@ -65,3 +62,43 @@ Items **already fixed in this session** are marked ✓.
 7. **`geneset_experiment.html` parameters table** — `<td class="muted mono">`
    applies both classes inline; could be `class="muted-2 mono"` to use the
    DRY utility (minor).
+
+---
+
+## Deferred MED/LOW items from 2026-08-20 independent audit
+
+9. **Tab labels glued to count badge** — `Genesets42`, `Numerical7` etc. appear
+   without a space before the count badge. Add `gap` or a space before `<span
+   class="tab-count">`. Affects `dataset.html` tab bar.
+
+10. **Folder header cryptic `L` / `E` columns** — `L` = layer count, `E` =
+    embedding count. Column headers in `folder.html` are single letters with
+    tooltip; add full `<th title="layers">L</th>` labels or expand to words.
+    See `folder.html:133–134`.
+
+11. **Score cells `0.341ω²` missing separator** — in `_module_view.html` the
+    score value and its unit (ω²/eta²/R²) are concatenated without a space.
+
+12. **No breadcrumb on `/` and `/genesets`** — landing and gene-set pages have
+    no `<nav>` breadcrumb (they're top-level, so this is debatable; a "home"
+    marker is the minimum). `about.html` also lacks one.
+
+13. **Plot page missing visualize dropdown** — the `plot.html` geom-switcher
+    has no dropdown that maps to the dataset's full `visualize ▾` menu. Users
+    navigating from a plot page can't see what other geoms are available without
+    returning to the dataset page.
+
+14. **Dataset title duplicate link icons** — when a dataset has both a `doi`
+    and an `accession`, both 🔗 icons appear immediately after the title in
+    `folder.html`. They are distinguishable by tooltip only; add a short label
+    or replace with `DOI` / `accession` text links.
+
+15. **Landing popover missing select-all / none** — column filter popovers in
+    `index.html` have per-value checkboxes but no "select all" / "clear" shortcut
+    inside the popover body (only a per-column `clear` link at the bottom).
+
+16. **Chat widget 401 pollution** — when Authelia is active, the chat status
+    probe (`GET /api/chat/status`) occasionally triggers a 401 in the browser
+    console before the Authelia cookie is forwarded. Not a bug (the probe
+    gracefully hides the launcher), but it pollutes devtools. Fix: add a 1-retry
+    after 500 ms before giving up, or gate the probe on `document.cookie` presence.
