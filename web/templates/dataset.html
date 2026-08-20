@@ -387,7 +387,7 @@
   {% if markdown_content %}<button type="button" class="tab-btn active" data-tab="overview" role="tab">Overview</button>{% endif %}
   {% if caveats %}<button type="button" class="tab-btn caveat-tab lvl-{{ caveats_summary.max_level or 'low' }}" data-tab="caveats" role="tab">⚠ Caveats<span class="tab-count">{{ caveats_summary.n }}</span></button>{% endif %}
   <button type="button" class="tab-btn{% if not markdown_content %} active{% endif %}" data-tab="data" role="tab">Data</button>
-  {% if gene_panel and gene_panel.genes %}
+  {% if info and info.n_genes %}
   <button type="button" class="tab-btn"        data-tab="genes"    role="tab">Genes</button>
   {% endif %}
   {% if n_module_scores %}
@@ -449,8 +449,10 @@
 {# ── Genes tab ────────────────────────────────────────────────────────
    Precomputed favourites when the dataset defines them; otherwise a
    canonical curated panel keyed on cell type. Each gene: histogram +
-   embedding scatter icon + sparkline bars for %expr, rank expr, variability. #}
-{% if gene_panel and gene_panel.genes %}
+   embedding scatter icon + sparkline bars for %expr, rank expr, variability.
+   Always rendered when the dataset has genes (n_genes > 0); curated rows only
+   when gene_panel.genes is non-empty; top-variable rows fetched by JS always. #}
+{% if info and info.n_genes %}
 <section class="tab-panel" id="tab-genes" role="tabpanel">
   <style>
     /* ── Compact sparkline (.ss) ────────────────────────────────────────────
@@ -497,8 +499,9 @@
   <h2>Genes
     <span class="info" title="Click ▬ for a histogram of the gene's expression, or ◉ for an embedding scatter coloured by the gene. Sparklines show the gene's value relative to the db-wide range for that stat. Panel source: precomputed dataset favourites, or a canonical curated panel keyed on cell type (microglia / astrocyte / neuron).">ⓘ</span></h2>
   <div class="muted" style="font-size:11px;margin-bottom:6px">
-    {% if gene_panel.source == 'precomputed' %}Curated favourites shipped with this dataset.
-    {% else %}<em>Generic {{ gene_panel.label.split(' ', 1)[1] if ' ' in gene_panel.label else gene_panel.label }}</em> — dataset did not precompute a favourite list.{% endif %}
+    {% if gene_panel and gene_panel.source == 'precomputed' %}Curated favourites shipped with this dataset.
+    {% elif gene_panel and gene_panel.source != 'none' %}<em>Generic {{ gene_panel.label.split(' ', 1)[1] if ' ' in gene_panel.label else gene_panel.label }}</em> — dataset did not precompute a favourite list.
+    {% else %}No curated gene panel for this cell type — showing top-variable genes.{% endif %}
   </div>
   <div class="gene-search-row">
     <input id="gene-search" type="search" placeholder="search any gene…" autocomplete="off"
@@ -521,7 +524,8 @@
       <tbody id="gene-search-tbody"></tbody>
     </table></div>
   </div>
-  {# Single merged table: curated genes first (★ marked), then top-variable appended by JS #}
+  {# Single merged table: curated genes first (★ marked), then top-variable appended by JS.
+     When gene_panel.genes is empty (source=='none') the tbody starts empty and JS fills it. #}
   <div class="table-wrap"><table class="obs-stats-tbl auto" id="obs-tbl-genes">
     <thead><tr>
       <th data-sortcol="star" title="★ = curated favourite; click to sort" style="width:1.2em;text-align:center">★</th>
@@ -532,6 +536,7 @@
       <th data-sortcol="var" class="g-sort-desc" title="variability: std across cells — higher = more variable; click to sort">variability</th>
     </tr></thead>
     <tbody>
+    {% if gene_panel and gene_panel.genes %}
     {% for gene in gene_panel.genes %}
     {% set _b = '/browse/' ~ folder_browse_id ~ '/' ~ file_id %}
     <tr class="gene-item gene-curated" data-gene="{{ gene }}" data-gene-lc="{{ gene|lower }}" data-pct="" data-rank="" data-var="">
@@ -555,14 +560,15 @@
       </td>
     </tr>
     {% endfor %}
-    {# top-variable rows appended here by JS (id="topvar-tbody") #}
+    {% endif %}
+    {# top-variable rows appended here by JS (id="topvar-tbody") — always populated #}
     <tbody id="topvar-tbody"></tbody>
     </tbody>
   </table></div>
   {# topvar-section wrapper kept for JS show/hide; visually invisible (no heading) #}
   <div id="topvar-section" style="display:none"></div>
   <div class="muted" style="font-size:11px;margin-top:4px">
-    Stats from <code>/gene_stats</code> (log-normalised X layer).
+    Stats from <code>/gene_stats</code> (log-normalised expression layer).
     <b>rank expr</b>: percentile rank of the gene's mean among all genes in the dataset.
     <b>variability</b>: rank of std within the displayed gene panel.
   </div>
@@ -1124,9 +1130,13 @@ document.addEventListener('DOMContentLoaded', function() {
             .catch(function () {});
 
         // ── Genes tab: server-side search + sparklines + gene_stats + top-var ──
+        // Runs whenever the Genes tab is present (n_genes > 0), even when there
+        // are no curated rows — top-var is always fetched genome-wide.
         (function () {
+            var tabGenes = document.getElementById('tab-genes');
+            if (!tabGenes) return;  // no Genes tab on this page
+
             var rows = Array.from(document.querySelectorAll('#tab-genes .gene-item'));
-            if (!rows.length) return;
 
             var searchInput  = document.getElementById('gene-search');
             var searchCount  = document.getElementById('gene-search-count');
@@ -1252,8 +1262,49 @@ document.addEventListener('DOMContentLoaded', function() {
 
             if (searchCount) searchCount.textContent = rows.length + ' genes';
 
+            // Populate topvarTbody with the given stats array (already sorted by std desc).
+            function renderTopVar(statsArr) {
+                if (!topvarTbody || !statsArr.length) return;
+                var topVar = statsArr.slice(0, 10);
+                var tvStdRankMap = computeStdRanks(topVar);
+                topvarTbody.innerHTML = topVar.map(function (x) {
+                    return makeGeneRow(x.gene, x, '', tvStdRankMap[x.gene.toLowerCase()]);
+                }).join('');
+                // Hydrate sparklines in inserted rows.
+                var tvByGene = {};
+                topVar.forEach(function (x) { tvByGene[x.gene.toLowerCase()] = x; });
+                Array.from(topvarTbody.querySelectorAll('.gene-item')).forEach(function (tvRow) {
+                    var s = tvByGene[(tvRow.dataset.gene || '').toLowerCase()];
+                    if (!s) return;
+                    var frac = tvStdRankMap[(tvRow.dataset.gene || '').toLowerCase()];
+                    setGeneSparklines(tvRow, s, frac != null ? frac : null);
+                });
+                if (topvarSection) topvarSection.style.display = '';
+            }
+
+            // Fetch genome-wide top-20 most variable genes and render them.
+            // Called when there are no curated genes, or after curated hydration.
+            function fetchTopVarGenomeWide() {
+                fetch(apiBase + '/gene_stats?top=20', { credentials: 'same-origin' })
+                    .then(function (r) { return r.ok ? r.json() : null; })
+                    .then(function (d) {
+                        if (!d || !d.stats) return;
+                        // Filter out genes already in curated panel.
+                        var fresh = d.stats.filter(function (s) {
+                            return !curatedByGene[s.gene.toLowerCase()];
+                        });
+                        renderTopVar(fresh);
+                        applySortToTable();
+                    })
+                    .catch(function () {});
+            }
+
             function fetchAndHydrateCurated() {
-                if (!genes.length) return;
+                if (!genes.length) {
+                    // No curated panel — go straight to genome-wide top-var.
+                    fetchTopVarGenomeWide();
+                    return;
+                }
                 fetch(apiBase + '/gene_stats?genes=' + encodeURIComponent(genes.join(',')),
                       { credentials: 'same-origin' })
                     .then(function (r) { return r.ok ? r.json() : null; })
@@ -1266,29 +1317,15 @@ document.addEventListener('DOMContentLoaded', function() {
                         // Sort the table now that variability values are hydrated.
                         applySortToTable();
 
-                        // ── Top-10 most variable (by std) ─────────────────────
-                        // Computed from curated panel stats; not genome-wide.
-                        var stdVals = d.stats
-                            .filter(function (s) { return s.std != null; })
-                            .map(function (s) { return s; });
-                        if (stdVals.length >= 3 && topvarTbody) {
+                        // ── Top-10 most variable from curated stats ────────────
+                        // When curated panel is small, fall back to genome-wide.
+                        var stdVals = d.stats.filter(function (s) { return s.std != null; });
+                        if (stdVals.length >= 3) {
                             stdVals.sort(function (a, b) { return b.std - a.std; });
-                            var topVar = stdVals.slice(0, 10);
-                            // std-rank within the top-var subset
-                            var tvStdRankMap = computeStdRanks(topVar);
-                            topvarTbody.innerHTML = topVar.map(function (x) {
-                                return makeGeneRow(x.gene, x, '', tvStdRankMap[x.gene.toLowerCase()]);
-                            }).join('');
-                            // Hydrate sparklines in topvar rows.
-                            var tvByGene = {};
-                            topVar.forEach(function (x) { tvByGene[x.gene.toLowerCase()] = x; });
-                            Array.from(topvarTbody.querySelectorAll('.gene-item')).forEach(function (row) {
-                                var s = tvByGene[(row.dataset.gene || '').toLowerCase()];
-                                if (!s) return;
-                                var frac = tvStdRankMap[(row.dataset.gene || '').toLowerCase()];
-                                setGeneSparklines(row, s, frac != null ? frac : null);
-                            });
-                            if (topvarSection) topvarSection.style.display = '';
+                            renderTopVar(stdVals);
+                        } else {
+                            // Curated panel too small to rank — fetch genome-wide.
+                            fetchTopVarGenomeWide();
                         }
                     })
                     .catch(function () {});

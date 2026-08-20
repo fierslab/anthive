@@ -3201,11 +3201,22 @@ async def get_gene_info(db_id: str, gene_id: str):
 @app.get("/databases/{db_id:path}/gene_stats", tags=["genes"])
 async def get_gene_stats(
     db_id: str,
-    genes: str = Query(..., description="Comma-separated gene names, e.g. APOE,CLU"),
-    layer: str = Query("X", description="Layer name (default: X)")
+    genes: Optional[str] = Query(None, description="Comma-separated gene names, e.g. APOE,CLU. Omit to use top=N."),
+    layer: Optional[str] = Query(None, description="Layer name (default: dataset's default_layer, or X)"),
+    top: Optional[int] = Query(None, description="When genes= is omitted, return stats for the top-N most variable genes (by std). Max 200."),
 ):
     """
     Get expression statistics for one or more genes.
+
+    Either ``genes`` (comma-separated list) or ``top`` must be supplied:
+
+    - **genes**: explicit list — stats for those genes on the specified layer.
+    - **top**: omit ``genes`` and supply ``top=N`` to return the N most variable
+      genes (by std across all cells), ranked highest-first.  Maximum 200.
+      Useful for datasets with no curated gene panel.
+
+    When ``layer`` is omitted the dataset's ``default_layer`` is used (falls
+    back to ``X`` if not configured).
 
     Computed efficiently from sparse data without transferring all cells.
 
@@ -3217,17 +3228,49 @@ async def get_gene_stats(
     - **mean_nonzero**, **std_nonzero**, **median_nonzero**, **q10_nonzero**, **q90_nonzero**, **max**: expressing cells only
 
     Example:
-        GET /databases/LC5/SPM/gene_stats?genes=APOE,CLU&layer=X
+        GET /databases/LC5/SPM/gene_stats?genes=APOE,CLU
+        GET /databases/LC5/VNF/gene_stats?top=20
     """
+    if genes is None and top is None:
+        raise HTTPException(status_code=422, detail="Supply either genes= or top=")
+    if top is not None and top > 200:
+        top = 200
     try:
-        gene_list = [g.strip() for g in genes.split(',') if g.strip()]
-        with _pooled_db(db_id) as db:
-            stats = db.get_gene_stats(gene_list, layer=layer)
-        return {"db_id": db_id, "layer": layer, "stats": stats}
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        def _sync_work():
+            with _pooled_db(db_id) as db:
+                # Resolve the layer to use.
+                try:
+                    resolved_layer = layer or registry.get_database_metadata(db_id).get('default_layer') or 'X'
+                except KeyError:
+                    resolved_layer = layer or 'X'
+                if genes is not None:
+                    gene_list = [g.strip() for g in genes.split(',') if g.strip()]
+                else:
+                    # top-N most variable: get all gene stats, sort by std desc.
+                    # Use _get_top_genes_by_mean as a fallback gene list source,
+                    # then compute stats and return sorted by std.
+                    n_top = top or 20
+                    # Fetch a larger pool to sort by variability (std).
+                    candidate_genes = _get_top_genes_by_mean(db, min(n_top * 10, 500), resolved_layer)
+                    if not candidate_genes:
+                        # Fallback: pull first N gene names from genes table.
+                        rows = db._conn.execute(
+                            "SELECT gene_name FROM genes ORDER BY gene_name LIMIT ?",
+                            [min(n_top * 10, 500)]
+                        ).fetchall()
+                        candidate_genes = [r[0] for r in rows]
+                    all_stats = db.get_gene_stats(candidate_genes, layer=resolved_layer)
+                    # Sort by std descending; genes with no std sort last.
+                    all_stats.sort(key=lambda s: (s.get('std') or 0), reverse=True)
+                    return {"db_id": db_id, "layer": resolved_layer,
+                            "stats": all_stats[:n_top], "top_by": "std"}
+                stats = db.get_gene_stats(gene_list, layer=resolved_layer)
+            return {"db_id": db_id, "layer": resolved_layer, "stats": stats}
+        return await asyncio.to_thread(_sync_work)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.get("/gene_stats_all", tags=["genes"])
