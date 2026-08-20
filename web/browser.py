@@ -2476,10 +2476,9 @@ async def genesets_index(request: Request):
 
     active_group = request.query_params.get("group")
 
-    # starCAT UI temporarily hidden while users get comfortable with the
-    # gene-set model. Server code kept intact — flip this back to True to
-    # re-expose the tab (or remove the guard entirely).
-    STARCAT_UI_ENABLED = False
+    # starCAT tab is now enabled — catalogs are available and the browser
+    # handles the module/score detail load when active_group == 'starcat'.
+    STARCAT_UI_ENABLED = True
 
     # starCAT programs are a SECOND module source, served by the /catalogs
     # endpoint (REST 2.30) — the authoritative definitions (modules with gene
