@@ -165,8 +165,8 @@
       <th data-sortcol="tissue">tissue</th>
       <th data-sortcol="biosample">biosample</th>
       <th data-sortcol="pct_nonzero" style="text-align:right">%expr</th>
-      <th data-sortcol="mean" style="text-align:right">mean</th>
-      <th data-sortcol="mean_nonzero" style="text-align:right">meannz</th>
+      <th data-sortcol="mean" style="text-align:right">rank mean</th>
+      <th data-sortcol="mean_nonzero" style="text-align:right">rank mean(nz)</th>
       <th style="text-align:center;cursor:default">plots</th>
     </tr></thead>
     <tbody id="gv-rows"></tbody>
@@ -290,7 +290,8 @@
     + '</svg>';
 
   // ── dataset popover HTML ────────────────────────────────────────────────────
-  function dsTip(dbId) {
+  // stats: optional {mean, mean_nonzero} to display raw values in the popover.
+  function dsTip(dbId, stats) {
     var ann = DS_ANNOT[dbId] || {};
     var rows = '';
     // Collection header
@@ -305,13 +306,18 @@
     if (ann.technology)  rows += '<div class="tip-row">Technology: ' + esc(ann.technology) + '</div>';
     if (ann.biosample)   rows += '<div class="tip-row">Biosample: '  + esc(ann.biosample)  + '</div>';
     if (ann.n_cells)     rows += '<div class="tip-row">Cells: '     + esc(ann.n_cells)  + '</div>';
+    // Raw expression values (moved from visible columns)
+    if (stats) {
+      if (stats.mean != null)          rows += '<div class="tip-row">mean: '    + num(stats.mean, 3)          + '</div>';
+      if (stats.mean_nonzero != null)  rows += '<div class="tip-row">mean_nz: ' + num(stats.mean_nonzero, 3)  + '</div>';
+    }
     rows += '<div class="tip-id">' + esc(dbId) + '</div>';
     return '<div class="gv-ds-tip">' + rows + '</div>';
   }
-  function dsCell(dbId) {
+  function dsCell(dbId, stats) {
     var parts = String(dbId).split('/');
     var href = '/browse/' + encodeURIComponent(parts[0] || '') + '/' + encodeURIComponent(parts[1] || '');
-    return '<span class="gv-ds-pop"><a href="' + esc(href) + '">' + esc(dbId) + '</a>' + dsTip(dbId) + '</span>';
+    return '<span class="gv-ds-pop"><a href="' + esc(href) + '">' + esc(dbId) + '</a>' + dsTip(dbId, stats) + '</span>';
   }
 
   // ── plot links per row ──────────────────────────────────────────────────────
@@ -624,15 +630,19 @@
       var mnzRankPct = mnzRank01 != null ? mnzRank01 * 100 : null;
       var mnzSpark  = sparkline(mnzRank01 != null ? mnzRank01 : 0,
                                 r.mean_nonzero, mnzRankPct, nGenes, 'mean_nonzero', GENE);
+      // Visible text for rank columns: show percentile (0–100), not raw value.
+      var meanRankText = meanRankPct != null ? meanRankPct.toFixed(1) + '%' : '—';
+      var mnzRankText  = mnzRankPct  != null ? mnzRankPct.toFixed(1)  + '%' : '—';
+      var rowStats = { mean: r.mean, mean_nonzero: r.mean_nonzero };
       return '<tr>'
-        + '<td>' + dsCell(r.db_id) + '</td>'
+        + '<td>' + dsCell(r.db_id, rowStats) + '</td>'
         + '<td>' + orgPill + '</td>'
         + '<td class="muted gv-narrow" style="font-size:11px" title="' + esc(ann.celltype || '') + '">' + esc(ann.celltype || '') + '</td>'
         + '<td class="muted gv-narrow" style="font-size:11px" title="' + esc(ann.tissue   || '') + '">' + esc(ann.tissue   || '') + '</td>'
         + '<td class="muted gv-narrow" style="font-size:11px" title="' + esc(ann.biosample || '') + '">' + esc(ann.biosample || '') + '</td>'
         + '<td class="gv-val">' + num(r.pct_nonzero, 1) + '% ' + pctSpark  + '</td>'
-        + '<td class="gv-val">' + num(r.mean, 3)        + ' '  + meanSpark + '</td>'
-        + '<td class="gv-val">' + num(r.mean_nonzero, 2)+ ' '  + mnzSpark  + '</td>'
+        + '<td class="gv-val">' + meanRankText + ' ' + meanSpark + '</td>'
+        + '<td class="gv-val">' + mnzRankText  + ' ' + mnzSpark  + '</td>'
         + '<td class="gv-icons" style="text-align:center">' + plotLinks(r.db_id) + '</td>'
         + '</tr>';
     }).join('');

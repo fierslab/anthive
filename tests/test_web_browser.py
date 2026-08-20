@@ -745,6 +745,43 @@ def test_genes_page_popover_has_collection_and_dataset_fields(client):  # pyrigh
     assert "dataset_desc" in resp.text
 
 
+def test_genes_page_rank_column_headers(client):  # pyright: ignore
+    """Gene atlas table headers say 'rank mean' and 'rank mean(nz)', not 'mean'/'meannz'."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    text = resp.text
+    assert "rank mean" in text
+    assert "rank mean(nz)" in text
+    # The old bare column header text must not appear as a standalone <th> label.
+    # (The word 'mean' still appears inside tooltip strings and JS, so we check
+    # the header markup specifically.)
+    assert ">meannz<" not in text
+    # Confirm sort handles use the old API field names (unchanged).
+    assert 'data-sortcol="mean"' in text
+    assert 'data-sortcol="mean_nonzero"' in text
+
+
+def test_genes_page_popover_has_mean_raw_values(client):  # pyright: ignore
+    """The dsTip function template includes mean_nz label so raw values appear in popovers."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    # The JS source embeds the strings that build popover rows; verify they're present.
+    assert "mean_nz" in resp.text
+    assert "tip-row" in resp.text
+
+
+def test_genes_page_rank_text_not_raw_mean(client):  # pyright: ignore
+    """Rank columns display rank percentile text (toFixed + '%'), not raw num(mean, 3) pattern."""
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    text = resp.text
+    # The JS now builds rank text via meanRankPct.toFixed(1) + '%', not num(r.mean, 3).
+    assert "meanRankText" in text
+    assert "mnzRankText" in text
+    # Raw mean is routed to rowStats / dsTip, not the visible cell text.
+    assert "rowStats" in text
+
+
 # ── fake REST API ──────────────────────────────────────────────────────────────
 
 # Two collections. GroupA mixes organism/celltype/disease across its two
@@ -1987,12 +2024,62 @@ def test_topbar_no_auth_section_without_header(client):
 
 
 def test_landing_popover_filter_guard(client):
-    # Regression: the column-header popover is a child of the <th>, so its th
-    # click handler must ignore clicks that originate inside the open popover —
-    # otherwise filter checkboxes close the popover before they register.
+    # Regression: the column-header popover click handler must ignore clicks
+    # that originate inside the open popover — otherwise filter checkboxes
+    # close the popover before they register.
     resp = client.get("/")
     assert resp.status_code == 200
     assert "activePopover.contains(e.target)" in resp.text
+
+
+def test_landing_popover_uses_fixed_positioning(client):
+    # The .col-popover must use position:fixed (not position:absolute) so it
+    # escapes any overflow:auto ancestor (.table-wrap) and is never clipped
+    # when the table is narrowed to a single row by a filter.
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "position:fixed" in resp.text, \
+        ".col-popover must use position:fixed to escape overflow:auto clipping"
+    # Must NOT use position:absolute for the popover (that was the bug).
+    # Find the col-popover block and verify it has fixed, not absolute.
+    idx = resp.text.find(".col-popover {")
+    assert idx >= 0, ".col-popover rule not found"
+    rule_slice = resp.text[idx: idx + 300]
+    assert "position:fixed" in rule_slice, \
+        ".col-popover rule does not set position:fixed"
+    assert "position:absolute" not in rule_slice, \
+        ".col-popover rule must not use position:absolute (overflow clipping bug)"
+
+
+def test_landing_popover_appended_to_body(client):
+    # The popover JS must append to document.body (not th.appendChild) so the
+    # DOM element is outside .table-wrap and never subject to its overflow clip.
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "document.body.appendChild(pop)" in resp.text, \
+        "popover must be appended to document.body, not the <th>"
+
+
+def test_landing_popover_positioned_via_bounding_rect(client):
+    # The popover must position itself via getBoundingClientRect() on the
+    # anchor <th>, setting top/left from the viewport rectangle.
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "getBoundingClientRect()" in resp.text, \
+        "popover positioning must use getBoundingClientRect()"
+    assert "thRect.bottom" in resp.text, \
+        "popover top must be set from thRect.bottom"
+
+
+def test_landing_popover_closes_on_scroll_and_resize(client):
+    # Scroll and resize listeners must call closePopover so the fixed-position
+    # popover doesn't drift away from its anchor after the page moves.
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "window.addEventListener('scroll', closePopover" in resp.text, \
+        "missing scroll listener to close popover"
+    assert "window.addEventListener('resize', closePopover" in resp.text, \
+        "missing resize listener to close popover"
 
 
 def test_tissue_popover_is_hierarchical(client):
