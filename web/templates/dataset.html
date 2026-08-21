@@ -298,7 +298,7 @@
     {% if pub_icon and pub_icon.glyph %}<span class="ds-pub-icon" style="color:{{ pub_icon.color }}" title="{{ pub_icon.tooltip }}">{{ pub_icon.glyph|safe }}</span>{% endif %}
     <button type="button" class="btn-grey ds-actions-toggle" id="ds-actions-toggle" title="actions" aria-haspopup="true" aria-expanded="false">☰</button>
     <div class="ds-actions-group">
-    {% if has_duckdb %}<a class="btn-grey btn-icon" href="/jupyter/" target="_blank" rel="noopener" title="open dataset in JupyterLite">📓 notebook</a>{% endif %}
+    {% if has_duckdb %}<a class="btn-grey btn-icon" id="ds-open-notebook" href="/jupyter/" target="_blank" rel="noopener" title="open this dataset in a JupyterLite notebook (pre-fills the AnthiveClient for {{ db_id }})">📓 notebook</a>{% endif %}
     {% if has_duckdb %}
     <div class="viz-menu" id="viz-menu">
       <button type="button" class="btn-grey" id="viz-menu-btn" aria-haspopup="true" aria-expanded="false">visualize <span class="caret">▾</span></button>
@@ -838,6 +838,36 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (e.key === 'Escape') { acts.classList.remove('open'); actsBtn.setAttribute('aria-expanded', 'false'); }
             });
         }
+    })();
+
+    // ── "notebook" action button → open a dataset-loading .ipynb ─────────
+    // Reuses the existing plot-notebook endpoint (`/api/notebook/{b64}/…`)
+    // with `geom=scatter` on the default embedding, so JupyterLite opens a
+    // notebook whose first code cell instantiates AnthiveClient bound to
+    // THIS dataset. R52 from BUG_AUDIT_2026_08_21.md: clicking notebook
+    // previously landed the user on plain JupyterLite (no dataset context).
+    (function () {
+        var link = document.getElementById('ds-open-notebook');
+        if (!link) return;
+        var dbId = {{ db_id|tojson }};
+        var defaultEmb = {{ (default_embedding or '')|tojson }};
+        link.addEventListener('click', function (e) {
+            e.preventDefault();
+            var params = { db_id: dbId, geom: 'scatter' };
+            if (defaultEmb) params.embedding = defaultEmb;
+            var b64;
+            try {
+                b64 = btoa(JSON.stringify(params))
+                        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+            } catch (err) {
+                window.open('/jupyter/', '_blank', 'noopener');
+                return;
+            }
+            var filename = (dbId.replace(/[^A-Za-z0-9_-]+/g, '_') || 'dataset');
+            var nbUrl = '/api/notebook/' + b64 + '/' + filename + '.ipynb';
+            var labUrl = '/jupyter/lab/index.html?fromURL=' + encodeURIComponent(nbUrl);
+            window.open(labUrl, '_blank', 'noopener');
+        });
     })();
 
     // ── Tab bar wiring (URL-hash deep-linking) ───────────────────────────
