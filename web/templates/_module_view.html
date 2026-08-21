@@ -856,7 +856,7 @@ URL hash scheme (feature: back-button / shareable filter state):
       if (CTX.scope !== 'dataset') tds.push('<td class="mv-ds">' + dsLink + '</td>');
       tds.push('<td class="mv-tag">' + formatColLabel(r.tag_column || r.tag) + '</td>');
       tds.push('<td class="mv-method">' + esc(METHOD_LABEL[r.source] || r.source) + '</td>');
-      tds.push('<td class="mv-val">' + (+r.value).toFixed(3) + '<span class="muted-2" style="font-size:9px;margin-left:3px">' + esc(r.statistic) + '</span></td>');
+      tds.push('<td class="mv-val">' + (+r.value).toFixed(3) + ' <span class="muted-2" style="font-size:9px;margin-left:3px">' + esc(r.statistic) + '</span></td>');
       tds.push('<td class="mv-pos">' + track + ' <span class="muted-2" style="font-size:10px">' + (+g.min).toFixed(2) + '–' + (+g.max).toFixed(2) + '</span></td>');
       var plotCell = (pu ? '<a href="' + pu + '" title="plot ' + esc(r.tag) + ' × ' + esc(r.module) + '">' + plotSvg + '</a>' : '')
         + (eu ? '<a href="' + eu + '" title="ECDF of ' + esc(r.module) + ' split by ' + esc(r.tag) + '">' + SVG_LINE + '</a>' : '')

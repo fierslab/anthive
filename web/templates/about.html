@@ -45,6 +45,9 @@
   @media (max-width: 760px) { .about-hero img { width: 220px; } }
 </style>
 
+{% from "_macros.html" import breadcrumb %}
+{{ breadcrumb([("about", None)]) }}
+
 <div class="about-wrap">
 
   <div class="about-hero">

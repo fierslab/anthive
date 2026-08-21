@@ -19,6 +19,11 @@
   details.sc-scores > summary { cursor: pointer; font-weight: 600; font-size: 14px; margin: 14px 0 4px; }
 </style>
 
+{% from "_macros.html" import breadcrumb %}
+{{ breadcrumb([("gene sets", None)]) }}
+
+<h1 class="page-title">Gene sets &amp; programs</h1>
+
 {% if error %}<p style="color:#dc2626">{{ error }}</p>{% endif %}
 
 <div class="stats-row">
