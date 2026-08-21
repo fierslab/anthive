@@ -652,6 +652,23 @@ URL hash scheme (feature: back-button / shareable filter state):
    * mff widgets: null=all; Set=OR across checked values.
    * single-select: empty=all.
    */
+  /**
+   * Return true when the user has actively narrowed a filter (i.e. any
+   * multi-select is a proper subset of its options, or a single-select is
+   * non-empty). Used to pick a helpful empty-state message.
+   */
+  function _hasActiveMvFilters() {
+    var anyMff = Object.keys(mff).some(function (key) {
+      var widget = mff[key]; if (!widget) return false;
+      var vals = widget.getValues();
+      return vals !== null;  // null = "all/none checked" (i.e. no filter)
+    });
+    if (anyMff) return true;
+    if (flt.method && flt.method.value) return true;
+    if (flt.n_cells && flt.n_cells.value) return true;
+    return false;
+  }
+
   function render() {
     var rows = ALL_ROWS.slice();
 
@@ -778,7 +795,22 @@ URL hash scheme (feature: back-button / shareable filter state):
     rows = rows.slice(0, 500);   // cap for render sanity
     summaryEl.textContent = rows.length + (rows.length === 500 ? '+' : '') + ' rows';
     if (!rows.length) {
-      bodyEl.style.display = ''; rowsEl.innerHTML = '<tr><td colspan="8" class="mv-empty">No rows match — widen the filters.</td></tr>';
+      bodyEl.style.display = '';
+      // Distinguish "no data returned by the server" from "user's filters
+      // exclude everything". ALL_ROWS.length === 0 means the endpoint has no
+      // module-variability data for this scope (e.g. a dataset that has module
+      // scores but no variability statistics computed yet); "widen the filters"
+      // would be misleading advice.
+      var hasAnyActiveFilter = _hasActiveMvFilters();
+      var msg;
+      if (!ALL_ROWS.length) {
+        msg = 'No module-variability statistics available for this scope yet.';
+      } else if (!hasAnyActiveFilter) {
+        msg = 'No rows to display (statistics were dropped by the per-tag canonical-statistic step).';
+      } else {
+        msg = 'No rows match — widen the filters.';
+      }
+      rowsEl.innerHTML = '<tr><td colspan="8" class="mv-empty">' + msg + '</td></tr>';
       return;
     }
     // Render
