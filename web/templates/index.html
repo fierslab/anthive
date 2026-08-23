@@ -182,23 +182,17 @@
       <td data-label="Datasets" class="muted">{{ folder.dataset_count }}</td>
       <td data-label="Cells" class="muted mono" style="font-size:11px">{{ format_count(folder.total_cells) or "—" }}</td>
       <td data-label="Date" data-sort-ts="{{ _date.sort_ts or 0 }}" class="muted mono" style="font-size:11px;white-space:nowrap">{{ _date.iso or "—" }}</td>
-      <td data-label="Tissue" data-sort-tissue="{{ folder.tissue_rank or 0 }}" class="muted" style="font-size:11px">
-        {% if _tis.abbrev %}<span class="ctx-pill tissue" title="tissue: {{ _tis.full }}">{{ _tis.abbrev }}</span>{% endif %}
-      </td>
-      <td data-label="Org">
-        {% if _org_chips %}<span class="org-chips">
-          {% for chip in _org_chips %}<span class="org-chip {{ chip.cls }}" title="organism: {{ chip.full }}">{{ chip.abbrev }}</span>{% endfor %}
-        </span>{% endif %}
-      </td>
-      <td data-label="Tech">
-        {% if _tech_class %}<span class="tech-class {{ _tech_cls_slug }}" title="tech class: {{ _tech_class }}{% if _tech.full %} · {{ _tech.full }}{% endif %}">{{ _tech_class }}</span>{% endif %}
-      </td>
-      <td data-label="Cell">
-        {% if _cell.abbrev %}<span class="ctx-pill cell" title="cell type: {{ _cell.full }}">{{ _cell.abbrev }}</span>{% endif %}
-      </td>
-      <td data-label="Disease">
-        {% if _dis.abbrev %}<span class="ctx-pill disease" title="disease: {{ _dis.full }}">{{ _dis.abbrev }}</span>{% endif %}
-      </td>
+      {# Whitespace-strip inside these <td>s: on mobile (≤760px) the shared
+         .card-table rule uses :empty to collapse a cell out of the card.
+         A cell containing only newlines + a Jinja {% if %} guard is NOT
+         :empty when the branch is false, so the labelled 'FIELD :' line
+         renders blank. `{%- … -%}` strips the surrounding whitespace so
+         the empty case is truly empty. #}
+      <td data-label="Tissue" data-sort-tissue="{{ folder.tissue_rank or 0 }}" class="muted" style="font-size:11px">{%- if _tis.abbrev %}<span class="ctx-pill tissue" title="tissue: {{ _tis.full }}">{{ _tis.abbrev }}</span>{% endif -%}</td>
+      <td data-label="Org">{%- if _org_chips %}<span class="org-chips">{%- for chip in _org_chips %}<span class="org-chip {{ chip.cls }}" title="organism: {{ chip.full }}">{{ chip.abbrev }}</span>{%- endfor %}</span>{% endif -%}</td>
+      <td data-label="Tech">{%- if _tech_class %}<span class="tech-class {{ _tech_cls_slug }}" title="tech class: {{ _tech_class }}{% if _tech.full %} · {{ _tech.full }}{% endif %}">{{ _tech_class }}</span>{% endif -%}</td>
+      <td data-label="Cell">{%- if _cell.abbrev %}<span class="ctx-pill cell" title="cell type: {{ _cell.full }}">{{ _cell.abbrev }}</span>{% endif -%}</td>
+      <td data-label="Disease">{%- if _dis.abbrev %}<span class="ctx-pill disease" title="disease: {{ _dis.full }}">{{ _dis.abbrev }}</span>{% endif -%}</td>
     </tr>
     {% endfor %}
   </tbody>
