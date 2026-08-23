@@ -4778,9 +4778,9 @@ def test_module_view_has_mff_widgets_not_selects(client):
                       "mv-flt-celltype-w", "mv-flt-tissue-w",
                       "mv-flt-technology-w", "mv-flt-biosample-w"):
         assert css_class in html, f"mff widget container {css_class!r} missing"
-    # each popover has select-all / select-none buttons
+    # each popover has select-all / clear-selection buttons
     assert "select all" in html
-    assert "select none" in html
+    assert "clear selection" in html
     # core mff machinery present
     assert "mff-btn" in html
     assert "mff-popover" in html
@@ -4818,14 +4818,20 @@ def test_module_view_no_old_select_for_multi_facets(client):
 
 
 def test_module_view_mff_select_all_none_buttons(client):
-    """Every mff widget popover must contain both 'select all' and 'select none' buttons."""
+    """Every mff widget popover must contain both 'select all' and 'clear selection' buttons.
+
+    'clear selection' is the P1.1 (2026-08-23) rename of the old 'select none'
+    label — zero-checked is treated downstream as 'all rows' (see mffWidget.getValues),
+    so 'select none' promised narrowing that never happened. 'clear selection'
+    matches the actual behaviour.
+    """
     resp = client.get("/genesets/StudyX/Exp1")
     assert resp.status_code == 200
     html = resp.text
     assert html.count("select all") >= 7, "expected ≥7 'select all' buttons (one per mff widget)"
-    assert html.count("select none") >= 7, "expected ≥7 'select none' buttons (one per mff widget)"
+    assert html.count("clear selection") >= 7, "expected ≥7 'clear selection' buttons (one per mff widget)"
     assert "mff-all" in html
-    assert "mff-none" in html
+    assert "mff-none" in html   # CSS class name intentionally kept for backwards-compat JS selectors
 
 
 def test_module_view_mff_hash_serialization_in_js(client):
@@ -4848,9 +4854,9 @@ def test_genes_page_has_mff_widgets_not_selects(client):
     for widget_id in ("gv-flt-cell_type-w", "gv-flt-tissue-w",
                       "gv-flt-technology-w", "gv-flt-biosample-w"):
         assert widget_id in html, f"mff widget id {widget_id!r} missing from genes.html"
-    # select-all / select-none buttons
+    # select-all / clear-selection buttons (P1.1 rename 2026-08-23)
     assert "select all" in html
-    assert "select none" in html
+    assert "clear selection" in html
     assert "mff-btn" in html
     assert "mff-popover" in html
 
