@@ -1150,6 +1150,36 @@ def test_privacy_page_renders(client):
     assert "never leaves this server" in resp.text
 
 
+def test_settings_page_renders(client):
+    """Both settings controls render, and the page ships the antSettings API
+    (module_algorithm + favourite_genes storage keys). Client-side only —
+    no server persistence."""
+    resp = client.get("/settings")
+    assert resp.status_code == 200
+    assert "Preferences" in resp.text
+    # Both controls present
+    assert 'name="module_algorithm"' in resp.text
+    assert 'value="geneset"' in resp.text
+    assert 'value="aucell"' in resp.text
+    assert 'id="favourite-genes"' in resp.text
+    # Storage keys documented (also referenced by consumers via window.antSettings)
+    assert "anthive.settings.module_algorithm" in resp.text
+    assert "anthive.settings.favourite_genes" in resp.text
+
+
+def test_settings_link_in_topbar_when_authed(client):
+    """The 'preferences' link appears in the Authelia account dropdown when
+    the request carries a Remote-User header — not otherwise. Uses the same
+    proxy-header pattern as the sign-out / account settings links."""
+    resp = client.get("/", headers={"Remote-User": "test-user", "Remote-Name": "Test User"})
+    assert resp.status_code == 200
+    assert 'href="/settings"' in resp.text
+    # Un-authenticated: no header → account menu not rendered → no link.
+    resp2 = client.get("/")
+    assert resp2.status_code == 200
+    assert 'href="/settings"' not in resp2.text
+
+
 def test_geneset_variability_page_renders(client):
     resp = client.get("/genesets/variability")
     assert resp.status_code == 200

@@ -971,11 +971,16 @@ URL hash scheme (feature: back-button / shareable filter state):
     fetch('/api/module-variability?' + params, { credentials: 'same-origin' })
       .then(function (r) { return r.ok ? r.json() : r.text().then(function (t) { throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 160)); }); })
       .then(function (d) {
-        // starCAT + AUCell rows are hidden client-side (starcat 2026-08 early,
-        // AUCell 2026-08-23) — the UI defaults to scanpy only. Flip either
-        // filter here to re-expose. Same pattern for both.
+        // starCAT rows are always hidden client-side (starcat 2026-08).
+        // scanpy (source='geneset') vs AUCell (source='aucell') is driven by
+        // the user's module-algorithm preference — /settings sets it, default
+        // 'geneset' (scanpy) matches the site-wide 2026-08-23 default.
+        var _algo = (window.antSettings && window.antSettings.moduleAlgorithm())
+                    || 'geneset';
         ALL_ROWS = (d.rows || []).filter(function (r) {
-          return r.source !== 'starcat' && r.source !== 'aucell';
+          if (r.source === 'starcat') return false;
+          if (r.source === 'geneset' || r.source === 'aucell') return r.source === _algo;
+          return true;
         });
         var groups = {}, modules = {}, datasets = {}, tags = {};
         ALL_ROWS.forEach(function (r) {

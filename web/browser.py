@@ -2411,6 +2411,25 @@ async def privacy_view(request: Request):
     return templates.TemplateResponse(request, "privacy.html", {})
 
 
+@router.get("/settings", response_class=HTMLResponse)
+async def settings_view(request: Request):
+    """User-preferences page (per-browser, localStorage-only).
+
+    Renders a shell with two controls:
+
+    - **Module scoring algorithm** — scanpy (default) vs AUCell. Read by the
+      module drilldown (`_module_view.html`) and the module-variability
+      heatmap (`geneset_variability.html`) via `window.antSettings`.
+    - **Favourite genes** — comma/newline list; upper-cased on save. Read by
+      the dataset Genes tab (star + top-pin) and the gene atlas
+      (title marker) via `window.antSettings`.
+
+    Nothing here is server-persisted; no server endpoint is called. Storage
+    keys live under the shared `ant.remember.*` prefix used elsewhere.
+    """
+    return templates.TemplateResponse(request, "settings.html", {})
+
+
 @router.get("/admin/feedback", response_class=HTMLResponse)
 async def admin_feedback_view(request: Request):
     """Admin-only triage of chat-assistant feedback flags. The rows are fetched

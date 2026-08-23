@@ -115,7 +115,24 @@
 {{ mff_styles() }}
 {{ mff_scripts() }}
 {{ breadcrumb([("gene atlas", None)]) }}
-<h1 class="page-title">{{ gene }} <span class="muted" style="font-size:13px;font-weight:normal">— expression across the catalogue</span></h1>
+<h1 class="page-title">
+  <span id="gv-fav-star" style="display:none" title="you have favourited this gene (see /settings)">&#9733;</span>
+  {{ gene }}
+  <span class="muted" style="font-size:13px;font-weight:normal">— expression across the catalogue</span>
+</h1>
+<script>
+// Show a ★ next to the gene name when it is on the user's favourite list.
+// Runs on load (single-gene view only; comma-list views skip since GENE is CSV).
+(function () {
+    var star = document.getElementById('gv-fav-star');
+    if (!star) return;
+    var name = {{ gene | tojson }};
+    if (name && name.indexOf(',') === -1
+        && window.antSettings && window.antSettings.isFavourite(name)) {
+        star.style.display = 'inline';
+    }
+})();
+</script>
 
 {# ── Row 1: %expr threshold · organism · (multi-gene: metric picker) ── #}
 <div class="gv-filter-row">

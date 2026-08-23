@@ -1,0 +1,178 @@
+{% extends "base.html" %}
+
+{% block title %}Preferences — anthive{% endblock %}
+
+{% block content %}
+<style>
+  .settings-page { max-width: 720px; }
+  .settings-page h1 { font-size: 20px; font-weight: 600; margin: 4px 0 4px; }
+  .settings-page .lead { font-size: 12px; color: var(--text-muted); margin: 0 0 16px; }
+  .settings-page h2 { font-size: 14px; margin: 20px 0 4px;
+      border-bottom: 1px solid var(--border); padding-bottom: 3px; }
+  .settings-page .field-help { font-size: 11px; color: var(--text-muted);
+      margin: 2px 0 6px; }
+  .settings-page fieldset { border: none; padding: 0; margin: 0; }
+  .settings-page .radio-row { display: flex; flex-direction: column; gap: 3px; margin: 4px 0; }
+  .settings-page .radio-row label { font-size: 13px; cursor: pointer; }
+  .settings-page textarea { width: 100%; min-height: 90px; font-family: var(--font-mono);
+      font-size: 12px; padding: 6px 8px; border: 1px solid var(--border);
+      border-radius: 4px; outline: none; box-sizing: border-box; resize: vertical; }
+  .settings-page .actions { display: flex; align-items: center; gap: 10px; margin-top: 18px; }
+  .settings-page button {
+      font-size: 12px; padding: 5px 14px;
+      background: var(--link); color: #fff; border: none; border-radius: 3px;
+      cursor: pointer; font-family: inherit;
+  }
+  .settings-page button.secondary {
+      background: #fff; color: var(--text); border: 1px solid var(--border);
+  }
+  .settings-page .save-status { font-size: 12px; color: #059669; opacity: 0; transition: opacity .2s; }
+  .settings-page .save-status.show { opacity: 1; }
+  .settings-page .fav-preview { margin-top: 4px; font-size: 11px; color: var(--text-muted); }
+  .settings-page .fav-preview .g { display: inline-block; padding: 1px 6px;
+      margin: 0 3px 3px 0; font-family: var(--font-mono);
+      background: #f1f5f9; border-radius: 2px; color: var(--text); }
+</style>
+
+{% from "_macros.html" import breadcrumb %}
+{{ breadcrumb([("preferences", None)]) }}
+
+<div class="settings-page">
+  <h1>Preferences</h1>
+  <p class="lead">
+    These settings are stored in your browser (<code>localStorage</code>), not on the
+    server. They persist across visits on this device, but do not follow you to
+    another browser or machine. Clear browser data will reset them.
+  </p>
+
+  <form id="settings-form" onsubmit="event.preventDefault(); saveSettings();">
+
+    <h2>Module scoring algorithm</h2>
+    <div class="field-help">
+      Which module-score computation to show by default in the module &amp; geneset
+      views. Applies to the module drilldown table and the module-variability heatmap.
+    </div>
+    <fieldset class="radio-row">
+      <label><input type="radio" name="module_algorithm" value="geneset"> scanpy (gene sets) — default</label>
+      <label><input type="radio" name="module_algorithm" value="aucell"> AUCell</label>
+    </fieldset>
+
+    <h2>Favourite genes</h2>
+    <div class="field-help">
+      Comma- or newline-separated gene symbols. These get a
+      <span title="favourite">&#9733;</span> marker across the site and pin to the
+      top of the dataset Genes tab, so your go-to markers are always visible.
+      Symbols are normalised to upper case.
+    </div>
+    <textarea id="favourite-genes" placeholder="APOE, TREM2, GFAP, ..."
+              autocomplete="off" spellcheck="false"></textarea>
+    <div class="fav-preview" id="fav-preview"></div>
+
+    <div class="actions">
+      <button type="submit">save</button>
+      <button type="button" class="secondary" onclick="resetSettings()">reset to defaults</button>
+      <span id="save-status" class="save-status">saved &#10003;</span>
+    </div>
+  </form>
+</div>
+
+<script>
+(function () {
+    var form       = document.getElementById('settings-form');
+    var favTa      = document.getElementById('favourite-genes');
+    var favPreview = document.getElementById('fav-preview');
+    var status     = document.getElementById('save-status');
+
+    var ALGO_KEY = window.antSettings.ALGO_KEY;
+    var FAV_KEY  = window.antSettings.FAV_KEY;
+
+    /**
+     * Parse a comma/newline-separated string of gene symbols into a
+     * normalised list of upper-case tokens (deduped, no empties).
+     *
+     * Only [A-Z0-9._-] characters survive normalisation — this both matches
+     * the shape of real HGNC symbols (letters, digits, hyphens, occasional
+     * dot for antisense/withdrawn ids) and neutralises any HTML-like input
+     * so the stored value is safe to concatenate into markup on other pages
+     * (each consumer still escapes, but defence in depth is cheap here).
+     *
+     * @param {string} raw
+     * @returns {string[]}
+     */
+    function parseGenes(raw) {
+        if (!raw) return [];
+        var seen = {}, out = [];
+        raw.split(/[\s,;]+/).forEach(function (token) {
+            var norm = token.trim().toUpperCase().replace(/[^A-Z0-9._-]/g, '');
+            if (!norm) return;
+            if (seen[norm]) return;
+            seen[norm] = 1;
+            out.push(norm);
+        });
+        return out;
+    }
+
+    function renderFavPreview() {
+        var genes = parseGenes(favTa.value);
+        if (!genes.length) { favPreview.textContent = ''; return; }
+        favPreview.innerHTML = genes.length + ' gene' + (genes.length === 1 ? '' : 's') + ': '
+            + genes.map(function (g) {
+                return '<span class="g">' + g.replace(/[&<>"]/g, function (c) {
+                    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+                }) + '</span>';
+            }).join('');
+    }
+
+    /**
+     * Load current settings from localStorage into the form controls.
+     */
+    function loadSettings() {
+        var algo = window.antSettings.moduleAlgorithm();  // 'geneset' | 'aucell'
+        var radios = form.querySelectorAll('input[name="module_algorithm"]');
+        for (var i = 0; i < radios.length; i++) {
+            radios[i].checked = (radios[i].value === algo);
+        }
+        var favs = window.antSettings.favouriteGenes();
+        favTa.value = favs.join(', ');
+        renderFavPreview();
+    }
+
+    /**
+     * Persist the form's current values into localStorage.
+     * Called on submit; renders "saved ✓" briefly.
+     */
+    window.saveSettings = function () {
+        var chosen = form.querySelector('input[name="module_algorithm"]:checked');
+        var algoVal = chosen ? chosen.value : 'geneset';
+        window.antRemember.set(ALGO_KEY, algoVal);
+
+        var genes = parseGenes(favTa.value);
+        window.antRemember.set(FAV_KEY, JSON.stringify(genes));
+        // Re-render the textarea in canonical form.
+        favTa.value = genes.join(', ');
+        renderFavPreview();
+
+        status.classList.add('show');
+        setTimeout(function () { status.classList.remove('show'); }, 1500);
+    };
+
+    /**
+     * Clear the two settings keys and reset the form to defaults.
+     */
+    window.resetSettings = function () {
+        try { localStorage.removeItem('ant.remember.' + ALGO_KEY); } catch (e) {}
+        try { localStorage.removeItem('ant.remember.' + FAV_KEY); } catch (e) {}
+        loadSettings();
+        status.textContent = 'reset ✓';
+        status.classList.add('show');
+        setTimeout(function () {
+            status.classList.remove('show');
+            status.textContent = 'saved ✓';
+        }, 1500);
+    };
+
+    favTa.addEventListener('input', renderFavPreview);
+    loadSettings();
+})();
+</script>
+{% endblock %}

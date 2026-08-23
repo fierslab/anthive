@@ -1166,6 +1166,62 @@ document.addEventListener('DOMContentLoaded', function() {
             var tabGenes = document.getElementById('tab-genes');
             if (!tabGenes) return;  // no Genes tab on this page
 
+            // ── User's favourite genes (from /settings, localStorage) ────────
+            // Injected at the top of the curated table as star-marked rows.
+            // Skipped when already present in the server-rendered curated panel
+            // (case-insensitive symbol match).
+            var _favGenes = (window.antSettings && window.antSettings.favouriteGenes()) || [];
+            if (_favGenes.length) {
+                var _existingCurated = {};
+                document.querySelectorAll('#tab-genes .gene-curated').forEach(function (row) {
+                    var g = (row.dataset.gene || '').toUpperCase();
+                    if (g) _existingCurated[g] = 1;
+                });
+                var _favBase = '/browse/' + {{ folder_browse_id | tojson }} + '/' + {{ file_id | tojson }};
+                var _favDefEmb = {{ default_embedding | tojson }};
+                var _favHasDb  = {{ has_duckdb | tojson }};
+                var _favTbody  = document.querySelector('#obs-tbl-genes tbody');
+                var _favInsertAnchor = _favTbody ? _favTbody.firstElementChild : null;
+                _favGenes.forEach(function (gene) {
+                    var _g = gene.toUpperCase();
+                    if (_existingCurated[_g]) return;  // already curated → don't duplicate
+                    if (!_favTbody) return;
+                    var _row = document.createElement('tr');
+                    _row.className = 'gene-item gene-curated gene-favourite';
+                    _row.dataset.gene   = _g;
+                    _row.dataset.geneLc = _g.toLowerCase();
+                    _row.dataset.pct    = '';
+                    _row.dataset.rank   = '';
+                    _row.dataset.var    = '';
+                    var _plotCell = '';
+                    if (_favHasDb) {
+                        var _histLink = _favBase + '/plot/histogram?x=' + encodeURIComponent(_g);
+                        var _ecdfLink = _favBase + '/plot/ecdf?x=' + encodeURIComponent(_g);
+                        _plotCell = ''
+                            + '<a class="obs-plot-icon" href="' + _histLink + '" title="histogram of ' + _g + '">'
+                            +   '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="1.5" y="8" width="3" height="6"/><rect x="6.5" y="5" width="3" height="9"/><rect x="11.5" y="2" width="3" height="12"/></svg>'
+                            + '</a>'
+                            + '<a class="obs-plot-icon" href="' + _ecdfLink + '" title="ECDF of ' + _g + '">'
+                            +   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M1.5 13 L5.5 8.5 L9 10.5 L14.5 3"/></svg>'
+                            + '</a>';
+                        if (_favDefEmb) {
+                            var _sctLink = _favBase + '/plot/scatter?embedding=' + encodeURIComponent(_favDefEmb) + '&color=' + encodeURIComponent(_g);
+                            _plotCell += '<a class="obs-plot-icon" href="' + _sctLink + '" title="' + _favDefEmb + ' scatter, coloured by ' + _g + '">'
+                                + '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3.4" cy="4.2" r="1.5"/><circle cx="6.2" cy="2.6" r="1.5"/><circle cx="5.6" cy="7" r="1.5"/><circle cx="10.6" cy="9.6" r="1.5"/><circle cx="13.2" cy="7.6" r="1.5"/><circle cx="12.4" cy="12.6" r="1.5"/><circle cx="8.6" cy="13" r="1.5"/></svg>'
+                                + '</a>';
+                        }
+                    }
+                    _row.innerHTML =
+                          '<td style="text-align:center;font-size:13px"><span title="your favourite (set in /settings)">★</span></td>'
+                        + '<td class="colname">' + _g + '</td>'
+                        + '<td class="obs-plots">' + _plotCell + '</td>'
+                        + '<td class="g-pct-cell"><span class="g-pct"></span><span class="ss" data-stat="pct" title="% expressing cells"><span class="ss-mark" style="display:none"></span></span></td>'
+                        + '<td class="g-rank-cell"><span class="g-rank"></span><span class="ss" data-stat="rank" title="rank expression (db-wide percentile rank of mean)"><span class="ss-mark" style="display:none"></span></span></td>'
+                        + '<td class="g-var-cell"><span class="g-var"></span><span class="ss" data-stat="var" title="variability (rank of std within displayed genes)"><span class="ss-mark" style="display:none"></span></span></td>';
+                    _favTbody.insertBefore(_row, _favInsertAnchor);
+                });
+            }
+
             var rows = Array.from(document.querySelectorAll('#tab-genes .gene-item'));
 
             var searchInput  = document.getElementById('gene-search');

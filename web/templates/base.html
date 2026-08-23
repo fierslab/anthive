@@ -512,6 +512,7 @@
                     {% if 'admins' in _groups %}
                     <a href="/admin/feedback">chat feedback</a>
                     {% endif %}
+                    <a href="/settings">preferences</a>
                     <a href="/authelia/" target="_blank" rel="noopener">account settings</a>
                     <a href="#" id="authelia-signout">sign out</a>
                 </span>
@@ -559,6 +560,46 @@
             return sel.value;
         }
     };
+    </script>
+    <script>
+    // User settings — persistent, per-browser (localStorage). Set on /settings.
+    //
+    //   window.antSettings.moduleAlgorithm()   → 'geneset' (scanpy, default) | 'aucell'
+    //   window.antSettings.favouriteGenes()    → array of upper-case HGNC symbols (may be [])
+    //   window.antSettings.isFavourite(gene)   → bool (case-insensitive)
+    //
+    // Storage keys (also used directly by settings.html):
+    //   ant.remember.anthive.settings.module_algorithm  → 'geneset' | 'aucell'
+    //   ant.remember.anthive.settings.favourite_genes   → JSON array of strings
+    window.antSettings = (function () {
+        var ALGO_KEY = 'anthive.settings.module_algorithm';
+        var FAV_KEY  = 'anthive.settings.favourite_genes';
+        function moduleAlgorithm() {
+            var val = window.antRemember.get(ALGO_KEY);
+            return (val === 'aucell') ? 'aucell' : 'geneset';
+        }
+        function favouriteGenes() {
+            var raw = window.antRemember.get(FAV_KEY);
+            if (!raw) return [];
+            try {
+                var parsed = JSON.parse(raw);
+                if (!Array.isArray(parsed)) return [];
+                return parsed.filter(function (g) { return typeof g === 'string' && g.length; });
+            } catch (e) { return []; }
+        }
+        function isFavourite(gene) {
+            if (!gene) return false;
+            var target = String(gene).toUpperCase();
+            return favouriteGenes().some(function (g) { return g.toUpperCase() === target; });
+        }
+        return {
+            moduleAlgorithm: moduleAlgorithm,
+            favouriteGenes: favouriteGenes,
+            isFavourite: isFavourite,
+            ALGO_KEY: ALGO_KEY,
+            FAV_KEY: FAV_KEY
+        };
+    })();
     </script>
     <script>
     // Breadcrumb ID-copy chips — .bc-id-chip elements (rendered by the
