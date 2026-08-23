@@ -1028,11 +1028,13 @@ URL hash scheme (feature: back-button / shareable filter state):
         fillMff('biosample',  Object.keys(biosamples));
 
         // preselect_cell_types: if a cell type matches a widget option, select it.
-        // Skip in module scope — the catalog spans many cell types so preselecting
-        // the geneset's own cell type silently hides datasets where it's scored
-        // under a different cell-type context (e.g. LuChen WGCNA modules scored
-        // in microglia datasets but the geneset's celltypes list includes astrocyte).
-        if (CTX.scope !== 'module' && PRESELECT_CTS.length > 0 && mff.celltype) {
+        // Applies in every scope. Previously blocked in module scope on the
+        // theory that the catalog might span many cell types; in practice the
+        // per-geneset detail page (module scope with module_name set) is
+        // exactly where users want microglial-cell auto-selected, so honour
+        // the server's preselect signal there too. If a geneset shouldn't
+        // preselect, the server side should stop sending it for that geneset.
+        if (PRESELECT_CTS.length > 0 && mff.celltype) {
           var ctWidget = mff.celltype;
           // Re-read all option values from the widget's list.
           var ctList = root.querySelector('.mv-flt-celltype-w .mff-list');
