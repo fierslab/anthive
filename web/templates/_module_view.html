@@ -213,10 +213,9 @@ URL hash scheme (feature: back-button / shareable filter state):
     <div><label>n cells</label>
       <select class="mv-flt-n_cells">
         <option value="">all</option>
-        <option value="lt1k">&lt;1k</option>
-        <option value="1k-10k">1k–10k</option>
-        <option value="10k-100k">10k–100k</option>
-        <option value="gt100k">&gt;100k</option>
+        <option value="gt100">&gt;100</option>
+        <option value="gt1k">&gt;1k</option>
+        <option value="gt10k">&gt;10k</option>
       </select>
     </div>
     {% endif %}
@@ -734,16 +733,15 @@ URL hash scheme (feature: back-button / shareable filter state):
       });
     }
 
-    // single-select: n_cells bucket
+    // single-select: n_cells bucket — cumulative lower bounds ("gt<N>" = nc > N).
     if (flt.n_cells && flt.n_cells.value) {
       var bucket = flt.n_cells.value;
       rows = rows.filter(function (r) {
         var ann = DS_ANNOT[r.dataset] || {};
         var nc = parseInt(ann.n_cells || '0', 10) || 0;
-        if (bucket === 'lt1k')     return nc < 1000;
-        if (bucket === '1k-10k')   return nc >= 1000 && nc < 10000;
-        if (bucket === '10k-100k') return nc >= 10000 && nc < 100000;
-        if (bucket === 'gt100k')   return nc >= 100000;
+        if (bucket === 'gt100')  return nc > 100;
+        if (bucket === 'gt1k')   return nc > 1000;
+        if (bucket === 'gt10k')  return nc > 10000;
         return true;
       });
     }
