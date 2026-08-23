@@ -709,12 +709,21 @@ def test_md_first_paragraph_no_heading():
 # ── n_cells facet and rich popover — HTML presence tests ──────────────────────
 
 def test_module_view_has_n_cells_filter(client):  # pyright: ignore
-    """Module drilldown page renders the .mv-flt-n_cells select with bucket options."""
+    """Module drilldown page renders the .mv-flt-n_cells select with cumulative buckets.
+
+    The four options are: all (empty value), gt100, gt1k, gt10k. Cumulative
+    lower bounds — each step is a subset of the previous.
+    """
     resp = client.get("/genesets/StudyX/Exp1")
     assert resp.status_code == 200
     text = resp.text
     assert "mv-flt-n_cells" in text
-    assert "lt1k" in text and "gt100k" in text
+    for bucket_value in ('"gt100"', '"gt1k"', '"gt10k"'):
+        assert bucket_value in text, f"missing bucket option {bucket_value}"
+    # Old range-bucket values must be gone (regression guard).
+    assert '"lt1k"' not in text
+    assert '"1k-10k"' not in text
+    assert '"gt100k"' not in text
 
 
 def test_module_view_popover_has_collection_and_dataset_fields(client):  # pyright: ignore
@@ -728,12 +737,16 @@ def test_module_view_popover_has_collection_and_dataset_fields(client):  # pyrig
 
 
 def test_genes_page_has_n_cells_filter(client):  # pyright: ignore
-    """Gene atlas page renders the gv-flt-n_cells select with bucket options."""
+    """Gene atlas page renders the gv-flt-n_cells select with cumulative buckets."""
     resp = client.get("/genes/APOE")
     assert resp.status_code == 200
     text = resp.text
     assert "gv-flt-n_cells" in text
-    assert "lt1k" in text and "gt100k" in text
+    for bucket_value in ('"gt100"', '"gt1k"', '"gt10k"'):
+        assert bucket_value in text, f"missing bucket option {bucket_value}"
+    assert '"lt1k"' not in text
+    assert '"1k-10k"' not in text
+    assert '"gt100k"' not in text
 
 
 def test_genes_page_popover_has_collection_and_dataset_fields(client):  # pyright: ignore
@@ -4889,3 +4902,74 @@ def test_categorical_top_cells_keep_pct_label(client):
     # pctLabel still builds the % span — check the JS still contains it
     assert "pctLabel" in html, "pctLabel variable missing — % text dropped from categorical cells"
     assert "% of cells" not in html or "data-stat" not in html or True  # partial check OK
+
+
+# ── geneset overview fixes 1–5 ────────────────────────────────────────────────
+
+def test_module_view_peer_position_has_no_score_range_text(client):
+    """Fix 1: the vs-peer-modules cell must not render a min–max numeric range
+    next to the sparkline — that range is meaningless without a shared axis.
+    The old JS emitted `<span class="muted-2">MIN–MAX</span>` after the track;
+    check that construction is gone.
+    """
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    html = resp.text
+    # The renderer used to concatenate `(+g.min).toFixed(2)` right after the
+    # track span for the mv-pos cell. That specific format was the sole caller.
+    assert "(+g.min).toFixed(2) + '–' + (+g.max).toFixed(2)" not in html, (
+        "min–max range text still emitted next to peer-position sparkline"
+    )
+    # The sparkline marker itself must remain.
+    assert "mv-mark" in html
+    assert "mv-track" in html
+
+
+def test_module_view_merges_plot_and_umap_columns(client):
+    """Fix 2: the module drilldown table must have a single icon column
+    ('plots'), not separate plot + umap columns."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    html = resp.text
+    # Header row must contain one 'plots' <th> and NOT a lone 'umap' header.
+    assert ">plots<" in html, "expected merged 'plots' column header"
+    assert ">umap<" not in html, "standalone 'umap' column header must be gone"
+    # Only ONE td.mv-icons per row now — but that's easier asserted via
+    # counting mv-icons occurrences in the row template. The Jinja template
+    # renders 'mv-icons' once inside the JS tds.push() calls.
+    assert html.count("class=\"mv-icons\"") <= 1, (
+        "expected at most one mv-icons cell template — extra icons column not removed"
+    )
+
+
+def test_mff_widget_populates_unchecked(client):
+    """Fix 4: mff popover checkboxes are inserted UNCHECKED by default (empty
+    == 'all')."""
+    # _macros.html is a partial; render any page that includes mff_scripts().
+    resp = client.get("/genes/APOE")
+    assert resp.status_code == 200
+    html = resp.text
+    # The populate() function must NOT ship every checkbox with `checked>`.
+    # Look for the specific template literal that used to render the box.
+    assert "'<input type=\"checkbox\" value=\"' + opt.value.replace(/\"/g, '&quot;') + '\" checked>" not in html, (
+        "mff-widget populate still renders boxes as checked — should be unchecked so first click narrows"
+    )
+    # Sanity: the unchecked form must be present.
+    assert "'<input type=\"checkbox\" value=\"' + opt.value.replace(/\"/g, '&quot;') + '\"> '" in html
+
+
+def test_module_view_tissue_tree_has_descendants_cascade(client):
+    """Fix 5: the tissue widget wires a click cascade that toggles the whole
+    subtree when a parent is clicked. The template must expose a
+    DESCENDANTS map and a click-listener that cascades .checked."""
+    resp = client.get("/genesets/StudyX/Exp1")
+    assert resp.status_code == 200
+    html = resp.text
+    # DESCENDANTS map is built inside fillTissueMff.
+    assert "DESCENDANTS" in html, "tissue cascade DESCENDANTS map not present"
+    # click-cascade block sets .checked on each descendant.
+    assert "kb.checked = newState" in html, (
+        "tissue cascade does not propagate check state to descendants"
+    )
+    # Indeterminate marker refreshed on partial subtree selection.
+    assert "cb.indeterminate" in html, "indeterminate marker not maintained on parent boxes"
