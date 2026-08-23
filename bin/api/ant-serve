@@ -10837,6 +10837,7 @@ def _load_module_variability(force: bool = False):
 @app.get("/module-variability", tags=["genesets"])
 async def get_module_variability(
     dataset: Optional[str] = Query(None, description="Filter by db_id."),
+    db_id: Optional[str] = Query(None, description="Alias for `dataset` (accepted for client-side symmetry with other endpoints)."),
     source: Optional[str] = Query(None, description="'geneset' or 'starcat'."),
     catalog: Optional[str] = Query(None, description="E.g. 'Sierksma2025/WGCNA' or 'MICROGLIA_V1'."),
     module: Optional[str] = Query(None, description="Module / program name."),
@@ -10873,6 +10874,13 @@ async def get_module_variability(
             f"{registry.data_folder}. Run `ant module-variability` to generate."
         ))
 
+    # ``db_id`` is an alias for ``dataset`` — callers writing generic
+    # "identify the dataset by its db_id" client code shouldn't have to know
+    # this endpoint uses a different name. Explicit ``dataset`` wins if both
+    # are supplied and disagree.
+    if dataset is None and db_id is not None:
+        dataset = db_id
+
     # Back-compat alias: ?tag_column=braak → ant_braak when ant_braak exists
     # in the parquet's tag_column values and braak itself does not.
     alias_notices: list[str] = []
@@ -10897,6 +10905,18 @@ async def get_module_variability(
     if min_abs is not None:
         import numpy as _np
         working = working[_np.abs(working['value']) >= min_abs]
+
+    # NaN / ±Inf in ``value`` (missing statistics or degenerate F/eta² on
+    # constant groups) are not JSON-compliant floats — a stray one causes
+    # ``to_dict`` → jsonable_encoder to raise ValueError → uvicorn 500. Drop
+    # them here so the endpoint never bombs on a legitimate query. If the
+    # user explicitly asked for the raw value with ``min_abs`` unset that
+    # would otherwise let NaN through, we still filter — anyone wanting the
+    # NaN rows can select ``statistic=NaN`` explicitly, which is impossible
+    # (statistic column carries the *name*, not the *value*).
+    import numpy as _np
+    _finite_mask = _np.isfinite(working['value'].astype(float, copy=False))
+    working = working[_finite_mask]
 
     # Sort
     if sort == "value:asc":
