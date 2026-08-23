@@ -482,6 +482,76 @@ URL hash scheme (feature: back-button / shareable filter state):
 
     widget.populate(opts, false);
     if (currentVals && currentVals.length) widget.setValues(currentVals);
+
+    // ── Tree-aware cascade ────────────────────────────────────────────────
+    // Build DESCENDANTS map (term → [all descendants, incl. transitive]).
+    var DESCENDANTS = {};
+    function collectDesc(term) {
+      if (DESCENDANTS[term]) return DESCENDANTS[term];
+      var out = [];
+      (children[term] || []).forEach(function (kid) {
+        out.push(kid);
+        collectDesc(kid).forEach(function (d) { out.push(d); });
+      });
+      DESCENDANTS[term] = out;
+      return out;
+    }
+    Object.keys(termSet).forEach(collectDesc);
+
+    var wRoot = root.querySelector('.mv-flt-tissue-w');
+    var boxes = wRoot.querySelectorAll('input[type="checkbox"]');
+    var boxByValue = {};
+    boxes.forEach(function (cb) { boxByValue[cb.value] = cb; });
+
+    /**
+     * Reflect indeterminate state on every parent based on descendant checks.
+     * Partial (some but not all descendants checked) → box.indeterminate = true.
+     * Fully-checked and fully-unchecked leave indeterminate false.
+     */
+    function refreshIndeterminates() {
+      boxes.forEach(function (cb) {
+        var kids = DESCENDANTS[cb.value] || [];
+        if (!kids.length) { cb.indeterminate = false; return; }
+        var checkedKids = 0;
+        kids.forEach(function (k) {
+          var kb = boxByValue[k]; if (kb && kb.checked) checkedKids++;
+        });
+        cb.indeterminate = checkedKids > 0 && checkedKids < kids.length &&
+          // if the parent itself is checked and all descendants are checked, it's fully selected;
+          // if parent unchecked & no descendants checked, it's fully clear.
+          true;
+        // Simpler rule: indeterminate iff there's a mix in the subtree.
+        if (checkedKids === 0 || checkedKids === kids.length) cb.indeterminate = false;
+      });
+    }
+
+    // Intercept a click on any tissue checkbox: if it's a parent (has
+    // descendants), cascade the new state to the entire subtree so the
+    // user's mental model — "click 'brain' selects brain" — matches.
+    // Leaves cascade nothing. The final onMffChange still fires once.
+    var suppressCascade = false;
+    boxes.forEach(function (cb) {
+      cb.addEventListener('click', function () {
+        if (suppressCascade) return;
+        var kids = DESCENDANTS[cb.value] || [];
+        if (!kids.length) { refreshIndeterminates(); return; }
+        suppressCascade = true;
+        var newState = cb.checked;
+        kids.forEach(function (kv) {
+          var kb = boxByValue[kv];
+          if (kb) kb.checked = newState;
+        });
+        suppressCascade = false;
+        refreshIndeterminates();
+      });
+      // Regular 'change' events (from the shared widget) need indeterminate
+      // updates too — bind once per box, non-cascading.
+      cb.addEventListener('change', function () {
+        if (suppressCascade) return;
+        refreshIndeterminates();
+      });
+    });
+    refreshIndeterminates();
   }
 
   var ALL_ROWS = [];      // raw fetched rows
