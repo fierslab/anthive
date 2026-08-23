@@ -173,10 +173,53 @@ def _view_column_kind(conn, column: str) -> str:
     return '?'
 
 
+def _obsnum_score_columns(conn: duckdb.DuckDBPyConnection) -> list[tuple[str, str, str, str]]:
+    """Enumerate legacy module-score columns living in ``__obsnum``.
+
+    These predate the ``.scores.parquet`` sidecar convention. They come from
+    ``ant-score --rebuild`` (h5ad write-back) or from pre-existing scored
+    obs columns imported by ``ant-convert``. The naming convention is
+    ``<study>::<experiment>::<module>`` (three ``::``-separated parts, all
+    non-empty).
+
+    Returns a list of ``(column_name, source, catalog, module)`` tuples
+    where ``source='geneset'`` and ``catalog='<study>/<experiment>'`` — the
+    same schema the sidecar uses.
+    """
+    rows = conn.execute(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_name = '__obsnum' AND column_name LIKE '%::%::%'"
+    ).fetchall()
+    out: list[tuple[str, str, str, str]] = []
+    for (col,) in rows:
+        parts = col.split('::')
+        if len(parts) != 3 or not all(parts):
+            continue
+        study, experiment, module = parts
+        out.append((col, 'geneset', f'{study}/{experiment}', module))
+    return out
+
+
 def compute_for_dataset(db_id: str, duckdb_path: Path, md_path: Path) -> pd.DataFrame:
-    """Return one long-format DataFrame of variability rows for the dataset."""
+    """Return one long-format DataFrame of variability rows for the dataset.
+
+    Score sources, in priority order (all are used when present):
+
+    1. ``<basename>.scores.parquet`` sidecar (modern path — starcat / aucell /
+       ext scoring writes here).
+    2. Legacy ``<study>::<experiment>::<module>`` columns in ``__obsnum``
+       — pre-sidecar module scores that were written straight to obs by
+       ``ant-score --rebuild`` or imported wholesale by ``ant-convert``. They
+       are treated as ``source='geneset'``, ``catalog='<study>/<experiment>'``,
+       ``module='<module>'`` — matching the sidecar schema.
+
+    If a ``(source, catalog, module)`` triple appears in both, the sidecar
+    wins (sidecar is the modern write path and is expected to be authoritative).
+    """
     md, _ = parse_md_file(md_path)
     obs_tags = md.get('obs_tags') or {}
+    api_config = md.get('api') or {}
+    obs_rename = api_config.get('obs_rename') or {}
 
     # Build the effective (column → [tag,...]) mapping:
     # 1. Canonical columns from the view get their canonical tag.
@@ -184,29 +227,113 @@ def compute_for_dataset(db_id: str, duckdb_path: Path, md_path: Path) -> pd.Data
     #    (canonical is preferred; a raw name will only fire if that raw
     #    column still exists in the view, which it won't after obs_rename —
     #    those entries become dead weight and can be dropped later).
+    # 3. `api.obs_rename` chains — the view builder only applies a single
+    #    hop, so a chain like ``Sex_donor → sex → ant_sex`` surfaces `sex`
+    #    in the view, not `ant_sex`. Walk the chain and, for every hop that
+    #    lands on a canonical column, teach the tag mapping to accept the
+    #    intermediate name too (so variability can still find the column).
     tag_targets: dict[str, list[str]] = {}
     for col, tag in _CANONICAL_TAGS.items():
         tag_targets.setdefault(col, [])
         if tag not in tag_targets[col]:
             tag_targets[col].append(tag)
+
+    def _resolve_chain(start: str, seen: set[str]) -> Optional[str]:
+        """Follow ``obs_rename`` forward from ``start``; return the last
+        name in the chain (guarded against cycles)."""
+        current = start
+        while current in obs_rename and current not in seen:
+            seen.add(current)
+            current = obs_rename[current]
+        return current
+
+    for src, dst in list(obs_rename.items()):
+        # Terminal name of the chain that starts at `src`.
+        terminal = _resolve_chain(src, set())
+        if terminal in _CANONICAL_TAGS:
+            canonical_tag = _CANONICAL_TAGS[terminal]
+            # Register every hop as a candidate view-column name; the first
+            # one actually present wins in `_view_column_kind` below.
+            hop = src
+            visited: set[str] = set()
+            while True:
+                if hop in visited:
+                    break
+                visited.add(hop)
+                tag_targets.setdefault(hop, [])
+                if canonical_tag not in tag_targets[hop]:
+                    tag_targets[hop].append(canonical_tag)
+                if hop == terminal or hop not in obs_rename:
+                    break
+                hop = obs_rename[hop]
+
     for col, tags in obs_tags.items():
         tag_targets.setdefault(col, [])
         for t in (tags or []):
             if t not in tag_targets[col]:
                 tag_targets[col].append(t)
+        # If the raw obs_tags column has been renamed via api.obs_rename,
+        # register the renamed (view-visible) column too. Walk the chain
+        # so a two-hop rename like ``Sex_donor → sex → ant_sex`` still
+        # picks up the intermediate ``sex`` if that's the one the view
+        # actually surfaces.
+        hop = col
+        visited = set()
+        while hop in obs_rename and hop not in visited:
+            visited.add(hop)
+            hop = obs_rename[hop]
+            tag_targets.setdefault(hop, [])
+            for t in (tags or []):
+                if t not in tag_targets[hop]:
+                    tag_targets[hop].append(t)
 
     sidecar = scores_path(duckdb_path)
-    if not sidecar.exists():
+    conn = duckdb.connect(str(duckdb_path), read_only=True)
+
+    frames: list[pd.DataFrame] = []
+    if sidecar.exists():
+        sidecar_df = conn.execute(
+            "SELECT c.cell_name, s.source, s.catalog, s.module, s.score "
+            "FROM read_parquet(?) s "
+            "JOIN __cells c ON c.cell_id = s.cell_id",
+            [str(sidecar)],
+        ).df()
+        if not sidecar_df.empty:
+            frames.append(sidecar_df)
+
+    # Legacy obs-column path — score columns in __obsnum written straight to
+    # obs before the sidecar existed. Discover them and pull each column as
+    # (cell_name, source, catalog, module, score) rows.
+    legacy_cols = _obsnum_score_columns(conn)
+    if legacy_cols:
+        seen_from_sidecar: set[tuple[str, str, str]] = set()
+        if frames:
+            seen_from_sidecar = set(
+                map(tuple,
+                    frames[0][['source', 'catalog', 'module']].drop_duplicates().values.tolist())
+            )
+        for column, source, catalog, module in legacy_cols:
+            if (source, catalog, module) in seen_from_sidecar:
+                continue  # sidecar wins
+            try:
+                df = conn.execute(
+                    'SELECT c.cell_name, CAST("' + column + '" AS DOUBLE) AS score '
+                    'FROM __obsnum o JOIN __cells c ON c.cell_id = o.cell_id'
+                ).df()
+            except Exception:
+                continue
+            if df.empty:
+                continue
+            df['source'] = source
+            df['catalog'] = catalog
+            df['module'] = module
+            frames.append(df[['cell_name', 'source', 'catalog', 'module', 'score']])
+
+    if not frames:
+        conn.close()
         return pd.DataFrame()
 
-    # Load all score triples in one shot.
-    conn = duckdb.connect(str(duckdb_path), read_only=True)
-    scores_long = conn.execute(
-        "SELECT c.cell_name, s.source, s.catalog, s.module, s.score "
-        "FROM read_parquet(?) s "
-        "JOIN __cells c ON c.cell_id = s.cell_id",
-        [str(sidecar)],
-    ).df()
+    scores_long = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
     if scores_long.empty:
         conn.close()
         return pd.DataFrame()
@@ -325,6 +452,11 @@ def main() -> int:
             continue
         if not entry.duckdb_path.exists():
             continue
+        # Skip datasets marked inactive via sidecar file (same convention as
+        # ant-serve — an ``.inactive`` file next to the ``.h5ad`` hides the
+        # dataset from the catalog; it should not surface in variability).
+        if entry.h5ad_path.with_suffix('.inactive').exists():
+            continue
         t0 = time.time()
         try:
             df = compute_for_dataset(entry.db_id, entry.duckdb_path, entry.md_path)
@@ -334,9 +466,21 @@ def main() -> int:
             continue
 
         if df.empty:
-            # Try to distinguish reason
+            # Distinguish "no scores at all" (sidecar missing AND no legacy
+            # ::-columns in __obsnum) from "scores present but no matching
+            # canonical/tag columns to compute variability against".
             sidecar_ok = scores_path(entry.duckdb_path).exists()
+            legacy_ok = False
             if not sidecar_ok:
+                try:
+                    _c = duckdb.connect(str(entry.duckdb_path), read_only=True)
+                    try:
+                        legacy_ok = bool(_obsnum_score_columns(_c))
+                    finally:
+                        _c.close()
+                except Exception:
+                    legacy_ok = False
+            if not sidecar_ok and not legacy_ok:
                 stats_summary['skipped_no_scores'] += 1
             else:
                 stats_summary['skipped_no_tags'] += 1
