@@ -698,11 +698,22 @@ URL hash scheme (feature: back-button / shareable filter state):
   /**
    * After mff widgets are populated with options, apply any pending hash values.
    * Comma-joined values are split and set on the widget.
+   *
+   * URL-facing key aliases (user reads them off the UI label):
+   *   geneset → module (internal widget key; the button label is "geneset")
+   * Internal-name keys still work so old links keep resolving.
    */
+  var HASH_KEY_ALIAS = { geneset: 'module' };
   function flushPendingHashValues() {
+    // Merge alias keys into their canonical widget key so both spellings apply.
+    var pending = {};
+    Object.keys(_pendingHashVals).forEach(function (raw) {
+      var mapped = HASH_KEY_ALIAS[raw] || raw;
+      pending[mapped] = _pendingHashVals[raw];
+    });
     Object.keys(mff).forEach(function (key) {
       var widget = mff[key]; if (!widget) return;
-      var raw = _pendingHashVals[key]; if (!raw) return;
+      var raw = pending[key]; if (!raw) return;
       widget.setValues(raw.split(',').map(function (v) { return v.trim(); }).filter(Boolean));
     });
   }
