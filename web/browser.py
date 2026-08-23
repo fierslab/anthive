@@ -2174,9 +2174,23 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
                 'n':       len(by_cat[cat_name]),
             })
 
+    # Hide auto-generated starCAT columns from the raw obs listings on the
+    # dataset page. Numerical starCAT scores (``starcat__<catalog>__<module>``)
+    # are already routed into the Module Scores tab by ``_group_module_scores``;
+    # the derived categorical flags (``starcat__…_pos`` / ``…_high`` /
+    # ``…_Identity_Label``) are pure clutter in the Categorical tab. Keep them
+    # out of ``obs_columns`` (which drives both the Numerical and Categorical
+    # tables). The data itself is untouched — plot endpoints still accept these
+    # column names for users who know them.
+    cat_cols_filtered = [
+        col for col in obs.get('categorical', []) if not col.startswith(_STARCAT_PREFIX)
+    ]
+    num_cols_filtered = [
+        col for col in score_grouped['non_score_cols'] if not col.startswith(_STARCAT_PREFIX)
+    ]
     obs_columns = (
-        [{'name': col, 'type': 'num'} for col in score_grouped['non_score_cols']] +
-        [{'name': col, 'type': 'cat'} for col in obs.get('categorical', [])]
+        [{'name': col, 'type': 'num'} for col in num_cols_filtered] +
+        [{'name': col, 'type': 'cat'} for col in cat_cols_filtered]
     )
 
     info = {
@@ -2264,10 +2278,12 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         'source':          _summarize_meta_field([db], 'source',          abbrev_map=_SOURCE_ABBREV),
         'year':            db.get('year'),
     }
-    n_cat = len(obs.get('categorical') or [])
+    # Counts follow the filtered lists: starcat__* columns are hidden from
+    # the raw obs tabs, so they don't contribute to the tab-bar badges either.
+    n_cat = len(cat_cols_filtered)
     # n_num = the plain (non-score) numerical columns shown in the Numerical
     # tab; module-score columns get their own "Module scores" tab now.
-    n_num = len(score_grouped['non_score_cols'])
+    n_num = len(num_cols_filtered)
     n_modules = len(module_scores)
 
     layer_stats = db.get('layer_stats') or {}

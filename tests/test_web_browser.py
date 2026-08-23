@@ -2467,6 +2467,50 @@ def test_dataset_view_module_scores_absent_method_greyed(client, monkeypatch):
     assert 'value="aucell"' in resp.text
 
 
+def test_dataset_view_hides_starcat_prefixed_obs_columns(client, monkeypatch):
+    """starcat__* columns are cluttery auto-generated flags — hide them from
+    the raw Numerical + Categorical tabs on the dataset page. Numerical
+    starCAT scores get their own Module Scores tab; the derived _pos/_high
+    categorical flags don't belong in the obs listings at all.
+
+    Contract: filter runs at obs_columns construction; plot endpoints still
+    accept starcat__* names (data path untouched, tested elsewhere)."""
+    def with_starcat(api_url, path):
+        result = _fake_api_get(api_url, path)
+        if path.endswith("/info") and isinstance(result, dict):
+            result = dict(result)
+            result["obs"] = {
+                "categorical": [
+                    "cell_type",
+                    "starcat__MICROGLIA_V1__DAM_pos",
+                    "starcat__MICROGLIA_V1__Cycling_pos",
+                    "starcat__MICROGLIA_V1__HeatShock_high",
+                ],
+                "numerical": [
+                    "n_genes", "pseudotime",
+                    "starcat__MICROGLIA_V1__DAM_progression",
+                    # A non-starcat scanpy module (routed to modules tab)
+                    "Sierksma2025::WGCNA::Brown_Lysosome",
+                ],
+            }
+        return result
+    monkeypatch.setattr(browser, "_api_get", with_starcat)
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+
+    # Categorical table: cell_type still there, no starcat__* rows
+    cat_section = resp.text[resp.text.index('id="obs-tbl-cat"'):]
+    cat_section = cat_section[:cat_section.index('</table>')]
+    assert 'data-colname="cell_type"' in cat_section
+    assert 'starcat__' not in cat_section
+
+    # Numerical table: no starcat__* rows either (they were classified as
+    # score columns and are on the Module Scores tab). n_genes/pseudotime stay.
+    num_section = resp.text[resp.text.index('id="obs-tbl-num"'):]
+    num_section = num_section[:num_section.index('</table>')]
+    assert 'starcat__' not in num_section
+
+
 def test_geneset_variability_page_offers_aucell_source(client):
     resp = client.get("/genesets/variability")
     assert resp.status_code == 200
