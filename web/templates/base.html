@@ -586,7 +586,25 @@
             try {
                 var parsed = JSON.parse(raw);
                 if (!Array.isArray(parsed)) return [];
-                return parsed.filter(function (g) { return typeof g === 'string' && g.length; });
+                // Re-sanitise on read (defence-in-depth). Consumers concatenate
+                // these strings into raw HTML — an untrusted same-origin write
+                // (bookmarklet, extension) into localStorage would otherwise
+                // pass through settings.html's parseGenes filter. Apply the
+                // identical [A-Z0-9._-] gate here so a stored `<img …>` token
+                // cannot survive to markup.
+                var GENE_TOKEN = /^[A-Z0-9._-]+$/;
+                var out = [];
+                var seen = {};
+                for (var i = 0; i < parsed.length; i++) {
+                    var candidate = parsed[i];
+                    if (typeof candidate !== 'string' || !candidate.length) continue;
+                    var normalised = candidate.toUpperCase().replace(/[^A-Z0-9._-]/g, '');
+                    if (!normalised || !GENE_TOKEN.test(normalised)) continue;
+                    if (seen[normalised]) continue;
+                    seen[normalised] = 1;
+                    out.push(normalised);
+                }
+                return out;
             } catch (e) { return []; }
         }
         function isFavourite(gene) {
