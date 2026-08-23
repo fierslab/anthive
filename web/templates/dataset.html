@@ -916,7 +916,11 @@ document.addEventListener('DOMContentLoaded', function() {
     })();
 
     // Show an inline error inside a hydrated tab when its fetch fails.
-    window.antShowTabError = function (tabName, message) {
+    // ``retryFn`` (optional): a zero-arg callback invoked when the user clicks
+    // Retry. If omitted, Retry falls back to a full-page reload — the previous
+    // behaviour. This matters because reloading the whole page throws away
+    // scroll position, expanded sections, and the user's tab activation.
+    window.antShowTabError = function (tabName, message, retryFn) {
         var host = document.getElementById('tab-' + tabName);
         if (!host) return;
         window.antTabLoading.done(tabName);
@@ -936,8 +940,53 @@ document.addEventListener('DOMContentLoaded', function() {
         var retry = box.querySelector('[data-action="retry"]');
         if (retry) retry.addEventListener('click', function (ev) {
             ev.preventDefault();
-            window.location.reload();
+            // Remove the banner so subsequent errors re-render it fresh, and
+            // reveal the spinner if a retry callback re-fires the fetch.
+            if (box && box.parentNode) box.parentNode.removeChild(box);
+            if (typeof retryFn === 'function') {
+                window.antTabLoading.show(tabName);
+                try { retryFn(); }
+                catch (err) { console.error('retry callback failed:', err); }
+            } else {
+                window.location.reload();
+            }
         });
+    };
+
+    // Fetch with an AbortController-backed timeout. On timeout the promise
+    // rejects with an Error whose ``.name === 'TimeoutError'`` so callers can
+    // surface a clear "took too long" message instead of a bare TypeError.
+    // ``onElapsed(seconds)`` (optional) is called every second while the
+    // request is inflight so a spinner can show "loading… 12s".
+    window.antFetchWithTimeout = function (url, opts, timeoutMs, onElapsed) {
+        opts = opts || {};
+        var controller = new AbortController();
+        var elapsed = 0;
+        var ticker = null;
+        if (typeof onElapsed === 'function') {
+            ticker = setInterval(function () {
+                elapsed += 1;
+                onElapsed(elapsed);
+            }, 1000);
+        }
+        var timer = setTimeout(function () { controller.abort(); }, timeoutMs || 30_000);
+        var fetchOpts = Object.assign({}, opts, { signal: controller.signal });
+        return fetch(url, fetchOpts)
+            .then(function (response) {
+                clearTimeout(timer);
+                if (ticker) clearInterval(ticker);
+                return response;
+            })
+            .catch(function (err) {
+                clearTimeout(timer);
+                if (ticker) clearInterval(ticker);
+                if (err && err.name === 'AbortError') {
+                    var timeoutErr = new Error('request timed out after ' + Math.round((timeoutMs || 30_000) / 1000) + 's');
+                    timeoutErr.name = 'TimeoutError';
+                    throw timeoutErr;
+                }
+                throw err;
+            });
     };
 
     // ── Tab bar wiring (URL-hash deep-linking) ───────────────────────────
@@ -1470,12 +1519,36 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (topvarSection) topvarSection.style.display = '';
             }
 
+            // Elapsed-timer helper for the Genes tab spinner. Reveals the
+            // seconds counter next to "loading gene stats…" so the user knows
+            // the page isn't wedged — the /gene_stats endpoint can take 8–15s
+            // on a cold dataset (see doc/QA_PUNCH_LIST_2026_08_23.md P0.2).
+            function _genesSpinnerElapsed(sec) {
+                var spinner = document.querySelector('[data-tab-loading="genes"]');
+                if (!spinner) return;
+                var counter = spinner.querySelector('.tab-elapsed');
+                if (!counter) {
+                    counter = document.createElement('span');
+                    counter.className = 'tab-elapsed muted';
+                    counter.style.cssText = 'font-size:11px;margin-left:6px';
+                    spinner.appendChild(counter);
+                }
+                counter.textContent = '(' + sec + 's)';
+            }
+
             // Fetch genome-wide top-20 most variable genes and render them.
             // Called when there are no curated genes, or after curated hydration.
-            // On failure: log to console + surface an inline error inside the
-            // Genes tab (replacing the misleading "0 genes" empty state).
+            // On failure (network error OR 30s timeout): log to console + surface
+            // an inline error inside the Genes tab with a Retry action that
+            // re-invokes this function (no full-page reload).
             function fetchTopVarGenomeWide() {
-                return fetch(apiBase + '/gene_stats?top=20', { credentials: 'same-origin' })
+                if (window.antTabLoading) window.antTabLoading.show('genes');
+                return window.antFetchWithTimeout(
+                    apiBase + '/gene_stats?top=20',
+                    { credentials: 'same-origin' },
+                    30_000,
+                    _genesSpinnerElapsed,
+                )
                     .then(function (r) {
                         if (!r.ok) throw new Error('HTTP ' + r.status);
                         return r.json();
@@ -1492,7 +1565,11 @@ document.addEventListener('DOMContentLoaded', function() {
                     .catch(function (err) {
                         console.error('fetchTopVarGenomeWide failed:', err);
                         if (window.antShowTabError) {
-                            window.antShowTabError('genes', 'network error (' + err.message + ')');
+                            window.antShowTabError(
+                                'genes',
+                                (err && err.name === 'TimeoutError' ? err.message : 'network error (' + err.message + ')'),
+                                fetchTopVarGenomeWide,
+                            );
                         }
                     })
                     .finally(function () {
@@ -1506,8 +1583,13 @@ document.addEventListener('DOMContentLoaded', function() {
                     fetchTopVarGenomeWide();
                     return;
                 }
-                fetch(apiBase + '/gene_stats?genes=' + encodeURIComponent(genes.join(',')),
-                      { credentials: 'same-origin' })
+                if (window.antTabLoading) window.antTabLoading.show('genes');
+                window.antFetchWithTimeout(
+                    apiBase + '/gene_stats?genes=' + encodeURIComponent(genes.join(',')),
+                    { credentials: 'same-origin' },
+                    30_000,
+                    _genesSpinnerElapsed,
+                )
                     .then(function (r) {
                         if (!r.ok) throw new Error('HTTP ' + r.status);
                         return r.json();
@@ -1537,7 +1619,11 @@ document.addEventListener('DOMContentLoaded', function() {
                     .catch(function (err) {
                         console.error('fetchAndHydrateCurated failed:', err);
                         if (window.antShowTabError) {
-                            window.antShowTabError('genes', 'network error (' + err.message + ')');
+                            window.antShowTabError(
+                                'genes',
+                                (err && err.name === 'TimeoutError' ? err.message : 'network error (' + err.message + ')'),
+                                fetchAndHydrateCurated,
+                            );
                         }
                     });
             }
