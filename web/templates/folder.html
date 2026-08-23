@@ -86,6 +86,36 @@
   th.sortable .sort-ind { display: inline-block; width: 8px; color: #bbb; margin-left: 2px; font-size: 9px; }
   th.sortable.sort-asc  .sort-ind::before  { content:'▲'; color: var(--text); }
   th.sortable.sort-desc .sort-ind::before  { content:'▼'; color: var(--text); }
+
+  /* Non-sortable header with a value filter (Org/Tech/Cell/Tissue/Disease)
+     also gets a pointer cursor so the click affordance matches the popover
+     hint. Layers/Embed have data-help but no filter — they still open a
+     help popover, so cursor:pointer there too. */
+  #datasets-table th[data-col] { cursor: pointer; user-select: none; position: relative; }
+  #datasets-table th[data-col]:hover { background: var(--hover); }
+
+  /* Column-header popover — mirrors index.html's .col-popover styling. */
+  .col-popover {
+    position:fixed; min-width:200px; max-width:280px;
+    background:#fff; border:1px solid var(--border); box-shadow:0 4px 12px rgba(0,0,0,.12);
+    padding:8px 10px; z-index:9999; font-size:11px; font-weight:400; color:var(--text);
+    text-transform:none; letter-spacing:0; line-height:1.4;
+  }
+  .col-popover .desc { color:var(--text-muted); margin-bottom:6px; }
+  .col-popover .sort-btns { display:flex; gap:4px; margin:4px 0 6px; }
+  .col-popover .sort-btns button {
+    flex:1; padding:2px 4px; font-size:11px; background:#f8fafc;
+    border:1px solid var(--border); cursor:pointer; font-family:inherit;
+  }
+  .col-popover .sort-btns button.active { background:#dbeafe; border-color:var(--link); }
+  .col-popover .filter-section { margin-top:4px; padding-top:4px; border-top:1px dotted var(--border); }
+  .col-popover .filter-section h5 {
+    font-size:10px; font-weight:600; color:var(--text-muted);
+    text-transform:uppercase; letter-spacing:.4px; margin:0 0 2px 0;
+  }
+  .col-popover .vals { max-height:160px; overflow-y:auto; }
+  .col-popover .vals label { display:block; padding:1px 0; cursor:pointer; }
+  .col-popover .clear-link { font-size:10px; color:#888; }
 </style>
 
 {% from "_macros.html" import breadcrumb %}
@@ -123,16 +153,16 @@
 <table id="datasets-table" class="card-table">
     <thead>
         <tr>
-            <th class="sortable" data-col="name">Dataset<span class="sort-ind"></span></th>
-            <th class="sortable" data-col="cells" title="cells × genes">Cells × Genes<span class="sort-ind"></span></th>
-            <th class="sortable" data-col="date" title="publication year, or upload date when unpublished">Date<span class="sort-ind"></span></th>
-            {% if 'organism' in var_fields %}<th title="organism (Hs=human, Mm=mouse, …)">Org</th>{% endif %}
-            {% if 'technology' in var_fields %}<th title="top-level technology class (sc/sn RNA · bulk RNA · proteomics · spatial · other)">Tech</th>{% endif %}
-            {% if 'celltype' in var_fields %}<th title="cell type">Cell</th>{% endif %}
-            {% if 'tissue' in var_fields %}<th title="tissue / brain region">Tissue</th>{% endif %}
-            {% if 'disease' in var_fields %}<th title="disease state">Disease</th>{% endif %}
-            <th title="layer count — hover to list">Layers</th>
-            <th title="embedding count — hover to list">Embed</th>
+            <th class="sortable" data-col="name" data-help="Dataset name (icon before it: 🌐 public / 🏠 internal; red=unpublished, green=published). External-link icons (🔗) link to DOI / accession / URL. ⚠ = caveats.">Dataset <span class="info" title="Click to sort or read help">ⓘ</span><span class="sort-ind"></span></th>
+            <th class="sortable" data-col="cells" title="cells × genes" data-help="Cell count × gene count for this dataset.">Cells × Genes <span class="info" title="Click to sort by cell count">ⓘ</span><span class="sort-ind"></span></th>
+            <th class="sortable" data-col="date" data-help="Publication year (when known and published), or upload date (mtime) otherwise.">Date <span class="info" title="Click to sort by date">ⓘ</span><span class="sort-ind"></span></th>
+            {% if 'organism' in var_fields %}<th data-col="organism" data-help="Organism(s) for this dataset. Chips: Hs=human, Mm=mouse, Rn=rat, Dr=zebrafish, Dm=drosophila, Mf=macaque, Ce=C.elegans." data-filter-field="organism">Org <span class="info" title="Click to filter by organism">ⓘ</span></th>{% endif %}
+            {% if 'technology' in var_fields %}<th data-col="tech_class" data-help="Top-level technology class: sc/sn RNA · bulk RNA · proteomics · spatial · other." data-filter-field="tech_class">Tech <span class="info" title="Click to filter by technology class">ⓘ</span></th>{% endif %}
+            {% if 'celltype' in var_fields %}<th data-col="celltype" data-help="Cell type represented in the dataset. Hover the pill for the full ontology term." data-filter-field="celltype">Cell <span class="info" title="Click to filter by cell type">ⓘ</span></th>{% endif %}
+            {% if 'tissue' in var_fields %}<th data-col="tissue" data-help="Tissue / brain region. Hover the pill for the full term." data-filter-field="tissue">Tissue <span class="info" title="Click to filter by tissue">ⓘ</span></th>{% endif %}
+            {% if 'disease' in var_fields %}<th data-col="disease" data-help="Disease / condition state. Hover the pill for the full term." data-filter-field="disease">Disease <span class="info" title="Click to filter by disease">ⓘ</span></th>{% endif %}
+            <th data-col="layers" data-help="Number of expression layers stored in the .h5ad (raw / lognorm / …). Hover to list them.">Layers <span class="info" title="Layer count — hover to list">ⓘ</span></th>
+            <th data-col="embed" data-help="Number of dimensionality-reduction embeddings (X_umap / X_pca / …). Hover to list them.">Embed <span class="info" title="Embedding count — hover to list">ⓘ</span></th>
         </tr>
     </thead>
     <tbody>
@@ -147,7 +177,12 @@
         {% set _date = dataset.dataset_date    or {} %}
         <tr data-name="{{ (dataset.name or '')|lower }}"
             data-cells="{{ dataset.n_obs or 0 }}"
-            data-sort-ts="{{ _date.sort_ts or 0 }}">
+            data-sort-ts="{{ _date.sort_ts or 0 }}"
+            data-organism="{{ _org.full or '' }}"
+            data-tech_class="{{ dataset.tech_class or '' }}"
+            data-celltype="{{ _cell.full or '' }}"
+            data-tissue="{{ _tis.full or '' }}"
+            data-disease="{{ _dis.full or '' }}">
             <td class="card-title">
                 {% if _icon.glyph %}<span class="ap-icon" style="color:{{ _icon.color }}" title="{{ _icon.tooltip }}">{{ _icon.glyph|safe }}</span>{% endif %}<a href="/browse/{{ folder_browse_id }}/{{ dataset.browse_id }}" title="{% if dataset.description %}{{ dataset.description }}{% else %}{{ dataset.file_id }}{% endif %}"><strong>{{ dataset.name }}</strong></a>{% for doi_item in dataset.doi %}<a class="ext-lnk" href="https://doi.org/{{ doi_item }}" target="_blank" rel="noopener" title="DOI: {{ doi_item }}">🔗</a>{% endfor %}{% if dataset.accession_url %}<a class="ext-lnk" href="{{ dataset.accession_url }}" target="_blank" rel="noopener" title="accession: {{ dataset.accession }}">🔗</a>{% endif %}{% for url_item in dataset.link %}<a class="ext-lnk" href="{{ url_item }}" target="_blank" rel="noopener" title="{{ url_item }}">🔗</a>{% endfor %}{% set _cv = dataset.caveats_summary or {} %}{% if _cv.n %}<a class="cv-mark lvl-{{ _cv.max_level }}" href="/browse/{{ folder_browse_id }}/{{ dataset.browse_id }}#tab-overview" title="{{ _cv.n }} caveat{{ 's' if _cv.n > 1 else '' }} (highest: {{ _cv.max_level }})">⚠</a>{% endif %}
                 {% if dataset.subfolder %}<br><span class="muted-2" style="font-size:11px">{{ dataset.subfolder }}</span>{% endif %}
@@ -204,9 +239,13 @@ document.addEventListener('DOMContentLoaded', function () {
     if (!tbl) return;
     var tbody = tbl.querySelector('tbody');
     var rows  = Array.from(tbody.querySelectorAll('tr'));
-    var headers = Array.from(tbl.querySelectorAll('th.sortable'));
+    var sortableHeaders = Array.from(tbl.querySelectorAll('th.sortable'));
+    var allHeaders      = Array.from(tbl.querySelectorAll('th[data-col]'));
     var filterEl = document.getElementById('ds-filter');
     var sortCol = 'date', sortDir = 'desc';
+    // Per-column value filters (populated from popover checkboxes).
+    // Map: {field: Set<value>}. Empty/missing = no filter for that field.
+    var valueFilters = {};
 
     function rowKey(row, col) {
         if (col === 'date')  return Number(row.getAttribute('data-sort-ts') || 0);
@@ -223,7 +262,7 @@ document.addEventListener('DOMContentLoaded', function () {
             return sortDir === 'desc' ? -cmp : cmp;
         });
         rows.forEach(function (r) { tbody.appendChild(r); });
-        headers.forEach(function (h) {
+        sortableHeaders.forEach(function (h) {
             h.classList.remove('sort-asc', 'sort-desc');
             if (h.getAttribute('data-col') === sortCol) h.classList.add('sort-' + sortDir);
         });
@@ -231,28 +270,169 @@ document.addEventListener('DOMContentLoaded', function () {
     var clearBtn  = document.getElementById('ds-filter-clear');
     var countEl   = document.getElementById('ds-visible-count');
 
+    function rowValueMatch(row, field, wanted) {
+        // Row attribute is a comma-joined 'full' string; OR-match wanted set.
+        var raw = row.getAttribute('data-' + field) || '';
+        var vals = raw.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+        return vals.some(function (v) { return wanted.has(v); });
+    }
     function applyFilter() {
         var q = (filterEl && filterEl.value || '').toLowerCase().trim();
+        var activeFields = Object.keys(valueFilters).filter(function (f) {
+            return valueFilters[f] && valueFilters[f].size;
+        });
         var visible = 0;
         rows.forEach(function (r) {
-            var hit = !q || r.textContent.toLowerCase().indexOf(q) >= 0;
+            var textHit = !q || r.textContent.toLowerCase().indexOf(q) >= 0;
+            var valueHit = activeFields.every(function (f) {
+                return rowValueMatch(r, f, valueFilters[f]);
+            });
+            var hit = textHit && valueHit;
             r.style.display = hit ? '' : 'none';
             if (hit) visible++;
         });
         if (countEl) countEl.textContent = visible;
-        if (clearBtn) clearBtn.style.display = q ? '' : 'none';
+        if (clearBtn) clearBtn.style.display = (q || activeFields.length) ? '' : 'none';
     }
-    headers.forEach(function (h) {
-        h.addEventListener('click', function () {
-            var col = h.getAttribute('data-col');
-            if (sortCol === col) sortDir = sortDir === 'asc' ? 'desc' : 'asc';
-            else { sortCol = col; sortDir = (col === 'date' || col === 'cells') ? 'desc' : 'asc'; }
-            applySort();
+
+    // ── Column-header popover (help + sort + value filter) ────────────────
+    // Mirrors the pattern in index.html: fixed-positioned .col-popover
+    // appended to <body>, one popover open at a time. Clicks inside the
+    // popover don't bubble to the th (they'd close it).
+    var activePopover = null;
+    function closePopover() {
+        if (activePopover) { activePopover.remove(); activePopover = null; }
+    }
+    document.addEventListener('click', function (event) {
+        if (activePopover && !activePopover.contains(event.target)
+            && !event.target.closest('th[data-col]')) closePopover();
+    });
+    window.addEventListener('scroll', closePopover, { passive: true, capture: true });
+    window.addEventListener('resize', closePopover, { passive: true });
+
+    function uniqueValuesFor(field) {
+        var out = new Set();
+        rows.forEach(function (r) {
+            (r.getAttribute('data-' + field) || '').split(',').forEach(function (v) {
+                v = v.trim(); if (v) out.add(v);
+            });
+        });
+        return Array.from(out).sort();
+    }
+
+    allHeaders.forEach(function (th) {
+        th.addEventListener('click', function (event) {
+            // Ignore clicks that came from inside our own popover.
+            if (activePopover && activePopover.contains(event.target)) return;
+            event.stopPropagation();
+            var col = th.getAttribute('data-col');
+            var help = th.getAttribute('data-help') || '';
+            var filterField = th.getAttribute('data-filter-field');
+            var isSortable = th.classList.contains('sortable');
+            var reopenOnSame = activePopover && activePopover.dataset.col === col;
+            closePopover();
+            if (reopenOnSame) {
+                // Clicking the same header again while its popover was open
+                // just flips the sort (matches index.html's behaviour).
+                if (isSortable) {
+                    if (sortCol === col) sortDir = (sortDir === 'asc') ? 'desc' : 'asc';
+                    else { sortCol = col; sortDir = (col === 'date' || col === 'cells') ? 'desc' : 'asc'; }
+                    applySort();
+                }
+                return;
+            }
+            var pop = document.createElement('div');
+            pop.className = 'col-popover';
+            pop.dataset.col = col;
+            document.body.appendChild(pop);
+            var rect = th.getBoundingClientRect();
+            pop.style.top  = (rect.bottom + 4) + 'px';
+            pop.style.left = rect.left + 'px';
+
+            if (help) {
+                var desc = document.createElement('div');
+                desc.className = 'desc';
+                desc.textContent = help;
+                pop.appendChild(desc);
+            }
+
+            if (isSortable) {
+                var sortBtns = document.createElement('div');
+                sortBtns.className = 'sort-btns';
+                var ascBtn = document.createElement('button');
+                ascBtn.textContent = '▲ asc';
+                if (sortCol === col && sortDir === 'asc') ascBtn.classList.add('active');
+                ascBtn.onclick = function (ev) {
+                    ev.stopPropagation();
+                    sortCol = col; sortDir = 'asc';
+                    applySort(); closePopover();
+                };
+                var descBtn = document.createElement('button');
+                descBtn.textContent = '▼ desc';
+                if (sortCol === col && sortDir === 'desc') descBtn.classList.add('active');
+                descBtn.onclick = function (ev) {
+                    ev.stopPropagation();
+                    sortCol = col; sortDir = 'desc';
+                    applySort(); closePopover();
+                };
+                sortBtns.appendChild(ascBtn); sortBtns.appendChild(descBtn);
+                pop.appendChild(sortBtns);
+            }
+
+            if (filterField) {
+                var vals = uniqueValuesFor(filterField);
+                if (vals.length) {
+                    var section = document.createElement('div');
+                    section.className = 'filter-section';
+                    var h5 = document.createElement('h5');
+                    h5.textContent = 'filter by ' + (col.replace(/_/g, ' '));
+                    section.appendChild(h5);
+                    if (!valueFilters[filterField]) valueFilters[filterField] = new Set();
+                    var valsBox = document.createElement('div');
+                    valsBox.className = 'vals';
+                    vals.forEach(function (value) {
+                        var lbl = document.createElement('label');
+                        var cb = document.createElement('input');
+                        cb.type = 'checkbox';
+                        cb.value = value;
+                        cb.checked = valueFilters[filterField].has(value);
+                        cb.addEventListener('change', function () {
+                            if (cb.checked) valueFilters[filterField].add(value);
+                            else valueFilters[filterField].delete(value);
+                            applyFilter();
+                        });
+                        lbl.appendChild(cb);
+                        lbl.appendChild(document.createTextNode(' ' + value));
+                        valsBox.appendChild(lbl);
+                    });
+                    section.appendChild(valsBox);
+                    if (valueFilters[filterField].size) {
+                        var clr = document.createElement('a');
+                        clr.className = 'clear-link';
+                        clr.href = '#';
+                        clr.textContent = '× clear filter';
+                        clr.onclick = function (ev) {
+                            ev.preventDefault(); ev.stopPropagation();
+                            valueFilters[filterField] = new Set();
+                            section.querySelectorAll('input[type=checkbox]').forEach(function (c) {
+                                c.checked = false;
+                            });
+                            applyFilter();
+                        };
+                        section.appendChild(clr);
+                    }
+                    pop.appendChild(section);
+                }
+            }
+            activePopover = pop;
         });
     });
+
     if (filterEl) filterEl.addEventListener('input', applyFilter);
     if (clearBtn) clearBtn.addEventListener('click', function () {
         if (filterEl) { filterEl.value = ''; filterEl.focus(); }
+        // Clear value filters too so one action zeroes everything.
+        Object.keys(valueFilters).forEach(function (f) { valueFilters[f] = new Set(); });
         applyFilter();
     });
     applySort();
