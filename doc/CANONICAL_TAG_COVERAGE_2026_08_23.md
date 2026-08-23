@@ -270,3 +270,59 @@ Collections modified (obs_rename/obs_derive additions to .md files):
 - Zielonka2025
 
 Total: 38 collections modified, all changes verified via API refresh-views.
+
+---
+
+## Post-audit decisions — 2026-08-23
+
+Six ambiguous cases were resolved with user input. Implementation completed same day.
+
+### Decisions and outcomes
+
+| Case | Decision | Result |
+|------|----------|--------|
+| #5 Thrupp2020 | SKIP — no `ant_disease` (control meaningless without disease) | Verified: no `ant_disease` in T20/FUL, T20/ISC, T20/ITG. No edits made. |
+| #3 Francken2026 ATM/LTM/MTM metacells | SKIP braak — avg_Braak is a per-metacell float, not a per-cell stage | Verified: no `ant_braak` in F26/ATM, F26/LTM, F26/MTM. No edits made. |
+| #4 Zielonka2025 Z3N metacells | SKIP braak — mean_Mathys_Braak_numeric is a per-metacell float | Verified: no `ant_braak` in Z25/Z3N. No edits made. |
+| #2 Gabitto2024 disease | `Overall AD neuropathological Change` → `ant_disease` (obs_rename) | DONE: 14 files (7 MTG + 7 PFC, ExN skipped — no obscat). Values: High/Intermediate/Low/Not AD/Reference. |
+| #1 Gabitto2024 age | Cast `Age at Death` string → numerical. MTG files: obs_derive with full explicit map (90+ → 90). PFC files: obs_rename (already in obsnum). | DONE: 14 files. `ant_age` live as numerical. |
+| #6 Lee2026 | Backfill from TableS3/TableS4 supp CSVs via AnnotationWriter | DONE: see below. |
+
+### Gabitto2024 — data correction note
+
+The audit doc claimed `Age at Death` was stored as `"80-89 years"` bins. This was wrong.
+- MTG files: `Age at Death` in `__obscat` as VARCHAR numeric strings (e.g. `"29"`, `"90+"`).
+- PFC files: `Age at Death` in `__obsnum` as DOUBLE.
+No paper fetch was needed. `90+` mapped to `90` (explicit map entry in MTG obs_derive).
+
+`Consensus Clinical Dx` column also does not exist in any Gabitto2024 dataset.
+`Overall AD neuropathological Change` was confirmed as the correct disease proxy
+(values: High/Intermediate/Low/Not AD/Reference; passes through verbatim).
+`Reference` = cognitively normal control category in the SEA-AD cohort.
+
+h5adstore commit: `a15f7d6`
+
+### Lee2026 — backfill details
+
+CSVs: `static/TableS3_metadata_FreshMG.csv` (137 donors) and `TableS4_metadata_PsychAD.csv` (1470 donors).
+Join key: `individualID`. Match: 100% (verified before write).
+
+Written to `__obsnum` via `AnnotationWriter`:
+- `age_years` — float; FreshMG `89+` → 90.0; all 137/1470 donors matched.
+- `pmi` — float (FreshMG: minutes-scale values from original CSV; PsychAD: hours-scale).
+- `braak_score` — float; NULLs where CSV is blank (FreshMG: 52,760 cells NULL; PsychAD: 63,814 cells NULL).
+- `cerad_score` — float; NULLs (FreshMG: 62,624 NULL; PsychAD: 79,881 NULL).
+- `dementia_score` — float (0/0.5/1); NULLs (FreshMG: 127,527 NULL; PsychAD: 71,844 NULL).
+
+Written to `__obscat` via `AnnotationWriter`:
+- `disease_dx` — dx string: FreshMG values CTRL/AD/OTH; PsychAD values CTRL/AD/OTH/AD_DLBD/AD_SCZ/AD_Vascular/BD/DLBD + others.
+- `sex_raw` — FreshMG: F/M; PsychAD: Female/Male (normalised to f/m via obs_value_rename).
+- `race_raw` — passed through verbatim.
+
+`obs_rename` in .md exposes: `ant_age`, `ant_pmi`, `ant_braak`, `ant_disease`, `ant_sex`.
+`obs_derive` adds: `ant_braak_group` (source: braak_score; 0-2 → low, 3-4 → medium, 5-6 → high).
+
+Note: `dementia_score` and `cerad_score` written to duckdb but not exposed via canonical
+`ant_` rename — available as raw columns `dementia_score` / `cerad_score` in obsnum.
+
+h5adstore commit: `7be3756`
