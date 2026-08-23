@@ -259,7 +259,7 @@ URL hash scheme (feature: back-button / shareable filter state):
         <th class="mv-th-tag" data-sortcol="tag">canonical tag</th>
         <th data-sortcol="method">method</th>
         <th data-sortcol="value" style="text-align:right">score</th>
-        <th class="mv-pos mv-sort-desc" data-sortcol="position">vs peer modules <span class="info" title="Peers = other modules scored with the SAME method on the SAME (dataset, tag). Marker = this row's value; bar spans min–max across peer modules. Click to sort by this column.">ⓘ</span></th>
+        <th class="mv-pos mv-sort-desc" data-sortcol="position">vs peer modules <span class="info" onclick="event.stopPropagation()" title="Peers = other modules scored with the SAME method on the SAME (dataset, tag). Marker = this row's value; bar spans min–max across peer modules. Click to sort by this column.">ⓘ</span></th>
         <th style="text-align:center;cursor:default">plots</th>
       </tr></thead>
       <tbody class="mv-rows"></tbody>
@@ -917,14 +917,19 @@ URL hash scheme (feature: back-button / shareable filter state):
       var hasAnyActiveFilter = _hasActiveMvFilters();
       var msg;
       if (!ALL_ROWS.length) {
-        // Dataset scope with score columns but no MV rows almost always
-        // means the fleet parquet is stale for this dataset (scored after
-        // the last `ant-module-variability` run) — steer the reader at
-        // the rebuild action, not a vague "yet".
+        // Dataset scope with score columns but no MV rows: distinguish
+        // "no canonical tags → will never have rows" from "canonical tags
+        // present, computation lagging". User-facing text only — never
+        // leak command names or endpoint paths into the UI.
         if (CTX.scope === 'dataset' && CTX.dataset) {
-          msg = 'No module-variability rows in module_variability.parquet for ' +
-                CTX.dataset + '. Regenerate via `ant module-variability` and ' +
-                '`POST /module-variability/rescan`.';
+          if (CTX.has_canonical_tags === false) {
+            msg = 'This dataset has module scores but no canonical tags ' +
+                  '(braak, sex, cluster, …). Variability statistics need ' +
+                  'at least one canonical tag to compare scores against.';
+          } else {
+            msg = 'Variability statistics for ' + CTX.dataset + ' are still ' +
+                  'being computed. Reload this page in a few minutes.';
+          }
         } else {
           msg = 'No module-variability statistics available for this scope yet.';
         }

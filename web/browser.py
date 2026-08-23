@@ -2352,7 +2352,20 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "publication_status": pub_status,
         "pub_icon": pub_icon,
         "is_admin": _is_admin(request),
-        "mv_ctx": {"scope": "dataset", "dataset": db_id, "id": "mv-modules-tab"},
+        "mv_ctx": {
+            "scope": "dataset",
+            "dataset": db_id,
+            "id": "mv-modules-tab",
+            # For the empty-state branching in _module_view.html: does this
+            # dataset carry any canonical (`ant_*`) obs columns at all?
+            # No canonical tags → variability cannot be computed for it, so
+            # the message needs to say that plainly rather than "computing…".
+            "has_canonical_tags": any(
+                str(col).startswith("ant_")
+                for col in (obs.get("categorical", []) or [])
+                          + (obs.get("numerical", []) or [])
+            ),
+        },
     })
 
 
