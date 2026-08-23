@@ -843,17 +843,46 @@
     return '/api/gene_stats_all?' + params.toString();
   }
 
+  // Elapsed-seconds counter for the /gene_stats_all spinner. Reveals ticks
+  // next to the "computing…" text so a slow (or wedged) request is
+  // visibly distinguishable from a fresh one. See doc/QA_PUNCH_LIST_2026_08_23.md P0.1.
+  function _showElapsed(seconds) {
+    if (!loading) return;
+    var counter = loading.querySelector('.gv-elapsed');
+    if (!counter) {
+      counter = document.createElement('span');
+      counter.className = 'gv-elapsed muted';
+      counter.style.cssText = 'font-size:11px;margin-left:6px;display:block;margin-top:4px';
+      loading.appendChild(counter);
+    }
+    counter.textContent = 'elapsed ' + seconds + 's';
+  }
+
   function load() {
     found = []; missing = [];
     loading.style.display = ''; gvBody.style.display = 'none';
     document.getElementById('gene-heatmap').innerHTML = '';
     missBox.innerHTML = ''; errBox.innerHTML = ''; heroBox.innerHTML = '';
     summaryEl.textContent = '';
-    fetch(fetchUrl())
+    // Reset the elapsed counter for a fresh request.
+    var _prevCounter = loading.querySelector('.gv-elapsed');
+    if (_prevCounter) _prevCounter.remove();
+
+    // 30s hard timeout — a wedged /gene_stats_all across 130+ dbs shouldn't
+    // spin forever. antFetchWithTimeout is defined in dataset.html but not
+    // universally available from this page; fall back to a local implementation.
+    var controller = new AbortController();
+    var elapsed = 0;
+    var ticker = setInterval(function () { elapsed += 1; _showElapsed(elapsed); }, 1000);
+    var timer = setTimeout(function () { controller.abort(); }, 30_000);
+    var clean = function () { clearTimeout(timer); clearInterval(ticker); };
+
+    fetch(fetchUrl(), { signal: controller.signal })
       .then(function (r) {
         return r.ok ? r.json() : r.text().then(function (t) { throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 200)); });
       })
       .then(function (data) {
+        clean();
         loading.style.display = 'none';
         if (MULTI) {
           document.getElementById('gv-hm-controls').style.display = '';
@@ -879,9 +908,25 @@
           missBox.innerHTML = '<b>Not detected</b> in ' + missing.length + ' dataset(s): ' + missing.map(function (m) { return esc(m.title || m.db_id); }).join(', ');
         }
       })
-      .catch(function (e) {
+      .catch(function (err) {
+        clean();
         loading.style.display = 'none';
-        errBox.innerHTML = '<span class="err">could not load gene stats — ' + esc(e.message) + '</span>';
+        // Never swallow: surface to console AND to the user.
+        console.error('/gene_stats_all failed:', err);
+        var isTimeout = err && err.name === 'AbortError';
+        var msg = isTimeout
+          ? 'request timed out after 30s'
+          : (err && err.message ? err.message : 'network error');
+        errBox.innerHTML =
+            '<div class="err" style="padding:10px;border:1px solid #fecaca;background:#fef2f2;color:#991b1b;border-radius:6px;font-size:12px">'
+          + '⚠ could not load gene stats — ' + esc(msg)
+          + '. <a href="#" data-action="retry" style="color:#991b1b;text-decoration:underline">Retry?</a>'
+          + '</div>';
+        var retry = errBox.querySelector('[data-action="retry"]');
+        if (retry) retry.addEventListener('click', function (ev) {
+          ev.preventDefault();
+          load();
+        });
       });
   }
 
