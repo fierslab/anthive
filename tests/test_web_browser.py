@@ -1168,16 +1168,17 @@ def test_settings_page_renders(client):
 
 
 def test_settings_link_in_topbar_when_authed(client):
-    """The 'preferences' link appears in the Authelia account dropdown when
-    the request carries a Remote-User header — not otherwise. Uses the same
-    proxy-header pattern as the sign-out / account settings links."""
+    """The 'preferences' link now lives in the always-visible topbar nav
+    (moved from the Authelia account dropdown in P1.14 — settings are
+    localStorage / per-browser, so they don't need SSO)."""
+    # Authed: link present.
     resp = client.get("/", headers={"Remote-User": "test-user", "Remote-Name": "Test User"})
     assert resp.status_code == 200
     assert 'href="/settings"' in resp.text
-    # Un-authenticated: no header → account menu not rendered → no link.
+    # Un-authenticated: link ALSO present (no SSO gate on preferences).
     resp2 = client.get("/")
     assert resp2.status_code == 200
-    assert 'href="/settings"' not in resp2.text
+    assert 'href="/settings"' in resp2.text
 
 
 def test_geneset_variability_page_renders(client):
@@ -2662,15 +2663,25 @@ def test_dataset_view_embeddings_subheading_hidden_when_no_obsm(client, monkeypa
 
 
 def test_dataset_view_downloads_client_filters_to_h5ad(client):
-    # The Downloads JS must filter /files output to kind == 'h5ad' only and
-    # additionally suppress .duckdb / .layer.*.parquet / .h5ad.mus / .md /
-    # dotfile / underscore-prefixed entries.
+    # After P1.16 the Downloads section renders all 4 known artifact kinds
+    # (h5ad / duckdb / scores / mus), each with a KIND_LABEL entry. Unknown
+    # kinds + staging/hidden files (`_`/`.` prefix, `.inactive` suffix) are
+    # still dropped client-side.
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
-    assert "f.kind !== 'h5ad'" in resp.text
+    # All four kinds appear in the client's KIND_LABEL table.
+    assert "h5ad:" in resp.text
+    assert "duckdb:" in resp.text
+    assert "scores:" in resp.text
+    assert "mus:" in resp.text
+    # Extensions are surfaced too (labels shown next to each download link).
+    assert ".h5ad" in resp.text
     assert ".duckdb" in resp.text
-    assert ".layer." in resp.text
+    assert ".scores.parquet" in resp.text
     assert ".h5ad.mus" in resp.text
+    # The unknown-kind / staging-file guard is still there.
+    assert "!KIND_LABEL[f.kind]" in resp.text
+    assert "startsWith('_')" in resp.text
 
 
 # ── group page: static folder + Downloads section ──────────────────────────────
