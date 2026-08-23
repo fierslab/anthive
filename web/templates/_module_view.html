@@ -240,8 +240,7 @@ URL hash scheme (feature: back-button / shareable filter state):
         <th data-sortcol="method">method</th>
         <th data-sortcol="value" style="text-align:right">score</th>
         <th class="mv-pos mv-sort-desc" data-sortcol="position">vs peer modules <span class="info" title="Peers = other modules scored with the SAME method on the SAME (dataset, tag). Marker = this row's value; bar spans min–max across peer modules. Click to sort by this column.">ⓘ</span></th>
-        <th style="text-align:center;cursor:default">plot</th>
-        <th style="text-align:center;cursor:default">umap</th>
+        <th style="text-align:center;cursor:default">plots</th>
       </tr></thead>
       <tbody class="mv-rows"></tbody>
     </table>
@@ -810,7 +809,7 @@ URL hash scheme (feature: back-button / shareable filter state):
       } else {
         msg = 'No rows match — widen the filters.';
       }
-      rowsEl.innerHTML = '<tr><td colspan="8" class="mv-empty">' + msg + '</td></tr>';
+      rowsEl.innerHTML = '<tr><td colspan="7" class="mv-empty">' + msg + '</td></tr>';
       return;
     }
     // Render
@@ -860,9 +859,9 @@ URL hash scheme (feature: back-button / shareable filter state):
       tds.push('<td class="mv-pos">' + track + '</td>');
       var plotCell = (pu ? '<a href="' + pu + '" title="plot ' + esc(r.tag) + ' × ' + esc(r.module) + '">' + plotSvg + '</a>' : '')
         + (eu ? '<a href="' + eu + '" title="ECDF of ' + esc(r.module) + ' split by ' + esc(r.tag) + '">' + SVG_LINE + '</a>' : '')
-        + (hu ? '<a href="' + hu + '" title="hexbin (density) of ' + esc(r.module) + ' in embedding">' + SVG_HEX + '</a>' : '');
+        + (hu ? '<a href="' + hu + '" title="hexbin (density) of ' + esc(r.module) + ' in embedding">' + SVG_HEX + '</a>' : '')
+        + (uu ? '<a href="' + uu + '" title="UMAP coloured by ' + esc(r.module) + '">' + SVG_UMAP + '</a>' : '');
       tds.push('<td class="mv-icons" style="text-align:center">' + plotCell + '</td>');
-      tds.push('<td class="mv-icons" style="text-align:center">' + (uu ? '<a href="' + uu + '" title="UMAP coloured by ' + esc(r.module) + '">' + SVG_UMAP + '</a>' : '') + '</td>');
       return '<tr>' + tds.join('') + '</tr>';
     }).join('');
     rowsEl.innerHTML = html;
