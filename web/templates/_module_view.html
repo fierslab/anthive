@@ -34,6 +34,11 @@ URL hash scheme (feature: back-button / shareable filter state):
 {% from "_macros.html" import mff_styles, mff_scripts %}
 {% set _mv = mv_ctx %}
 {% set _id = _mv.get('id', 'mv-panel') %}
+{# Column count for the empty-state row's colspan. Base = 8 columns
+   (group · geneset · dataset · tag · method · score · vs-peer · plots).
+   Scope 'dataset' drops the dataset column; scope 'module' drops the
+   group column — each = 7. #}
+{% set _empty_colspan = 8 if _mv.scope == 'global' else 7 %}
 {{ mff_styles() }}
 {{ mff_scripts() }}
 <div id="{{ _id }}" class="mv-panel">
@@ -892,7 +897,7 @@ URL hash scheme (feature: back-button / shareable filter state):
       } else {
         msg = 'No rows match — widen the filters.';
       }
-      rowsEl.innerHTML = '<tr><td colspan="8" class="mv-empty">' + msg + '</td></tr>';
+      rowsEl.innerHTML = '<tr><td colspan="{{ _empty_colspan }}" class="mv-empty">' + msg + '</td></tr>';
       return;
     }
     // Render
