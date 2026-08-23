@@ -103,6 +103,15 @@ URL hash scheme (feature: back-button / shareable filter state):
     }
     .mv-panel .mv-empty  { color: var(--text-muted); font-style: italic; padding: 12px 4px; font-size: 12px; }
     .mv-panel .mv-summary { color: var(--text-muted); font-size: 11px; margin: 6px 0; }
+    /* Row-cap badge — visible above the table only when the render cap fires
+       (500-row hard limit). Amber accent so it reads as a warning without
+       being loud. Hidden by default; shown only via .mv-cap-visible. */
+    .mv-panel .mv-cap-badge {
+      display: none; font-size: 11px; padding: 4px 8px; margin: 4px 0 6px;
+      background: #fef3c7; color: #92400e; border: 1px solid #fde68a;
+      border-radius: 4px;
+    }
+    .mv-panel .mv-cap-badge.mv-cap-visible { display: inline-block; }
   </style>
   {# Row 1: dataset · module · canonical tag #}
   <div class="mv-filter-row mv-filter-row-1">
@@ -239,6 +248,7 @@ URL hash scheme (feature: back-button / shareable filter state):
        option was pure noise. Flip the filter in load() to restore. #}
   </div>
   <div class="mv-summary-row"><span class="mv-summary"></span></div>
+  <div class="mv-cap-badge" role="status" aria-live="polite"></div>
   <div class="mv-state muted" style="font-size:12px">loading…</div>
   <div class="mv-body" style="overflow-x:auto;overflow-y:auto;max-height:70vh;display:none">
     <table class="mv-table">
@@ -266,6 +276,8 @@ URL hash scheme (feature: back-button / shareable filter state):
   var bodyEl  = root.querySelector('.mv-body');
   var rowsEl  = root.querySelector('.mv-rows');
   var summaryEl = root.querySelector('.mv-summary');
+  var capBadgeEl = root.querySelector('.mv-cap-badge');
+  var ROW_CAP = 500;    // hard render cap; the badge appears only at this exact size
 
   // Multi-filter-facet widgets. Each is a {getValues, setValues, populate} object.
   // null = scope hides that control. getValues() returns null (=all) or a Set.
@@ -880,8 +892,21 @@ URL hash scheme (feature: back-button / shareable filter state):
       // Fallback: peer position descending.
       rows.sort(function (a, b) { return positionOf(b, PEER_INDEX) - positionOf(a, PEER_INDEX); });
     }
-    rows = rows.slice(0, 500);   // cap for render sanity
-    summaryEl.textContent = rows.length + (rows.length === 500 ? '+' : '') + ' rows';
+    var preCapCount = rows.length;
+    rows = rows.slice(0, ROW_CAP);   // cap for render sanity
+    summaryEl.textContent = rows.length + (rows.length === ROW_CAP ? '+' : '') + ' rows';
+    // Show the cap badge only when the cap fires (rendered rows == ROW_CAP).
+    // Include the pre-cap N so the user knows how much was hidden.
+    if (capBadgeEl) {
+      if (rows.length === ROW_CAP) {
+        capBadgeEl.textContent = 'Showing top ' + ROW_CAP + ' of ' + preCapCount
+          + ' — narrow filters to see more.';
+        capBadgeEl.classList.add('mv-cap-visible');
+      } else {
+        capBadgeEl.textContent = '';
+        capBadgeEl.classList.remove('mv-cap-visible');
+      }
+    }
     if (!rows.length) {
       bodyEl.style.display = '';
       // Distinguish "no data returned by the server" from "user's filters
