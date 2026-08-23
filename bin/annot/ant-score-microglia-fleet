@@ -4,26 +4,30 @@
 #   "duckdb>=0.10.0",
 #   "requests>=2.31.0",
 #   "pyyaml>=6.0",
+#   "pandas>=2.0.0",
 # ]
 # ///
-"""ant-score-microglia-fleet — batch-score every microglia dataset
-into its parquet sidecar with Sierksma2025/WGCNA + MICROGLIA_V1 starcat.
+"""ant-score-microglia-fleet — batch-score every microglia dataset with
+all six microglia catalogs using scanpy (ant-score-ext), AUCell
+(ant-aucell), and starCAT (ant-starcat-ext).
 
-Not intended for reuse — one-off fleet backfill. Discovers datasets via
-lib.mus (cell_type contains 'microglial cell' / 'microglia'). Human-only
-for both scorers.
+Discovers datasets via lib.mus (cell_type contains 'microglial cell' /
+'microglia'). Human-only for all scorers.
 
 For each dataset it:
-  1. Ensures __gene_bins exists on the duckdb (via ant-serve release +
-     ant duckdb-check + restore).
-  2. Runs ant-score-ext Sierksma2025/WGCNA.
-  3. Runs ant-starcat-ext.
+  1. Ensures __gene_bins exists on the duckdb (needed by scanpy scorer).
+  2. For each catalog in --catalogs, runs scanpy + AUCell (independently
+     skippable per --skip-*), unless already present in the sidecar and
+     --overwrite is not set.
+  3. Runs ant-starcat-ext once per dataset (single-catalog MICROGLIA_V1).
 
 Failures are logged; the loop continues.
 
 Usage:
   ant-score-microglia-fleet [--only D1,D2,...] [--skip D1,D2,...]
-                            [--skip-score] [--skip-starcat] [--dry-run]
+                            [--catalogs C1,C2,...] [--overwrite]
+                            [--skip-scanpy] [--skip-aucell] [--skip-starcat]
+                            [--dry-run]
 """
 from __future__ import annotations
 
@@ -32,7 +36,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import List
+from typing import List, Set, Tuple
 
 import duckdb
 import requests   # type: ignore
@@ -44,20 +48,45 @@ sys.path.insert(0, str(lib_dir))
 
 from h5adstore import iter_h5adstore   # type: ignore
 from mus import resolve_annotation     # type: ignore
+from scores_parquet import read_scores  # type: ignore
 
 ANT = repo_root / 'bin' / 'ant'
 ANT_SERVE_URL = 'http://localhost:8080'
 LOG_PATH = repo_root / 'tmp' / f'score-fleet-{int(time.time())}.log'
 
+# The six microglia catalogs, all celltypes=microglial cell.
+DEFAULT_CATALOGS = [
+    'Sierksma2025/WGCNA',
+    'Mancuso2024/Cell_states',
+    'LuChen2025/cen_wgcna',
+    'LuChen2025/nbb_cellstates',
+    'LuChen2025/nbb_celltypes',
+    'LuChen2025/nbb_wgcna',
+]
+
+# WGCNA-derivative datasets whose feature space is ME* modules — gene-symbol
+# scoring is meaningless there. Explicit hardcoded skip list.
+GENESYMBOL_INCOMPATIBLE_DATASETS = {
+    'S25/PhW',   # Sierksma2025 phenoWGCNA modules
+    'S25/PSW',   # Sierksma2025 pseudobulk WGCNA
+    'S25/V6M',   # Sierksma2025 Visium ME modules
+}
+
 
 def _log(msg: str) -> None:
+    """Print a line and mirror it into the run log."""
     print(msg, flush=True)
     with open(LOG_PATH, 'a') as fh:
         fh.write(msg + '\n')
 
 
 def enumerate_microglia(root: Path) -> List[tuple]:
-    """Return list of (db_id, h5ad_path, duckdb_path, is_human)."""
+    """Return list of (db_id, h5ad_path, duckdb_path, is_human).
+
+    A dataset qualifies as microglia if resolve_annotation reports a
+    cell_type of 'microglial cell' or 'microglia'. Human status is used
+    downstream to gate human-only scorers.
+    """
     out = []
     for entry in iter_h5adstore(root):
         if not entry.duckdb_path.exists():
@@ -75,7 +104,7 @@ def enumerate_microglia(root: Path) -> List[tuple]:
 
 
 def has_gene_bins(duckdb_path: Path) -> bool:
-    """Read-only check for __gene_bins table."""
+    """Return True iff the duckdb already has the __gene_bins helper table."""
     conn = duckdb.connect(str(duckdb_path), read_only=True)
     try:
         rows = conn.execute(
@@ -87,13 +116,16 @@ def has_gene_bins(duckdb_path: Path) -> bool:
 
 
 def ensure_gene_bins(db_id: str, h5ad_path: Path, duckdb_path: Path) -> bool:
-    """If __gene_bins missing, run ant duckdb-check via release/restore.
-    Returns True on success (or already-present)."""
+    """Build the __gene_bins helper table if missing.
+
+    Coordinates with ant-serve by releasing the duckdb before opening
+    r/w and restoring it after. Returns True on success (or when the
+    table was already present).
+    """
     try:
         if has_gene_bins(duckdb_path):
             return True
     except duckdb.IOException:
-        # Locked by ant-serve; release and try again
         pass
 
     _log(f"  · __gene_bins missing — building via ant duckdb-check")
@@ -114,26 +146,65 @@ def ensure_gene_bins(db_id: str, h5ad_path: Path, duckdb_path: Path) -> bool:
         pass
 
     if not ok:
-        _log(f"  ✗ duckdb-check failed:")
+        _log(f"  x duckdb-check failed:")
         _log('\n'.join(result.stdout.splitlines()[-15:]))
         _log(result.stderr.strip()[-500:])
     return ok
 
 
-def run_score_ext(db_id: str) -> bool:
-    _log(f"  · ant-score-ext {db_id} Sierksma2025/WGCNA")
+def scored_catalogs(duckdb_path: Path, source: str) -> Set[str]:
+    """Return the set of catalog ids already present under ``source``.
+
+    Empty set when the sidecar is missing. Read failures fall back to
+    an empty set so scoring re-runs conservatively.
+    """
+    try:
+        df = read_scores(duckdb_path, source=source)
+    except Exception as exc:
+        _log(f"  ! read_scores({source}) failed on {duckdb_path.name}: {exc}")
+        return set()
+    if df.empty:
+        return set()
+    return {str(c) for c in df['catalog'].unique()}
+
+
+def run_score_ext(db_id: str, catalog: str) -> bool:
+    """Invoke ``ant score-ext <db_id> <catalog>`` and log its output.
+
+    Returns True on exit-code 0.
+    """
+    _log(f"  · ant-score-ext {db_id} {catalog}")
     result = subprocess.run(
-        [str(ANT), 'score-ext', db_id, 'Sierksma2025/WGCNA'],
+        [str(ANT), 'score-ext', db_id, catalog],
         capture_output=True, text=True,
     )
     _log(result.stdout)
     if result.returncode != 0:
-        _log(f"  ✗ score-ext failed: {result.stderr.strip()[-500:]}")
+        _log(f"  x score-ext failed ({catalog}): {result.stderr.strip()[-500:]}")
+        return False
+    return True
+
+
+def run_aucell(db_id: str, catalog: str, overwrite: bool) -> bool:
+    """Invoke ``ant aucell <db_id> <catalog>`` and log its output.
+
+    Passes --overwrite when requested so caller-side skip logic is not
+    duplicated inside the CLI. Returns True on exit-code 0.
+    """
+    _log(f"  · ant-aucell {db_id} {catalog}")
+    cmd = [str(ANT), 'aucell', db_id, catalog]
+    if overwrite:
+        cmd.append('--overwrite')
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    _log(result.stdout)
+    if result.returncode != 0:
+        _log(f"  x aucell failed ({catalog}): {result.stderr.strip()[-500:]}")
         return False
     return True
 
 
 def run_starcat_ext(db_id: str) -> bool:
+    """Invoke ``ant starcat-ext <db_id>`` (MICROGLIA_V1) and log output."""
     _log(f"  · ant-starcat-ext {db_id}")
     result = subprocess.run(
         [str(ANT), 'starcat-ext', db_id],
@@ -141,23 +212,71 @@ def run_starcat_ext(db_id: str) -> bool:
     )
     _log(result.stdout)
     if result.returncode != 0:
-        _log(f"  ✗ starcat-ext failed: {result.stderr.strip()[-500:]}")
+        _log(f"  x starcat-ext failed: {result.stderr.strip()[-500:]}")
         return False
     return True
 
 
-def main() -> int:
+def parse_args() -> argparse.Namespace:
+    """Command-line parser for the fleet driver."""
     parser = argparse.ArgumentParser(prog='ant-score-microglia-fleet')
     parser.add_argument('--only', default=None, help='comma-separated db_ids')
     parser.add_argument('--skip', default=None, help='comma-separated db_ids')
-    parser.add_argument('--skip-score', action='store_true')
+    parser.add_argument(
+        '--catalogs', default=None,
+        help='comma-separated catalog ids (default: 6 microglia catalogs)',
+    )
+    parser.add_argument('--overwrite', action='store_true',
+                        help='re-score even if (source, catalog) already exists')
+    parser.add_argument('--skip-scanpy', action='store_true')
+    parser.add_argument('--skip-aucell', action='store_true')
     parser.add_argument('--skip-starcat', action='store_true')
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--h5adstore-root', default='data/h5adstore')
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+def _plan_methods(
+    db_id: str,
+    duckdb_path: Path,
+    catalogs: List[str],
+    args: argparse.Namespace,
+) -> Tuple[List[str], List[str]]:
+    """Compute which catalogs still need scanpy vs. AUCell for this dataset.
+
+    Applies:
+      - --skip-scanpy / --skip-aucell master switches
+      - hardcoded WGCNA-derivative exclusion (feature namespace mismatch)
+      - already-scored short-circuit unless --overwrite
+
+    Returns (scanpy_catalogs, aucell_catalogs).
+    """
+    if db_id in GENESYMBOL_INCOMPATIBLE_DATASETS:
+        return [], []
+
+    already_geneset = set() if args.overwrite else scored_catalogs(duckdb_path, 'geneset')
+    already_aucell = set() if args.overwrite else scored_catalogs(duckdb_path, 'aucell')
+
+    scanpy_catalogs = [] if args.skip_scanpy else [
+        cat for cat in catalogs if cat not in already_geneset
+    ]
+    aucell_catalogs = [] if args.skip_aucell else [
+        cat for cat in catalogs if cat not in already_aucell
+    ]
+    return scanpy_catalogs, aucell_catalogs
+
+
+def main() -> int:
+    """Drive the microglia scoring fleet across the h5adstore."""
+    args = parse_args()
 
     root = Path(args.h5adstore_root).resolve()
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    catalogs = (
+        [c.strip() for c in args.catalogs.split(',') if c.strip()]
+        if args.catalogs else list(DEFAULT_CATALOGS)
+    )
 
     datasets = enumerate_microglia(root)
     if args.only:
@@ -167,42 +286,104 @@ def main() -> int:
         drop = set(args.skip.split(','))
         datasets = [d for d in datasets if d[0] not in drop]
 
-    _log(f"[fleet] {len(datasets)} microglia datasets found — log at {LOG_PATH}")
-    stats = {'total': len(datasets), 'gene_bins_ok': 0, 'score_ok': 0,
-             'starcat_ok': 0, 'starcat_skipped_nonhuman': 0, 'starcat_failed': 0,
-             'score_failed': 0, 'gene_bins_failed': 0}
+    n_human = sum(1 for _, _, _, is_human in datasets if is_human)
+    _log(f"[fleet] {len(datasets)} microglia datasets found "
+         f"({n_human} human) — log at {LOG_PATH}")
+    _log(f"[fleet] catalogs ({len(catalogs)}): {', '.join(catalogs)}")
+    _log(f"[fleet] overwrite={args.overwrite}  "
+         f"skip_scanpy={args.skip_scanpy}  skip_aucell={args.skip_aucell}  "
+         f"skip_starcat={args.skip_starcat}")
+
+    stats = {
+        'total': len(datasets),
+        'gene_bins_ok': 0,
+        'gene_bins_failed': 0,
+        'scanpy_ok': 0,
+        'scanpy_failed': 0,
+        'scanpy_skipped_nonhuman': 0,
+        'scanpy_skipped_existing': 0,
+        'scanpy_skipped_incompatible': 0,
+        'aucell_ok': 0,
+        'aucell_failed': 0,
+        'aucell_skipped_nonhuman': 0,
+        'aucell_skipped_existing': 0,
+        'aucell_skipped_incompatible': 0,
+        'starcat_ok': 0,
+        'starcat_failed': 0,
+        'starcat_skipped_nonhuman': 0,
+    }
+
+    planned_scanpy_runs = 0
+    planned_aucell_runs = 0
 
     for i, (db_id, h5ad_path, duckdb_path, is_human) in enumerate(datasets, 1):
         _log(f"\n[{i:>3}/{len(datasets)}] {db_id}  (human={is_human})")
 
+        if db_id in GENESYMBOL_INCOMPATIBLE_DATASETS:
+            _log(f"  · skip (feature space is ME* modules, not gene symbols)")
+            stats['scanpy_skipped_incompatible'] += 1
+            stats['aucell_skipped_incompatible'] += 1
+            continue
+
+        if not is_human:
+            _log(f"  · skip all scorers (non-human)")
+            stats['scanpy_skipped_nonhuman'] += 1
+            stats['aucell_skipped_nonhuman'] += 1
+            stats['starcat_skipped_nonhuman'] += 1
+            continue
+
+        scanpy_catalogs, aucell_catalogs = _plan_methods(
+            db_id, duckdb_path, catalogs, args,
+        )
+        skipped_scanpy = len(catalogs) - len(scanpy_catalogs) \
+            if not args.skip_scanpy else 0
+        skipped_aucell = len(catalogs) - len(aucell_catalogs) \
+            if not args.skip_aucell else 0
+        stats['scanpy_skipped_existing'] += skipped_scanpy
+        stats['aucell_skipped_existing'] += skipped_aucell
+
+        planned_scanpy_runs += len(scanpy_catalogs)
+        planned_aucell_runs += len(aucell_catalogs)
+
+        _log(f"  plan: scanpy={len(scanpy_catalogs)}  "
+             f"aucell={len(aucell_catalogs)}  "
+             f"starcat={'yes' if not args.skip_starcat else 'no'}")
+
         if args.dry_run:
             continue
 
-        # Both scorers require __gene_bins
-        gb_ok = ensure_gene_bins(db_id, h5ad_path, duckdb_path)
-        if gb_ok:
-            stats['gene_bins_ok'] += 1
-        else:
-            stats['gene_bins_failed'] += 1
-            continue
-
-        if not args.skip_score and is_human:
-            if run_score_ext(db_id):
-                stats['score_ok'] += 1
+        needs_gene_bins = bool(scanpy_catalogs)
+        if needs_gene_bins:
+            gb_ok = ensure_gene_bins(db_id, h5ad_path, duckdb_path)
+            if gb_ok:
+                stats['gene_bins_ok'] += 1
             else:
-                stats['score_failed'] += 1
+                stats['gene_bins_failed'] += 1
+                # Scanpy scores need __gene_bins; skip scanpy but keep
+                # AUCell + starCAT paths — they don't depend on it.
+                scanpy_catalogs = []
+
+        for catalog in scanpy_catalogs:
+            if run_score_ext(db_id, catalog):
+                stats['scanpy_ok'] += 1
+            else:
+                stats['scanpy_failed'] += 1
+
+        for catalog in aucell_catalogs:
+            if run_aucell(db_id, catalog, args.overwrite):
+                stats['aucell_ok'] += 1
+            else:
+                stats['aucell_failed'] += 1
 
         if not args.skip_starcat:
-            if not is_human:
-                _log(f"  · skipping starcat (non-human)")
-                stats['starcat_skipped_nonhuman'] += 1
+            if run_starcat_ext(db_id):
+                stats['starcat_ok'] += 1
             else:
-                if run_starcat_ext(db_id):
-                    stats['starcat_ok'] += 1
-                else:
-                    stats['starcat_failed'] += 1
+                stats['starcat_failed'] += 1
 
     _log(f"\n===== FLEET SUMMARY =====")
+    _log(f"  planned scanpy runs (this invocation): {planned_scanpy_runs}")
+    _log(f"  planned aucell runs (this invocation): {planned_aucell_runs}")
     for key, val in stats.items():
         _log(f"  {key:32s}  {val}")
     _log(f"log: {LOG_PATH}")
