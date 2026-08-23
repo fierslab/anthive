@@ -315,10 +315,14 @@ def compute_for_dataset(db_id: str, duckdb_path: Path, md_path: Path) -> pd.Data
         for column, source, catalog, module in legacy_cols:
             if (source, catalog, module) in seen_from_sidecar:
                 continue  # sidecar wins
+            # Column name came from information_schema so it's a real stored
+            # column, but it can still contain characters that need doubling
+            # inside a double-quoted identifier. Escape defensively.
+            col_ident = '"' + column.replace('"', '""') + '"'
             try:
                 df = conn.execute(
-                    'SELECT c.cell_name, CAST("' + column + '" AS DOUBLE) AS score '
-                    'FROM __obsnum o JOIN __cells c ON c.cell_id = o.cell_id'
+                    f'SELECT c.cell_name, CAST({col_ident} AS DOUBLE) AS score '
+                    f'FROM __obsnum o JOIN __cells c ON c.cell_id = o.cell_id'
                 ).df()
             except Exception:
                 continue

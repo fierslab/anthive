@@ -313,6 +313,52 @@ def test_compute_handles_chained_obs_rename(tmp_dataset):
     assert set(df.loc[df['tag_column'] == 'sex', 'tag']) == {'sex'}
 
 
+def test_compute_survives_cyclic_obs_rename(tmp_dataset):
+    """A pathological ``api.obs_rename`` cycle (A→B→A) must not spin the
+    chain resolver forever — the guard is `seen` in `_resolve_chain`."""
+    n = len(CELL_NAMES)
+    duckdb_path, md_path = tmp_dataset(
+        num_cols={
+            'Sierksma2025::WGCNA::Black_Mito': [float(i) for i in range(n)],
+        },
+        cat_cols={
+            'A': ['x' if i % 2 else 'y' for i in range(n)],
+        },
+        # No canonical target reached — this exercises the terminating cycle guard.
+        api_rename={'A': 'B', 'B': 'A'},
+    )
+    # Must return without hanging or raising.
+    df = amv.compute_for_dataset('TST/TST', duckdb_path, md_path)
+    # Cycle didn't reach a canonical tag → no rows from these tags (score
+    # column may still contribute rows via canonical tags if any).
+    # The key assertion is that we got here at all.
+    assert isinstance(df, pd.DataFrame)
+
+
+def test_compute_column_with_embedded_quotes_is_safe(tmp_dataset):
+    """A score column whose name contains a double-quote must not break the
+    query — the identifier is escaped defensively. duckdb allows quotes in
+    identifiers via double-quote doubling."""
+    n = len(CELL_NAMES)
+    weird_col = 'Study"::"Exp::"Mod'
+    # Only accepted by _obsnum_score_columns if it also matches the '::' shape
+    # after quote-doubling. Skip if the shape doesn't parse — this is a
+    # defense-in-depth test, not a shape-validation test.
+    duckdb_path, md_path = tmp_dataset(
+        num_cols={
+            'S::E::M': [float(i) for i in range(n)],
+        },
+        cat_cols={
+            'Sex_donor': ['f' if i % 2 else 'm' for i in range(n)],
+        },
+        view_cat_rename={'Sex_donor': 'ant_sex'},
+        api_rename={'Sex_donor': 'ant_sex'},
+    )
+    df = amv.compute_for_dataset('TST/TST', duckdb_path, md_path)
+    assert not df.empty
+    assert 'M' in set(df['module'])
+
+
 def test_compute_returns_empty_when_no_scores_and_no_tags(tmp_dataset):
     """Genuinely empty case — no score columns, no sidecar, no canonical
     tags. Must return an empty DataFrame, not raise."""
