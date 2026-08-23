@@ -810,7 +810,17 @@
       var href = '/browse/' + encodeURIComponent(pp[0] || '') + '/' + encodeURIComponent(pp[1] || '') + '/plot/histogram?x=' + encodeURIComponent(g);
       return '<td class="hm-cell"><a href="' + href + '" style="background:rgba(29,78,216,' + op + ');color:' + fg + '" title="' + esc(g) + ' in ' + esc(dbId) + ': ' + hmFmt(cfg, v) + ' (' + esc(cfg.label) + ') — open distribution">' + hmFmt(cfg, v) + '</a></td>';
     };
-    var head = '<tr><th class="hm-corner">dataset</th>' + GENES.map(function (g) { return '<th class="hm-gene">' + esc(g) + '</th>'; }).join('') + '</tr>';
+    // Prefix ★ on column headers whose gene is on the user's favourite list
+    // (see /settings) — matches the single-gene mode's ★ marker.
+    var isFav = (window.antSettings && window.antSettings.isFavourite)
+        ? function (gene) { return window.antSettings.isFavourite(gene); }
+        : function () { return false; };
+    var head = '<tr><th class="hm-corner">dataset</th>' + GENES.map(function (g) {
+        var star = isFav(g)
+            ? '<span title="favourite (see /settings)" style="color:#eab308;margin-right:2px">&#9733;</span>'
+            : '';
+        return '<th class="hm-gene">' + star + esc(g) + '</th>';
+    }).join('') + '</tr>';
     var body = rows.map(function (r) {
       var denom = cfg.norm === 'rownorm' ? (r.rowmax > 0 ? r.rowmax : 1) : 1;
       return '<tr><td class="hm-row"><span class="nm">' + esc(r.title || r.db_id) + '</span><span class="pills">' + pillsFor(r.db_id) + '</span></td>'

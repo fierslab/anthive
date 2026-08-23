@@ -493,6 +493,8 @@
             <a href="/genesets">genesets</a>
             {% endif %}
             <a href="/api/docs">api</a>
+            {# Settings are localStorage (per-browser); accessible without SSO. #}
+            <a href="/settings" title="per-browser preferences">preferences</a>
         </nav>
         <form class="gene-search" onsubmit="event.preventDefault(); var g=this.q.value.trim(); if(g) window.location='/genes/'+encodeURIComponent(g);"
               title="Jump to a gene's cross-catalogue expression atlas">
@@ -512,7 +514,7 @@
                     {% if 'admins' in _groups %}
                     <a href="/admin/feedback">chat feedback</a>
                     {% endif %}
-                    <a href="/settings">preferences</a>
+                    {# /settings link moved to always-visible topbar nav (accessible without SSO). #}
                     <a href="/authelia/" target="_blank" rel="noopener">account settings</a>
                     <a href="#" id="authelia-signout">sign out</a>
                 </span>

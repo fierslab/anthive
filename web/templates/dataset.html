@@ -498,6 +498,10 @@
   </style>
   <h2>Genes
     <span class="info" title="Click ▬ for a histogram of the gene's expression, or ◉ for an embedding scatter coloured by the gene. Sparklines show the gene's value relative to the db-wide range for that stat. Panel source: precomputed dataset favourites, or a canonical curated panel keyed on cell type (microglia / astrocyte / neuron).">ⓘ</span></h2>
+  <div class="tab-loading plot-loading" data-tab-loading="genes" style="min-height:60px;display:none">
+    <span class="spinner-lg"></span>
+    <span>loading gene stats…<br><span class="muted" style="font-size:12px">first view can take a few seconds; cached after that</span></span>
+  </div>
   <div class="muted" style="font-size:11px;margin-bottom:6px">
     {% if gene_panel and gene_panel.source == 'precomputed' %}Curated favourites shipped with this dataset.
     {% elif gene_panel and gene_panel.source != 'none' %}<em>Generic {{ gene_panel.label.split(' ', 1)[1] if ' ' in gene_panel.label else gene_panel.label }}</em> — dataset did not precompute a favourite list.
@@ -676,6 +680,10 @@
     <span class="muted" style="font-size:12px;font-weight:normal">({{ n_module_scores }} genesets)</span>
     <span class="info" title="One long list of (geneset × dataset × tag × method), sorted by peer position — how far the geneset sits from its peers on the same (dataset, tag, method). Filter with the dropdowns above.">ⓘ</span>
   </h2>
+  <div class="tab-loading plot-loading" data-tab-loading="modules" style="min-height:60px;display:none">
+    <span class="spinner-lg"></span>
+    <span>loading geneset variability…</span>
+  </div>
   {% include "_module_view.html" with context %}
 </section>
 {% endif %}
@@ -686,6 +694,10 @@
     <span class="muted" style="font-size:12px;font-weight:normal">({{ _num_cols|length }})</span>
     <span class="info" title="Continuous per-cell values (e.g. n_counts, pseudotime). Geneset scores are in their own tab. Click a column to plot its histogram.">ⓘ</span>
   </h2>
+  <div class="tab-loading plot-loading" data-tab-loading="num" style="min-height:60px;display:none">
+    <span class="spinner-lg"></span>
+    <span>loading numerical column stats…</span>
+  </div>
   {% if _num_cols %}
   <div style="margin-bottom:6px;display:flex;align-items:center;gap:8px">
     <input class="obs-filter" data-target="num" type="text" placeholder="filter…" style="padding:2px 6px;font-family:inherit;font-size:12px;border:1px solid #ccc;outline:none;width:160px">
@@ -722,6 +734,10 @@
     <span class="muted" style="font-size:12px;font-weight:normal">({{ _cat_cols|length }})</span>
     <span class="info" title="Discrete per-cell labels (cluster, donor, condition, …). Click a column to plot its bar chart.">ⓘ</span>
   </h2>
+  <div class="tab-loading plot-loading" data-tab-loading="cat" style="min-height:60px;display:none">
+    <span class="spinner-lg"></span>
+    <span>loading categorical column stats…</span>
+  </div>
   {% if _cat_cols %}
   <div style="margin-bottom:6px;display:flex;align-items:center;gap:8px">
     <input class="obs-filter" data-target="cat" type="text" placeholder="filter…" style="padding:2px 6px;font-family:inherit;font-size:12px;border:1px solid #ccc;outline:none;width:160px">
@@ -787,7 +803,11 @@
 {# ── Downloads tab ────────────────────────────────────────────────────── #}
 <section class="tab-panel" id="tab-downloads" role="tabpanel">
   <h2>Downloads
-    <span class="info" title="The raw AnnData (.h5ad) file for this dataset. Additional files — the served .duckdb, layer sidecars, .mus annotation — are internal artifacts and are intentionally not exposed here.">ⓘ</span></h2>
+    <span class="info" title="Downloadable artifacts for this dataset: the raw AnnData (.h5ad), the served DuckDB (.duckdb), pre-computed module scores (.scores.parquet), and the mus annotation sidecar (.h5ad.mus).">ⓘ</span></h2>
+  <div class="tab-loading plot-loading" data-tab-loading="downloads" style="min-height:60px;display:none">
+    <span class="spinner-lg"></span>
+    <span>loading downloadable artifacts…</span>
+  </div>
   <div id="ds-files" class="muted" style="font-size:12px;padding:2px 0">loading files…</div>
 </section>
 
@@ -870,6 +890,56 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     })();
 
+    // ── Tab-loading spinner controller (P1.9) ─────────────────────────────
+    // Each JS-hydrated tab (Genes, Numerical, Categorical, Genesets, Downloads)
+    // carries a `.tab-loading[data-tab-loading]` block. Hydration code calls
+    // window.antTabLoading.done(name) when its fetch completes; if a tab is
+    // activated before that, the spinner is shown. If activated after, it
+    // stays hidden (fetch is already done).
+    window.antTabLoading = (function () {
+        var done = {};         // tabName → true once fetch complete
+        var pending = {};      // tabName → true once we've seen its spinner activate
+        function els(name) {
+            return Array.from(document.querySelectorAll(
+                '[data-tab-loading="' + name + '"]'));
+        }
+        function show(name) {
+            if (done[name]) return;
+            pending[name] = true;
+            els(name).forEach(function (el) { el.style.display = ''; });
+        }
+        function markDone(name) {
+            done[name] = true;
+            els(name).forEach(function (el) { el.style.display = 'none'; });
+        }
+        return { show: show, done: markDone, isDone: function (n) { return !!done[n]; } };
+    })();
+
+    // Show an inline error inside a hydrated tab when its fetch fails.
+    window.antShowTabError = function (tabName, message) {
+        var host = document.getElementById('tab-' + tabName);
+        if (!host) return;
+        window.antTabLoading.done(tabName);
+        var box = host.querySelector('[data-tab-error="' + tabName + '"]');
+        if (!box) {
+            box = document.createElement('div');
+            box.setAttribute('data-tab-error', tabName);
+            box.style.cssText = 'padding:10px;border:1px solid #fecaca;background:#fef2f2;color:#991b1b;border-radius:6px;font-size:12px;margin:8px 0;';
+            var h2 = host.querySelector('h2');
+            if (h2 && h2.parentNode) h2.parentNode.insertBefore(box, h2.nextSibling);
+            else host.insertBefore(box, host.firstChild);
+        }
+        var safeMsg = String(message || 'network error')
+            .replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; });
+        box.innerHTML = '⚠ Failed to load — ' + safeMsg
+            + '. <a href="#" data-action="retry" style="color:#991b1b;text-decoration:underline">Retry?</a>';
+        var retry = box.querySelector('[data-action="retry"]');
+        if (retry) retry.addEventListener('click', function (ev) {
+            ev.preventDefault();
+            window.location.reload();
+        });
+    };
+
     // ── Tab bar wiring (URL-hash deep-linking) ───────────────────────────
     (function() {
         var bar = document.getElementById('ds-tab-bar');
@@ -882,10 +952,29 @@ document.addEventListener('DOMContentLoaded', function() {
             if (panel) panels[name] = panel;
             b.addEventListener('click', function() { activateTab(name, true); });
         });
+        // Initialise `hidden` to match the initial `.active` state so screen
+        // readers only announce the visible panel from first paint.
+        Object.keys(panels).forEach(function(k) {
+            panels[k].hidden = !panels[k].classList.contains('active');
+        });
         function activateTab(name, push) {
             if (!panels[name]) name = 'overview';
             btns.forEach(function(b) { b.classList.toggle('active', b.dataset.tab === name); });
-            Object.keys(panels).forEach(function(k) { panels[k].classList.toggle('active', k === name); });
+            Object.keys(panels).forEach(function(k) {
+                var isActive = (k === name);
+                panels[k].classList.toggle('active', isActive);
+                // Accessibility: reflect visibility in the hidden attribute so
+                // screen readers don't announce every panel as visible.
+                panels[k].hidden = !isActive;
+            });
+            // Reveal the spinner for the newly-active tab if its hydration
+            // hasn't finished yet.
+            if (window.antTabLoading) window.antTabLoading.show(name);
+            // Fire a page-scoped event so per-tab hydration code can react
+            // (spinners, lazy fetches, etc.).
+            try {
+                document.dispatchEvent(new CustomEvent('anthive:tab-activated', { detail: { name: name } }));
+            } catch (_) {}
             if (push) {
                 // Preserve any &mv=… state already in the hash so switching
                 // tabs doesn't discard the module-view filter state.
@@ -1157,7 +1246,20 @@ document.addEventListener('DOMContentLoaded', function() {
                     return 'min ' + fnum(s.min) + ' · median ' + fnum(s.median) + ' · max ' + fnum(s.max) + (s.mean != null ? ' · mean ' + fnum(s.mean) : '');
                 }
             })
-            .catch(function () {});
+            .catch(function (err) {
+                console.error('/obs_summary fetch failed:', err);
+                if (window.antShowTabError) {
+                    var msg = 'network error (' + (err && err.message ? err.message : 'unknown') + ')';
+                    window.antShowTabError('num', msg);
+                    window.antShowTabError('cat', msg);
+                }
+            })
+            .finally(function () {
+                if (window.antTabLoading) {
+                    window.antTabLoading.done('num');
+                    window.antTabLoading.done('cat');
+                }
+            });
 
         // ── Genes tab: server-side search + sparklines + gene_stats + top-var ──
         // Runs whenever the Genes tab is present (n_genes > 0), even when there
@@ -1370,9 +1472,14 @@ document.addEventListener('DOMContentLoaded', function() {
 
             // Fetch genome-wide top-20 most variable genes and render them.
             // Called when there are no curated genes, or after curated hydration.
+            // On failure: log to console + surface an inline error inside the
+            // Genes tab (replacing the misleading "0 genes" empty state).
             function fetchTopVarGenomeWide() {
-                fetch(apiBase + '/gene_stats?top=20', { credentials: 'same-origin' })
-                    .then(function (r) { return r.ok ? r.json() : null; })
+                return fetch(apiBase + '/gene_stats?top=20', { credentials: 'same-origin' })
+                    .then(function (r) {
+                        if (!r.ok) throw new Error('HTTP ' + r.status);
+                        return r.json();
+                    })
                     .then(function (d) {
                         if (!d || !d.stats) return;
                         // Filter out genes already in curated panel.
@@ -1382,7 +1489,15 @@ document.addEventListener('DOMContentLoaded', function() {
                         renderTopVar(fresh);
                         applySortToTable();
                     })
-                    .catch(function () {});
+                    .catch(function (err) {
+                        console.error('fetchTopVarGenomeWide failed:', err);
+                        if (window.antShowTabError) {
+                            window.antShowTabError('genes', 'network error (' + err.message + ')');
+                        }
+                    })
+                    .finally(function () {
+                        if (window.antTabLoading) window.antTabLoading.done('genes');
+                    });
             }
 
             function fetchAndHydrateCurated() {
@@ -1393,7 +1508,10 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
                 fetch(apiBase + '/gene_stats?genes=' + encodeURIComponent(genes.join(',')),
                       { credentials: 'same-origin' })
-                    .then(function (r) { return r.ok ? r.json() : null; })
+                    .then(function (r) {
+                        if (!r.ok) throw new Error('HTTP ' + r.status);
+                        return r.json();
+                    })
                     .then(function (d) {
                         if (!d || !d.stats) return;
                         d.stats.forEach(function (s) { curatedByGene[s.gene.toLowerCase()] = s; });
@@ -1409,12 +1527,19 @@ document.addEventListener('DOMContentLoaded', function() {
                         if (stdVals.length >= 3) {
                             stdVals.sort(function (a, b) { return b.std - a.std; });
                             renderTopVar(stdVals);
+                            if (window.antTabLoading) window.antTabLoading.done('genes');
                         } else {
-                            // Curated panel too small to rank — fetch genome-wide.
+                            // Curated panel too small to rank — fetch genome-wide
+                            // (which marks the tab done on completion).
                             fetchTopVarGenomeWide();
                         }
                     })
-                    .catch(function () {});
+                    .catch(function (err) {
+                        console.error('fetchAndHydrateCurated failed:', err);
+                        if (window.antShowTabError) {
+                            window.antShowTabError('genes', 'network error (' + err.message + ')');
+                        }
+                    });
             }
             // ── Sortable gene table ───────────────────────────────────────────
             // sortState: col ∈ {star, gene, pct, rank, var}, dir ∈ {asc, desc}
@@ -1654,10 +1779,9 @@ document.addEventListener('DOMContentLoaded', function() {
             if (a) trackClick(a.getAttribute('href'));
         });
 
-        // ── Downloads: raw h5ad ONLY (per anthive4 web tab-refactor spec).
-        //    Sidecars (.duckdb / .layer.*.parquet / .h5ad.mus / .md) are
-        //    hidden from the UI. Tab reveals only when at least one h5ad
-        //    entry is returned; otherwise it stays hidden entirely.
+        // ── Downloads: all stored artifacts (h5ad + duckdb + scores + mus).
+        //    Tab reveals only when at least one downloadable entry is returned;
+        //    otherwise stays hidden.
         (function loadFiles() {
             var box = document.getElementById('ds-files');
             var tabBtn = document.getElementById('tab-btn-downloads');
@@ -1669,36 +1793,57 @@ document.addEventListener('DOMContentLoaded', function() {
                 return (n >= 100 || i === 0 ? n.toFixed(0) : n.toFixed(1)) + ' ' + u[i];
             }
             function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+            // Human-readable label per artifact kind (matches server's _ARTIFACT_SUFFIXES).
+            var KIND_LABEL = {
+                h5ad:   { name: 'raw AnnData',    ext: '.h5ad',           desc: 'source expression matrix + obs/var + layers (log-normalised X)' },
+                duckdb: { name: 'DuckDB',         ext: '.duckdb',         desc: 'served database (obs + expression, no h5ad required)' },
+                scores: { name: 'module scores',  ext: '.scores.parquet', desc: 'pre-computed per-cell module / geneset scores' },
+                mus:    { name: 'annotation',     ext: '.h5ad.mus',       desc: 'mus biology-annotation sidecar (YAML frontmatter)' }
+            };
             fetch(apiBase + '/files', { credentials: 'same-origin' })
-                .then(function (r) { return r.ok ? r.json() : null; })
+                .then(function (r) {
+                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                    return r.json();
+                })
                 .then(function (d) {
-                    // Filter to raw h5ad only; per-file names undergo the sitewide
-                    // hidden-download filter (server may name the file *.duckdb by
-                    // mistake, or _-prefixed).
                     var files = ((d && d.files) || []).filter(function (f) {
-                        if (f.kind !== 'h5ad') return false;
+                        // Drop unknown kinds and staging/hidden files.
+                        if (!KIND_LABEL[f.kind]) return false;
                         var n = (f.filename || '').toLowerCase();
-                        if (!n) return true;
-                        if (n.startsWith('_') || n.startsWith('.')) return false;
-                        if (n.endsWith('.duckdb') || n.endsWith('.h5ad.mus') || n.endsWith('.md') || n.endsWith('.inactive')) return false;
-                        if (n.indexOf('.layer.') >= 0 && n.endsWith('.parquet')) return false;
+                        if (n && (n.startsWith('_') || n.startsWith('.') || n.endsWith('.inactive'))) return false;
                         return true;
                     });
                     if (!files.length) {
-                        // Nothing to show → hide the tab entirely.
                         if (tabBtn) tabBtn.style.display = 'none';
                         return;
                     }
                     if (tabBtn) tabBtn.style.display = '';
+                    // Stable display order: h5ad, duckdb, scores, mus.
+                    var order = { h5ad: 0, duckdb: 1, scores: 2, mus: 3 };
+                    files.sort(function (a, b) { return (order[a.kind] || 99) - (order[b.kind] || 99); });
                     box.innerHTML = files.map(function (f) {
-                        return '<div style="padding:2px 0"><a href="' + apiBase + '/download/' + encodeURIComponent(f.kind) + '" download>⬇ raw AnnData (.h5ad)</a>'
+                        var meta = KIND_LABEL[f.kind];
+                        return '<div style="padding:3px 0">'
+                            + '<a href="' + apiBase + '/download/' + encodeURIComponent(f.kind) + '" download>'
+                            + '⬇ ' + esc(meta.name) + ' (' + esc(meta.ext) + ')</a>'
                             + ' <span class="muted-2" style="font-size:11px">' + fmtSize(f.size_bytes)
-                            + ' · ' + esc(f.filename) + (f.source === 's3' ? ' · object storage' : '') + '</span></div>';
+                            + ' · ' + esc(f.filename)
+                            + (f.source === 's3' ? ' · object storage' : '')
+                            + '</span>'
+                            + '<div class="muted-2" style="font-size:11px;margin-left:16px">' + esc(meta.desc) + '</div>'
+                            + '</div>';
                     }).join('');
                 })
-                .catch(function () {
+                .catch(function (err) {
+                    console.error('/files fetch failed:', err);
                     box.textContent = '';
                     if (tabBtn) tabBtn.style.display = 'none';
+                    if (window.antShowTabError) {
+                        window.antShowTabError('downloads', 'network error (' + err.message + ')');
+                    }
+                })
+                .finally(function () {
+                    if (window.antTabLoading) window.antTabLoading.done('downloads');
                 });
         })();
     })();

@@ -41,11 +41,31 @@
 <script>
 // Remember the last group tab: on a bare /genesets (no ?group), jump to the
 // last-used group so a reload restores the same overview.
+//
+// Guard against a stale `gs.tab` in localStorage that no longer names a
+// present group (e.g. group was removed server-side, or user shared a URL
+// from an install with different groups). Walk the rendered .grp-tab list;
+// if the remembered value isn't in it, drop it and don't redirect.
 (function () {
   var active = {{ active_group|tojson }};
   if (!new URLSearchParams(location.search).get('group')) {
     var rem = antRemember.get('gs.tab');
-    if (rem && rem !== active) { location.replace('/genesets?group=' + encodeURIComponent(rem)); return; }
+    if (rem && rem !== active) {
+      var validGroups = Array.from(document.querySelectorAll('.grp-tab'))
+        .map(function (a) {
+          var href = a.getAttribute('href') || '';
+          var m = href.match(/[?&]group=([^&]+)/);
+          return m ? decodeURIComponent(m[1]) : null;
+        })
+        .filter(Boolean);
+      if (validGroups.indexOf(rem) === -1) {
+        // Stale — drop it and stay on the server-picked default.
+        antRemember.set('gs.tab', active);
+      } else {
+        location.replace('/genesets?group=' + encodeURIComponent(rem));
+        return;
+      }
+    }
   }
   antRemember.set('gs.tab', active);
 })();
