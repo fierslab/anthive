@@ -871,7 +871,17 @@ URL hash scheme (feature: back-button / shareable filter state):
       var hasAnyActiveFilter = _hasActiveMvFilters();
       var msg;
       if (!ALL_ROWS.length) {
-        msg = 'No module-variability statistics available for this scope yet.';
+        // Dataset scope with score columns but no MV rows almost always
+        // means the fleet parquet is stale for this dataset (scored after
+        // the last `ant-module-variability` run) — steer the reader at
+        // the rebuild action, not a vague "yet".
+        if (CTX.scope === 'dataset' && CTX.dataset) {
+          msg = 'No module-variability rows in module_variability.parquet for ' +
+                CTX.dataset + '. Regenerate via `ant module-variability` and ' +
+                '`POST /module-variability/rescan`.';
+        } else {
+          msg = 'No module-variability statistics available for this scope yet.';
+        }
       } else if (!hasAnyActiveFilter) {
         msg = 'No rows to display (statistics were dropped by the per-tag canonical-statistic step).';
       } else {
