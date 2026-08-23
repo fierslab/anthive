@@ -75,7 +75,10 @@
     function updateLabel() {
       var checked = list.querySelectorAll('input[type="checkbox"]:checked');
       var total   = list.querySelectorAll('input[type="checkbox"]').length;
-      if (!total || checked.length === total || checked.length === 0) {
+      // Zero checked == "all" (empty selection means no filter — same as all).
+      // "N of N" checked also renders as "all" so the label reads sensibly
+      // once the user hits select-all.
+      if (!total || checked.length === 0 || checked.length === total) {
         btn.textContent = labelText + ': all ▾';
         btn.classList.remove('mff-active');
       } else if (checked.length === 1) {
@@ -98,9 +101,10 @@
     function fireChange() { updateLabel(); onChange(getValues()); }
 
     function setValues(arr) {
+      // Empty/null → uncheck all (== "all"). Non-empty → check only those in arr.
       var valueSet = arr && arr.length ? new Set(arr) : null;
       list.querySelectorAll('input[type="checkbox"]').forEach(function (cb) {
-        cb.checked = !valueSet || valueSet.has(cb.value);
+        cb.checked = valueSet ? valueSet.has(cb.value) : false;
       });
       updateLabel();
     }
@@ -108,10 +112,13 @@
     function populate(opts, keepValues) {
       var prevValues = keepValues ? getValues() : null;
       options = opts;
+      // Options render UNCHECKED by default — zero-checked == "all", so the
+      // popover opens without a filter. The user's first click narrows to
+      // exactly that value (the common case: pick one).
       var html = opts.map(function (opt) {
         var indent = opt.indent ? 'padding-left:' + (opt.indent * 14) + 'px;' : '';
         return '<li><label style="' + indent + '">'
-          + '<input type="checkbox" value="' + opt.value.replace(/"/g, '&quot;') + '" checked> '
+          + '<input type="checkbox" value="' + opt.value.replace(/"/g, '&quot;') + '"> '
           + opt.label.replace(/[&<>]/g, function (c) { return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c]; })
           + '</label></li>';
       }).join('');
