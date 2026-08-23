@@ -83,9 +83,19 @@ URL hash scheme (feature: back-button / shareable filter state):
     .mv-panel .mv-track  { position: relative; display: inline-block; width: 80px; height: 12px; vertical-align: middle; }
     .mv-panel .mv-track::before { content:''; position:absolute; top:50%; left:0; right:0; height:1px; background:#d1d5db; transform:translateY(-50%); }
     .mv-panel .mv-track .mv-mark { position: absolute; top: 1px; bottom: 1px; width: 2px; border-radius: 1px; transform: translateX(-50%); }
-    .mv-panel .mv-icons a { display: inline-flex; text-decoration: none; color: var(--text-muted); font-size: 14px; padding: 0 3px; }
+    .mv-panel .mv-icons a { display: inline-flex; text-decoration: none; color: var(--text-muted); font-size: 14px; padding: 0 3px; position: relative; }
     .mv-panel .mv-icons a:hover { color: var(--link); }
     .mv-panel .mv-icons svg { width: 1em; height: 1em; }
+    /* UMAP badges: tiny letter that distinguishes UMAP-by-module (m) from
+       UMAP-by-tag (t). Rides in the bottom-right of the icon so both icons
+       are still readable at 16px. */
+    .mv-panel .mv-icons a.umap-badge::after {
+      content: attr(data-badge);
+      position: absolute; right: -1px; bottom: -3px;
+      font-family: var(--font-mono, monospace); font-size: 8px; font-weight: 700;
+      line-height: 1; padding: 1px 2px; border-radius: 2px;
+      background: var(--surface, #fff); color: currentColor;
+    }
     .mv-panel .mv-empty  { color: var(--text-muted); font-style: italic; padding: 12px 4px; font-size: 12px; }
     .mv-panel .mv-summary { color: var(--text-muted); font-size: 11px; margin: 6px 0; }
   </style>
@@ -378,11 +388,18 @@ URL hash scheme (feature: back-button / shareable filter state):
     var geom = NUMERICAL_TAGS[row.tag] ? 'scatter' : 'violin';
     return b + '/plot/' + geom + '?x=' + encodeURIComponent(tagCol) + '&y=' + encodeURIComponent(col);
   }
+  // UMAP coloured by the raw tag column (categorical or numerical).
   function umapUrl(row) {
     var b = baseUrl(row); if (!b) return null;
     var tagCol = row.tag_column || row.tag;
     if (!tagCol) return null;
     return b + '/plot/scatter?embedding=X_umap&color=' + encodeURIComponent(tagCol);
+  }
+  // UMAP coloured by the module score column (continuous). Different colour
+  // channel than the tag UMAP — this shows where the module lights up.
+  function umapModuleUrl(row) {
+    var col = scoreColFor(row); var b = baseUrl(row); if (!col || !b) return null;
+    return b + '/plot/scatter?embedding=X_umap&color=' + encodeURIComponent(col);
   }
 
   // Build the dataset browse URL landing on the Modules tab with the group/module pre-selected.
@@ -924,6 +941,8 @@ URL hash scheme (feature: back-button / shareable filter state):
         : '<span class="mv-ds-pop">' + esc(r.dataset) + dsTip + '</span>';
       var plotSvg = NUMERICAL_TAGS[r.tag] ? SVG_LINE : SVG_BAR;
       var pu = plotUrl(r), uu = umapUrl(r), eu = ecdfUrl(r), hu = hexUrl(r);
+      var umapMod = umapModuleUrl(r);
+      var tagLabel = r.tag_column || r.tag;
       var tds = [];
       if (CTX.scope !== 'module') {
         tds.push('<td class="mv-group">' + esc(r.catalog) + '</td>');
@@ -938,7 +957,8 @@ URL hash scheme (feature: back-button / shareable filter state):
       var plotCell = (pu ? '<a href="' + pu + '" title="plot ' + esc(r.tag) + ' × ' + esc(r.module) + '">' + plotSvg + '</a>' : '')
         + (eu ? '<a href="' + eu + '" title="ECDF of ' + esc(r.module) + ' split by ' + esc(r.tag) + '">' + SVG_LINE + '</a>' : '')
         + (hu ? '<a href="' + hu + '" title="hexbin (density) of ' + esc(r.module) + ' in embedding">' + SVG_HEX + '</a>' : '')
-        + (uu ? '<a href="' + uu + '" title="UMAP coloured by ' + esc(r.module) + '">' + SVG_UMAP + '</a>' : '');
+        + (umapMod ? '<a class="umap-badge" data-badge="m" href="' + umapMod + '" title="UMAP coloured by ' + esc(r.module) + ' score">' + SVG_UMAP + '</a>' : '')
+        + (uu ? '<a class="umap-badge" data-badge="t" href="' + uu + '" title="UMAP coloured by ' + esc(tagLabel) + '">' + SVG_UMAP + '</a>' : '');
       tds.push('<td class="mv-icons" style="text-align:center">' + plotCell + '</td>');
       return '<tr>' + tds.join('') + '</tr>';
     }).join('');
