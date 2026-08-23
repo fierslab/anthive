@@ -229,13 +229,9 @@ URL hash scheme (feature: back-button / shareable filter state):
       </select>
     </div>
     {% endif %}
-    <div><label>method</label>
-      <select class="mv-flt-method">
-        <option value="">all</option>
-        <option value="geneset">scanpy</option>
-        <option value="aucell">AUCell</option>
-      </select>
-    </div>
+    {# Method widget removed 2026-08-23 — only scanpy rows are shown (AUCell
+       hidden client-side alongside starcat), so a filter with a single real
+       option was pure noise. Flip the filter in load() to restore. #}
   </div>
   <div class="mv-summary-row"><span class="mv-summary"></span></div>
   <div class="mv-state muted" style="font-size:12px">loading…</div>
@@ -276,7 +272,6 @@ URL hash scheme (feature: back-button / shareable filter state):
   // Single-select controls that keep <select> (range / categorical-single semantics).
   var flt = {
     n_cells: root.querySelector('.mv-flt-n_cells'),
-    method:  root.querySelector('.mv-flt-method'),
   };
 
   function onMffChange() { updateHash(true); render(); }
@@ -659,8 +654,7 @@ URL hash scheme (feature: back-button / shareable filter state):
         pairs.push(key + '=' + encodeURIComponent(Array.from(vals).join(',')));
       }
     });
-    // single-select (method, n_cells)
-    if (flt.method && flt.method.value) pairs.push('method=' + encodeURIComponent(flt.method.value));
+    // single-select (n_cells) — method removed 2026-08-23 (scanpy-only UI).
     if (flt.n_cells && flt.n_cells.value) pairs.push('n_cells=' + encodeURIComponent(flt.n_cells.value));
     // sort state
     var defaultSort = sortState.col === 'position' && sortState.dir === 'desc';
@@ -691,7 +685,8 @@ URL hash scheme (feature: back-button / shareable filter state):
       }
     }
     // Apply single-select values immediately (options are static HTML).
-    if (parsed.method  && flt.method)  flt.method.value  = parsed.method;
+    // NB: parsed.method from a legacy URL is silently ignored — the method
+    // widget is gone (2026-08-23) and aucell rows are dropped in load().
     if (parsed.n_cells && flt.n_cells) flt.n_cells.value = parsed.n_cells;
   }
 
@@ -749,7 +744,6 @@ URL hash scheme (feature: back-button / shareable filter state):
       return vals !== null;  // null = "all/none checked" (i.e. no filter)
     });
     if (anyMff) return true;
-    if (flt.method && flt.method.value) return true;
     if (flt.n_cells && flt.n_cells.value) return true;
     return false;
   }
@@ -766,12 +760,6 @@ URL hash scheme (feature: back-button / shareable filter state):
     if (mffGroup)   rows = rows.filter(function (r) { return mffGroup.has(r.catalog); });
     if (mffModule)  rows = rows.filter(function (r) { return mffModule.has(r.module); });
     if (mffTag)     rows = rows.filter(function (r) { return mffTag.has(r.tag); });
-
-    // single-select: method
-    if (flt.method && flt.method.value) {
-      var methodVal = flt.method.value;
-      rows = rows.filter(function (r) { return r.source === methodVal; });
-    }
 
     // mff: dataset annotation facets (celltype / tissue / technology / biosample)
     // DS_ANNOT values are comma-joined flat strings; OR logic across checked values.
@@ -983,7 +971,12 @@ URL hash scheme (feature: back-button / shareable filter state):
     fetch('/api/module-variability?' + params, { credentials: 'same-origin' })
       .then(function (r) { return r.ok ? r.json() : r.text().then(function (t) { throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 160)); }); })
       .then(function (d) {
-        ALL_ROWS = (d.rows || []).filter(function (r) { return r.source !== 'starcat'; });
+        // starCAT + AUCell rows are hidden client-side (starcat 2026-08 early,
+        // AUCell 2026-08-23) — the UI defaults to scanpy only. Flip either
+        // filter here to re-expose. Same pattern for both.
+        ALL_ROWS = (d.rows || []).filter(function (r) {
+          return r.source !== 'starcat' && r.source !== 'aucell';
+        });
         var groups = {}, modules = {}, datasets = {}, tags = {};
         ALL_ROWS.forEach(function (r) {
           groups[r.catalog] = 1; modules[r.module] = 1;
@@ -1053,8 +1046,7 @@ URL hash scheme (feature: back-button / shareable filter state):
       .catch(function (e) { stateEl.textContent = 'could not load — ' + e.message; });
   }
 
-  // Single-select filters (method, n_cells) fire onChange directly.
-  if (flt.method)  { flt.method.addEventListener('change',  function () { updateHash(!!this.value); render(); }); }
+  // Single-select filters fire onChange directly. (method removed 2026-08-23.)
   if (flt.n_cells) { flt.n_cells.addEventListener('change', function () { updateHash(!!this.value); render(); }); }
 
   // Sort is handled by column-header click listeners bound above.

@@ -117,9 +117,9 @@ geneset's per-cell score co-varies with the tag in that dataset.</p>
   <div>
     <label for="mv-source">source</label>
     <select id="mv-source">
-      <option value="">all sources</option>
-      <option value="geneset">scanpy (gene sets) only</option>
+      <option value="geneset" selected>scanpy (gene sets) only</option>
       <option value="aucell">AUCell only</option>
+      <option value="">all sources</option>
     </select>
   </div>
   <div>
@@ -382,7 +382,14 @@ geneset's per-cell score co-varies with the tag in that dataset.</p>
     if (!inList(stat0, dim.statistics)) stat0 = antRemember.get('mv.stat');
     if (!inList(stat0, dim.statistics)) stat0 = defaultStat(tag0, dim.statistics);
     populate(statSel, dim.statistics, stat0);
-    var src0 = qp.get('source') || antRemember.get('mv.source') || '';
+    // Default to scanpy-only ('geneset'). ?source= wins, then last-remembered
+    // (including a deliberate ''=all), else scanpy — matches the site-wide
+    // "default to scanpy" convention (2026-08-23).
+    var src0 = qp.get('source');
+    if (src0 === null) {
+      var remembered = antRemember.get('mv.source');
+      src0 = (remembered === null || remembered === undefined) ? 'geneset' : remembered;
+    }
     if (Array.prototype.some.call(srcSel.options, function (o) { return o.value === src0; })) srcSel.value = src0;
     var cs0 = antRemember.get('mv.cscale');
     if (cs0 && Array.prototype.some.call(cscaleSel.options, function (o) { return o.value === cs0; })) cscaleSel.value = cs0;

@@ -1800,8 +1800,9 @@ def test_geneset_experiment_has_module_view(client):
     # the variability drilldown is available without navigating into a module.
     resp = client.get("/genesets/StudyX/Exp1")
     assert resp.status_code == 200
-    # Partial injects its filter controls (method/n_cells remain <select>; others are mff widgets)
-    assert 'class="mv-flt-method"' in resp.text
+    # Partial injects its filter controls (n_cells stays as <select>; others
+    # are mff widgets). Method widget removed 2026-08-23 (scanpy-only UI).
+    assert 'class="mv-flt-method"' not in resp.text
     # module, tag are now mff widgets — look for their container class
     assert 'mv-flt-module-w' in resp.text
     assert 'mv-flt-tag-w' in resp.text
@@ -1847,8 +1848,9 @@ def test_geneset_detail_has_variability_panel(client):
     resp = client.get("/genesets/StudyX/Exp1/gs_up")
     assert resp.status_code == 200
     assert "Where it varies most" in resp.text
-    # Partial's filter controls replace the old gv-* IDs
-    assert 'class="mv-flt-method"' in resp.text
+    # Partial's filter controls replace the old gv-* IDs. Method widget was
+    # removed 2026-08-23 (scanpy-only UI).
+    assert 'class="mv-flt-method"' not in resp.text
     assert 'mv-flt-tag-w' in resp.text  # tag is now an mff widget
     # sort dropdown removed — sort lives in column-header clicks (see test_module_view_sort_state_and_indicators)
     assert 'class="mv-flt-sort"' not in resp.text
@@ -1912,24 +1914,29 @@ def test_geneset_view_404(client):
 
 
 def test_module_view_celltype_tissue_method_change_listeners_are_explicit(client):
-    """Regression: celltype/tissue/method filter dropdowns must have explicit
+    """Regression: celltype/tissue/n_cells filter dropdowns must have explicit
     addEventListener('change', render) bindings in the emitted JS.
 
     The generic Object.keys(flt).forEach(...) loop was replaced with named
     bindings (2026-08 fix) so static analysis and tests can assert each filter
     class is wired — a silent typo in the flt key would have made the generic
-    loop bind nothing for that control.  This test greps the rendered HTML for
-    the three bindings that were previously invisible.
+    loop bind nothing for that control. This test greps the rendered HTML for
+    the bindings that were previously invisible.
+
+    2026-08-23: method widget removed alongside the "default to scanpy"
+    change — its explicit listener is gone with it.
     """
     # Geneset detail page — has dataset_annotations → celltype + tissue selects
-    # are rendered; method is always rendered.
+    # are rendered; n_cells is always rendered.
     resp = client.get("/genesets/StudyX/Exp1/gs_up")
     assert resp.status_code == 200
     # celltype/tissue are now mff widgets — onChange is wired inside mffWidget factory.
-    # method is still a single-select with an explicit listener.
-    assert "flt.method.addEventListener('change'" in resp.text, (
-        "method change listener not found — filter will be a no-op"
+    # n_cells stays as a single-select with an explicit listener.
+    assert "flt.n_cells.addEventListener('change'" in resp.text, (
+        "n_cells change listener not found — filter will be a no-op"
     )
+    # method listener gone (widget removed)
+    assert "flt.method.addEventListener" not in resp.text
     # mff widget factory wires its own onChange — check it's defined on the page.
     assert "window.mffWidget" in resp.text, (
         "mffWidget factory missing — celltype/tissue onChange won't fire"
@@ -1946,7 +1953,7 @@ def test_module_view_celltype_tissue_method_change_listeners_are_explicit(client
     # Geneset experiment page — same partial, same requirement.
     resp = client.get("/genesets/StudyX/Exp1")
     assert resp.status_code == 200
-    assert "flt.method.addEventListener('change'" in resp.text
+    assert "flt.n_cells.addEventListener('change'" in resp.text
     assert "window.mffWidget" in resp.text
 
 
@@ -2418,13 +2425,15 @@ def test_dataset_view_module_scores_tab_groups_three_methods(client, monkeypatch
     assert resp.status_code == 200
     # Tab button is present (module count non-zero)
     assert 'data-tab="modules"' in resp.text
-    # Partial is rendered — its filter controls and panel ID are present
+    # Partial is rendered — its filter controls and panel ID are present.
+    # Method widget removed 2026-08-23 (scanpy-only UI).
     assert 'id="mv-modules-tab"' in resp.text
-    assert 'class="mv-flt-method"' in resp.text
+    assert 'class="mv-flt-method"' not in resp.text
     assert 'mv-flt-tag-w' in resp.text  # tag is now an mff widget
-    # starCAT option NOT in the partial's method filter (hidden 2026-08)
+    # starCAT + AUCell options NOT in the partial (both hidden client-side)
     assert 'data-method="starcat"' not in resp.text
     assert '>starCAT<' not in resp.text
+    assert '>AUCell<' not in resp.text
     # mv_ctx carries scope=dataset and the db_id (GroupA/ds1)
     assert '"scope": "dataset"' in resp.text or '"scope":"dataset"' in resp.text
     assert 'GroupA/ds1' in resp.text
@@ -2437,10 +2446,10 @@ def test_dataset_view_module_scores_tab_groups_three_methods(client, monkeypatch
 
 def test_dataset_view_module_scores_absent_method_greyed(client, monkeypatch):
     # A dataset with ONLY aucell scores — the modules tab still renders via the
-    # shared partial (scope=dataset). The partial's method filter includes
-    # both scanpy and AUCell options regardless; client-side JS filters to
-    # what's actually present. The old server-side absent/greyed badge logic
-    # is gone — the partial handles this uniformly. 2026-08: refactored.
+    # shared partial (scope=dataset). The partial no longer exposes a method
+    # widget (scanpy-only UI, 2026-08-23): AUCell rows are dropped client-side
+    # alongside starcat. The old server-side absent/greyed badge logic is gone
+    # — the partial handles this uniformly.
     def aucell_only(api_url, path):
         result = _fake_api_get(api_url, path)
         if path.endswith("/info") and isinstance(result, dict):
@@ -2460,11 +2469,11 @@ def test_dataset_view_module_scores_absent_method_greyed(client, monkeypatch):
     assert 'data-tab="modules"' in resp.text
     # Partial is present with scope=dataset
     assert 'id="mv-modules-tab"' in resp.text
-    assert 'class="mv-flt-method"' in resp.text
-    # starCAT not in the partial's method options (hidden 2026-08)
+    # Method widget removed 2026-08-23 (scanpy-only UI)
+    assert 'class="mv-flt-method"' not in resp.text
+    # No AUCell / starCAT method options in the partial
+    assert '>AUCell<' not in resp.text
     assert 'method="starcat"' not in resp.text
-    # AUCell option is present in the partial's method filter
-    assert 'value="aucell"' in resp.text
 
 
 def test_dataset_view_hides_starcat_prefixed_obs_columns(client, monkeypatch):
@@ -2515,12 +2524,16 @@ def test_geneset_variability_page_offers_aucell_source(client):
     resp = client.get("/genesets/variability")
     assert resp.status_code == 200
     # AUCell + scanpy (gene sets) source-filter options are present.
+    # scanpy is the DEFAULT (selected) — site-wide 2026-08-23 default-to-scanpy
+    # convention. AUCell stays as a picker for power users.
     # starCAT is temporarily hidden alongside its /genesets tab (2026-08 —
     # STARCAT_UI_ENABLED in browser.py); restore the assertion when the
     # flag flips back.
     assert 'value="aucell"' in resp.text
     assert 'value="geneset"' in resp.text
     assert 'value="starcat"' not in resp.text
+    # scanpy is the pre-selected default option
+    assert 'value="geneset" selected' in resp.text
 
 
 def test_geneset_variability_page_canonical_tags_in_js(client):
@@ -3467,7 +3480,9 @@ def test_dataset_html_activatetab_preserves_mv_suffix(client):
 def test_module_view_two_filter_rows(client):
     """Filter controls must be split into two .mv-filter-row elements.
     Row 1: dataset · module · canonical tag (in that order).
-    Row 2: group · cell type · tissue · system · method.
+    Row 2: group · cell type · tissue · technology · biosample · n_cells.
+    (Method widget was removed 2026-08-23 alongside the default-to-scanpy
+    change.)
     """
     resp = client.get("/genesets/StudyX/Exp1")
     assert resp.status_code == 200
@@ -3483,12 +3498,14 @@ def test_module_view_two_filter_rows(client):
     assert 'mv-flt-dataset-w' in row1, "Row 1 must have dataset mff widget"
     assert 'mv-flt-module-w'  in row1, "Row 1 must have module mff widget"
     assert 'mv-flt-tag-w'     in row1, "Row 1 must have canonical tag mff widget"
-    # Row 2 must contain method.
+    # Row 2 must contain the annotation facets + n_cells.
     row2_start = row1_end
     row2_end   = html.find('mv-summary-row', row2_start)
     row2 = html[row2_start:row2_end]
-    assert 'mv-flt-method'    in row2, "Row 2 must have method filter (single-select)"
     assert 'mv-flt-celltype-w' in row2, "Row 2 must have cell type mff widget"
+    assert 'mv-flt-n_cells'    in row2, "Row 2 must have n_cells filter"
+    # Method widget must be gone
+    assert 'mv-flt-method' not in row2
 
 
 # ── Ask 2: column-header sort ─────────────────────────────────────────────────
@@ -4378,7 +4395,7 @@ def test_geneset_experiment_drilldown_visible_without_overview(client):
     assert resp.status_code == 200
     html = resp.text
     # Module view panel must be present.
-    assert 'class="mv-panel"' in html or 'mv-flt-method' in html, (
+    assert 'class="mv-panel"' in html or 'mv-flt-n_cells' in html, (
         "module_view drilldown must be present on experiment page"
     )
     # The mv-panel must appear after the closing </details> tag so it's outside.
@@ -4742,15 +4759,18 @@ def test_module_view_has_mff_widgets_not_selects(client):
 
 
 def test_module_view_n_cells_is_still_select(client):
-    """n_cells and method stay as single-select <select> — they have single-choice semantics."""
+    """n_cells stays as a single-select <select> — it has range-bucket semantics.
+    (Method widget was removed 2026-08-23 alongside the default-to-scanpy
+    change; the site now shows only scanpy rows and hides the method picker.)
+    """
     resp = client.get("/genesets/StudyX/Exp1")
     assert resp.status_code == 200
     html = resp.text
     # n_cells is a plain <select>, not an mff widget
     assert "mv-flt-n_cells" in html
     assert 'class="mv-flt-n_cells"' in html or 'class="mv-flt-n_cells ' in html
-    # method is a plain <select>
-    assert "mv-flt-method" in html
+    # Method widget removed — should NOT be present anywhere
+    assert "mv-flt-method" not in html
 
 
 def test_module_view_no_old_select_for_multi_facets(client):
