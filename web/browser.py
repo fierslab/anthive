@@ -2478,6 +2478,41 @@ async def privacy_view(request: Request):
     return templates.TemplateResponse(request, "privacy.html", {})
 
 
+@router.get("/help", response_class=HTMLResponse)
+async def help_view(request: Request):
+    """User-facing cheat-sheet: what the site is, how to navigate, what the
+    dataset tabs mean, canonical tags, icons, and where preferences live.
+
+    Reachable from the topbar 'Help' link. Purely informational — no
+    server-side interactivity, no admin gate. Live catalogue counts are best-
+    effort so the page renders even if the REST API is briefly unavailable.
+    """
+    api_url = _api_url(request)
+    n_datasets: Optional[int] = None
+    n_collections: Optional[int] = None
+    n_genesets: Optional[int] = None
+    try:
+        databases = _all_databases(api_url)
+        n_datasets = len(databases)
+        n_collections = len({
+            (db.get('group_id') or db['id'].split('/')[0]) for db in databases
+        })
+    except Exception as error:
+        print(f"API error (help counts): {error}")
+    try:
+        genesets_payload = _api_get(api_url, '/genesets') or {}
+        sets_list = genesets_payload.get('genesets') if isinstance(genesets_payload, dict) else None
+        if isinstance(sets_list, list):
+            n_genesets = len(sets_list)
+    except Exception:
+        pass
+    return templates.TemplateResponse(request, "help.html", {
+        "n_datasets": n_datasets,
+        "n_collections": n_collections,
+        "n_genesets": n_genesets,
+    })
+
+
 @router.get("/settings", response_class=HTMLResponse)
 async def settings_view(request: Request):
     """User-preferences page (per-browser, localStorage-only).

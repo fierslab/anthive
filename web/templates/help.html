@@ -1,0 +1,133 @@
+{% extends "base.html" %}
+
+{% block title %}Help — anthive{% endblock %}
+
+{% block content %}
+<style>
+  .help { max-width: 900px; }
+  .help h1 { font-size: 20px; font-weight: 600; margin: 4px 0 10px; }
+  .help h2 { font-size: 14px; margin: 18px 0 4px; border-bottom: 1px solid var(--border); padding-bottom: 2px; }
+  .help h3 { font-size: 12px; margin: 10px 0 3px; color: var(--text); text-transform: uppercase; letter-spacing: .4px; }
+  .help p, .help li { font-size: 13px; line-height: 1.6; }
+  .help ul { margin: 4px 0 6px 20px; }
+  .help code, .help .path { background: var(--border-light); padding: 1px 5px; border-radius: 3px; font-family: var(--font-mono); font-size: 11.5px; }
+  .help .lead { font-size: 13px; color: var(--text); background: #f8fafc; border-left: 3px solid var(--link); padding: 8px 12px; margin: 6px 0 14px; border-radius: 0 4px 4px 0; }
+  .help .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 24px; margin: 4px 0; }
+  @media (max-width: 720px) { .help .grid { grid-template-columns: 1fr; } }
+  .help .kv { font-size: 12px; }
+  .help .kv .k { color: var(--text-muted); margin-right: 6px; font-family: var(--font-mono); font-size: 11px; }
+  .help .pill { display: inline-block; background: #f1f5f9; color: #64748b; border: 1px solid #cbd5e1; border-radius: 3px; padding: 0 5px; font-size: 10px; letter-spacing: .3px; }
+  .help .beaker, .help .globe { font-size: 13px; margin-right: 3px; }
+  .help .contact { color: var(--text-muted); font-size: 12px; margin-top: 8px; }
+</style>
+
+{% from "_macros.html" import breadcrumb %}
+{{ breadcrumb([("help", None)]) }}
+
+<div class="help">
+  <h1>Anthive — a quick tour</h1>
+
+  <div class="lead">
+    Anthive is a single-cell RNA-seq browser focused on microglia and astrocyte
+    datasets relevant to Alzheimer's disease.
+    {% if n_datasets is not none %}It currently holds <strong>{{ n_datasets }}</strong> datasets{% if n_collections is not none %} across <strong>{{ n_collections }}</strong> collections{% endif %}{% if n_genesets is not none %}, plus <strong>{{ n_genesets }}</strong> registered gene sets{% endif %}.{% endif %}
+    Everything is server-rendered around a REST API — no data leaves this
+    server until you export it.
+  </div>
+
+  <h2>Getting around</h2>
+  <ul>
+    <li><a href="/">Landing page</a> — the full catalogue, grouped by collection. Column headers filter and sort; state persists via a <code>#mv=</code> hash so a filtered view is shareable.</li>
+    <li><a href="/">Collection page</a> (<span class="path">/browse/&lt;group&gt;</span>) — one collection's datasets. Constant metadata is hoisted to the header as pills; only fields that vary get their own column.</li>
+    <li><span class="path">/browse/&lt;group&gt;/&lt;file&gt;</span> — one dataset. IDs at the top are copy-clickable.</li>
+    <li><a href="/genesets">Genesets</a> (<span class="path">/genesets</span>) — the gene-set / starCAT / find-by-gene browsers.</li>
+    <li><a href="/genes/APOE">Gene atlas</a> (<span class="path">/genes/&lt;gene&gt;</span>) — a single gene's stats across every dataset.</li>
+  </ul>
+
+  <h2>The dataset page — tabs</h2>
+  <p>Each dataset renders a tabbed page. Tabs only show when their data is
+     present:</p>
+  <div class="grid">
+    <div class="kv"><span class="k">Overview</span> markdown description, caveats, provenance.</div>
+    <div class="kv"><span class="k">Data</span> obs columns, embeddings, matrix shape.</div>
+    <div class="kv"><span class="k">Genes</span> per-dataset gene stats + your favourites.</div>
+    <div class="kv"><span class="k">Genesets</span> module scores computed for this dataset.</div>
+    <div class="kv"><span class="k">Numerical</span> distributions of continuous obs fields.</div>
+    <div class="kv"><span class="k">Categorical</span> distributions of categorical obs fields.</div>
+    <div class="kv"><span class="k">Differential expression</span> studies × terms × contrasts.</div>
+    <div class="kv"><span class="k">Downloads</span> the raw <code>.h5ad</code>, DuckDB, and sidecars.</div>
+    <div class="kv"><span class="k">⚠ Caveats</span> known issues — never the default tab; opt-in only.</div>
+  </div>
+
+  <p>The top-right <strong>visualize ▾</strong> dropdown is the plot launcher —
+     it opens an interactive form for scatter, hexbin, KDE, violin, dot-plot,
+     heatmap, forest / volcano / MA (DE), and the rest.</p>
+
+  <h2>Genesets</h2>
+  <ul>
+    <li><a href="/genesets">/genesets</a> — three tabs: <em>gene sets</em> (curated registry), <em>starCAT</em> (weighted programs), <em>find by gene</em> (reverse lookup).</li>
+    <li><span class="path">/genesets/&lt;study&gt;/&lt;experiment&gt;</span> — one experiment's set list.</li>
+    <li><span class="path">/genesets/&lt;study&gt;/&lt;experiment&gt;/&lt;name&gt;</span> — one gene set plus a <em>where it varies most</em> panel.</li>
+    <li><a href="/genesets/variability">/genesets/variability</a> — fleet-wide module × dataset variance-explained heatmap.</li>
+    <li><span class="path">/genesets?group=bygene</span> — type a gene, find every set it belongs to.</li>
+  </ul>
+
+  <h2>Filters, sorting, shareable views</h2>
+  <ul>
+    <li><strong>Multi-select popovers</strong> live on the column headers of the landing table and most drilldown tables. Zero-checked reads as "all". A blue tint on the button = an active filter.</li>
+    <li><strong>Sort</strong> — click a header title (not the popover button) to sort by that column.</li>
+    <li><strong>Shareable URL state</strong> — the landing page and several drilldowns encode filter + sort state as a <code>#mv=key=val;key=val</code> hash. Copy the URL, paste anywhere; the same view opens.</li>
+    <li>Selection state that isn't in the URL (dropdowns, tabs) is stored per-browser via <code>localStorage</code>, so it survives a reload.</li>
+  </ul>
+
+  <h2>Canonical tags</h2>
+  <p>Fields prefixed <code>ant_</code> — <code>ant_braak</code>,
+     <code>ant_sex</code>, <code>ant_donor</code>, <code>ant_apoe</code>,
+     <code>ant_diagnosis</code>, and so on — are the site's controlled
+     vocabulary. They render in <strong>bold</strong> with a subdued
+     <span class="pill">canonical</span> pill; the tooltip carries the raw
+     column name.</p>
+  <p>These are what analytics + curation index on; use them when you're
+     grouping/coloring/filtering plots.</p>
+
+  <h2>Icons you'll see</h2>
+  <ul>
+    <li><span class="beaker">⚗</span> <strong>Lab beaker</strong> — dataset generated in-house.</li>
+    <li><span class="globe">🌐</span> <strong>Globe</strong> — imported / public dataset.</li>
+    <li>Small chart glyphs next to obs fields (histogram, ECDF, UMAP dot, hexbin) — quick launchers for the matching plot geom on that column.</li>
+    <li><span class="pill">⚠</span> in the collection list means the dataset has caveats worth reading.</li>
+  </ul>
+
+  <h2>Preferences</h2>
+  <p>The <strong>👤 dropdown → Preferences</strong> page holds per-browser
+     settings kept in <code>localStorage</code>:</p>
+  <ul>
+    <li><strong>Module-scoring algorithm</strong> — scanpy (default) or AUCell.</li>
+    <li><strong>Favourite genes</strong> — pinned to the top of gene lists and marked with a star in the gene atlas.</li>
+  </ul>
+  <p>Nothing here is server-persisted. Clearing your browser data resets these
+     to defaults.</p>
+
+  <h2>The data assistant (chat)</h2>
+  <p>The <strong>💬</strong> button (bottom-right, when enabled for your
+     deployment) opens an in-app chat that can navigate you to plots, filter
+     tables, and answer questions about the catalogue. Your messages are
+     stored on this server and forwarded to an external model provider;
+     the underlying single-cell data itself is never sent —
+     see <a href="/privacy">the privacy note</a>.</p>
+
+  <h2>REST API</h2>
+  <p>Every server-rendered view is backed by <code>ant-serve</code>, a REST
+     API you can hit directly. The <strong>API</strong> link in the topbar
+     opens the Swagger UI at <span class="path">/api/docs</span>. A Python
+     client (<code>pyvark</code>) and a Go CLI (<code>vark</code>) ship
+     separately; see the topbar link or ask in-lab for access.</p>
+
+  <h2>Contact</h2>
+  <p class="contact">
+    Bug reports, dataset requests, curation fixes:
+    <a href="mailto:mark.fiers@kuleuven.be">mark.fiers@kuleuven.be</a>.
+    The catalogue is developed by the <a href="https://mflab.kuleuven.be/" target="_blank" rel="noopener">Fiers Lab</a> at KU Leuven / VIB.
+  </p>
+</div>
+{% endblock %}

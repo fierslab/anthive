@@ -2176,7 +2176,9 @@ def test_folder_mobile_card_markup(client):
 
 def test_topbar_authelia_identity_and_signout(client):
     # When behind Authelia (Remote-* headers forwarded by Caddy), the topbar
-    # surfaces the user + a sign-out action + account-settings link.
+    # dropdown surfaces the user + a Logout action wired to the Authelia logout
+    # endpoint. The old separate "account settings" (/authelia/) item was
+    # collapsed into a single Logout line 2026-08-24.
     resp = client.get("/", headers={
         "Remote-User": "mf", "Remote-Name": "Mark Fiers",
         "Remote-Email": "mark@example.org",
@@ -2185,14 +2187,114 @@ def test_topbar_authelia_identity_and_signout(client):
     assert "Mark Fiers" in resp.text
     assert 'id="authelia-signout"' in resp.text
     assert "/authelia/api/logout" in resp.text
-    assert "/authelia/" in resp.text          # account settings link
+    # a single "Logout" item, not two separate lines
+    assert ">Logout<" in resp.text
+    assert ">sign out<" not in resp.text
+    assert "account settings" not in resp.text
 
 
 def test_topbar_no_auth_section_without_header(client):
-    # Direct / un-proxied access (no Remote-User) → no auth UI.
+    # Direct / un-proxied access (no Remote-User) → the Logout item disappears
+    # and the auth-only "signed in as" header disappears, but the dropdown
+    # itself stays (Preferences is per-browser / no SSO needed).
     resp = client.get("/")
     assert resp.status_code == 200
     assert 'id="authelia-signout"' not in resp.text
+    assert "signed in as" not in resp.text
+    # Preferences must still be reachable via the dropdown.
+    assert 'href="/settings"' in resp.text
+
+
+def test_topbar_help_link_present(client):
+    # The 'Help' link lives in the top-right utility cluster on every page.
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert 'href="/help"' in resp.text
+
+
+def test_topbar_api_link_opens_in_new_tab(client):
+    # The 'API' link points at the FastAPI Swagger UI (/api/docs) and opens
+    # in a new tab. Assert both the href and the noopener target so downstream
+    # tooling / accessibility scans keep it that way.
+    resp = client.get("/")
+    assert resp.status_code == 200
+    idx = resp.text.find('href="/api/docs"')
+    assert idx >= 0, "API link (/api/docs) missing from topbar"
+    # Look at the anchor tag containing that href.
+    tag_start = resp.text.rfind("<a ", 0, idx)
+    tag_end = resp.text.find(">", idx)
+    tag = resp.text[tag_start:tag_end + 1]
+    assert 'target="_blank"' in tag, "API link must open in a new tab"
+    assert 'rel="noopener"' in tag, "API link must have rel=noopener"
+
+
+def test_topbar_preferences_moved_into_dropdown(client):
+    # 'Preferences' is no longer a top-level nav entry — it lives INSIDE the
+    # user dropdown (linking to /settings). The main <nav> at the start of the
+    # topbar must not carry it any more.
+    resp = client.get("/")
+    assert resp.status_code == 200
+    # The dropdown item is called "Preferences" (capitalised) and points to /settings.
+    assert ">Preferences<" in resp.text
+    # It sits inside a dropdown-menu, not in the primary <nav>.
+    # Grab the first <nav>…</nav> block (the main nav) and assert it does NOT
+    # contain a /settings link any more.
+    import re as _re_local
+    first_nav = _re_local.search(r"<nav>(.*?)</nav>", resp.text, _re_local.S)
+    assert first_nav is not None
+    assert "/settings" not in first_nav.group(1)
+
+
+def test_topbar_dropdown_shows_without_sso(client):
+    # Un-authed users still get a dropdown (for Preferences). The "signed in
+    # as" header line only renders when Authelia headers are present.
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert 'class="dropdown-menu right"' in resp.text
+    assert 'href="/settings"' in resp.text
+    assert "signed in as" not in resp.text
+
+
+def test_topbar_dropdown_header_shown_when_authed(client):
+    # When Authelia identifies the user, the dropdown carries a small header
+    # "signed in as <user>" above the menu items.
+    resp = client.get("/", headers={
+        "Remote-User": "mf", "Remote-Name": "Mark Fiers",
+    })
+    assert resp.status_code == 200
+    assert "signed in as" in resp.text
+    assert "Mark Fiers" in resp.text
+
+
+def test_help_page_renders(client):
+    # /help renders substantive orientation content (not lorem-ipsum) —
+    # >500 characters of visible body text, links to key views, and copy
+    # explaining the tab structure.
+    resp = client.get("/help")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+    # Enough real content
+    import re as _re_local
+    text_only = _re_local.sub(r"<[^>]+>", " ", resp.text)
+    text_only = _re_local.sub(r"\s+", " ", text_only).strip()
+    assert len(text_only) > 500, "help page body is suspiciously short"
+    # Key orienting phrases
+    lowered = resp.text.lower()
+    assert "anthive" in lowered
+    assert "genesets" in lowered
+    assert "gene atlas" in lowered
+    assert "canonical" in lowered
+    # Cross-links into the actual routes
+    assert 'href="/"' in resp.text
+    assert 'href="/genesets"' in resp.text
+    assert 'href="/privacy"' in resp.text
+
+
+def test_help_link_reachable_from_landing(client):
+    # A user landing on / can click Help without knowing the URL.
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert 'href="/help"' in resp.text
 
 
 def test_landing_popover_filter_guard(client):

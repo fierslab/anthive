@@ -89,8 +89,18 @@
         .dropdown:hover .dropdown-menu { display: block; }
         /* right-aligned variant for the auth menu at the far end of the topbar */
         .dropdown-menu.right { left: auto; right: -6px; }
+        .dropdown-menu .dropdown-header {
+            padding: 4px 12px; color: var(--text-muted); font-size: 10px;
+            text-transform: uppercase; letter-spacing: .4px; white-space: nowrap;
+            border-bottom: 1px solid var(--border-light); margin-bottom: 2px;
+        }
+        .dropdown-menu .dropdown-header strong { color: var(--text); font-weight: 600; letter-spacing: 0; text-transform: none; font-size: 11px; }
         #topbar .topbar-auth .dropdown-toggle { color: var(--bar-link); }
         #topbar .topbar-auth .dropdown-toggle:hover { color: var(--bar-link-hover); }
+        /* Right-hand utility cluster (Help / API / dropdown). */
+        #topbar .topbar-util { display: flex; align-items: center; gap: 16px; }
+        #topbar .topbar-util > a { color: var(--bar-link); font-size: 13px; }
+        #topbar .topbar-util > a:hover { color: var(--bar-link-hover); text-decoration: none; }
 
         main { padding: 12px 18px; max-width: 1200px; margin: 0 auto; }
 
@@ -492,35 +502,38 @@
             {% if request.app.state.genesets_available %}
             <a href="/genesets">genesets</a>
             {% endif %}
-            <a href="/api/docs">api</a>
-            {# Settings are localStorage (per-browser); accessible without SSO. #}
-            <a href="/settings" title="per-browser preferences">preferences</a>
         </nav>
         <form class="gene-search" onsubmit="event.preventDefault(); var g=this.q.value.trim(); if(g) window.location='/genes/'+encodeURIComponent(g);"
               title="Jump to a gene's cross-catalogue expression atlas">
             <input name="q" type="text" placeholder="🔍 gene atlas…" autocomplete="off" spellcheck="false">
         </form>
-        {# Authelia identity + sign-out. Only shown when the request carries the
-           Remote-User header Caddy/nginx forwards from Authelia — so direct
-           (un-proxied) access shows nothing. Cookie SSO only: no basic auth. #}
-        {% set _auth_user = request.headers.get('remote-name') or request.headers.get('remote-user') %}
-        {% if _auth_user %}
         <span style="flex:1"></span>
-        <nav class="topbar-auth">
-            <span class="dropdown">
-                <span class="dropdown-toggle" title="signed in{% if request.headers.get('remote-email') %} — {{ request.headers.get('remote-email') }}{% endif %}">👤 {{ _auth_user }}</span>
+        {# Right-hand utility cluster: Help + API + user dropdown.
+           - Help: on-site cheat-sheet at /help.
+           - API: FastAPI Swagger UI at /api/docs, external tab.
+           - Dropdown: always shows Preferences (localStorage, no SSO needed);
+             the "signed in as" header + Logout only appear behind Authelia. #}
+        {% set _auth_user = request.headers.get('remote-name') or request.headers.get('remote-user') %}
+        {% set _groups = (request.headers.get('remote-groups') or '').split(',') | map('trim') | list %}
+        <nav class="topbar-util">
+            <a href="/help" title="What's here & how to use it">Help</a>
+            <a href="/api/docs" target="_blank" rel="noopener" title="REST API — Swagger UI (new tab)">API</a>
+            <span class="dropdown topbar-auth">
+                <span class="dropdown-toggle" title="{% if _auth_user %}signed in{% if request.headers.get('remote-email') %} — {{ request.headers.get('remote-email') }}{% endif %}{% else %}account &amp; preferences{% endif %}">👤{% if _auth_user %} {{ _auth_user }}{% endif %}</span>
                 <span class="dropdown-menu right">
-                    {% set _groups = (request.headers.get('remote-groups') or '').split(',') | map('trim') | list %}
-                    {% if 'admins' in _groups %}
+                    {% if _auth_user %}
+                    <div class="dropdown-header">signed in as <strong>{{ _auth_user }}</strong></div>
+                    {% endif %}
+                    {% if _auth_user and 'admins' in _groups %}
                     <a href="/admin/feedback">chat feedback</a>
                     {% endif %}
-                    {# /settings link moved to always-visible topbar nav (accessible without SSO). #}
-                    <a href="/authelia/" target="_blank" rel="noopener">account settings</a>
-                    <a href="#" id="authelia-signout">sign out</a>
+                    <a href="/settings">Preferences</a>
+                    {% if _auth_user %}
+                    <a href="#" id="authelia-signout">Logout</a>
+                    {% endif %}
                 </span>
             </span>
         </nav>
-        {% endif %}
     </div>
     <script>
     // Sign out via Authelia's logout endpoint (clears the SSO session), then
