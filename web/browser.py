@@ -583,18 +583,23 @@ _ACCESS_ABBREV = {
     'public': '🌐',
 }
 
-# Source — internal/external (lab-generated vs imported from elsewhere)
+# Source — internal/external (lab-generated vs imported from elsewhere).
+# Emoji fallback: 🧪 (test tube) for lab-generated; ↓ (arrow) for imported.
+# Matches the inline-SVG glyph used in `_ACCESS_SVG_INTERNAL` — a lab beaker,
+# NOT a house (which read as a "home" link).
 _SOURCE_ABBREV = {
-    'internal': '🏠',
+    'internal': '🧪',
     'external': '↓',
 }
 
 
 # ── unified access + publication-status icon ─────────────────────────────────
 # One glyph replaces the old two-icon (access + source) system. Shape encodes
-# access (public → globe, internal → house); colour encodes publication_status
-# (unpublished → muted red, published → muted green). Container width is fixed
-# so row alignment survives regardless of glyph choice.
+# access (public → globe, internal → lab beaker / Erlenmeyer flask); colour
+# encodes publication_status (unpublished → muted red, published → muted
+# green). The "internal" glyph used to be a house; that was read as a link to
+# the home page, so it's now a lab beaker to signal "lab-generated" data.
+# Container width is fixed so row alignment survives regardless of glyph.
 #
 # publication_status is NOT exposed by ant-serve (2026-08) — read it directly
 # from the collection's ``data/h5adstore/<group>/index.md`` YAML frontmatter.
@@ -629,12 +634,16 @@ _ACCESS_SVG_INTERNAL = (
     'aria-hidden="true">'
     # filled colored disc
     '<circle cx="8" cy="8" r="8" fill="currentColor"/>'
-    # house glyph in white on top
+    # Erlenmeyer (conical) lab flask in white on top:
+    #   - short horizontal cap across the neck top
+    #   - two vertical neck lines
+    #   - triangular body flaring out to a wide base
+    #   - a meniscus line partway up the body suggesting liquid level
     '<g fill="none" stroke="white" stroke-width="1.2" '
     'stroke-linecap="round" stroke-linejoin="round">'
-    '<path d="M3.4 8.2 L8 4.4 L12.6 8.2"/>'
-    '<path d="M4.6 8.2 v4.2 h6.8 v-4.2"/>'
-    '<path d="M7.1 12.4 v-2.4 h1.8 v2.4"/>'
+    '<path d="M6.2 3.6 h3.6"/>'
+    '<path d="M6.6 3.6 v3.4 L4.0 12.4 h8.0 L9.4 7.0 V3.6"/>'
+    '<path d="M5.3 9.6 h5.4"/>'
     '</g>'
     '</svg>'
 )
