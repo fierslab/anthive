@@ -383,7 +383,14 @@ def build_dataset_inputs(entry) -> Optional[DatasetInputs]:
     catalogs = _discover_catalogs(entry.duckdb_path)
     if not catalogs:
         return None
-    source_mtime = max(_mtime(sidecar), _mtime(entry.duckdb_path))
+    # Cache invalidation must react to changes in any of the three sources
+    # feeding a computed row: scores (sidecar), obs columns (duckdb), and
+    # tag-target resolution (the .md's obs_tags / api.obs_rename block).
+    source_mtime = max(
+        _mtime(sidecar),
+        _mtime(entry.duckdb_path),
+        _mtime(entry.md_path),
+    )
     return DatasetInputs(
         db_id=entry.db_id,
         duckdb_path=entry.duckdb_path.resolve(),
