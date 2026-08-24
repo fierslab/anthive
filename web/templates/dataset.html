@@ -863,21 +863,21 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     })();
 
-    // ── "notebook" action button → open a dataset-loading .ipynb ─────────
-    // Reuses the existing plot-notebook endpoint (`/api/notebook/{b64}/…`)
-    // with `geom=scatter` on the default embedding, so JupyterLite opens a
-    // notebook whose first code cell instantiates AnthiveClient bound to
-    // THIS dataset. R52 from BUG_AUDIT_2026_08_21.md: clicking notebook
-    // previously landed the user on plain JupyterLite (no dataset context).
+    // ── "notebook" action button → open a dataset-exploration .ipynb ─────
+    // Calls the dataset-notebook endpoint (`/api/notebook/{b64}/dataset.ipynb`)
+    // which returns a starter notebook for THIS dataset: connect + info +
+    // obs slice + module_scores + gene_stats + flagship UMAP. NOT the
+    // plot-notebook endpoint — that returns a specific-plot notebook,
+    // which is the wrong artifact for the dataset page. Filename stays
+    // literal `dataset.ipynb` so JupyterLite's open-url extension saves
+    // it under a stable basename across every dataset.
     (function () {
         var link = document.getElementById('ds-open-notebook');
         if (!link) return;
         var dbId = {{ db_id|tojson }};
-        var defaultEmb = {{ (default_embedding or '')|tojson }};
         link.addEventListener('click', function (e) {
             e.preventDefault();
-            var params = { db_id: dbId, geom: 'scatter' };
-            if (defaultEmb) params.embedding = defaultEmb;
+            var params = { db_id: dbId };
             var b64;
             try {
                 b64 = btoa(JSON.stringify(params))
@@ -886,8 +886,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 window.open('/jupyter/', '_blank', 'noopener');
                 return;
             }
-            var filename = (dbId.replace(/[^A-Za-z0-9_-]+/g, '_') || 'dataset');
-            var nbUrl = '/api/notebook/' + b64 + '/' + filename + '.ipynb';
+            var nbUrl = '/api/notebook/' + b64 + '/dataset.ipynb';
             var labUrl = '/jupyter/lab/index.html?fromURL=' + encodeURIComponent(nbUrl);
             window.open(labUrl, '_blank', 'noopener');
         });

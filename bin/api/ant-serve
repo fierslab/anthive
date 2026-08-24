@@ -8830,6 +8830,328 @@ def _build_notebook_for_plot(
     }
 
 
+def _build_notebook_for_dataset(
+    *,
+    db_id: str,
+    info: Dict[str, Any],
+    base_url: str,
+) -> Dict[str, Any]:
+    """Assemble an nbformat-4 JSON dict for a dataset-exploration notebook.
+
+    Unlike ``_build_notebook_for_plot`` (which pre-fills a specific plot),
+    this notebook is a **starter kit** for THIS dataset: connect + fetch
+    ``info``, list obs metadata, list module scores, fetch gene stats for a
+    short starter panel, and render the flagship UMAP (skipped when the
+    dataset has no default embedding).
+
+    Args:
+        db_id: Composite dataset id (``group/file``) — same value
+            ``AnthiveClient`` accepts everywhere.
+        info: The ``/databases/{db_id}/info`` payload — used to build a
+            biology-aware intro (title, cell/gene counts, celltype/tissue
+            hints), pick a starter gene panel from ``top_genes``, and
+            decide whether the UMAP cell should be emitted.
+        base_url: Public base URL of the API (from ``_notebook_base_url``),
+            embedded in the auth cell verbatim so the notebook is
+            deployment-portable.
+
+    Returns:
+        An nbformat-4 dict ready to ``json.dumps(...)`` and serve with
+        media type ``application/x-ipynb+json``. Roughly 11 cells,
+        alternating markdown and code — see inline comments for the
+        exact layout.
+    """
+    title = (info.get('title') or db_id) if isinstance(info, dict) else db_id
+    n_cells = info.get('n_cells') if isinstance(info, dict) else None
+    n_genes = info.get('n_genes') if isinstance(info, dict) else None
+    collection = info.get('collection') if isinstance(info, dict) else None
+    collection_name = (
+        collection.get('group') if isinstance(collection, dict) else None
+    )
+    default_embedding = (
+        info.get('default_embedding') if isinstance(info, dict) else None
+    )
+    embeddings = info.get('embeddings') if isinstance(info, dict) else None
+    if not default_embedding and isinstance(embeddings, dict):
+        # Prefer an X_umap-shaped key, else first available.
+        for candidate in embeddings.keys():
+            if 'umap' in candidate.lower():
+                default_embedding = candidate
+                break
+        if not default_embedding and embeddings:
+            default_embedding = next(iter(embeddings.keys()))
+    top_genes = info.get('top_genes') if isinstance(info, dict) else None
+    starter_genes: List[str]
+    if isinstance(top_genes, list) and top_genes:
+        starter_genes = [str(gene) for gene in top_genes[:5] if gene]
+    else:
+        starter_genes = ['APOE', 'TREM2', 'C1QA']
+    top_cat = info.get('top_cat') if isinstance(info, dict) else None
+    color_field = (
+        str(top_cat) if isinstance(top_cat, str) and top_cat else 'ant_cluster'
+    )
+
+    intro_lines = [f"# {title}", ""]
+    fact_bits: List[str] = []
+    if collection_name:
+        fact_bits.append(f"**Collection:** {collection_name}")
+    if isinstance(n_cells, int):
+        fact_bits.append(f"**Cells:** {n_cells:,}")
+    if isinstance(n_genes, int):
+        fact_bits.append(f"**Genes:** {n_genes:,}")
+    fact_bits.append(f"**db_id:** `{db_id}`")
+    intro_lines.append(" · ".join(fact_bits))
+    description = info.get('description') if isinstance(info, dict) else None
+    if isinstance(description, str) and description.strip():
+        first_para = description.strip().split('\n\n', 1)[0]
+        intro_lines.extend(["", first_para])
+    intro_lines.extend([
+        "",
+        "This notebook is a starter for exploring **this dataset**. Each cell "
+        "is a self-contained call against the anthive REST API via "
+        "`pyvark.AnthiveClient` — edit params freely.",
+        "",
+        "> **Disclaimer.** This notebook lives only in your browser "
+        "(JupyterLite saves to the local IndexedDB). To persist your "
+        "changes, download the `.ipynb` via *File → Download* and run it "
+        "against your own Jupyter server.",
+        "",
+        "> Tip: install **pyvark[vark-config]** to reuse Go vark CLI "
+        "credentials; the auth block below becomes a no-op.",
+    ])
+    intro_md = "\n".join(intro_lines)
+
+    info_cell = (
+        f"DB_ID = {db_id!r}\n"
+        "\n"
+        "# High-level dataset metadata: title, n_cells / n_genes, layers,\n"
+        "# embeddings, obs columns (numerical + categorical), collection\n"
+        "# provenance (authors / year / doi / accession), and top_genes.\n"
+        "info = c.get_database_info(DB_ID)\n"
+        "print(f\"title      : {info.get('title')}\")\n"
+        "print(f\"n_cells    : {info.get('n_cells'):,}\") if isinstance(info.get('n_cells'), int) else None\n"
+        "print(f\"n_genes    : {info.get('n_genes'):,}\") if isinstance(info.get('n_genes'), int) else None\n"
+        "print(f\"layers     : {list((info.get('layers') or {}).keys())}\")\n"
+        "print(f\"embeddings : {list((info.get('embeddings') or {}).keys())}\")\n"
+        "collection = info.get('collection') or {}\n"
+        "print(f\"collection : {collection.get('group')} ({collection.get('year')})\")\n"
+        "info  # full dict for reference"
+    )
+
+    obs_cell = (
+        "# Pull a slice of the obs (per-cell metadata) table as a\n"
+        "# pandas DataFrame. `metadata='*'` selects every obs column;\n"
+        "# `limit=1000` keeps the pull small for exploration — drop it\n"
+        "# for the full table (can be very large).\n"
+        "obs_df = c.get_cells(DB_ID, metadata='*', limit=1000, format='dataframe')\n"
+        "obs_df.head()"
+    )
+
+    scores_cell = (
+        "# Every pre-computed geneset score already present in the\n"
+        "# duckdb as an obs column. Each row: study, experiment, name,\n"
+        "# column, n_genes. Empty list = no module scores on this dataset.\n"
+        "module_scores = c.list_module_scores(DB_ID)\n"
+        "print(f\"n scored genesets: {module_scores.get('count', 0)}\")\n"
+        "module_scores.get('scored_genesets', [])[:20]"
+    )
+
+    starter_repr = ', '.join(repr(gene) for gene in starter_genes)
+    genes_cell = (
+        f"STARTER_GENES = [{starter_repr}]\n"
+        "\n"
+        "# Per-gene expression stats (mean, pct_expressed, ...) on the\n"
+        "# default log-normalised layer. Extend the list — the endpoint\n"
+        "# is cheap.\n"
+        "c.get_gene_stats(DB_ID, STARTER_GENES, format='dataframe')"
+    )
+
+    cells: List[Dict[str, Any]] = [
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": intro_md,
+        },
+        {
+            "cell_type": "code",
+            "metadata": {},
+            "execution_count": None,
+            "outputs": [],
+            "source": _auth_cell(base_url),
+        },
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": "## Dataset overview",
+        },
+        {
+            "cell_type": "code",
+            "metadata": {},
+            "execution_count": None,
+            "outputs": [],
+            "source": info_cell,
+        },
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": (
+                "## Explore obs metadata\n"
+                "\n"
+                "The **obs** table has one row per cell and one column per "
+                "annotation (cluster labels, QC metrics, donor / condition, "
+                "module scores, …). Fetch a sample as a DataFrame."
+            ),
+        },
+        {
+            "cell_type": "code",
+            "metadata": {},
+            "execution_count": None,
+            "outputs": [],
+            "source": obs_cell,
+        },
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": (
+                "## List available geneset scores\n"
+                "\n"
+                "Which curated gene sets are already scored on this dataset "
+                "(available as `<experiment>::<name>` obs columns)."
+            ),
+        },
+        {
+            "cell_type": "code",
+            "metadata": {},
+            "execution_count": None,
+            "outputs": [],
+            "source": scores_cell,
+        },
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": (
+                "## Fetch expression stats for a starter gene panel\n"
+                "\n"
+                "Per-gene summary stats (mean, fraction expressed, …) — a "
+                "cheap starting point before pulling per-cell expression."
+            ),
+        },
+        {
+            "cell_type": "code",
+            "metadata": {},
+            "execution_count": None,
+            "outputs": [],
+            "source": genes_cell,
+        },
+    ]
+
+    if default_embedding:
+        umap_cell = (
+            f"EMBEDDING = {default_embedding!r}\n"
+            f"COLOR     = {color_field!r}\n"
+            "\n"
+            "# Render the flagship embedding scatter via the server. The\n"
+            "# response is a dict {'bytes': <PNG>, 'caption': <str>, ...};\n"
+            "# switch format='csv' to pull the underlying DataFrame instead.\n"
+            "from IPython.display import Image, Markdown, display\n"
+            "img = c.get_plot(DB_ID, 'scatter', x=EMBEDDING, color=COLOR, format='png')\n"
+            "display(Image(data=img['bytes']))\n"
+            "display(Markdown(f\"**Caption.** {img.get('caption', '')}\"))"
+        )
+        cells.append({
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": (
+                "## Render the default embedding\n"
+                "\n"
+                f"Server-rendered scatter of `{default_embedding}` "
+                f"coloured by `{color_field}`. Swap `COLOR` for any obs "
+                "column (categorical or numerical) or a gene symbol."
+            ),
+        })
+        cells.append({
+            "cell_type": "code",
+            "metadata": {},
+            "execution_count": None,
+            "outputs": [],
+            "source": umap_cell,
+        })
+
+    return {
+        "nbformat": 4,
+        "nbformat_minor": 5,
+        "metadata": {
+            "kernelspec": {
+                "name": "python3",
+                "display_name": "Python 3 (Pyodide)",
+                "language": "python",
+            },
+            "language_info": {
+                "name": "python",
+                "version": "3.11",
+                "file_extension": ".py",
+                "mimetype": "text/x-python",
+            },
+            "anthive": {
+                "generator": "ant-serve",
+                "api_version": API_VERSION,
+                "db_id": db_id,
+                "kind": "dataset",
+            },
+        },
+        "cells": cells,
+    }
+
+
+async def _build_dataset_notebook_response(
+    db_id: str,
+    request: Request,
+):
+    """Serve a dataset-exploration notebook for ``db_id``.
+
+    Args:
+        db_id: Composite dataset id (``group/file``). Must resolve to a
+            live entry in the registry — otherwise this raises 404
+            (mirrored from the ``/info`` endpoint's KeyError → 404 path).
+        request: The inbound FastAPI request. Used to compute the
+            embedded ``BASE_URL`` (honours ``X-Forwarded-Host``) and to
+            detect the deployment's auth case for the ``X-Anthive-Auth-Case``
+            header (client telemetry only — the notebook body is
+            auth-case-agnostic).
+
+    Returns:
+        A FastAPI ``Response`` carrying the ``application/x-ipynb+json``
+        JSON body. Adds ``Content-Disposition`` (``dataset.ipynb``) so a
+        direct download saves under a clean basename.
+
+    Raises:
+        HTTPException: 404 if the db_id is unknown, 500 on unexpected
+        registry errors — matches ``/databases/{db_id}/info`` semantics.
+    """
+    try:
+        info = registry.get_database_metadata(db_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:  # noqa: BLE001 — mirrors get_database_info
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    case, _remote_user, _passwordless = _detect_notebook_auth(request)
+    base_url = _notebook_base_url(request)
+    notebook_dict = _build_notebook_for_dataset(
+        db_id=db_id, info=info, base_url=base_url,
+    )
+    headers = {
+        "Content-Disposition": 'attachment; filename="dataset.ipynb"',
+        "Cache-Control": "no-store",
+        "X-Anthive-Auth-Case": case,
+    }
+    return Response(
+        content=json.dumps(notebook_dict, indent=1),
+        media_type="application/x-ipynb+json",
+        headers=headers,
+    )
+
+
 def _common_plot_params_from_dict(
     db_id: str,
     params: Dict[str, Any],
@@ -9129,6 +9451,96 @@ async def plot_notebook_b64_endpoint(
     """
     db_id, geom, params = _decode_b64_notebook_params(b64params)
     return await _build_notebook_response(db_id, geom, params, request)
+
+
+def _decode_b64_dataset_params(b64params: str) -> Tuple[str, Dict[str, Any]]:
+    """Decode a base64-urlsafe JSON blob for a dataset notebook.
+
+    The dataset notebook variant only needs ``db_id``; any other keys
+    (e.g. ``geom`` or plot-form fields inherited from the caller) are
+    ignored so the same encoder as the plot notebook can be reused
+    client-side without a special case.
+
+    Args:
+        b64params: URL-safe base64 of a JSON object with (at least) a
+            ``db_id`` key. Padding is optional.
+
+    Returns:
+        A ``(db_id, extras)`` pair where ``extras`` is the remaining
+        (unused) dict — kept for future extensions.
+
+    Raises:
+        HTTPException: 400 if the blob is not valid base64 / JSON / a
+            dict, or if ``db_id`` is missing.
+    """
+    import base64 as _b64
+    try:
+        padded = b64params + '=' * (-len(b64params) % 4)
+        raw = _b64.urlsafe_b64decode(padded)
+        params = json.loads(raw.decode('utf-8'))
+    except (ValueError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(
+            400,
+            detail=f"Could not decode base64-url-safe JSON params: {exc}",
+        )
+    if not isinstance(params, dict):
+        raise HTTPException(
+            400, detail="Decoded payload must be a JSON object.",
+        )
+    db_id = params.pop('db_id', None)
+    if not db_id:
+        raise HTTPException(
+            400, detail="Encoded params dict must include 'db_id'.",
+        )
+    return str(db_id), params
+
+
+@app.get(
+    "/notebook/{b64params}/dataset.ipynb",
+    tags=["plots"],
+    response_class=JSONResponse,
+)
+async def dataset_notebook_b64_endpoint(
+    b64params: str = FastAPIPath(
+        ...,
+        description=(
+            "Base64-url-safe-encoded JSON with (at least) a ``db_id`` key. "
+            "Any other keys are ignored — the dataset notebook has no "
+            "plot-param surface. Same encoding as the plot-notebook b64 "
+            "route so callers can share their encoder."
+        ),
+    ),
+    request: Request = None,  # type: ignore[assignment]
+):
+    """Return a JupyterLite-compatible ``.ipynb`` seeded for exploring
+    a **whole dataset** (not a specific plot).
+
+    Wire shape mirrors ``/notebook/{b64params}/{filename}.ipynb`` (b64
+    path segment → JupyterLite ``?fromURL=`` deep-link) so the web UI's
+    notebook button can flip to a dataset URL with no other change.
+
+    Cells (11, one-shot content — no plot pre-fill):
+
+    1. markdown — dataset title, cells / genes, collection, disclaimer
+    2. code     — connect (``AnthiveClient(BASE_URL)``)
+    3. markdown — "Dataset overview"
+    4. code     — ``c.get_database_info(DB_ID)`` + printed highlights
+    5. markdown — "Explore obs metadata"
+    6. code     — ``c.get_cells(DB_ID, metadata='*', limit=1000, ...)``
+    7. markdown — "List available geneset scores"
+    8. code     — ``c.list_module_scores(DB_ID)``
+    9. markdown — "Fetch expression stats for a starter panel"
+    10. code    — ``c.get_gene_stats(DB_ID, [...], format='dataframe')``
+    11. markdown + code — optional flagship UMAP (only when the dataset
+        has a default embedding; skipped otherwise).
+
+    Filename is always literal ``dataset.ipynb`` so JupyterLite's
+    open-url extension saves it under a stable, recognisable basename
+    across every dataset (per-file naming would collide with the
+    plot-notebook flow).
+    """
+    db_id, _extras = _decode_b64_dataset_params(b64params)
+    return await _build_dataset_notebook_response(db_id, request)
 
 
 @app.get(
