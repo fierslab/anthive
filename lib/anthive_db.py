@@ -1090,18 +1090,42 @@ class AnthiveDB:
 
         n_cells = (self._conn.execute("SELECT COUNT(*) FROM cells").fetchone() or (0,))[0]
 
-        # ── Step 1: resolve stored gene names (single lookup per gene) ────────
-        resolved: Dict[str, Optional[str]] = {}   # queried_name → stored_name or None
-        for gene_name in gene_names:
+        # ── Step 1: resolve stored gene names (batched lookup) ────────────────
+        # One query resolves every queried name at once. Keeps `resolved` a
+        # queried_name → stored_name map (None when the gene is absent). We
+        # also build resolved_ids so Step 3 can drive the batched aggregation
+        # on gene_id (much faster than filtering by gene_name string).
+        resolved: Dict[str, Optional[str]] = {n: None for n in gene_names}
+        resolved_ids: Dict[str, Optional[int]] = {n: None for n in gene_names}
+        stored_to_id: Dict[str, int] = {}
+        if gene_names:
+            placeholders = ','.join('?' * len(gene_names))
             if case_sensitive:
-                row = self._conn.execute(
-                    "SELECT gene_name FROM genes WHERE gene_name = ?", [gene_name]
-                ).fetchone()
+                lookup_rows = self._conn.execute(
+                    f"SELECT gene_name, gene_id FROM __genes WHERE gene_name IN ({placeholders})",
+                    gene_names,
+                ).fetchall()
+                stored_to_id = {r[0]: int(r[1]) for r in lookup_rows}
+                for n in gene_names:
+                    if n in stored_to_id:
+                        resolved[n] = n
+                        resolved_ids[n] = stored_to_id[n]
             else:
-                row = self._conn.execute(
-                    "SELECT gene_name FROM genes WHERE LOWER(gene_name) = LOWER(?)", [gene_name]
-                ).fetchone()
-            resolved[gene_name] = row[0] if row else None
+                lower_names = [n.lower() for n in gene_names]
+                lookup_rows = self._conn.execute(
+                    f"SELECT gene_name, gene_id FROM __genes WHERE LOWER(gene_name) IN ({placeholders})",
+                    lower_names,
+                ).fetchall()
+                lower_to_stored: Dict[str, Tuple[str, int]] = {}
+                for stored_n, gid in lookup_rows:
+                    lower_to_stored[stored_n.lower()] = (stored_n, int(gid))
+                for n in gene_names:
+                    hit = lower_to_stored.get(n.lower())
+                    if hit is not None:
+                        stored, gid = hit
+                        resolved[n] = stored
+                        resolved_ids[n] = gid
+                        stored_to_id[stored] = gid
 
         # ── Step 2: rank_mean + scaled_mean for the queried genes ─────────────
         #
@@ -1230,11 +1254,139 @@ class AnthiveDB:
                         'mean_expr_layer': round(float(mean_expr), 6),
                     }
 
-        # ── Step 3: per-gene expression statistics ────────────────────────────
-        results = []
+        # ── Step 3: per-gene expression statistics (BATCHED) ──────────────────
+        # One aggregated SQL query for all requested genes instead of one query
+        # per gene. On a 150k-cell parquet-backed dataset this drops the 200-
+        # candidate top-var path from ~7 s to ~0.5 s (measured 2026-08-24) — the
+        # by_gene parquet is sorted by gene_id, so a WHERE gene_id IN (...)
+        # scans only the requested gene ranges.
+        #
+        # Path A (fast): by_gene parquet exists → query it directly by gene_id.
+        # Path B (legacy): no parquet → __layer__<safe> table has gene_id too.
+        # Path C (older legacy view with gene_name): fall back to per-gene loop.
+        results: List[Dict[str, Any]] = []
+        stats_by_stored: Dict[str, Dict[str, Any]] = {}
+
+        # Collect the gene_ids we need in one go (from Step 1's resolved_ids).
+        ids_for_query = [
+            (n, resolved_ids[n], resolved[n])
+            for n in gene_names
+            if resolved_ids.get(n) is not None and resolved.get(n) is not None
+        ]
+
+        if ids_for_query:
+            gene_id_list = [gid for _, gid, _ in ids_for_query]
+            id_to_stored: Dict[int, str] = {gid: sn for _, gid, sn in ids_for_query}
+            # Unique the ids (a queried duplicate should hit cache once).
+            unique_ids = list(dict.fromkeys(gene_id_list))
+
+            layer_source = self._layer_source_for_gene_filter(layer)
+            id_placeholders = ','.join('?' * len(unique_ids))
+            batch_sql = f"""
+                SELECT
+                    gene_id,
+                    COUNT(*)                          AS n_nonzero,
+                    SUM(value)                        AS sum_nz,
+                    SUM(value * value)                AS sum_sq_nz,
+                    AVG(value)                        AS mean_nz,
+                    STDDEV_POP(value)                 AS std_nz,
+                    MEDIAN(value)                     AS median_nz,
+                    QUANTILE_CONT(value, 0.1)         AS q10_nz,
+                    QUANTILE_CONT(value, 0.9)         AS q90_nz,
+                    MAX(value)                        AS max_val
+                FROM {layer_source}
+                WHERE gene_id IN ({id_placeholders})
+                GROUP BY gene_id
+            """
+            try:
+                batch_rows = self._conn.execute(batch_sql, unique_ids).fetchall()
+            except duckdb.BinderException:
+                # Older legacy views only expose (cell_name, gene_name, value)
+                # with no gene_id column — fall back to per-gene loop on those.
+                batch_rows = None
+
+            if batch_rows is not None:
+                by_gid: Dict[int, Tuple[Any, ...]] = {int(r[0]): r for r in batch_rows}
+                for gene_name, gid, stored_name in ids_for_query:
+                    row = by_gid.get(int(gid))
+                    if row is None or row[1] == 0:
+                        stats_by_stored[stored_name] = {
+                            'n_nonzero': 0, 'pct_nonzero': 0.0,
+                            'mean': 0.0, 'std': 0.0,
+                            'mean_nonzero': None, 'std_nonzero': None,
+                            'median_nonzero': None, 'q10_nonzero': None, 'q90_nonzero': None,
+                            'max': 0.0,
+                        }
+                        continue
+                    (_gid, n_nonzero, sum_nz, sum_sq_nz, mean_nz, std_nz,
+                     median_nz, q10_nz, q90_nz, max_val) = row
+                    mean_all = float(sum_nz) / n_cells if n_cells else 0.0
+                    var_all = max(0.0, float(sum_sq_nz) / n_cells - mean_all ** 2) if n_cells else 0.0
+                    std_all = math.sqrt(var_all)
+                    cv = round(std_all / mean_all, 4) if mean_all > 0 else None
+                    stats_by_stored[stored_name] = {
+                        'n_nonzero': int(n_nonzero),
+                        'pct_nonzero': round(n_nonzero * 100.0 / n_cells, 2) if n_cells else 0.0,
+                        'mean': round(mean_all, 6),
+                        'std': round(std_all, 6),
+                        'cv': cv,
+                        'mean_nonzero': round(float(mean_nz), 6),
+                        'std_nonzero': round(float(std_nz), 6),
+                        'median_nonzero': round(float(median_nz), 6),
+                        'q10_nonzero': round(float(q10_nz), 6),
+                        'q90_nonzero': round(float(q90_nz), 6),
+                        'max': round(float(max_val), 6),
+                    }
+            else:
+                # Fallback: per-gene loop on legacy layer view (rare — pre-parquet
+                # datasets). Keeps behavior identical for these edge cases.
+                layer_src = self._layer_source_with_names(layer)
+                for gene_name, _gid, stored_name in ids_for_query:
+                    row = self._conn.execute(f"""
+                        SELECT
+                            COUNT(*)                          AS n_nonzero,
+                            SUM(value)                        AS sum_nz,
+                            SUM(value * value)                AS sum_sq_nz,
+                            AVG(value)                        AS mean_nz,
+                            STDDEV_POP(value)                 AS std_nz,
+                            MEDIAN(value)                     AS median_nz,
+                            QUANTILE_CONT(value, 0.1)         AS q10_nz,
+                            QUANTILE_CONT(value, 0.9)         AS q90_nz,
+                            MAX(value)                        AS max_val
+                        FROM {layer_src}
+                        WHERE gene_name = ?
+                    """, [stored_name]).fetchone()
+                    if row is None or row[0] == 0:
+                        stats_by_stored[stored_name] = {
+                            'n_nonzero': 0, 'pct_nonzero': 0.0,
+                            'mean': 0.0, 'std': 0.0,
+                            'mean_nonzero': None, 'std_nonzero': None,
+                            'median_nonzero': None, 'q10_nonzero': None, 'q90_nonzero': None,
+                            'max': 0.0,
+                        }
+                        continue
+                    n_nonzero, sum_nz, sum_sq_nz, mean_nz, std_nz, median_nz, q10_nz, q90_nz, max_val = row
+                    mean_all = float(sum_nz) / n_cells if n_cells else 0.0
+                    var_all = max(0.0, float(sum_sq_nz) / n_cells - mean_all ** 2) if n_cells else 0.0
+                    std_all = math.sqrt(var_all)
+                    cv = round(std_all / mean_all, 4) if mean_all > 0 else None
+                    stats_by_stored[stored_name] = {
+                        'n_nonzero': int(n_nonzero),
+                        'pct_nonzero': round(n_nonzero * 100.0 / n_cells, 2) if n_cells else 0.0,
+                        'mean': round(mean_all, 6),
+                        'std': round(std_all, 6),
+                        'cv': cv,
+                        'mean_nonzero': round(float(mean_nz), 6),
+                        'std_nonzero': round(float(std_nz), 6),
+                        'median_nonzero': round(float(median_nz), 6),
+                        'q10_nonzero': round(float(q10_nz), 6),
+                        'q90_nonzero': round(float(q90_nz), 6),
+                        'max': round(float(max_val), 6),
+                    }
+
+        # ── Step 4: assemble the response in queried-name order ───────────────
         for gene_name in gene_names:
             stored_name = resolved.get(gene_name)
-
             if stored_name is None:
                 results.append({'gene': gene_name, 'error': 'not found'})
                 continue
@@ -1245,54 +1397,17 @@ class AnthiveDB:
             if stored_name in rank_ctx:
                 base.update(rank_ctx[stored_name])
 
-            # Local parquet resolution — see _layer_source_with_names.
-            layer_src = self._layer_source_with_names(layer)
-            row = self._conn.execute(f"""
-                SELECT
-                    COUNT(*)                          AS n_nonzero,
-                    SUM(value)                        AS sum_nz,
-                    SUM(value * value)                AS sum_sq_nz,
-                    AVG(value)                        AS mean_nz,
-                    STDDEV_POP(value)                 AS std_nz,
-                    MEDIAN(value)                     AS median_nz,
-                    QUANTILE_CONT(value, 0.1)         AS q10_nz,
-                    QUANTILE_CONT(value, 0.9)         AS q90_nz,
-                    MAX(value)                        AS max_val
-                FROM {layer_src}
-                WHERE gene_name = ?
-            """, [stored_name]).fetchone()
-
-            if row is None or row[0] == 0:
-                results.append({**base,
+            row_stats = stats_by_stored.get(stored_name)
+            if row_stats is None:
+                # Defensive: gene resolved but no stats row (shouldn't happen).
+                row_stats = {
                     'n_nonzero': 0, 'pct_nonzero': 0.0,
                     'mean': 0.0, 'std': 0.0,
                     'mean_nonzero': None, 'std_nonzero': None,
                     'median_nonzero': None, 'q10_nonzero': None, 'q90_nonzero': None,
                     'max': 0.0,
-                })
-                continue
-
-            n_nonzero, sum_nz, sum_sq_nz, mean_nz, std_nz, median_nz, q10_nz, q90_nz, max_val = row
-
-            mean_all = float(sum_nz) / n_cells
-            var_all = max(0.0, float(sum_sq_nz) / n_cells - mean_all ** 2)
-            std_all = math.sqrt(var_all)
-
-            cv = round(std_all / mean_all, 4) if mean_all > 0 else None
-
-            results.append({**base,
-                'n_nonzero': int(n_nonzero),
-                'pct_nonzero': round(n_nonzero * 100.0 / n_cells, 2),
-                'mean': round(mean_all, 6),
-                'std': round(std_all, 6),
-                'cv': cv,
-                'mean_nonzero': round(float(mean_nz), 6),
-                'std_nonzero': round(float(std_nz), 6),
-                'median_nonzero': round(float(median_nz), 6),
-                'q10_nonzero': round(float(q10_nz), 6),
-                'q90_nonzero': round(float(q90_nz), 6),
-                'max': round(float(max_val), 6),
-            })
+                }
+            results.append({**base, **row_stats})
 
         return results
 

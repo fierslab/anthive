@@ -3318,40 +3318,114 @@ async def get_gene_stats(
         top = 200
     try:
         def _sync_work():
-            with _pooled_db(db_id) as db:
-                # Resolve the layer to use.
+            # Build the per-(db, layer) cache fingerprint. Mirrors the
+            # /gene_stats_all pattern (mus sha + day-bucketed mtime); when
+            # either signal is missing we bypass the cache rather than
+            # risk staleness.
+            cache = registry.gene_stats_cache
+            try:
+                meta = registry.get_database_metadata(db_id) or {}
+            except KeyError:
+                meta = {}
+            resolved_layer = layer or meta.get('default_layer') or 'X'
+            mus_sha = str(meta.get('sha256') or '').strip()
+            duckdb_mtime = 0.0
+            db_url = registry.databases.get(db_id)
+            if db_url and not db_url.startswith('s3://'):
                 try:
-                    resolved_layer = layer or registry.get_database_metadata(db_id).get('default_layer') or 'X'
-                except KeyError:
-                    resolved_layer = layer or 'X'
+                    duckdb_mtime = Path(db_url).stat().st_mtime
+                except OSError:
+                    duckdb_mtime = 0.0
+            fingerprint = GeneStatsCache.fingerprint(mus_sha or None, duckdb_mtime)
+
+            with _pooled_db(db_id) as db:
                 if genes is not None:
                     gene_list = [g.strip() for g in genes.split(',') if g.strip()]
-                else:
-                    # top-N most variable: get all gene stats, sort by std desc.
-                    # Use _get_top_genes_by_mean as a fallback gene list source,
-                    # then compute stats and return sorted by std.
-                    n_top = top or 20
-                    # Fetch a larger pool to sort by variability (std).
-                    candidate_genes = _get_top_genes_by_mean(db, min(n_top * 10, 500), resolved_layer)
-                    if not candidate_genes:
-                        # Fallback: pull first N gene names from genes table.
-                        rows = db._conn.execute(
-                            "SELECT gene_name FROM genes ORDER BY gene_name LIMIT ?",
-                            [min(n_top * 10, 500)]
-                        ).fetchall()
-                        candidate_genes = [r[0] for r in rows]
-                    all_stats = db.get_gene_stats(candidate_genes, layer=resolved_layer)
-                    # Sort by std descending; genes with no std sort last.
-                    all_stats.sort(key=lambda s: (s.get('std') or 0), reverse=True)
-                    return {"db_id": db_id, "layer": resolved_layer,
-                            "stats": all_stats[:n_top], "top_by": "std"}
-                stats = db.get_gene_stats(gene_list, layer=resolved_layer)
-            return {"db_id": db_id, "layer": resolved_layer, "stats": stats}
+                    stats = _cached_gene_stats(
+                        db, db_id, gene_list, resolved_layer, fingerprint, cache,
+                    )
+                    return {"db_id": db_id, "layer": resolved_layer, "stats": stats}
+
+                # top-N most variable: pull a candidate pool by mean, compute
+                # std for each (batched, cache-aware), then keep the highest-std N.
+                n_top = top or 20
+                candidate_genes = _get_top_genes_by_mean(db, min(n_top * 10, 500), resolved_layer)
+                if not candidate_genes:
+                    # Fallback: pull first N gene names from genes table.
+                    rows = db._conn.execute(
+                        "SELECT gene_name FROM genes ORDER BY gene_name LIMIT ?",
+                        [min(n_top * 10, 500)]
+                    ).fetchall()
+                    candidate_genes = [r[0] for r in rows]
+                all_stats = _cached_gene_stats(
+                    db, db_id, candidate_genes, resolved_layer, fingerprint, cache,
+                )
+                # Sort by std descending; genes with no std sort last.
+                all_stats.sort(key=lambda s: (s.get('std') or 0), reverse=True)
+                return {"db_id": db_id, "layer": resolved_layer,
+                        "stats": all_stats[:n_top], "top_by": "std"}
         return await asyncio.to_thread(_sync_work)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+def _cached_gene_stats(db, db_id: str, gene_list: List[str], layer: str,
+                       fingerprint: Optional[str], cache) -> List[Dict[str, Any]]:
+    """Batched per-(db, gene) stats with SQLite caching.
+
+    Buckets the requested genes into cache hits vs misses (case_sensitive=True
+    to match the endpoint), computes misses via one batched ``db.get_gene_stats``
+    call, and writes them back to cache. Preserves the caller's gene ordering.
+
+    Also reuses the dataset-level distribution cache so the rank_mean /
+    scaled_mean columns are populated without a fresh layer scan.
+    """
+    if not gene_list:
+        return []
+    # Case_sensitive=True is the endpoint's implicit behavior; keep it stable
+    # so cache keys don't churn between callers.
+    case_sensitive = True
+    cached: Dict[str, Dict[str, Any]] = {}
+    missing: List[str] = []
+    if fingerprint:
+        for g in gene_list:
+            hit = cache.get(db_id, g, case_sensitive, layer, fingerprint)
+            if hit is not None:
+                cached[g] = hit
+            else:
+                missing.append(g)
+    else:
+        missing = list(gene_list)
+
+    computed: List[Dict[str, Any]] = []
+    if missing:
+        precomputed_dist = None
+        if fingerprint:
+            precomputed_dist = cache.get_distribution(db_id, layer, fingerprint)
+        computed = db.get_gene_stats(
+            missing, layer=layer, case_sensitive=case_sensitive,
+            precomputed_dist=precomputed_dist,
+        )
+        # Write back — under the caller's queried names (matches cache keys).
+        if fingerprint:
+            if precomputed_dist is None and getattr(db, '_last_distribution', None):
+                cache.put_distribution(db_id, layer, fingerprint, db._last_distribution)
+            for s in computed:
+                queried = s.get('gene')
+                if not queried:
+                    continue
+                cache.put(db_id, queried, case_sensitive, layer, fingerprint, s)
+
+    # Preserve caller order.
+    by_gene: Dict[str, Dict[str, Any]] = {}
+    by_gene.update(cached)
+    for s in computed:
+        g = s.get('gene')
+        if g is not None:
+            by_gene[g] = s
+    return [by_gene[g] for g in gene_list if g in by_gene]
 
 
 @app.get("/gene_stats_all", tags=["genes"])
