@@ -1051,6 +1051,58 @@ def test_get_collection_list_sorted_newest_first(fake_api):  # pyright: ignore
     assert collections[0]["last_modified"] == "2026-05-01"
 
 
+def test_collection_icon_reflects_source_not_access(monkeypatch):
+    # A collection whose datasets are ALL lab-generated (source=internal) but
+    # have mixed shareability (access=internal on some, access=public on
+    # others) must show the lab-beaker icon on the landing page — the
+    # collection card icon encodes provenance, not per-dataset shareability.
+    # This is the Hou2025 case: internal source, mixed access.
+    dbs = [
+        {"id": "H25/A", "group_id": "H25", "collection": {"group": "Hou2025"},
+         "access": "internal", "source": "internal", "updated": "2026-06-01"},
+        {"id": "H25/B", "group_id": "H25", "collection": {"group": "Hou2025"},
+         "access": "public", "source": "internal", "updated": "2026-06-02"},
+        {"id": "H25/C", "group_id": "H25", "collection": {"group": "Hou2025"},
+         "access": "public", "source": "internal", "updated": "2026-06-03"},
+    ]
+    monkeypatch.setattr(browser, "_api_get",
+                        lambda base, path, **_: {"databases": dbs} if path == "/databases" else {})
+    collections = browser.get_collection_list("http://x")
+    hou = next(c for c in collections if c["group_id"] == "H25")
+    assert hou["pub_icon"]["access"] == "lab-generated"
+    assert "lab-generated" in hou["pub_icon"]["tooltip"]
+
+
+def test_collection_icon_reflects_source_external_wins(monkeypatch):
+    # Even one imported dataset in the collection flips the icon to globe:
+    # a "mostly lab-generated" collection is not wholly lab-generated.
+    dbs = [
+        {"id": "MIX/A", "group_id": "MIX", "collection": {"group": "MixCol"},
+         "access": "internal", "source": "internal", "updated": "2026-06-01"},
+        {"id": "MIX/B", "group_id": "MIX", "collection": {"group": "MixCol"},
+         "access": "internal", "source": "external", "updated": "2026-06-02"},
+    ]
+    monkeypatch.setattr(browser, "_api_get",
+                        lambda base, path, **_: {"databases": dbs} if path == "/databases" else {})
+    collections = browser.get_collection_list("http://x")
+    mix = next(c for c in collections if c["group_id"] == "MIX")
+    assert mix["pub_icon"]["access"] == "imported"
+
+
+def test_collection_icon_missing_source_defaults_to_lab_generated(monkeypatch):
+    # A collection with no source recorded defaults to lab-generated — matches
+    # the safer-default contract used everywhere else in the icon path.
+    dbs = [
+        {"id": "X/A", "group_id": "X", "collection": {"group": "X"},
+         "access": "public", "updated": "2026-06-01"},
+    ]
+    monkeypatch.setattr(browser, "_api_get",
+                        lambda base, path, **_: {"databases": dbs} if path == "/databases" else {})
+    collections = browser.get_collection_list("http://x")
+    col = next(c for c in collections if c["group_id"] == "X")
+    assert col["pub_icon"]["access"] == "lab-generated"
+
+
 def test_get_filter_options_splits_and_dedups(fake_api):  # pyright: ignore
     collections = browser.get_collection_list("http://x")
     options = browser.get_filter_options(collections)
@@ -2782,8 +2834,10 @@ def test_landing_uses_unified_icon(client):
     assert "ap-icon" in resp.text
     # class definition ships in base.html (sitewide)
     assert ".ap-icon" in resp.text
-    # tooltip vocabulary
-    assert "internal · published" in resp.text or "external · published" in resp.text
+    # tooltip vocabulary — landing card icon speaks *provenance* (source),
+    # so tooltips read lab-generated/imported (not internal/external, which
+    # would be per-dataset access wording).
+    assert "lab-generated · published" in resp.text or "imported · published" in resp.text
 
 
 def test_folder_page_uses_unified_icon(client):

@@ -1394,13 +1394,35 @@ def get_collection_list(api_url: str) -> List[Dict]:
         # frontmatter). Ant-serve doesn't expose it yet; read from disk.
         pub_status = _publication_status_for_group(collection_meta.get('group'))
 
-        # Unified access+publication icon (one glyph per collection). Access
-        # is a per-dataset field; when it varies inside the collection we fall
-        # back to 'internal' (the safer default). If any dataset is public we
-        # keep the 'public' semantic for the header icon.
-        access_values = sorted({(db.get('access') or 'internal').lower() for db in dbs})
-        coll_access = 'public' if 'public' in access_values else access_values[0]
-        pub_icon = _access_pub_icon(coll_access, pub_status)
+        # Unified source+publication icon (one glyph per collection). The
+        # shape is semantically about *provenance* — beaker = lab-generated
+        # (source=internal), globe = imported from an external source. That
+        # matches how users read the icon on a collection card ("is this
+        # ours?"). We deliberately use `source` here, not `access`: a
+        # collection where every dataset was lab-generated but a subset is
+        # currently public-shareable ('access=public') is still lab-
+        # generated. Per-dataset icons on the folder page keep using
+        # `access` (a per-dataset shareability concern).
+        #
+        # Aggregation: if any dataset was imported (source=external) we show
+        # the globe — a "mixed" collection with even one imported dataset is
+        # not wholly lab-generated. Missing source defaults to 'internal'
+        # (matches the safer-default contract elsewhere).
+        source_values = sorted({(db.get('source') or 'internal').lower() for db in dbs})
+        # Map source vocabulary → the access glyph vocabulary that
+        # _access_pub_icon speaks (internal → beaker, public → globe).
+        coll_is_external = any(v not in ('internal',) for v in source_values)
+        icon_access = 'public' if coll_is_external else 'internal'
+        pub_icon = _access_pub_icon(icon_access, pub_status)
+        # Rewrite the icon labels to source-terminology so the tooltip
+        # reads correctly (the shape encodes provenance here, not
+        # shareability). Keep the publication_status half untouched.
+        source_word = 'imported' if coll_is_external else 'lab-generated'
+        pub_icon = {
+            **pub_icon,
+            'access': source_word,
+            'tooltip': f"{source_word} · {pub_icon['publication']}",
+        }
 
         # Canonical dataset date: for the collection use the newest date
         # across its datasets (published year OR most-recent mtime).
