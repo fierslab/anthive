@@ -573,7 +573,7 @@ def _caveats_or_empty(file_metadata: dict, md_path) -> list:
     try:
         return get_caveats(file_metadata)
     except Exception as exc:
-        logger.warning(f"caveats parse error in {md_path}: {exc}")
+        log.warning(f"caveats parse error in {md_path}: {exc}")
         return []
 
 
@@ -1226,7 +1226,7 @@ class DatabaseRegistry:
                             obs_numerical.append(col_name)
                     obs_numerical = sorted(obs_numerical)
             except Exception as exc:
-                logger.warning(f"Failed to read score sidecar {score_sidecar}: {exc}")
+                log.warning(f"Failed to read score sidecar {score_sidecar}: {exc}")
 
             # Get obs columns (categorical)
             obs_categorical = []
