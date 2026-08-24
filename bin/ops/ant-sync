@@ -55,12 +55,14 @@ SYNC_EXTENSIONS      = {'.h5ad', '.duckdb', '.de.parquet', '.scores.parquet',
                         '.by_gene.parquet', '.by_cell.parquet',
                         # Fleet-wide summary tables at repo root — one
                         # file per resource; specific-name allow.
-                        'module_variability.parquet'}
+                        'module_variability.parquet',
+                        'scores_index.parquet'}
 # Pull defaults to .h5ad + .de.parquet. .duckdb and .layer.*.parquet sidecars
 # are derived (rebuilt locally via `ant-build-all`). Use `pull --include-duckdb`
 # to override for disaster recovery.
 PULL_DEFAULT_EXTS    = {'.h5ad', '.de.parquet', '.scores.parquet',
-                        'module_variability.parquet'}
+                        'module_variability.parquet',
+                        'scores_index.parquet'}
 SKIP_SUFFIXES        = {'.wal', '.deleted', '.partial'}
 # S3 object metadata key holding the source file's mtime (integer seconds).
 # Set on every push so we can detect content-without-size-change drift
