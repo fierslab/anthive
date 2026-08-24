@@ -1,0 +1,310 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "duckdb>=0.10.0",
+#   "requests>=2.31.0",
+#   "pyyaml>=6.0",
+#   "pandas>=2.0.0",
+# ]
+# ///
+"""ant-score-astrocyte-fleet — batch-score every astrocyte dataset with the
+three astrocyte-state catalogs (Habib 2020 DAA, Sadick 2022 subtypes,
+Liddelow 2017 A1/A2 cassettes) via scanpy (ant-score-ext) and AUCell
+(ant-aucell). No starCAT — no astrocyte catalog exists there.
+
+Discovers datasets via lib.mus (cell_type contains 'astrocyte'). Human-only
+by default (all current astrocyte catalogs are human ortholog-mapped).
+
+For each dataset it:
+  1. Ensures __gene_bins exists on the duckdb (needed by scanpy scorer).
+  2. For each catalog in --catalogs, runs scanpy + AUCell (independently
+     skippable per --skip-*), unless already present in the sidecar and
+     --overwrite is not set.
+
+Failures are logged; the loop continues.
+
+Usage:
+  ant-score-astrocyte-fleet [--only D1,D2,...] [--skip D1,D2,...]
+                             [--catalogs C1,C2,...] [--overwrite]
+                             [--skip-scanpy] [--skip-aucell]
+                             [--dry-run]
+"""
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import List, Set, Tuple
+
+import duckdb
+import requests   # type: ignore
+
+script_dir = Path(__file__).resolve().parent
+repo_root = script_dir.parent.parent
+lib_dir = repo_root / 'lib'
+sys.path.insert(0, str(lib_dir))
+
+from h5adstore import iter_h5adstore   # type: ignore
+from mus import resolve_annotation     # type: ignore
+from scores_parquet import read_scores  # type: ignore
+
+ANT = repo_root / 'bin' / 'ant'
+ANT_SERVE_URL = 'http://localhost:8080'
+LOG_PATH = repo_root / 'tmp' / f'score-astro-fleet-{int(time.time())}.log'
+
+# The three astrocyte state / subtype catalogs (all celltypes=astrocyte,
+# organism=human — mouse-derived Habib and Liddelow use the *_human ortholog
+# variants).
+DEFAULT_CATALOGS = [
+    'Habib2020/DAA_states_human',
+    'Sadick2022/Astro_subtypes',
+    'Liddelow2017/Reactive_states_human',
+]
+
+
+def _log(msg: str) -> None:
+    print(msg, flush=True)
+    with open(LOG_PATH, 'a') as fh:
+        fh.write(msg + '\n')
+
+
+def enumerate_astrocytes(root: Path) -> List[tuple]:
+    """Return list of (db_id, h5ad_path, duckdb_path, is_human).
+
+    A dataset qualifies if resolve_annotation reports cell_type containing
+    'astrocyte'.
+    """
+    out = []
+    for entry in iter_h5adstore(root):
+        if not entry.duckdb_path.exists():
+            continue
+        ann = resolve_annotation(entry.h5ad_path, root=root)
+        ct = ann.get('cell_type')
+        ct_list = ct if isinstance(ct, list) else [ct] if ct else []
+        ct_lower = {str(x).lower() for x in ct_list}
+        if 'astrocyte' in ct_lower:
+            org = ann.get('organism')
+            org_list = org if isinstance(org, list) else [org] if org else []
+            is_human = 'human' in {str(x).lower() for x in org_list}
+            out.append((entry.db_id, entry.h5ad_path, entry.duckdb_path, is_human))
+    return sorted(out, key=lambda row: row[0])
+
+
+def has_gene_bins(duckdb_path: Path) -> bool:
+    conn = duckdb.connect(str(duckdb_path), read_only=True)
+    try:
+        rows = conn.execute(
+            "SELECT 1 FROM information_schema.tables WHERE table_name = '__gene_bins'"
+        ).fetchall()
+        return bool(rows)
+    finally:
+        conn.close()
+
+
+def ensure_gene_bins(db_id: str, h5ad_path: Path, duckdb_path: Path) -> bool:
+    """Build __gene_bins if missing. Coordinates with ant-serve."""
+    try:
+        if has_gene_bins(duckdb_path):
+            return True
+    except duckdb.IOException:
+        pass
+
+    _log(f"  · __gene_bins missing — building via ant duckdb-check")
+    try:
+        requests.post(f"{ANT_SERVE_URL}/admin/release/{db_id}", timeout=10)
+    except Exception:
+        pass
+
+    result = subprocess.run(
+        [str(ANT), 'duckdb-check', str(h5ad_path)],
+        capture_output=True, text=True,
+    )
+    ok = 'CHECK COMPLETED SUCCESSFULLY' in result.stdout
+
+    try:
+        requests.post(f"{ANT_SERVE_URL}/admin/restore/{db_id}", timeout=10)
+    except Exception:
+        pass
+
+    if not ok:
+        _log(f"  x duckdb-check failed:")
+        _log('\n'.join(result.stdout.splitlines()[-15:]))
+        _log(result.stderr.strip()[-500:])
+    return ok
+
+
+def scored_catalogs(duckdb_path: Path, source: str) -> Set[str]:
+    try:
+        df = read_scores(duckdb_path, source=source)
+    except Exception as exc:
+        _log(f"  ! read_scores({source}) failed on {duckdb_path.name}: {exc}")
+        return set()
+    if df.empty:
+        return set()
+    return {str(c) for c in df['catalog'].unique()}
+
+
+def run_score_ext(db_id: str, catalog: str) -> bool:
+    _log(f"  · ant-score-ext {db_id} {catalog}")
+    result = subprocess.run(
+        [str(ANT), 'score-ext', db_id, catalog],
+        capture_output=True, text=True,
+    )
+    _log(result.stdout)
+    if result.returncode != 0:
+        _log(f"  x score-ext failed ({catalog}): {result.stderr.strip()[-500:]}")
+        return False
+    return True
+
+
+def run_aucell(db_id: str, catalog: str, overwrite: bool) -> bool:
+    _log(f"  · ant-aucell {db_id} {catalog}")
+    cmd = [str(ANT), 'aucell', db_id, catalog]
+    if overwrite:
+        cmd.append('--overwrite')
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    _log(result.stdout)
+    if result.returncode != 0:
+        _log(f"  x aucell failed ({catalog}): {result.stderr.strip()[-500:]}")
+        return False
+    return True
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog='ant-score-astrocyte-fleet')
+    parser.add_argument('--only', default=None, help='comma-separated db_ids')
+    parser.add_argument('--skip', default=None, help='comma-separated db_ids')
+    parser.add_argument(
+        '--catalogs', default=None,
+        help='comma-separated catalog ids (default: 3 astrocyte catalogs)',
+    )
+    parser.add_argument('--overwrite', action='store_true')
+    parser.add_argument('--skip-scanpy', action='store_true')
+    parser.add_argument('--skip-aucell', action='store_true')
+    parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--h5adstore-root', default='data/h5adstore')
+    return parser.parse_args()
+
+
+def _plan_methods(
+    db_id: str,
+    duckdb_path: Path,
+    catalogs: List[str],
+    args: argparse.Namespace,
+) -> Tuple[List[str], List[str]]:
+    already_geneset = set() if args.overwrite else scored_catalogs(duckdb_path, 'geneset')
+    already_aucell = set() if args.overwrite else scored_catalogs(duckdb_path, 'aucell')
+
+    scanpy_catalogs = [] if args.skip_scanpy else [
+        cat for cat in catalogs if cat not in already_geneset
+    ]
+    aucell_catalogs = [] if args.skip_aucell else [
+        cat for cat in catalogs if cat not in already_aucell
+    ]
+    return scanpy_catalogs, aucell_catalogs
+
+
+def main() -> int:
+    args = parse_args()
+
+    root = Path(args.h5adstore_root).resolve()
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    catalogs = (
+        [c.strip() for c in args.catalogs.split(',') if c.strip()]
+        if args.catalogs else list(DEFAULT_CATALOGS)
+    )
+
+    datasets = enumerate_astrocytes(root)
+    if args.only:
+        keep = set(args.only.split(','))
+        datasets = [d for d in datasets if d[0] in keep]
+    if args.skip:
+        drop = set(args.skip.split(','))
+        datasets = [d for d in datasets if d[0] not in drop]
+
+    n_human = sum(1 for _, _, _, is_human in datasets if is_human)
+    _log(f"[astro-fleet] {len(datasets)} astrocyte datasets found "
+         f"({n_human} human) — log at {LOG_PATH}")
+    _log(f"[astro-fleet] catalogs ({len(catalogs)}): {', '.join(catalogs)}")
+    _log(f"[astro-fleet] overwrite={args.overwrite}  "
+         f"skip_scanpy={args.skip_scanpy}  skip_aucell={args.skip_aucell}")
+
+    stats = {
+        'total': len(datasets),
+        'gene_bins_ok': 0,
+        'gene_bins_failed': 0,
+        'scanpy_ok': 0,
+        'scanpy_failed': 0,
+        'scanpy_skipped_nonhuman': 0,
+        'scanpy_skipped_existing': 0,
+        'aucell_ok': 0,
+        'aucell_failed': 0,
+        'aucell_skipped_nonhuman': 0,
+        'aucell_skipped_existing': 0,
+    }
+
+    planned_scanpy_runs = 0
+    planned_aucell_runs = 0
+
+    for i, (db_id, h5ad_path, duckdb_path, is_human) in enumerate(datasets, 1):
+        _log(f"\n[{i:>3}/{len(datasets)}] {db_id}  (human={is_human})")
+
+        if not is_human:
+            _log(f"  · skip all scorers (non-human)")
+            stats['scanpy_skipped_nonhuman'] += 1
+            stats['aucell_skipped_nonhuman'] += 1
+            continue
+
+        scanpy_catalogs, aucell_catalogs = _plan_methods(
+            db_id, duckdb_path, catalogs, args,
+        )
+        skipped_scanpy = len(catalogs) - len(scanpy_catalogs) \
+            if not args.skip_scanpy else 0
+        skipped_aucell = len(catalogs) - len(aucell_catalogs) \
+            if not args.skip_aucell else 0
+        stats['scanpy_skipped_existing'] += skipped_scanpy
+        stats['aucell_skipped_existing'] += skipped_aucell
+
+        planned_scanpy_runs += len(scanpy_catalogs)
+        planned_aucell_runs += len(aucell_catalogs)
+
+        _log(f"  plan: scanpy={len(scanpy_catalogs)}  aucell={len(aucell_catalogs)}")
+
+        if args.dry_run:
+            continue
+
+        needs_gene_bins = bool(scanpy_catalogs)
+        if needs_gene_bins:
+            gb_ok = ensure_gene_bins(db_id, h5ad_path, duckdb_path)
+            if gb_ok:
+                stats['gene_bins_ok'] += 1
+            else:
+                stats['gene_bins_failed'] += 1
+                scanpy_catalogs = []
+
+        for catalog in scanpy_catalogs:
+            if run_score_ext(db_id, catalog):
+                stats['scanpy_ok'] += 1
+            else:
+                stats['scanpy_failed'] += 1
+
+        for catalog in aucell_catalogs:
+            if run_aucell(db_id, catalog, args.overwrite):
+                stats['aucell_ok'] += 1
+            else:
+                stats['aucell_failed'] += 1
+
+    _log(f"\n===== ASTRO-FLEET SUMMARY =====")
+    _log(f"  planned scanpy runs (this invocation): {planned_scanpy_runs}")
+    _log(f"  planned aucell runs (this invocation): {planned_aucell_runs}")
+    for key, val in stats.items():
+        _log(f"  {key:32s}  {val}")
+    _log(f"log: {LOG_PATH}")
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
