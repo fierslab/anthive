@@ -257,10 +257,112 @@ class _ProgressCallback:
             print()
 
 
+def _rebuild_module_variability_if_stale(
+    data_folder: Path, skip: bool = False,
+) -> None:
+    """Rebuild ``<h5adstore>/module_variability.parquet`` if any local
+    ``*.scores.parquet`` sidecar is newer than the aggregate.
+
+    The aggregate is a single fleet-wide summary that pulls from every
+    ``*.scores.parquet``. It ships to S3 alongside the sidecars, but nothing
+    else in the sync layer notices when scoring runs make the aggregate
+    stale. This helper does that check on every push so the file we ship
+    matches the sidecars we ship.
+
+    Args:
+        data_folder: Root of the h5adstore.
+        skip: If True, do nothing (opt-out via ``--no-rebuild-variability``).
+
+    Side effects:
+        On rebuild, runs ``bin/annot/ant-module-variability`` in a subprocess
+        (output streamed to stdout). If ant-serve is reachable, POSTs
+        ``/module-variability/rescan`` afterwards so the running server
+        picks up the new file. Rebuild failure aborts the push (stale
+        aggregate on S3 is worse than no push).
+    """
+    if skip:
+        print('Skipping module_variability aggregate check '
+              '(--no-rebuild-variability).')
+        return
+
+    aggregate = data_folder / 'module_variability.parquet'
+
+    # Walk only the known catalog entries (fast) rather than rglob'ing the
+    # whole tree (slow on a large h5adstore). `iter_h5adstore` skips staging
+    # folders and half-ingested datasets — same gate as the rest of the tool.
+    def _mtime(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except FileNotFoundError:
+            return 0.0
+
+    newest_sidecar = 0.0
+    sidecar_count = 0
+    for entry in iter_h5adstore(data_folder):
+        sidecar = entry.duckdb_path.with_name(
+            entry.duckdb_path.name[: -len('.duckdb')] + '.scores.parquet'
+        )
+        if sidecar.exists():
+            sidecar_count += 1
+            m = _mtime(sidecar)
+            if m > newest_sidecar:
+                newest_sidecar = m
+
+    if sidecar_count == 0:
+        return  # nothing to aggregate → nothing to keep in sync
+    aggregate_mtime = _mtime(aggregate) if aggregate.exists() else 0.0
+
+    if aggregate.exists() and aggregate_mtime >= newest_sidecar:
+        return  # already fresh
+
+    import subprocess
+
+    reason = 'missing' if not aggregate.exists() else 'stale'
+    print(f'Aggregate module_variability.parquet is {reason} — '
+          f'rebuilding via ant-module-variability before push.')
+
+    script = Path(__file__).resolve().parent.parent / 'annot' / 'ant-module-variability'
+    if not script.exists():
+        print(f'  WARNING: {script} not found — pushing whatever aggregate exists.')
+        return
+
+    completed = subprocess.run(
+        [str(script), '--h5adstore-root', str(data_folder)],
+        check=False,
+    )
+    if completed.returncode != 0:
+        print(f'\nERROR: ant-module-variability exited {completed.returncode}. '
+              f'Refusing to push a stale aggregate — fix the rebuild first.',
+              file=sys.stderr)
+        raise SystemExit(1)
+
+    # Best-effort: nudge ant-serve to reload the aggregate on the running
+    # instance. Connection refused / 404 is fine — the file itself will
+    # ship regardless, and a restarted server will pick it up.
+    # Path is `/module-variability/rescan` (not `/api/…`): ant-serve mounts
+    # itself under `root_path="/api"` at the Caddy layer, but when we talk
+    # to it directly on rest_api_host:rest_api_port we go straight to the
+    # route without the reverse-proxy prefix.
+    api_url = _ant_serve_url(get_config())
+    status = _admin_post(api_url, '/module-variability/rescan', timeout=30)
+    if status in (200, 204):
+        print('ant-serve module_variability rescan: ok')
+    elif status is None:
+        print('ant-serve module_variability rescan: skipped '
+              '(server unreachable — file will still upload)')
+    else:
+        print(f'ant-serve module_variability rescan: status={status} '
+              f'(non-fatal — file will still upload)')
+
+
 def cmd_push(args, s3_cfg: dict, data_folder: Path) -> None:
     # Slaves are read-only mirrors — pushing would propagate local
     # divergence back to the primary, defeating the point of the mode.
     require_primary(tool='ant-sync push')
+
+    _rebuild_module_variability_if_stale(
+        data_folder, skip=args.no_rebuild_variability,
+    )
 
     client   = _s3_client(s3_cfg)
     bucket   = s3_cfg['bucket']
@@ -1064,6 +1166,14 @@ def main() -> None:
         '--max-concurrency', type=int, default=4,
         help='Parallel multipart upload chunks (default 4). Lower it to '
              'reduce CPU + socket pressure.',
+    )
+    push_sub.add_argument(
+        '--no-rebuild-variability', action='store_true',
+        help=('Skip the pre-push check that rebuilds '
+              'module_variability.parquet when any *.scores.parquet '
+              'sidecar is newer. Use for surgical pushes where the '
+              'aggregate is known to be current (or when the scoring '
+              'fleet is still running).'),
     )
 
     pull_sub = subparsers.add_parser('pull', help='Download S3 files locally')
