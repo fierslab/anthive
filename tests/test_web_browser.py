@@ -4002,13 +4002,25 @@ def test_genes_tab_server_side_search(client):
 
 
 def test_genes_tab_topvar_section_present(client):
-    """Genes tab: top-10 most-variable section present, populated by JS from std."""
+    """Genes tab: top-variable rows share the curated table, populated by JS from std.
+
+    Post-merge (task #295): top-var rows are appended into the same
+    ``#obs-tbl-genes`` tbody as curated rows and sort together — the
+    separate ``topvar-section`` / ``topvar-tbody`` scaffold is gone.
+    The JS uses `renderTopVar` to insert into the shared tbody."""
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
     html = resp.text
-    assert 'id="topvar-section"' in html, "topvar section must be present"
-    assert 'id="topvar-tbody"'   in html, "topvar tbody must exist"
-    # Top-var requires std from gene_stats.
+    # Merged behavior: no separate topvar tbody/section.
+    assert 'id="topvar-section"' not in html, (
+        "topvar section must be gone — top-var rows share the curated tbody now"
+    )
+    assert 'id="topvar-tbody"' not in html, (
+        "topvar tbody must be gone — top-var rows share the curated tbody now"
+    )
+    # But renderTopVar is still the entry point that inserts the rows.
+    assert 'function renderTopVar' in html, "renderTopVar must still populate top-var rows"
+    # Top-var still requires std from gene_stats.
     assert ".std" in html or "s.std" in html or "x.std" in html, "topvar must sort by std field"
 
 

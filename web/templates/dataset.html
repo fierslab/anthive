@@ -495,9 +495,6 @@
     #gene-search { padding: 3px 7px; font-family: inherit; font-size: 12px;
       border: 1px solid #ccc; border-radius: 4px; outline: none; width: 200px; }
     #gene-search-count { font-size: 11px; color: var(--text-muted); }
-    /* top-var section header */
-    .topvar-section { margin-top: 10px; }
-    .topvar-section .obs-sub { margin-top: 0; }
   </style>
   <h2>Genes
     <span class="info" title="Click ▬ for a histogram of the gene's expression, or ◉ for an embedding scatter coloured by the gene. Sparklines show the gene's value relative to the db-wide range for that stat. Panel source: precomputed dataset favourites, or a canonical curated panel keyed on cell type (microglia / astrocyte / neuron).">ⓘ</span></h2>
@@ -531,8 +528,10 @@
       <tbody id="gene-search-tbody"></tbody>
     </table></div>
   </div>
-  {# Single merged table: curated genes first (★ marked), then top-variable appended by JS.
-     When gene_panel.genes is empty (source=='none') the tbody starts empty and JS fills it. #}
+  {# Single merged table: curated genes (★ marked) + top-variable genes in ONE
+     tbody, sorted together by whichever column is active (variability desc by
+     default). The nested-tbody split for top-var is gone; JS appends top-var
+     rows into the same tbody and applySortToTable mixes them with curated. #}
   <div class="table-wrap"><table class="obs-stats-tbl auto" id="obs-tbl-genes">
     <thead><tr>
       <th data-sortcol="star" title="★ = curated favourite; click to sort" style="width:1.2em;text-align:center">★</th>
@@ -568,12 +567,8 @@
     </tr>
     {% endfor %}
     {% endif %}
-    {# top-variable rows appended here by JS (id="topvar-tbody") — always populated #}
-    <tbody id="topvar-tbody"></tbody>
     </tbody>
   </table></div>
-  {# topvar-section wrapper kept for JS show/hide; visually invisible (no heading) #}
-  <div id="topvar-section" style="display:none"></div>
   <div class="muted" style="font-size:11px;margin-top:4px">
     Stats from <code>/gene_stats</code> (log-normalised expression layer).
     <b>rank expr</b>: percentile rank of the gene's mean among all genes in the dataset.
@@ -1387,8 +1382,9 @@ document.addEventListener('DOMContentLoaded', function() {
             var searchStatus = document.getElementById('gene-search-status');
             var searchResults = document.getElementById('gene-search-results');
             var searchTbody  = document.getElementById('gene-search-tbody');
-            var topvarSection = document.getElementById('topvar-section');
-            var topvarTbody   = document.getElementById('topvar-tbody');
+            // Top-var rows now live in the same tbody as curated rows so they
+            // sort together (see #obs-tbl-genes). Renders via renderTopVar
+            // append into that tbody, then applySortToTable re-orders.
 
             // Base URL for gene plot links (computed once).
             var _gBase = '/browse/' + {{ folder_browse_id | tojson }} + '/' + {{ file_id | tojson }};
@@ -1506,24 +1502,32 @@ document.addEventListener('DOMContentLoaded', function() {
 
             if (searchCount) searchCount.textContent = rows.length + ' genes';
 
-            // Populate topvarTbody with the given stats array (already sorted by std desc).
+            // Append the given top-var stats into the SAME tbody as curated rows
+            // (statsArr is already sorted by std desc). Curated rows are marked
+            // with class="gene-curated" + a ★; top-var rows get no star. After
+            // insertion the sort function mixes both by whatever column is
+            // active (default: variability desc).
             function renderTopVar(statsArr) {
-                if (!topvarTbody || !statsArr.length) return;
+                var mainTbody = document.querySelector('#obs-tbl-genes tbody');
+                if (!mainTbody || !statsArr.length) return;
                 var topVar = statsArr.slice(0, 10);
                 var tvStdRankMap = computeStdRanks(topVar);
-                topvarTbody.innerHTML = topVar.map(function (x) {
+                // Insert rows. makeGeneRow returns HTML for a <tr>; use a
+                // temporary tbody to parse and move nodes so we don't clobber
+                // curated rows already in place.
+                var frag = document.createElement('tbody');
+                frag.innerHTML = topVar.map(function (x) {
                     return makeGeneRow(x.gene, x, '', tvStdRankMap[x.gene.toLowerCase()]);
                 }).join('');
-                // Hydrate sparklines in inserted rows.
                 var tvByGene = {};
                 topVar.forEach(function (x) { tvByGene[x.gene.toLowerCase()] = x; });
-                Array.from(topvarTbody.querySelectorAll('.gene-item')).forEach(function (tvRow) {
+                Array.from(frag.querySelectorAll('.gene-item')).forEach(function (tvRow) {
+                    mainTbody.appendChild(tvRow);
                     var s = tvByGene[(tvRow.dataset.gene || '').toLowerCase()];
                     if (!s) return;
                     var frac = tvStdRankMap[(tvRow.dataset.gene || '').toLowerCase()];
                     setGeneSparklines(tvRow, s, frac != null ? frac : null);
                 });
-                if (topvarSection) topvarSection.style.display = '';
             }
 
             // Elapsed-timer helper for the Genes tab spinner. Reveals the
@@ -1610,18 +1614,11 @@ document.addEventListener('DOMContentLoaded', function() {
                         // Sort the table now that variability values are hydrated.
                         applySortToTable();
 
-                        // ── Top-10 most variable from curated stats ────────────
-                        // When curated panel is small, fall back to genome-wide.
-                        var stdVals = d.stats.filter(function (s) { return s.std != null; });
-                        if (stdVals.length >= 3) {
-                            stdVals.sort(function (a, b) { return b.std - a.std; });
-                            renderTopVar(stdVals);
-                            if (window.antTabLoading) window.antTabLoading.done('genes');
-                        } else {
-                            // Curated panel too small to rank — fetch genome-wide
-                            // (which marks the tab done on completion).
-                            fetchTopVarGenomeWide();
-                        }
+                        // Always also fetch genome-wide top-variable genes and
+                        // merge them into the SAME table (dedup against curated).
+                        // The merged rows sort together with curated by whatever
+                        // column is active — see renderTopVar + applySortToTable.
+                        fetchTopVarGenomeWide();
                     })
                     .catch(function (err) {
                         console.error('fetchAndHydrateCurated failed:', err);
