@@ -1369,6 +1369,105 @@ class AnthiveDB:
         # table wrapped by a view with (cell_name, gene_name, value).
         return f'"layer__{safe}"'
 
+    # Ordered candidates for a "human-readable symbol" column in __varcat,
+    # searched when __genes.gene_name looks like Ensembl. Mirrors the
+    # autodetect in ``bin/annot/ant-aucell``.
+    _SYMBOL_COLUMN_CANDIDATES = (
+        'feature_name', 'gene_symbol', 'Symbol', 'gene_symbols',
+        'symbol', 'hgnc_symbol', 'mgi_symbol',
+    )
+
+    def _looks_like_ensembl(self, sample_size: int = 200) -> bool:
+        """Return True when ``__genes.gene_name`` predominantly holds Ensembl IDs.
+
+        Samples up to ``sample_size`` rows and returns True when at least half
+        of the observed values start with ``ENSG``/``ENSMUS`` (human/mouse).
+        Uses gene_id ordering so the sample is deterministic.
+        """
+        rows = self._conn.execute(
+            "SELECT gene_name FROM __genes ORDER BY gene_id LIMIT ?",
+            [int(sample_size)],
+        ).fetchall()
+        if not rows:
+            return False
+        n_ensembl = sum(
+            1 for (name,) in rows
+            if isinstance(name, str) and (name.startswith('ENSG') or name.startswith('ENSMUS'))
+        )
+        return n_ensembl / len(rows) >= 0.5
+
+    def _find_symbol_column(self) -> Optional[str]:
+        """Return the first available __varcat column that holds gene symbols.
+
+        Returns None when __varcat does not exist or contains none of the
+        candidate columns.
+        """
+        rows = self._conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = '__varcat'"
+        ).fetchall()
+        available = {name for (name,) in rows}
+        if not available:
+            return None
+        for cand in self._SYMBOL_COLUMN_CANDIDATES:
+            if cand in available:
+                return cand
+        return None
+
+    def _resolve_symbols_to_gene_ids(
+        self, symbols: List[str]
+    ) -> Tuple[Dict[str, int], Optional[str]]:
+        """Map gene symbols → gene_ids, transparently handling Ensembl-indexed DBs.
+
+        First tries the direct ``__genes.gene_name`` match. When the direct
+        match yields no hits AND ``__genes.gene_name`` looks Ensembl AND a
+        symbol column exists in ``__varcat``, retries via ``__varcat`` (case-
+        insensitive on the symbol column).
+
+        Args:
+            symbols: Gene symbols to resolve.
+
+        Returns:
+            Tuple of (map from input symbol to gene_id, resolution route).
+            Route ∈ ``{'gene_name', 'varcat:<column>', None}``. Missing
+            symbols are absent from the map.
+        """
+        if not symbols:
+            return {}, None
+
+        placeholders = ', '.join('?' for _ in symbols)
+        direct_rows = self._conn.execute(
+            f"SELECT gene_name, gene_id FROM __genes WHERE gene_name IN ({placeholders})",
+            symbols,
+        ).fetchall()
+        if direct_rows:
+            return {name: gid for name, gid in direct_rows}, 'gene_name'
+
+        # Ensembl fallback via __varcat.<symbol_column>.
+        if not self._looks_like_ensembl():
+            return {}, None
+        symbol_column = self._find_symbol_column()
+        if symbol_column is None:
+            return {}, None
+        upper_placeholders = ', '.join('?' for _ in symbols)
+        varcat_rows = self._conn.execute(
+            f"SELECT UPPER({safe_ident(symbol_column)}) AS sym, gene_id "
+            f"FROM __varcat "
+            f"WHERE UPPER({safe_ident(symbol_column)}) IN ({upper_placeholders})",
+            [s.upper() for s in symbols],
+        ).fetchall()
+        if not varcat_rows:
+            return {}, f'varcat:{symbol_column}'
+        upper_map: Dict[str, int] = {}
+        for sym_upper, gid in varcat_rows:
+            upper_map.setdefault(sym_upper, gid)
+        found: Dict[str, int] = {}
+        for original in symbols:
+            hit = upper_map.get(original.upper())
+            if hit is not None:
+                found[original] = hit
+        return found, f'varcat:{symbol_column}'
+
     def score_module(
         self,
         module_genes: List[str],
@@ -1382,26 +1481,29 @@ class AnthiveDB:
         where control genes are sampled from the same expression bins as
         the module genes (using __gene_bins built by ant-duckdb-check).
 
+        Ensembl-indexed duckdbs (``__genes.gene_name`` holds ENSG… IDs) are
+        handled transparently: when a direct ``gene_name`` match yields
+        nothing, the resolver retries via ``__varcat.feature_name`` (or the
+        next available symbol column).
+
         Args:
-            module_genes: List of gene names in the module.
+            module_genes: List of gene symbols in the module.
             layer: Expression layer (default 'X'). Must be log-normalized.
             n_control: Control genes sampled per expression bin (default 100).
             seed: Integer seed for reproducible control gene selection.
 
         Returns:
-            Tuple of (scores_df, meta_dict).
-            scores_df: DataFrame with columns [cell_name, module_score].
-            meta_dict: Dict with genes_found, genes_missing, n_control_genes.
+            Tuple of (scores_df, meta_dict). ``scores_df`` has columns
+            ``[cell_name, module_score]``. ``meta_dict`` has keys
+            ``genes_found``, ``genes_missing``, ``n_control_genes``, and
+            ``gene_resolution`` (``'gene_name'`` | ``'varcat:<col>'`` | ``None``).
+
+        Raises:
+            ValueError: If no module genes can be resolved to gene_ids.
         """
         self.require_gene_bins()
 
-        # Resolve gene names → integer IDs (parameterized, no SQL injection)
-        placeholders = ', '.join('?' for _ in module_genes)
-        found_rows = self._conn.execute(
-            f"SELECT gene_name, gene_id FROM __genes WHERE gene_name IN ({placeholders})",
-            module_genes,
-        ).fetchall()
-        found_map = {name: gid for name, gid in found_rows}
+        found_map, resolution = self._resolve_symbols_to_gene_ids(module_genes)
         genes_found = [g for g in module_genes if g in found_map]
         genes_missing = [g for g in module_genes if g not in found_map]
 
@@ -1483,6 +1585,7 @@ class AnthiveDB:
             'genes_found': genes_found,
             'genes_missing': genes_missing,
             'n_control_genes': int(n_control_genes),
+            'gene_resolution': resolution,
         }
         return scores_df, meta
 
