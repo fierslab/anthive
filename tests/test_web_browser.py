@@ -87,6 +87,70 @@ def test_plot_thumbnail_noop_without_scheme():
     assert browser._expand_plot_thumbnails(html, default_db="GroupA/ds1") == html
 
 
+# ── unit tests: _resolve_gene_panel ────────────────────────────────────────────
+
+def test_resolve_gene_panel_precomputed_wins():
+    """Curated top_genes short-circuits fallback regardless of cell_type."""
+    genes, source = browser._resolve_gene_panel(["TREM2", "CX3CR1"], "microglia")
+    assert genes == ["TREM2", "CX3CR1"]
+    assert source == "precomputed"
+
+
+@pytest.mark.parametrize("term, expected_source", [
+    ("microglial cell", "microglia_fallback"),
+    ("microglia",       "microglia_fallback"),
+    ("Microglia",       "microglia_fallback"),   # case-insensitive
+    ("astrocyte",       "astrocyte_fallback"),
+    ("neuron",          "neuron_fallback"),
+])
+def test_resolve_gene_panel_string_matches_fallback(term, expected_source):
+    """A single-string term maps to the right fallback panel."""
+    genes, source = browser._resolve_gene_panel([], term)
+    assert source == expected_source
+    assert isinstance(genes, list) and len(genes) > 0
+
+
+@pytest.mark.parametrize("term", [None, "", "unknown_thing", " "])
+def test_resolve_gene_panel_no_match_returns_empty(term):
+    """Missing/empty/unmatched terms return the empty 'none' source."""
+    genes, source = browser._resolve_gene_panel([], term)
+    assert genes == []
+    assert source == "none"
+
+
+def test_resolve_gene_panel_list_cell_type_bug_3():
+    """Regression: cell_type given as a list (from CellxGene .mus) must not crash.
+
+    Before the fix, ``(cell_type_term or '').lower()`` raised
+    ``AttributeError: 'list' object has no attribute 'lower'``.
+    """
+    genes, source = browser._resolve_gene_panel([], ["microglial cell"])
+    assert source == "microglia_fallback"
+    assert genes  # non-empty
+
+
+def test_resolve_gene_panel_list_picks_first_matching_entry():
+    """When multiple cell-type entries are present, the first known one wins."""
+    genes, source = browser._resolve_gene_panel(
+        [], ["neuron", "microglial cell"]
+    )
+    assert source == "neuron_fallback"
+    assert genes
+
+
+def test_resolve_gene_panel_empty_list_returns_none():
+    """An empty list of cell-type terms behaves like a missing term."""
+    genes, source = browser._resolve_gene_panel([], [])
+    assert genes == []
+    assert source == "none"
+
+
+def test_resolve_gene_panel_list_ignores_falsy_entries():
+    """Empty/None entries in the list are skipped without crashing."""
+    genes, source = browser._resolve_gene_panel([], [None, "", "astrocyte"])
+    assert source == "astrocyte_fallback"
+
+
 # ── unit tests: _accession_url ─────────────────────────────────────────────────
 
 @pytest.mark.parametrize("accession, fragment", [

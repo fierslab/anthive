@@ -247,18 +247,41 @@ _NEURON_CELLTYPE_TERMS   = {"neuron", "neurons", "gabaergic neuron",
 def _resolve_gene_panel(top_genes, cell_type_term):
     """Return (genes: List[str], source: str) for the Genes tab.
 
-    source ∈ {'precomputed', 'microglia_fallback', 'astrocyte_fallback',
-              'neuron_fallback', 'none'}.
+    Args:
+        top_genes: Curated marker list (may be empty/None).
+        cell_type_term: Either a single cell-type string, a list of strings
+            (from `.mus` files that store comma-separated types), or None.
+            The value is coerced to strings and each candidate is checked
+            against the microglia / astrocyte / neuron term sets — the first
+            matching entry picks the fallback source.
+
+    Returns:
+        Tuple of (list of gene symbols, source label). ``source`` ∈
+        ``{'precomputed', 'microglia_fallback', 'astrocyte_fallback',
+        'neuron_fallback', 'none'}``.
     """
     if top_genes:
         return list(top_genes), 'precomputed'
-    ct = (cell_type_term or '').lower()
-    if ct in _MICROGLIA_CELLTYPE_TERMS:
-        return list(_MICROGLIA_MARKER_FALLBACK), 'microglia_fallback'
-    if ct in _ASTROCYTE_CELLTYPE_TERMS:
-        return list(_ASTROCYTE_MARKER_FALLBACK), 'astrocyte_fallback'
-    if ct in _NEURON_CELLTYPE_TERMS:
-        return list(_NEURON_MARKER_FALLBACK), 'neuron_fallback'
+
+    # `.mus` files may carry cell_type as a JSON list (comma-separated types
+    # in CellxGene-imported datasets). Normalise to an iterable of strings.
+    if cell_type_term is None:
+        candidates: List[str] = []
+    elif isinstance(cell_type_term, list):
+        candidates = [str(entry) for entry in cell_type_term if entry]
+    else:
+        candidates = [str(cell_type_term)]
+
+    for term in candidates:
+        lowered = term.strip().lower()
+        if not lowered:
+            continue
+        if lowered in _MICROGLIA_CELLTYPE_TERMS:
+            return list(_MICROGLIA_MARKER_FALLBACK), 'microglia_fallback'
+        if lowered in _ASTROCYTE_CELLTYPE_TERMS:
+            return list(_ASTROCYTE_MARKER_FALLBACK), 'astrocyte_fallback'
+        if lowered in _NEURON_CELLTYPE_TERMS:
+            return list(_NEURON_MARKER_FALLBACK), 'neuron_fallback'
     return [], 'none'
 
 
