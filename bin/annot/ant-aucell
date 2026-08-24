@@ -385,10 +385,15 @@ def _aucell_one_experiment(
     try:
         scores_df = _run_pyscenic_aucell(adata, signatures, seed=seed)
     except Exception as exc:
+        # str(exc) can be empty (e.g. bare ``raise RuntimeError()``); include
+        # the class name so the fleet log never surfaces a blank message.
+        message = str(exc).strip() or repr(exc)
+        error = f'{type(exc).__name__}: {message}'
+        print(f'  ERROR: pyscenic AUCell failed — {error}', file=sys.stderr)
         return {
             'catalog': catalog_id,
             'status': 'error',
-            'error': str(exc),
+            'error': error,
             'n_rows': 0,
         }
     elapsed = time.time() - t_score
@@ -560,13 +565,31 @@ def main() -> int:
     print(f'\n=== {entry.db_id} ({entry.readable_id}) ===')
     print(f'  h5ad: {entry.h5ad_path}')
     t_load = time.time()
-    adata = ad.read_h5ad(entry.h5ad_path)
+    try:
+        adata = ad.read_h5ad(entry.h5ad_path)
+    except Exception as exc:
+        message = str(exc).strip() or repr(exc)
+        print(
+            f'ERROR: failed to read h5ad {entry.h5ad_path}: '
+            f'{type(exc).__name__}: {message}',
+            file=sys.stderr,
+        )
+        return 1
     print(
         f'  Loaded {adata.n_obs:,} cells × {adata.n_vars:,} genes '
         f'({time.time()-t_load:.1f}s)'
     )
 
-    adata = _maybe_remap_var_names(adata, args.gene_column)
+    try:
+        adata = _maybe_remap_var_names(adata, args.gene_column)
+    except Exception as exc:
+        message = str(exc).strip() or repr(exc)
+        print(
+            f'ERROR: gene-column remap failed on {entry.db_id}: '
+            f'{type(exc).__name__}: {message}',
+            file=sys.stderr,
+        )
+        return 1
 
     all_results = []
     for exp_id, genesets in by_experiment.items():
