@@ -385,7 +385,6 @@
 
 <div class="tab-bar" id="ds-tab-bar" role="tablist">
   {% if markdown_content %}<button type="button" class="tab-btn active" data-tab="overview" role="tab">Overview</button>{% endif %}
-  {% if caveats %}<button type="button" class="tab-btn caveat-tab lvl-{{ caveats_summary.max_level or 'low' }}" data-tab="caveats" role="tab">⚠ Caveats<span class="tab-count">{{ caveats_summary.n }}</span></button>{% endif %}
   <button type="button" class="tab-btn{% if not markdown_content %} active{% endif %}" data-tab="data" role="tab">Data</button>
   {% if info and info.n_genes %}
   <button type="button" class="tab-btn"        data-tab="genes"    role="tab">Genes</button>
@@ -400,6 +399,10 @@
   {% endif %}
   {# Downloads tab hidden until JS confirms a filtered h5ad is available. #}
   <button type="button" class="tab-btn"        data-tab="downloads" role="tab" id="tab-btn-downloads" style="display:none">Downloads</button>
+  {# Caveats tab is intentionally last and NEVER default-active — it is a
+     warning affordance, not a landing surface. Users click into it when
+     they want to see caveats; the page opens on Overview (or Data). #}
+  {% if caveats %}<button type="button" class="tab-btn caveat-tab lvl-{{ caveats_summary.max_level or 'low' }}" data-tab="caveats" role="tab">⚠ Caveats<span class="tab-count">{{ caveats_summary.n }}</span></button>{% endif %}
 </div>
 
 {# ── Overview tab ──────────────────────────────────────────────────────
@@ -1007,7 +1010,12 @@ document.addEventListener('DOMContentLoaded', function() {
             panels[k].hidden = !panels[k].classList.contains('active');
         });
         function activateTab(name, push) {
-            if (!panels[name]) name = 'overview';
+            // Requested tab missing on this dataset → fall back. Never land
+            // on caveats: it's an opt-in warning surface, not a default.
+            // Prefer overview, then data.
+            if (!panels[name]) {
+                name = panels.overview ? 'overview' : (panels.data ? 'data' : name);
+            }
             btns.forEach(function(b) { b.classList.toggle('active', b.dataset.tab === name); });
             Object.keys(panels).forEach(function(k) {
                 var isActive = (k === name);
