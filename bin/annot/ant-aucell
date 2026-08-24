@@ -4,19 +4,32 @@
 # dependencies = [
 #   "anndata>=0.10.0",
 #   "numpy>=1.24.0,<2.0",
-#   "pandas>=2.0.0",
+#   "pandas>=2.0.0,<3.0",
 #   "pyarrow>=14.0.0",
 #   "duckdb>=0.10.0",
 #   "pyyaml>=6.0",
-#   "decoupler>=1.6.0,<2.0",
+#   "scipy>=1.10",
+#   "pyscenic>=0.12.1,<0.13",
+#   "ctxcore>=0.2.0",
 # ]
 # ///
 """ant-aucell — AUCell scoring from the genesetstore into scores.parquet.
 
-Uses decoupler-py's run_aucell (rank-based AUC enrichment) instead of
-scanpy.tl.score_genes. Scores are written to the dataset's
-<basename>.scores.parquet sidecar with source='aucell' so they coexist
+Uses ``pyscenic.aucell.aucell`` (which wraps ``ctxcore.recovery.aucell``)
+for rank-based AUC enrichment. Scores are written to the dataset's
+``<basename>.scores.parquet`` sidecar with source='aucell' so they coexist
 with scanpy scores (source='geneset') and starcat scores (source='starcat').
+
+History
+-------
+The 0.1 line of this script used ``decoupler.run_aucell``. On 2026-08-24
+it was swapped to pyscenic (6.4× speedup on 21k×19k microglia data;
+see ``doc/AUCELL_IMPLEMENTATION_2026_08_24.md``). Existing fleet scores
+(source='aucell') were kept as-is — the two engines agree within
+decoupler-vs-decoupler tie-breaking noise for per-cell scores, and
+within r_donor > 0.92 for aggregate statistics. Sparse edge-case
+modules (fewer than ~3 genes actually present, mean-AUC below noise)
+can diverge below that threshold; a WARNING is logged for these.
 
 Key differences from ant-score:
   - Does NOT write to __obsnum/__obscat in the duckdb.
@@ -24,6 +37,10 @@ Key differences from ant-score:
   - Writes only to the parquet sidecar.
   - Scores are 0–1 rank-based AUCs (not scanpy signed-mean scores).
   - use_raw=False is mandatory (X is log-norm per anthive convention).
+
+For datasets larger than ``_CHUNK_THRESHOLD`` cells (default 200_000)
+scoring is performed in ``_CHUNK_SIZE`` (default 100_000) cell batches
+to bound peak memory.
 
 The sidecar is immediately queryable via:
   GET /databases/<db>/module_score?source=aucell&catalog=<experiment>
@@ -65,7 +82,10 @@ import anndata as ad
 import duckdb
 import numpy as np
 import pandas as pd
-import decoupler as dc
+from scipy.sparse import issparse
+
+from ctxcore.genesig import GeneSignature
+from pyscenic.aucell import aucell as pyscenic_aucell
 
 from config import get_config          # type: ignore
 from geneset import (                  # type: ignore
@@ -75,7 +95,20 @@ from h5adstore import H5adEntry, find_h5ad   # type: ignore
 from metadata import parse_md_file           # type: ignore
 from scores_parquet import read_scores, summarize, upsert_scores  # type: ignore
 
-TOOL_VERSION = 'ant-aucell/0.1'
+TOOL_VERSION = 'ant-aucell/0.2-pyscenic'
+
+# pyscenic uses the top 5% ranked genes for AUC (same default as decoupler).
+_AUC_THRESHOLD = 0.05
+
+# Above this many cells, score in _CHUNK_SIZE-cell batches (dense conversion
+# ~= n_cells * n_vars * 4 bytes; 200k × 20k float32 ≈ 16 GB).
+_CHUNK_THRESHOLD = 200_000
+_CHUNK_SIZE = 100_000
+
+# Modules with fewer than this many actual genes in adata.var are logged as
+# sparse edge-case modules (per-cell scores diverge > 0.02 vs decoupler and
+# aggregate stats can drop below r_donor 0.99). See migration doc.
+_SPARSE_MODULE_WARN_N = 3
 
 # Columns in adata.var that may hold gene symbols when var_names are Ensembl IDs
 _GENE_SYMBOL_COLUMN_CANDIDATES = (
@@ -87,6 +120,7 @@ _GENE_SYMBOL_COLUMN_CANDIDATES = (
 # ── registry helpers ──────────────────────────────────────────────────────────
 
 def _load_geneset_registry() -> GenesetRegistry:
+    """Return a scanned, error-free geneset registry (or exit)."""
     config = get_config()
     store_value = config.get('geneset_store')
     if not store_value:
@@ -104,6 +138,7 @@ def _load_geneset_registry() -> GenesetRegistry:
 
 
 def _h5adstore_root() -> Path:
+    """Return the resolved h5adstore root (or exit)."""
     config = get_config()
     h5ad_root_value = config.get('h5ad_store') or 'data/h5adstore'
     root = (SCRIPT_DIR.parent.parent / h5ad_root_value).resolve()
@@ -146,7 +181,7 @@ def _resolve_target(
 # ── var_names remapping (mirrors ant-score logic) ─────────────────────────────
 
 def _swap_var_names(adata: ad.AnnData, column: str, source_label: str) -> ad.AnnData:
-    """Replace adata.var_names with values from `column`, deduplicating."""
+    """Replace ``adata.var_names`` with values from ``column``, dedup'd."""
     old_name = adata.var.index.name or '_var_index'
     adata.var[old_name + '_orig'] = adata.var.index.values
     new_names = pd.Index(adata.var[column].astype(str).values, name=old_name)
@@ -167,6 +202,7 @@ def _swap_var_names(adata: ad.AnnData, column: str, source_label: str) -> ad.Ann
 def _maybe_remap_var_names(
     adata: ad.AnnData, explicit_column: Optional[str]
 ) -> ad.AnnData:
+    """Remap Ensembl var_names → symbol column if needed."""
     if explicit_column:
         if explicit_column not in adata.var.columns:
             sys.exit(
@@ -197,15 +233,85 @@ def _maybe_remap_var_names(
     return adata
 
 
-# ── core AUCell scoring ───────────────────────────────────────────────────────
+# ── pyscenic AUCell scoring ───────────────────────────────────────────────────
 
-def _build_network(genesets: List[Geneset]) -> pd.DataFrame:
-    """Long-format (source, target, weight) network for decoupler."""
-    rows = []
+def _build_signatures(
+    genesets: List[Geneset],
+    var_names: set,
+    min_n: int,
+) -> Tuple[List[GeneSignature], Dict[str, int], List[str]]:
+    """Return (signatures, per-module present-gene counts, skipped_module names).
+
+    Signatures are pre-subset to genes present in ``var_names`` — this makes
+    pyscenic's coverage check moot and matches decoupler-1.8 min_n semantics.
+    """
+    signatures: List[GeneSignature] = []
+    module_gene_counts: Dict[str, int] = {}
+    skipped: List[str] = []
     for gs in genesets:
-        for gene in gs.genes:
-            rows.append({'source': gs.name, 'target': gene, 'weight': 1.0})
-    return pd.DataFrame(rows)
+        present = [g for g in gs.genes if g in var_names]
+        module_gene_counts[gs.name] = len(present)
+        if len(present) < min_n:
+            skipped.append(gs.name)
+            continue
+        signatures.append(
+            GeneSignature(name=gs.name, gene2weight={g: 1.0 for g in present})
+        )
+    return signatures, module_gene_counts, skipped
+
+
+def _run_pyscenic_aucell(
+    adata: ad.AnnData,
+    signatures: List[GeneSignature],
+    seed: int,
+) -> pd.DataFrame:
+    """Run pyscenic AUCell, chunking large adatas to bound memory.
+
+    Returns a wide DataFrame indexed by ``adata.obs_names``, one column per
+    signature. Chunks along the cell axis when ``adata.n_obs`` exceeds
+    ``_CHUNK_THRESHOLD``.
+    """
+    n_cells = adata.n_obs
+    if n_cells <= _CHUNK_THRESHOLD:
+        return _score_chunk(adata, signatures, seed)
+
+    print(
+        f'  Cells ({n_cells:,}) > threshold ({_CHUNK_THRESHOLD:,}); '
+        f'chunking in batches of {_CHUNK_SIZE:,}.'
+    )
+    parts: List[pd.DataFrame] = []
+    for start in range(0, n_cells, _CHUNK_SIZE):
+        stop = min(start + _CHUNK_SIZE, n_cells)
+        print(f'    chunk {start:,}-{stop:,} ({stop-start:,} cells)…')
+        chunk = adata[start:stop, :]
+        parts.append(_score_chunk(chunk, signatures, seed))
+    return pd.concat(parts, axis=0)
+
+
+def _score_chunk(
+    adata: ad.AnnData,
+    signatures: List[GeneSignature],
+    seed: int,
+) -> pd.DataFrame:
+    """Score one contiguous chunk of cells with pyscenic AUCell.
+
+    Densifies the chunk's X (pyscenic requires a DataFrame). Signatures are
+    assumed already subset to present genes.
+    """
+    expr_matrix = adata.X.toarray() if issparse(adata.X) else np.asarray(adata.X)
+    expr_df = pd.DataFrame(
+        expr_matrix,
+        index=list(adata.obs_names),
+        columns=list(adata.var_names),
+    )
+    return pyscenic_aucell(
+        expr_df,
+        signatures,
+        auc_threshold=_AUC_THRESHOLD,
+        num_workers=1,
+        seed=seed,
+        normalize=False,
+    )
 
 
 def _aucell_one_experiment(
@@ -218,17 +324,25 @@ def _aucell_one_experiment(
     verbose: bool,
     dry_run: bool,
 ) -> Dict:
-    """Score one experiment on adata, write to parquet. Returns a result dict."""
+    """Score one experiment on ``adata``, write to parquet.
+
+    Returns a result dict with keys ``catalog``, ``status`` (``ok``,
+    ``dry-run``, ``error``, or ``skipped``), ``n_rows``, and (on error)
+    ``error``.
+    """
     catalog_id = experiment.experiment_id
     print(f'\n  Experiment: {catalog_id}')
 
-    net = _build_network(genesets)
-    print(f'  Network: {len(genesets)} modules, {len(net):,} (module, gene) pairs')
-
     var_names = set(adata.var_names)
-    module_gene_counts = {gs.name: sum(1 for g in gs.genes if g in var_names)
-                          for gs in genesets}
-    skipped_modules = [name for name, cnt in module_gene_counts.items() if cnt < min_n]
+    signatures, module_gene_counts, skipped_modules = _build_signatures(
+        genesets, var_names, min_n
+    )
+    n_pairs = sum(len(sig.gene2weight) for sig in signatures)
+    print(
+        f'  Network: {len(genesets)} modules '
+        f'({len(signatures)} scoreable), {n_pairs:,} (module, gene) pairs'
+    )
+
     if skipped_modules:
         print(
             f'  WARNING: {len(skipped_modules)} modules have <{min_n} genes in '
@@ -236,16 +350,40 @@ def _aucell_one_experiment(
             file=sys.stderr,
         )
 
+    # Warn about sparse edge-case modules (kept in output, but flagged —
+    # per-cell scores here diverge >0.02 vs decoupler baseline).
+    sparse_modules = [
+        name for name, count in module_gene_counts.items()
+        if 0 < count < _SPARSE_MODULE_WARN_N + min_n
+        and count >= min_n
+    ]
+    # The user-facing rule is "< _SPARSE_MODULE_WARN_N genes present"; but
+    # since we already reject below min_n, warn on modules with min_n..min_n+2
+    # actual genes present — these are the divergence outliers.
+    edge_modules = [
+        name for name, count in module_gene_counts.items()
+        if count >= min_n and count < min_n + _SPARSE_MODULE_WARN_N
+    ]
+    if edge_modules:
+        print(
+            f'  WARNING: {len(edge_modules)} sparse modules have fewer than '
+            f'{min_n + _SPARSE_MODULE_WARN_N} genes actually present in var '
+            f'(scores may diverge from decoupler baseline > 0.02): '
+            f'{edge_modules}',
+            file=sys.stderr,
+        )
+
+    if not signatures:
+        return {
+            'catalog': catalog_id,
+            'status': 'error',
+            'error': f'no scoreable modules (all below min_n={min_n})',
+            'n_rows': 0,
+        }
+
     t_score = time.time()
     try:
-        dc.run_aucell(
-            adata, net,
-            source='source', target='target',
-            use_raw=False,   # X is log-norm per anthive convention
-            seed=seed,
-            min_n=min_n,
-            verbose=False,
-        )
+        scores_df = _run_pyscenic_aucell(adata, signatures, seed=seed)
     except Exception as exc:
         return {
             'catalog': catalog_id,
@@ -253,35 +391,18 @@ def _aucell_one_experiment(
             'error': str(exc),
             'n_rows': 0,
         }
-
     elapsed = time.time() - t_score
     print(f'  AUCell finished in {elapsed:.1f}s')
 
-    obsm_key = 'aucell_estimate'
-    if obsm_key not in adata.obsm:
-        return {
-            'catalog': catalog_id,
-            'status': 'error',
-            'error': f'{obsm_key!r} not in adata.obsm after run_aucell',
-            'n_rows': 0,
-        }
-
-    raw_scores = adata.obsm[obsm_key]
-    if hasattr(raw_scores, 'to_df'):
-        scores_df = raw_scores.to_df()
-    elif isinstance(raw_scores, pd.DataFrame):
-        scores_df = raw_scores
-    else:
-        module_names = [gs.name for gs in genesets if module_gene_counts.get(gs.name, 0) >= min_n]
-        scores_df = pd.DataFrame(
-            np.asarray(raw_scores),
-            index=adata.obs_names,
-            columns=module_names,
-        )
+    # Ensure row order matches adata.obs_names (pyscenic can reorder).
+    scores_df = scores_df.reindex(index=list(adata.obs_names))
 
     if verbose:
         for col in scores_df.columns:
             vals = scores_df[col].dropna()
+            if len(vals) == 0:
+                print(f'    {col}: all-NaN')
+                continue
             print(
                 f'    {col}: n={len(vals)}  '
                 f'range=[{vals.min():.3f}, {vals.max():.3f}]  '
@@ -290,10 +411,8 @@ def _aucell_one_experiment(
     else:
         print(f'  Scored {len(scores_df.columns)} modules × {len(scores_df):,} cells')
 
-    # Melt to long format. reset_index() may produce an unnamed column ('index')
-    # or one named after the index — normalise to 'cell_name' before melt.
+    # Melt to long format. The reset index becomes 'cell_name'.
     scores_reset = scores_df.reset_index()
-    # The first column is the former index (cell obs names)
     first_col = scores_reset.columns[0]
     scores_reset = scores_reset.rename(columns={first_col: 'cell_name'})
     long_df = scores_reset.melt(
@@ -303,7 +422,7 @@ def _aucell_one_experiment(
     )
     long_df = long_df.dropna(subset=['score'])
 
-    # Map cell_name → cell_id via the duckdb __cells table
+    # Map cell_name → cell_id via the duckdb __cells table.
     conn = duckdb.connect(str(entry.duckdb_path), read_only=True)
     try:
         cellmap = conn.execute('SELECT cell_id, cell_name FROM __cells').df()
@@ -347,8 +466,9 @@ def _aucell_one_experiment(
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main() -> int:
+    """CLI entry point. Returns process exit code."""
     parser = argparse.ArgumentParser(
-        description='AUCell scoring (decoupler-py) from the genesetstore.',
+        description='AUCell scoring (pyscenic) from the genesetstore.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -392,7 +512,7 @@ def main() -> int:
             f'Run `ant-convert {entry.h5ad_path}` first.'
         )
 
-    # Collect (experiment, [genesets]) pairs, deduplicating across inputs
+    # Collect (experiment, [genesets]) pairs, deduplicating across inputs.
     by_experiment: Dict[str, List[Geneset]] = {}
     experiments_by_id: Dict[str, Experiment] = {}
     seen_geneset_ids: set = set()
@@ -407,18 +527,16 @@ def main() -> int:
     if not by_experiment:
         sys.exit('ERROR: no genesets resolved')
 
-    # Filter out already-scored (source=aucell, catalog=experiment) unless --overwrite
+    # Filter out already-scored (source=aucell, catalog=experiment) unless --overwrite.
     if not args.overwrite:
         existing = read_scores(entry.duckdb_path, source='aucell')
         already_done = set(existing['catalog'].unique()) if not existing.empty else set()
-        skipped_experiments = []
         for exp_id in list(by_experiment):
             if exp_id in already_done:
                 print(
                     f'  SKIP {exp_id}: already scored with source=aucell '
                     f'(use --overwrite to redo)'
                 )
-                skipped_experiments.append(exp_id)
                 del by_experiment[exp_id]
         if not by_experiment:
             print('All requested experiments already scored. Nothing to do.')
@@ -430,7 +548,6 @@ def main() -> int:
         f'{len(by_experiment)} experiment(s), {n_total_modules} module(s)'
     )
 
-    # Read the h5ad once for all experiments
     md_metadata, _ = parse_md_file(entry.md_path)
     has_lognorm = md_metadata.get('has_lognorm', True)
     if has_lognorm is False:
