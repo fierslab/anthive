@@ -2663,24 +2663,26 @@ def test_dataset_view_embeddings_subheading_hidden_when_no_obsm(client, monkeypa
 
 
 def test_dataset_view_downloads_client_filters_to_h5ad(client):
-    # After P1.16 the Downloads section renders all 4 known artifact kinds
-    # (h5ad / duckdb / scores / mus), each with a KIND_LABEL entry. Unknown
-    # kinds + staging/hidden files (`_`/`.` prefix, `.inactive` suffix) are
-    # still dropped client-side.
+    # Downloads surface is locked down to the raw h5ad + per-collection
+    # static/ folder ONLY. The server refuses to expose duckdb / scores /
+    # mus (see bin/api/ant-serve _DOWNLOADABLE_KINDS), so the client-side
+    # markup no longer carries labels for those kinds. Staging/hidden files
+    # (`_`/`.` prefix, `.inactive` suffix) are still dropped client-side.
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
-    # All four kinds appear in the client's KIND_LABEL table.
-    assert "h5ad:" in resp.text
-    assert "duckdb:" in resp.text
-    assert "scores:" in resp.text
-    assert "mus:" in resp.text
-    # Extensions are surfaced too (labels shown next to each download link).
+    # h5ad label + supplementary heading are the only kinds surfaced.
+    assert "raw AnnData" in resp.text
+    assert "Supplementary materials from paper" in resp.text
     assert ".h5ad" in resp.text
-    assert ".duckdb" in resp.text
-    assert ".scores.parquet" in resp.text
-    assert ".h5ad.mus" in resp.text
-    # The unknown-kind / staging-file guard is still there.
-    assert "!KIND_LABEL[f.kind]" in resp.text
+    # The removed kinds must not appear as user-facing labels or hrefs.
+    assert "/download/duckdb" not in resp.text
+    assert "/download/scores" not in resp.text
+    assert "/download/mus" not in resp.text
+    assert ".scores.parquet" not in resp.text
+    assert ".h5ad.mus" not in resp.text
+    # The static file endpoint is what supp downloads point at.
+    assert "/download-static/" in resp.text
+    # The staging-file guard is still there.
     assert "startsWith('_')" in resp.text
 
 

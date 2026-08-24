@@ -806,7 +806,7 @@
 {# ── Downloads tab ────────────────────────────────────────────────────── #}
 <section class="tab-panel" id="tab-downloads" role="tabpanel">
   <h2>Downloads
-    <span class="info" title="Downloadable artifacts for this dataset: the raw AnnData (.h5ad), the served DuckDB (.duckdb), pre-computed module scores (.scores.parquet), and the mus annotation sidecar (.h5ad.mus).">ⓘ</span></h2>
+    <span class="info" title="Downloadable artifacts for this dataset: the raw AnnData (.h5ad) and any supplementary materials from the associated paper.">ⓘ</span></h2>
   <div class="tab-loading plot-loading" data-tab-loading="downloads" style="min-height:60px;display:none">
     <span class="spinner-lg"></span>
     <span>loading downloadable artifacts…</span>
@@ -1873,9 +1873,10 @@ document.addEventListener('DOMContentLoaded', function() {
             if (a) trackClick(a.getAttribute('href'));
         });
 
-        // ── Downloads: all stored artifacts (h5ad + duckdb + scores + mus).
-        //    Tab reveals only when at least one downloadable entry is returned;
-        //    otherwise stays hidden.
+        // ── Downloads: raw AnnData + per-collection static files.
+        //    The server-side /files endpoint only returns those two kinds
+        //    (duckdb / scores / mus are locked down on the API side, not
+        //    filtered here). Tab reveals only when at least one entry exists.
         (function loadFiles() {
             var box = document.getElementById('ds-files');
             var tabBtn = document.getElementById('tab-btn-downloads');
@@ -1887,13 +1888,8 @@ document.addEventListener('DOMContentLoaded', function() {
                 return (n >= 100 || i === 0 ? n.toFixed(0) : n.toFixed(1)) + ' ' + u[i];
             }
             function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
-            // Human-readable label per artifact kind (matches server's _ARTIFACT_SUFFIXES).
-            var KIND_LABEL = {
-                h5ad:   { name: 'raw AnnData',    ext: '.h5ad',           desc: 'source expression matrix + obs/var + layers (log-normalised X)' },
-                duckdb: { name: 'DuckDB',         ext: '.duckdb',         desc: 'served database (obs + expression, no h5ad required)' },
-                scores: { name: 'module scores',  ext: '.scores.parquet', desc: 'pre-computed per-cell module / geneset scores' },
-                mus:    { name: 'annotation',     ext: '.h5ad.mus',       desc: 'mus biology-annotation sidecar (YAML frontmatter)' }
-            };
+            var H5AD_LABEL = { name: 'raw AnnData', ext: '.h5ad',
+                desc: 'source expression matrix + obs/var + layers (log-normalised X)' };
             fetch(apiBase + '/files', { credentials: 'same-origin' })
                 .then(function (r) {
                     if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -1901,8 +1897,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 })
                 .then(function (d) {
                     var files = ((d && d.files) || []).filter(function (f) {
-                        // Drop unknown kinds and staging/hidden files.
-                        if (!KIND_LABEL[f.kind]) return false;
                         var n = (f.filename || '').toLowerCase();
                         if (n && (n.startsWith('_') || n.startsWith('.') || n.endsWith('.inactive'))) return false;
                         return true;
@@ -1912,21 +1906,33 @@ document.addEventListener('DOMContentLoaded', function() {
                         return;
                     }
                     if (tabBtn) tabBtn.style.display = '';
-                    // Stable display order: h5ad, duckdb, scores, mus.
-                    var order = { h5ad: 0, duckdb: 1, scores: 2, mus: 3 };
-                    files.sort(function (a, b) { return (order[a.kind] || 99) - (order[b.kind] || 99); });
-                    box.innerHTML = files.map(function (f) {
-                        var meta = KIND_LABEL[f.kind];
-                        return '<div style="padding:3px 0">'
-                            + '<a href="' + apiBase + '/download/' + encodeURIComponent(f.kind) + '" download>'
-                            + '⬇ ' + esc(meta.name) + ' (' + esc(meta.ext) + ')</a>'
+                    var h5ads = files.filter(function (f) { return f.kind === 'h5ad'; });
+                    var statics = files.filter(function (f) { return f.kind === 'static'; })
+                        .sort(function (a, b) { return String(a.filename || '').localeCompare(String(b.filename || '')); });
+                    var html = '';
+                    h5ads.forEach(function (f) {
+                        html += '<div style="padding:3px 0">'
+                            + '<a href="' + apiBase + '/download/h5ad" download>'
+                            + '⬇ ' + esc(H5AD_LABEL.name) + ' (' + esc(H5AD_LABEL.ext) + ')</a>'
                             + ' <span class="muted-2" style="font-size:11px">' + fmtSize(f.size_bytes)
                             + ' · ' + esc(f.filename)
                             + (f.source === 's3' ? ' · object storage' : '')
                             + '</span>'
-                            + '<div class="muted-2" style="font-size:11px;margin-left:16px">' + esc(meta.desc) + '</div>'
+                            + '<div class="muted-2" style="font-size:11px;margin-left:16px">' + esc(H5AD_LABEL.desc) + '</div>'
                             + '</div>';
-                    }).join('');
+                    });
+                    if (statics.length) {
+                        html += '<h3 style="margin:14px 0 4px;font-size:13px">Supplementary materials from paper</h3>';
+                        statics.forEach(function (f) {
+                            var name = f.sub || f.filename;
+                            html += '<div style="padding:3px 0">'
+                                + '<a href="' + apiBase + '/download-static/' + encodeURIComponent(name) + '" download>'
+                                + '⬇ ' + esc(name) + '</a>'
+                                + ' <span class="muted-2" style="font-size:11px">' + fmtSize(f.size_bytes) + '</span>'
+                                + '</div>';
+                        });
+                    }
+                    box.innerHTML = html;
                 })
                 .catch(function (err) {
                     console.error('/files fetch failed:', err);

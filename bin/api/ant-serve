@@ -695,12 +695,29 @@ class DatabaseRegistry:
             base = base.with_suffix('')
         return base.with_name(base.name + suffix)
 
+    # Downloadable kinds exposed via /files + /download. Deliberately narrow:
+    # `.duckdb`, `.scores.parquet`, and `.h5ad.mus` are internal / derived
+    # artifacts that MUST NOT be served over the API (users get the raw h5ad
+    # or supplementary materials from the paper, not the derived database).
+    _DOWNLOADABLE_KINDS = ('h5ad',)
+
     def list_artifacts(self, db_id: str) -> List[Dict[str, Any]]:
-        """Downloadable stored artifacts that actually exist (local or in S3)."""
+        """Downloadable stored artifacts that actually exist (local or in S3).
+
+        Returns only the raw ``.h5ad`` per dataset plus any files living in
+        the collection's sibling ``static/`` folder (paper PDFs and
+        supplementary tables). ``.duckdb``, ``.scores.parquet``, and
+        ``.h5ad.mus`` are deliberately excluded from the download surface —
+        those are internal / derived and are not exposed here or via
+        ``/download/{kind}``.
+
+        Static entries carry ``kind='static'`` plus an extra ``sub`` field
+        (basename) so the download endpoint can address one file at a time.
+        """
         out: List[Dict[str, Any]] = []
         s3_client = None
         s3_enabled = bool(self._s3_config.get('bucket'))
-        for kind in self._ARTIFACT_SUFFIXES:
+        for kind in self._DOWNLOADABLE_KINDS:
             rel = self._artifact_rel(db_id, kind)
             if rel is None:
                 continue
@@ -716,15 +733,79 @@ class DatabaseRegistry:
                 if size is not None:
                     out.append({'kind': kind, 'filename': rel.name,
                                 'size_bytes': size, 'source': 's3'})
+        # Per-collection static/ folder (paper PDF, supp tables, etc.). Local
+        # files only — these are curator-uploaded and always live in the git
+        # store, never in S3.
+        static_dir = self._static_dir_for(db_id)
+        if static_dir is not None and static_dir.is_dir():
+            for entry in sorted(static_dir.iterdir()):
+                if not entry.is_file():
+                    continue
+                name = entry.name
+                if name.startswith('_') or name.startswith('.'):
+                    continue
+                out.append({
+                    'kind': 'static',
+                    'sub': name,
+                    'filename': name,
+                    'size_bytes': entry.stat().st_size,
+                    'source': 'local',
+                })
         return out
+
+    def _static_dir_for(self, db_id: str) -> Optional[Path]:
+        """Locate ``<data_folder>/<group>/static/`` for a given db_id.
+
+        Returns None when the collection folder can't be resolved. Does not
+        require the ``static/`` folder to exist — the caller checks.
+        """
+        extra = self._db_extra.get(db_id)
+        if not extra or not extra.get('rel_path'):
+            return None
+        rel = Path(extra['rel_path'])
+        if not rel.parts:
+            return None
+        return self.data_folder / rel.parts[0] / 'static'
+
+    def static_file_download(self, db_id: str, filename: str) -> Optional[Path]:
+        """Resolve a per-collection static file for download.
+
+        Returns the absolute path when the file exists inside the collection's
+        ``static/`` folder and the filename is a simple basename (no
+        traversal). Returns None otherwise.
+        """
+        if not filename or '/' in filename or '\\' in filename or filename in ('.', '..'):
+            return None
+        static_dir = self._static_dir_for(db_id)
+        if static_dir is None or not static_dir.is_dir():
+            return None
+        target = static_dir / filename
+        try:
+            resolved = target.resolve()
+        except OSError:
+            return None
+        try:
+            resolved.relative_to(static_dir.resolve())
+        except ValueError:
+            return None
+        if not resolved.is_file():
+            return None
+        return resolved
 
     def artifact_download(self, db_id: str, kind: str, expires: int = 300):
         """Resolve one artifact for download.
+
+        Only kinds in ``_DOWNLOADABLE_KINDS`` (``h5ad`` at time of writing) are
+        exposed — every other kind returns None (so the API refuses to serve
+        internal / derived artifacts like ``.duckdb``, ``.scores.parquet``,
+        or ``.h5ad.mus``).
 
         Returns ``('s3', presigned_url, filename)`` when the object is in the
         bucket (short-lived presigned GET with a Content-Disposition filename),
         ``('local', Path, filename)`` for a local-only file, or None if absent.
         """
+        if kind not in self._DOWNLOADABLE_KINDS:
+            return None
         rel = self._artifact_rel(db_id, kind)
         if rel is None:
             return None
@@ -11249,11 +11330,15 @@ async def list_database_files(db_id: str):
 
 @app.get("/databases/{db_id:path}/download/{kind}", tags=["databases"])
 async def download_database_file(db_id: str, kind: str):
-    """Download one stored artifact (``kind`` ∈ h5ad | duckdb | scores | mus).
+    """Download one stored artifact.
 
-    S3-backed objects 307-redirect to a short-lived (5 min) presigned URL so the
-    browser pulls straight from object storage (no multi-GB proxy through the
-    server); local-only objects stream via FileResponse. Gate == catalog
+    Only ``kind='h5ad'`` is served — the ``.duckdb``, ``.scores.parquet``, and
+    ``.h5ad.mus`` sidecars are internal / derived and are deliberately NOT
+    exposed to any API consumer (web, vark, pyvark).
+
+    S3-backed objects 307-redirect to a short-lived (5 min) presigned URL so
+    the browser pulls straight from object storage (no multi-GB proxy through
+    the server); local-only objects stream via FileResponse. Gate == catalog
     visibility: any dataset the caller can see is downloadable.
     """
     if registry is None or db_id not in registry.databases:
@@ -11267,6 +11352,25 @@ async def download_database_file(db_id: str, kind: str):
     if source == 's3':
         return RedirectResponse(url=target, status_code=307)
     return FileResponse(str(target), filename=filename,
+                        media_type='application/octet-stream')
+
+
+@app.get("/databases/{db_id:path}/download-static/{filename}", tags=["databases"])
+async def download_database_static_file(db_id: str, filename: str):
+    """Download one file from the collection's ``static/`` folder.
+
+    Paper PDFs and supplementary tables shipped with the collection. Path-
+    traversal safe: ``filename`` must be a plain basename resolved inside
+    ``<data_folder>/<group>/static/``. Gate == catalog visibility.
+    """
+    if registry is None or db_id not in registry.databases:
+        raise HTTPException(status_code=404, detail=f"Database not found: {db_id}")
+    target = registry.static_file_download(db_id, filename)
+    if target is None:
+        raise HTTPException(status_code=404,
+                            detail=f"No static file '{filename}' for {db_id}")
+    from fastapi.responses import FileResponse  # noqa: PLC0415
+    return FileResponse(str(target), filename=target.name,
                         media_type='application/octet-stream')
 
 
