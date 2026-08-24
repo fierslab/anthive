@@ -7,53 +7,64 @@
 #   "scipy>=1.10.0",
 #   "pyarrow>=14.0",
 #   "pyyaml>=6.0",
+#   "tqdm>=4.66",
 # ]
 # ///
-"""ant-module-variability — per-(dataset × module × tag) variability
-statistics, in a scale-invariant [0,1] variance-explained frame that
-lets you compare across categorical vs numerical tags AND across
-datasets with wildly different expression / variability levels.
+"""ant-module-variability — per-(dataset × catalog × module × tag) variability.
 
-For every dataset that carries both a `.scores.parquet` sidecar and
-tagged obs columns:
+Compute the same long-format aggregate parquet as the legacy tool but with:
+
+  * Per-(dataset, catalog) parquet cache under
+    ``<h5adstore>/_module_variability_cache/<db_id>/<catalog>.parquet``.
+    Invalidated by mtime comparison against the source
+    ``.scores.parquet`` sidecar (or the legacy obs-column source: the
+    ``.duckdb`` file's mtime).
+  * ``multiprocessing.Pool`` over the (dataset × catalog) queue.
+    Default ``min(8, cpu_count() // 2)``, override with ``--workers``.
+  * ``tqdm`` progress + JSON progress lines to stderr every 10 pairs.
+  * Streaming aggregate write via ``duckdb.COPY`` over the cache
+    directory — never holds >1 dataset's worth of data in RAM.
+
+Output schema (unchanged):
+
+  ``dataset, source, catalog, module, tag_column, tag, statistic,
+    value, n_cells, n_categories``
+
+Statistics per (module × tag × statistic):
 
   * η² (eta squared) — fraction of module-score variance explained by
     the tag categories. Categorical tags only. [0,1].
-  * ω² (omega squared) — bias-corrected η², compensates for the
-    number of categories. Fairer for cross-dataset comparison when
-    n_categories differs (e.g. cluster resolutions).
-  * R² — same idea but for numerical tags (Pearson).
+  * ω² (omega squared) — bias-corrected η².
+  * R² — Pearson² for numerical tags.
   * spearman ρ — signed monotone association for numerical tags.
   * mean_range — max group mean minus min group mean (categorical).
-    Reflects DIRECTION-agnostic effect size.
-  * total_var — Var(score) on this dataset. Denominator. Absolute
-    magnitude — filter downstream to catch "module effectively dead".
-  * n_cells, n_categories — context.
-
-All rows written to `<h5adstore>/module_variability.parquet` as a
-long-format table keyed on
-(dataset, source, catalog, module, tag_column, tag, statistic, value).
-
-Tag_column is included so that datasets with multiple columns for
-the same tag (e.g. `Sex_donor` + `sex_mouse` if you hadn't yet
-retagged the latter to host_sex) produce a row per column.
+  * total_var — Var(score) on this dataset. Denominator.
+  * mean_score — sanity denominator.
 
 Usage:
   ant-module-variability [--only DB1,DB2,...] [--tags sex,braak,cluster,...]
-                        [--out PATH] [--dry-run]
+                         [--out PATH] [--dry-run] [--force]
+                         [--workers N] [--h5adstore-root DIR]
 """
 from __future__ import annotations
 
 import argparse
+import json
+import multiprocessing
+import os
+import re
 import sys
 import time
+import traceback
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 import duckdb
 import numpy as np
 import pandas as pd
 from scipy import stats
+from tqdm import tqdm
 
 script_dir = Path(__file__).resolve().parent
 lib_dir = script_dir.parent.parent / 'lib'
@@ -71,30 +82,43 @@ from canonical_columns import (                                    # type: ignor
 
 
 #: Numerical tag ids (ordinal / continuous). Kept as bare tag ids —
-#: the view column each maps to is `ant_<tag>`.
+#: the view column each maps to is ``ant_<tag>``.
 NUMERICAL_TAGS = set(_NUMERICAL_TAG_IDS)
 CATEGORICAL_TAGS = set(_CATEGORICAL_TAG_IDS)
 
+#: Canonical view column → tag id.
+_CANONICAL_TAGS = {
+    canonical_column(tag): tag for tag in _CANONICAL_TAG_IDS
+}
 
-def _numerical_column_kind(db: duckdb.DuckDBPyConnection, column: str) -> str:
-    """Return 'num' if the column is in __obsnum, 'cat' if in __obscat, else '?'.
-    Uses `information_schema` which is cheap."""
-    for table, kind in (('__obsnum', 'num'), ('__obscat', 'cat')):
-        rows = db.execute(
-            "SELECT 1 FROM information_schema.columns "
-            "WHERE table_name = ? AND column_name = ? LIMIT 1",
-            [table, column],
-        ).fetchone()
-        if rows:
-            return kind
-    return '?'
+#: Where the incremental cache lives — one parquet per (db_id, catalog).
+CACHE_DIRNAME = '_module_variability_cache'
+
+#: Aggregate output schema — kept in canonical column order for equality
+#: checks against the legacy output.
+OUTPUT_COLUMNS = (
+    'dataset', 'source', 'catalog', 'module', 'tag_column', 'tag',
+    'statistic', 'value', 'n_cells', 'n_categories',
+)
 
 
-def _eta_squared(values: np.ndarray, groups: np.ndarray) -> tuple[float, float, float, float]:
-    """Return (eta2, omega2, mean_range, F).
+# ---------------------------------------------------------------------------
+# Statistics primitives.
+# ---------------------------------------------------------------------------
 
-    η² = SS_between / SS_total
-    ω² = (SS_between - (k-1) * MS_within) / (SS_total + MS_within)
+
+def _eta_squared(
+    values: np.ndarray, groups: np.ndarray,
+) -> tuple[float, float, float, float]:
+    """Return ``(eta2, omega2, mean_range, F)`` for a categorical predictor.
+
+    Args:
+        values: Score vector.
+        groups: Category label vector (same length).
+
+    Returns:
+        Tuple ``(eta2, omega2, mean_range, F)``. All NaN if fewer than
+        two categories or fewer than three finite observations.
     """
     if len(values) < 3:
         return (float('nan'),) * 4
@@ -102,63 +126,81 @@ def _eta_squared(values: np.ndarray, groups: np.ndarray) -> tuple[float, float, 
     values = values[mask]
     groups = np.asarray(groups)[mask]
     unique = pd.unique(groups)
-    k = len(unique)
-    n = len(values)
-    if k < 2 or n <= k:
+    n_categories = len(unique)
+    n_values = len(values)
+    if n_categories < 2 or n_values <= n_categories:
         return (float('nan'),) * 4
 
     grand_mean = float(values.mean())
-    ss_total   = float(((values - grand_mean) ** 2).sum())
+    ss_total = float(((values - grand_mean) ** 2).sum())
     if ss_total == 0.0:
         return (0.0, 0.0, 0.0, 0.0)
 
     ss_between = 0.0
-    group_means = []
+    group_means: list[float] = []
     for level in unique:
         vals = values[groups == level]
         if len(vals) == 0:
             continue
-        m = float(vals.mean())
-        group_means.append(m)
-        ss_between += len(vals) * (m - grand_mean) ** 2
+        mean = float(vals.mean())
+        group_means.append(mean)
+        ss_between += len(vals) * (mean - grand_mean) ** 2
     ss_within = ss_total - ss_between
     mean_range = float(max(group_means) - min(group_means)) if group_means else 0.0
 
     eta2 = ss_between / ss_total
-    if n <= k or ss_within < 0:
+    if n_values <= n_categories or ss_within < 0:
         omega2 = float('nan')
         f_stat = float('nan')
     else:
-        ms_within = ss_within / (n - k)
-        ms_between = ss_between / (k - 1) if k > 1 else 0.0
-        omega2 = (ss_between - (k - 1) * ms_within) / (ss_total + ms_within) if (ss_total + ms_within) > 0 else float('nan')
+        ms_within = ss_within / (n_values - n_categories)
+        ms_between = ss_between / (n_categories - 1) if n_categories > 1 else 0.0
+        omega2 = (
+            (ss_between - (n_categories - 1) * ms_within) / (ss_total + ms_within)
+            if (ss_total + ms_within) > 0
+            else float('nan')
+        )
         f_stat = ms_between / ms_within if ms_within > 0 else float('inf')
     return (float(eta2), float(omega2), float(mean_range), float(f_stat))
 
 
-def _r_squared(values: np.ndarray, x: np.ndarray) -> tuple[float, float, float]:
-    """Return (r2, spearman_rho, spearman_p) for a numerical predictor."""
-    mask = ~(np.isnan(values) | np.isnan(x))
-    values, x = values[mask], x[mask]
-    if len(values) < 3 or np.std(x) == 0 or np.std(values) == 0:
+def _r_squared(values: np.ndarray, predictor: np.ndarray) -> tuple[float, float, float]:
+    """Return ``(r2, spearman_rho, spearman_p)`` for a numerical predictor.
+
+    Args:
+        values: Score vector.
+        predictor: Numerical predictor vector.
+
+    Returns:
+        Tuple ``(r2, rho, p)``. All NaN if fewer than three finite pairs
+        or if either vector has zero variance.
+    """
+    mask = ~(np.isnan(values) | np.isnan(predictor))
+    values, predictor = values[mask], predictor[mask]
+    if len(values) < 3 or np.std(predictor) == 0 or np.std(values) == 0:
         return (float('nan'), float('nan'), float('nan'))
 
-    slope, intercept, r_value, _, _ = stats.linregress(x, values)
+    _slope, _intercept, r_value, _, _ = stats.linregress(predictor, values)
     r2 = float(r_value * r_value)
-    rho, p = stats.spearmanr(x, values, nan_policy='omit')
-    return (r2, float(rho), float(p))
+    rho, p_value = stats.spearmanr(predictor, values, nan_policy='omit')
+    return (r2, float(rho), float(p_value))
 
 
-#: Canonical view column → tag id. Post-2026-08 the view column is
-#: `ant_<tag>` for every canonical tag. Extends via obs_tags: entries.
-_CANONICAL_TAGS = {
-    canonical_column(tag): tag for tag in _CANONICAL_TAG_IDS
-}
+# ---------------------------------------------------------------------------
+# DuckDB introspection helpers.
+# ---------------------------------------------------------------------------
 
 
-def _view_column_kind(conn, column: str) -> str:
-    """Same as `_numerical_column_kind` but for the VIEWs (obscat/obsnum)
-    which surface canonical, post-rename column names."""
+def _view_column_kind(conn: duckdb.DuckDBPyConnection, column: str) -> str:
+    """Report whether ``column`` lives in the ``obsnum`` or ``obscat`` view.
+
+    Args:
+        conn: Read-only DuckDB connection.
+        column: Column name to look up.
+
+    Returns:
+        ``'num'`` if numeric, ``'cat'`` if categorical, ``'?'`` otherwise.
+    """
     for view, kind in (('obsnum', 'num'), ('obscat', 'cat')):
         try:
             row = conn.execute(
@@ -173,18 +215,19 @@ def _view_column_kind(conn, column: str) -> str:
     return '?'
 
 
-def _obsnum_score_columns(conn: duckdb.DuckDBPyConnection) -> list[tuple[str, str, str, str]]:
-    """Enumerate legacy module-score columns living in ``__obsnum``.
+def _obsnum_score_columns(
+    conn: duckdb.DuckDBPyConnection,
+) -> list[tuple[str, str, str, str]]:
+    """Enumerate legacy ``<study>::<experiment>::<module>`` score columns.
 
-    These predate the ``.scores.parquet`` sidecar convention. They come from
-    ``ant-score --rebuild`` (h5ad write-back) or from pre-existing scored
-    obs columns imported by ``ant-convert``. The naming convention is
-    ``<study>::<experiment>::<module>`` (three ``::``-separated parts, all
-    non-empty).
+    These predate the ``.scores.parquet`` sidecar convention.
 
-    Returns a list of ``(column_name, source, catalog, module)`` tuples
-    where ``source='geneset'`` and ``catalog='<study>/<experiment>'`` — the
-    same schema the sidecar uses.
+    Args:
+        conn: Read-only DuckDB connection.
+
+    Returns:
+        List of ``(column_name, source, catalog, module)`` tuples with
+        ``source='geneset'`` and ``catalog='<study>/<experiment>'``.
     """
     rows = conn.execute(
         "SELECT column_name FROM information_schema.columns "
@@ -200,38 +243,182 @@ def _obsnum_score_columns(conn: duckdb.DuckDBPyConnection) -> list[tuple[str, st
     return out
 
 
-def compute_for_dataset(db_id: str, duckdb_path: Path, md_path: Path) -> pd.DataFrame:
-    """Return one long-format DataFrame of variability rows for the dataset.
+# ---------------------------------------------------------------------------
+# Cache path handling.
+# ---------------------------------------------------------------------------
 
-    Score sources, in priority order (all are used when present):
 
-    1. ``<basename>.scores.parquet`` sidecar (modern path — starcat / aucell /
-       ext scoring writes here).
-    2. Legacy ``<study>::<experiment>::<module>`` columns in ``__obsnum``
-       — pre-sidecar module scores that were written straight to obs by
-       ``ant-score --rebuild`` or imported wholesale by ``ant-convert``. They
-       are treated as ``source='geneset'``, ``catalog='<study>/<experiment>'``,
-       ``module='<module>'`` — matching the sidecar schema.
+_SANITISE_RE = re.compile(r'[^A-Za-z0-9._-]+')
 
-    If a ``(source, catalog, module)`` triple appears in both, the sidecar
-    wins (sidecar is the modern write path and is expected to be authoritative).
+
+def _sanitise(name: str) -> str:
+    """Turn a db_id or catalog id into a filesystem-safe token.
+
+    Slashes / colons / spaces are replaced by ``__``; other unsafe chars
+    collapse to ``_``. Empty inputs raise ``ValueError``.
+
+    Args:
+        name: Raw identifier (e.g. ``'M23/MIC'`` or ``'Sierksma2025/WGCNA'``).
+
+    Returns:
+        A safe token — e.g. ``'M23__MIC'``.
+
+    Raises:
+        ValueError: If ``name`` collapses to an empty string.
+    """
+    if not name:
+        raise ValueError('empty identifier')
+    token = _SANITISE_RE.sub('_', name.replace('/', '__').replace(':', '_'))
+    token = token.strip('_')
+    if not token:
+        raise ValueError(f'identifier {name!r} sanitises to empty')
+    return token
+
+
+def _cache_root(h5adstore_root: Path) -> Path:
+    """Cache directory root under the h5adstore."""
+    return h5adstore_root / CACHE_DIRNAME
+
+
+def _cache_file(
+    h5adstore_root: Path, db_id: str, source: str, catalog: str,
+) -> Path:
+    """Cache file path for one (dataset, source, catalog) triple.
+
+    Source is part of the key because a single catalog can carry
+    multiple sources (e.g. ``geneset`` and ``aucell`` on the same
+    ``Sierksma2025/WGCNA``) — sharing a cache file would let one
+    overwrite the other.
+    """
+    return (
+        _cache_root(h5adstore_root) / _sanitise(db_id)
+        / f'{_sanitise(source)}__{_sanitise(catalog)}.parquet'
+    )
+
+
+def _mtime(path: Path) -> float:
+    """Return ``path.stat().st_mtime`` or ``0.0`` if the file is absent."""
+    try:
+        return path.stat().st_mtime
+    except FileNotFoundError:
+        return 0.0
+
+
+# ---------------------------------------------------------------------------
+# Dataset-level metadata used by all workers.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DatasetInputs:
+    """Cached, JSON-safe view of everything needed to compute one dataset.
+
+    Attributes:
+        db_id: Canonical ``group/file`` id.
+        duckdb_path: Absolute path to the ``.duckdb`` file.
+        md_path: Absolute path to the sibling ``.md`` file.
+        sidecar_path: Absolute path to the ``.scores.parquet`` sidecar
+            (may not exist).
+        source_mtime: Newest mtime among (sidecar, duckdb) — the cache
+            invalidation key.
+        catalogs: List of ``(source, catalog)`` pairs present for this
+            dataset.
+    """
+    db_id: str
+    duckdb_path: Path
+    md_path: Path
+    sidecar_path: Path
+    source_mtime: float
+    catalogs: tuple[tuple[str, str], ...]
+
+
+def _discover_catalogs(entry_duckdb: Path) -> list[tuple[str, str]]:
+    """Enumerate every ``(source, catalog)`` present for a dataset.
+
+    Reads the sidecar (if present) and the ``__obsnum`` legacy columns.
+    A ``(source, catalog)`` from the sidecar shadows any legacy match —
+    the same rule the legacy tool used ("sidecar wins").
+
+    Args:
+        entry_duckdb: Path to the dataset's ``.duckdb`` file.
+
+    Returns:
+        Sorted, deduplicated list of ``(source, catalog)`` pairs. Empty
+        if neither source has any modules.
+    """
+    seen: dict[tuple[str, str], None] = {}
+    sidecar = scores_path(entry_duckdb)
+    conn = duckdb.connect(str(entry_duckdb), read_only=True)
+    try:
+        if sidecar.exists():
+            rows = conn.execute(
+                "SELECT DISTINCT source, catalog "
+                "FROM read_parquet(?)",
+                [str(sidecar)],
+            ).fetchall()
+            for source, catalog in rows:
+                seen[(source, catalog)] = None
+        for _col, source, catalog, _module in _obsnum_score_columns(conn):
+            seen.setdefault((source, catalog), None)
+    finally:
+        conn.close()
+    return sorted(seen.keys())
+
+
+def build_dataset_inputs(entry) -> Optional[DatasetInputs]:
+    """Snapshot on-disk state for a dataset without reading scores.
+
+    Returns ``None`` for datasets without any score source (sidecar
+    missing AND no legacy ``::`` columns).
+
+    Args:
+        entry: :class:`h5adstore.H5adEntry` yielded by ``iter_h5adstore``.
+
+    Returns:
+        A :class:`DatasetInputs` or ``None``.
+    """
+    if not entry.duckdb_path.exists():
+        return None
+    sidecar = scores_path(entry.duckdb_path)
+    catalogs = _discover_catalogs(entry.duckdb_path)
+    if not catalogs:
+        return None
+    source_mtime = max(_mtime(sidecar), _mtime(entry.duckdb_path))
+    return DatasetInputs(
+        db_id=entry.db_id,
+        duckdb_path=entry.duckdb_path.resolve(),
+        md_path=entry.md_path.resolve(),
+        sidecar_path=sidecar.resolve(),
+        source_mtime=source_mtime,
+        catalogs=tuple(catalogs),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tag-target resolution — replicated verbatim from the legacy tool.
+# ---------------------------------------------------------------------------
+
+
+def _resolve_tag_targets(md_path: Path) -> dict[str, list[str]]:
+    """Build the ``(view_column → [tag_id,...])`` map for one dataset.
+
+    Combines:
+      * Canonical ``ant_*`` columns from :data:`_CANONICAL_TAGS`.
+      * Every hop of an ``api.obs_rename`` chain that terminates on a
+        canonical column (so intermediate names still surface).
+      * ``obs_tags:`` in the ``.md`` YAML (both raw and any renamed hop).
+
+    Args:
+        md_path: Path to the dataset's ``.md``.
+
+    Returns:
+        Dict mapping view column name → list of tag ids to compute.
     """
     md, _ = parse_md_file(md_path)
     obs_tags = md.get('obs_tags') or {}
     api_config = md.get('api') or {}
     obs_rename = api_config.get('obs_rename') or {}
 
-    # Build the effective (column → [tag,...]) mapping:
-    # 1. Canonical columns from the view get their canonical tag.
-    # 2. obs_tags entries augment, keyed by whatever column name they use
-    #    (canonical is preferred; a raw name will only fire if that raw
-    #    column still exists in the view, which it won't after obs_rename —
-    #    those entries become dead weight and can be dropped later).
-    # 3. `api.obs_rename` chains — the view builder only applies a single
-    #    hop, so a chain like ``Sex_donor → sex → ant_sex`` surfaces `sex`
-    #    in the view, not `ant_sex`. Walk the chain and, for every hop that
-    #    lands on a canonical column, teach the tag mapping to accept the
-    #    intermediate name too (so variability can still find the column).
     tag_targets: dict[str, list[str]] = {}
     for col, tag in _CANONICAL_TAGS.items():
         tag_targets.setdefault(col, [])
@@ -239,22 +426,17 @@ def compute_for_dataset(db_id: str, duckdb_path: Path, md_path: Path) -> pd.Data
             tag_targets[col].append(tag)
 
     def _resolve_chain(start: str, seen: set[str]) -> Optional[str]:
-        """Follow ``obs_rename`` forward from ``start``; return the last
-        name in the chain (guarded against cycles)."""
         current = start
         while current in obs_rename and current not in seen:
             seen.add(current)
             current = obs_rename[current]
         return current
 
-    for src, dst in list(obs_rename.items()):
-        # Terminal name of the chain that starts at `src`.
-        terminal = _resolve_chain(src, set())
+    for source_column in list(obs_rename.keys()):
+        terminal = _resolve_chain(source_column, set())
         if terminal in _CANONICAL_TAGS:
             canonical_tag = _CANONICAL_TAGS[terminal]
-            # Register every hop as a candidate view-column name; the first
-            # one actually present wins in `_view_column_kind` below.
-            hop = src
+            hop = source_column
             visited: set[str] = set()
             while True:
                 if hop in visited:
@@ -269,55 +451,91 @@ def compute_for_dataset(db_id: str, duckdb_path: Path, md_path: Path) -> pd.Data
 
     for col, tags in obs_tags.items():
         tag_targets.setdefault(col, [])
-        for t in (tags or []):
-            if t not in tag_targets[col]:
-                tag_targets[col].append(t)
-        # If the raw obs_tags column has been renamed via api.obs_rename,
-        # register the renamed (view-visible) column too. Walk the chain
-        # so a two-hop rename like ``Sex_donor → sex → ant_sex`` still
-        # picks up the intermediate ``sex`` if that's the one the view
-        # actually surfaces.
+        for tag in (tags or []):
+            if tag not in tag_targets[col]:
+                tag_targets[col].append(tag)
         hop = col
         visited = set()
         while hop in obs_rename and hop not in visited:
             visited.add(hop)
             hop = obs_rename[hop]
             tag_targets.setdefault(hop, [])
-            for t in (tags or []):
-                if t not in tag_targets[hop]:
-                    tag_targets[hop].append(t)
+            for tag in (tags or []):
+                if tag not in tag_targets[hop]:
+                    tag_targets[hop].append(tag)
 
-    sidecar = scores_path(duckdb_path)
-    conn = duckdb.connect(str(duckdb_path), read_only=True)
+    return tag_targets
 
+
+# ---------------------------------------------------------------------------
+# Per-(dataset, catalog) compute — the parallelised leaf.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PairJob:
+    """One (dataset × catalog) unit of work."""
+    db_id: str
+    source: str
+    catalog: str
+    inputs: DatasetInputs
+    cache_path: Path
+
+
+@dataclass
+class PairResult:
+    """What a worker returns to the coordinator."""
+    db_id: str
+    source: str
+    catalog: str
+    cache_path: Path
+    n_rows: int
+    from_cache: bool
+    elapsed_s: float
+    error: Optional[str] = None
+
+
+def _load_scores_for_pair(
+    conn: duckdb.DuckDBPyConnection,
+    inputs: DatasetInputs,
+    source: str,
+    catalog: str,
+) -> pd.DataFrame:
+    """Return ``(cell_name, module, score)`` rows for one (source, catalog).
+
+    Reads from the sidecar if the pair is present there; falls back to
+    the legacy ``__obsnum`` columns for pairs absent from the sidecar.
+    Sidecar shadows legacy (matches legacy tool behaviour).
+
+    Args:
+        conn: Read-only DuckDB connection to the dataset's ``.duckdb``.
+        inputs: Dataset metadata (paths, mtime).
+        source: ``'geneset'`` / ``'starcat'`` / ...
+        catalog: e.g. ``'Sierksma2025/WGCNA'``.
+
+    Returns:
+        DataFrame with columns ``cell_name``, ``module``, ``score``.
+        Empty if the pair has no data (unusual — the pair was
+        discovered from these sources).
+    """
     frames: list[pd.DataFrame] = []
-    if sidecar.exists():
+    sidecar_present = False
+    if inputs.sidecar_path.exists():
         sidecar_df = conn.execute(
-            "SELECT c.cell_name, s.source, s.catalog, s.module, s.score "
+            "SELECT c.cell_name, s.module, s.score "
             "FROM read_parquet(?) s "
-            "JOIN __cells c ON c.cell_id = s.cell_id",
-            [str(sidecar)],
+            "JOIN __cells c ON c.cell_id = s.cell_id "
+            "WHERE s.source = ? AND s.catalog = ?",
+            [str(inputs.sidecar_path), source, catalog],
         ).df()
         if not sidecar_df.empty:
+            sidecar_present = True
             frames.append(sidecar_df)
 
-    # Legacy obs-column path — score columns in __obsnum written straight to
-    # obs before the sidecar existed. Discover them and pull each column as
-    # (cell_name, source, catalog, module, score) rows.
-    legacy_cols = _obsnum_score_columns(conn)
-    if legacy_cols:
-        seen_from_sidecar: set[tuple[str, str, str]] = set()
-        if frames:
-            seen_from_sidecar = set(
-                map(tuple,
-                    frames[0][['source', 'catalog', 'module']].drop_duplicates().values.tolist())
-            )
-        for column, source, catalog, module in legacy_cols:
-            if (source, catalog, module) in seen_from_sidecar:
-                continue  # sidecar wins
-            # Column name came from information_schema so it's a real stored
-            # column, but it can still contain characters that need doubling
-            # inside a double-quoted identifier. Escape defensively.
+    if not sidecar_present:
+        for column, col_source, col_catalog, module in _obsnum_score_columns(conn):
+            if col_source != source or col_catalog != catalog:
+                continue
             col_ident = '"' + column.replace('"', '""') + '"'
             try:
                 df = conn.execute(
@@ -328,94 +546,110 @@ def compute_for_dataset(db_id: str, duckdb_path: Path, md_path: Path) -> pd.Data
                 continue
             if df.empty:
                 continue
-            df['source'] = source
-            df['catalog'] = catalog
             df['module'] = module
-            frames.append(df[['cell_name', 'source', 'catalog', 'module', 'score']])
+            frames.append(df[['cell_name', 'module', 'score']])
 
     if not frames:
+        return pd.DataFrame(columns=['cell_name', 'module', 'score'])
+    return pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
+
+
+def _compute_rows_for_pair(
+    inputs: DatasetInputs,
+    source: str,
+    catalog: str,
+) -> list[dict]:
+    """Compute the variability rows for one (dataset × catalog) pair.
+
+    Args:
+        inputs: Dataset metadata.
+        source: Score source (``'geneset'``, ``'starcat'``, ...).
+        catalog: Catalog id.
+
+    Returns:
+        List of dicts, one per output row.
+    """
+    tag_targets = _resolve_tag_targets(inputs.md_path)
+
+    conn = duckdb.connect(str(inputs.duckdb_path), read_only=True)
+    try:
+        scores_long = _load_scores_for_pair(conn, inputs, source, catalog)
+        if scores_long.empty:
+            return []
+
+        obs_frames: dict[str, pd.DataFrame] = {}
+        for column in list(tag_targets.keys()):
+            kind = _view_column_kind(conn, column)
+            if kind == '?':
+                continue
+            view = 'obsnum' if kind == 'num' else 'obscat'
+            try:
+                df = conn.execute(
+                    f'SELECT cell_name, "{column}" AS "{column}" FROM {view}'
+                ).df().set_index('cell_name')
+            except Exception:
+                continue
+            obs_frames[column] = df
+    finally:
         conn.close()
-        return pd.DataFrame()
 
-    scores_long = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
-    if scores_long.empty:
-        conn.close()
-        return pd.DataFrame()
-
-    # Pre-fetch each tag column via the VIEW (obscat/obsnum) so that
-    # obs_rename/obs_derive is applied — canonical column names win.
-    obs_frames: dict[str, pd.DataFrame] = {}
-    for column in list(tag_targets.keys()):
-        kind = _view_column_kind(conn, column)
-        if kind == '?':
-            continue
-        view = 'obsnum' if kind == 'num' else 'obscat'
-        try:
-            df = conn.execute(
-                f'SELECT cell_name, "{column}" AS "{column}" FROM {view}'
-            ).df().set_index('cell_name')
-        except Exception:
-            continue
-        obs_frames[column] = df
-    conn.close()
-
-    # Drop tag_targets entries with no data (col not in view or query failed)
-    tag_targets = {c: t for c, t in tag_targets.items() if c in obs_frames}
+    tag_targets = {col: tags for col, tags in tag_targets.items() if col in obs_frames}
     if not tag_targets:
-        return pd.DataFrame()
+        return []
 
     rows: list[dict] = []
-    # For each (source, catalog, module), pivot to cell_name → score, then per tag_column compute stats
-    for (source, catalog, module), sub in scores_long.groupby(
-        ['source', 'catalog', 'module'], observed=True,
-    ):
+    for module, sub in scores_long.groupby('module', observed=True):
         scores_by_cell = sub.set_index('cell_name')['score']
         total_var = float(scores_by_cell.var(ddof=1))
-        n_cells   = int(len(scores_by_cell))
+        n_cells = int(len(scores_by_cell))
 
         for column, tags in tag_targets.items():
-            if column not in obs_frames:
-                continue
             col_series = obs_frames[column][column]
-            joined = pd.concat([scores_by_cell, col_series], axis=1, join='inner').dropna()
+            joined = pd.concat(
+                [scores_by_cell, col_series], axis=1, join='inner',
+            ).dropna()
             if joined.empty:
                 continue
-            score_arr = joined.iloc[:, 0].to_numpy(dtype=float)
-            tag_arr   = joined.iloc[:, 1]
+            score_array = joined.iloc[:, 0].to_numpy(dtype=float)
+            tag_array = joined.iloc[:, 1]
 
             for tag in tags:
                 if tag in NUMERICAL_TAGS:
-                    x = pd.to_numeric(tag_arr, errors='coerce').to_numpy(dtype=float)
-                    if np.isnan(x).all():
-                        # Categorical string being tagged numerical? try one-way anova as fallback
-                        eta2, omega2, mean_range, f_stat = _eta_squared(score_arr, tag_arr.to_numpy())
-                        n_cat = int(pd.Series(tag_arr).nunique())
-                        stats_here = [
-                            ('eta2', eta2), ('omega2', omega2), ('mean_range', mean_range),
-                            ('F', f_stat),
+                    predictor = pd.to_numeric(tag_array, errors='coerce').to_numpy(
+                        dtype=float,
+                    )
+                    if np.isnan(predictor).all():
+                        # Numeric tag against a non-numeric column? fall
+                        # back to categorical stats — matches legacy.
+                        eta2, omega2, mean_range, f_stat = _eta_squared(
+                            score_array, tag_array.to_numpy(),
+                        )
+                        n_categories = int(pd.Series(tag_array).nunique())
+                        stats_here: list[tuple[str, float]] = [
+                            ('eta2', eta2), ('omega2', omega2),
+                            ('mean_range', mean_range), ('F', f_stat),
                         ]
                     else:
-                        r2, rho, _ = _r_squared(score_arr, x)
-                        stats_here = [
-                            ('R2', r2), ('spearman', rho),
-                        ]
-                        n_cat = 0
+                        r2, rho, _ = _r_squared(score_array, predictor)
+                        stats_here = [('R2', r2), ('spearman', rho)]
+                        n_categories = 0
                 else:
-                    tag_vals = tag_arr.astype(str).to_numpy()
-                    eta2, omega2, mean_range, f_stat = _eta_squared(score_arr, tag_vals)
-                    n_cat = int(pd.Series(tag_vals).nunique())
+                    tag_values = tag_array.astype(str).to_numpy()
+                    eta2, omega2, mean_range, f_stat = _eta_squared(
+                        score_array, tag_values,
+                    )
+                    n_categories = int(pd.Series(tag_values).nunique())
                     stats_here = [
-                        ('eta2', eta2), ('omega2', omega2), ('mean_range', mean_range),
-                        ('F', f_stat),
+                        ('eta2', eta2), ('omega2', omega2),
+                        ('mean_range', mean_range), ('F', f_stat),
                     ]
 
-                # Common context rows
                 stats_here.append(('total_var', total_var))
-                stats_here.append(('mean_score', float(score_arr.mean())))
+                stats_here.append(('mean_score', float(score_array.mean())))
 
                 for stat_name, value in stats_here:
                     rows.append({
-                        'dataset':      db_id,
+                        'dataset':      inputs.db_id,
                         'source':       source,
                         'catalog':      catalog,
                         'module':       module,
@@ -424,104 +658,476 @@ def compute_for_dataset(db_id: str, duckdb_path: Path, md_path: Path) -> pd.Data
                         'statistic':    stat_name,
                         'value':        value,
                         'n_cells':      n_cells,
-                        'n_categories': n_cat,
+                        'n_categories': n_categories,
                     })
 
-    return pd.DataFrame(rows)
+    return rows
+
+
+def _write_cache(cache_path: Path, rows: list[dict]) -> None:
+    """Atomically write pair rows to the cache directory.
+
+    Always writes a parquet — even for zero rows — so cache freshness
+    can be tested by mtime alone (no ambiguity between "cache miss" and
+    "cache present but empty").
+
+    Args:
+        cache_path: Target parquet path (must be under the cache root).
+        rows: Rows to write (may be empty).
+    """
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    if rows:
+        df = pd.DataFrame(rows, columns=list(OUTPUT_COLUMNS))
+    else:
+        df = pd.DataFrame({col: [] for col in OUTPUT_COLUMNS})
+        df = df.astype({
+            'dataset': 'object', 'source': 'object', 'catalog': 'object',
+            'module': 'object', 'tag_column': 'object', 'tag': 'object',
+            'statistic': 'object', 'value': 'float64',
+            'n_cells': 'int64', 'n_categories': 'int64',
+        })
+    tmp = cache_path.with_suffix(cache_path.suffix + '.tmp')
+    df.to_parquet(tmp, engine='pyarrow', compression='zstd')
+    os.replace(tmp, cache_path)
+
+
+def _process_pair(job: PairJob, force: bool) -> PairResult:
+    """Worker entry point. Handle cache read, compute, cache write.
+
+    Args:
+        job: Unit of work.
+        force: If ``True``, ignore any existing cache file.
+
+    Returns:
+        A :class:`PairResult` — never raises; errors are captured on
+        ``.error``.
+    """
+    start = time.time()
+    try:
+        cache_mtime = _mtime(job.cache_path)
+        if (
+            not force
+            and cache_mtime > 0.0
+            and cache_mtime >= job.inputs.source_mtime
+        ):
+            # Cache is at least as new as the sources it derives from.
+            n_rows = _count_parquet_rows(job.cache_path)
+            return PairResult(
+                db_id=job.db_id, source=job.source, catalog=job.catalog,
+                cache_path=job.cache_path, n_rows=n_rows,
+                from_cache=True, elapsed_s=time.time() - start,
+            )
+
+        rows = _compute_rows_for_pair(job.inputs, job.source, job.catalog)
+        _write_cache(job.cache_path, rows)
+        return PairResult(
+            db_id=job.db_id, source=job.source, catalog=job.catalog,
+            cache_path=job.cache_path, n_rows=len(rows),
+            from_cache=False, elapsed_s=time.time() - start,
+        )
+    except Exception as exc:  # noqa: BLE001 — surfaced via .error
+        return PairResult(
+            db_id=job.db_id, source=job.source, catalog=job.catalog,
+            cache_path=job.cache_path, n_rows=0, from_cache=False,
+            elapsed_s=time.time() - start,
+            error=f'{type(exc).__name__}: {exc}\n{traceback.format_exc()}',
+        )
+
+
+def _count_parquet_rows(path: Path) -> int:
+    """Row count of a parquet file via a short-lived DuckDB connection."""
+    conn = duckdb.connect(':memory:')
+    try:
+        row = conn.execute(
+            'SELECT COUNT(*) FROM read_parquet(?)', [str(path)],
+        ).fetchone()
+        return int(row[0]) if row else 0
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Coordinator.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RunSummary:
+    """Aggregate progress counters for the coordinator log line."""
+    processed: int = 0
+    cached: int = 0
+    empty_pairs: int = 0
+    errored: int = 0
+    skipped_datasets: int = 0
+    errors: list[str] = field(default_factory=list)
+
+
+def _iter_pair_jobs(
+    root: Path,
+    only: Optional[set[str]],
+    dataset_snapshot: list[DatasetInputs],
+) -> Iterable[PairJob]:
+    """Yield one :class:`PairJob` per (dataset × catalog).
+
+    Args:
+        root: h5adstore root.
+        only: Optional set of db_ids to keep.
+        dataset_snapshot: Pre-computed dataset inputs.
+
+    Yields:
+        :class:`PairJob` in stable (db_id, source, catalog) order.
+    """
+    for inputs in dataset_snapshot:
+        if only and inputs.db_id not in only:
+            continue
+        for source, catalog in inputs.catalogs:
+            yield PairJob(
+                db_id=inputs.db_id, source=source, catalog=catalog,
+                inputs=inputs,
+                cache_path=_cache_file(root, inputs.db_id, source, catalog),
+            )
+
+
+def _collect_dataset_snapshot(root: Path) -> list[DatasetInputs]:
+    """Walk the h5adstore, return one :class:`DatasetInputs` per scored dataset.
+
+    Skips inactive datasets (``.inactive`` sidecar) and datasets without
+    a score source. Runs sequentially — the discovery is cheap
+    relative to the compute.
+
+    Args:
+        root: h5adstore root.
+
+    Returns:
+        Sorted list of :class:`DatasetInputs`.
+    """
+    out: list[DatasetInputs] = []
+    for entry in sorted(iter_h5adstore(root), key=lambda entry: entry.db_id):
+        if entry.h5ad_path.with_suffix('.inactive').exists():
+            continue
+        if not entry.duckdb_path.exists():
+            continue
+        try:
+            inputs = build_dataset_inputs(entry)
+        except Exception as exc:  # noqa: BLE001 — surfaced in stderr
+            print(
+                f'  [warn] discover {entry.db_id}: {exc}',
+                file=sys.stderr,
+            )
+            continue
+        if inputs is None:
+            continue
+        out.append(inputs)
+    return out
+
+
+def _prune_stale_cache(
+    root: Path, active_triples: set[tuple[str, str, str]],
+) -> int:
+    """Remove cache files for (dataset, source, catalog) triples no longer present.
+
+    Args:
+        root: h5adstore root.
+        active_triples: Set of ``(db_id, source, catalog)`` still active.
+
+    Returns:
+        Count of files removed.
+    """
+    cache_root = _cache_root(root)
+    if not cache_root.exists():
+        return 0
+    active_tokens = {
+        (_sanitise(db_id), f'{_sanitise(source)}__{_sanitise(catalog)}')
+        for db_id, source, catalog in active_triples
+    }
+    removed = 0
+    for db_dir in cache_root.iterdir():
+        if not db_dir.is_dir():
+            continue
+        for cache_file in db_dir.glob('*.parquet'):
+            key = (db_dir.name, cache_file.stem)
+            if key not in active_tokens:
+                cache_file.unlink()
+                removed += 1
+        if not any(db_dir.iterdir()):
+            db_dir.rmdir()
+    return removed
+
+
+def _concat_and_write(
+    root: Path,
+    out_path: Path,
+    cache_files: list[Path],
+    keep_tags: Optional[set[str]],
+) -> tuple[int, int]:
+    """Concatenate the given cache parquets into the aggregate output.
+
+    Uses DuckDB's native parquet reader over an explicit file list —
+    never materialises the full aggregate in Python. Filters by
+    ``keep_tags`` if provided.
+
+    Args:
+        root: h5adstore root (unused; kept for symmetry).
+        out_path: Final parquet path.
+        cache_files: Explicit list of cache parquet paths to concat.
+            Passing the list (not a glob) lets ``--only`` limit the
+            aggregate to the requested datasets, matching legacy
+            semantics.
+        keep_tags: Optional whitelist of ``tag`` values.
+
+    Returns:
+        Tuple ``(n_rows, n_datasets)`` in the aggregate. ``(0, 0)`` if
+        ``cache_files`` is empty.
+    """
+    del root  # noqa: F841 — kept for parity with older callers
+    tmp = out_path.with_suffix(out_path.suffix + '.tmp')
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+
+    if not cache_files:
+        # Write an empty parquet with the canonical schema — downstream
+        # readers should never see "file missing" vs "no rows" as two
+        # distinct states.
+        empty = pd.DataFrame({col: [] for col in OUTPUT_COLUMNS}).astype({
+            'dataset': 'object', 'source': 'object', 'catalog': 'object',
+            'module': 'object', 'tag_column': 'object', 'tag': 'object',
+            'statistic': 'object', 'value': 'float64',
+            'n_cells': 'int64', 'n_categories': 'int64',
+        })
+        empty.to_parquet(tmp, engine='pyarrow', compression='zstd')
+        os.replace(tmp, out_path)
+        return (0, 0)
+
+    conn = duckdb.connect(':memory:')
+    try:
+        file_list = [str(path) for path in cache_files]
+        select_cols = ', '.join(OUTPUT_COLUMNS)
+        where_clause = ''
+        params: list = [file_list]
+        if keep_tags is not None:
+            placeholders = ', '.join(['?'] * len(keep_tags))
+            where_clause = f'WHERE tag IN ({placeholders})'
+            params.extend(sorted(keep_tags))
+        conn.execute(
+            f"COPY (SELECT {select_cols} "
+            f"      FROM read_parquet(?, union_by_name=true) "
+            f"      {where_clause}) "
+            f"TO '{tmp}' (FORMAT PARQUET, COMPRESSION ZSTD)",
+            params,
+        )
+        row = conn.execute(
+            "SELECT COUNT(*), COUNT(DISTINCT dataset) FROM read_parquet(?)",
+            [str(tmp)],
+        ).fetchone()
+        n_rows = int(row[0]) if row else 0
+        n_datasets = int(row[1]) if row else 0
+    finally:
+        conn.close()
+
+    os.replace(tmp, out_path)
+    return n_rows, n_datasets
+
+
+def _emit_progress_json(
+    stream, index: int, total: int, result: PairResult,
+) -> None:
+    """Emit a machine-readable progress line to ``stream`` (stderr)."""
+    stream.write(json.dumps({
+        'i':         index,
+        'n':         total,
+        'db_id':     result.db_id,
+        'catalog':   result.catalog,
+        'elapsed_s': round(result.elapsed_s, 3),
+        'n_rows':    result.n_rows,
+        'cached':    result.from_cache,
+        'ok':        result.error is None,
+    }) + '\n')
+    stream.flush()
+
+
+# ---------------------------------------------------------------------------
+# CLI.
+# ---------------------------------------------------------------------------
+
+
+def _default_workers() -> int:
+    """Half of the CPU count, capped at 8. Leaves room for ant-serve."""
+    cpu_count = os.cpu_count() or 2
+    return max(1, min(8, cpu_count // 2))
 
 
 def main() -> int:
+    """Entry point. See module docstring for CLI flags."""
     parser = argparse.ArgumentParser(prog='ant-module-variability')
     parser.add_argument('--h5adstore-root', default='data/h5adstore')
-    parser.add_argument('--only', default=None,
-                        help='comma-separated db_ids to process (else all)')
-    parser.add_argument('--tags', default=None,
-                        help='comma-separated tag subset (else all)')
-    parser.add_argument('--out', default=None,
-                        help='output parquet path (default: '
-                             '<h5adstore>/module_variability.parquet)')
+    parser.add_argument(
+        '--only', default=None,
+        help='comma-separated db_ids to process (else all)',
+    )
+    parser.add_argument(
+        '--tags', default=None,
+        help='comma-separated tag subset (else all)',
+    )
+    parser.add_argument(
+        '--out', default=None,
+        help='output parquet path (default: '
+             '<h5adstore>/module_variability.parquet)',
+    )
+    parser.add_argument(
+        '--force', action='store_true',
+        help='ignore cache — recompute every pair from scratch',
+    )
+    parser.add_argument(
+        '--workers', type=int, default=_default_workers(),
+        help=f'parallel workers (default: {_default_workers()})',
+    )
+    parser.add_argument(
+        '--no-prune', action='store_true',
+        help='keep cache entries for pairs no longer active',
+    )
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args()
 
     root = Path(args.h5adstore_root).resolve()
     only = set(args.only.split(',')) if args.only else None
-    keep_tags: Optional[set[str]] = set(args.tags.split(',')) if args.tags else None
-    out = Path(args.out).resolve() if args.out else (root / 'module_variability.parquet')
+    keep_tags: Optional[set[str]] = (
+        set(args.tags.split(',')) if args.tags else None
+    )
+    out = (
+        Path(args.out).resolve() if args.out
+        else root / 'module_variability.parquet'
+    )
 
-    all_rows: list[pd.DataFrame] = []
-    stats_summary = {'processed': 0, 'skipped_no_scores': 0, 'skipped_no_tags': 0,
-                     'errored': 0}
-    for entry in sorted(iter_h5adstore(root), key=lambda e: e.db_id):
-        if only and entry.db_id not in only:
-            continue
-        if not entry.duckdb_path.exists():
-            continue
-        # Skip datasets marked inactive via sidecar file (same convention as
-        # ant-serve — an ``.inactive`` file next to the ``.h5ad`` hides the
-        # dataset from the catalog; it should not surface in variability).
-        if entry.h5ad_path.with_suffix('.inactive').exists():
-            continue
-        t0 = time.time()
-        try:
-            df = compute_for_dataset(entry.db_id, entry.duckdb_path, entry.md_path)
-        except Exception as exc:
-            print(f'  ✗ {entry.db_id}: {exc}', file=sys.stderr)
-            stats_summary['errored'] += 1
-            continue
+    print(f'Scanning {root} for scored datasets…', file=sys.stderr)
+    dataset_snapshot = _collect_dataset_snapshot(root)
+    print(
+        f'  found {len(dataset_snapshot)} scored dataset(s) '
+        f'({sum(len(datasets.catalogs) for datasets in dataset_snapshot)} '
+        f'pair(s) total)',
+        file=sys.stderr,
+    )
 
-        if df.empty:
-            # Distinguish "no scores at all" (sidecar missing AND no legacy
-            # ::-columns in __obsnum) from "scores present but no matching
-            # canonical/tag columns to compute variability against".
-            sidecar_ok = scores_path(entry.duckdb_path).exists()
-            legacy_ok = False
-            if not sidecar_ok:
-                try:
-                    _c = duckdb.connect(str(entry.duckdb_path), read_only=True)
-                    try:
-                        legacy_ok = bool(_obsnum_score_columns(_c))
-                    finally:
-                        _c.close()
-                except Exception:
-                    legacy_ok = False
-            if not sidecar_ok and not legacy_ok:
-                stats_summary['skipped_no_scores'] += 1
-            else:
-                stats_summary['skipped_no_tags'] += 1
-            continue
-
-        if keep_tags is not None:
-            df = df[df['tag'].isin(keep_tags)]
-            if df.empty:
-                continue
-
-        stats_summary['processed'] += 1
-        all_rows.append(df)
-        n_stats = len(df)
-        n_mod = df['module'].nunique()
-        n_tag = df['tag_column'].nunique()
-        print(f'  ✓ {entry.db_id:16s}  modules={n_mod:3d}  '
-              f'tag_cols={n_tag}  stats={n_stats:5d}  ({time.time()-t0:.1f}s)')
-
-    if not all_rows:
-        print('no rows produced', file=sys.stderr)
+    jobs = list(_iter_pair_jobs(root, only, dataset_snapshot))
+    if not jobs:
+        print('no (dataset × catalog) pairs to process', file=sys.stderr)
         return 1
 
-    combined = pd.concat(all_rows, ignore_index=True)
-    print(f'\n=== {len(combined):,} rows across {combined["dataset"].nunique()} datasets')
-    print(combined.groupby(['tag', 'statistic']).size().unstack(fill_value=0))
+    _cache_root(root).mkdir(parents=True, exist_ok=True)
+
+    workers = max(1, args.workers)
+    print(
+        f'Processing {len(jobs)} pair(s) with {workers} worker(s) '
+        f'(force={args.force})',
+        file=sys.stderr,
+    )
+
+    summary = RunSummary()
+    total_pairs = len(jobs)
+    completed = 0
+
+    if workers == 1:
+        result_iter = (_process_pair(job, args.force) for job in jobs)
+    else:
+        # spawn keeps workers hermetic; each opens its own DuckDB
+        # connection (see :func:`_process_pair`) and DuckDB is not
+        # fork-safe.
+        ctx = multiprocessing.get_context('spawn')
+        pool = ctx.Pool(processes=workers)
+        result_iter = pool.imap_unordered(
+            _process_pair_star, [(job, args.force) for job in jobs],
+        )
+
+    pbar = tqdm(
+        total=total_pairs, desc='dataset × catalog',
+        unit='pair', file=sys.stderr,
+    )
+    try:
+        for result in result_iter:
+            completed += 1
+            pbar.update(1)
+            tag = '[cached]' if result.from_cache else '[computed]'
+            if result.error:
+                summary.errored += 1
+                summary.errors.append(
+                    f'{result.db_id} × {result.catalog}: {result.error}'
+                )
+                tqdm.write(
+                    f'[{completed}/{total_pairs}] '
+                    f'{result.db_id} × {result.catalog} — ERROR: '
+                    f'{result.error.splitlines()[0]}',
+                    file=sys.stderr,
+                )
+            else:
+                if result.from_cache:
+                    summary.cached += 1
+                else:
+                    summary.processed += 1
+                if result.n_rows == 0:
+                    summary.empty_pairs += 1
+                tqdm.write(
+                    f'[{completed}/{total_pairs}] '
+                    f'{result.db_id} × {result.catalog} '
+                    f'— {result.elapsed_s:.2f}s — '
+                    f'{result.n_rows} rows {tag}',
+                    file=sys.stderr,
+                )
+            if completed % 10 == 0 or completed == total_pairs:
+                _emit_progress_json(sys.stderr, completed, total_pairs, result)
+    finally:
+        pbar.close()
+        if workers > 1:
+            pool.close()
+            pool.join()
+
+    if summary.errored:
+        print(
+            f'\n{summary.errored} pair(s) failed — aborting aggregate write',
+            file=sys.stderr,
+        )
+        for err in summary.errors[:5]:
+            print(f'  {err}', file=sys.stderr)
+        return 2
+
+    if not args.no_prune:
+        # ``dataset_snapshot`` is the fleet-wide inventory (``--only`` is
+        # applied at pair-job dispatch, not at snapshot time), so the
+        # active set is complete and pruning is safe even with ``--only``.
+        active_triples = {
+            (inputs.db_id, source, catalog)
+            for inputs in dataset_snapshot
+            for source, catalog in inputs.catalogs
+        }
+        pruned = _prune_stale_cache(root, active_triples)
+        if pruned:
+            print(f'pruned {pruned} stale cache file(s)', file=sys.stderr)
 
     if args.dry_run:
-        print(f'\n[dry-run] would write to {out}')
+        print(f'\n[dry-run] would concat cache → {out}', file=sys.stderr)
         return 0
 
-    # Atomic write
-    tmp = out.with_suffix(out.suffix + '.tmp')
-    combined.to_parquet(tmp, engine='pyarrow', compression='zstd')
-    tmp.replace(out)
-    print(f'\nwrote → {out}')
-    print(f'summary: {stats_summary}')
+    print(f'\nConcatenating cache → {out}', file=sys.stderr)
+    # Only include cache files that both (a) match a job we ran this
+    # invocation and (b) actually exist on disk. Errored jobs and
+    # `--only`-filtered pairs are excluded.
+    cache_files = [
+        job.cache_path for job in jobs if job.cache_path.exists()
+    ]
+    n_rows, n_datasets = _concat_and_write(root, out, cache_files, keep_tags)
+    print(
+        f'wrote {n_rows:,} rows across {n_datasets} dataset(s) → {out}',
+        file=sys.stderr,
+    )
+    print(
+        f'summary: processed={summary.processed} cached={summary.cached} '
+        f'empty_pairs={summary.empty_pairs} errored={summary.errored}',
+        file=sys.stderr,
+    )
     return 0
+
+
+def _process_pair_star(args_tuple: tuple[PairJob, bool]) -> PairResult:
+    """Multiprocessing helper — unpacks the ``(job, force)`` tuple."""
+    job, force = args_tuple
+    return _process_pair(job, force)
 
 
 if __name__ == '__main__':

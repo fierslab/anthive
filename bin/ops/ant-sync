@@ -57,6 +57,10 @@ SYNC_EXTENSIONS      = {'.h5ad', '.duckdb', '.de.parquet', '.scores.parquet',
                         # file per resource; specific-name allow.
                         'module_variability.parquet',
                         'scores_index.parquet'}
+# Prefixed-path allowlist — relative-path prefixes whose contents are
+# always syncable (bypasses the `_` staging-folder skip). Used for the
+# module-variability cache so slave nodes reap the primary's cache hits.
+SYNC_PATH_PREFIXES   = ('_module_variability_cache/',)
 # Pull defaults to .h5ad + .de.parquet. .duckdb and .layer.*.parquet sidecars
 # are derived (rebuilt locally via `ant-build-all`). Use `pull --include-duckdb`
 # to override for disaster recovery.
@@ -138,6 +142,14 @@ def _is_syncable(
     path = Path(rel)
     if path.name.startswith('.'):
         return False
+    # Prefixed-path allowlist (checked BEFORE the `_` skip because these
+    # prefixes deliberately start with `_`, e.g. the module-variability
+    # cache under `_module_variability_cache/`).
+    for prefix in SYNC_PATH_PREFIXES:
+        if rel.startswith(prefix):
+            if any(rel.endswith(suffix) for suffix in SKIP_SUFFIXES):
+                return False
+            return True
     # Skip _-prefixed folders (e.g. _synapse_raw) — staging / archive areas.
     if any(part.startswith('_') for part in path.parts[:-1]):
         return False
