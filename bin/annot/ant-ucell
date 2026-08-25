@@ -83,6 +83,7 @@ import duckdb
 import numpy as np
 import pandas as pd
 from scipy.sparse import issparse
+from scipy.stats import rankdata
 
 from config import get_config          # type: ignore
 from geneset import (                  # type: ignore
@@ -95,9 +96,14 @@ from scores_parquet import read_scores, upsert_scores  # type: ignore
 TOOL_VERSION = 'ant-ucell/0.1'
 
 # Above this many cells, score in _CHUNK_SIZE-cell batches (dense conversion
-# ~= n_cells * n_vars * 4 bytes; 200k × 20k float32 ≈ 16 GB).
+# is n_cells * n_vars * 4 bytes; 200k times 20k float32 is around 16 GB).
 _CHUNK_THRESHOLD = 200_000
 _CHUNK_SIZE = 100_000
+
+# UCell rank cap. Any gene ranked below this cutoff contributes a constant
+# (MAX_RANK + 1) instead of its raw rank, so the many tied zeros in sparse
+# scRNA don't drag every cell to the same mean score. Matches R UCell.
+_MAX_RANK = 1500
 
 # Modules with fewer than this many actual genes in adata.var are skipped.
 # UCell on very small sets (< min_n) produces highly variable scores.
@@ -292,29 +298,50 @@ def _ucell_chunk(
 
     scores = np.empty((n_cells, n_modules), dtype=np.float64)
 
-    # Pre-compute index arrays per module to avoid per-cell dict lookup.
     module_indices: List[np.ndarray] = [
         np.array([gene_to_idx[g] for g in gene_sets_dict[m]], dtype=np.intp)
         for m in module_names
     ]
 
-    for cell_idx in range(n_cells):
-        row = expr_dense[cell_idx]
-        # Rank descending: rank 1 = highest expression. scipy.rankdata is
-        # slower than argsort-of-argsort; use argsort with average tie method.
-        # np.argsort of argsort gives ordinal ranks — ties split arbitrarily.
-        # That's equivalent to pyscenic's tie-breaking; fine for UCell.
-        ranks = np.argsort(np.argsort(-row)) + 1  # 1-indexed, descending rank
+    # Match R UCell defaults. maxRank caps rank contributions above the
+    # top-1500 mark, which stabilises scores on sparse scRNA (many tied
+    # zeros otherwise pull all cells to a common mean). ties.method='average'
+    # gives all tied genes the same mid-rank, so tied zeros don't create
+    # spurious signal from var-index order.
+    MAX_RANK = _MAX_RANK
+
+    # Vectorised: rank one batch of cells at a time (one rankdata call per
+    # batch, not per cell). scipy.stats.rankdata with axis and 'average'
+    # returns float64. Cast to float32 to keep memory bounded to
+    # BATCH * n_genes * 4B; 5000 x 25k rounds to about 500 MB.
+    BATCH = 5000
+
+    for start in range(0, n_cells, BATCH):
+        end = min(start + BATCH, n_cells)
+        batch = expr_dense[start:end]
+
+        # rankdata ranks ascending; negate values for descending ranks so
+        # rank 1 corresponds to the most highly expressed gene.
+        batch_ranks = rankdata(
+            -batch, method='average', axis=1
+        ).astype(np.float32)
+        # Cap ranks above the maxRank threshold at (MAX_RANK + 1).
+        np.minimum(batch_ranks, MAX_RANK + 1, out=batch_ranks)
 
         for mod_idx, gene_indices in enumerate(module_indices):
             k = len(gene_indices)
-            n = n_genes
-            set_ranks = ranks[gene_indices]
-            # U = (sum of set ranks) - k*(k+1)/2
-            # U_max = k * (n - k)
-            U_raw = float(set_ranks.sum()) - k * (k + 1) / 2.0
-            U_max = float(k) * float(n - k)
-            scores[cell_idx, mod_idx] = 1.0 - U_raw / U_max if U_max > 0 else 1.0
+            if k <= 0:
+                scores[start:end, mod_idx] = 1.0
+                continue
+            u_max = float(k) * float(MAX_RANK)
+            if u_max <= 0:
+                scores[start:end, mod_idx] = 1.0
+                continue
+            set_rank_sums = batch_ranks[:, gene_indices].sum(
+                axis=1, dtype=np.float64
+            )
+            u = set_rank_sums - k * (k + 1) / 2.0
+            scores[start:end, mod_idx] = 1.0 - u / u_max
 
     return scores
 
