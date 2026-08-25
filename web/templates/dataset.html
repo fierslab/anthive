@@ -501,6 +501,8 @@
     .g-flag-cell { line-height: 1; }
     .g-flag-curated { color: #0f766e; margin-right: 2px; }
     .g-flag-personal { color: #c2410c; }
+    /* When search hides a row, keep it off the layout. */
+    #obs-tbl-genes tbody tr.gene-item.g-hidden { display: none; }
   </style>
   <h2>Genes
     <span class="info" title="Click ▬ for a histogram of the gene's expression, or ◉ for an embedding scatter coloured by the gene. Sparklines show the gene's value relative to the db-wide range for that stat. Panel source: precomputed dataset favourites, or a canonical curated panel keyed on cell type (microglia / astrocyte / neuron).">ⓘ</span></h2>
@@ -519,25 +521,12 @@
     <span id="gene-search-count" class="muted"></span>
     <span id="gene-search-status" class="muted" style="font-size:11px"></span>
   </div>
-  {# search results section — hidden until a search returns non-curated genes #}
-  <div id="gene-search-results" style="display:none">
-    <div class="obs-sub">Search results</div>
-    <div class="table-wrap"><table class="obs-stats-tbl auto" id="obs-tbl-gene-results">
-      <thead><tr>
-        <th style="width:1.2em"></th>
-        <th>gene</th>
-        <th class="obs-plots-th">plot</th>
-        <th title="fraction of cells with expression > 0">% expr</th>
-        <th title="percentile rank of this gene's mean expression among all genes in the dataset (0 = lowest, 1 = highest)">rank expr</th>
-        <th title="variability: rank of std across displayed genes (higher = more variable)">variability</th>
-      </tr></thead>
-      <tbody id="gene-search-tbody"></tbody>
-    </table></div>
-  </div>
-  {# Single merged table: curated genes (★ marked) + top-variable genes in ONE
-     tbody, sorted together by whichever column is active (variability desc by
-     default). The nested-tbody split for top-var is gone; JS appends top-var
-     rows into the same tbody and applySortToTable mixes them with curated. #}
+  {# Single merged table: curated genes (◆ dataset-fav, ♥ personal-fav) plus
+     top-variable genes in ONE tbody, sorted together by whichever column is
+     active (variability desc by default). Search filters this SAME table in
+     place: non-matching rows get .g-hidden, dataset-wide server matches not
+     already in the tbody are appended and then filtered. Clearing the search
+     un-hides everything. #}
   <div class="table-wrap"><table class="obs-stats-tbl auto" id="obs-tbl-genes">
     <thead><tr>
       <th data-sortcol="star" title="◆ dataset favourite (from the collection's top_genes) · ♥ your personal favourite (set on /settings). Click to sort." style="width:2.2em;text-align:center">★</th>
@@ -1408,11 +1397,10 @@ document.addEventListener('DOMContentLoaded', function() {
             var searchInput  = document.getElementById('gene-search');
             var searchCount  = document.getElementById('gene-search-count');
             var searchStatus = document.getElementById('gene-search-status');
-            var searchResults = document.getElementById('gene-search-results');
-            var searchTbody  = document.getElementById('gene-search-tbody');
             // Top-var rows now live in the same tbody as curated rows so they
             // sort together (see #obs-tbl-genes). Renders via renderTopVar
             // append into that tbody, then applySortToTable re-orders.
+            // Search filters this same tbody in place (see runGeneSearch below).
 
             // Base URL for gene plot links (computed once).
             var _gBase = '/browse/' + {{ folder_browse_id | tojson }} + '/' + {{ file_id | tojson }};
@@ -1614,6 +1602,12 @@ document.addEventListener('DOMContentLoaded', function() {
                         });
                         renderTopVar(fresh);
                         applySortToTable();
+                        // Reapply any active search filter to the freshly
+                        // appended rows so a mid-load search stays honoured.
+                        if (_lastQuery) {
+                            var res = _applyClientFilter(_lastQuery);
+                            _updateSearchCount(_lastQuery, res);
+                        }
                     })
                     .catch(function (err) {
                         console.error('fetchTopVarGenomeWide failed:', err);
@@ -1754,55 +1748,103 @@ document.addEventListener('DOMContentLoaded', function() {
 
             fetchAndHydrateCurated();
 
-            // ── Server-side gene search (debounced 250ms) ─────────────────────
-            // When query is non-empty, searches the full dataset gene list via
-            // GET /databases/{id}/genes?q=...&limit=30, then fetches stats for
-            // matched genes NOT already in the curated panel.
+            // ── Gene search: in-place filter of the main table (debounced 250ms).
+            // Non-empty query → hide rows whose gene symbol doesn't contain
+            // the substring (case-insensitive), so only matches remain visible.
+            // Also runs a dataset-wide server search; any hits not already in
+            // the tbody get inserted as fresh rows (fetched stats hydrated
+            // async). Clearing the box un-hides every row.
             var _searchTimer = null;
             var _lastQuery   = '';
+
+            function _applyClientFilter(q) {
+                if (!genesTbody) return { total: 0, shown: 0 };
+                var lc = q.toLowerCase();
+                var total = 0, shown = 0;
+                Array.from(genesTbody.querySelectorAll('tr.gene-item')).forEach(function (row) {
+                    total++;
+                    var name = (row.dataset.geneLc || (row.dataset.gene || '').toLowerCase());
+                    if (!lc || name.indexOf(lc) !== -1) {
+                        row.classList.remove('g-hidden');
+                        shown++;
+                    } else {
+                        row.classList.add('g-hidden');
+                    }
+                });
+                return { total: total, shown: shown };
+            }
+
+            function _updateSearchCount(q, res) {
+                if (!searchCount) return;
+                if (!q) {
+                    searchCount.textContent = res.total + ' genes';
+                } else {
+                    searchCount.textContent = res.shown + ' / ' + res.total + ' match'
+                        + (res.shown === 1 ? '' : 'es');
+                }
+            }
 
             function runGeneSearch(q) {
                 q = q.trim();
                 if (q === _lastQuery) return;
                 _lastQuery = q;
 
-                // Clear the search panel when query is empty.
+                // Empty query → un-hide every row and restore total count.
                 if (!q) {
-                    if (searchResults) searchResults.style.display = 'none';
-                    if (searchStatus)  searchStatus.textContent = '';
-                    // Restore curated count.
-                    if (searchCount) searchCount.textContent = rows.length + ' genes';
+                    var r0 = _applyClientFilter('');
+                    if (searchStatus) searchStatus.textContent = '';
+                    _updateSearchCount('', r0);
                     return;
                 }
 
-                if (searchStatus) searchStatus.textContent = 'searching…';
+                // Immediate client-side filter over the rows we already have.
+                var r1 = _applyClientFilter(q);
+                _updateSearchCount(q, r1);
+                if (searchStatus) searchStatus.textContent = 'searching dataset…';
+
                 fetch(apiBase + '/genes?q=' + encodeURIComponent(q) + '&limit=30',
                       { credentials: 'same-origin' })
                     .then(function (r) { return r.ok ? r.json() : null; })
                     .then(function (d) {
-                        if (!d || !d.genes) { if (searchStatus) searchStatus.textContent = ''; return; }
-                        var matched = d.genes.filter(function (g) {
-                            return !curatedByGene[g.toLowerCase()];
-                        });
+                        // Race guard: if the user has typed further while this
+                        // request was in flight, bail; a newer call is running.
+                        if (q !== _lastQuery) return;
                         if (searchStatus) searchStatus.textContent = '';
-                        if (searchCount) searchCount.textContent = d.genes.length + ' match' + (d.genes.length === 1 ? '' : 'es');
+                        if (!d || !d.genes || !genesTbody) return;
 
-                        if (!matched.length) {
-                            // All matches are already in curated panel.
-                            if (searchTbody) searchTbody.innerHTML = '<tr><td colspan="6" class="muted" style="font-size:11px;padding:3px 0">All matching genes are already in the curated panel above.</td></tr>';
-                            if (searchResults) searchResults.style.display = '';
+                        // Find genes the server returned that aren't yet in the tbody.
+                        var have = {};
+                        Array.from(genesTbody.querySelectorAll('tr.gene-item')).forEach(function (row) {
+                            have[(row.dataset.gene || '').toLowerCase()] = 1;
+                        });
+                        var missing = d.genes.filter(function (g) { return !have[g.toLowerCase()]; });
+                        if (!missing.length) {
+                            // Nothing new to insert; refresh the count from
+                            // the current (filtered) DOM.
+                            _updateSearchCount(q, _applyClientFilter(q));
                             return;
                         }
-                        // Placeholder rows while fetching stats.
-                        if (searchTbody) {
-                            searchTbody.innerHTML = matched.map(function (g) {
-                                return makeGeneRow(g, null, '', null);
-                            }).join('');
-                        }
-                        if (searchResults) searchResults.style.display = '';
 
-                        // Fetch stats for matched genes.
-                        fetch(apiBase + '/gene_stats?genes=' + encodeURIComponent(matched.join(',')),
+                        // Insert placeholder rows for the missing genes so they
+                        // show up straight away; hydrate their stats async.
+                        var frag = document.createElement('tbody');
+                        frag.innerHTML = missing.map(function (g) {
+                            var isFav = _favSet[g.toLowerCase()];
+                            return makeGeneRow(g, null, isFav ? _HEART_HTML : '', null);
+                        }).join('');
+                        Array.from(frag.querySelectorAll('.gene-item')).forEach(function (newRow) {
+                            if (_favSet[(newRow.dataset.gene || '').toLowerCase()]) {
+                                newRow.classList.add('gene-favourite');
+                            }
+                            genesTbody.appendChild(newRow);
+                        });
+                        // Reapply filter + sort so new rows land in the right place.
+                        _applyClientFilter(q);
+                        applySortToTable();
+                        _updateSearchCount(q, _applyClientFilter(q));
+
+                        // Hydrate stats for the newly added rows.
+                        fetch(apiBase + '/gene_stats?genes=' + encodeURIComponent(missing.join(',')),
                               { credentials: 'same-origin' })
                             .then(function (r) { return r.ok ? r.json() : null; })
                             .then(function (sd) {
@@ -1810,8 +1852,14 @@ document.addEventListener('DOMContentLoaded', function() {
                                 var byG = {};
                                 sd.stats.forEach(function (s) { byG[s.gene.toLowerCase()] = s; });
                                 var srStdRankMap = computeStdRanks(sd.stats);
-                                var resultRows = Array.from(searchTbody.querySelectorAll('.gene-item'));
-                                hydrateRows(resultRows, byG, srStdRankMap);
+                                var newRowEls = Array.from(genesTbody.querySelectorAll('tr.gene-item'))
+                                    .filter(function (r) { return byG[(r.dataset.gene || '').toLowerCase()]; });
+                                hydrateRows(newRowEls, byG, srStdRankMap);
+                                // Re-sort now that stats are populated (only if
+                                // the sort is on a numeric column).
+                                if (geneSortState.col !== 'gene' && geneSortState.col !== 'star') {
+                                    applySortToTable();
+                                }
                             })
                             .catch(function () {});
                     })

@@ -3988,7 +3988,12 @@ def test_genes_tab_variability_uses_std_rank(client):
 # ── Dataset tab enhancements (2026-08-19) ────────────────────────────────────
 
 def test_genes_tab_server_side_search(client):
-    """Genes tab: server-side search hits /genes?q= endpoint (debounced, 250ms)."""
+    """Genes tab: server-side search hits /genes?q= endpoint (debounced, 250ms).
+
+    After the 2026-08-25 in-place filter refactor, search no longer renders a
+    separate results table; it hides non-matching rows in the main table and
+    appends dataset-wide server hits into it. #gene-search input remains.
+    """
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
     html = resp.text
@@ -3997,8 +4002,13 @@ def test_genes_tab_server_side_search(client):
         "gene search must hit /genes?q= API endpoint"
     # Debounce: setTimeout used.
     assert "setTimeout" in html, "gene search must be debounced (setTimeout)"
-    # Search results section present.
-    assert 'id="gene-search-results"' in html, "#gene-search-results section must exist"
+    # In-place filter: the .g-hidden marker class must be applied by search JS.
+    assert 'g-hidden' in html, "search must toggle .g-hidden on non-matching rows"
+    # The old separate search-results table must be gone.
+    assert 'id="gene-search-results"' not in html, \
+        "search results no longer render in a separate table; filter is in place"
+    assert 'id="obs-tbl-gene-results"' not in html, \
+        "the separate search-results table id must be gone"
 
 
 def test_genes_tab_topvar_section_present(client):
@@ -4027,30 +4037,25 @@ def test_genes_tab_topvar_section_present(client):
 # ── Genes tab — merged curated + top-variable table (2026-08-20) ──────────────
 
 def test_genes_tab_single_table(client):
-    """Curated and top-variable genes share ONE merged table (#obs-tbl-genes),
-    plus one hidden search-results table — exactly 2 obs-stats-tbl tables total."""
+    """Curated, top-variable, and searched genes all share ONE table
+    (#obs-tbl-genes). Search filters this table in place, so there is exactly
+    one obs-stats-tbl table in the Genes panel."""
     import re
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
     html = resp.text
-    # Locate the Genes tab panel.
     tab_start = html.find('id="tab-genes"')
     tab_end   = html.find('id="tab-data"', tab_start)
     assert tab_start != -1, "tab-genes panel not found"
     genes_html = html[tab_start:tab_end] if tab_end != -1 else html[tab_start:]
-    # Exactly TWO obs-stats-tbl tables: the hidden search-results table
-    # (#obs-tbl-gene-results) and the merged curated+topvar table (#obs-tbl-genes).
     tables = re.findall(r'<table\b[^>]*class="obs-stats-tbl[^"]*"', genes_html)
-    assert len(tables) == 2, (
-        f"Expected exactly 2 obs-stats-tbl tables in Genes panel "
-        f"(search-results + merged), found {len(tables)}"
+    assert len(tables) == 1, (
+        f"Expected exactly 1 obs-stats-tbl table in the Genes panel "
+        f"(everything filters in place); found {len(tables)}"
     )
-    # The merged table must have id="obs-tbl-genes".
     assert 'id="obs-tbl-genes"' in genes_html, "#obs-tbl-genes must be present"
-    # The search table is hidden.
-    assert 'id="obs-tbl-gene-results"' in genes_html, "#obs-tbl-gene-results must be present"
-    # There must be NO separate "Most variable genes" heading in the panel
-    # (the two sections are merged into one table now).
+    assert 'id="obs-tbl-gene-results"' not in genes_html, \
+        "there must be no separate search-results table"
     assert "Most variable genes" not in genes_html, (
         "Separate 'Most variable genes' heading must not appear in Genes panel"
     )
@@ -4114,39 +4119,38 @@ def test_genes_tab_topvar_rows_have_no_star(client):
 
 
 def test_genes_tab_search_still_works(client):
-    """The gene search input and server-side search JS are still present after the merge."""
+    """The gene search input and search JS are still present after the
+    2026-08-25 in-place filter refactor."""
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
     html = resp.text
     assert 'id="gene-search"' in html, "gene-search input must remain present"
-    assert 'id="gene-search-results"' in html, "gene-search-results section must remain"
     assert "applyGeneSearch" in html, "applyGeneSearch JS must remain"
-    # The search table and the merged genes table are both present.
-    assert 'id="obs-tbl-gene-results"' in html, "search results table must exist"
     assert 'id="obs-tbl-genes"' in html, "merged genes table must exist"
+    # No separate search-results table any more.
+    assert 'id="gene-search-results"' not in html, "search-results section is gone"
+    assert 'id="obs-tbl-gene-results"' not in html, "search-results table is gone"
 
 
 # ── Genes tab — uniform columns (star / gene / %expr / rank / variability) ───
 
 def test_genes_tab_uniform_column_headers(client):
-    """Both #obs-tbl-genes and #obs-tbl-gene-results have identical column headers:
-    star / gene / plot / % expr / rank expr / variability.  No mean or mean(nz)."""
-    import re
+    """#obs-tbl-genes has the standard column headers: star / gene / plot /
+    % expr / rank expr / variability. No mean or mean(nz). The separate
+    search-results table is gone."""
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
     html = resp.text
-    for tbl_id in ('obs-tbl-genes', 'obs-tbl-gene-results'):
-        tbl_start = html.find(f'id="{tbl_id}"')
-        assert tbl_start != -1, f"#{tbl_id} not found"
-        thead_end = html.find('</thead>', tbl_start)
-        thead = html[tbl_start:thead_end]
-        assert '% expr'     in thead or 'pct'  in thead.lower(), \
-            f"#{tbl_id} thead missing % expr column"
-        assert 'rank expr'  in thead, f"#{tbl_id} thead missing 'rank expr' column"
-        assert 'variability' in thead, f"#{tbl_id} thead missing 'variability' column"
-        # No raw mean or mean(nz) column headers.
-        assert '>mean<' not in thead and '>mean(nz)<' not in thead, \
-            f"#{tbl_id} thead must not contain raw mean or mean(nz) column"
+    tbl_start = html.find('id="obs-tbl-genes"')
+    assert tbl_start != -1, "#obs-tbl-genes not found"
+    thead_end = html.find('</thead>', tbl_start)
+    thead = html[tbl_start:thead_end]
+    assert '% expr'     in thead or 'pct'  in thead.lower(), \
+        "#obs-tbl-genes thead missing % expr column"
+    assert 'rank expr'  in thead, "#obs-tbl-genes thead missing 'rank expr' column"
+    assert 'variability' in thead, "#obs-tbl-genes thead missing 'variability' column"
+    assert '>mean<' not in thead and '>mean(nz)<' not in thead, \
+        "#obs-tbl-genes thead must not contain raw mean or mean(nz) column"
 
 
 def test_genes_tab_no_mean_columns_visible(client):
