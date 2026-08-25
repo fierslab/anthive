@@ -1096,7 +1096,33 @@ URL hash scheme (feature: back-button / shareable filter state):
         stateEl.style.display = 'none';
         render();
       })
-      .catch(function (e) { stateEl.textContent = 'could not load — ' + e.message; });
+      .catch(function (e) {
+        // Surface the failure inline. Without this the panel silently keeps
+        // its "loading…" state (visible when the outer tab-loading spinner
+        // is dismissed).
+        stateEl.style.display = '';
+        stateEl.textContent = 'could not load module-variability (' + (e && e.message ? e.message : 'network error') + ')';
+        bodyEl.style.display = 'none';
+      })
+      .then(function () {
+        // Always dismiss the outer tab-loading spinner. Runs on both success
+        // and failure so a 401 or 500 doesn't leave the tab spinning forever.
+        // The controller lives in dataset.html and is installed inside its
+        // DOMContentLoaded handler; this script runs during parsing so the
+        // controller may not exist yet. Retry once on DOMContentLoaded when
+        // that happens.
+        function dismiss() {
+          if (window.antTabLoading) { window.antTabLoading.done('modules'); return true; }
+          return false;
+        }
+        if (!dismiss()) {
+          document.addEventListener('DOMContentLoaded', function once() {
+            document.removeEventListener('DOMContentLoaded', once);
+            // Give the controller a microtask to install itself.
+            setTimeout(dismiss, 0);
+          });
+        }
+      });
   }
 
   // Single-select filters fire onChange directly. (method removed 2026-08-23.)
