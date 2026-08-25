@@ -9,15 +9,15 @@
 # ///
 """ant-score-astrocyte-fleet — batch-score every astrocyte dataset with the
 three astrocyte-state catalogs (Habib 2020 DAA, Sadick 2022 subtypes,
-Liddelow 2017 A1/A2 cassettes) via scanpy (ant-score-ext) and AUCell
-(ant-aucell). No starCAT — no astrocyte catalog exists there.
+Liddelow 2017 A1/A2 cassettes) via scanpy (ant-score-ext) and UCell or AUCell
+(ant-ucell / ant-aucell). No starCAT — no astrocyte catalog exists there.
 
 Discovers datasets via lib.mus (cell_type contains 'astrocyte'). Human-only
 by default (all current astrocyte catalogs are human ortholog-mapped).
 
 For each dataset it:
   1. Ensures __gene_bins exists on the duckdb (needed by scanpy scorer).
-  2. For each catalog in --catalogs, runs scanpy + AUCell (independently
+  2. For each catalog in --catalogs, runs scanpy + module scorer (independently
      skippable per --skip-*), unless already present in the sidecar and
      --overwrite is not set.
 
@@ -27,7 +27,7 @@ Usage:
   ant-score-astrocyte-fleet [--only D1,D2,...] [--skip D1,D2,...]
                              [--catalogs C1,C2,...] [--overwrite]
                              [--skip-scanpy] [--skip-aucell]
-                             [--dry-run]
+                             [--method {aucell,ucell}] [--dry-run]
 """
 from __future__ import annotations
 
@@ -159,20 +159,31 @@ def run_score_ext(db_id: str, catalog: str) -> bool:
     return True
 
 
-def run_aucell(db_id: str, catalog: str, overwrite: bool) -> bool:
-    _log(f"  · ant-aucell {db_id} {catalog}")
-    cmd = [str(ANT), 'aucell', db_id, catalog]
+def run_module_scorer(db_id: str, catalog: str, overwrite: bool, method: str) -> bool:
+    """Invoke ``ant <method> <db_id> <catalog>`` and log its output.
+
+    Args:
+        db_id: dataset identifier.
+        catalog: geneset catalog id.
+        overwrite: if True, pass --overwrite to the scorer CLI.
+        method: 'ucell' or 'aucell' — selects which ant subcommand to run.
+
+    Returns True on exit-code 0.
+    """
+    _log(f"  · ant-{method} {db_id} {catalog}")
+    cmd = [str(ANT), method, db_id, catalog]
     if overwrite:
         cmd.append('--overwrite')
     result = subprocess.run(cmd, capture_output=True, text=True)
     _log(result.stdout)
     if result.returncode != 0:
-        _log(f"  x aucell failed ({catalog}): {result.stderr.strip()[-500:]}")
+        _log(f"  x {method} failed ({catalog}): {result.stderr.strip()[-500:]}")
         return False
     return True
 
 
 def parse_args() -> argparse.Namespace:
+    """Command-line parser for the astrocyte fleet driver."""
     parser = argparse.ArgumentParser(prog='ant-score-astrocyte-fleet')
     parser.add_argument('--only', default=None, help='comma-separated db_ids')
     parser.add_argument('--skip', default=None, help='comma-separated db_ids')
@@ -182,7 +193,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument('--overwrite', action='store_true')
     parser.add_argument('--skip-scanpy', action='store_true')
-    parser.add_argument('--skip-aucell', action='store_true')
+    parser.add_argument('--skip-aucell', action='store_true',
+                        help='skip the module scorer (applies to whichever --method is selected)')
+    parser.add_argument(
+        '--method', default='ucell', choices=['aucell', 'ucell'],
+        help='module scoring method: ucell (default) or aucell',
+    )
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--h5adstore-root', default='data/h5adstore')
     return parser.parse_args()
@@ -194,24 +210,32 @@ def _plan_methods(
     catalogs: List[str],
     args: argparse.Namespace,
 ) -> Tuple[List[str], List[str]]:
+    """Compute which catalogs still need scanpy vs. the module scorer for this dataset.
+
+    Uses args.method to determine which source column to check for existing scores.
+
+    Returns (scanpy_catalogs, module_scorer_catalogs).
+    """
     already_geneset = set() if args.overwrite else scored_catalogs(duckdb_path, 'geneset')
-    already_aucell = set() if args.overwrite else scored_catalogs(duckdb_path, 'aucell')
+    already_module = set() if args.overwrite else scored_catalogs(duckdb_path, args.method)
 
     scanpy_catalogs = [] if args.skip_scanpy else [
         cat for cat in catalogs if cat not in already_geneset
     ]
-    aucell_catalogs = [] if args.skip_aucell else [
-        cat for cat in catalogs if cat not in already_aucell
+    module_catalogs = [] if args.skip_aucell else [
+        cat for cat in catalogs if cat not in already_module
     ]
-    return scanpy_catalogs, aucell_catalogs
+    return scanpy_catalogs, module_catalogs
 
 
 def main() -> int:
+    """Drive the astrocyte scoring fleet across the h5adstore."""
     args = parse_args()
 
     root = Path(args.h5adstore_root).resolve()
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
+    method = args.method
     catalogs = (
         [c.strip() for c in args.catalogs.split(',') if c.strip()]
         if args.catalogs else list(DEFAULT_CATALOGS)
@@ -229,7 +253,7 @@ def main() -> int:
     _log(f"[astro-fleet] {len(datasets)} astrocyte datasets found "
          f"({n_human} human) — log at {LOG_PATH}")
     _log(f"[astro-fleet] catalogs ({len(catalogs)}): {', '.join(catalogs)}")
-    _log(f"[astro-fleet] overwrite={args.overwrite}  "
+    _log(f"[astro-fleet] method={method}  overwrite={args.overwrite}  "
          f"skip_scanpy={args.skip_scanpy}  skip_aucell={args.skip_aucell}")
 
     stats = {
@@ -240,14 +264,14 @@ def main() -> int:
         'scanpy_failed': 0,
         'scanpy_skipped_nonhuman': 0,
         'scanpy_skipped_existing': 0,
-        'aucell_ok': 0,
-        'aucell_failed': 0,
-        'aucell_skipped_nonhuman': 0,
-        'aucell_skipped_existing': 0,
+        f'{method}_ok': 0,
+        f'{method}_failed': 0,
+        f'{method}_skipped_nonhuman': 0,
+        f'{method}_skipped_existing': 0,
     }
 
     planned_scanpy_runs = 0
-    planned_aucell_runs = 0
+    planned_module_runs = 0
 
     for i, (db_id, h5ad_path, duckdb_path, is_human) in enumerate(datasets, 1):
         _log(f"\n[{i:>3}/{len(datasets)}] {db_id}  (human={is_human})")
@@ -255,23 +279,23 @@ def main() -> int:
         if not is_human:
             _log(f"  · skip all scorers (non-human)")
             stats['scanpy_skipped_nonhuman'] += 1
-            stats['aucell_skipped_nonhuman'] += 1
+            stats[f'{method}_skipped_nonhuman'] += 1
             continue
 
-        scanpy_catalogs, aucell_catalogs = _plan_methods(
+        scanpy_catalogs, module_catalogs = _plan_methods(
             db_id, duckdb_path, catalogs, args,
         )
         skipped_scanpy = len(catalogs) - len(scanpy_catalogs) \
             if not args.skip_scanpy else 0
-        skipped_aucell = len(catalogs) - len(aucell_catalogs) \
+        skipped_module = len(catalogs) - len(module_catalogs) \
             if not args.skip_aucell else 0
         stats['scanpy_skipped_existing'] += skipped_scanpy
-        stats['aucell_skipped_existing'] += skipped_aucell
+        stats[f'{method}_skipped_existing'] += skipped_module
 
         planned_scanpy_runs += len(scanpy_catalogs)
-        planned_aucell_runs += len(aucell_catalogs)
+        planned_module_runs += len(module_catalogs)
 
-        _log(f"  plan: scanpy={len(scanpy_catalogs)}  aucell={len(aucell_catalogs)}")
+        _log(f"  plan: scanpy={len(scanpy_catalogs)}  {method}={len(module_catalogs)}")
 
         if args.dry_run:
             continue
@@ -291,15 +315,15 @@ def main() -> int:
             else:
                 stats['scanpy_failed'] += 1
 
-        for catalog in aucell_catalogs:
-            if run_aucell(db_id, catalog, args.overwrite):
-                stats['aucell_ok'] += 1
+        for catalog in module_catalogs:
+            if run_module_scorer(db_id, catalog, args.overwrite, method):
+                stats[f'{method}_ok'] += 1
             else:
-                stats['aucell_failed'] += 1
+                stats[f'{method}_failed'] += 1
 
     _log(f"\n===== ASTRO-FLEET SUMMARY =====")
     _log(f"  planned scanpy runs (this invocation): {planned_scanpy_runs}")
-    _log(f"  planned aucell runs (this invocation): {planned_aucell_runs}")
+    _log(f"  planned {method} runs (this invocation): {planned_module_runs}")
     for key, val in stats.items():
         _log(f"  {key:32s}  {val}")
     _log(f"log: {LOG_PATH}")
