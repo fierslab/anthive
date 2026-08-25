@@ -4057,53 +4057,57 @@ def test_genes_tab_single_table(client):
 
 
 def test_genes_tab_curated_rows_have_star(client):
-    """Each server-rendered curated gene row must contain a ★ marker."""
+    """Each server-rendered curated gene row must carry the ◆ dataset-favourite
+    glyph (a personal favourite ♥ is added by client-side JS, so we don't
+    assert on it here)."""
     import re
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
     html = resp.text
-    # All gene-curated rows should contain the star glyph.
     curated_rows = re.findall(
         r'<tr class="gene-item gene-curated"[^>]*>.*?</tr>', html, re.DOTALL
     )
     assert len(curated_rows) > 0, "gene-curated rows not found (ds1 has top_genes)"
     for row in curated_rows:
-        assert '★' in row, f"Curated gene row missing ★ marker: {row[:120]}"
+        assert '&#9670;' in row or '◆' in row, \
+            f"Curated gene row missing ◆ glyph: {row[:160]}"
 
 
 def test_genes_tab_star_column_header(client):
-    """The merged genes table has a ★ column header (narrow, titled)."""
+    """The merged genes table has a sort-flag column header (labelled ★, but
+    the tooltip explains ◆ vs ♥)."""
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
     html = resp.text
-    # The thead of #obs-tbl-genes must have a ★ column header.
     tbl_start = html.find('id="obs-tbl-genes"')
     assert tbl_start != -1
     thead_end = html.find('</thead>', tbl_start)
     thead = html[tbl_start:thead_end]
-    assert '★' in thead, "★ column header must appear in #obs-tbl-genes <thead>"
+    assert '★' in thead, "★ flag-column header must appear in #obs-tbl-genes <thead>"
 
 
 def test_genes_tab_star_hover_title(client):
-    """The ★ in curated rows has a title= attribute so readers learn what it means."""
+    """The flag-column header's tooltip mentions both ◆ (dataset favourite)
+    and ♥ (personal favourite)."""
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
     html = resp.text
-    # The curated star glyph must carry a title attribute.
-    assert 'title="curated favourite"' in html, (
-        'Star cell must have title="curated favourite" hover text'
-    )
+    assert 'dataset favourite' in html, \
+        "flag-column header tooltip must call out the dataset favourite"
+    assert 'personal favourite' in html, \
+        "flag-column header tooltip must call out the personal favourite"
 
 
 def test_genes_tab_topvar_rows_have_no_star(client):
-    """The JS-generated topvar row calls makeGeneRow with empty star argument."""
+    """Top-var rows carry a ♥ only when the gene is ALSO a personal favourite;
+    otherwise the flag cell is empty. The renderTopVar branch computes this
+    per-row (isFav ? _HEART_HTML : '')."""
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
     html = resp.text
-    # makeGeneRow is the unified row builder; topvar calls it with '' as starHtml.
-    # Check the topvar build call passes empty string for the star argument.
-    assert "makeGeneRow(x.gene, x, '', " in html, \
-        "topvar makeGeneRow call must pass empty string '' for the star column"
+    # renderTopVar passes an isFav-derived flag string, not a literal ★.
+    assert "isFav ? _HEART_HTML : ''" in html, \
+        "renderTopVar must decide the flag per-row (personal favourite check)"
     # The topvar call must NOT pass a literal '★'.
     assert "makeGeneRow(x.gene, x, '★'" not in html, \
         "topvar makeGeneRow call must not emit a ★ glyph"

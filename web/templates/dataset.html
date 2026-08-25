@@ -495,6 +495,12 @@
     #gene-search { padding: 3px 7px; font-family: inherit; font-size: 12px;
       border: 1px solid #ccc; border-radius: 4px; outline: none; width: 200px; }
     #gene-search-count { font-size: 11px; color: var(--text-muted); }
+    /* Row-flag glyphs in the first column. Curator's ◆ is the dataset's
+       top_genes; ♥ is the user's per-browser favourite list. Distinct so a
+       row that is BOTH can carry both marks side by side. */
+    .g-flag-cell { line-height: 1; }
+    .g-flag-curated { color: #0f766e; margin-right: 2px; }
+    .g-flag-personal { color: #c2410c; }
   </style>
   <h2>Genes
     <span class="info" title="Click ▬ for a histogram of the gene's expression, or ◉ for an embedding scatter coloured by the gene. Sparklines show the gene's value relative to the db-wide range for that stat. Panel source: precomputed dataset favourites, or a canonical curated panel keyed on cell type (microglia / astrocyte / neuron).">ⓘ</span></h2>
@@ -534,19 +540,19 @@
      rows into the same tbody and applySortToTable mixes them with curated. #}
   <div class="table-wrap"><table class="obs-stats-tbl auto" id="obs-tbl-genes">
     <thead><tr>
-      <th data-sortcol="star" title="★ = curated favourite; click to sort" style="width:1.2em;text-align:center">★</th>
+      <th data-sortcol="star" title="◆ dataset favourite (from the collection's top_genes) · ♥ your personal favourite (set on /settings). Click to sort." style="width:2.2em;text-align:center">★</th>
       <th data-sortcol="gene">gene</th>
       <th class="obs-plots-th">plot</th>
       <th data-sortcol="pct" title="fraction of cells with expression > 0; click to sort">% expr</th>
       <th data-sortcol="rank" title="percentile rank of this gene's mean expression among all genes in the dataset (0 = lowest, 1 = highest); click to sort">rank expr</th>
-      <th data-sortcol="var" class="g-sort-desc" title="variability: std across cells — higher = more variable; click to sort">variability</th>
+      <th data-sortcol="var" class="g-sort-desc" title="variability: std across cells, higher = more variable; click to sort">variability</th>
     </tr></thead>
     <tbody>
     {% if gene_panel and gene_panel.genes %}
     {% for gene in gene_panel.genes %}
     {% set _b = '/browse/' ~ folder_browse_id ~ '/' ~ file_id %}
     <tr class="gene-item gene-curated" data-gene="{{ gene }}" data-gene-lc="{{ gene|lower }}" data-pct="" data-rank="" data-var="">
-      <td style="text-align:center;font-size:13px"><span title="curated favourite">★</span></td>
+      <td class="g-flag-cell" style="text-align:center;font-size:13px;white-space:nowrap"><span class="g-flag-curated" title="dataset favourite (from this collection's top_genes)">&#9670;</span></td>
       <td class="colname">{{ gene }}</td>
       <td class="obs-plots">
         {% if has_duckdb %}
@@ -1320,15 +1326,21 @@ document.addEventListener('DOMContentLoaded', function() {
             if (!tabGenes) return;  // no Genes tab on this page
 
             // ── User's favourite genes (from /settings, localStorage) ────────
-            // Injected at the top of the curated table as star-marked rows.
-            // Skipped when already present in the server-rendered curated panel
-            // (case-insensitive symbol match).
+            // Two flags live on gene rows now, independently:
+            //   .gene-curated    → dataset favourite (in the collection's top_genes)
+            //                      Marked with a ◆ (.g-flag-curated).
+            //   .gene-favourite  → this user's personal favourite from /settings
+            //                      Marked with a ♥ (.g-flag-personal).
+            // A single row can carry both, in which case both glyphs render side
+            // by side in the flag cell. Personal favourites that aren't already
+            // in the server-rendered curated panel get a fresh row inserted at
+            // the top; ones that ARE already curated get a ♥ appended in place.
             var _favGenes = (window.antSettings && window.antSettings.favouriteGenes()) || [];
             if (_favGenes.length) {
                 var _existingCurated = {};
                 document.querySelectorAll('#tab-genes .gene-curated').forEach(function (row) {
                     var g = (row.dataset.gene || '').toUpperCase();
-                    if (g) _existingCurated[g] = 1;
+                    if (g) _existingCurated[g] = row;
                 });
                 var _favBase = '/browse/' + {{ folder_browse_id | tojson }} + '/' + {{ file_id | tojson }};
                 var _favDefEmb = {{ default_embedding | tojson }};
@@ -1337,10 +1349,26 @@ document.addEventListener('DOMContentLoaded', function() {
                 var _favInsertAnchor = _favTbody ? _favTbody.firstElementChild : null;
                 _favGenes.forEach(function (gene) {
                     var _g = gene.toUpperCase();
-                    if (_existingCurated[_g]) return;  // already curated → don't duplicate
+                    if (_existingCurated[_g]) {
+                        // Row is BOTH a dataset favourite and a personal favourite.
+                        // Append the ♥ inside the existing flag cell so both glyphs show.
+                        var _existRow = _existingCurated[_g];
+                        _existRow.classList.add('gene-favourite');
+                        var _flagCell = _existRow.querySelector('.g-flag-cell');
+                        if (_flagCell && !_flagCell.querySelector('.g-flag-personal')) {
+                            var _heart = document.createElement('span');
+                            _heart.className = 'g-flag-personal';
+                            _heart.title = 'your personal favourite (set on /settings)';
+                            _heart.innerHTML = '&#9829;';
+                            _flagCell.appendChild(_heart);
+                        }
+                        return;
+                    }
                     if (!_favTbody) return;
                     var _row = document.createElement('tr');
-                    _row.className = 'gene-item gene-curated gene-favourite';
+                    // Personal-favourite-only row: NOT in the dataset's curated
+                    // panel. Marked ♥ only, no ◆. Class list omits gene-curated.
+                    _row.className = 'gene-item gene-favourite';
                     _row.dataset.gene   = _g;
                     _row.dataset.geneLc = _g.toLowerCase();
                     _row.dataset.pct    = '';
@@ -1365,7 +1393,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         }
                     }
                     _row.innerHTML =
-                          '<td style="text-align:center;font-size:13px"><span title="your favourite (set in /settings)">★</span></td>'
+                          '<td class="g-flag-cell" style="text-align:center;font-size:13px;white-space:nowrap"><span class="g-flag-personal" title="your personal favourite (set on /settings)">&#9829;</span></td>'
                         + '<td class="colname">' + _g + '</td>'
                         + '<td class="obs-plots">' + _plotCell + '</td>'
                         + '<td class="g-pct-cell"><span class="g-pct"></span><span class="ss" data-stat="pct" title="% expressing cells"><span class="ss-mark" style="display:none"></span></span></td>'
@@ -1407,8 +1435,10 @@ document.addEventListener('DOMContentLoaded', function() {
             }
 
             // Build a gene result row HTML (for both search results, top-var, and curated).
-            // Uniform columns: ★ | gene | plot | % expr | rank expr | variability
-            // starHtml: pass '★' for curated, '' for others.
+            // Uniform columns: flag | gene | plot | % expr | rank expr | variability
+            // starHtml: raw HTML for the flag cell content. Empty for
+            // non-curated non-favourite rows; a ♥ span if the gene is a personal
+            // favourite; renderTopVar/runGeneSearch decide what to pass.
             // stdRankFrac: 0-1 fraction for variability sparkline (null if unknown).
             function makeGeneRow(geneName, s, starHtml, stdRankFrac) {
                 var plotHtml = ''
@@ -1438,7 +1468,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 var dataRank = s && s.rank_mean   != null  ? ' data-rank="' + s.rank_mean   + '"' : ' data-rank=""';
                 var dataVar  = s && s.std         != null  ? ' data-var="'  + s.std         + '"' : ' data-var=""';
                 var row = '<tr class="gene-item" data-gene="' + esc(geneName) + '" data-gene-lc="' + esc(geneName.toLowerCase()) + '"' + dataPct + dataRank + dataVar + '>'
-                    + '<td style="text-align:center;font-size:13px">' + (starHtml || '') + '</td>'
+                    + '<td class="g-flag-cell" style="text-align:center;font-size:13px;white-space:nowrap">' + (starHtml || '') + '</td>'
                     + '<td class="colname">' + esc(geneName) + '</td>'
                     + '<td class="obs-plots">' + plotHtml + '</td>'
                     + '<td class="g-pct-cell"><span class="g-pct">' + esc(pctStr) + '</span>' + pctSpark + '</td>'
@@ -1502,11 +1532,18 @@ document.addEventListener('DOMContentLoaded', function() {
 
             if (searchCount) searchCount.textContent = rows.length + ' genes';
 
+            // Personal-favourite set for cross-checking top-var / search hits.
+            // Lower-cased for case-insensitive match. Empty when the user has
+            // no favourites set.
+            var _favSet = {};
+            _favGenes.forEach(function (g) { _favSet[String(g).toLowerCase()] = 1; });
+            var _HEART_HTML = '<span class="g-flag-personal" title="your personal favourite (set on /settings)">&#9829;</span>';
+
             // Append the given top-var stats into the SAME tbody as curated rows
             // (statsArr is already sorted by std desc). Curated rows are marked
-            // with class="gene-curated" + a ★; top-var rows get no star. After
-            // insertion the sort function mixes both by whatever column is
-            // active (default: variability desc).
+            // .gene-curated with a ◆; top-var rows get no ◆, but a ♥ if the
+            // gene is also a personal favourite. The sort function then mixes
+            // both by whatever column is active (default: variability desc).
             function renderTopVar(statsArr) {
                 var mainTbody = document.querySelector('#obs-tbl-genes tbody');
                 if (!mainTbody || !statsArr.length) return;
@@ -1517,11 +1554,16 @@ document.addEventListener('DOMContentLoaded', function() {
                 // curated rows already in place.
                 var frag = document.createElement('tbody');
                 frag.innerHTML = topVar.map(function (x) {
-                    return makeGeneRow(x.gene, x, '', tvStdRankMap[x.gene.toLowerCase()]);
+                    var isFav = _favSet[x.gene.toLowerCase()];
+                    return makeGeneRow(x.gene, x, isFav ? _HEART_HTML : '', tvStdRankMap[x.gene.toLowerCase()]);
                 }).join('');
                 var tvByGene = {};
                 topVar.forEach(function (x) { tvByGene[x.gene.toLowerCase()] = x; });
                 Array.from(frag.querySelectorAll('.gene-item')).forEach(function (tvRow) {
+                    // Tag the class list so the sort's "star" comparator sees it.
+                    if (_favSet[(tvRow.dataset.gene || '').toLowerCase()]) {
+                        tvRow.classList.add('gene-favourite');
+                    }
                     mainTbody.appendChild(tvRow);
                     var s = tvByGene[(tvRow.dataset.gene || '').toLowerCase()];
                     if (!s) return;
@@ -1670,7 +1712,17 @@ document.addEventListener('DOMContentLoaded', function() {
                     else if (col === 'rank') { av = numVal(a, 'rank'); bv = numVal(b, 'rank'); }
                     else if (col === 'var')  { av = numVal(a, 'var');  bv = numVal(b, 'var');  }
                     else if (col === 'gene') { return mul * (a.dataset.gene || '').localeCompare(b.dataset.gene || ''); }
-                    else if (col === 'star') { return mul * ((b.classList.contains('gene-curated') ? 1 : 0) - (a.classList.contains('gene-curated') ? 1 : 0)); }
+                    else if (col === 'star') {
+                        // Sort by "how many flags this row carries" — personal
+                        // favourite + dataset favourite each count as 1.
+                        // Descending puts double-flagged rows first, then
+                        // singly-flagged, then unmarked.
+                        function flagCount(r) {
+                            return (r.classList.contains('gene-curated') ? 1 : 0)
+                                 + (r.classList.contains('gene-favourite') ? 1 : 0);
+                        }
+                        return mul * (flagCount(b) - flagCount(a));
+                    }
                     else { return 0; }
                     // Numeric: null values sort last regardless of direction.
                     if (av == null && bv == null) return 0;
