@@ -340,13 +340,16 @@ def _expand_plot_thumbnails(html_text: Optional[str], default_db: Optional[str] 
     return _PLOT_IMG_RE.sub(_sub, html_text)
 
 
-# ── module-score column classification ───────────────────────────────────
+# Module-score column classification.
 #
 # Score sidecar columns show up in /info's numerical obs list under one of
-# three name conventions (see lib/anthive_db._score_col_name):
+# these name conventions (see lib/anthive_db._score_col_name):
 #   scanpy/geneset : "Sierksma2025::WGCNA::Brown_Lysosome"
 #   starcat        : "starcat__MICROGLIA_V1__DAM_pos"
-#   aucell         : "aucell__Sierksma2025/WGCNA__Brown_Lysosome"
+#   ucell          : "ucell__Sierksma2025/WGCNA__Brown_Lysosome"
+#   aucell         : "aucell__Sierksma2025/WGCNA__Brown_Lysosome"  (legacy,
+#                    folded into ucell on read since 2026-08-26 — the parquet
+#                    layer still tolerates it but the UI never surfaces it)
 #
 # _classify_score_column parses one column name; _group_module_scores
 # collapses a full list into a per-module structure exposing which methods
@@ -363,6 +366,9 @@ def _classify_score_column(col: str) -> Optional[Dict[str, str]]:
 
     ``catalog`` is the human-facing catalog id (``Sierksma2025/WGCNA`` or
     ``MICROGLIA_V1``); ``module`` is the module / program name.
+
+    Legacy ``aucell__`` columns are silently folded into the ``ucell`` method
+    so the UI only ever surfaces one rank-based method label.
     """
     if col.startswith(_STARCAT_PREFIX):
         rest = col[len(_STARCAT_PREFIX):]
@@ -381,7 +387,10 @@ def _classify_score_column(col: str) -> Optional[Dict[str, str]]:
         catalog, sep, module = rest.rpartition('__')
         if not sep or not catalog or not module:
             return None
-        return {'method': 'aucell', 'catalog': catalog, 'module': module}
+        # Legacy aucell rows fold into ucell for display. The raw column
+        # name is still what the caller uses to plot, so we keep it as-is
+        # if a consumer walks back to it, but the method label is ucell.
+        return {'method': 'ucell', 'catalog': catalog, 'module': module}
     # scanpy / geneset: "<study>::<experiment>::<module>"
     parts = col.split('::')
     if len(parts) == 3 and all(p for p in parts):
@@ -398,10 +407,10 @@ def _group_module_scores(numerical_cols: List[str]) -> Dict[str, Any]:
 
     Returns a dict with:
       - ``modules``: list of {catalog, module, key, methods}. ``methods`` maps
-        one of ``scanpy|starcat|aucell`` → the actual obs-column name.
+        one of ``scanpy|starcat|ucell`` to the actual obs-column name.
       - ``non_score_cols``: list of column names that are NOT module scores
-        (native numerical obs — n_counts, pseudotime, …).
-      - ``method_counts``: {method → int} number of modules scored by that method.
+        (native numerical obs, n_counts, pseudotime, and so on).
+      - ``method_counts``: {method: int} number of modules scored by that method.
     """
     by_key: Dict[tuple, Dict[str, Any]] = {}
     non_score: List[str] = []
@@ -425,7 +434,6 @@ def _group_module_scores(numerical_cols: List[str]) -> Dict[str, Any]:
         'scanpy':  sum(1 for m in modules if 'scanpy'  in m['methods']),
         'starcat': sum(1 for m in modules if 'starcat' in m['methods']),
         'ucell':   sum(1 for m in modules if 'ucell'   in m['methods']),
-        'aucell':  sum(1 for m in modules if 'aucell'  in m['methods']),
     }
     return {
         'modules':        modules,
@@ -2228,7 +2236,7 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         default_embedding = None
 
     # Split numerical obs columns into module-score triples (grouped by
-    # (catalog, module) so scanpy/starcat/aucell for the same module collapse
+    # (catalog, module) so scanpy/starcat/ucell for the same module collapse
     # to one row with per-method chips) vs everything else.
     score_grouped = _group_module_scores(obs.get('numerical', []) or [])
     module_scores = score_grouped['modules']

@@ -243,9 +243,11 @@ URL hash scheme (feature: back-button / shareable filter state):
       </select>
     </div>
     {% endif %}
-    {# Method widget removed 2026-08-23 — only scanpy rows are shown (AUCell
-       hidden client-side alongside starcat), so a filter with a single real
-       option was pure noise. Flip the filter in load() to restore. #}
+    {# Method widget removed 2026-08-23. Only scanpy rows show by default,
+       with UCell as the alternative rank-based method. Legacy AUCell rows
+       fold into UCell client-side; starcat rows stay hidden. A filter with
+       a single real option was pure noise, so the widget is gone. Flip the
+       filter in load() to restore. #}
   </div>
   <div class="mv-summary-row"><span class="mv-summary"></span></div>
   <div class="mv-cap-badge" role="status" aria-live="polite"></div>
@@ -361,7 +363,7 @@ URL hash scheme (feature: back-button / shareable filter state):
     + '</svg>';
 
   var NUMERICAL_TAGS = { braak: 1, age: 1, pmi: 1 };
-  var METHOD_LABEL = { geneset: 'scanpy', ucell: 'UCell', aucell: 'AUCell' };
+  var METHOD_LABEL = { geneset: 'scanpy', ucell: 'UCell' };
 
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
 
@@ -388,7 +390,6 @@ URL hash scheme (feature: back-button / shareable filter state):
   function scoreColFor(row) {
     if (row.source === 'geneset') return String(row.catalog).replace('/', '::') + '::' + row.module;
     if (row.source === 'ucell')   return 'ucell__'  + row.catalog + '__' + row.module;
-    if (row.source === 'aucell')  return 'aucell__' + row.catalog + '__' + row.module;
     return null;
   }
   function baseUrl(row) {
@@ -703,8 +704,9 @@ URL hash scheme (feature: back-button / shareable filter state):
       }
     }
     // Apply single-select values immediately (options are static HTML).
-    // NB: parsed.method from a legacy URL is silently ignored — the method
-    // widget is gone (2026-08-23) and aucell rows are dropped in load().
+    // NB: parsed.method from a legacy URL is silently ignored. The method
+    // widget is gone (2026-08-23) and legacy aucell rows fold into ucell
+    // in load() so nothing is dropped from the module list.
     if (parsed.n_cells && flt.n_cells) flt.n_cells.value = parsed.n_cells;
   }
 
@@ -1024,11 +1026,12 @@ URL hash scheme (feature: back-button / shareable filter state):
       .then(function (d) {
         // starCAT rows are always hidden client-side (starcat 2026-08).
         // scanpy (source='geneset') vs UCell (source='ucell') is driven by
-        // the user's module-algorithm preference — /settings sets it, default
+        // the user's module-algorithm preference. /settings sets it, default
         // 'geneset' (scanpy) matches the site-wide 2026-08-23 default. The
         // URL hash `#alg=` (scanpy|ucell|both) wins over the stored preference
         // for the current page load; `both` shows scanpy and ucell side-by-side.
         // Legacy stored 'aucell' is coerced to 'ucell' at the antSettings layer.
+        // Legacy parquet rows tagged source='aucell' fold into ucell here.
         var _hashAlg = (function () {
           var m = (window.location.hash || '').match(/(?:^#|[&#])alg=([^&]+)/);
           return m ? decodeURIComponent(m[1]) : null;

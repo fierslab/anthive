@@ -252,18 +252,17 @@
   .caveats-card.caveat-high   { border-left-color: #b91c1c; background: #fef2f2; }
   .caveats-card.caveat-high   .cv-chip.lvl { background: #fee2e2; color: #991b1b; border-color: #fecaca; }
 
-  /* Module-score tab — per-method chips + legend swatches.
-     Monochrome-adjacent palette matching the site look (see web/CLAUDE.md):
-     three subdued hues so the eye can distinguish the three methods without
-     overwhelming the table. Absent methods render as a dim em-dash. */
+  /* Module-score tab per-method chips plus legend swatches.
+     Monochrome-adjacent palette matching the site look (see web/CLAUDE.md).
+     Absent methods render as a dim em-dash. */
   .mod-chip {
     display: inline-block; padding: 1px 8px; border-radius: 10px;
     font-size: 11px; font-family: var(--font); line-height: 1.5;
     background: #f3f4f6; color: #374151; border: 1px solid #e5e7eb;
     text-decoration: none; letter-spacing: .1px;
   }
-  /* Per-method colours dropped — each chip's inner text ("scanpy" /
-     "starCAT" / "AUCell") already identifies the method. */
+  /* Per-method colours dropped. Each chip's inner text ("scanpy" /
+     "starCAT" / "UCell") already identifies the method. */
   .mod-chip:hover { filter: brightness(.96); text-decoration: none; }
   .mod-chip.absent { color: #c8cdd3; background: transparent; border-color: transparent; cursor: default; padding: 1px 4px; }
 
@@ -273,7 +272,7 @@
   }
   .mod-swatch.scanpy  { background: #94a3b8; }
   .mod-swatch.starcat { background: #a58c6c; border-color: #d6c8b6; }
-  .mod-swatch.aucell  { background: #6d9c7d; border-color: #b8d4be; }
+  .mod-swatch.ucell   { background: #6d9c7d; border-color: #b8d4be; }
 
   .mod-legend-item {
     cursor: pointer; user-select: none; padding: 1px 6px;
@@ -658,16 +657,16 @@
   </div>
 </section>
 
-{# ── Module scores tab ────────────────────────────────────────────────
-   One row per (catalog, module); columns are the three scoring methods
-   (scanpy / starcat / aucell). The score parquet sidecar exposes each
+{# Module scores tab.
+   One row per (catalog, module); columns are the scoring methods
+   (scanpy / starcat / ucell). The score parquet sidecar exposes each
    method as a virtual obs column (see lib/anthive_db._score_col_name):
-     scanpy  → "<study>::<experiment>::<module>"
-     starcat → "starcat__<catalog>__<program>"
-     aucell  → "aucell__<catalog>__<module>"
-   Method chip = link to a histogram plot on that column. Datasets with
-   no aucell rows in the parquet get a blank cell — the option greys out
-   only when zero modules have aucell data. #}
+     scanpy  -> "<study>::<experiment>::<module>"
+     starcat -> "starcat__<catalog>__<program>"
+     ucell   -> "ucell__<catalog>__<module>"
+   Legacy "aucell__..." columns fold into the ucell method server-side.
+   A method chip links to a histogram plot on that column. Datasets with
+   no rows for a given method get a blank cell. #}
 {% if n_module_scores %}
 <section class="tab-panel" id="tab-modules" role="tabpanel">
   <h2>Geneset scores
@@ -1137,10 +1136,10 @@ document.addEventListener('DOMContentLoaded', function() {
         });
 
         // Module-scores tab: text filter + method-legend toggles (multi-select).
-        // Clicking a legend badge (scanpy / starCAT / AUCell) restricts the table
+        // Clicking a legend badge (scanpy / starCAT / UCell) restricts the table
         // to modules that have at least one active method. Absent-on-this-dataset
-        // methods aren't clickable. Filter state is NOT persisted — each visit
-        // starts unfiltered so the whole picture is visible.
+        // methods aren't clickable. Filter state is NOT persisted, so each visit
+        // starts unfiltered and the whole picture is visible.
         (function () {
             var modTbl = document.getElementById('mod-tbl');
             if (!modTbl) return;
@@ -1148,17 +1147,17 @@ document.addEventListener('DOMContentLoaded', function() {
             var count = document.querySelector('.obs-count[data-target="modules"]');
             var rows = Array.from(modTbl.querySelectorAll('.mod-item'));
             var legendItems = Array.from(document.querySelectorAll('.mod-legend-item'));
-            var active = { scanpy: false, starcat: false, aucell: false };
+            var active = { scanpy: false, starcat: false, ucell: false };
             function update() {
                 var q = (input && input.value || '').toLowerCase();
-                var anyActive = active.scanpy || active.starcat || active.aucell;
+                var anyActive = active.scanpy || active.starcat || active.ucell;
                 var shown = 0;
                 rows.forEach(function (row) {
                     var textOk = !q || (row.dataset.name || '').indexOf(q) >= 0;
                     var methodOk = !anyActive
                         || (active.scanpy  && row.dataset.hasScanpy  === '1')
                         || (active.starcat && row.dataset.hasStarcat === '1')
-                        || (active.aucell  && row.dataset.hasAucell  === '1');
+                        || (active.ucell   && row.dataset.hasUcell   === '1');
                     var vis = textOk && methodOk;
                     row.style.display = vis ? '' : 'none';
                     if (vis) shown++;
@@ -1894,10 +1893,10 @@ document.addEventListener('DOMContentLoaded', function() {
             window._applyGeneSearch = applyGeneSearch;
         })();
 
-        // Modules tab — hydrate per-tag variability cells from
-        // /module-variability. Categorical tags use ω²; numerical use spearman ρ.
-        // Value comes from the "primary" method score present for the module
-        // (scanpy > aucell > starcat).
+        // Modules tab. Hydrate per-tag variability cells from
+        // /module-variability. Categorical tags use omega squared; numerical
+        // use spearman rho. Value comes from the primary method score present
+        // for the module (scanpy > ucell > starcat).
         (function () {
             var modRows = Array.from(document.querySelectorAll('#tab-modules tr.mod-item'));
             if (!modRows.length) return;
@@ -1905,7 +1904,7 @@ document.addEventListener('DOMContentLoaded', function() {
             var STAT_FOR_TAG = function (tag) {
                 return (tag in NUMERICAL_TAGS) ? 'spearman' : 'omega2';
             };
-            var METHOD_PRIORITY = ['geneset', 'aucell'];   // starCAT dropped from the UI
+            var METHOD_PRIORITY = ['geneset', 'ucell'];   // starCAT dropped from the UI
             // `min_abs=0` drops NaN rows server-side — without it the
             // endpoint 500s on JSON-serialising NaN in large responses.
             fetch('/api/module-variability?dataset=' + encodeURIComponent(DB_ID) + '&min_abs=0&limit=100000',
