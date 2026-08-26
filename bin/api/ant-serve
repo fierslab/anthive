@@ -11239,6 +11239,81 @@ async def list_genesets(
     }
 
 
+@app.get("/genesets/studies", tags=["genesets"])
+async def list_geneset_studies():
+    """List every study in the geneset store with the frontmatter of its
+    top-level ``index.md`` (title, doi, journal, year, authors).
+
+    This exists so the ``/genesets`` landing table can show provenance
+    per study without probing an experiment endpoint per row.  Studies
+    without an ``index.md`` are still returned, just with empty
+    metadata.
+
+    Registered BEFORE ``/genesets/{study}/{experiment}`` in file order
+    but ``/genesets/studies`` is single-segment after ``/genesets``, so
+    FastAPI matches this literal route before the two-segment
+    experiment route.  No ordering conflict.
+    """
+    registry = _require_geneset_registry()
+    # Assemble one row per study with the union of its experiments'
+    # organisms / celltypes so the client can render filters without a
+    # second call.  Body is omitted (kept for the individual study view
+    # if we add one).
+    per_study: Dict[str, Dict[str, Any]] = {}
+    for exp in registry.experiments.values():
+        row = per_study.setdefault(exp.study, {
+            'study': exp.study,
+            'organisms': set(),
+            'celltypes': set(),
+            'methods': set(),
+            'n_experiments': 0,
+            'n_genesets': 0,
+        })
+        row['n_experiments'] += 1
+        if exp.organism:
+            row['organisms'].add(exp.organism)
+        for cell in exp.celltypes:
+            row['celltypes'].add(cell)
+        if exp.method:
+            row['methods'].add(exp.method)
+    for geneset in registry.genesets.values():
+        row = per_study.get(geneset.experiment.study)
+        if row is not None:
+            row['n_genesets'] += 1
+
+    studies_out: List[Dict[str, Any]] = []
+    for study_name, row in sorted(per_study.items()):
+        study_info = registry.studies.get(study_name) or {}
+        meta = study_info.get('metadata') or {}
+        annotation = meta.get('annotation') or {}
+        year_raw = meta.get('year') or annotation.get('year')
+        year = None
+        if year_raw is not None:
+            try:
+                year = int(str(year_raw)[:4])
+            except (ValueError, TypeError):
+                year = None
+        authors = meta.get('authors') or annotation.get('authors') or []
+        if not isinstance(authors, list):
+            authors = [str(authors)]
+        studies_out.append({
+            'study': study_name,
+            'title': str(annotation.get('title') or meta.get('title') or ''),
+            'doi': str(annotation.get('doi') or meta.get('doi') or ''),
+            'pmid': str(annotation.get('pmid') or meta.get('pmid') or ''),
+            'journal': str(annotation.get('journal') or ''),
+            'year': year,
+            'authors': [str(a) for a in authors],
+            'organisms': sorted(row['organisms']),
+            'celltypes': sorted(row['celltypes']),
+            'methods': sorted(row['methods']),
+            'n_experiments': row['n_experiments'],
+            'n_genesets': row['n_genesets'],
+            'has_index_md': bool(study_info),
+        })
+    return {'count': len(studies_out), 'studies': studies_out}
+
+
 @app.get("/genesets/by-gene/{gene}", tags=["genesets"])
 async def get_genesets_by_gene(gene: str):
     """Case-insensitive gene-symbol lookup across all genesets and starCAT programs.
