@@ -177,7 +177,7 @@
       data-pub="{{ _icon.publication or '' }}">
       <td data-label="ID" class="muted-2 mono" style="font-size:11px">{{ folder.group_id or "—" }}</td>
       <td class="card-title">
-        {% if _icon.glyph %}<span class="ap-icon" style="color:{{ _icon.color }}" title="{{ _icon.tooltip }}">{{ _icon.glyph|safe }}</span>{% endif %}<a href="/browse/{{ folder.browse_id }}"{% if folder.summary and folder.summary != 'na' %} title="{{ folder.summary }}"{% endif %}><strong>{{ folder.name }}</strong></a>
+        {% if _icon.glyph %}<span class="ap-icon" style="color:{{ _icon.color }}" title="{{ _icon.tooltip }}">{{ _icon.glyph|safe }}</span>{% endif %}<a href="/browse/{{ folder.browse_id }}"{% if folder.summary and folder.summary != 'na' %} title="{{ folder.summary }}"{% endif %}><strong>{{ folder.name }}</strong></a>{% if folder.has_secondary %}<span class="badge-secondary" title="This collection contains one or more secondary datasets (cells that also appear in other deposits). Do not double-count if pooling with other collections.">(2)</span>{% endif %}
       </td>
       <td data-label="Datasets" class="muted">{{ folder.dataset_count }}</td>
       <td data-label="Cells" class="muted mono" style="font-size:11px">{{ format_count(folder.total_cells) or "—" }}</td>

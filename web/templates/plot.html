@@ -207,13 +207,13 @@
   }
 </style>
 
-{% from "_macros.html" import breadcrumb %}
+{% from "_macros.html" import breadcrumb, secondary_badge %}
 {{ breadcrumb([
     (folder_name, "/browse/" ~ folder_browse_id),
     (dataset_name, "/browse/" ~ folder_browse_id ~ "/" ~ file_id),
     (geom_icon ~ " " ~ geom_label, None)
 ], ids=[("collection", group_id), ("dataset", file_id)]) }}
-<h1 class="page-title">{{ geom_icon }} {{ geom_label }} — {{ dataset_name }}</h1>
+<h1 class="page-title{% if is_secondary %} secondary-dataset{% endif %}">{{ geom_icon }} {{ geom_label }} — {{ dataset_name }}{{ secondary_badge(is_secondary) }}</h1>
 
 {# ── Known caveats banner (task #254) ──────────────────────────────────
    Same list dataset.html shows, placed here above the plot preview so

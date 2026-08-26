@@ -287,12 +287,13 @@
 
 {% from "_macros.html" import breadcrumb %}
 <!-- Consolidated header: breadcrumb with click-to-copy ids + action buttons. -->
-<div class="ds-top">
+<div class="ds-top{% if is_secondary %} secondary-dataset{% endif %}">
   <div class="ds-bc">
     {{ breadcrumb([
         (folder_name, "/browse/" ~ folder_browse_id),
         (dataset_name, None)
-    ], ids=[("collection", group_id), ("dataset", file_id), ("db", db_id)]) }}
+    ], ids=[("collection", group_id), ("dataset", file_id), ("db", db_id)],
+      is_secondary=is_secondary) }}
   </div>
   <div class="ds-actions">
     {% if pub_icon and pub_icon.glyph %}<span class="ds-pub-icon" style="color:{{ pub_icon.color }}" title="{{ pub_icon.tooltip }}">{{ pub_icon.glyph|safe }}</span>{% endif %}

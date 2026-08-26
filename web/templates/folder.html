@@ -175,6 +175,7 @@
         {% set _sus  = dataset.suspension_type or {} %}
         {% set _icon = dataset.pub_icon        or {} %}
         {% set _date = dataset.dataset_date    or {} %}
+        {% from "_macros.html" import secondary_badge %}
         <tr data-name="{{ (dataset.name or '')|lower }}"
             data-cells="{{ dataset.n_obs or 0 }}"
             data-sort-ts="{{ _date.sort_ts or 0 }}"
@@ -182,9 +183,10 @@
             data-tech_class="{{ dataset.tech_class or '' }}"
             data-celltype="{{ _cell.full or '' }}"
             data-tissue="{{ _tis.full or '' }}"
-            data-disease="{{ _dis.full or '' }}">
+            data-disease="{{ _dis.full or '' }}"
+            {% if dataset.is_secondary %}class="secondary-dataset"{% endif %}>
             <td class="card-title">
-                {% if _icon.glyph %}<span class="ap-icon" style="color:{{ _icon.color }}" title="{{ _icon.tooltip }}">{{ _icon.glyph|safe }}</span>{% endif %}<a href="/browse/{{ folder_browse_id }}/{{ dataset.browse_id }}" title="{% if dataset.description %}{{ dataset.description }}{% else %}{{ dataset.file_id }}{% endif %}"><strong>{{ dataset.name }}</strong></a>{% for doi_item in dataset.doi %}<a class="ext-lnk" href="https://doi.org/{{ doi_item }}" target="_blank" rel="noopener" title="DOI: {{ doi_item }}">🔗</a>{% endfor %}{% if dataset.accession_url %}<a class="ext-lnk" href="{{ dataset.accession_url }}" target="_blank" rel="noopener" title="accession: {{ dataset.accession }}">🔗</a>{% endif %}{% for url_item in dataset.link %}<a class="ext-lnk" href="{{ url_item }}" target="_blank" rel="noopener" title="{{ url_item }}">🔗</a>{% endfor %}{% set _cv = dataset.caveats_summary or {} %}{% if _cv.n %}<a class="cv-mark lvl-{{ _cv.max_level }}" href="/browse/{{ folder_browse_id }}/{{ dataset.browse_id }}#tab-overview" title="{{ _cv.n }} caveat{{ 's' if _cv.n > 1 else '' }} (highest: {{ _cv.max_level }})">⚠</a>{% endif %}
+                {% if _icon.glyph %}<span class="ap-icon" style="color:{{ _icon.color }}" title="{{ _icon.tooltip }}">{{ _icon.glyph|safe }}</span>{% endif %}<a href="/browse/{{ folder_browse_id }}/{{ dataset.browse_id }}" title="{% if dataset.description %}{{ dataset.description }}{% else %}{{ dataset.file_id }}{% endif %}"><strong>{{ dataset.name }}</strong></a>{{ secondary_badge(dataset.is_secondary) }}{% for doi_item in dataset.doi %}<a class="ext-lnk" href="https://doi.org/{{ doi_item }}" target="_blank" rel="noopener" title="DOI: {{ doi_item }}">🔗</a>{% endfor %}{% if dataset.accession_url %}<a class="ext-lnk" href="{{ dataset.accession_url }}" target="_blank" rel="noopener" title="accession: {{ dataset.accession }}">🔗</a>{% endif %}{% for url_item in dataset.link %}<a class="ext-lnk" href="{{ url_item }}" target="_blank" rel="noopener" title="{{ url_item }}">🔗</a>{% endfor %}{% set _cv = dataset.caveats_summary or {} %}{% if _cv.n %}<a class="cv-mark lvl-{{ _cv.max_level }}" href="/browse/{{ folder_browse_id }}/{{ dataset.browse_id }}#tab-overview" title="{{ _cv.n }} caveat{{ 's' if _cv.n > 1 else '' }} (highest: {{ _cv.max_level }})">⚠</a>{% endif %}
                 {% if dataset.subfolder %}<br><span class="muted-2" style="font-size:11px">{{ dataset.subfolder }}</span>{% endif %}
             </td>
             <td data-label="Cells × Genes" class="card-span cells-genes mono" style="color:#555;font-size:11px">
