@@ -1317,6 +1317,7 @@ class DatabaseRegistry:
             'year': file_metadata.get('year'),
             'default_layer': file_metadata.get('default_layer'),
             'has_lognorm':   file_metadata.get('has_lognorm', True),
+            'is_secondary':  file_metadata.get('is_secondary', False),
 
             # Biology & study annotation (resolved from .h5ad.mus + .env cascade)
             'organism':         ann.get('organism'),
