@@ -254,12 +254,14 @@
   // PUT). Every field also carries its tab so the "dirty" indicator on the
   // tab bar knows where an unsaved change lives.
   const EDITABLE = [
-    { key: 'title',       label: 'title',                             kind: 'scalar', tab: 'basics' },
-    { key: 'description', label: 'description (one line)',            kind: 'scalar', tab: 'basics' },
-    { key: 'year',        label: 'year',                              kind: 'number', tab: 'basics' },
-    { key: 'top_genes',   label: 'top genes (comma-separated)',       kind: 'list',   tab: 'favorites' },
-    { key: 'top_cat',     label: 'top categories (comma-separated)',  kind: 'list',   tab: 'favorites' },
-    { key: 'top_num',     label: 'top numeric (comma-separated)',     kind: 'list',   tab: 'favorites' },
+    { key: 'title',        label: 'title',                             kind: 'scalar', tab: 'basics' },
+    { key: 'description',  label: 'description (one line)',            kind: 'scalar', tab: 'basics' },
+    { key: 'year',         label: 'year',                              kind: 'number', tab: 'basics' },
+    { key: 'is_secondary', label: 'secondary dataset',                 kind: 'bool',   tab: 'basics',
+      help: 'Cells re-aggregated from another deposit. Check when this dataset should not be double-counted alongside the original.' },
+    { key: 'top_genes',    label: 'top genes (comma-separated)',       kind: 'list',   tab: 'favorites' },
+    { key: 'top_cat',      label: 'top categories (comma-separated)',  kind: 'list',   tab: 'favorites' },
+    { key: 'top_num',      label: 'top numeric (comma-separated)',     kind: 'list',   tab: 'favorites' },
   ];
   // Machine-generated identity/computed fields — shown read-only for context.
   const RO_SHOW = ['id', 'version', 'sha256', 'date', 'n_obs', 'n_vars', 'default_layer'];
@@ -338,12 +340,34 @@
     EDITABLE.forEach(f => {
       const v = fm[f.key];
       const row = document.createElement('div'); row.className = 'ef-row';
-      const lab = document.createElement('label'); lab.textContent = f.label; row.appendChild(lab);
-      const inp = document.createElement('input');
-      inp.type = 'text'; inp.dataset.key = f.key; inp.dataset.kind = f.kind; inp.dataset.tab = f.tab;
-      inp.value = Array.isArray(v) ? v.join(', ') : (v == null ? '' : String(v));
-      inp.addEventListener('input', () => markDirty(f.tab));
-      row.appendChild(inp);
+      const lab = document.createElement('label'); lab.textContent = f.label;
+      if (f.help) {
+        const help = document.createElement('span');
+        help.className = 'info'; help.title = f.help; help.textContent = 'ⓘ';
+        lab.appendChild(document.createTextNode(' '));
+        lab.appendChild(help);
+      }
+      row.appendChild(lab);
+      let inp;
+      if (f.kind === 'bool') {
+        // Checkbox rendered inline. Keep dataset attributes so collect/dirty
+        // logic works uniformly with the text inputs.
+        const wrap = document.createElement('div');
+        wrap.style.padding = '5px 0';
+        inp = document.createElement('input');
+        inp.type = 'checkbox';
+        inp.dataset.key = f.key; inp.dataset.kind = f.kind; inp.dataset.tab = f.tab;
+        inp.checked = v === true || v === 'true' || v === 1;
+        inp.addEventListener('change', () => markDirty(f.tab));
+        wrap.appendChild(inp);
+        row.appendChild(wrap);
+      } else {
+        inp = document.createElement('input');
+        inp.type = 'text'; inp.dataset.key = f.key; inp.dataset.kind = f.kind; inp.dataset.tab = f.tab;
+        inp.value = Array.isArray(v) ? v.join(', ') : (v == null ? '' : String(v));
+        inp.addEventListener('input', () => markDirty(f.tab));
+        row.appendChild(inp);
+      }
       const target = (f.tab === 'favorites') ? favoritesFields : basicsFields;
       target.appendChild(row);
     });
@@ -362,7 +386,9 @@
   function collectFrontmatter() {
     const fm = Object.assign({}, original);   // everything else (machine fields, annotation, include-lists) untouched
     document.querySelectorAll('#tab-basics input[data-key], #tab-favorites input[data-key]').forEach(inp => {
-      const k = inp.dataset.key, kind = inp.dataset.kind, raw = inp.value.trim();
+      const k = inp.dataset.key, kind = inp.dataset.kind;
+      if (kind === 'bool') { fm[k] = !!inp.checked; return; }
+      const raw = inp.value.trim();
       if (kind === 'list') fm[k] = raw === '' ? null : raw.split(',').map(x => x.trim()).filter(Boolean);
       else if (kind === 'number') fm[k] = raw === '' ? null : (isNaN(Number(raw)) ? raw : Number(raw));
       else fm[k] = raw;

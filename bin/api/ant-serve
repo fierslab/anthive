@@ -2355,6 +2355,7 @@ async def put_collection_source(
 _DATASET_EDITABLE_FIELDS: Set[str] = {
     'title', 'description', 'year',
     'top_genes', 'top_cat', 'top_num',
+    'is_secondary',
 }
 
 # Machine fields that define identity / integrity / layer schema. PUT MUST
