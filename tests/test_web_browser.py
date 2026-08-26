@@ -1073,10 +1073,39 @@ def _fake_api_get(api_url, path):  # pyright: ignore
         ]}
     if path == "/genesets":
         return {"genesets": _GENESETS}
+    if path == "/genesets/studies":
+        # Aggregated per-study view (REST addition 2026-08-26).  Mirrors the
+        # shape ant-serve returns for the /genesets landing table.
+        return {
+            "count": 2,
+            "studies": [
+                {"study": "StudyX",
+                 "title": "Study X paper title",
+                 "doi": "10.1234/studyx", "pmid": "12345",
+                 "journal": "Test Journal", "year": 2023,
+                 "authors": ["Alice", "Bob"],
+                 "organisms": ["human"], "celltypes": ["microglial cell"],
+                 "methods": ["DESeq2"],
+                 "n_experiments": 1, "n_genesets": 2, "has_index_md": True},
+                {"study": "StudyY",
+                 "title": "", "doi": "", "pmid": "", "journal": "",
+                 "year": None, "authors": [],
+                 "organisms": ["mouse"], "celltypes": [],
+                 "methods": ["edgeR"],
+                 "n_experiments": 1, "n_genesets": 1, "has_index_md": False},
+            ],
+        }
     if path == "/genesets/StudyX/Exp1":
         return _EXPERIMENT_PAYLOAD
     if path == "/genesets/StudyX/Exp1/gs_up":
         return _GENESET_PAYLOAD
+    if path == "/genesets/StudyY/Exp2":
+        return {
+            "metadata": {"name": "Experiment Y", "organism": "mouse",
+                         "method": "edgeR"},
+            "body": "",
+            "genesets": [g for g in _GENESETS if g["experiment"] == "Exp2"],
+        }
     raise requests.HTTPError(f"404 for {path}")
 
 
@@ -1320,15 +1349,15 @@ def test_genesets_index_links_variability(client):
 
 
 def test_genesets_group_selector(client):
-    # The index offers three group tabs: gene sets, starCAT, find-by-gene.
-    # starCAT UI was hidden 2026-08 (STARCAT_UI_ENABLED=False); re-enabled
-    # same day in the BLOCKER-3 fix.
+    # After the 2026-08-26 landing redesign, the tabs are: gene sets (study
+    # drilldown) and find-by-gene. starCAT is intentionally hidden from the
+    # landing; its deep-link route still resolves.
     home = client.get("/genesets")
     assert home.status_code == 200
     assert "grp-tab" in home.text
-    assert "/genesets?group=bygene" in home.text     # the find-by-gene tab href
-    assert "/genesets?group=starcat" in home.text    # starCAT tab now enabled
-    assert "StudyX" in home.text                     # geneset content (default group)
+    assert "/genesets?group=bygene" in home.text     # find-by-gene tab
+    assert "/genesets?group=starcat" not in home.text  # starCAT tab hidden
+    assert "StudyX" in home.text                     # study row (default tab)
 
 
 def test_genesets_find_by_gene_mode(client):
@@ -1340,14 +1369,14 @@ def test_genesets_find_by_gene_mode(client):
     assert "/genesets/by-gene/" in resp.text
 
 
-def test_genesets_starcat_group_lists_modules_and_scores(client):
-    # starCAT group renders the catalog selector and module/score detail
-    # (STARCAT_UI_ENABLED=True, re-enabled 2026-08-20).
-    resp = client.get("/genesets?group=starcat")
+def test_genesets_starcat_deep_link_still_resolves(client):
+    # starCAT is hidden from the landing but its module deep link route must
+    # continue to render its own page (accessible from the variability
+    # heatmap and external references).
+    resp = client.get("/genesets/starcat/MICROGLIA_T/modules/Microglia_DAM")
     assert resp.status_code == 200
-    assert 'id="sc-cat"' in resp.text           # catalog dropdown
-    assert 'id="sc-content"' in resp.text       # module listing area
-    assert 'id="sc-data"' in resp.text          # embedded JSON for JS
+    assert 'id="sc-top"' in resp.text
+    assert "starCAT program" in resp.text
 
 
 def test_geneset_starcat_module_detail_renders(client):
@@ -1962,15 +1991,22 @@ def test_plot_view_info_tooltips_and_collapse(client):
     assert 'class="orient-btn' in resp.text
 
 
-def test_genesets_index_renders_grouped(client):
-    # Gene-set group is now dropdown-driven: the study/experiment selectors +
-    # the embedded by_study JSON (which carries the study names + display names).
+def test_genesets_index_renders_study_drilldown(client):
+    # The landing shows a per-study drilldown table with cell-type and
+    # organism filter popovers. Each study row links to /genesets/<study>.
     resp = client.get("/genesets")
     assert resp.status_code == 200
-    assert 'id="gs-study"' in resp.text and 'id="gs-exp"' in resp.text
-    assert "StudyX" in resp.text          # study key (embedded JSON)
-    assert "StudyY" in resp.text
-    assert "Up genes" in resp.text        # geneset display_name (embedded JSON)
+    assert 'id="gs-study-table"' in resp.text
+    assert 'data-col="celltype"' in resp.text
+    assert 'data-col="organism"' in resp.text
+    assert 'data-filter-fields="celltype"' in resp.text
+    assert 'data-filter-fields="organism"' in resp.text
+    # Both fake studies appear as rows.
+    assert 'href="/genesets/StudyX"' in resp.text
+    assert 'href="/genesets/StudyY"' in resp.text
+    # Provenance from /genesets/studies is embedded (title + doi).
+    assert "Study X paper title" in resp.text
+    assert "10.1234/studyx" in resp.text
 
 
 def test_genesets_index_survives_api_failure(client, monkeypatch):
@@ -3890,19 +3926,22 @@ def test_module_view_ecdf_plot_icon_in_row(client):
 
 # ── Ask 5: genesets page — browse-all link per collection ────────────────────
 
-def test_genesets_collection_browse_all_link(client):
-    """/genesets?group=genesets must show a 'browse all' link to /genesets/<study>/<exp>."""
-    resp = client.get("/genesets")
+def test_genesets_study_page_renders(client):
+    """/genesets/<study> renders a per-study drilldown with experiments and
+    gene sets nested inside expandable cards. Replaces the old
+    'browse-all-in-this-collection' link (which lived on the landing page
+    itself before the 2026-08-26 redesign)."""
+    resp = client.get("/genesets/StudyX")
     assert resp.status_code == 200
-    # The browse-all link is rendered by JS (renderTable) into #gs-content.
-    # Verify the JS template string contains the expHref pattern.
     html = resp.text
-    assert 'browse all in this collection' in html, (
-        "renderTable must include a 'browse all in this collection' link"
-    )
-    assert "'/genesets/' + encodeURIComponent(study) + '/' + encodeURIComponent(exp)" in html, (
-        "expHref must be constructed from study + experiment"
-    )
+    # Experiment name + expandable card
+    assert 'class="exp-card"' in html
+    # The "open" link points at the existing /genesets/<study>/<exp> route
+    assert 'href="/genesets/StudyX/Exp1"' in html
+    # Gene set link into the geneset page
+    assert 'href="/genesets/StudyX/Exp1/gs_up"' in html
+    # Breadcrumb back to /genesets
+    assert 'href="/genesets"' in html
 
 
 # ── Ask 6: gene search URL state ─────────────────────────────────────────────

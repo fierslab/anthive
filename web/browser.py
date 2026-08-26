@@ -2612,89 +2612,96 @@ async def gene_view(request: Request, gene: str):
 
 @router.get("/genesets", response_class=HTMLResponse)
 async def genesets_index(request: Request):
-    api_url = _api_url(request)
-    try:
-        payload = _api_get(api_url, '/genesets')
-        genesets = payload.get('genesets', [])
-    except Exception as error:
-        print(f"API error: {error}")
-        genesets = []
+    """Genesets landing page.
 
-    # Group by study → experiment for display
-    by_study: Dict[str, Dict[str, list]] = {}
-    for geneset in genesets:
-        by_study.setdefault(geneset['study'], {}).setdefault(
-            geneset['experiment'], []
-        ).append(geneset)
+    Renders a drilldown table of studies (one row per study). Filters for
+    cell type and organism sit above the table (folder-style header
+    popovers). starCAT was surfaced here previously, but the entry point
+    is now hidden. Deep-links to ``/genesets/starcat/…`` still resolve
+    via the dedicated route.
+    """
+    api_url = _api_url(request)
+    # /genesets/studies returns one row per study with title/doi/journal/year/
+    # authors/organisms/celltypes/methods pre-aggregated by the API.  Fall back
+    # to an empty list if the endpoint is missing (older ant-serve).
+    studies: List[Dict[str, Any]] = []
+    total_genesets = 0
+    try:
+        payload = _api_get(api_url, '/genesets/studies') or {}
+        studies = payload.get('studies') or []
+        total_genesets = sum(int(row.get('n_genesets') or 0) for row in studies)
+    except Exception as error:
+        print(f"API error (/genesets/studies): {error}")
+    # If /genesets/studies is unavailable (older API), fall back to the flat
+    # list so the page still renders (without title/doi/year enrichment).
+    if not studies:
+        try:
+            flat = _api_get(api_url, '/genesets') or {}
+            genesets = flat.get('genesets', [])
+        except Exception as error:
+            print(f"API error (/genesets fallback): {error}")
+            genesets = []
+        per_study: Dict[str, Dict[str, Any]] = {}
+        for geneset in genesets:
+            study_name = geneset.get('study') or ''
+            if not study_name:
+                continue
+            entry = per_study.setdefault(study_name, {
+                'study': study_name,
+                'organisms': set(),
+                'celltypes': set(),
+                'methods': set(),
+                'n_experiments': set(),
+                'n_genesets': 0,
+                'title': '', 'doi': '', 'pmid': '', 'journal': '',
+                'year': None, 'authors': [],
+            })
+            entry['n_genesets'] += 1
+            entry['n_experiments'].add(geneset.get('experiment') or '')
+            if geneset.get('organism'):
+                entry['organisms'].add(geneset['organism'])
+            for cell in geneset.get('celltypes') or []:
+                if cell:
+                    entry['celltypes'].add(cell)
+            if geneset.get('method'):
+                entry['methods'].add(geneset['method'])
+        studies = []
+        for study_name, entry in sorted(per_study.items()):
+            studies.append({
+                'study': study_name,
+                'title': entry['title'], 'doi': entry['doi'],
+                'pmid': entry['pmid'], 'journal': entry['journal'],
+                'year': entry['year'], 'authors': entry['authors'],
+                'organisms': sorted(entry['organisms']),
+                'celltypes': sorted(entry['celltypes']),
+                'methods': sorted(entry['methods']),
+                'n_experiments': len(entry['n_experiments']),
+                'n_genesets': entry['n_genesets'],
+            })
+        total_genesets = sum(int(row.get('n_genesets') or 0) for row in studies)
 
     active_group = request.query_params.get("group")
 
-    # starCAT tab is now enabled — catalogs are available and the browser
-    # handles the module/score detail load when active_group == 'starcat'.
-    STARCAT_UI_ENABLED = True
-
-    # starCAT programs are a SECOND module source, served by the /catalogs
-    # endpoint (REST 2.30) — the authoritative definitions (modules with gene
-    # weights + group + biological description, plus derived score recipes).
-    # /catalogs lists all catalogs cheaply (for the tab count); the per-catalog
-    # module/score detail is only fetched when the starCAT group is active.
-    starcat_summaries: list = []
-    starcat_detail: list = []
-    if STARCAT_UI_ENABLED:
-        try:
-            catalogs = _api_get(api_url, '/catalogs').get('catalogs', [])
-            starcat_summaries = [c for c in catalogs if c.get('source') == 'starcat']
-        except Exception as error:
-            print(f"API error (/catalogs): {error}")
-
-    starcat_total = sum(c.get('n_modules', 0) for c in starcat_summaries)
-
-    if active_group == 'starcat':
-        for summary in starcat_summaries:
-            try:
-                detail = _api_get(api_url, f"/catalogs/starcat/{summary['catalog_id']}")
-            except Exception as error:
-                print(f"API error (/catalogs/{summary.get('catalog_id')}): {error}")
-                continue
-            # group modules by their curated `group` for display
-            by_group: Dict[str, list] = {}
-            for module in detail.get('modules', []):
-                by_group.setdefault(module.get('group') or 'other', []).append(module)
-            starcat_detail.append({
-                "catalog_id": summary['catalog_id'],
-                "name": detail.get('name') or summary.get('name') or summary['catalog_id'],
-                "description": detail.get('description') or summary.get('description'),
-                "n_modules": detail.get('n_modules'),
-                "n_scores": detail.get('n_scores'),
-                "n_genes": detail.get('n_genes'),
-                "modules_by_group": dict(sorted(by_group.items())),
-                "scores": detail.get('scores', []),
-            })
-
-    # Group selector: one tab per module source (gene sets / starCAT; more to
-    # follow). Only groups that actually have content are offered. The active
-    # group comes from ?group=, defaulting to the first available.
+    # Group selector. starCAT was here previously; we keep the ``starcat``
+    # route (``/genesets/starcat/{catalog_id}/modules/{module_name}``) and its
+    # template alive for deep-links, but the tab is intentionally hidden on
+    # this landing page. Find-by-gene remains available.
     groups = []
-    if by_study:
-        groups.append({"key": "genesets", "label": "Gene sets", "count": len(genesets)})
-    if starcat_summaries:
-        groups.append({"key": "starcat", "label": "starCAT", "count": starcat_total})
-    if by_study or starcat_summaries:
-        # reverse lookup: which sets/programs contain a given gene (client-side
-        # search against GET /genesets/by-gene/{gene}). No count.
+    if studies:
+        groups.append({"key": "genesets", "label": "Gene sets", "count": len(studies)})
+        # Reverse lookup: which sets/programs contain a given gene.
         groups.append({"key": "bygene", "label": "🔍 find by gene", "count": None})
     valid_keys = {g["key"] for g in groups}
     if active_group not in valid_keys:
         active_group = groups[0]["key"] if groups else "genesets"
 
-    # dataset_annotations is embedded so JS-rendered `parent_dataset` cells
-    # can flag secondary datasets with a `(2)` badge. Same shape used elsewhere.
+    # dataset_annotations feeds the parent-dataset `(2)` badge on rendered
+    # study rows and inside the drilldown.
     dataset_annotations = _build_dataset_annotations(api_url)
     return templates.TemplateResponse(request, "genesets.html", {
-        "by_study": by_study,
-        "total": len(genesets),
-        "starcat_detail": starcat_detail,
-        "starcat_total": starcat_total,
+        "studies": studies,
+        "total": len(studies),
+        "total_genesets": total_genesets,
         "groups": groups,
         "active_group": active_group,
         "dataset_annotations": dataset_annotations,
@@ -3055,4 +3062,121 @@ async def geneset_view(request: Request, study: str, experiment: str, name: str)
             "tissue_ancestors": _TISSUE_ANCESTORS,
             "preselect_cell_types": preselect_cts,
         },
+    })
+
+
+@router.get("/genesets/{study}", response_class=HTMLResponse)
+async def geneset_study_view(request: Request, study: str):
+    """Per-study drilldown of experiments and their genesets.
+
+    Reached from a row click on the ``/genesets`` landing table. Renders a
+    table of experiments; each row expands into the genesets that live
+    under it. Registered AFTER every other ``/genesets/…`` route because
+    the single-segment pattern would otherwise swallow ``variability``
+    and ``starcat`` deep-links.
+    """
+    api_url = _api_url(request)
+    try:
+        payload = _api_get(api_url, '/genesets') or {}
+        all_genesets = payload.get('genesets') or []
+    except Exception as error:
+        print(f"API error: {error}")
+        all_genesets = []
+
+    study_genesets = [g for g in all_genesets if g.get('study') == study]
+    if not study_genesets:
+        return templates.TemplateResponse(
+            request, "genesets.html",
+            {
+                "studies": [],
+                "groups": [],
+                "active_group": "genesets",
+                "error": f"Study {study} not found",
+            },
+            status_code=404,
+        )
+
+    # Group into experiments, fetch experiment-level metadata once each so
+    # organism / celltypes / method / description are available.
+    experiments: List[Dict[str, Any]] = []
+    seen_experiments: Dict[str, List[Dict[str, Any]]] = {}
+    for geneset in study_genesets:
+        exp_name = geneset.get('experiment') or ''
+        seen_experiments.setdefault(exp_name, []).append(geneset)
+
+    study_provenance = {
+        'doi': '',
+        'pmid': '',
+        'journal': '',
+        'title': '',
+        'year': None,
+        'authors': [],
+        'body': '',
+    }
+    # Seed provenance from the study-level index.md via /genesets/studies.
+    # Falls through to experiment.annotation.doi below when the study has no
+    # index.md of its own (e.g. LuChen2025, Mancuso2024, Sierksma2025).
+    try:
+        studies_payload = _api_get(api_url, '/genesets/studies') or {}
+        for row in studies_payload.get('studies') or []:
+            if row.get('study') == study:
+                study_provenance['title'] = row.get('title') or ''
+                study_provenance['doi'] = row.get('doi') or ''
+                study_provenance['pmid'] = row.get('pmid') or ''
+                study_provenance['journal'] = row.get('journal') or ''
+                study_provenance['year'] = row.get('year')
+                study_provenance['authors'] = row.get('authors') or []
+                break
+    except Exception as error:
+        print(f"API error (/genesets/studies): {error}")
+
+    for exp_name in sorted(seen_experiments):
+        meta: Dict[str, Any] = {}
+        body_html = ''
+        try:
+            exp_payload = _api_get(api_url, f'/genesets/{study}/{exp_name}') or {}
+            meta = exp_payload.get('metadata') or {}
+            body_html = markdown.markdown(
+                exp_payload.get('body') or '', extensions=['tables']
+            )
+        except Exception as error:
+            print(f"API error (/genesets/{study}/{exp_name}): {error}")
+        # Study-level provenance: first non-empty wins. Every experiment
+        # under a study points back at the same paper.
+        annotation = meta.get('annotation') or {}
+        for key in ('doi', 'pmid', 'journal', 'title'):
+            if not study_provenance[key]:
+                value = annotation.get(key) or meta.get(key)
+                if value:
+                    study_provenance[key] = str(value)
+        if study_provenance['year'] is None:
+            year_raw = meta.get('year') or annotation.get('year')
+            if year_raw:
+                try:
+                    study_provenance['year'] = int(str(year_raw)[:4])
+                except ValueError:
+                    pass
+        if not study_provenance['authors']:
+            authors = meta.get('authors') or annotation.get('authors')
+            if isinstance(authors, list) and authors:
+                study_provenance['authors'] = [str(a) for a in authors]
+        experiments.append({
+            'name': exp_name,
+            'display_name': meta.get('name') or exp_name,
+            'description': meta.get('description') or '',
+            'organism': meta.get('organism') or '',
+            'celltypes': meta.get('celltypes') or [],
+            'method': meta.get('method') or '',
+            'parent_dataset': meta.get('parent_dataset'),
+            'body_html': body_html,
+            'genesets': seen_experiments[exp_name],
+            'n_genesets': len(seen_experiments[exp_name]),
+        })
+
+    dataset_annotations = _build_dataset_annotations(api_url)
+    return templates.TemplateResponse(request, "geneset_study.html", {
+        "study": study,
+        "experiments": experiments,
+        "provenance": study_provenance,
+        "dataset_annotations": dataset_annotations,
     })

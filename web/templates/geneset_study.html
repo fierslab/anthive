@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+
+{% block title %}{{ study }} · gene sets · anthive{% endblock %}
+
+{% block content %}
+{% from "_macros.html" import breadcrumb, secondary_badge %}
+{% set _ds_annot = dataset_annotations or {} %}
+
+{{ breadcrumb([
+    ("gene sets", "/genesets"),
+    (study, None)
+]) }}
+
+<style>
+  .exp-card {
+    border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px;
+    margin: 10px 0;
+  }
+  .exp-card summary {
+    cursor: pointer; font-size: 14px; font-weight: 600;
+    display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  }
+  .exp-card summary .exp-name { font-weight: 700; }
+  .exp-card summary .exp-meta { font-size: 11px; color: var(--text-muted); font-weight: 400; }
+  .exp-card summary .exp-count {
+    background: #f3f4f6; color: #374151;
+    border-radius: 10px; padding: 0 8px; font-size: 11px; font-weight: 500;
+  }
+  .exp-body { margin-top: 10px; }
+  .exp-desc { color: var(--text-muted); font-size: 12px; margin: 6px 0 8px; }
+  .ctx-pill {
+    display:inline-block; padding:0 4px; border-radius:2px;
+    background:#f3f4f6; color:#374151; border:1px solid #e5e7eb;
+    font-family:var(--font-mono); font-size:9.5px; letter-spacing:.2px;
+  }
+  .prov-row {
+    display: flex; gap: 12px; flex-wrap: wrap;
+    font-size: 12px; color: var(--text-muted);
+    margin: 2px 0 12px;
+  }
+  .prov-row a { color: var(--link); }
+  .prov-title { font-style: italic; color: var(--text); font-size: 13px; margin: 4px 0 6px; }
+  .exp-open-link { font-size: 11px; color: var(--link); margin-left: auto; }
+</style>
+
+<h1 class="page-title">{{ study }}</h1>
+
+{% if provenance.title %}<p class="prov-title">{{ provenance.title }}</p>{% endif %}
+<div class="prov-row">
+  {% if provenance.year %}<div>{{ provenance.year }}</div>{% endif %}
+  {% if provenance.journal %}<div><i>{{ provenance.journal }}</i></div>{% endif %}
+  {% if provenance.doi %}<div><a href="https://doi.org/{{ provenance.doi }}" target="_blank" rel="noopener">doi:{{ provenance.doi }}</a></div>{% endif %}
+  {% if provenance.pmid %}<div><a href="https://pubmed.ncbi.nlm.nih.gov/{{ provenance.pmid }}/" target="_blank" rel="noopener">pmid:{{ provenance.pmid }}</a></div>{% endif %}
+  <div style="margin-left:auto"><a href="/genesets/variability">📊 variability across datasets →</a></div>
+</div>
+
+<p class="gs-desc" style="font-size:12px;color:var(--text-muted);margin:0 0 10px">
+  {{ experiments|length }} experiment{{ '' if experiments|length == 1 else 's' }}, {{ experiments|map(attribute='n_genesets')|sum }} gene set{{ '' if experiments|map(attribute='n_genesets')|sum == 1 else 's' }} total.  Click an experiment to expand its gene sets.
+</p>
+
+{% for exp in experiments %}
+<details class="exp-card" {% if experiments|length == 1 %}open{% endif %}>
+  <summary>
+    <span class="exp-name">{{ exp.display_name }}</span>
+    <span class="exp-count">{{ exp.n_genesets }} gene set{{ '' if exp.n_genesets == 1 else 's' }}</span>
+    <span class="exp-meta">
+      {% if exp.method %}method: {{ exp.method }}{% endif %}
+      {% if exp.organism %}{% if exp.method %} · {% endif %}organism: {{ exp.organism }}{% endif %}
+      {% if exp.parent_dataset %}
+        {% set _pd = _ds_annot.get(exp.parent_dataset) or {} %}
+        {% if exp.method or exp.organism %} · {% endif %}parent:
+        <a href="/browse/{{ exp.parent_dataset }}">{{ exp.parent_dataset }}</a>{{ secondary_badge(_pd.get('is_secondary')) }}
+      {% endif %}
+    </span>
+    <a class="exp-open-link" href="/genesets/{{ study }}/{{ exp.name }}">open ↗</a>
+  </summary>
+  <div class="exp-body">
+    {% if exp.description %}<div class="exp-desc">{{ exp.description }}</div>{% endif %}
+    {% if exp.celltypes %}
+    <div style="margin:4px 0 8px">
+      {% for cell in exp.celltypes %}<span class="ctx-pill" title="cell type: {{ cell }}">{{ cell }}</span> {% endfor %}
+    </div>
+    {% endif %}
+
+    <div class="table-wrap">
+    <table class="auto card-table">
+      <thead>
+        <tr>
+          <th>Gene set</th>
+          <th>Format</th>
+          <th>n genes</th>
+          <th>Direction</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for g in exp.genesets %}
+        <tr>
+          <td class="card-title"><a href="/genesets/{{ study }}/{{ exp.name }}/{{ g.name }}">{{ g.display_name or g.name }}</a></td>
+          <td data-label="Format" class="muted">{{ g.format }}</td>
+          <td data-label="n genes" class="muted">{{ g.n_genes if g.n_genes is not none else '—' }}</td>
+          <td data-label="Direction" class="muted">{{ g.direction or '—' }}</td>
+          <td data-label="Description" class="muted">{{ g.description or '' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+</details>
+{% endfor %}
+
+{% endblock %}
