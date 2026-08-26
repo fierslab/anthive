@@ -50,7 +50,9 @@
   .col-popover .clear-link { font-size:10px; color:#888; }
 </style>
 
-{% from "_macros.html" import breadcrumb %}
+{% from "_macros.html" import breadcrumb, mff_styles, mff_scripts %}
+{{ mff_styles() }}
+{{ mff_scripts() }}
 {{ breadcrumb([("gene sets", None)]) }}
 
 <h1 class="page-title">Gene sets</h1>
@@ -103,7 +105,37 @@
   {% if not studies %}
   <p class="muted">No gene sets in the store.</p>
   {% else %}
-  <p class="gs-desc">One row per study.  Click a row to browse that study's experiments and gene sets.  Use the column headers to filter by cell type or organism.</p>
+  <p class="gs-desc">One row per study. Click a row to browse that study's experiments and gene sets. Narrow the list with the filters below.</p>
+
+  <div class="gs-filters" style="display:flex;gap:18px;flex-wrap:wrap;align-items:flex-end;margin:8px 0 12px">
+    <div>
+      <label style="display:block;font-size:10px;text-transform:uppercase;letter-spacing:.4px;color:var(--text-muted);margin-bottom:2px">cell type</label>
+      <div class="mff-widget" id="gs-flt-celltype-w">
+        <button class="mff-btn" type="button" aria-haspopup="listbox" aria-expanded="false">cell type: all ▾</button>
+        <div class="mff-popover" hidden>
+          <div class="mff-actions">
+            <button class="mff-all" type="button">select all</button>
+            <button class="mff-none" type="button">clear selection</button>
+          </div>
+          <ul class="mff-list" role="listbox" aria-multiselectable="true"></ul>
+        </div>
+      </div>
+    </div>
+    <div>
+      <label style="display:block;font-size:10px;text-transform:uppercase;letter-spacing:.4px;color:var(--text-muted);margin-bottom:2px">organism</label>
+      <div class="mff-widget" id="gs-flt-organism-w">
+        <button class="mff-btn" type="button" aria-haspopup="listbox" aria-expanded="false">organism: all ▾</button>
+        <div class="mff-popover" hidden>
+          <div class="mff-actions">
+            <button class="mff-all" type="button">select all</button>
+            <button class="mff-none" type="button">clear selection</button>
+          </div>
+          <ul class="mff-list" role="listbox" aria-multiselectable="true"></ul>
+        </div>
+      </div>
+    </div>
+    <div style="margin-left:auto;font-size:12px;color:var(--text-muted);align-self:center" id="gs-summary"></div>
+  </div>
 
   <div class="table-wrap">
   <table id="gs-study-table" class="auto card-table">
@@ -113,11 +145,9 @@
         <th class="sortable" data-col="title" data-help="Paper title, when the study has an index.md annotation block.">Title <span class="info" title="Click to sort by title">ⓘ</span><span class="sort-ind"></span></th>
         <th class="sortable" data-col="year" data-help="Publication year, when available.">Year <span class="info" title="Click to sort by year">ⓘ</span><span class="sort-ind"></span></th>
         <th class="sortable" data-col="celltype"
-            data-help="Cell types the study's experiments apply to.  A study whose experiments span multiple cell types appears under all of them in the filter."
-            data-filter-fields="celltype">Cell types <span class="info" title="Click to sort or filter by cell type">ⓘ</span><span class="sort-ind"></span></th>
+            data-help="Cell types the study's experiments apply to. A study whose experiments span multiple cell types appears under all of them in the top filter. `all` marks studies designed to apply broadly across cell types.">Cell types <span class="info" title="Click to sort by cell type">ⓘ</span><span class="sort-ind"></span></th>
         <th class="sortable" data-col="organism"
-            data-help="Organism(s) represented across the study's experiments."
-            data-filter-fields="organism">Organism <span class="info" title="Click to sort or filter by organism">ⓘ</span><span class="sort-ind"></span></th>
+            data-help="Organism(s) represented across the study's experiments.">Organism <span class="info" title="Click to sort by organism">ⓘ</span><span class="sort-ind"></span></th>
         <th class="sortable" data-col="n_experiments" data-help="Number of experiments under this study.">Experiments <span class="info" title="Click to sort by number of experiments">ⓘ</span><span class="sort-ind"></span></th>
         <th class="sortable" data-col="n_genesets" data-help="Total number of gene sets across all experiments in this study.">Gene sets <span class="info" title="Click to sort by number of gene sets">ⓘ</span><span class="sort-ind"></span></th>
         <th data-help="DOI or PMID link when the study is annotated.">Ref</th>
@@ -131,6 +161,7 @@
         data-year="{{ s.year or 0 }}"
         data-organism="{{ ','.join(s.organisms) }}"
         data-celltype="{{ ','.join(s.celltypes) }}"
+        data-celltype-has-all="{{ '1' if 'all' in s.celltypes else '0' }}"
         data-n_experiments="{{ s.n_experiments }}"
         data-n_genesets="{{ s.n_genesets }}"
       >
@@ -152,7 +183,7 @@
   </table>
   </div>
 
-  <div style="margin-top:8px;font-size:11px;color:var(--text-muted)"><span id="gs-count"></span></div>
+  <div style="margin-top:8px;font-size:11px;color:var(--text-muted)"><span id="gs-count-legacy" style="display:none"></span></div>
 
   <script>
   (function () {
@@ -160,39 +191,89 @@
     if (!table) return;
     var rows = Array.from(table.querySelectorAll('tbody tr'));
     var headers = Array.from(table.querySelectorAll('th.sortable'));
-    var countEl = document.getElementById('gs-count');
-    var valueFilters = {};   // { col: Set<value> }
+    var summaryEl = document.getElementById('gs-summary');
+    // Selected values per filter. null = no filter (show all).
+    var filters = { celltype: null, organism: null };
     var sortCol = null, sortDir = 'asc';
 
-    // Restore persisted filter state (per-browser, same convention as the
-    // dataset browser).  Keys namespaced under `gs.study.*`.
-    ['celltype', 'organism'].forEach(function (col) {
-      var stored = antRemember.get('gs.study.filter.' + col);
-      if (Array.isArray(stored) && stored.length) {
-        valueFilters[col] = new Set(stored);
-      }
-    });
     var storedSort = antRemember.get('gs.study.sort');
     if (storedSort && storedSort.col) { sortCol = storedSort.col; sortDir = storedSort.dir || 'asc'; }
-
-    function persistFilter(col) {
-      var vals = valueFilters[col] ? Array.from(valueFilters[col]) : [];
-      antRemember.set('gs.study.filter.' + col, vals);
-    }
     function persistSort() { antRemember.set('gs.study.sort', { col: sortCol, dir: sortDir }); }
 
-    function rowMatches(row) {
-      for (var col in valueFilters) {
-        var wanted = valueFilters[col];
-        if (!wanted || !wanted.size) continue;
-        var raw = row.getAttribute('data-' + col) || '';
-        var vals = raw.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
-        var hit = false;
-        for (var i = 0; i < vals.length; i++) { if (wanted.has(vals[i])) { hit = true; break; } }
-        if (!hit) return false;
-      }
-      return true;
+    // ── URL hash state (scheme: #gs=celltype=a,b;organism=human) ────────────
+    // Mirrors the dataset-browser #mv= and gene-atlas #gv= pattern: a page-
+    // anchor prefix and a namespaced state string are joined with `&`.
+    var GS_KEY = 'gs';
+    function splitHash(hash) {
+      var raw = (hash || '').replace(/^#/, '');
+      var sepIdx = raw.indexOf('&' + GS_KEY + '=');
+      if (sepIdx !== -1) return { prefix: raw.slice(0, sepIdx), gsStr: raw.slice(sepIdx + GS_KEY.length + 2) };
+      if (raw.indexOf(GS_KEY + '=') === 0) return { prefix: '', gsStr: raw.slice(GS_KEY.length + 1) };
+      return { prefix: raw, gsStr: '' };
     }
+    function parseGsStr(gsStr) {
+      var out = {};
+      if (!gsStr) return out;
+      gsStr.split(';').forEach(function (pair) {
+        var eq = pair.indexOf('=');
+        if (eq === -1) return;
+        var key = pair.slice(0, eq);
+        var val = decodeURIComponent(pair.slice(eq + 1));
+        if (key) out[key] = val;
+      });
+      return out;
+    }
+    function parseHashFilters() { return parseGsStr(splitHash(window.location.hash).gsStr); }
+    function buildHashFromFilters() {
+      var pairs = [];
+      Object.keys(filters).forEach(function (key) {
+        var vals = filters[key];
+        if (vals && vals.size) pairs.push(key + '=' + encodeURIComponent(Array.from(vals).join(',')));
+      });
+      var parts = splitHash(window.location.hash);
+      if (!pairs.length) return parts.prefix ? '#' + parts.prefix : '';
+      var gsFull = GS_KEY + '=' + pairs.join(';');
+      return '#' + (parts.prefix ? parts.prefix + '&' + gsFull : gsFull);
+    }
+    function updateHash(push) {
+      var newHash = buildHashFromFilters();
+      var curHash = window.location.hash || '';
+      if (newHash === curHash) return;
+      var target = newHash || window.location.pathname + window.location.search;
+      if (push) history.pushState({}, '', target);
+      else history.replaceState({}, '', target);
+    }
+
+    // ── row visibility ──────────────────────────────────────────────────────
+    // Semantics for the celltype filter:
+    //   - `all` bucket picked explicitly → keep only rows whose celltype list
+    //     literally contains `all`.
+    //   - a specific celltype picked (e.g. microglia) → keep rows tagged with
+    //     that celltype, AND ALSO rows tagged `all` (broadly applicable).
+    //   - both `all` and specific picked → same as the union above.
+    function rowMatchesCelltype(row) {
+      var wanted = filters.celltype;
+      if (!wanted || !wanted.size) return true;
+      var raw = row.getAttribute('data-celltype') || '';
+      var rowVals = raw.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+      var hasAll = row.getAttribute('data-celltype-has-all') === '1';
+      var wantedOnlyAll = wanted.size === 1 && wanted.has('all');
+      if (wantedOnlyAll) return hasAll;
+      // At least one non-`all` value picked. Row matches if it shares any picked
+      // value, OR if it's tagged `all` (broadly applicable across cell types).
+      if (hasAll) return true;
+      for (var i = 0; i < rowVals.length; i++) if (wanted.has(rowVals[i])) return true;
+      return false;
+    }
+    function rowMatchesOrganism(row) {
+      var wanted = filters.organism;
+      if (!wanted || !wanted.size) return true;
+      var raw = row.getAttribute('data-organism') || '';
+      var rowVals = raw.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+      for (var i = 0; i < rowVals.length; i++) if (wanted.has(rowVals[i])) return true;
+      return false;
+    }
+    function rowMatches(row) { return rowMatchesCelltype(row) && rowMatchesOrganism(row); }
 
     function applyVisibility() {
       var shown = 0;
@@ -201,8 +282,10 @@
         r.style.display = vis ? '' : 'none';
         if (vis) shown++;
       });
-      countEl.textContent = shown + ' of ' + rows.length + ' studies';
+      if (summaryEl) summaryEl.textContent = 'Showing ' + shown + ' of ' + rows.length + ' studies';
     }
+
+    // ── sort ────────────────────────────────────────────────────────────────
     function applySort() {
       if (!sortCol) return;
       var isNumeric = (sortCol === 'year' || sortCol === 'n_experiments' || sortCol === 'n_genesets');
@@ -229,10 +312,77 @@
           v = v.trim(); if (v) out.add(v);
         });
       });
-      return Array.from(out).sort();
+      // For celltype, sort so `all` appears at the top of the picker for
+      // discoverability. Everything else is alpha.
+      var arr = Array.from(out);
+      if (field === 'celltype') {
+        arr.sort(function (a, b) {
+          if (a === 'all') return -1;
+          if (b === 'all') return 1;
+          return a < b ? -1 : (a > b ? 1 : 0);
+        });
+      } else {
+        arr.sort();
+      }
+      return arr;
     }
 
-    // ── header popovers (help + sort + value filter) ─────────────────────
+    // ── mff widgets (top of page, primary filter access) ────────────────────
+    var celltypeWidget = null, organismWidget = null;
+    var widgetElCell = document.getElementById('gs-flt-celltype-w');
+    var widgetElOrg  = document.getElementById('gs-flt-organism-w');
+    if (widgetElCell && window.mffWidget) {
+      celltypeWidget = mffWidget(widgetElCell, 'celltype', 'cell type', [], function (vals) {
+        filters.celltype = vals;  // null when empty
+        applyVisibility();
+        updateHash(true);
+      });
+    }
+    if (widgetElOrg && window.mffWidget) {
+      organismWidget = mffWidget(widgetElOrg, 'organism', 'organism', [], function (vals) {
+        filters.organism = vals;
+        applyVisibility();
+        updateHash(true);
+      });
+    }
+    // Populate options.
+    if (celltypeWidget) {
+      celltypeWidget.populate(uniqueValuesFor('celltype').map(function (v) {
+        return { value: v, label: v === 'all' ? 'all (broadly applicable)' : v, indent: 0 };
+      }), false);
+    }
+    if (organismWidget) {
+      organismWidget.populate(uniqueValuesFor('organism').map(function (v) {
+        return { value: v, label: v, indent: 0 };
+      }), false);
+    }
+
+    // ── restore filters from URL hash ───────────────────────────────────────
+    var parsed = parseHashFilters();
+    if (parsed.celltype && celltypeWidget) {
+      var cvals = parsed.celltype.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+      celltypeWidget.setValues(cvals);
+      filters.celltype = cvals.length ? new Set(cvals) : null;
+    }
+    if (parsed.organism && organismWidget) {
+      var ovals = parsed.organism.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+      organismWidget.setValues(ovals);
+      filters.organism = ovals.length ? new Set(ovals) : null;
+    }
+
+    // ── back/forward navigation restores state ──────────────────────────────
+    window.addEventListener('popstate', function () {
+      var p = parseHashFilters();
+      var cv = (p.celltype || '').split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+      var ov = (p.organism || '').split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+      if (celltypeWidget) celltypeWidget.setValues(cv);
+      if (organismWidget) organismWidget.setValues(ov);
+      filters.celltype = cv.length ? new Set(cv) : null;
+      filters.organism = ov.length ? new Set(ov) : null;
+      applyVisibility();
+    });
+
+    // ── header popovers (help + sort only; filtering lives at the top) ──────
     var activePopover = null;
     function closePopover() { if (activePopover) { activePopover.remove(); activePopover = null; } }
     document.addEventListener('click', function (e) {
@@ -244,14 +394,10 @@
 
     headers.forEach(function (th) {
       th.addEventListener('click', function (e) {
-        // Clicks INSIDE an open popover bubble up here because the popover is
-        // attached to <body>.  Guard so a filter checkbox change doesn't flip
-        // the sort direction on us.
         if (activePopover && activePopover.contains(e.target)) return;
         e.stopPropagation();
         var col = th.getAttribute('data-col');
         var help = th.getAttribute('data-help') || '';
-        var filterFields = (th.getAttribute('data-filter-fields') || col).split(',');
         var reopenOnSame = activePopover && activePopover.dataset.col === col;
         closePopover();
         if (reopenOnSame) {
@@ -274,7 +420,6 @@
         desc.textContent = help;
         pop.appendChild(desc);
 
-        // Sort buttons
         var sortBtns = document.createElement('div');
         sortBtns.className = 'sort-btns';
         function makeBtn(label, dir) {
@@ -290,58 +435,6 @@
         sortBtns.appendChild(makeBtn('▲ asc', 'asc'));
         sortBtns.appendChild(makeBtn('▼ desc', 'desc'));
         pop.appendChild(sortBtns);
-
-        var filterable = new Set(['celltype', 'organism']);
-        var sectionLabels = { celltype: 'cell type', organism: 'organism' };
-        filterFields.filter(function (f) { return filterable.has(f); }).forEach(function (field) {
-          var vals = uniqueValuesFor(field);
-          if (!vals.length) return;
-          var section = document.createElement('div');
-          section.style.marginTop = '4px';
-          var h5 = document.createElement('div');
-          h5.style.fontSize = '10px';
-          h5.style.color = 'var(--text-muted)';
-          h5.style.textTransform = 'uppercase';
-          h5.style.letterSpacing = '.4px';
-          h5.style.marginBottom = '2px';
-          h5.textContent = sectionLabels[field] || field;
-          section.appendChild(h5);
-          if (!valueFilters[field]) valueFilters[field] = new Set();
-          var vBox = document.createElement('div');
-          vBox.className = 'vals';
-          vals.forEach(function (v) {
-            var lbl = document.createElement('label');
-            var cb = document.createElement('input');
-            cb.type = 'checkbox';
-            cb.value = v;
-            cb.checked = valueFilters[field].has(v);
-            cb.addEventListener('change', function () {
-              if (cb.checked) valueFilters[field].add(v);
-              else valueFilters[field].delete(v);
-              persistFilter(field);
-              applyVisibility();
-            });
-            lbl.appendChild(cb);
-            lbl.appendChild(document.createTextNode(' ' + v));
-            vBox.appendChild(lbl);
-          });
-          section.appendChild(vBox);
-          if (valueFilters[field].size) {
-            var clr = document.createElement('a');
-            clr.className = 'clear-link';
-            clr.href = '#';
-            clr.textContent = '× clear ' + (sectionLabels[field] || field);
-            clr.onclick = function (ev) {
-              ev.preventDefault(); ev.stopPropagation();
-              valueFilters[field] = new Set();
-              persistFilter(field);
-              vBox.querySelectorAll('input[type=checkbox]').forEach(function (c) { c.checked = false; });
-              applyVisibility();
-            };
-            section.appendChild(clr);
-          }
-          pop.appendChild(section);
-        });
       });
     });
 
