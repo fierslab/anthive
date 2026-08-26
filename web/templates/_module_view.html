@@ -248,6 +248,19 @@ URL hash scheme (feature: back-button / shareable filter state):
        fold into UCell client-side; starcat rows stay hidden. A filter with
        a single real option was pure noise, so the widget is gone. Flip the
        filter in load() to restore. #}
+    {# Score-algorithm picker (scanpy / UCell / both). Reads the initial value
+       from URL fragment `#alg=scanpy|ucell|both`; falls back to the user's
+       /settings preference. On-page choice does NOT overwrite /settings; it
+       lives in the URL hash so a link like `.../Magenta#alg=both` is shareable.
+       `both` shows scanpy and UCell rows side by side. #}
+    <div>
+      <label for="{{ _id }}-alg">score algorithm <span class="info" title="Which score source the rows below reflect. scanpy uses gene-set scores, UCell uses the ranked-based method, both shows them together. On-page choice does not overwrite your /settings preference. URL fragment alg= shares the current view.">ⓘ</span></label>
+      <select class="mv-flt-alg" id="{{ _id }}-alg">
+        <option value="scanpy">scanpy (gene sets)</option>
+        <option value="ucell">UCell</option>
+        <option value="both">both</option>
+      </select>
+    </div>
   </div>
   <div class="mv-summary-row"><span class="mv-summary"></span></div>
   <div class="mv-cap-badge" role="status" aria-live="polite"></div>
@@ -291,7 +304,69 @@ URL hash scheme (feature: back-button / shareable filter state):
   // Single-select controls that keep <select> (range / categorical-single semantics).
   var flt = {
     n_cells: root.querySelector('.mv-flt-n_cells'),
+    alg:     root.querySelector('.mv-flt-alg'),
   };
+
+  /* Read the algorithm out of the URL hash. Returns 'scanpy' | 'ucell' | 'both'
+   * or null if not set. Legacy `#alg=aucell` migrates to 'ucell'; internal
+   * 'geneset' maps to the URL-friendly 'scanpy'. */
+  function readHashAlg() {
+    var m = (window.location.hash || '').match(/(?:^#|[&#])alg=([^&]+)/);
+    if (!m) return null;
+    var v = decodeURIComponent(m[1]).toLowerCase();
+    if (v === 'aucell') return 'ucell';
+    if (v === 'geneset') return 'scanpy';
+    if (v === 'scanpy' || v === 'ucell' || v === 'both') return v;
+    return null;
+  }
+
+  /* Write `alg=<val>` into the URL hash without disturbing the mv= filter part
+   * or other page anchors. Uses history.replaceState so it does not add a
+   * navigation entry per toggle. */
+  function writeHashAlg(alg) {
+    var hash = window.location.hash || '';
+    if (hash.charAt(0) === '#') hash = hash.slice(1);
+    // Strip an existing `alg=…` pair. Two regex arms so a leading `alg=…`
+    // is removed cleanly (no leftover separator) and a mid/tail `alg=…`
+    // takes its preceding `&` with it.
+    var stripped = hash
+      .replace(/(^|&)alg=[^&]*/, function (_m, sep) { return sep ? '' : ''; })
+      .replace(/^&+/, '').replace(/&+$/, '');
+    var next = 'alg=' + encodeURIComponent(alg);
+    var combined = stripped ? (next + '&' + stripped) : next;
+    history.replaceState({}, '', '#' + combined);
+  }
+
+  /* Default algorithm when nothing is on the URL hash. Reads the user's
+   * /settings preference (geneset ↔ scanpy). */
+  function defaultAlg() {
+    var pref = (window.antSettings && window.antSettings.moduleAlgorithm()) || 'geneset';
+    return pref === 'ucell' ? 'ucell' : 'scanpy';
+  }
+
+  /* Current algorithm from the select (single source of truth once populated),
+   * falling back to hash then settings. */
+  function currentAlg() {
+    if (flt.alg && flt.alg.value) return flt.alg.value;
+    return readHashAlg() || defaultAlg();
+  }
+
+  /* Seed the select from hash/settings, then wire the change handler. */
+  if (flt.alg) {
+    flt.alg.value = readHashAlg() || defaultAlg();
+    flt.alg.addEventListener('change', function () {
+      writeHashAlg(flt.alg.value);
+      load();
+    });
+    // Reflect external hash changes (browser back/forward, manual URL edits).
+    window.addEventListener('hashchange', function () {
+      var next = readHashAlg();
+      if (next && next !== flt.alg.value) {
+        flt.alg.value = next;
+        load();
+      }
+    });
+  }
 
   function onMffChange() { updateHash(true); render(); }
 
@@ -1021,25 +1096,24 @@ URL hash scheme (feature: back-button / shareable filter state):
       // Fetch the whole catalog so peer stats have real spread across all modules.
       params += '&catalog=' + encodeURIComponent(CTX.module_catalog);
     }
+    // Narrow the fetch by algorithm when the user picks one specific source.
+    // 'both' omits the parameter so the endpoint returns geneset AND ucell rows;
+    // client-side filtering below still folds legacy 'aucell' rows into 'ucell'
+    // and drops starcat.
+    var _alg = currentAlg();
+    if (_alg === 'scanpy') params += '&source=geneset';
+    else if (_alg === 'ucell') params += '&source=ucell';
     fetch('/api/module-variability?' + params, { credentials: 'same-origin' })
       .then(function (r) { return r.ok ? r.json() : r.text().then(function (t) { throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 160)); }); })
       .then(function (d) {
         // starCAT rows are always hidden client-side (starcat 2026-08).
         // scanpy (source='geneset') vs UCell (source='ucell') is driven by
-        // the user's module-algorithm preference. /settings sets it, default
-        // 'geneset' (scanpy) matches the site-wide 2026-08-23 default. The
-        // URL hash `#alg=` (scanpy|ucell|both) wins over the stored preference
-        // for the current page load; `both` shows scanpy and ucell side-by-side.
-        // Legacy stored 'aucell' is coerced to 'ucell' at the antSettings layer.
+        // the picker at the top of the panel. It seeds from the URL hash
+        // (`#alg=scanpy|ucell|both`) and falls back to /settings. `both` keeps
+        // rows from both sources so they render side-by-side in the long list.
         // Legacy parquet rows tagged source='aucell' fold into ucell here.
-        var _hashAlg = (function () {
-          var m = (window.location.hash || '').match(/(?:^#|[&#])alg=([^&]+)/);
-          return m ? decodeURIComponent(m[1]) : null;
-        })();
-        var _algo = _hashAlg
-                    || (window.antSettings && window.antSettings.moduleAlgorithm())
-                    || 'geneset';
-        if (_algo === 'scanpy') _algo = 'geneset';   // URL-friendly alias
+        var _alg = currentAlg();
+        var _algo = _alg === 'scanpy' ? 'geneset' : _alg;   // 'geneset' | 'ucell' | 'both'
         ALL_ROWS = (d.rows || []).filter(function (r) {
           if (r.source === 'starcat') return false;
           // legacy aucell rows in the parquet fold into 'ucell' for display
