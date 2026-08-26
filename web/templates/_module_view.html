@@ -361,7 +361,7 @@ URL hash scheme (feature: back-button / shareable filter state):
     + '</svg>';
 
   var NUMERICAL_TAGS = { braak: 1, age: 1, pmi: 1 };
-  var METHOD_LABEL = { geneset: 'scanpy', aucell: 'AUCell' };
+  var METHOD_LABEL = { geneset: 'scanpy', ucell: 'UCell', aucell: 'AUCell' };
 
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
 
@@ -387,6 +387,7 @@ URL hash scheme (feature: back-button / shareable filter state):
 
   function scoreColFor(row) {
     if (row.source === 'geneset') return String(row.catalog).replace('/', '::') + '::' + row.module;
+    if (row.source === 'ucell')   return 'ucell__'  + row.catalog + '__' + row.module;
     if (row.source === 'aucell')  return 'aucell__' + row.catalog + '__' + row.module;
     return null;
   }
@@ -1022,14 +1023,28 @@ URL hash scheme (feature: back-button / shareable filter state):
       .then(function (r) { return r.ok ? r.json() : r.text().then(function (t) { throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 160)); }); })
       .then(function (d) {
         // starCAT rows are always hidden client-side (starcat 2026-08).
-        // scanpy (source='geneset') vs AUCell (source='aucell') is driven by
+        // scanpy (source='geneset') vs UCell (source='ucell') is driven by
         // the user's module-algorithm preference — /settings sets it, default
-        // 'geneset' (scanpy) matches the site-wide 2026-08-23 default.
-        var _algo = (window.antSettings && window.antSettings.moduleAlgorithm())
+        // 'geneset' (scanpy) matches the site-wide 2026-08-23 default. The
+        // URL hash `#alg=` (scanpy|ucell|both) wins over the stored preference
+        // for the current page load; `both` shows scanpy and ucell side-by-side.
+        // Legacy stored 'aucell' is coerced to 'ucell' at the antSettings layer.
+        var _hashAlg = (function () {
+          var m = (window.location.hash || '').match(/(?:^#|[&#])alg=([^&]+)/);
+          return m ? decodeURIComponent(m[1]) : null;
+        })();
+        var _algo = _hashAlg
+                    || (window.antSettings && window.antSettings.moduleAlgorithm())
                     || 'geneset';
+        if (_algo === 'scanpy') _algo = 'geneset';   // URL-friendly alias
         ALL_ROWS = (d.rows || []).filter(function (r) {
           if (r.source === 'starcat') return false;
-          if (r.source === 'geneset' || r.source === 'aucell') return r.source === _algo;
+          // legacy aucell rows in the parquet fold into 'ucell' for display
+          if (r.source === 'aucell') r.source = 'ucell';
+          if (r.source === 'geneset' || r.source === 'ucell') {
+            if (_algo === 'both') return true;
+            return r.source === _algo;
+          }
           return true;
         });
         var groups = {}, modules = {}, datasets = {}, tags = {};

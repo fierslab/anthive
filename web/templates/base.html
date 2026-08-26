@@ -595,19 +595,24 @@
     <script>
     // User settings — persistent, per-browser (localStorage). Set on /settings.
     //
-    //   window.antSettings.moduleAlgorithm()   → 'geneset' (scanpy, default) | 'aucell'
+    //   window.antSettings.moduleAlgorithm()   → 'geneset' (scanpy, default) | 'ucell'
     //   window.antSettings.favouriteGenes()    → array of upper-case HGNC symbols (may be [])
     //   window.antSettings.isFavourite(gene)   → bool (case-insensitive)
     //
     // Storage keys (also used directly by settings.html):
-    //   ant.remember.anthive.settings.module_algorithm  → 'geneset' | 'aucell'
+    //   ant.remember.anthive.settings.module_algorithm  → 'geneset' | 'ucell'
     //   ant.remember.anthive.settings.favourite_genes   → JSON array of strings
+    //
+    // Migration (2026-08-26): the ranked-based algorithm moved from AUCell to
+    // UCell. A stored 'aucell' value is silently migrated to 'ucell' on read;
+    // anything unrecognised falls back to 'geneset'.
     window.antSettings = (function () {
         var ALGO_KEY = 'anthive.settings.module_algorithm';
         var FAV_KEY  = 'anthive.settings.favourite_genes';
         function moduleAlgorithm() {
             var val = window.antRemember.get(ALGO_KEY);
-            return (val === 'aucell') ? 'aucell' : 'geneset';
+            if (val === 'aucell' || val === 'ucell') return 'ucell';
+            return 'geneset';
         }
         function favouriteGenes() {
             var raw = window.antRemember.get(FAV_KEY);

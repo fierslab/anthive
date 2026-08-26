@@ -355,6 +355,7 @@ def _expand_plot_thumbnails(html_text: Optional[str], default_db: Optional[str] 
 
 _STARCAT_PREFIX = 'starcat__'
 _AUCELL_PREFIX = 'aucell__'
+_UCELL_PREFIX = 'ucell__'
 
 
 def _classify_score_column(col: str) -> Optional[Dict[str, str]]:
@@ -369,6 +370,12 @@ def _classify_score_column(col: str) -> Optional[Dict[str, str]]:
         if not sep or not catalog or not module:
             return None
         return {'method': 'starcat', 'catalog': catalog, 'module': module}
+    if col.startswith(_UCELL_PREFIX):
+        rest = col[len(_UCELL_PREFIX):]
+        catalog, sep, module = rest.rpartition('__')
+        if not sep or not catalog or not module:
+            return None
+        return {'method': 'ucell', 'catalog': catalog, 'module': module}
     if col.startswith(_AUCELL_PREFIX):
         rest = col[len(_AUCELL_PREFIX):]
         catalog, sep, module = rest.rpartition('__')
@@ -417,6 +424,7 @@ def _group_module_scores(numerical_cols: List[str]) -> Dict[str, Any]:
     counts = {
         'scanpy':  sum(1 for m in modules if 'scanpy'  in m['methods']),
         'starcat': sum(1 for m in modules if 'starcat' in m['methods']),
+        'ucell':   sum(1 for m in modules if 'ucell'   in m['methods']),
         'aucell':  sum(1 for m in modules if 'aucell'  in m['methods']),
     }
     return {
@@ -2535,7 +2543,7 @@ async def settings_view(request: Request):
 
     Renders a shell with two controls:
 
-    - **Module scoring algorithm** — scanpy (default) vs AUCell. Read by the
+    - **Module scoring algorithm** — scanpy (default) vs UCell. Read by the
       module drilldown (`_module_view.html`) and the module-variability
       heatmap (`geneset_variability.html`) via `window.antSettings`.
     - **Favourite genes** — comma/newline list; upper-cased on save. Read by
@@ -3173,10 +3181,29 @@ async def geneset_study_view(request: Request, study: str):
             'n_genesets': len(seen_experiments[exp_name]),
         })
 
+    # Aggregate distinct organisms across experiments for a study-level pill
+    # cluster in the header. Preserve first-seen order (experiments are already
+    # alphabetised above) and pair each with its Hs/Mm abbrev for the pill.
+    organisms: List[Dict[str, str]] = []
+    seen_orgs: set = set()
+    for exp in experiments:
+        raw = (exp.get('organism') or '').strip()
+        if not raw:
+            continue
+        key = raw.lower()
+        if key in seen_orgs:
+            continue
+        seen_orgs.add(key)
+        organisms.append({
+            'full': raw,
+            'abbrev': _ORGANISM_ABBREV.get(key, raw[:2].capitalize()),
+        })
+
     dataset_annotations = _build_dataset_annotations(api_url)
     return templates.TemplateResponse(request, "geneset_study.html", {
         "study": study,
         "experiments": experiments,
+        "organisms": organisms,
         "provenance": study_provenance,
         "dataset_annotations": dataset_annotations,
     })

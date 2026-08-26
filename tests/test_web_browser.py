@@ -1309,7 +1309,12 @@ def test_settings_page_renders(client):
     # Both controls present
     assert 'name="module_algorithm"' in resp.text
     assert 'value="geneset"' in resp.text
-    assert 'value="aucell"' in resp.text
+    assert 'value="ucell"' in resp.text
+    # AUCell label was retired in favour of UCell (2026-08-26). The user-facing
+    # radio label reads UCell now; the only surviving AUCell mention is the
+    # migration note in the antSettings comment.
+    assert 'AUCell' not in resp.text.split('window.antSettings')[0]
+    assert '> UCell' in resp.text or '>UCell' in resp.text or 'UCell' in resp.text
     assert 'id="favourite-genes"' in resp.text
     # Storage keys documented (also referenced by consumers via window.antSettings)
     assert "anthive.settings.module_algorithm" in resp.text
@@ -2850,16 +2855,16 @@ def test_dataset_view_hides_starcat_prefixed_obs_columns(client, monkeypatch):
     assert 'starcat__' not in num_section
 
 
-def test_geneset_variability_page_offers_aucell_source(client):
+def test_geneset_variability_page_offers_ucell_source(client):
     resp = client.get("/genesets/variability")
     assert resp.status_code == 200
-    # AUCell + scanpy (gene sets) source-filter options are present.
+    # UCell + scanpy (gene sets) source-filter options are present.
     # scanpy is the DEFAULT (selected) — site-wide 2026-08-23 default-to-scanpy
-    # convention. AUCell stays as a picker for power users.
+    # convention. UCell replaces AUCell as the ranked-based option (2026-08-26).
     # starCAT is temporarily hidden alongside its /genesets tab (2026-08 —
     # STARCAT_UI_ENABLED in browser.py); restore the assertion when the
     # flag flips back.
-    assert 'value="aucell"' in resp.text
+    assert 'value="ucell"' in resp.text
     assert 'value="geneset"' in resp.text
     assert 'value="starcat"' not in resp.text
     # scanpy is the pre-selected default option

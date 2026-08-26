@@ -54,7 +54,7 @@
     </div>
     <fieldset class="radio-row">
       <label><input type="radio" name="module_algorithm" value="geneset"> scanpy (gene sets) — default</label>
-      <label><input type="radio" name="module_algorithm" value="aucell"> AUCell</label>
+      <label><input type="radio" name="module_algorithm" value="ucell"> UCell</label>
     </fieldset>
 
     <h2>Favourite genes</h2>
@@ -127,7 +127,7 @@
      * Load current settings from localStorage into the form controls.
      */
     function loadSettings() {
-        var algo = window.antSettings.moduleAlgorithm();  // 'geneset' | 'aucell'
+        var algo = window.antSettings.moduleAlgorithm();  // 'geneset' | 'ucell'
         var radios = form.querySelectorAll('input[name="module_algorithm"]');
         for (var i = 0; i < radios.length; i++) {
             radios[i].checked = (radios[i].value === algo);
