@@ -178,7 +178,7 @@
 </script>
 {% endmacro %}
 
-{# breadcrumb(trail, ids=None)
+{# breadcrumb(trail, ids=None, is_secondary=False)
 
    Renders a unified breadcrumb row used on every page.
 
@@ -193,17 +193,19 @@
             right-aligned on the same row. Example: [("collection", "SP4"),
             ("dataset", "SP4/MTH")]. Each chip is clickable and copies its
             value to the clipboard (JS in base.html handles the click).
+     is_secondary: When True, appends a small `(2)` marker after the final
+            (current) label. Same semantic as the sitewide `.badge-secondary`.
 
    The home icon is the word "home" styled as a muted link — keeps it subtle
    and screen-reader-friendly.
 #}
-{% macro breadcrumb(trail, ids=None) -%}
+{% macro breadcrumb(trail, ids=None, is_secondary=False) -%}
 <nav class="breadcrumb" aria-label="breadcrumb">
   <a class="bc-home" href="/" title="catalogue home">home</a>
   {%- for label, href in trail -%}
   <span class="bc-sep">/</span>
   {%- if href is none -%}
-  <span class="bc-current">{{ label }}</span>
+  <span class="bc-current">{{ label }}{% if is_secondary and loop.last %}<span class="badge-secondary" title="Secondary dataset. Contains cells that also appear in other deposits (re-aggregated collection). Do not double-count if pooling with other datasets.">(2)</span>{% endif %}</span>
   {%- elif href -%}
   <a href="{{ href }}">{{ label }}</a>
   {%- else -%}
@@ -220,6 +222,17 @@
   </span>
   {%- endif -%}
 </nav>
+{%- endmacro %}
+
+{# secondary_badge(is_secondary): small `(2)` marker for re-aggregated datasets.
+
+   Renders nothing when is_secondary is falsy. When true, drops a tiny monospace
+   `(2)` with the sitewide tooltip explaining what secondary means. Pair with
+   the `.secondary-dataset` class on the enclosing row/card container to also
+   grey the whole entry. Style lives in base.html.
+#}
+{% macro secondary_badge(is_secondary) -%}
+{%- if is_secondary -%}<span class="badge-secondary" title="Secondary dataset. Contains cells that also appear in other deposits (re-aggregated collection). Do not double-count if pooling with other datasets.">(2)</span>{%- endif -%}
 {%- endmacro %}
 
 {# col_label(name): display transform for obs column names.

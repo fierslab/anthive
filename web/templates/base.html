@@ -319,6 +319,22 @@
         .muted    { color: var(--text-muted); }
         .muted-2  { color: #94a3b8; }
         .mono     { font-family: var(--font-mono); }
+        /* Secondary-dataset marker. `is_secondary: true` in a dataset .md means
+           some of its cells also appear in other deposits (re-aggregated /
+           duplicate). Callers add:
+             `.secondary-dataset`  on the row/card container (mutes it slightly)
+             the `badge_secondary()` snippet next to the dataset name/id.
+           The badge is a tiny monospace (2) with a title= tooltip. */
+        .secondary-dataset { opacity: 0.72; }
+        .secondary-dataset:hover { opacity: 0.92; }
+        .badge-secondary {
+            display: inline-block; margin-left: 4px;
+            font-family: var(--font-mono); font-size: 9px; font-weight: 500;
+            color: var(--text-muted); vertical-align: super; line-height: 1;
+            cursor: help; user-select: none;
+            letter-spacing: 0;
+        }
+        .badge-secondary:hover { color: var(--link); }
         /* Compact help: a small ⓘ revealing its text on hover (native title),
            so explanatory prose doesn't take up space. Used across all views. */
         .info {

@@ -1510,6 +1510,9 @@ def get_collection_list(api_url: str) -> List[Dict]:
                 for item in _as_list(db.get('technology'))
                 if item and str(item).strip()
             } - {''})),
+            # any member dataset with is_secondary=true → mark the whole
+            # collection as containing secondary data. All-primary stays False.
+            'has_secondary': any(bool(db.get('is_secondary')) for db in dbs),
         })
 
     # Default sort: newest-first by last_modified (empty values sink to the
@@ -1634,6 +1637,11 @@ def get_collection_datasets(api_url: str, group_id: str) -> tuple:
             # only needs (n, max_level), not the full body (that lives on the
             # dataset page).
             'caveats_summary': _summarize_caveats(db.get('caveats')),
+            # is_secondary: true when the dataset contains cells that also
+            # appear in other deposits (re-aggregated collection). Sourced from
+            # the per-dataset .md frontmatter via the REST API. Defensive .get()
+            # so a rescan-lagging API still renders (the badge just stays off).
+            'is_secondary': bool(db.get('is_secondary')),
         })
 
     # Constant-across-collection fields → header pills; varying fields → columns.
@@ -2089,6 +2097,7 @@ async def plot_view(request: Request, folder_browse_id: str,
         "file_id":          file_id,
         "dataset_name":     dataset_title,
         "db_id":            db_id,
+        "is_secondary":     bool(db.get('is_secondary')),
         "geom":             geom,
         "geom_label":       _PLOT_GEOMS_UI[geom]['label'],
         "geom_icon":        _PLOT_GEOMS_UI[geom]['icon'],
@@ -2135,10 +2144,12 @@ async def de_study_view(request: Request, folder_browse_id: str,
 
     # Breadcrumb names (best-effort).
     friendly_group, dataset_title = group_id, file_id
+    is_secondary = False
     try:
         info = _api_get(api_url, f'/databases/{db_id}/info')
         friendly_group = (info.get('collection') or {}).get('group') or group_id
         dataset_title = info.get('title') or file_id
+        is_secondary = bool(info.get('is_secondary'))
     except Exception:
         pass
 
@@ -2152,6 +2163,7 @@ async def de_study_view(request: Request, folder_browse_id: str,
         "study_id":         study_id,
         "study":            study_meta,
         "api_url":          "/api",
+        "is_secondary":     is_secondary,
     })
 
 
@@ -2382,6 +2394,10 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "dataset_name": dataset_title,
         "file_id": file_id,
         "db_id": db_id,
+        # is_secondary marker (surfaced next to the title + h1 gets the
+        # `.secondary-dataset` mute-class). Defaults to False so a rescan-
+        # lagging API still renders.
+        "is_secondary": bool(db.get('is_secondary')),
         "info": info,
         "markdown_content": markdown_content,
         "obs_columns": obs_columns,
@@ -2671,6 +2687,9 @@ async def genesets_index(request: Request):
     if active_group not in valid_keys:
         active_group = groups[0]["key"] if groups else "genesets"
 
+    # dataset_annotations is embedded so JS-rendered `parent_dataset` cells
+    # can flag secondary datasets with a `(2)` badge. Same shape used elsewhere.
+    dataset_annotations = _build_dataset_annotations(api_url)
     return templates.TemplateResponse(request, "genesets.html", {
         "by_study": by_study,
         "total": len(genesets),
@@ -2678,6 +2697,7 @@ async def genesets_index(request: Request):
         "starcat_total": starcat_total,
         "groups": groups,
         "active_group": active_group,
+        "dataset_annotations": dataset_annotations,
     })
 
 
@@ -2691,9 +2711,14 @@ async def geneset_variability_view(request: Request):
     Registered BEFORE the /{study}/{experiment} route so 'variability' isn't
     swallowed as a study id."""
     from canonical_columns import CANONICAL_TAGS, NUMERICAL_TAGS
+    # Fleet-wide dataset annotations — the column-header renderer uses this to
+    # flag secondary datasets with a `(2)` badge. Same shape as the module view
+    # consumes.
+    dataset_annotations = _build_dataset_annotations(_api_url(request))
     return templates.TemplateResponse(request, "geneset_variability.html", {
         "canonical_tags": list(CANONICAL_TAGS),
         "numerical_tags": sorted(NUMERICAL_TAGS),
+        "dataset_annotations": dataset_annotations,
     })
 
 
@@ -2931,6 +2956,10 @@ def _build_dataset_annotations(api_url: str) -> Dict[str, Dict[str, str]]:
             'collection_name': collection_name,
             'collection_desc': collection_desc,
             'dataset_desc': dataset_desc,
+            # secondary marker — the client renders a `(2)` badge next to the
+            # dataset id when true. Boolean so JS can `if (ann.is_secondary)`
+            # without truthiness surprises on empty strings.
+            'is_secondary': bool(db.get('is_secondary')),
         }
     return result
 
@@ -3014,6 +3043,9 @@ async def geneset_view(request: Request, study: str, experiment: str, name: str)
         "payload": payload,
         "geneset_body_html": geneset_body_html,
         "experiment_body_html": experiment_body_html,
+        # Exposed to the outer geneset.html scope so parent_dataset / scored_in
+        # chips can render a `(2)` badge for secondary datasets.
+        "dataset_annotations": dataset_annotations,
         "mv_ctx": {
             "scope": "module",
             "module_catalog": catalog,
