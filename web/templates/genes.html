@@ -398,7 +398,13 @@
   function dsCell(dbId, stats) {
     var parts = String(dbId).split('/');
     var href = '/browse/' + encodeURIComponent(parts[0] || '') + '/' + encodeURIComponent(parts[1] || '');
-    return '<span class="gv-ds-pop"><a href="' + esc(href) + '">' + esc(dbId) + '</a>' + dsTip(dbId, stats) + '</span>';
+    var ann = DS_ANNOT[dbId] || {};
+    // Small (2) badge for secondary datasets (re-aggregated cells). Rendered
+    // inline after the dataset id link so it reads as a marker on the id.
+    var secondaryBadge = ann.is_secondary
+      ? '<span class="badge-secondary" title="Secondary dataset. Contains cells that also appear in other deposits (re-aggregated collection). Do not double-count if pooling with other datasets.">(2)</span>'
+      : '';
+    return '<span class="gv-ds-pop"><a href="' + esc(href) + '">' + esc(dbId) + '</a>' + secondaryBadge + dsTip(dbId, stats) + '</span>';
   }
 
   // ── plot links per row ──────────────────────────────────────────────────────
@@ -735,7 +741,9 @@
       var meanRankText = meanRankPct != null ? meanRankPct.toFixed(1) + '%' : '—';
       var mnzRankText  = mnzRankPct  != null ? mnzRankPct.toFixed(1)  + '%' : '—';
       var rowStats = { mean: r.mean, mean_nonzero: r.mean_nonzero };
-      return '<tr>'
+      // Grey the whole row for secondary datasets (re-aggregated cells).
+      var trClass = ann.is_secondary ? ' class="secondary-dataset"' : '';
+      return '<tr' + trClass + '>'
         + '<td>' + dsCell(r.db_id, rowStats) + '</td>'
         + '<td>' + orgPill + '</td>'
         + '<td class="muted gv-narrow" style="font-size:11px" title="' + esc(ann.celltype || '') + '">' + esc(ann.celltype || '') + '</td>'
@@ -823,7 +831,12 @@
     }).join('') + '</tr>';
     var body = rows.map(function (r) {
       var denom = cfg.norm === 'rownorm' ? (r.rowmax > 0 ? r.rowmax : 1) : 1;
-      return '<tr><td class="hm-row"><span class="nm">' + esc(r.title || r.db_id) + '</span><span class="pills">' + pillsFor(r.db_id) + '</span></td>'
+      var ann = DS_ANNOT[r.db_id] || {};
+      var trClass = ann.is_secondary ? ' class="secondary-dataset"' : '';
+      var badge = ann.is_secondary
+        ? '<span class="badge-secondary" title="Secondary dataset. Contains cells that also appear in other deposits (re-aggregated collection). Do not double-count if pooling with other datasets.">(2)</span>'
+        : '';
+      return '<tr' + trClass + '><td class="hm-row"><span class="nm">' + esc(r.title || r.db_id) + '</span>' + badge + '<span class="pills">' + pillsFor(r.db_id) + '</span></td>'
         + GENES.map(function (g) { return cellFn(r.vals[g] != null ? r.vals[g] : null, g, r.db_id, denom); }).join('') + '</tr>';
     }).join('');
     document.getElementById('gene-heatmap').innerHTML = '<div class="table-wrap"><table class="hm">' + head + body + '</table></div>';

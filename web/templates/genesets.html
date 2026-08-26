@@ -82,6 +82,7 @@
   </div>
   <div id="gs-content"></div>
   <script id="gs-data" type="application/json">{{ by_study|tojson }}</script>
+  <script id="gs-ds-annot" type="application/json">{{ (dataset_annotations or {})|tojson }}</script>
   {% endif %}
 {% endif %}
 
@@ -219,6 +220,8 @@
   (function () {
     var el = document.getElementById('gs-data'); if (!el) return;
     var data = JSON.parse(el.textContent);   // {study: {experiment: [geneset, ...]}}
+    var annotEl = document.getElementById('gs-ds-annot');
+    var DS_ANNOT = annotEl ? JSON.parse(annotEl.textContent) : {};
     var studySel = document.getElementById('gs-study'), studyStatic = document.getElementById('gs-study-static'),
         expSel = document.getElementById('gs-exp'), expStatic = document.getElementById('gs-exp-static'),
         content = document.getElementById('gs-content');
@@ -228,12 +231,17 @@
       var expHref = '/genesets/' + encodeURIComponent(study) + '/' + encodeURIComponent(exp);
       var rows = list.map(function (g) {
         var href = expHref + '/' + encodeURIComponent(g.name);
-        return '<tr><td class="card-title"><a href="' + href + '">' + _gsEsc(g.display_name || g.name) + '</a></td>'
+        var pdAnn = g.parent_dataset ? (DS_ANNOT[g.parent_dataset] || {}) : {};
+        var pdBadge = pdAnn.is_secondary
+          ? '<span class="badge-secondary" title="Secondary dataset. Contains cells that also appear in other deposits (re-aggregated collection). Do not double-count if pooling with other datasets.">(2)</span>'
+          : '';
+        var trClass = pdAnn.is_secondary ? ' class="secondary-dataset"' : '';
+        return '<tr' + trClass + '><td class="card-title"><a href="' + href + '">' + _gsEsc(g.display_name || g.name) + '</a></td>'
           + '<td data-label="Format" class="muted">' + _gsEsc(g.format) + '</td>'
           + '<td data-label="n genes" class="muted">' + (g.n_genes == null ? '—' : g.n_genes) + '</td>'
           + '<td data-label="Organism" class="muted">' + _gsEsc(g.organism || '—') + '</td>'
           + '<td data-label="Method" class="muted">' + _gsEsc(g.method || '—') + '</td>'
-          + '<td data-label="Parent dataset" class="muted mono" style="font-size:11px">' + _gsEsc(g.parent_dataset || '—') + '</td></tr>';
+          + '<td data-label="Parent dataset" class="muted mono" style="font-size:11px">' + _gsEsc(g.parent_dataset || '—') + pdBadge + '</td></tr>';
       }).join('');
       content.innerHTML = '<div class="gs-count">' + list.length + ' gene set' + (list.length === 1 ? '' : 's') + ' in ' + _gsEsc(study) + ' / ' + _gsEsc(exp)
         + ' — <a href="' + expHref + '">browse all in this collection →</a></div>'

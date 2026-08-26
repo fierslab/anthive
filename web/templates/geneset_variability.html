@@ -166,6 +166,9 @@ geneset's per-cell score co-varies with the tag in that dataset.</p>
   var _numTagList = {{ numerical_tags | tojson }};
   var NUMERIC_TAGS = {};
   _numTagList.forEach(function (t) { NUMERIC_TAGS[t] = 1; });
+  // Fleet-wide dataset annotations — used to flag secondary datasets in the
+  // column headers with a `(2)` badge. Same shape as the module view uses.
+  var DS_ANNOT = {{ dataset_annotations | tojson }};
   var BOUNDED01 = { eta2: 1, omega2: 1, R2: 1 };   // already [0,1]
   var SIGNED = { spearman: 1 };                     // [-1,1] → diverging
 
@@ -292,7 +295,12 @@ geneset's per-cell score co-varies with the tag in that dataset.</p>
     dsList.forEach(function (d) {
       var parts = d.ds.split('/');
       var href = parts.length === 2 ? '/browse/' + encodeURIComponent(parts[0]) + '/' + encodeURIComponent(parts[1]) : null;
-      thead += '<th class="mv-col"><span>' + (href ? '<a href="' + href + '" title="open dataset ' + esc(d.ds) + '">' + esc(d.ds) + '</a>' : esc(d.ds)) + '</span></th>';
+      var ann = DS_ANNOT[d.ds] || {};
+      var badge = ann.is_secondary
+        ? '<span class="badge-secondary" title="Secondary dataset. Contains cells that also appear in other deposits (re-aggregated collection). Do not double-count if pooling with other datasets.">(2)</span>'
+        : '';
+      var thCls = ann.is_secondary ? ' class="mv-col secondary-dataset"' : ' class="mv-col"';
+      thead += '<th' + thCls + '><span>' + (href ? '<a href="' + href + '" title="open dataset ' + esc(d.ds) + '">' + esc(d.ds) + '</a>' : esc(d.ds)) + badge + '</span></th>';
     });
     thead += '</tr></thead>';
 

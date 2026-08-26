@@ -970,9 +970,12 @@ URL hash scheme (feature: back-button / shareable filter state):
       if (dsAnn.contributor) dsTipRows += '<div class="tip-row">Contributor: ' + esc(dsAnn.contributor) + '</div>';
       dsTipRows += '<div class="tip-id">' + esc(r.dataset) + '</div>';
       var dsTip = '<div class="mv-ds-tip">' + dsTipRows + '</div>';
+      var secondaryBadge = dsAnn.is_secondary
+        ? '<span class="badge-secondary" title="Secondary dataset. Contains cells that also appear in other deposits (re-aggregated collection). Do not double-count if pooling with other datasets.">(2)</span>'
+        : '';
       var dsLink = dsHref
-        ? '<span class="mv-ds-pop"><a href="' + esc(dsHref) + '">' + esc(r.dataset) + '</a>' + dsTip + '</span>'
-        : '<span class="mv-ds-pop">' + esc(r.dataset) + dsTip + '</span>';
+        ? '<span class="mv-ds-pop"><a href="' + esc(dsHref) + '">' + esc(r.dataset) + '</a>' + secondaryBadge + dsTip + '</span>'
+        : '<span class="mv-ds-pop">' + esc(r.dataset) + secondaryBadge + dsTip + '</span>';
       var plotSvg = NUMERICAL_TAGS[r.tag] ? SVG_LINE : SVG_BAR;
       var pu = plotUrl(r), uu = umapUrl(r), eu = ecdfUrl(r), hu = hexUrl(r);
       var umapMod = umapModuleUrl(r);
@@ -994,7 +997,8 @@ URL hash scheme (feature: back-button / shareable filter state):
         + (umapMod ? '<a class="umap-badge" data-badge="m" href="' + umapMod + '" title="UMAP coloured by ' + esc(r.module) + ' score">' + SVG_UMAP + '</a>' : '')
         + (uu ? '<a class="umap-badge" data-badge="t" href="' + uu + '" title="UMAP coloured by ' + esc(tagLabel) + '">' + SVG_UMAP + '</a>' : '');
       tds.push('<td class="mv-icons" style="text-align:center">' + plotCell + '</td>');
-      return '<tr>' + tds.join('') + '</tr>';
+      var trCls = dsAnn.is_secondary ? ' class="secondary-dataset"' : '';
+      return '<tr' + trCls + '>' + tds.join('') + '</tr>';
     }).join('');
     rowsEl.innerHTML = html;
     bodyEl.style.display = '';

@@ -3,12 +3,15 @@
 {% block title %}{{ study }}/{{ experiment }}/{{ name }} — geneset{% endblock %}
 
 {% block content %}
-{% from "_macros.html" import breadcrumb %}
+{% from "_macros.html" import breadcrumb, secondary_badge %}
 {{ breadcrumb([
     ("gene sets", "/genesets"),
     (study ~ "/" ~ experiment, "/genesets/" ~ study ~ "/" ~ experiment),
     (name, None)
 ]) }}
+{# is_secondary is per-dataset (not per-geneset). The parent_dataset chip
+   is the one place a dataset appears on this page. Look up its flag. #}
+{% set _ds_annot = dataset_annotations or {} %}
 
 <h1 class="page-title">{{ payload.display_name }}</h1>
 {% if payload.description %}
@@ -25,8 +28,9 @@
     <div>
         {% if payload.direction %}<div><span class="mk">direction</span> {{ payload.direction }}</div>{% endif %}
         {% if payload.parent_dataset %}
-        <div><span class="mk">parent</span>
-            <a href="/browse/{{ payload.parent_dataset.split('/')[0] }}/{{ payload.parent_dataset.split('/')[1] }}">{{ payload.parent_dataset }}</a>
+        {% set _pd_ann = _ds_annot.get(payload.parent_dataset) or {} %}
+        <div{% if _pd_ann.get('is_secondary') %} class="secondary-dataset"{% endif %}><span class="mk">parent</span>
+            <a href="/browse/{{ payload.parent_dataset.split('/')[0] }}/{{ payload.parent_dataset.split('/')[1] }}">{{ payload.parent_dataset }}</a>{{ secondary_badge(_pd_ann.get('is_secondary')) }}
         </div>
         {% endif %}
         <div><span class="mk">experiment</span>
@@ -46,7 +50,8 @@
     <div style="margin-top:6px">
     {% for dbid in payload.scored_in %}
     {% set parts = dbid.split('/') %}
-    {% if parts|length == 2 %}<a href="/browse/{{ parts[0]|urlencode }}/{{ parts[1]|urlencode }}" class="chip">{{ dbid }}</a>{% else %}<span class="chip">{{ dbid }}</span>{% endif %}
+    {% set _si_ann = _ds_annot.get(dbid) or {} %}
+    {% if parts|length == 2 %}<a href="/browse/{{ parts[0]|urlencode }}/{{ parts[1]|urlencode }}" class="chip{% if _si_ann.get('is_secondary') %} secondary-dataset{% endif %}">{{ dbid }}{{ secondary_badge(_si_ann.get('is_secondary')) }}</a>{% else %}<span class="chip">{{ dbid }}</span>{% endif %}
     {% endfor %}
     </div>
 </details>

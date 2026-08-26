@@ -3,12 +3,13 @@
 {% block title %}{{ study }}/{{ experiment }} — genesets{% endblock %}
 
 {% block content %}
-{% from "_macros.html" import breadcrumb %}
+{% from "_macros.html" import breadcrumb, secondary_badge %}
 {{ breadcrumb([
     ("gene sets", "/genesets"),
     (study, ""),
     (experiment, None)
 ]) }}
+{% set _ds_annot = dataset_annotations or {} %}
 
 <h1 class="page-title">{{ metadata.get('name', experiment) }}</h1>
 {% if metadata.get('description') %}
@@ -24,8 +25,9 @@
         {% if metadata.get('method') %}<div><span class="mk">method</span> {{ metadata.method }}</div>{% endif %}
         {% if metadata.get('gene_id_type') %}<div><span class="mk">gene_id_type</span> {{ metadata.gene_id_type }}</div>{% endif %}
         {% if metadata.get('parent_dataset') %}
-        <div><span class="mk">parent dataset</span>
-            <a href="/browse/{{ metadata.parent_dataset.split('/')[0] }}/{{ metadata.parent_dataset.split('/')[1] }}">{{ metadata.parent_dataset }}</a>
+        {% set _pd_ann = _ds_annot.get(metadata.parent_dataset) or {} %}
+        <div{% if _pd_ann.get('is_secondary') %} class="secondary-dataset"{% endif %}><span class="mk">parent dataset</span>
+            <a href="/browse/{{ metadata.parent_dataset.split('/')[0] }}/{{ metadata.parent_dataset.split('/')[1] }}">{{ metadata.parent_dataset }}</a>{{ secondary_badge(_pd_ann.get('is_secondary')) }}
         </div>
         {% endif %}
     </div>
