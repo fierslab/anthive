@@ -10856,6 +10856,13 @@ async def refresh_views(db_id: str):
                 dt = spec.get('dtype')
                 if dt in derive_by_dtype:
                     derive_by_dtype[dt].add(new_col)
+            # obs_constant contributes the same way — if a dataset has no
+            # __obscat and we want to publish a constant categorical col,
+            # we need the empty stub keyed by cell_id.
+            for new_col, spec in (api_config.get('obs_constant') or {}).items():
+                dt = spec.get('dtype')
+                if dt in derive_by_dtype:
+                    derive_by_dtype[dt].add(new_col)
             for view_name, underscore in (('obsnum', '__obsnum'), ('obscat', '__obscat')):
                 exists = conn.execute(
                     "SELECT COUNT(*) FROM information_schema.tables "
@@ -10919,6 +10926,7 @@ async def refresh_views(db_id: str):
         'obs_value_rename': api_config.get('obs_value_rename', {}),
         'obs_value_hidden': api_config.get('obs_value_hidden', {}),
         'obs_derive':       api_config.get('obs_derive', {}),
+        'obs_constant':     api_config.get('obs_constant', {}),
     }
 
 
@@ -10953,6 +10961,7 @@ async def set_api_config(db_id: str, request: Request):
         'obs_value_rename': dict,   # {col: {old_val → new_val}}
         'obs_value_hidden': dict,   # {col: [values to NULL]}
         'obs_derive':       dict,   # {new_col: {source, dtype, map, default}}
+        'obs_constant':     dict,   # {new_col: {value, dtype}}
     }
     for name, expected_type in _FIELDS.items():
         val = body.get(name)

@@ -83,6 +83,7 @@ def build_obs_view_sql(
     value_rename = api.get('obs_value_rename', {}) or {}
     value_hidden = api.get('obs_value_hidden', {}) or {}
     derive_all = api.get('obs_derive', {}) or {}
+    constant_all = api.get('obs_constant', {}) or {}
 
     # Match this view's dtype to the derivations that target it.
     view_dtype = 'categorical' if view_name.endswith('obscat') else 'numerical'
@@ -155,6 +156,20 @@ def build_obs_view_sql(
         if col in hidden:
             continue
         projections.append(_projection_for(col))
+
+    # obs_constant projections — one literal per active constant column.
+    # No source col, no CASE, just SELECT '<value>' AS <alias>. Used to
+    # broadcast a dataset-level annotation (typically a mus.cell_type
+    # scalar) into a per-cell facet-visible column.
+    for new_col, spec in constant_all.items():
+        if spec.get('dtype') != view_dtype:
+            continue
+        raw_value = spec.get('value')
+        if view_dtype == 'numerical':
+            value_sql = 'NULL' if raw_value is None else f'{float(raw_value)}'
+        else:
+            value_sql = 'NULL' if raw_value is None else _sql_str(str(raw_value))
+        projections.append(f"{value_sql} AS {safe_ident(new_col)}")
 
     # obs_derive projections — one CASE expression per active derivation.
     # The alias is validated by safe_ident (strict) since it's a

@@ -329,6 +329,10 @@ def get_api_config(yaml_dict: Dict[str, Any]) -> Dict[str, Any]:
               map:                              # required: value mapping
                 <old_value>: <new_value>        # unmapped values → default
               default: <value>                  # optional: fallback (else NULL)
+          obs_constant:
+            <new_col_name>:                     # publish a new constant-value col
+              value: <value>                    # required: value literal
+              dtype: numerical | categorical    # required: target view
 
     Semantics:
       * ``obs_rename``: internal → public column name. A rename implicitly
@@ -370,6 +374,7 @@ def get_api_config(yaml_dict: Dict[str, Any]) -> Dict[str, Any]:
     value_rename = api.get('obs_value_rename') or {}
     value_hidden = api.get('obs_value_hidden') or {}
     derive = api.get('obs_derive') or {}
+    constant = api.get('obs_constant') or {}
 
     if rename and not isinstance(rename, dict):
         raise MetadataError("ERROR: [Metadata] 'api.obs_rename' must be a mapping")
@@ -381,6 +386,8 @@ def get_api_config(yaml_dict: Dict[str, Any]) -> Dict[str, Any]:
         raise MetadataError("ERROR: [Metadata] 'api.obs_value_hidden' must be a mapping")
     if derive and not isinstance(derive, dict):
         raise MetadataError("ERROR: [Metadata] 'api.obs_derive' must be a mapping")
+    if constant and not isinstance(constant, dict):
+        raise MetadataError("ERROR: [Metadata] 'api.obs_constant' must be a mapping")
 
     # No duplicate public targets for column-level rename
     seen_targets = {}
@@ -493,12 +500,68 @@ def get_api_config(yaml_dict: Dict[str, Any]) -> Dict[str, Any]:
             'default': coerced_default,
         }
 
+    # obs_constant: publish a new column whose value is the same literal
+    # for every row. Semantically equivalent to obs_derive with an empty
+    # map + a default, but does not need a source column and reads cleanly
+    # in the .md. Used mostly to broadcast a dataset-level mus annotation
+    # (cell_type, tissue, ...) into a per-cell facet-visible column.
+    validated_constant: Dict[str, Any] = {}
+    for new_col, spec in constant.items():
+        if not isinstance(new_col, str) or not new_col:
+            raise MetadataError(
+                "ERROR: [Metadata] api.obs_constant keys must be non-empty strings"
+            )
+        if new_col in _RESERVED_VIEW_COLS:
+            raise MetadataError(
+                f"ERROR: [Metadata] api.obs_constant['{new_col}'] collides with a reserved view column name"
+            )
+        if new_col in rename_targets:
+            raise MetadataError(
+                f"ERROR: [Metadata] api.obs_constant['{new_col}'] collides with an obs_rename target"
+            )
+        if new_col in validated_derive:
+            raise MetadataError(
+                f"ERROR: [Metadata] api.obs_constant['{new_col}'] collides with an obs_derive target"
+            )
+        if not isinstance(spec, dict):
+            raise MetadataError(
+                f"ERROR: [Metadata] api.obs_constant['{new_col}'] must be a mapping"
+            )
+        dtype = spec.get('dtype')
+        if dtype not in ('numerical', 'categorical'):
+            raise MetadataError(
+                f"ERROR: [Metadata] api.obs_constant['{new_col}'].dtype must be "
+                f"'numerical' or 'categorical' (got {dtype!r})"
+            )
+        if 'value' not in spec:
+            raise MetadataError(
+                f"ERROR: [Metadata] api.obs_constant['{new_col}'].value is required"
+            )
+        raw_value = spec['value']
+        if raw_value is None:
+            coerced_value: Any = None
+        elif dtype == 'numerical':
+            try:
+                coerced_value = float(raw_value)
+            except (TypeError, ValueError):
+                raise MetadataError(
+                    f"ERROR: [Metadata] api.obs_constant['{new_col}'].value "
+                    f"must be numeric (dtype=numerical)"
+                )
+        else:
+            coerced_value = str(raw_value)
+        validated_constant[new_col] = {
+            'value': coerced_value,
+            'dtype': dtype,
+        }
+
     return {
         'obs_rename': dict(rename),
         'obs_hidden': list(hidden),
         'obs_value_rename': dict(value_rename),
         'obs_value_hidden': dict(value_hidden),
         'obs_derive': validated_derive,
+        'obs_constant': validated_constant,
     }
 
 
