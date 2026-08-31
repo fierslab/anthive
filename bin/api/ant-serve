@@ -11626,6 +11626,351 @@ async def rescan_module_variability():
     }
 
 
+# ── /facets ──────────────────────────────────────────────────────────
+#
+# A facet is a standardized ``ant_*`` obs column that appears across
+# multiple datasets under a common name (ant_disease, ant_sex, ant_donor,
+# ant_braak, ...). The catalog fields (n_cells, n_genes, ...) are NOT
+# facets; only obs columns matching the ant_<tag> pattern qualify.
+#
+# ``/facets`` returns the fleet-wide inventory (one row per distinct
+# ant_* column across all datasets). ``/facets/{name}`` returns the
+# per-facet detail (dataset list, value distribution, signal strength
+# from module_variability.parquet).
+#
+# Two caches: the inventory (recomputed on rescan of the registry) and a
+# per-facet value-distribution cache (recomputed on rescan of the
+# registry).
+
+_FACET_INVENTORY_CACHE: Dict[str, Any] = {
+    "rows": None,          # list of dicts, or None
+    "signature": None,     # (registry cache signature, mv mtime)
+}
+
+
+def _is_facet_column(name: str) -> bool:
+    """A facet is an obs column whose name starts with 'ant_'."""
+    return isinstance(name, str) and name.startswith('ant_') and len(name) > 4
+
+
+def _collect_facet_columns_per_dataset() -> Dict[str, Dict[str, str]]:
+    """Return {db_id: {facet_name: 'categorical'|'numerical'}}.
+
+    Reads from the cached metadata list so no DuckDB scan is needed.
+    """
+    result: Dict[str, Dict[str, str]] = {}
+    for db in registry.list_databases():
+        db_id = db.get('id')
+        if not db_id:
+            continue
+        obs = db.get('obs') or {}
+        facets: Dict[str, str] = {}
+        for col in obs.get('categorical') or []:
+            if _is_facet_column(col):
+                facets[col] = 'categorical'
+        for col in obs.get('numerical') or []:
+            if _is_facet_column(col):
+                # In the rare case a facet appears in both, categorical wins.
+                facets.setdefault(col, 'numerical')
+        if facets:
+            result[db_id] = facets
+    return result
+
+
+def _facet_signal_strength_by_name() -> Dict[str, float]:
+    """For each ant_* facet name, the max ``value`` in module_variability
+    across all rows where tag_column == facet. Missing = 0.0."""
+    import numpy as _np
+    out: Dict[str, float] = {}
+    df = _load_module_variability()
+    if df is None or df.empty:
+        return out
+    working = df[df['tag_column'].str.startswith('ant_', na=False)]
+    if working.empty:
+        return out
+    # Drop non-finite values before max.
+    finite = working[_np.isfinite(working['value'].astype(float, copy=False))]
+    if finite.empty:
+        return out
+    grouped = finite.groupby('tag_column')['value'].max()
+    for tag_column, val in grouped.items():
+        out[str(tag_column)] = float(val)
+    return out
+
+
+def _build_facet_inventory() -> List[Dict[str, Any]]:
+    """One row per distinct ant_* obs column across all datasets."""
+    per_dataset = _collect_facet_columns_per_dataset()
+    signal = _facet_signal_strength_by_name()
+
+    aggregate: Dict[str, Dict[str, Any]] = {}
+    for db_id, facets in per_dataset.items():
+        for facet_name, kind in facets.items():
+            entry = aggregate.setdefault(facet_name, {
+                'facet': facet_name,
+                'kinds': set(),  # collected then reduced to type + mixed flag
+                'datasets': [],
+            })
+            entry['kinds'].add(kind)
+            entry['datasets'].append(db_id)
+
+    rows: List[Dict[str, Any]] = []
+    for facet_name, entry in aggregate.items():
+        kinds = entry['kinds']
+        if kinds == {'categorical'}:
+            type_ = 'categorical'
+            mixed = False
+        elif kinds == {'numerical'}:
+            type_ = 'numerical'
+            mixed = False
+        else:
+            # Majority vote across datasets carrying this facet.
+            cat_n = sum(1 for db_id in entry['datasets']
+                        if per_dataset[db_id][facet_name] == 'categorical')
+            num_n = len(entry['datasets']) - cat_n
+            type_ = 'categorical' if cat_n >= num_n else 'numerical'
+            mixed = True
+        rows.append({
+            'facet': facet_name,
+            'type': type_,
+            'type_mixed': mixed,
+            'n_datasets': len(entry['datasets']),
+            'signal_strength': float(signal.get(facet_name, 0.0)),
+        })
+
+    rows.sort(key=lambda r: (-r['n_datasets'], r['facet']))
+    return rows
+
+
+@app.get("/facets", tags=["facets"])
+async def list_facets():
+    """Return the fleet-wide inventory of ``ant_*`` facets.
+
+    Response shape::
+
+        {
+          "n_facets": int,
+          "facets": [
+            {
+              "facet": "ant_disease",
+              "type": "categorical",
+              "type_mixed": false,
+              "n_datasets": 24,
+              "signal_strength": 0.42,
+            },
+            ...
+          ]
+        }
+
+    ``signal_strength`` is the max variance-explained ``value`` across all
+    rows in ``module_variability.parquet`` where ``tag_column == facet``.
+    Zero when the facet has no signal recorded (or when the parquet is
+    absent).
+    """
+    def _sync() -> List[Dict[str, Any]]:
+        return _build_facet_inventory()
+    rows = await asyncio.to_thread(_sync)
+    return {"n_facets": len(rows), "facets": rows}
+
+
+def _facet_value_distribution(facet_name: str, kind: str,
+                              datasets: List[str],
+                              per_facet_limit: int = 200) -> Dict[str, Any]:
+    """Per-value cell counts + per-dataset carrier counts across datasets.
+
+    Returns::
+
+        {
+          "kind": "categorical",
+          "values": [{"value": "...", "n_cells": int, "n_datasets": int}, ...],
+          "total_cells": int,
+        }
+
+    For numerical facets we return a min/max/mean summary per dataset
+    plus fleet-wide min/max::
+
+        {
+          "kind": "numerical",
+          "fleet_min": float, "fleet_max": float,
+          "per_dataset": [{"db_id": "...", "min": ..., "max": ..., "mean": ...}, ...],
+          "total_cells": int,
+        }
+    """
+    total_cells = 0
+    if kind == 'categorical':
+        # Aggregate value -> (n_cells across datasets, n_datasets carrying it).
+        val_cells: Dict[str, int] = {}
+        val_datasets: Dict[str, int] = {}
+        for db_id in datasets:
+            try:
+                with _pooled_db(db_id) as db:
+                    conn = db._conn
+                    if not _is_facet_column(facet_name):
+                        continue
+                    ident = safe_ident(facet_name)
+                    rows_top = conn.execute(
+                        f"SELECT {ident} AS v, COUNT(*) AS n "
+                        f"FROM obscat WHERE {ident} IS NOT NULL "
+                        f"GROUP BY v ORDER BY n DESC LIMIT ?",
+                        [per_facet_limit],
+                    ).fetchall()
+                    for value, count in rows_top:
+                        key = str(value) if value is not None else ''
+                        val_cells[key] = val_cells.get(key, 0) + int(count)
+                        val_datasets[key] = val_datasets.get(key, 0) + 1
+                        total_cells += int(count)
+            except Exception:
+                # Skip datasets whose duckdb can't be opened or scanned.
+                continue
+        values = [
+            {'value': v, 'n_cells': val_cells[v], 'n_datasets': val_datasets[v]}
+            for v in sorted(val_cells, key=lambda k: (-val_cells[k], k))
+        ]
+        return {
+            'kind': 'categorical',
+            'values': values,
+            'total_cells': total_cells,
+        }
+
+    # numerical
+    import math as _math
+    fleet_min = _math.inf
+    fleet_max = -_math.inf
+    per_dataset: List[Dict[str, Any]] = []
+    for db_id in datasets:
+        try:
+            with _pooled_db(db_id) as db:
+                conn = db._conn
+                ident = safe_ident(facet_name)
+                row = conn.execute(
+                    f"SELECT MIN({ident}), MAX({ident}), AVG({ident}), COUNT({ident}) "
+                    f"FROM obsnum WHERE {ident} IS NOT NULL"
+                ).fetchone()
+                if row is None:
+                    continue
+                mn, mx, avg, cnt = row
+                if mn is None or mx is None or cnt is None or int(cnt) == 0:
+                    continue
+                mn_f, mx_f = float(mn), float(mx)
+                if mn_f < fleet_min:
+                    fleet_min = mn_f
+                if mx_f > fleet_max:
+                    fleet_max = mx_f
+                total_cells += int(cnt)
+                per_dataset.append({
+                    'db_id': db_id,
+                    'min': mn_f,
+                    'max': mx_f,
+                    'mean': float(avg) if avg is not None else None,
+                    'n_cells': int(cnt),
+                })
+        except Exception:
+            continue
+    return {
+        'kind': 'numerical',
+        'fleet_min': (None if fleet_min == _math.inf else fleet_min),
+        'fleet_max': (None if fleet_max == -_math.inf else fleet_max),
+        'per_dataset': per_dataset,
+        'total_cells': total_cells,
+    }
+
+
+@app.get("/facets/{facet_name}", tags=["facets"])
+async def get_facet_detail(
+    facet_name: str,
+    top_modules: int = Query(200, ge=1, le=5000, description="Cap on module-variability rows returned."),
+    per_facet_value_limit: int = Query(200, ge=1, le=2000, description="Cap on distinct categorical values."),
+):
+    """Detailed page data for one facet.
+
+    Returns dataset list, value distribution, and the top module-variability
+    rows filtered on ``tag_column == facet_name``. See the ``/facets``
+    inventory for the list of names.
+
+    404 when the facet name is not present in the catalog.
+    """
+    if not _is_facet_column(facet_name):
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{facet_name}' is not a facet (must start with 'ant_').",
+        )
+
+    per_dataset_kind = _collect_facet_columns_per_dataset()
+    dataset_kinds: List[Tuple[str, str]] = [
+        (db_id, facets[facet_name])
+        for db_id, facets in per_dataset_kind.items()
+        if facet_name in facets
+    ]
+    if not dataset_kinds:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No datasets carry facet '{facet_name}'.",
+        )
+
+    # Type is the majority vote across datasets that carry the facet.
+    cat_n = sum(1 for _, k in dataset_kinds if k == 'categorical')
+    num_n = len(dataset_kinds) - cat_n
+    facet_type = 'categorical' if cat_n >= num_n else 'numerical'
+    type_mixed = 0 < cat_n < len(dataset_kinds)
+
+    datasets_with_type = [d for d, _ in dataset_kinds]
+
+    # Pull dataset metadata (title, group, n_cells) from the cache.
+    dbs_by_id = {d['id']: d for d in registry.list_databases() if d.get('id')}
+    dataset_summaries: List[Dict[str, Any]] = []
+    total_n_cells = 0
+    for db_id, kind in dataset_kinds:
+        db = dbs_by_id.get(db_id, {})
+        n_cells = int(db.get('n_cells') or 0)
+        total_n_cells += n_cells
+        collection = db.get('collection') or {}
+        dataset_summaries.append({
+            'db_id': db_id,
+            'title': db.get('title') or db_id,
+            'group': collection.get('group') or db.get('group_id'),
+            'group_id': db.get('group_id'),
+            'file_id': db.get('file_id'),
+            'n_cells': n_cells,
+            'kind_on_this_dataset': kind,
+        })
+    dataset_summaries.sort(key=lambda d: (-d['n_cells'], d['db_id']))
+
+    def _sync_distribution() -> Dict[str, Any]:
+        return _facet_value_distribution(
+            facet_name, facet_type, datasets_with_type,
+            per_facet_limit=per_facet_value_limit,
+        )
+    distribution = await asyncio.to_thread(_sync_distribution)
+
+    # Filter module_variability on tag_column == facet_name.
+    df = _load_module_variability()
+    modules_rows: List[Dict[str, Any]] = []
+    n_modules_total = 0
+    if df is not None and not df.empty:
+        import numpy as _np
+        slice_ = df[df['tag_column'] == facet_name]
+        if not slice_.empty:
+            slice_ = slice_[_np.isfinite(slice_['value'].astype(float, copy=False))]
+            n_modules_total = int(len(slice_))
+            slice_ = slice_.sort_values('value', ascending=False).head(top_modules)
+            modules_rows = slice_.to_dict(orient='records')
+
+    return {
+        'facet': facet_name,
+        'type': facet_type,
+        'type_mixed': type_mixed,
+        'n_datasets': len(dataset_kinds),
+        'total_n_cells': total_n_cells,
+        'datasets': dataset_summaries,
+        'value_distribution': distribution,
+        'modules': {
+            'rows': modules_rows,
+            'n_total': n_modules_total,
+            'truncated': n_modules_total > len(modules_rows),
+        },
+    }
+
+
 # ── /catalogs ────────────────────────────────────────────────────────
 #
 # Cross-source module catalog view. Currently:
