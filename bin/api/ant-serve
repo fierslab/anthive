@@ -11678,21 +11678,30 @@ def _collect_facet_columns_per_dataset() -> Dict[str, Dict[str, str]]:
 
 
 def _facet_signal_strength_by_name() -> Dict[str, float]:
-    """For each ant_* facet name, the max ``value`` in module_variability
-    across all rows where tag_column == facet. Missing = 0.0."""
+    """For each ant_* facet name, the max variance-explained ``value`` in
+    module_variability across all rows where tag_column == facet. Missing = 0.0.
+
+    Only the scale-invariant [0, 1] variance-explained statistics count as
+    signal here (eta2, omega2, R2, |spearman|). Raw F, mean_score, and total_var
+    are on unrelated scales and would distort ranking.
+    """
     import numpy as _np
     out: Dict[str, float] = {}
     df = _load_module_variability()
     if df is None or df.empty:
         return out
+    keep_stats = {'eta2', 'omega2', 'R2', 'spearman'}
     working = df[df['tag_column'].str.startswith('ant_', na=False)]
+    working = working[working['statistic'].isin(keep_stats)]
     if working.empty:
         return out
-    # Drop non-finite values before max.
-    finite = working[_np.isfinite(working['value'].astype(float, copy=False))]
-    if finite.empty:
+    # Signed spearman contributes symmetrically.
+    abs_values = _np.abs(working['value'].astype(float, copy=False).to_numpy())
+    finite_mask = _np.isfinite(abs_values)
+    working = working.loc[finite_mask].assign(_abs=abs_values[finite_mask])
+    if working.empty:
         return out
-    grouped = finite.groupby('tag_column')['value'].max()
+    grouped = working.groupby('tag_column')['_abs'].max()
     for tag_column, val in grouped.items():
         out[str(tag_column)] = float(val)
     return out
@@ -11942,17 +11951,29 @@ async def get_facet_detail(
         )
     distribution = await asyncio.to_thread(_sync_distribution)
 
-    # Filter module_variability on tag_column == facet_name.
+    # Filter module_variability on tag_column == facet_name. Restrict to the
+    # scale-invariant statistics (eta2, omega2, R2, spearman); raw F / mean_score
+    # /total_var are on different scales and would drown out real signal in the
+    # ranking.
     df = _load_module_variability()
     modules_rows: List[Dict[str, Any]] = []
     n_modules_total = 0
     if df is not None and not df.empty:
         import numpy as _np
+        keep_stats = {'eta2', 'omega2', 'R2', 'spearman'}
         slice_ = df[df['tag_column'] == facet_name]
+        slice_ = slice_[slice_['statistic'].isin(keep_stats)]
         if not slice_.empty:
-            slice_ = slice_[_np.isfinite(slice_['value'].astype(float, copy=False))]
+            values = slice_['value'].astype(float, copy=False).to_numpy()
+            slice_ = slice_.loc[_np.isfinite(values)]
             n_modules_total = int(len(slice_))
-            slice_ = slice_.sort_values('value', ascending=False).head(top_modules)
+            # Sort by absolute value so signed spearman contributes with sign
+            # preserved but ordering reflects strength.
+            slice_ = slice_.assign(_abs=_np.abs(
+                slice_['value'].astype(float, copy=False).to_numpy()
+            ))
+            slice_ = slice_.sort_values('_abs', ascending=False).head(top_modules)
+            slice_ = slice_.drop(columns=['_abs'])
             modules_rows = slice_.to_dict(orient='records')
 
     return {
