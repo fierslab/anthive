@@ -11992,6 +11992,324 @@ async def get_facet_detail(
     }
 
 
+# ── gene-variance-by-facet cache ─────────────────────────────────────────────
+#
+# Small OrderedDict-backed LRU keyed on (db_id, facet, top, fingerprint).
+# The fingerprint (duckdb mtime for local, URL for S3) invalidates entries
+# the moment the underlying data is rebuilt: the new key simply misses.
+# Mirrors the plot cache pattern above so a reader coming from there finds
+# familiar shape.
+
+_GENE_VARIANCE_CACHE_MAX_ENTRIES = 128
+_gene_variance_cache: "_PlotOrderedDict[Tuple[str, str, int, str], dict]" = _PlotOrderedDict()
+_gene_variance_cache_lock = _PlotLock()
+_gene_variance_cache_stats = {'hits': 0, 'misses': 0, 'evictions': 0}
+
+
+def _gene_variance_cache_get(key: Tuple[str, str, int, str]) -> Optional[dict]:
+    with _gene_variance_cache_lock:
+        entry = _gene_variance_cache.get(key)
+        if entry is None:
+            _gene_variance_cache_stats['misses'] += 1
+            return None
+        _gene_variance_cache.move_to_end(key)
+        _gene_variance_cache_stats['hits'] += 1
+        return entry
+
+
+def _gene_variance_cache_put(key: Tuple[str, str, int, str], entry: dict) -> None:
+    with _gene_variance_cache_lock:
+        _gene_variance_cache[key] = entry
+        _gene_variance_cache.move_to_end(key)
+        while len(_gene_variance_cache) > _GENE_VARIANCE_CACHE_MAX_ENTRIES:
+            _gene_variance_cache.popitem(last=False)
+            _gene_variance_cache_stats['evictions'] += 1
+
+
+@app.get("/databases/{db_id:path}/gene-variance-by-facet", tags=["facets"])
+async def gene_variance_by_facet(
+    db_id: str,
+    facet: str = Query(..., description="Name of the ant_* obs column to bucket cells by."),
+    top: int = Query(50, ge=1, le=500, description="Number of top-signal genes to return."),
+):
+    """Rank genes by between-group variance of their mean expression across a facet.
+
+    For one dataset and one ``ant_*`` obs column (categorical or numerical),
+    partitions cells into groups, computes the mean layer value per (gene,
+    group), and ranks genes by the sample variance of those group means.
+    Numerical facets are bucketed into 5 quantile bins (``q1``..``q5``) via
+    DuckDB ``NTILE``.
+
+    Parameters
+    ----------
+    db_id : path
+        Composite ``group/file`` dataset identifier.
+    facet : str
+        Obs column to group by. Must start with ``ant_``.
+    top : int
+        Cap on returned genes, sorted by signal descending. Default 50, max 500.
+
+    Response
+    --------
+    ``{db_id, facet, facet_type, layer, n_groups, groups, n_cells_per_group,
+    n_genes_returned, genes: [{gene, signal, group_means: {grp: mean}}, ...]}``.
+    Genes are ordered by ``signal`` descending. ``signal`` is
+    ``VAR_SAMP(mean_over_cells)`` across groups. Groups with fewer than 2
+    non-null cells are still returned in group sizes but a gene is only
+    included when it has non-zero expression in at least 2 groups.
+    """
+    if not _is_facet_column(facet):
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{facet}' is not a facet (must start with 'ant_').",
+        )
+
+    try:
+        meta = registry.get_database_metadata(db_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    obs = meta.get('obs') or {}
+    cat_cols = set(obs.get('categorical') or [])
+    num_cols = set(obs.get('numerical') or [])
+    if facet in cat_cols:
+        facet_type = 'categorical'
+    elif facet in num_cols:
+        facet_type = 'numerical'
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"facet '{facet}' is not present in dataset '{db_id}'.",
+        )
+
+    layer = meta.get('default_layer') or 'X'
+
+    try:
+        db_url = registry.get_database_path(db_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    fingerprint = _plot_db_fingerprint(db_url)
+
+    cache_key = (db_id, facet, int(top), fingerprint)
+    cached = _gene_variance_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    def _sync() -> Dict[str, Any]:
+        facet_ident = safe_ident(facet)
+        layer_view = safe_ident(f"layer__{layer}")
+
+        with _pooled_db(db_id) as db:
+            conn = db._conn
+
+            # The facet name is the *public* obs column (post rename / derive),
+            # so we go through the `obscat` / `obsnum` views rather than the
+            # underscore tables. These views join on ``cell_name``, so we
+            # bridge back to ``cell_id`` via ``__cells`` for the layer join.
+            obs_view = safe_ident('obsnum' if facet_type == 'numerical' else 'obscat')
+
+            if facet_type == 'numerical':
+                nonnull_row = conn.execute(
+                    f"SELECT COUNT(*) FROM {obs_view} WHERE {facet_ident} IS NOT NULL"
+                ).fetchone()
+                nonnull = int(nonnull_row[0]) if nonnull_row and nonnull_row[0] is not None else 0
+                if nonnull == 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"facet '{facet}' is all-NULL on '{db_id}'.",
+                    )
+                distinct_row = conn.execute(
+                    f"SELECT COUNT(DISTINCT {facet_ident}) FROM {obs_view} WHERE {facet_ident} IS NOT NULL"
+                ).fetchone()
+                distinct_n = int(distinct_row[0]) if distinct_row and distinct_row[0] is not None else 0
+                if distinct_n < 2:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"facet '{facet}' resolves to a single group on '{db_id}'; "
+                            "need at least 2 groups for variance."
+                        ),
+                    )
+
+                group_sizes_sql = f"""
+                    WITH binned AS (
+                        SELECT cell_name,
+                               'q' || CAST(NTILE(5) OVER (ORDER BY {facet_ident}) AS VARCHAR) AS grp
+                        FROM {obs_view}
+                        WHERE {facet_ident} IS NOT NULL
+                    )
+                    SELECT grp, COUNT(*) AS n
+                    FROM binned
+                    GROUP BY grp
+                    ORDER BY grp
+                """
+
+                main_sql = f"""
+                    WITH binned AS (
+                        SELECT cell_name,
+                               'q' || CAST(NTILE(5) OVER (ORDER BY {facet_ident}) AS VARCHAR) AS grp
+                        FROM {obs_view}
+                        WHERE {facet_ident} IS NOT NULL
+                    ),
+                    per_cell AS (
+                        SELECT x.gene_name AS gene, x.value AS val, b.grp AS grp
+                        FROM {layer_view} x
+                        JOIN binned b ON b.cell_name = x.cell_name
+                    ),
+                    group_means AS (
+                        SELECT gene, grp, AVG(val) AS mean, COUNT(*) AS n
+                        FROM per_cell
+                        GROUP BY gene, grp
+                    ),
+                    gene_stats AS (
+                        SELECT gene, VAR_SAMP(mean) AS signal, COUNT(*) AS n_groups
+                        FROM group_means
+                        GROUP BY gene
+                        HAVING COUNT(*) >= 2
+                    ),
+                    top_genes AS (
+                        SELECT gene, signal FROM gene_stats
+                        ORDER BY signal DESC NULLS LAST
+                        LIMIT ?
+                    )
+                    SELECT tg.gene, tg.signal, gm.grp, gm.mean, gm.n
+                    FROM top_genes tg
+                    JOIN group_means gm ON gm.gene = tg.gene
+                    ORDER BY tg.signal DESC, gm.grp
+                """
+            else:
+                nonnull_row = conn.execute(
+                    f"SELECT COUNT(*) FROM {obs_view} WHERE {facet_ident} IS NOT NULL"
+                ).fetchone()
+                nonnull = int(nonnull_row[0]) if nonnull_row and nonnull_row[0] is not None else 0
+                if nonnull == 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"facet '{facet}' is all-NULL on '{db_id}'.",
+                    )
+                distinct_row = conn.execute(
+                    f"SELECT COUNT(DISTINCT {facet_ident}) FROM {obs_view} WHERE {facet_ident} IS NOT NULL"
+                ).fetchone()
+                distinct_n = int(distinct_row[0]) if distinct_row and distinct_row[0] is not None else 0
+                if distinct_n < 2:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"facet '{facet}' resolves to a single group on '{db_id}'; "
+                            "need at least 2 groups for variance."
+                        ),
+                    )
+
+                group_sizes_sql = f"""
+                    SELECT CAST({facet_ident} AS VARCHAR) AS grp, COUNT(*) AS n
+                    FROM {obs_view}
+                    WHERE {facet_ident} IS NOT NULL
+                    GROUP BY grp
+                    ORDER BY grp
+                """
+
+                main_sql = f"""
+                    WITH cell_grp AS (
+                        SELECT o.cell_name AS cell_name,
+                               CAST(o.{facet_ident} AS VARCHAR) AS grp
+                        FROM {obs_view} o
+                        WHERE o.{facet_ident} IS NOT NULL
+                    ),
+                    per_cell AS (
+                        SELECT x.gene_name AS gene, x.value AS val, cg.grp AS grp
+                        FROM {layer_view} x
+                        JOIN cell_grp cg ON cg.cell_name = x.cell_name
+                    ),
+                    group_means AS (
+                        SELECT gene, grp, AVG(val) AS mean, COUNT(*) AS n
+                        FROM per_cell
+                        GROUP BY gene, grp
+                    ),
+                    gene_stats AS (
+                        SELECT gene, VAR_SAMP(mean) AS signal, COUNT(*) AS n_groups
+                        FROM group_means
+                        GROUP BY gene
+                        HAVING COUNT(*) >= 2
+                    ),
+                    top_genes AS (
+                        SELECT gene, signal FROM gene_stats
+                        ORDER BY signal DESC NULLS LAST
+                        LIMIT ?
+                    )
+                    SELECT tg.gene, tg.signal, gm.grp, gm.mean, gm.n
+                    FROM top_genes tg
+                    JOIN group_means gm ON gm.gene = tg.gene
+                    ORDER BY tg.signal DESC, gm.grp
+                """
+
+            size_rows = conn.execute(group_sizes_sql).fetchall()
+            n_cells_per_group = {str(grp): int(n) for grp, n in size_rows}
+
+            rows = conn.execute(main_sql, [int(top)]).fetchall()
+
+        # Pivot to per-gene records preserving signal order.
+        gene_order: List[str] = []
+        gene_signal: Dict[str, float] = {}
+        gene_means: Dict[str, Dict[str, float]] = {}
+        for gene, signal, grp, mean, _n in rows:
+            if gene not in gene_signal:
+                gene_order.append(gene)
+                gene_signal[gene] = float(signal) if signal is not None else 0.0
+                gene_means[gene] = {}
+            gene_means[gene][str(grp)] = float(mean) if mean is not None else 0.0
+
+        genes_payload = [
+            {
+                'gene': gene,
+                'signal': gene_signal[gene],
+                'group_means': gene_means[gene],
+            }
+            for gene in gene_order
+        ]
+
+        groups_sorted = sorted(n_cells_per_group.keys())
+
+        return {
+            'db_id': db_id,
+            'facet': facet,
+            'facet_type': facet_type,
+            'layer': layer,
+            'n_groups': len(groups_sorted),
+            'groups': groups_sorted,
+            'n_cells_per_group': n_cells_per_group,
+            'n_genes_returned': len(genes_payload),
+            'genes': genes_payload,
+        }
+
+    try:
+        result = await asyncio.to_thread(_sync)
+    except HTTPException:
+        raise
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"gene-variance-by-facet failed: {exc}")
+
+    _gene_variance_cache_put(cache_key, result)
+    return result
+
+
+@app.get("/admin/gene-variance-cache/stats", tags=["admin"])
+async def gene_variance_cache_stats():
+    """Return the gene-variance-by-facet cache stats (size / hits / misses)."""
+    with _gene_variance_cache_lock:
+        size = len(_gene_variance_cache)
+    hits = _gene_variance_cache_stats['hits']
+    misses = _gene_variance_cache_stats['misses']
+    return {
+        'size':         size,
+        'max_entries':  _GENE_VARIANCE_CACHE_MAX_ENTRIES,
+        'hits':         hits,
+        'misses':       misses,
+        'evictions':    _gene_variance_cache_stats['evictions'],
+    }
+
+
 # ── /catalogs ────────────────────────────────────────────────────────
 #
 # Cross-source module catalog view. Currently:
