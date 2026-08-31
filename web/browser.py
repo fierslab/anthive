@@ -2443,9 +2443,9 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
             "dataset": db_id,
             "id": "mv-modules-tab",
             # For the empty-state branching in _module_view.html: does this
-            # dataset carry any canonical (`ant_*`) obs columns at all?
-            # No canonical tags → variability cannot be computed for it, so
-            # the message needs to say that plainly rather than "computing…".
+            # dataset carry any facet (`ant_*`) obs columns at all?
+            # No facets means variability cannot be computed, so the message
+            # needs to say that plainly rather than "computing…".
             "has_canonical_tags": any(
                 str(col).startswith("ant_")
                 for col in (obs.get("categorical", []) or [])
@@ -2520,7 +2520,7 @@ async def privacy_view(request: Request):
 @router.get("/help", response_class=HTMLResponse)
 async def help_view(request: Request):
     """User-facing cheat-sheet: what the site is, how to navigate, what the
-    dataset tabs mean, canonical tags, icons, and where preferences live.
+    dataset tabs mean, facets, icons, and where preferences live.
 
     Reachable from the topbar 'Help' link. Purely informational — no
     server-side interactivity, no admin gate. Live catalogue counts are best-

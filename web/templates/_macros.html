@@ -237,16 +237,16 @@
 
 {# col_label(name): display transform for obs column names.
 
-   canonical (ant_*) → bold stripped label + subdued "canonical" pill + hover ⓘ
-   non-canonical      → plain text, unchanged
+   facet (ant_*) columns render as a bold stripped label plus a subdued
+   "facet" pill and a hover tooltip. Other names pass through as plain text.
 
-   The ant_* value is always the real form used in URLs/API calls — this macro
-   only affects what the user sees on screen.
+   The ant_* value is always the real form used in URLs and API calls. This
+   macro only affects what the user sees on screen.
 #}
 {% macro col_label(name) -%}
 {%- set _ci = obs_col_info(name) -%}
 {%- if _ci.is_canonical -%}
-<span class="canonical-col" title="canonical annotation `{{ name }}`, standardised across datasets"><b>{{ _ci.display_name }}</b><span class="canonical-pill">canonical</span></span>
+<span class="facet-col" title="facet annotation `{{ name }}`, standardised across datasets"><b>{{ _ci.display_name }}</b><span class="facet-pill">facet</span></span>
 {%- else -%}
 {{ name }}
 {%- endif -%}

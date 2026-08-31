@@ -2008,15 +2008,15 @@
 
   // ── chip label formatter — mirrors the Jinja col_label macro ────────────
   // Returns HTML to display as a chip label.  ant_* columns get a bold
-  // stripped label + canonical pill; everything else is plain-escaped text.
+  // stripped label plus a facet pill; everything else is plain-escaped text.
   // The actual `value` submitted to the API always stays the raw ant_* name.
   function formatColLabel(name) {
     function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function(c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
     if (!name || !name.startsWith('ant_')) return esc(name);
     var tag = name.slice(4);
-    return '<span class="canonical-col" title="canonical annotation `' + esc(name) + '`, standardised across datasets">'
+    return '<span class="facet-col" title="facet annotation `' + esc(name) + '`, standardised across datasets">'
       + '<b>' + esc(tag) + '</b>'
-      + '<span class="canonical-pill">canonical</span>'
+      + '<span class="facet-pill">facet</span>'
       + '</span>';
   }
 

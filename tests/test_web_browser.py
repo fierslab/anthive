@@ -2369,7 +2369,7 @@ def test_help_page_renders(client):
     assert "anthive" in lowered
     assert "genesets" in lowered
     assert "gene atlas" in lowered
-    assert "canonical" in lowered
+    assert "facet" in lowered
     # Cross-links into the actual routes
     assert 'href="/"' in resp.text
     assert 'href="/genesets"' in resp.text
@@ -3263,15 +3263,15 @@ def test_obs_col_info_all_canonical_tags(col_name):
     assert info['display_name'] == col_name[4:]   # strip 'ant_'
 
 
-# ── route tests: canonical-pill rendering in dataset obs tables ────────────────
+# ── route tests: facet-pill rendering in dataset obs tables ───────────────────
 
 def test_dataset_canonical_col_renders_pill(client):
-    """ant_braak in the obs list → canonical-pill + bold stripped label in HTML."""
+    """ant_braak in the obs list renders as facet-pill + bold stripped label in HTML."""
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
     html = resp.text
     # The pill class must appear (ant_braak, ant_cluster, ant_age are all in _INFO)
-    assert 'canonical-pill' in html
+    assert 'facet-pill' in html
 
 
 def test_dataset_canonical_col_has_bold_tag_label(client):
@@ -3287,7 +3287,7 @@ def test_dataset_canonical_col_ant_prefix_not_in_label(client):
     import re as _re
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
-    # Extract all bold-tag label texts from canonical-col spans
+    # Extract all bold-tag label texts from facet-col spans
     labels = _re.findall(r'<b>(.*?)</b>', resp.text)
     canonical_labels = [lb for lb in labels if 'ant_' in lb]
     assert canonical_labels == [], (
@@ -3300,30 +3300,30 @@ def test_dataset_canonical_col_title_contains_full_name(client):
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
     assert 'ant_braak' in resp.text
-    # The title attribute on the canonical-col span carries the full name
-    assert 'title="canonical annotation `ant_braak`' in resp.text
+    # The title attribute on the facet-col span carries the full name
+    assert 'title="facet annotation `ant_braak`' in resp.text
 
 
 def test_dataset_non_canonical_col_no_pill(client):
-    """cell_type and sample (non-canonical) must NOT have a canonical-pill."""
+    """cell_type and sample (non-facet) must NOT have a facet-pill."""
     import re as _re
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
     html = resp.text
-    # Locate the cell_type row and confirm no canonical-pill near it
-    # (we check the colname td specifically, not the whole page)
+    # Locate the cell_type row and confirm no facet-pill near it.
+    # We check the colname td specifically, not the whole page.
     cell_type_idx = html.find('>cell_type<')
     assert cell_type_idx != -1, "cell_type colname not found in page"
     # pill should not appear in close proximity to plain cell_type label
     surrounding = html[max(0, cell_type_idx - 100): cell_type_idx + 200]
-    assert 'canonical-pill' not in surrounding
+    assert 'facet-pill' not in surrounding
 
 
 def test_dataset_canonical_col_css_present(client):
-    """base.html must define the .canonical-pill CSS rule."""
+    """base.html must define the .facet-pill CSS rule."""
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
-    assert '.canonical-pill' in resp.text
+    assert '.facet-pill' in resp.text
 
 
 def test_dataset_canonical_col_data_name_attr_unmodified(client):
@@ -3828,10 +3828,10 @@ def test_dataset_html_activatetab_preserves_mv_suffix(client):
 
 def test_module_view_two_filter_rows(client):
     """Filter controls must be split into two .mv-filter-row elements.
-    Row 1: dataset · module · canonical tag (in that order).
-    Row 2: group · cell type · tissue · technology · biosample · n_cells.
-    (Method widget was removed 2026-08-23 alongside the default-to-scanpy
-    change.)
+    Row 1 holds dataset, module, and facet (in that order).
+    Row 2 holds group, cell type, tissue, technology, biosample, n_cells.
+    The method widget was removed 2026-08-23 alongside the default-to-scanpy
+    change.
     """
     resp = client.get("/genesets/StudyX/Exp1")
     assert resp.status_code == 200
@@ -3839,14 +3839,14 @@ def test_module_view_two_filter_rows(client):
     assert html.count('class="mv-filter-row') >= 2, (
         "Expected at least two .mv-filter-row elements"
     )
-    # Row 1 must contain dataset, module, and canonical tag (in DOM order).
+    # Row 1 must contain dataset, module, and facet (in DOM order).
     row1_start = html.find('mv-filter-row-1')
     row1_end   = html.find('mv-filter-row-2')
     assert row1_start != -1 and row1_end != -1
     row1 = html[row1_start:row1_end]
     assert 'mv-flt-dataset-w' in row1, "Row 1 must have dataset mff widget"
     assert 'mv-flt-module-w'  in row1, "Row 1 must have module mff widget"
-    assert 'mv-flt-tag-w'     in row1, "Row 1 must have canonical tag mff widget"
+    assert 'mv-flt-tag-w'     in row1, "Row 1 must have facet mff widget"
     # Row 2 must contain the annotation facets + n_cells.
     row2_start = row1_end
     row2_end   = html.find('mv-summary-row', row2_start)
@@ -3885,19 +3885,21 @@ def test_module_view_sort_state_and_indicators(client):
     )
 
 
-# ── Ask 3: canonical tag label ────────────────────────────────────────────────
+# ── Ask 3: facet label ────────────────────────────────────────────────────────
 
-def test_module_view_canonical_tag_label(client):
-    """The tag filter label must read 'canonical tag' (not bare 'tag').
-    The table column header must also say 'canonical tag'.
+def test_module_view_facet_label(client):
+    """The tag filter label must read 'facet' (not bare 'tag').
+    The table column header must also say 'facet'.
     """
     resp = client.get("/genesets/StudyX/Exp1")
     assert resp.status_code == 200
     html = resp.text
-    assert 'canonical tag' in html, "Label 'canonical tag' not found in filter row"
-    # Column header: th contains 'canonical tag' text.
-    assert '>canonical tag<' in html or 'canonical tag</th' in html or 'canonical tag<' in html, (
-        "Column header for tag column must say 'canonical tag'"
+    assert '>facet<' in html or 'facet</label' in html or 'facet <span' in html, (
+        "Label 'facet' not found in filter row"
+    )
+    # Column header: th contains 'facet' text.
+    assert '>facet<' in html or 'facet</th' in html, (
+        "Column header for tag column must say 'facet'"
     )
 
 
