@@ -1407,8 +1407,10 @@ document.addEventListener('DOMContentLoaded', function() {
             var _defaultEmb = {{ default_embedding | tojson }};
 
             // ── Sparkline helper for gene rows (pct / rank_mean / rank_std) ──
-            // stdRankFrac: pre-computed fraction 0-1 for this gene's std rank
-            //              within the displayed panel (undefined → skip).
+            // stdRankFrac is IGNORED (kept in the signature for old call sites);
+            // variability is now rendered by refreshVarSparklines() using a
+            // single shared max across every currently displayed row, so the
+            // curated batch and the top-var batch share one y-axis.
             function setGeneSparklines(row, statsObj, stdRankFrac) {
                 var pct = statsObj.pct_nonzero != null ? statsObj.pct_nonzero : null;
                 // pct track: 0-100 absolute
@@ -1417,9 +1419,33 @@ document.addEventListener('DOMContentLoaded', function() {
                 // rank_mean: server returns 0-1 percentile rank among ALL genes
                 var rankTrack = row.querySelector('.ss[data-stat="rank"]');
                 if (rankTrack && statsObj.rank_mean != null) setSsMark(rankTrack, statsObj.rank_mean);
-                // variability: rank of std within the displayed panel (0-1)
-                var varTrack = row.querySelector('.ss[data-stat="var"]');
-                if (varTrack && stdRankFrac != null) setSsMark(varTrack, stdRankFrac);
+                // variability sparkline is set by refreshVarSparklines() below.
+            }
+
+            // Compute a shared std-max across every currently rendered row,
+            // then set every .ss[data-stat="var"] marker to std / maxStd. This
+            // is what makes the curated batch and the top-var batch share one
+            // scale: whether a row came from curated or top-var (or a search),
+            // it competes with every other row on the same axis.
+            function refreshVarSparklines() {
+                var tbody = document.querySelector('#obs-tbl-genes tbody');
+                if (!tbody) return;
+                var allRows = Array.from(tbody.querySelectorAll('tr.gene-item'));
+                var maxStd = 0;
+                allRows.forEach(function (row) {
+                    var v = parseFloat(row.dataset.var);
+                    if (!isNaN(v) && v > maxStd) maxStd = v;
+                });
+                if (!(maxStd > 0)) return;
+                allRows.forEach(function (row) {
+                    var v = parseFloat(row.dataset.var);
+                    var varTrack = row.querySelector('.ss[data-stat="var"]');
+                    if (!varTrack) return;
+                    if (isNaN(v)) return;
+                    setSsMark(varTrack, v / maxStd);
+                    varTrack.title = 'variability: std ' + fnum(v)
+                        + ' (of max ' + fnum(maxStd) + ' in table)';
+                });
             }
 
             // Build a gene result row HTML (for both search results, top-var, and curated).
@@ -1536,14 +1562,15 @@ document.addEventListener('DOMContentLoaded', function() {
                 var mainTbody = document.querySelector('#obs-tbl-genes tbody');
                 if (!mainTbody || !statsArr.length) return;
                 var topVar = statsArr.slice(0, 10);
-                var tvStdRankMap = computeStdRanks(topVar);
                 // Insert rows. makeGeneRow returns HTML for a <tr>; use a
                 // temporary tbody to parse and move nodes so we don't clobber
-                // curated rows already in place.
+                // curated rows already in place. The stdRankFrac argument to
+                // makeGeneRow is a no-op now (refreshVarSparklines does the
+                // shared-max scaling once every row is in the DOM).
                 var frag = document.createElement('tbody');
                 frag.innerHTML = topVar.map(function (x) {
                     var isFav = _favSet[x.gene.toLowerCase()];
-                    return makeGeneRow(x.gene, x, isFav ? _HEART_HTML : '', tvStdRankMap[x.gene.toLowerCase()]);
+                    return makeGeneRow(x.gene, x, isFav ? _HEART_HTML : '', null);
                 }).join('');
                 var tvByGene = {};
                 topVar.forEach(function (x) { tvByGene[x.gene.toLowerCase()] = x; });
@@ -1555,9 +1582,11 @@ document.addEventListener('DOMContentLoaded', function() {
                     mainTbody.appendChild(tvRow);
                     var s = tvByGene[(tvRow.dataset.gene || '').toLowerCase()];
                     if (!s) return;
-                    var frac = tvStdRankMap[(tvRow.dataset.gene || '').toLowerCase()];
-                    setGeneSparklines(tvRow, s, frac != null ? frac : null);
+                    setGeneSparklines(tvRow, s, null);
                 });
+                // Every insertion rebalances the shared-max variability axis
+                // over the full table so the two batches share one scale.
+                refreshVarSparklines();
             }
 
             // Elapsed-timer helper for the Genes tab spinner. Reveals the
@@ -1645,8 +1674,11 @@ document.addEventListener('DOMContentLoaded', function() {
                         if (!d || !d.stats) return;
                         d.stats.forEach(function (s) { curatedByGene[s.gene.toLowerCase()] = s; });
 
-                        var stdRankMap = computeStdRanks(d.stats);
-                        hydrateRows(rows, curatedByGene, stdRankMap);
+                        // stdRankMap is a legacy input to hydrateRows; the
+                        // variability sparkline is set later by
+                        // refreshVarSparklines against a shared table-wide max.
+                        hydrateRows(rows, curatedByGene, {});
+                        refreshVarSparklines();
                         // Sort the table now that variability values are hydrated.
                         applySortToTable();
 
@@ -1851,10 +1883,14 @@ document.addEventListener('DOMContentLoaded', function() {
                                 if (!sd || !sd.stats) return;
                                 var byG = {};
                                 sd.stats.forEach(function (s) { byG[s.gene.toLowerCase()] = s; });
-                                var srStdRankMap = computeStdRanks(sd.stats);
                                 var newRowEls = Array.from(genesTbody.querySelectorAll('tr.gene-item'))
                                     .filter(function (r) { return byG[(r.dataset.gene || '').toLowerCase()]; });
-                                hydrateRows(newRowEls, byG, srStdRankMap);
+                                hydrateRows(newRowEls, byG, {});
+                                // Rescale every variability sparkline against
+                                // the new table-wide max (a low-variability
+                                // search hit will just shift the marker inward,
+                                // which is intentional and defensible).
+                                refreshVarSparklines();
                                 // Re-sort now that stats are populated (only if
                                 // the sort is on a numeric column).
                                 if (geneSortState.col !== 'gene' && geneSortState.col !== 'star') {
