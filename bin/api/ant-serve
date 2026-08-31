@@ -11691,8 +11691,10 @@ def _facet_signal_strength_by_name() -> Dict[str, float]:
     if df is None or df.empty:
         return out
     keep_stats = {'eta2', 'omega2', 'R2', 'spearman'}
+    keep_sources = {'geneset', 'ucell'}
     working = df[df['tag_column'].str.startswith('ant_', na=False)]
     working = working[working['statistic'].isin(keep_stats)]
+    working = working[working['source'].isin(keep_sources)]
     if working.empty:
         return out
     # Signed spearman contributes symmetrically.
@@ -11961,8 +11963,10 @@ async def get_facet_detail(
     if df is not None and not df.empty:
         import numpy as _np
         keep_stats = {'eta2', 'omega2', 'R2', 'spearman'}
+        keep_sources = {'geneset', 'ucell'}
         slice_ = df[df['tag_column'] == facet_name]
         slice_ = slice_[slice_['statistic'].isin(keep_stats)]
+        slice_ = slice_[slice_['source'].isin(keep_sources)]
         if not slice_.empty:
             values = slice_['value'].astype(float, copy=False).to_numpy()
             slice_ = slice_.loc[_np.isfinite(values)]
