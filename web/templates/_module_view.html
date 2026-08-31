@@ -440,6 +440,52 @@ URL hash scheme (feature: back-button / shareable filter state):
   var NUMERICAL_TAGS = { braak: 1, age: 1, pmi: 1 };
   var METHOD_LABEL = { geneset: 'scanpy', ucell: 'UCell' };
 
+  // Authoritative per-dataset kind lookup, only populated when CTX.scope
+  // is 'dataset' (dataset.html passes obs.numerical / obs.categorical
+  // straight through mv_ctx). A tag that is "canonically numerical" like
+  // age can still be stored categorically on a specific dataset (e.g.
+  // P26/HMI stores ant_age as "young"/"old"), so the global NUMERICAL_TAGS
+  // heuristic is wrong for it. When these sets are populated they win over
+  // any other heuristic.
+  var DS_OBS_NUM = new Set(CTX.obs_numerical || []);
+  var DS_OBS_CAT = new Set(CTX.obs_categorical || []);
+
+  // Statistics that are only computed for numerical tags vs only for
+  // categorical tags. Used as a fallback when DS_OBS_* is empty (the
+  // cross-dataset views on geneset.html / geneset_experiment.html).
+  var NUM_ONLY_STATS = { spearman: 1, R2: 1 };
+  var CAT_ONLY_STATS = { omega2: 1, eta2: 1, F: 1, mean_range: 1 };
+
+  /**
+   * Classify a row's tag column as 'numerical' or 'categorical' for THIS
+   * dataset. Returns null if the answer is genuinely unknown (in which case
+   * callers should skip the ambiguous link rather than emit a broken one).
+   *
+   * Resolution order:
+   *  1. Dataset-scoped obs kind lookup (authoritative when populated).
+   *  2. Row's own statistic (spearman/R2 -> num, F/omega2/eta2 -> cat,
+   *     n_categories > 0 -> cat).
+   *  3. Global NUMERICAL_TAGS heuristic on row.tag.
+   *
+   * @param {object} row - a module-variability row.
+   * @returns {'numerical' | 'categorical' | null}
+   */
+  function resolveTagKind(row) {
+    var tagCol = row && (row.tag_column || row.tag);
+    if (tagCol && DS_OBS_NUM.size + DS_OBS_CAT.size > 0) {
+      if (DS_OBS_NUM.has(tagCol)) return 'numerical';
+      if (DS_OBS_CAT.has(tagCol)) return 'categorical';
+    }
+    var stat = row && row.statistic;
+    if (stat && NUM_ONLY_STATS[stat]) return 'numerical';
+    if (stat && CAT_ONLY_STATS[stat]) return 'categorical';
+    if (row && typeof row.n_categories === 'number' && row.n_categories > 0) {
+      return 'categorical';
+    }
+    if (row && row.tag && NUMERICAL_TAGS[row.tag]) return 'numerical';
+    return null;
+  }
+
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
 
   /**
@@ -474,7 +520,12 @@ URL hash scheme (feature: back-button / shareable filter state):
   function plotUrl(row) {
     var col = scoreColFor(row); var b = baseUrl(row); if (!col || !b) return null;
     var tagCol = row.tag_column || row.tag;
-    var geom = NUMERICAL_TAGS[row.tag] ? 'scatter' : 'violin';
+    // Pick geom by the ACTUAL kind of tagCol on this dataset. A categorical
+    // x on /plot/scatter blows up ("Embedding 'ant_age' not found") because
+    // the scatter handler falls through to the embedding path. Box is the
+    // right choice for a numerical y grouped by categorical x.
+    var kind = resolveTagKind(row);
+    var geom = kind === 'numerical' ? 'scatter' : 'box';
     return b + '/plot/' + geom + '?x=' + encodeURIComponent(tagCol) + '&y=' + encodeURIComponent(col);
   }
   // UMAP coloured by the raw tag column (categorical or numerical).
@@ -503,19 +554,19 @@ URL hash scheme (feature: back-button / shareable filter state):
   }
 
   // Build an ECDF plot URL using the module score as x-axis, categorical tag as hue.
-  // Only for non-numerical (categorical) tags.
+  // Only meaningful when the tag column is categorical on this dataset.
   function ecdfUrl(row) {
     var col = scoreColFor(row); var b = baseUrl(row); if (!col || !b) return null;
-    if (NUMERICAL_TAGS[row.tag]) return null;  // numerical tags → not an ECDF-by-category plot
+    if (resolveTagKind(row) !== 'categorical') return null;
     var tagCol = row.tag_column || row.tag;
     return b + '/plot/ecdf?x=' + encodeURIComponent(col) + '&color=' + encodeURIComponent(tagCol);
   }
 
   // Build a hexbin density URL: module score on the default UMAP embedding.
-  // Only for numerical tags — density requires a continuous color axis.
+  // Continuous color needs a numerical tag; skip on categorical.
   function hexUrl(row) {
     var col = scoreColFor(row); var b = baseUrl(row); if (!col || !b) return null;
-    if (!NUMERICAL_TAGS[row.tag]) return null;
+    if (resolveTagKind(row) !== 'numerical') return null;
     return b + '/plot/hexbin?embedding=X_umap&color=' + encodeURIComponent(col);
   }
 
@@ -1054,7 +1105,7 @@ URL hash scheme (feature: back-button / shareable filter state):
       var dsLink = dsHref
         ? '<span class="mv-ds-pop"><a href="' + esc(dsHref) + '">' + esc(r.dataset) + '</a>' + secondaryBadge + dsTip + '</span>'
         : '<span class="mv-ds-pop">' + esc(r.dataset) + secondaryBadge + dsTip + '</span>';
-      var plotSvg = NUMERICAL_TAGS[r.tag] ? SVG_LINE : SVG_BAR;
+      var plotSvg = resolveTagKind(r) === 'numerical' ? SVG_LINE : SVG_BAR;
       var pu = plotUrl(r), uu = umapUrl(r), eu = ecdfUrl(r), hu = hexUrl(r);
       var umapMod = umapModuleUrl(r);
       var tagLabel = r.tag_column || r.tag;

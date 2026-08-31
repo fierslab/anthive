@@ -2451,6 +2451,13 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
                 for col in (obs.get("categorical", []) or [])
                           + (obs.get("numerical", []) or [])
             ),
+            # Authoritative kind lookup for THIS dataset's obs columns.
+            # _module_view.html's plotUrl uses these to pick scatter vs box
+            # per-tag_column, so a tag that's "canonically numerical" but
+            # stored categorically on this dataset (e.g. ant_age as
+            # "young"/"old") gets a box plot link, not a broken scatter.
+            "obs_numerical":   list(obs.get("numerical", []) or []),
+            "obs_categorical": list(obs.get("categorical", []) or []),
         },
     })
 
