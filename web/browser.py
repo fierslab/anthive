@@ -2764,6 +2764,60 @@ async def geneset_starcat_module_view(request: Request, catalog_id: str, module_
     })
 
 
+@router.get("/facets", response_class=HTMLResponse)
+async def facets_index(request: Request):
+    """Top-level browser for the fleet's ``ant_*`` obs columns.
+
+    One row per distinct facet name across all datasets. The heavy lifting
+    happens server-side in ant-serve's ``/facets`` endpoint; this route
+    just renders the table shell around the JSON payload.
+    """
+    api_url = _api_url(request)
+    error: Optional[str] = None
+    facets: List[Dict[str, Any]] = []
+    try:
+        payload = _api_get(api_url, "/facets")
+        facets = payload.get("facets") or []
+    except Exception as exc:
+        error = f"Failed to load facets from ant-serve: {exc}"
+    return templates.TemplateResponse(request, "facets.html", {
+        "facets": facets,
+        "n_facets": len(facets),
+        "error": error,
+    })
+
+
+@router.get("/facets/{facet_name}", response_class=HTMLResponse)
+async def facet_detail_view(request: Request, facet_name: str):
+    """Per-facet drilldown page.
+
+    Header stats, value distribution across all carriers, and the top
+    variable genesets from ``module_variability.parquet`` filtered on
+    ``tag_column == facet``.
+    """
+    api_url = _api_url(request)
+    error: Optional[str] = None
+    facet_data: Dict[str, Any] = {}
+    try:
+        facet_data = _api_get(api_url, f"/facets/{url_quote(facet_name, safe='')}")
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else None
+        if status == 404:
+            return templates.TemplateResponse(request, "facets.html", {
+                "facets": [],
+                "n_facets": 0,
+                "error": f"Facet '{facet_name}' is not present in the catalog.",
+            }, status_code=404)
+        error = f"Failed to load facet '{facet_name}': {exc}"
+    except Exception as exc:
+        error = f"Failed to load facet '{facet_name}': {exc}"
+    return templates.TemplateResponse(request, "facet.html", {
+        "facet_name": facet_name,
+        "facet": facet_data,
+        "error": error,
+    })
+
+
 def _flatten_annotation_field(value: object) -> str:
     """Flatten a possibly-list annotation value to a comma-joined string.
 

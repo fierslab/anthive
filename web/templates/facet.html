@@ -1,0 +1,325 @@
+{% extends "base.html" %}
+
+{% block title %}{{ facet_name }} · facets · anthive{% endblock %}
+
+{% block content %}
+<style>
+  .facet-header { margin: 4px 0 12px; }
+  .facet-header .strip { color: var(--text-muted); font-family: var(--font-mono); font-size: 13px; margin-left: 8px; }
+  .type-pill {
+    display: inline-block; padding: 0 6px; border-radius: 3px; font-size: 10px;
+    background: #eef2f5; color: #475569; border: 1px solid #cbd5e1;
+    vertical-align: middle;
+  }
+  .type-pill.numerical { background: #eef8f4; color: #14664b; border-color: #a7d7c0; }
+  .type-pill.mixed { background: #fff7e0; color: #7a5b00; border-color: #eed08c; }
+  .card { border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; margin: 14px 0; background: #fff; }
+  .card h2 { font-size: 13px; margin-bottom: 6px; text-transform: uppercase; letter-spacing: .3px; color: var(--text); font-weight: 600; }
+  .note { font-size: 12px; color: var(--text-muted); margin: 4px 0 8px; max-width: 780px; }
+  .val-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .val-table th, .val-table td { padding: 5px 8px; border-bottom: 1px solid var(--border-light); text-align: left; }
+  .val-table th { font-size: 10px; text-transform: uppercase; letter-spacing: .3px; color: var(--text-muted); font-weight: 500; }
+  .val-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .val-bar {
+    display: inline-block; height: 8px; background: var(--link); opacity: .7;
+    vertical-align: middle; border-radius: 2px; margin-right: 6px;
+  }
+  .mod-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .mod-table th, .mod-table td { padding: 4px 8px; border-bottom: 1px solid var(--border-light); text-align: left; vertical-align: top; }
+  .mod-table th { font-size: 10px; text-transform: uppercase; letter-spacing: .3px; color: var(--text-muted); font-weight: 500; }
+  .mod-table th.sortable { cursor: pointer; user-select: none; }
+  .mod-table th.sortable:hover { background: var(--hover); }
+  .mod-table th.sortable .sort-ind { display: inline-block; width: 10px; margin-left: 3px; color: #bbb; font-size: 9px; }
+  .mod-table th.sortable.sort-asc  .sort-ind::before { content: '\25B2'; color: var(--text); }
+  .mod-table th.sortable.sort-desc .sort-ind::before { content: '\25BC'; color: var(--text); }
+  .mod-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .mod-controls { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin: 6px 0 8px; font-size: 12px; }
+  .mod-controls input[type=text], .mod-controls select {
+    font-family: var(--font); font-size: 12px; padding: 3px 8px; border: 1px solid var(--border); border-radius: 4px; background: #fff;
+  }
+  .mod-controls .count { color: var(--text-muted); }
+  .show-more { font-size: 12px; margin-top: 6px; }
+  .empty-note { color: var(--text-muted); font-size: 13px; padding: 12px 0; }
+  .source-tag {
+    display: inline-block; padding: 0 5px; border-radius: 3px; font-size: 10px;
+    background: #f1f5f9; color: #475569; border: 1px solid #cbd5e1;
+    font-family: var(--font-mono);
+  }
+  .num-range { font-family: var(--font-mono); font-size: 12px; color: var(--text); }
+  .num-summary { font-size: 12px; color: var(--text-muted); margin-bottom: 8px; }
+</style>
+
+{% from "_macros.html" import breadcrumb %}
+{{ breadcrumb([("facets", "/facets"), (facet_name, None)]) }}
+
+{% if error %}<p style="color:#dc2626">{{ error }}</p>{% endif %}
+
+{% if facet %}
+{% set fd = facet %}
+<div class="facet-header">
+  <h1 class="page-title" style="display: inline-block;">{{ facet_name[4:] if facet_name.startswith('ant_') else facet_name }}</h1>
+  <span class="strip">{{ facet_name }}</span>
+  &nbsp;
+  {% if fd.type_mixed %}
+    <span class="type-pill mixed" title="Some datasets store this facet as categorical, others as numerical.">{{ fd.type }} (mixed)</span>
+  {% else %}
+    <span class="type-pill {{ fd.type }}">{{ fd.type }}</span>
+  {% endif %}
+</div>
+
+<div class="stats-row">
+  <div>datasets: <span class="val">{{ fd.n_datasets }}</span></div>
+  <div>total cells: <span class="val">{{ '{:,}'.format(fd.total_n_cells) }}</span></div>
+  {% if fd.value_distribution and fd.value_distribution.kind == 'categorical' %}
+  <div>distinct values: <span class="val">{{ fd.value_distribution['values']|length }}</span></div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Value distribution</h2>
+  {% set vd = fd.value_distribution %}
+  {% if vd and vd.kind == 'categorical' %}
+    {% if vd['values'] %}
+    {% set maxN = vd['values'][0].n_cells if vd['values'] else 1 %}
+    <div class="table-wrap">
+    <table class="val-table">
+      <thead>
+        <tr>
+          <th>Value</th>
+          <th class="num">Cells</th>
+          <th class="num">Datasets</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for v in vd['values'][:60] %}
+        <tr>
+          <td>{{ v.value or '(missing)' }}</td>
+          <td class="num">
+            {% set pct = (v.n_cells / maxN * 100) | round(0, 'floor') | int %}
+            <span class="val-bar" style="width: {{ [pct, 3] | max }}px"></span>{{ '{:,}'.format(v.n_cells) }}
+          </td>
+          <td class="num">{{ v.n_datasets }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% if vd['values']|length > 60 %}
+    <p class="note">Showing top 60 of {{ vd['values']|length }} distinct values by cell count.</p>
+    {% endif %}
+    {% else %}
+    <p class="empty-note">No categorical values recorded across the carrying datasets.</p>
+    {% endif %}
+  {% elif vd and vd.kind == 'numerical' %}
+    <div class="num-summary">
+      Fleet range
+      <span class="num-range">
+        {% if vd.fleet_min is not none %}{{ '%.4g' | format(vd.fleet_min) }}{% else %}?{% endif %}
+        to
+        {% if vd.fleet_max is not none %}{{ '%.4g' | format(vd.fleet_max) }}{% else %}?{% endif %}
+      </span>
+      across {{ vd.per_dataset|length }} datasets.
+    </div>
+    {% if vd.per_dataset %}
+    <div class="table-wrap">
+    <table class="val-table">
+      <thead>
+        <tr>
+          <th>Dataset</th>
+          <th class="num">Min</th>
+          <th class="num">Mean</th>
+          <th class="num">Max</th>
+          <th class="num">Cells</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for d in vd.per_dataset %}
+        <tr>
+          <td><a href="/browse/{{ d.db_id }}">{{ d.db_id }}</a></td>
+          <td class="num num-range">{{ '%.4g' | format(d.min) }}</td>
+          <td class="num num-range">{% if d.mean is not none %}{{ '%.4g' | format(d.mean) }}{% else %}?{% endif %}</td>
+          <td class="num num-range">{{ '%.4g' | format(d.max) }}</td>
+          <td class="num">{{ '{:,}'.format(d.n_cells) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% else %}
+    <p class="empty-note">No numerical values recorded.</p>
+    {% endif %}
+  {% else %}
+  <p class="empty-note">No values recorded.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Top variable genesets by this facet</h2>
+  <p class="note">
+    Each row is one module (a curated gene set or a starCAT program) scored on
+    one dataset. The value shows how much of the module score's variance is
+    explained by <code>{{ facet_name }}</code> on that dataset. Higher means
+    the facet separates cells more cleanly by module activity.
+    Per-gene variance-explained on this facet lives on the individual dataset
+    pages, not here.
+  </p>
+  {% set mods = fd['modules'] %}
+  {% if mods['rows'] %}
+  <div class="mod-controls">
+    <label>Source
+      <select id="mod-source-filter">
+        <option value="">all</option>
+      </select>
+    </label>
+    <label>Catalog
+      <select id="mod-catalog-filter">
+        <option value="">all</option>
+      </select>
+    </label>
+    <input type="text" id="mod-name-filter" placeholder="filter by module or dataset...">
+    <span class="count" id="mod-count-live"></span>
+  </div>
+  <div class="table-wrap">
+  <table class="mod-table" id="mod-table">
+    <thead>
+      <tr>
+        <th class="sortable" data-key="catalog" data-dir="asc">Catalog <span class="sort-ind"></span></th>
+        <th class="sortable" data-key="module" data-dir="asc">Module <span class="sort-ind"></span></th>
+        <th class="sortable" data-key="source" data-dir="asc">Source <span class="sort-ind"></span></th>
+        <th class="sortable" data-key="statistic" data-dir="asc">Statistic <span class="sort-ind"></span></th>
+        <th class="sortable num sort-desc" data-key="value" data-dir="desc">Value <span class="sort-ind"></span></th>
+        <th class="sortable" data-key="dataset" data-dir="asc">Dataset <span class="sort-ind"></span></th>
+        <th class="sortable num" data-key="n_cells" data-dir="desc">Cells <span class="sort-ind"></span></th>
+        <th class="sortable num" data-key="n_categories" data-dir="desc">Groups <span class="sort-ind"></span></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in mods['rows'] %}
+      <tr class="mod-row"
+          data-catalog="{{ r.catalog }}"
+          data-module="{{ r.module }}"
+          data-source="{{ r.source }}"
+          data-statistic="{{ r.statistic }}"
+          data-value="{{ '%.6f' | format(r.value) }}"
+          data-dataset="{{ r.dataset }}"
+          data-n_cells="{{ r.n_cells }}"
+          data-n_categories="{{ r.n_categories }}">
+        <td>{{ r.catalog }}</td>
+        <td>{{ r.module }}</td>
+        <td><span class="source-tag">{{ r.source }}</span></td>
+        <td>{{ r.statistic }}</td>
+        <td class="num">{{ '%.4f' | format(r.value) }}</td>
+        <td><a href="/browse/{{ r.dataset }}#tab-genesets">{{ r.dataset }}</a></td>
+        <td class="num">{{ '{:,}'.format(r.n_cells) }}</td>
+        <td class="num">{{ r.n_categories }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <div class="show-more">
+    <button id="mod-show-more" style="font-size:12px; padding:3px 10px; cursor:pointer; border:1px solid var(--border); border-radius:4px; background:#fff;">Show more</button>
+    <span class="count" id="mod-count-shown"></span>
+  </div>
+  {% if mods.truncated %}
+  <p class="note">Server-side cap on returned rows. Sorted by value desc; showing top {{ mods['rows']|length }} of {{ mods.n_total }}.</p>
+  {% endif %}
+  {% else %}
+  <p class="empty-note">No module-variability entries for this facet yet. Run <code>ant module-variability</code> to compute them.</p>
+  {% endif %}
+</div>
+
+<script>
+(function () {
+  var table = document.getElementById('mod-table');
+  if (!table) return;
+  var tbody = table.querySelector('tbody');
+  var allRows = Array.from(tbody.querySelectorAll('tr.mod-row'));
+  var pageSize = 100;
+  var shown = pageSize;
+
+  var srcSel = document.getElementById('mod-source-filter');
+  var catSel = document.getElementById('mod-catalog-filter');
+  var nameInput = document.getElementById('mod-name-filter');
+  var live = document.getElementById('mod-count-live');
+  var counter = document.getElementById('mod-count-shown');
+  var showMoreBtn = document.getElementById('mod-show-more');
+
+  var sources = new Set();
+  var catalogs = new Set();
+  allRows.forEach(function (r) {
+    if (r.dataset.source) sources.add(r.dataset.source);
+    if (r.dataset.catalog) catalogs.add(r.dataset.catalog);
+  });
+
+  function fillSelect(sel, values) {
+    Array.from(values).sort().forEach(function (v) {
+      var opt = document.createElement('option');
+      opt.value = v;
+      opt.textContent = v;
+      sel.appendChild(opt);
+    });
+  }
+  fillSelect(srcSel, sources);
+  fillSelect(catSel, catalogs);
+
+  function currentFilter() {
+    var srcVal = srcSel.value;
+    var catVal = catSel.value;
+    var qRaw = (nameInput.value || '').trim().toLowerCase();
+    return allRows.filter(function (r) {
+      if (srcVal && r.dataset.source !== srcVal) return false;
+      if (catVal && r.dataset.catalog !== catVal) return false;
+      if (qRaw) {
+        var hay = (r.dataset.module + ' ' + r.dataset.dataset + ' ' + r.dataset.catalog).toLowerCase();
+        if (hay.indexOf(qRaw) === -1) return false;
+      }
+      return true;
+    });
+  }
+
+  var sortState = { key: 'value', dir: 'desc' };
+
+  function render() {
+    var filtered = currentFilter();
+    filtered.sort(function (a, b) {
+      var av = a.dataset[sortState.key];
+      var bv = b.dataset[sortState.key];
+      var an = parseFloat(av), bn = parseFloat(bv);
+      var isNum = !isNaN(an) && !isNaN(bn);
+      var cmp = isNum ? (an - bn) : String(av).localeCompare(String(bv));
+      return sortState.dir === 'desc' ? -cmp : cmp;
+    });
+    allRows.forEach(function (r) { r.style.display = 'none'; });
+    var slice = filtered.slice(0, shown);
+    // Detach + reattach in sorted order so DOM matches sort.
+    slice.forEach(function (r) { r.style.display = ''; tbody.appendChild(r); });
+    // Move hidden rows to the bottom in original order (so they don't pop back).
+    filtered.slice(shown).forEach(function (r) { tbody.appendChild(r); });
+    if (live) live.textContent = filtered.length + ' matching';
+    if (counter) counter.textContent = 'showing ' + Math.min(shown, filtered.length) + ' of ' + filtered.length;
+    if (showMoreBtn) showMoreBtn.style.display = filtered.length > shown ? '' : 'none';
+  }
+
+  document.querySelectorAll('.mod-table th.sortable').forEach(function (th) {
+    th.addEventListener('click', function () {
+      var key = th.dataset.key;
+      var dir = (sortState.key === key && sortState.dir === 'asc') ? 'desc' : (sortState.key === key ? 'asc' : (th.dataset.dir || 'asc'));
+      sortState = { key: key, dir: dir };
+      document.querySelectorAll('.mod-table th.sortable').forEach(function (h) { h.classList.remove('sort-asc', 'sort-desc'); });
+      th.classList.add(dir === 'asc' ? 'sort-asc' : 'sort-desc');
+      render();
+    });
+  });
+
+  srcSel.addEventListener('change', function () { shown = pageSize; render(); });
+  catSel.addEventListener('change', function () { shown = pageSize; render(); });
+  nameInput.addEventListener('input', function () { shown = pageSize; render(); });
+  if (showMoreBtn) showMoreBtn.addEventListener('click', function () { shown += pageSize; render(); });
+
+  render();
+})();
+</script>
+{% endif %}
+
+{% endblock %}

@@ -518,6 +518,7 @@
             {% if request.app.state.genesets_available %}
             <a href="/genesets">genesets</a>
             {% endif %}
+            <a href="/facets">facets</a>
         </nav>
         <form class="gene-search" onsubmit="event.preventDefault(); var g=this.q.value.trim(); if(g) window.location='/genes/'+encodeURIComponent(g);"
               title="Jump to a gene's cross-catalogue expression atlas">
