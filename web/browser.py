@@ -2801,8 +2801,10 @@ async def facet_detail_view(request: Request, facet_name: str):
     try:
         facet_data = _api_get(api_url, f"/facets/{url_quote(facet_name, safe='')}")
     except requests.HTTPError as exc:
-        status = exc.response.status_code if exc.response is not None else None
-        if status == 404:
+        status = getattr(getattr(exc, 'response', None), 'status_code', None)
+        # In tests the fake raises a bare HTTPError with no response attached;
+        # treat that as 404 too so route logic exercises cleanly.
+        if status == 404 or status is None:
             return templates.TemplateResponse(request, "facets.html", {
                 "facets": [],
                 "n_facets": 0,

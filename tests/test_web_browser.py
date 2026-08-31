@@ -1071,6 +1071,57 @@ def _fake_api_get(api_url, path):  # pyright: ignore
             {"catalog": "MICROGLIA_V1", "module": "DAM_pos", "dataset": "GroupA/ds2"},
             {"catalog": "MICROGLIA_V1", "module": "Cycling_pos", "dataset": "GroupA/ds1"},
         ]}
+    if path == "/facets":
+        return {
+            "n_facets": 2,
+            "facets": [
+                {"facet": "ant_disease", "type": "categorical",
+                 "type_mixed": False, "n_datasets": 2, "signal_strength": 0.42},
+                {"facet": "ant_age", "type": "numerical",
+                 "type_mixed": False, "n_datasets": 1, "signal_strength": 0.05},
+            ],
+        }
+    if path.startswith("/facets/"):
+        name = path[len("/facets/"):]
+        if name == "ant_disease":
+            return {
+                "facet": "ant_disease", "type": "categorical",
+                "type_mixed": False, "n_datasets": 2, "total_n_cells": 501_500,
+                "datasets": [
+                    {"db_id": "GroupA/ds2", "title": "Dataset Two",
+                     "group": "Group A Study", "group_id": "GroupA",
+                     "file_id": "ds2", "n_cells": 500_000,
+                     "kind_on_this_dataset": "categorical"},
+                    {"db_id": "GroupA/ds1", "title": "Dataset One",
+                     "group": "Group A Study", "group_id": "GroupA",
+                     "file_id": "ds1", "n_cells": 1500,
+                     "kind_on_this_dataset": "categorical"},
+                ],
+                "value_distribution": {
+                    "kind": "categorical",
+                    "values": [
+                        {"value": "alzheimer disease", "n_cells": 250_000, "n_datasets": 1},
+                        {"value": "normal", "n_cells": 251_500, "n_datasets": 2},
+                    ],
+                    "total_cells": 501_500,
+                },
+                "modules": {
+                    "rows": [
+                        {"catalog": "MICROGLIA_V1", "module": "DAM_pos",
+                         "dataset": "GroupA/ds1", "source": "starcat",
+                         "statistic": "eta2", "value": 0.32,
+                         "n_cells": 1500, "n_categories": 2,
+                         "tag": "disease", "tag_column": "ant_disease"},
+                        {"catalog": "MICROGLIA_V1", "module": "Cycling_pos",
+                         "dataset": "GroupA/ds1", "source": "starcat",
+                         "statistic": "eta2", "value": 0.11,
+                         "n_cells": 1500, "n_categories": 2,
+                         "tag": "disease", "tag_column": "ant_disease"},
+                    ],
+                    "n_total": 2, "truncated": False,
+                },
+            }
+        raise requests.HTTPError(f"404 for {name}")
     if path == "/genesets":
         return {"genesets": _GENESETS}
     if path == "/genesets/studies":
@@ -1392,6 +1443,52 @@ def test_geneset_starcat_module_detail_renders(client):
     assert 'id="sc-top"' in resp.text
     assert "/catalogs/starcat/" in resp.text
     assert "starCAT program" in resp.text
+
+
+def test_facets_index_renders(client):
+    # /facets renders. The table shows the facet names sourced from the
+    # ant-serve /facets stub and the topbar carries the new Facets link.
+    resp = client.get("/facets")
+    assert resp.status_code == 200
+    assert 'id="facet-table"' in resp.text
+    assert "ant_disease" in resp.text
+    assert "ant_age" in resp.text
+    # Numeric type variant renders.
+    assert "numerical" in resp.text
+    # Topbar entry present.
+    assert 'href="/facets"' in resp.text
+    # Wrapped in the responsive scroll container per convention.
+    assert 'class="table-wrap"' in resp.text
+
+
+def test_facets_link_in_topbar(client):
+    # Facets link is visible in the topbar nav on any page.
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert '>facets<' in resp.text
+
+
+def test_facet_detail_renders(client):
+    # Per-facet page: header, value distribution, geneset variability table.
+    resp = client.get("/facets/ant_disease")
+    assert resp.status_code == 200
+    assert "ant_disease" in resp.text
+    # value distribution card headings
+    assert "Value distribution" in resp.text
+    # both distinct values rendered
+    assert "alzheimer disease" in resp.text
+    assert "normal" in resp.text
+    # geneset table
+    assert "Top variable genesets" in resp.text
+    assert "DAM_pos" in resp.text
+    # dataset link goes to the Genesets tab
+    assert "/browse/GroupA/ds1#tab-genesets" in resp.text
+
+
+def test_facet_detail_404(client):
+    # Unknown facet name lands on the facets index with a 404 status.
+    resp = client.get("/facets/ant_unknown")
+    assert resp.status_code == 404
 
 
 def test_admin_feedback_requires_admin(client):
