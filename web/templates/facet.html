@@ -47,6 +47,28 @@
   }
   .num-range { font-family: var(--font-mono); font-size: 12px; color: var(--text); }
   .num-summary { font-size: 12px; color: var(--text-muted); margin-bottom: 8px; }
+
+  /* Top variable genes panel */
+  .tvg-controls { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin: 6px 0 8px; font-size: 12px; }
+  .tvg-controls select, .tvg-controls button {
+    font-family: var(--font); font-size: 12px; padding: 3px 8px; border: 1px solid var(--border); border-radius: 4px; background: #fff;
+  }
+  .tvg-controls button { cursor: pointer; }
+  .tvg-controls button:hover { background: var(--hover); }
+  .tvg-groups { font-size: 12px; color: var(--text-muted); margin: 4px 0 8px; }
+  .tvg-status { font-size: 12px; color: var(--text-muted); margin: 4px 0 8px; min-height: 1em; }
+  .tvg-status.err { color: #dc2626; }
+  .tvg-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .tvg-table th, .tvg-table td { padding: 4px 8px; border-bottom: 1px solid var(--border-light); text-align: left; vertical-align: middle; }
+  .tvg-table th { font-size: 10px; text-transform: uppercase; letter-spacing: .3px; color: var(--text-muted); font-weight: 500; }
+  .tvg-table th.sortable { cursor: pointer; user-select: none; }
+  .tvg-table th.sortable:hover { background: var(--hover); }
+  .tvg-table th.sortable .sort-ind { display: inline-block; width: 10px; margin-left: 3px; color: #bbb; font-size: 9px; }
+  .tvg-table th.sortable.sort-asc  .sort-ind::before { content: '\25B2'; color: var(--text); }
+  .tvg-table th.sortable.sort-desc .sort-ind::before { content: '\25BC'; color: var(--text); }
+  .tvg-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .tvg-table td.gene { font-family: var(--font-mono); }
+  .tvg-spark svg { display: block; }
 </style>
 
 {% from "_macros.html" import breadcrumb %}
@@ -229,6 +251,28 @@
   {% endif %}
 </div>
 
+<div class="card">
+  <h2>Top variable genes</h2>
+  <p class="note">
+    Genes on the selected dataset are ranked by variance across per-group mean
+    expression for <code>{{ facet_name }}</code>. This is a pseudobulk ANOVA-lite proxy, and the variance ignores per-group sample size.
+  </p>
+  <div class="tvg-controls">
+    <label>Dataset
+      <select id="tvg-dataset"></select>
+    </label>
+    <button id="tvg-compute" type="button">Compute</button>
+  </div>
+  <div class="tvg-groups" id="tvg-groups"></div>
+  <div class="tvg-status" id="tvg-status"></div>
+  <div class="table-wrap">
+    <table class="tvg-table" id="tvg-table" hidden>
+      <thead id="tvg-thead"></thead>
+      <tbody id="tvg-tbody"></tbody>
+    </table>
+  </div>
+</div>
+
 <script>
 (function () {
   var table = document.getElementById('mod-table');
@@ -318,6 +362,213 @@
   if (showMoreBtn) showMoreBtn.addEventListener('click', function () { shown += pageSize; render(); });
 
   render();
+})();
+</script>
+
+<script>
+(function () {
+  var FACET = {{ facet_name|tojson }};
+  var datasets = {{ (facet.datasets or [])|tojson }};
+  var modRows = {{ (facet['modules']['rows'] if facet.get('modules') else [])|tojson }};
+
+  var sel = document.getElementById('tvg-dataset');
+  var btn = document.getElementById('tvg-compute');
+  var statusEl = document.getElementById('tvg-status');
+  var groupsEl = document.getElementById('tvg-groups');
+  var tableEl = document.getElementById('tvg-table');
+  var theadEl = document.getElementById('tvg-thead');
+  var tbodyEl = document.getElementById('tvg-tbody');
+  if (!sel || !btn) return;
+
+  if (!datasets.length) {
+    statusEl.textContent = 'No datasets carry this facet.';
+    btn.disabled = true;
+    sel.disabled = true;
+    return;
+  }
+
+  // Pick default: top module-variability row's dataset if it's in the list, else the first (highest cell count).
+  var defaultDbId = null;
+  if (modRows.length) {
+    var candidate = modRows[0].dataset;
+    for (var i = 0; i < datasets.length; i++) {
+      if (datasets[i].db_id === candidate) { defaultDbId = candidate; break; }
+    }
+  }
+  if (!defaultDbId) defaultDbId = datasets[0].db_id;
+
+  // Populate the picker.
+  datasets.forEach(function (d) {
+    var opt = document.createElement('option');
+    opt.value = d.db_id;
+    var cells = (d.n_cells || 0).toLocaleString();
+    opt.textContent = d.db_id + '  ' + cells + ' cells';
+    if (d.db_id === defaultDbId) opt.selected = true;
+    sel.appendChild(opt);
+  });
+
+  function apiUrlFor(dbId) {
+    var enc = dbId.split('/').map(encodeURIComponent).join('/');
+    return '/api/databases/' + enc + '/gene-variance-by-facet?facet=' + encodeURIComponent(FACET) + '&top=50';
+  }
+
+  function fmtSig(x) {
+    if (x === null || x === undefined || !isFinite(x)) return '';
+    var ax = Math.abs(x);
+    if (ax === 0) return '0';
+    if (ax >= 100) return x.toFixed(1);
+    if (ax >= 10) return x.toFixed(2);
+    if (ax >= 1) return x.toFixed(3);
+    if (ax >= 0.001) return x.toFixed(4);
+    return x.toExponential(2);
+  }
+
+  function fmtGroupsRow(groups, counts) {
+    return groups.map(function (g) {
+      var c = counts[g];
+      var cs = (c === null || c === undefined) ? '?' : c.toLocaleString();
+      return g + ' (' + cs + ')';
+    }).join('  ·  ');
+  }
+
+  function sparklineSvg(means, groups) {
+    var w = 60, h = 14, gap = 1;
+    var n = groups.length;
+    if (!n) return '';
+    var maxV = 0;
+    for (var i = 0; i < n; i++) {
+      var v = means[groups[i]];
+      if (v !== null && v !== undefined && isFinite(v) && v > maxV) maxV = v;
+    }
+    if (maxV <= 0) maxV = 1;
+    var barW = Math.max(1, (w - gap * (n - 1)) / n);
+    var bars = '';
+    var titleLines = [];
+    for (var j = 0; j < n; j++) {
+      var g = groups[j];
+      var val = means[g];
+      var vv = (val === null || val === undefined || !isFinite(val)) ? 0 : val;
+      var barH = Math.max(1, (Math.max(0, vv) / maxV) * h);
+      var x = j * (barW + gap);
+      var y = h - barH;
+      bars += '<rect x="' + x.toFixed(2) + '" y="' + y.toFixed(2) + '" width="' + barW.toFixed(2) + '" height="' + barH.toFixed(2) + '" fill="#94a3b8"></rect>';
+      titleLines.push(g + ': ' + fmtSig(val));
+    }
+    var title = titleLines.join('\n')
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '" xmlns="http://www.w3.org/2000/svg"><title>' + title + '</title>' + bars + '</svg>';
+  }
+
+  var sortState = { key: 'signal', dir: 'desc' };
+  var lastResp = null;
+
+  function renderTable(resp) {
+    lastResp = resp;
+    var groups = resp.groups || [];
+    var counts = resp.n_cells_per_group || {};
+    groupsEl.textContent = fmtGroupsRow(groups, counts);
+
+    // Build header
+    var thead = '<tr>';
+    thead += '<th class="sortable" data-key="gene" data-dir="asc">Gene <span class="sort-ind"></span></th>';
+    thead += '<th class="sortable num" data-key="signal" data-dir="desc">Signal <span class="sort-ind"></span></th>';
+    groups.forEach(function (g) {
+      thead += '<th class="sortable num" data-key="grp:' + encodeURIComponent(g) + '" data-dir="desc">' + g + ' <span class="sort-ind"></span></th>';
+    });
+    thead += '<th>Bars</th>';
+    thead += '</tr>';
+    theadEl.innerHTML = thead;
+
+    // Apply sort indicator to the active header
+    var activeTh = theadEl.querySelector('th[data-key="' + sortState.key + '"]');
+    if (activeTh) activeTh.classList.add(sortState.dir === 'asc' ? 'sort-asc' : 'sort-desc');
+
+    // Sort rows
+    var rows = (resp.genes || []).slice();
+    rows.sort(function (a, b) {
+      var av, bv, cmp;
+      if (sortState.key === 'gene') {
+        cmp = String(a.gene).localeCompare(String(b.gene));
+      } else if (sortState.key === 'signal') {
+        cmp = (a.signal || 0) - (b.signal || 0);
+      } else if (sortState.key.indexOf('grp:') === 0) {
+        var g = decodeURIComponent(sortState.key.slice(4));
+        av = (a.group_means || {})[g]; bv = (b.group_means || {})[g];
+        av = (av === null || av === undefined || !isFinite(av)) ? -Infinity : av;
+        bv = (bv === null || bv === undefined || !isFinite(bv)) ? -Infinity : bv;
+        cmp = av - bv;
+      } else {
+        cmp = 0;
+      }
+      return sortState.dir === 'desc' ? -cmp : cmp;
+    });
+
+    // Build body
+    var html = '';
+    rows.forEach(function (r) {
+      html += '<tr>';
+      html += '<td class="gene">' + r.gene + '</td>';
+      html += '<td class="num">' + fmtSig(r.signal) + '</td>';
+      var means = r.group_means || {};
+      groups.forEach(function (g) {
+        html += '<td class="num">' + fmtSig(means[g]) + '</td>';
+      });
+      html += '<td class="tvg-spark">' + sparklineSvg(means, groups) + '</td>';
+      html += '</tr>';
+    });
+    tbodyEl.innerHTML = html;
+    tableEl.hidden = false;
+
+    // Wire sort handlers
+    theadEl.querySelectorAll('th.sortable').forEach(function (th) {
+      th.addEventListener('click', function () {
+        var key = th.dataset.key;
+        var dir;
+        if (sortState.key === key) {
+          dir = sortState.dir === 'asc' ? 'desc' : 'asc';
+        } else {
+          dir = th.dataset.dir || 'asc';
+        }
+        sortState = { key: key, dir: dir };
+        renderTable(lastResp);
+      });
+    });
+  }
+
+  function fetchAndRender() {
+    var dbId = sel.value;
+    if (!dbId) return;
+    statusEl.classList.remove('err');
+    statusEl.textContent = 'Computing...';
+    var t0 = (window.performance && performance.now) ? performance.now() : Date.now();
+    fetch(apiUrlFor(dbId), { credentials: 'same-origin' })
+      .then(function (r) {
+        return r.json().then(function (body) { return { ok: r.ok, status: r.status, body: body }; });
+      })
+      .then(function (res) {
+        var t1 = (window.performance && performance.now) ? performance.now() : Date.now();
+        var ms = Math.round(t1 - t0);
+        if (!res.ok) {
+          var msg = (res.body && res.body.detail) ? res.body.detail : ('HTTP ' + res.status);
+          statusEl.classList.add('err');
+          statusEl.textContent = 'Failed: ' + msg;
+          return;
+        }
+        statusEl.classList.remove('err');
+        statusEl.textContent = 'Ranked ' + (res.body.n_genes_returned || 0) + ' genes across ' + (res.body.n_groups || 0) + ' groups in ' + ms + ' ms.';
+        renderTable(res.body);
+      })
+      .catch(function (err) {
+        statusEl.classList.add('err');
+        statusEl.textContent = 'Failed: ' + err;
+      });
+  }
+
+  btn.addEventListener('click', fetchAndRender);
+  sel.addEventListener('change', fetchAndRender);
+
+  // Auto-load on ready.
+  if (defaultDbId) fetchAndRender();
 })();
 </script>
 {% endif %}
