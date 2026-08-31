@@ -4525,6 +4525,16 @@ def _handle_scatter(req: PlotRequest, ctx: PlotContext) -> Tuple[bytes, str]:
                     f"For embedding scatter, omit x (defaults to X_umap)."
                 ))
             return _handle_xy(req, ctx)
+        if x_kind == 'categorical':
+            # Explicit reject rather than falling through to the embedding
+            # path, which would otherwise fail with the misleading
+            # "Embedding '...' not found". Box or violin group a numerical y
+            # by a categorical x cleanly.
+            raise HTTPException(400, detail=(
+                f"Scatter requires x to be numerical or a gene. "
+                f"'{req.x}' is categorical on this dataset. "
+                f"Use /plot/box or /plot/violin instead."
+            ))
     emb_id = req.x or ('X_umap' if 'X_umap' in ctx.available_embeddings
                        else (ctx.available_embeddings[0] if ctx.available_embeddings else None))
     if not emb_id:
