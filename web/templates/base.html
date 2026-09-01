@@ -647,10 +647,56 @@
             var target = String(gene).toUpperCase();
             return favouriteGenes().some(function (g) { return g.toUpperCase() === target; });
         }
+        // Sanitise a candidate gene token the same way favouriteGenes() does
+        // on read. Returns '' if the token would be rejected.
+        var GENE_TOKEN = /^[A-Z0-9._-]+$/;
+        function _normaliseGene(gene) {
+            if (typeof gene !== 'string' || !gene.length) return '';
+            var normalised = gene.toUpperCase().replace(/[^A-Z0-9._-]/g, '');
+            if (!normalised || !GENE_TOKEN.test(normalised)) return '';
+            return normalised;
+        }
+        function _persist(list) {
+            if (window.antRemember && typeof window.antRemember.set === 'function') {
+                window.antRemember.set(FAV_KEY, JSON.stringify(list));
+            }
+            return list;
+        }
+        function addFavourite(gene) {
+            var normalised = _normaliseGene(gene);
+            var list = favouriteGenes();
+            if (!normalised) return list;
+            for (var i = 0; i < list.length; i++) {
+                if (list[i] === normalised) return list;
+            }
+            list.push(normalised);
+            return _persist(list);
+        }
+        function removeFavourite(gene) {
+            var normalised = _normaliseGene(gene);
+            var list = favouriteGenes();
+            if (!normalised) return list;
+            var out = [];
+            for (var i = 0; i < list.length; i++) {
+                if (list[i] !== normalised) out.push(list[i]);
+            }
+            return _persist(out);
+        }
+        function toggleFavourite(gene) {
+            var normalised = _normaliseGene(gene);
+            if (!normalised) return { added: false, list: favouriteGenes() };
+            if (isFavourite(normalised)) {
+                return { added: false, list: removeFavourite(normalised) };
+            }
+            return { added: true, list: addFavourite(normalised) };
+        }
         return {
             moduleAlgorithm: moduleAlgorithm,
             favouriteGenes: favouriteGenes,
             isFavourite: isFavourite,
+            addFavourite: addFavourite,
+            removeFavourite: removeFavourite,
+            toggleFavourite: toggleFavourite,
             ALGO_KEY: ALGO_KEY,
             FAV_KEY: FAV_KEY
         };

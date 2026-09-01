@@ -511,7 +511,25 @@
        row that is BOTH can carry both marks side by side. */
     .g-flag-cell { line-height: 1; }
     .g-flag-curated { color: #0f766e; margin-right: 2px; }
-    .g-flag-personal { color: #c2410c; }
+    /* Personal-favourite heart is a click-to-toggle affordance on every row.
+       Muted outline (♡) when the gene is NOT a favourite; filled coloured
+       heart (♥) when it is (via .is-fav). The row itself carries
+       .gene-favourite in the filled state so column-star sorting keeps working. */
+    .g-flag-personal {
+        color: #94a3b8;
+        cursor: pointer;
+        display: inline-block;
+        padding: 0 2px;
+        border-radius: 3px;
+        user-select: none;
+    }
+    .g-flag-personal:hover { background: #f1f5f9; color: #64748b; }
+    .g-flag-personal:focus-visible {
+        outline: 2px solid var(--link, #2563eb);
+        outline-offset: 1px;
+    }
+    .g-flag-personal.is-fav { color: #c2410c; }
+    .g-flag-personal.is-fav:hover { background: #fef3ec; color: #9a3412; }
     /* When search hides a row, keep it off the layout. */
     #obs-tbl-genes tbody tr.gene-item.g-hidden { display: none; }
   </style>
@@ -1330,40 +1348,59 @@ document.addEventListener('DOMContentLoaded', function() {
             //   .gene-curated    → dataset favourite (in the collection's top_genes)
             //                      Marked with a ◆ (.g-flag-curated).
             //   .gene-favourite  → this user's personal favourite from /settings
-            //                      Marked with a ♥ (.g-flag-personal).
-            // A single row can carry both, in which case both glyphs render side
-            // by side in the flag cell. Personal favourites that aren't already
-            // in the server-rendered curated panel get a fresh row inserted at
-            // the top; ones that ARE already curated get a ♥ appended in place.
+            //                      Marked with a filled ♥ (.g-flag-personal.is-fav).
+            // Every rendered row (curated, top-var, search-appended, or seeded
+            // from localStorage) carries a ♡/♥ toggle in its flag cell so the
+            // user can add or remove personal favourites without leaving the tab.
+            // Curated rows keep their ◆; the ♥ is orthogonal.
             var _favGenes = (window.antSettings && window.antSettings.favouriteGenes()) || [];
+            var _favBase = '/browse/' + {{ folder_browse_id | tojson }} + '/' + {{ file_id | tojson }};
+            var _favDefEmb = {{ default_embedding | tojson }};
+            var _favHasDb  = {{ has_duckdb | tojson }};
+
+            // Build the ♡/♥ heart button HTML with the correct visual state.
+            // Filled ♥ + .is-fav when the gene is a favourite; outline ♡ otherwise.
+            function _heartHtml(isFav) {
+                var glyph = isFav ? '&#9829;' : '&#9825;';
+                var cls   = isFav ? 'g-flag-personal is-fav' : 'g-flag-personal';
+                var title = isFav
+                    ? 'remove personal favourite'
+                    : 'mark as personal favourite';
+                return '<span class="' + cls + '" role="button" tabindex="0"'
+                    + ' aria-pressed="' + (isFav ? 'true' : 'false') + '"'
+                    + ' title="' + title + '">' + glyph + '</span>';
+            }
+
+            // Inject a ♡/♥ toggle into every server-rendered curated row's
+            // flag cell (they already have ◆). Curated rows currently in the
+            // table are considered favourites if the localStorage list holds
+            // their gene symbol.
+            var _favSetInit = {};
+            _favGenes.forEach(function (g) { _favSetInit[String(g).toLowerCase()] = 1; });
+            document.querySelectorAll('#tab-genes .gene-curated').forEach(function (row) {
+                var flagCell = row.querySelector('.g-flag-cell');
+                if (!flagCell) return;
+                if (flagCell.querySelector('.g-flag-personal')) return;
+                var isFav = !!_favSetInit[(row.dataset.gene || '').toLowerCase()];
+                flagCell.insertAdjacentHTML('beforeend', _heartHtml(isFav));
+                if (isFav) row.classList.add('gene-favourite');
+            });
+
+            // Seed personal-favourite-only rows for favourites that are NOT
+            // in the server-rendered curated panel. These render up top so
+            // reloads restore the user's saved favourites even when they're
+            // not otherwise selected by top-var or a fresh search.
             if (_favGenes.length) {
                 var _existingCurated = {};
                 document.querySelectorAll('#tab-genes .gene-curated').forEach(function (row) {
                     var g = (row.dataset.gene || '').toUpperCase();
                     if (g) _existingCurated[g] = row;
                 });
-                var _favBase = '/browse/' + {{ folder_browse_id | tojson }} + '/' + {{ file_id | tojson }};
-                var _favDefEmb = {{ default_embedding | tojson }};
-                var _favHasDb  = {{ has_duckdb | tojson }};
                 var _favTbody  = document.querySelector('#obs-tbl-genes tbody');
                 var _favInsertAnchor = _favTbody ? _favTbody.firstElementChild : null;
                 _favGenes.forEach(function (gene) {
                     var _g = gene.toUpperCase();
-                    if (_existingCurated[_g]) {
-                        // Row is BOTH a dataset favourite and a personal favourite.
-                        // Append the ♥ inside the existing flag cell so both glyphs show.
-                        var _existRow = _existingCurated[_g];
-                        _existRow.classList.add('gene-favourite');
-                        var _flagCell = _existRow.querySelector('.g-flag-cell');
-                        if (_flagCell && !_flagCell.querySelector('.g-flag-personal')) {
-                            var _heart = document.createElement('span');
-                            _heart.className = 'g-flag-personal';
-                            _heart.title = 'your personal favourite (set on /settings)';
-                            _heart.innerHTML = '&#9829;';
-                            _flagCell.appendChild(_heart);
-                        }
-                        return;
-                    }
+                    if (_existingCurated[_g]) return;  // already handled above
                     if (!_favTbody) return;
                     var _row = document.createElement('tr');
                     // Personal-favourite-only row: NOT in the dataset's curated
@@ -1393,7 +1430,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         }
                     }
                     _row.innerHTML =
-                          '<td class="g-flag-cell" style="text-align:center;font-size:13px;white-space:nowrap"><span class="g-flag-personal" title="your personal favourite (set on /settings)">&#9829;</span></td>'
+                          '<td class="g-flag-cell" style="text-align:center;font-size:13px;white-space:nowrap">' + _heartHtml(true) + '</td>'
                         + '<td class="colname">' + _g + '</td>'
                         + '<td class="obs-plots">' + _plotCell + '</td>'
                         + '<td class="g-pct-cell"><span class="g-pct"></span><span class="ss" data-stat="pct" title="% expressing cells"><span class="ss-mark" style="display:none"></span></span></td>'
@@ -1558,11 +1595,64 @@ document.addEventListener('DOMContentLoaded', function() {
             if (searchCount) searchCount.textContent = rows.length + ' genes';
 
             // Personal-favourite set for cross-checking top-var / search hits.
-            // Lower-cased for case-insensitive match. Empty when the user has
-            // no favourites set.
+            // Lower-cased for case-insensitive match. Reflects the localStorage
+            // state at page load; the delegated click handler below keeps it
+            // in sync with mutations, but it is also allowed to lag because
+            // window.antSettings.isFavourite() is the authoritative check.
             var _favSet = {};
             _favGenes.forEach(function (g) { _favSet[String(g).toLowerCase()] = 1; });
-            var _HEART_HTML = '<span class="g-flag-personal" title="your personal favourite (set on /settings)">&#9829;</span>';
+
+            // Delegated toggle handler on the tbody. Clicking (or pressing
+            // Enter/Space on) a .g-flag-personal flips the gene's membership
+            // in window.antSettings.favouriteGenes() and updates the row's
+            // visual state in place. Search-appended rows favourited this way
+            // stay in the DOM after clearing the search (they get .gene-favourite
+            // and are treated like any other row); on reload they come back
+            // via the seed loop above.
+            function _toggleFavouriteAt(heart) {
+                if (!heart) return;
+                var row = heart.closest('tr.gene-item');
+                if (!row) return;
+                var gene = row.dataset.gene || '';
+                if (!gene) return;
+                if (!window.antSettings || typeof window.antSettings.toggleFavourite !== 'function') return;
+                var result = window.antSettings.toggleFavourite(gene);
+                var isFav = !!result.added;
+                var key = gene.toLowerCase();
+                if (isFav) {
+                    _favSet[key] = 1;
+                    row.classList.add('gene-favourite');
+                    heart.classList.add('is-fav');
+                    heart.innerHTML = '&#9829;';
+                    heart.title = 'remove personal favourite';
+                    heart.setAttribute('aria-pressed', 'true');
+                } else {
+                    delete _favSet[key];
+                    row.classList.remove('gene-favourite');
+                    heart.classList.remove('is-fav');
+                    heart.innerHTML = '&#9825;';
+                    heart.title = 'mark as personal favourite';
+                    heart.setAttribute('aria-pressed', 'false');
+                }
+            }
+            var _genesTbodyForToggle = document.querySelector('#obs-tbl-genes tbody');
+            if (_genesTbodyForToggle) {
+                _genesTbodyForToggle.addEventListener('click', function (evt) {
+                    var heart = evt.target.closest('.g-flag-personal');
+                    if (!heart) return;
+                    evt.preventDefault();
+                    evt.stopPropagation();
+                    _toggleFavouriteAt(heart);
+                });
+                _genesTbodyForToggle.addEventListener('keydown', function (evt) {
+                    if (evt.key !== 'Enter' && evt.key !== ' ') return;
+                    var heart = evt.target.closest('.g-flag-personal');
+                    if (!heart) return;
+                    evt.preventDefault();
+                    evt.stopPropagation();
+                    _toggleFavouriteAt(heart);
+                });
+            }
 
             // Append the given top-var stats into the SAME tbody as curated rows
             // (statsArr is already sorted by std desc). Curated rows are marked
@@ -1580,8 +1670,8 @@ document.addEventListener('DOMContentLoaded', function() {
                 // shared-max scaling once every row is in the DOM).
                 var frag = document.createElement('tbody');
                 frag.innerHTML = topVar.map(function (x) {
-                    var isFav = _favSet[x.gene.toLowerCase()];
-                    return makeGeneRow(x.gene, x, isFav ? _HEART_HTML : '', null);
+                    var isFav = !!_favSet[x.gene.toLowerCase()];
+                    return makeGeneRow(x.gene, x, _heartHtml(isFav), null);
                 }).join('');
                 var tvByGene = {};
                 topVar.forEach(function (x) { tvByGene[x.gene.toLowerCase()] = x; });
@@ -1872,8 +1962,8 @@ document.addEventListener('DOMContentLoaded', function() {
                         // show up straight away; hydrate their stats async.
                         var frag = document.createElement('tbody');
                         frag.innerHTML = missing.map(function (g) {
-                            var isFav = _favSet[g.toLowerCase()];
-                            return makeGeneRow(g, null, isFav ? _HEART_HTML : '', null);
+                            var isFav = !!_favSet[g.toLowerCase()];
+                            return makeGeneRow(g, null, _heartHtml(isFav), null);
                         }).join('');
                         Array.from(frag.querySelectorAll('.gene-item')).forEach(function (newRow) {
                             if (_favSet[(newRow.dataset.gene || '').toLowerCase()]) {

@@ -4291,16 +4291,16 @@ def test_genes_tab_star_hover_title(client):
         "flag-column header tooltip must call out the personal favourite"
 
 
-def test_genes_tab_topvar_rows_have_no_star(client):
-    """Top-var rows carry a ♥ only when the gene is ALSO a personal favourite;
-    otherwise the flag cell is empty. The renderTopVar branch computes this
-    per-row (isFav ? _HEART_HTML : '')."""
+def test_genes_tab_topvar_rows_have_heart_toggle(client):
+    """Every rendered top-var row carries a ♡/♥ toggle. The renderTopVar
+    branch computes isFav from the personal-favourite set and passes the
+    result to _heartHtml, which renders either the outline or filled state."""
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
     html = resp.text
-    # renderTopVar passes an isFav-derived flag string, not a literal ★.
-    assert "isFav ? _HEART_HTML : ''" in html, \
-        "renderTopVar must decide the flag per-row (personal favourite check)"
+    # renderTopVar must call _heartHtml(isFav) so every row gets a toggle.
+    assert "_heartHtml(isFav)" in html, \
+        "renderTopVar must emit a ♡/♥ toggle on every row via _heartHtml"
     # The topvar call must NOT pass a literal '★'.
     assert "makeGeneRow(x.gene, x, '★'" not in html, \
         "topvar makeGeneRow call must not emit a ★ glyph"
