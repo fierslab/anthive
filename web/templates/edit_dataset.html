@@ -279,6 +279,7 @@
   const RO_SHOW = ['id', 'version', 'sha256', 'date', 'n_obs', 'n_vars', 'default_layer'];
 
   let original = {};   // full loaded frontmatter — everything not in EDITABLE round-trips untouched
+  let layersDefault = 'X';   // captured from the loaded frontmatter's default_layer so the save side can force-include it
 
   const loading = document.getElementById('ed-loading'),
         formBox = document.getElementById('ed-form'),
@@ -404,12 +405,21 @@
   // means it moves to layers_exclude. The default_layer is force-checked and
   // disabled so a curator cannot accidentally hide the layer the plot API
   // falls back to.
+  // Legacy .md files stored layers_include as a dict ({layer_name: friendly_name}).
+  // Post-refactor it is a list of layer names. Tolerate both on load and coerce to
+  // an array so the render / save paths only ever deal with one shape.
+  function coerceLayerList(v) {
+    if (Array.isArray(v)) return v.slice();
+    if (v && typeof v === 'object') return Object.keys(v);
+    return [];
+  }
   function renderLayersTab(fm) {
     layersFields.innerHTML = '';
     const stats = fm.layer_stats || {};
-    const inc = Array.isArray(fm.layers_include) ? fm.layers_include : [];
-    const exc = Array.isArray(fm.layers_exclude) ? fm.layers_exclude : [];
+    const inc = coerceLayerList(fm.layers_include);
+    const exc = coerceLayerList(fm.layers_exclude);
     const defaultLayer = fm.default_layer || 'X';
+    layersDefault = defaultLayer;
 
     // Build the union, keeping insertion order stable across reloads.
     const seen = {};
@@ -507,16 +517,34 @@
       else fm[k] = raw;
     });
     // Layers tab. Send both lists on every save so the on-disk .md stays
-    // in sync with the UI's view of the world.
+    // in sync with the UI's view of the world. Always serialize as arrays
+    // (legacy .md files sometimes store an empty dict here, and we never want
+    // to round-trip that shape). The default layer is force-included and
+    // never excluded, matching the disabled/checked contract in the render side.
     const layerBoxes = layersFields.querySelectorAll('input.layer-cb');
     if (layerBoxes.length) {
-      const inc = [], exc = [];
+      const inc = [], exc = [], seen = {};
       layerBoxes.forEach(function (cb) {
         const name = cb.dataset.layerName;
-        if (cb.checked) inc.push(name); else exc.push(name);
+        if (!name || seen[name]) return;
+        seen[name] = true;
+        const isDefault = (name === layersDefault);
+        // The default layer is always served. Treat it as checked regardless
+        // of its DOM state (it renders disabled so a curator cannot uncheck it,
+        // but reading .checked on a disabled input has historically been fragile).
+        if (isDefault || cb.checked) inc.push(name);
+        else exc.push(name);
       });
+      // Belt and suspenders: guarantee the default layer is in inc and never in exc.
+      if (layersDefault && inc.indexOf(layersDefault) < 0) inc.unshift(layersDefault);
+      const excClean = exc.filter(function (n) { return n !== layersDefault; });
       fm.layers_include = inc;
-      fm.layers_exclude = exc;
+      fm.layers_exclude = excClean;
+    } else {
+      // Layers tab never rendered (empty layer_stats). Still coerce any legacy
+      // dict shape lingering in `original` into an array so we do not write it back.
+      fm.layers_include = coerceLayerList(fm.layers_include);
+      fm.layers_exclude = coerceLayerList(fm.layers_exclude);
     }
     return fm;
   }
