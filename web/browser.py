@@ -2408,6 +2408,9 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "data_project": friendly_group,          # collection folder name (e.g. Sierksma2025)
         "basename": db.get('basename'),           # .md filename stem (from API when available)
         "dataset_name": dataset_title,
+        # One-line description from the .md frontmatter (edited via the admin
+        # editor's Basics tab). Rendered near the title in dataset.html.
+        "dataset_description": (db.get('description') or '').strip() or None,
         "file_id": file_id,
         "db_id": db_id,
         # is_secondary marker (surfaced next to the title + h1 gets the

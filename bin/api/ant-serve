@@ -1288,6 +1288,10 @@ class DatabaseRegistry:
             # title. Distinct from file_id (V6A) and title (anything).
             'basename': md_path.stem,
             'title': file_metadata.get('title', md_path.stem),
+            # One-line curator description from the .md frontmatter (edited via
+            # the admin dataset editor's Basics tab). Not the markdown body,
+            # which is exposed separately as `markdown` below.
+            'description': file_metadata.get('description'),
             'n_cells': n_cells,
             'n_genes': n_genes,
 
@@ -2337,6 +2341,26 @@ async def put_collection_source(
         raise HTTPException(status_code=500,
                             detail=f"failed to write {index_path}: {exc}")
 
+    # Refresh the in-memory metadata cache for every dataset that lives
+    # under this collection folder. The dataset payload embeds the
+    # collection block (citation, authors, description body) from this
+    # index.md, so a write here must invalidate those cached entries too.
+    try:
+        touched = 0
+        for db_id_i, extra in list(registry._db_extra.items()):
+            rel_path = extra.get('rel_path') or ''
+            if rel_path and Path(rel_path).parts[:1] == (folder.name,):
+                registry.metadata_cache[db_id_i] = (
+                    registry._load_database_metadata(db_id_i, extra)
+                )
+                touched += 1
+        registry._databases_list_cache = None
+        log.info("collection PUT source: refreshed %d dataset cache entries "
+                 "under %s", touched, folder.name)
+    except Exception as exc:
+        log.warning("collection PUT source: cache refresh failed for %s: %s",
+                    group_id, exc)
+
     rel = index_path.relative_to(registry.data_folder)
     return {'ok': True, 'path': str(rel)}
 
@@ -2500,6 +2524,18 @@ async def put_dataset_source(
         raise HTTPException(status_code=500,
                             detail=f"failed to write {md_path}: {exc}")
 
+    # Refresh the in-memory metadata cache so /info reflects the edit
+    # immediately (without waiting for a restart or /admin/rescan). Same
+    # pattern used by /admin/refresh-views. Failure here is soft; the file
+    # is already on disk and the next restart will pick it up.
+    try:
+        extra = registry._db_extra.get(db_id, {})
+        registry.metadata_cache[db_id] = registry._load_database_metadata(db_id, extra)
+        registry._databases_list_cache = None
+    except Exception as exc:
+        log.warning("dataset PUT source: cache refresh failed for %s: %s",
+                    db_id, exc)
+
     rel = md_path.relative_to(registry.data_folder)
     return {
         'ok': True,
@@ -2653,6 +2689,18 @@ async def put_dataset_mus_source(
     except Exception as exc:
         raise HTTPException(status_code=500,
                             detail=f"failed to write {mus_path}: {exc}")
+
+    # Refresh the in-memory metadata cache so /info reflects the .mus edit
+    # immediately. The metadata payload includes annotation fields resolved
+    # through lib.mus.resolve_annotation (organism, tissue, cell_type, etc.),
+    # so a .mus write must invalidate the same cache the .md write does.
+    try:
+        extra = registry._db_extra.get(db_id, {})
+        registry.metadata_cache[db_id] = registry._load_database_metadata(db_id, extra)
+        registry._databases_list_cache = None
+    except Exception as exc:
+        log.warning("dataset PUT source.mus: cache refresh failed for %s: %s",
+                    db_id, exc)
 
     rel = mus_path.relative_to(registry.data_folder) if (mus_path.is_absolute() and registry.data_folder in mus_path.parents) else mus_path.name
     return {

@@ -83,6 +83,9 @@
   .ds-prov .lnk:hover { color: var(--link); text-decoration: underline; }
   .ds-desc { margin: 2px 0 10px; font-size: 13px; }
   .ds-desc > :first-child { margin-top: 0; }
+  /* One-line curator description (frontmatter `description:`). Distinct
+     from the multi-paragraph body rendered in the Overview tab. */
+  .ds-desc-oneline { margin: 4px 0 12px; font-size: 14px; color: var(--text); line-height: 1.4; }
 
   /* Observation columns: filterable table (per tab). */
   .obs-table { display: grid; grid-template-columns: 1fr 1fr; gap: 1px 24px; margin-top: 6px; }
@@ -370,6 +373,14 @@
   {% if dataset_meta.accession and dataset_meta.accession_url %}<a class="lnk" href="{{ dataset_meta.accession_url }}" target="_blank" rel="noopener" title="accession {{ dataset_meta.accession }}">🔗 {{ dataset_meta.accession }}</a>{% endif %}
   {% for url_item in dataset_meta.link %}<a class="lnk" href="{{ url_item }}" target="_blank" rel="noopener" title="{{ url_item }}">🔗 link</a>{% endfor %}
 </div>
+{% endif %}
+
+{# One-line curator description from the .md frontmatter. Distinct from the
+   long-form markdown body (Overview tab). Rendered under the provenance row
+   so it lands above the fold, next to the title, without pushing the tab
+   bar down when absent. #}
+{% if dataset_description %}
+<div class="ds-desc-oneline">{{ dataset_description }}</div>
 {% endif %}
 
 
