@@ -2387,6 +2387,10 @@ _DATASET_EDITABLE_FIELDS: Set[str] = {
     'title', 'description', 'year',
     'top_genes', 'top_cat', 'top_num',
     'is_secondary',
+    # Curator-controlled layer visibility. layer_stats stays locked (machine
+    # computed union of all layers); layers_include/exclude decide which of
+    # those layers are actually served through /info + plot endpoints.
+    'layers_include', 'layers_exclude',
 }
 
 # Machine fields that define identity / integrity / layer schema. PUT MUST

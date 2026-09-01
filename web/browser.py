@@ -2391,6 +2391,11 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
     n_modules = len(module_scores)
 
     layer_stats = db.get('layer_stats') or {}
+    # layer_stats holds the union of every layer in the h5ad (machine computed).
+    # A curator can hide layers via layers_include on the .md, and ant-serve's
+    # /info endpoint already scopes db['layers'] to those. Mirror that filter
+    # here so hidden layers do not leak into the Layers card stats table.
+    _served_layers = db.get('layers') or {}
     layer_stats_rows = [
         {
             'name':      name,
@@ -2403,6 +2408,7 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
             'pct_zeros': format_number(stats['pct_zeros'])     if stats.get('pct_zeros')    is not None else '',
         }
         for name, stats in layer_stats.items()
+        if name in _served_layers
     ]
 
     collection = db.get('collection') or {}

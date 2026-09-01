@@ -146,6 +146,7 @@
   <div class="tab-bar" id="tab-bar" role="tablist">
     <button type="button" class="tab-btn active" data-tab="basics"    role="tab">Basics<span class="tab-dirty"></span></button>
     <button type="button" class="tab-btn"        data-tab="favorites" role="tab">Favorites<span class="tab-dirty"></span></button>
+    <button type="button" class="tab-btn"        data-tab="layers"    role="tab">Layers<span class="tab-dirty"></span></button>
     <button type="button" class="tab-btn"        data-tab="biology"   role="tab">Biology<span class="tab-dirty"></span></button>
     <button type="button" class="tab-btn"        data-tab="api"       role="tab">API<span class="tab-dirty"></span></button>
     <button type="button" class="tab-btn"        data-tab="desc"      role="tab">Description<span class="tab-dirty"></span></button>
@@ -164,6 +165,17 @@
     <h2>Favorites
       <span class="info" title="Curated defaults that drive the plot form's pre-population and the dataset page's context chips. Comma-separated lists. Auto-suggested by ant-suggest-tops.">ⓘ</span></h2>
     <div id="ef-fields-favorites" class="ef-grid"></div>
+  </section>
+
+  <!-- Tab: Layers — which h5ad layers are served -->
+  <section class="tab-panel" id="tab-layers" role="tabpanel">
+    <h2>Layers
+      <span class="info" title="Toggle which h5ad layers are served through the API. layer_stats stays as-is (it lists every layer in the h5ad); layers_include/exclude on the .md decide what /info and plot endpoints see. The default_layer is always served and cannot be hidden.">ⓘ</span></h2>
+    <p class="ed-note" style="margin: -4px 0 10px 0">
+      Checked layers reach the plot API. Unchecked layers stay inside the h5ad
+      but never surface through /info or plot requests.
+    </p>
+    <div id="layers-fields"></div>
   </section>
 
   <!-- Tab: Biology — the .h5ad.mus sidecar -->
@@ -272,6 +284,7 @@
         formBox = document.getElementById('ed-form'),
         basicsFields    = document.getElementById('ef-fields-basics'),
         favoritesFields = document.getElementById('ef-fields-favorites'),
+        layersFields    = document.getElementById('layers-fields'),
         roBox   = document.getElementById('ef-ro'),
         body    = document.getElementById('md-body'),
         preview = document.getElementById('md-preview'),
@@ -383,6 +396,106 @@
       row.appendChild(val); roBox.appendChild(row);
     });
   }
+
+  // Layers tab. One checkbox per known layer. The set of "known" layers is the
+  // union of layer_stats keys (union across every layer in the h5ad, machine
+  // computed and locked), plus anything already listed in layers_include or
+  // layers_exclude. Checked means the layer stays in layers_include; unchecked
+  // means it moves to layers_exclude. The default_layer is force-checked and
+  // disabled so a curator cannot accidentally hide the layer the plot API
+  // falls back to.
+  function renderLayersTab(fm) {
+    layersFields.innerHTML = '';
+    const stats = fm.layer_stats || {};
+    const inc = Array.isArray(fm.layers_include) ? fm.layers_include : [];
+    const exc = Array.isArray(fm.layers_exclude) ? fm.layers_exclude : [];
+    const defaultLayer = fm.default_layer || 'X';
+
+    // Build the union, keeping insertion order stable across reloads.
+    const seen = {};
+    const layers = [];
+    function push(name) { if (name && !(name in seen)) { seen[name] = true; layers.push(name); } }
+    Object.keys(stats).forEach(push);
+    inc.forEach(push);
+    exc.forEach(push);
+    push(defaultLayer);   // always visible even if orphaned somehow
+
+    if (!layers.length) {
+      const empty = document.createElement('div');
+      empty.className = 'muted'; empty.style.fontSize = '12px';
+      empty.textContent = 'no layer_stats on this dataset yet';
+      layersFields.appendChild(empty);
+      return;
+    }
+
+    layers.forEach(function (name) {
+      const row = document.createElement('div');
+      row.className = 'ef-row';
+      row.style.padding = '3px 0';
+      const wrap = document.createElement('label');
+      wrap.style.display = 'flex';
+      wrap.style.alignItems = 'center';
+      wrap.style.gap = '10px';
+      wrap.style.fontSize = '13px';
+      wrap.style.cursor = 'pointer';
+      wrap.style.textTransform = 'none';
+      wrap.style.letterSpacing = '0';
+      wrap.style.color = 'var(--text)';
+
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.dataset.layerName = name;
+      cb.className = 'layer-cb';
+
+      const isDefault = (name === defaultLayer);
+      if (isDefault) {
+        cb.checked = true;
+        cb.disabled = true;
+        wrap.title = 'the default layer is always served and cannot be hidden';
+      } else if (inc.length === 0 && exc.length === 0) {
+        // No explicit lists yet. Default: treat every known layer as included.
+        cb.checked = true;
+      } else if (inc.indexOf(name) >= 0) {
+        cb.checked = true;
+      } else if (exc.indexOf(name) >= 0) {
+        cb.checked = false;
+      } else {
+        // Present in stats but neither list. Fall back to visible.
+        cb.checked = true;
+      }
+      cb.addEventListener('change', function () { markDirty('layers'); });
+
+      const nameSpan = document.createElement('code');
+      nameSpan.textContent = name;
+      nameSpan.style.fontSize = '13px';
+
+      wrap.appendChild(cb);
+      wrap.appendChild(nameSpan);
+
+      if (isDefault) {
+        const tag = document.createElement('span');
+        tag.textContent = 'default';
+        tag.style.fontSize = '10px';
+        tag.style.textTransform = 'uppercase';
+        tag.style.letterSpacing = '.3px';
+        tag.style.color = 'var(--text-muted)';
+        tag.style.background = 'var(--border-light)';
+        tag.style.padding = '0 5px';
+        tag.style.borderRadius = '6px';
+        wrap.appendChild(tag);
+      }
+
+      row.appendChild(wrap);
+      layersFields.appendChild(row);
+    });
+
+    const hint = document.createElement('div');
+    hint.className = 'ed-note';
+    hint.style.marginTop = '10px';
+    hint.textContent = 'The default layer is force-included. Every other layer flips freely between served and hidden.';
+    layersFields.appendChild(hint);
+  }
+
   function collectFrontmatter() {
     const fm = Object.assign({}, original);   // everything else (machine fields, annotation, include-lists) untouched
     document.querySelectorAll('#tab-basics input[data-key], #tab-favorites input[data-key]').forEach(inp => {
@@ -393,6 +506,18 @@
       else if (kind === 'number') fm[k] = raw === '' ? null : (isNaN(Number(raw)) ? raw : Number(raw));
       else fm[k] = raw;
     });
+    // Layers tab. Send both lists on every save so the on-disk .md stays
+    // in sync with the UI's view of the world.
+    const layerBoxes = layersFields.querySelectorAll('input.layer-cb');
+    if (layerBoxes.length) {
+      const inc = [], exc = [];
+      layerBoxes.forEach(function (cb) {
+        const name = cb.dataset.layerName;
+        if (cb.checked) inc.push(name); else exc.push(name);
+      });
+      fm.layers_include = inc;
+      fm.layers_exclude = exc;
+    }
     return fm;
   }
 
@@ -483,6 +608,7 @@
       loading.style.display = 'none'; formBox.style.display = '';
       original = d.frontmatter || {};
       addEditable(original); addReadonly(original);
+      renderLayersTab(original);
       body.value = d.body || '';
       if (!d.exists) statusEl.innerHTML = '<span class="muted">no .md yet — saving will create it</span>';
       // .md carries the api: section — render the API tab from it.
