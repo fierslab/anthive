@@ -1425,7 +1425,14 @@ def get_collection_list(api_url: str) -> List[Dict]:
     for group_id, dbs in groups.items():
         total_cells = sum(db.get('n_cells') or 0 for db in dbs)
         collection_meta = (dbs[0].get('collection') or {})
-        name = collection_meta.get('group') or group_id
+        # Display name falls through: index.md `title` (curator override) →
+        # `group` (folder name) → `group_id`. Blank/whitespace title is
+        # ignored so a cleared field reverts to the folder name.
+        name = (
+            (collection_meta.get('title') or '').strip()
+            or collection_meta.get('group')
+            or group_id
+        )
         # Group modification = most recent member modification.
         last_modified = max((_modified_ts(db) for db in dbs), default='')
 
@@ -1875,14 +1882,18 @@ async def folder_view(request: Request, browse_id: str):
             status_code=404
         )
 
-    # Friendly group name (from the collection metadata in any of the datasets);
-    # falls back to the short group_id when not declared.
+    # Friendly group name. Falls through index.md `title` (curator override)
+    # → `group` (folder name) → the short group_id when neither is set.
     friendly_group = None
     try:
         all_dbs = _all_databases(_api_url(request))
         for db in all_dbs:
             if (db.get('group_id') or db['id'].split('/')[0]) == group_id:
-                friendly_group = (db.get('collection') or {}).get('group')
+                coll = db.get('collection') or {}
+                friendly_group = (
+                    (coll.get('title') or '').strip()
+                    or coll.get('group')
+                )
                 if friendly_group:
                     break
     except Exception:
@@ -2064,7 +2075,13 @@ async def plot_view(request: Request, folder_browse_id: str,
         )
 
     collection = db.get('collection') or {}
-    friendly_group = collection.get('group') or group_id
+    # Collection display name. index.md `title` (curator override) beats the
+    # folder name; both fall through to the short group_id.
+    friendly_group = (
+        (collection.get('title') or '').strip()
+        or collection.get('group')
+        or group_id
+    )
     dataset_title = db.get('title') or file_id
 
     # Fetch the dataset's DE study list (best-effort). Used two ways:
@@ -2163,7 +2180,12 @@ async def de_study_view(request: Request, folder_browse_id: str,
     is_secondary = False
     try:
         info = _api_get(api_url, f'/databases/{db_id}/info')
-        friendly_group = (info.get('collection') or {}).get('group') or group_id
+        coll = info.get('collection') or {}
+        friendly_group = (
+            (coll.get('title') or '').strip()
+            or coll.get('group')
+            or group_id
+        )
         dataset_title = info.get('title') or file_id
         is_secondary = bool(info.get('is_secondary'))
     except Exception:
@@ -2384,7 +2406,14 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
     ]
 
     collection = db.get('collection') or {}
-    friendly_group = collection.get('group') or group_id
+    # Folder name (never overridden). Feeds the id-strip `data_project`
+    # label so admins can copy-paste the real folder path.
+    group_folder_name = collection.get('group') or group_id
+    # Display name for the breadcrumb. index.md `title` overrides when set.
+    friendly_group = (
+        (collection.get('title') or '').strip()
+        or group_folder_name
+    )
     dataset_title = db.get('title') or file_id
 
     # Known caveats (REST /info `caveats: []`) — surfaced as a warning card
@@ -2405,7 +2434,7 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "folder_name": friendly_group,
         "folder_browse_id": group_id,
         "group_id": group_id,
-        "data_project": friendly_group,          # collection folder name (e.g. Sierksma2025)
+        "data_project": group_folder_name,       # collection folder name (e.g. Sierksma2025)
         "basename": db.get('basename'),           # .md filename stem (from API when available)
         "dataset_name": dataset_title,
         # One-line description from the .md frontmatter (edited via the admin

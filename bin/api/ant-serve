@@ -1375,6 +1375,13 @@ class DatabaseRegistry:
             metadata['collection'] = {
                 'group': collection_metadata.get('group'),
                 'group_id': collection_metadata.get('group_id'),
+                # Display-only title override from the index.md frontmatter
+                # `title:` field. When set, the web UI shows this everywhere
+                # the group name would render (landing tile, folder header,
+                # breadcrumb). Blank/None falls back to `group` (the folder
+                # name). Programmatic identity (`group`, `group_id`, URL
+                # paths, obs values) is unaffected.
+                'title': collection_metadata.get('title'),
                 'experiment': collection_metadata.get('experiment'),
                 'authors': collection_metadata.get('authors'),
                 'year': collection_metadata.get('year'),
@@ -1383,10 +1390,10 @@ class DatabaseRegistry:
                 'accession': collection_metadata.get('accession'),
                 'default_dataset': collection_metadata.get('default_dataset'),
                 'description': collection_body or None,
-                # 'summary' is the NEW one-line frontmatter `description`
-                # exposed by the metadata editor (anthive-web pika #262).
-                # Kept separate from 'description' above which carries the
-                # full markdown body — don't conflate.
+                # 'summary' is the one-line frontmatter `description` exposed
+                # by the metadata editor (anthive-web pika #262). Kept
+                # separate from 'description' above which carries the full
+                # markdown body. Do not conflate.
                 'summary': collection_metadata.get('description'),
             }
 

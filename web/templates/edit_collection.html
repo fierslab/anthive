@@ -96,9 +96,9 @@
   const isScalarList = v => Array.isArray(v) && v.every(isScalar);
 
   const DATASETS = {{ datasets|tojson }};  // {value:file_id, label} for the default_dataset dropdown
-  const RO_KEYS = ['group', 'group_id'];   // identity — shown read-only, never editable (also locked server-side)
-  const HIDE_KEYS = ['experiment'];        // deprecated pre-migration field → hide, but preserve in the file
-  const HANDLED = RO_KEYS.concat(HIDE_KEYS, ['description', 'default_dataset']);  // rendered specially or not at all
+  const RO_KEYS = ['group', 'group_id'];   // identity, shown read-only, never editable (also locked server-side)
+  const HIDE_KEYS = ['experiment'];        // deprecated pre-migration field, hide but preserve in the file
+  const HANDLED = RO_KEYS.concat(HIDE_KEYS, ['title', 'description', 'default_dataset']);  // rendered specially or not at all
 
   function addField(key, value, kind, label) {
     const row = document.createElement('div'); row.className = 'ef-row';
@@ -121,6 +121,10 @@
       val.textContent = fm[k] == null ? '' : String(fm[k]);
       val.title = 'fixed identifier — not editable'; row.appendChild(val); fields.appendChild(row);
     });
+    // title — display-only override for the collection name. Blank falls
+    // back to the folder name (group). Never affects group_id, URL paths,
+    // or any programmatic id. Always editable, even when absent.
+    addField('title', fm.title == null ? '' : String(fm.title), 'scalar', 'title (display name, blank = use group)');
     // description — always editable, even when absent from the file
     addField('description', fm.description == null ? '' : String(fm.description), 'scalar', 'description (one line)');
     // remaining generic scalar/list fields (authors, year, …)
