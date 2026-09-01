@@ -1,74 +1,357 @@
-# Deploying anthive4 on a production host
+# Deploying anthive4
 
-End-to-end recipe for deploying anthive on a host that ALREADY runs
-nginx fronting other vhosts (alzmap.org, data.example.org, …).  The
-goal of this recipe is to add ONE new anthive vhost without touching
-the unrelated nginx config.
+End-to-end deployment guide covering two shapes.
 
-If you're setting up a fresh box without any existing nginx, see
-`doc/INSTALL.md` instead — that doc covers the from-scratch path.
+1. Fresh single-host install on a clean Ubuntu-ish box (sections 1 through 7).
+2. Multi-copy topology where a **main** install serves the full dataset
+   catalogue and one or more **derivatives** serve subsets via symlinks
+   (sections 8 through 12).
 
-## Topology — what we're building
+Sister docs:
+
+- `doc/INSTALL.md` covers the same ground with an alternative angle
+  (bare-API-first, then reverse proxy). Some passages there are older; where
+  the two disagree, this file wins.
+- `doc/NEW_INSTANCE.md` is the legacy per-instance recipe for hosts that
+  already run system nginx. It stays as a reference for that pattern.
+- `doc/HANDOFF_authelia.md` is the self-contained Authelia walkthrough.
+  Read that before wiring auth.
+
+---
+
+## 1. Prerequisites on the host
+
+Required.
+
+- Linux x86_64. Tested on Debian 12 and Ubuntu 22.04 or newer.
+- Python 3.10 or later for the system tooling. The per-script venvs use
+  Python 3.11 via uv, so the system Python is only needed to run `uv` itself.
+- **[uv](https://docs.astral.sh/uv/)**. Every `ant-*` script is a
+  `uv run --script` PEP-723 shebang. Install once:
+
+  ```bash
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  ```
+
+- **git** with SSH access to the data repos (`badslab/h5adstore` and any
+  geneset repo you use).
+- **micromamba** for the `anthive-data` env. Only needed if you plan to
+  run ingest, scoring, or DE tools on this host. Not needed for a
+  serve-only install. Install per
+  <https://mamba.readthedocs.io/en/latest/installation/micromamba-installation.html>.
+- Disk. The repo itself is small (<200 MB). The h5adstore is the heavy
+  bit. Full catalog as of 2026-09 is roughly **500 GB** of `.h5ad` plus
+  `.duckdb` and the parquet sidecars. Budget accordingly. A serve-only
+  derivative that symlinks the main's files needs a few GB of headroom
+  for the `.md` files and DuckDB spill.
+- A non-root user that owns the install. `anthive` on most deployments.
+  All services run as this user, no root at runtime.
+
+Recommended.
+
+- **Caddy 2.x**. The repo ships a working `config/Caddyfile` plus a
+  bundled binary at `envs/caddy/caddy` (built with the `replace_response`
+  module for a small piece of Authelia CSS injection).
+- **nginx** if the host already fronts other vhosts. In that case anthive
+  runs as a thin loopback shim (see section 5).
+- **Authelia** for auth. The supervisor already knows how to launch it
+  from `envs/authelia/authelia`. Setup detail is in
+  `doc/HANDOFF_authelia.md`.
+
+Optional secrets and configs on the host.
+
+- `~/.synapseConfig` if any dataset comes from a Synapse-gated study.
+  Only ingest tools need this; a derivative that symlinks does not.
+- `~/.pypirc` if you plan to release pyvark from this host. Not needed for
+  serving.
+- S3 credentials for Hetzner (or wherever your object storage lives) go
+  into `anthive.yaml`. See section 3.
+
+---
+
+## 2. Clone the three repos
+
+anthive4 hosts the code. The h5adstore and (optionally) the genesetstore
+are separate git repos because their heavy files are too big for git. The
+`.md` files in those repos ARE tracked; the `.h5ad`, `.duckdb`, and
+parquet sidecars are synced to S3 via `bin/ops/ant-sync` (never committed).
+
+```bash
+# Pick a base path. Convention: /data/anthive or /opt/anthive.
+BASE=/data/anthive
+sudo mkdir -p "$BASE" && sudo chown "$USER" "$BASE"
+cd "$BASE"
+
+# Code.
+git clone git@github.com:badslab/anthive4.git
+
+# Data. The h5adstore repo's `.gitignore` is `*` at the leaves, so the
+# clone is fast (only .md + index files land locally).
+git clone git@github.com:badslab/h5adstore.git
+
+# Genesets. Optional if you don't use gene-set scoring.
+git clone git@github.com:badslab/genesetstore.git
+
+# Wire the data stores into the anthive tree.
+cd anthive4
+ln -s ../h5adstore    data/h5adstore
+ln -s ../genesetstore data/genesetstore    # optional
+```
+
+After the clone, `data/h5adstore/` contains one folder per collection with
+`.md` files and often an `index.md` at the folder root. The heavy files
+come later via `ant-sync pull`.
+
+---
+
+## 3. Configure `anthive.yaml`
+
+```bash
+cd "$BASE/anthive4"
+cp anthive.default.yaml anthive.yaml
+$EDITOR anthive.yaml
+```
+
+`anthive.yaml` is gitignored (instance-local). Minimum keys to set for a
+fresh install:
+
+```yaml
+# Bind loopback when a reverse proxy on this host fronts public access.
+# Set to 0.0.0.0 only if you want direct LAN access without Caddy or nginx.
+rest_api_host: localhost
+rest_api_port: 8080
+browse_host:   localhost
+browse_port:   8081
+
+# DuckDB memory. Leave 'auto' on a fresh box; revisit if RSS climbs.
+duckdb_memory_limit: auto
+
+# S3 for the data layer. Required if you'll be running ant-sync.
+# AWS: leave endpoint null. Hetzner / MinIO / R2 / B2: set endpoint.
+s3:
+  endpoint: fsn1.your-objectstorage.com
+  region: eu-central
+  bucket: anthive4a
+  access_key_id: AKIA...
+  secret_access_key: ...
+  prefix: ""
+  use_path_style: true    # true for Hetzner and most non-AWS backends
+```
+
+For derivatives, add the `sync_policy` block from
+`anthive.default.yaml` and set `role: slave` so annotation writers and
+`sync push` refuse to run against the shared store. More on this in
+section 8.
+
+The chat assistant, geneset store path, and the report-site list all have
+sensible defaults in `anthive.default.yaml`. Copy over the ones that apply
+to your instance.
+
+---
+
+## 4. Pull the data
+
+The h5adstore is canonical on S3. `ant-sync pull` copies the files this
+host actually needs.
+
+```bash
+cd "$BASE/anthive4"
+
+# Full catalog. Watch disk: current fleet is ~500 GB.
+./bin/ops/ant-sync pull
+
+# One collection only.
+./bin/ops/ant-sync pull 'Sierksma2025/**'
+
+# See what pull would touch without transferring.
+./bin/ops/ant-sync status
+```
+
+Defaults pull `.h5ad`, `.de.parquet`, `.scores.parquet`, plus the
+fleet-wide `module_variability.parquet` and `scores_index.parquet`.
+`.duckdb` and the `.layer.*.parquet` expression sidecars are treated as
+derived; rebuild them locally via `make build-stale` (or pull them for
+disaster recovery with `ant-sync pull --include-duckdb`).
+
+For a derivative that symlinks the main's files, skip this step entirely
+and go to section 8.
+
+---
+
+## 5. Build the `anthive-data` micromamba env (only if ingesting)
+
+The serve-only path does NOT need this. It's for tools that touch h5ad or
+run scoring: `ant-convert`, `ant-merge-h5ad`, `ant-score`, `ant-starcat`,
+`ant-module-variability`, the DE ingest scripts, and anything that runs
+R + Seurat for `.rds` import.
+
+```bash
+cd "$BASE/anthive4"
+micromamba create -y -p envs/anthive-data -f envs/anthive-data.yml
+```
+
+The env definition ships in the repo at `envs/anthive-data.yml` and
+includes R + Seurat, anndata, scanpy, and the numeric stack. It builds
+once, then per-script uv shebangs pick it up when needed.
+
+Derivatives that only serve don't need any of this. `ant-serve` reads
+DuckDB directly and has no heavy scientific dependencies.
+
+---
+
+## 6. Reverse proxy
+
+Two shapes. Pick one.
+
+### 6a. Caddy alone (single-host dev box or no other vhosts)
+
+Caddy terminates TLS on `:8501` with `tls internal` (self-signed by
+Caddy's local CA). Users accept the cert warning once, or run
+`caddy trust` on the server to install the CA into the OS trust store.
+
+The Caddyfile is already correct out of the box. To reach the box over a
+LAN address, add the address to the site block header in
+`config/Caddyfile`, or export `ANTHIVE_CADDY_BIND` before start.
+
+Start under the supervisor:
+
+```bash
+cd "$BASE/anthive4"
+./bin/ops/ant-supervisor --caddy
+# or nohup for a persistent run:
+nohup ./bin/ops/ant-supervisor --caddy > /tmp/ant-supervisor.log 2>&1 &
+```
+
+Smoke test:
+
+```bash
+curl -k https://localhost:8501/api/version | python3 -m json.tool
+```
+
+### 6b. Nginx in front of Caddy (multi-vhost host)
+
+If the box already runs nginx for other vhosts (alzmap.org, data.badslab
+sites, and so on), do NOT duplicate the anthive routing in nginx. Use
+this pattern:
 
 ```
 client ──https──> nginx :443 (SSL term + Authelia auth_request)
-                   │  proxy_pass http://127.0.0.1:8500
-                   ▼
-                  Caddy on 127.0.0.1:8500 (plain HTTP, localhost-only)
-                   │
-                   ├── /api/*           → ant-serve   :8080
-                   ├── /browse/*        → ant-browse  :8081
-                   ├── /mcp*            → ant-mcp     :8090
-                   ├── /authelia/*      → authelia    :9091
-                   ├── /jupyter/*       → static (webapp/jupyter/)
-                   ├── /artifacts/*     → static (webapp/artifacts/)
-                   └── /  (fallback)    → ant-browse  :8081
+                    │  proxy_pass http://127.0.0.1:8500
+                    ▼
+                Caddy on 127.0.0.1:8500 (plain HTTP, loopback only)
+                    │
+                    ├── /api/*        → ant-serve   :8080
+                    ├── /browse/*     → ant-browse  :8081
+                    ├── /mcp*         → ant-mcp     :8090
+                    ├── /authelia/*   → authelia    :9091
+                    ├── /jupyter/*    → static
+                    ├── /artifacts/*  → static
+                    └── / fallback    → ant-browse  :8081
 ```
 
-The nginx → Caddy hop is loopback (~1 ms). The benefit: ONE Caddyfile
-defines what `/jupyter/`, `/api/`, `/artifacts/`, `/mcp/`, … look like,
-identical on dev and prod.  Adding or renaming a path = editing
-`config/Caddyfile` only.  Nginx never changes after this deploy.
+The nginx to Caddy hop is loopback (~1 ms). The benefit is that
+`config/Caddyfile` is the single source of path routing, identical on dev
+and prod. Adding or renaming a path means editing `config/Caddyfile`
+only. Nginx never changes after this deploy.
 
-## Prerequisites
+The prod-mode env-var split that drives `config/Caddyfile`:
 
-- nginx already installed and running (managing other vhosts).
-- DNS for the new anthive hostname (e.g. `anthive.example.org`) points at
-  this host.
-- A valid TLS cert in `/etc/nginx/cert/` (wildcard recommended).
-- `/data/anthive/anthive4` checked out — or any path; adjust the unit.
-- All anthive prerequisites from `doc/INSTALL.md` (uv, S3 creds, the
-  initial `sync-pull` + `build-stale` etc.).
+| Env var                          | Dev default                 | Prod value                  |
+| -------------------------------- | --------------------------- | --------------------------- |
+| `ANTHIVE_LISTEN`                 | `:8501`                     | `http://127.0.0.1:8500`     |
+| `ANTHIVE_TLS_SNIPPET`            | `caddy-tls.dev`             | `caddy-tls.prod` (empty)    |
+| `ANTHIVE_AUTH_SNIPPET`           | `caddy-auth.dev`            | `caddy-auth.prod` (empty)   |
+| `ANTHIVE_HTTP_REDIRECT_SNIPPET`  | `caddy-http-redirect.dev`   | `caddy-http-redirect.prod` (empty) |
+| `ANTHIVE_CADDY_BIND`             | `0.0.0.0 ::`                | `127.0.0.1`                 |
 
-## Step-by-step
+`ant-supervisor --prod` sets all of them. Without `--prod` the dev
+defaults apply and behaviour is unchanged.
 
-### 1. Pull the latest anthive4 code
+Copy the slim nginx vhost:
 
 ```bash
-cd /data/anthive/anthive4
-git pull origin main
+sudo cp config/nginx-intern-anthive.conf \
+        /etc/nginx/sites-available/anthive.conf
+sudo ln -sf /etc/nginx/sites-available/anthive.conf \
+            /etc/nginx/sites-enabled/anthive.conf
 ```
 
-### 2. Verify Caddy is available
+Adjust cert paths and the `server_name` at the top of the file. If a
+sprawling per-path anthive vhost existed before this deploy, remove it
+now. The new slim vhost replaces it entirely.
 
-We ship a Caddy binary at `./envs/caddy/caddy` (built with the
-`replace_response` module for the Authelia logo CSS injection).
-Confirm it works:
+Test and reload:
 
 ```bash
-./envs/caddy/caddy version
-./envs/caddy/caddy validate --config config/Caddyfile
+sudo nginx -t
+sudo systemctl reload nginx
 ```
 
-The supervisor uses this binary by default — no system-wide install
-needed.
+Start the supervisor in prod mode:
 
-### 3. Set up the systemd unit for the anthive supervisor in prod mode
+```bash
+cd "$BASE/anthive4"
+nohup ./bin/ops/ant-supervisor --prod --caddy > /tmp/ant-supervisor.log 2>&1 &
+```
+
+Verify:
+
+```bash
+# Direct to Caddy on loopback.
+curl -sv http://127.0.0.1:8500/api/health -H 'Remote-User: smoke-test'
+# → HTTP/1.1 200 with a JSON body listing databases.
+
+# The MCP discovery stub (proves Caddy's routing layer is alive).
+curl -s -o /dev/null -w 'HTTP %{http_code}\n' \
+    http://127.0.0.1:8500/.well-known/oauth-authorization-server
+# → HTTP 404 with a JSON body.
+
+# Through nginx.
+curl -sv https://anthive.example.org/api/health
+```
+
+If the loopback check fails, fix BEFORE wiring nginx. The failure mode is
+much harder to diagnose through nginx.
+
+---
+
+## 7. Authelia (auth)
+
+`doc/HANDOFF_authelia.md` is the canonical Authelia walkthrough. It
+covers binary install, per-host secret generation, `configuration.yml`
+placeholders, first-user seeding via `bin/ops/ant-adduser`, both the
+Caddy and nginx wiring, and the common gotchas (the `localhost` cookie
+domain trap, the basic-auth ban trap, the TLS-required cookie URL).
+
+Key headers the app depends on, set by the proxy after Authelia says
+"allow" on a `forward_auth` (Caddy) or `auth_request` (nginx) call:
+
+- `Remote-User` (login, no spaces)
+- `Remote-Name` (display name)
+- `Remote-Email`
+- `Remote-Groups` (comma-separated; `admins` gates the admin editors)
+
+The web UI's topbar reads these to render the signed-in user and the
+sign-out action. Un-proxied direct access to `:8081` shows nothing there,
+which is correct.
+
+Never add HTTP basic auth to browser routes. Browsers resend stale creds
+and trip Authelia's rate-limiter and ban. The API path in
+`config/caddy-auth.dev` and the equivalent nginx location have a
+cookie-first-then-basic split that keeps CLI clients happy without
+banning users.
+
+---
+
+## 8. Systemd
+
+The supervisor should run under systemd on production hosts so it
+survives reboots and restarts cleanly on crash.
 
 ```ini
 # /etc/systemd/system/anthive.service
 [Unit]
-Description=Anthive supervisor (prod — Caddy on 127.0.0.1:8500, nginx in front)
+Description=Anthive supervisor (prod, Caddy on 127.0.0.1:8500, nginx in front)
 After=network.target
 
 [Service]
@@ -80,13 +363,14 @@ ExecStop=/data/anthive/anthive4/bin/ops/ant-supervisor restart all
 Restart=on-failure
 RestartSec=5
 
-# uv must be discoverable for the per-script PEP-723 shebangs:
+# uv must be on PATH for the per-script PEP-723 shebangs.
 Environment=PATH=/home/anthive/.local/bin:/usr/local/bin:/usr/bin:/bin
 
-# Prod-mode env split — also encoded by `--prod` above, but stating it
-# explicitly here means a manual `systemctl edit anthive.service` user
-# sees the actual values that drive config/Caddyfile.
+# Prod-mode env split.
 Environment=ANTHIVE_PROD=1
+
+# Optional: pin Caddy to specific interfaces on multi-homed boxes.
+# Environment=ANTHIVE_CADDY_BIND=127.0.0.1 10.0.0.10
 
 [Install]
 WantedBy=multi-user.target
@@ -96,130 +380,438 @@ WantedBy=multi-user.target
 sudo systemctl daemon-reload
 sudo systemctl enable --now anthive.service
 sudo systemctl status anthive.service
-journalctl -u anthive.service -f       # follow logs
+journalctl -u anthive.service -f
 ```
 
-### 4. Verify Caddy is up locally
+For the "Caddy alone, no nginx" shape, drop `--prod` from `ExecStart`.
+Caddy then listens on `:8501` with `tls internal` and its own auth.
+
+Nginx has its own systemd unit already. Just make sure the anthive vhost
+is in `/etc/nginx/sites-enabled/`.
+
+For hosts that need per-instance nginx routing (the legacy shape rather
+than the thin shim), `doc/NEW_INSTANCE.md` remains the reference. Don't
+mix the two on the same vhost.
+
+Rollback if something goes wrong:
 
 ```bash
-curl -sv http://127.0.0.1:8500/api/health -H 'Remote-User: smoke-test'
-# → expect HTTP/1.1 200 OK with a JSON body listing databases.
-
-curl -s -o /dev/null -w 'HTTP %{http_code}\n' http://127.0.0.1:8500/streamlit
-# → HTTP 410 (the gone-stub, proves Caddy's routing layer is alive).
-
-curl -s -o /dev/null -w 'HTTP %{http_code}\n' \
-    http://127.0.0.1:8500/.well-known/oauth-authorization-server
-# → HTTP 404 (the MCP discovery JSON-404 stub).
-```
-
-If any of these fail, fix BEFORE wiring nginx — the failure mode is
-much harder to diagnose through nginx.
-
-### 5. Drop in the slim nginx vhost
-
-Copy `config/nginx-intern-anthive.conf` into nginx's sites directory
-and enable it. The file is a ~150-line server{} block containing:
-
-- SSL termination
-- Authelia `auth_request` gate
-- `/authelia/*` portal pass-through
-- A single `location /` that forwards EVERYTHING to Caddy on 127.0.0.1:8500
-
-```bash
-sudo cp config/nginx-intern-anthive.conf \
-        /etc/nginx/sites-available/intern-bdslab.conf
-sudo ln -sf /etc/nginx/sites-available/intern-bdslab.conf \
-            /etc/nginx/sites-enabled/intern-bdslab.conf
-
-# If the host previously had a sprawling anthive.example.org config with
-# /api/, /browse/, /jupyter/, … location blocks, REMOVE that old file
-# now — the new slim vhost replaces it entirely.
-# Example:
-# sudo rm /etc/nginx/sites-enabled/intern-bdslab-OLD.conf
-```
-
-Adjust the cert paths in the new file if this host uses different ones.
-
-### 6. Test + reload nginx
-
-```bash
-sudo nginx -t
-sudo systemctl reload nginx
-```
-
-`nginx -t` MUST pass. A typo here doesn't break running connections
-(reload is graceful) but a failing config blocks future reloads.
-
-### 7. Smoke test from a browser
-
-Visit `https://anthive.example.org/` and verify:
-
-- [ ] Landing page loads (browse UI, owned by ant-browse via Caddy).
-- [ ] Click into a dataset → plot UI works.
-- [ ] `https://anthive.example.org/jupyter/` → JupyterLite loads with
-      COOP/COEP headers (Pyodide kernel boots).
-- [ ] Generate a plot, then a notebook link → the "Open in JupyterLite"
-      button on the plot page opens the notebook deep-link.
-- [ ] Trigger a pseudobulk artifact download from the API → file lands
-      in `/artifacts/…` and downloads cleanly (auth flows through).
-- [ ] `https://anthive.example.org/mcp` → MCP endpoint responds (try
-      `curl -H 'Accept: text/event-stream' https://anthive.example.org/mcp`
-      while authenticated — should produce a non-empty SSE stream).
-- [ ] `https://anthive.example.org/api/version` → JSON `{ "version": ... }`.
-- [ ] Other vhosts on this nginx (alzmap.org, data.example.org) still
-      work — they live in their own server{} blocks and we didn't touch
-      them.
-
-## Rollback
-
-If something is wrong:
-
-```bash
-# 1. Roll nginx back to whatever was there before:
-sudo rm /etc/nginx/sites-enabled/intern-bdslab.conf
-sudo ln -sf /etc/nginx/sites-available/intern-bdslab-OLD.conf \
-            /etc/nginx/sites-enabled/intern-bdslab.conf
-sudo nginx -t && sudo systemctl reload nginx
-
-# 2. Stop the new prod-mode supervisor:
 sudo systemctl stop anthive.service
+sudo rm /etc/nginx/sites-enabled/anthive.conf
+sudo nginx -t && sudo systemctl reload nginx
 ```
 
-You should be back to the pre-deploy state.  Diagnose the Caddy issue
-locally (steps 4 above), fix, and retry.
+You should be back to the pre-deploy state.
 
-## What changes vs. the old topology
+---
 
-Before:
+## 9. Multi-copy topology (main plus derivatives)
+
+The "main" install is the full replica. Every dataset lives there, on
+disk, backed by S3. It's the source of truth for the code repo, the data
+store, and the fleet-wide summary parquets.
+
+A "derivative" is a **second (or third) anthive install** that serves a
+**subset** of the main's datasets. Each derivative has:
+
+- Its own anthive4 checkout.
+- Its own `data/h5adstore/` folder.
+- Its own `ant-serve` and `ant-browse` on their own ports and vhost.
+- Its own Authelia, since Authelia is per-instance by design (see
+  `doc/HANDOFF_authelia.md`).
+- Its own `module_variability.parquet` and `scores_index.parquet`,
+  filtered from the main's copies.
+
+The derivative's `data/h5adstore/<Group>/` folders contain **symlinks**
+back to the main install's files. The `.h5ad` file is deliberately NOT
+symlinked. `ant-serve` reads only the DuckDB, so a serve-only derivative
+never touches the h5ad and doesn't need it on local disk.
 
 ```
-client ──https──> nginx :443  ──/api/      → ant-serve  :8080
-                                ──/browse/   → ant-browse :8081
-                                ──/jupyter/  → static
-                                ──/mcp/      → ant-mcp    :8090
-                                ──/.well-known/ → (custom 404s)
-                                ──/streamlit  → 410
-                                ──/artifacts/ → static
-                                ──/           → ant-browse :8081
+main:      /data/anthive/anthive4/data/h5adstore/Group/foo.duckdb   (real file)
+                                                    foo.h5ad        (real file)
+                                                    foo.scores.parquet
+                                                    foo.md
+                                                    static/
+                                                    .env
+
+derivative: /data/anthive-microglia/anthive4/data/h5adstore/Group/foo.duckdb
+              → symlink to /data/anthive/.../Group/foo.duckdb
+            foo.scores.parquet
+              → symlink
+            foo.md
+              → symlink
+            static/
+              → symlink
+            .env
+              → symlink
+            (foo.h5ad intentionally absent)
 ```
 
-After:
+Anything that requires the h5ad (mainly `ant-merge-h5ad`, `ant-convert`,
+and full re-scoring) MUST NOT run on the derivative. Set
+`sync_policy.role: slave` in the derivative's `anthive.yaml` and the
+annotation writers will refuse.
 
-```
-client ──https──> nginx :443  ──/  → Caddy 127.0.0.1:8500 ── (everything above)
+---
+
+## 10. Symlinking a dataset into a derivative
+
+For each dataset the derivative wants to include, symlink these files
+from the main install into the derivative's tree:
+
+- `<basename>.duckdb`
+- `<basename>.layer.*.by_cell.parquet`
+- `<basename>.layer.*.by_gene.parquet`
+- `<basename>.scores.parquet`
+- `<basename>.md`
+- `<basename>.h5ad.mus`
+
+Then, once per group folder:
+
+- `index.md`
+- `.env` (folder-level mus cascade entry point)
+- `static/` (the whole folder; paper PDFs and supplementary tables)
+
+DO NOT symlink `<basename>.h5ad`. The derivative doesn't need it.
+
+A small bash loop that operators can adapt:
+
+```bash
+MAIN=/data/anthive/anthive4/data/h5adstore
+DERIV=/data/anthive-microglia/anthive4/data/h5adstore
+GROUP=Sierksma2025
+
+# Datasets in this group that we want on the derivative. Empty = all.
+BASENAMES=(Village.6M Village.12M Grafts.Adult)
+
+mkdir -p "$DERIV/$GROUP"
+
+# Group-level files (once per group).
+for name in index.md .env static; do
+    src="$MAIN/$GROUP/$name"
+    dst="$DERIV/$GROUP/$name"
+    [ -e "$src" ] && ln -sfn "$src" "$dst"
+done
+
+# Per-dataset files.
+for base in "${BASENAMES[@]}"; do
+    for ext in .duckdb .scores.parquet .md .h5ad.mus; do
+        src="$MAIN/$GROUP/${base}${ext}"
+        dst="$DERIV/$GROUP/${base}${ext}"
+        [ -e "$src" ] && ln -sfn "$src" "$dst"
+    done
+    # Layer parquets (there are usually two per layer: by_cell and by_gene).
+    for f in "$MAIN/$GROUP/${base}".layer.*.parquet; do
+        [ -e "$f" ] && ln -sfn "$f" "$DERIV/$GROUP/$(basename "$f")"
+    done
+done
 ```
 
-`config/nginx-intern-anthive.conf` shrinks from ~200 lines to ~50 of
-actual routing.  Adding a new path = `config/Caddyfile` only — touch
-nothing on prod nginx after this deploy.
+Two warnings.
+
+Absolute paths keep the derivative working across moves within the host,
+but they break if the main install ever migrates to a new path. Pick one
+convention (absolute or relative) and use it consistently. Relative
+symlinks (`ln -sr` on GNU coreutils, or hand-compute the `..` traversal)
+survive host-path renames as long as main and derivative move together.
+
+Symlinks make eviction on the main install invisible to derivatives. If
+you `ant-sync pull` on the main and it evicts a low-priority duckdb, the
+derivative's symlink is now dangling. Prefer per-file symlinks over
+`ln -s <group>/` at the folder level so a newly-added file on the main
+does NOT auto-appear on the derivative unless you re-run the loop.
+
+---
+
+## 11. Per-derivative genesetstore
+
+Each derivative has its own `data/genesetstore/`. Two options.
+
+**Symlink the whole store to the main** (recommended default). Every
+derivative sees every geneset the main knows about.
+
+```bash
+ln -sfn /data/anthive/genesetstore \
+        /data/anthive-microglia/anthive4/data/genesetstore
+```
+
+**Copy or symlink a subset** if you want a derivative to expose only
+certain catalogs. Create a fresh folder and symlink the specific
+catalog subfolders you want. `ant-serve` walks the store and picks up
+whatever's there.
+
+---
+
+## 12. Per-derivative summary parquets
+
+Two fleet-wide summary parquets live at the root of `data/h5adstore/`.
+They're computed across **whatever datasets are in this install's
+h5adstore**, so a derivative needs its own subset. Options for each:
+
+- Rerun the tool on the derivative. Correct, slow (hours for the full
+  walk on a large catalog), and requires the anthive-data env.
+- Filter the main's parquet down to the derivative's dataset list. Fast
+  (seconds). Correct because rows are keyed on `dataset` (the `db_id`
+  string, e.g. `S25/PhM`).
+
+Filter is the default for both.
+
+### 12a. module_variability.parquet
+
+Schema is `dataset, source, catalog, module, tag_column, tag, statistic,
+value, n_cells, n_categories`. `dataset` is the compact `db_id` string
+that `ant-serve` uses (like `AZ5/SLM`, `S25/PhM`).
+
+Get the derivative's dataset list. One reliable source is the running
+main's REST API:
+
+```bash
+# On the main.
+curl -s http://127.0.0.1:8080/databases | python3 -c \
+    'import json, sys; [print(r["id"]) for r in json.load(sys.stdin)["databases"]]'
+```
+
+The subset the derivative wants is a subset of that list. Save it as a
+plain text file (one `db_id` per line):
+
+```bash
+cat > /tmp/derivative_datasets.txt <<'EOF'
+S25/PhM
+S25/Vlg
+AZ5/SLM
+...
+EOF
+```
+
+Filter the main's MV parquet into the derivative's spot:
+
+```bash
+duckdb -c "
+COPY (
+  SELECT * FROM read_parquet('/data/anthive/anthive4/data/h5adstore/module_variability.parquet')
+  WHERE dataset IN (
+    SELECT column0 FROM read_csv('/tmp/derivative_datasets.txt',
+                                 columns={'column0': 'VARCHAR'}, header=false)
+  )
+) TO '/data/anthive-microglia/anthive4/data/h5adstore/module_variability.parquet' (FORMAT parquet);
+"
+```
+
+To rebuild from scratch on the derivative instead (only if you don't
+trust the main's copy):
+
+```bash
+cd /data/anthive-microglia/anthive4
+./bin/annot/ant-module-variability --h5adstore-root ./data/h5adstore \
+    --out data/h5adstore/module_variability.parquet
+```
+
+That walks the derivative's h5adstore (following the symlinks), reads
+each `.scores.parquet`, and writes the aggregate. Same tool, same
+schema.
+
+### 12b. scores_index.parquet
+
+Same filter approach. Schema is `dataset, group, basename, source,
+catalog, module, n_cells, mean, std, min, p50, max`. `dataset` is the
+same `db_id` string.
+
+```bash
+duckdb -c "
+COPY (
+  SELECT * FROM read_parquet('/data/anthive/anthive4/data/h5adstore/scores_index.parquet')
+  WHERE dataset IN (
+    SELECT column0 FROM read_csv('/tmp/derivative_datasets.txt',
+                                 columns={'column0': 'VARCHAR'}, header=false)
+  )
+) TO '/data/anthive-microglia/anthive4/data/h5adstore/scores_index.parquet' (FORMAT parquet);
+"
+```
+
+After either filter, restart the derivative's `ant-serve` so it picks up
+the new parquet:
+
+```bash
+./bin/ops/ant-supervisor restart api
+```
+
+---
+
+## 13. Day-2 ops
+
+### Update code on a derivative
+
+Same as the main. Pull, restart.
+
+```bash
+cd /data/anthive-microglia/anthive4
+git pull origin main
+./bin/ops/ant-supervisor restart all
+```
+
+The derivative doesn't own an h5adstore commit history separate from the
+main's; only its `anthive.yaml` and Authelia config are instance-local.
+
+### Add a new dataset to a derivative
+
+Once the dataset is ingested on the main (via the usual `ant-convert`
+plus `ant-sync push` cycle), the derivative catches up in two steps.
+
+1. Add the symlinks. Re-run the loop from section 10 with the new
+   basename.
+2. Rebuild the two summary parquets by rerunning the filter from
+   section 12 with the extended dataset list.
+3. Restart the derivative's `ant-serve` so it rescans and picks up the
+   new folder entries:
+
+   ```bash
+   ./bin/ops/ant-supervisor restart api
+   # or trigger a rescan without restart:
+   curl -X POST http://127.0.0.1:8080/admin/rescan
+   ```
+
+### Remove a dataset from a derivative
+
+Delete the derivative's symlinks for that basename, refresh the two
+summary parquets (rerun the filter with the shrunken list), then rescan
+`ant-serve`. The main is untouched.
+
+```bash
+cd /data/anthive-microglia/anthive4/data/h5adstore/Sierksma2025
+rm -f Village.6M.duckdb Village.6M.scores.parquet Village.6M.md \
+      Village.6M.h5ad.mus Village.6M.layer.*.parquet
+# then rebuild module_variability and scores_index parquets, and rescan.
+```
+
+### When the main evicts a dataset
+
+If the main's disk fills and `ant-sync pull --priority` evicts a duckdb
+that a derivative still symlinks, the derivative's symlink is now
+dangling and `ant-serve` on the derivative will log a load failure for
+that entry.
+
+Either pin the priority higher on the main (`bin/ops/ant-priority set`),
+or remove the symlink on the derivative and rebuild the summaries.
+There's no automatic reconciliation across installs; the two catalogs
+are coupled only by convention.
+
+### Add a user
+
+Both main and derivatives have their own Authelia and their own users
+database.
+
+```bash
+./bin/ops/ant-adduser you@example.org -g admins
+```
+
+Prints a random password once. The user changes it in the portal's
+Settings page after first login.
+
+### Restart one service
+
+```bash
+./bin/ops/ant-supervisor restart api          # ant-serve
+./bin/ops/ant-supervisor restart browse       # ant-browse (web UI)
+./bin/ops/ant-supervisor restart caddy
+./bin/ops/ant-supervisor restart authelia
+./bin/ops/ant-supervisor restart all
+```
+
+Under systemd, do NOT use `ant-supervisor stop` for a permanent stop.
+The unit's `Restart=on-failure` respawns the supervisor immediately. Use
+`sudo systemctl stop anthive` to actually take it down.
+
+---
+
+## 14. Verify
+
+```bash
+curl -s http://localhost:8080/api/version | python3 -m json.tool
+curl -s http://localhost:8080/api/health
+curl -s http://localhost:8080/databases | python3 -c \
+    'import json, sys; d = json.load(sys.stdin); print(f"{d[\"total\"]} datasets")'
+```
+
+Through the public vhost:
+
+```bash
+curl -sv https://anthive.example.org/api/version
+```
+
+If `/api/version` returns the current `API_VERSION` and `/api/health`
+reports `databases > 0`, the install works. Then open the URL in a
+browser and step through:
+
+- [ ] Landing page loads. Datasets appear in the collection list.
+- [ ] Click into a dataset. Plot UI works.
+- [ ] `/jupyter/` loads JupyterLite with COOP/COEP headers so Pyodide
+      boots.
+- [ ] Generate a plot, click "notebook" on the plot toolbar, verify the
+      JupyterLite deep-link opens.
+- [ ] Pull a pseudobulk artifact from the API. File lands under
+      `/artifacts/` and downloads cleanly.
+- [ ] `/mcp` responds. Try
+      `curl -H 'Accept: text/event-stream' https://anthive.example.org/mcp`
+      while authenticated; expect a non-empty SSE stream.
+
+For derivatives, run the same list on the derivative's hostname. It
+should list the subset of datasets you symlinked and no more.
+
+---
+
+## 15. Common pitfalls
+
+**Empty `data/h5adstore/`.** After a fresh clone the `.md` files are
+there but the heavy files aren't. Run `ant-sync pull` (main) or add
+symlinks (derivative). Until one of those runs, the API returns an empty
+database list.
+
+**DuckDB lock conflicts.** `ant-serve` holds duckdbs read-only via a
+connection pool. Writers (`ant-convert`, `ant-score`, `ant-de-ingest`)
+coordinate via `POST /admin/release/{db_id}` then
+`POST /admin/restore/{db_id}`. A hung writer leaves the duckdb evicted
+for 5 minutes. Kill the writer and call `restore` manually to recover.
+On a derivative, none of this should happen because writers refuse under
+`role: slave`.
+
+**Dangling symlinks on a derivative.** If a main-side eviction wipes a
+duckdb, the derivative's symlink is now broken. Pin priority on the main
+or remove the derivative-side symlink and rebuild the summaries.
+
+**`uv` not on PATH under systemd.** The unit above sets
+`Environment=PATH=...` to include `~/.local/bin`. Verify with
+`sudo -u anthive env | grep PATH`.
+
+**Per-script PEP-723 deps cache cold.** The first time each `ant-*`
+script runs, uv resolves and downloads its inline deps. This can take
+60 to 90 seconds per script. Subsequent runs hit uv's cache and start in
+under a second.
+
+**`localhost` rejected as Authelia cookie domain.** Use
+`localhost.localdomain` or an IP. See `doc/HANDOFF_authelia.md` for the
+full list of Authelia gotchas.
+
+**Basic-auth ban trap.** Never put HTTP basic auth in front of a browser
+route while cookie SSO is also active. Browsers cache and resend basic
+creds; Authelia treats each retry as a failed login and eventually bans
+the user. `caddy-auth.dev` splits the API path (cookie-then-basic) from
+the browser path (cookie only) for exactly this reason.
+
+---
 
 ## Reference
 
-- `config/Caddyfile`                   — single source of truth, dev + prod
-- `config/caddy-{tls,auth,http-redirect}.{dev,prod}` — the env-toggled snippets
-- `config/Caddyfile-prod-snippet`      — annotated example of the env vars
-- `config/nginx-intern-anthive.conf`   — drop-in slim vhost
-- `config/nginx.conf`                  — local dev/test variant of the shim
-- `doc/INSTALL.md` §5                  — the dev-mode (TLS-internal) Caddy path
-- `doc/HANDOFF_authelia.md`            — Authelia setup details (still current)
+- `config/Caddyfile` is the single source of path routing on dev and prod.
+- `config/caddy-{tls,auth,http-redirect}.{dev,prod}` are env-toggled snippets.
+- `config/nginx-intern-anthive.conf` is the drop-in slim prod vhost.
+- `config/nginx.conf` is the local dev variant of the nginx shim.
+- `doc/HANDOFF_authelia.md` covers Authelia end-to-end.
+- `doc/NEW_INSTANCE.md` is the legacy per-instance recipe (nginx holds
+  the routing; kept for hosts already on that pattern).
+- `bin/ops/ant-supervisor` runs the stack, restarts crashed children,
+  multiplexes stdout with colored labels.
+- `bin/ops/ant-sync` pushes and pulls the heavy files.
+- `bin/ops/ant-adduser` seeds and adds Authelia users.
+- `bin/annot/ant-module-variability` rebuilds the MV parquet from
+  scratch (slow, correct) as an alternative to filtering.
