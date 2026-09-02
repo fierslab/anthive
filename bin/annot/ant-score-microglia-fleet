@@ -69,7 +69,8 @@ DEFAULT_CATALOGS = [
 GENESYMBOL_INCOMPATIBLE_DATASETS = {
     'S25/PhW',   # Sierksma2025 phenoWGCNA modules
     'S25/PSW',   # Sierksma2025 pseudobulk WGCNA
-    'S25/V6M',   # Sierksma2025 Visium ME modules
+    'S25/V6M',   # Sierksma2026 Village.6M prs.modules_city.WGCNA — ME features
+    'S25/V6W',   # Sierksma2026 Village.6M.WGCNA_modules — ME features (13 modules)
 }
 
 
