@@ -1,0 +1,1005 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "duckdb>=0.10.0",
+#   "pandas>=2.0.0",
+#   "numpy>=1.24.0",
+#   "pyarrow>=14.0",
+#   "pyyaml>=6.0",
+#   "tqdm>=4.66",
+# ]
+# ///
+"""ant-gene-stats-precompute — fleet-wide `gene_stats_index.parquet`.
+
+Precomputes per-(dataset, gene) expression statistics for a "hot" gene set
+so `/api/gene_stats_all` can serve most queries from a single parquet
+instead of fanning out over 185 duckdbs.
+
+Architecture (mirrors `ant-module-variability`):
+
+  * Per-dataset parquet cache under
+    ``<h5adstore>/_gene_stats_cache/<db_id_flat>/genestats.parquet``.
+    Invalidated by mtime comparison against the dataset's ``.duckdb``
+    (and its by-gene layer parquet, if present).
+  * Two-phase build:
+      Phase 1 — per dataset, compute top-N most-variable genes over the
+                default layer (native STDDEV_POP over the by-gene parquet).
+      Phase 2 — union those sets → **global hot set** — then for every
+                dataset compute stats for **every** hot gene (so every
+                dataset can answer for every hot gene, no server-side
+                fallback for the hot set).
+  * `--hot-set FILE` — override the auto-discovered hot set (one gene per
+    line). Useful for pinning the user's favourite genes.
+  * `--only db_id` — recompute one dataset's cache; the aggregate rebuild
+    then re-concatenates.
+  * Output row schema (canonical column order):
+      ``dataset, gene, layer, n_cells, n_nonzero, pct_nonzero, mean, std,
+        cv, mean_nonzero, std_nonzero, median_nonzero, q10_nonzero,
+        q90_nonzero, max, mean_expr_layer, rank_mean, scaled_mean``.
+
+Usage:
+  ant-gene-stats-precompute [--only DB1,DB2,...] [--top-n N]
+                            [--hot-set FILE] [--out PATH]
+                            [--workers N] [--force] [--dry-run]
+                            [--h5adstore-root DIR]
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import multiprocessing
+import os
+import re
+import sys
+import time
+import traceback
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Iterable, Optional
+
+import duckdb
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+
+script_dir = Path(__file__).resolve().parent
+lib_dir = script_dir.parent.parent / 'lib'
+sys.path.insert(0, str(lib_dir))
+
+from h5adstore import iter_h5adstore                              # type: ignore
+from metadata import parse_md_file                                 # type: ignore
+
+
+CACHE_DIRNAME = '_gene_stats_cache'
+CACHE_FILENAME = 'genestats.parquet'
+
+# Canonical schema — matches the fields ant-serve's /gene_stats_all
+# returns (minus `gene` reordering / `error`). Kept in stable order so
+# the aggregate parquet is diffable.
+OUTPUT_COLUMNS = (
+    'dataset', 'gene', 'layer', 'n_cells',
+    'n_nonzero', 'pct_nonzero',
+    'mean', 'std', 'cv',
+    'mean_nonzero', 'std_nonzero', 'median_nonzero',
+    'q10_nonzero', 'q90_nonzero', 'max',
+    'mean_expr_layer', 'rank_mean', 'scaled_mean',
+)
+
+OUTPUT_DTYPES = {
+    'dataset': 'object', 'gene': 'object', 'layer': 'object',
+    'n_cells': 'int64',
+    'n_nonzero': 'int64', 'pct_nonzero': 'float64',
+    'mean': 'float64', 'std': 'float64', 'cv': 'float64',
+    'mean_nonzero': 'float64', 'std_nonzero': 'float64',
+    'median_nonzero': 'float64', 'q10_nonzero': 'float64',
+    'q90_nonzero': 'float64', 'max': 'float64',
+    'mean_expr_layer': 'float64', 'rank_mean': 'float64',
+    'scaled_mean': 'float64',
+}
+
+
+# ---------------------------------------------------------------------------
+# Cache path handling
+# ---------------------------------------------------------------------------
+
+
+_SANITISE_RE = re.compile(r'[^A-Za-z0-9._-]+')
+
+
+def _sanitise(name: str) -> str:
+    """Turn a db_id into a filesystem-safe single token (`G/F` → `G__F`)."""
+    if not name:
+        raise ValueError('empty identifier')
+    token = _SANITISE_RE.sub('_', name.replace('/', '__').replace(':', '_'))
+    token = token.strip('_')
+    if not token:
+        raise ValueError(f'identifier {name!r} sanitises to empty')
+    return token
+
+
+def _cache_root(h5adstore_root: Path) -> Path:
+    return h5adstore_root / CACHE_DIRNAME
+
+
+def _cache_file(h5adstore_root: Path, db_id: str) -> Path:
+    return _cache_root(h5adstore_root) / _sanitise(db_id) / CACHE_FILENAME
+
+
+def _mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except FileNotFoundError:
+        return 0.0
+
+
+# ---------------------------------------------------------------------------
+# Dataset discovery
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DatasetInputs:
+    """Everything a worker needs to compute one dataset.
+
+    Attributes:
+        db_id: Canonical ``group/file`` id.
+        duckdb_path: Absolute path to the ``.duckdb`` file.
+        md_path: Absolute path to the sibling ``.md`` file.
+        layer: Default layer name (e.g. ``'X'``).
+        by_gene_parquet: Path to ``<stem>.layer.<layer>.by_gene.parquet``
+            (may or may not exist).
+        source_mtime: Newest mtime among (duckdb, by-gene parquet, md) —
+            the cache invalidation key.
+    """
+    db_id: str
+    duckdb_path: Path
+    md_path: Path
+    layer: str
+    by_gene_parquet: Path
+    source_mtime: float
+
+
+def _default_layer_from_md(md_path: Path) -> Optional[str]:
+    """Return ``default_layer`` from a dataset's ``.md`` (or ``None``)."""
+    try:
+        meta, _ = parse_md_file(md_path)
+    except Exception:
+        return None
+    val = meta.get('default_layer')
+    return str(val).strip() if val else None
+
+
+def build_dataset_inputs(entry) -> Optional[DatasetInputs]:
+    """Snapshot on-disk state for a dataset without opening it.
+
+    Returns ``None`` if the dataset lacks a ``.duckdb`` or a resolvable
+    ``default_layer``. The ``by_gene_parquet`` is *not* required — a
+    legacy in-DuckDB layer is fine, we just fall back to the slower path.
+
+    Args:
+        entry: :class:`h5adstore.H5adEntry`.
+
+    Returns:
+        A :class:`DatasetInputs` or ``None``.
+    """
+    if not entry.duckdb_path.exists():
+        return None
+    layer = _default_layer_from_md(entry.md_path)
+    if not layer:
+        return None
+    by_gene = entry.duckdb_path.with_name(
+        f'{entry.duckdb_path.stem}.layer.{layer}.by_gene.parquet'
+    )
+    source_mtime = max(
+        _mtime(entry.duckdb_path),
+        _mtime(by_gene),
+        _mtime(entry.md_path),
+    )
+    return DatasetInputs(
+        db_id=entry.db_id,
+        duckdb_path=entry.duckdb_path.resolve(),
+        md_path=entry.md_path.resolve(),
+        layer=layer,
+        by_gene_parquet=by_gene.resolve() if by_gene.exists() else by_gene,
+        source_mtime=source_mtime,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Layer source expressions (portable across hosts — mirrors AnthiveDB helpers)
+# ---------------------------------------------------------------------------
+
+
+def _sql_str(literal: str) -> str:
+    return "'" + str(literal).replace("'", "''") + "'"
+
+
+def _by_gene_source(inputs: DatasetInputs) -> str:
+    """Return a SQL ``FROM`` expression for the per-gene layer.
+
+    Prefers the by-gene parquet sidecar (portable across hosts); falls
+    back to the persisted ``layer__<safe>`` view otherwise. The chosen
+    expression exposes ``(cell_id, gene_id, value)``.
+    """
+    if inputs.by_gene_parquet.exists():
+        return f"read_parquet({_sql_str(str(inputs.by_gene_parquet))})"
+    safe = ''.join(c if c.isalnum() else '_' for c in inputs.layer)
+    return f'"__layer__{safe}"'
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: per-dataset top-N most-variable genes
+# ---------------------------------------------------------------------------
+
+
+def _top_variable_genes(
+    conn: duckdb.DuckDBPyConnection,
+    inputs: DatasetInputs,
+    top_n: int,
+) -> list[str]:
+    """Return the ``top_n`` most-variable gene names for a dataset.
+
+    Variability = STDDEV_POP(value) over non-zero rows on the default
+    layer. Ties broken by mean expression (higher first) for determinism.
+
+    Args:
+        conn: Open read-only connection to the dataset's ``.duckdb``.
+        inputs: Dataset paths + default layer.
+        top_n: Number of genes to return.
+
+    Returns:
+        List of gene names, longest-first (may be shorter than ``top_n``
+        for very small datasets).
+    """
+    layer_source = _by_gene_source(inputs)
+    rows = conn.execute(f"""
+        WITH stats AS (
+            SELECT gene_id,
+                   STDDEV_POP(value) AS s,
+                   AVG(value)        AS m
+            FROM {layer_source}
+            GROUP BY gene_id
+        )
+        SELECT g.gene_name
+        FROM stats s
+        JOIN __genes g USING (gene_id)
+        WHERE s.s IS NOT NULL
+        ORDER BY s.s DESC NULLS LAST, s.m DESC NULLS LAST
+        LIMIT ?
+    """, [int(top_n)]).fetchall()
+    return [r[0] for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: per-(dataset, gene set) stat computation
+# ---------------------------------------------------------------------------
+
+
+def _compute_stats_for_genes(
+    conn: duckdb.DuckDBPyConnection,
+    inputs: DatasetInputs,
+    gene_names: list[str],
+    n_cells: int,
+) -> list[dict]:
+    """Return one row per gene present in this dataset, matching OUTPUT_COLUMNS.
+
+    Genes absent from ``__genes`` are silently skipped — the aggregate
+    parquet is (dataset, gene) sparse: a gene only appears for datasets
+    that carry it. The endpoint falls back to the live query for missing
+    pairs.
+
+    Args:
+        conn: Open read-only connection to the dataset's ``.duckdb``.
+        inputs: Dataset paths + default layer.
+        gene_names: Hot-set gene names to compute for.
+        n_cells: ``COUNT(*) FROM __cells`` (passed in — hoisted once per
+            dataset by the caller).
+
+    Returns:
+        List of dicts, one per gene that resolves to an entry in
+        ``__genes``. Rows are keyed by the *stored* gene name (queried
+        name matches stored name in this pass because we drove the hot
+        set with stored names to begin with).
+    """
+    if not gene_names or n_cells == 0:
+        return []
+
+    # ── Resolve queried names → gene_ids (batched — one SQL call) ────────
+    placeholders = ','.join('?' * len(gene_names))
+    id_rows = conn.execute(
+        f"SELECT gene_name, gene_id FROM __genes "
+        f"WHERE gene_name IN ({placeholders})",
+        gene_names,
+    ).fetchall()
+    if not id_rows:
+        return []
+    stored_to_id: dict[str, int] = {r[0]: int(r[1]) for r in id_rows}
+    unique_ids = list(dict.fromkeys(stored_to_id.values()))
+
+    layer_source = _by_gene_source(inputs)
+    id_placeholders = ','.join('?' * len(unique_ids))
+
+    # ── Per-gene aggregates (single grouped scan) ─────────────────────────
+    stat_rows = conn.execute(f"""
+        SELECT
+            gene_id,
+            COUNT(*)                   AS n_nonzero,
+            SUM(value)                 AS sum_nz,
+            SUM(value * value)         AS sum_sq_nz,
+            AVG(value)                 AS mean_nz,
+            STDDEV_POP(value)          AS std_nz,
+            MEDIAN(value)              AS median_nz,
+            QUANTILE_CONT(value, 0.1)  AS q10_nz,
+            QUANTILE_CONT(value, 0.9)  AS q90_nz,
+            MAX(value)                 AS max_val
+        FROM {layer_source}
+        WHERE gene_id IN ({id_placeholders})
+        GROUP BY gene_id
+    """, unique_ids).fetchall()
+    stats_by_gid: dict[int, tuple] = {int(row[0]): row for row in stat_rows}
+
+    # ── Cross-gene distribution (for rank_mean + scaled_mean) ─────────────
+    # One layer-wide grouped scan — ~800 ms cold on 300k×25k datasets. The
+    # same scan is what /gene_stats_all triggers on a cache miss; running
+    # it once per dataset here is exactly the "compute once, serve many"
+    # trade the parquet exists to make.
+    dist_rows = conn.execute(f"""
+        SELECT gene_id, SUM(value) / {n_cells}.0 AS mean_expr
+        FROM {layer_source}
+        GROUP BY gene_id
+    """).fetchall()
+    if not dist_rows:
+        return []
+    all_means: dict[int, float] = {int(r[0]): float(r[1]) for r in dist_rows}
+    sorted_means = sorted(all_means.values())
+    n_total = max(len(sorted_means) - 1, 1)
+
+    def _quant(p: float) -> float:
+        n = len(sorted_means)
+        if n == 0:
+            return 0.0
+        idx = p * (n - 1)
+        lo = int(idx)
+        hi = min(lo + 1, n - 1)
+        frac = idx - lo
+        return sorted_means[lo] * (1 - frac) + sorted_means[hi] * frac
+
+    q05 = _quant(0.05)
+    q95 = _quant(0.95)
+    q_range = max(q95 - q05, 1e-9)
+    from bisect import bisect_left
+
+    # ── Assemble output rows ──────────────────────────────────────────────
+    import math
+    out_rows: list[dict] = []
+    for stored_name, gid in stored_to_id.items():
+        row = stats_by_gid.get(gid)
+        mean_expr = all_means.get(gid)
+        rank_mean = (
+            bisect_left(sorted_means, mean_expr) / n_total
+            if mean_expr is not None else 0.0
+        )
+        scaled_mean = (
+            max(0.0, min(1.0, (mean_expr - q05) / q_range))
+            if mean_expr is not None else 0.0
+        )
+
+        if row is None:
+            # Gene present but silent across all cells — mean 0, std 0.
+            out_rows.append({
+                'dataset':         inputs.db_id,
+                'gene':            stored_name,
+                'layer':           inputs.layer,
+                'n_cells':         int(n_cells),
+                'n_nonzero':       0,
+                'pct_nonzero':     0.0,
+                'mean':            0.0,
+                'std':             0.0,
+                'cv':              float('nan'),
+                'mean_nonzero':    float('nan'),
+                'std_nonzero':     float('nan'),
+                'median_nonzero':  float('nan'),
+                'q10_nonzero':     float('nan'),
+                'q90_nonzero':     float('nan'),
+                'max':             0.0,
+                'mean_expr_layer': round(float(mean_expr or 0.0), 6),
+                'rank_mean':       round(float(rank_mean), 4),
+                'scaled_mean':     round(float(scaled_mean), 4),
+            })
+            continue
+
+        (_gid, n_nonzero, sum_nz, sum_sq_nz, mean_nz, std_nz,
+         median_nz, q10_nz, q90_nz, max_val) = row
+        mean_all = float(sum_nz) / n_cells if n_cells else 0.0
+        var_all = max(0.0, float(sum_sq_nz) / n_cells - mean_all ** 2) if n_cells else 0.0
+        std_all = math.sqrt(var_all)
+        cv = round(std_all / mean_all, 4) if mean_all > 0 else float('nan')
+
+        out_rows.append({
+            'dataset':         inputs.db_id,
+            'gene':            stored_name,
+            'layer':           inputs.layer,
+            'n_cells':         int(n_cells),
+            'n_nonzero':       int(n_nonzero),
+            'pct_nonzero':     round(n_nonzero * 100.0 / n_cells, 2) if n_cells else 0.0,
+            'mean':            round(mean_all, 6),
+            'std':             round(std_all, 6),
+            'cv':              cv,
+            'mean_nonzero':    round(float(mean_nz), 6),
+            'std_nonzero':     round(float(std_nz), 6),
+            'median_nonzero':  round(float(median_nz), 6),
+            'q10_nonzero':     round(float(q10_nz), 6),
+            'q90_nonzero':     round(float(q90_nz), 6),
+            'max':             round(float(max_val), 6),
+            'mean_expr_layer': round(float(mean_expr or mean_all), 6),
+            'rank_mean':       round(float(rank_mean), 4),
+            'scaled_mean':     round(float(scaled_mean), 4),
+        })
+    return out_rows
+
+
+# ---------------------------------------------------------------------------
+# Per-dataset worker
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class DatasetJob:
+    """One dataset unit of work."""
+    inputs: DatasetInputs
+    hot_set: tuple[str, ...]
+    top_n: int
+    cache_path: Path
+    phase: str          # 'topvar' → phase 1;  'full' → phase 2
+
+
+@dataclass
+class DatasetResult:
+    """What a worker returns to the coordinator."""
+    db_id: str
+    phase: str
+    cache_path: Path
+    n_rows: int
+    top_genes: tuple[str, ...]     # only set for phase 'topvar'
+    from_cache: bool
+    elapsed_s: float
+    error: Optional[str] = None
+
+
+def _read_cache(cache_path: Path) -> Optional[pd.DataFrame]:
+    if not cache_path.exists():
+        return None
+    try:
+        return pd.read_parquet(cache_path)
+    except Exception:
+        return None
+
+
+def _write_cache(cache_path: Path, rows: list[dict]) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    if rows:
+        df = pd.DataFrame(rows, columns=list(OUTPUT_COLUMNS)).astype(
+            OUTPUT_DTYPES, errors='ignore',
+        )
+    else:
+        df = pd.DataFrame({col: [] for col in OUTPUT_COLUMNS}).astype(
+            OUTPUT_DTYPES,
+        )
+    tmp = cache_path.with_suffix(cache_path.suffix + '.tmp')
+    df.to_parquet(tmp, engine='pyarrow', compression='zstd')
+    os.replace(tmp, cache_path)
+
+
+def _process_topvar(job: DatasetJob) -> DatasetResult:
+    """Phase 1: compute this dataset's top-N most-variable genes."""
+    start = time.time()
+    try:
+        conn = duckdb.connect(str(job.inputs.duckdb_path), read_only=True)
+        try:
+            top = _top_variable_genes(conn, job.inputs, job.top_n)
+        finally:
+            conn.close()
+        return DatasetResult(
+            db_id=job.inputs.db_id, phase='topvar',
+            cache_path=job.cache_path, n_rows=len(top),
+            top_genes=tuple(top), from_cache=False,
+            elapsed_s=time.time() - start,
+        )
+    except Exception as exc:  # noqa: BLE001 — reported via .error
+        return DatasetResult(
+            db_id=job.inputs.db_id, phase='topvar',
+            cache_path=job.cache_path, n_rows=0,
+            top_genes=(), from_cache=False,
+            elapsed_s=time.time() - start,
+            error=f'{type(exc).__name__}: {exc}\n{traceback.format_exc()}',
+        )
+
+
+def _process_full(job: DatasetJob, force: bool) -> DatasetResult:
+    """Phase 2: compute per-(dataset, gene) stats for the hot set.
+
+    Cache is valid if (a) cache mtime ≥ source mtime AND (b) it already
+    contains every gene in ``job.hot_set``. If (a) but not (b), we
+    compute stats for the missing genes and *append* them to the cache
+    (append-only backfill).
+    """
+    start = time.time()
+    try:
+        cache_mtime = _mtime(job.cache_path)
+        source_mtime = job.inputs.source_mtime
+
+        cached_df: Optional[pd.DataFrame] = None
+        cached_genes: set[str] = set()
+        if not force and cache_mtime >= source_mtime and cache_mtime > 0.0:
+            cached_df = _read_cache(job.cache_path)
+            if cached_df is not None:
+                cached_genes = set(cached_df['gene'].astype(str))
+
+        missing_genes = [g for g in job.hot_set if g not in cached_genes]
+        if not missing_genes and cached_df is not None:
+            return DatasetResult(
+                db_id=job.inputs.db_id, phase='full',
+                cache_path=job.cache_path,
+                n_rows=int(len(cached_df)),
+                top_genes=(), from_cache=True,
+                elapsed_s=time.time() - start,
+            )
+
+        conn = duckdb.connect(str(job.inputs.duckdb_path), read_only=True)
+        try:
+            n_cells = (conn.execute(
+                'SELECT COUNT(*) FROM __cells'
+            ).fetchone() or (0,))[0]
+            new_rows = _compute_stats_for_genes(
+                conn, job.inputs, missing_genes if cached_df is not None else list(job.hot_set),
+                int(n_cells),
+            )
+        finally:
+            conn.close()
+
+        # Merge — cached rows (still valid, still current mtime) + new rows.
+        # The cache mtime is unchanged when we only backfill new genes, but we
+        # trust source_mtime as the truth: any dataset-content change would
+        # have bumped it above cache_mtime and we'd already be recomputing
+        # from scratch.
+        if cached_df is not None:
+            new_df = pd.DataFrame(new_rows, columns=list(OUTPUT_COLUMNS))
+            merged = pd.concat([cached_df, new_df], ignore_index=True)
+            # De-dup on (dataset, gene) — new rows win.
+            merged = merged.drop_duplicates(
+                subset=['dataset', 'gene'], keep='last',
+            )
+            _write_cache(job.cache_path, merged.to_dict(orient='records'))
+            n_rows = int(len(merged))
+        else:
+            _write_cache(job.cache_path, new_rows)
+            n_rows = len(new_rows)
+
+        return DatasetResult(
+            db_id=job.inputs.db_id, phase='full',
+            cache_path=job.cache_path,
+            n_rows=n_rows, top_genes=(),
+            from_cache=False, elapsed_s=time.time() - start,
+        )
+    except Exception as exc:  # noqa: BLE001 — reported via .error
+        return DatasetResult(
+            db_id=job.inputs.db_id, phase='full',
+            cache_path=job.cache_path, n_rows=0,
+            top_genes=(), from_cache=False,
+            elapsed_s=time.time() - start,
+            error=f'{type(exc).__name__}: {exc}\n{traceback.format_exc()}',
+        )
+
+
+def _process_topvar_star(args_tuple):
+    return _process_topvar(args_tuple)
+
+
+def _process_full_star(args_tuple):
+    job, force = args_tuple
+    return _process_full(job, force)
+
+
+# ---------------------------------------------------------------------------
+# Coordinator
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RunSummary:
+    processed: int = 0
+    cached: int = 0
+    errored: int = 0
+    errors: list[str] = field(default_factory=list)
+
+
+def _collect_dataset_snapshot(root: Path) -> list[DatasetInputs]:
+    """Walk the h5adstore, one DatasetInputs per active dataset with a layer."""
+    out: list[DatasetInputs] = []
+    for entry in sorted(iter_h5adstore(root), key=lambda entry: entry.db_id):
+        if entry.h5ad_path.with_suffix('.inactive').exists():
+            continue
+        if not entry.duckdb_path.exists():
+            continue
+        try:
+            inputs = build_dataset_inputs(entry)
+        except Exception as exc:  # noqa: BLE001 — surfaced in stderr
+            print(f'  [warn] discover {entry.db_id}: {exc}', file=sys.stderr)
+            continue
+        if inputs is None:
+            continue
+        out.append(inputs)
+    return out
+
+
+def _prune_stale_cache(root: Path, active_db_ids: set[str]) -> int:
+    """Remove cache dirs for db_ids no longer present."""
+    cache_root = _cache_root(root)
+    if not cache_root.exists():
+        return 0
+    active_tokens = {_sanitise(db_id) for db_id in active_db_ids}
+    removed = 0
+    for db_dir in cache_root.iterdir():
+        if not db_dir.is_dir():
+            continue
+        if db_dir.name in active_tokens:
+            continue
+        for cache_file in db_dir.glob('*.parquet'):
+            cache_file.unlink()
+            removed += 1
+        try:
+            db_dir.rmdir()
+        except OSError:
+            pass
+    return removed
+
+
+def _concat_and_write(
+    out_path: Path,
+    cache_files: list[Path],
+) -> tuple[int, int, int]:
+    """Concatenate per-dataset caches into the aggregate parquet.
+
+    Returns ``(n_rows, n_datasets, n_unique_genes)``.
+    """
+    tmp = out_path.with_suffix(out_path.suffix + '.tmp')
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+
+    if not cache_files:
+        empty = pd.DataFrame({col: [] for col in OUTPUT_COLUMNS}).astype(
+            OUTPUT_DTYPES,
+        )
+        empty.to_parquet(tmp, engine='pyarrow', compression='zstd')
+        os.replace(tmp, out_path)
+        return (0, 0, 0)
+
+    conn = duckdb.connect(':memory:')
+    try:
+        select_cols = ', '.join(OUTPUT_COLUMNS)
+        conn.execute(
+            f"COPY (SELECT {select_cols} "
+            f"      FROM read_parquet(?, union_by_name=true)) "
+            f"TO '{tmp}' (FORMAT PARQUET, COMPRESSION ZSTD)",
+            [[str(path) for path in cache_files]],
+        )
+        row = conn.execute(
+            'SELECT COUNT(*), COUNT(DISTINCT dataset), COUNT(DISTINCT gene) '
+            'FROM read_parquet(?)',
+            [str(tmp)],
+        ).fetchone()
+        n_rows = int(row[0]) if row else 0
+        n_datasets = int(row[1]) if row else 0
+        n_genes = int(row[2]) if row else 0
+    finally:
+        conn.close()
+
+    os.replace(tmp, out_path)
+    return n_rows, n_datasets, n_genes
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def _default_workers() -> int:
+    cpu_count = os.cpu_count() or 2
+    return max(1, min(8, cpu_count // 2))
+
+
+def _load_hot_set_file(path: Path) -> list[str]:
+    """Load a hot-set gene list from a text file (one gene per line, `#` comments)."""
+    out: list[str] = []
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith('#'):
+            continue
+        # Allow comma-separated per line too, for convenience.
+        for token in line.split(','):
+            gene = token.strip()
+            if gene:
+                out.append(gene)
+    # Preserve order, dedup.
+    return list(dict.fromkeys(out))
+
+
+def _emit_progress_json(stream, index: int, total: int,
+                        result: DatasetResult) -> None:
+    stream.write(json.dumps({
+        'i':         index,
+        'n':         total,
+        'db_id':     result.db_id,
+        'phase':     result.phase,
+        'elapsed_s': round(result.elapsed_s, 3),
+        'n_rows':    result.n_rows,
+        'cached':    result.from_cache,
+        'ok':        result.error is None,
+    }) + '\n')
+    stream.flush()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog='ant-gene-stats-precompute')
+    parser.add_argument('--h5adstore-root', default='data/h5adstore')
+    parser.add_argument(
+        '--only', default=None,
+        help='comma-separated db_ids (else all active datasets)',
+    )
+    parser.add_argument(
+        '--top-n', type=int, default=100,
+        help='per-dataset top-N variable genes to seed the hot set '
+             '(default: 100)',
+    )
+    parser.add_argument(
+        '--hot-set', default=None,
+        help='path to a text file of hot-set gene names, one per line '
+             '(overrides auto-discovery — no phase 1)',
+    )
+    parser.add_argument(
+        '--extra-hot-set', default=None,
+        help='path to a text file of ADDITIONAL hot-set gene names to '
+             'union with the auto-discovered set (e.g. user favourites)',
+    )
+    parser.add_argument(
+        '--out', default=None,
+        help='output parquet path (default: '
+             '<h5adstore>/gene_stats_index.parquet)',
+    )
+    parser.add_argument(
+        '--force', action='store_true',
+        help='ignore per-dataset cache — recompute every dataset',
+    )
+    parser.add_argument(
+        '--workers', type=int, default=_default_workers(),
+        help=f'parallel workers (default: {_default_workers()})',
+    )
+    parser.add_argument('--no-prune', action='store_true')
+    parser.add_argument('--dry-run', action='store_true')
+    args = parser.parse_args()
+
+    root = Path(args.h5adstore_root).resolve()
+    only = set(args.only.split(',')) if args.only else None
+    out = (
+        Path(args.out).resolve() if args.out
+        else root / 'gene_stats_index.parquet'
+    )
+    workers = max(1, args.workers)
+
+    print(f'Scanning {root} for scored datasets…', file=sys.stderr)
+    dataset_snapshot = _collect_dataset_snapshot(root)
+    if only is not None:
+        active_subset = [d for d in dataset_snapshot if d.db_id in only]
+        if not active_subset:
+            print(f'no dataset in {only!r} — nothing to do', file=sys.stderr)
+            return 1
+    else:
+        active_subset = dataset_snapshot
+    print(
+        f'  found {len(dataset_snapshot)} active dataset(s); '
+        f'{len(active_subset)} in scope',
+        file=sys.stderr,
+    )
+
+    _cache_root(root).mkdir(parents=True, exist_ok=True)
+
+    # ── Determine the hot gene set ────────────────────────────────────────
+    if args.hot_set:
+        hot_set = _load_hot_set_file(Path(args.hot_set))
+        print(
+            f'Hot set: {len(hot_set)} gene(s) from {args.hot_set} (phase 1 skipped)',
+            file=sys.stderr,
+        )
+    else:
+        # Phase 1 — top-N per dataset, then union. Normally we walk the
+        # entire fleet so the hot set is stable regardless of `--only`;
+        # BUT if the caller passed `--only`, walking the whole fleet
+        # dominates a small backfill. In that case, seed the hot set from
+        # the existing aggregate parquet (its ``gene`` column) if it
+        # exists, and only run phase 1 for the requested subset. Result:
+        # `--only` becomes a cheap incremental. On the very first fleet
+        # run there is no aggregate yet, so we still walk everything.
+        seeded_from_agg: list[str] = []
+        if only is not None and out.exists():
+            try:
+                agg = pd.read_parquet(out, columns=['gene'])
+                seeded_from_agg = list(dict.fromkeys(agg['gene'].astype(str)))
+                print(
+                    f'Seeded hot set from existing aggregate '
+                    f'({len(seeded_from_agg)} genes at {out})',
+                    file=sys.stderr,
+                )
+            except Exception as exc:
+                print(f'  [warn] could not seed from {out}: {exc}',
+                      file=sys.stderr)
+                seeded_from_agg = []
+        phase1_scope = active_subset if seeded_from_agg else dataset_snapshot
+        print(
+            f'Phase 1: top-{args.top_n} variable genes across '
+            f'{len(phase1_scope)} dataset(s)',
+            file=sys.stderr,
+        )
+        topvar_jobs = [
+            DatasetJob(
+                inputs=inputs,
+                hot_set=(), top_n=args.top_n,
+                cache_path=_cache_file(root, inputs.db_id),
+                phase='topvar',
+            )
+            for inputs in phase1_scope
+        ]
+
+        hot_set_dict: dict[str, None] = {g: None for g in seeded_from_agg}
+        pbar = tqdm(
+            total=len(topvar_jobs), desc='phase 1 (top-var)',
+            unit='ds', file=sys.stderr,
+        )
+        if workers == 1 or len(topvar_jobs) <= 1:
+            result_iter = (_process_topvar(job) for job in topvar_jobs)
+        else:
+            ctx = multiprocessing.get_context('spawn')
+            pool = ctx.Pool(processes=workers)
+            result_iter = pool.imap_unordered(_process_topvar_star, topvar_jobs)
+        try:
+            for result in result_iter:
+                pbar.update(1)
+                if result.error:
+                    tqdm.write(
+                        f'  [warn] {result.db_id}: {result.error.splitlines()[0]}',
+                        file=sys.stderr,
+                    )
+                    continue
+                for gene in result.top_genes:
+                    hot_set_dict.setdefault(gene, None)
+        finally:
+            pbar.close()
+            if workers > 1 and len(topvar_jobs) > 1:
+                pool.close()
+                pool.join()
+        hot_set = list(hot_set_dict.keys())
+        print(
+            f'  hot set union: {len(hot_set)} unique gene(s)',
+            file=sys.stderr,
+        )
+
+    if args.extra_hot_set:
+        extra = _load_hot_set_file(Path(args.extra_hot_set))
+        merged = list(dict.fromkeys(list(hot_set) + extra))
+        added = len(merged) - len(hot_set)
+        hot_set = merged
+        print(
+            f'  + {added} extra gene(s) from {args.extra_hot_set} — total {len(hot_set)}',
+            file=sys.stderr,
+        )
+
+    if not hot_set:
+        print('empty hot set — nothing to compute', file=sys.stderr)
+        return 1
+
+    # ── Phase 2 — per-(dataset, gene) stats ───────────────────────────────
+    full_jobs = [
+        DatasetJob(
+            inputs=inputs,
+            hot_set=tuple(hot_set), top_n=args.top_n,
+            cache_path=_cache_file(root, inputs.db_id),
+            phase='full',
+        )
+        for inputs in active_subset
+    ]
+    print(
+        f'Phase 2: stats for {len(hot_set)} hot gene(s) × '
+        f'{len(full_jobs)} dataset(s) with {workers} worker(s) '
+        f'(force={args.force})',
+        file=sys.stderr,
+    )
+
+    summary = RunSummary()
+    total = len(full_jobs)
+    completed = 0
+
+    if workers == 1 or total <= 1:
+        result_iter = (_process_full(job, args.force) for job in full_jobs)
+    else:
+        ctx = multiprocessing.get_context('spawn')
+        pool = ctx.Pool(processes=workers)
+        result_iter = pool.imap_unordered(
+            _process_full_star, [(job, args.force) for job in full_jobs],
+        )
+
+    pbar = tqdm(total=total, desc='phase 2 (stats)', unit='ds', file=sys.stderr)
+    try:
+        for result in result_iter:
+            completed += 1
+            pbar.update(1)
+            tag = '[cached]' if result.from_cache else '[computed]'
+            if result.error:
+                summary.errored += 1
+                summary.errors.append(f'{result.db_id}: {result.error}')
+                tqdm.write(
+                    f'[{completed}/{total}] {result.db_id} — ERROR: '
+                    f'{result.error.splitlines()[0]}',
+                    file=sys.stderr,
+                )
+            else:
+                if result.from_cache:
+                    summary.cached += 1
+                else:
+                    summary.processed += 1
+                tqdm.write(
+                    f'[{completed}/{total}] {result.db_id} — '
+                    f'{result.elapsed_s:.2f}s — {result.n_rows} rows {tag}',
+                    file=sys.stderr,
+                )
+            if completed % 10 == 0 or completed == total:
+                _emit_progress_json(sys.stderr, completed, total, result)
+    finally:
+        pbar.close()
+        if workers > 1 and total > 1:
+            pool.close()
+            pool.join()
+
+    if summary.errored:
+        print(
+            f'\n{summary.errored} dataset(s) failed — continuing to aggregate '
+            f'with the successful ones',
+            file=sys.stderr,
+        )
+        for err in summary.errors[:5]:
+            print(f'  {err}', file=sys.stderr)
+
+    if not args.no_prune:
+        active_ids = {inputs.db_id for inputs in dataset_snapshot}
+        pruned = _prune_stale_cache(root, active_ids)
+        if pruned:
+            print(f'pruned {pruned} stale cache file(s)', file=sys.stderr)
+
+    if args.dry_run:
+        print(f'\n[dry-run] would concat cache → {out}', file=sys.stderr)
+        return 0
+
+    # Aggregate: concatenate EVERY cache file for the full fleet (not just
+    # `active_subset`), so a `--only` re-run still produces a complete
+    # fleet-wide parquet.
+    all_cache_files = [
+        _cache_file(root, inputs.db_id)
+        for inputs in dataset_snapshot
+        if _cache_file(root, inputs.db_id).exists()
+    ]
+
+    print(f'\nConcatenating {len(all_cache_files)} cache file(s) → {out}',
+          file=sys.stderr)
+    n_rows, n_datasets, n_genes = _concat_and_write(out, all_cache_files)
+    print(
+        f'wrote {n_rows:,} rows across {n_datasets} dataset(s), '
+        f'{n_genes} unique gene(s) → {out}',
+        file=sys.stderr,
+    )
+    print(
+        f'summary: processed={summary.processed} cached={summary.cached} '
+        f'errored={summary.errored} hot_set={len(hot_set)}',
+        file=sys.stderr,
+    )
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

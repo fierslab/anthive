@@ -86,6 +86,7 @@ from geneset import (
     validate_registry as validate_geneset_registry,
 )
 from gene_stats_cache import GeneStatsCache
+from gene_stats_index import GeneStatsIndex
 from md_check import generate_file_id, generate_group_id
 from metadata import parse_md_file, get_caveats
 import mus
@@ -607,6 +608,14 @@ class DatabaseRegistry:
         # cache so it co-locates with the data deposit.
         self.gene_stats_cache = GeneStatsCache(Path('./tmp/gene_stats_cache.db'))
 
+        # Precomputed fleet-wide (dataset, gene) stats index. Rebuilt by
+        # ``bin/annot/ant-gene-stats-precompute``. Loaded at startup and
+        # after ``POST /admin/rescan`` — a missing file is a supported
+        # state (every lookup treated as a miss → live fan-out fallback).
+        self.gene_stats_index = GeneStatsIndex(
+            self.data_folder / 'gene_stats_index.parquet'
+        )
+
         # Metrics
         self.request_count = 0
         self.error_count = 0
@@ -614,6 +623,25 @@ class DatabaseRegistry:
         print(f"Scanning data folder: {self.data_folder}")
         self._scan_databases()
         self._cache_all_metadata()
+        # Load the precomputed gene-stats index (may be absent — see the
+        # attribute doc above; a missing file just makes every /gene_stats_all
+        # lookup a miss).
+        try:
+            self.gene_stats_index.load()
+            if self.gene_stats_index.is_loaded():
+                print(
+                    f"Loaded gene_stats_index: {self.gene_stats_index.n_rows:,} rows, "
+                    f"{self.gene_stats_index.n_datasets} datasets, "
+                    f"{self.gene_stats_index.n_genes} genes"
+                )
+            else:
+                print(
+                    f"No gene_stats_index parquet at "
+                    f"{self.gene_stats_index.path} — /gene_stats_all will fall "
+                    "back to live queries only"
+                )
+        except Exception as exc:  # noqa: BLE001
+            print(f"  (gene_stats_index.load failed: {exc})")
 
     def _resolve_db_id(self, md_path: Path, rel_path: Path) -> tuple:
         """Compute (db_id, group_id, file_id) from .md files.
@@ -1385,6 +1413,7 @@ class DatabaseRegistry:
                 'experiment': collection_metadata.get('experiment'),
                 'authors': collection_metadata.get('authors'),
                 'year': collection_metadata.get('year'),
+                'date': collection_metadata.get('date'),
                 'doi': collection_metadata.get('doi'),
                 'pmid': collection_metadata.get('pmid'),
                 'accession': collection_metadata.get('accession'),
@@ -1498,6 +1527,14 @@ class DatabaseRegistry:
 
         self._scan_databases()
         self._cache_all_metadata(force_reload=True)
+
+        # Reload the precomputed gene-stats index — the underlying parquet
+        # may have been regenerated in the same operation that changed the
+        # catalog (e.g. `ant-gene-stats-precompute` after adding a dataset).
+        try:
+            self.gene_stats_index.load()
+        except Exception as exc:  # noqa: BLE001
+            print(f"  (gene_stats_index.load failed: {exc})")
 
         new_db_ids = set(self.databases.keys())
         added = new_db_ids - old_db_ids
@@ -2973,6 +3010,7 @@ async def get_group_info(group_id: str):
         'experiment': collection_meta.get('experiment'),
         'authors': collection_meta.get('authors'),
         'year': collection_meta.get('year'),
+        'date': collection_meta.get('date'),
         'doi': collection_meta.get('doi'),
         'pmid': collection_meta.get('pmid'),
         'accession': collection_meta.get('accession'),
@@ -3516,9 +3554,20 @@ async def get_gene_stats_all(
     - `tissue`: free text, UBERON-aligned where available (e.g. brain)
     - `include_remote`: include S3-remote-only datasets (slow). Default off.
 
-    **Caching**: results are cached on disk per `(db_id, gene, layer, case_sensitive)`,
-    keyed by the dataset's mus sha256 + day-bucketed duckdb mtime. TTL 90 days.
-    Pass `refresh=true` to force recompute.
+    **Serving path** (fastest → slowest):
+    1. Precomputed fleet-wide parquet (`gene_stats_index.parquet`) — covers
+       the hot-gene set built by `ant-gene-stats-precompute`. Sub-second.
+    2. Per-(db, gene) SQLite cache (90-day TTL, `tmp/gene_stats_cache.db`)
+       for previously-scanned live queries.
+    3. Live `AnthiveDB.get_gene_stats` — the historical slow path, still
+       used for genes not in either cache.
+
+    Each result carries a `served_from` field (`parquet` / `cache` /
+    `live` / `mixed`). The top-level `parquet` block reports overall hit
+    counts against the precomputed index.
+
+    Pass `refresh=true` to bypass ALL caches (including the parquet) and
+    force live recompute.
 
     Returns:
     - **results**: list of per-database entries, each with `db_id`, `title`, `n_cells`, `layer`, `stats`
@@ -3589,18 +3638,45 @@ async def get_gene_stats_all(
         targets.append((db_id_inner, meta, layer, fingerprint))
 
     cache = registry.gene_stats_cache
+    gene_stats_index = registry.gene_stats_index
 
-    # ── Per-db worker: cache-aware gene_stats fetch ───────────────────────
+    # ── Per-db worker: parquet-first, then SQLite cache, then live query ──
     def _query_one(db_id_inner: str, meta: Dict[str, Any], layer: str,
-                   fingerprint: Optional[str]) -> Tuple[Optional[Dict[str, Any]], int, int, int]:
-        """Returns (result_entry_or_None, hits, misses, writes) for this db."""
-        hits = misses = writes = 0
-        cached_stats: List[Dict[str, Any]] = []
-        missing_genes: List[str] = []
+                   fingerprint: Optional[str]) -> Tuple[Optional[Dict[str, Any]], int, int, int, int]:
+        """Return ``(entry, hits, misses, writes, parquet_hits)`` for one dataset.
 
-        # Bucket each queried gene into hit / miss
-        if fingerprint and not refresh:
+        Layered lookup:
+          1. Fleet-wide precomputed parquet (`gene_stats_index.parquet`) —
+             a hot-gene set covering the vast majority of the /genes atlas
+             traffic. O(1) hash lookup, no duckdb open.
+          2. Per-(db, gene) SQLite cache — for genes previously scanned live.
+          3. Live `AnthiveDB.get_gene_stats` — the historical slow path.
+        `served_from` on the entry reflects which of the three actually
+        answered every queried gene ('parquet' / 'cache' / 'live' /
+        'parquet+live' when mixed).
+        """
+        hits = misses = writes = 0
+        parquet_hits = 0
+        parquet_stats: List[Dict[str, Any]] = []
+        cached_stats: List[Dict[str, Any]] = []
+
+        # (1) Parquet-first — bucket parquet hits vs the rest.
+        remaining_genes: List[str] = []
+        if not refresh:
             for g in gene_list:
+                hit = gene_stats_index.lookup(db_id_inner, g, case_sensitive)
+                if hit is not None:
+                    parquet_stats.append(hit)
+                    parquet_hits += 1
+                else:
+                    remaining_genes.append(g)
+        else:
+            remaining_genes = list(gene_list)
+
+        # (2) SQLite cache — for genes not served by parquet.
+        missing_genes: List[str] = []
+        if fingerprint and not refresh:
+            for g in remaining_genes:
                 hit = cache.get(db_id_inner, g, case_sensitive, layer, fingerprint)
                 if hit is not None:
                     cached_stats.append(hit)
@@ -3609,14 +3685,10 @@ async def get_gene_stats_all(
                     missing_genes.append(g)
                     misses += 1
         else:
-            missing_genes = list(gene_list)
-            misses = len(gene_list)
+            missing_genes = list(remaining_genes)
+            misses = len(remaining_genes)
 
-        # Compute the misses in one duckdb call (much cheaper than per-gene).
-        # If we have a cached dataset-level distribution for this (db, layer,
-        # fingerprint), pass it through so get_gene_stats skips the layer scan
-        # for rank_mean / scaled_mean. Otherwise the scan runs once and we
-        # write the resulting distribution back to cache for future genes.
+        # (3) Live query — final fallback (the historical slow path).
         computed_stats: List[Dict[str, Any]] = []
         if missing_genes:
             precomputed_dist: Optional[Dict[str, Any]] = None
@@ -3628,8 +3700,6 @@ async def get_gene_stats_all(
                         missing_genes, layer=layer, case_sensitive=case_sensitive,
                         precomputed_dist=precomputed_dist,
                     )
-                    # If get_gene_stats ran a fresh layer scan it leaves the
-                    # distribution on db._last_distribution. Cache it.
                     if (fingerprint
                             and precomputed_dist is None
                             and getattr(db, '_last_distribution', None)):
@@ -3637,7 +3707,7 @@ async def get_gene_stats_all(
                             db_id_inner, layer, fingerprint, db._last_distribution
                         )
             except Exception:
-                return None, hits, misses, writes
+                return None, hits, misses, writes, parquet_hits
 
             if fingerprint:
                 for s in computed_stats:
@@ -3648,10 +3718,26 @@ async def get_gene_stats_all(
                     writes += 1
 
         # Re-order to match gene_list (so the response is stable per-call).
-        by_gene = {s.get('gene'): s for s in cached_stats + computed_stats if s.get('gene')}
+        all_stats = parquet_stats + cached_stats + computed_stats
+        by_gene = {s.get('gene'): s for s in all_stats if s.get('gene')}
         ordered = [by_gene[g] for g in gene_list if g in by_gene]
         # Genes that returned nothing at all (e.g. resolve failed) — pass through.
-        ordered.extend(s for s in cached_stats + computed_stats if s.get('gene') not in gene_list)
+        ordered.extend(s for s in all_stats if s.get('gene') not in gene_list)
+
+        # served_from surface — mirrors the layering above.
+        n_total = len(gene_list)
+        if parquet_hits == n_total:
+            served_from = 'parquet'
+        elif parquet_hits == 0 and hits == n_total:
+            served_from = 'cache'
+        elif parquet_hits == 0 and hits == 0:
+            served_from = 'live'
+        elif parquet_hits > 0 and (hits + len(computed_stats)) == 0:
+            served_from = 'parquet'    # some genes not in the parquet were absent from the db
+        elif parquet_hits > 0:
+            served_from = 'mixed'
+        else:
+            served_from = 'live'
 
         entry = {
             'db_id': db_id_inner,
@@ -3659,16 +3745,17 @@ async def get_gene_stats_all(
             'title': meta.get('title', db_id_inner),
             'n_cells': meta.get('n_cells', 0),
             'layer': layer,
+            'served_from': served_from,
             'stats': ordered,
         }
-        return entry, hits, misses, writes
+        return entry, hits, misses, writes, parquet_hits
 
     # ── Run in parallel — duckdb queries release the GIL on .execute ──────
     def _run_all_parallel():
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         results_local: List[Dict[str, Any]] = []
-        h_total = m_total = w_total = 0
+        h_total = m_total = w_total = p_total = 0
         skipped_local = 0
         with ThreadPoolExecutor(max_workers=12) as pool:
             futures = {
@@ -3676,17 +3763,18 @@ async def get_gene_stats_all(
                 for (db_id_, meta_, layer_, fp_) in targets
             }
             for fut in as_completed(futures):
-                entry, h, m, w = fut.result()
+                entry, h, m, w, p = fut.result()
                 h_total += h
                 m_total += m
                 w_total += w
+                p_total += p
                 if entry is None:
                     skipped_local += 1
                 else:
                     results_local.append(entry)
-        return results_local, skipped_local, h_total, m_total, w_total
+        return results_local, skipped_local, h_total, m_total, w_total, p_total
 
-    results, n_skipped_err, cache_hits, cache_misses, cache_writes = await asyncio.to_thread(
+    results, n_skipped_err, cache_hits, cache_misses, cache_writes, parquet_hits = await asyncio.to_thread(
         _run_all_parallel
     )
     n_skipped = n_skipped_no_layer + n_skipped_err
@@ -3744,6 +3832,11 @@ async def get_gene_stats_all(
             'misses': cache_misses,
             'writes': cache_writes,
             'refresh': refresh,
+        },
+        'parquet': {
+            'hits':         parquet_hits,
+            'loaded':       registry.gene_stats_index.is_loaded(),
+            'n_index_rows': registry.gene_stats_index.n_rows,
         },
         'results': results,
     }
@@ -11119,6 +11212,72 @@ async def gene_stats_cache_clear():
     """Wipe every gene_stats cache entry. Returns the row count that was dropped."""
     n = registry.gene_stats_cache.clear()
     return {'cleared': n}
+
+
+@app.get("/admin/gene-stats-index/stats", tags=["admin"])
+async def gene_stats_index_stats():
+    """Return the precomputed gene-stats index status (row/dataset/gene counts)."""
+    return registry.gene_stats_index.stats()
+
+
+@app.post("/admin/gene-stats-index/reload", tags=["admin"])
+async def gene_stats_index_reload():
+    """Reload ``<h5adstore>/gene_stats_index.parquet`` from disk.
+
+    Call after ``ant-gene-stats-precompute`` has written a new parquet
+    (typically as the final step of a re-ingest workflow). Cheap
+    (~milliseconds); the response echoes the fresh index stats.
+    """
+    registry.gene_stats_index.load()
+    return registry.gene_stats_index.stats()
+
+
+@app.post("/admin/gene-stats-index/rebuild", tags=["admin"])
+async def gene_stats_index_rebuild(
+    only: Optional[str] = Query(None, description='Comma-separated db_ids to (re)compute; default: all'),
+    top_n: int = Query(100, description='Per-dataset top-N variable genes for the hot set'),
+    force: bool = Query(False, description='Ignore per-dataset cache; recompute everything'),
+    workers: int = Query(4, description='Parallel workers for the precompute'),
+):
+    """Kick off a background rebuild of ``gene_stats_index.parquet``.
+
+    Fires ``bin/annot/ant-gene-stats-precompute`` as a **subprocess** —
+    returns immediately with the PID. The rebuild runs to completion on
+    its own and writes to the standard output path; call ``/reload``
+    once it's done to swap the in-memory index. Progress lines land in
+    ``tmp/gene_stats_precompute.log``.
+    """
+    import subprocess
+
+    script = script_dir.parent / 'annot' / 'ant-gene-stats-precompute'
+    if not script.exists():
+        raise HTTPException(status_code=500, detail=f'precompute tool missing: {script}')
+
+    args = [
+        str(script),
+        '--h5adstore-root', str(registry.data_folder),
+        '--workers', str(int(workers)),
+        '--top-n', str(int(top_n)),
+    ]
+    if only:
+        args += ['--only', only]
+    if force:
+        args += ['--force']
+
+    log_path = Path('./tmp/gene_stats_precompute.log')
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_fh = log_path.open('ab', buffering=0)
+    proc = subprocess.Popen(
+        args, stdout=log_fh, stderr=subprocess.STDOUT,
+        # Detach so the parent (uvicorn) can be restarted without SIGKILLing us.
+        start_new_session=True,
+    )
+    return {
+        'status':   'started',
+        'pid':      proc.pid,
+        'args':     args,
+        'log_path': str(log_path),
+    }
 
 
 @app.post("/admin/gene-stats-cache/gc", tags=["admin"])

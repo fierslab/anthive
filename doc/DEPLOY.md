@@ -168,7 +168,9 @@ cd "$BASE/anthive4"
 ```
 
 Defaults pull `.h5ad`, `.de.parquet`, `.scores.parquet`, plus the
-fleet-wide `module_variability.parquet` and `scores_index.parquet`.
+fleet-wide `module_variability.parquet`, `scores_index.parquet`, and
+`gene_stats_index.parquet` (with its per-dataset `_gene_stats_cache/`
+prefix so incremental updates can reuse cached rows).
 `.duckdb` and the `.layer.*.parquet` expression sidecars are treated as
 derived; rebuild them locally via `make build-stale` (or pull them for
 disaster recovery with `ant-sync pull --include-duckdb`).
@@ -629,8 +631,44 @@ COPY (
 "
 ```
 
-After either filter, restart the derivative's `ant-serve` so it picks up
-the new parquet:
+### 12c. gene_stats_index.parquet
+
+Precomputed per-(dataset, gene) statistics for a "hot" gene set (union
+of top-N variable genes per dataset, plus any starred/favorite genes).
+Serves `/api/gene_stats_all` in sub-second time; falls back to a live
+`__genes` scan for any gene not in the parquet. Schema is
+`dataset, gene, layer, n_cells, n_nonzero, pct_nonzero, mean, std, cv,
+mean_nonzero, std_nonzero, median_nonzero, q10_nonzero, q90_nonzero,
+max, mean_expr_layer, rank_mean, scaled_mean`.
+
+Same filter approach for a derivative:
+
+```bash
+duckdb -c "
+COPY (
+  SELECT * FROM read_parquet('/data/anthive/anthive4/data/h5adstore/gene_stats_index.parquet')
+  WHERE dataset IN (
+    SELECT column0 FROM read_csv('/tmp/derivative_datasets.txt',
+                                 columns={'column0': 'VARCHAR'}, header=false)
+  )
+) TO '/data/anthive-microglia/anthive4/data/h5adstore/gene_stats_index.parquet' (FORMAT parquet);
+"
+```
+
+Or rebuild from the derivative's h5adstore:
+
+```bash
+cd /data/anthive-microglia/anthive4
+./bin/annot/ant-gene-stats-precompute --h5adstore-root ./data/h5adstore \
+    --out data/h5adstore/gene_stats_index.parquet
+```
+
+The tool caches per-dataset stats in `_gene_stats_cache/<db_id>/` keyed
+on the max mtime of the duckdb, layer parquet, and .md, so subsequent
+runs after a single-dataset ingest only recompute for that dataset.
+
+After any of these three (12a/12b/12c) filters, restart the derivative's
+`ant-serve` so it picks up the new parquets:
 
 ```bash
 ./bin/ops/ant-supervisor restart api
