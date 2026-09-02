@@ -4324,7 +4324,7 @@ def test_genes_tab_search_still_works(client):
 
 def test_genes_tab_uniform_column_headers(client):
     """#obs-tbl-genes has the standard column headers: star / gene / plot /
-    % expr / rank expr / variability. No mean or mean(nz). The separate
+    % expr / rank expr / std / CoV. No mean or mean(nz). The separate
     search-results table is gone."""
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
@@ -4336,7 +4336,10 @@ def test_genes_tab_uniform_column_headers(client):
     assert '% expr'     in thead or 'pct'  in thead.lower(), \
         "#obs-tbl-genes thead missing % expr column"
     assert 'rank expr'  in thead, "#obs-tbl-genes thead missing 'rank expr' column"
-    assert 'variability' in thead, "#obs-tbl-genes thead missing 'variability' column"
+    assert '>std<' in thead, "#obs-tbl-genes thead missing 'std' column"
+    assert '>CoV<' in thead, "#obs-tbl-genes thead missing 'CoV' column"
+    assert 'variability' not in thead, \
+        "'variability' header must be renamed to 'std'"
     assert '>mean<' not in thead and '>mean(nz)<' not in thead, \
         "#obs-tbl-genes thead must not contain raw mean or mean(nz) column"
 
