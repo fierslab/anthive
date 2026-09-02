@@ -472,7 +472,7 @@
     /* ── Compact sparkline (.ss) ────────────────────────────────────────────
        A 4-char-wide (32px) track: grey centre line + black tick marker.
        Visual: --+--  where + is the value position.
-       Applied to gene stats, numerical obs IQR, and categorical % cells.
+       Applied to gene stats (%expr, rank expr, variability).
        The .mv-track class in _module_view.html is also aliased here. */
     .ss {
       position: relative; display: inline-block;
@@ -726,7 +726,7 @@
     <span class="obs-count muted" data-target="num" style="font-size:11px"></span>
   </div>
   <div class="table-wrap"><table class="obs-stats-tbl auto" id="obs-tbl-num">
-    <thead><tr><th>column</th><th class="obs-plots-th">plot</th><th>min</th><th>Q05</th><th>median</th><th>Q95</th><th>max</th><th title="IQR bar: min–max track with median marker">range</th></tr></thead>
+    <thead><tr><th>column</th><th class="obs-plots-th">plot</th><th>min</th><th>Q05</th><th>median</th><th>Q95</th><th>max</th></tr></thead>
     <tbody>
     {% for col in _num_cols %}
     {% set _base = '/browse/' ~ folder_browse_id ~ '/' ~ file_id %}
@@ -740,7 +740,6 @@
         {% endif %}
       </td>
       <td class="s-min"></td><td class="s-q05"></td><td class="s-median"></td><td class="s-q95"></td><td class="s-max"></td>
-      <td style="white-space:nowrap"><span class="ss s-num-spark" title="median on min–max range"><span class="ss-mark" style="display:none"></span></span></td>
     </tr>
     {% endfor %}
     </tbody>
@@ -1221,11 +1220,6 @@ document.addEventListener('DOMContentLoaded', function() {
             arr.forEach(function (v) { if (v < mn) mn = v; if (v > mx) mx = v; });
             return { min: mn, max: mx };
         }
-        function normInRange(v, range) {
-            var span = range.max - range.min;
-            return span ? (v - range.min) / span : 0.5;
-        }
-
         // Hydrate stats from /obs_summary (REST 2.22). Fields not returned by
         // the API stay blank — non-blocking.
         var allItems = Array.from(document.querySelectorAll('#tab-num .obs-item, #tab-cat .obs-item'));
@@ -1264,15 +1258,6 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (s.type === 'num') {
                         set('.s-min', fnum(s.min)); set('.s-q05', fnum(s.q05));
                         set('.s-median', fnum(s.median)); set('.s-q95', fnum(s.q95)); set('.s-max', fnum(s.max));
-                        // Numerical sparkline: median position on min–max track.
-                        if (s.min != null && s.max != null && s.median != null) {
-                            var numSpark = el.querySelector('.s-num-spark');
-                            if (numSpark) {
-                                var frac = normInRange(s.median, { min: s.min, max: s.max });
-                                numSpark.title = 'median ' + fnum(s.median) + ' on [' + fnum(s.min) + ', ' + fnum(s.max) + ']';
-                                setSsMark(numSpark, frac);
-                            }
-                        }
                     } else {
                         set('.s-nuniq', s.n_unique == null ? '–' : s.n_unique);
                         var topCell = el.querySelector('.s-top');
