@@ -135,6 +135,14 @@ def _api_url(request: Request) -> str:
 _GENESETS_TTL_TRUE = 60.0
 _GENESETS_TTL_FALSE = 5.0
 
+# Max distinct values before we suppress the Categorical-tab plot links and
+# top-N breakdown for a column. High-cardinality categoricals (e.g. ant_donor
+# with ~460 donors, barcode with n_cells values, ant_author_cluster with
+# hundreds of dataset-specific labels) produce useless bar charts and don't
+# fit the page. The column stays filterable through the search box; only the
+# inline plot affordance and top-N cell go away above this threshold.
+CATEGORICAL_PLOT_MAX_DISTINCT = 50
+
 
 def _probe_genesets_once(api_url: str) -> bool:
     """Probe /genesets on ant-serve; return True iff it responds 200.
@@ -2462,6 +2470,7 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "context_bar": context_bar,
         "n_cat_cols": n_cat,
         "n_num_cols": n_num,
+        "categorical_plot_max_distinct": CATEGORICAL_PLOT_MAX_DISTINCT,
         "module_scores": module_scores,
         "module_scores_by_catalog": module_scores_by_catalog,
         "n_module_scores": n_modules,

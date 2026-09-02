@@ -1222,6 +1222,11 @@ document.addEventListener('DOMContentLoaded', function() {
         }
         // Hydrate stats from /obs_summary (REST 2.22). Fields not returned by
         // the API stay blank — non-blocking.
+        // Threshold: categorical columns with more distinct values than this
+        // get a terse "too many categories to plot" note instead of a top-N
+        // breakdown + plot links. Tunable via CATEGORICAL_PLOT_MAX_DISTINCT
+        // in web/browser.py.
+        var CAT_PLOT_MAX_DISTINCT = {{ categorical_plot_max_distinct | tojson }};
         var allItems = Array.from(document.querySelectorAll('#tab-num .obs-item, #tab-cat .obs-item'));
         // First numeric column name (for categorical ECDF fallback x-axis).
         var _firstNumCol = null;
@@ -1262,26 +1267,40 @@ document.addEventListener('DOMContentLoaded', function() {
                         set('.s-nuniq', s.n_unique == null ? '–' : s.n_unique);
                         var topCell = el.querySelector('.s-top');
                         var tops = (s.top || s.top_categories || []);
-                        if (topCell && tops.length) {
-                            // Show top-3 categories with % text (no sparkline — visual overload).
-                            topCell.innerHTML = '<span class="cat-top">' + tops.slice(0, 3).map(function (t) {
-                                var val = (t.value != null ? t.value : t.name);
-                                var cnt = t.count, pct = t.pct;
-                                var tip = (cnt != null ? cnt.toLocaleString() : '')
-                                        + (pct != null ? ' (' + (Math.round(pct * 10) / 10) + '%)' : '');
-                                var pctLabel = pct != null ? ' <span style="font-size:10px;color:var(--text-muted);font-family:var(--font-mono)">' + (Math.round(pct * 10) / 10) + '%</span>' : '';
-                                return '<span class="ct" title="' + esc(tip) + '">' + esc(val) + pctLabel + '</span>';
-                            }).join('') + '</span>';
-                        }
-                        // ECDF link: use first numerical column as x-axis, this col as hue.
-                        if (_firstNumCol) {
-                            var ecdfLink = el.querySelector('.s-ecdf-link');
-                            if (ecdfLink) {
-                                var colname = el.dataset.colname || el.dataset.name;
-                                ecdfLink.href = _base + '/plot/ecdf?x=' + encodeURIComponent(_firstNumCol)
-                                    + '&hue=' + encodeURIComponent(colname);
-                                ecdfLink.title = 'ECDF of ' + _firstNumCol + ' split by ' + colname;
-                                ecdfLink.style.display = '';
+                        // High-cardinality categoricals (n_unique > CAT_PLOT_MAX_DISTINCT):
+                        // suppress the top-N breakdown and hide the plot icons.
+                        // A bar chart of hundreds of donors doesn't fit the page and
+                        // isn't informative. The column stays filterable through the
+                        // obs-filter search box above the table.
+                        var tooMany = (s.n_unique != null && s.n_unique > CAT_PLOT_MAX_DISTINCT);
+                        if (tooMany) {
+                            if (topCell) {
+                                topCell.innerHTML = '<span class="muted" style="font-style:italic;font-size:11px">too many categories to plot</span>';
+                            }
+                            var plotsCell = el.querySelector('.obs-plots');
+                            if (plotsCell) plotsCell.innerHTML = '';
+                        } else {
+                            if (topCell && tops.length) {
+                                // Show top-3 categories with % text (no sparkline — visual overload).
+                                topCell.innerHTML = '<span class="cat-top">' + tops.slice(0, 3).map(function (t) {
+                                    var val = (t.value != null ? t.value : t.name);
+                                    var cnt = t.count, pct = t.pct;
+                                    var tip = (cnt != null ? cnt.toLocaleString() : '')
+                                            + (pct != null ? ' (' + (Math.round(pct * 10) / 10) + '%)' : '');
+                                    var pctLabel = pct != null ? ' <span style="font-size:10px;color:var(--text-muted);font-family:var(--font-mono)">' + (Math.round(pct * 10) / 10) + '%</span>' : '';
+                                    return '<span class="ct" title="' + esc(tip) + '">' + esc(val) + pctLabel + '</span>';
+                                }).join('') + '</span>';
+                            }
+                            // ECDF link: use first numerical column as x-axis, this col as hue.
+                            if (_firstNumCol) {
+                                var ecdfLink = el.querySelector('.s-ecdf-link');
+                                if (ecdfLink) {
+                                    var colname = el.dataset.colname || el.dataset.name;
+                                    ecdfLink.href = _base + '/plot/ecdf?x=' + encodeURIComponent(_firstNumCol)
+                                        + '&hue=' + encodeURIComponent(colname);
+                                    ecdfLink.title = 'ECDF of ' + _firstNumCol + ' split by ' + colname;
+                                    ecdfLink.style.display = '';
+                                }
                             }
                         }
                     }
