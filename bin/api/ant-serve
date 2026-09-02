@@ -87,6 +87,7 @@ from geneset import (
 )
 from gene_stats_cache import GeneStatsCache
 from gene_stats_index import GeneStatsIndex
+from gene_variance_index import GeneVarianceIndex
 from md_check import generate_file_id, generate_group_id
 from metadata import parse_md_file, get_caveats
 import mus
@@ -616,6 +617,15 @@ class DatabaseRegistry:
             self.data_folder / 'gene_stats_index.parquet'
         )
 
+        # Precomputed fleet-wide (dataset, gene, facet) variance index.
+        # Rebuilt by ``bin/annot/ant-gene-variance-precompute``. Loaded
+        # at startup and after ``POST /admin/rescan``. The
+        # ``/gene-variance-by-facet`` endpoint checks it first; a
+        # missing (dataset, facet) triple falls back to live compute.
+        self.gene_variance_index = GeneVarianceIndex(
+            self.data_folder / 'gene_variance_index.parquet'
+        )
+
         # Metrics
         self.request_count = 0
         self.error_count = 0
@@ -642,6 +652,25 @@ class DatabaseRegistry:
                 )
         except Exception as exc:  # noqa: BLE001
             print(f"  (gene_stats_index.load failed: {exc})")
+
+        try:
+            self.gene_variance_index.load()
+            if self.gene_variance_index.is_loaded():
+                print(
+                    f"Loaded gene_variance_index: "
+                    f"{self.gene_variance_index.n_rows:,} rows, "
+                    f"{self.gene_variance_index.n_datasets} datasets, "
+                    f"{self.gene_variance_index.n_genes} genes, "
+                    f"{self.gene_variance_index.n_facets} facets"
+                )
+            else:
+                print(
+                    f"No gene_variance_index parquet at "
+                    f"{self.gene_variance_index.path} — "
+                    "/gene-variance-by-facet will fall back to live queries"
+                )
+        except Exception as exc:  # noqa: BLE001
+            print(f"  (gene_variance_index.load failed: {exc})")
 
     def _resolve_db_id(self, md_path: Path, rel_path: Path) -> tuple:
         """Compute (db_id, group_id, file_id) from .md files.
@@ -1535,6 +1564,12 @@ class DatabaseRegistry:
             self.gene_stats_index.load()
         except Exception as exc:  # noqa: BLE001
             print(f"  (gene_stats_index.load failed: {exc})")
+
+        # Same story for the (dataset, gene, facet) variance index.
+        try:
+            self.gene_variance_index.load()
+        except Exception as exc:  # noqa: BLE001
+            print(f"  (gene_variance_index.load failed: {exc})")
 
         new_db_ids = set(self.databases.keys())
         added = new_db_ids - old_db_ids
@@ -11280,6 +11315,70 @@ async def gene_stats_index_rebuild(
     }
 
 
+@app.get("/admin/gene-variance-index/stats", tags=["admin"])
+async def gene_variance_index_stats():
+    """Return the precomputed gene-variance index status (row/dataset/gene/facet counts)."""
+    return registry.gene_variance_index.stats()
+
+
+@app.post("/admin/gene-variance-index/reload", tags=["admin"])
+async def gene_variance_index_reload():
+    """Reload ``<h5adstore>/gene_variance_index.parquet`` from disk.
+
+    Call after ``ant-gene-variance-precompute`` has written a new parquet.
+    Cheap (~milliseconds); the response echoes the fresh index stats.
+    """
+    registry.gene_variance_index.load()
+    return registry.gene_variance_index.stats()
+
+
+@app.post("/admin/gene-variance-index/rebuild", tags=["admin"])
+async def gene_variance_index_rebuild(
+    only: Optional[str] = Query(None, description='Comma-separated db_ids to (re)compute; default: all'),
+    force: bool = Query(False, description='Ignore per-dataset cache; recompute everything'),
+    workers: int = Query(2, description='Parallel workers for the precompute'),
+    max_facet_cardinality: int = Query(50, description='Skip categorical facets with more distinct values than this'),
+):
+    """Kick off a background rebuild of ``gene_variance_index.parquet``.
+
+    Fires ``bin/annot/ant-gene-variance-precompute`` as a **subprocess** —
+    returns immediately with the PID. The rebuild runs to completion on
+    its own and writes to the standard output path; call ``/reload``
+    once it's done to swap the in-memory index. Progress lines land in
+    ``tmp/gene_variance_precompute.log``.
+    """
+    import subprocess
+
+    script = script_dir.parent / 'annot' / 'ant-gene-variance-precompute'
+    if not script.exists():
+        raise HTTPException(status_code=500, detail=f'precompute tool missing: {script}')
+
+    args = [
+        str(script),
+        '--h5adstore-root', str(registry.data_folder),
+        '--workers', str(int(workers)),
+        '--max-facet-cardinality', str(int(max_facet_cardinality)),
+    ]
+    if only:
+        args += ['--only', only]
+    if force:
+        args += ['--force']
+
+    log_path = Path('./tmp/gene_variance_precompute.log')
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_fh = log_path.open('ab', buffering=0)
+    proc = subprocess.Popen(
+        args, stdout=log_fh, stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    return {
+        'status':   'started',
+        'pid':      proc.pid,
+        'args':     args,
+        'log_path': str(log_path),
+    }
+
+
 @app.post("/admin/gene-stats-cache/gc", tags=["admin"])
 async def gene_stats_cache_gc():
     """Drop cache rows whose fingerprint no longer matches the current dataset state.
@@ -12326,6 +12425,52 @@ async def gene_variance_by_facet(
     if cached is not None:
         return cached
 
+    # Parquet fast-path — the precompute covers all (dataset, facet)
+    # triples where the dataset appears in ``gene_stats_index.parquet``
+    # (the hot-gene set, task #324). Miss → live compute below.
+    variance_index = registry.gene_variance_index
+    if variance_index.is_loaded() and variance_index.has_pair(db_id, facet):
+        top_rows = variance_index.top_by_facet(db_id, facet, int(top))
+        facet_meta = variance_index.facet_metadata(db_id, facet)
+        if top_rows is not None and facet_meta is not None:
+            # Group sizes were not persisted (we intentionally keep the
+            # parquet compact); the endpoint historically reports per-group
+            # counts. We can serve the group list without the counts and
+            # let clients look them up via `/facet-groups` if needed.
+            group_means_union: Dict[str, Any] = {}
+            for entry in top_rows:
+                for g in entry.get('group_means', {}).keys():
+                    group_means_union.setdefault(g, None)
+            groups_sorted = sorted(group_means_union.keys())
+
+            result = {
+                'db_id':             db_id,
+                'facet':             facet,
+                'facet_type':        facet_meta['facet_type'] or facet_type,
+                'layer':             facet_meta['layer'] or layer,
+                'n_groups':          facet_meta['n_groups'] or len(groups_sorted),
+                'groups':            groups_sorted,
+                # ``n_cells_per_group`` is not stored in the parquet
+                # (compactness); leave as an empty dict on the fast path
+                # so callers can distinguish "not measured" from a zero.
+                'n_cells_per_group': {},
+                'n_genes_returned':  len(top_rows),
+                'genes':             [
+                    {
+                        'gene':        entry['gene'],
+                        'signal':      entry.get('signal', 0.0) or 0.0,
+                        'eta_squared': entry.get('eta_squared'),
+                        'F_stat':      entry.get('F_stat'),
+                        'total_var':   entry.get('total_var'),
+                        'group_means': entry.get('group_means', {}),
+                    }
+                    for entry in top_rows
+                ],
+                'served_from':       'parquet',
+            }
+            _gene_variance_cache_put(cache_key, result)
+            return result
+
     def _sync() -> Dict[str, Any]:
         facet_ident = safe_ident(facet)
         layer_view = safe_ident(f"layer__{layer}")
@@ -12510,6 +12655,7 @@ async def gene_variance_by_facet(
             'n_cells_per_group': n_cells_per_group,
             'n_genes_returned': len(genes_payload),
             'genes': genes_payload,
+            'served_from': 'live',
         }
 
     try:

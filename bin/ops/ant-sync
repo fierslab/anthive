@@ -57,19 +57,22 @@ SYNC_EXTENSIONS      = {'.h5ad', '.duckdb', '.de.parquet', '.scores.parquet',
                         # file per resource; specific-name allow.
                         'module_variability.parquet',
                         'scores_index.parquet',
-                        'gene_stats_index.parquet'}
+                        'gene_stats_index.parquet',
+                        'gene_variance_index.parquet'}
 # Prefixed-path allowlist — relative-path prefixes whose contents are
 # always syncable (bypasses the `_` staging-folder skip). Used for the
-# module-variability + gene-stats caches so slave nodes reap the primary's
-# cache hits.
-SYNC_PATH_PREFIXES   = ('_module_variability_cache/', '_gene_stats_cache/')
+# module-variability + gene-stats + gene-variance caches so slave nodes
+# reap the primary's cache hits.
+SYNC_PATH_PREFIXES   = ('_module_variability_cache/', '_gene_stats_cache/',
+                        '_gene_variance_cache/')
 # Pull defaults to .h5ad + .de.parquet. .duckdb and .layer.*.parquet sidecars
 # are derived (rebuilt locally via `ant-build-all`). Use `pull --include-duckdb`
 # to override for disaster recovery.
 PULL_DEFAULT_EXTS    = {'.h5ad', '.de.parquet', '.scores.parquet',
                         'module_variability.parquet',
                         'scores_index.parquet',
-                        'gene_stats_index.parquet'}
+                        'gene_stats_index.parquet',
+                        'gene_variance_index.parquet'}
 SKIP_SUFFIXES        = {'.wal', '.deleted', '.partial'}
 # S3 object metadata key holding the source file's mtime (integer seconds).
 # Set on every push so we can detect content-without-size-change drift

@@ -168,9 +168,11 @@ cd "$BASE/anthive4"
 ```
 
 Defaults pull `.h5ad`, `.de.parquet`, `.scores.parquet`, plus the
-fleet-wide `module_variability.parquet`, `scores_index.parquet`, and
-`gene_stats_index.parquet` (with its per-dataset `_gene_stats_cache/`
-prefix so incremental updates can reuse cached rows).
+fleet-wide `module_variability.parquet`, `scores_index.parquet`,
+`gene_stats_index.parquet`, and `gene_variance_index.parquet` (each
+with its per-dataset cache prefix so incremental updates can reuse
+cached rows: `_gene_stats_cache/`, `_gene_variance_cache/`,
+`_module_variability_cache/`).
 `.duckdb` and the `.layer.*.parquet` expression sidecars are treated as
 derived; rebuild them locally via `make build-stale` (or pull them for
 disaster recovery with `ant-sync pull --include-duckdb`).
@@ -667,8 +669,49 @@ The tool caches per-dataset stats in `_gene_stats_cache/<db_id>/` keyed
 on the max mtime of the duckdb, layer parquet, and .md, so subsequent
 runs after a single-dataset ingest only recompute for that dataset.
 
-After any of these three (12a/12b/12c) filters, restart the derivative's
-`ant-serve` so it picks up the new parquets:
+### 12d. gene_variance_index.parquet
+
+Precomputed per-(dataset, gene, facet) between-group variance for the
+same hot gene set as 12c. Serves `/api/databases/{db_id}/gene-variance-by-facet`
+in sub-second time; falls back to a live DuckDB scan for any
+(dataset, facet) triple not represented in the parquet. Schema is
+`dataset, gene, facet, facet_type, layer, n_cells, n_groups,
+eta_squared, F_stat, signal, total_var, group_means_json`. `signal`
+is `VAR_SAMP` over group means (the endpoint's ranking metric);
+`eta_squared` is SS_between / SS_total; `F_stat` is one-way F.
+Numerical facets are NTILE(5)-binned into `q1..q5`; categorical facets
+with > 50 distinct values are skipped as uninformative for
+group-variance (donor ids, cell barcodes).
+
+Same filter approach for a derivative:
+
+```bash
+duckdb -c "
+COPY (
+  SELECT * FROM read_parquet('/data/anthive/anthive4/data/h5adstore/gene_variance_index.parquet')
+  WHERE dataset IN (
+    SELECT column0 FROM read_csv('/tmp/derivative_datasets.txt',
+                                 columns={'column0': 'VARCHAR'}, header=false)
+  )
+) TO '/data/anthive-microglia/anthive4/data/h5adstore/gene_variance_index.parquet' (FORMAT parquet);
+"
+```
+
+Or rebuild from the derivative's h5adstore (needs `gene_stats_index.parquet`
+already in place — the hot set is sourced from there):
+
+```bash
+cd /data/anthive-microglia/anthive4
+./bin/annot/ant-gene-variance-precompute --h5adstore-root ./data/h5adstore \
+    --out data/h5adstore/gene_variance_index.parquet
+```
+
+Caches land under `_gene_variance_cache/<db_id>/genevar.parquet` keyed
+on the max mtime of the duckdb, layer parquet, and .md — subsequent
+runs after a single-dataset ingest only recompute for that dataset.
+
+After any of these four (12a/12b/12c/12d) filters, restart the
+derivative's `ant-serve` so it picks up the new parquets:
 
 ```bash
 ./bin/ops/ant-supervisor restart api

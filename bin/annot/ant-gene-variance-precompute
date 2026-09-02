@@ -1,0 +1,1052 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "duckdb>=0.10.0",
+#   "pandas>=2.0.0",
+#   "numpy>=1.24.0",
+#   "pyarrow>=14.0",
+#   "pyyaml>=6.0",
+#   "tqdm>=4.66",
+# ]
+# ///
+"""ant-gene-variance-precompute -- fleet-wide gene x facet variability.
+
+Precomputes per-(dataset, gene, facet) between-group variance for the
+"hot" gene set already present in ``<h5adstore>/gene_stats_index.parquet``.
+Feeds ``/api/databases/{db_id}/gene-variance-by-facet``: the endpoint
+hits the aggregate parquet first, only falling back to live DuckDB
+compute for datasets not represented here.
+
+Architecture mirrors ``ant-gene-stats-precompute`` and
+``ant-module-variability``:
+
+  * Per-dataset parquet cache under
+    ``<h5adstore>/_gene_variance_cache/<db_id>/genevar.parquet``.
+    Invalidated by mtime comparison against the dataset's ``.duckdb``,
+    its by-gene parquet sidecar, and its ``.md`` (facet renames / obs
+    derives live there).
+  * ``multiprocessing.Pool`` over the dataset queue. Default 2 workers
+    (host memory is often under pressure -- the by-gene parquet can be
+    5-15 GB per dataset in the DuckDB working set).
+  * ``tqdm`` progress + JSON progress lines to stderr every 10
+    datasets.
+  * Streaming aggregate write via ``duckdb.COPY`` -- never holds >1
+    dataset's worth of rows in Python at once.
+
+Output schema (wide, one row per (dataset, gene, facet)):
+
+  ``dataset, gene, facet, facet_type, layer, n_cells, n_groups,
+    eta_squared, F_stat, signal, total_var, group_means_json``.
+
+Where:
+
+  * ``signal`` = ``VAR_SAMP(mean_expr_per_group)`` -- kept for backward
+    compatibility with the existing endpoint's ranking metric.
+  * ``eta_squared`` = SS_between / SS_total on per-cell expression
+    values (categorical grouping, matches the module-variability
+    formula).
+  * ``F_stat`` = one-way F for the same grouping. NaN if any group has
+    <2 cells or ss_within = 0.
+  * ``total_var`` = ``VAR_SAMP(per_cell_value)`` -- gene-level denominator.
+  * ``group_means_json`` = JSON dict {group: mean}, so the endpoint can
+    hydrate its response without a DuckDB round-trip.
+
+Facet handling:
+
+  * Facets are auto-discovered from the dataset's ``.md`` obs block:
+    every column starting with ``ant_``.
+  * ``ant_braak`` (numerical) is treated as categorical here (each
+    level is its own group). For truly continuous facets, we NTILE(5)
+    into ``q1``..``q5`` and treat those as categories.
+  * Skips facets with 1 unique value (no groups) or n_unique > 50 (per
+    spec: uninformative for group-variance).
+  * Skips ``cell_name``.
+
+Scope:
+
+  * Restricted to the genes already present in
+    ``<h5adstore>/gene_stats_index.parquet`` (the "hot set"). This is
+    task #324's promise; the full-genome sweep is task #330.
+
+Usage:
+  ant-gene-variance-precompute [--only DB1,DB2,...] [--out PATH]
+                               [--workers N] [--force] [--dry-run]
+                               [--h5adstore-root DIR]
+                               [--max-facet-cardinality N]
+                               [--gene-index PATH]
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import multiprocessing
+import os
+import re
+import sys
+import time
+import traceback
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Iterable, Optional
+
+import duckdb
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+
+script_dir = Path(__file__).resolve().parent
+lib_dir = script_dir.parent.parent / 'lib'
+sys.path.insert(0, str(lib_dir))
+
+from h5adstore import iter_h5adstore                              # type: ignore
+from metadata import parse_md_file                                 # type: ignore
+
+
+CACHE_DIRNAME = '_gene_variance_cache'
+CACHE_FILENAME = 'genevar.parquet'
+
+#: Canonical output schema -- one row per (dataset, gene, facet).
+OUTPUT_COLUMNS = (
+    'dataset', 'gene', 'facet', 'facet_type', 'layer',
+    'n_cells', 'n_groups',
+    'eta_squared', 'F_stat', 'signal', 'total_var',
+    'group_means_json',
+)
+
+OUTPUT_DTYPES = {
+    'dataset': 'object', 'gene': 'object', 'facet': 'object',
+    'facet_type': 'object', 'layer': 'object',
+    'n_cells': 'int64', 'n_groups': 'int64',
+    'eta_squared': 'float64', 'F_stat': 'float64',
+    'signal': 'float64', 'total_var': 'float64',
+    'group_means_json': 'object',
+}
+
+#: Max distinct group count per facet before we skip it as uninformative
+#: (per spec: cell_name-style columns are useless for group-variance).
+DEFAULT_MAX_FACET_CARDINALITY = 50
+
+#: Facet names we never compute for -- these are cell identifiers or
+#: otherwise structurally unsuitable for group-variance.
+FACET_BLACKLIST = {
+    'ant_cell_name',
+    'cell_name',
+}
+
+
+# ---------------------------------------------------------------------------
+# Cache path handling
+# ---------------------------------------------------------------------------
+
+
+_SANITISE_RE = re.compile(r'[^A-Za-z0-9._-]+')
+
+
+def _sanitise(name: str) -> str:
+    """Turn a db_id into a filesystem-safe single token (``G/F`` -> ``G__F``)."""
+    if not name:
+        raise ValueError('empty identifier')
+    token = _SANITISE_RE.sub('_', name.replace('/', '__').replace(':', '_'))
+    token = token.strip('_')
+    if not token:
+        raise ValueError(f'identifier {name!r} sanitises to empty')
+    return token
+
+
+def _cache_root(h5adstore_root: Path) -> Path:
+    return h5adstore_root / CACHE_DIRNAME
+
+
+def _cache_file(h5adstore_root: Path, db_id: str) -> Path:
+    return _cache_root(h5adstore_root) / _sanitise(db_id) / CACHE_FILENAME
+
+
+def _mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except FileNotFoundError:
+        return 0.0
+
+
+# ---------------------------------------------------------------------------
+# Dataset discovery
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DatasetInputs:
+    """Everything a worker needs to compute one dataset.
+
+    Attributes:
+        db_id: Canonical ``group/file`` id.
+        duckdb_path: Absolute path to the ``.duckdb``.
+        md_path: Absolute path to the ``.md``.
+        layer: Default layer name (``default_layer`` or ``'X'``).
+        by_gene_parquet: Path to ``<stem>.layer.<layer>.by_gene.parquet``
+            (may or may not exist).
+        source_mtime: Newest mtime among (duckdb, by-gene parquet, md)
+            -- the cache invalidation key.
+    """
+    db_id: str
+    duckdb_path: Path
+    md_path: Path
+    layer: str
+    by_gene_parquet: Path
+    source_mtime: float
+
+
+def _default_layer_from_md(md_path: Path) -> Optional[str]:
+    """Return ``default_layer`` from a dataset's ``.md`` (or ``None``)."""
+    try:
+        meta, _ = parse_md_file(md_path)
+    except Exception:
+        return None
+    val = meta.get('default_layer')
+    if val:
+        return str(val).strip()
+    # Fall back to 'X' if the dataset has an X layer. The endpoint does
+    # this exact fallback (``meta.get('default_layer') or 'X'``), so we
+    # mirror it here.
+    return 'X'
+
+
+def build_dataset_inputs(entry) -> Optional[DatasetInputs]:
+    """Snapshot on-disk state for a dataset without opening it."""
+    if not entry.duckdb_path.exists():
+        return None
+    layer = _default_layer_from_md(entry.md_path)
+    if not layer:
+        return None
+    by_gene = entry.duckdb_path.with_name(
+        f'{entry.duckdb_path.stem}.layer.{layer}.by_gene.parquet'
+    )
+    source_mtime = max(
+        _mtime(entry.duckdb_path),
+        _mtime(by_gene),
+        _mtime(entry.md_path),
+    )
+    return DatasetInputs(
+        db_id=entry.db_id,
+        duckdb_path=entry.duckdb_path.resolve(),
+        md_path=entry.md_path.resolve(),
+        layer=layer,
+        by_gene_parquet=by_gene.resolve() if by_gene.exists() else by_gene,
+        source_mtime=source_mtime,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Layer source expressions (portable across hosts)
+# ---------------------------------------------------------------------------
+
+
+def _sql_str(literal: str) -> str:
+    return "'" + str(literal).replace("'", "''") + "'"
+
+
+def _by_gene_source(inputs: DatasetInputs) -> str:
+    """Return a SQL ``FROM`` expression for the per-gene layer view.
+
+    Prefers the by-gene parquet sidecar (portable across hosts); falls
+    back to the persisted ``__layer__<safe>`` view otherwise. The
+    chosen expression exposes ``(cell_id, gene_id, value)``.
+    """
+    if inputs.by_gene_parquet.exists():
+        return f'read_parquet({_sql_str(str(inputs.by_gene_parquet))})'
+    safe = ''.join(c if c.isalnum() else '_' for c in inputs.layer)
+    return f'"__layer__{safe}"'
+
+
+# ---------------------------------------------------------------------------
+# Facet discovery
+# ---------------------------------------------------------------------------
+
+
+def _obs_view_kind(conn: duckdb.DuckDBPyConnection, facet: str) -> str:
+    """Return ``'num'`` if facet lives in obsnum, ``'cat'`` in obscat, else ``'?'``."""
+    for view, kind in (('obsnum', 'num'), ('obscat', 'cat')):
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM information_schema.columns "
+                "WHERE table_name = ? AND column_name = ?",
+                [view, facet],
+            ).fetchone()
+            if row and row[0]:
+                return kind
+        except Exception:
+            continue
+    return '?'
+
+
+def _facet_cardinality(
+    conn: duckdb.DuckDBPyConnection, facet: str, view: str,
+) -> tuple[int, int]:
+    """Return ``(n_nonnull, n_distinct)`` for one facet.
+
+    Uses the ``view`` name (``obsnum`` or ``obscat``) unquoted (both are
+    stable string constants, never user input). Returns ``(0, 0)`` if
+    the view is malformed for this column (e.g. an obsnum entry whose
+    view body is a string CASE — happens on some legacy datasets).
+    """
+    ident = '"' + facet.replace('"', '""') + '"'
+    try:
+        n_row = conn.execute(
+            f"SELECT COUNT(*) FROM {view} WHERE {ident} IS NOT NULL"
+        ).fetchone()
+    except duckdb.Error:
+        return (0, 0)
+    n_nonnull = int(n_row[0]) if n_row and n_row[0] is not None else 0
+    if n_nonnull == 0:
+        return (0, 0)
+    try:
+        d_row = conn.execute(
+            f"SELECT COUNT(DISTINCT {ident}) FROM {view} WHERE {ident} IS NOT NULL"
+        ).fetchone()
+    except duckdb.Error:
+        return (0, 0)
+    n_distinct = int(d_row[0]) if d_row and d_row[0] is not None else 0
+    return n_nonnull, n_distinct
+
+
+def _discover_facets(
+    conn: duckdb.DuckDBPyConnection,
+    max_cardinality: int,
+) -> list[tuple[str, str, int, int]]:
+    """Enumerate usable facets on one dataset.
+
+    A facet is an obs column named ``ant_*``. For numerical facets we
+    still emit ``'numerical'`` as the facet_type -- the compute path
+    NTILE(5)s the raw values into quantile bins.
+
+    Skips: cell_name-style blacklist, single-valued columns, and
+    columns with cardinality > ``max_cardinality`` (uninformative for
+    group-variance -- typically donor ids, cell barcodes).
+
+    Args:
+        conn: Read-only DuckDB connection.
+        max_cardinality: Reject facets with more than this many
+            distinct non-null values (categorical only; NTILE-binned
+            numericals are always 5 groups so they pass).
+
+    Returns:
+        List of ``(facet_name, facet_type, n_nonnull, n_distinct_or_5)``
+        tuples. Sorted by facet name.
+    """
+    out: list[tuple[str, str, int, int]] = []
+    all_cols_seen: set[str] = set()
+    for view_kind, view in (('cat', 'obscat'), ('num', 'obsnum')):
+        try:
+            rows = conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                f"WHERE table_name = '{view}' AND column_name LIKE 'ant\\_%' ESCAPE '\\'"
+            ).fetchall()
+        except Exception:
+            continue
+        for (col,) in rows:
+            if col in all_cols_seen:
+                continue
+            if col in FACET_BLACKLIST:
+                continue
+            n_nonnull, n_distinct = _facet_cardinality(conn, col, view)
+            if n_nonnull == 0 or n_distinct < 2:
+                continue
+            if view_kind == 'num':
+                # Continuous facets are NTILE(5)-binned regardless of
+                # raw cardinality -- always 5 groups.
+                out.append((col, 'numerical', n_nonnull, 5))
+            else:
+                if n_distinct > max_cardinality:
+                    continue
+                out.append((col, 'categorical', n_nonnull, n_distinct))
+            all_cols_seen.add(col)
+    return sorted(out, key=lambda x: x[0])
+
+
+# ---------------------------------------------------------------------------
+# Per-(dataset, gene, facet) compute
+# ---------------------------------------------------------------------------
+
+
+def _facet_group_cte(facet: str, facet_type: str) -> str:
+    """Return a WITH-CTE fragment computing ``(cell_id, grp)`` for a facet.
+
+    For categorical facets, the group is ``CAST(obscat.facet AS VARCHAR)``.
+    For numerical facets, we NTILE(5) into ``q1``..``q5`` -- same
+    binning as the endpoint's live compute path.
+    """
+    facet_ident = '"' + facet.replace('"', '""') + '"'
+    if facet_type == 'numerical':
+        # obsnum joins to __cells via cell_name. We bridge to cell_id
+        # so we can join the by-gene layer directly.
+        return f"""
+            WITH cell_grp AS (
+                SELECT c.cell_id AS cell_id,
+                       'q' || CAST(NTILE(5) OVER (ORDER BY o.{facet_ident}) AS VARCHAR) AS grp
+                FROM obsnum o
+                JOIN __cells c ON c.cell_name = o.cell_name
+                WHERE o.{facet_ident} IS NOT NULL
+            )
+        """
+    return f"""
+        WITH cell_grp AS (
+            SELECT c.cell_id AS cell_id,
+                   CAST(o.{facet_ident} AS VARCHAR) AS grp
+            FROM obscat o
+            JOIN __cells c ON c.cell_name = o.cell_name
+            WHERE o.{facet_ident} IS NOT NULL
+        )
+    """
+
+
+def _compute_rows_for_dataset(
+    inputs: DatasetInputs,
+    facets: list[tuple[str, str, int, int]],
+    gene_names: list[str],
+    max_facet_cardinality: int,
+) -> list[dict]:
+    """Compute one dataset's rows for the hot-gene subset.
+
+    Strategy: for each facet, build the (cell_id, grp) mapping once,
+    then a single grouped scan of the by-gene layer restricted to
+    ``gene_names`` produces per-(gene, grp) mean and count. Python
+    aggregates ss_between + eta² per gene from those group means.
+
+    Args:
+        inputs: Dataset paths and default layer.
+        facets: List of ``(facet, facet_type, n_nonnull, n_groups_est)``.
+        gene_names: Hot-set gene names to score.
+        max_facet_cardinality: Guard rail; per-facet skip already
+            applied at discovery, but we re-check in case discovery
+            was cached against a different threshold.
+
+    Returns:
+        List of dicts, one per (gene, facet) row, matching OUTPUT_COLUMNS.
+        Genes absent from ``__genes`` in this dataset are silently
+        skipped (as with ant-gene-stats-precompute).
+    """
+    if not gene_names or not facets:
+        return []
+
+    conn = duckdb.connect(str(inputs.duckdb_path), read_only=True)
+    try:
+        placeholders = ','.join('?' * len(gene_names))
+        id_rows = conn.execute(
+            f'SELECT gene_name, gene_id FROM __genes '
+            f'WHERE gene_name IN ({placeholders})',
+            gene_names,
+        ).fetchall()
+        if not id_rows:
+            return []
+        stored_to_id = {r[0]: int(r[1]) for r in id_rows}
+        # unique gene_ids for the by-gene filter
+        unique_ids = list(dict.fromkeys(stored_to_id.values()))
+        id_placeholders = ','.join('?' * len(unique_ids))
+
+        layer_source = _by_gene_source(inputs)
+
+        rows_out: list[dict] = []
+
+        for facet, facet_type, _n_nonnull, n_groups_est in facets:
+            if facet_type == 'categorical' and n_groups_est > max_facet_cardinality:
+                continue
+
+            grp_cte = _facet_group_cte(facet, facet_type)
+
+            # Per-(gene, grp) mean and count over the hot subset.
+            gene_grp_sql = f"""
+                {grp_cte}
+                , per_cell AS (
+                    SELECT x.gene_id AS gene_id, x.value AS val, cg.grp AS grp
+                    FROM {layer_source} x
+                    JOIN cell_grp cg ON cg.cell_id = x.cell_id
+                    WHERE x.gene_id IN ({id_placeholders})
+                )
+                SELECT gene_id, grp,
+                       SUM(val)         AS sum_val,
+                       SUM(val * val)   AS sum_sq_val,
+                       COUNT(*)         AS n_nz
+                FROM per_cell
+                GROUP BY gene_id, grp
+            """
+            # A stray facet (e.g. obsnum column whose view returns a
+            # string CASE expression) may fail at runtime. Skip the
+            # facet on any duckdb error rather than sinking the whole
+            # dataset. The failure surfaces via /admin/gene-variance-
+            # index stats (that facet just won't be present).
+            try:
+                gg_rows = conn.execute(gene_grp_sql, unique_ids).fetchall()
+            except duckdb.Error as exc:  # noqa: BLE001
+                print(
+                    f'  [warn] {inputs.db_id}:{facet}: skipped '
+                    f'({type(exc).__name__}: {str(exc).splitlines()[0]})',
+                    file=sys.stderr,
+                )
+                continue
+
+            # Cells-per-group is invariant across genes; compute once.
+            grp_size_sql = f"""
+                {grp_cte}
+                SELECT grp, COUNT(*) AS n
+                FROM cell_grp
+                GROUP BY grp
+            """
+            try:
+                size_rows = conn.execute(grp_size_sql).fetchall()
+            except duckdb.Error as exc:  # noqa: BLE001
+                print(
+                    f'  [warn] {inputs.db_id}:{facet}: skipped grp-sizes '
+                    f'({type(exc).__name__}: {str(exc).splitlines()[0]})',
+                    file=sys.stderr,
+                )
+                continue
+            grp_sizes: dict[str, int] = {
+                str(grp): int(n) for grp, n in size_rows
+            }
+            n_cells_facet = sum(grp_sizes.values())
+            groups_sorted = sorted(grp_sizes.keys())
+            n_groups = len(groups_sorted)
+            if n_groups < 2 or n_cells_facet == 0:
+                continue
+
+            # Bucket per-(gene, grp) aggregates -- non-zero cell counts
+            # only; zero-expression cells contribute mean 0.
+            per_gene: dict[int, dict[str, tuple[float, float, int]]] = {}
+            for gene_id, grp, sum_val, sum_sq_val, n_nz in gg_rows:
+                per_gene.setdefault(int(gene_id), {})[str(grp)] = (
+                    float(sum_val), float(sum_sq_val), int(n_nz),
+                )
+
+            # ------ Assemble per-gene stats ------
+            for stored_name, gid in stored_to_id.items():
+                gene_groups = per_gene.get(gid, {})
+
+                # Per-group mean: include zero-expression cells in denom.
+                group_means: dict[str, float] = {}
+                group_ss_within: float = 0.0
+                for grp, n_grp in grp_sizes.items():
+                    aggr = gene_groups.get(grp)
+                    if aggr is None:
+                        # Silent gene in this group -- zero everywhere.
+                        group_means[grp] = 0.0
+                        # ss_within contribution: sum over cells of
+                        # (0 - 0)^2 = 0. Nothing to add.
+                        continue
+                    sum_val, sum_sq_val, _n_nz = aggr
+                    mean = sum_val / n_grp
+                    group_means[grp] = mean
+                    # ss_within = sum_i (x_i - mean)^2
+                    #           = sum_i x_i^2 - n_grp * mean^2
+                    ss_grp = sum_sq_val - n_grp * mean * mean
+                    if ss_grp < 0:
+                        ss_grp = 0.0
+                    group_ss_within += ss_grp
+
+                grand_mean = (
+                    sum(m * grp_sizes[g] for g, m in group_means.items())
+                    / n_cells_facet
+                )
+                ss_between = sum(
+                    grp_sizes[g] * (m - grand_mean) ** 2
+                    for g, m in group_means.items()
+                )
+                ss_total = ss_between + group_ss_within
+                if ss_total <= 0.0:
+                    eta_squared = 0.0
+                    f_stat = 0.0
+                    total_var = 0.0
+                else:
+                    eta_squared = ss_between / ss_total
+                    # Sample variance total (per-cell). Use ss_total / (n-1).
+                    if n_cells_facet > 1:
+                        total_var = ss_total / (n_cells_facet - 1)
+                    else:
+                        total_var = float('nan')
+                    if n_groups > 1 and n_cells_facet > n_groups and group_ss_within > 0:
+                        ms_between = ss_between / (n_groups - 1)
+                        ms_within = group_ss_within / (n_cells_facet - n_groups)
+                        f_stat = ms_between / ms_within if ms_within > 0 else float('inf')
+                    else:
+                        f_stat = float('nan')
+
+                # ``signal`` = VAR_SAMP of the group means (endpoint's
+                # ranking metric). Zero if <2 groups (guarded above).
+                if n_groups >= 2:
+                    means_arr = np.fromiter(
+                        (group_means[g] for g in groups_sorted),
+                        dtype=float, count=n_groups,
+                    )
+                    signal = float(means_arr.var(ddof=1))
+                else:
+                    signal = 0.0
+
+                # Round group means for storage compactness (6 decimals).
+                gm_rounded = {g: round(v, 6) for g, v in group_means.items()}
+
+                rows_out.append({
+                    'dataset':          inputs.db_id,
+                    'gene':             stored_name,
+                    'facet':            facet,
+                    'facet_type':       facet_type,
+                    'layer':            inputs.layer,
+                    'n_cells':          int(n_cells_facet),
+                    'n_groups':         int(n_groups),
+                    'eta_squared':      round(float(eta_squared), 6),
+                    'F_stat':           (
+                        None if f_stat != f_stat or f_stat == float('inf')
+                        else round(float(f_stat), 4)
+                    ),
+                    'signal':           round(float(signal), 8),
+                    'total_var':        (
+                        None if total_var != total_var
+                        else round(float(total_var), 8)
+                    ),
+                    'group_means_json': json.dumps(
+                        gm_rounded, separators=(',', ':'),
+                    ),
+                })
+    finally:
+        conn.close()
+    return rows_out
+
+
+# ---------------------------------------------------------------------------
+# Per-dataset worker
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class DatasetJob:
+    inputs: DatasetInputs
+    hot_genes: tuple[str, ...]
+    cache_path: Path
+    max_facet_cardinality: int
+
+
+@dataclass
+class DatasetResult:
+    db_id: str
+    cache_path: Path
+    n_rows: int
+    n_facets: int
+    from_cache: bool
+    elapsed_s: float
+    error: Optional[str] = None
+
+
+def _read_cache(cache_path: Path) -> Optional[pd.DataFrame]:
+    if not cache_path.exists():
+        return None
+    try:
+        return pd.read_parquet(cache_path)
+    except Exception:
+        return None
+
+
+def _write_cache(cache_path: Path, rows: list[dict]) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    if rows:
+        df = pd.DataFrame(rows, columns=list(OUTPUT_COLUMNS)).astype(
+            OUTPUT_DTYPES, errors='ignore',
+        )
+    else:
+        df = pd.DataFrame({col: [] for col in OUTPUT_COLUMNS}).astype(
+            OUTPUT_DTYPES,
+        )
+    tmp = cache_path.with_suffix(cache_path.suffix + '.tmp')
+    df.to_parquet(tmp, engine='pyarrow', compression='zstd')
+    os.replace(tmp, cache_path)
+
+
+def _process_dataset(job: DatasetJob, force: bool) -> DatasetResult:
+    """Compute one dataset. Cache-hit if the parquet is newer than sources."""
+    start = time.time()
+    try:
+        cache_mtime = _mtime(job.cache_path)
+        if (
+            not force
+            and cache_mtime > 0.0
+            and cache_mtime >= job.inputs.source_mtime
+        ):
+            cached = _read_cache(job.cache_path)
+            if cached is not None:
+                n_rows = int(len(cached))
+                n_facets = (
+                    int(cached['facet'].nunique()) if n_rows else 0
+                )
+                return DatasetResult(
+                    db_id=job.inputs.db_id, cache_path=job.cache_path,
+                    n_rows=n_rows, n_facets=n_facets,
+                    from_cache=True, elapsed_s=time.time() - start,
+                )
+
+        conn = duckdb.connect(str(job.inputs.duckdb_path), read_only=True)
+        try:
+            facets = _discover_facets(conn, job.max_facet_cardinality)
+        finally:
+            conn.close()
+
+        if not facets:
+            _write_cache(job.cache_path, [])
+            return DatasetResult(
+                db_id=job.inputs.db_id, cache_path=job.cache_path,
+                n_rows=0, n_facets=0, from_cache=False,
+                elapsed_s=time.time() - start,
+            )
+
+        rows = _compute_rows_for_dataset(
+            job.inputs, facets, list(job.hot_genes),
+            job.max_facet_cardinality,
+        )
+        _write_cache(job.cache_path, rows)
+        return DatasetResult(
+            db_id=job.inputs.db_id, cache_path=job.cache_path,
+            n_rows=len(rows), n_facets=len(facets),
+            from_cache=False, elapsed_s=time.time() - start,
+        )
+    except Exception as exc:  # noqa: BLE001 -- reported via .error
+        return DatasetResult(
+            db_id=job.inputs.db_id, cache_path=job.cache_path,
+            n_rows=0, n_facets=0, from_cache=False,
+            elapsed_s=time.time() - start,
+            error=f'{type(exc).__name__}: {exc}\n{traceback.format_exc()}',
+        )
+
+
+def _process_dataset_star(args_tuple):
+    job, force = args_tuple
+    return _process_dataset(job, force)
+
+
+# ---------------------------------------------------------------------------
+# Coordinator
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RunSummary:
+    processed: int = 0
+    cached: int = 0
+    errored: int = 0
+    errors: list[str] = field(default_factory=list)
+
+
+def _collect_dataset_snapshot(root: Path) -> list[DatasetInputs]:
+    """Walk the h5adstore, return one DatasetInputs per active dataset."""
+    out: list[DatasetInputs] = []
+    for entry in sorted(iter_h5adstore(root), key=lambda entry: entry.db_id):
+        if entry.h5ad_path.with_suffix('.inactive').exists():
+            continue
+        if not entry.duckdb_path.exists():
+            continue
+        try:
+            inputs = build_dataset_inputs(entry)
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f'  [warn] discover {entry.db_id}: {exc}', file=sys.stderr,
+            )
+            continue
+        if inputs is None:
+            continue
+        out.append(inputs)
+    return out
+
+
+def _prune_stale_cache(root: Path, active_db_ids: set[str]) -> int:
+    cache_root = _cache_root(root)
+    if not cache_root.exists():
+        return 0
+    active_tokens = {_sanitise(db_id) for db_id in active_db_ids}
+    removed = 0
+    for db_dir in cache_root.iterdir():
+        if not db_dir.is_dir():
+            continue
+        if db_dir.name in active_tokens:
+            continue
+        for cache_file in db_dir.glob('*.parquet'):
+            cache_file.unlink()
+            removed += 1
+        try:
+            db_dir.rmdir()
+        except OSError:
+            pass
+    return removed
+
+
+def _concat_and_write(
+    out_path: Path, cache_files: list[Path],
+) -> tuple[int, int, int, int]:
+    """Concat per-dataset caches into the aggregate parquet.
+
+    Returns ``(n_rows, n_datasets, n_genes, n_facets)``.
+    """
+    tmp = out_path.with_suffix(out_path.suffix + '.tmp')
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+
+    if not cache_files:
+        empty = pd.DataFrame({col: [] for col in OUTPUT_COLUMNS}).astype(
+            OUTPUT_DTYPES,
+        )
+        empty.to_parquet(tmp, engine='pyarrow', compression='zstd')
+        os.replace(tmp, out_path)
+        return (0, 0, 0, 0)
+
+    conn = duckdb.connect(':memory:')
+    try:
+        select_cols = ', '.join(OUTPUT_COLUMNS)
+        conn.execute(
+            f"COPY (SELECT {select_cols} "
+            f"      FROM read_parquet(?, union_by_name=true)) "
+            f"TO '{tmp}' (FORMAT PARQUET, COMPRESSION ZSTD)",
+            [[str(path) for path in cache_files]],
+        )
+        row = conn.execute(
+            'SELECT COUNT(*), COUNT(DISTINCT dataset), '
+            '       COUNT(DISTINCT gene), COUNT(DISTINCT facet) '
+            'FROM read_parquet(?)',
+            [str(tmp)],
+        ).fetchone()
+        n_rows = int(row[0]) if row else 0
+        n_datasets = int(row[1]) if row else 0
+        n_genes = int(row[2]) if row else 0
+        n_facets = int(row[3]) if row else 0
+    finally:
+        conn.close()
+
+    os.replace(tmp, out_path)
+    return n_rows, n_datasets, n_genes, n_facets
+
+
+# ---------------------------------------------------------------------------
+# Hot-set loading
+# ---------------------------------------------------------------------------
+
+
+def _load_hot_set_from_index(index_path: Path) -> list[str]:
+    """Return the sorted unique gene names from ``gene_stats_index.parquet``.
+
+    Task #324 scope: hot-set restricted. Full-genome sweep is #330.
+    """
+    df = pd.read_parquet(index_path, columns=['gene'])
+    genes = sorted(set(df['gene'].astype(str).tolist()))
+    return genes
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def _default_workers() -> int:
+    """2 workers by default -- host is memory-constrained during ingests."""
+    return 2
+
+
+def _emit_progress_json(stream, index: int, total: int,
+                        result: DatasetResult) -> None:
+    stream.write(json.dumps({
+        'i':          index,
+        'n':          total,
+        'db_id':      result.db_id,
+        'elapsed_s':  round(result.elapsed_s, 3),
+        'n_rows':     result.n_rows,
+        'n_facets':   result.n_facets,
+        'cached':     result.from_cache,
+        'ok':         result.error is None,
+    }) + '\n')
+    stream.flush()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog='ant-gene-variance-precompute')
+    parser.add_argument('--h5adstore-root', default='data/h5adstore')
+    parser.add_argument(
+        '--only', default=None,
+        help='comma-separated db_ids (else all active datasets)',
+    )
+    parser.add_argument(
+        '--out', default=None,
+        help='output parquet path (default: '
+             '<h5adstore>/gene_variance_index.parquet)',
+    )
+    parser.add_argument(
+        '--gene-index', default=None,
+        help='path to gene_stats_index.parquet -- hot-set source '
+             '(default: <h5adstore>/gene_stats_index.parquet)',
+    )
+    parser.add_argument(
+        '--max-facet-cardinality', type=int,
+        default=DEFAULT_MAX_FACET_CARDINALITY,
+        help=f'skip categorical facets with more than N distinct '
+             f'values (default: {DEFAULT_MAX_FACET_CARDINALITY})',
+    )
+    parser.add_argument(
+        '--force', action='store_true',
+        help='ignore per-dataset cache; recompute everything',
+    )
+    parser.add_argument(
+        '--workers', type=int, default=_default_workers(),
+        help=f'parallel workers (default: {_default_workers()}; '
+             f'the host is memory-constrained during ingests)',
+    )
+    parser.add_argument('--no-prune', action='store_true')
+    parser.add_argument('--dry-run', action='store_true')
+    args = parser.parse_args()
+
+    root = Path(args.h5adstore_root).resolve()
+    only = set(args.only.split(',')) if args.only else None
+    out = (
+        Path(args.out).resolve() if args.out
+        else root / 'gene_variance_index.parquet'
+    )
+    gene_index_path = (
+        Path(args.gene_index).resolve() if args.gene_index
+        else root / 'gene_stats_index.parquet'
+    )
+    workers = max(1, args.workers)
+
+    print(
+        f'Loading hot-set gene list from {gene_index_path}',
+        file=sys.stderr,
+    )
+    if not gene_index_path.exists():
+        print(
+            f'  gene_stats_index.parquet not found at {gene_index_path} '
+            f'-- run ant-gene-stats-precompute first',
+            file=sys.stderr,
+        )
+        return 1
+    hot_genes = _load_hot_set_from_index(gene_index_path)
+    if not hot_genes:
+        print('  hot set is empty -- nothing to compute', file=sys.stderr)
+        return 1
+    print(f'  hot set: {len(hot_genes)} unique gene(s)', file=sys.stderr)
+
+    print(f'Scanning {root} for active datasets...', file=sys.stderr)
+    dataset_snapshot = _collect_dataset_snapshot(root)
+    if only is not None:
+        active_subset = [d for d in dataset_snapshot if d.db_id in only]
+        if not active_subset:
+            print(f'no dataset in {only!r} -- nothing to do', file=sys.stderr)
+            return 1
+    else:
+        active_subset = dataset_snapshot
+    print(
+        f'  found {len(dataset_snapshot)} active dataset(s); '
+        f'{len(active_subset)} in scope',
+        file=sys.stderr,
+    )
+
+    _cache_root(root).mkdir(parents=True, exist_ok=True)
+
+    jobs = [
+        DatasetJob(
+            inputs=inputs,
+            hot_genes=tuple(hot_genes),
+            cache_path=_cache_file(root, inputs.db_id),
+            max_facet_cardinality=int(args.max_facet_cardinality),
+        )
+        for inputs in active_subset
+    ]
+
+    print(
+        f'Compute: {len(hot_genes)} hot gene(s) x '
+        f'{len(jobs)} dataset(s) with {workers} worker(s) '
+        f'(force={args.force}, max_facet_cardinality={args.max_facet_cardinality})',
+        file=sys.stderr,
+    )
+
+    summary = RunSummary()
+    total = len(jobs)
+    completed = 0
+
+    if workers == 1 or total <= 1:
+        result_iter = (_process_dataset(job, args.force) for job in jobs)
+    else:
+        ctx = multiprocessing.get_context('spawn')
+        pool = ctx.Pool(processes=workers)
+        result_iter = pool.imap_unordered(
+            _process_dataset_star, [(job, args.force) for job in jobs],
+        )
+
+    pbar = tqdm(
+        total=total, desc='gene-variance', unit='ds', file=sys.stderr,
+    )
+    try:
+        for result in result_iter:
+            completed += 1
+            pbar.update(1)
+            tag = '[cached]' if result.from_cache else '[computed]'
+            if result.error:
+                summary.errored += 1
+                summary.errors.append(f'{result.db_id}: {result.error}')
+                tqdm.write(
+                    f'[{completed}/{total}] {result.db_id} -- ERROR: '
+                    f'{result.error.splitlines()[0]}',
+                    file=sys.stderr,
+                )
+            else:
+                if result.from_cache:
+                    summary.cached += 1
+                else:
+                    summary.processed += 1
+                tqdm.write(
+                    f'[{completed}/{total}] {result.db_id} -- '
+                    f'{result.elapsed_s:.1f}s -- '
+                    f'{result.n_rows} rows / {result.n_facets} facets {tag}',
+                    file=sys.stderr,
+                )
+            if completed % 10 == 0 or completed == total:
+                _emit_progress_json(sys.stderr, completed, total, result)
+    finally:
+        pbar.close()
+        if workers > 1 and total > 1:
+            pool.close()
+            pool.join()
+
+    if summary.errored:
+        print(
+            f'\n{summary.errored} dataset(s) failed -- continuing to '
+            f'aggregate with the successful ones',
+            file=sys.stderr,
+        )
+        for err in summary.errors[:5]:
+            print(f'  {err}', file=sys.stderr)
+
+    if not args.no_prune:
+        active_ids = {inputs.db_id for inputs in dataset_snapshot}
+        pruned = _prune_stale_cache(root, active_ids)
+        if pruned:
+            print(f'pruned {pruned} stale cache file(s)', file=sys.stderr)
+
+    if args.dry_run:
+        print(f'\n[dry-run] would concat cache -> {out}', file=sys.stderr)
+        return 0
+
+    all_cache_files = [
+        _cache_file(root, inputs.db_id)
+        for inputs in dataset_snapshot
+        if _cache_file(root, inputs.db_id).exists()
+    ]
+
+    print(
+        f'\nConcatenating {len(all_cache_files)} cache file(s) -> {out}',
+        file=sys.stderr,
+    )
+    n_rows, n_datasets, n_genes, n_facets = _concat_and_write(
+        out, all_cache_files,
+    )
+    print(
+        f'wrote {n_rows:,} rows across {n_datasets} dataset(s), '
+        f'{n_genes} unique gene(s), {n_facets} unique facet(s) -> {out}',
+        file=sys.stderr,
+    )
+    print(
+        f'summary: processed={summary.processed} cached={summary.cached} '
+        f'errored={summary.errored} hot_set={len(hot_genes)}',
+        file=sys.stderr,
+    )
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
