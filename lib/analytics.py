@@ -22,6 +22,7 @@ import base64
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -86,17 +87,44 @@ def _cleanup_old_sessions() -> int:
 # perform schema inference for foreign sources (e.g. open the s3:// URL) at
 # EXPLAIN time, which is the exact attack we are trying to prevent.
 
-# Identifiers that — when used in FROM clause position — read files or URLs.
-# Token-stream check is grammar-aware: these are blocked only as actual FROM
-# items, not as column names or string literals containing the same text.
+# Functions that read files / URLs, run nested SQL, or expose engine config
+# or secrets. validate_sql rejects any of these names when followed by `(`,
+# anywhere in the statement (FROM, JOIN, LATERAL, comma joins, subqueries,
+# scalar position), including schema-qualified (`main.read_text`) and quoted
+# (`"read_text"`) spellings. This is defence in depth only: the real
+# boundary is the engine lockdown in _lockdown_connection().
 _BLOCKED_FROM_FUNCTIONS = frozenset({
-    'read_csv', 'read_csv_auto', 'read_parquet', 'read_json', 'read_ndjson',
-    'read_text', 'read_arrow', 'read_blob', 'read_xlsx', 'read_excel',
+    'read_csv', 'read_csv_auto', 'read_parquet', 'read_json', 'read_json_auto',
+    'read_json_objects', 'read_json_objects_auto', 'read_ndjson',
+    'read_ndjson_auto', 'read_ndjson_objects', 'read_text', 'read_arrow',
+    'read_blob', 'read_xlsx', 'read_excel', 'read_duckdb',
     'scan_csv', 'scan_parquet', 'scan_arrow', 'scan_ndjson', 'scan_json',
-    'csv_scan', 'parquet_scan',
+    'csv_scan', 'parquet_scan', 'sniff_csv',
     'glob', 'httpfs_get', 'httpfs_post', 'parquet_metadata', 'parquet_schema',
-    'load_spatial',
+    'parquet_file_metadata', 'parquet_kv_metadata', 'parquet_bloom_probe',
+    'load_spatial', 'st_read', 'st_read_meta',
+    'iceberg_scan', 'iceberg_metadata', 'iceberg_snapshots', 'delta_scan',
+    'sqlite_scan', 'sqlite_attach', 'postgres_scan', 'postgres_attach',
+    'mysql_scan',
+    'query', 'query_table',
+    'duckdb_settings', 'duckdb_secrets', 'which_secret', 'current_setting',
+    'duckdb_databases', 'duckdb_extensions', 'getenv',
+    'load_aws_credentials',
 })
+
+_SESSION_ID_RE = re.compile(r'^[0-9a-f]{32}$')
+
+
+def validate_session_id(session_id: Any) -> str:
+    """Return session_id if it is a 32-char lowercase hex id, else raise ValueError.
+
+    Session ids become file names under the analytics tmp dir and are placed
+    inside SQL string literals, so nothing but uuid4().hex is accepted.
+    """
+    if not isinstance(session_id, str) or not _SESSION_ID_RE.fullmatch(session_id):
+        raise ValueError("Invalid session_id: expected 32 lowercase hex characters.")
+    return session_id
+
 
 _IDENT_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
 
@@ -136,45 +164,50 @@ def validate_sql(sql: str) -> None:
         raise ValueError(f"Could not tokenize SQL: {exc}") from exc
 
     n = len(tokens)
+
+    def _next_significant(idx: int) -> int:
+        idx += 1
+        while idx < n and tokens[idx][1] == duckdb.token_type.comment:
+            idx += 1
+        return idx
+
+    def _raw_token(idx: int) -> str:
+        start_off = tokens[idx][0]
+        end_off = tokens[idx + 1][0] if idx + 1 < n else len(sql)
+        return sql[start_off:end_off].strip()
+
     for i in range(n):
         offset, tt = tokens[i]
-        if tt != duckdb.token_type.keyword:
+        if tt not in (duckdb.token_type.keyword, duckdb.token_type.identifier):
             continue
-        keyword = _token_text(sql, offset).lower()
+        raw = _raw_token(i)
+        if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
+            name = raw[1:-1].replace('""', '"')
+        else:
+            name = _token_text(sql, offset)
+        name = name.lower()
         # PRAGMA slips past the Step-1 statement-type gate because DuckDB's
         # parser reports read-only pragmas (e.g. `PRAGMA database_list`) as
-        # StatementType.SELECT.  Reject it explicitly here: pragmas expose
-        # engine/schema introspection and the `PRAGMA x=y` form changes
-        # settings.  (The `=` form is already StatementType.SET and blocked,
-        # but catching the keyword covers both spellings in one place.)
-        if keyword == 'pragma':
+        # StatementType.SELECT.
+        if tt == duckdb.token_type.keyword and name == 'pragma':
             raise ValueError(
                 "PRAGMA statements are not allowed through analytics_query."
             )
-        if keyword != 'from':
-            continue
-        # Find next non-comment token.
-        j = i + 1
-        while j < n and tokens[j][1] == duckdb.token_type.comment:
-            j += 1
+        j = _next_significant(i)
         if j >= n:
             continue
-        next_offset, next_tt = tokens[j]
-        if next_tt == duckdb.token_type.string_const:
+        # FROM / JOIN '<path>' (path-as-table replacement scan).
+        if (tt == duckdb.token_type.keyword and name in ('from', 'join')
+                and tokens[j][1] == duckdb.token_type.string_const):
             raise ValueError(
                 "FROM '<path>' (path-as-table) is not allowed. "
                 "External files / URLs cannot be read through analytics_query."
             )
-        # Most blocked table-functions tokenize as identifiers, but a few are
-        # also DuckDB keywords — notably `glob`, which doubles as the GLOB
-        # pattern operator.  Checking only identifiers let `FROM glob('…')`
-        # bypass the blocklist, so inspect keyword tokens too.
-        if next_tt in (duckdb.token_type.identifier, duckdb.token_type.keyword):
-            name = _token_text(sql, next_offset).lower()
-            if name in _BLOCKED_FROM_FUNCTIONS:
-                raise ValueError(
-                    f"Table-producing function '{name}()' is not allowed in FROM."
-                )
+        # Blocked function call anywhere: <name> ( ...
+        if name in _BLOCKED_FROM_FUNCTIONS and _raw_token(j).startswith('('):
+            raise ValueError(
+                f"Function '{name}()' is not allowed in analytics queries."
+            )
 
 
 # ── Python security ────────────────────────────────────────────────────────────
@@ -289,46 +322,125 @@ def get_schema(conn: duckdb.DuckDBPyConnection) -> List[Dict[str, Any]]:
 
 # ── Query execution ────────────────────────────────────────────────────────────
 
+def _sql_str(value: str) -> str:
+    """Single-quoted SQL string literal with embedded quotes doubled."""
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+_VIEW_PARQUET_RE = re.compile(r"read_parquet\(\s*'((?:[^']|'')+)'")
+
+
+def _dataset_sidecar_paths(conn: duckdb.DuckDBPyConnection, db_url: str) -> List[str]:
+    """Files the attached dataset legitimately reads: parquet paths named in
+    its views, plus <stem>.*.parquet siblings of a local .duckdb."""
+    paths: List[str] = []
+    try:
+        for (view_sql,) in conn.execute(
+            "SELECT sql FROM duckdb_views() WHERE database_name = 'db'"
+        ).fetchall():
+            for match in _VIEW_PARQUET_RE.finditer(view_sql or ''):
+                paths.append(match.group(1).replace("''", "'"))
+    except Exception as exc:  # views are optional; lockdown still applies
+        log.debug('analytics: could not list view parquet paths: %s', exc)
+    if not db_url.startswith('s3://'):
+        db_path = Path(db_url).resolve()
+        paths.append(str(db_path))
+        paths.extend(str(p) for p in db_path.parent.glob(f"{db_path.stem}.*.parquet"))
+    return paths
+
+
+def _lockdown_connection(
+    conn: duckdb.DuckDBPyConnection,
+    allowed_paths: List[str],
+    allowed_directories: Optional[List[str]] = None,
+) -> None:
+    """Disable all external file / network / extension access except the
+    listed paths, then freeze the configuration so SQL cannot undo it.
+
+    Must run on a connection that owns its own DuckDB instance (in-memory
+    connect + ATTACH): settings are per-instance, so locking a pooled file
+    connection would lock every other connection on that file too.
+    """
+    unique_paths = sorted({str(p) for p in allowed_paths if p})
+    conn.execute(f"SET allowed_paths = [{', '.join(_sql_str(p) for p in unique_paths)}]")
+    if allowed_directories:
+        dirs = sorted({str(d) for d in allowed_directories if d})
+        conn.execute(f"SET allowed_directories = [{', '.join(_sql_str(d) for d in dirs)}]")
+    conn.execute("SET enable_external_access = false")
+    conn.execute("SET lock_configuration = true")
+
+
 def _open_analytics_connection(
     db_url: str,
     s3_config: Optional[Dict[str, Any]] = None,
+    attach_sessions: Optional[List[str]] = None,
+    extra_parquet_views: Optional[Dict[str, str]] = None,
 ) -> duckdb.DuckDBPyConnection:
-    """Open a dedicated read-only DuckDB connection, configuring httpfs for S3 URLs."""
-    if db_url.startswith('s3://'):
-        conn = duckdb.connect()
-        # httpfs is installed once by the connection pool; LOAD is idempotent.
-        try:
-            conn.execute("LOAD httpfs;")
-        except Exception:
-            conn.execute("INSTALL httpfs; LOAD httpfs;")
-        s3 = s3_config or {}
-        raw_ep = (s3.get('endpoint') or '').strip()
-        ep_host = raw_ep.removeprefix('https://').removeprefix('http://')
-        use_ssl = not raw_ep.startswith('http://')
-        use_path_style = s3.get('use_path_style') or bool(ep_host)
-        fields = [
-            "TYPE S3",
-            f"KEY_ID '{s3.get('access_key_id') or ''}'",
-            f"SECRET '{s3.get('secret_access_key') or ''}'",
-        ]
-        if ep_host:
-            fields.append(f"ENDPOINT '{ep_host}'")
-        if s3.get('region'):
-            fields.append(f"REGION '{s3['region']}'")
-        fields.append(f"USE_SSL {'true' if use_ssl else 'false'}")
-        if use_path_style:
-            fields.append("URL_STYLE 'path'")
-        conn.execute(f"CREATE OR REPLACE SECRET _s3 ({', '.join(fields)})")
-        conn.execute(f"ATTACH '{db_url}' AS db (READ_ONLY);")
-        conn.execute("USE db;")
-    else:
-        conn = duckdb.connect(db_url, read_only=True)
-    # Cap memory to prevent OOM on constrained servers
-    mem_limit = os.environ.get('ANTHIVE_DUCKDB_MEMORY_LIMIT', '2GB')
-    threads = os.environ.get('ANTHIVE_DUCKDB_THREADS', '2')
-    conn.execute(f"SET memory_limit = '{mem_limit}'")
-    conn.execute(f"SET threads = {threads}")
-    return conn
+    """Open a private, locked-down DuckDB instance with the dataset attached
+    read-only as ``db`` (the default schema), plus TEMP VIEWs for attached
+    session parquets and extra fleet-wide parquet views."""
+    conn = duckdb.connect()  # private in-memory instance, never shared
+    try:
+        mem_limit = os.environ.get('ANTHIVE_DUCKDB_MEMORY_LIMIT', '2GB')
+        threads = int(os.environ.get('ANTHIVE_DUCKDB_THREADS', '2'))
+        conn.execute(f"SET memory_limit = {_sql_str(mem_limit)}")
+        conn.execute(f"SET threads = {threads}")
+        allowed_directories: List[str] = []
+        if db_url.startswith('s3://'):
+            # httpfs is installed once by the connection pool; LOAD is idempotent.
+            try:
+                conn.execute("LOAD httpfs;")
+            except Exception:
+                conn.execute("INSTALL httpfs; LOAD httpfs;")
+            s3 = s3_config or {}
+            raw_ep = (s3.get('endpoint') or '').strip()
+            ep_host = raw_ep.removeprefix('https://').removeprefix('http://')
+            use_ssl = not raw_ep.startswith('http://')
+            use_path_style = s3.get('use_path_style') or bool(ep_host)
+            fields = [
+                "TYPE S3",
+                f"KEY_ID {_sql_str(s3.get('access_key_id') or '')}",
+                f"SECRET {_sql_str(s3.get('secret_access_key') or '')}",
+            ]
+            if ep_host:
+                fields.append(f"ENDPOINT {_sql_str(ep_host)}")
+            if s3.get('region'):
+                fields.append(f"REGION {_sql_str(s3['region'])}")
+            fields.append(f"USE_SSL {'true' if use_ssl else 'false'}")
+            if use_path_style:
+                fields.append("URL_STYLE 'path'")
+            conn.execute(f"CREATE OR REPLACE SECRET _s3 ({', '.join(fields)})")
+            # The dataset's own folder in the bucket (its parquet sidecars).
+            allowed_directories.append(db_url.rsplit('/', 1)[0] + '/')
+        conn.execute(f"ATTACH {_sql_str(db_url)} AS db (READ_ONLY)")
+        conn.execute("USE db")
+
+        session_views: List[Tuple[str, str]] = []
+        tmp = _get_tmp_dir()
+        for i, sid in enumerate(attach_sessions or []):
+            pq_path = tmp / f"{validate_session_id(sid)}.parquet"
+            if pq_path.exists():
+                session_views.append((f"session_{i}" if i > 0 else "scores", str(pq_path)))
+        extra_views: List[Tuple[str, str]] = []
+        for view_name, pq_path in (extra_parquet_views or {}).items():
+            if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', view_name):
+                raise ValueError(f"Invalid extra view name: {view_name!r}")
+            if Path(pq_path).exists():
+                extra_views.append((view_name, str(Path(pq_path).resolve())))
+
+        allowed = _dataset_sidecar_paths(conn, db_url)
+        allowed += [path for _, path in session_views + extra_views]
+        _lockdown_connection(conn, allowed, allowed_directories)
+
+        for view_name, pq_path in session_views + extra_views:
+            conn.execute(
+                f"CREATE OR REPLACE TEMP VIEW {view_name} AS "
+                f"SELECT * FROM read_parquet({_sql_str(pq_path)})"
+            )
+        return conn
+    except Exception:
+        conn.close()
+        raise
 
 
 def run_query(
@@ -344,25 +456,35 @@ def run_query(
 
     The caller receives column names, dtypes, row count, and a small preview
     (PREVIEW_ROWS rows).  The full result set lives at tmp/{session_id}.parquet
-    and is never returned in this response — the session_id is the only handle.
+    and is never returned in this response; the session_id is the only handle.
 
-    A dedicated read-only DuckDB connection is opened for this query and closed
-    immediately after (or on timeout).  Closing the connection interrupts any
-    in-flight query, so the timeout is enforced at the DuckDB level — not just
-    at the Python thread-join level.
+    The query runs on a private in-memory DuckDB instance with the dataset
+    ATTACHed read-only and external access disabled at the engine level
+    (only the dataset's own files and the attached parquets are readable).
+    On timeout the query is interrupted, then the connection closed.
 
     Args:
         db_url:     Path or S3 URL of the DuckDB file.
         sql:        SELECT query to execute.
-        session_id: Optional caller-supplied ID; one is generated if omitted.
+        session_id: Optional caller-supplied ID (32 hex chars); generated if omitted.
         s3_config:  S3 credentials dict (required for s3:// URLs).
-        timeout:    Query timeout in seconds. Defaults to QUERY_TIMEOUT (120 s).
+        timeout:    Query timeout in seconds, clamped to (0, QUERY_TIMEOUT].
+        attach_sessions: Prior session ids to expose as TEMP VIEWs
+                    (`scores`, `session_1`, ...).
+        extra_parquet_views: {view_name: parquet_path} fleet-wide views.
 
     Returns:
         Dict with keys: session_id, columns, dtypes, row_count, preview, truncated.
     """
-    effective_timeout = timeout if timeout is not None else QUERY_TIMEOUT
+    if timeout is None or timeout <= 0:
+        effective_timeout = QUERY_TIMEOUT
+    else:
+        effective_timeout = min(int(timeout), QUERY_TIMEOUT)
     validate_sql(sql)
+    if session_id is not None:
+        validate_session_id(session_id)
+    for sid in attach_sessions or []:
+        validate_session_id(sid)
     _cleanup_old_sessions()  # prune stale Parquet files to prevent disk fill
     session_id = session_id or uuid.uuid4().hex
 
@@ -374,69 +496,11 @@ def run_query(
 
     def _exec() -> None:
         try:
-            if attach_sessions:
-                # Open a writable in-memory connection, then attach the real
-                # database read-only. This lets us CREATE VIEWs for session
-                # Parquet files while keeping the database itself read-only.
-                import duckdb as _duckdb
-                query_conn = _duckdb.connect()
-                # Cap memory/threads
-                mem_limit = os.environ.get('ANTHIVE_DUCKDB_MEMORY_LIMIT', '2GB')
-                threads = os.environ.get('ANTHIVE_DUCKDB_THREADS', '2')
-                query_conn.execute(f"SET memory_limit = '{mem_limit}'")
-                query_conn.execute(f"SET threads = {threads}")
-
-                if db_url.startswith('s3://'):
-                    # Configure S3 credentials
-                    s3 = s3_config or {}
-                    raw_ep = (s3.get('endpoint') or '').strip()
-                    ep_host = raw_ep.removeprefix('https://').removeprefix('http://')
-                    use_ssl = not raw_ep.startswith('http://')
-                    use_path_style = s3.get('use_path_style') or bool(ep_host)
-                    try:
-                        query_conn.execute("LOAD httpfs;")
-                    except Exception:
-                        query_conn.execute("INSTALL httpfs; LOAD httpfs;")
-                    fields = ["TYPE S3", f"KEY_ID '{s3.get('access_key_id') or ''}'",
-                              f"SECRET '{s3.get('secret_access_key') or ''}'"]
-                    if ep_host: fields.append(f"ENDPOINT '{ep_host}'")
-                    if s3.get('region'): fields.append(f"REGION '{s3['region']}'")
-                    fields.append(f"USE_SSL {'true' if use_ssl else 'false'}")
-                    if use_path_style: fields.append("URL_STYLE 'path'")
-                    query_conn.execute(f"CREATE OR REPLACE SECRET _s3 ({', '.join(fields)})")
-                    query_conn.execute(f"ATTACH '{db_url}' AS db (READ_ONLY);")
-                else:
-                    query_conn.execute(f"ATTACH '{db_url}' AS db (READ_ONLY);")
-                query_conn.execute("USE db;")
-
-                # Create views for attached session Parquet files
-                tmp = _get_tmp_dir()
-                for i, sid in enumerate(attach_sessions):
-                    pq_path = tmp / f"{sid}.parquet"
-                    if pq_path.exists():
-                        view_name = f"session_{i}" if i > 0 else "scores"
-                        query_conn.execute(
-                            f"CREATE OR REPLACE TEMP VIEW {view_name} AS "
-                            f"SELECT * FROM read_parquet('{pq_path}')"
-                        )
-
-            else:
-                # Standard path: dedicated read-only connection
-                query_conn = _open_analytics_connection(db_url, s3_config)
-
-            # Global/extra parquet views (e.g. module_variability). Each
-            # entry becomes a TEMP VIEW so callers can join against them
-            # in the same query — cross-dataset analyses become one SQL.
-            # Applied to BOTH branches — read-only connections still allow
-            # CREATE TEMP VIEW (temp namespace, not the underlying db).
-            if extra_parquet_views:
-                for view_name, pq_path in extra_parquet_views.items():
-                    if Path(pq_path).exists():
-                        query_conn.execute(
-                            f"CREATE OR REPLACE TEMP VIEW {view_name} AS "
-                            f"SELECT * FROM read_parquet('{pq_path}')"
-                        )
-
+            query_conn = _open_analytics_connection(
+                db_url, s3_config,
+                attach_sessions=attach_sessions,
+                extra_parquet_views=extra_parquet_views,
+            )
             conn_holder['conn'] = query_conn
             result_holder['df'] = query_conn.execute(limited_sql).df()
         except Exception as exc:
@@ -449,9 +513,13 @@ def run_query(
 
     if thread.is_alive():
         log.warning('analytics_query TIMEOUT session=%s after %ds', session_id, effective_timeout)
-        # Close the connection to interrupt the running query, then wait briefly.
         dedicated_conn = conn_holder.get('conn')
         if dedicated_conn is not None:
+            try:
+                dedicated_conn.interrupt()
+            except Exception:
+                pass
+            thread.join(5)
             try:
                 dedicated_conn.close()
             except Exception:
@@ -517,6 +585,7 @@ def run_viz(
     """
     if output_format not in {'png', 'svg', 'pdf'}:
         output_format = 'png'
+    validate_session_id(session_id)
 
     tmp = _get_tmp_dir()
     parquet_path = tmp / f"{session_id}.parquet"
@@ -526,44 +595,51 @@ def run_viz(
             "Run analytics_query first."
         )
 
-    output_path = tmp / f"{session_id}_viz.{output_format}"
     validate_python(code)
-    script_source = _build_viz_script(code, str(parquet_path), str(output_path))
-
-    with tempfile.NamedTemporaryFile(
-        mode='w', suffix='.py', delete=False, dir=tmp, prefix='_viz_',
-    ) as script_file:
-        script_file.write(script_source)
-        script_path = Path(script_file.name)
+    work_dir = Path(tempfile.mkdtemp(prefix='_viz_', dir=tmp))
+    output_path = work_dir / f"figure.{output_format}"
+    script_path = work_dir / 'script.py'
+    script_path.write_text(_build_viz_script(code, str(parquet_path), str(output_path)))
+    # No inherited environment (credentials, API keys, proxies); only what
+    # the interpreter and matplotlib need. cwd is a private scratch dir.
+    child_env = {
+        'PATH': '/usr/local/bin:/usr/bin:/bin',
+        'HOME': str(work_dir),
+        'MPLCONFIGDIR': str(work_dir),
+        'LANG': 'C.UTF-8',
+        'PYTHONDONTWRITEBYTECODE': '1',
+        'PYTHONNOUSERSITE': '1',
+    }
 
     try:
-        proc = subprocess.run(
-            [sys.executable, str(script_path)],
-            capture_output=True,
-            text=True,
-            timeout=VIZ_TIMEOUT,
-            cwd=str(tmp),
-        )
-    except subprocess.TimeoutExpired:
-        log.warning('analytics_viz TIMEOUT session=%s after %ds', session_id, VIZ_TIMEOUT)
-        raise TimeoutError(
-            f"Visualization script exceeded the {VIZ_TIMEOUT}s time limit."
-        )
+        try:
+            proc = subprocess.run(
+                [sys.executable, '-I', str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=VIZ_TIMEOUT,
+                cwd=str(work_dir),
+                env=child_env,
+            )
+        except subprocess.TimeoutExpired:
+            log.warning('analytics_viz TIMEOUT session=%s after %ds', session_id, VIZ_TIMEOUT)
+            raise TimeoutError(
+                f"Visualization script exceeded the {VIZ_TIMEOUT}s time limit."
+            )
+        figure_bytes = output_path.read_bytes() if output_path.exists() else None
     finally:
-        script_path.unlink(missing_ok=True)
+        shutil.rmtree(work_dir, ignore_errors=True)
 
     if proc.returncode != 0:
         stderr_snippet = (proc.stderr or '(no stderr)')[-1000:]
         log.error('analytics_viz FAILED session=%s: %s', session_id, stderr_snippet[:200])
         raise RuntimeError(f"Visualization script failed:\n{stderr_snippet}")
 
-    if not output_path.exists():
+    if figure_bytes is None:
         raise RuntimeError(
             "Script exited successfully but produced no output file. "
             "Make sure your script saves the figure to OUTPUT_PATH, e.g.:\n"
             "    plt.savefig(OUTPUT_PATH, bbox_inches='tight', dpi=150)"
         )
 
-    figure_bytes = output_path.read_bytes()
-    output_path.unlink(missing_ok=True)
     return base64.b64encode(figure_bytes).decode(), output_format

@@ -48,13 +48,14 @@ import logging.handlers
 import math
 import sys
 import time
+import uuid
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime
 from io import BytesIO, StringIO
 from pathlib import Path
 from threading import Lock
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Annotated, Any, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 import uvicorn
@@ -66,7 +67,7 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # Add lib directory to path
 script_dir = Path(__file__).parent.resolve()
@@ -1748,6 +1749,42 @@ app.add_middleware(
 
 # Note: Response compression via reverse proxy (nginx, caddy) recommended
 # Can enable gzip middleware here if needed
+
+
+# ── 500 detail scrubbing ─────────────────────────────────────────────────────
+#
+# Many handlers map unexpected exceptions to HTTPException(500, detail=str(e)).
+# A DuckDB error string can echo query fragments or data, so 500 details never
+# leave the server: the client gets a generic message plus an error id, and the
+# real detail goes to the log under that id. 4xx and crafted 503 details
+# (retry hints, "not configured") pass through unchanged.
+
+from fastapi.exception_handlers import http_exception_handler as _default_http_exception_handler
+from starlette.exceptions import HTTPException as _StarletteHTTPException
+
+
+def _scrubbed_500(request: Request, detail: Any) -> JSONResponse:
+    error_id = uuid.uuid4().hex[:12]
+    log.error("500 error_id=%s %s %s: %s", error_id, request.method,
+              request.url.path, detail)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error (error id {error_id})",
+                 "error_id": error_id},
+    )
+
+
+@app.exception_handler(_StarletteHTTPException)
+async def _http_exception_scrubber(request: Request, exc: _StarletteHTTPException):
+    if exc.status_code == 500:
+        return _scrubbed_500(request, exc.detail)
+    return await _default_http_exception_handler(request, exc)
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_scrubber(request: Request, exc: Exception):
+    log.exception("unhandled exception on %s %s", request.method, request.url.path)
+    return _scrubbed_500(request, repr(exc))
 
 
 # ── Request logging + timing middleware ───────────────────────────────────────
@@ -9989,15 +10026,21 @@ def _json_safe(obj: Any) -> Any:
     return obj
 
 
+_SESSION_ID_PATTERN = r'^[0-9a-f]{32}$'
+
+
 class AnalyticsQueryRequest(BaseModel):
     sql: str
-    session_id: Optional[str] = None
-    timeout: Optional[int] = None  # seconds; defaults to server ANTHIVE_QUERY_TIMEOUT (120)
-    attach_sessions: Optional[List[str]] = None  # prior session IDs to attach as tables (e.g. module_score results)
+    session_id: Optional[str] = Field(None, pattern=_SESSION_ID_PATTERN)
+    # seconds; clamped server-side to ANTHIVE_QUERY_TIMEOUT (120)
+    timeout: Optional[int] = Field(None, gt=0)
+    # prior session IDs to attach as tables (e.g. module_score results)
+    attach_sessions: Optional[List[Annotated[str, Field(pattern=_SESSION_ID_PATTERN)]]] = Field(
+        None, max_length=8)
 
 
 class AnalyticsVizRequest(BaseModel):
-    session_id: str
+    session_id: str = Field(..., pattern=_SESSION_ID_PATTERN)
     code: str
     output_format: str = 'png'
 
@@ -10076,8 +10119,12 @@ async def analytics_query(db_id: str, request: AnalyticsQueryRequest):
 
 
 @app.post("/analytics/viz", tags=["analytics"])
-async def analytics_viz(request: AnalyticsVizRequest):
+async def analytics_viz(request: AnalyticsVizRequest, http_request: Request):
     """Execute a Python visualisation script and return the figure as base64.
+
+    ADMINS ONLY (Authelia 'admins' group). The AST scan is not a sandbox:
+    it can be bypassed, so running caller-supplied Python is restricted to
+    admins. The subprocess gets no inherited environment.
 
     The script runs in a subprocess with a blocked-import AST scan and a
     wall-clock timeout.  Two variables are pre-injected:
@@ -10091,6 +10138,7 @@ async def analytics_viz(request: AnalyticsVizRequest):
     subprocess, socket, requests, and similar modules are blocked.
     Scripts are killed after 60 s (configurable via ANTHIVE_VIZ_TIMEOUT).
     """
+    _require_admin(http_request)
     try:
         figure_b64, output_format = await asyncio.to_thread(
             analytics.run_viz,
