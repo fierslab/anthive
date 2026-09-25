@@ -6,16 +6,21 @@ the parquet at startup and after ``POST /admin/rescan``; queries against
 ``/gene_stats_all`` hit the parquet first and only fan out to live
 duckdb calls for (dataset, gene) pairs not represented here.
 
-Not thread-safe on ``load()`` — only the startup/rescan hook should
-call it. Per-lookup access is thread-safe (read-only DataFrame slicing).
+``load()`` publishes a new snapshot atomically, so lookups running
+concurrently with a rescan never see an empty or half-built index.
+Rows for datasets whose source files changed after the precompute are
+treated as misses (see ``index_freshness``).
 """
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from threading import RLock
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import pandas as pd
+
+from index_freshness import FreshnessChecker, extract_fingerprints
 
 
 #: Columns copied from a parquet row into a response ``stats`` entry. Kept
@@ -65,13 +70,35 @@ def _row_to_stats(row: pd.Series, gene_query: str) -> Dict[str, Any]:
     return stats
 
 
+class _State:
+    """One immutable snapshot of a loaded index; swapped in atomically."""
+
+    __slots__ = ('df', 'by_key_ci', 'by_key_cs', 'freshness')
+
+    def __init__(
+        self,
+        df: Optional[pd.DataFrame],
+        by_key_ci: Dict[tuple, int],
+        by_key_cs: Dict[tuple, int],
+        freshness: FreshnessChecker,
+    ) -> None:
+        self.df = df
+        self.by_key_ci = by_key_ci
+        self.by_key_cs = by_key_cs
+        self.freshness = freshness
+
+
+def _empty_state() -> _State:
+    return _State(None, {}, {}, FreshnessChecker({}, 0))
+
+
 class GeneStatsIndex:
     """Frozen (dataset, gene) → stats lookup backed by a parquet file.
 
-    The parquet is loaded once (or reloaded on rescan) into a pandas
-    DataFrame indexed on ``(dataset, gene_lower)``. Lookups are O(1) per
-    key. Case-insensitive gene lookup is the default because the endpoint
-    is case-insensitive by default.
+    The parquet is loaded once (or reloaded on rescan) into a DataFrame
+    plus ``(dataset, gene)`` → row dicts, so lookups are O(1) per key.
+    Case-insensitive gene lookup is the default because the endpoint is
+    case-insensitive by default.
 
     Attributes:
         path: Path to the source parquet.
@@ -86,9 +113,7 @@ class GeneStatsIndex:
         """Bind the parquet path; does NOT read the file (call :meth:`load`)."""
         self.path = path
         self._lock = RLock()
-        self._df: Optional[pd.DataFrame] = None
-        self._by_key_ci: Dict[tuple, int] = {}      # (dataset, gene_lower) → row_idx
-        self._by_key_cs: Dict[tuple, int] = {}      # (dataset, gene) → row_idx
+        self._state: _State = _empty_state()
         self.loaded_at: Optional[float] = None
         self.n_rows: int = 0
         self.n_datasets: int = 0
@@ -103,41 +128,39 @@ class GeneStatsIndex:
         hasn't been run yet, or is disabled". Callers should treat every
         lookup as a miss in that case.
         """
-        import time
         with self._lock:
             if not self.path.exists():
-                self._df = None
-                self._by_key_ci.clear()
-                self._by_key_cs.clear()
+                self._state = _empty_state()
                 self.n_rows = self.n_datasets = self.n_genes = 0
                 self.loaded_at = None
                 return
             df = pd.read_parquet(self.path)
-            # Coerce identifier columns to plain str so `.map(str.lower)` is
-            # safe even if pyarrow returned an object dtype.
+            # Coerce identifier columns to plain str so `.lower()` is safe
+            # even if pyarrow returned an object dtype.
             df['dataset'] = df['dataset'].astype(str)
             df['gene'] = df['gene'].astype(str)
-            self._df = df.reset_index(drop=True)
-
-            self._by_key_ci = {
-                (ds, gene.lower()): idx
-                for idx, (ds, gene) in enumerate(
-                    zip(self._df['dataset'].values, self._df['gene'].values)
-                )
+            df, freshness = extract_fingerprints(
+                df, self.path.parent, self.path, 'gene_stats_index',
+            )
+            df = df.reset_index(drop=True)
+            datasets = df['dataset'].values
+            genes = df['gene'].values
+            by_key_ci = {
+                (dataset, gene.lower()): idx
+                for idx, (dataset, gene) in enumerate(zip(datasets, genes))
             }
-            self._by_key_cs = {
-                (ds, gene): idx
-                for idx, (ds, gene) in enumerate(
-                    zip(self._df['dataset'].values, self._df['gene'].values)
-                )
+            by_key_cs = {
+                (dataset, gene): idx
+                for idx, (dataset, gene) in enumerate(zip(datasets, genes))
             }
-            self.n_rows = int(len(self._df))
-            self.n_datasets = int(self._df['dataset'].nunique())
-            self.n_genes = int(self._df['gene'].nunique())
+            self._state = _State(df, by_key_ci, by_key_cs, freshness)
+            self.n_rows = int(len(df))
+            self.n_datasets = int(df['dataset'].nunique())
+            self.n_genes = int(df['gene'].nunique())
             self.loaded_at = time.time()
 
     def is_loaded(self) -> bool:
-        return self._df is not None
+        return self._state.df is not None
 
     # ------------------------------------------------------------------ Lookup
 
@@ -157,57 +180,35 @@ class GeneStatsIndex:
 
         Returns:
             Stats dict shaped like ``AnthiveDB.get_gene_stats`` output, or
-            ``None`` if the pair is not in the index.
+            ``None`` if the pair is not in the index or the dataset's
+            source files changed since the precompute ran.
         """
-        if self._df is None:
+        state = self._state
+        if state.df is None:
             return None
         key = (db_id, gene if case_sensitive else gene.lower())
-        idx = (self._by_key_cs if case_sensitive else self._by_key_ci).get(key)
+        idx = (state.by_key_cs if case_sensitive else state.by_key_ci).get(key)
         if idx is None:
             return None
-        return _row_to_stats(self._df.iloc[idx], gene)
+        if not state.freshness.is_fresh(db_id):
+            return None
+        return _row_to_stats(state.df.iloc[idx], gene)
 
-    def has_dataset(self, db_id: str) -> bool:
-        """Whether ``db_id`` appears in the loaded index at all."""
-        if self._df is None:
-            return False
-        # Precompute this once for speed if it becomes hot; today the call
-        # site is only /gene_stats_all which pays this per-request per-db.
-        return bool((self._df['dataset'] == db_id).any())
+    def is_fresh(self, db_id: str) -> bool:
+        """Whether ``db_id``'s rows still match its source files."""
+        return self._state.freshness.is_fresh(db_id)
 
     def stats(self) -> Dict[str, Any]:
         """Return a summary payload for `/admin/gene-stats-index/stats`."""
+        freshness = self._state.freshness
         return {
-            'path':       str(self.path),
-            'exists':     self.path.exists(),
-            'loaded':     self.is_loaded(),
-            'n_rows':     self.n_rows,
-            'n_datasets': self.n_datasets,
-            'n_genes':    self.n_genes,
-            'loaded_at':  self.loaded_at,
+            'path':             str(self.path),
+            'exists':           self.path.exists(),
+            'loaded':           self.is_loaded(),
+            'n_rows':           self.n_rows,
+            'n_datasets':       self.n_datasets,
+            'n_genes':          self.n_genes,
+            'loaded_at':        self.loaded_at,
+            'has_fingerprints': freshness.has_fingerprints,
+            'stale_datasets':   freshness.stale_datasets(),
         }
-
-    def genes_for_dataset(self, db_id: str, case_sensitive: bool) -> set[str]:
-        """Return the set of hot genes indexed for one dataset.
-
-        Used by the endpoint to bucket queried genes into
-        "served-from-parquet" vs "needs-live-query" before firing off any
-        thread work.
-
-        Args:
-            db_id: Canonical ``group/file`` id.
-            case_sensitive: If ``False``, returned names are lowercased.
-
-        Returns:
-            Set of gene names in the index for that dataset. Empty set if
-            the dataset is not indexed or the parquet is not loaded.
-        """
-        if self._df is None:
-            return set()
-        # Cheap boolean mask over an in-memory DataFrame — acceptable at
-        # /gene_stats_all fan-out scale (~185 dbs × 1 mask each per call).
-        # A per-db pre-index would micro-optimise this but complicates load.
-        sub = self._df[self._df['dataset'] == db_id]['gene']
-        if case_sensitive:
-            return set(sub.astype(str))
-        return {g.lower() for g in sub.astype(str)}
