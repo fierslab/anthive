@@ -36,9 +36,14 @@ Architecture mirrors ``ant-gene-stats-precompute`` and
 Output schema (wide, one row per (dataset, gene, facet)):
 
   ``dataset, gene, facet, facet_type, layer, n_cells, n_groups,
-    eta_squared, F_stat, signal, total_var, group_means_json``.
+    eta_squared, F_stat, signal, total_var, group_means_json,
+    src_fingerprint``.
 
 Where:
+
+  * ``src_fingerprint`` = per-dataset JSON snapshot of the duckdb and
+    by-gene parquet (size + mtime); ant-serve skips rows whose sources
+    changed after this run. See ``lib/index_freshness.py``.
 
   * ``signal`` = ``VAR_SAMP(mean_expr_per_group)`` -- kept for backward
     compatibility with the existing endpoint's ranking metric.
@@ -99,6 +104,9 @@ lib_dir = script_dir.parent.parent / 'lib'
 sys.path.insert(0, str(lib_dir))
 
 from h5adstore import iter_h5adstore                              # type: ignore
+from index_freshness import (                                      # type: ignore
+    FINGERPRINT_COLUMN, STALE_FINGERPRINT, build_fingerprint,
+)
 from metadata import parse_md_file                                 # type: ignore
 
 
@@ -186,6 +194,9 @@ class DatasetInputs:
             (may or may not exist).
         source_mtime: Newest mtime among (duckdb, by-gene parquet, md)
             -- the cache invalidation key.
+        fingerprint: ``src_fingerprint`` JSON snapshot of the duckdb (facet
+            columns) and by-gene parquet (values) taken at discovery;
+            ant-serve compares it to the live files before serving rows.
     """
     db_id: str
     duckdb_path: Path
@@ -193,6 +204,7 @@ class DatasetInputs:
     layer: str
     by_gene_parquet: Path
     source_mtime: float
+    fingerprint: str = STALE_FINGERPRINT
 
 
 def _default_layer_from_md(md_path: Path) -> Optional[str]:
@@ -210,8 +222,13 @@ def _default_layer_from_md(md_path: Path) -> Optional[str]:
     return 'X'
 
 
-def build_dataset_inputs(entry) -> Optional[DatasetInputs]:
-    """Snapshot on-disk state for a dataset without opening it."""
+def build_dataset_inputs(entry, root: Path) -> Optional[DatasetInputs]:
+    """Snapshot on-disk state for a dataset without opening it.
+
+    Args:
+        entry: :class:`h5adstore.H5adEntry`.
+        root: h5adstore root (fingerprint paths are relative to it).
+    """
     if not entry.duckdb_path.exists():
         return None
     layer = _default_layer_from_md(entry.md_path)
@@ -232,6 +249,10 @@ def build_dataset_inputs(entry) -> Optional[DatasetInputs]:
         layer=layer,
         by_gene_parquet=by_gene.resolve() if by_gene.exists() else by_gene,
         source_mtime=source_mtime,
+        fingerprint=build_fingerprint(
+            root,
+            [entry.duckdb_path, *([by_gene] if by_gene.exists() else [])],
+        ),
     )
 
 
@@ -739,7 +760,7 @@ def _collect_dataset_snapshot(root: Path) -> list[DatasetInputs]:
         if not entry.duckdb_path.exists():
             continue
         try:
-            inputs = build_dataset_inputs(entry)
+            inputs = build_dataset_inputs(entry, root)
         except Exception as exc:  # noqa: BLE001
             print(
                 f'  [warn] discover {entry.db_id}: {exc}', file=sys.stderr,
@@ -772,32 +793,71 @@ def _prune_stale_cache(root: Path, active_db_ids: set[str]) -> int:
     return removed
 
 
+def _cache_fingerprints(
+    root: Path, snapshot: list[DatasetInputs],
+) -> list[tuple[Path, str, str]]:
+    """Pair every existing cache file with its dataset's ``src_fingerprint``.
+
+    A cache the script itself would recompute (older than its sources,
+    e.g. skipped by ``--only`` or errored this run) is stamped with
+    :data:`STALE_FINGERPRINT` so ant-serve never serves its rows.
+    """
+    out: list[tuple[Path, str, str]] = []
+    for inputs in snapshot:
+        cache_path = _cache_file(root, inputs.db_id)
+        if not cache_path.exists():
+            continue
+        cache_mtime = _mtime(cache_path)
+        fresh = cache_mtime > 0.0 and cache_mtime >= inputs.source_mtime
+        out.append((
+            cache_path, inputs.db_id,
+            inputs.fingerprint if fresh else STALE_FINGERPRINT,
+        ))
+    return out
+
+
 def _concat_and_write(
-    out_path: Path, cache_files: list[Path],
+    out_path: Path, cache_entries: list[tuple[Path, str, str]],
 ) -> tuple[int, int, int, int]:
     """Concat per-dataset caches into the aggregate parquet.
+
+    Args:
+        out_path: Aggregate parquet to (atomically) replace.
+        cache_entries: ``(cache_path, db_id, src_fingerprint)`` triples.
 
     Returns ``(n_rows, n_datasets, n_genes, n_facets)``.
     """
     tmp = out_path.with_suffix(out_path.suffix + '.tmp')
     tmp.parent.mkdir(parents=True, exist_ok=True)
 
-    if not cache_files:
-        empty = pd.DataFrame({col: [] for col in OUTPUT_COLUMNS}).astype(
-            OUTPUT_DTYPES,
-        )
+    if not cache_entries:
+        empty = pd.DataFrame(
+            {col: [] for col in (*OUTPUT_COLUMNS, FINGERPRINT_COLUMN)}
+        ).astype({**OUTPUT_DTYPES, FINGERPRINT_COLUMN: 'object'})
         empty.to_parquet(tmp, engine='pyarrow', compression='zstd')
         os.replace(tmp, out_path)
         return (0, 0, 0, 0)
 
+    cache_files = [str(path) for path, _, _ in cache_entries]
+    fingerprints = pd.DataFrame(
+        [(db_id, fp) for _, db_id, fp in cache_entries],
+        columns=['dataset', FINGERPRINT_COLUMN],
+    )
     conn = duckdb.connect(':memory:')
     try:
-        select_cols = ', '.join(OUTPUT_COLUMNS)
+        conn.register('fingerprints', fingerprints)
+        select_cols = ', '.join(f'c.{col}' for col in OUTPUT_COLUMNS)
+        # ORDER BY keeps the pre-join row order (file order, then row
+        # order within each cache): the index's signal-tie order depends
+        # on it, and it keeps the output diffable.
         conn.execute(
-            f"COPY (SELECT {select_cols} "
-            f"      FROM read_parquet(?, union_by_name=true)) "
+            f"COPY (SELECT {select_cols}, f.{FINGERPRINT_COLUMN} "
+            f"      FROM read_parquet(?, union_by_name=true, filename=true, "
+            f"                        file_row_number=true) c "
+            f"      LEFT JOIN fingerprints f ON f.dataset = c.dataset "
+            f"      ORDER BY list_position(?, c.filename), c.file_row_number) "
             f"TO '{tmp}' (FORMAT PARQUET, COMPRESSION ZSTD)",
-            [[str(path) for path in cache_files]],
+            [cache_files, cache_files],
         )
         row = conn.execute(
             'SELECT COUNT(*), COUNT(DISTINCT dataset), '
@@ -1022,18 +1082,14 @@ def main() -> int:
         print(f'\n[dry-run] would concat cache -> {out}', file=sys.stderr)
         return 0
 
-    all_cache_files = [
-        _cache_file(root, inputs.db_id)
-        for inputs in dataset_snapshot
-        if _cache_file(root, inputs.db_id).exists()
-    ]
+    all_cache_entries = _cache_fingerprints(root, dataset_snapshot)
 
     print(
-        f'\nConcatenating {len(all_cache_files)} cache file(s) -> {out}',
+        f'\nConcatenating {len(all_cache_entries)} cache file(s) -> {out}',
         file=sys.stderr,
     )
     n_rows, n_datasets, n_genes, n_facets = _concat_and_write(
-        out, all_cache_files,
+        out, all_cache_entries,
     )
     print(
         f'wrote {n_rows:,} rows across {n_datasets} dataset(s), '

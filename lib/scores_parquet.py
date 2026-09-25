@@ -22,10 +22,15 @@ Write semantics
 
 * removes every existing row matching ``(source, catalog)`` from the
   sidecar, then appends the caller's rows;
-* is all-or-nothing — writes to a ``*.tmp`` file then ``os.replace``.
+* is all-or-nothing — writes to a per-process ``*.<pid>.tmp`` file then
+  ``os.replace``;
+* holds an exclusive ``flock`` on ``<sidecar>.lock`` for the whole
+  read-modify-replace, so concurrent writers serialise instead of
+  overwriting each other's catalogs.
 """
 from __future__ import annotations
 
+import fcntl
 import os
 from pathlib import Path
 from typing import Optional
@@ -113,34 +118,50 @@ def upsert_scores(
     fresh = fresh[list(SCHEMA_COLUMNS)]
 
     sidecar = scores_path(duckdb_path)
-    tmp = sidecar.with_suffix(sidecar.suffix + '.tmp')
+    # Per-process temp name: two writers must never share one .tmp file.
+    tmp = sidecar.with_name(f'{sidecar.name}.{os.getpid()}.tmp')
 
-    conn = duckdb.connect(':memory:')
-    try:
-        conn.register('fresh_rows', fresh)
-        if sidecar.exists():
-            # keep rows that are NOT (source, catalog), then union fresh
-            conn.execute(
-                "CREATE TABLE combined AS "
-                "SELECT cell_id, source, catalog, module, score "
-                "FROM read_parquet(?) "
-                "WHERE NOT (source = ? AND catalog = ?) "
-                "UNION ALL BY NAME "
-                "SELECT * FROM fresh_rows",
-                [str(sidecar), source, catalog],
-            )
-        else:
-            conn.execute("CREATE TABLE combined AS SELECT * FROM fresh_rows")
+    # The read-modify-replace below is only atomic per writer; without the
+    # lock two concurrent scorers each rebuild from the same old sidecar
+    # and the later os.replace silently drops the other's catalog.
+    with open(_lock_path(sidecar), 'a') as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            conn = duckdb.connect(':memory:')
+            try:
+                conn.register('fresh_rows', fresh)
+                if sidecar.exists():
+                    # keep rows that are NOT (source, catalog), then union fresh
+                    conn.execute(
+                        "CREATE TABLE combined AS "
+                        "SELECT cell_id, source, catalog, module, score "
+                        "FROM read_parquet(?) "
+                        "WHERE NOT (source = ? AND catalog = ?) "
+                        "UNION ALL BY NAME "
+                        "SELECT * FROM fresh_rows",
+                        [str(sidecar), source, catalog],
+                    )
+                else:
+                    conn.execute("CREATE TABLE combined AS SELECT * FROM fresh_rows")
 
-        conn.execute(
-            "COPY combined TO ? (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 100000)",
-            [str(tmp)],
-        )
-    finally:
-        conn.close()
-
-    os.replace(tmp, sidecar)
+                conn.execute(
+                    "COPY combined TO ? "
+                    "(FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 100000)",
+                    [str(tmp)],
+                )
+            finally:
+                conn.close()
+            os.replace(tmp, sidecar)
+        finally:
+            if tmp.exists():
+                tmp.unlink()
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     return len(fresh)
+
+
+def _lock_path(sidecar: Path) -> Path:
+    """Advisory lock file serialising writers of one sidecar."""
+    return sidecar.with_name(sidecar.name + '.lock')
 
 
 def summarize(duckdb_path: Path) -> pd.DataFrame:

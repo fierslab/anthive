@@ -11,7 +11,8 @@ added, or the precompute has not run).
 Schema (wide, one row per (dataset, gene, facet)):
 
   dataset, gene, facet, facet_type, layer, n_cells, n_groups,
-  eta_squared, F_stat, signal, total_var, group_means_json
+  eta_squared, F_stat, signal, total_var, group_means_json,
+  src_fingerprint (optional; split off at load, see ``index_freshness``)
 
 ``signal`` mirrors the existing endpoint's ranking metric: ``VAR_SAMP``
 across group means. ``eta_squared`` is the between-group variance share
@@ -19,17 +20,24 @@ across group means. ``eta_squared`` is the between-group variance share
 group label -> group mean, hydrating the endpoint response without a
 DuckDB round-trip.
 
-Not thread-safe on ``load()`` -- only the startup/rescan hook should
-call it. Per-lookup access is thread-safe (read-only slicing).
+``load()`` builds a complete snapshot off to the side and publishes it
+with one attribute assignment, so readers running during a rescan see
+the old or the new index, never an empty one. Datasets whose source
+files changed after the precompute read as misses (see
+``index_freshness``), which sends the endpoint to its live path.
 """
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from threading import RLock
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import pandas as pd
+
+from index_freshness import FreshnessChecker, extract_fingerprints
 
 
 #: Columns copied from a parquet row into a response entry. Kept in sync
@@ -38,6 +46,48 @@ STAT_COLUMNS = (
     'eta_squared', 'F_stat', 'signal', 'total_var',
     'n_cells', 'n_groups',
 )
+
+
+class _State:
+    """One immutable snapshot of a loaded index; swapped in atomically.
+
+    ``df`` is sorted by (dataset, facet, signal desc, NaN last) with a
+    stable sort, so every (dataset, facet) pair is one contiguous slice
+    recorded in ``by_pair`` as ``(start, stop)`` row positions.
+    """
+
+    __slots__ = ('df', 'by_pair', 'by_triple', 'freshness')
+
+    def __init__(
+        self,
+        df: Optional[pd.DataFrame],
+        by_pair: Dict[tuple, Tuple[int, int]],
+        by_triple: Dict[tuple, int],
+        freshness: FreshnessChecker,
+    ) -> None:
+        self.df = df
+        self.by_pair = by_pair
+        self.by_triple = by_triple
+        self.freshness = freshness
+
+
+def _empty_state() -> _State:
+    return _State(None, {}, {}, FreshnessChecker({}, 0))
+
+
+def _pair_bounds(df: pd.DataFrame) -> Dict[tuple, Tuple[int, int]]:
+    """Map each (dataset, facet) run in a key-sorted frame to its slice."""
+    if df.empty:
+        return {}
+    datasets = df['dataset'].values
+    facets = df['facet'].values
+    changed = (datasets[1:] != datasets[:-1]) | (facets[1:] != facets[:-1])
+    starts = np.concatenate(([0], np.flatnonzero(changed) + 1))
+    stops = np.concatenate((starts[1:], [len(df)]))
+    return {
+        (datasets[start], facets[start]): (int(start), int(stop))
+        for start, stop in zip(starts, stops)
+    }
 
 
 class GeneVarianceIndex:
@@ -64,13 +114,7 @@ class GeneVarianceIndex:
         """Bind the parquet path; does NOT read the file (call :meth:`load`)."""
         self.path = path
         self._lock = RLock()
-        self._df: Optional[pd.DataFrame] = None
-        # (dataset, facet) -> sub-DataFrame sorted by signal desc.
-        # Built lazily on first query and cached, so repeated top-K
-        # calls skip the group-by cost.
-        self._by_pair: Dict[tuple, pd.DataFrame] = {}
-        # (dataset, gene, facet) -> integer row index.
-        self._by_triple: Dict[tuple, int] = {}
+        self._state: _State = _empty_state()
         self.loaded_at: Optional[float] = None
         self.n_rows: int = 0
         self.n_datasets: int = 0
@@ -86,12 +130,9 @@ class GeneVarianceIndex:
         hasn't been run yet, or is disabled". Callers should fall back
         to the live compute path in that case.
         """
-        import time
         with self._lock:
-            self._by_pair.clear()
-            self._by_triple.clear()
             if not self.path.exists():
-                self._df = None
+                self._state = _empty_state()
                 self.n_rows = self.n_datasets = self.n_genes = self.n_facets = 0
                 self.loaded_at = None
                 return
@@ -99,25 +140,32 @@ class GeneVarianceIndex:
             df['dataset'] = df['dataset'].astype(str)
             df['gene'] = df['gene'].astype(str)
             df['facet'] = df['facet'].astype(str)
-            self._df = df.reset_index(drop=True)
-
-            for idx, (dataset, gene, facet) in enumerate(
-                zip(
-                    self._df['dataset'].values,
-                    self._df['gene'].values,
-                    self._df['facet'].values,
+            df, freshness = extract_fingerprints(
+                df, self.path.parent, self.path, 'gene_variance_index',
+            )
+            # Stable multi-key sort: within a pair, rows keep file order on
+            # signal ties, matching the old per-pair mergesort exactly.
+            df = df.sort_values(
+                ['dataset', 'facet', 'signal'],
+                ascending=[True, True, False],
+                na_position='last',
+                kind='mergesort',
+            ).reset_index(drop=True)
+            by_triple = {
+                (dataset, gene, facet): idx
+                for idx, (dataset, gene, facet) in enumerate(
+                    zip(df['dataset'].values, df['gene'].values, df['facet'].values)
                 )
-            ):
-                self._by_triple[(dataset, gene, facet)] = idx
-
-            self.n_rows = int(len(self._df))
-            self.n_datasets = int(self._df['dataset'].nunique())
-            self.n_genes = int(self._df['gene'].nunique())
-            self.n_facets = int(self._df['facet'].nunique())
+            }
+            self._state = _State(df, _pair_bounds(df), by_triple, freshness)
+            self.n_rows = int(len(df))
+            self.n_datasets = int(df['dataset'].nunique())
+            self.n_genes = int(df['gene'].nunique())
+            self.n_facets = int(df['facet'].nunique())
             self.loaded_at = time.time()
 
     def is_loaded(self) -> bool:
-        return self._df is not None
+        return self._state.df is not None
 
     # ------------------------------------------------------------------ Lookup
 
@@ -134,19 +182,17 @@ class GeneVarianceIndex:
         Returns:
             Dict of the wide row's fields, or ``None`` if absent.
         """
-        if self._df is None:
+        state = self._state
+        if state.df is None:
             return None
-        idx = self._by_triple.get((db_id, gene, facet))
-        if idx is None:
+        idx = state.by_triple.get((db_id, gene, facet))
+        if idx is None or not state.freshness.is_fresh(db_id):
             return None
-        return self._row_to_dict(self._df.iloc[idx])
+        return self._row_to_dict(state.df.iloc[idx])
 
     def has_pair(self, db_id: str, facet: str) -> bool:
-        """Whether (dataset, facet) has any rows in the index."""
-        if self._df is None:
-            return False
-        sub = self._pair_sub(db_id, facet)
-        return not sub.empty
+        """Whether (dataset, facet) has fresh rows in the index."""
+        return self._pair_sub(self._state, db_id, facet) is not None
 
     def top_by_facet(
         self, db_id: str, facet: str, top: int,
@@ -166,16 +212,11 @@ class GeneVarianceIndex:
             or ``None`` if the index is empty for that pair (caller
             should live-compute).
         """
-        if self._df is None:
-            return None
-        sub = self._pair_sub(db_id, facet)
-        if sub.empty:
+        sub = self._pair_sub(self._state, db_id, facet)
+        if sub is None:
             return None
         head = sub.head(int(top))
-        out: List[Dict[str, Any]] = []
-        for _, row in head.iterrows():
-            out.append(self._row_to_entry(row))
-        return out
+        return [self._row_to_entry(row) for row in head.to_dict('records')]
 
     def facet_metadata(
         self, db_id: str, facet: str,
@@ -192,10 +233,8 @@ class GeneVarianceIndex:
         Returns:
             Dict or ``None`` if the pair has no rows.
         """
-        if self._df is None:
-            return None
-        sub = self._pair_sub(db_id, facet)
-        if sub.empty:
+        sub = self._pair_sub(self._state, db_id, facet)
+        if sub is None:
             return None
         row = sub.iloc[0]
         gm = _parse_group_means(row.get('group_means_json'))
@@ -219,26 +258,29 @@ class GeneVarianceIndex:
             'n_genes':    self.n_genes,
             'n_facets':   self.n_facets,
             'loaded_at':  self.loaded_at,
+            'has_fingerprints': self._state.freshness.has_fingerprints,
+            'stale_datasets':   self._state.freshness.stale_datasets(),
         }
 
     # ------------------------------------------------------------------ internal
 
-    def _pair_sub(self, db_id: str, facet: str) -> pd.DataFrame:
+    @staticmethod
+    def _pair_sub(
+        state: _State, db_id: str, facet: str,
+    ) -> Optional[pd.DataFrame]:
         """Return the (dataset, facet) slice sorted by signal desc.
 
-        Cached in ``self._by_pair`` so repeated top-K calls are O(top).
+        ``None`` when the pair is absent or its dataset is stale. The
+        slice is a view over the pre-sorted frame, so nothing is copied
+        or cached per pair.
         """
-        key = (db_id, facet)
-        cached = self._by_pair.get(key)
-        if cached is not None:
-            return cached
-        assert self._df is not None
-        mask = (self._df['dataset'] == db_id) & (self._df['facet'] == facet)
-        sub = self._df.loc[mask].sort_values(
-            'signal', ascending=False, na_position='last', kind='mergesort',
-        )
-        self._by_pair[key] = sub
-        return sub
+        if state.df is None:
+            return None
+        bounds = state.by_pair.get((db_id, facet))
+        if bounds is None or not state.freshness.is_fresh(db_id):
+            return None
+        start, stop = bounds
+        return state.df.iloc[start:stop]
 
     @staticmethod
     def _row_to_dict(row: pd.Series) -> Dict[str, Any]:
