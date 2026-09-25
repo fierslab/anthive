@@ -18,6 +18,7 @@ Converts h5ad files to optimized DuckDB databases using metadata from .md files
 import argparse
 import gc
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -258,6 +259,27 @@ def convert_h5ad_to_duckdb(h5ad_path: Path, config: Dict[str, Any],
     if duckdb_path.exists():
         print(f"⚠ Warning: {duckdb_path.name} already exists and will be overwritten")
 
+    # Refuse if another live process (e.g. ant-drop-indexes) owns the sentinel;
+    # a sentinel left by a dead process is stale and safe to replace.
+    if rebuilding_sentinel.exists():
+        owner = rebuilding_sentinel.read_text().strip()
+        pid_match = re.search(r'pid=(\d+)', owner)
+        owner_alive = False
+        if pid_match:
+            try:
+                os.kill(int(pid_match.group(1)), 0)
+                owner_alive = True
+            except ProcessLookupError:
+                owner_alive = False
+            except PermissionError:
+                owner_alive = True
+        if owner_alive:
+            raise ConversionError(
+                f"ERROR: [ant-convert] {rebuilding_sentinel.name} is held by a live process ({owner}).\n"
+                f"Action: wait for it to finish, then rerun"
+            )
+        print(f"  Removing stale sentinel ({owner})")
+
     # Set sentinel BEFORE the rebuild starts so AnnotationWriter refuses to open
     rebuilding_sentinel.write_text(f"ant-convert pid={os.getpid()}\n")
 
@@ -434,7 +456,7 @@ def create_cell_index(conn: duckdb.DuckDBPyConnection, adata) -> None:
     conn.execute("INSERT INTO __cells SELECT * FROM temp_cells")
     conn.unregister('temp_cells')
 
-    conn.execute("CREATE INDEX idx_cells_name ON __cells(cell_name)")
+    # No extra index on cell_name: the UNIQUE constraint already builds one.
     conn.execute("CREATE VIEW cells AS SELECT * FROM __cells")
 
 
@@ -459,7 +481,6 @@ def create_gene_index(conn: duckdb.DuckDBPyConnection, adata) -> None:
     conn.execute("INSERT INTO __genes SELECT * FROM temp_genes")
     conn.unregister('temp_genes')
 
-    conn.execute("CREATE INDEX idx_genes_name ON __genes(gene_name)")
     conn.execute("CREATE VIEW genes AS SELECT * FROM __genes")
 
 
@@ -792,11 +813,9 @@ def convert_observations(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict)
             conn.execute("INSERT INTO __obscat SELECT * FROM temp_obscat")
             conn.unregister('temp_obscat')
 
-            # Create indices on categorical columns
-            for col in obscat_cols:
-                # Sanitize column name for index (replace special chars with underscore)
-                safe_col = ''.join(c if c.isalnum() else '_' for c in col)
-                conn.execute(f'CREATE INDEX idx_obscat_{safe_col} ON __obscat("{col}")')
+            # No per-column ART indexes: DuckDB 1.5 plans sequential scans for
+            # these filters anyway, and the indexes tripled file size and made
+            # AnnotationWriter overwrites 100-4000x slower (see ant-drop-indexes).
 
             # Create view — apply .md api: section (rename+hide).
             conn.execute(build_obs_view_sql(
@@ -976,9 +995,6 @@ def convert_embeddings(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict) -
             conn.register('temp_embedding', embedding_df)
             conn.execute(f"INSERT INTO __obsm__{safe_obsm_key} SELECT * FROM temp_embedding")
             conn.unregister('temp_embedding')
-
-            # Create index
-            conn.execute(f"CREATE INDEX idx_obsm_{safe_obsm_key}_cell ON __obsm__{safe_obsm_key}(cell_id)")
 
             # Create view
             conn.execute(f"""

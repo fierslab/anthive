@@ -9,6 +9,7 @@ The conversion + maintenance tools that turn `.h5ad` files into the
 | `ant-merge-h5ad` | Cold-path merge of pending duckdb obs columns back into the h5ad without rewriting X. Self-heals half-completed merges. |
 | `ant-build-all` | Walk the whole h5adstore, rebuild stale `.duckdb` (h5ad newer than duckdb), refresh `.md` (sha256/n_obs/layer_stats). Parallel-friendly. |
 | `ant-h5ad-check` | Validate one `.h5ad` against the ingestion contract — log-norm in `.X`, raw counts in `layers['counts']`, embedding present, etc. |
+| `ant-drop-indexes` | Rewrite existing `.duckdb` files without the redundant ART indexes older ant-convert runs created (flock + sentinel + ant-serve release/restore, verified content, atomic swap). `--dry-run` first. |
 | `ant-duckdb-check` | Validate a `.duckdb` schema (`__cells`, `__genes`, `__obscat`, `__obsnum`, `__layer__*`, views, schema_version). |
 | `ant-ingest` | End-to-end ingestion from S3 `__incoming/` to the catalog: pull → sha-validate → promote (with collision detection) → run `ant-h5ad-check`/`-convert`/`-duckdb-check` → push to catalog root → re-stamp `s3_*` in the sidecar. Has `prune` subcommand for cleanup. Uses `lib.sidecar_merge` for `.h5ad.mus` merges (KEY=VALUE, machine-keys silent, semantic conflicts warn-and-keep-local). |
 

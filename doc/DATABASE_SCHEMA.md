@@ -33,7 +33,6 @@ CREATE TABLE __cells (
     cell_name TEXT NOT NULL UNIQUE
 );
 
-CREATE INDEX idx_cells_name ON __cells(cell_name);
 ```
 
 **View**:
@@ -51,7 +50,6 @@ CREATE TABLE __genes (
     gene_name TEXT NOT NULL UNIQUE
 );
 
-CREATE INDEX idx_genes_name ON __genes(gene_name);
 ```
 
 **View**:
@@ -136,7 +134,6 @@ CREATE TABLE __obscat (
 );
 
 CREATE INDEX idx_obscat_cell ON __obscat(cell_id);
--- Additional indices on frequently queried categorical columns
 ```
 
 Columns included based on `obscat_include` list in metadata.
@@ -190,7 +187,6 @@ CREATE TABLE __obsm__<name> (
     ... (additional dimensions as needed)
 );
 
-CREATE INDEX idx_obsm_<name>_cell ON __obsm__<name>(cell_id);
 ```
 
 **View**:
@@ -205,11 +201,17 @@ JOIN __cells c ON e.cell_id = c.cell_id;
 
 ## Indexing Strategy
 
-Critical indices for query performance:
-- Primary keys on all cell_id and gene_id columns
-- Cell name and gene name lookups
-- Gene-based lookups on expression layers (common query pattern)
-- Categorical columns that are frequently used in filters
+The only ART indexes are the ones DuckDB builds for PRIMARY KEY (every
+cell_id / gene_id) and UNIQUE (cell_name, gene_name) constraints, plus a few
+task-specific ones (`__de_*`, `idx_gene_bins_*`).
+
+Until 2026-09 ant-convert also created one index per categorical obs column
+(`idx_obscat_*`), duplicate `idx_cells_name` / `idx_genes_name`, and
+`idx_obsm_*_cell` on primary-key columns. DuckDB 1.5 plans sequential scans
+for the filters anthive issues, so these were never used; they roughly
+tripled file size and made AnnotationWriter overwrites of an indexed column
+100-4000x slower (Francken PFC microglia: 363 s vs 0.08 s). Existing files
+are cleaned with `bin/ingest/ant-drop-indexes`.
 
 ## Storage Efficiency
 

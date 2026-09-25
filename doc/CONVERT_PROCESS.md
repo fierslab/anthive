@@ -73,7 +73,6 @@ conn.execute("""
 """)
 
 conn.execute("INSERT INTO __cells VALUES (?, ?)", cells_df.values)
-conn.execute("CREATE INDEX idx_cells_name ON __cells(cell_name)")
 
 # Create view
 conn.execute("CREATE VIEW cells AS SELECT * FROM __cells")
@@ -236,9 +235,7 @@ if obscat_cols:
     # Prepare and insert data (similar to obsnum)
     # ...
 
-    # Create indices on frequently used categorical columns
-    for col in obscat_cols:
-        conn.execute(f"CREATE INDEX idx_obscat_{col} ON __obscat({col})")
+    # No per-column indexes (unused by DuckDB, costly on writes; see DATABASE_SCHEMA.md)
 
     # Create view
     conn.execute("""
