@@ -36,14 +36,23 @@ browse_port: 8081
 # Cache expiration in days (future use)
 cache_expiration_days: 7
 
-# DuckDB resource limits (per connection)
-# memory_limit: "auto" uses 40% of system RAM / max_connections.
-#               Set explicitly (e.g. "2GB") on shared or constrained servers.
-# threads: CPU threads per DuckDB connection (lower = less memory, less parallelism)
-# max_connections_per_db: max pooled connections per database file
+# DuckDB resource limits for ant-convert (ingest).
 duckdb_memory_limit: auto
 duckdb_threads: 2
-duckdb_max_connections: 3
+
+# DuckDB resource limits for ant-serve. Each served dataset gets its own
+# DuckDB instance; these apply per instance.
+# duckdb_server_threads: worker threads per dataset instance. 8 measured
+#   ~8x faster than 2 on a full-layer aggregate (L26/FMG) with 16 only 1.6x
+#   better again; every open instance starts threads-1 OS threads.
+# duckdb_server_memory_limit: "auto" = 25% of RAM capped at 16 GB.
+# duckdb_max_open_databases: LRU cap on simultaneously open instances.
+# duckdb_allowed_directories: extra directories queries may read (the data
+#   folder and each dataset's own directory are always allowed).
+duckdb_server_threads: 8
+duckdb_server_memory_limit: auto
+duckdb_max_open_databases: 48
+duckdb_allowed_directories: []
 
 # S3-compatible storage for DuckDB files (optional)
 # If bucket is set and a local .duckdb is not found, ant-serve will attempt

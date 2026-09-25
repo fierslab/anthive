@@ -49,7 +49,7 @@ import math
 import sys
 import time
 import uuid
-from collections import defaultdict
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from datetime import datetime
 from io import BytesIO, StringIO
@@ -57,6 +57,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Annotated, Any, Dict, List, Optional, Set, Tuple
 
+import duckdb
 import pandas as pd
 import uvicorn
 from fastapi import (
@@ -182,13 +183,8 @@ def _parse_size_mb(value) -> int:
 
 
 def _auto_total_memory_budget_mb() -> int:
-    """Total DuckDB memory budget, shared across ALL in-flight pool
-    connections. Defaults to 25% of system RAM, capped at 16 GB.
-
-    The progressive-throttling logic in ConnectionPool divides this
-    among the connections in use right now (with a floor), so a solo
-    query gets the full budget and concurrent queries share it.
-    """
+    """Default DuckDB memory ceiling per dataset instance: 25% of system RAM,
+    capped at 16 GB."""
     import os
     try:
         total_bytes = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
@@ -198,14 +194,15 @@ def _auto_total_memory_budget_mb() -> int:
     return max(1024, min(budget_mb, 16 * 1024))
 
 
-def _auto_memory_limit(max_connections: int = 3) -> str:
-    """Back-compat shim for callers that still expect a per-connection
-    string limit.  Returns the floor of the adaptive scheme (total /
-    max_connections) so existing call sites keep working.
-    """
-    total_mb = _auto_total_memory_budget_mb()
-    per_mb = max(256, total_mb // max(max_connections, 1))
-    return f'{per_mb}MB'
+def _sql_str(value: str) -> str:
+    """Quote a Python string as a DuckDB string literal."""
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _dir_prefix(path: str) -> str:
+    """Absolute directory path with a trailing slash (allowed_directories form)."""
+    import os
+    return os.path.abspath(path).rstrip('/') + '/'
 
 
 class QueryRequest(BaseModel):
@@ -228,172 +225,232 @@ class EvictedDatabaseError(RuntimeError):
     administratively evicted (a writer is holding the duckdb r/w lock)."""
 
 
-class ConnectionPool:
-    """Connection pool for DuckDB databases
+class _DbInstance:
+    """One private DuckDB instance holding a single dataset ATTACHed as ``db``.
 
-    Maintains a pool of reusable connections per database for better performance.
-    Phase 2 enhancement for concurrent request handling.
+    ``in_use`` counts cursors handed out and not yet returned. ``retired``
+    instances receive no new cursors and close when their last cursor comes
+    back (rescan / release while a query is still running).
+    """
+
+    __slots__ = ('conn', 'in_use', 'retired')
+
+    def __init__(self, conn):
+        self.conn = conn
+        self.in_use = 0
+        self.retired = False
+
+
+class ConnectionPool:
+    """Per-dataset DuckDB instances, handed out as one cursor per request.
+
+    Each dataset gets its own in-memory DuckDB instance with the ``.duckdb``
+    ATTACHed read-only as ``db``. Resource settings (threads, memory_limit,
+    temp_directory) are fixed at instance creation; the instance is then
+    hardened (``allowed_directories`` + ``enable_external_access=false``) and
+    ``lock_configuration=true`` so no query can widen its own access or change
+    limits. Requests get ``conn.cursor()`` + ``USE db``, so concurrent requests
+    never share a DuckDB connection object.
+
+    Why a private in-memory instance instead of ``duckdb.connect(path)``: DuckDB
+    shares one instance per file path inside a process, so settings are
+    per-instance (a per-connection ``SET memory_limit`` changes it for every
+    query on that file) and a second ``connect(path)`` with a different config
+    is refused. An ATTACHed file keeps ``information_schema`` scoped to that
+    one dataset, which a single shared instance with every dataset attached
+    would not.
+
+    Open instances are capped (LRU, idle ones only) because every instance
+    starts ``threads - 1`` worker threads eagerly.
 
     Supports eviction (POST /admin/release/{db_id}) for the AnnotationWriter
-    workflow — when an annotator wants to take the duckdb r/w lock, ant-serve
-    must first close its r/o handles and refuse to issue new ones until the
-    writer is done.
+    workflow: the instance is closed (file lock dropped) once in-flight
+    cursors drain, and no new cursors are issued until restore or expiry.
     """
 
     EVICTION_DEFAULT_SECONDS = 300.0
 
-    def __init__(self, max_connections_per_db: int = 3, s3_config: Optional[Dict] = None,
-                 memory_limit: str = 'auto', threads: int = 2,
-                 total_memory_budget: str = 'auto',
-                 min_memory_per_conn: str = '256MB',
-                 temp_directory: Optional[str] = None):
+    def __init__(self, s3_config: Optional[Dict] = None, threads: int = 8,
+                 memory_limit: str = 'auto',
+                 temp_directory: Optional[str] = None,
+                 allowed_directories: Optional[List[str]] = None,
+                 max_open_databases: int = 48):
         """
-        Memory model — progressive throttling
-        --------------------------------------
-        ``total_memory_budget`` is a single shared budget across ALL in-flight
-        pool connections.  On each ``get_connection()`` we compute
-        ``per_conn = max(min_memory_per_conn, total / in_use_count)`` and
-        ``SET memory_limit`` on the returned connection.  Effects:
-
-        * Solo query: gets the full budget (e.g. 8 GB).
-        * Concurrent queries: each new request shrinks the per-conn budget;
-          when 8 are running, each has total/8 (with a floor).
-        * Existing queries keep whatever memory_limit they were issued at
-          acquire time — we don't reach into a running query.
-        * Above the budget DuckDB spills to ``temp_directory`` (if set) or
-          OOM-errors (if not), so set ``temp_directory`` if you expect
-          big aggregations under contention.
-
         Args:
-            total_memory_budget: total DuckDB RAM across the whole pool.
+            s3_config: anthive.yaml ``s3`` block, for ``s3://`` datasets.
+            threads: DuckDB worker threads per dataset instance.
+            memory_limit: DuckDB memory ceiling per dataset instance.
                 ``'auto'`` = 25% of system RAM, capped at 16 GB.
-                Pass any size string (``'4GB'``, ``'512MB'``, ``'8192'`` (MB), …).
-            min_memory_per_conn: floor on the per-connection budget. Even
-                under heavy concurrency, every connection gets at least
-                this much, so a single huge query never starves out.
-            temp_directory: where DuckDB spills when a query exceeds its
-                budget.  ``None`` disables spilling (queries OOM-error
-                instead).  The directory is created if missing.
-            memory_limit: DEPRECATED — kept for callers that still pass it,
-                folded into ``total_memory_budget`` if explicitly given.
+            temp_directory: spill directory (created if missing). ``None``
+                disables spilling.
+            allowed_directories: directories queries may read (the data
+                folder, symlink targets, ...). The directory of each attached
+                ``.duckdb`` is added per instance automatically.
+            max_open_databases: cap on simultaneously open dataset instances;
+                the least recently used idle instance is closed past it.
         """
         import os
-        self.max_connections_per_db = max_connections_per_db
         self.s3_config = s3_config or {}
-        self.threads = threads
-
-        if total_memory_budget == 'auto':
-            self.total_memory_mb = _auto_total_memory_budget_mb()
-        else:
-            self.total_memory_mb = _parse_size_mb(total_memory_budget)
-        self.min_memory_mb = max(64, _parse_size_mb(min_memory_per_conn))
-        # Back-compat: surface the static-budget number too (some metrics expose it).
-        self.memory_limit = (
-            memory_limit if memory_limit != 'auto'
-            else _auto_memory_limit(max_connections_per_db)
+        self.threads = max(1, int(threads))
+        self.memory_limit_mb = (
+            _auto_total_memory_budget_mb() if str(memory_limit) == 'auto'
+            else _parse_size_mb(memory_limit)
         )
+        self.max_open_databases = max(1, int(max_open_databases))
 
         self.temp_directory = temp_directory
         if temp_directory:
             try:
                 os.makedirs(temp_directory, exist_ok=True)
+                self.temp_directory = os.path.abspath(temp_directory)
             except OSError as exc:
-                log.warning("ConnectionPool: cannot create temp_directory %r: %s — "
-                            "spilling disabled, queries past budget will OOM.",
+                log.warning("ConnectionPool: cannot create temp_directory %r: %s; "
+                            "spilling disabled, queries past the limit will OOM.",
                             temp_directory, exc)
                 self.temp_directory = None
 
-        log.info(
-            'ConnectionPool: total_memory_budget=%dMB (shared, adaptive per-conn, '
-            'floor=%dMB), threads=%d/conn, max_conns_per_db=%d, temp_directory=%s',
-            self.total_memory_mb, self.min_memory_mb, threads,
-            max_connections_per_db, self.temp_directory or '(disabled)',
-        )
-        self.pools: Dict[str, List[Any]] = defaultdict(list)
-        self.in_use: Dict[str, int] = defaultdict(int)
-        self.locks: Dict[str, Lock] = defaultdict(Lock)
-        self.eviction_until: Dict[str, float] = {}  # db_key -> unix timestamp
-        self.total_connections = 0
+        allowed = set()
+        for directory in (allowed_directories or []):
+            allowed.add(_dir_prefix(directory))
+            try:
+                allowed.add(_dir_prefix(os.path.realpath(directory)))
+            except OSError:
+                pass
+        if self.temp_directory:
+            allowed.add(_dir_prefix(self.temp_directory))
+        bucket = self.s3_config.get('bucket')
+        if bucket:
+            prefix = (self.s3_config.get('prefix') or '').strip('/')
+            allowed.add(f"s3://{bucket}/{prefix + '/' if prefix else ''}")
+        self.allowed_directories = sorted(allowed)
+
+        self._registry_lock = Lock()
+        self._locks: Dict[str, Lock] = {}
+        self._instances: "OrderedDict[str, _DbInstance]" = OrderedDict()  # LRU order
+        self._retiring: Dict[str, List[_DbInstance]] = {}
+        self._owners: Dict[int, _DbInstance] = {}      # id(cursor) -> instance
+        self.in_use: Dict[str, int] = {}
+        self.eviction_until: Dict[str, float] = {}     # db_key -> unix timestamp
+        self.total_connections = 0                      # instances opened
         self.hits = 0
         self.misses = 0
-        # Last per-conn budget computed at acquire — surfaced in /metrics so
-        # operators can see when throttling kicks in.
-        self.last_per_conn_mb = self.total_memory_mb
+        self.lru_closes = 0
         self._httpfs_installed = False
 
-    def _make_connection(self, db_key: str):
-        """Create a new DuckDB connection for a local path or S3 URL"""
-        import duckdb
-        if db_key.startswith('s3://'):
-            conn = duckdb.connect()
-            if not self._httpfs_installed:
-                conn.execute("INSTALL httpfs;")
-                self._httpfs_installed = True
-            conn.execute("LOAD httpfs;")
-            s3 = self.s3_config
-            raw_ep = (s3.get('endpoint') or '').strip()
-            ep_host = raw_ep.removeprefix('https://').removeprefix('http://')
-            use_ssl = not raw_ep.startswith('http://')
-            use_path_style = s3.get('use_path_style') or bool(ep_host)
-            # DuckDB 1.x: use CREATE SECRET instead of SET s3_* variables
-            fields = [
-                f"TYPE S3",
-                f"KEY_ID '{s3.get('access_key_id') or ''}'",
-                f"SECRET '{s3.get('secret_access_key') or ''}'",
-            ]
-            if ep_host:
-                fields.append(f"ENDPOINT '{ep_host}'")
-            if s3.get('region'):
-                fields.append(f"REGION '{s3['region']}'")
-            fields.append(f"USE_SSL {'true' if use_ssl else 'false'}")
-            if use_path_style:
-                fields.append("URL_STYLE 'path'")
-            conn.execute(f"CREATE OR REPLACE SECRET _s3 ({', '.join(fields)})")
-            conn.execute(f"ATTACH '{db_key}' AS db (READ_ONLY);")
-            conn.execute("USE db;")
-        else:
-            conn = duckdb.connect(db_key, read_only=True)
-        # Static settings only — memory_limit is set per-acquire by
-        # _apply_adaptive_settings so the budget tracks current load.
-        conn.execute(f"SET threads = {self.threads}")
+        log.info(
+            'ConnectionPool: per-db instance memory_limit=%dMB threads=%d '
+            'max_open_databases=%d temp_directory=%s allowed_directories=%s',
+            self.memory_limit_mb, self.threads, self.max_open_databases,
+            self.temp_directory or '(disabled)', self.allowed_directories,
+        )
+
+    # ── instance lifecycle ────────────────────────────────────────────────
+
+    def _lock_for(self, db_key: str) -> Lock:
+        with self._registry_lock:
+            lock = self._locks.get(db_key)
+            if lock is None:
+                lock = self._locks[db_key] = Lock()
+            return lock
+
+    def _configure_s3(self, conn) -> None:
+        """Load httpfs and register the S3 secret. Must run before hardening."""
+        if not self._httpfs_installed:
+            conn.execute("INSTALL httpfs")
+            self._httpfs_installed = True
+        conn.execute("LOAD httpfs")
+        s3 = self.s3_config
+        raw_ep = (s3.get('endpoint') or '').strip()
+        ep_host = raw_ep.removeprefix('https://').removeprefix('http://')
+        use_ssl = not raw_ep.startswith('http://')
+        use_path_style = s3.get('use_path_style') or bool(ep_host)
+        fields = [
+            "TYPE S3",
+            f"KEY_ID {_sql_str(s3.get('access_key_id') or '')}",
+            f"SECRET {_sql_str(s3.get('secret_access_key') or '')}",
+        ]
+        if ep_host:
+            fields.append(f"ENDPOINT {_sql_str(ep_host)}")
+        if s3.get('region'):
+            fields.append(f"REGION {_sql_str(s3['region'])}")
+        fields.append(f"USE_SSL {'true' if use_ssl else 'false'}")
+        if use_path_style:
+            fields.append("URL_STYLE 'path'")
+        conn.execute(f"CREATE OR REPLACE SECRET _s3 ({', '.join(fields)})")
+
+    def _open_instance(self, db_key: str) -> _DbInstance:
+        """Open a private instance, ATTACH the dataset read-only, harden, lock."""
+        import os
+        config = {'threads': str(self.threads), 'memory_limit': f'{self.memory_limit_mb}MB'}
         if self.temp_directory:
-            # Quote the path; DuckDB SET expects a string literal.
-            conn.execute(f"SET temp_directory = '{self.temp_directory}'")
-        return conn
-
-    def _adaptive_per_conn_mb(self) -> int:
-        """Compute the per-connection memory budget given current load.
-
-        Sums ``in_use`` across every db in the pool, adds 1 for the
-        connection being acquired right now, and divides the total
-        budget across that count — floored at ``min_memory_mb``.
-
-        Threading note: the read is unlocked across dbs.  Worst case it's
-        stale by one or two — the budget is heuristic, slight skew is
-        fine.  We never need an exact concurrent count.
-        """
-        in_use_total = sum(self.in_use.values())
-        n_after_acquire = max(1, in_use_total + 1)
-        return max(self.min_memory_mb, self.total_memory_mb // n_after_acquire)
-
-    def _apply_adaptive_settings(self, conn) -> int:
-        """Set ``memory_limit`` on a connection based on current load.
-
-        Returns the budget (MB) that was applied — caller can log it.
-        Failures are non-fatal (we log + continue with whatever the
-        connection's previous limit was).
-        """
-        budget_mb = self._adaptive_per_conn_mb()
+            config['temp_directory'] = self.temp_directory
+        conn = duckdb.connect(':memory:', config=config)
         try:
-            conn.execute(f"SET memory_limit = '{budget_mb}MB'")
-            self.last_per_conn_mb = budget_mb
-        except Exception as exc:
-            log.warning("ConnectionPool: SET memory_limit=%dMB failed: %s",
-                        budget_mb, exc)
-        return budget_mb
+            allowed = list(self.allowed_directories)
+            if db_key.startswith('s3://'):
+                self._configure_s3(conn)
+            else:
+                # Parquet sidecars sit next to the .duckdb and are read via
+                # their resolved path, which may be outside the data folder
+                # when the dataset is symlinked in from another store.
+                allowed.append(_dir_prefix(os.path.dirname(os.path.realpath(db_key))))
+                allowed.append(_dir_prefix(os.path.dirname(os.path.abspath(db_key))))
+            conn.execute(f"ATTACH {_sql_str(db_key)} AS db (READ_ONLY)")
+            allowed_sql = ', '.join(_sql_str(path) for path in sorted(set(allowed)))
+            conn.execute(f"SET allowed_directories = [{allowed_sql}]")
+            conn.execute("SET enable_external_access = false")
+            conn.execute("SET lock_configuration = true")
+        except Exception:
+            conn.close()
+            raise
+        return _DbInstance(conn)
+
+    def _close_instance(self, instance: _DbInstance) -> None:
+        try:
+            instance.conn.close()
+        except duckdb.Error as exc:
+            log.warning("ConnectionPool: closing instance failed: %s", exc)
+
+    def _retire_current_unlocked(self, db_key: str) -> int:
+        """Caller holds the db_key lock. Close the current instance if idle,
+        else mark it retired so its last returning cursor closes it.
+        Returns 1 when an instance was closed right away."""
+        with self._registry_lock:
+            instance = self._instances.pop(db_key, None)
+        if instance is None:
+            return 0
+        if instance.in_use == 0:
+            self._close_instance(instance)
+            return 1
+        instance.retired = True
+        self._retiring.setdefault(db_key, []).append(instance)
+        return 0
+
+    def _enforce_open_cap(self) -> None:
+        """Close least-recently-used idle instances beyond max_open_databases."""
+        with self._registry_lock:
+            excess = len(self._instances) - self.max_open_databases
+            candidates = list(self._instances.keys()) if excess > 0 else []
+        for db_key in candidates:
+            if excess <= 0:
+                break
+            lock = self._lock_for(db_key)
+            if not lock.acquire(blocking=False):
+                continue
+            try:
+                with self._registry_lock:
+                    instance = self._instances.get(db_key)
+                    if instance is None or instance.in_use > 0:
+                        continue
+                    del self._instances[db_key]
+                self._close_instance(instance)
+                self.lru_closes += 1
+                excess -= 1
+            finally:
+                lock.release()
 
     def _is_evicted_unlocked(self, db_key: str) -> bool:
-        """Caller must hold self.locks[db_key]. Auto-clears expired evictions."""
+        """Caller must hold the db_key lock. Auto-clears expired evictions."""
         deadline = self.eviction_until.get(db_key)
         if deadline is None:
             return False
@@ -402,9 +459,14 @@ class ConnectionPool:
             return False
         return True
 
+    # ── public API ────────────────────────────────────────────────────────
+
     def get_connection(self, db_key: str):
-        """Get a connection from the pool or create a new one"""
-        with self.locks[db_key]:
+        """Return a fresh cursor on this dataset's instance (``USE db`` applied).
+
+        Every cursor must go back through ``return_connection``.
+        """
+        with self._lock_for(db_key):
             if self._is_evicted_unlocked(db_key):
                 expires_in = self.eviction_until[db_key] - time.time()
                 raise EvictedDatabaseError(
@@ -412,146 +474,126 @@ class ConnectionPool:
                     f"(expires in {expires_in:.0f}s). Retry shortly or call "
                     f"POST /admin/restore/{{db_id}} to clear."
                 )
-
-            # Try to get an existing connection
-            if self.pools[db_key]:
-                conn = self.pools[db_key].pop()
-                self.in_use[db_key] += 1
-                self.hits += 1
-                # Rebalance: this acquire raises the in-use count, so the
-                # per-conn budget shrinks for this connection accordingly.
-                self._apply_adaptive_settings(conn)
-                return conn
-
-            # Create new connection if under limit
-            if self.in_use[db_key] < self.max_connections_per_db:
-                conn = self._make_connection(db_key)
-                self.in_use[db_key] += 1
+            with self._registry_lock:
+                instance = self._instances.get(db_key)
+            if instance is None:
+                instance = self._open_instance(db_key)
                 self.total_connections += 1
                 self.misses += 1
-                self._apply_adaptive_settings(conn)
-                return conn
+            else:
+                self.hits += 1
+            with self._registry_lock:
+                self._instances[db_key] = instance
+                self._instances.move_to_end(db_key)
+            cursor = instance.conn.cursor()
+            try:
+                cursor.execute("USE db")
+            except Exception:
+                cursor.close()
+                raise
+            instance.in_use += 1
+            self.in_use[db_key] = self.in_use.get(db_key, 0) + 1
+            with self._registry_lock:
+                self._owners[id(cursor)] = instance
+        self._enforce_open_cap()
+        return cursor
 
-            # Fallback: create an extra connection beyond the pool limit
-            self.misses += 1
-            conn = self._make_connection(db_key)
-            self._apply_adaptive_settings(conn)
-            return conn
+    def return_connection(self, db_key: str, conn):
+        """Close a cursor from ``get_connection`` and release its slot."""
+        with self._lock_for(db_key):
+            with self._registry_lock:
+                instance = self._owners.pop(id(conn), None)
+            try:
+                conn.close()
+            except duckdb.Error as exc:
+                log.warning("ConnectionPool: closing cursor for %s failed: %s", db_key, exc)
+            if instance is None:
+                return
+            instance.in_use -= 1
+            self.in_use[db_key] = max(0, self.in_use.get(db_key, 0) - 1)
+            if instance.retired and instance.in_use == 0:
+                self._close_instance(instance)
+                retiring = self._retiring.get(db_key, [])
+                if instance in retiring:
+                    retiring.remove(instance)
+                if not retiring:
+                    self._retiring.pop(db_key, None)
 
     def release(self, db_key: str, *,
                 duration_seconds: Optional[float] = None,
                 drain_timeout_seconds: float = 30.0) -> Dict[str, Any]:
-        """Mark db_key evicted, close idle conns, wait for in-use to drain.
+        """Mark db_key evicted, close its instance once in-flight cursors drain.
 
-        Used by POST /admin/release/{db_id}. Returns dict with status and
-        counts so the caller can decide whether to proceed.
+        Used by POST /admin/release/{db_id}. Returns a dict with status and
+        counts so the caller can decide whether to proceed. On a drain
+        timeout the eviction stays set and the instance closes as soon as the
+        last cursor returns, so a writer retrying shortly will get the lock.
         """
         if duration_seconds is None:
             duration_seconds = self.EVICTION_DEFAULT_SECONDS
 
-        with self.locks[db_key]:
-            # Close idle connections
-            n_closed = 0
-            while self.pools[db_key]:
-                conn = self.pools[db_key].pop()
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-                n_closed += 1
-            # Mark evicted
+        with self._lock_for(db_key):
             self.eviction_until[db_key] = time.time() + duration_seconds
+            n_closed = self._retire_current_unlocked(db_key)
 
-        # Wait for in-use to drain (outside the per-key lock so request
-        # handlers can finish and call return_connection)
         deadline = time.monotonic() + drain_timeout_seconds
-        while True:
-            in_use = self.in_use.get(db_key, 0)
-            if in_use <= 0:
-                break
+        while self.in_use.get(db_key, 0) > 0:
             if time.monotonic() > deadline:
                 return {
                     'ok': False,
                     'closed_idle': n_closed,
-                    'still_in_use': in_use,
+                    'still_in_use': self.in_use.get(db_key, 0),
                     'eviction_expires_in': duration_seconds,
                     'reason': f"in_use did not drain within {drain_timeout_seconds:.0f}s",
                 }
-            time.sleep(0.1)
-
-        # Drain happened; also close any conns that came back during the wait
-        with self.locks[db_key]:
-            late_returns = 0
-            while self.pools[db_key]:
-                conn = self.pools[db_key].pop()
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-                late_returns += 1
+            time.sleep(0.05)
 
         return {
             'ok': True,
-            'closed_idle': n_closed + late_returns,
+            'closed_idle': n_closed,
             'still_in_use': 0,
             'eviction_expires_in': duration_seconds,
         }
 
     def restore(self, db_key: str) -> Dict[str, Any]:
-        """Clear eviction state so new connections can be issued again."""
-        with self.locks[db_key]:
+        """Clear eviction state so a fresh instance is opened on next use."""
+        with self._lock_for(db_key):
             was_evicted = self._is_evicted_unlocked(db_key)
             self.eviction_until.pop(db_key, None)
         return {'was_evicted': was_evicted}
 
-    def return_connection(self, db_key: str, conn):
-        """Return a connection to the pool"""
-        with self.locks[db_key]:
-            if len(self.pools[db_key]) < self.max_connections_per_db:
-                self.pools[db_key].append(conn)
-                self.in_use[db_key] = max(0, self.in_use[db_key] - 1)
-            else:
-                # Close if pool is full
-                conn.close()
-                self.in_use[db_key] = max(0, self.in_use[db_key] - 1)
-
     def close_all(self):
-        """Close all pooled connections"""
-        for db_key, conns in self.pools.items():
-            for conn in conns:
-                try:
-                    conn.close()
-                except:
-                    pass
-            conns.clear()
-        self.pools.clear()
-        self.in_use.clear()
+        """Retire every instance: idle ones close now, busy ones on last return.
+
+        Used by rescan: the next request opens a fresh instance that sees the
+        current schema, while queries already running finish on the old one.
+        """
+        with self._registry_lock:
+            keys = list(self._instances.keys())
+        for db_key in keys:
+            with self._lock_for(db_key):
+                self._retire_current_unlocked(db_key)
 
     def get_stats(self) -> Dict[str, Any]:
-        """Get pool statistics — includes the adaptive-throttling state so
-        operators can see when concurrent load is squeezing the per-conn
-        memory budget.
-        """
-        in_use = sum(self.in_use.values())
-        # Predict what the NEXT acquire would get, given current load.
-        next_budget_mb = max(self.min_memory_mb,
-                             self.total_memory_mb // max(1, in_use + 1))
+        """Pool statistics for /metrics."""
+        with self._registry_lock:
+            open_instances = len(self._instances)
+            retiring = sum(len(v) for v in self._retiring.values())
         return {
             'total_connections': self.total_connections,
-            'active_databases': len(self.pools),
-            'pooled_connections': sum(len(p) for p in self.pools.values()),
-            'in_use': in_use,
+            'active_databases': open_instances,
+            'pooled_connections': open_instances,
+            'retiring_instances': retiring,
+            'in_use': sum(self.in_use.values()),
             'cache_hits': self.hits,
             'cache_misses': self.misses,
             'hit_rate': self.hits / max(1, self.hits + self.misses),
+            'lru_closes': self.lru_closes,
+            'max_open_databases': self.max_open_databases,
             'memory': {
-                'total_budget_mb':         self.total_memory_mb,
-                'min_per_conn_mb':         self.min_memory_mb,
-                'last_per_conn_mb':        self.last_per_conn_mb,
-                'next_acquire_per_conn_mb': next_budget_mb,
-                # How aggressively throttled: 1.0 = no throttling, 0.5 = half budget per conn, etc.
-                'throttle_ratio':          next_budget_mb / self.total_memory_mb,
-                'temp_directory':          self.temp_directory,
+                'per_db_limit_mb': self.memory_limit_mb,
+                'threads_per_db': self.threads,
+                'temp_directory': self.temp_directory,
             },
         }
 
@@ -714,9 +756,20 @@ class DatabaseRegistry:
             aws_secret_access_key=s3.get('secret_access_key') or None,
         )
 
-    def _s3_key_exists(self, s3_client, duckdb_rel: Path) -> bool:
-        """Return True if the S3 object exists (HEAD request)"""
-        return self._s3_head_size(s3_client, duckdb_rel) is not None
+    def _s3_duckdb_keys(self, s3_client) -> set:
+        """Every ``.duckdb`` object key (relative to the configured prefix) in
+        the bucket, from one paginated listing instead of a HEAD per dataset."""
+        bucket = self._s3_config['bucket']
+        prefix = (self._s3_config.get('prefix') or '').strip('/')
+        list_prefix = f"{prefix}/" if prefix else ''
+        keys = set()
+        paginator = s3_client.get_paginator('list_objects_v2')
+        for page in paginator.paginate(Bucket=bucket, Prefix=list_prefix):
+            for obj in page.get('Contents', []):
+                key = obj['Key']
+                if key.endswith('.duckdb'):
+                    keys.add(key[len(list_prefix):])
+        return keys
 
     def _s3_head_size(self, s3_client, rel: Path) -> Optional[int]:
         """ContentLength of an S3 object (relative key), or None if absent."""
@@ -979,12 +1032,24 @@ class DatabaseRegistry:
         if not self.data_folder.exists():
             raise FileNotFoundError(f"Data folder not found: {self.data_folder}")
 
-        self.databases.clear()
-        self._db_md_bases.clear()
-        self._db_extra.clear()
+        # Built into fresh dicts and swapped in at the end, so request threads
+        # reading the registry during a rescan never see a half-filled map.
+        databases: Dict[str, str] = {}
+        md_bases: Dict[str, Path] = {}
+        db_extra: Dict[str, Dict[str, str]] = {}
 
         s3_enabled = bool(self._s3_config.get('bucket'))
-        s3_client = self._make_s3_client() if s3_enabled else None
+        s3_keys: Optional[set] = None
+
+        def s3_has(duckdb_rel: Path) -> bool:
+            nonlocal s3_keys
+            if s3_keys is None:
+                try:
+                    s3_keys = self._s3_duckdb_keys(self._make_s3_client())
+                except Exception as exc:  # boto3 raises many types; S3 is optional
+                    log.warning("S3 listing failed; S3-only datasets skipped: %s", exc)
+                    s3_keys = set()
+            return str(duckdb_rel) in s3_keys
 
         # Walk the directory tree, following symlinks
         def scan_recursive(path: Path, base: Path):
@@ -1008,7 +1073,7 @@ class DatabaseRegistry:
                                 db_url = str(local_duckdb)
                             elif s3_enabled:
                                 duckdb_rel = rel_path.with_suffix('.duckdb')
-                                if not self._s3_key_exists(s3_client, duckdb_rel):
+                                if not s3_has(duckdb_rel):
                                     continue  # not on S3 either
                                 db_url = self._build_s3_url(duckdb_rel)
                             else:
@@ -1016,15 +1081,15 @@ class DatabaseRegistry:
 
                             db_id, group_id, file_id = self._resolve_db_id(resolved_item, rel_path)
 
-                            if db_id in self.databases:
-                                existing = self._db_extra[db_id]['rel_path']
+                            if db_id in databases:
+                                existing = db_extra[db_id]['rel_path']
                                 print(f"  WARNING: ID collision '{db_id}': "
                                       f"{existing} vs {rel_path} — using path fallback")
                                 db_id = str(rel_path.with_suffix(''))
 
-                            self.databases[db_id] = db_url
-                            self._db_md_bases[db_id] = resolved_item
-                            self._db_extra[db_id] = {
+                            databases[db_id] = db_url
+                            md_bases[db_id] = resolved_item
+                            db_extra[db_id] = {
                                 'group_id': group_id,
                                 'file_id': file_id,
                                 'rel_path': str(rel_path.with_suffix('.duckdb')),
@@ -1045,6 +1110,10 @@ class DatabaseRegistry:
 
         scan_recursive(self.data_folder, self.data_folder)
 
+        self._db_md_bases = md_bases
+        self._db_extra = db_extra
+        self.databases = databases
+
         print(f"Found {len(self.databases)} databases")
         if len(self.databases) <= 10:
             for db_id in sorted(self.databases.keys()):
@@ -1063,71 +1132,80 @@ class DatabaseRegistry:
 
         Pass force_reload=True to ignore the cache and reload everything (used by
         POST /admin/rescan).
+
+        A load failure only drops a dataset when its files are gone. Any other
+        failure (e.g. a writer briefly holding the duckdb lock) keeps the
+        previous metadata, so a transient error never makes a dataset vanish
+        from the catalog. The new cache is swapped in at the end.
         """
         print("Loading metadata (checking cache)..." if not force_reload else "Loading metadata (forced reload)...")
-        persisted = {} if force_reload else self._load_persisted_cache()
+        persisted = self._load_persisted_cache()
+        previous = self.metadata_cache
 
-        self.metadata_cache.clear()
-        self._databases_list_cache = None
-        errors: List[tuple] = []
+        new_cache: Dict[str, Dict[str, Any]] = {}
+        gone: List[str] = []
+        kept_stale: List[str] = []
+        unloadable: List[str] = []
         cache_hits = 0
         reloaded = 0
-        s3_warnings: List[str] = []
 
         for db_id, db_url in self.databases.items():
             fingerprint = self._get_entry_fingerprint(db_id)
             cached_entry = persisted.get(db_id, {})
 
             if not force_reload and self._is_cache_entry_valid(db_id, cached_entry, fingerprint):
-                self.metadata_cache[db_id] = cached_entry['metadata']
+                new_cache[db_id] = cached_entry['metadata']
                 cache_hits += 1
                 continue
 
             try:
                 metadata = self._load_database_metadata(db_id, self._db_extra[db_id])
-                self.metadata_cache[db_id] = metadata
-                persisted[db_id] = {
-                    'metadata': metadata,
-                    **fingerprint,
-                    'cached_at': time.time(),
-                }
-                reloaded += 1
-            except Exception as exc:
+            except Exception as exc:  # any failure: classify below, never crash the scan
                 error_msg = str(exc)
-                is_s3_missing = (
-                    db_url.startswith('s3://')
-                    and 'does not exist' in error_msg.lower()
-                )
-                if is_s3_missing:
-                    s3_warnings.append(db_id)
+                if db_url.startswith('s3://'):
+                    files_gone = 'does not exist' in error_msg.lower()
                 else:
-                    errors.append((db_id, error_msg))
-                    print(f"\n{'='*70}")
-                    print(f"ERROR: Failed to load database metadata")
-                    print(f"{'='*70}")
-                    print(f"Database: {db_id}")
-                    print(f"Path: {db_url}")
-                    print(f"Error: {error_msg}")
-                    print(f"{'='*70}\n")
+                    md_path = self._db_md_bases.get(db_id)
+                    files_gone = not Path(db_url).exists() or md_path is None or not md_path.exists()
+                prior = previous.get(db_id) or cached_entry.get('metadata')
+                if files_gone:
+                    gone.append(db_id)
+                    persisted.pop(db_id, None)
+                    print(f"  dropped {db_id}: files gone ({error_msg})")
+                elif prior is not None:
+                    new_cache[db_id] = prior
+                    kept_stale.append(db_id)
+                    log.warning("metadata load failed for %s, keeping previous entry: %s", db_id, error_msg)
+                else:
+                    unloadable.append(db_id)
+                    log.error("metadata load failed for %s (%s), no previous entry to keep: %s",
+                              db_id, db_url, error_msg)
+                continue
 
-        if s3_warnings:
-            print(f"  S3 not accessible ({len(s3_warnings)}): {', '.join(s3_warnings)}")
-            errors.extend((db_id, 'S3 not accessible') for db_id in s3_warnings)
+            new_cache[db_id] = metadata
+            persisted[db_id] = {
+                'metadata': metadata,
+                **fingerprint,
+                'cached_at': time.time(),
+            }
+            reloaded += 1
 
-        # Remove databases that failed to load
-        for db_id, _ in errors:
-            if db_id in self.databases:
-                del self.databases[db_id]
-                self._db_md_bases.pop(db_id, None)
-                persisted.pop(db_id, None)
+        dropped = set(gone) | set(unloadable)
+        if dropped:
+            self._db_md_bases = {k: v for k, v in self._db_md_bases.items() if k not in dropped}
+            self.databases = {k: v for k, v in self.databases.items() if k not in dropped}
+        self.metadata_cache = new_cache
+        self._databases_list_cache = None
 
-        self._save_persisted_cache(persisted)
+        self._save_persisted_cache({k: v for k, v in persisted.items() if k in self.databases})
 
         status = f"{len(self.metadata_cache)} databases"
         if cache_hits:
             status += f" ({cache_hits} from cache, {reloaded} reloaded)"
-        if errors:
-            status += f", {len(errors)} skipped"
+        if kept_stale:
+            status += f", {len(kept_stale)} kept previous metadata after a transient error"
+        if dropped:
+            status += f", {len(dropped)} skipped"
         print(f"Metadata ready: {status}")
 
     def _resolve_annotations(self, md_path: Path, file_metadata: dict) -> dict:
@@ -1232,14 +1310,15 @@ class DatabaseRegistry:
 
                     # Get dimensions (count columns excluding cell_name and cell_id)
                     try:
-                        dim_result = conn.execute(f"""
+                        dim_result = conn.execute("""
                             SELECT COUNT(*)
                             FROM information_schema.columns
-                            WHERE table_name = 'obsm__{key}'
+                            WHERE table_name = ?
                             AND column_name NOT IN ('cell_name', 'cell_id')
-                        """).fetchone()
+                        """, [f'obsm__{key}']).fetchone()
                         emb_info['dimensions'] = dim_result[0] if dim_result else None
-                    except:
+                    except duckdb.Error as exc:
+                        log.warning("embedding dimension lookup failed for %s/%s: %s", db_id, key, exc)
                         emb_info['dimensions'] = None
 
                     embeddings[key] = emb_info
@@ -1283,7 +1362,7 @@ class DatabaseRegistry:
                         if col_name not in obs_numerical:
                             obs_numerical.append(col_name)
                     obs_numerical = sorted(obs_numerical)
-            except Exception as exc:
+            except (OSError, duckdb.Error) as exc:
                 log.warning(f"Failed to read score sidecar {score_sidecar}: {exc}")
 
             # Get obs columns (categorical)
@@ -1535,25 +1614,19 @@ class DatabaseRegistry:
         old_db_ids = set(self.databases.keys())
 
         print("\nRescanning data folder...")
-        self.databases.clear()
-        self._db_md_bases.clear()
-        self.metadata_cache.clear()
-        self._databases_list_cache = None
-        self._db_extra.clear()
-
-        # Phase 2: Clear enhanced caches
+        # The registry maps are rebuilt and swapped by _scan_databases /
+        # _cache_all_metadata, not cleared here: requests keep being served
+        # from the old maps during the rescan, and the previous metadata is
+        # what a transient per-dataset load failure falls back to.
         self.gene_list_cache.clear()
         self.metadata_stats_cache.clear()
 
-        # Drop the DuckDB connection pool — pooled connections hold the OLD
-        # schema after a .duckdb file is replaced (e.g., after ant-convert
-        # rebuilds with new obs columns added by ant-score), so any
-        # information_schema query against them returns stale column lists.
-        # Closing forces fresh connections on next access.
-        try:
-            self.connection_pool.close_all()
-        except Exception as exc:
-            print(f"  (connection_pool.close_all failed: {exc})")
+        # Retire the DuckDB instances: an open instance holds the OLD schema
+        # after a .duckdb file is replaced (e.g. ant-convert rebuilds with new
+        # obs columns), so information_schema would return stale column
+        # lists. In-flight queries finish on the old instance; the next
+        # request opens a fresh one.
+        self.connection_pool.close_all()
 
         self._scan_databases()
         self._cache_all_metadata(force_reload=True)
@@ -1700,7 +1773,7 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.37.0"
+API_VERSION = "2.37.1"
 API_VERSION_RELEASED = "2026-08-13"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
@@ -1900,7 +1973,7 @@ app.add_middleware(RequestLoggingMiddleware)
 # ============================================================================
 
 @app.get("/", tags=["info"])
-async def root():
+def root():
     """
     API root endpoint with overview and available endpoints
     """
@@ -1953,7 +2026,7 @@ def _pooled_db(db_id: str):
 
 
 @app.get("/health", tags=["info"])
-async def health_check():
+def health_check():
     """
     Health check + speed signal for load balancers and client-side server
     selection.
@@ -2035,7 +2108,7 @@ def _chat_user_from_request(request: Request) -> str:
 
 
 @app.get("/chat/status", tags=["chat"])
-async def chat_status(request: Request):
+def chat_status(request: Request):
     """Whether the in-app chat assistant is available + (per-user) ack state.
 
     Always reachable (no 404 in any state). Returns
@@ -2068,7 +2141,7 @@ async def chat_status(request: Request):
 
 
 @app.post("/chat/ack", tags=["chat"], status_code=204)
-async def chat_ack(request: Request):
+def chat_ack(request: Request):
     """Record that the current user has acknowledged the privacy notice.
 
     Per pika 2026-06-28 #260: server-side ack keyed on Remote-User so it
@@ -2097,7 +2170,7 @@ class _ChatFeedbackBody(BaseModel):
 
 
 @app.post("/chat/feedback", tags=["chat"])
-async def chat_feedback_post(request: Request, body: _ChatFeedbackBody):
+def chat_feedback_post(request: Request, body: _ChatFeedbackBody):
     """Record a user-submitted feedback flag against ONE assistant message.
 
     Identifies the target message by (session_id, turn_seq, round_idx) —
@@ -2126,7 +2199,7 @@ async def chat_feedback_post(request: Request, body: _ChatFeedbackBody):
 
 
 @app.get("/chat/feedback", tags=["chat"])
-async def chat_feedback_list(request: Request, limit: int = 50):
+def chat_feedback_list(request: Request, limit: int = 50):
     """Admin-gated triage view of recent feedback flags.
 
     Returns ``{count, items: [{...}]}`` with the most recent rows first.
@@ -2226,7 +2299,7 @@ async def chat_post(request: Request, body: _ChatPostBody):
 
 
 @app.get("/chat/history", tags=["chat"])
-async def chat_history(
+def chat_history(
     request: Request,
     session_id: str = Query(..., description="Client-chosen session id; the transcript is keyed on (Remote-User, session_id)."),
 ):
@@ -2248,7 +2321,7 @@ async def chat_history(
 
 
 @app.get("/chat/usage", tags=["chat"])
-async def chat_usage(
+def chat_usage(
     request: Request,
     session_id: str = Query(..., description="Same session_id used by /chat and /chat/history."),
 ):
@@ -2339,7 +2412,7 @@ def _resolve_collection_dir(group_id: str) -> Tuple[Optional[Path], Optional[str
 
 
 @app.get("/collections/{group_id}/source", tags=["collections"])
-async def get_collection_source(group_id: str, request: Request):
+def get_collection_source(group_id: str, request: Request):
     """Read a collection's ``index.md`` for the admin editor.
 
     Returns ``{exists, group, group_id, frontmatter, body}``. When no
@@ -2400,7 +2473,7 @@ class CollectionSourceBody(BaseModel):
 
 
 @app.put("/collections/{group_id}/source", tags=["collections"])
-async def put_collection_source(
+def put_collection_source(
     group_id: str,
     payload: CollectionSourceBody,
     request: Request,
@@ -2532,7 +2605,7 @@ def _resolve_dataset_md_path(db_id: str) -> Tuple[Optional[Path], Optional[str],
 
 
 @app.get("/databases/{db_id:path}/source", tags=["databases"])
-async def get_dataset_source(db_id: str, request: Request):
+def get_dataset_source(db_id: str, request: Request):
     """Read a dataset's ``.md`` for the admin editor (admin-gated).
 
     Returns ``{exists, db_id, frontmatter, body}``. Non-existent dataset
@@ -2574,7 +2647,7 @@ class DatasetSourceBody(BaseModel):
 
 
 @app.put("/databases/{db_id:path}/source", tags=["databases"])
-async def put_dataset_source(
+def put_dataset_source(
     db_id: str,
     payload: DatasetSourceBody,
     request: Request,
@@ -2686,7 +2759,7 @@ _MUS_LOCKED_FIELDS: Set[str] = {
 
 
 @app.get("/databases/{db_id:path}/source.mus", tags=["databases"])
-async def get_dataset_mus_source(db_id: str, request: Request):
+def get_dataset_mus_source(db_id: str, request: Request):
     """Read a dataset's per-dataset ``.h5ad.mus`` sidecar.
 
     Returns the PER-DATASET fields (what's literally in the sidecar
@@ -2726,7 +2799,7 @@ class DatasetMusBody(BaseModel):
 
 
 @app.put("/databases/{db_id:path}/source.mus", tags=["databases"])
-async def put_dataset_mus_source(
+def put_dataset_mus_source(
     db_id: str,
     payload: DatasetMusBody,
     request: Request,
@@ -2834,7 +2907,7 @@ async def put_dataset_mus_source(
 
 
 @app.get("/mus/vocab", tags=["databases"])
-async def get_mus_vocab():
+def get_mus_vocab():
     """Read-only mus vocabulary — what the .mus editor renders as dropdowns.
 
     Per anthive-web pika 2026-06-29 #265: the .mus annotation editor
@@ -2879,7 +2952,7 @@ async def get_mus_vocab():
 
 
 @app.get("/version", tags=["info"])
-async def get_version():
+def get_version():
     """Single-shot "what's the current API contract?" probe.
 
     Designed for LLM clients (vark, Claude bindings, anything that
@@ -2920,7 +2993,7 @@ async def get_version():
 
 
 @app.get("/changelog", tags=["info"])
-async def get_changelog():
+def get_changelog():
     """Serve ``doc/API_CHANGELOG.md`` as text/markdown.
 
     This is the human-readable counterpart to ``/version``: a structured
@@ -2941,7 +3014,7 @@ async def get_changelog():
 
 
 @app.get("/metrics", tags=["info"])
-async def get_metrics():
+def get_metrics():
     """
     Performance metrics endpoint.
 
@@ -2987,7 +3060,7 @@ async def get_metrics():
 
 
 @app.get("/databases", tags=["databases"])
-async def list_databases(
+def list_databases(
     refresh: bool = Query(False, description="Force refresh from disk")
 ):
     """
@@ -3010,7 +3083,7 @@ async def list_databases(
 
 
 @app.get("/groups/{group_id}", tags=["databases"])
-async def get_group_info(group_id: str):
+def get_group_info(group_id: str):
     """
     Return collection-level metadata + prose for a single group.
 
@@ -3093,7 +3166,7 @@ async def get_group_info(group_id: str):
 
 
 @app.get("/databases/{db_id:path}/info", tags=["databases"])
-async def get_database_info(db_id: str):
+def get_database_info(db_id: str):
     """
     Get detailed information about a specific database
 
@@ -3162,6 +3235,8 @@ async def get_obs_summary(db_id: str, top_n: int = 3):
                 return db.obs_summary(top_n_categories=max(0, min(int(top_n), 200)))
         cols = await asyncio.to_thread(_sync)
         return {'db_id': db_id, 'columns': cols}
+    except HTTPException:
+        raise
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -3245,7 +3320,7 @@ async def get_obs_top(db_id: str, n: int = 8):
 # writes.
 
 @app.get("/databases/{db_id:path}/curation", tags=["databases"])
-async def get_dataset_curation(db_id: str, request: Request):
+def get_dataset_curation(db_id: str, request: Request):
     """Return any AI-curation proposals for ``db_id``, generated by ant-curate.
 
     Admin-gated — same Authelia 'admins' check as /source.
@@ -3311,7 +3386,7 @@ async def get_dataset_curation(db_id: str, request: Request):
 #   GET /de/by-gene/{gene_name}                       all rows for one gene (forest plot data)
 
 @app.get("/databases/{db_id:path}/de", tags=["de"])
-async def list_de_studies(db_id: str):
+def list_de_studies(db_id: str):
     """List every DE study on this dataset, with per-study row / term / contrast counts.
 
     Empty list if no DE data has been ingested for this dataset.
@@ -3321,7 +3396,7 @@ async def list_de_studies(db_id: str):
 
 
 @app.get("/databases/{db_id:path}/de/by-gene/{gene_name}", tags=["de"])
-async def get_de_by_gene(db_id: str, gene_name: str):
+def get_de_by_gene(db_id: str, gene_name: str):
     """All DE rows for one gene across every study × term × contrast on this dataset.
 
     Feeds forest-plot UIs. Returns an empty list if the gene is unknown
@@ -3332,7 +3407,7 @@ async def get_de_by_gene(db_id: str, gene_name: str):
 
 
 @app.get("/databases/{db_id:path}/de/{study_id}", tags=["de"])
-async def get_de_study(db_id: str, study_id: str):
+def get_de_study(db_id: str, study_id: str):
     """One DE study's metadata + the list of (term, n_contrasts) pairs in it."""
     with _pooled_db(db_id) as db:
         study = lib_de_storage.get_study(db.conn, study_id)
@@ -3342,7 +3417,7 @@ async def get_de_study(db_id: str, study_id: str):
 
 
 @app.get("/databases/{db_id:path}/de/{study_id}/terms/{term}", tags=["de"])
-async def list_de_contrasts(db_id: str, study_id: str, term: str):
+def list_de_contrasts(db_id: str, study_id: str, term: str):
     """List the contrasts within one (study, term), with per-contrast significance counts."""
     with _pooled_db(db_id) as db:
         contrasts = lib_de_storage.list_contrasts(db.conn, study_id, term)
@@ -3358,7 +3433,7 @@ async def list_de_contrasts(db_id: str, study_id: str, term: str):
     "/databases/{db_id:path}/de/{study_id}/terms/{term}/contrasts/{contrast}",
     tags=["de"],
 )
-async def get_de_contrast_rows(
+def get_de_contrast_rows(
     db_id: str,
     study_id: str,
     term: str,
@@ -3422,6 +3497,8 @@ async def search_genes(
                 genes = db.search_genes(q, case_sensitive=case_sensitive, limit=limit, exact=exact)
             return {"query": q, "count": len(genes), "genes": genes}
         return await asyncio.to_thread(_sync_search)
+    except HTTPException:
+        raise
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -3429,7 +3506,7 @@ async def search_genes(
 
 
 @app.get("/databases/{db_id:path}/genes/{gene_id}", tags=["genes"])
-async def get_gene_info(db_id: str, gene_id: str):
+def get_gene_info(db_id: str, gene_id: str):
     """
     Get information about a specific gene
 
@@ -3442,6 +3519,8 @@ async def get_gene_info(db_id: str, gene_id: str):
         with _pooled_db(db_id) as db:
             info = db.get_gene_info(gene_id)
             return info
+    except HTTPException:
+        raise
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -3536,6 +3615,8 @@ async def get_gene_stats(
                 return {"db_id": db_id, "layer": resolved_layer,
                         "stats": all_stats[:n_top], "top_by": "std"}
         return await asyncio.to_thread(_sync_work)
+    except HTTPException:
+        raise
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
@@ -3914,8 +3995,42 @@ async def get_gene_stats_all(
     }
 
 
+_CELLS_STREAM_CHUNK_ROWS = 5_000
+
+
+def _cells_json_chunks(df: pd.DataFrame):
+    """Yield the /cells JSON body (``{n_cells, n_columns, columns, data}``)
+    in row chunks. Byte-identical to one ``df.to_json(orient='records')``
+    wrapped in the metadata envelope, built directly (no re-parse) to avoid
+    DataFrame -> JSON -> dicts -> JSON amplification."""
+    columns = [str(col) for col in df.columns.tolist()]
+    yield (f'{{"n_cells":{int(len(df))},"n_columns":{int(len(df.columns))},'
+           f'"columns":{json.dumps(columns)},"data":[').encode('utf-8')
+    first = True
+    for start in range(0, len(df), _CELLS_STREAM_CHUNK_ROWS):
+        records = df.iloc[start:start + _CELLS_STREAM_CHUNK_ROWS].to_json(
+            orient='records', double_precision=6)[1:-1]
+        if not records:
+            continue
+        if not first:
+            yield b','
+        yield records.encode('utf-8')
+        first = False
+    yield b']}'
+
+
+def _cells_csv_chunks(df: pd.DataFrame):
+    """Yield ``df.to_csv(index=False)`` in row chunks (header once)."""
+    if len(df) == 0:
+        yield df.to_csv(index=False).encode('utf-8')
+        return
+    for start in range(0, len(df), _CELLS_STREAM_CHUNK_ROWS):
+        yield df.iloc[start:start + _CELLS_STREAM_CHUNK_ROWS].to_csv(
+            index=False, header=(start == 0)).encode('utf-8')
+
+
 @app.get("/databases/{db_id:path}/cells", tags=["data"])
-async def get_cells(
+def get_cells(
     db_id: str,
     genes: Optional[str] = Query(None, description="Comma-separated gene names"),
     metadata: Optional[str] = Query(None, description="Comma-separated metadata fields, '*' for all"),
@@ -3988,10 +4103,11 @@ async def get_cells(
                 limit=limit
             )
 
-        # Return in requested format
+        # Return in requested format. CSV and JSON are streamed in row chunks:
+        # one to_csv/to_json call over a large frame holds the GIL for
+        # seconds (2.8 s for 543k cells x 20 genes), stalling every other
+        # request; per-chunk calls in the threadpool cap that at ~0.1 s.
         if format == "csv":
-            output = StringIO()
-            df.to_csv(output, index=False)
             # Generate filename (max 60 chars)
             base_name = db_id.replace('/', '_')
             filename = f"{base_name}_cells.csv"
@@ -3999,8 +4115,8 @@ async def get_cells(
                 # Truncate base_name to fit within 60 chars including suffix
                 max_base = 60 - len("_cells.csv")
                 filename = f"{base_name[:max_base]}_cells.csv"
-            return Response(
-                content=output.getvalue(),
+            return StreamingResponse(
+                _cells_csv_chunks(df),
                 media_type="text/csv",
                 headers={"Content-Disposition": f"attachment; filename={filename}"}
             )
@@ -4020,20 +4136,10 @@ async def get_cells(
                 headers={"Content-Disposition": f"attachment; filename={filename}"}
             )
         else:  # json
-            # Build JSON directly to avoid 3x memory amplification
-            # (DataFrame → JSON string → Python dicts → output JSON)
-            n_cells = int(len(df))
-            n_columns = int(len(df.columns))
-            columns = [str(col) for col in df.columns.tolist()]
-            records_json = df.to_json(orient='records', double_precision=6)
-            # Assemble final JSON with metadata wrapper without re-parsing
-            body = (
-                f'{{"n_cells":{n_cells},"n_columns":{n_columns},'
-                f'"columns":{json.dumps(columns)},'
-                f'"data":{records_json}}}'
-            )
-            return Response(content=body, media_type="application/json")
+            return StreamingResponse(_cells_json_chunks(df), media_type="application/json")
 
+    except HTTPException:
+        raise
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -4043,7 +4149,7 @@ async def get_cells(
 
 
 @app.get("/databases/{db_id:path}/layers", tags=["data"])
-async def get_layers(db_id: str):
+def get_layers(db_id: str):
     """
     List available layers for a database
 
@@ -4060,7 +4166,7 @@ async def get_layers(db_id: str):
 
 
 @app.get("/databases/{db_id:path}/metadata/fields", tags=["metadata"])
-async def get_metadata_fields(db_id: str):
+def get_metadata_fields(db_id: str):
     """
     Get metadata fields with their types
 
@@ -4080,7 +4186,7 @@ async def get_metadata_fields(db_id: str):
 
 
 @app.get("/databases/{db_id:path}/embeddings", tags=["embeddings"])
-async def get_embeddings(db_id: str):
+def get_embeddings(db_id: str):
     """
     List available embeddings for a database
 
@@ -4097,7 +4203,7 @@ async def get_embeddings(db_id: str):
 
 
 @app.get("/databases/{db_id:path}/embeddings/{embedding_id}", tags=["embeddings"])
-async def get_embedding_data(
+def get_embedding_data(
     db_id: str,
     embedding_id: str,
     limit: int = Query(100000, description="Maximum cells (default 100000)"),
@@ -4123,6 +4229,8 @@ async def get_embedding_data(
                 "columns": df.columns.tolist(),
                 "data": df.to_dict(orient='records')
             }
+    except HTTPException:
+        raise
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -4132,7 +4240,7 @@ async def get_embedding_data(
 
 
 @app.post("/databases/{db_id:path}/query/sql", tags=["query"])
-async def execute_sql_query(db_id: str, request: QueryRequest):
+def execute_sql_query(db_id: str, request: QueryRequest):
     """
     Execute a raw SQL query on the database
 
@@ -4162,6 +4270,8 @@ async def execute_sql_query(db_id: str, request: QueryRequest):
             "data": df.to_dict(orient='records')
         }
 
+    except HTTPException:
+        raise
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -4469,14 +4579,21 @@ _plot_cache_stats = {'hits': 0, 'misses': 0, 'evictions': 0}
 
 
 def _plot_db_fingerprint(db_url: str) -> str:
-    """Stable per-deposit fingerprint. mtime for local files, the URL
-    itself for s3:// (S3 deposits don't change underneath a running server)."""
+    """Stable per-deposit fingerprint. mtime of the .duckdb plus its
+    ``.scores.parquet`` sidecar (score columns are plottable and are rewritten
+    without touching the duckdb) for local files; the URL itself for s3://
+    (S3 deposits don't change underneath a running server)."""
     if db_url.startswith('s3://'):
         return db_url
     try:
-        return f"{_plot_os.path.getmtime(db_url):.0f}"
+        duckdb_mtime = _plot_os.path.getmtime(db_url)
     except OSError:
         return db_url
+    try:
+        scores_mtime = _plot_os.path.getmtime(db_url.replace('.duckdb', '.scores.parquet'))
+    except OSError:
+        scores_mtime = 0.0
+    return f"{duckdb_mtime:.0f}-{scores_mtime:.0f}"
 
 
 # ── memory hygiene ────────────────────────────────────────────────────────────
@@ -4533,6 +4650,8 @@ def _plot_cache_key(
     from urllib.parse import parse_qsl, urlencode
     canonical = []
     for key, value in parse_qsl(query, keep_blank_values=True):
+        if key == 'cache':
+            continue  # ?cache=miss is a bypass switch, not part of the plot identity
         try:
             num = float(value)
         except (ValueError, TypeError):
@@ -7224,7 +7343,8 @@ async def _render_plot(plot_req: PlotRequest, request: Request) -> Response:
     def _ext_for_format(fmt: str) -> str:
         return fmt if fmt in _PLOT_DATA_FORMATS else fmt
 
-    cached = _plot_cache_get(cache_key)
+    bypass_cache = request is not None and request.query_params.get('cache') == 'miss'
+    cached = None if bypass_cache else _plot_cache_get(cache_key)
     if cached is not None:
         # Older cache entries (pre-2.9.0) don't carry title/filename. Fall
         # back to building them now from the raw request — kinds will be
@@ -7345,7 +7465,7 @@ async def _render_plot(plot_req: PlotRequest, request: Request) -> Response:
         'X-Plot-Filename':  _ascii_safe(filename),
         'X-Plot-Format':    plot_req.output_format,
         'X-Source-URL':     plot_req.source_url,
-        'X-Plot-Cache':     'MISS',
+        'X-Plot-Cache':     'BYPASS' if bypass_cache else 'MISS',
         'ETag':             f'"{cache_key}"',
         'Cache-Control':    'public, max-age=3600',
     }
@@ -9923,7 +10043,7 @@ async def plot_notebook_b64_named_endpoint(
     tags=["plots"],
     response_class=JSONResponse,
 )
-async def plot_notebook_descriptor_endpoint(
+def plot_notebook_descriptor_endpoint(
     b64params: str = FastAPIPath(
         ...,
         description=(
@@ -10981,7 +11101,7 @@ async def get_pseudobulk(
 
 
 @app.post("/admin/release/{db_id:path}", tags=["admin"])
-async def release_database(
+def release_database(
     db_id: str,
     duration_seconds: float = 300.0,
     drain_timeout_seconds: float = 30.0,
@@ -11019,20 +11139,35 @@ async def release_database(
 
 
 @app.post("/admin/restore/{db_id:path}", tags=["admin"])
-async def restore_database(db_id: str):
+def restore_database(db_id: str):
     """Clear an eviction set by /admin/release/{db_id}. The connection pool
-    will issue fresh r/o connections on the next request."""
+    opens a fresh r/o instance on the next request.
+
+    The writer that held the release may have added obs columns
+    (AnnotationWriter ALTER TABLE), so this dataset's cached metadata is
+    reloaded too; otherwise /info would keep the old column list until a
+    full rescan.
+    """
     try:
         db_url = registry.get_database_path(db_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"db_id {db_id!r} not found")
     result = connection_pool.restore(db_url)
+    registry.gene_list_cache.pop(db_id, None)
+    try:
+        extra = registry._db_extra.get(db_id, {})
+        registry.metadata_cache[db_id] = registry._load_database_metadata(db_id, extra)
+        registry._databases_list_cache = None
+        result['metadata_reloaded'] = True
+    except Exception as exc:  # restore itself succeeded; keep the old metadata
+        log.warning("admin.restore: metadata reload failed for %s: %s", db_id, exc)
+        result['metadata_reloaded'] = False
     log.info("admin.restore db_id=%s result=%s", db_id, result)
     return result
 
 
 @app.post("/admin/refresh-views/{db_id:path}", tags=["admin"])
-async def refresh_views(db_id: str):
+def refresh_views(db_id: str):
     """Rebuild the obscat/obsnum views on this dataset's duckdb from the
     current .md ``api:`` section (obs_rename / obs_hidden).
 
@@ -11220,11 +11355,11 @@ async def set_api_config(db_id: str, request: Request):
     log.info("admin.api-config db_id=%s wrote %s", db_id, md_path.name)
 
     # Rebuild views to make the new rename+hide live immediately.
-    return await refresh_views(db_id)
+    return await asyncio.to_thread(refresh_views, db_id)
 
 
 @app.post("/admin/rescan", tags=["admin"])
-async def rescan_databases():
+def rescan_databases():
     """
     Force rescan of data folder and reload all metadata
 
@@ -11259,7 +11394,7 @@ async def rescan_databases():
 
 
 @app.get("/admin/plot-cache/stats", tags=["admin"])
-async def plot_cache_stats():
+def plot_cache_stats():
     """Return the plot response cache stats (hits / misses / evictions / size)."""
     with _plot_cache_lock:
         size = len(_plot_cache)
@@ -11278,33 +11413,33 @@ async def plot_cache_stats():
 
 
 @app.post("/admin/plot-cache/clear", tags=["admin"])
-async def plot_cache_clear():
+def plot_cache_clear():
     """Drop all cached plot responses."""
     n = _plot_cache_clear()
     return {'cleared': n}
 
 
 @app.get("/admin/gene-stats-cache/stats", tags=["admin"])
-async def gene_stats_cache_stats():
+def gene_stats_cache_stats():
     """Return the on-disk gene_stats cache stats (rows / distinct dbs / size)."""
     return registry.gene_stats_cache.stats()
 
 
 @app.post("/admin/gene-stats-cache/clear", tags=["admin"])
-async def gene_stats_cache_clear():
+def gene_stats_cache_clear():
     """Wipe every gene_stats cache entry. Returns the row count that was dropped."""
     n = registry.gene_stats_cache.clear()
     return {'cleared': n}
 
 
 @app.get("/admin/gene-stats-index/stats", tags=["admin"])
-async def gene_stats_index_stats():
+def gene_stats_index_stats():
     """Return the precomputed gene-stats index status (row/dataset/gene counts)."""
     return registry.gene_stats_index.stats()
 
 
 @app.post("/admin/gene-stats-index/reload", tags=["admin"])
-async def gene_stats_index_reload():
+def gene_stats_index_reload():
     """Reload ``<h5adstore>/gene_stats_index.parquet`` from disk.
 
     Call after ``ant-gene-stats-precompute`` has written a new parquet
@@ -11316,7 +11451,7 @@ async def gene_stats_index_reload():
 
 
 @app.post("/admin/gene-stats-index/rebuild", tags=["admin"])
-async def gene_stats_index_rebuild(
+def gene_stats_index_rebuild(
     only: Optional[str] = Query(None, description='Comma-separated db_ids to (re)compute; default: all'),
     top_n: int = Query(100, description='Per-dataset top-N variable genes for the hot set'),
     force: bool = Query(False, description='Ignore per-dataset cache; recompute everything'),
@@ -11364,13 +11499,13 @@ async def gene_stats_index_rebuild(
 
 
 @app.get("/admin/gene-variance-index/stats", tags=["admin"])
-async def gene_variance_index_stats():
+def gene_variance_index_stats():
     """Return the precomputed gene-variance index status (row/dataset/gene/facet counts)."""
     return registry.gene_variance_index.stats()
 
 
 @app.post("/admin/gene-variance-index/reload", tags=["admin"])
-async def gene_variance_index_reload():
+def gene_variance_index_reload():
     """Reload ``<h5adstore>/gene_variance_index.parquet`` from disk.
 
     Call after ``ant-gene-variance-precompute`` has written a new parquet.
@@ -11381,7 +11516,7 @@ async def gene_variance_index_reload():
 
 
 @app.post("/admin/gene-variance-index/rebuild", tags=["admin"])
-async def gene_variance_index_rebuild(
+def gene_variance_index_rebuild(
     only: Optional[str] = Query(None, description='Comma-separated db_ids to (re)compute; default: all'),
     force: bool = Query(False, description='Ignore per-dataset cache; recompute everything'),
     workers: int = Query(2, description='Parallel workers for the precompute'),
@@ -11428,7 +11563,7 @@ async def gene_variance_index_rebuild(
 
 
 @app.post("/admin/gene-stats-cache/gc", tags=["admin"])
-async def gene_stats_cache_gc():
+def gene_stats_cache_gc():
     """Drop cache rows whose fingerprint no longer matches the current dataset state.
 
     Called rarely — the cache stays correct without it (stale rows are simply
@@ -11600,7 +11735,7 @@ def _annotate_with_scored_in(summary: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @app.get("/genesets", tags=["genesets"])
-async def list_genesets(
+def list_genesets(
     organism: Optional[str] = None,
     method: Optional[str] = None,
     study: Optional[str] = None,
@@ -11624,7 +11759,7 @@ async def list_genesets(
 
 
 @app.get("/genesets/studies", tags=["genesets"])
-async def list_geneset_studies():
+def list_geneset_studies():
     """List every study in the geneset store with the frontmatter of its
     top-level ``index.md`` (title, doi, journal, year, authors).
 
@@ -11699,7 +11834,7 @@ async def list_geneset_studies():
 
 
 @app.get("/genesets/by-gene/{gene}", tags=["genesets"])
-async def get_genesets_by_gene(gene: str):
+def get_genesets_by_gene(gene: str):
     """Case-insensitive gene-symbol lookup across all genesets and starCAT programs.
 
     Returns every geneset and starCAT module that contains the requested gene.
@@ -11767,7 +11902,7 @@ async def get_genesets_by_gene(gene: str):
 
 
 @app.get("/genesets/{study}/{experiment}", tags=["genesets"])
-async def get_geneset_experiment(study: str, experiment: str):
+def get_geneset_experiment(study: str, experiment: str):
     """Return experiment metadata + the list of genesets it contains."""
     registry = _require_geneset_registry()
     experiment_id = f"{study}/{experiment}"
@@ -11786,7 +11921,7 @@ async def get_geneset_experiment(study: str, experiment: str):
 
 
 @app.get("/genesets/{study}/{experiment}/{name}", tags=["genesets"])
-async def get_geneset(study: str, experiment: str, name: str):
+def get_geneset(study: str, experiment: str, name: str):
     """Return one geneset (merged metadata + gene list).
 
     Includes `scored_in` (list of db_ids) and `column_name` (the obs column name
@@ -11808,7 +11943,7 @@ async def get_geneset(study: str, experiment: str, name: str):
 
 
 @app.post("/genesets/rescan", tags=["genesets"])
-async def rescan_genesets():
+def rescan_genesets():
     """Re-scan the geneset store from disk and rebuild the score index."""
     geneset_reg = _require_geneset_registry()
     geneset_reg.scan()
@@ -11863,7 +11998,7 @@ def _load_module_variability(force: bool = False):
 
 
 @app.get("/module-variability", tags=["genesets"])
-async def get_module_variability(
+def get_module_variability(
     dataset: Optional[str] = Query(None, description="Filter by db_id."),
     db_id: Optional[str] = Query(None, description="Alias for `dataset` (accepted for client-side symmetry with other endpoints)."),
     source: Optional[str] = Query(None, description="'geneset' or 'starcat'."),
@@ -11989,7 +12124,7 @@ async def get_module_variability(
 
 
 @app.post("/module-variability/rescan", tags=["genesets"])
-async def rescan_module_variability():
+def rescan_module_variability():
     """Force a reload of module_variability.parquet from disk."""
     df = _load_module_variability(force=True)
     return {
@@ -12720,7 +12855,7 @@ async def gene_variance_by_facet(
 
 
 @app.get("/admin/gene-variance-cache/stats", tags=["admin"])
-async def gene_variance_cache_stats():
+def gene_variance_cache_stats():
     """Return the gene-variance-by-facet cache stats (size / hits / misses)."""
     with _gene_variance_cache_lock:
         size = len(_gene_variance_cache)
@@ -12768,7 +12903,7 @@ def _build_catalog_registry():
 
 
 @app.get("/catalogs", tags=["genesets"])
-async def list_catalogs(source: Optional[str] = None):
+def list_catalogs(source: Optional[str] = None):
     """List all module catalogs (geneset + starcat).
 
     Each entry summarises the catalog (module + score count, gene
@@ -12794,21 +12929,21 @@ async def list_catalogs(source: Optional[str] = None):
 
 @app.get("/catalogs/{source}/{a}/{b}/modules/{module_name}",
          tags=["genesets"])
-async def _get_catalog_module_2seg(source: str, a: str, b: str,
+def _get_catalog_module_2seg(source: str, a: str, b: str,
                                     module_name: str,
                                     top: Optional[int] = Query(None, ge=1, le=5000)):
-    return await get_catalog_module(source, f"{a}/{b}", module_name, top)
+    return get_catalog_module(source, f"{a}/{b}", module_name, top)
 
 
 @app.get("/catalogs/{source}/{a}/{b}/scores/{score_name}",
          tags=["genesets"])
-async def _get_catalog_score_2seg(source: str, a: str, b: str, score_name: str):
-    return await get_catalog_score_recipe(source, f"{a}/{b}", score_name)
+def _get_catalog_score_2seg(source: str, a: str, b: str, score_name: str):
+    return get_catalog_score_recipe(source, f"{a}/{b}", score_name)
 
 
 @app.get("/catalogs/{source}/{catalog_id}/modules/{module_name}",
          tags=["genesets"])
-async def get_catalog_module(
+def get_catalog_module(
     source: str, catalog_id: str, module_name: str,
     top: Optional[int] = Query(None, ge=1, le=5000,
                                description="If set, return only the top-N genes by absolute weight (starcat) or first-N (geneset)."),
@@ -12850,7 +12985,7 @@ async def get_catalog_module(
 
 @app.get("/catalogs/{source}/{catalog_id}/scores/{score_name}",
          tags=["genesets"])
-async def get_catalog_score_recipe(source: str, catalog_id: str,
+def get_catalog_score_recipe(source: str, catalog_id: str,
                                     score_name: str):
     """Return one derived score recipe (composite / binary / multinomial).
 
@@ -12871,7 +13006,7 @@ async def get_catalog_score_recipe(source: str, catalog_id: str,
 
 
 @app.post("/catalogs/rescan", tags=["genesets"])
-async def rescan_catalogs():
+def rescan_catalogs():
     """Invalidate the starCAT + geneset catalog cache — reloads from disk."""
     import catalogs as _catalogs_mod
     _catalogs_mod._cached_starcat_catalogs.cache_clear()
@@ -12885,7 +13020,7 @@ async def rescan_catalogs():
 # `/scores/{name}` routes above take priority.
 
 @app.get("/catalogs/{source}/{catalog_id:path}", tags=["genesets"])
-async def get_catalog(source: str, catalog_id: str):
+def get_catalog(source: str, catalog_id: str):
     """One catalog — module summaries + score recipes + metadata.
 
     `catalog_id` uses a path-style key: for geneset it's
@@ -12907,7 +13042,7 @@ async def get_catalog(source: str, catalog_id: str):
 
 
 @app.get("/databases/{db_id:path}/module_scores", tags=["databases"])
-async def get_database_module_scores(db_id: str):
+def get_database_module_scores(db_id: str):
     """List all pre-computed module-score columns for one dataset.
 
     For each scored geneset, returns:
@@ -12998,7 +13133,7 @@ async def get_database_module_scores(db_id: str):
 
 
 @app.get("/databases/{db_id:path}/files", tags=["databases"])
-async def list_database_files(db_id: str):
+def list_database_files(db_id: str):
     """List downloadable stored ("static") artifacts for one dataset — the raw
     ``.h5ad``, the served ``.duckdb``, and sidecars (``.scores.parquet``,
     ``.h5ad.mus``) that actually exist. Available to anyone who can see the
@@ -13011,7 +13146,7 @@ async def list_database_files(db_id: str):
 
 
 @app.get("/databases/{db_id:path}/download/{kind}", tags=["databases"])
-async def download_database_file(db_id: str, kind: str):
+def download_database_file(db_id: str, kind: str):
     """Download one stored artifact.
 
     Only ``kind='h5ad'`` is served — the ``.duckdb``, ``.scores.parquet``, and
@@ -13038,7 +13173,7 @@ async def download_database_file(db_id: str, kind: str):
 
 
 @app.get("/databases/{db_id:path}/download-static/{filename}", tags=["databases"])
-async def download_database_static_file(db_id: str, filename: str):
+def download_database_static_file(db_id: str, filename: str):
     """Download one file from the collection's ``static/`` folder.
 
     Paper PDFs and supplementary tables shipped with the collection. Path-
@@ -13057,7 +13192,7 @@ async def download_database_static_file(db_id: str, filename: str):
 
 
 @app.get("/skill", tags=["info"], response_class=Response)
-async def get_skill():
+def get_skill():
     """Return the Anthive Claude Code skill file (SKILL.md).
 
     Collaborators can install it with:
@@ -13114,13 +13249,12 @@ def main():
     try:
         print("Initializing connection pool...")
         connection_pool = ConnectionPool(
-            max_connections_per_db=config.get('duckdb_max_connections', 3),
             s3_config=s3_config,
-            memory_limit=str(config.get('duckdb_memory_limit', 'auto')),
-            threads=config.get('duckdb_threads', 2),
-            total_memory_budget=str(config.get('duckdb_total_memory_budget', 'auto')),
-            min_memory_per_conn=str(config.get('duckdb_min_memory_per_conn', '256MB')),
+            threads=config.get('duckdb_server_threads', 8),
+            memory_limit=str(config.get('duckdb_server_memory_limit', 'auto')),
             temp_directory=config.get('duckdb_temp_directory') or './tmp/duckdb_spill',
+            allowed_directories=[str(args.data_folder)] + list(config.get('duckdb_allowed_directories') or []),
+            max_open_databases=config.get('duckdb_max_open_databases', 48),
         )
         print("Initializing database registry...")
         registry = DatabaseRegistry(args.data_folder, connection_pool, s3_config=s3_config)

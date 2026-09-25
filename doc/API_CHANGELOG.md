@@ -29,6 +29,40 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.37.1 — 2026-09-25
+
+Middleware fixes. No endpoint or parameter changes.
+
+- **Endpoints no longer block each other.** 71 handlers that ran DuckDB,
+  S3 or file IO directly on the event loop are now plain `def` (Starlette
+  threadpool). `/info` stayed under ~0.2 s while a 500k-row `/cells` ran;
+  before it stalled up to 12 s.
+- **`/cells` JSON and CSV are streamed** in 5k-row chunks (chunked
+  transfer encoding, no `Content-Length`). The body is byte-identical.
+- **`?cache=miss` works on plot endpoints** as documented: it skips the
+  cache lookup, re-renders, refreshes the entry and answers
+  `X-Plot-Cache: BYPASS`. It is no longer part of the cache key.
+- **Plot cache fingerprint includes the `.scores.parquet` sidecar**, so
+  a rescored dataset no longer serves stale score plots.
+- **503 instead of 500 while a writer holds a dataset.** `/cells`,
+  `/obs_summary`, `/genes/{gene}`, `/gene_stats` and the other handlers
+  whose broad `except` used to turn the pool's 503 (and explicit 404s)
+  into 500 now pass them through.
+- **`POST /admin/restore/{db_id}` reloads that dataset's metadata**
+  (new `metadata_reloaded` field), so columns an annotator added show up
+  in `/info` without a rescan.
+- **`/metrics.connection_pool` shape changed** (operator diagnostics):
+  the adaptive-throttling block (`total_budget_mb`, `min_per_conn_mb`,
+  `last_per_conn_mb`, `next_acquire_per_conn_mb`, `throttle_ratio`) is
+  gone, since per-connection `SET memory_limit` never worked (DuckDB
+  settings are per instance). New: `retiring_instances`, `lru_closes`,
+  `max_open_databases`, `memory.per_db_limit_mb`, `memory.threads_per_db`.
+- **Pool connections are sandboxed by DuckDB itself**:
+  `enable_external_access=false` with `allowed_directories` limited to
+  the data folder, each dataset's own directory and the spill directory,
+  then `lock_configuration=true`. `read_text('/any/file')` and similar
+  fail with a permission error on every pooled query path.
+
 ## 2.37.0 — 2026-08-13
 
 ### Added — `obs_derive`: value-map a new obs column at view time
