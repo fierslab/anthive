@@ -7,6 +7,7 @@ Provides a clean interface to query DuckDB databases created by ant-convert
 import copy
 import fcntl
 import json
+import math
 import re
 import threading
 import time
@@ -626,6 +627,8 @@ class AnthiveDB:
                           'top': [{value, count, pct}, ...]}
           - numerical:   {'type': 'num', 'min', 'q05', 'q25', 'mean',
                           'median', 'q75', 'q95', 'max', 'pct_missing'}
+                         plus 'has_nonfinite': True when inf/nan values were
+                         nulled out of the stats
 
         ``n_unique`` is HyperLogLog-approximate (as DuckDB SUMMARIZE's
         ``approx_unique``); every quantile, the median included, is exact.
@@ -660,12 +663,23 @@ class AnthiveDB:
         skip_cols = {'cell_name', 'cell_id'}
 
         def _coerce_num(value):
+            # inf/nan are not JSON-serialisable; _flag_nonfinite marks them.
             if value is None:
                 return None
             try:
-                return float(value)
+                number = float(value)
             except (ValueError, TypeError):
                 return None
+            return number if math.isfinite(number) else None
+
+        def _flag_nonfinite(entry: Dict[str, Any], raw_values) -> None:
+            for value in raw_values:
+                try:
+                    if value is not None and not math.isfinite(float(value)):
+                        entry['has_nonfinite'] = True
+                        return
+                except (ValueError, TypeError):
+                    continue
 
         def _pct_missing(total: int, non_null: int) -> float:
             return round(100.0 * (total - non_null) / total, 2) if total else 0.0
@@ -743,6 +757,7 @@ class AnthiveDB:
                         'q05': q05, 'q25': q25, 'q75': q75, 'q95': q95,
                         'pct_missing': _pct_missing(total_rows, int(non_null or 0)),
                     }
+                    _flag_nonfinite(out[name], [min_value, max_value, mean_value, *(quantiles or [])])
 
             # Top-N values for every categorical column in ONE scan: unpivot
             # to (col, value) (UNPIVOT drops NULLs), count, keep the N most
@@ -816,6 +831,7 @@ class AnthiveDB:
                             'q05': q05, 'q25': q25, 'q75': q75, 'q95': q95,
                             'pct_missing': round(100.0 * (n_null or 0) / n_rows, 2) if n_rows else 0.0,
                         }
+                        _flag_nonfinite(out[col_name], [min_value, max_value, mean_value, *(quantiles or [])])
             except duckdb.Error:
                 pass   # sidecar shape drift must not kill the endpoint
 

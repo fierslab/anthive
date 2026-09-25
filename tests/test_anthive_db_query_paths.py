@@ -167,6 +167,22 @@ def test_obs_summary_numeric_stats_are_exact(db):
     assert summary['n_counts']['pct_missing'] == round(100 * 3 / N_CELLS, 2)
 
 
+def test_obs_summary_nonfinite_values_are_json_safe_and_flagged(dataset):
+    import json
+    con = duckdb.connect(str(dataset))
+    con.execute("UPDATE __obsnum SET n_counts = 'inf'::DOUBLE WHERE cell_id = 0")
+    con.close()
+    handle = AnthiveDB(dataset)
+    try:
+        summary = handle.obs_summary()
+    finally:
+        handle.close()
+    json.dumps(summary, allow_nan=False)
+    entry = next(v for v in summary.values() if v.get('has_nonfinite'))
+    assert entry['max'] is None and entry['mean'] is None
+    assert entry['min'] is not None and entry['median'] is not None
+
+
 def test_obs_summary_respects_view_rename_and_hide(db):
     summary = db.obs_summary()
     assert 'ant_donor' in summary and 'ant_age' in summary
