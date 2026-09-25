@@ -4,16 +4,20 @@ Database access layer for Anthive DuckDB files
 Provides a clean interface to query DuckDB databases created by ant-convert
 """
 
+import copy
 import fcntl
 import json
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple, Literal
 import duckdb
+import numpy as np
 import pandas as pd
 
 
@@ -213,6 +217,72 @@ def build_obs_view_sql(
     )
 
 
+# Process-wide obs_summary memo. Keyed on the file signatures of the duckdb,
+# its WAL and the scores sidecar, so any write (ALTER TABLE, view refresh,
+# re-ingest, new scores) produces a new key and the stale entry ages out.
+_OBS_SUMMARY_MEMO: "OrderedDict[tuple, Dict[str, Dict[str, Any]]]" = OrderedDict()
+_OBS_SUMMARY_MEMO_MAX_ENTRIES = 256
+_OBS_SUMMARY_MEMO_LOCK = threading.Lock()
+
+_NUMERIC_TYPE_PREFIXES = (
+    'TINYINT', 'SMALLINT', 'INTEGER', 'BIGINT', 'HUGEINT',
+    'UTINYINT', 'USMALLINT', 'UINTEGER', 'UBIGINT', 'UHUGEINT',
+    'FLOAT', 'DOUBLE', 'REAL', 'DECIMAL', 'NUMERIC',
+)
+
+_OBS_SUMMARY_QUANTILES = (0.05, 0.25, 0.5, 0.75, 0.95)
+
+
+def _file_signature(path: Path) -> Optional[Tuple[int, int]]:
+    """(mtime_ns, size) of a file, or None when it does not exist."""
+    try:
+        stat_result = path.stat()
+    except OSError:
+        return None
+    return (stat_result.st_mtime_ns, stat_result.st_size)
+
+
+def _is_numeric_type(data_type: str) -> bool:
+    return str(data_type).upper().startswith(_NUMERIC_TYPE_PREFIXES)
+
+
+def _numeric_filter_value(field: str, value: Any) -> float:
+    """Coerce a filter value for a numerical column, or raise ValueError."""
+    if isinstance(value, bool):
+        return float(value)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"Filter value {value!r} for numerical field {field!r} is not a number"
+        ) from None
+
+
+def _categorical_filter_values(values: List[Any]) -> List[str]:
+    """Text forms to match for categorical filter values.
+
+    Callers (e.g. /cells) turn "3" into 3.0 before we see it; an integral
+    float therefore matches both "3" and "3.0" so the stored label is found
+    whichever way it was written.
+    """
+    text_values: List[str] = []
+    for value in values:
+        if isinstance(value, float) and value.is_integer():
+            candidates = [str(int(value)), str(value)]
+        else:
+            candidates = [str(value)]
+        for candidate in candidates:
+            if candidate not in text_values:
+                text_values.append(candidate)
+    return text_values
+
+
+def clear_obs_summary_memo() -> None:
+    """Drop every memoised obs_summary result (tests, admin rescans)."""
+    with _OBS_SUMMARY_MEMO_LOCK:
+        _OBS_SUMMARY_MEMO.clear()
+
+
 def _load_api_config_for(duckdb_path: Path) -> Dict[str, Any]:
     """Load the api: section from the sibling .md (same stem as the duckdb).
 
@@ -389,7 +459,8 @@ class AnthiveDB:
             return self._score_index_cache
 
         rows = self._conn.execute(
-            "SELECT DISTINCT source, catalog, module FROM read_parquet(?)",
+            "SELECT DISTINCT source, catalog, module FROM read_parquet(?) "
+            "ORDER BY source, catalog, module",
             [str(sidecar)]
         ).fetchall()
         index = {
@@ -429,6 +500,52 @@ class AnthiveDB:
             [str(sidecar), source, catalog, module],
         ).df()
         return df
+
+    def _fetch_score_matrix(self, virtual_cols: List[str]) -> pd.DataFrame:
+        """Return a DataFrame [cell_name, *virtual_cols] for many score columns.
+
+        One read of the sidecar for all requested triples, scattered into a
+        dense cells x columns array; replaces one parquet scan plus one
+        pandas merge per column. Cells without a row get NaN. Rows are in
+        __cells.cell_id order.
+        """
+        idx = self._load_score_index()
+        unknown = [col for col in virtual_cols if col not in idx]
+        if unknown:
+            raise KeyError(f"unknown score column(s): {unknown!r}")
+        sidecar = self._scores_sidecar_path()
+        cells = self._conn.execute(
+            "SELECT cell_id, cell_name FROM __cells ORDER BY cell_id"
+        ).fetchnumpy()
+        cell_ids = np.asarray(cells['cell_id'], dtype=np.int64)
+        matrix = np.full((len(cell_ids), len(virtual_cols)), np.nan, dtype=np.float64)
+        if virtual_cols and len(cell_ids):
+            triple_values = ', '.join(['(?, ?, ?, ?)'] * len(virtual_cols))
+            triple_params: List[Any] = []
+            for col_position, col in enumerate(virtual_cols):
+                triple_params.extend([col_position, *idx[col]])
+            long_scores = self._conn.execute(
+                f"""
+                SELECT s.cell_id, t.col_position, s.score
+                FROM read_parquet(?) s
+                JOIN (VALUES {triple_values}) t(col_position, source, catalog, module)
+                  ON s.source = t.source AND s.catalog = t.catalog AND s.module = t.module
+                WHERE s.score IS NOT NULL
+                """,
+                [str(sidecar), *triple_params],
+            ).fetchnumpy()
+            score_cell_ids = np.asarray(long_scores['cell_id'], dtype=np.int64)
+            row_positions = np.searchsorted(cell_ids, score_cell_ids)
+            in_range = row_positions < len(cell_ids)
+            matched = np.zeros(len(score_cell_ids), dtype=bool)
+            matched[in_range] = cell_ids[row_positions[in_range]] == score_cell_ids[in_range]
+            matrix[row_positions[matched],
+                   np.asarray(long_scores['col_position'], dtype=np.int64)[matched]] = (
+                np.asarray(long_scores['score'], dtype=np.float64)[matched]
+            )
+        frame = pd.DataFrame(matrix, columns=list(virtual_cols))
+        frame.insert(0, 'cell_name', cells['cell_name'])
+        return frame
 
     def _get_numerical_fields(self) -> List[str]:
         """Get numerical metadata fields (union of duckdb obsnum + parquet scores)."""
@@ -485,28 +602,60 @@ class AnthiveDB:
 
         return [row[0] for row in result]
 
+    def _obs_summary_memo_key(self, top_n_categories: int) -> Optional[tuple]:
+        """Memo key for obs_summary, or None when the dataset is not a local file."""
+        if self.db_path is None:
+            return None
+        db_path = Path(self.db_path)
+        db_signature = _file_signature(db_path)
+        if db_signature is None:
+            return None
+        wal_signature = _file_signature(db_path.with_name(db_path.name + '.wal'))
+        sidecar = self._scores_sidecar_path()
+        sidecar_signature = _file_signature(sidecar) if sidecar is not None else None
+        return (
+            str(db_path.resolve()), db_signature, wal_signature,
+            sidecar_signature, int(top_n_categories),
+        )
+
     def obs_summary(self, top_n_categories: int = 3) -> Dict[str, Dict[str, Any]]:
         """Per-obs-column summary stats for the dataset-page right-column.
-
-        Uses DuckDB's ``SUMMARIZE`` on ``obscat`` and ``obsnum`` for the
-        cheap aggregates, plus two follow-up queries to fill in the stats
-        SUMMARIZE doesn't carry:
-
-          - q05 / q95 on numerical columns (one bulk SELECT with
-            quantile_cont calls — one scan over obsnum).
-          - top-N value frequency on categorical columns (one
-            small GROUP BY per column; per-column scan but fast on
-            obscat which is narrow).
 
         Returns a dict keyed on column name:
           - categorical: {'type': 'cat', 'n_unique', 'pct_missing',
                           'top': [{value, count, pct}, ...]}
-          - numerical:   {'type': 'num', 'min', 'q05', 'mean', 'median',
-                          'q95', 'max', 'pct_missing'}
+          - numerical:   {'type': 'num', 'min', 'q05', 'q25', 'mean',
+                          'median', 'q75', 'q95', 'max', 'pct_missing'}
 
-        Missing values are reported as ``pct_missing`` (0-100). Empty
-        when neither obscat nor obsnum exists in this dataset.
+        ``n_unique`` is HyperLogLog-approximate (as DuckDB SUMMARIZE's
+        ``approx_unique``); every quantile, the median included, is exact.
+        Missing values are reported as ``pct_missing`` (0-100). Empty when
+        neither obscat nor obsnum exists in this dataset.
+
+        Results are memoised process-wide on the duckdb / WAL / scores-sidecar
+        file signatures, so repeat calls are free and any write invalidates.
         """
+        memo_key = self._obs_summary_memo_key(top_n_categories)
+        if memo_key is not None:
+            with _OBS_SUMMARY_MEMO_LOCK:
+                cached = _OBS_SUMMARY_MEMO.get(memo_key)
+                if cached is not None:
+                    _OBS_SUMMARY_MEMO.move_to_end(memo_key)
+                    return copy.deepcopy(cached)
+
+        summary = self._compute_obs_summary(top_n_categories)
+
+        if memo_key is not None:
+            with _OBS_SUMMARY_MEMO_LOCK:
+                _OBS_SUMMARY_MEMO[memo_key] = copy.deepcopy(summary)
+                _OBS_SUMMARY_MEMO.move_to_end(memo_key)
+                while len(_OBS_SUMMARY_MEMO) > _OBS_SUMMARY_MEMO_MAX_ENTRIES:
+                    _OBS_SUMMARY_MEMO.popitem(last=False)
+        return summary
+
+    def _compute_obs_summary(self, top_n_categories: int) -> Dict[str, Dict[str, Any]]:
+        """Uncached obs_summary: one aggregate scan per view, one top-N scan
+        for all categorical columns, one grouped scan of the scores sidecar."""
         out: Dict[str, Dict[str, Any]] = {}
         skip_cols = {'cell_name', 'cell_id'}
 
@@ -518,178 +667,157 @@ class AnthiveDB:
             except (ValueError, TypeError):
                 return None
 
+        def _pct_missing(total: int, non_null: int) -> float:
+            return round(100.0 * (total - non_null) / total, 2) if total else 0.0
+
         for view_name, kind in (('obscat', 'cat'), ('obsnum', 'num')):
-            exists = (self._conn.execute(
-                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+            column_rows = self._conn.execute(
+                "SELECT column_name, data_type FROM information_schema.columns "
+                "WHERE table_name = ? ORDER BY ordinal_position",
                 [view_name],
-            ).fetchone() or (0,))[0]
-            if not exists:
+            ).fetchall()
+            columns = [(name, dtype) for name, dtype in column_rows if name not in skip_cols]
+            if not columns:
                 continue
 
-            try:
-                rows = self._conn.execute(
-                    f"SUMMARIZE SELECT * FROM {view_name}"
-                ).fetchall()
-            except Exception:
-                continue
-
-            cols = [
-                desc[0] for desc in self._conn.execute(
-                    f"SUMMARIZE SELECT * FROM {view_name}"
-                ).description
-            ]
-
-            # Find the indices we care about — SUMMARIZE's column set is
-            # stable in DuckDB but we look them up by name to be robust.
-            try:
-                ix_name = cols.index('column_name')
-                ix_min = cols.index('min')
-                ix_max = cols.index('max')
-                ix_q50 = cols.index('q50')
-                ix_avg = cols.index('avg')
-                ix_unique = cols.index('approx_unique')
-                ix_nullpct = cols.index('null_percentage')
-            except ValueError:
-                continue
-
-            # Collect the per-column rows + the column-name list (we need
-            # it for the follow-up q05/q95 + top-categories queries).
-            col_names: list = []
-            for row in rows:
-                name = row[ix_name]
-                if name in skip_cols:
-                    continue
-                col_names.append(name)
-                null_pct_raw = row[ix_nullpct]
-                pct_missing = float(null_pct_raw) if null_pct_raw is not None else 0.0
+            # Aggregate over the view (it carries the api rename / hide /
+            # value-rename / derive projections), minus cell_name so the
+            # string min/max/distinct work SUMMARIZE used to do on it is gone.
+            has_cell_name = any(name == 'cell_name' for name, _ in column_rows)
+            source_sql = (
+                f"(SELECT * EXCLUDE (cell_name) FROM {safe_ident(view_name)})"
+                if has_cell_name else safe_ident(view_name)
+            )
+            aggregate_exprs = ['COUNT(*)']
+            for name, dtype in columns:
+                ident = _q(name)   # trusted: from information_schema
                 if kind == 'cat':
+                    aggregate_exprs += [f'approx_count_distinct({ident})', f'COUNT({ident})']
+                elif _is_numeric_type(dtype):
+                    quantile_list = ', '.join(str(p) for p in _OBS_SUMMARY_QUANTILES)
+                    aggregate_exprs += [
+                        f'MIN({ident})', f'MAX({ident})', f'AVG({ident})',
+                        f'quantile_cont({ident}, [{quantile_list}])', f'COUNT({ident})',
+                    ]
+                else:
+                    # Non-numeric column in obsnum (e.g. BOOLEAN): min/max as
+                    # text like SUMMARIZE reported them, no mean / quantiles.
+                    aggregate_exprs += [
+                        f'CAST(MIN({ident}) AS VARCHAR)', f'CAST(MAX({ident}) AS VARCHAR)',
+                        'NULL', 'NULL', f'COUNT({ident})',
+                    ]
+            try:
+                aggregate_row = self._conn.execute(
+                    f"SELECT {', '.join(aggregate_exprs)} FROM {source_sql}"
+                ).fetchone()
+            except duckdb.Error:
+                continue
+            total_rows = int(aggregate_row[0] or 0)
+
+            position = 1
+            for name, _dtype in columns:
+                if kind == 'cat':
+                    n_unique, non_null = aggregate_row[position:position + 2]
+                    position += 2
                     out[name] = {
                         'type': 'cat',
-                        'n_unique': int(row[ix_unique]) if row[ix_unique] is not None else 0,
-                        'pct_missing': round(pct_missing, 2),
-                        'top': [],   # populated below
+                        'n_unique': int(n_unique) if n_unique is not None else 0,
+                        'pct_missing': _pct_missing(total_rows, int(non_null or 0)),
+                        'non_null': int(non_null or 0),
+                        'top': [],
                     }
                 else:
+                    min_value, max_value, mean_value, quantiles, non_null = (
+                        aggregate_row[position:position + 5]
+                    )
+                    position += 5
+                    q05 = q25 = median = q75 = q95 = None
+                    if quantiles is not None:
+                        q05, q25, median, q75, q95 = (_coerce_num(v) for v in quantiles)
                     out[name] = {
                         'type': 'num',
-                        'min': _coerce_num(row[ix_min]),
-                        'max': _coerce_num(row[ix_max]),
-                        'median': _coerce_num(row[ix_q50]),
-                        'mean': _coerce_num(row[ix_avg]),
-                        # q05 / q25 / q75 / q95 filled in by the follow-up scan.
-                        'q05': None, 'q25': None, 'q75': None, 'q95': None,
-                        'pct_missing': round(pct_missing, 2),
+                        'min': _coerce_num(min_value),
+                        'max': _coerce_num(max_value),
+                        'median': median,
+                        'mean': _coerce_num(mean_value),
+                        'q05': q05, 'q25': q25, 'q75': q75, 'q95': q95,
+                        'pct_missing': _pct_missing(total_rows, int(non_null or 0)),
                     }
 
-            # ─── follow-up #1: q05 / q25 / q75 / q95 on numerical columns (bulk) ───
-            if kind == 'num' and col_names:
-                quant_exprs = []
-                for name in col_names:
-                    ident = _q(name)   # legacy stored col names may have '#'/space; trusted (comes from information_schema)
-                    quant_exprs.append(f'quantile_cont({ident}, 0.05)')
-                    quant_exprs.append(f'quantile_cont({ident}, 0.25)')
-                    quant_exprs.append(f'quantile_cont({ident}, 0.75)')
-                    quant_exprs.append(f'quantile_cont({ident}, 0.95)')
+            # Top-N values for every categorical column in ONE scan: unpivot
+            # to (col, value) (UNPIVOT drops NULLs), count, keep the N most
+            # frequent per column. Ties break on value for determinism.
+            if kind == 'cat' and top_n_categories > 0:
+                cast_list = ', '.join(
+                    f'CAST({_q(name)} AS VARCHAR) AS {_q(name)}' for name, _ in columns
+                )
+                top_sql = (
+                    f"WITH long_values AS ("
+                    f"  UNPIVOT (SELECT {cast_list} FROM {source_sql}) "
+                    f"  ON COLUMNS(*) INTO NAME col_name VALUE col_value"
+                    f"), value_counts AS ("
+                    f"  SELECT col_name, col_value, COUNT(*) AS n "
+                    f"  FROM long_values GROUP BY col_name, col_value"
+                    f") "
+                    f"SELECT col_name, col_value, n FROM value_counts "
+                    f"QUALIFY row_number() OVER ("
+                    f"  PARTITION BY col_name ORDER BY n DESC, col_value) <= ? "
+                    f"ORDER BY col_name, n DESC, col_value"
+                )
                 try:
-                    quant_row = self._conn.execute(
-                        f"SELECT {', '.join(quant_exprs)} FROM {view_name}"
-                    ).fetchone()
-                except Exception:
-                    quant_row = None
-                if quant_row is not None:
-                    for idx, name in enumerate(col_names):
-                        out[name]['q05'] = _coerce_num(quant_row[idx * 4])
-                        out[name]['q25'] = _coerce_num(quant_row[idx * 4 + 1])
-                        out[name]['q75'] = _coerce_num(quant_row[idx * 4 + 2])
-                        out[name]['q95'] = _coerce_num(quant_row[idx * 4 + 3])
-
-            # ─── follow-up #2: top-N categorical values per column ───
-            # Per-column GROUP BY query. obscat is narrow and DuckDB is
-            # fast; with ~50 categorical columns this completes in
-            # ~hundreds of ms. The endpoint is called once per dataset-
-            # page load, not per user interaction.
-            if kind == 'cat' and col_names and top_n_categories > 0:
-                # Total non-missing count (per column) needed for `pct`.
-                # We re-derive it from pct_missing instead of issuing
-                # another COUNT — saves a roundtrip.
-                total_rows = (self._conn.execute(
-                    f"SELECT COUNT(*) FROM {view_name}"
-                ).fetchone() or (0,))[0]
-                for name in col_names:
-                    ident = _q(name)   # legacy stored col names may have '#'/space; trusted (comes from information_schema)
-                    try:
-                        rows_top = self._conn.execute(
-                            f"SELECT {ident}, COUNT(*) AS n "
-                            f"FROM {view_name} WHERE {ident} IS NOT NULL "
-                            f"GROUP BY {ident} ORDER BY n DESC LIMIT ?",
-                            [top_n_categories],
-                        ).fetchall()
-                    except Exception:
+                    top_rows = self._conn.execute(top_sql, [int(top_n_categories)]).fetchall()
+                except duckdb.Error:
+                    top_rows = []
+                for col_name, col_value, count in top_rows:
+                    entry = out.get(col_name)
+                    if entry is None or entry['type'] != 'cat':
                         continue
-                    non_missing = max(
-                        0,
-                        int(total_rows * (1.0 - out[name]['pct_missing'] / 100.0)),
-                    ) if total_rows else 0
-                    top_items = []
-                    for value, count in rows_top:
-                        pct = (100.0 * count / non_missing) if non_missing else 0.0
-                        top_items.append({
-                            'value': str(value) if value is not None else None,
-                            'count': int(count),
-                            'pct': round(pct, 2),
-                        })
-                    out[name]['top'] = top_items
+                    non_missing = entry['non_null']
+                    entry['top'].append({
+                        'value': str(col_value) if col_value is not None else None,
+                        'count': int(count),
+                        'pct': round(100.0 * count / non_missing, 2) if non_missing else 0.0,
+                    })
+            for name, _ in columns:
+                out.get(name, {}).pop('non_null', None)
 
-        # ─── extension: include score-parquet columns as numerical stats ───
-        # obs_summary walks obscat/obsnum but the score sidecar (aucell,
-        # starcat, geneset) lives in <basename>.scores.parquet — read it
-        # here so the modules-tab stats row can hydrate from the same
-        # /obs_summary payload.
+        # Score-sidecar columns as numerical stats: one grouped scan of the
+        # long-format parquet (cell_id, source, catalog, module, score).
         sidecar = self._scores_sidecar_path()
         if sidecar is not None:
             try:
                 score_index = self._load_score_index()
                 if score_index:
-                    # One SUMMARIZE over the pivoted parquet would be ideal
-                    # but the parquet is long-form (cell_name, source,
-                    # catalog, module, value). Aggregate per (source,
-                    # catalog, module) — one bulk scan with GROUP BY.
-                    triples_rows = self._conn.execute(f"""
+                    quantile_list = ', '.join(str(p) for p in _OBS_SUMMARY_QUANTILES)
+                    triple_rows = self._conn.execute(f"""
                         SELECT source, catalog, module,
-                               MIN(score)  AS min_v,
-                               MAX(score)  AS max_v,
-                               AVG(score)  AS mean_v,
-                               MEDIAN(score) AS median_v,
-                               quantile_cont(score, 0.05) AS q05_v,
-                               quantile_cont(score, 0.25) AS q25_v,
-                               quantile_cont(score, 0.75) AS q75_v,
-                               quantile_cont(score, 0.95) AS q95_v,
-                               COUNT(*)    AS n_v,
-                               SUM(CASE WHEN score IS NULL THEN 1 ELSE 0 END) AS n_null
+                               MIN(score), MAX(score), AVG(score),
+                               quantile_cont(score, [{quantile_list}]),
+                               COUNT(*), COUNT(*) - COUNT(score)
                         FROM read_parquet(?)
                         GROUP BY source, catalog, module
+                        ORDER BY source, catalog, module
                     """, [str(sidecar)]).fetchall()
-                    # Invert score_index: (source, catalog, module) → col_name
                     reverse_index = {v: k for k, v in score_index.items()}
-                    for source, catalog, module, mn, mx, mean_v, med, q05, q25, q75, q95, n_v, n_null in triples_rows:
+                    for (source, catalog, module, min_value, max_value, mean_value,
+                         quantiles, n_rows, n_null) in triple_rows:
                         col_name = reverse_index.get((source, catalog, module))
                         if not col_name or col_name in out:
                             continue
-                        pct_missing = round(100.0 * (n_null or 0) / n_v, 2) if n_v else 0.0
+                        q05 = q25 = median = q75 = q95 = None
+                        if quantiles is not None:
+                            q05, q25, median, q75, q95 = (_coerce_num(v) for v in quantiles)
                         out[col_name] = {
                             'type': 'num',
-                            'min':    _coerce_num(mn),
-                            'max':    _coerce_num(mx),
-                            'mean':   _coerce_num(mean_v),
-                            'median': _coerce_num(med),
-                            'q05':    _coerce_num(q05),
-                            'q25':    _coerce_num(q25),
-                            'q75':    _coerce_num(q75),
-                            'q95':    _coerce_num(q95),
-                            'pct_missing': pct_missing,
+                            'min': _coerce_num(min_value),
+                            'max': _coerce_num(max_value),
+                            'mean': _coerce_num(mean_value),
+                            'median': median,
+                            'q05': q05, 'q25': q25, 'q75': q75, 'q95': q95,
+                            'pct_missing': round(100.0 * (n_null or 0) / n_rows, 2) if n_rows else 0.0,
                         }
-            except Exception:
-                pass   # non-fatal — sidecar shape drift shouldn't kill the endpoint
+            except duckdb.Error:
+                pass   # sidecar shape drift must not kill the endpoint
 
         return out
 
@@ -833,13 +961,13 @@ class AnthiveDB:
         if metadata_fields:
             if metadata_fields == ["*"]:
                 for field in num_fields_real:
-                    select_parts.append(f'n."{field}"')
+                    select_parts.append(f'n.{_q(field)}')
                 if num_fields_real:
                     metadata_joins.append("LEFT JOIN obsnum n ON c.cell_name = n.cell_name")
 
                 cat_fields = self._get_categorical_fields()
                 for field in cat_fields:
-                    select_parts.append(f'cat."{field}"')
+                    select_parts.append(f'cat.{_q(field)}')
                 if cat_fields:
                     metadata_joins.append("LEFT JOIN obscat cat ON c.cell_name = cat.cell_name")
 
@@ -860,52 +988,84 @@ class AnthiveDB:
 
                 for field in metadata_fields:
                     if field in real_num_set:
-                        select_parts.append(f'n."{field}"')
+                        select_parts.append(f'n.{_q(field)}')
                     elif field in cat_set:
-                        select_parts.append(f'cat."{field}"')
+                        select_parts.append(f'cat.{_q(field)}')
                     elif field in score_index:
                         score_fields_to_merge.append(field)
 
-        # Build WHERE clause from filters
+        # Build WHERE clause from filters. Parameters are bound in SQL text
+        # order: SELECT (gene subqueries) → JOIN (score sidecar) → WHERE.
         where_parts = []
+        join_params: List[Any] = []
+        where_params: List[Any] = []
         if filters:
-            num_fields = self._get_numerical_fields()
-            cat_fields = self._get_categorical_fields()
+            real_num_set = set(num_fields_real)
+            cat_set = set(self._get_categorical_fields())
+            filters = dict(filters)
+            # cell_name restricts to an explicit cell list (the plot
+            # endpoints pass the sampled embedding cells this way). Bound
+            # as one LIST parameter so a 100k-cell sample is a hash semi-join.
+            cell_name_filter = filters.pop('cell_name', None)
+            if cell_name_filter is not None:
+                cell_names = (list(cell_name_filter)
+                              if isinstance(cell_name_filter, (list, tuple, set))
+                              else [cell_name_filter])
+                where_parts.append("c.cell_name IN (SELECT UNNEST(?::VARCHAR[]))")
+                where_params.append([str(name) for name in cell_names])
+            unknown = [f for f in filters if f not in real_num_set and f not in cat_set
+                       and f not in score_index]
+            if unknown:
+                raise ValueError(f"Unknown filter field(s): {unknown!r}")
 
-            # Ensure we have joins for filtered fields
-            needs_num_join = any(f in num_fields for f in filters.keys())
-            needs_cat_join = any(f in cat_fields for f in filters.keys())
-
-            if needs_num_join and "LEFT JOIN obsnum n" not in ' '.join(metadata_joins):
+            joined = ' '.join(metadata_joins)
+            if any(f in real_num_set for f in filters) and "LEFT JOIN obsnum n" not in joined:
                 metadata_joins.append("LEFT JOIN obsnum n ON c.cell_name = n.cell_name")
-            if needs_cat_join and "LEFT JOIN obscat cat" not in ' '.join(metadata_joins):
+            if any(f in cat_set for f in filters) and "LEFT JOIN obscat cat" not in joined:
                 metadata_joins.append("LEFT JOIN obscat cat ON c.cell_name = cat.cell_name")
 
-            for field, value in filters.items():
-                if field in num_fields:
-                    prefix = 'n'
-                elif field in cat_fields:
-                    prefix = 'cat'
+            sidecar = self._scores_sidecar_path()
+            for filter_position, (field, value) in enumerate(filters.items()):
+                if field in real_num_set:
+                    col_sql = f'n.{_q(field)}'   # trusted: matched against the schema
+                    is_numeric = True
+                elif field in cat_set:
+                    col_sql = f'cat.{_q(field)}'
+                    is_numeric = False
                 else:
-                    continue
+                    # Score-sidecar virtual column: join just that triple.
+                    alias = f'score_filter_{filter_position}'
+                    metadata_joins.append(
+                        f"LEFT JOIN (SELECT cell_id, score FROM read_parquet(?) "
+                        f"WHERE source = ? AND catalog = ? AND module = ?) {alias} "
+                        f"ON {alias}.cell_id = c.cell_id"
+                    )
+                    join_params.extend([str(sidecar), *score_index[field]])
+                    col_sql = f'{alias}.score'
+                    is_numeric = True
 
-                # `field` was validated against num_fields / cat_fields (which
-                # come from the duckdb schema), so safe_ident() will accept it
-                # and produce a properly quoted identifier.
-                col_sql = safe_ident(field)
-
-                if isinstance(value, tuple) and len(value) == 2:
-                    # Range filter: field:(min, max)
-                    where_parts.append(f'{prefix}.{col_sql} BETWEEN ? AND ?')
-                    params.extend([value[0], value[1]])
-                elif isinstance(value, list):
-                    # IN list: field:[v1, v2, ...]
-                    placeholders = ', '.join(['?'] * len(value))
-                    where_parts.append(f'{prefix}.{col_sql} IN ({placeholders})')
-                    params.extend(value)
+                if is_numeric:
+                    if isinstance(value, tuple) and len(value) == 2:
+                        where_parts.append(f'{col_sql} BETWEEN ? AND ?')
+                        where_params.extend(_numeric_filter_value(field, v) for v in value)
+                    elif isinstance(value, list):
+                        placeholders = ', '.join(['?'] * len(value))
+                        where_parts.append(f'{col_sql} IN ({placeholders})')
+                        where_params.extend(_numeric_filter_value(field, v) for v in value)
+                    else:
+                        where_parts.append(f'{col_sql} = ?')
+                        where_params.append(_numeric_filter_value(field, value))
                 else:
-                    where_parts.append(f'{prefix}.{col_sql} = ?')
-                    params.append(value)
+                    # Categorical values compare as text. A tuple here is the
+                    # /cells "a,b" syntax parsed as a numeric range, which on
+                    # a categorical column means the IN-list {a, b}.
+                    raw_values = list(value) if isinstance(value, (list, tuple)) else [value]
+                    text_values = _categorical_filter_values(raw_values)
+                    placeholders = ', '.join(['?'] * len(text_values))
+                    where_parts.append(f'{col_sql} IN ({placeholders})')
+                    where_params.extend(text_values)
+
+        params = params + join_params + where_params
 
         # Build inner SQL (filters applied here, sampling wraps this)
         inner_sql = f"""
@@ -929,14 +1089,11 @@ class AnthiveDB:
 
         df = self._conn.execute(sql, params).fetchdf()
 
-        # Merge in any parquet-sidecar score columns the caller asked for.
-        # We fetch per column so predicate pushdown in DuckDB keeps the read
-        # narrow; then merge on cell_name so downstream code doesn't have to
-        # know the difference.
+        # Merge in the parquet-sidecar score columns the caller asked for:
+        # one sidecar read for all of them, one merge on cell_name.
         if score_fields_to_merge:
-            for virtual_col in score_fields_to_merge:
-                score_df = self._fetch_score_values(virtual_col)
-                df = df.merge(score_df, on='cell_name', how='left')
+            score_df = self._fetch_score_matrix(list(dict.fromkeys(score_fields_to_merge)))
+            df = df.merge(score_df, on='cell_name', how='left')
         return df
 
     def get_embedding_data(self, embedding_id: str,
@@ -1233,12 +1390,29 @@ class AnthiveDB:
                     # sidecar (via _layer_source_with_names) rather than the
                     # persisted view — the view has a host-baked absolute
                     # path that breaks on any host other than the migrator.
-                    layer_src = self._layer_source_with_names(layer)
-                    all_means = self._conn.execute(f"""
-                        SELECT gene_name, SUM(value) / {n_cells}.0 AS mean_expr
-                        FROM {layer_src}
-                        GROUP BY gene_name
-                    """).fetchall()
+                    # Aggregate on gene_id straight off the layer and map to
+                    # names afterwards: joining every nonzero value to
+                    # __cells + __genes first forced a read of the (wide)
+                    # cell_id column and a 10^8-10^10-row hash join.
+                    gene_filter_src = self._layer_source_for_gene_filter(layer)
+                    try:
+                        all_means = self._conn.execute(f"""
+                            SELECT g.gene_name, s.sum_value / {n_cells}.0 AS mean_expr
+                            FROM (
+                                SELECT gene_id, SUM(value) AS sum_value
+                                FROM {gene_filter_src}
+                                GROUP BY gene_id
+                            ) s
+                            JOIN __genes g ON g.gene_id = s.gene_id
+                        """).fetchall()
+                    except duckdb.BinderException:
+                        # Legacy layer view with (cell_name, gene_name, value) only.
+                        layer_src = self._layer_source_with_names(layer)
+                        all_means = self._conn.execute(f"""
+                            SELECT gene_name, SUM(value) / {n_cells}.0 AS mean_expr
+                            FROM {layer_src}
+                            GROUP BY gene_name
+                        """).fetchall()
                     means_dict = {row[0]: float(row[1]) for row in all_means}
                     if means_dict:
                         sorted_vals = sorted(means_dict.values())
@@ -1716,13 +1890,15 @@ class AnthiveDB:
                 WHERE gene_id IN (SELECT gene_id FROM control)
                 GROUP BY cell_id
             )
+            -- Every cell gets a score: a cell with no nonzero module or
+            -- control expression scores 0 - 0 = 0 (sparse storage omits zeros).
             SELECT
                 cl.cell_name,
                 COALESCE(ma.m, 0.0) - COALESCE(ca.c, 0.0) AS module_score
             FROM __cells cl
             LEFT JOIN module_avg  ma ON cl.cell_id = ma.cell_id
             LEFT JOIN control_avg ca ON cl.cell_id = ca.cell_id
-            WHERE ma.cell_id IS NOT NULL OR ca.cell_id IS NOT NULL
+            ORDER BY cl.cell_id
         """).fetchdf()
 
         meta = {
@@ -1837,8 +2013,9 @@ class AnnotationWriter:
             w.add_categorical('Identity_Label', other_series)
             w.commit()
 
-    On exception inside the `with` block, columns added during this transaction
-    are dropped. On clean exit without `.commit()`, also rolls back.
+    The with-block is one DuckDB transaction: on exception, or on exit
+    without `.commit()`, added columns, overwritten values, view rebuilds and
+    __pending_cols rows are all rolled back.
 
     Locking: a cooperative flock on `<duckdb>.lock` prevents two writers.
     ant-serve's read-only connections are unaffected (DuckDB MVCC).
@@ -1906,6 +2083,7 @@ class AnnotationWriter:
         # for rollback. Cleared on commit().
         self._txn_cols: List[Tuple[str, str]] = []
         self._committed = False
+        self._in_transaction = False
 
     # --------- context management ---------
 
@@ -1919,7 +2097,19 @@ class AnnotationWriter:
         try:
             self._conn = self._open_with_release_retry()
             self._ensure_pending_table()
+            # One transaction for the whole with-block: ADD COLUMN, UPDATE,
+            # view rebuilds and __pending_cols rows land together or not at
+            # all (DuckDB DDL is transactional). A crash before commit()
+            # leaves the duckdb exactly as it was.
+            self._conn.execute("BEGIN TRANSACTION")
+            self._in_transaction = True
         except Exception:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
             self._release_lock()
             raise
         return self
@@ -2094,8 +2284,14 @@ class AnnotationWriter:
         )
 
     def commit(self) -> None:
-        """Mark the transaction as committed; nothing to flush — DuckDB
-        DDL is autocommit. Just clears the rollback list and seals."""
+        """COMMIT the with-block's transaction and seal the writer."""
+        if self._committed:
+            return
+        if self._conn is None:
+            raise AnnotationWriterError("Writer not entered (use `with`).")
+        if self._in_transaction:
+            self._conn.execute("COMMIT")
+            self._in_transaction = False
         self._txn_cols = []
         self._committed = True
 
@@ -2307,8 +2503,21 @@ class AnnotationWriter:
         )
 
     def _rollback_txn(self) -> None:
-        """Drop columns added in this transaction; clear their pending rows."""
-        if self._conn is None or not self._txn_cols:
+        """ROLLBACK the with-block's transaction (schema, values, views and
+        __pending_cols all revert). Falls back to dropping the added columns
+        by hand only if ROLLBACK itself fails."""
+        if self._conn is None:
+            return
+        if self._in_transaction:
+            try:
+                self._conn.execute("ROLLBACK")
+                self._in_transaction = False
+                self._txn_cols = []
+                return
+            except Exception as exc:
+                print(f"  ⚠ rollback: ROLLBACK failed ({exc}); dropping added columns manually")
+                self._in_transaction = False
+        if not self._txn_cols:
             return
         for col_name, target in reversed(self._txn_cols):
             underscore_table = f"__{target}"
