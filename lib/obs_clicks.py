@@ -6,7 +6,7 @@ ant-serve increments a counter, and the dataset page later fetches the
 top-N most-clicked columns to surface as suggestions.
 
 Design notes:
-  - One SQLite file (`tmp/obs_clicks.db` by default; configurable).
+  - One SQLite file (`var/obs_clicks.db` by default; configurable).
   - One table, `clicks(db_id, column, n, last_seen)`. PK on (db_id, column).
   - Increments via INSERT OR REPLACE / ON CONFLICT — fire-and-forget,
     fast. The endpoint replies 204 without waiting on disk fsync.

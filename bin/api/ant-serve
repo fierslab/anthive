@@ -607,7 +607,7 @@ class DatabaseRegistry:
         # Keyed by mus sha256 + day-bucketed duckdb mtime — see
         # GeneStatsCache.fingerprint. Lives next to the in-memory metadata
         # cache so it co-locates with the data deposit.
-        self.gene_stats_cache = GeneStatsCache(Path('./tmp/gene_stats_cache.db'))
+        self.gene_stats_cache = GeneStatsCache(Path(__file__).resolve().parent.parent.parent / 'var' / 'gene_stats_cache.db')
 
         # Precomputed fleet-wide (dataset, gene) stats index. Rebuilt by
         # ``bin/annot/ant-gene-stats-precompute``. Loaded at startup and
@@ -3137,19 +3137,19 @@ async def get_obs_summary(db_id: str, top_n: int = 3):
 # the most-popular obs columns per dataset. The dataset page renders these as
 # a "frequently used" chip row above the curated favourites.
 #
-# Storage: tmp/obs_clicks.db. Survives ant-serve restarts but is per-host
-# (not synced to S3). Wipe at any time — purely usage data.
+# Storage: var/obs_clicks.db (var/ holds persistent state; tmp/ may be wiped).
+# Per-host, not synced to S3.
 
 _obs_click_store_instance: 'Optional[Any]' = None
 
 
 def _get_obs_click_store():
-    """Lazy singleton. Path is fixed at tmp/obs_clicks.db under repo root."""
+    """Lazy singleton. Path is fixed at var/obs_clicks.db under repo root."""
     global _obs_click_store_instance
     if _obs_click_store_instance is None:
         from obs_clicks import ObsClickStore  # noqa: PLC0415
         repo_root = Path(__file__).resolve().parent.parent.parent
-        _obs_click_store_instance = ObsClickStore(repo_root / 'tmp' / 'obs_clicks.db')
+        _obs_click_store_instance = ObsClickStore(repo_root / 'var' / 'obs_clicks.db')
     return _obs_click_store_instance
 
 

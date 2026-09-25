@@ -3,6 +3,8 @@ webapp/
 
 # Temporary / generated files (go in tmp/)
 tmp/
+# Persistent per-host state (SQLite caches, click history). Never wipe casually.
+var/
 .jupyterlite.doit.db
 
 # Server logs and pids
