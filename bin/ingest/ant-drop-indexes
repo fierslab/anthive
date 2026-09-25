@@ -1,0 +1,509 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "duckdb>=1.1.0",
+#   "pyyaml>=6.0",
+# ]
+# ///
+"""
+ant-drop-indexes: rewrite dataset .duckdb files without the redundant ART indexes.
+
+ant-convert used to create one ART index per categorical obs column
+(idx_obscat_*), a duplicate idx_cells_name / idx_genes_name next to the
+UNIQUE constraints that already index those columns, and idx_obsm_*_cell on
+columns that are already PRIMARY KEY. DuckDB never uses them for the queries
+anthive issues (it plans sequential scans), they roughly triple file size, and
+they make AnnotationWriter overwrites of an indexed column 100-4000x slower.
+DROP INDEX alone does not shrink the file, so this tool rebuilds each file.
+
+Per file:
+  1. Refuse if a live writer exists: <db>.rebuilding sentinel owned by a live
+     process, an un-checkpointed <db>.wal, a held <db>.lock flock, or a
+     read-write DuckDB lock.
+  2. Take the <db>.lock flock and write a <db>.rebuilding sentinel, so
+     AnnotationWriter / ant-merge-h5ad / ant-convert stay out.
+  3. Build <db>.dropidx.tmp next to the original with
+     COPY FROM DATABASE (SCHEMA), DROP INDEX on the targeted indexes, then
+     COPY FROM DATABASE (DATA). The original is only ever opened read-only.
+  4. Verify: every table's row count and content hash, column definitions,
+     constraints, view SQL, the surviving indexes, and __pending_cols.
+  5. Ask ant-serve to release the db (/admin/release/{db_id}), atomically
+     rename the temp file over the original (mode and mtime preserved, since
+     the content is identical and mtime is used as a cache fingerprint), then
+     /admin/restore/{db_id}.
+
+A crash or kill at any point before the rename leaves the original untouched;
+rerunning cleans up the stale sentinel and temp file.
+
+Input:  one or more .duckdb paths or globs (quote globs so the tool expands
+        them; paths under _-prefixed staging folders are skipped by globs).
+Output: rewritten .duckdb files and a before/after size report.
+
+Usage:
+  ant-drop-indexes --dry-run 'data/h5adstore/*/*.duckdb'
+  ant-drop-indexes data/h5adstore/Gabitto2024/Seattle_PFC_MG.duckdb
+  ant-drop-indexes --no-coordinate path/to/db.duckdb   # ant-serve not running
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import glob
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import duckdb
+
+script_dir = Path(__file__).resolve().parent
+sys.path.insert(0, str(script_dir.parent.parent / 'lib'))
+
+from metadata import parse_md_file  # noqa: E402
+
+TARGET_INDEX_RE = re.compile(r'^(idx_obscat_.*|idx_cells_name|idx_genes_name|idx_obsm_.*_cell)$')
+SENTINEL_TAG = 'ant-drop-indexes'
+
+
+class DropIndexError(Exception):
+    """Refusal or failure for one database file."""
+
+
+def target_indexes(conn: duckdb.DuckDBPyConnection, database: str) -> List[Tuple[str, str]]:
+    """(schema, index) pairs of the redundant indexes present in `database`."""
+    rows = conn.execute(
+        "SELECT schema_name, index_name FROM duckdb_indexes() WHERE database_name = ? ORDER BY index_name",
+        [database],
+    ).fetchall()
+    return [(schema, name) for schema, name in rows if TARGET_INDEX_RE.match(name)]
+
+
+class AntServeUnreachable(Exception):
+    """No ant-serve listening at the configured URL."""
+
+
+def post_ant_serve(base_url: str, path: str, timeout: float = 45.0) -> Dict[str, Any]:
+    """POST to ant-serve. Raises AntServeUnreachable only when nothing is listening;
+    an HTTP error response (the server IS running) raises DropIndexError."""
+    url = base_url.rstrip('/') + '/' + path.lstrip('/')
+    request = urllib.request.Request(url, method='POST', headers={'Content-Length': '0'})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read()
+    except urllib.error.HTTPError as exc:
+        raise DropIndexError(f'POST {url} returned HTTP {exc.code}: {exc.read()[:200]!r}') from exc
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, ConnectionRefusedError):
+            raise AntServeUnreachable(url) from exc
+        raise DropIndexError(f'POST {url} failed: {exc.reason}') from exc
+    try:
+        return json.loads(body.decode())
+    except ValueError:
+        return {'ok': False, 'raw': body[:200].decode(errors='replace')}
+
+
+def catalog_fingerprint(conn: duckdb.DuckDBPyConnection, database: str) -> Dict[str, Any]:
+    """Everything that must be identical before and after the rewrite, except the dropped indexes."""
+    fingerprint: Dict[str, Any] = {}
+    fingerprint['columns'] = conn.execute(
+        "SELECT schema_name, table_name, column_name, column_index, data_type, column_default, is_nullable "
+        "FROM duckdb_columns() WHERE database_name = ? AND NOT internal "
+        "ORDER BY schema_name, table_name, column_index",
+        [database],
+    ).fetchall()
+    fingerprint['constraints'] = sorted(conn.execute(
+        "SELECT schema_name, table_name, constraint_type, constraint_text "
+        "FROM duckdb_constraints() WHERE database_name = ?",
+        [database],
+    ).fetchall())
+    fingerprint['views'] = conn.execute(
+        "SELECT schema_name, view_name, sql FROM duckdb_views() "
+        "WHERE database_name = ? AND NOT internal ORDER BY schema_name, view_name",
+        [database],
+    ).fetchall()
+    fingerprint['indexes'] = [
+        row for row in conn.execute(
+            "SELECT schema_name, table_name, index_name, sql FROM duckdb_indexes() "
+            "WHERE database_name = ? ORDER BY index_name",
+            [database],
+        ).fetchall()
+        if not TARGET_INDEX_RE.match(row[2])
+    ]
+    fingerprint['sequences'] = conn.execute(
+        "SELECT schema_name, sequence_name FROM duckdb_sequences() WHERE database_name = ? ORDER BY 1, 2",
+        [database],
+    ).fetchall()
+    fingerprint['macros'] = conn.execute(
+        "SELECT DISTINCT schema_name, function_name FROM duckdb_functions() "
+        "WHERE database_name = ? AND NOT internal ORDER BY 1, 2",
+        [database],
+    ).fetchall()
+    tables = conn.execute(
+        "SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = ? AND NOT internal "
+        "ORDER BY schema_name, table_name",
+        [database],
+    ).fetchall()
+    contents = []
+    for schema_name, table_name in tables:
+        qualified = f'"{database}"."{schema_name}"."{table_name}"'
+        # sum of per-row hashes: order-independent, and duplicate rows do not cancel.
+        count, content_hash = conn.execute(
+            f'SELECT count(*), coalesce(sum(hash(t)::HUGEINT), 0) FROM {qualified} AS t'
+        ).fetchone()
+        contents.append((schema_name, table_name, count, int(content_hash)))
+    fingerprint['tables'] = contents
+    return fingerprint
+
+
+def diff_fingerprints(before: Dict[str, Any], after: Dict[str, Any]) -> List[str]:
+    """Human-readable list of differing fingerprint sections (empty when identical)."""
+    problems = []
+    for section in before:
+        if before[section] != after.get(section):
+            missing = [item for item in before[section] if item not in after.get(section, [])]
+            extra = [item for item in after.get(section, []) if item not in before[section]]
+            problems.append(f'{section}: missing={missing[:3]} extra={extra[:3]}')
+    return problems
+
+
+def db_id_for(duckdb_path: Path) -> Optional[str]:
+    """Canonical '{group_id}/{file_id}' from the sibling .md and the folder index.md, or None."""
+    md_path = duckdb_path.with_suffix('.md')
+    index_path = duckdb_path.parent / 'index.md'
+    if not md_path.exists() or not index_path.exists():
+        return None
+    try:
+        data_meta, _ = parse_md_file(md_path)
+        index_meta, _ = parse_md_file(index_path)
+    except Exception:
+        return None
+    file_id = str((data_meta or {}).get('id') or '').strip()
+    group_id = str((index_meta or {}).get('group_id') or '').strip()
+    if not file_id or not group_id:
+        return None
+    return f'{group_id}/{file_id}'
+
+
+def resolve_ant_serve_url(args: argparse.Namespace) -> Optional[str]:
+    """Same convention as ant-score: CLI override, else anthive.yaml host/port."""
+    if args.no_coordinate:
+        return None
+    if args.api_url:
+        return args.api_url.rstrip('/')
+    from config import get_config  # noqa: PLC0415
+    config = get_config()
+    host = config.get('rest_api_host', 'localhost')
+    port = config.get('rest_api_port', 8080)
+    return f'http://{host}:{port}/api/'
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def sentinel_owner(sentinel: Path) -> Tuple[str, Optional[int]]:
+    """(tag, pid) parsed from a '<tag> pid=<n>' sentinel; pid None if unparseable."""
+    try:
+        text = sentinel.read_text().strip()
+    except FileNotFoundError:
+        return '', None
+    match = re.match(r'^(\S+)\s+pid=(\d+)', text)
+    if not match:
+        return text, None
+    return match.group(1), int(match.group(2))
+
+
+class DropIndexJob:
+    """Rewrite one .duckdb without the targeted indexes. Use via run()."""
+
+    def __init__(self, duckdb_path: Path, *, dry_run: bool, ant_serve_url: Optional[str],
+                 threads: int, keep_mtime: bool = True):
+        self.path = duckdb_path.resolve()
+        self.dry_run = dry_run
+        self.ant_serve_url = ant_serve_url
+        self.threads = threads
+        self.keep_mtime = keep_mtime
+        self.lock_path = self.path.with_name(self.path.name + '.lock')
+        self.sentinel = self.path.with_name(self.path.name + '.rebuilding')
+        self.wal_path = self.path.with_name(self.path.name + '.wal')
+        self.tmp_path = self.path.with_name(self.path.name + '.dropidx.tmp')
+        self.db_id = db_id_for(self.path)
+        self._lock_fd = None
+        self._sentinel_written = False
+        self._released = False
+
+    # ---- preflight ------------------------------------------------------
+
+    def _clear_stale_leftovers(self) -> None:
+        """Remove a sentinel and temp file left behind by a killed earlier run of this tool."""
+        if self.sentinel.exists():
+            tag, pid = sentinel_owner(self.sentinel)
+            if tag == SENTINEL_TAG and pid is not None and not _pid_alive(pid):
+                print(f'  removing stale sentinel from dead {SENTINEL_TAG} pid={pid}')
+                self.sentinel.unlink()
+                for leftover in (self.tmp_path, self.tmp_path.with_name(self.tmp_path.name + '.wal')):
+                    if leftover.exists():
+                        leftover.unlink()
+            else:
+                raise DropIndexError(
+                    f'{self.sentinel.name} exists ({tag or "unknown owner"} pid={pid}); '
+                    f'a rebuild is in progress. Refusing.'
+                )
+
+    def _preflight_read_only(self) -> List[Tuple[str, str]]:
+        if self.wal_path.exists():
+            raise DropIndexError(
+                f'{self.wal_path.name} exists: a writer is active or did not checkpoint. Refusing.'
+            )
+        try:
+            conn = duckdb.connect(str(self.path), read_only=True)
+        except duckdb.IOException as exc:
+            if 'lock' in str(exc).lower():
+                raise DropIndexError(f'DuckDB write lock held by another process: {exc}') from exc
+            raise
+        try:
+            database = conn.execute('SELECT current_database()').fetchone()[0]
+            return target_indexes(conn, database)
+        finally:
+            conn.close()
+
+    # ---- locking --------------------------------------------------------
+
+    def _acquire(self) -> None:
+        self._lock_fd = open(self.lock_path, 'w')
+        try:
+            fcntl.flock(self._lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            self._lock_fd.close()
+            self._lock_fd = None
+            raise DropIndexError(f'{self.lock_path.name} is held: another writer is active. Refusing.') from exc
+        # O_EXCL: fail rather than overwrite a sentinel that appeared since preflight.
+        try:
+            fd = os.open(self.sentinel, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError as exc:
+            raise DropIndexError(f'{self.sentinel.name} appeared concurrently. Refusing.') from exc
+        with os.fdopen(fd, 'w') as handle:
+            handle.write(f'{SENTINEL_TAG} pid={os.getpid()}\n')
+        self._sentinel_written = True
+
+    def _release_locks(self) -> None:
+        if self._sentinel_written:
+            tag, pid = sentinel_owner(self.sentinel)
+            if tag == SENTINEL_TAG and pid == os.getpid():
+                self.sentinel.unlink()
+            self._sentinel_written = False
+        if self._lock_fd is not None:
+            try:
+                fcntl.flock(self._lock_fd.fileno(), fcntl.LOCK_UN)
+            finally:
+                self._lock_fd.close()
+                self._lock_fd = None
+            try:
+                self.lock_path.unlink()
+            except FileNotFoundError:
+                pass
+
+    # ---- rebuild + verify ----------------------------------------------
+
+    def _build(self) -> Tuple[int, List[Tuple[str, str]]]:
+        for leftover in (self.tmp_path, self.tmp_path.with_name(self.tmp_path.name + '.wal')):
+            if leftover.exists():
+                leftover.unlink()
+        conn = duckdb.connect(str(self.tmp_path), config={'threads': self.threads})
+        try:
+            new_db = conn.execute('SELECT current_database()').fetchone()[0]
+            escaped_src = str(self.path).replace("'", "''")
+            conn.execute(f"ATTACH '{escaped_src}' AS src (READ_ONLY)")
+            before = catalog_fingerprint(conn, 'src')
+            conn.execute(f'COPY FROM DATABASE src TO "{new_db}" (SCHEMA)')
+            dropped = target_indexes(conn, new_db)
+            for schema_name, index_name in dropped:
+                conn.execute(f'DROP INDEX "{new_db}"."{schema_name}"."{index_name}"')
+            conn.execute(f'COPY FROM DATABASE src TO "{new_db}" (DATA)')
+            conn.execute('CHECKPOINT')
+            after = catalog_fingerprint(conn, new_db)
+            problems = diff_fingerprints(before, after)
+            leftover = target_indexes(conn, new_db)
+            if leftover:
+                problems.append(f'targeted indexes still present: {leftover}')
+            if problems:
+                raise DropIndexError('verification failed: ' + '; '.join(problems))
+            conn.execute('DETACH src')
+        finally:
+            conn.close()
+        return len(dropped), dropped
+
+    # ---- swap -----------------------------------------------------------
+
+    def _coordinate_release(self) -> None:
+        if not self.ant_serve_url:
+            return
+        if not self.db_id:
+            raise DropIndexError(
+                'cannot derive db_id (need id: in the .md and group_id: in index.md) to ask '
+                'ant-serve to release the file; pass --no-coordinate only if ant-serve is stopped.'
+            )
+        try:
+            result = post_ant_serve(self.ant_serve_url, f'/admin/release/{self.db_id}')
+        except AntServeUnreachable:
+            print('  ant-serve not listening; assuming it is not running')
+            return
+        if not result.get('ok'):
+            # The eviction may be set even when draining timed out; clear it.
+            self._released = True
+            raise DropIndexError(f'ant-serve did not release {self.db_id}: {result}')
+        self._released = True
+
+    def _coordinate_restore(self) -> None:
+        if self._released:
+            self._released = False
+            try:
+                post_ant_serve(self.ant_serve_url, f'/admin/restore/{self.db_id}')
+            except (DropIndexError, AntServeUnreachable) as exc:
+                print(f'  WARNING: /admin/restore/{self.db_id} failed ({exc}); restore it by hand')
+
+    def _swap(self, original_stat: os.stat_result) -> None:
+        current = self.path.stat()
+        if (current.st_ino, current.st_size, current.st_mtime_ns) != (
+                original_stat.st_ino, original_stat.st_size, original_stat.st_mtime_ns):
+            raise DropIndexError('original changed during the rebuild; not swapping')
+        tag, pid = sentinel_owner(self.sentinel)
+        if tag != SENTINEL_TAG or pid != os.getpid():
+            raise DropIndexError(f'sentinel taken over by {tag} pid={pid}; not swapping')
+        os.chmod(self.tmp_path, original_stat.st_mode & 0o7777)
+        if self.keep_mtime:
+            os.utime(self.tmp_path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+        with open(self.tmp_path, 'rb') as handle:
+            os.fsync(handle.fileno())
+        os.replace(self.tmp_path, self.path)
+        dir_fd = os.open(self.path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+
+    # ---- entry point ----------------------------------------------------
+
+    def run(self) -> Dict[str, Any]:
+        self._clear_stale_leftovers()
+        targets = self._preflight_read_only()
+        size_before = self.path.stat().st_size
+        report = {'path': str(self.path), 'db_id': self.db_id, 'n_targets': len(targets),
+                  'size_before': size_before, 'size_after': size_before, 'status': 'noop'}
+        if not targets:
+            return report
+        if self.dry_run:
+            report['status'] = 'dry-run'
+            return report
+        started = time.monotonic()
+        try:
+            self._acquire()
+            original_stat = self.path.stat()
+            n_dropped, _ = self._build()
+            self._coordinate_release()
+            self._swap(original_stat)
+        finally:
+            self._coordinate_restore()
+            if self.tmp_path.exists():
+                self.tmp_path.unlink()
+            tmp_wal = self.tmp_path.with_name(self.tmp_path.name + '.wal')
+            if tmp_wal.exists():
+                tmp_wal.unlink()
+            self._release_locks()
+        report.update(status='rewritten', n_targets=n_dropped, size_after=self.path.stat().st_size,
+                      seconds=round(time.monotonic() - started, 1))
+        return report
+
+
+def expand_inputs(patterns: List[str]) -> List[Path]:
+    """Expand files and globs; globs skip _-prefixed staging folders, explicit paths do not."""
+    found: List[Path] = []
+    for pattern in patterns:
+        if any(ch in pattern for ch in '*?['):
+            for match in sorted(glob.glob(pattern, recursive=True)):
+                if any(part.startswith('_') for part in Path(match).parts[:-1]):
+                    continue
+                if match.endswith('.duckdb'):
+                    found.append(Path(match))
+        else:
+            found.append(Path(pattern))
+    unique: List[Path] = []
+    seen = set()
+    for path in found:
+        key = path.resolve()
+        if key not in seen:
+            seen.add(key)
+            unique.append(path)
+    return unique
+
+
+def _mb(n_bytes: int) -> str:
+    return f'{n_bytes / 2**20:.1f} MB'
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0],
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('paths', nargs='+', help='.duckdb files or quoted globs')
+    parser.add_argument('--dry-run', action='store_true', help='report what would be dropped; write nothing')
+    parser.add_argument('--no-coordinate', action='store_true',
+                        help='do not ask ant-serve to release/restore (only when it is stopped)')
+    parser.add_argument('--api-url', help='ant-serve base URL (default: from anthive.yaml)')
+    parser.add_argument('--threads', type=int, default=4, help='DuckDB threads for the rebuild (default 4)')
+    parser.add_argument('--touch', action='store_true',
+                        help='give rewritten files a fresh mtime instead of preserving it')
+    args = parser.parse_args(argv)
+
+    from config import is_slave  # noqa: PLC0415
+    if not args.dry_run and is_slave():
+        print('refusing: this deployment is a slave (sync_policy.role=slave); rewrite on the primary.')
+        return 2
+
+    paths = expand_inputs(args.paths)
+    if not paths:
+        print('no .duckdb files matched')
+        return 1
+    ant_serve_url = resolve_ant_serve_url(args)
+    total_before = total_after = 0
+    failures = 0
+    for path in paths:
+        if not path.exists():
+            print(f'MISSING  {path}')
+            failures += 1
+            continue
+        job = DropIndexJob(path, dry_run=args.dry_run, ant_serve_url=ant_serve_url,
+                           threads=args.threads, keep_mtime=not args.touch)
+        try:
+            report = job.run()
+        except (DropIndexError, duckdb.Error, OSError) as exc:
+            print(f'FAILED   {path}: {exc}')
+            failures += 1
+            continue
+        total_before += report['size_before']
+        total_after += report['size_after']
+        if report['status'] == 'noop':
+            print(f'ok       {path} (no redundant indexes, {_mb(report["size_before"])})')
+        elif report['status'] == 'dry-run':
+            print(f'would    {path}: drop {report["n_targets"]} indexes ({_mb(report["size_before"])})')
+        else:
+            print(f'rewrote  {path}: dropped {report["n_targets"]} indexes, '
+                  f'{_mb(report["size_before"])} -> {_mb(report["size_after"])} in {report["seconds"]}s')
+    if not args.dry_run:
+        print(f'\ntotal {_mb(total_before)} -> {_mb(total_after)} across {len(paths) - failures} files, '
+              f'{failures} failed')
+    return 1 if failures else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
