@@ -959,66 +959,80 @@ class AnthiveDB:
             DataFrame with cell names and coordinates
         """
 
-        # Check if embedding exists
+        # embedding_id arrives from the URL path: resolve it against the
+        # schema (parameterised) and only ever interpolate the stored name.
+        if not isinstance(embedding_id, str) or not embedding_id:
+            raise ValueError("Embedding id must be a non-empty string")
         table_name = f"obsm__{embedding_id}"
-        exists = (self._conn.execute(f"""
-            SELECT COUNT(*)
-            FROM information_schema.tables
-            WHERE table_name = '{table_name}'
-        """).fetchone() or (0,))[0]
+        exists = (self._conn.execute(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+            [table_name],
+        ).fetchone() or (0,))[0]
 
         if not exists:
             raise ValueError(f"Embedding '{embedding_id}' not found")
 
-        # Get all columns
-        columns_result = self._conn.execute(f"""
-            SELECT column_name
-            FROM information_schema.columns
-            WHERE table_name = '{table_name}'
-            ORDER BY ordinal_position
-        """).fetchall()
+        all_cols = [row[0] for row in self._conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = ? ORDER BY ordinal_position",
+            [table_name],
+        ).fetchall()]
 
-        all_cols = [row[0] for row in columns_result]
-
-        # Select columns based on n_dims
         if n_dims is None:
-            # All dimensions
             select_cols = all_cols
         else:
-            # First n_dims + cell_name
-            dim_cols = [c for c in all_cols if c.startswith('dim_')][:n_dims]
+            dim_cols = [c for c in all_cols if c.startswith('dim_')][:int(n_dims)]
             select_cols = ['cell_name'] + dim_cols
+        select_sql = ', '.join(_q(c) for c in select_cols)
+        table_sql = _q(table_name)
 
-        limit_clause = f"LIMIT {limit}" if limit else ""
+        limit_clause = f"LIMIT {int(limit)}" if limit else ""
 
-        # Build optional WHERE clause from metadata filters
+        params: List[Any] = []
         filter_where = ""
         if filters:
-            num_fields = self._get_numerical_fields()
-            cat_fields = self._get_categorical_fields()
+            num_fields = set(self._get_numerical_fields())
+            cat_fields = set(self._get_categorical_fields())
+            score_fields = set(self._load_score_index())
+            unknown = [f for f in filters
+                       if f not in num_fields and f not in cat_fields]
+            if unknown:
+                raise ValueError(f"Unknown filter field(s): {', '.join(map(str, unknown))}")
+            scored = [f for f in filters if f in score_fields and f not in cat_fields]
+            if scored:
+                raise ValueError(
+                    f"Filtering on module-score columns is not supported: {', '.join(scored)}")
             sub_joins = []
             sub_where = []
             if any(f in num_fields for f in filters):
                 sub_joins.append("LEFT JOIN obsnum n ON c.cell_name = n.cell_name")
             if any(f in cat_fields for f in filters):
                 sub_joins.append("LEFT JOIN obscat cat ON c.cell_name = cat.cell_name")
+
+            def _bind(val: Any, numeric: bool) -> Any:
+                if numeric:
+                    try:
+                        return float(val)
+                    except (TypeError, ValueError):
+                        raise ValueError(
+                            f"Filter value {val!r} is not numeric") from None
+                return str(val)
+
             for field, value in filters.items():
-                if field in num_fields:
-                    prefix = 'n'
-                elif field in cat_fields:
-                    prefix = 'cat'
-                else:
-                    continue
+                numeric = field in num_fields
+                prefix = 'n' if numeric else 'cat'
+                col_sql = f"{prefix}.{_q(field)}"  # field validated against schema above
                 if isinstance(value, tuple) and len(value) == 2:
-                    sub_where.append(f'{prefix}."{field}" BETWEEN {value[0]} AND {value[1]}')
+                    sub_where.append(f"{col_sql} BETWEEN ? AND ?")
+                    params.extend([_bind(value[0], True), _bind(value[1], True)])
                 elif isinstance(value, list):
-                    quoted = ', '.join(f"'{v}'" for v in value)
-                    sub_where.append(f'{prefix}."{field}" IN ({quoted})')
+                    if not value:
+                        raise ValueError(f"Empty value list for filter {field!r}")
+                    sub_where.append(f"{col_sql} IN ({', '.join(['?'] * len(value))})")
+                    params.extend(_bind(v, numeric) for v in value)
                 else:
-                    if isinstance(value, str):
-                        sub_where.append(f'{prefix}."{field}" = \'{value}\'')
-                    else:
-                        sub_where.append(f'{prefix}."{field}" = {value}')
+                    sub_where.append(f"{col_sql} = ?")
+                    params.append(_bind(value, numeric))
             if sub_where:
                 subquery = (
                     f"SELECT c.cell_name FROM __cells c "
@@ -1028,17 +1042,17 @@ class AnthiveDB:
                 filter_where = f"WHERE cell_name IN ({subquery})"
 
         if sample:
-            inner = f"SELECT {', '.join(select_cols)} FROM {table_name} {filter_where}"
-            sql = f"SELECT * FROM ({inner}) USING SAMPLE {sample} ROWS (reservoir) {limit_clause}"
+            inner = f"SELECT {select_sql} FROM {table_sql} {filter_where}"
+            sql = f"SELECT * FROM ({inner}) USING SAMPLE {int(sample)} ROWS (reservoir) {limit_clause}"
         else:
             sql = f"""
-                SELECT {', '.join(select_cols)}
-                FROM {table_name}
+                SELECT {select_sql}
+                FROM {table_sql}
                 {filter_where}
                 {limit_clause}
             """
 
-        df = self._conn.execute(sql).fetchdf()
+        df = self._conn.execute(sql, params).fetchdf()
         return df
 
     def require_gene_bins(self) -> None:
