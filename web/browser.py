@@ -2750,6 +2750,33 @@ async def admin_feedback_view(request: Request):
     return templates.TemplateResponse(request, "admin_feedback.html", {})
 
 
+@router.get("/account/mcp", response_class=HTMLResponse)
+async def account_mcp_view(request: Request):
+    """The signed-in user's private MCP link: create, show, copy, rotate,
+    revoke, plus per-client setup snippets. Everything is fetched client-side
+    from ant-serve's /me/mcp (which identifies the user from the same proxy
+    headers); this route renders the shell and refuses un-proxied access."""
+    user = request.headers.get('remote-user')
+    if not user:
+        return templates.TemplateResponse(
+            request, "account_mcp.html", {"signed_in": False}, status_code=401)
+    return templates.TemplateResponse(
+        request, "account_mcp.html", {"signed_in": True, "user": user})
+
+
+@router.get("/admin/mcp-links", response_class=HTMLResponse)
+async def admin_mcp_links_view(request: Request):
+    """Admin overview of every user's MCP link with a revoke action. Rows come
+    client-side from ant-serve's admin-gated /admin/mcp-links."""
+    if not _is_admin(request):
+        return templates.TemplateResponse(
+            request, "index.html",
+            {"folders": [], "error": "Not authorized. Admins only."},
+            status_code=403,
+        )
+    return templates.TemplateResponse(request, "admin_mcp_links.html", {})
+
+
 @router.get("/genes/{gene}", response_class=HTMLResponse)
 async def gene_view(request: Request, gene: str):
     """Single-gene cross-catalogue atlas — where is {gene} expressed?

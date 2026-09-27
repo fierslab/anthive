@@ -1,0 +1,280 @@
+{% extends "base.html" %}
+
+{% block title %}Connect an AI client (MCP) · anthive{% endblock %}
+
+{% block content %}
+<style>
+  .mcp-page { max-width: 820px; }
+  .mcp-page h1 { font-size: 20px; font-weight: 600; margin: 4px 0 8px; }
+  .mcp-intro { color: var(--text); font-size: 14px; line-height: 1.55; margin: 0 0 14px; }
+  .mcp-warn { background: var(--accent-cream); border-left: 3px solid var(--accent-amber);
+              padding: 8px 12px; font-size: 13px; border-radius: 4px; margin: 0 0 16px; }
+  .mcp-card { border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin: 0 0 16px; }
+  .mcp-card h2 { font-size: 15px; font-weight: 600; margin: 0 0 10px; }
+  .mcp-url-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .mcp-url { flex: 1 1 320px; min-width: 0; font-family: var(--font-mono); font-size: 12.5px;
+             background: var(--hover); border: 1px solid var(--border); border-radius: 5px;
+             padding: 7px 9px; overflow-wrap: anywhere; user-select: all; }
+  .mcp-btn { font-family: var(--font); font-size: 13px; padding: 6px 12px; border-radius: 5px;
+             border: 1px solid var(--border); background: var(--bg); color: var(--text); cursor: pointer; }
+  .mcp-btn:hover { background: var(--hover); }
+  .mcp-btn.primary { background: var(--link); border-color: var(--link); color: #fff; }
+  .mcp-btn.primary:hover { filter: brightness(1.1); }
+  .mcp-btn.danger { color: var(--accent-red); border-color: #e7c3c3; }
+  .mcp-btn:disabled { opacity: .55; cursor: default; }
+  .mcp-meta { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 16px;
+              margin: 12px 0 4px; font-size: 13px; }
+  .mcp-meta dt { font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--text-muted); }
+  .mcp-meta dd { margin: 2px 0 0; }
+  .mcp-meta dd.soon { color: var(--accent-red); font-weight: 600; }
+  .mcp-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  .mcp-flash { font-size: 13px; margin-top: 10px; color: var(--link); min-height: 1em; }
+  .mcp-flash.err { color: #b91c1c; }
+  .mcp-state { color: var(--text-muted); font-size: 14px; padding: 8px 2px; }
+  .mcp-state.err { color: #b91c1c; }
+  .mcp-tabs { display: flex; gap: 4px; flex-wrap: wrap; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
+  .mcp-tab { font-family: var(--font); font-size: 13px; padding: 6px 12px; border: 1px solid transparent;
+             border-bottom: none; background: none; cursor: pointer; color: var(--text-muted);
+             border-radius: 5px 5px 0 0; margin-bottom: -1px; }
+  .mcp-tab[aria-selected="true"] { color: var(--text); border-color: var(--border); background: var(--bg); font-weight: 600; }
+  .mcp-panel p { font-size: 13px; margin: 0 0 8px; line-height: 1.5; }
+  .mcp-snippet { position: relative; }
+  .mcp-snippet pre { font-family: var(--font-mono); font-size: 12px; background: var(--hover);
+                     border: 1px solid var(--border); border-radius: 5px; padding: 10px 12px;
+                     margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .mcp-snippet .mcp-btn { position: absolute; top: 6px; right: 6px; font-size: 12px; padding: 3px 9px; }
+  @media (max-width: 760px) {
+    .mcp-meta { grid-template-columns: 1fr 1fr; }
+    .mcp-url-row .mcp-btn { flex: 1 1 auto; }
+    .mcp-snippet .mcp-btn { position: static; margin-top: 6px; }
+  }
+</style>
+
+{% from "_macros.html" import breadcrumb %}
+{{ breadcrumb([("account", None), ("MCP link", None)]) }}
+
+<div class="mcp-page">
+  <h1>Connect an AI client (MCP)</h1>
+  <p class="mcp-intro">
+    MCP lets an AI assistant such as Claude, Cursor or VS Code search and plot the anthive
+    datasets on your behalf. You get one private link that identifies you. Paste it into your
+    client once and it keeps working until you rotate or revoke it.
+  </p>
+  <div class="mcp-warn">
+    Treat this link like a password. Anyone who has it can query the data as you.
+    If you think it leaked, rotate it: the old link stops working immediately.
+  </div>
+
+  {% if not signed_in %}
+  <div class="mcp-state err" id="mcp-state">You need to be signed in to get a personal MCP link.</div>
+  {% else %}
+  <div class="mcp-state" id="mcp-state">loading…</div>
+
+  <div class="mcp-card" id="mcp-create" style="display:none">
+    <h2>You do not have a link yet</h2>
+    <button type="button" class="mcp-btn primary" id="mcp-create-btn">Create my link</button>
+  </div>
+
+  <div class="mcp-card" id="mcp-link" style="display:none">
+    <h2>Your link
+      <span class="info" title="The link carries a random secret tied to your account. The server only accepts it while it is active and not expired.">ⓘ</span>
+    </h2>
+    <div class="mcp-url-row">
+      <code class="mcp-url" id="mcp-url"></code>
+      <button type="button" class="mcp-btn" id="mcp-show-btn">Show</button>
+      <button type="button" class="mcp-btn" id="mcp-copy-btn">Copy</button>
+    </div>
+    <dl class="mcp-meta">
+      <div><dt id="mcp-created-label">created</dt><dd id="mcp-created"></dd></div>
+      <div><dt>last used</dt><dd id="mcp-last-used"></dd></div>
+      <div><dt>expires</dt><dd id="mcp-expires"></dd></div>
+    </dl>
+    <div class="mcp-actions">
+      <button type="button" class="mcp-btn" id="mcp-rotate-btn">Rotate link</button>
+      <button type="button" class="mcp-btn danger" id="mcp-revoke-btn">Revoke</button>
+    </div>
+    <div class="mcp-flash" id="mcp-flash" role="status"></div>
+  </div>
+
+  <div class="mcp-card" id="mcp-clients" style="display:none">
+    <h2>Set up your client</h2>
+    <div class="mcp-tabs" role="tablist">
+      <button type="button" class="mcp-tab" role="tab" data-tab="claude-code" aria-selected="true">Claude Code</button>
+      <button type="button" class="mcp-tab" role="tab" data-tab="claude-desktop" aria-selected="false">Claude Desktop / claude.ai</button>
+      <button type="button" class="mcp-tab" role="tab" data-tab="json" aria-selected="false">Cursor / VS Code / JSON</button>
+    </div>
+    <div class="mcp-panel" data-panel="claude-code">
+      <p>Run this once in a terminal:</p>
+      <div class="mcp-snippet"><pre data-snippet="claude_code"></pre><button type="button" class="mcp-btn" data-copy="claude_code">Copy</button></div>
+    </div>
+    <div class="mcp-panel" data-panel="claude-desktop" hidden>
+      <p>Open Settings, then Connectors, and choose <em>Add custom connector</em>. Give it a name
+        (for example <em>anthive</em>) and paste your link as the server URL. Leave the OAuth fields empty.</p>
+      <div class="mcp-snippet"><pre data-snippet="url"></pre><button type="button" class="mcp-btn" data-copy="url">Copy</button></div>
+    </div>
+    <div class="mcp-panel" data-panel="json" hidden>
+      <p>Add this server entry to your client's MCP configuration
+        (Cursor: <code>~/.cursor/mcp.json</code>, VS Code: <code>.vscode/mcp.json</code>).</p>
+      <div class="mcp-snippet"><pre data-snippet="json_config"></pre><button type="button" class="mcp-btn" data-copy="json_config">Copy</button></div>
+    </div>
+  </div>
+  {% endif %}
+</div>
+
+{% if signed_in %}
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var stateEl = $('mcp-state'), createCard = $('mcp-create'), linkCard = $('mcp-link'),
+      clientsCard = $('mcp-clients'), urlEl = $('mcp-url'), flashEl = $('mcp-flash'),
+      showBtn = $('mcp-show-btn');
+  var current = null, revealed = false;
+
+  function maskUrl(url) {
+    if (!url) return '';
+    // Keep scheme + host + path prefix readable; hide the secret tail.
+    var cut = url.lastIndexOf('/') + 1;
+    var secret = url.slice(cut);
+    if (secret.length <= 8) return url.slice(0, cut) + '••••••••';
+    return url.slice(0, cut) + secret.slice(0, 5) + '••••••••••••' + secret.slice(-2);
+  }
+
+  function fmtDate(iso) {
+    if (!iso) return null;
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return String(iso);
+    var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+  }
+
+  function flash(msg, isErr) {
+    flashEl.textContent = msg || '';
+    flashEl.className = 'mcp-flash' + (isErr ? ' err' : '');
+  }
+
+  function setState(msg, isErr) {
+    stateEl.style.display = msg ? '' : 'none';
+    stateEl.textContent = msg || '';
+    stateEl.className = 'mcp-state' + (isErr ? ' err' : '');
+  }
+
+  function snippetText(key) {
+    if (!current) return '';
+    if (key === 'url') return current.url || '';
+    return (current.snippets && current.snippets[key]) || '';
+  }
+
+  function renderSecrets() {
+    var url = current && current.url;
+    urlEl.textContent = revealed ? url : maskUrl(url);
+    showBtn.textContent = revealed ? 'Hide' : 'Show';
+    document.querySelectorAll('[data-snippet]').forEach(function (pre) {
+      var text = snippetText(pre.getAttribute('data-snippet'));
+      pre.textContent = revealed || !url ? text : text.split(url).join(maskUrl(url));
+    });
+  }
+
+  function render(d) {
+    current = d;
+    createCard.style.display = 'none'; linkCard.style.display = 'none'; clientsCard.style.display = 'none';
+    if (!d.enabled) { setState('MCP links are not enabled on this deployment.'); return; }
+    if (!d.has_link || !d.url) { setState(''); createCard.style.display = ''; return; }
+    setState('');
+    linkCard.style.display = ''; clientsCard.style.display = '';
+    $('mcp-created-label').textContent = d.rotated_at ? 'rotated' : 'created';
+    $('mcp-created').textContent = fmtDate(d.rotated_at || d.created) || 'unknown';
+    $('mcp-last-used').textContent = fmtDate(d.last_used) || 'never used';
+    var expEl = $('mcp-expires');
+    if (d.expires_at) {
+      expEl.textContent = fmtDate(d.expires_at);
+      var daysLeft = (new Date(d.expires_at).getTime() - Date.now()) / 86400000;
+      expEl.className = daysLeft < 14 ? 'soon' : '';
+      expEl.title = daysLeft < 14 ? 'Expires soon. Rotate to get a fresh link.' : '';
+    } else {
+      expEl.textContent = 'never'; expEl.className = ''; expEl.title = '';
+    }
+    renderSecrets();
+  }
+
+  function api(method, path) {
+    return fetch('/api' + path, { method: method, credentials: 'same-origin' })
+      .then(function (r) {
+        if (r.status === 401) throw new Error('You are not signed in. Reload the page to sign in again.');
+        if (r.status === 404) throw new Error('MCP links are not available on this server.');
+        if (!r.ok) return r.text().then(function (t) { throw new Error('Server error (HTTP ' + r.status + '). ' + t.slice(0, 160)); });
+        return r.json();
+      });
+  }
+
+  function load() {
+    setState('loading…');
+    api('GET', '/me/mcp').then(render).catch(function (e) {
+      setState(e.message && e.message.indexOf('fetch') === -1 ? e.message : 'Could not reach the server. Check your connection and reload.', true);
+    });
+  }
+
+  function busy(on) {
+    ['mcp-create-btn', 'mcp-rotate-btn', 'mcp-revoke-btn'].forEach(function (id) { var b = $(id); if (b) b.disabled = on; });
+  }
+
+  function copyText(text, btn) {
+    var done = function () {
+      var old = btn.textContent; btn.textContent = 'Copied';
+      setTimeout(function () { btn.textContent = old; }, 1400);
+    };
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(done, function () { fallbackCopy(text); done(); });
+    } else { fallbackCopy(text); done(); }
+  }
+  function fallbackCopy(text) {
+    var ta = document.createElement('textarea');
+    ta.value = text; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); } catch (e) {}
+    document.body.removeChild(ta);
+  }
+
+  $('mcp-create-btn').addEventListener('click', function () {
+    busy(true);
+    api('POST', '/me/mcp/rotate')
+      .then(function (d) { revealed = true; render(d); flash('Your link is ready. Copy it into your client.'); })
+      .catch(function (e) { setState(e.message, true); })
+      .finally(function () { busy(false); });
+  });
+  $('mcp-rotate-btn').addEventListener('click', function () {
+    if (!confirm('Rotate your MCP link?\n\nThe old link stops working immediately. You will need to update every client that uses it.')) return;
+    busy(true);
+    api('POST', '/me/mcp/rotate')
+      .then(function (d) { revealed = true; render(d); flash('New link created. The old one no longer works; update your clients.'); })
+      .catch(function (e) { flash(e.message, true); })
+      .finally(function () { busy(false); });
+  });
+  $('mcp-revoke-btn').addEventListener('click', function () {
+    if (!confirm('Revoke your MCP link?\n\nClients using it stop working immediately. You can create a new link later.')) return;
+    busy(true);
+    api('DELETE', '/me/mcp')
+      .then(function () { revealed = false; flash(''); load(); })
+      .catch(function (e) { flash(e.message, true); })
+      .finally(function () { busy(false); });
+  });
+  showBtn.addEventListener('click', function () { revealed = !revealed; renderSecrets(); });
+  $('mcp-copy-btn').addEventListener('click', function () { copyText(current && current.url || '', this); });
+  document.querySelectorAll('[data-copy]').forEach(function (btn) {
+    btn.addEventListener('click', function () { copyText(snippetText(btn.getAttribute('data-copy')), btn); });
+  });
+  document.querySelectorAll('.mcp-tab').forEach(function (tab) {
+    tab.addEventListener('click', function () {
+      var name = tab.getAttribute('data-tab');
+      document.querySelectorAll('.mcp-tab').forEach(function (t) { t.setAttribute('aria-selected', t === tab ? 'true' : 'false'); });
+      document.querySelectorAll('.mcp-panel').forEach(function (p) { p.hidden = p.getAttribute('data-panel') !== name; });
+      if (window.antRemember) window.antRemember.set('mcp.client_tab', name);
+    });
+  });
+  var savedTab = window.antRemember && window.antRemember.get('mcp.client_tab');
+  if (savedTab) { var t = document.querySelector('.mcp-tab[data-tab="' + savedTab + '"]'); if (t) t.click(); }
+
+  load();
+})();
+</script>
+{% endif %}
+{% endblock %}

@@ -541,8 +541,14 @@
                     {% if _auth_user %}
                     <div class="dropdown-header">signed in as <strong>{{ _auth_user }}</strong></div>
                     {% endif %}
+                    {% if _auth_user %}
+                    {# Hidden until GET /api/me/mcp reports enabled:true, so a
+                       deployment without MCP links shows no affordance. #}
+                    <a href="/account/mcp" id="mcp-menu-link" style="display:none">Connect an AI client (MCP)</a>
+                    {% endif %}
                     {% if _auth_user and 'admins' in _groups %}
                     <a href="/admin/feedback">chat feedback</a>
+                    <a href="/admin/mcp-links">MCP links</a>
                     {% endif %}
                     <a href="/settings">Preferences</a>
                     {% if _auth_user %}
@@ -555,6 +561,14 @@
     <script>
     // Sign out via Authelia's logout endpoint (clears the SSO session), then
     // land back on the catalogue (which will bounce to the login portal).
+    (function () {
+        var link = document.getElementById('mcp-menu-link');
+        if (!link || !window.fetch) return;
+        fetch('/api/me/mcp', { credentials: 'same-origin' })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (d) { if (d && d.enabled) link.style.display = ''; })
+            .catch(function () {});
+    })();
     (function () {
         var btn = document.getElementById('authelia-signout');
         if (!btn) return;

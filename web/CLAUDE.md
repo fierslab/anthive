@@ -78,6 +78,15 @@ line-art logo (grayscale+alpha PNG), so it's shown on a dark hero panel.
 | `/privacy` | chat data-handling note (draft) | `privacy.html` |
 | `/admin/edit/{group}` · `/admin/edit/{group}/{file}` | index.md · dataset .md/.mus editors (admin) | `edit_*.html` |
 | `/admin/feedback` | chat-feedback triage (admin) | `admin_feedback.html` |
+| `/account/mcp` | the signed-in user's private MCP link: create / show / copy / rotate / revoke + client setup snippets (401 without `Remote-User`) | `account_mcp.html` |
+| `/admin/mcp-links` | every user's MCP link with revoke (admin) | `admin_mcp_links.html` |
+
+**MCP links UI** talks to ant-serve's `GET /me/mcp`, `POST /me/mcp/rotate`,
+`DELETE /me/mcp`, `GET /admin/mcp-links`, `DELETE /admin/mcp-links/{user}`
+client-side (same-origin `/api`). The account-menu entry (`#mcp-menu-link`)
+is hidden until `/api/me/mcp` reports `enabled:true`, like the chat widget.
+The URL and the snippets are masked by default; Copy always copies the real
+text. Rotate and Revoke confirm first because the old link dies immediately.
 
 **Route ordering, geneset routes:** `/genesets/variability` and
 `/genesets/starcat/{catalog_id}/modules/{name}` are registered *before* the
