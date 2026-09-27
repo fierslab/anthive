@@ -79,6 +79,9 @@ sys.path.insert(0, str(lib_dir))
 from anthive_db import AnthiveDB, safe_ident
 from canonical_columns import BACKCOMPAT_LEGACY_NAMES  # type: ignore
 from config import get_config
+from config import (get_auth_settings, get_catalog_scan_mode, get_data_folder,
+                    get_duckdb_temp_dir, get_log_dir, get_state_dir, get_tmp_dir,
+                    get_webapp_dir)
 import de_storage as lib_de_storage
 from geneset import (
     GenesetRegistry,
@@ -651,7 +654,7 @@ class DatabaseRegistry:
         # Keyed by mus sha256 + day-bucketed duckdb mtime — see
         # GeneStatsCache.fingerprint. Lives next to the in-memory metadata
         # cache so it co-locates with the data deposit.
-        self.gene_stats_cache = GeneStatsCache(Path(__file__).resolve().parent.parent.parent / 'var' / 'gene_stats_cache.db')
+        self.gene_stats_cache = GeneStatsCache(get_state_dir() / 'gene_stats_cache.db')
 
         # Precomputed fleet-wide (dataset, gene) stats index. Rebuilt by
         # ``bin/annot/ant-gene-stats-precompute``. Loaded at startup and
@@ -943,7 +946,7 @@ class DatabaseRegistry:
     # ── persistent metadata cache ──────────────────────────────────────────────
 
     def _cache_file_path(self) -> Path:
-        return Path('./tmp/metadata_cache.json')
+        return get_tmp_dir() / 'metadata_cache.json'
 
     def _load_persisted_cache(self) -> Dict[str, Any]:
         """Load the on-disk metadata cache.  Returns {} on any error or version mismatch."""
@@ -1039,7 +1042,10 @@ class DatabaseRegistry:
         md_bases: Dict[str, Path] = {}
         db_extra: Dict[str, Dict[str, str]] = {}
 
-        s3_enabled = bool(self._s3_config.get('bucket'))
+        scan_mode = get_catalog_scan_mode()
+        s3_enabled = bool(self._s3_config.get('bucket')) and scan_mode != 'local'
+        if scan_mode == 's3' and not self._s3_config.get('bucket'):
+            log.warning("catalog_scan=s3 but s3.bucket is not set; scanning local files only")
         s3_keys: Optional[set] = None
 
         def s3_has(duckdb_rel: Path) -> bool:
@@ -2385,14 +2391,25 @@ def _require_admin(request: Request) -> str:
                   or request.headers.get('X-Remote-Groups')
                   or '')
     groups = {g.strip().lower() for g in raw_groups.split(',') if g.strip()}
-    if 'admins' not in groups:
+    user = (request.headers.get('Remote-User')
+            or request.headers.get('X-Remote-User')
+            or '')
+    auth = get_auth_settings()
+    if auth['mode'] == 'none':
+        is_admin = False    # no login means no identity to trust
+    elif 'admins' in groups:
+        is_admin = True
+    else:
+        # basic mode: the proxy authenticates the user but sends no groups;
+        # auth.admins names who is an admin.
+        is_admin = (auth['mode'] == 'basic' and not raw_groups
+                    and bool(user) and user in auth['admins'])
+    if not is_admin:
         raise HTTPException(
             status_code=403,
             detail="admins-only endpoint (must be in Authelia 'admins' group)",
         )
-    return (request.headers.get('Remote-User')
-            or request.headers.get('X-Remote-User')
-            or 'unknown')
+    return user or 'unknown'
 
 
 def _resolve_collection_dir(group_id: str) -> Tuple[Optional[Path], Optional[str]]:
@@ -3259,12 +3276,11 @@ _obs_click_store_instance: 'Optional[Any]' = None
 
 
 def _get_obs_click_store():
-    """Lazy singleton. Path is fixed at var/obs_clicks.db under repo root."""
+    """Lazy singleton at <state_dir>/obs_clicks.db."""
     global _obs_click_store_instance
     if _obs_click_store_instance is None:
         from obs_clicks import ObsClickStore  # noqa: PLC0415
-        repo_root = Path(__file__).resolve().parent.parent.parent
-        _obs_click_store_instance = ObsClickStore(repo_root / 'var' / 'obs_clicks.db')
+        _obs_click_store_instance = ObsClickStore(get_state_dir() / 'obs_clicks.db')
     return _obs_click_store_instance
 
 
@@ -3344,9 +3360,8 @@ def get_dataset_curation(db_id: str, request: Request):
     _require_admin(request)
     import yaml as _yaml  # noqa: PLC0415
 
-    repo_root = Path(__file__).resolve().parent.parent.parent
     safe_id = db_id.replace('/', '__')
-    proposal_path = repo_root / 'tmp' / 'curation' / f'{safe_id}.yaml'
+    proposal_path = get_tmp_dir() / 'curation' / f'{safe_id}.yaml'
 
     if not proposal_path.is_file():
         return {
@@ -4573,7 +4588,7 @@ import os as _plot_os
 from collections import OrderedDict as _PlotOrderedDict
 from threading import Lock as _PlotLock
 
-_PLOT_CACHE_MAX_ENTRIES = 256
+_PLOT_CACHE_MAX_ENTRIES = int(get_config().get('plot_cache_max_entries') or 256)
 _plot_cache: "_PlotOrderedDict[str, dict]" = _PlotOrderedDict()
 _plot_cache_lock = _PlotLock()
 _plot_cache_stats = {'hits': 0, 'misses': 0, 'evictions': 0}
@@ -10382,17 +10397,7 @@ def _pseudobulk_artifacts_dir() -> Path:
     """Resolve the on-disk artifact directory. Mirrors `ant-mcp`'s `plots_dir`
     convention: under `webapp/`, served by the reverse proxy.
     """
-    cfg = get_config()
-    base = cfg.get('mcp', {}).get('plots_dir') if isinstance(cfg, dict) else None
-    if base:
-        base_path = Path(base).resolve()
-        # plots_dir is typically `./webapp/plots`; we want `./webapp/artifacts/pseudobulk`
-        if base_path.name == 'plots':
-            return base_path.parent / 'artifacts' / 'pseudobulk'
-        # Fallback: a sibling artifacts/pseudobulk under the same parent
-        return base_path.parent / 'artifacts' / 'pseudobulk'
-    # No plots_dir configured — fall back to repo `./webapp/artifacts/pseudobulk`
-    return Path(__file__).resolve().parent.parent.parent / 'webapp' / 'artifacts' / 'pseudobulk'
+    return get_webapp_dir() / 'artifacts' / 'pseudobulk'
 
 
 def _layer_looks_integer(layer_stats: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
@@ -11483,7 +11488,7 @@ def gene_stats_index_rebuild(
     if force:
         args += ['--force']
 
-    log_path = Path('./tmp/gene_stats_precompute.log')
+    log_path = get_log_dir() / 'gene_stats_precompute.log'
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_fh = log_path.open('ab', buffering=0)
     proc = subprocess.Popen(
@@ -11548,7 +11553,7 @@ def gene_variance_index_rebuild(
     if force:
         args += ['--force']
 
-    log_path = Path('./tmp/gene_variance_precompute.log')
+    log_path = get_log_dir() / 'gene_variance_precompute.log'
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_fh = log_path.open('ab', buffering=0)
     proc = subprocess.Popen(
@@ -13222,8 +13227,8 @@ def main():
     parser.add_argument(
         '--data-folder',
         type=Path,
-        default=Path('./data'),
-        help='Path to data folder containing .duckdb files (default: ./data)'
+        default=get_data_folder(config),
+        help='Path to the h5adstore (default: h5adstore key / ANTHIVE_H5ADSTORE)'
     )
     parser.add_argument(
         '--host',
@@ -13244,6 +13249,14 @@ def main():
 
     args = parser.parse_args()
 
+    auth_mode = get_auth_settings(config)['mode']
+    if auth_mode == 'none':
+        banner = '!' * 72
+        print(f"{banner}\n  auth.mode = none: NO LOGIN. Every visitor can read every dataset\n"
+              f"  this server exposes. Admin features (editors, viz, rescans) are OFF.\n"
+              f"  Only use this for a public read-only mirror or a loopback-only box.\n"
+              f"{banner}", file=sys.stderr, flush=True)
+
     # Initialize global connection pool and registry (Phase 2)
     global registry, connection_pool, geneset_registry
     s3_config = config.get('s3') or {}
@@ -13253,7 +13266,7 @@ def main():
             s3_config=s3_config,
             threads=config.get('duckdb_server_threads', 8),
             memory_limit=str(config.get('duckdb_server_memory_limit', 'auto')),
-            temp_directory=config.get('duckdb_temp_directory') or './tmp/duckdb_spill',
+            temp_directory=str(get_duckdb_temp_dir(config)),
             allowed_directories=[str(args.data_folder)] + list(config.get('duckdb_allowed_directories') or []),
             max_open_databases=config.get('duckdb_max_open_databases', 48),
         )

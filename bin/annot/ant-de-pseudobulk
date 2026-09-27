@@ -355,11 +355,10 @@ def main() -> None:
 
     config = get_config()
     if not args.ant_serve_url:
-        host = config.get('rest_api_host', 'localhost')
-        port = config.get('rest_api_port', 8080)
-        args.ant_serve_url = f"http://{host}:{port}/api"
+        from config import get_api_url  # noqa: PLC0415
+        args.ant_serve_url = f"{get_api_url(config)}/api"
 
-    data_root = Path(config.get('data_folder', './data/h5adstore')).resolve()
+    data_root = __import__('config').get_data_folder(config)
     h5ad_entry = find_h5ad(data_root, args.db_id)
     if h5ad_entry is None:
         _die(f"unknown db_id {args.db_id!r} under {data_root}")

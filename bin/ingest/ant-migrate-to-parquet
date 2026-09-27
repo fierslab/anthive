@@ -74,10 +74,8 @@ def _fmt_size(num_bytes: int) -> str:
 
 
 def _ant_serve_url(cfg: dict) -> str:
-    host = cfg.get('rest_api_host') or 'localhost'
-    if host in ('0.0.0.0', '::'):
-        host = 'localhost'
-    return f"http://{host}:{cfg.get('rest_api_port', 8080)}"
+    from config import get_api_url  # noqa: PLC0415
+    return get_api_url(cfg)
 
 
 def _admin_post(base_url: str, path: str, timeout: float = 120.0) -> Optional[int]:
@@ -585,9 +583,7 @@ def main() -> None:
     log = _setup_log(log_path)
 
     cfg = get_config()
-    api_url = args.ant_serve_url or (
-        f"http://{cfg.get('rest_api_host', 'localhost')}:{cfg.get('rest_api_port', 8080)}"
-    )
+    api_url = args.ant_serve_url or _ant_serve_url(cfg)
     coordinate = not args.no_coordinate
 
     skip_set = set(args.skip)

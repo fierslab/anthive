@@ -148,9 +148,8 @@ def _resolve_ant_serve_url(api_url_override: Optional[str],
         cfg = get_config()
     except Exception:
         return None
-    host = cfg.get('rest_api_host', 'localhost')
-    port = cfg.get('rest_api_port', 8080)
-    return f"http://{host}:{port}/api/"
+    from config import get_api_url  # noqa: PLC0415
+    return f"{get_api_url(cfg)}/api/"
 
 
 def _open_duckdb_rw_with_release(duckdb_path: Path,
@@ -398,9 +397,11 @@ def find_dirty_datasets(h5adstore_root: Path) -> List[Path]:
 
 
 def find_h5adstore_root() -> Optional[Path]:
-    here = Path(__file__).parent.resolve()
-    repo_root = here.parent
-    candidate = repo_root / 'data' / 'h5adstore'
+    try:
+        from config import get_data_folder  # noqa: PLC0415
+        candidate = get_data_folder()
+    except Exception:
+        candidate = Path(__file__).resolve().parent.parent.parent / 'data' / 'h5adstore'
     return candidate if candidate.exists() else None
 
 

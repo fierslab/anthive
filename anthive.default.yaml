@@ -36,6 +36,76 @@ browse_port: 8081
 # Cache expiration in days (future use)
 cache_expiration_days: 7
 
+# Locations and runtime switches
+# ------------------------------
+# Every path below may be absolute, relative to the repo root, or contain
+# $VARS / ~ (expanded at use). Each one can also be overridden per process
+# with the environment variable shown, which is how containers and HPC jobs
+# set them without editing this file. lib/config.py resolves them.
+
+# Data store root (the h5adstore). Env: ANTHIVE_H5ADSTORE.
+h5adstore: data/h5adstore
+
+# Persistent per-site state: SQLite caches, click history, MCP link tokens,
+# generated secrets. Back this up. Never put it under tmp_dir.
+# Env: ANTHIVE_STATE_DIR.
+state_dir: var
+
+# Disposable scratch: metadata cache, analytics session parquets, job logs.
+# Env: ANTHIVE_TMP_DIR.
+tmp_dir: tmp
+
+# Background job logs (precompute runs). null = tmp_dir. Env: ANTHIVE_LOG_DIR.
+log_dir: null
+
+# Static bundle root served by the proxy (jupyter/, plots/, artifacts/).
+# Env: ANTHIVE_WEBAPP_DIR.
+webapp_dir: webapp
+
+# DuckDB spill directory for ant-serve and ant-convert. null =
+# <tmp_dir>/duckdb_spill. Env: ANTHIVE_DUCKDB_TEMP_DIR.
+duckdb_temp_directory: null
+
+# Where ant-convert builds a new .duckdb before atomically moving it next to
+# the h5ad. null = build in place (next to the target). On HPC set this to
+# node-local scratch, e.g. "$TMPDIR": GPFS/Lustre handle DuckDB's small
+# writes and file locks badly. If staging and target are on different
+# filesystems the final move is a copy followed by a rename.
+# Env: ANTHIVE_CONVERT_STAGING_DIR.
+convert_staging_dir: null
+
+# Base URL tools (ant-score, ant-convert, fleet scorers) use to reach
+# ant-serve for the release/restore handshake. null =
+# http://localhost:<rest_api_port>. Env: ANTHIVE_API_URL.
+api_url: null
+
+# Do duckdb writers coordinate with a running ant-serve?
+#   auto   try the handshake; skip quietly when no server answers (HPC)
+#   always an unreachable server is an error
+#   never  skip the handshake (only when no server has the files open)
+# Env: ANTHIVE_COORDINATE.
+coordinate: auto
+
+# Catalog scan: local = only datasets with a local .duckdb; s3 = also list
+# the bucket for S3-only datasets; auto = s3 when s3.bucket is set.
+# Env: ANTHIVE_CATALOG_SCAN.
+catalog_scan: auto
+
+# In-memory rendered-plot LRU size (entries) in ant-serve.
+plot_cache_max_entries: 256
+
+# Authentication model, set per deployment (containers set it from site.yaml).
+#   authelia       Caddy forward_auth against Authelia; Remote-* headers from it
+#   basic          Caddy basic_auth; Remote-User = the basic user, admins below
+#   trusted-proxy  an upstream proxy (nginx + SSO) already set Remote-* headers
+#   none           no login at all; admin features are disabled
+# null = not declared (legacy installs; identity comes from proxy headers).
+# Env: ANTHIVE_AUTH_MODE.
+auth:
+  mode: null
+  # Users treated as admins when the proxy sends no Remote-Groups (basic mode).
+  admins: []
+
 # DuckDB resource limits for ant-convert (ingest).
 duckdb_memory_limit: auto
 duckdb_threads: 2
@@ -83,6 +153,10 @@ s3:
 # MCP Server Configuration (ant-mcp)
 # ------------------------------------
 mcp:
+  # Master switch for the MCP server (the supervisor / compose skip it when
+  # false).
+  enabled: true
+
   # Host and port ant-mcp listens on. Keep it on loopback: public access
   # goes through Caddy's /mcp route, which applies the auth snippet.
   host: 127.0.0.1

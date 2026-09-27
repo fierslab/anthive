@@ -1990,7 +1990,18 @@ def _post_ant_serve(
     Returns None when `on_failure != 'raise'` and the call fails (server
     down, network error, etc). Re-raises AnnotationWriterError on failure
     when `on_failure == 'raise'`.
+
+    The ``coordinate`` config switch (see config.get_coordinate_mode) shapes
+    this: ``never`` skips the call entirely; ``auto`` downgrades an
+    unreachable server (no HTTP response at all) to a warning, because a
+    batch node simply has no server; ``always`` makes every failure raise.
     """
+    from config import get_coordinate_mode  # noqa: PLC0415  (avoid import cycle)
+    mode = get_coordinate_mode()
+    if mode == 'never':
+        return None
+    if mode == 'always':
+        on_failure = 'raise'
     if not base_url:
         if on_failure == 'raise':
             raise AnnotationWriterError(f"no ant_serve_url given")
@@ -2011,6 +2022,11 @@ def _post_ant_serve(
                 return {'ok': True, 'raw': body[:200]}
     except urllib.error.URLError as exc:
         msg = f"POST {url} failed: {exc}"
+        unreachable = not isinstance(exc, urllib.error.HTTPError)
+        if mode == 'auto' and unreachable and on_failure == 'raise':
+            print(f"  ⚠ no ant-serve reachable at {base_url}; continuing "
+                  f"without coordination (coordinate=auto)")
+            return None
         if on_failure == 'raise':
             raise AnnotationWriterError(msg)
         if on_failure == 'warn':

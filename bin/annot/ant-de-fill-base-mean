@@ -55,7 +55,9 @@ _REPO_ROOT = _SCRIPT_DIR.parent.parent
 sys.path.insert(0, str(_REPO_ROOT / 'lib'))
 from config import get_config                                # noqa: E402
 
-_DEFAULT_DATA_FOLDER = _REPO_ROOT / 'data' / 'h5adstore'
+from config import get_data_folder                           # noqa: E402
+
+_DEFAULT_DATA_FOLDER = get_data_folder()
 
 
 def _eprint(*args, **kwargs) -> None:
@@ -441,9 +443,8 @@ def main() -> int:
 
     cfg = get_config()
     if not args.ant_serve_url:
-        host = cfg.get('rest_api_host', 'localhost')
-        port = cfg.get('rest_api_port', 8080)
-        args.ant_serve_url = f"http://{host}:{port}/api"
+        from config import get_api_url  # noqa: PLC0415
+        args.ant_serve_url = f"{get_api_url(cfg)}/api"
 
     # Each target: (label_for_logging, duckdb_path, db_id_or_None)
     targets: List[Tuple[str, Path, Optional[str]]] = []

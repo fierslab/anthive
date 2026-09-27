@@ -124,19 +124,20 @@ def main():
 
     parser.add_argument(
         '--api-url',
-        default=f"http://{config.get('rest_api_host', 'localhost')}:{config.get('rest_api_port', 8080)}",
-        help='URL of the ant-serve REST API (default: from config or http://localhost:8080)'
+        default=__import__('config').get_api_url(config),
+        help='URL of the ant-serve REST API (default: api_url / ANTHIVE_API_URL, '
+             'else http://localhost:<rest_api_port>)'
     )
     parser.add_argument(
         '--host',
-        default='127.0.0.1',
-        help='Host to bind to (default: 127.0.0.1)'
+        default=config.get('browse_host') or '127.0.0.1',
+        help='Host to bind to (default: browse_host or 127.0.0.1)'
     )
     parser.add_argument(
         '--port',
         type=int,
-        default=8081,
-        help='Port to bind to (default: 8081)'
+        default=int(config.get('browse_port') or 8081),
+        help='Port to bind to (default: browse_port or 8081)'
     )
     parser.add_argument(
         '--reload',

@@ -263,7 +263,7 @@ def main() -> int:
     args = parser.parse_args()
 
     cfg = get_config()
-    data_root = Path(cfg.get('data_folder', './data/h5adstore')).resolve()
+    data_root = __import__('config').get_data_folder(cfg)
 
     entry = find_h5ad(data_root, args.db_id)
     if entry is None:

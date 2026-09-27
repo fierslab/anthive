@@ -234,7 +234,7 @@ def _load_h5ad_db_ids() -> set | None:
         config = get_config()
     except SystemExit:
         return None
-    h5ad_root_value = config.get('h5ad_store') or 'data/h5adstore'
+    h5ad_root_value = config.get('h5ad_store') or str(__import__('config').get_data_folder(config))
     h5ad_root = (script_dir.parent / h5ad_root_value).resolve()
     if not h5ad_root.exists():
         return None

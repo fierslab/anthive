@@ -194,7 +194,11 @@ def _reports(request: Request) -> list:
 # fields ant-serve doesn't currently expose (publication_status) and to stat
 # dataset files for the on-disk-mtime fallback in _dataset_date. Also serves
 # per-collection static/ downloads (see _group_static_files below).
-_H5ADSTORE_ROOT = Path(__file__).parent.parent / 'data' / 'h5adstore'
+try:
+    from config import get_data_folder as _get_data_folder
+    _H5ADSTORE_ROOT = _get_data_folder()
+except Exception:  # config unavailable (tests import this module bare)
+    _H5ADSTORE_ROOT = Path(__file__).parent.parent / 'data' / 'h5adstore'
 
 
 # ── misc helpers ───────────────────────────────────────────────────────────────

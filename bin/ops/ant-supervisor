@@ -62,9 +62,14 @@ _script_dir = Path(__file__).parent.parent.parent.resolve()
 sys.path.insert(0, str(_script_dir / 'lib'))
 try:
     from config import load_config as _load_anthive_config
+    from config import get_data_folder as _get_data_folder, get_tmp_dir as _get_tmp_dir
     _CFG = _load_anthive_config()
+    _DATA_FOLDER = str(_get_data_folder(_CFG))
+    _TMP_DIR = _get_tmp_dir(_CFG)
 except Exception:
     _CFG = {}
+    _DATA_FOLDER = './data/h5adstore'
+    _TMP_DIR = _script_dir / 'tmp'
 
 _API_HOST    = _CFG.get('rest_api_host', 'localhost')
 _API_PORT    = str(_CFG.get('rest_api_port', 8080))
@@ -75,7 +80,7 @@ _API_INTERNAL_URL = f"http://{'localhost' if _API_HOST in ('127.0.0.1', 'localho
 
 SERVICES: dict = {
     'api': {
-        'cmd': ['./bin/api/ant-serve', '--data-folder', './data/h5adstore',
+        'cmd': ['./bin/api/ant-serve', '--data-folder', _DATA_FOLDER,
                 '--host', _API_HOST, '--port', _API_PORT],
         'color': CYAN,
     },
@@ -181,7 +186,7 @@ CLEAN_RUN_THRESHOLD = 10  # seconds; if process lived this long, reset back-off
 
 # Control-plane state file. Written by the running supervisor; read by the
 # `restart` / `status` subcommands to know which PIDs to signal.
-STATE_FILE = _script_dir / 'tmp' / 'supervisor-state.json'
+STATE_FILE = _TMP_DIR / 'supervisor-state.json'
 
 # Set by the run loop; read by _write_state. Module-global because the
 # write happens inside per-service tasks and it's cheaper than threading

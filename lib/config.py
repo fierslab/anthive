@@ -4,6 +4,7 @@ Configuration management for anthive
 Loads configuration from anthive.yaml or uses defaults from anthive.default.yaml
 """
 
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -25,6 +26,18 @@ def get_anthive_root() -> Path:
     """
     # Get the directory containing this file, then go up to root
     return Path(__file__).parent.parent.resolve()
+
+
+def get_user_config_path() -> Path:
+    """Path of the site config: ``$ANTHIVE_CONFIG`` or ``<root>/anthive.yaml``.
+
+    Containers mount a rendered config read-only outside the image and
+    point ANTHIVE_CONFIG at it, so the image never carries secrets.
+    """
+    override = os.environ.get('ANTHIVE_CONFIG', '').strip()
+    if override:
+        return Path(override).expanduser()
+    return get_anthive_root() / "anthive.yaml"
 
 
 def load_default_config() -> Dict[str, Any]:
@@ -69,8 +82,7 @@ def load_user_config() -> Dict[str, Any]:
     Raises:
         ConfigError: If config file exists but cannot be parsed
     """
-    anthive_root = get_anthive_root()
-    user_config_path = anthive_root / "anthive.yaml"
+    user_config_path = get_user_config_path()
 
     if not user_config_path.exists():
         return {}
@@ -173,7 +185,7 @@ def load_config() -> Dict[str, Any]:
     # provider_order / base_url / history_path defaults from
     # anthive.default.yaml would otherwise be silently dropped by a shallow
     # merge).
-    for subkey in ('s3', 'mcp', 'chat', 'sync_policy'):
+    for subkey in ('s3', 'mcp', 'chat', 'sync_policy', 'auth'):
         if isinstance(user_config.get(subkey), dict):
             merged = defaults.get(subkey, {}).copy()
             merged.update(user_config[subkey])
@@ -232,3 +244,145 @@ def get_config() -> Dict[str, Any]:
     except ConfigError as error:
         print(str(error), file=sys.stderr)
         sys.exit(1)
+
+
+# ── Resolved paths and runtime switches ─────────────────────────────────────
+#
+# Every location a deployment may need to move (containers, HPC scratch,
+# multi-instance hosts) resolves here, in one precedence order:
+#   1. environment variable (ANTHIVE_<NAME>), for containers and batch jobs
+#   2. anthive.yaml key
+#   3. built-in default relative to the repo root (the historical layout)
+# Values may contain $VARS and ~ (e.g. convert_staging_dir: $TMPDIR).
+
+def resolve_path(value: Any, base: Optional[Path] = None) -> Path:
+    """Expand ``$VARS``/``~`` and anchor a relative path at the repo root."""
+    expanded = os.path.expandvars(os.path.expanduser(str(value)))
+    candidate = Path(expanded)
+    if not candidate.is_absolute():
+        candidate = (base or get_anthive_root()) / candidate
+    return candidate
+
+
+def _setting(cfg: Optional[Dict[str, Any]], key: str, env: str, default: Any) -> Any:
+    env_value = os.environ.get(env, '').strip()
+    if env_value:
+        return env_value
+    cfg = cfg if cfg is not None else load_config()
+    value = cfg.get(key)
+    return default if value in (None, '') else value
+
+
+def get_state_dir(cfg: Optional[Dict[str, Any]] = None, create: bool = True) -> Path:
+    """Persistent per-site state: SQLite caches, MCP tokens, click history."""
+    path = resolve_path(_setting(cfg, 'state_dir', 'ANTHIVE_STATE_DIR', 'var'))
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_tmp_dir(cfg: Optional[Dict[str, Any]] = None, create: bool = True) -> Path:
+    """Disposable scratch: metadata cache, analytics sessions, job logs."""
+    path = resolve_path(_setting(cfg, 'tmp_dir', 'ANTHIVE_TMP_DIR', 'tmp'))
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_log_dir(cfg: Optional[Dict[str, Any]] = None, create: bool = True) -> Path:
+    """Where background jobs write their log files (default: the tmp dir)."""
+    configured = _setting(cfg, 'log_dir', 'ANTHIVE_LOG_DIR', None)
+    path = resolve_path(configured) if configured else get_tmp_dir(cfg, create=create)
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_data_folder(cfg: Optional[Dict[str, Any]] = None) -> Path:
+    """The h5adstore root."""
+    return resolve_path(_setting(cfg, 'h5adstore', 'ANTHIVE_H5ADSTORE', 'data/h5adstore'))
+
+
+def get_webapp_dir(cfg: Optional[Dict[str, Any]] = None) -> Path:
+    """Static bundle root served by Caddy (jupyter/, plots/, artifacts/)."""
+    return resolve_path(_setting(cfg, 'webapp_dir', 'ANTHIVE_WEBAPP_DIR', 'webapp'))
+
+
+def get_duckdb_temp_dir(cfg: Optional[Dict[str, Any]] = None) -> Path:
+    """DuckDB spill directory (ant-serve and ant-convert)."""
+    configured = _setting(cfg, 'duckdb_temp_directory', 'ANTHIVE_DUCKDB_TEMP_DIR', None)
+    if configured:
+        return resolve_path(configured)
+    return get_tmp_dir(cfg, create=False) / 'duckdb_spill'
+
+
+def get_convert_staging_dir(cfg: Optional[Dict[str, Any]] = None) -> Optional[Path]:
+    """Where ant-convert builds a .duckdb before moving it into place.
+
+    None means next to the target (the historical behaviour). On HPC point
+    it at node-local scratch ($TMPDIR): parallel filesystems handle DuckDB's
+    many small writes and its file locks badly.
+    """
+    configured = _setting(cfg, 'convert_staging_dir', 'ANTHIVE_CONVERT_STAGING_DIR', None)
+    if not configured:
+        return None
+    return resolve_path(configured)
+
+
+def get_api_url(cfg: Optional[Dict[str, Any]] = None) -> str:
+    """Base URL tools use to reach ant-serve (release/restore, rescans)."""
+    cfg = cfg if cfg is not None else load_config()
+    default = f"http://localhost:{cfg.get('rest_api_port') or 8080}"
+    return str(_setting(cfg, 'api_url', 'ANTHIVE_API_URL', default)).rstrip('/')
+
+
+_COORDINATE_MODES = ('auto', 'always', 'never')
+
+
+def get_coordinate_mode(cfg: Optional[Dict[str, Any]] = None) -> str:
+    """Whether duckdb writers coordinate with ant-serve.
+
+    auto   -> try the release/restore handshake; if no server answers, carry
+              on (a batch node has no server). Default.
+    always -> an unreachable server is an error.
+    never  -> skip the handshake (safe only when no server holds the file).
+    """
+    mode = str(_setting(cfg, 'coordinate', 'ANTHIVE_COORDINATE', 'auto')).strip().lower()
+    if mode not in _COORDINATE_MODES:
+        raise ConfigError(
+            f"ERROR: [Config] Invalid coordinate mode {mode!r}; "
+            f"expected one of {', '.join(_COORDINATE_MODES)}"
+        )
+    return mode
+
+
+_AUTH_MODES = ('authelia', 'basic', 'trusted-proxy', 'none')
+
+
+def get_auth_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """{'mode': str | None, 'admins': set[str]} from the ``auth`` block.
+
+    mode None means "not declared" (legacy installs): no fallbacks and no
+    warnings; identity comes from whatever headers the proxy forwards.
+    """
+    cfg = cfg if cfg is not None else load_config()
+    block = cfg.get('auth') or {}
+    mode = os.environ.get('ANTHIVE_AUTH_MODE', '').strip() or block.get('mode')
+    mode = str(mode).strip().lower() if mode else None
+    if mode is not None and mode not in _AUTH_MODES:
+        raise ConfigError(
+            f"ERROR: [Config] Invalid auth.mode {mode!r}; "
+            f"expected one of {', '.join(_AUTH_MODES)}"
+        )
+    admins = {str(name).strip() for name in (block.get('admins') or []) if str(name).strip()}
+    return {'mode': mode, 'admins': admins}
+
+
+def get_catalog_scan_mode(cfg: Optional[Dict[str, Any]] = None) -> str:
+    """local | s3 | auto. auto (default) consults S3 only when a bucket is set."""
+    mode = str(_setting(cfg, 'catalog_scan', 'ANTHIVE_CATALOG_SCAN', 'auto')).strip().lower()
+    if mode not in ('local', 's3', 'auto'):
+        raise ConfigError(
+            f"ERROR: [Config] Invalid catalog_scan {mode!r}; expected local, s3 or auto"
+        )
+    return mode

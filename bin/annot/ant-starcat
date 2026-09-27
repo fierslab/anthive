@@ -81,8 +81,9 @@ MIN_GENE_OVERLAP = 1500
 
 
 def _h5adstore_root() -> Path:
-    """Find data/h5adstore relative to this script."""
-    candidate = script_dir.parent.parent / 'data' / 'h5adstore'
+    """The configured h5adstore (h5adstore key / ANTHIVE_H5ADSTORE)."""
+    from config import get_data_folder  # noqa: PLC0415
+    candidate = get_data_folder()
     if not candidate.exists():
         sys.exit(f"ERROR: h5adstore not found at {candidate}")
     return candidate
@@ -369,9 +370,8 @@ def main() -> int:
         ant_serve_url = args.api_url.rstrip('/')
     else:
         cfg = get_config()
-        host = cfg.get('rest_api_host', 'localhost')
-        port = cfg.get('rest_api_port', 8080)
-        ant_serve_url = f"http://{host}:{port}/api/"
+        from config import get_api_url  # noqa: PLC0415
+        ant_serve_url = f"{get_api_url(cfg)}/api/"
 
     # --- Resolve dataset ---
     h5ad_root = _h5adstore_root()

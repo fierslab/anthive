@@ -1160,8 +1160,8 @@ def main() -> None:
         epilog=__doc__,
     )
     parser.add_argument(
-        '--data-folder', default='./data/h5adstore',
-        help='Root of the h5adstore (default: ./data/h5adstore)',
+        '--data-folder', default=str(__import__('config').get_data_folder()),
+        help='Root of the h5adstore (default: h5adstore key / ANTHIVE_H5ADSTORE)',
     )
 
     subparsers = parser.add_subparsers(dest='command', required=True)

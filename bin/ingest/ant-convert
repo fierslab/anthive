@@ -34,7 +34,7 @@ script_dir = Path(__file__).parent.resolve()
 lib_dir = script_dir.parent.parent / 'lib'
 sys.path.insert(0, str(lib_dir))
 
-from config import get_config
+from config import get_config, get_convert_staging_dir
 from h5ad_utils import load_h5ad, H5ADError
 from metadata import parse_md_file, get_api_config, MetadataError
 from anthive_db import pending_state_diagnosis, build_obs_view_sql
@@ -283,16 +283,40 @@ def convert_h5ad_to_duckdb(h5ad_path: Path, config: Dict[str, Any],
     # Set sentinel BEFORE the rebuild starts so AnnotationWriter refuses to open
     rebuilding_sentinel.write_text(f"ant-convert pid={os.getpid()}\n")
 
+    # Staging: with convert_staging_dir set (e.g. $TMPDIR on HPC) the new
+    # .duckdb is built there and moved into place only after it verified, so
+    # the served file stays intact until the swap. Layer parquet sidecars are
+    # still written next to the h5ad: the layer views record their absolute
+    # paths, so they must be created at their final location.
+    staging_dir = get_convert_staging_dir(config)
+    if staging_dir is not None:
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        build_path = staging_dir / f"{duckdb_path.name}.{os.getpid()}.building"
+        for leftover in (build_path, Path(str(build_path) + '.wal')):
+            if leftover.exists():
+                leftover.unlink()
+        print(f"  Staging build in {staging_dir}")
+    else:
+        build_path = duckdb_path
+
     # Create connection and start conversion
     conn = None
     try:
-        # Remove existing database
-        if duckdb_path.exists():
+        # Remove existing database (in-place builds only; a staged build
+        # replaces it atomically at the end)
+        if build_path == duckdb_path and duckdb_path.exists():
             duckdb_path.unlink()
 
         # Connect to new database
         print(f"[3/7] Initializing database...")
-        conn = duckdb.connect(str(duckdb_path))
+        conn = duckdb.connect(str(build_path))
+        spill_dir = (os.environ.get('ANTHIVE_DUCKDB_TEMP_DIR', '').strip()
+                     or config.get('duckdb_temp_directory'))
+        if spill_dir:
+            spill_path = Path(os.path.expandvars(os.path.expanduser(str(spill_dir))))
+            spill_path.mkdir(parents=True, exist_ok=True)
+            conn.execute(f"SET temp_directory = '{spill_path}'")
+            print(f"  ✓ temp_directory = {spill_path}")
         # Apply memory_limit from anthive.yaml if set. DuckDB's default
         # (~80% of RAM) can trigger OOM on very-large-nnz layer melts
         # where the primary-key index build accumulates a lot of state;
@@ -349,7 +373,7 @@ def convert_h5ad_to_duckdb(h5ad_path: Path, config: Dict[str, Any],
         print("  ✓ Integrity verified")
 
         # Get file sizes
-        duckdb_size = duckdb_path.stat().st_size
+        duckdb_size = build_path.stat().st_size
         compression_pct = (1 - duckdb_size / h5ad_size) * 100
 
         # Re-ingest DE sidecar if one exists. The .duckdb's __de_study /
@@ -368,13 +392,18 @@ def convert_h5ad_to_duckdb(h5ad_path: Path, config: Dict[str, Any],
             if sidecar.exists():
                 print(f"\nReimporting DE sidecar...")
                 print(f"  {sidecar.name}")
-                inserted = _de_storage.reimport_sidecar(duckdb_path, sidecar)
+                inserted = _de_storage.reimport_sidecar(build_path, sidecar)
                 for study_id, n_rows in inserted.items():
                     print(f"  ✓ {study_id}: {n_rows} rows")
         except Exception as de_exc:
             # Non-fatal — the duckdb rebuild succeeded; just warn loudly.
             print(f"  ⚠ DE sidecar reimport failed: {de_exc}", file=sys.stderr)
             print(f"  Run `ant-de-ingest` manually to recover.", file=sys.stderr)
+
+        if build_path != duckdb_path:
+            _install_staged_duckdb(build_path, duckdb_path)
+            duckdb_size = duckdb_path.stat().st_size
+            print(f"  ✓ Moved staged build into place: {duckdb_path}")
 
         print(f"\n{'='*70}")
         print(f"CONVERSION COMPLETE!")
@@ -383,12 +412,23 @@ def convert_h5ad_to_duckdb(h5ad_path: Path, config: Dict[str, Any],
         print(f"  Output: {duckdb_path.name} ({format_size(duckdb_size)})")
         print(f"  Compression: {compression_pct:.0f}%")
 
-    except Exception as error:
-        # Clean up on failure
+    except BaseException as error:
+        # Clean up on failure (BaseException: a Ctrl-C must not leave a
+        # half-built staged file behind either)
         if conn:
             conn.close()
+            conn = None
 
-        if duckdb_path.exists():
+        if build_path == duckdb_path and not isinstance(error, Exception):
+            raise    # in-place build: main() handles Ctrl-C cleanup as before
+        if build_path != duckdb_path:
+            for partial in (build_path, Path(str(build_path) + '.wal')):
+                if partial.exists():
+                    print(f"\nRemoving partial staged build: {partial}", file=sys.stderr)
+                    partial.unlink()
+            if not isinstance(error, Exception):
+                raise
+        elif duckdb_path.exists():
             print(f"\n{'='*60}", file=sys.stderr)
             print(f"ERROR: [ant-convert] Conversion failed", file=sys.stderr)
             print(f"{'='*60}", file=sys.stderr)
@@ -417,6 +457,38 @@ def convert_h5ad_to_duckdb(h5ad_path: Path, config: Dict[str, Any],
                 rebuilding_sentinel.unlink()
             except FileNotFoundError:
                 pass
+
+
+def _install_staged_duckdb(build_path: Path, duckdb_path: Path) -> None:
+    """Move a finished staged build over the target, atomically on the target fs.
+
+    Same filesystem: one rename. Different filesystem (node-local scratch to
+    a shared store): copy next to the target under a temporary name, fsync,
+    then rename, so readers never see a half-copied file.
+    """
+    import shutil  # noqa: PLC0415
+    wal = Path(str(build_path) + '.wal')
+    if wal.exists():
+        raise ConversionError(
+            f"ERROR: [ant-convert] staged build left a WAL file ({wal}); "
+            f"refusing to install an unconsolidated database"
+        )
+    try:
+        os.replace(build_path, duckdb_path)
+        return
+    except OSError as exc:
+        if exc.errno != 18:   # EXDEV: cross-device link
+            raise
+    incoming = duckdb_path.with_name(f".{duckdb_path.name}.{os.getpid()}.incoming")
+    try:
+        shutil.copyfile(build_path, incoming)
+        with open(incoming, 'rb') as handle:
+            os.fsync(handle.fileno())
+        os.replace(incoming, duckdb_path)
+    finally:
+        if incoming.exists():
+            incoming.unlink()
+    build_path.unlink()
 
 
 def initialize_database(conn: duckdb.DuckDBPyConnection) -> None:
@@ -1116,9 +1188,9 @@ def main():
     except KeyboardInterrupt:
         print("\n\nInterrupted by user", file=sys.stderr)
 
-        # Try to clean up
+        # Try to clean up (a staged build never touched the target file)
         duckdb_path = h5ad_path.with_suffix('.duckdb')
-        if duckdb_path.exists():
+        if get_convert_staging_dir(config) is None and duckdb_path.exists():
             print(f"Removing partial database: {duckdb_path}", file=sys.stderr)
             duckdb_path.unlink()
 
@@ -1129,9 +1201,9 @@ def main():
         import traceback
         traceback.print_exc()
 
-        # Try to clean up
+        # Try to clean up (a staged build never touched the target file)
         duckdb_path = h5ad_path.with_suffix('.duckdb')
-        if duckdb_path.exists():
+        if get_convert_staging_dir(config) is None and duckdb_path.exists():
             print(f"\nRemoving partial database: {duckdb_path}", file=sys.stderr)
             duckdb_path.unlink()
 

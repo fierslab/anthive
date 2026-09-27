@@ -127,7 +127,7 @@ def _load_geneset_registry() -> GenesetRegistry:
 
 def _h5adstore_root() -> Path:
     config = get_config()
-    h5ad_root_value = config.get('h5ad_store') or 'data/h5adstore'
+    h5ad_root_value = config.get('h5ad_store') or str(__import__('config').get_data_folder(config))
     root = (script_dir.parent.parent / h5ad_root_value).resolve()
     if not root.exists():
         sys.exit(f"ERROR: h5ad store does not exist: {root}")
@@ -695,9 +695,8 @@ def _resolve_ant_serve_url(args: argparse.Namespace) -> Optional[str]:
     if getattr(args, 'api_url', None):
         return args.api_url.rstrip('/')
     config = get_config()
-    host = config.get('rest_api_host', 'localhost')
-    port = config.get('rest_api_port', 8080)
-    return f"http://{host}:{port}/api/"
+    from config import get_api_url  # noqa: PLC0415
+    return f"{get_api_url(config)}/api/"
 
 
 def _run_rescan(api_url: str) -> int:
@@ -878,9 +877,8 @@ def main() -> int:
         api_url = args.api_url
         if not api_url:
             config = get_config()
-            host = config.get('rest_api_host', 'localhost')
-            port = config.get('rest_api_port', 8080)
-            api_url = f"http://{host}:{port}/api/"
+            from config import get_api_url  # noqa: PLC0415
+            api_url = f"{get_api_url(config)}/api/"
         _run_rescan(api_url)
 
     print()

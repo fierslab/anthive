@@ -32,21 +32,14 @@ import yaml
 
 
 def _api_url_from_config() -> str:
-    """Read anthive.yaml → rest_api_host + rest_api_port; default localhost:8080."""
+    """api_url / ANTHIVE_API_URL, else http://localhost:<rest_api_port>."""
     try:
         script_dir = Path(__file__).resolve().parent
-        cfg_path = script_dir.parent.parent / 'anthive.yaml'
-        if cfg_path.exists():
-            cfg = yaml.safe_load(cfg_path.read_text()) or {}
-            host = cfg.get('rest_api_host', 'localhost')
-            port = cfg.get('rest_api_port', 8080)
-            # 0.0.0.0 → localhost for outbound calls
-            if host in ('0.0.0.0', ''):
-                host = 'localhost'
-            return f'http://{host}:{port}'
+        sys.path.insert(0, str(script_dir.parent.parent / 'lib'))
+        from config import get_api_url  # noqa: PLC0415
+        return get_api_url()
     except Exception:
-        pass
-    return 'http://localhost:8080'
+        return 'http://localhost:8080'
 
 
 def main() -> int:

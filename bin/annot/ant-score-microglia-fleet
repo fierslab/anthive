@@ -51,8 +51,10 @@ from mus import resolve_annotation     # type: ignore
 from scores_parquet import read_scores  # type: ignore
 
 ANT = repo_root / 'bin' / 'ant'
-ANT_SERVE_URL = 'http://localhost:8080'
-LOG_PATH = repo_root / 'tmp' / f'score-fleet-{int(time.time())}.log'
+from config import get_api_url, get_log_dir  # type: ignore  # noqa: E402
+
+ANT_SERVE_URL = get_api_url()
+LOG_PATH = get_log_dir() / f'score-fleet-{int(time.time())}.log'
 
 # The six microglia catalogs, all celltypes=microglial cell.
 DEFAULT_CATALOGS = [

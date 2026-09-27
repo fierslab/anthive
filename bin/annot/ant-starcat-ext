@@ -63,7 +63,8 @@ USAGE_PREFIX = 'usage__'
 
 
 def _h5adstore_root() -> Path:
-    candidate = script_dir.parent.parent / 'data' / 'h5adstore'
+    from config import get_data_folder  # noqa: PLC0415
+    candidate = get_data_folder()
     if not candidate.exists():
         sys.exit(f"ERROR: h5adstore not found at {candidate}")
     return candidate

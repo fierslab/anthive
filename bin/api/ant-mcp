@@ -97,9 +97,8 @@ _anthive_cfg = _get_anthive_config().get('mcp', {})
 
 def _parse_args() -> argparse.Namespace:
     cfg = _anthive_cfg  # shorthand for yaml mcp: section
-    rest_host = _get_anthive_config().get('rest_api_host', 'localhost')
-    rest_port = _get_anthive_config().get('rest_api_port', 8080)
-    default_api_url = f'http://{rest_host}:{rest_port}'
+    from config import get_api_url  # noqa: PLC0415
+    default_api_url = get_api_url(_get_anthive_config())
 
     parser = argparse.ArgumentParser(
         description='Anthive MCP Server — exposes single-cell data to LLM sessions',

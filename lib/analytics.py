@@ -41,7 +41,12 @@ log = logging.getLogger('anthive.analytics')
 # ── Configuration ──────────────────────────────────────────────────────────────
 
 def _get_tmp_dir() -> Path:
-    tmp = Path(os.environ.get('ANTHIVE_ANALYTICS_TMP', './tmp/analytics')).resolve()
+    override = os.environ.get('ANTHIVE_ANALYTICS_TMP', '').strip()
+    if override:
+        tmp = Path(override).resolve()
+    else:
+        from config import get_tmp_dir  # noqa: PLC0415
+        tmp = get_tmp_dir() / 'analytics'
     tmp.mkdir(parents=True, exist_ok=True)
     return tmp
 

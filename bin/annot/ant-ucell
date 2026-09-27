@@ -139,7 +139,7 @@ def _load_geneset_registry() -> GenesetRegistry:
 def _h5adstore_root() -> Path:
     """Return the resolved h5adstore root (or exit)."""
     config = get_config()
-    h5ad_root_value = config.get('h5ad_store') or 'data/h5adstore'
+    h5ad_root_value = config.get('h5ad_store') or str(__import__('config').get_data_folder(config))
     root = (SCRIPT_DIR.parent.parent / h5ad_root_value).resolve()
     if not root.exists():
         sys.exit(f'ERROR: h5ad store does not exist: {root}')

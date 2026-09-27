@@ -102,9 +102,8 @@ def _resolve_ant_serve_url(args: argparse.Namespace) -> Optional[str]:
         cfg = get_config()
     except Exception:
         return None
-    host = cfg.get('rest_api_host', 'localhost')
-    port = cfg.get('rest_api_port', 8080)
-    return f"http://{host}:{port}/api/"
+    from config import get_api_url  # noqa: PLC0415
+    return f"{get_api_url(cfg)}/api/"
 
 
 def _read_tsv(path: Path, kind: str) -> pd.Series:
