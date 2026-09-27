@@ -20,7 +20,7 @@ Usage (local):
     ant-mcp --api-url http://localhost:8080
 
 Usage (remote HTTP server, proxied through nginx):
-    ant-mcp --api-url http://localhost:8080 --host 0.0.0.0 --port 8090
+    ant-mcp --api-url http://localhost:8080 --port 8090
 
 Client configuration (add to ~/.claude/settings.json or Claude Desktop config):
     {
@@ -109,7 +109,7 @@ def _parse_args() -> argparse.Namespace:
         help=f'ant-serve API base URL (default: {default_api_url})',
     )
     parser.add_argument(
-        '--host', default=cfg.get('host', '0.0.0.0'),
+        '--host', default=cfg.get('host', '127.0.0.1'),
         help='Bind host for HTTP/SSE transport',
     )
     parser.add_argument(

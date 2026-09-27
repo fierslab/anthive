@@ -52,7 +52,8 @@ and `lib/config.py` (anthive.yaml loader).
 ## ant-mcp specifics
 
 - FastMCP `streamable-http` transport on `/mcp`.
-- Public path through Caddy at `:8501/mcp` (no auth — MCP clients use their own).
+- Public path through Caddy at `:8501/mcp`, behind the same auth snippet as
+  every other route (Authelia on dev). ant-mcp itself binds to loopback.
 - OAuth-discovery probes (`/.well-known/oauth-*`, `/register`) are
   short-circuited by Caddy with valid JSON 404s (see `config/Caddyfile`).
 - Plot output saved to `webapp/plots/` for URL-based serving; falls back to
@@ -65,7 +66,7 @@ Default bind: `127.0.0.1`. Override via `anthive.yaml`:
 rest_api_host: 0.0.0.0   # bind on all interfaces (skip Caddy)
 rest_api_port: 8080
 ```
-MCP defaults to `0.0.0.0:8090` (`mcp.host` / `mcp.port` in anthive.yaml).
+MCP defaults to `127.0.0.1:8090` (`mcp.host` / `mcp.port` in anthive.yaml).
 
 ## Server-selection signal — `/health` carries the "how fast is this server"
 

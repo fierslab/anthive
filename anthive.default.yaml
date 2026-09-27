@@ -83,8 +83,9 @@ s3:
 # MCP Server Configuration (ant-mcp)
 # ------------------------------------
 mcp:
-  # Host and port ant-mcp listens on
-  host: 0.0.0.0
+  # Host and port ant-mcp listens on. Keep it on loopback: public access
+  # goes through Caddy's /mcp route, which applies the auth snippet.
+  host: 127.0.0.1
   port: 8090
 
   # MCP transport: streamable-http | sse | stdio

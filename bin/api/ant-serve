@@ -3,7 +3,7 @@
 # dependencies = [
 #   "fastapi>=0.110.0",
 #   "uvicorn>=0.27.0",
-#   "duckdb>=0.10.0",
+#   "duckdb>=1.3,<1.6",
 #   "pandas>=2.0.0",
 #   "pyyaml>=6.0",
 #   "boto3>=1.26.0",
@@ -46,6 +46,7 @@ import json
 import logging
 import logging.handlers
 import math
+import re
 import sys
 import time
 import uuid
@@ -1814,8 +1815,10 @@ Handled by the reverse proxy (Caddy / nginx) via HTTP Basic. The API itself does
 # Enable CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure in production
-    allow_credentials=True,
+    allow_origins=["*"],
+    # Browsers reach the API same-origin through Caddy; a wildcard origin
+    # must never be combined with credentialed (cookie) requests.
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -4074,24 +4077,22 @@ def get_cells(
         filters = {}
         if filter:
             for f in filter:
-                if ':' not in f:
+                # Split at the first lone ':' so score columns like
+                # 'GWAS0000::GWAS::bellenguez' keep their '::' separators.
+                parts = re.split(r'(?<!:):(?!:)', f, maxsplit=1)
+                if len(parts) != 2 or not parts[0]:
                     raise ValueError(f"Invalid filter format: {f}")
+                field, value = parts
 
-                field, value = f.split(':', 1)
-
-                # Try to parse as range
+                # Values stay text: AnthiveDB coerces per column type, so a
+                # categorical label like '007' is not mangled into 7.0.
+                # 'a,b' is a numeric range or a 2-value IN list (AnthiveDB
+                # picks by column type); three or more values are an IN list.
                 if ',' in value:
-                    try:
-                        parts = value.split(',')
-                        filters[field] = (float(parts[0]), float(parts[1]))
-                    except ValueError:
-                        filters[field] = value
+                    items = value.split(',')
+                    filters[field] = tuple(items) if len(items) == 2 else items
                 else:
-                    # Try numeric conversion
-                    try:
-                        filters[field] = float(value)
-                    except ValueError:
-                        filters[field] = value
+                    filters[field] = value
 
         # Get data
         with _pooled_db(db_id) as db:
