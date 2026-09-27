@@ -45,6 +45,7 @@ import gc
 import json
 import logging
 import logging.handlers
+import hmac
 import math
 import os
 import re
@@ -2414,6 +2415,188 @@ def _require_admin(request: Request) -> str:
             detail="admins-only endpoint (must be in Authelia 'admins' group)",
         )
     return user or 'unknown'
+
+
+# ── Internal secret + admin-or-local guard ────────────────────────────────
+#
+# ant-mcp calls ant-serve on behalf of a verified MCP-link owner and says so
+# with X-Anthive-Internal: <internal_secret> plus Remote-User/Remote-Groups.
+# Caddy strips client-supplied Remote-* and X-Anthive-Internal, so through
+# the proxy those headers are only ever set by forward_auth. A request that
+# presents X-Anthive-Internal with the wrong value is rejected outright.
+
+_internal_secret_value: Optional[str] = None
+
+
+def _internal_secret() -> str:
+    global _internal_secret_value
+    if _internal_secret_value is None:
+        from config import get_or_create_secret  # noqa: PLC0415
+        cfg = get_config()
+        _internal_secret_value = get_or_create_secret(
+            'internal_secret', cfg.get('internal_secret'), 'ANTHIVE_INTERNAL_SECRET', cfg)
+    return _internal_secret_value
+
+
+def _has_valid_internal_secret(request: Request) -> bool:
+    presented = request.headers.get('X-Anthive-Internal', '')
+    return bool(presented) and hmac.compare_digest(presented, _internal_secret())
+
+
+class _InternalSecretGuard:
+    """Pure-ASGI: a wrong X-Anthive-Internal header is a 401, never ignored."""
+
+    def __init__(self, app) -> None:
+        self._app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope['type'] == 'http':
+            for key, value in scope.get('headers', []):
+                if key == b'x-anthive-internal':
+                    if not hmac.compare_digest(value.decode('latin-1'), _internal_secret()):
+                        response = JSONResponse({'detail': 'invalid internal credentials'},
+                                                status_code=401)
+                        await response(scope, receive, send)
+                        return
+                    break
+        await self._app(scope, receive, send)
+
+
+app.add_middleware(_InternalSecretGuard)
+
+
+def _is_local_tool_request(request: Request) -> bool:
+    """A direct call from a tool on this host: loopback peer, no proxy
+    forwarding header (Caddy always adds X-Forwarded-For), no Remote-User."""
+    peer = request.client.host if request.client else ''
+    return (peer in ('127.0.0.1', '::1', 'localhost')
+            and 'x-forwarded-for' not in request.headers
+            and not request.headers.get('Remote-User'))
+
+
+def _require_admin_or_local(request: Request) -> str:
+    """Admin endpoints: allow local tools (ant-sync, AnnotationWriter,
+    ant-refresh-views, ant-score), callers with the internal secret and no
+    user identity (tools in another container), and Authelia admins."""
+    if _is_local_tool_request(request):
+        return 'local'
+    if _has_valid_internal_secret(request) and not request.headers.get('Remote-User'):
+        return 'internal'
+    return _require_admin(request)
+
+
+# ── Personal MCP links (/me/mcp, /admin/mcp-links, /internal/mcp/verify) ──
+
+_mcp_link_store = None
+_mcp_link_store_lock = Lock()
+
+
+def _mcp_cfg() -> Dict[str, Any]:
+    return get_config().get('mcp') or {}
+
+
+def _get_mcp_link_store():
+    global _mcp_link_store
+    if _mcp_link_store is None:
+        with _mcp_link_store_lock:
+            if _mcp_link_store is None:
+                from config import get_or_create_secret, get_state_dir  # noqa: PLC0415
+                from mcp_tokens import McpLinkStore  # noqa: PLC0415
+                cfg = get_config()
+                mcp_cfg = cfg.get('mcp') or {}
+                secret = get_or_create_secret(
+                    'mcp_token_secret', mcp_cfg.get('token_secret'),
+                    'ANTHIVE_MCP_TOKEN_SECRET', cfg)
+                _mcp_link_store = McpLinkStore(
+                    get_state_dir(cfg) / 'mcp_tokens.db', secret,
+                    ttl_days=int(mcp_cfg.get('token_ttl_days', 90) or 0))
+    return _mcp_link_store
+
+
+def _request_groups(request: Request) -> List[str]:
+    raw = request.headers.get('Remote-Groups') or request.headers.get('X-Remote-Groups') or ''
+    return [g.strip() for g in raw.split(',') if g.strip()]
+
+
+def _mcp_public_base_url(request: Request) -> str:
+    configured = _mcp_cfg().get('public_base_url')
+    if configured:
+        return str(configured).rstrip('/')
+    proto = (request.headers.get('X-Forwarded-Proto') or request.url.scheme or 'https').split(',')[0].strip()
+    host = (request.headers.get('X-Forwarded-Host') or request.headers.get('Host') or 'localhost').split(',')[0].strip()
+    return f"{proto}://{host}"
+
+
+def _mcp_link_body(request: Request, user: str, record) -> Dict[str, Any]:
+    from mcp_tokens import describe  # noqa: PLC0415
+    return describe(record, _get_mcp_link_store(), _mcp_public_base_url(request),
+                    user, bool(_mcp_cfg().get('enabled', True)))
+
+
+@app.get("/me/mcp", tags=["mcp"])
+def get_my_mcp_link(request: Request):
+    """The caller's personal MCP link (never creates one)."""
+    user = _chat_user_from_request(request)
+    if not _mcp_cfg().get('enabled', True):
+        return _mcp_link_body(request, user, None)
+    store = _get_mcp_link_store()
+    record = store.get(user)
+    if record is not None:
+        store.update_groups(user, _request_groups(request))
+    return _mcp_link_body(request, user, record)
+
+
+@app.post("/me/mcp/rotate", tags=["mcp"])
+def rotate_my_mcp_link(request: Request):
+    """Issue the caller's link, or replace it (the old link stops working)."""
+    user = _chat_user_from_request(request)
+    if not _mcp_cfg().get('enabled', True):
+        raise HTTPException(status_code=403, detail="personal MCP links are disabled on this site")
+    record = _get_mcp_link_store().rotate(user, _request_groups(request))
+    log.info("mcp-link rotate user=%s generation=%s", user, record.generation)
+    return _mcp_link_body(request, user, record)
+
+
+@app.delete("/me/mcp", tags=["mcp"])
+def revoke_my_mcp_link(request: Request):
+    user = _chat_user_from_request(request)
+    _get_mcp_link_store().revoke(user)
+    log.info("mcp-link revoke user=%s (self)", user)
+    return {"ok": True}
+
+
+@app.get("/admin/mcp-links", tags=["mcp"])
+def list_mcp_links(request: Request):
+    _require_admin(request)
+    from mcp_tokens import admin_row  # noqa: PLC0415
+    return [admin_row(r) for r in _get_mcp_link_store().list_all()]
+
+
+@app.delete("/admin/mcp-links/{user}", tags=["mcp"])
+def admin_revoke_mcp_link(user: str, request: Request):
+    admin = _require_admin(request)
+    if not _get_mcp_link_store().revoke(user):
+        raise HTTPException(status_code=404, detail=f"no MCP link for {user!r}")
+    log.info("mcp-link revoke user=%s by admin=%s", user, admin)
+    return {"ok": True}
+
+
+class McpVerifyRequest(BaseModel):
+    token: str = Field(..., max_length=200)
+    client_ip: Optional[str] = Field(None, max_length=64)
+
+
+@app.post("/internal/mcp/verify", tags=["internal"], include_in_schema=False)
+def verify_mcp_link(body: McpVerifyRequest, request: Request):
+    """ant-mcp -> ant-serve: resolve a token to its owner. Internal secret only."""
+    if not _has_valid_internal_secret(request):
+        raise HTTPException(status_code=401, detail="internal endpoint")
+    if not _mcp_cfg().get('enabled', True):
+        raise HTTPException(status_code=401, detail="personal MCP links are disabled")
+    record = _get_mcp_link_store().verify(body.token, body.client_ip)
+    if record is None:
+        raise HTTPException(status_code=401, detail="unknown, rotated, revoked or expired MCP link")
+    return {"user": record.user, "groups": record.groups}
 
 
 def _resolve_collection_dir(group_id: str) -> Tuple[Optional[Path], Optional[str]]:
@@ -11110,7 +11293,7 @@ async def get_pseudobulk(
     )
 
 
-@app.post("/admin/release/{db_id:path}", tags=["admin"])
+@app.post("/admin/release/{db_id:path}", tags=["admin"], dependencies=[Depends(_require_admin_or_local)])
 def release_database(
     db_id: str,
     duration_seconds: float = 300.0,
@@ -11148,7 +11331,7 @@ def release_database(
     return result
 
 
-@app.post("/admin/restore/{db_id:path}", tags=["admin"])
+@app.post("/admin/restore/{db_id:path}", tags=["admin"], dependencies=[Depends(_require_admin_or_local)])
 def restore_database(db_id: str):
     """Clear an eviction set by /admin/release/{db_id}. The connection pool
     opens a fresh r/o instance on the next request.
@@ -11176,7 +11359,7 @@ def restore_database(db_id: str):
     return result
 
 
-@app.post("/admin/refresh-views/{db_id:path}", tags=["admin"])
+@app.post("/admin/refresh-views/{db_id:path}", tags=["admin"], dependencies=[Depends(_require_admin_or_local)])
 def refresh_views(db_id: str):
     """Rebuild the obscat/obsnum views on this dataset's duckdb from the
     current .md ``api:`` section (obs_rename / obs_hidden).
@@ -11368,7 +11551,7 @@ async def set_api_config(db_id: str, request: Request):
     return await asyncio.to_thread(refresh_views, db_id)
 
 
-@app.post("/admin/rescan", tags=["admin"])
+@app.post("/admin/rescan", tags=["admin"], dependencies=[Depends(_require_admin_or_local)])
 def rescan_databases():
     """
     Force rescan of data folder and reload all metadata

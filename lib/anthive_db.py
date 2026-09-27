@@ -2011,8 +2011,9 @@ def _post_ant_serve(
     # and `_post_ant_serve('http://h/api',  '/admin/x')` both produce
     # `http://h/api/admin/x` with no double slashes.
     url = base_url.rstrip('/') + '/' + path.lstrip('/')
-    req = urllib.request.Request(url, method='POST',
-                                 headers={'Content-Length': '0'})
+    from config import internal_auth_headers  # noqa: PLC0415
+    headers = {'Content-Length': '0', **internal_auth_headers()}
+    req = urllib.request.Request(url, method='POST', headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read()

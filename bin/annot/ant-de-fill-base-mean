@@ -69,8 +69,8 @@ def _post_ant_serve(url: str, db_id: str, action: str) -> None:
     when --no-coordinate or the server isn't reachable."""
     full = url.rstrip('/') + f'/admin/{action}/{db_id}'
     try:
-        r = requests.post(full, timeout=5,
-                          auth=_auth_for_url(url))
+        r = requests.post(full, timeout=5, auth=_auth_for_url(url),
+                          headers=__import__('config').internal_auth_headers())
         if r.status_code == 200:
             return
         _eprint(f"  ant-serve {action} returned {r.status_code}: {r.text[:120]}")

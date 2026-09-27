@@ -124,6 +124,11 @@ duckdb_server_memory_limit: auto
 duckdb_max_open_databases: 48
 duckdb_allowed_directories: []
 
+# Shared secret ant-mcp sends (X-Anthive-Internal) when it calls ant-serve
+# on behalf of a verified user. null = env ANTHIVE_INTERNAL_SECRET, else
+# <state_dir>/secrets/internal_secret (auto-created, mode 0600).
+internal_secret: null
+
 # S3-compatible storage for DuckDB files (optional)
 # If bucket is set and a local .duckdb is not found, ant-serve will attempt
 # to open the .duckdb from S3 at the equivalent relative path.
@@ -153,10 +158,6 @@ s3:
 # MCP Server Configuration (ant-mcp)
 # ------------------------------------
 mcp:
-  # Master switch for the MCP server (the supervisor / compose skip it when
-  # false).
-  enabled: true
-
   # Host and port ant-mcp listens on. Keep it on loopback: public access
   # goes through Caddy's /mcp route, which applies the auth snippet.
   host: 127.0.0.1
@@ -173,11 +174,39 @@ mcp:
   # (scheme + host only, no trailing slash)
   public_url: http://localhost:8501
 
-  # Public-facing MCP URL shown at startup and passed to LLM clients.
-  # Include the per-user token here, e.g.:
-  #   https://your-host.example.org/mcp/<token>
-  # Defaults to http://<host>:<port>/mcp when null.
+  # Public-facing MCP URL shown at startup (informational only; users get
+  # their own personal link from the web UI). Defaults to
+  # http://<host>:<port>/mcp when null.
   mcp_url: null
+
+  # ── Personal MCP links ──────────────────────────────────────────────
+  # Every signed-in user can get ONE personal link
+  # (<public_base_url>/mcp/u/<token>) from the web UI and rotate or revoke
+  # it at any time. The token is derived from a server secret, so the
+  # database alone never reveals a working link.
+  #
+  # enabled: false hides the feature in the UI and refuses new links.
+  enabled: true
+  # require_token: false keeps the legacy unauthenticated /mcp endpoint
+  # (only sensible when ant-mcp is reachable from localhost alone).
+  require_token: true
+  # Days until a link expires; 0 = never. Rotating resets the clock.
+  token_ttl_days: 90
+  # Scheme + host users' MCP clients reach this site at, e.g.
+  # https://anthive.example.org. null = derive from the request
+  # (X-Forwarded-Proto / X-Forwarded-Host set by the reverse proxy).
+  public_base_url: null
+  # Per-link request budget in ant-mcp (requests per minute).
+  rate_limit_per_minute: 120
+  # ant-mcp caches a successful token check this many seconds, a failed
+  # one verify_negative_cache_seconds. Rotation/revocation takes effect
+  # after at most verify_cache_seconds.
+  verify_cache_seconds: 30
+  verify_negative_cache_seconds: 5
+  # HMAC secret the tokens derive from. null = env
+  # ANTHIVE_MCP_TOKEN_SECRET, else <state_dir>/secrets/mcp_token_secret
+  # (auto-created, mode 0600). Changing it invalidates every link.
+  token_secret: null
 
 # S3 sync policy — what to pull locally, how to cap the local store
 # -----------------------------------------------------------------

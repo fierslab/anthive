@@ -28,6 +28,8 @@ import time
 from pathlib import Path
 
 import requests
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / 'lib'))
 import yaml
 
 
@@ -88,7 +90,7 @@ def main() -> int:
     for i, e in enumerate(entries, 1):
         db_id = e['id']
         try:
-            r = requests.post(f'{base}/admin/refresh-views/{db_id}',
+            r = requests.post(f'{base}/admin/refresh-views/{db_id}', headers=__import__('config').internal_auth_headers(),
                               timeout=60)
         except Exception as exc:
             n_fail += 1
@@ -139,7 +141,7 @@ def main() -> int:
         try:
             # Rescan iterates the whole store to detect adds/removes and can
             # take minutes on a fleet with S3-backed catalog entries.
-            r = requests.post(f'{base}/admin/rescan', timeout=600)
+            r = requests.post(f'{base}/admin/rescan', timeout=600, headers=__import__('config').internal_auth_headers())
             r.raise_for_status()
             body = r.json()
             print(f'  previous → current: {body["previous_count"]} → {body["current_count"]}')

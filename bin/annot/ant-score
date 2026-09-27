@@ -703,6 +703,7 @@ def _run_rescan(api_url: str) -> int:
     import urllib.request
     request = urllib.request.Request(
         f"{api_url.rstrip('/')}/admin/rescan", method='POST',
+        headers=__import__('config').internal_auth_headers(),
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:

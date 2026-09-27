@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
 # dependencies = [
-#   "mcp>=1.4.0",
+#   "mcp>=1.10,<2",
 #   "httpx>=0.27.0",
 #   "pyyaml>=6.0",
 # ]
@@ -22,34 +22,34 @@ Usage (local):
 Usage (remote HTTP server, proxied through nginx):
     ant-mcp --api-url http://localhost:8080 --port 8090
 
-Client configuration (add to ~/.claude/settings.json or Claude Desktop config):
-    {
-      "mcpServers": {
-        "anthive": {
-          "type": "http",
-          "url": "https://anthive.example.org/mcp",
-          "headers": { "Authorization": "Basic <base64(user:pass)>" }
-        }
-      }
-    }
+Authentication: every signed-in user gets a personal link from the web UI
+(account menu, "MCP link"), of the form
 
-Generate the base64 token with:
-    echo -n "user:password" | base64
+    https://anthive.example.org/mcp/u/amcp_<id>_<mac>
+
+Clients that support headers can instead send the token to /mcp as
+``Authorization: Bearer amcp_<id>_<mac>``. Tokens are verified against
+ant-serve (/internal/mcp/verify); tool calls then run with that user's
+identity, and admin-only tools are hidden from non-admins.
+See doc/MCP_LINKS.md.
 """
 
 import argparse
 import base64
+import collections
 import contextvars
 import json
 import sys
+import time
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 import uvicorn
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ImageContent, TextContent
 
 
@@ -84,6 +84,166 @@ class _ImageCapabilityMiddleware:
         else:
             await self._app(scope, receive, send)
 
+# ── Personal MCP links: token check + per-request identity ────────────────────
+#
+# /mcp/u/<token>[/...] is rewritten to /mcp[/...]; /mcp also accepts
+# "Authorization: Bearer amcp_...". The token is resolved to its owner by
+# ant-serve (/internal/mcp/verify, internal secret) and cached briefly. The
+# identity rides in the ASGI scope, is read back per MCP message in
+# AnthiveMCP, and is forwarded to ant-serve as Remote-User / Remote-Groups
+# with the internal secret, so every tool call runs as that user.
+
+ADMIN_ONLY_TOOLS = frozenset({'analytics_viz', 'rescan_databases'})
+
+_current_identity: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar(
+    'anthive_identity', default=None,
+)
+
+
+def _is_admin(identity: Optional[dict]) -> bool:
+    return bool(identity) and 'admins' in {g.lower() for g in identity.get('groups', [])}
+
+
+class _McpLinkAuthMiddleware:
+    """ASGI middleware enforcing personal MCP links in front of FastMCP."""
+
+    def __init__(self, app, *, api_base_url: str, internal_secret: str,
+                 require_token: bool = True, rate_limit_per_minute: int = 120,
+                 cache_seconds: float = 30.0, negative_cache_seconds: float = 5.0,
+                 mcp_path: str = '/mcp', http_client: Optional[httpx.AsyncClient] = None) -> None:
+        self._app = app
+        self._verify_url = f"{api_base_url.rstrip('/')}/internal/mcp/verify"
+        self._secret = internal_secret
+        self._require_token = require_token
+        self._rate_limit = max(1, int(rate_limit_per_minute))
+        self._cache_seconds = float(cache_seconds)
+        self._negative_cache_seconds = float(negative_cache_seconds)
+        self._mcp_path = mcp_path.rstrip('/')
+        self._cache: dict = {}
+        self._hits: dict = collections.defaultdict(collections.deque)
+        self._client = http_client or httpx.AsyncClient(timeout=httpx.Timeout(10.0))
+
+    @staticmethod
+    async def _reject(send, status: int, message: str) -> None:
+        body = json.dumps({'error': 'unauthorized' if status == 401 else 'error',
+                           'detail': message}).encode()
+        headers = [(b'content-type', b'application/json'),
+                   (b'content-length', str(len(body)).encode())]
+        if status == 401:
+            headers.append((b'www-authenticate', b'Bearer realm="anthive-mcp"'))
+        await send({'type': 'http.response.start', 'status': status, 'headers': headers})
+        await send({'type': 'http.response.body', 'body': body})
+
+    async def _verify(self, token: str, client_ip: Optional[str]) -> Optional[dict]:
+        now = time.monotonic()
+        cached = self._cache.get(token)
+        if cached and cached[0] > now:
+            return cached[1]
+        try:
+            response = await self._client.post(
+                self._verify_url, json={'token': token, 'client_ip': client_ip},
+                headers={'X-Anthive-Internal': self._secret})
+        except httpx.HTTPError:
+            return None          # API unreachable: fail closed, do not cache
+        identity = response.json() if response.status_code == 200 else None
+        ttl = self._cache_seconds if identity else self._negative_cache_seconds
+        if len(self._cache) > 10_000:
+            self._cache.clear()
+        self._cache[token] = (now + ttl, identity)
+        return identity
+
+    def _over_rate_limit(self, token: str) -> bool:
+        now = time.monotonic()
+        window = self._hits[token]
+        while window and window[0] < now - 60:
+            window.popleft()
+        if len(window) >= self._rate_limit:
+            return True
+        window.append(now)
+        return False
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope['type'] != 'http':
+            await self._app(scope, receive, send)
+            return
+        path = scope.get('path', '')
+        headers = {k.lower(): v for k, v in scope.get('headers', [])}
+        token = None
+        prefix = f"{self._mcp_path}/u/"
+        if path.startswith(prefix):
+            token, _, rest = path[len(prefix):].partition('/')
+            new_path = self._mcp_path + (f"/{rest}" if rest else '')
+            scope = dict(scope, path=new_path, raw_path=new_path.encode())
+        elif path == self._mcp_path or path.startswith(self._mcp_path + '/'):
+            auth = headers.get(b'authorization', b'').decode('latin-1')
+            if auth.lower().startswith('bearer '):
+                token = auth[7:].strip()
+            elif self._require_token:
+                await self._reject(send, 401,
+                    'This MCP server needs your personal link. Get it in the Anthive '
+                    'web UI (account menu, "MCP link") and use it as the server URL, '
+                    'or send it as "Authorization: Bearer <token>".')
+                return
+        if token is not None:
+            forwarded = headers.get(b'x-forwarded-for', b'').decode('latin-1')
+            client_ip = (forwarded.split(',')[0].strip() if forwarded
+                         else (scope.get('client') or ('', 0))[0])
+            identity = await self._verify(token, client_ip)
+            if identity is None:
+                await self._reject(send, 401,
+                    'Unknown, rotated, revoked or expired MCP link. Open the Anthive web '
+                    'UI (account menu, "MCP link") to see your current link.')
+                return
+            if self._over_rate_limit(token):
+                await self._reject(send, 429, 'Too many requests for this MCP link; slow down.')
+                return
+            state = dict(scope.get('state') or {})
+            state['anthive_identity'] = identity
+            scope = dict(scope, state=state)
+            ctx_token = _current_identity.set(identity)
+            try:
+                await self._app(scope, receive, send)
+            finally:
+                _current_identity.reset(ctx_token)
+            return
+        await self._app(scope, receive, send)
+
+
+class AnthiveMCP(FastMCP):
+    """FastMCP that runs each tool call as the verified link owner and hides
+    admin-only tools from everyone else."""
+
+    require_identity = True
+
+    def _identity_from_request(self) -> Optional[dict]:
+        try:
+            request = self.get_context().request_context.request
+        except (LookupError, ValueError, AttributeError):
+            request = None
+        if request is not None:
+            identity = (getattr(request, 'scope', {}).get('state') or {}).get('anthive_identity')
+            if identity:
+                return identity
+        return _current_identity.get()
+
+    async def list_tools(self):
+        tools = await super().list_tools()
+        identity = self._identity_from_request()
+        if self.require_identity and not _is_admin(identity):
+            tools = [tool for tool in tools if tool.name not in ADMIN_ONLY_TOOLS]
+        return tools
+
+    async def call_tool(self, name, arguments):
+        identity = self._identity_from_request()
+        if self.require_identity and name in ADMIN_ONLY_TOOLS and not _is_admin(identity):
+            raise PermissionError(f"The '{name}' tool is restricted to Anthive admins.")
+        ctx_token = _current_identity.set(identity)
+        try:
+            return await super().call_tool(name, arguments)
+        finally:
+            _current_identity.reset(ctx_token)
+
+
 # ── load anthive config (anthive.yaml / anthive.default.yaml) ──────────────────
 
 _script_dir = Path(__file__).parent.resolve()
@@ -91,6 +251,13 @@ sys.path.insert(0, str(_script_dir.parent.parent / 'lib'))
 from config import get_config as _get_anthive_config  # noqa: E402
 
 _anthive_cfg = _get_anthive_config().get('mcp', {})
+
+
+def _internal_secret() -> str:
+    from config import get_or_create_secret  # noqa: PLC0415
+    cfg = _get_anthive_config()
+    return get_or_create_secret('internal_secret', cfg.get('internal_secret'),
+                                'ANTHIVE_INTERNAL_SECRET', cfg)
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
@@ -146,10 +313,19 @@ def main() -> None:
     public_url = args.public_url.rstrip('/')
     mcp_public_url = (args.mcp_url or f'http://{args.host}:{args.port}/mcp').rstrip('/')
 
-    mcp = FastMCP(
+    require_token = bool(_anthive_cfg.get('require_token', True))
+    AnthiveMCP.require_identity = require_token
+    # Behind Caddy the Host header is the public name; with token auth in
+    # force, DNS-rebinding protection adds nothing and would 421 every
+    # proxied request, so it only stays on in legacy (tokenless) mode.
+    transport_security = (TransportSecuritySettings(enable_dns_rebinding_protection=False)
+                          if require_token else None)
+
+    mcp = AnthiveMCP(
         name='anthive',
         host=args.host,
         port=args.port,
+        transport_security=transport_security,
         instructions=(
             'Anthive is a single-cell RNA-seq data browser with 60+ curated datasets.\n'
             '\n'
@@ -243,24 +419,38 @@ def main() -> None:
 
     _http_client = httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=120, write=60, pool=10))
 
+    internal_secret = _internal_secret()
+
+    def _identity_headers() -> dict:
+        identity = _current_identity.get()
+        if not identity:
+            return {}
+        return {
+            'Remote-User': identity.get('user', ''),
+            'Remote-Groups': ','.join(identity.get('groups', [])),
+            'X-Anthive-Internal': internal_secret,
+        }
+
     async def _get(path: str, **params) -> dict:
         """GET JSON from ant-serve."""
         url = f"{api_base_url}{path}"
-        response = await _http_client.get(url, params={k: v for k, v in params.items() if v is not None})
+        response = await _http_client.get(url, params={k: v for k, v in params.items() if v is not None},
+                                          headers=_identity_headers())
         response.raise_for_status()
         return response.json()
 
     async def _get_post(path: str, body: dict) -> dict:
         """POST JSON body to ant-serve and return JSON response."""
         url = f"{api_base_url}{path}"
-        response = await _http_client.post(url, json=body)
+        response = await _http_client.post(url, json=body, headers=_identity_headers())
         response.raise_for_status()
         return response.json()
 
     async def _get_image(path: str, **params) -> bytes:
         """GET image bytes from an ant-serve plot endpoint (legacy)."""
         url = f"{api_base_url}{path}"
-        response = await _http_client.get(url, params={k: v for k, v in params.items() if v is not None})
+        response = await _http_client.get(url, params={k: v for k, v in params.items() if v is not None},
+                                          headers=_identity_headers())
         response.raise_for_status()
         return response.content
 
@@ -282,7 +472,7 @@ def main() -> None:
                     query.append((k, item))
             else:
                 query.append((k, v))
-        response = await _http_client.get(url, params=query)
+        response = await _http_client.get(url, params=query, headers=_identity_headers())
         response.raise_for_status()
         return response.content, dict(response.headers)
 
@@ -1037,8 +1227,22 @@ def main() -> None:
         mcp.run(transport='stdio')
     elif args.transport == 'streamable-http':
         starlette_app = mcp.streamable_http_app()
+        asgi_app = _ImageCapabilityMiddleware(starlette_app)
+        if require_token:
+            asgi_app = _McpLinkAuthMiddleware(
+                asgi_app,
+                api_base_url=api_base_url,
+                internal_secret=internal_secret,
+                require_token=True,
+                rate_limit_per_minute=int(_anthive_cfg.get('rate_limit_per_minute', 120)),
+                cache_seconds=float(_anthive_cfg.get('verify_cache_seconds', 30)),
+                negative_cache_seconds=float(_anthive_cfg.get('verify_negative_cache_seconds', 5)),
+                mcp_path=mcp.settings.streamable_http_path,
+            )
+        else:
+            print('  WARNING: mcp.require_token is false; /mcp is unauthenticated')
         uvicorn.run(
-            _ImageCapabilityMiddleware(starlette_app),
+            asgi_app,
             host=args.host,
             port=args.port,
         )

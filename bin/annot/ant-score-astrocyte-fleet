@@ -115,7 +115,7 @@ def ensure_gene_bins(db_id: str, h5ad_path: Path, duckdb_path: Path) -> bool:
 
     _log(f"  · __gene_bins missing — building via ant duckdb-check")
     try:
-        requests.post(f"{ANT_SERVE_URL}/admin/release/{db_id}", timeout=10)
+        requests.post(f"{ANT_SERVE_URL}/admin/release/{db_id}", timeout=10, headers=__import__('config').internal_auth_headers())
     except Exception:
         pass
 
@@ -126,7 +126,7 @@ def ensure_gene_bins(db_id: str, h5ad_path: Path, duckdb_path: Path) -> bool:
     ok = 'CHECK COMPLETED SUCCESSFULLY' in result.stdout
 
     try:
-        requests.post(f"{ANT_SERVE_URL}/admin/restore/{db_id}", timeout=10)
+        requests.post(f"{ANT_SERVE_URL}/admin/restore/{db_id}", timeout=10, headers=__import__('config').internal_auth_headers())
     except Exception:
         pass
 

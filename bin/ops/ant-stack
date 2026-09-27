@@ -304,8 +304,9 @@ def render_anthive_yaml(site: dict) -> dict:
             'admins': [str(a) for a in site['auth'].get('admins') or []],
         },
         'mcp': {
-            'enabled': bool(site['services'].get('mcp')),
+            'enabled': bool(site['services'].get('mcp')),   # personal links on/off
             'host': '0.0.0.0', 'port': 8090,
+            'public_base_url': site['site']['public_url'].rstrip('/'),
             'plots_dir': f"{C_WEBAPP}/plots",
             'public_url': site['site']['public_url'].rstrip('/'),
             'token_ttl_days': int((site.get('mcp') or {}).get('token_ttl_days') or 0),
@@ -350,7 +351,15 @@ def render_caddy_auth(site: dict) -> str:
     lines = [head,
              "# Identity comes ONLY from basic_auth: client-sent headers are dropped",
              "# and re-derived from the authenticated user.",
-             "@anthive_protected not path /api/health /health /.well-known/* /register",
+             "# MCP personal links authenticate in ant-mcp (token in the path or",
+             "# an `Authorization: Bearer amcp_...` header), not with basic auth.",
+             "@anthive_protected {",
+             "\tnot path /api/health /health /.well-known/* /register /mcp/u/*",
+             "\tnot {",
+             "\t\tpath /mcp /mcp/*",
+             "\t\theader_regexp Authorization ^Bearer\\s+amcp_",
+             "\t}",
+             "}",
              "basic_auth @anthive_protected {"]
     for user in site['auth'].get('users') or []:
         name = str(user['name'])

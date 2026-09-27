@@ -92,7 +92,8 @@ SERVICES: dict = {
         'color': GREEN,
     },
     'mcp': {
-        'cmd': ['./bin/api/ant-mcp'],
+        # Binds 127.0.0.1 (mcp.host); Caddy's /mcp route is the public path.
+        'cmd': ['./bin/api/ant-mcp', '--api-url', _API_INTERNAL_URL],
         'color': MAGENTA,
     },
     'caddy': {
@@ -124,16 +125,14 @@ SERVICES: dict = {
     },
 }
 
-# Services intentionally NOT in the default set:
-#   * mcp        — vark (CLI/skill) is the LLM-facing path now.
-#
-# To re-enable: add the name back to DEFAULT_SERVICES, OR launch it
-# standalone (`make serve-mcp`).
+# mcp is in the default set again: personal MCP links (doc/MCP_LINKS.md)
+# make the classic MCP endpoint the general LLM-client path; vark/pyvark
+# remain the CLI/notebook route.
 #
 # The legacy `streamlit` service was removed 2026-06-22 — ant-browse owns
 # the interactive plot UI now. `/streamlit` on the reverse proxy returns
 # 410 for anyone with a bookmark.
-DEFAULT_SERVICES = ['api', 'browse', 'authelia']
+DEFAULT_SERVICES = ['api', 'browse', 'mcp', 'authelia']
 
 
 def _caddy_env_for_mode(prod: bool) -> dict[str, str]:

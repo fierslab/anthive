@@ -31,8 +31,6 @@ x-app: &app
     ANTHIVE_GENESETSTORE: ${ANTHIVE_GENESETSTORE:-}
     ANTHIVE_STARCATSTORE: ${ANTHIVE_STARCATSTORE:-}
     ANTHIVE_API_URL: http://api:8080
-    ANTHIVE_INTERNAL_SECRET_FILE: /var/lib/anthive/secrets/internal_secret
-    ANTHIVE_MCP_TOKEN_SECRET_FILE: /var/lib/anthive/secrets/mcp_token_secret
   logging: &logging
     driver: json-file
     options: {max-size: "20m", max-file: "5"}

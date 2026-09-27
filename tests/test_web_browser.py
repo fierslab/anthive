@@ -5517,3 +5517,77 @@ def test_module_view_tissue_tree_has_descendants_cascade(client):
     )
     # Indeterminate marker refreshed on partial subtree selection.
     assert "cb.indeterminate" in html, "indeterminate marker not maintained on parent boxes"
+
+
+# ── Per-user MCP links (/account/mcp, /admin/mcp-links) ─────────────────────
+
+
+def test_mcp_menu_entry_only_when_signed_in(client):
+    authed = client.get("/", headers={"Remote-User": "mf"})
+    assert 'id="mcp-menu-link"' in authed.text
+    assert 'href="/account/mcp"' in authed.text
+    # Hidden until /api/me/mcp says enabled (client-side gate, like chat).
+    assert 'id="mcp-menu-link" style="display:none"' in authed.text
+    assert "/api/me/mcp" in authed.text
+    anon = client.get("/")
+    assert 'id="mcp-menu-link"' not in anon.text
+
+
+def test_admin_mcp_links_menu_entry_only_for_admins(client):
+    admin = client.get("/", headers={"Remote-User": "mf", "Remote-Groups": "admins"})
+    assert 'href="/admin/mcp-links"' in admin.text
+    plain = client.get("/", headers={"Remote-User": "mf", "Remote-Groups": "users"})
+    assert 'href="/admin/mcp-links"' not in plain.text
+
+
+def test_account_mcp_requires_sign_in(client):
+    resp = client.get("/account/mcp")
+    assert resp.status_code == 401
+    assert "signed in" in resp.text
+    # No controls (and no API calls) for an anonymous visitor.
+    assert 'id="mcp-create-btn"' not in resp.text
+    assert "/me/mcp/rotate" not in resp.text
+
+
+def test_account_mcp_renders_controls_when_signed_in(client):
+    resp = client.get("/account/mcp", headers={"Remote-User": "mf"})
+    assert resp.status_code == 200
+    text = resp.text
+    for marker in ('id="mcp-create-btn"', 'id="mcp-show-btn"', 'id="mcp-copy-btn"',
+                   'id="mcp-rotate-btn"', 'id="mcp-revoke-btn"',
+                   'data-tab="claude-code"', 'data-tab="claude-desktop"', 'data-tab="json"',
+                   'data-snippet="claude_code"', 'data-snippet="json_config"'):
+        assert marker in text, marker
+    # Same-origin calls to the backend contract.
+    assert "'/api' + path" in text
+    assert "'/me/mcp'" in text and "'/me/mcp/rotate'" in text
+    assert "api('DELETE', '/me/mcp')" in text
+    # Password warning, rotate confirmation and disabled-deployment copy.
+    assert "like a password" in text
+    assert "stops working immediately" in text
+    assert "not enabled on this deployment" in text
+
+
+def test_mcp_templates_have_no_em_dashes():
+    templates_dir = Path(__file__).resolve().parent.parent / "web" / "templates"
+    for name in ("account_mcp.html", "admin_mcp_links.html"):
+        assert "—" not in (templates_dir / name).read_text(), name
+
+
+def test_admin_mcp_links_requires_admin(client):
+    assert client.get("/admin/mcp-links").status_code == 403
+    plain = client.get("/admin/mcp-links",
+                       headers={"Remote-User": "mf", "Remote-Groups": "users"})
+    assert plain.status_code == 403
+    assert 'id="ml-table"' not in plain.text
+
+
+def test_admin_mcp_links_page_renders_for_admin(client):
+    resp = client.get("/admin/mcp-links",
+                      headers={"Remote-User": "mf", "Remote-Groups": "admins"})
+    assert resp.status_code == 200
+    assert 'id="ml-table"' in resp.text
+    assert 'class="card-table"' in resp.text
+    assert 'class="table-wrap"' in resp.text
+    assert "/api/admin/mcp-links" in resp.text
+    assert "method: 'DELETE'" in resp.text

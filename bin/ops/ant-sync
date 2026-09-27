@@ -750,7 +750,7 @@ def _admin_post(base_url: str, path: str, timeout: float = 120.0):
     import urllib.request
     import urllib.error
     try:
-        req = urllib.request.Request(base_url + path, method='POST')
+        req = urllib.request.Request(base_url + path, method='POST', headers=__import__('config').internal_auth_headers())
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status
     except urllib.error.HTTPError as exc:

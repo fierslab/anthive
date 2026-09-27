@@ -91,7 +91,7 @@ def post_ant_serve(base_url: str, path: str, timeout: float = 45.0) -> Dict[str,
     """POST to ant-serve. Raises AntServeUnreachable only when nothing is listening;
     an HTTP error response (the server IS running) raises DropIndexError."""
     url = base_url.rstrip('/') + '/' + path.lstrip('/')
-    request = urllib.request.Request(url, method='POST', headers={'Content-Length': '0'})
+    request = urllib.request.Request(url, method='POST', headers={'Content-Length': '0', **__import__('config').internal_auth_headers()})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             body = response.read()
