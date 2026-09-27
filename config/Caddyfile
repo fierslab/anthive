@@ -81,13 +81,26 @@ import {$ANTHIVE_HTTP_REDIRECT_SNIPPET:caddy-http-redirect.dev}
 	# Routes that MUST bypass auth — MCP discovery probes + the /streamlit
 	# gone-410 stub. Otherwise MCP clients see a 302-to-login instead of
 	# the JSON 404 they need to parse.
-	@bypass_auth path /.well-known/* /register /streamlit*
+	# /mcp/u/* carries a personal MCP link token that ant-mcp verifies
+	# itself, and /mcp with "Authorization: Bearer amcp_..." likewise
+	# (see the @browser matcher in caddy-auth.dev).
+	@bypass_auth path /.well-known/* /register /streamlit* /mcp/u/*
+
+	# X-Anthive-Internal is ant-mcp's credential towards ant-serve; a
+	# client must never be able to present it through the proxy.
+	request_header -X-Anthive-Internal
 
 	# Auth snippet — dev imports forward_auth blocks (cookie/api split
 	# against local Authelia); prod imports a passthrough that trusts
 	# the Remote-User / Remote-Groups / Remote-Email headers set by nginx.
 	# Path is relative to THIS Caddyfile.
 	import {$ANTHIVE_AUTH_SNIPPET:caddy-auth.dev}
+
+	# ant-serve's /internal/* endpoints (MCP link verification) are for
+	# ant-mcp on the backend network only.
+	handle /api/internal/* {
+		respond `{"detail":"internal endpoint"}` 403
+	}
 
 	# Reverse proxy for API - strip /api prefix before forwarding
 	handle_path /api/* {
@@ -136,9 +149,15 @@ import {$ANTHIVE_HTTP_REDIRECT_SNIPPET:caddy-http-redirect.dev}
 		file_server
 	}
 
-	# MCP server (FastMCP streamable-http)
+	# MCP server (FastMCP streamable-http). ant-mcp authenticates every
+	# request itself (personal link /mcp/u/<token> or Bearer amcp_ token)
+	# and never reads client identity headers, but strip them anyway.
 	handle /mcp* {
-		reverse_proxy localhost:8090
+		request_header -Remote-User
+		request_header -Remote-Groups
+		request_header -Remote-Name
+		request_header -Remote-Email
+		reverse_proxy localhost:{$ANTHIVE_MCP_PORT:8090}
 	}
 
 	# MCP clients (per RFC 8414 / MCP spec) probe many discovery URLs
@@ -212,9 +231,16 @@ import {$ANTHIVE_HTTP_REDIRECT_SNIPPET:caddy-http-redirect.dev}
 	# Enable gzip compression
 	encode gzip
 
-	# Logging
+	# Access log. Path via ANTHIVE_CADDY_LOG (default ./tmp/caddy.log).
+	# Personal MCP link tokens (/mcp/u/amcp_...) and credentials in
+	# headers are redacted before anything is written.
 	log {
-		output file ./tmp/caddy.log
-		format console
+		output file {$ANTHIVE_CADDY_LOG:./tmp/caddy.log}
+		format filter {
+			wrap console
+			request>uri regexp amcp_[A-Za-z0-9_-]+ amcp_REDACTED
+			request>headers>Authorization replace REDACTED
+			request>headers>Cookie replace REDACTED
+		}
 	}
 }

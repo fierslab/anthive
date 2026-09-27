@@ -25,7 +25,23 @@ forward_auth @api localhost:9091 {
 # unauth, which the browser follows to the portal. The cookie-only
 # strategy avoids the basic-auth challenge (WWW-Authenticate) that
 # breaks the redirect AND the stale-basic-creds → ban risk.
-@browser not path /api/* /artifacts/* /authelia/* /.well-known/* /register /streamlit*
+#
+# MCP: /mcp/u/<token> and /mcp with "Authorization: Bearer amcp_..."
+# skip the cookie gate; ant-mcp verifies the personal link itself. Any
+# other /mcp request stays behind the gate.
+#
+# Spoofing: forward_auth copy_headers deletes client-supplied Remote-*
+# headers before setting the ones Authelia returned (Caddy >= 2.7), so a
+# forged Remote-Groups never reaches ant-serve on a gated route. Do NOT
+# add a site-level `request_header -Remote-*`: it runs after forward_auth
+# and would strip the authenticated identity.
+@browser {
+	not path /api/* /artifacts/* /authelia/* /.well-known/* /register /streamlit* /mcp/u/*
+	not {
+		path /mcp /mcp/*
+		header_regexp Authorization ^Bearer\s+amcp_
+	}
+}
 forward_auth @browser localhost:9091 {
 	uri /authelia/api/authz/forward-auth-cookie
 	copy_headers Remote-User Remote-Groups Remote-Name Remote-Email

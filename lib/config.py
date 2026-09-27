@@ -4,6 +4,8 @@ Configuration management for anthive
 Loads configuration from anthive.yaml or uses defaults from anthive.default.yaml
 """
 
+import os
+import secrets
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -232,3 +234,73 @@ def get_config() -> Dict[str, Any]:
     except ConfigError as error:
         print(str(error), file=sys.stderr)
         sys.exit(1)
+
+
+def get_state_dir(cfg: Optional[Dict[str, Any]] = None) -> Path:
+    """Directory for persistent per-host state (created if missing).
+
+    Resolution: env ANTHIVE_STATE_DIR, else ``state_dir`` from the config,
+    relative paths anchored at the repo root.
+    """
+    raw = os.environ.get('ANTHIVE_STATE_DIR')
+    if not raw:
+        cfg = cfg if cfg is not None else load_config()
+        raw = cfg.get('state_dir') or './var'
+    path = Path(raw)
+    if not path.is_absolute():
+        path = get_anthive_root() / path
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_or_create_secret(name: str, configured: Optional[str] = None,
+                         env_var: Optional[str] = None,
+                         cfg: Optional[Dict[str, Any]] = None) -> str:
+    """Return a secret: configured value, else env var, else a file in
+    <state_dir>/secrets/<name> created once with 0600 permissions."""
+    if configured:
+        return str(configured)
+    if env_var and os.environ.get(env_var):
+        return os.environ[env_var]
+    secrets_dir = get_state_dir(cfg) / 'secrets'
+    secrets_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(secrets_dir, 0o700)
+    secret_path = secrets_dir / name
+    if not secret_path.exists():
+        value = secrets.token_urlsafe(48)
+        tmp_path = secrets_dir / f".{name}.{os.getpid()}.tmp"
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, value.encode())
+        finally:
+            os.close(fd)
+        try:
+            os.link(tmp_path, secret_path)   # atomic; loses cleanly to a racer
+        except FileExistsError:
+            pass
+        finally:
+            tmp_path.unlink(missing_ok=True)
+    return secret_path.read_text().strip()
+
+
+def internal_auth_headers() -> Dict[str, str]:
+    """``{'X-Anthive-Internal': secret}`` when an internal secret is
+    configured (config, env, or an existing secrets file), else ``{}``.
+
+    For tools that call ant-serve's admin endpoints from another host or
+    container, where the loopback exemption does not apply. Never creates
+    the secret.
+    """
+    value = os.environ.get('ANTHIVE_INTERNAL_SECRET')
+    if not value:
+        try:
+            cfg = load_config()
+        except ConfigError:
+            return {}
+        value = cfg.get('internal_secret')
+        if not value:
+            try:
+                value = (get_state_dir(cfg) / 'secrets' / 'internal_secret').read_text().strip()
+            except OSError:
+                value = None
+    return {'X-Anthive-Internal': value} if value else {}
