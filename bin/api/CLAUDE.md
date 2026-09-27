@@ -49,11 +49,40 @@ and `lib/config.py` (anthive.yaml loader).
 - `analytics_query` runs sandboxed SELECT-only SQL via `lib/analytics.py` —
   see `tests/test_analytics_security.py` before touching the sandbox.
 
+## Personal MCP links (ant-serve side)
+
+- Token store: `lib/mcp_tokens.py` (`McpLinkStore`), SQLite at
+  `<state_dir>/mcp_tokens.db`. Tokens are HMAC-derived
+  (`amcp_<public_id>_<mac>`), never stored; rotate = generation + 1.
+- Endpoints: `GET /me/mcp`, `POST /me/mcp/rotate`, `DELETE /me/mcp`
+  (Remote-User required), `GET/DELETE /admin/mcp-links[/{user}]` (admins),
+  `POST /internal/mcp/verify` (internal secret only; Caddy 403s
+  `/api/internal/*`). The web UI's `/account/mcp` page consumes `/me/mcp`.
+- `_InternalSecretGuard`: a wrong `X-Anthive-Internal` is a 401 everywhere.
+- `/admin/rescan|release|restore|refresh-views` use
+  `_require_admin_or_local`: loopback tool calls without proxy headers or
+  Remote-User (ant-sync, AnnotationWriter, ant-refresh-views, ant-score),
+  internal-secret calls without a user (tools in another container), or
+  admins. Through the proxy a normal user gets 403.
+- Secrets: `internal_secret` / `mcp.token_secret` in config, else env
+  `ANTHIVE_INTERNAL_SECRET` / `ANTHIVE_MCP_TOKEN_SECRET`, else auto-created
+  0600 files in `<state_dir>/secrets/` (`config.get_or_create_secret`).
+
 ## ant-mcp specifics
 
-- FastMCP `streamable-http` transport on `/mcp`.
-- Public path through Caddy at `:8501/mcp`, behind the same auth snippet as
-  every other route (Authelia on dev). ant-mcp itself binds to loopback.
+- FastMCP `streamable-http` transport on `/mcp`, bound to loopback.
+- **Personal MCP links** (`doc/MCP_LINKS.md`): `/mcp/u/<token>` (rewritten to
+  `/mcp`) or `Authorization: Bearer amcp_...`. `_McpLinkAuthMiddleware`
+  verifies via ant-serve `POST /internal/mcp/verify` (header
+  `X-Anthive-Internal: <internal_secret>`), caches `mcp.verify_cache_seconds`,
+  rate-limits per token, and puts the owner in the ASGI scope. `AnthiveMCP`
+  (FastMCP subclass) reads it per message, hides `ADMIN_ONLY_TOOLS` from
+  non-admins, and every ant-serve call carries `Remote-User`/`Remote-Groups`
+  + the internal secret, so tools run as that user.
+- `mcp.require_token: false` restores the old unauthenticated `/mcp` (only
+  for localhost-only setups). With tokens on, FastMCP's DNS-rebinding check is
+  disabled, because behind Caddy the Host header is the public name.
+- Pinned to `mcp>=1.10,<2`: the 2.x SDK renamed FastMCP.
 - OAuth-discovery probes (`/.well-known/oauth-*`, `/register`) are
   short-circuited by Caddy with valid JSON 404s (see `config/Caddyfile`).
 - Plot output saved to `webapp/plots/` for URL-based serving; falls back to

@@ -347,6 +347,89 @@ banning users.
 
 ---
 
+## 7a. Personal MCP links through the proxy
+
+Users connect AI clients with a personal link
+(`/mcp/u/amcp_<id>_<mac>`, or `Authorization: Bearer amcp_...` on `/mcp`).
+ant-mcp verifies the token itself (against ant-serve's
+`/internal/mcp/verify`, using the shared internal secret), so the proxy
+must let these requests through **without** the Authelia gate. User docs:
+`doc/MCP_LINKS.md`.
+
+`config/Caddyfile` already does this on every host:
+
+- `/mcp/u/*` and `/mcp` with a `Bearer amcp_` header skip the cookie gate
+  (`@browser` matcher in `config/caddy-auth.dev`); other `/mcp` requests
+  stay gated;
+- `/api/internal/*` answers 403 from outside;
+- client-supplied `X-Anthive-Internal` is stripped; `Remote-*` headers are
+  stripped on `/mcp*` (on gated routes `forward_auth copy_headers` already
+  replaces client values);
+- the access log (`ANTHIVE_CADDY_LOG`, default `./tmp/caddy.log`) redacts
+  `amcp_` tokens, `Authorization` and `Cookie`.
+
+**Prod with nginx in front** (6b): nginx runs `auth_request` itself, so it
+needs one extra location that proxies `/mcp` to Caddy without the gate
+and without logging the token:
+
+```nginx
+# Mask personal MCP link tokens in the access log.
+map $request_uri $anthive_log_uri {
+    ~^(?<mcp_prefix>/mcp/u/)amcp_  "${mcp_prefix}amcp_REDACTED";
+    default                        $request_uri;
+}
+log_format anthive_masked '$remote_addr - $remote_user [$time_local] '
+                          '"$request_method $anthive_log_uri $server_protocol" '
+                          '$status $body_bytes_sent "$http_referer" "$http_user_agent"';
+
+server {
+    # ... existing server_name / TLS / auth_request setup ...
+    access_log /var/log/nginx/anthive.access.log anthive_masked;
+
+    # Personal MCP links: ant-mcp authenticates; no auth_request here.
+    location /mcp {
+        proxy_pass http://127.0.0.1:8500;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # never forward client-supplied identity or internal headers
+        proxy_set_header Remote-User "";
+        proxy_set_header Remote-Groups "";
+        proxy_set_header Remote-Name "";
+        proxy_set_header Remote-Email "";
+        proxy_set_header X-Anthive-Internal "";
+        # MCP streamable HTTP uses long-lived SSE responses
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+    }
+    location /api/internal/ { return 403; }
+}
+```
+
+Also make sure every gated nginx location **overwrites** `Remote-*` from
+the `auth_request` response (`auth_request_set` + `proxy_set_header`) so a
+client can never supply its own; `caddy-auth.prod` trusts whatever nginx
+sends.
+
+Set `mcp.public_base_url` in `anthive.yaml` to the public origin (for
+example `https://anthive.example.org`) so the web UI shows the right link
+even if a hop rewrites `Host`.
+
+Smoke test after deploy (replace the token with one from the UI):
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://anthive.example.org/mcp
+# -> 302 (dev Caddy) or 401 (prod nginx path): no token, no entry
+curl -s -X POST https://anthive.example.org/mcp/u/amcp_... \
+     -H 'Accept: application/json, text/event-stream' -H 'Content-Type: application/json' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
+# -> 200 with serverInfo "anthive"
+```
+
+---
+
 ## 8. Systemd
 
 The supervisor should run under systemd on production hosts so it
