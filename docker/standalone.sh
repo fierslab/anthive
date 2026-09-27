@@ -40,7 +40,7 @@ CHAT_MODEL="${ANTHIVE_CHAT_MODEL:-anthropic/claude-opus-4}"
 BASIC_AUTH_USER="${ANTHIVE_BASIC_AUTH_USER:-}"
 BASIC_AUTH_PASS="${ANTHIVE_BASIC_AUTH_PASSWORD:-}"
 
-# S3 (optional — for datasets fetched over S3 on the fly)
+# S3 (optional, for datasets fetched over S3 on the fly)
 S3_ENDPOINT="${ANTHIVE_S3_ENDPOINT:-}"
 S3_BUCKET="${ANTHIVE_S3_BUCKET:-}"
 S3_REGION="${ANTHIVE_S3_REGION:-us-east-1}"
@@ -51,7 +51,7 @@ S3_SECRET_KEY="${ANTHIVE_S3_SECRET_ACCESS_KEY:-}"
 _validate_store() {
     local role="$1" path="$2" required="$3"
     if [[ -z "$path" ]]; then
-        [[ "$required" == "yes" ]] && _die "$role: no path provided — set the env var or bind-mount /data/$(echo "$role" | tr '[:upper:]' '[:lower:]')"
+        [[ "$required" == "yes" ]] && _die "$role: no path provided; set the env var or bind-mount /data/$(echo "$role" | tr '[:upper:]' '[:lower:]')"
         return 0
     fi
     if [[ ! -d "$path" ]]; then
@@ -179,7 +179,7 @@ else
     _log "basic auth disabled (set ANTHIVE_BASIC_AUTH_USER + ANTHIVE_BASIC_AUTH_PASSWORD to enable)"
 fi
 
-# ─── supervisor env — swaps in the docker-mode snippets ────────────────
+# ─── supervisor env: swaps in the docker-mode snippets ─────────────────
 export ANTHIVE_LISTEN="http://:${ANTHIVEPORT}"
 export ANTHIVE_CADDY_BIND="0.0.0.0 ::"
 export ANTHIVE_TLS_SNIPPET="caddy-tls.prod"

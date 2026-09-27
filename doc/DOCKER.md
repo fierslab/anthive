@@ -1,116 +1,104 @@
-# DOCKER — maintainer notes for the anthive4 container image
+# DOCKER: maintainer notes for the anthive images
 
-Sister of `docker/README.md` (user-facing). This one documents the
-image's internals: what the entrypoint does, how config is
-synthesized, and how to iterate on the image.
+How the images are built and why. Operators want
+[DEPLOY_CONTAINERS.md](DEPLOY_CONTAINERS.md) (sites) or [HPC.md](HPC.md)
+(clusters); `docker/README.md` lists the files.
 
-## Image shape
+## Two images
 
-Two-stage Debian slim (Python 3.11-bookworm).
+`anthive-app` (about 1.4 GB) runs every service: ant-serve, ant-browse,
+ant-mcp, and all Python CLI tools for one-off runs. `anthive-ingest`
+(about 4.1 GB) is the app image plus the R/Seurat conda env at `/opt/rdata`
+(entered with `rdata <cmd>`), for converting Seurat objects. Both are
+linux/amd64 only: the wheels lock is resolved for x86_64 manylinux and the
+conda export is linux-64. An arm64 build would need both locks regenerated
+on that platform.
 
-```
-builder stage:
-  - apt: curl, git, build-essential, ca-certificates
-  - install uv (pinned via UV_VERSION build-arg)
-  - COPY . /opt/anthive4
-  - Pre-warm uv cache: ant-serve, ant-browse, ant-score-ext, ant-supervisor
-    all --help through uv so their PEP-723 deps land in /opt/uv-cache.
+Build stages of `docker/Dockerfile`:
 
-runtime stage:
-  - apt: ca-certificates, curl, tini
-  - non-root user `anthive` (uid 1000)
-  - COPY uv binary + /opt/uv-cache + /opt/anthive4 from builder
-  - HEALTHCHECK: curl /api/health
-  - ENTRYPOINT: tini -> docker/entrypoint.sh
-```
+1. `uv` and `caddy`: binaries copied from their official images (uv only
+   at build time; caddy only for the single-container `all` role).
+2. `venv`: `uv pip install --no-deps -r docker/requirements-app.lock` into
+   `/opt/venv`. Nothing is resolved at build time, so a rebuild installs the
+   same versions.
+3. `jupyter`: builds the JupyterLite bundle with the pins from `make
+   build-jupyter` (jupyterlite-core 0.7.6, notebook 7.5.6; the plugins are
+   unpinned there and here).
+4. `app`: python:3.11-slim, tini, the venv, the repo tree, the static
+   bundle at `/opt/anthive4/webapp-dist`.
 
-Why two stages: apt build-essential + git are ~200 MB. Dropping them
-in the final layer keeps the shipped image lean.
+The repo tree in the image is read-only at runtime and the containers run
+as the site's uid, not root. Everything that writes goes to a configured
+directory (`state_dir`, `tmp_dir`, `log_dir`, `webapp_dir`, the DuckDB spill
+dir, the ant-convert staging dir; see `anthive.default.yaml`). A new
+hard-coded path under the repo shows up immediately as a PermissionError in
+the container, which is how the remaining ones were found.
 
-Why tini: PID-1 signal semantics. Without tini, `docker stop` sends
-SIGTERM to `python /opt/anthive4/bin/ops/ant-supervisor`, but python
-on PID 1 without an explicit signal handler ignores SIGTERM, so docker
-falls back to SIGKILL after `--stop-timeout` (10 s default). tini
-correctly forwards signals and reaps zombies.
+## One venv instead of per-script environments
 
-Why non-root: least-privilege. The container never needs root at
-runtime. Mounts must be readable by uid 1000.
+Every script keeps its PEP-723 header; that stays the source of truth for
+dependencies. `docker/gen-lock` merges the headers of all runtime and CLI
+scripts, applies `docker/lock-overrides.txt`, and resolves one lock with
+`uv pip compile`. The overrides record the conflicts between headers:
 
-## Entrypoint responsibilities (`docker/entrypoint.sh`)
+- pyscenic/ctxcore (ant-aucell) are left out: they pin old numpy/pandas and
+  cannot share a venv with current scanpy.
+- numpy is pinned to 2.x: ant-ucell's header caps it below 2, but the live
+  server runs numpy 2.4 and ant-ucell only uses plain array operations.
+- mcp stays on 1.x: ant-mcp uses the 1.x FastMCP API.
+- duckdb is pinned to the tested 1.3 to 1.5 range.
 
-1. **Validate mounts** — `H5ADSTORE` and `GENESETSTORE` must be
-   directories (readable). Empty directory → warn but continue.
-   Non-existent → fatal.
-2. **Synthesize `anthive.yaml`** — from env vars, into
-   `/opt/anthive4/anthive.yaml`. Overwritten on every start; never
-   read from the image.
-3. **Symlink stores** — `/opt/anthive4/data/{h5adstore,genesetstore}`
-   are symlinks to whatever `H5ADSTORE` / `GENESETSTORE` resolve to.
-   This lets the codebase keep its `./data/h5adstore` relative paths
-   without knowing anything about docker.
-4. **Synthesize Caddy auth snippet** — writes
-   `/tmp/anthive-caddy-auth.docker`. Empty if no basic-auth env
-   vars; a `basic_auth` block if both `ANTHIVE_BASIC_AUTH_USER` and
-   `ANTHIVE_BASIC_AUTH_PASSWORD` are set. Password is bcrypt-hashed
-   via `caddy hash-password --plaintext`.
-5. **Export supervisor env vars** — the docker-mode splice into
-   `config/Caddyfile`:
-   - `ANTHIVE_LISTEN=http://:${ANTHIVEPORT}`
-   - `ANTHIVE_CADDY_BIND=0.0.0.0 ::`
-   - `ANTHIVE_TLS_SNIPPET=caddy-tls.prod` (empty snippet — no TLS)
-   - `ANTHIVE_HTTP_REDIRECT_SNIPPET=caddy-http-redirect.prod` (empty)
-   - `ANTHIVE_AUTH_SNIPPET=/tmp/anthive-caddy-auth.docker`
-   - `ANTHIVE_SERVICES=api,browse,caddy`
-6. **`exec uv run --script bin/ops/ant-supervisor`** — the supervisor
-   takes over PID 1's job, spawns the three services, and proxies
-   SIGTERM to them.
+`ant-starcat` and `ant-starcat-ext` are excluded entirely (torch-scale
+dependencies; starCAT was purged from the catalog). `make images` runs
+`gen-lock --check` and fails when a header changed without regenerating the
+lock.
 
-## Why `caddy-tls.prod` and not a docker-specific snippet
+The scripts' shebang (`uv run --quiet --script`) is served by
+`docker/uv-shim`, installed as `/usr/local/bin/uv`. It turns `uv run [flags]
+SCRIPT ARGS` into `/opt/venv/bin/python SCRIPT ARGS` and refuses anything
+else, so the `ant` dispatcher, subprocess calls between tools and the
+shebangs all keep working without uv or network access in the image.
 
-The existing `config/caddy-tls.prod` is empty (nginx terminates
-upstream). For the container image, nginx is upstream is the user's
-problem — we just serve plain HTTP on `ANTHIVEPORT`. The empty
-`.prod` snippet is exactly what we want; no need for a new
-`caddy-tls.docker` file.
+## Entrypoint roles
 
-Same reasoning for `caddy-http-redirect.prod` (empty).
+`docker/entrypoint.sh` (PID 1 is tini):
 
-## Why NOT `caddy-auth.prod`
+| Role | Does |
+| --- | --- |
+| `api` | `ant-serve --data-folder $ANTHIVE_H5ADSTORE --host 0.0.0.0 --port 8080` |
+| `web` | `ant-browse --api-url $ANTHIVE_API_URL` on 8081 |
+| `mcp` | `ant-mcp --api-url $ANTHIVE_API_URL` on 8090 |
+| `static` | copies JupyterLite, the 404 page and `config/` into the shared volumes, exits |
+| `all` | `docker/standalone.sh`: api + web + caddy under ant-supervisor |
+| anything else | exec'd as a command (`ant convert ...`, `bash`) |
 
-That file has a hardcoded `basic_auth` block for user `bds` — leftover
-from the KU Leuven prod deployment. Reusing it inside the image would
-require patching the file at build time or shipping a snippet with
-credentials baked in. Instead, the entrypoint writes a fresh snippet
-to `/tmp/` on every start (env → hash → file → env var), so the
-image itself carries zero credentials.
+Before starting, it checks that `ANTHIVE_CONFIG` is readable and that the
+store mounts exist and are readable by the container's uid, and links them
+under `/tmp/anthive-links/` so the repo-relative defaults
+(`data/h5adstore`) resolve too. A missing mount fails at once with a clear
+message instead of looping through restarts.
 
-## Iterating on the image
+## The ingest image's R environment
 
-- **Change source code** → `make docker-build`. Layer cache reuses
-  the apt + uv-install layers; the COPY + uv-warm layers rebuild.
-- **Change a script's dep** → `make docker-build`. uv-warm layer
-  re-runs, which downloads only the delta wheels via uv's own cache.
-- **Change entrypoint.sh** → `make docker-build`. Cheap — only the
-  final layer changes.
-- **Change Dockerfile itself** → cache invalidates from the changed
-  layer down.
+`docker/anthive-data.linux-64.explicit.txt` is `micromamba env export
+--explicit --md5` of a working `envs/anthive-data` (R 4.5.3, Seurat 5.4.0,
+reticulate, anndata, scanpy). The Dockerfile creates the env from exactly
+those package URLs and hashes. To upgrade R or Seurat, update a real env
+from `envs/anthive-data.yml`, check it, export it again, commit the file.
 
-## Testing
+## Iterating
 
-`make docker-smoketest` builds nothing — it assumes the image already
-exists — and hits `/api/health`, `/api/databases`, `/api/catalogs`,
-and `/`. Returns non-zero on any failure and dumps the last 50 log
-lines for post-mortem.
+- Source change: `make images` (cached layers; only the repo copy and later
+  layers rebuild, under a minute plus export).
+- Dependency change in a script header: `make lock`, then `make images`.
+- Entrypoint or Caddyfile change: rebuild; `ant-stack up` re-syncs the
+  config volume and recreates Caddy on every run.
+- Quick check without compose: `make docker-smoketest` (single-container).
 
-## Known limitations
+## Data and secrets never enter an image
 
-- **Architecture**: x86_64 only. The vendored Caddy binary at
-  `envs/caddy/caddy` is statically linked ELF x86-64. To build for
-  arm64, replace it with the matching binary before running
-  `docker build`.
-- **First boot is slow-ish**: 60 s startup grace covers a fresh uv
-  cache miss on first invocation of the pre-warmed scripts (they
-  still need to hydrate their venv from cache).
-- **No persistent state volume**: score sidecars and `__gene_bins`
-  land inside the mounted store, so they persist with the store.
-  `tmp/` in the image is ephemeral.
+`.dockerignore` excludes `data/`, `var/`, `tmp/`, `anthive.yaml`, `site.yaml`,
+the Authelia secrets, `webapp/*` except the 404 page, and all host tool envs.
+A check over a built image found no `.duckdb`, `anthive.yaml`, `site.yaml`,
+SQLite state or secrets; the only `.h5ad` inside is scanpy's bundled
+public example dataset in site-packages.

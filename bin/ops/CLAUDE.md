@@ -4,7 +4,8 @@ Process supervision, S3 sync, build helpers, and developer wrappers.
 
 | Tool | Role |
 | --- | --- |
-| `ant-supervisor` | Runs the full stack (api+web+mcp+caddy+authelia), multiplexes their stdout/stderr with colored labels, auto-restarts crashed children. `restart <name>` / `status` / `stop` subcommands. |
+| `ant-stack` | **The deployment tool.** Renders `site.yaml` into a docker compose stack under `<state_dir>/stack/` and drives it (`init`, `check`, `render`, `up`, `down`, `logs`, `ps`, `pull`, `build`, `passwd`, `ingest -- ...`). See `doc/DEPLOY_CONTAINERS.md`. |
+| `ant-supervisor` | Runs the full stack as host processes (dev boxes, the `all` single-container mode) (api+web+mcp+caddy+authelia), multiplexes their stdout/stderr with colored labels, auto-restarts crashed children. `restart <name>` / `status` / `stop` subcommands. |
 | `ant-sync` | Push/pull `.h5ad` and `.duckdb` files to/from S3 (boto3, mtime-aware, `_`-folder-aware). Never touches `.md` files. |
 | `ant_s3` | Lower-level S3 toolkit (credentials, list, status). Mostly invoked via `ant-sync`. |
 | `ant-build-reports` | Pull static report sites from the git repos listed in `anthive.yaml` → `data/reports/`. Served by Caddy at `/report/<slug>/`. |
