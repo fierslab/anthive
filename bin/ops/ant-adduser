@@ -140,8 +140,25 @@ def detect_instance_url(config_path: Path) -> str | None:
     return None
 
 
-def generate_password_and_hash() -> tuple[str, str]:
-    """Return (plaintext, argon2_digest) from the Authelia crypto helper."""
+def generate_password_and_hash(fixed_password: str = "") -> tuple[str, str]:
+    """Return (plaintext, argon2_digest) from the Authelia crypto helper.
+
+    If ``fixed_password`` is provided, hash it and return (fixed_password, digest).
+    Else generate a random 12-char alphanumeric password.
+    """
+    if fixed_password:
+        result = subprocess.run(
+            [str(AUTHELIA_BIN), "crypto", "hash", "generate", "argon2",
+             "--password", fixed_password, "--no-confirm"],
+            capture_output=True, text=True, check=True,
+        )
+        digest = None
+        for line in result.stdout.splitlines():
+            if line.startswith("Digest: "):
+                digest = line[len("Digest: "):].strip()
+        if not digest:
+            die(f"could not parse hash from authelia output:\n{result.stdout}")
+        return fixed_password, digest
     result = subprocess.run(
         [str(AUTHELIA_BIN), "crypto", "hash", "generate", "argon2",
          "--random", "--random.length", "12", "--random.charset", "alphanumeric",
@@ -187,6 +204,10 @@ def main() -> None:
                         help="if the email already has an account, regenerate "
                              "its password instead of erroring (preserves the "
                              "existing login, display name and groups)")
+    parser.add_argument("--password", default="",
+                        help="use this password instead of generating a random "
+                             "one. Combine with --force to reset an existing "
+                             "account to a chosen password.")
     args = parser.parse_args()
 
     # Normalize the group list. argparse hands us a list (or None when no -g
@@ -260,7 +281,7 @@ def main() -> None:
         login = confirm_login(suggestion, existing, args.email)
         login_source = "manually confirmed (collision)"
 
-    password, digest = generate_password_and_hash()
+    password, digest = generate_password_and_hash(args.password)
 
     if is_reset:
         # Mutate the existing entry: swap only the password (and display

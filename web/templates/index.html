@@ -73,6 +73,42 @@
   .col-popover .vals label { display:block; padding:1px 0; cursor:pointer; }
   .col-popover .clear-link { font-size:10px; color:#888; }
 
+  /* Two-row collections: line 1 keeps the original columnar layout
+     (id · icon · name · datasets · cells · date · tissue · …); line 2 is a
+     single full-width paper row (italic authors + bold title), rendered ONLY
+     when the collection has a paper_title. Both rows share a data-group-id
+     so sort/filter reorder / show / hide them as a pair. */
+  tr.row-primary > td { border-bottom: 0; }
+  /* Subtle divider BEFORE each primary row so paired rows read as one unit
+     (the paper row hangs off the primary; the visual break is at the next
+     primary, not between primary and its own paper row). */
+  tr.row-primary + tr.row-primary > td,
+  tr.row-paper + tr.row-primary > td {
+    border-top: 1px solid var(--border);
+  }
+  tr.row-paper > td.row-paper-spacer {
+    /* Empty cell that matches column 1 (ID) so the paper cell aligns
+       under the status glyph + title in column 2. */
+    border-top: 0;
+    padding-top: 0; padding-bottom: 8px;
+  }
+  tr.row-paper > td.row-paper-cell {
+    border-top: 0;
+    padding-top: 0; padding-bottom: 8px;
+    font-size: 11px;
+    color: var(--text-muted);
+    line-height: 1.35;
+  }
+  tr.row-paper .rp-author {
+    font-style: italic;
+    font-size: 11px;
+    color: #94a3b8;
+  }
+  tr.row-paper .rp-title {
+    font-weight: 600;
+    color: var(--text);
+  }
+
   /* Hierarchical tissue-tree filter (nested <ul>). Each level is indented
      via padding-left rather than nested-list default margins so the disclosure
      triangle stays aligned with the label. */
@@ -158,7 +194,15 @@
     {% set _org_chips = folder.organism_chips or [] %}
     {% set _tech_class = folder.tech_class or '' %}
     {% set _tech_cls_slug = _tech_class.replace('sc/sn RNA','sc-sn').replace('bulk RNA','bulk').replace(' ','-')|lower %}
-    <tr
+    {% set _paper_title = folder.paper_title or '' %}
+    {% set _first_author = folder.first_author or '' %}
+    {% set _last_author  = folder.last_author or '' %}
+    {# Searchable blob for the client-side text filter — mirrors id + name +
+       paper_title + author names so the search input hits the paper row too
+       even though it renders as raw text on line 2. #}
+    {% set _search_blob = (folder.group_id ~ ' ' ~ folder.name ~ ' ' ~ _paper_title ~ ' ' ~ _first_author ~ ' ' ~ _last_author)|trim %}
+    <tr class="row-primary"
+      data-group-id="{{ folder.group_id or '' }}"
       data-id="{{ folder.group_id or '' }}"
       data-name="{{ folder.name or '' }}"
       data-n_datasets="{{ folder.dataset_count }}"
@@ -174,7 +218,8 @@
       data-tissue-rank="{{ folder.tissue_rank or 0 }}"
       data-disease="{{ _dis.full or '' }}"
       data-acc="{{ _icon.access or '' }}"
-      data-pub="{{ _icon.publication or '' }}">
+      data-pub="{{ _icon.publication or '' }}"
+      data-search="{{ _search_blob|lower }}">
       <td data-label="ID" class="muted-2 mono" style="font-size:11px">{{ folder.group_id or "—" }}</td>
       <td class="card-title">
         {% if _icon.glyph %}<span class="ap-icon" style="color:{{ _icon.color }}" title="{{ _icon.tooltip }}">{{ _icon.glyph|safe }}</span>{% endif %}<a href="/browse/{{ folder.browse_id }}"{% if folder.summary and folder.summary != 'na' %} title="{{ folder.summary }}"{% endif %}><strong>{{ folder.name }}</strong></a>{% if folder.has_secondary %}<span class="badge-secondary" title="This collection contains one or more secondary datasets (cells that also appear in other deposits). Do not double-count if pooling with other collections.">(2)</span>{% endif %}
@@ -194,6 +239,22 @@
       <td data-label="Cell">{%- if _cell.abbrev %}<span class="ctx-pill cell" title="cell type: {{ _cell.full }}">{{ _cell.abbrev }}</span>{% endif -%}</td>
       <td data-label="Disease">{%- if _dis.abbrev %}<span class="ctx-pill disease" title="disease: {{ _dis.full }}">{{ _dis.abbrev }}</span>{% endif -%}</td>
     </tr>
+    {%- if _paper_title %}
+    {# Paper row (line 2): italic first_author, italic last_author, bold
+       paper_title — comma-separated, wraps on narrow viewports. Missing
+       authors drop out cleanly (no dangling commas). Only rendered when
+       paper_title is non-empty; a collection with no paper info shows just
+       the primary row. Paired to its primary via data-group-id so sort /
+       filter reorder / show / hide them together. #}
+    <tr class="row-paper" data-group-id="{{ folder.group_id or '' }}">
+      <td class="row-paper-spacer"></td>
+      <td class="row-paper-cell card-span" colspan="9">
+        <span class="rp-title">{{ _paper_title }}</span>
+        {%- if _first_author %}, <span class="rp-author">{{ _first_author }}</span>{% endif -%}
+        {%- if _last_author and _last_author != _first_author %}, <span class="rp-author">{{ _last_author }}</span>{% endif -%}
+      </td>
+    </tr>
+    {%- endif %}
     {% endfor %}
   </tbody>
 </table>
@@ -207,7 +268,21 @@
   const infoEl        = document.getElementById('coll-info');
   const showAllLink   = document.getElementById('show-all-link');
   const clearFiltersBtn = document.getElementById('coll-clear-filters');
-  const rows = Array.from(document.querySelectorAll('#coll-table tbody tr'));
+  // Each collection is ONE or TWO rows: a .row-primary (columnar values —
+  // id / name / datasets / cells / date / tissue / …) and an OPTIONAL
+  // .row-paper (italic authors + bold paper_title, rendered only when the
+  // collection has paper info). Sort/filter reorder the primary rows; the
+  // paper row is paired via data-group-id and always moved / shown / hidden
+  // together with its primary — a collection without a paper row simply has
+  // no secondary to move (secondaryFor returns null).
+  const rows = Array.from(document.querySelectorAll('#coll-table tbody tr.row-primary'));
+  const secondaryByGroup = {};
+  document.querySelectorAll('#coll-table tbody tr.row-paper').forEach(function (tr) {
+    secondaryByGroup[tr.getAttribute('data-group-id') || ''] = tr;
+  });
+  function secondaryFor(row) {
+    return secondaryByGroup[row.getAttribute('data-group-id') || ''] || null;
+  }
   const headers = Array.from(document.querySelectorAll('#coll-table th.sortable'));
 
   // Per-column value filters (set/unset via header popover checkboxes).
@@ -428,7 +503,11 @@
       });
     }
     const tbody = document.querySelector('#coll-table tbody');
-    rows.forEach(r => tbody.appendChild(r));
+    rows.forEach(r => {
+      tbody.appendChild(r);
+      const secondary = secondaryFor(r);
+      if (secondary) tbody.appendChild(secondary);
+    });
     headers.forEach(h => {
       h.classList.remove('sort-asc','sort-desc');
       if (sortMode !== 'tissue-tree' && h.getAttribute('data-col') === sortCol)
@@ -454,9 +533,17 @@
   }
 
   function rowMatches(row) {
-    // text search
+    // text search — match against the primary row's textContent (id / name /
+    // columnar values), the paired paper row's textContent (authors + paper
+    // title), AND the pre-lowered data-search blob so the search input hits
+    // paper info even for collections whose paper row is missing.
     const q = (searchEl.value || '').toLowerCase().trim();
-    if (q && !row.textContent.toLowerCase().includes(q)) return false;
+    if (q) {
+      const blob = (row.getAttribute('data-search') || '')
+        + ' ' + (row.textContent || '')
+        + ' ' + ((secondaryFor(row) || {}).textContent || '');
+      if (!blob.toLowerCase().includes(q)) return false;
+    }
     // per-column value filters
     for (const col in valueFilters) {
       const wanted = valueFilters[col];
@@ -482,10 +569,20 @@
     rows.forEach(r => { if (rowMatches(r)) visible.push(r); });
     const anyFilter = !!searchEl.value || Object.values(valueFilters).some(s => s && s.size);
     let shown = 0;
-    rows.forEach(r => { r.style.display = 'none'; });
+    // Hide every pair first, then re-reveal the visible ones.
+    rows.forEach(r => {
+      r.style.display = 'none';
+      const secondary = secondaryFor(r);
+      if (secondary) secondary.style.display = 'none';
+    });
     visible.forEach((r, i) => {
       const within = (anyFilter || showAll) ? true : (i < DEFAULT_SHOW);
-      if (within) { r.style.display = ''; shown++; }
+      if (within) {
+        r.style.display = '';
+        const secondary = secondaryFor(r);
+        if (secondary) secondary.style.display = '';
+        shown++;
+      }
     });
     if (visible.length > DEFAULT_SHOW && !anyFilter && !showAll) {
       showAllLink.style.display = '';

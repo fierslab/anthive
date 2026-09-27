@@ -138,6 +138,10 @@
 ], ids=[("collection", group_id), ("dataset", file_id)]) }}
 <h1 class="page-title">Edit dataset <span class="mono">{{ db_id }}</span>
   <span class="info" title="Admin only. Writes the dataset .md to disk. Most fields are machine-generated (id, hashes, counts, layer stats) and are read-only; biology annotation lives in the .mus sidecar. It's a git repo — commit the change yourself.">ⓘ</span></h1>
+<p class="muted" style="font-size:12px;margin-top:-8px">
+  Paper title, authors, DOI, and journal are collection-level fields.
+  <a href="/admin/edit/{{ group_id|urlencode }}">Edit collection metadata →</a>
+</p>
 
 <div id="ed-loading" class="muted" style="font-size:12px">loading .md…</div>
 

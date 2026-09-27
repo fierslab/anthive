@@ -878,8 +878,113 @@ def _organism_chips(organism) -> List[Dict[str, str]]:
 # Cache the publication_status field parsed from data/h5adstore/<group>/index.md
 # frontmatter. Loaded lazily on first read per group; each entry is either a
 # string ('unpublished', 'published', …) or None (field absent). Cleared by
-# calling ``_pub_status_cache.clear()`` if needed.
-_pub_status_cache: Dict[str, Optional[str]] = {}
+# calling ``_pub_status_cache.clear()`` if needed. Values are (mtime_ns, status)
+# so the cache self-invalidates on file edits — same pattern as
+# ``_paper_info_cache`` below.
+_pub_status_cache: Dict[str, tuple] = {}
+
+# Cache of paper_title / first_author / last_author parsed from index.md
+# frontmatter, keyed by folder name. Value is (mtime_ns, info_dict) — mtime
+# lets the cache self-invalidate when the .md is edited (via /admin/edit or a
+# direct git pull), without cross-process coupling to ant-serve's PUT hook.
+_paper_info_cache: Dict[str, tuple] = {}
+
+# Sentinel values that mean "no paper metadata" for the three fields we care
+# about. Case-insensitive.
+_PAPER_EMPTY_SENTINELS = {'', 'na', 'n/a', 'none', 'null'}
+
+
+def _paper_field_absent(value: Optional[str]) -> bool:
+    """True when a paper-info field is missing / empty / a common placeholder."""
+    if value is None:
+        return True
+    return str(value).strip().lower() in _PAPER_EMPTY_SENTINELS
+
+
+def _paper_info_for_group(group_name: Optional[str]) -> Dict[str, str]:
+    """Read ``paper_title`` / ``first_author`` / ``last_author`` from
+    ``data/h5adstore/<group>/index.md`` frontmatter.
+
+    Returns a dict with (possibly missing) keys ``paper_title``,
+    ``first_author``, ``last_author`` — only fields that are present AND not
+    an empty/na placeholder are included. Values are stripped strings with
+    YAML soft-wrap continuation lines re-joined.
+
+    Uses a tiny hand-rolled scanner (like ``_publication_status_for_group``)
+    to avoid pulling in yaml on the landing hot path — but *does* support
+    the folded-string continuation lines that longer paper titles are
+    routinely wrapped across.
+    """
+    if not group_name:
+        return {}
+    path = _H5ADSTORE_ROOT / group_name / 'index.md'
+    try:
+        cur_mtime = path.stat().st_mtime_ns
+    except OSError:
+        cur_mtime = 0
+    cached = _paper_info_cache.get(group_name)
+    if cached and cached[0] == cur_mtime:
+        return cached[1]
+    result: Dict[str, str] = {}
+    wanted = ('paper_title', 'first_author', 'last_author')
+    try:
+        if path.is_file():
+            with path.open('r', encoding='utf-8', errors='replace') as fh:
+                in_fm = False
+                lines: List[str] = []
+                for lineno, line in enumerate(fh):
+                    if line.startswith('---'):
+                        if not in_fm:
+                            in_fm = True
+                            continue
+                        break   # end of frontmatter
+                    if in_fm:
+                        lines.append(line.rstrip('\n'))
+                    if lineno > 1000:   # bail on unreasonably long frontmatter
+                        break
+            # Walk through lines; when a top-level key we want appears,
+            # gather its value plus any continuation lines (indented, not
+            # a new key). Stop when a new top-level `key:` is seen.
+            index = 0
+            while index < len(lines):
+                current = lines[index]
+                stripped = current.lstrip()
+                # Skip list items / continuation of a preceding non-wanted key
+                if current and not current[0].isspace() and ':' in stripped:
+                    key, _, first_value = stripped.partition(':')
+                    key = key.strip().lower()
+                    if key in wanted and key not in result:
+                        chunks = [first_value.strip()]
+                        cursor = index + 1
+                        while cursor < len(lines):
+                            follow = lines[cursor]
+                            if not follow.strip():
+                                break
+                            # New top-level `key:` ends the value
+                            if follow and not follow[0].isspace():
+                                break
+                            # Continuation line — indented text or list item.
+                            # A list-of-authors under 'authors:' shouldn't
+                            # reach us; we only look at first_author/last_author
+                            # which are scalars, and paper_title which folds.
+                            follow_stripped = follow.strip()
+                            if follow_stripped.startswith('- '):
+                                break   # actually a list — bail
+                            chunks.append(follow_stripped)
+                            cursor += 1
+                        # Reassemble; strip surrounding quotes if any.
+                        combined = ' '.join(c for c in chunks if c).strip()
+                        if combined.startswith(("'", '"')) and combined.endswith(combined[0]):
+                            combined = combined[1:-1].strip()
+                        if not _paper_field_absent(combined):
+                            result[key] = combined
+                        index = cursor
+                        continue
+                index += 1
+    except (OSError, UnicodeError):
+        result = {}
+    _paper_info_cache[group_name] = (cur_mtime, result)
+    return result
 
 
 def _publication_status_for_group(group_name: Optional[str]) -> Optional[str]:
@@ -891,11 +996,16 @@ def _publication_status_for_group(group_name: Optional[str]) -> Optional[str]:
     """
     if not group_name:
         return None
-    if group_name in _pub_status_cache:
-        return _pub_status_cache[group_name]
+    path = _H5ADSTORE_ROOT / group_name / 'index.md'
+    try:
+        cur_mtime = path.stat().st_mtime_ns
+    except OSError:
+        cur_mtime = 0
+    cached = _pub_status_cache.get(group_name)
+    if cached and cached[0] == cur_mtime:
+        return cached[1]
     result: Optional[str] = None
     try:
-        path = _H5ADSTORE_ROOT / group_name / 'index.md'
         if path.is_file():
             # Minimal one-line YAML parse. The frontmatter is small and
             # well-formed; we only need one field. Avoids a yaml dep.
@@ -917,7 +1027,7 @@ def _publication_status_for_group(group_name: Optional[str]) -> Optional[str]:
                         break
     except (OSError, UnicodeError):
         result = None
-    _pub_status_cache[group_name] = result
+    _pub_status_cache[group_name] = (cur_mtime, result)
     return result
 
 
@@ -1447,6 +1557,10 @@ def get_collection_list(api_url: str) -> List[Dict]:
         # publication_status is a collection-level attribute (index.md
         # frontmatter). Ant-serve doesn't expose it yet; read from disk.
         pub_status = _publication_status_for_group(collection_meta.get('group'))
+        # paper_title / first_author / last_author likewise come straight from
+        # the folder's index.md frontmatter — the /databases endpoint doesn't
+        # expose them. Landing renders them on the collection row's line 1.
+        paper_info = _paper_info_for_group(collection_meta.get('group'))
 
         # Unified source+publication icon (one glyph per collection). The
         # shape is semantically about *provenance* — beaker = lab-generated
@@ -1503,6 +1617,9 @@ def get_collection_list(api_url: str) -> List[Dict]:
             'publication_status': pub_status,
             'pub_icon': pub_icon,
             'dataset_date': dataset_date,
+            'paper_title': paper_info.get('paper_title') or '',
+            'first_author': paper_info.get('first_author') or '',
+            'last_author': paper_info.get('last_author') or '',
             # Sort key for a per-collection tissue-hierarchy sort — highest =
             # sinks to the bottom. Multi-region collections use the first
             # dataset's first tissue.
