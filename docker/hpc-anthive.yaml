@@ -1,0 +1,23 @@
+# Default anthive.yaml inside the Apptainer image (docker/anthive-ingest.def
+# sets ANTHIVE_CONFIG to this file unless the job passes its own with
+# `--env ANTHIVE_CONFIG=/path/job.yaml`). Copy it as the starting point for a
+# job config: the image is read-only, so every path must point at scratch.
+#
+# Values stay unexpanded here; lib/config expands ${VAR:-default} when a tool
+# runs, so they follow the job's $TMPDIR. ${UID} is the numeric user id.
+
+# Node-local scratch for disposable files and DuckDB spill.
+tmp_dir: "${TMPDIR:-/tmp}/anthive-${UID}"
+duckdb_temp_directory: "${TMPDIR:-/tmp}/anthive-${UID}/spill"
+state_dir: "${TMPDIR:-/tmp}/anthive-${UID}/state"
+
+# Build each .duckdb on node-local disk and move it next to the h5ad when it
+# has verified (parallel filesystems handle DuckDB's writes and locks badly).
+convert_staging_dir: "${TMPDIR:-/tmp}"
+
+# No ant-serve on a compute node. auto: talk to one only if it answers.
+coordinate: auto
+
+# Set these to the job's allocation (see docker/slurm-ingest.example.sh).
+duckdb_memory_limit: auto
+duckdb_threads: 4

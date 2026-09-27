@@ -1,0 +1,54 @@
+Bootstrap: {{ BOOTSTRAP }}
+From: {{ IMAGE }}
+
+# anthive-ingest as an Apptainer image, for command-line ingest on HPC
+# (no API, no web, no daemons). Built FROM the anthive-ingest docker image,
+# so the tools, the pinned Python venv and the R/Seurat env are identical to
+# what the compose stack runs.
+#
+#   Local build (image in the local docker daemon):
+#     apptainer build anthive-ingest.sif docker/anthive-ingest.def
+#   From the registry:
+#     apptainer build --build-arg BOOTSTRAP=docker \
+#         --build-arg IMAGE=codeberg.org/mfiers/anthive-ingest:TAG \
+#         anthive-ingest.sif docker/anthive-ingest.def
+#   Or skip building: apptainer pull oras://codeberg.org/mfiers/anthive-ingest-sif:TAG
+#
+# No %post section: the image needs no changes, so the build runs
+# unprivileged (no --fakeroot). See doc/HPC.md.
+
+%arguments
+    BOOTSTRAP=docker-daemon
+    IMAGE=anthive/anthive-ingest:dev
+
+%labels
+    org.opencontainers.image.title anthive-ingest (apptainer)
+    org.opencontainers.image.source https://codeberg.org/mfiers/anthive4
+
+%environment
+    export ANTHIVE_HOME=/opt/anthive4
+    export PATH=/opt/anthive4/bin:/opt/venv/bin:$PATH
+    # The image is read-only, so every write must go to scratch. The default
+    # config (docker/hpc-anthive.yaml) points everything at the job's $TMPDIR;
+    # a job overrides it with `--env ANTHIVE_CONFIG=/path/job.yaml` (Apptainer
+    # applies --env/--cleanenv variables after this section, so the job's
+    # value wins). No ANTHIVE_* path variables are set here on purpose: an
+    # environment variable would beat whatever the job's config says.
+    [ -n "${ANTHIVE_CONFIG:-}" ] || export ANTHIVE_CONFIG=/opt/anthive4/docker/hpc-anthive.yaml
+    # Read by matplotlib/numba directly (no expansion): /tmp is bound in.
+    export MPLCONFIGDIR="/tmp/anthive-$(id -u)/mpl"
+    export NUMBA_CACHE_DIR="/tmp/anthive-$(id -u)/numba"
+
+%runscript
+    # `apptainer run anthive-ingest.sif convert x.h5ad` == `ant convert x.h5ad`
+    exec /opt/anthive4/bin/ant "$@"
+
+%help
+    anthive command-line ingest tools.
+
+      apptainer run  anthive-ingest.sif convert /path/to/x.h5ad
+      apptainer exec anthive-ingest.sif ant check /path/to/x.h5ad
+      apptainer exec anthive-ingest.sif rdata Rscript convert_rds.R   # R/Seurat env
+
+    Bind your data and scratch: --bind /scratch/$USER --bind /data/project
+    Writes go to $TMPDIR (node-local) by default; see doc/HPC.md.

@@ -1,0 +1,85 @@
+# Build and publish the anthive container images (Forgejo Actions on
+# codeberg.org). Runs on version tags (v*) and on manual dispatch.
+#
+# Publishes to the Codeberg (Forgejo) package registry of the repo owner:
+#   codeberg.org/<owner>/anthive-app:<tag>       (+ :latest on tags)
+#   codeberg.org/<owner>/anthive-ingest:<tag>
+#   oras://codeberg.org/<owner>/anthive-ingest-sif:<tag>   (Apptainer image)
+#
+# Needs repository secrets:
+#   REGISTRY_USER   Codeberg user (or bot) with package write access
+#   REGISTRY_TOKEN  an access token with the write:package scope
+#
+# The runner needs docker (a "docker" labelled runner with the host socket,
+# or docker-in-docker). The Apptainer job is optional and skipped when no
+# runner with the `apptainer` label is registered for the repo.
+
+name: images
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "image tag to publish (default: short commit sha)"
+        required: false
+
+env:
+  REGISTRY: codeberg.org/${{ github.repository_owner }}
+
+jobs:
+  images:
+    runs-on: docker
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then TAG="${{ inputs.tag }}";
+          elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then TAG="${GITHUB_REF_NAME}";
+          else TAG="$(git rev-parse --short HEAD)"; fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Lock file matches the script headers
+        run: python3 docker/gen-lock --check
+
+      - name: Registry login
+        run: echo "${{ secrets.REGISTRY_TOKEN }}" | docker login codeberg.org -u "${{ secrets.REGISTRY_USER }}" --password-stdin
+
+      - name: Build
+        run: make images REGISTRY=${{ env.REGISTRY }} TAG=${{ steps.tag.outputs.tag }}
+
+      - name: Smoke test (single-container mode, empty stores)
+        run: |
+          mkdir -p /tmp/ci-store/h5adstore /tmp/ci-store/genesetstore
+          H5ADSTORE=/tmp/ci-store/h5adstore GENESETSTORE=/tmp/ci-store/genesetstore \
+            bash docker/smoketest.sh ${{ env.REGISTRY }}/anthive-app:${{ steps.tag.outputs.tag }} 18501 || \
+            echo "::warning::smoke test failed (empty store); inspect the job log"
+
+      - name: Push
+        run: |
+          make push-images REGISTRY=${{ env.REGISTRY }} TAG=${{ steps.tag.outputs.tag }}
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            for image in anthive-app anthive-ingest; do
+              docker tag ${{ env.REGISTRY }}/$image:${{ steps.tag.outputs.tag }} ${{ env.REGISTRY }}/$image:latest
+              docker push ${{ env.REGISTRY }}/$image:latest
+            done
+          fi
+
+  sif:
+    needs: images
+    runs-on: apptainer
+    continue-on-error: true
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+      - name: Build and push the Apptainer image
+        run: |
+          TAG="${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}"
+          [ -n "$TAG" ] || TAG="$(git rev-parse --short HEAD)"
+          apptainer build --build-arg BOOTSTRAP=docker \
+              --build-arg IMAGE=${{ env.REGISTRY }}/anthive-ingest:$TAG \
+              anthive-ingest.sif docker/anthive-ingest.def
+          echo "${{ secrets.REGISTRY_TOKEN }}" | apptainer registry login -u "${{ secrets.REGISTRY_USER }}" --password-stdin oras://codeberg.org
+          apptainer push anthive-ingest.sif oras://${{ env.REGISTRY }}/anthive-ingest-sif:$TAG

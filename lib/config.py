@@ -5,6 +5,7 @@ Loads configuration from anthive.yaml or uses defaults from anthive.default.yaml
 """
 
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -255,10 +256,34 @@ def get_config() -> Dict[str, Any]:
 #   3. built-in default relative to the repo root (the historical layout)
 # Values may contain $VARS and ~ (e.g. convert_staging_dir: $TMPDIR).
 
+_DEFAULTED_VAR = re.compile(r'\$\{(\w+):-([^}]*)\}')
+
+
+def expand_value(value: Any) -> str:
+    """Expand ``${VAR:-default}``, ``$VAR``/``${VAR}`` and ``~`` at use time.
+
+    Values stay unexpanded in config files and container images so they pick
+    up the environment of the process that runs (a batch job's $TMPDIR, not
+    the one present when an image or config was built). ``UID`` falls back to
+    the numeric user id, since shells do not export it.
+    """
+    text = str(value)
+
+    def _defaulted(match: 're.Match[str]') -> str:
+        name, default = match.group(1), match.group(2)
+        found = os.environ.get(name) or (str(os.getuid()) if name == 'UID' else '')
+        return found or default
+
+    text = _DEFAULTED_VAR.sub(_defaulted, text)
+    if '$UID' in text or '${UID}' in text:
+        text = text.replace('${UID}', os.environ.get('UID', str(os.getuid())))
+        text = text.replace('$UID', os.environ.get('UID', str(os.getuid())))
+    return os.path.expanduser(os.path.expandvars(text))
+
+
 def resolve_path(value: Any, base: Optional[Path] = None) -> Path:
-    """Expand ``$VARS``/``~`` and anchor a relative path at the repo root."""
-    expanded = os.path.expandvars(os.path.expanduser(str(value)))
-    candidate = Path(expanded)
+    """Expand variables/``~`` and anchor a relative path at the repo root."""
+    candidate = Path(expand_value(value))
     if not candidate.is_absolute():
         candidate = (base or get_anthive_root()) / candidate
     return candidate

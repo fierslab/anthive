@@ -1,4 +1,4 @@
-.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-mcp serve-all serve-debug serve-prod serve-stop caddy-passwd caddy-passwd-clear dev-jupyter refresh-viewer symlink sync-push sync-pull sync-plan sync-pull-evict sync-evict sync-pull-duckdb sync-pull-de sync-pull-all sync-status build-stale sync-update serve-status serve-restart h5adstore-push push-all ingest ingest-dry manifest cache-warm docker-build docker-run docker-smoketest docker-clean
+.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-mcp serve-all serve-debug serve-prod serve-stop caddy-passwd caddy-passwd-clear dev-jupyter refresh-viewer symlink sync-push sync-pull sync-plan sync-pull-evict sync-evict sync-pull-duckdb sync-pull-de sync-pull-all sync-status build-stale sync-update serve-status serve-restart h5adstore-push push-all ingest ingest-dry manifest cache-warm docker-build docker-run docker-smoketest docker-clean lock images sif push-images ship stack-check
 
 help:
 	@echo "Anthive4 Development Commands"
@@ -71,7 +71,7 @@ help:
 TEST_DEPS = --with pytest --with duckdb --with pyyaml --with numpy \
             --with pandas --with pyarrow --with h5py --with scipy \
             --with fastapi --with httpx --with jinja2 \
-            --with markdown --with requests
+            --with markdown --with requests --with anndata --with bcrypt
 
 test:
 	uv run $(TEST_DEPS) env PYTHONPATH=lib python -m pytest tests/ -v
@@ -591,15 +591,59 @@ sync-update:
 
 
 # ============================================================================
-# Docker — single-container image for reproducible paper deployments.
-# See docker/README.md and doc/DOCKER.md for details.
+# Containers: the deployment path. See doc/DEPLOY_CONTAINERS.md (sites),
+# doc/HPC.md (Apptainer / uv on clusters) and doc/DOCKER.md (image internals).
 # ============================================================================
 
-DOCKER_IMAGE ?= anthive
-DOCKER_TAG   ?= latest
+REGISTRY     ?= codeberg.org/mfiers
+TAG          ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+APP_IMAGE    ?= $(REGISTRY)/anthive-app:$(TAG)
+INGEST_IMAGE ?= $(REGISTRY)/anthive-ingest:$(TAG)
+SIF          ?= anthive-ingest-$(TAG).sif
+
+## lock - Regenerate docker/requirements-app.lock from the scripts' PEP-723 headers
+# in:  bin/*/ant-*, web/ant-browse, docker/lock-overrides.txt
+# out: docker/requirements-app.{in,lock}
+lock:
+	docker/gen-lock
+
+## images - Build anthive-app and anthive-ingest as $(APP_IMAGE) / $(INGEST_IMAGE)
+# in:  the repo (no data: see .dockerignore), docker/requirements-app.lock,
+#      docker/anthive-data.linux-64.explicit.txt
+# out: two local docker images
+images:
+	docker/gen-lock --check
+	docker build --pull -f docker/Dockerfile -t $(APP_IMAGE) .
+	docker build -f docker/Dockerfile.ingest --build-arg APP_IMAGE=$(APP_IMAGE) -t $(INGEST_IMAGE) .
+
+## sif - Build the Apptainer image for HPC ingest from the local ingest image
+# in:  $(INGEST_IMAGE) in the local docker daemon
+# out: $(SIF)
+sif:
+	apptainer build --force --build-arg IMAGE=$(INGEST_IMAGE) $(SIF) docker/anthive-ingest.def
+
+## push-images - Push both images (and the .sif as an OCI artifact if built) to $(REGISTRY)
+# needs: `docker login $(REGISTRY)` (and `apptainer registry login` for the sif)
+push-images:
+	docker push $(APP_IMAGE)
+	docker push $(INGEST_IMAGE)
+	@if [ -f "$(SIF)" ]; then \
+	    apptainer push $(SIF) oras://$(REGISTRY)/anthive-ingest-sif:$(TAG); \
+	else echo "no $(SIF): skipping the Apptainer artifact (make sif)"; fi
+
+## ship - Build, test and push a release: make ship TAG=v1.2.3
+ship: test images push-images
+
+## stack-check - Validate ./site.yaml and print the resolved deployment plan
+stack-check:
+	bin/ops/ant-stack check
+
+# ── legacy single-container targets (docker run ... all) ───────────────────
+DOCKER_IMAGE ?= $(REGISTRY)/anthive-app
+DOCKER_TAG   ?= $(TAG)
 DOCKER_PORT  ?= 8501
 
-## docker-build - Build the anthive:latest image (~5-10 min first time)
+## docker-build - Build only the app image (use `make images` for both)
 docker-build:
 	docker build --pull -f docker/Dockerfile -t $(DOCKER_IMAGE):$(DOCKER_TAG) .
 
@@ -613,7 +657,7 @@ docker-run:
 	    -e ANTHIVEPORT=$(DOCKER_PORT) \
 	    -v "$(PWD)/data/h5adstore:/data/h5adstore" \
 	    -v "$(PWD)/data/genesetstore:/data/genesetstore" \
-	    $(DOCKER_IMAGE):$(DOCKER_TAG)
+	    $(DOCKER_IMAGE):$(DOCKER_TAG) all
 
 ## docker-smoketest - Boot the image, hit /api/health, tear down. Returns non-zero on failure.
 docker-smoketest:

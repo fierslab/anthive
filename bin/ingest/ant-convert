@@ -34,7 +34,7 @@ script_dir = Path(__file__).parent.resolve()
 lib_dir = script_dir.parent.parent / 'lib'
 sys.path.insert(0, str(lib_dir))
 
-from config import get_config, get_convert_staging_dir
+from config import expand_value, get_config, get_convert_staging_dir
 from h5ad_utils import load_h5ad, H5ADError
 from metadata import parse_md_file, get_api_config, MetadataError
 from anthive_db import pending_state_diagnosis, build_obs_view_sql
@@ -313,7 +313,7 @@ def convert_h5ad_to_duckdb(h5ad_path: Path, config: Dict[str, Any],
         spill_dir = (os.environ.get('ANTHIVE_DUCKDB_TEMP_DIR', '').strip()
                      or config.get('duckdb_temp_directory'))
         if spill_dir:
-            spill_path = Path(os.path.expandvars(os.path.expanduser(str(spill_dir))))
+            spill_path = Path(expand_value(spill_dir))
             spill_path.mkdir(parents=True, exist_ok=True)
             conn.execute(f"SET temp_directory = '{spill_path}'")
             print(f"  ✓ temp_directory = {spill_path}")

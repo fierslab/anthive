@@ -32,7 +32,7 @@ docker run -d --rm \
     -e ANTHIVEPORT="$PORT" \
     -v "$H5AD:/data/h5adstore" \
     -v "$GS:/data/genesetstore" \
-    "$IMAGE" >/dev/null
+    "$IMAGE" all >/dev/null
 
 _log "waiting for /api/health (up to 180s — ant-serve scans + .md validation take ~45s for a large store)"
 for i in $(seq 1 180); do
