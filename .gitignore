@@ -7,6 +7,11 @@ tmp/
 var/
 .jupyterlite.doit.db
 
+# Site deployment config for bin/ops/ant-stack (site-specific; the
+# documented template site.example.yaml is tracked)
+site.yaml
+*.sif
+
 # Server logs and pids
 caddy.log
 nginx_access.log

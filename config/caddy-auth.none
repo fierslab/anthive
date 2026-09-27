@@ -1,0 +1,16 @@
+# No-login auth snippet: imported by config/Caddyfile when auth.mode is
+# `none` (ANTHIVE_AUTH_SNIPPET points here; set by bin/ops/ant-stack or
+# docker/standalone.sh).
+#
+# There is no login, so there is no identity. The one thing this snippet
+# MUST do is drop identity headers a client might send itself: ant-serve
+# and ant-browse read Remote-User / Remote-Groups to decide who is an
+# admin, and without this a visitor could claim `Remote-Groups: admins`.
+# ant-serve also refuses every admin action when auth.mode is none, so this
+# is the second of two locks.
+request_header -Remote-User
+request_header -Remote-Groups
+request_header -Remote-Email
+request_header -Remote-Name
+request_header -X-Remote-User
+request_header -X-Remote-Groups

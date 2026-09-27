@@ -17,6 +17,9 @@
 .idea
 
 # Local data caches — the container gets its stores via bind mounts.
+# The whole data/ tree stays out (chat_history.db and friends live there on
+# dev checkouts); the image recreates data/ as links to the mounts.
+data
 data/h5adstore
 data/genesetstore
 data/starcatstore
@@ -25,12 +28,11 @@ data/*.h5ad
 data/*.duckdb
 data/*.parquet
 
-# Non-runtime envs. The container only needs envs/caddy/ (the vendored
-# Caddy binary). Everything else is either a build-only workspace or a
-# CLI-side data-management env that never runs inside the container.
-envs/anthive-data
-envs/go
-envs/authelia
+# Host-local tool envs never enter the image: the Dockerfile copies caddy
+# from the official image, the venv comes from docker/requirements-app.lock
+# and the ingest image builds its R env from the pinned explicit lock.
+envs/*
+!envs/anthive-data.yml
 
 # Emacs autosave + attic + host-local Claude/Jupyter caches
 attic
@@ -54,6 +56,18 @@ htmlcov
 .mypy_cache
 .ruff_cache
 *.egg-info
+
+# Runtime state and site deployment config (tokens, caches, secrets)
+var
+site.yaml
+site.*.yaml
+!site.example.yaml
+
+# Static bundles: the image builds JupyterLite itself; plots/ and artifacts/
+# are runtime output (possibly data derivatives). Keep only the 404 page.
+webapp/*
+!webapp/404.html
+!webapp/anthive404.png
 
 # Secrets — must never end up in a redistributable image
 anthive.yaml

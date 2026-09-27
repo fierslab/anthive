@@ -1,0 +1,37 @@
+# anthive-ingest: anthive-app plus the R/Seurat/anndata conda env used to
+# convert Seurat .rds objects to .h5ad (the `anthive-data` env of a dev
+# checkout, envs/anthive-data.yml).
+#
+# The Python ingest tools (ant-convert, ant-merge-h5ad, ant-score, ...) are
+# already in anthive-app's venv; this image adds only the R side, at
+# /opt/rdata, activated with `rdata <cmd>` (e.g. `rdata Rscript convert.R`).
+#
+# Pinned exactly: docker/anthive-data.linux-64.explicit.txt is a
+# `micromamba env export --explicit --md5` of the working env (URL + md5 per
+# package). Regenerate it from a known-good env when bumping R/Seurat.
+#
+# Built by `make images` / `ant-stack build`; APP_IMAGE is the anthive-app
+# tag it layers on. Also the base of the Apptainer image for HPC
+# (docker/anthive-ingest.def).
+
+ARG APP_IMAGE=anthive/anthive-app:dev
+ARG MICROMAMBA_IMAGE=mambaorg/micromamba:2.3.3
+
+FROM ${MICROMAMBA_IMAGE} AS rdata
+USER root
+COPY docker/anthive-data.linux-64.explicit.txt /tmp/rdata.txt
+RUN micromamba create --yes --prefix /opt/rdata --file /tmp/rdata.txt \
+ && micromamba clean --all --yes \
+ && /opt/rdata/bin/Rscript -e 'suppressMessages(library(Seurat)); cat("Seurat", as.character(packageVersion("Seurat")), "\n")'
+
+FROM ${APP_IMAGE}
+USER root
+COPY --from=rdata /opt/rdata /opt/rdata
+RUN printf '#!/bin/sh\n# rdata CMD...: run CMD inside the R/Seurat conda env\nexport PATH=/opt/rdata/bin:$PATH\nexport R_HOME=/opt/rdata/lib/R\nexec "$@"\n' \
+        > /usr/local/bin/rdata \
+ && chmod 0755 /usr/local/bin/rdata \
+ && rdata Rscript -e 'suppressMessages(library(Seurat)); suppressMessages(library(reticulate)); cat("R env ok\n")'
+LABEL org.opencontainers.image.title="anthive-ingest" \
+      org.opencontainers.image.description="anthive ingest tools + R/Seurat conversion env"
+USER anthive
+CMD ["ant", "--help"]

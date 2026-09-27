@@ -46,6 +46,7 @@ import json
 import logging
 import logging.handlers
 import math
+import os
 import re
 import sys
 import time
@@ -141,7 +142,10 @@ def _alias_canonical(
 def _setup_logging(log_dir: Path = None) -> logging.Logger:
     """Configure file + console logging with rotation."""
     if log_dir is None:
-        log_dir = Path(__file__).parent.parent.resolve() / 'logs'
+        if os.environ.get('ANTHIVE_LOG_DIR') or get_config().get('log_dir'):
+            log_dir = get_log_dir()
+        else:
+            log_dir = Path(__file__).parent.parent.resolve() / 'logs'   # historical bin/logs
     log_dir.mkdir(parents=True, exist_ok=True)
 
     logger = logging.getLogger('anthive')

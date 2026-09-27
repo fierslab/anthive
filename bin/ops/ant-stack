@@ -1,0 +1,904 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "pyyaml>=6.0",
+#   "bcrypt>=4.1",
+# ]
+# ///
+"""ant-stack: deploy anthive as a docker compose stack from one site.yaml.
+
+Commands:
+    init                 create site.yaml (from site.example.yaml), state_dir,
+                         secrets and the seeded user accounts
+    check                validate site.yaml, paths, permissions, ports, images;
+                         print the resolved plan
+    render               write <state_dir>/stack/: .env, compose.site.yaml,
+                         anthive.yaml, Caddy snippets, Authelia config
+    up / down / ps / logs [service] / pull / restart [service]
+                         docker compose wrappers (render runs first for up)
+    build                build the app and ingest images locally
+    passwd USER          set a user's password (basic + authelia accounts)
+    ingest -- CMD...     one-off command in the ingest image with the site's
+                         mounts, e.g. `ant-stack ingest -- ant convert /data/x.h5ad`
+    config-path          print the rendered anthive.yaml path
+
+Inputs:
+    site.yaml            --site PATH, $ANTHIVE_SITE, or ./site.yaml
+    docker/compose.yaml  the static part of the stack (this repo)
+
+Outputs (all under state_dir; nothing is written into the repo or images):
+    stack/.env                  compose variables (images, uid, paths, listen)
+    stack/compose.site.yaml     bind mounts, ports, profiles for this site
+    stack/anthive.yaml          rendered runtime config (0600, has secrets)
+    stack/caddy/{auth,tls}.caddy
+    authelia/configuration.yml  (+ users_database.yml seeded once, secrets/)
+    secrets/                    internal_secret, mcp_token_secret, users.yaml,
+                                initial-passwords.txt, optional s3/chat keys
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import grp
+import os
+import pwd
+import re
+import secrets
+import shutil
+import socket
+import stat
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit
+
+import bcrypt
+import yaml
+
+REPO = Path(__file__).resolve().parent.parent.parent
+COMPOSE_FILE = REPO / 'docker' / 'compose.yaml'
+EXAMPLE = REPO / 'site.example.yaml'
+
+AUTH_MODES = ('authelia', 'basic', 'trusted-proxy', 'none')
+TLS_MODES = ('internal', 'acme', 'off')
+
+# Container-side fixed locations (see docker/Dockerfile + compose.yaml).
+C_STATE = '/var/lib/anthive'
+C_SCRATCH = '/scratch'
+C_WEBAPP = '/srv/webapp'
+C_CONFIG = '/etc/anthive/anthive.yaml'
+C_CADDY_SNIPPETS = '/etc/anthive-caddy'
+C_CADDY_CONFIG = '/srv/caddy-config/config'
+PORT_TLS_INTERNAL = 8443
+PORT_PLAIN = 8500
+
+
+class SiteError(Exception):
+    """A site.yaml problem the operator must fix."""
+
+
+def _say(message: str) -> None:
+    print(f"[ant-stack] {message}", flush=True)
+
+
+def _warn(message: str) -> None:
+    print(f"[ant-stack] WARNING: {message}", file=sys.stderr, flush=True)
+
+
+# ── site.yaml ────────────────────────────────────────────────────────────
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    merged = copy.deepcopy(base)
+    for key, value in (override or {}).items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def site_path(args: argparse.Namespace) -> Path:
+    raw = args.site or os.environ.get('ANTHIVE_SITE') or 'site.yaml'
+    return Path(raw).expanduser().resolve()
+
+
+def load_site(path: Path) -> dict:
+    if not path.exists():
+        raise SiteError(f"{path} not found; run `ant-stack init` first")
+    defaults = yaml.safe_load(EXAMPLE.read_text()) or {}
+    user = yaml.safe_load(path.read_text()) or {}
+    site = _deep_merge(defaults, user)
+    # `users` lists replace rather than merge.
+    if 'auth' in user and 'users' in (user.get('auth') or {}):
+        site['auth']['users'] = user['auth']['users'] or []
+    return validate_site(site, path)
+
+
+def _abs(value: Any, field: str, required: bool = True) -> Path | None:
+    if value in (None, ''):
+        if required:
+            raise SiteError(f"{field} is required")
+        return None
+    path = Path(os.path.expandvars(os.path.expanduser(str(value))))
+    if not path.is_absolute():
+        raise SiteError(f"{field} must be an absolute host path (got {value!r})")
+    return path
+
+
+def validate_site(site: dict, path: Path) -> dict:
+    name = str(site['site'].get('name') or '')
+    if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,40}', name):
+        raise SiteError("site.name must be lowercase letters, digits and dashes")
+    public = urlsplit(str(site['site'].get('public_url') or ''))
+    if public.scheme not in ('http', 'https') or not public.hostname:
+        raise SiteError("site.public_url must look like https://host[:port]")
+    auth_mode = site['auth'].get('mode')
+    if auth_mode not in AUTH_MODES:
+        raise SiteError(f"auth.mode must be one of {', '.join(AUTH_MODES)}")
+    tls_mode = site['tls'].get('mode')
+    if tls_mode is False:          # YAML 1.1 reads a bare `off` as false
+        tls_mode = site['tls']['mode'] = 'off'
+    if tls_mode not in TLS_MODES:
+        raise SiteError(f"tls.mode must be one of {', '.join(TLS_MODES)}")
+    if tls_mode == 'acme' and not site['tls'].get('acme_email'):
+        raise SiteError("tls.mode acme needs tls.acme_email")
+    if auth_mode == 'authelia' and public.scheme != 'https':
+        raise SiteError("auth.mode authelia requires an https public_url (Authelia refuses http cookies)")
+    if auth_mode == 'basic' and not site['auth'].get('users'):
+        raise SiteError("auth.mode basic needs at least one entry in auth.users")
+    site['_path'] = path
+    site['_h5adstore'] = _abs(site['data'].get('h5adstore'), 'data.h5adstore')
+    site['_genesetstore'] = _abs(site['data'].get('genesetstore'), 'data.genesetstore', False)
+    site['_starcatstore'] = _abs(site['data'].get('starcatstore'), 'data.starcatstore', False)
+    site['_state'] = _abs(site.get('state_dir'), 'state_dir')
+    site['_scratch'] = _abs(site.get('scratch_dir'), 'scratch_dir', False)
+    run_as = site.get('run_as') or {}
+    site['_uid'] = int(run_as.get('uid') if run_as.get('uid') is not None else os.getuid())
+    site['_gid'] = int(run_as.get('gid') if run_as.get('gid') is not None else os.getgid())
+    site['_public'] = public
+    for key in ('https', 'http'):
+        site['ports'][key] = int(site['ports'][key])
+    return site
+
+
+def image_ref(site: dict, which: str) -> str:
+    images = site['images']
+    if which in ('caddy', 'authelia'):
+        return str(images[which])
+    registry = str(images.get('registry') or '').rstrip('/')
+    name = str(images[which])
+    ref = f"{registry}/{name}" if registry else name
+    return f"{ref}:{images.get('tag') or 'latest'}"
+
+
+def stack_dir(site: dict) -> Path:
+    return site['_state'] / 'stack'
+
+
+# ── secrets ──────────────────────────────────────────────────────────────
+
+def _write_secret(path: Path, value: str, overwrite: bool = False) -> bool:
+    if path.exists() and not overwrite:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w') as handle:
+        handle.write(value if value.endswith('\n') else value + '\n')
+    return True
+
+
+def _read_secret(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    return path.read_text().strip() or None
+
+
+def _users_file(site: dict) -> Path:
+    return site['_state'] / 'secrets' / 'users.yaml'
+
+
+def _load_user_hashes(site: dict) -> dict[str, str]:
+    path = _users_file(site)
+    if not path.exists():
+        return {}
+    return yaml.safe_load(path.read_text()) or {}
+
+
+def _save_user_hashes(site: dict, hashes: dict[str, str]) -> None:
+    _write_secret(_users_file(site), yaml.safe_dump(hashes, sort_keys=True), overwrite=True)
+
+
+def _hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt(rounds=12)).decode()
+
+
+def ensure_secrets(site: dict) -> list[str]:
+    """Create every missing secret; return the list of files created."""
+    state = site['_state']
+    created: list[str] = []
+    generated = {
+        state / 'secrets' / 'internal_secret': secrets.token_hex(32),
+        state / 'secrets' / 'mcp_token_secret': secrets.token_hex(32),
+        state / 'authelia' / 'secrets' / 'jwt': secrets.token_hex(64),
+        state / 'authelia' / 'secrets' / 'session': secrets.token_hex(64),
+        state / 'authelia' / 'secrets' / 'storage': secrets.token_hex(32),
+    }
+    for path, value in generated.items():
+        if _write_secret(path, value):
+            created.append(str(path.relative_to(state)))
+    hashes = _load_user_hashes(site)
+    new_passwords: list[str] = []
+    for user in site['auth'].get('users') or []:
+        name = str(user['name'])
+        if name not in hashes:
+            password = secrets.token_urlsafe(18)
+            hashes[name] = _hash_password(password)
+            new_passwords.append(f"{name}\t{password}")
+    if new_passwords:
+        _save_user_hashes(site, hashes)
+        passwords_file = state / 'secrets' / 'initial-passwords.txt'
+        existing = passwords_file.read_text() if passwords_file.exists() else ''
+        _write_secret(passwords_file, existing + '\n'.join(new_passwords) + '\n', overwrite=True)
+        created.append('secrets/initial-passwords.txt')
+        for line in new_passwords:
+            user, password = line.split('\t')
+            _say(f"initial password for {user}: {password}  (also in secrets/initial-passwords.txt)")
+    return created
+
+
+# ── rendering ────────────────────────────────────────────────────────────
+
+def _hostnames(site: dict) -> list[str]:
+    names = [site['_public'].hostname] + [str(h) for h in site['site'].get('hostnames') or []]
+    seen: list[str] = []
+    for name in names:
+        if name and name not in seen:
+            seen.append(name)
+    return seen
+
+
+def _listen_and_ports(site: dict) -> tuple[str, list[str], str]:
+    """(ANTHIVE_LISTEN, published ports, ANTHIVE_AUTO_HTTPS line)."""
+    bind = site['ports']['bind']
+    mode = site['tls']['mode']
+    if mode == 'internal':
+        listen = ', '.join(f"https://{name}:{PORT_TLS_INTERNAL}" for name in _hostnames(site))
+        return listen, [f"{bind}:{site['ports']['https']}:{PORT_TLS_INTERNAL}"], \
+            'auto_https disable_redirects'
+    if mode == 'acme':
+        return site['_public'].hostname, [f"{bind}:80:80", f"{bind}:443:443"], \
+            '# acme: automatic HTTPS with redirects'
+    return f"http://:{PORT_PLAIN}", [f"{bind}:{site['ports']['http']}:{PORT_PLAIN}"], \
+        'auto_https off'
+
+
+def render_anthive_yaml(site: dict) -> dict:
+    res = site['resources']
+    state = site['_state']
+    cfg: dict[str, Any] = {
+        'rest_api_host': '0.0.0.0', 'rest_api_port': 8080,
+        'browse_host': '0.0.0.0', 'browse_port': 8081,
+        'api_url': 'http://api:8080',
+        'h5adstore': str(site['_h5adstore']),
+        'geneset_store': str(site['_genesetstore']) if site['_genesetstore'] else None,
+        'state_dir': C_STATE,
+        'tmp_dir': f"{C_SCRATCH}/tmp",
+        'log_dir': f"{C_SCRATCH}/logs",
+        'webapp_dir': C_WEBAPP,
+        'duckdb_temp_directory': f"{C_SCRATCH}/duckdb_spill",
+        'convert_staging_dir': f"{C_SCRATCH}/convert",
+        'duckdb_server_threads': int(res['server_threads']),
+        'duckdb_server_memory_limit': str(res['server_memory_limit']),
+        'duckdb_max_open_databases': int(res['max_open_databases']),
+        'duckdb_threads': int(res['convert_threads']),
+        'duckdb_memory_limit': str(res['convert_memory_limit']),
+        'plot_cache_max_entries': int(res['plot_cache_max_entries']),
+        'catalog_scan': str(res['catalog_scan']),
+        'coordinate': 'auto',
+        'auth': {
+            'mode': site['auth']['mode'],
+            'admins': [str(a) for a in site['auth'].get('admins') or []],
+        },
+        'mcp': {
+            'enabled': bool(site['services'].get('mcp')),
+            'host': '0.0.0.0', 'port': 8090,
+            'plots_dir': f"{C_WEBAPP}/plots",
+            'public_url': site['site']['public_url'].rstrip('/'),
+            'token_ttl_days': int((site.get('mcp') or {}).get('token_ttl_days') or 0),
+        },
+    }
+    if site['_starcatstore']:
+        cfg['starcat_store'] = str(site['_starcatstore'])
+    chat_key = _read_secret(state / 'secrets' / 'chat_api_key')
+    cfg['chat'] = {
+        'enabled': bool(site['services'].get('chat')) and bool(chat_key),
+        'api_key': chat_key,
+        'history_path': f"{C_STATE}/chat_history.db",
+    }
+    if site['services'].get('chat') and not chat_key:
+        _warn("services.chat is on but secrets/chat_api_key is missing; chat stays off")
+    s3 = site.get('s3') or {}
+    if s3.get('enabled'):
+        cfg['s3'] = {
+            'endpoint': s3.get('endpoint'), 'region': s3.get('region') or 'us-east-1',
+            'bucket': s3.get('bucket'), 'prefix': s3.get('prefix') or '',
+            'use_path_style': bool(s3.get('use_path_style')),
+            'access_key_id': _read_secret(state / 'secrets' / 's3_access_key_id'),
+            'secret_access_key': _read_secret(state / 'secrets' / 's3_secret_access_key'),
+        }
+    return _deep_merge(cfg, site.get('anthive') or {})
+
+
+def render_caddy_auth(site: dict) -> str:
+    mode = site['auth']['mode']
+    head = f"# Rendered by bin/ops/ant-stack for auth.mode={mode}. Do not edit; edit site.yaml.\n"
+    if mode == 'authelia':
+        return head + f"import {C_CADDY_CONFIG}/caddy-auth.dev\n"
+    if mode == 'trusted-proxy':
+        return head + f"import {C_CADDY_CONFIG}/caddy-auth.prod\n"
+    if mode == 'none':
+        return head + f"import {C_CADDY_CONFIG}/caddy-auth.none\n"
+    hashes = _load_user_hashes(site)
+    admins = {str(a) for a in site['auth'].get('admins') or []}
+    for user in site['auth'].get('users') or []:
+        if 'admins' in (user.get('groups') or []):
+            admins.add(str(user['name']))
+    lines = [head,
+             "# Identity comes ONLY from basic_auth: client-sent headers are dropped",
+             "# and re-derived from the authenticated user.",
+             "@anthive_protected not path /api/health /health /.well-known/* /register",
+             "basic_auth @anthive_protected {"]
+    for user in site['auth'].get('users') or []:
+        name = str(user['name'])
+        if name not in hashes:
+            raise SiteError(f"no password hash for basic user {name!r}; run `ant-stack init` or `passwd`")
+        if not re.fullmatch(r'[A-Za-z0-9._@-]+', name):
+            raise SiteError(f"basic user name {name!r} has characters Caddy cannot take")
+        lines.append(f"\t{name} {hashes[name]}")
+    lines.append("}")
+    lines.append("map {http.auth.user.id} {anthive_groups} {")
+    for name in sorted(admins):
+        lines.append(f"\t{name} admins")
+    lines.append('\tdefault ""')
+    lines.append("}")
+    lines += [
+        "request_header Remote-User {http.auth.user.id}",
+        "request_header Remote-Groups {anthive_groups}",
+        "request_header -Remote-Email",
+        "request_header -Remote-Name",
+        "request_header -X-Remote-User",
+        "request_header -X-Remote-Groups",
+    ]
+    return '\n'.join(lines) + '\n'
+
+
+def render_caddy_tls(site: dict) -> str:
+    mode = site['tls']['mode']
+    if mode == 'internal':
+        return "tls internal\n"
+    if mode == 'acme':
+        return f"tls {site['tls']['acme_email']}\n"
+    return "# tls off: plain HTTP behind an upstream TLS proxy\n"
+
+
+def render_authelia(site: dict) -> str:
+    public = site['_public']
+    base = site['site']['public_url'].rstrip('/')
+    smtp = site['auth'].get('smtp')
+    if smtp:
+        notifier = {'disable_startup_check': True, 'smtp': {
+            'address': smtp['address'], 'username': smtp.get('username'),
+            'sender': smtp.get('sender'), 'subject': '[Anthive] {title}'}}
+    else:
+        notifier = {'disable_startup_check': True,
+                    'filesystem': {'filename': '/config/notification.txt'}}
+    config = {
+        'theme': 'dark',
+        'server': {
+            'address': 'tcp://0.0.0.0:9091/authelia',
+            'asset_path': '/srv/caddy-config/config/authelia/assets',
+            'endpoints': {'authz': {
+                'auth-request': {'implementation': 'AuthRequest',
+                                 'authn_strategies': [{'name': 'CookieSession'}]},
+                'auth-request-api': {'implementation': 'AuthRequest', 'authn_strategies': [
+                    {'name': 'CookieSession'},
+                    {'name': 'HeaderAuthorization', 'schemes': ['basic']}]},
+                'forward-auth-cookie': {'implementation': 'ForwardAuth',
+                                        'authn_strategies': [{'name': 'CookieSession'}]},
+            }},
+        },
+        'log': {'level': 'info', 'format': 'text'},
+        'authentication_backend': {'file': {
+            'path': '/config/users_database.yml', 'watch': True,
+            'password': {'algorithm': 'argon2'}}},
+        'access_control': {'default_policy': 'one_factor'},
+        'session': {
+            'name': f"authelia_session_{site['site']['name']}",
+            'same_site': 'lax', 'expiration': '1 hour', 'inactivity': '30 minutes',
+            'remember_me': '1 month',
+            'cookies': [{'domain': public.hostname,
+                         'authelia_url': f"{base}/authelia/",
+                         'default_redirection_url': f"{base}/"}],
+        },
+        'regulation': {'max_retries': 5, 'find_time': '2 minutes', 'ban_time': '10 minutes'},
+        'storage': {'local': {'path': '/config/db.sqlite3'}},
+        'notifier': notifier,
+    }
+    return ("# Rendered by bin/ops/ant-stack from site.yaml. Do not edit; edit site.yaml.\n"
+            + yaml.safe_dump(config, sort_keys=False))
+
+
+def seed_authelia_users(site: dict) -> None:
+    """Write users_database.yml once. Authelia owns it afterwards."""
+    path = site['_state'] / 'authelia' / 'users_database.yml'
+    hashes = _load_user_hashes(site)
+    users = {}
+    for user in site['auth'].get('users') or []:
+        name = str(user['name'])
+        if name not in hashes:
+            continue
+        users[name] = {
+            'disabled': False,
+            'displayname': user.get('displayname') or name,
+            'email': user.get('email') or f"{name}@localhost",
+            'groups': list(user.get('groups') or []),
+            'password': hashes[name],
+        }
+    if path.exists():
+        current = yaml.safe_load(path.read_text()) or {}
+        existing = current.get('users') or {}
+        added = {k: v for k, v in users.items() if k not in existing}
+        if not added:
+            return
+        existing.update(added)
+        current['users'] = existing
+        users_doc = current
+    else:
+        users_doc = {'users': users}
+    _write_secret(path, yaml.safe_dump(users_doc, sort_keys=True), overwrite=True)
+
+
+def _bind(source: Path | str, target: str, read_only: bool = False) -> dict:
+    entry = {'type': 'bind', 'source': str(source), 'target': target}
+    if read_only:
+        entry['read_only'] = True
+    return entry
+
+
+def render_compose_site(site: dict) -> dict:
+    state = site['_state']
+    stack = stack_dir(site)
+    h5ad = site['_h5adstore']
+    data_rw = [_bind(h5ad, str(h5ad), read_only=bool(site['data'].get('readonly')))]
+    data_ro = [_bind(h5ad, str(h5ad), read_only=True)]
+    for extra in ('_genesetstore', '_starcatstore'):
+        if site[extra]:
+            data_rw.append(_bind(site[extra], str(site[extra]), read_only=True))
+            data_ro.append(_bind(site[extra], str(site[extra]), read_only=True))
+    config_mount = _bind(stack / 'anthive.yaml', C_CONFIG, read_only=True)
+    state_mount = _bind(state, C_STATE)
+    scratch = (_bind(site['_scratch'], C_SCRATCH) if site['_scratch']
+               else {'type': 'volume', 'source': 'scratch', 'target': C_SCRATCH})
+    webapp_rw = {'type': 'volume', 'source': 'webapp', 'target': C_WEBAPP}
+    services: dict[str, Any] = {
+        'static': {'volumes': [
+            webapp_rw,
+            {'type': 'volume', 'source': 'caddy-config', 'target': '/srv/caddy-config'},
+        ]},
+        'api': {'volumes': data_rw + [config_mount, state_mount, scratch, webapp_rw]},
+        'web': {'volumes': data_ro + [config_mount]},
+        'mcp': {'volumes': [config_mount, state_mount, webapp_rw]},
+        'ingest': {'volumes': data_rw + [config_mount, state_mount, scratch, webapp_rw]},
+        'caddy': {
+            'ports': _listen_and_ports(site)[1],
+            'volumes': [_bind(stack / 'caddy', C_CADDY_SNIPPETS, read_only=True)],
+        },
+        'authelia': {'volumes': [_bind(state / 'authelia', '/config')]},
+    }
+    doc: dict[str, Any] = {'services': services}
+    if not site['_scratch']:
+        doc['volumes'] = {'scratch': {}}
+    return doc
+
+
+def render(site: dict, quiet: bool = False) -> Path:
+    state = site['_state']
+    stack = stack_dir(site)
+    (stack / 'caddy').mkdir(parents=True, exist_ok=True)
+    (state / 'authelia').mkdir(parents=True, exist_ok=True)
+    listen, _ports, auto_https = _listen_and_ports(site)
+
+    anthive_cfg = render_anthive_yaml(site)
+    header = ("# Rendered by bin/ops/ant-stack from site.yaml. Do not edit: edit\n"
+              "# site.yaml (or its `anthive:` block) and run `ant-stack render`.\n")
+    _write_secret(stack / 'anthive.yaml', header + yaml.safe_dump(anthive_cfg, sort_keys=False),
+                  overwrite=True)
+    (stack / 'caddy' / 'auth.caddy').write_text(render_caddy_auth(site))
+    (stack / 'caddy' / 'tls.caddy').write_text(render_caddy_tls(site))
+    if site['auth']['mode'] == 'authelia':
+        (state / 'authelia' / 'configuration.yml').write_text(render_authelia(site))
+        seed_authelia_users(site)
+    (stack / 'compose.site.yaml').write_text(
+        "# Rendered by bin/ops/ant-stack from site.yaml. Do not edit.\n"
+        + yaml.safe_dump(render_compose_site(site), sort_keys=False))
+
+    profiles = []
+    if site['services'].get('mcp'):
+        profiles.append('mcp')
+    if site['auth']['mode'] == 'authelia':
+        profiles.append('authelia')
+    env = {
+        'COMPOSE_PROJECT_NAME': site['site']['name'],
+        'COMPOSE_PROFILES': ','.join(profiles),
+        'ANTHIVE_IMAGE_APP': image_ref(site, 'app'),
+        'ANTHIVE_IMAGE_INGEST': image_ref(site, 'ingest'),
+        'ANTHIVE_IMAGE_CADDY': image_ref(site, 'caddy'),
+        'ANTHIVE_IMAGE_AUTHELIA': image_ref(site, 'authelia'),
+        'ANTHIVE_UID': str(site['_uid']),
+        'ANTHIVE_GID': str(site['_gid']),
+        'ANTHIVE_H5ADSTORE': str(site['_h5adstore']),
+        'ANTHIVE_GENESETSTORE': str(site['_genesetstore'] or ''),
+        'ANTHIVE_STARCATSTORE': str(site['_starcatstore'] or ''),
+        'ANTHIVE_LISTEN': listen,
+        'ANTHIVE_AUTO_HTTPS': auto_https,
+    }
+    lines = ["# Rendered by bin/ops/ant-stack from site.yaml. Do not edit."]
+    for key, value in env.items():
+        escaped = value.replace('\\', '\\\\').replace('"', '\\"')
+        lines.append(f'{key}="{escaped}"')
+    (stack / '.env').write_text('\n'.join(lines) + '\n')
+    _validate_rendered_config(stack / 'anthive.yaml')
+    if not quiet:
+        _say(f"rendered {stack}")
+    return stack
+
+
+def _validate_rendered_config(path: Path) -> None:
+    """Load the rendered config through lib/config so unknown keys fail now."""
+    code = ("import sys; sys.path.insert(0, sys.argv[1]); import config; "
+            "cfg = config.load_config(); config.get_auth_settings(cfg); "
+            "config.get_coordinate_mode(cfg); config.get_catalog_scan_mode(cfg)")
+    env = {**os.environ, 'ANTHIVE_CONFIG': str(path)}
+    result = subprocess.run([sys.executable, '-c', code, str(REPO / 'lib')],
+                            env=env, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise SiteError(f"rendered anthive.yaml is invalid:\n{result.stderr.strip()}")
+
+
+# ── docker compose plumbing ─────────────────────────────────────────────
+
+def compose_cmd(site: dict, *args: str) -> list[str]:
+    stack = stack_dir(site)
+    return ['docker', 'compose', '--project-directory', str(REPO),
+            '-p', site['site']['name'], '--env-file', str(stack / '.env'),
+            '-f', str(COMPOSE_FILE), '-f', str(stack / 'compose.site.yaml'), *args]
+
+
+def run_compose(site: dict, *args: str, check: bool = True) -> int:
+    cmd = compose_cmd(site, *args)
+    result = subprocess.run(cmd)
+    if check and result.returncode != 0:
+        raise SiteError(f"docker compose {' '.join(args)} failed (exit {result.returncode})")
+    return result.returncode
+
+
+# ── checks ───────────────────────────────────────────────────────────────
+
+def _port_free(bind: str, port: int) -> bool:
+    family = socket.AF_INET6 if ':' in bind else socket.AF_INET
+    with socket.socket(family, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((bind, port))
+            return True
+        except OSError:
+            return False
+
+
+def _readable_by(path: Path, uid: int, gid: int) -> bool:
+    try:
+        info = path.stat()
+    except OSError:
+        return False
+    if uid == 0:
+        return True
+    mode = info.st_mode
+    if info.st_uid == uid:
+        return bool(mode & stat.S_IRUSR)
+    groups = {gid}
+    try:
+        user = pwd.getpwuid(uid).pw_name
+        groups |= {g.gr_gid for g in grp.getgrall() if user in g.gr_mem}
+    except KeyError:
+        pass
+    if info.st_gid in groups:
+        return bool(mode & stat.S_IRGRP)
+    return bool(mode & stat.S_IROTH)
+
+
+def check(site: dict, running: bool = False) -> list[str]:
+    problems: list[str] = []
+    if not shutil.which('docker'):
+        problems.append("docker is not installed or not on PATH")
+    else:
+        result = subprocess.run(['docker', 'compose', 'version', '--short'],
+                                capture_output=True, text=True)
+        if result.returncode != 0:
+            problems.append("docker compose v2 plugin not available")
+    uid, gid = site['_uid'], site['_gid']
+    for field, path in (('data.h5adstore', site['_h5adstore']),
+                        ('data.genesetstore', site['_genesetstore']),
+                        ('data.starcatstore', site['_starcatstore'])):
+        if path is None:
+            continue
+        if not path.is_dir():
+            problems.append(f"{field}: {path} is not a directory")
+        elif not _readable_by(path, uid, gid):
+            problems.append(f"{field}: {path} is not readable by uid {uid}")
+    if site['_h5adstore'] and site['_h5adstore'].is_dir() and not site['data'].get('readonly'):
+        if not os.access(site['_h5adstore'], os.W_OK):
+            problems.append(f"data.h5adstore {site['_h5adstore']} is not writable (set data.readonly: true "
+                            f"for a read-only mirror)")
+    state = site['_state']
+    if not state.is_dir():
+        problems.append(f"state_dir {state} does not exist (run `ant-stack init`)")
+    else:
+        if state.stat().st_uid != uid:
+            problems.append(f"state_dir {state} is owned by uid {state.stat().st_uid}, containers run as {uid}")
+        if state.stat().st_mode & 0o077:
+            problems.append(f"state_dir {state} is readable by others (chmod 700)")
+        for secret in ('secrets/internal_secret', 'secrets/mcp_token_secret'):
+            if not (state / secret).exists():
+                problems.append(f"missing {secret} (run `ant-stack init`)")
+        if site['auth']['mode'] == 'authelia':
+            for secret in ('jwt', 'session', 'storage'):
+                if not (state / 'authelia' / 'secrets' / secret).exists():
+                    problems.append(f"missing authelia/secrets/{secret} (run `ant-stack init`)")
+    if site['_scratch'] and not site['_scratch'].is_dir():
+        problems.append(f"scratch_dir {site['_scratch']} does not exist")
+    if not running:
+        _listen, ports, _ = _listen_and_ports(site)
+        for spec in ports:
+            bind, host_port, _container = spec.rsplit(':', 2)
+            if not _port_free(bind, int(host_port)):
+                problems.append(f"host port {bind}:{host_port} is already in use")
+    for which in ('app', 'ingest'):
+        ref = image_ref(site, which)
+        result = subprocess.run(['docker', 'image', 'inspect', ref], capture_output=True)
+        if result.returncode != 0:
+            problems.append(f"image {ref} not present locally (`ant-stack pull` or `ant-stack build`)"
+                            + (" [ingest image only needed for `ant-stack ingest`]" if which == 'ingest' else ''))
+    if site['auth']['mode'] == 'none':
+        _warn("auth.mode none: NO LOGIN. Every dataset is public and admin features are off.")
+    if site['auth']['mode'] == 'trusted-proxy' and site['ports']['bind'] not in ('127.0.0.1', '::1'):
+        problems.append("auth.mode trusted-proxy trusts identity headers: ports.bind must be 127.0.0.1")
+    return problems
+
+
+def print_plan(site: dict) -> None:
+    listen, ports, _ = _listen_and_ports(site)
+    print(f"""
+  site           {site['site']['name']}  ({site['_path']})
+  public_url     {site['site']['public_url']}
+  auth           {site['auth']['mode']}   admins: {', '.join(site['auth'].get('admins') or []) or '-'}
+  tls            {site['tls']['mode']}    caddy listens: {listen}
+  published      {', '.join(ports)}
+  h5adstore      {site['_h5adstore']}{' (read-only)' if site['data'].get('readonly') else ''}
+  genesetstore   {site['_genesetstore'] or '-'}
+  state_dir      {site['_state']}
+  scratch        {site['_scratch'] or 'docker volume <site>_scratch'}
+  run as         uid {site['_uid']} gid {site['_gid']}
+  images         {image_ref(site, 'app')}
+                 {image_ref(site, 'ingest')}
+  services       api web caddy{' mcp' if site['services'].get('mcp') else ''}{' authelia' if site['auth']['mode'] == 'authelia' else ''}
+""")
+
+
+# ── commands ─────────────────────────────────────────────────────────────
+
+def cmd_init(args: argparse.Namespace) -> int:
+    path = site_path(args)
+    if not path.exists():
+        shutil.copyfile(EXAMPLE, path)
+        os.chmod(path, 0o640)
+        _say(f"wrote {path} from site.example.yaml: edit it, then run `ant-stack init` again")
+        return 0
+    site = load_site(path)
+    state = site['_state']
+    state.mkdir(parents=True, exist_ok=True)
+    os.chmod(state, 0o700)
+    for sub in ('secrets', 'authelia', 'stack'):
+        (state / sub).mkdir(exist_ok=True)
+    created = ensure_secrets(site)
+    for item in created:
+        _say(f"created {item}")
+    render(site)
+    _say("init done; next: `ant-stack check`")
+    return 0
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    site = load_site(site_path(args))
+    render(site, quiet=True)
+    print_plan(site)
+    problems = check(site, running=args.running)
+    for problem in problems:
+        print(f"  PROBLEM  {problem}")
+    if problems:
+        return 1
+    print("  OK: ready for `ant-stack up`")
+    return 0
+
+
+def cmd_render(args: argparse.Namespace) -> int:
+    site = load_site(site_path(args))
+    render(site)
+    return 0
+
+
+def cmd_up(args: argparse.Namespace) -> int:
+    site = load_site(site_path(args))
+    ensure_secrets(site)
+    render(site)
+    blocking = [p for p in check(site, running=True) if 'ingest' not in p]
+    if blocking:
+        for problem in blocking:
+            print(f"  PROBLEM  {problem}")
+        return 1
+    extra = ['--wait', '--wait-timeout', str(args.wait_timeout)] if not args.no_wait else []
+    # 1. Re-sync the image's static bundles + Caddy config into the shared
+    #    volumes (a new image or edited config must not be masked by the
+    #    copy made at the previous `up`).
+    run_compose(site, 'up', '-d', '--no-deps', '--force-recreate', 'static')
+    if run_compose(site, 'wait', 'static', check=False) != 0:
+        raise SiteError("the static sync container failed; see `ant-stack logs static`")
+    # 2. Everything else.
+    run_compose(site, 'up', '-d', '--remove-orphans', *extra)
+    # 3. Services whose profile is now off (auth mode or mcp switched) are
+    #    not orphans to compose; stop and remove them explicitly.
+    active = {'authelia': site['auth']['mode'] == 'authelia',
+              'mcp': bool(site['services'].get('mcp'))}
+    for service, is_active in active.items():
+        if not is_active:
+            run_compose(site, '--profile', service, 'rm', '--stop', '--force', service, check=False)
+    # 4. Caddy reads its config only at start (admin API is off): recreate
+    #    it so the synced config and re-rendered snippets take effect.
+    run_compose(site, 'up', '-d', '--no-deps', '--force-recreate', *extra, 'caddy')
+    _say(f"up: {site['site']['public_url']}")
+    return 0
+
+
+def cmd_simple(args: argparse.Namespace) -> int:
+    site = load_site(site_path(args))
+    if not (stack_dir(site) / '.env').exists():
+        render(site, quiet=True)
+    compose_args = {
+        'down': ['down'] + (['--volumes'] if getattr(args, 'volumes', False) else []),
+        'ps': ['ps', '--all'],
+        'pull': ['pull', '--ignore-buildable'],
+        'logs': ['logs', '--tail', str(getattr(args, 'tail', 200))]
+                + (['-f'] if getattr(args, 'follow', False) else [])
+                + ([args.service] if getattr(args, 'service', None) else []),
+        'restart': ['restart'] + ([args.service] if getattr(args, 'service', None) else []),
+    }[args.command]
+    return run_compose(site, *compose_args, check=False)
+
+
+def cmd_build(args: argparse.Namespace) -> int:
+    site = load_site(site_path(args))
+    app, ingest = image_ref(site, 'app'), image_ref(site, 'ingest')
+    builds = [
+        ['docker', 'build', '-f', 'docker/Dockerfile', '-t', app, '.'],
+        ['docker', 'build', '-f', 'docker/Dockerfile.ingest', '--build-arg', f'APP_IMAGE={app}',
+         '-t', ingest, '.'],
+    ]
+    for command in builds[: 1 if args.app_only else 2]:
+        if args.pull:
+            command.insert(2, '--pull')
+        _say(' '.join(command))
+        result = subprocess.run(command, cwd=REPO)
+        if result.returncode != 0:
+            return result.returncode
+    return 0
+
+
+def cmd_passwd(args: argparse.Namespace) -> int:
+    site = load_site(site_path(args))
+    names = {str(u['name']) for u in site['auth'].get('users') or []}
+    if args.user not in names:
+        raise SiteError(f"{args.user!r} is not in auth.users of site.yaml")
+    password = args.password or os.environ.get('ANTHIVE_NEW_PASSWORD')
+    if not password:
+        import getpass  # noqa: PLC0415
+        password = getpass.getpass(f"new password for {args.user}: ")
+        if password != getpass.getpass("again: "):
+            raise SiteError("passwords differ")
+    if len(password) < 10:
+        raise SiteError("use at least 10 characters")
+    hashes = _load_user_hashes(site)
+    hashes[args.user] = _hash_password(password)
+    _save_user_hashes(site, hashes)
+    users_db = site['_state'] / 'authelia' / 'users_database.yml'
+    if users_db.exists():
+        doc = yaml.safe_load(users_db.read_text()) or {}
+        if args.user in (doc.get('users') or {}):
+            doc['users'][args.user]['password'] = hashes[args.user]
+            _write_secret(users_db, yaml.safe_dump(doc, sort_keys=True), overwrite=True)
+    render(site, quiet=True)
+    _say(f"password for {args.user} updated (basic list + authelia db); "
+         f"basic mode needs `ant-stack restart caddy`")
+    return 0
+
+
+def cmd_ingest(args: argparse.Namespace) -> int:
+    site = load_site(site_path(args))
+    render(site, quiet=True)
+    command = list(args.cmd)
+    if command and command[0] == '--':
+        command = command[1:]
+    if not command:
+        raise SiteError("usage: ant-stack ingest -- <command...>")
+    return run_compose(site, '--profile', 'ingest', 'run', '--rm', '--no-deps', 'ingest',
+                       *command, check=False)
+
+
+def cmd_config_path(args: argparse.Namespace) -> int:
+    site = load_site(site_path(args))
+    print(stack_dir(site) / 'anthive.yaml')
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog='ant-stack', description=__doc__.splitlines()[0],
+                                     formatter_class=argparse.RawDescriptionHelpFormatter,
+                                     epilog=__doc__)
+    parser.add_argument('--site', help='site.yaml path (default: $ANTHIVE_SITE or ./site.yaml)')
+    sub = parser.add_subparsers(dest='command', required=True)
+    sub.add_parser('init')
+    p_check = sub.add_parser('check')
+    p_check.add_argument('--running', action='store_true',
+                         help='skip the free-port check (stack already up)')
+    sub.add_parser('render')
+    p_up = sub.add_parser('up')
+    p_up.add_argument('--no-wait', action='store_true')
+    p_up.add_argument('--wait-timeout', type=int, default=900)
+    p_down = sub.add_parser('down')
+    p_down.add_argument('--volumes', action='store_true',
+                        help='also delete the docker volumes (webapp bundle, caddy certs, scratch)')
+    sub.add_parser('ps')
+    sub.add_parser('pull')
+    p_logs = sub.add_parser('logs')
+    p_logs.add_argument('service', nargs='?')
+    p_logs.add_argument('-f', '--follow', action='store_true')
+    p_logs.add_argument('--tail', type=int, default=200)
+    p_restart = sub.add_parser('restart')
+    p_restart.add_argument('service', nargs='?')
+    p_build = sub.add_parser('build')
+    p_build.add_argument('--pull', action='store_true', help='pull newer base images')
+    p_build.add_argument('--app-only', action='store_true')
+    p_passwd = sub.add_parser('passwd')
+    p_passwd.add_argument('user')
+    p_passwd.add_argument('--password', help='non-interactive (or $ANTHIVE_NEW_PASSWORD)')
+    p_ingest = sub.add_parser('ingest')
+    p_ingest.add_argument('cmd', nargs=argparse.REMAINDER)
+    sub.add_parser('config-path')
+    args = parser.parse_args()
+    handlers = {
+        'init': cmd_init, 'check': cmd_check, 'render': cmd_render, 'up': cmd_up,
+        'down': cmd_simple, 'ps': cmd_simple, 'pull': cmd_simple, 'logs': cmd_simple,
+        'restart': cmd_simple, 'build': cmd_build, 'passwd': cmd_passwd,
+        'ingest': cmd_ingest, 'config-path': cmd_config_path,
+    }
+    try:
+        return handlers[args.command](args)
+    except SiteError as error:
+        print(f"[ant-stack] ERROR: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == '__main__':
+    sys.exit(main())

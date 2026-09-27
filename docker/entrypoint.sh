@@ -1,170 +1,102 @@
 #!/usr/bin/env bash
-# entrypoint.sh — anthive4 container init
+# entrypoint.sh: role dispatcher for the anthive-app / anthive-ingest images.
 #
-# Responsibilities:
-#   1. Validate the required bind mounts exist and look plausible.
-#   2. Synthesize anthive.yaml from environment.
-#   3. Synthesize the runtime Caddy auth snippet (basic-auth if env
-#      vars are set, else empty).
-#   4. exec ant-supervisor.
+#   api | web | mcp        run one service in the foreground (compose)
+#   static                 copy the image's static bundles into the shared
+#                          volumes (/srv/webapp, /srv/caddy-config), exit 0
+#   all                    legacy single-container mode: api + web + caddy
+#                          under ant-supervisor, config synthesised from env
+#   <anything else>        exec it (e.g. `ant convert x.h5ad`, `bash`)
 #
-# Every failure prints a clear message and exits non-zero. No silent
-# retries — a broken mount should fail loudly, not spin in a restart
-# loop.
+# Inputs (environment, set by compose from the site's rendered .env):
+#   ANTHIVE_CONFIG        rendered anthive.yaml, mounted read-only (required
+#                         for api/web/mcp and commands)
+#   ANTHIVE_H5ADSTORE     h5adstore path (bind-mounted at the SAME absolute
+#                         path as on the host)
+#   ANTHIVE_GENESETSTORE  genesetstore path (same-path mount)
+#   ANTHIVE_STARCATSTORE  optional
+#   ANTHIVE_API_URL       how web/mcp/tools reach ant-serve (http://api:8080)
+#
+# Failures are loud and immediate: a broken mount must not become a restart
+# loop that looks like a flaky service.
 set -euo pipefail
 
-# ─── log helpers ────────────────────────────────────────────────────────
-_log()  { printf '\033[36m[anthive]\033[0m %s\n' "$*" >&2; }
-_warn() { printf '\033[33m[anthive]\033[0m %s\n' "$*" >&2; }
-_die()  { printf '\033[31m[anthive]\033[0m %s\n' "$*" >&2; exit 1; }
+_log()  { printf '[anthive:%s] %s\n' "${ROLE:-init}" "$*" >&2; }
+_die()  { printf '[anthive:%s] FATAL: %s\n' "${ROLE:-init}" "$*" >&2; exit 64; }
 
-# ─── inputs ─────────────────────────────────────────────────────────────
-ANTHIVEPORT="${ANTHIVEPORT:-8501}"
+ROLE="${1:-api}"
+HOME_DIR=/opt/anthive4
+cd "$HOME_DIR"
 
-# Backwards-compat: accept both H5ADSTORE (documented) and ANTHIVE_H5ADSTORE.
-H5ADSTORE_DIR="${H5ADSTORE:-${ANTHIVE_H5ADSTORE:-/data/h5adstore}}"
-GENESETSTORE_DIR="${GENESETSTORE:-${ANTHIVE_GENESETSTORE:-/data/genesetstore}}"
-STARCATSTORE_DIR="${STARCATSTORE:-${ANTHIVE_STARCATSTORE:-}}"
+mkdir -p /tmp/anthive-links "${MPLCONFIGDIR:-/tmp/matplotlib}" "${NUMBA_CACHE_DIR:-/tmp/numba}"
 
-CHAT_API_KEY="${ANTHIVE_CHAT_API_KEY:-}"
-CHAT_MODEL="${ANTHIVE_CHAT_MODEL:-anthropic/claude-opus-4}"
-
-BASIC_AUTH_USER="${ANTHIVE_BASIC_AUTH_USER:-}"
-BASIC_AUTH_PASS="${ANTHIVE_BASIC_AUTH_PASSWORD:-}"
-
-# S3 (optional — for datasets fetched over S3 on the fly)
-S3_ENDPOINT="${ANTHIVE_S3_ENDPOINT:-}"
-S3_BUCKET="${ANTHIVE_S3_BUCKET:-}"
-S3_REGION="${ANTHIVE_S3_REGION:-us-east-1}"
-S3_ACCESS_KEY="${ANTHIVE_S3_ACCESS_KEY_ID:-}"
-S3_SECRET_KEY="${ANTHIVE_S3_SECRET_ACCESS_KEY:-}"
-
-# ─── validate mounts ────────────────────────────────────────────────────
-_validate_store() {
-    local role="$1" path="$2" required="$3"
+# Link a mounted store under /tmp/anthive-links/<link> so the repo-relative
+# defaults (data/h5adstore, data/genesetstore) resolve inside the image.
+_link_store() {
+    local name="$1" path="${2:-}" required="$3" link="$4"
     if [[ -z "$path" ]]; then
-        [[ "$required" == "yes" ]] && _die "$role: no path provided — set the env var or bind-mount /data/$(echo "$role" | tr '[:upper:]' '[:lower:]')"
+        [[ "$required" == yes ]] && _die "$name is not set (ant-stack renders it from site.yaml)"
         return 0
     fi
-    if [[ ! -d "$path" ]]; then
-        _die "$role: directory does not exist: $path
-    Fix: bind-mount your store to $path (or set the env var to a mounted path)"
-    fi
-    if [[ ! -r "$path" ]]; then
-        _die "$role: directory is not readable: $path
-    Fix: check host permissions; container UID is $(id -u) (anthive)"
-    fi
-    # A totally empty mount usually means the user forgot the -v flag.
-    if [[ -z "$(ls -A "$path" 2>/dev/null)" ]]; then
-        _warn "$role: mount at $path is EMPTY. Anthive will start but serve no datasets from this store."
-    fi
+    [[ -d "$path" ]] || _die "$name=$path is not a directory inside the container (missing bind mount?)"
+    [[ -r "$path" ]] || _die "$name=$path is not readable by uid $(id -u); fix host permissions or site.yaml uid/gid"
+    ln -sfn "$path" "/tmp/anthive-links/$link"
 }
 
-_validate_store H5ADSTORE     "$H5ADSTORE_DIR"     yes
-_validate_store GENESETSTORE  "$GENESETSTORE_DIR"  yes
-_validate_store STARCATSTORE  "$STARCATSTORE_DIR"  no
-
-_log "H5ADSTORE     = $H5ADSTORE_DIR"
-_log "GENESETSTORE  = $GENESETSTORE_DIR"
-_log "STARCATSTORE  = ${STARCATSTORE_DIR:-<not set>}"
-_log "ANTHIVEPORT   = $ANTHIVEPORT"
-
-# ─── synthesize anthive.yaml ────────────────────────────────────────────
-# Everything the container runs reads /opt/anthive4/anthive.yaml — the
-# template ships with placeholders that we substitute here.
-CFG_OUT=/opt/anthive4/anthive.yaml
-
-# Escape values for YAML double-quoted strings.
-_yaml_esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
-
-# Symlink the mounted stores into the paths the repo expects. The
-# supervisor + ant-serve default `--data-folder ./data/h5adstore`.
-mkdir -p /opt/anthive4/data
-_symlink() {
-    local src="$1" dst="$2"
-    [[ -z "$src" ]] && return 0
-    [[ -e "$dst" && ! -L "$dst" ]] && _die "path collision: $dst already exists and is not a symlink"
-    ln -sfn "$src" "$dst"
+_require_config() {
+    [[ -n "${ANTHIVE_CONFIG:-}" ]] || _die "ANTHIVE_CONFIG is not set"
+    [[ -r "$ANTHIVE_CONFIG" ]] || _die "ANTHIVE_CONFIG=$ANTHIVE_CONFIG is not readable (is the site config mounted?)"
 }
-_symlink "$H5ADSTORE_DIR"    /opt/anthive4/data/h5adstore
-_symlink "$GENESETSTORE_DIR" /opt/anthive4/data/genesetstore
 
-# Compose the yaml.
-{
-    echo "# Generated by docker/entrypoint.sh at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "# Do NOT edit by hand — env-var → yaml synthesis happens on every container start."
-    echo ""
-    echo "rest_api_host: 127.0.0.1"
-    echo "rest_api_port: 8080"
-    echo "browse_host: 127.0.0.1"
-    echo "browse_port: 8081"
-    echo ""
-    echo "geneset_store: /opt/anthive4/data/genesetstore"
-    if [[ -n "$STARCATSTORE_DIR" ]]; then
-        echo "starcat_store: \"$(_yaml_esc "$STARCATSTORE_DIR")\""
-    fi
-    echo ""
-    echo "s3:"
-    if [[ -n "$S3_BUCKET" ]]; then
-        echo "  endpoint: $( [[ -n "$S3_ENDPOINT" ]] && echo "\"$(_yaml_esc "$S3_ENDPOINT")\"" || echo "null" )"
-        echo "  region: \"$(_yaml_esc "$S3_REGION")\""
-        echo "  bucket: \"$(_yaml_esc "$S3_BUCKET")\""
-        echo "  access_key_id: $( [[ -n "$S3_ACCESS_KEY" ]] && echo "\"$(_yaml_esc "$S3_ACCESS_KEY")\"" || echo "null" )"
-        echo "  secret_access_key: $( [[ -n "$S3_SECRET_KEY" ]] && echo "\"$(_yaml_esc "$S3_SECRET_KEY")\"" || echo "null" )"
-    else
-        echo "  endpoint: null"
-        echo "  bucket: null"
-    fi
-    echo ""
-    echo "chat:"
-    if [[ -n "$CHAT_API_KEY" ]]; then
-        echo "  enabled: true"
-        echo "  model: \"$(_yaml_esc "$CHAT_MODEL")\""
-        echo "  api_key: \"$(_yaml_esc "$CHAT_API_KEY")\""
-    else
-        echo "  enabled: false"
-    fi
-} > "$CFG_OUT"
-_log "wrote $CFG_OUT"
-
-# ─── synthesize the Caddy auth snippet ─────────────────────────────────
-# The Caddyfile imports whatever ANTHIVE_AUTH_SNIPPET points at. We
-# write the runtime snippet to /tmp so we never mutate the shipped
-# config/ tree.
-AUTH_SNIPPET=/tmp/anthive-caddy-auth.docker
-if [[ -n "$BASIC_AUTH_USER" && -n "$BASIC_AUTH_PASS" ]]; then
-    # Hash with Caddy's built-in bcrypt.
-    HASH="$(/opt/anthive4/envs/caddy/caddy hash-password --plaintext "$BASIC_AUTH_PASS" 2>/dev/null)" \
-        || _die "failed to bcrypt-hash basic-auth password (caddy hash-password errored)"
-    cat > "$AUTH_SNIPPET" <<CADDY_EOF
-# Runtime basic-auth snippet — generated by docker/entrypoint.sh.
-@protected {
-    not path /api/health /.well-known/* /register
+_stores() {
+    local need_data="$1"
+    _link_store ANTHIVE_H5ADSTORE "${ANTHIVE_H5ADSTORE:-}" "$need_data" h5adstore
+    _link_store ANTHIVE_GENESETSTORE "${ANTHIVE_GENESETSTORE:-}" no genesetstore
+    _link_store ANTHIVE_STARCATSTORE "${ANTHIVE_STARCATSTORE:-}" no starcatstore
 }
-basic_auth @protected {
-    $BASIC_AUTH_USER $HASH
-}
-CADDY_EOF
-    _log "basic auth ENABLED for user '$BASIC_AUTH_USER'"
-elif [[ -n "$BASIC_AUTH_USER$BASIC_AUTH_PASS" ]]; then
-    _die "basic-auth is half-configured: set BOTH ANTHIVE_BASIC_AUTH_USER and ANTHIVE_BASIC_AUTH_PASSWORD, or neither"
-else
-    : > "$AUTH_SNIPPET"
-    _log "basic auth disabled (set ANTHIVE_BASIC_AUTH_USER + ANTHIVE_BASIC_AUTH_PASSWORD to enable)"
-fi
 
-# ─── supervisor env — swaps in the docker-mode snippets ────────────────
-export ANTHIVE_LISTEN="http://:${ANTHIVEPORT}"
-export ANTHIVE_CADDY_BIND="0.0.0.0 ::"
-export ANTHIVE_TLS_SNIPPET="caddy-tls.prod"
-export ANTHIVE_HTTP_REDIRECT_SNIPPET="caddy-http-redirect.prod"
-export ANTHIVE_AUTH_SNIPPET="$AUTH_SNIPPET"
-export ANTHIVE_API_PORT=8080
-export ANTHIVE_BROWSE_PORT=8081
+API_URL="${ANTHIVE_API_URL:-http://api:8080}"
 
-# Only start api, browse, caddy — never authelia, never mcp.
-export ANTHIVE_SERVICES="api,browse,caddy"
-
-_log "launching supervisor — services: $ANTHIVE_SERVICES, listen: $ANTHIVE_LISTEN"
-cd /opt/anthive4
-exec uv run --script bin/ops/ant-supervisor
+case "$ROLE" in
+    api)
+        _require_config; _stores yes
+        _log "ant-serve on :8080, data $ANTHIVE_H5ADSTORE"
+        exec python bin/api/ant-serve --data-folder "$ANTHIVE_H5ADSTORE" --host 0.0.0.0 --port 8080
+        ;;
+    web)
+        _require_config; _stores no
+        _log "ant-browse on :8081 -> $API_URL"
+        exec python web/ant-browse --api-url "$API_URL" --host 0.0.0.0 --port 8081
+        ;;
+    mcp)
+        _require_config
+        _log "ant-mcp on :8090 -> $API_URL"
+        exec python bin/api/ant-mcp --api-url "$API_URL" --host 0.0.0.0 --port 8090
+        ;;
+    static)
+        # Refresh the image-owned parts of the shared volumes on every `up`
+        # so an upgraded image brings its new JupyterLite bundle and Caddy
+        # config along. plots/ and artifacts/ (written at runtime) are kept.
+        _log "syncing static bundles into /srv/webapp and /srv/caddy-config"
+        # Plain cp -R (no -a): the volume roots belong to root and the
+        # container runs as the site uid, so ownership/times of `.` cannot
+        # be preserved (and need not be).
+        rm -rf /srv/webapp/jupyter /srv/webapp/index.html /srv/webapp/404.html /srv/webapp/anthive404.png
+        cp -R "$HOME_DIR/webapp-dist/." /srv/webapp/
+        mkdir -p /srv/webapp/plots /srv/webapp/artifacts
+        chmod 0777 /srv/webapp/plots /srv/webapp/artifacts 2>/dev/null || true
+        rm -rf /srv/caddy-config/config
+        cp -R "$HOME_DIR/config" /srv/caddy-config/config
+        _log "done"
+        exit 0
+        ;;
+    all)
+        exec "$HOME_DIR/docker/standalone.sh"
+        ;;
+    *)
+        # One-off command (ingest, maintenance, shell). Stores are optional.
+        if [[ -n "${ANTHIVE_CONFIG:-}" ]]; then _require_config; fi
+        _stores no
+        exec "$@"
+        ;;
+esac

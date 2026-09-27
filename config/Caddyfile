@@ -28,7 +28,7 @@
 	# ON (`tls internal` needs that) but skips the :80 → :443 redirect
 	# listener that fails as a non-root process.  On prod ANTHIVE_TLS
 	# is empty and nginx terminates TLS in front of us.
-	auto_https disable_redirects
+	{$ANTHIVE_AUTO_HTTPS:auto_https disable_redirects}
 }
 
 # HTTP companion block — dev: :8500 → 301 to https://…:8501. Prod:
@@ -67,7 +67,7 @@ import {$ANTHIVE_HTTP_REDIRECT_SNIPPET:caddy-http-redirect.dev}
 	import {$ANTHIVE_TLS_SNIPPET:caddy-tls.dev}
 
 	# Root directory for static files
-	root * ./webapp
+	root * {$ANTHIVE_WEBAPP_ROOT:./webapp}
 
 	# Authelia portal — always reachable, never gated by forward_auth
 	# (chicken-and-egg: this IS the gate). handle_path strips /authelia/
@@ -75,7 +75,7 @@ import {$ANTHIVE_HTTP_REDIRECT_SNIPPET:caddy-http-redirect.dev}
 	# full path it expects.  Identical dev/prod (prod nginx forwards
 	# /authelia/* through to us so the login UI keeps working).
 	handle /authelia/* {
-		reverse_proxy localhost:{$ANTHIVE_AUTHELIA_PORT:9091}
+		reverse_proxy {$ANTHIVE_AUTHELIA_HOST:localhost}:{$ANTHIVE_AUTHELIA_PORT:9091}
 	}
 
 	# Routes that MUST bypass auth — MCP discovery probes + the /streamlit
@@ -89,19 +89,34 @@ import {$ANTHIVE_HTTP_REDIRECT_SNIPPET:caddy-http-redirect.dev}
 	# Path is relative to THIS Caddyfile.
 	import {$ANTHIVE_AUTH_SNIPPET:caddy-auth.dev}
 
+	# Server-control endpoints (/admin/release, /restore, /rescan, cache and
+	# precompute rebuilds) carry no auth check of their own: local tools call
+	# them on the loopback port. Through the proxy only members of the admins
+	# group may reach them (auth snippets strip client-sent Remote-Groups, so
+	# the header is the proxy's own assertion). `handle` sorts before
+	# `handle_path`, so this runs first.
+	@anthive_admin_api_forbidden {
+		path /api/admin/*
+		not header Remote-Groups *admins*
+	}
+	handle @anthive_admin_api_forbidden {
+		header Content-Type application/json
+		respond `{"detail":"the admin API is limited to the admins group"}` 403
+	}
+
 	# Reverse proxy for API - strip /api prefix before forwarding
 	handle_path /api/* {
-		reverse_proxy localhost:{$ANTHIVE_API_PORT:8080}
+		reverse_proxy {$ANTHIVE_API_HOST:localhost}:{$ANTHIVE_API_PORT:8080}
 	}
 
 	# Reverse proxy for browser interface (dataset browsing)
 	handle /browse/* {
-		reverse_proxy localhost:{$ANTHIVE_BROWSE_PORT:8081}
+		reverse_proxy {$ANTHIVE_BROWSE_HOST:localhost}:{$ANTHIVE_BROWSE_PORT:8081}
 	}
 
 	# Home page - browser interface
 	handle / {
-		reverse_proxy localhost:{$ANTHIVE_BROWSE_PORT:8081}
+		reverse_proxy {$ANTHIVE_BROWSE_HOST:localhost}:{$ANTHIVE_BROWSE_PORT:8081}
 	}
 
 	# Serve static files for JupyterLite
@@ -138,7 +153,7 @@ import {$ANTHIVE_HTTP_REDIRECT_SNIPPET:caddy-http-redirect.dev}
 
 	# MCP server (FastMCP streamable-http)
 	handle /mcp* {
-		reverse_proxy localhost:8090
+		reverse_proxy {$ANTHIVE_MCP_HOST:localhost}:{$ANTHIVE_MCP_PORT:8090}
 	}
 
 	# MCP clients (per RFC 8414 / MCP spec) probe many discovery URLs
@@ -187,7 +202,7 @@ import {$ANTHIVE_HTTP_REDIRECT_SNIPPET:caddy-http-redirect.dev}
 	# /api/* is intentionally NOT intercepted so API consumers still see
 	# the FastAPI JSON error body.
 	handle {
-		reverse_proxy localhost:{$ANTHIVE_BROWSE_PORT:8081} {
+		reverse_proxy {$ANTHIVE_BROWSE_HOST:localhost}:{$ANTHIVE_BROWSE_PORT:8081} {
 			@notfound status 404
 			handle_response @notfound {
 				error 404
@@ -214,7 +229,7 @@ import {$ANTHIVE_HTTP_REDIRECT_SNIPPET:caddy-http-redirect.dev}
 
 	# Logging
 	log {
-		output file ./tmp/caddy.log
+		output {$ANTHIVE_CADDY_LOG_OUTPUT:file ./tmp/caddy.log}
 		format console
 	}
 }

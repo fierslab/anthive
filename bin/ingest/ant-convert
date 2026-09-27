@@ -402,8 +402,11 @@ def convert_h5ad_to_duckdb(h5ad_path: Path, config: Dict[str, Any],
 
         if build_path != duckdb_path:
             _install_staged_duckdb(build_path, duckdb_path)
-            duckdb_size = duckdb_path.stat().st_size
             print(f"  ✓ Moved staged build into place: {duckdb_path}")
+        # Measure after close: before the final checkpoint the file on disk
+        # is only a fraction of its real size.
+        duckdb_size = duckdb_path.stat().st_size
+        compression_pct = (1 - duckdb_size / h5ad_size) * 100
 
         print(f"\n{'='*70}")
         print(f"CONVERSION COMPLETE!")

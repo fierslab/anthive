@@ -1,0 +1,40 @@
+#!/bin/sh
+# uv-shim: stands in for `uv` inside the anthive images.
+#
+# Every ant-* script starts with `#!/usr/bin/env -S uv run --quiet --script`
+# and would normally get its own uv-managed environment. The images instead
+# ship ONE pinned virtualenv (/opt/venv, from docker/requirements-app.lock),
+# so this shim turns `uv run [flags] SCRIPT ARGS...` into
+# `/opt/venv/bin/python SCRIPT ARGS...`. Scripts, the `ant` dispatcher and
+# subprocess calls between tools keep working unchanged, with no network
+# access and no per-script environments at runtime.
+#
+# Anything other than `uv run` is refused: the images do not carry uv.
+set -eu
+
+VENV_PYTHON="${ANTHIVE_VENV_PYTHON:-/opt/venv/bin/python}"
+
+if [ "${1:-}" != "run" ]; then
+    echo "uv-shim: only 'uv run SCRIPT' is available inside the anthive image (got: uv $*)" >&2
+    exit 2
+fi
+shift
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --quiet|-q|--script|--no-project|--frozen|--offline|--no-sync) shift ;;
+        --with|--python|-p|--directory)
+            echo "uv-shim: '$1' is not supported in the image (the venv is fixed)" >&2
+            exit 2 ;;
+        --) shift; break ;;
+        -*) echo "uv-shim: unsupported uv flag '$1'" >&2; exit 2 ;;
+        *) break ;;
+    esac
+done
+
+if [ $# -eq 0 ]; then
+    echo "uv-shim: no script given" >&2
+    exit 2
+fi
+
+exec "$VENV_PYTHON" "$@"

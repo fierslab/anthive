@@ -1,0 +1,140 @@
+# anthive compose stack. Do not run this file directly: bin/ops/ant-stack
+# renders the site-specific parts from site.yaml into <state_dir>/stack/
+# (.env, compose.site.yaml with the data/state bind mounts and ports, the
+# rendered anthive.yaml, Caddy snippets, Authelia config) and then calls
+#
+#   docker compose -p <site> --env-file <state>/stack/.env \
+#       -f docker/compose.yaml -f <state>/stack/compose.site.yaml <cmd>
+#
+# Services (one process per container):
+#   static    one-shot: copies the image's JupyterLite bundle and Caddy config
+#             into the shared volumes, then exits
+#   api       ant-serve        (h5adstore read-write, state_dir)
+#   web       ant-browse       (h5adstore read-only: it reads .md frontmatter
+#                               and the per-collection static/ downloads)
+#   mcp       ant-mcp          (profile `mcp`)
+#   caddy     reverse proxy, TLS, auth split (official caddy image)
+#   authelia  SSO portal       (profile `authelia`, only in auth.mode authelia)
+#   ingest    one-off CLI runs (profile `ingest`, `ant-stack ingest -- ...`)
+#
+# Data never enters an image: every store is a bind mount at the SAME absolute
+# path as on the host (duckdb layer views record absolute parquet paths).
+
+x-app: &app
+  image: ${ANTHIVE_IMAGE_APP:?run ant-stack render first}
+  user: "${ANTHIVE_UID:?}:${ANTHIVE_GID:?}"
+  restart: unless-stopped
+  init: false
+  environment: &app-env
+    ANTHIVE_CONFIG: /etc/anthive/anthive.yaml
+    ANTHIVE_H5ADSTORE: ${ANTHIVE_H5ADSTORE:?}
+    ANTHIVE_GENESETSTORE: ${ANTHIVE_GENESETSTORE:-}
+    ANTHIVE_STARCATSTORE: ${ANTHIVE_STARCATSTORE:-}
+    ANTHIVE_API_URL: http://api:8080
+    ANTHIVE_INTERNAL_SECRET_FILE: /var/lib/anthive/secrets/internal_secret
+    ANTHIVE_MCP_TOKEN_SECRET_FILE: /var/lib/anthive/secrets/mcp_token_secret
+  logging: &logging
+    driver: json-file
+    options: {max-size: "20m", max-file: "5"}
+
+services:
+  static:
+    <<: *app
+    restart: "no"
+    command: ["static"]
+
+  api:
+    <<: *app
+    command: ["api"]
+    depends_on:
+      static: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "anthive-healthcheck", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 6s
+      start_period: 180s
+      retries: 5
+
+  web:
+    <<: *app
+    command: ["web"]
+    depends_on:
+      api: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "anthive-healthcheck", "http://localhost:8081/about"]
+      interval: 15s
+      timeout: 6s
+      start_period: 60s
+      retries: 5
+
+  mcp:
+    <<: *app
+    profiles: ["mcp"]
+    command: ["mcp"]
+    depends_on:
+      api: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "anthive-healthcheck", "http://localhost:8090/mcp", "--any-status"]
+      interval: 15s
+      timeout: 6s
+      start_period: 60s
+      retries: 5
+
+  caddy:
+    image: ${ANTHIVE_IMAGE_CADDY:-caddy:2.11-alpine}
+    restart: unless-stopped
+    command: ["caddy", "run", "--config", "/srv/caddy-config/config/Caddyfile", "--adapter", "caddyfile"]
+    environment:
+      ANTHIVE_LISTEN: ${ANTHIVE_LISTEN:?}
+      ANTHIVE_CADDY_BIND: "0.0.0.0"
+      ANTHIVE_TLS_SNIPPET: /etc/anthive-caddy/tls.caddy
+      ANTHIVE_AUTH_SNIPPET: /etc/anthive-caddy/auth.caddy
+      ANTHIVE_HTTP_REDIRECT_SNIPPET: /srv/caddy-config/config/caddy-http-redirect.prod
+      ANTHIVE_AUTO_HTTPS: ${ANTHIVE_AUTO_HTTPS:-auto_https disable_redirects}
+      ANTHIVE_WEBAPP_ROOT: /srv/webapp
+      ANTHIVE_CADDY_LOG_OUTPUT: stdout
+      ANTHIVE_API_HOST: api
+      ANTHIVE_BROWSE_HOST: web
+      ANTHIVE_MCP_HOST: mcp
+      ANTHIVE_AUTHELIA_HOST: authelia
+    volumes:
+      - caddy-config:/srv/caddy-config:ro
+      - webapp:/srv/webapp:ro
+      - caddy-data:/data
+    depends_on:
+      static: {condition: service_completed_successfully}
+      web: {condition: service_healthy}
+      authelia: {condition: service_healthy, required: false}
+    logging: *logging
+
+  authelia:
+    image: ${ANTHIVE_IMAGE_AUTHELIA:-authelia/authelia:4.39}
+    profiles: ["authelia"]
+    restart: unless-stopped
+    environment:
+      PUID: ${ANTHIVE_UID:?}
+      PGID: ${ANTHIVE_GID:?}
+      X_AUTHELIA_CONFIG: /config/configuration.yml
+      AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE: /config/secrets/jwt
+      AUTHELIA_SESSION_SECRET_FILE: /config/secrets/session
+      AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE: /config/secrets/storage
+    volumes:
+      - caddy-config:/srv/caddy-config:ro
+    depends_on:
+      static: {condition: service_completed_successfully}
+    logging: *logging
+
+  ingest:
+    <<: *app
+    image: ${ANTHIVE_IMAGE_INGEST:?}
+    profiles: ["ingest"]
+    restart: "no"
+    command: ["ant", "--help"]
+    environment:
+      <<: *app-env
+      ANTHIVE_COORDINATE: auto
+
+volumes:
+  webapp:
+  caddy-config:
+  caddy-data:
