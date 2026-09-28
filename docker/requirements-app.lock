@@ -24,6 +24,8 @@ attrs==26.1.0
     # via
     #   jsonschema
     #   referencing
+bcrypt==5.0.0
+    # via -r docker/requirements-app.in
 boto3==1.43.103
     # via -r docker/requirements-app.in
 botocore==1.43.103

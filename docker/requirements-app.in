@@ -3,6 +3,7 @@
 adjustText>=0.8
 anndata>=0.10.0
 anndata>=0.12.0
+bcrypt>=4.1
 boto3
 boto3>=1.26.0
 boto3>=1.34.0
@@ -15,7 +16,7 @@ httpx>=0.27.0
 jinja2>=3.1.0
 markdown>=3.5.0
 matplotlib>=3.7.0
-mcp>=1.4,<2  # override (headers: mcp>=1.4.0)
+mcp>=1.10,<2  # override (headers: mcp>=1.10,<2)
 numpy>=2.0,<2.5  # override (headers: numpy; numpy>=1.24; numpy>=1.24.0; numpy>=1.24.0,<2.0)
 openai>=1.30.0
 pandas
