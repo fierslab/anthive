@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# check-image: refuse to ship an image that carries files git does not track.
+#
+# Usage: docker/check-image <image> [git-ref]   (git-ref defaults to HEAD)
+#
+# Compares every file under /opt/anthive4 in the image with the files
+# tracked at <git-ref>. Only known build outputs may be extra. Also scans
+# the whole image filesystem for file types that must never ship (data,
+# site config, user databases, logs). Exit 1 lists the offenders.
+set -euo pipefail
+
+image=${1:?usage: docker/check-image <image> [git-ref]}
+ref=${2:-HEAD}
+repo=$(cd "$(dirname "$0")/.." && pwd)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+git -C "$repo" ls-tree -r --name-only "$ref" | sort > "$work/tracked"
+
+docker run --rm --user 0 --entrypoint "" "$image" \
+    sh -c 'cd /opt/anthive4 && find . \( -type f -o -type l \) | sed "s|^\./||"' \
+    | sort > "$work/in_image"
+
+# Build outputs the Dockerfile creates on purpose.
+allowed_extra='^(webapp-dist/|envs/caddy/caddy$|data/(h5adstore|genesetstore|starcatstore)$|docker/requirements-app\.lock$)'
+comm -23 "$work/in_image" "$work/tracked" | grep -Ev "$allowed_extra" > "$work/extra" || true
+
+# Anywhere in the image: things that are data, site state or secrets.
+docker run --rm --user 0 --entrypoint "" "$image" sh -c '
+    find / -xdev -type f \( \
+        -name "*.duckdb" -o -name "*.h5ad" -o -name "*.h5ad.mus" -o -name "anthive.yaml" \
+        -o -name "site.yaml" -o -name "users_database.yml" -o -name "users.yaml" \
+        -o -name "initial-passwords.txt" -o -name "*.sqlite" -o -name "*.sqlite3" \
+        -o -name "mcp_tokens.db*" -o -name "obs_clicks.db*" -o -name "gene_stats_cache.db*" \
+        -o -name "*.log" -o -name "*.pem" -o -name "id_rsa*" -o -name "id_ed25519*" \) \
+        -not -path "/proc/*" -not -path "/opt/venv/*" -not -path "/opt/rdata/*" \
+        -not -path "/usr/*" -not -path "/var/log/*" -not -path "/var/lib/*" 2>/dev/null' \
+    > "$work/forbidden" || true
+
+status=0
+if [ -s "$work/extra" ]; then
+    echo "check-image: $image has $(wc -l < "$work/extra") file(s) under /opt/anthive4 that git does not track at $ref:" >&2
+    head -40 "$work/extra" | sed 's/^/  /' >&2
+    status=1
+fi
+if [ -s "$work/forbidden" ]; then
+    echo "check-image: $image contains data/state/secret-type files:" >&2
+    head -40 "$work/forbidden" | sed 's/^/  /' >&2
+    status=1
+fi
+[ "$status" = 0 ] && echo "check-image: $image OK (only files tracked at $ref plus build outputs)"
+exit "$status"

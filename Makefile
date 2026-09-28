@@ -596,7 +596,10 @@ sync-update:
 # ============================================================================
 
 REGISTRY     ?= codeberg.org/mfiers
-TAG          ?= $(patsubst v%,%,$(shell git describe --tags --always --dirty 2>/dev/null || echo dev))
+# Images are built from `git archive $(BUILD_REF)`: only committed, tracked
+# files enter the build context, never local state, logs or secrets.
+BUILD_REF    ?= HEAD
+TAG          ?= $(patsubst v%,%,$(shell git describe --tags --always $(BUILD_REF) 2>/dev/null || echo dev))
 APP_IMAGE    ?= $(REGISTRY)/anthive-app:$(TAG)
 INGEST_IMAGE ?= $(REGISTRY)/anthive-ingest:$(TAG)
 SIF          ?= anthive-ingest-$(TAG).sif
@@ -608,13 +611,16 @@ lock:
 	docker/gen-lock
 
 ## images - Build anthive-app and anthive-ingest as $(APP_IMAGE) / $(INGEST_IMAGE)
-# in:  the repo (no data: see .dockerignore), docker/requirements-app.lock,
+# in:  `git archive $(BUILD_REF)` (tracked files only), docker/requirements-app.lock,
 #      docker/anthive-data.linux-64.explicit.txt
 # out: two local docker images
 images:
 	docker/gen-lock --check
-	docker build --pull -f docker/Dockerfile -t $(APP_IMAGE) .
-	docker build -f docker/Dockerfile.ingest --build-arg APP_IMAGE=$(APP_IMAGE) -t $(INGEST_IMAGE) .
+	@git diff --quiet HEAD -- || echo "note: uncommitted changes are NOT in the image (built from $(BUILD_REF))"
+	git archive --format=tar $(BUILD_REF) | docker build --pull -f docker/Dockerfile -t $(APP_IMAGE) -
+	git archive --format=tar $(BUILD_REF) | docker build -f docker/Dockerfile.ingest --build-arg APP_IMAGE=$(APP_IMAGE) -t $(INGEST_IMAGE) -
+	docker/check-image $(APP_IMAGE) $(BUILD_REF)
+	docker/check-image $(INGEST_IMAGE) $(BUILD_REF)
 
 ## sif - Build the Apptainer image for HPC ingest from the local ingest image
 # in:  $(INGEST_IMAGE) in the local docker daemon
@@ -625,6 +631,8 @@ sif:
 ## push-images - Push both images (and the .sif as an OCI artifact if built) to $(REGISTRY)
 # needs: `docker login $(REGISTRY)` (and `apptainer registry login` for the sif)
 push-images:
+	docker/check-image $(APP_IMAGE) $(BUILD_REF)
+	docker/check-image $(INGEST_IMAGE) $(BUILD_REF)
 	docker push $(APP_IMAGE)
 	docker push $(INGEST_IMAGE)
 	@if [ -f "$(SIF)" ]; then \

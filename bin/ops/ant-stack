@@ -800,18 +800,31 @@ def cmd_simple(args: argparse.Namespace) -> int:
 def cmd_build(args: argparse.Namespace) -> int:
     site = load_site(site_path(args))
     app, ingest = image_ref(site, 'app'), image_ref(site, 'ingest')
+    # Build context = `git archive HEAD`: only committed, tracked files, so
+    # local state (Authelia db, logs, nested checkouts) can never ship.
+    if subprocess.run(['git', 'rev-parse', '--git-dir'], cwd=REPO,
+                      capture_output=True).returncode != 0:
+        raise SiteError("ant-stack build needs a git checkout (it builds from `git archive HEAD`)")
+    if subprocess.run(['git', 'diff', '--quiet', 'HEAD', '--'], cwd=REPO).returncode != 0:
+        _say("note: uncommitted changes are NOT in the image; commit them first to include them")
     builds = [
-        ['docker', 'build', '-f', 'docker/Dockerfile', '-t', app, '.'],
+        ['docker', 'build', '-f', 'docker/Dockerfile', '-t', app, '-'],
         ['docker', 'build', '-f', 'docker/Dockerfile.ingest', '--build-arg', f'APP_IMAGE={app}',
-         '-t', ingest, '.'],
+         '-t', ingest, '-'],
     ]
-    for command in builds[: 1 if args.app_only else 2]:
+    for command, image in list(zip(builds, (app, ingest)))[: 1 if args.app_only else 2]:
         if args.pull:
             command.insert(2, '--pull')
-        _say(' '.join(command))
-        result = subprocess.run(command, cwd=REPO)
-        if result.returncode != 0:
-            return result.returncode
+        _say('git archive HEAD | ' + ' '.join(command))
+        archive = subprocess.Popen(['git', 'archive', '--format=tar', 'HEAD'], cwd=REPO,
+                                   stdout=subprocess.PIPE)
+        result = subprocess.run(command, cwd=REPO, stdin=archive.stdout)
+        archive.stdout.close()
+        if archive.wait() != 0 or result.returncode != 0:
+            return result.returncode or 1
+        check = subprocess.run([str(REPO / 'docker' / 'check-image'), image, 'HEAD'], cwd=REPO)
+        if check.returncode != 0:
+            raise SiteError(f"{image} failed docker/check-image; not safe to use or push")
     return 0
 
 

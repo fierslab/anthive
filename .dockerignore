@@ -88,3 +88,20 @@ plans
 # but the Dockerfile lives elsewhere in the tree so keep it out of the
 # copy step's noise.
 docker/build
+
+# Second layer (images are built from `git archive`, see Makefile): local
+# state that must never reach an image even with a plain `docker build .`.
+config/authelia/*
+!config/authelia/configuration.example.yml
+!config/authelia/assets
+config/authelia/assets/*
+!config/authelia/assets/logo.png
+config/default.conf
+bin/logs
+**/*.sqlite
+**/*.sqlite3
+**/*.db
+var
+vark
+doc/BACKFILL_survey.md
+site.yaml
