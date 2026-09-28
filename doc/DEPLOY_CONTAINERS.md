@@ -56,6 +56,14 @@ checking out a newer commit changes nothing until you pull newer images.
 | `codeberg.org/mfiers/anthive-app` | `2.37.1`, `latest` | every service (api, web, mcp, static) in one pinned venv, ~1.7 GB |
 | `codeberg.org/mfiers/anthive-ingest` | `2.37.1`, `latest` | app plus the R/Seurat environment for `.rds` conversion, ~4.5 GB |
 
+The same images (identical digests) are also published on the KU Leuven
+GitLab registry, next to the GitLab mirror of the source:
+
+| Registry prefix (`images.registry` in site.yaml) | Images |
+| --- | --- |
+| `codeberg.org/mfiers` | `anthive-app`, `anthive-ingest` |
+| `registry.gitlab.kuleuven.be/bdslab/anthive/anthive4` | `anthive-app`, `anthive-ingest` |
+
 Both are linux/amd64 only and public, so `docker pull` works without a login.
 They contain no data, configuration or secrets. `site.example.yaml` points at
 `codeberg.org/mfiers` with `images.tag: latest`; pin a release
@@ -211,8 +219,13 @@ release tag: `docker login codeberg.org`, then `make images push-images`
 of `latest`. `.forgejo/workflows/images.yml` automates the same steps, but it
 only runs on a Forgejo host (Codeberg); the source lives on GitHub
 (`badslab/anthive4`), so that workflow is dormant unless the repo is mirrored
-to Codeberg or ported to GitHub Actions. The Apptainer image is not published
-yet; HPC users build it from the ingest image ([HPC.md](HPC.md)).
+to Codeberg or ported to GitHub Actions. To publish to the GitLab registry as
+well, `docker login registry.gitlab.kuleuven.be` (a token with
+`read_registry` + `write_registry`), then
+`make push-images REGISTRY=registry.gitlab.kuleuven.be/bdslab/anthive/anthive4`
+(after `docker tag`-ing the local build to that prefix, or `make images` with
+the same `REGISTRY`). The Apptainer image is not published yet; HPC users
+build it from the ingest image ([HPC.md](HPC.md)).
 
 | Registry | For | Against |
 | --- | --- | --- |

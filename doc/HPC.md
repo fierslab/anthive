@@ -39,6 +39,7 @@ when you want exactly the tool versions a serving site runs.
 apptainer build --build-arg BOOTSTRAP=docker \
     --build-arg IMAGE=codeberg.org/mfiers/anthive-ingest:2.37.1 \
     anthive-ingest.sif docker/anthive-ingest.def
+# (the same image is on registry.gitlab.kuleuven.be/bdslab/anthive/anthive4/anthive-ingest:2.37.1)
 # once a .sif is published as an oras artifact this becomes:
 #   apptainer pull anthive-ingest.sif oras://<registry>/anthive-ingest-sif:2.37.1
 
