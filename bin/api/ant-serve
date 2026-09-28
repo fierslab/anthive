@@ -1713,6 +1713,21 @@ async def _daily_metadata_refresh() -> None:
             print(f"Daily metadata refresh error: {exc}")
 
 
+async def _build_startup_indexes() -> None:
+    try:
+        await asyncio.to_thread(_build_score_index)
+        log.info(
+            "Module-score index: %d database(s), %d distinct geneset(s)",
+            len(_score_index_by_db), len(_score_index_by_geneset),
+        )
+    except Exception as exc:
+        log.warning("Failed to build module-score index: %s", exc)
+    try:
+        await asyncio.to_thread(_build_by_gene_index)
+    except Exception as exc:
+        log.warning("Failed to build by-gene index: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown (Phase 2)"""
@@ -1733,18 +1748,9 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         log.warning("chat-config load failed: %s", exc)
     if geneset_registry is not None:
-        try:
-            _build_score_index()
-            log.info(
-                "Module-score index: %d database(s), %d distinct geneset(s)",
-                len(_score_index_by_db), len(_score_index_by_geneset),
-            )
-        except Exception as exc:
-            log.warning("Failed to build module-score index: %s", exc)
-        try:
-            _build_by_gene_index()
-        except Exception as exc:
-            log.warning("Failed to build by-gene index: %s", exc)
+        # Both indexes open every database; with S3-remote datasets that is
+        # minutes of network reads, so build them off the startup path.
+        asyncio.create_task(_build_startup_indexes())
     # Slave-mode banner — make the deployment role obvious in the logs
     # so it's the first thing visible when debugging "why won't this
     # write?". Banner ONLY fires when role=slave is opt-in; primaries
@@ -1785,8 +1791,8 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.37.1"
-API_VERSION_RELEASED = "2026-08-13"
+API_VERSION = "2.37.2"
+API_VERSION_RELEASED = "2026-09-28"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
 # Create FastAPI app with lifespan handler (Phase 2)

@@ -22,7 +22,7 @@ docker run --rm --user 0 --entrypoint "" "$image" \
     | sort > "$work/in_image"
 
 # Build outputs the Dockerfile creates on purpose.
-allowed_extra='^(webapp-dist/|envs/caddy/caddy$|data/(h5adstore|genesetstore|starcatstore)$|docker/requirements-app\.lock$)'
+allowed_extra='^(webapp-dist/|webapp$|(.*/)?__pycache__/[^/]+\.pyc$|envs/caddy/caddy$|data/(h5adstore|genesetstore|starcatstore)$|docker/requirements-app\.lock$)'
 comm -23 "$work/in_image" "$work/tracked" | grep -Ev "$allowed_extra" > "$work/extra" || true
 
 # Anywhere in the image: things that are data, site state or secrets.

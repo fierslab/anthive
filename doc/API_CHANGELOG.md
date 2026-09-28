@@ -29,6 +29,23 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.37.2 — 2026-09-28
+
+Patch release: no endpoint or response changes.
+
+- Startup no longer waits for the module-score and by-gene indexes; they
+  build in a background thread. A site whose catalog is mostly S3-remote
+  (a fresh deployment that has not pulled every dataset) used to spend
+  minutes opening every remote database before answering its first health
+  check, so `ant-stack up` gave up on it. Until the background build
+  finishes, module-score listings can be incomplete.
+- Container images are built from `git archive` and verified by
+  `docker/check-image`; the 2.37.1 images accidentally carried untracked
+  local files (Authelia user database, server log, a nested checkout) and
+  were republished clean.
+- `ant-stack check` flags missing S3 key files when `s3.enabled`, warns on
+  an empty catalog and on datasets without a local `.duckdb`.
+
 ## 2.37.1 — 2026-09-25
 
 Middleware fixes. No endpoint or parameter changes.

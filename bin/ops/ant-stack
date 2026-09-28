@@ -667,6 +667,23 @@ def check(site: dict, running: bool = False) -> list[str]:
             for secret in ('jwt', 'session', 'storage'):
                 if not (state / 'authelia' / 'secrets' / secret).exists():
                     problems.append(f"missing authelia/secrets/{secret} (run `ant-stack init`)")
+    if (site.get('s3') or {}).get('enabled') and state.is_dir():
+        for secret in ('secrets/s3_access_key_id', 'secrets/s3_secret_access_key'):
+            if not (state / secret).is_file() or not (state / secret).read_text().strip():
+                problems.append(f"s3.enabled is true but {state / secret} is missing or empty "
+                                f"(put the key in that file, chmod 600)")
+    store = site['_h5adstore']
+    if store and store.is_dir():
+        mds = [p for p in store.glob('*/*.md') if p.name != 'index.md' and not p.parent.name.startswith('_')]
+        if not mds:
+            _warn(f"{store} has no dataset .md files: the catalog will be empty "
+                  f"(clone the h5adstore repo there first, see doc/DEPLOY_CONTAINERS.md)")
+        else:
+            missing = [p for p in mds if not p.with_suffix('.duckdb').exists()]
+            if missing:
+                _warn(f"{len(missing)} of {len(mds)} datasets have no local .duckdb: they are served "
+                      f"from S3 (slow) or not at all; pull them with "
+                      f"`ant-stack ingest -- ant sync pull --include-duckdb`")
     if site['_scratch'] and not site['_scratch'].is_dir():
         problems.append(f"scratch_dir {site['_scratch']} does not exist")
     if not running:
