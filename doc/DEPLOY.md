@@ -1,5 +1,11 @@
 # Deploying anthive4
 
+> **Legacy host install.** New sites are deployed with containers: see
+> [DEPLOY_CONTAINERS.md](DEPLOY_CONTAINERS.md) (docker compose driven by
+> `site.yaml`) and [HPC.md](HPC.md) for cluster ingest. This guide stays as
+> the reference for the existing non-container hosts and for background on
+> the multi-copy topology, Authelia and the per-derivative summary files.
+
 End-to-end deployment guide covering two shapes.
 
 1. Fresh single-host install on a clean Ubuntu-ish box (sections 1 through 7).

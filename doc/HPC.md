@@ -15,7 +15,7 @@ into your home directory without root.
 
 ```sh
 curl -LsSf https://astral.sh/uv/install.sh | sh          # once, on a login node
-git clone https://codeberg.org/mfiers/anthive4 ~/anthive4
+git clone git@github.com:badslab/anthive4.git ~/anthive4 && git -C ~/anthive4 checkout v2.37.1
 cp ~/anthive4/docker/hpc-anthive.yaml ~/anthive4/anthive.yaml   # scratch-friendly defaults
 ~/anthive4/bin/ant convert /data/project/h5adstore/Study2026/cells.h5ad
 ```
@@ -34,11 +34,13 @@ objects to `.h5ad`), when compute nodes cannot reach the internet at all, or
 when you want exactly the tool versions a serving site runs.
 
 ```sh
-apptainer pull anthive-ingest.sif oras://codeberg.org/mfiers/anthive-ingest-sif:TAG
-# or build it from the published docker image:
+# build it from the published docker image (run in the anthive4 checkout;
+# no root needed, ~1.3 GB result, a few minutes):
 apptainer build --build-arg BOOTSTRAP=docker \
-    --build-arg IMAGE=codeberg.org/mfiers/anthive-ingest:TAG \
+    --build-arg IMAGE=codeberg.org/mfiers/anthive-ingest:2.37.1 \
     anthive-ingest.sif docker/anthive-ingest.def
+# once a .sif is published as an oras artifact this becomes:
+#   apptainer pull anthive-ingest.sif oras://<registry>/anthive-ingest-sif:2.37.1
 
 apptainer run  anthive-ingest.sif convert /data/project/h5adstore/Study2026/cells.h5ad
 apptainer exec anthive-ingest.sif ant check /data/project/h5adstore/Study2026/cells.h5ad

@@ -4,8 +4,12 @@ A collection of command-line tools to validate, convert, and serve single-cell a
 
 ## Deploying anthive on a new host
 
-See **[doc/INSTALL.md](doc/INSTALL.md)** — end-to-end install + production
-deploy instructions (Caddy / nginx, systemd, S3 data sync).
+Sites run as a docker compose stack described by one `site.yaml`. See
+**[doc/DEPLOY_CONTAINERS.md](doc/DEPLOY_CONTAINERS.md)** for the quick start
+(published images: `codeberg.org/mfiers/anthive-app` and `anthive-ingest`,
+release 2.37.1) and **[doc/HPC.md](doc/HPC.md)** for command-line ingest on a
+cluster (plain uv or Apptainer). The older host install without containers is
+in [doc/INSTALL.md](doc/INSTALL.md) and [doc/DEPLOY.md](doc/DEPLOY.md).
 
 ## Clients
 

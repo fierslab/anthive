@@ -31,11 +31,12 @@ upgraded image always brings its own static files along.
 ## Quick start
 
 ```sh
-git clone https://codeberg.org/mfiers/anthive4 && cd anthive4
+git clone git@github.com:badslab/anthive4.git && cd anthive4
+git checkout v2.37.1         # match the checkout to the image tag you run
 bin/ops/ant-stack init       # writes ./site.yaml from site.example.yaml
 $EDITOR site.yaml            # paths, public_url, auth mode, tls
 bin/ops/ant-stack init       # creates state_dir, secrets, user accounts
-bin/ops/ant-stack pull       # or: bin/ops/ant-stack build
+bin/ops/ant-stack pull       # published images (see below); or: bin/ops/ant-stack build
 bin/ops/ant-stack check      # validates and prints the plan
 bin/ops/ant-stack up         # renders, starts, waits until healthy
 ```
@@ -47,6 +48,24 @@ Change one with `bin/ops/ant-stack passwd <user>`.
 The repo checkout is only needed for `ant-stack`, `docker/compose.yaml` and
 `site.example.yaml`. The containers run the code inside the images, so
 checking out a newer commit changes nothing until you pull newer images.
+
+### Published images
+
+| Image | Tags | Contents |
+| --- | --- | --- |
+| `codeberg.org/mfiers/anthive-app` | `2.37.1`, `latest` | every service (api, web, mcp, static) in one pinned venv, ~1.7 GB |
+| `codeberg.org/mfiers/anthive-ingest` | `2.37.1`, `latest` | app plus the R/Seurat environment for `.rds` conversion, ~4.5 GB |
+
+Both are linux/amd64 only and public, so `docker pull` works without a login.
+They contain no data, configuration or secrets. `site.example.yaml` points at
+`codeberg.org/mfiers` with `images.tag: latest`; pin a release
+(`images.tag: 2.37.1`) on production sites so an upgrade only happens when
+you change that line. The code in the git checkout and the image tag should
+be the same release, because `ant-stack` renders config the images read.
+
+To move to a new release: `git fetch --tags && git checkout vX.Y.Z`, set
+`images.tag: X.Y.Z`, then `bin/ops/ant-stack pull && bin/ops/ant-stack up`.
+`state_dir` (secrets, user accounts, MCP links, caches) carries over.
 
 ## site.yaml
 
@@ -186,8 +205,14 @@ into the image tag, without the `v`). Set `images.tag: X.Y.Z` in each site's
 
 ## Registry
 
-The images are published by `.forgejo/workflows/images.yml` on version tags
-(and on demand), or by hand with `make images push-images REGISTRY=... TAG=...`.
+Releases are currently built and pushed by hand from a clean checkout of the
+release tag: `docker login codeberg.org`, then `make images push-images`
+(the tag comes from `git describe`), plus `docker tag ... :latest` and a push
+of `latest`. `.forgejo/workflows/images.yml` automates the same steps, but it
+only runs on a Forgejo host (Codeberg); the source lives on GitHub
+(`badslab/anthive4`), so that workflow is dormant unless the repo is mirrored
+to Codeberg or ported to GitHub Actions. The Apptainer image is not published
+yet; HPC users build it from the ingest image ([HPC.md](HPC.md)).
 
 | Registry | For | Against |
 | --- | --- | --- |
