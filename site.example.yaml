@@ -16,10 +16,14 @@ site:
   name: anthive
   # What users type into the browser (scheme + host [+ port]). Used for
   # cookies, redirects, MCP links and plot URLs.
-  public_url: https://localhost:8443
+  # The address users type. With auth.mode authelia the host must contain a
+  # dot or be an IP address (browser cookie rule): anthive.example.org or
+  # 10.0.0.5 work, plain "localhost" does not. For a quick local trial use
+  # https://127.0.0.1:8443.
+  public_url: https://anthive.example.org:8443
   # Extra hostnames/IPs Caddy answers for (tls: internal issues a cert for
   # each). The host of public_url is always included.
-  hostnames: [localhost]
+  hostnames: [127.0.0.1]
 
 data:
   h5adstore: /srv/anthive/h5adstore        # required

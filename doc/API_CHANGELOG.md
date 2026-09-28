@@ -44,7 +44,14 @@ Patch release: no endpoint or response changes.
   local files (Authelia user database, server log, a nested checkout) and
   were republished clean.
 - `ant-stack check` flags missing S3 key files when `s3.enabled`, warns on
-  an empty catalog and on datasets without a local `.duckdb`.
+  an empty catalog and on datasets without a local `.duckdb`, and refuses
+  authelia mode with a `public_url` host Authelia cannot use as a cookie
+  domain (no dot, not an IP, e.g. `localhost`) or without https.
+  `site.example.yaml` no longer defaults to that combination.
+- `ant-stack up` recreates the Authelia container on every run, so a fixed
+  config replaces a container stuck in crash-loop backoff.
+- Caddy gets `default_sni <public host>` from ant-stack, so browsing to the
+  bare IP of a containerised site no longer aborts the TLS handshake.
 
 ## 2.37.1 — 2026-09-25
 

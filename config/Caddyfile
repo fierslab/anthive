@@ -29,6 +29,12 @@
 	# listener that fails as a non-root process.  On prod ANTHIVE_TLS
 	# is empty and nginx terminates TLS in front of us.
 	{$ANTHIVE_AUTO_HTTPS:auto_https disable_redirects}
+
+	# Certificate to use when a client sends no SNI (someone browsing to
+	# the bare IP). In docker the listener address is the container's, so
+	# without this Caddy has no certificate to offer and aborts the TLS
+	# handshake. ant-stack sets `default_sni <public host>`; empty otherwise.
+	{$ANTHIVE_DEFAULT_SNI:}
 }
 
 # HTTP companion block — dev: :8500 → 301 to https://…:8501. Prod:

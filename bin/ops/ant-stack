@@ -554,6 +554,8 @@ def render(site: dict, quiet: bool = False) -> Path:
         'ANTHIVE_STARCATSTORE': str(site['_starcatstore'] or ''),
         'ANTHIVE_LISTEN': listen,
         'ANTHIVE_AUTO_HTTPS': auto_https,
+        'ANTHIVE_DEFAULT_SNI': (f"default_sni {site['_public'].hostname}"
+                                if site['tls']['mode'] in ('internal', 'acme') else ''),
     }
     lines = ["# Rendered by bin/ops/ant-stack from site.yaml. Do not edit."]
     for key, value in env.items():
@@ -698,6 +700,21 @@ def check(site: dict, running: bool = False) -> list[str]:
         if result.returncode != 0:
             problems.append(f"image {ref} not present locally (`ant-stack pull` or `ant-stack build`)"
                             + (" [ingest image only needed for `ant-stack ingest`]" if which == 'ingest' else ''))
+    if site['auth']['mode'] == 'authelia':
+        import ipaddress  # noqa: PLC0415
+        from urllib.parse import urlparse  # noqa: PLC0415
+        host = urlparse(str(site['site'].get('public_url') or '')).hostname or ''
+        try:
+            ipaddress.ip_address(host)
+            is_ip = True
+        except ValueError:
+            is_ip = False
+        if not is_ip and '.' not in host:
+            problems.append(f"auth.mode authelia needs a public_url host with a dot or an IP address "
+                            f"(cookie rule); {host!r} is refused by Authelia. Use e.g. "
+                            f"https://anthive.example.org or https://127.0.0.1:<port>")
+        if not str(site['site'].get('public_url') or '').startswith('https://'):
+            problems.append("auth.mode authelia needs an https:// public_url (Authelia refuses plain-HTTP cookies)")
     if site['auth']['mode'] == 'none':
         _warn("auth.mode none: NO LOGIN. Every dataset is public and admin features are off.")
     if site['auth']['mode'] == 'trusted-proxy' and site['ports']['bind'] not in ('127.0.0.1', '::1'):
@@ -782,7 +799,11 @@ def cmd_up(args: argparse.Namespace) -> int:
     run_compose(site, 'up', '-d', '--no-deps', '--force-recreate', 'static')
     if run_compose(site, 'wait', 'static', check=False) != 0:
         raise SiteError("the static sync container failed; see `ant-stack logs static`")
-    # 2. Everything else.
+    # 2. Everything else. Authelia first without waiting: if a previous
+    #    config made it crash-loop, compose would otherwise wait on the
+    #    stale container instead of recreating it with the new config.
+    if site['auth']['mode'] == 'authelia':
+        run_compose(site, 'up', '-d', '--no-deps', '--force-recreate', 'authelia')
     run_compose(site, 'up', '-d', '--remove-orphans', *extra)
     # 3. Services whose profile is now off (auth mode or mcp switched) are
     #    not orphans to compose; stop and remove them explicitly.
@@ -793,7 +814,10 @@ def cmd_up(args: argparse.Namespace) -> int:
             run_compose(site, '--profile', service, 'rm', '--stop', '--force', service, check=False)
     # 4. Caddy reads its config only at start (admin API is off): recreate
     #    it so the synced config and re-rendered snippets take effect.
-    run_compose(site, 'up', '-d', '--no-deps', '--force-recreate', *extra, 'caddy')
+    # Authelia too: its config is re-rendered on every up, and a container
+    # stuck in crash-loop backoff would otherwise keep the old failure.
+    recreate = ['caddy'] + (['authelia'] if active['authelia'] else [])
+    run_compose(site, 'up', '-d', '--no-deps', '--force-recreate', *extra, *recreate)
     _say(f"up: {site['site']['public_url']}")
     return 0
 
