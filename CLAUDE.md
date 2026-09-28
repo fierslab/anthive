@@ -114,6 +114,16 @@ precedence, and `ANTHIVE_CONFIG` names a config outside the repo. **Never
 hard-code a path under the repo for runtime writes** (the images mount the
 tree read-only); add a key to `anthive.default.yaml` and a `get_*` helper.
 
+## Git remotes: GitHub + KU Leuven GitLab mirror
+
+`anthive4` and `data/h5adstore` push to two places. In this checkout
+`origin` has two push URLs (GitHub `badslab/*` and
+`gitlab.kuleuven.be:bdslab/anthive/*`), so a plain `git push` updates both;
+fetch comes from GitHub. `push.followTags` is on so annotated release tags
+travel along. Commits that reach GitHub some other way (another clone, a PR
+merged on github.com) are only mirrored at the next push from here; catch up
+with `git fetch origin && git push gitlab 'refs/remotes/origin/*:refs/heads/*' --follow-tags`.
+
 ## Where things are documented
 
 `doc/` holds design + process docs (`ARCHITECTURE.md`,
