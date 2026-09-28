@@ -596,7 +596,7 @@ sync-update:
 # ============================================================================
 
 REGISTRY     ?= codeberg.org/mfiers
-TAG          ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+TAG          ?= $(patsubst v%,%,$(shell git describe --tags --always --dirty 2>/dev/null || echo dev))
 APP_IMAGE    ?= $(REGISTRY)/anthive-app:$(TAG)
 INGEST_IMAGE ?= $(REGISTRY)/anthive-ingest:$(TAG)
 SIF          ?= anthive-ingest-$(TAG).sif

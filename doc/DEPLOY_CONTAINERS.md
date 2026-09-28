@@ -171,6 +171,19 @@ the SQLite files with `sqlite3 <db> ".backup <file>"`.
 The data stores are backed up as today (S3 via `ant sync`, the `.md` files
 in git). Docker volumes only hold rebuildable things.
 
+## Versioning and releases
+
+The release version is the REST API version (`API_VERSION` in
+`bin/api/ant-serve`, history in `doc/API_CHANGELOG.md`). `lib/__init__.py`
+carries the same number and `tests/test_version_sync.py` fails if they drift.
+A running server reports it in `/health` (`api_version`), so you can tell
+which image a site runs.
+
+To release: bump both version strings and add a changelog entry, commit, tag
+`vX.Y.Z`, then `make images push-images` (the Makefile turns the latest tag
+into the image tag, without the `v`). Set `images.tag: X.Y.Z` in each site's
+`site.yaml` and run `ant-stack pull` and `ant-stack up`.
+
 ## Registry
 
 The images are published by `.forgejo/workflows/images.yml` on version tags
