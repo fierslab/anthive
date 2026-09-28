@@ -10,9 +10,9 @@ From: {{ IMAGE }}
 #     apptainer build anthive-ingest.sif docker/anthive-ingest.def
 #   From the registry:
 #     apptainer build --build-arg BOOTSTRAP=docker \
-#         --build-arg IMAGE=codeberg.org/mfiers/anthive-ingest:TAG \
+#         --build-arg IMAGE=registry.gitlab.kuleuven.be/bdslab/anthive/anthive4/anthive-ingest:TAG \
 #         anthive-ingest.sif docker/anthive-ingest.def
-#   Or skip building: apptainer pull oras://codeberg.org/mfiers/anthive-ingest-sif:TAG
+#   Or skip building: apptainer pull oras://registry.gitlab.kuleuven.be/bdslab/anthive/anthive4/anthive-ingest-sif:TAG
 #
 # No %post section: the image needs no changes, so the build runs
 # unprivileged (no --fakeroot). See doc/HPC.md.
@@ -23,7 +23,7 @@ From: {{ IMAGE }}
 
 %labels
     org.opencontainers.image.title anthive-ingest (apptainer)
-    org.opencontainers.image.source https://codeberg.org/mfiers/anthive4
+    org.opencontainers.image.source https://gitlab.kuleuven.be/bdslab/anthive/anthive4
 
 %environment
     export ANTHIVE_HOME=/opt/anthive4

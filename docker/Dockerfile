@@ -62,7 +62,7 @@ FROM ${PYTHON_IMAGE} AS app
 
 LABEL org.opencontainers.image.title="anthive-app" \
       org.opencontainers.image.description="anthive single-cell browser: API, web UI, MCP" \
-      org.opencontainers.image.source="https://codeberg.org/mfiers/anthive4"
+      org.opencontainers.image.source="https://gitlab.kuleuven.be/bdslab/anthive/anthive4"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \

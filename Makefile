@@ -595,7 +595,7 @@ sync-update:
 # doc/HPC.md (Apptainer / uv on clusters) and doc/DOCKER.md (image internals).
 # ============================================================================
 
-REGISTRY     ?= codeberg.org/mfiers
+REGISTRY     ?= registry.gitlab.kuleuven.be/bdslab/anthive/anthive4
 # Images are built from `git archive $(BUILD_REF)`: only committed, tracked
 # files enter the build context, never local state, logs or secrets.
 BUILD_REF    ?= HEAD

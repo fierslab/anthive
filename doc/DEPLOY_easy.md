@@ -1,3 +1,7 @@
+> **Superseded (2026-09-28).** This was the design note for a one-command
+> installer. Deployment now goes through `bin/ops/ant-stack` and published
+> images; follow [DEPLOY_CONTAINERS.md](DEPLOY_CONTAINERS.md).
+
 # Easy-deploy for anthive — one-command install for non-technical users
 
 ## Goal

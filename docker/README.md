@@ -41,7 +41,7 @@ docker run --rm -p 8501:8501 \
     -v /path/to/h5adstore:/data/h5adstore \
     -v /path/to/genesetstore:/data/genesetstore:ro \
     -e ANTHIVE_BASIC_AUTH_USER=demo -e ANTHIVE_BASIC_AUTH_PASSWORD='a long password' \
-    codeberg.org/mfiers/anthive-app:TAG all
+    registry.gitlab.kuleuven.be/bdslab/anthive/anthive4/anthive-app:TAG all
 ```
 
 Optional variables: `ANTHIVEPORT` (default 8501), `STARCATSTORE`,
