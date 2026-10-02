@@ -137,6 +137,15 @@
 </div>
 {% endif %}
 
+{% if papers %}
+{% from "_papers.html" import paper_list %}
+<section id="coll-papers" style="margin:10px 0 16px">
+  <h2 style="margin:0 0 4px;font-size:15px">Papers
+    <span class="info" title="Papers in the anthive library linked to this collection's datasets, source papers first. The label says why each one is linked.">ⓘ</span></h2>
+  {{ paper_list(papers) }}
+</section>
+{% endif %}
+
 <!-- Toolbar: filter (top-left), stats (top-right). -->
 {% set _total_cells = namespace(n=0) %}
 {% for d in datasets %}{% if d.n_obs %}{% set _total_cells.n = _total_cells.n + d.n_obs %}{% endif %}{% endfor %}

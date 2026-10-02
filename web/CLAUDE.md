@@ -81,6 +81,25 @@ line-art logo (grayscale+alpha PNG), so it's shown on a dark hero panel.
 | `/admin/feedback` | chat-feedback triage (admin) | `admin_feedback.html` |
 | `/account/mcp` | the signed-in user's named MCP links: add (with label) / show / copy / rotate / revoke each, client setup snippets for a chosen link; admins also get the "All users' links" section (`#all`). 401 without `Remote-User` | `account_mcp.html` |
 | `/admin/mcp-links` | 307 redirect to `/account/mcp#all` | none |
+| `/papers/{citekey}` | one library paper: record, summary/topics (draft markers), linked datasets grouped by role with the reason, related papers grouped by kind with evidence, PDF + BibTeX | `paper.html` |
+| `/library` | all library papers, client-side search + role/year/cohort/cell-type filters | `library.html` |
+
+**Paper library UI (API 2.39+).** `dataset_view` fetches `/databases/{id}/papers`
+and `folder_view` does so for every dataset of the collection (deduplicated,
+"Linked to N of M datasets"); both render cards from the `paper_card` macro in
+`_papers.html` (styles `.paper-card` / `.paper-role` in base.html). Source
+papers come first; the badge and sentence come from `_paper_reason()`
+(source / reanalysis / method / related, "preprint" for online/unpublished
+entries). A summary listed in `draft_fields` gets the "draft, not yet
+reviewed" marker. The dataset page shows a `Papers` tab after Overview and a
+server-rendered `#ds-paper-files` subsection in Downloads (paper PDFs come
+from `/api/papers/{citekey}/file`, not from `static/`); that subsection keeps
+the Downloads tab visible even when `/files` lists nothing. Everything hides
+when the library is off or the call fails; restricted papers never reach the
+web layer (the API filters them). The top-nav `library` link appears only
+when `/library/status` reports papers (background-probed, cached:
+`_library_available`). Gotcha: never name a dict key `values`/`items` for a
+template (`t.values` resolves to the dict method).
 
 **MCP links UI** talks to ant-serve's `GET /me/mcp`, `POST /me/mcp/links`,
 `POST /me/mcp/links/{id}/rotate`, `DELETE /me/mcp/links/{id}`,

@@ -396,6 +396,7 @@
 
 <div class="tab-bar" id="ds-tab-bar" role="tablist">
   {% if markdown_content %}<button type="button" class="tab-btn active" data-tab="overview" role="tab">Overview</button>{% endif %}
+  {% if papers %}<button type="button" class="tab-btn" data-tab="papers" role="tab" id="tab-btn-papers">Papers<span class="tab-count">{{ papers|length }}</span></button>{% endif %}
   <button type="button" class="tab-btn{% if not markdown_content %} active{% endif %}" data-tab="data" role="tab">Data</button>
   {% if info and info.n_genes %}
   <button type="button" class="tab-btn"        data-tab="genes"    role="tab">Genes</button>
@@ -424,6 +425,16 @@
 {% if markdown_content %}
 <section class="tab-panel active" id="tab-overview" role="tabpanel">
   <div class="ds-desc md-body">{{ markdown_content|safe }}</div>
+</section>
+{% endif %}
+
+{# ── Papers tab (only when the library links papers to this dataset) ──── #}
+{% if papers %}
+{% from "_papers.html" import paper_list %}
+<section class="tab-panel" id="tab-papers" role="tabpanel">
+  <h2>Papers
+    <span class="info" title="Papers in the anthive library linked to this dataset. The label says why each one is linked: the source of the data, a reanalysis, a method, or a related study.">ⓘ</span></h2>
+  {{ paper_list(papers) }}
 </section>
 {% endif %}
 
@@ -841,6 +852,20 @@
     <span>loading downloadable artifacts…</span>
   </div>
   <div id="ds-files" class="muted" style="font-size:12px;padding:2px 0">loading files…</div>
+  {% set _paper_pdfs = papers | selectattr('pdf_url') | list if papers else [] %}
+  {% if _paper_pdfs %}
+  <div id="ds-paper-files">
+    <h3 style="margin:14px 0 4px;font-size:13px">Papers
+      <span class="info" title="PDFs of the papers linked to this dataset, served from the anthive paper library.">ⓘ</span></h3>
+    {% for p in _paper_pdfs %}
+    <div style="padding:3px 0;font-size:12px">
+      <a href="{{ p.pdf_url }}" target="_blank" rel="noopener">⬇ {{ p.citation_line }}</a>
+      <span class="paper-role role-{{ p.role }}" style="margin-left:6px">{{ p.badge }}</span>
+      <div class="muted-2" style="font-size:11px;margin-left:16px">{{ p.title }}</div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
 </section>
 
 <script>
@@ -2141,6 +2166,14 @@ document.addEventListener('DOMContentLoaded', function() {
             var box = document.getElementById('ds-files');
             var tabBtn = document.getElementById('tab-btn-downloads');
             if (!box) return;
+            // Paper PDFs are rendered server-side (#ds-paper-files); they keep
+            // the tab visible even when /files lists nothing.
+            var hasPaperPdfs = !!document.getElementById('ds-paper-files');
+            if (hasPaperPdfs && tabBtn) tabBtn.style.display = '';
+            function noFiles() {
+                box.textContent = '';
+                if (tabBtn) tabBtn.style.display = hasPaperPdfs ? '' : 'none';
+            }
             function fmtSize(n) {
                 if (n == null) return '';
                 var u = ['B', 'KB', 'MB', 'GB', 'TB'], i = 0;
@@ -2162,7 +2195,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         return true;
                     });
                     if (!files.length) {
-                        if (tabBtn) tabBtn.style.display = 'none';
+                        noFiles();
                         return;
                     }
                     if (tabBtn) tabBtn.style.display = '';
@@ -2182,7 +2215,7 @@ document.addEventListener('DOMContentLoaded', function() {
                             + '</div>';
                     });
                     if (statics.length) {
-                        html += '<h3 style="margin:14px 0 4px;font-size:13px">Supplementary materials from paper</h3>';
+                        html += '<h3 style="margin:14px 0 4px;font-size:13px">Other files</h3>';
                         statics.forEach(function (f) {
                             var name = f.sub || f.filename;
                             html += '<div style="padding:3px 0">'
@@ -2196,9 +2229,8 @@ document.addEventListener('DOMContentLoaded', function() {
                 })
                 .catch(function (err) {
                     console.error('/files fetch failed:', err);
-                    box.textContent = '';
-                    if (tabBtn) tabBtn.style.display = 'none';
-                    if (window.antShowTabError) {
+                    noFiles();
+                    if (!hasPaperPdfs && window.antShowTabError) {
                         window.antShowTabError('downloads', 'network error (' + err.message + ')');
                     }
                 })

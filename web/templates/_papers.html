@@ -1,0 +1,29 @@
+{#- Paper cards shared by dataset.html, folder.html and paper.html.
+    `p` is a card from browser._paper_card (citekey, title, citation_line, url,
+    role, badge, reason, doi(_url), pmid(_url), pdf_url, bib_url, summary,
+    summary_draft, optional n_linked / n_total). -#}
+{% macro paper_card(p, show_reason=True) -%}
+<article class="paper-card" data-citekey="{{ p.citekey }}" data-role="{{ p.role }}">
+  <div class="pc-cite">{{ p.citation_line }}</div>
+  <a class="pc-title" href="{{ p.url }}">{{ p.title }}</a>
+  {% if show_reason %}
+  <div class="pc-reason"><span class="paper-role role-{{ p.role }}">{{ p.badge }}</span>{{ p.reason }}{% if p.n_total and p.n_total > 1 %} <span class="muted">Linked to {{ p.n_linked }} of {{ p.n_total }} datasets.</span>{% endif %}</div>
+  {% endif %}
+  {% if p.summary %}
+  <div class="pc-summary">{{ p.summary }}{% if p.summary_draft %}<span class="pc-draft" title="Written by a model from the abstract and not yet reviewed by a curator">draft, not yet reviewed</span>{% endif %}</div>
+  {% endif %}
+  <div class="pc-links">
+    {% if p.pdf_url %}<a class="pc-btn" href="{{ p.pdf_url }}" target="_blank" rel="noopener">PDF</a>{% endif %}
+    {% if p.doi_url %}<a href="{{ p.doi_url }}" target="_blank" rel="noopener">DOI</a>{% endif %}
+    {% if p.pmid_url %}<a href="{{ p.pmid_url }}" target="_blank" rel="noopener">PubMed</a>{% endif %}
+    <a href="{{ p.bib_url }}">BibTeX</a>
+    <span class="muted mono">{{ p.citekey }}</span>
+  </div>
+</article>
+{%- endmacro %}
+
+{% macro paper_list(papers, show_reason=True) -%}
+<div class="paper-list">
+  {% for p in papers %}{{ paper_card(p, show_reason) }}{% endfor %}
+</div>
+{%- endmacro %}

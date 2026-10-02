@@ -3122,9 +3122,10 @@ def test_dataset_view_downloads_client_filters_to_h5ad(client):
     # (`_`/`.` prefix, `.inactive` suffix) are still dropped client-side.
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
-    # h5ad label + supplementary heading are the only kinds surfaced.
+    # h5ad label + the remaining static files are the only kinds surfaced
+    # (paper PDFs come from the library, rendered server-side).
     assert "raw AnnData" in resp.text
-    assert "Supplementary materials from paper" in resp.text
+    assert "Other files" in resp.text
     assert ".h5ad" in resp.text
     # The removed kinds must not appear as user-facing labels or hrefs.
     assert "/download/duckdb" not in resp.text
@@ -5803,3 +5804,150 @@ def test_version_refresh_failure_keeps_last_known(monkeypatch):
     _set_version_state(monkeypatch, "2.0.0", True, checked=False)
     browser._refresh_api_version("http://testapi")
     assert browser._version_state['ok'] is False and browser._version_state['api'] == "2.0.0"
+
+
+# ── paper library: papers on dataset/collection pages, paper + library pages ──
+
+_PAPER_SOURCE = {
+    "citekey": "smith2025microglia", "entrytype": "article",
+    "title": "Microglia states in the ageing cortex",
+    "authors": ["Smith, Anna", "Jones, Bob", "Lee, Cara"], "first_author": "Smith, Anna",
+    "citation": "Smith et al. 2025", "year": 2025, "journal": "Nature Neuroscience",
+    "doi": "10.1000/xyz", "pmid": "12345", "role": "source", "link_role": "source",
+    "summary": "Profiles microglia from 40 donors.", "draft_fields": ["anthive_summary"],
+    "celltypes": ["microglial cell"], "cohorts": ["ROSMAP"], "has_pdf": True, "n_datasets": 2,
+}
+_PAPER_RELATED = {
+    "citekey": "doe2024trisomy", "entrytype": "online",
+    "title": "A related preprint", "authors": ["Doe, Jane"], "first_author": "Doe, Jane",
+    "citation": "Doe 2024", "year": 2024, "journal": "bioRxiv", "doi": "10.1101/1",
+    "role": "related", "link_role": "related", "summary": "Reviewed summary.",
+    "draft_fields": [], "has_pdf": False, "n_datasets": 1,
+}
+_PAPER_RECORD = {
+    **_PAPER_SOURCE, "fields": {"abstract": "We profiled microglia."},
+    "datasets": [{"db_id": "GroupA/ds1", "role": "source", "scope": "collection"},
+                 {"db_id": "GroupA/ds2", "role": "source", "scope": "collection"}],
+    "related": [
+        {"citekey": "doe2024trisomy", "title": "A related preprint", "citation": "Doe 2024",
+         "relations": [{"kind": "explicit", "evidence": "version"},
+                       {"kind": "author", "evidence": ["Smith, Anna"]}]},
+        {"citekey": "roe2020cohort", "title": "Cohort paper", "citation": "Roe et al. 2020",
+         "relations": [{"kind": "cohort", "evidence": ["rosmap"]},
+                       {"kind": "cites", "evidence": "10.1000/roe"}]},
+    ],
+    "notes": "## Notes\n\nNo notes yet.\n",
+}
+
+
+def _library_api(path_map):
+    def fake(api_url, path):
+        if path in path_map:
+            value = path_map[path]
+            if isinstance(value, Exception):
+                raise value
+            return value
+        return _fake_api_get(api_url, path)
+    return fake
+
+
+@pytest.fixture
+def library_client(client, monkeypatch):
+    monkeypatch.setattr(browser, "_api_get", _library_api({
+        "/databases/GroupA/ds1/papers": {"db_id": "GroupA/ds1", "papers": [_PAPER_RELATED, _PAPER_SOURCE]},
+        "/databases/GroupA/ds2/papers": {"db_id": "GroupA/ds2", "papers": [_PAPER_SOURCE]},
+        "/papers/smith2025microglia": _PAPER_RECORD,
+        "/papers": {"n": 2, "papers": [_PAPER_SOURCE, _PAPER_RELATED]},
+    }))
+    return client
+
+
+def test_paper_reason_sentences():
+    assert browser._paper_reason("source").startswith("Source of this dataset")
+    assert "this collection" in browser._paper_reason("source", scope="collection")
+    assert "preprint" in browser._paper_reason("related", "online")
+    assert browser._paper_reason("method").startswith("Method used")
+    assert browser._paper_citation_line(_PAPER_SOURCE) == "Smith et al., Nature Neuroscience, 2025"
+
+
+def test_dataset_papers_tab_source_first_with_reasons(library_client):
+    html = library_client.get("/browse/GroupA/ds1").text
+    assert 'data-tab="papers"' in html and 'id="tab-papers"' in html
+    src = html.index('data-citekey="smith2025microglia"')
+    rel = html.index('data-citekey="doe2024trisomy"')
+    assert src < rel, "source papers must come first"
+    assert "Source of this dataset: the data come from this paper." in html
+    assert "Related: a preprint of a closely related study" in html
+    assert "draft, not yet reviewed" in html
+    assert 'href="/api/papers/smith2025microglia/file"' in html
+    assert 'href="/api/papers/smith2025microglia.bib"' in html
+    assert 'href="https://doi.org/10.1000/xyz"' in html
+
+
+def test_dataset_downloads_lists_paper_pdfs(library_client):
+    html = library_client.get("/browse/GroupA/ds1").text
+    block = html[html.index('id="ds-paper-files"'):]
+    assert '/api/papers/smith2025microglia/file' in block[:2000]
+    # the related preprint has no PDF, so it is not offered as a download
+    assert 'doe2024trisomy/file' not in html
+    for forbidden in ('.duckdb', '.h5ad.mus', '.scores.parquet'):
+        assert forbidden not in block[:2000]
+
+
+def test_dataset_without_papers_has_no_papers_tab(client):
+    html = client.get("/browse/GroupA/ds1").text
+    assert 'data-tab="papers"' not in html
+    assert 'id="ds-paper-files"' not in html
+
+
+def test_collection_papers_panel_dedupes_and_counts(library_client):
+    html = library_client.get("/browse/GroupA").text
+    assert 'id="coll-papers"' in html
+    assert html.count('data-citekey="smith2025microglia"') == 1
+    assert "Source of this collection" in html
+    assert "Linked to 2 of 2 datasets." in html
+
+
+def test_paper_page_sections(library_client):
+    resp = library_client.get("/papers/smith2025microglia")
+    assert resp.status_code == 200
+    html = resp.text
+    assert "Microglia states in the ageing cortex" in html
+    assert "We profiled microglia." in html
+    assert 'id="pp-topics"' in html and "ROSMAP" in html
+    assert 'id="pp-linked"' in html and "Dataset One" in html and "/browse/GroupA/ds1" in html
+    assert "Source of these datasets" in html
+    assert "Same study (versions, preprints, follow-ups)" in html
+    assert "another version of the same study" in html
+    assert "both use the rosmap cohort" in html
+    assert "this paper cites it" in html
+    assert "No notes yet" not in html
+
+
+def test_paper_page_unknown_is_404(library_client):
+    assert library_client.get("/papers/unknown2020paper").status_code == 404
+
+
+def test_library_page_lists_and_filters(library_client):
+    resp = library_client.get("/library")
+    assert resp.status_code == 200
+    html = resp.text
+    assert 'id="lib-q"' in html and 'id="lib-table"' in html
+    assert 'class="table-wrap"' in html
+    assert html.index("smith2025microglia") < html.index("doe2024trisomy")  # newest first
+    assert '<option value="ROSMAP">' in html and '<option value="2025">' in html
+
+
+def test_library_page_without_library(client, monkeypatch):
+    monkeypatch.setattr(browser, "_api_get", _library_api({"/papers": requests.HTTPError("404")}))
+    html = client.get("/library").text
+    assert "not available on this site" in html
+
+
+def test_nav_library_link_follows_availability(client, monkeypatch):
+    monkeypatch.setattr(browser, "_library_state",
+                        {"available": True, "checked": browser.time.monotonic(), "refreshing": False})
+    assert 'id="nav-library"' in client.get("/about").text
+    monkeypatch.setattr(browser, "_library_state",
+                        {"available": False, "checked": browser.time.monotonic(), "refreshing": False})
+    assert 'id="nav-library"' not in client.get("/about").text

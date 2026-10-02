@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+
+{% block title %}Paper library | anthive{% endblock %}
+
+{% block content %}
+<style>
+  .lib-top { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0 10px; }
+  .lib-top input[type=search] { flex: 1 1 320px; padding: 7px 10px; font-size: 14px; border: 1px solid var(--border);
+                                border-radius: 6px; font-family: var(--font); }
+  .lib-top select { font-size: 12px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 4px;
+                    font-family: var(--font); max-width: 200px; }
+  .lib-count { font-size: 12px; color: var(--text-muted); }
+  #lib-table td.lib-title a { font-size: 13px; }
+  #lib-table .lib-cite { font-size: 11.5px; color: var(--text-muted); }
+  #lib-table tr[hidden] { display: none !important; }
+</style>
+
+{% from "_macros.html" import breadcrumb %}
+{{ breadcrumb([("library", None)]) }}
+<h1 class="page-title" style="margin-top:4px">Paper library</h1>
+<p class="muted" style="max-width:780px;font-size:12.5px;margin:2px 0 8px">The papers behind the datasets in this anthive site, plus background reading. Each paper page says which datasets it is linked to and why.</p>
+
+{% if error %}
+<div class="exp-notice">{{ error }}</div>
+{% elif not rows %}
+<p class="muted">No papers in the library yet.</p>
+{% else %}
+<div class="lib-top">
+  <input type="search" id="lib-q" placeholder="Search papers: title, author, cohort, cell type, DOI..." autocomplete="off" spellcheck="false" aria-label="Search papers">
+  {% if roles|length > 1 %}<select id="lib-role" aria-label="Filter by role"><option value="">any role</option>{% for value, label in roles %}<option value="{{ value }}">{{ label }}</option>{% endfor %}</select>{% endif %}
+  <select id="lib-year" aria-label="Filter by year"><option value="">any year</option>{% for y in years %}<option value="{{ y }}">{{ y }}</option>{% endfor %}</select>
+  {% if cohorts %}<select id="lib-cohort" aria-label="Filter by cohort"><option value="">any cohort</option>{% for c in cohorts %}<option value="{{ c }}">{{ c }}</option>{% endfor %}</select>{% endif %}
+  {% if celltypes %}<select id="lib-cell" aria-label="Filter by cell type"><option value="">any cell type</option>{% for c in celltypes %}<option value="{{ c }}">{{ c }}</option>{% endfor %}</select>{% endif %}
+  <span class="lib-count" id="lib-count">{{ rows|length }} papers</span>
+</div>
+
+<div class="table-wrap">
+<table class="card-table" id="lib-table">
+  <thead><tr><th>Paper</th><th>Year</th><th>Role</th><th>Datasets</th><th>Cohorts</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+  <tr data-search="{{ r.search }}" data-role="{{ r.role }}" data-year="{{ r.year or '' }}"
+      data-cohorts="{{ r.cohorts | join('|') }}" data-cells="{{ r.celltypes | join('|') }}">
+    <td class="card-title lib-title"><a href="{{ r.url }}">{{ r.title }}</a><div class="lib-cite">{{ r.citation_line }}</div></td>
+    <td data-label="Year">{{ r.year or '' }}</td>
+    <td data-label="Role">{% if r.role %}<span class="paper-role role-{{ r.role }}">{{ r.badge }}</span>{% endif %}</td>
+    <td data-label="Datasets">{{ r.n_datasets }}</td>
+    <td data-label="Cohorts">{{ r.cohorts | join(', ') }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<script>
+(function () {
+    var q = document.getElementById('lib-q');
+    var sel = { role: document.getElementById('lib-role'), year: document.getElementById('lib-year'),
+                cohort: document.getElementById('lib-cohort'), cell: document.getElementById('lib-cell') };
+    var rows = Array.prototype.slice.call(document.querySelectorAll('#lib-table tbody tr'));
+    var count = document.getElementById('lib-count');
+    function fold(s) { return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, ''); }
+    function val(el) { return el ? el.value : ''; }
+    function apply() {
+        var words = fold(q.value).split(/\s+/).filter(Boolean);
+        var role = val(sel.role), year = val(sel.year), cohort = val(sel.cohort), cell = val(sel.cell);
+        var shown = 0;
+        rows.forEach(function (tr) {
+            var hay = tr.getAttribute('data-search') || '';
+            var ok = words.every(function (w) { return hay.indexOf(w) !== -1; })
+                && (!role || tr.getAttribute('data-role') === role)
+                && (!year || tr.getAttribute('data-year') === year)
+                && (!cohort || (tr.getAttribute('data-cohorts') || '').split('|').indexOf(cohort) !== -1)
+                && (!cell || (tr.getAttribute('data-cells') || '').split('|').indexOf(cell) !== -1);
+            tr.hidden = !ok;
+            if (ok) shown++;
+        });
+        count.textContent = shown === rows.length ? rows.length + ' papers' : shown + ' of ' + rows.length + ' papers';
+    }
+    q.addEventListener('input', apply);
+    Object.keys(sel).forEach(function (k) { if (sel[k]) sel[k].addEventListener('change', apply); });
+    var params = new URLSearchParams(location.search);
+    if (params.get('q')) { q.value = params.get('q'); }
+    apply();
+})();
+</script>
+{% endif %}
+{% endblock %}

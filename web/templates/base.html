@@ -68,6 +68,23 @@
         }
         #topbar nav > a, #topbar nav .dropdown-toggle { color: var(--bar-link); font-size: 13px; }
         #topbar nav > a:hover, #topbar nav .dropdown-toggle:hover { color: var(--bar-link-hover); text-decoration: none; }
+        /* Paper cards (dataset, collection and paper pages; _papers.html). */
+        .paper-list { display: flex; flex-direction: column; gap: 10px; margin: 6px 0 14px; max-width: 900px; }
+        .paper-card { border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; background: #fff; }
+        .paper-card .pc-cite { font-size: 11.5px; color: var(--text-muted); }
+        .paper-card .pc-title { font-size: 14px; line-height: 1.35; margin: 1px 0 4px; display: block; }
+        .paper-card .pc-reason { font-size: 12px; color: #374151; margin: 2px 0 6px; }
+        .paper-role { display: inline-block; padding: 0 6px; margin-right: 6px; border-radius: 3px; font-size: 10px;
+                      line-height: 16px; text-transform: uppercase; letter-spacing: .3px; vertical-align: 1px;
+                      background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }
+        .paper-role.role-source { background: #ecfdf5; color: #065f46; border-color: #a7f3d0; }
+        .paper-role.role-related, .paper-role.role-background { background: #f8fafc; color: #64748b; }
+        .paper-card .pc-summary { font-size: 12.5px; line-height: 1.5; color: #374151; margin: 4px 0; }
+        .pc-draft { font-size: 10.5px; color: #92400e; background: #fffbeb; border: 1px solid #fde68a;
+                    border-radius: 3px; padding: 0 4px; margin-left: 4px; white-space: nowrap; }
+        .paper-card .pc-links { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; margin-top: 4px; }
+        .paper-card .pc-links a.pc-btn { border: 1px solid var(--border); border-radius: 4px; padding: 1px 8px; }
+        .paper-card .pc-links .muted { font-size: 11.5px; }
         /* Small marker for views that are still experimental (nav + page notice). */
         .exp-badge { display: inline-block; margin-left: 4px; padding: 0 4px; border-radius: 3px; font-size: 9px;
                      line-height: 13px; vertical-align: 1px; text-transform: uppercase; letter-spacing: .3px;
@@ -546,6 +563,9 @@
             <a href="/genesets">genesets</a>
             {% endif %}
             <a href="/facets" title="Facets: experimental">facets<span class="exp-badge">exp</span></a>
+            {% if library_available(request) %}
+            <a href="/library" id="nav-library" title="The papers behind the datasets">library</a>
+            {% endif %}
         </nav>
         <form class="gene-search" onsubmit="event.preventDefault(); var g=this.q.value.trim(); if(g) window.location='/genes/'+encodeURIComponent(g);"
               title="Jump to a gene's cross-catalogue expression atlas">

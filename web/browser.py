@@ -2348,6 +2348,8 @@ async def folder_view(request: Request, browse_id: str):
         "var_fields": collection_meta['var_fields'],
         "is_admin": _is_admin(request),
         "static_files": static_files,
+        "papers": _collection_papers(_api_url(request), group_id,
+                                     [d['file_id'] for d in datasets if d.get('file_id')]),
     })
 
 
@@ -2907,6 +2909,7 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "update_pending": False,
         "de_studies": de_studies,
         "de_total_contrasts": de_total_contrasts,
+        "papers": _dataset_papers(api_url, db_id),
         "caveats": caveats,
         "caveats_summary": caveats_summary,
         "publication_status": pub_status,
@@ -3772,4 +3775,331 @@ async def geneset_study_view(request: Request, study: str):
         "organisms": organisms,
         "provenance": study_provenance,
         "dataset_annotations": dataset_annotations,
+    })
+
+
+# ── Paper library: cards, link reasons, paper page, library page ────────────
+#
+# Everything comes from ant-serve's library endpoints (2.39+). The API already
+# filters restricted papers per caller; the web side only renders what it gets
+# and stays quiet (no section) when the library is absent or the call fails.
+
+_PAPER_ROLE_ORDER = {'source': 0, 'reanalysis': 1, 'method': 2, 'related': 3, 'background': 4}
+_PAPER_ROLE_BADGE = {'source': 'Source', 'reanalysis': 'Reanalysis', 'method': 'Method',
+                     'related': 'Related', 'background': 'Background'}
+_PREPRINT_TYPES = {'online', 'unpublished', 'preprint', 'misc'}
+
+
+def _paper_reason(role: str, entrytype: str = '', scope: str = 'dataset') -> str:
+    """Plain-language sentence saying why a paper is linked to a dataset or
+    collection."""
+    what = {'collection': 'this collection', 'datasets': 'these datasets'}.get(scope, 'this dataset')
+    role = (role or '').lower()
+    if role == 'source':
+        return f"Source of {what}: the data come from this paper."
+    if role == 'reanalysis':
+        return f"Reanalysis: this paper analyses the data of {what} again."
+    if role == 'method':
+        return f"Method used: a protocol or tool used to produce or process {what}."
+    if role == 'related':
+        if (entrytype or '').lower() in _PREPRINT_TYPES:
+            return "Related: a preprint of a closely related study, not the source of these data."
+        return "Related: a closely related study, not the source of these data."
+    if role == 'background':
+        return "Background reading on the topic of these data."
+    return f"Linked to {what}."
+
+
+def _surname(author: str) -> str:
+    author = (author or '').strip()
+    if ',' in author:
+        return author.split(',', 1)[0].strip()
+    return author.split()[-1] if author else ''
+
+
+def _paper_citation_line(paper: Dict) -> str:
+    """'Lee et al., Nature Genetics, 2026' from a library paper record."""
+    authors = [a for a in _as_list(paper.get('authors')) if a]
+    first = _surname(paper.get('first_author') or (authors[0] if authors else ''))
+    if len(authors) == 2:
+        who = f"{first} and {_surname(authors[1])}"
+    elif len(authors) > 2:
+        who = f"{first} et al."
+    else:
+        who = first
+    parts = [p for p in (who, paper.get('journal') or '', str(paper.get('year') or '')) if p]
+    return ', '.join(parts) or paper.get('citation') or paper.get('citekey') or ''
+
+
+def _paper_card(paper: Dict, scope: str = 'dataset') -> Dict:
+    """Template-ready view of one paper linked to a dataset or collection."""
+    citekey = paper.get('citekey') or ''
+    role = (paper.get('link_role') or paper.get('role') or '').lower()
+    drafts = set(_as_list(paper.get('draft_fields')))
+    doi = (paper.get('doi') or '').strip()
+    pmid = str(paper.get('pmid') or '').strip()
+    key = url_quote(citekey, safe='')
+    return {
+        'citekey': citekey,
+        'title': paper.get('title') or citekey,
+        'citation_line': _paper_citation_line(paper),
+        'url': f"/papers/{key}",
+        'role': role,
+        'badge': _PAPER_ROLE_BADGE.get(role, role.capitalize() or 'Linked'),
+        'reason': _paper_reason(role, paper.get('entrytype') or '', scope),
+        'doi': doi,
+        'doi_url': f"https://doi.org/{doi}" if doi else '',
+        'pmid': pmid,
+        'pmid_url': f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else '',
+        'pdf_url': f"/api/papers/{key}/file" if paper.get('has_pdf') else '',
+        'bib_url': f"/api/papers/{key}.bib",
+        'summary': (paper.get('summary') or '').strip(),
+        'summary_draft': 'anthive_summary' in drafts,
+        'year': paper.get('year'),
+    }
+
+
+def _year_int(card: Dict) -> int:
+    year = str(card.get('year') or '')
+    return int(year) if year.isdigit() else 0
+
+
+def _sort_paper_cards(cards: List[Dict]) -> List[Dict]:
+    return sorted(cards, key=lambda c: (_PAPER_ROLE_ORDER.get(c['role'], 9), -_year_int(c), c['citekey']))
+
+
+def _dataset_papers(api_url: str, db_id: str, scope: str = 'dataset') -> List[Dict]:
+    """Paper cards for one dataset, source papers first; [] when the library is
+    off, the dataset has no papers or the API errors."""
+    try:
+        payload = _api_get(api_url, f'/databases/{db_id}/papers') or {}
+    except Exception:
+        return []
+    papers = payload.get('papers') if isinstance(payload, dict) else None
+    return _sort_paper_cards([_paper_card(p, scope) for p in papers or [] if p.get('citekey')])
+
+
+def _collection_papers(api_url: str, group_id: str, file_ids: List[str]) -> List[Dict]:
+    """Papers across a collection's datasets, deduplicated; each card notes how
+    many of the collection's datasets it is linked to."""
+    by_key: Dict[str, Dict] = {}
+    counts: Dict[str, int] = defaultdict(int)
+    for file_id in file_ids:
+        for card in _dataset_papers(api_url, f"{group_id}/{file_id}", scope='collection'):
+            counts[card['citekey']] += 1
+            current = by_key.get(card['citekey'])
+            if current is None or _PAPER_ROLE_ORDER.get(card['role'], 9) < _PAPER_ROLE_ORDER.get(current['role'], 9):
+                by_key[card['citekey']] = card
+    for key, card in by_key.items():
+        card['n_linked'] = counts[key]
+        card['n_total'] = len(file_ids)
+    return _sort_paper_cards(list(by_key.values()))
+
+
+# Related-paper grouping on the paper page: the first matching kind wins.
+_RELATION_GROUPS = [
+    ('explicit', 'Same study (versions, preprints, follow-ups)'),
+    ('cohort', 'Same cohort'),
+    ('method', 'Same method'),
+    ('author', 'Shared authors'),
+    ('celltype', 'Same cell type, tissue or disease'),
+    ('tissue', 'Same cell type, tissue or disease'),
+    ('disease', 'Same cell type, tissue or disease'),
+    ('cites', 'Citations'),
+    ('cited_by', 'Citations'),
+]
+_EXPLICIT_WORDS = {'version': 'another version of the same study',
+                   'samecohort': 'uses the same cohort',
+                   'extends': 'builds on or extends this work',
+                   'reanalysis': 'reanalyses the same data',
+                   'comment': 'a comment on this work'}
+
+
+def _relation_reason(kind: str, evidence: Any) -> str:
+    items = [str(e) for e in _as_list(evidence) if str(e).strip()]
+    if kind == 'explicit':
+        return '; '.join(_EXPLICIT_WORDS.get(i.lower(), i) for i in items) or 'explicitly related'
+    if kind == 'cohort':
+        return f"both use the {', '.join(items)} cohort{'s' if len(items) > 1 else ''}"
+    if kind == 'author':
+        names = [_surname(n) for n in items]
+        shown = ', '.join(names[:4]) + (f" and {len(names) - 4} more" if len(names) > 4 else '')
+        return f"shared author{'s' if len(names) > 1 else ''}: {shown}"
+    if kind in ('celltype', 'tissue', 'disease', 'method'):
+        label = {'celltype': 'cell type', 'tissue': 'tissue', 'disease': 'disease',
+                 'method': 'method'}[kind]
+        return f"same {label}: {', '.join(items)}"
+    if kind == 'cites':
+        return 'this paper cites it'
+    if kind == 'cited_by':
+        return 'it cites this paper'
+    return kind
+
+
+def _related_groups(related: List[Dict]) -> List[Dict]:
+    """Group related papers by their strongest kind of relation; every entry
+    keeps all its reasons."""
+    order = [kind for kind, _ in _RELATION_GROUPS]
+    titles = dict(_RELATION_GROUPS)
+    groups: Dict[str, List[Dict]] = {}
+    for item in related or []:
+        relations = [r for r in item.get('relations') or [] if r.get('kind')]
+        kinds = [r['kind'] for r in relations]
+        primary = next((k for k in order if k in kinds), None)
+        if not item.get('citekey') or primary is None:
+            continue
+        ranked = sorted(relations, key=lambda r: order.index(r['kind']) if r['kind'] in order else 99)
+        groups.setdefault(titles[primary], []).append({
+            'citekey': item['citekey'],
+            'url': f"/papers/{url_quote(item['citekey'], safe='')}",
+            'title': item.get('title') or item['citekey'],
+            'citation': item.get('citation') or '',
+            'reasons': [_relation_reason(r['kind'], r.get('evidence')) for r in ranked],
+        })
+    out: List[Dict] = []
+    for _kind, heading in _RELATION_GROUPS:
+        if heading in groups and all(g['heading'] != heading for g in out):
+            out.append({'heading': heading, 'papers': groups[heading]})
+    return out
+
+
+def _dataset_titles(api_url: str) -> Dict[str, str]:
+    try:
+        return {db['id']: (db.get('title') or db.get('file_id') or db['id'])
+                for db in _all_databases(api_url) if db.get('id')}
+    except Exception:
+        return {}
+
+
+# Top-nav "library" link: shown only when the API reports papers. Probed in a
+# background thread and cached so page renders never wait on the API.
+_LIBRARY_TTL_OK = 120.0
+_LIBRARY_TTL_FAIL = 30.0
+_library_state: Dict[str, Any] = {'available': False, 'checked': 0.0, 'refreshing': False}
+_library_lock = threading.Lock()
+
+
+def _refresh_library_available(api_url: str) -> None:
+    available = False
+    try:
+        status = _api_get(api_url, '/library/status') or {}
+        available = int(status.get('papers') or 0) > 0
+    except Exception:
+        pass
+    with _library_lock:
+        _library_state.update(available=available, checked=time.monotonic(), refreshing=False)
+
+
+def _library_available(request: Request) -> bool:
+    now = time.monotonic()
+    with _library_lock:
+        ttl = _LIBRARY_TTL_OK if _library_state['available'] else _LIBRARY_TTL_FAIL
+        start = now - _library_state['checked'] > ttl and not _library_state['refreshing']
+        if start:
+            _library_state['refreshing'] = True
+        available = _library_state['available']
+    if start:
+        try:
+            threading.Thread(target=_refresh_library_available,
+                             args=(request.app.state.api_url,), daemon=True).start()
+        except Exception:
+            with _library_lock:
+                _library_state['refreshing'] = False
+    return available
+
+
+templates.env.globals['library_available'] = _library_available
+
+
+_TOPIC_FIELDS = [('celltypes', 'Cell types', 'anthive_celltypes'),
+                 ('tissues', 'Tissues', 'anthive_tissues'),
+                 ('diseases', 'Diseases', 'anthive_diseases'),
+                 ('organisms', 'Organisms', 'anthive_organisms'),
+                 ('methods', 'Methods', 'anthive_methods'),
+                 ('cohorts', 'Cohorts', 'anthive_cohorts')]
+
+
+@router.get("/papers/{citekey}", response_class=HTMLResponse)
+async def paper_view(request: Request, citekey: str):
+    api_url = _api_url(request)
+    try:
+        record = _api_get(api_url, f'/papers/{url_quote(citekey, safe="")}')
+    except Exception:
+        record = None
+    if not isinstance(record, dict) or not record.get('citekey'):
+        return templates.TemplateResponse(
+            request, "index.html", {"folders": [], "error": f"Paper '{citekey}' not found"},
+            status_code=404)
+    card = _paper_card(record)
+    drafts = set(_as_list(record.get('draft_fields')))
+    topics = [{'label': label, 'vals': _as_list(record.get(key)), 'draft': field in drafts}
+              for key, label, field in _TOPIC_FIELDS if _as_list(record.get(key))]
+    titles = _dataset_titles(api_url)
+    linked: Dict[str, List[Dict]] = {}
+    for link in record.get('datasets') or []:
+        db_id = link.get('db_id') or ''
+        if '/' not in db_id:
+            continue
+        group_id, file_id = db_id.split('/', 1)
+        linked.setdefault((link.get('role') or '').lower(), []).append({
+            'db_id': db_id, 'title': titles.get(db_id, db_id),
+            'url': f"/browse/{url_quote(group_id, safe='')}/{url_quote(file_id, safe='')}",
+        })
+    linked_groups = [{'role': role,
+                      'badge': _PAPER_ROLE_BADGE.get(role, role.capitalize() or 'Linked'),
+                      'reason': _paper_reason(role, record.get('entrytype') or '', 'datasets'),
+                      'datasets': items}
+                     for role, items in sorted(linked.items(),
+                                               key=lambda kv: _PAPER_ROLE_ORDER.get(kv[0], 9))]
+    notes = (record.get('notes') or '').strip()
+    notes_html = ''
+    if notes and 'no notes yet' not in notes.lower():
+        notes_html = markdown.markdown(notes, extensions=['tables', 'fenced_code'])
+    abstract = ((record.get('fields') or {}).get('abstract') or record.get('abstract') or '').strip()
+    return templates.TemplateResponse(request, "paper.html", {
+        "paper": card,
+        "record": record,
+        "authors": [a for a in _as_list(record.get('authors')) if a],
+        "abstract": abstract,
+        "topics": topics,
+        "topics_draft": any(t['draft'] for t in topics),
+        "linked_groups": linked_groups,
+        "related_groups": _related_groups(record.get('related') or []),
+        "notes_html": notes_html,
+    })
+
+
+@router.get("/library", response_class=HTMLResponse)
+async def library_view(request: Request):
+    error = None
+    try:
+        payload = _api_get(_api_url(request), '/papers') or {}
+        papers = payload.get('papers') if isinstance(payload, dict) else None
+        papers = papers or []
+    except Exception:
+        papers, error = [], "The paper library is not available on this site."
+    rows = []
+    for paper in papers:
+        if not paper.get('citekey'):
+            continue
+        card = _paper_card(paper)
+        cohorts = [str(c) for c in _as_list(paper.get('cohorts'))]
+        celltypes = [str(c) for c in _as_list(paper.get('celltypes'))]
+        searchable = [card['title'], card['citation_line'], card['citekey'], card['doi'],
+                      ' '.join(str(a) for a in _as_list(paper.get('authors'))),
+                      ' '.join(cohorts), ' '.join(celltypes)]
+        for key in ('tissues', 'diseases', 'methods', 'organisms'):
+            searchable.append(' '.join(str(v) for v in _as_list(paper.get(key))))
+        rows.append({**card, 'cohorts': cohorts, 'celltypes': celltypes,
+                     'n_datasets': paper.get('n_datasets') or 0,
+                     'search': _fold_text(' '.join(s for s in searchable if s))})
+    rows.sort(key=lambda r: (-_year_int(r), r['citekey']))
+    return templates.TemplateResponse(request, "library.html", {
+        "rows": rows,
+        "years": sorted({str(r['year']) for r in rows if r.get('year')}, reverse=True),
+        "cohorts": sorted({c for r in rows for c in r['cohorts']}, key=str.lower),
+        "celltypes": sorted({c for r in rows for c in r['celltypes']}, key=str.lower),
+        "roles": [(role, _PAPER_ROLE_BADGE[role]) for role in _PAPER_ROLE_ORDER
+                  if any(r['role'] == role for r in rows)],
+        "error": error,
     })
