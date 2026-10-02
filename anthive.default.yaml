@@ -55,6 +55,27 @@ library: data/library
 library_lab_authors:
   - De Strooper
 
+# Adding papers through the API (POST /papers/upload, MCP upload_paper) and
+# the two-way library sync (`ant sync library`). See doc/LIBRARY.md.
+# Who may upload: Remote-Groups of the caller (basic auth mode: auth.admins
+# count as "admins").
+library_upload_groups:
+  - admins
+# Largest PDF accepted by the upload endpoint, in MB.
+library_upload_max_pdf_mb: 25
+# Committer of upload commits in the library repo (the uploader is the author).
+library_git_committer: anthive <noreply@anthive.local>
+# Push the library repo after each upload commit and on `ant sync library`
+# (needs a remote and credentials, e.g. a deploy key). Off: commits stay local
+# until someone pushes.
+library_git_push: false
+# Push an uploaded PDF to S3 right away (when s3 is configured).
+library_s3_autopush: true
+# This site publishes the literature index to S3 on `ant sync`. Exactly one
+# site (the main one) should; the others only pull it as a bootstrap and add
+# their local papers.
+library_index_publisher: false
+
 # Precomputed literature index (folder holding library_chunks.parquet, built
 # by `ant lib-index`, synced via S3). See doc/LIBRARY_INDEX.md.
 # Env: ANTHIVE_LIBRARY_INDEX.
@@ -219,6 +240,9 @@ mcp:
   rate_limit_per_minute: 120
   # How many named links one user may hold at the same time.
   max_links_per_user: 5
+  # Largest PDF the MCP upload_paper tool accepts (base64 in the tool call),
+  # in MB. The API's own limit is library_upload_max_pdf_mb.
+  max_upload_mb: 25
   # ant-mcp caches a successful token check this many seconds, a failed
   # one verify_negative_cache_seconds. Rotation/revocation takes effect
   # after at most verify_cache_seconds.

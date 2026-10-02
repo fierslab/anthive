@@ -29,6 +29,37 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.40.0 (2026-10-02)
+
+Additive: adding papers through the API, and a two-way library sync.
+Existing clients keep working.
+
+- `GET /papers/upload/requirements`: `required`, `recommended`, `fields`
+  (per field `description`, `example`, `type`, optional `vocab`), `roles`,
+  `folders`, `entrytypes`, `max_pdf_mb`.
+- `POST /papers/upload` (multipart): `metadata` (JSON object or `.md`
+  text), optional `file` (PDF), `folder` (`lab|datasets|methods|reading`),
+  `enrich` (default true, fills only empty fields), `dry_run`, `update`.
+  201 `{status: created, citekey, folder, path, pdf_sha256, record,
+  filled_fields, warnings, missing_recommended}`; 200 for `updated` and
+  `dry_run`; 409 `{status: duplicate, existing_citekey, matched_on:
+  doi|pmid|sha256|citekey}`; 422 `{status: invalid, errors: [{field,
+  message}], missing_required}`; 413 PDF too large; 415 not a PDF; 403
+  unless the caller is in `library_upload_groups` (default `[admins]`).
+  `papers_for` is stored on the paper as `anthive_proposed_links`, never
+  written to the h5adstore. Post-commit steps (index, reload, S3) only add
+  warnings.
+- `GET /library/status` gains `upload_index` (state of the background index
+  update after an upload).
+- MCP: `paper_upload_requirements`, `check_paper`, `upload_paper` (the last
+  two only for uploaders; PDF capped by `mcp.max_upload_mb`).
+- `ant sync library` (also part of `ant sync push|pull` unless
+  `--no-library`): records via git, PDFs two-way against S3 with conflict
+  copies and opt-in delete propagation, literature index publisher rule.
+  New config keys: `library_upload_groups`, `library_upload_max_pdf_mb`,
+  `library_git_committer`, `library_git_push`, `library_s3_autopush`,
+  `library_index_publisher`, `mcp.max_upload_mb`.
+
 ## 2.39.0 (2026-10-02)
 
 Additive: the paper library and literature search. Existing clients keep

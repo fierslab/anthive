@@ -21,10 +21,13 @@ Examples:
   ant-sync push '**/Single.Grafts.h5ad'    # push a specific file
   ant-sync status                          # show what needs syncing
 
-The paper library's PDFs (<library>/papers/**.pdf, subfolders mirrored) and
-the literature index (<library_index>/library_chunks.parquet) are pushed and
-pulled too, under the S3 prefixes _library/papers/ and _library_index/ (see
-lib/library_sync.py). --no-library skips them, --library-only does only them.
+The paper library is synced in both directions by push, pull and
+`ant-sync library` (see lib/library_sync.py and doc/LIBRARY.md): records via
+version control (pull --rebase, push when library_git_push is on), PDFs
+(<library>/papers/**.pdf, folders mirrored under _library/papers/) against S3
+with a local manifest, so changes on either side travel and conflicts are
+kept, and the literature index (_library_index/) by the publisher rule.
+--no-library skips the library, --library-only does only the library.
 A PDF that moved to another folder is uploaded under its new key; the old key
 is reported as S3-only and never deleted automatically.
 """
@@ -1159,8 +1162,12 @@ def cmd_status(args, s3_cfg: dict, data_folder: Path) -> None:
           f'in sync: {in_sync}')
 
 
-def _sync_library(args, s3_cfg: dict, push: bool) -> None:
-    """Push or pull the library PDFs and the literature index."""
+def _sync_library(args, s3_cfg: dict, push: Optional[bool] = None) -> int:
+    """Two-way sync of the paper library (records via git, PDFs via S3) and
+    the literature index (publisher rule). Same behaviour for push, pull and
+    `ant sync library`: the library has no single direction. Returns the
+    number of errors."""
+    import subprocess  # noqa: PLC0415
     from config import get_library_dir, get_library_index_dir  # noqa: PLC0415
     import library_sync as ls  # noqa: PLC0415
     cfg = get_config()
@@ -1170,20 +1177,65 @@ def _sync_library(args, s3_cfg: dict, push: bool) -> None:
     bucket = s3_cfg['bucket']
     prefix = s3_cfg.get('prefix', '') or ''
     dry_run = bool(getattr(args, 'dry_run', False))
-    print('\nLibrary + literature index:')
-    reports = []
-    for area in ls.library_areas(library_dir, index_dir):
-        if push:
-            reports.append(ls.push_area(client, bucket, prefix, area, dry_run=dry_run))
+    read_only = is_slave(cfg)
+    errors = 0
+    print('\nLibrary (two-way):' + ('  [read-only site: downloads only]' if read_only else ''))
+
+    # 1. records: git pull --rebase, push when allowed
+    if not getattr(args, 'no_git', False):
+        allow_push = bool(cfg.get('library_git_push', False)) and not read_only
+        git = ls.git_sync(library_dir, push=allow_push, dry_run=dry_run)
+        print(f"  records (git): {git['status']}: {git['detail']}")
+        errors += git['status'] in ('conflict', 'push_failed')
+
+    # 2. PDFs: two-way against S3
+    papers_report = None
+    if (library_dir / 'papers').is_dir():
+        papers_report = ls.sync_library_pdfs(
+            client, bucket, prefix, library_dir, dry_run=dry_run,
+            propagate_deletes=bool(getattr(args, 'propagate_deletes', False)),
+            prefer=getattr(args, 'prefer', None), allow_remote_writes=not read_only,
+            say=lambda msg: print('  ' + msg))
+        counts = {k: papers_report.count(k) for k in
+                  ('upload', 'download', 'conflict', 'move_remote', 'move_local', 'delete_remote',
+                   'delete_local', 'report', 'resolve_local', 'resolve_remote')}
+        busy = ', '.join(f"{k.replace('_', ' ')} {v}" for k, v in counts.items() if v) or 'in sync'
+        print(f"  papers (S3): {busy}" + (' [dry run]' if dry_run else ''))
+        for error in papers_report.errors:
+            print(f"  ERROR {error}")
+        errors += len(papers_report.errors)
+    else:
+        print(f"  papers (S3): skipped, {library_dir}/papers does not exist (clone the library repo there)")
+
+    # 3. literature index: derived data. Publisher sites push it; others pull
+    #    it only when missing or older, then add their local papers.
+    publisher = bool(cfg.get('library_index_publisher', False)) and not read_only
+    pulled = False
+    if not publisher:
+        try:
+            index_dir.mkdir(parents=True, exist_ok=True)
+            pulled = ls.pull_index_if_newer(client, bucket, prefix, index_dir, dry_run=dry_run,
+                                            say=lambda msg: print('  ' + msg))
+        except OSError as exc:
+            print(f"  index: cannot write {index_dir}: {exc}")
+    changed = bool(papers_report and papers_report.changed_local) or pulled or bool(getattr(args, 'reindex', False))
+    if changed and not getattr(args, 'no_index', False) and (library_dir / 'papers').is_dir() and not dry_run:
+        tool = Path(__file__).resolve().parent.parent / 'meta' / 'ant-lib-index'
+        cmd = [str(tool), '--add', '--library', str(library_dir),
+               '--out', str(index_dir / ls.INDEX_FILENAME)]
+        print('  index: adding new or changed papers (ant lib-index --add)')
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        tail = (result.stdout.strip().splitlines() or [''])[-1]
+        if result.returncode not in (0, 2):
+            print(f"  index: update failed ({result.returncode}): {(result.stderr or tail).strip()[-300:]}")
+            errors += 1
         else:
-            # PDFs only next to a cloned library repo (they mean nothing without
-            # their records); the index folder is created if missing.
-            reports.append(ls.pull_area(client, bucket, prefix, area, dry_run=dry_run,
-                                        create_root=(area.key_prefix == ls.INDEX_S3_PREFIX)))
-    for line in ls.summarize(reports, 'uploaded' if push else 'downloaded'):
-        print('  ' + line)
-    if not push and any(r.skipped_reason for r in reports if r.name == 'library papers'):
-        print(f'  (clone the library repo to {library_dir} to receive its PDFs)')
+            print(f"  index: {tail}")
+    if publisher:
+        report = ls.push_area(client, bucket, prefix, ls.index_area(index_dir), dry_run=dry_run,
+                              say=lambda msg: print('  ' + msg))
+        print('  ' + ls.summarize([report], 'uploaded')[0] + ' (this site publishes the index)')
+    return errors
 
 
 def main() -> None:
@@ -1230,11 +1282,27 @@ def main() -> None:
               'fleet is still running).'),
     )
 
+    def _library_flags(sub, with_dry_run: bool = False) -> None:
+        sub.add_argument('--propagate-deletes', action='store_true',
+                         help='library: delete a PDF on the other side when it was deleted on one side '
+                              '(default: report only)')
+        sub.add_argument('--prefer', choices=['local', 'remote'], default=None,
+                         help='library: resolve PDF conflicts by keeping the local or the S3 copy')
+        sub.add_argument('--no-git', action='store_true',
+                         help='library: do not git pull/push the paper records')
+        sub.add_argument('--no-index', action='store_true',
+                         help='library: do not update the literature index after PDF changes')
+        sub.add_argument('--reindex', action='store_true',
+                         help='library: run the incremental index update even if no PDF changed')
+        if with_dry_run:
+            sub.add_argument('--dry-run', action='store_true', help='print the plan, change nothing')
+
     for sub in (push_sub,):
         sub.add_argument('--no-library', action='store_true',
                          help='skip the library PDFs and the literature index')
         sub.add_argument('--library-only', action='store_true',
                          help='only the library PDFs and the literature index (not the h5adstore)')
+        _library_flags(sub)
 
     pull_sub = subparsers.add_parser('pull', help='Download S3 files locally')
     pull_sub.add_argument(
@@ -1282,6 +1350,13 @@ def main() -> None:
                           help='skip the library PDFs and the literature index')
     pull_sub.add_argument('--library-only', action='store_true',
                           help='only the library PDFs and the literature index (not the h5adstore)')
+    _library_flags(pull_sub)
+
+    library_sub = subparsers.add_parser(
+        'library',
+        help=('Two-way sync of the paper library only: records via git, PDFs via S3 '
+              '(both directions, conflicts kept), then the literature index'))
+    _library_flags(library_sub, with_dry_run=True)
 
     evict_sub = subparsers.add_parser(
         'evict',
@@ -1339,6 +1414,8 @@ def main() -> None:
             (cmd_push if args.command == 'push' else cmd_pull)(args, s3_cfg, data_folder)
         if not args.no_library:
             _sync_library(args, s3_cfg, push=(args.command == 'push'))
+    elif args.command == 'library':
+        sys.exit(1 if _sync_library(args, s3_cfg) else 0)
     elif args.command == 'evict':
         cmd_evict(args, s3_cfg, data_folder)
     elif args.command == 'plan':

@@ -36,6 +36,7 @@ See doc/MCP_LINKS.md.
 
 import argparse
 import base64
+import binascii
 import collections
 import contextvars
 import json
@@ -44,10 +45,11 @@ import time
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 import uvicorn
+import yaml
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ImageContent, TextContent
@@ -102,6 +104,25 @@ _current_identity: contextvars.ContextVar[Optional[dict]] = contextvars.ContextV
 
 def _is_admin(identity: Optional[dict]) -> bool:
     return bool(identity) and 'admins' in {g.lower() for g in identity.get('groups', [])}
+
+
+# Tools that add papers: only for users in library_upload_groups (ant-serve
+# enforces it again; hiding them keeps the tool list honest).
+UPLOAD_TOOLS = frozenset({'check_paper', 'upload_paper'})
+
+
+def _upload_groups() -> set:
+    from config import get_library_upload_settings  # noqa: PLC0415
+    try:
+        return set(get_library_upload_settings(_get_anthive_config())['upload_groups'])
+    except Exception:  # noqa: BLE001 - unreadable config: admins only
+        return {'admins'}
+
+
+def _may_upload(identity: Optional[dict]) -> bool:
+    if not identity:
+        return False
+    return bool({g.lower() for g in identity.get('groups', [])} & _upload_groups())
 
 
 class _McpLinkAuthMiddleware:
@@ -231,12 +252,16 @@ class AnthiveMCP(FastMCP):
         identity = self._identity_from_request()
         if self.require_identity and not _is_admin(identity):
             tools = [tool for tool in tools if tool.name not in ADMIN_ONLY_TOOLS]
+        if self.require_identity and not _may_upload(identity):
+            tools = [tool for tool in tools if tool.name not in UPLOAD_TOOLS]
         return tools
 
     async def call_tool(self, name, arguments):
         identity = self._identity_from_request()
         if self.require_identity and name in ADMIN_ONLY_TOOLS and not _is_admin(identity):
             raise PermissionError(f"The '{name}' tool is restricted to Anthive admins.")
+        if self.require_identity and name in UPLOAD_TOOLS and not _may_upload(identity):
+            raise PermissionError(f"The '{name}' tool needs permission to upload papers.")
         ctx_token = _current_identity.set(identity)
         try:
             return await super().call_tool(name, arguments)
@@ -1429,6 +1454,102 @@ def main() -> None:
         if not data.get('index_available'):
             text += '\n\n(note: the literature index is not loaded on this server, so no paper passages.)'
         return text
+
+    # ── adding papers to the library (REST 2.40) ─────────────────────────────────
+
+    async def _post_upload(metadata: Any, pdf: Optional[bytes], *, folder: Optional[str],
+                           dry_run: bool, update: bool) -> Tuple[int, dict]:
+        text = metadata if isinstance(metadata, str) else json.dumps(metadata)
+        data = {'metadata': text, 'dry_run': str(dry_run).lower(), 'update': str(update).lower()}
+        if folder:
+            data['folder'] = folder
+        files = {'file': ('paper.pdf', pdf, 'application/pdf')} if pdf is not None else None
+        response = await _http_client.post(f"{api_base_url}/papers/upload", data=data, files=files,
+                                           headers=_identity_headers(),
+                                           timeout=httpx.Timeout(connect=10, read=300, write=120, pool=10))
+        try:
+            return response.status_code, response.json()
+        except ValueError:
+            return response.status_code, {'status': 'error', 'detail': response.text[:500]}
+
+    def _upload_report(code: int, body: dict) -> str:
+        status = body.get('status')
+        if status == 'invalid':
+            lines = ['The record is not valid yet:']
+            lines += [f"- {e.get('field')}: {e.get('message')}" for e in body.get('errors', [])]
+            if body.get('missing_required'):
+                lines.append(f"Missing required: {', '.join(body['missing_required'])}")
+            return '\n'.join(lines)
+        if status == 'duplicate':
+            return (f"Already in the library as {body.get('existing_citekey')} (matched on "
+                    f"{body.get('matched_on')}). Use update=True to change that record.")
+        if status in ('created', 'updated', 'dry_run'):
+            verb = {'created': 'Added', 'updated': 'Updated', 'dry_run': 'Dry run, nothing written:'}[status]
+            lines = [f"{verb} {body.get('citekey')} in papers/{body.get('folder')}/"]
+            if body.get('filled_fields'):
+                lines.append(f"Filled from CrossRef/OpenAlex (marked as draft): {', '.join(body['filled_fields'])}")
+            if body.get('missing_recommended'):
+                lines.append(f"Still recommended: {', '.join(body['missing_recommended'])}")
+            lines += [f"Note: {w}" for w in body.get('warnings', [])]
+            lines.append('Record:\n' + yaml.safe_dump(body.get('record') or {}, sort_keys=False,
+                                                      allow_unicode=True).strip())
+            return '\n'.join(lines)
+        return f"Error {code}: {body.get('detail') or body}"
+
+    @mcp.tool()
+    async def paper_upload_requirements() -> str:
+        """What a paper record must and should contain before it can be added
+        to the Anthive paper library: required and recommended fields, their
+        meaning and allowed values (entry types, roles, folders), and the PDF
+        size limit. Read this before preparing a paper for upload."""
+        try:
+            data = await _get('/papers/upload/requirements')
+        except httpx.HTTPStatusError as exc:
+            return f"Error {exc.response.status_code}: {exc.response.text}"
+        return json.dumps(data, indent=1)
+
+    @mcp.tool()
+    async def check_paper(metadata: Any) -> str:
+        """Validate a paper record without writing anything (a dry run of
+        upload_paper): reports errors, missing required and recommended
+        fields, what CrossRef/OpenAlex would fill in from the DOI or PMID, a
+        duplicate if the paper is already in the library, the citekey and the
+        folder it would get.
+
+        Args:
+            metadata: the record as an object with BibLaTeX field names
+                      (entrytype, title, author ['Last, First', ...], date,
+                      doi, ...) plus anthive_* fields and optional papers_for,
+                      or the full .md text with YAML front matter.
+        """
+        code, body = await _post_upload(metadata, None, folder=None, dry_run=True, update=False)
+        return _upload_report(code, body)
+
+    @mcp.tool()
+    async def upload_paper(metadata: Any, pdf_base64: Optional[str] = None,
+                           folder: Optional[str] = None, update: bool = False) -> str:
+        """Add a paper to the Anthive paper library (record and optional PDF).
+        The record is validated, missing fields are filled from CrossRef/
+        OpenAlex (marked as draft), duplicates are refused unless update=True,
+        and it is committed with you as the author. Run check_paper first.
+
+        Args:
+            metadata:   record object or .md text (see check_paper).
+            pdf_base64: the PDF, base64-encoded (optional; size-limited).
+            folder:     lab | datasets | methods | reading (default: by rule).
+            update:     True to update the existing record of the same paper.
+        """
+        pdf = None
+        if pdf_base64:
+            limit_mb = int((_get_anthive_config().get('mcp') or {}).get('max_upload_mb') or 25)
+            if len(pdf_base64) * 3 // 4 > limit_mb * 1024 * 1024:
+                return f"The PDF is larger than the MCP upload limit of {limit_mb} MB; upload it through the API."
+            try:
+                pdf = base64.b64decode(pdf_base64, validate=True)
+            except (ValueError, binascii.Error):
+                return 'pdf_base64 is not valid base64.'
+        code, body = await _post_upload(metadata, pdf, folder=folder, dry_run=False, update=update)
+        return _upload_report(code, body)
 
     # ── prompts: ready-made starting points in MCP clients ───────────────────────
 

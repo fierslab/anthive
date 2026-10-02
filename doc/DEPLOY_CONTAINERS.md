@@ -215,7 +215,10 @@ only those, for example after the library gained papers:
 bin/ops/ant-stack ingest -- ant sync pull --library-only
 ```
 
-`--no-library` does the opposite (data only).
+`--no-library` does the opposite (data only). The library part runs in
+both directions (`ant sync library`): new records come from git, new and
+changed PDFs go both ways, and nothing is deleted unless you add
+`--propagate-deletes` (`doc/LIBRARY.md`).
 
 ---
 
@@ -274,6 +277,45 @@ Run these from `/srv/anthive/anthive4`.
 | start again | `bin/ops/ant-stack up` |
 | convert my own .h5ad | put it in a collection folder with its `.md`, then `bin/ops/ant-stack ingest -- ant convert /srv/anthive/h5adstore/MyStudy/file.h5ad` |
 
+### Let people add papers
+
+Off by default. To let users add papers to the library through the API and
+their MCP link (`doc/LIBRARY.md`, "Adding papers through the API"):
+
+```yaml
+services:
+  paper_upload: true
+library:
+  upload_groups: [admins]      # Authelia groups allowed to upload; basic mode: auth.admins
+  max_pdf_mb: 25
+  git_push: false
+  s3_autopush: true
+  index_publisher: false       # true on ONE site only (normally the main one)
+```
+
+Then `bin/ops/ant-stack check` and `bin/ops/ant-stack up`. With
+`paper_upload` on, `data.library` and `data.library_index` are mounted
+read-write into the api container (otherwise read-only). `data.library`
+must be a git checkout of the library repo and writable by the site's uid;
+`check` warns when it is not. Each upload becomes a commit there, with the
+uploader as author and `library.git_committer` as committer.
+
+Getting those commits back to the library remote:
+
+- **`git_push: false`** (default, simplest): commits stay in the checkout.
+  Push them from the host with your own credentials, by hand or from cron:
+  `git -C /srv/anthive/library pull --rebase && git -C /srv/anthive/library push`.
+- **`git_push: true`**: the api container pushes after each upload and
+  `ant sync library` pushes too. The container has no SSH keys of its own,
+  so the remote must work without them, for example an HTTPS remote with a
+  project access token limited to that one repository (it ends up in the
+  checkout's `.git/config`, readable by anyone who can read the checkout).
+  A failed push is a warning on the upload; the commit is kept.
+
+Other sites get the new papers with their next `ant sync pull` (or `ant sync
+library`), which pulls the records from git and the PDFs from S3. See
+`doc/LIBRARY.md` for conflicts and deletes.
+
 ### Upgrade to a new release
 
 ```sh
@@ -319,6 +361,11 @@ catalogue from git.
 | `check`: library_chunks.parquet is missing | the literature index was not downloaded | `bin/ops/ant-stack ingest -- ant sync pull --library-only` |
 | `check`: index built with another model | the index and the image use different embedding models | literature search still works by keyword; rebuild the index with `ant lib-index --full` or use the matching release |
 | literature search finds nothing in one paper | its PDF has no text layer (a scan) | the index build lists these; rebuild that paper with `ant lib-index --parser docling` (OCR) on a machine with the ingest image |
+| upload returns 403 | the user is not in `library.upload_groups` (basic mode: not in `auth.admins`) | add the group or the user, `ant-stack init` |
+| upload returns 500 "cannot write to the library" | `services.paper_upload` is off (library mounted read-only) or the checkout is not writable by the site uid | set `services.paper_upload: true` and fix ownership, `ant-stack check`, `ant-stack up` |
+| upload warns "not a git repository" | `data.library` is a plain folder | clone the library repo there; the uploaded files are kept |
+| upload warns "git push failed" | no remote, or the container cannot authenticate | leave `library.git_push: false` and push from the host (see "Let people add papers") |
+| `ant sync library` reports a conflict | the same PDF changed on this site and on S3 | keep one: `ant sync library --prefer local` or `--prefer remote`, then delete the `.conflict-*.pdf` copy |
 | papers show but "PDF not available" | the PDFs were not pulled, or the library repo is not checked out at `data.library` | clone the library repo, then `ant sync pull --library-only` |
 | anything else | | `bin/ops/ant-stack logs <service>`; the first error line usually names the problem |
 
@@ -399,6 +446,8 @@ absolute path.
 | `images.*` | registry, image names, tag |
 | `services.mcp` | personal MCP links for AI clients (on by default; the supported way to use AI with anthive) |
 | `mcp.token_ttl_days`, `mcp.max_links_per_user` | how long a link lives (0 = forever) and how many links one user may hold (default 5) |
+| `services.paper_upload` | let `library.upload_groups` add papers through the API and MCP (mounts the library read-write) |
+| `library.*` | upload groups, PDF size limit, git committer and push, S3 autopush, index publisher |
 | `services.chat` | the in-app chat assistant; off by default and being phased out in favour of MCP, leave it off |
 | `resources.*` | threads, memory, open-dataset limit, plot cache, catalogue scan |
 

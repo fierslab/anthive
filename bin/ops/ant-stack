@@ -321,6 +321,16 @@ def render_anthive_yaml(site: dict) -> dict:
         },
         'issue_tracker_url': str(site['site'].get('issue_tracker_url') or ''),
     }
+    lib = site.get('library') or {}
+    cfg.update({
+        'library_upload_groups': [str(g) for g in (lib.get('upload_groups') or ['admins'])],
+        'library_upload_max_pdf_mb': int(lib.get('max_pdf_mb') or 25),
+        'library_git_push': bool(lib.get('git_push', False)),
+        'library_git_committer': str(lib.get('git_committer') or 'anthive <noreply@anthive.local>'),
+        'library_s3_autopush': bool(lib.get('s3_autopush', True)),
+        'library_index_publisher': bool(lib.get('index_publisher', False)),
+    })
+    cfg['mcp']['max_upload_mb'] = int(lib.get('max_pdf_mb') or 25)
     if site['_starcatstore']:
         cfg['starcat_store'] = str(site['_starcatstore'])
     chat_key = _read_secret(state / 'secrets' / 'chat_api_key')
@@ -497,8 +507,9 @@ def render_compose_site(site: dict) -> dict:
         if site[extra]:
             data_rw.append(_bind(site[extra], str(site[extra]), read_only=True))
             data_ro.append(_bind(site[extra], str(site[extra]), read_only=True))
-    # Library PDFs + literature index: the API only reads them; the ingest
-    # container writes them (`ant sync pull`, `ant lib-add`, `ant lib-index`).
+    # Library PDFs + literature index: the API only reads them, unless paper
+    # uploads are on (it then writes records, PDFs and the index); the ingest
+    # container writes them (`ant sync library`, `ant lib-add`, `ant lib-index`).
     library_ro, library_rw = [], []
     for extra in ('_library', '_library_index'):
         if site[extra]:
@@ -514,7 +525,8 @@ def render_compose_site(site: dict) -> dict:
             webapp_rw,
             {'type': 'volume', 'source': 'caddy-config', 'target': '/srv/caddy-config'},
         ]},
-        'api': {'volumes': data_rw + library_ro + [config_mount, state_mount, scratch, webapp_rw]},
+        'api': {'volumes': data_rw + (library_rw if site.get('services', {}).get('paper_upload') else library_ro)
+                + [config_mount, state_mount, scratch, webapp_rw]},
         'web': {'volumes': data_ro + [config_mount]},
         'mcp': {'volumes': [config_mount, state_mount, webapp_rw]},
         'ingest': {'volumes': data_rw + library_rw + [config_mount, state_mount, scratch, webapp_rw]},
@@ -689,7 +701,36 @@ def _check_library(site: dict) -> list[str]:
     if papers.is_dir() and not any(papers.rglob('*.pdf')):
         _warn(f"no PDFs under {papers}: run `ant-stack ingest -- ant sync pull --library-only` "
               f"for the paper files")
+    if site.get('services', {}).get('paper_upload'):
+        uid, gid = site['_uid'], site['_gid']
+        if not (library / '.git').exists():
+            _warn(f"services.paper_upload is on but {library} is not a git checkout: uploads are "
+                  f"written but not committed (clone the library repo there)")
+        for target in (library, papers, index_dir):
+            if target.is_dir() and not _writable_by(target, uid, gid):
+                _warn(f"services.paper_upload is on but {target} is not writable by uid {uid}: "
+                      f"uploads will fail (chown it or set run_as)")
     return problems
+
+
+def _writable_by(path: Path, uid: int, gid: int) -> bool:
+    try:
+        info = path.stat()
+    except OSError:
+        return False
+    if uid == 0:
+        return True
+    if info.st_uid == uid:
+        return bool(info.st_mode & stat.S_IWUSR)
+    groups = {gid}
+    try:
+        user = pwd.getpwuid(uid).pw_name
+        groups |= {g.gr_gid for g in grp.getgrall() if user in g.gr_mem}
+    except KeyError:
+        pass
+    if info.st_gid in groups:
+        return bool(info.st_mode & stat.S_IWGRP)
+    return bool(info.st_mode & stat.S_IWOTH)
 
 
 def check(site: dict, running: bool = False) -> list[str]:

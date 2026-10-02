@@ -74,9 +74,13 @@ ENV DEBIAN_FRONTEND=noninteractive \
     NUMBA_CACHE_DIR=/tmp/numba \
     XDG_CACHE_HOME=/tmp/cache
 
+# git (+ ssh for a deploy-key remote): paper uploads commit to the library
+# checkout, `ant sync library` pulls/pushes it. The checkout is a bind mount
+# owned by the site's uid, so mark every directory safe for git.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl tini libgomp1 \
+        ca-certificates curl tini libgomp1 git openssh-client \
     && rm -rf /var/lib/apt/lists/* \
+    && git config --system --add safe.directory '*' \
     && useradd --system --uid 1000 --home /tmp --no-create-home anthive
 
 COPY --from=venv /opt/venv /opt/venv

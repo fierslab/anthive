@@ -85,9 +85,14 @@ def main() -> int:
     ap.add_argument("--full", action="store_true", help="re-parse and re-embed everything")
     ap.add_argument("--cache-dir", default=None, help="fastembed model cache")
     ap.add_argument("--workers", type=int, default=8, help="parallel PDF parsers (pymupdf only; default 8)")
+    ap.add_argument("--add", action="store_true",
+                    help="only add new or changed PDFs of --library/--pdfs to the existing index, "
+                         "keeping every other chunk (what uploads and `ant sync library` use)")
     args = ap.parse_args()
 
     out = args.out or _default_out()
+    if args.add:
+        return _add_mode(args, out)
     sources: list[Path] = []
     roots: list[Path] = []
     # Store first: when a library PDF is a copy of a store PDF (same sha256),
@@ -133,6 +138,31 @@ def main() -> int:
         print(f"  failed: {failure}")
     for item in stats.get("needs_ocr", []):
         print(f"  needs OCR (partly image-only): {item}")
+    return 0 if not stats["failed"] else 2
+
+
+def _add_mode(args, out: Path) -> int:
+    """Incremental add: index new/changed library PDFs, keep everything else."""
+    sources: list[Path] = []
+    roots: list[Path] = []
+    for folder in ([args.library] if args.library else []) + list(args.pdfs):
+        sources += _pdfs_under(folder)
+        roots.append(folder)
+    if not sources:
+        print("no PDFs found", file=sys.stderr)
+        return 1
+    model = args.model
+    if out.exists():
+        model = li.read_index_metadata(out).get("embedding_model") or model
+    parse = li.parse_pdf_pymupdf if args.parser == "pymupdf" else (
+        lambda path, conv=li.make_docling_converter(): li.parse_pdf_docling(path, conv))
+    embedder = li.Embedder(model, cache_dir=args.cache_dir)
+    stats = li.add_or_replace_sources(sources, out, embedder=embedder, parse=parse, source_root=roots,
+                                      progress=lambda msg: print("  " + msg, flush=True))
+    print(f"\n{out}: {stats['chunks']} chunks; added {len(stats['added'])}, replaced "
+          f"{len(stats['replaced'])}, unchanged {stats['refreshed']}, failed {len(stats['failed'])}")
+    for failure in stats["failed"]:
+        print(f"  failed: {failure}")
     return 0 if not stats["failed"] else 2
 
 

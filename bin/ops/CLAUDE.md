@@ -6,7 +6,7 @@ Process supervision, S3 sync, build helpers, and developer wrappers.
 | --- | --- |
 | `ant-stack` | **The deployment tool.** Renders `site.yaml` into a docker compose stack under `<state_dir>/stack/` and drives it (`init`, `check`, `render`, `up`, `down`, `logs`, `ps`, `pull`, `build`, `passwd`, `ingest -- ...`). See `doc/DEPLOY_CONTAINERS.md`. |
 | `ant-supervisor` | Runs the full stack as host processes (dev boxes, the `all` single-container mode) (api+web+mcp+caddy+authelia), multiplexes their stdout/stderr with colored labels, auto-restarts crashed children. `restart <name>` / `status` / `stop` subcommands. |
-| `ant-sync` | Push/pull `.h5ad` and `.duckdb` files to/from S3 (boto3, mtime-aware, `_`-folder-aware). Never touches `.md` files. Also syncs the paper library PDFs (`_library/papers/`, folders mirrored) and the literature index (`_library_index/`) via `lib/library_sync.py`; `--no-library` / `--library-only`. |
+| `ant-sync` | Push/pull `.h5ad` and `.duckdb` files to/from S3 (boto3, mtime-aware, `_`-folder-aware). Never touches `.md` files. Also runs the two-way paper library sync (`ant sync library`: records via git, PDFs via S3, literature index) via `lib/library_sync.py`; `--no-library` / `--library-only`. |
 | `ant_s3` | Lower-level S3 toolkit (credentials, list, status). Mostly invoked via `ant-sync`. |
 | `ant-build-reports` | Pull static report sites from the git repos listed in `anthive.yaml` → `data/reports/`. Served by Caddy at `/report/<slug>/`. |
 | `ant-inactive` | Mark/unmark a dataset as inactive (drops a `.inactive` sidecar; hides it from `ant-serve`). |
@@ -46,6 +46,15 @@ files.
 
 `ant-sync pull` — h5ad only by default. `.duckdb` is treated as derived
 data; rebuild it locally with `make build-stale`.
+
+`ant-sync library` runs the two-way paper library sync, also run by push and pull
+unless `--no-library`: records via `git pull --rebase` (+ push with
+`library_git_push`, never forced), PDFs against S3 through the manifest
+state table in `lib/library_sync.py` (`plan_pdf_sync`, conflict copies,
+deletes only with `--propagate-deletes`, `--prefer local|remote`,
+`--dry-run`), then `ant lib-index --add` and the index publisher rule
+(`library_index_publisher`). Read-only (slave) sites only download. Tests:
+`tests/test_library_upload.py` (fake S3).
 
 S3 credentials come from `anthive.yaml`:
 ```yaml

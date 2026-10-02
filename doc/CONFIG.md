@@ -76,6 +76,41 @@ See `doc/LIBRARY.md` and `doc/LIBRARY_INDEX.md`.
 - **Default**: `[De Strooper]`
 - **Description**: New papers with a matching author go to `papers/lab/` when added with `ant lib-add` / `ant lib-import` (case and accent insensitive). Folders are for people only.
 
+#### `library_upload_groups`
+- **Type**: list of strings
+- **Default**: `[admins]`
+- **Description**: Groups (from `Remote-Groups`) allowed to add papers through `POST /papers/upload` and the MCP tools `check_paper` / `upload_paper`. In basic auth mode the users in `auth.admins` count as `admins`. Container sites set `library.upload_groups`.
+
+#### `library_upload_max_pdf_mb`
+- **Type**: integer
+- **Default**: `25`
+- **Description**: Largest PDF the upload endpoint accepts (larger is a 413). Container sites set `library.max_pdf_mb`.
+
+#### `library_git_committer`
+- **Type**: string (`Name <email>`)
+- **Default**: `anthive <noreply@anthive.local>`
+- **Description**: Committer of upload commits in the library repository; the uploader is the author.
+
+#### `library_git_push`
+- **Type**: boolean
+- **Default**: `false`
+- **Description**: Push the library repository after each upload commit and on `ant sync library`. Needs a remote and credentials (for example a deploy key). Off: commits stay local until someone pushes.
+
+#### `library_s3_autopush`
+- **Type**: boolean
+- **Default**: `true`
+- **Description**: Push an uploaded PDF to S3 right after the commit (when S3 is configured). Off: it goes with the next `ant sync library`.
+
+#### `library_index_publisher`
+- **Type**: boolean
+- **Default**: `false`
+- **Description**: This site publishes the literature index to S3 during `ant sync`. Set it on exactly one site; the others download the published index as a starting point and add their own papers (`doc/LIBRARY.md`, "Two-way sync").
+
+#### `mcp.max_upload_mb`
+- **Type**: integer
+- **Default**: `25`
+- **Description**: Largest PDF the MCP tool `upload_paper` accepts (sent base64 in the tool call). The API's own limit `library_upload_max_pdf_mb` still applies.
+
 #### `model_cache`
 - **Type**: path
 - **Default**: empty

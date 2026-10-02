@@ -108,6 +108,19 @@ services:
   mcp: true          # MCP server for AI clients (per-user links)
   chat: false        # in-app assistant, being phased out in favour of MCP: leave off
                      # (key in <state_dir>/secrets/chat_api_key if you do switch it on)
+  paper_upload: false # let users in library.upload_groups add papers through the API and
+                     # MCP; mounts data.library and data.library_index read-write into
+                     # the api container (data.library must be a git checkout)
+
+# Paper library: uploads and the two-way sync (`ant sync library`).
+library:
+  upload_groups: [admins]   # who may upload (Authelia groups; basic mode: auth.admins)
+  max_pdf_mb: 25            # largest PDF accepted
+  git_push: false           # push the library repo after each upload and on sync
+                            # (needs a remote the api container can reach, see the guide)
+  git_committer: "anthive <noreply@anthive.local>"   # uploader is the author, this the committer
+  s3_autopush: true         # push an uploaded PDF to S3 at once (when s3 is enabled)
+  index_publisher: false    # this site publishes the literature index to S3 (one site only)
 
 mcp:
   token_ttl_days: 90 # lifetime of a per-user MCP link (0 = never expires)

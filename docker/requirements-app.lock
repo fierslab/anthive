@@ -288,7 +288,9 @@ python-dateutil==2.9.0.post0
 python-dotenv==1.2.3
     # via pydantic-settings
 python-multipart==0.0.32
-    # via mcp
+    # via
+    #   -r docker/requirements-app.in
+    #   mcp
 pytz==2026.4
     # via pandas
 pyyaml==6.0.3

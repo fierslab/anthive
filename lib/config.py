@@ -343,6 +343,32 @@ def get_library_lab_authors(cfg: Optional[Dict[str, Any]] = None) -> List[str]:
     return [str(v) for v in (value if isinstance(value, list) else [value]) if str(v).strip()]
 
 
+def get_library_upload_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Paper upload and library sync switches (see doc/LIBRARY.md):
+    upload_groups (who may upload; default admins), max_pdf_mb, git committer
+    identity, whether to push the library repo after a commit, whether to push
+    an uploaded PDF to S3 at once, and whether this site publishes the
+    literature index to S3."""
+    cfg = cfg if cfg is not None else get_config()
+    groups = cfg.get('library_upload_groups')
+    if groups is None:
+        groups = ['admins']
+    elif not isinstance(groups, list):
+        groups = [groups]
+    try:
+        max_mb = int(cfg.get('library_upload_max_pdf_mb') or 25)
+    except (TypeError, ValueError):
+        max_mb = 25
+    return {
+        'upload_groups': [str(g).strip().lower() for g in groups if str(g).strip()],
+        'max_pdf_mb': max_mb,
+        'git_committer': str(cfg.get('library_git_committer') or 'anthive <noreply@anthive.local>'),
+        'git_push': bool(cfg.get('library_git_push', False)),
+        's3_autopush': bool(cfg.get('library_s3_autopush', True)),
+        'index_publisher': bool(cfg.get('library_index_publisher', False)),
+    }
+
+
 def get_library_index_dir(cfg: Optional[Dict[str, Any]] = None) -> Path:
     """Folder holding library_chunks.parquet (see doc/LIBRARY_INDEX.md)."""
     return resolve_path(_setting(cfg, 'library_index', 'ANTHIVE_LIBRARY_INDEX', 'data/library_index'))

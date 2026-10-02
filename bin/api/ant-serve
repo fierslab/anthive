@@ -16,6 +16,8 @@
 #   "openai>=1.30.0",
 #   "httpx>=0.27.0",
 #   "fastembed>=0.5,<0.9",
+#   "python-multipart>=0.0.9",
+#   "pymupdf4llm>=0.0.17",
 # ]
 # ///
 """
@@ -65,9 +67,9 @@ import duckdb
 import pandas as pd
 import uvicorn
 from fastapi import (
-    Depends, FastAPI, HTTPException,
+    Depends, FastAPI, File, Form, HTTPException,
     Path as FastAPIPath,   # avoid shadowing pathlib.Path imported above
-    Query, Request, Response,
+    Query, Request, Response, UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
@@ -1803,7 +1805,7 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.39.0"
+API_VERSION = "2.40.0"
 API_VERSION_RELEASED = "2026-10-02"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
@@ -13559,6 +13561,139 @@ def _csv(value: Optional[str]) -> Optional[List[str]]:
     return [v.strip() for v in value.split(',') if v.strip()]
 
 
+# ── Paper upload (REST 2.40) ──────────────────────────────────────────────────
+#
+# POST /papers/upload validates, enriches (CrossRef/OpenAlex), deduplicates,
+# places and commits one paper in the library repo (lib/library_upload.py).
+# Only callers in library_upload_groups (default admins) may upload; the
+# uploader becomes the commit author. After the commit: the PDF is pushed to
+# S3 (library_s3_autopush), the in-memory library reloads, and the literature
+# index is updated for just that paper in a background thread. Anything that
+# fails after the commit is a warning, never a 500.
+
+_upload_index_lock = Lock()
+_upload_index_status: Dict[str, Any] = {}
+
+
+def _require_uploader(request: Request) -> str:
+    from config import get_library_upload_settings  # noqa: PLC0415
+    allowed = set(get_library_upload_settings(get_config())['upload_groups'])
+    raw_groups = request.headers.get('Remote-Groups') or request.headers.get('X-Remote-Groups') or ''
+    groups = {g.strip().lower() for g in raw_groups.split(',') if g.strip()}
+    user = request.headers.get('Remote-User') or request.headers.get('X-Remote-User') or ''
+    if get_auth_settings()['mode'] != 'none' and user:
+        if groups & allowed:
+            return user
+        if 'admins' in allowed and _caller_is_admin(request):
+            return user      # basic auth mode: auth.admins have no Remote-Groups
+    raise HTTPException(status_code=403,
+                        detail=f"uploading papers needs one of the groups {sorted(allowed)}")
+
+
+def _upload_settings():
+    from config import get_library_lab_authors, get_library_upload_settings  # noqa: PLC0415
+    from library_upload import UploadSettings  # noqa: PLC0415
+    cfg = get_config()
+    switches = get_library_upload_settings(cfg)
+    return UploadSettings(library_dir=get_library_dir(cfg),
+                          lab_authors=tuple(get_library_lab_authors(cfg)),
+                          max_pdf_mb=switches['max_pdf_mb'], committer=switches['git_committer'],
+                          git_push=switches['git_push']), switches
+
+
+def _index_one_paper(pdf: Path, citekey: str) -> None:
+    """Background: add one uploaded PDF to the literature index, then reload it."""
+    import library_index as li  # noqa: PLC0415
+    cfg = get_config()
+    out = get_library_index_dir(cfg) / 'library_chunks.parquet'
+    status = {'citekey': citekey, 'state': 'running', 'started': datetime.now().isoformat(timespec='seconds')}
+    _upload_index_status.update(status)
+    with _upload_index_lock:
+        try:
+            model = (li.read_index_metadata(out).get('embedding_model') if out.exists() else None) or li.DEFAULT_MODEL
+            stats = li.add_or_replace_sources([pdf], out, embedder=_make_query_embedder(model),
+                                              parse=li.parse_pdf_pymupdf,
+                                              source_root=[get_library_dir(cfg)])
+            _upload_index_status.update(state='done', added=stats['added'], failed=stats['failed'],
+                                        needs_ocr=stats['needs_ocr'])
+            if _library_service is not None:
+                _library_service.load_index()
+        except Exception as exc:  # noqa: BLE001 - background work reports, never raises
+            log.warning("index update for %s failed: %s", citekey, exc)
+            _upload_index_status.update(state='failed', error=f"{type(exc).__name__}: {exc}")
+
+
+def _after_upload(result, switches) -> List[str]:
+    """Post-commit steps: S3 push of the PDF, library reload, background index."""
+    warnings: List[str] = []
+    citekey = result.body['citekey']
+    if result.pdf_path is not None and switches['s3_autopush']:
+        s3_config = getattr(registry, '_s3_config', None) or {}
+        if s3_config.get('bucket'):
+            try:
+                import library_sync as ls  # noqa: PLC0415
+                ls.push_one_pdf(registry._make_s3_client(), s3_config['bucket'],
+                                s3_config.get('prefix', '') or '', get_library_dir(get_config()),
+                                result.pdf_path)
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(f"PDF not pushed to S3 ({type(exc).__name__}: {exc}); "
+                                f"run `ant sync library` later")
+    try:
+        _library_refresh(load_index=False)
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"library reload failed: {exc}")
+    if result.pdf_path is not None:
+        _threading.Thread(target=_index_one_paper, args=(result.pdf_path, citekey),
+                         name=f"index-{citekey}", daemon=True).start()
+        warnings.append('the literature index is being updated in the background '
+                        '(GET /library/status shows when it is done)')
+    return warnings
+
+
+@app.get("/papers/upload/requirements", tags=["library"])
+def paper_upload_requirements():
+    """What a paper record must and should contain to be uploaded."""
+    from library_upload import requirements  # noqa: PLC0415
+    _, switches = _upload_settings()
+    return requirements(switches['max_pdf_mb'])
+
+
+@app.post("/papers/upload", tags=["library"])
+def upload_paper(request: Request,
+                 metadata: str = Form(..., description="JSON object, or the full .md text with YAML front matter"),
+                 file: Optional[UploadFile] = File(None, description="the PDF (optional)"),
+                 folder: Optional[str] = Form(None, description="lab | datasets | methods | reading (default by rule)"),
+                 enrich: bool = Form(True, description="fill missing fields from CrossRef/OpenAlex"),
+                 dry_run: bool = Form(False, description="validate and report, write nothing"),
+                 update: bool = Form(False, description="update the existing record if this paper is already in the library")):
+    """Add a paper (record + optional PDF) to the library: validated, enriched,
+    deduplicated, placed in the right folder and committed with the caller as
+    author. 201 created, 200 updated or dry_run, 409 duplicate, 422 invalid,
+    413 PDF too large, 415 not a PDF, 403 not allowed to upload."""
+    from library_upload import UploadError, upload_paper as do_upload  # noqa: PLC0415
+    user = _require_uploader(request)
+    settings, switches = _upload_settings()
+    pdf_bytes = None
+    if file is not None:
+        pdf_bytes = file.file.read(settings.max_pdf_mb * 1024 * 1024 + 1)
+    try:
+        result = do_upload(settings, metadata, pdf_bytes, folder=folder or None, enrich_fields=enrich,
+                           dry_run=dry_run, update=update, user=user,
+                           user_name=request.headers.get('Remote-Name'),
+                           user_email=request.headers.get('Remote-Email'))
+    except UploadError as exc:
+        return JSONResponse(exc.body, status_code=exc.status)
+    except OSError as exc:
+        # nothing was committed: typically a library mounted read-only
+        # (services.paper_upload off) or not writable by the site's uid
+        log.error("paper upload could not write to the library: %s", exc)
+        return JSONResponse({'status': 'error', 'message': f'cannot write to the library: {exc}'},
+                            status_code=500)
+    if result.status != 'dry_run':
+        result.body['warnings'] = result.body.get('warnings', []) + _after_upload(result, switches)
+    return JSONResponse(result.body, status_code=result.http_status)
+
+
 @app.get("/papers", tags=["library"])
 def list_papers(request: Request, role: Optional[str] = None, celltype: Optional[str] = None,
                 tissue: Optional[str] = None, disease: Optional[str] = None,
@@ -13588,8 +13723,11 @@ def library_bibtex(request: Request,
 
 @app.get("/library/status", tags=["library"])
 def library_status():
-    """Library and literature-index health: counts, issues, unresolved references, model."""
-    return _library().status()
+    """Library and literature-index health: counts, issues, unresolved references,
+    model, and the state of the last upload's background index update."""
+    status = _library().status()
+    status['upload_index'] = dict(_upload_index_status) or None
+    return status
 
 
 def _paper_or_404(request: Request, citekey: str, for_llm: bool = False):

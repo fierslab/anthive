@@ -82,9 +82,19 @@ Anthive well) and `anthive://dataset/<group>/<file>/context`.
 Papers marked `anthive_llm: never` in the library never reach an MCP client;
 `summary_only` papers show their summary but no passages or page text.
 
-All tools are read-only. Admin-only tools (`analytics_viz`, which runs
-Python on the server, and `rescan_databases`) only appear for members of
-the `admins` group.
+Paper upload tools (2.40): `paper_upload_requirements()` (which fields a
+paper record needs, with examples and the allowed values),
+`check_paper(metadata)` (a dry run: errors, missing fields, what CrossRef
+and OpenAlex would fill in, duplicates, the citekey and folder it would get)
+and `upload_paper(metadata, pdf_base64=None, folder=None, update=False)`.
+`check_paper` and `upload_paper` only appear for members of
+`library_upload_groups` (default: admins). The PDF goes base64-encoded in the
+call and is capped at `mcp.max_upload_mb` (default 25 MB). The paper is
+committed to the library with you as the author (`doc/LIBRARY.md`).
+
+Apart from `upload_paper`, all tools are read-only. Admin-only tools
+(`analytics_viz`, which runs Python on the server, and `rescan_databases`)
+only appear for members of the `admins` group.
 
 ## For operators
 

@@ -542,6 +542,98 @@ def build_index(sources: Sequence[Path], out: Path, *, embedder: Embedder,
     return stats
 
 
+def _sidecar_meta_next_to(pdf: Path) -> Dict[str, Any]:
+    """citekey/doi/title/year from ``<pdf stem>.md`` next to a library PDF."""
+    md = pdf.with_suffix(".md")
+    meta = _read_front_matter(md) if md.is_file() else {}
+    return {"citekey": str(meta["citekey"]) if meta.get("citekey") else None,
+            "collection": None,
+            "doi": str(meta.get("doi") or "").lower() or None,
+            "title": meta.get("title"), "year": _year_of(meta)}
+
+
+def add_or_replace_sources(pdfs: Sequence[Path], out: Path, *, embedder: Embedder,
+                           parse: ParseFn, source_root: Any = None,
+                           progress: Callable[[str], None] = lambda msg: None) -> Dict[str, Any]:
+    """Add these PDFs to an existing index without touching any other source.
+
+    Unlike ``build_index`` (which drops sources not in its list), this keeps
+    every existing chunk and only (re)indexes the given PDFs: a PDF whose
+    sha256 is already indexed just gets its citekey/title refreshed; a PDF
+    whose path was indexed with another sha256 has its old chunks replaced.
+    Used after an upload and after a library sync. If the index file does not
+    exist yet, it is created from these PDFs alone. A model or chunker
+    mismatch with the existing file is refused (run a full build instead).
+    """
+    import pyarrow.parquet as pq  # noqa: PLC0415
+
+    out = Path(out)
+    roots = [Path(r) for r in (source_root if isinstance(source_root, (list, tuple))
+                               else ([source_root] if source_root else []))]
+    rows: List[Dict[str, Any]] = []
+    if out.exists():
+        meta = read_index_metadata(out)
+        if (meta.get("embedding_model") != embedder.model
+                or meta.get("chunker_version") != CHUNKER_VERSION
+                or meta.get("schema_version") != SCHEMA_VERSION):
+            raise ValueError(f"{out} was built with model {meta.get('embedding_model')!r} / chunker "
+                             f"{meta.get('chunker_version')!r}: run a full `ant lib-index` build")
+        rows = pq.read_table(out).to_pylist()
+    by_sha: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        by_sha.setdefault(row["source_sha256"], []).append(row)
+    stats = {"added": [], "refreshed": 0, "replaced": [], "failed": [], "needs_ocr": []}
+    for pdf in pdfs:
+        pdf = Path(pdf)
+        if not pdf.is_file():
+            continue
+        sha = sha256_file(pdf)
+        rel = _relative_to_any(pdf, roots)
+        file_meta = _sidecar_meta_next_to(pdf)
+        if sha in by_sha:
+            for row in by_sha[sha]:
+                for key in ("citekey", "doi", "title", "year"):
+                    if file_meta.get(key):
+                        row[key] = file_meta[key]
+            stats["refreshed"] += 1
+            continue
+        stale = [r for r in rows if r["source_path"] == rel]
+        blocks, error = _parse_one(parse, pdf)
+        chunks = []
+        if error is None:
+            try:
+                chunks = blocks_to_chunks(blocks)
+            except Exception as exc:  # noqa: BLE001
+                error = str(exc)
+        if error is not None or not chunks:
+            stats["failed"].append(f"{rel}: {error or 'no text (scanned PDF? needs OCR)'}")
+            continue
+        coverage = text_layer_coverage(pdf)
+        if coverage is not None and coverage < 0.5:
+            stats["needs_ocr"].append(f"{rel}: text layer on {coverage:.0%} of pages")
+        if stale:
+            rows = [r for r in rows if r["source_path"] != rel]
+            stats["replaced"].append(rel)
+        vectors = embedder.embed_documents([c.text for c in chunks])
+        new_rows = []
+        for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
+            new_rows.append({
+                "chunk_id": f"{sha[:16]}:{i:04d}", **file_meta, "source_path": rel,
+                "source_sha256": sha, "page_start": chunk.page_start, "page_end": chunk.page_end,
+                "section": chunk.section, "heading": chunk.heading, "text": chunk.text,
+                "n_tokens": chunk.n_tokens, "cited_dois": chunk.dois,
+                "embedding": vector.tolist(),
+            })
+        rows += new_rows
+        by_sha[sha] = new_rows
+        stats["added"].append(rel)
+        progress(f"{rel}: {len(chunks)} chunks")
+    if stats["added"] or stats["replaced"] or stats["refreshed"] or not out.exists():
+        write_index(rows, out, embedder)
+    stats["chunks"] = len(rows)
+    return stats
+
+
 def text_layer_coverage(pdf: Path) -> Optional[float]:
     """Fraction of pages with an extractable text layer (None if pymupdf is
     unavailable). Image-only pages need OCR (``--parser docling`` with OCR)."""

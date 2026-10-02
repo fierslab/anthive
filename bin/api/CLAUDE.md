@@ -75,6 +75,16 @@ and `lib/config.py` (anthive.yaml loader).
   ant-mcp (internal secret + Remote-User) count as `for_llm` and honour
   `anthive_llm`. Query model: fastembed, cache from `get_model_cache_dir()`.
 
+- **Paper upload** (2.40): `GET /papers/upload/requirements`, `POST
+  /papers/upload` (multipart). Logic lives in `lib/library_upload.py`
+  (validation, enrichment, duplicates, folder rule, flock under `.git/`,
+  commit with the uploader as author); the handler only does auth
+  (`_require_uploader`, `library_upload_groups`) and the post-commit steps
+  (`_after_upload`: background `add_or_replace_sources`, library reload,
+  S3 autopush). Post-commit failures are warnings, never 500s. ant-mcp tools
+  `check_paper` / `upload_paper` are hidden unless the caller may upload
+  (`UPLOAD_TOOLS`, `_may_upload`).
+
 ## ant-mcp specifics
 
 - FastMCP `streamable-http` transport on `/mcp`, bound to loopback.

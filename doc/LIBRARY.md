@@ -37,10 +37,10 @@ references on datasets, collections and gene sets stay the source of truth.
   `README.md`, `REVIEW.md` and any `.md` without `entrytype` in its front
   matter (plain notes).
 - Moving a paper is a `git mv` of its `.md` (and moving the PDF next to it).
-  `ant sync push` uploads the PDF under its new key and reports the old key
-  as S3-only; it never deletes anything on S3 by itself.
+  `ant sync library` copies the PDF to its new key on S3 and reports the old
+  key; only `--propagate-deletes` removes it (see "Two-way sync" below).
 
-`ant lib-add` and `ant lib-import` put a NEW record in the first folder that
+`ant lib-add`, `ant lib-import` and the upload API put a NEW record in the first folder that
 applies, unless `--folder` says otherwise:
 
 1. `papers/lab/` when an author matches `library_lab_authors` in
@@ -207,7 +207,8 @@ license: CC-BY-4.0
 | `ant lib-check` | validates every record and every `papers:` reference in the h5adstore |
 
 | `ant lib-index` | builds or updates the literature index (`doc/LIBRARY_INDEX.md`) |
-| `ant sync push` / `pull` | also syncs the PDFs and the index (below); `--no-library` skips them, `--library-only` does only them |
+| `ant sync library` | two-way sync of the records (git) and PDFs (S3), then the index (below) |
+| `ant sync push` / `pull` | also run the library sync; `--no-library` skips it, `--library-only` does only it |
 
 All of them read the library location from `library` in `anthive.yaml`
 (environment `ANTHIVE_LIBRARY`) and the h5adstore from `h5adstore`.
@@ -224,8 +225,122 @@ h5adstore, mirroring the folders:
 ```
 
 The leading `_` keeps both out of the h5adstore sync and the S3 catalog scan.
-`ant sync pull` fetches the PDFs only into an existing library checkout (they
-mean nothing without their records) and creates the index folder if needed.
+The PDF sync works only inside an existing library checkout (PDFs mean
+nothing without their records); the index folder is created if needed.
+
+### Two-way sync (`ant sync library`)
+
+Papers can be added on any site (by hand, with `ant lib-add`, or through the
+upload API), so the library has no single direction. `ant sync library`
+runs three steps, and `ant sync push` and `ant sync pull` run the same three
+unless `--no-library` is given:
+
+1. **Records** through git: `git pull --rebase --autostash` from the
+   library remote, then `git push` when `library_git_push` is true. It never
+   forces. A rebase conflict is aborted (the checkout is left as it was) and
+   reported; resolve it by hand in the checkout. `--no-git` skips this step.
+2. **PDFs** against S3, decided per file from a manifest of what both sides
+   looked like at the last sync (kept in `.git/anthive-sync.json`, or
+   `.anthive-sync.json` when the library is not a plain git checkout; put
+   `.anthive-*` in the library's `.gitignore` in that case). Remote changes
+   are seen from the ETag and the `sha256` stored in each object's metadata,
+   so nothing is downloaded just to compare.
+3. **Index**: when PDFs arrived or changed, `ant lib-index --add` indexes
+   just those papers. Then the publisher rule below.
+
+| Local | S3 | Seen at last sync | Result |
+| --- | --- | --- | --- |
+| new | absent | no | upload |
+| absent | new | no | download |
+| same content | same content | no | recorded, nothing copied |
+| different | different | no | conflict |
+| changed | unchanged | yes | upload |
+| unchanged | changed | yes | download |
+| changed | changed | yes | conflict (unless both now hold the same bytes) |
+| unchanged | deleted | yes | reported; local file deleted only with `--propagate-deletes` |
+| deleted | unchanged | yes | reported; S3 object deleted only with `--propagate-deletes` |
+| moved (same bytes, new path, old path gone) | unchanged | yes | copied to the new key on S3; old key reported, removed with `--propagate-deletes` |
+| unchanged | moved and old key gone | yes | moved locally |
+
+A **conflict** keeps the local file untouched and saves the S3 version next
+to it as `<name>.conflict-YYYYMMDD.pdf` (never synced itself). It stays a
+conflict on every run until you decide: `--prefer local` uploads the local
+file, `--prefer remote` replaces it with the S3 copy. Delete the conflict
+copy afterwards.
+
+`--dry-run` prints the plan and changes nothing (no manifest update either).
+On a read-only site (`slave` mode) the sync downloads only: no git push, no
+S3 writes, local changes are reported.
+
+**Index publisher rule.** The literature index is derived data and is
+published by one site only, the one with `library_index_publisher: true`
+(normally the main site). That site pushes `library_chunks.parquet` to S3
+after its index update. Every other site downloads the published index only
+when it has none or the S3 copy is newer, then runs `ant lib-index --add` so
+its own local papers are included again. Two publishers would overwrite each
+other's index; do not configure more than one.
+
+## Adding papers through the API
+
+`POST /api/papers/upload` (and the MCP tools `check_paper` and
+`upload_paper`) add a paper without a shell on the server. Only members of
+`library_upload_groups` (default `[admins]`; in basic auth mode the users in
+`auth.admins` count as `admins`) may call it; everyone else gets a 403.
+
+`GET /api/papers/upload/requirements` describes what a record needs, with a
+description and example for every field and the allowed vocabularies, so a
+client (or the paper-preparation skill) can build a complete record first.
+
+Required:
+
+- `entrytype` (BibLaTeX: article, inproceedings, book, online, unpublished,
+  misc, ...), `title`, `author` (a list of `"Last, First"` names, at least
+  one), `date` or `year`;
+- an identifier: `doi`, `pmid`, `eprint` with `eprinttype`, or `url`.
+  Entry types `unpublished` and `misc` may give a `note` instead.
+
+Recommended (listed back as `missing_recommended` when absent):
+`journaltitle`, `abstract`, `keywords`, `anthive_role`, `anthive_celltypes`,
+`anthive_tissues`, `anthive_diseases`, `anthive_methods`, `anthive_cohorts`,
+`anthive_summary`, `anthive_access`, `anthive_llm` and `papers_for`.
+
+The multipart form takes `metadata` (a JSON object or the text of a `.md`
+record with front matter), an optional `file` (the PDF), `folder` (`lab`,
+`datasets`, `methods` or `reading`; default by the folder rule above),
+`enrich` (default true), `dry_run` and `update`.
+
+- **Enrichment** looks the DOI or PMID up in CrossRef and OpenAlex and fills
+  only empty fields; it never overwrites what was sent. Filled fields are
+  listed in `filled_fields` and in the record's `anthive_draft`, so they show
+  up for review. A failed lookup is a warning.
+- **Duplicates** are refused with 409 and the matching citekey, checked by
+  DOI, PMID, the PDF's sha256 and the citekey. A record without DOI or PMID
+  whose first author, year and title match an existing paper counts as the
+  same citekey (`matched_on: citekey`). `update=true` merges the sent
+  fields into the existing record instead (it stays in its folder).
+- **PDFs** are checked by their magic bytes (415 otherwise) and size
+  (`library_upload_max_pdf_mb`, 413 above it).
+- **`papers_for`** (dataset or collection ids, optionally `id:role`) is
+  stored as `anthive_proposed_links` on the paper and never written into the
+  h5adstore. A curator adds the real `papers:` reference on the dataset.
+- `dry_run=true` validates, enriches and returns the record that would be
+  written, without writing anything.
+
+Responses: 201 `created`, 200 `updated` or `dry_run` (all with `citekey`,
+`folder`, `path`, `pdf_sha256`, `record`, `filled_fields`, `warnings`,
+`missing_recommended`), 409 `duplicate`, 422 `invalid` (`errors` per field
+and `missing_required`), 413, 415, 403.
+
+What happens on success, in order: the record (and PDF) are written under a
+lock, the record is validated with the same rules as `ant lib-check`, and
+both are committed to the library repo with the uploader as git author
+(`Remote-Name`/`Remote-Email`, else the user name) and
+`library_git_committer` as committer; with `library_git_push` the commit is
+pushed. Then, without failing the request: the paper is added to the
+literature index in the background (`/api/library/status` shows
+`upload_index`), the library is reloaded, and with `library_s3_autopush`
+the PDF goes to S3 at once. Any of those that fails is returned as a
+warning; the paper itself is saved.
 
 ## How the server uses it
 

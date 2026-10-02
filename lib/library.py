@@ -49,6 +49,7 @@ ANTHIVE_FIELDS = [
     'anthive_diseases', 'anthive_organisms', 'anthive_methods',
     'anthive_cohorts', 'anthive_summary', 'anthive_orcids', 'anthive_cites',
     'anthive_openalex', 'anthive_access', 'anthive_llm', 'anthive_draft',
+    'anthive_proposed_links',
 ]
 
 FIELD_ORDER = BIBLATEX_FIELDS + ANTHIVE_FIELDS
