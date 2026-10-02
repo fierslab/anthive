@@ -220,6 +220,18 @@ both directions (`ant sync library`): new records come from git, new and
 changed PDFs go both ways, and nothing is deleted unless you add
 `--propagate-deletes` (`doc/LIBRARY.md`).
 
+Where the library lives:
+
+| What | Where | Synced by |
+| --- | --- | --- |
+| paper records (`.md`) | the library git repo | `git` (pulled and pushed by `ant sync library`) |
+| paper PDFs | S3, under `_library/papers/<folder>/` in the same bucket and prefix as the data | `ant sync` (both directions) |
+| literature index (`library_chunks.parquet` + `.json`) | S3, under `_library_index/` | `ant sync` (downloaded by every site; uploaded only by the site with `library_index_publisher: true`) |
+
+The leading `_` keeps these folders out of the dataset sync. A site that
+adds papers updates its own index locally after each sync, so it does not
+need the published copy to be current.
+
 ---
 
 ## 6. Start it
@@ -327,9 +339,39 @@ bin/ops/ant-stack pull
 bin/ops/ant-stack up
 ```
 
-Users, passwords, MCP links and caches live in `state_dir` and carry over.
-To go back, check out the old tag, put the old image tag back and run the
-same two commands.
+Run `bin/ops/ant-stack check` before `up`: it flags new settings a release
+needs. Users, passwords, MCP links and caches live in `state_dir` and carry
+over. To go back, check out the old tag, put the old image tag back and run
+the same two commands.
+
+#### What changed in recent releases (read when upgrading an older site)
+
+Read every entry between your current version (top-right of the site, or
+`curl -sk https://<site>/api/health`) and the new one.
+
+| Release | What it means for an existing site | Action |
+| --- | --- | --- |
+| **2.37.2** | Images are published only on the KU Leuven GitLab registry. Sites set up earlier may still point at `codeberg.org/mfiers`, which no longer has images. | in `site.yaml`: `images: registry: registry.gitlab.kuleuven.be/bdslab/anthive/anthive4` |
+| **2.38.0** | Several named MCP links per user. Existing links keep working (migrated and named "default"). New "Report an issue" link in the user menu. | optional: `site.issue_tracker_url` (empty hides the link) |
+| **2.39.0** | Paper library and literature search (REST, MCP tools, prompts). Without the library the site works as before. New front page. | optional: add the library, see below |
+| **2.40.0** | Paper upload through the API and MCP, two-way library sync, version button in the top bar. Uploads are off by default. | optional: `services: paper_upload: true` (see "Let people add papers") |
+
+The in-app chat assistant is off and being phased out; leave
+`services.chat: false`. AI use goes through the personal MCP links.
+
+#### Adding the paper library to an existing site
+
+1. Clone the library next to your other data (step 3):
+   `git clone <library repo URL> /srv/anthive/library && mkdir -p /srv/anthive/library_index`.
+2. Add both paths to `site.yaml` under `data:`:
+   `library: /srv/anthive/library` and `library_index: /srv/anthive/library_index`.
+3. Fetch the PDFs and the index from S3:
+   `bin/ops/ant-stack ingest -- ant sync pull --library-only`.
+4. `bin/ops/ant-stack check`, then `bin/ops/ant-stack up`.
+5. Check: `https://<site>/api/library/status` reports the number of papers
+   and `"loaded": true` for the index.
+
+The site needs the S3 settings and keys (step 4) for step 3.
 
 ### Back up
 
