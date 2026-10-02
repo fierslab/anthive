@@ -1485,6 +1485,35 @@ def test_facet_detail_renders(client):
     assert "/browse/GroupA/ds1#tab-genesets" in resp.text
 
 
+def test_facets_pages_carry_experimental_notice(client, monkeypatch):
+    monkeypatch.setenv("ANTHIVE_ISSUE_TRACKER_URL", "https://tracker.example/issues")
+    for path in ("/facets", "/facets/ant_disease"):
+        text = client.get(path).text
+        assert 'class="exp-notice"' in text
+        assert "Experimental." in text
+        notice = text.split('class="exp-notice"')[1].split("</div>")[0]
+        assert 'href="https://tracker.example/issues"' in notice
+        assert "Report an issue" in notice
+        assert "—" not in notice
+
+
+def test_facets_notice_without_issue_link_when_unconfigured(client, monkeypatch):
+    monkeypatch.setenv("ANTHIVE_ISSUE_TRACKER_URL", "")
+    text = client.get("/facets").text
+    notice = text.split('class="exp-notice"')[1].split("</div>")[0]
+    assert "Experimental." in notice
+    assert "<a " not in notice
+
+
+def test_facets_nav_entry_has_experimental_badge(client):
+    text = client.get("/").text
+    assert '<a href="/facets"' in text
+    nav_entry = text.split('<a href="/facets"')[1].split("</a>")[0]
+    assert 'class="exp-badge"' in nav_entry
+    # other pages carry no experimental notice
+    assert 'class="exp-notice"' not in text
+
+
 def test_facet_detail_404(client):
     # Unknown facet name lands on the facets index with a 404 status.
     resp = client.get("/facets/ant_unknown")

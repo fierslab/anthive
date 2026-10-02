@@ -199,6 +199,14 @@
    The home icon is the word "home" styled as a muted link — keeps it subtle
    and screen-reader-friendly.
 #}
+{% macro experimental_notice(what) -%}
+{%- set _issue_url = issue_tracker_url() -%}
+<div class="exp-notice" role="note">
+  <strong>Experimental.</strong> The {{ what }} view is still being developed: numbers and groupings may change or be incomplete.
+  {%- if _issue_url %} Feedback is welcome via <a href="{{ _issue_url }}" target="_blank" rel="noopener">Report an issue</a>.{% endif %}
+</div>
+{%- endmacro %}
+
 {% macro breadcrumb(trail, ids=None, is_secondary=False) -%}
 <nav class="breadcrumb" aria-label="breadcrumb">
   <a class="bc-home" href="/" title="catalogue home">home</a>

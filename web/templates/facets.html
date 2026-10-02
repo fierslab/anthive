@@ -34,10 +34,11 @@
   .empty-note { color: var(--text-muted); font-size: 13px; padding: 20px 0; }
 </style>
 
-{% from "_macros.html" import breadcrumb %}
+{% from "_macros.html" import breadcrumb, experimental_notice %}
 {{ breadcrumb([("facets", None)]) }}
 
 <h1 class="page-title">Facets</h1>
+{{ experimental_notice("facets") }}
 
 <p class="facet-desc">
   A facet is a standardised <code>ant_*</code> obs column that carries the

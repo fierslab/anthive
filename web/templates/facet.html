@@ -71,8 +71,9 @@
   .tvg-spark svg { display: block; }
 </style>
 
-{% from "_macros.html" import breadcrumb %}
+{% from "_macros.html" import breadcrumb, experimental_notice %}
 {{ breadcrumb([("facets", "/facets"), (facet_name, None)]) }}
+{{ experimental_notice("facets") }}
 
 {% if error %}<p style="color:#dc2626">{{ error }}</p>{% endif %}
 
