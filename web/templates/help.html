@@ -1,142 +1,339 @@
 {% extends "base.html" %}
 
-{% block title %}Help — anthive{% endblock %}
+{% block title %}Help · anthive{% endblock %}
 
 {% block content %}
 <style>
-  .help { max-width: 900px; }
+  .help { max-width: 920px; }
   .help h1 { font-size: 20px; font-weight: 600; margin: 4px 0 10px; }
-  .help h2 { font-size: 14px; margin: 18px 0 4px; border-bottom: 1px solid var(--border); padding-bottom: 2px; }
-  .help h3 { font-size: 12px; margin: 10px 0 3px; color: var(--text); text-transform: uppercase; letter-spacing: .4px; }
-  .help p, .help li { font-size: 13px; line-height: 1.6; }
-  .help ul { margin: 4px 0 6px 20px; }
+  .help h2 { font-size: 16px; margin: 26px 0 6px; border-bottom: 1px solid var(--border); padding-bottom: 3px; scroll-margin-top: 12px; }
+  .help h3 { font-size: 13.5px; margin: 14px 0 4px; color: var(--text); scroll-margin-top: 12px; }
+  .help p, .help li, .help td { font-size: 13px; line-height: 1.6; }
+  .help ul, .help ol { margin: 4px 0 8px 20px; }
   .help code, .help .path { background: var(--border-light); padding: 1px 5px; border-radius: 3px; font-family: var(--font-mono); font-size: 11.5px; }
-  .help .lead { font-size: 13px; color: var(--text); background: #f8fafc; border-left: 3px solid var(--link); padding: 8px 12px; margin: 6px 0 14px; border-radius: 0 4px 4px 0; }
-  .help .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 24px; margin: 4px 0; }
-  @media (max-width: 720px) { .help .grid { grid-template-columns: 1fr; } }
-  .help .kv { font-size: 12px; }
-  .help .kv .k { color: var(--text-muted); margin-right: 6px; font-family: var(--font-mono); font-size: 11px; }
-  .help .pill { display: inline-block; background: #f1f5f9; color: #64748b; border: 1px solid #cbd5e1; border-radius: 3px; padding: 0 5px; font-size: 10px; letter-spacing: .3px; }
-  .help .beaker, .help .globe { font-size: 13px; margin-right: 3px; }
-  .help .contact { color: var(--text-muted); font-size: 12px; margin-top: 8px; }
+  .help .lead { font-size: 13px; color: var(--text); background: var(--hover, #f8fafc); border-left: 3px solid var(--link); padding: 8px 12px; margin: 6px 0 14px; border-radius: 0 4px 4px 0; }
+  .help .note { font-size: 12.5px; color: var(--text-muted); border-left: 3px solid var(--border); padding: 4px 10px; margin: 6px 0; }
+  .help .warn { font-size: 12.5px; background: #fff7ed; border-left: 3px solid #f59e0b; padding: 6px 10px; margin: 8px 0; border-radius: 0 4px 4px 0; }
+  .help table { border-collapse: collapse; margin: 6px 0 10px; width: 100%; }
+  .help th, .help td { text-align: left; vertical-align: top; padding: 4px 8px; border-bottom: 1px solid var(--border-light); }
+  .help th { font-size: 12px; color: var(--text-muted); font-weight: 600; }
+  .help td code { white-space: nowrap; }
+  .help .toc { columns: 2; column-gap: 28px; margin: 8px 0 4px; padding-left: 18px; }
+  .help .toc li { break-inside: avoid; font-size: 13px; }
+  .help .toc ul { margin: 0 0 2px 16px; }
+  @media (max-width: 720px) { .help .toc { columns: 1; } }
+  .help .cmd { position: relative; background: var(--border-light); border-radius: 4px; padding: 8px 64px 8px 10px; margin: 6px 0 10px; }
+  .help .cmd pre { margin: 0; font-family: var(--font-mono); font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+  .help .cmd button { position: absolute; top: 6px; right: 6px; font-size: 11px; padding: 2px 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); border-radius: 3px; cursor: pointer; }
+  .help .filter { width: 100%; box-sizing: border-box; font-size: 14px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; margin: 6px 0 4px; background: var(--bg); color: var(--text); }
+  .help .filter-status { font-size: 12px; color: var(--text-muted); min-height: 16px; }
+  .help .contact { color: var(--text-muted); font-size: 12.5px; }
+  .help .table-wrap { overflow-x: auto; }
 </style>
 
 {% from "_macros.html" import breadcrumb %}
 {{ breadcrumb([("help", None)]) }}
 
 <div class="help">
-  <h1>Anthive — a quick tour</h1>
+  <h1>Anthive help</h1>
 
   <div class="lead">
-    Anthive is a single-cell RNA-seq browser focused on microglia and astrocyte
-    datasets relevant to Alzheimer's disease.
-    {% if n_datasets is not none %}It currently holds <strong>{{ n_datasets }}</strong> datasets{% if n_collections is not none %} across <strong>{{ n_collections }}</strong> collections{% endif %}{% if n_genesets is not none %}, plus <strong>{{ n_genesets }}</strong> registered gene sets{% endif %}.{% endif %}
-    Everything is server-rendered around a REST API — no data leaves this
-    server until you export it.
+    Anthive is a browser for curated single-cell RNA-seq data, mostly human
+    microglia and other brain cells in health and Alzheimer's disease, together
+    with a library of the papers behind it.
+    {% if n_datasets is not none %}It currently holds <strong>{{ n_datasets }}</strong> datasets{% if n_collections is not none %} in <strong>{{ n_collections }}</strong> collections{% endif %}{% if n_genesets is not none %} and <strong>{{ n_genesets }}</strong> gene sets{% endif %}.{% endif %}
+    You can explore it in the browser, from your own code, or through an AI
+    assistant connected with your personal MCP link.
   </div>
 
-  <h2>Getting around</h2>
-  <ul>
-    <li><a href="/">Landing page</a> — the full catalogue, grouped by collection. Column headers filter and sort; state persists via a <code>#mv=</code> hash so a filtered view is shareable.</li>
-    <li><a href="/">Collection page</a> (<span class="path">/browse/&lt;group&gt;</span>) — one collection's datasets. Constant metadata is hoisted to the header as pills; only fields that vary get their own column.</li>
-    <li><span class="path">/browse/&lt;group&gt;/&lt;file&gt;</span> — one dataset. IDs at the top are copy-clickable.</li>
-    <li><a href="/genesets">Genesets</a> (<span class="path">/genesets</span>) — the gene-set / starCAT / find-by-gene browsers.</li>
-    <li><a href="/genes/APOE">Gene atlas</a> (<span class="path">/genes/&lt;gene&gt;</span>) — a single gene's stats across every dataset.</li>
-  </ul>
+  <input type="search" class="filter" id="help-filter" placeholder="Search this help page (for example: MCP, skills, download, upload)" aria-label="Search this help page">
+  <div class="filter-status" id="help-filter-status"></div>
 
-  <h2>The dataset page — tabs</h2>
-  <p>Each dataset renders a tabbed page. Tabs only show when their data is
-     present:</p>
-  <div class="grid">
-    <div class="kv"><span class="k">Overview</span> markdown description, caveats, provenance.</div>
-    <div class="kv"><span class="k">Data</span> obs columns, embeddings, matrix shape.</div>
-    <div class="kv"><span class="k">Genes</span> per-dataset gene stats + your favourites.</div>
-    <div class="kv"><span class="k">Genesets</span> module scores computed for this dataset.</div>
-    <div class="kv"><span class="k">Numerical</span> distributions of continuous obs fields.</div>
-    <div class="kv"><span class="k">Categorical</span> distributions of categorical obs fields.</div>
-    <div class="kv"><span class="k">Differential expression</span> studies × terms × contrasts.</div>
-    <div class="kv"><span class="k">Downloads</span> the raw <code>.h5ad</code>, DuckDB, and sidecars.</div>
-    <div class="kv"><span class="k">⚠ Caveats</span> known issues — never the default tab; opt-in only.</div>
-  </div>
+  <nav aria-label="Contents">
+    <ol class="toc">
+      <li><a href="#what">What anthive is</a></li>
+      <li><a href="#finding">Finding data</a></li>
+      <li><a href="#pages">Collection and dataset pages</a></li>
+      <li><a href="#plots">Plots</a></li>
+      <li><a href="#genes">Genes, gene sets and facets</a></li>
+      <li><a href="#papers">The paper library</a></li>
+      <li><a href="#ai">Working with AI assistants</a>
+        <ul>
+          <li><a href="#mcp">MCP: connect an assistant</a></li>
+          <li><a href="#mcp-clients">Setting up each client</a></li>
+          <li><a href="#mcp-offers">What the MCP server offers</a></li>
+          <li><a href="#skills">Skills</a></li>
+          <li><a href="#servers">Several anthive servers</a></li>
+          <li><a href="#ai-practice">Good practice and limits</a></li>
+        </ul>
+      </li>
+      <li><a href="#code">Programmatic access</a></li>
+      <li><a href="#account">Accounts, privacy and getting help</a></li>
+    </ol>
+  </nav>
 
-  <p>The top-right <strong>visualize ▾</strong> dropdown is the plot launcher —
-     it opens an interactive form for scatter, hexbin, KDE, violin, dot-plot,
-     heatmap, forest / volcano / MA (DE), and the rest.</p>
+  <section class="help-section" id="what">
+    <h2>1. What anthive is</h2>
+    <ul>
+      <li><strong>Datasets</strong> are single-cell (or bulk or spatial) expression matrices with their cell annotations, converted from curated <code>.h5ad</code> files into fast databases. Each has an id such as <code>L26/FMG</code>: the collection code, then the dataset code.</li>
+      <li><strong>Collections</strong> group the datasets that come from one study or source, usually one paper.</li>
+      <li><strong>Papers</strong> live in the <a href="/library">paper library</a>: the publications behind the datasets plus papers kept for background, with their full text searchable.</li>
+      <li><strong>Gene sets and module scores</strong>: curated gene modules, scored per cell in many datasets.</li>
+      <li><strong>Facets</strong>: standardised annotation columns (<code>ant_*</code>) that mean the same thing in every dataset, so you can compare across studies.</li>
+    </ul>
+    <p>The site is developed and curated by the <a href="https://mflab.kuleuven.be/" target="_blank" rel="noopener">Fiers Lab</a> at KU Leuven / VIB. The software and its documentation are on <a href="https://gitlab.kuleuven.be/bdslab/anthive/anthive4" target="_blank" rel="noopener">GitLab</a>.</p>
+  </section>
 
-  <h2>Genesets</h2>
-  <ul>
-    <li><a href="/genesets">/genesets</a> — three tabs: <em>gene sets</em> (curated registry), <em>starCAT</em> (weighted programs), <em>find by gene</em> (reverse lookup).</li>
-    <li><span class="path">/genesets/&lt;study&gt;/&lt;experiment&gt;</span> — one experiment's set list.</li>
-    <li><span class="path">/genesets/&lt;study&gt;/&lt;experiment&gt;/&lt;name&gt;</span> — one gene set plus a <em>where it varies most</em> panel.</li>
-    <li><a href="/genesets/variability">/genesets/variability</a> — fleet-wide module × dataset variance-explained heatmap.</li>
-    <li><span class="path">/genesets?group=bygene</span> — type a gene, find every set it belongs to.</li>
-  </ul>
+  <section class="help-section" id="finding">
+    <h2>2. Finding data</h2>
+    <p>The <a href="/">front page</a> lists every collection, newest first.</p>
+    <ul>
+      <li><strong>Search box.</strong> Type anything: a paper title, an author, a journal or year, a DOI or PubMed id, a tissue, cell type, disease or method, a collection or dataset code, or the name of a dataset inside a collection. Several words must all match (so <code>microglia prefrontal</code> narrows the list). Case and accents do not matter, and matching words are highlighted.</li>
+      <li><strong>Shortcut and sharing.</strong> Press <code>/</code> anywhere on the page to jump to the search box. The search is kept in the address bar, so you can copy the URL to share exactly the list you see.</li>
+      <li><strong>Filters.</strong> The <em>Filters</em> button opens chips for organism, cell type, tissue, method and disease, with counts. Chips in one group combine as OR, chips in different groups as AND. Filters are also kept in the URL and remembered in your browser.</li>
+      <li><strong>Tags only where it matters.</strong> Each collection shows small tags only for what is unusual in this catalogue (for example <em>mouse</em>, <em>spatial</em>, <em>astrocytes</em>, <em>prefrontal cortex</em>). The common case (human, brain, microglia, single-cell RNA, Alzheimer's) is not repeated on every row. Collections whose access differs from the usual get a small mark (for example <em>public</em>).</li>
+      <li><strong>Sorting.</strong> Recently added, paper year, number of cells, or name.</li>
+      <li><strong>Table view.</strong> The <em>Table view</em> button switches to a classic table with all columns, following the same search and filters.</li>
+    </ul>
+  </section>
 
-  <h2>Filters, sorting, shareable views</h2>
-  <ul>
-    <li><strong>Multi-select popovers</strong> live on the column headers of the landing table and most drilldown tables. Zero-checked reads as "all". A blue tint on the button = an active filter.</li>
-    <li><strong>Sort</strong> — click a header title (not the popover button) to sort by that column.</li>
-    <li><strong>Shareable URL state</strong> — the landing page and several drilldowns encode filter + sort state as a <code>#mv=key=val;key=val</code> hash. Copy the URL, paste anywhere; the same view opens.</li>
-    <li>Selection state that isn't in the URL (dropdowns, tabs) is stored per-browser via <code>localStorage</code>, so it survives a reload.</li>
-  </ul>
+  <section class="help-section" id="pages">
+    <h2>3. Collection and dataset pages</h2>
+    <h3>Collection page</h3>
+    <p>Lists the datasets of one collection with their size and the annotations that differ between them (values shared by all datasets are shown once, as pills under the title). Below the table: the collection description, the linked <strong>papers</strong> (with why they are linked) and downloads.</p>
+    <h3>Dataset page</h3>
+    <p>At the top: the <strong>id strip</strong> with the collection, dataset and database ids (click to select and copy; you need the database id, for example <code>L26/FMG</code>, in the API, vark, pyvark and MCP), provenance (access, source, license, links to the DOI or accession), the title, a short description, context pills and the numbers of cells and genes. The <em>visualize</em> menu (top right) opens the plot builder.</p>
+    <div class="table-wrap">
+    <table>
+      <tr><th>Tab</th><th>What it shows</th></tr>
+      <tr><td>Overview</td><td>The written description of the dataset, when there is one.</td></tr>
+      <tr><td>Data</td><td>Layers, embeddings (UMAP, PCA) and an overview of the cell annotation columns.</td></tr>
+      <tr><td>Genes</td><td>Expression statistics per gene (mean, standard deviation, coefficient of variation, fraction of cells expressing it); search, sort and star favourites.</td></tr>
+      <tr><td>Genesets</td><td>Module scores already computed for curated gene sets, with how strongly they vary across the dataset's annotations.</td></tr>
+      <tr><td>Numerical</td><td>Numeric cell annotations (age, Braak stage, QC metrics, scores) with summaries and quick plots.</td></tr>
+      <tr><td>Categorical</td><td>Categorical annotations (cell type, donor, disease, sex) with value counts and quick plots.</td></tr>
+      <tr><td>Differential expression</td><td>Precomputed differential expression results, when the dataset has them: studies, terms, contrasts and genes, with volcano and MA plots.</td></tr>
+      <tr><td>Papers</td><td>The papers linked to this dataset, with the reason (for example <em>Source of this dataset</em>), a short summary, PDF, DOI, PubMed and BibTeX.</td></tr>
+      <tr><td>Downloads</td><td>The original <code>.h5ad</code> file, the papers' PDFs and any other files that belong to the study.</td></tr>
+      <tr><td>⚠ Caveats</td><td>Known problems with this dataset (contamination, batch effects, missing metadata). Read them before drawing conclusions. A ⚠ in the lists marks datasets that have caveats.</td></tr>
+    </table>
+    </div>
+    <p>Tabs only appear when the dataset has that kind of data.</p>
+    <h3>Facets (<code>ant_*</code> columns)</h3>
+    <p>Columns starting with <code>ant_</code>, such as <code>ant_cell_type</code>, <code>ant_disease</code>, <code>ant_donor</code>, <code>ant_sex</code>, <code>ant_age</code>, <code>ant_braak</code> and <code>ant_apoe</code>, are the site's standardised annotations: same name and same values in every dataset that has them. Prefer them when you group, colour or filter, and when you compare datasets. They are shown in bold with a small <em>facet</em> pill; the tooltip gives the original column name.</p>
+  </section>
 
-  <h2>Facets</h2>
-  <p>Fields prefixed <code>ant_</code> such as <code>ant_braak</code>,
-     <code>ant_sex</code>, <code>ant_donor</code>, <code>ant_apoe</code>,
-     or <code>ant_diagnosis</code> are the site's controlled vocabulary.
-     They render in <strong>bold</strong> with a subdued
-     <span class="pill">facet</span> pill. The tooltip carries the raw
-     column name.</p>
-  <p>These are what analytics and curation index on. Use them when you're
-     grouping, colouring, or filtering plots.</p>
-  <ul>
-    <li><a href="/facets">/facets</a> lists every facet in the catalog with
-      how many datasets carry it and how strong the module-scoring signal
-      is across the fleet.</li>
-    <li><span class="path">/facets/&lt;name&gt;</span> drills into one facet.
-      You get the dataset carriers, the value distribution, and a sortable
-      table of module scores whose variance is best explained by this facet.
-      Rows deep-link into the dataset Genesets tab.</li>
-  </ul>
+  <section class="help-section" id="plots">
+    <h2>4. Plots</h2>
+    <ul>
+      <li><strong>Where.</strong> Use the <em>visualize</em> menu on a dataset page, or the small chart icons next to a column. Plots are rendered on the server, so they work on very large datasets.</li>
+      <li><strong>Plot types.</strong> Scatter and hexbin (on an embedding such as UMAP, or one variable against another), violin, box, bar, histogram, ECDF, KDE and 2-D KDE, heatmap, rolling average along a variable, and for differential expression: volcano, MA, forest and DE heatmap.</li>
+      <li><strong>Colour, subset and sample.</strong> Colour by a gene or a column; restrict to a subset of cells (for example one sex or one disease group); subsample very large datasets for speed. Settings such as palette and size live in the side panel.</li>
+      <li><strong>Downloads.</strong> PNG, SVG or PDF. Figures contain no visible caption text, so they are clean for manuscripts; the caption is available separately.</li>
+      <li><strong>Sharing.</strong> <em>copy URL</em> copies the address of the interactive plot page with all settings; <em>copy thumbnail md</em> copies a snippet to embed the plot in a description.</li>
+      <li><strong>Notebook.</strong> <em>📓 notebook</em> opens the same plot as a JupyterLite notebook in your browser, with the code to fetch the data and redraw it. Download the notebook to keep changes.</li>
+    </ul>
+  </section>
 
-  <h2>Icons you'll see</h2>
-  <ul>
-    <li><span class="beaker">⚗</span> <strong>Lab beaker</strong> — dataset generated in-house.</li>
-    <li><span class="globe">🌐</span> <strong>Globe</strong> — imported / public dataset.</li>
-    <li>Small chart glyphs next to obs fields (histogram, ECDF, UMAP dot, hexbin) — quick launchers for the matching plot geom on that column.</li>
-    <li><span class="pill">⚠</span> in the collection list means the dataset has caveats worth reading.</li>
-  </ul>
+  <section class="help-section" id="genes">
+    <h2>5. Genes, gene sets and facets</h2>
+    <ul>
+      <li><strong>Gene atlas.</strong> Type a gene in the <em>gene atlas</em> box in the top bar to see it across all datasets; several genes separated by commas give a heatmap. Favourite genes (set in Preferences) are marked.</li>
+      <li><strong>Gene sets</strong> (<a href="/genesets">/genesets</a>): browse curated gene sets by study and experiment, open one to see its genes and where its module score varies most, or look up every set containing a gene. The <a href="/genesets/variability">variability heatmap</a> compares modules across datasets; note that these statistics are per cell, not per donor.</li>
+      <li><strong>Module scores</strong> are computed per cell with scanpy (default) or UCell; choose the method in Preferences.</li>
+      <li><strong>Facets browser</strong> (<a href="/facets">/facets</a>, marked <em>EXP</em>): every facet with how many datasets carry it and how strongly module scores vary with it. It is experimental: numbers and groupings may still change.</li>
+    </ul>
+  </section>
 
-  <h2>Preferences</h2>
-  <p>The <strong>👤 dropdown → Preferences</strong> page holds per-browser
-     settings kept in <code>localStorage</code>:</p>
-  <ul>
-    <li><strong>Module-scoring algorithm</strong> — scanpy (default) or UCell.</li>
-    <li><strong>Favourite genes</strong> — pinned to the top of gene lists and marked with a star in the gene atlas.</li>
-  </ul>
-  <p>Nothing here is server-persisted. Clearing your browser data resets these
-     to defaults.</p>
+  <section class="help-section" id="papers">
+    <h2>6. The paper library</h2>
+    <ul>
+      <li><strong><a href="/library">Library page</a>:</strong> every paper, searchable and filterable by year, cohort, cell type and role.</li>
+      <li><strong>Paper page:</strong> the full record (authors, journal, DOI, PubMed, abstract), a short summary, topics (cell types, tissues, diseases, methods, cohorts), the datasets it is linked to, related papers, the PDF and a BibTeX entry.</li>
+      <li><strong>Why a paper is linked.</strong> Datasets point to papers with a role: <em>source</em> (the data come from this paper), <em>reanalysis</em>, <em>method</em> (a protocol or tool used) or <em>related</em> (for example a preprint of the same study). Related papers are also found automatically, and the page says why: same cohort, another version of the same study, shared authors, same cell type, tissue, disease or method, or one cites the other.</li>
+      <li><strong>Drafts.</strong> Summaries and topics marked <em>draft, not yet reviewed</em> were written by a language model from the abstract and methods and still await a curator. Treat them as hints; the PDF and the record are authoritative.</li>
+      <li><strong>Search inside papers.</strong> The full text is indexed by section and page; AI assistants can search it and cite the page (see <a href="#mcp-offers">MCP</a>).</li>
+      <li><strong>Adding papers.</strong> By default only admins can add papers (sites can widen this). Admins and other permitted users can upload through the API (<code>POST /api/papers/upload</code>, with <code>GET /api/papers/upload/requirements</code> listing what a record needs) or through their AI assistant with the MCP tools <code>check_paper</code> and <code>upload_paper</code>. The <code>anthive-paper-upload</code> skill guides an assistant through collecting complete metadata first. New papers are checked for duplicates, missing details are filled from CrossRef and PubMed, and links to datasets are proposed for a curator to confirm.</li>
+    </ul>
+  </section>
 
-  <h2>The data assistant (chat)</h2>
-  <p>The <strong>💬</strong> button (bottom-right, when enabled for your
-     deployment) opens an in-app chat that can navigate you to plots, filter
-     tables, and answer questions about the catalogue. Your messages are
-     stored on this server and forwarded to an external model provider;
-     the underlying single-cell data itself is never sent —
-     see <a href="/privacy">the privacy note</a>.</p>
+  <section class="help-section" id="ai">
+    <h2>7. Working with AI assistants</h2>
+    <p>You can let an AI assistant (Claude, ChatGPT-based tools, Cursor, VS Code, Codex, OpenCode and others) search, plot and analyse anthive data for you, and read the papers. Two pieces work together:</p>
+    <ul>
+      <li><strong>MCP</strong> is the live connection: it lets the assistant use anthive, as you, through a personal link.</li>
+      <li><strong>Skills</strong> are written know-how installed in your assistant: how to use anthive well, which caveats matter, how to cite. They are loaded automatically when relevant.</li>
+    </ul>
+    <p>Use both if your assistant supports skills; MCP alone works too.</p>
 
-  <h2>REST API</h2>
-  <p>Every server-rendered view is backed by <code>ant-serve</code>, a REST
-     API you can hit directly. The <strong>API</strong> link in the topbar
-     opens the Swagger UI at <span class="path">/api/docs</span>. A Python
-     client (<code>pyvark</code>) and a Go CLI (<code>vark</code>) ship
-     separately; see the topbar link or ask in-lab for access.</p>
+    <h3 id="mcp">7a. MCP: connect an assistant</h3>
+    <p>MCP (Model Context Protocol) is a standard way for AI assistants to use outside tools. Anthive runs an MCP server; your assistant connects to it with a <strong>personal link</strong> that identifies you, so it sees exactly what you may see and acts in your name.</p>
+    <ol>
+      <li>Sign in, open your name at the top right and choose <strong>Connect an MCP client</strong> (it says <strong>MCP links</strong> once you have links). This opens <a href="/account/mcp">your MCP page</a>.</li>
+      <li>Give the link a name, for example <em>laptop Claude Code</em>, and press <em>Add a link</em>. Make one link per client or computer, so you can replace one without touching the others. Most sites allow up to 5 links per person.</li>
+      <li>Copy the link, or the ready-made setup snippet for your client (next section).</li>
+      <li><strong>Rotate</strong> a link if you think it leaked: the old address stops working immediately and you paste the new one into your client. <strong>Revoke</strong> removes a link for good. Links expire after a period set by the site (90 days by default); the page warns when expiry is near and <em>Renew</em> gives a fresh one.</li>
+    </ol>
+    <div class="warn"><strong>Treat a link like a password.</strong> Anyone who has it can query the data as you. Do not paste it into chats, tickets or shared files.</div>
 
-  <h2>Contact</h2>
-  <p class="contact">
-    Bug reports, dataset requests, curation fixes:
-    <a href="mailto:mark.fiers@kuleuven.be">mark.fiers@kuleuven.be</a>.
-    The catalogue is developed by the <a href="https://mflab.kuleuven.be/" target="_blank" rel="noopener">Fiers Lab</a> at KU Leuven / VIB.
-  </p>
+    <h3 id="mcp-clients">7b. Setting up each client</h3>
+    <p>Your <a href="/account/mcp">MCP page</a> shows these snippets with your own link filled in and a copy button. Below, replace <code>&lt;your link&gt;</code> with your link, which looks like <code>https://&lt;this site&gt;/mcp/u/amcp_...</code>.</p>
+    <p><strong>Claude Code</strong>: run once in a terminal:</p>
+    <div class="cmd"><pre>claude mcp add --transport http anthive &lt;your link&gt;</pre><button type="button" data-copy-help>Copy</button></div>
+    <p><strong>Claude Desktop and claude.ai</strong>: open Settings, then Connectors, choose <em>Add custom connector</em>, give it a name (for example <em>anthive</em>) and paste your link as the server URL. Leave the OAuth fields empty.</p>
+    <p><strong>Cursor, VS Code and other clients that read a JSON configuration</strong> (Cursor: <code>~/.cursor/mcp.json</code>, VS Code: <code>.vscode/mcp.json</code>):</p>
+    <div class="cmd"><pre>{
+  "mcpServers": {
+    "anthive": {
+      "type": "http",
+      "url": "&lt;your link&gt;"
+    }
+  }
+}</pre><button type="button" data-copy-help>Copy</button></div>
+    <p><strong>Codex, OpenCode and other assistants</strong>: add a remote MCP server of type HTTP (streamable HTTP) with your link as the URL, using your client's own configuration file or command; the JSON above shows the two values it needs (a name and the URL).</p>
+    <p class="note">The name you give the server (<code>anthive</code> above) is how the assistant refers to it, and how its tools and prompts are named in your client.</p>
+
+    <h3 id="mcp-offers">7c. What the MCP server offers</h3>
+    <p>When an assistant connects, the server tells it where to start: load a dataset's background first, cite the literature, and keep "the literature says" apart from "our data shows". The tools:</p>
+    <div class="table-wrap">
+    <table>
+      <tr><th>Tool</th><th>What it does</th></tr>
+      <tr><td><code>search_datasets</code></td><td>Search and filter the datasets.</td></tr>
+      <tr><td><code>get_dataset_info</code></td><td>Details of one dataset: layers, embeddings, annotation columns.</td></tr>
+      <tr><td><code>get_dataset_context</code></td><td>Background before analysing a dataset: metadata, caveats, exact column names, module scores and the source paper's methods.</td></tr>
+      <tr><td><code>search_genes</code></td><td>Find gene names in a dataset (names are case-sensitive).</td></tr>
+      <tr><td><code>plot</code></td><td>Make a plot and return it, with its link.</td></tr>
+      <tr><td><code>analytics_schema</code></td><td>Show the tables and columns available for queries.</td></tr>
+      <tr><td><code>analytics_query</code></td><td>Run a read-only SQL query on a dataset.</td></tr>
+      <tr><td><code>analytics_viz</code></td><td>Draw a custom figure from a query result with Python (admins only).</td></tr>
+      <tr><td><code>module_score</code></td><td>Score a gene set per cell (like scanpy <code>score_genes</code> or Seurat <code>AddModuleScore</code>).</td></tr>
+      <tr><td><code>list_module_scores</code></td><td>Module scores already computed for a dataset.</td></tr>
+      <tr><td><code>list_genesets</code>, <code>get_geneset</code></td><td>Browse the curated gene sets and fetch one with its genes.</td></tr>
+      <tr><td><code>search_literature</code></td><td>Search the full text of the library papers; returns passages with the citation, page and section.</td></tr>
+      <tr><td><code>get_paper</code></td><td>One paper: record, summary, topics and the datasets it is linked to.</td></tr>
+      <tr><td><code>related_papers</code></td><td>Papers related to a paper, and why.</td></tr>
+      <tr><td><code>paper_upload_requirements</code></td><td>What a paper record needs before upload.</td></tr>
+      <tr><td><code>check_paper</code>, <code>upload_paper</code></td><td>Check a paper record without saving it, then add it to the library (only for people allowed to upload).</td></tr>
+      <tr><td><code>rescan_databases</code></td><td>Reload the catalogue on the server (admins only).</td></tr>
+    </table>
+    </div>
+    <p>Tools you may not use are hidden from your assistant. The server also offers two <strong>prompts</strong>, ready-made task recipes you start yourself (in Claude Code type them as slash commands; the middle part is the name you gave the server):</p>
+    <ul>
+      <li><code>/mcp__anthive__investigate_dataset</code> with a dataset id: loads the background and proposes sensible analyses.</li>
+      <li><code>/mcp__anthive__literature_in_our_data</code> with a topic: what the papers say, and whether the data agree.</li>
+    </ul>
+    <p>And two <strong>resources</strong>, documents your client can attach (Claude Desktop and Claude Code support this): <code>anthive://guide</code>, how to use anthive well, and <code>anthive://dataset/&lt;collection&gt;/&lt;dataset&gt;/context</code>, the background of one dataset.</p>
+
+    <h3 id="skills">7d. Skills</h3>
+    <p>A <strong>skill</strong> is a small folder with instructions (a <code>SKILL.md</code>) that your assistant loads by itself when a task fits. Where MCP gives the assistant access, a skill gives it judgement: which tool to call first, how to avoid misleading statistics, how to cite. Skills follow an open format, so the same skills work in Claude Code, Codex, OpenCode, Cursor, Gemini CLI, GitHub Copilot and many other agents.</p>
+    <p>The anthive skills are public at <a href="https://gitlab.kuleuven.be/bdslab/anthive/skills" target="_blank" rel="noopener">gitlab.kuleuven.be/bdslab/anthive/skills</a>. Names starting with <code>anthive-</code> need access to an anthive server; names starting with <code>sc-</code> are general single-cell and research practice and work without anthive. Currently:</p>
+    <div class="table-wrap">
+    <table>
+      <tr><th>Skill</th><th>For</th></tr>
+      <tr><td><code>anthive-basics</code></td><td>Start here: connecting (MCP or REST), finding datasets, several servers, ground rules.</td></tr>
+      <tr><td><code>anthive-dataset-analysis</code></td><td>Expression, plots, module scores, SQL, and statistics without overclaiming.</td></tr>
+      <tr><td><code>anthive-literature</code></td><td>Searching and citing the paper library, and combining it with the data.</td></tr>
+      <tr><td><code>anthive-paper-upload</code></td><td>Preparing complete metadata for a paper and uploading it.</td></tr>
+      <tr><td><code>sc-reproducible-research</code></td><td>Reproducible AI-assisted analysis: frozen data, scripted pipelines, versioning, recorded environments and model use, independent checks.</td></tr>
+    </table>
+    </div>
+    <p>The list grows; the repository always has the current set.</p>
+    <p><strong>Install</strong> with the skills command-line tool (needs <a href="https://nodejs.org/" target="_blank" rel="noopener">Node.js</a>), into every agent it finds on your computer:</p>
+    <div class="cmd"><pre>DISABLE_TELEMETRY=1 npx skills add https://gitlab.kuleuven.be/bdslab/anthive/skills.git -g --agent '*'</pre><button type="button" data-copy-help>Copy</button></div>
+    <p><strong>Update</strong> later:</p>
+    <div class="cmd"><pre>DISABLE_TELEMETRY=1 npx skills update -g</pre><button type="button" data-copy-help>Copy</button></div>
+    <ul>
+      <li><code>DISABLE_TELEMETRY=1</code> stops the tool from reporting the installation to its makers.</li>
+      <li>To install for certain agents only, name them separated by spaces, for example <code>--agent claude-code codex opencode</code>. Leave out <code>-g</code> to install into the current project only.</li>
+      <li>To install only some skills, add <code>--skill</code> with their names separated by spaces; <code>-l</code> lists what the repository offers without installing anything.</li>
+      <li>The tool keeps one copy in <code>~/.agents/skills/</code> (read directly by Codex, OpenCode and other agents) and links it into agent-specific folders such as <code>~/.claude/skills/</code>.</li>
+      <li>Without the tool, copy the folders under <code>skills/</code> of the repository into your agent's skills folder.</li>
+      <li>Assistants without skills support (for example claude.ai) still get the same guidance through MCP: the <code>anthive://guide</code> resource and the prompts.</li>
+    </ul>
+
+    <h3 id="servers">7e. Several anthive servers</h3>
+    <p>You may have access to more than one anthive server, for example an internal one with everything you may see and a public one. The skills and tools work with any of them.</p>
+    <ul>
+      <li>Add one MCP connection per server, each with its own link and a clear name (for example <code>anthive-intern</code> and <code>anthive-public</code>). The assistant should say which server each result came from.</li>
+      <li>Dataset ids such as <code>L26/FMG</code> are unique only within one server; always name the server with the id.</li>
+      <li>Servers hold different data and may run different versions (shown on the version button). Literature search needs version 2.39.0 or newer, paper upload 2.40.0 or newer.</li>
+      <li>Without MCP, assistants and scripts reach a server over plain HTTP: if you use <a href="https://codeberg.org/mfiers/vark" target="_blank" rel="noopener">vark</a>, its server list (<code>vark server ls</code>) is used; otherwise set <code>ANTHIVE_URL=https://&lt;site&gt;</code> and put your login in <code>~/.netrc</code> (<code>machine &lt;site&gt; login &lt;user&gt; password &lt;password&gt;</code>).</li>
+    </ul>
+
+    <h3 id="ai-practice">7f. Good practice and limits</h3>
+    <ul>
+      <li><strong>Pseudoreplication.</strong> Thousands of cells from a few donors are not independent. Ask for comparisons per donor (<code>ant_donor</code>) and the number of donors before trusting a disease or sex effect.</li>
+      <li><strong>Citations.</strong> Ask the assistant to cite literature as [Author Year, p.N] and to keep it separate from what the data show; check important claims in the PDF.</li>
+      <li><strong>Drafts.</strong> Paper summaries marked as drafts are model-written; quotes from the paper are more reliable.</li>
+      <li><strong>Permissions.</strong> Some tools are admin-only (custom Python figures, reloading the catalogue, and by default uploading papers). The assistant gets a clear refusal instead of a result.</li>
+      <li><strong>Privacy.</strong> Your assistant's provider (for example Anthropic, OpenAI or the maker of your editor) sees the questions you ask and the results the tools return, including text from papers and summaries of data. The underlying expression matrices stay on this server unless a tool returns or you download them. Use a provider and settings you trust for unpublished work.</li>
+      <li><strong>The built-in chat</strong> that some sites showed in the corner of the page is switched off; use your own assistant through MCP instead.</li>
+    </ul>
+  </section>
+
+  <section class="help-section" id="code">
+    <h2>8. Programmatic access</h2>
+    <h3>REST API</h3>
+    <p>Everything the site shows comes from a REST API under <code>/api</code>. The <strong>API</strong> link in the top bar opens interactive documentation at <a href="/api/docs">/api/docs</a> (also <a href="/api/redoc">/api/redoc</a>). Scripts sign in with your normal username and password over HTTPS; keep them in <code>~/.netrc</code> and use <code>curl -n</code>:</p>
+    <div class="cmd"><pre>curl -n -s "https://&lt;this site&gt;/api/databases" | jq '.databases[] | {id, title, n_cells}'</pre><button type="button" data-copy-help>Copy</button></div>
+    <div class="cmd"><pre>curl -n -s "https://&lt;this site&gt;/api/databases/L26/FMG/plot/violin?x=ant_disease&amp;y=APOE&amp;sample=20000" -o apoe.png</pre><button type="button" data-copy-help>Copy</button></div>
+    <p>Changes between versions are listed in the <a href="/api/changelog">changelog</a>.</p>
+    <h3>vark (command line)</h3>
+    <p><a href="https://codeberg.org/mfiers/vark" target="_blank" rel="noopener">vark</a> is a single program for the terminal that queries one or several anthive servers at once.</p>
+    <div class="cmd"><pre>curl -sSL https://codeberg.org/mfiers/vark/raw/branch/main/install.sh | bash
+vark server login --name intern --url https://&lt;this site&gt;/api --user &lt;you&gt;
+vark db ls
+vark gene-stats L26/FMG APOE
+vark plot L26/FMG --geom violin --x ant_disease --y APOE --out apoe.png</pre><button type="button" data-copy-help>Copy</button></div>
+    <p><code>vark skill install</code> adds a vark skill to the agents on your computer.</p>
+    <h3>pyvark (Python)</h3>
+    <p><a href="https://codeberg.org/mfiers/pyvark" target="_blank" rel="noopener">pyvark</a> is the Python client, for scripts and notebooks:</p>
+    <div class="cmd"><pre>pip install pyvark
+python -c "from vark import AnthiveClient; c = AnthiveClient('https://&lt;this site&gt;/api', auth=('&lt;you&gt;', '&lt;password&gt;')); print(len(c.get_databases()))"</pre><button type="button" data-copy-help>Copy</button></div>
+    <h3>Notebooks in the browser</h3>
+    <p>The <em>📓 notebook</em> button on a plot, and <a href="/jupyter/lab/index.html">JupyterLite</a>, open notebooks that run in your browser with pyvark preinstalled. Nothing is installed on your computer; download a notebook to keep it.</p>
+  </section>
+
+  <section class="help-section" id="account">
+    <h2>9. Accounts, privacy and getting help</h2>
+    <ul>
+      <li><strong>Signing in and out.</strong> The site asks for your login once per session; <em>Logout</em> is in the menu under your name, which also has your <a href="/account/mcp">MCP links</a> and <a href="/settings">Preferences</a> (scoring method, favourite genes; stored in your browser only).</li>
+      <li><strong>Version.</strong> The small button left of <em>Help</em> shows the version of the running server (for example <code>v2.40.0</code>); hover for details, click for the changelog. Mention it when you report a problem.</li>
+      <li><strong>Privacy.</strong> The site uses no analytics or tracking; preferences stay in your browser. See <a href="/privacy">the privacy note</a>.</li>
+      {% set _help_issue_url = issue_tracker_url() %}
+      {% if _help_issue_url %}<li id="help-issue-link"><strong>Problems and requests.</strong> <a href="{{ _help_issue_url }}" target="_blank" rel="noopener">Report an issue</a> (also in the menu under your name): bugs, wrong annotations, datasets or papers you would like added.</li>{% endif %}
+    </ul>
+    <p class="contact">Contact: <a href="mailto:mark.fiers@kuleuven.be">mark.fiers@kuleuven.be</a>.</p>
+  </section>
 </div>
+
+<script>
+(function () {
+  // Copy buttons on command blocks.
+  document.querySelectorAll('.help [data-copy-help]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var text = btn.parentElement.querySelector('pre').innerText;
+      var done = function () { btn.textContent = 'Copied'; setTimeout(function () { btn.textContent = 'Copy'; }, 1500); };
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(done, function () {});
+      } else {
+        var ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta);
+        ta.select(); try { document.execCommand('copy'); done(); } catch (e) {} document.body.removeChild(ta);
+      }
+    });
+  });
+  // Search-as-you-type over sections.
+  var input = document.getElementById('help-filter'), status = document.getElementById('help-filter-status');
+  var sections = Array.prototype.slice.call(document.querySelectorAll('.help .help-section'));
+  input.addEventListener('input', function () {
+    var words = input.value.toLowerCase().split(/\s+/).filter(Boolean), shown = 0;
+    sections.forEach(function (sec) {
+      var text = sec.textContent.toLowerCase();
+      var hit = words.every(function (w) { return text.indexOf(w) !== -1; });
+      sec.hidden = words.length > 0 && !hit; if (!sec.hidden) shown++;
+    });
+    status.textContent = words.length ? (shown + ' of ' + sections.length + ' sections match') : '';
+  });
+})();
+</script>
 {% endblock %}

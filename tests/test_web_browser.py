@@ -2524,6 +2524,49 @@ def test_help_page_renders(client):
     assert 'href="/privacy"' in resp.text
 
 
+def test_help_page_has_all_sections_and_toc(client):
+    resp = client.get("/help")
+    assert resp.status_code == 200
+    for anchor in ("what", "finding", "pages", "plots", "genes", "papers", "ai",
+                   "mcp", "mcp-clients", "mcp-offers", "skills", "servers",
+                   "ai-practice", "code", "account"):
+        assert f'id="{anchor}"' in resp.text, anchor
+        assert f'href="#{anchor}"' in resp.text, anchor
+    assert 'id="help-filter"' in resp.text
+    help_body = resp.text.split('<div class="help">', 1)[1].split('<script>', 1)[0]
+    assert '\u2014' not in help_body
+
+
+def test_help_page_skills_and_mcp_facts(client):
+    resp = client.get("/help")
+    text = resp.text
+    assert ("DISABLE_TELEMETRY=1 npx skills add "
+            "https://gitlab.kuleuven.be/bdslab/anthive/skills.git -g --agent &#39;*&#39;") in text \
+        or ("DISABLE_TELEMETRY=1 npx skills add "
+            "https://gitlab.kuleuven.be/bdslab/anthive/skills.git -g --agent '*'") in text
+    assert "npx skills update -g" in text
+    assert "claude mcp add --transport http anthive" in text
+    for tool in ("search_datasets", "get_dataset_info", "get_dataset_context", "search_genes",
+                 "plot", "analytics_schema", "analytics_query", "analytics_viz", "module_score",
+                 "list_module_scores", "list_genesets", "get_geneset", "search_literature",
+                 "get_paper", "related_papers", "paper_upload_requirements", "check_paper",
+                 "upload_paper", "rescan_databases"):
+        assert f"<code>{tool}</code>" in text, tool
+    assert "investigate_dataset" in text and "literature_in_our_data" in text
+    assert "anthive://guide" in text
+    assert 'href="/account/mcp"' in text and 'href="/api/docs"' in text
+
+
+def test_help_page_issue_link_follows_config(client, monkeypatch):
+    monkeypatch.setenv("ANTHIVE_ISSUE_TRACKER_URL", "https://example.org/issues")
+    resp = client.get("/help")
+    assert 'id="help-issue-link"' in resp.text
+    assert 'href="https://example.org/issues"' in resp.text
+    monkeypatch.setenv("ANTHIVE_ISSUE_TRACKER_URL", "")
+    resp = client.get("/help")
+    assert 'id="help-issue-link"' not in resp.text
+
+
 def test_help_link_reachable_from_landing(client):
     # A user landing on / can click Help without knowing the URL.
     resp = client.get("/")
