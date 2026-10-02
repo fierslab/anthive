@@ -3,7 +3,7 @@
 This is the one supported way to run anthive: a docker compose stack,
 described by one file (`site.yaml`) and driven by one tool
 (`bin/ops/ant-stack`). Follow the steps in order. Every command below was run
-end to end on a fresh checkout for release 2.40.1.
+end to end on a fresh checkout for release 2.40.2.
 
 Plan about an hour, plus the time it takes to download the data.
 
@@ -69,7 +69,7 @@ sudo mkdir -p /srv/anthive && sudo chown $USER /srv/anthive
 cd /srv/anthive
 git clone https://gitlab.kuleuven.be/bdslab/anthive/anthive4.git
 cd anthive4
-git checkout v2.40.1
+git checkout v2.40.2
 ```
 
 Always check out a release tag, and use the same number as the image tag in
@@ -141,7 +141,7 @@ ports:
 
 images:
   registry: registry.gitlab.kuleuven.be/bdslab/anthive/anthive4
-  tag: 2.40.1                                 # same number as the git tag
+  tag: 2.40.2                                 # same number as the git tag
 
 s3:                                           # skip if you have no S3 keys
   enabled: true
@@ -358,6 +358,7 @@ Read every entry between your current version (top-right of the site, or
 | **2.39.0** | Paper library and literature search (REST, MCP tools, prompts). Without the library the site works as before. New front page. | optional: add the library, see below |
 | **2.40.0** | Paper upload through the API and MCP, two-way library sync, version button in the top bar. Uploads are off by default. | optional: `services: paper_upload: true` (see "Let people add papers") |
 | **2.40.1** | Paper PDFs moved from `*/static/` into the paper library (and deleted there on S3); new Papers tab, paper pages and Library page. | after `ant sync pull`, delete old local copies: `find <h5adstore> -path '*/static/*.pdf' -not -path '*/_*' -delete`; add the library if you have not (below) |
+| **2.40.2** | Client setup guide for 22 AI clients on GitLab (`doc/MCP_CLIENTS.md`); the help page links to the GitLab docs. | optional: `site.docs_base_url` to point the help links at your own docs |
 
 The in-app chat assistant is off and being phased out; leave
 `services.chat: false`. AI use goes through the personal MCP links.
@@ -449,7 +450,7 @@ Personal MCP links work the same in every mode.
 | `registry.gitlab.kuleuven.be/bdslab/anthive/anthive4/anthive-app` | every service (API, web, MCP) in one image, ~1.7 GB |
 | `registry.gitlab.kuleuven.be/bdslab/anthive/anthive4/anthive-ingest` | the app plus the R/Seurat tools for converting data, ~4.5 GB |
 
-Tags are release numbers (`2.40.1`) plus `latest`. Always pin a release
+Tags are release numbers (`2.40.2`) plus `latest`. Always pin a release
 number in `site.yaml`; `latest` changes under you. The images are public
 (no login needed to pull), linux/amd64 only, and contain no data,
 configuration or secrets: each image is checked against the git tree at

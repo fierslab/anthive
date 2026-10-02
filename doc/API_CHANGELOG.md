@@ -29,6 +29,21 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.40.2 — 2026-10-02
+
+Patch release: no endpoint changes. `/me/mcp` snippets gain more clients.
+
+- New `doc/MCP_CLIENTS.md`: setting up anthive in 22 AI clients (Claude Code,
+  claude.ai and Claude Desktop, Codex, ChatGPT, Gemini CLI, OpenCode, Cursor,
+  VS Code / Copilot, Windsurf, Zed, Cline, Roo Code, Continue, Goose, Amp,
+  Kiro, Warp, JetBrains, Junie, LM Studio, Cherry Studio, Pi) plus the
+  `mcp-remote` bridge, each with a link to the vendor docs; cloud connectors
+  need a publicly reachable site.
+- The help page links to the documentation on GitLab (`docs_base_url`,
+  `site.docs_base_url`) instead of repeating it.
+- The MCP links page gets setup tabs for Codex, Gemini CLI, VS Code, Cursor
+  and mcp-remote, and links to the full guide.
+
 ## 2.40.1 — 2026-10-02
 
 Patch release: no endpoint or response changes. Web UI and data layout only.
