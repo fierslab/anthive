@@ -396,7 +396,6 @@
 
 <div class="tab-bar" id="ds-tab-bar" role="tablist">
   {% if markdown_content %}<button type="button" class="tab-btn active" data-tab="overview" role="tab">Overview</button>{% endif %}
-  {% if papers %}<button type="button" class="tab-btn" data-tab="papers" role="tab" id="tab-btn-papers">Papers<span class="tab-count">{{ papers|length }}</span></button>{% endif %}
   <button type="button" class="tab-btn{% if not markdown_content %} active{% endif %}" data-tab="data" role="tab">Data</button>
   {% if info and info.n_genes %}
   <button type="button" class="tab-btn"        data-tab="genes"    role="tab">Genes</button>
@@ -409,6 +408,7 @@
   {% if de_studies %}
   <button type="button" class="tab-btn"        data-tab="de"       role="tab">Differential expression<span class="tab-count">{{ de_studies|length }}</span></button>
   {% endif %}
+  {% if papers %}<button type="button" class="tab-btn" data-tab="papers" role="tab" id="tab-btn-papers">Papers<span class="tab-count">{{ papers|length }}</span></button>{% endif %}
   {# Downloads tab hidden until JS confirms a filtered h5ad is available. #}
   <button type="button" class="tab-btn"        data-tab="downloads" role="tab" id="tab-btn-downloads" style="display:none">Downloads</button>
   {# Caveats tab is intentionally last and NEVER default-active — it is a
@@ -429,14 +429,6 @@
 {% endif %}
 
 {# ── Papers tab (only when the library links papers to this dataset) ──── #}
-{% if papers %}
-{% from "_papers.html" import paper_list %}
-<section class="tab-panel" id="tab-papers" role="tabpanel">
-  <h2>Papers
-    <span class="info" title="Papers in the anthive library linked to this dataset. The label says why each one is linked: the source of the data, a reanalysis, a method, or a related study.">ⓘ</span></h2>
-  {{ paper_list(papers) }}
-</section>
-{% endif %}
 
 {# ── Caveats tab (only rendered when caveats present) ────────────────── #}
 {% if caveats %}
@@ -840,6 +832,15 @@
       </tbody>
   </table>
   </div>
+</section>
+{% endif %}
+
+{% if papers %}
+{% from "_papers.html" import paper_list %}
+<section class="tab-panel" id="tab-papers" role="tabpanel">
+  <h2>Papers
+    <span class="info" title="Papers in the anthive library linked to this dataset. The label says why each one is linked: the source of the data, a reanalysis, a method, or a related study.">ⓘ</span></h2>
+  {{ paper_list(papers) }}
 </section>
 {% endif %}
 

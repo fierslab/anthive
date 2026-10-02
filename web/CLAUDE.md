@@ -91,7 +91,7 @@ and `folder_view` does so for every dataset of the collection (deduplicated,
 papers come first; the badge and sentence come from `_paper_reason()`
 (source / reanalysis / method / related, "preprint" for online/unpublished
 entries). A summary listed in `draft_fields` gets the "draft, not yet
-reviewed" marker. The dataset page shows a `Papers` tab after Overview and a
+reviewed" marker. The dataset page shows a `Papers` tab directly before Downloads and a
 server-rendered `#ds-paper-files` subsection in Downloads (paper PDFs come
 from `/api/papers/{citekey}/file`, not from `static/`); that subsection keeps
 the Downloads tab visible even when `/files` lists nothing. Everything hides
@@ -383,6 +383,7 @@ with `nh3`/`bleach` + a CSP if editing ever widens.)
 - **Actual tab bar (2026-08):** `Overview` (only when markdown) · `Data` ·
   `Genes` (only when n_genes > 0) · `Genesets` (only when module scores) ·
   `Numerical` · `Categorical` · `Differential expression` (only when DE data) ·
+  `Papers` (only when linked library papers) ·
   `Downloads` (JS-revealed when h5ad exists) · `⚠ Caveats` (only when caveats
   — pinned far right and **never default-active**; it's an opt-in warning
   surface, not a landing tab; `activateTab` fallback skips it and prefers

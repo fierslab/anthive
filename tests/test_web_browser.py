@@ -5951,3 +5951,12 @@ def test_nav_library_link_follows_availability(client, monkeypatch):
     monkeypatch.setattr(browser, "_library_state",
                         {"available": False, "checked": browser.time.monotonic(), "refreshing": False})
     assert 'id="nav-library"' not in client.get("/about").text
+
+
+def test_dataset_papers_tab_sits_right_before_downloads(library_client):
+    import re
+    html = library_client.get("/browse/GroupA/ds1").text
+    buttons = re.findall(r'data-tab="([a-z]+)"', html)
+    assert 'papers' in buttons and 'downloads' in buttons
+    assert buttons.index('downloads') == buttons.index('papers') + 1
+    assert buttons[0] != 'papers'
