@@ -10,6 +10,7 @@ import html as html_lib
 import re
 import sys
 import time
+import unicodedata
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qsl, quote as url_quote, unquote, urlencode
@@ -952,7 +953,7 @@ def _paper_info_for_group(group_name: Optional[str]) -> Dict[str, str]:
     if cached and cached[0] == cur_mtime:
         return cached[1]
     result: Dict[str, str] = {}
-    wanted = ('paper_title', 'first_author', 'last_author')
+    wanted = ('paper_title', 'first_author', 'last_author', 'journal')
     try:
         if path.is_file():
             with path.open('r', encoding='utf-8', errors='replace') as fh:
@@ -1557,6 +1558,196 @@ def _summarize_caveats(caveats: Optional[List[Dict]]) -> Dict[str, Any]:
     return {'n': len(caveats), 'max_level': max_level or 'low'}
 
 
+# ── landing-page list helpers ─────────────────────────────────────────────────
+# The catalogue list shows plain words and only the values that set a
+# collection apart from the rest of the catalogue; these maps turn ontology
+# terms and technology classes into readable labels.
+_CELLTYPE_PLAIN = {
+    'microglial cell': 'microglia', 'microglia': 'microglia',
+    'astrocyte': 'astrocytes', 'oligodendrocyte': 'oligodendrocytes',
+    'oligodendrocyte precursor cell': 'OPCs', 'neuron': 'neurons',
+    'excitatory neuron': 'excitatory neurons', 'inhibitory neuron': 'inhibitory neurons',
+    'myeloid cell': 'myeloid cells', 'macrophage': 'macrophages',
+    'endothelial cell': 'endothelial cells', 'pericyte': 'pericytes', 'pericyte cell': 'pericytes',
+    'vascular associated smooth muscle cell': 'smooth muscle cells',
+}
+_TISSUE_PLAIN = {
+    'brodmann (1909) area 17': 'visual cortex (BA17)',
+}
+# Disease values that describe controls rather than a condition: never tags.
+_CONTROL_VALUES = {'normal', 'control', 'healthy', 'none', 'not applicable'}
+_TAG_GROUP_WORD = {'organism': 'species', 'method': 'methods', 'tissue': 'regions',
+                   'celltype': 'cell types', 'disease': 'conditions'}
+_TECH_PLAIN = {
+    'sc/sn RNA': 'single-cell RNA', 'bulk RNA': 'bulk RNA', 'spatial': 'spatial',
+    'proteomics': 'proteomics', 'other': 'other method',
+}
+_FACET_SKIP = {'', 'na', 'n/a', 'none', 'null', 'unknown', 'mixed', 'mix', 'other'}
+LANDING_FACETS = ('organism', 'celltype', 'tissue', 'method', 'disease')
+
+
+def _fold_text(text: str) -> str:
+    """Lower-case, accent-free, whitespace-collapsed text for client search."""
+    decomposed = unicodedata.normalize('NFKD', str(text or ''))
+    stripped = ''.join(ch for ch in decomposed if not unicodedata.combining(ch))
+    return ' '.join(stripped.lower().split())
+
+
+def _plain_facet_value(field: str, value: str) -> str:
+    text = str(value).strip()
+    if field == 'celltype':
+        return _CELLTYPE_PLAIN.get(text.lower(), text)
+    if field == 'method':
+        return _TECH_PLAIN.get(text, text)
+    if field == 'tissue':
+        return _TISSUE_PLAIN.get(text.lower(), text)
+    return text
+
+
+def _collection_facets(dbs: List[Dict]) -> Dict[str, List[str]]:
+    """Plain-word facet values per field, unioned over a collection's datasets."""
+    out: Dict[str, List[str]] = {}
+    for field in LANDING_FACETS:
+        values: List[str] = []
+        for db in dbs:
+            if field == 'method':
+                raw = [_tech_class(t) for t in _as_list(db.get('technology'))]
+            else:
+                source_field = 'celltype' if field == 'celltype' else field
+                raw = _as_list(db.get(source_field)) or (
+                    _as_list(db.get('cell_type')) if field == 'celltype' else [])
+            for item in raw:
+                for part in str(item).split(','):
+                    if part.strip().lower() in _FACET_SKIP:
+                        continue
+                    plain = _plain_facet_value(field, part)
+                    if plain and plain not in values:
+                        values.append(plain)
+        out[field] = sorted(values, key=str.lower)
+    return out
+
+
+_ADDED_PLACEHOLDER = re.compile(r'^\d{4}-01-01$')
+
+
+def _collection_added(collection_meta: Dict, last_modified: str) -> str:
+    """Date a collection was added: index.md date unless it is a YYYY-01-01
+    placeholder, then the newest dataset modification date."""
+    curated = str(collection_meta.get('date') or '').strip()[:10]
+    if curated and not _ADDED_PLACEHOLDER.match(curated):
+        return curated
+    return str(last_modified or '')[:10]
+
+
+def _collection_search_text(name: str, group_id: str, paper: Dict, collection_meta: Dict,
+                            facets: Dict[str, List[str]], dbs: List[Dict]) -> str:
+    """Everything a person might type to find a collection, folded for search."""
+    parts: List[str] = [name, group_id, collection_meta.get('group') or '',
+                        collection_meta.get('title') or '', collection_meta.get('summary') or '',
+                        (collection_meta.get('description') or '')[:1500],
+                        str(collection_meta.get('year') or ''), str(collection_meta.get('doi') or ''),
+                        str(collection_meta.get('pmid') or ''), str(collection_meta.get('accession') or '')]
+    parts += [paper.get(k) or '' for k in ('paper_title', 'first_author', 'last_author', 'journal')]
+    for values in facets.values():
+        parts += values
+    for db in dbs:
+        for key in ('id', 'file_id', 'basename', 'title', 'description', 'organism', 'tissue',
+                    'celltype', 'cell_type', 'disease', 'condition', 'region', 'technology',
+                    'suspension_type', 'experimental_system', 'accession', 'doi', 'pmid',
+                    'contributor', 'access', 'source', 'year'):
+            parts += [str(v) for v in _as_list(db.get(key))]
+        parts.append((db.get('markdown') or '')[:600])
+    return _fold_text(' '.join(p for p in parts if p))
+
+
+def _landing_tags(facets: Dict[str, List[str]], defaults: Dict[str, set]) -> List[Dict[str, str]]:
+    """Facet values that differ from the catalogue default, organism and method
+    first. More than two unusual values in one field collapse into a single
+    count tag ("11 regions") whose title lists them."""
+    tags: List[Dict[str, str]] = []
+    for field in ('organism', 'method', 'tissue', 'celltype', 'disease'):
+        unusual = [v for v in facets.get(field) or []
+                   if v not in defaults.get(field, set())
+                   and not (field == 'disease' and v.lower() in _CONTROL_VALUES)]
+        if len(unusual) > 2:
+            tags.append({'field': field, 'value': f"{len(unusual)} {_TAG_GROUP_WORD[field]}",
+                         'title': ', '.join(unusual)})
+        else:
+            tags += [{'field': field, 'value': v, 'title': v} for v in unusual]
+    return tags
+
+
+def _collection_access_label(access_values: List[str]) -> str:
+    """One access word per collection: 'public', 'internal' (or another
+    single non-public value), or 'partly public' when datasets disagree."""
+    values = sorted(set(access_values or ['internal']))
+    if len(values) == 1:
+        return values[0]
+    return 'partly public' if 'public' in values else ', '.join(values)
+
+
+def landing_access_marks(collections: List[Dict]) -> str:
+    """Set coll['access_mark'] only where a collection's access differs from
+    the catalogue majority, so the mark carries information. Returns the
+    majority label. Majority non-public: public ones get a muted 'public'
+    mark. Majority public: non-public ones get the lock."""
+    counts: Dict[str, int] = defaultdict(int)
+    for coll in collections:
+        coll['access_label'] = _collection_access_label(coll.get('access_values') or [])
+        counts[coll['access_label']] += 1
+    majority = max(counts.items(), key=lambda item: (item[1], item[0]))[0] if counts else 'internal'
+    for coll in collections:
+        label = coll['access_label']
+        if label == majority:
+            coll['access_mark'] = None
+        elif label == 'public' or (majority != 'public' and label == 'partly public'):
+            coll['access_mark'] = {'kind': 'public', 'text': label,
+                                   'title': f"{label}: shareable outside the lab"
+                                            if label == 'public' else
+                                            "some datasets are public, others internal"}
+        else:
+            coll['access_mark'] = {'kind': 'lock', 'text': label,
+                                   'title': f"Not public ({label}): for signed-in lab members; "
+                                            f"do not share outside the group"}
+    return majority
+
+
+def landing_facet_defaults(collections: List[Dict], share: float = 0.30) -> Dict[str, set]:
+    """Per facet, the single most common value when at least `share` of all
+    collections carry it: the catalogue's unstated default, not shown as a tag."""
+    total = len(collections) or 1
+    defaults: Dict[str, set] = {}
+    for field in LANDING_FACETS:
+        counts: Dict[str, int] = defaultdict(int)
+        for coll in collections:
+            for value in (coll.get('facets') or {}).get(field) or []:
+                counts[value] += 1
+        top = max(counts.items(), key=lambda item: (item[1], item[0]), default=None)
+        defaults[field] = {top[0]} if top and top[1] / total >= share else set()
+    return defaults
+
+
+def _authors_label(first: Optional[str], last: Optional[str]) -> str:
+    """'First … Last' for the landing list, or whichever name is known."""
+    first, last = (first or '').strip(), (last or '').strip()
+    if first and last and first != last:
+        return f"{first} … {last}"
+    return first or last
+
+
+def _cells_label(count: Optional[int]) -> str:
+    """Readable cell count: '88 cells', '3.9 k cells', '833 k cells', '1.4 M cells'."""
+    if not count:
+        return ''
+    if count < 1000:
+        return f"{count} cells"
+    if count < 10_000:
+        return f"{count / 1000:.1f} k cells"
+    if count < 1_000_000:
+        return f"{round(count / 1000)} k cells"
+    return f"{count / 1_000_000:.1f} M cells"
+
+
 def get_collection_list(api_url: str) -> List[Dict]:
     """Build collection list by grouping API databases by group_id."""
     databases = _all_databases(api_url)
@@ -1587,6 +1778,7 @@ def get_collection_list(api_url: str) -> List[Dict]:
         # the folder's index.md frontmatter — the /databases endpoint doesn't
         # expose them. Landing renders them on the collection row's line 1.
         paper_info = _paper_info_for_group(collection_meta.get('group'))
+        facets = _collection_facets(dbs)
 
         # Unified source+publication icon (one glyph per collection). The
         # shape is semantically about *provenance* — beaker = lab-generated
@@ -1687,6 +1879,15 @@ def get_collection_list(api_url: str) -> List[Dict]:
             # any member dataset with is_secondary=true → mark the whole
             # collection as containing secondary data. All-primary stays False.
             'has_secondary': any(bool(db.get('is_secondary')) for db in dbs),
+            # Landing list: plain-word facets, paper line extras, sort keys
+            # and the folded search text the client-side filter reads.
+            'facets': facets,
+            'journal': paper_info.get('journal') or '',
+            'paper_year': str(collection_meta.get('year') or ''),
+            'added': _collection_added(collection_meta, last_modified),
+            'non_public': any(str(db.get('access') or 'internal').lower() != 'public' for db in dbs),
+            'access_values': sorted({str(db.get('access') or 'internal').lower() for db in dbs}),
+            'search_text': _collection_search_text(name, group_id, paper_info, collection_meta, facets, dbs),
         })
 
     # Default sort: newest-first by last_modified (empty values sink to the
@@ -1910,6 +2111,22 @@ async def index(request: Request):
 
     filter_options = get_filter_options(collections)
     tissue_tree = build_tissue_tree(collections)
+    facet_defaults = landing_facet_defaults(collections)
+    landing_access_marks(collections)
+    for coll in collections:
+        coll['tags'] = _landing_tags(coll.get('facets') or {}, facet_defaults)
+        coll['display_title'] = coll.get('paper_title') or coll.get('name') or coll.get('group_id')
+        coll['authors_label'] = _authors_label(coll.get('first_author'), coll.get('last_author'))
+        coll['cells_label'] = _cells_label(coll.get('total_cells'))
+        coll['landing_index'] = {
+            'gid': coll.get('group_id'),
+            'text': coll.get('search_text') or '',
+            'facets': coll.get('facets') or {},
+            'added': coll.get('added') or '',
+            'year': coll.get('paper_year') or '',
+            'cells': coll.get('total_cells') or 0,
+            'name': coll.get('display_title') or '',
+        }
 
     return templates.TemplateResponse(request, "index.html", {
         "folders": collections,
@@ -1918,6 +2135,8 @@ async def index(request: Request):
         "total_cells": total_cells,
         "filter_options": filter_options,
         "tissue_tree": tissue_tree,
+        "facet_defaults": {k: sorted(v) for k, v in facet_defaults.items()},
+        "landing_facets": LANDING_FACETS,
     })
 
 
