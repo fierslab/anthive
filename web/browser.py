@@ -1677,6 +1677,41 @@ def _landing_tags(facets: Dict[str, List[str]], defaults: Dict[str, set]) -> Lis
     return tags
 
 
+def _collection_access_label(access_values: List[str]) -> str:
+    """One access word per collection: 'public', 'internal' (or another
+    single non-public value), or 'partly public' when datasets disagree."""
+    values = sorted(set(access_values or ['internal']))
+    if len(values) == 1:
+        return values[0]
+    return 'partly public' if 'public' in values else ', '.join(values)
+
+
+def landing_access_marks(collections: List[Dict]) -> str:
+    """Set coll['access_mark'] only where a collection's access differs from
+    the catalogue majority, so the mark carries information. Returns the
+    majority label. Majority non-public: public ones get a muted 'public'
+    mark. Majority public: non-public ones get the lock."""
+    counts: Dict[str, int] = defaultdict(int)
+    for coll in collections:
+        coll['access_label'] = _collection_access_label(coll.get('access_values') or [])
+        counts[coll['access_label']] += 1
+    majority = max(counts.items(), key=lambda item: (item[1], item[0]))[0] if counts else 'internal'
+    for coll in collections:
+        label = coll['access_label']
+        if label == majority:
+            coll['access_mark'] = None
+        elif label == 'public' or (majority != 'public' and label == 'partly public'):
+            coll['access_mark'] = {'kind': 'public', 'text': label,
+                                   'title': f"{label}: shareable outside the lab"
+                                            if label == 'public' else
+                                            "some datasets are public, others internal"}
+        else:
+            coll['access_mark'] = {'kind': 'lock', 'text': label,
+                                   'title': f"Not public ({label}): for signed-in lab members; "
+                                            f"do not share outside the group"}
+    return majority
+
+
 def landing_facet_defaults(collections: List[Dict], share: float = 0.30) -> Dict[str, set]:
     """Per facet, the single most common value when at least `share` of all
     collections carry it: the catalogue's unstated default, not shown as a tag."""
@@ -2077,6 +2112,7 @@ async def index(request: Request):
     filter_options = get_filter_options(collections)
     tissue_tree = build_tissue_tree(collections)
     facet_defaults = landing_facet_defaults(collections)
+    landing_access_marks(collections)
     for coll in collections:
         coll['tags'] = _landing_tags(coll.get('facets') or {}, facet_defaults)
         coll['display_title'] = coll.get('paper_title') or coll.get('name') or coll.get('group_id')

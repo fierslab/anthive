@@ -5726,3 +5726,24 @@ def test_landing_phone_layout_markers(client):
     assert "tr.row-paper td.row-paper-spacer { display: none; }" in text
     # hidden list items stay hidden despite the flex display rule
     assert ".cat-list [hidden]" in text
+
+
+
+def test_landing_access_mark_only_where_it_differs():
+    colls = [{"access_values": ["internal"]} for _ in range(3)] + [
+        {"access_values": ["public"]}, {"access_values": ["internal", "public"]}]
+    assert browser.landing_access_marks(colls) == "internal"
+    assert [c["access_mark"] for c in colls[:3]] == [None, None, None]   # majority: no lock
+    assert colls[3]["access_mark"]["kind"] == "public"
+    assert colls[4]["access_mark"]["text"] == "partly public"
+    flipped = [{"access_values": ["public"]} for _ in range(3)] + [{"access_values": ["internal"]}]
+    assert browser.landing_access_marks(flipped) == "public"
+    assert flipped[0]["access_mark"] is None
+    assert flipped[3]["access_mark"]["kind"] == "lock"
+
+
+def test_landing_access_still_searchable_and_in_table(client):
+    text = client.get("/?all=1").text
+    index = _landing_index(text)
+    assert "public" in index["GroupA"]["text"] and "internal" in index["GroupB"]["text"]
+    assert 'data-acc=' in text            # table view keeps its access filter data

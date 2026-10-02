@@ -219,6 +219,7 @@
   }
   .cat-tag.more { background: transparent; border: 1px dashed var(--border); color: var(--text-muted); }
   .cat-lock { width: 13px; height: 13px; color: #b0b6bd; flex: 0 0 auto; }
+  .cat-access { font-size: 11px; color: #8a929b; letter-spacing: .2px; white-space: nowrap; }
   .cat-badge-secondary { font-size: 11px; color: var(--text-muted); margin-left: 6px; }
   mark.hit { background: #fff3b0; color: inherit; padding: 0 1px; border-radius: 2px; }
   #cat-empty { max-width: 1100px; margin: 24px auto; color: var(--text-muted); font-size: 14px; }
@@ -299,7 +300,9 @@
     <div class="cat-side">
       {%- for tag in _tags[:3] %}<span class="cat-tag" title="{{ tag.title }}">{{ tag.value }}</span>{% endfor -%}
       {%- if _tags|length > 3 %}<span class="cat-tag more" title="{{ _tags[3:]|map(attribute='title')|join(', ') }}">+{{ _tags|length - 3 }}</span>{% endif -%}
-      {%- if folder.non_public %}<svg class="cat-lock" viewBox="0 0 16 16" role="img" aria-label="Not public"><title>Not public ({{ folder.access_values|join(', ') }}): for signed-in lab members; do not share outside the group</title><rect x="3" y="7" width="10" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>{% endif -%}
+      {%- set _mark = folder.access_mark -%}
+      {%- if _mark and _mark.kind == 'lock' %}<svg class="cat-lock" viewBox="0 0 16 16" role="img" aria-label="Not public"><title>{{ _mark.title }}</title><rect x="3" y="7" width="10" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>
+      {%- elif _mark %}<span class="cat-access" title="{{ _mark.title }}">{{ _mark.text }}</span>{% endif -%}
     </div>
   </li>
   {% endfor %}
