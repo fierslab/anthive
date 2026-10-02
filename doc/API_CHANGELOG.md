@@ -29,6 +29,23 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.40.1 — 2026-10-02
+
+Patch release: no endpoint or response changes. Web UI and data layout only.
+
+- Paper PDFs moved out of the h5adstore (`*/static/*.pdf`) into the paper
+  library (records in `bdslab/anthive/library_store`, PDFs on S3 under
+  `_library/papers/`); collections link to their papers with `papers:`.
+- Dataset pages get a Papers tab (before Downloads), collection pages a Papers
+  panel (after the datasets), each paper with the reason it is linked; paper
+  pages `/papers/<citekey>` and a Library page `/library`; Downloads lists the
+  linked papers' PDFs.
+- One shared, more distinctive section-heading style on collection and
+  dataset pages.
+- Version button in the top bar (from 2.40.0) and an exhaustive help page
+  covering MCP links, every MCP tool, prompt and resource, skills (install with
+  the skills CLI), several servers, the paper library and programmatic access.
+
 ## 2.40.0 (2026-10-02)
 
 Additive: adding papers through the API, and a two-way library sync.
