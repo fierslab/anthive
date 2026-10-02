@@ -3,7 +3,7 @@
 This is the one supported way to run anthive: a docker compose stack,
 described by one file (`site.yaml`) and driven by one tool
 (`bin/ops/ant-stack`). Follow the steps in order. Every command below was run
-end to end on a fresh checkout for release 2.39.0.
+end to end on a fresh checkout for release 2.40.0.
 
 Plan about an hour, plus the time it takes to download the data.
 
@@ -68,7 +68,7 @@ sudo mkdir -p /srv/anthive && sudo chown $USER /srv/anthive
 cd /srv/anthive
 git clone https://gitlab.kuleuven.be/bdslab/anthive/anthive4.git
 cd anthive4
-git checkout v2.39.0
+git checkout v2.40.0
 ```
 
 Always check out a release tag, and use the same number as the image tag in
@@ -139,7 +139,7 @@ ports:
 
 images:
   registry: registry.gitlab.kuleuven.be/bdslab/anthive/anthive4
-  tag: 2.39.0                                 # same number as the git tag
+  tag: 2.40.0                                 # same number as the git tag
 
 s3:                                           # skip if you have no S3 keys
   enabled: true
@@ -404,7 +404,7 @@ Personal MCP links work the same in every mode.
 | `registry.gitlab.kuleuven.be/bdslab/anthive/anthive4/anthive-app` | every service (API, web, MCP) in one image, ~1.7 GB |
 | `registry.gitlab.kuleuven.be/bdslab/anthive/anthive4/anthive-ingest` | the app plus the R/Seurat tools for converting data, ~4.5 GB |
 
-Tags are release numbers (`2.39.0`) plus `latest`. Always pin a release
+Tags are release numbers (`2.40.0`) plus `latest`. Always pin a release
 number in `site.yaml`; `latest` changes under you. The images are public
 (no login needed to pull), linux/amd64 only, and contain no data,
 configuration or secrets: each image is checked against the git tree at
