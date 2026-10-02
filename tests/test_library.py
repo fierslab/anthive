@@ -141,7 +141,7 @@ def test_load_library_detects_duplicates_and_dangling_related(tmp_path):
     make_paper(tmp_path, key='lee2026plasticitya', related=['missing2020paper'], relatedtype='samecohort')
     papers, issues = L.load_library(tmp_path)
     assert set(papers) == {'lee2026plasticity', 'lee2026plasticitya'}
-    assert any('already used by' in e for e in issues.errors)  # same DOI twice
+    assert any(e.startswith('DOI ') and ' in both ' in e for e in issues.errors)  # same DOI twice
     assert any('missing2020paper' in e for e in issues.errors)
 
 

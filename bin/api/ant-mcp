@@ -244,6 +244,40 @@ class AnthiveMCP(FastMCP):
             _current_identity.reset(ctx_token)
 
 
+ANTHIVE_GUIDE = """# Using Anthive well
+
+Anthive serves ~190 curated single-cell datasets (mostly human microglia) and
+a library of the papers they come from. Datasets have ids like `L26/FMG`;
+papers have citekeys like `lee2026plasticity`.
+
+## Order of work
+
+1. Find data: `search_datasets` (organism, tissue, cell type, disease, text).
+2. Before analysing a dataset: `get_dataset_context(db_id)`. It gives the
+   caveats, the exact obs column names (standardised `ant_*` facets such as
+   `ant_disease`, `ant_braak`, `ant_donor`, `ant_sex`), the precomputed module
+   scores and the source paper's methods.
+3. Look and test: `plot` for figures, `analytics_schema` then
+   `analytics_query` for numbers, `module_score` for gene programmes.
+4. Literature: `search_literature` for passages, `get_paper` for a paper and
+   the datasets it is the source of, `related_papers` for context.
+
+## Rules
+
+- Cite literature as [Author Year, p.N] with the citekey. Never present a
+  literature claim as a result from our data, or the reverse.
+- Per-cell statistics are pseudoreplicated. For donor-level conclusions
+  aggregate per donor (`ant_donor`) first and report donors per group.
+- Use exact column and gene names; confirm genes with `search_genes`
+  (mouse and human symbols are different genes, never case-convert).
+- Read the caveats; some datasets have known contamination, missing raw
+  counts or partial metadata.
+- Summaries and topics on papers marked as drafts are machine-written and
+  not yet reviewed; say so if they matter.
+- Share plot links with the user; every plot call returns one.
+"""
+
+
 # ── load anthive config (anthive.yaml / anthive.default.yaml) ──────────────────
 
 _script_dir = Path(__file__).parent.resolve()
@@ -327,7 +361,23 @@ def main() -> None:
         port=args.port,
         transport_security=transport_security,
         instructions=(
-            'Anthive is a single-cell RNA-seq data browser with 60+ curated datasets.\n'
+            'Anthive is a single-cell RNA-seq data browser with ~190 curated datasets and a\n'
+            'library of the papers behind them.\n'
+            '\n'
+            'START HERE\n'
+            '  Exploring a dataset: get_dataset_context(db_id) first (caveats, exact column names,\n'
+            '  source paper methods), then plot / analytics. Literature questions: search_literature,\n'
+            '  then get_paper to find the datasets a paper is the source of, then test the claim in\n'
+            '  our data. Prompts investigate_dataset and literature_in_our_data do this for you;\n'
+            '  the resource anthive://guide has the full rules.\n'
+            '  Always keep "the literature says" (cite [Author Year, p.N]) separate from "our data\n'
+            '  shows", and remember per-cell statistics are pseudoreplicated (aggregate per donor).\n'
+            '\n'
+            'LITERATURE\n'
+            '  search_literature    full-text passages from the library papers, with citation, page, section\n'
+            '  get_paper            one paper: record, summary, topics, linked datasets and gene sets\n'
+            '  related_papers       why papers are related: cohort, cell type, method, authors, citations\n'
+            '  get_dataset_context  background pack for one dataset (load before analysing it)\n'
             '\n'
             'DISCOVERING DATA\n'
             '  search_datasets  — find datasets by organism, cell type, tissue, disease, or free text;\n'
@@ -1220,6 +1270,216 @@ def main() -> None:
         lines.append("Use this session_id with analytics_viz to plot the score distribution,")
         lines.append("e.g. a histogram or overlay on UMAP embeddings.")
         return '\n'.join(lines)
+
+    # ── literature: library search, papers, dataset background (REST 2.39) ──────
+
+    def _passage_lines(results: list) -> list:
+        lines = []
+        for i, hit in enumerate(results, 1):
+            pages = hit.get('page_start')
+            if hit.get('page_end') and hit.get('page_end') != pages:
+                pages = f"{pages}-{hit.get('page_end')}"
+            lines.append(f"[{i}] {hit.get('citation')} ({hit.get('citekey')}), {hit.get('section')}, p.{pages}"
+                         f"  {hit.get('title') or ''}")
+            lines.append((hit.get('text') or '').strip())
+            lines.append('')
+        return lines
+
+    @mcp.tool()
+    async def search_literature(
+        query: str,
+        k: int = 6,
+        section: Optional[str] = None,
+        citekeys: Optional[List[str]] = None,
+        year: Optional[str] = None,
+        mode: str = 'hybrid',
+    ) -> str:
+        """Search the full text of the papers in the Anthive library.
+
+        Returns passages with a citation (first author, year, citekey), the
+        section and the page, so every claim can be cited as
+        [Author Year, p.N]. Use it to answer what is known in the
+        literature, then check the same question in our data with the
+        dataset tools (get_paper lists the datasets a paper is the source of).
+
+        Args:
+            query:    a natural-language question or keywords (gene names work).
+            k:        number of passages (default 6, max 20).
+            section:  restrict to one or more sections, comma-separated:
+                      abstract, introduction, methods, results, discussion, figure_legend.
+            citekeys: only search these papers (e.g. ['lee2026plasticity']).
+            year:     'YYYY' or 'YYYY..YYYY'.
+            mode:     hybrid (default), keyword or semantic.
+        """
+        try:
+            data = await _get('/search/literature', q=query, k=min(max(int(k), 1), 20), mode=mode,
+                              section=section, citekey=','.join(citekeys) if citekeys else None,
+                              year=year)
+        except httpx.HTTPStatusError as exc:
+            return f"Error {exc.response.status_code}: {exc.response.text}"
+        lines = [f"Literature search: {query!r} ({data.get('mode')} mode, {len(data.get('results') or [])} passages)"]
+        for warning in data.get('warnings') or []:
+            lines.append(f"note: {warning}")
+        lines.append('')
+        lines += _passage_lines(data.get('results') or [])
+        if not data.get('results'):
+            lines.append('No passages found. Try other words, or drop the section/year filters.')
+        lines.append('Cite passages as [Author Year, p.N]. Keep what the literature says separate '
+                     'from what our datasets show.')
+        return '\n'.join(lines)
+
+    @mcp.tool()
+    async def get_paper(citekey: str) -> str:
+        """One paper from the library: bibliographic record, summary, curated
+        topics (cell types, tissues, methods, cohorts), the datasets it is the
+        source of (or otherwise linked to, with the role), linked gene sets and
+        the most related papers.
+
+        Args:
+            citekey: the paper's citekey, e.g. 'lee2026plasticity' (from
+                     search_literature or related_papers).
+        """
+        try:
+            data = await _get(f'/papers/{citekey}')
+        except httpx.HTTPStatusError as exc:
+            return f"Error {exc.response.status_code}: {exc.response.text}"
+        lines = [f"{data.get('citation')}: {data.get('title')}",
+                 f"  {data.get('journal') or ''} {data.get('year') or ''}  doi:{data.get('doi') or '-'}"
+                 f"  pmid:{data.get('pmid') or '-'}  citekey:{data.get('citekey')}"]
+        if data.get('authors'):
+            authors = data['authors']
+            lines.append('  Authors: ' + '; '.join(authors[:6]) + (f' ... ({len(authors)} total)' if len(authors) > 6 else ''))
+        if data.get('summary'):
+            lines.append(f"  Summary: {data['summary']}")
+        for label, key in (('Cell types', 'celltypes'), ('Tissues', 'tissues'), ('Diseases', 'diseases'),
+                           ('Organisms', 'organisms'), ('Methods', 'methods'), ('Cohorts', 'cohorts')):
+            if data.get(key):
+                lines.append(f"  {label}: {', '.join(data[key])}")
+        if data.get('draft_fields'):
+            lines.append(f"  (machine-drafted, not yet reviewed: {', '.join(data['draft_fields'])})")
+        if data.get('datasets'):
+            lines.append('  Datasets:')
+            lines += [f"    {d['db_id']} ({d['role']})" for d in data['datasets']]
+        else:
+            lines.append('  Datasets: none linked')
+        if data.get('genesets'):
+            lines.append('  Gene sets: ' + ', '.join(f"{g['id']} ({g['role']})" for g in data['genesets']))
+        if data.get('related'):
+            lines.append('  Related papers:')
+            for item in data['related'][:8]:
+                kinds = ', '.join(sorted({r['kind'] for r in item.get('relations', [])}))
+                lines.append(f"    {item['citation']} ({item['citekey']}; {kinds}): {item.get('title')}")
+        if data.get('notes'):
+            lines.append('')
+            lines.append(data['notes'].strip()[:2000])
+        return '\n'.join(lines)
+
+    @mcp.tool()
+    async def related_papers(citekey: str, kinds: Optional[List[str]] = None, limit: int = 10) -> str:
+        """Papers related to a library paper, with why: explicit links
+        (same cohort, version, extends), shared cohort, cell type, tissue,
+        disease, method, shared authors, and citations in either direction.
+
+        Args:
+            citekey: the paper's citekey.
+            kinds:   optional subset of: explicit, cohort, celltype, tissue,
+                     disease, method, author, cites, cited_by.
+            limit:   at most this many papers (default 10).
+        """
+        try:
+            data = await _get(f'/papers/{citekey}/related',
+                              kind=','.join(kinds) if kinds else None, limit=min(max(int(limit), 1), 50))
+        except httpx.HTTPStatusError as exc:
+            return f"Error {exc.response.status_code}: {exc.response.text}"
+        items = data.get('related') or []
+        if not items:
+            return f"No related papers found for {citekey}."
+        lines = [f"Papers related to {citekey}:"]
+        for item in items:
+            why = '; '.join(
+                f"{r['kind']}: {', '.join(r['evidence']) if isinstance(r['evidence'], list) else r['evidence']}"
+                for r in item.get('relations', []))
+            lines.append(f"- {item['citation']} ({item['citekey']}, score {item['score']}): {item.get('title')}")
+            lines.append(f"    {why}")
+        return '\n'.join(lines)
+
+    @mcp.tool()
+    async def get_dataset_context(db_id: str, level: str = 'brief', budget_tokens: int = 4000) -> str:
+        """Background pack for analysing one dataset: metadata, known caveats,
+        the exact obs column names (standardised ant_* facets first),
+        precomputed module scores, the source paper(s) with summary and
+        methods passages (how cells were isolated, QC, annotation), other
+        linked papers and related literature. Load this BEFORE planning
+        analyses or plots on a dataset.
+
+        Args:
+            db_id:         dataset id, e.g. 'L26/FMG'.
+            level:         'brief' (default) or 'full' (more passages and related papers).
+            budget_tokens: approximate size limit (default 4000).
+        """
+        try:
+            data = await _get(f'/databases/{db_id}/context', level=level,
+                              budget_tokens=min(max(int(budget_tokens), 500), 20000))
+        except httpx.HTTPStatusError as exc:
+            return f"Error {exc.response.status_code}: {exc.response.text}"
+        text = data.get('text') or ''
+        if data.get('truncated'):
+            text += (f"\n\n(trimmed to ~{data.get('budget_tokens')} tokens; dropped: "
+                     f"{', '.join(data.get('dropped_sections') or [])}. Ask with level='full' or a larger budget.)")
+        if not data.get('index_available'):
+            text += '\n\n(note: the literature index is not loaded on this server, so no paper passages.)'
+        return text
+
+    # ── prompts: ready-made starting points in MCP clients ───────────────────────
+
+    @mcp.prompt(name='investigate_dataset', title='Investigate a dataset',
+                description='Load a dataset\'s background and its source paper, then plan analyses.')
+    def investigate_dataset(db_id: str) -> str:
+        return (
+            f"I want to investigate the Anthive dataset {db_id}.\n\n"
+            f"1. Call get_dataset_context(db_id='{db_id}', level='full') and read it fully: the "
+            "caveats, the obs columns and the source paper's methods matter for every later step.\n"
+            "2. Summarise in a few lines what the dataset is (design, cohort, cell types, how cells "
+            "were obtained) and what its source paper already reported, citing passages as "
+            "[Author Year, p.N].\n"
+            "3. Propose 3 to 5 concrete analyses or plots that would add to what the paper did, "
+            "using the Anthive tools (plot, analytics_query, module scores). Use the exact obs "
+            "column names from the context.\n"
+            "4. Before running anything heavy, say what you will run and why. Then run it.\n"
+            "Rules: keep 'the literature says' separate from 'our data shows'. Per-cell statistics "
+            "are pseudoreplicated: for donor-level claims aggregate per donor (ant_donor) first, "
+            "and say so. Flag any caveat from the context that affects a result."
+        )
+
+    @mcp.prompt(name='literature_in_our_data', title='What does the literature say, and do our data agree?',
+                description='Search the library for a topic, then test the claims in Anthive datasets.')
+    def literature_in_our_data(topic: str) -> str:
+        return (
+            f"Topic: {topic}\n\n"
+            "1. Call search_literature on this topic (try two or three phrasings, and section='results' "
+            "for findings). Collect the main claims, each cited as [Author Year, p.N] with its citekey.\n"
+            "2. For the key papers, call get_paper to see which Anthive datasets they are the source of, "
+            "and search_datasets for other datasets that can test the same claims.\n"
+            "3. For each testable claim, propose the check (gene, obs column, plot or query), run it "
+            "with the Anthive tools and report the result with the plot link or table.\n"
+            "4. Finish with a short table: claim, source, our result, agree / disagree / not testable.\n"
+            "Rules: never present a literature claim as our result or the reverse. Per-cell "
+            "statistics are pseudoreplicated; aggregate per donor for donor-level conclusions and "
+            "say how many donors per group. Mention datasets whose design limits the comparison."
+        )
+
+    # ── resources: reference documents a client can attach ───────────────────────
+
+    @mcp.resource('anthive://guide', name='anthive-guide', title='How to use Anthive well',
+                  mime_type='text/markdown')
+    def anthive_guide() -> str:
+        return ANTHIVE_GUIDE
+
+    @mcp.resource('anthive://dataset/{group_id}/{file_id}/context', name='dataset-context',
+                  title='Dataset background pack', mime_type='text/markdown')
+    async def dataset_context_resource(group_id: str, file_id: str) -> str:
+        data = await _get(f'/databases/{group_id}/{file_id}/context', level='full', budget_tokens=8000)
+        return data.get('text') or ''
 
     # ── run ────────────────────────────────────────────────────────────────────
 

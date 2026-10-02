@@ -111,3 +111,31 @@ Keep that file in your home directory (mode 0600) and pass it with
 `--env ANTHIVE_CONFIG=...`; never put keys into the image or a job script.
 Serving sites then run `ant sync pull` (or `ant-stack ingest -- ant sync pull`)
 and rescan.
+
+## Building the literature index
+
+The literature index (`library_chunks.parquet`, `doc/LIBRARY_INDEX.md`) is
+built once, centrally, and pulled by every site. Parsing the PDFs is the slow
+part (about 13 minutes for 56 papers with 16 parsers on one node; an
+unchanged re-run takes seconds), so a cluster node is a good place for a full
+rebuild:
+
+```sh
+# Route A (uv): same repo checkout as above, library repo cloned next to it
+~/anthive4/bin/ant lib-index --library ~/library --store /data/project/h5adstore \
+    --out $TMPDIR/library_chunks.parquet --workers $SLURM_CPUS_PER_TASK
+cp $TMPDIR/library_chunks.* ~/library_index/
+
+# Route B (Apptainer): the ingest image carries the parser and the model runtime
+apptainer exec --cleanenv --bind ~/library,/data/project/h5adstore,$TMPDIR anthive-ingest.sif \
+    ant lib-index --library ~/library --store /data/project/h5adstore \
+    --out $TMPDIR/library_chunks.parquet
+```
+
+The first run downloads the embedding model (about 65 MB) into the fastembed
+cache; on nodes without internet set `--cache-dir` to a folder prepared on a
+login node. Use the same model the serving image ships
+(`BAAI/bge-small-en-v1.5`), otherwise sites fall back to keyword search.
+Scanned PDFs without a text layer are listed at the end; `--parser docling`
+handles them with OCR (it needs the heavier Docling install). Publish with
+`ant sync push --library-only` from a node with the S3 credentials.

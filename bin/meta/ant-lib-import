@@ -23,7 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / 'lib'))
 import library as L  # noqa: E402
-from config import get_config, get_library_dir  # noqa: E402
+from config import get_config, get_library_dir, get_library_lab_authors  # noqa: E402
 
 def entry_fields(entry: dict) -> dict:
     return L.fields_from_bibtex_entry(entry)
@@ -45,11 +45,16 @@ def main() -> int:
     parser.add_argument('--library', type=Path, help='library root (default: from config)')
     parser.add_argument('--role', default='background', choices=sorted(L.ROLES))
     parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--folder', help=('sub-folder of papers/ for NEW records (e.g. papers/reading/2024); '
+                                          'default papers/datasets for --role source, papers/reading '
+                                          'otherwise. Existing records are updated where they are'))
     args = parser.parse_args()
     library = args.library or get_library_dir(get_config())
-    papers_dir = library / 'papers'
-    papers_dir.mkdir(parents=True, exist_ok=True)
     papers, _ = L.load_library(library)
+    try:
+        new_dir = L.folder_for(library, args.role, args.folder)
+    except ValueError as exc:
+        raise SystemExit(str(exc))
     by_doi = {p.doi: p for p in papers.values() if p.doi}
 
     from bibtexparser.bparser import BibTexParser  # noqa: PLC0415
@@ -70,6 +75,7 @@ def main() -> int:
                     if k.startswith('anthive_') or k in ('related', 'relatedtype', 'file')}
             new_fields = {**fields, **keep, 'citekey': existing.citekey}
             key, body = existing.citekey, existing.body
+            papers_dir = existing.path.parent if existing.path is not None else new_dir
             updated += 1
         else:
             key = entry.get('ID', '').lower()
@@ -77,13 +83,18 @@ def main() -> int:
                 key = L.make_citekey(L.first_author_last(fields), fields.get('date'), fields['title'], papers)
             new_fields = {'anthive_role': args.role, 'anthive_llm': 'allowed', **fields, 'citekey': key}
             body = '## Notes\n\nImported from ' + args.bibfile.name + '.'
+            papers_dir = L.folder_for(library, args.role, args.folder,
+                                      authors=fields.get('author') or [],
+                                      lab_authors=get_library_lab_authors(get_config()))
             added += 1
+        if not args.dry_run:
+            papers_dir.mkdir(parents=True, exist_ok=True)
         if pdf and not args.dry_run:
             shutil.copy2(pdf, papers_dir / f"{key}.pdf")
             new_fields['file'] = f"{key}.pdf"
         if not args.dry_run:
             L.write_sidecar(papers_dir / f"{key}.md", new_fields, body)
-        papers[key] = L.Paper(citekey=key, fields=new_fields, body=body)
+        papers[key] = L.Paper(citekey=key, fields=new_fields, body=body, path=papers_dir / f"{key}.md")
         if new_fields.get('doi'):
             by_doi[new_fields['doi']] = papers[key]
         print(f"{'update' if existing else 'add':6s} {key}")

@@ -63,6 +63,25 @@ URL. Use `https://anthive.example.org/mcp` as the URL and send
 
 ## What you can do with it
 
+Data tools: `search_datasets`, `get_dataset_info`, `search_genes`, `plot`,
+`analytics_schema`, `analytics_query`, `module_score`, `list_module_scores`,
+`list_genesets`, `get_geneset`.
+
+Literature tools (2.39): `search_literature` (full-text passages from the
+library papers, with citation, page and section), `get_paper` (a paper's
+record, summary, topics and the datasets it is the source of),
+`related_papers` (same cohort, cell type, method, shared authors,
+citations) and `get_dataset_context` (background pack to load before
+analysing a dataset).
+
+Prompts, offered by clients that support them (Claude Code shows them as
+`/mcp__anthive__...` commands): `investigate_dataset(db_id)` and
+`literature_in_our_data(topic)`. Resources: `anthive://guide` (how to use
+Anthive well) and `anthive://dataset/<group>/<file>/context`.
+
+Papers marked `anthive_llm: never` in the library never reach an MCP client;
+`summary_only` papers show their summary but no passages or page text.
+
 All tools are read-only. Admin-only tools (`analytics_viz`, which runs
 Python on the server, and `rescan_databases`) only appear for members of
 the `admins` group.

@@ -15,6 +15,7 @@
 #   "shapely>=2.0",
 #   "openai>=1.30.0",
 #   "httpx>=0.27.0",
+#   "fastembed>=0.5,<0.9",
 # ]
 # ///
 """
@@ -69,7 +70,7 @@ from fastapi import (
     Query, Request, Response,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field
 
@@ -82,8 +83,10 @@ from anthive_db import AnthiveDB, safe_ident
 from canonical_columns import BACKCOMPAT_LEGACY_NAMES  # type: ignore
 from config import get_config
 from config import (get_auth_settings, get_catalog_scan_mode, get_data_folder,
-                    get_duckdb_temp_dir, get_log_dir, get_state_dir, get_tmp_dir,
+                    get_duckdb_temp_dir, get_library_dir,
+                    get_library_index_dir, get_model_cache_dir, get_log_dir, get_state_dir, get_tmp_dir,
                     get_webapp_dir)
+from library_service import LIBRARY_S3_PREFIX, LibraryService
 import de_storage as lib_de_storage
 from geneset import (
     GenesetRegistry,
@@ -1713,6 +1716,13 @@ async def _daily_metadata_refresh() -> None:
             print(f"Daily metadata refresh error: {exc}")
 
 
+def _library_refresh_safe(load_index: bool = True) -> None:
+    try:
+        _library_refresh(load_index=load_index)
+    except Exception as exc:  # noqa: BLE001 - the API works without the library
+        log.warning("paper library failed to load: %s", exc)
+
+
 async def _build_startup_indexes() -> None:
     try:
         await asyncio.to_thread(_build_score_index)
@@ -1751,6 +1761,8 @@ async def lifespan(app: FastAPI):
         # Both indexes open every database; with S3-remote datasets that is
         # minutes of network reads, so build them off the startup path.
         asyncio.create_task(_build_startup_indexes())
+    # Paper library + literature index: a few seconds, also off the startup path.
+    asyncio.create_task(asyncio.to_thread(_library_refresh_safe))
     # Slave-mode banner — make the deployment role obvious in the logs
     # so it's the first thing visible when debugging "why won't this
     # write?". Banner ONLY fires when role=slave is opt-in; primaries
@@ -1791,7 +1803,7 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.38.0"
+API_VERSION = "2.39.0"
 API_VERSION_RELEASED = "2026-10-02"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
@@ -11645,6 +11657,10 @@ def rescan_databases():
             _build_score_index()
             _build_by_gene_index()
             result['scored_databases'] = len(_score_index_by_db)
+        _library_refresh_safe(load_index=True)
+        if _library_service is not None:
+            result['library_papers'] = len(_library_service.state.papers)
+            result['literature_index_loaded'] = _library_service.index is not None
         # Drop the plot-response cache — any cached image may now be stale.
         result['plot_cache_cleared'] = _plot_cache_clear()
         return result
@@ -13450,6 +13466,255 @@ def download_database_static_file(db_id: str, filename: str):
                         media_type='application/octet-stream')
 
 
+# ── Paper library + literature search (REST 2.39) ─────────────────────────────
+#
+# The library repository (lib/library.py, doc/LIBRARY.md) holds one
+# BibLaTeX-compatible .md record per paper; datasets, collections and gene
+# sets point at papers with `papers: {citekey: role}`. The literature index
+# (lib/library_index.py) is the precomputed library_chunks.parquet. Both are
+# loaded once at startup (in a thread) and on /admin/rescan.
+#
+# Access: restricted papers are admin-only. Calls from ant-mcp (internal
+# secret + a user) or with ?for_llm=true answer for an external LLM:
+# anthive_llm=never papers disappear, summary_only papers lose passages,
+# notes, abstract and page text.
+
+_library_service: Optional[LibraryService] = None
+_geneset_path_for_library: Optional[Path] = None
+
+
+def _make_query_embedder(model: str):
+    """fastembed query embedder for the index's model, cached in model_cache."""
+    from library_index import Embedder  # noqa: PLC0415
+    cache = get_model_cache_dir(get_config())
+    try:
+        cache.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass   # read-only image path: the model is baked in already
+    return Embedder(model, cache_dir=str(cache))
+
+
+def _library_db_md_paths() -> Dict[str, Path]:
+    out: Dict[str, Path] = {}
+    if registry is None:
+        return out
+    for db_id in list(registry.databases.keys()):
+        try:
+            rel = registry.get_database_metadata(db_id).get('path')
+        except Exception:  # noqa: BLE001 - a dataset without metadata has no papers
+            continue
+        if rel:
+            out[db_id] = (registry.data_folder / rel).with_suffix('.md')
+    return out
+
+
+def _library_refresh(load_index: bool = True) -> None:
+    """(Re)load library records, papers: references and (optionally) the index."""
+    global _library_service
+    cfg = get_config()
+    if _library_service is None:
+        _library_service = LibraryService(
+            get_library_dir(cfg), get_library_index_dir(cfg),
+            registry.data_folder if registry is not None else None,
+            _geneset_path_for_library, embedder_factory=_make_query_embedder)
+    service = _library_service
+    service.set_datasets(_library_db_md_paths())
+    state = service.load()
+    print(f"  Library: {len(state.papers)} paper(s), {len(state.papers_by_db)} dataset(s) linked"
+          + (f", {len(state.unresolved)} unresolved reference(s)" if state.unresolved else ''))
+    if load_index:
+        service.load_index()
+        status = service.status()['index']
+        if status['loaded']:
+            print(f"  Literature index: {status['chunks']} chunks, model {status['embedding_model']}, "
+                  f"semantic={'on' if status['semantic'] else 'off'}")
+        else:
+            print(f"  Literature index: not loaded ({status['error']})")
+
+
+def _library() -> LibraryService:
+    if _library_service is None:
+        raise HTTPException(status_code=503, detail='paper library is still loading')
+    return _library_service
+
+
+def _caller_is_admin(request: Request) -> bool:
+    try:
+        _require_admin(request)
+        return True
+    except HTTPException:
+        return False
+
+
+def _for_llm(request: Request, for_llm: bool = False) -> bool:
+    """True when the answer goes to an external LLM: ant-mcp calls (internal
+    secret plus a user identity) always, others when they ask for it."""
+    return bool(for_llm) or (_has_valid_internal_secret(request)
+                             and bool(request.headers.get('Remote-User')))
+
+
+def _csv(value: Optional[str]) -> Optional[List[str]]:
+    if not value:
+        return None
+    return [v.strip() for v in value.split(',') if v.strip()]
+
+
+@app.get("/papers", tags=["library"])
+def list_papers(request: Request, role: Optional[str] = None, celltype: Optional[str] = None,
+                tissue: Optional[str] = None, disease: Optional[str] = None,
+                method: Optional[str] = None, cohort: Optional[str] = None,
+                organism: Optional[str] = None, author: Optional[str] = None,
+                year: Optional[str] = Query(None, description="YYYY or YYYY..YYYY"),
+                q: Optional[str] = Query(None, description="words matched against title, authors, DOI, summary, topics"),
+                for_llm: bool = False):
+    """Papers in the library (bibliographic summary per paper), newest first."""
+    service = _library()
+    papers = service.list(is_admin=_caller_is_admin(request), for_llm=_for_llm(request, for_llm),
+                          role=role, celltype=celltype, tissue=tissue, disease=disease,
+                          method=method, cohort=cohort, organism=organism, author=author,
+                          year=year, q=q)
+    return {'n': len(papers), 'papers': papers}
+
+
+@app.get("/library.bib", tags=["library"], response_class=Response)
+def library_bibtex(request: Request,
+                   citekeys: Optional[str] = Query(None, description="comma-separated; default all visible"),
+                   classic: bool = Query(False, description="plain BibTeX instead of BibLaTeX")):
+    """The library (or a selection) as one BibTeX file."""
+    text = _library().bibtex(_csv(citekeys), is_admin=_caller_is_admin(request), classic=classic)
+    return Response(content=text, media_type='application/x-bibtex',
+                    headers={'Content-Disposition': 'inline; filename="anthive-library.bib"'})
+
+
+@app.get("/library/status", tags=["library"])
+def library_status():
+    """Library and literature-index health: counts, issues, unresolved references, model."""
+    return _library().status()
+
+
+def _paper_or_404(request: Request, citekey: str, for_llm: bool = False):
+    service = _library()
+    paper = service.get(citekey, is_admin=_caller_is_admin(request), for_llm=_for_llm(request, for_llm))
+    if paper is None:
+        raise HTTPException(status_code=404, detail=f"paper not found: {citekey}")
+    return service, paper
+
+
+@app.get("/papers/{citekey}.bib", tags=["library"], response_class=Response)
+def paper_bibtex(request: Request, citekey: str, classic: bool = False):
+    """One paper as a BibTeX entry."""
+    service, paper = _paper_or_404(request, citekey)
+    return Response(content=service.bibtex_one(paper, classic=classic, is_admin=_caller_is_admin(request)),
+                    media_type='application/x-bibtex',
+                    headers={'Content-Disposition': f'inline; filename="{citekey}.bib"'})
+
+
+@app.get("/papers/{citekey}/related", tags=["library"])
+def paper_related(request: Request, citekey: str,
+                  kind: Optional[str] = Query(None, description="comma-separated: explicit, cohort, celltype, tissue, disease, method, author, cites, cited_by"),
+                  limit: int = Query(25, ge=1, le=200), for_llm: bool = False):
+    """Papers related to this one, with the kind, weight and evidence of each relation."""
+    service, _ = _paper_or_404(request, citekey, for_llm)
+    return {'citekey': citekey,
+            'related': service.related(citekey, is_admin=_caller_is_admin(request),
+                                       for_llm=_for_llm(request, for_llm),
+                                       kinds=_csv(kind), limit=limit)}
+
+
+@app.get("/papers/{citekey}/file", tags=["library"])
+def paper_file(request: Request, citekey: str):
+    """The paper's PDF: streamed from the library folder, or a short-lived
+    presigned S3 link. Never any other file."""
+    service, paper = _paper_or_404(request, citekey)
+    local = service.pdf_path(paper)
+    if local is not None:
+        return FileResponse(local, media_type='application/pdf', filename=local.name)
+    rel = service.pdf_s3_relpath(paper)
+    s3_config = getattr(registry, '_s3_config', None) or {}
+    if not rel or not s3_config.get('bucket'):
+        raise HTTPException(status_code=404, detail=f"no PDF for {citekey}")
+    prefix = (s3_config.get('prefix') or '').strip('/')
+    key = '/'.join(part for part in (prefix, LIBRARY_S3_PREFIX, rel) if part)
+    client = registry._make_s3_client()
+    try:
+        client.head_object(Bucket=s3_config['bucket'], Key=key)
+    except Exception:  # noqa: BLE001 - absent or unreachable: no PDF to give
+        raise HTTPException(status_code=404, detail=f"no PDF for {citekey}")
+    name = rel.rsplit('/', 1)[-1]
+    url = client.generate_presigned_url(
+        'get_object',
+        Params={'Bucket': s3_config['bucket'], 'Key': key,
+                'ResponseContentDisposition': f'inline; filename="{name}"',
+                'ResponseContentType': 'application/pdf'},
+        ExpiresIn=300)
+    return RedirectResponse(url, status_code=307)
+
+
+@app.get("/papers/{citekey}/pages/{page}", tags=["library"])
+def paper_page(request: Request, citekey: str, page: int, for_llm: bool = False):
+    """Plain text of one page, from the literature index."""
+    service, paper = _paper_or_404(request, citekey, for_llm)
+    if not service.full_text_allowed(paper, for_llm=_for_llm(request, for_llm)):
+        raise HTTPException(status_code=403, detail=f"{citekey}: full text is not shared with external LLMs")
+    text = service.page_text(paper, page)
+    if text is None:
+        raise HTTPException(status_code=404, detail=f"{citekey}: page {page} is not in the literature index")
+    return {'citekey': citekey, 'page': page, 'n_pages': service.n_pages(paper), 'text': text}
+
+
+@app.get("/papers/{citekey}", tags=["library"])
+def get_paper(request: Request, citekey: str, for_llm: bool = False):
+    """One paper: bibliographic fields, notes, linked datasets and gene sets
+    by role, and the most related papers."""
+    service, paper = _paper_or_404(request, citekey, for_llm)
+    return service.record(paper, is_admin=_caller_is_admin(request), for_llm=_for_llm(request, for_llm))
+
+
+@app.get("/search/literature", tags=["library"])
+def search_literature(request: Request, q: str = Query(..., min_length=2),
+                      k: int = Query(10, ge=1, le=50),
+                      mode: str = Query('hybrid', pattern='^(hybrid|keyword|semantic)$'),
+                      section: Optional[str] = Query(None, description="comma-separated: abstract, introduction, methods, results, discussion, figure_legend"),
+                      citekey: Optional[str] = Query(None, description="comma-separated citekeys to search within"),
+                      year: Optional[str] = Query(None, description="YYYY or YYYY..YYYY"),
+                      for_llm: bool = False):
+    """Passages from the library's papers, each with citation, page, section
+    and a highlighted snippet. Semantic and hybrid modes fall back to keyword
+    search (with a warning) when this server has no matching query model."""
+    return _library().search(q, is_admin=_caller_is_admin(request), for_llm=_for_llm(request, for_llm),
+                             k=k, mode=mode, sections=_csv(section), citekeys=_csv(citekey), year=year)
+
+
+@app.get("/databases/{db_id:path}/papers", tags=["library"])
+def database_papers(request: Request, db_id: str, for_llm: bool = False):
+    """Papers linked to a dataset (its own and its collection's `papers:`), source first."""
+    if registry is None or db_id not in registry.databases:
+        raise HTTPException(status_code=404, detail=f"Database not found: {db_id}")
+    papers = _library().papers_for_dataset(db_id, is_admin=_caller_is_admin(request),
+                                           for_llm=_for_llm(request, for_llm))
+    return {'db_id': db_id, 'papers': papers}
+
+
+@app.get("/databases/{db_id:path}/context", tags=["library"])
+def database_context(request: Request, db_id: str,
+                     level: str = Query('brief', pattern='^(brief|full)$'),
+                     budget_tokens: int = Query(4000, ge=200, le=50000),
+                     for_llm: bool = False):
+    """Background pack for analysing a dataset with an LLM: metadata, caveats,
+    obs columns, module scores, source papers with methods passages, related
+    papers; trimmed to ``budget_tokens`` (approximate)."""
+    if registry is None or db_id not in registry.databases:
+        raise HTTPException(status_code=404, detail=f"Database not found: {db_id}")
+    try:
+        info = registry.get_database_metadata(db_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    scores = sorted(_score_index_by_db.get(db_id, []))
+    return _library().context(db_id, info, module_scores=scores, level=level,
+                              budget_tokens=budget_tokens, is_admin=_caller_is_admin(request),
+                              for_llm=_for_llm(request, for_llm))
+
+
 @app.get("/skill", tags=["info"], response_class=Response)
 def get_skill():
     """Return the Anthive Claude Code skill file (SKILL.md).
@@ -13457,7 +13722,7 @@ def get_skill():
     Collaborators can install it with:
         curl -n https://anthive.example.org/api/skill -o ~/.claude/skills/anthive/SKILL.md
     """
-    skill_path = script_dir.parent / ".claude" / "skills" / "anthive" / "SKILL.md"
+    skill_path = script_dir.parent.parent / ".claude" / "skills" / "anthive" / "SKILL.md"
     if not skill_path.exists():
         raise HTTPException(status_code=404, detail="SKILL.md not found")
     return Response(
@@ -13539,6 +13804,7 @@ def main():
     geneset_store_value = config.get('geneset_store')
     if geneset_store_value:
         geneset_path = (script_dir.parent.parent / geneset_store_value).resolve()
+        globals()['_geneset_path_for_library'] = geneset_path
         if geneset_path.exists():
             print(f"Initializing geneset registry: {geneset_path}")
             geneset_registry = GenesetRegistry(geneset_path)

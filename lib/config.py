@@ -9,7 +9,7 @@ import re
 import secrets
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import yaml
 
@@ -332,6 +332,31 @@ def get_data_folder(cfg: Optional[Dict[str, Any]] = None) -> Path:
 def get_library_dir(cfg: Optional[Dict[str, Any]] = None) -> Path:
     """The paper library root (its own repository; see doc/LIBRARY.md)."""
     return resolve_path(_setting(cfg, 'library', 'ANTHIVE_LIBRARY', 'data/library'))
+
+
+def get_library_lab_authors(cfg: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Author names that send new papers to papers/lab/ (library_lab_authors)."""
+    cfg = cfg if cfg is not None else get_config()
+    value = cfg.get('library_lab_authors')
+    if value is None:
+        return ['De Strooper']
+    return [str(v) for v in (value if isinstance(value, list) else [value]) if str(v).strip()]
+
+
+def get_library_index_dir(cfg: Optional[Dict[str, Any]] = None) -> Path:
+    """Folder holding library_chunks.parquet (see doc/LIBRARY_INDEX.md)."""
+    return resolve_path(_setting(cfg, 'library_index', 'ANTHIVE_LIBRARY_INDEX', 'data/library_index'))
+
+
+def get_model_cache_dir(cfg: Optional[Dict[str, Any]] = None) -> Path:
+    """Cache for the query-embedding model: model_cache / ANTHIVE_MODEL_CACHE,
+    else FASTEMBED_CACHE_PATH (baked into the image), else <state_dir>/models."""
+    configured = _setting(cfg, 'model_cache', 'ANTHIVE_MODEL_CACHE', '')
+    if configured:
+        return resolve_path(configured)
+    if os.environ.get('FASTEMBED_CACHE_PATH'):
+        return Path(os.environ['FASTEMBED_CACHE_PATH'])
+    return get_state_dir(cfg) / 'models'
 
 
 def get_webapp_dir(cfg: Optional[Dict[str, Any]] = None) -> Path:

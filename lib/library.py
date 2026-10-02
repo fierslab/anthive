@@ -328,24 +328,102 @@ def library_papers_dir(root: Path) -> Path:
     return root / 'papers' if (root / 'papers').is_dir() else root
 
 
+# Markdown files in the library that are never paper records.
+NON_RECORD_NAMES = {'README.MD', 'REVIEW.MD', 'INDEX.MD', 'CONVENTIONS.MD'}
+# Default sub-folder of papers/ for new records. Folders are for people
+# only: nothing reads meaning from them (roles and `papers:` references are
+# the source of truth). Precedence: lab (an author matches a configured lab
+# author) > datasets (role source or reanalysis) > methods (role method) >
+# reading.
+LAB_FOLDER = 'lab'
+DEFAULT_FOLDERS = {'source': 'datasets', 'reanalysis': 'datasets', 'method': 'methods'}
+DEFAULT_FOLDER = 'reading'
+DEFAULT_LAB_AUTHORS = ('De Strooper',)
+
+
+def is_lab_paper(authors: Iterable[str], lab_authors: Iterable[str] = DEFAULT_LAB_AUTHORS) -> bool:
+    """True when any author matches a lab author (case and accent insensitive,
+    on the whole 'Last, First' string, so 'De Strooper' matches
+    'De Strooper, Bart')."""
+    import unicodedata  # noqa: PLC0415
+
+    def norm(text: str) -> str:
+        return unicodedata.normalize('NFKD', str(text)).encode('ascii', 'ignore').decode().lower()
+    wanted = [norm(a).strip() for a in lab_authors if str(a).strip()]
+    return any(w in norm(author) for author in authors for w in wanted)
+
+
+def record_paths(papers_dir: Path) -> List[Path]:
+    """Every candidate record under ``papers_dir``, at any depth, skipping
+    ``_``/``.`` folders and known non-record files (README, REVIEW, ...)."""
+    papers_dir = Path(papers_dir)
+    out = []
+    for path in sorted(papers_dir.rglob('*.md')):
+        rel = path.relative_to(papers_dir)
+        if any(part.startswith(('_', '.')) for part in rel.parts[:-1]):
+            continue
+        if path.name.startswith('.') or path.name.upper() in NON_RECORD_NAMES:
+            continue
+        out.append(path)
+    return out
+
+
+def folder_for(library: Path, role: str, folder: Optional[str] = None,
+               authors: Iterable[str] = (), lab_authors: Iterable[str] = DEFAULT_LAB_AUTHORS) -> Path:
+    """The folder a new record goes in: ``--folder`` (with or without a
+    leading ``papers/``), else by precedence ``papers/lab`` (a lab author),
+    ``papers/datasets`` (source, reanalysis), ``papers/methods`` (method),
+    ``papers/reading``."""
+    papers_dir = Path(library) / 'papers'
+    if folder:
+        rel = Path(str(folder).strip('/'))
+        if rel.parts and rel.parts[0] == 'papers':
+            rel = Path(*rel.parts[1:]) if len(rel.parts) > 1 else Path('.')
+        if any(part in ('..',) or part.startswith(('_', '.')) for part in rel.parts if part != '.'):
+            raise ValueError(f"folder {folder!r} must stay inside papers/ and not start with _ or .")
+        return papers_dir / rel
+    if is_lab_paper(authors, lab_authors):
+        return papers_dir / LAB_FOLDER
+    return papers_dir / DEFAULT_FOLDERS.get(role, DEFAULT_FOLDER)
+
+
 def load_library(root: Path) -> Tuple[Dict[str, Paper], LibraryIssues]:
+    """Load every paper record under ``<library>/papers`` (any depth).
+
+    A ``.md`` without ``entrytype`` in its front matter is not a record and is
+    skipped silently. Citekeys and DOIs must be unique library-wide; a clash
+    is reported with both paths and the second record is ignored.
+    """
     issues = LibraryIssues()
     papers: Dict[str, Paper] = {}
     dois: Dict[str, str] = {}
-    for path in sorted(library_papers_dir(root).glob('*.md')):
-        if path.name.upper() in ('README.MD', 'REVIEW.MD', 'INDEX.MD'):
-            continue
+    papers_dir = library_papers_dir(root)
+
+    def rel(path: Optional[Path]) -> str:
+        if path is None:
+            return '?'
+        try:
+            return str(path.relative_to(papers_dir))
+        except ValueError:
+            return str(path)
+
+    for path in record_paths(papers_dir):
         try:
             paper = parse_sidecar(path)
         except (ValueError, yaml.YAMLError) as exc:
-            issues.errors.append(f"{path.name}: {exc}")
+            if path.read_text(encoding='utf-8', errors='replace').startswith('---'):
+                issues.errors.append(f"{rel(path)}: {exc}")
             continue
+        if not paper.fields.get('entrytype'):
+            continue   # notes or other markdown, not a paper record
         if paper.citekey in papers:
-            issues.errors.append(f"{path.name}: duplicate citekey {paper.citekey}")
+            issues.errors.append(f"duplicate citekey {paper.citekey}: {rel(papers[paper.citekey].path)} "
+                                 f"and {rel(path)} (one paper lives in exactly one folder)")
             continue
         if paper.doi:
             if paper.doi in dois:
-                issues.errors.append(f"{path.name}: DOI {paper.doi} already used by {dois[paper.doi]}")
+                issues.errors.append(f"DOI {paper.doi} in both {rel(papers[dois[paper.doi]].path)} "
+                                     f"({dois[paper.doi]}) and {rel(path)} ({paper.citekey})")
             dois[paper.doi] = paper.citekey
         papers[paper.citekey] = paper
     for paper in papers.values():

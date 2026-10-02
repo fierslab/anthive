@@ -10,11 +10,46 @@ them and are synced through S3 like the data, not committed.
 ```
 library/
   papers/
-    lee2026plasticity.md      bibliographic record + notes
-    lee2026plasticity.pdf     optional, git-ignored, synced via S3
+    datasets/
+      lee2026plasticity.md    bibliographic record + notes
+      lee2026plasticity.pdf   optional, git-ignored, synced via S3
+    lab/
+    methods/
+    reading/
+      2024/                   any depth is fine
   README.md
   REVIEW.md                   fields still awaiting human review
 ```
+
+## Folders
+
+Records can sit in sub-folders of `papers/`, at any depth. **Folders are for
+people only and never carry meaning**: no tool reads a role, a topic or an
+access rule from a folder name. Roles (`anthive_role`) and the `papers:`
+references on datasets, collections and gene sets stay the source of truth.
+
+- One paper lives in exactly one folder. Citekeys (and DOIs) are unique
+  across the whole library; `ant lib-check` and the server report a clash
+  with both paths.
+- `file:` names the PDF relative to the record's own folder, normally the
+  bare filename (`file: lee2026plasticity.pdf` next to the `.md`).
+- Folders starting with `_` or `.` are skipped (staging, scratch), as are
+  `README.md`, `REVIEW.md` and any `.md` without `entrytype` in its front
+  matter (plain notes).
+- Moving a paper is a `git mv` of its `.md` (and moving the PDF next to it).
+  `ant sync push` uploads the PDF under its new key and reports the old key
+  as S3-only; it never deletes anything on S3 by itself.
+
+`ant lib-add` and `ant lib-import` put a NEW record in the first folder that
+applies, unless `--folder` says otherwise:
+
+1. `papers/lab/` when an author matches `library_lab_authors` in
+   `anthive.yaml` (default `[De Strooper]`, case and accent insensitive);
+2. `papers/datasets/` for role `source` or `reanalysis`;
+3. `papers/methods/` for role `method`;
+4. `papers/reading/` for everything else.
+
+Updates keep a record where it is.
 
 ## The sidecar format
 
@@ -166,10 +201,45 @@ license: CC-BY-4.0
 
 | Command | Does |
 | --- | --- |
-| `ant lib-add <doi\|pmid\|pdf\|bibfile>` | fetches CrossRef and OpenAlex (authors with ORCID, journal, pages, abstract, cited DOIs), writes the sidecar, copies the PDF |
-| `ant lib-import <export.bib>` | imports a Better BibTeX export (for example one Zotero collection); idempotent by DOI and citekey |
+| `ant lib-add <doi\|pmid\|pdf\|bibfile> [--folder papers/reading/2024]` | fetches CrossRef and OpenAlex (authors with ORCID, journal, pages, abstract, cited DOIs), writes the sidecar, copies the PDF next to it |
+| `ant lib-import <export.bib> [--folder ...]` | imports a Better BibTeX export (for example one Zotero collection); idempotent by DOI and citekey |
 | `ant lib-export [-o library.bib]` | writes BibTeX for the whole library or a selection |
 | `ant lib-check` | validates every record and every `papers:` reference in the h5adstore |
 
+| `ant lib-index` | builds or updates the literature index (`doc/LIBRARY_INDEX.md`) |
+| `ant sync push` / `pull` | also syncs the PDFs and the index (below); `--no-library` skips them, `--library-only` does only them |
+
 All of them read the library location from `library` in `anthive.yaml`
 (environment `ANTHIVE_LIBRARY`) and the h5adstore from `h5adstore`.
+
+## Storage and sync
+
+The `.md` records are committed to the library repository. PDFs are
+git-ignored and live in S3, under the same bucket and prefix as the
+h5adstore, mirroring the folders:
+
+```
+<s3.prefix>/_library/papers/<folders>/<citekey>.pdf
+<s3.prefix>/_library_index/library_chunks.parquet     (+ library_chunks.json)
+```
+
+The leading `_` keeps both out of the h5adstore sync and the S3 catalog scan.
+`ant sync pull` fetches the PDFs only into an existing library checkout (they
+mean nothing without their records) and creates the index folder if needed.
+
+## How the server uses it
+
+ant-serve loads the records, resolves every `papers:` reference to dataset
+ids and loads the index at startup (in the background) and on
+`/admin/rescan`. Endpoints: `/papers`, `/papers/{citekey}` (+ `.bib`,
+`/related`, `/file`, `/pages/{n}`), `/library.bib`, `/library/status`,
+`/search/literature`, `/databases/{id}/papers`, `/databases/{id}/context`
+(see `doc/API_CHANGELOG.md`, 2.39.0). MCP clients get the same through the
+tools `search_literature`, `get_paper`, `related_papers`,
+`get_dataset_context` (`doc/MCP_LINKS.md`).
+
+Access: `anthive_access: restricted` records are visible to admins only and
+never appear in other records' `related` lists or exports for anyone else.
+For callers that pass answers to an external LLM (ant-mcp), `anthive_llm:
+never` hides the paper and `summary_only` keeps its metadata and summary but
+no passages, notes, abstract or page text.

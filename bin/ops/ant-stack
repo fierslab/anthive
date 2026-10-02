@@ -153,6 +153,8 @@ def validate_site(site: dict, path: Path) -> dict:
     site['_h5adstore'] = _abs(site['data'].get('h5adstore'), 'data.h5adstore')
     site['_genesetstore'] = _abs(site['data'].get('genesetstore'), 'data.genesetstore', False)
     site['_starcatstore'] = _abs(site['data'].get('starcatstore'), 'data.starcatstore', False)
+    site['_library'] = _abs(site['data'].get('library'), 'data.library', False)
+    site['_library_index'] = _abs(site['data'].get('library_index'), 'data.library_index', False)
     site['_state'] = _abs(site.get('state_dir'), 'state_dir')
     site['_scratch'] = _abs(site.get('scratch_dir'), 'scratch_dir', False)
     run_as = site.get('run_as') or {}
@@ -285,6 +287,11 @@ def render_anthive_yaml(site: dict) -> dict:
         'api_url': 'http://api:8080',
         'h5adstore': str(site['_h5adstore']),
         'geneset_store': str(site['_genesetstore']) if site['_genesetstore'] else None,
+        # Paper library + literature index (absolute host paths, mounted at the
+        # same path). Unset: the API runs without literature features.
+        'library': str(site['_library']) if site['_library'] else f"{C_STATE}/no-library",
+        'library_index': (str(site['_library_index']) if site['_library_index']
+                          else f"{C_STATE}/no-library-index"),
         'state_dir': C_STATE,
         'tmp_dir': f"{C_SCRATCH}/tmp",
         'log_dir': f"{C_SCRATCH}/logs",
@@ -490,6 +497,13 @@ def render_compose_site(site: dict) -> dict:
         if site[extra]:
             data_rw.append(_bind(site[extra], str(site[extra]), read_only=True))
             data_ro.append(_bind(site[extra], str(site[extra]), read_only=True))
+    # Library PDFs + literature index: the API only reads them; the ingest
+    # container writes them (`ant sync pull`, `ant lib-add`, `ant lib-index`).
+    library_ro, library_rw = [], []
+    for extra in ('_library', '_library_index'):
+        if site[extra]:
+            library_ro.append(_bind(site[extra], str(site[extra]), read_only=True))
+            library_rw.append(_bind(site[extra], str(site[extra])))
     config_mount = _bind(stack / 'anthive.yaml', C_CONFIG, read_only=True)
     state_mount = _bind(state, C_STATE)
     scratch = (_bind(site['_scratch'], C_SCRATCH) if site['_scratch']
@@ -500,10 +514,10 @@ def render_compose_site(site: dict) -> dict:
             webapp_rw,
             {'type': 'volume', 'source': 'caddy-config', 'target': '/srv/caddy-config'},
         ]},
-        'api': {'volumes': data_rw + [config_mount, state_mount, scratch, webapp_rw]},
+        'api': {'volumes': data_rw + library_ro + [config_mount, state_mount, scratch, webapp_rw]},
         'web': {'volumes': data_ro + [config_mount]},
         'mcp': {'volumes': [config_mount, state_mount, webapp_rw]},
-        'ingest': {'volumes': data_rw + [config_mount, state_mount, scratch, webapp_rw]},
+        'ingest': {'volumes': data_rw + library_rw + [config_mount, state_mount, scratch, webapp_rw]},
         'caddy': {
             'ports': _listen_and_ports(site)[1],
             'volumes': [_bind(stack / 'caddy', C_CADDY_SNIPPETS, read_only=True)],
@@ -633,6 +647,51 @@ def _readable_by(path: Path, uid: int, gid: int) -> bool:
     return bool(mode & stat.S_IROTH)
 
 
+# The query-embedding model baked into the app image (docker/Dockerfile);
+# the literature index must be built with the same model.
+IMAGE_EMBEDDING_MODEL = 'BAAI/bge-small-en-v1.5'
+
+
+def _check_library(site: dict) -> list[str]:
+    """Library + literature index sanity: warnings for what degrades features,
+    problems only for what breaks the stack."""
+    problems: list[str] = []
+    library, index_dir = site['_library'], site['_library_index']
+    if library is None:
+        if index_dir is not None:
+            _warn("data.library_index is set but data.library is not: passages cannot be attributed "
+                  "to papers, so literature search returns nothing")
+        return problems
+    papers = library / 'papers'
+    if library.is_dir() and not papers.is_dir():
+        _warn(f"{library} has no papers/ folder: is data.library the library repo checkout?")
+    elif papers.is_dir() and not any(papers.rglob('*.md')):
+        _warn(f"{papers} has no paper records yet (clone the library repo there)")
+    if index_dir is None:
+        _warn("data.library is set but data.library_index is not: no literature search or "
+              "paper passages (set data.library_index and run `ant-stack ingest -- ant sync pull`)")
+        return problems
+    parquet = index_dir / 'library_chunks.parquet'
+    if index_dir.is_dir() and not parquet.is_file():
+        _warn(f"{parquet} is missing: run `ant-stack ingest -- ant sync pull --library-only` "
+              f"(or build it with `ant lib-index`)")
+    meta_file = index_dir / 'library_chunks.json'
+    if parquet.is_file() and meta_file.is_file():
+        try:
+            import json  # noqa: PLC0415
+            model = json.loads(meta_file.read_text()).get('embedding_model')
+        except (OSError, ValueError):
+            model = None
+        if model and model != IMAGE_EMBEDDING_MODEL:
+            _warn(f"the literature index was built with {model!r} but the image ships "
+                  f"{IMAGE_EMBEDDING_MODEL!r}: semantic search falls back to keyword search "
+                  f"(rebuild with `ant lib-index --full`)")
+    if papers.is_dir() and not any(papers.rglob('*.pdf')):
+        _warn(f"no PDFs under {papers}: run `ant-stack ingest -- ant sync pull --library-only` "
+              f"for the paper files")
+    return problems
+
+
 def check(site: dict, running: bool = False) -> list[str]:
     problems: list[str] = []
     if not shutil.which('docker'):
@@ -645,7 +704,9 @@ def check(site: dict, running: bool = False) -> list[str]:
     uid, gid = site['_uid'], site['_gid']
     for field, path in (('data.h5adstore', site['_h5adstore']),
                         ('data.genesetstore', site['_genesetstore']),
-                        ('data.starcatstore', site['_starcatstore'])):
+                        ('data.starcatstore', site['_starcatstore']),
+                        ('data.library', site['_library']),
+                        ('data.library_index', site['_library_index'])):
         if path is None:
             continue
         if not path.is_dir():
@@ -688,6 +749,7 @@ def check(site: dict, running: bool = False) -> list[str]:
                 _warn(f"{len(missing)} of {len(mds)} datasets have no local .duckdb: they are served "
                       f"from S3 (slow) or not at all; pull them with "
                       f"`ant-stack ingest -- ant sync pull --include-duckdb`")
+    problems += _check_library(site)
     if site['_scratch'] and not site['_scratch'].is_dir():
         problems.append(f"scratch_dir {site['_scratch']} does not exist")
     if not running:
@@ -734,6 +796,8 @@ def print_plan(site: dict) -> None:
   published      {', '.join(ports)}
   h5adstore      {site['_h5adstore']}{' (read-only)' if site['data'].get('readonly') else ''}
   genesetstore   {site['_genesetstore'] or '-'}
+  library        {site['_library'] or '-'}
+  library_index  {site['_library_index'] or '-'}
   state_dir      {site['_state']}
   scratch        {site['_scratch'] or 'docker volume <site>_scratch'}
   run as         uid {site['_uid']} gid {site['_gid']}

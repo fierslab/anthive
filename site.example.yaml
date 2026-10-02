@@ -31,6 +31,12 @@ data:
   h5adstore: /srv/anthive/h5adstore        # required
   genesetstore: /srv/anthive/genesetstore  # optional (null disables gene sets)
   starcatstore: null                       # optional
+  # Paper library checkout (its own git repo, doc/LIBRARY.md) and the folder
+  # holding the precomputed literature index (library_chunks.parquet, filled
+  # by `ant-stack ingest -- ant sync pull`). Both optional: null runs the
+  # site without papers and literature search.
+  library: null                            # e.g. /srv/anthive/library
+  library_index: null                      # e.g. /srv/anthive/library_index
   # Mount the h5adstore read-only into the API (mirror sites that never
   # annotate). Admin editors and annotation writes then fail.
   readonly: false

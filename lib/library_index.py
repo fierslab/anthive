@@ -391,6 +391,9 @@ def library_sidecar_map(library_dir: Optional[Path]) -> Dict[str, Dict[str, Any]
     if not library_dir or not Path(library_dir).is_dir():
         return out
     for md in Path(library_dir).rglob("*.md"):
+        # same walk as lib/library.py: any depth, but never _staging or .hidden folders
+        if any(part.startswith(("_", ".")) for part in md.relative_to(library_dir).parts[:-1]):
+            continue
         meta = _read_front_matter(md)
         if not meta.get("citekey"):
             continue
@@ -626,6 +629,9 @@ def write_index(rows: List[Dict[str, Any]], out: Path, embedder: Embedder) -> No
     tmp = out.with_suffix(out.suffix + ".tmp")
     pq.write_table(table, tmp, compression="zstd")
     tmp.replace(out)
+    # Same metadata as a small JSON next to the parquet, so tools without
+    # pyarrow (ant-stack check) can compare the embedding model.
+    out.with_suffix(".json").write_text(metadata["anthive_library_index"] + "\n")
 
 
 def read_index_metadata(path: Path) -> Dict[str, Any]:
