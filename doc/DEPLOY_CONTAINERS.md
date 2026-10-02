@@ -49,9 +49,10 @@ Tick every box. Most failed installs skip one of these.
 - [ ] Read access to the gene-set repo
       (`gitlab.kuleuven.be/bdslab/genesetdbs/anthive-genesetdb`). Optional:
       without it the gene-set pages are empty.
-- [ ] Read access to the paper library repo (`<library repo URL>`, to be
-      announced). Optional: without it the site has no papers, literature
-      search or paper context for AI clients.
+- [ ] Read access to the paper library repo
+      (`gitlab.kuleuven.be/bdslab/anthive/library_store`, private; it holds
+      the paper records, the PDFs come from S3). Optional: without it the
+      site has no papers, literature search or paper context for AI clients.
 - [ ] S3 keys for the data bucket (an access key id and a secret). Without
       them you can still run a site, but only with data you convert yourself.
 
@@ -83,7 +84,7 @@ programs themselves run from the images.
 cd /srv/anthive
 git clone git@gitlab.kuleuven.be:bdslab/anthive/h5adstore.git
 git clone git@gitlab.kuleuven.be:bdslab/genesetdbs/anthive-genesetdb.git genesetstore
-git clone <library repo URL> library          # optional, see step 1
+git clone git@gitlab.kuleuven.be:bdslab/anthive/library_store.git library          # optional, see step 1
 mkdir -p library_index
 ```
 
@@ -92,9 +93,10 @@ mkdir -p library_index
 The actual data (`.h5ad`, `.duckdb`, parquet), the paper PDFs and the
 precomputed literature index are downloaded in step 5.
 
-The library repository's address is not final yet; replace
-`<library repo URL>` with it once it is announced. Until then, leave the two
-library lines out of `site.yaml` in step 4: the site runs without papers.
+The library repository (`bdslab/anthive/library_store`) is private: ask the
+maintainers for read access. It holds only the paper records (`.md`); the
+PDFs come from S3 in step 5. Without access, leave the two library lines out
+of `site.yaml` in step 4: the site runs without papers.
 
 ---
 
@@ -362,7 +364,7 @@ The in-app chat assistant is off and being phased out; leave
 #### Adding the paper library to an existing site
 
 1. Clone the library next to your other data (step 3):
-   `git clone <library repo URL> /srv/anthive/library && mkdir -p /srv/anthive/library_index`.
+   `git clone git@gitlab.kuleuven.be:bdslab/anthive/library_store.git /srv/anthive/library && mkdir -p /srv/anthive/library_index`.
 2. Add both paths to `site.yaml` under `data:`:
    `library: /srv/anthive/library` and `library_index: /srv/anthive/library_index`.
 3. Fetch the PDFs and the index from S3:
