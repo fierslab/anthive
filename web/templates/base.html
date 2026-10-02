@@ -68,6 +68,15 @@
         }
         #topbar nav > a, #topbar nav .dropdown-toggle { color: var(--bar-link); font-size: 13px; }
         #topbar nav > a:hover, #topbar nav .dropdown-toggle:hover { color: var(--bar-link-hover); text-decoration: none; }
+        /* Small marker for views that are still experimental (nav + page notice). */
+        .exp-badge { display: inline-block; margin-left: 4px; padding: 0 4px; border-radius: 3px; font-size: 9px;
+                     line-height: 13px; vertical-align: 1px; text-transform: uppercase; letter-spacing: .3px;
+                     background: #FFF3B0; color: #6b5a1c; }
+        .exp-notice { max-width: 780px; margin: 4px 0 14px; padding: 8px 12px; font-size: 12px; line-height: 1.45;
+                      background: #fffbea; color: #5b4a12; border: 1px solid #f0e3a6; border-left: 3px solid #E09F3E;
+                      border-radius: 4px; }
+        .exp-notice strong { color: #4d3d0c; }
+        .exp-notice a { color: #7a4f0a; text-decoration: underline; }
         #topbar .gene-search { margin: 0; }
         #topbar .gene-search input {
             font-size: 12px; padding: 3px 10px; width: 130px; border: 1px solid #4b7d88;
@@ -527,7 +536,7 @@
             {% if request.app.state.genesets_available %}
             <a href="/genesets">genesets</a>
             {% endif %}
-            <a href="/facets">facets</a>
+            <a href="/facets" title="Facets: experimental">facets<span class="exp-badge">exp</span></a>
         </nav>
         <form class="gene-search" onsubmit="event.preventDefault(); var g=this.q.value.trim(); if(g) window.location='/genes/'+encodeURIComponent(g);"
               title="Jump to a gene's cross-catalogue expression atlas">
