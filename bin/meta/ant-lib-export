@@ -1,0 +1,54 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "pyyaml>=6.0",
+# ]
+# ///
+"""ant-lib-export: write the paper library as BibTeX.
+
+Input: the library (``library`` in anthive.yaml / ANTHIVE_LIBRARY, or
+--library); optional filters by role, collection reference or citekey.
+Output: BibLaTeX (default) or classic BibTeX (--classic) on stdout or in
+the file given with -o. Author lists are joined with " and ", special
+characters escaped, ``anthive_*`` fields kept unless --plain.
+"""
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / 'lib'))
+import library as L  # noqa: E402
+from config import get_config, get_library_dir  # noqa: E402
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument('citekeys', nargs='*', help='only these citekeys (default: all)')
+    parser.add_argument('--library', type=Path, help='library root (default: from config)')
+    parser.add_argument('--role', help='only papers with this anthive_role')
+    parser.add_argument('--plain', action='store_true', help='leave out the anthive_* fields')
+    parser.add_argument('--classic', action='store_true',
+                        help='classic BibTeX instead of BibLaTeX (online -> misc, journaltitle -> journal, date -> year/month)')
+    parser.add_argument('-o', '--output', type=Path, help='write to this file instead of stdout')
+    args = parser.parse_args()
+    library = args.library or get_library_dir(get_config())
+    papers, issues = L.load_library(library)
+    for message in issues.errors:
+        print(f"ERROR {message}", file=sys.stderr)
+    selected = [p for k, p in papers.items()
+                if (not args.citekeys or k in args.citekeys)
+                and (not args.role or p.fields.get('anthive_role') == args.role)]
+    missing = sorted(set(args.citekeys) - set(papers))
+    if missing:
+        print(f"unknown citekeys: {', '.join(missing)}", file=sys.stderr)
+    text = L.export_bibtex(selected, include_anthive=not args.plain, classic=args.classic)
+    if args.output:
+        args.output.write_text(text, encoding='utf-8')
+        print(f"wrote {len(selected)} entries to {args.output}", file=sys.stderr)
+    else:
+        sys.stdout.write(text)
+    return 1 if missing else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

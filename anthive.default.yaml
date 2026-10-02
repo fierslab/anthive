@@ -46,6 +46,10 @@ cache_expiration_days: 7
 # Data store root (the h5adstore). Env: ANTHIVE_H5ADSTORE.
 h5adstore: data/h5adstore
 
+# Paper library: a separate repository of BibLaTeX-compatible .md sidecars
+# (plus PDFs, synced via S3). See doc/LIBRARY.md. Env: ANTHIVE_LIBRARY.
+library: data/library
+
 # Persistent per-site state: SQLite caches, click history, MCP link tokens,
 # generated secrets. Back this up. Never put it under tmp_dir.
 # Env: ANTHIVE_STATE_DIR.

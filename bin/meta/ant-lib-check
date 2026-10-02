@@ -1,0 +1,67 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "pyyaml>=6.0",
+# ]
+# ///
+"""ant-lib-check: validate the paper library and the references to it.
+
+Checks every ``<citekey>.md`` sidecar in the library (BibLaTeX field shapes,
+citekey and file naming, roles, access, vocabulary labels, ``related``
+targets, duplicate DOIs) and every ``papers:`` reference in the h5adstore's
+dataset and collection ``.md`` files.
+
+Input: the library (``library`` in anthive.yaml / ANTHIVE_LIBRARY, or
+--library) and the h5adstore (``h5adstore`` / --h5adstore).
+Output: a report; exit status 1 when there are errors (or warnings with
+--strict).
+"""
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / 'lib'))
+import library as L  # noqa: E402
+from config import get_config, get_data_folder, get_library_dir  # noqa: E402
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument('--library', type=Path, help='library root (default: from config)')
+    parser.add_argument('--h5adstore', type=Path, help='h5adstore root (default: from config)')
+    parser.add_argument('--no-references', action='store_true', help='skip the h5adstore reference check')
+    parser.add_argument('--strict', action='store_true', help='treat warnings as errors')
+    parser.add_argument('-q', '--quiet', action='store_true', help='only print problems and the summary')
+    args = parser.parse_args()
+    cfg = get_config()
+    library = args.library or get_library_dir(cfg)
+    store = args.h5adstore or get_data_folder(cfg)
+    if not library.is_dir():
+        print(f"library not found: {library}", file=sys.stderr)
+        return 2
+
+    papers, issues = L.load_library(library)
+    vocab = L.load_vocabulary()
+    for paper in papers.values():
+        result = L.validate_paper(paper, vocab)
+        issues.errors.extend(result.errors)
+        issues.warnings.extend(result.warnings)
+    refs = []
+    if not args.no_references and store.is_dir():
+        refs = L.find_references(store)
+        issues.errors.extend(L.unresolved_references(papers, refs))
+    drafts = sum(1 for p in papers.values() if p.fields.get('anthive_draft'))
+
+    for message in issues.errors:
+        print(f"ERROR    {message}")
+    for message in issues.warnings:
+        print(f"warning  {message}")
+    print(f"{len(papers)} papers, {len(refs)} references checked, {drafts} with fields awaiting review; "
+          f"{len(issues.errors)} errors, {len(issues.warnings)} warnings")
+    if issues.errors or (args.strict and issues.warnings):
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
