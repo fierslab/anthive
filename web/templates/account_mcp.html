@@ -57,6 +57,9 @@
                      border: 1px solid var(--border); border-radius: 5px; padding: 10px 12px;
                      margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
   .mcp-snippet .mcp-btn { position: absolute; top: 6px; right: 6px; font-size: 12px; padding: 3px 9px; }
+  .mcp-snippet + .mcp-snippet { margin-top: 8px; }
+  .mcp-panel p.mcp-netnote { font-size: 12px; color: var(--text-muted); margin-top: 8px; }
+  .mcp-more { font-size: 13px; margin: 12px 0 0; padding-top: 10px; border-top: 1px solid var(--border); }
   /* admin section */
   .ml-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin: 0 0 10px; }
   .ml-head h2 { margin: 0; }
@@ -81,7 +84,7 @@
 <div class="mcp-page">
   <h1 id="mcp-title">MCP links</h1>
   <p class="mcp-intro">
-    MCP lets an AI assistant such as Claude, Cursor or VS Code search and plot the anthive
+    MCP lets an AI assistant such as Claude, Codex, Gemini CLI, Cursor or VS Code search and plot the anthive
     datasets on your behalf. Each link is private and identifies you. Make one per client
     (a laptop, Claude Desktop, a notebook server) so you can replace or revoke one without
     touching the others.
@@ -116,22 +119,53 @@
     <div class="mcp-tabs" role="tablist">
       <button type="button" class="mcp-tab" role="tab" data-tab="claude-code" aria-selected="true">Claude Code</button>
       <button type="button" class="mcp-tab" role="tab" data-tab="claude-desktop" aria-selected="false">Claude Desktop / claude.ai</button>
-      <button type="button" class="mcp-tab" role="tab" data-tab="json" aria-selected="false">Cursor / VS Code / JSON</button>
+      <button type="button" class="mcp-tab" role="tab" data-tab="codex" aria-selected="false">Codex</button>
+      <button type="button" class="mcp-tab" role="tab" data-tab="gemini" aria-selected="false">Gemini CLI</button>
+      <button type="button" class="mcp-tab" role="tab" data-tab="vscode" aria-selected="false">VS Code</button>
+      <button type="button" class="mcp-tab" role="tab" data-tab="json" aria-selected="false">Cursor / JSON</button>
+      <button type="button" class="mcp-tab" role="tab" data-tab="bridge" aria-selected="false">Other (mcp-remote)</button>
     </div>
     <div class="mcp-panel" data-panel="claude-code">
-      <p>Run this once in a terminal:</p>
+      <p>Run this once in a terminal. It adds anthive to the current project; for every project use the second line.</p>
       <div class="mcp-snippet"><pre data-snippet="claude_code"></pre><button type="button" class="mcp-btn" data-copy="claude_code">Copy</button></div>
+      <div class="mcp-snippet"><pre data-snippet="claude_code_user"></pre><button type="button" class="mcp-btn" data-copy="claude_code_user">Copy</button></div>
     </div>
     <div class="mcp-panel" data-panel="claude-desktop" hidden>
-      <p>Open Settings, then Connectors, and choose <em>Add custom connector</em>. Give it a name
-        (for example <em>anthive</em>) and paste the link as the server URL. Leave the OAuth fields empty.</p>
+      <p>In claude.ai open Customize, then Connectors, and choose <em>Add custom connector</em>. Name it
+        <em>anthive</em>, paste the link as the URL and choose <em>No sign in</em>. The connector then also
+        appears in Claude Desktop and the mobile apps.</p>
       <div class="mcp-snippet"><pre data-snippet="url"></pre><button type="button" class="mcp-btn" data-copy="url">Copy</button></div>
+      <p class="mcp-netnote">claude.ai connects from Anthropic's servers, so this only works if this site is reachable
+        from the internet. If it is only reachable on a campus network or VPN, use Claude Code or the
+        <em>Other (mcp-remote)</em> tab, which runs on your computer.</p>
+    </div>
+    <div class="mcp-panel" data-panel="codex" hidden>
+      <p>Run this once in a terminal. The Codex CLI, app and IDE extension share the setting
+        (<code>~/.codex/config.toml</code>).</p>
+      <div class="mcp-snippet"><pre data-snippet="codex"></pre><button type="button" class="mcp-btn" data-copy="codex">Copy</button></div>
+    </div>
+    <div class="mcp-panel" data-panel="gemini" hidden>
+      <p>Run this once in a terminal (writes <code>~/.gemini/settings.json</code>).</p>
+      <div class="mcp-snippet"><pre data-snippet="gemini_cli"></pre><button type="button" class="mcp-btn" data-copy="gemini_cli">Copy</button></div>
+    </div>
+    <div class="mcp-panel" data-panel="vscode" hidden>
+      <p>Put this in <code>.vscode/mcp.json</code>, or in the file that <em>MCP: Open User Configuration</em>
+        opens to use it in every workspace. Note the key <code>servers</code>.</p>
+      <div class="mcp-snippet"><pre data-snippet="vscode_json"></pre><button type="button" class="mcp-btn" data-copy="vscode_json">Copy</button></div>
     </div>
     <div class="mcp-panel" data-panel="json" hidden>
-      <p>Add this server entry to your client's MCP configuration
-        (Cursor: <code>~/.cursor/mcp.json</code>, VS Code: <code>.vscode/mcp.json</code>).</p>
-      <div class="mcp-snippet"><pre data-snippet="json_config"></pre><button type="button" class="mcp-btn" data-copy="json_config">Copy</button></div>
+      <p>Add this server entry to your client's MCP configuration (Cursor: <code>~/.cursor/mcp.json</code>;
+        the same shape works in Kiro, LM Studio, JetBrains AI Assistant, Junie and Pi).</p>
+      <div class="mcp-snippet"><pre data-snippet="json_url"></pre><button type="button" class="mcp-btn" data-copy="json_url">Copy</button></div>
     </div>
+    <div class="mcp-panel" data-panel="bridge" hidden>
+      <p>For clients that can only start a local program, including <code>claude_desktop_config.json</code>.
+        Needs Node.js; it runs on your computer, so it also works when this site is not public.</p>
+      <div class="mcp-snippet"><pre data-snippet="mcp_remote"></pre><button type="button" class="mcp-btn" data-copy="mcp_remote">Copy</button></div>
+    </div>
+    <p class="mcp-more">Setup for other clients (ChatGPT, OpenCode, Windsurf, Zed, Cline, Roo Code, Continue, Goose,
+      Amp, Warp, ...) and how to keep the token out of the URL:
+      <a href="{{ docs_base_url() }}/MCP_CLIENTS.md" target="_blank" rel="noopener" id="mcp-clients-doc">client setup guide</a>.</p>
   </div>
 
   {% if is_admin %}
@@ -286,6 +320,8 @@
     document.querySelectorAll('[data-snippet]').forEach(function (pre) {
       var text = snippetText(pre.getAttribute('data-snippet'));
       pre.textContent = (url && !revealed[link.id]) ? text.split(url).join(maskUrl(url)) : text;
+      // An older API may not send every snippet yet: hide the empty box.
+      pre.parentNode.hidden = !!url && !text;
     });
   }
 

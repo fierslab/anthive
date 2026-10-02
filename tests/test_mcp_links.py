@@ -601,3 +601,18 @@ def test_admin_only_tool_set():
     assert mod._is_admin({'user': 'r', 'groups': ['Admins']})
     assert not mod._is_admin({'user': 'a', 'groups': ['users']})
     assert not mod._is_admin(None)
+
+
+def test_client_snippets_cover_common_clients():
+    url = 'https://h.example/mcp/u/amcp_abc'
+    snippets = mcp_tokens.client_snippets(url)
+    assert json.loads(snippets['json_url']) == {'mcpServers': {'anthive': {'url': url}}}
+    assert json.loads(snippets['vscode_json']) == {'servers': {'anthive': {'type': 'http', 'url': url}}}
+    bridge = json.loads(snippets['mcp_remote'])['mcpServers']['anthive']
+    assert bridge['command'] == 'npx' and bridge['args'][2] == url
+    assert snippets['codex'] == f'codex mcp add anthive --url {url}'
+    assert snippets['gemini_cli'] == f'gemini mcp add --scope user --transport http anthive {url}'
+    assert '--scope user' in snippets['claude_code_user']
+    # Every key is in the template the web page fills in, and has a {url} slot.
+    assert set(mcp_tokens.SNIPPETS_TEMPLATE) == set(snippets)
+    assert all('{url}' in tpl for tpl in mcp_tokens.SNIPPETS_TEMPLATE.values())

@@ -1,7 +1,7 @@
 # Your personal MCP links
 
 Anthive speaks the Model Context Protocol (MCP), so AI clients such as
-Claude Code, Claude Desktop, claude.ai, Cursor and VS Code can search the
+Claude Code, claude.ai, Codex, Gemini CLI, Cursor and VS Code can search the
 datasets, look up genes, run read-only SQL and make plots for you.
 
 Every signed-in user can make **personal links**, one per client (a laptop,
@@ -29,27 +29,20 @@ or renewing starts a new period.
 
 ## Connect a client
 
-**Claude Code**
+Step-by-step setup for each client (Claude Code, claude.ai and Claude
+Desktop, Codex, ChatGPT, Gemini CLI, OpenCode, Cursor, VS Code, Windsurf,
+Zed, Cline, Roo Code, Continue, Goose, Amp, Kiro, Warp, JetBrains, LM
+Studio, Pi, and anything else through the `mcp-remote` bridge) is in
+[MCP_CLIENTS.md](MCP_CLIENTS.md). The MCP links page in the web UI also
+shows copy-ready snippets with your link filled in.
+
+The short version for Claude Code:
 
     claude mcp add --transport http anthive <your link>
 
-**Claude Desktop / claude.ai**: Settings, Connectors, Add custom
-connector. Paste the link as the server URL and leave the OAuth fields
-empty.
-
-**Cursor** (`~/.cursor/mcp.json`) and **VS Code** (`.vscode/mcp.json`, key
-`servers` instead of `mcpServers`):
-
-```json
-{
-  "mcpServers": {
-    "anthive": {
-      "type": "http",
-      "url": "<your link>"
-    }
-  }
-}
-```
+claude.ai, the Claude apps and ChatGPT call the server from the vendor's
+cloud, so they only work when your anthive site is reachable from the
+internet. Clients that run on your computer have no such limit.
 
 **Clients that support custom headers** can keep the token out of the
 URL. Use `https://anthive.example.org/mcp` as the URL and send

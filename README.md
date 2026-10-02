@@ -83,8 +83,10 @@ Images (public, linux/amd64):
 
 - **In the browser:** open the site and log in.
 - **From an AI client:** in the web UI, open your account menu, choose
-  "Connect an AI client (MCP)", and paste your personal link into Claude,
-  Cursor or VS Code ([doc/MCP_LINKS.md](doc/MCP_LINKS.md)).
+  "Connect an MCP client", and paste your personal link into Claude Code,
+  claude.ai, Codex, Gemini CLI, Cursor, VS Code or one of the ~20 other
+  clients in [doc/MCP_CLIENTS.md](doc/MCP_CLIENTS.md)
+  (links: [doc/MCP_LINKS.md](doc/MCP_LINKS.md)).
 - **From Python:** [`pyvark`](https://codeberg.org/mfiers/pyvark)
   (`pip install pyvark`, then `from vark import AnthiveClient`).
 - **From the shell:** [`vark`](https://codeberg.org/mfiers/vark), a single
@@ -140,6 +142,7 @@ change there affects all of them.
 | configuration keys | [CONFIG.md](doc/CONFIG.md), `anthive.default.yaml` |
 | API changes | [API_CHANGELOG.md](doc/API_CHANGELOG.md) |
 | MCP links | [MCP_LINKS.md](doc/MCP_LINKS.md) |
+| connecting each AI client | [MCP_CLIENTS.md](doc/MCP_CLIENTS.md) |
 | image internals | [DOCKER.md](doc/DOCKER.md) |
 | old host install (no containers) | [DEPLOY.md](doc/DEPLOY.md), [INSTALL.md](doc/INSTALL.md) |
 

@@ -57,6 +57,23 @@ def _issue_tracker_url() -> str:
 
 templates.env.globals['issue_tracker_url'] = _issue_tracker_url
 
+_DEFAULT_DOCS_BASE_URL = 'https://gitlab.kuleuven.be/bdslab/anthive/anthive4/-/blob/main/doc'
+_docs_base_cfg: list = []          # [value] once read from anthive.yaml
+
+
+def _docs_base_url() -> str:
+    """Folder of the detailed docs the help pages link to (no trailing /)."""
+    if not _docs_base_cfg:
+        try:
+            from config import get_docs_base_url, load_config  # noqa: PLC0415
+            _docs_base_cfg.append(get_docs_base_url(load_config()))
+        except Exception:  # config unavailable (tests import this module bare)
+            _docs_base_cfg.append(_DEFAULT_DOCS_BASE_URL)
+    return _docs_base_cfg[0]
+
+
+templates.env.globals['docs_base_url'] = _docs_base_url
+
 
 # ── Stack version for the top-bar badge ──────────────────────────────────────
 #

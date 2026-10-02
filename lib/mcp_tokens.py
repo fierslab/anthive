@@ -319,6 +319,12 @@ def link_url(base_url: str, token: str) -> str:
 
 
 def client_snippets(url: str, server_name: str = 'anthive') -> Dict[str, str]:
+    """Copy-ready setup for the common clients, keyed by client.
+
+    doc/MCP_CLIENTS.md has the full per-client guide; keep the two in step.
+    ``json_config`` (the Claude Code ``.mcp.json`` shape) predates the others
+    and is kept for API clients that read it.
+    """
     json_config = (
         '{\n'
         '  "mcpServers": {\n'
@@ -331,7 +337,16 @@ def client_snippets(url: str, server_name: str = 'anthive') -> Dict[str, str]:
     )
     return {
         'claude_code': f"claude mcp add --transport http {server_name} {url}",
+        'claude_code_user': f"claude mcp add --transport http --scope user {server_name} {url}",
         'json_config': json_config,
+        # Cursor, Kiro, LM Studio, JetBrains AI Assistant, Junie, Pi
+        'json_url': '{ "mcpServers": { "%s": { "url": "%s" } } }' % (server_name, url),
+        'vscode_json': '{ "servers": { "%s": { "type": "http", "url": "%s" } } }' % (server_name, url),
+        'codex': f"codex mcp add {server_name} --url {url}",
+        'gemini_cli': f"gemini mcp add --scope user --transport http {server_name} {url}",
+        'mcp_remote': ('{ "mcpServers": { "%s": { "command": "npx", '
+                       '"args": ["-y", "mcp-remote", "%s", "--transport", "http-only"] } } }'
+                       % (server_name, url)),
     }
 
 
@@ -357,7 +372,7 @@ def describe(record: Optional[LinkRecord], store: McpLinkStore, base_url: str,
     has_link/url/created/... fields describe ``record`` (the first link) and
     are kept for clients written against the single-link API.
     """
-    empty = {'claude_code': '', 'json_config': ''}
+    empty = {key: '' for key in SNIPPETS_TEMPLATE}
     body: Dict[str, Any] = {
         'enabled': bool(enabled), 'user': user, 'has_link': False, 'url': None,
         'created': None, 'rotated_at': None, 'expires_at': None, 'last_used': None,

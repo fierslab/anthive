@@ -321,6 +321,8 @@ def render_anthive_yaml(site: dict) -> dict:
         },
         'issue_tracker_url': str(site['site'].get('issue_tracker_url') or ''),
     }
+    if site['site'].get('docs_base_url'):
+        cfg['docs_base_url'] = str(site['site']['docs_base_url'])
     lib = site.get('library') or {}
     cfg.update({
         'library_upload_groups': [str(g) for g in (lib.get('upload_groups') or ['admins'])],

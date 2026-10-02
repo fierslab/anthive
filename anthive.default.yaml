@@ -392,3 +392,8 @@ grist:
 # Where the "Report an issue" entry in the web UI's user menu points
 # (opens in a new tab). An empty string hides the entry.
 issue_tracker_url: https://gitlab.kuleuven.be/bdslab/anthive/anthive4/-/issues
+
+# Folder the in-app help links to for detailed docs (doc/MCP_CLIENTS.md,
+# doc/MCP_LINKS.md, ...). They live in the repo so they can be corrected
+# without a release. Env: ANTHIVE_DOCS_BASE_URL. Empty means this default.
+docs_base_url: https://gitlab.kuleuven.be/bdslab/anthive/anthive4/-/blob/main/doc

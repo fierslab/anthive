@@ -3,6 +3,7 @@
 {% block title %}Help · anthive{% endblock %}
 
 {% block content %}
+{% set _docs = docs_base_url() %}
 <style>
   .help { max-width: 920px; }
   .help h1 { font-size: 20px; font-weight: 600; margin: 4px 0 10px; }
@@ -153,7 +154,7 @@
       <li><strong>Why a paper is linked.</strong> Datasets point to papers with a role: <em>source</em> (the data come from this paper), <em>reanalysis</em>, <em>method</em> (a protocol or tool used) or <em>related</em> (for example a preprint of the same study). Related papers are also found automatically, and the page says why: same cohort, another version of the same study, shared authors, same cell type, tissue, disease or method, or one cites the other.</li>
       <li><strong>Drafts.</strong> Summaries and topics marked <em>draft, not yet reviewed</em> were written by a language model from the abstract and methods and still await a curator. Treat them as hints; the PDF and the record are authoritative.</li>
       <li><strong>Search inside papers.</strong> The full text is indexed by section and page; AI assistants can search it and cite the page (see <a href="#mcp-offers">MCP</a>).</li>
-      <li><strong>Adding papers.</strong> By default only admins can add papers (sites can widen this). Admins and other permitted users can upload through the API (<code>POST /api/papers/upload</code>, with <code>GET /api/papers/upload/requirements</code> listing what a record needs) or through their AI assistant with the MCP tools <code>check_paper</code> and <code>upload_paper</code>. The <code>anthive-paper-upload</code> skill guides an assistant through collecting complete metadata first. New papers are checked for duplicates, missing details are filled from CrossRef and PubMed, and links to datasets are proposed for a curator to confirm.</li>
+      <li><strong>Adding papers.</strong> By default only admins can add papers (sites can widen this). Admins and other permitted users can upload through the API (<code>POST /api/papers/upload</code>, with <code>GET /api/papers/upload/requirements</code> listing what a record needs) or through their AI assistant with the MCP tools <code>check_paper</code> and <code>upload_paper</code>. The <code>anthive-paper-upload</code> skill guides an assistant through collecting complete metadata first; the record format is described in <a href="{{ _docs }}/LIBRARY.md" target="_blank" rel="noopener">the library documentation</a>. New papers are checked for duplicates, missing details are filled from CrossRef and PubMed, and links to datasets are proposed for a curator to confirm.</li>
     </ul>
   </section>
 
@@ -175,23 +176,29 @@
       <li><strong>Rotate</strong> a link if you think it leaked: the old address stops working immediately and you paste the new one into your client. <strong>Revoke</strong> removes a link for good. Links expire after a period set by the site (90 days by default); the page warns when expiry is near and <em>Renew</em> gives a fresh one.</li>
     </ol>
     <div class="warn"><strong>Treat a link like a password.</strong> Anyone who has it can query the data as you. Do not paste it into chats, tickets or shared files.</div>
+    <p class="note">More on links, expiry and what each tool may do: <a href="{{ _docs }}/MCP_LINKS.md" target="_blank" rel="noopener">MCP links</a>.</p>
 
     <h3 id="mcp-clients">7b. Setting up each client</h3>
-    <p>Your <a href="/account/mcp">MCP page</a> shows these snippets with your own link filled in and a copy button. Below, replace <code>&lt;your link&gt;</code> with your link, which looks like <code>https://&lt;this site&gt;/mcp/u/amcp_...</code>.</p>
-    <p><strong>Claude Code</strong>: run once in a terminal:</p>
+    <p>Almost every AI tool that speaks MCP can use anthive: it is a remote server over HTTP ("streamable HTTP") that needs no sign-in beyond your link. Your <a href="/account/mcp">MCP page</a> has copy-ready snippets with your own link filled in for the common clients. <strong>Step-by-step instructions for each client</strong>, kept up to date on GitLab, are in <a href="{{ _docs }}/MCP_CLIENTS.md" target="_blank" rel="noopener" id="help-mcp-clients-doc">Connecting an AI client to anthive</a>. It covers:</p>
+    <ul class="client-list">
+      <li><strong>Claude</strong>: Claude Code, claude.ai, Claude Desktop and mobile</li>
+      <li><strong>OpenAI</strong>: Codex (CLI, app, IDE) and ChatGPT developer mode</li>
+      <li><strong>Terminal agents</strong>: Gemini CLI, OpenCode, Goose, Amp, Pi, Warp</li>
+      <li><strong>Editors</strong>: Cursor, VS Code with GitHub Copilot, Windsurf (Devin Desktop), Zed, Cline, Roo Code, Continue, Kiro, JetBrains AI Assistant and Junie</li>
+      <li><strong>Desktop chat apps</strong>: LM Studio, Cherry Studio</li>
+      <li><strong>Anything else</strong> that can start a local program, through the <code>mcp-remote</code> bridge</li>
+    </ul>
+    <p>The short version for the most common ones (replace <code>&lt;your link&gt;</code> with your link, <code>https://&lt;this site&gt;/mcp/u/amcp_...</code>):</p>
+    <p><strong>Claude Code</strong>, once in a terminal (add <code>--scope user</code> to use it in every project):</p>
     <div class="cmd"><pre>claude mcp add --transport http anthive &lt;your link&gt;</pre><button type="button" data-copy-help>Copy</button></div>
-    <p><strong>Claude Desktop and claude.ai</strong>: open Settings, then Connectors, choose <em>Add custom connector</em>, give it a name (for example <em>anthive</em>) and paste your link as the server URL. Leave the OAuth fields empty.</p>
-    <p><strong>Cursor, VS Code and other clients that read a JSON configuration</strong> (Cursor: <code>~/.cursor/mcp.json</code>, VS Code: <code>.vscode/mcp.json</code>):</p>
-    <div class="cmd"><pre>{
-  "mcpServers": {
-    "anthive": {
-      "type": "http",
-      "url": "&lt;your link&gt;"
-    }
-  }
-}</pre><button type="button" data-copy-help>Copy</button></div>
-    <p><strong>Codex, OpenCode and other assistants</strong>: add a remote MCP server of type HTTP (streamable HTTP) with your link as the URL, using your client's own configuration file or command; the JSON above shows the two values it needs (a name and the URL).</p>
-    <p class="note">The name you give the server (<code>anthive</code> above) is how the assistant refers to it, and how its tools and prompts are named in your client.</p>
+    <p><strong>Codex</strong>:</p>
+    <div class="cmd"><pre>codex mcp add anthive --url &lt;your link&gt;</pre><button type="button" data-copy-help>Copy</button></div>
+    <p><strong>claude.ai and Claude Desktop</strong>: Customize, then Connectors, <em>Add custom connector</em>. Name it <em>anthive</em>, paste your link as the URL and choose no sign-in.</p>
+    <p><strong>Clients with a JSON configuration</strong> (Cursor <code>~/.cursor/mcp.json</code>, Kiro, LM Studio, Junie and others) mostly take:</p>
+    <div class="cmd"><pre>{ "mcpServers": { "anthive": { "url": "&lt;your link&gt;" } } }</pre><button type="button" data-copy-help>Copy</button></div>
+    <p class="note">Small differences trip people up: VS Code uses <code>servers</code> instead of <code>mcpServers</code> and needs <code>"type": "http"</code>, Gemini CLI wants <code>httpUrl</code>, Windsurf <code>serverUrl</code>, Zed <code>context_servers</code>, Goose <code>uri</code>. The <a href="{{ _docs }}/MCP_CLIENTS.md" target="_blank" rel="noopener">client guide</a> has the exact form for each.</p>
+    <div class="warn"><strong>claude.ai, the Claude apps and ChatGPT connect from the vendor's cloud, not from your computer.</strong> They only work if this site is reachable from the internet. If it is only reachable on a campus network or VPN, use a client that runs on your machine (Claude Code, Codex, Gemini CLI, Cursor, VS Code, ...) or the <code>mcp-remote</code> bridge.</div>
+    <p class="note">The name you give the server (<code>anthive</code> above) is how the assistant refers to it, and how its tools and prompts are named in your client. Clients that support custom headers can keep the token out of the URL: see <a href="{{ _docs }}/MCP_LINKS.md" target="_blank" rel="noopener">MCP links</a>.</p>
 
     <h3 id="mcp-offers">7c. What the MCP server offers</h3>
     <p>When an assistant connects, the server tells it where to start: load a dataset's background first, cite the literature, and keep "the literature says" apart from "our data shows". The tools:</p>
@@ -250,6 +257,7 @@
       <li>Without the tool, copy the folders under <code>skills/</code> of the repository into your agent's skills folder.</li>
       <li>Assistants without skills support (for example claude.ai) still get the same guidance through MCP: the <code>anthive://guide</code> resource and the prompts.</li>
     </ul>
+    <p class="note">The <a href="https://gitlab.kuleuven.be/bdslab/anthive/skills#readme" target="_blank" rel="noopener">skills README</a> on GitLab has the current list and per-agent install notes.</p>
 
     <h3 id="servers">7e. Several anthive servers</h3>
     <p>You may have access to more than one anthive server, for example an internal one with everything you may see and a public one. The skills and tools work with any of them.</p>
@@ -300,6 +308,7 @@ python -c "from vark import AnthiveClient; c = AnthiveClient('https://&lt;this s
       <li><strong>Signing in and out.</strong> The site asks for your login once per session; <em>Logout</em> is in the menu under your name, which also has your <a href="/account/mcp">MCP links</a> and <a href="/settings">Preferences</a> (scoring method, favourite genes; stored in your browser only).</li>
       <li><strong>Version.</strong> The small button left of <em>Help</em> shows the version of the running server (for example <code>v2.40.0</code>); hover for details, click for the changelog. Mention it when you report a problem.</li>
       <li><strong>Privacy.</strong> The site uses no analytics or tracking; preferences stay in your browser. See <a href="/privacy">the privacy note</a>.</li>
+      <li id="help-docs-link"><strong>More documentation.</strong> Detailed guides live on GitLab, where they can be corrected quickly: <a href="{{ _docs }}/MCP_CLIENTS.md" target="_blank" rel="noopener">connecting AI clients</a>, <a href="{{ _docs }}/MCP_LINKS.md" target="_blank" rel="noopener">MCP links</a>, <a href="{{ _docs }}/LIBRARY.md" target="_blank" rel="noopener">the paper library</a>, <a href="{{ _docs }}/API_CHANGELOG.md" target="_blank" rel="noopener">API changes</a> and, for people running a site, <a href="{{ _docs }}/DEPLOY_CONTAINERS.md" target="_blank" rel="noopener">the deployment guide</a>.</li>
       {% set _help_issue_url = issue_tracker_url() %}
       {% if _help_issue_url %}<li id="help-issue-link"><strong>Problems and requests.</strong> <a href="{{ _help_issue_url }}" target="_blank" rel="noopener">Report an issue</a> (also in the menu under your name): bugs, wrong annotations, datasets or papers you would like added.</li>{% endif %}
     </ul>

@@ -26,6 +26,9 @@ site:
   hostnames: [127.0.0.1]
   # Where the "Report an issue" entry in the user menu points. Empty hides it.
   issue_tracker_url: https://gitlab.kuleuven.be/bdslab/anthive/anthive4/-/issues
+  # Optional: folder the in-app help links to for detailed docs (client
+  # setup, MCP links, library). Leave out to use the anthive4 GitLab docs.
+  # docs_base_url: https://gitlab.kuleuven.be/bdslab/anthive/anthive4/-/blob/main/doc
 
 data:
   h5adstore: /srv/anthive/h5adstore        # required

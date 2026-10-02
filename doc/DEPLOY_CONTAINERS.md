@@ -481,6 +481,7 @@ absolute path.
 | `site.public_url` | the address; used for cookies, redirects and MCP links |
 | `site.hostnames` | extra names or IPs the site answers to |
 | `site.issue_tracker_url` | where the "Report an issue" entry in the user menu points (empty hides it) |
+| `site.docs_base_url` | folder the help pages link to for detailed docs such as MCP client setup (default: the anthive4 `doc/` folder on GitLab) |
 | `data.h5adstore`, `data.genesetstore` | the data folders (absolute paths) |
 | `data.library`, `data.library_index` | the paper library checkout and the literature index folder (absolute paths; leave out to run without papers) |
 | `data.readonly` | mount the data read-only (a mirror that never annotates) |

@@ -343,3 +343,22 @@ def test_uv_shim_runs_scripts_with_the_fixed_python(tmp_path):
 @pytest.mark.parametrize('args', [('pip', 'install', 'x'), ('run', '--with', 'x', 'y'), ('run',)])
 def test_uv_shim_refuses_everything_else(args):
     assert _shim(*args).returncode == 2
+
+
+def test_docs_base_url_default_env_and_config(clean_env):
+    default = 'https://gitlab.kuleuven.be/bdslab/anthive/anthive4/-/blob/main/doc'
+    assert config.get_docs_base_url(config.load_default_config()) == default
+    assert config.get_docs_base_url({'docs_base_url': ''}) == default      # empty = default
+    assert config.get_docs_base_url({'docs_base_url': 'https://x.org/doc/'}) == 'https://x.org/doc'
+    clean_env.setenv('ANTHIVE_DOCS_BASE_URL', 'https://env.org/doc')
+    assert config.get_docs_base_url({'docs_base_url': 'https://x.org/doc'}) == 'https://env.org/doc'
+
+
+def test_render_docs_base_url_only_when_set(tmp_path, ant_stack):
+    site = _site(tmp_path, ant_stack)
+    ant_stack.ensure_secrets(site)
+    rendered = yaml.safe_load((ant_stack.render(site, quiet=True) / 'anthive.yaml').read_text())
+    assert 'docs_base_url' not in rendered
+    site = _site(tmp_path, ant_stack, site={'docs_base_url': 'https://fork.example/doc'})
+    rendered = yaml.safe_load((ant_stack.render(site, quiet=True) / 'anthive.yaml').read_text())
+    assert rendered['docs_base_url'] == 'https://fork.example/doc'

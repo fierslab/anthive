@@ -435,6 +435,21 @@ def get_issue_tracker_url(cfg: Optional[Dict[str, Any]] = None) -> str:
     return DEFAULT_ISSUE_TRACKER_URL
 
 
+DEFAULT_DOCS_BASE_URL = 'https://gitlab.kuleuven.be/bdslab/anthive/anthive4/-/blob/main/doc'
+
+
+def get_docs_base_url(cfg: Optional[Dict[str, Any]] = None) -> str:
+    """Folder the help page links to for detailed docs (MCP_CLIENTS.md, ...).
+
+    The docs live in the repo so they can be fixed without a release; a site
+    running a fork can point this at its own copy. Empty falls back to the
+    default (the help page always needs somewhere to link to).
+    """
+    cfg = cfg if cfg is not None else load_config()
+    value = str(_setting(cfg, 'docs_base_url', 'ANTHIVE_DOCS_BASE_URL', '') or '').strip()
+    return (value or DEFAULT_DOCS_BASE_URL).rstrip('/')
+
+
 _COORDINATE_MODES = ('auto', 'always', 'never')
 
 

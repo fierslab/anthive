@@ -5653,7 +5653,7 @@ def test_account_mcp_renders_controls_when_signed_in(client):
     for marker in ('id="mcp-add-form"', 'id="mcp-add-label"', 'id="mcp-add-btn"',
                    'id="mcp-links-list"', 'id="mcp-link-select"',
                    'data-tab="claude-code"', 'data-tab="claude-desktop"', 'data-tab="json"',
-                   'data-snippet="claude_code"', 'data-snippet="json_config"'):
+                   'data-snippet="claude_code"', 'data-snippet="json_url"'):
         assert marker in text, marker
     # Same-origin calls to the multi-link backend contract.
     assert "'/api' + path" in text
@@ -6023,3 +6023,22 @@ def test_dataset_papers_tab_sits_right_before_downloads(library_client):
     assert 'papers' in buttons and 'downloads' in buttons
     assert buttons.index('downloads') == buttons.index('papers') + 1
     assert buttons[0] != 'papers'
+
+
+def test_help_page_links_client_guide_on_gitlab(client, monkeypatch):
+    monkeypatch.setattr(browser, "_docs_base_cfg", ["https://docs.example/doc"])
+    text = client.get("/help").text
+    assert 'id="help-mcp-clients-doc"' in text
+    assert 'href="https://docs.example/doc/MCP_CLIENTS.md"' in text
+    assert 'href="https://docs.example/doc/MCP_LINKS.md"' in text
+    assert 'id="help-docs-link"' in text
+    assert "codex mcp add anthive --url" in text
+    assert "vendor&#39;s cloud" in text or "vendor's cloud" in text
+
+
+def test_account_mcp_has_more_client_tabs_and_guide_link(client, monkeypatch):
+    monkeypatch.setattr(browser, "_docs_base_cfg", ["https://docs.example/doc"])
+    text = client.get("/account/mcp", headers={"Remote-User": "mf"}).text
+    for key in ("codex", "gemini_cli", "vscode_json", "json_url", "mcp_remote", "claude_code_user"):
+        assert f'data-snippet="{key}"' in text, key
+    assert 'href="https://docs.example/doc/MCP_CLIENTS.md"' in text
