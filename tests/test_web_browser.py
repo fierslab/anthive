@@ -5747,3 +5747,59 @@ def test_landing_access_still_searchable_and_in_table(client):
     index = _landing_index(text)
     assert "public" in index["GroupA"]["text"] and "internal" in index["GroupB"]["text"]
     assert 'data-acc=' in text            # table view keeps its access filter data
+
+
+# ── top-bar version badge ─────────────────────────────────────────────────────
+
+def _set_version_state(monkeypatch, api, ok, checked=True):
+    import time as _t
+    monkeypatch.setattr(browser, "_version_state",
+                        {'api': api, 'ok': ok, 'checked': _t.monotonic() if checked else 0.0,
+                         'refreshing': False})
+
+
+def test_version_badge_shows_api_version_left_of_help(client, monkeypatch):
+    _set_version_state(monkeypatch, browser._WEB_VERSION, True)
+    html = client.get("/about").text
+    assert 'id="stack-version"' in html
+    assert f'<span class="v-prefix">v</span>{browser._WEB_VERSION}' in html
+    assert html.index('id="stack-version"') < html.index('href="/help"') < html.index('href="/api/docs"')
+    assert 'href="/api/changelog"' in html
+    assert 'class="version-pill" id="stack-version"' in html
+
+
+def test_version_badge_tooltip_lists_both_when_they_differ(client, monkeypatch):
+    _set_version_state(monkeypatch, "9.9.9", True)
+    html = client.get("/about").text
+    assert '<span class="v-prefix">v</span>9.9.9' in html
+    assert "Anthive version 9.9.9 (API), web " + browser._WEB_VERSION in html
+
+
+def test_version_badge_falls_back_when_api_unreachable(client, monkeypatch):
+    _set_version_state(monkeypatch, None, False)
+    html = client.get("/about").text
+    assert f'<span class="v-prefix">v</span>{browser._WEB_VERSION}' in html
+    assert "API unreachable" in html
+    assert 'class="version-pill version-unconfirmed" id="stack-version"' in html
+
+
+def test_version_refresh_reads_health(monkeypatch):
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"api_version": "3.1.4"}
+    monkeypatch.setattr(browser.requests, "get", lambda url, timeout=0: _Resp())
+    _set_version_state(monkeypatch, None, False, checked=False)
+    browser._refresh_api_version("http://testapi")
+    assert browser._version_state['api'] == "3.1.4" and browser._version_state['ok']
+
+
+def test_version_refresh_failure_keeps_last_known(monkeypatch):
+    def boom(url, timeout=0):
+        raise requests.ConnectionError("down")
+    monkeypatch.setattr(browser.requests, "get", boom)
+    _set_version_state(monkeypatch, "2.0.0", True, checked=False)
+    browser._refresh_api_version("http://testapi")
+    assert browser._version_state['ok'] is False and browser._version_state['api'] == "2.0.0"
