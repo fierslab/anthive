@@ -116,6 +116,13 @@ precedence, and `ANTHIVE_CONFIG` names a config outside the repo. **Never
 hard-code a path under the repo for runtime writes** (the images mount the
 tree read-only); add a key to `anthive.default.yaml` and a `get_*` helper.
 
+**Deployment docs are part of every change.** Anything that changes how a
+site is set up or run (a new store or repo to clone, a new compose service,
+a new `site.yaml` key, a new secret, a changed default) is not done until
+`doc/DEPLOY_CONTAINERS.md`, `site.example.yaml` and `ant-stack check` are
+updated and the guide has been followed on a scratch site (fresh
+`state_dir`, anonymous image pull). `doc/RELEASING.md` describes that check.
+
 ## Git remotes: GitHub + KU Leuven GitLab mirror
 
 `anthive4` and `data/h5adstore` push to two places. In this checkout

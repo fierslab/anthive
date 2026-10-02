@@ -98,7 +98,8 @@ images:
 
 services:
   mcp: true          # MCP server for AI clients (per-user links)
-  chat: false        # in-app assistant; key in <state_dir>/secrets/chat_api_key
+  chat: false        # in-app assistant, being phased out in favour of MCP: leave off
+                     # (key in <state_dir>/secrets/chat_api_key if you do switch it on)
 
 mcp:
   token_ttl_days: 90 # lifetime of a per-user MCP link (0 = never expires)

@@ -24,7 +24,7 @@ gene sets and the client libraries.
 | REST API | datasets, cells, genes, plots (PNG/SVG/PDF), module scores, DE results, sandboxed SQL analytics | `bin/api/ant-serve` |
 | MCP server | the same data as tools for AI clients (Claude, Cursor, VS Code, ...), with a private link per user | `bin/api/ant-mcp` |
 | Notebooks | JupyterLite in the browser, preloaded with the Python client | `frontend/jupyter/` |
-| Data assistant | optional in-app chat that can query and plot (via OpenRouter) | `lib/chat_*.py` |
+| Data assistant | in-app chat (via OpenRouter); switched off and being phased out, AI use goes through MCP | `lib/chat_*.py` |
 | Ingest | check an `.h5ad`, convert it to DuckDB, merge annotations back | `bin/ingest/` |
 | Annotation | module scores (scanpy, UCell), curation helpers | `bin/annot/` |
 | Catalogue tools | dataset metadata (`.md`, `.h5ad.mus`), validators, gene sets | `bin/meta/` |

@@ -368,7 +368,8 @@ absolute path.
 | `auth.*`, `tls.*`, `ports.*` | see above |
 | `run_as` | the user id the containers run as (default: whoever runs ant-stack) |
 | `images.*` | registry, image names, tag |
-| `services.mcp`, `services.chat` | optional parts |
+| `services.mcp` | personal MCP links for AI clients (on by default; the supported way to use AI with anthive) |
+| `services.chat` | the in-app chat assistant; off by default and being phased out in favour of MCP, leave it off |
 | `resources.*` | threads, memory, open-dataset limit, plot cache, catalogue scan |
 
 `ant-stack render` (run by `up`) writes everything derived from `site.yaml`
