@@ -5644,3 +5644,85 @@ def test_account_mcp_all_users_section_for_admins(client):
     assert 'id="ml-table"' in text
     assert 'class="card-table"' in text and 'class="table-wrap"' in text
     assert "/api/admin/mcp-links" in text and "method: 'DELETE'" in text
+
+
+
+# ── landing page: light list, search index, chips, table toggle ──────────────
+
+def _landing_index(resp_text):
+    import html as _html
+    import json as _json
+    import re as _re
+    match = _re.search(r'<script type="application/json" id="cat-index">(.*?)</script>', resp_text, _re.S)
+    assert match, "landing search index missing"
+    return {entry["gid"]: entry for entry in _json.loads(_html.unescape(match.group(1)))}
+
+
+def test_landing_search_index_covers_relevant_fields(client):
+    resp = client.get("/?all=1")
+    assert resp.status_code == 200
+    group_a = _landing_index(resp.text)["GroupA"]["text"]
+    # titles, file ids and DOIs of the datasets inside, plus the biology,
+    # all folded to lower case so the client can match case-insensitively
+    for needle in ("dataset one", "ds2", "10.1/abc", "prefrontal cortex",
+                   "alzheimer disease", "microglia", "groupa", "group a study"):
+        assert needle in group_a, needle
+    assert group_a == group_a.lower()
+
+
+def test_landing_fold_text_is_accent_insensitive():
+    assert browser._fold_text("Aicardi-Goutières  Syndrome") == "aicardi-goutieres syndrome"
+
+
+def test_landing_majority_values_are_not_tags():
+    colls = [{"facets": {"organism": ["human"], "celltype": ["microglia"], "tissue": [],
+                         "method": ["single-cell RNA"], "disease": []}} for _ in range(3)]
+    colls.append({"facets": {"organism": ["mouse"], "celltype": ["microglia"],
+                             "tissue": ["cortex", "hippocampus", "cerebellum"],
+                             "method": ["single-cell RNA"], "disease": ["normal"]}})
+    defaults = browser.landing_facet_defaults(colls)
+    assert defaults["organism"] == {"human"}
+    assert defaults["celltype"] == {"microglia"}
+    tags = browser._landing_tags(colls[3]["facets"], defaults)
+    values = [t["value"] for t in tags]
+    assert "mouse" in values                     # differs from the majority
+    assert "microglia" not in values             # the unstated default
+    assert "3 regions" in values                 # >2 unusual values collapse
+    assert all("normal" not in v for v in values)   # controls are never tags
+    assert browser._landing_tags(colls[0]["facets"], defaults) == []
+
+
+def test_landing_labels():
+    assert browser._cells_label(88) == "88 cells"
+    assert browser._cells_label(3900) == "3.9 k cells"
+    assert browser._cells_label(833_000) == "833 k cells"
+    assert browser._cells_label(1_400_000) == "1.4 M cells"
+    assert browser._authors_label("Donghoon Lee", "Panos Roussos") == "Donghoon Lee … Panos Roussos"
+    assert browser._authors_label("Emma Davis", "") == "Emma Davis"
+
+
+def test_landing_list_search_first_and_table_toggle(client):
+    text = client.get("/?all=1").text
+    # the prominent search sits above everything else in the content
+    assert text.index('id="cat-q"') < text.index('id="cat-list"') < text.index('id="table-view"')
+    assert 'id="cat-table-toggle"' in text
+    # the original table is kept for power users, behind the toggle
+    assert 'id="coll-table"' in text and '<div id="table-view" hidden>' in text
+    listing = text[text.index('id="cat-list"'):text.index('id="table-view"')]
+    assert listing.count('class="cat-item"') == 2
+    # no flask / globe provenance icons or cryptic column info icons in the list
+    assert "ap-icon" not in listing and "ⓘ" not in listing
+    # chips for every facet group, folded behind the Filters button
+    for field in ("organism", "celltype", "tissue", "method", "disease"):
+        assert f'data-field="{field}"' in text
+    assert 'id="cat-chips" class="cat-chips collapsed"' in text
+
+
+def test_landing_phone_layout_markers(client):
+    text = client.get("/?all=1").text
+    assert "@media (max-width: 760px)" in text
+    assert ".cat-item { flex-direction: column" in text
+    # the table view's paper line stays attached to its card on phones
+    assert "tr.row-paper td.row-paper-spacer { display: none; }" in text
+    # hidden list items stay hidden despite the flex display rule
+    assert ".cat-list [hidden]" in text

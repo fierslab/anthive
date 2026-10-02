@@ -384,6 +384,30 @@ with `nh3`/`bleach` + a CSP if editing ever widens.)
   page's marker (`.cv-mark.lvl-{low,medium,high}` in `folder.html`) links
   into `#tab-overview` so the caveat card is in view on landing.
 
+## Catalogue landing page (`/`, index.html)
+
+The default view is a light **list**, one entry per collection: line 1 the
+paper title (fallback: collection name), line 2 authors, journal and year,
+dataset and cell counts and the copyable collection code. On the right only
+**tags that differ from the catalogue default** (`landing_facet_defaults`: the
+most common value per field when at least 30% of collections carry it; more
+than two unusual values in a field collapse into "N regions" and the like;
+control values never become tags), plus a muted lock for non-public access.
+
+A prominent search box on top filters client-side over a folded (lower-case,
+accent-free) text per collection that browser.py builds in
+`_collection_search_text` from every relevant field, including the titles,
+basenames, ids, DOIs and markdown of the datasets inside. Multi-word queries
+are AND. Facet chips (organism, cell type, tissue, method, disease) sit behind
+a "Filters" button, OR within a group and AND across groups, counts reflect
+the other active filters. State lives in the URL (`?q=`, `org=`, `cell=`,
+`tissue=`, `method=`, `disease=` with `|` separators, `sort=`, `view=`) and in
+antRemember. The original column table is still there behind **Table view**;
+it reads the controller's matches from `window.__antVisibleGroups`, keeps its
+own header popovers as extra filters, and the sort selector drives it via
+`window.__antTableSortMode`. List items set `display:flex`, so the template
+carries a `[hidden] { display:none !important }` rule; keep it.
+
 ## Vocabulary shared across pages
 
 - **Coloured "context" pills** (organism / tech / cell / tissue / disease
