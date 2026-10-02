@@ -85,9 +85,10 @@ COPY --from=venv /opt/venv /opt/venv
 # was built with (bin/ops/ant-stack IMAGE_EMBEDDING_MODEL warns otherwise).
 ARG EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
 ENV FASTEMBED_CACHE_PATH=/opt/fastembed
-RUN /opt/venv/bin/python -c "from fastembed import TextEmbedding; \
+RUN HF_HOME=/tmp/hf-build /opt/venv/bin/python -c "from fastembed import TextEmbedding; \
       TextEmbedding('${EMBEDDING_MODEL}', cache_dir='/opt/fastembed')" \
- && chmod -R a+rX /opt/fastembed
+ && chmod -R a+rX /opt/fastembed \
+ && rm -rf /tmp/hf-build /tmp/*.log /tmp/cache
 COPY docker/uv-shim /usr/local/bin/uv
 COPY docker/healthcheck /usr/local/bin/anthive-healthcheck
 COPY . /opt/anthive4
