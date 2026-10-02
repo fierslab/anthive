@@ -3082,7 +3082,7 @@ def test_dataset_view_embeddings_on_data_tab(client):
     data_start = resp.text.index('id="tab-data"')
     data_end = resp.text.index('</section>', data_start)
     data_panel = resp.text[data_start:data_end]
-    assert '<h2>Embeddings' in data_panel
+    assert '<h2 class="section-head">Embeddings' in data_panel
     assert 'plot/scatter?embedding=X_umap' in data_panel
 
 
@@ -3101,7 +3101,7 @@ def test_dataset_view_embeddings_subheading_hidden_when_no_obsm(client, monkeypa
     # Data tab still present
     assert 'data-tab="data"' in resp.text
     # No standalone Embeddings heading anywhere
-    assert '<h2>Embeddings' not in resp.text
+    assert 'class="section-head">Embeddings' not in resp.text
     # The Jinja-rendered embedding chip links (href=…) must not be present.
     # Note: JS may contain the string 'plot/scatter?embedding=' as a template
     # literal; we check for the Jinja-rendered href= version instead.
@@ -3179,7 +3179,7 @@ def test_folder_view_hides_downloads_when_static_empty(client):
     # "Downloads" heading.
     resp = client.get("/browse/GroupA")
     assert resp.status_code == 200
-    assert "<h2>Downloads" not in resp.text
+    assert '<h2 class="section-head">Downloads' not in resp.text
 
 
 def test_folder_view_shows_static_downloads(client, tmp_path, monkeypatch):
@@ -3191,7 +3191,7 @@ def test_folder_view_shows_static_downloads(client, tmp_path, monkeypatch):
     monkeypatch.setattr(browser, "_H5ADSTORE_ROOT", tmp_path)
     resp = client.get("/browse/GroupA")
     assert resp.status_code == 200
-    assert "<h2>Downloads" in resp.text
+    assert '<h2 class="section-head">Downloads' in resp.text
     assert "/browse/GroupA/static/supplement.pdf" in resp.text
 
 
@@ -5911,8 +5911,21 @@ def test_collection_papers_panel_dedupes_and_counts(library_client):
 def test_collection_papers_panel_sits_after_dataset_table(library_client):
     html = library_client.get("/browse/GroupA").text
     assert html.index('id="datasets-table"') < html.index('id="coll-papers"')
-    if "<h2>Downloads" in html:
-        assert html.index('id="coll-papers"') < html.index("<h2>Downloads")
+    if '<h2 class="section-head">Downloads' in html:
+        assert html.index('id="coll-papers"') < html.index('<h2 class="section-head">Downloads')
+
+
+def test_section_headings_share_one_style_on_collection_and_dataset_pages(library_client):
+    # One heading style for every section on both pages, defined once in
+    # base.html; no bare <h2> sections or inline-styled section headings left.
+    import re
+    for url in ("/browse/GroupA", "/browse/GroupA/ds1"):
+        html = library_client.get(url).text
+        assert '<h2 class="section-head' in html, url
+        assert ".section-head {" in html, url          # CSS from base.html
+        body = html.split("<body", 1)[1]
+        assert not re.search(r"<h2>|<h2 style=", body), url
+        assert '<h3 style="margin:14px' not in body, url
 
 
 def test_paper_page_sections(library_client):

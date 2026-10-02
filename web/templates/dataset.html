@@ -542,7 +542,7 @@
     /* When search hides a row, keep it off the layout. */
     #obs-tbl-genes tbody tr.gene-item.g-hidden { display: none; }
   </style>
-  <h2>Genes
+  <h2 class="section-head">Genes
     <span class="info" title="Click ▬ for a histogram of the gene's expression, or ◉ for an embedding scatter coloured by the gene. Sparklines show the gene's value relative to the db-wide range for that stat. Panel source: precomputed dataset favourites, or a canonical curated panel keyed on cell type (microglia / astrocyte / neuron).">ⓘ</span></h2>
   <div class="tab-loading plot-loading" data-tab-loading="genes" style="min-height:60px;display:none">
     <span class="spinner-lg"></span>
@@ -620,7 +620,7 @@
   <div class="data-cards">
   {% if info %}
   <div class="data-card">
-    <h2>Stats</h2>
+    <h2 class="section-head">Stats</h2>
     <table class="obs-stats-tbl auto" style="font-size:12px">
       <tbody>
         {% if info.n_cells %}<tr><td class="colname">cells</td><td>{{ "{:,}".format(info.n_cells) }}</td></tr>{% endif %}
@@ -634,7 +634,7 @@
   {% endif %}
 
   <div class="data-card">
-    <h2>Biology <span class="info" title="Headline biology — organism, technology, cell type, tissue, disease, prep — plus per-donor attributes when known.">ⓘ</span></h2>
+    <h2 class="section-head">Biology <span class="info" title="Headline biology — organism, technology, cell type, tissue, disease, prep — plus per-donor attributes when known.">ⓘ</span></h2>
     <table class="obs-stats-tbl auto" style="font-size:12px">
       <tbody>
       {% if context_bar %}{% set _cb = context_bar %}
@@ -657,7 +657,7 @@
   </div>
 
   <div class="data-card">
-    <h2>Layers <span class="info" title="X = the expression matrix served to plots (log-normalised by convention). Additional named layers (e.g. counts, sqrt) may be present.">ⓘ</span></h2>
+    <h2 class="section-head">Layers <span class="info" title="X = the expression matrix served to plots (log-normalised by convention). Additional named layers (e.g. counts, sqrt) may be present.">ⓘ</span></h2>
     {% if layer_stats_rows %}
     {# Transposed: each layer becomes a column, stats become rows. Datasets
        usually have 1–3 layers so this fits in the card without scrolling. #}
@@ -688,7 +688,7 @@
 
   {% if info and info.obsm_keys %}
   <div class="data-card">
-    <h2>Embeddings <span class="info" title="Per-cell 2D layouts (UMAP, tSNE, custom). Each links to a scatter plot on that embedding.">ⓘ</span></h2>
+    <h2 class="section-head">Embeddings <span class="info" title="Per-cell 2D layouts (UMAP, tSNE, custom). Each links to a scatter plot on that embedding.">ⓘ</span></h2>
     <div style="margin-bottom:4px">
       {% for emb in info.obsm_keys %}
         {% if has_duckdb %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/scatter?embedding={{ emb|urlencode }}" class="chip" title="scatter on {{ emb }}">{{ emb }}</a>{% else %}<code>{{ emb }}</code>{% endif %}
@@ -712,7 +712,7 @@
    no rows for a given method get a blank cell. #}
 {% if n_module_scores %}
 <section class="tab-panel" id="tab-modules" role="tabpanel">
-  <h2>Geneset scores
+  <h2 class="section-head">Geneset scores
     <span class="muted" style="font-size:12px;font-weight:normal">({{ n_module_scores }} genesets)</span>
     <span class="info" title="One long list of (geneset × dataset × tag × method), sorted by peer position — how far the geneset sits from its peers on the same (dataset, tag, method). Filter with the dropdowns above.">ⓘ</span>
   </h2>
@@ -726,7 +726,7 @@
 
 {# ── Numerical columns tab ────────────────────────────────────────────── #}
 <section class="tab-panel" id="tab-num" role="tabpanel">
-  <h2>Numerical observation columns
+  <h2 class="section-head">Numerical observation columns
     <span class="muted" style="font-size:12px;font-weight:normal">({{ _num_cols|length }})</span>
     <span class="info" title="Continuous per-cell values (e.g. n_counts, pseudotime). Geneset scores are in their own tab. Click a column to plot its histogram.">ⓘ</span>
   </h2>
@@ -765,7 +765,7 @@
 
 {# ── Categorical columns tab ──────────────────────────────────────────── #}
 <section class="tab-panel" id="tab-cat" role="tabpanel">
-  <h2>Categorical observation columns
+  <h2 class="section-head">Categorical observation columns
     <span class="muted" style="font-size:12px;font-weight:normal">({{ _cat_cols|length }})</span>
     <span class="info" title="Discrete per-cell labels (cluster, donor, condition, …). Click a column to plot its bar chart.">ⓘ</span>
   </h2>
@@ -805,7 +805,7 @@
 {# ── Differential expression tab ──────────────────────────────────────── #}
 {% if de_studies %}
 <section class="tab-panel" id="tab-de" role="tabpanel">
-  <h2>Differential expression <span class="muted" style="font-weight:normal;font-size:13px">({{ de_studies|length }} {{ 'study' if de_studies|length == 1 else 'studies' }})</span></h2>
+  <h2 class="section-head">Differential expression <span class="muted">({{ de_studies|length }} {{ 'study' if de_studies|length == 1 else 'studies' }})</span></h2>
   <div class="table-wrap">
   <table class="auto" style="font-size:12px">
       <thead><tr>
@@ -838,7 +838,7 @@
 {% if papers %}
 {% from "_papers.html" import paper_list %}
 <section class="tab-panel" id="tab-papers" role="tabpanel">
-  <h2>Papers
+  <h2 class="section-head">Papers
     <span class="info" title="Papers in the anthive library linked to this dataset. The label says why each one is linked: the source of the data, a reanalysis, a method, or a related study.">ⓘ</span></h2>
   {{ paper_list(papers) }}
 </section>
@@ -846,7 +846,7 @@
 
 {# ── Downloads tab ────────────────────────────────────────────────────── #}
 <section class="tab-panel" id="tab-downloads" role="tabpanel">
-  <h2>Downloads
+  <h2 class="section-head">Downloads
     <span class="info" title="Downloadable artifacts for this dataset: the raw AnnData (.h5ad) and any supplementary materials from the associated paper.">ⓘ</span></h2>
   <div class="tab-loading plot-loading" data-tab-loading="downloads" style="min-height:60px;display:none">
     <span class="spinner-lg"></span>
@@ -856,7 +856,7 @@
   {% set _paper_pdfs = papers | selectattr('pdf_url') | list if papers else [] %}
   {% if _paper_pdfs %}
   <div id="ds-paper-files">
-    <h3 style="margin:14px 0 4px;font-size:13px">Papers
+    <h3 class="subsection-head">Papers
       <span class="info" title="PDFs of the papers linked to this dataset, served from the anthive paper library.">ⓘ</span></h3>
     {% for p in _paper_pdfs %}
     <div style="padding:3px 0;font-size:12px">
@@ -2216,7 +2216,7 @@ document.addEventListener('DOMContentLoaded', function() {
                             + '</div>';
                     });
                     if (statics.length) {
-                        html += '<h3 style="margin:14px 0 4px;font-size:13px">Other files</h3>';
+                        html += '<h3 class="subsection-head">Other files</h3>';
                         statics.forEach(function (f) {
                             var name = f.sub || f.filename;
                             html += '<div style="padding:3px 0">'

@@ -260,6 +260,16 @@
         .stats-row .val { font-weight: 600; color: var(--text); }
 
         h2 { font-size: 13px; font-weight: 600; margin: 10px 0 4px; color: var(--text); border-bottom: 1px solid var(--border); padding-bottom: 2px; }
+        /* Section headings on collection and dataset pages: one style, defined
+           here only. A short teal accent bar sets them apart from headings inside
+           markdown descriptions; .subsection-head is the lighter level below. */
+        .section-head { font-size: 15px; font-weight: 600; color: var(--link); line-height: 1.3;
+            margin: 22px 0 8px; padding: 1px 0 1px 9px; border: none; border-left: 3px solid var(--bar-bg); }
+        .section-head .info, .subsection-head .info { font-size: 11px; font-weight: normal; vertical-align: 1px; }
+        .section-head .muted, .section-head .count { font-size: 12px; font-weight: normal; color: var(--text-muted); }
+        .tab-panel > .section-head:first-of-type, .data-card > .section-head:first-child, .section-head.first { margin-top: 0; }
+        .subsection-head { font-size: 13px; font-weight: 600; color: var(--link); line-height: 1.3;
+            margin: 14px 0 4px; padding: 0; border: none; }
         code { background: var(--border-light); padding: 1px 4px; font-family: var(--font-mono); font-size: 11px; }
 
         .md-body { font-size: 13px; line-height: 1.6; }

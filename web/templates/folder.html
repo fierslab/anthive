@@ -216,7 +216,7 @@
 </div>
 
 {% if description_html %}
-<h2 style="margin-top:22px">About this collection</h2>
+<h2 class="section-head">About this collection</h2>
 <div class="md-body" style="margin:6px 0 14px;padding:0">
     {{ description_html|safe }}
 </div>
@@ -225,14 +225,14 @@
 {% if papers %}
 {% from "_papers.html" import paper_list %}
 <section id="coll-papers" style="margin:22px 0 16px">
-  <h2 style="margin:0 0 4px;font-size:15px">Papers
+  <h2 class="section-head first">Papers
     <span class="info" title="Papers in the anthive library linked to this collection's datasets, source papers first. The label says why each one is linked.">ⓘ</span></h2>
   {{ paper_list(papers) }}
 </section>
 {% endif %}
 
 {% if static_files %}
-<h2>Downloads
+<h2 class="section-head">Downloads
   <span class="info" title="Files placed under data/h5adstore/{{ group_id }}/static/ — supplementary tables, PDFs, etc. Raw .h5ad and .duckdb are on the dataset pages.">ⓘ</span></h2>
 <div class="static-files">
   {% for f in static_files %}

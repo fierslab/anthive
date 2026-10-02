@@ -323,6 +323,17 @@ with `nh3`/`bleach` + a CSP if editing ever widens.)
 
 ## Sitewide UI conventions (base.html)
 
+- **Section headings: one style.** Every section on the collection and
+  dataset pages (including the headings inside dataset tab panels and the
+  Data-tab cards) is `<h2 class="section-head">`, the level below is
+  `<h3 class="subsection-head">` (also in JS-built markup). Both are defined
+  once in `base.html`: 15px semibold dark teal with a 3px accent bar for
+  `.section-head`, 13px semibold teal for `.subsection-head`. Sentence case,
+  no inline heading styles; an inline count goes in `<span class="muted">`
+  and the `ⓘ` stays aligned. The first section heading in a tab panel or
+  card loses its top margin automatically; use `.section-head.first` where a
+  wrapper already provides spacing. Headings inside markdown descriptions
+  (`.md-body`) stay neutral so sections remain distinct.
 - **Help → hover `ⓘ`.** Verbose/explanatory prose hides behind a small `ⓘ`
   with a `title=` (the `.info` class is defined sitewide in `base.html`; `title`
   text must contain no `"`). Used in every view; plot.html also has a local
