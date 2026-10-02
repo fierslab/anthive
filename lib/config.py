@@ -329,6 +329,11 @@ def get_data_folder(cfg: Optional[Dict[str, Any]] = None) -> Path:
     return resolve_path(_setting(cfg, 'h5adstore', 'ANTHIVE_H5ADSTORE', 'data/h5adstore'))
 
 
+def get_library_dir(cfg: Optional[Dict[str, Any]] = None) -> Path:
+    """The paper library root (its own repository; see doc/LIBRARY.md)."""
+    return resolve_path(_setting(cfg, 'library', 'ANTHIVE_LIBRARY', 'data/library'))
+
+
 def get_webapp_dir(cfg: Optional[Dict[str, Any]] = None) -> Path:
     """Static bundle root served by Caddy (jupyter/, plots/, artifacts/)."""
     return resolve_path(_setting(cfg, 'webapp_dir', 'ANTHIVE_WEBAPP_DIR', 'webapp'))

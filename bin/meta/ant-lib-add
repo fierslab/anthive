@@ -1,0 +1,114 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "pyyaml>=6.0",
+#   "pymupdf>=1.24",
+#   "bibtexparser>=1.4,<2",
+# ]
+# ///
+"""ant-lib-add: add a paper to the library.
+
+Input: a DOI, a PMID (``pmid:12345``), a PDF (the DOI is read from its
+metadata or first pages) or a BibTeX file with one entry; optionally a PDF to
+attach (--pdf) and a role.
+Output: ``<library>/papers/<citekey>.md`` with BibLaTeX fields from CrossRef
+and OpenAlex (authors with ORCID, journal, volume/pages, abstract, cited
+DOIs) and the PDF copied as ``<citekey>.pdf``. Refuses to add a DOI that is
+already in the library (use --update to refresh its bibliographic fields,
+keeping anthive_* fields and notes).
+"""
+import argparse
+import shutil
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / 'lib'))
+import library as L  # noqa: E402
+from config import get_config, get_library_dir  # noqa: E402
+
+
+def fields_from_bibtex(path: Path) -> dict:
+    import bibtexparser  # noqa: PLC0415
+    from bibtexparser.bparser import BibTexParser  # noqa: PLC0415
+    parser = BibTexParser(common_strings=True)
+    parser.ignore_nonstandard_types = False
+    db = bibtexparser.loads(path.read_text(encoding='utf-8'), parser=parser)
+    if len(db.entries) != 1:
+        raise SystemExit(f"{path}: expected one BibTeX entry, found {len(db.entries)}")
+    fields = L.fields_from_bibtex_entry(db.entries[0])
+    fields['_bibtex_key'] = db.entries[0].get('ID')
+    return fields
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument('source', help="DOI, 'pmid:<id>', a PDF, or a BibTeX file")
+    parser.add_argument('--pdf', type=Path, help='PDF to attach')
+    parser.add_argument('--role', default='background', choices=sorted(L.ROLES))
+    parser.add_argument('--access', choices=sorted(L.ACCESS))
+    parser.add_argument('--citekey', help='use this citekey instead of generating one')
+    parser.add_argument('--library', type=Path, help='library root (default: from config)')
+    parser.add_argument('--update', action='store_true', help='refresh an existing record with the same DOI')
+    parser.add_argument('--no-references', action='store_true', help='skip fetching cited DOIs')
+    args = parser.parse_args()
+
+    library = args.library or get_library_dir(get_config())
+    papers_dir = library / 'papers'
+    papers_dir.mkdir(parents=True, exist_ok=True)
+    papers, _ = L.load_library(library)
+
+    source = args.source
+    pdf = args.pdf
+    fields: dict = {}
+    if source.lower().endswith('.bib'):
+        fields = fields_from_bibtex(Path(source))
+        doi = L.normalize_doi(fields['doi']) if fields.get('doi') else None
+    elif source.lower().endswith('.pdf'):
+        pdf = pdf or Path(source)
+        doi = L.doi_from_pdf(Path(source))
+        if not doi:
+            raise SystemExit(f"no DOI found in {source}; pass the DOI and --pdf instead")
+    elif source.lower().startswith('pmid:'):
+        doi = L.doi_from_pmid(source.split(':', 1)[1])
+        if not doi:
+            raise SystemExit(f"no DOI found for {source}")
+    else:
+        doi = L.normalize_doi(source)
+
+    if doi:
+        fetched = L.metadata_from_doi(doi, with_references=not args.no_references)
+        fields = {**fields, **fetched} if fields else fetched
+    fields.pop('_bibtex_key', None) if args.citekey else None
+
+    existing = next((p for p in papers.values() if doi and p.doi == doi), None)
+    if existing and not args.update:
+        raise SystemExit(f"{doi} is already in the library as {existing.citekey} (use --update)")
+    if existing:
+        merged = {k: v for k, v in existing.fields.items() if k.startswith('anthive_') or k in ('related', 'relatedtype', 'file')}
+        fields = {**fields, **merged, 'citekey': existing.citekey}
+        key, body = existing.citekey, existing.body
+    else:
+        bib_key = fields.pop('_bibtex_key', None)
+        key = args.citekey or bib_key or L.make_citekey(L.first_author_last(fields), fields.get('date') or fields.get('year'),
+                                                         fields.get('title', ''), papers)
+        if key in papers:
+            raise SystemExit(f"citekey {key} is taken")
+        fields['citekey'] = key
+        fields['anthive_role'] = args.role
+        fields['anthive_llm'] = 'allowed'
+        body = '## Notes\n\nNo notes yet.'
+    if args.access:
+        fields['anthive_access'] = args.access
+    if pdf:
+        shutil.copy2(pdf, papers_dir / f"{key}.pdf")
+        fields['file'] = f"{key}.pdf"
+    problems = L.validate_paper(L.Paper(citekey=key, fields=fields, path=papers_dir / f"{key}.md"))
+    L.write_sidecar(papers_dir / f"{key}.md", fields, body)
+    print(f"{'updated' if existing else 'added'} {key}: {fields.get('title', '')[:80]}")
+    for message in problems.errors + problems.warnings:
+        print(f"  note: {message}")
+    return 1 if problems.errors else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -1,0 +1,95 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "pyyaml>=6.0",
+#   "bibtexparser>=1.4,<2",
+# ]
+# ///
+"""ant-lib-import: import a Better BibTeX export into the library.
+
+Input: a .bib file, typically one Zotero collection exported with Better
+BibTeX (optionally "with files", so ``file`` fields point at PDFs relative
+to the .bib). Entries are matched to existing records by DOI, then citekey;
+a match updates the bibliographic fields and keeps anthive_* fields and
+notes, so re-importing is safe.
+Output: ``<library>/papers/<citekey>.md`` per entry (+ PDF copies), and a
+summary of added / updated / skipped entries. New entries get
+``anthive_role: background`` unless --role says otherwise.
+"""
+import argparse
+import shutil
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / 'lib'))
+import library as L  # noqa: E402
+from config import get_config, get_library_dir  # noqa: E402
+
+def entry_fields(entry: dict) -> dict:
+    return L.fields_from_bibtex_entry(entry)
+
+
+def resolve_file(file_field: str, bib_dir: Path):
+    for part in (file_field or '').split(';'):
+        candidate = part.split(':')[1] if part.count(':') >= 2 else part
+        path = (bib_dir / candidate).resolve()
+        if candidate and path.suffix.lower() == '.pdf' and path.exists():
+            return path
+    return None
+
+
+def main() -> int:
+    import bibtexparser  # noqa: PLC0415
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument('bibfile', type=Path)
+    parser.add_argument('--library', type=Path, help='library root (default: from config)')
+    parser.add_argument('--role', default='background', choices=sorted(L.ROLES))
+    parser.add_argument('--dry-run', action='store_true')
+    args = parser.parse_args()
+    library = args.library or get_library_dir(get_config())
+    papers_dir = library / 'papers'
+    papers_dir.mkdir(parents=True, exist_ok=True)
+    papers, _ = L.load_library(library)
+    by_doi = {p.doi: p for p in papers.values() if p.doi}
+
+    from bibtexparser.bparser import BibTexParser  # noqa: PLC0415
+    bib_parser = BibTexParser(common_strings=True)
+    bib_parser.ignore_nonstandard_types = False  # keep BibLaTeX types such as @online
+    db = bibtexparser.loads(args.bibfile.read_text(encoding='utf-8'), parser=bib_parser)
+    added = updated = skipped = 0
+    for entry in db.entries:
+        fields = entry_fields(entry)
+        if not fields.get('title'):
+            print(f"skip {entry.get('ID')}: no title")
+            skipped += 1
+            continue
+        existing = by_doi.get(fields.get('doi')) or papers.get(entry.get('ID', '').lower())
+        pdf = resolve_file(fields.pop('file', ''), args.bibfile.parent)
+        if existing:
+            keep = {k: v for k, v in existing.fields.items()
+                    if k.startswith('anthive_') or k in ('related', 'relatedtype', 'file')}
+            new_fields = {**fields, **keep, 'citekey': existing.citekey}
+            key, body = existing.citekey, existing.body
+            updated += 1
+        else:
+            key = entry.get('ID', '').lower()
+            if not L.CITEKEY_RE.match(key) or key in papers:
+                key = L.make_citekey(L.first_author_last(fields), fields.get('date'), fields['title'], papers)
+            new_fields = {'anthive_role': args.role, 'anthive_llm': 'allowed', **fields, 'citekey': key}
+            body = '## Notes\n\nImported from ' + args.bibfile.name + '.'
+            added += 1
+        if pdf and not args.dry_run:
+            shutil.copy2(pdf, papers_dir / f"{key}.pdf")
+            new_fields['file'] = f"{key}.pdf"
+        if not args.dry_run:
+            L.write_sidecar(papers_dir / f"{key}.md", new_fields, body)
+        papers[key] = L.Paper(citekey=key, fields=new_fields, body=body)
+        if new_fields.get('doi'):
+            by_doi[new_fields['doi']] = papers[key]
+        print(f"{'update' if existing else 'add':6s} {key}")
+    print(f"{added} added, {updated} updated, {skipped} skipped{' (dry run)' if args.dry_run else ''}")
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

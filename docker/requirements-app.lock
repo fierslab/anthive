@@ -26,6 +26,8 @@ attrs==26.1.0
     #   referencing
 bcrypt==5.0.0
     # via -r docker/requirements-app.in
+bibtexparser==1.4.4
+    # via -r docker/requirements-app.in
 boto3==1.43.103
     # via -r docker/requirements-app.in
 botocore==1.43.103
@@ -221,12 +223,16 @@ pydeseq2==0.5.2
     # via -r docker/requirements-app.in
 pyjwt==2.15.0
     # via mcp
+pymupdf==1.28.2
+    # via -r docker/requirements-app.in
 pynndescent==0.6.0
     # via
     #   scanpy
     #   umap-learn
 pyparsing==3.3.3
-    # via matplotlib
+    # via
+    #   bibtexparser
+    #   matplotlib
 python-dateutil==2.9.0.post0
     # via
     #   botocore

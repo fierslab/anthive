@@ -13,6 +13,15 @@ annotation), and the integrity of the underlying h5ad/duckdb/S3 state.
 | `ant-s3-check` | Verify S3 mirror parity vs local h5adstore (size + mtime). Read-only — push/pull lives in `bin/ops/ant-sync`. |
 | `ant-cellxgene` | Import datasets from the CZ CELL×GENE Discover portal. Downloads, validates, runs ant-convert. |
 | `ant-geneset` | Manage the **genesetstore** (`data/genesetstore/`): list, validate, register `.grp` / `.rnk` gene lists keyed per study. Consumed by `bin/annot/ant-score`. |
+| `ant-lib-add` | Add a paper to the **library** (`library` in anthive.yaml, default `data/library`, its own git repo) by DOI, PMID, PDF or BibTeX; fetches CrossRef + OpenAlex. Spec: `doc/LIBRARY.md`. |
+| `ant-lib-import` | Import a Better BibTeX export (e.g. one Zotero collection) into the library; idempotent by DOI / citekey. |
+| `ant-lib-export` | Write the library as BibLaTeX (default) or classic BibTeX (`--classic`). |
+| `ant-lib-check` | Validate library sidecars and every `papers: {citekey: role}` reference in the h5adstore. |
+
+Paper records are `<citekey>.md` sidecars with BibLaTeX field names plus
+`anthive_*` fields (`lib/library.py`). Datasets/collections point at them
+with `papers:` in their own front matter; nothing in the library points
+back at datasets.
 
 ## The two metadata stores
 
