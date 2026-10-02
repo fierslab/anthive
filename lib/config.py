@@ -362,6 +362,23 @@ def get_api_url(cfg: Optional[Dict[str, Any]] = None) -> str:
     return str(_setting(cfg, 'api_url', 'ANTHIVE_API_URL', default)).rstrip('/')
 
 
+DEFAULT_ISSUE_TRACKER_URL = 'https://gitlab.kuleuven.be/bdslab/anthive/anthive4/-/issues'
+
+
+def get_issue_tracker_url(cfg: Optional[Dict[str, Any]] = None) -> str:
+    """Target of the web UI's "Report an issue" menu entry; '' hides it.
+
+    Unlike most settings an explicit empty value is honoured (it hides the
+    entry) instead of falling back to the default.
+    """
+    if 'ANTHIVE_ISSUE_TRACKER_URL' in os.environ:
+        return os.environ['ANTHIVE_ISSUE_TRACKER_URL'].strip()
+    cfg = cfg if cfg is not None else load_config()
+    if 'issue_tracker_url' in cfg:
+        return str(cfg.get('issue_tracker_url') or '').strip()
+    return DEFAULT_ISSUE_TRACKER_URL
+
+
 _COORDINATE_MODES = ('auto', 'always', 'never')
 
 

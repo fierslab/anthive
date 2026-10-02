@@ -29,6 +29,28 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.38.0 — 2026-10-02
+
+Additive: several named MCP links per user. Existing clients keep working.
+
+- `GET /me/mcp` gains `links` (one entry per non-revoked link: `id`,
+  `label`, `url`, `active`, `created`, `rotated_at`, `expires_at`,
+  `last_used`), `max_links` and `snippets_template` (client snippets with a
+  `{url}` placeholder). The 2.37 top-level fields (`has_link`, `url`,
+  `created`, ..., `snippets`) stay and describe the user's first link.
+- New: `POST /me/mcp/links` (body `{"label": "..."}`, optional; 409 at the
+  per-user cap `mcp.max_links_per_user`, default 5),
+  `POST /me/mcp/links/{id}/rotate` (only that link's token changes),
+  `DELETE /me/mcp/links/{id}`, admin `DELETE /admin/mcp-links/{user}/{id}`.
+  Unchanged: `POST /me/mcp/rotate` (first link, created if none),
+  `DELETE /me/mcp` and `DELETE /admin/mcp-links/{user}` (all of a user's
+  links).
+- `GET /admin/mcp-links` returns one row per link and adds `id` and `label`.
+- The link store converts a 2.37 database (one row per user) in place on
+  first open; existing tokens stay valid and are labelled "default".
+- New config keys: `mcp.max_links_per_user`, `issue_tracker_url` (web UI
+  "Report an issue" menu entry).
+
 ## 2.37.2 — 2026-09-28
 
 Patch release: no endpoint or response changes.

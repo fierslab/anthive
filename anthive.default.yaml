@@ -198,6 +198,8 @@ mcp:
   public_base_url: null
   # Per-link request budget in ant-mcp (requests per minute).
   rate_limit_per_minute: 120
+  # How many named links one user may hold at the same time.
+  max_links_per_user: 5
   # ant-mcp caches a successful token check this many seconds, a failed
   # one verify_negative_cache_seconds. Rotation/revocation takes effect
   # after at most verify_cache_seconds.
@@ -343,3 +345,7 @@ grist:
   url: null                    # e.g. https://grist.fie.rs
   doc_id: null                 # e.g. 6dMbv7Qi9Zy8
   table: null                  # e.g. Micro_v8
+
+# Where the "Report an issue" entry in the web UI's user menu points
+# (opens in a new tab). An empty string hides the entry.
+issue_tracker_url: https://gitlab.kuleuven.be/bdslab/anthive/anthive4/-/issues

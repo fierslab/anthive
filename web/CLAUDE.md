@@ -31,7 +31,8 @@ web/
     # admin (Authelia `admins` only):
     edit_collection.html   # /admin/edit/{group} — index.md editor
     edit_dataset.html      # /admin/edit/{group}/{file} — .md + .mus editor
-    admin_feedback.html    # /admin/feedback — chat feedback triage
+    admin_feedback.html    # /admin/feedback — chat feedback triage (no menu entry)
+    account_mcp.html       # /account/mcp — the user's MCP links (+ all users' links for admins)
   anthive_logo.png  # the (white) brand logo — grayscale+alpha, for dark bg
   topbar_logo.png   # dark-recoloured topbar mark (base64-inlined Jinja global)
   __init__.py       # so the directory imports cleanly if ever needed
@@ -78,15 +79,26 @@ line-art logo (grayscale+alpha PNG), so it's shown on a dark hero panel.
 | `/privacy` | chat data-handling note (draft) | `privacy.html` |
 | `/admin/edit/{group}` · `/admin/edit/{group}/{file}` | index.md · dataset .md/.mus editors (admin) | `edit_*.html` |
 | `/admin/feedback` | chat-feedback triage (admin) | `admin_feedback.html` |
-| `/account/mcp` | the signed-in user's private MCP link: create / show / copy / rotate / revoke + client setup snippets (401 without `Remote-User`) | `account_mcp.html` |
-| `/admin/mcp-links` | every user's MCP link with revoke (admin) | `admin_mcp_links.html` |
+| `/account/mcp` | the signed-in user's named MCP links: add (with label) / show / copy / rotate / revoke each, client setup snippets for a chosen link; admins also get the "All users' links" section (`#all`). 401 without `Remote-User` | `account_mcp.html` |
+| `/admin/mcp-links` | 307 redirect to `/account/mcp#all` | none |
 
-**MCP links UI** talks to ant-serve's `GET /me/mcp`, `POST /me/mcp/rotate`,
-`DELETE /me/mcp`, `GET /admin/mcp-links`, `DELETE /admin/mcp-links/{user}`
-client-side (same-origin `/api`). The account-menu entry (`#mcp-menu-link`)
-is hidden until `/api/me/mcp` reports `enabled:true`, like the chat widget.
-The URL and the snippets are masked by default; Copy always copies the real
-text. Rotate and Revoke confirm first because the old link dies immediately.
+**MCP links UI** talks to ant-serve's `GET /me/mcp`, `POST /me/mcp/links`,
+`POST /me/mcp/links/{id}/rotate`, `DELETE /me/mcp/links/{id}`,
+`GET /admin/mcp-links`, `DELETE /admin/mcp-links/{user}/{id}` client-side
+(same-origin `/api`). The single account-menu entry (`#mcp-menu-link`) is
+hidden until `/api/me/mcp` reports `enabled:true`; its label is "Connect an
+MCP client" with no links and "MCP links" once the user has one. URLs and
+snippets are masked by default; Copy always copies the real text. Rotate
+and Revoke confirm first because the old URL dies immediately.
+
+**User menu (base.html).** Opens on hover, focus, or click/tap
+(`#user-menu-toggle`, `.dropdown.open`), closes on outside click or Escape.
+`.dropdown-menu::before` is an invisible bridge over the gap between toggle
+and menu: without it the pointer leaves `.dropdown` while moving down and
+the menu closes (the "fiddly dropdown" bug). The menu has "Report an issue"
+(`#issue-tracker-link`, new tab) for signed-in users when
+`issue_tracker_url` is set (Jinja global `issue_tracker_url()`); the old
+admin-only "chat feedback" entry is gone (`/admin/feedback` still exists).
 
 **Route ordering, geneset routes:** `/genesets/variability` and
 `/genesets/starcat/{catalog_id}/modules/{name}` are registered *before* the
@@ -284,8 +296,8 @@ with `nh3`/`bleach` + a CSP if editing ever widens.)
   `<select>`/datalist from `GET /mus/vocab`, minimal-diff PUT, 400 vocab-gate
   surfaced inline. AI-curation chips (`/curation`) fill both `.md` and `.mus`.
 - **`/admin/feedback`** (`admin_feedback.html`) — triage of chat feedback flags
-  (`GET /chat/feedback`), colour-coded category + flagged message; topbar
-  account menu shows the link only to admins.
+  (`GET /chat/feedback`), colour-coded category + flagged message; no
+  longer linked from the account menu (reach it by URL).
 - Non-admin → 403 (`index.html` with an error); the server-side write gate in
   ant-serve is authoritative. Never add HTTP Basic Auth (see Auth note).
 

@@ -146,10 +146,98 @@ def test_describe_and_admin_rows(store):
     assert body['url'] in body['snippets']['json_config']
     assert json.loads(body['snippets']['json_config'])['mcpServers']['anthive']['url'] == body['url']
     assert set(body) == {'enabled', 'user', 'has_link', 'url', 'created', 'rotated_at',
-                         'expires_at', 'last_used', 'ttl_days', 'snippets'}
+                         'expires_at', 'last_used', 'ttl_days', 'snippets',
+                         'links', 'max_links', 'snippets_template'}
     disabled = mcp_tokens.describe(record, store, 'https://h', 'alice', False)
     assert disabled['enabled'] is False and disabled['url'] is None
     assert mcp_tokens.admin_row(record)['user'] == 'alice'
+
+
+# ── multiple links per user ─────────────────────────────────────────────────
+
+def test_several_links_are_independent(store):
+    laptop = store.create('alice', 'laptop', ['users'])
+    desktop = store.create('alice', 'Claude Desktop')
+    t1, t2 = store.token_for(laptop), store.token_for(desktop)
+    assert t1 != t2 and laptop.label == 'laptop' and desktop.label == 'Claude Desktop'
+    assert store.verify(t1).id == laptop.id and store.verify(t2).id == desktop.id
+    rotated = store.rotate_link('alice', laptop.id)
+    assert store.verify(t1) is None                     # only the rotated one dies
+    assert store.verify(t2).id == desktop.id
+    assert store.verify(store.token_for(rotated)).id == laptop.id
+    assert store.revoke_link(desktop.id, user='alice') is True
+    assert store.verify(t2) is None
+    assert [r.id for r in store.links_for('alice')] == [laptop.id]
+
+
+def test_links_are_scoped_to_their_owner(store):
+    mine = store.create('alice', 'laptop')
+    assert store.rotate_link('bob', mine.id) is None
+    assert store.revoke_link(mine.id, user='bob') is False
+    assert store.verify(store.token_for(mine)).user == 'alice'
+    assert store.revoke_link(mine.id) is True            # admin path: no user scope
+
+
+def test_link_cap_and_default_labels(tmp_path):
+    capped = McpLinkStore(tmp_path / 'cap.db', 's', max_links_per_user=2)
+    first = capped.create('alice')
+    second = capped.create('alice', '   ')
+    assert (first.label, second.label) == ('link 1', 'link 2')
+    with pytest.raises(mcp_tokens.LinkLimitError):
+        capped.create('alice', 'third')
+    capped.revoke_link(first.id, user='alice')
+    assert capped.create('alice', 'third').label == 'third'    # revoked ones free a slot
+    assert len(capped.create('bob', 'x' * 80).label) == mcp_tokens.LABEL_MAX_CHARS
+
+
+def test_single_link_api_acts_on_first_link(store):
+    first = store.create('alice', 'laptop')
+    second = store.create('alice', 'desktop')
+    rotated = store.rotate('alice')
+    assert rotated.id == first.id and rotated.generation == 2
+    assert store.verify(store.token_for(second)).id == second.id
+    assert store.revoke('alice') is True                 # revokes all of them
+    assert store.links_for('alice') == []
+
+
+def test_single_link_table_is_migrated_in_place(tmp_path):
+    db = tmp_path / 'old.db'
+    con = sqlite3.connect(db)
+    con.execute("""
+        CREATE TABLE mcp_links (
+            user TEXT PRIMARY KEY, public_id TEXT NOT NULL UNIQUE,
+            generation INTEGER NOT NULL DEFAULT 1, groups TEXT NOT NULL DEFAULT '',
+            created TEXT NOT NULL, rotated_at TEXT, expires_at TEXT,
+            revoked INTEGER NOT NULL DEFAULT 0, last_used TEXT, last_ip TEXT)""")
+    con.execute("INSERT INTO mcp_links (user, public_id, generation, groups, created) "
+                "VALUES ('alice', 'AAAAAAAAAAAAAAAA', 3, 'users', '2026-09-01T00:00:00+00:00')")
+    con.execute("INSERT INTO mcp_links (user, public_id, generation, groups, created, revoked) "
+                "VALUES ('bob', 'BBBBBBBBBBBBBBBB', 2, '', '2026-09-01T00:00:00+00:00', 1)")
+    con.commit()
+    con.close()
+    secret = 'migration-secret'
+    old_style = McpLinkStore.__new__(McpLinkStore)           # derive the pre-migration token
+    old_style._secret = secret.encode()
+    old_token = 'amcp_AAAAAAAAAAAAAAAA_' + old_style._mac('AAAAAAAAAAAAAAAA', 3)
+    migrated = McpLinkStore(db, secret)
+    record = migrated.verify(old_token)
+    assert record is not None and record.user == 'alice' and record.label == 'default'
+    assert record.groups == ['users']
+    assert migrated.get('bob').revoked                        # revoked rows stay revoked
+    assert migrated.create('alice', 'second').id != record.id  # multi-link works afterwards
+    migrated.close()
+    assert McpLinkStore(db, secret).verify(old_token).user == 'alice'   # idempotent re-open
+
+
+def test_describe_lists_links_and_keeps_old_fields(store):
+    store.create('alice', 'laptop')
+    store.create('alice', 'desktop')
+    body = mcp_tokens.describe(store.get('alice'), store, 'https://h', 'alice', True,
+                               store.links_for('alice'))
+    assert [l['label'] for l in body['links']] == ['laptop', 'desktop']
+    assert body['has_link'] and body['url'] == body['links'][0]['url']
+    assert body['max_links'] == 5
+    assert '{url}' in body['snippets_template']['claude_code']
 
 
 # ── ant-serve endpoints ─────────────────────────────────────────────────────
@@ -161,6 +249,8 @@ _SERVE_WANTED = {
     '_request_groups', '_mcp_public_base_url', '_mcp_link_body',
     'get_my_mcp_link', 'rotate_my_mcp_link', 'revoke_my_mcp_link', 'list_mcp_links',
     'admin_revoke_mcp_link', 'McpVerifyRequest', 'verify_mcp_link',
+    '_require_mcp_enabled', 'McpLinkCreateRequest', 'create_my_mcp_link',
+    'rotate_one_mcp_link', 'revoke_one_mcp_link', 'admin_revoke_one_mcp_link',
     '_chat_user_from_request', '_require_admin',
 }
 
@@ -286,6 +376,45 @@ def test_admin_endpoints(tmp_path, monkeypatch):
     assert client.delete('/admin/mcp-links/alice', headers=ADMIN).json() == {'ok': True}
     assert client.delete('/admin/mcp-links/ghost', headers=ADMIN).status_code == 404
     assert client.get('/me/mcp', headers=ALICE).json()['has_link'] is False
+
+
+def test_me_mcp_multi_link_endpoints(tmp_path, monkeypatch):
+    app, _ = _serve_app(tmp_path, monkeypatch, {'max_links_per_user': 2})
+    client = _client(app)
+    body = client.post('/me/mcp/links', json={'label': 'laptop'}, headers=ALICE).json()
+    assert [l['label'] for l in body['links']] == ['laptop']
+    body = client.post('/me/mcp/links', headers=ALICE).json()           # no body: default label
+    assert [l['label'] for l in body['links']] == ['laptop', 'link 2']
+    capped = client.post('/me/mcp/links', json={'label': 'third'}, headers=ALICE)
+    assert capped.status_code == 409 and 'maximum' in capped.json()['detail']
+    first, second = body['links']
+    rotated = client.post(f"/me/mcp/links/{first['id']}/rotate", headers=ALICE).json()
+    new_first = [l for l in rotated['links'] if l['id'] == first['id']][0]
+    assert new_first['url'] != first['url']
+    assert [l for l in rotated['links'] if l['id'] == second['id']][0]['url'] == second['url']
+    BOB = {**ALICE, 'Remote-User': 'bob'}
+    assert client.post(f"/me/mcp/links/{first['id']}/rotate", headers=BOB).status_code == 404
+    assert client.delete(f"/me/mcp/links/{first['id']}", headers=BOB).status_code == 404
+    after = client.delete(f"/me/mcp/links/{second['id']}", headers=ALICE).json()
+    assert [l['id'] for l in after['links']] == [first['id']]
+    token = new_first['url'].rsplit('/', 1)[1]
+    ok = client.post('/internal/mcp/verify', json={'token': token},
+                     headers={'X-Anthive-Internal': INTERNAL})
+    assert ok.status_code == 200 and ok.json()['user'] == 'alice'
+
+
+def test_admin_per_link_revoke(tmp_path, monkeypatch):
+    app, _ = _serve_app(tmp_path, monkeypatch)
+    client = _client(app)
+    client.post('/me/mcp/links', json={'label': 'laptop'}, headers=ALICE)
+    keep = client.post('/me/mcp/links', json={'label': 'desktop'}, headers=ALICE).json()['links'][1]
+    rows = client.get('/admin/mcp-links', headers=ADMIN).json()
+    assert [(r['user'], r['label']) for r in rows] == [('alice', 'laptop'), ('alice', 'desktop')]
+    target = rows[0]['id']
+    assert client.delete(f'/admin/mcp-links/alice/{target}', headers=ALICE).status_code == 403
+    assert client.delete(f'/admin/mcp-links/alice/{target}', headers=ADMIN).json() == {'ok': True}
+    assert client.delete(f'/admin/mcp-links/alice/{target}', headers=ADMIN).status_code == 404
+    assert [l['id'] for l in client.get('/me/mcp', headers=ALICE).json()['links']] == [keep['id']]
 
 
 def test_admin_or_local_guard(tmp_path, monkeypatch):

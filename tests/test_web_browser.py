@@ -1506,13 +1506,35 @@ def test_admin_feedback_page_renders(client):
     assert 'class="table-wrap"' in resp.text
 
 
-def test_admin_feedback_link_shown_only_to_admins(client):
-    # The topbar feedback link appears for admins…
+def test_chat_feedback_link_left_the_user_menu(client):
+    # Replaced by "Report an issue"; the page itself stays reachable for admins.
     admin = client.get("/", headers={"Remote-User": "mf", "Remote-Groups": "admins"})
-    assert '/admin/feedback' in admin.text
-    # …and not for a signed-in non-admin.
+    assert 'href="/admin/feedback"' not in admin.text
+    assert client.get("/admin/feedback", headers={"Remote-Groups": "admins"}).status_code == 200
+
+
+def test_issue_tracker_link_for_signed_in_users(client, monkeypatch):
+    monkeypatch.setenv("ANTHIVE_ISSUE_TRACKER_URL", "https://tracker.example/issues")
     plain = client.get("/", headers={"Remote-User": "mf", "Remote-Groups": "users"})
-    assert '/admin/feedback' not in plain.text
+    assert 'id="issue-tracker-link"' in plain.text
+    assert 'href="https://tracker.example/issues"' in plain.text
+    assert 'target="_blank"' in plain.text.split('id="issue-tracker-link"')[1][:80]
+    assert "Report an issue" in plain.text
+    assert 'id="issue-tracker-link"' not in client.get("/").text      # anonymous
+
+
+def test_issue_tracker_link_hidden_when_unconfigured(client, monkeypatch):
+    monkeypatch.setenv("ANTHIVE_ISSUE_TRACKER_URL", "")
+    resp = client.get("/", headers={"Remote-User": "mf"})
+    assert 'id="issue-tracker-link"' not in resp.text
+
+
+def test_user_menu_dropdown_has_hover_bridge_and_tap_toggle(client):
+    resp = client.get("/", headers={"Remote-User": "mf"})
+    text = resp.text
+    assert ".dropdown-menu::before" in text            # no hover gap under the toggle
+    assert ".dropdown.open .dropdown-menu" in text     # click/tap opens it
+    assert 'id="user-menu-toggle"' in text and 'aria-expanded="false"' in text
 
 
 def test_dataset_editor_requires_admin(client):
@@ -5529,15 +5551,17 @@ def test_mcp_menu_entry_only_when_signed_in(client):
     # Hidden until /api/me/mcp says enabled (client-side gate, like chat).
     assert 'id="mcp-menu-link" style="display:none"' in authed.text
     assert "/api/me/mcp" in authed.text
+    # One entry: "Connect an MCP client" until the user has links, then "MCP links".
+    assert ">Connect an MCP client</a>" in authed.text
+    assert "n ? 'MCP links' : 'Connect an MCP client'" in authed.text
     anon = client.get("/")
     assert 'id="mcp-menu-link"' not in anon.text
 
 
-def test_admin_mcp_links_menu_entry_only_for_admins(client):
+def test_no_separate_admin_mcp_menu_entry(client):
     admin = client.get("/", headers={"Remote-User": "mf", "Remote-Groups": "admins"})
-    assert 'href="/admin/mcp-links"' in admin.text
-    plain = client.get("/", headers={"Remote-User": "mf", "Remote-Groups": "users"})
-    assert 'href="/admin/mcp-links"' not in plain.text
+    assert 'href="/admin/mcp-links"' not in admin.text
+    assert admin.text.count('href="/account/mcp"') == 1
 
 
 def test_account_mcp_requires_sign_in(client):
@@ -5545,23 +5569,26 @@ def test_account_mcp_requires_sign_in(client):
     assert resp.status_code == 401
     assert "signed in" in resp.text
     # No controls (and no API calls) for an anonymous visitor.
-    assert 'id="mcp-create-btn"' not in resp.text
-    assert "/me/mcp/rotate" not in resp.text
+    assert 'id="mcp-add-form"' not in resp.text
+    assert "/me/mcp/links" not in resp.text
 
 
 def test_account_mcp_renders_controls_when_signed_in(client):
     resp = client.get("/account/mcp", headers={"Remote-User": "mf"})
     assert resp.status_code == 200
     text = resp.text
-    for marker in ('id="mcp-create-btn"', 'id="mcp-show-btn"', 'id="mcp-copy-btn"',
-                   'id="mcp-rotate-btn"', 'id="mcp-revoke-btn"',
+    for marker in ('id="mcp-add-form"', 'id="mcp-add-label"', 'id="mcp-add-btn"',
+                   'id="mcp-links-list"', 'id="mcp-link-select"',
                    'data-tab="claude-code"', 'data-tab="claude-desktop"', 'data-tab="json"',
                    'data-snippet="claude_code"', 'data-snippet="json_config"'):
         assert marker in text, marker
-    # Same-origin calls to the backend contract.
+    # Same-origin calls to the multi-link backend contract.
     assert "'/api' + path" in text
-    assert "'/me/mcp'" in text and "'/me/mcp/rotate'" in text
-    assert "api('DELETE', '/me/mcp')" in text
+    assert "'/me/mcp'" in text and "'/me/mcp/links'" in text
+    assert "'/me/mcp/links/' + link.id + '/rotate'" in text
+    assert "api('DELETE', '/me/mcp/links/' + link.id)" in text
+    # Non-admins get no all-users section.
+    assert 'id="all"' not in text and "/api/admin/mcp-links" not in text
     # Password warning, rotate confirmation and disabled-deployment copy.
     assert "like a password" in text
     assert "stops working immediately" in text
@@ -5570,24 +5597,21 @@ def test_account_mcp_renders_controls_when_signed_in(client):
 
 def test_mcp_templates_have_no_em_dashes():
     templates_dir = Path(__file__).resolve().parent.parent / "web" / "templates"
-    for name in ("account_mcp.html", "admin_mcp_links.html"):
-        assert "—" not in (templates_dir / name).read_text(), name
+    assert "—" not in (templates_dir / "account_mcp.html").read_text()
 
 
-def test_admin_mcp_links_requires_admin(client):
-    assert client.get("/admin/mcp-links").status_code == 403
-    plain = client.get("/admin/mcp-links",
-                       headers={"Remote-User": "mf", "Remote-Groups": "users"})
-    assert plain.status_code == 403
-    assert 'id="ml-table"' not in plain.text
+def test_admin_mcp_links_redirects_to_account_page(client):
+    resp = client.get("/admin/mcp-links", follow_redirects=False)
+    assert resp.status_code == 307
+    assert resp.headers["location"] == "/account/mcp#all"
 
 
-def test_admin_mcp_links_page_renders_for_admin(client):
-    resp = client.get("/admin/mcp-links",
+def test_account_mcp_all_users_section_for_admins(client):
+    resp = client.get("/account/mcp",
                       headers={"Remote-User": "mf", "Remote-Groups": "admins"})
     assert resp.status_code == 200
-    assert 'id="ml-table"' in resp.text
-    assert 'class="card-table"' in resp.text
-    assert 'class="table-wrap"' in resp.text
-    assert "/api/admin/mcp-links" in resp.text
-    assert "method: 'DELETE'" in resp.text
+    text = resp.text
+    assert 'id="all"' in text and "All users' links" in text
+    assert 'id="ml-table"' in text
+    assert 'class="card-table"' in text and 'class="table-wrap"' in text
+    assert "/api/admin/mcp-links" in text and "method: 'DELETE'" in text

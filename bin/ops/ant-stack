@@ -310,7 +310,9 @@ def render_anthive_yaml(site: dict) -> dict:
             'plots_dir': f"{C_WEBAPP}/plots",
             'public_url': site['site']['public_url'].rstrip('/'),
             'token_ttl_days': int((site.get('mcp') or {}).get('token_ttl_days') or 0),
+            'max_links_per_user': int((site.get('mcp') or {}).get('max_links_per_user') or 5),
         },
+        'issue_tracker_url': str(site['site'].get('issue_tracker_url') or ''),
     }
     if site['_starcatstore']:
         cfg['starcat_store'] = str(site['_starcatstore'])

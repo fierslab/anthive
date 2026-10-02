@@ -361,6 +361,7 @@ absolute path.
 | --- | --- |
 | `site.public_url` | the address; used for cookies, redirects and MCP links |
 | `site.hostnames` | extra names or IPs the site answers to |
+| `site.issue_tracker_url` | where the "Report an issue" entry in the user menu points (empty hides it) |
 | `data.h5adstore`, `data.genesetstore` | the data folders (absolute paths) |
 | `data.readonly` | mount the data read-only (a mirror that never annotates) |
 | `state_dir` | secrets, users, caches and the rendered config |
@@ -369,6 +370,7 @@ absolute path.
 | `run_as` | the user id the containers run as (default: whoever runs ant-stack) |
 | `images.*` | registry, image names, tag |
 | `services.mcp` | personal MCP links for AI clients (on by default; the supported way to use AI with anthive) |
+| `mcp.token_ttl_days`, `mcp.max_links_per_user` | how long a link lives (0 = forever) and how many links one user may hold (default 5) |
 | `services.chat` | the in-app chat assistant; off by default and being phased out in favour of MCP, leave it off |
 | `resources.*` | threads, memory, open-dataset limit, plot cache, catalogue scan |
 

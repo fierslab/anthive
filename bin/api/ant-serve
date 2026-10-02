@@ -1791,8 +1791,8 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.37.2"
-API_VERSION_RELEASED = "2026-09-28"
+API_VERSION = "2.38.0"
+API_VERSION_RELEASED = "2026-10-02"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
 # Create FastAPI app with lifespan handler (Phase 2)
@@ -2515,7 +2515,8 @@ def _get_mcp_link_store():
                     'ANTHIVE_MCP_TOKEN_SECRET', cfg)
                 _mcp_link_store = McpLinkStore(
                     get_state_dir(cfg) / 'mcp_tokens.db', secret,
-                    ttl_days=int(mcp_cfg.get('token_ttl_days', 90) or 0))
+                    ttl_days=int(mcp_cfg.get('token_ttl_days', 90) or 0),
+                    max_links_per_user=int(mcp_cfg.get('max_links_per_user', 5) or 5))
     return _mcp_link_store
 
 
@@ -2535,8 +2536,15 @@ def _mcp_public_base_url(request: Request) -> str:
 
 def _mcp_link_body(request: Request, user: str, record) -> Dict[str, Any]:
     from mcp_tokens import describe  # noqa: PLC0415
-    return describe(record, _get_mcp_link_store(), _mcp_public_base_url(request),
-                    user, bool(_mcp_cfg().get('enabled', True)))
+    enabled = bool(_mcp_cfg().get('enabled', True))
+    store = _get_mcp_link_store()
+    links = store.links_for(user) if enabled else []
+    return describe(record, store, _mcp_public_base_url(request), user, enabled, links)
+
+
+def _require_mcp_enabled() -> None:
+    if not _mcp_cfg().get('enabled', True):
+        raise HTTPException(status_code=403, detail="personal MCP links are disabled on this site")
 
 
 @app.get("/me/mcp", tags=["mcp"])
@@ -2556,8 +2564,7 @@ def get_my_mcp_link(request: Request):
 def rotate_my_mcp_link(request: Request):
     """Issue the caller's link, or replace it (the old link stops working)."""
     user = _chat_user_from_request(request)
-    if not _mcp_cfg().get('enabled', True):
-        raise HTTPException(status_code=403, detail="personal MCP links are disabled on this site")
+    _require_mcp_enabled()
     record = _get_mcp_link_store().rotate(user, _request_groups(request))
     log.info("mcp-link rotate user=%s generation=%s", user, record.generation)
     return _mcp_link_body(request, user, record)
@@ -2565,25 +2572,78 @@ def rotate_my_mcp_link(request: Request):
 
 @app.delete("/me/mcp", tags=["mcp"])
 def revoke_my_mcp_link(request: Request):
+    """Revoke all of the caller's links."""
     user = _chat_user_from_request(request)
     _get_mcp_link_store().revoke(user)
-    log.info("mcp-link revoke user=%s (self)", user)
+    log.info("mcp-link revoke-all user=%s (self)", user)
     return {"ok": True}
+
+
+class McpLinkCreateRequest(BaseModel):
+    label: Optional[str] = Field(None, max_length=200)
+
+
+@app.post("/me/mcp/links", tags=["mcp"])
+def create_my_mcp_link(request: Request, body: Optional[McpLinkCreateRequest] = None):
+    """Add a named link for the caller (up to mcp.max_links_per_user)."""
+    user = _chat_user_from_request(request)
+    _require_mcp_enabled()
+    from mcp_tokens import LinkLimitError  # noqa: PLC0415
+    store = _get_mcp_link_store()
+    try:
+        record = store.create(user, (body.label if body else None), _request_groups(request))
+    except LinkLimitError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    log.info("mcp-link create user=%s id=%s", user, record.id)
+    return _mcp_link_body(request, user, store.get(user))
+
+
+@app.post("/me/mcp/links/{link_id}/rotate", tags=["mcp"])
+def rotate_one_mcp_link(link_id: int, request: Request):
+    """New token for one of the caller's links; the old one stops working."""
+    user = _chat_user_from_request(request)
+    _require_mcp_enabled()
+    store = _get_mcp_link_store()
+    record = store.rotate_link(user, link_id, _request_groups(request))
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"no MCP link {link_id} for {user!r}")
+    log.info("mcp-link rotate user=%s id=%s generation=%s", user, link_id, record.generation)
+    return _mcp_link_body(request, user, store.get(user))
+
+
+@app.delete("/me/mcp/links/{link_id}", tags=["mcp"])
+def revoke_one_mcp_link(link_id: int, request: Request):
+    user = _chat_user_from_request(request)
+    store = _get_mcp_link_store()
+    if not store.revoke_link(link_id, user=user):
+        raise HTTPException(status_code=404, detail=f"no MCP link {link_id} for {user!r}")
+    log.info("mcp-link revoke user=%s id=%s (self)", user, link_id)
+    return _mcp_link_body(request, user, store.get(user))
 
 
 @app.get("/admin/mcp-links", tags=["mcp"])
 def list_mcp_links(request: Request):
     _require_admin(request)
     from mcp_tokens import admin_row  # noqa: PLC0415
-    return [admin_row(r) for r in _get_mcp_link_store().list_all()]
+    return [admin_row(r) for r in _get_mcp_link_store().list_all()]  # one row per link
 
 
 @app.delete("/admin/mcp-links/{user}", tags=["mcp"])
 def admin_revoke_mcp_link(user: str, request: Request):
+    """Revoke every link of one user."""
     admin = _require_admin(request)
     if not _get_mcp_link_store().revoke(user):
         raise HTTPException(status_code=404, detail=f"no MCP link for {user!r}")
-    log.info("mcp-link revoke user=%s by admin=%s", user, admin)
+    log.info("mcp-link revoke-all user=%s by admin=%s", user, admin)
+    return {"ok": True}
+
+
+@app.delete("/admin/mcp-links/{user}/{link_id}", tags=["mcp"])
+def admin_revoke_one_mcp_link(user: str, link_id: int, request: Request):
+    admin = _require_admin(request)
+    if not _get_mcp_link_store().revoke_link(link_id, user=user):
+        raise HTTPException(status_code=404, detail=f"no active MCP link {link_id} for {user!r}")
+    log.info("mcp-link revoke user=%s id=%s by admin=%s", user, link_id, admin)
     return {"ok": True}
 
 

@@ -86,9 +86,18 @@
         }
         .dropdown-menu a { display: block; padding: 4px 12px; color: var(--text) !important; font-size: 12px; white-space: nowrap; }
         .dropdown-menu a:hover { background: var(--hover); text-decoration: none; }
-        .dropdown:hover .dropdown-menu { display: block; }
+        .dropdown:hover .dropdown-menu, .dropdown:focus-within .dropdown-menu,
+        .dropdown.open .dropdown-menu { display: block; }
+        /* Invisible bridge over the gap between toggle and menu: without it the
+           pointer leaves .dropdown while moving down and the menu closes. */
+        .dropdown-menu::before { content: ''; position: absolute; left: 0; right: 0; top: -10px; height: 10px; }
+        .dropdown-toggle:focus { outline: none; }
+        .dropdown-toggle:focus-visible { outline: 2px solid var(--accent-cream); outline-offset: 2px; border-radius: 2px; }
         /* right-aligned variant for the auth menu at the far end of the topbar */
         .dropdown-menu.right { left: auto; right: -6px; }
+        /* set by placeMenu() when the right-aligned menu would leave the
+           screen (narrow topbars wrap the user menu to the left edge) */
+        .dropdown-menu.right.flip-left { right: auto; left: -6px; }
         .dropdown-menu .dropdown-header {
             padding: 4px 12px; color: var(--text-muted); font-size: 10px;
             text-transform: uppercase; letter-spacing: .4px; white-space: nowrap;
@@ -536,19 +545,20 @@
             <a href="/help" title="What's here & how to use it">Help</a>
             <a href="/api/docs" target="_blank" rel="noopener" title="REST API — Swagger UI (new tab)">API</a>
             <span class="dropdown topbar-auth">
-                <span class="dropdown-toggle" title="{% if _auth_user %}signed in{% if request.headers.get('remote-email') %} — {{ request.headers.get('remote-email') }}{% endif %}{% else %}account &amp; preferences{% endif %}">👤{% if _auth_user %} {{ _auth_user }}{% endif %}</span>
+                <span class="dropdown-toggle" id="user-menu-toggle" tabindex="0" role="button" aria-haspopup="menu" aria-expanded="false" title="{% if _auth_user %}signed in{% if request.headers.get('remote-email') %} — {{ request.headers.get('remote-email') }}{% endif %}{% else %}account &amp; preferences{% endif %}">👤{% if _auth_user %} {{ _auth_user }}{% endif %}</span>
                 <span class="dropdown-menu right">
                     {% if _auth_user %}
                     <div class="dropdown-header">signed in as <strong>{{ _auth_user }}</strong></div>
                     {% endif %}
                     {% if _auth_user %}
                     {# Hidden until GET /api/me/mcp reports enabled:true, so a
-                       deployment without MCP links shows no affordance. #}
-                    <a href="/account/mcp" id="mcp-menu-link" style="display:none">Connect an AI client (MCP)</a>
+                       deployment without MCP links shows no affordance. The
+                       label becomes "MCP links" once the user has any. #}
+                    <a href="/account/mcp" id="mcp-menu-link" style="display:none">Connect an MCP client</a>
+                    {% set _issue_url = issue_tracker_url() %}
+                    {% if _issue_url %}
+                    <a href="{{ _issue_url }}" id="issue-tracker-link" target="_blank" rel="noopener">Report an issue</a>
                     {% endif %}
-                    {% if _auth_user and 'admins' in _groups %}
-                    <a href="/admin/feedback">chat feedback</a>
-                    <a href="/admin/mcp-links">MCP links</a>
                     {% endif %}
                     <a href="/settings">Preferences</a>
                     {% if _auth_user %}
@@ -566,8 +576,47 @@
         if (!link || !window.fetch) return;
         fetch('/api/me/mcp', { credentials: 'same-origin' })
             .then(function (r) { return r.ok ? r.json() : null; })
-            .then(function (d) { if (d && d.enabled) link.style.display = ''; })
+            .then(function (d) {
+                if (!d || !d.enabled) return;
+                var n = (d.links || []).length || (d.has_link ? 1 : 0);
+                link.textContent = n ? 'MCP links' : 'Connect an MCP client';
+                link.style.display = '';
+            })
             .catch(function () {});
+    })();
+    (function () {
+        // Click/tap and keyboard for the user menu (hover alone is not
+        // enough on touch screens). Outside click or Escape closes it.
+        var toggle = document.getElementById('user-menu-toggle');
+        if (!toggle) return;
+        var box = toggle.parentNode;
+        var menu = box.querySelector('.dropdown-menu');
+        function placeMenu() {
+            // Keep the menu on screen: flip to left alignment when the
+            // right-aligned menu would stick out past the left edge.
+            if (!menu) return;
+            menu.classList.remove('flip-left');
+            var rect = menu.getBoundingClientRect();
+            if (rect.width && rect.left < 4) menu.classList.add('flip-left');
+        }
+        function setOpen(on) {
+            box.classList.toggle('open', on);
+            toggle.setAttribute('aria-expanded', on ? 'true' : 'false');
+            if (on) placeMenu();
+        }
+        box.addEventListener('mouseenter', function () { requestAnimationFrame(placeMenu); });
+        box.addEventListener('focusin', function () { requestAnimationFrame(placeMenu); });
+        toggle.addEventListener('click', function (e) {
+            e.stopPropagation();
+            setOpen(!box.classList.contains('open'));
+        });
+        toggle.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(!box.classList.contains('open')); }
+        });
+        document.addEventListener('click', function (e) { if (!box.contains(e.target)) setOpen(false); });
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape') { setOpen(false); if (box.contains(document.activeElement)) document.activeElement.blur(); }
+        });
     })();
     (function () {
         var btn = document.getElementById('authelia-signout');

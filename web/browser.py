@@ -34,6 +34,28 @@ templates = Jinja2Templates(directory=str(templates_dir))
 templates.env.filters['urlencode'] = url_quote
 
 
+_DEFAULT_ISSUE_TRACKER_URL = 'https://gitlab.kuleuven.be/bdslab/anthive/anthive4/-/issues'
+_issue_tracker_cfg: list = []      # [value] once read from anthive.yaml
+
+
+def _issue_tracker_url() -> str:
+    """User-menu "Report an issue" target ('' hides the entry). The env var
+    wins and is read per render; the config value is read once."""
+    import os  # noqa: PLC0415
+    if 'ANTHIVE_ISSUE_TRACKER_URL' in os.environ:
+        return os.environ['ANTHIVE_ISSUE_TRACKER_URL'].strip()
+    if not _issue_tracker_cfg:
+        try:
+            from config import get_issue_tracker_url, load_config  # noqa: PLC0415
+            _issue_tracker_cfg.append(get_issue_tracker_url(load_config()))
+        except Exception:  # config unavailable (tests import this module bare)
+            _issue_tracker_cfg.append(_DEFAULT_ISSUE_TRACKER_URL)
+    return _issue_tracker_cfg[0]
+
+
+templates.env.globals['issue_tracker_url'] = _issue_tracker_url
+
+
 def _obs_col_info(name: str) -> dict:
     """Return display metadata for an obs column name.
 
@@ -2765,20 +2787,14 @@ async def account_mcp_view(request: Request):
         return templates.TemplateResponse(
             request, "account_mcp.html", {"signed_in": False}, status_code=401)
     return templates.TemplateResponse(
-        request, "account_mcp.html", {"signed_in": True, "user": user})
+        request, "account_mcp.html",
+        {"signed_in": True, "user": user, "is_admin": _is_admin(request)})
 
 
-@router.get("/admin/mcp-links", response_class=HTMLResponse)
+@router.get("/admin/mcp-links")
 async def admin_mcp_links_view(request: Request):
-    """Admin overview of every user's MCP link with a revoke action. Rows come
-    client-side from ant-serve's admin-gated /admin/mcp-links."""
-    if not _is_admin(request):
-        return templates.TemplateResponse(
-            request, "index.html",
-            {"folders": [], "error": "Not authorized. Admins only."},
-            status_code=403,
-        )
-    return templates.TemplateResponse(request, "admin_mcp_links.html", {})
+    """The admin overview now lives on /account/mcp (section #all)."""
+    return RedirectResponse("/account/mcp#all", status_code=307)
 
 
 @router.get("/genes/{gene}", response_class=HTMLResponse)

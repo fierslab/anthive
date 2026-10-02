@@ -24,6 +24,8 @@ site:
   # Extra hostnames/IPs Caddy answers for (tls: internal issues a cert for
   # each). The host of public_url is always included.
   hostnames: [127.0.0.1]
+  # Where the "Report an issue" entry in the user menu points. Empty hides it.
+  issue_tracker_url: https://gitlab.kuleuven.be/bdslab/anthive/anthive4/-/issues
 
 data:
   h5adstore: /srv/anthive/h5adstore        # required
@@ -103,6 +105,7 @@ services:
 
 mcp:
   token_ttl_days: 90 # lifetime of a per-user MCP link (0 = never expires)
+  max_links_per_user: 5 # each user can have this many named links
 
 s3:
   enabled: false
