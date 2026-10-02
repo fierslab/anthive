@@ -9,6 +9,7 @@ import base64
 import html as html_lib
 import re
 import sys
+import threading
 import time
 import unicodedata
 from collections import defaultdict
@@ -55,6 +56,70 @@ def _issue_tracker_url() -> str:
 
 
 templates.env.globals['issue_tracker_url'] = _issue_tracker_url
+
+
+# ── Stack version for the top-bar badge ──────────────────────────────────────
+#
+# The badge shows the running API's version (GET /health). It is fetched in a
+# background thread and cached, so a page render never waits on the API.
+
+def _read_web_version() -> str:
+    try:
+        text = (_lib_dir / '__init__.py').read_text()
+        match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', text, re.M)
+        return match.group(1) if match else ''
+    except OSError:
+        return ''
+
+
+_WEB_VERSION = _read_web_version()
+_VERSION_TTL_OK = 120.0
+_VERSION_TTL_FAIL = 15.0
+_version_state: Dict[str, Any] = {'api': None, 'ok': False, 'checked': 0.0, 'refreshing': False}
+_version_lock = threading.Lock()
+
+
+def _refresh_api_version(api_url: str) -> None:
+    api_version, ok = None, False
+    try:
+        response = requests.get(f"{api_url.rstrip('/')}/health", timeout=3)
+        response.raise_for_status()
+        api_version = (response.json() or {}).get('api_version') or None
+        ok = bool(api_version)
+    except Exception:
+        pass
+    with _version_lock:
+        _version_state.update(api=api_version if ok else _version_state['api'], ok=ok,
+                              checked=time.monotonic(), refreshing=False)
+
+
+def _stack_version(request: Request) -> Dict[str, str]:
+    """Version badge data: shown text, tooltip and whether the API answered."""
+    now = time.monotonic()
+    with _version_lock:
+        ttl = _VERSION_TTL_OK if _version_state['ok'] else _VERSION_TTL_FAIL
+        stale = now - _version_state['checked'] > ttl
+        start = stale and not _version_state['refreshing']
+        if start:
+            _version_state['refreshing'] = True
+        api_version, ok, checked = _version_state['api'], _version_state['ok'], _version_state['checked']
+    if start:
+        try:
+            api_url = request.app.state.api_url
+            threading.Thread(target=_refresh_api_version, args=(api_url,), daemon=True).start()
+        except Exception:
+            with _version_lock:
+                _version_state['refreshing'] = False
+    web = _WEB_VERSION or 'unknown'
+    if ok and api_version:
+        title = f"Anthive version {api_version} (API)"
+        title += f", web {web}" if web != api_version else ", web the same"
+        return {'shown': api_version, 'title': title + ". Click for the changelog.", 'ok': 'yes'}
+    reason = 'API unreachable' if checked else 'API version not checked yet'
+    return {'shown': web, 'title': f"Anthive web {web} ({reason}). Click for the changelog.", 'ok': ''}
+
+
+templates.env.globals['stack_version'] = _stack_version
 
 
 def _obs_col_info(name: str) -> dict:

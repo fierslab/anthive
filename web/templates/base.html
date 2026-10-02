@@ -119,6 +119,15 @@
         #topbar .topbar-util { display: flex; align-items: center; gap: 16px; }
         #topbar .topbar-util > a { color: var(--bar-link); font-size: 13px; }
         #topbar .topbar-util > a:hover { color: var(--bar-link-hover); text-decoration: none; }
+        /* Version badge: muted pill left of Help; a dotted border when the API
+           did not confirm the version (fallback to the web process version). */
+        #topbar .topbar-util > a.version-pill { font-size: 11px; line-height: 1.5; padding: 0 7px; border: 1px solid rgba(255,255,255,.28); border-radius: 9px; opacity: .85; white-space: nowrap; font-variant-numeric: tabular-nums; }
+        #topbar .topbar-util > a.version-pill:hover { opacity: 1; border-color: rgba(255,255,255,.5); }
+        #topbar .topbar-util > a.version-pill.version-unconfirmed { border-style: dashed; }
+        @media (max-width: 760px) {
+            #topbar .topbar-util > a.version-pill { padding: 0 5px; font-size: 10px; }
+            #topbar .topbar-util > a.version-pill .v-prefix { display: none; }
+        }
 
         main { padding: 12px 18px; max-width: 1200px; margin: 0 auto; }
 
@@ -551,6 +560,8 @@
         {% set _auth_user = request.headers.get('remote-name') or request.headers.get('remote-user') %}
         {% set _groups = (request.headers.get('remote-groups') or '').split(',') | map('trim') | list %}
         <nav class="topbar-util">
+            {% set _ver = stack_version(request) %}
+            <a href="/api/changelog" target="_blank" rel="noopener" class="version-pill{% if not _ver.ok %} version-unconfirmed{% endif %}" id="stack-version" title="{{ _ver.title }}"><span class="v-prefix">v</span>{{ _ver.shown }}</a>
             <a href="/help" title="What's here & how to use it">Help</a>
             <a href="/api/docs" target="_blank" rel="noopener" title="REST API — Swagger UI (new tab)">API</a>
             <span class="dropdown topbar-auth">
