@@ -86,7 +86,8 @@ line-art logo (grayscale+alpha PNG), so it's shown on a dark hero panel.
 
 **Paper library UI (API 2.39+).** `dataset_view` fetches `/databases/{id}/papers`
 and `folder_view` does so for every dataset of the collection (deduplicated,
-"Linked to N of M datasets"); both render cards from the `paper_card` macro in
+"Linked to N of M datasets"; on the collection page the panel sits after the
+dataset table and the collection description, just before Downloads); both render cards from the `paper_card` macro in
 `_papers.html` (styles `.paper-card` / `.paper-role` in base.html). Source
 papers come first; the badge and sentence come from `_paper_reason()`
 (source / reanalysis / method / related, "preprint" for online/unpublished

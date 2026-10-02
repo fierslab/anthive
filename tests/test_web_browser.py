@@ -5908,6 +5908,13 @@ def test_collection_papers_panel_dedupes_and_counts(library_client):
     assert "Linked to 2 of 2 datasets." in html
 
 
+def test_collection_papers_panel_sits_after_dataset_table(library_client):
+    html = library_client.get("/browse/GroupA").text
+    assert html.index('id="datasets-table"') < html.index('id="coll-papers"')
+    if "<h2>Downloads" in html:
+        assert html.index('id="coll-papers"') < html.index("<h2>Downloads")
+
+
 def test_paper_page_sections(library_client):
     resp = library_client.get("/papers/smith2025microglia")
     assert resp.status_code == 200
