@@ -50,6 +50,21 @@ h5adstore: data/h5adstore
 # (plus PDFs, synced via S3). See doc/LIBRARY.md. Env: ANTHIVE_LIBRARY.
 library: data/library
 
+# Authors whose papers go to papers/lab/ by default when added with
+# ant lib-add / ant lib-import (folders are for people only).
+library_lab_authors:
+  - De Strooper
+
+# Precomputed literature index (folder holding library_chunks.parquet, built
+# by `ant lib-index`, synced via S3). See doc/LIBRARY_INDEX.md.
+# Env: ANTHIVE_LIBRARY_INDEX.
+library_index: data/library_index
+
+# Where the query-embedding model (fastembed/ONNX) is cached. Empty means
+# FASTEMBED_CACHE_PATH if set (the container image bakes the model there),
+# else <state_dir>/models. Env: ANTHIVE_MODEL_CACHE.
+model_cache: ''
+
 # Persistent per-site state: SQLite caches, click history, MCP link tokens,
 # generated secrets. Back this up. Never put it under tmp_dir.
 # Env: ANTHIVE_STATE_DIR.

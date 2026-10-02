@@ -29,6 +29,36 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.39.0 (2026-10-02)
+
+Additive: the paper library and literature search. Existing clients keep
+working.
+
+- **Library** (`lib/library.py`, `doc/LIBRARY.md`): `GET /papers` (filters
+  `role`, `celltype`, `tissue`, `disease`, `method`, `cohort`, `organism`,
+  `author`, `year`, `q`), `GET /papers/{citekey}` (record, notes, linked
+  datasets and gene sets by role, related papers), `GET /papers/{citekey}.bib`,
+  `GET /library.bib` (`citekeys`, `classic`), `GET /papers/{citekey}/related`
+  (`kind`: explicit, cohort, celltype, tissue, disease, method, author, cites,
+  cited_by; each relation with weight and evidence), `GET /papers/{citekey}/file`
+  (the PDF, streamed or a presigned S3 link), `GET /library/status`.
+- **Literature search** (`lib/library_index.py`, `doc/LIBRARY_INDEX.md`):
+  `GET /search/literature` (`q`, `k`, `mode` hybrid|keyword|semantic,
+  `section`, `citekey`, `year`) returns passages with citation, page, section
+  and a highlighted snippet. Semantic and hybrid fall back to keyword search
+  with a warning when the server has no matching query model.
+  `GET /papers/{citekey}/pages/{n}` returns the text of one page.
+- **Datasets**: `GET /databases/{id}/papers` (linked papers, source first) and
+  `GET /databases/{id}/context` (`level` brief|full, `budget_tokens`): a
+  background pack for LLM analysis (metadata, caveats, obs columns, module
+  scores, source papers with methods passages, related papers).
+- **Access**: `anthive_access: restricted` papers are admin-only. Calls from
+  ant-mcp (or with `for_llm=true`) honour `anthive_llm`: `never` hides the
+  paper, `summary_only` keeps metadata and summary but no passages, notes,
+  abstract or page text.
+- `/admin/rescan` reloads the library and the index. `GET /skill` works again
+  (it looked in the wrong folder and the file was missing from images).
+
 ## 2.38.0 — 2026-10-02
 
 Additive: several named MCP links per user. Existing clients keep working.

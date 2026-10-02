@@ -57,6 +57,30 @@ Full list in `anthive.default.yaml`; user-facing guide in `doc/MCP_LINKS.md`.
 - **Default**: 90
 - **Description**: Lifetime of a link; rotating or renewing starts a new period. 0 means links never expire.
 
+### Paper library and literature index
+
+See `doc/LIBRARY.md` and `doc/LIBRARY_INDEX.md`.
+
+#### `library`
+- **Type**: path
+- **Default**: `data/library`
+- **Description**: Checkout of the library repository (paper records under `papers/`, any depth). Env `ANTHIVE_LIBRARY`; container sites set `data.library` in `site.yaml`.
+
+#### `library_index`
+- **Type**: path
+- **Default**: `data/library_index`
+- **Description**: Folder holding `library_chunks.parquet` (and `library_chunks.json`). Env `ANTHIVE_LIBRARY_INDEX`; container sites set `data.library_index`.
+
+#### `library_lab_authors`
+- **Type**: list of strings
+- **Default**: `[De Strooper]`
+- **Description**: New papers with a matching author go to `papers/lab/` when added with `ant lib-add` / `ant lib-import` (case and accent insensitive). Folders are for people only.
+
+#### `model_cache`
+- **Type**: path
+- **Default**: empty
+- **Description**: Cache for the query-embedding model. Empty means `FASTEMBED_CACHE_PATH` (the container image bakes the model there), else `<state_dir>/models`. Env `ANTHIVE_MODEL_CACHE`.
+
 ## Configuration File Format
 
 Example `anthive.yaml`:

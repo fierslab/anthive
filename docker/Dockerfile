@@ -80,6 +80,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && useradd --system --uid 1000 --home /tmp --no-create-home anthive
 
 COPY --from=venv /opt/venv /opt/venv
+# Query-embedding model for literature search, baked in read-only so sites
+# need no download at runtime. Must match the model the literature index
+# was built with (bin/ops/ant-stack IMAGE_EMBEDDING_MODEL warns otherwise).
+ARG EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
+ENV FASTEMBED_CACHE_PATH=/opt/fastembed
+RUN /opt/venv/bin/python -c "from fastembed import TextEmbedding; \
+      TextEmbedding('${EMBEDDING_MODEL}', cache_dir='/opt/fastembed')" \
+ && chmod -R a+rX /opt/fastembed
 COPY docker/uv-shim /usr/local/bin/uv
 COPY docker/healthcheck /usr/local/bin/anthive-healthcheck
 COPY . /opt/anthive4

@@ -47,6 +47,20 @@ image with the git tree and scans for data and secret-type files; `make
 push-images` runs it again and refuses to push a failing image. Do not bypass
 it with a plain `docker build .`.
 
+If the library gained papers since the last release, rebuild the literature
+index and publish it first (it is data, not part of the image):
+
+```sh
+ant lib-index --library data/library --store data/h5adstore   # incremental
+ant sync push --library-only                                  # PDFs + library_chunks.parquet
+```
+
+The app image bakes the query-embedding model (`EMBEDDING_MODEL` build arg in
+`docker/Dockerfile`, default `BAAI/bge-small-en-v1.5`); the index must be
+built with the same model. Changing the model means a full index rebuild
+(`ant lib-index --full`) and updating `IMAGE_EMBEDDING_MODEL` in
+`bin/ops/ant-stack`.
+
 Before announcing a release, deploy it once on a scratch site following
 DEPLOY_CONTAINERS.md word for word (fresh `state_dir`, anonymous pulls with an
 empty `DOCKER_CONFIG`). Release 2.37.2 found four real problems that way.

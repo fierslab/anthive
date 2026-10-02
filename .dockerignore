@@ -37,7 +37,9 @@ envs/*
 # Emacs autosave + attic + host-local Claude/Jupyter caches
 attic
 .cache
-.claude
+# .claude holds host-local session state; only the served skill file ships
+.claude/*
+!.claude/skills
 .jupyterlite.doit.db
 
 # Local run state

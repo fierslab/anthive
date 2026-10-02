@@ -205,17 +205,55 @@ curl -n -s -X POST "$API/analytics/viz" \
 
 ---
 
+### Literature (paper library)
+
+Anthive keeps a library of the papers behind its datasets plus papers kept
+for background, with their full text indexed. Papers have citekeys such as
+`lee2026plasticity`.
+
+```bash
+# passages with citation, page and section (mode: hybrid | keyword | semantic)
+curl -n -s "$API/search/literature?q=microglia+isolation+fresh+tissue&k=5&section=methods" | jq '.results[] | {citation, page_start, section, text}'
+# one paper: record, summary, topics, datasets it is the source of, related papers
+curl -n -s "$API/papers/lee2026plasticity" | jq '{citation, title, summary, datasets, related: [.related[] | .citekey]}'
+# filter the library
+curl -n -s "$API/papers?cohort=ROSMAP&celltype=microglial" | jq '.papers[] | {citekey, citation, title}'
+# why two papers are related (cohort, cell type, method, authors, citations)
+curl -n -s "$API/papers/lee2026plasticity/related?kind=cohort,cites" | jq .
+# papers linked to a dataset, source first
+curl -n -s "$API/databases/$DB/papers" | jq '.papers[] | {citekey, link_role, title}'
+# background pack before analysing a dataset (metadata, caveats, columns, source paper methods)
+curl -n -s "$API/databases/$DB/context?level=full&budget_tokens=6000" | jq -r .text
+# BibTeX
+curl -n -s "$API/papers/lee2026plasticity.bib"
+curl -n -s "$API/library.bib" -o anthive-library.bib
+```
+
+Cite passages as [Author Year, p.N] with the citekey. Keep what the
+literature says separate from what the datasets show. Summaries and topic
+fields listed in `draft_fields` are machine-written and not yet reviewed.
+
+MCP clients get the same as tools (`search_literature`, `get_paper`,
+`related_papers`, `get_dataset_context`), two prompts
+(`investigate_dataset`, `literature_in_our_data`) and two resources
+(`anthive://guide`, `anthive://dataset/<group>/<file>/context`).
+
+---
+
 ## Standard workflow
 
-1. `$API/databases` — find the dataset
-2. `$API/databases/$DB/info` — learn available fields, layers, embeddings
-3. `$API/databases/$DB/genes?q=...` — confirm gene names
-4. Plot or query as needed
-5. For plots: save to `/tmp/`, then Read the file to show the user
-6. For analytics_viz: decode base64 to file, then Read to show the user
+1. `$API/databases`: find the dataset
+2. `$API/databases/$DB/context`: background: caveats, exact column names, source paper methods
+3. `$API/databases/$DB/info`: learn available fields, layers, embeddings
+4. `$API/databases/$DB/genes?q=...`: confirm gene names
+5. Plot or query as needed; for literature questions use `$API/search/literature`
+6. For plots: save to `/tmp/`, then Read the file to show the user
+7. For analytics_viz: decode base64 to file, then Read to show the user
 
 ## Important notes
 
+- Per-cell statistics are pseudoreplicated: aggregate per donor (`ant_donor`)
+  before drawing donor-level conclusions.
 - Gene names are case-sensitive in most operations. Use `search_genes`
   to confirm the exact spelling (APOE vs Apoe).
 - The `$DB` variable is a path like `S25/SGM` or `Z25/L23`. URL-encode

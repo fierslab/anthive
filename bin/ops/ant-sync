@@ -20,6 +20,13 @@ Examples:
   ant-sync push 'Sierksma2025/**'          # push one group
   ant-sync push '**/Single.Grafts.h5ad'    # push a specific file
   ant-sync status                          # show what needs syncing
+
+The paper library's PDFs (<library>/papers/**.pdf, subfolders mirrored) and
+the literature index (<library_index>/library_chunks.parquet) are pushed and
+pulled too, under the S3 prefixes _library/papers/ and _library_index/ (see
+lib/library_sync.py). --no-library skips them, --library-only does only them.
+A PDF that moved to another folder is uploaded under its new key; the old key
+is reported as S3-only and never deleted automatically.
 """
 
 import argparse
@@ -1152,6 +1159,33 @@ def cmd_status(args, s3_cfg: dict, data_folder: Path) -> None:
           f'in sync: {in_sync}')
 
 
+def _sync_library(args, s3_cfg: dict, push: bool) -> None:
+    """Push or pull the library PDFs and the literature index."""
+    from config import get_library_dir, get_library_index_dir  # noqa: PLC0415
+    import library_sync as ls  # noqa: PLC0415
+    cfg = get_config()
+    library_dir = get_library_dir(cfg)
+    index_dir = get_library_index_dir(cfg)
+    client = _s3_client(s3_cfg)
+    bucket = s3_cfg['bucket']
+    prefix = s3_cfg.get('prefix', '') or ''
+    dry_run = bool(getattr(args, 'dry_run', False))
+    print('\nLibrary + literature index:')
+    reports = []
+    for area in ls.library_areas(library_dir, index_dir):
+        if push:
+            reports.append(ls.push_area(client, bucket, prefix, area, dry_run=dry_run))
+        else:
+            # PDFs only next to a cloned library repo (they mean nothing without
+            # their records); the index folder is created if missing.
+            reports.append(ls.pull_area(client, bucket, prefix, area, dry_run=dry_run,
+                                        create_root=(area.key_prefix == ls.INDEX_S3_PREFIX)))
+    for line in ls.summarize(reports, 'uploaded' if push else 'downloaded'):
+        print('  ' + line)
+    if not push and any(r.skipped_reason for r in reports if r.name == 'library papers'):
+        print(f'  (clone the library repo to {library_dir} to receive its PDFs)')
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog='ant-sync',
@@ -1196,6 +1230,12 @@ def main() -> None:
               'fleet is still running).'),
     )
 
+    for sub in (push_sub,):
+        sub.add_argument('--no-library', action='store_true',
+                         help='skip the library PDFs and the literature index')
+        sub.add_argument('--library-only', action='store_true',
+                         help='only the library PDFs and the literature index (not the h5adstore)')
+
     pull_sub = subparsers.add_parser('pull', help='Download S3 files locally')
     pull_sub.add_argument(
         'filter', nargs='?', default=None,
@@ -1237,6 +1277,11 @@ def main() -> None:
               "dataset, size, cumulative, projected free, action) and exit "
               "without transferring or deleting anything."),
     )
+
+    pull_sub.add_argument('--no-library', action='store_true',
+                          help='skip the library PDFs and the literature index')
+    pull_sub.add_argument('--library-only', action='store_true',
+                          help='only the library PDFs and the literature index (not the h5adstore)')
 
     evict_sub = subparsers.add_parser(
         'evict',
@@ -1284,10 +1329,16 @@ def main() -> None:
         print(f'Error: data folder not found: {data_folder}', file=sys.stderr)
         sys.exit(1)
 
-    if args.command == 'push':
-        cmd_push(args, s3_cfg, data_folder)
-    elif args.command == 'pull':
-        cmd_pull(args, s3_cfg, data_folder)
+    if args.command in ('push', 'pull'):
+        if args.no_library and args.library_only:
+            print('Error: --no-library and --library-only exclude each other', file=sys.stderr)
+            sys.exit(2)
+        if args.command == 'push' and args.library_only:
+            require_primary(tool='ant-sync push')
+        if not args.library_only:
+            (cmd_push if args.command == 'push' else cmd_pull)(args, s3_cfg, data_folder)
+        if not args.no_library:
+            _sync_library(args, s3_cfg, push=(args.command == 'push'))
     elif args.command == 'evict':
         cmd_evict(args, s3_cfg, data_folder)
     elif args.command == 'plan':

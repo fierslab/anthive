@@ -24,7 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / 'lib'))
 import library as L  # noqa: E402
-from config import get_config, get_library_dir  # noqa: E402
+from config import get_config, get_library_dir, get_library_lab_authors  # noqa: E402
 
 
 def fields_from_bibtex(path: Path) -> dict:
@@ -50,12 +50,18 @@ def main() -> int:
     parser.add_argument('--library', type=Path, help='library root (default: from config)')
     parser.add_argument('--update', action='store_true', help='refresh an existing record with the same DOI')
     parser.add_argument('--no-references', action='store_true', help='skip fetching cited DOIs')
+    parser.add_argument('--folder', help=('sub-folder of papers/ for a NEW record (e.g. papers/lab or '
+                                          'reading/2024); default papers/datasets for --role source, '
+                                          'papers/reading otherwise. Folders are for people only; '
+                                          'updates keep a record where it is'))
     args = parser.parse_args()
 
     library = args.library or get_library_dir(get_config())
-    papers_dir = library / 'papers'
-    papers_dir.mkdir(parents=True, exist_ok=True)
     papers, _ = L.load_library(library)
+    try:
+        papers_dir = L.folder_for(library, args.role, args.folder)   # refined once authors are known
+    except ValueError as exc:
+        raise SystemExit(str(exc))
 
     source = args.source
     pdf = args.pdf
@@ -87,6 +93,8 @@ def main() -> int:
         merged = {k: v for k, v in existing.fields.items() if k.startswith('anthive_') or k in ('related', 'relatedtype', 'file')}
         fields = {**fields, **merged, 'citekey': existing.citekey}
         key, body = existing.citekey, existing.body
+        if existing.path is not None:
+            papers_dir = existing.path.parent   # an update never moves a record
     else:
         bib_key = fields.pop('_bibtex_key', None)
         key = args.citekey or bib_key or L.make_citekey(L.first_author_last(fields), fields.get('date') or fields.get('year'),
@@ -95,10 +103,14 @@ def main() -> int:
             raise SystemExit(f"citekey {key} is taken")
         fields['citekey'] = key
         fields['anthive_role'] = args.role
+        papers_dir = L.folder_for(library, args.role, args.folder,
+                                  authors=fields.get('author') or [],
+                                  lab_authors=get_library_lab_authors(get_config()))
         fields['anthive_llm'] = 'allowed'
         body = '## Notes\n\nNo notes yet.'
     if args.access:
         fields['anthive_access'] = args.access
+    papers_dir.mkdir(parents=True, exist_ok=True)
     if pdf:
         shutil.copy2(pdf, papers_dir / f"{key}.pdf")
         fields['file'] = f"{key}.pdf"

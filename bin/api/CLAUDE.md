@@ -68,6 +68,13 @@ and `lib/config.py` (anthive.yaml loader).
   `ANTHIVE_INTERNAL_SECRET` / `ANTHIVE_MCP_TOKEN_SECRET`, else auto-created
   0600 files in `<state_dir>/secrets/` (`config.get_or_create_secret`).
 
+- **Paper library + literature search** (2.39): `lib/library_service.py`
+  holds the records, the resolved `papers:` references and the
+  `LibraryIndex`; loaded in a thread at startup and on `/admin/rescan`.
+  Handlers stay thin. Access: `restricted` papers admin-only; calls from
+  ant-mcp (internal secret + Remote-User) count as `for_llm` and honour
+  `anthive_llm`. Query model: fastembed, cache from `get_model_cache_dir()`.
+
 ## ant-mcp specifics
 
 - FastMCP `streamable-http` transport on `/mcp`, bound to loopback.

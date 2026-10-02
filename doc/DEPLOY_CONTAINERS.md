@@ -49,6 +49,9 @@ Tick every box. Most failed installs skip one of these.
 - [ ] Read access to the gene-set repo
       (`gitlab.kuleuven.be/bdslab/genesetdbs/anthive-genesetdb`). Optional:
       without it the gene-set pages are empty.
+- [ ] Read access to the paper library repo (`<library repo URL>`, to be
+      announced). Optional: without it the site has no papers, literature
+      search or paper context for AI clients.
 - [ ] S3 keys for the data bucket (an access key id and a secret). Without
       them you can still run a site, but only with data you convert yourself.
 
@@ -74,16 +77,24 @@ programs themselves run from the images.
 
 ---
 
-## 3. Get the catalogue and gene sets
+## 3. Get the catalogue, gene sets and paper library
 
 ```sh
 cd /srv/anthive
 git clone git@gitlab.kuleuven.be:bdslab/anthive/h5adstore.git
 git clone git@gitlab.kuleuven.be:bdslab/genesetdbs/anthive-genesetdb.git genesetstore
+git clone <library repo URL> library          # optional, see step 1
+mkdir -p library_index
 ```
 
 `h5adstore/` now contains one folder per collection with small text files.
-The actual data (`.h5ad`, `.duckdb`, parquet) is downloaded in step 5.
+`library/papers/` holds one `.md` record per paper (`doc/LIBRARY.md`).
+The actual data (`.h5ad`, `.duckdb`, parquet), the paper PDFs and the
+precomputed literature index are downloaded in step 5.
+
+The library repository's address is not final yet; replace
+`<library repo URL>` with it once it is announced. Until then, leave the two
+library lines out of `site.yaml` in step 4: the site runs without papers.
 
 ---
 
@@ -105,6 +116,8 @@ site:
 data:
   h5adstore: /srv/anthive/h5adstore           # absolute paths
   genesetstore: /srv/anthive/genesetstore     # or null if you have no access
+  library: /srv/anthive/library               # the paper library checkout, or leave out
+  library_index: /srv/anthive/library_index   # literature index (filled in step 5)
 
 state_dir: /srv/anthive/state                 # secrets, users, caches: back this up
 
@@ -193,6 +206,16 @@ bin/ops/ant-stack ingest -- ant sync pull --include-duckdb     # the whole catal
 and the site has nothing it can serve quickly. A dataset whose files are not
 local is still listed; it is read from S3 over the network, which is slow.
 Running the same pull again only downloads what changed.
+
+Every `ant sync pull` also brings the paper PDFs (into the library checkout)
+and the literature index (`library_chunks.parquet`, about 10 MB). To fetch
+only those, for example after the library gained papers:
+
+```sh
+bin/ops/ant-stack ingest -- ant sync pull --library-only
+```
+
+`--no-library` does the opposite (data only).
 
 ---
 
@@ -293,6 +316,10 @@ catalogue from git.
 | 502 right after `up --no-wait` | the API is still starting | wait a minute |
 | logged in but admin pages say 403 | the user is not an admin | add to `auth.admins` and `groups: [admins]`, `ant-stack init` |
 | a dataset is listed but its page is very slow | its files are not on this disk | pull that collection with `--include-duckdb` |
+| `check`: library_chunks.parquet is missing | the literature index was not downloaded | `bin/ops/ant-stack ingest -- ant sync pull --library-only` |
+| `check`: index built with another model | the index and the image use different embedding models | literature search still works by keyword; rebuild the index with `ant lib-index --full` or use the matching release |
+| literature search finds nothing in one paper | its PDF has no text layer (a scan) | the index build lists these; rebuild that paper with `ant lib-index --parser docling` (OCR) on a machine with the ingest image |
+| papers show but "PDF not available" | the PDFs were not pulled, or the library repo is not checked out at `data.library` | clone the library repo, then `ant sync pull --library-only` |
 | anything else | | `bin/ops/ant-stack logs <service>`; the first error line usually names the problem |
 
 ---
@@ -363,6 +390,7 @@ absolute path.
 | `site.hostnames` | extra names or IPs the site answers to |
 | `site.issue_tracker_url` | where the "Report an issue" entry in the user menu points (empty hides it) |
 | `data.h5adstore`, `data.genesetstore` | the data folders (absolute paths) |
+| `data.library`, `data.library_index` | the paper library checkout and the literature index folder (absolute paths; leave out to run without papers) |
 | `data.readonly` | mount the data read-only (a mirror that never annotates) |
 | `state_dir` | secrets, users, caches and the rendered config |
 | `scratch_dir` | disk for temporary DuckDB files and conversions (default: a docker volume) |
