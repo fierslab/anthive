@@ -1,0 +1,140 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "numpy>=1.24",
+#   "scipy>=1.10",
+#   "pyarrow>=14",
+#   "pyyaml>=6.0",
+#   "fastembed>=0.5,<0.9",
+#   "pymupdf4llm>=0.0.17",
+# ]
+# ///
+"""ant-lib-index: build or update the precomputed literature index.
+
+Parses every PDF of the library (or of the given folders), cuts it into
+section-tagged chunks of ~300-500 tokens with page numbers, embeds them with
+a small ONNX model (fastembed, CPU) and writes one portable parquet file
+(default ``<library_index>/library_chunks.parquet``). Deployments download
+that file; they never re-parse or re-embed.
+
+Incremental by default: only PDFs whose sha256 changed are parsed again,
+chunks of removed PDFs are dropped. A different model or chunker version
+forces a full rebuild. ``--full`` rebuilds everything.
+
+Inputs:  a library folder (``Library/<citekey>.md`` + ``.pdf`` sidecars) and/or
+         PDF folders (``--pdfs``); an h5adstore root (``--store``) to pick up
+         ``<collection>/static/*.pdf`` with collection paper metadata.
+Output:  library_chunks.parquet (schema and metadata: doc/LIBRARY_INDEX.md).
+
+Examples:
+    ant lib-index --store data/h5adstore
+    ant lib-index --library data/library --out data/library_index/library_chunks.parquet
+    ant lib-index --pdfs ~/papers --model BAAI/bge-small-en-v1.5 --full
+
+The default parser is pymupdf4llm (no torch). ``--parser docling`` uses
+Docling's layout model (better tables and captions, needs the ingest image
+or ``uv run --with docling``).
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+from pathlib import Path
+
+script_dir = Path(__file__).resolve().parent
+sys.path.insert(0, str(script_dir.parent.parent / "lib"))
+
+import library_index as li  # noqa: E402
+
+
+def _pdfs_under(root: Path, skip_underscore: bool = True) -> list[Path]:
+    out = []
+    for path in sorted(root.rglob("*")):
+        if path.suffix.lower() != ".pdf" or not path.is_file():
+            continue
+        rel = path.relative_to(root).parts
+        if skip_underscore and any(part.startswith(("_", ".")) for part in rel):
+            continue
+        out.append(path)
+    return out
+
+
+def _default_out() -> Path:
+    try:
+        from config import get_config  # noqa: PLC0415
+        cfg = get_config() or {}
+        base = cfg.get("library_index")
+        if base:
+            return Path(base) / "library_chunks.parquet"
+    except Exception:  # noqa: BLE001
+        pass
+    return script_dir.parent.parent / "data" / "library_index" / "library_chunks.parquet"
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
+    ap.add_argument("--library", type=Path, help="library folder with <citekey>.md + .pdf sidecars")
+    ap.add_argument("--store", type=Path, help="h5adstore root: index <collection>/static/*.pdf")
+    ap.add_argument("--pdfs", type=Path, nargs="*", default=[], help="extra folders with PDFs")
+    ap.add_argument("--out", type=Path, default=None, help="output parquet")
+    ap.add_argument("--model", default=li.DEFAULT_MODEL, help=f"fastembed model (default {li.DEFAULT_MODEL})")
+    ap.add_argument("--parser", choices=["pymupdf", "docling"], default="pymupdf")
+    ap.add_argument("--full", action="store_true", help="re-parse and re-embed everything")
+    ap.add_argument("--cache-dir", default=None, help="fastembed model cache")
+    ap.add_argument("--workers", type=int, default=8, help="parallel PDF parsers (pymupdf only; default 8)")
+    args = ap.parse_args()
+
+    out = args.out or _default_out()
+    sources: list[Path] = []
+    roots: list[Path] = []
+    # Store first: when a library PDF is a copy of a store PDF (same sha256),
+    # the store path is kept (it carries the collection) and the library
+    # sidecar only contributes the citekey.
+    if args.store:
+        sources += [p for p in _pdfs_under(args.store) if "static" in p.relative_to(args.store).parts]
+        roots.append(args.store)
+    if args.library:
+        sources += _pdfs_under(args.library)
+        roots.append(args.library)
+    for folder in args.pdfs:
+        sources += _pdfs_under(folder)
+        roots.append(folder)
+    seen, unique = set(), []
+    for pdf in sources:  # same file reachable twice: index once
+        key = pdf.resolve()
+        if key not in seen:
+            seen.add(key)
+            unique.append(pdf)
+    if not unique:
+        print("no PDFs found", file=sys.stderr)
+        return 1
+
+    if args.parser == "docling":
+        converter = li.make_docling_converter()
+        parse = lambda path: li.parse_pdf_docling(path, converter)  # noqa: E731
+    else:
+        parse = li.parse_pdf_pymupdf
+
+    started = time.time()
+    embedder = li.Embedder(args.model, cache_dir=args.cache_dir)
+    stats = li.build_index(unique, out, embedder=embedder, parse=parse, full=args.full,
+                           store_root=args.store, library_dir=args.library,
+                           source_root=roots, workers=(args.workers if args.parser == "pymupdf" else 1),
+                           progress=lambda msg: print("  " + msg, flush=True))
+    elapsed = time.time() - started
+    size_mb = out.stat().st_size / 1e6 if out.exists() else 0
+    print(f"\n{out}: {stats['chunks']} chunks from {stats['sources']} PDFs "
+          f"({stats['parsed']} parsed, {stats['reused']} reused, {len(stats['failed'])} failed), "
+          f"{size_mb:.1f} MB, {elapsed:.0f}s, model {embedder.model} (dim {embedder.dim})")
+    for failure in stats["failed"]:
+        print(f"  failed: {failure}")
+    for item in stats.get("needs_ocr", []):
+        print(f"  needs OCR (partly image-only): {item}")
+    return 0 if not stats["failed"] else 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
