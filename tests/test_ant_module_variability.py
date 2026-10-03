@@ -86,6 +86,11 @@ def _write_index_md(dir_path: Path, group_id: str = 'TST') -> None:
     )
 
 
+def _quote(identifier: str) -> str:
+    """Quote a SQL identifier, doubling embedded double-quotes."""
+    return '"' + identifier.replace('"', '""') + '"'
+
+
 def _build_duckdb(
     path: Path,
     num_cols: dict[str, Iterable[float]],
@@ -112,7 +117,7 @@ def _build_duckdb(
         conn.execute('INSERT INTO __cells SELECT * FROM t_cells')
 
         # __obsnum
-        num_defs = ', '.join(f'"{c}" DOUBLE' for c in num_cols.keys())
+        num_defs = ', '.join(f'{_quote(c)} DOUBLE' for c in num_cols.keys())
         conn.execute(
             'CREATE TABLE __obsnum (cell_id INTEGER PRIMARY KEY'
             + (', ' + num_defs if num_defs else '')
@@ -123,7 +128,7 @@ def _build_duckdb(
         conn.execute('INSERT INTO __obsnum SELECT * FROM t_num')
 
         # __obscat
-        cat_defs = ', '.join(f'"{c}" VARCHAR' for c in cat_cols.keys())
+        cat_defs = ', '.join(f'{_quote(c)} VARCHAR' for c in cat_cols.keys())
         conn.execute(
             'CREATE TABLE __obscat (cell_id INTEGER PRIMARY KEY'
             + (', ' + cat_defs if cat_defs else '')
@@ -138,7 +143,7 @@ def _build_duckdb(
         num_proj = ['c.cell_name']
         for col in num_cols.keys():
             alias = num_rename.get(col, col)
-            num_proj.append(f'o."{col}" AS "{alias}"')
+            num_proj.append(f'o.{_quote(col)} AS {_quote(alias)}')
         conn.execute(
             f'CREATE VIEW obsnum AS SELECT {", ".join(num_proj)} '
             'FROM __obsnum o JOIN __cells c ON o.cell_id = c.cell_id'
@@ -147,7 +152,7 @@ def _build_duckdb(
         cat_proj = ['c.cell_name']
         for col in cat_cols.keys():
             alias = cat_rename.get(col, col)
-            cat_proj.append(f'o."{col}" AS "{alias}"')
+            cat_proj.append(f'o.{_quote(col)} AS {_quote(alias)}')
         conn.execute(
             f'CREATE VIEW obscat AS SELECT {", ".join(cat_proj)} '
             'FROM __obscat o JOIN __cells c ON o.cell_id = c.cell_id'
@@ -193,7 +198,8 @@ def tmp_dataset(tmp_path):
         if inactive:
             (d / 'sample.inactive').touch()
         if with_sidecar and sidecar_rows is not None:
-            from lib.scores_parquet import upsert_scores  # type: ignore
+            # Same module object the script imported (lib/ is on sys.path).
+            from scores_parquet import upsert_scores  # type: ignore
             for (source, catalog), grp in sidecar_rows.groupby(['source', 'catalog']):
                 upsert_scores(duckdb_path, source, catalog,
                               grp[['cell_id', 'module', 'score']])
@@ -259,153 +265,210 @@ def test_obsnum_score_columns_ignores_bad_shapes(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# compute_for_dataset — obs fallback path                                     #
+# Per-dataset pipeline (build_dataset_inputs -> pair jobs -> _process_pair)   #
 # --------------------------------------------------------------------------- #
 
 
-def test_compute_uses_obs_fallback_when_no_sidecar(tmp_dataset):
-    """Root-cause fix for S25/V6W: no sidecar but score columns in obs → the
-    builder must still emit variability rows using the obs values."""
-    n = len(CELL_NAMES)
-    # Two modules, one canonical categorical tag surfaced via a direct rename
-    # (``Sex_donor → ant_sex``, so the view exposes ``ant_sex``).
+def _entry_for(duckdb_path: Path, md_path: Path, db_id: str = 'TST/TST'):
+    """Build the ``H5adEntry`` that ``iter_h5adstore`` would yield."""
+    from h5adstore import H5adEntry  # type: ignore
+    group_id, file_id = db_id.split('/')
+    return H5adEntry(
+        db_id=db_id,
+        md_path=md_path,
+        h5ad_path=md_path.with_suffix('.h5ad'),
+        duckdb_path=duckdb_path,
+        group_id=group_id,
+        file_id=file_id,
+        study=md_path.parent.name,
+        stem=md_path.stem,
+    )
+
+
+def _run_dataset(duckdb_path: Path, md_path: Path) -> pd.DataFrame:
+    """Run one dataset through the same code path ``main()`` uses per pair.
+
+    ``build_dataset_inputs`` discovers the (source, catalog) pairs,
+    ``_iter_pair_jobs`` turns them into jobs with cache paths under the
+    test's tmp root, ``_process_pair`` computes and writes each cache
+    parquet. Returns the concatenated cache contents (empty frame if the
+    dataset has no score source at all).
+    """
+    inputs = amv.build_dataset_inputs(_entry_for(duckdb_path, md_path))
+    if inputs is None:
+        return pd.DataFrame(columns=list(amv.OUTPUT_COLUMNS))
+    store_root = duckdb_path.parent.parent
+    frames = []
+    for job in amv._iter_pair_jobs(store_root, None, [inputs]):
+        result = amv._process_pair(job, force=True)
+        assert result.error is None, result.error
+        assert not result.from_cache
+        frame = pd.read_parquet(job.cache_path)
+        assert len(frame) == result.n_rows
+        frames.append(frame)
+    if not frames:
+        return pd.DataFrame(columns=list(amv.OUTPUT_COLUMNS))
+    return pd.concat(frames, ignore_index=True)
+
+
+def _alternating_sex(n_cells: int) -> list[str]:
+    return ['f' if i % 2 else 'm' for i in range(n_cells)]
+
+
+def test_obs_fallback_when_no_sidecar(tmp_dataset):
+    """Root-cause fix for S25/V6W: no sidecar but score columns in obs ->
+    the builder must still emit variability rows using the obs values."""
+    n_cells = len(CELL_NAMES)
     duckdb_path, md_path = tmp_dataset(
         num_cols={
-            'Sierksma2025::WGCNA::Black_Mito': [float(i) for i in range(n)],
-            'Sierksma2025::WGCNA::Blue_Innate_IR': [float(i * 2) for i in range(n)],
+            'Sierksma2025::WGCNA::Black_Mito': [float(i) for i in range(n_cells)],
+            'Sierksma2025::WGCNA::Blue_Innate_IR': [float(i * 2) for i in range(n_cells)],
         },
-        cat_cols={
-            'Sex_donor': ['f' if i % 2 else 'm' for i in range(n)],
-        },
+        cat_cols={'Sex_donor': _alternating_sex(n_cells)},
         view_cat_rename={'Sex_donor': 'ant_sex'},
         api_rename={'Sex_donor': 'ant_sex'},
     )
-    df = amv.compute_for_dataset('TST/TST', duckdb_path, md_path)
-    assert not df.empty, "must produce rows via obs fallback"
+    assert not amv.scores_path(duckdb_path).exists()
+
+    inputs = amv.build_dataset_inputs(_entry_for(duckdb_path, md_path))
+    assert inputs is not None, 'obs-only dataset must be discovered'
+    assert inputs.catalogs == (('geneset', 'Sierksma2025/WGCNA'),)
+
+    df = _run_dataset(duckdb_path, md_path)
+    assert not df.empty, 'must produce rows via obs fallback'
     assert set(df['module']) == {'Black_Mito', 'Blue_Innate_IR'}
     assert (df['catalog'] == 'Sierksma2025/WGCNA').all()
     assert (df['source'] == 'geneset').all()
-    assert 'ant_sex' in set(df['tag_column'])
+    assert (df['dataset'] == 'TST/TST').all()
+    assert set(df['tag_column']) == {'ant_sex'}
+    assert set(df['tag']) == {'sex'}
+    # Values come from obs: Black_Mito is 0..29, sample variance = 77.5.
+    total_var = df[(df['module'] == 'Black_Mito')
+                   & (df['statistic'] == 'total_var')]['value'].iloc[0]
+    assert total_var == pytest.approx(pd.Series(range(n_cells)).var(ddof=1))
 
 
-def test_compute_handles_chained_obs_rename(tmp_dataset):
-    """S25/V6W .md uses a two-hop chain ``Sex_donor → sex → ant_sex``.
+def test_chained_obs_rename_maps_intermediate_column(tmp_dataset):
+    """S25/V6W .md uses a two-hop chain ``Sex_donor -> sex -> ant_sex``.
 
-    The view builder only performs a single hop, so the view actually
-    surfaces ``sex``.  The builder must nevertheless recognise ``sex`` as
-    a canonical-tag-carrying column and produce variability rows against it.
+    The view builder only performs a single hop, so the view surfaces
+    ``sex``. The builder must recognise ``sex`` as carrying the canonical
+    ``sex`` tag and produce rows against it.
     """
-    n = len(CELL_NAMES)
+    n_cells = len(CELL_NAMES)
     duckdb_path, md_path = tmp_dataset(
         num_cols={
-            'Sierksma2025::WGCNA::Black_Mito': [float(i) for i in range(n)],
+            'Sierksma2025::WGCNA::Black_Mito': [float(i) for i in range(n_cells)],
         },
-        cat_cols={
-            'Sex_donor': ['f' if i % 2 else 'm' for i in range(n)],
-        },
-        # Only one hop is applied to the view (Sex_donor → sex).
+        cat_cols={'Sex_donor': _alternating_sex(n_cells)},
         view_cat_rename={'Sex_donor': 'sex'},
-        # The .md's declared chain says the intent is ant_sex.
         api_rename={'Sex_donor': 'sex', 'sex': 'ant_sex'},
     )
-    df = amv.compute_for_dataset('TST/TST', duckdb_path, md_path)
+    tag_targets = amv._resolve_tag_targets(md_path)
+    assert 'sex' in tag_targets.get('sex', [])
+    assert 'sex' in tag_targets.get('Sex_donor', [])
+
+    df = _run_dataset(duckdb_path, md_path)
     assert not df.empty
-    assert 'sex' in set(df['tag_column'])
-    # Tag id must be the canonical one (`sex`), regardless of the raw column.
-    assert set(df.loc[df['tag_column'] == 'sex', 'tag']) == {'sex'}
+    # Only the intermediate name exists in the view.
+    assert set(df['tag_column']) == {'sex'}
+    assert set(df['tag']) == {'sex'}
+    eta2 = df[df['statistic'] == 'eta2']['value'].iloc[0]
+    assert 0.0 <= eta2 <= 1.0
 
 
-def test_compute_survives_cyclic_obs_rename(tmp_dataset):
-    """A pathological ``api.obs_rename`` cycle (A→B→A) must not spin the
-    chain resolver forever — the guard is `seen` in `_resolve_chain`."""
-    n = len(CELL_NAMES)
+def test_cyclic_obs_rename_terminates(tmp_dataset):
+    """A pathological ``api.obs_rename`` cycle (A -> B -> A) must not spin
+    the chain resolver forever, must not attach a canonical tag to the
+    cycle members, and must not stop other canonical tags from working."""
+    n_cells = len(CELL_NAMES)
     duckdb_path, md_path = tmp_dataset(
         num_cols={
-            'Sierksma2025::WGCNA::Black_Mito': [float(i) for i in range(n)],
+            'Sierksma2025::WGCNA::Black_Mito': [float(i) for i in range(n_cells)],
         },
         cat_cols={
-            'A': ['x' if i % 2 else 'y' for i in range(n)],
+            'A': ['x' if i % 2 else 'y' for i in range(n_cells)],
+            'ant_sex': _alternating_sex(n_cells),
         },
-        # No canonical target reached — this exercises the terminating cycle guard.
         api_rename={'A': 'B', 'B': 'A'},
     )
-    # Must return without hanging or raising.
-    df = amv.compute_for_dataset('TST/TST', duckdb_path, md_path)
-    # Cycle didn't reach a canonical tag → no rows from these tags (score
-    # column may still contribute rows via canonical tags if any).
-    # The key assertion is that we got here at all.
-    assert isinstance(df, pd.DataFrame)
+    tag_targets = amv._resolve_tag_targets(md_path)
+    assert 'A' not in tag_targets and 'B' not in tag_targets
+
+    df = _run_dataset(duckdb_path, md_path)
+    assert set(df['tag_column']) == {'ant_sex'}
+    assert set(df['tag']) == {'sex'}
 
 
-def test_compute_column_with_embedded_quotes_is_safe(tmp_dataset):
-    """A score column whose name contains a double-quote must not break the
-    query — the identifier is escaped defensively. duckdb allows quotes in
-    identifiers via double-quote doubling."""
-    n = len(CELL_NAMES)
-    weird_col = 'Study"::"Exp::"Mod'
-    # Only accepted by _obsnum_score_columns if it also matches the '::' shape
-    # after quote-doubling. Skip if the shape doesn't parse — this is a
-    # defense-in-depth test, not a shape-validation test.
+def test_score_column_with_embedded_quotes(tmp_dataset):
+    """A legacy score column whose name contains double-quotes must be
+    read correctly: the identifier is escaped by quote doubling."""
+    n_cells = len(CELL_NAMES)
+    weird_column = 'Stu"dy::E"xp::Mo"d'
     duckdb_path, md_path = tmp_dataset(
-        num_cols={
-            'S::E::M': [float(i) for i in range(n)],
-        },
-        cat_cols={
-            'Sex_donor': ['f' if i % 2 else 'm' for i in range(n)],
-        },
+        num_cols={weird_column: [float(i) for i in range(n_cells)]},
+        cat_cols={'Sex_donor': _alternating_sex(n_cells)},
         view_cat_rename={'Sex_donor': 'ant_sex'},
         api_rename={'Sex_donor': 'ant_sex'},
     )
-    df = amv.compute_for_dataset('TST/TST', duckdb_path, md_path)
+    df = _run_dataset(duckdb_path, md_path)
     assert not df.empty
-    assert 'M' in set(df['module'])
+    assert set(df['module']) == {'Mo"d'}
+    assert set(df['catalog']) == {'Stu"dy/E"xp'}
+    mean_score = df[df['statistic'] == 'mean_score']['value'].iloc[0]
+    assert mean_score == pytest.approx((n_cells - 1) / 2)
 
 
-def test_compute_returns_empty_when_no_scores_and_no_tags(tmp_dataset):
-    """Genuinely empty case — no score columns, no sidecar, no canonical
-    tags. Must return an empty DataFrame, not raise."""
+def test_no_scores_and_no_tags_yields_nothing(tmp_dataset):
+    """No score columns, no sidecar, no canonical tags: the dataset is
+    not a scored dataset (``build_dataset_inputs`` returns ``None``) and
+    the fleet snapshot excludes it without raising."""
     duckdb_path, md_path = tmp_dataset(
         num_cols={'n_counts': [100.0] * len(CELL_NAMES)},
         cat_cols={'batch': ['a'] * len(CELL_NAMES)},
     )
-    df = amv.compute_for_dataset('TST/TST', duckdb_path, md_path)
-    assert df.empty
+    assert amv.build_dataset_inputs(_entry_for(duckdb_path, md_path)) is None
+    assert amv._collect_dataset_snapshot(duckdb_path.parent.parent) == []
+    assert _run_dataset(duckdb_path, md_path).empty
 
 
-def test_compute_sidecar_takes_priority_over_obs_duplicate(tmp_dataset):
+def test_sidecar_takes_priority_over_obs_duplicate(tmp_dataset):
     """When the same ``(source, catalog, module)`` exists in both the
     sidecar AND obs, the sidecar wins (single row-set, no double count)."""
-    n = len(CELL_NAMES)
+    n_cells = len(CELL_NAMES)
     sidecar_rows = pd.DataFrame({
-        'cell_id': list(range(n)),
-        'module': ['Black_Mito'] * n,
-        'score': [10.0] * n,   # a distinctive constant so we can tell them apart
-        'source': ['geneset'] * n,
-        'catalog': ['Sierksma2025/WGCNA'] * n,
+        'cell_id': list(range(n_cells)),
+        'module': ['Black_Mito'] * n_cells,
+        'score': [10.0] * n_cells,   # constant, distinguishable from obs
+        'source': ['geneset'] * n_cells,
+        'catalog': ['Sierksma2025/WGCNA'] * n_cells,
     })
     duckdb_path, md_path = tmp_dataset(
         num_cols={
-            # obs values would produce non-zero variance
-            'Sierksma2025::WGCNA::Black_Mito': [float(i) for i in range(n)],
+            # obs values would give non-zero variance and mean 14.5
+            'Sierksma2025::WGCNA::Black_Mito': [float(i) for i in range(n_cells)],
         },
-        cat_cols={
-            'Sex_donor': ['f' if i % 2 else 'm' for i in range(n)],
-        },
+        cat_cols={'Sex_donor': _alternating_sex(n_cells)},
         view_cat_rename={'Sex_donor': 'ant_sex'},
         api_rename={'Sex_donor': 'ant_sex'},
         with_sidecar=True,
         sidecar_rows=sidecar_rows,
     )
-    df = amv.compute_for_dataset('TST/TST', duckdb_path, md_path)
-    # One catalog-module triple only — no duplication.
+    assert amv.scores_path(duckdb_path).exists()
+    inputs = amv.build_dataset_inputs(_entry_for(duckdb_path, md_path))
+    assert inputs is not None
+    assert inputs.catalogs == (('geneset', 'Sierksma2025/WGCNA'),)
+
+    df = _run_dataset(duckdb_path, md_path)
     triples = df[['source', 'catalog', 'module']].drop_duplicates()
     assert len(triples) == 1
-    # Total variance is 0 (all sidecar values are 10.0) → total_var == 0.
-    tv = df[df['statistic'] == 'total_var']['value'].iloc[0]
-    assert tv == 0.0, (
-        "sidecar values (all 10.0) should have zero variance — "
-        "obs values would give non-zero, confirming sidecar wins"
-    )
+    # One row per statistic: obs rows were not appended alongside.
+    assert df['n_cells'].unique().tolist() == [n_cells]
+    assert df.groupby(['tag', 'statistic']).size().max() == 1
+    total_var = df[df['statistic'] == 'total_var']['value'].iloc[0]
+    mean_score = df[df['statistic'] == 'mean_score']['value'].iloc[0]
+    assert total_var == 0.0, 'sidecar (all 10.0) must win over obs'
+    assert mean_score == 10.0
 
 
 # --------------------------------------------------------------------------- #
@@ -413,51 +476,50 @@ def test_compute_sidecar_takes_priority_over_obs_duplicate(tmp_dataset):
 # --------------------------------------------------------------------------- #
 
 
-def test_main_skips_inactive_datasets(tmp_path, monkeypatch, capsys):
-    """A `<basename>.inactive` sidecar must exclude a dataset from the
-    fleet rebuild, matching ant-serve's catalog filter."""
-    n = len(CELL_NAMES)
-    active = tmp_path / 'active'
-    active.mkdir()
-    _write_index_md(active, group_id='TST')
+def _write_scored_dataset(directory: Path, file_id: str) -> None:
+    n_cells = len(CELL_NAMES)
+    directory.mkdir()
+    _write_index_md(directory, group_id='TST')
     _build_duckdb(
-        active / 'sample.duckdb',
-        num_cols={'Sierksma2025::WGCNA::Black_Mito': [float(i) for i in range(n)]},
-        cat_cols={'Sex_donor': ['f' if i % 2 else 'm' for i in range(n)]},
+        directory / 'sample.duckdb',
+        num_cols={'Sierksma2025::WGCNA::Black_Mito': [float(i) for i in range(n_cells)]},
+        cat_cols={'Sex_donor': _alternating_sex(n_cells)},
         view_cat_rename={'Sex_donor': 'ant_sex'},
     )
-    _write_md(active / 'sample.md',
+    _write_md(directory / 'sample.md',
               api_rename={'Sex_donor': 'ant_sex'},
               obs_tags={},
-              extra={'id': 'ACT'})
+              extra={'id': file_id})
 
-    inactive = tmp_path / 'inactive'
-    inactive.mkdir()
-    _write_index_md(inactive, group_id='TST')
-    _build_duckdb(
-        inactive / 'sample.duckdb',
-        num_cols={'Sierksma2025::WGCNA::Black_Mito': [float(i) for i in range(n)]},
-        cat_cols={'Sex_donor': ['f' if i % 2 else 'm' for i in range(n)]},
-        view_cat_rename={'Sex_donor': 'ant_sex'},
-    )
-    _write_md(inactive / 'sample.md',
-              api_rename={'Sex_donor': 'ant_sex'},
-              obs_tags={},
-              extra={'id': 'INA'})
-    (inactive / 'sample.inactive').touch()
+
+def test_main_skips_inactive_datasets(tmp_path, monkeypatch):
+    """A ``<basename>.inactive`` sidecar must exclude a dataset from the
+    fleet rebuild, matching ant-serve's catalog filter.
+
+    ``--workers 1`` keeps main() in-process. The default spawns a
+    ``multiprocessing`` pool, whose children cannot re-import this
+    importlib-loaded script, so ``imap_unordered`` would wait forever.
+    """
+    store_root = tmp_path / 'store'
+    store_root.mkdir()
+    _write_scored_dataset(store_root / 'active', 'ACT')
+    _write_scored_dataset(store_root / 'inactive', 'INA')
+    (store_root / 'inactive' / 'sample.inactive').touch()
 
     out_parquet = tmp_path / 'mv.parquet'
     monkeypatch.setattr(sys, 'argv', [
         'ant-module-variability',
-        '--h5adstore-root', str(tmp_path),
+        '--h5adstore-root', str(store_root),
         '--out', str(out_parquet),
+        '--workers', '1',
     ])
-    rc = amv.main()
-    assert rc == 0
+    assert amv.main() == 0
 
-    combined = duckdb.execute(
-        f"SELECT DISTINCT dataset FROM read_parquet('{out_parquet}')"
-    ).fetchall()
-    dsets = {r[0] for r in combined}
-    assert 'TST/ACT' in dsets
-    assert 'TST/INA' not in dsets, "inactive dataset must be skipped"
+    datasets = {
+        row[0] for row in duckdb.execute(
+            'SELECT DISTINCT dataset FROM read_parquet(?)', [str(out_parquet)],
+        ).fetchall()
+    }
+    assert datasets == {'TST/ACT'}, 'inactive dataset must be skipped'
+    cache_dirs = {p.name for p in (store_root / amv.CACHE_DIRNAME).iterdir()}
+    assert cache_dirs == {'TST__ACT'}, 'inactive dataset must not be computed'
