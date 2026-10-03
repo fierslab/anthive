@@ -584,7 +584,8 @@
         <span style="flex:1"></span>
         {# Right-hand utility cluster: Help + API + user dropdown.
            - Help: on-site cheat-sheet at /help.
-           - API: FastAPI Swagger UI at /api/docs, external tab.
+           - API: the /api-guide page (login, curl, pyvark, vark), which links
+             on to the Swagger UI at /api/docs. Also in the user dropdown.
            - Dropdown: always shows Preferences (localStorage, no SSO needed);
              the "signed in as" header + Logout only appear behind Authelia. #}
         {% set _auth_user = request.headers.get('remote-name') or request.headers.get('remote-user') %}
@@ -593,7 +594,7 @@
             {% set _ver = stack_version(request) %}
             <a href="/api/changelog" target="_blank" rel="noopener" class="version-pill{% if not _ver.ok %} version-unconfirmed{% endif %}" id="stack-version" title="{{ _ver.title }}"><span class="v-prefix">v</span>{{ _ver.shown }}</a>
             <a href="/help" title="What's here & how to use it">Help</a>
-            <a href="/api/docs" target="_blank" rel="noopener" title="REST API — Swagger UI (new tab)">API</a>
+            <a href="/api-guide" id="topbar-api-link" title="Use the REST API: signing in, first steps, pyvark and vark">API</a>
             <span class="dropdown topbar-auth">
                 <span class="dropdown-toggle" id="user-menu-toggle" tabindex="0" role="button" aria-haspopup="menu" aria-expanded="false" title="{% if _auth_user %}signed in{% if request.headers.get('remote-email') %} — {{ request.headers.get('remote-email') }}{% endif %}{% else %}account &amp; preferences{% endif %}">👤{% if _auth_user %} {{ _auth_user }}{% endif %}</span>
                 <span class="dropdown-menu right">
@@ -610,6 +611,7 @@
                     <a href="{{ _issue_url }}" id="issue-tracker-link" target="_blank" rel="noopener">Report an issue</a>
                     {% endif %}
                     {% endif %}
+                    <a href="/api-guide" id="api-menu-link">API</a>
                     <a href="/settings">Preferences</a>
                     {% if _auth_user %}
                     <a href="#" id="authelia-signout">Logout</a>

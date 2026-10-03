@@ -1,0 +1,210 @@
+{% extends "base.html" %}
+
+{% block title %}API · anthive{% endblock %}
+
+{% block content %}
+{% set _docs = docs_base_url() %}
+{% set _who = user or 'your-username' %}
+{% set _basic = auth_mode not in ('none', 'trusted-proxy') %}
+<style>
+  .api-guide { max-width: 920px; }
+  .api-guide h1 { font-size: 20px; font-weight: 600; margin: 4px 0 10px; }
+  .api-guide .section-head { scroll-margin-top: 12px; }
+  .api-guide p, .api-guide li, .api-guide td { font-size: 13px; line-height: 1.6; }
+  .api-guide ul, .api-guide ol { margin: 4px 0 8px 20px; }
+  .api-guide code { background: var(--border-light); padding: 1px 5px; border-radius: 3px; font-family: var(--font-mono); font-size: 11.5px; }
+  .api-guide .lead { font-size: 13px; color: var(--text); background: var(--hover, #f8fafc); border-left: 3px solid var(--link); padding: 8px 12px; margin: 6px 0 14px; border-radius: 0 4px 4px 0; }
+  .api-guide .note { font-size: 12.5px; color: var(--text-muted); border-left: 3px solid var(--border); padding: 4px 10px; margin: 6px 0; }
+  .api-guide .warn { font-size: 12.5px; background: var(--accent-cream, #fff7ed); border-left: 3px solid var(--accent-amber, #f59e0b); padding: 6px 10px; margin: 8px 0; border-radius: 0 4px 4px 0; }
+  .api-guide .doc-links { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 14px; }
+  .api-guide .doc-links a { border: 1px solid var(--border); border-radius: 5px; padding: 5px 11px; font-size: 13px; background: var(--bg); }
+  .api-guide .doc-links a.primary { background: var(--link); border-color: var(--link); color: #fff !important; }
+  .api-guide .doc-links a:hover { text-decoration: none; filter: brightness(1.05); }
+  .api-guide table { border-collapse: collapse; margin: 6px 0 10px; width: 100%; }
+  .api-guide th, .api-guide td { text-align: left; vertical-align: top; padding: 4px 8px; border-bottom: 1px solid var(--border-light); }
+  .api-guide th { font-size: 12px; color: var(--text-muted); font-weight: 600; }
+  .api-guide .table-wrap { overflow-x: auto; }
+  .api-guide .toc { margin: 8px 0 4px; padding-left: 18px; columns: 2; column-gap: 28px; }
+  .api-guide .toc li { break-inside: avoid; font-size: 13px; }
+  @media (max-width: 720px) { .api-guide .toc { columns: 1; } }
+  .api-guide .cmd { position: relative; background: var(--border-light); border-radius: 4px; padding: 8px 64px 8px 10px; margin: 6px 0 10px; }
+  .api-guide .cmd pre { margin: 0; font-family: var(--font-mono); font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+  .api-guide .cmd button { position: absolute; top: 6px; right: 6px; font-size: 11px; padding: 2px 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); border-radius: 3px; cursor: pointer; }
+</style>
+
+{% from "_macros.html" import breadcrumb %}
+{{ breadcrumb([("API", None)]) }}
+
+<div class="api-guide">
+  <h1>Using the anthive API</h1>
+
+  <div class="lead">
+    Everything this site shows comes from a REST API at <code>{{ api_base }}</code>.
+    You can call it from the command line, from Python or R, or with the
+    <a href="https://codeberg.org/mfiers/vark" target="_blank" rel="noopener">vark</a> and
+    <a href="https://codeberg.org/mfiers/pyvark" target="_blank" rel="noopener">pyvark</a> clients.
+    Read how signing in works first; the full list of endpoints is in the interactive documentation.
+    {% if api_version %}This server runs API version <strong id="api-guide-version">{{ api_version }}</strong>{% if api_released %} (released {{ api_released }}){% endif %}.{% endif %}
+  </div>
+
+  <div class="doc-links" id="api-doc-links">
+    <a class="primary" href="/api/docs" target="_blank" rel="noopener" id="api-docs-link">Interactive API docs</a>
+    <a href="/api/redoc" target="_blank" rel="noopener">ReDoc</a>
+    <a href="/api/openapi.json" target="_blank" rel="noopener">openapi.json</a>
+    <a href="/api/changelog" target="_blank" rel="noopener">Changelog on this server</a>
+    <a href="{{ _docs }}/API_CHANGELOG.md" target="_blank" rel="noopener" id="api-changelog-gitlab">Changelog on GitLab</a>
+  </div>
+
+  <nav aria-label="Contents">
+    <ol class="toc">
+      <li><a href="#signing-in">Signing in</a></li>
+      <li><a href="#password">Keeping your password out of your code</a></li>
+      <li><a href="#first-steps">First steps with curl</a></li>
+      <li><a href="#pyvark">Python with pyvark</a></li>
+      <li><a href="#vark">The vark command line</a></li>
+      <li><a href="#permissions">What needs admin rights, and limits</a></li>
+      <li><a href="#version">Versions and changes</a></li>
+    </ol>
+  </nav>
+
+  <section id="signing-in">
+    <h2 class="section-head">Signing in</h2>
+    {% if auth_mode == 'none' %}
+    <p>This site is a public, read-only mirror. Nobody logs in, so the API needs no username or password. Admin features are switched off.</p>
+    {% elif auth_mode == 'trusted-proxy' %}
+    <p>On this site the login is handled by your institute's web server in front of anthive, not by anthive itself. Whether scripts can send a username and password depends on that server; ask the people running this site how to call <code>{{ api_base }}</code> from a script.</p>
+    {% else %}
+    <p>The API uses <strong>the same username and password as this website</strong>. There are no separate API keys. In the browser your login session already covers the API, which is why the interactive docs work right away. Scripts and programs send the username and password with every request using HTTP basic authentication.</p>
+    <ul>
+      <li><strong>Always over HTTPS.</strong> Basic authentication only encodes the password, it does not encrypt it. HTTPS is what protects it on the way, so always use the <code>https://</code> address: <code>{{ api_base }}</code>.</li>
+      <li><strong>Only the API takes a password this way.</strong> Basic authentication works on addresses under <code>/api/</code>. The web pages themselves always go through the login page.</li>
+      <li><strong>Mistyped passwords lock you out for a while.</strong> With the default settings, five failed logins within two minutes block the account for ten minutes, for the website as well. A script with a wrong password in a loop triggers this quickly, so test it with one call first.</li>
+      <li><strong>Who you are matters.</strong> The API sees your username, so admin-only endpoints work for admins and refuse everybody else (see <a href="#permissions">below</a>).</li>
+    </ul>
+    {% endif %}
+    <h3 class="subsection-head">MCP links are separate</h3>
+    <p>The personal links on your <a href="/account/mcp" id="api-guide-mcp-link">MCP page</a> are for AI assistants. Each link is its own token that acts as your login on the MCP server (<code>/mcp</code>); it does not work on the REST API, and your password does not go into an MCP client. Treat a link like a password and revoke it there if it leaks.</p>
+  </section>
+
+  {% if _basic %}
+  <section id="password">
+    <h2 class="section-head">Keeping your password out of your code</h2>
+    <p>Never type your password into a script, a notebook, a command line or a file you share or commit. Command lines end up in your shell history and in the process list; notebooks end up on GitHub. Use one of these instead.</p>
+    <h3 class="subsection-head">A <code>~/.netrc</code> file (curl, Python)</h3>
+    <p>Open <code>~/.netrc</code> in a text editor (create it if it does not exist) and add this line with your own password:</p>
+    <div class="cmd"><pre id="api-netrc-line">machine {{ netrc_host }} login {{ _who }} password YOUR_PASSWORD</pre><button type="button" data-copy-api>Copy</button></div>
+    <p>Then make it readable for you only:</p>
+    <div class="cmd"><pre>chmod 600 ~/.netrc</pre><button type="button" data-copy-api>Copy</button></div>
+    <p><code>curl -n</code> reads the file. Python's <code>requests</code> (and so pyvark) uses it automatically when you give no other login.</p>
+    <h3 class="subsection-head">Environment variables</h3>
+    <p>Set them in a session without echoing the password, then read them in your code:</p>
+    <div class="cmd"><pre>export ANTHIVE_USER={{ _who }}
+read -rs -p "anthive password: " ANTHIVE_PASSWORD; export ANTHIVE_PASSWORD; echo</pre><button type="button" data-copy-api>Copy</button></div>
+    <h3 class="subsection-head">The vark credential store</h3>
+    <p><code>vark server login</code> keeps the password in your system keyring (or an encrypted file on servers without one), and pyvark can read it from there. See <a href="#vark">vark</a>.</p>
+  </section>
+  {% endif %}
+
+  <section id="first-steps">
+    <h2 class="section-head">First steps with curl</h2>
+    <p>With <code>~/.netrc</code> in place, <code>-n</code> adds your login to each call. The dataset id <code>L26/FMG</code> is an example; any id from the list works (you can copy ids from the dataset pages).</p>
+    <p>Is the server up, and which version does it run?</p>
+    <div class="cmd"><pre>curl -n -s {{ api_base }}/health
+curl -n -s {{ api_base }}/version</pre><button type="button" data-copy-api>Copy</button></div>
+    <p>List the datasets (with <code>jq</code> to keep the output short):</p>
+    <div class="cmd"><pre>curl -n -s {{ api_base }}/databases | jq '.databases[] | {id, title, n_cells}'</pre><button type="button" data-copy-api>Copy</button></div>
+    <p>Expression statistics for a few genes in one dataset:</p>
+    <div class="cmd"><pre>curl -n -s "{{ api_base }}/databases/L26/FMG/gene_stats?genes=APOE,TREM2"</pre><button type="button" data-copy-api>Copy</button></div>
+    <p>Download a plot as a PNG. The plot endpoints take the same options as the plot builder on the dataset pages; the interactive docs list them for each plot type.</p>
+    <div class="cmd"><pre>curl -n -s -o apoe_violin.png "{{ api_base }}/databases/L26/FMG/plot/violin?x=ant_disease&amp;y=APOE&amp;sample=20000"</pre><button type="button" data-copy-api>Copy</button></div>
+    <p class="note">A <code>401</code> means the login was missing or wrong (check <code>~/.netrc</code> and the host name in it). A <code>403</code> means you are logged in but the endpoint needs rights you do not have.</p>
+  </section>
+
+  <section id="pyvark">
+    <h2 class="section-head">Python with pyvark</h2>
+    <p><a href="https://codeberg.org/mfiers/pyvark" target="_blank" rel="noopener">pyvark</a> is the Python client. The package is called <code>pyvark</code>, but you import it as <code>vark</code>.</p>
+    <div class="cmd"><pre>pip install pyvark            # or: uv add pyvark
+pip install "pyvark[pandas]"  # optional, for format='dataframe'</pre><button type="button" data-copy-api>Copy</button></div>
+    <p>Pass the API address and read the login from the environment variables above:</p>
+    <div class="cmd"><pre>import os
+from vark import AnthiveClient
+
+client = AnthiveClient(
+    "{{ api_base }}",
+    auth=(os.environ["ANTHIVE_USER"], os.environ["ANTHIVE_PASSWORD"]),
+)
+print(client.get_version()["version"])
+print(len(client.get_databases()), "datasets")
+print(client.get_gene_stats("L26/FMG", ["APOE", "TREM2"]))</pre><button type="button" data-copy-api>Copy</button></div>
+    <p>With a <code>~/.netrc</code> entry you can leave out <code>auth=</code> entirely: <code>AnthiveClient("{{ api_base }}")</code>.</p>
+    <p>If you already registered this site with vark, pyvark can reuse that password. Install the extra and again leave out <code>auth=</code>:</p>
+    <div class="cmd"><pre>pip install "pyvark[vark-config]"</pre><button type="button" data-copy-api>Copy</button></div>
+    <p>Notebooks opened from this site (the <em>notebook</em> button on a plot, or <a href="/jupyter/lab/index.html">JupyterLite</a>) run in your browser with pyvark preinstalled and need no setup.</p>
+  </section>
+
+  <section id="vark">
+    <h2 class="section-head">The vark command line</h2>
+    <p><a href="https://codeberg.org/mfiers/vark" target="_blank" rel="noopener">vark</a> is a single program for the terminal (Linux, macOS, Windows). The installer checks the release signature and puts <code>vark</code> on your path:</p>
+    <div class="cmd"><pre>curl -sSL https://codeberg.org/mfiers/vark/raw/branch/main/install.sh | bash</pre><button type="button" data-copy-api>Copy</button></div>
+    <p>Register this site once. vark asks for your password, checks that the server answers, and stores the password in your keyring:</p>
+    <div class="cmd"><pre>vark server login --name anthive --url {{ api_base }} --user {{ _who }}
+vark server ls
+vark server status</pre><button type="button" data-copy-api>Copy</button></div>
+    <p>vark can hold several anthive servers at once. Run <code>vark server login</code> again with another <code>--name</code> and <code>--url</code> to add one; listings and searches then cover every reachable server, and <code>--server NAME</code> limits a command to one of them.</p>
+    <div class="cmd"><pre>vark db ls
+vark gene-stats L26/FMG APOE
+vark plot L26/FMG --geom violin --x ant_disease --y APOE --out apoe.png</pre><button type="button" data-copy-api>Copy</button></div>
+    <p id="api-guide-papers">vark and pyvark can also download and upload library papers; see their documentation.</p>
+  </section>
+
+  <section id="permissions">
+    <h2 class="section-head">What needs admin rights, and limits</h2>
+    <p>Reading data is open to everyone who can log in: datasets, genes, plots, differential expression, gene sets, read-only SQL and the paper library. A few endpoints change the site or expose other people's data and answer <code>403</code> with a short JSON message unless you are an admin:</p>
+    <ul>
+      <li>editing collection and dataset descriptions and annotations, and the curation suggestions;</li>
+      <li>server control under <code>/api/admin/</code> (reloading the catalogue, cache rebuilds);</li>
+      <li>the list of every user's MCP links;</li>
+      <li>custom Python figures (<code>/analytics/viz</code>);</li>
+      <li>adding papers to the library, which is limited to the upload groups the site configures (admins by default).</li>
+    </ul>
+    <p>The API has no request rate limit of its own, but please do not hammer it: plots are cached, and one call per figure is plenty. These limits do apply:</p>
+    <div class="table-wrap"><table>
+      <tr><th>What</th><th>Limit</th></tr>
+      <tr><td>SQL on one dataset (<code>/databases/{id}/query/sql</code>)</td><td>SELECT only, at most 100,000 rows</td></tr>
+      <tr><td>Analytics queries (<code>/databases/{id}/analytics/query</code>)</td><td>SELECT only, at most 500,000 rows, stopped after 120 s by default</td></tr>
+      <tr><td>Custom Python figures (admins)</td><td>stopped after 60 s by default</td></tr>
+      <tr><td>Paper PDF upload</td><td>25 MB by default</td></tr>
+      <tr><td>Failed logins</td><td>5 within 2 minutes block the account for 10 minutes (default)</td></tr>
+    </table></div>
+  </section>
+
+  <section id="version">
+    <h2 class="section-head">Versions and changes</h2>
+    {% if api_version %}
+    <p>This server runs API version <code>{{ api_version }}</code>. The same number is on the small button in the top bar.</p>
+    {% else %}
+    <p>The API version could not be read just now; the button in the top bar shows it once the server answers.</p>
+    {% endif %}
+    <p><code>GET /api/version</code> returns the version together with the addresses of the OpenAPI description and the changelog, so a script can check whether it still matches the server. What changed between versions, and how to adapt, is in the changelog (<a href="/api/changelog" target="_blank" rel="noopener">on this server</a>, or <a href="{{ _docs }}/API_CHANGELOG.md" target="_blank" rel="noopener">on GitLab</a>). For the details of every endpoint and parameter, open the <a href="/api/docs" target="_blank" rel="noopener">interactive API docs</a>.</p>
+    <p class="note">More help on using the site is on the <a href="/help">help page</a>.</p>
+  </section>
+</div>
+
+<script>
+(function () {
+  // Copy buttons on command blocks.
+  document.querySelectorAll('.api-guide [data-copy-api]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var text = btn.parentElement.querySelector('pre').innerText;
+      var done = function () { btn.textContent = 'Copied'; setTimeout(function () { btn.textContent = 'Copy'; }, 1500); };
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(done, function () {});
+      } else {
+        var ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta);
+        ta.select(); try { document.execCommand('copy'); done(); } catch (e) {} document.body.removeChild(ta);
+      }
+    });
+  });
+})();
+</script>
+{% endblock %}

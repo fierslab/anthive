@@ -3046,6 +3046,68 @@ async def help_view(request: Request):
     })
 
 
+def _api_guide_site_settings() -> Dict[str, Any]:
+    """Login mode and configured public base URL for the API page.
+
+    Read per render (cheap; tests and sites without a config fall back to
+    the defaults). mode None means "not declared", which behaves like
+    authelia/basic: the proxy asks for HTTP basic on /api.
+    """
+    try:
+        from config import get_auth_settings, load_config  # noqa: PLC0415
+        cfg = load_config()
+        mode = get_auth_settings(cfg)['mode']
+        public = str(((cfg.get('mcp') or {}).get('public_base_url')) or '').strip()
+    except Exception:  # config unavailable (tests import this module bare)
+        mode, public = None, ''
+    return {'mode': mode, 'public_base_url': public.rstrip('/')}
+
+
+def _site_base_url(request: Request, configured: str = '') -> str:
+    """Public https base URL of this site, for copy-pasteable examples.
+
+    The configured public URL wins. Otherwise the host the browser used
+    (X-Forwarded-Host, then Host). The scheme is always https: the API
+    sends a password with every request, so the examples never show http.
+    """
+    if configured:
+        return configured
+    host = (request.headers.get('x-forwarded-host') or request.headers.get('host')
+            or 'localhost').split(',')[0].strip()
+    return f"https://{host}"
+
+
+@router.get("/api-guide", response_class=HTMLResponse)
+async def api_guide_view(request: Request):
+    """How to use the REST API: login, first curl calls, pyvark, vark.
+
+    The top-bar 'API' link and the user-menu 'API' entry land here; the page
+    links on to the interactive docs (/api/docs). Examples are rendered with
+    this site's own base URL and the signed-in user's name. The API version
+    is best-effort (the page renders without it).
+    """
+    settings = _api_guide_site_settings()
+    base_url = _site_base_url(request, settings['public_base_url'])
+    api_version: Optional[str] = None
+    api_released: Optional[str] = None
+    try:
+        version_payload = _api_get(_api_url(request), '/version') or {}
+        api_version = version_payload.get('version') or None
+        api_released = version_payload.get('released') or None
+    except Exception as error:
+        print(f"API error (api guide version): {error}")
+    host = base_url.split('://', 1)[-1].split('/', 1)[0].split(':', 1)[0]
+    return templates.TemplateResponse(request, "api_guide.html", {
+        "base_url": base_url,
+        "api_base": base_url + "/api",
+        "netrc_host": host,
+        "user": request.headers.get('remote-user') or '',
+        "auth_mode": settings['mode'],
+        "api_version": api_version,
+        "api_released": api_released,
+    })
+
+
 @router.get("/settings", response_class=HTMLResponse)
 async def settings_view(request: Request):
     """User-preferences page (per-browser, localStorage-only).
