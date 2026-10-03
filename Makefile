@@ -72,7 +72,7 @@ TEST_DEPS = --with pytest --with duckdb --with pyyaml --with numpy \
             --with pandas --with pyarrow --with h5py --with scipy \
             --with fastapi --with httpx --with jinja2 \
             --with markdown --with requests --with anndata --with bcrypt \
-            --with 'bibtexparser>=1.4,<2' --with python-multipart
+            --with 'bibtexparser>=1.4,<2' --with python-multipart --with tqdm --with boto3
 
 test:
 	uv run $(TEST_DEPS) env PYTHONPATH=lib python -m pytest tests/ -v

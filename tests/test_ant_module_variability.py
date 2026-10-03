@@ -49,6 +49,8 @@ def _load_amv():
     )
     assert spec is not None
     module = importlib.util.module_from_spec(spec)
+    # dataclasses looks the module up in sys.modules while the class body runs.
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)  # type: ignore[union-attr]
     return module
 
