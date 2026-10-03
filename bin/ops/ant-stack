@@ -745,6 +745,17 @@ def run_compose(site: dict, *args: str, check: bool = True) -> int:
 
 # ── checks ───────────────────────────────────────────────────────────────
 
+def _site_is_up(site: dict) -> bool:
+    """True when containers of this site's compose project are running."""
+    try:
+        result = subprocess.run(
+            ['docker', 'ps', '-q', '--filter', f"label=com.docker.compose.project={site['site']['name']}"],
+            capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
 def _port_free(bind: str, port: int) -> bool:
     family = socket.AF_INET6 if ':' in bind else socket.AF_INET
     with socket.socket(family, socket.SOCK_STREAM) as sock:
@@ -1008,12 +1019,16 @@ def check(site: dict, running: bool = False) -> list[str]:
     _check_publish_library(site)
     if site['_scratch'] and not site['_scratch'].is_dir():
         problems.append(f"scratch_dir {site['_scratch']} does not exist")
+    if not running and _site_is_up(site):
+        _say("the site's own containers are running: skipping the free-port check")
+        running = True
     if not running:
         _listen, ports, _ = _listen_and_ports(site)
         for spec in ports:
             bind, host_port, _container = spec.rsplit(':', 2)
             if not _port_free(bind, int(host_port)):
-                problems.append(f"host port {bind}:{host_port} is already in use")
+                problems.append(f"host port {bind}:{host_port} is already in use "
+                                "(by another program; if it is this site, use `check --running`)")
     for which in ('app', 'ingest'):
         ref = image_ref(site, which)
         result = subprocess.run(['docker', 'image', 'inspect', ref], capture_output=True)
@@ -1268,6 +1283,13 @@ def _acquire_lock(path: Path, timeout: float):
             time.sleep(1)
 
 
+def _git_output(result: subprocess.CompletedProcess) -> str:
+    """All of git's output, indented: the cause (Permission denied
+    (publickey), Host key verification failed) is rarely the last line."""
+    text = ((result.stderr or '') + (result.stdout or '')).strip() or '(no output)'
+    return '\n'.join('    ' + line for line in text.splitlines())
+
+
 def cmd_publish_library(args: argparse.Namespace) -> int:
     """Host-side publishing of the paper library: git pull --rebase and push
     the records with the site's deploy key, then sync the PDFs (and the
@@ -1293,21 +1315,29 @@ def cmd_publish_library(args: argparse.Namespace) -> int:
     try:
         _say(f"locked {library_lock_path(library)}")
         if args.dry_run:
+            s3_step = (not args.no_s3) and site['s3'].get('enabled')
             _say(f"dry run: would git pull --rebase{'' if args.no_push else ' and git push'} in {library}"
-                 + ('' if args.no_s3 else ', then `ant sync library --no-git --dry-run`'))
+                 + (', then `ant sync library --no-git --dry-run`' if s3_step else ''))
+            # Contact the remote with the deploy key, so the dry run proves
+            # the key, the host key and the remote URL actually work.
+            probe = _git(library, env, 'ls-remote', '--heads', 'origin')
+            if probe.returncode != 0:
+                errors += 1
+                _warn("cannot reach the library remote with this key:\n" + _git_output(probe))
+            else:
+                _say("remote: reachable with this key")
         pulled = _git(library, env, 'pull', '--rebase', '--autostash') if not args.dry_run else None
         if pulled is not None and pulled.returncode != 0:
             _git(library, env, 'rebase', '--abort')
             errors += 1
-            _warn("git pull --rebase failed, nothing pushed: "
-                  + ((pulled.stderr or pulled.stdout).strip().splitlines() or ['?'])[-1])
+            _warn("git pull --rebase failed, nothing pushed:\n" + _git_output(pulled))
         elif pulled is not None:
             _say("records: pulled")
             if not args.no_push:
                 pushed = _git(library, env, 'push')
                 if pushed.returncode != 0:
                     errors += 1
-                    _warn("git push failed: " + ((pushed.stderr or pushed.stdout).strip().splitlines() or ['?'])[-1])
+                    _warn("git push failed:\n" + _git_output(pushed))
                 else:
                     _say("records: pushed")
         if args.no_s3:
@@ -1325,6 +1355,17 @@ def cmd_publish_library(args: argparse.Namespace) -> int:
     finally:
         handle.close()
     return 1 if errors else 0
+
+
+def image_pathspec() -> list[str]:
+    """`git archive` pathspec for an image build context: the whole tree
+    minus docker/image-excludes (reports, tests, audits), as the Makefile does."""
+    spec = ['.']
+    for line in (REPO / 'docker' / 'image-excludes').read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith('#'):
+            spec.append(f':(exclude,glob){line}')
+    return spec
 
 
 def cmd_build(args: argparse.Namespace) -> int:
@@ -1346,8 +1387,8 @@ def cmd_build(args: argparse.Namespace) -> int:
         if args.pull:
             command.insert(2, '--pull')
         _say('git archive HEAD | ' + ' '.join(command))
-        archive = subprocess.Popen(['git', 'archive', '--format=tar', 'HEAD'], cwd=REPO,
-                                   stdout=subprocess.PIPE)
+        archive = subprocess.Popen(['git', 'archive', '--format=tar', 'HEAD', '--', *image_pathspec()],
+                                   cwd=REPO, stdout=subprocess.PIPE)
         result = subprocess.run(command, cwd=REPO, stdin=archive.stdout)
         archive.stdout.close()
         if archive.wait() != 0 or result.returncode != 0:

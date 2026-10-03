@@ -364,7 +364,10 @@ This is the recommended setup. Do it once:
    (`git -C /srv/anthive/library remote -v` shows `git@gitlab...`) and that
    the host key is known: `ssh-keyscan gitlab.kuleuven.be >> ~/.ssh/known_hosts`.
 4. Set `library.deploy_key` in `site.yaml` (above), then try it by hand:
-   `bin/ops/ant-stack publish-library --dry-run`, then without `--dry-run`.
+   `bin/ops/ant-stack publish-library --dry-run` contacts the remote with
+   the key and says "remote: reachable with this key", or prints git's full
+   error (a wrong key gives "Permission denied (publickey)", an unknown host
+   "Host key verification failed"). Then run it without `--dry-run`.
 5. Run it every 15 minutes. With systemd, fill in and install the two
    templates `config/examples/anthive-publish-library.{service,timer}.example`
    (instructions inside); with cron, use
@@ -498,7 +501,9 @@ catalogue from git.
 | `check`: index built with another model | the index and the image use different embedding models | literature search still works by keyword; rebuild the index with `ant lib-index --full` or use the matching release |
 | literature search finds nothing in one paper | its PDF has no text layer (a scan) | the index build lists these; rebuild that paper with `ant lib-index --parser docling` (OCR) on a machine with the ingest image |
 | upload returns 403 | the user is not in `library.upload_groups` (basic mode: not in `auth.admins`) | add the group or the user, `ant-stack init` |
-| upload returns 500 "cannot write to the library" | `services.paper_upload` is off (library mounted read-only) or the checkout is not writable by the site uid | set `services.paper_upload: true` and fix ownership, `ant-stack check`, `ant-stack up` |
+| upload returns 503 with status `disabled` | `services.paper_upload` is off (library mounted read-only) or the checkout is not writable by the site uid | set `services.paper_upload: true` and fix ownership, `ant-stack check`, `ant-stack up` |
+| `check` says "host port ... is already in use" on a running site | another program holds the port (`check` skips this test when the site's own containers are up) | find it with `ss -ltnp`, or run `ant-stack check --running` |
+| `ant sync pull` says "s3.bucket is not set" | S3 is off for this site | set `s3.enabled: true` and put the keys in `<state_dir>/secrets` (see "S3"), or copy the data by hand |
 | upload warns "not a git repository" | `data.library` is a plain folder | clone the library repo there; the uploaded files are kept |
 | upload warns "git push failed" | no remote, or the container cannot authenticate | leave `library.git_push: false` and use `ant-stack publish-library` (see "Let people add papers") |
 | Authelia log: "has an insecure scheme 'http'" | `tls.mode: off` behind a proxy, and Caddy did not believe the proxy's `X-Forwarded-Proto` | check `tls.trusted_proxies` (default `private_ranges`) and that the proxy sends `X-Forwarded-Proto https`; release 2.41.0 or newer |

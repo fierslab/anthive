@@ -33,6 +33,7 @@ Nothing here talks HTTP; ant-serve and the tests call ``upload_paper``.
 from __future__ import annotations
 
 import contextlib
+import datetime
 import fcntl
 import hashlib
 import json
@@ -221,8 +222,20 @@ def parse_metadata(metadata: Any) -> Tuple[Dict[str, Any], str]:
     return dict(fields), body.strip()
 
 
+def _plain_dates(value: Any) -> Any:
+    """YAML reads an unquoted ``date: 2026-10-03`` as a date object; keep
+    ISO strings so the record, the git commit and the JSON answer agree."""
+    if isinstance(value, (datetime.date, datetime.datetime)):
+        return value.isoformat()
+    if isinstance(value, list):
+        return [_plain_dates(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _plain_dates(v) for k, v in value.items()}
+    return value
+
+
 def _normalise(fields: Dict[str, Any]) -> Dict[str, Any]:
-    out = {k: v for k, v in fields.items() if v not in (None, '', [], {})}
+    out = {k: _plain_dates(v) for k, v in fields.items() if v not in (None, '', [], {})}
     if 'entrytype' in out:
         out['entrytype'] = str(out['entrytype']).strip().lower().lstrip('@')
     if 'journal' in out and 'journaltitle' not in out:

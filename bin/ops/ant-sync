@@ -1393,7 +1393,7 @@ def main() -> None:
     bucket      = s3_cfg.get('bucket')
 
     if not bucket:
-        print('Error: s3.bucket is not set in anthive.yaml', file=sys.stderr)
+        print('Error: s3.bucket is not set in anthive.yaml (on a container site: S3 is off, see s3.enabled in site.yaml)', file=sys.stderr)
         sys.exit(1)
     if not s3_cfg.get('access_key_id'):
         print('Error: s3.access_key_id is not set in anthive.yaml', file=sys.stderr)

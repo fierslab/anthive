@@ -524,3 +524,26 @@ def test_publish_library_runs_s3_sync_in_ingest(tmp_path, ant_stack, library_rep
     assert code == 0
     assert seen and seen[0][-4:] == ('ant', 'sync', 'library', '--no-git')
     assert 'ingest' in seen[0]
+
+
+def test_publish_library_dry_run_probes_the_remote(tmp_path, ant_stack, library_repo, capsys):
+    library, _remote = library_repo
+    path = _write_site(tmp_path, data={'h5adstore': str(tmp_path / 'store'), 'library': str(library)})
+    code = ant_stack.cmd_publish_library(argparse.Namespace(
+        site=str(path), no_push=False, no_s3=False, dry_run=True, lock_timeout=5))
+    output = capsys.readouterr()
+    assert code == 0
+    assert 'remote: reachable' in output.out + output.err
+    assert 'ant sync library' not in output.out + output.err      # S3 is off on this site
+
+
+def test_publish_library_shows_all_of_gits_error(tmp_path, ant_stack, library_repo, capsys):
+    library, _remote = library_repo
+    _git('remote', 'set-url', 'origin', str(tmp_path / 'missing.git'), cwd=library)
+    path = _write_site(tmp_path, data={'h5adstore': str(tmp_path / 'store'), 'library': str(library)})
+    code = ant_stack.cmd_publish_library(argparse.Namespace(
+        site=str(path), no_push=False, no_s3=True, dry_run=False, lock_timeout=5))
+    output = capsys.readouterr()
+    assert code == 1
+    text = output.out + output.err
+    assert 'missing.git' in text and 'does not appear to be a git repository' in text

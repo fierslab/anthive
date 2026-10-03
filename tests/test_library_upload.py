@@ -848,3 +848,18 @@ def test_ant_stack_mounts_and_keys(tmp_path):
         cfg = stack.render_anthive_yaml(site_cfg)
         assert cfg['library_upload_groups'] == ['admins', 'curators'] and cfg['library_git_push'] is True
         assert cfg['library_index_publisher'] is False and cfg['mcp']['max_upload_mb'] == 25
+
+
+def test_endpoint_md_record_with_unquoted_date(tmp_path, monkeypatch):
+    """YAML turns `date: 2026-10-03` into a date object; dry run and upload
+    must still answer with JSON (a 500 came after the commit in 2.41.0 rc)."""
+    lib = make_library(tmp_path)
+    client, after = _serve_app(tmp_path, monkeypatch, lib)
+    text = ("---\nentrytype: report\ntype: project proposal\ntitle: A dated proposal\n"
+            "author:\n- Doe, Jane\ndate: 2026-10-03\ninstitution: KU Leuven\n---\n")
+    dry = client.post('/papers/upload', data={'metadata': text, 'dry_run': 'true'}, headers=ADMIN)
+    assert dry.status_code == 200, dry.text
+    created = client.post('/papers/upload', data={'metadata': text}, headers=ADMIN)
+    assert created.status_code == 201, created.text
+    paper = parse_sidecar(lib / created.json()['path'])
+    assert str(paper.fields['date']) == '2026-10-03'
