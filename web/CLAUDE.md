@@ -81,6 +81,7 @@ line-art logo (grayscale+alpha PNG), so it's shown on a dark hero panel.
 | `/admin/feedback` | chat-feedback triage (admin) | `admin_feedback.html` |
 | `/account/mcp` | the signed-in user's named MCP links: add (with label) / show / copy / rotate / revoke each, client setup snippets for a chosen link; admins also get the "All users' links" section (`#all`). 401 without `Remote-User` | `account_mcp.html` |
 | `/admin/mcp-links` | 307 redirect to `/account/mcp#all` | none |
+| `/api-guide` | how to use the REST API: login (basic auth on /api, netrc, env vars), curl first steps, pyvark, vark, admin-only endpoints and limits, API version; links on to `/api/docs`. Target of the top-bar `API` link (`#topbar-api-link`) and the user-menu entry (`#api-menu-link`). Examples use `mcp.public_base_url` or the request host, always https; text adapts to `auth.mode` | `api_guide.html` |
 | `/papers/{citekey}` | one library paper: record, summary/topics (draft markers), linked datasets grouped by role with the reason, related papers grouped by kind with evidence, PDF + BibTeX | `paper.html` |
 | `/library` | all library papers, client-side search + role/year/cohort/cell-type filters | `library.html` |
 
