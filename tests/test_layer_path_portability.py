@@ -456,3 +456,25 @@ def test_pseudobulk_groups_and_filters_on_public_column_names(renamed_obs_store,
     expected = frame.groupby(['gene_name', 'cell_type'])['value'].sum()
     for (gene, cell_type), total in expected.items():
         assert int(table.loc[gene, cell_type]) == int(total)
+
+
+@pytest.fixture
+def ant_sex_store(moved_store):
+    """Expose a canonical ``ant_sex`` column so ``sex`` aliases to it."""
+    con = duckdb.connect(str(moved_store['db']))
+    con.execute("CREATE OR REPLACE VIEW obscat AS "
+                "SELECT c.cell_name, o.cell_type, o.ant_group AS ant_sex "
+                "FROM __obscat o JOIN __cells c USING (cell_id)")
+    con.close()
+    return moved_store
+
+
+def test_deprecated_alias_header_survives_the_plot_cache(ant_sex_store, serve_client):
+    serve_client, db_id = serve_client
+    params = {'x': 'sex', 'y': 'APOE', 'format': 'png'}
+    first = serve_client.get(f'/databases/{db_id}/plot/violin', params=params)
+    second = serve_client.get(f'/databases/{db_id}/plot/violin', params=params)
+    assert first.status_code == 200 and second.status_code == 200, first.text[:300]
+    assert second.headers.get('X-Plot-Cache') == 'HIT'
+    for response in (first, second):
+        assert 'ant_sex' in response.headers.get('X-Anthive-Deprecated-Alias', '')

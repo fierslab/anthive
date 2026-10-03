@@ -310,8 +310,9 @@ def test_real_mancuso_2024():
     assert ann.get('technology') == '10x_chromium'
     assert ann.get('suspension_type') == 'cell'
     assert ann.get('access') == 'public'  # sidecar overrides cascade default
-    assert 'brain' in (ann.get('tissue') if isinstance(ann.get('tissue'), list)
-                       else [ann.get('tissue')])
+    # The curated tissue was refined from 'brain' to 'cortex' in the store.
+    tissues = ann.get('tissue') if isinstance(ann.get('tissue'), list) else [ann.get('tissue')]
+    assert {'brain', 'cortex'} & set(tissues), tissues
 
 
 @pytest.mark.skipif(not H5ADSTORE.exists(), reason='no local h5adstore')

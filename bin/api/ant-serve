@@ -7676,6 +7676,9 @@ async def _render_plot(plot_req: PlotRequest, request: Request) -> Response:
         }
         if cached_truncated:
             headers['X-Plot-Filename-Truncated'] = 'true'
+        # A cache hit must warn about deprecated aliases just like the miss did.
+        if cached.get('alias_notices'):
+            headers['X-Anthive-Deprecated-Alias'] = ', '.join(cached['alias_notices'])
         if plot_req.output_format in _PLOT_DATA_FORMATS:
             headers['Content-Disposition'] = (
                 f'attachment; filename="{cached_filename}.{_ext_for_format(plot_req.output_format)}"'
@@ -7760,6 +7763,7 @@ async def _render_plot(plot_req: PlotRequest, request: Request) -> Response:
         'filename_truncated': truncated,
         'source_url':         plot_req.source_url,
         'mime':               mime,
+        'alias_notices':      list(alias_notices),
     })
     # Starlette runs BackgroundTask after the response has been sent — the
     # client doesn't wait on the trim.  Sync target is run in a threadpool,
