@@ -3054,13 +3054,38 @@ def _api_guide_site_settings() -> Dict[str, Any]:
     authelia/basic: the proxy asks for HTTP basic on /api.
     """
     try:
-        from config import get_auth_settings, load_config  # noqa: PLC0415
+        from config import (get_auth_settings, get_library_upload_settings,  # noqa: PLC0415
+                            load_config)
         cfg = load_config()
-        mode = get_auth_settings(cfg)['mode']
+        auth = get_auth_settings(cfg)
+        mode, admins = auth['mode'], set(auth['admins'])
+        upload = get_library_upload_settings(cfg)
+        upload_groups, max_pdf_mb = list(upload['upload_groups']), int(upload['max_pdf_mb'])
         public = str(((cfg.get('mcp') or {}).get('public_base_url')) or '').strip()
     except Exception:  # config unavailable (tests import this module bare)
-        mode, public = None, ''
-    return {'mode': mode, 'public_base_url': public.rstrip('/')}
+        mode, admins, upload_groups, max_pdf_mb, public = None, set(), ['admins'], 25, ''
+    return {'mode': mode, 'public_base_url': public.rstrip('/'), 'admins': admins,
+            'upload_groups': upload_groups, 'max_pdf_mb': max_pdf_mb}
+
+
+def _may_upload_papers(request: Request, settings: Dict[str, Any]) -> bool:
+    """Whether the caller may add papers to the library.
+
+    Mirrors ant-serve's ``_require_uploader`` (which stays authoritative):
+    a signed-in user in one of ``library_upload_groups``, or, when admins
+    may upload, an admin by group or (basic mode, no groups) by name in
+    ``auth.admins``. Only decides whether the page SHOWS upload commands.
+    """
+    user = request.headers.get('remote-user') or ''
+    if settings['mode'] == 'none' or not user:
+        return False
+    raw_groups = request.headers.get('remote-groups') or ''
+    groups = {g.strip().lower() for g in raw_groups.split(',') if g.strip()}
+    allowed = set(settings['upload_groups'])
+    if groups & allowed:
+        return True
+    return ('admins' in allowed and settings['mode'] == 'basic' and not raw_groups
+            and user in settings['admins'])
 
 
 def _site_base_url(request: Request, configured: str = '') -> str:
@@ -3105,6 +3130,9 @@ async def api_guide_view(request: Request):
         "auth_mode": settings['mode'],
         "api_version": api_version,
         "api_released": api_released,
+        "may_upload_papers": _may_upload_papers(request, settings),
+        "upload_groups": settings['upload_groups'],
+        "max_pdf_mb": settings['max_pdf_mb'],
     })
 
 

@@ -62,6 +62,7 @@
       <li><a href="#first-steps">First steps with curl</a></li>
       <li><a href="#pyvark">Python with pyvark</a></li>
       <li><a href="#vark">The vark command line</a></li>
+      <li><a href="#papers">Library papers</a></li>
       <li><a href="#permissions">What needs admin rights, and limits</a></li>
       <li><a href="#version">Versions and changes</a></li>
     </ol>
@@ -154,7 +155,53 @@ vark server status</pre><button type="button" data-copy-api>Copy</button></div>
     <div class="cmd"><pre>vark db ls
 vark gene-stats L26/FMG APOE
 vark plot L26/FMG --geom violin --x ant_disease --y APOE --out apoe.png</pre><button type="button" data-copy-api>Copy</button></div>
-    <p id="api-guide-papers">vark and pyvark can also download and upload library papers; see their documentation.</p>
+  </section>
+
+  <section id="papers">
+    <h2 class="section-head">Library papers</h2>
+    <p id="api-guide-papers">Everyone who can log in can read the <a href="/library">paper library</a>: list and search the papers, download their PDFs and BibTeX, search their full text, and see which papers belong to a dataset. These commands need vark 0.0.18 or pyvark 0.7.0 or newer. <em>CITEKEY</em> stands for a paper's key, shown on its page.</p>
+    <h3 class="subsection-head">With vark</h3>
+    <div class="cmd"><pre>vark papers ls --role source --year 2020..2025
+vark papers ls --celltype microglia --disease "Alzheimer" -q TREM2
+vark papers show CITEKEY
+vark papers pdf CITEKEY --dir papers/
+vark papers bib --out library.bib
+vark literature "lipid droplet accumulating microglia" -k 5 --section methods
+vark db papers L26/FMG</pre><button type="button" data-copy-api>Copy</button></div>
+    <p><code>vark papers ls</code> also filters by <code>--author</code>. <code>vark papers bib</code> without a citekey writes the whole library; with citekeys only those entries. <code>vark papers pdf</code> takes several citekeys at once.</p>
+    <h3 class="subsection-head">With pyvark</h3>
+    <div class="cmd"><pre>papers = client.list_papers(role="source", q="TREM2")
+paper = client.get_paper("CITEKEY")
+client.download_paper_pdf("CITEKEY", dest="papers/")
+with open("library.bib", "w") as handle:
+    handle.write(client.get_library_bibtex())
+hits = client.search_literature("lipid droplet accumulating microglia", k=10)
+linked = client.get_database_papers("L26/FMG")</pre><button type="button" data-copy-api>Copy</button></div>
+
+    <h3 class="subsection-head" id="papers-upload">Adding papers</h3>
+    {% if may_upload_papers %}
+    <p id="api-guide-upload">You may add papers on this site. A paper is a <code>.md</code> record with YAML front matter plus, optionally, its PDF (at most {{ max_pdf_mb }} MB). The server checks the record, fills empty fields from CrossRef and OpenAlex, refuses duplicates and commits the paper with you as author. Check what a record needs first, and try a dry run:</p>
+    <div class="cmd"><pre>vark server check {{ base_url }} -o json
+vark papers requirements --server anthive
+vark papers upload --metadata paper.md --pdf paper.pdf --server anthive --dry-run
+vark papers upload --metadata paper.md --pdf paper.pdf --server anthive</pre><button type="button" data-copy-api>Copy</button></div>
+    <p>For many papers, put <code>name.md</code> and <code>name.pdf</code> pairs in one folder, or list them in a CSV manifest:</p>
+    <div class="cmd"><pre>vark papers upload ./papers/ --server anthive
+vark papers upload --manifest papers.csv --server anthive</pre><button type="button" data-copy-api>Copy</button></div>
+    <p>The same from Python:</p>
+    <div class="cmd"><pre>from pathlib import Path
+from vark import AnthiveClient
+from vark.exceptions import PaperUploadDisabledError, PaperUploadForbiddenError
+
+print(client.get_paper_upload_requirements())
+result = client.upload_paper(Path("paper.md"), pdf="paper.pdf", dry_run=True)
+results = client.upload_papers(AnthiveClient.paper_items_from_folder("papers/"))</pre><button type="button" data-copy-api>Copy</button></div>
+    <p><code>PaperUploadForbiddenError</code> (403) means your account may not upload; <code>PaperUploadDisabledError</code> (503) means this site does not accept uploads at the moment. With curl, the record goes in the <code>metadata</code> field and the PDF in <code>file</code>:</p>
+    <div class="cmd"><pre>curl -n -s -F "metadata=&lt;paper.md" -F "file=@paper.pdf" -F dry_run=true {{ api_base }}/papers/upload</pre><button type="button" data-copy-api>Copy</button></div>
+    <p class="note">Upload large PDFs with vark, pyvark or curl, not through an AI assistant's MCP upload tool: the assistant has to pass the whole file through the conversation, and messages have size limits.</p>
+    {% else %}
+    <p id="api-guide-upload-restricted">Adding papers is limited to members of {% if upload_groups %}the {{ upload_groups | join(', ') }} group{% if upload_groups | length > 1 %}s{% endif %}{% else %}no group (uploads are off){% endif %} on this site. If you should be able to add papers, ask the people running it; once you may, this section shows the upload commands for vark, pyvark and curl.</p>
+    {% endif %}
   </section>
 
   <section id="permissions">
@@ -165,7 +212,7 @@ vark plot L26/FMG --geom violin --x ant_disease --y APOE --out apoe.png</pre><bu
       <li>server control under <code>/api/admin/</code> (reloading the catalogue, cache rebuilds);</li>
       <li>the list of every user's MCP links;</li>
       <li>custom Python figures (<code>/analytics/viz</code>);</li>
-      <li>adding papers to the library, which is limited to the upload groups the site configures (admins by default).</li>
+      <li>adding papers to the library, which is limited to the upload groups the site configures (admins by default; see <a href="#papers-upload">adding papers</a>).</li>
     </ul>
     <p>The API has no request rate limit of its own, but please do not hammer it: plots are cached, and one call per figure is plenty. These limits do apply:</p>
     <div class="table-wrap"><table>
@@ -173,7 +220,7 @@ vark plot L26/FMG --geom violin --x ant_disease --y APOE --out apoe.png</pre><bu
       <tr><td>SQL on one dataset (<code>/databases/{id}/query/sql</code>)</td><td>SELECT only, at most 100,000 rows</td></tr>
       <tr><td>Analytics queries (<code>/databases/{id}/analytics/query</code>)</td><td>SELECT only, at most 500,000 rows, stopped after 120 s by default</td></tr>
       <tr><td>Custom Python figures (admins)</td><td>stopped after 60 s by default</td></tr>
-      <tr><td>Paper PDF upload</td><td>25 MB by default</td></tr>
+      <tr><td>Paper PDF upload</td><td>{{ max_pdf_mb }} MB on this site</td></tr>
       <tr><td>Failed logins</td><td>5 within 2 minutes block the account for 10 minutes (default)</td></tr>
     </table></div>
   </section>
