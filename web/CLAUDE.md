@@ -79,7 +79,7 @@ line-art logo (grayscale+alpha PNG), so it's shown on a dark hero panel.
 | `/privacy` | chat data-handling note (draft) | `privacy.html` |
 | `/admin/edit/{group}` · `/admin/edit/{group}/{file}` | index.md · dataset .md/.mus editors (admin) | `edit_*.html` |
 | `/admin/feedback` | chat-feedback triage (admin) | `admin_feedback.html` |
-| `/account/mcp` | the signed-in user's named MCP links: add (with label) / show / copy / rotate / revoke each, client setup snippets for a chosen link; admins also get the "All users' links" section (`#all`). 401 without `Remote-User` | `account_mcp.html` |
+| `/account/mcp` | the signed-in user's named MCP links: add (with label) / show / copy / rotate / revoke each, the "Set up with one paste" agent prompt (`#mcp-paste`), client setup snippets for a chosen link; admins also get the "All users' links" section (`#all`). 401 without `Remote-User` | `account_mcp.html` |
 | `/admin/mcp-links` | 307 redirect to `/account/mcp#all` | none |
 | `/api-guide` | how to use the REST API: login (basic auth on /api, netrc, env vars), curl first steps, pyvark, vark, admin-only endpoints and limits, API version; links on to `/api/docs`. Target of the top-bar `API` link (`#topbar-api-link`) and the user-menu entry (`#api-menu-link`). Examples use `mcp.public_base_url` or the request host, always https; text adapts to `auth.mode` | `api_guide.html` |
 | `/papers/{citekey}` | one library paper: record, summary/topics (draft markers), linked datasets grouped by role with the reason, related papers grouped by kind with evidence, PDF + BibTeX | `paper.html` |
@@ -112,6 +112,19 @@ hidden until `/api/me/mcp` reports `enabled:true`; its label is "Connect an
 MCP client" with no links and "MCP links" once the user has one. URLs and
 snippets are masked by default; Copy always copies the real text. Rotate
 and Revoke confirm first because the old URL dies immediately.
+
+**One-paste setup prompt (`#mcp-paste`).** `_mcp_setup_prompt()` in
+browser.py builds a numbered, plain-language prompt for an agent with a
+shell (Claude Code, Codex, Gemini CLI, OpenCode, Cursor, ...): explain and
+ask for OK, add the MCP connection at user scope, install the skills with
+`npx skills`, optionally install vark (the user runs `vark server login`
+in their own terminal), check, summarise. Safety rules (link only in
+user-level config, never echoed in full, never ask for the password, stop
+on failure) come first. The route renders it with
+`MCP_PROMPT_LINK_PLACEHOLDER`; the JS swaps in the chosen link, so the
+secret never sits in the HTML. Connection name per site from
+`_mcp_connection_name()` (`anthive-<first host label>`); site URL from
+`_site_base_url()` (`mcp.public_base_url` or request host).
 
 **User menu (base.html).** Opens on hover, focus, or click/tap
 (`#user-menu-toggle`, `.dropdown.open`), closes on outside click or Escape.

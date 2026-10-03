@@ -5865,6 +5865,88 @@ def test_account_mcp_renders_controls_when_signed_in(client):
     assert "not enabled on this deployment" in text
 
 
+_FAKE_MCP_LINK = "https://anthive.example.org/mcp/u/amcp_SECRETTOKEN123"
+
+
+def _setup_prompt(link=_FAKE_MCP_LINK):
+    return browser._mcp_setup_prompt(
+        link, "anthive-example", "https://anthive.example.org",
+        "https://anthive.example.org/api", "mf",
+        "https://gitlab.kuleuven.be/bdslab/anthive/anthive4/-/blob/main/doc")
+
+
+def test_mcp_setup_prompt_fills_in_link_and_commands():
+    prompt = _setup_prompt()
+    # The link goes into every client command, with the per-site name and user scope.
+    assert f"claude mcp add --transport http --scope user anthive-example {_FAKE_MCP_LINK}" in prompt
+    assert f"codex mcp add anthive-example --url {_FAKE_MCP_LINK}" in prompt
+    assert f"gemini mcp add --scope user --transport http anthive-example {_FAKE_MCP_LINK}" in prompt
+    assert "doc/MCP_CLIENTS.md" in prompt
+    # Skills, optional vark (login typed by the user), checks.
+    assert ("DISABLE_TELEMETRY=1 npx skills add https://gitlab.kuleuven.be/bdslab/anthive/skills.git"
+            " -g --agent '*'") in prompt
+    assert "curl -sSL https://gitlab.kuleuven.be/bdslab/anthive/vark/-/raw/main/install.sh | bash" in prompt
+    assert ("vark server login --name anthive-example --url https://anthive.example.org/api"
+            " --user mf") in prompt
+    assert "vark server check anthive-example -o json" in prompt
+    assert "Do not run the login yourself" in prompt
+    # Safety rules and the ask-first / stop-on-failure behaviour.
+    assert "works like my password" in prompt
+    assert "Never write it into a project folder, a git repository" in prompt
+    assert "Never repeat the link in full" in prompt
+    assert "Never ask me for my Anthive password" in prompt
+    assert "wait for my OK" in prompt
+    assert "If a step fails, stop." in prompt
+    # The masked example shows only the non-secret start.
+    assert "https://anthive.example.org/mcp/u/..." in prompt
+    assert prompt.count("SECRETTOKEN") == 4  # the fact line plus the three commands
+    assert "\u2014" not in prompt and "—" not in prompt
+
+
+def test_mcp_connection_name_from_site_host():
+    name = browser._mcp_connection_name
+    assert name("https://intern.anthive.example.org") == "anthive-intern"
+    assert name("https://anthive.bdslab.kuleuven.be") == "anthive-bdslab"
+    assert name("https://www.example.org/") == "anthive-example"
+    assert name("https://localhost:8501") == "anthive-localhost"
+    assert name("https://10.0.0.5:8443") == "anthive"
+    assert name("https://anthive-public.example.org") == "anthive-public"
+    assert name("https://anthive") == "anthive"
+
+
+def test_account_mcp_setup_prompt_section(client):
+    text = client.get("/account/mcp", headers={"Remote-User": "mf",
+                                              "Host": "intern.example.org"}).text
+    for marker in ('id="mcp-paste"', 'id="mcp-paste-copy"', 'id="mcp-paste-prompt"',
+                   'id="mcp-paste-warn"', 'id="mcp-paste-nolink"', 'id="mcp-paste-desktop-note"'):
+        assert marker in text, marker
+    # Beginner explanation, the Claude Desktop caveat, the don't-share warning.
+    assert "Claude Desktop and claude.ai cannot run commands" in text
+    assert 'href="/help#ai"' in text
+    assert "Do not share it" in text
+    assert "<code>anthive-intern</code>" in text
+    # The page carries the prompt with a placeholder only; JS swaps in the
+    # chosen link, so no secret is ever in the HTML.
+    placeholder = browser.MCP_PROMPT_LINK_PLACEHOLDER
+    assert placeholder in text
+    assert "amcp_" not in text
+    assert "promptTemplate.split(PROMPT_PLACEHOLDER).join(link.url)" in text
+    assert "npx skills add https://gitlab.kuleuven.be/bdslab/anthive/skills.git" in text
+    assert "vark server login --name anthive-intern --url https://intern.example.org/api --user mf" in text
+    # Without a link the prompt stays hidden behind the "add a link first" note.
+    assert '<div id="mcp-paste-ready" hidden>' in text
+    assert "Add a link above first" in text
+    # Copy copies the real text; the preview is masked like the snippets.
+    assert "copyText(promptText(), $('mcp-paste-copy'))" in text
+    assert "text.split(link.url).join(maskUrl(link.url))" in text
+
+
+def test_account_mcp_setup_prompt_absent_when_signed_out(client):
+    text = client.get("/account/mcp").text
+    assert 'id="mcp-paste"' not in text
+    assert browser.MCP_PROMPT_LINK_PLACEHOLDER not in text
+
+
 def test_mcp_templates_have_no_em_dashes():
     templates_dir = Path(__file__).resolve().parent.parent / "web" / "templates"
     assert "—" not in (templates_dir / "account_mcp.html").read_text()

@@ -60,6 +60,18 @@
   .mcp-snippet + .mcp-snippet { margin-top: 8px; }
   .mcp-panel p.mcp-netnote { font-size: 12px; color: var(--text-muted); margin-top: 8px; }
   .mcp-more { font-size: 13px; margin: 12px 0 0; padding-top: 10px; border-top: 1px solid var(--border); }
+  /* one-paste setup prompt */
+  .mcp-paste { border-color: var(--link); }
+  .mcp-paste h2 { font-size: 16px; }
+  .mcp-paste ol { font-size: 13px; line-height: 1.55; margin: 0 0 10px; padding-left: 20px; }
+  .mcp-paste p { font-size: 13px; line-height: 1.55; margin: 0 0 8px; }
+  .mcp-paste-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 10px 0 8px; }
+  .mcp-btn.big { font-size: 15px; font-weight: 600; padding: 10px 22px; }
+  .mcp-paste-prompt { font-family: var(--font-mono); font-size: 12px; background: var(--hover);
+                      border: 1px solid var(--border); border-radius: 5px; padding: 10px 12px; margin: 0;
+                      white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow-y: auto; }
+  .mcp-paste .mcp-warn { margin: 0 0 10px; }
+  #mcp-paste-ready > .mcp-note { margin-top: 8px; }
   /* admin section */
   .ml-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin: 0 0 10px; }
   .ml-head h2 { margin: 0; }
@@ -117,6 +129,37 @@
     </form>
     <div class="mcp-note" id="mcp-cap-note"></div>
     <div class="mcp-flash" id="mcp-flash" role="status"></div>
+  </div>
+
+  <div class="mcp-card mcp-paste" id="mcp-paste" style="display:none">
+    <h2>Set up with one paste</h2>
+    <p>MCP is the way an AI assistant connects to outside tools such as anthive. The easiest way to set it
+      up is to let an AI agent that can run commands on your computer do it for you: Claude Code, Codex,
+      OpenCode, Cursor, Gemini CLI and similar tools. Copy the prompt below, paste it into the agent and
+      answer its questions. It explains what it will do and asks for your OK before it changes anything.
+      It connects anthive as <code>{{ mcp_connection_name }}</code>, installs the anthive skills and,
+      if you want, the vark command-line tool.</p>
+    <p id="mcp-paste-desktop-note">Claude Desktop and claude.ai cannot run commands on your computer, so the
+      prompt does not work there. Add anthive to them by hand as a custom connector (the
+      <em>Claude Desktop / claude.ai</em> tab below) and upload the skills as zip files; the
+      <a href="/help#ai">help page</a> explains both.</p>
+    <div id="mcp-paste-nolink" class="mcp-note">Add a link above first. The prompt then appears here with that
+      link filled in.</div>
+    <div id="mcp-paste-ready" hidden>
+      <div class="mcp-warn" id="mcp-paste-warn">This prompt contains your personal link, which works like a
+        password. Paste it only into your own agent on your own computer. Do not share it, post it or
+        send it to anyone.</div>
+      <div class="mcp-paste-bar">
+        <button type="button" class="mcp-btn primary big" id="mcp-paste-copy">Copy the setup prompt</button>
+        <label class="mcp-pick" id="mcp-paste-pick">Link to use
+          <select id="mcp-paste-link-select" data-keep-select></select></label>
+        <button type="button" class="mcp-btn small" id="mcp-paste-show">Show link</button>
+      </div>
+      <pre class="mcp-paste-prompt" id="mcp-paste-prompt" aria-label="Setup prompt"></pre>
+      <p class="mcp-note">The prompt only asks the agent to put the link in its own user settings on this
+        computer, never in a project folder, and to never ask for your password. If you later rotate or
+        revoke this link, run the prompt again with the new one.</p>
+    </div>
   </div>
 
   <div class="mcp-card" id="mcp-clients" style="display:none">
@@ -207,6 +250,10 @@
   var stateEl = $('mcp-state'), mine = $('mcp-mine'), listEl = $('mcp-links-list'),
       clientsCard = $('mcp-clients'), flashEl = $('mcp-flash'), pick = $('mcp-link-select');
   var data = null, revealed = {}, chosenId = null;
+  // The setup prompt, rendered server-side with a placeholder for the link.
+  var PROMPT_PLACEHOLDER = {{ mcp_prompt_placeholder|tojson }};
+  var promptTemplate = {{ mcp_setup_prompt|tojson }};
+  var pastePick = $('mcp-paste-link-select');
 
   function maskUrl(url) {
     if (!url) return '';
@@ -332,9 +379,27 @@
     });
   }
 
+  function chosenLink() {
+    return (data && data.links || []).filter(function (l) { return String(l.id) === String(chosenId) && l.url; })[0] || null;
+  }
+  function promptText() {
+    var link = chosenLink();
+    return link ? promptTemplate.split(PROMPT_PLACEHOLDER).join(link.url) : '';
+  }
+  function renderPrompt() {
+    var link = chosenLink();
+    $('mcp-paste-ready').hidden = !link;
+    $('mcp-paste-nolink').hidden = !!link;
+    if (!link) { $('mcp-paste-prompt').textContent = ''; return; }
+    var text = promptText();
+    $('mcp-paste-prompt').textContent = revealed[link.id] ? text : text.split(link.url).join(maskUrl(link.url));
+    $('mcp-paste-show').textContent = revealed[link.id] ? 'Hide link' : 'Show link';
+    $('mcp-paste-pick').hidden = pastePick.options.length < 2;
+  }
+
   function render() {
     if (!data) return;
-    if (!data.enabled) { setState('MCP links are not enabled on this deployment.'); mine.style.display = 'none'; clientsCard.style.display = 'none'; return; }
+    if (!data.enabled) { setState('MCP links are not enabled on this deployment.'); mine.style.display = 'none'; clientsCard.style.display = 'none'; $('mcp-paste').style.display = 'none'; return; }
     setState('');
     mine.style.display = '';
     var links = data.links || [];
@@ -351,13 +416,17 @@
     var usable = links.filter(function (l) { return l.url; });
     clientsCard.style.display = usable.length ? '' : 'none';
     if (!usable.some(function (l) { return String(l.id) === String(chosenId); })) chosenId = usable.length ? usable[0].id : null;
-    pick.innerHTML = '';
-    usable.forEach(function (l) {
-      var o = el('option', null, l.label || ('link ' + l.id)); o.value = l.id;
-      if (String(l.id) === String(chosenId)) o.selected = true;
-      pick.appendChild(o);
+    [pick, pastePick].forEach(function (select) {
+      select.innerHTML = '';
+      usable.forEach(function (l) {
+        var o = el('option', null, l.label || ('link ' + l.id)); o.value = l.id;
+        if (String(l.id) === String(chosenId)) o.selected = true;
+        select.appendChild(o);
+      });
     });
+    $('mcp-paste').style.display = '';
     renderSnippets();
+    renderPrompt();
   }
 
   function busy(on) { document.querySelectorAll('#mcp-mine button, #mcp-mine input').forEach(function (b) { b.disabled = on; }); }
@@ -389,7 +458,13 @@
       flash('Link "' + (fresh ? fresh.label : label) + '" is ready. Copy it into your client.');
     }).catch(function (e2) { busy(false); render(); flash(e2.message, true); });
   });
-  pick.addEventListener('change', function () { chosenId = pick.value; renderSnippets(); });
+  pick.addEventListener('change', function () { chosenId = pick.value; pastePick.value = pick.value; renderSnippets(); renderPrompt(); });
+  pastePick.addEventListener('change', function () { chosenId = pastePick.value; pick.value = pastePick.value; renderSnippets(); renderPrompt(); });
+  $('mcp-paste-copy').addEventListener('click', function () { copyText(promptText(), $('mcp-paste-copy')); });
+  $('mcp-paste-show').addEventListener('click', function () {
+    var link = chosenLink(); if (!link) return;
+    revealed[link.id] = !revealed[link.id]; render();
+  });
   document.querySelectorAll('[data-copy]').forEach(function (btn) {
     btn.addEventListener('click', function () { copyText(snippetText(btn.getAttribute('data-copy')), btn); });
   });
