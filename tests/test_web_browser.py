@@ -2145,15 +2145,22 @@ def test_plot_view_info_tooltips_and_collapse(client):
 
 
 def test_genesets_index_renders_study_drilldown(client):
-    # The landing shows a per-study drilldown table with cell-type and
-    # organism filter popovers. Each study row links to /genesets/<study>.
+    # The landing shows a per-study drilldown table. Cell-type and organism
+    # filtering moved out of the column headers into two mff multiselect
+    # widgets above the table (commit e96baf3); the headers still sort but
+    # no longer carry data-filter-fields. Each study row links to
+    # /genesets/<study>.
     resp = client.get("/genesets")
     assert resp.status_code == 200
     assert 'id="gs-study-table"' in resp.text
     assert 'data-col="celltype"' in resp.text
     assert 'data-col="organism"' in resp.text
-    assert 'data-filter-fields="celltype"' in resp.text
-    assert 'data-filter-fields="organism"' in resp.text
+    assert 'id="gs-flt-celltype-w"' in resp.text
+    assert 'id="gs-flt-organism-w"' in resp.text
+    assert 'id="gs-summary"' in resp.text
+    # Header popovers must not duplicate the filter UI.
+    assert 'data-filter-fields="celltype"' not in resp.text
+    assert 'data-filter-fields="organism"' not in resp.text
     # Both fake studies appear as rows.
     assert 'href="/genesets/StudyX"' in resp.text
     assert 'href="/genesets/StudyY"' in resp.text
@@ -4556,18 +4563,23 @@ def test_genes_tab_js_makeGeneRow_unified(client):
     assert "gene_stats columns" not in html, "old gene_stats variant comment must be removed"
 
 
-def test_numerical_tab_sparkline(client):
-    """Numerical obs tab: each row has a .ss range sparkline for IQR/median."""
+def test_numerical_tab_stats_without_sparkline(client):
+    """Numerical obs tab: min/Q05/median/Q95/max columns, no range sparkline.
+
+    The per-row median-on-range sparkline (.s-num-spark) was removed on
+    purpose in commit ff1023f because it duplicated the min/median/max
+    columns. Guard against it coming back and check the stat cells remain.
+    """
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
     html = resp.text
-    # The numerical table should have the sparkline class.
-    assert 's-num-spark' in html, ".s-num-spark sparkline must be present in numerical tab"
-    # JS must set the mark based on median vs min/max range.
-    assert "s-num-spark" in html and "setSsMark" in html, \
-        "numerical sparkline must be positioned by setSsMark"
-    # Median column present in numerical tab.
-    assert 'median' in html, "median column must appear in numerical tab"
+    assert 'id="obs-tbl-num"' in html
+    assert ('<th>min</th><th>Q05</th><th>median</th><th>Q95</th><th>max</th></tr>'
+            in html), "numerical tab header must end at max (no range column)"
+    for cell in ('s-min', 's-q05', 's-median', 's-q95', 's-max'):
+        assert f'class="{cell}"' in html, f"numerical rows must have .{cell}"
+    assert 's-num-spark' not in html, ".s-num-spark sparkline was removed (ff1023f)"
+    assert 'normInRange' not in html, "normInRange helper was removed with the sparkline"
 
 
 def test_categorical_tab_ecdf_link(client):
