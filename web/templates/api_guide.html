@@ -170,7 +170,10 @@ vark literature "lipid droplet accumulating microglia" -k 5 --section methods
 vark db papers L26/FMG</pre><button type="button" data-copy-api>Copy</button></div>
     <p><code>vark papers ls</code> also filters by <code>--author</code>. <code>vark papers bib</code> without a citekey writes the whole library; with citekeys only those entries. <code>vark papers pdf</code> takes several citekeys at once.</p>
     <h3 class="subsection-head">With pyvark</h3>
-    <div class="cmd"><pre>papers = client.list_papers(role="source", q="TREM2")
+    <div class="cmd"><pre>from vark import AnthiveClient
+
+client = AnthiveClient("{{ api_base }}")  # login from ~/.netrc or vark; or pass auth= as above
+papers = client.list_papers(role="source", q="TREM2")
 paper = client.get_paper("CITEKEY")
 client.download_paper_pdf("CITEKEY", dest="papers/")
 with open("library.bib", "w") as handle:
@@ -193,6 +196,7 @@ vark papers upload --manifest papers.csv --server anthive</pre><button type="but
 from vark import AnthiveClient
 from vark.exceptions import PaperUploadDisabledError, PaperUploadForbiddenError
 
+client = AnthiveClient("{{ api_base }}")  # login from ~/.netrc or vark; or pass auth= as above
 print(client.get_paper_upload_requirements())
 result = client.upload_paper(Path("paper.md"), pdf="paper.pdf", dry_run=True)
 results = client.upload_papers(AnthiveClient.paper_items_from_folder("papers/"))</pre><button type="button" data-copy-api>Copy</button></div>

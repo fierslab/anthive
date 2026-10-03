@@ -6220,3 +6220,28 @@ def test_account_mcp_has_more_client_tabs_and_guide_link(client, monkeypatch):
     for key in ("codex", "gemini_cli", "vscode_json", "json_url", "mcp_remote", "claude_code_user"):
         assert f'data-snippet="{key}"' in text, key
     assert 'href="https://docs.example/doc/MCP_CLIENTS.md"' in text
+
+
+def test_api_guide_python_snippets_construct_client(client, monkeypatch):
+    """Every <pre> that calls ``client.`` must build ``client = AnthiveClient(`` first.
+
+    Checked per block, not per page: a reader copies one block, so a block
+    that leans on a client built in an earlier section fails when pasted on
+    its own (the bug a 2.41.0 release check found in the upload snippet).
+    """
+    import html as html_lib
+    import re
+    monkeypatch.setattr(browser, "_api_get", _api_guide_fake({"version": "2.41.0"}))
+    # uploader view, so the upload section's snippets are on the page too
+    monkeypatch.setattr(browser, "_api_guide_site_settings", lambda: _guide_settings("authelia"))
+    page = client.get("/api-guide", headers={"Remote-User": "mf",
+                                             "Remote-Groups": "admins"}).text
+    assert 'id="api-guide-upload"' in page
+    blocks = [html_lib.unescape(block)
+              for block in re.findall(r"<pre[^>]*>(.*?)</pre>", page, re.S)]
+    client_blocks = [block for block in blocks if "client." in block]
+    assert len(client_blocks) >= 3
+    for block in client_blocks:
+        construct_at = block.find("client = AnthiveClient(")
+        assert construct_at != -1, block
+        assert construct_at < block.find("client."), block
