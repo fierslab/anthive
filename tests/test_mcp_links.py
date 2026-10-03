@@ -144,10 +144,11 @@ def test_describe_and_admin_rows(store):
     assert body['has_link'] and body['url'].startswith('https://h.example/mcp/u/amcp_')
     assert body['url'] in body['snippets']['claude_code']
     assert body['url'] in body['snippets']['json_config']
-    assert json.loads(body['snippets']['json_config'])['mcpServers']['anthive']['url'] == body['url']
+    assert json.loads(body['snippets']['json_config'])['mcpServers']['anthive-h']['url'] == body['url']
+    assert body['connection_name'] == 'anthive-h' and 'anthive-h' in body['snippets_template']['claude_code']
     assert set(body) == {'enabled', 'user', 'has_link', 'url', 'created', 'rotated_at',
                          'expires_at', 'last_used', 'ttl_days', 'snippets',
-                         'links', 'max_links', 'snippets_template'}
+                         'links', 'max_links', 'snippets_template', 'connection_name'}
     disabled = mcp_tokens.describe(record, store, 'https://h', 'alice', False)
     assert disabled['enabled'] is False and disabled['url'] is None
     assert mcp_tokens.admin_row(record)['user'] == 'alice'

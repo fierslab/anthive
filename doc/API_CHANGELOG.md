@@ -29,9 +29,21 @@ the spec drifting away from the running code.
 
 ---
 
-## 2.41.1 (unreleased)
+## 2.42.0 (2026-10-03)
 
-Patch release: no contract change.
+Minor release. Literature search and onboarding.
+
+- **Getting started.** The help page opens with a quick start (browse,
+  connect an AI client, install the skills, ask a first question). The MCP
+  page has a "Set up with one paste" prompt, filled in with the user's
+  link, for agents that can run commands (Claude Code, Codex, Gemini CLI,
+  OpenCode, Cursor): it adds the connection, installs the skills and
+  optionally vark, asking before each change. The link is filled in by the
+  browser and never appears in the page HTML.
+- `GET /me/mcp` gains `connection_name` (for example `anthive-intern`, from
+  the site's address); `snippets` and `snippets_template` use it instead of
+  the fixed name `anthive`, so people with several Anthive servers get one
+  name per site.
 
 - **Hybrid literature search keeps paraphrase matches.** The fusion of the
   keyword and semantic rankings favoured passages found by both, so the

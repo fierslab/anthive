@@ -6372,3 +6372,10 @@ def test_api_guide_python_snippets_construct_client(client, monkeypatch):
         construct_at = block.find("client = AnthiveClient(")
         assert construct_at != -1, block
         assert construct_at < block.find("client."), block
+
+
+def test_mcp_connection_name_matches_the_api_snippets():
+    import mcp_tokens
+    for url in ('https://intern.bdslab.org', 'https://www.anthive.kuleuven.be/', 'http://10.0.0.5:8501',
+                'https://anthive.example.org', 'https://anthive-public.org', 'http://localhost:8501', ''):
+        assert browser._mcp_connection_name(url) == mcp_tokens.connection_name(url), url

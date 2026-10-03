@@ -34,8 +34,11 @@ provider. Choose a client and provider you trust with that material.
    below, replace `https://<your-anthive-site>/mcp/u/amcp_XXXX` with your
    own link.
 
-4. **Name the server `anthive`.** Any name works, but the anthive skills and
-   prompts assume this one.
+4. **Name the server after the site**, for example `anthive-intern` or
+   `anthive-public`. The snippets on your site's MCP page already use a
+   name made from the site's address. With several Anthive servers, a
+   distinct name per site keeps the results apart; the skills work with any
+   name. The examples below use `anthive`.
 
 Anthive does not use OAuth. When a client asks which sign-in method to use,
 pick "none", "No sign in" or "No authentication". If a client starts an

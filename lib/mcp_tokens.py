@@ -352,6 +352,29 @@ def client_snippets(url: str, server_name: str = 'anthive') -> Dict[str, str]:
 
 SNIPPETS_TEMPLATE = client_snippets('{url}')
 
+_NAME_SKIP_LABELS = {'www', 'anthive'}
+
+
+def connection_name(base_url: str) -> str:
+    """The MCP connection name to suggest for this site, e.g. ``anthive-intern``.
+
+    Taken from the first meaningful host label of the site's public URL
+    (``www`` and ``anthive`` are skipped when more labels follow), so people
+    with several anthive servers get one name per site. IP addresses and
+    empty hosts give plain ``anthive``. web/browser.py's setup prompt uses
+    the same rule (``_mcp_connection_name``); a test keeps the two equal.
+    """
+    host = base_url.split('://', 1)[-1].split('/', 1)[0].split(':', 1)[0].lower()
+    if not host or re.fullmatch(r'[0-9.]+', host):
+        return 'anthive'
+    labels = [label for label in host.split('.') if label]
+    while len(labels) > 1 and labels[0] in _NAME_SKIP_LABELS:
+        labels = labels[1:]
+    label = re.sub(r'[^a-z0-9-]+', '-', labels[0] if labels else '').strip('-')
+    if not label or label == 'anthive':
+        return 'anthive'
+    return label if label.startswith('anthive-') else f'anthive-{label}'
+
 
 def link_entry(record: LinkRecord, store: McpLinkStore, base_url: str) -> Dict[str, Any]:
     """One link as shown to its owner."""
@@ -372,13 +395,15 @@ def describe(record: Optional[LinkRecord], store: McpLinkStore, base_url: str,
     has_link/url/created/... fields describe ``record`` (the first link) and
     are kept for clients written against the single-link API.
     """
-    empty = {key: '' for key in SNIPPETS_TEMPLATE}
+    name = connection_name(base_url)
+    template = client_snippets('{url}', name)
+    empty = {key: '' for key in template}
     body: Dict[str, Any] = {
         'enabled': bool(enabled), 'user': user, 'has_link': False, 'url': None,
         'created': None, 'rotated_at': None, 'expires_at': None, 'last_used': None,
         'ttl_days': store.ttl_days if store else 0, 'snippets': empty,
         'links': [], 'max_links': store.max_links if store else 0,
-        'snippets_template': SNIPPETS_TEMPLATE,
+        'snippets_template': template, 'connection_name': name,
     }
     if not enabled:
         return body
@@ -389,7 +414,7 @@ def describe(record: Optional[LinkRecord], store: McpLinkStore, base_url: str,
                 expires_at=_iso(record.expires_at), last_used=_iso(record.last_used))
     if record.is_active:
         url = link_url(base_url, store.token_for(record))
-        body.update(has_link=True, url=url, snippets=client_snippets(url))
+        body.update(has_link=True, url=url, snippets=client_snippets(url, name))
     return body
 
 
