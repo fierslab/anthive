@@ -1805,7 +1805,7 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.40.2"
+API_VERSION = "2.41.0"
 API_VERSION_RELEASED = "2026-10-02"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
@@ -13476,10 +13476,9 @@ def download_database_static_file(db_id: str, filename: str):
 # (lib/library_index.py) is the precomputed library_chunks.parquet. Both are
 # loaded once at startup (in a thread) and on /admin/rescan.
 #
-# Access: restricted papers are admin-only. Calls from ant-mcp (internal
-# secret + a user) or with ?for_llm=true answer for an external LLM:
-# anthive_llm=never papers disappear, summary_only papers lose passages,
-# notes, abstract and page text.
+# Access (2.41): no per-paper rules. Everyone who passes the site login sees
+# the whole library, and any of its text may be forwarded to an AI client and
+# its LLM provider. Leftover anthive_access/anthive_llm fields are ignored.
 
 _library_service: Optional[LibraryService] = None
 _geneset_path_for_library: Optional[Path] = None
@@ -13548,13 +13547,6 @@ def _caller_is_admin(request: Request) -> bool:
         return False
 
 
-def _for_llm(request: Request, for_llm: bool = False) -> bool:
-    """True when the answer goes to an external LLM: ant-mcp calls (internal
-    secret plus a user identity) always, others when they ask for it."""
-    return bool(for_llm) or (_has_valid_internal_secret(request)
-                             and bool(request.headers.get('Remote-User')))
-
-
 def _csv(value: Optional[str]) -> Optional[List[str]]:
     if not value:
         return None
@@ -13575,7 +13567,9 @@ _upload_index_lock = Lock()
 _upload_index_status: Dict[str, Any] = {}
 
 
-def _require_uploader(request: Request) -> str:
+def _require_uploader(request: Request) -> Tuple[Optional[str], Optional[JSONResponse]]:
+    """(user, None) for a caller in library_upload_groups, else (None, a 403
+    JSONResponse). Upload features are only shown to people who may upload."""
     from config import get_library_upload_settings  # noqa: PLC0415
     allowed = set(get_library_upload_settings(get_config())['upload_groups'])
     raw_groups = request.headers.get('Remote-Groups') or request.headers.get('X-Remote-Groups') or ''
@@ -13583,11 +13577,13 @@ def _require_uploader(request: Request) -> str:
     user = request.headers.get('Remote-User') or request.headers.get('X-Remote-User') or ''
     if get_auth_settings()['mode'] != 'none' and user:
         if groups & allowed:
-            return user
+            return user, None
         if 'admins' in allowed and _caller_is_admin(request):
-            return user      # basic auth mode: auth.admins have no Remote-Groups
-    raise HTTPException(status_code=403,
-                        detail=f"uploading papers needs one of the groups {sorted(allowed)}")
+            return user, None   # basic auth mode: auth.admins have no Remote-Groups
+    return None, JSONResponse(
+        {'status': 'forbidden',
+         'message': f"Only users in {', '.join(sorted(allowed))} can add papers to the library."},
+        status_code=403)
 
 
 def _upload_settings():
@@ -13650,29 +13646,45 @@ def _after_upload(result, switches) -> List[str]:
     return warnings
 
 
-@app.get("/papers/upload/requirements", tags=["library"])
-def paper_upload_requirements():
-    """What a paper record must and should contain to be uploaded."""
-    from library_upload import requirements  # noqa: PLC0415
-    _, switches = _upload_settings()
-    return requirements(switches['max_pdf_mb'])
+# Both upload routes are left out of the public OpenAPI (/api/docs): only
+# uploaders may see them (403 for everyone else, before the 503 disabled
+# answer). doc/LIBRARY.md documents them.
+@app.get("/papers/upload/requirements", tags=["library"], include_in_schema=False)
+def paper_upload_requirements(request: Request):
+    """What a paper record must and should contain to be uploaded: required
+    and recommended fields, roles (default background), document types,
+    folders, whether uploads are switched on here, and a notice that library
+    text may be sent to AI clients."""
+    from library_upload import requirements, uploads_enabled  # noqa: PLC0415
+    _, forbidden = _require_uploader(request)
+    if forbidden is not None:
+        return forbidden
+    settings, switches = _upload_settings()
+    return requirements(switches['max_pdf_mb'], uploads_enabled=uploads_enabled(settings.library_dir))
 
 
-@app.post("/papers/upload", tags=["library"])
+@app.post("/papers/upload", tags=["library"], include_in_schema=False)
 def upload_paper(request: Request,
                  metadata: str = Form(..., description="JSON object, or the full .md text with YAML front matter"),
                  file: Optional[UploadFile] = File(None, description="the PDF (optional)"),
-                 folder: Optional[str] = Form(None, description="lab | datasets | methods | reading (default by rule)"),
+                 folder: Optional[str] = Form(None, description="lab | datasets | methods | reading | proposals (default by rule)"),
                  enrich: bool = Form(True, description="fill missing fields from CrossRef/OpenAlex"),
                  dry_run: bool = Form(False, description="validate and report, write nothing"),
                  update: bool = Form(False, description="update the existing record if this paper is already in the library")):
     """Add a paper (record + optional PDF) to the library: validated, enriched,
     deduplicated, placed in the right folder and committed with the caller as
     author. 201 created, 200 updated or dry_run, 409 duplicate, 422 invalid,
-    413 PDF too large, 415 not a PDF, 403 not allowed to upload."""
-    from library_upload import UploadError, upload_paper as do_upload  # noqa: PLC0415
-    user = _require_uploader(request)
+    413 PDF too large, 415 not a PDF, 403 not allowed to upload, 503 disabled
+    (the library is not writable here: services.paper_upload off)."""
+    from library_upload import (UploadError, disabled_error, upload_paper as do_upload,  # noqa: PLC0415
+                                uploads_enabled)
+    user, forbidden = _require_uploader(request)
+    if forbidden is not None:
+        return forbidden
     settings, switches = _upload_settings()
+    if not dry_run and not uploads_enabled(settings.library_dir):
+        exc = disabled_error()
+        return JSONResponse(exc.body, status_code=exc.status)
     pdf_bytes = None
     if file is not None:
         pdf_bytes = file.file.read(settings.max_pdf_mb * 1024 * 1024 + 1)
@@ -13700,12 +13712,10 @@ def list_papers(request: Request, role: Optional[str] = None, celltype: Optional
                 method: Optional[str] = None, cohort: Optional[str] = None,
                 organism: Optional[str] = None, author: Optional[str] = None,
                 year: Optional[str] = Query(None, description="YYYY or YYYY..YYYY"),
-                q: Optional[str] = Query(None, description="words matched against title, authors, DOI, summary, topics"),
-                for_llm: bool = False):
+                q: Optional[str] = Query(None, description="words matched against title, authors, DOI, summary, topics")):
     """Papers in the library (bibliographic summary per paper), newest first."""
     service = _library()
-    papers = service.list(is_admin=_caller_is_admin(request), for_llm=_for_llm(request, for_llm),
-                          role=role, celltype=celltype, tissue=tissue, disease=disease,
+    papers = service.list(role=role, celltype=celltype, tissue=tissue, disease=disease,
                           method=method, cohort=cohort, organism=organism, author=author,
                           year=year, q=q)
     return {'n': len(papers), 'papers': papers}
@@ -13713,10 +13723,10 @@ def list_papers(request: Request, role: Optional[str] = None, celltype: Optional
 
 @app.get("/library.bib", tags=["library"], response_class=Response)
 def library_bibtex(request: Request,
-                   citekeys: Optional[str] = Query(None, description="comma-separated; default all visible"),
+                   citekeys: Optional[str] = Query(None, description="comma-separated; default all"),
                    classic: bool = Query(False, description="plain BibTeX instead of BibLaTeX")):
     """The library (or a selection) as one BibTeX file."""
-    text = _library().bibtex(_csv(citekeys), is_admin=_caller_is_admin(request), classic=classic)
+    text = _library().bibtex(_csv(citekeys), classic=classic)
     return Response(content=text, media_type='application/x-bibtex',
                     headers={'Content-Disposition': 'inline; filename="anthive-library.bib"'})
 
@@ -13730,9 +13740,9 @@ def library_status():
     return status
 
 
-def _paper_or_404(request: Request, citekey: str, for_llm: bool = False):
+def _paper_or_404(request: Request, citekey: str):
     service = _library()
-    paper = service.get(citekey, is_admin=_caller_is_admin(request), for_llm=_for_llm(request, for_llm))
+    paper = service.get(citekey)
     if paper is None:
         raise HTTPException(status_code=404, detail=f"paper not found: {citekey}")
     return service, paper
@@ -13742,7 +13752,7 @@ def _paper_or_404(request: Request, citekey: str, for_llm: bool = False):
 def paper_bibtex(request: Request, citekey: str, classic: bool = False):
     """One paper as a BibTeX entry."""
     service, paper = _paper_or_404(request, citekey)
-    return Response(content=service.bibtex_one(paper, classic=classic, is_admin=_caller_is_admin(request)),
+    return Response(content=service.bibtex_one(paper, classic=classic),
                     media_type='application/x-bibtex',
                     headers={'Content-Disposition': f'inline; filename="{citekey}.bib"'})
 
@@ -13750,13 +13760,10 @@ def paper_bibtex(request: Request, citekey: str, classic: bool = False):
 @app.get("/papers/{citekey}/related", tags=["library"])
 def paper_related(request: Request, citekey: str,
                   kind: Optional[str] = Query(None, description="comma-separated: explicit, cohort, celltype, tissue, disease, method, author, cites, cited_by"),
-                  limit: int = Query(25, ge=1, le=200), for_llm: bool = False):
+                  limit: int = Query(25, ge=1, le=200)):
     """Papers related to this one, with the kind, weight and evidence of each relation."""
-    service, _ = _paper_or_404(request, citekey, for_llm)
-    return {'citekey': citekey,
-            'related': service.related(citekey, is_admin=_caller_is_admin(request),
-                                       for_llm=_for_llm(request, for_llm),
-                                       kinds=_csv(kind), limit=limit)}
+    service, _ = _paper_or_404(request, citekey)
+    return {'citekey': citekey, 'related': service.related(citekey, kinds=_csv(kind), limit=limit)}
 
 
 @app.get("/papers/{citekey}/file", tags=["library"])
@@ -13789,11 +13796,9 @@ def paper_file(request: Request, citekey: str):
 
 
 @app.get("/papers/{citekey}/pages/{page}", tags=["library"])
-def paper_page(request: Request, citekey: str, page: int, for_llm: bool = False):
+def paper_page(request: Request, citekey: str, page: int):
     """Plain text of one page, from the literature index."""
-    service, paper = _paper_or_404(request, citekey, for_llm)
-    if not service.full_text_allowed(paper, for_llm=_for_llm(request, for_llm)):
-        raise HTTPException(status_code=403, detail=f"{citekey}: full text is not shared with external LLMs")
+    service, paper = _paper_or_404(request, citekey)
     text = service.page_text(paper, page)
     if text is None:
         raise HTTPException(status_code=404, detail=f"{citekey}: page {page} is not in the literature index")
@@ -13801,11 +13806,11 @@ def paper_page(request: Request, citekey: str, page: int, for_llm: bool = False)
 
 
 @app.get("/papers/{citekey}", tags=["library"])
-def get_paper(request: Request, citekey: str, for_llm: bool = False):
+def get_paper(request: Request, citekey: str):
     """One paper: bibliographic fields, notes, linked datasets and gene sets
     by role, and the most related papers."""
-    service, paper = _paper_or_404(request, citekey, for_llm)
-    return service.record(paper, is_admin=_caller_is_admin(request), for_llm=_for_llm(request, for_llm))
+    service, paper = _paper_or_404(request, citekey)
+    return service.record(paper)
 
 
 @app.get("/search/literature", tags=["library"])
@@ -13814,30 +13819,26 @@ def search_literature(request: Request, q: str = Query(..., min_length=2),
                       mode: str = Query('hybrid', pattern='^(hybrid|keyword|semantic)$'),
                       section: Optional[str] = Query(None, description="comma-separated: abstract, introduction, methods, results, discussion, figure_legend"),
                       citekey: Optional[str] = Query(None, description="comma-separated citekeys to search within"),
-                      year: Optional[str] = Query(None, description="YYYY or YYYY..YYYY"),
-                      for_llm: bool = False):
+                      year: Optional[str] = Query(None, description="YYYY or YYYY..YYYY")):
     """Passages from the library's papers, each with citation, page, section
     and a highlighted snippet. Semantic and hybrid modes fall back to keyword
     search (with a warning) when this server has no matching query model."""
-    return _library().search(q, is_admin=_caller_is_admin(request), for_llm=_for_llm(request, for_llm),
-                             k=k, mode=mode, sections=_csv(section), citekeys=_csv(citekey), year=year)
+    return _library().search(q, k=k, mode=mode, sections=_csv(section), citekeys=_csv(citekey), year=year)
 
 
 @app.get("/databases/{db_id:path}/papers", tags=["library"])
-def database_papers(request: Request, db_id: str, for_llm: bool = False):
+def database_papers(request: Request, db_id: str):
     """Papers linked to a dataset (its own and its collection's `papers:`), source first."""
     if registry is None or db_id not in registry.databases:
         raise HTTPException(status_code=404, detail=f"Database not found: {db_id}")
-    papers = _library().papers_for_dataset(db_id, is_admin=_caller_is_admin(request),
-                                           for_llm=_for_llm(request, for_llm))
+    papers = _library().papers_for_dataset(db_id)
     return {'db_id': db_id, 'papers': papers}
 
 
 @app.get("/databases/{db_id:path}/context", tags=["library"])
 def database_context(request: Request, db_id: str,
                      level: str = Query('brief', pattern='^(brief|full)$'),
-                     budget_tokens: int = Query(4000, ge=200, le=50000),
-                     for_llm: bool = False):
+                     budget_tokens: int = Query(4000, ge=200, le=50000)):
     """Background pack for analysing a dataset with an LLM: metadata, caveats,
     obs columns, module scores, source papers with methods passages, related
     papers; trimmed to ``budget_tokens`` (approximate)."""
@@ -13849,8 +13850,7 @@ def database_context(request: Request, db_id: str,
         raise HTTPException(status_code=404, detail=str(exc))
     scores = sorted(_score_index_by_db.get(db_id, []))
     return _library().context(db_id, info, module_scores=scores, level=level,
-                              budget_tokens=budget_tokens, is_admin=_caller_is_admin(request),
-                              for_llm=_for_llm(request, for_llm))
+                              budget_tokens=budget_tokens)
 
 
 @app.get("/skill", tags=["info"], response_class=Response)

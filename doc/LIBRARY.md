@@ -15,6 +15,7 @@ library/
       lee2026plasticity.pdf   optional, git-ignored, synced via S3
     lab/
     methods/
+    proposals/                project and grant proposals
     reading/
       2024/                   any depth is fine
   README.md
@@ -24,8 +25,8 @@ library/
 ## Folders
 
 Records can sit in sub-folders of `papers/`, at any depth. **Folders are for
-people only and never carry meaning**: no tool reads a role, a topic or an
-access rule from a folder name. Roles (`anthive_role`) and the `papers:`
+people only and never carry meaning**: no tool reads a role or a topic from
+a folder name. Roles (`anthive_role`) and the `papers:`
 references on datasets, collections and gene sets stay the source of truth.
 
 - One paper lives in exactly one folder. Citekeys (and DOIs) are unique
@@ -43,11 +44,14 @@ references on datasets, collections and gene sets stay the source of truth.
 `ant lib-add`, `ant lib-import` and the upload API put a NEW record in the first folder that
 applies, unless `--folder` says otherwise:
 
-1. `papers/lab/` when an author matches `library_lab_authors` in
+1. `papers/proposals/` for `entrytype: report` whose `type` mentions a
+   proposal (`project proposal`, `grant proposal`);
+2. `papers/lab/` when an author matches `library_lab_authors` in
    `anthive.yaml` (default `[De Strooper]`, case and accent insensitive);
-2. `papers/datasets/` for role `source` or `reanalysis`;
-3. `papers/methods/` for role `method`;
-4. `papers/reading/` for everything else.
+3. `papers/datasets/` for role `source` or `reanalysis`;
+4. `papers/methods/` for role `method`;
+5. `papers/reading/` for everything else, which includes the default role
+   `background`.
 
 Updates keep a record where it is.
 
@@ -83,8 +87,6 @@ anthive_organisms: [human, mouse]
 anthive_methods: [scRNA-seq (fresh myeloid cells), snRNA-seq, CITE-seq]
 anthive_cohorts: [PsychAD, ROSMAP]
 anthive_summary: Two or three sentences on what the paper shows.
-anthive_access: public
-anthive_llm: allowed
 anthive_draft: [anthive_celltypes, anthive_summary]
 ---
 
@@ -99,12 +101,14 @@ The file is named `<citekey>.md` and the PDF, if any, `<citekey>.pdf`.
 
 | Field | Notes |
 | --- | --- |
-| `entrytype` | `article`, `online` (preprints), `unpublished`, `book`, `incollection`, `inproceedings`, `thesis`, `report`, `misc`, `dataset`, `software` |
+| `entrytype` | the document type, see "Document types" |
+| `type` | the kind of thesis or report: `phd thesis`, `master thesis`, `project proposal`, `grant proposal`, `technical report`, `protocol` |
 | `citekey` | lowercase ascii; see "Citekeys" |
 | `author`, `editor` | lists of `Last, First` |
 | `title`, `subtitle` | |
 | `journaltitle` | the journal (`journal` is accepted as the BibTeX alias) |
-| `booktitle`, `publisher`, `institution` | |
+| `booktitle`, `publisher` | |
+| `institution` | university, institute or funder (theses, reports, proposals) |
 | `date` | `YYYY`, `YYYY-MM` or `YYYY-MM-DD`; `year` is accepted too |
 | `volume`, `number`, `pages`, `eid` | |
 | `doi`, `pmid`, `pmcid`, `isbn`, `issn`, `url` | DOIs without the `https://doi.org/` prefix |
@@ -118,7 +122,7 @@ The file is named `<citekey>.md` and the PDF, if any, `<citekey>.pdf`.
 
 | Field | Meaning |
 | --- | --- |
-| `anthive_role` | why the paper is in the library: `source`, `reanalysis`, `method`, `background`, `related` |
+| `anthive_role` | why the paper is in the library, see "Roles"; default `background` |
 | `anthive_celltypes` | cell types studied, as mus vocabulary labels |
 | `anthive_tissues` | tissues or regions, as mus vocabulary labels |
 | `anthive_diseases` | conditions, as mus vocabulary labels (`normal` for healthy) |
@@ -129,9 +133,45 @@ The file is named `<citekey>.md` and the PDF, if any, `<citekey>.pdf`.
 | `anthive_orcids` | author name to ORCID, from OpenAlex |
 | `anthive_cites` | DOIs this paper cites, from OpenAlex (used for citation relations) |
 | `anthive_openalex` | the OpenAlex work id |
-| `anthive_access` | `public`, `internal` or `restricted`; who may see the record and PDF |
-| `anthive_llm` | `allowed`, `summary_only` or `never`: what may be sent to external LLMs |
 | `anthive_draft` | fields written by a tool or LLM that still need a human check; remove a field from this list once checked |
+
+There are no per-record access or LLM fields. `anthive_access` and
+`anthive_llm` were removed in 2.41.0; `ant lib-check` warns about leftovers
+("ignored: access follows the site login") and the upload API drops them.
+See "Who sees the library" below.
+
+### Roles
+
+| Role | Meaning |
+| --- | --- |
+| `source` | the data in anthive come from this paper |
+| `reanalysis` | the paper reanalyses data that are in anthive |
+| `method` | a method used on anthive data |
+| `related` | related to a dataset in anthive, not its source |
+| `background` | of interest to the lab, not linked to any dataset. **The default** when no role is given |
+
+Set `source` or `reanalysis` only when the data in anthive come from the
+paper. Proposed dataset links (`papers_for` on upload) do not change the
+role; a curator sets it when linking the dataset.
+
+### Document types
+
+A document's type is its BibLaTeX `entrytype`, refined by the `type` field.
+
+| `entrytype` | For | Identifier |
+| --- | --- | --- |
+| `article` | journal articles | required |
+| `online` | preprints (`eprint` + `eprinttype`) and web pages (`url`) | required |
+| `book`, `inbook`, `incollection` | books, chapters, contributions to edited volumes | required |
+| `inproceedings` | conference papers | required |
+| `thesis` | `type: phd thesis` or `type: master thesis` | `institution` or `note` |
+| `report` | `type: project proposal`, `grant proposal`, `technical report`, `protocol`, ... | `institution` or `note` |
+| `unpublished` | manuscripts in preparation | `institution` or `note` |
+| `misc` | anything else | `institution` or `note` |
+
+"Identifier" is one of `doi`, `pmid`, `eprint` with `eprinttype`, or `url`.
+Older records may use `preprint`, `phdthesis`, `mastersthesis`, `techreport`,
+`dataset` or `software`; they still validate.
 
 The mus vocabulary (`lib/_mus_vocab.yaml`, the same one `.h5ad.mus` uses)
 keeps papers and datasets comparable. Labels outside the vocabulary are
@@ -166,8 +206,8 @@ papers:
   mathys2023singlecell: related
 ```
 
-Roles: `source` (the data comes from this paper), `reanalysis`, `method`,
-`related`. Gene-set experiments in the genesetstore use the same `papers:`
+Roles: `source` (the data come from this paper), `reanalysis`, `method`,
+`related` (see "Roles" above). Gene-set experiments in the genesetstore use the same `papers:`
 mapping in their metadata.
 
 **Papers point at papers** with BibLaTeX's `related` (a list of citekeys)
@@ -285,29 +325,52 @@ other's index; do not configure more than one.
 `POST /api/papers/upload` (and the MCP tools `check_paper` and
 `upload_paper`) add a paper without a shell on the server. Only members of
 `library_upload_groups` (default `[admins]`; in basic auth mode the users in
-`auth.admins` count as `admins`) may call it; everyone else gets a 403.
+`auth.admins` count as `admins`) may use or even see the upload features:
+
+- `GET /api/papers/upload/requirements` and `POST /api/papers/upload`
+  answer everyone else with 403
+  `{"status": "forbidden", "message": "Only users in admins can add papers to the library."}`
+  (the groups are listed). The 403 comes before the 503 `disabled` answer.
+- Both routes are left out of the public OpenAPI (`/api/docs`,
+  `/api/openapi.json`); this section is their documentation.
+- ant-mcp shows `paper_upload_requirements`, `check_paper` and
+  `upload_paper` only to uploaders, and to nobody while uploads are off.
+- The help page only says that admins can add papers.
 
 `GET /api/papers/upload/requirements` describes what a record needs, with a
 description and example for every field and the allowed vocabularies, so a
 client (or the paper-preparation skill) can build a complete record first.
+It also returns `notice` (who sees the library and that its text may go to
+AI providers), `uploads_enabled`, `roles` with their meaning, `default_role`,
+`entrytypes` with a description each, `document_types` (suggested `type`
+values per entrytype) and `folders`.
 
 Required:
 
-- `entrytype` (BibLaTeX: article, inproceedings, book, online, unpublished,
-  misc, ...), `title`, `author` (a list of `"Last, First"` names, at least
-  one), `date` or `year`;
-- an identifier: `doi`, `pmid`, `eprint` with `eprinttype`, or `url`.
-  Entry types `unpublished` and `misc` may give a `note` instead.
+- `entrytype` (see "Document types"), `title`, `author` (a list of
+  `"Last, First"` names, at least one), `date` or `year`;
+- for `article`, `online`, `book`, `inbook`, `incollection` and
+  `inproceedings`: an identifier (`doi`, `pmid`, `eprint` with `eprinttype`,
+  or `url`). `report`, `thesis`, `unpublished` and `misc` need `institution`
+  or `note` instead.
+
+Without `anthive_role` the record gets `background`.
 
 Recommended (listed back as `missing_recommended` when absent):
 `journaltitle`, `abstract`, `keywords`, `anthive_role`, `anthive_celltypes`,
 `anthive_tissues`, `anthive_diseases`, `anthive_methods`, `anthive_cohorts`,
-`anthive_summary`, `anthive_access`, `anthive_llm` and `papers_for`.
+`anthive_summary` and `papers_for`.
 
 The multipart form takes `metadata` (a JSON object or the text of a `.md`
 record with front matter), an optional `file` (the PDF), `folder` (`lab`,
-`datasets`, `methods` or `reading`; default by the folder rule above),
-`enrich` (default true), `dry_run` and `update`.
+`datasets`, `methods`, `reading` or `proposals`; default by the folder rule
+above), `enrich` (default true), `dry_run` and `update`.
+
+When the library folder is not writable on a site (`services.paper_upload`
+off, so it is mounted read-only), uploads answer 503
+`{"status": "disabled", "message": "Paper uploads are switched off on this site (services.paper_upload)."}`
+without trying to write, the requirements say `uploads_enabled: false`, and
+ant-mcp hides `check_paper` and `upload_paper`.
 
 - **Enrichment** looks the DOI or PMID up in CrossRef and OpenAlex and fills
   only empty fields; it never overwrites what was sent. Filled fields are
@@ -329,7 +392,7 @@ record with front matter), an optional `file` (the PDF), `folder` (`lab`,
 Responses: 201 `created`, 200 `updated` or `dry_run` (all with `citekey`,
 `folder`, `path`, `pdf_sha256`, `record`, `filled_fields`, `warnings`,
 `missing_recommended`), 409 `duplicate`, 422 `invalid` (`errors` per field
-and `missing_required`), 413, 415, 403.
+and `missing_required`), 413, 415, 403, 503 `disabled`.
 
 What happens on success, in order: the record (and PDF) are written under a
 lock, the record is validated with the same rules as `ant lib-check`, and
@@ -353,8 +416,14 @@ ids and loads the index at startup (in the background) and on
 tools `search_literature`, `get_paper`, `related_papers`,
 `get_dataset_context` (`doc/MCP_LINKS.md`).
 
-Access: `anthive_access: restricted` records are visible to admins only and
-never appear in other records' `related` lists or exports for anyone else.
-For callers that pass answers to an external LLM (ant-mcp), `anthive_llm:
-never` hides the paper and `summary_only` keeps its metadata and summary but
-no passages, notes, abstract or page text.
+## Who sees the library
+
+Everyone who can sign in to the site sees every record, note and PDF in the
+library. The library endpoints use the site's normal login and nothing
+else; there is no per-paper rule that could hide a paper from, or show it
+to, anyone beyond that. Put a document in the library only if everyone with
+a login on that site may read it.
+
+Any library text, including passages, notes, abstracts and page text, may be
+sent to AI clients through MCP or the REST API, and from there to the
+client's external LLM provider. Nothing is held back for AI clients.

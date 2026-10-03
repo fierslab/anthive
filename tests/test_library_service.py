@@ -167,6 +167,15 @@ def test_folder_precedence_and_lab_authors(tmp_path):
     assert L.folder_for(lib, 'source', authors=['Smith, A'], lab_authors=['Doe']) == lib / 'papers' / 'datasets'
     assert L.folder_for(lib, 'source', 'papers/reading/2024') == lib / 'papers' / 'reading' / '2024'
     assert L.folder_for(lib, 'source', 'lab') == lib / 'papers' / 'lab'
+    # proposals win over everything else; only a report whose type mentions a proposal
+    lab = ['De Strooper, Bart']
+    assert L.folder_for(lib, 'background', authors=lab, entrytype='report',
+                        doc_type='Project Proposal') == lib / 'papers' / 'proposals'
+    assert L.folder_for(lib, 'source', entrytype='report', doc_type='grant proposal') == lib / 'papers' / 'proposals'
+    assert L.folder_for(lib, 'background', entrytype='report', doc_type='technical report') == lib / 'papers' / 'reading'
+    assert L.folder_for(lib, 'background', entrytype='article', doc_type='proposal') == lib / 'papers' / 'reading'
+    assert L.folder_for(lib, 'background', 'reading', entrytype='report',
+                        doc_type='project proposal') == lib / 'papers' / 'reading'
     with pytest.raises(ValueError):
         L.folder_for(lib, 'source', '../outside')
     with pytest.raises(ValueError):
@@ -188,55 +197,50 @@ def test_papers_references_resolve_to_datasets(service):
     assert state.unresolved == []
 
 
-def test_restricted_paper_admin_only(service):
-    user = {p['citekey'] for p in service.list(is_admin=False, for_llm=False)}
-    admin = {p['citekey'] for p in service.list(is_admin=True, for_llm=False)}
-    assert 'secret2025' not in user and 'secret2025' in admin
-    assert service.get('secret2025', is_admin=False, for_llm=False) is None
+def test_legacy_access_fields_do_not_hide_papers(service):
+    """2.41: access follows the site login; anthive_access/anthive_llm left in
+    a record are ignored, so every paper is listed, fetched and exported."""
+    listed = {p['citekey'] for p in service.list()}
+    assert {'secret2025', 'nollm2021', 'summ2020'} <= listed
+    for citekey in ('secret2025', 'nollm2021', 'summ2020'):
+        assert service.get(citekey) is not None
+    summary = service.summary(service.get('secret2025'))
+    assert 'access' not in summary and 'llm' not in summary
 
 
-def test_llm_policy(service):
-    assert service.get('nollm2021', is_admin=False, for_llm=False) is not None
-    assert service.get('nollm2021', is_admin=False, for_llm=True) is None
-    paper = service.get('summ2020', is_admin=False, for_llm=True)
-    record = service.record(paper, is_admin=False, for_llm=True)
-    assert record['notes'] is None and 'abstract' not in record['fields']
-    record = service.record(paper, is_admin=False, for_llm=False)
+def test_full_record_always_has_notes_abstract_and_related(service):
+    record = service.record(service.get('summ2020'))
     assert record['notes'] and record['fields']['abstract'] == 'An abstract.'
-
-
-def test_hidden_papers_do_not_leak_through_related(service):
-    paper = service.get('nollm2021', is_admin=False, for_llm=False)
-    assert 'related' not in service.record(paper, is_admin=False, for_llm=False)['fields']
-    assert 'secret2025' in service.record(paper, is_admin=True, for_llm=False)['fields']['related']
-    bib = service.bibtex(None, is_admin=False)
-    assert 'secret2025' not in bib
-    assert bib.count('\n@') + 1 == 5
-    assert 'secret2025' in service.bibtex(None, is_admin=True)
+    assert 'anthive_llm' not in record['fields']
+    record = service.record(service.get('nollm2021'))
+    assert record['fields']['related'] == ['secret2025']
+    bib = service.bibtex(None)
+    assert 'secret2025' in bib and bib.count('\n@') + 1 == 6
+    assert 'anthive_access' not in bib and 'anthive_llm' not in bib
 
 
 def test_list_filters(service):
-    by_cohort = {p['citekey'] for p in service.list(is_admin=False, for_llm=False, cohort='rosmap')}
+    by_cohort = {p['citekey'] for p in service.list(cohort='rosmap')}
     assert by_cohort == {'src2024', 'rel2022'}
-    assert [p['citekey'] for p in service.list(is_admin=False, for_llm=False, role='method')] == ['meth2023']
-    assert [p['citekey'] for p in service.list(is_admin=False, for_llm=False, author='doe')] == ['meth2023']
-    assert {p['citekey'] for p in service.list(is_admin=False, for_llm=False, q='source paper summary')} == {'src2024'}
+    assert [p['citekey'] for p in service.list(role='method')] == ['meth2023']
+    assert [p['citekey'] for p in service.list(author='doe')] == ['meth2023']
+    assert {p['citekey'] for p in service.list(q='source paper summary')} == {'src2024'}
 
 
 def test_related_kinds_and_evidence(service):
-    related = service.related('src2024', is_admin=False, for_llm=False)
+    related = service.related('src2024')
     rel = next(r for r in related if r['citekey'] == 'rel2022')
     kinds = {x['kind'] for x in rel['relations']}
     assert {'explicit', 'cohort', 'celltype', 'cites'} <= kinds
-    only = service.related('src2024', is_admin=False, for_llm=False, kinds=['cites'])
+    only = service.related('src2024', kinds=['cites'])
     assert [r['citekey'] for r in only] == ['rel2022']
     assert all(x['kind'] == 'cites' for x in only[0]['relations'])
-    back = service.related('rel2022', is_admin=False, for_llm=False, kinds=['cited_by'])
+    back = service.related('rel2022', kinds=['cited_by'])
     assert [r['citekey'] for r in back] == ['src2024']
 
 
 def test_pdf_path_stays_inside_record_folder(service):
-    paper = service.get('src2024', is_admin=False, for_llm=False)
+    paper = service.get('src2024')
     assert service.pdf_path(paper).name == 'src2024.pdf'
     assert service.pdf_s3_relpath(paper) == 'datasets/src2024.pdf'
     paper.fields['file'] = '../../etc/passwd.pdf'
@@ -247,18 +251,15 @@ def test_pdf_path_stays_inside_record_folder(service):
 
 # ── search, pages, context ───────────────────────────────────────────────────
 
-def test_search_modes_and_access(service, tmp_path, library):
+def test_search_modes(service, tmp_path, library):
     build_toy_index(tmp_path, library)
     service.load_index()
-    result = service.search('microglia amyloid', is_admin=False, for_llm=False, k=10)
+    result = service.search('microglia amyloid', k=10)
     assert result['mode'] == 'hybrid'
     keys = {r['citekey'] for r in result['results']}
-    assert 'secret2025' not in keys and {'src2024', 'nollm2021', 'summ2020'} <= keys
-    llm = {r['citekey'] for r in service.search('microglia amyloid', is_admin=False, for_llm=True, k=10)['results']}
-    assert llm == {'src2024'}          # never + summary_only give no passages to an LLM
-    admin = {r['citekey'] for r in service.search('microglia amyloid', is_admin=True, for_llm=False, k=10)['results']}
-    assert 'secret2025' in admin
-    methods = service.search('nuclei isolated', is_admin=False, for_llm=False, sections=['methods'])
+    # legacy anthive_access/anthive_llm values no longer hold passages back
+    assert {'src2024', 'nollm2021', 'summ2020', 'secret2025'} <= keys
+    methods = service.search('nuclei isolated', sections=['methods'])
     assert methods['results'] and all(r['section'] == 'methods' for r in methods['results'])
     assert '<mark>' in methods['results'][0]['snippet']
 
@@ -267,25 +268,25 @@ def test_model_mismatch_falls_back_to_keyword(service, tmp_path, library):
     build_toy_index(tmp_path, library, model='other/model')
     service.embedder_factory = lambda model: FakeEmbedder('fake/model-1')
     service.load_index()
-    result = service.search('microglia', is_admin=False, for_llm=False)
+    result = service.search('microglia')
     assert result['mode'] == 'keyword'
     assert any('does not match' in w or 'unavailable' in w for w in result['warnings'])
 
 
 def test_missing_index_reports_warning(service):
     service.load_index()
-    result = service.search('microglia', is_admin=False, for_llm=False)
+    result = service.search('microglia')
     assert result['results'] == [] and result['warnings']
     assert service.status()['index']['loaded'] is False
 
 
-def test_page_text_and_llm_policy(service, tmp_path, library):
+def test_page_text(service, tmp_path, library):
     build_toy_index(tmp_path, library)
     service.load_index()
-    paper = service.get('src2024', is_admin=False, for_llm=False)
+    paper = service.get('src2024')
     assert 'Nuclei were isolated' in service.page_text(paper, 5)
     assert service.page_text(paper, 99) is None and service.n_pages(paper) == 7
-    assert not service.full_text_allowed(service.get('summ2020', is_admin=False, for_llm=True), for_llm=True)
+    assert not hasattr(service, 'full_text_allowed')
 
 
 def test_context_pack_and_budget(service, tmp_path, library):
@@ -294,14 +295,13 @@ def test_context_pack_and_budget(service, tmp_path, library):
     info = {'title': 'Cells', 'organism': 'human', 'n_cells': 100, 'n_genes': 50,
             'obs': {'categorical': ['ant_donor', 'cluster'], 'numerical': ['ant_age']},
             'caveats': [{'level': 'high', 'message': 'ambient RNA'}], 'description': 'A dataset.'}
-    full = service.context('S24/CEL', info, module_scores=['A::B::C'], level='full', budget_tokens=5000,
-                           is_admin=False, for_llm=False)
+    full = service.context('S24/CEL', info, module_scores=['A::B::C'], level='full', budget_tokens=5000)
     names = [s['name'] for s in full['sections']]
     assert 'source:src2024' in names and 'caveats' in names and 'module_scores' in names
     assert any(n.startswith('passage:src2024:methods') for n in names)
     assert 'ambient RNA' in full['text'] and 'ant_donor' in full['text']
     assert full['papers'][0] == {'citekey': 'src2024', 'role': 'source', 'citation': 'Smith et al. 2024'}
-    small = service.context('S24/CEL', info, level='full', budget_tokens=200, is_admin=False, for_llm=False)
+    small = service.context('S24/CEL', info, level='full', budget_tokens=200)
     assert small['truncated'] and small['tokens'] <= 200 and small['dropped_sections']
     assert [s['name'] for s in small['sections']][0] == 'dataset'
 

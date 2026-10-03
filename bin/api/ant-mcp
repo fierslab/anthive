@@ -106,9 +106,11 @@ def _is_admin(identity: Optional[dict]) -> bool:
     return bool(identity) and 'admins' in {g.lower() for g in identity.get('groups', [])}
 
 
-# Tools that add papers: only for users in library_upload_groups (ant-serve
-# enforces it again; hiding them keeps the tool list honest).
-UPLOAD_TOOLS = frozenset({'check_paper', 'upload_paper'})
+# Tools about adding papers: only visible to users in library_upload_groups
+# (ant-serve enforces it again with a 403), and only while uploads are
+# switched on (ant-serve's requirements report uploads_enabled).
+UPLOAD_TOOLS = frozenset({'paper_upload_requirements', 'check_paper', 'upload_paper'})
+UPLOADS_DISABLED_MESSAGE = 'Paper uploads are switched off on this site (services.paper_upload).'
 
 
 def _upload_groups() -> set:
@@ -235,6 +237,14 @@ class AnthiveMCP(FastMCP):
     admin-only tools from everyone else."""
 
     require_identity = True
+    # async (identity) -> bool, set in main(): are paper uploads switched on?
+    # None means "assume yes" (tests, or a server without the probe).
+    uploads_probe = None
+
+    async def _uploads_enabled(self, identity: Optional[dict] = None) -> bool:
+        if self.uploads_probe is None:
+            return True
+        return bool(await self.uploads_probe(identity))
 
     def _identity_from_request(self) -> Optional[dict]:
         try:
@@ -252,7 +262,7 @@ class AnthiveMCP(FastMCP):
         identity = self._identity_from_request()
         if self.require_identity and not _is_admin(identity):
             tools = [tool for tool in tools if tool.name not in ADMIN_ONLY_TOOLS]
-        if self.require_identity and not _may_upload(identity):
+        if (self.require_identity and not _may_upload(identity)) or not await self._uploads_enabled(identity):
             tools = [tool for tool in tools if tool.name not in UPLOAD_TOOLS]
         return tools
 
@@ -262,6 +272,8 @@ class AnthiveMCP(FastMCP):
             raise PermissionError(f"The '{name}' tool is restricted to Anthive admins.")
         if self.require_identity and name in UPLOAD_TOOLS and not _may_upload(identity):
             raise PermissionError(f"The '{name}' tool needs permission to upload papers.")
+        if name in UPLOAD_TOOLS and not await self._uploads_enabled(identity):
+            raise PermissionError(UPLOADS_DISABLED_MESSAGE)
         ctx_token = _current_identity.set(identity)
         try:
             return await super().call_tool(name, arguments)
@@ -300,6 +312,22 @@ papers have citekeys like `lee2026plasticity`.
 - Summaries and topics on papers marked as drafts are machine-written and
   not yet reviewed; say so if they matter.
 - Share plot links with the user; every plot call returns one.
+
+## Who sees what, and where text goes
+
+Everyone who can sign in to this Anthive site sees the whole library; there
+are no per-paper access rules. Everything these tools return, including
+passages and notes from library papers, dataset descriptions and numbers, is
+sent to your AI client and from there to its LLM provider. Tell the user if
+that matters for what they are asking.
+
+## Paper roles and document types
+
+A paper's role says why it is in the library: `source` (the data in Anthive
+come from it), `reanalysis`, `method`, `related`, or `background` (of
+interest to the lab, not linked to any dataset; the default). The library
+also holds other documents: `entrytype` plus `type` say which (for example
+`report` with `type: project proposal`, `thesis` with `type: phd thesis`).
 """
 
 
@@ -397,6 +425,11 @@ def main() -> None:
             '  the resource anthive://guide has the full rules.\n'
             '  Always keep "the literature says" (cite [Author Year, p.N]) separate from "our data\n'
             '  shows", and remember per-cell statistics are pseudoreplicated (aggregate per donor).\n'
+            '\n'
+            'DATA LEAVES THE SERVER\n'
+            '  Everything these tools return, including passages and notes from library papers, is\n'
+            '  sent to your AI client and its LLM provider. Everyone who can sign in to this site\n'
+            '  sees the whole library (no per-paper restrictions).\n'
             '\n'
             'LITERATURE\n'
             '  search_literature    full-text passages from the library papers, with citation, page, section\n'
@@ -513,6 +546,28 @@ def main() -> None:
                                           headers=_identity_headers())
         response.raise_for_status()
         return response.json()
+
+    _uploads_state = {'enabled': True, 'checked': 0.0}
+
+    async def _uploads_probe(identity: Optional[dict] = None) -> bool:
+        """uploads_enabled from ant-serve's upload requirements (asked as the
+        caller, who is an uploader by the time this runs), cached for a
+        minute. If ant-serve cannot answer, keep the last known state."""
+        now = time.monotonic()
+        if _uploads_state['checked'] and now - _uploads_state['checked'] < 60:
+            return _uploads_state['enabled']
+        ctx_token = _current_identity.set(identity or _current_identity.get())
+        try:
+            data = await _get('/papers/upload/requirements')
+            _uploads_state['enabled'] = bool(data.get('uploads_enabled', True))
+            _uploads_state['checked'] = now
+        except (httpx.HTTPError, ValueError):
+            pass
+        finally:
+            _current_identity.reset(ctx_token)
+        return _uploads_state['enabled']
+
+    mcp.uploads_probe = _uploads_probe
 
     async def _get_post(path: str, body: dict) -> dict:
         """POST JSON body to ant-serve and return JSON response."""
@@ -1327,6 +1382,9 @@ def main() -> None:
         literature, then check the same question in our data with the
         dataset tools (get_paper lists the datasets a paper is the source of).
 
+        The passages are sent to your AI client and its LLM provider, like
+        everything else these tools return.
+
         Args:
             query:    a natural-language question or keywords (gene names work).
             k:        number of passages (default 6, max 20).
@@ -1483,6 +1541,8 @@ def main() -> None:
         if status == 'duplicate':
             return (f"Already in the library as {body.get('existing_citekey')} (matched on "
                     f"{body.get('matched_on')}). Use update=True to change that record.")
+        if status == 'disabled':
+            return body.get('message') or UPLOADS_DISABLED_MESSAGE
         if status in ('created', 'updated', 'dry_run'):
             verb = {'created': 'Added', 'updated': 'Updated', 'dry_run': 'Dry run, nothing written:'}[status]
             lines = [f"{verb} {body.get('citekey')} in papers/{body.get('folder')}/"]
@@ -1500,8 +1560,11 @@ def main() -> None:
     async def paper_upload_requirements() -> str:
         """What a paper record must and should contain before it can be added
         to the Anthive paper library: required and recommended fields, their
-        meaning and allowed values (entry types, roles, folders), and the PDF
-        size limit. Read this before preparing a paper for upload."""
+        meaning and allowed values (document types, roles with background as
+        the default, folders), whether uploads are switched on, and the PDF
+        size limit. Read this before preparing a paper for upload. Anything
+        you add to the library is visible to everyone who can sign in to the
+        site, and its text may be sent to AI clients and their LLM providers."""
         try:
             data = await _get('/papers/upload/requirements')
         except httpx.HTTPStatusError as exc:
@@ -1520,7 +1583,10 @@ def main() -> None:
             metadata: the record as an object with BibLaTeX field names
                       (entrytype, title, author ['Last, First', ...], date,
                       doi, ...) plus anthive_* fields and optional papers_for,
-                      or the full .md text with YAML front matter.
+                      or the full .md text with YAML front matter. Without
+                      anthive_role the record gets role background (of
+                      interest to the lab, not linked to a dataset); papers_for
+                      only proposes dataset links and does not change it.
         """
         code, body = await _post_upload(metadata, None, folder=None, dry_run=True, update=False)
         return _upload_report(code, body)
@@ -1532,11 +1598,13 @@ def main() -> None:
         The record is validated, missing fields are filled from CrossRef/
         OpenAlex (marked as draft), duplicates are refused unless update=True,
         and it is committed with you as the author. Run check_paper first.
+        Everyone who can sign in to the site will see it, and its text may be
+        sent to AI clients and their LLM providers.
 
         Args:
             metadata:   record object or .md text (see check_paper).
             pdf_base64: the PDF, base64-encoded (optional; size-limited).
-            folder:     lab | datasets | methods | reading (default: by rule).
+            folder:     lab | datasets | methods | reading | proposals (default: by rule).
             update:     True to update the existing record of the same paper.
         """
         pdf = None

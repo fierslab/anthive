@@ -359,6 +359,7 @@ Read every entry between your current version (top-right of the site, or
 | **2.40.0** | Paper upload through the API and MCP, two-way library sync, version button in the top bar. Uploads are off by default. | optional: `services: paper_upload: true` (see "Let people add papers") |
 | **2.40.1** | Paper PDFs moved from `*/static/` into the paper library (and deleted there on S3); new Papers tab, paper pages and Library page. | after `ant sync pull`, delete old local copies: `find <h5adstore> -path '*/static/*.pdf' -not -path '*/_*' -delete`; add the library if you have not (below) |
 | **2.40.2** | Client setup guide for 22 AI clients on GitLab (`doc/MCP_CLIENTS.md`); the help page links to the GitLab docs. | optional: `site.docs_base_url` to point the help links at your own docs |
+| **2.41.0** | Per-paper access and LLM fields (`anthive_access`, `anthive_llm`) removed: everyone with site access sees the whole library, and snippets go to the AI providers of connected clients. Role defaults to `background`; document types; `papers/proposals/`; uploads answer 503 `disabled` when the library is read-only. | before upgrading, check that nothing in the library must stay hidden from people who can sign in to the site (move it out of the library); `ant lib-check` warns about leftover fields |
 
 The in-app chat assistant is off and being phased out; leave
 `services.chat: false`. AI use goes through the personal MCP links.

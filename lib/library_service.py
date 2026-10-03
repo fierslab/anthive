@@ -11,17 +11,13 @@ ant-serve builds one ``LibraryService`` at startup. It joins three sources:
   ``library_chunks.parquet``) for passage search, page text and the
   per-dataset background pack.
 
-Access rules, applied to every answer:
+Access: there are no per-paper rules. Everyone who can sign in to the site
+(the endpoints keep their normal auth) sees the whole library, and any of its
+text, passages included, may be forwarded to an AI client and its LLM
+provider. The per-record ``anthive_access``/``anthive_llm`` fields were
+removed in 2.41.0; leftover values are ignored.
 
-- ``anthive_access: restricted`` papers are visible to admins only;
-  ``public`` and ``internal`` follow the dataset rule (anyone who can reach
-  the API sees them).
-- Callers that forward answers to an external LLM (ant-mcp) set
-  ``for_llm``: papers with ``anthive_llm: never`` disappear entirely,
-  ``summary_only`` papers keep their metadata and summary but no passages,
-  notes, abstract or page text.
-
-Nothing here talks to HTTP; ant-serve passes the caller's flags in.
+Nothing here talks to HTTP.
 """
 from __future__ import annotations
 
@@ -37,7 +33,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 
 import yaml
 
-from library import (LibraryIssues, Paper, export_bibtex, find_references,
+from library import (LEGACY_IGNORED_FIELDS, LibraryIssues, Paper, export_bibtex, find_references,
                      load_library, normalize_doi, parse_front_matter, to_bibtex)
 
 log = logging.getLogger(__name__)
@@ -60,9 +56,6 @@ RELATION_KINDS = ('explicit', 'cohort', 'celltype', 'tissue', 'disease', 'method
                   'author', 'cites', 'cited_by')
 # Terms too generic to make two papers "related" on their own.
 _GENERIC_TERMS = {'normal', 'human', 'mouse', 'brain', 'snrna-seq', 'scrna-seq'}
-_LLM_FULL = 'allowed'
-_LLM_SUMMARY = 'summary_only'
-_LLM_NEVER = 'never'
 
 
 def _as_list(value: Any) -> List[str]:
@@ -295,31 +288,8 @@ class LibraryService:
             },
         }
 
-    # ── access ────────────────────────────────────────────────────────────
-    @staticmethod
-    def llm_policy(paper: Paper) -> str:
-        value = str(paper.fields.get('anthive_llm') or _LLM_FULL)
-        return value if value in (_LLM_FULL, _LLM_SUMMARY, _LLM_NEVER) else _LLM_FULL
-
-    def visible(self, paper: Paper, *, is_admin: bool, for_llm: bool) -> bool:
-        if str(paper.fields.get('anthive_access') or 'public') == 'restricted' and not is_admin:
-            return False
-        if for_llm and self.llm_policy(paper) == _LLM_NEVER:
-            return False
-        return True
-
-    def full_text_allowed(self, paper: Paper, *, for_llm: bool) -> bool:
-        return not (for_llm and self.llm_policy(paper) != _LLM_FULL)
-
-    def _visible_papers(self, is_admin: bool, for_llm: bool) -> Dict[str, Paper]:
-        return {ck: p for ck, p in self.state.papers.items()
-                if self.visible(p, is_admin=is_admin, for_llm=for_llm)}
-
-    def get(self, citekey: str, *, is_admin: bool, for_llm: bool) -> Optional[Paper]:
-        paper = self.state.papers.get(citekey)
-        if paper is None or not self.visible(paper, is_admin=is_admin, for_llm=for_llm):
-            return None
-        return paper
+    def get(self, citekey: str) -> Optional[Paper]:
+        return self.state.papers.get(citekey)
 
     # ── records ───────────────────────────────────────────────────────────
     def summary(self, paper: Paper) -> Dict[str, Any]:
@@ -346,33 +316,27 @@ class LibraryService:
             'methods': _as_list(f.get('anthive_methods')),
             'cohorts': _as_list(f.get('anthive_cohorts')),
             'summary': f.get('anthive_summary'),
-            'access': f.get('anthive_access') or 'public',
-            'llm': self.llm_policy(paper),
             'has_pdf': self.pdf_path(paper) is not None,
             'n_datasets': len({link.db_id for link in links}),
             'draft_fields': _as_list(f.get('anthive_draft')),
         }
 
-    def record(self, paper: Paper, *, is_admin: bool, for_llm: bool) -> Dict[str, Any]:
+    def record(self, paper: Paper) -> Dict[str, Any]:
         out = self.summary(paper)
-        full = self.full_text_allowed(paper, for_llm=for_llm)
-        paper = self._without_hidden_links(paper, self._visible_papers(is_admin, for_llm))
-        fields = {k: v for k, v in paper.fields.items() if k != 'anthive_cites'}
-        if not full:
-            fields.pop('abstract', None)
-        out['fields'] = fields
+        out['fields'] = {k: v for k, v in paper.fields.items()
+                         if k != 'anthive_cites' and k not in LEGACY_IGNORED_FIELDS}
         out['n_cites'] = len(_as_list(paper.fields.get('anthive_cites')))
-        out['notes'] = paper.body if full else None
+        out['notes'] = paper.body
         out['datasets'] = [{'db_id': link.db_id, 'role': link.role, 'scope': link.scope,
                             'via': link.source}
                            for link in sorted(self.state.dataset_links.get(paper.citekey, []),
                                               key=lambda l: (l.role != 'source', l.db_id))]
         out['genesets'] = [{'id': scope, 'role': role}
                            for scope, role in sorted(self.state.geneset_links.get(paper.citekey, []))]
-        out['related'] = self.related(paper.citekey, is_admin=is_admin, for_llm=for_llm, limit=10)
+        out['related'] = self.related(paper.citekey, limit=10)
         return out
 
-    def list(self, *, is_admin: bool, for_llm: bool, role: Optional[str] = None,
+    def list(self, *, role: Optional[str] = None,
              celltype: Optional[str] = None, tissue: Optional[str] = None,
              disease: Optional[str] = None, method: Optional[str] = None,
              cohort: Optional[str] = None, organism: Optional[str] = None,
@@ -387,7 +351,7 @@ class LibraryService:
             year_hi = int(parts[-1]) if parts[-1] else None
         words = [_norm(w) for w in (q or '').split() if w.strip()]
         out = []
-        for paper in self._visible_papers(is_admin, for_llm).values():
+        for paper in self.state.papers.values():
             f = paper.fields
             if role and str(f.get('anthive_role')) != role:
                 continue
@@ -416,34 +380,14 @@ class LibraryService:
         out.sort(key=lambda s: (-(s['year'] or 0), s['citekey']))
         return out
 
-    def _without_hidden_links(self, paper: Paper, visible: Iterable[str]) -> Paper:
-        """A copy whose ``related`` list only names papers the caller may see,
-        so a restricted paper's citekey never leaks through its neighbours."""
-        visible = set(visible)
-        related = _as_list(paper.fields.get('related'))
-        if all(ck in visible for ck in related):
-            return paper
-        fields = dict(paper.fields)
-        kept = [ck for ck in related if ck in visible]
-        if kept:
-            fields['related'] = kept
-        else:
-            fields.pop('related', None)
-            fields.pop('relatedtype', None)
-        return Paper(citekey=paper.citekey, fields=fields, body=paper.body, path=paper.path)
-
-    def bibtex(self, citekeys: Optional[Iterable[str]], *, is_admin: bool,
-               classic: bool = False) -> str:
-        papers = self._visible_papers(is_admin, for_llm=False)
+    def bibtex(self, citekeys: Optional[Iterable[str]], *, classic: bool = False) -> str:
+        papers = self.state.papers
         chosen = [papers[ck] for ck in citekeys if ck in papers] if citekeys is not None \
             else list(papers.values())
-        chosen = [self._without_hidden_links(p, papers) for p in chosen]
         return export_bibtex(chosen, include_anthive=True, classic=classic)
 
-    def bibtex_one(self, paper: Paper, classic: bool = False, *, is_admin: bool = False) -> str:
-        visible = self._visible_papers(is_admin, for_llm=False)
-        return to_bibtex(self._without_hidden_links(paper, visible), include_anthive=True,
-                         classic=classic) + '\n'
+    def bibtex_one(self, paper: Paper, classic: bool = False) -> str:
+        return to_bibtex(paper, include_anthive=True, classic=classic) + '\n'
 
     def pdf_path(self, paper: Paper) -> Optional[Path]:
         name = paper.fields.get('file')
@@ -474,9 +418,9 @@ class LibraryService:
             return None
 
     # ── relations ─────────────────────────────────────────────────────────
-    def related(self, citekey: str, *, is_admin: bool, for_llm: bool,
-                kinds: Optional[Sequence[str]] = None, limit: int = 25) -> List[Dict[str, Any]]:
-        papers = self._visible_papers(is_admin, for_llm)
+    def related(self, citekey: str, *, kinds: Optional[Sequence[str]] = None,
+                limit: int = 25) -> List[Dict[str, Any]]:
+        papers = self.state.papers
         me = papers.get(citekey)
         if me is None:
             return []
@@ -545,10 +489,10 @@ class LibraryService:
             entry['year'] = _year(paper.fields)
         return ranked
 
-    def papers_for_dataset(self, db_id: str, *, is_admin: bool, for_llm: bool) -> List[Dict[str, Any]]:
+    def papers_for_dataset(self, db_id: str) -> List[Dict[str, Any]]:
         out = []
         for citekey, role in self.state.papers_by_db.get(db_id, []):
-            paper = self.get(citekey, is_admin=is_admin, for_llm=for_llm)
+            paper = self.get(citekey)
             if paper is None:
                 continue
             item = self.summary(paper)
@@ -557,14 +501,13 @@ class LibraryService:
         return out
 
     # ── literature search and pages ───────────────────────────────────────
-    def search(self, query: str, *, is_admin: bool, for_llm: bool, k: int = 10,
+    def search(self, query: str, *, k: int = 10,
                mode: str = 'hybrid', sections: Optional[Sequence[str]] = None,
                citekeys: Optional[Sequence[str]] = None, year: Optional[str] = None) -> Dict[str, Any]:
         if self.index is None:
             return {'query': query, 'mode': None, 'results': [],
                     'warnings': [self.index_error or 'literature index still loading']}
-        allowed = {ck for ck, p in self._visible_papers(is_admin, for_llm).items()
-                   if self.full_text_allowed(p, for_llm=for_llm)}
+        allowed = set(self.state.papers)
         if citekeys:
             allowed &= set(citekeys)
         year_lo = year_hi = None
@@ -572,8 +515,7 @@ class LibraryService:
             parts = str(year).split('..')
             year_lo = int(parts[0]) if parts[0] else None
             year_hi = int(parts[-1]) if parts[-1] else None
-        # PDFs without a library record (no citekey) are not served: their
-        # access policy is unknown.
+        # PDFs without a library record (no citekey) are not served.
         raw = self.index.search(query, k=max(k * 3, k), mode=mode, citekeys=allowed or {'\x00'},
                                 sections=sections or None, year_min=year_lo, year_max=year_hi)
         results = []
@@ -617,8 +559,7 @@ class LibraryService:
 
     # ── per-dataset background pack ───────────────────────────────────────
     def context(self, db_id: str, info: Dict[str, Any], *, module_scores: Sequence[str] = (),
-                level: str = 'brief', budget_tokens: int = 4000,
-                is_admin: bool, for_llm: bool) -> Dict[str, Any]:
+                level: str = 'brief', budget_tokens: int = 4000) -> Dict[str, Any]:
         """Everything an LLM should know before analysing ``db_id``, trimmed
         to ``budget_tokens`` (approximate, same estimate as the index)."""
         from library_index import count_tokens  # noqa: PLC0415
@@ -675,7 +616,7 @@ class LibraryService:
                              'text': '## Precomputed module scores\n' + ', '.join(shown)
                              + (f" (+{len(module_scores) - len(shown)} more)" if len(module_scores) > len(shown) else '')})
 
-        papers = self.papers_for_dataset(db_id, is_admin=is_admin, for_llm=for_llm)
+        papers = self.papers_for_dataset(db_id)
         sources = [p for p in papers if p['link_role'] == 'source']
         others = [p for p in papers if p['link_role'] != 'source']
         for paper in sources:
@@ -689,7 +630,7 @@ class LibraryService:
                     text.append(f"{label}: {', '.join(paper[key])}")
             sections.append({'name': f"source:{paper['citekey']}", 'priority': 2, 'text': '\n'.join(text)})
             record = self.state.papers.get(paper['citekey'])
-            if self.index is not None and record is not None and self.full_text_allowed(record, for_llm=for_llm):
+            if self.index is not None and record is not None:
                 queries = [('methods', 'tissue dissociation nuclei isolation sequencing quality control '
                                        'normalization clustering cell type annotation donors cohort', 3 if full else 2),
                            ('results', 'main findings microglia states disease association', 2 if full else 1)]
@@ -707,8 +648,7 @@ class LibraryService:
         if sources:
             related = {}
             for paper in sources:
-                for item in self.related(paper['citekey'], is_admin=is_admin, for_llm=for_llm,
-                                         limit=8 if full else 4):
+                for item in self.related(paper['citekey'], limit=8 if full else 4):
                     related.setdefault(item['citekey'], item)
             if related:
                 text = ['## Related papers in the library']

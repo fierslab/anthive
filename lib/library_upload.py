@@ -9,16 +9,24 @@ YAML front matter) and optionally a PDF, and:
    ``anthive_draft``;
 3. refuses duplicates (same DOI, PMID, PDF checksum or citekey) unless the
    caller asked to update the existing record;
-4. picks the folder (``lab`` for a lab author, ``datasets`` for source and
-   reanalysis papers, ``methods`` for method papers, ``reading`` otherwise)
-   unless the caller named one;
+4. sets the role to ``background`` when none is given, and picks the folder
+   (``proposals`` for a report whose type mentions a proposal, ``lab`` for a
+   lab author, ``datasets`` for source and reanalysis papers, ``methods`` for
+   method papers, ``reading`` otherwise) unless the caller named one;
 5. writes ``papers/<folder>/<citekey>.md`` (+ ``.pdf``) atomically under a
    lock and commits the record in the library git repository with the
    uploader as author.
 
 Dataset links proposed by the uploader (``papers_for``) are stored as
 ``anthive_proposed_links`` in the record and never written into the
-h5adstore: linking a dataset to a paper stays a curated step.
+h5adstore: linking a dataset to a paper stays a curated step, and they do
+not change the record's role.
+
+There is no per-record access or LLM policy (removed in 2.41.0): everyone who
+can sign in sees the whole library, and any of its text may be sent to an AI
+client. ``anthive_access``/``anthive_llm`` in an upload are dropped with a
+warning. When the library folder is not writable (``services.paper_upload``
+off, read-only mount) uploads answer 503 ``disabled`` before any write.
 
 Nothing here talks HTTP; ant-serve and the tests call ``upload_paper``.
 """
@@ -37,25 +45,37 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import yaml
 
-from library import (ACCESS, DEFAULT_LAB_AUTHORS, ENTRY_TYPES, LIST_FIELDS, LLM_POLICY,
-                     ROLES, Paper, first_author_last, folder_for, load_library,
+from library import (DEFAULT_LAB_AUTHORS, DEFAULT_ROLE, DOCUMENT_TYPES, ENTRY_TYPES,
+                     ENTRYTYPE_HELP, IDENTIFIED_TYPES, LEGACY_IGNORED_FIELDS, LIST_FIELDS,
+                     ROLE_HELP, ROLES, Paper, first_author_last, folder_for, load_library,
                      make_citekey, normalize_doi, parse_front_matter, render_sidecar,
                      validate_paper)
 
-FOLDERS = ('lab', 'datasets', 'methods', 'reading')
-NOTE_ONLY_TYPES = {'unpublished', 'misc'}
+FOLDERS = ('lab', 'datasets', 'methods', 'reading', 'proposals')
 IDENTIFIER_FIELDS = ('doi', 'pmid', 'eprint', 'url')
 REQUIRED = ['entrytype', 'title', 'author', 'date or year', 'identifier']
 RECOMMENDED = ['journaltitle', 'abstract', 'keywords', 'anthive_role', 'anthive_celltypes',
                'anthive_tissues', 'anthive_diseases', 'anthive_methods', 'anthive_cohorts',
-               'anthive_summary', 'anthive_access', 'anthive_llm', 'papers_for']
+               'anthive_summary', 'papers_for']
+NOTICE = ("Everyone who can sign in to this site sees the whole library. Any library text, "
+          "including passages from papers and notes, may be sent to an AI client and its "
+          "external LLM provider.")
+DISABLED_MESSAGE = 'Paper uploads are switched off on this site (services.paper_upload).'
+ROLE_DESCRIPTION = ('default: background (of interest to the lab, not linked to a dataset); '
+                    'set source or reanalysis only when the data in anthive come from the paper')
 PDF_MAGIC = b'%PDF-'
 LOCK_NAME = '.anthive-upload.lock'
 DEFAULT_COMMITTER = 'anthive <noreply@anthive.local>'
 
 FIELD_HELP: Dict[str, Dict[str, Any]] = {
-    'entrytype': {'description': 'BibLaTeX entry type', 'example': 'article', 'type': 'string',
-                  'vocab': sorted(ENTRY_TYPES)},
+    'entrytype': {'description': 'BibLaTeX entry type (the document type, with `type`)', 'example': 'article',
+                  'type': 'string', 'vocab': list(ENTRYTYPE_HELP)},
+    'type': {'description': "BibLaTeX type: the kind of thesis or report, e.g. 'phd thesis', "
+                            "'project proposal' (see document_types)", 'example': 'project proposal',
+             'type': 'string'},
+    'institution': {'description': 'university, institute or funder; report, thesis, unpublished and misc '
+                                   'need institution or note when they have no identifier',
+                    'example': 'KU Leuven', 'type': 'string'},
     'title': {'description': 'full title', 'example': 'Plasticity of human microglia ...', 'type': 'string'},
     'author': {'description': "authors as a list of 'Last, First'", 'example': ['Lee, Donghoon', 'Roussos, Panos'],
                'type': 'list'},
@@ -66,13 +86,13 @@ FIELD_HELP: Dict[str, Dict[str, Any]] = {
     'eprint': {'description': 'preprint id (with eprinttype)', 'example': '2024.01.02.573911', 'type': 'string'},
     'eprinttype': {'description': 'preprint server', 'example': 'biorxiv', 'type': 'string'},
     'url': {'description': 'stable URL when there is no DOI/PMID', 'example': 'https://...', 'type': 'string'},
-    'note': {'description': 'free note; required for unpublished/misc entries without an identifier',
+    'note': {'description': 'free note; report, thesis, unpublished and misc need note or institution',
              'example': 'Manuscript in preparation', 'type': 'string'},
     'journaltitle': {'description': 'journal name', 'example': 'Nature Genetics', 'type': 'string'},
     'abstract': {'description': 'abstract text', 'example': '...', 'type': 'string'},
     'keywords': {'description': 'free keywords', 'example': ['microglia', 'aging'], 'type': 'list'},
-    'anthive_role': {'description': 'why the paper is in the library', 'example': 'source', 'type': 'string',
-                     'vocab': sorted(ROLES)},
+    'anthive_role': {'description': ROLE_DESCRIPTION, 'example': 'background', 'type': 'string',
+                     'vocab': sorted(ROLES), 'default': DEFAULT_ROLE},
     'anthive_celltypes': {'description': 'cell types studied (mus vocabulary labels)',
                           'example': ['microglial cell'], 'type': 'list'},
     'anthive_tissues': {'description': 'tissues or regions (mus vocabulary labels)',
@@ -82,12 +102,9 @@ FIELD_HELP: Dict[str, Dict[str, Any]] = {
     'anthive_methods': {'description': 'main methods', 'example': ['snRNA-seq', '10x Chromium'], 'type': 'list'},
     'anthive_cohorts': {'description': 'donor cohorts', 'example': ['ROSMAP'], 'type': 'list'},
     'anthive_summary': {'description': '2-3 sentences on what the paper shows', 'example': '...', 'type': 'string'},
-    'anthive_access': {'description': 'who may see it', 'example': 'internal', 'type': 'string',
-                       'vocab': sorted(ACCESS)},
-    'anthive_llm': {'description': 'may passages go to external LLMs', 'example': 'allowed', 'type': 'string',
-                    'vocab': sorted(LLM_POLICY)},
     'papers_for': {'description': "datasets or collections this paper is the source/reanalysis of, "
-                                  "e.g. {'L26/FMG': 'source'} (stored as a proposal for an admin to link)",
+                                  "e.g. {'L26/FMG': 'source'} (stored as a proposal for an admin to link; "
+                                  "does not change anthive_role)",
                    'example': {'L26/FMG': 'source'}, 'type': 'mapping'},
 }
 
@@ -118,22 +135,60 @@ class UploadResult:
     pdf_path: Optional[Path] = None
 
 
-def requirements(max_pdf_mb: int = 25) -> Dict[str, Any]:
+def requirements(max_pdf_mb: int = 25, uploads_enabled: bool = True) -> Dict[str, Any]:
     return {
+        'notice': NOTICE,
+        'uploads_enabled': uploads_enabled,
         'required': REQUIRED,
         'required_detail': {
-            'identifier': "at least one of doi, pmid, eprint (+eprinttype) or url; entrytype "
-                          "unpublished or misc may instead give a note",
+            'identifier': (f"for entrytype {', '.join(sorted(IDENTIFIED_TYPES))}: at least one of doi, "
+                           "pmid, eprint (+eprinttype) or url; report, thesis, unpublished and misc "
+                           "need institution or note instead"),
             'author': "a list of 'Last, First' names, at least one",
             'date or year': 'date (YYYY[-MM[-DD]]) or year',
         },
         'recommended': RECOMMENDED,
         'fields': FIELD_HELP,
-        'roles': sorted(ROLES),
+        'roles': {role: ROLE_HELP[role] for role in ('source', 'reanalysis', 'method', 'related', 'background')},
+        'default_role': DEFAULT_ROLE,
         'folders': list(FOLDERS),
-        'entrytypes': sorted(ENTRY_TYPES),
+        'entrytypes': dict(ENTRYTYPE_HELP),
+        'document_types': {k: list(v) for k, v in DOCUMENT_TYPES.items()},
         'max_pdf_mb': max_pdf_mb,
     }
+
+
+def uploads_enabled(library_dir: Path) -> bool:
+    """True when an upload could write: the library folder exists and it,
+    its ``papers/`` folder and the lock location are writable (a read-only
+    mount means uploads are switched off)."""
+    library_dir = Path(library_dir)
+    if not library_dir.is_dir():
+        return False
+    candidates = [library_dir, library_dir / 'papers', private_path(library_dir, LOCK_NAME).parent]
+    return all(os.access(path, os.W_OK) for path in candidates if path.exists())
+
+
+def disabled_error() -> UploadError:
+    return UploadError(503, {'status': 'disabled', 'message': DISABLED_MESSAGE})
+
+
+def drop_legacy_fields(fields: Dict[str, Any]) -> List[str]:
+    """Remove anthive_access/anthive_llm (and their anthive_draft entries)
+    in place; one warning per field that was there."""
+    warnings = []
+    for key, reason in LEGACY_IGNORED_FIELDS.items():
+        if key in fields:
+            fields.pop(key)
+            warnings.append(f"{key} ignored: {reason}")
+    draft = fields.get('anthive_draft')
+    if isinstance(draft, list) and any(k in LEGACY_IGNORED_FIELDS for k in draft):
+        draft = [k for k in draft if k not in LEGACY_IGNORED_FIELDS]
+        if draft:
+            fields['anthive_draft'] = draft
+        else:
+            fields.pop('anthive_draft')
+    return warnings
 
 
 # ── input normalisation ─────────────────────────────────────────────────
@@ -249,13 +304,13 @@ def check_required(fields: Dict[str, Any]) -> Tuple[List[Dict[str, str]], List[s
     if fields.get('eprint') and not fields.get('eprinttype') and not any(fields.get(k) for k in ('doi', 'pmid', 'url')):
         errors.append({'field': 'eprinttype', 'message': 'eprint needs eprinttype (e.g. biorxiv, arxiv)'})
     if not has_id:
-        if entrytype in NOTE_ONLY_TYPES:
-            if not fields.get('note'):
-                missing.append('identifier')
-                errors.append({'field': 'note', 'message': f'{entrytype} entries without an identifier need a note'})
-        else:
+        if entrytype in IDENTIFIED_TYPES or not entrytype:
             missing.append('identifier')
             errors.append({'field': 'doi', 'message': 'an identifier is required: doi, pmid, eprint+eprinttype or url'})
+        elif not (fields.get('institution') or fields.get('note')):
+            missing.append('identifier')
+            errors.append({'field': 'institution',
+                           'message': f'{entrytype} entries without an identifier need an institution or a note'})
     return errors, missing
 
 
@@ -464,13 +519,20 @@ def upload_paper(settings: UploadSettings, metadata: Any, pdf: Optional[bytes] =
                  fetch: Callable[[Dict[str, Any]], Dict[str, Any]] = default_fetch) -> UploadResult:
     """Validate, enrich, deduplicate, place and commit one paper (see module doc)."""
     library_dir = Path(settings.library_dir)
+    if not dry_run and library_dir.is_dir() and not uploads_enabled(library_dir):
+        raise disabled_error()
     check_pdf(pdf, settings.max_pdf_mb)
     if folder is not None and folder not in FOLDERS:
         raise UploadError(422, {'status': 'invalid', 'missing_required': [],
                                 'errors': [{'field': 'folder', 'message': f'folder must be one of {list(FOLDERS)}'}]})
     raw, body = parse_metadata(metadata)
+    warnings: List[str] = drop_legacy_fields(raw)
+    given_role = str(raw.get('anthive_role') or '')
     try:
-        links = normalise_links(raw.pop('papers_for', None), str(raw.get('anthive_role') or 'source'))
+        # a proposed link without its own role is a source link; the record's
+        # role is not taken from (or changed by) the links
+        links = normalise_links(raw.pop('papers_for', None),
+                                given_role if given_role and given_role != DEFAULT_ROLE else 'source')
     except ValueError as exc:
         raise UploadError(422, {'status': 'invalid', 'missing_required': [],
                                 'errors': [{'field': 'papers_for', 'message': str(exc)}]})
@@ -478,7 +540,6 @@ def upload_paper(settings: UploadSettings, metadata: Any, pdf: Optional[bytes] =
     if links:
         fields['anthive_proposed_links'] = {**(fields.get('anthive_proposed_links') or {}), **links}
     filled: List[str] = []
-    warnings: List[str] = []
     if enrich_fields:
         fields, filled, enrich_warnings = enrich(fields, fetch)
         warnings += enrich_warnings
@@ -507,6 +568,8 @@ def upload_paper(settings: UploadSettings, metadata: Any, pdf: Optional[bytes] =
                 merged['anthive_draft'] = sorted(set(existing.fields.get('anthive_draft') or [])
                                                  | set(fields.get('anthive_draft') or []))
             fields = merged
+            warnings += [w for w in drop_legacy_fields(fields) if w not in warnings]
+            fields.setdefault('anthive_role', DEFAULT_ROLE)
             citekey = existing.citekey
             target_dir = existing.path.parent
             body = body or existing.body
@@ -519,10 +582,12 @@ def upload_paper(settings: UploadSettings, metadata: Any, pdf: Optional[bytes] =
             if not citekey:
                 year = fields.get('year') or str(fields.get('date') or '')[:4]
                 citekey = make_citekey(first_author_last(fields), year, fields.get('title', ''), papers)
-            role = str(fields.get('anthive_role') or '')
+            fields.setdefault('anthive_role', DEFAULT_ROLE)
+            role = str(fields['anthive_role'])
             try:
                 target_dir = folder_for(library_dir, role, folder, fields.get('author') or [],
-                                        settings.lab_authors)
+                                        settings.lab_authors, fields.get('entrytype') or '',
+                                        fields.get('type') or '')
             except ValueError as exc:
                 raise UploadError(422, {'status': 'invalid', 'missing_required': [],
                                         'errors': [{'field': 'folder', 'message': str(exc)}]})
@@ -575,7 +640,7 @@ def upload_paper(settings: UploadSettings, metadata: Any, pdf: Optional[bytes] =
 
 
 def _field_of(message: str) -> str:
-    for key in ('doi', 'entrytype', 'title', 'author', 'anthive_role', 'anthive_access', 'anthive_llm',
+    for key in ('doi', 'entrytype', 'title', 'author', 'anthive_role', 'institution', 'note',
                 'date', 'citekey'):
         if key in message:
             return key

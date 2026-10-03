@@ -31,7 +31,8 @@
 {% from "_macros.html" import breadcrumb %}
 <div class="paper-page">
   {{ breadcrumb([("library", "/library"), (paper.citation_line, None)], ids=[("citekey", paper.citekey)]) }}
-  <div class="pp-cite">{{ paper.citation_line }}{% if record.entrytype %} · {{ record.entrytype }}{% endif %}</div>
+  <div class="pp-cite">{{ paper.citation_line }}{% if record.entrytype %} · {{ record.entrytype }}{% endif %}{% if doc_type %} ({{ doc_type }}){% endif %}
+    · <span class="paper-role role-{{ own_role }}" title="{{ own_role_help }}">{{ own_role_badge }}</span>{% if own_role_help %} <span class="muted">{{ own_role_help }}</span>{% endif %}</div>
   <h1>{{ paper.title }}</h1>
 
   {% if authors %}

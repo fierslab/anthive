@@ -37,7 +37,7 @@ ENTRY_TYPES = {
 # BibLaTeX fields we recognise, in the order they are written.
 BIBLATEX_FIELDS = [
     'entrytype', 'citekey', 'author', 'editor', 'title', 'subtitle',
-    'journaltitle', 'journal', 'booktitle', 'publisher', 'institution',
+    'journaltitle', 'journal', 'booktitle', 'publisher', 'institution', 'type',
     'date', 'year', 'month', 'volume', 'number', 'issue', 'pages',
     'eid', 'doi', 'pmid', 'pmcid', 'isbn', 'issn', 'eprint', 'eprinttype',
     'eprintclass', 'url', 'urldate', 'language', 'abstract', 'keywords',
@@ -48,7 +48,7 @@ ANTHIVE_FIELDS = [
     'anthive_role', 'anthive_celltypes', 'anthive_tissues',
     'anthive_diseases', 'anthive_organisms', 'anthive_methods',
     'anthive_cohorts', 'anthive_summary', 'anthive_orcids', 'anthive_cites',
-    'anthive_openalex', 'anthive_access', 'anthive_llm', 'anthive_draft',
+    'anthive_openalex', 'anthive_draft',
     'anthive_proposed_links',
 ]
 
@@ -60,8 +60,44 @@ LIST_FIELDS = {
 }
 
 ROLES = {'source', 'reanalysis', 'method', 'background', 'related'}
-ACCESS = {'public', 'internal', 'restricted'}
-LLM_POLICY = {'allowed', 'summary_only', 'never'}
+# The role a record gets when none is given: of interest to the lab, not
+# linked to a dataset. Source/reanalysis are only ever set explicitly.
+DEFAULT_ROLE = 'background'
+ROLE_HELP = {
+    'source': 'the data in anthive come from this paper',
+    'reanalysis': 'the paper reanalyses data that are in anthive',
+    'method': 'a method used on anthive data',
+    'related': 'related to a dataset in anthive, not its source',
+    'background': 'of interest to the lab, not linked to any dataset (the default)',
+}
+# Per-record access and LLM policies were removed in 2.41.0: everyone who can
+# sign in to the site sees the whole library, and any of its text may be sent
+# to an AI client. Leftover fields are ignored with a warning.
+LEGACY_IGNORED_FIELDS = {
+    'anthive_access': 'access follows the site login',
+    'anthive_llm': 'all library text may be sent to AI clients',
+}
+
+# Document types: the BibLaTeX entrytype plus its `type` field.
+ENTRYTYPE_HELP = {
+    'article': 'journal article',
+    'online': 'preprint or web page (set eprint/eprinttype or url)',
+    'book': 'book',
+    'inbook': 'chapter or part of a book',
+    'incollection': 'contribution to an edited collection',
+    'inproceedings': 'conference paper',
+    'thesis': "thesis; set type: 'phd thesis' or 'master thesis'",
+    'report': "report; set type, e.g. 'project proposal', 'grant proposal', 'technical report', 'protocol'",
+    'unpublished': 'manuscript in preparation or otherwise unpublished',
+    'misc': 'anything else',
+}
+DOCUMENT_TYPES = {
+    'thesis': ['phd thesis', 'master thesis'],
+    'report': ['project proposal', 'grant proposal', 'technical report', 'protocol'],
+}
+# Entrytypes that must carry an identifier (doi, pmid, eprint or url); the
+# others need institution or note instead.
+IDENTIFIED_TYPES = {'article', 'online', 'book', 'inbook', 'incollection', 'inproceedings'}
 
 # BibLaTeX relatedtype values plus the ones anthive uses.
 RELATED_TYPES = {
@@ -296,10 +332,9 @@ def validate_paper(paper: Paper, vocab: Optional[Dict[str, set]] = None) -> Libr
     role = f.get('anthive_role')
     if role is not None and role not in ROLES:
         issues.errors.append(f"{where}: anthive_role {role!r} not in {sorted(ROLES)}")
-    if f.get('anthive_access') not in (None, *ACCESS):
-        issues.errors.append(f"{where}: anthive_access must be one of {sorted(ACCESS)}")
-    if f.get('anthive_llm') not in (None, *LLM_POLICY):
-        issues.errors.append(f"{where}: anthive_llm must be one of {sorted(LLM_POLICY)}")
+    for key, reason in LEGACY_IGNORED_FIELDS.items():
+        if key in f:
+            issues.warnings.append(f"{where}: {key} ignored: {reason}")
     if f.get('relatedtype') and f['relatedtype'] not in RELATED_TYPES:
         issues.warnings.append(f"{where}: relatedtype {f['relatedtype']!r} is not a known type")
     if f.get('related') and not f.get('relatedtype'):
@@ -333,9 +368,10 @@ def library_papers_dir(root: Path) -> Path:
 NON_RECORD_NAMES = {'README.MD', 'REVIEW.MD', 'INDEX.MD', 'CONVENTIONS.MD'}
 # Default sub-folder of papers/ for new records. Folders are for people
 # only: nothing reads meaning from them (roles and `papers:` references are
-# the source of truth). Precedence: lab (an author matches a configured lab
-# author) > datasets (role source or reanalysis) > methods (role method) >
-# reading.
+# the source of truth). Precedence: proposals (entrytype report whose type
+# mentions a proposal) > lab (an author matches a configured lab author) >
+# datasets (role source or reanalysis) > methods (role method) > reading.
+PROPOSALS_FOLDER = 'proposals'
 LAB_FOLDER = 'lab'
 DEFAULT_FOLDERS = {'source': 'datasets', 'reanalysis': 'datasets', 'method': 'methods'}
 DEFAULT_FOLDER = 'reading'
@@ -354,6 +390,11 @@ def is_lab_paper(authors: Iterable[str], lab_authors: Iterable[str] = DEFAULT_LA
     return any(w in norm(author) for author in authors for w in wanted)
 
 
+def is_proposal(entrytype: Any, doc_type: Any) -> bool:
+    """True for a report whose BibLaTeX ``type`` mentions a proposal."""
+    return str(entrytype or '').lower() == 'report' and 'proposal' in str(doc_type or '').lower()
+
+
 def record_paths(papers_dir: Path) -> List[Path]:
     """Every candidate record under ``papers_dir``, at any depth, skipping
     ``_``/``.`` folders and known non-record files (README, REVIEW, ...)."""
@@ -370,9 +411,11 @@ def record_paths(papers_dir: Path) -> List[Path]:
 
 
 def folder_for(library: Path, role: str, folder: Optional[str] = None,
-               authors: Iterable[str] = (), lab_authors: Iterable[str] = DEFAULT_LAB_AUTHORS) -> Path:
+               authors: Iterable[str] = (), lab_authors: Iterable[str] = DEFAULT_LAB_AUTHORS,
+               entrytype: str = '', doc_type: str = '') -> Path:
     """The folder a new record goes in: ``--folder`` (with or without a
-    leading ``papers/``), else by precedence ``papers/lab`` (a lab author),
+    leading ``papers/``), else by precedence ``papers/proposals`` (a report
+    whose type mentions a proposal), ``papers/lab`` (a lab author),
     ``papers/datasets`` (source, reanalysis), ``papers/methods`` (method),
     ``papers/reading``."""
     papers_dir = Path(library) / 'papers'
@@ -383,6 +426,8 @@ def folder_for(library: Path, role: str, folder: Optional[str] = None,
         if any(part in ('..',) or part.startswith(('_', '.')) for part in rel.parts if part != '.'):
             raise ValueError(f"folder {folder!r} must stay inside papers/ and not start with _ or .")
         return papers_dir / rel
+    if is_proposal(entrytype, doc_type):
+        return papers_dir / PROPOSALS_FOLDER
     if is_lab_paper(authors, lab_authors):
         return papers_dir / LAB_FOLDER
     return papers_dir / DEFAULT_FOLDERS.get(role, DEFAULT_FOLDER)
@@ -546,7 +591,7 @@ def to_bibtex(paper: Paper, include_anthive: bool = True, classic: bool = False)
         entrytype = _CLASSIC_TYPES.get(entrytype, entrytype)
     lines = [f"@{entrytype}{{{paper.citekey},"]
     for key, value in ordered_fields(fields).items():
-        if key in ('entrytype', 'citekey') or value in (None, '', []):
+        if key in ('entrytype', 'citekey') or value in (None, '', []) or key in LEGACY_IGNORED_FIELDS:
             continue
         if key.startswith('anthive_') and not include_anthive:
             continue

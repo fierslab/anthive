@@ -47,7 +47,7 @@
     assistant connected with your personal MCP link.
   </div>
 
-  <input type="search" class="filter" id="help-filter" placeholder="Search this help page (for example: MCP, skills, download, upload)" aria-label="Search this help page">
+  <input type="search" class="filter" id="help-filter" placeholder="Search this help page (for example: MCP, skills, download, library)" aria-label="Search this help page">
   <div class="filter-status" id="help-filter-status"></div>
 
   <nav aria-label="Contents">
@@ -151,10 +151,13 @@
     <ul>
       <li><strong><a href="/library">Library page</a>:</strong> every paper, searchable and filterable by year, cohort, cell type and role.</li>
       <li><strong>Paper page:</strong> the full record (authors, journal, DOI, PubMed, abstract), a short summary, topics (cell types, tissues, diseases, methods, cohorts), the datasets it is linked to, related papers, the PDF and a BibTeX entry.</li>
+      <li><strong>Who sees the library.</strong> Everyone who can sign in to this site sees every paper and document in it; there are no per-paper restrictions. Text from the library, including passages from papers, may be sent to AI assistants and their providers (see <a href="#ai-practice">privacy</a>).</li>
+      <li><strong>Roles.</strong> Every paper has a role: <em>source</em> (the data in anthive come from this paper), <em>reanalysis</em> (it reanalyses data that are in anthive), <em>method</em> (a method used on anthive data), <em>related</em> (related to a dataset, not its source) or <em>background</em> (of interest to the lab, not linked to any dataset). Background is the default when no role is given.</li>
+      <li><strong>Document types.</strong> Besides journal articles and preprints the library can hold books and chapters, conference papers, theses (PhD or master), reports such as project or grant proposals, technical reports and protocols, and manuscripts in preparation. Project proposals are kept in their own folder.</li>
       <li><strong>Why a paper is linked.</strong> Datasets point to papers with a role: <em>source</em> (the data come from this paper), <em>reanalysis</em>, <em>method</em> (a protocol or tool used) or <em>related</em> (for example a preprint of the same study). Related papers are also found automatically, and the page says why: same cohort, another version of the same study, shared authors, same cell type, tissue, disease or method, or one cites the other.</li>
       <li><strong>Drafts.</strong> Summaries and topics marked <em>draft, not yet reviewed</em> were written by a language model from the abstract and methods and still await a curator. Treat them as hints; the PDF and the record are authoritative.</li>
       <li><strong>Search inside papers.</strong> The full text is indexed by section and page; AI assistants can search it and cite the page (see <a href="#mcp-offers">MCP</a>).</li>
-      <li><strong>Adding papers.</strong> By default only admins can add papers (sites can widen this). Admins and other permitted users can upload through the API (<code>POST /api/papers/upload</code>, with <code>GET /api/papers/upload/requirements</code> listing what a record needs) or through their AI assistant with the MCP tools <code>check_paper</code> and <code>upload_paper</code>. The <code>anthive-paper-upload</code> skill guides an assistant through collecting complete metadata first; the record format is described in <a href="{{ _docs }}/LIBRARY.md" target="_blank" rel="noopener">the library documentation</a>. New papers are checked for duplicates, missing details are filled from CrossRef and PubMed, and links to datasets are proposed for a curator to confirm.</li>
+      <li><strong>Adding papers.</strong> Admins can add papers; see <a href="{{ _docs }}/LIBRARY.md" target="_blank" rel="noopener">the library documentation</a>. If you would like a paper added, ask an admin.</li>
     </ul>
   </section>
 
@@ -165,6 +168,7 @@
       <li><strong>MCP</strong> is the live connection: it lets the assistant use anthive, as you, through a personal link.</li>
       <li><strong>Skills</strong> are written know-how installed in your assistant: how to use anthive well, which caveats matter, how to cite. They are loaded automatically when relevant.</li>
     </ul>
+    <p id="ai-provider-note">Anything anthive returns to your AI client, including text from papers and datasets, is sent to that client's AI provider.</p>
     <p>Use both if your assistant supports skills; MCP alone works too.</p>
 
     <h3 id="mcp">7a. MCP: connect an assistant</h3>
@@ -219,8 +223,6 @@
       <tr><td><code>search_literature</code></td><td>Search the full text of the library papers; returns passages with the citation, page and section.</td></tr>
       <tr><td><code>get_paper</code></td><td>One paper: record, summary, topics and the datasets it is linked to.</td></tr>
       <tr><td><code>related_papers</code></td><td>Papers related to a paper, and why.</td></tr>
-      <tr><td><code>paper_upload_requirements</code></td><td>What a paper record needs before upload.</td></tr>
-      <tr><td><code>check_paper</code>, <code>upload_paper</code></td><td>Check a paper record without saving it, then add it to the library (only for people allowed to upload).</td></tr>
       <tr><td><code>rescan_databases</code></td><td>Reload the catalogue on the server (admins only).</td></tr>
     </table>
     </div>
@@ -240,7 +242,6 @@
       <tr><td><code>anthive-basics</code></td><td>Start here: connecting (MCP or REST), finding datasets, several servers, ground rules.</td></tr>
       <tr><td><code>anthive-dataset-analysis</code></td><td>Expression, plots, module scores, SQL, and statistics without overclaiming.</td></tr>
       <tr><td><code>anthive-literature</code></td><td>Searching and citing the paper library, and combining it with the data.</td></tr>
-      <tr><td><code>anthive-paper-upload</code></td><td>Preparing complete metadata for a paper and uploading it.</td></tr>
       <tr><td><code>sc-reproducible-research</code></td><td>Reproducible AI-assisted analysis: frozen data, scripted pipelines, versioning, recorded environments and model use, independent checks.</td></tr>
     </table>
     </div>
@@ -264,7 +265,7 @@
     <ul>
       <li>Add one MCP connection per server, each with its own link and a clear name (for example <code>anthive-intern</code> and <code>anthive-public</code>). The assistant should say which server each result came from.</li>
       <li>Dataset ids such as <code>L26/FMG</code> are unique only within one server; always name the server with the id.</li>
-      <li>Servers hold different data and may run different versions (shown on the version button). Literature search needs version 2.39.0 or newer, paper upload 2.40.0 or newer.</li>
+      <li>Servers hold different data and may run different versions (shown on the version button). Literature search needs version 2.39.0 or newer.</li>
       <li>Without MCP, assistants and scripts reach a server over plain HTTP: if you use <a href="https://codeberg.org/mfiers/vark" target="_blank" rel="noopener">vark</a>, its server list (<code>vark server ls</code>) is used; otherwise set <code>ANTHIVE_URL=https://&lt;site&gt;</code> and put your login in <code>~/.netrc</code> (<code>machine &lt;site&gt; login &lt;user&gt; password &lt;password&gt;</code>).</li>
     </ul>
 
@@ -273,8 +274,8 @@
       <li><strong>Pseudoreplication.</strong> Thousands of cells from a few donors are not independent. Ask for comparisons per donor (<code>ant_donor</code>) and the number of donors before trusting a disease or sex effect.</li>
       <li><strong>Citations.</strong> Ask the assistant to cite literature as [Author Year, p.N] and to keep it separate from what the data show; check important claims in the PDF.</li>
       <li><strong>Drafts.</strong> Paper summaries marked as drafts are model-written; quotes from the paper are more reliable.</li>
-      <li><strong>Permissions.</strong> Some tools are admin-only (custom Python figures, reloading the catalogue, and by default uploading papers). The assistant gets a clear refusal instead of a result.</li>
-      <li><strong>Privacy.</strong> Your assistant's provider (for example Anthropic, OpenAI or the maker of your editor) sees the questions you ask and the results the tools return, including text from papers and summaries of data. The underlying expression matrices stay on this server unless a tool returns or you download them. Use a provider and settings you trust for unpublished work.</li>
+      <li><strong>Permissions.</strong> Some tools are admin-only (custom Python figures, reloading the catalogue, adding papers). The assistant gets a clear refusal instead of a result.</li>
+      <li><strong>Privacy.</strong> Anything anthive returns to your AI client, including text from papers and datasets, is sent to that client's AI provider (for example Anthropic, OpenAI or the maker of your editor), together with the questions you ask. This applies to every paper and document in the library; none is held back. The underlying expression matrices stay on this server unless a tool returns or you download them. Use a provider and settings you trust for unpublished work.</li>
       <li><strong>The built-in chat</strong> that some sites showed in the corner of the page is switched off; use your own assistant through MCP instead.</li>
     </ul>
   </section>

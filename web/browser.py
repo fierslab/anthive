@@ -3797,13 +3797,22 @@ async def geneset_study_view(request: Request, study: str):
 
 # ── Paper library: cards, link reasons, paper page, library page ────────────
 #
-# Everything comes from ant-serve's library endpoints (2.39+). The API already
-# filters restricted papers per caller; the web side only renders what it gets
-# and stays quiet (no section) when the library is absent or the call fails.
+# Everything comes from ant-serve's library endpoints (2.39+). There are no
+# per-paper access rules (2.41): everyone who can sign in sees the whole
+# library. The web side only renders what it gets and stays quiet (no
+# section) when the library is absent or the call fails.
 
 _PAPER_ROLE_ORDER = {'source': 0, 'reanalysis': 1, 'method': 2, 'related': 3, 'background': 4}
 _PAPER_ROLE_BADGE = {'source': 'Source', 'reanalysis': 'Reanalysis', 'method': 'Method',
                      'related': 'Related', 'background': 'Background'}
+# What each role means (same wording as GET /papers/upload/requirements).
+_PAPER_ROLE_HELP = {
+    'source': 'the data in anthive come from this paper',
+    'reanalysis': 'the paper reanalyses data that are in anthive',
+    'method': 'a method used on anthive data',
+    'related': 'related to a dataset in anthive, not its source',
+    'background': 'of interest to the lab, not linked to any dataset (the default)',
+}
 _PREPRINT_TYPES = {'online', 'unpublished', 'preprint', 'misc'}
 
 
@@ -4073,9 +4082,15 @@ async def paper_view(request: Request, citekey: str):
     if notes and 'no notes yet' not in notes.lower():
         notes_html = markdown.markdown(notes, extensions=['tables', 'fenced_code'])
     abstract = ((record.get('fields') or {}).get('abstract') or record.get('abstract') or '').strip()
+    own_role = str(record.get('role') or 'background').lower()
+    fields = record.get('fields') or {}
     return templates.TemplateResponse(request, "paper.html", {
         "paper": card,
         "record": record,
+        "doc_type": fields.get('type') or '',
+        "own_role": own_role,
+        "own_role_badge": _PAPER_ROLE_BADGE.get(own_role, own_role.capitalize()),
+        "own_role_help": _PAPER_ROLE_HELP.get(own_role, ''),
         "authors": [a for a in _as_list(record.get('authors')) if a],
         "abstract": abstract,
         "topics": topics,

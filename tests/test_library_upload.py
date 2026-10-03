@@ -10,7 +10,7 @@ import os
 import subprocess
 from pathlib import Path
 from threading import Lock
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -104,6 +104,40 @@ def test_unpublished_needs_note_not_identifier(tmp_path):
     assert result.status == 'created'
 
 
+@pytest.mark.parametrize('entrytype', ['article', 'online', 'book', 'inbook', 'incollection', 'inproceedings'])
+def test_published_types_need_an_identifier(entrytype):
+    base = {k: v for k, v in NEW.items() if k != 'doi'}
+    errors, missing = lu.check_required({**base, 'entrytype': entrytype, 'institution': 'KU Leuven',
+                                         'note': 'a note'})
+    assert 'identifier' in missing
+    errors, missing = lu.check_required({**base, 'entrytype': entrytype, 'url': 'https://example.org/x'})
+    assert not errors and not missing
+
+
+@pytest.mark.parametrize('entrytype', ['report', 'thesis', 'unpublished', 'misc'])
+def test_unpublished_types_need_institution_or_note(entrytype):
+    base = {k: v for k, v in NEW.items() if k != 'doi'}
+    errors, missing = lu.check_required({**base, 'entrytype': entrytype})
+    assert 'identifier' in missing and any(e['field'] == 'institution' for e in errors)
+    for extra in ({'institution': 'KU Leuven'}, {'note': 'internal document'}, {'doi': '10.1000/x'}):
+        errors, missing = lu.check_required({**base, 'entrytype': entrytype, **extra})
+        assert not errors and not missing, (entrytype, extra, errors)
+
+
+def test_project_proposal_goes_to_proposals_with_background_role(tmp_path):
+    lib = make_library(tmp_path)
+    proposal = {'entrytype': 'report', 'type': 'project proposal', 'title': 'Microglia states in ageing',
+                'author': ['De Strooper, Bart'], 'year': 2026, 'institution': 'KU Leuven'}
+    result = lu.upload_paper(settings(lib), proposal, fetch=no_fetch)
+    assert result.status == 'created' and result.body['folder'] == 'proposals'
+    record = result.body['record']
+    assert record['anthive_role'] == 'background' and record['type'] == 'project proposal'
+    assert (lib / 'papers' / 'proposals' / f"{result.body['citekey']}.md").is_file()
+    thesis = {'entrytype': 'thesis', 'type': 'phd thesis', 'title': 'Microglia and amyloid',
+              'author': ['Doe, Jane'], 'year': 2025, 'institution': 'KU Leuven'}
+    assert lu.upload_paper(settings(lib), thesis, fetch=no_fetch).body['folder'] == 'reading'
+
+
 def test_eprint_needs_eprinttype(tmp_path):
     lib = make_library(tmp_path)
     base = {k: v for k, v in NEW.items() if k != 'doi'}
@@ -126,9 +160,67 @@ def test_md_text_metadata_accepted(tmp_path):
 def test_requirements_shape():
     req = lu.requirements(30)
     assert req['max_pdf_mb'] == 30
-    assert {'required', 'recommended', 'fields', 'roles', 'folders', 'entrytypes'} <= set(req)
+    assert {'required', 'recommended', 'fields', 'roles', 'folders', 'entrytypes',
+            'document_types', 'notice', 'uploads_enabled', 'default_role'} <= set(req)
     assert 'papers_for' in req['recommended'] and 'source' in req['roles']
-    assert req['folders'] == ['lab', 'datasets', 'methods', 'reading']
+    assert req['folders'] == ['lab', 'datasets', 'methods', 'reading', 'proposals']
+    assert set(req['roles']) == {'source', 'reanalysis', 'method', 'related', 'background'}
+    assert req['default_role'] == 'background'
+    assert req['fields']['anthive_role']['description'] == (
+        'default: background (of interest to the lab, not linked to a dataset); '
+        'set source or reanalysis only when the data in anthive come from the paper')
+    assert set(req['entrytypes']) == {'article', 'online', 'book', 'inbook', 'incollection', 'inproceedings',
+                                      'thesis', 'report', 'unpublished', 'misc'}
+    assert all(isinstance(text, str) and text for text in req['entrytypes'].values())
+    assert {'project proposal', 'grant proposal'} <= set(req['document_types']['report'])
+    assert set(req['document_types']['thesis']) == {'phd thesis', 'master thesis'}
+    assert 'anthive_access' not in req['fields'] and 'anthive_llm' not in req['fields']
+    assert 'anthive_access' not in req['recommended'] and 'anthive_llm' not in req['recommended']
+    assert req['uploads_enabled'] is True and lu.requirements(uploads_enabled=False)['uploads_enabled'] is False
+
+
+def test_notice_says_who_sees_and_where_text_goes():
+    notice = lu.requirements()['notice']
+    assert notice == lu.NOTICE
+    assert 'Everyone who can sign in' in notice and 'whole library' in notice
+    assert 'AI client' in notice and 'external LLM provider' in notice
+
+
+def test_role_defaults_to_background(tmp_path):
+    lib = make_library(tmp_path)
+    record = {k: v for k, v in NEW.items() if k != 'anthive_role'}
+    result = lu.upload_paper(settings(lib), record, fetch=no_fetch)
+    assert result.body['record']['anthive_role'] == 'background' and result.body['folder'] == 'reading'
+
+
+def test_no_role_with_papers_for_stays_background(tmp_path):
+    lib = make_library(tmp_path)
+    record = {k: v for k, v in NEW.items() if k != 'anthive_role'}
+    result = lu.upload_paper(settings(lib), {**record, 'papers_for': {'L26/FMG': 'source'}}, fetch=no_fetch)
+    assert result.body['record']['anthive_role'] == 'background'
+    assert result.body['folder'] == 'reading'
+    assert result.body['record']['anthive_proposed_links'] == {'L26/FMG': 'source'}
+    # precedence still applies: a lab author goes to lab, a proposal to proposals
+    lab = lu.upload_paper(settings(lib), {**record, 'doi': '10.1000/lab.1', 'author': ['De Strooper, Bart'],
+                                          'papers_for': ['L26/FMG']}, fetch=no_fetch)
+    assert lab.body['record']['anthive_role'] == 'background' and lab.body['folder'] == 'lab'
+    proposal = lu.upload_paper(settings(lib), {**record, 'doi': None, 'entrytype': 'report',
+                                               'type': 'grant proposal', 'institution': 'FWO',
+                                               'title': 'A grant', 'papers_for': ['L26/FMG']}, fetch=no_fetch)
+    assert proposal.body['record']['anthive_role'] == 'background' and proposal.body['folder'] == 'proposals'
+
+
+def test_legacy_access_and_llm_are_dropped_with_a_warning(tmp_path):
+    lib = make_library(tmp_path)
+    record = {**NEW, 'anthive_access': 'restricted', 'anthive_llm': 'never',
+              'anthive_draft': ['anthive_llm', 'anthive_summary'], 'anthive_summary': 'S.'}
+    result = lu.upload_paper(settings(lib), record, fetch=no_fetch)
+    saved = parse_sidecar(lib / result.body['path']).fields
+    assert 'anthive_access' not in saved and 'anthive_llm' not in saved
+    assert saved['anthive_draft'] == ['anthive_summary']
+    warnings = result.body['warnings']
+    assert 'anthive_access ignored: access follows the site login' in warnings
+    assert any(w.startswith('anthive_llm ignored') for w in warnings)
 
 
 # ── enrichment, duplicates, folders, PDFs ───────────────────────────────────
@@ -277,7 +369,8 @@ def test_papers_for_becomes_a_proposal_only(tmp_path):
     result = lu.upload_paper(settings(lib), {**NEW, 'papers_for': ['L26/FMG', 'S25:reanalysis']},
                              fetch=no_fetch)
     links = result.body['record']['anthive_proposed_links']
-    assert links == {'L26/FMG': 'background', 'S25': 'reanalysis'}
+    assert links == {'L26/FMG': 'source', 'S25': 'reanalysis'}
+    assert result.body['record']['anthive_role'] == 'background'
     assert any('not applied' in w for w in result.body['warnings'])
     with pytest.raises(lu.UploadError):
         lu.upload_paper(settings(lib), {**NEW, 'doi': '10.1000/tz', 'papers_for': {'L26/FMG': 'owner'}},
@@ -301,7 +394,7 @@ def _serve_app(tmp_path, monkeypatch, lib: Path, cfg_extra: Optional[dict] = Non
     namespace: Dict[str, Any] = {
         'app': app, 'get_config': lambda: cfg, 'Request': Request, 'HTTPException': HTTPException,
         'JSONResponse': JSONResponse, 'Form': Form, 'File': File, 'UploadFile': UploadFile,
-        'Optional': Optional, 'Dict': Dict, 'List': List, 'Any': Any, 'Lock': Lock,
+        'Optional': Optional, 'Dict': Dict, 'List': List, 'Any': Any, 'Lock': Lock, 'Tuple': Tuple,
         'log': logging.getLogger('test-upload'),
         'get_library_dir': config.get_library_dir,
         'get_auth_settings': lambda cfg_arg=None: config.get_auth_settings(cfg),
@@ -317,13 +410,30 @@ ADMIN = {'Remote-User': 'root', 'Remote-Groups': 'users,admins', 'Remote-Name': 
 USER = {'Remote-User': 'alice', 'Remote-Groups': 'users'}
 
 
+FORBIDDEN = {'status': 'forbidden', 'message': 'Only users in admins can add papers to the library.'}
+
+
 def test_endpoint_requirements_and_auth(tmp_path, monkeypatch):
     lib = make_library(tmp_path)
     client, _ = _serve_app(tmp_path, monkeypatch, lib, {'library_upload_max_pdf_mb': 7})
-    assert client.get('/papers/upload/requirements').json()['max_pdf_mb'] == 7
+    assert client.get('/papers/upload/requirements', headers=ADMIN).json()['max_pdf_mb'] == 7
+    for headers in (USER, {}):
+        response = client.get('/papers/upload/requirements', headers=headers)
+        assert response.status_code == 403 and response.json() == FORBIDDEN
     form = {'metadata': json.dumps(NEW)}
-    assert client.post('/papers/upload', data=form, headers=USER).status_code == 403
+    response = client.post('/papers/upload', data=form, headers=USER)
+    assert response.status_code == 403 and response.json() == FORBIDDEN
     assert client.post('/papers/upload', data=form).status_code == 403
+
+
+def test_upload_routes_not_in_public_openapi(tmp_path, monkeypatch):
+    lib = make_library(tmp_path)
+    client, _ = _serve_app(tmp_path, monkeypatch, lib)
+    paths = client.get('/openapi.json').json().get('paths', {})
+    assert '/papers/upload' not in paths and '/papers/upload/requirements' not in paths
+    source = SERVE_PATH.read_text()
+    assert '@app.get("/papers/upload/requirements", tags=["library"], include_in_schema=False)' in source
+    assert '@app.post("/papers/upload", tags=["library"], include_in_schema=False)' in source
 
 
 def test_endpoint_created_duplicate_invalid_and_groups(tmp_path, monkeypatch):
@@ -361,6 +471,31 @@ def test_endpoint_unwritable_library_is_a_clear_error(tmp_path, monkeypatch):
     assert after == [] and 'smith2024microglia' not in _vcs(lib, 'log', '--format=%s')
 
 
+def test_endpoint_disabled_when_library_not_writable(tmp_path, monkeypatch):
+    lib = make_library(tmp_path)
+    client, after = _serve_app(tmp_path, monkeypatch, lib)
+    papers_dir = lib / 'papers'
+    head_before = _vcs(lib, 'rev-parse', 'HEAD')
+    papers_dir.chmod(0o555)
+    try:
+        if os.access(papers_dir, os.W_OK):
+            pytest.skip('running as a user that ignores directory permissions')
+        response = client.post('/papers/upload', data={'metadata': json.dumps(NEW)},
+                               files={'file': ('x.pdf', PDF + b'x', 'application/pdf')}, headers=ADMIN)
+        requirements = client.get('/papers/upload/requirements', headers=ADMIN).json()
+        not_uploader = client.post('/papers/upload', data={'metadata': json.dumps(NEW)}, headers=USER)
+    finally:
+        papers_dir.chmod(0o755)
+    assert response.status_code == 503
+    assert response.json() == {'status': 'disabled',
+                               'message': 'Paper uploads are switched off on this site (services.paper_upload).'}
+    assert requirements['uploads_enabled'] is False
+    assert not_uploader.status_code == 403 and not_uploader.json() == FORBIDDEN   # 403 before 503
+    assert after == [] and _vcs(lib, 'rev-parse', 'HEAD') == head_before
+    assert not (lib / '.git' / 'anthive-upload.lock').exists()
+    assert not lu.uploads_enabled(tmp_path / 'missing')
+
+
 def test_endpoint_basic_mode_admin_list(tmp_path, monkeypatch):
     lib = make_library(tmp_path)
     client, _ = _serve_app(tmp_path, monkeypatch, lib, {'auth': {'mode': 'basic', 'admins': ['bob']}})
@@ -382,13 +517,92 @@ def test_mcp_upload_tools_gate(monkeypatch):
     cfg = {'library_upload_groups': ['admins', 'curators']}
     namespace: Dict[str, Any] = {'Optional': Optional, '_get_anthive_config': lambda: cfg}
     exec(compile(ast.Module(body=body, type_ignores=[]), str(MCP_PATH), 'exec', dont_inherit=True), namespace)
-    assert namespace['UPLOAD_TOOLS'] == frozenset({'check_paper', 'upload_paper'})
+    assert namespace['UPLOAD_TOOLS'] == frozenset({'paper_upload_requirements', 'check_paper', 'upload_paper'})
     may = namespace['_may_upload']
     assert may({'user': 'a', 'groups': ['curators']}) and may({'user': 'r', 'groups': ['admins']})
     assert not may({'user': 'u', 'groups': ['users']}) and not may(None)
     source = MCP_PATH.read_text()
     for tool in ('paper_upload_requirements', 'check_paper', 'upload_paper'):
         assert f"async def {tool}(" in source
+
+
+def _anthive_mcp_class(cfg):
+    """AnthiveMCP from ant-mcp on a stub FastMCP base."""
+    import asyncio  # noqa: F401
+    import contextvars
+    from types import SimpleNamespace
+    tree = ast.parse(MCP_PATH.read_text())
+    names = {'_is_admin', '_upload_groups', '_may_upload', 'AnthiveMCP'}
+    assigns = {'UPLOAD_TOOLS', 'UPLOADS_DISABLED_MESSAGE', 'ADMIN_ONLY_TOOLS'}
+    body = [n for n in tree.body if getattr(n, 'name', None) in names
+            or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id in assigns for t in n.targets))]
+
+    class StubFastMCP:
+        tool_names = ('search_literature', 'check_paper', 'upload_paper', 'paper_upload_requirements')
+
+        def get_context(self):
+            raise LookupError
+
+        async def list_tools(self):
+            return [SimpleNamespace(name=name) for name in self.tool_names]
+
+        async def call_tool(self, name, arguments):
+            return f'ran {name}'
+
+    namespace: Dict[str, Any] = {
+        'Optional': Optional, '_get_anthive_config': lambda: cfg, 'FastMCP': StubFastMCP,
+        '_current_identity': contextvars.ContextVar('identity', default=None), 'frozenset': frozenset,
+    }
+    exec(compile(ast.Module(body=body, type_ignores=[]), str(MCP_PATH), 'exec', dont_inherit=True), namespace)
+    return namespace['AnthiveMCP'], namespace
+
+
+def test_mcp_hides_upload_tools_when_uploads_disabled():
+    import asyncio
+    cls, namespace = _anthive_mcp_class({'library_upload_groups': ['admins']})
+    server = cls()
+    server.require_identity = False
+
+    async def tool_names():
+        return {tool.name for tool in await server.list_tools()}
+
+    assert {'check_paper', 'upload_paper'} <= asyncio.run(tool_names())
+
+    async def disabled(identity=None):
+        return False
+    server.uploads_probe = disabled
+    names = asyncio.run(tool_names())
+    assert 'check_paper' not in names and 'upload_paper' not in names
+    assert 'paper_upload_requirements' not in names and 'search_literature' in names
+    with pytest.raises(PermissionError, match='switched off'):
+        asyncio.run(server.call_tool('upload_paper', {}))
+    assert asyncio.run(server.call_tool('search_literature', {})) == 'ran search_literature'
+
+
+def test_mcp_upload_tools_only_for_uploaders():
+    import asyncio
+    cls, namespace = _anthive_mcp_class({'library_upload_groups': ['admins']})
+    server = cls()
+    server.require_identity = True
+    upload_tools = {'paper_upload_requirements', 'check_paper', 'upload_paper'}
+
+    async def tool_names(identity):
+        token = namespace['_current_identity'].set(identity)
+        try:
+            return {tool.name for tool in await server.list_tools()}
+        finally:
+            namespace['_current_identity'].reset(token)
+
+    assert not upload_tools & asyncio.run(tool_names({'user': 'alice', 'groups': ['users']}))
+    assert not upload_tools & asyncio.run(tool_names(None))
+    assert upload_tools <= asyncio.run(tool_names({'user': 'root', 'groups': ['admins']}))
+
+
+def test_mcp_text_tells_users_where_text_goes():
+    source = MCP_PATH.read_text()
+    assert source.count('LLM provider') >= 3          # instructions, guide, tool descriptions
+    assert 'DATA LEAVES THE SERVER' in source
+    assert 'anthive_llm' not in source and 'summary_only' not in source
 
 
 # ── two-way sync against a fake S3 ───────────────────────────────────────────

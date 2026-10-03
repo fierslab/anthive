@@ -44,15 +44,18 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('source', help="DOI, 'pmid:<id>', a PDF, or a BibTeX file")
     parser.add_argument('--pdf', type=Path, help='PDF to attach')
-    parser.add_argument('--role', default='background', choices=sorted(L.ROLES))
-    parser.add_argument('--access', choices=sorted(L.ACCESS))
+    parser.add_argument('--role', default=L.DEFAULT_ROLE, choices=sorted(L.ROLES),
+                        help=('default background (of interest to the lab, not linked to a dataset); '
+                              'source or reanalysis only when the data in anthive come from the paper'))
     parser.add_argument('--citekey', help='use this citekey instead of generating one')
     parser.add_argument('--library', type=Path, help='library root (default: from config)')
     parser.add_argument('--update', action='store_true', help='refresh an existing record with the same DOI')
     parser.add_argument('--no-references', action='store_true', help='skip fetching cited DOIs')
     parser.add_argument('--folder', help=('sub-folder of papers/ for a NEW record (e.g. papers/lab or '
-                                          'reading/2024); default papers/datasets for --role source, '
-                                          'papers/reading otherwise. Folders are for people only; '
+                                          'reading/2024); default by rule: papers/proposals for a report '
+                                          'whose type mentions a proposal, papers/lab for a lab author, '
+                                          'papers/datasets for --role source/reanalysis, papers/methods for '
+                                          'method, papers/reading otherwise. Folders are for people only; '
                                           'updates keep a record where it is'))
     args = parser.parse_args()
 
@@ -90,7 +93,9 @@ def main() -> int:
     if existing and not args.update:
         raise SystemExit(f"{doi} is already in the library as {existing.citekey} (use --update)")
     if existing:
-        merged = {k: v for k, v in existing.fields.items() if k.startswith('anthive_') or k in ('related', 'relatedtype', 'file')}
+        merged = {k: v for k, v in existing.fields.items()
+                  if (k.startswith('anthive_') and k not in L.LEGACY_IGNORED_FIELDS)
+                  or k in ('related', 'relatedtype', 'file')}
         fields = {**fields, **merged, 'citekey': existing.citekey}
         key, body = existing.citekey, existing.body
         if existing.path is not None:
@@ -105,11 +110,9 @@ def main() -> int:
         fields['anthive_role'] = args.role
         papers_dir = L.folder_for(library, args.role, args.folder,
                                   authors=fields.get('author') or [],
-                                  lab_authors=get_library_lab_authors(get_config()))
-        fields['anthive_llm'] = 'allowed'
+                                  lab_authors=get_library_lab_authors(get_config()),
+                                  entrytype=fields.get('entrytype') or '', doc_type=fields.get('type') or '')
         body = '## Notes\n\nNo notes yet.'
-    if args.access:
-        fields['anthive_access'] = args.access
     papers_dir.mkdir(parents=True, exist_ok=True)
     if pdf:
         shutil.copy2(pdf, papers_dir / f"{key}.pdf")

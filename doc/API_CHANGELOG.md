@@ -29,6 +29,58 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.41.0 (2026-10-03)
+
+Minor release. The library has no per-paper access or LLM rules any more,
+the upload requirements say more, and uploads report when they are off.
+
+- **Access follows the site login.** `anthive_access` is gone: everyone who
+  can sign in sees every paper, note and PDF. The admin-only filtering of
+  `restricted` papers and the hiding of their citekeys in other records'
+  `related` lists and exports are removed. The endpoints keep their normal
+  auth.
+- **All library text may go to AI clients.** `anthive_llm` is gone, with the
+  `never`/`summary_only` handling for ant-mcp calls; `for_llm` is no longer a
+  query parameter (sending it is harmless, it is ignored). Paper summaries no
+  longer carry `access` and `llm`. Clients that read those two keys must
+  stop; nothing else in the response shape changed.
+- Leftover `anthive_access`/`anthive_llm` in records give a validator
+  warning (`anthive_access ignored: access follows the site login`);
+  uploads drop them with the same warning.
+- **Roles.** `anthive_role` defaults to `background` (of interest to the
+  lab, not linked to a dataset) whenever it is not given, also when
+  `papers_for` proposes dataset links. Set `source` or `reanalysis` only
+  when the data in anthive come from the paper.
+- **Document types.** BibLaTeX `entrytype` plus the `type` field (now a
+  known field): article, online, book, inbook, incollection, inproceedings,
+  thesis (`phd thesis`, `master thesis`), report (`project proposal`,
+  `grant proposal`, `technical report`, `protocol`), unpublished, misc.
+  An identifier (doi, pmid, eprint+eprinttype, url) is required only for
+  article, online, book, inbook, incollection and inproceedings; report,
+  thesis, unpublished and misc need `institution` or `note`.
+- **Folder `proposals`.** A report whose `type` mentions a proposal goes to
+  `papers/proposals/` (before the lab, datasets, methods and reading rules).
+- `GET /papers/upload/requirements` gains `notice` (who sees the library,
+  and that its text may be sent to AI providers), `uploads_enabled`,
+  `default_role`, `document_types`; `roles` becomes a mapping role to
+  meaning and `entrytypes` a mapping entrytype to description (both were
+  lists); `folders` includes `proposals`.
+- `POST /papers/upload` answers 503
+  `{"status": "disabled", "message": "Paper uploads are switched off on this site (services.paper_upload)."}`
+  without writing when the library is not writable (2.40.x answered 500).
+  ant-mcp hides `check_paper` and `upload_paper` in that case.
+- MCP instructions, `anthive://guide` and the literature and upload tool
+  descriptions say that everything the tools return goes to the AI client's
+  LLM provider.
+- **Upload features are only visible to uploaders.** `GET
+  /papers/upload/requirements` now needs `library_upload_groups` too (it was
+  open to every signed-in user); both upload routes answer non-uploaders 403
+  `{"status": "forbidden", "message": "Only users in <groups> can add papers to the library."}`
+  (before any 503) and are no longer in `/openapi.json` (documented in
+  `doc/LIBRARY.md`). ant-mcp hides `paper_upload_requirements` as well as
+  `check_paper` and `upload_paper` from non-uploaders. The help page no
+  longer lists the upload tools.
+
 ## 2.40.2 — 2026-10-02
 
 Patch release: no endpoint changes. `/me/mcp` snippets gain more clients.

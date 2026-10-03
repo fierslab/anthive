@@ -72,16 +72,19 @@ Prompts, offered by clients that support them (Claude Code shows them as
 `literature_in_our_data(topic)`. Resources: `anthive://guide` (how to use
 Anthive well) and `anthive://dataset/<group>/<file>/context`.
 
-Papers marked `anthive_llm: never` in the library never reach an MCP client;
-`summary_only` papers show their summary but no passages or page text.
+Everything the tools return, including passages and notes from library
+papers, is sent to the AI client and from there to its LLM provider. There
+are no per-paper exceptions (the `anthive_llm` field was removed in 2.41.0),
+and everyone who can sign in to the site sees the whole library.
 
 Paper upload tools (2.40): `paper_upload_requirements()` (which fields a
 paper record needs, with examples and the allowed values),
 `check_paper(metadata)` (a dry run: errors, missing fields, what CrossRef
 and OpenAlex would fill in, duplicates, the citekey and folder it would get)
 and `upload_paper(metadata, pdf_base64=None, folder=None, update=False)`.
-`check_paper` and `upload_paper` only appear for members of
-`library_upload_groups` (default: admins). The PDF goes base64-encoded in the
+All three only appear for members of `library_upload_groups` (default:
+admins), and only while uploads are switched on (`uploads_enabled` in the
+requirements); everyone else does not see them at all. The PDF goes base64-encoded in the
 call and is capped at `mcp.max_upload_mb` (default 25 MB). The paper is
 committed to the library with you as the author (`doc/LIBRARY.md`).
 

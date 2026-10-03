@@ -2549,9 +2549,12 @@ def test_help_page_skills_and_mcp_facts(client):
     for tool in ("search_datasets", "get_dataset_info", "get_dataset_context", "search_genes",
                  "plot", "analytics_schema", "analytics_query", "analytics_viz", "module_score",
                  "list_module_scores", "list_genesets", "get_geneset", "search_literature",
-                 "get_paper", "related_papers", "paper_upload_requirements", "check_paper",
-                 "upload_paper", "rescan_databases"):
+                 "get_paper", "related_papers", "rescan_databases"):
         assert f"<code>{tool}</code>" in text, tool
+    # upload features are only shown to uploaders, never on the public help page
+    for tool in ("paper_upload_requirements", "check_paper", "upload_paper"):
+        assert tool not in text, tool
+    assert "/api/papers/upload" not in text and "Admins can add papers" in text
     assert "investigate_dataset" in text and "literature_in_our_data" in text
     assert "anthive://guide" in text
     assert 'href="/account/mcp"' in text and 'href="/api/docs"' in text
@@ -5985,6 +5988,32 @@ def test_paper_page_sections(library_client):
     assert "both use the rosmap cohort" in html
     assert "this paper cites it" in html
     assert "No notes yet" not in html
+
+
+def test_paper_page_shows_own_role_and_document_type(library_client, monkeypatch):
+    html = library_client.get("/papers/smith2025microglia").text
+    # _PAPER_RECORD has role source: badge plus its meaning
+    assert 'class="paper-role role-source"' in html
+    assert "the data in anthive come from this paper" in html
+    proposal = {**_PAPER_RECORD, "citekey": "lab2026proposal", "role": None, "entrytype": "report",
+                "datasets": [], "fields": {**(_PAPER_RECORD.get("fields") or {}), "type": "project proposal"}}
+    monkeypatch.setattr(browser, "_api_get", _library_api({"/papers/lab2026proposal": proposal}))
+    html = library_client.get("/papers/lab2026proposal").text
+    assert "report" in html and "(project proposal)" in html
+    assert 'class="paper-role role-background"' in html
+    assert "of interest to the lab, not linked to any dataset" in html
+
+
+def test_help_and_mcp_pages_say_where_text_goes(client):
+    sentence = ("Anything anthive returns to your AI client, including text from papers and datasets, "
+                "is sent to that client&#39;s AI provider.")
+    plain = sentence.replace("&#39;", "'")
+    help_html = client.get("/help").text
+    assert (sentence in help_html) or (plain in help_html)
+    assert "Background is the default" in help_html and "project or grant proposals" in help_html
+    assert "sees every paper and document" in help_html
+    mcp_html = client.get("/account/mcp", headers={"Remote-User": "mf"}).text
+    assert (sentence in mcp_html) or (plain in mcp_html)
 
 
 def test_paper_page_unknown_is_404(library_client):

@@ -96,8 +96,9 @@ reviewed" marker. The dataset page shows a `Papers` tab directly before Download
 server-rendered `#ds-paper-files` subsection in Downloads (paper PDFs come
 from `/api/papers/{citekey}/file`, not from `static/`); that subsection keeps
 the Downloads tab visible even when `/files` lists nothing. Everything hides
-when the library is off or the call fails; restricted papers never reach the
-web layer (the API filters them). The top-nav `library` link appears only
+when the library is off or the call fails; there are no per-paper access
+rules (2.41): everyone past the site login sees every paper. The paper page
+shows the paper's own role badge (`_PAPER_ROLE_HELP`) and document `type`. The top-nav `library` link appears only
 when `/library/status` reports papers (background-probed, cached:
 `_library_available`). Gotcha: never name a dict key `values`/`items` for a
 template (`t.values` resolves to the dict method).

@@ -63,7 +63,7 @@ def test_bibtex_round_trip_is_lossless(tmp_path):
     path = make_paper(tmp_path, entrytype='online', note='Preprint, bioRxiv',
                       anthive_orcids={'Donghoon Lee': '0000-0001-0000-0001'},
                       anthive_cites=['10.1/a', '10.1/b'], related=['other2020x'], relatedtype='samecohort',
-                      anthive_access='internal', anthive_llm='allowed')
+                      institution='KU Leuven', type='protocol')
     paper = L.parse_sidecar(path)
     parser = BibTexParser(common_strings=True)
     parser.ignore_nonstandard_types = False
@@ -99,8 +99,34 @@ def test_validation_errors(tmp_path):
                       anthive_access='secret', doi='not-a-doi', keywords='microglia')
     issues = L.validate_paper(L.parse_sidecar(path))
     text = ' | '.join(issues.errors)
-    assert 'entrytype' in text and 'anthive_role' in text and 'anthive_access' in text
+    assert 'entrytype' in text and 'anthive_role' in text
     assert 'doi' in text and 'keywords must be a list' in text
+    assert 'anthive_access' not in text
+
+
+def test_legacy_access_and_llm_fields_are_ignored_with_a_warning(tmp_path):
+    path = make_paper(tmp_path, anthive_access='restricted', anthive_llm='never')
+    paper = L.parse_sidecar(path)
+    issues = L.validate_paper(paper)
+    assert not issues.errors
+    warnings = ' | '.join(issues.warnings)
+    assert 'anthive_access ignored: access follows the site login' in warnings
+    assert 'anthive_llm ignored' in warnings
+    bib = L.to_bibtex(paper)
+    assert 'anthive_access' not in bib and 'anthive_llm' not in bib
+    assert not hasattr(L, 'ACCESS') and not hasattr(L, 'LLM_POLICY')
+
+
+def test_document_type_constants():
+    assert L.DEFAULT_ROLE == 'background'
+    assert set(L.ROLE_HELP) == L.ROLES
+    assert 'not linked to any dataset' in L.ROLE_HELP['background']
+    assert set(L.ENTRYTYPE_HELP) == {'article', 'online', 'book', 'inbook', 'incollection', 'inproceedings',
+                                     'thesis', 'report', 'unpublished', 'misc'}
+    assert set(L.ENTRYTYPE_HELP) <= L.ENTRY_TYPES
+    assert 'project proposal' in L.DOCUMENT_TYPES['report'] and 'grant proposal' in L.DOCUMENT_TYPES['report']
+    assert L.DOCUMENT_TYPES['thesis'] == ['phd thesis', 'master thesis']
+    assert 'type' in L.FIELD_ORDER
 
 
 def test_validation_file_name_and_citekey(tmp_path):

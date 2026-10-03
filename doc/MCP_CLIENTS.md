@@ -11,6 +11,10 @@ If a menu name or config key has changed, the vendor link is the authority,
 and a note in the [issue tracker](https://gitlab.kuleuven.be/bdslab/anthive/anthive4/-/issues)
 helps us fix this page.
 
+**What leaves the server.** Anything anthive returns to your AI client,
+including text from papers and datasets, is sent to that client's AI
+provider. Choose a client and provider you trust with that material.
+
 ## Before you start
 
 1. **Get a personal link.** Sign in to your anthive site, open the account

@@ -71,9 +71,10 @@ and `lib/config.py` (anthive.yaml loader).
 - **Paper library + literature search** (2.39): `lib/library_service.py`
   holds the records, the resolved `papers:` references and the
   `LibraryIndex`; loaded in a thread at startup and on `/admin/rescan`.
-  Handlers stay thin. Access: `restricted` papers admin-only; calls from
-  ant-mcp (internal secret + Remote-User) count as `for_llm` and honour
-  `anthive_llm`. Query model: fastembed, cache from `get_model_cache_dir()`.
+  Handlers stay thin. Access (2.41): no per-paper rules; everyone past the
+  site login sees the whole library and any text may go to AI clients
+  (leftover `anthive_access`/`anthive_llm` are ignored with a validator
+  warning). Query model: fastembed, cache from `get_model_cache_dir()`.
 
 - **Paper upload** (2.40): `GET /papers/upload/requirements`, `POST
   /papers/upload` (multipart). Logic lives in `lib/library_upload.py`
@@ -81,9 +82,17 @@ and `lib/config.py` (anthive.yaml loader).
   commit with the uploader as author); the handler only does auth
   (`_require_uploader`, `library_upload_groups`) and the post-commit steps
   (`_after_upload`: background `add_or_replace_sources`, library reload,
-  S3 autopush). Post-commit failures are warnings, never 500s. ant-mcp tools
-  `check_paper` / `upload_paper` are hidden unless the caller may upload
-  (`UPLOAD_TOOLS`, `_may_upload`).
+  S3 autopush). Post-commit failures are warnings, never 500s. A library
+  that is not writable (`uploads_enabled()` false, e.g. `services.paper_upload`
+  off) answers 503 `disabled` before any write, and requirements report
+  `uploads_enabled: false`. Upload features are visible to uploaders only:
+  both routes return 403 `forbidden` for others (before the 503) and are
+  `include_in_schema=False`; ant-mcp hides `paper_upload_requirements`,
+  `check_paper` and `upload_paper` unless the caller may upload
+  (`UPLOAD_TOOLS`, `_may_upload`) and uploads are enabled
+  (`AnthiveMCP.uploads_probe`, asked as the caller, cached 60 s). Role
+  defaults to `background`; folder precedence proposals > lab > datasets >
+  methods > reading.
 
 ## ant-mcp specifics
 

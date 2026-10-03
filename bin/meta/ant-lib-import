@@ -43,10 +43,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('bibfile', type=Path)
     parser.add_argument('--library', type=Path, help='library root (default: from config)')
-    parser.add_argument('--role', default='background', choices=sorted(L.ROLES))
+    parser.add_argument('--role', default=L.DEFAULT_ROLE, choices=sorted(L.ROLES),
+                        help=('default background (of interest to the lab, not linked to a dataset); '
+                              'source or reanalysis only when the data in anthive come from the paper'))
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--folder', help=('sub-folder of papers/ for NEW records (e.g. papers/reading/2024); '
-                                          'default papers/datasets for --role source, papers/reading '
+                                          'default by rule: papers/proposals for a report whose type mentions '
+                                          'a proposal, papers/lab for a lab author, papers/datasets for --role '
+                                          'source/reanalysis, papers/methods for method, papers/reading '
                                           'otherwise. Existing records are updated where they are'))
     args = parser.parse_args()
     library = args.library or get_library_dir(get_config())
@@ -72,7 +76,8 @@ def main() -> int:
         pdf = resolve_file(fields.pop('file', ''), args.bibfile.parent)
         if existing:
             keep = {k: v for k, v in existing.fields.items()
-                    if k.startswith('anthive_') or k in ('related', 'relatedtype', 'file')}
+                    if (k.startswith('anthive_') and k not in L.LEGACY_IGNORED_FIELDS)
+                    or k in ('related', 'relatedtype', 'file')}
             new_fields = {**fields, **keep, 'citekey': existing.citekey}
             key, body = existing.citekey, existing.body
             papers_dir = existing.path.parent if existing.path is not None else new_dir
@@ -81,11 +86,13 @@ def main() -> int:
             key = entry.get('ID', '').lower()
             if not L.CITEKEY_RE.match(key) or key in papers:
                 key = L.make_citekey(L.first_author_last(fields), fields.get('date'), fields['title'], papers)
-            new_fields = {'anthive_role': args.role, 'anthive_llm': 'allowed', **fields, 'citekey': key}
+            new_fields = {'anthive_role': args.role, **fields, 'citekey': key}
             body = '## Notes\n\nImported from ' + args.bibfile.name + '.'
             papers_dir = L.folder_for(library, args.role, args.folder,
                                       authors=fields.get('author') or [],
-                                      lab_authors=get_library_lab_authors(get_config()))
+                                      lab_authors=get_library_lab_authors(get_config()),
+                                      entrytype=fields.get('entrytype') or '',
+                                      doc_type=fields.get('type') or '')
             added += 1
         if not args.dry_run:
             papers_dir.mkdir(parents=True, exist_ok=True)
