@@ -132,6 +132,8 @@ fetch comes from GitHub. `push.followTags` is on so annotated release tags
 travel along. Commits that reach GitHub some other way (another clone, a PR
 merged on github.com) are only mirrored at the next push from here; catch up
 with `git fetch origin && git push gitlab 'refs/remotes/origin/*:refs/heads/*' --follow-tags`.
+In a fresh clone run `git remote set-head origin -d` once first: GitLab
+rejects the whole push over the `origin/HEAD` symref (a branch named `HEAD`).
 
 ## Where things are documented
 
