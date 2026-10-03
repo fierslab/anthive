@@ -124,7 +124,7 @@ services:
 
 # Paper library: uploads and the two-way sync (`ant sync library`).
 library:
-  upload_groups: [admins]   # who may upload (Authelia groups; basic mode: auth.admins)
+  upload_groups: [admins]   # who may upload (Authelia groups, e.g. [admins, librarians]; basic mode: auth.admins)
   max_pdf_mb: 25            # largest PDF accepted
   git_push: false           # api pushes after each upload; leave off and use
                             # `ant-stack publish-library` from a timer (see the guide)

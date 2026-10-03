@@ -343,6 +343,25 @@ must be a git checkout of the library repo and writable by the site's uid;
 `check` warns when it is not. Each upload becomes a commit there, with the
 uploader as author and `library.git_committer` as committer.
 
+**Librarians.** To let people who are not admins add papers, give them a
+group of their own and allow that group to upload. They get the upload
+features (API, MCP tools, the upload part of `/api-guide`) and nothing else
+an admin can do:
+
+```yaml
+auth:
+  users:
+    - name: jdoe
+      groups: [librarians]
+library:
+  upload_groups: [admins, librarians]
+```
+
+Then `bin/ops/ant-stack init` (writes the Authelia user database) and
+`bin/ops/ant-stack up`. Authelia picks up the new group within a few
+minutes, at the next login at the latest. In `auth.mode: basic` there are no groups: only
+`auth.admins` can upload.
+
 Getting those commits and PDFs out of the server is done on the host, not
 in the api container, by `bin/ops/ant-stack publish-library`. It takes the
 same lock the upload path holds (so no upload commits halfway), runs
