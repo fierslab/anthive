@@ -398,13 +398,19 @@ def library_sidecar_map(library_dir: Optional[Path]) -> Dict[str, Dict[str, Any]
         if not meta.get("citekey"):
             continue
         entry = {"citekey": str(meta["citekey"]), "doi": str(meta.get("doi") or "").lower() or None,
-                 "title": meta.get("title"), "year": _year_of(meta)}
+                 "title": _clean_title(meta.get("title")), "year": _year_of(meta)}
         pdf_name = meta.get("file")
         if pdf_name and (md.parent / str(pdf_name)).is_file():
             out["sha:" + sha256_file(md.parent / str(pdf_name))] = entry
         if entry["doi"]:
             out["doi:" + entry["doi"]] = entry
     return out
+
+
+def _clean_title(title: Any) -> Any:
+    """Plain-text title (HTML entities / BibTeX escapes undone, as lib/library does)."""
+    from library import clean_text  # noqa: PLC0415
+    return clean_text(title)
 
 
 def _year_of(meta: Dict[str, Any]) -> Optional[int]:
@@ -549,7 +555,7 @@ def _sidecar_meta_next_to(pdf: Path) -> Dict[str, Any]:
     return {"citekey": str(meta["citekey"]) if meta.get("citekey") else None,
             "collection": None,
             "doi": str(meta.get("doi") or "").lower() or None,
-            "title": meta.get("title"), "year": _year_of(meta)}
+            "title": _clean_title(meta.get("title")), "year": _year_of(meta)}
 
 
 def add_or_replace_sources(pdfs: Sequence[Path], out: Path, *, embedder: Embedder,

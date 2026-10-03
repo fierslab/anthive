@@ -206,3 +206,33 @@ def test_library_dir_config(monkeypatch, tmp_path):
     import config
     monkeypatch.setenv('ANTHIVE_LIBRARY', str(tmp_path / 'mylib'))
     assert config.get_library_dir({}) == tmp_path / 'mylib'
+
+
+def test_clean_text_undoes_html_entities_and_bibtex_escapes():
+    assert L.clean_text("Alzheimer's &amp; Dementia") == "Alzheimer's & Dementia"
+    # CrossRef abstracts escaped two or three times
+    assert L.clean_text('(P &amp;amp;lt; .001)') == '(P < .001)'
+    assert L.clean_text('&amp;gt;41 000 nuclei') == '>41 000 nuclei'
+    assert L.clean_text('Cell Death \\& Differentiation, 100\\%') == 'Cell Death & Differentiation, 100%'
+    assert L.clean_text(['O&#39;Neil, Ann', 'Smith &amp; Co']) == ["O'Neil, Ann", 'Smith & Co']
+    # plain text, bare ampersands and non-strings are untouched
+    assert L.clean_text('R&D at A & B') == 'R&D at A & B'
+    assert L.clean_text(2024) == 2024
+
+
+def test_parse_sidecar_normalises_escaped_record_text(tmp_path):
+    path = make_paper(tmp_path, journaltitle="Alzheimer's &amp; Dementia",
+                      title='APOE \\& TREM2 in &lt;5% of microglia',
+                      abstract='significant (P &amp;amp;lt; .001)',
+                      author=['O&#39;Neil, Ann'],
+                      url='https://example.org/?a=1&amp;b=2')
+    fields = L.parse_sidecar(path).fields
+    assert fields['journaltitle'] == "Alzheimer's & Dementia"
+    assert fields['title'] == 'APOE & TREM2 in <5% of microglia'
+    assert fields['abstract'] == 'significant (P < .001)'
+    assert fields['author'] == ["O'Neil, Ann"]
+    # verbatim identifier fields keep their exact characters
+    assert fields['url'] == 'https://example.org/?a=1&amp;b=2'
+    # and the BibTeX export escapes the plain text exactly once
+    bib = L.to_bibtex(L.parse_sidecar(path))
+    assert "Alzheimer's \\& Dementia" in bib and '&amp;' not in bib.split('url')[0]

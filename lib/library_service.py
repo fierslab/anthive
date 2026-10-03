@@ -21,6 +21,7 @@ Nothing here talks to HTTP.
 """
 from __future__ import annotations
 
+import html
 import logging
 import math
 import re
@@ -141,7 +142,7 @@ def highlight_snippet(text: str, query: str, width: int = 320) -> str:
         snippet = '...' + snippet
     if start + width < len(text):
         snippet = snippet + '...'
-    snippet = snippet.replace('<', '&lt;').replace('>', '&gt;')
+    snippet = html.escape(snippet, quote=False)
     for term in sorted(set(terms), key=len, reverse=True):
         snippet = re.sub(rf"(?i)\b({re.escape(term)})", r"<mark>\1</mark>", snippet)
     return snippet

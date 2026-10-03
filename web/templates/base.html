@@ -451,10 +451,35 @@
             background: #f1f5f9; color: #64748b; border: 1px solid #cbd5e1;
             font-weight: 400; letter-spacing: .2px; white-space: nowrap;
         }
-        /* GDPR notice: full-width, scrollable bottom sheet on small screens
-           (the inline desktop styling is a fixed 380px corner card). */
+        /* GDPR storage notice. Desktop: a 380px card in the bottom-right
+           corner. Phones: a slim one-line bar at the very bottom (message,
+           details, dismiss); details expand upwards and scroll above it, "clear my
+           data" only shows with the details open. While the notice is visible
+           body.storage-notice-on reserves room below the page so the bar never
+           covers content. JS toggles display; the CSS never sets it. */
+        #storage-notice { position: fixed; bottom: 8px; right: 8px; max-width: 380px;
+            background: #fff; border: 1px solid var(--border); box-shadow: 0 4px 16px rgba(0,0,0,.12);
+            padding: 10px 12px; font-size: 11px; line-height: 1.55; color: var(--text);
+            z-index: 1000; border-radius: 3px; }
+        #storage-notice .sn-actions { margin-top: 8px; display: flex; gap: 8px; align-items: center; }
+        #storage-details { white-space: nowrap; }
+        #storage-details-body { margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px dotted var(--border); color: var(--text-muted); }
+        #storage-ack { font-size: 11px; padding: 3px 12px; background: var(--link); color: #fff;
+            border: none; border-radius: 2px; cursor: pointer; font-family: inherit; }
+        #storage-clear { font-size: 10px; }
         @media (max-width: 560px) {
-            #storage-notice { left: 6px !important; right: 6px !important; max-width: none !important; max-height: 62vh; overflow-y: auto; }
+            #storage-notice { left: 0; right: 0; bottom: 0; max-width: none; border-radius: 0;
+                border-width: 1px 0 0; box-shadow: 0 -2px 8px rgba(0,0,0,.08);
+                padding: 5px 12px; }
+            #storage-notice .sn-line { display: flex; align-items: center; gap: 10px; }
+            #storage-notice .sn-msg { flex: 1 1 auto; min-width: 0; white-space: nowrap;
+                overflow: hidden; text-overflow: ellipsis; }
+            #storage-notice .sn-extra { display: none; }
+            #storage-notice .sn-actions { margin-top: 0; flex: 0 0 auto; gap: 10px; }
+            #storage-ack { padding: 2px 10px; }
+            #storage-notice:not(.sn-open) #storage-clear { display: none; }
+            #storage-details-body { max-height: 55vh; overflow-y: auto; }
+            body.storage-notice-on { padding-bottom: 40px; }
         }
 
         /* ── data-assistant chat widget (sitewide) ───────────────────────────
@@ -925,15 +950,8 @@
          consent; this notice is purely informational, dismissable, and
          offers a clear-data control. No "accept" wording — no consent is
          being collected. -->
-    <div id="storage-notice" style="display:none;position:fixed;bottom:8px;right:8px;
-        max-width:380px;background:#fff;border:1px solid var(--border);
-        box-shadow:0 4px 16px rgba(0,0,0,.12);padding:10px 12px;font-size:11px;
-        line-height:1.55;color:var(--text);z-index:1000;border-radius:3px">
-      <strong>Your data stays in your browser.</strong> Plot preferences are
-      stored locally — no analytics or tracking.
-      <a href="#" id="storage-details" style="white-space:nowrap">details ▾</a>
-
-      <div id="storage-details-body" style="display:none;margin-top:6px;padding-top:6px;border-top:1px dotted var(--border);color:var(--text-muted)">
+    <div id="storage-notice" style="display:none">
+      <div id="storage-details-body" style="display:none">
         <strong>What's stored, where, and why:</strong>
         <ul style="margin:4px 0 4px 16px;padding:0">
           <li><code>anthive.plot.settings</code> — your figure size, DPI, font,
@@ -975,13 +993,14 @@
         plot defaults instead of your saved preferences).</p>
       </div>
 
-      <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
-        <button id="storage-ack"
-          style="font-size:11px;padding:3px 12px;background:var(--link);
-          color:#fff;border:none;border-radius:2px;cursor:pointer;font-family:inherit">
-          dismiss
-        </button>
-        <a href="#" id="storage-clear" style="font-size:10px">clear my data</a>
+      <div class="sn-line">
+        <span class="sn-msg"><strong>Your data stays in your browser.</strong><span class="sn-extra">
+          Plot preferences are stored locally, with no analytics or tracking.</span></span>
+        <span class="sn-actions">
+          <a href="#" id="storage-details">details ▾</a>
+          <button id="storage-ack" type="button">dismiss</button>
+          <a href="#" id="storage-clear">clear my data</a>
+        </span>
       </div>
     </div>
     <script>
@@ -989,8 +1008,12 @@
       var KEY = 'anthive.storage.notice.ack';
       var notice = document.getElementById('storage-notice');
       if (!notice) return;
+      function show(on) {
+        notice.style.display = on ? '' : 'none';
+        document.body.classList.toggle('storage-notice-on', on);
+      }
       try {
-        if (localStorage.getItem(KEY) !== '1') notice.style.display = '';
+        if (localStorage.getItem(KEY) !== '1') show(true);
       } catch (e) { /* localStorage unavailable — don't show notice */ }
       var ack    = document.getElementById('storage-ack');
       var clear  = document.getElementById('storage-clear');
@@ -998,18 +1021,19 @@
       var detBody= document.getElementById('storage-details-body');
       if (ack) ack.addEventListener('click', function() {
         try { localStorage.setItem(KEY, '1'); } catch (e) {}
-        notice.style.display = 'none';
+        show(false);
       });
       if (clear) clear.addEventListener('click', function(e) {
         e.preventDefault();
         try { localStorage.clear(); } catch (e2) {}
-        notice.style.display = 'none';
+        show(false);
         alert('All locally-stored anthive preferences cleared from this browser.');
       });
       if (det) det.addEventListener('click', function(e) {
         e.preventDefault();
         var open = detBody.style.display !== 'none';
         detBody.style.display = open ? 'none' : 'block';
+        notice.classList.toggle('sn-open', !open);
         det.textContent = open ? 'details ▾' : 'details ▴';
       });
     })();

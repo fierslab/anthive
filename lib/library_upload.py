@@ -49,7 +49,7 @@ import yaml
 from library import (DEFAULT_LAB_AUTHORS, DEFAULT_ROLE, DOCUMENT_TYPES, ENTRY_TYPES,
                      ENTRYTYPE_HELP, IDENTIFIED_TYPES, LEGACY_IGNORED_FIELDS, LIST_FIELDS,
                      ROLE_HELP, ROLES, Paper, first_author_last, folder_for, load_library,
-                     make_citekey, normalize_doi, parse_front_matter, render_sidecar,
+                     clean_fields, make_citekey, normalize_doi, parse_front_matter, render_sidecar,
                      validate_paper)
 
 FOLDERS = ('lab', 'datasets', 'methods', 'reading', 'proposals')
@@ -197,7 +197,7 @@ def drop_legacy_fields(fields: Dict[str, Any]) -> List[str]:
 def parse_metadata(metadata: Any) -> Tuple[Dict[str, Any], str]:
     """Fields and body from a dict, a JSON string, or a .md text with front matter."""
     if isinstance(metadata, dict):
-        fields = dict(metadata)
+        fields = clean_fields(dict(metadata))
         body = str(fields.pop('notes', '') or fields.pop('body', '') or '')
         return fields, body
     if not isinstance(metadata, str) or not metadata.strip():
@@ -219,7 +219,7 @@ def parse_metadata(metadata: Any) -> Tuple[Dict[str, Any], str]:
     except (ValueError, yaml.YAMLError) as exc:
         raise UploadError(422, {'status': 'invalid', 'missing_required': [],
                                 'errors': [{'field': 'metadata', 'message': f'not a JSON object or .md with front matter: {exc}'}]})
-    return dict(fields), body.strip()
+    return clean_fields(dict(fields)), body.strip()
 
 
 def _plain_dates(value: Any) -> Any:

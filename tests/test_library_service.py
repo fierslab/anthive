@@ -306,6 +306,23 @@ def test_context_pack_and_budget(service, tmp_path, library):
     assert [s['name'] for s in small['sections']][0] == 'dataset'
 
 
+def test_list_and_record_return_plain_text_not_html_entities(tmp_path):
+    papers = tmp_path / 'library' / 'papers'
+    write_record(papers / 'lab', 'amp2025', journaltitle="Alzheimer's &amp; Dementia",
+                 title='Plasma &amp;amp;lt; CSF', anthive_role='background')
+    svc = LibraryService(tmp_path / 'library', None, None)
+    svc.load()
+    row = next(r for r in svc.list() if r['citekey'] == 'amp2025')
+    assert row['journal'] == "Alzheimer's & Dementia"
+    assert row['title'] == 'Plasma < CSF'
+    assert svc.list(q='alzheimer & dementia')[0]['citekey'] == 'amp2025'
+
+
+def test_highlight_snippet_escapes_ampersands():
+    snippet = highlight_snippet('Microglia & astrocytes, P < 0.05', 'microglia')
+    assert snippet == '<mark>Microglia</mark> &amp; astrocytes, P &lt; 0.05'
+
+
 def test_highlight_snippet_skips_stopwords():
     snippet = highlight_snippet('Nuclei were isolated from the cortex with care.', 'isolated from cortex')
     assert '<mark>isolated</mark>' in snippet and '<mark>cortex</mark>' in snippet

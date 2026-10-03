@@ -2117,6 +2117,24 @@ def test_topbar_has_no_gene_search_box(client):
     assert "'/genes/'+encodeURIComponent" not in resp.text
 
 
+def test_storage_notice_is_a_slim_bar_on_phones(client):
+    # The privacy notice used to be a multi-line card covering the bottom of
+    # a phone screen. On narrow screens it is now a one-line bar (message,
+    # details, dismiss) and the body gets bottom padding while it shows.
+    text = client.get("/").text
+    assert 'id="storage-notice" style="display:none"' in text
+    assert 'class="sn-line"' in text and 'class="sn-extra"' in text
+    css = text[text.find("@media (max-width: 560px) {\n            #storage-notice"):]
+    css = css[:css.find("\n        }\n")]
+    assert "#storage-notice .sn-extra { display: none; }" in css
+    assert "white-space: nowrap" in css and "text-overflow: ellipsis" in css
+    assert "body.storage-notice-on { padding-bottom:" in css
+    # dismiss behaviour and storage key unchanged
+    assert "var KEY = 'anthive.storage.notice.ack';" in text
+    assert "localStorage.setItem(KEY, '1')" in text
+    assert "document.body.classList.toggle('storage-notice-on', on)" in text
+
+
 def test_topbar_genes_link(client):
     text = client.get("/").text
     idx = text.find('id="nav-genes"')

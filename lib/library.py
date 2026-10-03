@@ -13,6 +13,7 @@ bibliographic metadata from CrossRef and OpenAlex.
 """
 from __future__ import annotations
 
+import html
 import json
 import re
 import time
@@ -204,8 +205,47 @@ def parse_front_matter(text: str) -> Tuple[Dict[str, Any], str]:
     return data, match.group(2)
 
 
+_HTML_ENTITY_RE = re.compile(r'&(#\d+|#x[0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]*);')
+_BIBTEX_ESCAPE_RE = re.compile(r'\\([&%$#_])')
+
+
+def clean_text(value: Any) -> Any:
+    """Undo HTML entities and BibTeX escapes in a record value.
+
+    CrossRef returns some metadata HTML-escaped (``Alzheimer's &amp;
+    Dementia``) and some abstracts escaped twice or three times
+    (``&amp;amp;lt;``); BibTeX imports can carry ``\\&``. Records store plain
+    text and every consumer escapes for its own output, so a stored entity
+    shows up literally on the page. Entities are unescaped until stable
+    (bounded), then ``\\&``, ``\\%``, ``\\$``, ``\\#``, ``\\_`` become the bare
+    character. Lists and mappings are cleaned element-wise; other types are
+    returned unchanged."""
+    if isinstance(value, str):
+        text = value
+        for _ in range(5):
+            if not _HTML_ENTITY_RE.search(text):
+                break
+            text = html.unescape(text)
+        if '\\' in text:
+            text = _BIBTEX_ESCAPE_RE.sub(r'\1', text)
+        return text
+    if isinstance(value, list):
+        return [clean_text(item) for item in value]
+    if isinstance(value, dict):
+        return {key: clean_text(item) for key, item in value.items()}
+    return value
+
+
+def clean_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
+    """``clean_text`` over every field except the verbatim ones (doi, url,
+    file, ids), which must keep their exact characters."""
+    return {key: value if key in _VERBATIM_FIELDS else clean_text(value)
+            for key, value in fields.items()}
+
+
 def parse_sidecar(path: Path) -> Paper:
     data, body = parse_front_matter(Path(path).read_text(encoding='utf-8'))
+    data = clean_fields(data)
     citekey = str(data.get('citekey') or Path(path).stem)
     return Paper(citekey=citekey, fields=data, body=body.lstrip('\n'), path=Path(path))
 
@@ -697,7 +737,7 @@ def _get_json(url: str, timeout: int = 30, min_interval: float = 0.25) -> Option
 
 def _strip_jats(text: str) -> str:
     text = re.sub(r'<[^>]+>', ' ', text or '')
-    return ' '.join(text.split())
+    return ' '.join(clean_text(text).split())
 
 
 def fetch_crossref(doi: str) -> Optional[dict]:
@@ -821,7 +861,7 @@ def metadata_from_doi(doi: str, with_references: bool = True) -> Dict[str, Any]:
             orcids[' '.join(author['display_name'].split())] = author['orcid'].rsplit('/', 1)[-1]
     if orcids:
         fields['anthive_orcids'] = orcids
-    return fields
+    return clean_fields(fields)
 
 
 def doi_from_pdf(pdf_path: Path) -> Optional[str]:

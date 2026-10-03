@@ -63,6 +63,14 @@ standard BibTeX entry without translation (`ant lib-export`). anthive's own
 fields carry an `anthive_` prefix; BibTeX tools ignore fields they do not
 know.
 
+Field values are plain text. Do not store HTML entities (`&amp;`) or BibTeX
+escapes (`\&`): every consumer (web pages, BibTeX export, MCP) escapes for
+its own output. CrossRef returns some titles, journal names and abstracts
+HTML-escaped, so `lib/library.py` (`clean_text`) undoes entities and these
+escapes when it reads a record and when `ant lib-add` or an upload creates
+one. Identifier fields (`doi`, `url`, `file`, `eprint`, `pmid`, `pmcid`,
+`anthive_openalex`) are kept verbatim.
+
 ```markdown
 ---
 entrytype: article
