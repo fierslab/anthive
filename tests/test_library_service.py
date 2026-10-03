@@ -499,3 +499,49 @@ def test_serve_registers_library_routes():
         assert f'@app.get({route}' in source, route
     # the .bib route must be registered before the bare /papers/{citekey}
     assert source.index('"/papers/{citekey}.bib"') < source.index('@app.get("/papers/{citekey}", ')
+
+
+def _wait_reload(svc, timeout=5.0):
+    import time
+    end = time.time() + timeout
+    while svc._reloading and time.time() < end:
+        time.sleep(0.02)
+
+
+def test_refresh_picks_up_an_index_replaced_on_disk(tmp_path, service, library):
+    import os
+    out = build_toy_index(tmp_path, library)
+    service.load_index()
+    assert service.index is not None and service.index.search('TREM2', k=3)['results']
+    assert service.refresh_if_changed(min_interval=0) is False            # nothing changed
+    out.unlink()                                                          # a sync swaps the file
+    build_toy_index(tmp_path, library)
+    os.utime(out, ns=(1, 1))                                              # different signature
+    before = service.index
+    assert service.refresh_if_changed(min_interval=0) is True
+    _wait_reload(service)
+    assert service.index is not None and service.index is not before
+
+
+def test_refresh_picks_up_new_records_from_git(tmp_path, service, library):
+    import subprocess
+    def git(*args):
+        subprocess.run(['git', '-C', str(library), *args], check=True, capture_output=True)
+    git('init', '-q', '-b', 'main')
+    git('-c', 'user.email=t@t', '-c', 'user.name=t', 'add', '.')
+    git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'one')
+    service.load()
+    assert 'new2026' not in service.state.papers
+    assert service.refresh_if_changed(min_interval=0) is False
+    write_record(library / 'papers' / 'reading', 'new2026', anthive_role='background')
+    git('-c', 'user.email=t@t', '-c', 'user.name=t', 'add', '.')
+    git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'two')   # what a git pull does
+    assert service.refresh_if_changed(min_interval=0) is True
+    _wait_reload(service)
+    assert 'new2026' in service.state.papers
+
+
+def test_refresh_is_throttled(service):
+    service._last_change_check = 0.0
+    service.refresh_if_changed(min_interval=3600)
+    assert service.refresh_if_changed(min_interval=3600) is False

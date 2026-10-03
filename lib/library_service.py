@@ -183,6 +183,12 @@ class LibraryService:
         self.index_loading = False
         self._lock = threading.Lock()
         self._db_md: Dict[str, Path] = {}  # db_id -> dataset .md (absolute)
+        # What was loaded, to notice when `ant sync library` (or another
+        # process) replaced the index or pulled new records underneath us.
+        self._index_signature: Optional[Tuple[int, int]] = None
+        self._records_signature: Optional[str] = None
+        self._last_change_check = 0.0
+        self._reloading = False
 
     # ── loading ───────────────────────────────────────────────────────────
     @property
@@ -193,8 +199,70 @@ class LibraryService:
         """db_id -> absolute path of the dataset's .md (next to its .duckdb)."""
         self._db_md = {db: Path(p) for db, p in db_md_paths.items()}
 
+    def _index_file_signature(self) -> Optional[Tuple[int, int]]:
+        path = self.index_path
+        try:
+            info = path.stat() if path is not None else None
+        except OSError:
+            return None
+        return (info.st_mtime_ns, info.st_size) if info else None
+
+    def _records_head(self) -> Optional[str]:
+        """The library checkout's current commit, read from .git (no git call)."""
+        if not self.library_dir:
+            return None
+        git_dir = self.library_dir / '.git'
+        try:
+            head = (git_dir / 'HEAD').read_text().strip()
+            if head.startswith('ref: '):
+                ref = head[5:]
+                ref_file = git_dir / ref
+                if ref_file.is_file():
+                    return ref_file.read_text().strip()
+                packed = git_dir / 'packed-refs'
+                for line in packed.read_text().splitlines() if packed.is_file() else []:
+                    if line.endswith(' ' + ref):
+                        return line.split(' ', 1)[0]
+                return None
+            return head
+        except OSError:
+            return None
+
+    def refresh_if_changed(self, min_interval: float = 30.0) -> bool:
+        """Reload the records and/or the index in the background when they
+        changed on disk since they were loaded (a sync pulled new records or
+        replaced library_chunks.parquet). Checks at most every
+        ``min_interval`` seconds; costs two stats and two small reads.
+        Returns True when a reload was started."""
+        import time  # noqa: PLC0415
+        now = time.monotonic()
+        if self._reloading or now - self._last_change_check < min_interval:
+            return False
+        self._last_change_check = now
+        records_changed = self._records_head() != self._records_signature
+        index_changed = (not self.index_loading
+                         and self._index_file_signature() != self._index_signature)
+        if not (records_changed or index_changed):
+            return False
+
+        def reload() -> None:
+            try:
+                if records_changed:
+                    self.load()
+                if index_changed:
+                    self.load_index()
+            except Exception as exc:  # noqa: BLE001 - background reload reports, never raises
+                log.warning("library reload after an external change failed: %s", exc)
+            finally:
+                self._reloading = False
+
+        self._reloading = True
+        threading.Thread(target=reload, name='library-reload', daemon=True).start()
+        return True
+
     def load(self) -> LibraryState:
         """(Re)load records and references. Cheap: a few hundred small files."""
+        self._records_signature = self._records_head()
         state = LibraryState()
         if self.library_dir and self.library_dir.is_dir():
             state.papers, state.issues = load_library(self.library_dir)
@@ -244,6 +312,7 @@ class LibraryService:
         """Load library_chunks.parquet (seconds). Safe to call from a thread."""
         path = self.index_path
         self.index_loading = True
+        self._index_signature = self._index_file_signature()
         try:
             if path is None or not path.is_file():
                 self.index, self.index_error = None, f"no literature index at {path}"
@@ -267,6 +336,7 @@ class LibraryService:
             self.index_loading = False
 
     def status(self) -> Dict[str, Any]:
+        self.refresh_if_changed()
         state = self.state
         meta = self.index.meta if self.index is not None else {}
         return {
@@ -504,6 +574,7 @@ class LibraryService:
     def search(self, query: str, *, k: int = 10,
                mode: str = 'hybrid', sections: Optional[Sequence[str]] = None,
                citekeys: Optional[Sequence[str]] = None, year: Optional[str] = None) -> Dict[str, Any]:
+        self.refresh_if_changed()
         if self.index is None:
             return {'query': query, 'mode': None, 'results': [],
                     'warnings': [self.index_error or 'literature index still loading']}

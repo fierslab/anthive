@@ -29,6 +29,18 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.42.1 (2026-10-03)
+
+Patch release: no contract change.
+
+- **The server notices a library changed on disk.** When `ant sync
+  library` (or the host-side `ant-stack publish-library`) pulls new records
+  or replaces `library_chunks.parquet`, the running server reloads them in
+  the background on the next library request (checked at most every 30 s).
+  Before, a site that downloaded a newer published index, or a publisher
+  whose ingest container added papers to it, kept searching the old index
+  until a restart or rescan.
+
 ## 2.42.0 (2026-10-03)
 
 Minor release. Literature search and onboarding.
