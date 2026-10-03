@@ -3241,6 +3241,7 @@ Safety rules. Follow them for the whole session.
    - If it is, run
      DISABLE_TELEMETRY=1 npx skills add https://gitlab.kuleuven.be/bdslab/anthive/skills.git -g --agent '*'
      In Windows PowerShell, which does not understand the DISABLE_TELEMETRY=1 prefix, first run $env:DISABLE_TELEMETRY=1 and then the same command without that prefix.
+     A few agents, such as Eve and PromptScript, only take per-project skills, so the output may contain lines like "Eve does not support global skill installation". Those lines are expected and harmless and do not count as a failed step. Tell me so, then verify the install by checking that the anthive-* folders exist in ~/.agents/skills or ~/.claude/skills.
    - If Node.js is missing, do not install it on your own. Tell me how to install it for my operating system (https://nodejs.org) and ask whether I want to do that now. If I prefer not to, offer to copy the folders under skills/ from https://gitlab.kuleuven.be/bdslab/anthive/skills into your own user-level skills folder (for Claude Code ~/.claude/skills/, for most other agents ~/.agents/skills/).
 
 4. Optional, ask me first: install vark. vark is a command-line tool for querying Anthive from a terminal or a script. Ask whether I want it. If I say no, skip to step 5.

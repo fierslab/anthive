@@ -77,6 +77,7 @@
         <ul>
           <li>In Claude Code, Codex, OpenCode, Cursor, Gemini CLI and most other agents that read skill folders, run this once in a terminal. It needs <a href="https://nodejs.org/" target="_blank" rel="noopener">Node.js</a>, the free program that provides <code>npx</code>.
             <div class="cmd"><pre id="quickstart-skills-cmd">{{ _skills_install }}</pre><button type="button" data-copy-help>Copy</button></div>
+            <p>A few agents, such as Eve and PromptScript, report "does not support global skill installation". That is harmless; check the install with <code>ls ~/.agents/skills ~/.claude/skills</code>.</p>
           </li>
           <li>In Claude Desktop and claude.ai, download the zips and upload each one under Customize &gt; Skills, with code execution switched on (<a href="#skills-claude-apps">step by step</a>). Then add your MCP link under Customize &gt; Connectors.
             <ul class="zips">
@@ -297,6 +298,7 @@
 
     <p><strong>Install in Claude Code, Codex, OpenCode, Cursor, Gemini CLI and other agents.</strong> Use the skills command-line tool (needs <a href="https://nodejs.org/" target="_blank" rel="noopener">Node.js</a>). This installs every skill into every agent it finds on your computer:</p>
     <div class="cmd"><pre>{{ _skills_install }}</pre><button type="button" data-copy-help>Copy</button></div>
+    <p>A few agents, such as Eve and PromptScript, report "does not support global skill installation". That is harmless; check the install with <code>ls ~/.agents/skills ~/.claude/skills</code>.</p>
     <p>An agent that can run commands can also do this for you: the setup prompt on <a href="/account/mcp">your MCP page</a> connects anthive and installs the skills in one paste.</p>
     <p>Update them now and then:</p>
     <div class="cmd"><pre>{{ _skills_update }}</pre><button type="button" data-copy-help>Copy</button></div>

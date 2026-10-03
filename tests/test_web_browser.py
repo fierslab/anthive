@@ -2811,6 +2811,8 @@ def test_help_page_quick_start_first(client):
     assert ("DISABLE_TELEMETRY=1 npx skills add https://gitlab.kuleuven.be/bdslab/anthive/skills.git"
             " -g --agent &#39;*&#39;") in quick
     assert "data-copy-help" in quick
+    assert "does not support global skill installation" in quick and "harmless" in quick
+    assert "ls ~/.agents/skills ~/.claude/skills" in quick
     for name in HELP_SKILL_NAMES:
         url = f"https://gitlab.kuleuven.be/bdslab/anthive/skills/-/raw/main/zips/{name}.zip?inline=false"
         assert f'href="{url}"' in quick, name
@@ -2831,6 +2833,8 @@ def test_help_page_skills_section_complete(client):
                                re.sub(r"<[^>]+>", " ", skills)))
     assert mentioned <= set(HELP_SKILL_NAMES), mentioned - set(HELP_SKILL_NAMES)
     assert "npx skills update -g" in skills
+    assert "does not support global skill installation" in skills
+    assert "ls ~/.agents/skills ~/.claude/skills" in skills
     assert "--skill anthive-basics anthive-literature" in skills
     assert "Customize &gt; Skills" in skills and "code execution" in skills
     assert "Anthropic&#39;s cloud" in skills or "Anthropic's cloud" in skills
@@ -5979,6 +5983,10 @@ def test_mcp_setup_prompt_fills_in_link_and_commands():
     assert ("vark server login --name anthive-example --url https://anthive.example.org/api"
             " --user mf") in prompt
     assert "vark server check anthive-example -o json" in prompt
+    # The harmless "does not support global skill installation" lines are explained.
+    assert "does not support global skill installation" in prompt
+    assert "expected and harmless" in prompt
+    assert "anthive-* folders exist in ~/.agents/skills or ~/.claude/skills" in prompt
     assert "Do not run the login yourself" in prompt
     # Safety rules and the ask-first / stop-on-failure behaviour.
     assert "works like my password" in prompt
