@@ -4,11 +4,27 @@
 
 {% block content %}
 {% set _docs = docs_base_url() %}
+{% set _skills_repo = 'https://gitlab.kuleuven.be/bdslab/anthive/skills' %}
+{% set _skills_install = "DISABLE_TELEMETRY=1 npx skills add " ~ _skills_repo ~ ".git -g --agent '*'" %}
+{% set _skills_update = 'DISABLE_TELEMETRY=1 npx skills update -g' %}
+{% set _skills = [
+  ('anthive-basics', 'Start here: connecting (MCP or REST), finding datasets, several servers, ground rules.'),
+  ('anthive-setup', 'After the first install: updating the skills and vark, adding a second anthive server, replacing a revoked MCP link, finding out why tools are missing.'),
+  ('anthive-dataset-analysis', 'Expression, plots, module scores, SQL, and statistics without overclaiming.'),
+  ('anthive-literature', 'Searching and citing the paper library, and combining it with the data.'),
+  ('anthive-paper-upload', "Preparing a paper's metadata and uploading it to the paper library. Only useful if you have upload rights."),
+  ('sc-reproducible-research', 'Reproducible AI-assisted analysis: frozen data, scripted pipelines, versioning, recorded environments and model use, independent checks. Needs no anthive server.'),
+] %}
 <style>
   .help { max-width: 920px; }
   .help h1 { font-size: 20px; font-weight: 600; margin: 4px 0 10px; }
-  .help h2 { font-size: 16px; margin: 26px 0 6px; border-bottom: 1px solid var(--border); padding-bottom: 3px; scroll-margin-top: 12px; }
-  .help h3 { font-size: 13.5px; margin: 14px 0 4px; color: var(--text); scroll-margin-top: 12px; }
+  .help .section-head, .help .subsection-head { scroll-margin-top: 12px; }
+  .help .quickstart { border: 1px solid var(--border); border-radius: 6px; padding: 12px 16px 6px; margin: 4px 0 16px; }
+  .help .quickstart > .section-head { margin-top: 0; }
+  .help .quickstart > ol > li { margin-bottom: 8px; }
+  .help .quickstart .zips { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; padding: 0; list-style: none; }
+  .help .quickstart .zips a { display: inline-block; border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; font-family: var(--font-mono); font-size: 11.5px; background: var(--bg); }
+  .help .prompt { font-style: italic; }
   .help p, .help li, .help td { font-size: 13px; line-height: 1.6; }
   .help ul, .help ol { margin: 4px 0 8px 20px; }
   .help code, .help .path { background: var(--border-light); padding: 1px 5px; border-radius: 3px; font-family: var(--font-mono); font-size: 11.5px; }
@@ -47,11 +63,45 @@
     assistant connected with your personal MCP link.
   </div>
 
+  <section class="help-section quickstart" id="quickstart">
+    <h2 class="section-head">Quick start</h2>
+    <ol>
+      <li><strong>Sign in and look around.</strong> The site asks for your login once per session. The <a href="/">front page</a> lists every collection; type in the search box (a gene, a disease, an author, a dataset code) or open <em>Filters</em>, then open a dataset to see its cells, plots and papers.</li>
+      <li><strong>Connect your AI client.</strong> MCP is the way AI assistants use outside tools; a personal MCP link lets yours use anthive as you. Open your name at the top right and choose <strong>Connect an MCP client</strong>, which takes you to <a href="/account/mcp" id="quickstart-mcp-link">your MCP page</a>, and create a link there. Keep it private, it works like a password.
+        <ul>
+          <li><strong>Agents that can run commands</strong> (Claude Code, Codex, OpenCode, Cursor) are quickest. Copy the setup prompt from your MCP page and paste it into the agent: it connects anthive and installs the skills in one go, so you can skip step 3.</li>
+          <li><strong>Other clients</strong>, including Claude Desktop and claude.ai, are set up by hand. Your MCP page has ready-made snippets with your link filled in, and the <a href="{{ _docs }}/MCP_CLIENTS.md" target="_blank" rel="noopener" id="quickstart-mcp-clients-doc">client guide on GitLab</a> walks through more than 20 clients step by step.</li>
+        </ul>
+      </li>
+      <li><strong>Install the skills.</strong> Skills are short written instructions your assistant reads when a task fits: which tool to use first, how to cite, which statistics not to trust.
+        <ul>
+          <li>In Claude Code, Codex, OpenCode, Cursor, Gemini CLI and most other agents that read skill folders, run this once in a terminal. It needs <a href="https://nodejs.org/" target="_blank" rel="noopener">Node.js</a>, the free program that provides <code>npx</code>.
+            <div class="cmd"><pre id="quickstart-skills-cmd">{{ _skills_install }}</pre><button type="button" data-copy-help>Copy</button></div>
+          </li>
+          <li>In Claude Desktop and claude.ai, download the zips and upload each one under Customize &gt; Skills, with code execution switched on (<a href="#skills-claude-apps">step by step</a>). Then add your MCP link under Customize &gt; Connectors.
+            <ul class="zips">
+              {% for name, _desc in _skills %}<li><a href="{{ _skills_repo }}/-/raw/main/zips/{{ name }}.zip?inline=false">{{ name }}.zip</a></li>
+              {% endfor %}
+            </ul>
+          </li>
+        </ul>
+      </li>
+      <li><strong>Ask a first question.</strong> For example:
+        <ul>
+          <li class="prompt">"Which datasets have human microglia from Alzheimer's disease donors? Show APOE by disease in one of them and tell me what the papers in the library say about it."</li>
+          <li class="prompt">"Search the paper library for what is known about TREM2 in microglia, then check whether TREM2 expression differs between the disease groups in one of the datasets."</li>
+        </ul>
+      </li>
+    </ol>
+    <p>Writing scripts instead? The <a href="/api-guide" id="quickstart-api-guide-link">API page</a> shows how to sign in and make your first calls with curl, Python and vark.</p>
+  </section>
+
   <input type="search" class="filter" id="help-filter" placeholder="Search this help page (for example: MCP, skills, download, library)" aria-label="Search this help page">
   <div class="filter-status" id="help-filter-status"></div>
 
   <nav aria-label="Contents">
     <ol class="toc">
+      <li><a href="#quickstart">Quick start</a></li>
       <li><a href="#what">What anthive is</a></li>
       <li><a href="#finding">Finding data</a></li>
       <li><a href="#pages">Collection and dataset pages</a></li>
@@ -74,7 +124,7 @@
   </nav>
 
   <section class="help-section" id="what">
-    <h2>1. What anthive is</h2>
+    <h2 class="section-head">What anthive is</h2>
     <ul>
       <li><strong>Datasets</strong> are single-cell (or bulk or spatial) expression matrices with their cell annotations, converted from curated <code>.h5ad</code> files into fast databases. Each has an id such as <code>L26/FMG</code>: the collection code, then the dataset code.</li>
       <li><strong>Collections</strong> group the datasets that come from one study or source, usually one paper.</li>
@@ -86,7 +136,7 @@
   </section>
 
   <section class="help-section" id="finding">
-    <h2>2. Finding data</h2>
+    <h2 class="section-head">Finding data</h2>
     <p>The <a href="/">front page</a> lists every collection, newest first.</p>
     <ul>
       <li><strong>Search box.</strong> Type anything: a paper title, an author, a journal or year, a DOI or PubMed id, a tissue, cell type, disease or method, a collection or dataset code, or the name of a dataset inside a collection. Several words must all match (so <code>microglia prefrontal</code> narrows the list). Case and accents do not matter, and matching words are highlighted.</li>
@@ -99,10 +149,10 @@
   </section>
 
   <section class="help-section" id="pages">
-    <h2>3. Collection and dataset pages</h2>
-    <h3>Collection page</h3>
+    <h2 class="section-head">Collection and dataset pages</h2>
+    <h3 class="subsection-head">Collection page</h3>
     <p>Lists the datasets of one collection with their size and the annotations that differ between them (values shared by all datasets are shown once, as pills under the title). Below the table: the collection description, the linked <strong>papers</strong> (with why they are linked) and downloads.</p>
-    <h3>Dataset page</h3>
+    <h3 class="subsection-head">Dataset page</h3>
     <p>At the top: the <strong>id strip</strong> with the collection, dataset and database ids (click to select and copy; you need the database id, for example <code>L26/FMG</code>, in the API, vark, pyvark and MCP), provenance (access, source, license, links to the DOI or accession), the title, a short description, context pills and the numbers of cells and genes. The <em>visualize</em> menu (top right) opens the plot builder.</p>
     <div class="table-wrap">
     <table>
@@ -120,12 +170,12 @@
     </table>
     </div>
     <p>Tabs only appear when the dataset has that kind of data.</p>
-    <h3>Facets (<code>ant_*</code> columns)</h3>
+    <h3 class="subsection-head">Facets (<code>ant_*</code> columns)</h3>
     <p>Columns starting with <code>ant_</code>, such as <code>ant_cell_type</code>, <code>ant_disease</code>, <code>ant_donor</code>, <code>ant_sex</code>, <code>ant_age</code>, <code>ant_braak</code> and <code>ant_apoe</code>, are the site's standardised annotations: same name and same values in every dataset that has them. Prefer them when you group, colour or filter, and when you compare datasets. They are shown in bold with a small <em>facet</em> pill; the tooltip gives the original column name.</p>
   </section>
 
   <section class="help-section" id="plots">
-    <h2>4. Plots</h2>
+    <h2 class="section-head">Plots</h2>
     <ul>
       <li><strong>Where.</strong> Use the <em>visualize</em> menu on a dataset page, or the small chart icons next to a column. Plots are rendered on the server, so they work on very large datasets.</li>
       <li><strong>Plot types.</strong> Scatter and hexbin (on an embedding such as UMAP, or one variable against another), violin, box, bar, histogram, ECDF, KDE and 2-D KDE, heatmap, rolling average along a variable, and for differential expression: volcano, MA, forest and DE heatmap.</li>
@@ -137,7 +187,7 @@
   </section>
 
   <section class="help-section" id="genes">
-    <h2>5. Genes, gene sets and facets</h2>
+    <h2 class="section-head">Genes, gene sets and facets</h2>
     <ul>
       <li><strong>Gene atlas.</strong> Type a gene in the <em>gene atlas</em> box in the top bar to see it across all datasets; several genes separated by commas give a heatmap. Favourite genes (set in Preferences) are marked.</li>
       <li><strong>Gene sets</strong> (<a href="/genesets">/genesets</a>): browse curated gene sets by study and experiment, open one to see its genes and where its module score varies most, or look up every set containing a gene. The <a href="/genesets/variability">variability heatmap</a> compares modules across datasets; note that these statistics are per cell, not per donor.</li>
@@ -147,7 +197,7 @@
   </section>
 
   <section class="help-section" id="papers">
-    <h2>6. The paper library</h2>
+    <h2 class="section-head">The paper library</h2>
     <ul>
       <li><strong><a href="/library">Library page</a>:</strong> every paper, searchable and filterable by year, cohort, cell type and role.</li>
       <li><strong>Paper page:</strong> the full record (authors, journal, DOI, PubMed, abstract), a short summary, topics (cell types, tissues, diseases, methods, cohorts), the datasets it is linked to, related papers, the PDF and a BibTeX entry.</li>
@@ -162,7 +212,7 @@
   </section>
 
   <section class="help-section" id="ai">
-    <h2>7. Working with AI assistants</h2>
+    <h2 class="section-head">Working with AI assistants</h2>
     <p>You can let an AI assistant (Claude, ChatGPT-based tools, Cursor, VS Code, Codex, OpenCode and others) search, plot and analyse anthive data for you, and read the papers. Two pieces work together:</p>
     <ul>
       <li><strong>MCP</strong> is the live connection: it lets the assistant use anthive, as you, through a personal link.</li>
@@ -171,7 +221,7 @@
     <p id="ai-provider-note">Anything anthive returns to your AI client, including text from papers and datasets, is sent to that client's AI provider.</p>
     <p>Use both if your assistant supports skills; MCP alone works too.</p>
 
-    <h3 id="mcp">7a. MCP: connect an assistant</h3>
+    <h3 class="subsection-head" id="mcp">MCP: connect an assistant</h3>
     <p>MCP (Model Context Protocol) is a standard way for AI assistants to use outside tools. Anthive runs an MCP server; your assistant connects to it with a <strong>personal link</strong> that identifies you, so it sees exactly what you may see and acts in your name.</p>
     <ol>
       <li>Sign in, open your name at the top right and choose <strong>Connect an MCP client</strong> (it says <strong>MCP links</strong> once you have links). This opens <a href="/account/mcp">your MCP page</a>.</li>
@@ -182,7 +232,7 @@
     <div class="warn"><strong>Treat a link like a password.</strong> Anyone who has it can query the data as you. Do not paste it into chats, tickets or shared files.</div>
     <p class="note">More on links, expiry and what each tool may do: <a href="{{ _docs }}/MCP_LINKS.md" target="_blank" rel="noopener">MCP links</a>.</p>
 
-    <h3 id="mcp-clients">7b. Setting up each client</h3>
+    <h3 class="subsection-head" id="mcp-clients">Setting up each client</h3>
     <p>Almost every AI tool that speaks MCP can use anthive: it is a remote server over HTTP ("streamable HTTP") that needs no sign-in beyond your link. Your <a href="/account/mcp">MCP page</a> has copy-ready snippets with your own link filled in for the common clients. <strong>Step-by-step instructions for each client</strong>, kept up to date on GitLab, are in <a href="{{ _docs }}/MCP_CLIENTS.md" target="_blank" rel="noopener" id="help-mcp-clients-doc">Connecting an AI client to anthive</a>. It covers:</p>
     <ul class="client-list">
       <li><strong>Claude</strong>: Claude Code, claude.ai, Claude Desktop and mobile</li>
@@ -204,7 +254,7 @@
     <div class="warn"><strong>claude.ai, the Claude apps and ChatGPT connect from the vendor's cloud, not from your computer.</strong> They only work if this site is reachable from the internet. If it is only reachable on a campus network or VPN, use a client that runs on your machine (Claude Code, Codex, Gemini CLI, Cursor, VS Code, ...) or the <code>mcp-remote</code> bridge.</div>
     <p class="note">The name you give the server (<code>anthive</code> above) is how the assistant refers to it, and how its tools and prompts are named in your client. Clients that support custom headers can keep the token out of the URL: see <a href="{{ _docs }}/MCP_LINKS.md" target="_blank" rel="noopener">MCP links</a>.</p>
 
-    <h3 id="mcp-offers">7c. What the MCP server offers</h3>
+    <h3 class="subsection-head" id="mcp-offers">What the MCP server offers</h3>
     <p>When an assistant connects, the server tells it where to start: load a dataset's background first, cite the literature, and keep "the literature says" apart from "our data shows". The tools:</p>
     <div class="table-wrap">
     <table>
@@ -233,34 +283,59 @@
     </ul>
     <p>And two <strong>resources</strong>, documents your client can attach (Claude Desktop and Claude Code support this): <code>anthive://guide</code>, how to use anthive well, and <code>anthive://dataset/&lt;collection&gt;/&lt;dataset&gt;/context</code>, the background of one dataset.</p>
 
-    <h3 id="skills">7d. Skills</h3>
+    <h3 class="subsection-head" id="skills">Skills</h3>
     <p>A <strong>skill</strong> is a small folder with instructions (a <code>SKILL.md</code>) that your assistant loads by itself when a task fits. Where MCP gives the assistant access, a skill gives it judgement: which tool to call first, how to avoid misleading statistics, how to cite. Skills follow an open format, so the same skills work in Claude Code, Codex, OpenCode, Cursor, Gemini CLI, GitHub Copilot and many other agents.</p>
-    <p>The anthive skills are public at <a href="https://gitlab.kuleuven.be/bdslab/anthive/skills" target="_blank" rel="noopener">gitlab.kuleuven.be/bdslab/anthive/skills</a>. Names starting with <code>anthive-</code> need access to an anthive server; names starting with <code>sc-</code> are general single-cell and research practice and work without anthive. Currently:</p>
+    <p>The anthive skills are public at <a href="{{ _skills_repo }}" target="_blank" rel="noopener" id="help-skills-repo">gitlab.kuleuven.be/bdslab/anthive/skills</a>. Names starting with <code>anthive-</code> need access to an anthive server; names starting with <code>sc-</code> are general single-cell and research practice and work without anthive. Currently:</p>
     <div class="table-wrap">
     <table>
       <tr><th>Skill</th><th>For</th></tr>
-      <tr><td><code>anthive-basics</code></td><td>Start here: connecting (MCP or REST), finding datasets, several servers, ground rules.</td></tr>
-      <tr><td><code>anthive-dataset-analysis</code></td><td>Expression, plots, module scores, SQL, and statistics without overclaiming.</td></tr>
-      <tr><td><code>anthive-literature</code></td><td>Searching and citing the paper library, and combining it with the data.</td></tr>
-      <tr><td><code>sc-reproducible-research</code></td><td>Reproducible AI-assisted analysis: frozen data, scripted pipelines, versioning, recorded environments and model use, independent checks.</td></tr>
+      {% for name, desc in _skills %}<tr><td><code>{{ name }}</code></td><td>{{ desc }}</td></tr>
+      {% endfor %}
     </table>
     </div>
     <p>The list grows; the repository always has the current set.</p>
-    <p><strong>Install</strong> with the skills command-line tool (needs <a href="https://nodejs.org/" target="_blank" rel="noopener">Node.js</a>), into every agent it finds on your computer:</p>
-    <div class="cmd"><pre>DISABLE_TELEMETRY=1 npx skills add https://gitlab.kuleuven.be/bdslab/anthive/skills.git -g --agent '*'</pre><button type="button" data-copy-help>Copy</button></div>
-    <p><strong>Update</strong> later:</p>
-    <div class="cmd"><pre>DISABLE_TELEMETRY=1 npx skills update -g</pre><button type="button" data-copy-help>Copy</button></div>
+
+    <p><strong>Install in Claude Code, Codex, OpenCode, Cursor, Gemini CLI and other agents.</strong> Use the skills command-line tool (needs <a href="https://nodejs.org/" target="_blank" rel="noopener">Node.js</a>). This installs every skill into every agent it finds on your computer:</p>
+    <div class="cmd"><pre>{{ _skills_install }}</pre><button type="button" data-copy-help>Copy</button></div>
+    <p>An agent that can run commands can also do this for you: the setup prompt on <a href="/account/mcp">your MCP page</a> connects anthive and installs the skills in one paste.</p>
+    <p>Update them now and then:</p>
+    <div class="cmd"><pre>{{ _skills_update }}</pre><button type="button" data-copy-help>Copy</button></div>
     <ul>
       <li><code>DISABLE_TELEMETRY=1</code> stops the tool from reporting the installation to its makers.</li>
       <li>To install for certain agents only, name them separated by spaces, for example <code>--agent claude-code codex opencode</code>. Leave out <code>-g</code> to install into the current project only.</li>
-      <li>To install only some skills, add <code>--skill</code> with their names separated by spaces; <code>-l</code> lists what the repository offers without installing anything.</li>
+      <li>To install only some skills, add <code>--skill</code> with their names separated by spaces. Adding <code>-l</code> lists what the repository offers without installing anything.</li>
       <li>The tool keeps one copy in <code>~/.agents/skills/</code> (read directly by Codex, OpenCode and other agents) and links it into agent-specific folders such as <code>~/.claude/skills/</code>.</li>
-      <li>Without the tool, copy the folders under <code>skills/</code> of the repository into your agent's skills folder.</li>
-      <li>Assistants without skills support (for example claude.ai) still get the same guidance through MCP: the <code>anthive://guide</code> resource and the prompts.</li>
+      <li>Without the tool, copy the folders under <code>skills/</code> of the repository into your agent's skills folder (<code>~/.claude/skills/</code> for Claude Code, <code>~/.agents/skills/</code> for most others).</li>
     </ul>
-    <p class="note">The <a href="https://gitlab.kuleuven.be/bdslab/anthive/skills#readme" target="_blank" rel="noopener">skills README</a> on GitLab has the current list and per-agent install notes.</p>
+    <p>For example, only the basics and the literature skill:</p>
+    <div class="cmd"><pre>{{ _skills_install }} --skill anthive-basics anthive-literature</pre><button type="button" data-copy-help>Copy</button></div>
 
-    <h3 id="servers">7e. Several anthive servers</h3>
+    <p id="skills-claude-apps"><strong>Install in Claude Desktop and claude.ai.</strong> These apps do not read skill folders from your disk, so you upload each skill as a zip.</p>
+    <ol>
+      <li>Open the skills settings (Customize &gt; Skills; in older versions Settings &gt; Capabilities &gt; Skills) and check that code execution is switched on. Skills need it.</li>
+      <li>Choose <em>Upload skill</em> (or <strong>+</strong>) and pick a zip. Repeat for each skill you want, <code>anthive-basics</code> first. <code>anthive-setup</code> helps later, when you update or add a server.
+        <ul>
+          {% for name, _desc in _skills %}<li><a href="{{ _skills_repo }}/-/raw/main/zips/{{ name }}.zip?inline=false">{{ name }}.zip</a></li>
+          {% endfor %}
+        </ul>
+      </li>
+      <li>Add your MCP link as a custom connector (Customize &gt; Connectors &gt; <em>Add custom connector</em>, no sign-in) so the skills have something to talk to.</li>
+    </ol>
+    <p>To update, delete the old skill and upload the new zip. On a Team or Enterprise plan an organisation owner can upload the zips once for everyone.</p>
+    <div class="warn"><strong>Custom connectors are called from Anthropic's cloud, also from Claude Desktop.</strong> They only reach an anthive site that is reachable from the internet. For a site on a campus network or VPN, use Claude Desktop with the <code>mcp-remote</code> bridge, or a client that runs on your machine such as Claude Code or Codex (see the <a href="{{ _docs }}/MCP_CLIENTS.md" target="_blank" rel="noopener">client guide</a>).</div>
+
+    <p><strong>The vark skill.</strong> If you use <a href="#code">vark</a>, <code>vark skill install</code> adds its own skill to the agents on your computer, and <code>vark upgrade</code> keeps it current.</p>
+
+    <p><strong>What the skills do not contain.</strong> No data, no credentials and no site address: they work with any anthive server. Your assistant still needs a connection, in one of three ways:</p>
+    <ul>
+      <li>your personal MCP link from <a href="/account/mcp">your MCP page</a> (recommended);</li>
+      <li><a href="#code">vark</a>, after <code>vark server login</code>;</li>
+      <li>the REST API, with <code>ANTHIVE_URL=https://&lt;this site&gt;</code> in your environment and your login in <code>~/.netrc</code> (see the <a href="/api-guide">API page</a>).</li>
+    </ul>
+    <p>Assistants without skills support still get the same guidance through MCP: the <code>anthive://guide</code> resource and the prompts.</p>
+    <p class="note">The <a href="{{ _skills_repo }}#readme" target="_blank" rel="noopener">skills README</a> on GitLab has the current list and per-agent install notes.</p>
+
+    <h3 class="subsection-head" id="servers">Several anthive servers</h3>
     <p>You may have access to more than one anthive server, for example an internal one with everything you may see and a public one. The skills and tools work with any of them.</p>
     <ul>
       <li>Add one MCP connection per server, each with its own link and a clear name (for example <code>anthive-intern</code> and <code>anthive-public</code>). The assistant should say which server each result came from.</li>
@@ -269,7 +344,7 @@
       <li>Without MCP, assistants and scripts reach a server over plain HTTP: if you use <a href="https://codeberg.org/mfiers/vark" target="_blank" rel="noopener">vark</a>, its server list (<code>vark server ls</code>) is used; otherwise set <code>ANTHIVE_URL=https://&lt;site&gt;</code> and put your login in <code>~/.netrc</code> (<code>machine &lt;site&gt; login &lt;user&gt; password &lt;password&gt;</code>).</li>
     </ul>
 
-    <h3 id="ai-practice">7f. Good practice and limits</h3>
+    <h3 class="subsection-head" id="ai-practice">Good practice and limits</h3>
     <ul>
       <li><strong>Pseudoreplication.</strong> Thousands of cells from a few donors are not independent. Ask for comparisons per donor (<code>ant_donor</code>) and the number of donors before trusting a disease or sex effect.</li>
       <li><strong>Citations.</strong> Ask the assistant to cite literature as [Author Year, p.N] and to keep it separate from what the data show; check important claims in the PDF.</li>
@@ -281,30 +356,30 @@
   </section>
 
   <section class="help-section" id="code">
-    <h2>8. Programmatic access</h2>
-    <h3>REST API</h3>
+    <h2 class="section-head">Programmatic access</h2>
+    <h3 class="subsection-head">REST API</h3>
     <p>Everything the site shows comes from a REST API under <code>/api</code>. Start with the <a href="/api-guide" id="help-api-guide-link">API page</a> (the <strong>API</strong> link in the top bar and in the menu under your name): it explains signing in, keeping your password out of scripts, first calls with curl, pyvark and vark, with this site's address filled in. The interactive documentation is at <a href="/api/docs">/api/docs</a> (also <a href="/api/redoc">/api/redoc</a>). Scripts sign in with your normal username and password over HTTPS; keep them in <code>~/.netrc</code> and use <code>curl -n</code>:</p>
     <div class="cmd"><pre>curl -n -s "https://&lt;this site&gt;/api/databases" | jq '.databases[] | {id, title, n_cells}'</pre><button type="button" data-copy-help>Copy</button></div>
     <div class="cmd"><pre>curl -n -s "https://&lt;this site&gt;/api/databases/L26/FMG/plot/violin?x=ant_disease&amp;y=APOE&amp;sample=20000" -o apoe.png</pre><button type="button" data-copy-help>Copy</button></div>
     <p>Changes between versions are listed in the <a href="/api/changelog">changelog</a>.</p>
-    <h3>vark (command line)</h3>
+    <h3 class="subsection-head">vark (command line)</h3>
     <p><a href="https://codeberg.org/mfiers/vark" target="_blank" rel="noopener">vark</a> is a single program for the terminal that queries one or several anthive servers at once.</p>
     <div class="cmd"><pre>curl -sSL https://codeberg.org/mfiers/vark/raw/branch/main/install.sh | bash
 vark server login --name intern --url https://&lt;this site&gt;/api --user &lt;you&gt;
 vark db ls
 vark gene-stats L26/FMG APOE
 vark plot L26/FMG --geom violin --x ant_disease --y APOE --out apoe.png</pre><button type="button" data-copy-help>Copy</button></div>
-    <p><code>vark skill install</code> adds a vark skill to the agents on your computer.</p>
-    <h3>pyvark (Python)</h3>
+    <p><code>vark skill install</code> adds a vark skill to the agents on your computer; <code>vark upgrade</code> refreshes it.</p>
+    <h3 class="subsection-head">pyvark (Python)</h3>
     <p><a href="https://codeberg.org/mfiers/pyvark" target="_blank" rel="noopener">pyvark</a> is the Python client, for scripts and notebooks:</p>
     <div class="cmd"><pre>pip install pyvark
 python -c "from vark import AnthiveClient; c = AnthiveClient('https://&lt;this site&gt;/api', auth=('&lt;you&gt;', '&lt;password&gt;')); print(len(c.get_databases()))"</pre><button type="button" data-copy-help>Copy</button></div>
-    <h3>Notebooks in the browser</h3>
+    <h3 class="subsection-head">Notebooks in the browser</h3>
     <p>The <em>📓 notebook</em> button on a plot, and <a href="/jupyter/lab/index.html">JupyterLite</a>, open notebooks that run in your browser with pyvark preinstalled. Nothing is installed on your computer; download a notebook to keep it.</p>
   </section>
 
   <section class="help-section" id="account">
-    <h2>9. Accounts, privacy and getting help</h2>
+    <h2 class="section-head">Accounts, privacy and getting help</h2>
     <ul>
       <li><strong>Signing in and out.</strong> The site asks for your login once per session; <em>Logout</em> is in the menu under your name, which also has your <a href="/account/mcp">MCP links</a>, the <a href="/api-guide">API page</a> and <a href="/settings">Preferences</a> (scoring method, favourite genes; stored in your browser only).</li>
       <li><strong>Version.</strong> The small button left of <em>Help</em> shows the version of the running server (for example <code>v2.40.0</code>); hover for details, click for the changelog. Mention it when you report a problem.</li>

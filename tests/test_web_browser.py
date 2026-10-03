@@ -21,6 +21,7 @@ modules.
 # pyright: reportMissingImports=false
 
 import importlib.util
+import re
 from pathlib import Path
 
 import pytest
@@ -2702,6 +2703,50 @@ def test_help_page_skills_and_mcp_facts(client):
     assert "investigate_dataset" in text and "literature_in_our_data" in text
     assert "anthive://guide" in text
     assert 'href="/account/mcp"' in text and 'href="/api/docs"' in text
+
+
+HELP_SKILL_NAMES = ("anthive-basics", "anthive-setup", "anthive-dataset-analysis",
+                    "anthive-literature", "anthive-paper-upload", "sc-reproducible-research")
+
+
+def test_help_page_quick_start_first(client):
+    # A quick start sits above the long sections and leads the table of contents.
+    text = client.get("/help").text
+    body = text.split('<div class="help">', 1)[1].split('<script>', 1)[0]
+    assert 'id="quickstart"' in body
+    assert body.index('id="quickstart"') < body.index('id="what"')
+    toc = body.split('class="toc"', 1)[1].split('</ol>', 1)[0]
+    assert re.findall(r'href="#([a-z-]+)"', toc)[0] == "quickstart"
+    quick = body.split('id="quickstart"', 1)[1].split('</section>', 1)[0]
+    assert ("DISABLE_TELEMETRY=1 npx skills add https://gitlab.kuleuven.be/bdslab/anthive/skills.git"
+            " -g --agent &#39;*&#39;") in quick
+    assert "data-copy-help" in quick
+    for name in HELP_SKILL_NAMES:
+        url = f"https://gitlab.kuleuven.be/bdslab/anthive/skills/-/raw/main/zips/{name}.zip?inline=false"
+        assert f'href="{url}"' in quick, name
+    assert 'href="/api-guide"' in quick and 'href="/account/mcp"' in quick
+    assert "/MCP_CLIENTS.md" in quick and "setup prompt" in quick
+    assert "human microglia from Alzheimer" in quick
+    assert '\u2014' not in body
+
+
+def test_help_page_skills_section_complete(client):
+    text = client.get("/help").text
+    skills = text.split('id="skills"', 1)[1].split('id="servers"', 1)[0]
+    for name in HELP_SKILL_NAMES:
+        assert f"<code>{name}</code>" in skills, name
+        assert f"zips/{name}.zip?inline=false" in skills, name
+    # only skill names that exist in the skills repository
+    mentioned = set(re.findall(r"\b((?:anthive|sc)-[a-z]+(?:-[a-z]+)*)\b",
+                               re.sub(r"<[^>]+>", " ", skills)))
+    assert mentioned <= set(HELP_SKILL_NAMES), mentioned - set(HELP_SKILL_NAMES)
+    assert "npx skills update -g" in skills
+    assert "--skill anthive-basics anthive-literature" in skills
+    assert "Customize &gt; Skills" in skills and "code execution" in skills
+    assert "Anthropic&#39;s cloud" in skills or "Anthropic's cloud" in skills
+    assert "vark skill install" in skills and "~/.netrc" in skills
+    assert 'href="https://gitlab.kuleuven.be/bdslab/anthive/skills"' in skills
+    assert "for example claude.ai" not in skills  # claude.ai does take skills (as zips)
 
 
 def test_help_page_issue_link_follows_config(client, monkeypatch):
