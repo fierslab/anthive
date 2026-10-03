@@ -47,6 +47,14 @@ image with the git tree and scans for data and secret-type files; `make
 push-images` runs it again and refuses to push a failing image. Do not bypass
 it with a plain `docker build .`.
 
+Tracked files that have no place in an image (reports, tests, audits) are
+listed in `docker/image-excludes`. The build leaves them out of the
+`git archive` context and `check-image` refuses an image that contains any of
+them. `.dockerignore` does not help here: Docker does not apply it to a tar
+context piped in on stdin. Images up to 2.40.2 shipped `report/` and `tests/`
+for that reason. Anything private that is tracked in git must go on that list,
+or better, out of the repo.
+
 If the library gained papers since the last release, rebuild the literature
 index and publish it first (it is data, not part of the image):
 

@@ -15,7 +15,17 @@ repo=$(cd "$(dirname "$0")/.." && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-git -C "$repo" ls-tree -r --name-only "$ref" | sort > "$work/tracked"
+# Tracked paths that must stay out of images (docker/image-excludes).
+excludes=()
+while IFS= read -r line; do
+    case "$line" in ''|'#'*) continue ;; esac
+    excludes+=(":(exclude,glob)$line")
+done < "$repo/docker/image-excludes"
+
+# Same file list the Makefile feeds into the build context.
+git -C "$repo" archive --format=tar "$ref" -- . "${excludes[@]}" | tar -t | grep -v '/$' | sort > "$work/tracked"
+git -C "$repo" ls-tree -r --name-only "$ref" | sort > "$work/tracked_all"
+comm -23 "$work/tracked_all" "$work/tracked" > "$work/excluded"
 
 docker run --rm --user 0 --entrypoint "" "$image" \
     sh -c 'cd /opt/anthive4 && find . \( -type f -o -type l \) | sed "s|^\./||"' \
@@ -37,7 +47,15 @@ docker run --rm --user 0 --entrypoint "" "$image" sh -c '
         -not -path "/usr/*" -not -path "/var/log/*" -not -path "/var/lib/*" 2>/dev/null' \
     > "$work/forbidden" || true
 
+# Tracked but excluded files (reports, tests, audits) must not be there.
+comm -12 "$work/in_image" "$work/excluded" > "$work/leaked" || true
+
 status=0
+if [ -s "$work/leaked" ]; then
+    echo "check-image: $image has $(wc -l < "$work/leaked") file(s) listed in docker/image-excludes:" >&2
+    head -40 "$work/leaked" | sed 's/^/  /' >&2
+    status=1
+fi
 if [ -s "$work/extra" ]; then
     echo "check-image: $image has $(wc -l < "$work/extra") file(s) under /opt/anthive4 that git does not track at $ref:" >&2
     head -40 "$work/extra" | sed 's/^/  /' >&2
@@ -48,5 +66,5 @@ if [ -s "$work/forbidden" ]; then
     head -40 "$work/forbidden" | sed 's/^/  /' >&2
     status=1
 fi
-[ "$status" = 0 ] && echo "check-image: $image OK (only files tracked at $ref plus build outputs)"
+[ "$status" = 0 ] && echo "check-image: $image OK (only files tracked at $ref, minus docker/image-excludes, plus build outputs)"
 exit "$status"

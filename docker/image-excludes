@@ -1,0 +1,14 @@
+# Tracked paths that never go into an image. One git pathspec per line.
+# The Makefile passes them to `git archive` (the build context) and
+# docker/check-image refuses an image that still contains any of them.
+# .dockerignore is not applied to a `git archive | docker build -` context.
+report
+tests
+plans
+notebooks
+attic
+doc/BUG_AUDIT_*
+doc/BACKFILL_*
+.dockerignore
+.gitignore
+.gitattributes

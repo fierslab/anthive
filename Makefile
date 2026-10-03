@@ -605,6 +605,9 @@ TAG          ?= $(patsubst v%,%,$(shell git describe --tags --always $(BUILD_REF
 APP_IMAGE    ?= $(REGISTRY)/anthive-app:$(TAG)
 INGEST_IMAGE ?= $(REGISTRY)/anthive-ingest:$(TAG)
 SIF          ?= anthive-ingest-$(TAG).sif
+# Tracked paths kept out of the images (reports, tests, audits): see
+# docker/image-excludes, also enforced by docker/check-image.
+IMAGE_PATHSPEC := . $(shell sed -e '/^\#/d' -e '/^$$/d' -e "s/^\(.*\)$$/':(exclude,glob)\1'/" docker/image-excludes)
 
 ## lock - Regenerate docker/requirements-app.lock from the scripts' PEP-723 headers
 # in:  bin/*/ant-*, web/ant-browse, docker/lock-overrides.txt
@@ -619,8 +622,8 @@ lock:
 images:
 	docker/gen-lock --check
 	@git diff --quiet HEAD -- || echo "note: uncommitted changes are NOT in the image (built from $(BUILD_REF))"
-	git archive --format=tar $(BUILD_REF) | docker build --pull -f docker/Dockerfile -t $(APP_IMAGE) -
-	git archive --format=tar $(BUILD_REF) | docker build -f docker/Dockerfile.ingest --build-arg APP_IMAGE=$(APP_IMAGE) -t $(INGEST_IMAGE) -
+	git archive --format=tar $(BUILD_REF) -- $(IMAGE_PATHSPEC) | docker build --pull -f docker/Dockerfile -t $(APP_IMAGE) -
+	git archive --format=tar $(BUILD_REF) -- $(IMAGE_PATHSPEC) | docker build -f docker/Dockerfile.ingest --build-arg APP_IMAGE=$(APP_IMAGE) -t $(INGEST_IMAGE) -
 	docker/check-image $(APP_IMAGE) $(BUILD_REF)
 	docker/check-image $(INGEST_IMAGE) $(BUILD_REF)
 
