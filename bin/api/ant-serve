@@ -1805,7 +1805,7 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.41.0"
+API_VERSION = "2.41.1"
 API_VERSION_RELEASED = "2026-10-02"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
@@ -13646,14 +13646,38 @@ def _upload_settings():
                           git_push=switches['git_push']), switches
 
 
+_upload_index_queue: List[str] = []          # citekeys waiting for the index lock
+_upload_index_recent: List[Dict[str, Any]] = []   # last finished jobs, newest first
+_UPLOAD_INDEX_RECENT_MAX = 20
+
+
+def _upload_index_snapshot() -> Optional[Dict[str, Any]]:
+    """/library/status view: the job that runs (or ran last), the citekeys
+    still waiting, and the outcome of recent jobs."""
+    if not _upload_index_status and not _upload_index_queue and not _upload_index_recent:
+        return None
+    snapshot = dict(_upload_index_status)
+    snapshot['queued'] = list(_upload_index_queue)
+    snapshot['recent'] = [dict(job) for job in _upload_index_recent]
+    return snapshot
+
+
 def _index_one_paper(pdf: Path, citekey: str) -> None:
-    """Background: add one uploaded PDF to the literature index, then reload it."""
+    """Background: add one uploaded PDF to the literature index, then reload it.
+    Uploads in quick succession wait for each other; the status only switches
+    to a paper when its turn starts, the others are listed as queued."""
     import library_index as li  # noqa: PLC0415
     cfg = get_config()
     out = get_library_index_dir(cfg) / 'library_chunks.parquet'
-    status = {'citekey': citekey, 'state': 'running', 'started': datetime.now().isoformat(timespec='seconds')}
-    _upload_index_status.update(status)
+    _upload_index_queue.append(citekey)
     with _upload_index_lock:
+        try:
+            _upload_index_queue.remove(citekey)
+        except ValueError:
+            pass
+        _upload_index_status.clear()
+        _upload_index_status.update(citekey=citekey, state='running',
+                                    started=datetime.now().isoformat(timespec='seconds'))
         try:
             model = (li.read_index_metadata(out).get('embedding_model') if out.exists() else None) or li.DEFAULT_MODEL
             stats = li.add_or_replace_sources([pdf], out, embedder=_make_query_embedder(model),
@@ -13666,6 +13690,9 @@ def _index_one_paper(pdf: Path, citekey: str) -> None:
         except Exception as exc:  # noqa: BLE001 - background work reports, never raises
             log.warning("index update for %s failed: %s", citekey, exc)
             _upload_index_status.update(state='failed', error=f"{type(exc).__name__}: {exc}")
+        _upload_index_status['finished'] = datetime.now().isoformat(timespec='seconds')
+        _upload_index_recent.insert(0, dict(_upload_index_status))
+        del _upload_index_recent[_UPLOAD_INDEX_RECENT_MAX:]
 
 
 def _after_upload(result, switches) -> List[str]:
@@ -13785,7 +13812,7 @@ def library_status():
     """Library and literature-index health: counts, issues, unresolved references,
     model, and the state of the last upload's background index update."""
     status = _library().status()
-    status['upload_index'] = dict(_upload_index_status) or None
+    status['upload_index'] = _upload_index_snapshot()
     return status
 
 

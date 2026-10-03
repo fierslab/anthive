@@ -29,6 +29,23 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.41.1 (unreleased)
+
+Patch release: no contract change.
+
+- **Hybrid literature search keeps paraphrase matches.** The fusion of the
+  keyword and semantic rankings favoured passages found by both, so the
+  best semantic match of a query that shares few words with the paper
+  could drop out of the results. The two best passages of each ranking are
+  now interleaved at the top (semantic rank r at place 2r or better,
+  keyword rank r at 2r + 1). Example on the dev library: "cells that eat
+  debris do not clear the toxic protein clumps but actually help seed
+  them" ranks konstantoulea2026phagocytes first (before: not in the top 10).
+- **`GET /library/status` `upload_index` shows the queue.** Uploads in quick
+  succession are indexed one after another; the status now switches to a
+  paper only when its turn starts, lists waiting citekeys in `queued`, and
+  keeps the outcome of the last 20 jobs in `recent` (before, a waiting
+  upload overwrote the status of the one being indexed).
 ## 2.41.0 (2026-10-03)
 
 Minor release. The library has no per-paper access or LLM rules any more,

@@ -3,6 +3,7 @@ two-way library sync (lib/library_sync.py) against an in-memory fake S3."""
 from __future__ import annotations
 
 import ast
+import sys
 import hashlib
 import json
 import logging
@@ -863,3 +864,70 @@ def test_endpoint_md_record_with_unquoted_date(tmp_path, monkeypatch):
     assert created.status_code == 201, created.text
     paper = parse_sidecar(lib / created.json()['path'])
     assert str(paper.fields['date']) == '2026-10-03'
+
+
+def _index_queue_namespace(tmp_path, monkeypatch, gate):
+    """ant-serve's background indexing functions with a fake indexer that
+    waits on ``gate`` so the test controls when each job finishes."""
+    import datetime as _dt
+    import threading
+    import types
+    tree = ast.parse(SERVE_PATH.read_text())
+    wanted = {'_index_one_paper', '_upload_index_snapshot'}
+    globals_wanted = {'_upload_index_lock', '_upload_index_status', '_upload_index_queue',
+                      '_upload_index_recent', '_UPLOAD_INDEX_RECENT_MAX'}
+    body = [node for node in tree.body
+            if getattr(node, 'name', None) in wanted
+            or (isinstance(node, (ast.Assign, ast.AnnAssign)) and
+                {getattr(t, 'id', None) for t in (node.targets if isinstance(node, ast.Assign) else [node.target])}
+                & globals_wanted)]
+    fake_li = types.SimpleNamespace(
+        read_index_metadata=lambda out: {}, DEFAULT_MODEL='fake', parse_pdf_pymupdf=None,
+        add_or_replace_sources=lambda pdfs, out, **kw: (gate[pdfs[0].stem].wait(5),
+                                                        {'added': [pdfs[0].name], 'failed': [], 'needs_ocr': []})[1])
+    monkeypatch.setitem(sys.modules, 'library_index', fake_li)
+    namespace: Dict[str, Any] = {
+        'Optional': Optional, 'Dict': Dict, 'List': List, 'Any': Any, 'Lock': Lock, 'Path': Path,
+        'datetime': _dt.datetime, 'log': logging.getLogger('test-index-queue'),
+        'get_config': lambda: {}, 'get_library_index_dir': lambda cfg: tmp_path,
+        'get_library_dir': lambda cfg: tmp_path, '_make_query_embedder': lambda model: None,
+        '_library_service': None,
+    }
+    exec(compile(ast.Module(body=body, type_ignores=[]), str(SERVE_PATH), 'exec', dont_inherit=True), namespace)
+    return namespace, threading
+
+
+def test_upload_index_status_shows_the_queue(tmp_path, monkeypatch):
+    import threading
+    import time
+    gate = {'first': threading.Event(), 'second': threading.Event()}
+    ns, _ = _index_queue_namespace(tmp_path, monkeypatch, gate)
+    assert ns['_upload_index_snapshot']() is None
+    first = threading.Thread(target=ns['_index_one_paper'], args=(tmp_path / 'first.pdf', 'first'))
+    first.start()
+    for _ in range(100):
+        if ns['_upload_index_status'].get('citekey') == 'first':
+            break
+        time.sleep(0.01)
+    second = threading.Thread(target=ns['_index_one_paper'], args=(tmp_path / 'second.pdf', 'second'))
+    second.start()
+    for _ in range(100):
+        if ns['_upload_index_queue']:
+            break
+        time.sleep(0.01)
+    snap = ns['_upload_index_snapshot']()
+    assert snap['citekey'] == 'first' and snap['state'] == 'running' and snap['queued'] == ['second']
+    gate['first'].set()
+    for _ in range(200):
+        if ns['_upload_index_status'].get('citekey') == 'second':
+            break
+        time.sleep(0.01)
+    snap = ns['_upload_index_snapshot']()
+    assert snap['citekey'] == 'second' and snap['queued'] == []
+    assert snap['recent'][0]['citekey'] == 'first' and snap['recent'][0]['added'] == ['first.pdf']
+    gate['second'].set()
+    first.join(5)
+    second.join(5)
+    snap = ns['_upload_index_snapshot']()
+    assert snap['state'] == 'done' and snap['added'] == ['second.pdf']
+    assert [job['citekey'] for job in snap['recent']] == ['second', 'first']

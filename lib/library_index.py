@@ -860,22 +860,52 @@ class LibraryIndex:
             idx = np.argsort(-scores, kind="stable")[:k]
             ranked = [(int(candidates[j]), float(scores[j])) for j in idx]
         else:
-            depth = max(50, k * 5)
             kw = self._keyword_scores(query)[candidates]
             se = self._semantic_scores(query)[candidates]
-            fused: Dict[int, float] = {}
-            kw_order = [j for j in np.argsort(-kw, kind="stable")[:depth] if kw[j] > 0]
-            for rank, j in enumerate(kw_order):
-                fused[int(candidates[j])] = fused.get(int(candidates[j]), 0.0) + 1.0 / (rrf_k + rank + 1)
-            for rank, j in enumerate(np.argsort(-se, kind="stable")[:depth]):
-                fused[int(candidates[j])] = fused.get(int(candidates[j]), 0.0) + 1.0 / (rrf_k + rank + 1)
-            ranked = sorted(fused.items(), key=lambda item: -item[1])[:k]
+            ranked = [(int(candidates[j]), score) for j, score in fuse_rankings(kw, se, k, rrf_k=rrf_k)]
         results = []
         for i, score in ranked:
             row = dict(self.rows[i])
             row["score"] = round(score, 6)
             results.append(row)
         return {"mode": mode, "results": results, "warnings": warnings}
+
+
+def fuse_rankings(keyword_scores: np.ndarray, semantic_scores: np.ndarray, k: int, *,
+                  rrf_k: int = 60, protect: Optional[int] = None) -> List[Tuple[int, float]]:
+    """Hybrid ranking: reciprocal rank fusion of the keyword and semantic
+    rankings, returning ``k`` (position, score) pairs, best first.
+
+    Plain RRF favours passages that appear in both rankings, so a passage
+    that is the best semantic match but shares few words with the query
+    (a paraphrase) could fall far down, behind passages that are middling
+    in both. The top ``protect`` hits of each ranking (default 2) are
+    therefore moved up like an interleave: semantic rank r to at most
+    place 2r, keyword rank r to at most place 2r + 1 (0-based). The best
+    semantic and the best keyword passage always take the first two
+    places, the second best of each the next two. Callers that trim
+    the list further still keep them. Scores stay non-increasing: a moved
+    passage takes the score of the place it moves to.
+    """
+    depth = max(50, k * 5)
+    protect = 2 if protect is None else protect
+    kw_order = [int(j) for j in np.argsort(-keyword_scores, kind="stable")[:depth] if keyword_scores[j] > 0]
+    se_order = [int(j) for j in np.argsort(-semantic_scores, kind="stable")[:depth]]
+    fused: Dict[int, float] = {}
+    for order in (kw_order, se_order):
+        for rank, j in enumerate(order):
+            fused[j] = fused.get(j, 0.0) + 1.0 / (rrf_k + rank + 1)
+    order = [j for j, _ in sorted(fused.items(), key=lambda item: -item[1])]
+    limits: Dict[int, int] = {}
+    for offset, own in ((0, se_order[:protect]), (1, kw_order[:protect])):
+        for rank, j in enumerate(own):
+            limits[j] = min(limits.get(j, len(order)), 2 * rank + offset)
+    for j in sorted(limits, key=lambda j: limits[j]):
+        position = order.index(j)
+        if position > limits[j]:
+            order.insert(limits[j], order.pop(position))
+    scores = sorted(fused.values(), reverse=True)
+    return [(j, scores[i]) for i, j in enumerate(order[:k])]
 
 
 _STOPWORDS = frozenset("""

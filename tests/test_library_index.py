@@ -219,3 +219,32 @@ def test_library_copy_deduplicated_and_citekey_attached(tmp_path):
     assert {r["collection"] for r in rows} == {"Lee2026"}
     assert {r["source_path"] for r in rows} == {"Lee2026/static/lee.pdf"}
     assert {r["title"] for r in rows} == {"Library title"} and {r["year"] for r in rows} == {2026}
+
+
+def test_hybrid_keeps_the_best_semantic_hit_of_a_paraphrase():
+    # 30 passages: 0..19 are decent in both rankings, 25 is the best semantic
+    # match with no keyword overlap (a paraphrase), 26 the best keyword match.
+    keyword = np.zeros(30)
+    semantic = np.zeros(30)
+    keyword[:20] = np.linspace(10, 5, 20)
+    semantic[:20] = np.linspace(0.8, 0.6, 20)
+    semantic[25] = 0.95
+    keyword[26] = 50
+    ranked = li.fuse_rankings(keyword, semantic, k=10)
+    positions = [j for j, _ in ranked]
+    assert len(positions) == 10
+    assert set(positions[:2]) == {25, 26}       # best of each ranking near the top
+    assert positions[2:] == list(range(8))      # then the plain fused order
+    scores = [score for _, score in ranked]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_hybrid_fusion_without_protection_is_plain_rrf():
+    keyword = np.array([3.0, 2.0, 1.0, 0.0])
+    semantic = np.array([0.1, 0.2, 0.3, 0.9])     # 3 is a semantic-only hit
+    plain = [j for j, _ in li.fuse_rankings(keyword, semantic, k=2, protect=0)]
+    assert plain[0] == 0 and 3 not in plain
+    protected = [j for j, _ in li.fuse_rankings(keyword, semantic, k=2, protect=1)]
+    assert set(protected) == {0, 3}
+    long_list = [j for j, _ in li.fuse_rankings(keyword, semantic, k=4)]
+    assert 3 in long_list[:2]
