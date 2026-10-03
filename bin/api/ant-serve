@@ -11054,8 +11054,19 @@ def _pseudobulk_compute(
             subset_filters, cat_fields, num_fields, 'oc',
             obsnum_alias='onum' if num_fields else None,
         )
+        # Field names are the public ones from the obscat/obsnum views (api
+        # renames, hidden columns, derived columns), so filter and group on
+        # those views, keyed back to cell_id through __cells for the layer join.
+        obscat_src = (
+            "(SELECT c.cell_id AS cell_id, v.* EXCLUDE (cell_name) "
+            "FROM obscat v JOIN __cells c ON c.cell_name = v.cell_name)"
+        )
+        obsnum_src = (
+            "(SELECT c.cell_id AS cell_id, v.* EXCLUDE (cell_name) "
+            "FROM obsnum v JOIN __cells c ON c.cell_name = v.cell_name)"
+        )
         obsnum_join = (
-            "LEFT JOIN __obsnum onum ON onum.cell_id = oc.cell_id"
+            f"LEFT JOIN {obsnum_src} onum ON onum.cell_id = oc.cell_id"
             if needs_obsnum else ""
         )
 
@@ -11079,7 +11090,7 @@ def _pseudobulk_compute(
                 {group_expr} AS group_id,
                 COUNT(*) AS n_cells,
                 {size_select_cols}
-            FROM __obscat oc
+            FROM {obscat_src} oc
             {obsnum_join}
             WHERE {where_sql}
             GROUP BY group_id, {', '.join(safe_ident(c) for c in group_by_cols)}
@@ -11111,7 +11122,7 @@ def _pseudobulk_compute(
                 SELECT
                     oc.cell_id AS cell_id,
                     {group_expr} AS group_id
-                FROM __obscat oc
+                FROM {obscat_src} oc
                 {obsnum_join}
                 WHERE {where_sql}
             )

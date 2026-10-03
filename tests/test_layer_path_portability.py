@@ -426,3 +426,33 @@ def test_gene_variance_by_facet_on_moved_dataset(serve_client):
                                 params={'facet': 'ant_group', 'top': 5})
     assert response.status_code == 200, response.text[:500]
     assert len(response.json()['genes']) == 5
+
+
+@pytest.fixture
+def renamed_obs_store(moved_store):
+    """Publish ``cell_type`` under a renamed public name, as an api
+    ``obs_rename`` does: the obscat view carries the public name while
+    ``__obscat`` keeps the stored one."""
+    con = duckdb.connect(str(moved_store['db']))
+    con.execute("CREATE OR REPLACE VIEW obscat AS "
+                "SELECT c.cell_name, o.cell_type AS ant_cell_type, o.ant_group "
+                "FROM __obscat o JOIN __cells c USING (cell_id)")
+    con.close()
+    return moved_store
+
+
+def test_pseudobulk_groups_and_filters_on_public_column_names(renamed_obs_store, serve_client):
+    serve_client, db_id = serve_client
+    response = serve_client.get(f'/databases/{db_id}/pseudobulk',
+                                params={'group_by': 'ant_cell_type', 'layer': 'counts',
+                                        'subset': 'ant_group:g0',
+                                        'min_cells': 1, 'format': 'csv'})
+    assert response.status_code == 200, response.text[:500]
+    table = pd.read_csv(pd.io.common.StringIO(response.text), comment='#').set_index('gene_name')
+    frame = _layer_frame('counts')
+    frame = frame[frame['cell_id'] % 2 == 0]
+    frame['cell_type'] = [CELL_TYPES[c % 3] for c in frame['cell_id']]
+    frame['gene_name'] = [GENE_NAMES[g] for g in frame['gene_id']]
+    expected = frame.groupby(['gene_name', 'cell_type'])['value'].sum()
+    for (gene, cell_type), total in expected.items():
+        assert int(table.loc[gene, cell_type]) == int(total)
