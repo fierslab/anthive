@@ -92,6 +92,51 @@ JOIN __genes g ON l.gene_id = g.gene_id;
 
 **Note**: When reading expression data, zeros must be filled in for any (cell, gene) pairs not present in the table.
 
+### Parquet sidecars (current layout)
+
+Since the 2026-07 migration, `ant-convert` (and `ant-migrate-to-parquet` for
+older files) no longer keeps layer values inside the `.duckdb`. Each layer is
+written twice next to it, as `<stem>.layer.<name>.by_gene.parquet` (sorted by
+gene_id) and `<stem>.layer.<name>.by_cell.parquet` (sorted by cell_id), each
+with `(cell_id, gene_id, value)`. The `.duckdb` still gets three views per
+layer: `layer__<name>` and `layer__<name>_by_gene` over the by_gene file,
+`layer__<name>_by_cell` over the by_cell file. All three expose
+`(cell_name, gene_name, value)`.
+
+DuckDB resolves a relative `read_parquet` path against the process working
+directory, not the database file, so these views have to name the sidecar
+by absolute path. That path belongs to the host and folder that converted
+the dataset. Copy the store to another host, sync it to a site with a
+different store path, or rename a group folder (SerranoPozo2024 became
+Wachter2024 in the dev store), and the views point at files that are not
+there.
+
+We keep writing the views. People who open a `.duckdb` directly in DuckDB,
+or with a notebook on the host that built it, rely on `FROM layer__X`, and
+`AnthiveDB._get_layers` uses the views to list the layers. Served code never
+reads through them, though. Every query path resolves the sidecar at query
+time from the `.duckdb` file's own location and current stem
+(`lib/anthive_db.py`, `layer_sidecar_path` and the `AnthiveDB._layer_source_*`
+helpers). The resolved path is not symlink-resolved, so it stays inside the
+directories ant-serve already allows for the dataset (its own folder and the
+folder of its symlink target). The hardening (`enable_external_access =
+false`, `allowed_directories`) is unchanged.
+
+Hand-written SQL (`/query/sql`, the analytics sandbox, `ant-duckdb-check`)
+may still say `FROM layer__X`. For those, `install_portable_layer_views`
+creates TEMP views on the request's own connection with the same SQL but
+the locally resolved sidecar paths. TEMP names win over the attached
+database's names, the TEMP views die with the connection, and nothing is
+written to the `.duckdb`. A view whose sidecar is not found locally is left
+alone. Remote `s3://` datasets resolve to the sibling object in the same
+bucket folder.
+
+Rule for new code: never `FROM layer__<name>` in a served path. Use
+`db._layer_source_for_gene_filter(layer)` for `(cell_id, gene_id, value)`
+or `db._layer_source_with_names(layer)` for `(cell_name, gene_name, value)`.
+`tests/test_layer_path_portability.py` moves a converted dataset to another
+directory and checks the endpoints still work.
+
 ## Observation Data (.obs)
 
 The .obs dataframe is split into numerical and categorical columns.

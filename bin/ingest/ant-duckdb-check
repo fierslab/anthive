@@ -31,6 +31,7 @@ lib_dir = script_dir.parent.parent / 'lib'
 sys.path.insert(0, str(lib_dir))
 
 from metadata import parse_md_file, MetadataError
+from anthive_db import install_portable_layer_views
 
 
 class DuckDBCheckReport:
@@ -1158,6 +1159,10 @@ def main():
         # Open database
         print(f"\n[2/10] Opening database...")
         conn = duckdb.connect(str(duckdb_path), read_only=True)
+        # The persisted layer__* views carry the converting host's absolute
+        # sidecar path; shadow them (TEMP, this connection only) with views
+        # over the sidecars next to this duckdb so the check runs anywhere.
+        install_portable_layer_views(conn, duckdb_path)
         print("  ✓ Connected successfully")
 
         # Check schema
@@ -1282,6 +1287,7 @@ def main():
                     print(f"  ✗ Failed to build __gene_bins: {e}")
                 # Re-open read-only for remaining steps
                 conn = duckdb.connect(str(duckdb_path), read_only=True)
+                install_portable_layer_views(conn, duckdb_path)
 
         # Run deep data integrity checks if requested
         if args.deep:

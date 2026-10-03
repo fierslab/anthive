@@ -34,7 +34,11 @@ After the 2026-06 reorgs, the consumers live under:
   expose `cell_name`. The view's `o.*` is bound at CREATE time, so after an
   `ALTER TABLE … ADD COLUMN` you must DROP+CREATE the view to surface it.
 - `layer__<name>` views over `__layer__<name>(cell_id, gene_id, value)` (sparse,
-  zeros omitted).
+  zeros omitted). Current datasets keep layers in
+  `<stem>.layer.<name>.{by_gene,by_cell}.parquet` sidecars and the views bake
+  the converting host's absolute path. Never query `layer__*` in served code;
+  use `_layer_source_for_gene_filter` / `_layer_source_with_names` (resolved
+  from the duckdb's own location). See `doc/DATABASE_SCHEMA.md`.
 
 ## Two contracts that must not be bypassed
 

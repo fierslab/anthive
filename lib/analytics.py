@@ -35,6 +35,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import duckdb
 import pandas as pd
 
+from anthive_db import portable_layer_views
+
 log = logging.getLogger('anthive.analytics')
 
 
@@ -433,9 +435,21 @@ def _open_analytics_connection(
             if Path(pq_path).exists():
                 extra_views.append((view_name, str(Path(pq_path).resolve())))
 
+        # TEMP views shadowing the persisted layer__* views: same SQL, but
+        # read_parquet points at the sidecars next to THIS host's duckdb
+        # instead of the path baked in by whichever host converted it.
+        layer_views = portable_layer_views(conn, db_url)
+
         allowed = _dataset_sidecar_paths(conn, db_url)
         allowed += [path for _, path in session_views + extra_views]
+        allowed += [path for _, _, paths in layer_views for path in paths]
         _lockdown_connection(conn, allowed, allowed_directories)
+
+        for view_name, create_sql, _paths in layer_views:
+            try:
+                conn.execute(create_sql)
+            except duckdb.Error as exc:
+                log.warning('analytics: portable view %s not installed: %s', view_name, exc)
 
         for view_name, pq_path in session_views + extra_views:
             conn.execute(

@@ -234,6 +234,197 @@ _NUMERIC_TYPE_PREFIXES = (
 _OBS_SUMMARY_QUANTILES = (0.05, 0.25, 0.5, 0.75, 0.95)
 
 
+# Layer keys that may appear in a sidecar filename. Anything else (path
+# separators, '..', quotes) never reaches a filesystem path or SQL literal.
+_LAYER_KEY_RE = re.compile(r'^[A-Za-z0-9_][A-Za-z0-9_.\-]*$')
+
+LAYER_ORDERS = ('by_gene', 'by_cell')
+
+
+def layer_sidecar_path(db_location: Any, layer: str,
+                       order: str = 'by_gene') -> Optional[str]:
+    """Locate a layer's parquet sidecar next to the ``.duckdb`` file itself.
+
+    The persisted ``layer__<name>`` views carry the absolute path of the host
+    that wrote them, so a duckdb synced to a host with a different store path
+    cannot read through them. Served code resolves the sidecar here instead,
+    from the duckdb's own location at query time.
+
+    The returned path is NOT symlink-resolved: it sits in the duckdb's own
+    directory (or the directory of its symlink target), which is exactly what
+    ant-serve and the analytics sandbox put in ``allowed_directories``.
+    Resolving the parquet's own symlink could land outside that set.
+
+    Args:
+        db_location: Path to the local ``.duckdb`` file.
+        layer: Layer key (e.g. ``'X'``, ``'counts'``).
+        order: ``'by_gene'`` (sorted by gene_id) or ``'by_cell'``.
+
+    Returns:
+        Absolute path string of the existing sidecar, or None when the layer
+        has no sidecar (legacy in-DuckDB ``__layer__`` table) or the layer
+        key is not filename-safe.
+    """
+    if db_location is None or order not in LAYER_ORDERS:
+        return None
+    if not isinstance(layer, str) or not _LAYER_KEY_RE.match(layer):
+        return None
+    import os
+    db_str = str(db_location)
+    if db_str.startswith('s3://'):
+        return None
+    abs_db = os.path.abspath(db_str)
+    stem = Path(abs_db).stem
+    filename = f"{stem}.layer.{layer}.{order}.parquet"
+    candidates = [os.path.dirname(abs_db)]
+    try:
+        real_dir = os.path.dirname(os.path.realpath(abs_db))
+        if real_dir not in candidates:
+            candidates.append(real_dir)
+    except OSError:
+        pass
+    for directory in candidates:
+        sidecar = os.path.join(directory, filename)
+        if os.path.exists(sidecar):
+            return sidecar
+    return None
+
+
+_VIEW_PARQUET_PATH_RE = re.compile(r"read_parquet\(\s*'((?:[^']|'')+)'")
+_VIEW_BODY_RE = re.compile(r"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+.+?\s+AS\s+(.*)$",
+                           re.IGNORECASE | re.DOTALL)
+_SIDECAR_BASENAME_RE = re.compile(r"^[^/\\']+\.parquet$")
+_SIDECAR_NAME_RE = re.compile(r"^.+\.layer\.(.+)\.(by_gene|by_cell)\.parquet$")
+
+
+def portable_layer_views(conn: duckdb.DuckDBPyConnection, db_location: Any,
+                         database_name: Optional[str] = None) -> List[Tuple[str, str, List[str]]]:
+    """Build TEMP views that shadow the persisted ``layer__*`` views portably.
+
+    For hand-written SQL (``/query/sql``, the analytics sandbox,
+    ``ant-duckdb-check``) that says ``FROM layer__X``.
+    Each persisted view's own SQL is reused with every ``read_parquet('<baked
+    path>')`` rewritten to the same layer's sidecar next to the attached
+    duckdb (``db_location``), named after the duckdb's current stem (the
+    baked file name is only a fallback; renamed datasets keep stale names in
+    their views). Created as TEMP views on the same connection, they take
+    precedence over ``<database_name>.main.layer__*`` for unqualified names,
+    so the baked path is never read.
+
+    Views without a parquet path (legacy in-DuckDB layers, or the
+    ``layer__X_by_gene`` alias over ``layer__X``) are recreated verbatim so
+    their unqualified references bind to the shadowing views. A view whose
+    sidecar cannot be found locally is skipped and the persisted view stays
+    visible.
+
+    Args:
+        conn: Connection with the dataset attached as ``database_name``.
+        db_location: Local path or ``s3://`` URL of the attached ``.duckdb``.
+        database_name: Catalog the dataset is attached under; None means the
+            connection's current database (``db`` after ant-serve's ``USE
+            db``, the file stem for a plain ``duckdb.connect(path)``).
+
+    Returns:
+        ``(view_name, create_temp_view_sql, sidecar_paths)`` per view, in an
+        order safe to execute (parquet-backed views first). ``sidecar_paths``
+        must be readable under the connection's file-access settings.
+    """
+    import os
+    if database_name is None:
+        database_name = conn.execute("SELECT current_database()").fetchone()[0]
+    rows = conn.execute(
+        "SELECT view_name, sql FROM duckdb_views() "
+        "WHERE database_name = ? AND view_name LIKE 'layer\\_\\_%' ESCAPE '\\' "
+        "ORDER BY view_name",
+        [database_name],
+    ).fetchall()
+    db_str = str(db_location)
+    is_remote = db_str.startswith('s3://')
+    if is_remote:
+        directories = [db_str.rsplit('/', 1)[0]]
+    else:
+        abs_db = os.path.abspath(db_str)
+        directories = [os.path.dirname(abs_db)]
+        real_dir = os.path.dirname(os.path.realpath(abs_db))
+        if real_dir not in directories:
+            directories.append(real_dir)
+
+    db_stem = db_str.rsplit('/', 1)[-1]
+    if db_stem.endswith('.duckdb'):
+        db_stem = db_stem[:-len('.duckdb')]
+
+    def _local_sidecar(baked_path: str) -> Optional[str]:
+        basename = baked_path.replace('\\', '/').rsplit('/', 1)[-1]
+        if not _SIDECAR_BASENAME_RE.match(basename):
+            return None
+        # The canonical name follows the duckdb's CURRENT stem: datasets get
+        # renamed after conversion (SerranoPozo2024_* -> Wachter2024_*), and
+        # the sidecars are renamed with them while the view keeps the old
+        # name. Fall back to the baked file name only if that is absent.
+        names = []
+        sidecar_match = _SIDECAR_NAME_RE.match(basename)
+        if sidecar_match and _LAYER_KEY_RE.match(sidecar_match.group(1)):
+            names.append(f"{db_stem}.layer.{sidecar_match.group(1)}.{sidecar_match.group(2)}.parquet")
+        if basename not in names:
+            names.append(basename)
+        if is_remote:
+            return f"{directories[0]}/{names[0]}"
+        for name in names:
+            for directory in directories:
+                candidate = os.path.join(directory, name)
+                if os.path.exists(candidate):
+                    return candidate
+        return None
+
+    with_parquet: List[Tuple[str, str, List[str]]] = []
+    without_parquet: List[Tuple[str, str, List[str]]] = []
+    for view_name, view_sql in rows:
+        if not isinstance(view_name, str) or not _SAFE_IDENT_RE.match(view_name):
+            continue
+        body_match = _VIEW_BODY_RE.match(view_sql or '')
+        if body_match is None:
+            continue
+        body = body_match.group(1).rstrip().rstrip(';')
+        sidecars: List[str] = []
+        missing = False
+
+        def _rewrite(match: 're.Match[str]') -> str:
+            nonlocal missing
+            local = _local_sidecar(match.group(1).replace("''", "'"))
+            if local is None:
+                missing = True
+                return match.group(0)
+            sidecars.append(local)
+            return "read_parquet('" + local.replace("'", "''") + "'"
+
+        body = _VIEW_PARQUET_PATH_RE.sub(_rewrite, body)
+        if missing:
+            continue
+        create_sql = f'CREATE OR REPLACE TEMP VIEW {_q(view_name)} AS {body}'
+        (with_parquet if sidecars else without_parquet).append(
+            (view_name, create_sql, sidecars))
+    return with_parquet + without_parquet
+
+
+def install_portable_layer_views(conn: duckdb.DuckDBPyConnection, db_location: Any,
+                                 database_name: Optional[str] = None) -> List[str]:
+    """Create the ``portable_layer_views`` TEMP views on ``conn``.
+
+    Best effort per view: a view that fails to create is logged and left to
+    the persisted definition. Returns the names of the views installed.
+    """
+    import logging
+    installed: List[str] = []
+    for view_name, create_sql, _paths in portable_layer_views(conn, db_location, database_name):
+        try:
+            conn.execute(create_sql)
+            installed.append(view_name)
+        except duckdb.Error as exc:
+            logging.getLogger(__name__).warning(
+                "portable layer view %s not installed: %s", view_name, exc)
+    return installed
+
+
 def _file_signature(path: Path) -> Optional[Tuple[int, int]]:
     """(mtime_ns, size) of a file, or None when it does not exist."""
     try:
@@ -308,7 +499,8 @@ def _load_api_config_for(duckdb_path: Path) -> Dict[str, Any]:
 class AnthiveDB:
     """Interface to a single Anthive DuckDB database"""
 
-    def __init__(self, db_path: Optional[Path] = None, conn=None, owns_conn: bool = True):
+    def __init__(self, db_path: Optional[Path] = None, conn=None, owns_conn: bool = True,
+                 db_url: Optional[str] = None):
         """
         Initialize database connection.
 
@@ -316,8 +508,14 @@ class AnthiveDB:
             db_path: Path to .duckdb file (used when conn is None)
             conn: Existing DuckDB connection to use (skips opening a new one)
             owns_conn: If False, close() will not close the connection (for pooled use)
+            db_url: Location of a remote ``s3://`` duckdb, used only to find
+                its layer parquet sidecars when ``db_path`` is None.
         """
         self.db_path = db_path
+        self.db_url = db_url
+        # (layer, order) -> sidecar location or None; per-instance, and pooled
+        # AnthiveDB objects live for one request, so this never goes stale.
+        self._layer_parquet_cache: Dict[Tuple[str, str], Optional[str]] = {}
         self.conn: Optional[duckdb.DuckDBPyConnection] = conn
         self._owns_conn = owns_conn
         # Loaded lazily on demand — currently only used when _refresh_view is
@@ -1630,20 +1828,53 @@ class AnthiveDB:
 
         return results
 
-    def _layer_source_for_gene_filter(self, layer: str) -> str:
-        """Return the SQL table/view/parquet expression best suited for a gene-filter query.
+    def _layer_parquet_path(self, layer: str, order: str = 'by_gene') -> Optional[str]:
+        """Return the layer's parquet sidecar location, resolved at query time.
+
+        Local datasets: the sidecar next to ``db_path`` (see
+        ``layer_sidecar_path``). Remote ``s3://`` datasets (``db_url``): the
+        sibling object in the same bucket folder, but only when the persisted
+        view says the layer is parquet-backed (an S3 existence check per
+        query would cost a round trip). Never the path baked into the view.
+
+        Returns None for legacy in-DuckDB layers (``__layer__<name>`` table).
+        """
+        cache_key = (layer, order)
+        cache = self._layer_parquet_cache
+        if cache_key in cache:
+            return cache[cache_key]
+        resolved: Optional[str] = None
+        if self.db_path is not None:
+            resolved = layer_sidecar_path(self.db_path, layer, order)
+        elif (self.db_url and str(self.db_url).startswith('s3://')
+              and order in LAYER_ORDERS and isinstance(layer, str)
+              and _LAYER_KEY_RE.match(layer)):
+            view_row = self._conn.execute(
+                "SELECT sql FROM duckdb_views() "
+                "WHERE database_name = current_database() AND view_name = ?",
+                ["layer__" + ''.join(c if c.isalnum() else '_' for c in layer)],
+            ).fetchone()
+            if view_row and 'read_parquet' in (view_row[0] or ''):
+                base, _, filename = str(self.db_url).rpartition('/')
+                stem = filename[:-len('.duckdb')] if filename.endswith('.duckdb') else filename
+                resolved = f"{base}/{stem}.layer.{layer}.{order}.parquet"
+        cache[cache_key] = resolved
+        return resolved
+
+    def _layer_source_for_gene_filter(self, layer: str, order: str = 'by_gene') -> str:
+        """Return a SQL ``FROM`` expression yielding ``(cell_id, gene_id, value)``.
 
         For Parquet-backed datasets the by-gene parquet is sorted by gene_id, making
         gene-filter queries 4-100× faster than the by-cell ordering.  For legacy
         in-DuckDB datasets we return the ``__layer__<safe>`` table name directly so
         callers that do ``WHERE gene_id IN (...)`` continue to work.
 
-        The rule is conservative: if we cannot find a Parquet sidecar, we fall
-        back to the old ``__layer__`` table so this helper is safe to call from
-        any context.
+        The parquet location comes from ``_layer_parquet_path`` (the duckdb's
+        own directory), never from the persisted ``layer__`` view.
 
         Args:
             layer: Layer key (e.g. 'X', 'counts').
+            order: 'by_gene' (default) or 'by_cell' sidecar.
 
         Returns:
             A SQL expression suitable for use in ``FROM <expr>``, either a
@@ -1651,56 +1882,41 @@ class AnthiveDB:
             (legacy).
         """
         safe = ''.join(c if c.isalnum() else '_' for c in layer)
-        if self.db_path is not None:
-            db_path = Path(self.db_path)
-            stem = db_path.stem
-            by_gene = db_path.parent / f"{stem}.layer.{layer}.by_gene.parquet"
-            if by_gene.exists():
-                # Escape single quotes in the path (SQL string-literal rules)
-                # so a dataset in a directory named e.g. `O'Brien2025` still
-                # produces a valid SELECT.
-                escaped = str(by_gene.resolve()).replace("'", "''")
-                return f"read_parquet('{escaped}')"
+        sidecar = self._layer_parquet_path(layer, order)
+        if sidecar is not None:
+            # Escape single quotes in the path (SQL string-literal rules)
+            # so a dataset in a directory named e.g. `O'Brien2025` still
+            # produces a valid SELECT.
+            escaped = sidecar.replace("'", "''")
+            return f"read_parquet('{escaped}')"
         # Fallback: legacy in-DuckDB table
         return f'"__layer__{safe}"'
 
-    def _layer_source_with_names(self, layer: str) -> str:
+    def _layer_source_with_names(self, layer: str, order: str = 'by_gene') -> str:
         """Return a SQL ``FROM`` expression yielding ``(cell_name, gene_name, value)``.
 
         Portable across hosts: resolves the parquet sidecar from the duckdb's
-        OWN directory at query time (never bakes a host-absolute path). Prefers
-        the by_gene parquet (gene-filter queries dominate). Falls back to the
-        persisted ``layer__<safe>`` view for legacy in-DuckDB datasets with no
-        parquet sidecar.
-
-        This is the anti-view read path: ``ant-migrate-to-parquet`` writes each
-        ``layer__*`` view with a hardcoded absolute path to the sidecar, which
-        breaks the moment the duckdb is copied to a host with a different
-        h5adstore mount. Every gene-fetch, gene-stats and mean-expression query
-        in this module now goes through this helper instead of ``FROM layer__X``.
+        OWN location at query time (never the host-absolute path baked into
+        the persisted view). This replicates the persisted ``layer__<name>``
+        view's join; every served query that needs names goes through here
+        instead of ``FROM layer__X``. Falls back to the persisted view only for
+        legacy in-DuckDB datasets with no sidecar, where the view wraps the
+        local ``__layer__`` table and carries no path.
         """
         safe = ''.join(c if c.isalnum() else '_' for c in layer)
-        if self.db_path is not None:
-            db_path = Path(self.db_path)
-            stem = db_path.stem
-            by_gene = db_path.parent / f"{stem}.layer.{layer}.by_gene.parquet"
-            if by_gene.exists():
-                escaped = str(by_gene.resolve()).replace("'", "''")
-                # Predicate pushdown: DuckDB pushes WHERE gene_name = ? and
-                # WHERE cell_name = ? down into the JOINs on __genes/__cells,
-                # so a gene-filter query only touches the matching gene's rows
-                # in the by_gene parquet.
-                return (
-                    f"(SELECT c.cell_name, g.gene_name, l.value "
-                    f"FROM read_parquet('{escaped}') l "
-                    f"JOIN __cells c ON l.cell_id = c.cell_id "
-                    f"JOIN __genes g ON l.gene_id = g.gene_id)"
-                )
-        # Legacy fallback: the persisted layer__ view. The view carries a
-        # (broken-on-non-migrator-hosts) absolute path if parquet-migrated,
-        # but the branch above avoids that case entirely. For truly legacy
-        # datasets that never went through migration, this is the in-DuckDB
-        # table wrapped by a view with (cell_name, gene_name, value).
+        sidecar = self._layer_parquet_path(layer, order)
+        if sidecar is not None:
+            escaped = sidecar.replace("'", "''")
+            # Predicate pushdown: DuckDB pushes WHERE gene_name = ? and
+            # WHERE cell_name = ? down into the JOINs on __genes/__cells,
+            # so a gene-filter query only touches the matching gene's rows
+            # in the by_gene parquet.
+            return (
+                f"(SELECT c.cell_name, g.gene_name, l.value "
+                f"FROM read_parquet('{escaped}') l "
+                f"JOIN __cells c ON l.cell_id = c.cell_id "
+                f"JOIN __genes g ON l.gene_id = g.gene_id)"
+            )
         return f'"layer__{safe}"'
 
     # Ordered candidates for a "human-readable symbol" column in __varcat,
