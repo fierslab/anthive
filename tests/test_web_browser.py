@@ -2446,20 +2446,94 @@ def test_topbar_help_link_present(client):
     assert 'href="/help"' in resp.text
 
 
-def test_topbar_api_link_opens_in_new_tab(client):
-    # The 'API' link points at the FastAPI Swagger UI (/api/docs) and opens
-    # in a new tab. Assert both the href and the noopener target so downstream
-    # tooling / accessibility scans keep it that way.
+def test_topbar_api_link_goes_to_api_guide(client):
+    # The top-bar 'API' link lands on the on-site API page first (login,
+    # curl, pyvark, vark), not straight on the Swagger UI.
     resp = client.get("/")
     assert resp.status_code == 200
-    idx = resp.text.find('href="/api/docs"')
-    assert idx >= 0, "API link (/api/docs) missing from topbar"
-    # Look at the anchor tag containing that href.
-    tag_start = resp.text.rfind("<a ", 0, idx)
-    tag_end = resp.text.find(">", idx)
-    tag = resp.text[tag_start:tag_end + 1]
-    assert 'target="_blank"' in tag, "API link must open in a new tab"
-    assert 'rel="noopener"' in tag, "API link must have rel=noopener"
+    idx = resp.text.find('id="topbar-api-link"')
+    assert idx >= 0, "API link missing from topbar"
+    tag = resp.text[resp.text.rfind("<a ", 0, idx):resp.text.find(">", idx) + 1]
+    assert 'href="/api-guide"' in tag
+    assert 'target="_blank"' not in tag
+
+
+def test_user_dropdown_has_api_entry(client):
+    # The API page is also in the user dropdown, for signed-in and anonymous
+    # visitors alike, next to Preferences.
+    for headers in ({}, {"Remote-User": "mf", "Remote-Name": "Mark Fiers"}):
+        html = client.get("/", headers=headers).text
+        menu = html.split('class="dropdown-menu right"', 1)[1].split("</span>", 1)[0]
+        assert 'id="api-menu-link"' in menu
+        assert 'href="/api-guide"' in menu
+        assert menu.index('id="api-menu-link"') < menu.index('href="/settings"')
+
+
+def _api_guide_fake(version_payload):
+    def fake(api_url, path):
+        if path == "/version":
+            if version_payload is None:
+                raise requests.ConnectionError("down")
+            return version_payload
+        return _fake_api_get(api_url, path)
+    return fake
+
+
+def test_api_guide_renders_with_links_and_site_url(client, monkeypatch):
+    monkeypatch.setattr(browser, "_api_get",
+                        _api_guide_fake({"version": "9.8.7", "released": "2026-10-01"}))
+    monkeypatch.setattr(browser, "_api_guide_site_settings",
+                        lambda: {"mode": "authelia", "public_base_url": ""})
+    resp = client.get("/api-guide", headers={"Host": "anthive.example.org",
+                                             "Remote-User": "mf"})
+    assert resp.status_code == 200
+    html = resp.text
+    # links on to the raw API docs, the schema and both changelogs
+    assert 'href="/api/docs"' in html and 'id="api-docs-link"' in html
+    assert 'href="/api/redoc"' in html
+    assert 'href="/api/openapi.json"' in html
+    assert 'href="/api/changelog"' in html
+    assert "gitlab.kuleuven.be/bdslab/anthive/anthive4/-/blob/main/doc/API_CHANGELOG.md" in html
+    assert 'href="/account/mcp"' in html
+    # examples carry this site's https address, the user's name and netrc host
+    assert "https://anthive.example.org/api" in html
+    assert "http://anthive.example.org" not in html
+    assert "machine anthive.example.org login mf password YOUR_PASSWORD" in html
+    assert "curl -n -s https://anthive.example.org/api/health" in html
+    assert "/gene_stats?genes=" in html and "/plot/violin?" in html
+    assert "chmod 600 ~/.netrc" in html
+    # pyvark and vark connection instructions
+    assert "pip install pyvark" in html
+    assert "from vark import AnthiveClient" in html
+    assert 'auth=(os.environ["ANTHIVE_USER"], os.environ["ANTHIVE_PASSWORD"])' in html \
+        or "auth=(os.environ[&#34;ANTHIVE_USER&#34;], os.environ[&#34;ANTHIVE_PASSWORD&#34;])" in html
+    assert "vark server login --name anthive --url https://anthive.example.org/api --user mf" in html
+    assert "vark server ls" in html
+    assert 'id="api-guide-papers"' in html
+    # version from the server
+    assert 'id="api-guide-version">9.8.7<' in html
+    # consistent headings, house style
+    body = html.split('<div class="api-guide">', 1)[1].split("<script>", 1)[0]
+    assert body.count('<h2 class="section-head">') >= 6
+    assert "\u2014" not in body
+
+
+def test_api_guide_survives_api_down_and_public_mode(client, monkeypatch):
+    monkeypatch.setattr(browser, "_api_get", _api_guide_fake(None))
+    monkeypatch.setattr(browser, "_api_guide_site_settings",
+                        lambda: {"mode": "none", "public_base_url": "https://mirror.example.org"})
+    resp = client.get("/api-guide")
+    assert resp.status_code == 200
+    assert 'id="api-guide-version"' not in resp.text
+    assert "https://mirror.example.org/api" in resp.text
+    assert "needs no username or password" in resp.text
+    assert 'id="password"' not in resp.text
+
+
+def test_help_and_mcp_pages_link_to_api_guide(client):
+    assert 'id="help-api-guide-link"' in client.get("/help").text
+    mcp = client.get("/account/mcp", headers={"Remote-User": "mf"}).text
+    assert 'id="mcp-api-note"' in mcp and 'href="/api-guide"' in mcp
 
 
 def test_topbar_preferences_moved_into_dropdown(client):
@@ -5810,7 +5884,7 @@ def test_version_badge_shows_api_version_left_of_help(client, monkeypatch):
     html = client.get("/about").text
     assert 'id="stack-version"' in html
     assert f'<span class="v-prefix">v</span>{browser._WEB_VERSION}' in html
-    assert html.index('id="stack-version"') < html.index('href="/help"') < html.index('href="/api/docs"')
+    assert html.index('id="stack-version"') < html.index('href="/help"') < html.index('id="topbar-api-link"')
     assert 'href="/api/changelog"' in html
     assert 'class="version-pill" id="stack-version"' in html
 

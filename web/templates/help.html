@@ -283,7 +283,7 @@
   <section class="help-section" id="code">
     <h2>8. Programmatic access</h2>
     <h3>REST API</h3>
-    <p>Everything the site shows comes from a REST API under <code>/api</code>. The <strong>API</strong> link in the top bar opens interactive documentation at <a href="/api/docs">/api/docs</a> (also <a href="/api/redoc">/api/redoc</a>). Scripts sign in with your normal username and password over HTTPS; keep them in <code>~/.netrc</code> and use <code>curl -n</code>:</p>
+    <p>Everything the site shows comes from a REST API under <code>/api</code>. Start with the <a href="/api-guide" id="help-api-guide-link">API page</a> (the <strong>API</strong> link in the top bar and in the menu under your name): it explains signing in, keeping your password out of scripts, first calls with curl, pyvark and vark, with this site's address filled in. The interactive documentation is at <a href="/api/docs">/api/docs</a> (also <a href="/api/redoc">/api/redoc</a>). Scripts sign in with your normal username and password over HTTPS; keep them in <code>~/.netrc</code> and use <code>curl -n</code>:</p>
     <div class="cmd"><pre>curl -n -s "https://&lt;this site&gt;/api/databases" | jq '.databases[] | {id, title, n_cells}'</pre><button type="button" data-copy-help>Copy</button></div>
     <div class="cmd"><pre>curl -n -s "https://&lt;this site&gt;/api/databases/L26/FMG/plot/violin?x=ant_disease&amp;y=APOE&amp;sample=20000" -o apoe.png</pre><button type="button" data-copy-help>Copy</button></div>
     <p>Changes between versions are listed in the <a href="/api/changelog">changelog</a>.</p>
@@ -306,7 +306,7 @@ python -c "from vark import AnthiveClient; c = AnthiveClient('https://&lt;this s
   <section class="help-section" id="account">
     <h2>9. Accounts, privacy and getting help</h2>
     <ul>
-      <li><strong>Signing in and out.</strong> The site asks for your login once per session; <em>Logout</em> is in the menu under your name, which also has your <a href="/account/mcp">MCP links</a> and <a href="/settings">Preferences</a> (scoring method, favourite genes; stored in your browser only).</li>
+      <li><strong>Signing in and out.</strong> The site asks for your login once per session; <em>Logout</em> is in the menu under your name, which also has your <a href="/account/mcp">MCP links</a>, the <a href="/api-guide">API page</a> and <a href="/settings">Preferences</a> (scoring method, favourite genes; stored in your browser only).</li>
       <li><strong>Version.</strong> The small button left of <em>Help</em> shows the version of the running server (for example <code>v2.40.0</code>); hover for details, click for the changelog. Mention it when you report a problem.</li>
       <li><strong>Privacy.</strong> The site uses no analytics or tracking; preferences stay in your browser. See <a href="/privacy">the privacy note</a>.</li>
       <li id="help-docs-link"><strong>More documentation.</strong> Detailed guides live on GitLab, where they can be corrected quickly: <a href="{{ _docs }}/MCP_CLIENTS.md" target="_blank" rel="noopener">connecting AI clients</a>, <a href="{{ _docs }}/MCP_LINKS.md" target="_blank" rel="noopener">MCP links</a>, <a href="{{ _docs }}/LIBRARY.md" target="_blank" rel="noopener">the paper library</a>, <a href="{{ _docs }}/API_CHANGELOG.md" target="_blank" rel="noopener">API changes</a> and, for people running a site, <a href="{{ _docs }}/DEPLOY_CONTAINERS.md" target="_blank" rel="noopener">the deployment guide</a>.</li>
