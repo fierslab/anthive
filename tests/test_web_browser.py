@@ -2479,11 +2479,16 @@ def _api_guide_fake(version_payload):
     return fake
 
 
+def _guide_settings(mode, public="", upload_groups=("admins",), admins=(), max_pdf_mb=25):
+    return {"mode": mode, "public_base_url": public, "admins": set(admins),
+            "upload_groups": list(upload_groups), "max_pdf_mb": max_pdf_mb}
+
+
 def test_api_guide_renders_with_links_and_site_url(client, monkeypatch):
     monkeypatch.setattr(browser, "_api_get",
                         _api_guide_fake({"version": "9.8.7", "released": "2026-10-01"}))
     monkeypatch.setattr(browser, "_api_guide_site_settings",
-                        lambda: {"mode": "authelia", "public_base_url": ""})
+                        lambda: _guide_settings("authelia"))
     resp = client.get("/api-guide", headers={"Host": "anthive.example.org",
                                              "Remote-User": "mf"})
     assert resp.status_code == 200
@@ -2518,10 +2523,68 @@ def test_api_guide_renders_with_links_and_site_url(client, monkeypatch):
     assert "\u2014" not in body
 
 
+def test_api_guide_paper_read_commands(client, monkeypatch):
+    monkeypatch.setattr(browser, "_api_get", _api_guide_fake({"version": "2.41.0"}))
+    monkeypatch.setattr(browser, "_api_guide_site_settings", lambda: _guide_settings("authelia"))
+    html = client.get("/api-guide", headers={"Remote-User": "someone"}).text
+    assert 'href="#papers"' in html and 'id="papers"' in html
+    for snippet in ("vark papers ls --role source --year 2020..2025", "vark papers show CITEKEY",
+                    "vark papers pdf CITEKEY --dir papers/", "vark papers bib --out library.bib",
+                    "vark literature ", "vark db papers L26/FMG",
+                    "client.list_papers(", "client.get_paper(", "client.download_paper_pdf(",
+                    "client.get_library_bibtex()", "client.search_literature(",
+                    "client.get_database_papers("):
+        assert snippet in html, snippet
+
+
+def test_api_guide_upload_section_only_for_uploaders(client, monkeypatch):
+    monkeypatch.setattr(browser, "_api_get", _api_guide_fake({"version": "2.41.0"}))
+    monkeypatch.setattr(browser, "_api_guide_site_settings",
+                        lambda: _guide_settings("authelia", max_pdf_mb=40))
+    # a plain user: no upload commands, a plain statement of who may upload
+    html = client.get("/api-guide", headers={"Remote-User": "someone",
+                                             "Remote-Groups": "users"}).text
+    assert 'id="api-guide-upload-restricted"' in html and "admins group" in html
+    assert "vark papers upload" not in html and "/papers/upload" not in html
+    assert "upload_paper(" not in html
+    # anonymous: same
+    assert "vark papers upload" not in client.get("/api-guide").text
+    # an admin by group sees every upload route and the size warning
+    html = client.get("/api-guide", headers={"Remote-User": "mf",
+                                             "Remote-Groups": "users,admins"}).text
+    assert 'id="api-guide-upload"' in html
+    for snippet in ("vark papers requirements --server anthive",
+                    "vark papers upload --metadata paper.md --pdf paper.pdf --server anthive --dry-run",
+                    "vark papers upload ./papers/ --server anthive",
+                    "vark papers upload --manifest papers.csv --server anthive",
+                    "vark server check ", "client.get_paper_upload_requirements()",
+                    "client.upload_paper(", "client.upload_papers(AnthiveClient.paper_items_from_folder(",
+                    "PaperUploadForbiddenError", "PaperUploadDisabledError",
+                    "/api/papers/upload", "at most 40 MB", "MCP upload tool"):
+        assert snippet in html, snippet
+    assert "<td>40 MB on this site</td>" in html
+
+
+def test_api_guide_upload_follows_groups_and_basic_mode(client, monkeypatch):
+    monkeypatch.setattr(browser, "_api_get", _api_guide_fake({"version": "2.41.0"}))
+    monkeypatch.setattr(browser, "_api_guide_site_settings",
+                        lambda: _guide_settings("authelia", upload_groups=("curators",)))
+    assert 'id="api-guide-upload"' in client.get(
+        "/api-guide", headers={"Remote-User": "c", "Remote-Groups": "curators"}).text
+    # admins are not uploaders when the site names other groups
+    assert 'id="api-guide-upload"' not in client.get(
+        "/api-guide", headers={"Remote-User": "mf", "Remote-Groups": "admins"}).text
+    # basic mode: no groups header, admins by name in auth.admins
+    monkeypatch.setattr(browser, "_api_guide_site_settings",
+                        lambda: _guide_settings("basic", admins=("mf",)))
+    assert 'id="api-guide-upload"' in client.get("/api-guide", headers={"Remote-User": "mf"}).text
+    assert 'id="api-guide-upload"' not in client.get("/api-guide", headers={"Remote-User": "x"}).text
+
+
 def test_api_guide_survives_api_down_and_public_mode(client, monkeypatch):
     monkeypatch.setattr(browser, "_api_get", _api_guide_fake(None))
     monkeypatch.setattr(browser, "_api_guide_site_settings",
-                        lambda: {"mode": "none", "public_base_url": "https://mirror.example.org"})
+                        lambda: _guide_settings("none", "https://mirror.example.org"))
     resp = client.get("/api-guide")
     assert resp.status_code == 200
     assert 'id="api-guide-version"' not in resp.text
