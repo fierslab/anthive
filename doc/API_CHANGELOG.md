@@ -81,6 +81,23 @@ the upload requirements say more, and uploads report when they are off.
   `check_paper` and `upload_paper` from non-uploaders. The help page no
   longer lists the upload tools.
 
+- **Expression layers are found next to each `.duckdb`.** Served queries
+  no longer read the `layer__*` views, whose stored path points at the
+  machine that converted the dataset. Moved or renamed datasets work again:
+  `gene_stats?top=N` answered 500 on every container site, and renamed
+  collections (Wachter2024, Sierksma2026) gave 400/500 on cells, plots and
+  SQL. Raw SQL that names `layer__X` gets per-connection views with local
+  paths. The `top=N` fallback ranks genes by mean over all cells (it used
+  the mean over expressing cells only), matching `__gene_bins.mean_expr`.
+- **Pseudobulk works again.** It joined on a column the layer view does not
+  have (500 on every parquet-backed dataset) and grouped on stored instead of
+  public column names (500 for renamed columns such as `ant_apoe`).
+- New web page `/api-guide` (top bar and user menu): how to sign in to the
+  API, first requests, vark and pyvark. The raw docs stay at `/api/docs`.
+- Deployment (no API change): per-container secrets, host-side
+  `ant-stack publish-library`, Caddy proxy trust with `tls: off`, `ant-stack
+  pull` fix. See the upgrade notes in `doc/DEPLOY_CONTAINERS.md`.
+
 ## 2.40.2 — 2026-10-02
 
 Patch release: no endpoint changes. `/me/mcp` snippets gain more clients.
