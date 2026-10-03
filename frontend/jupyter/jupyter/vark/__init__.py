@@ -15,7 +15,9 @@ this release was last verified against.
 Quick start::
 
     from vark import AnthiveClient
-    c = AnthiveClient("https://my.anthive/api", auth=("user", "pass"))
+    # credentials from auth=, ANTHIVE_USER/ANTHIVE_PASSWORD, the vark CLI
+    # store or ~/.netrc
+    c = AnthiveClient("https://my.anthive/api")
     print(c.get_version()["version"])
 
 For the legacy `find_database` / `find_metadata` helpers from antclient,
@@ -23,9 +25,25 @@ use ``from vark.helpers import find_database, find_metadata``.
 """
 
 from .client import AnthiveClient
+from ._credentials import VarkConfigError
+from .exceptions import (
+    AnthiveAPIError,
+    PaperDuplicateError,
+    PaperInvalidError,
+    PaperNotPDFError,
+    PaperTooLargeError,
+    PaperUploadDisabledError,
+    PaperUploadError,
+    PaperUploadForbiddenError,
+)
 
 # Backward-compatibility alias (matches antclient 1.x).
 AntClient = AnthiveClient
 
-__version__ = "0.1.0"
-__all__ = ["AnthiveClient", "AntClient", "__version__"]
+__version__ = "0.7.0"
+__all__ = [
+    "AnthiveClient", "AntClient", "VarkConfigError", "__version__",
+    "AnthiveAPIError", "PaperUploadError", "PaperUploadForbiddenError",
+    "PaperUploadDisabledError", "PaperDuplicateError", "PaperInvalidError",
+    "PaperTooLargeError", "PaperNotPDFError",
+]
