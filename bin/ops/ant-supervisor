@@ -149,6 +149,7 @@ def _caddy_env_for_mode(prod: bool) -> dict[str, str]:
       caddy-tls.{dev,prod}            (TLS directives or empty)
       caddy-auth.{dev,prod}           (forward_auth or empty)
       caddy-http-redirect.{dev,prod}  (:8500 redirect block or empty)
+      caddy-servers.{dev,prod}        (trusted_proxies or empty)
     """
     if not prod:
         # Leave the env untouched so config/Caddyfile picks its defaults
@@ -169,6 +170,8 @@ def _caddy_env_for_mode(prod: bool) -> dict[str, str]:
         'ANTHIVE_TLS_SNIPPET':           'caddy-tls.prod',
         'ANTHIVE_AUTH_SNIPPET':          'caddy-auth.prod',
         'ANTHIVE_HTTP_REDIRECT_SNIPPET': 'caddy-http-redirect.prod',
+        # Trust nginx on loopback for X-Forwarded-Proto (Authelia needs https).
+        'ANTHIVE_SERVERS_SNIPPET':       'caddy-servers.prod',
         # Lock Caddy to loopback in prod — only nginx reaches it.
         'ANTHIVE_CADDY_BIND':   os.environ.get('ANTHIVE_CADDY_BIND', '127.0.0.1'),
         # Upstream service ports (from anthive.yaml) so the shared Caddyfile

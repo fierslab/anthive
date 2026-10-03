@@ -169,6 +169,29 @@ nano /srv/anthive/state/secrets/s3_secret_access_key
 chmod 600 /srv/anthive/state/secrets/s3_*
 ```
 
+These keys only reach the ingest container (`ant-stack ingest`, used for
+downloads in step 5) and `ant-stack publish-library`. The running site (api,
+web, mcp) gets no S3 keys at all, so it serves only data that is on this
+disk. If the site should also read datasets you have not downloaded, hand
+out downloads and PDFs that are only on S3, give the api a read-only key
+pair of its own:
+
+```yaml
+s3:
+  api_access: read      # none (default) | read | write
+```
+
+```sh
+nano /srv/anthive/state/secrets/s3_read_access_key_id
+nano /srv/anthive/state/secrets/s3_read_secret_access_key
+chmod 600 /srv/anthive/state/secrets/s3_read_*
+```
+
+Ask whoever runs the bucket for a key that can only list and read.
+`write` hands the api the read-write keys and is only needed for
+`library.s3_autopush`, which you can leave off (see "Let people add
+papers").
+
 Now let `check` look for mistakes:
 
 ```sh
@@ -187,8 +210,11 @@ datasets without a local `.duckdb` is expected at this point; step 5 fixes it.
 bin/ops/ant-stack pull
 ```
 
-This fetches the app, Caddy and Authelia images (about 2 GB). The ingest
-image (about 4.5 GB) is downloaded the first time you use it below.
+This fetches the app, ingest, Caddy and Authelia images (about 6.5 GB, of
+which the ingest image is 4.5 GB) by the tag in `site.yaml` and ends with a
+table of what it pulled and whether each image was new, updated or
+unchanged. `--no-ingest` skips the ingest image, which you need for the
+downloads below and for `publish-library`.
 
 Download the data through the ingest container. Start with one collection to
 see that everything works:
@@ -206,8 +232,9 @@ bin/ops/ant-stack ingest -- ant sync pull --include-duckdb     # the whole catal
 
 `--include-duckdb` matters: without it only the raw `.h5ad` files come down
 and the site has nothing it can serve quickly. A dataset whose files are not
-local is still listed; it is read from S3 over the network, which is slow.
-Running the same pull again only downloads what changed.
+local is only listed with `s3.api_access: read` (step 4); it is then read
+from S3 over the network, which is slow. Running the same pull again only
+downloads what changed.
 
 Every `ant sync pull` also brings the paper PDFs (into the library checkout)
 and the literature index (`library_chunks.parquet`, about 10 MB). To fetch
@@ -290,6 +317,7 @@ Run these from `/srv/anthive/anthive4`.
 | stop everything | `bin/ops/ant-stack down` (keeps data, users and settings) |
 | start again | `bin/ops/ant-stack up` |
 | convert my own .h5ad | put it in a collection folder with its `.md`, then `bin/ops/ant-stack ingest -- ant convert /srv/anthive/h5adstore/MyStudy/file.h5ad` |
+| publish uploaded papers | `bin/ops/ant-stack publish-library` (better: from a timer, see "Let people add papers") |
 
 ### Let people add papers
 
@@ -302,8 +330,9 @@ services:
 library:
   upload_groups: [admins]      # Authelia groups allowed to upload; basic mode: auth.admins
   max_pdf_mb: 25
-  git_push: false
-  s3_autopush: true
+  git_push: false              # leave off: publish-library pushes
+  s3_autopush: false           # leave off: publish-library syncs the PDFs
+  deploy_key: /srv/anthive/keys/library_deploy   # see below
   index_publisher: false       # true on ONE site only (normally the main one)
 ```
 
@@ -314,17 +343,45 @@ must be a git checkout of the library repo and writable by the site's uid;
 `check` warns when it is not. Each upload becomes a commit there, with the
 uploader as author and `library.git_committer` as committer.
 
-Getting those commits back to the library remote:
+Getting those commits and PDFs out of the server is done on the host, not
+in the api container, by `bin/ops/ant-stack publish-library`. It takes the
+same lock the upload path holds (so no upload commits halfway), runs
+`git pull --rebase` and `git push` in the library checkout with a deploy key
+that can write to that one repository, and then syncs the PDFs and the
+literature index with S3 through the ingest container
+(`ant sync library --no-git`). The api container keeps no git credentials
+and no S3 keys.
 
-- **`git_push: false`** (default, simplest): commits stay in the checkout.
-  Push them from the host with your own credentials, by hand or from cron:
-  `git -C /srv/anthive/library pull --rebase && git -C /srv/anthive/library push`.
-- **`git_push: true`**: the api container pushes after each upload and
-  `ant sync library` pushes too. The container has no SSH keys of its own,
-  so the remote must work without them, for example an HTTPS remote with a
-  project access token limited to that one repository (it ends up in the
-  checkout's `.git/config`, readable by anyone who can read the checkout).
-  A failed push is a warning on the upload; the commit is kept.
+This is the recommended setup. Do it once:
+
+1. Make a key without a passphrase, readable only by you:
+   `mkdir -p /srv/anthive/keys && ssh-keygen -t ed25519 -N '' -C "$(hostname) anthive library" -f /srv/anthive/keys/library_deploy`
+   and check `chmod 600 /srv/anthive/keys/library_deploy`.
+2. Add `/srv/anthive/keys/library_deploy.pub` to the library repository as
+   a deploy key with write access (GitLab: Settings > Repository > Deploy
+   keys, "Grant write permissions"). Ask the maintainers if you cannot.
+3. Make sure the checkout uses the SSH remote
+   (`git -C /srv/anthive/library remote -v` shows `git@gitlab...`) and that
+   the host key is known: `ssh-keyscan gitlab.kuleuven.be >> ~/.ssh/known_hosts`.
+4. Set `library.deploy_key` in `site.yaml` (above), then try it by hand:
+   `bin/ops/ant-stack publish-library --dry-run`, then without `--dry-run`.
+5. Run it every 15 minutes. With systemd, fill in and install the two
+   templates `config/examples/anthive-publish-library.{service,timer}.example`
+   (instructions inside); with cron, use
+   `config/examples/anthive-publish-library.cron.example`.
+
+Run it as the user that owns the library checkout (the `run_as` uid);
+otherwise git refuses the checkout as "dubious ownership". The command exits
+non-zero when the pull, the push or the S3 sync fails, so the timer shows up
+as failed in `systemctl list-timers` / `journalctl`.
+
+The older alternatives still work but put credentials in the container.
+`git_push: true` makes the api container push after each upload; the
+container has no SSH keys, so the remote must work without them, typically
+an HTTPS remote with a project token that ends up in `.git/config` and is
+readable by anyone who can read the checkout. `s3_autopush: true` pushes
+each PDF at once and needs `s3.api_access: write`, which gives the api the
+read-write S3 keys; `check` warns about both.
 
 Other sites get the new papers with their next `ant sync pull` (or `ant sync
 library`), which pulls the records from git and the PDFs from S3. See
@@ -359,9 +416,42 @@ Read every entry between your current version (top-right of the site, or
 | **2.40.0** | Paper upload through the API and MCP, two-way library sync, version button in the top bar. Uploads are off by default. | optional: `services: paper_upload: true` (see "Let people add papers") |
 | **2.40.1** | Paper PDFs moved from `*/static/` into the paper library (and deleted there on S3); new Papers tab, paper pages and Library page. | after `ant sync pull`, delete old local copies: `find <h5adstore> -path '*/static/*.pdf' -not -path '*/_*' -delete`; add the library if you have not (below) |
 | **2.40.2** | Client setup guide for 22 AI clients on GitLab (`doc/MCP_CLIENTS.md`); the help page links to the GitLab docs. | optional: `site.docs_base_url` to point the help links at your own docs |
+| **2.41.0** | Secrets reach only the containers that use them: S3 keys go to the ingest container alone, api and mcp no longer see `state_dir/secrets`. `library.s3_autopush` is off by default; papers are published from the host with `ant-stack publish-library`. Caddy believes `X-Forwarded-*` from private addresses when `tls.mode` is off, which fixes Authelia behind a TLS proxy. `ant-stack pull` now pulls the tag in `site.yaml` (before, a stale render could pull the old one). | read "Upgrading to 2.41.0" below |
 
 The in-app chat assistant is off and being phased out; leave
 `services.chat: false`. AI use goes through the personal MCP links.
+
+#### Upgrading to 2.41.0
+
+1. Check out the tag, set `images: tag: 2.41.0` and run
+   `bin/ops/ant-stack pull`. Check that its table lists the app image with
+   the new tag. If an older `pull` left you on the old image, this is the
+   release that fixes it.
+2. S3. If the site serves only local data (the usual case), nothing to do:
+   the api simply stops getting the keys. If datasets or PDFs should still
+   come from S3 on demand, add a read-only key pair and
+   `s3: api_access: read` (step 4). Sites that set S3 keys in the `anthive:`
+   block of `site.yaml` should move them to `state_dir/secrets`; `check`
+   warns about it.
+3. Paper uploads (only with `services.paper_upload: true`). Uploaded PDFs no
+   longer go to S3 by themselves. Set up the deploy key and the timer from
+   "Let people add papers", and remove `git_push: true` and any token from
+   the library checkout's `.git/config`
+   (`git -C /srv/anthive/library remote set-url origin git@gitlab.kuleuven.be:bdslab/anthive/library_store.git`).
+   To keep the old behaviour instead, set `s3_autopush: true` and
+   `s3: api_access: write`.
+4. Behind a reverse proxy with `tls.mode: off`: Caddy now trusts
+   `X-Forwarded-*` from private addresses (`tls.trusted_proxies`, default
+   `private_ranges`). Keep `ports.bind: 127.0.0.1` when the proxy runs on the
+   same host, and make the proxy send `X-Forwarded-Proto` (nginx:
+   `proxy_set_header X-Forwarded-Proto $scheme;`). The workaround of
+   `tls: internal` with `proxy_pass https://...` and `proxy_ssl_verify off`
+   can go: switch to `tls.mode: off`, `ports.http`, and `proxy_pass http://127.0.0.1:<ports.http>`.
+5. `bin/ops/ant-stack check`. It now also warns when a secret file, a
+   rendered config or the deploy key is readable by group or others; fix
+   each with the `chmod` it prints.
+6. `bin/ops/ant-stack up`. The api, web and mcp containers are recreated
+   with the new mounts.
 
 #### Adding the paper library to an existing site
 
@@ -410,7 +500,11 @@ catalogue from git.
 | upload returns 403 | the user is not in `library.upload_groups` (basic mode: not in `auth.admins`) | add the group or the user, `ant-stack init` |
 | upload returns 500 "cannot write to the library" | `services.paper_upload` is off (library mounted read-only) or the checkout is not writable by the site uid | set `services.paper_upload: true` and fix ownership, `ant-stack check`, `ant-stack up` |
 | upload warns "not a git repository" | `data.library` is a plain folder | clone the library repo there; the uploaded files are kept |
-| upload warns "git push failed" | no remote, or the container cannot authenticate | leave `library.git_push: false` and push from the host (see "Let people add papers") |
+| upload warns "git push failed" | no remote, or the container cannot authenticate | leave `library.git_push: false` and use `ant-stack publish-library` (see "Let people add papers") |
+| Authelia log: "has an insecure scheme 'http'" | `tls.mode: off` behind a proxy, and Caddy did not believe the proxy's `X-Forwarded-Proto` | check `tls.trusted_proxies` (default `private_ranges`) and that the proxy sends `X-Forwarded-Proto https`; release 2.41.0 or newer |
+| `check` says the app image is missing right after `pull` | before 2.41.0, `pull` used the image tag of the previous render | upgrade the checkout; `pull` now renders first and lists every image it pulled |
+| `publish-library`: "dubious ownership" or permission denied | the command runs as another user than the one owning the library checkout | run it as the `run_as` user (the `User=` of the systemd unit) |
+| `publish-library`: git push failed, "Permission denied (publickey)" | the deploy key is not added to the repository with write access, or the remote is HTTPS | add the `.pub` as a write deploy key; `git remote set-url origin git@...` |
 | `ant sync library` reports a conflict | the same PDF changed on this site and on S3 | keep one: `ant sync library --prefer local` or `--prefer remote`, then delete the `.conflict-*.pdf` copy |
 | papers show but "PDF not available" | the PDFs were not pulled, or the library repo is not checked out at `data.library` | clone the library repo, then `ant sync pull --library-only` |
 | anything else | | `bin/ops/ant-stack logs <service>`; the first error line usually names the problem |
@@ -441,7 +535,12 @@ Personal MCP links work the same in every mode.
   be reachable from the internet on ports 80 and 443, and you set
   `tls.acme_email`.
 - `off`: plain HTTP on `ports.http`, only when another web server in front
-  of anthive handles HTTPS.
+  of anthive handles HTTPS. That proxy must send `X-Forwarded-Proto` and
+  `X-Forwarded-For`; Caddy believes them from the addresses in
+  `tls.trusted_proxies` (default with `off`: `private_ranges`, which covers
+  a proxy on the same host reaching the container through docker). Keep
+  `ports.bind: 127.0.0.1` then, or narrow `tls.trusted_proxies` to the
+  proxy's address; `check` warns otherwise.
 
 ### Published images
 
@@ -495,12 +594,28 @@ absolute path.
 | `mcp.token_ttl_days`, `mcp.max_links_per_user` | how long a link lives (0 = forever) and how many links one user may hold (default 5) |
 | `services.paper_upload` | let `library.upload_groups` add papers through the API and MCP (mounts the library read-write) |
 | `library.*` | upload groups, PDF size limit, git committer and push, S3 autopush, index publisher |
+| `library.deploy_key` | SSH key `ant-stack publish-library` pushes the library with (host path) |
+| `s3.api_access` | what the api may do on S3: `none` (default), `read` (own read-only key pair) or `write` |
+| `tls.trusted_proxies` | addresses whose `X-Forwarded-*` Caddy believes (default `private_ranges` with `tls.mode: off`) |
 | `services.chat` | the in-app chat assistant; off by default and being phased out in favour of MCP, leave it off |
 | `resources.*` | threads, memory, open-dataset limit, plot cache, catalogue scan |
 
 `ant-stack render` (run by `up`) writes everything derived from `site.yaml`
 to `<state_dir>/stack/`. Do not edit those files; they are rewritten on
 every `up`.
+
+Who sees which secret:
+
+| Container | Config | From `state_dir` |
+| --- | --- | --- |
+| api | `stack/anthive-api.yaml` (S3 keys only as `s3.api_access` allows, chat key) | read-write, but `secrets/`, `authelia/` and `stack/` are hidden; only `internal_secret` and `mcp_token_secret` come back, read-only |
+| mcp | `stack/anthive.yaml` (no keys) | only `secrets/internal_secret`, read-only |
+| web | `stack/anthive.yaml` (no keys) | nothing |
+| authelia | its own `authelia/` folder | nothing else |
+| ingest | `stack/anthive-ingest.yaml` (full S3 keys) | all of it (it is the operator's tool) |
+
+`bin/ops/ant-stack config-path --role ingest` prints the config with the
+full S3 keys, for host-side scripts that need it.
 
 For command-line ingest on a cluster, see [HPC.md](HPC.md). For building and
 publishing releases, see [RELEASING.md](RELEASING.md). Image internals are in

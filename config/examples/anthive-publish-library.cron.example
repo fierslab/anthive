@@ -1,0 +1,13 @@
+# EXAMPLE: crontab entry that publishes the paper library of one container
+# site every 15 minutes (bin/ops/ant-stack publish-library). Install with
+# `crontab -e` as the user that owns the library checkout (the run_as uid of
+# site.yaml) and may run docker. Fill the <PLACEHOLDERS>.
+#
+# flock -n skips a run while the previous one is still busy; ant-stack also
+# takes the library upload lock itself, so uploads never commit halfway.
+# cron has a minimal PATH: uv and docker must be reachable through it.
+
+PATH=<HOME>/.local/bin:/usr/local/bin:/usr/bin:/bin
+ANTHIVE_SITE=<REPO_PATH>/site.yaml
+
+*/15 * * * *  flock -n /tmp/anthive-publish-library.lock <REPO_PATH>/bin/ops/ant-stack publish-library >> <LOG_DIR>/publish-library.log 2>&1

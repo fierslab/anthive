@@ -1,0 +1,10 @@
+# Prod servers snippet: imported into the global options block of
+# config/Caddyfile when ANTHIVE_SERVERS_SNIPPET points at this file (done by
+# ant-supervisor when ANTHIVE_PROD=1).
+#
+# On prod nginx terminates TLS on the same host and talks to Caddy on
+# 127.0.0.1:8500. Trust its X-Forwarded-For/-Proto/-Host so the scheme the
+# browser used (https) reaches ant-serve and Authelia unchanged.
+servers {
+	trusted_proxies static 127.0.0.1/8 ::1
+}

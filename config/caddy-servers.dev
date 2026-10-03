@@ -1,0 +1,6 @@
+# Dev servers snippet: imported into the global options block of
+# config/Caddyfile when ANTHIVE_SERVERS_SNIPPET is unset.
+#
+# Intentionally empty. On dev Caddy terminates TLS itself, so no upstream
+# proxy is trusted and client-sent X-Forwarded-* headers are replaced.
+# The file MUST exist (Caddy errors out on a missing import target).

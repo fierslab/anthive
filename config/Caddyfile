@@ -35,6 +35,13 @@
 	# without this Caddy has no certificate to offer and aborts the TLS
 	# handshake. ant-stack sets `default_sni <public host>`; empty otherwise.
 	{$ANTHIVE_DEFAULT_SNI:}
+
+	# Upstream proxies whose X-Forwarded-For/-Proto/-Host Caddy believes
+	# (`servers { trusted_proxies ... }`). Behind a TLS-terminating proxy
+	# (tls off) this must name the proxy, or Caddy rewrites
+	# X-Forwarded-Proto to http and Authelia refuses the request as
+	# insecure. ant-stack renders it from tls.trusted_proxies; dev: none.
+	import {$ANTHIVE_SERVERS_SNIPPET:caddy-servers.dev}
 }
 
 # HTTP companion block — dev: :8500 → 301 to https://…:8501. Prod:

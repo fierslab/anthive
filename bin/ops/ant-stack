@@ -15,13 +15,20 @@ Commands:
                          print the resolved plan
     render               write <state_dir>/stack/: .env, compose.site.yaml,
                          anthive.yaml, Caddy snippets, Authelia config
-    up / down / ps / logs [service] / pull / restart [service]
-                         docker compose wrappers (render runs first for up)
+    up / down / ps / logs [service] / restart [service]
+                         docker compose wrappers (each renders first)
+    pull [--no-ingest]   render, then pull every image site.yaml names (app,
+                         ingest, caddy, authelia) and report what changed
     build                build the app and ingest images locally
     passwd USER          set a user's password (basic + authelia accounts)
     ingest -- CMD...     one-off command in the ingest image with the site's
                          mounts, e.g. `ant-stack ingest -- ant convert /data/x.h5ad`
-    config-path          print the rendered anthive.yaml path
+    publish-library      host-side: git pull --rebase + push of data.library
+                         with library.deploy_key, then `ant sync library
+                         --no-git` in the ingest container, under the upload
+                         lock (run it from cron or a systemd timer)
+    config-path [--role serve|api|ingest]
+                         print a rendered anthive.yaml path
 
 Inputs:
     site.yaml            --site PATH, $ANTHIVE_SITE, or ./site.yaml
@@ -30,11 +37,14 @@ Inputs:
 Outputs (all under state_dir; nothing is written into the repo or images):
     stack/.env                  compose variables (images, uid, paths, listen)
     stack/compose.site.yaml     bind mounts, ports, profiles for this site
-    stack/anthive.yaml          rendered runtime config (0600, has secrets)
-    stack/caddy/{auth,tls}.caddy
+    stack/anthive.yaml          config for web + mcp (0600, no S3 or chat keys)
+    stack/anthive-api.yaml      config for api (S3 keys only per s3.api_access)
+    stack/anthive-ingest.yaml   config for ingest + host-side sync (full S3 keys)
+    stack/caddy/{auth,tls,servers}.caddy
     authelia/configuration.yml  (+ users_database.yml seeded once, secrets/)
     secrets/                    internal_secret, mcp_token_secret, users.yaml,
                                 initial-passwords.txt, optional s3/chat keys
+                                (containers see only the files they need)
 """
 
 from __future__ import annotations
@@ -64,6 +74,12 @@ EXAMPLE = REPO / 'site.example.yaml'
 
 AUTH_MODES = ('authelia', 'basic', 'trusted-proxy', 'none')
 TLS_MODES = ('internal', 'acme', 'off')
+# What the api container may do on S3 (s3.api_access). The serving stack
+# needs no S3 keys when the data is local; ingest and host-side sync always
+# get the full keys from secrets/s3_access_key_id + s3_secret_access_key.
+S3_API_ACCESS = ('none', 'read', 'write')
+S3_KEY_FILES = {'write': ('s3_access_key_id', 's3_secret_access_key'),
+                'read': ('s3_read_access_key_id', 's3_read_secret_access_key')}
 
 # Container-side fixed locations (see docker/Dockerfile + compose.yaml).
 C_STATE = '/var/lib/anthive'
@@ -163,7 +179,41 @@ def validate_site(site: dict, path: Path) -> dict:
     site['_public'] = public
     for key in ('https', 'http'):
         site['ports'][key] = int(site['ports'][key])
+    if not isinstance(site.get('s3'), dict):
+        site['s3'] = {}
+    s3 = site['s3']
+    api_access = str(s3.get('api_access') or 'none')
+    if api_access not in S3_API_ACCESS:
+        raise SiteError(f"s3.api_access must be one of {', '.join(S3_API_ACCESS)}")
+    s3['api_access'] = api_access
+    site['_trusted_proxies'] = _trusted_proxies(site)
+    library = site.get('library') or {}
+    site['_deploy_key'] = _abs(library.get('deploy_key'), 'library.deploy_key', False)
     return site
+
+
+def _trusted_proxies(site: dict) -> list[str]:
+    """Ranges Caddy trusts for X-Forwarded-* (tls.trusted_proxies). Unset:
+    private_ranges with tls off (an upstream proxy terminates TLS), none
+    otherwise. `[]` turns it off explicitly."""
+    import ipaddress  # noqa: PLC0415
+    raw = site['tls'].get('trusted_proxies')
+    if raw is None:
+        return ['private_ranges'] if site['tls']['mode'] == 'off' else []
+    if isinstance(raw, str):
+        raw = raw.split()
+    ranges: list[str] = []
+    for entry in raw:
+        entry = str(entry).strip()
+        if entry != 'private_ranges':
+            try:
+                ipaddress.ip_network(entry, strict=False)
+            except ValueError:
+                raise SiteError(f"tls.trusted_proxies: {entry!r} is not an IP range "
+                                f"(use CIDRs like 10.0.0.0/8 or private_ranges)") from None
+        if entry not in ranges:
+            ranges.append(entry)
+    return ranges
 
 
 def image_ref(site: dict, which: str) -> str:
@@ -278,7 +328,40 @@ def _listen_and_ports(site: dict) -> tuple[str, list[str], str]:
         'auto_https off'
 
 
-def render_anthive_yaml(site: dict) -> dict:
+# The three rendered configs. Each container mounts only its own, so a
+# secret is only in the containers that use it:
+#   serve   web + mcp: no S3 keys, no chat key
+#   api     ant-serve: S3 keys only as s3.api_access allows, the chat key
+#   ingest  `ant-stack ingest` and host-side sync: the full S3 keys
+CONFIG_ROLES = {'serve': 'anthive.yaml', 'api': 'anthive-api.yaml', 'ingest': 'anthive-ingest.yaml'}
+CONFIG_USERS = {'serve': 'web and mcp containers', 'api': 'api container',
+                'ingest': 'ingest container and host-side sync'}
+
+
+def config_file(site: dict, role: str) -> Path:
+    return stack_dir(site) / CONFIG_ROLES[role]
+
+
+def _s3_block(site: dict, role: str) -> dict | None:
+    """The s3 block for one role, or None when that role gets no S3 access."""
+    s3 = site.get('s3') or {}
+    if not s3.get('enabled'):
+        return None
+    access = 'write' if role == 'ingest' else (s3['api_access'] if role == 'api' else 'none')
+    if access == 'none':
+        return None
+    key_id, secret_key = S3_KEY_FILES[access]
+    secrets_dir = site['_state'] / 'secrets'
+    return {
+        'endpoint': s3.get('endpoint'), 'region': s3.get('region') or 'us-east-1',
+        'bucket': s3.get('bucket'), 'prefix': s3.get('prefix') or '',
+        'use_path_style': bool(s3.get('use_path_style')),
+        'access_key_id': _read_secret(secrets_dir / key_id),
+        'secret_access_key': _read_secret(secrets_dir / secret_key),
+    }
+
+
+def render_anthive_yaml(site: dict, role: str = 'api') -> dict:
     res = site['resources']
     state = site['_state']
     cfg: dict[str, Any] = {
@@ -329,7 +412,7 @@ def render_anthive_yaml(site: dict) -> dict:
         'library_upload_max_pdf_mb': int(lib.get('max_pdf_mb') or 25),
         'library_git_push': bool(lib.get('git_push', False)),
         'library_git_committer': str(lib.get('git_committer') or 'anthive <noreply@anthive.local>'),
-        'library_s3_autopush': bool(lib.get('s3_autopush', True)),
+        'library_s3_autopush': bool(lib.get('s3_autopush', False)),
         'library_index_publisher': bool(lib.get('index_publisher', False)),
     })
     cfg['mcp']['max_upload_mb'] = int(lib.get('max_pdf_mb') or 25)
@@ -338,20 +421,14 @@ def render_anthive_yaml(site: dict) -> dict:
     chat_key = _read_secret(state / 'secrets' / 'chat_api_key')
     cfg['chat'] = {
         'enabled': bool(site['services'].get('chat')) and bool(chat_key),
-        'api_key': chat_key,
+        'api_key': chat_key if role == 'api' else None,
         'history_path': f"{C_STATE}/chat_history.db",
     }
-    if site['services'].get('chat') and not chat_key:
+    if site['services'].get('chat') and not chat_key and role == 'api':
         _warn("services.chat is on but secrets/chat_api_key is missing; chat stays off")
-    s3 = site.get('s3') or {}
-    if s3.get('enabled'):
-        cfg['s3'] = {
-            'endpoint': s3.get('endpoint'), 'region': s3.get('region') or 'us-east-1',
-            'bucket': s3.get('bucket'), 'prefix': s3.get('prefix') or '',
-            'use_path_style': bool(s3.get('use_path_style')),
-            'access_key_id': _read_secret(state / 'secrets' / 's3_access_key_id'),
-            'secret_access_key': _read_secret(state / 'secrets' / 's3_secret_access_key'),
-        }
+    s3_block = _s3_block(site, role)
+    if s3_block is not None:
+        cfg['s3'] = s3_block
     return _deep_merge(cfg, site.get('anthive') or {})
 
 
@@ -413,6 +490,18 @@ def render_caddy_tls(site: dict) -> str:
     if mode == 'acme':
         return f"tls {site['tls']['acme_email']}\n"
     return "# tls off: plain HTTP behind an upstream TLS proxy\n"
+
+
+def render_caddy_servers(site: dict) -> str:
+    """Global `servers` options: which upstream proxies Caddy believes about
+    X-Forwarded-For/-Proto/-Host. Without this, Caddy behind a TLS proxy
+    (tls off) overwrites X-Forwarded-Proto with http and Authelia refuses
+    the request as insecure."""
+    ranges = site['_trusted_proxies']
+    head = "# Rendered by bin/ops/ant-stack from tls.trusted_proxies. Do not edit; edit site.yaml.\n"
+    if not ranges:
+        return head + "# no trusted proxies: X-Forwarded-* from clients is replaced, not believed\n"
+    return head + "servers {\n\ttrusted_proxies static " + ' '.join(ranges) + "\n}\n"
 
 
 def render_authelia(site: dict) -> str:
@@ -499,6 +588,24 @@ def _bind(source: Path | str, target: str, read_only: bool = False) -> dict:
     return entry
 
 
+def _state_mounts(site: dict, secret_names: tuple[str, ...], whole_state: bool) -> tuple[list, list]:
+    """(volumes, tmpfs) giving a service the state it needs and nothing more.
+
+    whole_state mounts state_dir read-write (caches, MCP link db) but hides
+    secrets/, authelia/ and stack/ behind empty tmpfs mounts owned by the
+    site uid; then each named secret file is bound read-only into the empty
+    secrets/ folder. Without whole_state only the secrets are there.
+    """
+    state = site['_state']
+    owner = f"uid={site.get('_uid', os.getuid())},gid={site.get('_gid', os.getgid())},mode=0700,size=1m"
+    hidden = ('secrets', 'authelia', 'stack') if whole_state else ('secrets',)
+    tmpfs = [f"{C_STATE}/{name}:{owner}" for name in hidden]
+    volumes = [_bind(state, C_STATE)] if whole_state else []
+    volumes += [_bind(state / 'secrets' / name, f"{C_STATE}/secrets/{name}", read_only=True)
+                for name in secret_names]
+    return volumes, tmpfs
+
+
 def render_compose_site(site: dict) -> dict:
     state = site['_state']
     stack = stack_dir(site)
@@ -517,8 +624,11 @@ def render_compose_site(site: dict) -> dict:
         if site[extra]:
             library_ro.append(_bind(site[extra], str(site[extra]), read_only=True))
             library_rw.append(_bind(site[extra], str(site[extra])))
-    config_mount = _bind(stack / 'anthive.yaml', C_CONFIG, read_only=True)
+    def config_mount(role: str) -> dict:
+        return _bind(config_file(site, role), C_CONFIG, read_only=True)
     state_mount = _bind(state, C_STATE)
+    api_state, api_tmpfs = _state_mounts(site, ('internal_secret', 'mcp_token_secret'), whole_state=True)
+    mcp_state, mcp_tmpfs = _state_mounts(site, ('internal_secret',), whole_state=False)
     scratch = (_bind(site['_scratch'], C_SCRATCH) if site['_scratch']
                else {'type': 'volume', 'source': 'scratch', 'target': C_SCRATCH})
     webapp_rw = {'type': 'volume', 'source': 'webapp', 'target': C_WEBAPP}
@@ -528,10 +638,12 @@ def render_compose_site(site: dict) -> dict:
             {'type': 'volume', 'source': 'caddy-config', 'target': '/srv/caddy-config'},
         ]},
         'api': {'volumes': data_rw + (library_rw if site.get('services', {}).get('paper_upload') else library_ro)
-                + [config_mount, state_mount, scratch, webapp_rw]},
-        'web': {'volumes': data_ro + [config_mount]},
-        'mcp': {'volumes': [config_mount, state_mount, webapp_rw]},
-        'ingest': {'volumes': data_rw + library_rw + [config_mount, state_mount, scratch, webapp_rw]},
+                + [config_mount('api')] + api_state + [scratch, webapp_rw],
+                'tmpfs': api_tmpfs},
+        'web': {'volumes': data_ro + [config_mount('serve')]},
+        'mcp': {'volumes': [config_mount('serve')] + mcp_state + [webapp_rw], 'tmpfs': mcp_tmpfs},
+        # ingest is the operator's own tool: the whole state_dir and the full S3 keys
+        'ingest': {'volumes': data_rw + library_rw + [config_mount('ingest'), state_mount, scratch, webapp_rw]},
         'caddy': {
             'ports': _listen_and_ports(site)[1],
             'volumes': [_bind(stack / 'caddy', C_CADDY_SNIPPETS, read_only=True)],
@@ -551,13 +663,16 @@ def render(site: dict, quiet: bool = False) -> Path:
     (state / 'authelia').mkdir(parents=True, exist_ok=True)
     listen, _ports, auto_https = _listen_and_ports(site)
 
-    anthive_cfg = render_anthive_yaml(site)
-    header = ("# Rendered by bin/ops/ant-stack from site.yaml. Do not edit: edit\n"
-              "# site.yaml (or its `anthive:` block) and run `ant-stack render`.\n")
-    _write_secret(stack / 'anthive.yaml', header + yaml.safe_dump(anthive_cfg, sort_keys=False),
-                  overwrite=True)
+    os.chmod(stack, 0o700)
+    for role, name in CONFIG_ROLES.items():
+        header = ("# Rendered by bin/ops/ant-stack from site.yaml. Do not edit: edit\n"
+                  "# site.yaml (or its `anthive:` block) and run `ant-stack render`.\n"
+                  f"# Role: {role} ({CONFIG_USERS[role]}).\n")
+        _write_secret(stack / name, header + yaml.safe_dump(render_anthive_yaml(site, role), sort_keys=False),
+                      overwrite=True)
     (stack / 'caddy' / 'auth.caddy').write_text(render_caddy_auth(site))
     (stack / 'caddy' / 'tls.caddy').write_text(render_caddy_tls(site))
+    (stack / 'caddy' / 'servers.caddy').write_text(render_caddy_servers(site))
     if site['auth']['mode'] == 'authelia':
         (state / 'authelia' / 'configuration.yml').write_text(render_authelia(site))
         seed_authelia_users(site)
@@ -592,7 +707,8 @@ def render(site: dict, quiet: bool = False) -> Path:
         escaped = value.replace('\\', '\\\\').replace('"', '\\"')
         lines.append(f'{key}="{escaped}"')
     (stack / '.env').write_text('\n'.join(lines) + '\n')
-    _validate_rendered_config(stack / 'anthive.yaml')
+    for name in CONFIG_ROLES.values():
+        _validate_rendered_config(stack / name)
     if not quiet:
         _say(f"rendered {stack}")
     return stack
@@ -735,6 +851,102 @@ def _writable_by(path: Path, uid: int, gid: int) -> bool:
     return bool(info.st_mode & stat.S_IWOTH)
 
 
+def _check_s3(site: dict) -> list[str]:
+    """S3 key files for ingest (always the read-write pair) and for the api
+    (none, the read-only pair, or the read-write pair; s3.api_access)."""
+    problems: list[str] = []
+    s3, state = site['s3'], site['_state']
+    library = site.get('library') or {}
+    if not s3.get('enabled'):
+        if s3['api_access'] != 'none':
+            _warn("s3.api_access is set but s3.enabled is false: the api gets no S3 access")
+        return problems
+    needed = {'write'} | ({s3['api_access']} - {'none'})
+    for access in sorted(needed):
+        for name in S3_KEY_FILES[access]:
+            path = state / 'secrets' / name
+            if not path.is_file() or not path.read_text().strip():
+                why = ("s3.enabled is true" if access == 'write'
+                       else "s3.api_access is read")
+                problems.append(f"{why} but {path} is missing or empty (put the key in that file, chmod 600)")
+    if library.get('s3_autopush') and s3['api_access'] != 'write':
+        _warn("library.s3_autopush is on but s3.api_access is not write: uploaded PDFs reach S3 only "
+              "with the next `ant-stack publish-library` (recommended: s3_autopush: false)")
+    if s3['api_access'] == 'write':
+        _warn("s3.api_access: write gives the api container the read-write S3 keys; prefer read "
+              "(a read-only key pair) and `ant-stack publish-library` for uploads")
+    extra = site.get('anthive') or {}
+    if isinstance(extra.get('s3'), dict) and (extra['s3'].get('access_key_id') or extra['s3'].get('secret_access_key')):
+        _warn("the `anthive:` block of site.yaml sets S3 keys: they are copied into EVERY rendered "
+              "config (api, web, mcp); put keys in <state_dir>/secrets instead")
+    return problems
+
+
+def _loose_permissions(path: Path) -> bool:
+    try:
+        return bool(path.stat().st_mode & 0o077)
+    except OSError:
+        return False
+
+
+def secret_files(site: dict) -> list[Path]:
+    """Every file ant-stack knows holds a secret: key files, the user
+    database, Authelia's secrets, the rendered configs and the deploy key."""
+    state = site['_state']
+    files: list[Path] = []
+    for folder in (state / 'secrets', state / 'authelia' / 'secrets'):
+        if folder.is_dir():
+            files += sorted(p for p in folder.iterdir() if p.is_file())
+    files.append(state / 'authelia' / 'users_database.yml')
+    files += [config_file(site, role) for role in CONFIG_ROLES]
+    if site.get('_deploy_key'):
+        files.append(site['_deploy_key'])
+    return [p for p in files if p.exists()]
+
+
+def _check_secret_permissions(site: dict) -> list[str]:
+    """Warn about secret files and folders that group or others can read.
+    Returns the offending paths (for tests)."""
+    loose: list[str] = []
+    state = site['_state']
+    for folder in (state / 'secrets', state / 'authelia' / 'secrets', state / 'stack'):
+        if folder.is_dir() and _loose_permissions(folder):
+            loose.append(str(folder))
+            _warn(f"{folder} is open to group or others (chmod 700 {folder})")
+    for path in secret_files(site):
+        if _loose_permissions(path):
+            loose.append(str(path))
+            _warn(f"{path} holds a secret and is readable by group or others (chmod 600 {path})")
+    return loose
+
+
+def _check_proxy_trust(site: dict) -> None:
+    ranges = site['_trusted_proxies']
+    bind = site['ports']['bind']
+    if ranges and bind not in ('127.0.0.1', '::1'):
+        _warn(f"tls.trusted_proxies ({' '.join(ranges)}) with ports.bind {bind}: any host in those "
+              f"ranges that reaches the port can set X-Forwarded-For/-Proto; bind 127.0.0.1 when the "
+              f"proxy runs on this host, or narrow tls.trusted_proxies to the proxy's address")
+    if site['tls']['mode'] == 'off' and not ranges and site['auth']['mode'] == 'authelia':
+        _warn("tls off with authelia and no tls.trusted_proxies: Caddy replaces the proxy's "
+              "X-Forwarded-Proto with http and Authelia refuses logins as insecure")
+
+
+def _check_publish_library(site: dict) -> None:
+    key = site.get('_deploy_key')
+    library = site.get('library') or {}
+    if key is None:
+        if site.get('services', {}).get('paper_upload') and not library.get('git_push'):
+            _warn("services.paper_upload is on but library.deploy_key is not set: uploads stay in "
+                  "this checkout until someone pushes; set the key and run `ant-stack publish-library` "
+                  "from a timer (doc/DEPLOY_CONTAINERS.md, \"Let people add papers\")")
+        return
+    if not key.is_file():
+        _warn(f"library.deploy_key {key} does not exist: `ant-stack publish-library` cannot push")
+    if site['_library'] is None:
+        _warn("library.deploy_key is set but data.library is not: nothing to publish")
+
+
 def check(site: dict, running: bool = False) -> list[str]:
     problems: list[str] = []
     if not shutil.which('docker'):
@@ -775,11 +987,9 @@ def check(site: dict, running: bool = False) -> list[str]:
             for secret in ('jwt', 'session', 'storage'):
                 if not (state / 'authelia' / 'secrets' / secret).exists():
                     problems.append(f"missing authelia/secrets/{secret} (run `ant-stack init`)")
-    if (site.get('s3') or {}).get('enabled') and state.is_dir():
-        for secret in ('secrets/s3_access_key_id', 'secrets/s3_secret_access_key'):
-            if not (state / secret).is_file() or not (state / secret).read_text().strip():
-                problems.append(f"s3.enabled is true but {state / secret} is missing or empty "
-                                f"(put the key in that file, chmod 600)")
+    problems += _check_s3(site)
+    _check_secret_permissions(site)
+    _check_proxy_trust(site)
     store = site['_h5adstore']
     if store and store.is_dir():
         mds = [p for p in store.glob('*/*.md') if p.name != 'index.md' and not p.parent.name.startswith('_')]
@@ -789,10 +999,13 @@ def check(site: dict, running: bool = False) -> list[str]:
         else:
             missing = [p for p in mds if not p.with_suffix('.duckdb').exists()]
             if missing:
-                _warn(f"{len(missing)} of {len(mds)} datasets have no local .duckdb: they are served "
-                      f"from S3 (slow) or not at all; pull them with "
-                      f"`ant-stack ingest -- ant sync pull --include-duckdb`")
+                remote = (site['s3'].get('enabled') and site['s3']['api_access'] != 'none')
+                _warn(f"{len(missing)} of {len(mds)} datasets have no local .duckdb: they are "
+                      + ("served from S3 (slow)" if remote else
+                         "not served (the api has no S3 access, s3.api_access: none)")
+                      + "; pull them with `ant-stack ingest -- ant sync pull --include-duckdb`")
     problems += _check_library(site)
+    _check_publish_library(site)
     if site['_scratch'] and not site['_scratch'].is_dir():
         problems.append(f"scratch_dir {site['_scratch']} does not exist")
     if not running:
@@ -836,6 +1049,8 @@ def print_plan(site: dict) -> None:
   public_url     {site['site']['public_url']}
   auth           {site['auth']['mode']}   admins: {', '.join(site['auth'].get('admins') or []) or '-'}
   tls            {site['tls']['mode']}    caddy listens: {listen}
+  trusted proxy  {' '.join(site['_trusted_proxies']) or '-'}
+  s3             {('on, api access: ' + site['s3']['api_access']) if site['s3'].get('enabled') else 'off'}
   published      {', '.join(ports)}
   h5adstore      {site['_h5adstore']}{' (read-only)' if site['data'].get('readonly') else ''}
   genesetstore   {site['_genesetstore'] or '-'}
@@ -933,18 +1148,183 @@ def cmd_up(args: argparse.Namespace) -> int:
 
 def cmd_simple(args: argparse.Namespace) -> int:
     site = load_site(site_path(args))
-    if not (stack_dir(site) / '.env').exists():
+    # Always re-render: a .env left from an older site.yaml names the old
+    # images (this is how `pull` once fetched 2.37.2 again after the tag
+    # had been set to 2.40.0).
+    try:
         render(site, quiet=True)
+    except SiteError as error:
+        if not (stack_dir(site) / '.env').exists():
+            raise
+        _warn(f"render failed, using the previous one: {error}")
     compose_args = {
         'down': ['down'] + (['--volumes'] if getattr(args, 'volumes', False) else []),
         'ps': ['ps', '--all'],
-        'pull': ['pull', '--ignore-buildable'],
         'logs': ['logs', '--tail', str(getattr(args, 'tail', 200))]
                 + (['-f'] if getattr(args, 'follow', False) else [])
                 + ([args.service] if getattr(args, 'service', None) else []),
         'restart': ['restart'] + ([args.service] if getattr(args, 'service', None) else []),
     }[args.command]
     return run_compose(site, *compose_args, check=False)
+
+
+def _rendered_images(site: dict) -> dict[str, str]:
+    """Image refs the current <state_dir>/stack/.env names (before a render)."""
+    env_file = stack_dir(site) / '.env'
+    found: dict[str, str] = {}
+    if not env_file.exists():
+        return found
+    for line in env_file.read_text().splitlines():
+        match = re.fullmatch(r'(ANTHIVE_IMAGE_[A-Z]+)="(.*)"', line.strip())
+        if match:
+            found[match.group(1)] = match.group(2)
+    return found
+
+
+def images_to_pull(site: dict, include_ingest: bool = True) -> list[tuple[str, str]]:
+    """(role, image ref) for every image this site runs, from site.yaml."""
+    images = [('app', image_ref(site, 'app'))]
+    if include_ingest:
+        images.append(('ingest', image_ref(site, 'ingest')))
+    images.append(('caddy', image_ref(site, 'caddy')))
+    if site['auth']['mode'] == 'authelia':
+        images.append(('authelia', image_ref(site, 'authelia')))
+    return images
+
+
+def _image_id(ref: str) -> str | None:
+    result = subprocess.run(['docker', 'image', 'inspect', '--format', '{{.Id}}', ref],
+                            capture_output=True, text=True)
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def cmd_pull(args: argparse.Namespace) -> int:
+    """Pull every image the site runs, by the refs site.yaml names NOW.
+
+    Renders first (a stale .env is what made 2.37.2 -> 2.40.0 upgrades pull
+    the old app image), pulls with `docker pull` one by one (compose skips
+    the ingest image, whose profile is off) and reports what changed."""
+    site = load_site(site_path(args))
+    before = _rendered_images(site)
+    render(site, quiet=True)
+    after = _rendered_images(site)
+    for key, ref in after.items():
+        if before.get(key) and before[key] != ref:
+            _say(f"{key}: the previous render named {before[key]}, site.yaml now names {ref}")
+    failed = 0
+    report: list[str] = []
+    for role, ref in images_to_pull(site, include_ingest=not args.no_ingest):
+        old_id = _image_id(ref)
+        _say(f"pulling {role}: {ref}")
+        result = subprocess.run(['docker', 'pull', ref])
+        new_id = _image_id(ref)
+        if result.returncode != 0 or new_id is None:
+            failed += 1
+            report.append(f"  FAILED     {role:9s}{ref}")
+            continue
+        state = 'unchanged' if old_id == new_id else ('updated' if old_id else 'new')
+        report.append(f"  {state:10s} {role:9s}{ref}  {new_id[:19]}")
+    print('\n'.join(['', 'ant-stack pull:'] + report))
+    if args.no_ingest:
+        print(f"  skipped    ingest   {image_ref(site, 'ingest')} (--no-ingest)")
+    if failed:
+        _warn(f"{failed} image(s) failed to pull; `ant-stack up` will refuse a missing app image")
+        return 1
+    return 0
+
+
+def library_lock_path(library: Path) -> Path:
+    """The lock the api upload path holds (lib/library_upload.library_lock)."""
+    meta = library / '.git'
+    return meta / 'anthive-upload.lock' if meta.is_dir() else library / '.anthive-upload.lock'
+
+
+def git_ssh_command(key: Path | None) -> str | None:
+    if key is None:
+        return None
+    import shlex  # noqa: PLC0415
+    return f"ssh -i {shlex.quote(str(key))} -o IdentitiesOnly=yes -o BatchMode=yes"
+
+
+def _git(library: Path, env: dict, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(['git', '-C', str(library), *args], env=env, capture_output=True,
+                          text=True, timeout=600)
+
+
+def _acquire_lock(path: Path, timeout: float):
+    import fcntl  # noqa: PLC0415
+    import time  # noqa: PLC0415
+    handle = open(path, 'a+')
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return handle
+        except BlockingIOError:
+            if time.monotonic() > deadline:
+                handle.close()
+                raise SiteError(f"{path} stayed locked for {timeout:.0f}s (an upload or another "
+                                f"publish is running); try again later") from None
+            time.sleep(1)
+
+
+def cmd_publish_library(args: argparse.Namespace) -> int:
+    """Host-side publishing of the paper library: git pull --rebase and push
+    the records with the site's deploy key, then sync the PDFs (and the
+    literature index) with S3 through the ingest container. Holds the
+    upload lock throughout so no upload commits halfway."""
+    site = load_site(site_path(args))
+    library = site['_library']
+    if library is None:
+        raise SiteError("data.library is not set: nothing to publish")
+    if not (library / '.git').is_dir():
+        raise SiteError(f"{library} is not a git checkout of the library repo")
+    key = site['_deploy_key']
+    if key is not None and not key.is_file():
+        raise SiteError(f"library.deploy_key {key} does not exist")
+    env = dict(os.environ)
+    ssh = git_ssh_command(key)
+    if ssh:
+        env['GIT_SSH_COMMAND'] = ssh
+    else:
+        _say("library.deploy_key is not set: git uses this user's own ssh setup")
+    errors = 0
+    handle = _acquire_lock(library_lock_path(library), args.lock_timeout)
+    try:
+        _say(f"locked {library_lock_path(library)}")
+        if args.dry_run:
+            _say(f"dry run: would git pull --rebase{'' if args.no_push else ' and git push'} in {library}"
+                 + ('' if args.no_s3 else ', then `ant sync library --no-git --dry-run`'))
+        pulled = _git(library, env, 'pull', '--rebase', '--autostash') if not args.dry_run else None
+        if pulled is not None and pulled.returncode != 0:
+            _git(library, env, 'rebase', '--abort')
+            errors += 1
+            _warn("git pull --rebase failed, nothing pushed: "
+                  + ((pulled.stderr or pulled.stdout).strip().splitlines() or ['?'])[-1])
+        elif pulled is not None:
+            _say("records: pulled")
+            if not args.no_push:
+                pushed = _git(library, env, 'push')
+                if pushed.returncode != 0:
+                    errors += 1
+                    _warn("git push failed: " + ((pushed.stderr or pushed.stdout).strip().splitlines() or ['?'])[-1])
+                else:
+                    _say("records: pushed")
+        if args.no_s3:
+            _say("PDFs: skipped (--no-s3)")
+        elif not site['s3'].get('enabled'):
+            _say("PDFs: skipped (s3.enabled is false)")
+        else:
+            render(site, quiet=True)
+            sync = ['ant', 'sync', 'library', '--no-git'] + (['--dry-run'] if args.dry_run else [])
+            _say("PDFs: " + ' '.join(sync) + " (ingest container)")
+            if run_compose(site, '--profile', 'ingest', 'run', '--rm', '--no-deps', '-T', 'ingest',
+                           *sync, check=False) != 0:
+                errors += 1
+                _warn("the library S3 sync failed; see the output above")
+    finally:
+        handle.close()
+    return 1 if errors else 0
 
 
 def cmd_build(args: argparse.Namespace) -> int:
@@ -1020,7 +1400,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 
 def cmd_config_path(args: argparse.Namespace) -> int:
     site = load_site(site_path(args))
-    print(stack_dir(site) / 'anthive.yaml')
+    print(config_file(site, args.role))
     return 0
 
 
@@ -1042,7 +1422,17 @@ def main() -> int:
     p_down.add_argument('--volumes', action='store_true',
                         help='also delete the docker volumes (webapp bundle, caddy certs, scratch)')
     sub.add_parser('ps')
-    sub.add_parser('pull')
+    p_pull = sub.add_parser('pull', help='pull every image site.yaml names and report what changed')
+    p_pull.add_argument('--no-ingest', action='store_true',
+                        help='skip the ingest image (~4.5 GB; needed for `ingest` and `publish-library`)')
+    p_publish = sub.add_parser('publish-library',
+                               help='host-side: git pull --rebase + push the library with the deploy key, '
+                                    'then sync the PDFs with S3 (cron/systemd timer)')
+    p_publish.add_argument('--no-push', action='store_true', help='pull the records, do not push')
+    p_publish.add_argument('--no-s3', action='store_true', help='records only, no PDF/index sync')
+    p_publish.add_argument('--dry-run', action='store_true', help='print the plan, change nothing')
+    p_publish.add_argument('--lock-timeout', type=float, default=600,
+                           help='seconds to wait for a running upload (default 600)')
     p_logs = sub.add_parser('logs')
     p_logs.add_argument('service', nargs='?')
     p_logs.add_argument('-f', '--follow', action='store_true')
@@ -1057,11 +1447,14 @@ def main() -> int:
     p_passwd.add_argument('--password', help='non-interactive (or $ANTHIVE_NEW_PASSWORD)')
     p_ingest = sub.add_parser('ingest')
     p_ingest.add_argument('cmd', nargs=argparse.REMAINDER)
-    sub.add_parser('config-path')
+    p_config = sub.add_parser('config-path')
+    p_config.add_argument('--role', choices=sorted(CONFIG_ROLES), default='serve',
+                          help='serve (web, mcp), api, or ingest (full S3 keys; host-side sync)')
     args = parser.parse_args()
     handlers = {
         'init': cmd_init, 'check': cmd_check, 'render': cmd_render, 'up': cmd_up,
-        'down': cmd_simple, 'ps': cmd_simple, 'pull': cmd_simple, 'logs': cmd_simple,
+        'down': cmd_simple, 'ps': cmd_simple, 'pull': cmd_pull, 'logs': cmd_simple,
+        'publish-library': cmd_publish_library,
         'restart': cmd_simple, 'build': cmd_build, 'passwd': cmd_passwd,
         'ingest': cmd_ingest, 'config-path': cmd_config_path,
     }
