@@ -6,8 +6,8 @@ to people (a web site), to code (a REST API with Python and Go clients), to
 notebooks (JupyterLite in the browser) and to AI assistants (MCP).
 
 The main deployment holds 186 datasets in 63 collections, about 17 million
-cells, mostly human microglia in health and Alzheimer's disease (September
-2026, release 2.40.2).
+cells, mostly human microglia in health and Alzheimer's disease (October
+2026, release 2.41.0).
 
 This repository is the home of the whole project: the server, the web UI,
 the ingest and annotation tools, the deployment tooling and the
@@ -60,7 +60,7 @@ In short, on a Linux server with Docker and uv:
 
 ```sh
 git clone https://gitlab.kuleuven.be/bdslab/anthive/anthive4.git && cd anthive4
-git checkout v2.40.2
+git checkout v2.41.0
 bin/ops/ant-stack init        # writes site.yaml; edit it, then run init again
 bin/ops/ant-stack check
 bin/ops/ant-stack pull
@@ -150,7 +150,7 @@ change there affects all of them.
 
 ## Status
 
-Release **2.40.2** (October 2026). The release number is the REST API
+Release **2.41.0** (October 2026). The release number is the REST API
 version; a running site reports it at `/api/health`.
 
 Maintained by the BADS lab, KU Leuven (Mark Fiers). License: not yet
