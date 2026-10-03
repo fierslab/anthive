@@ -46,6 +46,9 @@ Patch release: no contract change.
   paper only when its turn starts, lists waiting citekeys in `queued`, and
   keeps the outcome of the last 20 jobs in `recent` (before, a waiting
   upload overwrote the status of the one being indexed).
+- MCP instructions and the `search_literature` description tell AI clients
+  to search the library whenever they interpret a result or explain
+  biology, and how to phrase queries.
 ## 2.41.0 (2026-10-03)
 
 Minor release. The library has no per-paper access or LLM rules any more,

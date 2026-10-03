@@ -425,6 +425,9 @@ def main() -> None:
             '  the resource anthive://guide has the full rules.\n'
             '  Always keep "the literature says" (cite [Author Year, p.N]) separate from "our data\n'
             '  shows", and remember per-cell statistics are pseudoreplicated (aggregate per donor).\n'
+            '  Use search_literature throughout, not only when asked: before interpreting a finding,\n'
+            '  before explaining what a gene or cell state does, and again when the topic changes.\n'
+            '  No hit means "not in this library", not "unknown in the field".\n'
             '\n'
             'DATA LEAVES THE SERVER\n'
             '  Everything these tools return, including passages and notes from library papers, is\n'
@@ -1381,6 +1384,14 @@ def main() -> None:
         [Author Year, p.N]. Use it to answer what is known in the
         literature, then check the same question in our data with the
         dataset tools (get_paper lists the datasets a paper is the source of).
+        Call it whenever you interpret a result or explain biology, not only
+        when the user asks for literature.
+
+        Queries: plain sentences work (hybrid mode also matches paraphrases);
+        combine a gene symbol with a description; try two or three phrasings
+        when results are thin; restrict to one paper with citekeys to read
+        around a hit. The library is curated and small: no hit means "not in
+        this library", not "unknown".
 
         The passages are sent to your AI client and its LLM provider, like
         everything else these tools return.
