@@ -1,0 +1,14 @@
+# EXAMPLE: run anthive-publish-library.service every 15 minutes.
+# See anthive-publish-library.service.example for installation.
+
+[Unit]
+Description=Anthive: publish the paper library every 15 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+RandomizedDelaySec=60
+Persistent=true
+
+[Install]
+WantedBy=timers.target

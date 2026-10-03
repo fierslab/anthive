@@ -402,8 +402,10 @@ both are committed to the library repo with the uploader as git author
 pushed. Then, without failing the request: the paper is added to the
 literature index in the background (`/api/library/status` shows
 `upload_index`), the library is reloaded, and with `library_s3_autopush`
-the PDF goes to S3 at once. Any of those that fails is returned as a
-warning; the paper itself is saved.
+(off by default since 2.41.0) the PDF goes to S3 at once. Any of those that
+fails is returned as a warning; the paper itself is saved. Without autopush
+the PDF reaches S3 with the next `ant sync library`; container sites run
+`ant-stack publish-library` from a timer for that (`doc/DEPLOY_CONTAINERS.md`).
 
 ## How the server uses it
 

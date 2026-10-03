@@ -364,7 +364,7 @@ def get_library_upload_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[st
         'max_pdf_mb': max_mb,
         'git_committer': str(cfg.get('library_git_committer') or 'anthive <noreply@anthive.local>'),
         'git_push': bool(cfg.get('library_git_push', False)),
-        's3_autopush': bool(cfg.get('library_s3_autopush', True)),
+        's3_autopush': bool(cfg.get('library_s3_autopush', False)),
         'index_publisher': bool(cfg.get('library_index_publisher', False)),
     }
 

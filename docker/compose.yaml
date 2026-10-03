@@ -88,6 +88,7 @@ services:
       ANTHIVE_TLS_SNIPPET: /etc/anthive-caddy/tls.caddy
       ANTHIVE_AUTH_SNIPPET: /etc/anthive-caddy/auth.caddy
       ANTHIVE_HTTP_REDIRECT_SNIPPET: /srv/caddy-config/config/caddy-http-redirect.prod
+      ANTHIVE_SERVERS_SNIPPET: /etc/anthive-caddy/servers.caddy
       ANTHIVE_AUTO_HTTPS: ${ANTHIVE_AUTO_HTTPS:-auto_https disable_redirects}
       ANTHIVE_DEFAULT_SNI: ${ANTHIVE_DEFAULT_SNI:-}
       ANTHIVE_WEBAPP_ROOT: /srv/webapp

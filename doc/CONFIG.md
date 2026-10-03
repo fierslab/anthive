@@ -98,8 +98,8 @@ See `doc/LIBRARY.md` and `doc/LIBRARY_INDEX.md`.
 
 #### `library_s3_autopush`
 - **Type**: boolean
-- **Default**: `true`
-- **Description**: Push an uploaded PDF to S3 right after the commit (when S3 is configured). Off: it goes with the next `ant sync library`.
+- **Default**: `false` (was `true` before 2.41.0)
+- **Description**: Push an uploaded PDF to S3 right after the commit (when S3 is configured). Off: it goes with the next `ant sync library`. The serving process then needs no S3 write key; container sites publish with `ant-stack publish-library` from a timer (`doc/DEPLOY_CONTAINERS.md`).
 
 #### `library_index_publisher`
 - **Type**: boolean

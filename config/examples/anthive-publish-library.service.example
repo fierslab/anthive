@@ -1,0 +1,31 @@
+# EXAMPLE: systemd service that publishes the paper library of one
+# container site (bin/ops/ant-stack publish-library). Pair it with
+# anthive-publish-library.timer.example.
+#
+#   sudo cp anthive-publish-library.service.example /etc/systemd/system/anthive-publish-library.service
+#   sudo cp anthive-publish-library.timer.example   /etc/systemd/system/anthive-publish-library.timer
+#   (fill the <PLACEHOLDERS> in both)
+#   sudo systemctl daemon-reload && sudo systemctl enable --now anthive-publish-library.timer
+#   systemctl list-timers anthive-publish-library.timer
+#   journalctl -u anthive-publish-library.service
+#
+# <USER> must own the library checkout (the same uid as run_as in site.yaml)
+# and may run docker. The deploy key is library.deploy_key in site.yaml.
+
+[Unit]
+Description=Anthive: publish the paper library (git push + S3 sync)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=<USER>
+WorkingDirectory=<REPO_PATH>
+# uv must be on PATH (ant-stack is a `uv run --script`); HOME for its cache.
+Environment=HOME=<HOME>
+Environment=PATH=<HOME>/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=ANTHIVE_SITE=<REPO_PATH>/site.yaml
+ExecStart=<REPO_PATH>/bin/ops/ant-stack publish-library
+# A sync of many new PDFs can take a while; the lock wait is 10 minutes.
+TimeoutStartSec=2h
+Nice=10

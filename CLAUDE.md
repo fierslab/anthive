@@ -54,7 +54,7 @@ frontend/
   jupyter/   JupyterLite source (Pyodide), vendors codeberg.org/mfiers/pyvark
              as `vark/`                              frontend/jupyter/CLAUDE.md
 config/      Caddyfile (single source of path routing on dev + prod),
-             caddy-{tls,auth,http-redirect}.{dev,prod} (env-toggled snippets),
+             caddy-{tls,auth,http-redirect,servers}.{dev,prod} (env-toggled snippets),
              nginx.conf (thin shim → Caddy for `make serve-nginx`),
              nginx-intern-anthive.conf (drop-in prod vhost),
              Caddyfile-prod-snippet (annotated env-var reference),

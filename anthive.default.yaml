@@ -69,8 +69,11 @@ library_git_committer: anthive <noreply@anthive.local>
 # (needs a remote and credentials, e.g. a deploy key). Off: commits stay local
 # until someone pushes.
 library_git_push: false
-# Push an uploaded PDF to S3 right away (when s3 is configured).
-library_s3_autopush: true
+# Push an uploaded PDF to S3 right away (when s3 is configured). Off by
+# default since 2.41.0: the serving process then needs no S3 write key, and
+# the PDF goes with the next `ant sync library` (container sites:
+# `ant-stack publish-library` from a timer).
+library_s3_autopush: false
 # This site publishes the literature index to S3 on `ant sync`. Exactly one
 # site (the main one) should; the others only pull it as a bootstrap and add
 # their local papers.

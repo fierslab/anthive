@@ -15,7 +15,7 @@ prod:   browser ─https─▶ nginx :443 (TLS [+ auth]) ─http─▶ Caddy 127
 | Path | Tracked? | What |
 | --- | --- | --- |
 | `Caddyfile` | ✅ | The shared, env-driven router. All path routing lives here. |
-| `caddy-{tls,auth,http-redirect}.{dev,prod}` | ✅ | Snippets imported by the Caddyfile; pick dev vs prod behaviour. |
+| `caddy-{tls,auth,http-redirect,servers}.{dev,prod}` | ✅ | Snippets imported by the Caddyfile; pick dev vs prod behaviour. |
 | `caddy-auth.example` | ✅ | Template for an optional Caddy basic-auth file. |
 | `authelia/` | partial | `configuration.example.yml` is tracked; the real `configuration.yml`, `secrets/`, `users_database.yml` are gitignored. |
 | `examples/` | ✅ | Templates for the per-instance files you must create (nginx vhost, systemd unit, anthive.yaml). Placeholders only. |
@@ -36,6 +36,7 @@ vars the `Caddyfile` reads. Defaults (no `--prod`) reproduce dev behaviour.
 | `ANTHIVE_TLS_SNIPPET` | `caddy-tls.dev` (`tls internal`) | `caddy-tls.prod` (empty — nginx does TLS) |
 | `ANTHIVE_AUTH_SNIPPET` | `caddy-auth.dev` | `caddy-auth.prod` (empty — nginx auths, Caddy trusts headers) |
 | `ANTHIVE_HTTP_REDIRECT_SNIPPET` | `caddy-http-redirect.dev` | `caddy-http-redirect.prod` (empty) |
+| `ANTHIVE_SERVERS_SNIPPET` | `caddy-servers.dev` (empty) | `caddy-servers.prod` (trust nginx on loopback for `X-Forwarded-*`) |
 | `ANTHIVE_CADDY_BIND` | `0.0.0.0 ::` | `127.0.0.1` |
 | `ANTHIVE_API_PORT` / `ANTHIVE_BROWSE_PORT` | from `anthive.yaml` | from `anthive.yaml` |
 

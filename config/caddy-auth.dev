@@ -11,12 +11,23 @@
 # declared in Caddyfile (so /.well-known/*, /register, /streamlit* are
 # never gated regardless of mode).
 
+# The scheme the browser used. Behind a TLS-terminating proxy (tls off)
+# Caddy itself only sees http, so take X-Forwarded-Proto when it says http
+# or https and fall back to Caddy's own scheme. Authelia refuses an http
+# X-Original-URL ("insecure scheme"). A client talking to Caddy directly
+# can only make its own request fail with this header, not pass the gate.
+map {http.request.header.X-Forwarded-Proto} {anthive_original_scheme} {
+	https https
+	http http
+	default {http.request.scheme}
+}
+
 @api path /api/* /artifacts/*
 forward_auth @api {$ANTHIVE_AUTHELIA_HOST:localhost}:{$ANTHIVE_AUTHELIA_PORT:9091} {
 	uri /authelia/api/authz/auth-request-api
 	# AuthRequest impl needs the original URL header (Caddy doesn't
-	# send X-Original-URL by default — nginx's auth_request does).
-	header_up X-Original-URL "{http.request.scheme}://{http.request.host}{http.request.uri}"
+	# send X-Original-URL by default; nginx's auth_request does).
+	header_up X-Original-URL "{anthive_original_scheme}://{http.request.host}{http.request.uri}"
 	header_up X-Original-Method "{http.request.method}"
 	copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
 }
