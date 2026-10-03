@@ -13,6 +13,12 @@
   #lib-table td.lib-title a { font-size: 13px; }
   #lib-table .lib-cite { font-size: 11.5px; color: var(--text-muted); }
   #lib-table tr[hidden] { display: none !important; }
+  /* Phones: the filters form an even two-column grid, the count its own line. */
+  @media (max-width: 640px) {
+    .lib-top input[type=search] { flex-basis: 100%; min-width: 0; }
+    .lib-top select { flex: 1 1 calc(50% - 4px); min-width: 0; max-width: none; padding: 6px; font-size: 13px; }
+    .lib-count { flex-basis: 100%; }
+  }
 </style>
 
 {% from "_macros.html" import breadcrumb %}

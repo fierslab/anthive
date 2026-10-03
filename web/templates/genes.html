@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}{{ gene }} — gene atlas — anthive{% endblock %}
+{% block title %}{% if gene %}{{ gene }} — {% endif %}gene atlas — anthive{% endblock %}
 
 {% block content %}
 <style>
@@ -114,12 +114,43 @@
 {% from "_macros.html" import breadcrumb, mff_styles, mff_scripts %}
 {{ mff_styles() }}
 {{ mff_scripts() }}
+<style>
+  .gv-lookup { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 4px 0 10px; }
+  .gv-lookup input[type=search] { flex: 0 1 260px; min-width: 0; padding: 5px 9px; font-size: 13px;
+    font-family: var(--font); border: 1px solid var(--border); border-radius: 5px; }
+  .gv-lookup button { padding: 5px 12px; font-size: 13px; font-family: var(--font); border: 1px solid var(--link);
+    border-radius: 5px; background: var(--link); color: #fff; cursor: pointer; }
+  .gv-landing { max-width: 680px; }
+  .gv-landing p { margin: 6px 0 10px; color: #374151; }
+  .gv-landing .gv-lookup input[type=search] { flex: 1 1 260px; font-size: 15px; padding: 7px 10px; }
+  .gv-landing .gv-lookup button { font-size: 14px; padding: 7px 16px; }
+  .gv-examples { font-size: 13px; color: var(--text-muted); }
+  .gv-examples a { margin-right: 8px; white-space: nowrap; }
+</style>
+{% if not gene %}
 {{ breadcrumb([("gene atlas", None)]) }}
+<div class="gv-landing">
+<h1 class="page-title">Gene atlas</h1>
+<p>Look up a gene to see where it is expressed across every dataset in the catalogue. Several genes separated by commas give a gene &times; dataset heatmap.</p>
+<form class="gv-lookup" id="gv-lookup" action="/genes" method="get" role="search">
+  <input type="search" name="q" id="gv-lookup-q" placeholder="e.g. TREM2 or APOE,TREM2" aria-label="Gene symbol" autocomplete="off" spellcheck="false" autocapitalize="characters"{% if not gene %} autofocus{% endif %}>
+  <button type="submit">look up</button>
+</form>
+<div class="gv-examples">examples:
+  <a href="/genes/TREM2">TREM2</a><a href="/genes/APOE">APOE</a><a href="/genes/P2RY12">P2RY12</a><a href="/genes/SPP1">SPP1</a><a href="/genes/APOE,TREM2,CX3CR1">APOE,TREM2,CX3CR1</a>
+</div>
+</div>
+{% else %}
+{{ breadcrumb([("gene atlas", "/genes"), (gene, None)]) }}
 <h1 class="page-title">
   <span id="gv-fav-star" style="display:none" title="you have favourited this gene (see /settings)">&#9733;</span>
   {{ gene }}
   <span class="muted" style="font-size:13px;font-weight:normal">— expression across the catalogue</span>
 </h1>
+<form class="gv-lookup" id="gv-lookup" action="/genes" method="get" role="search">
+  <input type="search" name="q" id="gv-lookup-q" placeholder="e.g. TREM2 or APOE,TREM2" aria-label="Gene symbol" autocomplete="off" spellcheck="false" autocapitalize="characters"{% if not gene %} autofocus{% endif %}>
+  <button type="submit">look up</button>
+</form>
 <script>
 // Show a ★ next to the gene name when it is on the user's favourite list.
 // Runs on load (single-gene view only; comma-list views skip since GENE is CSV).
@@ -981,4 +1012,5 @@
   load();
 }());
 </script>
+{% endif %}
 {% endblock %}

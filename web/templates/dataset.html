@@ -103,8 +103,9 @@
   .ds-actions { display: flex; align-items: stretch; gap: 6px; flex-shrink: 0; position: relative; }
   .ds-actions > * { align-self: stretch; display: inline-flex; align-items: center; }
   .ds-actions-group { display: flex; align-items: stretch; gap: 6px; }
-  .ds-actions-toggle { display: none; font-size: 16px; padding: 6px 11px; }
-  /* Below 760px the buttons collapse behind a ☰ hamburger — the row
+  .ds-actions-toggle { display: none; }
+  /* Below 760px the buttons collapse behind an "actions" button (not a
+     hamburger, so it is not mistaken for the site menu); the row
      stops fighting the breadcrumb for horizontal space. */
   @media (max-width: 760px) {
     .ds-actions-toggle { display: inline-flex; }
@@ -299,7 +300,7 @@
   </div>
   <div class="ds-actions">
     {% if pub_icon and pub_icon.glyph %}<span class="ds-pub-icon" style="color:{{ pub_icon.color }}" title="{{ pub_icon.tooltip }}">{{ pub_icon.glyph|safe }}</span>{% endif %}
-    <button type="button" class="btn-grey ds-actions-toggle" id="ds-actions-toggle" title="actions" aria-haspopup="true" aria-expanded="false">☰</button>
+    <button type="button" class="btn-grey ds-actions-toggle" id="ds-actions-toggle" title="actions" aria-haspopup="true" aria-expanded="false">actions <span class="caret">▾</span></button>
     <div class="ds-actions-group">
     {% if has_duckdb %}<a class="btn-grey btn-icon" id="ds-open-notebook" href="/jupyter/" target="_blank" rel="noopener" title="open this dataset in a JupyterLite notebook (pre-fills the AnthiveClient for {{ db_id }})">📓 notebook</a>{% endif %}
     {% if has_duckdb %}

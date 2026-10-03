@@ -2107,12 +2107,84 @@ def test_gene_atlas_multigene_route(client):
     assert "renderHeatmap" in resp.text
 
 
-def test_gene_search_box_in_topbar(client):
-    # topbar gene search → /genes/{gene} (present on every page incl. landing)
+def test_topbar_has_no_gene_search_box(client):
+    # The top-bar gene search was removed (it ate a whole row on phones);
+    # a plain "genes" nav link to /genes replaces it.
     resp = client.get("/")
     assert resp.status_code == 200
-    assert 'class="gene-search"' in resp.text
-    assert "'/genes/'" in resp.text
+    assert 'class="gene-search"' not in resp.text
+    assert "gene atlas\u2026" not in resp.text
+    assert "'/genes/'+encodeURIComponent" not in resp.text
+
+
+def test_topbar_genes_link(client):
+    text = client.get("/").text
+    idx = text.find('id="nav-genes"')
+    assert idx >= 0, "genes link missing from the top bar"
+    tag = text[text.rfind("<a ", 0, idx):text.find("</a>", idx)]
+    assert 'href="/genes"' in tag
+    assert tag.endswith(">genes")
+    # inside the main nav, which sits in the collapsible menu container
+    menu = text.split('id="topbar-menu"')[1].split("</nav>")[0]
+    assert 'id="nav-genes"' in menu
+
+
+def test_gene_atlas_index_has_lookup_form(client):
+    resp = client.get("/genes")
+    assert resp.status_code == 200
+    assert 'id="gv-lookup"' in resp.text
+    assert 'action="/genes"' in resp.text
+    assert 'name="q"' in resp.text
+    # landing page must not run the per-gene loader
+    assert "/api/gene_stats_all" not in resp.text
+
+
+def test_gene_atlas_index_query_redirects(client):
+    resp = client.get("/genes?q=%20APOE%2C%20TREM2%20", follow_redirects=False)
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/genes/APOE,TREM2"
+    # empty query: stay on the lookup page
+    assert client.get("/genes?q=%20").status_code == 200
+
+
+def test_gene_atlas_page_has_lookup_form_and_breadcrumb(client):
+    text = client.get("/genes/APOE").text
+    assert 'id="gv-lookup"' in text
+    assert '<a href="/genes">gene atlas</a>' in text
+
+
+def test_topbar_menu_button(client):
+    # Narrow screens collapse the nav into a panel behind an accessible button.
+    text = client.get("/", headers={"Remote-User": "mf", "Remote-Name": "Mark Fiers"}).text
+    idx = text.find('id="nav-toggle"')
+    assert idx >= 0
+    tag = text[text.rfind("<button", 0, idx):text.find(">", idx) + 1]
+    assert 'type="button"' in tag
+    assert 'aria-controls="topbar-menu"' in tag
+    assert 'aria-expanded="false"' in tag
+    assert 'aria-label="Open menu"' in tag
+    # the panel holds the nav links, Help, API, version and the user menu
+    menu = text.split('id="topbar-menu"')[1].split('<script>')[0]
+    for needle in ('href="/"', 'href="/facets"', 'href="/help"', 'id="topbar-api-link"',
+                   'id="stack-version"', 'id="user-menu-toggle"', 'id="authelia-signout"'):
+        assert needle in menu, needle
+    # CSS: hidden on desktop, shown under the 640px breakpoint; JS toggles state
+    assert "@media (max-width: 640px)" in text
+    assert "#topbar .topbar-menu { display: contents; }" in text
+    assert "menu-open" in text
+    assert "btn.setAttribute('aria-expanded'" in text
+
+
+def test_exp_badge_is_small_inline(client):
+    text = client.get("/").text
+    nav_entry = text.split('<a href="/facets"')[1].split("</a>")[0]
+    assert 'class="nav-exp"' in nav_entry
+    assert '<span class="exp-badge">exp</span>' in nav_entry
+    css = text.split(".exp-badge {")[1].split("}")[0]
+    assert "font-size: .6em" in css
+    assert "vertical-align: super" in css
+    assert "display: inline-block" in css
+    assert "white-space: nowrap" in text.split("a.nav-exp {")[1].split("}")[0]
 
 
 def test_favicon_routes_served(client):
@@ -2619,7 +2691,7 @@ def test_topbar_preferences_moved_into_dropdown(client):
     # Grab the first <nav>…</nav> block (the main nav) and assert it does NOT
     # contain a /settings link any more.
     import re as _re_local
-    first_nav = _re_local.search(r"<nav>(.*?)</nav>", resp.text, _re_local.S)
+    first_nav = _re_local.search(r"<nav aria-label=\"Main\">(.*?)</nav>", resp.text, _re_local.S)
     assert first_nav is not None
     assert "/settings" not in first_nav.group(1)
 

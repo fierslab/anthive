@@ -61,10 +61,59 @@
            the dark background — invert + brightness pushes it to white/cream so
            it clears WCAG AA contrast against #335C67. */
         #topbar .brand img { height: 30px; width: auto; display: block; filter: brightness(0) invert(1); }
-        #topbar nav { display: flex; gap: 16px; }
-        /* Topbar wraps instead of overflowing on narrow screens. */
-        @media (max-width: 560px) {
-            #topbar { min-height: 46px; flex-wrap: wrap; padding: 8px 14px; gap: 8px 14px; }
+        #topbar nav { display: flex; align-items: center; gap: 16px; }
+        /* Desktop: the menu wrapper is layout-transparent, so the nav links,
+           spacer and utility cluster sit directly in the topbar flex row. */
+        #topbar .topbar-menu { display: contents; }
+        #topbar .topbar-spacer { flex: 1; }
+        /* Hamburger: only shown on narrow screens (see the 640px block below). */
+        #topbar .nav-toggle {
+            display: none; margin-left: auto; align-items: center; justify-content: center;
+            width: 40px; height: 36px; padding: 0; border: 1px solid rgba(255,255,255,.28);
+            border-radius: 6px; background: transparent; color: var(--bar-link); cursor: pointer;
+        }
+        #topbar .nav-toggle:hover { border-color: rgba(255,255,255,.55); color: var(--bar-link-hover); }
+        #topbar .nav-toggle:focus-visible { outline: 2px solid var(--accent-cream); outline-offset: 2px; }
+        #topbar .nav-toggle svg { width: 20px; height: 20px; display: block; }
+        #topbar .nav-toggle .icon-close { display: none; }
+        #topbar.menu-open .nav-toggle .icon-open { display: none; }
+        #topbar.menu-open .nav-toggle .icon-close { display: block; }
+        /* Narrow screens: one compact row (logo + menu button); everything
+           else lives in a panel that drops down under the bar. */
+        @media (max-width: 640px) {
+            #topbar { position: relative; z-index: 400; padding: 6px 14px; min-height: 48px; gap: 10px; }
+            #topbar .brand img { height: 28px; }
+            #topbar .nav-toggle { display: inline-flex; }
+            #topbar .topbar-menu {
+                display: none; position: absolute; top: 100%; left: 0; right: 0;
+                flex-direction: column; padding: 4px 14px 12px;
+                background: var(--bar-bg); border-bottom: 1px solid #274a52;
+                box-shadow: 0 8px 18px rgba(0,0,0,.18);
+                max-height: calc(100vh - 48px); overflow-y: auto;
+            }
+            #topbar.menu-open .topbar-menu { display: flex; }
+            #topbar .topbar-spacer { display: none; }
+            #topbar .topbar-menu nav { flex-direction: column; align-items: stretch; gap: 0; }
+            #topbar .topbar-menu nav > a { font-size: 15px; padding: 10px 2px; border-bottom: 1px solid rgba(255,255,255,.12); }
+            /* Utility row: version + Help + API on one line, then the account items. */
+            #topbar .topbar-menu nav.topbar-util { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 0 18px; padding-top: 4px; }
+            #topbar .topbar-menu nav.topbar-util > a { border-bottom: 0; }
+            #topbar .topbar-menu nav.topbar-util > a.version-pill { padding: 0 7px; font-size: 11px; }
+            #topbar .topbar-menu nav.topbar-util > a.version-pill .v-prefix { display: inline; }
+            /* The account dropdown is flattened into the panel. */
+            #topbar .topbar-auth { flex: 1 0 100%; margin-top: 6px; border-top: 1px solid rgba(255,255,255,.12); }
+            #topbar .topbar-auth .dropdown-toggle { display: none; }
+            #topbar .topbar-auth .dropdown-menu {
+                display: block; position: static; min-width: 0; padding: 4px 0 0;
+                background: transparent; border: 0; box-shadow: none;
+            }
+            #topbar .topbar-auth .dropdown-menu::before { display: none; }
+            #topbar .topbar-auth .dropdown-menu a { color: var(--bar-link) !important; font-size: 14px; padding: 8px 2px; white-space: normal; }
+            #topbar .topbar-auth .dropdown-menu a:hover { background: transparent; color: var(--bar-link-hover) !important; }
+            #topbar .topbar-auth .dropdown-menu .dropdown-header { color: rgba(255,255,255,.65); border-bottom: 0; padding: 6px 2px 2px; }
+            #topbar .topbar-auth .dropdown-menu .dropdown-header strong { color: #ffffff; }
+            /* API is already in the utility row. */
+            #topbar .topbar-auth #api-menu-link { display: none; }
         }
         #topbar nav > a, #topbar nav .dropdown-toggle { color: var(--bar-link); font-size: 13px; }
         #topbar nav > a:hover, #topbar nav .dropdown-toggle:hover { color: var(--bar-link-hover); text-decoration: none; }
@@ -86,21 +135,15 @@
         .paper-card .pc-links a.pc-btn { border: 1px solid var(--border); border-radius: 4px; padding: 1px 8px; }
         .paper-card .pc-links .muted { font-size: 11.5px; }
         /* Small marker for views that are still experimental (nav + page notice). */
-        .exp-badge { display: inline-block; margin-left: 4px; padding: 0 4px; border-radius: 3px; font-size: 9px;
-                     line-height: 13px; vertical-align: 1px; text-transform: uppercase; letter-spacing: .3px;
-                     background: #FFF3B0; color: #6b5a1c; }
+        .exp-badge { display: inline-block; margin-left: 2px; padding: 1px 3px; border-radius: 3px; font-size: .6em;
+                     line-height: 1; vertical-align: super; text-transform: uppercase; letter-spacing: .3px;
+                     font-weight: 500; background: #FFF3B0; color: #6b5a1c; }
+        #topbar nav > a.nav-exp { white-space: nowrap; }
         .exp-notice { max-width: 780px; margin: 4px 0 14px; padding: 8px 12px; font-size: 12px; line-height: 1.45;
                       background: #fffbea; color: #5b4a12; border: 1px solid #f0e3a6; border-left: 3px solid #E09F3E;
                       border-radius: 4px; }
         .exp-notice strong { color: #4d3d0c; }
         .exp-notice a { color: #7a4f0a; text-decoration: underline; }
-        #topbar .gene-search { margin: 0; }
-        #topbar .gene-search input {
-            font-size: 12px; padding: 3px 10px; width: 130px; border: 1px solid #4b7d88;
-            border-radius: 3px; background: #ffffff; color: var(--text); outline: none;
-            font-family: var(--font);
-        }
-        #topbar .gene-search input:focus { border-color: var(--accent-cream); width: 160px; }
 
         .dropdown { position: relative; }
         .dropdown-toggle { cursor: pointer; }
@@ -567,21 +610,23 @@
 <body>
     <div id="topbar">
         <a href="/about" class="brand">{% if topbar_logo %}<img src="{{ topbar_logo }}" alt="">{% endif %}anthive</a>
-        <nav>
+        <button type="button" class="nav-toggle" id="nav-toggle" aria-controls="topbar-menu" aria-expanded="false" aria-label="Open menu">
+            <svg class="icon-open" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+            <svg class="icon-close" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        </button>
+        <div class="topbar-menu" id="topbar-menu">
+        <nav aria-label="Main">
             <a href="/">datasets</a>
             {% if request.app.state.genesets_available %}
             <a href="/genesets">genesets</a>
             {% endif %}
-            <a href="/facets" title="Facets: experimental">facets<span class="exp-badge">exp</span></a>
+            <a href="/genes" id="nav-genes" title="Gene atlas: look up a gene across the whole catalogue">genes</a>
+            <a href="/facets" class="nav-exp" title="Facets: experimental">facets<span class="exp-badge">exp</span></a>
             {% if library_available(request) %}
             <a href="/library" id="nav-library" title="The papers behind the datasets">library</a>
             {% endif %}
         </nav>
-        <form class="gene-search" onsubmit="event.preventDefault(); var g=this.q.value.trim(); if(g) window.location='/genes/'+encodeURIComponent(g);"
-              title="Jump to a gene's cross-catalogue expression atlas">
-            <input name="q" type="text" placeholder="🔍 gene atlas…" autocomplete="off" spellcheck="false">
-        </form>
-        <span style="flex:1"></span>
+        <span class="topbar-spacer"></span>
         {# Right-hand utility cluster: Help + API + user dropdown.
            - Help: on-site cheat-sheet at /help.
            - API: the /api-guide page (login, curl, pyvark, vark), which links
@@ -590,7 +635,7 @@
              the "signed in as" header + Logout only appear behind Authelia. #}
         {% set _auth_user = request.headers.get('remote-name') or request.headers.get('remote-user') %}
         {% set _groups = (request.headers.get('remote-groups') or '').split(',') | map('trim') | list %}
-        <nav class="topbar-util">
+        <nav class="topbar-util" aria-label="Help and account">
             {% set _ver = stack_version(request) %}
             <a href="/api/changelog" target="_blank" rel="noopener" class="version-pill{% if not _ver.ok %} version-unconfirmed{% endif %}" id="stack-version" title="{{ _ver.title }}"><span class="v-prefix">v</span>{{ _ver.shown }}</a>
             <a href="/help" title="What's here & how to use it">Help</a>
@@ -619,6 +664,7 @@
                 </span>
             </span>
         </nav>
+        </div>
     </div>
     <script>
     // Sign out via Authelia's logout endpoint (clears the SSO session), then
@@ -635,6 +681,39 @@
                 link.style.display = '';
             })
             .catch(function () {});
+    })();
+    (function () {
+        // Narrow-screen menu button: opens the panel with the nav links, Help,
+        // API, version and account items. Outside click, Escape, following a
+        // link or widening the window past the breakpoint closes it.
+        var bar = document.getElementById('topbar');
+        var btn = document.getElementById('nav-toggle');
+        var panel = document.getElementById('topbar-menu');
+        if (!bar || !btn || !panel) return;
+        function setOpen(on) {
+            bar.classList.toggle('menu-open', on);
+            btn.setAttribute('aria-expanded', on ? 'true' : 'false');
+            btn.setAttribute('aria-label', on ? 'Close menu' : 'Open menu');
+        }
+        btn.addEventListener('click', function (e) {
+            e.stopPropagation();
+            setOpen(!bar.classList.contains('menu-open'));
+        });
+        document.addEventListener('click', function (e) {
+            if (bar.classList.contains('menu-open') && !bar.contains(e.target)) setOpen(false);
+        });
+        panel.addEventListener('click', function (e) {
+            if (e.target.closest && e.target.closest('a')) setOpen(false);
+        });
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape' && bar.classList.contains('menu-open')) { setOpen(false); btn.focus(); }
+        });
+        if (window.matchMedia) {
+            var wide = window.matchMedia('(min-width: 641px)');
+            var onWide = function () { if (wide.matches) setOpen(false); };
+            if (wide.addEventListener) wide.addEventListener('change', onWide);
+            else if (wide.addListener) wide.addListener(onWide);
+        }
     })();
     (function () {
         // Click/tap and keyboard for the user menu (hover alone is not

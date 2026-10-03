@@ -3292,6 +3292,26 @@ async def admin_mcp_links_view(request: Request):
     return RedirectResponse("/account/mcp#all", status_code=307)
 
 
+@router.get("/genes", response_class=HTMLResponse)
+async def gene_index_view(request: Request, q: Optional[str] = None):
+    """Gene atlas entry page: a search form that leads to /genes/{gene}.
+
+    The top-bar "genes" link lands here. A submitted ``?q=`` (one gene or a
+    comma-separated list) redirects to the atlas, so the form works without
+    JavaScript.
+    """
+    query = ','.join(part.strip() for part in (q or '').split(',') if part.strip())
+    if query:
+        return RedirectResponse(url='/genes/' + url_quote(query, safe=','),
+                                status_code=302)
+    return templates.TemplateResponse(request, "genes.html", {
+        "gene": "",
+        "pill_map": {},
+        "filter_opts": {'organism': [], 'cell_type': [], 'tissue': []},
+        "dataset_annotations": {},
+    })
+
+
 @router.get("/genes/{gene}", response_class=HTMLResponse)
 async def gene_view(request: Request, gene: str):
     """Single-gene cross-catalogue atlas — where is {gene} expressed?

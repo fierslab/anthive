@@ -20,7 +20,7 @@ web/
     plot.html       # in-app plot UI (form + preview + downloads)
     about.html      # /about — logo hero, what-it-is, live catalogue counts
     de_browser.html # term→contrast→gene DE explorer
-    genes.html      # /genes/{g[,g,…]} single-gene atlas OR multi-gene heatmap
+    genes.html      # /genes lookup form, /genes/{g[,g,…]} single-gene atlas OR multi-gene heatmap
     privacy.html    # /privacy — chat data-handling note (draft copy)
     # gene-set & module browser:
     genesets.html          # group selector (gene sets / starCAT / find-by-gene)
@@ -75,6 +75,7 @@ line-art logo (grayscale+alpha PNG), so it's shown on a dark hero panel.
 | `/genesets/{study}/{experiment}` | one experiment's geneset list | `geneset_experiment.html` |
 | `/genesets/{study}/{experiment}/{name}` | one geneset (+ "where it varies most") | `geneset.html` |
 | `/about` | logo hero + what-it-is + live dataset/collection counts | `about.html` |
+| `/genes` | gene atlas entry: lookup form (`?q=` redirects to `/genes/{q}`); target of the top-bar `genes` link (`#nav-genes`), which replaced the old top-bar search box | `genes.html` (empty `gene`) |
 | `/genes/{gene[,gene…]}` | single-gene atlas OR multi-gene heatmap (comma list) | `genes.html` |
 | `/privacy` | chat data-handling note (draft) | `privacy.html` |
 | `/admin/edit/{group}` · `/admin/edit/{group}/{file}` | index.md · dataset .md/.mus editors (admin) | `edit_*.html` |
@@ -372,6 +373,15 @@ with `nh3`/`bleach` + a CSP if editing ever widens.)
   Authelia login mark), base64-inlined once and exposed as the Jinja **global**
   `topbar_logo` (`templates.env.globals`), so `base.html` shows it on every page
   without per-route context.
+- **Topbar on narrow screens (<= 640px)** is one row: logo plus a menu button
+  (`#nav-toggle`, `aria-controls="topbar-menu"`, `aria-expanded`). The nav
+  links, version, Help, API and the flattened user menu live in
+  `#topbar-menu`, which is `display: contents` on desktop (so the desktop row
+  is unchanged) and a drop-down panel on phones. Escape, an outside click, a
+  link click or widening past 640px closes it. There is no top-bar gene search
+  any more; the `genes` link goes to `/genes`, which has its own lookup form.
+  The dataset page's own collapsed action button reads "actions", not a
+  second hamburger.
 - **Data-assistant chat widget** (`#chat-launcher` + `#chat-panel`, bottom-right)
   is in `base.html` so the conversation follows the user across pages. It is
   **gated entirely client-side on `GET /api/chat/status`**: the launcher is
