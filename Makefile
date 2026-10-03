@@ -72,6 +72,7 @@ TEST_DEPS = --with pytest --with duckdb --with pyyaml --with numpy \
             --with pandas --with pyarrow --with h5py --with scipy \
             --with fastapi --with httpx --with jinja2 \
             --with markdown --with requests --with anndata --with bcrypt \
+            --with uvicorn --with matplotlib --with seaborn \
             --with 'bibtexparser>=1.4,<2' --with python-multipart
 
 test:

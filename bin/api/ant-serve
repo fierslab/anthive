@@ -81,7 +81,7 @@ script_dir = Path(__file__).parent.resolve()
 lib_dir = script_dir.parent.parent / 'lib'
 sys.path.insert(0, str(lib_dir))
 
-from anthive_db import AnthiveDB, safe_ident
+from anthive_db import AnthiveDB, install_portable_layer_views, safe_ident
 from canonical_columns import BACKCOMPAT_LEGACY_NAMES  # type: ignore
 from config import get_config
 from config import (get_auth_settings, get_catalog_scan_mode, get_data_folder,
@@ -2054,7 +2054,8 @@ def _pooled_db(db_id: str):
         # Pass db_url as db_path so AnthiveDB can locate the sibling
         # scores.parquet sidecar (score-virtual obs columns).
         db_path_for_sidecar = db_url if not db_url.startswith('s3://') else None
-        yield AnthiveDB(db_path=db_path_for_sidecar, conn=conn, owns_conn=False)
+        yield AnthiveDB(db_path=db_path_for_sidecar, conn=conn, owns_conn=False,
+                        db_url=db_url)
     finally:
         connection_pool.return_connection(db_url, conn)
 
@@ -4539,6 +4540,11 @@ def execute_sql_query(db_id: str, request: QueryRequest):
         analytics.validate_sql(request.query)
         effective_limit = min(request.limit or 100_000, 100_000)
         with _pooled_db(db_id) as db:
+            # Hand-written SQL may say FROM layer__X: shadow the persisted
+            # views (baked host path) with ones over this host's sidecars.
+            # Only when named; installing costs a few ms per request.
+            if 'layer__' in request.query.lower():
+                install_portable_layer_views(db._conn, db.db_url)
             df = db.execute_sql(request.query, limit=effective_limit)
 
         # Convert to JSON-safe format
@@ -4742,10 +4748,15 @@ def _resolve_field_kind(
 
 
 def _get_top_genes_by_mean(db, n_genes: int, layer: str) -> List[str]:
-    """Return top n_genes names ranked by mean expression.
+    """Return top n_genes names ranked by mean expression over all cells.
 
-    Both branches use bound parameters (`?`) for n_genes and `safe_ident()`
-    for the layer table — no f-string SQL interpolation of user input.
+    Both branches bind n_genes as a parameter. The fallback validates the
+    layer against the dataset and reads the parquet sidecar resolved from
+    the duckdb's own location (``_layer_source_for_gene_filter``), never the
+    persisted ``layer__`` view, whose baked absolute path breaks on any host
+    other than the one that converted the dataset. Ranking is by
+    SUM(value), i.e. mean over all cells, the same quantity as
+    ``__gene_bins.mean_expr``.
     """
     try:
         db.require_gene_bins()
@@ -4767,15 +4778,27 @@ def _get_top_genes_by_mean(db, n_genes: int, layer: str) -> List[str]:
                 status_code=400,
                 detail=f"Layer '{layer}' not in this dataset (available: {available})",
             )
-        layer_table = safe_ident(f"layer__{layer}")
-        rows = db._conn.execute(
-            f'SELECT gene_name, AVG(value) AS avg_expr '
-            f'FROM {layer_table} '
-            f'GROUP BY gene_name '
-            f'ORDER BY avg_expr DESC '
-            f'LIMIT ?',
-            [n_genes],
-        ).fetchall()
+        layer_source = db._layer_source_for_gene_filter(layer)
+        try:
+            rows = db._conn.execute(
+                f'SELECT g.gene_name FROM ('
+                f'  SELECT gene_id, SUM(value) AS sum_expr '
+                f'  FROM {layer_source} GROUP BY gene_id'
+                f') s JOIN __genes g ON g.gene_id = s.gene_id '
+                f'ORDER BY s.sum_expr DESC, g.gene_name '
+                f'LIMIT ?',
+                [n_genes],
+            ).fetchall()
+        except duckdb.CatalogException:
+            # Legacy dataset whose layer exists only as a (cell_name,
+            # gene_name, value) view with no __layer__ table or sidecar.
+            rows = db._conn.execute(
+                f'SELECT gene_name FROM {db._layer_source_with_names(layer)} '
+                f'GROUP BY gene_name '
+                f'ORDER BY SUM(value) DESC, gene_name '
+                f'LIMIT ?',
+                [n_genes],
+            ).fetchall()
         return [r[0] for r in rows]
 
 
@@ -10463,6 +10486,9 @@ async def analytics_schema(db_id: str):
     def _sync_schema():
         conn = connection_pool.get_connection(db_url)
         try:
+            # Shadow layer__* views with ones over this host's sidecars, so
+            # row counts and samples do not hit the baked absolute path.
+            install_portable_layer_views(conn, db_url)
             return analytics.get_schema(conn)
         finally:
             connection_pool.return_connection(db_url, conn)
@@ -10989,10 +11015,11 @@ def _pseudobulk_compute(
         layer_stats = layer_stats_all.get(layer) if isinstance(layer_stats_all, dict) else None
 
         if layer_stats is None:
-            # Use the layer view (works for both Parquet-backed and legacy dbs)
-            layer_view = safe_ident(f"layer__{layer}")
+            # Sidecar resolved next to the duckdb (or the legacy __layer__
+            # table); never the persisted view with its baked host path.
+            layer_values = db._layer_source_for_gene_filter(layer)
             row = conn.execute(
-                f"SELECT MIN(value), MAX(value), MIN(CASE WHEN value > 0 THEN value END) FROM {layer_view}"
+                f"SELECT MIN(value), MAX(value), MIN(CASE WHEN value > 0 THEN value END) FROM {layer_values}"
             ).fetchone() or (0, 0, None)
             layer_stats = {
                 'dtype': 'float',  # we have to guess; treat as float and lean on heuristics
@@ -11037,10 +11064,11 @@ def _pseudobulk_compute(
             where_parts.append(subset_frag)
         where_sql = ' AND '.join(where_parts)
 
-        # Use the by-gene parquet view for the layer aggregation —
-        # it is sorted by gene_id which makes the GROUP BY gene_name fast.
-        # For legacy in-DuckDB dbs the view backs through __layer__<layer>.
-        layer_table = safe_ident(f"layer__{layer}")
+        # (cell_id, gene_id, value) source for the aggregation: the by-gene
+        # parquet resolved next to the duckdb, or the legacy __layer__ table.
+        # The persisted layer__ view is unusable here twice over: it exposes
+        # only cell_name/gene_name, and it bakes the converting host's path.
+        layer_table = db._layer_source_for_gene_filter(layer)
 
         # 1) Group sizes (cells per group, regardless of expression)
         size_select_cols = ', '.join(
@@ -11076,9 +11104,8 @@ def _pseudobulk_compute(
         kept_ids = kept_df['group_id'].astype(str).tolist()
         ids_placeholders = ','.join(['?'] * len(kept_ids))
 
-        # 2) Aggregated counts (long form). Use the layer__<layer> view
-        #    (Parquet-backed since the 2026-07 migration; joins __cells/__genes
-        #    to expose cell_name and gene_name).
+        # 2) Aggregated counts (long form) over the layer's (cell_id,
+        #    gene_id, value) source, joined to __genes for the names.
         sql_counts = f"""
             WITH cells_in_groups AS (
                 SELECT
@@ -12933,10 +12960,17 @@ async def gene_variance_by_facet(
 
     def _sync() -> Dict[str, Any]:
         facet_ident = safe_ident(facet)
-        layer_view = safe_ident(f"layer__{layer}")
 
         with _pooled_db(db_id) as db:
             conn = db._conn
+            available_layers = db._get_layers()
+            if layer not in available_layers:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Layer '{layer}' not in this dataset (available: {available_layers})",
+                )
+            # Sidecar resolved next to the duckdb, not the persisted view.
+            layer_view = db._layer_source_with_names(layer)
 
             # The facet name is the *public* obs column (post rename / derive),
             # so we go through the `obscat` / `obsnum` views rather than the
