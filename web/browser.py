@@ -3170,19 +3170,120 @@ async def admin_feedback_view(request: Request):
     return templates.TemplateResponse(request, "admin_feedback.html", {})
 
 
+#: Stands in for the user's MCP link in the server-rendered setup prompt.
+#: The page's JS swaps in the real link (fetched from /api/me/mcp), so the
+#: secret never appears in the HTML.
+MCP_PROMPT_LINK_PLACEHOLDER = '__ANTHIVE_MCP_LINK__'
+
+_MCP_NAME_SKIP_LABELS = {'www', 'anthive'}
+
+
+def _mcp_connection_name(base_url: str) -> str:
+    """A per-site MCP connection name such as ``anthive-intern``.
+
+    Taken from the first meaningful host label of the site's public URL
+    (``www`` and ``anthive`` are skipped when more labels follow), so users
+    with several anthive servers get a distinct name per site. IP addresses
+    and empty hosts fall back to plain ``anthive``.
+    """
+    host = base_url.split('://', 1)[-1].split('/', 1)[0].split(':', 1)[0].lower()
+    if not host or re.fullmatch(r'[0-9.]+', host):
+        return 'anthive'
+    labels = [label for label in host.split('.') if label]
+    while len(labels) > 1 and labels[0] in _MCP_NAME_SKIP_LABELS:
+        labels = labels[1:]
+    label = re.sub(r'[^a-z0-9-]+', '-', labels[0] if labels else '').strip('-')
+    if not label or label == 'anthive':
+        return 'anthive'
+    return label if label.startswith('anthive-') else f'anthive-{label}'
+
+
+def _mcp_setup_prompt(link: str, connection_name: str, site_url: str,
+                      api_url: str, user: str, docs_url: str) -> str:
+    """The 'set up with one paste' prompt for an AI agent with a shell.
+
+    Plain language, numbered, with the safety rules first. ``link`` is the
+    user's personal MCP link (or MCP_PROMPT_LINK_PLACEHOLDER when the page
+    renders it, the JS fills in the real one).
+    """
+    # Only the non-secret start of the link: the token follows /mcp/u/.
+    masked = f"{site_url.rstrip('/')}/mcp/u/..."
+    user_text = user or '<your anthive user name>'
+    return f"""Please help me connect this computer's AI agent to Anthive, a single-cell data browser at {site_url}. I am a beginner, so explain each step in plain language and keep it short.
+
+Facts you need.
+- My personal Anthive MCP link is {link}
+- Use the connection name {connection_name}
+- My Anthive user name is {user_text}
+- The Anthive API address (only for the optional vark tool) is {api_url}
+
+Safety rules. Follow them for the whole session.
+- The MCP link works like my password. Put it only in your own user-level (global) MCP configuration on this computer. Never write it into a project folder, a git repository, a shared or synced file, a script or a note.
+- Never repeat the link in full in your messages or summaries. If you need to refer to it, write only its start, for example {masked}
+- Never ask me for my Anthive password, and never type, store or read it. When a step needs it, I type it myself in my own terminal.
+- Do not change anything before I say OK in step 1.
+- If a step fails, stop. Tell me which step failed and what the error message said, then ask me how to continue. Do not improvise workarounds and do not edit configuration in ways this prompt does not describe.
+- If your sandbox or permission settings block a command, ask me to approve it, or give me the command so I can run it myself.
+
+1. Explain and ask. In a few sentences, tell me what you will do in steps 2 to 5, which settings or files on this computer will change, and that step 4 is optional. Then wait for my OK.
+
+2. Add the Anthive connection. Work out which AI agent you are and add the connection at user level, so it works in all my projects (never only in the current project folder).
+   - For Claude Code, run
+     claude mcp add --transport http --scope user {connection_name} {link}
+   - For OpenAI Codex, run
+     codex mcp add {connection_name} --url {link}
+   - For Gemini CLI, run
+     gemini mcp add --scope user --transport http {connection_name} {link}
+   - For any other agent (OpenCode, Cursor, Windsurf, VS Code, Zed, Goose and others), open {docs_url}/MCP_CLIENTS.md, find the section for your agent and follow it, using your user-level (global) configuration file, the connection name {connection_name} and my link. Anthive needs no sign-in, so if your configuration has an OAuth or sign-in option, switch it off. If your agent is not listed, tell me and stop this step.
+   If a connection named {connection_name} already exists, tell me (without showing its full link) and ask whether to replace it.
+
+3. Install the Anthive skills. Skills are small instruction files that teach you how to use Anthive well. Check whether Node.js is installed by running node --version
+   - If it is, run
+     DISABLE_TELEMETRY=1 npx skills add https://gitlab.kuleuven.be/bdslab/anthive/skills.git -g --agent '*'
+     In Windows PowerShell, which does not understand the DISABLE_TELEMETRY=1 prefix, first run $env:DISABLE_TELEMETRY=1 and then the same command without that prefix.
+   - If Node.js is missing, do not install it on your own. Tell me how to install it for my operating system (https://nodejs.org) and ask whether I want to do that now. If I prefer not to, offer to copy the folders under skills/ from https://gitlab.kuleuven.be/bdslab/anthive/skills into your own user-level skills folder (for Claude Code ~/.claude/skills/, for most other agents ~/.agents/skills/).
+
+4. Optional, ask me first: install vark. vark is a command-line tool for querying Anthive from a terminal or a script. Ask whether I want it. If I say no, skip to step 5.
+   a. If vark is already installed (vark version prints a version), run vark upgrade
+      Otherwise install it with
+      curl -sSL https://gitlab.kuleuven.be/bdslab/anthive/vark/-/raw/main/install.sh | bash
+      On Windows this needs Git Bash or WSL. If neither is available, tell me and skip vark.
+   b. vark needs my password once. Do not run the login yourself. Ask me to open my own terminal window, run the command below and type my password when it asks:
+      vark server login --name {connection_name} --url {api_url} --user {user_text}
+      Wait until I tell you it is done.
+
+5. Check that it works.
+   - Show that the connection is registered, with claude mcp list, codex mcp list, gemini mcp list or your agent's equivalent. Do not copy the full link from that output into your reply.
+   - Most agents only load a new MCP connection in a new session. If that applies to you, tell me exactly how to restart you. If you can already see Anthive tools (for example search_datasets), call search_datasets once with search set to microglia and tell me how many datasets came back.
+   - If vark is installed, run vark server check {connection_name} -o json and tell me whether "ok" is true. If it is not, tell me the "problem" and "hint" it reports. An older vark without the check command needs vark upgrade first.
+
+6. Finish with a short summary: what you added and where (with the link shortened as above), what was skipped, and what I still need to do, such as restarting you. Then suggest a first question to ask once Anthive is connected, for example "Which Anthive datasets are about microglia in Alzheimer's disease?"
+"""
+
+
 @router.get("/account/mcp", response_class=HTMLResponse)
 async def account_mcp_view(request: Request):
     """The signed-in user's private MCP link: create, show, copy, rotate,
-    revoke, plus per-client setup snippets. Everything is fetched client-side
-    from ant-serve's /me/mcp (which identifies the user from the same proxy
-    headers); this route renders the shell and refuses un-proxied access."""
+    revoke, plus per-client setup snippets and the 'set up with one paste'
+    agent prompt. Everything secret is fetched client-side from ant-serve's
+    /me/mcp (which identifies the user from the same proxy headers); the
+    prompt is rendered here with a placeholder that the JS replaces with
+    the chosen link. This route refuses un-proxied access."""
     user = request.headers.get('remote-user')
     if not user:
         return templates.TemplateResponse(
             request, "account_mcp.html", {"signed_in": False}, status_code=401)
+    site_url = _site_base_url(request, _api_guide_site_settings()['public_base_url'])
+    connection_name = _mcp_connection_name(site_url)
+    setup_prompt = _mcp_setup_prompt(
+        MCP_PROMPT_LINK_PLACEHOLDER, connection_name, site_url, site_url + '/api',
+        user, _docs_base_url())
     return templates.TemplateResponse(
         request, "account_mcp.html",
-        {"signed_in": True, "user": user, "is_admin": _is_admin(request)})
+        {"signed_in": True, "user": user, "is_admin": _is_admin(request),
+         "mcp_connection_name": connection_name,
+         "mcp_setup_prompt": setup_prompt,
+         "mcp_prompt_placeholder": MCP_PROMPT_LINK_PLACEHOLDER})
 
 
 @router.get("/admin/mcp-links")
