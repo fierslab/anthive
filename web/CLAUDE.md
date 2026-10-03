@@ -546,8 +546,8 @@ uv run --with pytest --with fastapi --with httpx --with jinja2 \
 ```
 
 `make test` wraps the same idea for the full repo suite (its `TEST_DEPS` adds
-duckdb/numpy/pandas/h5py/scipy). A stray `uv.lock` may appear from `uv run` in
-the repo root — delete it (this repo deliberately has no shared lock).
+duckdb/numpy/pandas/h5py/scipy). `uv.lock` in the repo root is tracked; never
+delete it. If `uv run` changes it, restore it with `git checkout uv.lock`.
 
 **Visual verification (headless).** The pages fetch `/api/**` at runtime;
 Caddy proxies that to ant-serve on :8080 (and the whole site is behind
