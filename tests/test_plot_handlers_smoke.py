@@ -34,8 +34,8 @@ except ImportError:
 _DEFAULT_URL = os.environ.get(
     'ANTHIVE_TEST_URL', 'https://localhost:8501/api',
 )
-_USER = os.environ.get('ANTHIVE_TEST_USER', 'mf')
-_PW = os.environ.get('ANTHIVE_TEST_PASSWORD', 'ahToehR5g1xsEpg')
+_USER = os.environ.get('ANTHIVE_TEST_USER', '')
+_PW = os.environ.get('ANTHIVE_TEST_PASSWORD', '')
 
 
 def _probe() -> Optional[str]:

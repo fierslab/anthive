@@ -35,8 +35,8 @@ except ImportError:
 _DEFAULT_URL = os.environ.get(
     'ANTHIVE_TEST_URL', 'https://localhost:8501/api',
 )
-_USER = os.environ.get('ANTHIVE_TEST_USER', 'mf')
-_PW = os.environ.get('ANTHIVE_TEST_PASSWORD', 'ahToehR5g1xsEpg')
+_USER = os.environ.get('ANTHIVE_TEST_USER', '')
+_PW = os.environ.get('ANTHIVE_TEST_PASSWORD', '')
 
 
 def _probe() -> Optional[str]:
@@ -176,7 +176,7 @@ def test_notebook_auth_cell_is_generic():
 
     assert 'Authelia' not in code, code
     # No hard-coded password from the test fixture.
-    assert _PW not in code, "test password leaked into the auth cell"
+    assert not _PW or _PW not in code, "test password leaked into the auth cell"
 
     # The active line works for all deployment cases.
     assert 'c = AnthiveClient(BASE_URL)' in code, code

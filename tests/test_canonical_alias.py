@@ -174,8 +174,8 @@ class TestModuleVariabilityAlias:
 # ── 3. Live integration tests (skip when ant-serve is unreachable) ────────────
 
 _DEFAULT_URL = os.environ.get('ANTHIVE_TEST_URL', 'http://127.0.0.1:8080')
-_USER = os.environ.get('ANTHIVE_TEST_USER', 'mf')
-_PW = os.environ.get('ANTHIVE_TEST_PASSWORD', 'ahToehR5g1xsEpg')
+_USER = os.environ.get('ANTHIVE_TEST_USER', '')
+_PW = os.environ.get('ANTHIVE_TEST_PASSWORD', '')
 
 
 def _probe_server() -> Optional[str]:
