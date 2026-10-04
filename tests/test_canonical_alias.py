@@ -25,7 +25,7 @@ _lib_dir = str(_repo_root / "lib")
 if _lib_dir not in sys.path:
     sys.path.insert(0, _lib_dir)
 
-from canonical_columns import BACKCOMPAT_LEGACY_NAMES, CANONICAL_TAGS  # noqa: E402
+from canonical_columns import BACKCOMPAT_LEGACY_NAMES, CANONICAL_TAGS, LEGACY_BARE_TAGS  # noqa: E402
 
 
 # ── replicate the helper locally (imported indirectly; we test it via its
@@ -63,7 +63,7 @@ class TestAliasCanonical:
         assert result_name == 'braak'
         assert notice is None
 
-    @pytest.mark.parametrize("tag", list(CANONICAL_TAGS))
+    @pytest.mark.parametrize("tag", list(LEGACY_BARE_TAGS))
     def test_canonical_tag_rewrites_when_ant_column_exists(self, tag: str):
         ant_col = f"ant_{tag}"
         result_name, notice = _alias_canonical(tag, {ant_col})

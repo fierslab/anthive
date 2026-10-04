@@ -17,6 +17,9 @@ Public API
 * :func:`get_columns_by_tag`— reverse lookup on a parsed .md
 * :func:`facet_definition`  — published definition of an ``ant_<tag>`` facet
 * :func:`facet_definitions_status` — audit state of those definitions
+* :func:`facet_registry`    — the closed ``ant_*`` namespace (decision L1):
+  status, scope, controlled values, range per registered or deprecated tag
+* :func:`registered_facet_tags`, :func:`deprecated_facet_tags`
 """
 from __future__ import annotations
 
@@ -153,6 +156,9 @@ def facet_definition(facet: str) -> Dict[str, Any]:
         'values': _clean_text(block.get('values')),
         'missing': _clean_text(block.get('missing')),
         'hint_keywords': keywords,
+        'status': (facet_registry().get(tag) or {}).get('status'),
+        'scope': (facet_registry().get(tag) or {}).get('scope'),
+        'replaced_by': list((facet_registry().get(tag) or {}).get('replaced_by') or []),
     }
 
 
@@ -163,3 +169,77 @@ def facet_definitions_status() -> Dict[str, Optional[str]]:
         'state': _clean_text(status.get('state')) or None,
         'note': _clean_text(status.get('note')) or None,
     }
+
+
+FACET_STATUSES = ('registered', 'deprecated')
+
+
+def _as_list(value: object) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value]
+    return [str(value)]
+
+
+@lru_cache(maxsize=1)
+def facet_registry() -> Dict[str, Dict[str, Any]]:
+    """The facet registry: tag -> its registry entry, in vocab order.
+
+    Only tags whose ``facet:`` block has a ``status`` of ``registered`` or
+    ``deprecated`` are facets. Each entry has ``tag``, ``column``
+    (``ant_<tag>``), ``status``, ``kind`` (categorical / numerical),
+    ``scope`` (cross_dataset / dataset), ``replaced_by`` (list),
+    ``controlled_values`` (list, empty when free), ``ordered``, ``range``
+    (``(min, max)`` or None), ``integer`` and ``computed_from`` (tag or
+    None).
+
+    Raises:
+        ObsColTagError: when a facet block has an unknown status or kind.
+    """
+    registry: Dict[str, Dict[str, Any]] = {}
+    for tag, entry in (load_vocab().get('tags') or {}).items():
+        block = (entry or {}).get('facet') or {}
+        status = block.get('status')
+        if status is None:
+            continue
+        if status not in FACET_STATUSES:
+            raise ObsColTagError(f"facet {tag!r}: status must be one of {FACET_STATUSES}, got {status!r}")
+        kind = _clean_text(block.get('kind')) or None
+        if kind not in ('categorical', 'numerical'):
+            raise ObsColTagError(f"facet {tag!r}: kind must be categorical or numerical, got {kind!r}")
+        value_range = block.get('range')
+        if value_range is not None:
+            if not (isinstance(value_range, (list, tuple)) and len(value_range) == 2):
+                raise ObsColTagError(f"facet {tag!r}: range must be [min, max]")
+            value_range = (float(value_range[0]), float(value_range[1]))
+        registry[tag] = {
+            'tag': tag,
+            'column': FACET_PREFIX + tag,
+            'status': status,
+            'kind': kind,
+            'scope': _clean_text(block.get('scope')) or 'cross_dataset',
+            'replaced_by': _as_list(block.get('replaced_by')),
+            'controlled_values': _as_list(block.get('controlled_values')),
+            'ordered': bool(block.get('ordered', False)),
+            'range': value_range,
+            'integer': bool(block.get('integer', False)),
+            'computed_from': _clean_text(block.get('computed_from')) or None,
+        }
+    return registry
+
+
+def registered_facet_tags() -> List[str]:
+    """Tags that may be published as ``ant_<tag>``, in vocab order."""
+    return [tag for tag, entry in facet_registry().items() if entry['status'] == 'registered']
+
+
+def deprecated_facet_tags() -> List[str]:
+    """Tags still served while datasets migrate away from them."""
+    return [tag for tag, entry in facet_registry().items() if entry['status'] == 'deprecated']
+
+
+def facet_registry_entry(column_or_tag: str) -> Optional[Dict[str, Any]]:
+    """Registry entry of ``ant_x`` or ``x``; None when it is not a facet."""
+    tag = column_or_tag[len(FACET_PREFIX):] if column_or_tag.startswith(FACET_PREFIX) else column_or_tag
+    return facet_registry().get(tag)

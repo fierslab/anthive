@@ -41,8 +41,8 @@ lib_dir = script_dir.parent.parent / 'lib'
 sys.path.insert(0, str(lib_dir))
 
 from canonical_columns import (   # type: ignore
-    CANONICAL_TAGS,
     LEGACY_ALIASES,
+    LEGACY_BARE_TAGS,
     canonicalise_legacy_target,
 )
 
@@ -50,7 +50,7 @@ from canonical_columns import (   # type: ignore
 FRONTMATTER_RE = re.compile(r'\A---\n(.*?)\n---\n', re.DOTALL)
 
 #: Set of every legacy target that should be rewritten.
-LEGACY_TARGETS = set(CANONICAL_TAGS) | set(LEGACY_ALIASES.keys())
+LEGACY_TARGETS = set(LEGACY_BARE_TAGS) | set(LEGACY_ALIASES.keys())
 
 
 def _rewrite_frontmatter(fm: str) -> tuple[str, list[str]]:

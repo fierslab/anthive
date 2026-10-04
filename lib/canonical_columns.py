@@ -16,32 +16,45 @@ from __future__ import annotations
 
 from typing import Iterable, Mapping, Set
 
+try:  # lib/ on sys.path (every consumer uses the shim)
+    from obscol_tags import facet_registry as _facet_registry
+except ImportError:  # imported as a package module
+    from .obscol_tags import facet_registry as _facet_registry  # type: ignore
 
-#: The canonical tags. Kept in sync with ``obscol_tags_vocab.yaml``.
-#: Every tag here has a matching ``ant_<tag>`` view column when the
-#: dataset's ``.md`` declares the mapping in ``api.obs_rename`` or
-#: ``api.obs_derive``.
-CANONICAL_TAGS: tuple[str, ...] = (
-    'braak',
-    'braak_group',
-    'sex',
-    'age',
-    'cluster',
-    'disease',
-    'condition',
-    'pmi',
-    'donor',
-    'apoe',
-    'region',
-    'genotype',
-    'host_sex',
-)
 
-#: Numerical (ordinal / continuous) tags. Rest are categorical.
-NUMERICAL_TAGS: frozenset[str] = frozenset({'age', 'braak', 'pmi'})
+_REGISTRY = _facet_registry()
+
+#: The facet tags, registered and deprecated, in vocab order. Derived from
+#: ``lib/obscol_tags_vocab.yaml`` (the ``status`` field of each ``facet:``
+#: block), which is the single source of the closed ``ant_*`` namespace
+#: (decision L1, 2026-10-04). Every tag here has a matching ``ant_<tag>``
+#: view column when the dataset's ``.md`` declares the mapping in
+#: ``api.obs_rename``, ``api.obs_derive`` or ``api.obs_constant``.
+CANONICAL_TAGS: tuple[str, ...] = tuple(_REGISTRY)
+
+#: Tags that may be published. ``ant-md-check`` rejects any other target.
+REGISTERED_TAGS: tuple[str, ...] = tuple(
+    tag for tag, entry in _REGISTRY.items() if entry['status'] == 'registered')
+
+#: Tags still served while datasets migrate; ``ant-md-check`` warns.
+DEPRECATED_TAGS: tuple[str, ...] = tuple(
+    tag for tag, entry in _REGISTRY.items() if entry['status'] == 'deprecated')
+
+#: Numerical (ordinal / continuous) tags, from the vocab's ``kind``.
+NUMERICAL_TAGS: frozenset[str] = frozenset(
+    tag for tag, entry in _REGISTRY.items() if entry['kind'] == 'numerical')
 
 #: Categorical tags — everything else in CANONICAL_TAGS.
 CATEGORICAL_TAGS: frozenset[str] = frozenset(CANONICAL_TAGS) - NUMERICAL_TAGS
+
+#: The 13 bare tag names of the 2026-08 ``ant_*`` migration. Only these get
+#: the one-release REST alias (``?color=braak`` -> ``ant_braak``) and are
+#: rewritten by the one-shot migration scripts; facets registered later
+#: never had a bare-name form.
+LEGACY_BARE_TAGS: tuple[str, ...] = (
+    'braak', 'braak_group', 'sex', 'age', 'cluster', 'disease', 'condition',
+    'pmi', 'donor', 'apoe', 'region', 'genotype', 'host_sex',
+)
 
 
 #: One-off pre-migration aliases. When a legacy ``.md`` names the target
@@ -89,7 +102,7 @@ def canonicalise_legacy_target(target: str) -> str:
     >>> canonicalise_legacy_target('Cell_type_full')
     'Cell_type_full'
     """
-    if target in CANONICAL_TAGS:
+    if target in LEGACY_BARE_TAGS:
         return canonical_column(target)
     if target in LEGACY_ALIASES:
         return canonical_column(LEGACY_ALIASES[target])
@@ -108,13 +121,16 @@ def strip_ant_prefix(name: str) -> str:
 #: middleware rewrites ``?tag=braak`` / ``?color=braak`` → ``ant_braak``
 #: when ``braak`` is not itself a real column in the view.
 BACKCOMPAT_LEGACY_NAMES: Mapping[str, str] = {
-    **{tag: canonical_column(tag) for tag in CANONICAL_TAGS},
+    **{tag: canonical_column(tag) for tag in LEGACY_BARE_TAGS},
     **{legacy: canonical_column(canonical) for legacy, canonical in LEGACY_ALIASES.items()},
 }
 
 
 __all__ = [
     'CANONICAL_TAGS',
+    'REGISTERED_TAGS',
+    'DEPRECATED_TAGS',
+    'LEGACY_BARE_TAGS',
     'NUMERICAL_TAGS',
     'CATEGORICAL_TAGS',
     'LEGACY_ALIASES',

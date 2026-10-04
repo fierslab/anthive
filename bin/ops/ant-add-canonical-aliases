@@ -41,7 +41,7 @@ lib_dir = script_dir.parent.parent / 'lib'
 sys.path.insert(0, str(lib_dir))
 
 from canonical_columns import (   # type: ignore
-    CANONICAL_TAGS,
+    LEGACY_BARE_TAGS,
     LEGACY_ALIASES,
     canonical_column,
 )
@@ -49,7 +49,7 @@ from canonical_columns import (   # type: ignore
 
 #: bare name → canonical target name
 BARE_TO_CANONICAL = {
-    **{tag: canonical_column(tag) for tag in CANONICAL_TAGS},
+    **{tag: canonical_column(tag) for tag in LEGACY_BARE_TAGS},
     **{legacy: canonical_column(canonical) for legacy, canonical in LEGACY_ALIASES.items()},
 }
 # Strip the ant_* names — they're already canonical, don't try to re-rename.

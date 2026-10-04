@@ -55,6 +55,30 @@ version: 1
 #                  letters or fewer must match a whole name token.
 #
 # A tag without a `facet:` block has no published definition yet.
+#
+# The facet registry (decision L1, 2026-10-04: `ant_*` is a closed namespace)
+# --------------------------------------------------------------------------
+# These fields under `facet:` make this file the single source of the
+# registered facets. `lib/canonical_columns.py` (CANONICAL_TAGS and friends)
+# is derived from them and `ant-md-check` rejects an `ant_*` target in a
+# dataset's `api:` section whose tag is not registered here.
+#
+#   status             registered: may be published; deprecated: still
+#                      served while datasets migrate, `ant-md-check` warns
+#                      and names the replacement. A tag without a status is
+#                      not a facet.
+#   replaced_by        for deprecated tags, the facets that take over.
+#   scope              cross_dataset: values are comparable between
+#                      datasets; dataset: labels are local to one dataset.
+#   controlled_values  the only values a published column may carry
+#                      (NULL aside). Checked by ant-md-check on the values
+#                      a map or constant writes.
+#   ordered            the controlled values (or numbers) have an order.
+#   range              [min, max] for a numerical facet.
+#   integer            numerical values must be whole numbers.
+#   computed_from      the facet is computed centrally from another facet
+#                      when a dataset does not declare it
+#                      (`anthive_db.build_obs_view_sql`).
 
 facet_definitions_status:
   state: under_audit
@@ -70,6 +94,9 @@ tags:
       values like 'male' / 'female' / 'M' / 'F' / 'mixed'. Applies to
       per-cell obs when every cell inherits its donor's sex.
     facet:
+      status: registered
+      scope: cross_dataset
+      controlled_values: [m, f]
       summary: Biological sex of the donor or animal, coded m or f.
       definition: >
         Sex of the biological subject the cell comes from. Every cell
@@ -91,6 +118,11 @@ tags:
       staging in PD studies. If the column mixes both, split it before
       tagging.
     facet:
+      status: registered
+      scope: cross_dataset
+      ordered: true
+      range: [0, 6]
+      integer: true
       summary: Braak neurofibrillary tangle stage as a number from 0 to 6.
       definition: >
         Neuropathological Braak stage of tau tangle spread (Braak and Braak
@@ -109,6 +141,9 @@ tags:
       "this is a grouping of cells" so plot endpoints know to treat it
       as a discrete grouping axis rather than an ordinal covariate.
     facet:
+      status: deprecated
+      replaced_by: [author_cluster]
+      scope: dataset
       summary: Unsupervised cluster label (leiden, louvain, seurat_clusters).
       definition: >
         A cell grouping produced by clustering. Labels are local to one
@@ -127,6 +162,8 @@ tags:
       age-at-death; declare separately if you also carry
       age-at-onset.
     facet:
+      status: registered
+      scope: cross_dataset
       summary: Age of the donor or animal at sampling (post-mortem cohorts, age at death).
       definition: >
         Age of the biological subject when the sample was taken. For
@@ -149,6 +186,8 @@ tags:
       distinct from disease-status flags. If a column mixes disease
       state and genotype, split it before tagging.
     facet:
+      status: registered
+      scope: cross_dataset
       summary: Genetic background or model line that discriminates samples.
       definition: >
         Genotype or model of the sample, for example mouse lines (WT,
@@ -168,6 +207,9 @@ tags:
       subject, `host_sex` for the graft recipient. If the study
       is not a xenograft, this tag doesn't apply — use `sex`.
     facet:
+      status: registered
+      scope: cross_dataset
+      controlled_values: [m, f]
       summary: Sex of the host animal in a xenograft study, coded m or f.
       definition: >
         For cells grafted into a host animal, the host's sex. The donor's
@@ -188,6 +230,8 @@ tags:
       pseudoreplication. Typical column names: 'donor_id',
       'sample_id', 'individualID', 'library', 'orig.ident'.
     facet:
+      status: registered
+      scope: dataset
       summary: Identifier of the donor, animal or sample a cell comes from.
       definition: >
         The biological replicate a cell belongs to, the natural grouping
@@ -207,10 +251,16 @@ tags:
       Braak stage binned into low, medium and high. Derived from the Braak
       stage column of the dataset.
     facet:
+      status: registered
+      scope: cross_dataset
+      controlled_values: [low, medium, high]
+      ordered: true
+      computed_from: braak
       summary: Braak stage binned as low (0 to 2), medium (3 to 4) or high (5 to 6).
       definition: >
-        Coarse grouping of the Braak tangle stage, derived per dataset with
-        api.obs_derive from the Braak column.
+        Coarse grouping of the Braak tangle stage. Computed centrally from
+        ant_braak (0 to 2 low, 3 to 4 medium, 5 to 6 high) when the dataset
+        does not declare it; a declared map must follow the same rule.
       kind: categorical
       values: "low (Braak 0 to 2), medium (3 to 4), high (5 to 6)"
       missing: Empty (NULL) when the Braak stage is missing.
@@ -222,6 +272,9 @@ tags:
       NIA-AA Alzheimer's disease neuropathologic change (ADNC) level of the
       donor.
     facet:
+      status: deprecated
+      replaced_by: [adnc]
+      scope: cross_dataset
       summary: NIA-AA AD neuropathologic change level (control, low, intermediate, high).
       definition: >
         Overall Alzheimer's disease neuropathologic change of the donor
@@ -237,6 +290,9 @@ tags:
     description: >
       APOE allele pair of the donor.
     facet:
+      status: registered
+      scope: cross_dataset
+      controlled_values: [E2/E2, E2/E3, E2/E4, E3/E3, E3/E4, E4/E4]
       summary: APOE genotype of the donor, written E3/E4 (lower allele first).
       definition: >
         The donor's two APOE alleles. Author notations such as '34', 'e3e4'
@@ -251,10 +307,15 @@ tags:
     description: >
       Whether the donor carries at least one APOE e4 allele.
     facet:
+      status: registered
+      scope: cross_dataset
+      controlled_values: [E4+, E4-]
+      computed_from: apoe
       summary: APOE e4 carrier status (E4+ or E4-), derived from the APOE genotype.
       definition: >
         E4+ when the donor carries at least one APOE e4 allele, E4- when
-        it carries none. Derived per dataset from the APOE genotype column.
+        it carries none. Computed centrally from ant_apoe (any E4 allele
+        gives E4+) when the dataset does not declare it.
       kind: categorical
       values: "E4+, E4-"
       missing: Empty (NULL) when the APOE genotype is missing.
@@ -265,6 +326,8 @@ tags:
     description: >
       Disease or diagnosis of the donor.
     facet:
+      status: registered
+      scope: cross_dataset
       summary: Diagnosis of the donor as a short code (AD, control, MCI, PD, MS, ...).
       definition: >
         Clinical or neuropathological diagnosis of the donor the cell comes
@@ -282,6 +345,9 @@ tags:
     description: >
       Experimental condition or treatment of the sample.
     facet:
+      status: deprecated
+      replaced_by: [disease, genotype, treatment]
+      scope: dataset
       summary: Experimental condition or treatment of the sample.
       definition: >
         What was done to the sample in the experiment (treatment, stimulus,
@@ -296,6 +362,9 @@ tags:
     description: >
       Time between death and tissue preservation.
     facet:
+      status: registered
+      scope: cross_dataset
+      range: [0, 1000]
       summary: Post-mortem interval in hours.
       definition: >
         Time between death of the donor and freezing or fixation of the
@@ -310,6 +379,9 @@ tags:
     description: >
       Brain region or sub-region the sample was taken from.
     facet:
+      status: deprecated
+      replaced_by: [tissue]
+      scope: cross_dataset
       summary: Brain region or sub-region sampled, when it varies within a dataset.
       definition: >
         Anatomical region of the sample, used when one dataset combines
@@ -324,6 +396,8 @@ tags:
     description: >
       Tissue or anatomical structure of the sample.
     facet:
+      status: registered
+      scope: cross_dataset
       summary: Tissue or anatomical structure, often one constant per dataset.
       definition: >
         Tissue the cells were taken from, using UBERON-style labels. Often
@@ -338,6 +412,8 @@ tags:
     description: >
       Broad, harmonised cell class of the cell.
     facet:
+      status: registered
+      scope: cross_dataset
       summary: Broad cell class with Cell Ontology labels (microglial cell, astrocyte, ...).
       definition: >
         Harmonised broad cell class. Single-cell-type datasets publish it
@@ -352,6 +428,9 @@ tags:
     description: >
       The authors' own cell-type annotation, kept as published.
     facet:
+      status: deprecated
+      replaced_by: []
+      scope: dataset
       summary: The authors' cell-type labels, not harmonised.
       definition: >
         Cell-type annotation as published by the authors, kept for
@@ -366,6 +445,8 @@ tags:
     description: >
       The authors' cluster or cell-state labels, kept as published.
     facet:
+      status: registered
+      scope: dataset
       summary: The authors' cluster or cell-state labels, local to each dataset.
       definition: >
         Cluster or cell-state labels as published by the authors. Labels
@@ -374,3 +455,113 @@ tags:
       values: Dataset-specific labels.
       missing: Empty (NULL) for cells without a cluster.
       hint_keywords: [cluster, clusters, leiden, louvain, state, subcluster]
+
+  # ── Tags added 2026-10-05 with the closed namespace (decision L1) and the
+  #    disease vocabulary split (L17, L19, L21, L22) and donor identity (L5) ──
+
+  treatment:
+    label: Treatment
+    description: >
+      Perturbation applied to the sample in the experiment.
+    facet:
+      status: registered
+      scope: dataset
+      summary: Perturbation applied to the cells or animals (drug, stimulus, knockdown, vehicle).
+      definition: >
+        What the experimenters did to the sample: a compound, a stimulus
+        such as LPS or amyloid, a genetic knockdown delivered in the
+        experiment, or the matching vehicle or untreated control. Not the
+        donor's disease (disease) and not an inherited or engineered
+        background (genotype). Split out of the retired condition facet.
+      kind: categorical
+      values: >
+        Dataset-specific treatment labels, with 'untreated' or 'vehicle' for
+        the reference. No shared vocabulary yet.
+      missing: Empty (NULL) when not recorded.
+      hint_keywords: [treatment, stimulus, stim, drug, compound]
+
+  cognitive_status:
+    label: Cognitive status
+    description: >
+      Clinical cognitive diagnosis of the donor at the last assessment.
+    facet:
+      status: registered
+      scope: cross_dataset
+      controlled_values: [NCI, MCI, dementia, other_dementia]
+      ordered: false
+      summary: Clinical cognitive status of the donor (NCI, MCI, dementia, other_dementia).
+      definition: >
+        Clinical cognitive diagnosis of the donor, for example the ROSMAP
+        consensus diagnosis (cogdx). NCI is no cognitive impairment, MCI is
+        mild cognitive impairment, dementia is dementia attributed to AD,
+        other_dementia is dementia with another primary cause. This is a
+        clinical call; neuropathology is in braak and adnc, and the disease
+        facet keeps the study's own diagnosis.
+      kind: categorical
+      values: "NCI, MCI, dementia, other_dementia"
+      missing: Empty (NULL) when not assessed.
+      hint_keywords: [cogdx, cognitive, cognition, dcfdx, nci, mci]
+
+  comorbidity:
+    label: Comorbidity
+    description: >
+      Co-occurring neuropathology or disorder recorded next to the main
+      diagnosis.
+    facet:
+      status: registered
+      scope: cross_dataset
+      controlled_values: [DLBD, vascular, SCZ]
+      summary: Co-occurring condition next to the main diagnosis (DLBD, vascular, SCZ).
+      definition: >
+        A second condition of the donor recorded next to the diagnosis in
+        the disease facet, for example AD with diffuse Lewy body disease.
+        Labels such as AD_DLBD are published as disease AD plus comorbidity
+        DLBD. DLBD is diffuse Lewy body disease, vascular is cerebrovascular
+        pathology, SCZ is schizophrenia.
+      kind: categorical
+      values: "DLBD, vascular, SCZ"
+      missing: Empty (NULL) when none was recorded or not assessed.
+      hint_keywords: [comorbidity, copathology, co_pathology]
+
+  adnc:
+    label: AD neuropathologic change
+    description: >
+      NIA-AA Alzheimer's disease neuropathologic change (ADNC) level of the
+      donor. Replaces ad_stage.
+    facet:
+      status: registered
+      scope: cross_dataset
+      controlled_values: [Not, Low, Intermediate, High]
+      ordered: true
+      summary: NIA-AA AD neuropathologic change level (Not, Low, Intermediate, High).
+      definition: >
+        Overall Alzheimer's disease neuropathologic change of the donor from
+        the NIA-AA 2012 ABC score (Thal amyloid phase, Braak stage, CERAD
+        neuritic plaque score). Ordered Not < Low < Intermediate < High.
+        Studies that report another scale (NIA-Reagan, CERAD alone) are
+        mapped only where the paper defines the correspondence; the source
+        scale is recorded in the dataset's .md.
+      kind: categorical
+      values: "Not, Low, Intermediate, High (ordered)"
+      missing: Empty (NULL) when not assessed, including reference donors that were never scored.
+      hint_keywords: [adnc, neuropathological, nia_aa, abc_score]
+
+  donor_uid:
+    label: Donor (cross-dataset id)
+    description: >
+      Identifier of the donor that is the same in every dataset holding
+      that person.
+    facet:
+      status: registered
+      scope: cross_dataset
+      summary: Donor identifier shared across datasets, written <cohort>:<id>.
+      definition: >
+        The donor written as <cohort>:<id>, for example ROSMAP:R1234567, so
+        that the same person carries the same value in every dataset. Built
+        from data/h5adstore/donor_crosswalk.tsv; the dataset's own donor
+        labels stay in the donor facet. Cross-dataset tools count donors on
+        this column.
+      kind: categorical
+      values: "<cohort>:<id>, for example ROSMAP:R1234567 or SEA-AD:H20.33.001"
+      missing: Empty (NULL) when the donor has no crosswalk entry.
+      hint_keywords: []
