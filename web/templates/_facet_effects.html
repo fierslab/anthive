@@ -399,7 +399,8 @@
   table.fxf tr.fxf-cohort td .muted { font-weight: normal; }
   table.fxf tr.not-counted td { color: #64748b; }
   table.fxf td.fxf-bar, table.fxf th.fxf-bar { width: 38%; min-width: 160px; max-width: 460px; }
-  table.fxf td.fxf-ds { overflow-wrap: anywhere; }
+  table.fxf td.fxf-ds { overflow-wrap: anywhere; min-width: 10em; }
+  table.fxf td.fxf-ds > a { white-space: nowrap; }
   table.fxf td.fxf-donors { white-space: normal; min-width: 5.5em; }
   table.fxf .fx-pill { white-space: normal; }
   table.fxf tr.fxf-more-row td { background: #fff; padding: 4px 6px 6px; }
@@ -424,11 +425,11 @@
   @media (max-width: 640px) {
     /* the bar shows the interval; the CI text column is in each row's title */
     table.fxf .fxf-ci-col { display: none; }
-    table.fxf td.fxf-bar, table.fxf th.fxf-bar { width: auto; min-width: 96px; }
+    table.fxf td.fxf-bar, table.fxf th.fxf-bar { width: auto; min-width: 80px; }
     table.fxf td, table.fxf th { padding: 2px 4px; }
     .fxs-name { flex: 0 1 auto; }
     table.fxf .fxf-donors-col, table.fxf .fxf-reason { display: none; }
-    table.fxf td.fxf-ds > a { white-space: nowrap; }
+    table.fxf td.fxf-ds { min-width: 0; }
     .fxf-axis .zero { display: none; }
     table.fx-rec .fx-rec-units { display: none; }
     details.fxs-group > .fxf-card { padding-left: 0; }
