@@ -234,6 +234,10 @@ driven by dropout structure that pseudobulk averages away, and where the
 background-matched control set differs (scanpy draws controls over the whole
 dataset, variant B over the stratum's pseudobulk).
 
+Negative control on real data: `run --null-control-seed N --out-root DIR` shuffles
+every facet column across donors (age, PMI, batch stay) before planning and testing;
+every hit is then a false positive. It refuses to run without an explicit `--out-root`.
+
 ### Outputs
 
 `<h5adstore>/_facet_tests/<group>/<file>.facet_module_tests.parquet`: one row per

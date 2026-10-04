@@ -504,7 +504,7 @@ def package_versions() -> Dict[str, str]:
 def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[str],
                     registry: GenesetRegistry, sources: Sequence[str], n_permutations: int,
                     threads: int = 4, memory_limit_gb: int = 24, run_pseudobulk: bool = True,
-                    keep_work: bool = False) -> Dict[str, Any]:
+                    keep_work: bool = False, null_control_seed: Optional[int] = None) -> Dict[str, Any]:
     """Run variants A and B over all strata and facets of one dataset; write parquet + manifest."""
     started = time.time()
     md_yaml, _ = aft.parse_md_file(entry.md_path)
@@ -573,6 +573,13 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
 
         donor_table, conflicts = aft.build_donor_table(cells)
         manifest['donor_conflicts'] = conflicts
+        manifest['null_control_seed'] = null_control_seed
+        if null_control_seed is not None:
+            # negative control: every facet column is shuffled across donors (age, PMI and
+            # batch stay), so any hit is a false positive. Never write this to the real output.
+            shuffler = np.random.default_rng([SEED, null_control_seed])
+            for facet_name in aft.FACETS:
+                donor_table[facet_name] = donor_table[facet_name].to_numpy()[shuffler.permutation(len(donor_table))]
         membership, strata_note = aft.choose_strata(cells, cat_columns)
         manifest['celltype_note'] = strata_note
         manifest['celltype_sources'] = sorted(membership['source'].unique().tolist())
@@ -870,6 +877,8 @@ def cmd_run(args: argparse.Namespace) -> None:
     for facet in facets:
         if facet not in aft.FACETS:
             sys.exit(f'unknown facet {facet}; choose from {aft.FACETS}')
+    if args.null_control_seed is not None and not args.out_root:
+        sys.exit('--null-control-seed needs an explicit --out-root (never the real _facet_tests)')
     sources = [s.strip() for s in args.sources.split(',') if s.strip()]
     registry = GenesetRegistry(Path(args.geneset_store) if args.geneset_store else default_geneset_store())
     registry.scan()
@@ -901,7 +910,8 @@ def cmd_run(args: argparse.Namespace) -> None:
             manifest = process_dataset(entry, store_root, out_root, facets, registry, sources,
                                        args.permutations, threads=args.threads,
                                        memory_limit_gb=args.memory_gb,
-                                       run_pseudobulk=not args.no_pseudobulk, keep_work=args.keep_work)
+                                       run_pseudobulk=not args.no_pseudobulk, keep_work=args.keep_work,
+                                       null_control_seed=args.null_control_seed)
         except Exception as exc:
             import traceback
             traceback.print_exc()
@@ -949,6 +959,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument('--force', action='store_true')
     run.add_argument('--no-pseudobulk', action='store_true', help='variant A only')
     run.add_argument('--keep-work', action='store_true')
+    run.add_argument('--null-control-seed', type=int, default=None,
+                     help='negative control: shuffle facet labels across donors before testing; '
+                          'requires --out-root (refuses the default store output)')
     summarize = sub.add_parser('summarize', parents=[common], help='cross-dataset tables (exploratory)')
     summarize.add_argument('--out-dir', required=True)
     summarize.add_argument('--cohort-table', default=None)
