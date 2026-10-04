@@ -6770,7 +6770,7 @@ def test_dataset_facets_card_shows_effects_per_facet(client):
     assert 'id="fx-table-ant_sex"' in card and 'class="fx-toggle"' in card
     assert "m vs f" in card and "m 9, f 12" in card
     assert "42 / 15,000" in card
-    assert "cell mean, scanpy score 3|1 / 128" in card
+    assert "cell mean, scanpy score <span class=\"nw\">3|1 / 128</span>" in card
     # flags and model line
     assert ">composition</span>" in card
     assert "expression ~ sex + age_z" in card and "details" in card
@@ -6883,3 +6883,25 @@ def test_help_page_facet_effects_section(client):
         assert phrase in section, phrase
     assert '<a href="#facet-effects">' in text
     assert "—" not in section
+
+
+def test_fx_sex_control_renders_without_q_values():
+    """A sex control with a log2FC but no q (seen live on /facets/ant_sex)
+    must render instead of raising TypeError in the '%.1e' format."""
+    macro = browser.templates.env.get_template("_facet_effects.html").module.fx_sex_control
+    unit = {"sex_control": {"status": "inconclusive", "xist_logFC": -2.0, "xist_q": None,
+                            "rps4y1_logFC": 1.5, "rps4y1_q": None, "n_y_tested": 3,
+                            "n_y_up_q01": 0, "rule": "XIST down, RPS4Y1 up"}}
+    html = str(macro(unit))
+    assert "XIST log2FC -2.0" in html and "RPS4Y1 1.5" in html
+    assert "(q " not in html
+
+
+def test_fx_forest_folds_rows_not_counted():
+    """The gene-page forest keeps counted cohort rows visible and folds the
+    'not counted' rows behind a toggle; the axis places 0 at its data position."""
+    macro = browser.templates.env.get_template("_facet_effects.html").module.fx_forest_assets
+    html = str(macro())
+    assert "fxf-more" in html and "fxf-hidden" in html
+    assert "not counted towards replication" in html
+    assert 'class="zero" style="left:' in html

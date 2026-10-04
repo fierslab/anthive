@@ -15,9 +15,17 @@
   .fx-table th { text-align: left; white-space: nowrap; font-size: 10px; text-transform: uppercase;
                  letter-spacing: .3px; color: var(--text-muted); font-weight: 500; }
   .fx-table th, .fx-table td { padding: 4px 8px 4px 0; border-bottom: 1px solid var(--border-light); vertical-align: top; }
-  .fx-table td.num { font-family: var(--font-mono); font-size: 11px; white-space: nowrap; }
+  .fx-table td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  /* inside the dataset Facets card, table.ds-facets td.num would right-align these */
+  table.ds-facets table.fx-table td.num, table.fx-table td.num { text-align: left; }
+  .fx-table td.fx-donors { white-space: normal; min-width: 7em; }
+  .fx-table td.fx-mods { white-space: normal; min-width: 11em; }
+  .fx-table td.fx-mods .nw, .fx-table .nw { white-space: nowrap; }
+  .fx-table td.fx-dataset { max-width: 240px; overflow-wrap: anywhere; }
+  .fx-table td.fx-top-genes { min-width: 10em; }
+  .fx-table td.fx-flags .fx-pill { white-space: normal; }
   .fx-table .fx-model { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
-  .fx-table .fx-model code { font-size: 11px; color: #334155; background: none; padding: 0; }
+  .fx-table .fx-model code { font-size: 11px; color: #334155; background: none; padding: 0; white-space: normal; overflow-wrap: anywhere; }
   .fx-model-details summary { cursor: pointer; color: var(--link); font-size: 11px; display: inline; }
   .fx-model-details dl { display: grid; grid-template-columns: minmax(110px, max-content) minmax(0, 1fr);
                          gap: 2px 10px; margin: 4px 0 2px; font-size: 11px; color: #334155; }
@@ -31,11 +39,12 @@
   .fx-pill.warn { background: #fdf3e1; border-color: #f0d3a1; color: #7a4b0c; }
   .fx-table tr.fx-detail > td { background: #fbfcfd; padding: 10px 12px 14px; }
   .fx-table tr[hidden] { display: none !important; }
-  .fx-detail-grid { display: grid; grid-template-columns: minmax(0, 340px) minmax(0, 1fr); gap: 14px; }
+  .fx-detail-grid { display: grid; grid-template-columns: minmax(220px, 320px) minmax(0, 1fr); gap: 14px; }
   .fx-detail-grid .fx-vol img { width: 100%; max-width: 340px; height: auto; border: 1px solid var(--border-light); background: #fff; }
   .fx-detail .fx-block + .fx-block { margin-top: 12px; }
   .fx-detail .fx-note { font-size: 11px; margin: 2px 0 6px; }
   .fx-detail table { font-size: 11.5px; }
+  .fx-detail td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
   .fx-detail .table-wrap { max-height: 420px; overflow-y: auto; }
   .fx-links { font-size: 11px; margin-top: 4px; }
   .fx-links a { margin-right: 10px; }
@@ -57,7 +66,11 @@
     .fx-detail table.fx-genes td, .fx-detail table.fx-modules td,
     .fx-detail table.fx-genes th, .fx-detail table.fx-modules th { display: table-cell; padding: 3px 8px 3px 0; border-bottom: 1px solid var(--border-light); white-space: nowrap; }
     .fx-detail-grid { grid-template-columns: minmax(0, 1fr); }
+    .fx-detail-grid .fx-vol img { max-width: 100%; }
     .fx-table td.num { white-space: normal; }
+    .fx-table td.fx-dataset { max-width: none; }
+    .fx-table td.fx-donors, .fx-table td.fx-mods, .fx-table td.fx-top-genes { min-width: 0; }
+    .fx-table td.fx-mods, .fx-table td.fx-top-genes { grid-column: 1 / -1; }
   }
 </style>
 {%- endmacro %}
@@ -88,7 +101,7 @@
 {% macro fx_sex_control(unit) -%}
 {%- set c = unit.sex_control -%}
 {%- if c -%}
-<div class="fx-model fx-sex-control" title="{{ c.rule }}">Sex positive control {{ c.status }}{% if c.xist_logFC is not none %}: XIST log2FC {{ '%.1f'|format(c.xist_logFC) }} (q {{ '%.1e'|format(c.xist_q) }}){% endif %}{% if c.rps4y1_logFC is not none %}, RPS4Y1 {{ '%.1f'|format(c.rps4y1_logFC) }} (q {{ '%.1e'|format(c.rps4y1_q) }}){% endif %}; {{ c.n_y_up_q01 }} of {{ c.n_y_tested }} Y-linked genes higher in males at q &lt; 0.01.{% if c.status == 'failed' %} The sex labels or the donor assignment of this dataset may be wrong; read its other facets with care.{% endif %}</div>
+<div class="fx-model fx-sex-control" title="{{ c.rule }}">Sex positive control {{ c.status }}{% if c.xist_logFC is not none %}: XIST log2FC {{ '%.1f'|format(c.xist_logFC) }}{% if c.xist_q is not none %} (q {{ '%.1e'|format(c.xist_q) }}){% endif %}{% endif %}{% if c.rps4y1_logFC is not none %}, RPS4Y1 {{ '%.1f'|format(c.rps4y1_logFC) }}{% if c.rps4y1_q is not none %} (q {{ '%.1e'|format(c.rps4y1_q) }}){% endif %}{% endif %}; {{ c.n_y_up_q01 }} of {{ c.n_y_tested }} Y-linked genes higher in males at q &lt; 0.01.{% if c.status == 'failed' %} The sex labels or the donor assignment of this dataset may be wrong; read its other facets with care.{% endif %}</div>
 {%- endif -%}
 {%- endmacro %}
 
@@ -97,7 +110,7 @@
 {%- endmacro %}
 
 {% macro fx_module_counts(unit) -%}
-{%- if unit.modules_view -%}{%- for m in unit.modules_view -%}<div title="{{ m.label }}: modules with q_param below 0.05 | with q_perm below 0.05, of {{ m.n_modules }} tested">{{ m.label }} {{ m.n_q05_param }}|{{ m.n_q05_perm }} / {{ m.n_modules }}</div>{%- endfor -%}{%- else -%}<span class="muted">not run</span>{%- endif -%}
+{%- if unit.modules_view -%}{%- for m in unit.modules_view -%}<div title="{{ m.label }}: modules with q_param below 0.05 | with q_perm below 0.05, of {{ m.n_modules }} tested">{{ m.label }} <span class="nw">{{ m.n_q05_param }}|{{ m.n_q05_perm }} / {{ m.n_modules }}</span></div>{%- endfor -%}{%- else -%}<span class="muted">not run</span>{%- endif -%}
 {%- endmacro %}
 
 {# One summary row + its hidden detail row. show_dataset: cross-dataset view
@@ -108,20 +121,20 @@
     data-descriptive="{{ 'true' if unit.flags.descriptive_only else 'false' }}"
     data-has-genes="{{ 'true' if unit.genes else 'false' }}" data-has-modules="{{ 'true' if unit.modules_view else 'false' }}">
   {% if show_dataset %}
-  <td class="card-title"><a href="/browse/{{ unit.db_id }}#data" title="{{ unit.title }}"><strong>{{ unit.db_id }}</strong></a>
+  <td class="card-title fx-dataset"><a href="/browse/{{ unit.db_id }}#data" title="{{ unit.title }}"><strong>{{ unit.db_id }}</strong></a>
     <div class="muted" style="font-size:11px">{{ unit.title }}</div></td>
   <td data-label="Cell type">{{ unit.cell_type }}</td>
   {% else %}
   <td class="card-title"><strong>{{ unit.cell_type }}</strong></td>
   {% endif %}
   <td data-label="Contrast">{{ unit.contrast_label }}</td>
-  <td data-label="Donors" class="num">{{ unit.donors_text }}</td>
+  <td data-label="Donors" class="num fx-donors">{{ unit.donors_text }}</td>
   <td data-label="Genes q<0.05" class="num">{{ fx_counts(unit) }}</td>
-  <td data-label="Modules q<0.05" class="num">{{ fx_module_counts(unit) }}</td>
+  <td data-label="Modules q<0.05" class="num fx-mods">{{ fx_module_counts(unit) }}</td>
   {% if show_dataset %}
   <td data-label="Top genes" class="fx-top-genes">{% for g in unit.top_genes or [] %}<a href="/genes/{{ g.gene|urlencode }}" title="log2FC {{ '%.2f'|format(g.logFC) if g.logFC is not none else 'NA' }}, q {{ '%.2g'|format(g.q_value) if g.q_value is not none else 'NA' }}">{{ g.gene }}</a>{% endfor %}</td>
   {% endif %}
-  <td data-label="Flags">{% for pill in unit.pills %}<span class="fx-pill {{ pill[1] }}" title="{{ pill[2] }}">{{ pill[0] }}</span>{% endfor %}</td>
+  <td data-label="Flags" class="fx-flags">{% for pill in unit.pills %}<span class="fx-pill {{ pill[1] }}" title="{{ pill[2] }}">{{ pill[0] }}</span>{% endfor %}</td>
   <td class="card-span"><button type="button" class="fx-toggle" aria-expanded="false" aria-controls="{{ unit.unit_id }}-detail">show results</button></td>
 </tr>
 <tr class="fx-model-row"><td colspan="{{ 9 if show_dataset else 7 }}" class="card-span">{{ fx_model(unit) }}{{ fx_sex_control(unit) }}{% if show_dataset and unit.cohort_label %}<div class="fx-model">Cohort {{ unit.cohort_label }}, {{ unit.role or 'role not recorded' }}{% if not unit.counted %} (not counted towards replication){% endif %}; from the DRAFT cohort table.</div>{% endif %}</td></tr>
@@ -353,13 +366,20 @@
   .fxf-badge.rep { background: #e8f3ee; border-color: #a7d7c0; color: #14532d; }
   .fxf-badge.disc { background: #fdf3e1; border-color: #f0d3a1; color: #7a4b0c; }
   .fxf-note { font-size: 11.5px; color: #7a4b0c; margin: 3px 0; }
-  table.fxf { border-collapse: collapse; font-size: 11.5px; width: 100%; min-width: 560px; }
+  table.fxf { border-collapse: collapse; font-size: 11.5px; width: 100%; }
   table.fxf td, table.fxf th { padding: 2px 6px; border-bottom: 1px solid var(--border-light); vertical-align: middle; text-align: left; }
   table.fxf th { font-size: 10px; text-transform: uppercase; letter-spacing: .3px; color: var(--text-muted); font-weight: 500; }
   table.fxf tr.fxf-cohort td { background: #f8fafc; font-weight: 600; font-size: 11px; color: #334155; padding-top: 5px; }
   table.fxf tr.fxf-cohort td .muted { font-weight: normal; }
   table.fxf tr.not-counted td { color: #64748b; }
-  table.fxf td.fxf-bar { width: 38%; min-width: 160px; }
+  table.fxf td.fxf-bar, table.fxf th.fxf-bar { width: 38%; min-width: 160px; max-width: 460px; }
+  table.fxf td.fxf-ds { overflow-wrap: anywhere; }
+  table.fxf td.fxf-donors { white-space: normal; min-width: 5.5em; }
+  table.fxf .fx-pill { white-space: normal; }
+  table.fxf tr.fxf-more-row td { background: #fff; padding: 4px 6px 6px; }
+  .fxf-more { background: none; border: 0; padding: 0; color: var(--link); cursor: pointer; font: inherit; font-size: 11.5px; }
+  .fxf-more:hover { text-decoration: underline; }
+  table.fxf tbody.fxf-hidden { display: none; }
   .fxf-track { position: relative; height: 16px; }
   .fxf-zero { position: absolute; top: 0; bottom: 0; width: 1px; background: #94a3b8; }
   .fxf-ci { position: absolute; top: 7px; height: 2px; background: #334155; }
@@ -367,8 +387,20 @@
   .fxf-pt.sig { background: #334155; }
   .fxf-pt.up.sig { background: #b2182b; border-color: #b2182b; }
   .fxf-pt.down.sig { background: #2166ac; border-color: #2166ac; }
-  .fxf-axis { display: flex; justify-content: space-between; font-size: 10px; color: var(--text-muted); }
-  table.fxf td.num { font-family: var(--font-mono); font-size: 11px; white-space: nowrap; }
+  /* axis labels sit at the same positions as the track: lo at the left edge,
+     0 at its data position, hi at the right edge */
+  .fxf-axis { position: relative; height: 12px; font-size: 10px; color: var(--text-muted); font-weight: 400; text-transform: none; letter-spacing: 0; }
+  .fxf-axis span { position: absolute; top: 0; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .fxf-axis .lo { left: 0; }
+  .fxf-axis .hi { right: 0; }
+  .fxf-axis .zero { transform: translateX(-50%); }
+  table.fxf td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  @media (max-width: 640px) {
+    /* the bar shows the interval; the CI text column is in each row's title */
+    table.fxf .fxf-ci-col { display: none; }
+    table.fxf td.fxf-bar, table.fxf th.fxf-bar { width: auto; min-width: 96px; }
+    table.fxf td, table.fxf th { padding: 2px 4px; }
+  }
   .fxf-legend { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
   .fx-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
   .fx-tabs button { font: inherit; font-size: 12px; padding: 2px 10px; border: 1px solid var(--border); background: #fff; cursor: pointer; border-radius: 4px; }
@@ -433,15 +465,44 @@ window.antFx = window.antFx || (function () {
             });
             var pad = (hi - lo) * 0.06 || 0.1; lo -= pad; hi += pad;
             function pos(v) { return ((v - lo) / (hi - lo) * 100).toFixed(2) + '%'; }
+            // hide the 0 label when it would collide with an end label
+            var zeroFrac = (0 - lo) / (hi - lo), zeroLabel = zeroFrac > 0.12 && zeroFrac < 0.88;
             var cls = rep.sign_discordant ? 'disc' : (rep.cohorts_sig_same_sign >= 2 ? 'rep' : '');
             html += '<div class="fxf-card"><h3 class="subsection-head">' + esc(ct) +
                 ' <span class="fxf-badge ' + cls + '" title="' + esc(card.definition) + '">' + esc(rep.badge || '') + '</span></h3>';
-            html += '<div class="table-wrap"><table class="fxf"><thead><tr><th>Dataset</th><th>log2FC</th><th class="fxf-bar"><div class="fxf-axis"><span>' + num(lo) + '</span><span>0</span><span>' + num(hi) + '</span></div></th><th>95% CI</th><th>q</th><th>Donors</th><th>Flags</th></tr></thead><tbody>';
-            var lastCohort = null;
-            rows.forEach(function (u) {
+            html += '<div class="table-wrap"><table class="fxf"><thead><tr><th>Dataset</th><th>log2FC</th><th class="fxf-bar"><div class="fxf-axis"><span class="lo">' + num(lo) + '</span>' + (zeroLabel ? '<span class="zero" style="left:' + pos(0) + '">0</span>' : '') + '<span class="hi">' + num(hi) + '</span></div></th><th class="fxf-ci-col">95% CI</th><th>q</th><th>Donors</th><th>Flags</th></tr></thead><tbody>';
+            // Rows not counted towards replication are folded behind a toggle
+            // (unless nothing is counted), so the counted cohorts stay in view.
+            var nCounted = rows.filter(function (u) { return u.counted; }).length;
+            var fold = nCounted > 0 && nCounted < rows.length;
+            var shown = fold ? rows.filter(function (u) { return u.counted; }) : rows;
+            var folded = fold ? rows.filter(function (u) { return !u.counted; }) : [];
+            html += rowsHtml(shown, pos);
+            html += '</tbody>';
+            if (folded.length) {
+                html += '<tbody><tr class="fxf-more-row"><td colspan="7"><button type="button" class="fxf-more" aria-expanded="false">show ' + folded.length + ' ' + (folded.length === 1 ? 'row' : 'rows') + ' not counted towards replication</button></td></tr></tbody>';
+                html += '<tbody class="fxf-hidden">' + rowsHtml(folded, pos) + '</tbody>';
+            }
+            html += '</table></div></div>';
+        });
+        html += '<div class="fxf-legend">Filled point: q &lt; 0.05 (red up, blue down); open point: not significant; no bar: descriptive only (no CI). Point size grows with donors. Hover a row for its model. Cohorts and roles come from the DRAFT cohort table; rows marked "not counted" do not count towards replication and are folded by default.</div>';
+        box.innerHTML = html;
+        box.querySelectorAll('.fxf-more').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                var more = btn.closest('tbody').nextElementSibling;
+                var open = more.classList.toggle('fxf-hidden') === false;
+                btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+                btn.textContent = btn.textContent.replace(open ? /^show/ : /^hide/, open ? 'hide' : 'show');
+            });
+        });
+
+        // pos maps a log2FC to a left offset on the current cell type's track
+        function rowsHtml(list, pos) {
+            var out = '', lastCohort = null;
+            list.forEach(function (u) {
                 var cohort = u.cohort_label || 'not in the cohort table';
                 if (cohort !== lastCohort) {
-                    html += '<tr class="fxf-cohort"><td colspan="7">' + esc(cohort) + (u.counted ? '' : ' <span class="muted">(not counted)</span>') + '</td></tr>';
+                    out += '<tr class="fxf-cohort"><td colspan="7">' + esc(cohort) + (u.counted ? '' : ' <span class="muted">(not counted)</span>') + '</td></tr>';
                     lastCohort = cohort;
                 }
                 var size = Math.max(6, Math.min(16, 4 + Math.sqrt(u.n_donors || 1)));
@@ -450,16 +511,15 @@ window.antFx = window.antFx || (function () {
                 if (u.ci_low != null && u.ci_high != null) bar += '<div class="fxf-ci" style="left:' + pos(u.ci_low) + ';width:calc(' + pos(u.ci_high) + ' - ' + pos(u.ci_low) + ')"></div>';
                 if (u.logFC != null) bar += '<div class="fxf-pt ' + dir + (u.significant ? ' sig' : '') + '" style="left:' + pos(u.logFC) + ';width:' + size + 'px;height:' + size + 'px"></div>';
                 bar += '</div>';
-                html += '<tr class="' + (u.counted ? '' : 'not-counted') + '" title="' + esc((u.role || 'role not recorded') + '. Model: ' + u.model + (u.covariates_left_out && u.covariates_left_out.length ? '; left out: ' + u.covariates_left_out.join(', ') : '') + '; ' + u.method) + '">' +
-                    '<td><a href="/browse/' + esc(u.db_id) + '#data">' + esc(u.db_id) + '</a></td>' +
+                var ciText = u.ci_low != null ? '[' + num(u.ci_low) + ', ' + num(u.ci_high) + ']' : 'no CI';
+                out += '<tr class="' + (u.counted ? '' : 'not-counted') + '" title="' + esc('95% CI ' + ciText + '. ' + (u.role || 'role not recorded') + '. Model: ' + u.model + (u.covariates_left_out && u.covariates_left_out.length ? '; left out: ' + u.covariates_left_out.join(', ') : '') + '; ' + u.method) + '">' +
+                    '<td class="fxf-ds"><a href="/browse/' + esc(u.db_id) + '#data">' + esc(u.db_id) + '</a></td>' +
                     '<td class="num">' + num(u.logFC) + '</td><td class="fxf-bar">' + bar + '</td>' +
-                    '<td class="num">' + (u.ci_low != null ? '[' + num(u.ci_low) + ', ' + num(u.ci_high) + ']' : 'no CI') + '</td>' +
-                    '<td class="num">' + qfmt(u.q_value) + '</td><td class="num">' + esc(donors(u)) + '</td><td>' + flagPills(u) + '</td></tr>';
+                    '<td class="num fxf-ci-col">' + ciText + '</td>' +
+                    '<td class="num">' + qfmt(u.q_value) + '</td><td class="num fxf-donors">' + esc(donors(u)) + '</td><td>' + flagPills(u) + '</td></tr>';
             });
-            html += '</tbody></table></div></div>';
-        });
-        html += '<div class="fxf-legend">Filled point: q &lt; 0.05 (red up, blue down); open point: not significant; no bar: descriptive only (no CI). Point size grows with donors. Hover a row for its model. Cohorts and roles come from the DRAFT cohort table; rows marked "not counted" do not count towards replication.</div>';
-        box.innerHTML = html;
+            return out;
+        }
     }
     return { esc: esc, num: num, qfmt: qfmt, getJson: getJson, renderCard: renderCard };
 })();
