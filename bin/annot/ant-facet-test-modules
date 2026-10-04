@@ -1,0 +1,966 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "duckdb>=1.0.0",
+#   "pandas>=2.0.0",
+#   "numpy>=1.24.0",
+#   "scipy>=1.10.0",
+#   "pyarrow>=14.0",
+#   "pyyaml>=6.0",
+# ]
+# ///
+"""ant-facet-test-modules: donor-level facet tests of gene-module scores (v1, exploratory).
+
+What it does
+------------
+Module-level sibling of ``ant-facet-test`` (which tests single genes). For
+every eligible dataset (human, primary, not xenograft / in vitro / bulk, at
+least 6 donors) and every cell type stratum, tests the same four donor-level
+facets (sex m vs f, disease AD vs control [provisional], apoe_carrier e4 vs
+non-carrier, braak numeric) for every module of every catalog present in
+the dataset's ``<stem>.scores.parquet`` sidecar. Strata, donor tables,
+covariates, batch rules, minimum donors and the n_lt5 rule are the ones of
+the gene tool (they are literally its functions, imported from
+``ant-facet-test``).
+
+Two variants, reported side by side (column ``method``):
+
+  cell_mean    (A) per-cell module scores of the sidecar (scanpy score_genes
+               on log-normalised X, source ``geneset``; ``--sources`` can add
+               ``ucell``) averaged per (donor, stratum). Needs no counts, so
+               it also runs on datasets without a raw-counts layer (rows
+               carry ``no_counts`` true).
+  pseudobulk   (B) per (donor, stratum) raw counts are summed, converted to
+               log2(CPM + 1), and the module score is the mean over the module
+               genes minus the mean over an expression-matched control set
+               (scanpy score_genes logic: 25 bins of the stratum's mean
+               expression rank, 50 random controls per module gene, module
+               genes excluded, seed recorded). Only for datasets with a served
+               raw-counts layer and modules whose gene list is in the
+               genesetstore (>= 3 genes found in the dataset).
+
+Model per (dataset, stratum, facet, method): one OLS per module on the
+donor-level scores, ``score ~ facet [+ sex] [+ age] [+ pmi] [+ batch]``
+(design from ``plan_job`` of the gene tool), t test on the facet coefficient
+(df = donors - parameters), 95 percent CI on the t quantile, and a
+permutation p value from 1,000 shuffles of the facet labels across donors
+(covariates fixed, t statistic of the full model as test statistic, the same
+shuffles for every module of the unit and for both methods, seed derived from
+the base seed and the unit key). Benjamini-Hochberg across the modules of one
+(dataset, stratum, facet, method), separately for the parametric and the
+permutation p values. Units with n_lt5 are descriptive only (estimates and SE
+kept, p / q / t / CI NULL). A vs B effect-estimate correlation per unit is
+written to the manifest (calibration check).
+
+Inputs: the h5adstore (read only: .md, .h5ad.mus, .duckdb, scores sidecar,
+counts by_gene sidecar) and the genesetstore (module gene lists).
+Outputs: only <h5adstore>/_facet_tests/<group>/<file>.facet_module_tests.parquet
+and <file>.facet_module_run_manifest.json. Nothing else in data/ is written.
+
+Usage::
+
+  ant-facet-test-modules inventory [--out tsv]
+  ant-facet-test-modules run --db-id G24/MMG [--facets braak,sex]
+  ant-facet-test-modules run --all [--max-load 12]
+  ant-facet-test-modules summarize --out-dir DIR
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import importlib.machinery
+import importlib.util
+import json
+import math
+import os
+import platform
+import shutil
+import sys
+import tempfile
+import time
+import zlib
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+import duckdb
+import numpy as np
+import pandas as pd
+import scipy
+from scipy import stats
+
+script_dir = Path(__file__).parent.resolve()
+lib_dir = script_dir.parent.parent / 'lib'
+sys.path.insert(0, str(lib_dir))
+
+
+def _load_gene_tool():
+    """Import the sibling ``ant-facet-test`` script (hyphenated, not a package)."""
+    loader = importlib.machinery.SourceFileLoader('ant_facet_test', str(script_dir / 'ant-facet-test'))
+    spec = importlib.util.spec_from_loader('ant_facet_test', loader)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules['ant_facet_test'] = module
+    loader.exec_module(module)
+    return module
+
+
+aft = _load_gene_tool()
+from geneset import GenesetRegistry  # type: ignore  # noqa: E402
+from scores_parquet import scores_path  # type: ignore  # noqa: E402
+
+TOOL_VERSION = 'ant-facet-test-modules/1.0'
+SEED = aft.SEED                     # 20261004, base seed; unit seeds derive from it
+N_PERMUTATIONS = 1000
+N_BINS = 25                         # scanpy score_genes defaults, as ant-score
+CTRL_SIZE = 50
+MIN_MODULE_GENES = 3                # as ant-score
+MIN_SCORE_COVERAGE = 0.9            # fraction of a sample's cells carrying a score
+DEFAULT_SOURCES = ('geneset',)
+METHOD_A = 'cell_mean'
+METHOD_B = 'pseudobulk'
+MIN_RESIDUAL_DF = 2
+Q_THRESHOLD = 0.05
+
+ModuleKey = Tuple[str, str, str]    # (source, catalog, module)
+
+
+# --------------------------------------------------------------------------
+# Statistics (pure functions; unit tested)
+# --------------------------------------------------------------------------
+
+def benjamini_hochberg(p_values: np.ndarray) -> np.ndarray:
+    """BH adjusted p values; NaN stay NaN and do not count towards the family size."""
+    p_values = np.asarray(p_values, dtype=float)
+    adjusted = np.full(p_values.shape, np.nan)
+    valid = ~np.isnan(p_values)
+    if not valid.any():
+        return adjusted
+    values = p_values[valid]
+    order = np.argsort(values)
+    ranked = values[order] * len(values) / (np.arange(len(values)) + 1)
+    ranked = np.minimum.accumulate(ranked[::-1])[::-1]
+    result = np.empty(len(values))
+    result[order] = np.minimum(ranked, 1.0)
+    adjusted[valid] = result
+    return adjusted
+
+
+def build_design(design: pd.DataFrame, batch_used: bool) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+    """Facet vector and nuisance matrix from a ``plan_job`` design frame.
+
+    Returns (facet vector (n,), Z (n, q) with intercept + covariates, names of Z columns).
+    Covariate columns that are entirely NaN are omitted, as in the R design of the gene tool.
+    """
+    n_donors = len(design)
+    columns = [np.ones(n_donors)]
+    names = ['intercept']
+    for name in ('cov_sex', 'cov_age', 'cov_pmi'):
+        if name in design and design[name].notna().any():
+            columns.append(design[name].to_numpy(dtype=float))
+            names.append(name)
+    if batch_used:
+        dummies = pd.get_dummies(design['batch_value'].astype(str), drop_first=True, dtype=float)
+        for column in dummies.columns:
+            columns.append(dummies[column].to_numpy())
+            names.append(f'batch_{column}')
+    return design['facet_value'].to_numpy(dtype=float), np.column_stack(columns), names
+
+
+def _residualise(matrix: np.ndarray, basis: np.ndarray) -> np.ndarray:
+    return matrix - basis @ (basis.T @ matrix)
+
+
+def facet_effect_statistics(scores: np.ndarray, facet: np.ndarray, nuisance: np.ndarray
+                            ) -> Dict[str, np.ndarray]:
+    """OLS coefficient of ``facet`` for every column of ``scores`` (Frisch-Waugh).
+
+    Args:
+        scores: (n_donors, n_modules) donor-level scores, no NaN.
+        facet: (n_donors,) facet vector (0/1 or numeric).
+        nuisance: (n_donors, q) intercept + covariates.
+
+    Returns:
+        dict of arrays over modules: estimate, se, t, df (scalar array), p_param,
+        ci_low, ci_high, residual_sd. Modules with zero residual variance get NaN.
+    """
+    n_donors = scores.shape[0]
+    basis, _ = np.linalg.qr(nuisance)
+    df = n_donors - nuisance.shape[1] - 1
+    facet_resid = _residualise(facet[:, None], basis)[:, 0]
+    facet_ss = float(facet_resid @ facet_resid)
+    scores_resid = _residualise(scores, basis)
+    estimate = (facet_resid @ scores_resid) / facet_ss
+    rss = np.maximum((scores_resid ** 2).sum(axis=0) - estimate ** 2 * facet_ss, 0.0)
+    scale = np.maximum((scores_resid ** 2).sum(axis=0), 1e-300)
+    degenerate = rss <= 1e-12 * scale
+    sigma2 = rss / df
+    se = np.sqrt(sigma2 / facet_ss)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        t_stat = np.where(degenerate, np.nan, estimate / se)
+    p_param = 2 * stats.t.sf(np.abs(t_stat), df)
+    quantile = stats.t.ppf(0.975, df)
+    se = np.where(degenerate, np.nan, se)
+    return {'estimate': np.where(degenerate, np.nan, estimate), 'se': se, 't': t_stat,
+            'df': np.full(estimate.shape, float(df)), 'p_param': p_param,
+            'ci_low': estimate - quantile * se, 'ci_high': estimate + quantile * se,
+            'residual_sd': np.sqrt(rss / df)}
+
+
+def permutation_p_values(scores: np.ndarray, facet: np.ndarray, nuisance: np.ndarray,
+                         observed_t: np.ndarray, n_permutations: int,
+                         rng: np.random.Generator) -> Tuple[np.ndarray, int]:
+    """Two-sided permutation p of the facet t statistic by shuffling facet labels.
+
+    Facet labels are permuted across donors, covariates stay fixed, the t
+    statistic of the full model is recomputed for every module and shuffle.
+    p = (1 + #{|t_perm| >= |t_obs|}) / (1 + B_effective); shuffles whose
+    permuted facet is collinear with the covariates are discarded.
+
+    Returns (p values over modules, effective number of permutations).
+    """
+    n_donors = scores.shape[0]
+    basis, _ = np.linalg.qr(nuisance)
+    df = n_donors - nuisance.shape[1] - 1
+    scores_resid = _residualise(scores, basis)
+    total_ss = (scores_resid ** 2).sum(axis=0)
+    shuffle_index = np.argsort(rng.random((n_permutations, n_donors)), axis=1)
+    permuted = facet[shuffle_index].T                              # (n_donors, B)
+    permuted_resid = _residualise(permuted, basis)
+    facet_ss = (permuted_resid ** 2).sum(axis=0)                   # (B,)
+    usable = facet_ss > 1e-10 * max(float(facet @ facet), 1e-300)
+    permuted_resid, facet_ss = permuted_resid[:, usable], facet_ss[usable]
+    cross = permuted_resid.T @ scores_resid                        # (B, m)
+    estimate = cross / facet_ss[:, None]
+    rss = np.maximum(total_ss[None, :] - estimate ** 2 * facet_ss[:, None], 1e-300)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        t_permuted = estimate / np.sqrt(rss / df / facet_ss[:, None])
+    exceed = (np.abs(t_permuted) >= np.abs(observed_t)[None, :] - 1e-9).sum(axis=0)
+    n_effective = int(usable.sum())
+    p_values = (1.0 + exceed) / (1.0 + n_effective)
+    p_values = np.where(np.isnan(observed_t), np.nan, p_values)
+    return p_values, n_effective
+
+
+def n_distinct_label_permutations(facet: np.ndarray) -> float:
+    """Number of distinct arrangements of the facet labels (multinomial coefficient)."""
+    _, counts = np.unique(facet, return_counts=True)
+    log_value = math.lgamma(len(facet) + 1) - sum(math.lgamma(c + 1) for c in counts)
+    return float(math.exp(min(log_value, 700.0)))
+
+
+def unit_seed(*parts: Any) -> List[int]:
+    """Deterministic numpy seed sequence from the base seed and a textual unit key."""
+    return [SEED, zlib.crc32('|'.join(str(p) for p in parts).encode())]
+
+
+def fit_modules(scores: pd.DataFrame, design: pd.DataFrame, batch_used: bool, descriptive_only: bool,
+                 unit_key: Sequence[Any], n_permutations: int = N_PERMUTATIONS) -> pd.DataFrame:
+    """Facet effect, parametric and permutation tests for every module of one unit.
+
+    Args:
+        scores: donor-level scores, rows aligned with ``design`` rows, columns = module ids.
+        design: ``plan_job`` design frame (facet_value, cov_*, batch_value).
+        batch_used: whether batch enters the model.
+        descriptive_only: n_lt5 unit; p, q, t and CI are returned as NaN.
+        unit_key: seed key (same for both methods so both see identical shuffles).
+        n_permutations: number of label shuffles.
+
+    Returns:
+        frame indexed by module with estimate, se, t, df, p_param, ci_low, ci_high,
+        std_effect, residual_sd, p_perm, q_param, q_perm, n_perm_effective.
+        Modules with any non-finite donor score are dropped.
+    """
+    facet, nuisance, _ = build_design(design, batch_used)
+    finite = np.isfinite(scores.to_numpy(dtype=float)).all(axis=0)
+    scores = scores.loc[:, finite]
+    values = scores.to_numpy(dtype=float)
+    if np.linalg.matrix_rank(np.column_stack([nuisance, facet])) < nuisance.shape[1] + 1:
+        raise ValueError('rank deficient design')
+    if len(facet) - nuisance.shape[1] - 1 < MIN_RESIDUAL_DF:
+        raise ValueError('fewer than 2 residual df')
+    result = facet_effect_statistics(values, facet, nuisance)
+    frame = pd.DataFrame(result, index=scores.columns)
+    score_sd = values.std(axis=0, ddof=1)
+    frame['score_sd'] = score_sd
+    with np.errstate(divide='ignore', invalid='ignore'):
+        frame['std_effect'] = np.where(score_sd > 0, frame['estimate'] / score_sd, np.nan)
+    rng = np.random.default_rng(unit_seed(*unit_key))
+    p_perm, n_effective = permutation_p_values(values, facet, nuisance, result['t'], n_permutations, rng)
+    frame['p_perm'] = p_perm
+    frame['n_perm_effective'] = n_effective
+    if descriptive_only:
+        for column in ('t', 'p_param', 'p_perm', 'ci_low', 'ci_high'):
+            frame[column] = np.nan
+    frame['q_param'] = benjamini_hochberg(frame['p_param'].to_numpy())
+    frame['q_perm'] = benjamini_hochberg(frame['p_perm'].to_numpy())
+    return frame
+
+
+# --------------------------------------------------------------------------
+# Variant B: pseudobulk log-CPM and background-matched module scores
+# --------------------------------------------------------------------------
+
+def counts_to_log_cpm(counts: np.ndarray) -> np.ndarray:
+    """log2(CPM + 1) with library size = total counts of all genes of the sample."""
+    library = counts.sum(axis=1, keepdims=True).astype(np.float64)
+    library[library == 0] = 1.0
+    return np.log2(counts / library * 1e6 + 1.0).astype(np.float32)
+
+
+def control_gene_indices(gene_average: np.ndarray, module_genes: np.ndarray, n_bins: int,
+                         ctrl_size: int, rng: np.random.Generator) -> np.ndarray:
+    """Expression-matched control genes, scanpy ``score_genes`` logic.
+
+    Genes are cut into bins of equal rank size of their average expression
+    (``rank(method='min') // round(n_genes / (n_bins - 1))``). For every module
+    gene, ``ctrl_size`` genes are drawn without replacement from its bin
+    (module genes excluded; the whole bin when it holds fewer), and the union
+    is the control set.
+    """
+    n_items = max(int(np.round(len(gene_average) / (n_bins - 1))), 1)
+    bins = (pd.Series(gene_average).rank(method='min').to_numpy() // n_items).astype(int)
+    is_module = np.zeros(len(gene_average), dtype=bool)
+    is_module[module_genes] = True
+    chosen: List[np.ndarray] = []
+    for gene in module_genes:
+        candidates = np.flatnonzero((bins == bins[gene]) & ~is_module)
+        if len(candidates) > ctrl_size:
+            candidates = rng.choice(candidates, size=ctrl_size, replace=False)
+        chosen.append(candidates)
+    return np.unique(np.concatenate(chosen)) if chosen else np.array([], dtype=int)
+
+
+def background_matched_scores(log_cpm: np.ndarray, module_genes: Dict[ModuleKey, np.ndarray],
+                              stratum_key: str, n_bins: int = N_BINS, ctrl_size: int = CTRL_SIZE
+                              ) -> Tuple[pd.DataFrame, Dict[ModuleKey, int]]:
+    """Per-sample module score = mean(module genes) - mean(control genes), all in log2 CPM.
+
+    The control set of a module is drawn once per stratum (bins from the mean
+    expression over the stratum's samples) with an rng seeded from
+    (SEED, stratum, module), so results do not depend on processing order.
+
+    Returns (samples x modules frame, number of control genes per module).
+    """
+    gene_average = log_cpm.mean(axis=0)
+    columns: Dict[ModuleKey, np.ndarray] = {}
+    n_controls: Dict[ModuleKey, int] = {}
+    for key, genes in module_genes.items():
+        rng = np.random.default_rng(unit_seed(stratum_key, *key))
+        controls = control_gene_indices(gene_average, genes, n_bins, ctrl_size, rng)
+        if len(controls) == 0:
+            continue
+        columns[key] = log_cpm[:, genes].mean(axis=1) - log_cpm[:, controls].mean(axis=1)
+        n_controls[key] = int(len(controls))
+    scores = pd.DataFrame(columns)
+    if len(scores.columns):
+        scores.columns = pd.MultiIndex.from_tuples(list(scores.columns),
+                                                   names=['source', 'catalog', 'module'])
+    return scores, n_controls
+
+
+def correlate_methods(frame_a: pd.DataFrame, frame_b: pd.DataFrame) -> Dict[str, Any]:
+    """Pearson / Spearman correlation of A and B effect estimates and t statistics across shared modules."""
+    shared = frame_a.index.intersection(frame_b.index)
+    record: Dict[str, Any] = {'n_modules_shared': int(len(shared))}
+    if len(shared) < 4:
+        return record
+    for name in ('estimate', 'std_effect', 't'):
+        a_values = frame_a.loc[shared, name].to_numpy(dtype=float)
+        b_values = frame_b.loc[shared, name].to_numpy(dtype=float)
+        ok = np.isfinite(a_values) & np.isfinite(b_values)
+        if ok.sum() >= 4 and a_values[ok].std() > 0 and b_values[ok].std() > 0:
+            record[f'pearson_{name}'] = float(stats.pearsonr(a_values[ok], b_values[ok])[0])
+            record[f'spearman_{name}'] = float(stats.spearmanr(a_values[ok], b_values[ok])[0])
+    both = np.isfinite(frame_a.loc[shared, 'estimate']) & np.isfinite(frame_b.loc[shared, 'estimate'])
+    if both.any():
+        record['sign_agreement'] = float((np.sign(frame_a.loc[shared, 'estimate'][both])
+                                          == np.sign(frame_b.loc[shared, 'estimate'][both])).mean())
+    return record
+
+
+# --------------------------------------------------------------------------
+# Data access
+# --------------------------------------------------------------------------
+
+def sidecar_modules(sidecar: Path, sources: Sequence[str]) -> pd.DataFrame:
+    """Distinct (source, catalog, module) of the scores sidecar."""
+    conn = duckdb.connect(':memory:')
+    try:
+        return conn.execute(
+            'SELECT DISTINCT source, catalog, module FROM read_parquet(?) WHERE source IN '
+            f'({",".join("?" for _ in sources)}) ORDER BY 1, 2, 3', [str(sidecar), *sources]).df()
+    finally:
+        conn.close()
+
+
+def cell_mean_scores(conn: duckdb.DuckDBPyConnection, sidecar: Path, sample_map: pd.DataFrame,
+                     sample_sizes: pd.Series, sources: Sequence[str]
+                     ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Donor-by-stratum mean of the per-cell scores (variant A).
+
+    Args:
+        conn: DuckDB connection.
+        sidecar: ``<stem>.scores.parquet`` (cell_id, source, catalog, module, score).
+        sample_map: columns cell_id, sample_idx (cells of the kept samples).
+        sample_sizes: n cells per sample_idx (index = sample_idx).
+        sources: sidecar sources to read.
+
+    Returns:
+        (mean scores: rows sample_idx, columns MultiIndex (source, catalog, module);
+         coverage of the same shape: scored cells / cells of the sample).
+    """
+    conn.register('score_sample_map_df', sample_map[['cell_id', 'sample_idx']])
+    conn.execute('CREATE OR REPLACE TEMP TABLE score_sample_map AS SELECT * FROM score_sample_map_df')
+    conn.unregister('score_sample_map_df')
+    quoted = str(sidecar).replace("'", "''")
+    source_list = ','.join("'" + s.replace("'", "''") + "'" for s in sources)
+    long = conn.execute(
+        f"SELECT m.sample_idx, s.source, s.catalog, s.module, AVG(s.score) AS mean_score, "
+        f"COUNT(s.score) AS n_scored FROM read_parquet('{quoted}') s "
+        f"JOIN score_sample_map m ON s.cell_id = m.cell_id WHERE s.source IN ({source_list}) "
+        f"GROUP BY m.sample_idx, s.source, s.catalog, s.module").df()
+    conn.execute('DROP TABLE score_sample_map')
+    long['column'] = list(zip(long['source'], long['catalog'], long['module']))
+    means = long.pivot(index='sample_idx', columns='column', values='mean_score')
+    scored = long.pivot(index='sample_idx', columns='column', values='n_scored')
+    for frame in (means, scored):
+        frame.columns = pd.MultiIndex.from_tuples(list(frame.columns),
+                                                  names=['source', 'catalog', 'module'])
+    coverage = scored.div(sample_sizes.reindex(scored.index), axis=0)
+    return means, coverage
+
+
+def pseudobulk_dense(long_counts: pd.DataFrame, sample_ids: np.ndarray, n_genes: int
+                     ) -> np.ndarray:
+    """Dense (samples x genes) count matrix, rows in ``sample_ids`` order, columns = gene_id."""
+    position = pd.Series(np.arange(len(sample_ids)), index=sample_ids)
+    matrix = np.zeros((len(sample_ids), n_genes), dtype=np.float64)
+    wanted = long_counts[long_counts['sample_idx'].isin(position.index)]
+    matrix[position.loc[wanted['sample_idx']].to_numpy(), wanted['gene_id'].to_numpy()] = \
+        wanted['count'].to_numpy()
+    return matrix
+
+
+def load_module_genes(registry: GenesetRegistry, modules: pd.DataFrame, symbols: pd.DataFrame
+                      ) -> Tuple[Dict[ModuleKey, np.ndarray], Dict[ModuleKey, Dict[str, int]]]:
+    """Gene-column indices (position in the sorted gene_id list) of every sidecar module.
+
+    Genes are matched exactly on the symbol, then on the stored gene name.
+    Modules without a ``.grp`` gene list or with fewer than MIN_MODULE_GENES
+    genes in the dataset are left out. Returns (indices, gene counts per module).
+    """
+    lookup: Dict[str, int] = {}
+    for column in ('gene_name', 'symbol'):               # symbol wins on conflicts
+        for position, name in enumerate(symbols[column].astype(str).to_numpy()):
+            lookup[name] = position
+    indices: Dict[ModuleKey, np.ndarray] = {}
+    counts: Dict[ModuleKey, Dict[str, int]] = {}
+    for source, catalog, module in modules.itertuples(index=False):
+        geneset = registry.genesets.get(f'{catalog}/{module}')
+        if geneset is None or geneset.format != 'grp':
+            continue
+        requested = sorted(set(geneset.genes))
+        found = sorted({lookup[g] for g in requested if g in lookup})
+        counts[(source, catalog, module)] = {'requested': len(requested), 'found': len(found)}
+        if len(found) >= MIN_MODULE_GENES:
+            indices[(source, catalog, module)] = np.array(found, dtype=int)
+    return indices, counts
+
+
+def default_geneset_store() -> Path:
+    from config import get_config  # type: ignore
+    value = get_config().get('geneset_store') or 'data/genesetstore'
+    candidate = (script_dir.parent.parent / value).resolve()
+    if candidate.exists():
+        return candidate
+    try:   # git worktree: the data folders live in the main checkout
+        main_checkout = Path(aft.subprocess.run(
+            ['git', '-C', str(script_dir), 'rev-parse', '--git-common-dir'],
+            capture_output=True, text=True, check=True).stdout.strip())
+        return ((script_dir / main_checkout).resolve().parent / value).resolve()
+    except Exception:
+        return candidate
+
+
+# --------------------------------------------------------------------------
+# One dataset
+# --------------------------------------------------------------------------
+
+def module_eligibility(entry: Any, md_yaml: Dict[str, Any], annotation: Dict[str, Any],
+                       api_config: Dict[str, Any]) -> Tuple[bool, str]:
+    eligible, reason = aft.dataset_eligibility(entry, md_yaml, annotation, api_config,
+                                               require_counts=False)
+    if not eligible:
+        return False, reason
+    if not scores_path(entry.duckdb_path).exists():
+        return False, 'no scores sidecar'
+    return True, 'ok'
+
+
+def package_versions() -> Dict[str, str]:
+    return {'python': platform.python_version(), 'numpy': np.__version__, 'scipy': scipy.__version__,
+            'pandas': pd.__version__, 'duckdb': duckdb.__version__}
+
+
+def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[str],
+                    registry: GenesetRegistry, sources: Sequence[str], n_permutations: int,
+                    threads: int = 4, memory_limit_gb: int = 24, run_pseudobulk: bool = True,
+                    keep_work: bool = False) -> Dict[str, Any]:
+    """Run variants A and B over all strata and facets of one dataset; write parquet + manifest."""
+    started = time.time()
+    md_yaml, _ = aft.parse_md_file(entry.md_path)
+    api_config = aft.get_api_config(md_yaml)
+    annotation = aft.mus.resolve_annotation(entry.h5ad_path, root=store_root)
+    manifest: Dict[str, Any] = {
+        'tool': TOOL_VERSION, 'db_id': entry.db_id, 'group': entry.study, 'file': entry.stem,
+        'dataset_sha256': md_yaml.get('sha256'), 'md_path': str(entry.md_path),
+        'anthive4_git': aft.git_head(script_dir.parent.parent),
+        'h5adstore_git': aft.git_head(store_root),
+        'genesetstore_git': aft.git_head(registry.root),
+        'timestamp_utc': dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds'),
+        'seed': SEED, 'facets_requested': facets, 'sources': list(sources),
+        'versions': package_versions(),
+        'parameters': {
+            'n_permutations': n_permutations, 'permutation': 'facet labels shuffled across donors, '
+            'covariates fixed, statistic = t of the full model, two-sided, p = (1+k)/(1+B)',
+            'unit_seed': 'numpy default_rng([base seed, crc32 of "dataset|stratum|facet"])',
+            'bh_family': '(dataset, stratum, facet, method) over modules, parametric and permutation separately',
+            'n_bins': N_BINS, 'ctrl_size': CTRL_SIZE, 'min_module_genes': MIN_MODULE_GENES,
+            'pseudobulk_expression': 'log2(CPM + 1), library size = all-gene count sum',
+            'control_seed': 'default_rng([base seed, crc32 of "stratum|source|catalog|module"])',
+            'min_score_coverage': MIN_SCORE_COVERAGE,
+            'min_cells_per_sample': aft.MIN_CELLS_PER_SAMPLE, 'min_donors_dataset': aft.MIN_DONORS_DATASET,
+            'min_donors_per_level': aft.MIN_DONORS_PER_LEVEL, 'n_lt5_threshold': aft.N_LT5_THRESHOLD,
+            'numeric_min_donors_for_p': aft.NUMERIC_MIN_DONORS_FOR_P,
+            'min_donors_for_age_pmi': aft.MIN_DONORS_FOR_AGE_PMI,
+            'min_covariate_coverage': aft.MIN_COVARIATE_COVERAGE, 'disease_provisional': True,
+            'duckdb_threads': threads, 'duckdb_memory_limit_gb': memory_limit_gb,
+        },
+    }
+    eligible, reason = module_eligibility(entry, md_yaml, annotation, api_config)
+    if not eligible:
+        manifest.update(status='skipped', reason=reason)
+        return manifest
+    sidecar = scores_path(entry.duckdb_path)
+    counts_info = aft.counts_layer_for(entry, md_yaml)
+    no_counts = counts_info is None or not run_pseudobulk
+    manifest['no_counts'] = counts_info is None
+    manifest['counts_layer'] = counts_info[0] if counts_info else None
+
+    work_dir = Path(tempfile.mkdtemp(prefix='ant_facet_mod_', dir=os.environ.get('ANT_FACET_TMP')))
+    conn = aft.open_dataset(entry, api_config, threads=threads, memory_limit_gb=memory_limit_gb,
+                            temp_dir=work_dir)
+    try:
+        cat_columns = aft.view_columns(conn, 'obscat') if aft._has_view(conn, 'obscat') else {}
+        wanted = ['ant_donor', 'ant_sex', 'ant_disease', 'ant_apoe', 'ant_apoe_carrier',
+                  'ant_braak', 'ant_age', 'ant_pmi', 'ant_cell_type', 'ant_author_cell_type',
+                  'ant_tissue', 'ant_region', 'ant_author_cluster']
+        extra = [c for c in cat_columns if (aft.CELLTYPE_CANDIDATE_RE.match(c) or aft.BATCH_NAME_RE.search(c))
+                 and not c.startswith('ant_')]
+        cells = aft.cell_table(conn, wanted + extra)
+        if 'ant_donor' not in cells:
+            manifest.update(status='skipped', reason='no ant_donor facet in the current mapping')
+            return manifest
+        batch_column = aft.find_batch_column(conn, cells)
+        if batch_column is not None:
+            cells['batch'] = cells[batch_column]
+        manifest['batch_column'] = batch_column
+        n_donors_all = int(cells['ant_donor'].dropna().astype(str).nunique())
+        manifest['n_cells'] = int(len(cells))
+        manifest['n_donors'] = n_donors_all
+        if n_donors_all < aft.MIN_DONORS_DATASET:
+            manifest.update(status='skipped', reason=f'{n_donors_all} donors (< {aft.MIN_DONORS_DATASET})')
+            return manifest
+
+        donor_table, conflicts = aft.build_donor_table(cells)
+        manifest['donor_conflicts'] = conflicts
+        membership, strata_note = aft.choose_strata(cells, cat_columns)
+        manifest['celltype_note'] = strata_note
+        manifest['celltype_sources'] = sorted(membership['source'].unique().tolist())
+        cell_frame = cells.assign(pos=np.arange(len(cells)))[['pos', 'cell_id', 'ant_donor']]
+        usable = membership.merge(cell_frame, on='pos', how='inner')
+        usable = usable[usable['ant_donor'].notna()].copy()
+        usable['donor'] = usable['ant_donor'].astype(str)
+        usable['stratum'] = usable['source'] + '::' + usable['label']
+
+        sample_sizes = usable.groupby(['stratum', 'source', 'label', 'donor']).size() \
+            .rename('n_cells').reset_index()
+        n_groups = int(len(sample_sizes))
+        n_dropped_small = int((sample_sizes['n_cells'] < aft.MIN_CELLS_PER_SAMPLE).sum())
+        sample_sizes = sample_sizes[sample_sizes['n_cells'] >= aft.MIN_CELLS_PER_SAMPLE] \
+            .reset_index(drop=True)
+        manifest['samples'] = {'n_donor_celltype_groups': n_groups,
+                               'n_dropped_lt_min_cells': n_dropped_small, 'n_kept': int(len(sample_sizes))}
+        donor_totals = cells[cells['ant_donor'].notna()].assign(
+            donor=lambda f: f['ant_donor'].astype(str)).groupby('donor').size()
+
+        jobs: List[Dict[str, Any]] = []
+        for stratum, frame in sample_sizes.groupby('stratum'):
+            for facet in facets:
+                plan = aft.plan_job(donor_table, facet, frame['donor'])
+                plan.update(stratum=str(stratum), source=str(frame['source'].iloc[0]),
+                            label=str(frame['label'].iloc[0]))
+                jobs.append(plan)
+        needed = {(job['stratum'], donor) for job in jobs if job['status'] == 'ok'
+                  for donor in job['design']['donor']}
+        keep = sample_sizes[[(s, d) in needed for s, d in zip(sample_sizes['stratum'], sample_sizes['donor'])]] \
+            .reset_index(drop=True)
+        keep['sample_idx'] = np.arange(len(keep))
+        manifest['strata'] = {str(k): int(v) for k, v in keep.groupby('stratum')['donor'].nunique().items()}
+        sample_key = {(r.stratum, r.donor): int(r.sample_idx) for r in keep.itertuples()}
+        sample_n_cells = keep.set_index('sample_idx')['n_cells']
+
+        modules = sidecar_modules(sidecar, sources)
+        catalog_report: Dict[str, Dict[str, int]] = {}
+        symbols = aft.gene_symbols(conn)
+        module_genes, gene_counts = load_module_genes(registry, modules, symbols)
+        for source, catalog, module in modules.itertuples(index=False):
+            entry_report = catalog_report.setdefault(f'{source}::{catalog}', {
+                'n_modules_sidecar': 0, 'n_modules_with_gene_list_ge3': 0})
+            entry_report['n_modules_sidecar'] += 1
+            entry_report['n_modules_with_gene_list_ge3'] += int((source, catalog, module) in module_genes)
+        manifest['catalogs'] = catalog_report
+
+        # ---- variant A: donor means of the per-cell scores
+        pb_cells = usable.merge(keep[['stratum', 'donor', 'sample_idx']], on=['stratum', 'donor'], how='inner')
+        mean_scores = coverage = pd.DataFrame()
+        if len(keep):
+            mean_scores, coverage = cell_mean_scores(conn, sidecar, pb_cells[['cell_id', 'sample_idx']],
+                                                     sample_n_cells, sources)
+
+        # ---- variant B: pseudobulk log-CPM scores per stratum
+        background_scores: Dict[str, pd.DataFrame] = {}
+        control_counts: Dict[str, Dict[ModuleKey, int]] = {}
+        pb_error = None
+        if not no_counts and len(keep) and module_genes:
+            try:
+                long_counts = aft.pseudobulk(conn, counts_info[1], pb_cells[['cell_id', 'sample_idx']])
+                gene_order = symbols['gene_id'].to_numpy()
+                position_of_gene = pd.Series(np.arange(len(gene_order)), index=gene_order)
+                long_counts = long_counts.assign(gene_id=position_of_gene.reindex(long_counts['gene_id']).to_numpy())
+                long_counts = long_counts[long_counts['gene_id'].notna()].astype({'gene_id': int})
+                for stratum, frame in keep.groupby('stratum'):
+                    ids = frame['sample_idx'].to_numpy()
+                    log_cpm = counts_to_log_cpm(pseudobulk_dense(long_counts, ids, len(gene_order)))
+                    scores_b, n_ctrl = background_matched_scores(log_cpm, module_genes, str(stratum))
+                    scores_b.index = ids
+                    background_scores[str(stratum)] = scores_b
+                    control_counts[str(stratum)] = n_ctrl
+                    del log_cpm
+            except Exception as exc:  # keep variant A
+                pb_error = f'{type(exc).__name__}: {exc}'
+                background_scores = {}
+        manifest['pseudobulk_error'] = pb_error
+
+        frames: List[pd.DataFrame] = []
+        unit_records: List[Dict[str, Any]] = []
+        for job in jobs:
+            record: Dict[str, Any] = {'facet': job['facet'], 'cell_type': job['label'],
+                                      'celltype_source': job['source'], 'status': job['status'],
+                                      'n_donors_with_sample': job['n_donors_with_sample'],
+                                      'level_counts': job.get('level_counts')}
+            if job['status'] != 'ok':
+                unit_records.append(record)
+                continue
+            design = job['design'].reset_index(drop=True)
+            sample_ids = [sample_key[(job['stratum'], donor)] for donor in design['donor']]
+            stratum_cells = sample_n_cells.reindex(sample_ids).to_numpy()
+            proportions = pd.Series(stratum_cells / donor_totals.reindex(design['donor']).to_numpy(),
+                                    index=design['donor'])
+            composition_p = aft.composition_test(proportions, design.set_index('donor'), job['facet'])
+            unit_key = (entry.db_id, job['stratum'], job['facet'])
+            record.update(
+                n_lt5=bool(job['n_lt5']), batch_used=job['batch_used'], batch_confounded=job['batch_confounded'],
+                covariates=job['covariates'], covariates_omitted=job['covariates_omitted'],
+                n_donors_analysed=job['n_donors_analysed'],
+                n_donors_dropped_covariate=job['n_donors_dropped_covariate'],
+                composition_p=composition_p,
+                composition_flag=bool(composition_p is not None and composition_p < aft.COMPOSITION_ALPHA),
+                n_cells_in_stratum=int(stratum_cells.sum()),
+                n_distinct_label_permutations=n_distinct_label_permutations(design['facet_value'].to_numpy()))
+            per_method: Dict[str, pd.DataFrame] = {}
+            # variant A
+            if len(mean_scores):
+                a_values = mean_scores.reindex(sample_ids)
+                low_cov = coverage.reindex(sample_ids).min(axis=0)
+                try:
+                    a_frame = fit_modules(a_values.reset_index(drop=True), design, job['batch_used'],
+                                           bool(job['n_lt5']), unit_key, n_permutations)
+                    a_frame['min_score_coverage'] = low_cov.reindex(a_frame.index).to_numpy()
+                    per_method[METHOD_A] = a_frame
+                except ValueError as exc:
+                    record['method_A_error'] = str(exc)
+            # variant B
+            scores_b = background_scores.get(job['stratum'])
+            if scores_b is not None and len(scores_b.columns):
+                try:
+                    b_frame = fit_modules(scores_b.reindex(sample_ids).reset_index(drop=True), design,
+                                           job['batch_used'], bool(job['n_lt5']), unit_key, n_permutations)
+                    b_frame['n_control_genes'] = [control_counts[job['stratum']].get(tuple(k)) for k in b_frame.index]
+                    per_method[METHOD_B] = b_frame
+                except ValueError as exc:
+                    record['method_B_error'] = str(exc)
+            for method, frame in per_method.items():
+                n_sig_param = int((frame['q_param'] < Q_THRESHOLD).sum())
+                n_sig_perm = int((frame['q_perm'] < Q_THRESHOLD).sum())
+                record[f'n_modules_{method}'] = int(len(frame))
+                record[f'n_sig_q05_param_{method}'] = n_sig_param
+                record[f'n_sig_q05_perm_{method}'] = n_sig_perm
+            if METHOD_A in per_method and METHOD_B in per_method:
+                record['calibration'] = correlate_methods(per_method[METHOD_A], per_method[METHOD_B])
+            unit_records.append(record)
+            for method, frame in per_method.items():
+                frame = frame.copy()
+                index = pd.MultiIndex.from_tuples(frame.index, names=['source', 'catalog', 'module'])
+                frame.index = index
+                frame = frame.reset_index()
+                frame['method'] = method
+                frame['facet'] = job['facet']
+                frame['cell_type'] = job['label']
+                frame['celltype_source'] = job['source']
+                level_counts = job['level_counts']
+                if job['facet'] == 'braak':
+                    frame['contrast'] = 'braak_per_unit'
+                    frame['level_ref'] = None
+                    frame['level_test'] = None
+                    frame['n_donors_ref'] = np.nan
+                    frame['n_donors_test'] = np.nan
+                else:
+                    reference, tested = aft.CONTRAST[job['facet']]
+                    frame['contrast'] = f'{tested}_vs_{reference}'
+                    frame['level_ref'], frame['level_test'] = reference, tested
+                    frame['n_donors_ref'] = level_counts[reference]
+                    frame['n_donors_test'] = level_counts[tested]
+                frame['n_donors'] = job['n_donors_analysed']
+                frame['n_lt5'] = bool(job['n_lt5'])
+                frame['descriptive_only'] = bool(job['n_lt5'])
+                frame['batch_used'] = job['batch_used']
+                frame['batch_confounded'] = job['batch_confounded']
+                frame['covariates'] = ','.join(job['covariates'])
+                frame['composition_p'] = composition_p
+                frame['composition_flag'] = record['composition_flag']
+                frame['provisional'] = aft.PROVISIONAL_FLAGS.get(job['facet'], False)
+                frames.append(frame)
+
+        out_dir = out_root / entry.study
+        out_dir.mkdir(parents=True, exist_ok=True)
+        if frames:
+            table = pd.concat(frames, ignore_index=True)
+            if 'n_control_genes' not in table:
+                table['n_control_genes'] = np.nan
+            table['n_genes_requested'] = [gene_counts.get((s, c, m), {}).get('requested')
+                                          for s, c, m in zip(table['source'], table['catalog'], table['module'])]
+            table['n_genes_found'] = [gene_counts.get((s, c, m), {}).get('found')
+                                      for s, c, m in zip(table['source'], table['catalog'], table['module'])]
+            table['no_counts'] = bool(manifest['no_counts'])
+            table['multi_tissue_donors'] = int((donor_table['n_tissues'] > 1).sum())
+            table.insert(0, 'db_id', entry.db_id)
+            table.insert(1, 'dataset', entry.stem)
+            table.to_parquet(out_dir / f'{entry.stem}.facet_module_tests.parquet', index=False)
+            manifest['n_result_rows'] = int(len(table))
+            for method in (METHOD_A, METHOD_B):
+                sub = table[table['method'] == method]
+                manifest[f'n_modules_scored_{method}'] = int(sub[['source', 'catalog', 'module']]
+                                                              .drop_duplicates().shape[0])
+        manifest['units'] = unit_records
+        manifest['multi_tissue_donors'] = int((donor_table['n_tissues'] > 1).sum())
+        manifest.update(status='done', runtime_seconds=round(time.time() - started, 1))
+        (out_dir / f'{entry.stem}.facet_module_run_manifest.json').write_text(
+            json.dumps(manifest, indent=2, default=aft._json_default))
+        return manifest
+    finally:
+        conn.close()
+        if not keep_work:
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# Cross-dataset summary (exploratory)
+# --------------------------------------------------------------------------
+
+def summarize_results(out_root: Path, out_dir: Path, cohort_table: Optional[Path]) -> None:
+    """Tables over all module result parquets: units, hits, recurring modules.
+
+    Recurrence counts (dataset, stratum) units where a module is significant at
+    q_perm < 0.05 AND q_param < 0.05 with the same estimate sign, restricted to
+    non-descriptive units. Datasets are first collapsed into cohorts with the
+    DRAFT cohort selection table (donor-overlap caveat of the design note):
+    only datasets whose role there is not a duplicate/supplement/secondary are
+    counted as independent, when the table is given.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    files = sorted(out_root.glob('*/*.facet_module_tests.parquet'))
+    if not files:
+        print('no module result files')
+        return
+    table = pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
+    table['unit'] = table['db_id'] + '|' + table['celltype_source'] + '::' + table['cell_type']
+    table['significant'] = (table['q_param'] < Q_THRESHOLD) & (table['q_perm'] < Q_THRESHOLD)
+    table['sign'] = np.sign(table['estimate'])
+    units = (table.groupby(['facet', 'method', 'unit', 'db_id', 'cell_type', 'celltype_source'])
+             .agg(n_modules=('module', 'size'), n_donors=('n_donors', 'first'), n_lt5=('n_lt5', 'first'),
+                  n_sig_param=('q_param', lambda s: int((s < Q_THRESHOLD).sum())),
+                  n_sig_perm=('q_perm', lambda s: int((s < Q_THRESHOLD).sum())),
+                  n_sig_both=('significant', 'sum')).reset_index())
+    units.to_csv(out_dir / 'module_units.tsv', sep='\t', index=False)
+    per_facet = units[~units['n_lt5']].groupby(['facet', 'method']).agg(
+        testable_units=('unit', 'nunique'), datasets=('db_id', 'nunique'),
+        units_with_param_hit=('n_sig_param', lambda s: int((s > 0).sum())),
+        units_with_perm_hit=('n_sig_perm', lambda s: int((s > 0).sum())),
+        total_param_hits=('n_sig_param', 'sum'), total_perm_hits=('n_sig_perm', 'sum'),
+        total_both_hits=('n_sig_both', 'sum')).reset_index()
+    per_facet.to_csv(out_dir / 'module_facet_summary.tsv', sep='\t', index=False)
+    print(per_facet.to_string(index=False))
+
+    eligible = table[~table['n_lt5']].copy()
+    if cohort_table is not None and cohort_table.exists():
+        cohorts = pd.read_csv(cohort_table, sep='\t')
+        excluded_roles = cohorts['role'].fillna('').str.contains('duplicate|supplement|secondary|integrat|subset',
+                                                                  case=False, regex=True)
+        independent = set(cohorts.loc[~excluded_roles, 'db_id'])
+        eligible = eligible[eligible['db_id'].isin(independent)]
+    recurring = (eligible[eligible['significant']]
+                 .groupby(['facet', 'method', 'source', 'catalog', 'module'])
+                 .agg(n_units=('unit', 'nunique'), n_datasets=('db_id', 'nunique'),
+                      n_pos=('sign', lambda s: int((s > 0).sum())), n_neg=('sign', lambda s: int((s < 0).sum())),
+                      median_std_effect=('std_effect', 'median')).reset_index())
+    recurring['sign_consistent'] = (recurring['n_pos'] == 0) | (recurring['n_neg'] == 0)
+    recurring = recurring.sort_values(['facet', 'method', 'n_datasets'], ascending=[True, True, False])
+    recurring.to_csv(out_dir / 'module_recurring.tsv', sep='\t', index=False)
+    calibration_rows = []
+    for manifest_path in sorted(out_root.glob('*/*.facet_module_run_manifest.json')):
+        manifest = json.loads(manifest_path.read_text())
+        for unit in manifest.get('units', []):
+            if 'calibration' in unit:
+                calibration_rows.append({'db_id': manifest['db_id'], 'cell_type': unit['cell_type'],
+                                         'celltype_source': unit['celltype_source'], 'facet': unit['facet'],
+                                         'n_lt5': unit.get('n_lt5'), **unit['calibration']})
+    if calibration_rows:
+        pd.DataFrame(calibration_rows).to_csv(out_dir / 'module_calibration.tsv', sep='\t', index=False)
+
+
+# --------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------
+
+def _entries(store_root: Path) -> Dict[str, Any]:
+    return {e.db_id: e for e in aft.iter_h5adstore(store_root) if not e.study.startswith('_')}
+
+
+def cmd_inventory(args: argparse.Namespace) -> None:
+    store_root = Path(args.h5adstore_root).resolve()
+    rows = []
+    for entry in _entries(store_root).values():
+        md_yaml, _ = aft.parse_md_file(entry.md_path)
+        api_config = aft.get_api_config(md_yaml)
+        annotation = aft.mus.resolve_annotation(entry.h5ad_path, root=store_root)
+        eligible, reason = module_eligibility(entry, md_yaml, annotation, api_config)
+        rows.append({'db_id': entry.db_id, 'file': entry.stem, 'eligible_metadata': eligible, 'reason': reason,
+                     'has_counts': aft.counts_layer_for(entry, md_yaml) is not None if eligible else None})
+    frame = pd.DataFrame(rows)
+    if args.out:
+        frame.to_csv(args.out, sep='\t', index=False)
+    print(frame['reason'].value_counts().to_string())
+    print('eligible with counts:', int((frame['eligible_metadata'] & frame['has_counts'].fillna(False)).sum()))
+
+
+def cmd_run(args: argparse.Namespace) -> None:
+    store_root = Path(args.h5adstore_root).resolve()
+    out_root = Path(args.out_root) if args.out_root else store_root / '_facet_tests'
+    facets = [f.strip() for f in args.facets.split(',') if f.strip()]
+    for facet in facets:
+        if facet not in aft.FACETS:
+            sys.exit(f'unknown facet {facet}; choose from {aft.FACETS}')
+    sources = [s.strip() for s in args.sources.split(',') if s.strip()]
+    registry = GenesetRegistry(Path(args.geneset_store) if args.geneset_store else default_geneset_store())
+    registry.scan()
+    entries = _entries(store_root)
+    targets = sorted(entries) if args.all else [t.strip() for t in args.db_id.split(',')]
+    summary_rows = []
+    for db_id in targets:
+        entry = entries.get(db_id)
+        if entry is None:
+            print(f'unknown db_id {db_id}', file=sys.stderr)
+            continue
+        out_manifest = out_root / entry.study / f'{entry.stem}.facet_module_run_manifest.json'
+        md_yaml, _ = aft.parse_md_file(entry.md_path)
+        annotation = aft.mus.resolve_annotation(entry.h5ad_path, root=store_root)
+        eligible, reason = module_eligibility(entry, md_yaml, annotation, aft.get_api_config(md_yaml))
+        if not eligible:
+            print(f'[skip] {db_id}: {reason}')
+            summary_rows.append({'db_id': db_id, 'status': 'skipped', 'reason': reason})
+            continue
+        if out_manifest.exists() and not args.force and args.all:
+            previous = json.loads(out_manifest.read_text())
+            now_has_counts = aft.counts_layer_for(entry, md_yaml) is not None
+            if previous.get('status') == 'done' and not (previous.get('no_counts') and now_has_counts):
+                print(f'[skip existing] {db_id}')
+                continue
+        aft.wait_for_load(args.max_load)
+        begin = time.time()
+        try:
+            manifest = process_dataset(entry, store_root, out_root, facets, registry, sources,
+                                       args.permutations, threads=args.threads,
+                                       memory_limit_gb=args.memory_gb,
+                                       run_pseudobulk=not args.no_pseudobulk, keep_work=args.keep_work)
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            print(f'[error] {db_id}: {exc}', file=sys.stderr)
+            summary_rows.append({'db_id': db_id, 'status': 'error', 'reason': str(exc)[:300]})
+            continue
+        if manifest['status'] == 'skipped':
+            print(f'[skip] {db_id}: {manifest["reason"]}')
+        else:
+            n_ok = sum(1 for u in manifest['units'] if u['status'] == 'ok')
+            print(f'[done] {db_id}: {n_ok}/{len(manifest["units"])} units, {manifest.get("n_result_rows", 0)} rows, '
+                  f'no_counts={manifest["no_counts"]}, {time.time() - begin:.0f}s', flush=True)
+        summary_rows.append({'db_id': db_id, 'status': manifest['status'], 'reason': manifest.get('reason', '')})
+    if summary_rows:
+        print(pd.DataFrame(summary_rows)['status'].value_counts().to_string())
+
+
+def cmd_summarize(args: argparse.Namespace) -> None:
+    store_root = Path(args.h5adstore_root).resolve()
+    out_root = Path(args.out_root) if args.out_root else store_root / '_facet_tests'
+    cohort = Path(args.cohort_table) if args.cohort_table else out_root / 'cohort_selection.DRAFT.tsv'
+    summarize_results(out_root, Path(args.out_dir), cohort)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
+    sub = parser.add_subparsers(dest='command', required=True)
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument('--h5adstore-root', default=None)
+    common.add_argument('--out-root', default=None, help='default <h5adstore>/_facet_tests')
+    inventory = sub.add_parser('inventory', parents=[common], help='eligibility table')
+    inventory.add_argument('--out', default=None)
+    run = sub.add_parser('run', parents=[common], help='run module facet tests')
+    group = run.add_mutually_exclusive_group(required=True)
+    group.add_argument('--db-id', help='comma-separated db_ids (e.g. G24/MMG)')
+    group.add_argument('--all', action='store_true')
+    run.add_argument('--facets', default=','.join(aft.FACETS))
+    run.add_argument('--sources', default=','.join(DEFAULT_SOURCES),
+                     help='sidecar sources to test (geneset = scanpy score_genes; ucell optional)')
+    run.add_argument('--geneset-store', default=None)
+    run.add_argument('--permutations', type=int, default=N_PERMUTATIONS)
+    run.add_argument('--threads', type=int, default=4)
+    run.add_argument('--memory-gb', type=int, default=24)
+    run.add_argument('--max-load', type=float, default=12.0)
+    run.add_argument('--force', action='store_true')
+    run.add_argument('--no-pseudobulk', action='store_true', help='variant A only')
+    run.add_argument('--keep-work', action='store_true')
+    summarize = sub.add_parser('summarize', parents=[common], help='cross-dataset tables (exploratory)')
+    summarize.add_argument('--out-dir', required=True)
+    summarize.add_argument('--cohort-table', default=None)
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    if args.h5adstore_root is None:
+        args.h5adstore_root = str(aft.default_store_root())
+    {'inventory': cmd_inventory, 'run': cmd_run, 'summarize': cmd_summarize}[args.command](args)
+
+
+if __name__ == '__main__':
+    main()

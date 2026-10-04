@@ -238,11 +238,13 @@ def counts_layer_for(entry: H5adEntry, md_yaml: Dict[str, Any]) -> Optional[Tupl
 
 
 def dataset_eligibility(entry: H5adEntry, md_yaml: Dict[str, Any],
-                        annotation: Dict[str, Any], api_config: Dict[str, Any]
-                        ) -> Tuple[bool, str]:
+                        annotation: Dict[str, Any], api_config: Dict[str, Any],
+                        require_counts: bool = True) -> Tuple[bool, str]:
     """Metadata-level scope gate (before any data are read).
 
     Returns (eligible, reason). Reason is the first failing criterion.
+    ``require_counts=False`` is used by ``ant-facet-test-modules``, whose
+    cell-mean variant does not need a raw-counts layer.
     """
     if entry.md_path.with_suffix('.inactive').exists() or \
             (entry.md_path.parent / f'{entry.stem}.inactive').exists():
@@ -265,7 +267,7 @@ def dataset_eligibility(entry: H5adEntry, md_yaml: Dict[str, Any],
         return False, 'host sex facet present (xenograft / host animal)'
     if not entry.duckdb_path.exists():
         return False, 'no .duckdb'
-    if counts_layer_for(entry, md_yaml) is None:
+    if require_counts and counts_layer_for(entry, md_yaml) is None:
         return False, 'no raw counts layer served'
     return True, 'ok'
 
