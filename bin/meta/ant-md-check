@@ -2,6 +2,7 @@
 # /// script
 # dependencies = [
 #   "pyyaml>=6.0",
+#   "duckdb>=0.10.0",
 # ]
 # ///
 """
@@ -14,10 +15,24 @@ Scans all anthive .md files under a folder:
 Duplicate group_ids across groups and duplicate ids within a group
 are reported as errors.
 
+Data .md files are also linted (lib/facet_lint.py):
+  - closed ant_* namespace: every ant_* target of obs_rename / obs_derive /
+    obs_constant must be a registered facet in lib/obscol_tags_vocab.yaml
+    (deprecated facets warn; unregistered ones warn until --strict-namespace
+    is the default, see facet_lint.NAMESPACE_DEFAULT_MODE)
+  - mapping rules: rename chains, derive dtype vs facet kind, non-numeric
+    or out-of-range values in numerical facets (Braak 0 to 6), values
+    outside a facet vocabulary, ant_braak_group maps that break the rule
+  - lineage: reanalysis_of targets exist and imply is_secondary: true
+  - with --with-data, rules that read the dataset's .duckdb: missing
+    derive / rename source columns, non-NULL values without a map entry
+    or default, text or out-of-range values reaching a numerical facet
+
 Usage:
   ant md-check [FOLDER]
   ant md-check [FOLDER] --no-fix
   ant md-check [FOLDER] --verbose
+  ant md-check [FOLDER] --no-fix --strict-namespace --with-data
 """
 
 import argparse
@@ -29,7 +44,7 @@ script_dir = Path(__file__).parent.resolve()
 lib_dir = script_dir.parent.parent / 'lib'
 sys.path.insert(0, str(lib_dir))
 
-from md_check import MdCheckReport, check_md_folder, write_log_entry
+from md_check import MdCheckReport, check_md_folder, collect_db_ids, write_log_entry
 
 
 def main():
@@ -50,6 +65,19 @@ def main():
         '--verbose', action='store_true',
         help='Print a status line for every file checked'
     )
+    parser.add_argument(
+        '--strict-namespace', action='store_true',
+        help='Report ant_* targets that are not registered facets as errors (default: warnings)'
+    )
+    parser.add_argument(
+        '--with-data', action='store_true',
+        help="Also run the facet rules that read each dataset's .duckdb (read-only)"
+    )
+    parser.add_argument(
+        '--store', default=None,
+        help='Store root used to resolve reanalysis_of targets (default: the configured '
+             'h5adstore when FOLDER is inside it, else FOLDER)'
+    )
 
     args = parser.parse_args()
 
@@ -67,8 +95,21 @@ def main():
     print(f"{'='*70}")
     print()
 
+    store_root = Path(args.store).resolve() if args.store else None
+    if store_root is None:
+        try:
+            from config import get_config, get_data_folder
+            configured = Path(get_data_folder(get_config())).resolve()
+            if folder != configured and configured in folder.parents:
+                store_root = configured
+        except Exception:
+            store_root = None
+    known_db_ids = collect_db_ids(store_root) if store_root and store_root != folder else None
+
     report = MdCheckReport()
-    check_md_folder(folder, report, fix=fix, verbose=args.verbose)
+    check_md_folder(folder, report, fix=fix, verbose=args.verbose,
+                    namespace_mode='error' if args.strict_namespace else None,
+                    with_data=args.with_data, known_db_ids=known_db_ids)
 
     print(
         f"Scanned {report.checked} file(s): "
@@ -82,6 +123,18 @@ def main():
             print(f"  ✓ {msg}")
 
     report.print_summary()
+
+    rule_lines = report.rule_summary()
+    if rule_lines:
+        print(f"\nFacet and lineage rules violated (files per rule):")
+        for line in rule_lines:
+            print(f"  {line}")
+    if args.with_data:
+        print(f"\nData rules run on {report.data_checked} dataset(s); "
+              f"{len(report.data_unavailable)} without a readable local .duckdb")
+        if args.verbose:
+            for rel_path in report.data_unavailable:
+                print(f"  no data check: {rel_path}")
 
     log_messages = report.collect_log_messages()
     if log_messages:

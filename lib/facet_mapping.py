@@ -14,6 +14,10 @@ declares it in the ``api:`` section (validated by
   hides on that source do not apply.
 * ``obs_constant`` ``ant_x: {value, dtype}`` broadcasts one value to every
   cell.
+* computed: ``ant_braak_group`` and ``ant_apoe_carrier`` are computed
+  centrally from the published ``ant_braak`` / ``ant_apoe`` when the
+  ``.md`` declares neither (``COMPUTED_FACETS``; the SQL is
+  ``anthive_db._computed_facet_sql``).
 
 The semantics mirror ``anthive_db.build_obs_view_sql``, which builds the
 served ``obscat``/``obsnum`` views from the same config. This module only
@@ -39,6 +43,15 @@ RENAMED = 'renamed'
 DERIVED = 'derived'
 CONSTANT = 'constant'
 NATIVE = 'native'
+COMPUTED = 'computed'
+
+#: Facet computed centrally -> the facet it is computed from, with the rule
+#: as published text. Mirrors ``anthive_db.COMPUTED_FACETS``.
+COMPUTED_FACETS: Dict[str, Tuple[str, str]] = {
+    'ant_braak_group': ('ant_braak', 'Braak 0 to 2 low, 3 to 4 medium, 5 to 6 high; anything else NULL'),
+    'ant_apoe_carrier': ('ant_apoe', 'E4+ when ant_apoe (E<a>/E<b>) holds an E4 allele, E4- when it holds '
+                                     'none; values of another form NULL'),
+}
 
 # Translation rules for one author value.
 RULE_MAPPED = 'mapped'          # listed in obs_value_rename / obs_derive map
@@ -102,7 +115,7 @@ def project_dataset(
 
     Returns:
         One entry per facet, sorted by name, with keys ``facet``,
-        ``mapping_kind`` (renamed / derived / constant / native), ``live``
+        ``mapping_kind`` (renamed / derived / constant / native / computed), ``live``
         (the served view exposes it), ``dtype``, ``source_columns``,
         ``sources`` (``{column, published_as, hidden}``), ``source_hidden``,
         ``value_map`` (``{from, to, rule}`` in .md order), ``unmapped``
@@ -206,6 +219,18 @@ def project_dataset(
             continue
         entry = _base(target, CONSTANT, spec.get('dtype'))
         entry['constant_value'] = _json_value(spec.get('value'))
+        entries[target] = entry
+
+    # Centrally computed facets: the dataset publishes the source facet but
+    # declares nothing for the target (anthive_db.build_obs_view_sql).
+    for target, (source_facet, rule) in COMPUTED_FACETS.items():
+        if target in entries or source_facet not in entries:
+            continue
+        entry = _base(target, COMPUTED, 'categorical')
+        entry['source_columns'] = [source_facet]
+        entry['sources'] = [{'column': source_facet, 'published_as': source_facet, 'hidden': False}]
+        entry['computed_rule'] = rule
+        entry['unmapped'] = None
         entries[target] = entry
 
     # A facet the view serves without any declaration came from the h5ad
@@ -358,7 +383,7 @@ def candidate_columns(columns: Iterable[str], keywords: Iterable[str]) -> List[s
 
 
 __all__ = [
-    'FACET_PREFIX', 'RENAMED', 'DERIVED', 'CONSTANT', 'NATIVE',
+    'FACET_PREFIX', 'RENAMED', 'DERIVED', 'CONSTANT', 'NATIVE', 'COMPUTED', 'COMPUTED_FACETS',
     'RULE_MAPPED', 'RULE_HIDDEN', 'RULE_PASSTHROUGH', 'RULE_DEFAULT',
     'is_facet', 'project_dataset', 'translate', 'translate_observed',
     'redact_hidden_sources', 'candidate_columns',

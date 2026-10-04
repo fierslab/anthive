@@ -13342,7 +13342,7 @@ _FACET_MAPPING_KEYS = (
     'mapping_kind', 'live', 'source_columns', 'sources', 'source_hidden',
     'redacted', 'value_map', 'unmapped', 'default', 'constant_value',
     'n_missing', 'range', 'n_distinct_source_values', 'value_map_truncated',
-    'source_missing',
+    'source_missing', 'computed_rule',
 )
 
 
@@ -13554,7 +13554,7 @@ def get_dataset_facets(
 
         {
           "facet": "ant_sex", "label": "Sex", "summary": "...", "defined": true,
-          "mapping_kind": "renamed",        # renamed | derived | constant | native
+          "mapping_kind": "renamed",        # renamed | derived | constant | native | computed
           "live": true, "dtype": "categorical",
           "source_columns": ["sex"],
           "sources": [{"column": "sex", "published_as": "ant_sex", "hidden": false}],

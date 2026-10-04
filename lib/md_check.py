@@ -4,6 +4,10 @@ Anthive .md file sanity checks.
 Checks all metadata .md files in a folder tree for:
   - index.md:  presence and validity of group_id (3 chars), no cross-group duplicates
   - data .md:  presence and validity of id (3 chars), no within-group duplicates
+  - data .md:  the ``api:`` facet mapping and the lineage keys
+    (``lib/facet_lint.py``: closed ``ant_*`` namespace, mapping rules,
+    ``reanalysis_of`` / ``is_secondary`` / ``donor_group``); with
+    ``with_data=True`` also the rules that read the dataset's ``.duckdb``.
 
 Auto-generates missing IDs when fix=True (default).
 """
@@ -12,7 +16,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional, Set
 
 
 class MdCheckReport:
@@ -25,6 +29,29 @@ class MdCheckReport:
         self.checked: int = 0
         self.index_count: int = 0
         self.data_count: int = 0
+        # facet lint: rule id -> files that violate it (relative paths)
+        self.rule_files: Dict[str, Set[str]] = {}
+        self.data_checked: int = 0
+        self.data_unavailable: List[str] = []
+
+    def add_finding(self, rel_path: str, finding) -> None:
+        """Record one ``facet_lint.Finding`` for ``rel_path``."""
+        message = f"{rel_path}: [{finding.rule}] {finding.message}"
+        if finding.severity == 'error':
+            self.errors.append(message)
+        else:
+            self.warnings.append(message)
+        self.rule_files.setdefault(finding.rule, set()).add(rel_path)
+
+    def rule_summary(self) -> List[str]:
+        """One line per violated facet-lint rule: files affected."""
+        from facet_lint import RULES  # noqa: PLC0415
+        lines = []
+        for rule in RULES:
+            files = self.rule_files.get(rule)
+            if files:
+                lines.append(f"{rule:28s} {len(files):4d} file(s)  {RULES[rule]}")
+        return lines
 
     def has_errors(self) -> bool:
         return len(self.errors) > 0
@@ -140,6 +167,9 @@ def check_md_folder(
     report: MdCheckReport,
     fix: bool = True,
     verbose: bool = False,
+    namespace_mode: Optional[str] = None,
+    with_data: bool = False,
+    known_db_ids: Optional[Set[str]] = None,
 ) -> None:
     """Check all anthive .md files under folder.
 
@@ -160,16 +190,28 @@ def check_md_folder(
         report:  Accumulator for results (modified in-place)
         fix:     Write missing IDs back to the .md files (default True)
         verbose: Print a status line for every file processed
+        namespace_mode: ``warn`` or ``error`` for ``ant_*`` targets that are
+            not registered facets (default ``facet_lint.NAMESPACE_DEFAULT_MODE``)
+        with_data: Also run the facet rules that read each dataset's
+            ``.duckdb`` (source columns and values); datasets without a
+            local ``.duckdb`` are listed in ``report.data_unavailable``
+        known_db_ids: Dataset ids that ``reanalysis_of`` may name. Default:
+            the ids found under ``folder`` (``<group_id>/<id>``)
     """
     lib_dir = Path(__file__).parent
     if str(lib_dir) not in sys.path:
         sys.path.insert(0, str(lib_dir))
     from metadata import parse_md_file, write_md_file
+    import facet_lint  # noqa: PLC0415
+    namespace_mode = namespace_mode or facet_lint.NAMESPACE_DEFAULT_MODE
 
     index_files: List[Path] = []
     data_files: List[Path] = []
 
     for md_path in sorted(folder.rglob('*.md')):
+        # `_`-prefixed folders are staging / archive, excluded everywhere
+        if any(part.startswith('_') for part in md_path.relative_to(folder).parts[:-1]):
+            continue
         if md_path.name == 'index.md':
             index_files.append(md_path)
         elif md_path.with_suffix('.h5ad').exists():
@@ -184,6 +226,8 @@ def check_md_folder(
 
     # Map: normalised gid → top-level folder name that first claimed it
     group_ids: Dict[str, str] = {}
+    # Map: top-level folder → its group_id (for <group_id>/<id> dataset ids)
+    folder_group_id: Dict[str, str] = {}
 
     for md_path in index_files:
         try:
@@ -207,6 +251,10 @@ def check_md_folder(
             )
 
         gid_str = str(group_id)
+        if md_path.parent == folder / top_level:
+            folder_group_id[top_level] = gid_str
+        else:
+            folder_group_id.setdefault(top_level, gid_str)
         if len(gid_str) != 3:
             report.errors.append(
                 f"{md_path.relative_to(folder)}: "
@@ -241,6 +289,8 @@ def check_md_folder(
 
     # Track ids per parent directory for within-group duplicate detection
     dir_ids: Dict[Path, Dict[str, Path]] = {}
+    # (relative path, md path, frontmatter) for the facet and lineage lint
+    linted: List[tuple] = []
 
     for md_path in data_files:
         try:
@@ -294,6 +344,73 @@ def check_md_folder(
         if verbose:
             mark = '+' if changed else '✓'
             print(f"  {mark} {md_path.relative_to(folder)}  (id={file_id})")
+
+        group_id_here = metadata.get('group_id') or folder_group_id.get(_top_level_name(md_path, folder))
+        linted.append((str(md_path.relative_to(folder)), md_path, metadata,
+                       f"{group_id_here}/{file_id}" if group_id_here else None))
+
+    # ── facet mapping and lineage lint ───────────────────────────────────────
+
+    if known_db_ids is None:
+        known_db_ids = {db_id for _, _, _, db_id in linted if db_id}
+    for rel_path, md_path, metadata, _db_id in linted:
+        api = metadata.get('api') or {}
+        for finding in facet_lint.lint_api(api, namespace_mode=namespace_mode):
+            report.add_finding(rel_path, finding)
+        for finding in facet_lint.lint_lineage(metadata, known_db_ids):
+            report.add_finding(rel_path, finding)
+        if not with_data or not api:
+            continue
+        duckdb_path = md_path.with_suffix('.duckdb')
+        reader = facet_lint.duckdb_reader(duckdb_path) if duckdb_path.exists() else None
+        if reader is None:
+            report.data_unavailable.append(rel_path)
+            continue
+        columns, distinct_values, close = reader
+        try:
+            for finding in facet_lint.lint_api_data(api, columns, distinct_values):
+                report.add_finding(rel_path, finding)
+            report.data_checked += 1
+        finally:
+            close()
+
+
+def collect_db_ids(store_root: Path) -> Set[str]:
+    """``<group_id>/<id>`` of every data ``.md`` under ``store_root``.
+
+    The group id comes from the collection-root ``index.md`` (or the data
+    ``.md``'s own ``group_id``). Underscore folders are skipped. Used for
+    ``reanalysis_of`` targets when only part of the store is checked.
+    """
+    lib_dir = Path(__file__).parent
+    if str(lib_dir) not in sys.path:
+        sys.path.insert(0, str(lib_dir))
+    from metadata import parse_md_file  # noqa: PLC0415
+
+    store_root = Path(store_root)
+    group_of: Dict[str, Optional[str]] = {}
+    ids: Set[str] = set()
+    for md_path in sorted(store_root.rglob('*.md')):
+        parts = md_path.relative_to(store_root).parts
+        if any(part.startswith('_') for part in parts[:-1]) or len(parts) < 2:
+            continue
+        if md_path.name == 'index.md' or not md_path.with_suffix('.h5ad').exists():
+            continue
+        top = parts[0]
+        if top not in group_of:
+            index = store_root / top / 'index.md'
+            try:
+                group_of[top] = parse_md_file(index)[0].get('group_id') if index.exists() else None
+            except Exception:
+                group_of[top] = None
+        try:
+            metadata, _ = parse_md_file(md_path)
+        except Exception:
+            continue
+        group_id = metadata.get('group_id') or group_of[top]
+        if group_id and metadata.get('id'):
+            ids.add(f"{group_id}/{metadata['id']}")
+    return ids
 
 
 def write_log_entry(folder: Path, tool_name: str, messages: List[str]) -> None:

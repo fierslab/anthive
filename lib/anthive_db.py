@@ -7,6 +7,7 @@ Provides a clean interface to query DuckDB databases created by ant-convert
 import copy
 import fcntl
 import json
+import logging
 import math
 import re
 import threading
@@ -57,6 +58,39 @@ def _q(name: str) -> str:
     return '"' + str(name).replace('"', '""') + '"'
 
 
+#: Facets computed centrally from another facet when a dataset's ``.md``
+#: does not declare them (decision L2, 2026-10-04). The rules are documented
+#: in ``doc/DESIGN_canonical_columns.md`` and mirrored in
+#: ``facet_mapping.COMPUTED_FACETS`` and ``facet_lint.braak_group_of``.
+COMPUTED_FACETS: Dict[str, str] = {
+    'ant_braak_group': 'ant_braak',
+    'ant_apoe_carrier': 'ant_apoe',
+}
+
+
+def _computed_facet_sql(target: str, source_expr: str) -> str:
+    """SQL for a centrally computed facet over the published source facet.
+
+    * ``ant_braak_group``: Braak 0 to 2 ``low``, 3 to 4 ``medium``, 5 to 6
+      ``high``; anything else (NULL, text, 7, 2.5) is NULL.
+    * ``ant_apoe_carrier``: an ``ant_apoe`` value of the shared form
+      ``E<a>/E<b>`` (a, b in 2, 3, 4) is ``E4+`` when it holds an E4 allele
+      and ``E4-`` otherwise; any other value (a single allele, author codes
+      the dataset did not rewrite) is NULL.
+    """
+    if target == 'ant_braak_group':
+        stage = f'TRY_CAST({source_expr} AS DOUBLE)'
+        return (f"CASE WHEN {stage} IN (0, 1, 2) THEN 'low' "
+                f"WHEN {stage} IN (3, 4) THEN 'medium' "
+                f"WHEN {stage} IN (5, 6) THEN 'high' ELSE NULL END")
+    if target == 'ant_apoe_carrier':
+        text = f'CAST({source_expr} AS VARCHAR)'
+        return (f"CASE WHEN regexp_full_match({text}, 'E[234]/E[234]') "
+                f"THEN (CASE WHEN contains({text}, 'E4') THEN 'E4+' ELSE 'E4-' END) "
+                f"ELSE NULL END")
+    raise ValueError(f'no central rule for {target}')
+
+
 def build_obs_view_sql(
     view_name: str,
     underscore_table: str,
@@ -64,6 +98,7 @@ def build_obs_view_sql(
     api_config: Optional[Dict[str, Any]] = None,
     sibling_underscore_table: Optional[str] = None,
     sibling_columns: Optional[List[str]] = None,
+    db_label: Optional[str] = None,
 ) -> str:
     """Return the ``CREATE VIEW`` SQL for the obscat/obsnum view.
 
@@ -77,11 +112,23 @@ def build_obs_view_sql(
     A derivation whose ``dtype`` matches this view is emitted here.
     If the derivation's ``source`` column lives in the sibling __obs*
     table (obsnum-sourced obscat derivation, or vice versa), pass the
-    sibling table + column list so we can JOIN it in.
+    sibling table + column list so we can JOIN it in. A derivation whose
+    source exists in neither table is dropped with a logged warning (it
+    used to be dropped silently; the audit found 28 files that lost data
+    that way). Pass both tables to avoid false warnings.
+
+    ``ant_braak_group`` and ``ant_apoe_carrier`` are computed centrally
+    from the published ``ant_braak`` / ``ant_apoe`` (``COMPUTED_FACETS``,
+    ``_computed_facet_sql``) when the ``.md`` declares neither the facet
+    itself nor a stored column of that name. They land in the obscat view.
 
     Shared by ant-convert (initial view build) and AnnotationWriter
     (view rebuild after ALTER TABLE ADD COLUMN).
+
+    Args:
+        db_label: Dataset name used in the warning log lines.
     """
+    log = logging.getLogger(__name__)
     api = api_config or {}
     rename = api.get('obs_rename', {}) or {}
     hidden = set(api.get('obs_hidden', []) or [])
@@ -94,6 +141,7 @@ def build_obs_view_sql(
     view_dtype = 'categorical' if view_name.endswith('obscat') else 'numerical'
     own_cols = set(columns)
     sibling_cols = set(sibling_columns or [])
+    has_sibling = bool(sibling_underscore_table)
     active_derive = {}
     join_sibling = False
     for new_col, spec in derive_all.items():
@@ -102,12 +150,17 @@ def build_obs_view_sql(
         source = spec.get('source')
         if source in own_cols:
             spec = {**spec, '_source_table': 'o'}     # this view's alias
-        elif source in sibling_cols and sibling_underscore_table:
+        elif source in sibling_cols and has_sibling:
             spec = {**spec, '_source_table': 's'}     # sibling alias
             join_sibling = True
         else:
-            # Source column not found anywhere — silently skip (source
-            # may be an obs col not in either projection table yet).
+            # Source column not found: the derived column is not published.
+            # Loud, because a typo or a renamed author column otherwise
+            # turns a whole facet into nothing without anyone noticing.
+            where = 'this table' if not has_sibling else 'either obs table'
+            log.warning(
+                "obs_derive %s%s: source column %r is not in %s; %s is not published",
+                new_col, f' ({db_label})' if db_label else '', source, where, new_col)
             continue
         active_derive[new_col] = spec
 
@@ -119,29 +172,18 @@ def build_obs_view_sql(
         """Escape a Python value for a SQL string literal."""
         return "'" + str(v).replace("'", "''") + "'"
 
-    def _projection_for(col: str) -> str:
-        """Build the SELECT-list projection for a single stored column.
-
-        Adds value-level rename+hide via a CASE expression when the col is
-        configured in ``obs_value_rename`` / ``obs_value_hidden``. Ordering
-        inside the CASE: hidden values → NULL FIRST, then rename branches,
-        else passthrough. That way a value that's both hidden and renamed
-        stays NULL (hide wins).
-        """
-        col_sql = f'o.{_q(col)}'
-        alias = rename.get(col, col)
-        # Public rename targets go through the strict safe_ident (defense
-        # against SQL injection via a crafted .md). The default alias
-        # (=stored col name from information_schema) is trusted and can
-        # contain legacy characters like '#' or spaces — quote permissively.
-        alias_sql = safe_ident(alias) if col in rename else _q(alias)
+    def _value_expr(col: str, table_alias: str) -> str:
+        """The published value of stored column ``col``: value-level
+        rename+hide via a CASE expression when the col is configured in
+        ``obs_value_rename`` / ``obs_value_hidden``. Ordering inside the
+        CASE: hidden values → NULL FIRST, then rename branches, else
+        passthrough. That way a value that's both hidden and renamed stays
+        NULL (hide wins)."""
+        col_sql = f'{table_alias}.{_q(col)}'
         vhide = list(value_hidden.get(col, []) or [])
         vren = dict(value_rename.get(col, {}) or {})
-
         if not vhide and not vren:
-            # Plain projection — same as pre-phase-2 behavior.
-            return f'{col_sql} AS {alias_sql}'
-
+            return col_sql
         branches = []
         if vhide:
             in_list = ', '.join(_sql_str(v) for v in vhide)
@@ -151,8 +193,63 @@ def build_obs_view_sql(
                 f'WHEN {col_sql} = {_sql_str(old_val)} '
                 f'THEN {"NULL" if new_val is None else _sql_str(new_val)}'
             )
-        case_expr = f'CASE {" ".join(branches)} ELSE {col_sql} END'
-        return f'{case_expr} AS {alias_sql}'
+        return f'CASE {" ".join(branches)} ELSE {col_sql} END'
+
+    def _projection_for(col: str) -> str:
+        """Build the SELECT-list projection for a single stored column."""
+        alias = rename.get(col, col)
+        # Public rename targets go through the strict safe_ident (defense
+        # against SQL injection via a crafted .md). The default alias
+        # (=stored col name from information_schema) is trusted and can
+        # contain legacy characters like '#' or spaces — quote permissively.
+        alias_sql = safe_ident(alias) if col in rename else _q(alias)
+        return f'{_value_expr(col, "o")} AS {alias_sql}'
+
+    def _derive_expr(spec: Dict[str, Any], table_alias: str) -> str:
+        col_sql = f"{table_alias}.{_q(spec['source'])}"
+        mapping = spec.get('map', {}) or {}
+        dtype = spec.get('dtype')
+
+        def _lit(val: Any) -> str:
+            if val is None:
+                return 'NULL'
+            if dtype == 'numerical':
+                return f'{float(val)}'
+            return "'" + str(val).replace("'", "''") + "'"
+
+        branches = [f"WHEN {col_sql} = {_sql_str(old_val)} THEN {_lit(new_val)}"
+                    for old_val, new_val in mapping.items()]
+        return f"CASE {' '.join(branches)} ELSE {_lit(spec.get('default'))} END"
+
+    def _published_expr(target: str) -> Optional[Tuple[str, bool]]:
+        """SQL for facet ``target`` as published in either view, as
+        ``(expression, needs the sibling join)``; None when the dataset does
+        not publish it from data this view can reach."""
+        for col, alias in rename.items():
+            if alias != target or col in hidden:
+                continue
+            if col in own_cols:
+                return _value_expr(col, 'o'), False
+            if col in sibling_cols and has_sibling:
+                return _value_expr(col, 's'), True
+            return None
+        spec = derive_all.get(target)
+        if isinstance(spec, dict) and spec.get('source'):
+            source = spec['source']
+            if source in own_cols:
+                return _derive_expr(spec, 'o'), False
+            if source in sibling_cols and has_sibling:
+                return _derive_expr(spec, 's'), True
+            return None
+        spec = constant_all.get(target)
+        if isinstance(spec, dict) and spec.get('value') is not None:
+            return _sql_str(spec['value']), False
+        if target not in hidden:  # a stored column already named ant_x
+            if target in own_cols:
+                return f'o.{_q(target)}', False
+            if target in sibling_cols and has_sibling:
+                return f's.{_q(target)}', True
+        return None
 
     projections = ['c.cell_name']
     for col in columns:
@@ -180,29 +277,22 @@ def build_obs_view_sql(
     # The alias is validated by safe_ident (strict) since it's a
     # user-supplied string that lands in the public schema.
     for new_col, spec in active_derive.items():
-        src_table_alias = spec['_source_table']
-        source = spec['source']
-        col_sql = f"{src_table_alias}.{_q(source)}"
-        mapping = spec.get('map', {}) or {}
-        default = spec.get('default')
-        dtype = spec.get('dtype')
+        projections.append(f"{_derive_expr(spec, spec['_source_table'])} AS {safe_ident(new_col)}")
 
-        def _lit(val: Any) -> str:
-            if val is None:
-                return 'NULL'
-            if dtype == 'numerical':
-                return f'{float(val)}'
-            return "'" + str(val).replace("'", "''") + "'"
-
-        branches = []
-        for old_val, new_val in mapping.items():
-            branches.append(
-                f"WHEN {col_sql} = {_sql_str(old_val)} THEN {_lit(new_val)}"
-            )
-        case_expr = (
-            f"CASE {' '.join(branches)} ELSE {_lit(default)} END"
-        )
-        projections.append(f"{case_expr} AS {safe_ident(new_col)}")
+    # Centrally computed facets (obscat only), unless the dataset declares
+    # them or stores a column of that name.
+    if view_dtype == 'categorical':
+        declared = (set(rename.values()) | set(derive_all) | set(constant_all)
+                    | own_cols | sibling_cols)
+        for target, source_facet in COMPUTED_FACETS.items():
+            if target in declared:
+                continue
+            published = _published_expr(source_facet)
+            if published is None:
+                continue
+            expression, needs_sibling = published
+            join_sibling = join_sibling or needs_sibling
+            projections.append(f"{_computed_facet_sql(target, expression)} AS {safe_ident(target)}")
 
     join_sql = f"JOIN __cells c ON o.cell_id = c.cell_id"
     if join_sibling and sibling_underscore_table:

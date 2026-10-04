@@ -763,6 +763,8 @@ def convert_observations(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict)
 
     # Reserved column names that cannot be used
     RESERVED_COLUMNS = {'cell_id', 'cell_name', 'gene_id', 'gene_name'}
+    # view name -> stored columns (with cell_id), filled as tables are created
+    view_columns: Dict[str, List[str]] = {}
 
     # Convert numerical observations
     obsnum_cols = metadata.get('obsnum_include', [])
@@ -817,13 +819,8 @@ def convert_observations(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict)
             conn.execute("INSERT INTO __obsnum SELECT * FROM temp_obsnum")
             conn.unregister('temp_obsnum')
 
-            # Create view — apply .md api: section (rename+hide) at
-            # projection time so old internal names are unreachable via
-            # this view (or anything reading through it).
-            conn.execute(build_obs_view_sql(
-                'obsnum', '__obsnum', ['cell_id'] + obsnum_cols,
-                get_api_config(metadata),
-            ))
+            # The view is created below, once both __obs* tables exist.
+            view_columns['obsnum'] = ['cell_id'] + obsnum_cols
 
             print(f"  ✓ obsnum: {len(obsnum_cols)} columns")
 
@@ -892,13 +889,28 @@ def convert_observations(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict)
             # these filters anyway, and the indexes tripled file size and made
             # AnnotationWriter overwrites 100-4000x slower (see ant-drop-indexes).
 
-            # Create view — apply .md api: section (rename+hide).
-            conn.execute(build_obs_view_sql(
-                'obscat', '__obscat', ['cell_id'] + obscat_cols,
-                get_api_config(metadata),
-            ))
+            # The view is created below, once both __obs* tables exist.
+            view_columns['obscat'] = ['cell_id'] + obscat_cols
 
             print(f"  ✓ obscat: {len(obscat_cols)} columns")
+
+    # Create the views — apply the .md api: section (rename, hide, derive,
+    # constant, central facets) at projection time so old internal names are
+    # unreachable via the view. Built after both tables exist and with the
+    # sibling table passed, so a derive whose source lives in the other
+    # table (e.g. a numerical ant_braak from a text Braak column) is kept;
+    # before 2026-10-05 such derives were dropped silently at ingest.
+    api_config = get_api_config(metadata)
+    for view_name, sibling_name in (('obsnum', 'obscat'), ('obscat', 'obsnum')):
+        if view_name not in view_columns:
+            continue
+        sibling_columns = view_columns.get(sibling_name)
+        conn.execute(build_obs_view_sql(
+            view_name, f'__{view_name}', view_columns[view_name], api_config,
+            sibling_underscore_table=f'__{sibling_name}' if sibling_columns else None,
+            sibling_columns=sibling_columns,
+            db_label=str(metadata.get('id') or metadata.get('title') or ''),
+        ))
 
 
 def convert_variables(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict) -> None:
