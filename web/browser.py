@@ -2781,6 +2781,11 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         'group_id': db.get('group_id'),
         'title': db.get('title'),
         'modified': _modified_ts(db),
+        # lineage (API: primary / reanalysis / unresolved, donor group)
+        'designation': db.get('designation'),
+        'reanalysis_of': _as_list(db.get('reanalysis_of')),
+        'donor_group': db.get('donor_group'),
+        'has_donor_uid': bool(db.get('has_donor_uid')),
     }
 
     accession = db.get('accession')
@@ -3559,6 +3564,25 @@ async def facets_index(request: Request):
     })
 
 
+@router.get("/donor-groups", response_class=HTMLResponse)
+async def donor_groups_view(request: Request):
+    """Donor groups: datasets whose donors come from one donor collection,
+    each marked primary data, reanalysis or unresolved (GET /donor-groups)."""
+    api_url = _api_url(request)
+    error: Optional[str] = None
+    payload: Dict[str, Any] = {}
+    try:
+        payload = _api_get(api_url, "/donor-groups") or {}
+    except Exception as exc:
+        error = f"Failed to load donor groups from ant-serve: {exc}"
+    groups = sorted(payload.get("groups") or [], key=lambda g: str(g.get("donor_group") or ""))
+    return templates.TemplateResponse(request, "donor_groups.html", {
+        "groups": groups,
+        "n_ungrouped": payload.get("n_ungrouped"),
+        "error": error,
+    })
+
+
 @router.get("/facets/{facet_name}", response_class=HTMLResponse)
 async def facet_detail_view(request: Request, facet_name: str):
     """Per-facet drilldown page.
@@ -4235,6 +4259,10 @@ def _fx_donors_text(unit: Dict[str, Any]) -> str:
 def _fx_pills(unit: Dict[str, Any]) -> List[Tuple[str, str, str]]:
     flags = unit.get('flags') or {}
     pills: List[Tuple[str, str, str]] = []
+    if unit.get('is_secondary'):
+        pills.append(('reanalysis, not counted', 'warn',
+                      'A reanalysis of cells another dataset serves. Shown, but never counted towards '
+                      'replication and left out of pooled numbers.'))
     if flags.get('descriptive_only'):
         pills.append(('descriptive only', 'warn',
                       'A level has fewer than 5 donors (Braak: fewer than 10). Estimates are shown '

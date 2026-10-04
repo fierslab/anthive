@@ -85,6 +85,7 @@ line-art logo (grayscale+alpha PNG), so it's shown on a dark hero panel.
 | `/api-guide` | how to use the REST API: login (basic auth on /api, netrc, env vars), curl first steps, pyvark, vark, admin-only endpoints and limits, API version; links on to `/api/docs`. Target of the top-bar `API` link (`#topbar-api-link`) and the user-menu entry (`#api-menu-link`). Examples use `mcp.public_base_url` or the request host, always https; text adapts to `auth.mode` | `api_guide.html` |
 | `/papers/{citekey}` | one library paper: record, summary/topics (draft markers), linked datasets grouped by role with the reason, related papers grouped by kind with evidence, PDF + BibTeX | `paper.html` |
 | `/library` | all library papers, client-side search + role/year/cohort/cell-type filters | `library.html` |
+| `/donor-groups` | every donor group (`GET /donor-groups`) with its datasets marked primary data / reanalysis / unresolved, `#dg-<slug>` anchors; linked from the dataset lineage row, `/facets` and the help page | `donor_groups.html` |
 
 **Paper library UI (API 2.39+).** `dataset_view` fetches `/databases/{id}/papers`
 and `folder_view` does so for every dataset of the collection (deduplicated,
@@ -122,6 +123,21 @@ rendered from one partial, `_facet_effects.html` (macros `fx_table`,
 `fx_rows`, `fx_model`, `fx_sex_control`, `fx_methods_box`, `fx_recurring`,
 `fx_gene_panel`, plus `fx_script` for expand-and-fetch and
 `fx_forest_assets` for the HTML/CSS forest, `window.antFx.renderCard`).
+The forest card (`renderCard(box, card, {open})`) is summary-first: one
+`details.fxs-group` line per cell type group (units matched on
+`celltype_group`, never on the raw `cell_type`, which is shown in small text),
+"up in k of m independent cohorts" plus the median log2FC of the counted
+rows; the per-dataset forest is collapsed under it, rows that do not count are
+folded with their `not_counted_reason`, `q_counted` shows as "xn" under q
+when `n_sibling_strata` > 1, and groups without a counted row sit in one
+collapsed `details.fxs-rest`. Reanalyses (`is_secondary`) get the
+"reanalysis, not counted" pill. The dataset page has a lineage row
+(`#ds-lineage`: designation pill, reanalysis of, donor group link) from the
+`designation`/`reanalysis_of`/`donor_group`/`has_donor_uid` fields of
+`/info`, copied into the curated `info` dict in `dataset_view`. Layout rules:
+`table.ds-facets td.num` (nowrap, right) out-specifies plain `.fx-table`
+rules inside the dataset card, so fx rules that must win there are written as
+`table.ds-facets table.fx-table td.x, table.fx-table td.x`.
 Places: under each facet row of the dataset `#ds-facets` card (no separate
 tab; `_facet_tests_view` groups units by facet column), "Effects across
 datasets" on `/facets/{name}` (`#facet-effects`, replaces the per-cell "Top

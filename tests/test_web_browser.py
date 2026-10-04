@@ -6905,3 +6905,81 @@ def test_fx_forest_folds_rows_not_counted():
     assert "fxf-more" in html and "fxf-hidden" in html
     assert "not counted towards replication" in html
     assert 'class="zero" style="left:' in html
+
+
+_DONOR_GROUPS = {"n_groups": 1, "n_ungrouped": 3, "groups": [
+    {"donor_group": "rosmap", "n_datasets": 2, "n_primary": 1, "n_reanalysis": 1, "n_unresolved": 0,
+     "n_cells": 1000, "has_donor_uid": True, "datasets": [
+         {"db_id": "GroupA/ds1", "title": "Primary one", "group": "GroupA", "designation": "primary",
+          "is_secondary": False, "reanalysis_of": [], "has_donor_uid": True, "n_cells": 1000},
+         {"db_id": "GroupA/ds2", "title": "Reanalysed", "group": "GroupA", "designation": "reanalysis",
+          "is_secondary": True, "reanalysis_of": ["GroupA/ds1"], "has_donor_uid": True, "n_cells": 900}]}]}
+
+
+def _api_with(extra):
+    """_fake_api_get plus path overrides (path -> payload, or a callable)."""
+    def api_get(api_url, path, **kwargs):  # pyright: ignore
+        for key, value in extra.items():
+            if path == key:
+                return value(path) if callable(value) else value
+        return _fake_api_get(api_url, path, **kwargs)
+    return api_get
+
+
+def test_donor_groups_page_lists_groups_and_designations(client, monkeypatch):
+    monkeypatch.setattr(browser, "_api_get", _api_with({"/donor-groups": _DONOR_GROUPS}))
+    text = client.get("/donor-groups").text
+    assert 'id="dg-rosmap"' in text and 'href="#dg-rosmap"' in text
+    assert "primary data" in text and "reanalysis" in text
+    assert 'href="/browse/GroupA/ds1"' in text
+    assert "3 datasets have no donor group yet." in text
+    assert "1,000 cells in primary datasets" in text
+    assert "—" not in text.split('id="dg-intro"')[1].split("{% endblock")[0].split("</main>")[0]
+
+
+def test_donor_groups_page_survives_api_error(client, monkeypatch):
+    def broken(path):
+        raise requests.HTTPError("500")
+    monkeypatch.setattr(browser, "_api_get", _api_with({"/donor-groups": broken}))
+    resp = client.get("/donor-groups")
+    assert resp.status_code == 200 and "Failed to load donor groups" in resp.text
+
+
+def test_dataset_page_shows_lineage(client, monkeypatch):
+    info = dict(_INFO["GroupA/ds1"], designation="reanalysis", reanalysis_of=["GroupA/ds2"],
+                donor_group="rosmap", has_donor_uid=True)
+    monkeypatch.setattr(browser, "_api_get", _api_with({"/databases/GroupA/ds1/info": info}))
+    text = client.get("/browse/GroupA/ds1").text
+    lineage = text.split('id="ds-lineage"')[1].split("</div>")[0]
+    assert 'class="lineage-pill reanalysis"' in lineage
+    assert 'id="ds-reanalysis-of"' in lineage and 'href="/browse/GroupA/ds2"' in lineage
+    assert 'href="/donor-groups#dg-rosmap"' in lineage
+
+
+def test_dataset_page_without_designation_has_no_lineage_row(client):
+    text = client.get("/browse/GroupA/ds1").text
+    assert 'id="ds-lineage"' not in text
+
+
+def test_fx_pills_mark_reanalysis_not_counted():
+    pills = browser._fx_pills({"is_secondary": True, "flags": {}})
+    assert pills[0][0] == "reanalysis, not counted"
+
+
+def test_help_explains_groups_counting_and_ranking(client):
+    text = client.get("/help").text
+    section = text.split('id="facet-counting"')[1].split("</section>")[0]
+    for phrase in ("cell type group", "lib/celltype_groups.yaml", "Bonferroni", "agreement",
+                   "median absolute log2 fold change", "reanalysis, not counted", 'href="/donor-groups"'):
+        assert phrase in section, phrase
+    assert "—" not in section
+
+
+def test_fx_forest_summary_first_by_cell_type_group():
+    """The forest card renders one summary line per cell type group (matched
+    on celltype_group) with the per-dataset forest collapsed under it."""
+    html = str(browser.templates.env.get_template("_facet_effects.html").module.fx_forest_assets())
+    assert "celltype_group" in html and "details class=\"fxs-group\"" in html
+    assert "fxs-rest" in html and "with no counted result" in html
+    assert "not_counted_reason" in html and "n_sibling_strata" in html and "q_counted" in html
+    assert "reanalysis, not counted" in html
