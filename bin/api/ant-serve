@@ -627,6 +627,31 @@ def _json_serial(obj: object) -> str:
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
+def _lineage_fields(file_metadata: Dict[str, Any], obs_categorical: List[str]) -> Dict[str, Any]:
+    """Lineage of one dataset from its ``.md`` (audit decision L3).
+
+    ``is_secondary`` is True only for an explicit ``is_secondary: true``.
+    ``designation`` is ``reanalysis`` (``is_secondary: true``), ``primary``
+    (``is_secondary: false``) or ``unresolved`` (the key is absent: the
+    2026-10 audit could not decide). ``reanalysis_of`` is a list of db_ids
+    (empty for primaries and for unresolved datasets), ``donor_group`` a
+    slug or None, and ``has_donor_uid`` says whether the served obscat view
+    carries ``ant_donor_uid``.
+    """
+    targets = file_metadata.get('reanalysis_of') or []
+    if isinstance(targets, str):
+        targets = [targets]
+    donor_group = file_metadata.get('donor_group')
+    flag = file_metadata.get('is_secondary')
+    designation = 'reanalysis' if flag is True else 'primary' if flag is False else 'unresolved'
+    return {
+        'designation': designation,
+        'reanalysis_of': [str(t) for t in targets],
+        'donor_group': str(donor_group) if donor_group else None,
+        'has_donor_uid': 'ant_donor_uid' in (obs_categorical or []),
+    }
+
+
 def _caveats_or_empty(file_metadata: dict, md_path) -> list:
     """Return get_caveats(file_metadata), or [] on any validation error.
 
@@ -1480,6 +1505,11 @@ class DatabaseRegistry:
             'default_layer': file_metadata.get('default_layer'),
             'has_lognorm':   file_metadata.get('has_lognorm', True),
             'is_secondary':  file_metadata.get('is_secondary', False),
+            # Lineage (audit L3): the datasets this one reanalyses (db_ids,
+            # only on secondaries), the donor pool it shares with sibling
+            # datasets (slug) and whether it publishes the cross-dataset
+            # donor id ant_donor_uid. See _lineage_fields.
+            **_lineage_fields(file_metadata, obs_categorical),
 
             # Biology & study annotation (resolved from .h5ad.mus + .env cascade)
             'organism':         ann.get('organism'),
@@ -3374,6 +3404,64 @@ def list_databases(
     }
 
 
+@app.get("/donor-groups", tags=["databases"])
+def list_donor_groups(
+    donor_group: Optional[str] = Query(None, description="Only this donor group (slug)."),
+):
+    """Donor groups and their datasets (audit decision L3).
+
+    A donor group (``donor_group:`` in a dataset's ``.md``) names datasets
+    that hold cells of the same donor pool: complementary splits of one
+    study (cell classes, regions, libraries) or several studies of one
+    cohort. Datasets of one group share persons, so cross-dataset tools must
+    not count them as independent donors.
+
+    Returns ``groups`` (sorted by slug), each with ``donor_group``,
+    ``n_datasets``, ``n_primary``, ``n_reanalysis``, ``n_unresolved``,
+    ``n_cells`` (primaries only, so no cell is counted twice),
+    ``has_donor_uid`` (every dataset publishes ``ant_donor_uid``) and
+    ``datasets`` (``db_id``, ``title``, ``group``, ``designation``,
+    ``is_secondary``, ``reanalysis_of``, ``has_donor_uid``, ``n_cells``).
+    ``n_ungrouped`` counts datasets without a donor group. 404 when
+    ``donor_group`` names no group.
+    """
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    n_ungrouped = 0
+    for db in registry.list_databases():
+        slug = db.get('donor_group')
+        if not slug:
+            n_ungrouped += 1
+            continue
+        if donor_group and slug != donor_group:
+            continue
+        groups.setdefault(slug, []).append({
+            'db_id': db.get('id'),
+            'title': db.get('title') or db.get('id'),
+            'group': (db.get('collection') or {}).get('group'),
+            'designation': db.get('designation'),
+            'is_secondary': db.get('is_secondary') is True,
+            'reanalysis_of': list(db.get('reanalysis_of') or []),
+            'has_donor_uid': bool(db.get('has_donor_uid')),
+            'n_cells': int(db.get('n_cells') or 0),
+        })
+    if donor_group and donor_group not in groups:
+        raise HTTPException(status_code=404, detail=f"No dataset has donor_group {donor_group!r}")
+    rows = []
+    for slug in sorted(groups):
+        datasets = sorted(groups[slug], key=lambda d: (d['is_secondary'], d['db_id'] or ''))
+        rows.append({
+            'donor_group': slug,
+            'n_datasets': len(datasets),
+            'n_primary': sum(d['designation'] == 'primary' for d in datasets),
+            'n_reanalysis': sum(d['designation'] == 'reanalysis' for d in datasets),
+            'n_unresolved': sum(d['designation'] == 'unresolved' for d in datasets),
+            'n_cells': sum(d['n_cells'] for d in datasets if not d['is_secondary']),
+            'has_donor_uid': all(d['has_donor_uid'] for d in datasets),
+            'datasets': datasets,
+        })
+    return {'n_groups': len(rows), 'groups': rows, 'n_ungrouped': n_ungrouped}
+
+
 @app.get("/groups/{group_id}", tags=["databases"])
 def get_group_info(group_id: str):
     """
@@ -4238,7 +4326,8 @@ async def get_gene_stats_all(
     access: Optional[str] = Query(None, description="Comma-separated access filter ('internal' / 'public')"),
     tissue: Optional[str] = Query(None, description="Comma-separated tissue filter (free text; UBERON-aligned where available)"),
     include_remote: bool = Query(False, description="Include S3-remote duckdbs (slow). Default false — only locally-resident datasets are queried."),
-    refresh: bool = Query(False, description="Bypass the cache; recompute and overwrite cached entries")
+    refresh: bool = Query(False, description="Bypass the cache; recompute and overwrite cached entries"),
+    exclude_secondary: bool = Query(True, description="Leave out secondary datasets (is_secondary: true, reanalyses of cells served elsewhere) so a cell is not counted twice in the cross-dataset numbers. false lists them too, flagged is_secondary."),
 ):
     """
     Get expression statistics for selected genes across **all** databases that have a `default_layer`.
@@ -4254,6 +4343,10 @@ async def get_gene_stats_all(
     - `access`: internal, public
     - `tissue`: free text, UBERON-aligned where available (e.g. brain)
     - `include_remote`: include S3-remote-only datasets (slow). Default off.
+    - `exclude_secondary` (default true): secondary datasets (reanalyses of
+      cells another dataset serves) are left out of `results` and of
+      `cross_db_cv`; `n_excluded_secondary` counts them. With false they
+      are listed with `is_secondary: true` and enter the CV.
 
     **Serving path** (fastest → slowest):
     1. Precomputed fleet-wide parquet (`gene_stats_index.parquet`) — covers
@@ -4313,7 +4406,11 @@ async def get_gene_stats_all(
     targets: List[Tuple[str, Dict[str, Any], str, Optional[str]]] = []
     n_filtered = 0
     n_skipped_no_layer = 0
+    n_excluded_secondary = 0
     for db_id_inner, meta in registry.metadata_cache.items():
+        if exclude_secondary and meta.get('is_secondary') is True:
+            n_excluded_secondary += 1
+            continue
         layer = meta.get('default_layer')
         if not layer:
             n_skipped_no_layer += 1
@@ -4445,6 +4542,7 @@ async def get_gene_stats_all(
             'group': registry._db_extra.get(db_id_inner, {}).get('group_id', ''),
             'title': meta.get('title', db_id_inner),
             'n_cells': meta.get('n_cells', 0),
+            'is_secondary': meta.get('is_secondary') is True,
             'layer': layer,
             'served_from': served_from,
             'stats': ordered,
@@ -4520,6 +4618,8 @@ async def get_gene_stats_all(
         'n_databases': len(results),
         'n_skipped': n_skipped,
         'n_filtered': n_filtered,
+        'n_excluded_secondary': n_excluded_secondary,
+        'exclude_secondary': exclude_secondary,
         'filters': {
             'organism': sorted(organism_f) if organism_f else None,
             'cell_type': sorted(cell_type_f) if cell_type_f else None,
@@ -12594,8 +12694,15 @@ def get_module_variability(
     sort: str = Query("value:desc", description="'value:desc' (default), 'value:asc', 'abs_value:desc'."),
     limit: int = Query(500, ge=1, le=100000, description="Max rows returned."),
     format: str = Query("json", pattern="^(json|csv|tsv)$"),
+    exclude_secondary: bool = Query(True, description="Leave out rows of secondary datasets (is_secondary: true) unless `dataset` names one."),
 ):
     """Per-(dataset × source × catalog × module × tag × statistic) statistics.
+
+    ``exclude_secondary`` (default true) drops the rows of secondary
+    datasets (reanalyses of cells another dataset serves) from the listing,
+    unless ``dataset`` / ``db_id`` asks for that dataset explicitly.
+    ``n_excluded_secondary`` (JSON) and ``X-Excluded-Secondary`` (CSV / TSV)
+    count the rows left out.
 
     Statistics — variance-explained frame, comparable across categorical /
     numerical tags AND across datasets with different overall variability:
@@ -12637,6 +12744,13 @@ def get_module_variability(
 
     # Filter
     working = df
+    n_excluded_secondary = 0
+    if exclude_secondary and not dataset:
+        secondary = _secondary_db_ids()
+        if secondary:
+            is_secondary_row = working['dataset'].isin(secondary)
+            n_excluded_secondary = int(is_secondary_row.sum())
+            working = working[~is_secondary_row]
     if dataset:   working = working[working['dataset']    == dataset]
     if source:    working = working[working['source']     == source]
     if catalog:   working = working[working['catalog']    == catalog]
@@ -12689,6 +12803,7 @@ def get_module_variability(
                 "X-Total-Available": str(len(df)),
                 "X-Rows-Returned": str(len(working)),
                 "X-Truncated": "true" if truncated else "false",
+                "X-Excluded-Secondary": str(n_excluded_secondary),
                 **extra_headers,
             },
         )
@@ -12696,6 +12811,7 @@ def get_module_variability(
         "n_rows": int(len(working)),
         "n_total": int(len(df)),
         "truncated": bool(truncated),
+        "n_excluded_secondary": n_excluded_secondary,
         "sort": sort,
         "rows": working.to_dict(orient="records"),
     }
@@ -12736,6 +12852,14 @@ _FACET_INVENTORY_CACHE: Dict[str, Any] = {
     "rows": None,          # list of dicts, or None
     "signature": None,     # (registry cache signature, mv mtime)
 }
+
+
+def _secondary_db_ids() -> Set[str]:
+    """db_ids whose ``.md`` says ``is_secondary: true`` (reanalyses of cells
+    another dataset serves). Pooled and cross-dataset numbers leave them out
+    by default (``exclude_secondary``, audit decision L3)."""
+    return {db_id for db_id, meta in registry.metadata_cache.items()
+            if (meta or {}).get('is_secondary') is True}
 
 
 def _is_facet_column(name: str) -> bool:
@@ -12805,6 +12929,9 @@ def _facet_signal_strength_by_name() -> Dict[str, float]:
     keep_stats = {'eta2', 'omega2', 'R2', 'spearman'}
     keep_sources = {'geneset', 'ucell'}
     working = df[df['tag_column'].str.startswith('ant_', na=False)]
+    secondary = _secondary_db_ids()
+    if secondary:
+        working = working[~working['dataset'].isin(secondary)]
     working = working[working['statistic'].isin(keep_stats)]
     working = working[working['source'].isin(keep_sources)]
     if working.empty:
@@ -12888,6 +13015,7 @@ def _facets_visible() -> List[str]:
 def get_facet_tests_across_datasets(
     facet_name: str,
     top_genes: int = Query(5, ge=0, le=50, description="Genes at q < 0.05 listed per row"),
+    exclude_secondary: bool = Query(True, description="Secondary datasets (reanalyses) are listed, flagged is_secondary, but not counted towards replication"),
 ):
     """Donor-level facet test results of one facet in every tested dataset.
 
@@ -12907,7 +13035,8 @@ def get_facet_tests_across_datasets(
     braak). Other names return 404.
     """
     test_facet = _tested_facet(facet_name)
-    overview = _facet_results().facet_overview(test_facet, _facet_test_datasets(), top_genes=top_genes)
+    overview = _facet_results().facet_overview(test_facet, _facet_test_datasets(), top_genes=top_genes,
+                                               exclude_secondary=exclude_secondary)
     return {**overview, 'facet_column': 'ant_' + test_facet,
             'q_threshold': facet_results_lib.Q_THRESHOLD}
 
@@ -12934,7 +13063,8 @@ def _facet_test_datasets() -> List[Dict[str, Any]]:
         datasets.append({'db_id': db_id, 'group_folder': group_folder, 'stem': stem,
                          'title': meta.get('title') or db_id,
                          'group': (meta.get('collection') or {}).get('group') or group_folder,
-                         'sha256': meta.get('sha256')})
+                         'sha256': meta.get('sha256'),
+                         'is_secondary': meta.get('is_secondary') is True})
     return datasets
 
 
@@ -12944,26 +13074,33 @@ def _facet_test_datasets() -> List[Dict[str, Any]]:
 @app.get("/facets/{facet_name}/effects/top", tags=["facet-tests"])
 def get_facet_recurring_genes(
     facet_name: str,
-    cell_type: Optional[str] = Query(None, description="Cell type label; default: the one with most cohorts"),
+    cell_type: Optional[str] = Query(None, description="Cell type group (e.g. 'microglia') or a raw stratum label; default: the group with most cohorts"),
     n: int = Query(50, ge=1, le=500, description="Rows returned"),
+    exclude_secondary: bool = Query(True, description="Secondary datasets (reanalyses) are listed, flagged is_secondary, but not counted towards replication"),
 ):
-    """Recurring genes of one facet in one cell type: genes ranked by the
-    number of independent cohorts with q < 0.05 and the same sign, then by
-    cohorts tested (fewer first, so 2 of 2 ranks above 2 of 5), then by the
-    largest absolute log2 fold change. Rows: ``gene, cohorts_sig_same_sign,
-    cohorts_tested, direction, sign_discordant, units_up, units_down,
-    max_abs_logFC, cohorts, apoe_locus``; ``cell_types`` lists the labels with
-    their counted cohorts.
+    """Recurring genes of one facet in one cell type group: genes ranked by
+    k, the number of independent cohorts with q < 0.05 and the same sign
+    (highest first), then by ``agreement``, the fraction of the tested
+    cohorts whose effect has that sign, significant or not (highest first),
+    then by ``median_abs_logFC`` over the tested cohorts (largest first). The
+    number of cohorts tested is never a ranking key by itself, so "2 of 2"
+    does not outrank "2 of 4" for having fewer tests (``ranking`` states the
+    rule). Rows: ``gene, cohorts_sig_same_sign, cohorts_tested,
+    cohorts_same_sign, agreement, direction, sign_discordant, units_up,
+    units_down, median_abs_logFC, max_abs_logFC, cohorts, apoe_locus``;
+    ``cell_types`` lists the groups (with their raw ``labels``) and counted
+    cohorts. Cell types are counted by group (``lib/celltype_groups.yaml``).
 
     Exploratory. Each unit is one dataset and cell type, tested separately on
     donor pseudobulks (limma-voom, n = donors); nothing is pooled and there is
     no meta-analysis. Cohorts come from the DRAFT cohort selection table:
     ``replication`` follows ``definition`` (q < 0.05 with the same sign in k of
-    m independent cohorts, a cohort counts once, cell type labels matched
-    exactly).
+    m independent cohorts, a cohort counts once, cell types counted by their
+    group in ``lib/celltype_groups.yaml``, secondary datasets not counted).
     """
     test_facet = _tested_facet(facet_name)
-    return _facet_results().recurring_genes(test_facet, _facet_test_datasets(), cell_type=cell_type, limit=n)
+    return _facet_results().recurring_genes(test_facet, _facet_test_datasets(), cell_type=cell_type, limit=n,
+                                            exclude_secondary=exclude_secondary)
 
 
 
@@ -12971,11 +13108,14 @@ def get_facet_recurring_genes(
 def get_facet_gene_effects(
     facet_name: str,
     gene: str = Query(..., description="Gene symbol (case-insensitive)"),
-    cell_type: Optional[str] = Query(None, description="Restrict to one cell type label"),
+    cell_type: Optional[str] = Query(None, description="Restrict to one cell type group (e.g. 'microglia') or raw stratum label"),
+    exclude_secondary: bool = Query(True, description="Secondary datasets (reanalyses) are listed, flagged is_secondary, but not counted towards replication"),
 ):
     """Result card of one gene for one facet: every tested (dataset, cell
     type) unit with log2 fold change, 95% CI, q, donors per level, cohort and
-    role, flags and model; ``replication`` per cell type; ``notes``
+    role, flags and model, its raw ``cell_type`` and its ``celltype_group``;
+    ``counted`` with ``not_counted_reason``; ``replication`` per cell type
+    group (with the raw ``labels`` it covers); ``notes``
     (exploratory, provisional disease vocabulary, APOE locus note for APOE,
     APOC1, APOC1P1, TOMM40, NECTIN2, PVRL2).
 
@@ -12983,16 +13123,20 @@ def get_facet_gene_effects(
     donor pseudobulks (limma-voom, n = donors); nothing is pooled and there is
     no meta-analysis. Cohorts come from the DRAFT cohort selection table:
     ``replication`` follows ``definition`` (q < 0.05 with the same sign in k of
-    m independent cohorts, a cohort counts once, cell type labels matched
-    exactly).
+    m independent cohorts, a cohort counts once, cell types counted by their
+    group in ``lib/celltype_groups.yaml``, secondary datasets not counted).
     """
     test_facet = _tested_facet(facet_name)
-    return _facet_results().gene_effects(test_facet, gene, _facet_test_datasets(), cell_type=cell_type)
+    return _facet_results().gene_effects(test_facet, gene, _facet_test_datasets(), cell_type=cell_type,
+                                         exclude_secondary=exclude_secondary)
 
 
 
 @app.get("/genes/{gene}/facet-effects", tags=["facet-tests"])
-def get_gene_facet_effects(gene: str):
+def get_gene_facet_effects(
+    gene: str,
+    exclude_secondary: bool = Query(True, description="Secondary datasets (reanalyses) are listed, flagged is_secondary, but not counted towards replication"),
+):
     """Result cards of one gene for every tested facet (sex, disease,
     apoe_carrier, braak), keyed by facet; same shape as
     ``/facets/{facet}/effects``. The first call per facet reads every result
@@ -13002,13 +13146,13 @@ def get_gene_facet_effects(gene: str):
     donor pseudobulks (limma-voom, n = donors); nothing is pooled and there is
     no meta-analysis. Cohorts come from the DRAFT cohort selection table:
     ``replication`` follows ``definition`` (q < 0.05 with the same sign in k of
-    m independent cohorts, a cohort counts once, cell type labels matched
-    exactly).
+    m independent cohorts, a cohort counts once, cell types counted by their
+    group in ``lib/celltype_groups.yaml``, secondary datasets not counted).
     """
     datasets = _facet_test_datasets()
     reader = _facet_results()
     return {'gene': gene,
-            'facets': {facet: reader.gene_effects(facet, gene, datasets)
+            'facets': {facet: reader.gene_effects(facet, gene, datasets, exclude_secondary=exclude_secondary)
                        for facet in facet_results_lib.FACET_ORDER}}
 
 
@@ -13173,8 +13317,15 @@ async def get_facet_detail(
     top_modules: int = Query(200, ge=1, le=5000, description="Cap on module-variability rows returned."),
     per_facet_value_limit: int = Query(200, ge=1, le=2000, description="Cap on distinct categorical values."),
     mapping: bool = Query(True, description="Add per-dataset mapping (source columns, value translation) and the non-carrier list."),
+    exclude_secondary: bool = Query(True, description="Keep secondary datasets out of the pooled numbers (total_n_cells, value_distribution, modules); they stay in datasets, flagged is_secondary."),
 ):
     """Detailed page data for one facet.
+
+    ``exclude_secondary`` (default true): secondary datasets
+    (``is_secondary: true``) are listed in ``datasets`` with
+    ``is_secondary: true`` and ``counted: false`` but are left out of
+    ``total_n_cells``, ``value_distribution`` and ``modules``, so their
+    cells are not counted twice. ``n_excluded_secondary`` counts them.
 
     Returns dataset list, value distribution, and the top module-variability
     rows filtered on ``tag_column == facet_name``. See the ``/facets``
@@ -13216,7 +13367,9 @@ async def get_facet_detail(
     facet_type = 'categorical' if cat_n >= num_n else 'numerical'
     type_mixed = 0 < cat_n < len(dataset_kinds)
 
-    datasets_with_type = [d for d, _ in dataset_kinds]
+    secondary = _secondary_db_ids()
+    excluded = secondary if exclude_secondary else set()
+    datasets_with_type = [d for d, _ in dataset_kinds if d not in excluded]
 
     # Pull dataset metadata (title, group, n_cells) from the cache.
     dbs_by_id = {d['id']: d for d in registry.list_databases() if d.get('id')}
@@ -13225,10 +13378,14 @@ async def get_facet_detail(
     for db_id, kind in dataset_kinds:
         db = dbs_by_id.get(db_id, {})
         n_cells = int(db.get('n_cells') or 0)
-        total_n_cells += n_cells
+        if db_id not in excluded:
+            total_n_cells += n_cells
         collection = db.get('collection') or {}
         dataset_summaries.append({
             'db_id': db_id,
+            'is_secondary': db_id in secondary,
+            'counted': db_id not in excluded,
+            'reanalysis_of': list(db.get('reanalysis_of') or []),
             'title': db.get('title') or db_id,
             'group': collection.get('group') or db.get('group_id'),
             'group_id': db.get('group_id'),
@@ -13257,6 +13414,8 @@ async def get_facet_detail(
         keep_stats = {'eta2', 'omega2', 'R2', 'spearman'}
         keep_sources = {'geneset', 'ucell'}
         slice_ = df[df['tag_column'] == facet_name]
+        if excluded:
+            slice_ = slice_[~slice_['dataset'].isin(excluded)]
         slice_ = slice_[slice_['statistic'].isin(keep_stats)]
         slice_ = slice_[slice_['source'].isin(keep_sources)]
         if not slice_.empty:
@@ -13310,6 +13469,8 @@ async def get_facet_detail(
         'definition': _facet_definition(facet_name),
         'definitions_status': _facet_definitions_status(),
         'n_datasets': len(dataset_kinds),
+        'n_excluded_secondary': sum(1 for d, _ in dataset_kinds if d in excluded),
+        'exclude_secondary': exclude_secondary,
         'total_n_cells': total_n_cells,
         'datasets': dataset_summaries,
         'non_carriers': non_carriers,

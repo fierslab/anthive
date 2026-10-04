@@ -349,6 +349,19 @@ def _internal_secret() -> str:
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
+def _lineage_line(dataset: dict) -> str:
+    """One line on a dataset's lineage for the tool replies."""
+    designation = dataset.get('designation') or ('reanalysis' if dataset.get('is_secondary') else 'primary')
+    parts = [designation]
+    if dataset.get('reanalysis_of'):
+        parts.append('reanalysis of ' + ', '.join(dataset['reanalysis_of']))
+    if dataset.get('donor_group'):
+        parts.append(f"donor group {dataset['donor_group']} (shares donors with the other datasets of the group)")
+    if dataset.get('has_donor_uid'):
+        parts.append('cross-dataset donor id ant_donor_uid')
+    return '; '.join(parts)
+
+
 def _parse_args() -> argparse.Namespace:
     cfg = _anthive_cfg  # shorthand for yaml mcp: section
     from config import get_api_url  # noqa: PLC0415
@@ -690,11 +703,18 @@ def main() -> None:
         disease: Optional[str] = None,
         technology: Optional[str] = None,
         search: Optional[str] = None,
+        exclude_secondary: bool = True,
     ) -> str:
         """Search and filter available single-cell datasets.
 
         Returns a list of datasets with IDs, titles, cell/gene counts, and
         biological metadata. Use the returned db_id in all other tools.
+
+        Lineage: each dataset is a primary, a reanalysis (is_secondary: its
+        cells are also served by the datasets in reanalysis_of) or
+        unresolved. Datasets with the same donor_group hold cells of the same
+        donor pool, so never count them as independent donors or cohorts.
+        Reanalyses are left out unless exclude_secondary is false.
 
         Args:
             organism:   Filter by species, e.g. 'human', 'mouse'.
@@ -703,8 +723,10 @@ def main() -> None:
             disease:    Filter by condition, e.g. 'alzheimer', 'healthy'.
             technology: Filter by sequencing method, e.g. '10x', 'visium'.
             search:     Free-text search across all metadata fields.
+            exclude_secondary: Leave out reanalyses (default true).
         """
         all_databases = (await _get('/databases')).get('databases', [])
+        n_secondary_left_out = 0
 
         def field_matches(database: dict, field: str, query: Optional[str]) -> bool:
             if not query:
@@ -729,12 +751,19 @@ def main() -> None:
                 continue
             if search and search.lower() not in json.dumps(database).lower():
                 continue
+            if exclude_secondary and database.get('is_secondary') is True:
+                n_secondary_left_out += 1
+                continue
             matching_databases.append(database)
 
         if not matching_databases:
-            return 'No datasets found matching the given filters.'
+            return 'No datasets found matching the given filters.' + (
+                f' ({n_secondary_left_out} reanalyses left out; pass exclude_secondary=false to list them.)'
+                if n_secondary_left_out else '')
 
-        result_lines = [f'Found {len(matching_databases)} dataset(s):\n']
+        result_lines = [f'Found {len(matching_databases)} dataset(s)'
+                        + (f' ({n_secondary_left_out} reanalyses left out; exclude_secondary=false lists them)'
+                           if n_secondary_left_out else '') + ':\n']
         for db in matching_databases:
             collection_meta = db.get('collection') or {}
             result_lines.append(
@@ -749,6 +778,7 @@ def main() -> None:
                 f"  technology: {db.get('technology') or '—'}\n"
                 f"  layers:     {', '.join(db.get('layers', {}).keys()) or '—'}\n"
                 f"  embeddings: {', '.join(db.get('embeddings', {}).keys()) or '—'}\n"
+                f"  lineage:    {_lineage_line(db)}\n"
             )
         return '\n'.join(result_lines)
 
@@ -788,6 +818,7 @@ def main() -> None:
             info_lines.append(f"Categorical ({len(categorical_fields)}): {', '.join(categorical_fields)}")
         if numerical_fields:
             info_lines.append(f"Numerical ({len(numerical_fields)}):   {', '.join(numerical_fields)}")
+        info_lines.append(f"Lineage:       {_lineage_line(data)}")
         if data.get('doi'):
             info_lines.append(f"DOI:           {', '.join(data['doi'])}")
         if data.get('markdown'):
@@ -1469,12 +1500,15 @@ def main() -> None:
         'Exploratory, donor-level results (unit = donor; genes: limma-voom on pseudobulk). '
         'Datasets are tested separately; nothing is pooled. Replication: '
         '"replicates in k of m independent cohorts" means q < 0.05 with the same sign in k cohorts out of '
-        'the m cohorts in which this gene was tested in this cell type and facet; a cohort is a row group of '
-        'the DRAFT cohort selection table and counts at most once. Disease is provisional.'
+        'the m cohorts in which this gene was tested in this cell type group and facet; a cohort is a row '
+        'group of the DRAFT cohort selection table and counts at most once. Cell types are counted by group '
+        '(microglial cell, Microglia, MG and Mic P2RY12 are one group "microglia"); each unit keeps its raw '
+        'label. Reanalyses (secondary datasets) are shown but never counted. Disease is provisional.'
     )
 
     @mcp.tool()
-    async def facet_effects(gene: str, facet: Optional[str] = None, cell_type: Optional[str] = None) -> str:
+    async def facet_effects(gene: str, facet: Optional[str] = None, cell_type: Optional[str] = None,
+                            exclude_secondary: bool = True) -> str:
         """Donor-level effect of one gene for the tested facets (sex, disease, APOE e4 carrier, Braak), per dataset and cell type, grouped by cohort, with a replication badge.
 
         EXPLORATORY. Each row is one dataset and cell type tested on its own:
@@ -1487,7 +1521,11 @@ def main() -> None:
         this (gene, cell type, facet) was tested, where a cohort is a row group
         of the DRAFT cohort selection table (anchor and primary roles only) and
         contributes at most once even with several units. "Sign discordant" is
-        reported separately. Cell type labels are matched exactly.
+        reported separately. Cell types are counted by group
+        (lib/celltype_groups.yaml); within a cohort and group only the units
+        with the most direct cell type source count, and sibling strata of
+        one dataset in one group are Bonferroni-adjusted. Secondary datasets
+        (reanalyses) are listed but not counted.
 
         Contrasts: sex m vs f; disease AD vs control (PROVISIONAL: vocabulary
         not settled, results will change); apoe_carrier any e4 allele vs none;
@@ -1503,13 +1541,15 @@ def main() -> None:
         Args:
             gene: Gene symbol, e.g. 'PTPRG'.
             facet: sex, disease, apoe_carrier or braak; omit for all four.
-            cell_type: Restrict to one cell type label (exact).
+            cell_type: Restrict to one cell type group (e.g. 'microglia') or raw label (e.g. 'Mic P2RY12').
+            exclude_secondary: Do not count reanalyses (default true).
         """
         facets = [facet] if facet else ['sex', 'disease', 'apoe_carrier', 'braak']
         lines = [_FACET_TOOL_RULES]
         for name in facets:
             try:
-                card = await _get(f'/facets/{name}/effects', gene=gene, cell_type=cell_type)
+                card = await _get(f'/facets/{name}/effects', gene=gene, cell_type=cell_type,
+                                  exclude_secondary=str(bool(exclude_secondary)).lower())
             except httpx.HTTPStatusError as exc:
                 lines.append(f"{name}: error {exc.response.status_code}: {exc.response.text[:200]}")
                 continue
@@ -1519,7 +1559,8 @@ def main() -> None:
                 lines.append('  not tested in any dataset (gene absent or filtered out by filterByExpr)')
                 continue
             for rep in card.get('replication') or []:
-                lines.append(f"  [{rep['cell_type']}] {rep['badge']}")
+                labels = ', '.join(rep.get('labels') or [])
+                lines.append(f"  [{rep['cell_type']}] {rep['badge']}" + (f" (labels: {labels})" if labels else ''))
             for note in card.get('notes') or []:
                 if note not in ('exploratory',):
                     lines.append(f'  note: {note}')
@@ -1530,7 +1571,8 @@ def main() -> None:
                 donors = (f"{unit.get('level_test')} {unit.get('n_donors_test')}, {unit.get('level_ref')} {unit.get('n_donors_ref')}"
                           if unit.get('n_donors_test') is not None else f"{unit.get('n_donors')} donors")
                 lines.append(
-                    f"  {unit.get('cohort_label') or 'not in cohort table'}{'' if unit.get('counted') else ' (not counted)'} | "
+                    f"  {unit.get('cohort_label') or 'not in cohort table'}"
+                    f"{'' if unit.get('counted') else ' (not counted: ' + str(unit.get('not_counted_reason') or '-') + ')'} | "
                     f"{unit.get('role') or '-'} | {unit['db_id']} | {unit['cell_type']} | "
                     f"{_fmt_number(unit.get('logFC'))} [{_fmt_number(unit.get('ci_low'))}, {_fmt_number(unit.get('ci_high'))}] | "
                     f"{_fmt_number(unit.get('q_value'))} | {donors} | {', '.join(flags) or '-'} | "
@@ -1538,25 +1580,31 @@ def main() -> None:
         return '\n'.join(lines)
 
     @mcp.tool()
-    async def facet_top_genes(facet: str, cell_type: Optional[str] = None, n: int = 30) -> str:
-        """Genes that change with a facet in the most independent cohorts, within one cell type.
+    async def facet_top_genes(facet: str, cell_type: Optional[str] = None, n: int = 30,
+                              exclude_secondary: bool = True) -> str:
+        """Genes that change with a facet in the most independent cohorts, within one cell type group.
 
-        Ranked by the number of independent cohorts with q < 0.05 and the same
-        sign, then by cohorts tested (fewer first), then by the largest absolute
-        log2 fold change. Same replication definition as facet_effects
+        Ranked by k (independent cohorts with q < 0.05 and the same sign),
+        then by agreement (fraction of the tested cohorts whose effect has that
+        sign, significant or not), then by the median absolute log2 fold
+        change over the tested cohorts. The number of cohorts tested is never
+        a ranking key by itself. Same replication definition as facet_effects
         ("replicates in k of m independent cohorts": q < 0.05, same sign, a
         cohort of the DRAFT cohort selection table counts at most once; cell
-        type labels matched exactly). EXPLORATORY, no pooling, disease is
-        provisional, Braak is a linear trend per stage. Use facet_effects on a
-        gene from this list to see every dataset row and its model.
+        types counted by group; reanalyses not counted). EXPLORATORY, no
+        pooling, disease is provisional, Braak is a linear trend per stage.
+        Use facet_effects on a gene from this list to see every dataset row
+        and its model.
 
         Args:
             facet: sex, disease, apoe_carrier or braak.
-            cell_type: Cell type label; omit for the label with most cohorts (the reply lists the options).
+            cell_type: Cell type group (e.g. 'microglia') or raw label; omit for the group with most cohorts (the reply lists the options).
             n: Rows (default 30, max 500).
+            exclude_secondary: Do not count reanalyses (default true).
         """
         try:
-            data = await _get(f'/facets/{facet}/effects/top', cell_type=cell_type, n=max(1, min(int(n), 500)))
+            data = await _get(f'/facets/{facet}/effects/top', cell_type=cell_type, n=max(1, min(int(n), 500)),
+                              exclude_secondary=str(bool(exclude_secondary)).lower())
         except httpx.HTTPStatusError as exc:
             return f"Error {exc.response.status_code}: {exc.response.text[:300]}"
         lines = [_FACET_TOOL_RULES,
@@ -1567,16 +1615,20 @@ def main() -> None:
         if not rows:
             lines.append('No gene at q < 0.05 in a counted cohort for this cell type.')
             return '\n'.join(lines)
-        lines.append('gene | k of m cohorts | direction | units up/down | max |log2FC| | cohorts')
+        if data.get('labels'):
+            lines.append('Raw labels in this group: ' + ', '.join(data['labels']))
+        lines.append('gene | k of m cohorts | agreement | direction | units up/down | median |log2FC| | cohorts')
         for row in rows:
             lines.append(f"{row['gene']} | {row['cohorts_sig_same_sign']} of {row['cohorts_tested']} | "
+                         f"{_fmt_number(row.get('agreement'))} | "
                          f"{row['direction']}{' (sign discordant)' if row.get('sign_discordant') else ''} | "
-                         f"{row['units_up']}/{row['units_down']} | {_fmt_number(row.get('max_abs_logFC'))} | "
+                         f"{row['units_up']}/{row['units_down']} | {_fmt_number(row.get('median_abs_logFC'))} | "
                          f"{', '.join(row.get('cohorts') or [])}{' | APOE locus' if row.get('apoe_locus') else ''}")
         return '\n'.join(lines)
 
     @mcp.tool()
-    async def facet_units(db_id: Optional[str] = None, facet: Optional[str] = None) -> str:
+    async def facet_units(db_id: Optional[str] = None, facet: Optional[str] = None,
+                          exclude_secondary: bool = True) -> str:
         """Which dataset x cell type units were tested for the facets, with donors per level, model, flags and hits; and why the others were not tested.
 
         Give db_id for one dataset (all facets, with eligibility reasons and
@@ -1590,13 +1642,15 @@ def main() -> None:
         Args:
             db_id: Dataset id, e.g. 'G24/MMG'.
             facet: sex, disease, apoe_carrier or braak (used when db_id is not given).
+            exclude_secondary: Reanalyses are listed but marked not counted (default true).
         """
         if db_id:
             return await get_facet_tests(db_id, facet=facet, level='summary')
         if not facet:
             return 'Give db_id or facet.'
         try:
-            data = await _get(f'/facets/{facet}/tests', top_genes=5)
+            data = await _get(f'/facets/{facet}/tests', top_genes=5,
+                              exclude_secondary=str(bool(exclude_secondary)).lower())
         except httpx.HTTPStatusError as exc:
             return f"Error {exc.response.status_code}: {exc.response.text[:300]}"
         lines = [_FACET_TOOL_RULES,
@@ -1608,12 +1662,43 @@ def main() -> None:
             flags = [k for k, v in (row.get('flags') or {}).items() if v is True and k != 'n_lt5']
             model = ((row.get('model') or {}).get('genes') or {}).get('formula', 'not recorded')
             top = ', '.join(g['gene'] for g in row.get('top_genes') or [])
-            lines.append(f"- {row['db_id']} | {row.get('cell_type')} | cohort {row.get('cohort_label') or 'not in table'}"
+            lines.append(f"- {row['db_id']}{' (reanalysis, not counted)' if row.get('is_secondary') else ''} | "
+                         f"{row.get('cell_type')} [{row.get('celltype_group')}] | cohort {row.get('cohort_label') or 'not in table'}"
                          f" ({row.get('role') or '-'}) | donors {donors} | model {model} | genes q<0.05 "
                          f"{genes.get('n_q05', 'NA')}/{genes.get('n_tested', 'NA')} | flags {', '.join(flags) or '-'}"
                          f"{' | top ' + top if top else ''}")
         for item in data.get('not_tested') or []:
             lines.append(f"- not tested: {item['db_id']}: {item.get('reason')}")
+        return '\n'.join(lines)
+
+    @mcp.tool()
+    async def donor_groups(donor_group: Optional[str] = None) -> str:
+        """Donor groups: sets of datasets that hold cells of the same donor pool, with each dataset's lineage.
+
+        Datasets in one donor group share persons (complementary splits of one
+        study by cell class, region or library, or several studies of one
+        cohort). Count their donors once and never treat them as independent
+        replications. Each dataset is a primary, a reanalysis (its cells are
+        also served by the datasets it reanalyses) or unresolved.
+
+        Args:
+            donor_group: One group slug (e.g. 'gabitto2024'); omit for all.
+        """
+        try:
+            data = await _get('/donor-groups', donor_group=donor_group)
+        except httpx.HTTPStatusError as exc:
+            return f"Error {exc.response.status_code}: {exc.response.text[:300]}"
+        lines = [f"{data.get('n_groups')} donor group(s); {data.get('n_ungrouped')} datasets belong to none."]
+        for group in data.get('groups') or []:
+            lines.append(f"\n## {group['donor_group']}: {group['n_datasets']} datasets "
+                         f"({group['n_primary']} primary, {group['n_reanalysis']} reanalysis, "
+                         f"{group['n_unresolved']} unresolved); {group['n_cells']:,} cells in primaries")
+            for dataset in group.get('datasets') or []:
+                lineage = dataset.get('designation') or '-'
+                if dataset.get('reanalysis_of'):
+                    lineage += ' of ' + ', '.join(dataset['reanalysis_of'])
+                lines.append(f"  {dataset['db_id']} | {dataset.get('title')} | {lineage} | "
+                             f"{dataset.get('n_cells'):,} cells")
         return '\n'.join(lines)
 
     @mcp.tool()
