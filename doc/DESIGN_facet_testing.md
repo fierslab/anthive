@@ -59,8 +59,12 @@ resolved silently.
    (`ant_author_cell_type`, then an author column named like cell_type /
    class / annotation with 2 to 40 levels), one stratum per level. Both are
    kept because the constant can be wrong for a mixed file (audit L32) and
-   per-cell author labels can be expression-defined states. Every test is
-   within one (dataset, cell type) unit.
+   per-cell author labels can be expression-defined states. When
+   `ant_cell_type` is absent and no cell type column exists, `ant_author_cluster`
+   (2 to 40 levels) is used as a last resort (`celltype_source` =
+   `ant_author_cluster`; expression-defined groups); with nothing at all, all
+   cells are pooled in one stratum (`celltype_source` = `none`; not cell type
+   specific). Every test is within one (dataset, cell type) unit.
 3. **Pseudobulk.** Raw counts are summed per (donor, cell type) in DuckDB
    from the counts `by_gene` parquet. One sample per donor per cell type;
    donors with several samples or libraries are collapsed by summation.
