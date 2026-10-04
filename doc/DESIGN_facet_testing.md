@@ -58,10 +58,12 @@ resolved silently.
    in `celltype_source`: the whole dataset under the constant label
    (`constant_all_cells`) and, if the dataset has a per-cell cell type column
    (`ant_author_cell_type`, then an author column named like cell_type /
-   class / annotation with 2 to 40 levels), one stratum per level. Both are
+   cell_type_high_resolution / class / annotation with 2 to 40 levels), one stratum per level. Both are
    kept because the constant can be wrong for a mixed file (audit L32) and
    per-cell author labels can be expression-defined states. When
-   `ant_cell_type` is absent and no cell type column exists, `ant_author_cluster`
+   `ant_cell_type` is absent the same author column rule applies (this is how M23/IMM, which
+   has only `cell_type_high_resolution`, is stratified; before 2026-10-05 the pattern missed
+   that name and the dataset fell back to one pooled stratum). When no cell type column exists, `ant_author_cluster`
    (2 to 40 levels) is used as a last resort (`celltype_source` =
    `ant_author_cluster`; expression-defined groups); with nothing at all, all
    cells are pooled in one stratum (`celltype_source` = `none`; not cell type
@@ -203,7 +205,7 @@ control; carrier minus non-carrier), SE, t, df = donors minus parameters, 95 per
 CI from the t quantile, `std_effect` (estimate divided by the SD of the donor-level
 score, comparable across modules and methods), parametric p.
 
-Permutation p: 1,000 shuffles of the facet labels across donors with covariates
+Permutation p: 10,000 shuffles of the facet labels (default of `--permutations`; the first module run used 1,000) across donors with covariates
 held fixed; test statistic is the t of the facet coefficient in the full model;
 two-sided, p = (1 + #{|t_perm| >= |t_obs|}) / (1 + B). The shuffles are shared
 by all modules of a unit and by both methods (so A and B are compared under the
@@ -218,11 +220,12 @@ choice if facet and covariates are strongly associated.
 Multiple testing: Benjamini-Hochberg across the modules of one (dataset, stratum,
 facet, method), applied separately to the parametric p (`q_param`) and the
 permutation p (`q_perm`). Facets and strata are not corrected against each other
-(exploratory). **Resolution limit:** with B = 1,000 the smallest permutation p is
-1/1001, so a q_perm below 0.05 needs at least m / 50 modules at that floor (m =
-modules in the family, about 128 to 235 here, i.e. at least 3 to 5 modules at the floor).
-A single very strong module cannot pass `q_perm`; read `q_param` and `p_perm`
-together. `--permutations` raises B (one flag, small cost).
+(exploratory). **Resolution limit:** with B = 10,000 the smallest permutation p is
+1/10,001, so a q_perm below 0.05 needs at least m / 500 modules at that floor (m =
+modules in the family, about 128 to 235 here, i.e. a single module at the floor can pass
+q_perm). With the earlier B = 1,000 the floor was 1/1001 and at least m / 50 modules (3 to 5)
+had to sit at it, so a single very strong module could not pass; results from 1,000-shuffle
+runs should be read with `q_param` and `p_perm` together. `--permutations` changes B.
 Units with `n_lt5` are descriptive only (estimates and SE kept, t / p / q / CI NULL).
 
 Calibration check: per unit, Pearson and Spearman correlation of the A and B

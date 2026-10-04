@@ -356,6 +356,20 @@ def test_choose_strata_rules():
     absent = cells.drop(columns=['ant_cell_type', 'ant_author_cell_type'])
     membership, _ = aft.choose_strata(absent, {})
     assert set(membership['source']) == {'ant_author_cluster'}
+    # no ant_cell_type and no ant_author_cell_type: an author column such as M23/IMM's
+    # cell_type_high_resolution must be used (it used to fall through to a single 'all' stratum)
+    high_res = pd.DataFrame({
+        'cell_type_high_resolution': ['Mic P2RY12', 'Mic P2RY12', 'T cells', 'CAMs', 'Mic TPT1', None],
+        'ant_author_cluster': ['c1', 'c2', 'c1', 'c2', 'c1', 'c2'],
+    })
+    membership, note = aft.choose_strata(high_res, {'cell_type_high_resolution': 'VARCHAR'})
+    assert set(membership['source']) == {'cell_type_high_resolution'}
+    assert set(membership['label']) == {'Mic P2RY12', 'T cells', 'CAMs', 'Mic TPT1'}     # NULL label dropped
+    assert 'cell_type_high_resolution' in note
+    for name in ('cell_type_high_resolution', 'author_cell_type_low_resolution', 'cell_type_fine', 'celltype_major'):
+        assert aft.CELLTYPE_CANDIDATE_RE.match(name), name
+    for name in ('cell_type_ontology_term_id', 'seurat_idents', 'sample'):
+        assert not aft.CELLTYPE_CANDIDATE_RE.match(name), name
     nothing = pd.DataFrame({'x': [1, 2, 3]})
     membership, _ = aft.choose_strata(nothing, {})
     assert set(membership['source']) == {'none'} and set(membership['label']) == {'all'}

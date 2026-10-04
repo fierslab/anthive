@@ -44,7 +44,7 @@ Model per (dataset, stratum, facet, method): one OLS per module on the
 donor-level scores, ``score ~ facet [+ sex] [+ age] [+ pmi] [+ batch]``
 (design from ``plan_job`` of the gene tool), t test on the facet coefficient
 (df = donors - parameters), 95 percent CI on the t quantile, and a
-permutation p value from 1,000 shuffles of the facet labels across donors
+permutation p value from 10,000 shuffles of the facet labels across donors
 (covariates fixed, t statistic of the full model as test statistic, the same
 shuffles for every module of the unit and for both methods, seed derived from
 the base seed and the unit key). Benjamini-Hochberg across the modules of one
@@ -110,7 +110,7 @@ from scores_parquet import scores_path  # type: ignore  # noqa: E402
 
 TOOL_VERSION = 'ant-facet-test-modules/1.0'
 SEED = aft.SEED                     # 20261004, base seed; unit seeds derive from it
-N_PERMUTATIONS = 1000
+N_PERMUTATIONS = 10000              # default shuffles (was 1,000 until 2026-10-05; floor of p_perm is 1 / 10,001)
 N_BINS = 25                         # scanpy score_genes defaults, as ant-score
 CTRL_SIZE = 50
 MIN_MODULE_GENES = 3                # as ant-score

@@ -120,7 +120,8 @@ COUNTS_LAYER_NAMES = ('counts', 'UMIs', 'raw', 'raw_counts')
 EXCLUDED_SYSTEMS = {'xenograft', 'chimera', 'in_vitro_2d', 'organoid', 'bulk_tissue'}
 BATCH_NAME_RE = re.compile(r'(?i)(batch|pool|library|lane|plate|chip|chemistry|sequencing_run|run_id)')
 CELLTYPE_CANDIDATE_RE = re.compile(
-    r'(?i)^(author_)?(cell_?type\d*|cell_class|class|subclass|annotation\w*|major_?cell_?type|anno_v\d+)$')
+    r'(?i)^(author_)?(cell_?type\d*|cell_?type_(high|low|fine|coarse|broad)_?res\w*|cell_?type_(fine|coarse|broad|major|minor)\w*'
+    r'|cell_class|class|subclass|annotation\w*|major_?cell_?type|anno_v\d+)$')
 
 PROVISIONAL_FLAGS = {'disease': True}
 

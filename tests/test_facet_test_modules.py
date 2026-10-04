@@ -153,6 +153,12 @@ def test_control_genes_are_bin_matched_and_exclude_module_genes():
     assert np.array_equal(controls, again)
 
 
+def test_default_number_of_permutations_is_ten_thousand():
+    import inspect
+    assert mod.N_PERMUTATIONS == 10000
+    assert inspect.signature(mod.fit_modules).parameters['n_permutations'].default == 10000
+
+
 def test_n_distinct_label_permutations():
     assert mod.n_distinct_label_permutations(np.array([0, 0, 1, 1])) == pytest.approx(6.0)
     assert mod.n_distinct_label_permutations(np.array([0.0, 1.0, 2.0])) == pytest.approx(6.0)
