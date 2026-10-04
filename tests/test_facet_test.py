@@ -338,3 +338,24 @@ def test_n_lt5_units_suppress_p_and_q(tmp_path):
     assert disease['provisional'].all()
     unit = [u for u in manifest['units'] if u['facet'] == 'disease'][0]
     assert unit['n_lt5'] is True and 'n_sig_q05' not in unit
+
+
+def test_choose_strata_rules():
+    cells = pd.DataFrame({
+        'ant_cell_type': ['astrocyte'] * 6,
+        'ant_author_cell_type': ['A1', 'A1', 'A2', 'A2', 'A1', None],
+        'ant_author_cluster': ['c1', 'c2', 'c1', 'c2', 'c1', 'c2'],
+    })
+    membership, _ = aft.choose_strata(cells, {})
+    assert set(membership['source']) == {'constant_all_cells', 'ant_author_cell_type'}
+    assert (membership[membership['source'] == 'constant_all_cells']['label'] == 'astrocyte').all()
+    assert len(membership[membership['source'] == 'ant_author_cell_type']) == 5   # NULL label dropped
+    varying = cells.assign(ant_cell_type=['a', 'a', 'b', 'b', 'a', 'b'])
+    membership, _ = aft.choose_strata(varying, {})
+    assert set(membership['source']) == {'ant_cell_type'}
+    absent = cells.drop(columns=['ant_cell_type', 'ant_author_cell_type'])
+    membership, _ = aft.choose_strata(absent, {})
+    assert set(membership['source']) == {'ant_author_cluster'}
+    nothing = pd.DataFrame({'x': [1, 2, 3]})
+    membership, _ = aft.choose_strata(nothing, {})
+    assert set(membership['source']) == {'none'} and set(membership['label']) == {'all'}

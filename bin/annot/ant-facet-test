@@ -120,7 +120,7 @@ COUNTS_LAYER_NAMES = ('counts', 'UMIs', 'raw', 'raw_counts')
 EXCLUDED_SYSTEMS = {'xenograft', 'chimera', 'in_vitro_2d', 'organoid', 'bulk_tissue'}
 BATCH_NAME_RE = re.compile(r'(?i)(batch|pool|library|lane|plate|chip|chemistry|sequencing_run|run_id)')
 CELLTYPE_CANDIDATE_RE = re.compile(
-    r'(?i)^(author_)?(cell_?type|celltype|cell_class|class|subclass|annotation|major_?cell_?type)$')
+    r'(?i)^(author_)?(cell_?type\d*|cell_class|class|subclass|annotation\w*|major_?cell_?type|anno_v\d+)$')
 
 PROVISIONAL_FLAGS = {'disease': True}
 
@@ -333,6 +333,10 @@ def cell_table(conn: duckdb.DuckDBPyConnection, wanted: Iterable[str]) -> pd.Dat
             f'SELECT c.cell_id, {select_num} FROM __cells c '
             f'JOIN obsnum o ON o.cell_name = c.cell_name ORDER BY c.cell_id').df()
         frame = frame.merge(numeric, on='cell_id', how='left')
+    n_cells = conn.execute('SELECT count(*) FROM __cells').fetchone()[0]
+    if len(frame) != n_cells:
+        raise RuntimeError(f'cell_name join changed the row count ({len(frame)} vs {n_cells}); '
+                           f'duplicate cell names in __cells')
     return frame
 
 
@@ -423,10 +427,8 @@ def build_donor_table(cells: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, int]
             record['batch'] = str(unique[0]) if len(unique) == 1 else None
         else:
             record['batch'] = None
-        if 'ant_tissue' in frame:
-            record['n_tissues'] = int(frame['ant_tissue'].dropna().nunique())
-        else:
-            record['n_tissues'] = 0
+        n_places = [int(frame[c].dropna().nunique()) for c in ('ant_tissue', 'ant_region') if c in frame]
+        record['n_tissues'] = max(n_places) if n_places else 0
         records.append(record)
     return pd.DataFrame.from_records(records), conflicts
 
@@ -448,7 +450,9 @@ def choose_strata(cells: pd.DataFrame, categorical_columns: Dict[str, str]
       column (ant_author_cell_type first, then an author column named like
       cell_type / class / annotation, 2..MAX_STRATUM_LEVELS levels) one
       stratum per level, source = that column name.
-    * ant_cell_type absent: only (b), else a single 'all' stratum.
+    * ant_cell_type absent: only (b); when no such column exists, ant_author_cluster
+      (2..MAX_STRATUM_LEVELS levels) as a last resort; else a single 'all' stratum
+      (source 'none': all cells pooled, not cell type specific).
 
     Returns (membership frame with columns pos, source, label; note).
     """
@@ -481,6 +485,14 @@ def choose_strata(cells: pd.DataFrame, categorical_columns: Dict[str, str]
                                                 'label': cells[column].astype('object').to_numpy()}))
                     notes.append(f'per-cell column {column} ({levels} levels)')
                     break
+        if not pieces and constant is None and 'ant_author_cluster' in cells:
+            # No cell type information at all: the author cluster column is the only
+            # per-cell grouping. Expression-defined, so labelled as such in celltype_source.
+            levels = cells['ant_author_cluster'].nunique(dropna=True)
+            if 2 <= levels <= MAX_STRATUM_LEVELS:
+                pieces.append(pd.DataFrame({'pos': positions, 'source': 'ant_author_cluster',
+                                            'label': cells['ant_author_cluster'].astype('object').to_numpy()}))
+                notes.append(f'ant_cell_type absent; ant_author_cluster used ({levels} levels)')
         if not pieces:
             pieces.append(pd.DataFrame({'pos': positions, 'source': 'none', 'label': 'all'}))
             notes.append('single stratum (no cell type information)')
@@ -795,7 +807,7 @@ def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: 
         num_columns = view_columns(conn, 'obsnum') if _has_view(conn, 'obsnum') else {}
         wanted = ['ant_donor', 'ant_sex', 'ant_disease', 'ant_apoe', 'ant_apoe_carrier',
                   'ant_braak', 'ant_age', 'ant_pmi', 'ant_cell_type', 'ant_author_cell_type',
-                  'ant_tissue', 'ant_author_cluster']
+                  'ant_tissue', 'ant_region', 'ant_author_cluster']
         extra_candidates = [c for c in cat_columns
                             if (CELLTYPE_CANDIDATE_RE.match(c) or BATCH_NAME_RE.search(c))
                             and not c.startswith('ant_')]
