@@ -219,6 +219,25 @@ def records(frame: pd.DataFrame) -> List[Dict[str, Any]]:
     return out
 
 
+def json_safe(value: Any) -> Any:
+    """Recursively replace NaN / inf / pandas NA with None and numpy scalars
+    with Python values, so a payload always serialises as strict JSON."""
+    if isinstance(value, dict):
+        return {key: json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+    if value is pd.NA or value is pd.NaT:
+        return None
+    if hasattr(value, 'item') and not isinstance(value, (str, bytes)):
+        try:
+            value = value.item()
+        except (ValueError, AttributeError):
+            pass
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
 class FacetResults:
     """Cached, defensive reader for the facet results folder.
 
@@ -340,7 +359,7 @@ class FacetResults:
             cached = self._summary_cache.get(key)
         if cached is not None:
             return cached
-        result = self._compute_summary(db_id, group_folder, stem, current_sha256)
+        result = json_safe(self._compute_summary(db_id, group_folder, stem, current_sha256))
         result['cohort'] = self.cohorts().get(db_id)
         controls = self.sex_controls(group_folder, stem)
         for unit in result['units']:
@@ -957,7 +976,7 @@ class FacetResults:
             notes.append(PROVISIONAL_NOTE)
         if gene.upper() in APOE_LOCUS_GENES and facet == 'apoe_carrier':
             notes.append(APOE_LOCUS_NOTE)
-        return {
+        return json_safe({
             'query': {'gene': gene, 'facet': facet, 'cell_type': cell_type},
             'facet': {'name': facet, 'column': 'ant_' + facet, 'contrast': info['contrast'],
                       'effect_unit': info['effect_unit'], 'provisional': info['provisional'],
@@ -970,7 +989,7 @@ class FacetResults:
             'notes': notes,
             'apoe_locus': gene.upper() in APOE_LOCUS_GENES,
             'definition': REPLICATION_DEFINITION,
-        }
+        })
 
     def recurring_genes(self, facet: str, datasets: Sequence[Dict[str, Any]],
                         cell_type: Optional[str] = None, limit: int = 50) -> Dict[str, Any]:
@@ -1033,7 +1052,7 @@ class FacetResults:
                             'cohorts': sorted({labels.get(c) or c for c in names}),
                             'apoe_locus': str(record['gene']).upper() in APOE_LOCUS_GENES,
                         })
-        return {
+        return json_safe({
             'facet': facet,
             'cell_type': chosen,
             'cohorts_in_cell_type': n_cohorts,
@@ -1041,7 +1060,7 @@ class FacetResults:
             'rows': out_rows,
             'definition': REPLICATION_DEFINITION,
             'cohort_table_status': 'DRAFT',
-        }
+        })
 
     # ── one facet across datasets ──────────────────────────────────────────
 
@@ -1112,13 +1131,13 @@ class FacetResults:
                     'sex_control': unit.get('sex_control'),
                 })
         rows.sort(key=lambda r: (-(r.get('n_donors') or 0), r['db_id'], r.get('cell_type') or ''))
-        result = {
+        result = json_safe({
             'facet': facet,
             'n_rows': len(rows),
             'n_datasets_tested': len({r['db_id'] for r in rows}),
             'rows': rows,
             'not_tested': not_tested,
-        }
+        })
         with self._lock:
             if len(self._overview_cache) > 16:
                 self._overview_cache.clear()

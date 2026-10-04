@@ -730,7 +730,7 @@
 
   {% set _fx = facet_tests.by_facet if facet_tests else {} %}
   {% set _fx_shown = dataset_facets|map(attribute='facet')|list %}
-  {% set _fx_extra = [] %}{% for col in _fx %}{% if col not in _fx_shown and _fx[col].tested %}{% set _ = _fx_extra.append(col) %}{% endif %}{% endfor %}
+  {% set _fx_extra = [] %}{% set _fx_untested_extra = [] %}{% for col in _fx %}{% if col not in _fx_shown %}{% if _fx[col].tested %}{% set _ = _fx_extra.append(col) %}{% elif _fx[col].untested %}{% set _ = _fx_untested_extra.append(col) %}{% endif %}{% endif %}{% endfor %}
   {% if dataset_facets or _fx_extra %}
   {% from "_facet_mapping.html" import facet_mapping_styles, mapping_kind, source_columns, translation, coverage %}
   {% from "_facet_effects.html" import fx_styles, fx_intro, fx_table, fx_untested, fx_script %}
@@ -773,6 +773,10 @@
       </tbody>
     </table>
     </div>
+    {% if _fx_untested_extra %}
+    <div class="fx-none" id="fx-untested-extra">
+      {% for col in _fx_untested_extra %}<div>{{ col[4:]|capitalize }} was not tested ({% for item in _fx[col].untested %}{{ item.cell_type }}, {{ item.reason or 'no reason recorded' }}{{ '; ' if not loop.last }}{% endfor %}).</div>{% endfor %}</div>
+    {% endif %}
   </div>
   {{ fx_script() }}
   {% endif %}

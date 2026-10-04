@@ -3600,7 +3600,8 @@ async def facet_detail_view(request: Request, facet_name: str):
     non_carriers = facet_data.get("non_carriers") or []
     return templates.TemplateResponse(request, "facet.html", {
         "facet_effects": facet_effects,
-        "hidden_by_config": bool(facet_data.get("hidden_by_config")),
+        "hidden_by_config": bool(facet_data.get("hidden_by_config")
+                                 or (visible and facet_name not in visible)),
         "facet_name": facet_name,
         "facet": facet_data,
         "definition": facet_data.get("definition") or {},

@@ -94,6 +94,18 @@ and `lib/config.py` (anthive.yaml loader).
   defaults to `background`; folder precedence proposals > lab > datasets >
   methods > reading.
 
+- **Facet test results** (unreleased): `lib/facet_results.py` reads the
+  output of `bin/annot/ant-facet-test[-modules]` from `facet_results_dir`
+  (default `<h5adstore>/_facet_tests`, outside the catalogue scan). Routes:
+  `/databases/{id}/facet-tests[/genes|/modules|/volcano.png]` (registered
+  before the greedy `{db_id:path}/genes` route), `/facets/{name}/tests`,
+  `/facets/{name}/effects[/top]` (`/top` first), `/genes/{gene}/facet-effects`,
+  `/facets/cohorts` (before `/facets/{facet_name}`). Another job may rewrite
+  the files at any time: never assume a file is complete. The cross-dataset
+  gene table is built on first use per facet (a few seconds, about 30 MB) and
+  cached until a file changes. `facets_visible` (config) only adds
+  `hidden_by_config` to the facet listings; nothing is dropped from the API.
+
 ## ant-mcp specifics
 
 - FastMCP `streamable-http` transport on `/mcp`, bound to loopback.

@@ -25,6 +25,7 @@ After the 2026-06 reorgs, the consumers live under:
 | `analytics.py` | SELECT-only SQL sandbox for ant-serve's analytics endpoint |
 | `facet_mapping.py` | how a dataset's `.md` `api:` section projects author columns onto `ant_*` facets (renamed / derived / constant / native, value translation, redaction of `obs_hidden` sources, gap hints). Mirrors `anthive_db.build_obs_view_sql`; keep the two in step |
 | `obscol_tags.py` + `obscol_tags_vocab.yaml` | obs-column tag vocab; the `facet:` blocks are the single source of the facet definitions shown in the UI and API (`facet_definition`) |
+| `facet_results.py` | read-only view of the donor-level facet test results (`facet_results_dir`, default `<h5adstore>/_facet_tests`): unit summaries with the model from the run manifests, gene and module rows, volcano PNG, sex positive control, DRAFT cohort table, replication badge, recurring genes. Defensive reads (missing or partial files mean not available), caches keyed by file mtime |
 | `layer_stats.py`, `plotting.py`, `checksum.py`, `md_check.py` | layer stats, server-side plots, file hashing, `.md` sanity checks |
 
 ## DuckDB schema model (know this before touching anthive_db)

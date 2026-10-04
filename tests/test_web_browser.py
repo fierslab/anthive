@@ -1101,6 +1101,74 @@ _DATASET_FACETS = {
 }
 
 
+def _fx_model(formula):
+    return {
+        "stratum": {"cell_type": "microglial cell", "source": "constant_all_cells",
+                    "description": "all cells of the dataset (ant_cell_type is one constant label)"},
+        "facet_term": "m vs f: coefficient = m minus f (f is the reference)",
+        "donors": {"per_level": {"f": 12, "m": 9}, "n_analysed": 21, "n_dropped_missing_covariate": 0,
+                   "min_cells_per_donor": 10, "min_donors_per_level": 3},
+        "descriptive_only_rule": "descriptive only (no p, q or CI) when a level has fewer than 5 donors",
+        "genes": {"status": "ok", "unit_of_analysis": "one pseudobulk per donor",
+                  "formula": formula,
+                  "covariates": [{"name": "age", "status": "included", "term": "age_z", "reason": "z-scored"},
+                                 {"name": "pmi", "status": "dropped", "term": "",
+                                  "reason": "known for fewer than 90% of donors, or constant"}],
+                  "method": "edgeR filterByExpr; TMM + limma voom", "multiple_testing": "BH within unit",
+                  "tool": "ant-facet-test/1.0", "seed": 20261004, "run_date": "2026-10-04",
+                  "versions": {"limma": "3.62.1"}},
+        "modules": None,
+    }
+
+
+_FX_UNIT_FLAGS = {"descriptive_only": False, "n_lt5": False, "provisional": False,
+                  "composition_flag": True, "composition_p": 0.012, "batch_used": False,
+                  "batch_confounded": False}
+
+_FACET_TESTS_DS1 = {
+    "db_id": "GroupA/ds1", "status": "tested", "reason": None, "n_units": 3, "n_units_tested": 2,
+    "q_threshold": 0.05, "dataset_changed": False,
+    "files": {"genes": True, "modules": True, "composition": True},
+    "runs": {"genes": {"tool": "ant-facet-test/1.0", "timestamp_utc": "2026-10-04T11:00:00+00:00", "seed": 20261004}},
+    "cohort": {"cohort": "CohortX (shared)", "cohort_label": "CohortX", "role": "anchor", "counted": True},
+    "units": [
+        {"facet": "sex", "cell_type": "microglial cell", "celltype_source": "constant_all_cells",
+         "tested": True, "status_genes": "ok", "status_modules": "ok", "contrast": "m_vs_f",
+         "level_ref": "f", "level_test": "m", "level_counts": {"f": 12, "m": 9}, "n_donors": 21,
+         "n_donors_ref": 12, "n_donors_test": 9, "covariates": ["age"], "covariates_omitted": ["pmi"],
+         "flags": _FX_UNIT_FLAGS, "genes": {"n_tested": 15000, "n_q05": 42},
+         "modules": [{"method": "cell_mean", "source": "geneset", "n_modules": 128,
+                      "n_q05_param": 3, "n_q05_perm": 1}],
+         "model": _fx_model("expression ~ sex + age_z"),
+         "sex_control": {"status": "passed", "xist_logFC": -9.1, "xist_q": 1e-20, "rps4y1_logFC": 7.0,
+                         "rps4y1_q": 1e-15, "n_y_tested": 8, "n_y_up_q01": 8, "rule": "XIST down, RPS4Y1 up"}},
+        {"facet": "disease", "cell_type": "microglial cell", "celltype_source": "constant_all_cells",
+         "tested": False, "reason": "level with < 3 donors (control=2, AD=19)",
+         "flags": {"provisional": True}, "genes": None, "modules": [], "model": {}},
+        {"facet": "braak", "cell_type": "microglial cell", "celltype_source": "constant_all_cells",
+         "tested": True, "contrast": "braak_per_unit", "level_ref": None, "level_test": None,
+         "level_counts": {"n_donors": 21, "braak_min": 0, "braak_max": 6, "n_distinct": 6},
+         "n_donors": 21, "covariates": ["sex", "age"], "covariates_omitted": [],
+         "flags": {**_FX_UNIT_FLAGS, "composition_flag": False, "descriptive_only": True},
+         "genes": {"n_tested": 14000, "n_q05": 0}, "modules": [],
+         "model": _fx_model("expression ~ braak + sex + age_z")},
+    ],
+}
+
+_FACET_TESTS_ACROSS = {
+    "facet": "disease", "facet_column": "ant_disease", "n_rows": 1, "n_datasets_tested": 1,
+    "rows": [{"db_id": "GroupA/ds2", "title": "Dataset Two", "cell_type": "microglial cell",
+              "celltype_source": "constant_all_cells", "contrast": "AD_vs_control", "level_ref": "control",
+              "level_test": "AD", "level_counts": {"control": 8, "AD": 20}, "n_donors": 28,
+              "n_donors_ref": 8, "n_donors_test": 20, "covariates": ["sex", "age", "pmi"],
+              "flags": {"provisional": True, "descriptive_only": False}, "genes": {"n_tested": 15000, "n_q05": 7},
+              "modules": [], "top_genes": [{"gene": "PTPRG", "logFC": 0.4, "q_value": 0.001}],
+              "run_date": "2026-10-04", "cohort_label": "CohortY", "role": "anchor", "counted": True,
+              "model": _fx_model("expression ~ disease + sex + age_z + pmi_z")}],
+    "not_tested": [{"db_id": "GroupA/ds1", "title": "Dataset One", "reason": "level with < 3 donors"}],
+}
+
+
 def _fake_api_get(api_url, path, **kwargs):  # pyright: ignore
     """In-process stand-in for browser._api_get. Dispatches on path; raises
     requests.HTTPError for anything unknown (mirrors a 404 from ant-serve,
@@ -1113,6 +1181,10 @@ def _fake_api_get(api_url, path, **kwargs):  # pyright: ignore
         return _DE_STUDY_DETAIL
     if path == "/databases/GroupA/ds1/facets":
         return _DATASET_FACETS
+    if path == "/databases/GroupA/ds1/facet-tests":
+        return _FACET_TESTS_DS1
+    if path == "/facets/ant_disease/tests":
+        return _FACET_TESTS_ACROSS
     if path.startswith("/databases/") and path.endswith("/info"):
         db_id = path[len("/databases/"):-len("/info")]
         if db_id in _INFO:
@@ -1695,7 +1767,7 @@ def test_facet_detail_forwards_identity_headers(client, monkeypatch):
 def test_dataset_page_facets_card(client):
     text = client.get("/browse/GroupA/ds1").text
     assert 'id="ds-facets"' in text
-    card = text.split('id="ds-facets"')[1].split("</tbody>")[0]
+    card = text.split('id="ds-facets"')[1].split("<script>")[0]
     assert 'href="/facets/ant_sex"' in card
     assert "Gender" in card and "MALE" in card and ">m<" in card
     assert "800" in card
@@ -6681,3 +6753,133 @@ def test_mcp_connection_name_matches_the_api_snippets():
     for url in ('https://intern.bdslab.org', 'https://www.anthive.kuleuven.be/', 'http://10.0.0.5:8501',
                 'https://anthive.example.org', 'https://anthive-public.org', 'http://localhost:8501', ''):
         assert browser._mcp_connection_name(url) == mcp_tokens.connection_name(url), url
+
+
+# ── facet effects (donor-level facet tests) ──────────────────────────────────
+
+def test_dataset_facets_card_shows_effects_per_facet(client):
+    text = client.get("/browse/GroupA/ds1").text
+    card = text.split('id="ds-facets"')[1].split('<script>')[0]
+    # no separate tab: the effects live under the facets
+    assert 'data-tab="facets"' not in text
+    assert 'id="fx-intro"' in card and "exploratory" in card and "donor" in card
+    assert "provisional" in card and "same donors appear in several datasets" in card
+    assert 'href="/help#facet-effects"' in card
+    # one effects row under ant_sex, with the unit table and expanding rows
+    assert 'class="ds-facet-fx" data-facet="ant_sex"' in card
+    assert 'id="fx-table-ant_sex"' in card and 'class="fx-toggle"' in card
+    assert "m vs f" in card and "m 9, f 12" in card
+    assert "42 / 15,000" in card
+    assert "cell mean, scanpy score 3|1 / 128" in card
+    # flags and model line
+    assert ">composition</span>" in card
+    assert "expression ~ sex + age_z" in card and "details" in card
+    assert "pmi dropped (known for fewer than 90% of donors, or constant)" in card
+    assert "Sex positive control passed" in card
+    # braak is tested but not a column of this dataset: extra row, descriptive only
+    assert 'data-facet="ant_braak"' in card and ">descriptive only</span>" in card
+    # untested disease unit is listed with its reason
+    assert "level with &lt; 3 donors (control=2, AD=19)" in card or "level with < 3 donors (control=2, AD=19)" in card
+    assert "Cohort CohortX, anchor" in card
+    # expand logic loaded, and tables scroll inside their box
+    assert "/facet-tests" in text and "volcano.png" in text
+    assert '<div class="table-wrap">\n<table class="fx-table card-table"' in card
+    assert "—" not in card
+
+
+def test_dataset_facets_card_hides_facets_outside_the_config(client, monkeypatch):
+    hidden = {**_DATASET_FACETS, "facets": [
+        {**f, "hidden_by_config": f["facet"] not in ("ant_sex", "ant_apoe_carrier")}
+        for f in _DATASET_FACETS["facets"]]}
+
+    def fake(api_url, path, **kwargs):
+        if path == "/databases/GroupA/ds1/facets":
+            return hidden
+        return _fake_api_get(api_url, path)
+    monkeypatch.setattr(browser, "_api_get", fake)
+    card = client.get("/browse/GroupA/ds1").text.split('id="ds-facets"')[1].split("<script>")[0]
+    assert 'href="/facets/ant_tissue"' not in card and 'href="/facets/ant_braak_group"' not in card
+    assert 'href="/facets/ant_sex"' in card
+    assert "2 other facets are hidden while the facet audit decisions are pending" in card
+
+
+def test_dataset_facets_card_not_tested_state(client, monkeypatch):
+    def fake(api_url, path, **kwargs):
+        if path == "/databases/GroupA/ds1/facet-tests":
+            return {"db_id": "GroupA/ds1", "status": "not_tested", "reason": "no raw counts layer served",
+                    "n_units": 0, "n_units_tested": 0, "units": [], "runs": {}, "files": {}}
+        return _fake_api_get(api_url, path)
+    monkeypatch.setattr(browser, "_api_get", fake)
+    card = client.get("/browse/GroupA/ds1").text.split('id="ds-facets"')[1]
+    assert 'id="fx-not-tested"' in card
+    assert "Effects: not tested (no raw counts layer served)" in card
+    assert 'id="fx-intro"' not in card.split("<script>")[0]
+
+
+def test_dataset_page_without_facet_tests_endpoint(client):
+    # GroupA/ds2: no /facet-tests in the fake (older ant-serve): nothing breaks.
+    resp = client.get("/browse/GroupA/ds2")
+    assert resp.status_code == 200 and 'id="fx-table-' not in resp.text
+
+
+def test_facet_page_effects_across_datasets(client):
+    text = client.get("/facets/ant_disease").text
+    section = text.split('id="facet-effects"')[1]
+    assert "Effects across datasets" in text
+    assert 'id="fx-methods"' in section and "limma-voom" in section and "1,000 permutations" in section
+    assert "meta-analysis comes later" in section and "donors that occur in several datasets" in section
+    assert 'id="fx-table-across"' in section and 'data-db-id="GroupA/ds2"' in section
+    assert 'href="/genes/PTPRG"' in section
+    assert ">provisional</span>" in section
+    assert "Cohort CohortY, anchor" in section
+    assert 'id="fx-recurring"' in section and "DRAFT" in section
+    assert 'id="fx-across-untested"' in section
+    assert 'href="/help#facet-effects"' in section
+
+
+def test_facet_page_hidden_facet(client, monkeypatch):
+    monkeypatch.setattr(browser, "_facets_visible_cfg", [["ant_sex", "ant_braak"]])
+    resp = client.get("/facets/ant_disease")
+    assert resp.status_code == 200
+    assert 'id="facet-hidden-notice"' in resp.text and "not shown at the moment" in resp.text
+    assert 'href="/facets/ant_sex"' in resp.text and 'id="facet-effects"' not in resp.text
+    admin = client.get("/facets/ant_disease", headers={"Remote-User": "root", "Remote-Groups": "admins"})
+    assert 'id="facet-hidden-admin"' in admin.text and 'id="facet-hidden-notice"' not in admin.text
+
+
+def test_facets_index_hides_facets_and_signal(client, monkeypatch):
+    def fake(api_url, path, **kwargs):
+        if path == "/facets":
+            payload = _fake_api_get(api_url, path)
+            payload["facets"] = [{**f, "hidden_by_config": f["facet"] == "ant_age"} for f in payload["facets"]]
+            return payload
+        return _fake_api_get(api_url, path)
+    monkeypatch.setattr(browser, "_api_get", fake)
+    text = client.get("/facets").text
+    assert 'data-facet="ant_disease"' in text and 'data-facet="ant_age"' not in text
+    assert 'id="facets-hidden-note"' in text and "1 other facets are hidden" in text
+    assert "signal" not in text.lower().split('id="facet-table"')[1].split("</table>")[0]
+    admin = client.get("/facets", headers={"Remote-User": "root", "Remote-Groups": "admins"}).text
+    assert 'id="facets-hidden-admin"' in admin and 'href="/facets/ant_age"' in admin
+
+
+def test_gene_page_has_facet_effects_panel(client):
+    text = client.get("/genes/PTPRG").text
+    assert 'id="gene-facet-effects"' in text and 'data-gene="PTPRG"' in text
+    for facet in ("sex", "disease", "apoe_carrier", "braak"):
+        assert f'data-facet="{facet}"' in text
+    assert "/api/facets/" in text and "renderCard" in text
+    assert "exploratory" in text and 'href="/help#facet-effects"' in text
+    # multi-gene view: no panel
+    assert 'id="gene-facet-effects"' not in client.get("/genes/PTPRG,APOE").text
+
+
+def test_help_page_facet_effects_section(client):
+    text = client.get("/help").text
+    section = text.split('id="facet-effects"')[1].split("</section>")[0]
+    for phrase in ("sex, disease (AD vs control), APOE e4 carrier status and Braak stage",
+                   "limma-voom", "1,000 permutations", "Descriptive only", "Composition",
+                   "Provisional", "exploratory", "DESIGN_facet_testing.md", "not removed"):
+        assert phrase in section, phrase
+    assert '<a href="#facet-effects">' in text
+    assert "—" not in section
