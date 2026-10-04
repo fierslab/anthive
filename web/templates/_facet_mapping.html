@@ -1,0 +1,148 @@
+{#- How a dataset's author columns project onto an ant_* facet.
+    Shared by facet.html (per facet, one row per dataset) and dataset.html
+    (per dataset, one row per facet). Input is one entry of ant-serve's
+    GET /databases/{id}/facets (or a /facets/{name} carrier row, which
+    carries the same keys). -#}
+
+{% macro facet_mapping_styles() -%}
+<style>
+  .fm-kind {
+    display: inline-block; padding: 0 6px; border-radius: 3px; font-size: 11px;
+    border: 1px solid #cbd5e1; background: #f1f5f9; color: #334155; white-space: nowrap;
+  }
+  .fm-kind.renamed  { background: #eef4f6; border-color: #b9ccd2; color: #335C67; }
+  .fm-kind.derived  { background: #fdf6e9; border-color: #ecd3a5; color: #7a5212; }
+  .fm-kind.constant { background: #f3f0f8; border-color: #d3c9e3; color: #4c3d6b; }
+  .fm-kind.native   { background: #f1f5f9; border-color: #cbd5e1; color: #475569; }
+  .fm-src { font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; }
+  .fm-src .fm-pub { color: var(--text-muted); font-size: 11px; }
+  .fm-hidden-src { color: var(--text-muted); font-style: italic; font-size: 12px; }
+  table.fm-map { border-collapse: collapse; font-size: 12px; margin: 0; width: auto; }
+  table.fm-map td { padding: 1px 8px 1px 0; border: 0; vertical-align: top; }
+  table.fm-map td.fm-from, table.fm-map td.fm-to { font-family: var(--font-mono); overflow-wrap: anywhere; }
+  table.fm-map td.fm-arrow { color: var(--text-muted); padding-right: 6px; }
+  table.fm-map td.fm-n { color: var(--text-muted); text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .fm-null { color: #9E2A2B; font-family: var(--font); font-style: italic; }
+  .fm-empty { color: var(--text-muted); font-family: var(--font); font-style: italic; }
+  .fm-rule { font-family: var(--font); font-size: 10px; color: var(--text-muted); margin-left: 4px; }
+  .fm-note { font-size: 11.5px; color: var(--text-muted); margin-top: 2px; }
+  .fm-more summary { cursor: pointer; font-size: 11.5px; color: var(--link); margin-top: 2px; }
+  .fm-more[open] summary { margin-bottom: 2px; }
+  .fm-const { font-size: 12px; }
+  .fm-const b { font-family: var(--font-mono); font-weight: 500; }
+  .fm-warn { font-size: 11px; color: #9E2A2B; }
+</style>
+{%- endmacro %}
+
+{# A value as it appears in a translation table. #}
+{% macro fm_value(value, empty_label='(empty)') -%}
+{%- if value is none -%}<span class="fm-empty">{{ empty_label }}</span>
+{%- elif value is number and value == value|int -%}{{ value|int }}
+{%- else -%}{{ value }}{%- endif -%}
+{%- endmacro %}
+
+{% macro fm_target(value) -%}
+{%- if value is none -%}<span class="fm-null" title="Published as missing (NULL)">missing</span>
+{%- else -%}{{ fm_value(value) }}{%- endif -%}
+{%- endmacro %}
+
+{% macro fm_count(n) -%}
+{%- if n is not none -%}{{ '{:,}'.format(n) }}{%- endif -%}
+{%- endmacro %}
+
+{% set _KIND_HELP = {
+  'renamed': 'The author column is published under the facet name. Values listed in the table are rewritten or hidden; every other value is kept as it is.',
+  'derived': 'The facet is computed from the author column through a value map. Values not in the map (and empty values) become the default.',
+  'constant': 'One value for every cell of the dataset, declared in the dataset description (obs_constant).',
+  'native': 'The h5ad itself already has a column with this ant_ name; nothing is declared or translated.',
+} %}
+
+{% macro mapping_kind(kind) -%}
+<span class="fm-kind {{ kind }}" title="{{ _KIND_HELP.get(kind, '') }}">{{ kind }}</span>
+{%- endmacro %}
+
+{# Source column(s) of one projection entry. #}
+{% macro source_columns(entry, facet=None) -%}
+{%- set _facet = entry.facet or facet -%}
+{%- if entry.mapping_kind == 'constant' -%}<span class="muted">none (constant)</span>
+{%- elif entry.redacted -%}<span class="fm-hidden-src" title="This author column is hidden in this dataset (api.obs_hidden). Its name and values are shown to admins only.">hidden author column</span>
+{%- else -%}
+  {%- for src in entry.sources or [] -%}
+  <div class="fm-src">{{ src.column }}
+    {%- if src.hidden %} <span class="fm-pub" title="Listed in api.obs_hidden: not public. You see it as an admin.">(hidden)</span>
+    {%- elif src.published_as and src.published_as != src.column and src.published_as != _facet %} <span class="fm-pub">published as {{ src.published_as }}</span>{%- endif -%}
+  </div>
+  {%- endfor -%}
+  {%- if entry.source_missing %}<div class="fm-warn">source column not found in the dataset</div>{% endif -%}
+{%- endif -%}
+{%- endmacro %}
+
+{# The value translation of one projection entry, compact.
+   Explicit rules (mapped / hidden / default) are listed first; values that
+   pass through unchanged are summarised and folded away. #}
+{% macro translation(entry, max_rows=8) -%}
+{%- set rows = entry.value_map or [] -%}
+{%- if entry.mapping_kind == 'constant' -%}
+  <div class="fm-const">every cell: <b>{{ fm_value(entry.constant_value) }}</b></div>
+{%- elif entry.dtype == 'numerical' and not rows -%}
+  <div class="fm-note">numbers kept as they are
+    {%- if entry.range and entry.range.min is not none %}, range {{ '%.4g'|format(entry.range.min) }} to {{ '%.4g'|format(entry.range.max) }}{% endif -%}
+  </div>
+{%- else -%}
+  {%- set rules = rows | rejectattr('rule', 'equalto', 'passthrough') | list -%}
+  {%- set explicit = rules | rejectattr('n_cells', 'equalto', 0) | list -%}
+  {%- set unused = rules | selectattr('n_cells', 'equalto', 0) | list -%}
+  {%- set kept = rows | selectattr('rule', 'equalto', 'passthrough') | list -%}
+  {%- if explicit -%}
+  <table class="fm-map">
+    {%- for row in explicit[:max_rows] %}
+    <tr><td class="fm-from">{% if entry.redacted %}<span class="fm-empty">{{ 'other values' if row.rule == 'default' else '…' }}</span>{% else %}{{ fm_value(row['from']) }}{% endif %}</td><td class="fm-arrow">&rarr;</td><td class="fm-to">{{ fm_target(row.to) }}{% if row.rule == 'default' %}<span class="fm-rule">default</span>{% elif row.rule == 'hidden' %}<span class="fm-rule">hidden</span>{% endif %}</td><td class="fm-n">{{ fm_count(row.n_cells) }}</td></tr>
+    {%- endfor %}
+  </table>
+  {%- if explicit|length > max_rows %}
+  <details class="fm-more"><summary>{{ explicit|length - max_rows }} more rule{{ '' if explicit|length - max_rows == 1 else 's' }}</summary>
+  <table class="fm-map">
+    {%- for row in explicit[max_rows:] %}
+    <tr><td class="fm-from">{% if entry.redacted %}<span class="fm-empty">…</span>{% else %}{{ fm_value(row['from']) }}{% endif %}</td><td class="fm-arrow">&rarr;</td><td class="fm-to">{{ fm_target(row.to) }}{% if row.rule == 'default' %}<span class="fm-rule">default</span>{% elif row.rule == 'hidden' %}<span class="fm-rule">hidden</span>{% endif %}</td><td class="fm-n">{{ fm_count(row.n_cells) }}</td></tr>
+    {%- endfor %}
+  </table>
+  </details>
+  {%- endif -%}
+  {%- endif -%}
+  {%- if unused %}
+  <details class="fm-more"><summary>{{ unused|length }} rule{{ '' if unused|length == 1 else 's' }} for values not in this dataset</summary>
+  <table class="fm-map">
+    {%- for row in unused %}
+    <tr><td class="fm-from">{{ fm_value(row['from']) }}</td><td class="fm-arrow">&rarr;</td><td class="fm-to">{{ fm_target(row.to) }}</td></tr>
+    {%- endfor %}
+  </table>
+  </details>
+  {%- endif -%}
+  {%- if kept %}
+  <details class="fm-more"><summary>{{ kept|length }}{% if entry.value_map_truncated %}+{% endif %} value{{ '' if kept|length == 1 else 's' }} kept as {{ 'is' if kept|length == 1 else 'they are' }}</summary>
+  <table class="fm-map">
+    {%- for row in kept[:60] %}
+    <tr><td class="fm-from">{{ fm_value(row['from']) }}</td><td class="fm-n">{{ fm_count(row.n_cells) }}</td></tr>
+    {%- endfor %}
+  </table>
+  {%- if kept|length > 60 %}<div class="fm-note">first 60 by cell count</div>{% endif %}
+  </details>
+  {%- endif -%}
+  {%- if entry.mapping_kind == 'derived' and not entry.redacted %}
+  <div class="fm-note">any other value &rarr; {{ fm_target(entry.default) }}</div>
+  {%- elif entry.mapping_kind in ('renamed', 'native') and not rows %}
+  <div class="fm-note">all values kept as they are</div>
+  {%- endif -%}
+  {%- if entry.value_map_truncated %}
+  <div class="fm-note">top {{ rows|length }} of {{ '{:,}'.format(entry.n_distinct_source_values or 0) }} author values listed</div>
+  {%- endif -%}
+{%- endif -%}
+{%- endmacro %}
+
+{# Cells and missing of one projection entry. #}
+{% macro coverage(entry) -%}
+{%- if entry.n_cells is defined and entry.n_cells is not none -%}
+  {{ '{:,}'.format(entry.n_cells) }}
+  {%- if entry.n_missing %}<div class="fm-note" title="Cells where the facet is empty (NULL)">{{ '{:,}'.format(entry.n_missing) }} missing</div>{% endif -%}
+{%- endif -%}
+{%- endmacro %}

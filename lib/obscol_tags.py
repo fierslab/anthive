@@ -15,12 +15,14 @@ Public API
 * :func:`validate_tag`      — raise on unknown tag
 * :func:`validate_obs_tags` — validate a whole obs_tags dict
 * :func:`get_columns_by_tag`— reverse lookup on a parsed .md
+* :func:`facet_definition`  — published definition of an ``ant_<tag>`` facet
+* :func:`facet_definitions_status` — audit state of those definitions
 """
 from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Set
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Set
 
 import yaml
 
@@ -113,3 +115,51 @@ def get_columns_by_tag(md_metadata: Mapping, tag: str) -> List[str]:
     """Reverse lookup — return columns in this .md tagged with ``tag``."""
     obs_tags = md_metadata.get('obs_tags') or {}
     return [col for col, tags in obs_tags.items() if tag in (tags or [])]
+
+
+FACET_PREFIX = 'ant_'
+
+
+def _clean_text(value: object) -> str:
+    """Collapse YAML folded-scalar whitespace into one line."""
+    return ' '.join(str(value or '').split())
+
+
+def facet_definition(facet: str) -> Dict[str, Any]:
+    """Return the published definition of facet column ``facet``.
+
+    ``facet`` is the view column (``ant_sex``); a bare tag (``sex``) is
+    accepted too. The definition comes from the tag's ``facet:`` block in
+    ``obscol_tags_vocab.yaml``. Always returns the same keys, so callers can
+    render it without guards; ``defined`` is False when the vocab has no
+    ``facet:`` block for the tag.
+
+    Returns:
+        Dict with ``facet``, ``tag``, ``label``, ``defined``, ``summary``,
+        ``definition``, ``kind``, ``values``, ``missing``, ``hint_keywords``.
+    """
+    tag = facet[len(FACET_PREFIX):] if facet.startswith(FACET_PREFIX) else facet
+    entry = ((load_vocab().get('tags') or {}).get(tag) or {})
+    block = entry.get('facet') or {}
+    keywords = [str(k).lower() for k in (block.get('hint_keywords') or []) if str(k).strip()]
+    return {
+        'facet': FACET_PREFIX + tag,
+        'tag': tag,
+        'label': _clean_text(entry.get('label')) or tag.replace('_', ' '),
+        'defined': bool(block),
+        'summary': _clean_text(block.get('summary')),
+        'definition': _clean_text(block.get('definition')),
+        'kind': _clean_text(block.get('kind')) or None,
+        'values': _clean_text(block.get('values')),
+        'missing': _clean_text(block.get('missing')),
+        'hint_keywords': keywords,
+    }
+
+
+def facet_definitions_status() -> Dict[str, Optional[str]]:
+    """Audit state of the facet definitions (``state`` and ``note``)."""
+    status = load_vocab().get('facet_definitions_status') or {}
+    return {
+        'state': _clean_text(status.get('state')) or None,
+        'note': _clean_text(status.get('note')) or None,
+    }
