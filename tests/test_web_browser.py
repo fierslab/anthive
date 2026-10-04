@@ -2400,9 +2400,11 @@ def test_storage_notice_is_a_slim_bar_on_phones(client):
     text = client.get("/").text
     assert 'id="storage-notice" style="display:none"' in text
     assert 'class="sn-line"' in text and 'class="sn-extra"' in text
-    css = text[text.find("@media (max-width: 560px) {\n            #storage-notice"):]
-    css = css[:css.find("\n        }\n")]
-    assert "#storage-notice .sn-extra { display: none; }" in css
+    # since the bar is used at every width, the one-line rules are global and
+    # the phone query only drops the second sentence
+    css = text.split("/* GDPR storage notice")[1].split("/* ── data-assistant")[0]
+    phone = css[css.find("@media (max-width: 560px) {"):]
+    assert "#storage-notice .sn-extra { display: none; }" in phone
     assert "white-space: nowrap" in css and "text-overflow: ellipsis" in css
     assert "body.storage-notice-on { padding-bottom:" in css
     # dismiss behaviour and storage key unchanged
@@ -6826,7 +6828,8 @@ def test_facet_page_effects_across_datasets(client):
     text = client.get("/facets/ant_disease").text
     section = text.split('id="facet-effects"')[1]
     assert "Effects across datasets" in text
-    assert 'id="fx-methods"' in section and "limma-voom" in section and "1,000 permutations" in section
+    assert 'id="fx-methods"' in section and "limma-voom" in section and "10,000 by default" in section
+    assert "1,000" not in section.split('id="fx-methods"')[1].split("</div>")[0]
     assert "meta-analysis comes later" in section and "donors that occur in several datasets" in section
     assert 'id="fx-table-across"' in section and 'data-db-id="GroupA/ds2"' in section
     assert 'href="/genes/PTPRG"' in section
@@ -6878,7 +6881,7 @@ def test_help_page_facet_effects_section(client):
     text = client.get("/help").text
     section = text.split('id="facet-effects"')[1].split("</section>")[0]
     for phrase in ("sex, disease (AD vs control), APOE e4 carrier status and Braak stage",
-                   "limma-voom", "1,000 permutations", "Descriptive only", "Composition",
+                   "limma-voom", "10,000 by default", "1/(n + 1)", "Descriptive only", "Composition",
                    "Provisional", "exploratory", "DESIGN_facet_testing.md", "not removed"):
         assert phrase in section, phrase
     assert '<a href="#facet-effects">' in text
@@ -6983,3 +6986,27 @@ def test_fx_forest_summary_first_by_cell_type_group():
     assert "fxs-rest" in html and "with no counted result" in html
     assert "not_counted_reason" in html and "n_sibling_strata" in html and "q_counted" in html
     assert "reanalysis, not counted" in html
+
+
+def test_fx_forest_single_cohort_wording_is_not_replication():
+    html = str(browser.templates.env.get_template("_facet_effects.html").module.fx_forest_assets())
+    assert "single cohort, " in html and "not replicated" in html
+
+
+def test_storage_notice_is_a_bottom_bar_at_every_width(client):
+    text = client.get("/").text
+    css = text.split("/* GDPR storage notice")[1].split("/* ── data-assistant")[0]
+    rule = css.split("#storage-notice {")[1].split("}")[0]
+    assert "left: 0" in rule and "right: 0" in rule and "bottom: 0" in rule
+    # the page reserves room for the bar outside any media query
+    assert css.index("body.storage-notice-on { padding-bottom") < css.index("@media")
+
+
+def test_facet_intro_uses_manifest_permutations(client):
+    """The dataset intro states the permutation count of the module run."""
+    view = browser._facet_tests_view({"status": "tested", "units": [],
+                                      "runs": {"modules": {"n_permutations": 10000}}})
+    assert view["n_permutations"] == 10000
+    macro = browser.templates.env.get_template("_facet_effects.html").module.fx_intro
+    assert "10,000 label permutations" in str(macro("dataset", 10000))
+    assert "10,000 by default" in str(macro("facet"))

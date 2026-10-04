@@ -84,10 +84,12 @@
 
 {# 2 to 4 sentences: what was tested, unit = donor, exploratory, disease
    provisional, donors overlap. #}
-{% macro fx_intro(scope='dataset') -%}
+{# n_permutations: the module-test run's permutation count (run manifest),
+   when one run covers the whole scope; otherwise the text gives the default. #}
+{% macro fx_intro(scope='dataset', n_permutations=None) -%}
 <p class="fx-intro" id="fx-intro">
   {% if scope == 'dataset' %}Effects: each tested facet is compared within one cell type of this dataset.{% else %}Each row is one dataset and cell type, tested on its own.{% endif %}
-  The unit is the donor: counts are summed per donor into a pseudobulk; genes are tested with limma-voom and module scores with a linear model and 1,000 label permutations, adjusting for sex, age and post-mortem interval where available.
+  The unit is the donor: counts are summed per donor into a pseudobulk; genes are tested with limma-voom and module scores with a linear model and {% if n_permutations %}{{ "{:,}".format(n_permutations) }} label permutations{% else %}label permutations (10,000 by default; each row's model line gives its own number){% endif %}, adjusting for sex, age and post-mortem interval where available.
   The results are exploratory; disease results are provisional until the disease vocabulary is settled, and the same donors appear in several datasets, so agreement between datasets is not independent replication.
   <a href="/help#facet-effects">How to read this</a>
 </p>
@@ -126,6 +128,7 @@
 <tr class="fx-row" id="{{ unit.unit_id }}" data-db-id="{{ unit.db_id }}" data-facet="{{ unit.facet }}"
     data-cell-type="{{ unit.cell_type }}" data-celltype-source="{{ unit.celltype_source }}"
     data-descriptive="{{ 'true' if unit.flags.descriptive_only else 'false' }}"
+    data-n-perm="{{ ((unit.model or {}).get('modules') or {}).get('n_permutations') or '' }}"
     data-has-genes="{{ 'true' if unit.genes else 'false' }}" data-has-modules="{{ 'true' if unit.modules_view else 'false' }}">
   {% if show_dataset %}
   <td class="card-title fx-dataset"><a href="/browse/{{ unit.db_id }}#data" title="{{ unit.title }}"><strong>{{ unit.db_id }}</strong></a>
@@ -158,7 +161,7 @@
     <th>Cell type</th><th>Contrast</th>
     <th>Donors <span class="info" title="Donors analysed per level, after dropping donors without a covariate value. Donors with fewer than 10 cells of the cell type are left out.">ⓘ</span></th>
     <th>Genes q &lt; 0.05</th>
-    <th>Modules q &lt; 0.05 <span class="info" title="Per method: modules with q_param below 0.05, then with q_perm below 0.05 (1,000 permutations), out of the modules tested.">ⓘ</span></th>
+    <th>Modules q &lt; 0.05 <span class="info" title="Per method: modules with q_param below 0.05, then with q_perm below 0.05 (permutations, 10,000 by default; see each row's model line), out of the modules tested.">ⓘ</span></th>
     {% if show_dataset %}<th class="fx-top-genes">Top genes</th>{% endif %}
     <th>Flags</th><th></th>
   </tr></thead>
@@ -185,7 +188,7 @@
   <ul>
     <li>Unit of analysis: the donor. Raw counts are summed per donor within one cell type stratum (at least 10 cells per donor); a stratum is the dataset's cell type annotation, or all cells when the dataset holds one cell type.</li>
     <li>Genes: edgeR filterByExpr, TMM, limma-voom, lmFit and eBayes; model <code>expression ~ facet + sex + age_z + pmi_z [+ batch]</code>, covariates only when known for at least 90% of at least 15 donors. Benjamini-Hochberg within one dataset, stratum and facet.</li>
-    <li>Modules: per donor score (mean of the per-cell score, or a score on the pseudobulk), OLS per module, 1,000 permutations of the facet labels across donors; q_param and q_perm by Benjamini-Hochberg within one dataset, stratum, facet and method.</li>
+    <li>Modules: per donor score (mean of the per-cell score, or a score on the pseudobulk), OLS per module, permutations of the facet labels across donors (10,000 by default; the model line of each row gives the number used); q_param and q_perm by Benjamini-Hochberg within one dataset, stratum, facet and method.</li>
     <li>Contrasts: sex m vs f, disease AD vs control (provisional), APOE e4 carrier vs non-carrier, Braak as a linear trend per stage. A level with fewer than 5 donors (Braak: fewer than 10 donors) is descriptive only.</li>
     <li>Each row states its own model, covariates and run under "details". No pooling across datasets: a cross-dataset meta-analysis comes later, and donors overlap between datasets.</li>
   </ul>
@@ -228,6 +231,13 @@
             if (!r.ok) throw new Error(r.status === 404 ? 'not available' : 'HTTP ' + r.status);
             return r.json();
         });
+    }
+    // permutation count of this unit's module run (from the run manifest via
+    // data-n-perm), else the default
+    function permText(row) {
+        var n = parseInt(row.dataset.nPerm, 10);
+        if (!n) return 'permutations, 10,000 by default; p floor 1/(n + 1)';
+        return n.toLocaleString('en-US') + ' shuffles; p floor about ' + (1 / (n + 1)).toPrecision(1);
     }
     var METHOD = { 'cell_mean/geneset': 'cell mean, scanpy score', 'cell_mean/ucell': 'cell mean, UCell', 'pseudobulk/gene_list': 'pseudobulk' };
 
@@ -298,7 +308,7 @@
                     '<th title="facet coefficient in score units, 95% confidence interval">estimate [95% CI]</th>' +
                     '<th title="estimate divided by the SD of the donor-level score">std effect</th>' +
                     '<th title="Benjamini-Hochberg q of the t test">q_param</th>' +
-                    '<th title="Benjamini-Hochberg q of the permutation p (1,000 shuffles; floor about 0.001)">q_perm</th></tr></thead><tbody>';
+                    '<th title="Benjamini-Hochberg q of the permutation p (' + permText(row) + ')">q_perm</th></tr></thead><tbody>';
                 rows.forEach(function (m) {
                     html += '<tr><td title="' + esc(m.catalog) + '">' + esc(m.module) + ' <span class="muted-2">' + esc(m.catalog) + '</span></td>' +
                         '<td>' + esc(METHOD[m.method + '/' + m.source] || (m.method + ', ' + m.source)) + '</td>' +
@@ -491,8 +501,14 @@ window.antFx = window.antFx || (function () {
     // cohorts and the median log2FC of its counted units.
     function groupSummary(rep, counted, facet) {
         var m = rep.cohorts_tested || 0, k = rep.cohorts_sig_same_sign || 0, line;
-        if (rep.sign_discordant) {
+        // Fewer than 2 tested cohorts cannot replicate, and one significant
+        // cohort out of several is not replication either: say so in words.
+        if (m < 2) {
+            line = 'single cohort, ' + (k > 0 ? esc(rep.direction || '') + ' at q &lt; 0.05' : 'no q &lt; 0.05') + ', not replicated';
+        } else if (rep.sign_discordant) {
             line = 'discordant: q &lt; 0.05 up in ' + (rep.cohorts_up || []).length + ' and down in ' + (rep.cohorts_down || []).length + ' of ' + m + ' independent cohorts';
+        } else if (k === 1) {
+            line = esc(rep.direction || '') + ' in 1 of ' + m + ' independent cohorts, not replicated';
         } else if (k > 0) {
             line = esc(rep.direction || '') + ' in ' + k + ' of ' + m + ' independent ' + (m === 1 ? 'cohort' : 'cohorts');
         } else {
@@ -728,7 +744,7 @@ window.antFx = window.antFx || (function () {
             rows.forEach(function (r) {
                 var agreement = r.agreement != null ? Math.round(r.agreement * 100) + '%' + (r.cohorts_same_sign != null ? ' <span class="muted">(' + r.cohorts_same_sign + ' of ' + r.cohorts_tested + ')</span>' : '') : 'NA';
                 html += '<tr><td><a href="#" class="fx-rec-gene" data-gene="' + antFx.esc(r.gene) + '">' + antFx.esc(r.gene) + '</a>' + (r.apoe_locus ? ' <span class="fx-pill warn" title="APOE locus gene">APOE locus</span>' : '') + '</td>' +
-                    '<td class="num">' + r.cohorts_sig_same_sign + ' of ' + r.cohorts_tested + '</td><td class="num">' + agreement + '</td><td>' + antFx.esc(r.direction) + (r.sign_discordant ? ' <span class="fx-pill warn">sign discordant</span>' : '') + '</td>' +
+                    '<td class="num">' + r.cohorts_sig_same_sign + ' of ' + r.cohorts_tested + (r.cohorts_tested < 2 ? ' <span class="muted" title="Only one cohort tested this gene here: not replicated">single cohort</span>' : '') + '</td><td class="num">' + agreement + '</td><td>' + antFx.esc(r.direction) + (r.sign_discordant ? ' <span class="fx-pill warn">sign discordant</span>' : '') + '</td>' +
                     '<td class="num">' + antFx.num(r.median_abs_logFC != null ? r.median_abs_logFC : r.max_abs_logFC) + '</td><td class="num fx-rec-units">' + r.units_up + ' / ' + r.units_down + '</td><td class="fx-rec-cohorts">' + antFx.esc((r.cohorts || []).join(', ')) + '</td></tr>';
             });
             tableBox.classList.remove('muted');

@@ -4374,6 +4374,10 @@ def _facet_tests_view(summary: Optional[Dict[str, Any]], db_id: str = '') -> Opt
         'by_facet': by_facet,
         'n_units_tested': summary.get('n_units_tested') or 0,
         'cohort': summary.get('cohort') or None,
+        # permutation count of the module run (run manifest); None when unknown
+        'n_permutations': ((summary.get('runs') or {}).get('modules') or {}).get('n_permutations')
+                          if isinstance(((summary.get('runs') or {}).get('modules') or {}).get('n_permutations'), int)
+                          else None,
     }
 
 

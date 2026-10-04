@@ -4068,8 +4068,9 @@ def get_facet_test_modules(
     p_param, q_param, p_perm, q_perm, n_perm_effective, n_genes_requested,
     n_genes_found, n_donors(_ref/_test), descriptive_only, provisional,
     no_counts``. BH families are (dataset, stratum, facet, method, source).
-    With 1,000 permutations a single strong module cannot reach q_perm < 0.05;
-    read q_param and p_perm together. Exploratory.
+    p_perm cannot go below 1/(n + 1) for n permutations (10,000 by default,
+    recorded per run), so q_perm has a floor; read q_param and p_perm together.
+    Exploratory.
     """
     limit = _facet_rows_limit(limit, format)
     group_folder, stem = _facet_results_location(db_id)

@@ -760,7 +760,7 @@
     <h2 class="section-head">Facets <span class="muted">({{ dataset_facets|selectattr('live')|list|length }})</span>
       <span class="info" title="Standardised ant_ columns of this dataset and where they come from: the author column, how it was mapped (renamed, derived through a value map, or one constant value) and how each author value was translated, with cell counts. Below each facet, when it was tested: its donor-level effects per cell type. Click a facet for its definition and the other datasets that carry it.">ⓘ</span></h2>
     <p class="fx-intro muted" id="ds-facets-hidden-note">{% if n_facets_hidden %}{{ n_facets_hidden }} other {{ 'facet is' if n_facets_hidden == 1 else 'facets are' }} hidden while the facet audit decisions are pending; {{ 'it stays' if n_facets_hidden == 1 else 'they stay' }} in the data, plots and API. {% endif %}<a href="/help#facet-effects">About facets and their effects</a></p>
-    {% if facet_tests and facet_tests.n_units_tested %}{{ fx_intro('dataset') }}
+    {% if facet_tests and facet_tests.n_units_tested %}{{ fx_intro('dataset', facet_tests.n_permutations) }}
     {% if facet_tests.cohort %}<p class="fx-intro muted" id="fx-cohort">Cohort {{ facet_tests.cohort.cohort_label }}, {{ facet_tests.cohort.role }}{% if not facet_tests.cohort.counted %} (not counted towards replication across datasets){% endif %}; from the DRAFT cohort selection table.</p>
     {% else %}<p class="fx-intro muted" id="fx-cohort">This dataset is not in the DRAFT cohort selection table, so it does not count towards replication across datasets.</p>{% endif %}
     {% endif %}

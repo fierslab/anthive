@@ -451,35 +451,34 @@
             background: #f1f5f9; color: #64748b; border: 1px solid #cbd5e1;
             font-weight: 400; letter-spacing: .2px; white-space: nowrap;
         }
-        /* GDPR storage notice. Desktop: a 380px card in the bottom-right
-           corner. Phones: a slim one-line bar at the very bottom (message,
-           details, dismiss); details expand upwards and scroll above it, "clear my
-           data" only shows with the details open. While the notice is visible
-           body.storage-notice-on reserves room below the page so the bar never
-           covers content. JS toggles display; the CSS never sets it. */
-        #storage-notice { position: fixed; bottom: 8px; right: 8px; max-width: 380px;
-            background: #fff; border: 1px solid var(--border); box-shadow: 0 4px 16px rgba(0,0,0,.12);
-            padding: 10px 12px; font-size: 11px; line-height: 1.55; color: var(--text);
-            z-index: 1000; border-radius: 3px; }
-        #storage-notice .sn-actions { margin-top: 8px; display: flex; gap: 8px; align-items: center; }
+        /* GDPR storage notice: a slim one-line bar along the bottom at every
+           width (message, details, dismiss); details expand upwards and scroll
+           above it, "clear my data" only shows with the details open. While the
+           notice is visible body.storage-notice-on reserves room below the page
+           so the bar never covers content (it used to be a card in the
+           bottom-right corner on desktop, which hid buttons under it). Phones
+           drop the second sentence and ellipsize. JS toggles display; the CSS
+           never sets it. */
+        #storage-notice { position: fixed; left: 0; right: 0; bottom: 0;
+            background: #fff; border-top: 1px solid var(--border); box-shadow: 0 -2px 8px rgba(0,0,0,.08);
+            padding: 5px 16px; font-size: 11px; line-height: 1.55; color: var(--text);
+            z-index: 1000; }
+        #storage-notice .sn-line { display: flex; align-items: center; gap: 10px; max-width: 1200px; margin: 0 auto; }
+        #storage-notice .sn-msg { flex: 1 1 auto; min-width: 0; white-space: nowrap;
+            overflow: hidden; text-overflow: ellipsis; }
+        #storage-notice .sn-actions { display: flex; flex: 0 0 auto; gap: 10px; align-items: center; }
+        #storage-notice:not(.sn-open) #storage-clear { display: none; }
         #storage-details { white-space: nowrap; }
-        #storage-details-body { margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px dotted var(--border); color: var(--text-muted); }
-        #storage-ack { font-size: 11px; padding: 3px 12px; background: var(--link); color: #fff;
+        #storage-details-body { max-width: 1200px; margin: 0 auto 6px; padding-bottom: 6px; border-bottom: 1px dotted var(--border); color: var(--text-muted);
+            max-height: 55vh; overflow-y: auto; }
+        #storage-ack { font-size: 11px; padding: 2px 10px; background: var(--link); color: #fff;
             border: none; border-radius: 2px; cursor: pointer; font-family: inherit; }
         #storage-clear { font-size: 10px; }
+        body.storage-notice-on { padding-bottom: 40px; }
+        body.storage-notice-on #chat-launcher { bottom: 44px; }
         @media (max-width: 560px) {
-            #storage-notice { left: 0; right: 0; bottom: 0; max-width: none; border-radius: 0;
-                border-width: 1px 0 0; box-shadow: 0 -2px 8px rgba(0,0,0,.08);
-                padding: 5px 12px; }
-            #storage-notice .sn-line { display: flex; align-items: center; gap: 10px; }
-            #storage-notice .sn-msg { flex: 1 1 auto; min-width: 0; white-space: nowrap;
-                overflow: hidden; text-overflow: ellipsis; }
+            #storage-notice { padding: 5px 12px; }
             #storage-notice .sn-extra { display: none; }
-            #storage-notice .sn-actions { margin-top: 0; flex: 0 0 auto; gap: 10px; }
-            #storage-ack { padding: 2px 10px; }
-            #storage-notice:not(.sn-open) #storage-clear { display: none; }
-            #storage-details-body { max-height: 55vh; overflow-y: auto; }
-            body.storage-notice-on { padding-bottom: 40px; }
         }
 
         /* ── data-assistant chat widget (sitewide) ───────────────────────────
