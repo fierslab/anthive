@@ -108,6 +108,7 @@
       <li><a href="#pages">Collection and dataset pages</a></li>
       <li><a href="#plots">Plots</a></li>
       <li><a href="#genes">Genes, gene sets and facets</a></li>
+      <li><a href="#facet-effects">Facets and facet effects</a></li>
       <li><a href="#papers">The paper library</a></li>
       <li><a href="#ai">Working with AI assistants</a>
         <ul>
@@ -195,6 +196,27 @@
       <li><strong>Module scores</strong> are computed per cell with scanpy (default) or UCell; choose the method in Preferences.</li>
       <li><strong>Facets browser</strong> (<a href="/facets">/facets</a>, marked <em>EXP</em>): every facet with how many datasets carry it and how strongly module scores vary with it. It is experimental: numbers and groupings may still change.</li>
     </ul>
+  </section>
+
+  <section class="help-section" id="facet-effects">
+    <h2 class="section-head">Facets and facet effects</h2>
+    <p>A facet is a standardised <code>ant_</code> column with the same name and values in every dataset that has it. Each dataset declares how its own columns map onto a facet; the Facets card on a dataset's Data tab shows that mapping value by value.</p>
+    <p id="facet-effects-visible">Four facets are analysed at the moment: sex, disease (AD vs control), APOE e4 carrier status and Braak stage. Only these are shown on the <a href="/facets">facet pages</a> and in the Facets card while the audit of the facet definitions is open. The other <code>ant_</code> columns (cell type, tissue, age and so on) are not removed: they stay in the data, in the plots, in SQL and in the API.</p>
+    <h3 class="subsection-head">What was tested</h3>
+    <p>For each dataset and each cell type in it, the analysed facets are tested at the level of the donor. Raw counts of a donor's cells in that cell type are summed into one pseudobulk (donors with fewer than 10 such cells are left out). Genes are then tested with limma-voom (edgeR filterByExpr, TMM normalisation, voom, lmFit, eBayes), with sex, age and post-mortem interval as covariates when they are known for at least 90% of at least 15 donors, and batch when a donor-level batch column exists and is not confounded with the facet. Module scores are summarised per donor (the mean of the per-cell score, or a score computed on the pseudobulk) and tested with an ordinary linear model on the same covariates plus 1,000 permutations of the facet labels across donors. q values are Benjamini-Hochberg within one dataset, cell type and facet (for modules also within one method and score source).</p>
+    <p>Every result row states its exact model: click <em>details</em> next to the model line for the cell type definition, the formula (for example <code>expression ~ braak + sex + age_z + pmi_z</code>), which covariates were left out and why, the donors per level, the multiple-testing scope, and the tool version, seed and run date. Anything the run did not record says "not recorded".</p>
+    <h3 class="subsection-head">How to read the results</h3>
+    <ul>
+      <li><strong>Contrasts.</strong> Sex is m vs f, disease AD vs control, APOE e4 carrier vs non-carrier; a positive log2 fold change means higher in the first group. Braak stage is a number, so its effect is the change per stage.</li>
+      <li><strong>Descriptive only.</strong> When a group has fewer than 5 donors (Braak: fewer than 10 donors in total) the effect size is shown without p, q or confidence interval. Such rows cannot be called significant.</li>
+      <li><strong>Composition.</strong> This flag means the fraction of each donor's cells in the cell type differs with the facet (p &lt; 0.05, uncorrected). An expression effect may then reflect a shift in cell states or subtypes rather than a change within cells.</li>
+      <li><strong>Provisional.</strong> Disease results depend on vocabulary decisions that are still open (what counts as control differs between studies), so they will change.</li>
+      <li><strong>Batch.</strong> "batch adjusted" means a batch column entered the model; "batch confounded" means the facet cannot be separated from batch.</li>
+      <li><strong>Permutation q.</strong> With 1,000 permutations a single strong module cannot reach q_perm below 0.05; read q_param and p_perm together.</li>
+    </ul>
+    <h3 class="subsection-head">Limits</h3>
+    <p>All of this is exploratory. No hit means "not detected with this many donors", not "no effect". The same donors occur in several datasets (ROSMAP, SEA-AD, MADRC and others), so agreement between datasets is not independent replication; there is no meta-analysis across datasets yet. The facet page lists the results of every tested dataset side by side without pooling them.</p>
+    <p>The full method, thresholds and outputs are described in <a href="{{ _docs }}/DESIGN_facet_testing.md" target="_blank" rel="noopener" id="help-facet-design-doc">DESIGN_facet_testing.md</a>; the code is <code>bin/annot/ant-facet-test</code> and <code>bin/annot/ant-facet-test-modules</code> in the anthive4 repository. The results are also available through the API (<code>/api/databases/{id}/facet-tests</code>, <code>/api/facets/{name}/tests</code>) and the MCP tool <code>get_facet_tests</code>.</p>
   </section>
 
   <section class="help-section" id="papers">

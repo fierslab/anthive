@@ -117,6 +117,23 @@ templates. Those two fetches go through `_api_get_as_user`, which forwards
 `Remote-User`/`Remote-Groups` so admins see `obs_hidden` source columns;
 everyone else gets them redacted by ant-serve.
 
+**Facet effects (unreleased API).** Donor-level facet test results are
+rendered from one partial, `_facet_effects.html` (macros `fx_table`,
+`fx_rows`, `fx_model`, `fx_sex_control`, `fx_methods_box`, `fx_recurring`,
+`fx_gene_panel`, plus `fx_script` for expand-and-fetch and
+`fx_forest_assets` for the HTML/CSS forest, `window.antFx.renderCard`).
+Places: under each facet row of the dataset `#ds-facets` card (no separate
+tab; `_facet_tests_view` groups units by facet column), "Effects across
+datasets" on `/facets/{name}` (`#facet-effects`, replaces the per-cell "Top
+variable genesets/genes" cards; `#fx-recurring` lists recurring genes per cell
+type), and the gene page panel `#gene-facet-effects` (single-gene view only).
+Every unit shows its model line with a details disclosure; the help page
+section is `#facet-effects`. `facets_visible` (config, read once in
+`_facets_visible`) hides the other facets on `/facets`, the facet pages
+(non-admins get a short notice) and the dataset card; the `/facets` index no
+longer shows the per-cell Signal column. Tests set `_facets_visible_cfg`
+through an autouse fixture.
+
 **MCP links UI** talks to ant-serve's `GET /me/mcp`, `POST /me/mcp/links`,
 `POST /me/mcp/links/{id}/rotate`, `DELETE /me/mcp/links/{id}`,
 `GET /admin/mcp-links`, `DELETE /admin/mcp-links/{user}/{id}` client-side

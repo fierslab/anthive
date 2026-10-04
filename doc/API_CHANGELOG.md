@@ -33,6 +33,57 @@ the spec drifting away from the running code.
 
 Additive (minor). No version bump yet.
 
+- **Donor-level facet test results.** Four read-only endpoints over the
+  output of `ant-facet-test` and `ant-facet-test-modules`
+  (`<h5adstore>/_facet_tests/<group>/`), visible to everyone who can see
+  the dataset. All of it is exploratory; see `doc/DESIGN_facet_testing.md`.
+  - `GET /databases/{id}/facet-tests` gives one summary row per (facet,
+    cell type stratum): `contrast`, `level_ref` / `level_test`,
+    `level_counts` (donors per level), `n_donors(_ref/_test)`,
+    `covariates`, `flags` (`descriptive_only`, `n_lt5`, `provisional`,
+    `composition_flag`, `composition_p`, `batch_used`,
+    `batch_confounded`), `genes` (`n_tested`, `n_q05`) and `modules` (per
+    method and source: `n_modules`, `n_q05_param`, `n_q05_perm`). Untested
+    units carry `reason`. Top level: `status` (`tested`, `not_tested`,
+    `not_run`), `reason`, `dataset_changed` (the dataset's sha256 differs
+    from the one the run used), `files` and `runs` (tool, timestamp, seed,
+    package versions, git commits, counts layer, batch column, permutations).
+  - `GET /databases/{id}/facet-tests/genes` with `facet`, `cell_type`,
+    `celltype_source`, `gene`, `q` (default 0.05; `q=1` keeps every row),
+    `sort` (`q`, `effect`, `p`, `gene`), `limit` (max 2000 as JSON) and
+    `format` (`json` or `csv`; CSV allows up to 100000 rows).
+  - `GET /databases/{id}/facet-tests/modules` with the same unit filters
+    plus `method`, `source`, `module`, `q_by` (`param`, `perm`, `either`;
+    default `either`) and `sort` (`q`, `q_perm`, `effect`, `module`).
+  - `GET /databases/{id}/facet-tests/volcano.png?facet=&cell_type=` draws a
+    small volcano plot of one unit's gene results (404 for descriptive-only
+    units).
+  - Every summary unit carries `model`, built from the run manifests:
+    `stratum` (cell type and how the stratum was defined), `facet_term`,
+    `donors` (per level, analysed, left out for a missing covariate, minimum
+    cells per donor), `descriptive_only_rule`, and per run (`genes`,
+    `modules`) the `unit_of_analysis`, `formula` (for example
+    `expression ~ braak + sex + age_z + pmi_z`), `covariates` (each with
+    `status` included, dropped or not used and the `reason`), `method`,
+    `multiple_testing`, `tool`, `seed`, `run_date`, `versions`. Anything a
+    manifest does not record reads `not recorded`.
+  - `GET /facets/{name}/tests` (`ant_sex` or `sex`, also disease,
+    apoe_carrier, braak; `top_genes`, default 5) lists every tested
+    (dataset, stratum) of one facet with the unit fields above plus
+    `db_id`, `title`, `group`, `top_genes` and `run_date`, sorted by donors
+    analysed. `not_tested` lists datasets with results whose units for this
+    facet were not testable. No pooling across datasets.
+- **Facets hidden by configuration.** A new config key `facets_visible`
+  (default `ant_sex`, `ant_disease`, `ant_apoe_carrier`, `ant_braak`; an
+  empty list shows all) decides which facets the web UI shows. The API
+  still lists every facet: `GET /facets` rows, `GET /facets/{name}` and
+  `GET /databases/{id}/facets` rows gain `hidden_by_config`, and `GET
+  /facets` gains `facets_visible`.
+
+  Files are cached by mtime, so a rerun shows up on the next request. A
+  missing or partly written file counts as not available (404 for rows,
+  `files.genes: false` in the summary).
+
 - **Facet definitions.** `GET /facets` rows gain `label`, `summary` and
   `defined`, and the response gains `definitions_status` (`state`,
   `note`). `GET /facets/{name}` gains `definition` (`label`, `summary`,

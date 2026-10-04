@@ -1,0 +1,593 @@
+{#- Donor-level facet test results ("facet effects").
+    Shared by dataset.html (inside the Facets card: per facet, the strata of
+    this dataset) and facet.html ("Effects across datasets": one row per
+    dataset x stratum). Units are the display dicts built by browser.py
+    (_fx_unit_view). Expanding a row fetches its top genes, top modules and a
+    volcano plot from /api/databases/{id}/facet-tests/... (fx_script).
+    Kept as separate macros so the layout can be revised without touching
+    the data plumbing. -#}
+
+{% macro fx_styles() -%}
+<style>
+  .fx-intro { font-size: 12.5px; line-height: 1.55; max-width: 860px; margin: 0 0 8px; }
+  .fx-intro a { white-space: nowrap; }
+  .fx-table { font-size: 12px; border-collapse: collapse; width: 100%; }
+  .fx-table th { text-align: left; white-space: nowrap; font-size: 10px; text-transform: uppercase;
+                 letter-spacing: .3px; color: var(--text-muted); font-weight: 500; }
+  .fx-table th, .fx-table td { padding: 4px 8px 4px 0; border-bottom: 1px solid var(--border-light); vertical-align: top; }
+  .fx-table td.num { font-family: var(--font-mono); font-size: 11px; white-space: nowrap; }
+  .fx-table .fx-model { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+  .fx-table .fx-model code { font-size: 11px; color: #334155; background: none; padding: 0; }
+  .fx-model-details summary { cursor: pointer; color: var(--link); font-size: 11px; display: inline; }
+  .fx-model-details dl { display: grid; grid-template-columns: minmax(110px, max-content) minmax(0, 1fr);
+                         gap: 2px 10px; margin: 4px 0 2px; font-size: 11px; color: #334155; }
+  .fx-model-details dt { color: var(--text-muted); }
+  .fx-model-details dd { margin: 0; overflow-wrap: anywhere; }
+  .fx-toggle { background: none; border: 1px solid var(--border); color: var(--link); cursor: pointer;
+               font: inherit; font-size: 11px; padding: 1px 7px; white-space: nowrap; }
+  .fx-toggle:hover { background: var(--hover); }
+  .fx-pill { display: inline-block; padding: 0 6px; margin: 1px 3px 1px 0; font-size: 10.5px; line-height: 1.6;
+             border-radius: 9px; border: 1px solid #e5e7eb; background: #f3f4f6; color: #374151; white-space: nowrap; cursor: help; }
+  .fx-pill.warn { background: #fdf3e1; border-color: #f0d3a1; color: #7a4b0c; }
+  .fx-table tr.fx-detail > td { background: #fbfcfd; padding: 10px 12px 14px; }
+  .fx-table tr[hidden] { display: none !important; }
+  .fx-detail-grid { display: grid; grid-template-columns: minmax(0, 340px) minmax(0, 1fr); gap: 14px; }
+  .fx-detail-grid .fx-vol img { width: 100%; max-width: 340px; height: auto; border: 1px solid var(--border-light); background: #fff; }
+  .fx-detail .fx-block + .fx-block { margin-top: 12px; }
+  .fx-detail .fx-note { font-size: 11px; margin: 2px 0 6px; }
+  .fx-detail table { font-size: 11.5px; }
+  .fx-detail .table-wrap { max-height: 420px; overflow-y: auto; }
+  .fx-links { font-size: 11px; margin-top: 4px; }
+  .fx-links a { margin-right: 10px; }
+  .fx-top-genes { font-size: 11px; }
+  .fx-top-genes a { margin-right: 4px; }
+  .fx-untested { font-size: 11.5px; margin-top: 4px; }
+  .fx-untested ul { margin: 4px 0 0 18px; padding: 0; }
+  .fx-none { font-size: 11.5px; color: var(--text-muted); }
+  .table-wrap.fx-scroll { max-height: 70vh; overflow-y: auto; border: 1px solid var(--border-light); }
+  .fx-methods { font-size: 12px; line-height: 1.5; border-left: 3px solid var(--border); padding: 4px 10px; margin: 6px 0 10px; max-width: 900px; }
+  .fx-methods ul { margin: 4px 0 0 18px; padding: 0; }
+  @media (max-width: 760px) {
+    /* the unit table is a card-table; the gene and module tables nested in
+       its detail row stay plain tables that scroll inside their box */
+    .fx-detail table.fx-genes, .fx-detail table.fx-modules { display: table; }
+    .fx-detail table.fx-genes thead, .fx-detail table.fx-modules thead { display: table-header-group; }
+    .fx-detail table.fx-genes tbody, .fx-detail table.fx-modules tbody { display: table-row-group; }
+    .fx-detail table.fx-genes tr, .fx-detail table.fx-modules tr { display: table-row; border: 0; padding: 0; margin: 0; background: none; }
+    .fx-detail table.fx-genes td, .fx-detail table.fx-modules td,
+    .fx-detail table.fx-genes th, .fx-detail table.fx-modules th { display: table-cell; padding: 3px 8px 3px 0; border-bottom: 1px solid var(--border-light); white-space: nowrap; }
+    .fx-detail-grid { grid-template-columns: minmax(0, 1fr); }
+    .fx-table td.num { white-space: normal; }
+  }
+</style>
+{%- endmacro %}
+
+{# 2 to 4 sentences: what was tested, unit = donor, exploratory, disease
+   provisional, donors overlap. #}
+{% macro fx_intro(scope='dataset') -%}
+<p class="fx-intro" id="fx-intro">
+  {% if scope == 'dataset' %}Effects: each tested facet is compared within one cell type of this dataset.{% else %}Each row is one dataset and cell type, tested on its own.{% endif %}
+  The unit is the donor: counts are summed per donor into a pseudobulk; genes are tested with limma-voom and module scores with a linear model and 1,000 label permutations, adjusting for sex, age and post-mortem interval where available.
+  The results are exploratory; disease results are provisional until the disease vocabulary is settled, and the same donors appear in several datasets, so agreement between datasets is not independent replication.
+  <a href="/help#facet-effects">How to read this</a>
+</p>
+{%- endmacro %}
+
+{# The model behind one unit: a compact line and a details disclosure. #}
+{% macro fx_model(unit) -%}
+<div class="fx-model">Model: <code>{{ unit.model_view.line }}</code>
+  <details class="fx-model-details"><summary>details</summary>
+    <dl>
+      {% for label, value in unit.model_view.details %}<dt>{{ label }}</dt><dd>{{ value }}</dd>{% endfor %}
+    </dl>
+  </details>
+</div>
+{%- endmacro %}
+
+{# Sex positive control of a sex unit (XIST down, RPS4Y1 up in males). #}
+{% macro fx_sex_control(unit) -%}
+{%- set c = unit.sex_control -%}
+{%- if c -%}
+<div class="fx-model fx-sex-control" title="{{ c.rule }}">Sex positive control {{ c.status }}{% if c.xist_logFC is not none %}: XIST log2FC {{ '%.1f'|format(c.xist_logFC) }} (q {{ '%.1e'|format(c.xist_q) }}){% endif %}{% if c.rps4y1_logFC is not none %}, RPS4Y1 {{ '%.1f'|format(c.rps4y1_logFC) }} (q {{ '%.1e'|format(c.rps4y1_q) }}){% endif %}; {{ c.n_y_up_q01 }} of {{ c.n_y_tested }} Y-linked genes higher in males at q &lt; 0.01.{% if c.status == 'failed' %} The sex labels or the donor assignment of this dataset may be wrong; read its other facets with care.{% endif %}</div>
+{%- endif -%}
+{%- endmacro %}
+
+{% macro fx_counts(unit) -%}
+{%- if unit.genes -%}{%- if unit.flags.descriptive_only -%}<span class="muted">no test</span>{%- else -%}{{ "{:,}".format(unit.genes.n_q05 or 0) }} / {{ "{:,}".format(unit.genes.n_tested or 0) }}{%- endif -%}{%- else -%}<span class="muted">not run</span>{%- endif -%}
+{%- endmacro %}
+
+{% macro fx_module_counts(unit) -%}
+{%- if unit.modules_view -%}{%- for m in unit.modules_view -%}<div title="{{ m.label }}: modules with q_param below 0.05 | with q_perm below 0.05, of {{ m.n_modules }} tested">{{ m.label }} {{ m.n_q05_param }}|{{ m.n_q05_perm }} / {{ m.n_modules }}</div>{%- endfor -%}{%- else -%}<span class="muted">not run</span>{%- endif -%}
+{%- endmacro %}
+
+{# One summary row + its hidden detail row. show_dataset: cross-dataset view
+   (first column is the dataset, top genes column added). #}
+{% macro fx_rows(unit, show_dataset=False) -%}
+<tr class="fx-row" id="{{ unit.unit_id }}" data-db-id="{{ unit.db_id }}" data-facet="{{ unit.facet }}"
+    data-cell-type="{{ unit.cell_type }}" data-celltype-source="{{ unit.celltype_source }}"
+    data-descriptive="{{ 'true' if unit.flags.descriptive_only else 'false' }}"
+    data-has-genes="{{ 'true' if unit.genes else 'false' }}" data-has-modules="{{ 'true' if unit.modules_view else 'false' }}">
+  {% if show_dataset %}
+  <td class="card-title"><a href="/browse/{{ unit.db_id }}#data" title="{{ unit.title }}"><strong>{{ unit.db_id }}</strong></a>
+    <div class="muted" style="font-size:11px">{{ unit.title }}</div></td>
+  <td data-label="Cell type">{{ unit.cell_type }}</td>
+  {% else %}
+  <td class="card-title"><strong>{{ unit.cell_type }}</strong></td>
+  {% endif %}
+  <td data-label="Contrast">{{ unit.contrast_label }}</td>
+  <td data-label="Donors" class="num">{{ unit.donors_text }}</td>
+  <td data-label="Genes q<0.05" class="num">{{ fx_counts(unit) }}</td>
+  <td data-label="Modules q<0.05" class="num">{{ fx_module_counts(unit) }}</td>
+  {% if show_dataset %}
+  <td data-label="Top genes" class="fx-top-genes">{% for g in unit.top_genes or [] %}<a href="/genes/{{ g.gene|urlencode }}" title="log2FC {{ '%.2f'|format(g.logFC) if g.logFC is not none else 'NA' }}, q {{ '%.2g'|format(g.q_value) if g.q_value is not none else 'NA' }}">{{ g.gene }}</a>{% endfor %}</td>
+  {% endif %}
+  <td data-label="Flags">{% for pill in unit.pills %}<span class="fx-pill {{ pill[1] }}" title="{{ pill[2] }}">{{ pill[0] }}</span>{% endfor %}</td>
+  <td class="card-span"><button type="button" class="fx-toggle" aria-expanded="false" aria-controls="{{ unit.unit_id }}-detail">show results</button></td>
+</tr>
+<tr class="fx-model-row"><td colspan="{{ 9 if show_dataset else 7 }}" class="card-span">{{ fx_model(unit) }}{{ fx_sex_control(unit) }}{% if show_dataset and unit.cohort_label %}<div class="fx-model">Cohort {{ unit.cohort_label }}, {{ unit.role or 'role not recorded' }}{% if not unit.counted %} (not counted towards replication){% endif %}; from the DRAFT cohort table.</div>{% endif %}</td></tr>
+<tr class="fx-detail" id="{{ unit.unit_id }}-detail" hidden>
+  <td colspan="{{ 9 if show_dataset else 7 }}" class="card-span"><div class="fx-detail-body muted">loading…</div></td>
+</tr>
+{%- endmacro %}
+
+{% macro fx_table(units, table_id, show_dataset=False) -%}
+<div class="table-wrap{% if show_dataset %} fx-scroll{% endif %}">
+<table class="fx-table card-table" id="{{ table_id }}">
+  <thead><tr>
+    {% if show_dataset %}<th>Dataset</th>{% endif %}
+    <th>Cell type</th><th>Contrast</th>
+    <th>Donors <span class="info" title="Donors analysed per level, after dropping donors without a covariate value. Donors with fewer than 10 cells of the cell type are left out.">ⓘ</span></th>
+    <th>Genes q &lt; 0.05</th>
+    <th>Modules q &lt; 0.05 <span class="info" title="Per method: modules with q_param below 0.05, then with q_perm below 0.05 (1,000 permutations), out of the modules tested.">ⓘ</span></th>
+    {% if show_dataset %}<th>Top genes</th>{% endif %}
+    <th>Flags</th><th></th>
+  </tr></thead>
+  <tbody>
+  {% for unit in units %}{{ fx_rows(unit, show_dataset) }}{% endfor %}
+  </tbody>
+</table>
+</div>
+{%- endmacro %}
+
+{% macro fx_untested(items, label='not tested') -%}
+{% if items %}
+<details class="fx-untested">
+  <summary class="muted">{{ items|length }} {{ 'cell type' if items|length == 1 else 'cell types' }} {{ label }}</summary>
+  <ul>{% for item in items %}<li>{{ item.cell_type or item.title or item.db_id }}: <span class="muted">{{ item.reason or 'not tested' }}</span></li>{% endfor %}</ul>
+</details>
+{% endif %}
+{%- endmacro %}
+
+{# Short methods box for the facet page. #}
+{% macro fx_methods_box() -%}
+<div class="fx-methods" id="fx-methods">
+  <strong>Methods.</strong>
+  <ul>
+    <li>Unit of analysis: the donor. Raw counts are summed per donor within one cell type stratum (at least 10 cells per donor); a stratum is the dataset's cell type annotation, or all cells when the dataset holds one cell type.</li>
+    <li>Genes: edgeR filterByExpr, TMM, limma-voom, lmFit and eBayes; model <code>expression ~ facet + sex + age_z + pmi_z [+ batch]</code>, covariates only when known for at least 90% of at least 15 donors. Benjamini-Hochberg within one dataset, stratum and facet.</li>
+    <li>Modules: per donor score (mean of the per-cell score, or a score on the pseudobulk), OLS per module, 1,000 permutations of the facet labels across donors; q_param and q_perm by Benjamini-Hochberg within one dataset, stratum, facet and method.</li>
+    <li>Contrasts: sex m vs f, disease AD vs control (provisional), APOE e4 carrier vs non-carrier, Braak as a linear trend per stage. A level with fewer than 5 donors (Braak: fewer than 10 donors) is descriptive only.</li>
+    <li>Each row states its own model, covariates and run under "details". No pooling across datasets: a cross-dataset meta-analysis comes later, and donors overlap between datasets.</li>
+  </ul>
+</div>
+{%- endmacro %}
+
+{# The expand/fetch logic for every .fx-table on the page. #}
+{% macro fx_script() -%}
+<script>
+(function () {
+    var tables = document.querySelectorAll('table.fx-table');
+    if (!tables.length) return;
+    function apiBase(dbId) { return '/api/databases/' + dbId.split('/').map(encodeURIComponent).join('/') + '/facet-tests'; }
+    function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+    function num(v, digits) {
+        if (v === null || v === undefined || isNaN(v)) return 'NA';
+        return Number(v).toFixed(digits == null ? 2 : digits);
+    }
+    function qfmt(v) {
+        if (v === null || v === undefined || isNaN(v)) return 'NA';
+        v = Number(v);
+        if (v === 0) return '0';
+        return v < 0.001 ? v.toExponential(1) : v.toPrecision(2);
+    }
+    function ci(row, key) {
+        var est = num(row[key]);
+        if (row.ci_low === null || row.ci_low === undefined) return est;
+        return est + ' <span class="muted">[' + num(row.ci_low) + ', ' + num(row.ci_high) + ']</span>';
+    }
+    function query(row, extra) {
+        var params = new URLSearchParams();
+        params.set('facet', row.dataset.facet);
+        params.set('cell_type', row.dataset.cellType);
+        params.set('celltype_source', row.dataset.celltypeSource);
+        Object.keys(extra || {}).forEach(function (k) { params.set(k, extra[k]); });
+        return params.toString();
+    }
+    function getJson(url) {
+        return fetch(url, { credentials: 'same-origin' }).then(function (r) {
+            if (!r.ok) throw new Error(r.status === 404 ? 'not available' : 'HTTP ' + r.status);
+            return r.json();
+        });
+    }
+    var METHOD = { 'cell_mean/geneset': 'cell mean, scanpy score', 'cell_mean/ucell': 'cell mean, UCell', 'pseudobulk/gene_list': 'pseudobulk' };
+
+    function renderGenes(row, box, all) {
+        var base = apiBase(row.dataset.dbId);
+        var descriptive = row.dataset.descriptive === 'true';
+        var params = descriptive ? { q: 1, sort: 'effect', limit: all ? 2000 : 10 }
+                                 : { q: 0.05, sort: 'q', limit: all ? 2000 : 10 };
+        box.innerHTML = '<div class="muted fx-note">loading genes…</div>';
+        getJson(base + '/genes?' + query(row, params)).then(function (data) {
+            var note = descriptive
+                ? 'Descriptive only: a level has fewer than 5 donors, so there is no p or q. Largest absolute log2 fold changes first.'
+                : (data.n_matching + ' ' + (data.n_matching === 1 ? 'gene' : 'genes') + ' at q < 0.05, smallest q first.');
+            if (!descriptive && data.n_matching === 0) {
+                return getJson(base + '/genes?' + query(row, { q: 1, sort: 'p', limit: 10 })).then(function (more) {
+                    return { data: more, note: 'No gene at q < 0.05. The 10 smallest p values are listed for orientation; none passes the threshold.', all: false };
+                });
+            }
+            return { data: data, note: note, all: all };
+        }).then(function (res) {
+            var data = res.data, rows = data.rows || [];
+            var html = '<h3 class="subsection-head">Genes</h3><div class="muted fx-note">' + esc(res.note) + '</div>';
+            if (rows.length) {
+                html += '<div class="table-wrap"><table class="auto fx-genes"><thead><tr><th>Gene</th>' +
+                    '<th title="log2 fold change with 95% confidence interval">log2FC [95% CI]</th><th>q</th>' +
+                    '<th title="average log2 CPM over the donor pseudobulks">mean log2 CPM</th></tr></thead><tbody>';
+                rows.forEach(function (g) {
+                    html += '<tr><td><a href="/genes/' + encodeURIComponent(g.gene) + '">' + esc(g.gene) + '</a></td>' +
+                        '<td class="num">' + ci(g, 'logFC') + '</td><td class="num">' + qfmt(g.q_value) + '</td>' +
+                        '<td class="num">' + num(g.ave_expr, 1) + '</td></tr>';
+                });
+                html += '</tbody></table></div>';
+            }
+            html += '<div class="fx-links">';
+            if (!res.all && data.n_matching > rows.length && rows.length) {
+                html += '<a href="#" class="fx-all-genes">show all ' + data.n_matching.toLocaleString() + (data.n_matching > 2000 ? ' (first 2,000)' : '') + '</a>';
+            }
+            html += '<a href="' + base + '/genes?' + esc(query(row, { q: 1, sort: 'q', limit: 100000, format: 'csv' })) + '" download>CSV, all genes of this unit</a></div>';
+            box.innerHTML = html;
+            var allLink = box.querySelector('.fx-all-genes');
+            if (allLink) allLink.addEventListener('click', function (e) { e.preventDefault(); renderGenes(row, box, true); });
+        }).catch(function (err) {
+            box.innerHTML = '<h3 class="subsection-head">Genes</h3><div class="muted fx-note">Gene results ' + esc(err.message) + '.</div>';
+        });
+    }
+
+    function renderModules(row, box, all) {
+        var base = apiBase(row.dataset.dbId);
+        var descriptive = row.dataset.descriptive === 'true';
+        var params = descriptive ? { q: 1, sort: 'effect', limit: all ? 2000 : 10 }
+                                 : { q: 0.05, q_by: 'either', sort: 'q', limit: all ? 2000 : 10 };
+        box.innerHTML = '<div class="muted fx-note">loading modules…</div>';
+        getJson(base + '/modules?' + query(row, params)).then(function (data) {
+            var note = descriptive
+                ? 'Descriptive only: no p or q. Largest absolute standardised effects first.'
+                : (data.n_matching + ' module ' + (data.n_matching === 1 ? 'result' : 'results') + ' with q_param or q_perm below 0.05 (each method separately), smallest q_param first.');
+            if (!descriptive && data.n_matching === 0) {
+                return getJson(base + '/modules?' + query(row, { q: 1, sort: 'q', limit: 10 })).then(function (more) {
+                    return { data: more, note: 'No module at q < 0.05. The 10 smallest q_param values are listed for orientation.', all: false };
+                });
+            }
+            return { data: data, note: note, all: all };
+        }).then(function (res) {
+            var data = res.data, rows = data.rows || [];
+            var html = '<h3 class="subsection-head">Modules</h3><div class="muted fx-note">' + esc(res.note) + '</div>';
+            if (rows.length) {
+                html += '<div class="table-wrap"><table class="auto fx-modules"><thead><tr><th>Module</th><th>Method</th>' +
+                    '<th title="facet coefficient in score units, 95% confidence interval">estimate [95% CI]</th>' +
+                    '<th title="estimate divided by the SD of the donor-level score">std effect</th>' +
+                    '<th title="Benjamini-Hochberg q of the t test">q_param</th>' +
+                    '<th title="Benjamini-Hochberg q of the permutation p (1,000 shuffles; floor about 0.001)">q_perm</th></tr></thead><tbody>';
+                rows.forEach(function (m) {
+                    html += '<tr><td title="' + esc(m.catalog) + '">' + esc(m.module) + ' <span class="muted-2">' + esc(m.catalog) + '</span></td>' +
+                        '<td>' + esc(METHOD[m.method + '/' + m.source] || (m.method + ', ' + m.source)) + '</td>' +
+                        '<td class="num">' + ci(m, 'estimate') + '</td><td class="num">' + num(m.std_effect) + '</td>' +
+                        '<td class="num">' + qfmt(m.q_param) + '</td><td class="num">' + qfmt(m.q_perm) + '</td></tr>';
+                });
+                html += '</tbody></table></div>';
+            }
+            html += '<div class="fx-links">';
+            if (!res.all && data.n_matching > rows.length && rows.length) {
+                html += '<a href="#" class="fx-all-modules">show all ' + data.n_matching.toLocaleString() + '</a>';
+            }
+            html += '<a href="' + base + '/modules?' + esc(query(row, { q: 1, sort: 'q', limit: 100000, format: 'csv' })) + '" download>CSV, all modules of this unit</a></div>';
+            box.innerHTML = html;
+            var allLink = box.querySelector('.fx-all-modules');
+            if (allLink) allLink.addEventListener('click', function (e) { e.preventDefault(); renderModules(row, box, true); });
+        }).catch(function (err) {
+            box.innerHTML = '<h3 class="subsection-head">Modules</h3><div class="muted fx-note">Module results ' + esc(err.message) + '.</div>';
+        });
+    }
+
+    function load(row, detail) {
+        var body = detail.querySelector('.fx-detail-body');
+        body.classList.remove('muted');
+        var base = apiBase(row.dataset.dbId);
+        var hasGenes = row.dataset.hasGenes === 'true', hasModules = row.dataset.hasModules === 'true';
+        var showVolcano = hasGenes && row.dataset.descriptive !== 'true';
+        var html = '<div class="fx-detail-grid">';
+        html += '<div class="fx-vol">' + (showVolcano
+            ? '<img loading="lazy" alt="Volcano plot: log2 fold change against -log10 p; red and blue genes have q below 0.05" src="' + base + '/volcano.png?' + esc(query(row)) + '">' +
+              '<div class="muted fx-note">Each point is a gene; red and blue: q &lt; 0.05 (up, down).</div>'
+            : '<div class="muted fx-note">' + (hasGenes ? 'No volcano plot: descriptive only.' : 'No gene-level results for this unit.') + '</div>') + '</div>';
+        html += '<div><div class="fx-block fx-gene-box"></div><div class="fx-block fx-module-box"></div></div></div>';
+        body.innerHTML = html;
+        var geneBox = body.querySelector('.fx-gene-box'), moduleBox = body.querySelector('.fx-module-box');
+        if (hasGenes) renderGenes(row, geneBox, false); else geneBox.remove();
+        if (hasModules) renderModules(row, moduleBox, false); else moduleBox.remove();
+        var img = body.querySelector('.fx-vol img');
+        if (img) img.addEventListener('error', function () { img.replaceWith(document.createTextNode('Volcano plot not available.')); });
+    }
+
+    tables.forEach(function (table) {
+        table.querySelectorAll('tr.fx-row').forEach(function (row) {
+            var btn = row.querySelector('.fx-toggle');
+            var detail = document.getElementById(row.id + '-detail');
+            if (!btn || !detail) return;
+            btn.addEventListener('click', function () {
+                var open = detail.hidden;
+                detail.hidden = !open;
+                btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+                btn.textContent = open ? 'hide results' : 'show results';
+                if (open && !detail.dataset.loaded) { detail.dataset.loaded = '1'; load(row, detail); }
+            });
+        });
+    });
+})();
+</script>
+{%- endmacro %}
+
+{# ── Forest of one gene across datasets (gene page panel, facet page) ──────
+   Renders the result card of GET /api/facets/{facet}/effects?gene= as an
+   HTML table with CSS confidence-interval bars: one forest per cell type
+   label, rows grouped by cohort (DRAFT cohort table), with the replication
+   badge. Point filled when q < 0.05, open otherwise; no bar when the unit is
+   descriptive only (no CI). Point size grows with donors. #}
+{% macro fx_forest_assets() -%}
+<style>
+  .fxf-card { margin: 8px 0 14px; }
+  .fxf-head { font-size: 12.5px; margin: 4px 0; }
+  .fxf-badge { display: inline-block; font-size: 11.5px; padding: 1px 8px; border-radius: 10px; border: 1px solid #cbd5e1;
+               background: #f1f5f9; color: #1e293b; cursor: help; margin-left: 6px; }
+  .fxf-badge.rep { background: #e8f3ee; border-color: #a7d7c0; color: #14532d; }
+  .fxf-badge.disc { background: #fdf3e1; border-color: #f0d3a1; color: #7a4b0c; }
+  .fxf-note { font-size: 11.5px; color: #7a4b0c; margin: 3px 0; }
+  table.fxf { border-collapse: collapse; font-size: 11.5px; width: 100%; min-width: 560px; }
+  table.fxf td, table.fxf th { padding: 2px 6px; border-bottom: 1px solid var(--border-light); vertical-align: middle; text-align: left; }
+  table.fxf th { font-size: 10px; text-transform: uppercase; letter-spacing: .3px; color: var(--text-muted); font-weight: 500; }
+  table.fxf tr.fxf-cohort td { background: #f8fafc; font-weight: 600; font-size: 11px; color: #334155; padding-top: 5px; }
+  table.fxf tr.fxf-cohort td .muted { font-weight: normal; }
+  table.fxf tr.not-counted td { color: #64748b; }
+  table.fxf td.fxf-bar { width: 38%; min-width: 160px; }
+  .fxf-track { position: relative; height: 16px; }
+  .fxf-zero { position: absolute; top: 0; bottom: 0; width: 1px; background: #94a3b8; }
+  .fxf-ci { position: absolute; top: 7px; height: 2px; background: #334155; }
+  .fxf-pt { position: absolute; top: 50%; transform: translate(-50%, -50%); border-radius: 50%; border: 1.5px solid #334155; background: #fff; }
+  .fxf-pt.sig { background: #334155; }
+  .fxf-pt.up.sig { background: #b2182b; border-color: #b2182b; }
+  .fxf-pt.down.sig { background: #2166ac; border-color: #2166ac; }
+  .fxf-axis { display: flex; justify-content: space-between; font-size: 10px; color: var(--text-muted); }
+  table.fxf td.num { font-family: var(--font-mono); font-size: 11px; white-space: nowrap; }
+  .fxf-legend { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+  .fx-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
+  .fx-tabs button { font: inherit; font-size: 12px; padding: 2px 10px; border: 1px solid var(--border); background: #fff; cursor: pointer; border-radius: 4px; }
+  .fx-tabs button.active { background: var(--link); color: #fff; border-color: var(--link); }
+  .fx-tabs button .muted { font-size: 11px; }
+  .fx-tabs button.active .muted { color: #e2e8f0; }
+  .fx-rec-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px; margin: 6px 0; }
+  .fx-rec-controls select, .fx-rec-controls input { font: inherit; font-size: 12px; padding: 2px 6px; border: 1px solid var(--border); }
+  table.fx-rec { border-collapse: collapse; font-size: 12px; }
+  table.fx-rec td, table.fx-rec th { padding: 3px 8px 3px 0; border-bottom: 1px solid var(--border-light); text-align: left; }
+  table.fx-rec th { font-size: 10px; text-transform: uppercase; letter-spacing: .3px; color: var(--text-muted); font-weight: 500; }
+</style>
+<script>
+window.antFx = window.antFx || (function () {
+    function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+    function num(v, d) { return (v === null || v === undefined || isNaN(v)) ? 'NA' : Number(v).toFixed(d == null ? 2 : d); }
+    function qfmt(v) {
+        if (v === null || v === undefined || isNaN(v)) return 'NA';
+        v = Number(v); if (v === 0) return '0';
+        return v < 0.001 ? v.toExponential(1) : v.toPrecision(2);
+    }
+    function getJson(url) {
+        return fetch(url, { credentials: 'same-origin' }).then(function (r) {
+            if (!r.ok) throw new Error(r.status === 404 ? 'not available' : 'HTTP ' + r.status);
+            return r.json();
+        });
+    }
+    function donors(u) {
+        if (u.n_donors_test != null && u.n_donors_ref != null) return u.level_test + ' ' + u.n_donors_test + ' / ' + u.level_ref + ' ' + u.n_donors_ref;
+        var lc = u.level_counts || {};
+        if (lc.braak_min != null) return (u.n_donors || lc.n_donors) + ', stages ' + lc.braak_min + ' to ' + lc.braak_max;
+        return (u.n_donors || '?') + ' donors';
+    }
+    function flagPills(u) {
+        var f = u.flags || {}, out = [];
+        if (u.descriptive_only) out.push('<span class="fx-pill warn" title="Fewer than 5 donors in a level (Braak: fewer than 10): no p, q or CI.">descriptive only</span>');
+        if (f.composition_flag) out.push('<span class="fx-pill warn" title="The fraction of each donor\'s cells in this cell type varies with the facet (p &lt; 0.05, uncorrected); the effect may reflect which cells were captured.">composition?</span>');
+        if (f.batch_confounded) out.push('<span class="fx-pill warn" title="Facet and batch cannot be separated; batch left out.">batch confounded</span>');
+        if (f.batch_used) out.push('<span class="fx-pill" title="A donor-level batch column was in the model.">batch adjusted</span>');
+        return out.join('');
+    }
+    // One forest per cell type label of a result card.
+    function renderCard(box, card) {
+        var units = card.units || [];
+        var facet = card.facet || {};
+        if (!units.length) { box.innerHTML = '<p class="fx-none">' + esc(card.gene) + ' was not tested for ' + esc(facet.name) + ' (not in any tested dataset, or removed by the expression filter).</p>'; return; }
+        var html = '<div class="fxf-head">' + esc(facet.effect_unit) + '; ' + esc(facet.contrast) + '.</div>';
+        (card.notes || []).forEach(function (n) {
+            if (n === 'exploratory' || n.indexOf('no meta-analysis') === 0 || n.indexOf('cohort table') === 0) return;
+            html += '<div class="fxf-note">' + esc(n) + '</div>';
+        });
+        var byType = {};
+        var order = [];
+        units.forEach(function (u) { if (!byType[u.cell_type]) { byType[u.cell_type] = []; order.push(u.cell_type); } byType[u.cell_type].push(u); });
+        var reps = {};
+        (card.replication || []).forEach(function (r) { reps[r.cell_type] = r; });
+        order.forEach(function (ct) {
+            var rows = byType[ct], rep = reps[ct] || {};
+            var lo = 0, hi = 0;
+            rows.forEach(function (u) {
+                [u.ci_low, u.ci_high, u.logFC].forEach(function (v) { if (v != null && !isNaN(v)) { lo = Math.min(lo, v); hi = Math.max(hi, v); } });
+            });
+            var pad = (hi - lo) * 0.06 || 0.1; lo -= pad; hi += pad;
+            function pos(v) { return ((v - lo) / (hi - lo) * 100).toFixed(2) + '%'; }
+            var cls = rep.sign_discordant ? 'disc' : (rep.cohorts_sig_same_sign >= 2 ? 'rep' : '');
+            html += '<div class="fxf-card"><h3 class="subsection-head">' + esc(ct) +
+                ' <span class="fxf-badge ' + cls + '" title="' + esc(card.definition) + '">' + esc(rep.badge || '') + '</span></h3>';
+            html += '<div class="table-wrap"><table class="fxf"><thead><tr><th>Dataset</th><th>log2FC</th><th class="fxf-bar"><div class="fxf-axis"><span>' + num(lo) + '</span><span>0</span><span>' + num(hi) + '</span></div></th><th>95% CI</th><th>q</th><th>Donors</th><th>Flags</th></tr></thead><tbody>';
+            var lastCohort = null;
+            rows.forEach(function (u) {
+                var cohort = u.cohort_label || 'not in the cohort table';
+                if (cohort !== lastCohort) {
+                    html += '<tr class="fxf-cohort"><td colspan="7">' + esc(cohort) + (u.counted ? '' : ' <span class="muted">(not counted)</span>') + '</td></tr>';
+                    lastCohort = cohort;
+                }
+                var size = Math.max(6, Math.min(16, 4 + Math.sqrt(u.n_donors || 1)));
+                var dir = (u.logFC || 0) > 0 ? 'up' : 'down';
+                var bar = '<div class="fxf-track"><div class="fxf-zero" style="left:' + pos(0) + '"></div>';
+                if (u.ci_low != null && u.ci_high != null) bar += '<div class="fxf-ci" style="left:' + pos(u.ci_low) + ';width:calc(' + pos(u.ci_high) + ' - ' + pos(u.ci_low) + ')"></div>';
+                if (u.logFC != null) bar += '<div class="fxf-pt ' + dir + (u.significant ? ' sig' : '') + '" style="left:' + pos(u.logFC) + ';width:' + size + 'px;height:' + size + 'px"></div>';
+                bar += '</div>';
+                html += '<tr class="' + (u.counted ? '' : 'not-counted') + '" title="' + esc((u.role || 'role not recorded') + '. Model: ' + u.model + (u.covariates_left_out && u.covariates_left_out.length ? '; left out: ' + u.covariates_left_out.join(', ') : '') + '; ' + u.method) + '">' +
+                    '<td><a href="/browse/' + esc(u.db_id) + '#data">' + esc(u.db_id) + '</a></td>' +
+                    '<td class="num">' + num(u.logFC) + '</td><td class="fxf-bar">' + bar + '</td>' +
+                    '<td class="num">' + (u.ci_low != null ? '[' + num(u.ci_low) + ', ' + num(u.ci_high) + ']' : 'no CI') + '</td>' +
+                    '<td class="num">' + qfmt(u.q_value) + '</td><td class="num">' + esc(donors(u)) + '</td><td>' + flagPills(u) + '</td></tr>';
+            });
+            html += '</tbody></table></div></div>';
+        });
+        html += '<div class="fxf-legend">Filled point: q &lt; 0.05 (red up, blue down); open point: not significant; no bar: descriptive only (no CI). Point size grows with donors. Hover a row for its model. Cohorts and roles come from the DRAFT cohort table; rows marked "not counted" do not count towards replication.</div>';
+        box.innerHTML = html;
+    }
+    return { esc: esc, num: num, qfmt: qfmt, getJson: getJson, renderCard: renderCard };
+})();
+</script>
+{%- endmacro %}
+
+{# Gene page panel: one tab per tested facet. #}
+{% macro fx_gene_panel(gene) -%}
+{{ fx_styles() }}
+{{ fx_forest_assets() }}
+<section id="gene-facet-effects" class="fx-gene-panel" data-gene="{{ gene }}">
+  <h2 class="section-head">Facet effects <span class="muted">(donor level, exploratory)</span>
+    <span class="info" title="Donor-level tests from the facet pages: each row is one dataset and cell type tested on its own (limma-voom on donor pseudobulks). Nothing is pooled.">ⓘ</span></h2>
+  <p class="fx-intro">How {{ gene }} differs with sex, disease, APOE e4 carrier status and Braak stage when each dataset and cell type is tested at the level of donors. Rows are grouped by cohort; the badge counts independent cohorts, not datasets. Exploratory; disease results are provisional. <a href="/help#facet-effects">How to read this</a></p>
+  <div class="fx-tabs" role="tablist" id="gene-fx-tabs">
+    <button type="button" data-facet="sex" class="active">sex</button>
+    <button type="button" data-facet="disease">disease <span class="muted">(provisional)</span></button>
+    <button type="button" data-facet="apoe_carrier">APOE e4 carrier</button>
+    <button type="button" data-facet="braak">Braak stage</button>
+  </div>
+  <div id="gene-fx-body" class="muted" style="font-size:12px">loading…</div>
+</section>
+<script>
+(function () {
+    var panel = document.getElementById('gene-facet-effects');
+    if (!panel || !window.antFx) return;
+    var gene = panel.dataset.gene, body = document.getElementById('gene-fx-body');
+    var tabs = Array.from(document.querySelectorAll('#gene-fx-tabs button'));
+    var cards = {}, active = 'sex';
+    function show(facet) {
+        active = facet;
+        tabs.forEach(function (b) { b.classList.toggle('active', b.dataset.facet === facet); });
+        var card = cards[facet];
+        if (!card) { body.textContent = 'loading…'; return; }
+        if (card.error) { body.textContent = 'Facet effects ' + card.error + '.'; return; }
+        body.classList.remove('muted');
+        antFx.renderCard(body, card);
+    }
+    tabs.forEach(function (b) { b.addEventListener('click', function () { show(b.dataset.facet); }); });
+    var pending = tabs.length;
+    tabs.forEach(function (b) {
+        var facet = b.dataset.facet;
+        antFx.getJson('/api/facets/' + facet + '/effects?gene=' + encodeURIComponent(gene)).then(function (card) {
+            cards[facet] = card;
+            var best = Math.max.apply(null, (card.replication || []).map(function (r) { return r.cohorts_sig_same_sign; }).concat([0]));
+            b.dataset.best = best;
+            b.insertAdjacentHTML('beforeend', ' <span class="muted">' + (card.n_units || 0) + '</span>');
+        }).catch(function (err) { cards[facet] = { error: err.message }; })
+          .finally(function () {
+            pending -= 1;
+            if (facet === active) show(active);
+            if (pending === 0) {
+                // open the facet with the most replicated result (ties keep the order)
+                var pick = tabs.reduce(function (acc, t) { return (+t.dataset.best || 0) > (+acc.dataset.best || 0) ? t : acc; }, tabs[0]);
+                show(pick.dataset.facet);
+            }
+        });
+    });
+})();
+</script>
+{%- endmacro %}
+
+{# Facet page, part two: recurring genes per cell type, and a gene box that
+   shows that gene's forest. #}
+{% macro fx_recurring(facet_column) -%}
+{{ fx_forest_assets() }}
+<div id="fx-recurring" data-facet="{{ facet_column[4:] }}">
+  <h3 class="subsection-head">Recurring genes <span class="muted">(cohort table is a DRAFT)</span>
+    <span class="info" title="Genes ranked by the number of independent cohorts with q below 0.05 and the same sign in this cell type, then by cohorts tested (fewer first), then by the largest absolute log2 fold change. A cohort counts once; cell type labels are matched exactly.">ⓘ</span></h3>
+  <div class="fx-rec-controls">
+    <label>cell type <select id="fx-rec-celltype"></select></label>
+    <label>gene <input type="search" id="fx-rec-gene" placeholder="e.g. PTPRG" autocomplete="off" spellcheck="false"></label>
+    <button type="button" id="fx-rec-go" class="fx-toggle">show forest</button>
+    <span class="muted" id="fx-rec-status"></span>
+  </div>
+  <div id="fx-rec-forest"></div>
+  <div id="fx-rec-table" class="muted" style="font-size:12px">loading…</div>
+</div>
+<script>
+(function () {
+    var root = document.getElementById('fx-recurring');
+    if (!root || !window.antFx) return;
+    var facet = root.dataset.facet;
+    var sel = document.getElementById('fx-rec-celltype'), tableBox = document.getElementById('fx-rec-table');
+    var geneInput = document.getElementById('fx-rec-gene'), forest = document.getElementById('fx-rec-forest');
+    var status = document.getElementById('fx-rec-status');
+    function load(cellType) {
+        tableBox.textContent = 'loading…';
+        var url = '/api/facets/' + facet + '/effects/top?n=40' + (cellType ? '&cell_type=' + encodeURIComponent(cellType) : '');
+        antFx.getJson(url).then(function (data) {
+            if (!sel.options.length) {
+                (data.cell_types || []).forEach(function (o) {
+                    var opt = document.createElement('option');
+                    opt.value = o.cell_type; opt.textContent = o.cell_type + ' (' + o.n_cohorts + ' cohorts)';
+                    sel.appendChild(opt);
+                });
+                if (data.cell_type) sel.value = data.cell_type;
+            }
+            var rows = data.rows || [];
+            if (!rows.length) { tableBox.textContent = 'No gene at q < 0.05 in a counted cohort for this cell type.'; return; }
+            var html = '<div class="muted fx-note">' + data.cohorts_in_cell_type + ' counted cohorts tested ' + antFx.esc(data.cell_type) + '. Click a gene for its forest.</div>' +
+                '<div class="table-wrap"><table class="fx-rec"><thead><tr><th>Gene</th><th>Cohorts q &lt; 0.05, same sign</th><th>Direction</th><th>Units up / down</th><th>Max |log2FC|</th><th>Cohorts</th></tr></thead><tbody>';
+            rows.forEach(function (r) {
+                html += '<tr><td><a href="#" class="fx-rec-gene" data-gene="' + antFx.esc(r.gene) + '">' + antFx.esc(r.gene) + '</a>' + (r.apoe_locus ? ' <span class="fx-pill warn" title="APOE locus gene">APOE locus</span>' : '') + '</td>' +
+                    '<td class="num">' + r.cohorts_sig_same_sign + ' of ' + r.cohorts_tested + '</td><td>' + antFx.esc(r.direction) + (r.sign_discordant ? ' <span class="fx-pill warn">sign discordant</span>' : '') + '</td>' +
+                    '<td class="num">' + r.units_up + ' / ' + r.units_down + '</td><td class="num">' + antFx.num(r.max_abs_logFC) + '</td><td>' + antFx.esc((r.cohorts || []).join(', ')) + '</td></tr>';
+            });
+            tableBox.classList.remove('muted');
+            tableBox.innerHTML = html + '</tbody></table></div>';
+            tableBox.querySelectorAll('a.fx-rec-gene').forEach(function (a) {
+                a.addEventListener('click', function (e) { e.preventDefault(); geneInput.value = a.dataset.gene; showForest(); });
+            });
+        }).catch(function (err) { tableBox.textContent = 'Recurring genes ' + err.message + '.'; });
+    }
+    function showForest() {
+        var gene = geneInput.value.trim();
+        if (!gene) return;
+        status.textContent = 'loading ' + gene + '…';
+        antFx.getJson('/api/facets/' + facet + '/effects?gene=' + encodeURIComponent(gene)).then(function (card) {
+            status.textContent = '';
+            antFx.renderCard(forest, card);
+            forest.scrollIntoView({ block: 'nearest' });
+        }).catch(function (err) { status.textContent = gene + ': ' + err.message; });
+    }
+    sel.addEventListener('change', function () { load(sel.value); });
+    document.getElementById('fx-rec-go').addEventListener('click', showForest);
+    geneInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); showForest(); } });
+    load(null);
+})();
+</script>
+{%- endmacro %}

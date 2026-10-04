@@ -448,6 +448,13 @@ def main() -> None:
             '                     available expression layers, and embedding names\n'
             '  search_genes     — confirm exact gene identifiers before using them in queries or plots\n'
             '\n'
+            'DONOR-LEVEL FACET EFFECTS  (sex, disease [provisional], APOE e4 carrier, Braak; exploratory)\n'
+            '  facet_effects    one gene: every dataset x cell type, grouped by cohort, replication badge\n'
+            '  facet_top_genes  genes changing in the most independent cohorts, per cell type\n'
+            '  facet_units      which units were tested, donors, model, flags; why others were not\n'
+            '  get_facet_tests  gene or module rows of one dataset (limma-voom / OLS + permutations)\n'
+            '  Prefer these over per-cell plots for donor-level facets, and state the model when reporting.\n'
+            '\n'
             'PLOTTING\n'
             '  plot(db_id, geom, ...)  — generate a publication-quality figure server-side\n'
             '  Supported geom values:\n'
@@ -1275,6 +1282,338 @@ def main() -> None:
             lines.append(
                 f"  SELECT cell_name, \"{items[0]['column_name']}\" FROM obsnum LIMIT 5"
             )
+        return '\n'.join(lines)
+
+    def _fmt_number(value, digits: int = 3) -> str:
+        if value is None:
+            return 'NA'
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return str(value)
+        if number != 0 and (abs(number) < 1e-3 or abs(number) >= 1e4):
+            return f'{number:.{digits - 1}e}'
+        return f'{number:.{digits}g}'
+
+    @mcp.tool()
+    async def get_facet_tests(
+        db_id: str,
+        facet: Optional[str] = None,
+        cell_type: Optional[str] = None,
+        level: str = 'summary',
+        q: float = 0.05,
+        limit: int = 50,
+    ) -> str:
+        """Donor-level facet test results for one dataset (sex, disease, APOE e4 carrier, Braak).
+
+        EXPLORATORY results, precomputed per dataset. The unit of replication is
+        the donor, not the cell: raw counts are summed per (donor, cell type)
+        into a pseudobulk and genes are tested with limma-voom (TMM, voom,
+        eBayes; model ~ facet + sex + age + PMI + batch where available, BH q
+        within one dataset x cell type x facet). Module scores are averaged per
+        donor (method cell_mean, sources geneset and ucell) or computed on the
+        pseudobulk (method pseudobulk, source gene_list) and tested with OLS plus
+        1,000 facet-label permutations (q_param from the t test, q_perm from the
+        permutations; with 1,000 permutations a single strong module cannot reach
+        q_perm < 0.05, so read q_param and p_perm together).
+
+        Contrasts: sex = m vs f; disease = AD vs control; apoe_carrier = e4
+        carrier vs non-carrier; braak = linear trend per Braak stage.
+        Disease results are PROVISIONAL: the disease vocabulary is not settled
+        (what counts as control differs between studies), so they will change.
+
+        How to read the flags:
+          descriptive_only  a level has fewer than 5 donors (Braak: fewer than 10
+                            donors); p, q, t and CI are NULL and only the effect
+                            estimate is given. Do not call these significant.
+          composition flag  the fraction of each donor's cells that falls in this
+                            cell type differs with the facet (p < 0.05,
+                            uncorrected); an effect may reflect a shift in cell
+                            composition or state rather than expression.
+          batch_confounded  facet and batch cannot be separated; batch left out.
+        The same donors occur in several datasets (ROSMAP, SEA-AD, MADRC, ...),
+        so agreement across datasets is not independent replication. No hit
+        means "not detected with this many donors", not "no effect".
+
+        When you report any of these results, state the model with it, as
+        given in the summary for that unit: the unit of analysis (donor
+        pseudobulk, at least 10 cells per donor and stratum), the stratum and
+        how it was defined, the formula (e.g. expression ~ braak + sex + age_z
+        + pmi_z), the method, which covariates were left out and why, donors
+        per level, the multiple-testing scope, and tool, seed and run date.
+        Say that the result is exploratory. Fields the run did not record
+        read "not recorded"; do not fill them in.
+
+        Args:
+            db_id: Dataset id, e.g. 'G24/MMG'.
+            facet: Restrict to one facet: sex, disease, apoe_carrier or braak.
+            cell_type: Restrict to one cell type stratum (as listed in the summary).
+            level: 'summary' (one line per facet x cell type: donors per level,
+                covariates, flags, genes and modules at q < 0.05), 'genes'
+                (gene rows: logFC with 95% CI, q, mean log2 CPM) or 'modules'
+                (module rows: estimate with CI, std_effect, q_param, q_perm).
+            q: q threshold for 'genes' and 'modules' (default 0.05; 1 returns
+                every row, including descriptive-only ones). Modules pass when
+                q_param or q_perm is below q.
+            limit: Maximum rows for 'genes' and 'modules' (default 50, max 2000).
+        """
+        if level not in ('summary', 'genes', 'modules'):
+            return "level must be 'summary', 'genes' or 'modules'."
+        limit = max(1, min(int(limit), 2000))
+        try:
+            if level == 'summary':
+                data = await _get(f'/databases/{db_id}/facet-tests')
+            else:
+                data = await _get(f'/databases/{db_id}/facet-tests/{level}', facet=facet,
+                                  cell_type=cell_type, q=q, limit=limit)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                try:
+                    detail = exc.response.json().get('detail')
+                except Exception:
+                    detail = exc.response.text
+                return f"{db_id}: {detail or 'not found'}."
+            return f"Error {exc.response.status_code}: {exc.response.text}"
+
+        header = ('Exploratory donor-level results (unit = donor; genes: limma-voom on '
+                  'pseudobulk; modules: OLS + permutations). Disease is provisional.')
+        if level == 'summary':
+            if data.get('status') != 'tested':
+                return f"{db_id}: not tested ({data.get('reason') or 'no results'})."
+            runs = data.get('runs') or {}
+            lines = [header, f"{db_id}: {data.get('n_units_tested')} of {data.get('n_units')} "
+                             f"facet x cell type units tested."]
+            for kind in ('genes', 'modules'):
+                run = runs.get(kind)
+                if run:
+                    lines.append(f"  {kind} run: {run.get('tool')} at {run.get('timestamp_utc')}, "
+                                 f"seed {run.get('seed')}, versions {run.get('versions')}")
+            if data.get('dataset_changed'):
+                lines.append('  WARNING: the dataset changed since these results were computed.')
+            for unit in data.get('units') or []:
+                if facet and unit.get('facet') != facet:
+                    continue
+                if cell_type and unit.get('cell_type') != cell_type:
+                    continue
+                name = f"{unit.get('facet')} | {unit.get('cell_type')} ({unit.get('celltype_source')})"
+                if not unit.get('tested'):
+                    lines.append(f"- {name}: not tested ({unit.get('reason')})")
+                    continue
+                counts = unit.get('level_counts') or {}
+                donors = ', '.join(f'{k}={v}' for k, v in counts.items()) or str(unit.get('n_donors'))
+                flags = unit.get('flags') or {}
+                flag_words = [word for word, on in (
+                    ('descriptive_only', flags.get('descriptive_only')),
+                    ('provisional', flags.get('provisional')),
+                    (f"composition (p={_fmt_number(flags.get('composition_p'), 2)})", flags.get('composition_flag')),
+                    ('batch_used', flags.get('batch_used')),
+                    ('batch_confounded', flags.get('batch_confounded'))) if on]
+                genes = unit.get('genes') or {}
+                modules = '; '.join(
+                    f"{m['method']}/{m['source']} {m.get('n_q05_param')}|{m.get('n_q05_perm')} of {m.get('n_modules')}"
+                    for m in unit.get('modules') or [])
+                model = unit.get('model') or {}
+                model_lines = [f"    stratum: {(model.get('stratum') or {}).get('description', 'not recorded')}"]
+                for kind in ('genes', 'modules'):
+                    part = model.get(kind)
+                    if not part:
+                        continue
+                    left_out = '; '.join(f"{c['name']} {c['status']} ({c['reason']})"
+                                         for c in part.get('covariates') or [] if c.get('status') != 'included')
+                    model_lines.append(
+                        f"    {kind} model: {part.get('formula')} | {part.get('method')} | "
+                        f"multiple testing: {part.get('multiple_testing')} | {part.get('tool')}, seed "
+                        f"{part.get('seed')}, run {part.get('run_date')}"
+                        f"{' | not in model: ' + left_out if left_out else ''}")
+                lines.append(
+                    f"- {name}: {unit.get('contrast')}, donors {donors} (analysed {unit.get('n_donors')}), "
+                    f"covariates {', '.join(unit.get('covariates') or []) or 'none'}"
+                    f"{', flags ' + ', '.join(flag_words) if flag_words else ''}; "
+                    f"genes q<0.05: {genes.get('n_q05', 'NA')} of {genes.get('n_tested', 'NA')}"
+                    f"{'; modules q_param|q_perm<0.05: ' + modules if modules else ''}")
+                lines.extend(model_lines)
+                control = unit.get('sex_control')
+                if control:
+                    lines.append(f"    sex positive control: {control.get('status')} (XIST log2FC "
+                                 f"{_fmt_number(control.get('xist_logFC'))}, q {_fmt_number(control.get('xist_q'))}; "
+                                 f"{control.get('n_y_up_q01')} of {control.get('n_y_tested')} Y genes up at q < 0.01)")
+            lines.append("Use level='genes' or level='modules' with facet and cell_type for the rows.")
+            return '\n'.join(lines)
+
+        rows = data.get('rows') or []
+        lines = [header, f"{db_id} {level}: {data.get('n_returned')} of {data.get('n_matching')} rows "
+                         f"(q < {q}{', facet ' + facet if facet else ''}"
+                         f"{', cell type ' + cell_type if cell_type else ''})."]
+        if not rows:
+            lines.append('No rows. Try q=1 to see all estimates (descriptive-only units have no q).')
+            return '\n'.join(lines)
+        if level == 'genes':
+            lines.append('facet | cell_type | contrast | gene | logFC [95% CI] | q | ave_expr (log2 CPM) | donors')
+            for row in rows:
+                lines.append(
+                    f"{row.get('facet')} | {row.get('cell_type')} | {row.get('contrast')} | {row.get('gene')} | "
+                    f"{_fmt_number(row.get('logFC'))} [{_fmt_number(row.get('ci_low'))}, {_fmt_number(row.get('ci_high'))}] | "
+                    f"{_fmt_number(row.get('q_value'))} | {_fmt_number(row.get('ave_expr'))} | {row.get('n_donors')}")
+        else:
+            lines.append('facet | cell_type | method/source | catalog/module | estimate [95% CI] | std_effect | q_param | q_perm')
+            for row in rows:
+                lines.append(
+                    f"{row.get('facet')} | {row.get('cell_type')} | {row.get('method')}/{row.get('source')} | "
+                    f"{row.get('catalog')}/{row.get('module')} | {_fmt_number(row.get('estimate'))} "
+                    f"[{_fmt_number(row.get('ci_low'))}, {_fmt_number(row.get('ci_high'))}] | "
+                    f"{_fmt_number(row.get('std_effect'))} | {_fmt_number(row.get('q_param'))} | "
+                    f"{_fmt_number(row.get('q_perm'))}")
+        return '\n'.join(lines)
+
+    _FACET_TOOL_RULES = (
+        'Exploratory, donor-level results (unit = donor; genes: limma-voom on pseudobulk). '
+        'Datasets are tested separately; nothing is pooled. Replication: '
+        '"replicates in k of m independent cohorts" means q < 0.05 with the same sign in k cohorts out of '
+        'the m cohorts in which this gene was tested in this cell type and facet; a cohort is a row group of '
+        'the DRAFT cohort selection table and counts at most once. Disease is provisional.'
+    )
+
+    @mcp.tool()
+    async def facet_effects(gene: str, facet: Optional[str] = None, cell_type: Optional[str] = None) -> str:
+        """Donor-level effect of one gene for the tested facets (sex, disease, APOE e4 carrier, Braak), per dataset and cell type, grouped by cohort, with a replication badge.
+
+        EXPLORATORY. Each row is one dataset and cell type tested on its own:
+        raw counts summed per donor (at least 10 cells) into a pseudobulk,
+        limma-voom with covariates sex, age, PMI, batch when available; BH
+        within dataset x cell type x facet. Nothing is pooled; no meta-analysis.
+
+        Replication, verbatim: "replicates in k of m independent cohorts" means
+        q < 0.05 with the same sign in k cohorts out of the m cohorts in which
+        this (gene, cell type, facet) was tested, where a cohort is a row group
+        of the DRAFT cohort selection table (anchor and primary roles only) and
+        contributes at most once even with several units. "Sign discordant" is
+        reported separately. Cell type labels are matched exactly.
+
+        Contrasts: sex m vs f; disease AD vs control (PROVISIONAL: vocabulary
+        not settled, results will change); apoe_carrier any e4 allele vs none;
+        braak linear trend per stage (not AD vs control). Flags:
+        descriptive_only (a level has fewer than 5 donors, Braak fewer than 10:
+        no p, q, CI); composition (cell fraction in the stratum differs with
+        the facet; the effect may reflect composition). For APOE, APOC1,
+        APOC1P1, TOMM40, NECTIN2, PVRL2 the APOE-locus note applies.
+
+        When you report a result, repeat its model line (formula, n donors,
+        covariates left out), the replication badge and that it is exploratory.
+
+        Args:
+            gene: Gene symbol, e.g. 'PTPRG'.
+            facet: sex, disease, apoe_carrier or braak; omit for all four.
+            cell_type: Restrict to one cell type label (exact).
+        """
+        facets = [facet] if facet else ['sex', 'disease', 'apoe_carrier', 'braak']
+        lines = [_FACET_TOOL_RULES]
+        for name in facets:
+            try:
+                card = await _get(f'/facets/{name}/effects', gene=gene, cell_type=cell_type)
+            except httpx.HTTPStatusError as exc:
+                lines.append(f"{name}: error {exc.response.status_code}: {exc.response.text[:200]}")
+                continue
+            info = card.get('facet') or {}
+            lines.append(f"\n## {gene} / {name}: {info.get('contrast')}; effect = {info.get('effect_unit')}")
+            if not card.get('units'):
+                lines.append('  not tested in any dataset (gene absent or filtered out by filterByExpr)')
+                continue
+            for rep in card.get('replication') or []:
+                lines.append(f"  [{rep['cell_type']}] {rep['badge']}")
+            for note in card.get('notes') or []:
+                if note not in ('exploratory',):
+                    lines.append(f'  note: {note}')
+            lines.append('  cohort | role | dataset | cell type | log2FC [95% CI] | q | donors | flags | model')
+            for unit in card['units']:
+                flags = [k for k, v in (unit.get('flags') or {}).items()
+                         if v is True and k not in ('n_lt5',)]
+                donors = (f"{unit.get('level_test')} {unit.get('n_donors_test')}, {unit.get('level_ref')} {unit.get('n_donors_ref')}"
+                          if unit.get('n_donors_test') is not None else f"{unit.get('n_donors')} donors")
+                lines.append(
+                    f"  {unit.get('cohort_label') or 'not in cohort table'}{'' if unit.get('counted') else ' (not counted)'} | "
+                    f"{unit.get('role') or '-'} | {unit['db_id']} | {unit['cell_type']} | "
+                    f"{_fmt_number(unit.get('logFC'))} [{_fmt_number(unit.get('ci_low'))}, {_fmt_number(unit.get('ci_high'))}] | "
+                    f"{_fmt_number(unit.get('q_value'))} | {donors} | {', '.join(flags) or '-'} | "
+                    f"{unit.get('model')}{'; left out: ' + ', '.join(unit['covariates_left_out']) if unit.get('covariates_left_out') else ''}")
+        return '\n'.join(lines)
+
+    @mcp.tool()
+    async def facet_top_genes(facet: str, cell_type: Optional[str] = None, n: int = 30) -> str:
+        """Genes that change with a facet in the most independent cohorts, within one cell type.
+
+        Ranked by the number of independent cohorts with q < 0.05 and the same
+        sign, then by cohorts tested (fewer first), then by the largest absolute
+        log2 fold change. Same replication definition as facet_effects
+        ("replicates in k of m independent cohorts": q < 0.05, same sign, a
+        cohort of the DRAFT cohort selection table counts at most once; cell
+        type labels matched exactly). EXPLORATORY, no pooling, disease is
+        provisional, Braak is a linear trend per stage. Use facet_effects on a
+        gene from this list to see every dataset row and its model.
+
+        Args:
+            facet: sex, disease, apoe_carrier or braak.
+            cell_type: Cell type label; omit for the label with most cohorts (the reply lists the options).
+            n: Rows (default 30, max 500).
+        """
+        try:
+            data = await _get(f'/facets/{facet}/effects/top', cell_type=cell_type, n=max(1, min(int(n), 500)))
+        except httpx.HTTPStatusError as exc:
+            return f"Error {exc.response.status_code}: {exc.response.text[:300]}"
+        lines = [_FACET_TOOL_RULES,
+                 f"{facet} in {data.get('cell_type')}: {data.get('cohorts_in_cell_type')} counted cohorts tested.",
+                 'Other cell types: ' + ', '.join(f"{o['cell_type']} ({o['n_cohorts']} cohorts)"
+                                                  for o in (data.get('cell_types') or [])[:12])]
+        rows = data.get('rows') or []
+        if not rows:
+            lines.append('No gene at q < 0.05 in a counted cohort for this cell type.')
+            return '\n'.join(lines)
+        lines.append('gene | k of m cohorts | direction | units up/down | max |log2FC| | cohorts')
+        for row in rows:
+            lines.append(f"{row['gene']} | {row['cohorts_sig_same_sign']} of {row['cohorts_tested']} | "
+                         f"{row['direction']}{' (sign discordant)' if row.get('sign_discordant') else ''} | "
+                         f"{row['units_up']}/{row['units_down']} | {_fmt_number(row.get('max_abs_logFC'))} | "
+                         f"{', '.join(row.get('cohorts') or [])}{' | APOE locus' if row.get('apoe_locus') else ''}")
+        return '\n'.join(lines)
+
+    @mcp.tool()
+    async def facet_units(db_id: Optional[str] = None, facet: Optional[str] = None) -> str:
+        """Which dataset x cell type units were tested for the facets, with donors per level, model, flags and hits; and why the others were not tested.
+
+        Give db_id for one dataset (all facets, with eligibility reasons and
+        the sex positive control), or facet for that facet across all datasets
+        (one row per tested dataset x cell type, sorted by donors, with cohort
+        and role from the DRAFT cohort table). EXPLORATORY; donor-level
+        pseudobulk (limma-voom for genes, OLS + 1,000 permutations for
+        modules); disease is provisional. State the model when you report a
+        unit. For gene and module rows of one unit use get_facet_tests.
+
+        Args:
+            db_id: Dataset id, e.g. 'G24/MMG'.
+            facet: sex, disease, apoe_carrier or braak (used when db_id is not given).
+        """
+        if db_id:
+            return await get_facet_tests(db_id, facet=facet, level='summary')
+        if not facet:
+            return 'Give db_id or facet.'
+        try:
+            data = await _get(f'/facets/{facet}/tests', top_genes=5)
+        except httpx.HTTPStatusError as exc:
+            return f"Error {exc.response.status_code}: {exc.response.text[:300]}"
+        lines = [_FACET_TOOL_RULES,
+                 f"{facet}: {data.get('n_rows')} units in {data.get('n_datasets_tested')} datasets (no pooling)."]
+        for row in data.get('rows') or []:
+            counts = row.get('level_counts') or {}
+            donors = ', '.join(f'{k}={v}' for k, v in counts.items())
+            genes = row.get('genes') or {}
+            flags = [k for k, v in (row.get('flags') or {}).items() if v is True and k != 'n_lt5']
+            model = ((row.get('model') or {}).get('genes') or {}).get('formula', 'not recorded')
+            top = ', '.join(g['gene'] for g in row.get('top_genes') or [])
+            lines.append(f"- {row['db_id']} | {row.get('cell_type')} | cohort {row.get('cohort_label') or 'not in table'}"
+                         f" ({row.get('role') or '-'}) | donors {donors} | model {model} | genes q<0.05 "
+                         f"{genes.get('n_q05', 'NA')}/{genes.get('n_tested', 'NA')} | flags {', '.join(flags) or '-'}"
+                         f"{' | top ' + top if top else ''}")
+        for item in data.get('not_tested') or []:
+            lines.append(f"- not tested: {item['db_id']}: {item.get('reason')}")
         return '\n'.join(lines)
 
     @mcp.tool()

@@ -275,6 +275,39 @@ gene tests: ROSMAP, SEA-AD, MADRC and Lu files share persons.
 * `ucell` scores are rank based in [0, 1]; effect sizes of the two A sources are not
   comparable in scale (use `std_effect`).
 
+## Serving the results (API, MCP, web)
+
+The server reads the files above directly (`lib/facet_results.py`); there is
+no separate publish step. The folder is the config key `facet_results_dir`
+(default `<h5adstore>/_facet_tests`), so a site can point it at a copied or
+consolidated folder later without code changes. Reads are defensive: a
+missing or partly written file is "not available".
+
+* REST: `/databases/{id}/facet-tests` (units with a `model` object built from
+  the manifests), `/genes`, `/modules`, `/volcano.png`;
+  `/facets/{name}/tests` (units across datasets), `/facets/{name}/effects?gene=`
+  (result card with the replication badge), `/facets/{name}/effects/top`
+  (recurring genes per cell type), `/genes/{gene}/facet-effects`,
+  `/facets/cohorts`. See `doc/API_CHANGELOG.md`.
+* MCP: `get_facet_tests`, `facet_effects`, `facet_top_genes`, `facet_units`.
+* Web: effects under each facet of the dataset Facets card, "Effects across
+  datasets" on the facet page, a forest panel on the gene page, and the help
+  section "Facets and facet effects".
+
+Replication badge: "replicates in k of m independent cohorts" means q < 0.05
+with the same sign in k cohorts out of the m cohorts in which the gene was
+tested in that cell type and facet. A cohort is a row group of
+`cohort_selection.DRAFT.tsv`; rows whose role matches duplicate, supplement,
+"do not", never, "alternative B" or "T20 only" do not count (the same rule as
+`ant-facet-test-modules summarize`), and datasets missing from the table do
+not count. Cell type labels are matched exactly, so "microglial cell" and
+"Microglia" are separate rows; harmonising them is open.
+
+Sex positive control (dataset card, sex units): passed when XIST is lower and
+RPS4Y1 higher in males, both at q < 0.05; the number of Y-linked genes
+(RPS4Y1, DDX3Y, UTY, KDM5D, USP9Y, EIF1AY, ZFY, NLGN4Y, TXLNGY) higher in
+males at q < 0.01 is shown alongside.
+
 ## Reproducibility
 
 Seed 20261004 is passed to R (`set.seed`; limma-voom itself is

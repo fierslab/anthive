@@ -165,6 +165,11 @@ def validate_site(site: dict, path: Path) -> dict:
         raise SiteError("auth.mode authelia requires an https public_url (Authelia refuses http cookies)")
     if auth_mode == 'basic' and not site['auth'].get('users'):
         raise SiteError("auth.mode basic needs at least one entry in auth.users")
+    facets_visible = site['site'].get('facets_visible')
+    if facets_visible is not None and (
+            not isinstance(facets_visible, list)
+            or not all(isinstance(f, str) and re.fullmatch(r'ant_[A-Za-z0-9_]+', f) for f in facets_visible)):
+        raise SiteError("site.facets_visible must be a list of ant_* facet names (or [] for all)")
     site['_path'] = path
     site['_h5adstore'] = _abs(site['data'].get('h5adstore'), 'data.h5adstore')
     site['_genesetstore'] = _abs(site['data'].get('genesetstore'), 'data.genesetstore', False)
@@ -406,6 +411,7 @@ def render_anthive_yaml(site: dict, role: str = 'api') -> dict:
     }
     if site['site'].get('docs_base_url'):
         cfg['docs_base_url'] = str(site['site']['docs_base_url'])
+    cfg['facets_visible'] = [str(f) for f in (site['site'].get('facets_visible') or [])]
     lib = site.get('library') or {}
     cfg.update({
         'library_upload_groups': [str(g) for g in (lib.get('upload_groups') or ['admins'])],
@@ -718,7 +724,8 @@ def _validate_rendered_config(path: Path) -> None:
     """Load the rendered config through lib/config so unknown keys fail now."""
     code = ("import sys; sys.path.insert(0, sys.argv[1]); import config; "
             "cfg = config.load_config(); config.get_auth_settings(cfg); "
-            "config.get_coordinate_mode(cfg); config.get_catalog_scan_mode(cfg)")
+            "config.get_coordinate_mode(cfg); config.get_catalog_scan_mode(cfg); "
+            "config.get_facets_visible(cfg)")
     env = {**os.environ, 'ANTHIVE_CONFIG': str(path)}
     result = subprocess.run([sys.executable, '-c', code, str(REPO / 'lib')],
                             env=env, capture_output=True, text=True)

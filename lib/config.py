@@ -329,6 +329,19 @@ def get_data_folder(cfg: Optional[Dict[str, Any]] = None) -> Path:
     return resolve_path(_setting(cfg, 'h5adstore', 'ANTHIVE_H5ADSTORE', 'data/h5adstore'))
 
 
+def get_facet_results_dir(cfg: Optional[Dict[str, Any]] = None) -> Path:
+    """Folder with the donor-level facet test results (read-only for the server).
+
+    ``facet_results_dir`` / env ``ANTHIVE_FACET_RESULTS_DIR``; empty means
+    ``<h5adstore>/_facet_tests``, where ant-facet-test writes them.
+    """
+    cfg = cfg if cfg is not None else load_config()
+    value = _setting(cfg, 'facet_results_dir', 'ANTHIVE_FACET_RESULTS_DIR', '')
+    if value in (None, ''):
+        return get_data_folder(cfg) / '_facet_tests'
+    return resolve_path(value)
+
+
 def get_library_dir(cfg: Optional[Dict[str, Any]] = None) -> Path:
     """The paper library root (its own repository; see doc/LIBRARY.md)."""
     return resolve_path(_setting(cfg, 'library', 'ANTHIVE_LIBRARY', 'data/library'))
@@ -448,6 +461,46 @@ def get_docs_base_url(cfg: Optional[Dict[str, Any]] = None) -> str:
     cfg = cfg if cfg is not None else load_config()
     value = str(_setting(cfg, 'docs_base_url', 'ANTHIVE_DOCS_BASE_URL', '') or '').strip()
     return (value or DEFAULT_DOCS_BASE_URL).rstrip('/')
+
+
+DEFAULT_FACETS_VISIBLE = ('ant_sex', 'ant_disease', 'ant_apoe_carrier', 'ant_braak')
+
+
+def get_facets_visible(cfg: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Facets (``ant_*`` columns) the facet pages and the dataset facet card show.
+
+    Temporary: while the facet audit decisions are pending, only the facets
+    that the donor-level tests analyse are shown. The other ``ant_*``
+    columns stay in the data, SQL, plots and API listings (the ``/facets``
+    API marks them ``hidden_by_config``).
+
+    Precedence: env ``ANTHIVE_FACETS_VISIBLE`` (comma separated; ``*``
+    means all), then the ``facets_visible`` key. A missing key gives
+    ``DEFAULT_FACETS_VISIBLE``; an empty list or null means show every facet.
+
+    Returns:
+        The visible facet names, or ``[]`` for "show all".
+    """
+    env_value = os.environ.get('ANTHIVE_FACETS_VISIBLE', '').strip()
+    if env_value:
+        if env_value == '*':
+            return []
+        return [part.strip() for part in env_value.split(',') if part.strip()]
+    cfg = cfg if cfg is not None else load_config()
+    if 'facets_visible' not in cfg:
+        return list(DEFAULT_FACETS_VISIBLE)
+    value = cfg.get('facets_visible')
+    if not value:
+        return []
+    if isinstance(value, str):
+        value = value.split(',')
+    return [str(part).strip() for part in value if str(part).strip()]
+
+
+def facet_hidden_by_config(facet: str, visible: Optional[List[str]] = None) -> bool:
+    """True when ``facet`` is not in the configured visible list."""
+    visible = get_facets_visible() if visible is None else visible
+    return bool(visible) and facet not in visible
 
 
 _COORDINATE_MODES = ('auto', 'always', 'never')

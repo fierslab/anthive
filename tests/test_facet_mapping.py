@@ -379,6 +379,8 @@ def serve(tmp_path):
         'Dict': Dict, 'List': List, 'Any': Any, 'Optional': Optional, 'Tuple': Tuple,
         'get_auth_settings': lambda cfg=None: {'mode': 'authelia', 'admins': set()},
         '_load_module_variability': lambda force=False: None,
+        '_facets_visible': lambda: [],
+        'facet_hidden_by_config': lambda facet, visible=None: bool(visible) and facet not in visible,
     }
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SERVE_PATH), 'exec',
                  dont_inherit=True), namespace)

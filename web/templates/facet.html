@@ -24,20 +24,6 @@
     display: inline-block; height: 8px; background: var(--link); opacity: .7;
     vertical-align: middle; border-radius: 2px; margin-right: 6px;
   }
-  .mod-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-  .mod-table th, .mod-table td { padding: 4px 8px; border-bottom: 1px solid var(--border-light); text-align: left; vertical-align: top; }
-  .mod-table th { font-size: 10px; text-transform: uppercase; letter-spacing: .3px; color: var(--text-muted); font-weight: 500; }
-  .mod-table th.sortable { cursor: pointer; user-select: none; }
-  .mod-table th.sortable:hover { background: var(--hover); }
-  .mod-table th.sortable .sort-ind { display: inline-block; width: 10px; margin-left: 3px; color: #bbb; font-size: 9px; }
-  .mod-table th.sortable.sort-asc  .sort-ind::before { content: '\25B2'; color: var(--text); }
-  .mod-table th.sortable.sort-desc .sort-ind::before { content: '\25BC'; color: var(--text); }
-  .mod-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
-  .mod-controls { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin: 6px 0 8px; font-size: 12px; }
-  .mod-controls input[type=text], .mod-controls select {
-    font-family: var(--font); font-size: 12px; padding: 3px 8px; border: 1px solid var(--border); border-radius: 4px; background: #fff;
-  }
-  .mod-controls .count { color: var(--text-muted); }
   .show-more { font-size: 12px; margin-top: 6px; }
   .empty-note { color: var(--text-muted); font-size: 13px; padding: 12px 0; }
   .source-tag {
@@ -47,28 +33,6 @@
   }
   .num-range { font-family: var(--font-mono); font-size: 12px; color: var(--text); }
   .num-summary { font-size: 12px; color: var(--text-muted); margin-bottom: 8px; }
-
-  /* Top variable genes panel */
-  .tvg-controls { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin: 6px 0 8px; font-size: 12px; }
-  .tvg-controls select, .tvg-controls button {
-    font-family: var(--font); font-size: 12px; padding: 3px 8px; border: 1px solid var(--border); border-radius: 4px; background: #fff;
-  }
-  .tvg-controls button { cursor: pointer; }
-  .tvg-controls button:hover { background: var(--hover); }
-  .tvg-groups { font-size: 12px; color: var(--text-muted); margin: 4px 0 8px; }
-  .tvg-status { font-size: 12px; color: var(--text-muted); margin: 4px 0 8px; min-height: 1em; }
-  .tvg-status.err { color: #dc2626; }
-  .tvg-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-  .tvg-table th, .tvg-table td { padding: 4px 8px; border-bottom: 1px solid var(--border-light); text-align: left; vertical-align: middle; }
-  .tvg-table th { font-size: 10px; text-transform: uppercase; letter-spacing: .3px; color: var(--text-muted); font-weight: 500; }
-  .tvg-table th.sortable { cursor: pointer; user-select: none; }
-  .tvg-table th.sortable:hover { background: var(--hover); }
-  .tvg-table th.sortable .sort-ind { display: inline-block; width: 10px; margin-left: 3px; color: #bbb; font-size: 9px; }
-  .tvg-table th.sortable.sort-asc  .sort-ind::before { content: '\25B2'; color: var(--text); }
-  .tvg-table th.sortable.sort-desc .sort-ind::before { content: '\25BC'; color: var(--text); }
-  .tvg-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
-  .tvg-table td.gene { font-family: var(--font-mono); }
-  .tvg-spark svg { display: block; }
 
   /* Definition + per-dataset mapping */
   .facet-def { border: 1px solid var(--border); border-left: 3px solid var(--link); border-radius: 6px; padding: 10px 14px; margin: 10px 0 14px; max-width: 900px; background: #fff; }
@@ -110,6 +74,13 @@
 
 {% if error %}<p style="color:#dc2626">{{ error }}</p>{% endif %}
 
+{% if hidden_notice %}
+<div class="facet-header"><h1 class="page-title" style="display: inline-block;">{{ facet_name[4:] if facet_name.startswith('ant_') else facet_name }}</h1></div>
+<p id="facet-hidden-notice">This facet is not shown at the moment. While the facet audit decisions are pending, the site shows only the facets that the donor-level facet tests analyse{% if visible_facets %}:
+  {% for name in visible_facets %}<a href="/facets/{{ name|urlencode }}">{{ name[4:] if name.startswith('ant_') else name }}</a>{{ ', ' if not loop.last }}{% endfor %}{% endif %}.
+  The column itself is still in the data, the plots and the API. See <a href="/facets">all shown facets</a> or <a href="/help#facet-effects">the help page</a>.</p>
+{% endif %}
+
 {% if facet %}
 {% set fd = facet %}
 <div class="facet-header">
@@ -147,6 +118,36 @@
   <div>distinct values: <span class="val">{{ fd.value_distribution['values']|length }}</span></div>
   {% endif %}
 </div>
+
+{% if hidden_by_config %}
+<p class="audit-note" id="facet-hidden-admin">Only admins see this page. The facet is outside the site's <code>facets_visible</code> list while the facet audit decisions are pending.</p>
+{% endif %}
+
+{% if facet_effects is not none %}
+{% from "_facet_effects.html" import fx_styles, fx_intro, fx_table, fx_methods_box, fx_script, fx_recurring %}
+{{ fx_styles() }}
+<div class="card" id="facet-effects">
+  <h2 class="section-head">Effects across datasets <span class="muted">({{ facet_effects.rows|length }} {{ 'dataset and cell type' if facet_effects.rows|length == 1 else 'dataset and cell type combinations' }} in {{ facet_effects.n_datasets_tested }} {{ 'dataset' if facet_effects.n_datasets_tested == 1 else 'datasets' }})</span>
+    <span class="info" title="Donor-level tests of this facet, one row per dataset and cell type, sorted by the number of donors. No pooling.">ⓘ</span></h2>
+  {{ fx_intro('facet') }}
+  <p class="fx-intro" id="fx-no-pooling"><strong>No pooling.</strong> Each row is a separate test. A cross-dataset meta-analysis comes later; it has to account for donors that occur in several datasets (ROSMAP, SEA-AD, MADRC and others).</p>
+  {{ fx_methods_box() }}
+  {% if facet_effects.rows %}
+  <h3 class="subsection-head">Units tested <span class="muted">(one row per dataset and cell type, most donors first)</span></h3>
+  {{ fx_table(facet_effects.rows, 'fx-table-across', show_dataset=True) }}
+  {{ fx_recurring(facet_name) }}
+  {% else %}
+  <p class="fx-none">No dataset has a tested result for this facet yet.</p>
+  {% endif %}
+  {% if facet_effects.not_tested %}
+  <details class="fx-untested" id="fx-across-untested">
+    <summary class="muted">{{ facet_effects.not_tested|length }} {{ 'dataset' if facet_effects.not_tested|length == 1 else 'datasets' }} with results for other facets but not this one</summary>
+    <ul>{% for item in facet_effects.not_tested %}<li><a href="/browse/{{ item.db_id }}">{{ item.db_id }}</a> {{ item.title or '' }}: <span class="muted">{{ item.reason or 'not tested' }}</span></li>{% endfor %}</ul>
+  </details>
+  {% endif %}
+</div>
+{{ fx_script() }}
+{% endif %}
 
 <div class="card">
   <h2>Value distribution</h2>
@@ -288,402 +289,6 @@
   {% endif %}
 </div>
 
-<div class="card">
-  <h2>Top variable genesets by this facet</h2>
-  <p class="note">
-    Each row is one module (a curated gene set or a starCAT program) scored on
-    one dataset. The value shows how much of the module score's variance is
-    explained by <code>{{ facet_name }}</code> on that dataset. Higher means
-    the facet separates cells more cleanly by module activity.
-    Per-gene variance-explained on this facet lives on the individual dataset
-    pages, not here.
-  </p>
-  {% set mods = fd['modules'] %}
-  {% if mods['rows'] %}
-  <div class="mod-controls">
-    <label>Source
-      <select id="mod-source-filter">
-        <option value="">all</option>
-      </select>
-    </label>
-    <label>Catalog
-      <select id="mod-catalog-filter">
-        <option value="">all</option>
-      </select>
-    </label>
-    <input type="text" id="mod-name-filter" placeholder="filter by module or dataset...">
-    <span class="count" id="mod-count-live"></span>
-  </div>
-  <div class="table-wrap">
-  <table class="mod-table" id="mod-table">
-    <thead>
-      <tr>
-        <th class="sortable" data-key="catalog" data-dir="asc">Catalog <span class="sort-ind"></span></th>
-        <th class="sortable" data-key="module" data-dir="asc">Module <span class="sort-ind"></span></th>
-        <th class="sortable" data-key="source" data-dir="asc">Source <span class="sort-ind"></span></th>
-        <th class="sortable" data-key="statistic" data-dir="asc">Statistic <span class="sort-ind"></span></th>
-        <th class="sortable num sort-desc" data-key="value" data-dir="desc">Value <span class="sort-ind"></span></th>
-        <th class="sortable" data-key="dataset" data-dir="asc">Dataset <span class="sort-ind"></span></th>
-        <th class="sortable num" data-key="n_cells" data-dir="desc">Cells <span class="sort-ind"></span></th>
-        <th class="sortable num" data-key="n_categories" data-dir="desc">Groups <span class="sort-ind"></span></th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for r in mods['rows'] %}
-      <tr class="mod-row"
-          data-catalog="{{ r.catalog }}"
-          data-module="{{ r.module }}"
-          data-source="{{ r.source }}"
-          data-statistic="{{ r.statistic }}"
-          data-value="{{ '%.6f' | format(r.value) }}"
-          data-dataset="{{ r.dataset }}"
-          data-n_cells="{{ r.n_cells }}"
-          data-n_categories="{{ r.n_categories }}">
-        <td>{{ r.catalog }}</td>
-        <td>{{ r.module }}</td>
-        <td><span class="source-tag">{{ r.source }}</span></td>
-        <td>{{ r.statistic }}</td>
-        <td class="num">{{ '%.4f' | format(r.value) }}</td>
-        <td><a href="/browse/{{ r.dataset }}#tab-genesets">{{ r.dataset }}</a></td>
-        <td class="num">{{ '{:,}'.format(r.n_cells) }}</td>
-        <td class="num">{{ r.n_categories }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  </div>
-  <div class="show-more">
-    <button id="mod-show-more" style="font-size:12px; padding:3px 10px; cursor:pointer; border:1px solid var(--border); border-radius:4px; background:#fff;">Show more</button>
-    <span class="count" id="mod-count-shown"></span>
-  </div>
-  {% if mods.truncated %}
-  <p class="note">Server-side cap on returned rows. Sorted by value desc; showing top {{ mods['rows']|length }} of {{ mods.n_total }}.</p>
-  {% endif %}
-  {% else %}
-  <p class="empty-note">No module-variability entries for this facet yet. Run <code>ant module-variability</code> to compute them.</p>
-  {% endif %}
-</div>
-
-<div class="card">
-  <h2>Top variable genes</h2>
-  <p class="note">
-    Genes on the selected dataset are ranked by variance across per-group mean
-    expression for <code>{{ facet_name }}</code>. This is a pseudobulk ANOVA-lite proxy, and the variance ignores per-group sample size.
-  </p>
-  <div class="tvg-controls">
-    <label>Dataset
-      <select id="tvg-dataset"></select>
-    </label>
-    <button id="tvg-compute" type="button">Compute</button>
-  </div>
-  <div class="tvg-groups" id="tvg-groups"></div>
-  <div class="tvg-status" id="tvg-status"></div>
-  <div class="table-wrap">
-    <table class="tvg-table" id="tvg-table" hidden>
-      <thead id="tvg-thead"></thead>
-      <tbody id="tvg-tbody"></tbody>
-    </table>
-  </div>
-</div>
-
-<script>
-(function () {
-  var table = document.getElementById('mod-table');
-  if (!table) return;
-  var tbody = table.querySelector('tbody');
-  var allRows = Array.from(tbody.querySelectorAll('tr.mod-row'));
-  var pageSize = 100;
-  var shown = pageSize;
-
-  var srcSel = document.getElementById('mod-source-filter');
-  var catSel = document.getElementById('mod-catalog-filter');
-  var nameInput = document.getElementById('mod-name-filter');
-  var live = document.getElementById('mod-count-live');
-  var counter = document.getElementById('mod-count-shown');
-  var showMoreBtn = document.getElementById('mod-show-more');
-
-  var sources = new Set();
-  var catalogs = new Set();
-  allRows.forEach(function (r) {
-    if (r.dataset.source) sources.add(r.dataset.source);
-    if (r.dataset.catalog) catalogs.add(r.dataset.catalog);
-  });
-
-  function fillSelect(sel, values) {
-    Array.from(values).sort().forEach(function (v) {
-      var opt = document.createElement('option');
-      opt.value = v;
-      opt.textContent = v;
-      sel.appendChild(opt);
-    });
-  }
-  fillSelect(srcSel, sources);
-  fillSelect(catSel, catalogs);
-
-  function currentFilter() {
-    var srcVal = srcSel.value;
-    var catVal = catSel.value;
-    var qRaw = (nameInput.value || '').trim().toLowerCase();
-    return allRows.filter(function (r) {
-      if (srcVal && r.dataset.source !== srcVal) return false;
-      if (catVal && r.dataset.catalog !== catVal) return false;
-      if (qRaw) {
-        var hay = (r.dataset.module + ' ' + r.dataset.dataset + ' ' + r.dataset.catalog).toLowerCase();
-        if (hay.indexOf(qRaw) === -1) return false;
-      }
-      return true;
-    });
-  }
-
-  var sortState = { key: 'value', dir: 'desc' };
-
-  function render() {
-    var filtered = currentFilter();
-    filtered.sort(function (a, b) {
-      var av = a.dataset[sortState.key];
-      var bv = b.dataset[sortState.key];
-      var an = parseFloat(av), bn = parseFloat(bv);
-      var isNum = !isNaN(an) && !isNaN(bn);
-      var cmp = isNum ? (an - bn) : String(av).localeCompare(String(bv));
-      return sortState.dir === 'desc' ? -cmp : cmp;
-    });
-    allRows.forEach(function (r) { r.style.display = 'none'; });
-    var slice = filtered.slice(0, shown);
-    // Detach + reattach in sorted order so DOM matches sort.
-    slice.forEach(function (r) { r.style.display = ''; tbody.appendChild(r); });
-    // Move hidden rows to the bottom in original order (so they don't pop back).
-    filtered.slice(shown).forEach(function (r) { tbody.appendChild(r); });
-    if (live) live.textContent = filtered.length + ' matching';
-    if (counter) counter.textContent = 'showing ' + Math.min(shown, filtered.length) + ' of ' + filtered.length;
-    if (showMoreBtn) showMoreBtn.style.display = filtered.length > shown ? '' : 'none';
-  }
-
-  document.querySelectorAll('.mod-table th.sortable').forEach(function (th) {
-    th.addEventListener('click', function () {
-      var key = th.dataset.key;
-      var dir = (sortState.key === key && sortState.dir === 'asc') ? 'desc' : (sortState.key === key ? 'asc' : (th.dataset.dir || 'asc'));
-      sortState = { key: key, dir: dir };
-      document.querySelectorAll('.mod-table th.sortable').forEach(function (h) { h.classList.remove('sort-asc', 'sort-desc'); });
-      th.classList.add(dir === 'asc' ? 'sort-asc' : 'sort-desc');
-      render();
-    });
-  });
-
-  srcSel.addEventListener('change', function () { shown = pageSize; render(); });
-  catSel.addEventListener('change', function () { shown = pageSize; render(); });
-  nameInput.addEventListener('input', function () { shown = pageSize; render(); });
-  if (showMoreBtn) showMoreBtn.addEventListener('click', function () { shown += pageSize; render(); });
-
-  render();
-})();
-</script>
-
-<script>
-(function () {
-  var FACET = {{ facet_name|tojson }};
-  var datasets = {{ (facet.datasets or [])|tojson }};
-  var modRows = {{ (facet['modules']['rows'] if facet.get('modules') else [])|tojson }};
-
-  var sel = document.getElementById('tvg-dataset');
-  var btn = document.getElementById('tvg-compute');
-  var statusEl = document.getElementById('tvg-status');
-  var groupsEl = document.getElementById('tvg-groups');
-  var tableEl = document.getElementById('tvg-table');
-  var theadEl = document.getElementById('tvg-thead');
-  var tbodyEl = document.getElementById('tvg-tbody');
-  if (!sel || !btn) return;
-
-  if (!datasets.length) {
-    statusEl.textContent = 'No datasets carry this facet.';
-    btn.disabled = true;
-    sel.disabled = true;
-    return;
-  }
-
-  // Pick default: top module-variability row's dataset if it's in the list, else the first (highest cell count).
-  var defaultDbId = null;
-  if (modRows.length) {
-    var candidate = modRows[0].dataset;
-    for (var i = 0; i < datasets.length; i++) {
-      if (datasets[i].db_id === candidate) { defaultDbId = candidate; break; }
-    }
-  }
-  if (!defaultDbId) defaultDbId = datasets[0].db_id;
-
-  // Populate the picker.
-  datasets.forEach(function (d) {
-    var opt = document.createElement('option');
-    opt.value = d.db_id;
-    var cells = (d.n_cells || 0).toLocaleString();
-    opt.textContent = d.db_id + '  ' + cells + ' cells';
-    if (d.db_id === defaultDbId) opt.selected = true;
-    sel.appendChild(opt);
-  });
-
-  function apiUrlFor(dbId) {
-    var enc = dbId.split('/').map(encodeURIComponent).join('/');
-    return '/api/databases/' + enc + '/gene-variance-by-facet?facet=' + encodeURIComponent(FACET) + '&top=50';
-  }
-
-  function fmtSig(x) {
-    if (x === null || x === undefined || !isFinite(x)) return '';
-    var ax = Math.abs(x);
-    if (ax === 0) return '0';
-    if (ax >= 100) return x.toFixed(1);
-    if (ax >= 10) return x.toFixed(2);
-    if (ax >= 1) return x.toFixed(3);
-    if (ax >= 0.001) return x.toFixed(4);
-    return x.toExponential(2);
-  }
-
-  function fmtGroupsRow(groups, counts) {
-    return groups.map(function (g) {
-      var c = counts[g];
-      var cs = (c === null || c === undefined) ? '?' : c.toLocaleString();
-      return g + ' (' + cs + ')';
-    }).join('  ·  ');
-  }
-
-  function sparklineSvg(means, groups) {
-    var w = 60, h = 14, gap = 1;
-    var n = groups.length;
-    if (!n) return '';
-    var maxV = 0;
-    for (var i = 0; i < n; i++) {
-      var v = means[groups[i]];
-      if (v !== null && v !== undefined && isFinite(v) && v > maxV) maxV = v;
-    }
-    if (maxV <= 0) maxV = 1;
-    var barW = Math.max(1, (w - gap * (n - 1)) / n);
-    var bars = '';
-    var titleLines = [];
-    for (var j = 0; j < n; j++) {
-      var g = groups[j];
-      var val = means[g];
-      var vv = (val === null || val === undefined || !isFinite(val)) ? 0 : val;
-      var barH = Math.max(1, (Math.max(0, vv) / maxV) * h);
-      var x = j * (barW + gap);
-      var y = h - barH;
-      bars += '<rect x="' + x.toFixed(2) + '" y="' + y.toFixed(2) + '" width="' + barW.toFixed(2) + '" height="' + barH.toFixed(2) + '" fill="#94a3b8"></rect>';
-      titleLines.push(g + ': ' + fmtSig(val));
-    }
-    var title = titleLines.join('\n')
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '" xmlns="http://www.w3.org/2000/svg"><title>' + title + '</title>' + bars + '</svg>';
-  }
-
-  var sortState = { key: 'signal', dir: 'desc' };
-  var lastResp = null;
-
-  function renderTable(resp) {
-    lastResp = resp;
-    var groups = resp.groups || [];
-    var counts = resp.n_cells_per_group || {};
-    groupsEl.textContent = fmtGroupsRow(groups, counts);
-
-    // Build header
-    var thead = '<tr>';
-    thead += '<th class="sortable" data-key="gene" data-dir="asc">Gene <span class="sort-ind"></span></th>';
-    thead += '<th class="sortable num" data-key="signal" data-dir="desc">Signal <span class="sort-ind"></span></th>';
-    groups.forEach(function (g) {
-      thead += '<th class="sortable num" data-key="grp:' + encodeURIComponent(g) + '" data-dir="desc">' + g + ' <span class="sort-ind"></span></th>';
-    });
-    thead += '<th>Bars</th>';
-    thead += '</tr>';
-    theadEl.innerHTML = thead;
-
-    // Apply sort indicator to the active header
-    var activeTh = theadEl.querySelector('th[data-key="' + sortState.key + '"]');
-    if (activeTh) activeTh.classList.add(sortState.dir === 'asc' ? 'sort-asc' : 'sort-desc');
-
-    // Sort rows
-    var rows = (resp.genes || []).slice();
-    rows.sort(function (a, b) {
-      var av, bv, cmp;
-      if (sortState.key === 'gene') {
-        cmp = String(a.gene).localeCompare(String(b.gene));
-      } else if (sortState.key === 'signal') {
-        cmp = (a.signal || 0) - (b.signal || 0);
-      } else if (sortState.key.indexOf('grp:') === 0) {
-        var g = decodeURIComponent(sortState.key.slice(4));
-        av = (a.group_means || {})[g]; bv = (b.group_means || {})[g];
-        av = (av === null || av === undefined || !isFinite(av)) ? -Infinity : av;
-        bv = (bv === null || bv === undefined || !isFinite(bv)) ? -Infinity : bv;
-        cmp = av - bv;
-      } else {
-        cmp = 0;
-      }
-      return sortState.dir === 'desc' ? -cmp : cmp;
-    });
-
-    // Build body
-    var html = '';
-    rows.forEach(function (r) {
-      html += '<tr>';
-      html += '<td class="gene">' + r.gene + '</td>';
-      html += '<td class="num">' + fmtSig(r.signal) + '</td>';
-      var means = r.group_means || {};
-      groups.forEach(function (g) {
-        html += '<td class="num">' + fmtSig(means[g]) + '</td>';
-      });
-      html += '<td class="tvg-spark">' + sparklineSvg(means, groups) + '</td>';
-      html += '</tr>';
-    });
-    tbodyEl.innerHTML = html;
-    tableEl.hidden = false;
-
-    // Wire sort handlers
-    theadEl.querySelectorAll('th.sortable').forEach(function (th) {
-      th.addEventListener('click', function () {
-        var key = th.dataset.key;
-        var dir;
-        if (sortState.key === key) {
-          dir = sortState.dir === 'asc' ? 'desc' : 'asc';
-        } else {
-          dir = th.dataset.dir || 'asc';
-        }
-        sortState = { key: key, dir: dir };
-        renderTable(lastResp);
-      });
-    });
-  }
-
-  function fetchAndRender() {
-    var dbId = sel.value;
-    if (!dbId) return;
-    statusEl.classList.remove('err');
-    statusEl.textContent = 'Computing...';
-    var t0 = (window.performance && performance.now) ? performance.now() : Date.now();
-    fetch(apiUrlFor(dbId), { credentials: 'same-origin' })
-      .then(function (r) {
-        return r.json().then(function (body) { return { ok: r.ok, status: r.status, body: body }; });
-      })
-      .then(function (res) {
-        var t1 = (window.performance && performance.now) ? performance.now() : Date.now();
-        var ms = Math.round(t1 - t0);
-        if (!res.ok) {
-          var msg = (res.body && res.body.detail) ? res.body.detail : ('HTTP ' + res.status);
-          statusEl.classList.add('err');
-          statusEl.textContent = 'Failed: ' + msg;
-          return;
-        }
-        statusEl.classList.remove('err');
-        statusEl.textContent = 'Ranked ' + (res.body.n_genes_returned || 0) + ' genes across ' + (res.body.n_groups || 0) + ' groups in ' + ms + ' ms.';
-        renderTable(res.body);
-      })
-      .catch(function (err) {
-        statusEl.classList.add('err');
-        statusEl.textContent = 'Failed: ' + err;
-      });
-  }
-
-  btn.addEventListener('click', fetchAndRender);
-  sel.addEventListener('change', fetchAndRender);
-
-  // Auto-load on ready.
-  if (defaultDbId) fetchAndRender();
-})();
-</script>
 {% endif %}
 
 {% endblock %}
