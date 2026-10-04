@@ -105,6 +105,18 @@ when `/library/status` reports papers (background-probed, cached:
 `_library_available`). Gotcha: never name a dict key `values`/`items` for a
 template (`t.values` resolves to the dict method).
 
+**Facet docs (unreleased API).** `/facets` shows each facet's one-line
+`summary` and the audit note (`definitions_status`); `/facets/{name}` shows the
+definition on top (`#facet-definition`) and a Datasets card
+(`#facet-datasets`): carriers with author column, mapping kind and value
+translation, and the non-carriers folded in `#non-carriers` with name hints.
+The dataset Data tab has a wide `#ds-facets` card from
+`GET /databases/{id}/facets`. Both use the macros in `_facet_mapping.html`.
+Definitions live in `lib/obscol_tags_vocab.yaml` (`facet:` blocks), never in
+templates. Those two fetches go through `_api_get_as_user`, which forwards
+`Remote-User`/`Remote-Groups` so admins see `obs_hidden` source columns;
+everyone else gets them redacted by ant-serve.
+
 **MCP links UI** talks to ant-serve's `GET /me/mcp`, `POST /me/mcp/links`,
 `POST /me/mcp/links/{id}/rotate`, `DELETE /me/mcp/links/{id}`,
 `GET /admin/mcp-links`, `DELETE /admin/mcp-links/{user}/{id}` client-side

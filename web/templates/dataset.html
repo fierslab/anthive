@@ -184,6 +184,21 @@
   .tab-btn.caveat-tab.lvl-low .tab-count   { background: #6b5a1c; color: #fff; }
   .data-card { border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; background: #fff; }
   .data-card > h2:first-child { margin-top: 0; }
+  .data-card.wide { grid-column: 1 / -1; }
+  table.ds-facets { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  table.ds-facets th, table.ds-facets td { padding: 5px 8px; border-bottom: 1px solid var(--border-light); text-align: left; vertical-align: top; }
+  table.ds-facets th { font-size: 10px; text-transform: uppercase; letter-spacing: .3px; color: var(--text-muted); font-weight: 500; }
+  table.ds-facets td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  table.ds-facets .fct-name { font-weight: 600; }
+  table.ds-facets tr.not-live td { opacity: .65; }
+  @media (max-width: 760px) {
+    table.ds-facets, table.ds-facets > tbody, table.ds-facets > tbody > tr, table.ds-facets > tbody > tr > td { display: block; width: 100%; }
+    table.ds-facets > thead { display: none; }
+    table.ds-facets > tbody > tr { border-bottom: 1px solid var(--border); padding: 6px 0; }
+    table.ds-facets > tbody > tr > td { border: 0; padding: 1px 0; }
+    table.ds-facets > tbody > tr > td[data-label]::before { content: attr(data-label) " "; font-size: 10px; text-transform: uppercase; letter-spacing: .3px; color: var(--text-muted); margin-right: 4px; }
+    table.ds-facets > tbody > tr > td.num { text-align: left; }
+  }
   .obs-plots .obs-plots { border: none; padding: 0; }   /* nested cell macro (module scores): no double border */
   .obs-plot-icon {
     display: inline-flex; align-items: center; justify-content: center;
@@ -694,6 +709,32 @@
       {% for emb in info.obsm_keys %}
         {% if has_duckdb %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/scatter?embedding={{ emb|urlencode }}" class="chip" title="scatter on {{ emb }}">{{ emb }}</a>{% else %}<code>{{ emb }}</code>{% endif %}
       {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  {% if dataset_facets %}
+  {% from "_facet_mapping.html" import facet_mapping_styles, mapping_kind, source_columns, translation, coverage %}
+  {{ facet_mapping_styles() }}
+  <div class="data-card wide" id="ds-facets">
+    <h2 class="section-head">Facets <span class="muted">({{ dataset_facets|selectattr('live')|list|length }})</span>
+      <span class="info" title="Standardised ant_ columns of this dataset and where they come from: the author column, how it was mapped (renamed, derived through a value map, or one constant value) and how each author value was translated, with cell counts. Click a facet for its definition and the other datasets that carry it.">ⓘ</span></h2>
+    <div class="table-wrap">
+    <table class="ds-facets">
+      <thead><tr><th>Facet</th><th>Author column</th><th>Mapping</th><th>Value translation <span class="muted">(cells)</span></th><th class="num">Cells</th></tr></thead>
+      <tbody>
+        {% for f in dataset_facets %}
+        <tr class="ds-facet-row{% if not f.live %} not-live{% endif %}" data-facet="{{ f.facet }}">
+          <td data-label="Facet"><a class="fct-name" href="/facets/{{ f.facet|urlencode }}" title="{{ f.summary or f.facet }}">{{ f.facet[4:] }}</a>
+            {% if not f.live %}<div class="fm-warn" title="Declared in the dataset description but not in the served data (views not rebuilt, or the source column is missing).">declared, not served</div>{% endif %}</td>
+          <td data-label="From">{{ source_columns(f) }}</td>
+          <td data-label="Mapping">{{ mapping_kind(f.mapping_kind) }}</td>
+          <td data-label="Values">{{ translation(f, max_rows=6) }}</td>
+          <td class="num" data-label="Cells">{{ coverage(f) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
     </div>
   </div>
   {% endif %}

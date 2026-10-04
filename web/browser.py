@@ -222,12 +222,32 @@ for _fav_name, _fav_media in _FAVICON_FILES.items():
 
 # ── API helpers ────────────────────────────────────────────────────────────────
 
-def _api_get(api_url: str, path: str) -> Any:
+def _api_get(api_url: str, path: str, headers: Optional[Dict[str, str]] = None,
+             timeout: float = 15) -> Any:
     """GET request to the ant-serve API"""
     url = f"{api_url.rstrip('/')}{path}"
-    response = requests.get(url, timeout=15)
+    response = requests.get(url, timeout=timeout, headers=headers)
     response.raise_for_status()
     return response.json()
+
+
+# Identity headers the proxy sets from the SSO session. Forwarded on the few
+# server-side fetches whose answer depends on who asks (for example the
+# facet mapping, which shows obs_hidden author columns to admins only).
+_IDENTITY_HEADERS = ('Remote-User', 'Remote-Groups')
+
+
+def _api_get_as_user(request: Request, api_url: str, path: str,
+                     timeout: Optional[float] = None) -> Any:
+    """``_api_get`` on behalf of the signed-in user (identity headers kept)."""
+    headers = {name: request.headers[name] for name in _IDENTITY_HEADERS
+               if request.headers.get(name)}
+    kwargs: Dict[str, Any] = {}
+    if headers:
+        kwargs['headers'] = headers
+    if timeout is not None:
+        kwargs['timeout'] = timeout
+    return _api_get(api_url, path, **kwargs)
 
 
 def _api_url(request: Request) -> str:
@@ -2890,7 +2910,17 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
     pub_status = _publication_status_for_group(group_folder)
     pub_icon = _access_pub_icon(db.get('access'), pub_status)
 
+    # Facet projection (ant_* columns: source column, mapping kind, value
+    # translation). Best-effort: an older ant-serve without the endpoint
+    # just hides the card.
+    dataset_facets: List[Dict[str, Any]] = []
+    try:
+        dataset_facets = _api_get_as_user(request, api_url, f'/databases/{db_id}/facets').get('facets') or []
+    except Exception:
+        dataset_facets = []
+
     return templates.TemplateResponse(request, "dataset.html", {
+        "dataset_facets": dataset_facets,
         "folder_name": friendly_group,
         "folder_browse_id": group_id,
         "group_id": group_id,
@@ -3502,14 +3532,17 @@ async def facets_index(request: Request):
     api_url = _api_url(request)
     error: Optional[str] = None
     facets: List[Dict[str, Any]] = []
+    definitions_status: Dict[str, Any] = {}
     try:
         payload = _api_get(api_url, "/facets")
         facets = payload.get("facets") or []
+        definitions_status = payload.get("definitions_status") or {}
     except Exception as exc:
         error = f"Failed to load facets from ant-serve: {exc}"
     return templates.TemplateResponse(request, "facets.html", {
         "facets": facets,
         "n_facets": len(facets),
+        "definitions_status": definitions_status,
         "error": error,
     })
 
@@ -3526,7 +3559,10 @@ async def facet_detail_view(request: Request, facet_name: str):
     error: Optional[str] = None
     facet_data: Dict[str, Any] = {}
     try:
-        facet_data = _api_get(api_url, f"/facets/{url_quote(facet_name, safe='')}")
+        # A cold /facets/{name} scans every carrying dataset (value counts
+        # plus the per-dataset mapping); give it longer than the default.
+        facet_data = _api_get_as_user(request, api_url, f"/facets/{url_quote(facet_name, safe='')}",
+                                      timeout=90)
     except requests.HTTPError as exc:
         status = getattr(getattr(exc, 'response', None), 'status_code', None)
         # In tests the fake raises a bare HTTPError with no response attached;
@@ -3540,9 +3576,15 @@ async def facet_detail_view(request: Request, facet_name: str):
         error = f"Failed to load facet '{facet_name}': {exc}"
     except Exception as exc:
         error = f"Failed to load facet '{facet_name}': {exc}"
+    non_carriers = facet_data.get("non_carriers") or []
     return templates.TemplateResponse(request, "facet.html", {
         "facet_name": facet_name,
         "facet": facet_data,
+        "definition": facet_data.get("definition") or {},
+        "definitions_status": facet_data.get("definitions_status") or {},
+        "non_carriers": non_carriers,
+        "n_non_carriers_hinted": sum(1 for d in non_carriers if d.get("candidate_columns")),
+        "n_non_carriers_declared": sum(1 for d in non_carriers if d.get("declared")),
         "error": error,
     })
 

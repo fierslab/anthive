@@ -12854,21 +12854,28 @@ async def get_facet_detail(
         show_hidden = _caller_is_admin(request)
         carrier_ids = {d['db_id'] for d in dataset_summaries}
 
+        def _one_carrier(summary: Dict[str, Any]) -> None:
+            try:
+                entries = _dataset_facet_projection(summary['db_id'], only_facet=facet_name)
+            except Exception as exc:
+                log.warning("facets: mapping of %s on %s failed: %s",
+                            facet_name, summary['db_id'], exc)
+                return
+            entry = next((e for e in entries if e['facet'] == facet_name), None)
+            if entry is None:
+                return
+            entry = _facet_entry_for_caller(entry, show_hidden)
+            for key in _FACET_MAPPING_KEYS:
+                if key in entry:
+                    summary[key] = entry[key]
+
         def _sync_mapping() -> List[Dict[str, Any]]:
-            for summary in dataset_summaries:
-                try:
-                    entries = _dataset_facet_projection(summary['db_id'])
-                except Exception as exc:
-                    log.warning("facets: mapping of %s on %s failed: %s",
-                                facet_name, summary['db_id'], exc)
-                    continue
-                entry = next((e for e in entries if e['facet'] == facet_name), None)
-                if entry is None:
-                    continue
-                entry = _facet_entry_for_caller(entry, show_hidden)
-                for key in _FACET_MAPPING_KEYS:
-                    if key in entry:
-                        summary[key] = entry[key]
+            # Each carrier costs a pooled cursor and two small queries; a
+            # few in parallel keep a 150-dataset facet well under the web
+            # UI's timeout on a cold cache.
+            from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                list(pool.map(_one_carrier, dataset_summaries))
             return _facet_non_carriers(facet_name, carrier_ids, dbs_by_id)
         non_carriers = await asyncio.to_thread(_sync_mapping)
 
@@ -12947,7 +12954,8 @@ def _quote_stored_column(name: str) -> str:
     return '"' + str(name).replace('"', '""') + '"'
 
 
-def _facet_add_counts(db_id: str, entries: List[Dict[str, Any]]) -> None:
+def _facet_add_counts(db_id: str, entries: List[Dict[str, Any]],
+                      only_facet: Optional[str] = None) -> None:
     """Add cell counts to projection entries, on one pooled cursor.
 
     Per live facet: ``n_cells`` and ``n_missing`` (NULLs), plus ``range``
@@ -12970,6 +12978,8 @@ def _facet_add_counts(db_id: str, entries: List[Dict[str, Any]]) -> None:
                 stored[table] = set()
         for entry in entries:
             facet = entry['facet']
+            if only_facet is not None and facet != only_facet:
+                continue
             try:
                 if entry.get('live'):
                     view = 'obscat' if entry.get('dtype') == 'categorical' else 'obsnum'
@@ -13012,12 +13022,15 @@ def _facet_add_counts(db_id: str, entries: List[Dict[str, Any]]) -> None:
                 log.warning("facets: counting %s on %s failed: %s", facet, db_id, exc)
 
 
-def _dataset_facet_projection(db_id: str, with_counts: bool = True) -> List[Dict[str, Any]]:
+def _dataset_facet_projection(db_id: str, with_counts: bool = True,
+                              only_facet: Optional[str] = None) -> List[Dict[str, Any]]:
     """Unredacted facet projection of one dataset, cached.
 
-    The cache key carries the .md mtime, the duckdb location and mtime
-    (local files) and the identity of the registry's metadata entry, so an
-    edit, a view refresh or a rescan produces a new key.
+    ``only_facet`` limits the cell counting (the expensive part) to one
+    facet; the other entries come back without counts. The cache key
+    carries it, the .md mtime, the duckdb location and mtime (local files)
+    and the identity of the registry's metadata entry, so an edit, a view
+    refresh or a rescan produces a new key.
     """
     from facet_mapping import project_dataset  # noqa: PLC0415
     meta = registry.get_database_metadata(db_id)
@@ -13035,7 +13048,7 @@ def _dataset_facet_projection(db_id: str, with_counts: bool = True) -> List[Dict
             db_mtime = Path(db_url.replace('file://', '')).stat().st_mtime_ns
         except OSError:
             db_mtime = None
-    key = (db_id, with_counts, md_mtime, db_url, db_mtime, id(meta))
+    key = (db_id, with_counts, only_facet, md_mtime, db_url, db_mtime, id(meta))
     with _FACET_PROJECTION_LOCK:
         cached = _FACET_PROJECTION_CACHE.get(key)
         if cached is not None:
@@ -13044,7 +13057,7 @@ def _dataset_facet_projection(db_id: str, with_counts: bool = True) -> List[Dict
     entries = project_dataset(api_config, obs.get('categorical') or [], obs.get('numerical') or [])
     if with_counts and entries:
         try:
-            _facet_add_counts(db_id, entries)
+            _facet_add_counts(db_id, entries, only_facet=only_facet)
         except HTTPException:
             raise
         except Exception as exc:

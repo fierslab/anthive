@@ -69,7 +69,40 @@
   .tvg-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
   .tvg-table td.gene { font-family: var(--font-mono); }
   .tvg-spark svg { display: block; }
+
+  /* Definition + per-dataset mapping */
+  .facet-def { border: 1px solid var(--border); border-left: 3px solid var(--link); border-radius: 6px; padding: 10px 14px; margin: 10px 0 14px; max-width: 900px; background: #fff; }
+  .facet-def .def-summary { font-size: 14px; font-weight: 500; margin-bottom: 4px; }
+  .facet-def .def-text { font-size: 13px; margin-bottom: 6px; }
+  .facet-def dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; font-size: 12.5px; }
+  .facet-def dt { color: var(--text-muted); }
+  .facet-def .def-none { font-size: 13px; color: var(--text-muted); font-style: italic; }
+  .audit-note { font-size: 12px; margin-top: 8px; padding: 5px 9px; border-left: 3px solid var(--accent-amber); background: #fdf8ee; color: #5c4a1c; }
+  table.carrier-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.carrier-table th, table.carrier-table td { padding: 6px 8px; border-bottom: 1px solid var(--border-light); text-align: left; vertical-align: top; }
+  table.carrier-table th { font-size: 10px; text-transform: uppercase; letter-spacing: .3px; color: var(--text-muted); font-weight: 500; }
+  table.carrier-table td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .ds-title { display: block; font-size: 11.5px; color: var(--text-muted); max-width: 260px; }
+  .nc-details > summary { cursor: pointer; font-size: 13px; color: var(--link); margin: 4px 0; }
+  .nc-details > summary .muted { color: var(--text-muted); }
+  table.nc-table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 4px; }
+  table.nc-table td, table.nc-table th { padding: 4px 8px; border-bottom: 1px solid var(--border-light); text-align: left; vertical-align: top; }
+  table.nc-table th { font-size: 10px; text-transform: uppercase; letter-spacing: .3px; color: var(--text-muted); font-weight: 500; }
+  table.nc-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .nc-hint { display: inline-block; font-family: var(--font-mono); font-size: 11px; padding: 0 5px; margin: 1px 3px 1px 0; border-radius: 3px; background: #fdf6e9; border: 1px solid #ecd3a5; color: #7a5212; }
+  .nc-declared { display: inline-block; font-size: 11px; padding: 0 5px; border-radius: 3px; background: #fbeaea; border: 1px solid #e3b5b5; color: #9E2A2B; }
+  @media (max-width: 760px) {
+    table.carrier-table, table.carrier-table > tbody, table.carrier-table > tbody > tr, table.carrier-table > tbody > tr > td { display: block; width: 100%; }
+    table.carrier-table > thead { display: none; }
+    table.carrier-table > tbody > tr { border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; margin-bottom: 8px; }
+    table.carrier-table > tbody > tr > td { border: 0; padding: 2px 0; }
+    table.carrier-table > tbody > tr > td[data-label]::before { content: attr(data-label); display: block; font-size: 10px; text-transform: uppercase; letter-spacing: .3px; color: var(--text-muted); }
+    table.carrier-table > tbody > tr > td.num { text-align: left; }
+    .ds-title { max-width: none; }
+  }
 </style>
+{% from "_facet_mapping.html" import facet_mapping_styles, mapping_kind, source_columns, translation, coverage %}
+{{ facet_mapping_styles() }}
 
 {% from "_macros.html" import breadcrumb, experimental_notice %}
 {{ breadcrumb([("facets", "/facets"), (facet_name, None)]) }}
@@ -89,6 +122,23 @@
     <span class="type-pill {{ fd.type }}">{{ fd.type }}</span>
   {% endif %}
 </div>
+
+<section class="facet-def" id="facet-definition">
+  {% if definition and definition.defined %}
+  <div class="def-summary">{{ definition.summary }}</div>
+  {% if definition.definition %}<div class="def-text">{{ definition.definition }}</div>{% endif %}
+  <dl>
+    {% if definition.kind %}<dt>Kind</dt><dd>{{ definition.kind }}</dd>{% endif %}
+    {% if definition['values'] %}<dt>Values</dt><dd>{{ definition['values'] }}</dd>{% endif %}
+    {% if definition.missing %}<dt>Missing</dt><dd>{{ definition.missing }}</dd>{% endif %}
+  </dl>
+  {% else %}
+  <div class="def-none">No definition has been written for this facet yet.</div>
+  {% endif %}
+  {% if definitions_status and definitions_status.note %}
+  <div class="audit-note"><strong>Definitions under audit.</strong> {{ definitions_status.note }}</div>
+  {% endif %}
+</section>
 
 <div class="stats-row">
   <div>datasets: <span class="val">{{ fd.n_datasets }}</span></div>
@@ -173,6 +223,68 @@
     {% endif %}
   {% else %}
   <p class="empty-note">No values recorded.</p>
+  {% endif %}
+</div>
+
+<div class="card" id="facet-datasets">
+  <h2 class="section-head">Datasets <span class="muted">({{ fd.datasets|length }} with this facet, {{ non_carriers|length }} without)</span>
+    <span class="info" title="How each dataset publishes this facet: the author column it comes from, how it was mapped (renamed, derived through a value map, or one constant value) and how each author value was translated. Cell counts are per author value. Values the table does not list are kept as they are (renamed) or replaced by the default (derived).">ⓘ</span></h2>
+  {% if fd.datasets %}
+  <div class="table-wrap">
+  <table class="carrier-table" id="carrier-table">
+    <thead>
+      <tr>
+        <th>Dataset</th>
+        <th>Author column</th>
+        <th>Mapping</th>
+        <th>Value translation <span class="muted">(cells)</span></th>
+        <th class="num">Cells</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for d in fd.datasets %}
+      <tr class="carrier-row" data-db="{{ d.db_id }}">
+        <td data-label="Dataset"><a href="/browse/{{ d.db_id }}">{{ d.db_id }}</a><span class="ds-title">{{ d.title }}</span></td>
+        {% if d.mapping_kind %}
+        <td data-label="Author column">{{ source_columns(d, facet_name) }}</td>
+        <td data-label="Mapping">{{ mapping_kind(d.mapping_kind) }}</td>
+        <td data-label="Value translation">{{ translation(d) }}</td>
+        {% else %}
+        <td data-label="Author column"><span class="muted">?</span></td>
+        <td data-label="Mapping"><span class="muted">unknown</span></td>
+        <td data-label="Value translation"><span class="muted">mapping not available</span></td>
+        {% endif %}
+        <td class="num" data-label="Cells">{% if d.mapping_kind and d.n_missing is defined %}{{ coverage(d) }}{% else %}{{ '{:,}'.format(d.n_cells or 0) }}{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+
+  {% if non_carriers %}
+  <details class="nc-details" id="non-carriers">
+    <summary>Datasets without <code>{{ facet_name }}</code>: {{ non_carriers|length }}
+      <span class="muted">({{ n_non_carriers_hinted }} with an author column that may carry it{% if n_non_carriers_declared %}, {{ n_non_carriers_declared }} declared but not served{% endif %})</span></summary>
+    <p class="note">A hint is a public column whose name suggests it holds the same information (a name match, not a check of the values). "Declared, not served" means the dataset description maps the facet but the served data does not have it yet, usually because the views were not rebuilt.</p>
+    <div class="table-wrap">
+    <table class="nc-table">
+      <thead><tr><th>Dataset</th><th>Hint</th><th class="num">Cells</th></tr></thead>
+      <tbody>
+        {% for d in non_carriers %}
+        <tr class="nc-row">
+          <td><a href="/browse/{{ d.db_id }}">{{ d.db_id }}</a><span class="ds-title">{{ d.title }}</span></td>
+          <td>
+            {% if d.declared %}<span class="nc-declared" title="The .md declares this facet ({{ d.declared_kind }}) but the served view does not expose it.">declared, not served</span>{% endif %}
+            {% for col in d.candidate_columns %}<span class="nc-hint">{{ col }}</span>{% endfor %}
+          </td>
+          <td class="num">{{ '{:,}'.format(d.n_cells or 0) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </details>
   {% endif %}
 </div>
 

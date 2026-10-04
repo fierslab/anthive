@@ -1047,7 +1047,54 @@ _DE_STUDY_DETAIL = {
 }
 
 
-def _fake_api_get(api_url, path):  # pyright: ignore
+_DATASET_FACETS = {
+    "db_id": "GroupA/ds1",
+    "n_facets": 3,
+    "hidden_sources_visible": False,
+    "definitions_status": {"state": "under_audit", "note": "An audit of the facets is running."},
+    "facets": [
+        {"facet": "ant_sex", "label": "Sex", "summary": "Biological sex, coded m or f.",
+         "defined": True, "mapping_kind": "renamed", "live": True, "dtype": "categorical",
+         "source_columns": ["Gender"],
+         "sources": [{"column": "Gender", "published_as": "ant_sex", "hidden": False}],
+         "source_hidden": False, "redacted": False,
+         "value_map": [
+             {"from": "MALE", "to": "m", "rule": "mapped", "n_cells": 800},
+             {"from": "FEMALE", "to": "f", "rule": "mapped", "n_cells": 650},
+             {"from": "undefined", "to": None, "rule": "hidden", "n_cells": 50},
+             {"from": "M", "to": "m", "rule": "mapped", "n_cells": 0},
+         ],
+         "unmapped": "passthrough", "default": None, "constant_value": None,
+         "n_cells": 1500, "n_missing": 50, "n_distinct_source_values": 3,
+         "value_map_truncated": False},
+        {"facet": "ant_braak_group", "label": "Braak group", "summary": "Braak binned.",
+         "defined": True, "mapping_kind": "derived", "live": True, "dtype": "categorical",
+         "source_columns": ["braak_stage"],
+         "sources": [{"column": "braak_stage", "published_as": "ant_braak", "hidden": False}],
+         "source_hidden": False, "redacted": False,
+         "value_map": [
+             {"from": 5.0, "to": "high", "rule": "mapped", "n_cells": 900},
+             {"from": 9.0, "to": "unstaged", "rule": "default", "n_cells": 3},
+         ],
+         "unmapped": "default", "default": "unstaged", "constant_value": None,
+         "n_cells": 1500, "n_missing": 0, "n_distinct_source_values": 2,
+         "value_map_truncated": False},
+        {"facet": "ant_tissue", "label": "Tissue", "summary": "Tissue.", "defined": True,
+         "mapping_kind": "constant", "live": True, "dtype": "categorical",
+         "source_columns": [], "sources": [], "source_hidden": False, "redacted": False,
+         "value_map": [], "unmapped": None, "default": None,
+         "constant_value": "prefrontal cortex", "n_cells": 1500, "n_missing": 0},
+        {"facet": "ant_apoe_carrier", "label": "APOE e4 carrier", "summary": "E4+ or E4-.",
+         "defined": True, "mapping_kind": "derived", "live": True, "dtype": "categorical",
+         "source_columns": [], "sources": [], "source_hidden": True, "redacted": True,
+         "value_map": [{"from": None, "to": "E4+", "rule": "mapped", "n_cells": 700}],
+         "unmapped": "default", "default": None, "constant_value": None,
+         "n_cells": 1500, "n_missing": 800},
+    ],
+}
+
+
+def _fake_api_get(api_url, path, **kwargs):  # pyright: ignore
     """In-process stand-in for browser._api_get. Dispatches on path; raises
     requests.HTTPError for anything unknown (mirrors a 404 from ant-serve,
     which the routes catch)."""
@@ -1057,6 +1104,8 @@ def _fake_api_get(api_url, path):  # pyright: ignore
         return _DE_STUDIES
     if "/de/" in path:           # /databases/{id}/de/{study_id}
         return _DE_STUDY_DETAIL
+    if path == "/databases/GroupA/ds1/facets":
+        return _DATASET_FACETS
     if path.startswith("/databases/") and path.endswith("/info"):
         db_id = path[len("/databases/"):-len("/info")]
         if db_id in _INFO:
@@ -1077,10 +1126,15 @@ def _fake_api_get(api_url, path):  # pyright: ignore
             "n_facets": 2,
             "facets": [
                 {"facet": "ant_disease", "type": "categorical",
-                 "type_mixed": False, "n_datasets": 2, "signal_strength": 0.42},
+                 "type_mixed": False, "n_datasets": 2, "signal_strength": 0.42,
+                 "label": "Disease", "defined": True,
+                 "summary": "Diagnosis of the donor as a short code."},
                 {"facet": "ant_age", "type": "numerical",
-                 "type_mixed": False, "n_datasets": 1, "signal_strength": 0.05},
+                 "type_mixed": False, "n_datasets": 1, "signal_strength": 0.05,
+                 "label": "age", "defined": False, "summary": ""},
             ],
+            "definitions_status": {"state": "under_audit",
+                                   "note": "An audit of the facets is running."},
         }
     if path.startswith("/facets/"):
         name = path[len("/facets/"):]
@@ -1088,15 +1142,58 @@ def _fake_api_get(api_url, path):  # pyright: ignore
             return {
                 "facet": "ant_disease", "type": "categorical",
                 "type_mixed": False, "n_datasets": 2, "total_n_cells": 501_500,
+                "definition": {
+                    "facet": "ant_disease", "tag": "disease", "label": "Disease",
+                    "defined": True,
+                    "summary": "Diagnosis of the donor as a short code.",
+                    "definition": "Clinical or neuropathological diagnosis of the donor.",
+                    "kind": "categorical", "values": "AD, control, MCI, PD",
+                    "missing": "Empty (NULL) when not recorded.",
+                    "hint_keywords": ["disease", "diagnosis"],
+                },
+                "definitions_status": {"state": "under_audit",
+                                       "note": "An audit of the facets is running."},
                 "datasets": [
                     {"db_id": "GroupA/ds2", "title": "Dataset Two",
                      "group": "Group A Study", "group_id": "GroupA",
                      "file_id": "ds2", "n_cells": 500_000,
-                     "kind_on_this_dataset": "categorical"},
+                     "kind_on_this_dataset": "categorical",
+                     "mapping_kind": "renamed", "live": True,
+                     "source_columns": ["Diagnosis"],
+                     "sources": [{"column": "Diagnosis", "published_as": "ant_disease", "hidden": False}],
+                     "source_hidden": False, "redacted": False,
+                     "value_map": [
+                         {"from": "Alzheimer", "to": "alzheimer disease", "rule": "mapped", "n_cells": 250_000},
+                         {"from": "unknown", "to": None, "rule": "hidden", "n_cells": 12},
+                         {"from": "normal", "to": "normal", "rule": "passthrough", "n_cells": 249_988},
+                     ],
+                     "unmapped": "passthrough", "default": None, "constant_value": None,
+                     "n_missing": 12, "n_distinct_source_values": 3,
+                     "value_map_truncated": False},
                     {"db_id": "GroupA/ds1", "title": "Dataset One",
                      "group": "Group A Study", "group_id": "GroupA",
                      "file_id": "ds1", "n_cells": 1500,
-                     "kind_on_this_dataset": "categorical"},
+                     "kind_on_this_dataset": "categorical",
+                     "mapping_kind": "derived", "live": True,
+                     "source_columns": ["dx_code"],
+                     "sources": [{"column": "dx_code", "published_as": "dx_code", "hidden": False}],
+                     "source_hidden": False, "redacted": False,
+                     "value_map": [
+                         {"from": "1", "to": "normal", "rule": "mapped", "n_cells": 1500},
+                         {"from": "7", "to": None, "rule": "default", "n_cells": 4},
+                     ],
+                     "unmapped": "default", "default": None, "constant_value": None,
+                     "n_missing": 4, "n_distinct_source_values": 2,
+                     "value_map_truncated": False},
+                ],
+                "non_carriers": [
+                    {"db_id": "GroupB/ds3", "title": "Dataset Three", "group": "Group B",
+                     "group_id": "GroupB", "file_id": "ds3", "n_cells": 900,
+                     "candidate_columns": ["Diagnosis_clinical"], "declared": True,
+                     "declared_kind": "renamed"},
+                    {"db_id": "GroupB/ds4", "title": "Dataset Four", "group": "Group B",
+                     "group_id": "GroupB", "file_id": "ds4", "n_cells": 100,
+                     "candidate_columns": [], "declared": False, "declared_kind": None},
                 ],
                 "value_distribution": {
                     "kind": "categorical",
@@ -1513,6 +1610,107 @@ def test_facets_nav_entry_has_experimental_badge(client):
     assert 'class="exp-badge"' in nav_entry
     # other pages carry no experimental notice
     assert 'class="exp-notice"' not in text
+
+
+def test_facets_index_shows_definitions_and_audit_note(client):
+    text = client.get("/facets").text
+    assert 'id="facet-audit-note"' in text
+    assert "Definitions under audit." in text
+    assert "An audit of the facets is running." in text
+    assert "Diagnosis of the donor as a short code." in text
+    # a facet without a written definition says so
+    assert "No definition yet." in text
+
+
+def test_facet_detail_definition_at_top(client):
+    text = client.get("/facets/ant_disease").text
+    assert 'id="facet-definition"' in text
+    definition = text.split('id="facet-definition"')[1].split("</section>")[0]
+    assert "Diagnosis of the donor as a short code." in definition
+    assert "Clinical or neuropathological diagnosis of the donor." in definition
+    assert "AD, control, MCI, PD" in definition
+    assert "Empty (NULL) when not recorded." in definition
+    assert "Definitions under audit." in definition
+    # the definition comes before the datasets and value sections
+    assert text.index('id="facet-definition"') < text.index("Value distribution")
+
+
+def test_facet_detail_carriers_show_mapping(client):
+    text = client.get("/facets/ant_disease").text
+    assert 'id="facet-datasets"' in text
+    table = text.split('id="carrier-table"')[1].split("</table>\n  </div>")[0]
+    assert 'class="table-wrap"' in text.split('id="carrier-table"')[0][-200:]
+    # source column, mapping kind pills
+    assert "Diagnosis" in table and "dx_code" in table
+    assert 'class="fm-kind renamed"' in table
+    assert 'class="fm-kind derived"' in table
+    # value translation rows: author value -> facet value with cells
+    assert "Alzheimer" in table and "alzheimer disease" in table
+    assert "250,000" in table
+    # hidden value becomes missing, with the rule named
+    assert ">unknown<" in table
+    assert 'class="fm-null"' in table and "hidden</span>" in table
+    # pass-through values are folded away and counted
+    assert "1 value kept as is" in table
+    # derived: the default line and the default rule
+    assert "any other value" in table
+    assert "default</span>" in table
+    # missing cells
+    assert "12 missing" in table
+
+
+def test_facet_detail_non_carriers_collapsed_with_hints(client):
+    text = client.get("/facets/ant_disease").text
+    assert '<details class="nc-details" id="non-carriers">' in text  # collapsed by default
+    block = text.split('id="non-carriers"')[1].split("</details>")[0]
+    assert "Datasets without <code>ant_disease</code>: 2" in block
+    assert "1 with an author column that may carry it" in block
+    assert "1 declared but not served" in block
+    assert '<span class="nc-hint">Diagnosis_clinical</span>' in block
+    assert "declared, not served" in block
+    assert "/browse/GroupB/ds4" in block
+
+
+def test_facet_detail_forwards_identity_headers(client, monkeypatch):
+    seen = {}
+
+    def _spy(api_url, path, **kwargs):
+        if path.startswith("/facets/"):
+            seen.update(kwargs)
+        return _fake_api_get(api_url, path)
+
+    monkeypatch.setattr(browser, "_api_get", _spy)
+    client.get("/facets/ant_disease",
+               headers={"Remote-User": "root", "Remote-Groups": "users,admins"})
+    assert seen["headers"] == {"Remote-User": "root", "Remote-Groups": "users,admins"}
+    assert seen["timeout"] >= 60
+
+
+def test_dataset_page_facets_card(client):
+    text = client.get("/browse/GroupA/ds1").text
+    assert 'id="ds-facets"' in text
+    card = text.split('id="ds-facets"')[1].split("</tbody>")[0]
+    assert 'href="/facets/ant_sex"' in card
+    assert "Gender" in card and "MALE" in card and ">m<" in card
+    assert "800" in card
+    # a rule for a value the dataset does not have is folded away
+    assert "1 rule for values not in this dataset" in card
+    assert 'class="fm-kind derived"' in card and "unstaged" in card
+    assert "published as ant_braak" in card
+    assert "every cell: <b>prefrontal cortex</b>" in card
+    # hidden author column: no name, explained
+    assert "hidden author column" in card
+    assert "50 missing" in card
+    # inside the Data tab, wrapped for phones
+    data_tab = text.split('id="tab-data"')[1].split("</section>")[0]
+    assert 'id="ds-facets"' in data_tab
+    assert '<div class="table-wrap">\n    <table class="ds-facets">' in data_tab
+
+
+def test_dataset_page_without_facets_endpoint_hides_card(client):
+    # GroupA/ds2 has no /facets in the fake (older ant-serve): no card.
+    text = client.get("/browse/GroupA/ds2").text
+    assert 'id="ds-facets"' not in text
 
 
 def test_facet_detail_404(client):
