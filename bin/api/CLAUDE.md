@@ -106,6 +106,14 @@ and `lib/config.py` (anthive.yaml loader).
   cached until a file changes. `facets_visible` (config) only adds
   `hidden_by_config` to the facet listings; nothing is dropped from the API.
 
+- **Lineage and secondaries** (unreleased): dataset metadata carries
+  `designation`, `reanalysis_of`, `donor_group`, `has_donor_uid`
+  (`_lineage_fields`); `GET /donor-groups` lists the groups. Pooled or
+  cross-dataset numbers take `exclude_secondary` (default true, helper
+  `_secondary_db_ids`): `/gene_stats_all`, `/module-variability`,
+  `/facets/{name}`, facet signal strength and the facet test views (listed,
+  not counted). New pooled features must do the same.
+
 ## ant-mcp specifics
 
 - FastMCP `streamable-http` transport on `/mcp`, bound to loopback.

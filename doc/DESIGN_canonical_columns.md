@@ -1,6 +1,6 @@
 # Design — canonical columns as `ant_*`
 
-Status: **draft — awaiting sign-off before implementation**
+Status: **implemented (2026-08); namespace closed and registry moved to the vocab 2026-10-05, see the update at the end**
 Date: 2026-08-18
 
 ## Problem
@@ -206,3 +206,61 @@ canonicalises to `ant_donor`.
 - [ ] Back-compat alias for one release confirmed acceptable
 - [ ] `ant_donor` vs `ant_donor_id` — is losing the `_id` suffix OK?
 - [ ] Ready to run the mechanical `.md` rewrite across 105 files
+
+## Update 2026-10-05: closed namespace, central facets, lint (audit L1, L2)
+
+The facet audit (decisions L1 and L2, approved by Mark on 2026-10-04) closed
+the `ant_*` namespace and moved the vocabulary table above out of
+`lib/canonical_columns.py`.
+
+**Single source.** `lib/obscol_tags_vocab.yaml` is the registry. A tag is a
+facet when its `facet:` block has `status: registered` or `status:
+deprecated`; the block also carries `scope` (`cross_dataset` or `dataset`),
+`replaced_by`, `controlled_values`, `ordered`, `range`, `integer` and
+`computed_from`. `canonical_columns.CANONICAL_TAGS`, `REGISTERED_TAGS`,
+`DEPRECATED_TAGS` and `NUMERICAL_TAGS` are derived from it
+(`obscol_tags.facet_registry`). The one-release bare-name REST alias and the
+one-shot migration scripts keep the frozen 2026-08 list
+(`LEGACY_BARE_TAGS`), because facets registered later never had a bare form.
+
+| Status | Facets |
+| --- | --- |
+| registered | donor, sex, host_sex, age, pmi, disease, braak, braak_group, apoe, apoe_carrier, cell_type, tissue, genotype, author_cluster (dataset scoped), treatment, cognitive_status, comorbidity, adnc, donor_uid |
+| deprecated | cluster (use author_cluster), condition (disease, genotype, treatment), region (tissue), ad_stage (adnc), author_cell_type (a plain column) |
+
+Anything else under `ant_` (the singletons `ant_cause_of_death`,
+`ant_lesion`, `ant_ms_type`, `ant_subtype`, `ant_source_institution`,
+`ant_ethnicity`, `ant_technology`, `ant_group`) is to become a plain column.
+
+**Checker.** `ant md-check` (`lib/facet_lint.py`) reports an unregistered
+`ant_*` target as a warning while the store migrates
+(`facet_lint.NAMESPACE_DEFAULT_MODE = 'warn'`) and as an error with
+`--strict-namespace`; flip the default once the strict run passes. It also
+lints the mapping (rename chains, derive dtype against the facet kind,
+non-numeric or out-of-range values in numerical facets, Braak outside 0 to 6,
+controlled vocabularies, the Braak group rule) and, with `--with-data`, reads
+each `.duckdb` read-only for missing source columns and values with no map
+entry and no default. The store's own pre-commit hook
+(`data/h5adstore/scripts/validate_md.py`) does not run these rules yet.
+
+**Central facets.** `anthive_db.build_obs_view_sql` computes two facets when
+the `.md` declares neither the facet nor a stored column of that name:
+
+* `ant_braak_group` from the published `ant_braak`: 0 to 2 `low`, 3 to 4
+  `medium`, 5 to 6 `high`; NULL for anything else (NULL, text, 7, 2.5).
+* `ant_apoe_carrier` from the published `ant_apoe`: a value of the form
+  `E<a>/E<b>` (a, b in 2, 3, 4) is `E4+` when it holds E4, else `E4-`; any
+  other value (a single allele such as `E4`, an author code) is NULL.
+
+A declared map wins; the checker warns when a declared `ant_braak_group` map
+breaks the rule. `facet_mapping` reports these columns with `mapping_kind:
+computed`. Stored views change only when they are rebuilt (re-ingest or
+`/admin/refresh-views`).
+
+**Builder warnings.** A derive whose source column is in neither obs table
+is still left out of the view, but the builder now logs a warning naming the
+derive, the source and the dataset. `ant-convert` builds both obs views
+after both tables exist and passes the sibling table, so a derive whose
+source lives in the other table (a numerical `ant_braak` from a text Braak
+column) survives ingest; before, such derives were dropped at ingest and
+only appeared after a view refresh.

@@ -19,7 +19,7 @@ from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path
 from threading import Lock
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import duckdb
 import pytest
@@ -216,7 +216,7 @@ _SERVE_WANTED = {
     '_FACET_PROJECTION_LOCK', '_FACET_VALUE_ROWS_LIMIT', '_FACET_MAPPING_KEYS',
     '_facet_api_config', '_quote_stored_column', '_facet_add_counts',
     '_dataset_facet_projection', '_facet_entry_for_caller', '_facet_non_carriers',
-    'get_dataset_facets', 'get_facet_detail',
+    'get_dataset_facets', 'get_facet_detail', '_secondary_db_ids',
 }
 
 DB_ID = 'G1/ds1'
@@ -376,7 +376,7 @@ def serve(tmp_path):
         'log': logging.getLogger('test-facet-mapping'), 'OrderedDict': OrderedDict,
         'Lock': Lock, 'copy': copy, 'Path': Path, 'asyncio': asyncio,
         'Query': Query, 'Request': Request, 'HTTPException': HTTPException,
-        'Dict': Dict, 'List': List, 'Any': Any, 'Optional': Optional, 'Tuple': Tuple,
+        'Dict': Dict, 'List': List, 'Any': Any, 'Optional': Optional, 'Tuple': Tuple, 'Set': Set,
         'get_auth_settings': lambda cfg=None: {'mode': 'authelia', 'admins': set()},
         '_load_module_variability': lambda force=False: None,
         '_facets_visible': lambda: [],

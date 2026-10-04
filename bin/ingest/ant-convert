@@ -894,7 +894,7 @@ def convert_observations(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict)
 
             print(f"  ✓ obscat: {len(obscat_cols)} columns")
 
-    # Create the views — apply the .md api: section (rename, hide, derive,
+    # Create the views: apply the .md api: section (rename, hide, derive,
     # constant, central facets) at projection time so old internal names are
     # unreachable via the view. Built after both tables exist and with the
     # sibling table passed, so a derive whose source lives in the other

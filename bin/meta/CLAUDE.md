@@ -7,7 +7,7 @@ annotation), and the integrity of the underlying h5ad/duckdb/S3 state.
 | Tool | Role |
 | --- | --- |
 | `ant-md` | Read/write `.md` frontmatter fields. Refuses to set annotation fields (those live in `.h5ad.mus`, managed by the `mus` CLI). |
-| `ant-md-check` | Sanity-check `.md` files (group_id, id uniqueness, sha256 freshness, schema compliance). |
+| `ant-md-check` | Sanity-check `.md` files (group_id, id uniqueness, sha256 freshness, schema compliance) and lint the facet mapping and lineage (`lib/facet_lint.py`): closed `ant_*` namespace (`--strict-namespace` makes unregistered targets errors), mapping rules, `reanalysis_of` / `is_secondary`; `--with-data` reads each `.duckdb` read-only. Prints files per violated rule. Skips `_` folders. |
 | `ant-check` | Wrapper that runs `ant-h5ad-check` + `ant-duckdb-check` + `ant-md-check` over a target. |
 | `ant-api-check` | Probe a running `bin/api/ant-serve` for endpoint correctness + data sanity. |
 | `ant-s3-check` | Verify S3 mirror parity vs local h5adstore (size + mtime). Read-only — push/pull lives in `bin/ops/ant-sync`. |

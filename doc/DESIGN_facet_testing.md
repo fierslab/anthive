@@ -18,7 +18,8 @@ test inside each cell type.
 A dataset is tested when all of these hold (checked from `.md`, `.h5ad.mus`
 and the served files, before any expression data is read):
 
-* not `is_secondary: true` (primaries only; reanalyses are skipped),
+* not `is_secondary: true` (primaries only; reanalyses are skipped; the
+  result views also list any secondary unit as not counted),
 * `.h5ad.mus` organism is exactly `human` (datasets with a missing organism
   field are skipped, except the five Wachter2024 regional files that are
   listed in `ASSUME_HUMAN_DB_IDS` because their group describes 32 human
@@ -296,12 +297,88 @@ missing or partly written file is "not available".
 
 Replication badge: "replicates in k of m independent cohorts" means q < 0.05
 with the same sign in k cohorts out of the m cohorts in which the gene was
-tested in that cell type and facet. A cohort is a row group of
+tested in that cell type group and facet. A cohort is a row group of
 `cohort_selection.DRAFT.tsv`; rows whose role matches duplicate, supplement,
 "do not", never, "alternative B" or "T20 only" do not count (the same rule as
 `ant-facet-test-modules summarize`), and datasets missing from the table do
-not count. Cell type labels are matched exactly, so "microglial cell" and
-"Microglia" are separate rows; harmonising them is open.
+not count. A cohort counts once: it is significant in a direction when any of
+its counted units is.
+
+### Cell type groups (replication counting)
+
+Strata carry their dataset's label: a Cell Ontology name ("microglial
+cell"), a dataset constant, or an author label ("Mic P2RY12", "MG", "Astro",
+"Z20/ALL/cluster_Micro"). Since 2026-10-05 replication and the cross-dataset
+views count by the **group** of a label, from `lib/celltype_groups.yaml`
+(resolved by `lib/celltype_groups.py`: exact label, then case folded, then
+the longest matching prefix; anything else is `unmapped`). The raw label
+stays on every unit (`cell_type`) next to `celltype_group`.
+
+| Group | CL id | Labels (2026-10-05 results) |
+| --- | --- | --- |
+| microglia | CL:0000129 | microglial cell, Microglia, micro, MG, Mic P2RY12 / TPT1 / MKI67 / DUSP1, Z20/ALL/cluster_Micro |
+| perivascular macrophage | CL:0000881 | PVM, perivascular macrophage, CAMs (medium) |
+| macrophage (other) | CL:0000235 | macrophage, meningeal macrophage |
+| myeloid (mixed) | CL:0000763 | myeloid cell (Lee2026 constant over MG + PVM), Phagocytes |
+| immune (mixed) | none | Immune |
+| T cell | CL:0000084 | T cell, T cells |
+| astrocyte | CL:0000127 | astrocyte, Astrocytes, Astro, astro, Bergmann glial cell, Z20 cluster_Astro |
+| oligodendrocyte | CL:0000128 | oligodendrocyte, Oligo, oligo, OL-A, OL-C, Olig_*, Z20 cluster_Oli0/1 |
+| oligodendrocyte precursor cell | CL:0002453 | OPC, opc, OPC_*, oligodendrocyte precursor cell, Z20 cluster_OPC |
+| glia (mixed) | CL:0000125 | glial cell, Glia, Glia-MIX, MicroOligo |
+| excitatory neuron | CL:0000679 | glutamatergic neuron, excitatory neuron, Excit, exc, EN-*, Z20 cluster_Ex0/1, granule cell, unipolar brush cell |
+| inhibitory neuron | CL:0000617 | GABAergic neuron / interneuron, inhibitory neuron / interneuron, interneuron, Inhib, inh, IN-*, Z20 cluster_In, Purkinje cell, cerebellar Golgi cell, molecular layer interneuron |
+| dopaminergic neuron | CL:0000700 | dopaminergic neuron, CALB1_*, SOX6_* |
+| neuron (mixed) | CL:0000540 | neuron, brainstem motor neuron |
+| neural progenitor | none | cerebellar granule cell precursor |
+| endothelial cell | CL:0000115 | endothelial cell and its artery / capillary / vein / vascular tree forms, Endo cells, endo, Endo_* (Kamath2022, medium), Z20 cluster_Endo |
+| mural cell | CL:0008034 | pericyte, smooth muscle cell |
+| vascular (mixed) | none | EndoMural, perivascular cell, Endo_DCN_ABCC9 |
+| VLMC / fibroblast | CL:4023051 | vascular leptomeningeal cell, fibroblast, Stromal cells (medium) |
+| ependymal cell | CL:0000065 | ependymal cell |
+| choroid plexus epithelial cell | CL:0000706 | choroid plexus epithelial cell |
+| unmapped | none | all (pooled), unknown, LuChen2025 state clusters (cluster_Alz / Res / ND) |
+
+Mixed populations have their own groups and never count as evidence for a
+pure class. Neuron groups are coarse classes across regions (cerebellar
+Purkinje cells and cortical interneurons are both "inhibitory neuron"), so a
+group-level count can combine regions; read the raw labels before drawing a
+biological conclusion. Rows marked medium in the YAML are judgement calls.
+
+Counting rules, applied per facet and gene:
+
+1. A unit is eligible when its cohort counts, it is not descriptive only, it
+   is not a secondary dataset (`exclude_secondary`, default on) and its group
+   is not `unmapped`.
+2. Within one dataset and group only the eligible units with the most direct
+   cell type source count: per-cell `ant_cell_type` or a dataset constant,
+   then author cell type columns, then `ant_author_cluster`. A microglia-only
+   dataset is therefore represented by its all-microglia unit, not by its
+   substates. The choice is per dataset, not per cohort: two datasets of one
+   cohort can both speak for it, and the cohort is significant when either is.
+3. When several strata of one dataset still fall into one group (Schirmer2019
+   EN-L2-3-A, EN-L4, ...), each q is multiplied by the number of those strata
+   (Bonferroni) before the q < 0.05 call (`q_counted`, `n_sibling_strata`).
+4. Units that do not count stay in the card with `counted: false` and a
+   `not_counted_reason`.
+
+Recurring genes (`/facets/{name}/effects/top`) are ranked by (1) k, the
+number of cohorts with q < 0.05 and the same sign; (2) `agreement`, the
+fraction of the m tested cohorts whose effect has that sign, significant or
+not (a cohort's sign is its significant direction, else the sign of the mean
+log2 fold change of its counted units); (3) `median_abs_logFC` over the m
+tested cohorts. Before 2026-10-05 the second key was "cohorts tested, fewer
+first", which put "2 of 2" above "2 of 4" only because fewer cohorts had
+tested the gene; the number tested is no longer a key by itself.
+
+Effect on the main example (2026-10-05 results, Braak, PTPRG): with exact
+labels the badge was "replicates in 2 of 4 independent cohorts" in
+"microglial cell" (SEA-AD, MADRC), with Lee2026 (MG) and ROSMAP (Mic P2RY12,
+Mic TPT1 of M23/IMM) in separate one-cohort rows. With groups it is
+"replicates in 4 of 5 independent cohorts (up)" in microglia (SEA-AD, MADRC,
+Lee2026, ROSMAP; Fancy2024 up but q = 0.12), agreement 5 of 5. ROSMAP counts
+through M23/IMM while its MY4/MRM microglia unit is not significant (q = 0.96):
+the any-unit-per-cohort rule is liberal for cohorts with several datasets.
 
 Sex positive control (dataset card, sex units): passed when XIST is lower and
 RPS4Y1 higher in males, both at q < 0.05; the number of Y-linked genes

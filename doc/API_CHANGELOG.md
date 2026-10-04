@@ -112,6 +112,68 @@ Additive (minor). No version bump yet.
   non-admins a facet built from one has empty `source_columns`,
   `redacted: true` and `value_map` rows without `from` (counts summed per
   facet value). Admins (Authelia `admins`) see the column and its values.
+- **Dataset lineage (audit L3).** `GET /databases` rows and `GET
+  /databases/{id}/info` gain `designation` (`primary`, `reanalysis` or
+  `unresolved`: the `.md` has `is_secondary: false`, `true`, or no key),
+  `reanalysis_of` (list of db_ids, empty unless reanalysis), `donor_group`
+  (slug or null) and `has_donor_uid` (the dataset publishes
+  `ant_donor_uid`).
+- **New `GET /donor-groups`** (`?donor_group=` for one group): every donor
+  group with `n_datasets`, `n_primary`, `n_reanalysis`, `n_unresolved`,
+  `n_cells` (primaries only), `has_donor_uid` and `datasets` (`db_id`,
+  `title`, `group`, `designation`, `is_secondary`, `reanalysis_of`,
+  `has_donor_uid`, `n_cells`); `n_ungrouped` counts datasets without a
+  group. 404 for an unknown group.
+- **`exclude_secondary` (default true) on pooled and cross-dataset
+  features.** Behaviour change: secondary datasets (`is_secondary: true`,
+  reanalyses of cells another dataset serves) no longer enter pooled
+  numbers unless `exclude_secondary=false`.
+  - `GET /gene_stats_all`: secondaries are left out of `results` and of
+    `cross_db_cv`; the response gains `n_excluded_secondary` and
+    `exclude_secondary`, each result `is_secondary`.
+  - `GET /module-variability`: rows of secondaries are left out unless
+    `dataset` names one; JSON gains `n_excluded_secondary`, CSV / TSV the
+    header `X-Excluded-Secondary`.
+  - `GET /facets/{name}`: secondaries stay in `datasets` with
+    `is_secondary`, `counted: false` and `reanalysis_of`, but are left out
+    of `total_n_cells`, `value_distribution` and `modules`; the response
+    gains `n_excluded_secondary` and `exclude_secondary`. The
+    `signal_strength` of `GET /facets` ignores secondaries.
+  - Facet test views (`/facets/{name}/tests`, `/effects`, `/effects/top`,
+    `/genes/{gene}/facet-effects`): secondaries are listed with
+    `is_secondary: true` and `counted: false` and never count towards
+    replication.
+- **Facet test replication counts by cell type group.** Stratum labels map
+  to groups in `lib/celltype_groups.yaml` (`microglial cell`, `Microglia`,
+  `MG`, `Mic P2RY12` are all `microglia`). `/facets/{name}/effects` units
+  gain `celltype_group`, `not_counted_reason`, `q_counted` and
+  `n_sibling_strata`, and `counted` now means "counts towards replication"
+  (cohort counted, not descriptive only, not secondary, the dataset's most
+  direct cell type source for the group). `replication[]` and
+  `cell_types[]` are one entry per group with `celltype_group`, `cl_id` and
+  the raw `labels`; their `cell_type` holds the group name. `cell_type=`
+  accepts a group name or a raw label. `/facets/{name}/tests` rows gain
+  `celltype_group` and `is_secondary`. See `doc/DESIGN_facet_testing.md`.
+- **Recurring genes ranking.** `/facets/{name}/effects/top` ranks by k
+  (cohorts with q < 0.05 and the same sign), then `agreement` (fraction of
+  tested cohorts with that sign, significant or not), then
+  `median_abs_logFC`. Rows gain `cohorts_same_sign`, `agreement`,
+  `median_abs_logFC`; the response gains `celltype_group`, `cl_id`,
+  `labels`, `ranking` (the rule as text) and `exclude_secondary`. Before,
+  ties on k were broken by "fewer cohorts tested first", which ranked
+  "2 of 2" above "2 of 4".
+- **Facet registry.** Facet definitions (`GET /facets/{name}` `definition`)
+  gain `status` (`registered` or `deprecated`), `scope` and `replaced_by`.
+  New registered facets: `ant_treatment`, `ant_cognitive_status`,
+  `ant_comorbidity`, `ant_adnc`, `ant_donor_uid`. Deprecated:
+  `ant_cluster`, `ant_condition`, `ant_region`, `ant_ad_stage`,
+  `ant_author_cell_type` (still served while datasets migrate).
+- **Computed facets.** When a dataset publishes `ant_braak` or `ant_apoe`
+  but declares no `ant_braak_group` / `ant_apoe_carrier`, rebuilt views
+  compute them centrally (Braak 0-2 low, 3-4 medium, 5-6 high; E4+ when
+  `ant_apoe` holds an E4 allele). The facet mapping reports them with
+  `mapping_kind: computed` and `computed_rule`. Views on disk change only
+  after a rebuild.
 
 ## 2.42.1 (2026-10-03)
 

@@ -17,7 +17,7 @@ Public API
 * :func:`get_columns_by_tag`— reverse lookup on a parsed .md
 * :func:`facet_definition`  — published definition of an ``ant_<tag>`` facet
 * :func:`facet_definitions_status` — audit state of those definitions
-* :func:`facet_registry`    — the closed ``ant_*`` namespace (decision L1):
+* :func:`facet_registry`    : the closed ``ant_*`` namespace (decision L1):
   status, scope, controlled values, range per registered or deprecated tag
 * :func:`registered_facet_tags`, :func:`deprecated_facet_tags`
 """
