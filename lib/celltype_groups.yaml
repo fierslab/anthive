@@ -1,0 +1,213 @@
+# Cell type groups for replication counting (audit L33 / L34, partial).
+#
+# Facet test strata carry the cell type label of their dataset: a Cell
+# Ontology name from ant_cell_type ("microglial cell"), a constant for the
+# whole dataset, or an author label ("Mic P2RY12", "Astro", "OL-A",
+# "Z20/ALL/cluster_Micro"). Replication across cohorts and the
+# cross-dataset views in lib/facet_results.py count by the GROUP of a label,
+# not by the label itself, so "microglial cell", "Microglia", "MG" and
+# "Mic P2RY12" are one cell type. The raw label stays visible on every unit.
+#
+# Matching (lib/celltype_groups.py): exact label, then the label folded to
+# lower case, then the longest matching prefix in `prefixes`; anything else
+# is `unmapped`. Unmapped units are listed but never count towards
+# replication in a named group.
+#
+# Built 2026-10-05 from every distinct (cell_type, celltype_source) in
+# data/h5adstore/_facet_tests (139 label and source pairs, 123 labels). Confidence per entry:
+# high unless a `# medium` comment says otherwise. CL ids are given where
+# the group is one Cell Ontology class; mixed groups have none.
+#
+# Mixed populations get their own group (myeloid (mixed), glia (mixed),
+# vascular (mixed), immune (mixed), neuron (mixed)): they are not evidence
+# for a pure class. Perivascular / CNS-associated macrophages are not
+# microglia. Neuron classes are coarse (excitatory = glutamatergic,
+# inhibitory = GABAergic, across regions; cerebellar types included), so a
+# replication in "inhibitory neuron" can combine cortical interneurons and
+# cerebellar Purkinje cells. Check the raw labels before reading biology
+# into a group-level count.
+
+version: 1
+
+groups:
+  microglia:
+    cl_id: CL:0000129
+    cl_label: microglial cell
+  perivascular macrophage:
+    cl_id: CL:0000881
+    cl_label: perivascular macrophage
+  macrophage (other):
+    cl_id: CL:0000235
+    cl_label: macrophage
+    note: non-microglial macrophages that are not labelled perivascular (meningeal, unspecified)
+  myeloid (mixed):
+    cl_id: CL:0000763
+    cl_label: myeloid cell
+    note: microglia and macrophages together
+  immune (mixed):
+    note: immune cells of several lineages together
+  T cell:
+    cl_id: CL:0000084
+    cl_label: T cell
+  astrocyte:
+    cl_id: CL:0000127
+    cl_label: astrocyte
+  oligodendrocyte:
+    cl_id: CL:0000128
+    cl_label: oligodendrocyte
+  oligodendrocyte precursor cell:
+    cl_id: CL:0002453
+    cl_label: oligodendrocyte precursor cell
+  glia (mixed):
+    cl_id: CL:0000125
+    cl_label: glial cell
+    note: several glial classes together
+  excitatory neuron:
+    cl_id: CL:0000679
+    cl_label: glutamatergic neuron
+  inhibitory neuron:
+    cl_id: CL:0000617
+    cl_label: GABAergic neuron
+  dopaminergic neuron:
+    cl_id: CL:0000700
+    cl_label: dopaminergic neuron
+  neuron (mixed):
+    cl_id: CL:0000540
+    cl_label: neuron
+    note: neurons of several classes together, or a class not listed here
+  neural progenitor:
+    note: neuronal precursors (fetal datasets)
+  endothelial cell:
+    cl_id: CL:0000115
+    cl_label: endothelial cell
+  mural cell:
+    cl_id: CL:0008034
+    cl_label: mural cell
+    note: pericytes and vascular smooth muscle cells
+  vascular (mixed):
+    note: endothelial and mural cells together, or a vascular label that does not resolve
+  VLMC / fibroblast:
+    cl_id: CL:4023051
+    cl_label: vascular leptomeningeal cell
+    note: vascular leptomeningeal cells and fibroblasts
+  ependymal cell:
+    cl_id: CL:0000065
+    cl_label: ependymal cell
+  choroid plexus epithelial cell:
+    cl_id: CL:0000706
+    cl_label: choroid plexus epithelial cell
+  unmapped:
+    note: pooled strata, unknown cells and state clusters that are not a cell type
+
+labels:
+  # microglia
+  microglial cell: microglia
+  Microglia: microglia
+  micro: microglia
+  MG: microglia                          # Lee2026 class
+  Z20/ALL/cluster_Micro: microglia
+  # perivascular / CNS-associated macrophages
+  PVM: perivascular macrophage           # Lee2026 class
+  perivascular macrophage: perivascular macrophage
+  CAMs: perivascular macrophage          # Mathys2023/2024 CNS-associated macrophages; medium
+  macrophage: macrophage (other)         # Kamath2022; medium
+  meningeal macrophage: macrophage (other)
+  # mixed myeloid / immune
+  myeloid cell: myeloid (mixed)          # Lee2026 constant over MG + PVM
+  Phagocytes: myeloid (mixed)            # Schirmer2019, microglia and macrophages
+  Immune: immune (mixed)                 # GreenFujita2024 class
+  T cell: T cell
+  T cells: T cell
+  # astrocytes
+  astrocyte: astrocyte
+  Astrocytes: astrocyte
+  Astro: astrocyte
+  astro: astrocyte
+  Z20/ALL/cluster_Astro: astrocyte
+  Bergmann glial cell: astrocyte         # CL: Bergmann glial cell is_a astrocyte
+  # oligodendrocyte lineage
+  oligodendrocyte: oligodendrocyte
+  Oligo: oligodendrocyte
+  oligo: oligodendrocyte
+  OL-A: oligodendrocyte
+  OL-C: oligodendrocyte
+  Z20/ALL/cluster_Oli0: oligodendrocyte
+  Z20/ALL/cluster_Oli1: oligodendrocyte
+  oligodendrocyte precursor cell: oligodendrocyte precursor cell
+  OPC: oligodendrocyte precursor cell
+  opc: oligodendrocyte precursor cell
+  Z20/ALL/cluster_OPC: oligodendrocyte precursor cell
+  # mixed glia
+  glial cell: glia (mixed)
+  Glia: glia (mixed)                     # GreenFujita2024 class
+  Glia-MIX: glia (mixed)                 # Schirmer2019
+  MicroOligo: glia (mixed)               # HuukiMyers2024 microglia + oligodendrocytes
+  # excitatory neurons
+  glutamatergic neuron: excitatory neuron
+  excitatory neuron: excitatory neuron
+  Excit: excitatory neuron
+  exc: excitatory neuron
+  EN-PYR: excitatory neuron
+  EN-MIX: excitatory neuron
+  Z20/ALL/cluster_Ex0: excitatory neuron
+  Z20/ALL/cluster_Ex1: excitatory neuron
+  granule cell: excitatory neuron        # cerebellar granule cells (Castonguay2026, Aldinger2021); medium
+  unipolar brush cell: excitatory neuron # cerebellar, glutamatergic; medium
+  # inhibitory neurons
+  GABAergic neuron: inhibitory neuron
+  GABAergic interneuron: inhibitory neuron
+  inhibitory neuron: inhibitory neuron
+  inhibitory interneuron: inhibitory neuron
+  interneuron: inhibitory neuron         # cerebellar datasets only; medium
+  Inhib: inhibitory neuron
+  inh: inhibitory neuron
+  Z20/ALL/cluster_In: inhibitory neuron
+  Purkinje cell: inhibitory neuron       # GABAergic projection neuron; medium (region differs)
+  cerebellar Golgi cell: inhibitory neuron
+  molecular layer interneuron: inhibitory neuron
+  # dopaminergic neurons (Kamath2022 DA subclusters)
+  dopaminergic neuron: dopaminergic neuron
+  # other neurons
+  neuron: neuron (mixed)
+  brainstem motor neuron: neuron (mixed)
+  cerebellar granule cell precursor: neural progenitor
+  # vascular
+  endothelial cell: endothelial cell
+  capillary endothelial cell: endothelial cell
+  endothelial cell of artery: endothelial cell
+  endothelial cell of vascular tree: endothelial cell
+  vein endothelial cell: endothelial cell
+  Endo cells: endothelial cell
+  endo: endothelial cell
+  Z20/ALL/cluster_Endo: endothelial cell
+  Endo_DCN_ABCC9: vascular (mixed)       # Kamath2022; DCN and ABCC9 point to fibroblast / mural cells; medium
+  pericyte: mural cell
+  smooth muscle cell: mural cell
+  perivascular cell: vascular (mixed)    # Clarence2025; does not resolve to one class
+  EndoMural: vascular (mixed)            # HuukiMyers2024 endothelial + mural
+  vascular leptomeningeal cell: VLMC / fibroblast
+  fibroblast: VLMC / fibroblast
+  Stromal cells: VLMC / fibroblast       # Schirmer2019; medium
+  # other
+  ependymal cell: ependymal cell
+  choroid plexus epithelial cell: choroid plexus epithelial cell
+  # not a cell type
+  all: unmapped                          # Gerrits2021, all cells pooled
+  unknown: unmapped
+  LC5/VCF/cluster_Alz: unmapped          # LuChen2025 state clusters
+  LC5/VCF/cluster_Res: unmapped
+  LC5/VNF/cluster_Alz: unmapped
+  LC5/VNF/cluster_ND: unmapped
+  LC5/VNF/cluster_Res: unmapped
+
+# Label families (longest prefix wins). Applied after the exact labels.
+prefixes:
+  'Mic ': microglia                      # Mathys2023/2024: Mic P2RY12, Mic TPT1, Mic MKI67, Mic DUSP1
+  'EN-': excitatory neuron               # Schirmer2019 layer subtypes
+  'IN-': inhibitory neuron               # Schirmer2019 PVALB, SST, SV2C, VIP
+  'OL-': oligodendrocyte                 # Schirmer2019
+  'Olig_': oligodendrocyte               # Kamath2022
+  'OPC_': oligodendrocyte precursor cell # Kamath2022
+  'Endo_': endothelial cell              # Kamath2022; medium
+  'CALB1_': dopaminergic neuron          # Kamath2022 DA subclusters
+  'SOX6_': dopaminergic neuron           # Kamath2022 DA subclusters

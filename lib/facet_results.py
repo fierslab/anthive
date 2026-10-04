@@ -38,6 +38,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
+from celltype_groups import UNMAPPED, group_info, group_of
+
 log = logging.getLogger(__name__)
 
 RESULTS_DIRNAME = '_facet_tests'
@@ -88,12 +90,58 @@ EXCLUDED_ROLE_PATTERN = re.compile(r'duplicate|supplement|do not|never|alternati
 
 REPLICATION_DEFINITION = (
     'replicates in k of m independent cohorts: q < 0.05 with the same sign in k cohorts out of the m '
-    'cohorts in which this gene was tested in this cell type and facet. A cohort is a row group of the '
-    'DRAFT cohort selection table (roles that are duplicates, supplements, "do not pool", "never use '
+    'cohorts in which this gene was tested in this cell type group and facet. A cohort is a row group of '
+    'the DRAFT cohort selection table (roles that are duplicates, supplements, "do not pool", "never use '
     'alongside sources" or alternatives are not counted) and counts at most once, however many of its '
-    'datasets were tested. Descriptive-only units and datasets missing from the table are not counted. '
-    'Cell type labels are matched exactly.'
+    'datasets were tested. Descriptive-only units, secondary datasets (reanalyses) and datasets missing '
+    'from the table are not counted. Cell type labels are counted by their group (lib/celltype_groups.yaml: '
+    '"microglial cell", "Microglia" and "Mic P2RY12" are one group; unmapped labels never count). Within a '
+    'dataset and group only the units with the most direct cell type source count (per-cell ant_cell_type '
+    'or a dataset constant, then author cell type columns, then author clusters); when several strata of '
+    'one dataset still fall into one group, their q values are multiplied by the number of those strata '
+    '(Bonferroni) before the q < 0.05 call.'
 )
+
+RANKING_DEFINITION = (
+    'genes ranked by (1) k, the number of independent cohorts with q < 0.05 and the same sign, highest '
+    'first; (2) agreement, the fraction of the m tested cohorts whose effect has that sign (significant '
+    'or not), highest first; (3) the median absolute log2 fold change over the m tested cohorts, largest '
+    'first. The number of cohorts tested never ranks a gene by itself: "2 of 2" and "2 of 4" with all '
+    'four cohorts in the same direction tie on k and agreement and are ordered by effect size.'
+)
+
+#: Order in which a stratum's cell type source stands for its group when one
+#: cohort has several units in the same group (lower is more direct).
+_SOURCE_PRIORITY = {'ant_cell_type': 0, 'constant_all_cells': 0, 'ant_author_cluster': 2, 'none': 3}
+
+
+def source_priority(celltype_source: Any) -> int:
+    """0 per-cell ant_cell_type or dataset constant, 1 author cell type
+    column, 2 author clusters, 3 all cells pooled."""
+    return _SOURCE_PRIORITY.get(str(celltype_source), 1)
+
+
+def _known_group_names() -> set:
+    from celltype_groups import groups  # noqa: PLC0415
+    return set(groups())
+
+
+def _not_counted_reason(record: Dict[str, Any]) -> Optional[str]:
+    """Why a unit does not count towards replication (None when it counts)."""
+    if record.get('counted_effective'):
+        return None
+    if record.get('excluded_secondary'):
+        return 'secondary dataset (reanalysis)'
+    if record.get('descriptive_only'):
+        return 'descriptive only (a level has too few donors)'
+    if not record.get('cohort') or (isinstance(record.get('cohort'), float) and math.isnan(record['cohort'])):
+        return 'dataset not in the cohort table'
+    if not record.get('counted'):
+        return 'cohort role not counted (duplicate, supplement or alternative)'
+    if record.get('celltype_group') == UNMAPPED:
+        return 'cell type label not mapped to a group'
+    return 'another unit of this dataset and cell type group has a more direct cell type source'
+
 
 APOE_LOCUS_GENES = frozenset({'APOE', 'APOC1', 'APOC1P1', 'TOMM40', 'NECTIN2', 'PVRL2'})
 APOE_LOCUS_NOTE = ('APOE locus gene: allele-linked expression and read-mapping differences can produce '
@@ -798,7 +846,8 @@ class FacetResults:
             ``counted`` and ``summary_unit`` (the summary unit dict).
         """
         signature = (facet, _file_key(self.results_dir / COHORT_TABLE_NAME), tuple(
-            (d['db_id'], self.fingerprint(d['group_folder'], d['stem'])) for d in datasets))
+            (d['db_id'], bool(d.get('is_secondary')), self.fingerprint(d['group_folder'], d['stem']))
+            for d in datasets))
         with self._lock:
             cached = self._gene_tables.get(signature)
             if cached is not None:
@@ -840,6 +889,8 @@ class FacetResults:
                     'descriptive_only': bool((unit.get('flags') or {}).get('descriptive_only')),
                     'cohort': cohort.get('cohort') or None, 'cohort_label': cohort.get('cohort_label') or None,
                     'role': cohort.get('role') or None, 'counted': bool(cohort.get('counted')),
+                    'is_secondary': bool(dataset.get('is_secondary')),
+                    'celltype_group': group_of(cell_type),
                     'summary_unit': unit,
                 })
                 parts.append(pd.DataFrame({
@@ -853,7 +904,7 @@ class FacetResults:
         units = pd.DataFrame(unit_rows, columns=[
             'unit', 'db_id', 'title', 'cell_type', 'celltype_source', 'n_donors', 'n_donors_ref',
             'n_donors_test', 'level_ref', 'level_test', 'descriptive_only', 'cohort', 'cohort_label',
-            'role', 'counted', 'summary_unit'])
+            'role', 'counted', 'is_secondary', 'celltype_group', 'summary_unit'])
         if parts:
             rows = pd.concat(parts, ignore_index=True)
             rows['gene_upper'] = rows['gene'].str.upper().astype('category')
@@ -872,16 +923,58 @@ class FacetResults:
         return result
 
     @staticmethod
+    def counting_units(units: pd.DataFrame, exclude_secondary: bool = True) -> pd.DataFrame:
+        """``units`` with the replication bookkeeping added.
+
+        Columns added: ``excluded_secondary`` (a secondary dataset left out
+        because ``exclude_secondary``), ``eligible`` (counted cohort, not
+        descriptive only, not an excluded secondary, group not unmapped),
+        ``representative`` (eligible and of the most direct cell type source
+        among the eligible units of its dataset and group), ``n_siblings``
+        (representative units of the same dataset and group; their q values
+        are multiplied by it) and ``counted_effective`` (= representative).
+        """
+        units = units.copy()
+        if 'is_secondary' not in units.columns:
+            units['is_secondary'] = False
+        if 'celltype_group' not in units.columns:
+            units['celltype_group'] = units['cell_type'].map(group_of) if 'cell_type' in units.columns else UNMAPPED
+        if 'celltype_source' not in units.columns:
+            units['celltype_source'] = 'ant_cell_type'
+        if 'db_id' not in units.columns:
+            units['db_id'] = units.index.astype(str)
+        units['excluded_secondary'] = units['is_secondary'].astype(bool) & bool(exclude_secondary)
+        units['eligible'] = (units['counted'].astype(bool) & ~units['descriptive_only'].astype(bool)
+                             & units['cohort'].notna() & ~units['excluded_secondary']
+                             & (units['celltype_group'] != UNMAPPED))
+        priority = units['celltype_source'].map(source_priority)
+        units['_priority'] = priority.where(units['eligible'])
+        best = units.groupby(['db_id', 'celltype_group'], dropna=False)['_priority'].transform('min')
+        units['representative'] = units['eligible'] & (units['_priority'] == best)
+        siblings = units[units['representative']].groupby(['db_id', 'celltype_group']).size()
+        units['n_siblings'] = [int(siblings.get((d, g), 1)) if r else 1 for d, g, r in
+                               zip(units['db_id'], units['celltype_group'], units['representative'])]
+        units['counted_effective'] = units['representative']
+        return units.drop(columns='_priority')
+
+    @staticmethod
     def _replication(unit_rows: pd.DataFrame) -> Dict[str, Any]:
-        """Replication badge over the rows of one gene in one cell type.
+        """Replication badge over the rows of one gene in one cell type group.
 
         ``unit_rows`` needs ``counted``, ``descriptive_only``, ``cohort``,
-        ``q_value``, ``logFC``.
+        ``q_value``, ``logFC``; ``representative`` and ``n_siblings`` (from
+        ``counting_units``) are used when present.
         """
-        eligible = unit_rows[unit_rows['counted'] & ~unit_rows['descriptive_only']
-                             & unit_rows['q_value'].notna() & unit_rows['cohort'].notna()]
+        rows = unit_rows
+        if 'representative' not in rows.columns:
+            rows = rows.assign(representative=rows['counted'].astype(bool) & ~rows['descriptive_only'].astype(bool)
+                               & rows['cohort'].notna())
+        if 'n_siblings' not in rows.columns:
+            rows = rows.assign(n_siblings=1)
+        eligible = rows[rows['representative'].astype(bool) & rows['q_value'].notna()]
+        eligible = eligible.assign(q_adj=(eligible['q_value'] * eligible['n_siblings']).clip(upper=1.0))
         cohorts_tested = sorted(set(eligible['cohort']))
-        significant = eligible[eligible['q_value'] < Q_THRESHOLD]
+        significant = eligible[eligible['q_adj'] < Q_THRESHOLD]
         up = sorted(set(significant.loc[significant['logFC'] > 0, 'cohort']))
         down = sorted(set(significant.loc[significant['logFC'] < 0, 'cohort']))
         if len(up) > len(down):
@@ -909,52 +1002,90 @@ class FacetResults:
             'badge': badge + ('; sign discordant' if up and down else ''),
         }
 
+    def _resolve_group_filter(self, units: pd.DataFrame, cell_type: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+        """``cell_type`` as (group, raw label): a group name selects the group,
+        anything else a raw label (and through it, its group)."""
+        if not cell_type:
+            return None, None
+        known_groups = set(units['celltype_group']) if len(units) else set()
+        if cell_type in known_groups or cell_type in _known_group_names():
+            return cell_type, None
+        return None, cell_type
+
     def gene_effects(self, facet: str, gene: str, datasets: Sequence[Dict[str, Any]],
-                     cell_type: Optional[str] = None) -> Dict[str, Any]:
+                     cell_type: Optional[str] = None, exclude_secondary: bool = True) -> Dict[str, Any]:
         """The result card of one gene for one facet: every tested unit, grouped
-        by cohort, with the replication badge per cell type.
+        by cohort, with the replication badge per cell type group.
+
+        Args:
+            facet: Test facet (sex, disease, apoe_carrier, braak).
+            gene: Gene symbol (case-insensitive).
+            datasets: Dicts with ``db_id``, ``group_folder``, ``stem`` and
+                optional ``title``, ``sha256``, ``is_secondary``.
+            cell_type: A cell type group (``microglia``) or a raw stratum
+                label (``Mic P2RY12``) to restrict to.
+            exclude_secondary: Secondary datasets are listed but not counted.
 
         Returns:
             ``{query, facet, gene, units, replication, cell_types, notes,
             definition}``; ``units`` is empty when the gene was not tested.
+            Units carry the raw ``cell_type`` and its ``celltype_group``;
+            ``replication`` and ``cell_types`` are per group.
         """
         rows, units = self.facet_gene_table(facet, datasets)
         info = FACET_INFO.get(facet, {'contrast': facet, 'effect_unit': 'log2 fold change', 'provisional': False})
+        units = self.counting_units(units, exclude_secondary) if len(units) else units
         gene_rows = rows[rows['gene_upper'] == gene.upper()] if len(rows) else rows
         merged = gene_rows.merge(units, on='unit', how='left') if len(gene_rows) else None
         unit_cards: List[Dict[str, Any]] = []
         replication: List[Dict[str, Any]] = []
         cell_types: List[Dict[str, Any]] = []
         if merged is not None and len(merged):
-            if cell_type:
-                merged = merged[merged['cell_type'] == cell_type]
-            for ct, group in merged.groupby('cell_type', sort=False):
-                rep = self._replication(group)
-                replication.append({'cell_type': ct, **rep})
-                cell_types.append({'cell_type': ct, 'n_units': int(len(group)),
-                                   'n_cohorts': rep['cohorts_tested']})
-            order = {r['cell_type']: (-r['cohorts_tested'], -len(merged[merged['cell_type'] == r['cell_type']]))
+            group_filter, label_filter = self._resolve_group_filter(units, cell_type)
+            if group_filter:
+                merged = merged[merged['celltype_group'] == group_filter]
+            elif label_filter:
+                merged = merged[merged['cell_type'] == label_filter]
+            for group, sub in merged.groupby('celltype_group', sort=False):
+                rep = self._replication(sub)
+                labels = sorted(set(sub['cell_type']))
+                details = group_info(group)
+                replication.append({'cell_type': group, 'celltype_group': group, 'cl_id': details['cl_id'],
+                                    'labels': labels, **rep})
+                cell_types.append({'cell_type': group, 'celltype_group': group, 'labels': labels,
+                                   'n_units': int(len(sub)), 'n_cohorts': rep['cohorts_tested']})
+            order = {r['celltype_group']: (r['celltype_group'] == UNMAPPED, -r['cohorts_tested'],
+                                           -len(merged[merged['celltype_group'] == r['celltype_group']]))
                      for r in replication}
             merged = merged.assign(
-                _ct=merged['cell_type'].map(lambda c: order.get(c, (0, 0))),
-                _counted=~merged['counted'],
+                _ct=merged['celltype_group'].map(lambda g: order.get(g, (True, 0, 0))),
+                _counted=~merged['counted_effective'],
                 _role=merged['role'].fillna('').str.lower().str.startswith('anchor').map(lambda a: 0 if a else 1),
                 _cohort=merged['cohort_label'].fillna('~'),
                 _donors=-merged['n_donors'].fillna(0).astype(float))
-            merged = merged.sort_values(['_ct', 'cell_type', '_counted', '_cohort', '_role', '_donors'])
+            merged = merged.sort_values(['_ct', 'celltype_group', '_counted', '_cohort', '_role', '_donors',
+                                         'cell_type'])
             for record in merged.to_dict(orient='records'):
                 summary_unit = record.get('summary_unit') or {}
                 model = (summary_unit.get('model') or {}).get('genes') or {}
                 q_value = _finite(record.get('q_value'))
+                n_siblings = int(record.get('n_siblings') or 1)
+                q_counted = min(1.0, q_value * n_siblings) if q_value is not None else None
                 unit_cards.append({
                     'db_id': record['db_id'], 'title': record.get('title'),
                     'gene': str(record['gene']),
                     'cell_type': record['cell_type'], 'celltype_source': record['celltype_source'],
+                    'celltype_group': record['celltype_group'],
                     'cohort': record.get('cohort'), 'cohort_label': record.get('cohort_label'),
-                    'role': record.get('role'), 'counted': bool(record.get('counted')),
+                    'role': record.get('role'),
+                    'counted': bool(record.get('counted_effective')),
+                    'not_counted_reason': _not_counted_reason(record),
+                    'is_secondary': bool(record.get('is_secondary')),
                     'logFC': _finite(record.get('logFC')),
                     'ci_low': _finite(record.get('ci_low')), 'ci_high': _finite(record.get('ci_high')),
                     'q_value': q_value,
+                    'q_counted': q_counted if n_siblings > 1 else q_value,
+                    'n_sibling_strata': n_siblings,
                     'significant': q_value is not None and q_value < Q_THRESHOLD,
                     'n_donors': _as_int(record.get('n_donors')),
                     'n_donors_ref': _as_int(record.get('n_donors_ref')),
@@ -971,13 +1102,15 @@ class FacetResults:
                     'tool': model.get('tool', NOT_RECORDED),
                 })
         notes = ['exploratory', 'no meta-analysis: datasets are tested separately and share donors',
-                 'cohort table is a DRAFT']
+                 'cohort table is a DRAFT',
+                 'cell types are counted by group (lib/celltype_groups.yaml); the raw label is on each unit']
         if info.get('provisional'):
             notes.append(PROVISIONAL_NOTE)
         if gene.upper() in APOE_LOCUS_GENES and facet == 'apoe_carrier':
             notes.append(APOE_LOCUS_NOTE)
         return json_safe({
-            'query': {'gene': gene, 'facet': facet, 'cell_type': cell_type},
+            'query': {'gene': gene, 'facet': facet, 'cell_type': cell_type,
+                      'exclude_secondary': exclude_secondary},
             'facet': {'name': facet, 'column': 'ant_' + facet, 'contrast': info['contrast'],
                       'effect_unit': info['effect_unit'], 'provisional': info['provisional'],
                       'status': 'exploratory'},
@@ -992,80 +1125,122 @@ class FacetResults:
         })
 
     def recurring_genes(self, facet: str, datasets: Sequence[Dict[str, Any]],
-                        cell_type: Optional[str] = None, limit: int = 50) -> Dict[str, Any]:
-        """Genes ranked by the number of independent cohorts with q < 0.05 and
-        the same sign, within one cell type label.
+                        cell_type: Optional[str] = None, limit: int = 50,
+                        exclude_secondary: bool = True) -> Dict[str, Any]:
+        """Genes that change with a facet in the most independent cohorts,
+        within one cell type group.
 
-        Without ``cell_type`` the label with the most counted cohorts is used.
-        Rows: ``gene, cohorts_sig_same_sign, cohorts_tested, direction,
-        sign_discordant, units_up, units_down, max_abs_logFC, cohorts``.
+        Ranking (``RANKING_DEFINITION``): k (cohorts with q < 0.05 and the
+        same sign) descending, then ``agreement`` (fraction of the m tested
+        cohorts whose effect has that sign, significant or not) descending,
+        then the median absolute log2 fold change over the m tested cohorts
+        descending. The number of cohorts tested is never a ranking key by
+        itself, so "2 of 2" does not outrank "2 of 4" for having fewer tests.
+
+        A cohort's effect is the mean log2 fold change of its counted units in
+        the group; its sign is the significant direction when it has one.
+
+        Without ``cell_type`` the group with the most counted cohorts is used
+        (unmapped never). Rows: ``gene, cohorts_sig_same_sign, cohorts_tested,
+        cohorts_same_sign, agreement, direction, sign_discordant, units_up,
+        units_down, median_abs_logFC, max_abs_logFC, cohorts, apoe_locus``.
         """
         rows, units = self.facet_gene_table(facet, datasets)
-        counted = units[units['counted'] & ~units['descriptive_only']] if len(units) else units
+        units = self.counting_units(units, exclude_secondary) if len(units) else units
+        counted = units[units['counted_effective']] if len(units) else units
         options = []
         if len(counted):
-            for ct, group in counted.groupby('cell_type'):
-                options.append({'cell_type': ct, 'n_cohorts': int(group['cohort'].nunique()),
-                                'n_units': int(len(group))})
-        options.sort(key=lambda o: (-o['n_cohorts'], -o['n_units'], o['cell_type']))
-        chosen = cell_type or (options[0]['cell_type'] if options else None)
+            for group, sub in counted.groupby('celltype_group'):
+                options.append({'cell_type': group, 'celltype_group': group,
+                                'cl_id': group_info(group)['cl_id'],
+                                'labels': sorted(set(sub['cell_type'])),
+                                'n_cohorts': int(sub['cohort'].nunique()), 'n_units': int(len(sub))})
+        options.sort(key=lambda o: (-o['n_cohorts'], -o['n_units'], o['celltype_group']))
+        group_filter, label_filter = self._resolve_group_filter(units, cell_type) if len(units) else (None, None)
+        if label_filter:
+            group_filter = group_of(label_filter)
+        chosen = group_filter or (options[0]['celltype_group'] if options else None)
         out_rows: List[Dict[str, Any]] = []
         n_cohorts = 0
         if chosen is not None and len(rows):
-            unit_ids = counted.loc[counted['cell_type'] == chosen, 'unit']
-            n_cohorts = int(counted.loc[counted['cell_type'] == chosen, 'cohort'].nunique())
-            sub = rows[rows['unit'].isin(unit_ids) & rows['q_value'].notna()]
+            chosen_units = counted[counted['celltype_group'] == chosen]
+            n_cohorts = int(chosen_units['cohort'].nunique())
+            sub = rows[rows['unit'].isin(chosen_units['unit']) & rows['q_value'].notna()]
             if len(sub):
-                sub = sub.merge(units[['unit', 'cohort', 'cohort_label']], on='unit', how='left')
+                sub = sub.merge(chosen_units[['unit', 'cohort', 'cohort_label', 'n_siblings']], on='unit', how='left')
+                q_counted = (sub['q_value'] * sub['n_siblings']).clip(upper=1.0)
                 sub = sub.assign(gene=sub['gene'].astype(str),
-                                 up=(sub['q_value'] < Q_THRESHOLD) & (sub['logFC'] > 0),
-                                 down=(sub['q_value'] < Q_THRESHOLD) & (sub['logFC'] < 0))
+                                 up=(q_counted < Q_THRESHOLD) & (sub['logFC'] > 0),
+                                 down=(q_counted < Q_THRESHOLD) & (sub['logFC'] < 0))
                 per_cohort = sub.groupby(['gene', 'cohort'], observed=True).agg(
-                    up=('up', 'any'), down=('down', 'any')).reset_index()
+                    up=('up', 'any'), down=('down', 'any'), effect=('logFC', 'mean')).reset_index()
                 per_gene = per_cohort.groupby('gene').agg(
                     cohorts_tested=('cohort', 'nunique'),
                     k_up=('up', 'sum'), k_down=('down', 'sum')).reset_index()
                 per_gene = per_gene[(per_gene['k_up'] > 0) | (per_gene['k_down'] > 0)]
                 if len(per_gene):
+                    per_gene['k'] = per_gene[['k_up', 'k_down']].max(axis=1)
+                    per_gene['direction'] = [
+                        'up' if u > d else 'down' if d > u else 'mixed'
+                        for u, d in zip(per_gene['k_up'], per_gene['k_down'])]
+                    # cohort sign: significant direction, else the sign of the mean effect
+                    cohort_sign = per_cohort.assign(sign=[
+                        'discordant' if u and d else 'up' if u else 'down' if d else
+                        ('up' if e > 0 else 'down' if e < 0 else 'zero')
+                        for u, d, e in zip(per_cohort['up'], per_cohort['down'], per_cohort['effect'])])
+                    signs = cohort_sign.groupby('gene')['sign'].apply(list)
+                    effects = per_cohort.groupby('gene')['effect'].apply(lambda v: float(v.abs().median()))
+                    per_gene['cohorts_same_sign'] = [
+                        sum(sign == direction for sign in signs[gene]) if direction != 'mixed' else int(k)
+                        for gene, direction, k in zip(per_gene['gene'], per_gene['direction'], per_gene['k'])]
+                    per_gene['agreement'] = per_gene['cohorts_same_sign'] / per_gene['cohorts_tested']
+                    per_gene['median_abs_logFC'] = per_gene['gene'].map(effects)
                     sig = sub[sub['up'] | sub['down']]
                     unit_counts = sig.groupby('gene').agg(units_up=('up', 'sum'), units_down=('down', 'sum'),
                                                           max_abs_logFC=('logFC', lambda v: float(v.abs().max())))
                     per_gene = per_gene.merge(unit_counts, left_on='gene', right_index=True, how='left')
-                    per_gene['k'] = per_gene[['k_up', 'k_down']].max(axis=1)
-                    per_gene = per_gene.sort_values(['k', 'cohorts_tested', 'max_abs_logFC'],
-                                                    ascending=[False, True, False]).head(limit)
+                    per_gene = per_gene.sort_values(['k', 'agreement', 'median_abs_logFC', 'gene'],
+                                                    ascending=[False, False, False, True]).head(limit)
                     sig_cohorts = per_cohort[per_cohort['up'] | per_cohort['down']]
                     labels = dict(zip(units['cohort'], units['cohort_label']))
                     for record in per_gene.to_dict(orient='records'):
                         k_up, k_down = int(record['k_up']), int(record['k_down'])
-                        direction = 'up' if k_up > k_down else 'down' if k_down > k_up else 'mixed'
                         names = sig_cohorts.loc[sig_cohorts['gene'] == record['gene'], 'cohort']
                         out_rows.append({
                             'gene': record['gene'],
                             'cohorts_sig_same_sign': max(k_up, k_down),
                             'cohorts_tested': int(record['cohorts_tested']),
-                            'direction': direction,
+                            'cohorts_same_sign': int(record['cohorts_same_sign']),
+                            'agreement': _finite(record.get('agreement')),
+                            'direction': record['direction'],
                             'sign_discordant': k_up > 0 and k_down > 0,
                             'units_up': int(record.get('units_up') or 0),
                             'units_down': int(record.get('units_down') or 0),
+                            'median_abs_logFC': _finite(record.get('median_abs_logFC')),
                             'max_abs_logFC': _finite(record.get('max_abs_logFC')),
                             'cohorts': sorted({labels.get(c) or c for c in names}),
                             'apoe_locus': str(record['gene']).upper() in APOE_LOCUS_GENES,
                         })
+        chosen_info = group_info(chosen) if chosen else {}
         return json_safe({
             'facet': facet,
             'cell_type': chosen,
+            'celltype_group': chosen,
+            'cl_id': chosen_info.get('cl_id'),
+            'labels': next((o['labels'] for o in options if o['celltype_group'] == chosen), []),
             'cohorts_in_cell_type': n_cohorts,
             'cell_types': options,
             'rows': out_rows,
             'definition': REPLICATION_DEFINITION,
+            'ranking': RANKING_DEFINITION,
+            'exclude_secondary': exclude_secondary,
             'cohort_table_status': 'DRAFT',
         })
 
     # ── one facet across datasets ──────────────────────────────────────────
 
     def facet_overview(self, facet: str, datasets: Sequence[Dict[str, Any]],
-                       top_genes: int = 5) -> Dict[str, Any]:
+                       top_genes: int = 5, exclude_secondary: bool = True) -> Dict[str, Any]:
         """Per-dataset summaries of one facet: one row per tested (dataset,
         stratum), sorted by donors analysed (most first). No pooling.
 
@@ -1074,14 +1249,17 @@ class FacetResults:
             datasets: Dicts with ``db_id``, ``group_folder``, ``stem`` and
                 optional ``title``, ``group``, ``sha256``.
             top_genes: Genes at q < 0.05 listed per row (smallest q first).
+            exclude_secondary: Rows of secondary datasets stay in the list,
+                with ``is_secondary`` true and ``counted`` false.
 
         Returns:
             ``{facet, rows, not_tested, n_datasets_tested}``; ``not_tested``
             lists datasets with result files whose units for this facet were
             all untested, with the reason.
         """
-        signature = (facet, top_genes, tuple(
-            (d['db_id'], self.fingerprint(d['group_folder'], d['stem'])) for d in datasets))
+        signature = (facet, top_genes, exclude_secondary, tuple(
+            (d['db_id'], bool(d.get('is_secondary')), self.fingerprint(d['group_folder'], d['stem']))
+            for d in datasets))
         with self._lock:
             cached = self._overview_cache.get(signature)
         if cached is not None:
@@ -1126,13 +1304,17 @@ class FacetResults:
                     'cohort': (summary.get('cohort') or {}).get('cohort'),
                     'cohort_label': (summary.get('cohort') or {}).get('cohort_label'),
                     'role': (summary.get('cohort') or {}).get('role'),
-                    'counted': bool((summary.get('cohort') or {}).get('counted')),
+                    'counted': bool((summary.get('cohort') or {}).get('counted'))
+                    and not (exclude_secondary and bool(dataset.get('is_secondary'))),
+                    'is_secondary': bool(dataset.get('is_secondary')),
+                    'celltype_group': group_of(unit.get('cell_type')),
                     'model': unit.get('model'),
                     'sex_control': unit.get('sex_control'),
                 })
         rows.sort(key=lambda r: (-(r.get('n_donors') or 0), r['db_id'], r.get('cell_type') or ''))
         result = json_safe({
             'facet': facet,
+            'exclude_secondary': exclude_secondary,
             'n_rows': len(rows),
             'n_datasets_tested': len({r['db_id'] for r in rows}),
             'rows': rows,

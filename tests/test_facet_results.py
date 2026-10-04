@@ -368,7 +368,8 @@ def test_apoe_locus_note_only_for_apoe_carrier(results):
 
 def test_recurring_genes(results):
     out = fr.FacetResults(results).recurring_genes('braak', DATASETS)
-    assert out['cell_type'] == 'microglial cell' and out['cohorts_in_cell_type'] == 2
+    assert out['cell_type'] == 'microglia' and out['cohorts_in_cell_type'] == 2
+    assert out['labels'] == ['microglial cell'] and out['cl_id'] == 'CL:0000129'
     top = out['rows'][0]
     assert top['gene'] == 'PTPRG' and top['cohorts_sig_same_sign'] == 2 and top['direction'] == 'up'
     apoe = next(r for r in out['rows'] if r['gene'] == 'APOE')
