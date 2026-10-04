@@ -5,7 +5,10 @@ validate_python are the security boundary that prevents arbitrary file
 access, data exfiltration, and code execution via the analytics endpoints.
 """
 
+import duckdb
 import pytest
+
+import analytics
 
 from analytics import (
     _BLOCKED_BUILTINS,
@@ -491,3 +494,32 @@ class TestVizEnvironment:
         figure_b64, fmt = analytics.run_viz(sid, code)
         assert fmt == 'png' and len(figure_b64) > 100
         assert not list(tmp_path.glob('_viz_*')), "scratch dir not cleaned up"
+
+
+@pytest.mark.parametrize('sql', [
+    'SELECT capdate FROM __obscat',
+    'select * from main.__obscat',
+    'SELECT * FROM "__obsnum"',
+    'SELECT x FROM (FROM __OBSCAT)',
+    'SELECT * FROM main."__obscat"',
+    'SELECT * FROM anthive.main.__obscat',
+])
+def test_raw_obs_tables_are_not_queryable(sql):
+    """The physical obs tables carry columns and values that api.obs_hidden /
+    obs_value_hidden keep out of the public views."""
+    with pytest.raises(ValueError, match='internal'):
+        analytics.validate_sql(sql)
+
+
+def test_views_and_other_tables_stay_queryable():
+    analytics.validate_sql('SELECT ant_sex, count(*) FROM obscat GROUP BY 1')
+    analytics.validate_sql('SELECT o.* FROM obscat o JOIN __cells c USING (cell_name)')
+
+
+def test_schema_leaves_out_raw_obs_tables():
+    conn = duckdb.connect()
+    conn.execute("CREATE TABLE __obscat (cell_id INT, capdate VARCHAR)")
+    conn.execute("INSERT INTO __obscat VALUES (1, '2019-06-13')")
+    conn.execute("CREATE VIEW obscat AS SELECT cell_id FROM __obscat")
+    tables = {t['table'] for t in analytics.get_schema(conn)}
+    assert 'obscat' in tables and '__obscat' not in tables

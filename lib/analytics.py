@@ -119,6 +119,9 @@ _BLOCKED_FROM_FUNCTIONS = frozenset({
     'load_aws_credentials',
 })
 
+# Raw obs tables behind the public views: see validate_sql.
+_HIDDEN_RAW_TABLES = frozenset({'__obscat', '__obsnum'})
+
 _SESSION_ID_RE = re.compile(r'^[0-9a-f]{32}$')
 
 
@@ -199,6 +202,14 @@ def validate_sql(sql: str) -> None:
         if tt == duckdb.token_type.keyword and name == 'pragma':
             raise ValueError(
                 "PRAGMA statements are not allowed through analytics_query."
+            )
+        # The physical obs tables hold every author column and value,
+        # including the ones a dataset's .md hides (api.obs_hidden,
+        # obs_value_hidden). Queries go through the public obscat / obsnum
+        # views, which apply those rules.
+        if name.rsplit('.', 1)[-1] in _HIDDEN_RAW_TABLES:
+            raise ValueError(
+                f"Table '{name}' is internal; query the obscat / obsnum views instead."
             )
         j = _next_significant(i)
         if j >= n:
@@ -306,6 +317,8 @@ def get_schema(conn: duckdb.DuckDBPyConnection) -> List[Dict[str, Any]]:
     tables_raw = conn.execute("SHOW TABLES").fetchall()
     schema = []
     for (table_name,) in tables_raw:
+        if table_name.lower() in _HIDDEN_RAW_TABLES:
+            continue  # hidden author columns live there; the views are the public surface
         columns_raw = conn.execute(f"DESCRIBE \"{table_name}\"").fetchall()
         columns = [{'name': row[0], 'type': row[1]} for row in columns_raw]
         try:
