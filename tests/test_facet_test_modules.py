@@ -221,8 +221,9 @@ def make_module_dataset(tmp_path: Path, n_f: int = 10, n_m: int = 10, with_count
     conn.execute('CREATE TABLE __obscat AS SELECT * FROM obscat')
     conn.execute('CREATE TABLE __obsnum AS SELECT cell_id FROM cells')
     conn.close()
-    pd.DataFrame(score_rows, columns=['cell_id', 'source', 'catalog', 'module', 'score']) \
-        .to_parquet(group_dir / f'{stem}.scores.parquet', index=False)
+    score_frame = pd.DataFrame(score_rows, columns=['cell_id', 'source', 'catalog', 'module', 'score'])
+    ucell_frame = score_frame.assign(source='ucell', score=lambda f: 1 / (1 + np.exp(-f['score'])))
+    pd.concat([score_frame, ucell_frame]).to_parquet(group_dir / f'{stem}.scores.parquet', index=False)
     layer_stats = ''
     if with_counts:
         triples = pd.DataFrame(count_triples, columns=['cell_id', 'gene_id', 'value'])
@@ -257,7 +258,8 @@ def _run(tmp_path, entry, store, geneset_root, facets=('sex',), **kwargs):
     registry.scan()
     assert not registry.errors, registry.errors
     out_root = tmp_path / 'out'
-    manifest = mod.process_dataset(entry, store, out_root, list(facets), registry, ['geneset'],
+    manifest = mod.process_dataset(entry, store, out_root, list(facets), registry,
+                                   kwargs.pop('sources', ['geneset']),
                                    n_permutations=kwargs.pop('n_permutations', 300), threads=1,
                                    memory_limit_gb=2, **kwargs)
     return manifest, out_root
@@ -269,7 +271,7 @@ def test_planted_module_effect_recovered_by_both_methods(tmp_path):
     assert manifest['status'] == 'done' and manifest['no_counts'] is False
     table = pd.read_parquet(out_root / 'Syn2026' / 'Syn_mod.facet_module_tests.parquet')
     sex_t1 = table[(table['facet'] == 'sex') & (table['cell_type'] == 'T1')]
-    assert set(sex_t1['method']) == {'cell_mean', 'pseudobulk'}
+    assert set(sex_t1['method']) == {'cell_mean', 'pseudobulk'} and set(sex_t1['source']) == {'geneset', 'gene_list'}
     assert (sex_t1['contrast'] == 'm_vs_f').all() and (sex_t1['n_donors'] == 20).all()
     assert not (table['cell_type'] == 'T2').any()                      # 4 cells per donor: dropped
     plant_a = sex_t1[(sex_t1['module'] == 'PLANT') & (sex_t1['method'] == 'cell_mean')].iloc[0]
@@ -285,15 +287,29 @@ def test_planted_module_effect_recovered_by_both_methods(tmp_path):
         assert len(nulls) == 5
         assert (nulls['q_perm'] < 0.05).sum() <= 1, nulls[['module', 'estimate', 'p_perm']]
     unit = next(u for u in manifest['units'] if u['facet'] == 'sex' and u['cell_type'] == 'T1')
-    assert unit['n_sig_q05_param_cell_mean'] >= 1 and unit['n_sig_q05_param_pseudobulk'] >= 1
-    assert unit['calibration']['n_modules_shared'] == 6
-    assert unit['calibration']['pearson_estimate'] > 0.5
-    assert unit['calibration']['sign_agreement'] >= 0.5
+    assert unit['n_sig_q05_param_cell_mean_geneset'] >= 1 and unit['n_sig_q05_param_pseudobulk_gene_list'] >= 1
+    calibration = unit['calibration']['geneset']
+    assert calibration['n_modules_shared'] == 6
+    assert calibration['pearson_estimate'] > 0.5
+    assert calibration['sign_agreement'] >= 0.5
     # manifest on disk and reproducibility fields
     on_disk = json.loads((out_root / 'Syn2026' / 'Syn_mod.facet_module_run_manifest.json').read_text())
     assert on_disk['seed'] == mod.SEED and on_disk['parameters']['n_bins'] == 25 \
         and on_disk['parameters']['ctrl_size'] == 50 and 'numpy' in on_disk['versions']
     assert on_disk['catalogs']['geneset::SynStudy/Exp']['n_modules_sidecar'] == 6
+
+
+def test_both_sidecar_sources_are_separate_bh_families_and_b_is_not_duplicated(tmp_path):
+    store, geneset_root, entry = make_module_dataset(tmp_path)
+    manifest, out_root = _run(tmp_path, entry, store, geneset_root, sources=['geneset', 'ucell'])
+    table = pd.read_parquet(out_root / 'Syn2026' / 'Syn_mod.facet_module_tests.parquet')
+    sex_t1 = table[(table['facet'] == 'sex') & (table['cell_type'] == 'T1')]
+    counts = sex_t1.groupby(['method', 'source']).size().to_dict()
+    assert counts == {('cell_mean', 'geneset'): 6, ('cell_mean', 'ucell'): 6, ('pseudobulk', 'gene_list'): 6}
+    unit = next(u for u in manifest['units'] if u['facet'] == 'sex' and u['cell_type'] == 'T1')
+    assert set(unit['calibration']) == {'geneset', 'ucell'}
+    ucell_plant = sex_t1[(sex_t1['source'] == 'ucell') & (sex_t1['module'] == 'PLANT')].iloc[0]
+    assert ucell_plant['estimate'] > 0 and ucell_plant['q_param'] < 0.05
 
 
 def test_results_are_reproducible_for_a_fixed_seed(tmp_path):
@@ -319,6 +335,7 @@ def test_dataset_without_counts_runs_variant_a_only(tmp_path):
     assert manifest['status'] == 'done' and manifest['no_counts'] is True
     table = pd.read_parquet(out_root / 'Syn2026' / 'Syn_mod.facet_module_tests.parquet')
     assert set(table['method']) == {'cell_mean'} and table['no_counts'].all()
+    assert set(table['source']) == {'geneset'}
     plant = table[(table['module'] == 'PLANT') & (table['cell_type'] == 'T1')].iloc[0]
     assert plant['q_param'] < 0.05
 

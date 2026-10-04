@@ -171,8 +171,8 @@ without a served raw-counts layer run variant A only and carry `no_counts` true.
 
 | Variant | `method` | Per-donor module score | Needs |
 | --- | --- | --- | --- |
-| A | `cell_mean` | mean over the donor's cells in the stratum of the per-cell score in `<stem>.scores.parquet` (source `geneset` = scanpy `score_genes` on the log-normalised default layer; `--sources geneset,ucell` also tests the UCell scores) | sidecar only |
-| B | `pseudobulk` | per (donor, stratum) summed raw counts, log2(CPM + 1) with library size = all-gene count sum; score = mean over the module genes minus mean over an expression-matched control set | counts layer and a `.grp` gene list in the genesetstore |
+| A | `cell_mean` | mean over the donor's cells in the stratum of the per-cell score in `<stem>.scores.parquet` (source `geneset` = scanpy `score_genes` on the log-normalised default layer; source `ucell` = UCell rank scores. Both are tested by default and each is its own BH family and its own `source` value in the output. The first run with `geneset` only left out the datasets that carry only UCell scores, e.g. L26 and the WA4 regional files) | sidecar only |
+| B | `pseudobulk` (`source` = `gene_list`) | per (donor, stratum) summed raw counts, log2(CPM + 1) with library size = all-gene count sum; score = mean over the module genes minus mean over an expression-matched control set | counts layer and a `.grp` gene list in the genesetstore |
 
 The sidecar is keyed `(cell_id, source, catalog, module, score)`; `cell_id`
 joins `__cells`, `catalog` is `<Study>/<Experiment>` of the genesetstore and
@@ -228,7 +228,7 @@ Units with `n_lt5` are descriptive only (estimates and SE kept, t / p / q / CI N
 Calibration check: per unit, Pearson and Spearman correlation of the A and B
 effect estimates (and of `std_effect` and t) across the modules scored by both,
 plus the fraction with the same sign, are written to the manifest
-(`units[].calibration`). A and B are not expected to agree in scale (scanpy score
+(`units[].calibration`, one record per A source, paired by (catalog, module)). A and B are not expected to agree in scale (scanpy score
 units versus log2 CPM units). Disagreement is expected where per-cell scores are
 driven by dropout structure that pseudobulk averages away, and where the
 background-matched control set differs (scanpy draws controls over the whole
@@ -269,8 +269,8 @@ gene tests: ROSMAP, SEA-AD, MADRC and Lu files share persons.
   push the scores of unrelated modules whose controls overlap it (seen in the
   synthetic test when null modules shared bins with the planted genes).
 * Strata from per-cell author labels are expression defined, as for the gene tests.
-* `ucell` scores (rank based) are available only as `--sources` option and were
-  not part of the first run.
+* `ucell` scores are rank based in [0, 1]; effect sizes of the two A sources are not
+  comparable in scale (use `std_effect`).
 
 ## Reproducibility
 

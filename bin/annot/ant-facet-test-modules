@@ -27,7 +27,8 @@ Two variants, reported side by side (column ``method``):
 
   cell_mean    (A) per-cell module scores of the sidecar (scanpy score_genes
                on log-normalised X, source ``geneset``; ``--sources`` can add
-               ``ucell``) averaged per (donor, stratum). Needs no counts, so
+               ``ucell``, the default tests both, each source is its own BH
+               family) averaged per (donor, stratum). Needs no counts, so
                it also runs on datasets without a raw-counts layer (rows
                carry ``no_counts`` true).
   pseudobulk   (B) per (donor, stratum) raw counts are summed, converted to
@@ -114,7 +115,8 @@ N_BINS = 25                         # scanpy score_genes defaults, as ant-score
 CTRL_SIZE = 50
 MIN_MODULE_GENES = 3                # as ant-score
 MIN_SCORE_COVERAGE = 0.9            # fraction of a sample's cells carrying a score
-DEFAULT_SOURCES = ('geneset',)
+DEFAULT_SOURCES = ('geneset', 'ucell')
+GENE_LIST_SOURCE = 'gene_list'      # source label of variant B (independent of the sidecar source)
 METHOD_A = 'cell_mean'
 METHOD_B = 'pseudobulk'
 MIN_RESIDUAL_DF = 2
@@ -441,8 +443,10 @@ def pseudobulk_dense(long_counts: pd.DataFrame, sample_ids: np.ndarray, n_genes:
 
 
 def load_module_genes(registry: GenesetRegistry, modules: pd.DataFrame, symbols: pd.DataFrame
-                      ) -> Tuple[Dict[ModuleKey, np.ndarray], Dict[ModuleKey, Dict[str, int]]]:
-    """Gene-column indices (position in the sorted gene_id list) of every sidecar module.
+                      ) -> Tuple[Dict[ModuleKey, np.ndarray], Dict[Tuple[str, str], Dict[str, int]]]:
+    """Gene-column indices (position in the sorted gene_id list) of every distinct
+    (catalog, module) of the sidecar (a module scored by several sources counts once; its
+    key carries the source label ``gene_list``).
 
     Genes are matched exactly on the symbol, then on the stored gene name.
     Modules without a ``.grp`` gene list or with fewer than MIN_MODULE_GENES
@@ -453,16 +457,16 @@ def load_module_genes(registry: GenesetRegistry, modules: pd.DataFrame, symbols:
         for position, name in enumerate(symbols[column].astype(str).to_numpy()):
             lookup[name] = position
     indices: Dict[ModuleKey, np.ndarray] = {}
-    counts: Dict[ModuleKey, Dict[str, int]] = {}
-    for source, catalog, module in modules.itertuples(index=False):
+    counts: Dict[Tuple[str, str], Dict[str, int]] = {}
+    for catalog, module in sorted(set(zip(modules['catalog'], modules['module']))):
         geneset = registry.genesets.get(f'{catalog}/{module}')
         if geneset is None or geneset.format != 'grp':
             continue
         requested = sorted(set(geneset.genes))
         found = sorted({lookup[g] for g in requested if g in lookup})
-        counts[(source, catalog, module)] = {'requested': len(requested), 'found': len(found)}
+        counts[(catalog, module)] = {'requested': len(requested), 'found': len(found)}
         if len(found) >= MIN_MODULE_GENES:
-            indices[(source, catalog, module)] = np.array(found, dtype=int)
+            indices[(GENE_LIST_SOURCE, catalog, module)] = np.array(found, dtype=int)
     return indices, counts
 
 
@@ -624,7 +628,7 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
             entry_report = catalog_report.setdefault(f'{source}::{catalog}', {
                 'n_modules_sidecar': 0, 'n_modules_with_gene_list_ge3': 0})
             entry_report['n_modules_sidecar'] += 1
-            entry_report['n_modules_with_gene_list_ge3'] += int((source, catalog, module) in module_genes)
+            entry_report['n_modules_with_gene_list_ge3'] += int((GENE_LIST_SOURCE, catalog, module) in module_genes)
         manifest['catalogs'] = catalog_report
 
         # ---- variant A: donor means of the per-cell scores
@@ -684,38 +688,50 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
                 composition_flag=bool(composition_p is not None and composition_p < aft.COMPOSITION_ALPHA),
                 n_cells_in_stratum=int(stratum_cells.sum()),
                 n_distinct_label_permutations=n_distinct_label_permutations(design['facet_value'].to_numpy()))
-            per_method: Dict[str, pd.DataFrame] = {}
-            # variant A
+            per_method: Dict[Tuple[str, str], pd.DataFrame] = {}      # (method, source) -> frame
+            # variant A: one BH family per sidecar source
             if len(mean_scores):
-                a_values = mean_scores.reindex(sample_ids)
+                a_values = mean_scores.reindex(sample_ids).reset_index(drop=True)
                 low_cov = coverage.reindex(sample_ids).min(axis=0)
-                try:
-                    a_frame = fit_modules(a_values.reset_index(drop=True), design, job['batch_used'],
-                                           bool(job['n_lt5']), unit_key, n_permutations)
+                for source in sorted(set(a_values.columns.get_level_values('source'))):
+                    sub = a_values.loc[:, a_values.columns.get_level_values('source') == source]
+                    try:
+                        a_frame = fit_modules(sub, design, job['batch_used'], bool(job['n_lt5']),
+                                              unit_key, n_permutations)
+                    except ValueError as exc:
+                        record[f'method_A_{source}_error'] = str(exc)
+                        continue
                     a_frame['min_score_coverage'] = low_cov.reindex(a_frame.index).to_numpy()
-                    per_method[METHOD_A] = a_frame
-                except ValueError as exc:
-                    record['method_A_error'] = str(exc)
+                    per_method[(METHOD_A, source)] = a_frame
             # variant B
             scores_b = background_scores.get(job['stratum'])
             if scores_b is not None and len(scores_b.columns):
                 try:
                     b_frame = fit_modules(scores_b.reindex(sample_ids).reset_index(drop=True), design,
-                                           job['batch_used'], bool(job['n_lt5']), unit_key, n_permutations)
+                                          job['batch_used'], bool(job['n_lt5']), unit_key, n_permutations)
                     b_frame['n_control_genes'] = [control_counts[job['stratum']].get(tuple(k)) for k in b_frame.index]
-                    per_method[METHOD_B] = b_frame
+                    per_method[(METHOD_B, GENE_LIST_SOURCE)] = b_frame
                 except ValueError as exc:
                     record['method_B_error'] = str(exc)
-            for method, frame in per_method.items():
-                n_sig_param = int((frame['q_param'] < Q_THRESHOLD).sum())
-                n_sig_perm = int((frame['q_perm'] < Q_THRESHOLD).sum())
-                record[f'n_modules_{method}'] = int(len(frame))
-                record[f'n_sig_q05_param_{method}'] = n_sig_param
-                record[f'n_sig_q05_perm_{method}'] = n_sig_perm
-            if METHOD_A in per_method and METHOD_B in per_method:
-                record['calibration'] = correlate_methods(per_method[METHOD_A], per_method[METHOD_B])
+            for (method, source), frame in per_method.items():
+                label = f'{method}_{source}'
+                record[f'n_modules_{label}'] = int(len(frame))
+                record[f'n_sig_q05_param_{label}'] = int((frame['q_param'] < Q_THRESHOLD).sum())
+                record[f'n_sig_q05_perm_{label}'] = int((frame['q_perm'] < Q_THRESHOLD).sum())
+            if (METHOD_B, GENE_LIST_SOURCE) in per_method:
+                b_by_module = per_method[(METHOD_B, GENE_LIST_SOURCE)].copy()
+                b_by_module.index = pd.MultiIndex.from_tuples([(k[1], k[2]) for k in b_by_module.index])
+                calibration = {}
+                for (method, source), frame in per_method.items():
+                    if method != METHOD_A:
+                        continue
+                    a_by_module = frame.copy()
+                    a_by_module.index = pd.MultiIndex.from_tuples([(k[1], k[2]) for k in a_by_module.index])
+                    calibration[source] = correlate_methods(a_by_module, b_by_module)
+                if calibration:
+                    record['calibration'] = calibration
             unit_records.append(record)
-            for method, frame in per_method.items():
+            for (method, _source), frame in per_method.items():
                 frame = frame.copy()
                 index = pd.MultiIndex.from_tuples(frame.index, names=['source', 'catalog', 'module'])
                 frame.index = index
@@ -754,20 +770,19 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
             table = pd.concat(frames, ignore_index=True)
             if 'n_control_genes' not in table:
                 table['n_control_genes'] = np.nan
-            table['n_genes_requested'] = [gene_counts.get((s, c, m), {}).get('requested')
-                                          for s, c, m in zip(table['source'], table['catalog'], table['module'])]
-            table['n_genes_found'] = [gene_counts.get((s, c, m), {}).get('found')
-                                      for s, c, m in zip(table['source'], table['catalog'], table['module'])]
+            table['n_genes_requested'] = [gene_counts.get((c, m), {}).get('requested')
+                                          for c, m in zip(table['catalog'], table['module'])]
+            table['n_genes_found'] = [gene_counts.get((c, m), {}).get('found')
+                                      for c, m in zip(table['catalog'], table['module'])]
             table['no_counts'] = bool(manifest['no_counts'])
             table['multi_tissue_donors'] = int((donor_table['n_tissues'] > 1).sum())
             table.insert(0, 'db_id', entry.db_id)
             table.insert(1, 'dataset', entry.stem)
             table.to_parquet(out_dir / f'{entry.stem}.facet_module_tests.parquet', index=False)
             manifest['n_result_rows'] = int(len(table))
-            for method in (METHOD_A, METHOD_B):
-                sub = table[table['method'] == method]
-                manifest[f'n_modules_scored_{method}'] = int(sub[['source', 'catalog', 'module']]
-                                                              .drop_duplicates().shape[0])
+            for (method, source), sub in table.groupby(['method', 'source']):
+                manifest[f'n_modules_scored_{method}_{source}'] = int(
+                    sub[['catalog', 'module']].drop_duplicates().shape[0])
         manifest['units'] = unit_records
         manifest['multi_tissue_donors'] = int((donor_table['n_tissues'] > 1).sum())
         manifest.update(status='done', runtime_seconds=round(time.time() - started, 1))
@@ -803,13 +818,13 @@ def summarize_results(out_root: Path, out_dir: Path, cohort_table: Optional[Path
     table['unit'] = table['db_id'] + '|' + table['celltype_source'] + '::' + table['cell_type']
     table['significant'] = (table['q_param'] < Q_THRESHOLD) & (table['q_perm'] < Q_THRESHOLD)
     table['sign'] = np.sign(table['estimate'])
-    units = (table.groupby(['facet', 'method', 'unit', 'db_id', 'cell_type', 'celltype_source'])
+    units = (table.groupby(['facet', 'method', 'source', 'unit', 'db_id', 'cell_type', 'celltype_source'])
              .agg(n_modules=('module', 'size'), n_donors=('n_donors', 'first'), n_lt5=('n_lt5', 'first'),
                   n_sig_param=('q_param', lambda s: int((s < Q_THRESHOLD).sum())),
                   n_sig_perm=('q_perm', lambda s: int((s < Q_THRESHOLD).sum())),
                   n_sig_both=('significant', 'sum')).reset_index())
     units.to_csv(out_dir / 'module_units.tsv', sep='\t', index=False)
-    per_facet = units[~units['n_lt5']].groupby(['facet', 'method']).agg(
+    per_facet = units[~units['n_lt5']].groupby(['facet', 'method', 'source']).agg(
         testable_units=('unit', 'nunique'), datasets=('db_id', 'nunique'),
         units_with_param_hit=('n_sig_param', lambda s: int((s > 0).sum())),
         units_with_perm_hit=('n_sig_perm', lambda s: int((s > 0).sum())),
@@ -837,10 +852,10 @@ def summarize_results(out_root: Path, out_dir: Path, cohort_table: Optional[Path
     for manifest_path in sorted(out_root.glob('*/*.facet_module_run_manifest.json')):
         manifest = json.loads(manifest_path.read_text())
         for unit in manifest.get('units', []):
-            if 'calibration' in unit:
+            for source, record in (unit.get('calibration') or {}).items():
                 calibration_rows.append({'db_id': manifest['db_id'], 'cell_type': unit['cell_type'],
                                          'celltype_source': unit['celltype_source'], 'facet': unit['facet'],
-                                         'n_lt5': unit.get('n_lt5'), **unit['calibration']})
+                                         'a_source': source, 'n_lt5': unit.get('n_lt5'), **record})
     if calibration_rows:
         pd.DataFrame(calibration_rows).to_csv(out_dir / 'module_calibration.tsv', sep='\t', index=False)
 
@@ -904,6 +919,8 @@ def cmd_run(args: argparse.Namespace) -> None:
             if previous.get('status') == 'done' and not (previous.get('no_counts') and now_has_counts):
                 print(f'[skip existing] {db_id}')
                 continue
+        if args.wait_for_convert:
+            wait_for_conversions()
         aft.wait_for_load(args.max_load)
         begin = time.time()
         try:
@@ -929,6 +946,29 @@ def cmd_run(args: argparse.Namespace) -> None:
         print(pd.DataFrame(summary_rows)['status'].value_counts().to_string())
 
 
+def convert_processes_running() -> List[int]:
+    """PIDs whose argv has an element that is the ant-convert script (matched on argv, not on
+    the whole command line, so a shell that merely mentions the name does not count)."""
+    pids: List[int] = []
+    for proc_dir in Path('/proc').iterdir():
+        if not proc_dir.name.isdigit():
+            continue
+        try:
+            argv = (proc_dir / 'cmdline').read_bytes().split(b'\0')
+        except OSError:
+            continue
+        if any(arg.endswith(b'bin/ingest/ant-convert') for arg in argv):
+            pids.append(int(proc_dir.name))
+    return pids
+
+
+def wait_for_conversions(poll_seconds: int = 120) -> None:
+    """Block while an ant-convert process runs (re-converted datasets must not be read mid-write)."""
+    while convert_processes_running():
+        print(f'  ant-convert running, sleeping {poll_seconds}s', file=sys.stderr, flush=True)
+        time.sleep(poll_seconds)
+
+
 def cmd_summarize(args: argparse.Namespace) -> None:
     store_root = Path(args.h5adstore_root).resolve()
     out_root = Path(args.out_root) if args.out_root else store_root / '_facet_tests'
@@ -950,7 +990,7 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument('--all', action='store_true')
     run.add_argument('--facets', default=','.join(aft.FACETS))
     run.add_argument('--sources', default=','.join(DEFAULT_SOURCES),
-                     help='sidecar sources to test (geneset = scanpy score_genes; ucell optional)')
+                     help='sidecar sources to test (geneset = scanpy score_genes, ucell = UCell); one BH family per source')
     run.add_argument('--geneset-store', default=None)
     run.add_argument('--permutations', type=int, default=N_PERMUTATIONS)
     run.add_argument('--threads', type=int, default=4)
@@ -959,6 +999,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument('--force', action='store_true')
     run.add_argument('--no-pseudobulk', action='store_true', help='variant A only')
     run.add_argument('--keep-work', action='store_true')
+    run.add_argument('--wait-for-convert', action='store_true',
+                     help='before each dataset, wait until no bin/ingest/ant-convert process is running')
     run.add_argument('--null-control-seed', type=int, default=None,
                      help='negative control: shuffle facet labels across donors before testing; '
                           'requires --out-root (refuses the default store output)')
