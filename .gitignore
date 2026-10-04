@@ -111,3 +111,4 @@ config/authelia/assets/logo.original.png
 /vark/
 .vark/
 tmp/curation/
+envs/facet-test-r/

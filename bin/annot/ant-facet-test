@@ -1,0 +1,1147 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "duckdb>=1.0.0",
+#   "pandas>=2.0.0",
+#   "numpy>=1.24.0",
+#   "scipy>=1.10.0",
+#   "pyarrow>=14.0",
+#   "pyyaml>=6.0",
+# ]
+# ///
+"""ant-facet-test: donor-level facet tests by pseudobulk limma-voom (v1, exploratory).
+
+What it does
+------------
+For every eligible dataset (human, primary, not xenograft / in vitro / bulk,
+a raw-counts layer, at least 6 donors) and every cell type stratum, tests
+four donor-level facets for differential gene expression:
+
+  * sex           ant_sex            male vs female (reference female)
+  * disease       ant_disease        AD vs control (reference control); every
+                                     other value is dropped. PROVISIONAL:
+                                     the disease vocabulary decisions
+                                     (audit L17 to L21) are still open.
+  * apoe_carrier  ant_apoe_carrier   e4 carrier vs non-carrier (reference
+                                     non-carrier); derived from ant_apoe when
+                                     the carrier column is absent
+  * braak         ant_braak          numeric linear trend per Braak unit
+
+Pipeline per dataset (see doc/DESIGN_facet_testing.md for the rationale)::
+
+  .md api config --build_obs_view_sql--> TEMP obs views on a read-only
+  attach of the .duckdb (the CURRENT mapping, not the stored views)
+  -> donor table (one value per facet per donor; conflicting donors dropped)
+  -> pseudobulk counts per (donor, cell type) from the counts by_gene
+     parquet, summed in DuckDB; donors with several samples are collapsed
+     by summing; (donor, cell type) groups with < 10 cells are dropped
+  -> bin/annot/facet_test_limma.R: filterByExpr, TMM, voom, lmFit, eBayes,
+     per (dataset, cell type, facet), BH within that triple
+  -> <h5adstore>/_facet_tests/<group>/<file>.facet_tests.parquet,
+     <file>.facet_composition.parquet and <file>.facet_run_manifest.json
+
+Inputs: the h5adstore (read only: .md, .h5ad.mus, .duckdb, counts sidecar).
+Outputs: only under <h5adstore>/_facet_tests/. Nothing else in data/ is
+written; .h5ad / .duckdb / .md files are never opened for writing.
+
+Usage::
+
+  ant-facet-test inventory [--out tsv]
+  ant-facet-test run --db-id K22/AST [--facets sex,disease] [--out-root DIR]
+  ant-facet-test run --all [--facets ...] [--max-load 12]
+
+Needs an R with limma and edgeR (``--rscript`` or $ANT_FACET_RSCRIPT, default
+envs/facet-test-r/bin/Rscript). The anthive-data env has neither package.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import hashlib
+import json
+import math
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+import duckdb
+import numpy as np
+import pandas as pd
+
+script_dir = Path(__file__).parent.resolve()
+lib_dir = script_dir.parent.parent / 'lib'
+sys.path.insert(0, str(lib_dir))
+
+from anthive_db import build_obs_view_sql  # type: ignore  # noqa: E402
+from h5adstore import H5adEntry, iter_h5adstore  # type: ignore  # noqa: E402
+from metadata import get_api_config, parse_md_file  # type: ignore  # noqa: E402
+import mus  # type: ignore  # noqa: E402
+
+TOOL_VERSION = 'ant-facet-test/1.0'
+SEED = 20261004
+
+# Parameters (all recorded in the run manifest).
+MIN_CELLS_PER_SAMPLE = 10          # donor x cell type
+MIN_DONORS_DATASET = 6
+MIN_DONORS_PER_LEVEL = 3           # levels below are dropped
+N_LT5_THRESHOLD = 5                # any level below: descriptive only
+NUMERIC_MIN_DONORS_FOR_P = 10      # braak: two halves of >= 5 donors
+MIN_DONORS_FOR_AGE_PMI = 15
+MIN_COVARIATE_COVERAGE = 0.9
+BRAAK_MIN_DONORS = 6
+BRAAK_MIN_DISTINCT = 3
+COMPOSITION_ALPHA = 0.05
+MAX_STRATUM_LEVELS = 40            # per-cell stratifier sanity cap
+
+FACETS = ('sex', 'disease', 'apoe_carrier', 'braak')
+FACET_COLUMN = {
+    'sex': 'ant_sex', 'disease': 'ant_disease',
+    'apoe_carrier': 'ant_apoe_carrier', 'braak': 'ant_braak',
+}
+CONTRAST = {
+    'sex': ('f', 'm'),                 # (reference, tested)
+    'disease': ('control', 'AD'),
+    'apoe_carrier': ('noncarrier', 'e4_carrier'),
+    'braak': (None, None),
+}
+
+# Datasets whose .h5ad.mus lacks `organism` but which are human by their own
+# group description (Wachter2024: 32 human donors, BioProject PRJNA916657).
+# A missing organism field is a metadata gap, not evidence of a non-human sample.
+ASSUME_HUMAN_DB_IDS = {'WA4/MEC', 'WA4/MIT', 'WA4/MPF', 'WA4/MV1', 'WA4/MV2'}
+
+COUNTS_LAYER_NAMES = ('counts', 'UMIs', 'raw', 'raw_counts')
+EXCLUDED_SYSTEMS = {'xenograft', 'chimera', 'in_vitro_2d', 'organoid', 'bulk_tissue'}
+BATCH_NAME_RE = re.compile(r'(?i)(batch|pool|library|lane|plate|chip|chemistry|sequencing_run|run_id)')
+CELLTYPE_CANDIDATE_RE = re.compile(
+    r'(?i)^(author_)?(cell_?type|celltype|cell_class|class|subclass|annotation|major_?cell_?type)$')
+
+PROVISIONAL_FLAGS = {'disease': True}
+
+def _default_rscript() -> str:
+    """envs/facet-test-r of this checkout, or of the main checkout when run from a worktree."""
+    candidates = [script_dir.parent.parent / 'envs' / 'facet-test-r' / 'bin' / 'Rscript']
+    try:
+        common = subprocess.run(['git', '-C', str(script_dir), 'rev-parse', '--git-common-dir'],
+                                capture_output=True, text=True, check=True).stdout.strip()
+        candidates.append((script_dir / common).resolve().parent / 'envs' / 'facet-test-r' / 'bin' / 'Rscript')
+    except Exception:
+        pass
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return str(candidates[0])
+
+
+DEFAULT_RSCRIPT = _default_rscript()
+R_SCRIPT = script_dir / 'facet_test_limma.R'
+
+
+# --------------------------------------------------------------------------
+# Value normalisation (pure functions; unit tested)
+# --------------------------------------------------------------------------
+
+def normalize_sex(value: Any) -> Optional[str]:
+    """Map an ant_sex value to 'f' / 'm'; everything else is None."""
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return None
+    text = str(value).strip().lower()
+    if text in ('f', 'female', 'woman', 'xx'):
+        return 'f'
+    if text in ('m', 'male', 'man', 'xy'):
+        return 'm'
+    return None
+
+
+_AD_TOKENS = {'ad', "alzheimer's disease", 'alzheimer disease', 'alzheimers disease',
+              'alzheimer', 'alzheimers'}
+_CONTROL_TOKENS = {'control', 'ctrl', 'normal', 'healthy', 'healthy control', 'non-ad',
+                   'not ad', 'nci_control'}
+
+
+def normalize_disease(value: Any) -> Optional[str]:
+    """Map an ant_disease value to 'AD' / 'control'; every other value is None.
+
+    Compound labels (AD_DLBD, AD_vascular, ...) are deliberately dropped:
+    audit decision L21 is open and v1 tests plain AD against control only.
+    """
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return None
+    text = str(value).strip().lower()
+    if text in _AD_TOKENS:
+        return 'AD'
+    if text in _CONTROL_TOKENS:
+        return 'control'
+    return None
+
+
+def derive_apoe_carrier_from_genotype(value: Any) -> Optional[str]:
+    """e4 carrier / non-carrier from an APOE genotype string (33, E3/E4, e4e4...)."""
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return None
+    text = str(value).strip().lower()
+    if text in ('', 'nan', 'na', 'n/a', 'unknown', 'unk', 'none'):
+        return None
+    digits = re.findall(r'[234]', text)
+    if len(digits) == 2:
+        return 'e4_carrier' if '4' in digits else 'noncarrier'
+    return None
+
+
+def normalize_apoe_carrier(value: Any) -> Optional[str]:
+    """Map an ant_apoe_carrier value to 'e4_carrier' / 'noncarrier' / None."""
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return None
+    text = str(value).strip().lower()
+    if text in ('carrier', 'e4_carrier', 'e4 carrier', 'apoe4 carrier', 'apoe4+', 'e4+',
+                'yes', 'true', '1', '1.0', 'positive', 'apoe4_carrier', 'e4'):
+        return 'e4_carrier'
+    if text in ('noncarrier', 'non-carrier', 'non_carrier', 'e4_noncarrier', 'non carrier',
+                'no', 'false', '0', '0.0', 'negative', 'apoe4_noncarrier', 'non-e4',
+                'e4_non_carrier', 'e4 non-carrier', 'apoe4-', 'e4-', 'non-apoe4'):
+        return 'noncarrier'
+    return None
+
+
+# --------------------------------------------------------------------------
+# Eligibility
+# --------------------------------------------------------------------------
+
+def _as_text_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(v).strip().lower() for v in value]
+    return [str(value).strip().lower()]
+
+
+def counts_layer_for(entry: H5adEntry, md_yaml: Dict[str, Any]) -> Optional[Tuple[str, Path]]:
+    """Return (layer name, by_gene parquet path) of the first served raw-counts layer."""
+    stats = md_yaml.get('layer_stats') or {}
+    for layer in COUNTS_LAYER_NAMES:
+        sidecar = entry.duckdb_path.parent / f'{entry.stem}.layer.{layer}.by_gene.parquet'
+        if not sidecar.exists():
+            continue
+        layer_stat = stats.get(layer) or {}
+        min_nonzero = layer_stat.get('min_nonzero')
+        # Raw UMI layers have min nonzero value of exactly 1.
+        if min_nonzero is not None and abs(float(min_nonzero) - 1.0) > 1e-9:
+            continue
+        return layer, sidecar
+    return None
+
+
+def dataset_eligibility(entry: H5adEntry, md_yaml: Dict[str, Any],
+                        annotation: Dict[str, Any], api_config: Dict[str, Any]
+                        ) -> Tuple[bool, str]:
+    """Metadata-level scope gate (before any data are read).
+
+    Returns (eligible, reason). Reason is the first failing criterion.
+    """
+    if entry.md_path.with_suffix('.inactive').exists() or \
+            (entry.md_path.parent / f'{entry.stem}.inactive').exists():
+        return False, 'inactive'
+    if md_yaml.get('is_secondary') is True:
+        return False, 'secondary (is_secondary true)'
+    organism = _as_text_list(annotation.get('organism'))
+    if not organism and entry.db_id in ASSUME_HUMAN_DB_IDS:
+        organism = ['human']
+    if organism != ['human']:
+        return False, f'organism not human ({",".join(organism) or "missing"})'
+    systems = set(_as_text_list(annotation.get('experimental_system')))
+    excluded = systems & EXCLUDED_SYSTEMS
+    if excluded:
+        return False, f'experimental_system {sorted(excluded)[0]}'
+    published = set(api_config.get('obs_rename', {}).values()) | \
+        set((api_config.get('obs_derive') or {}).keys()) | \
+        set((api_config.get('obs_constant') or {}).keys())
+    if 'ant_host_sex' in published:
+        return False, 'host sex facet present (xenograft / host animal)'
+    if not entry.duckdb_path.exists():
+        return False, 'no .duckdb'
+    if counts_layer_for(entry, md_yaml) is None:
+        return False, 'no raw counts layer served'
+    return True, 'ok'
+
+
+# --------------------------------------------------------------------------
+# Opening a dataset with the CURRENT .md mapping
+# --------------------------------------------------------------------------
+
+def open_dataset(entry: H5adEntry, api_config: Dict[str, Any], threads: int = 4,
+                 memory_limit_gb: int = 24, temp_dir: Optional[Path] = None
+                 ) -> duckdb.DuckDBPyConnection:
+    """In-memory connection with the .duckdb attached read-only as ``ds`` and
+    TEMP ``obscat`` / ``obsnum`` views rebuilt from the current .md api config.
+    """
+    conn = duckdb.connect(':memory:', config={'threads': threads,
+                                              'memory_limit': f'{memory_limit_gb}GB'})
+    if temp_dir is not None:
+        conn.execute(f"SET temp_directory='{temp_dir}'")
+    conn.execute(f"ATTACH '{entry.duckdb_path}' AS ds (READ_ONLY)")
+    conn.execute('USE ds')
+    columns: Dict[str, List[str]] = {}
+    for underscore in ('__obscat', '__obsnum'):
+        columns[underscore] = [row[0] for row in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_catalog='ds' AND table_name = ? ORDER BY ordinal_position",
+            [underscore]).fetchall()]
+    for view_name, underscore, sibling in (('obscat', '__obscat', '__obsnum'),
+                                           ('obsnum', '__obsnum', '__obscat')):
+        if not columns[underscore]:
+            continue
+        sql = build_obs_view_sql(view_name, underscore, columns[underscore], api_config,
+                                 sibling_underscore_table=sibling,
+                                 sibling_columns=columns[sibling])
+        assert sql.startswith('CREATE VIEW')
+        conn.execute('CREATE OR REPLACE TEMP VIEW' + sql[len('CREATE VIEW'):])
+    return conn
+
+
+def view_columns(conn: duckdb.DuckDBPyConnection, view_name: str) -> Dict[str, str]:
+    """Column name -> type of a TEMP obs view."""
+    if not _has_view(conn, view_name):
+        return {}
+    rows = conn.execute(f'DESCRIBE {view_name}').fetchall()
+    return {row[0]: row[1] for row in rows}
+
+
+def cell_table(conn: duckdb.DuckDBPyConnection, wanted: Iterable[str]) -> pd.DataFrame:
+    """cell_id plus the wanted obs columns (from either TEMP view) as strings/numbers.
+
+    Columns absent from both views are skipped. Text columns come back as
+    object, numeric as float.
+    """
+    cat_columns = view_columns(conn, 'obscat') if _has_view(conn, 'obscat') else {}
+    num_columns = view_columns(conn, 'obsnum') if _has_view(conn, 'obsnum') else {}
+    pieces_cat = [c for c in wanted if c in cat_columns]
+    pieces_num = [c for c in wanted if c in num_columns and c not in cat_columns]
+    select_cat = ', '.join(f'o."{c}"' for c in pieces_cat) or 'NULL AS _nocat'
+    frame = conn.execute(
+        f'SELECT c.cell_id, {select_cat} FROM __cells c '
+        f'JOIN obscat o ON o.cell_name = c.cell_name ORDER BY c.cell_id'
+        if pieces_cat else 'SELECT cell_id FROM __cells ORDER BY cell_id').df()
+    if pieces_num:
+        select_num = ', '.join(f'o."{c}"' for c in pieces_num)
+        numeric = conn.execute(
+            f'SELECT c.cell_id, {select_num} FROM __cells c '
+            f'JOIN obsnum o ON o.cell_name = c.cell_name ORDER BY c.cell_id').df()
+        frame = frame.merge(numeric, on='cell_id', how='left')
+    return frame
+
+
+def _has_view(conn: duckdb.DuckDBPyConnection, name: str) -> bool:
+    return bool(conn.execute(
+        "SELECT count(*) FROM duckdb_views() WHERE view_name = ?", [name]).fetchone()[0]) or \
+        bool(conn.execute(
+            "SELECT count(*) FROM information_schema.tables WHERE table_name = ?",
+            [name]).fetchone()[0])
+
+
+# --------------------------------------------------------------------------
+# Donor table
+# --------------------------------------------------------------------------
+
+def _single_value(series: pd.Series) -> Tuple[Any, bool]:
+    """(value, conflicting). value None when all NULL or conflicting."""
+    unique = series.dropna().unique()
+    if len(unique) == 0:
+        return None, False
+    if len(unique) == 1:
+        return unique[0], False
+    return None, True
+
+
+def build_donor_table(cells: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, int]]:
+    """One row per donor with normalised facet values and covariates.
+
+    Args:
+        cells: per-cell frame with ant_donor and any of ant_sex, ant_disease,
+            ant_apoe_carrier, ant_apoe, ant_braak, ant_age, ant_pmi, batch.
+
+    Returns:
+        (donor table, conflict counts per column). A donor whose cells carry
+        more than one distinct value for a facet gets NULL for it and is
+        counted as conflicting (never silently picked).
+    """
+    cells = cells[cells['ant_donor'].notna()].copy()
+    cells['ant_donor'] = cells['ant_donor'].astype(str)
+    conflicts: Dict[str, int] = {}
+    records: List[Dict[str, Any]] = []
+    grouped = cells.groupby('ant_donor', sort=True)
+    for donor, frame in grouped:
+        record: Dict[str, Any] = {'donor': donor, 'n_cells_total': len(frame)}
+        for facet_name, column, normaliser in (
+                ('sex', 'ant_sex', normalize_sex),
+                ('disease', 'ant_disease', normalize_disease)):
+            if column in frame:
+                raw = frame[column].map(lambda v: normaliser(v))
+                value, conflict = _single_value(raw)
+                record[facet_name] = value
+                if conflict:
+                    conflicts[facet_name] = conflicts.get(facet_name, 0) + 1
+            else:
+                record[facet_name] = None
+        # apoe carrier: carrier column first, derive from genotype otherwise
+        carrier_series = None
+        if 'ant_apoe_carrier' in frame and frame['ant_apoe_carrier'].notna().any():
+            carrier_series = frame['ant_apoe_carrier'].map(normalize_apoe_carrier)
+        elif 'ant_apoe' in frame:
+            carrier_series = frame['ant_apoe'].map(derive_apoe_carrier_from_genotype)
+        if carrier_series is not None:
+            value, conflict = _single_value(carrier_series)
+            record['apoe_carrier'] = value
+            if conflict:
+                conflicts['apoe_carrier'] = conflicts.get('apoe_carrier', 0) + 1
+        else:
+            record['apoe_carrier'] = None
+        for facet_name, column in (('braak', 'ant_braak'), ('age', 'ant_age'), ('pmi', 'ant_pmi')):
+            if column in frame:
+                numeric = pd.to_numeric(frame[column], errors='coerce')
+                unique = numeric.dropna().unique()
+                if len(unique) == 1:
+                    record[facet_name] = float(unique[0])
+                elif len(unique) == 0:
+                    record[facet_name] = np.nan
+                else:
+                    record[facet_name] = np.nan
+                    if facet_name == 'braak':
+                        conflicts['braak'] = conflicts.get('braak', 0) + 1
+                    else:
+                        # age / pmi may legitimately vary per sample: use the mean
+                        record[facet_name] = float(np.nanmean(unique))
+            else:
+                record[facet_name] = np.nan
+        if 'batch' in frame:
+            unique = frame['batch'].dropna().unique()
+            record['batch'] = str(unique[0]) if len(unique) == 1 else None
+        else:
+            record['batch'] = None
+        if 'ant_tissue' in frame:
+            record['n_tissues'] = int(frame['ant_tissue'].dropna().nunique())
+        else:
+            record['n_tissues'] = 0
+        records.append(record)
+    return pd.DataFrame.from_records(records), conflicts
+
+
+# --------------------------------------------------------------------------
+# Cell-type stratifier
+# --------------------------------------------------------------------------
+
+def choose_strata(cells: pd.DataFrame, categorical_columns: Dict[str, str]
+                  ) -> Tuple[pd.DataFrame, str]:
+    """Cell type strata as a long (cell position, source, label) membership table.
+
+    * ant_cell_type varies per cell: that column only (source 'ant_cell_type').
+    * ant_cell_type is a constant (a dataset descriptor, e.g. "astrocyte"):
+      two stratifier sets, because the constant can be wrong for a mixed file
+      (audit L32) and per-cell subtypes can be expression-defined states:
+      (a) one all-cells stratum labelled with the constant, source
+      'constant_all_cells'; (b) when the dataset has a per-cell cell type
+      column (ant_author_cell_type first, then an author column named like
+      cell_type / class / annotation, 2..MAX_STRATUM_LEVELS levels) one
+      stratum per level, source = that column name.
+    * ant_cell_type absent: only (b), else a single 'all' stratum.
+
+    Returns (membership frame with columns pos, source, label; note).
+    """
+    positions = np.arange(len(cells))
+    pieces: List[pd.DataFrame] = []
+    notes: List[str] = []
+    varying = 'ant_cell_type' in cells and cells['ant_cell_type'].nunique(dropna=True) > 1
+    if varying:
+        labels = cells['ant_cell_type']
+        pieces.append(pd.DataFrame({'pos': positions, 'source': 'ant_cell_type',
+                                    'label': labels.astype('object').to_numpy()}))
+        notes.append('ant_cell_type per cell')
+    else:
+        constant = None
+        if 'ant_cell_type' in cells and cells['ant_cell_type'].nunique(dropna=True) == 1:
+            constant = str(cells['ant_cell_type'].dropna().iloc[0])
+        if constant is not None:
+            pieces.append(pd.DataFrame({'pos': positions, 'source': 'constant_all_cells',
+                                        'label': constant}))
+            notes.append(f'ant_cell_type constant ({constant})')
+        candidates = ['ant_author_cell_type'] + [
+            c for c in categorical_columns
+            if c not in ('ant_author_cell_type', 'ant_cell_type') and not c.startswith('ant_')
+            and CELLTYPE_CANDIDATE_RE.match(c)]
+        for column in candidates:
+            if column in cells:
+                levels = cells[column].nunique(dropna=True)
+                if 2 <= levels <= MAX_STRATUM_LEVELS:
+                    pieces.append(pd.DataFrame({'pos': positions, 'source': column,
+                                                'label': cells[column].astype('object').to_numpy()}))
+                    notes.append(f'per-cell column {column} ({levels} levels)')
+                    break
+        if not pieces:
+            pieces.append(pd.DataFrame({'pos': positions, 'source': 'none', 'label': 'all'}))
+            notes.append('single stratum (no cell type information)')
+    membership = pd.concat(pieces, ignore_index=True)
+    membership = membership[membership['label'].notna()].copy()
+    membership['label'] = membership['label'].astype(str)
+    return membership, '; '.join(notes)
+
+
+def find_batch_column(conn: duckdb.DuckDBPyConnection, donors_cells: pd.DataFrame) -> Optional[str]:
+    """First visible non-ant obs column that looks like a batch key and is
+    constant within donor (so it can enter a donor-level model)."""
+    columns = view_columns(conn, 'obscat') if _has_view(conn, 'obscat') else {}
+    for column in columns:
+        if column.startswith('ant_') or not BATCH_NAME_RE.search(column):
+            continue
+        if column not in donors_cells:
+            continue
+        per_donor = donors_cells.groupby('ant_donor')[column].nunique(dropna=True)
+        levels = donors_cells[column].nunique(dropna=True)
+        if (per_donor <= 1).all() and levels >= 2:
+            return column
+    return None
+
+
+# --------------------------------------------------------------------------
+# Job planning (pure pandas; unit tested)
+# --------------------------------------------------------------------------
+
+def _is_confounded(facet_values: np.ndarray, batch_values: pd.Series) -> bool:
+    """True when the facet is a function of batch (lies in the batch span)."""
+    batch_dummies = pd.get_dummies(batch_values.astype(str)).to_numpy(dtype=float)
+    if batch_dummies.shape[1] < 1:
+        return False
+    rank_batch = np.linalg.matrix_rank(batch_dummies)
+    stacked = np.column_stack([batch_dummies, np.asarray(facet_values, dtype=float)])
+    return int(np.linalg.matrix_rank(stacked)) == int(rank_batch)
+
+
+def plan_job(donor_table: pd.DataFrame, facet: str, stratum_donors: Iterable[str]
+             ) -> Dict[str, Any]:
+    """Decide design, donors and flags for one (cell type, facet) unit.
+
+    Args:
+        donor_table: build_donor_table output.
+        facet: one of FACETS.
+        stratum_donors: donors that have a pseudobulk sample for this cell type
+            (>= MIN_CELLS_PER_SAMPLE cells).
+
+    Returns:
+        dict with ``status`` ('ok' or a skip reason), ``design`` (DataFrame
+        indexed by donor with columns facet_value, cov_sex, cov_age, cov_pmi,
+        batch) and the reporting fields.
+    """
+    donors = donor_table[donor_table['donor'].isin(set(stratum_donors))].copy()
+    out: Dict[str, Any] = {'facet': facet, 'n_donors_with_sample': len(donors)}
+    if facet == 'braak':
+        valid = donors[donors['braak'].notna()].copy()
+        out['n_donors_facet'] = len(valid)
+        distinct = valid['braak'].nunique()
+        if len(valid) < BRAAK_MIN_DONORS or distinct < BRAAK_MIN_DISTINCT:
+            out.update(status=f'braak: {len(valid)} donors / {distinct} distinct values '
+                              f'(need {BRAAK_MIN_DONORS} / {BRAAK_MIN_DISTINCT})')
+            return out
+        valid['facet_value'] = valid['braak'].astype(float)
+        out['level_counts'] = {'n_donors': int(len(valid)),
+                               'braak_min': float(valid['braak'].min()),
+                               'braak_max': float(valid['braak'].max()),
+                               'n_distinct': int(distinct)}
+        out['n_lt5'] = len(valid) < NUMERIC_MIN_DONORS_FOR_P
+        valid_donors = valid
+    else:
+        reference, tested = CONTRAST[facet]
+        valid = donors[donors[facet].isin([reference, tested])].copy()
+        counts = valid[facet].value_counts().to_dict()
+        out['n_donors_facet'] = len(valid)
+        kept_levels = [lv for lv in (reference, tested) if counts.get(lv, 0) >= MIN_DONORS_PER_LEVEL]
+        out['level_counts'] = {reference: int(counts.get(reference, 0)),
+                               tested: int(counts.get(tested, 0))}
+        if len(kept_levels) < 2:
+            out.update(status=f'level with < {MIN_DONORS_PER_LEVEL} donors '
+                              f'({reference}={counts.get(reference, 0)}, {tested}={counts.get(tested, 0)})')
+            return out
+        valid['facet_value'] = (valid[facet] == tested).astype(float)
+        out['n_lt5'] = min(counts.get(reference, 0), counts.get(tested, 0)) < N_LT5_THRESHOLD
+        valid_donors = valid
+
+    design = valid_donors.copy()
+    covariates: List[str] = []
+    omitted: List[str] = []
+    total = len(design)
+
+    # sex covariate (not for the sex facet)
+    design['cov_sex'] = np.nan
+    if facet != 'sex':
+        sex_known = design['sex'].isin(['f', 'm'])
+        if sex_known.mean() >= MIN_COVARIATE_COVERAGE and design.loc[sex_known, 'sex'].nunique() == 2:
+            design = design[sex_known].copy()
+            design['cov_sex'] = (design['sex'] == 'm').astype(float)
+            covariates.append('sex')
+        else:
+            omitted.append('sex')
+    # age, pmi
+    for name in ('age', 'pmi'):
+        design[f'cov_{name}'] = np.nan
+        if total < MIN_DONORS_FOR_AGE_PMI:
+            continue
+        coverage = design[name].notna().mean() if len(design) else 0.0
+        if coverage >= MIN_COVARIATE_COVERAGE and design[name].nunique() > 1:
+            design = design[design[name].notna()].copy()
+            sd = design[name].std(ddof=0)
+            design[f'cov_{name}'] = (design[name] - design[name].mean()) / (sd if sd > 0 else 1.0)
+            covariates.append(name)
+        elif design[name].notna().any():
+            omitted.append(name)
+
+    # re-check the facet after covariate-driven donor loss
+    n_dropped_covariate = total - len(design)
+    if facet == 'braak':
+        if len(design) < BRAAK_MIN_DONORS or design['facet_value'].nunique() < BRAAK_MIN_DISTINCT:
+            out.update(status='braak: too few donors after covariate completeness filter')
+            return out
+        out['n_lt5'] = len(design) < NUMERIC_MIN_DONORS_FOR_P
+        out['level_counts'] = {'n_donors': int(len(design)),
+                               'braak_min': float(design['braak'].min()),
+                               'braak_max': float(design['braak'].max()),
+                               'n_distinct': int(design['braak'].nunique())}
+    else:
+        counts_after = design['facet_value'].value_counts().to_dict()
+        if counts_after.get(0.0, 0) < MIN_DONORS_PER_LEVEL or counts_after.get(1.0, 0) < MIN_DONORS_PER_LEVEL:
+            out.update(status='level with < 3 donors after covariate completeness filter')
+            return out
+        reference, tested = CONTRAST[facet]
+        out['level_counts'] = {reference: int(counts_after.get(0.0, 0)),
+                               tested: int(counts_after.get(1.0, 0))}
+        out['n_lt5'] = min(counts_after.get(0.0, 0), counts_after.get(1.0, 0)) < N_LT5_THRESHOLD
+
+    # batch: only when donor-level, >= 2 levels, not confounded with the facet
+    out['batch_used'] = False
+    out['batch_confounded'] = False
+    design['batch_value'] = design['batch'] if 'batch' in design else None
+    batch_known = design['batch_value'].notna()
+    if batch_known.all() and design['batch_value'].nunique() >= 2:
+        n_batches = design['batch_value'].nunique()
+        if _is_confounded(design['facet_value'].to_numpy(), design['batch_value']):
+            out['batch_confounded'] = True
+            design['batch_value'] = None
+        elif n_batches <= max(2, len(design) // 4):
+            out['batch_used'] = True
+            covariates.append('batch')
+        else:
+            design['batch_value'] = None
+            omitted.append('batch(too many levels)')
+    else:
+        design['batch_value'] = None
+
+    out.update(status='ok', design=design, covariates=covariates, covariates_omitted=omitted,
+               n_donors_analysed=len(design), n_donors_dropped_covariate=n_dropped_covariate)
+    return out
+
+
+# --------------------------------------------------------------------------
+# Pseudobulk
+# --------------------------------------------------------------------------
+
+def pseudobulk(conn: duckdb.DuckDBPyConnection, counts_parquet: Path,
+               sample_map: pd.DataFrame) -> pd.DataFrame:
+    """Sum raw counts per sample.
+
+    Args:
+        conn: DuckDB connection.
+        counts_parquet: <stem>.layer.counts.by_gene.parquet (cell_id, gene_id, value).
+        sample_map: columns cell_id, sample_idx (one row per cell kept).
+
+    Returns:
+        long frame (sample_idx, gene_id, count). Donors that own several
+        samples/libraries are collapsed by construction: the group key is the
+        sample_idx (donor x cell type), not the library.
+    """
+    conn.register('sample_map_df', sample_map[['cell_id', 'sample_idx']])
+    conn.execute('CREATE OR REPLACE TEMP TABLE sample_map AS SELECT * FROM sample_map_df')
+    conn.unregister('sample_map_df')
+    quoted = str(counts_parquet).replace("'", "''")
+    frame = conn.execute(
+        f"SELECT m.sample_idx, p.gene_id, SUM(p.value) AS count "
+        f"FROM read_parquet('{quoted}') p JOIN sample_map m ON p.cell_id = m.cell_id "
+        f"GROUP BY m.sample_idx, p.gene_id").df()
+    conn.execute('DROP TABLE sample_map')
+    return frame
+
+
+def gene_symbols(conn: duckdb.DuckDBPyConnection) -> pd.DataFrame:
+    """gene_id, gene_id_name (the __genes name), symbol (feature_name when present)."""
+    has_varcat = conn.execute(
+        "SELECT count(*) FROM information_schema.columns WHERE table_catalog='ds' "
+        "AND table_name='__varcat' AND column_name='feature_name'").fetchone()[0] > 0
+    genes = conn.execute('SELECT gene_id, gene_name FROM __genes ORDER BY gene_id').df()
+    if has_varcat:
+        feature = conn.execute('SELECT gene_id, feature_name FROM __varcat').df()
+        genes = genes.merge(feature, on='gene_id', how='left')
+        looks_ensembl = genes['gene_name'].astype(str).str.match(r'^ENS[A-Z]*G\d+')
+        genes['symbol'] = np.where(looks_ensembl & genes['feature_name'].notna(),
+                                   genes['feature_name'], genes['gene_name'])
+        genes = genes.drop(columns=['feature_name'])
+    else:
+        genes['symbol'] = genes['gene_name']
+    return genes
+
+
+# --------------------------------------------------------------------------
+# Composition check (donor-level proportion vs facet)
+# --------------------------------------------------------------------------
+
+def composition_test(proportions: pd.Series, design: pd.DataFrame, facet: str
+                     ) -> Optional[float]:
+    """p-value of the donor-level proportion of this cell type against the facet.
+
+    Two-level facets: Mann-Whitney U. Braak: Spearman. Exploratory, uncorrected.
+    """
+    from scipy import stats
+    joined = design[['facet_value']].join(proportions.rename('proportion'), how='inner').dropna()
+    if len(joined) < 4:
+        return None
+    if facet == 'braak':
+        if joined['facet_value'].nunique() < 2 or joined['proportion'].nunique() < 2:
+            return None
+        return float(stats.spearmanr(joined['facet_value'], joined['proportion']).pvalue)
+    group_a = joined.loc[joined['facet_value'] == 0.0, 'proportion']
+    group_b = joined.loc[joined['facet_value'] == 1.0, 'proportion']
+    if len(group_a) < 2 or len(group_b) < 2:
+        return None
+    return float(stats.mannwhitneyu(group_a, group_b, alternative='two-sided').pvalue)
+
+
+# --------------------------------------------------------------------------
+# Running one dataset
+# --------------------------------------------------------------------------
+
+def git_head(path: Path) -> Optional[str]:
+    try:
+        return subprocess.run(['git', '-C', str(path), 'rev-parse', 'HEAD'], capture_output=True,
+                              text=True, check=True).stdout.strip()
+    except Exception:
+        return None
+
+
+def r_versions(rscript: str) -> Dict[str, str]:
+    code = ('cat(R.version.string, as.character(packageVersion("limma")), '
+            'as.character(packageVersion("edgeR")), sep="|")')
+    try:
+        raw = subprocess.run([rscript, '-e', code], capture_output=True, text=True,
+                             check=True).stdout.strip().split('|')
+        return {'R': raw[0], 'limma': raw[1], 'edgeR': raw[2]}
+    except Exception as exc:  # pragma: no cover
+        return {'error': str(exc)}
+
+
+def run_r(rscript: str, work_dir: Path) -> None:
+    env = dict(os.environ, OPENBLAS_NUM_THREADS='2', OMP_NUM_THREADS='1',
+               MKL_NUM_THREADS='1')
+    command = [rscript, str(R_SCRIPT), str(work_dir), str(SEED)]
+    result = subprocess.run(command, capture_output=True, text=True, env=env)
+    if result.returncode != 0:
+        raise RuntimeError(f'R failed ({result.returncode}):\n{result.stdout[-2000:]}\n{result.stderr[-4000:]}')
+
+
+def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: List[str],
+                    rscript: str, threads: int = 4, memory_limit_gb: int = 24,
+                    keep_work: bool = False) -> Dict[str, Any]:
+    """Run all requested facets over all strata of one dataset.
+
+    Returns the manifest dict (also written next to the parquet). When the
+    dataset is not testable the manifest has ``status`` 'skipped' and a reason.
+    """
+    started = time.time()
+    md_yaml, _ = parse_md_file(entry.md_path)
+    api_config = get_api_config(md_yaml)
+    annotation = mus.resolve_annotation(entry.h5ad_path, root=store_root)
+    manifest: Dict[str, Any] = {
+        'tool': TOOL_VERSION, 'db_id': entry.db_id, 'group': entry.study, 'file': entry.stem,
+        'dataset_sha256': md_yaml.get('sha256'), 'md_path': str(entry.md_path),
+        'anthive4_git': git_head(script_dir.parent.parent),
+        'h5adstore_git': git_head(store_root),
+        'timestamp_utc': dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds'),
+        'seed': SEED, 'facets_requested': facets,
+        'parameters': {
+            'min_cells_per_sample': MIN_CELLS_PER_SAMPLE, 'min_donors_dataset': MIN_DONORS_DATASET,
+            'min_donors_per_level': MIN_DONORS_PER_LEVEL, 'n_lt5_threshold': N_LT5_THRESHOLD,
+            'numeric_min_donors_for_p': NUMERIC_MIN_DONORS_FOR_P,
+            'min_donors_for_age_pmi': MIN_DONORS_FOR_AGE_PMI,
+            'min_covariate_coverage': MIN_COVARIATE_COVERAGE,
+            'counts_layers_accepted': list(COUNTS_LAYER_NAMES),
+            'disease_provisional': True, 'normalisation': 'edgeR calcNormFactors TMM + limma voom',
+            'gene_filter': 'edgeR filterByExpr(design) defaults',
+            'eBayes': 'limma eBayes defaults (trend=FALSE, robust=FALSE)',
+            'duckdb_threads': threads, 'duckdb_memory_limit_gb': memory_limit_gb,
+        },
+        'r_versions': r_versions(rscript),
+    }
+    eligible, reason = dataset_eligibility(entry, md_yaml, annotation, api_config)
+    if not eligible:
+        manifest.update(status='skipped', reason=reason)
+        return manifest
+    layer_name, counts_parquet = counts_layer_for(entry, md_yaml)  # type: ignore[misc]
+    manifest['counts_layer'] = layer_name
+
+    work_dir = Path(tempfile.mkdtemp(prefix='ant_facet_', dir=os.environ.get('ANT_FACET_TMP')))
+    conn = open_dataset(entry, api_config, threads=threads, memory_limit_gb=memory_limit_gb,
+                        temp_dir=work_dir)
+    try:
+        cat_columns = view_columns(conn, 'obscat') if _has_view(conn, 'obscat') else {}
+        num_columns = view_columns(conn, 'obsnum') if _has_view(conn, 'obsnum') else {}
+        wanted = ['ant_donor', 'ant_sex', 'ant_disease', 'ant_apoe', 'ant_apoe_carrier',
+                  'ant_braak', 'ant_age', 'ant_pmi', 'ant_cell_type', 'ant_author_cell_type',
+                  'ant_tissue', 'ant_author_cluster']
+        extra_candidates = [c for c in cat_columns
+                            if (CELLTYPE_CANDIDATE_RE.match(c) or BATCH_NAME_RE.search(c))
+                            and not c.startswith('ant_')]
+        cells = cell_table(conn, wanted + extra_candidates)
+        if 'ant_donor' not in cells:
+            manifest.update(status='skipped', reason='no ant_donor facet in the current mapping')
+            return manifest
+        batch_column = find_batch_column(conn, cells)
+        if batch_column is not None:
+            cells['batch'] = cells[batch_column]
+        manifest['batch_column'] = batch_column
+        n_donors_all = int(cells['ant_donor'].dropna().astype(str).nunique())
+        manifest['n_cells'] = int(len(cells))
+        manifest['n_donors'] = n_donors_all
+        if n_donors_all < MIN_DONORS_DATASET:
+            manifest.update(status='skipped', reason=f'{n_donors_all} donors (< {MIN_DONORS_DATASET})')
+            return manifest
+
+        donor_table, conflicts = build_donor_table(cells)
+        manifest['donor_conflicts'] = conflicts
+        membership, strata_note = choose_strata(cells, cat_columns)
+        manifest['celltype_note'] = strata_note
+        manifest['celltype_sources'] = sorted(membership['source'].unique().tolist())
+        cell_frame = cells.assign(pos=np.arange(len(cells)))[['pos', 'cell_id', 'ant_donor']]
+        usable = membership.merge(cell_frame, on='pos', how='inner')
+        usable = usable[usable['ant_donor'].notna()].copy()
+        usable['donor'] = usable['ant_donor'].astype(str)
+        usable['stratum'] = usable['source'] + '::' + usable['label']
+
+        # pseudobulk samples: donor x cell type with >= MIN_CELLS_PER_SAMPLE cells
+        sample_sizes = usable.groupby(['stratum', 'source', 'label', 'donor']).size() \
+            .rename('n_cells').reset_index()
+        n_dropped_small = int((sample_sizes['n_cells'] < MIN_CELLS_PER_SAMPLE).sum())
+        n_samples_all = int(len(sample_sizes))
+        sample_sizes = sample_sizes[sample_sizes['n_cells'] >= MIN_CELLS_PER_SAMPLE].reset_index(drop=True)
+        manifest['pseudobulk'] = {
+            'n_donor_celltype_groups': n_samples_all,
+            'n_dropped_lt_min_cells': n_dropped_small,
+            'n_kept': int(len(sample_sizes)),
+        }
+        # donor totals (unique cells) for the composition proportions
+        donor_totals = cells[cells['ant_donor'].notna()].assign(
+            donor=lambda f: f['ant_donor'].astype(str)).groupby('donor').size()
+        strata_donor_counts = sample_sizes.groupby('stratum')['donor'].nunique()
+        manifest['strata'] = {str(k): int(v) for k, v in strata_donor_counts.items()}
+
+        # plan jobs first so that we only aggregate samples that some job needs
+        jobs: List[Dict[str, Any]] = []
+        for stratum, frame in sample_sizes.groupby('stratum'):
+            for facet in facets:
+                plan = plan_job(donor_table, facet, frame['donor'])
+                plan['stratum'] = str(stratum)
+                plan['source'] = str(frame['source'].iloc[0])
+                plan['label'] = str(frame['label'].iloc[0])
+                jobs.append(plan)
+        needed = {(job['stratum'], donor) for job in jobs if job['status'] == 'ok'
+                  for donor in job['design']['donor']}
+        keep = sample_sizes[[(s, d) in needed for s, d in zip(sample_sizes['stratum'], sample_sizes['donor'])]]
+        keep = keep.reset_index(drop=True)
+        keep['sample_idx'] = np.arange(len(keep))
+
+        symbols = gene_symbols(conn)
+        job_records: List[Dict[str, Any]] = []
+        if len(keep):
+            pb_cells = usable.merge(keep[['stratum', 'donor', 'sample_idx']], on=['stratum', 'donor'],
+                                    how='inner')
+            long_counts = pseudobulk(conn, counts_parquet, pb_cells[['cell_id', 'sample_idx']])
+            manifest['pseudobulk']['n_nonzero_entries'] = int(len(long_counts))
+            sample_key = {(row.stratum, row.donor): int(row.sample_idx) for row in keep.itertuples()}
+
+            long_counts.to_csv(work_dir / 'counts_long.csv', index=False)
+            symbols.to_csv(work_dir / 'genes.csv', index=False)
+            sample_rows: List[Dict[str, Any]] = []
+            composition_p: Dict[Tuple[int, str], Optional[float]] = {}
+            job_id = 0
+            for job in jobs:
+                if job['status'] != 'ok':
+                    continue
+                job_id += 1
+                job['job_id'] = job_id
+                design = job['design']
+                stratum_donor_cells = keep[keep['stratum'] == job['stratum']].set_index('donor')['n_cells']
+                proportions = (stratum_donor_cells / donor_totals.reindex(stratum_donor_cells.index))
+                job['composition_p'] = composition_test(proportions, design.set_index('donor'), job['facet'])
+                job['composition_flag'] = bool(job['composition_p'] is not None
+                                               and job['composition_p'] < COMPOSITION_ALPHA)
+                job['n_cells_in_stratum'] = int(stratum_donor_cells.reindex(design['donor']).sum())
+                for row in design.itertuples():
+                    sample_rows.append({
+                        'job_id': job_id, 'sample_idx': sample_key[(job['stratum'], row.donor)],
+                        'donor': row.donor, 'facet_value': row.facet_value,
+                        'cov_sex': row.cov_sex, 'cov_age': row.cov_age, 'cov_pmi': row.cov_pmi,
+                        'batch': row.batch_value if isinstance(row.batch_value, str) else '',
+                    })
+            if sample_rows:
+                pd.DataFrame(sample_rows).to_csv(work_dir / 'samples.csv', index=False)
+                pd.DataFrame([{'job_id': j['job_id'], 'facet': j['facet'], 'stratum': j['stratum'],
+                               'numeric': int(j['facet'] == 'braak')}
+                              for j in jobs if j['status'] == 'ok']).to_csv(work_dir / 'jobs.csv', index=False)
+                run_r(rscript, work_dir)
+                results = pd.read_csv(work_dir / 'results.csv')
+                job_summary = pd.read_csv(work_dir / 'job_summary.csv')
+            else:
+                results, job_summary = pd.DataFrame(), pd.DataFrame()
+        else:
+            results, job_summary = pd.DataFrame(), pd.DataFrame()
+
+        # assemble the output table
+        frames: List[pd.DataFrame] = []
+        unit_records: List[Dict[str, Any]] = []
+        summary_by_job = {int(r.job_id): r for r in job_summary.itertuples()} if len(job_summary) else {}
+        for job in jobs:
+            record: Dict[str, Any] = {
+                'facet': job['facet'], 'cell_type': job['label'], 'celltype_source': job['source'],
+                'status': job['status'],
+                'n_donors_with_sample': job['n_donors_with_sample'],
+                'level_counts': job.get('level_counts'),
+            }
+            if job['status'] != 'ok':
+                unit_records.append(record)
+                continue
+            summary = summary_by_job.get(job['job_id'])
+            record.update({
+                'n_lt5': bool(job['n_lt5']), 'batch_used': job['batch_used'],
+                'batch_confounded': job['batch_confounded'],
+                'covariates': job['covariates'], 'covariates_omitted': job['covariates_omitted'],
+                'n_donors_analysed': job['n_donors_analysed'],
+                'n_donors_dropped_covariate': job['n_donors_dropped_covariate'],
+                'composition_p': job['composition_p'], 'composition_flag': job['composition_flag'],
+                'n_cells_in_stratum': job['n_cells_in_stratum'],
+                'n_genes_tested': int(summary.n_genes_tested) if summary is not None else 0,
+                'n_genes_input': int(summary.n_genes_input) if summary is not None else 0,
+                'r_status': summary.status if summary is not None else 'missing',
+            })
+            unit = results[results['job_id'] == job['job_id']].copy() if len(results) else pd.DataFrame()
+            if len(unit):
+                if job['n_lt5']:
+                    for column in ('t', 'p_value', 'q_value', 'ci_low', 'ci_high'):
+                        unit[column] = np.nan
+                else:
+                    record['n_sig_q05'] = int((unit['q_value'] < 0.05).sum())
+                level_counts = job['level_counts']
+                if job['facet'] == 'braak':
+                    unit['n_donors_ref'] = np.nan
+                    unit['n_donors_test'] = np.nan
+                    unit['contrast'] = 'braak_per_unit'
+                    unit['level_ref'] = None
+                    unit['level_test'] = None
+                else:
+                    reference, tested = CONTRAST[job['facet']]
+                    unit['n_donors_ref'] = level_counts[reference]
+                    unit['n_donors_test'] = level_counts[tested]
+                    unit['contrast'] = f'{tested}_vs_{reference}'
+                    unit['level_ref'] = reference
+                    unit['level_test'] = tested
+                unit['n_donors'] = job['n_donors_analysed']
+                unit['facet'] = job['facet']
+                unit['cell_type'] = job['label']
+                unit['celltype_source'] = job['source']
+                unit['n_lt5'] = bool(job['n_lt5'])
+                unit['descriptive_only'] = bool(job['n_lt5'])
+                unit['batch_used'] = job['batch_used']
+                unit['batch_confounded'] = job['batch_confounded']
+                unit['covariates'] = ','.join(job['covariates'])
+                unit['composition_p'] = job['composition_p']
+                unit['composition_flag'] = job['composition_flag']
+                unit['provisional'] = PROVISIONAL_FLAGS.get(job['facet'], False)
+                frames.append(unit)
+            unit_records.append(record)
+
+        manifest['units'] = unit_records
+        out_dir = out_root / entry.study
+        out_dir.mkdir(parents=True, exist_ok=True)
+        if frames:
+            table = pd.concat(frames, ignore_index=True)
+            table = table.merge(symbols[['gene_id', 'symbol']].rename(columns={'symbol': 'gene'}),
+                                on='gene_id', how='left')
+            table.insert(0, 'db_id', entry.db_id)
+            table.insert(1, 'dataset', entry.stem)
+            table['multi_tissue_donors'] = int((donor_table['n_tissues'] > 1).sum())
+            table = table.drop(columns=['job_id'])
+            table.to_parquet(out_dir / f'{entry.stem}.facet_tests.parquet', index=False)
+            manifest['n_result_rows'] = int(len(table))
+        manifest['multi_tissue_donors'] = int((donor_table['n_tissues'] > 1).sum())
+
+        # composition table: donor x (cell type, and author cluster when present) proportions
+        comp_frames = [usable.groupby(['donor', 'source', 'label']).size().rename('n_cells').reset_index()
+                       .rename(columns={'label': 'level'}).assign(kind='cell_type')]
+        if 'ant_author_cluster' in cells and 2 <= cells['ant_author_cluster'].nunique() <= 200:
+            tmp = cells[cells['ant_donor'].notna() & cells['ant_author_cluster'].notna()].copy()
+            tmp['donor'] = tmp['ant_donor'].astype(str)
+            comp_frames.append(tmp.groupby(['donor', 'ant_author_cluster']).size().rename('n_cells')
+                               .reset_index().rename(columns={'ant_author_cluster': 'level'})
+                               .assign(kind='author_cluster'))
+        composition = pd.concat(comp_frames, ignore_index=True)
+        composition['n_cells_donor'] = composition['donor'].map(donor_totals)
+        composition['proportion'] = composition['n_cells'] / composition['n_cells_donor']
+        composition = composition.merge(donor_table[['donor', 'sex', 'disease', 'apoe_carrier', 'braak']],
+                                        on='donor', how='left')
+        composition.to_parquet(out_dir / f'{entry.stem}.facet_composition.parquet', index=False)
+
+        manifest.update(status='done', runtime_seconds=round(time.time() - started, 1))
+        manifest_path = out_dir / f'{entry.stem}.facet_run_manifest.json'
+        manifest_path.write_text(json.dumps(manifest, indent=2, default=_json_default))
+        return manifest
+    finally:
+        conn.close()
+        if not keep_work:
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        return None if np.isnan(value) else float(value)
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+    if isinstance(value, (set, tuple)):
+        return list(value)
+    return str(value)
+
+
+# --------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------
+
+def load_average() -> float:
+    return os.getloadavg()[0]
+
+
+def wait_for_load(max_load: float, poll_seconds: int = 60) -> None:
+    while load_average() > max_load:
+        print(f'  load {load_average():.1f} > {max_load}, sleeping {poll_seconds}s', file=sys.stderr)
+        time.sleep(poll_seconds)
+
+
+def default_store_root() -> Path:
+    from config import get_data_folder  # type: ignore
+    return get_data_folder()
+
+
+def cmd_inventory(args: argparse.Namespace) -> None:
+    store_root = Path(args.h5adstore_root).resolve()
+    rows = []
+    for entry in iter_h5adstore(store_root):
+        if entry.study.startswith('_'):
+            continue
+        md_yaml, _ = parse_md_file(entry.md_path)
+        api_config = get_api_config(md_yaml)
+        annotation = mus.resolve_annotation(entry.h5ad_path, root=store_root)
+        eligible, reason = dataset_eligibility(entry, md_yaml, annotation, api_config)
+        rows.append({'db_id': entry.db_id, 'group': entry.study, 'file': entry.stem,
+                     'n_obs': md_yaml.get('n_obs'), 'organism': ','.join(_as_text_list(annotation.get('organism'))),
+                     'experimental_system': ','.join(_as_text_list(annotation.get('experimental_system'))),
+                     'is_secondary': md_yaml.get('is_secondary'), 'eligible_metadata': eligible,
+                     'reason': reason})
+    frame = pd.DataFrame(rows)
+    if args.out:
+        frame.to_csv(args.out, sep='\t', index=False)
+    print(frame['reason'].value_counts().to_string())
+
+
+def cmd_run(args: argparse.Namespace) -> None:
+    store_root = Path(args.h5adstore_root).resolve()
+    out_root = Path(args.out_root) if args.out_root else store_root / '_facet_tests'
+    facets = [f.strip() for f in args.facets.split(',') if f.strip()]
+    for facet in facets:
+        if facet not in FACETS:
+            sys.exit(f'unknown facet {facet}; choose from {FACETS}')
+    entries = {e.db_id: e for e in iter_h5adstore(store_root) if not e.study.startswith('_')}
+    if args.all:
+        targets = sorted(entries)
+    else:
+        targets = [t.strip() for t in args.db_id.split(',')]
+    summary_rows = []
+    for db_id in targets:
+        entry = entries.get(db_id)
+        if entry is None:
+            print(f'unknown db_id {db_id}', file=sys.stderr)
+            continue
+        out_manifest = out_root / entry.study / f'{entry.stem}.facet_run_manifest.json'
+        if out_manifest.exists() and not args.force and args.all:
+            print(f'[skip existing] {db_id}')
+            continue
+        # cheap metadata gate first, so skipped datasets do not wait for load
+        md_yaml, _ = parse_md_file(entry.md_path)
+        eligible, reason = dataset_eligibility(
+            entry, md_yaml, mus.resolve_annotation(entry.h5ad_path, root=store_root),
+            get_api_config(md_yaml))
+        if not eligible:
+            print(f'[skip] {db_id}: {reason}')
+            summary_rows.append({'db_id': db_id, 'status': 'skipped', 'reason': reason})
+            continue
+        wait_for_load(args.max_load)
+        begin = time.time()
+        try:
+            manifest = process_dataset(entry, store_root, out_root, facets, args.rscript,
+                                       threads=args.threads, memory_limit_gb=args.memory_gb,
+                                       keep_work=args.keep_work)
+        except Exception as exc:
+            print(f'[error] {db_id}: {exc}', file=sys.stderr)
+            summary_rows.append({'db_id': db_id, 'status': 'error', 'reason': str(exc)[:300]})
+            continue
+        if manifest['status'] == 'skipped':
+            print(f'[skip] {db_id}: {manifest["reason"]}')
+            out_dir = out_root / entry.study
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_manifest.write_text(json.dumps(manifest, indent=2, default=_json_default))
+        else:
+            n_ok = sum(1 for u in manifest['units'] if u['status'] == 'ok')
+            print(f'[done] {db_id}: {n_ok}/{len(manifest["units"])} units tested, '
+                  f'{manifest.get("n_result_rows", 0)} rows, {time.time() - begin:.0f}s')
+        summary_rows.append({'db_id': db_id, 'status': manifest['status'],
+                             'reason': manifest.get('reason', '')})
+    print(pd.DataFrame(summary_rows)['status'].value_counts().to_string() if summary_rows else 'nothing run')
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
+    sub = parser.add_subparsers(dest='command', required=True)
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument('--h5adstore-root', default=None)
+    inventory = sub.add_parser('inventory', parents=[common], help='metadata-level eligibility table')
+    inventory.add_argument('--out', default=None)
+    run = sub.add_parser('run', parents=[common], help='run facet tests')
+    group = run.add_mutually_exclusive_group(required=True)
+    group.add_argument('--db-id', help='comma-separated db_ids (e.g. K22/AST)')
+    group.add_argument('--all', action='store_true')
+    run.add_argument('--facets', default=','.join(FACETS))
+    run.add_argument('--out-root', default=None, help='default <h5adstore>/_facet_tests')
+    run.add_argument('--rscript', default=os.environ.get('ANT_FACET_RSCRIPT', DEFAULT_RSCRIPT))
+    run.add_argument('--threads', type=int, default=4)
+    run.add_argument('--memory-gb', type=int, default=24)
+    run.add_argument('--max-load', type=float, default=12.0)
+    run.add_argument('--force', action='store_true')
+    run.add_argument('--keep-work', action='store_true', help='keep the temp work dir (debug)')
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    if args.h5adstore_root is None:
+        args.h5adstore_root = str(default_store_root())
+    {'inventory': cmd_inventory, 'run': cmd_run}[args.command](args)
+
+
+if __name__ == '__main__':
+    main()
