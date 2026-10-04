@@ -41,6 +41,7 @@ Example:
 """
 
 import argparse
+import copy
 import asyncio
 import ctypes
 import ctypes.util
@@ -12481,6 +12482,28 @@ def _is_facet_column(name: str) -> bool:
     return isinstance(name, str) and name.startswith('ant_') and len(name) > 4
 
 
+def _facet_definition(facet_name: str) -> Dict[str, Any]:
+    """Published definition of a facet from ``lib/obscol_tags_vocab.yaml``."""
+    from obscol_tags import facet_definition  # noqa: PLC0415
+    try:
+        return facet_definition(facet_name)
+    except Exception as exc:  # a broken vocab must not take /facets down
+        log.warning("facet definition lookup failed for %s: %s", facet_name, exc)
+        return {'facet': facet_name, 'tag': facet_name[4:], 'label': facet_name[4:],
+                'defined': False, 'summary': '', 'definition': '', 'kind': None,
+                'values': '', 'missing': '', 'hint_keywords': []}
+
+
+def _facet_definitions_status() -> Dict[str, Optional[str]]:
+    """Audit state of the facet definitions (``state``, ``note``)."""
+    from obscol_tags import facet_definitions_status  # noqa: PLC0415
+    try:
+        return facet_definitions_status()
+    except Exception as exc:
+        log.warning("facet definitions status lookup failed: %s", exc)
+        return {'state': None, 'note': None}
+
+
 def _collect_facet_columns_per_dataset() -> Dict[str, Dict[str, str]]:
     """Return {db_id: {facet_name: 'categorical'|'numerical'}}.
 
@@ -12569,12 +12592,17 @@ def _build_facet_inventory() -> List[Dict[str, Any]]:
             num_n = len(entry['datasets']) - cat_n
             type_ = 'categorical' if cat_n >= num_n else 'numerical'
             mixed = True
+        definition = _facet_definition(facet_name)
         rows.append({
             'facet': facet_name,
             'type': type_,
             'type_mixed': mixed,
             'n_datasets': len(entry['datasets']),
             'signal_strength': float(signal.get(facet_name, 0.0)),
+            # Added (unreleased): the published definition, one line for lists.
+            'label': definition['label'],
+            'summary': definition['summary'],
+            'defined': definition['defined'],
         })
 
     rows.sort(key=lambda r: (-r['n_datasets'], r['facet']))
@@ -12609,7 +12637,8 @@ async def list_facets():
     def _sync() -> List[Dict[str, Any]]:
         return _build_facet_inventory()
     rows = await asyncio.to_thread(_sync)
-    return {"n_facets": len(rows), "facets": rows}
+    return {"n_facets": len(rows), "facets": rows,
+            "definitions_status": _facet_definitions_status()}
 
 
 def _facet_value_distribution(facet_name: str, kind: str,
@@ -12717,14 +12746,26 @@ def _facet_value_distribution(facet_name: str, kind: str,
 @app.get("/facets/{facet_name}", tags=["facets"])
 async def get_facet_detail(
     facet_name: str,
+    request: Request,
     top_modules: int = Query(200, ge=1, le=5000, description="Cap on module-variability rows returned."),
     per_facet_value_limit: int = Query(200, ge=1, le=2000, description="Cap on distinct categorical values."),
+    mapping: bool = Query(True, description="Add per-dataset mapping (source columns, value translation) and the non-carrier list."),
 ):
     """Detailed page data for one facet.
 
     Returns dataset list, value distribution, and the top module-variability
     rows filtered on ``tag_column == facet_name``. See the ``/facets``
     inventory for the list of names.
+
+    Added (unreleased): ``definition`` and ``definitions_status`` (from
+    ``lib/obscol_tags_vocab.yaml``); with ``mapping=true`` (default) each
+    ``datasets[]`` row also carries the fields of
+    ``GET /databases/{id}/facets`` for this facet (``mapping_kind``,
+    ``source_columns``, ``sources``, ``value_map``, ``unmapped``,
+    ``default``, ``constant_value``, ``n_missing``, ...), and
+    ``non_carriers`` lists every other dataset with ``candidate_columns``
+    (author columns whose names suggest the facet) and ``declared``.
+    obs_hidden source columns are visible to admins only.
 
     404 when the facet name is not present in the catalog.
     """
@@ -12808,19 +12849,313 @@ async def get_facet_detail(
             slice_ = slice_.drop(columns=['_abs'])
             modules_rows = slice_.to_dict(orient='records')
 
+    non_carriers: Optional[List[Dict[str, Any]]] = None
+    if mapping:
+        show_hidden = _caller_is_admin(request)
+        carrier_ids = {d['db_id'] for d in dataset_summaries}
+
+        def _sync_mapping() -> List[Dict[str, Any]]:
+            for summary in dataset_summaries:
+                try:
+                    entries = _dataset_facet_projection(summary['db_id'])
+                except Exception as exc:
+                    log.warning("facets: mapping of %s on %s failed: %s",
+                                facet_name, summary['db_id'], exc)
+                    continue
+                entry = next((e for e in entries if e['facet'] == facet_name), None)
+                if entry is None:
+                    continue
+                entry = _facet_entry_for_caller(entry, show_hidden)
+                for key in _FACET_MAPPING_KEYS:
+                    if key in entry:
+                        summary[key] = entry[key]
+            return _facet_non_carriers(facet_name, carrier_ids, dbs_by_id)
+        non_carriers = await asyncio.to_thread(_sync_mapping)
+
     return {
         'facet': facet_name,
         'type': facet_type,
         'type_mixed': type_mixed,
+        'definition': _facet_definition(facet_name),
+        'definitions_status': _facet_definitions_status(),
         'n_datasets': len(dataset_kinds),
         'total_n_cells': total_n_cells,
         'datasets': dataset_summaries,
+        'non_carriers': non_carriers,
         'value_distribution': distribution,
         'modules': {
             'rows': modules_rows,
             'n_total': n_modules_total,
             'truncated': n_modules_total > len(modules_rows),
         },
+    }
+
+
+# ── facet mapping: how author columns project onto facets ───────────
+#
+# Added (unreleased). The projection itself (rename / derive / constant /
+# native, value translation, redaction of obs_hidden sources, gap hints)
+# lives in lib/facet_mapping.py; the definitions in
+# lib/obscol_tags_vocab.yaml. These helpers only read the .md api config,
+# count author values on the dataset's own tables, cache, and apply the
+# caller's access level.
+
+_FACET_API_CONFIG_CACHE: Dict[str, Tuple[Tuple[str, int], Dict[str, Any]]] = {}
+_FACET_PROJECTION_CACHE: "OrderedDict[Tuple[Any, ...], List[Dict[str, Any]]]" = OrderedDict()
+_FACET_PROJECTION_CACHE_MAX = 512
+_FACET_PROJECTION_LOCK = Lock()
+_FACET_VALUE_ROWS_LIMIT = 200
+
+# Keys of a projection entry that /facets/{name} copies onto a carrier row.
+_FACET_MAPPING_KEYS = (
+    'mapping_kind', 'live', 'source_columns', 'sources', 'source_hidden',
+    'redacted', 'value_map', 'unmapped', 'default', 'constant_value',
+    'n_missing', 'range', 'n_distinct_source_values', 'value_map_truncated',
+    'source_missing',
+)
+
+
+def _facet_api_config(db_id: str) -> Dict[str, Any]:
+    """The dataset's validated ``api:`` section, cached on the .md mtime."""
+    from metadata import get_api_config  # noqa: PLC0415
+    md_path = registry._db_md_bases.get(db_id)
+    if md_path is None:
+        return {}
+    try:
+        signature = (str(md_path), md_path.stat().st_mtime_ns)
+    except OSError:
+        return {}
+    cached = _FACET_API_CONFIG_CACHE.get(db_id)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+    try:
+        yaml_dict, _body = parse_md_file(md_path)
+        api_config = get_api_config(yaml_dict)
+    except Exception as exc:
+        log.warning("facets: cannot read api config of %s: %s", db_id, exc)
+        api_config = {}
+    _FACET_API_CONFIG_CACHE[db_id] = (signature, api_config)
+    return api_config
+
+
+def _quote_stored_column(name: str) -> str:
+    """Quote a stored column name read back from information_schema.
+
+    Legacy author columns contain spaces, dots or '#', which safe_ident
+    rejects. Only call this with names verified to exist in the table.
+    """
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def _facet_add_counts(db_id: str, entries: List[Dict[str, Any]]) -> None:
+    """Add cell counts to projection entries, on one pooled cursor.
+
+    Per live facet: ``n_cells`` and ``n_missing`` (NULLs), plus ``range``
+    for numerical facets. Per renamed or derived facet: the author values
+    present in the source column with their cell counts (top
+    ``_FACET_VALUE_ROWS_LIMIT``), translated through the mapping. A renamed
+    numerical column without value rules gets no value table.
+    """
+    from facet_mapping import DERIVED, RENAMED, translate_observed  # noqa: PLC0415
+    with _pooled_db(db_id) as db:
+        conn = db._conn
+        stored: Dict[str, set] = {}
+        for table in ('__obscat', '__obsnum'):
+            try:
+                stored[table] = {row[0] for row in conn.execute(
+                    "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
+                    [table],
+                ).fetchall()}
+            except duckdb.Error:
+                stored[table] = set()
+        for entry in entries:
+            facet = entry['facet']
+            try:
+                if entry.get('live'):
+                    view = 'obscat' if entry.get('dtype') == 'categorical' else 'obsnum'
+                    ident = safe_ident(facet)
+                    if view == 'obsnum':
+                        total, non_null, low, high = conn.execute(
+                            f"SELECT COUNT(*), COUNT({ident}), MIN({ident}), MAX({ident}) FROM {view}"
+                        ).fetchone()
+                        entry['range'] = {
+                            'min': float(low) if low is not None else None,
+                            'max': float(high) if high is not None else None,
+                        }
+                    else:
+                        total, non_null = conn.execute(
+                            f"SELECT COUNT(*), COUNT({ident}) FROM {view}"
+                        ).fetchone()
+                    entry['n_cells'] = int(total or 0)
+                    entry['n_missing'] = int(total or 0) - int(non_null or 0)
+                kind = entry.get('mapping_kind')
+                if kind not in (RENAMED, DERIVED) or not entry.get('source_columns'):
+                    continue
+                if kind == RENAMED and entry.get('dtype') == 'numerical' and not entry.get('value_map'):
+                    continue
+                source = entry['source_columns'][0]
+                table = next((t for t in ('__obscat', '__obsnum') if source in stored[t]), None)
+                if table is None:
+                    entry['source_missing'] = True
+                    continue
+                column = _quote_stored_column(source)
+                observed = conn.execute(
+                    f"SELECT {column} AS v, COUNT(*) AS n FROM {table} "
+                    f"GROUP BY 1 ORDER BY n DESC, v LIMIT ?",
+                    [_FACET_VALUE_ROWS_LIMIT],
+                ).fetchall()
+                n_distinct = conn.execute(
+                    f"SELECT COUNT(DISTINCT {column}) FROM {table}"
+                ).fetchone()[0]
+                translate_observed(entry, observed, int(n_distinct or 0))
+            except (duckdb.Error, ValueError) as exc:
+                log.warning("facets: counting %s on %s failed: %s", facet, db_id, exc)
+
+
+def _dataset_facet_projection(db_id: str, with_counts: bool = True) -> List[Dict[str, Any]]:
+    """Unredacted facet projection of one dataset, cached.
+
+    The cache key carries the .md mtime, the duckdb location and mtime
+    (local files) and the identity of the registry's metadata entry, so an
+    edit, a view refresh or a rescan produces a new key.
+    """
+    from facet_mapping import project_dataset  # noqa: PLC0415
+    meta = registry.get_database_metadata(db_id)
+    obs = meta.get('obs') or {}
+    api_config = _facet_api_config(db_id)
+    md_path = registry._db_md_bases.get(db_id)
+    db_url = str(registry.get_database_path(db_id))
+    try:
+        md_mtime = md_path.stat().st_mtime_ns if md_path else None
+    except OSError:
+        md_mtime = None
+    db_mtime = None
+    if not db_url.startswith('s3://'):
+        try:
+            db_mtime = Path(db_url.replace('file://', '')).stat().st_mtime_ns
+        except OSError:
+            db_mtime = None
+    key = (db_id, with_counts, md_mtime, db_url, db_mtime, id(meta))
+    with _FACET_PROJECTION_LOCK:
+        cached = _FACET_PROJECTION_CACHE.get(key)
+        if cached is not None:
+            _FACET_PROJECTION_CACHE.move_to_end(key)
+            return copy.deepcopy(cached)
+    entries = project_dataset(api_config, obs.get('categorical') or [], obs.get('numerical') or [])
+    if with_counts and entries:
+        try:
+            _facet_add_counts(db_id, entries)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log.warning("facets: counts for %s unavailable: %s", db_id, exc)
+    with _FACET_PROJECTION_LOCK:
+        _FACET_PROJECTION_CACHE[key] = entries
+        _FACET_PROJECTION_CACHE.move_to_end(key)
+        while len(_FACET_PROJECTION_CACHE) > _FACET_PROJECTION_CACHE_MAX:
+            _FACET_PROJECTION_CACHE.popitem(last=False)
+    return copy.deepcopy(entries)
+
+
+def _facet_entry_for_caller(entry: Dict[str, Any], show_hidden: bool) -> Dict[str, Any]:
+    """Apply the caller's access level: obs_hidden sources only for admins."""
+    from facet_mapping import redact_hidden_sources  # noqa: PLC0415
+    return entry if show_hidden else redact_hidden_sources(entry)
+
+
+def _facet_non_carriers(facet_name: str, carriers: set,
+                        dbs_by_id: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Every dataset without ``facet_name``, with gap hints.
+
+    ``candidate_columns`` lists public obs columns whose names suggest they
+    carry the facet (keywords from the facet definition). ``declared`` is
+    True when the .md declares the facet but the served view lacks it
+    (views not refreshed, or a missing source column).
+    """
+    from facet_mapping import candidate_columns  # noqa: PLC0415
+    definition = _facet_definition(facet_name)
+    keywords = definition.get('hint_keywords') or [definition.get('tag') or facet_name[4:]]
+    rows: List[Dict[str, Any]] = []
+    for db_id, db in dbs_by_id.items():
+        if db_id in carriers:
+            continue
+        obs = db.get('obs') or {}
+        columns = list(obs.get('categorical') or []) + list(obs.get('numerical') or [])
+        api_config = _facet_api_config(db_id)
+        declared_kind = None
+        for section, kind in (('obs_derive', 'derived'), ('obs_constant', 'constant')):
+            if facet_name in (api_config.get(section) or {}):
+                declared_kind = kind
+        if facet_name in (api_config.get('obs_rename') or {}).values():
+            declared_kind = 'renamed'
+        collection = db.get('collection') or {}
+        rows.append({
+            'db_id': db_id,
+            'title': db.get('title') or db_id,
+            'group': collection.get('group') or db.get('group_id'),
+            'group_id': db.get('group_id'),
+            'file_id': db.get('file_id'),
+            'n_cells': int(db.get('n_cells') or 0),
+            'candidate_columns': candidate_columns(columns, keywords),
+            'declared': declared_kind is not None,
+            'declared_kind': declared_kind,
+        })
+    rows.sort(key=lambda r: (not r['declared'], not r['candidate_columns'], r['db_id']))
+    return rows
+
+
+@app.get("/databases/{db_id:path}/facets", tags=["facets"])
+def get_dataset_facets(
+    db_id: str,
+    request: Request,
+    counts: bool = Query(True, description="Add cell counts per author value and per facet (one GROUP BY per facet)."),
+):
+    """How this dataset's author columns project onto ``ant_*`` facets.
+
+    One entry per facet the dataset declares (``api.obs_rename`` /
+    ``obs_derive`` / ``obs_constant`` in its .md) or serves natively::
+
+        {
+          "facet": "ant_sex", "label": "Sex", "summary": "...", "defined": true,
+          "mapping_kind": "renamed",        # renamed | derived | constant | native
+          "live": true, "dtype": "categorical",
+          "source_columns": ["sex"],
+          "sources": [{"column": "sex", "published_as": "ant_sex", "hidden": false}],
+          "source_hidden": false, "redacted": false,
+          "value_map": [{"from": "M", "to": "m", "rule": "mapped", "n_cells": 1200}, ...],
+          "unmapped": "passthrough",        # passthrough | default | null
+          "default": null, "constant_value": null,
+          "n_cells": 2400, "n_missing": 0,
+          "n_distinct_source_values": 2, "value_map_truncated": false
+        }
+
+    ``rule`` is ``mapped`` (listed in the .md), ``hidden`` (turned into
+    NULL), ``passthrough`` (unlisted value of a renamed column, kept as is)
+    or ``default`` (unlisted value of a derived column, replaced by
+    ``default``). Columns in ``obs_hidden`` are shown to admins only: for
+    everyone else ``source_columns`` is empty, ``redacted`` is true and
+    ``value_map`` rows carry ``from: null``.
+    """
+    try:
+        registry.get_database_path(db_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Database '{db_id}' not found")
+    show_hidden = _caller_is_admin(request)
+    entries = _dataset_facet_projection(db_id, with_counts=counts)
+    facets_out: List[Dict[str, Any]] = []
+    for entry in entries:
+        row = _facet_entry_for_caller(entry, show_hidden)
+        definition = _facet_definition(entry['facet'])
+        row['label'] = definition['label']
+        row['summary'] = definition['summary']
+        row['defined'] = definition['defined']
+        facets_out.append(row)
+    return {
+        'db_id': db_id,
+        'n_facets': sum(1 for e in facets_out if e.get('live')),
+        'facets': facets_out,
+        'hidden_sources_visible': show_hidden,
+        'definitions_status': _facet_definitions_status(),
     }
 
 

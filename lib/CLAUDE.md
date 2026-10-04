@@ -23,6 +23,8 @@ After the 2026-06 reorgs, the consumers live under:
 | `h5ad_utils.py` | `load_h5ad`, dtype/layer inspection |
 | `geneset.py` | genesetstore parsing/registry (`Experiment`, `Geneset`, `GenesetRegistry`) |
 | `analytics.py` | SELECT-only SQL sandbox for ant-serve's analytics endpoint |
+| `facet_mapping.py` | how a dataset's `.md` `api:` section projects author columns onto `ant_*` facets (renamed / derived / constant / native, value translation, redaction of `obs_hidden` sources, gap hints). Mirrors `anthive_db.build_obs_view_sql`; keep the two in step |
+| `obscol_tags.py` + `obscol_tags_vocab.yaml` | obs-column tag vocab; the `facet:` blocks are the single source of the facet definitions shown in the UI and API (`facet_definition`) |
 | `layer_stats.py`, `plotting.py`, `checksum.py`, `md_check.py` | layer stats, server-side plots, file hashing, `.md` sanity checks |
 
 ## DuckDB schema model (know this before touching anthive_db)

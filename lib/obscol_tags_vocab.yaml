@@ -34,6 +34,34 @@
 
 version: 1
 
+# Facets
+# ------
+# A facet is the published `ant_<tag>` obs column that a dataset's `.md`
+# declares through `api.obs_rename`, `api.obs_derive` or `api.obs_constant`
+# (see doc/DESIGN_canonical_columns.md). The optional `facet:` block under a
+# tag is the single source of truth for what that column means in the web
+# UI (/facets, /facets/<name>, dataset page) and in the REST API
+# (`definition` on GET /facets, GET /facets/{name},
+# GET /databases/{id}/facets). Fields:
+#
+#   summary        one line, shown in lists
+#   definition     what the column means, a few sentences
+#   kind           categorical | numerical
+#   values         unit or controlled vocabulary of the published values
+#   missing        how missing / unknown is encoded
+#   hint_keywords  lower-case name fragments that suggest an author column
+#                  carries this information (used to flag datasets that
+#                  could carry the facet but do not). Keywords of three
+#                  letters or fewer must match a whole name token.
+#
+# A tag without a `facet:` block has no published definition yet.
+
+facet_definitions_status:
+  state: under_audit
+  note: >
+    An audit of the facets is running. These definitions, value
+    vocabularies and missing-value rules are drafts and may still change.
+
 tags:
   sex:
     label: Sex
@@ -41,6 +69,18 @@ tags:
       Biological sex of the donor / animal. Column typically carries
       values like 'male' / 'female' / 'M' / 'F' / 'mixed'. Applies to
       per-cell obs when every cell inherits its donor's sex.
+    facet:
+      summary: Biological sex of the donor or animal, coded m or f.
+      definition: >
+        Sex of the biological subject the cell comes from. Every cell
+        inherits its donor's sex. For xenografts this is the graft donor,
+        not the host animal (see host_sex).
+      kind: categorical
+      values: "m (male), f (female)"
+      missing: >
+        Empty (NULL) when not recorded. Author codes such as 'unknown' or
+        'undefined' are hidden to NULL rather than kept as a value.
+      hint_keywords: [sex, gender]
 
   braak:
     label: Braak stage
@@ -50,6 +90,16 @@ tags:
       Braak I–VI in original notation. Also used for α-synuclein Braak
       staging in PD studies. If the column mixes both, split it before
       tagging.
+    facet:
+      summary: Braak neurofibrillary tangle stage as a number from 0 to 6.
+      definition: >
+        Neuropathological Braak stage of tau tangle spread (Braak and Braak
+        1991) of the donor. Roman numerals and labels such as 'Braak IV'
+        are converted to integers.
+      kind: numerical
+      values: "integer 0 to 6 (0 = no tangles)"
+      missing: Empty (NULL) when the stage was not assessed or not reported.
+      hint_keywords: [braak]
 
   cluster:
     label: Cluster
@@ -58,6 +108,15 @@ tags:
       seurat_clusters, cell_type_reclust, ...). Marks the column as
       "this is a grouping of cells" so plot endpoints know to treat it
       as a discrete grouping axis rather than an ordinal covariate.
+    facet:
+      summary: Unsupervised cluster label (leiden, louvain, seurat_clusters).
+      definition: >
+        A cell grouping produced by clustering. Labels are local to one
+        dataset and cannot be compared across datasets.
+      kind: categorical
+      values: Dataset-specific labels, no shared vocabulary.
+      missing: Empty (NULL) for unclustered cells.
+      hint_keywords: [cluster, clusters, leiden, louvain]
 
   age:
     label: Age
@@ -67,6 +126,18 @@ tags:
       inherits its donor's age. For post-mortem cohorts this is the
       age-at-death; declare separately if you also carry
       age-at-onset.
+    facet:
+      summary: Age of the donor or animal at sampling (post-mortem cohorts, age at death).
+      definition: >
+        Age of the biological subject when the sample was taken. For
+        post-mortem human cohorts this is age at death. Every cell
+        inherits its donor's age.
+      kind: numerical
+      values: >
+        Years for human donors. The unit for animal studies is not yet
+        harmonised; check the dataset. Binned author ages are not converted.
+      missing: Empty (NULL) when not recorded.
+      hint_keywords: [age, ageatdeath, age_death]
 
   genotype:
     label: Genotype / model
@@ -77,6 +148,15 @@ tags:
       donor genotype. Distinct from disease staging (see 'braak') and
       distinct from disease-status flags. If a column mixes disease
       state and genotype, split it before tagging.
+    facet:
+      summary: Genetic background or model line that discriminates samples.
+      definition: >
+        Genotype or model of the sample, for example mouse lines (WT,
+        AppNLGF, 5xFAD) or human variant carriers. Not disease state.
+      kind: categorical
+      values: Dataset-specific labels, no shared vocabulary yet.
+      missing: Empty (NULL) when not recorded.
+      hint_keywords: [genotype, strain, line]
 
   host_sex:
     label: Host sex (xenograft)
@@ -87,6 +167,15 @@ tags:
       biological subjects. Use `sex` for the donor / biological
       subject, `host_sex` for the graft recipient. If the study
       is not a xenograft, this tag doesn't apply — use `sex`.
+    facet:
+      summary: Sex of the host animal in a xenograft study, coded m or f.
+      definition: >
+        For cells grafted into a host animal, the host's sex. The donor's
+        sex is in the sex facet.
+      kind: categorical
+      values: "m (male), f (female)"
+      missing: Empty (NULL) when not recorded.
+      hint_keywords: [host_sex, hostsex, sex_mouse, mouse_sex]
 
   donor:
     label: Donor
@@ -98,3 +187,190 @@ tags:
       column itself is a nuisance grouping to control for
       pseudoreplication. Typical column names: 'donor_id',
       'sample_id', 'individualID', 'library', 'orig.ident'.
+    facet:
+      summary: Identifier of the donor, animal or sample a cell comes from.
+      definition: >
+        The biological replicate a cell belongs to, the natural grouping
+        for pseudobulk and mixed models. Identifiers are only guaranteed
+        to be unique within one dataset.
+      kind: categorical
+      values: Dataset-specific identifiers.
+      missing: Empty (NULL) when the donor is not known.
+      hint_keywords: [donor, individual, subject, patient, projid, individualid]
+
+  # ── Tags added 2026-10 with facet definitions (canonical tags that had
+  #    no vocab entry yet, plus facets in wide use across the store) ──
+
+  braak_group:
+    label: Braak group
+    description: >
+      Braak stage binned into low, medium and high. Derived from the Braak
+      stage column of the dataset.
+    facet:
+      summary: Braak stage binned as low (0 to 2), medium (3 to 4) or high (5 to 6).
+      definition: >
+        Coarse grouping of the Braak tangle stage, derived per dataset with
+        api.obs_derive from the Braak column.
+      kind: categorical
+      values: "low (Braak 0 to 2), medium (3 to 4), high (5 to 6)"
+      missing: Empty (NULL) when the Braak stage is missing.
+      hint_keywords: [braak]
+
+  ad_stage:
+    label: AD neuropathologic change
+    description: >
+      NIA-AA Alzheimer's disease neuropathologic change (ADNC) level of the
+      donor.
+    facet:
+      summary: NIA-AA AD neuropathologic change level (control, low, intermediate, high).
+      definition: >
+        Overall Alzheimer's disease neuropathologic change of the donor
+        (NIA-AA 2012 ABC score summary). 'Not AD' and reference donors map
+        to control.
+      kind: categorical
+      values: "control, low, intermediate, high"
+      missing: Empty (NULL) when not assessed.
+      hint_keywords: [adnc, neuropathological, cerad, thal]
+
+  apoe:
+    label: APOE genotype
+    description: >
+      APOE allele pair of the donor.
+    facet:
+      summary: APOE genotype of the donor, written E3/E4 (lower allele first).
+      definition: >
+        The donor's two APOE alleles. Author notations such as '34', 'e3e4'
+        or 'APOE3/4' are rewritten to the shared form.
+      kind: categorical
+      values: "E2/E2, E2/E3, E2/E4, E3/E3, E3/E4, E4/E4"
+      missing: Empty (NULL) when not genotyped.
+      hint_keywords: [apoe]
+
+  apoe_carrier:
+    label: APOE e4 carrier
+    description: >
+      Whether the donor carries at least one APOE e4 allele.
+    facet:
+      summary: APOE e4 carrier status (E4+ or E4-), derived from the APOE genotype.
+      definition: >
+        E4+ when the donor carries at least one APOE e4 allele, E4- when
+        it carries none. Derived per dataset from the APOE genotype column.
+      kind: categorical
+      values: "E4+, E4-"
+      missing: Empty (NULL) when the APOE genotype is missing.
+      hint_keywords: [apoe]
+
+  disease:
+    label: Disease
+    description: >
+      Disease or diagnosis of the donor.
+    facet:
+      summary: Diagnosis of the donor as a short code (AD, control, MCI, PD, MS, ...).
+      definition: >
+        Clinical or neuropathological diagnosis of the donor the cell comes
+        from. Non-diseased donors are 'control'.
+      kind: categorical
+      values: >
+        Short codes, for example AD, control, MCI, PD, ALS, MS, FTD, HD.
+        Not yet fully harmonised: 'normal' and 'NCI' still occur next to
+        'control'.
+      missing: Empty (NULL) when not recorded.
+      hint_keywords: [disease, diagnosis, dx, diag, pathology]
+
+  condition:
+    label: Condition
+    description: >
+      Experimental condition or treatment of the sample.
+    facet:
+      summary: Experimental condition or treatment of the sample.
+      definition: >
+        What was done to the sample in the experiment (treatment, stimulus,
+        time point). Disease of the donor belongs in the disease facet.
+      kind: categorical
+      values: Dataset-specific labels, no shared vocabulary.
+      missing: Empty (NULL) when not recorded.
+      hint_keywords: [condition, treatment, stimulus, stim]
+
+  pmi:
+    label: Post-mortem interval
+    description: >
+      Time between death and tissue preservation.
+    facet:
+      summary: Post-mortem interval in hours.
+      definition: >
+        Time between death of the donor and freezing or fixation of the
+        tissue.
+      kind: numerical
+      values: Hours.
+      missing: Empty (NULL) when not recorded.
+      hint_keywords: [pmi, postmortem, post_mortem]
+
+  region:
+    label: Region
+    description: >
+      Brain region or sub-region the sample was taken from.
+    facet:
+      summary: Brain region or sub-region sampled, when it varies within a dataset.
+      definition: >
+        Anatomical region of the sample, used when one dataset combines
+        several regions. A single region for the whole dataset is in tissue.
+      kind: categorical
+      values: Free-text region names, not yet a controlled vocabulary.
+      missing: Empty (NULL) when not recorded.
+      hint_keywords: [region, area, brain_region, location]
+
+  tissue:
+    label: Tissue
+    description: >
+      Tissue or anatomical structure of the sample.
+    facet:
+      summary: Tissue or anatomical structure, often one constant per dataset.
+      definition: >
+        Tissue the cells were taken from, using UBERON-style labels. Often
+        published as a constant for the whole dataset (api.obs_constant).
+      kind: categorical
+      values: "UBERON-style labels, for example 'prefrontal cortex', 'hippocampus'."
+      missing: Empty (NULL) when not recorded.
+      hint_keywords: [tissue]
+
+  cell_type:
+    label: Cell type
+    description: >
+      Broad, harmonised cell class of the cell.
+    facet:
+      summary: Broad cell class with Cell Ontology labels (microglial cell, astrocyte, ...).
+      definition: >
+        Harmonised broad cell class. Single-cell-type datasets publish it
+        as a constant; others map the authors' annotation onto it.
+      kind: categorical
+      values: "Cell Ontology labels, for example 'microglial cell', 'astrocyte', 'excitatory neuron'."
+      missing: "'unknown' for cells the authors left unassigned; empty (NULL) when not recorded."
+      hint_keywords: [celltype, cell_type, cellclass, class, annotation]
+
+  author_cell_type:
+    label: Author cell type
+    description: >
+      The authors' own cell-type annotation, kept as published.
+    facet:
+      summary: The authors' cell-type labels, not harmonised.
+      definition: >
+        Cell-type annotation as published by the authors, kept for
+        reference next to the harmonised cell_type facet.
+      kind: categorical
+      values: Dataset-specific labels.
+      missing: Empty (NULL) when not annotated.
+      hint_keywords: [celltype, cell_type, annotation, subtype]
+
+  author_cluster:
+    label: Author cluster
+    description: >
+      The authors' cluster or cell-state labels, kept as published.
+    facet:
+      summary: The authors' cluster or cell-state labels, local to each dataset.
+      definition: >
+        Cluster or cell-state labels as published by the authors. Labels
+        are dataset specific and are not comparable across datasets.
+      kind: categorical
+      values: Dataset-specific labels.
+      missing: Empty (NULL) for cells without a cluster.
+      hint_keywords: [cluster, clusters, leiden, louvain, state, subcluster]

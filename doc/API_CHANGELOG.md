@@ -29,6 +29,39 @@ the spec drifting away from the running code.
 
 ---
 
+## Unreleased
+
+Additive (minor). No version bump yet.
+
+- **Facet definitions.** `GET /facets` rows gain `label`, `summary` and
+  `defined`, and the response gains `definitions_status` (`state`,
+  `note`). `GET /facets/{name}` gains `definition` (`label`, `summary`,
+  `definition`, `kind`, `values`, `missing`, `hint_keywords`, `defined`)
+  and `definitions_status`. The text lives in the `facet:` blocks of
+  `lib/obscol_tags_vocab.yaml`. An audit of the facets is running, so
+  `definitions_status.state` is `under_audit` and the wording may change.
+- **How datasets project onto a facet.** With `mapping=true` (the default)
+  every `GET /facets/{name}` `datasets[]` row also carries
+  `mapping_kind` (`renamed`, `derived`, `constant` or `native`),
+  `source_columns`, `sources` (`column`, `published_as`, `hidden`),
+  `value_map` (rows `from`, `to`, `rule`, `n_cells`; `rule` is `mapped`,
+  `hidden`, `passthrough` or `default`), `unmapped`, `default`,
+  `constant_value`, `n_missing`, `range` (numerical facets),
+  `n_distinct_source_values`, `value_map_truncated` (only the 200 most
+  frequent author values are listed) and `redacted`. The new
+  `non_carriers` list has every other dataset with `candidate_columns`
+  (public columns whose names suggest the facet, for example `Gender` for
+  `ant_sex`) and `declared` / `declared_kind` (the `.md` declares the
+  facet but the served view lacks it). `mapping=false` skips both.
+- **New `GET /databases/{id}/facets`.** The same projection for every
+  facet of one dataset, plus `label`, `summary`, `defined`, `n_cells`,
+  `hidden_sources_visible` and `definitions_status`. `counts=false` skips
+  the cell counts.
+- Columns listed in a dataset's `api.obs_hidden` stay private: for
+  non-admins a facet built from one has empty `source_columns`,
+  `redacted: true` and `value_map` rows without `from` (counts summed per
+  facet value). Admins (Authelia `admins`) see the column and its values.
+
 ## 2.42.1 (2026-10-03)
 
 Patch release: no contract change.
