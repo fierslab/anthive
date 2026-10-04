@@ -13,7 +13,7 @@ import threading
 import time
 import unicodedata
 from collections import defaultdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, quote as url_quote, unquote, urlencode
 
 import markdown
@@ -2918,9 +2918,14 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         dataset_facets = _api_get_as_user(request, api_url, f'/databases/{db_id}/facets').get('facets') or []
     except Exception:
         dataset_facets = []
+    # Facets outside the configured visible list (facets_visible) are not
+    # shown for now; ant-serve flags them, they stay in the data and the API.
+    n_facets_hidden = sum(1 for f in dataset_facets if f.get('hidden_by_config'))
+    dataset_facets = [f for f in dataset_facets if not f.get('hidden_by_config')]
 
     return templates.TemplateResponse(request, "dataset.html", {
         "dataset_facets": dataset_facets,
+        "n_facets_hidden": n_facets_hidden,
         "folder_name": friendly_group,
         "folder_browse_id": group_id,
         "group_id": group_id,
@@ -2957,6 +2962,7 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "de_studies": de_studies,
         "de_total_contrasts": de_total_contrasts,
         "papers": _dataset_papers(api_url, db_id),
+        "facet_tests": _dataset_facet_tests(api_url, db_id),
         "caveats": caveats,
         "caveats_summary": caveats_summary,
         "publication_status": pub_status,
@@ -3539,9 +3545,15 @@ async def facets_index(request: Request):
         definitions_status = payload.get("definitions_status") or {}
     except Exception as exc:
         error = f"Failed to load facets from ant-serve: {exc}"
+    # facets_visible: the others are not shown for now (still in the data and
+    # the API, flagged hidden_by_config). Admins get them as a list of links.
+    hidden_facets = [f for f in facets if f.get("hidden_by_config")]
+    facets = [f for f in facets if not f.get("hidden_by_config")]
     return templates.TemplateResponse(request, "facets.html", {
         "facets": facets,
         "n_facets": len(facets),
+        "hidden_facets": hidden_facets,
+        "is_admin": _is_admin(request),
         "definitions_status": definitions_status,
         "error": error,
     })
@@ -3558,6 +3570,10 @@ async def facet_detail_view(request: Request, facet_name: str):
     api_url = _api_url(request)
     error: Optional[str] = None
     facet_data: Dict[str, Any] = {}
+    is_admin = _is_admin(request)
+    visible = _facets_visible()
+    if visible and facet_name not in visible and not is_admin:
+        return _facet_hidden_page(request, facet_name, visible)
     try:
         # A cold /facets/{name} scans every carrying dataset (value counts
         # plus the per-dataset mapping); give it longer than the default.
@@ -3576,8 +3592,15 @@ async def facet_detail_view(request: Request, facet_name: str):
         error = f"Failed to load facet '{facet_name}': {exc}"
     except Exception as exc:
         error = f"Failed to load facet '{facet_name}': {exc}"
+    if facet_data.get("hidden_by_config") and not is_admin:
+        return _facet_hidden_page(request, facet_name, visible)
+    facet_effects = None
+    if facet_name.startswith('ant_') and facet_name[4:] in _FACET_TEST_LABELS:
+        facet_effects = _facet_tests_across(api_url, facet_name)
     non_carriers = facet_data.get("non_carriers") or []
     return templates.TemplateResponse(request, "facet.html", {
+        "facet_effects": facet_effects,
+        "hidden_by_config": bool(facet_data.get("hidden_by_config")),
         "facet_name": facet_name,
         "facet": facet_data,
         "definition": facet_data.get("definition") or {},
@@ -3586,6 +3609,23 @@ async def facet_detail_view(request: Request, facet_name: str):
         "n_non_carriers_hinted": sum(1 for d in non_carriers if d.get("candidate_columns")),
         "n_non_carriers_declared": sum(1 for d in non_carriers if d.get("declared")),
         "error": error,
+    })
+
+
+def _facet_hidden_page(request: Request, facet_name: str, visible: List[str]) -> HTMLResponse:
+    """Short page for a facet outside facets_visible (non-admins)."""
+    return templates.TemplateResponse(request, "facet.html", {
+        "facet_name": facet_name,
+        "facet": {},
+        "hidden_notice": True,
+        "visible_facets": visible,
+        "definition": {},
+        "definitions_status": {},
+        "non_carriers": [],
+        "n_non_carriers_hinted": 0,
+        "n_non_carriers_declared": 0,
+        "facet_effects": None,
+        "error": None,
     })
 
 
@@ -4146,6 +4186,208 @@ def _year_int(card: Dict) -> int:
 
 def _sort_paper_cards(cards: List[Dict]) -> List[Dict]:
     return sorted(cards, key=lambda c: (_PAPER_ROLE_ORDER.get(c['role'], 9), -_year_int(c), c['citekey']))
+
+
+# ── Facet effects (donor-level facet tests, API /facet-tests) ─────────────────
+#
+# Rendered in two places from one partial (_facet_effects.html): inside the
+# dataset page's Facets card (per facet, the strata of this dataset) and on
+# /facets/{name} ("Effects across datasets", one row per dataset x stratum).
+# These helpers only turn API payloads into display fields.
+
+_FACET_TEST_LABELS = {
+    'sex': 'Sex',
+    'disease': 'Disease',
+    'apoe_carrier': 'APOE e4 carrier',
+    'braak': 'Braak stage',
+}
+
+_METHOD_LABELS = {
+    ('cell_mean', 'geneset'): 'cell mean, scanpy score',
+    ('cell_mean', 'ucell'): 'cell mean, UCell',
+    ('pseudobulk', 'gene_list'): 'pseudobulk',
+}
+
+
+def _facet_contrast_label(unit: Dict[str, Any]) -> str:
+    """Plain contrast wording: the test level first, the reference second."""
+    if unit.get('facet') == 'braak':
+        return 'trend per Braak stage'
+    test, ref = unit.get('level_test'), unit.get('level_ref')
+    if test and ref:
+        return f'{test} vs {ref}'
+    return unit.get('contrast') or ''
+
+
+def _fx_donors_text(unit: Dict[str, Any]) -> str:
+    counts = unit.get('level_counts') or {}
+    if unit.get('facet') == 'braak':
+        n_donors = unit.get('n_donors') or counts.get('n_donors') or 0
+        low, high = counts.get('braak_min'), counts.get('braak_max')
+        span = f', stages {low} to {high}' if low is not None and high is not None else ''
+        return f'{n_donors} donors{span}'
+    if unit.get('n_donors_ref') is not None and unit.get('n_donors_test') is not None:
+        return f"{unit.get('level_test')} {unit['n_donors_test']}, {unit.get('level_ref')} {unit['n_donors_ref']}"
+    return ', '.join(f'{level} {n}' for level, n in counts.items())
+
+
+def _fx_pills(unit: Dict[str, Any]) -> List[Tuple[str, str, str]]:
+    flags = unit.get('flags') or {}
+    pills: List[Tuple[str, str, str]] = []
+    if flags.get('descriptive_only'):
+        pills.append(('descriptive only', 'warn',
+                      'A level has fewer than 5 donors (Braak: fewer than 10). Estimates are shown '
+                      'without p, q or confidence interval and cannot be called significant.'))
+    if flags.get('provisional'):
+        pills.append(('provisional', 'warn',
+                      'Disease vocabulary is not settled yet (what counts as control differs between '
+                      'studies). These results will change.'))
+    if flags.get('composition_flag'):
+        pvalue = flags.get('composition_p')
+        ptext = f' (p = {pvalue:.2g})' if isinstance(pvalue, (int, float)) else ''
+        pills.append(('composition', 'warn',
+                      "The fraction of each donor's cells in this cell type differs with the facet"
+                      f'{ptext}, uncorrected. An effect may reflect a change in composition or cell '
+                      'state rather than in expression.'))
+    if flags.get('batch_confounded'):
+        pills.append(('batch confounded', 'warn',
+                      'The facet cannot be separated from batch, so batch was left out of the model.'))
+    if flags.get('batch_used'):
+        pills.append(('batch adjusted', 'info', 'A donor-level batch column was included in the model.'))
+    if unit.get('dataset_changed'):
+        pills.append(('data changed', 'warn', 'The dataset changed after this test was run; the result '
+                                               'describes the earlier version.'))
+    return pills
+
+
+def _fx_model_view(model: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Compact model line plus the detail rows for the disclosure."""
+    model = model or {}
+    parts, details = [], []
+    stratum = model.get('stratum') or {}
+    details.append(('Stratum', f"{stratum.get('cell_type', 'not recorded')}: "
+                               f"{stratum.get('description', 'not recorded')}"))
+    details.append(('Facet term', model.get('facet_term') or 'not recorded'))
+    donors = model.get('donors') or {}
+    per_level = donors.get('per_level')
+    if isinstance(per_level, dict):
+        per_level = ', '.join(f'{k} {v}' for k, v in per_level.items())
+    details.append(('Donors used', f"{per_level or 'not recorded'}; analysed {donors.get('n_analysed', 'not recorded')}, "
+                                   f"left out for a missing covariate {donors.get('n_dropped_missing_covariate', 'not recorded')}; "
+                                   f"at least {donors.get('min_cells_per_donor', 'not recorded')} cells per donor in the stratum, "
+                                   f"at least {donors.get('min_donors_per_level', 'not recorded')} donors per level"))
+    details.append(('Descriptive-only rule', model.get('descriptive_only_rule') or 'not recorded'))
+    for kind, label in (('genes', 'Genes'), ('modules', 'Modules')):
+        part = model.get(kind)
+        if not part:
+            continue
+        method_short = 'limma-voom' if kind == 'genes' else (
+            f"OLS + {part['n_permutations']:,} permutations" if isinstance(part.get('n_permutations'), int)
+            else 'OLS + permutations')
+        parts.append(f"{part.get('formula')} ({method_short})")
+        unit_of_analysis = part.get('unit_of_analysis')
+        if isinstance(unit_of_analysis, dict):
+            unit_of_analysis = ' | '.join(f'{k}: {v}' for k, v in unit_of_analysis.items())
+        covariates = '; '.join(f"{c['name']} {c['status']} ({c['reason']})" for c in part.get('covariates') or [])
+        versions = part.get('versions')
+        if isinstance(versions, dict):
+            versions = ', '.join(f'{k} {v}' for k, v in versions.items())
+        details.append((f'{label}: unit of analysis', unit_of_analysis or 'not recorded'))
+        details.append((f'{label}: formula', part.get('formula') or 'not recorded'))
+        details.append((f'{label}: covariates', covariates or 'not recorded'))
+        details.append((f'{label}: method', part.get('method') or 'not recorded'))
+        details.append((f'{label}: multiple testing', part.get('multiple_testing') or 'not recorded'))
+        details.append((f'{label}: run', f"{part.get('tool')}, seed {part.get('seed')}, run {part.get('run_date')}; "
+                                         f"{versions or 'versions not recorded'}"))
+    return {'line': '; '.join(parts) or 'not recorded', 'details': details}
+
+
+def _fx_unit_view(unit: Dict[str, Any], index: int, db_id: str = '', title: str = '') -> Dict[str, Any]:
+    modules = [{**m, 'label': _METHOD_LABELS.get((m.get('method'), m.get('source')),
+                                                  f"{m.get('method')}, {m.get('source')}")}
+               for m in unit.get('modules') or []]
+    return {
+        **unit,
+        'db_id': db_id or unit.get('db_id') or '',
+        'title': title or unit.get('title') or '',
+        'facet_label': _FACET_TEST_LABELS.get(unit.get('facet'), unit.get('facet')),
+        'contrast_label': _facet_contrast_label(unit),
+        'donors_text': _fx_donors_text(unit),
+        'pills': _fx_pills(unit),
+        'modules_view': modules,
+        'model_view': _fx_model_view(unit.get('model')),
+        'unit_id': f'fx-{index}',
+    }
+
+
+def _facet_tests_view(summary: Optional[Dict[str, Any]], db_id: str = '') -> Optional[Dict[str, Any]]:
+    """Dataset-page data for the facet effects, grouped by facet column.
+
+    None when the API could not answer (older ant-serve, error).
+    """
+    if not isinstance(summary, dict) or 'status' not in summary:
+        return None
+    by_facet: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+    index = 0
+    for unit in summary.get('units') or []:
+        column = 'ant_' + str(unit.get('facet'))
+        slot = by_facet.setdefault(column, {'tested': [], 'untested': []})
+        if unit.get('tested'):
+            slot['tested'].append(_fx_unit_view({**unit, 'dataset_changed': summary.get('dataset_changed')},
+                                                index, db_id=db_id))
+            index += 1
+        else:
+            slot['untested'].append({'cell_type': unit.get('cell_type'), 'reason': unit.get('reason')})
+    return {
+        'status': summary.get('status'),
+        'reason': summary.get('reason'),
+        'dataset_changed': bool(summary.get('dataset_changed')),
+        'by_facet': by_facet,
+        'n_units_tested': summary.get('n_units_tested') or 0,
+        'cohort': summary.get('cohort') or None,
+    }
+
+
+def _dataset_facet_tests(api_url: str, db_id: str) -> Optional[Dict[str, Any]]:
+    """Facet effects of one dataset; None when the API cannot answer."""
+    try:
+        return _facet_tests_view(_api_get(api_url, f'/databases/{db_id}/facet-tests'), db_id=db_id)
+    except Exception:
+        return None
+
+
+def _facet_tests_across(api_url: str, facet_name: str) -> Optional[Dict[str, Any]]:
+    """Rows for the "Effects across datasets" section of /facets/{name};
+    None when the facet is not tested or the API cannot answer."""
+    try:
+        payload = _api_get(api_url, f"/facets/{url_quote(facet_name, safe='')}/tests", timeout=90)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    rows = [_fx_unit_view({**row, 'facet': payload.get('facet')}, index, db_id=row.get('db_id', ''),
+                          title=row.get('title') or '')
+            for index, row in enumerate(payload.get('rows') or [])]
+    return {
+        'facet': payload.get('facet'),
+        'rows': rows,
+        'n_datasets_tested': payload.get('n_datasets_tested') or 0,
+        'not_tested': payload.get('not_tested') or [],
+    }
+
+
+_facets_visible_cfg: list = []     # [list] once read from anthive.yaml
+
+
+def _facets_visible() -> List[str]:
+    """Configured visible facets ([] = all). Same setting ant-serve reads."""
+    if not _facets_visible_cfg:
+        try:
+            from config import get_facets_visible, load_config  # noqa: PLC0415
+            _facets_visible_cfg.append(get_facets_visible(load_config()))
+        except Exception:  # config unavailable (tests import this module bare)
+            _facets_visible_cfg.append([])
+    return list(_facets_visible_cfg[0])
 
 
 def _dataset_papers(api_url: str, db_id: str, scope: str = 'dataset') -> List[Dict]:

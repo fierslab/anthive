@@ -25,12 +25,6 @@
   }
   .type-pill.numerical { background: #eef8f4; color: #14664b; border-color: #a7d7c0; }
   .type-pill.mixed { background: #fff7e0; color: #7a5b00; border-color: #eed08c; }
-  .signal-cell { min-width: 120px; }
-  .signal-bar {
-    display: inline-block; height: 6px; background: var(--link); border-radius: 2px;
-    vertical-align: middle; margin-right: 6px;
-  }
-  .signal-bar.zero { background: #cbd5e1; }
   .empty-note { color: var(--text-muted); font-size: 13px; padding: 20px 0; }
   .facet-summary { display: block; font-size: 12px; color: var(--text-muted); margin-top: 1px; max-width: 640px; }
   .facet-summary.undefined { font-style: italic; }
@@ -52,10 +46,20 @@
   facets. Each dataset declares how its own columns map onto a facet (a
   renamed author column, a value map, or one constant value). Click a row
   to see the definition, which datasets carry the facet and how their
-  values were translated, and where its signal is strongest.
+  values were translated, and how expression differs with it at the level
+  of donors (effects across datasets).
 </p>
 {% if definitions_status and definitions_status.note %}
 <p class="audit-note" id="facet-audit-note"><strong>Definitions under audit.</strong> {{ definitions_status.note }}</p>
+{% endif %}
+
+{% if hidden_facets %}
+<p class="audit-note" id="facets-hidden-note">Shown here are the {{ n_facets }} facets that the donor-level facet tests analyse, each with its effects across datasets. {{ hidden_facets|length }} other facets are hidden while the facet audit decisions are pending; their columns stay in the data, the plots and the API. <a href="/help#facet-effects">About facets and their effects</a></p>
+{% if is_admin %}
+<details class="audit-note" id="facets-hidden-admin"><summary>Hidden facets (visible to admins)</summary>
+  {% for row in hidden_facets %}<a href="/facets/{{ row.facet|urlencode }}">{{ row.facet[4:] }}</a> <span class="muted">({{ row.n_datasets }})</span>{{ ', ' if not loop.last }}{% endfor %}
+</details>
+{% endif %}
 {% endif %}
 
 {% if error %}<p style="color:#dc2626">{{ error }}</p>{% endif %}
@@ -72,15 +76,13 @@
       <th class="sortable" data-key="facet" data-dir="asc">Facet <span class="sort-ind"></span></th>
       <th class="sortable" data-key="type" data-dir="asc">Type <span class="sort-ind"></span></th>
       <th class="sortable num" data-key="n_datasets" data-dir="desc">Datasets <span class="sort-ind"></span></th>
-      <th class="sortable num" data-key="signal_strength" data-dir="desc">Signal <span class="info" title="Maximum variance-explained value across module_variability rows where tag_column matches this facet. Zero means no signal recorded.">i</span> <span class="sort-ind"></span></th>
     </tr>
   </thead>
   <tbody>
     {% for row in facets %}
     <tr data-facet="{{ row.facet }}"
         data-type="{{ row.type }}"
-        data-n_datasets="{{ row.n_datasets }}"
-        data-signal_strength="{{ '%.6f'|format(row.signal_strength) }}">
+        data-n_datasets="{{ row.n_datasets }}">
       <td>
         <a href="/facets/{{ row.facet|urlencode }}" class="facet-name">{{ row.facet[4:] }}</a>
         <span class="facet-strip">{{ row.facet }}</span>
@@ -95,14 +97,6 @@
         {% endif %}
       </td>
       <td class="num">{{ row.n_datasets }}</td>
-      <td class="num signal-cell">
-        {% set pct = (row.signal_strength * 100) | round(0, 'floor') | int %}
-        {% if row.signal_strength > 0 %}
-          <span class="signal-bar" style="width: {{ [pct, 4] | max }}px"></span>{{ '%.2f' | format(row.signal_strength) }}
-        {% else %}
-          <span class="signal-bar zero" style="width: 4px"></span><span class="muted">0</span>
-        {% endif %}
-      </td>
     </tr>
     {% endfor %}
   </tbody>

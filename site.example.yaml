@@ -29,6 +29,11 @@ site:
   # Optional: folder the in-app help links to for detailed docs (client
   # setup, MCP links, library). Leave out to use the anthive4 GitLab docs.
   # docs_base_url: https://gitlab.kuleuven.be/bdslab/anthive/anthive4/-/blob/main/doc
+  # Facets shown on the /facets pages and in the dataset facet card. While
+  # the facet audit decisions are pending, only the four that the donor-level
+  # facet tests analyse are shown; the other ant_* columns stay in the data
+  # and the API. An empty list ([]) or null shows every facet.
+  facets_visible: [ant_sex, ant_disease, ant_apoe_carrier, ant_braak]
 
 data:
   h5adstore: /srv/anthive/h5adstore        # required

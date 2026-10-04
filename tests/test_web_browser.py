@@ -40,6 +40,13 @@ browser = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(browser)
 
 
+@pytest.fixture(autouse=True)
+def _all_facets_visible(monkeypatch):
+    """Show every facet unless a test sets facets_visible itself (the repo
+    default config limits the facet pages to four)."""
+    monkeypatch.setattr(browser, "_facets_visible_cfg", [[]])
+
+
 # ── unit tests: _as_list ───────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("value, expected", [
@@ -1576,11 +1583,10 @@ def test_facet_detail_renders(client):
     # both distinct values rendered
     assert "alzheimer disease" in resp.text
     assert "normal" in resp.text
-    # geneset table
-    assert "Top variable genesets" in resp.text
-    assert "DAM_pos" in resp.text
-    # dataset link goes to the Genesets tab
-    assert "/browse/GroupA/ds1#tab-genesets" in resp.text
+    # the per-cell variability cards are gone (pseudoreplicated)
+    assert "Top variable genesets" not in resp.text
+    assert "Top variable genes" not in resp.text
+    assert 'id="tvg-dataset"' not in resp.text
 
 
 def test_facets_pages_carry_experimental_notice(client, monkeypatch):

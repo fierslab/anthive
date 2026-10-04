@@ -15,6 +15,21 @@
   {%- endif -%}
 {%- endmacro %}
 
+{% macro _fx_effects_row(column, slot) -%}
+{%- from "_facet_effects.html" import fx_table, fx_untested -%}
+<tr class="ds-facet-fx" data-facet="{{ column }}">
+  <td colspan="5">
+    {% if slot.tested %}
+    <h3 class="subsection-head">Effects of {{ column[4:] }} <span class="muted">({{ slot.tested|length }} {{ 'cell type' if slot.tested|length == 1 else 'cell types' }} tested)</span></h3>
+    {{ fx_table(slot.tested, 'fx-table-' ~ column) }}
+    {% else %}
+    <div class="fx-none">Effects of {{ column[4:] }}: not tested.</div>
+    {% endif %}
+    {{ fx_untested(slot.untested) }}
+  </td>
+</tr>
+{%- endmacro %}
+
 {% block content %}
 <style>
   /* Context bar — uniform neutral pill; no per-category colours (the label
@@ -713,12 +728,26 @@
   </div>
   {% endif %}
 
-  {% if dataset_facets %}
+  {% set _fx = facet_tests.by_facet if facet_tests else {} %}
+  {% set _fx_shown = dataset_facets|map(attribute='facet')|list %}
+  {% set _fx_extra = [] %}{% for col in _fx %}{% if col not in _fx_shown and _fx[col].tested %}{% set _ = _fx_extra.append(col) %}{% endif %}{% endfor %}
+  {% if dataset_facets or _fx_extra %}
   {% from "_facet_mapping.html" import facet_mapping_styles, mapping_kind, source_columns, translation, coverage %}
+  {% from "_facet_effects.html" import fx_styles, fx_intro, fx_table, fx_untested, fx_script %}
   {{ facet_mapping_styles() }}
+  {{ fx_styles() }}
   <div class="data-card wide" id="ds-facets">
     <h2 class="section-head">Facets <span class="muted">({{ dataset_facets|selectattr('live')|list|length }})</span>
-      <span class="info" title="Standardised ant_ columns of this dataset and where they come from: the author column, how it was mapped (renamed, derived through a value map, or one constant value) and how each author value was translated, with cell counts. Click a facet for its definition and the other datasets that carry it.">ⓘ</span></h2>
+      <span class="info" title="Standardised ant_ columns of this dataset and where they come from: the author column, how it was mapped (renamed, derived through a value map, or one constant value) and how each author value was translated, with cell counts. Below each facet, when it was tested: its donor-level effects per cell type. Click a facet for its definition and the other datasets that carry it.">ⓘ</span></h2>
+    <p class="fx-intro muted" id="ds-facets-hidden-note">{% if n_facets_hidden %}{{ n_facets_hidden }} other {{ 'facet is' if n_facets_hidden == 1 else 'facets are' }} hidden while the facet audit decisions are pending; {{ 'it stays' if n_facets_hidden == 1 else 'they stay' }} in the data, plots and API. {% endif %}<a href="/help#facet-effects">About facets and their effects</a></p>
+    {% if facet_tests and facet_tests.n_units_tested %}{{ fx_intro('dataset') }}
+    {% if facet_tests.cohort %}<p class="fx-intro muted" id="fx-cohort">Cohort {{ facet_tests.cohort.cohort_label }}, {{ facet_tests.cohort.role }}{% if not facet_tests.cohort.counted %} (not counted towards replication across datasets){% endif %}; from the DRAFT cohort selection table.</p>
+    {% else %}<p class="fx-intro muted" id="fx-cohort">This dataset is not in the DRAFT cohort selection table, so it does not count towards replication across datasets.</p>{% endif %}
+    {% endif %}
+    {% if facet_tests and facet_tests.dataset_changed %}<p class="fx-intro" id="fx-changed" style="color:#7a4b0c">The dataset has changed since the facet tests were run; the effects describe the earlier version.</p>{% endif %}
+    {% if facet_tests and not facet_tests.n_units_tested %}
+    <p class="fx-none" id="fx-not-tested">Effects: not tested{% if facet_tests.reason %} ({{ facet_tests.reason }}){% endif %}. Facet tests need a human primary dataset with a raw counts layer, at least 6 donors and at least 3 donors in each level.</p>
+    {% endif %}
     <div class="table-wrap">
     <table class="ds-facets">
       <thead><tr><th>Facet</th><th>Author column</th><th>Mapping</th><th>Value translation <span class="muted">(cells)</span></th><th class="num">Cells</th></tr></thead>
@@ -732,11 +761,20 @@
           <td data-label="Values">{{ translation(f, max_rows=6) }}</td>
           <td class="num" data-label="Cells">{{ coverage(f) }}</td>
         </tr>
+        {% if _fx.get(f.facet) %}{{ _fx_effects_row(f.facet, _fx[f.facet]) }}{% endif %}
+        {% endfor %}
+        {% for col in _fx_extra %}
+        <tr class="ds-facet-row" data-facet="{{ col }}">
+          <td data-label="Facet"><a class="fct-name" href="/facets/{{ col|urlencode }}">{{ col[4:] }}</a></td>
+          <td colspan="4" class="fm-note">Not published as a column of this dataset; the facet test derived it ({% if col == 'ant_apoe_carrier' %}any e4 allele in ant_apoe{% else %}see the model details{% endif %}).</td>
+        </tr>
+        {{ _fx_effects_row(col, _fx[col]) }}
         {% endfor %}
       </tbody>
     </table>
     </div>
   </div>
+  {{ fx_script() }}
   {% endif %}
 
   </div>

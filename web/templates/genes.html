@@ -288,6 +288,11 @@
 <div id="gene-missing" class="muted" style="font-size:11px; margin-top:10px"></div>
 <div id="gene-error" class="plot-status"></div>
 
+{% if ',' not in gene %}
+{% from "_facet_effects.html" import fx_gene_panel %}
+{{ fx_gene_panel(gene) }}
+{% endif %}
+
 <script>
 (function () {
   var GENE  = {{ gene|tojson }};

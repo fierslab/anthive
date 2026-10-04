@@ -85,11 +85,14 @@ sys.path.insert(0, str(lib_dir))
 from anthive_db import AnthiveDB, install_portable_layer_views, safe_ident
 from canonical_columns import BACKCOMPAT_LEGACY_NAMES  # type: ignore
 from config import get_config
+from config import facet_hidden_by_config, get_facet_results_dir, get_facets_visible
 from config import (get_auth_settings, get_catalog_scan_mode, get_data_folder,
                     get_duckdb_temp_dir, get_library_dir,
                     get_library_index_dir, get_model_cache_dir, get_log_dir, get_state_dir, get_tmp_dir,
                     get_webapp_dir)
 from library_service import LIBRARY_S3_PREFIX, LibraryService
+import facet_results as facet_results_lib
+from facet_results import FacetResults
 import de_storage as lib_de_storage
 from geneset import (
     GenesetRegistry,
@@ -3756,6 +3759,264 @@ def get_de_contrast_rows(
         "n_rows": len(rows),
         "rows": rows,
     }
+
+
+# ── Donor-level facet test results (read-only, lib/facet_results.py) ─────────
+#
+# Written by bin/annot/ant-facet-test (genes) and ant-facet-test-modules
+# (modules) under <h5adstore>/_facet_tests/<group>/. The underscore folder is
+# outside the catalogue scan; these endpoints only read it. Results are
+# visible to everyone who can see the dataset. Registered before the greedy
+# /databases/{db_id:path}/genes route, which would otherwise read
+# ".../facet-tests/genes" as a db_id ending in "facet-tests".
+
+_facet_results_reader: Optional[FacetResults] = None
+_facet_results_lock = Lock()
+
+
+def _facet_results() -> FacetResults:
+    """The shared reader over ``facet_results_dir`` (default <h5adstore>/_facet_tests)."""
+    global _facet_results_reader
+    with _facet_results_lock:
+        if _facet_results_reader is None:
+            # Default follows the served store (which --data-folder may
+            # override), not the config's h5adstore.
+            results_dir = facet_results_lib.default_results_dir(registry.data_folder)
+            try:
+                cfg = get_config()
+                if os.environ.get('ANTHIVE_FACET_RESULTS_DIR') or cfg.get('facet_results_dir'):
+                    results_dir = get_facet_results_dir(cfg)
+            except Exception as exc:
+                log.warning("facet_results_dir: %s; using %s", exc, results_dir)
+            _facet_results_reader = FacetResults(results_dir)
+        return _facet_results_reader
+
+
+def _facet_results_location(db_id: str) -> Tuple[str, str]:
+    """(collection folder, file stem) of a served dataset; 404 when unknown."""
+    if registry is None or db_id not in registry.databases:
+        raise HTTPException(status_code=404, detail=f"Database '{db_id}' not found")
+    md_path = registry._db_md_bases.get(db_id)
+    if md_path is not None:
+        try:
+            relative = Path(md_path).resolve().relative_to(registry.data_folder)
+            if len(relative.parts) >= 2:
+                return relative.parts[0], Path(md_path).stem
+        except ValueError:
+            pass
+    rel_path = (registry._db_extra.get(db_id) or {}).get('rel_path')
+    if rel_path:
+        rel = Path(rel_path)
+        stem = rel.name
+        for suffix in ('.duckdb', '.h5ad'):
+            if stem.endswith(suffix):
+                stem = stem[: -len(suffix)]
+        if rel.parts:
+            return rel.parts[0], stem
+    raise HTTPException(status_code=404, detail=f"Database '{db_id}' has no store location")
+
+
+def _facet_rows_response(frame: "pd.DataFrame", n_matching: int, fmt: str, db_id: str,
+                         kind: str, params: Dict[str, Any]):
+    if fmt == 'csv':
+        filename = f"{db_id.replace('/', '_')}_facet_{kind}.csv"
+        return Response(content=facet_results_lib.rows_to_csv(frame), media_type='text/csv',
+                        headers={'Content-Disposition': f'attachment; filename="{filename}"'})
+    return {'db_id': db_id, **params, 'n_matching': n_matching, 'n_returned': int(len(frame)),
+            'rows': facet_results_lib.records(frame)}
+
+
+_FACET_ROWS_LIMIT_JSON = 2000
+_FACET_ROWS_LIMIT_CSV = 100000
+
+
+def _facet_rows_limit(limit: int, fmt: str) -> int:
+    if fmt not in ('json', 'csv'):
+        raise HTTPException(status_code=400, detail="format must be 'json' or 'csv'")
+    cap = _FACET_ROWS_LIMIT_CSV if fmt == 'csv' else _FACET_ROWS_LIMIT_JSON
+    if limit > cap:
+        raise HTTPException(status_code=400, detail=f"limit must be <= {cap} for format={fmt}")
+    return limit
+
+
+@app.get("/databases/{db_id:path}/facet-tests", tags=["facet-tests"])
+def get_facet_tests(db_id: str):
+    """Donor-level facet test results of one dataset: one summary row per
+    (facet, cell type stratum).
+
+    Exploratory. The unit of replication is the donor: raw counts are summed
+    per (donor, cell type) and genes are tested with limma-voom
+    (``~ facet + sex + age + pmi + batch`` where available); module scores are
+    averaged per donor (``cell_mean``, from the stored per-cell scores) or
+    computed on the pseudobulk (``pseudobulk``) and tested with OLS plus 1,000
+    label permutations. Contrasts: sex (m vs f), disease (AD vs control,
+    provisional), apoe_carrier (e4 carrier vs non-carrier), braak (trend per
+    stage). See ``doc/DESIGN_facet_testing.md``.
+
+    Response::
+
+        {
+          "db_id": "G24/MMG",
+          "status": "tested",            # tested | not_tested | not_run
+          "reason": null,                # why not tested (manifest or run log)
+          "n_units": 4, "n_units_tested": 4, "q_threshold": 0.05,
+          "dataset_changed": false,      # dataset sha256 differs from the run's
+          "files": {"genes": true, "modules": true, "composition": true},
+          "runs": {"genes": {tool, timestamp_utc, seed, versions, dataset_sha256,
+                             anthive4_git, h5adstore_git, counts_layer, batch_column,
+                             n_cells, n_donors, multi_tissue_donors, method, ...},
+                   "modules": {..., n_permutations, sources, no_counts, genesetstore_git}},
+          "units": [{
+            "facet": "sex", "cell_type": "microglial cell",
+            "celltype_source": "constant_all_cells",
+            "tested": true, "status_genes": "ok", "status_modules": "ok",
+            "reason": null,              # only on untested units
+            "contrast": "m_vs_f", "level_ref": "f", "level_test": "m",
+            "level_counts": {"f": 51, "m": 33},   # donors with a sample per level
+            "n_donors": 84, "n_donors_ref": 51, "n_donors_test": 33,
+            "n_donors_dropped_covariate": 3, "n_cells_in_stratum": 38905,
+            "covariates": ["age", "pmi"], "covariates_omitted": [],
+            "flags": {"descriptive_only": false, "n_lt5": false, "provisional": false,
+                      "composition_flag": false, "composition_p": 1.0,
+                      "batch_used": false, "batch_confounded": false},
+            "genes": {"n_tested": 16290, "n_q05": 89},
+            "modules": [{"method": "cell_mean", "source": "geneset", "n_modules": 128,
+                         "n_q05_param": 4, "n_q05_perm": 3}, ...],
+            "model": {
+              "stratum": {"cell_type", "source", "description"},
+              "facet_term": "m vs f: coefficient = m minus f (f is the reference)",
+              "donors": {"per_level", "n_analysed", "n_dropped_missing_covariate",
+                         "min_cells_per_donor", "min_donors_per_level"},
+              "descriptive_only_rule": "...",
+              "genes":   {"unit_of_analysis", "formula": "expression ~ sex + age_z + pmi_z",
+                          "covariates": [{"name", "status": "included|dropped|not used",
+                                          "term", "reason"}],
+                          "method", "multiple_testing", "n_genes_tested",
+                          "tool", "seed", "run_date", "versions", "anthive4_git",
+                          "dataset_sha256"},
+              "modules": {"unit_of_analysis": {"cell_mean": "...", "pseudobulk": "..."},
+                          "formula": "score ~ ...", "covariates", "method",
+                          "n_permutations", "multiple_testing", "sources", "no_counts",
+                          "tool", "seed", "run_date", "versions", ...}
+            }
+          }]
+        }
+
+    ``model`` is built from the run manifests; anything a manifest does not
+    record reads "not recorded". ``genes`` / ``modules`` are null when that
+    run has no record of the unit.
+
+    ``descriptive_only``: a level has fewer than 5 donors (Braak: fewer than
+    10), so p, q, t and CI are NULL and only the effect estimate is reported.
+    ``composition_flag``: the fraction of the donor's cells in this stratum
+    differs with the facet (p < 0.05, uncorrected); an effect may then reflect
+    composition rather than expression. ``provisional``: disease vocabulary is
+    not settled; results will change. Missing or partly written files count
+    as not available.
+    """
+    group_folder, stem = _facet_results_location(db_id)
+    current_sha = (registry.metadata_cache.get(db_id) or {}).get('sha256')
+    return _facet_results().summary(db_id, group_folder, stem, current_sha256=current_sha)
+
+
+@app.get("/databases/{db_id:path}/facet-tests/genes", tags=["facet-tests"])
+def get_facet_test_genes(
+    db_id: str,
+    facet: Optional[str] = Query(None, description="sex | disease | apoe_carrier | braak"),
+    cell_type: Optional[str] = Query(None, description="Cell type stratum, as in the summary"),
+    celltype_source: Optional[str] = Query(None, description="Stratifier, e.g. constant_all_cells"),
+    gene: Optional[str] = Query(None, description="One gene symbol (case-insensitive)"),
+    q: float = Query(0.05, gt=0, le=1, description="Keep q_value < q; q=1 keeps every row, descriptive-only ones included"),
+    sort: str = Query('q', description="q (then |logFC|) | effect (|logFC|) | p | gene"),
+    limit: int = Query(100, ge=1, description="Rows returned (max 2000 for json, 100000 for csv)"),
+    format: str = Query('json', description="json | csv"),
+):
+    """Gene-level donor pseudobulk results (limma-voom), filtered and sorted.
+
+    Rows: ``facet, cell_type, celltype_source, contrast, level_ref,
+    level_test, gene, logFC, se, ci_low, ci_high, t, p_value, q_value,
+    ave_expr`` (mean log2 CPM), ``n_donors, n_donors_ref, n_donors_test,
+    descriptive_only, provisional``. q is Benjamini-Hochberg within one
+    (dataset, stratum, facet). Exploratory. 404 ``not available`` when the
+    dataset has no gene results.
+    """
+    limit = _facet_rows_limit(limit, format)
+    group_folder, stem = _facet_results_location(db_id)
+    try:
+        result = _facet_results().gene_rows(group_folder, stem, facet=facet, cell_type=cell_type,
+                                            celltype_source=celltype_source, q=q, sort=sort,
+                                            limit=limit, gene=gene)
+    except facet_results_lib.FacetResultsError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if result is None:
+        raise HTTPException(status_code=404, detail='gene-level facet test results not available')
+    frame, n_matching = result
+    return _facet_rows_response(frame, n_matching, format, db_id, 'genes', {
+        'facet': facet, 'cell_type': cell_type, 'celltype_source': celltype_source,
+        'q': q, 'sort': sort, 'limit': limit})
+
+
+@app.get("/databases/{db_id:path}/facet-tests/modules", tags=["facet-tests"])
+def get_facet_test_modules(
+    db_id: str,
+    facet: Optional[str] = Query(None, description="sex | disease | apoe_carrier | braak"),
+    cell_type: Optional[str] = Query(None, description="Cell type stratum, as in the summary"),
+    celltype_source: Optional[str] = Query(None, description="Stratifier, e.g. constant_all_cells"),
+    method: Optional[str] = Query(None, description="cell_mean | pseudobulk"),
+    source: Optional[str] = Query(None, description="geneset | ucell | gene_list"),
+    module: Optional[str] = Query(None, description="One module name (case-insensitive)"),
+    q: float = Query(0.05, gt=0, le=1, description="q threshold; q=1 keeps every row"),
+    q_by: str = Query('either', description="param (q_param) | perm (q_perm) | either"),
+    sort: str = Query('q', description="q (q_param, then |std_effect|) | q_perm | effect | module"),
+    limit: int = Query(100, ge=1, description="Rows returned (max 2000 for json, 100000 for csv)"),
+    format: str = Query('json', description="json | csv"),
+):
+    """Module-level donor results (OLS on donor-level module scores, with
+    permutation p values), filtered and sorted.
+
+    Rows: ``facet, cell_type, celltype_source, contrast, level_ref,
+    level_test, method, source, catalog, module, estimate, se, ci_low,
+    ci_high, std_effect`` (estimate / SD of the donor-level score), ``t, df,
+    p_param, q_param, p_perm, q_perm, n_perm_effective, n_genes_requested,
+    n_genes_found, n_donors(_ref/_test), descriptive_only, provisional,
+    no_counts``. BH families are (dataset, stratum, facet, method, source).
+    With 1,000 permutations a single strong module cannot reach q_perm < 0.05;
+    read q_param and p_perm together. Exploratory.
+    """
+    limit = _facet_rows_limit(limit, format)
+    group_folder, stem = _facet_results_location(db_id)
+    try:
+        result = _facet_results().module_rows(group_folder, stem, facet=facet, cell_type=cell_type,
+                                              celltype_source=celltype_source, method=method,
+                                              source=source, q=q, q_by=q_by, sort=sort,
+                                              limit=limit, module=module)
+    except facet_results_lib.FacetResultsError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if result is None:
+        raise HTTPException(status_code=404, detail='module-level facet test results not available')
+    frame, n_matching = result
+    return _facet_rows_response(frame, n_matching, format, db_id, 'modules', {
+        'facet': facet, 'cell_type': cell_type, 'celltype_source': celltype_source,
+        'method': method, 'source': source, 'q': q, 'q_by': q_by, 'sort': sort, 'limit': limit})
+
+
+@app.get("/databases/{db_id:path}/facet-tests/volcano.png", tags=["facet-tests"])
+def get_facet_test_volcano(
+    db_id: str,
+    facet: str = Query(..., description="sex | disease | apoe_carrier | braak"),
+    cell_type: str = Query(..., description="Cell type stratum"),
+    celltype_source: Optional[str] = Query(None, description="Stratifier"),
+):
+    """Small volcano plot (log2 fold change against -log10 p) of one unit's
+    gene results; genes at q < 0.05 in colour (red up, blue down), the
+    smallest q labelled. 404 when the unit has no p values (missing results
+    or a descriptive-only unit)."""
+    group_folder, stem = _facet_results_location(db_id)
+    png = _facet_results().volcano_png(group_folder, stem, facet, cell_type, celltype_source)
+    if png is None:
+        raise HTTPException(status_code=404, detail='no gene-level p values for this unit')
+    return Response(content=png, media_type='image/png',
+                    headers={'Cache-Control': 'private, max-age=300'})
 
 
 @app.get("/databases/{db_id:path}/genes", tags=["genes"])
@@ -12609,6 +12870,160 @@ def _build_facet_inventory() -> List[Dict[str, Any]]:
     return rows
 
 
+_FACETS_VISIBLE_CACHE: Dict[str, Any] = {}
+
+
+def _facets_visible() -> List[str]:
+    """The configured visible facets ([] = all), read once per process."""
+    if 'value' not in _FACETS_VISIBLE_CACHE:
+        try:
+            _FACETS_VISIBLE_CACHE['value'] = get_facets_visible(get_config())
+        except Exception as exc:  # a broken config must not take /facets down
+            log.warning("facets_visible: %s; showing all facets", exc)
+            _FACETS_VISIBLE_CACHE['value'] = []
+    return list(_FACETS_VISIBLE_CACHE['value'])
+
+
+@app.get("/facets/{facet_name}/tests", tags=["facet-tests"])
+def get_facet_tests_across_datasets(
+    facet_name: str,
+    top_genes: int = Query(5, ge=0, le=50, description="Genes at q < 0.05 listed per row"),
+):
+    """Donor-level facet test results of one facet in every tested dataset.
+
+    One row per tested (dataset, cell type stratum), sorted by donors
+    analysed (most first). Each row carries the fields of a
+    ``GET /databases/{id}/facet-tests`` unit (contrast, donors per level,
+    covariates, flags, genes and modules at q < 0.05) plus ``db_id``,
+    ``title``, ``group``, ``top_genes`` (``gene``, ``logFC``, ``q_value``)
+    and ``run_date``. ``not_tested`` lists datasets with results whose units
+    for this facet could not be tested, with the reason.
+
+    No pooling: datasets are tested independently and share donors (ROSMAP,
+    SEA-AD, MADRC, ...), so rows are not independent replications. A
+    cross-dataset meta-analysis is not part of this endpoint. Exploratory.
+
+    ``facet_name`` is ``ant_sex`` or ``sex`` (also disease, apoe_carrier,
+    braak). Other names return 404.
+    """
+    test_facet = _tested_facet(facet_name)
+    overview = _facet_results().facet_overview(test_facet, _facet_test_datasets(), top_genes=top_genes)
+    return {**overview, 'facet_column': 'ant_' + test_facet,
+            'q_threshold': facet_results_lib.Q_THRESHOLD}
+
+
+def _tested_facet(facet_name: str) -> str:
+    """``ant_braak`` / ``braak`` -> ``braak``; 404 for facets that are not tested."""
+    test_facet = facet_name[4:] if facet_name.startswith('ant_') else facet_name
+    if test_facet not in facet_results_lib.FACET_ORDER:
+        raise HTTPException(status_code=404,
+                            detail=f"'{facet_name}' is not tested (tested facets: "
+                                   f"{', '.join('ant_' + f for f in facet_results_lib.FACET_ORDER)})")
+    return test_facet
+
+
+def _facet_test_datasets() -> List[Dict[str, Any]]:
+    """Every served dataset with its result location, title and sha256."""
+    datasets: List[Dict[str, Any]] = []
+    for db_id in sorted(registry.databases):
+        try:
+            group_folder, stem = _facet_results_location(db_id)
+        except HTTPException:
+            continue
+        meta = registry.metadata_cache.get(db_id) or {}
+        datasets.append({'db_id': db_id, 'group_folder': group_folder, 'stem': stem,
+                         'title': meta.get('title') or db_id,
+                         'group': (meta.get('collection') or {}).get('group') or group_folder,
+                         'sha256': meta.get('sha256')})
+    return datasets
+
+
+
+
+
+@app.get("/facets/{facet_name}/effects/top", tags=["facet-tests"])
+def get_facet_recurring_genes(
+    facet_name: str,
+    cell_type: Optional[str] = Query(None, description="Cell type label; default: the one with most cohorts"),
+    n: int = Query(50, ge=1, le=500, description="Rows returned"),
+):
+    """Recurring genes of one facet in one cell type: genes ranked by the
+    number of independent cohorts with q < 0.05 and the same sign, then by
+    cohorts tested (fewer first, so 2 of 2 ranks above 2 of 5), then by the
+    largest absolute log2 fold change. Rows: ``gene, cohorts_sig_same_sign,
+    cohorts_tested, direction, sign_discordant, units_up, units_down,
+    max_abs_logFC, cohorts, apoe_locus``; ``cell_types`` lists the labels with
+    their counted cohorts.
+
+    Exploratory. Each unit is one dataset and cell type, tested separately on
+    donor pseudobulks (limma-voom, n = donors); nothing is pooled and there is
+    no meta-analysis. Cohorts come from the DRAFT cohort selection table:
+    ``replication`` follows ``definition`` (q < 0.05 with the same sign in k of
+    m independent cohorts, a cohort counts once, cell type labels matched
+    exactly).
+    """
+    test_facet = _tested_facet(facet_name)
+    return _facet_results().recurring_genes(test_facet, _facet_test_datasets(), cell_type=cell_type, limit=n)
+
+
+
+@app.get("/facets/{facet_name}/effects", tags=["facet-tests"])
+def get_facet_gene_effects(
+    facet_name: str,
+    gene: str = Query(..., description="Gene symbol (case-insensitive)"),
+    cell_type: Optional[str] = Query(None, description="Restrict to one cell type label"),
+):
+    """Result card of one gene for one facet: every tested (dataset, cell
+    type) unit with log2 fold change, 95% CI, q, donors per level, cohort and
+    role, flags and model; ``replication`` per cell type; ``notes``
+    (exploratory, provisional disease vocabulary, APOE locus note for APOE,
+    APOC1, APOC1P1, TOMM40, NECTIN2, PVRL2).
+
+    Exploratory. Each unit is one dataset and cell type, tested separately on
+    donor pseudobulks (limma-voom, n = donors); nothing is pooled and there is
+    no meta-analysis. Cohorts come from the DRAFT cohort selection table:
+    ``replication`` follows ``definition`` (q < 0.05 with the same sign in k of
+    m independent cohorts, a cohort counts once, cell type labels matched
+    exactly).
+    """
+    test_facet = _tested_facet(facet_name)
+    return _facet_results().gene_effects(test_facet, gene, _facet_test_datasets(), cell_type=cell_type)
+
+
+
+@app.get("/genes/{gene}/facet-effects", tags=["facet-tests"])
+def get_gene_facet_effects(gene: str):
+    """Result cards of one gene for every tested facet (sex, disease,
+    apoe_carrier, braak), keyed by facet; same shape as
+    ``/facets/{facet}/effects``. The first call per facet reads every result
+    file (a few seconds); later calls are cached until a file changes.
+
+    Exploratory. Each unit is one dataset and cell type, tested separately on
+    donor pseudobulks (limma-voom, n = donors); nothing is pooled and there is
+    no meta-analysis. Cohorts come from the DRAFT cohort selection table:
+    ``replication`` follows ``definition`` (q < 0.05 with the same sign in k of
+    m independent cohorts, a cohort counts once, cell type labels matched
+    exactly).
+    """
+    datasets = _facet_test_datasets()
+    reader = _facet_results()
+    return {'gene': gene,
+            'facets': {facet: reader.gene_effects(facet, gene, datasets)
+                       for facet in facet_results_lib.FACET_ORDER}}
+
+
+
+@app.get("/facets/cohorts", tags=["facet-tests"])
+def get_facet_cohorts():
+    """The DRAFT cohort selection table used to count independent cohorts:
+    one row per dataset with ``cohort``, ``cohort_label``, ``role``,
+    ``cell_class``, ``counted`` and ``note``. Empty when the table is
+    missing. Registered before ``/facets/{name}``."""
+    table = _facet_results().cohorts()
+    return {'status': 'DRAFT', 'n_datasets': len(table),
+            'datasets': [{'db_id': db_id, **record} for db_id, record in sorted(table.items())]}
+
+
 @app.get("/facets", tags=["facets"])
 async def list_facets():
     """Return the fleet-wide inventory of ``ant_*`` facets.
@@ -12629,6 +13044,11 @@ async def list_facets():
           ]
         }
 
+    ``hidden_by_config`` (unreleased) is true for facets outside the site's
+    ``facets_visible`` list; the web UI does not show those for now, but they
+    stay in the data and in every API listing. ``facets_visible`` is the list
+    itself (empty means all are shown).
+
     ``signal_strength`` is the max variance-explained ``value`` across all
     rows in ``module_variability.parquet`` where ``tag_column == facet``.
     Zero when the facet has no signal recorded (or when the parquet is
@@ -12637,7 +13057,10 @@ async def list_facets():
     def _sync() -> List[Dict[str, Any]]:
         return _build_facet_inventory()
     rows = await asyncio.to_thread(_sync)
+    visible = _facets_visible()
+    rows = [{**row, 'hidden_by_config': facet_hidden_by_config(row['facet'], visible)} for row in rows]
     return {"n_facets": len(rows), "facets": rows,
+            "facets_visible": visible,
             "definitions_status": _facet_definitions_status()}
 
 
@@ -12883,6 +13306,7 @@ async def get_facet_detail(
         'facet': facet_name,
         'type': facet_type,
         'type_mixed': type_mixed,
+        'hidden_by_config': facet_hidden_by_config(facet_name, _facets_visible()),
         'definition': _facet_definition(facet_name),
         'definitions_status': _facet_definitions_status(),
         'n_datasets': len(dataset_kinds),
@@ -13154,6 +13578,7 @@ def get_dataset_facets(
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Database '{db_id}' not found")
     show_hidden = _caller_is_admin(request)
+    visible = _facets_visible()
     entries = _dataset_facet_projection(db_id, with_counts=counts)
     facets_out: List[Dict[str, Any]] = []
     for entry in entries:
@@ -13162,6 +13587,7 @@ def get_dataset_facets(
         row['label'] = definition['label']
         row['summary'] = definition['summary']
         row['defined'] = definition['defined']
+        row['hidden_by_config'] = facet_hidden_by_config(entry['facet'], visible)
         facets_out.append(row)
     return {
         'db_id': db_id,

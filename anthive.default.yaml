@@ -46,6 +46,11 @@ cache_expiration_days: 7
 # Data store root (the h5adstore). Env: ANTHIVE_H5ADSTORE.
 h5adstore: data/h5adstore
 
+# Donor-level facet test results (ant-facet-test, ant-facet-test-modules),
+# read by ant-serve for /databases/{id}/facet-tests and /facets/{name}/...
+# Empty means <h5adstore>/_facet_tests. Env: ANTHIVE_FACET_RESULTS_DIR.
+facet_results_dir: ''
+
 # Paper library: a separate repository of BibLaTeX-compatible .md sidecars
 # (plus PDFs, synced via S3). See doc/LIBRARY.md. Env: ANTHIVE_LIBRARY.
 library: data/library
@@ -395,6 +400,14 @@ grist:
 # Where the "Report an issue" entry in the web UI's user menu points
 # (opens in a new tab). An empty string hides the entry.
 issue_tracker_url: https://gitlab.kuleuven.be/bdslab/anthive/anthive4/-/issues
+
+# Facets shown on the /facets pages and in the dataset page's facet card.
+# Temporary: while the facet audit decisions are pending, only the facets the
+# donor-level facet tests analyse are shown. Other ant_* columns stay in the
+# data, SQL, plots and API listings (the /facets API marks them
+# hidden_by_config). An empty list or null shows every facet.
+# Env: ANTHIVE_FACETS_VISIBLE (comma separated, "*" for all).
+facets_visible: [ant_sex, ant_disease, ant_apoe_carrier, ant_braak]
 
 # Folder the in-app help links to for detailed docs (doc/MCP_CLIENTS.md,
 # doc/MCP_LINKS.md, ...). They live in the repo so they can be corrected
