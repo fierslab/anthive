@@ -621,6 +621,9 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
         sample_n_cells = keep.set_index('sample_idx')['n_cells']
 
         modules = sidecar_modules(sidecar, sources)
+        if modules.empty:
+            manifest.update(status='skipped', reason=f'scores sidecar has no rows for sources {list(sources)}')
+            return manifest
         catalog_report: Dict[str, Dict[str, int]] = {}
         symbols = aft.gene_symbols(conn)
         module_genes, gene_counts = load_module_genes(registry, modules, symbols)
@@ -803,11 +806,12 @@ def summarize_results(out_root: Path, out_dir: Path, cohort_table: Optional[Path
     """Tables over all module result parquets: units, hits, recurring modules.
 
     Recurrence counts (dataset, stratum) units where a module is significant at
-    q_perm < 0.05 AND q_param < 0.05 with the same estimate sign, restricted to
-    non-descriptive units. Datasets are first collapsed into cohorts with the
-    DRAFT cohort selection table (donor-overlap caveat of the design note):
-    only datasets whose role there is not a duplicate/supplement/secondary are
-    counted as independent, when the table is given.
+    q_perm < 0.05 AND q_param < 0.05, restricted to non-descriptive units, and
+    reports how many positive and negative signs occur. Datasets are mapped to
+    cohorts with the DRAFT cohort selection table (donor-overlap caveat of the
+    design note): datasets with a role of duplicate / supplement / do not pool /
+    never alongside / alternative B are dropped, and recurrence is counted over
+    distinct cohorts (``n_cohorts``), not files (``n_datasets``).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     files = sorted(out_root.glob('*/*.facet_module_tests.parquet'))
@@ -834,20 +838,28 @@ def summarize_results(out_root: Path, out_dir: Path, cohort_table: Optional[Path
     print(per_facet.to_string(index=False))
 
     eligible = table[~table['n_lt5']].copy()
+    eligible['cohort'] = eligible['db_id']
     if cohort_table is not None and cohort_table.exists():
         cohorts = pd.read_csv(cohort_table, sep='\t')
-        excluded_roles = cohorts['role'].fillna('').str.contains('duplicate|supplement|secondary|integrat|subset',
-                                                                  case=False, regex=True)
-        independent = set(cohorts.loc[~excluded_roles, 'db_id'])
-        eligible = eligible[eligible['db_id'].isin(independent)]
+        excluded_roles = cohorts['role'].fillna('').str.contains(
+            'duplicate|supplement|do not|never|alternative B|T20 only', case=False, regex=True)
+        cohort_of = dict(zip(cohorts['db_id'], cohorts['cohort']))
+        allowed = set(cohorts.loc[~excluded_roles, 'db_id'])
+        eligible = eligible[eligible['db_id'].isin(allowed)].copy()
+        eligible['cohort'] = eligible['db_id'].map(cohort_of)
     recurring = (eligible[eligible['significant']]
                  .groupby(['facet', 'method', 'source', 'catalog', 'module'])
-                 .agg(n_units=('unit', 'nunique'), n_datasets=('db_id', 'nunique'),
+                 .agg(n_cohorts=('cohort', 'nunique'), n_datasets=('db_id', 'nunique'), n_units=('unit', 'nunique'),
                       n_pos=('sign', lambda s: int((s > 0).sum())), n_neg=('sign', lambda s: int((s < 0).sum())),
                       median_std_effect=('std_effect', 'median')).reset_index())
     recurring['sign_consistent'] = (recurring['n_pos'] == 0) | (recurring['n_neg'] == 0)
-    recurring = recurring.sort_values(['facet', 'method', 'n_datasets'], ascending=[True, True, False])
+    recurring = recurring.sort_values(['facet', 'method', 'n_cohorts', 'n_datasets'],
+                                      ascending=[True, True, False, False])
     recurring.to_csv(out_dir / 'module_recurring.tsv', sep='\t', index=False)
+    # also: how many cohorts were testable per facet/module family (denominator for recurrence)
+    testable = (eligible.groupby(['facet', 'method', 'source'])
+                .agg(n_cohorts_testable=('cohort', 'nunique'), n_datasets_testable=('db_id', 'nunique')).reset_index())
+    testable.to_csv(out_dir / 'module_testable_cohorts.tsv', sep='\t', index=False)
     calibration_rows = []
     for manifest_path in sorted(out_root.glob('*/*.facet_module_run_manifest.json')):
         manifest = json.loads(manifest_path.read_text())
