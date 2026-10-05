@@ -4,9 +4,8 @@ Targets the anthive REST API contract. See
 `https://codeberg.org/mfiers/pyvark` for sources and
 `https://codeberg.org/mfiers/vark` for the Go CLI that ships the same surface.
 
-API surface verified against **REST API 2.42.1** plus the unreleased facet
-test, donor-group and exclude_secondary additions on anthive main
-(2026-10-05). Older servers still work for every endpoint they expose; new params degrade
+API surface verified against **REST API 2.43.0** (facet tests, donor groups,
+exclude_secondary, facet engine v2, replicate fields). Older servers still work for every endpoint they expose; new params degrade
 to "server ignores it" rather than client-side errors.
 
 Works in standard Python 3.9+, in Pyodide / JupyterLite, and inside
@@ -247,7 +246,7 @@ class AnthiveClient:
     """
 
     #: Anthive REST API version this client release was last verified against.
-    API_TARGET = "2.42.1"
+    API_TARGET = "2.43.0"
 
     #: Server-side plot geoms the client knows about. Validation prevents a
     #: round-trip on typos. Update with every new server geom.
@@ -443,8 +442,7 @@ class AnthiveClient:
         older than 2.37 omit the field, in which case the client treats
         the row as primary.
 
-        Lineage fields (anthive main after 2.42.1, unreleased at the
-        time of pyvark 0.8.0): ``designation`` (``'primary'``,
+        Lineage fields (REST API 2.43.0+): ``designation`` (``'primary'``,
         ``'reanalysis'`` or ``'unresolved'``, from ``is_secondary:
         false`` / ``true`` / no key in the dataset's ``.md``),
         ``reanalysis_of`` (list of db_ids, empty unless reanalysis),
@@ -454,7 +452,7 @@ class AnthiveClient:
         persons, so do not count them as independent donors; see
         :meth:`get_donor_groups`.
 
-        Replicate fields (anthive main after 2.42.1): ``replicate_unit``
+        Replicate fields (REST API 2.43.0+): ``replicate_unit``
         (``'donor'``, ``'animal'``, ``'sample'`` or ``'none'``, what a
         biological replicate is in this dataset), ``replicate_column``
         (the obs column that identifies a replicate),
@@ -679,7 +677,7 @@ class AnthiveClient:
         the server cache.
 
         ``exclude_secondary`` (default ``True``, the server's default on
-        anthive main after 2.42.1): secondary datasets (reanalyses of
+        REST API 2.43.0+): secondary datasets (reanalyses of
         cells another dataset serves) are left out of ``results`` and of
         ``cross_db_cv``; the response then carries
         ``n_excluded_secondary`` and ``exclude_secondary`` and each
@@ -1344,7 +1342,7 @@ class AnthiveClient:
             format: ``'json'`` (the server's dict), ``'dataframe'``
                 (needs pandas), ``'csv'`` or ``'tsv'`` (text).
             exclude_secondary: Default ``True`` (the server's default on
-                anthive main after 2.42.1): rows of secondary datasets
+                REST API 2.43.0+): rows of secondary datasets
                 (reanalyses) are left out unless ``db_id`` names one.
                 JSON then carries ``n_excluded_secondary``, CSV / TSV the
                 ``X-Excluded-Secondary`` header. Sent only when ``False``.
@@ -1515,7 +1513,7 @@ class AnthiveClient:
         ignored on newer servers). ``signal_strength`` is per-cell
         (descriptive) and deprecated: do not use it to rank facets.
 
-        Newer servers (anthive main after 2.42.1) add ``label``,
+        Newer servers (REST API 2.43.0+) add ``label``,
         ``summary`` and ``defined`` (the published definition) and
         ``hidden_by_config``: True for facets outside the site's
         ``facets_visible`` list. The web UI hides those, the API still
@@ -1567,7 +1565,7 @@ class AnthiveClient:
         ``module_variability.parquet`` filtered on this facet, wrapped
         as ``{rows, n_total, truncated}``).
 
-        Newer servers (anthive main after 2.42.1) add:
+        Newer servers (REST API 2.43.0+) add:
 
         - ``definition`` (``label``, ``summary``, ``definition``,
           ``kind``, ``values``, ``missing``, ``hint_keywords``,
@@ -1624,8 +1622,7 @@ class AnthiveClient:
 
     def get_database_facets(self, db_id: str, counts: bool = True) -> Dict:
         """``GET /databases/{db_id}/facets``. How one dataset's author
-        columns project onto the ``ant_*`` facets (anthive main after
-        2.42.1).
+        columns project onto the ``ant_*`` facets (REST API 2.43.0+).
 
         Returns ``{db_id, n_facets, facets, hidden_sources_visible,
         definitions_status}``. One ``facets`` entry per facet the
@@ -1705,7 +1702,7 @@ class AnthiveClient:
             f'/databases/{db_id}/gene-variance-by-facet', params=params,
         )
 
-    # ── Donor-level facet tests (anthive main after 2.42.1) ─────────────
+    # ── Donor-level facet tests (REST API 2.43.0+) ─────────────
     #
     # Read-only views over the output of ant-facet-test (genes, limma-voom
     # on donor pseudobulks) and ant-facet-test-modules (module scores, OLS
