@@ -149,6 +149,13 @@ def make_dataset(tmp_path: Path, n_f: int = 10, n_m: int = 10, organism: str = '
 # Pure functions
 # ---------------------------------------------------------------------------
 
+def test_facet_notes_from_md_normalises_names_and_whitespace():
+    assert aft.facet_notes_from_md({}) == {}
+    assert aft.facet_notes_from_md({'facet_notes': 'nonsense'}) == {}
+    notes = aft.facet_notes_from_md({'facet_notes': {'ant_disease': 'a  proxy\n note', 'sex': '', 'x': 5}})
+    assert notes == {'disease': 'a proxy note'}
+
+
 def test_normalisers():
     assert aft.normalize_sex('F') == 'f' and aft.normalize_sex('male') == 'm'
     assert aft.normalize_sex('unknown') is None and aft.normalize_sex(None) is None

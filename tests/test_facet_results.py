@@ -212,6 +212,21 @@ def test_model_object_from_manifest(results):
     assert 'pseudobulk' in sex['model']['modules']['unit_of_analysis']
 
 
+def test_model_carries_dataset_facet_note(results):
+    manifest_path = results / 'G1' / 'ds1.facet_run_manifest.json'
+    manifest = json.loads(manifest_path.read_text())
+    manifest['facet_notes'] = {'disease': 'pathologic AD proxy, not a clinical diagnosis'}
+    manifest_path.write_text(json.dumps(manifest))
+    summary = fr.FacetResults(results).summary('G1/ds1', 'G1', 'ds1')
+    braak = next(u for u in summary['units'] if u['facet'] == 'braak')
+    assert braak['model']['facet_note'] is None
+    assert 'Dataset definition' not in braak['model']['facet_term']
+    disease = next(u for u in summary['units'] if u['facet'] == 'disease')
+    assert disease['model']['facet_note'] == 'pathologic AD proxy, not a clinical diagnosis'
+    assert disease['model']['facet_term'].startswith('AD vs control')
+    assert disease['model']['facet_term'].endswith('Dataset definition: pathologic AD proxy, not a clinical diagnosis')
+
+
 def test_model_reasons_for_left_out_covariates(results):
     summary = fr.FacetResults(results).summary('G2/ds2', 'G2', 'ds2')
     sex = next(u for u in summary['units'] if u['facet'] == 'sex')

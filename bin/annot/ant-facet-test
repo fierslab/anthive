@@ -762,6 +762,32 @@ def run_r(rscript: str, work_dir: Path) -> None:
         raise RuntimeError(f'R failed ({result.returncode}):\n{result.stdout[-2000:]}\n{result.stderr[-4000:]}')
 
 
+def facet_notes_from_md(md_yaml: Dict[str, Any]) -> Dict[str, str]:
+    """Per-dataset definition notes of facets (``facet_notes`` in the .md front matter).
+
+    A dataset can state how one of its facets was defined, for example that
+    ant_disease is a pathologic proxy and not a clinical diagnosis. The notes
+    are copied into the run manifest so the result page can show them next to
+    the model. Keys are facet names with or without the ``ant_`` prefix.
+
+    Args:
+        md_yaml: Parsed front matter of the dataset .md.
+
+    Returns:
+        ``{facet_name: note}`` (names without the ``ant_`` prefix, empty and
+        non-string entries dropped). Empty dict when the key is absent.
+    """
+    raw = md_yaml.get('facet_notes')
+    if not isinstance(raw, dict):
+        return {}
+    notes: Dict[str, str] = {}
+    for name, note in raw.items():
+        if isinstance(note, str) and note.strip():
+            key = str(name)
+            notes[key[4:] if key.startswith('ant_') else key] = ' '.join(note.split())
+    return notes
+
+
 def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: List[str],
                     rscript: str, threads: int = 4, memory_limit_gb: int = 24,
                     keep_work: bool = False) -> Dict[str, Any]:
@@ -781,6 +807,7 @@ def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: 
         'h5adstore_git': git_head(store_root),
         'timestamp_utc': dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds'),
         'seed': SEED, 'facets_requested': facets,
+        'facet_notes': facet_notes_from_md(md_yaml),
         'parameters': {
             'min_cells_per_sample': MIN_CELLS_PER_SAMPLE, 'min_donors_dataset': MIN_DONORS_DATASET,
             'min_donors_per_level': MIN_DONORS_PER_LEVEL, 'n_lt5_threshold': N_LT5_THRESHOLD,

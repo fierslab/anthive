@@ -125,6 +125,17 @@ in git, never read by the catalogue scan):
   of anthive4 and h5adstore, R / limma / edgeR versions, all parameters, seed,
   timestamp, per-unit status, donors per level, flags and counts.
 
+### Dataset definition notes (`facet_notes`)
+
+A dataset `.md` can state how one of its facets was defined, as a front-matter
+mapping `facet_notes: {disease: "..."}` (names with or without `ant_`). Both
+tools copy it into the run manifest as `facet_notes`, and `lib/facet_results.py`
+appends it to the "Facet term" line of the model description as "Dataset
+definition: ...". Used for the ROSMAP datasets, whose `ant_disease` is a
+pathologic AD proxy (Braak III or higher and CERAD definite or probable) and
+not a clinical diagnosis. Manifests written before the key existed carry no
+note until the dataset is re-run.
+
 Nothing is written elsewhere in `data/`; `.h5ad`, `.duckdb` and `.md` files are
 only read. R lives in `envs/facet-test-r` (limma 3.62.1, edgeR 4.4.0, R 4.4.3);
 the `anthive-data` environment has neither package and was not modified.

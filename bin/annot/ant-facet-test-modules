@@ -522,6 +522,7 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
         'genesetstore_git': aft.git_head(registry.root),
         'timestamp_utc': dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds'),
         'seed': SEED, 'facets_requested': facets, 'sources': list(sources),
+        'facet_notes': aft.facet_notes_from_md(md_yaml),
         'versions': package_versions(),
         'parameters': {
             'n_permutations': n_permutations, 'permutation': 'facet labels shuffled across donors, '

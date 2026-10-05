@@ -1589,6 +1589,28 @@ def _run_line(manifest: Optional[dict], versions_key: str) -> Dict[str, Any]:
     }
 
 
+def dataset_facet_note(facet: str, gene_manifest: Optional[dict], module_manifest: Optional[dict]) -> Optional[str]:
+    """The dataset's own definition note for a facet, from the run manifests.
+
+    The tools copy the ``facet_notes`` front-matter key of the dataset .md
+    into the manifest (for example: ant_disease is a pathologic AD proxy, not a
+    clinical diagnosis). Manifests from earlier tool runs have no such key.
+
+    Args:
+        facet: Facet name without the ``ant_`` prefix.
+        gene_manifest: Gene-level run manifest or None.
+        module_manifest: Module-level run manifest or None.
+
+    Returns:
+        The note text, or None when the dataset has none for this facet.
+    """
+    for manifest in (gene_manifest, module_manifest):
+        notes = (manifest or {}).get('facet_notes')
+        if isinstance(notes, dict) and notes.get(facet):
+            return str(notes[facet])
+    return None
+
+
 def build_model(unit: Dict[str, Any], records_for_unit: Dict[str, Dict[str, Any]],
                 gene_manifest: Optional[dict], module_manifest: Optional[dict]) -> Dict[str, Any]:
     """The exact model behind one (facet, stratum) unit, from the manifests.
@@ -1624,10 +1646,15 @@ def build_model(unit: Dict[str, Any], records_for_unit: Dict[str, Dict[str, Any]
         'min_cells_per_donor': min_cells if min_cells is not None else NOT_RECORDED,
         'min_donors_per_level': parameters.get('min_donors_per_level', NOT_RECORDED),
     }
+    facet_term = _FACET_TERMS.get(facet, (facet, NOT_RECORDED))[1]
+    facet_note = dataset_facet_note(facet, gene_manifest, module_manifest)
+    if facet_note:
+        facet_term = f'{facet_term}. Dataset definition: {facet_note}'
     model: Dict[str, Any] = {
         'stratum': {'cell_type': unit['cell_type'], 'source': unit['celltype_source'],
                     'description': _stratum_source_text(unit['celltype_source'])},
-        'facet_term': _FACET_TERMS.get(facet, (facet, NOT_RECORDED))[1],
+        'facet_term': facet_term,
+        'facet_note': facet_note,
         'donors': donors,
         'descriptive_only_rule': rule,
         'genes': None,
