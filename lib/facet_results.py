@@ -83,6 +83,9 @@ MODULE_Q_BY = ('param', 'perm', 'either')
 
 Q_THRESHOLD = 0.05
 
+#: y label of the facet volcano: raw p, unlike the padj axis of the regular DE volcano.
+VOLCANO_YLABEL = f'-log10 p (raw); coloured = q < {Q_THRESHOLD:g}'
+
 # Cohorts: which datasets share donors. The table is a DRAFT written next to
 # the results (audit section 8.3). A cohort counts once; roles matching this
 # pattern do not count (the same rule as ant-facet-test-modules summarize).
@@ -1476,7 +1479,7 @@ class FacetResults:
         else:
             xlabel = 'log2 fold change'
         axes.set_xlabel(xlabel, fontsize=8)
-        axes.set_ylabel('-log10 p', fontsize=8)
+        axes.set_ylabel(VOLCANO_YLABEL, fontsize=8)
         axes.tick_params(labelsize=7)
         for side in ('top', 'right'):
             axes.spines[side].set_visible(False)

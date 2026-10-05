@@ -4029,8 +4029,8 @@ def get_facet_tests(db_id: str):
     per (donor, cell type) and genes are tested with limma-voom
     (``~ facet + sex + age + pmi + batch`` where available); module scores are
     averaged per donor (``cell_mean``, from the stored per-cell scores) or
-    computed on the pseudobulk (``pseudobulk``) and tested with OLS plus 1,000
-    label permutations. Contrasts: sex (m vs f), disease (AD vs control,
+    computed on the pseudobulk (``pseudobulk``) and tested with OLS plus 10,000
+    label permutations (the tool default; the run manifest records the actual number). Contrasts: sex (m vs f), disease (AD vs control,
     provisional), apoe_carrier (e4 carrier vs non-carrier), braak (trend per
     stage). See ``doc/DESIGN_facet_testing.md``.
 

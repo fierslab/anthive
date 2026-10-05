@@ -268,7 +268,22 @@ Mechanism:
    `<basename>.de.parquet` sidecar exists**, ant-convert ingests it
    automatically — re-populating `__de_study` + `__de` from the
    sidecar. Same path as the manual ingester (`ant-de-ingest` below);
-   ant-convert just calls it.
+   ant-convert just calls it. A reimport that fails (unreadable sidecar,
+   no gene name matching, a study that restores zero rows) aborts the
+   conversion with a non-zero exit; it is never a warning.
+
+   The full `__de_study` rows (description, covariates, subset_filter,
+   counts, notes, source, created_at, cluster_obs_column) travel inside
+   the sidecar as parquet key-value metadata (key `anthive_de_studies`,
+   written by `write_sidecar`), so the reimport restores them. Sidecars
+   from before this restore only study_name, method, target and
+   reference_type; `ant-de-restore --embed-metadata` rewrites them from the
+   duckdb.
+
+   Copying a `.de.parquet` next to a dataset does NOT make the duckdb serve
+   it: only a rebuild (or `ant-de-restore --fix`) imports it. Drift is
+   caught by `ant-duckdb-check` (error: sidecar study missing from the
+   duckdb) and by the fleet scan `ant-de-restore` (exit 1 on any gap).
 
 3. `ant-sync` includes `.de.parquet` in the S3 set (alongside `.h5ad`,
    `.duckdb`). The sidecar is the **durable** copy; the duckdb's DE

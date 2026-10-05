@@ -48,3 +48,11 @@ one-off panel build. `ant-suggest-tops` uses curated marker panels for
 ~16 cell types + disease modifiers (AD GWAS, PD genes, etc.), intersected
 with the genes actually present in the duckdb. Mouse case-fallback via
 title-case.
+
+## DE sidecar repair
+
+`ant-de-restore` scans every dataset for `.de.parquet` studies that the
+duckdb does not serve (exit 1 on any gap). `--fix` restores them through
+`DEWriter` (ant-serve release/restore, no restart); `--embed-metadata`
+rewrites legacy sidecars so they carry the full `__de_study` rows. Push
+the changed files with `ant-sync push` afterwards.

@@ -13,6 +13,13 @@ The conversion + maintenance tools that turn `.h5ad` files into the
 | `ant-duckdb-check` | Validate a `.duckdb` schema (`__cells`, `__genes`, `__obscat`, `__obsnum`, `__layer__*`, views, schema_version). |
 | `ant-ingest` | End-to-end ingestion from S3 `__incoming/` to the catalog: pull → sha-validate → promote (with collision detection) → run `ant-h5ad-check`/`-convert`/`-duckdb-check` → push to catalog root → re-stamp `s3_*` in the sidecar. Has `prune` subcommand for cleanup. Uses `lib.sidecar_merge` for `.h5ad.mus` merges (KEY=VALUE, machine-keys silent, semantic conflicts warn-and-keep-local). |
 
+## DE sidecar
+
+`ant-convert` re-imports `<stem>.de.parquet` into the fresh duckdb (full study rows
+included). A failed reimport aborts the conversion (non-zero exit); a staged
+build leaves the served duckdb untouched. `ant-duckdb-check` flags sidecar
+studies the duckdb lacks.
+
 ## Dependencies
 
 These tools rely on `lib/h5ad_utils.py` (load_h5ad, dtype inspection),

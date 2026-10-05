@@ -109,6 +109,7 @@ def _build_stage_view(
     where_filter: Optional[str],
     column_map: Dict[str, str],
     map_overrides: Dict[str, str],
+    column_transforms: Optional[Dict[str, str]] = None,
 ) -> Tuple[duckdb.DuckDBPyConnection, str, Dict[str, str]]:
     """Stage the input file as an in-memory view with anthive column names.
 
@@ -155,8 +156,10 @@ def _build_stage_view(
 
     # Build SELECT clause renaming source → anthive.
     select_parts = []
+    transforms = column_transforms or {}
     for src, dst in resolved.items():
-        select_parts.append(f'"{src}" AS "{dst}"')
+        expression = transforms.get(src, '{col}').format(col=f'"{src}"')
+        select_parts.append(f'{expression} AS "{dst}"')
     if not select_parts:
         _die("after applying --map, no columns are mapped — nothing to ingest")
     select_clause = ", ".join(select_parts)
@@ -425,6 +428,7 @@ def run_ingest_for_study(
     map_overrides = _parse_map(args.map_str)
     stage_con, stage_view, resolved = _build_stage_view(
         input_path, where_sql, preset.column_map, map_overrides,
+        preset.column_transforms,
     )
     try:
         staged_cols = _list_columns(stage_con, stage_view)

@@ -219,6 +219,21 @@ def convert_h5ad_to_duckdb(h5ad_path: Path, config: Dict[str, Any],
             f"Action: Run ant check before converting"
         )
 
+    # Fail fast on an unreadable DE sidecar: it is restored at the very end,
+    # after the previous duckdb may already be gone (in-place builds).
+    import de_storage as _de_storage  # type: ignore
+    de_sidecar = _de_storage.sidecar_path_for(h5ad_path)
+    if de_sidecar.exists():
+        try:
+            _de_storage.read_sidecar_studies(de_sidecar)
+        except Exception as de_exc:
+            raise ConversionError(
+                f"ERROR: [ant-convert] DE sidecar unreadable\n"
+                f"Details: {de_exc}\n"
+                f"Location: {de_sidecar}\n"
+                f"Action: repair or move the sidecar before converting"
+            ) from de_exc
+
     # Load metadata
     print("[1/7] Loading metadata...")
     try:
@@ -387,19 +402,35 @@ def convert_h5ad_to_duckdb(h5ad_path: Path, config: Dict[str, Any],
             except Exception:
                 pass
             conn = None
-        try:
-            import de_storage as _de_storage  # type: ignore
-            sidecar = _de_storage.sidecar_path_for(h5ad_path)
-            if sidecar.exists():
-                print(f"\nReimporting DE sidecar...")
-                print(f"  {sidecar.name}")
+        # A failed reimport aborts the conversion (the outer handler removes
+        # the build and keeps any served duckdb): silently shipping a duckdb
+        # without its DE studies is data loss the next restore would not notice.
+        sidecar = de_sidecar
+        if sidecar.exists():
+            print(f"\nReimporting DE sidecar...")
+            print(f"  {sidecar.name}")
+            try:
                 inserted = _de_storage.reimport_sidecar(build_path, sidecar)
-                for study_id, n_rows in inserted.items():
-                    print(f"  ✓ {study_id}: {n_rows} rows")
-        except Exception as de_exc:
-            # Non-fatal — the duckdb rebuild succeeded; just warn loudly.
-            print(f"  ⚠ DE sidecar reimport failed: {de_exc}", file=sys.stderr)
-            print(f"  Run `ant-de-ingest` manually to recover.", file=sys.stderr)
+            except Exception as de_exc:
+                raise ConversionError(
+                    f"ERROR: [ant-convert] DE sidecar reimport failed\n"
+                    f"Details: {de_exc}\n"
+                    f"Location: {sidecar}\n"
+                    f"Action: fix the sidecar or its gene names, then rerun"
+                ) from de_exc
+            expected = {entry['study_id']: entry['n_rows']
+                        for entry in _de_storage.read_sidecar_studies(sidecar)}
+            if set(inserted) != set(expected):
+                raise ConversionError(
+                    f"ERROR: [ant-convert] DE sidecar reimport incomplete\n"
+                    f"Details: restored {sorted(inserted)}, sidecar has {sorted(expected)}\n"
+                    f"Location: {sidecar}"
+                )
+            for study_id, n_rows in inserted.items():
+                print(f"  ✓ {study_id}: {n_rows} rows")
+                if n_rows < expected[study_id]:
+                    print(f"  ⚠ {study_id}: {expected[study_id] - n_rows} sidecar rows "
+                          f"dropped (gene not in rebuilt dataset)", file=sys.stderr)
 
         if build_path != duckdb_path:
             _install_staged_duckdb(build_path, duckdb_path)

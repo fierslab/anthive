@@ -45,6 +45,7 @@ class DuckDBCheckReport:
         self.info = []
         self.orphaned_tables = []
         self.data_mismatches = []
+        self.de_sidecar_gaps = []
         self.deep_checks_passed = 0
 
     def has_errors(self) -> bool:
@@ -52,7 +53,8 @@ class DuckDBCheckReport:
         return (
             len(self.missing_tables) > 0 or
             len(self.size_mismatches) > 0 or
-            len(self.data_mismatches) > 0
+            len(self.data_mismatches) > 0 or
+            len(self.de_sidecar_gaps) > 0
         )
 
     def has_warnings(self) -> bool:
@@ -73,6 +75,8 @@ class DuckDBCheckReport:
             messages.append(f"✗ Size mismatch: {msg}")
         for msg in self.data_mismatches:
             messages.append(f"✗ Data mismatch: {msg}")
+        for study_id in self.de_sidecar_gaps:
+            messages.append(f"✗ DE study in .de.parquet but not in the duckdb: {study_id}")
         for table in self.orphaned_tables:
             messages.append(f"⚠ Orphaned table: {table}")
         for view in self.missing_views:
@@ -111,6 +115,13 @@ class DuckDBCheckReport:
                 print(f"  - {msg}")
             if len(self.data_mismatches) > 20:
                 print(f"  ... and {len(self.data_mismatches) - 20} more mismatches")
+            print()
+
+        if self.de_sidecar_gaps:
+            print("✗ DE studies in the .de.parquet sidecar but missing from the duckdb:")
+            for study_id in self.de_sidecar_gaps:
+                print(f"  - {study_id}")
+            print("  Restore with: ant-de-restore <file.duckdb> --fix")
             print()
 
         # Warnings
@@ -644,6 +655,20 @@ def check_views(conn: duckdb.DuckDBPyConnection, report: DuckDBCheckReport):
             report.missing_views.append(view_name)
 
 
+def check_de_sidecar(conn: duckdb.DuckDBPyConnection, duckdb_path: Path,
+                     report: DuckDBCheckReport) -> None:
+    """Report DE studies that the dataset's ``.de.parquet`` has but the duckdb lacks.
+
+    A rebuild (or a copy of an older duckdb) that did not restore the sidecar
+    leaves the dataset serving no DE at all; the API then reports an empty
+    study list without any error.
+    """
+    import de_storage  # noqa: PLC0415
+    sidecar = de_storage.sidecar_path_for(duckdb_path.with_suffix('.h5ad'))
+    report.de_sidecar_gaps.extend(
+        de_storage.studies_missing_from_duckdb(conn, sidecar))
+
+
 def check_orphaned_tables(conn: duckdb.DuckDBPyConnection, metadata: dict,
                           report: DuckDBCheckReport,
                           duckdb_path: Optional[Path] = None):
@@ -661,6 +686,8 @@ def check_orphaned_tables(conn: duckdb.DuckDBPyConnection, metadata: dict,
         '__cells',
         '__genes',
         '__gene_bins',
+        '__de',
+        '__de_study',
     }
 
     # Layer tables: expected only when NOT Parquet-backed (legacy schema).
@@ -1219,6 +1246,7 @@ def main():
         # Check views
         print(f"\n[9/10] Checking views...")
         check_views(conn, report)
+        check_de_sidecar(conn, duckdb_path, report)
         views = get_view_list(conn)
         print(f"  ✓ Found {len(views)} view(s)")
 

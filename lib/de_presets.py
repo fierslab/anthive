@@ -50,6 +50,11 @@ class Preset:
         default_reference_type:
             Default ``reference_type`` for new studies created via this
             preset; can be overridden with ``--reference-type``.
+        column_transforms:
+            ``source_name -> SQL expression`` applied while staging, with
+            ``{col}`` standing for the quoted source column. Used when a
+            source column is on another scale than its anthive column
+            (Seurat < v4 ``avg_logFC`` is natural log, ``log2fc`` is log2).
     """
 
     name: str
@@ -60,6 +65,7 @@ class Preset:
     required_cli_flags: List[str] = field(default_factory=list)
     default_method: Optional[str] = None
     default_reference_type: Optional[str] = None
+    column_transforms: Dict[str, str] = field(default_factory=dict)
 
 
 # ── presets ───────────────────────────────────────────────────────────────────
@@ -169,16 +175,19 @@ PRESETS: Dict[str, Preset] = {
             "Seurat FindMarkers / FindAllMarkers output (CSV per contrast). "
             "One file = one contrast; --term and --contrast required. "
             "If the file ALSO has a 'cluster' column (FindAllMarkers), use "
-            "the 'long' preset with --map cluster:contrast instead."
+            "the 'long' preset with --map cluster:contrast instead. "
+            "avg_log2FC is stored as is; avg_logFC (Seurat < 4, natural "
+            "log) is divided by ln(2) to give log2fc."
         ),
         shape='one-file-one-contrast',
         column_map={
             # Seurat column → anthive column
-            # Seurat ships avg_log2FC (or avg_logFC in older versions);
-            # both map to log2fc. Default to avg_log2FC; --map can override.
+            # Seurat >= 4 ships avg_log2FC (already log2). Seurat < 4 ships
+            # avg_logFC, a NATURAL log; column_transforms below divides it
+            # by ln(2) so log2fc is always log2.
             'gene':         'gene',
             'avg_log2FC':   'log2fc',
-            'avg_logFC':    'log2fc',     # older Seurat (<4.0) ships natural-log
+            'avg_logFC':    'log2fc',
             'p_val':        'pvalue',
             'p_val_adj':    'padj',
             'pct.1':        'pct_in',     # → stats_extra
@@ -188,6 +197,7 @@ PRESETS: Dict[str, Preset] = {
         required_cli_flags=['--term', '--contrast', '--method'],
         default_method='seurat.FindMarkers',
         default_reference_type='vsreference',
+        column_transforms={'avg_logFC': '{col} / ln(2)'},
     ),
 
     'glmmseq': Preset(
@@ -277,6 +287,8 @@ def format_preset_help(preset: Preset) -> str:
     lines.append("  Column mapping (source-file → anthive __de column):")
     for src, dst in preset.column_map.items():
         lines.append(f"    {src:20s} →  {dst}")
+    for src, expression in preset.column_transforms.items():
+        lines.append(f"    (transform: {src} = {expression.format(col=src)})")
     lines.append("")
     lines.append("  Required columns in the input file:")
     lines.append("    " + ", ".join(preset.required_in_file))

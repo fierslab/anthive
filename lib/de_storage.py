@@ -442,6 +442,24 @@ class DEWriter:
             )],
         )
 
+    def restore_from_sidecar(
+        self, sidecar: Path, study_ids: Optional[List[str]] = None,
+    ) -> Dict[str, int]:
+        """Restore studies from a ``.de.parquet`` into this duckdb.
+
+        Args:
+            sidecar: The dataset's DE sidecar.
+            study_ids: Only these studies; ``None`` restores every study in
+                the sidecar (replacing same-id studies already present).
+
+        Returns:
+            ``{study_id: n_rows}`` for the restored studies.
+
+        Raises:
+            DEReimportError: A study restored zero rows.
+        """
+        return _restore_studies(self.conn, Path(sidecar), study_ids)
+
     def delete_study(self, study_id: str) -> int:
         """Remove a study and all its DE rows.
 
@@ -614,6 +632,84 @@ def sidecar_path_for(h5ad_path: Path) -> Path:
     return h5ad_path.parent / f"{base}.de.parquet"
 
 
+#: Parquet key-value metadata key carrying the full ``__de_study`` rows.
+STUDY_META_KEY = 'anthive_de_studies'
+
+#: ``__de_study`` columns persisted in the sidecar (everything but schema_version).
+STUDY_META_COLUMNS = (
+    'study_id', 'name', 'description', 'method', 'target', 'reference_type',
+    'covariates', 'n_tests_total', 'n_cells_total', 'subset_filter', 'source',
+    'created_at', 'notes', 'cluster_obs_column',
+)
+
+
+class DEReimportError(Exception):
+    """A DE sidecar could not be restored into a duckdb (loud, never a warning)."""
+
+
+def _studies_meta_from_db(
+    con: duckdb.DuckDBPyConnection, study_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Read ``src.__de_study`` rows (JSON-safe dicts) from an attached duckdb.
+
+    Args:
+        con: Connection with the dataset attached as ``src``.
+        study_ids: Restrict to these studies; ``None`` means all.
+
+    Returns:
+        One dict per study keyed by :data:`STUDY_META_COLUMNS`; ``created_at``
+        is an ISO 8601 string.
+    """
+    where = ''
+    if study_ids is not None:
+        quoted = ', '.join(f"'{_sql_escape(sid)}'" for sid in study_ids)
+        where = f"WHERE study_id IN ({quoted})" if quoted else "WHERE false"
+    # Duckdbs from before schema v2 lack cluster_obs_column: read what exists.
+    present = {row[0] for row in con.execute(
+        "SELECT column_name FROM duckdb_columns() "
+        "WHERE database_name = 'src' AND table_name = '__de_study'").fetchall()}
+    columns = [column for column in STUDY_META_COLUMNS if column in present]
+    rows = con.execute(
+        f"SELECT {', '.join(columns)} FROM src.__de_study {where} ORDER BY study_id"
+    ).fetchall()
+    out = []
+    for row in rows:
+        entry = {column: None for column in STUDY_META_COLUMNS}
+        entry.update(zip(columns, row))
+        if isinstance(entry['created_at'], datetime):
+            entry['created_at'] = entry['created_at'].isoformat()
+        out.append(entry)
+    return out
+
+
+def read_sidecar_study_meta(sidecar: Path) -> Dict[str, Dict[str, Any]]:
+    """Return the ``__de_study`` rows embedded in a sidecar, keyed by study_id.
+
+    Sidecars written before the metadata was embedded (and unreadable or
+    malformed values) yield ``{}``; callers fall back to what the data rows
+    carry.
+    """
+    sidecar = Path(sidecar)
+    if not sidecar.exists():
+        return {}
+    con = duckdb.connect()
+    try:
+        row = con.execute(
+            f"SELECT decode(value) FROM parquet_kv_metadata('{_sql_escape(str(sidecar))}') "
+            f"WHERE decode(key) = '{STUDY_META_KEY}'"
+        ).fetchone()
+    finally:
+        con.close()
+    if not row or not row[0]:
+        return {}
+    try:
+        entries = json.loads(row[0])
+    except json.JSONDecodeError:
+        return {}
+    return {e['study_id']: e for e in entries
+            if isinstance(e, dict) and e.get('study_id')}
+
+
 def write_sidecar(
     sidecar: Path,
     duckdb_path: Path,
@@ -627,6 +723,11 @@ def write_sidecar(
     only that study is exported (other studies in any existing sidecar
     are merged back in, so re-exporting one study doesn't drop others).
 
+    The full ``__de_study`` rows (description, covariates, subset_filter,
+    counts, notes, source, created_at, cluster_obs_column, ...) are embedded
+    as parquet key-value metadata under :data:`STUDY_META_KEY`, so
+    :func:`reimport_sidecar` can restore them after a duckdb rebuild.
+
     Returns the number of rows written.
     """
     sidecar = Path(sidecar)
@@ -639,7 +740,8 @@ def write_sidecar(
     # If a sidecar already exists AND we're only refreshing one study,
     # union the un-touched studies' rows from the old parquet with the
     # fresh duckdb rows for `only_study`.
-    if only_study and sidecar.exists():
+    merging = bool(only_study and sidecar.exists())
+    if merging:
         union_sql = f"""
             WITH old_sidecar AS (
                 SELECT * FROM read_parquet('{sidecar}')
@@ -653,12 +755,11 @@ def write_sidecar(
             SELECT * FROM new_from_db
         """
         n_sql = f"SELECT count(*) FROM ({union_sql})"
-        export_sql = f"COPY ({union_sql}) TO '{tmp}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+        select_sql = union_sql
     else:
         where = f"WHERE study_id = '{_sql_escape(only_study)}'" if only_study else ""
+        select_sql = f"SELECT * FROM src.de {where}"
         n_sql = f"SELECT count(*) FROM src.de {where}"
-        export_sql = (f"COPY (SELECT * FROM src.de {where}) "
-                      f"TO '{tmp}' (FORMAT PARQUET, COMPRESSION ZSTD)")
 
     n = con.execute(n_sql).fetchone()[0]
     if n == 0:
@@ -667,7 +768,21 @@ def write_sidecar(
             sidecar.unlink()
         con.close()
         return 0
-    con.execute(export_sql)
+
+    if merging:
+        # Keep the embedded rows of the untouched studies; refresh the one
+        # re-exported from the duckdb.
+        kept = [meta for study_id, meta in read_sidecar_study_meta(sidecar).items()
+                if study_id != only_study]
+        studies_meta = kept + _studies_meta_from_db(con, [only_study])
+    else:
+        studies_meta = _studies_meta_from_db(
+            con, [only_study] if only_study else None)
+    meta_literal = _sql_escape(json.dumps(studies_meta, default=str))
+    con.execute(
+        f"COPY ({select_sql}) TO '{tmp}' (FORMAT PARQUET, COMPRESSION ZSTD, "
+        f"KV_METADATA {{{STUDY_META_KEY}: '{meta_literal}'}})"
+    )
     con.close()
     tmp.replace(sidecar)
     return n
@@ -700,65 +815,123 @@ def read_sidecar_studies(sidecar: Path) -> List[Dict[str, Any]]:
     ]
 
 
-def reimport_sidecar(
-    duckdb_path: Path,
-    sidecar: Path,
-) -> Dict[str, int]:
-    """Re-ingest a sidecar parquet into a freshly-built duckdb.
+def studies_missing_from_duckdb(
+    conn: duckdb.DuckDBPyConnection, sidecar: Path,
+) -> List[str]:
+    """Return the sidecar's study_ids that the duckdb lacks (or has without rows).
 
-    Called by ``ant-convert`` after a full rebuild — the duckdb's
-    ``__de`` tables are gone, but the sidecar parquet survived. We
-    re-create them.
+    Args:
+        conn: Open connection to the dataset's duckdb (read-only is fine).
+        sidecar: The dataset's ``.de.parquet``.
 
-    The sidecar's columns mirror the ``de`` view: it has ``study_name``
-    + first-class stats + ``stats_extra`` JSON, and ``gene_name``
-    instead of ``gene_id``. We split it back into ``__de_study`` and
-    ``__de`` rows.
-
-    Returns ``{study_id: n_rows_inserted, ...}``.
-
-    Does NOT need locking — ant-convert is the only writer at this
-    point in the rebuild.
+    Returns:
+        Sorted study_ids present in the sidecar but with no ``__de_study``
+        row, or no ``__de`` rows, in the duckdb. Empty when there is no
+        sidecar or nothing is missing.
     """
-    if not sidecar.exists():
-        return {}
+    sidecar = Path(sidecar)
+    wanted = [entry['study_id'] for entry in read_sidecar_studies(sidecar)]
+    if not wanted:
+        return []
+    tables = {row[0] for row in conn.execute(
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_name IN ('__de_study', '__de')").fetchall()}
+    if tables != {'__de_study', '__de'}:
+        return sorted(wanted)
+    served = {row[0] for row in conn.execute(
+        "SELECT DISTINCT s.study_id FROM __de_study s "
+        "JOIN __de d USING (study_id)").fetchall()}
+    return sorted(set(wanted) - served)
 
-    con = duckdb.connect(str(duckdb_path), read_only=False)
+
+def sidecar_studies_without_metadata(sidecar: Path) -> List[str]:
+    """Return sidecar study_ids that have no embedded ``__de_study`` row.
+
+    These come from sidecars written before the metadata was embedded; a
+    rebuild would restore them with only the fields their data rows carry.
+    """
+    embedded = read_sidecar_study_meta(sidecar)
+    return sorted(entry['study_id'] for entry in read_sidecar_studies(Path(sidecar))
+                  if entry['study_id'] not in embedded)
+
+
+def duckdb_covers_sidecar(
+    conn: duckdb.DuckDBPyConnection, sidecar: Path,
+) -> bool:
+    """True when the duckdb holds every sidecar study with at least as many rows.
+
+    Guards re-exporting a sidecar from the duckdb: a duckdb that lost rows
+    (e.g. genes dropped by a rebuild) must not shrink the durable copy.
+    """
+    if studies_missing_from_duckdb(conn, sidecar):
+        return False
+    counts = dict(conn.execute(
+        "SELECT study_id, count(*) FROM __de GROUP BY study_id").fetchall())
+    return all(counts.get(entry['study_id'], 0) >= entry['n_rows']
+               for entry in read_sidecar_studies(Path(sidecar)))
+
+
+def _restore_studies(
+    con: duckdb.DuckDBPyConnection,
+    sidecar: Path,
+    study_ids: Optional[List[str]] = None,
+) -> Dict[str, int]:
+    """Re-create ``__de_study`` + ``__de`` rows from a sidecar on an open r/w connection.
+
+    Full study rows come from the embedded metadata when present; older
+    sidecars fall back to the columns the data rows carry (study_name,
+    method, target, reference_type).
+
+    Args:
+        con: Read-write connection to the dataset's duckdb.
+        sidecar: Sidecar parquet to read.
+        study_ids: Restore only these studies; ``None`` restores all.
+
+    Returns:
+        ``{study_id: n_rows_in___de_after_restore}``.
+
+    Raises:
+        DEReimportError: A study ended up with zero ``__de`` rows (typically
+            no gene name in the sidecar matches ``__genes``).
+    """
     ensure_schema(con)
-
-    # Pull study-level metadata from any of its rows. The sidecar's
-    # `de` view shape doesn't carry every field on __de_study (covariates
-    # / source / notes / subset_filter are in study metadata only), so
-    # the reimport carries whatever it has and the rest stays NULL.
+    embedded = read_sidecar_study_meta(sidecar)
     studies = con.execute(f"""
         SELECT DISTINCT study_id, study_name, method, target, reference_type
-        FROM read_parquet('{sidecar}')
+        FROM read_parquet('{_sql_escape(str(sidecar))}')
     """).fetchall()
 
     result: Dict[str, int] = {}
-    for row in studies:
-        study_id, study_name, method, target, reference_type = row
-        spec = StudySpec(
-            study_id=study_id, name=study_name, method=method,
-            target=target or 'gene',
-            reference_type=reference_type,
-            source=f"reimport_sidecar:{sidecar.name}",
-            created_at=datetime.now(timezone.utc),
-        )
-        # Persist the study row (DEWriter.upsert_study reuses this logic;
-        # we inline it because we don't need locking here)
+    for study_id, study_name, method, target, reference_type in sorted(studies):
+        if study_ids is not None and study_id not in study_ids:
+            continue
+        meta = embedded.get(study_id) or {
+            'study_id': study_id, 'name': study_name, 'method': method,
+            'target': target, 'reference_type': reference_type,
+            'source': f"reimport_sidecar:{sidecar.name}",
+        }
+        created_at = meta.get('created_at')
+        if isinstance(created_at, str):
+            try:
+                created_at = datetime.fromisoformat(created_at)
+            except ValueError:
+                created_at = None
+        values = {column: meta.get(column) for column in STUDY_META_COLUMNS}
+        values['study_id'] = study_id
+        values['target'] = values['target'] or 'gene'
+        values['created_at'] = created_at or datetime.now(timezone.utc)
+        for column in ('covariates', 'subset_filter'):
+            if values[column] is not None and not isinstance(values[column], str):
+                values[column] = json.dumps(values[column])
+        con.execute("DELETE FROM __de WHERE study_id = ?", [study_id])
+        con.execute("DELETE FROM __de_study WHERE study_id = ?", [study_id])
         con.execute(
-            "DELETE FROM __de_study WHERE study_id = ?", [spec.study_id]
+            f"INSERT INTO __de_study ({', '.join(STUDY_META_COLUMNS)}) "
+            f"VALUES ({', '.join('?' for _ in STUDY_META_COLUMNS)})",
+            [values[column] for column in STUDY_META_COLUMNS],
         )
-        con.execute(
-            "INSERT INTO __de_study (study_id, name, method, target, "
-            "reference_type, source, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [spec.study_id, spec.name, spec.method, spec.target,
-             spec.reference_type, spec.source, spec.created_at],
-        )
-        # Re-create __de rows joining via gene_name → gene_id.
-        sql = f"""
+        # Re-create __de rows joining via gene_name -> gene_id.
+        con.execute(f"""
             INSERT OR REPLACE INTO __de (
                 study_id, term, contrast, gene_id,
                 log2fc, zeff, effsize, efftype, pvalue, padj,
@@ -768,18 +941,49 @@ def reimport_sidecar(
                 p.study_id, p.term, p.contrast, g.gene_id,
                 p.log2fc, p.zeff, p.effsize, p.efftype, p.pvalue, p.padj,
                 p.estimate, p.SE, p.ci_low, p.ci_high, p.stats_extra
-            FROM read_parquet('{sidecar}') p
+            FROM read_parquet('{_sql_escape(str(sidecar))}') p
             JOIN __genes g ON g.gene_name = p.gene_name
             WHERE p.study_id = '{_sql_escape(study_id)}'
-        """
-        con.execute(sql)
-        n = con.execute(
+        """)
+        n_rows = con.execute(
             "SELECT count(*) FROM __de WHERE study_id = ?", [study_id]
         ).fetchone()[0]
-        result[study_id] = n
-
-    con.close()
+        if n_rows == 0:
+            raise DEReimportError(
+                f"study {study_id!r} from {sidecar.name}: no sidecar gene name "
+                f"matches this duckdb's __genes, 0 rows restored")
+        result[study_id] = n_rows
     return result
+
+
+def reimport_sidecar(
+    duckdb_path: Path,
+    sidecar: Path,
+) -> Dict[str, int]:
+    """Re-ingest a sidecar parquet into a freshly-built duckdb.
+
+    Called by ``ant-convert`` after a full rebuild, so the duckdb's
+    ``__de`` tables are gone, but the sidecar parquet survived. We
+    re-create them, restoring the full ``__de_study`` rows from the
+    metadata embedded by :func:`write_sidecar` (older sidecars restore
+    only study_name, method, target and reference_type).
+
+    Returns ``{study_id: n_rows_inserted, ...}``; ``{}`` if the sidecar is
+    absent.
+
+    Raises:
+        DEReimportError: A study could not be restored (zero rows).
+
+    Does NOT need locking: ant-convert is the only writer at this
+    point in the rebuild.
+    """
+    if not sidecar.exists():
+        return {}
+    con = duckdb.connect(str(duckdb_path), read_only=False)
+    try:
+        return _restore_studies(con, sidecar)
+    finally:
+        con.close()
 
 
 # ── read helpers (used by the API) ────────────────────────────────────────────

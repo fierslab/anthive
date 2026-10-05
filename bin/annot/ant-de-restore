@@ -1,0 +1,172 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "duckdb>=0.10.0",
+#   "pyyaml>=6.0",
+#   "requests>=2.25.0",
+# ]
+# ///
+"""ant-de-restore - find and repair datasets whose duckdb lost its DE studies.
+
+The ``.de.parquet`` sidecar is the durable copy of a dataset's differential
+expression; the duckdb is a derivative. When a duckdb is rebuilt or replaced
+without restoring the sidecar, the API silently serves an empty study list.
+
+Scan (default, read-only; exit 1 when any dataset has a gap)::
+
+    ant-de-restore                 # every dataset in the store
+    ant-de-restore SF9/CMR         # one dataset (db_id or path to a .duckdb)
+
+Repair (restores the missing studies from the sidecar, with every
+``__de_study`` field the sidecar carries; uses the ant-serve release/restore
+dance, so the live server keeps running)::
+
+    ant-de-restore --fix
+    ant-de-restore SF9/CMR --fix
+
+Embed study metadata (older sidecars carry none, so a later rebuild would
+restore only name, method, target and reference type)::
+
+    ant-de-restore --embed-metadata            # rewrites those sidecars from the duckdb
+
+A sidecar is rewritten only when its duckdb holds every study with at least as
+many rows, so the durable copy can never shrink.
+
+After a repair, push the changed duckdbs with ``ant-sync push``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+# sys.path shim - see bin/CLAUDE.md
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / 'lib'))
+
+import duckdb  # noqa: E402
+
+from config import get_api_url, get_config, get_data_folder  # noqa: E402
+from de_storage import (  # noqa: E402
+    DEReimportError, DEWriter, DEWriterError, duckdb_covers_sidecar,
+    sidecar_path_for, sidecar_studies_without_metadata,
+    studies_missing_from_duckdb, write_sidecar,
+)
+from h5adstore import H5adEntry, find_h5ad, iter_h5adstore  # noqa: E402
+
+
+def find_gap(entry: H5adEntry) -> Optional[Tuple[Path, List[str]]]:
+    """Return ``(sidecar, missing_study_ids)`` for a dataset, or ``None`` if fine.
+
+    Datasets without a local duckdb or without a sidecar have nothing to check.
+    """
+    sidecar = sidecar_path_for(entry.h5ad_path)
+    if not entry.duckdb_path.exists() or not sidecar.exists():
+        return None
+    connection = duckdb.connect(str(entry.duckdb_path), read_only=True)
+    try:
+        missing = studies_missing_from_duckdb(connection, sidecar)
+    finally:
+        connection.close()
+    return (sidecar, missing) if missing else None
+
+
+def embed_metadata(entry: H5adEntry) -> Optional[str]:
+    """Rewrite a metadata-less sidecar from the duckdb; return a status line or ``None``.
+
+    ``None`` means nothing to do (no sidecar, or it already carries metadata).
+    """
+    sidecar = sidecar_path_for(entry.h5ad_path)
+    if not entry.duckdb_path.exists() or not sidecar.exists():
+        return None
+    unembedded = sidecar_studies_without_metadata(sidecar)
+    if not unembedded:
+        return None
+    connection = duckdb.connect(str(entry.duckdb_path), read_only=True)
+    try:
+        covered = duckdb_covers_sidecar(connection, sidecar)
+    finally:
+        connection.close()
+    if not covered:
+        return f"SKIP  {entry.db_id}: duckdb does not cover {sidecar.name}; run --fix first"
+    n_rows = write_sidecar(sidecar, entry.duckdb_path)
+    return f"EMBED {entry.db_id}: {sidecar.name} rewritten with study metadata ({n_rows} rows)"
+
+
+def repair(entry: H5adEntry, sidecar: Path, missing: List[str],
+           ant_serve_url: Optional[str]) -> dict:
+    """Restore ``missing`` studies into the dataset's duckdb; return rows per study."""
+    with DEWriter(entry.duckdb_path, db_id=entry.db_id,
+                  ant_serve_url=ant_serve_url) as writer:
+        return writer.restore_from_sidecar(sidecar, missing)
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    """CLI entry point; returns the process exit code."""
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument('db_id', nargs='?',
+                        help="dataset id (e.g. 'SF9/CMR') or path to a .duckdb; default: all")
+    parser.add_argument('--fix', action='store_true',
+                        help='restore the missing studies from the sidecar')
+    parser.add_argument('--embed-metadata', action='store_true',
+                        help='rewrite sidecars without embedded study metadata from the duckdb')
+    parser.add_argument('--ant-serve-url', default=None,
+                        help='ant-serve API base for release/restore (default: from config)')
+    args = parser.parse_args(argv)
+
+    config = get_config()
+    root = get_data_folder(config)
+    ant_serve_url = args.ant_serve_url or f"{get_api_url(config)}/api"
+    if args.db_id:
+        entry = find_h5ad(root, args.db_id)
+        if entry is None:
+            print(f"ant-de-restore: unknown dataset {args.db_id!r}", file=sys.stderr)
+            return 2
+        entries = [entry]
+    else:
+        entries = list(iter_h5adstore(root))
+
+    n_gaps = n_failed = 0
+    for entry in entries:
+        if args.embed_metadata:
+            try:
+                status = embed_metadata(entry)
+            except duckdb.Error as exc:
+                print(f"ERROR {entry.db_id}: {exc}", file=sys.stderr)
+                n_failed += 1
+                continue
+            if status:
+                print(status)
+            continue
+        try:
+            gap = find_gap(entry)
+        except duckdb.Error as exc:
+            print(f"ERROR {entry.db_id}: cannot inspect {entry.duckdb_path.name}: {exc}",
+                  file=sys.stderr)
+            n_failed += 1
+            continue
+        if gap is None:
+            continue
+        sidecar, missing = gap
+        n_gaps += 1
+        print(f"GAP   {entry.db_id}: {sidecar.name} has {', '.join(missing)} "
+              f"missing from {entry.duckdb_path.name}")
+        if not args.fix:
+            continue
+        try:
+            restored = repair(entry, sidecar, missing, ant_serve_url)
+        except (DEWriterError, DEReimportError, duckdb.Error) as exc:
+            print(f"ERROR {entry.db_id}: restore failed: {exc}", file=sys.stderr)
+            n_failed += 1
+            continue
+        for study_id, n_rows in restored.items():
+            print(f"FIXED {entry.db_id}: {study_id} ({n_rows} rows)")
+
+    print(f"{len(entries)} datasets checked, {n_gaps} with gaps, {n_failed} errors")
+    return 1 if n_failed or (n_gaps and not args.fix) else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
