@@ -28,6 +28,8 @@ def get_available_commands(bin_dir: Path) -> dict:
         'duckdb-check': 'Validate DuckDB database integrity',
         'geneset': 'Manage geneset store (.grp / .rnk gene lists per study)',
         'h5ad-check': 'Check h5ad file and generate metadata',
+        'ingest-check': 'Check a dataset submission before publication (read-only, JSON report)',
+        'ingest-index': 'Build the donor/cell/gene overlap indexes that ingest-check reads',
         'inactive': 'Mark/unmark datasets as inactive (removes .duckdb, hides from API)',
         'md': 'Manage markdown metadata (YAML preambles)',
         'md-check': 'Check .md metadata files for sanity (group_id / id)',

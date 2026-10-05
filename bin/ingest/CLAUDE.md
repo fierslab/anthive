@@ -11,7 +11,22 @@ The conversion + maintenance tools that turn `.h5ad` files into the
 | `ant-h5ad-check` | Validate one `.h5ad` against the ingestion contract — log-norm in `.X`, raw counts in `layers['counts']`, embedding present, etc. |
 | `ant-drop-indexes` | Rewrite existing `.duckdb` files without the redundant ART indexes older ant-convert runs created (flock + sentinel + ant-serve release/restore, verified content, atomic swap). `--dry-run` first. |
 | `ant-duckdb-check` | Validate a `.duckdb` schema (`__cells`, `__genes`, `__obscat`, `__obsnum`, `__layer__*`, views, schema_version). |
+| `ant-ingest-check` | **Read-only** check of a dataset submission (a group folder or one h5ad) before publication: 33 checks with frozen ids (`ant ingest-check --list-checks`), JSON report `anthive.ingest_check/1` plus markdown, exit 0 / 1 / 2. Runs `ant-convert` on a hard-linked scratch copy when there is no `.duckdb`, runs `ant-duckdb-check` on a private copy, never writes into the folder or the store. Package `lib/ingest_check/`, thresholds in `lib/ingest_check/thresholds.py` and `lib/facet_rules.py`. Docs: `doc/DATASET_INGESTION.md`. |
+| `ant-ingest-index` | Builds the overlap indexes `ant-ingest-check` reads (donor digests with demographics, hashed cell barcodes, gene names per organism) under `config.get_ingest_index_dir()`, never in the store. Incremental; `build`, `status`. |
 | `ant-ingest` | End-to-end ingestion from S3 `__incoming/` to the catalog: pull → sha-validate → promote (with collision detection) → run `ant-h5ad-check`/`-convert`/`-duckdb-check` → push to catalog root → re-stamp `s3_*` in the sidecar. Has `prune` subcommand for cleanup. Uses `lib.sidecar_merge` for `.h5ad.mus` merges (KEY=VALUE, machine-keys silent, semantic conflicts warn-and-keep-local). |
+
+## Which tools rewrite files (do not run these on a submission or a live dataset)
+
+- `ant-h5ad-check` rewrites the dataset `.md`, and `bin/meta/ant-check` calls it as a subprocess.
+- `ant-duckdb-check` is **not** read-only: it builds a missing `__gene_bins` table inside the database,
+  may write `default_layer` into the `.md`, and appends to `./ant-<date>.log` in the working directory.
+  Run it on a copy. (It modified a served database once during the P1 work.)
+- `bin/meta/ant-md-check` writes ids unless `--no-fix`; `lib/md_check.py` skips `_` folders below the scan
+  root, so pass the group folder itself as the root.
+- `ant-convert` resolves symlinks: a scratch copy must be a hard link or a copy, or the `.duckdb` lands
+  next to the original.
+
+For anything that must stay untouched use `ant-ingest-check`.
 
 ## DE sidecar
 

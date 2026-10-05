@@ -84,6 +84,21 @@ library_s3_autopush: false
 # their local papers.
 library_index_publisher: false
 
+# Dataset ingestion (doc/DESIGN_dataset_ingestion.md). P1 reads these in
+# `ant ingest-check`.
+# Largest h5ad accepted, in GB (check files.size).
+datasets_upload_max_gb: 50
+# access=public waits for an admin unless this is true.
+datasets_auto_publish_public: false
+# Access level a new dataset gets when its annotation does not say.
+datasets_default_access: internal
+# Where ingestion keeps its state (submissions, reports, overlap indexes).
+# Empty: <state_dir>/ingest. Env: ANTHIVE_INGEST_STATE_DIR.
+ingest_state_dir: ''
+# Overlap indexes of `ant ingest-index`. Empty: <ingest_state_dir>/index.
+# Env: ANTHIVE_INGEST_INDEX_DIR.
+ingest_index_dir: ''
+
 # Precomputed literature index (folder holding library_chunks.parquet, built
 # by `ant lib-index`, synced via S3). See doc/LIBRARY_INDEX.md.
 # Env: ANTHIVE_LIBRARY_INDEX.

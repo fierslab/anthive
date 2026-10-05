@@ -81,6 +81,9 @@ lib_dir = script_dir.parent.parent / 'lib'
 sys.path.insert(0, str(lib_dir))
 
 import donor_exclusions  # type: ignore  # noqa: E402
+from facet_rules import (BRAAK_MIN_DISTINCT, BRAAK_MIN_DONORS, MIN_CELLS_PER_SAMPLE, MIN_COVARIATE_COVERAGE,  # type: ignore  # noqa: E402,F401
+                         MIN_DONORS_DATASET, MIN_DONORS_FOR_AGE_PMI, MIN_DONORS_PER_LEVEL, N_LT5_THRESHOLD,
+                         NUMERIC_MIN_DONORS_FOR_P)
 from anthive_db import build_obs_view_sql  # type: ignore  # noqa: E402
 from donor_keys import COUNT_BASIS as DONOR_COUNT_BASIS, donor_key_map, key_digest  # type: ignore  # noqa: E402
 from h5adstore import H5adEntry, iter_h5adstore  # type: ignore  # noqa: E402
@@ -94,15 +97,9 @@ TOOL_VERSION = 'ant-facet-test/2.0'
 SEED = 20261004
 
 # Parameters (all recorded in the run manifest).
-MIN_CELLS_PER_SAMPLE = 10          # donor x cell type
-MIN_DONORS_DATASET = 6
-MIN_DONORS_PER_LEVEL = 3           # levels below are dropped
-N_LT5_THRESHOLD = 5                # any level below: descriptive only
-NUMERIC_MIN_DONORS_FOR_P = 10      # braak: two halves of >= 5 donors
-MIN_DONORS_FOR_AGE_PMI = 15
-MIN_COVARIATE_COVERAGE = 0.9
-BRAAK_MIN_DONORS = 6
-BRAAK_MIN_DISTINCT = 3
+# MIN_CELLS_PER_SAMPLE, MIN_DONORS_DATASET, MIN_DONORS_PER_LEVEL, N_LT5_THRESHOLD, NUMERIC_MIN_DONORS_FOR_P,
+# MIN_DONORS_FOR_AGE_PMI, MIN_COVARIATE_COVERAGE, BRAAK_MIN_DONORS and BRAAK_MIN_DISTINCT come from lib/facet_rules.py
+# (shared with `ant ingest-check`).
 COMPOSITION_ALPHA = 0.05
 MAX_STRATUM_LEVELS = 40            # per-cell stratifier sanity cap
 # limma treat thresholds (log2 fold change). Two-group contrasts: 10 percent. Braak is a

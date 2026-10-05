@@ -1,0 +1,154 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "duckdb>=0.10.0",
+#   "numpy>=1.24.0",
+#   "pandas>=2.0.0",
+#   "pyarrow>=14.0.0",
+#   "pyyaml>=6.0",
+# ]
+# ///
+"""ant-ingest-index: build the overlap indexes that ``ant ingest-check`` reads.
+
+For every active dataset in the store (``.duckdb`` present, no ``.inactive``
+sidecar, no ``_`` folder in the path) it records
+
+- the donors: digest of the donor key (``lib/donor_keys.key_digest``), sex,
+  age, APOE genotype, Braak stage and PMI, from the published ``ant_*`` views;
+- the cells: sorted 64-bit hashes of (normalised barcode, donor digest) and of
+  the barcode alone;
+- the gene names, per organism.
+
+Digests only, never donor identifiers or barcodes. The index sits in
+``config.get_ingest_index_dir()`` (default ``<state_dir>/ingest/index``), mode
+0600/0700, never in the store or the repo. The store is opened read-only and
+nothing in it is written.
+
+The build is incremental: a dataset is redone when its ``.duckdb`` or ``.md``
+changed (size, mtime). ``--force`` redoes everything.
+
+Usage:
+    ant ingest-index build [--store PATH] [--only GROUP/ID ...] [--force]
+    ant ingest-index status [--store PATH]
+"""
+import argparse
+import sys
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+script_dir = Path(__file__).parent.resolve()
+sys.path.insert(0, str(script_dir.parent.parent / 'lib'))
+
+import config  # noqa: E402
+import mus  # noqa: E402
+from h5adstore import H5adEntry, iter_h5adstore  # noqa: E402
+from ingest_check.dataset_view import DatasetView  # noqa: E402
+from ingest_check.overlap_index import OverlapIndex, digests_from_view  # noqa: E402
+from metadata import get_api_config, parse_md_file  # noqa: E402
+
+
+def active_entries(store_root: Path) -> List[H5adEntry]:
+    """Datasets with a ``.duckdb``, not inactive, not below a ``_`` folder."""
+    entries = []
+    for entry in iter_h5adstore(store_root):
+        parts = entry.md_path.relative_to(store_root).parts[:-1]
+        if any(part.startswith('_') for part in parts):
+            continue
+        if entry.md_path.with_suffix('.inactive').exists() or not entry.duckdb_path.is_file():
+            continue
+        if entry.duckdb_path.with_suffix('.duckdb.rebuilding').exists():
+            continue
+        entries.append(entry)
+    return entries
+
+
+def signature(entry: H5adEntry) -> Dict[str, Any]:
+    """What identifies the source files of an entry for incremental builds."""
+    duckdb_stat, md_stat = entry.duckdb_path.stat(), entry.md_path.stat()
+    return {'duckdb_size': duckdb_stat.st_size, 'duckdb_mtime_ns': duckdb_stat.st_mtime_ns,
+            'md_size': md_stat.st_size, 'md_mtime_ns': md_stat.st_mtime_ns}
+
+
+def organism_of(entry: H5adEntry, store_root: Path) -> str:
+    """Lower-case organism from the mus cascade ('' when absent)."""
+    try:
+        value = mus.resolve_annotation(entry.h5ad_path, root=store_root).get('organism') or ''
+    except Exception:  # noqa: BLE001 - an unreadable sidecar leaves the organism unknown
+        return ''
+    return str(value[0] if isinstance(value, list) and value else value).strip().lower()
+
+
+def build(store_root: Path, index: OverlapIndex, only: List[str], force: bool, scratch: Path) -> int:
+    """Index new and changed datasets, drop vanished ones. Returns the number of failures."""
+    entries = active_entries(store_root)
+    present = {entry.db_id for entry in entries}
+    state = index.state()
+    failures = 0
+    for entry in entries:
+        if only and entry.db_id not in only:
+            continue
+        current = signature(entry)
+        old = state.get(entry.db_id, {})
+        if not force and all(old.get(key) == value for key, value in current.items()):
+            continue
+        started = time.monotonic()
+        try:
+            metadata, _ = parse_md_file(entry.md_path)
+            view = DatasetView(entry.duckdb_path, get_api_config(metadata), entry.group_id, db_label=entry.db_id,
+                               store_root=store_root, temp_dir=scratch / 'spill')
+            try:
+                digests = digests_from_view(view, entry.db_id, entry.group_id)
+            finally:
+                view.close()
+            index.write_dataset(digests, current, organism_of(entry, store_root))
+            print(f'  indexed {entry.db_id}: {digests.n_cells} cells, {len(digests.donors)} donors, '
+                  f'{len(digests.genes)} genes ({time.monotonic() - started:.1f}s)')
+        except Exception as exc:  # noqa: BLE001 - one broken dataset must not stop the index
+            failures += 1
+            print(f'  FAILED {entry.db_id}: {type(exc).__name__}: {exc}', file=sys.stderr)
+    if not only:
+        for gone in sorted(set(state) - present):
+            index.drop_dataset(gone)
+            print(f'  dropped {gone} (no longer in the store)')
+    index.rebuild_combined()
+    return failures
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description='Build the ingest overlap indexes',
+                                     formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
+    sub = parser.add_subparsers(dest='command', required=True)
+    for name in ('build', 'status'):
+        command = sub.add_parser(name)
+        command.add_argument('--store', help='h5adstore root (default: configured store)')
+        command.add_argument('--index-dir', help='override the index directory')
+    sub.choices['build'].add_argument('--only', nargs='+', default=[], metavar='GROUP/ID', help='index only these datasets')
+    sub.choices['build'].add_argument('--force', action='store_true', help='redo datasets that are up to date')
+    args = parser.parse_args(argv)
+
+    cfg = config.get_config()
+    store_root = Path(args.store).resolve() if args.store else config.get_data_folder(cfg).resolve()
+    index_dir = Path(args.index_dir).resolve() if args.index_dir else config.get_ingest_index_dir(cfg)
+    if index_dir == store_root or store_root in index_dir.parents:
+        print(f'ERROR: the index directory {index_dir} is inside the store; it holds quasi-identifiers and must not be.',
+              file=sys.stderr)
+        return 2
+    index = OverlapIndex(index_dir)
+    if args.command == 'status':
+        state = index.state()
+        entries = active_entries(store_root)
+        stale = [entry.db_id for entry in entries
+                 if any(state.get(entry.db_id, {}).get(key) != value for key, value in signature(entry).items())]
+        print(f'index {index_dir}: {len(state)} datasets indexed, {len(entries)} active in the store, '
+              f'{len(stale)} missing or stale')
+        return 0
+    print(f'Indexing {store_root} -> {index_dir}')
+    failures = build(store_root, index, args.only, args.force, config.get_ingest_scratch_dir(cfg))
+    print(f'Done: {len(index.state())} datasets in the index, {failures} failure(s)')
+    return 1 if failures else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

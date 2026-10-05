@@ -1,6 +1,8 @@
 # Plan: dataset ingestion route (skill-guided curator uploads that publish themselves once server-side checks pass)
 
-Status: plan, 2026-10-05. It includes Mark's decisions sent mid-task:
+Status: accepted 2026-10-05 (Mark), with the recommended defaults of section 19. **P1 is implemented**
+(`ant ingest-check`, `ant ingest-index`; see section 20 for what differs from this plan). P2 to P5 are open.
+It includes Mark's decisions sent mid-task:
 - The role is called `curators`.
 - A submission whose server-side checks pass is published automatically, with a "new, unreviewed" badge. Admins can retire it or send it back afterwards.
 - Anything marked controlled-access, or with an unknown licence, waits for an admin.
@@ -20,7 +22,7 @@ Status: plan, 2026-10-05. It includes Mark's decisions sent mid-task:
 | Derive forms, donor keys | `lib/obs_derive_forms.py` (`validate_spec`, `crosswalk_for`, `translate_value`, `group_id_for_md`), `lib/donor_keys.py` (`donor_key_map`, `key_digest`, `distinct_count`) | The crosswalk is read only inside the worker. |
 | Annotation | `lib/mus.py` (`resolve_annotation`, `validate_annotation`, `required_fields`), `lib/_mus_vocab.yaml` | `access` vocabulary is only `internal | public`. `license` is a soft field with no vocabulary. Controlled-access needs a new field (section 9). |
 | Structure validator | `<store>/scripts/validate_md.py` (id / group_id rules) | Run as a subprocess when present. `md_check` covers the same rules. |
-| DuckDB integrity | `bin/ingest/ant-duckdb-check` (read-only without `--clean-wal`) | Reuse as a subprocess. |
+| DuckDB integrity | `bin/ingest/ant-duckdb-check` | Reuse as a subprocess, **on a private copy only**: it is not read-only (it builds `__gene_bins`, may write `default_layer` into the `.md`, logs into the working directory). Found in P1, see section 20. |
 | **Never** | `bin/ingest/ant-h5ad-check`, and `bin/meta/ant-check`, which calls ant-h5ad-check as a subprocess | Both rewrite `.md` destructively. A test enforces this (section 14). |
 | Versioning | Already in store `.md`: `version: X.Y.Z` and a `changelog:` list of `{version, date, previous_sha256, changes}` | New datasets start at `1.0.0` with a first changelog entry. |
 | Store metadata | `/data/1/project/h5adstore` is a git repo (gitlab `bdslab/anthive/h5adstore`) | `.md`, `.h5ad.mus` and `index.md` are git-tracked. `ant-sync` never touches them and skips any path with a `_` folder part. |
@@ -98,7 +100,7 @@ What runs where:
 | S3 `_incoming/<user>/<sid>/meta/` | not used: metadata lives in the submission record | |
 | `<h5adstore>/_incoming/<user>/<sid>/` | worker staging: `<Group>/index.md` (new group only), `<Group>/<basename>.{h5ad,md,h5ad.mus}`, scratch `.duckdb` and layer parquet, `reports/` | worker only |
 | `<scratch_dir>/ingest/<job_id>/` | DuckDB spill and `ANTHIVE_CONVERT_STAGING_DIR` | worker |
-| `<h5adstore>/_ingest_index/` | overlap indexes: `donors.parquet` and `cells/<db_key>.parquet` | worker (`ant ingest-index`) |
+| `config.get_ingest_index_dir()` (default `<state_dir>/ingest/index`) | overlap indexes (changed in P1, they are not in the store; section 20) | `ant ingest-index` |
 
 The underscore keeps everything out of the catalogue scan (`ant-serve` line 1150), `ant-sync` (line 170), `md_check` and `catalog_manifest`. `<user>` is the `Remote-User`, sanitised to `[a-z0-9._-]`. `<sid>` is a ULID.
 
@@ -207,7 +209,16 @@ Measured: `ant-convert` takes 4m43s on M22/PFC (172k cells) and 7m53s on RX4/ALL
 
 Facet tests are measured from `_facet_tests/*/*manifest.json`: 124 runs, 2,220 s in total (median about 18 s), maximum 241 s (Lee2026 PsychAD).
 
-Estimates, to be measured in P1 on RX4/ALL and recorded in this doc:
+Measured in P1 (2026-10-05, `taskset -c 4-11 nice -n 19 ionice -c3`, scratch convert of M22/PFC, 172k cells, 3.3 GB h5ad):
+`ant ingest-check` end to end took 367 s wall with a peak of 39.7 GB resident memory. That is the scratch
+`ant-convert` (about 5 min, 11 GB of scratch files: 7.2 GB of layer parquet, a 30 MB database) plus the hash and
+all 33 checks (under a minute). Without a scratch convert (database already there) the checks take 6 to 51 s on
+the five validation datasets (22k to 290k cells, peak 0.3 to 7.7 GB). The downstream build steps were **not**
+measured: scoring, gene stats, module variability and facet tests write into the live store caches and the served
+databases, so a clean measurement needs the throwaway store of the end to end test (section 15). The table below
+stays an estimate.
+
+Estimates for the downstream steps, to be measured on RX4/ALL in a throwaway store:
 
 | Step | Estimate for 400k cells |
 | --- | --- |
@@ -334,10 +345,12 @@ No admin tools (approve, reviewed, send-back, retire, reject). Admin actions are
 ### 8.4 Overlap indexes: `bin/ingest/ant-ingest-index`
 
 `ant ingest-index build [--store PATH] [--only DB]` writes:
-- `<store>/_ingest_index/donors.parquet`: `db_key, group_id, key_digest, sex, age, apoe, braak, pmi`. Digests only, never raw uids.
-- `<store>/_ingest_index/cells/<db_key>.parquet`: `xxh64(barcode_norm|donor_key_digest)`.
+- `donors.parquet`: `db_key, group_id, key_digest, key_kind, sex, age, age_censored, apoe, braak, pmi, n_cells`. Digests only, never raw uids.
+- `cells/<db_key>.{strict,loose}.npy`: 64-bit hashes of (normalised barcode, donor digest) and of the barcode alone (BLAKE2b, 8 bytes; section 20).
+- `genes.parquet`: the gene names per organism, for `genes.ids`.
+- Location: `config.get_ingest_index_dir()`, not `<store>/_ingest_index/` (section 20).
 
-The build is incremental, keyed on the duckdb mtime and sha. It reads the `ant_*` views read-only. The worker refreshes the index after every build. The files sit under `_` and so never go to S3 or the API, but they contain quasi-identifiers: they get the same file permissions as the crosswalk.
+The build is incremental, keyed on the duckdb mtime and sha. It reads the `ant_*` views read-only. The worker refreshes the index after every build. The files never go to S3 or the API, but they contain quasi-identifiers: mode 0700 / 0600, like the crosswalk.
 
 ---
 
@@ -431,7 +444,7 @@ Must never: anything that bypasses section 1, contacting S3 directly, putting id
   - Fallback when the provider cannot scope keys: `s3.api_access: write`, with an `ant-stack check` warning.
 - **No data through the api or MCP:** only text up to 256 KB per field, and reports. Enforced by request size limits on those routes.
 - **Controlled access:**
-  - The crosswalk and `_ingest_index/` live only in the store and are read only by the worker.
+  - The crosswalk and overlap indexes (`config.get_ingest_index_dir()`) are read only by the worker and `ant ingest-check`.
   - Reports carry digests or counts in the curator view and names in `admin_detail` only.
   - Controlled or licence-unknown data is never auto-published.
   - The public skill holds no cohort aliases, no site addresses and no file paths of private files.
@@ -588,7 +601,7 @@ Rule kept: nothing hard-codes repo paths for runtime writes. Every path comes fr
 
 | Phase | Content | Size | Depends on |
 | --- | --- | --- | --- |
-| **P1: ant ingest-check, manual** | `lib/ingest_check/*`, `bin/ingest/ant-ingest-check`, `bin/ingest/ant-ingest-index`, `lib/facet_rules.py` (shared thresholds), `lib/ingest_md_fill.py`, scratch convert cache, JSON + md report, tests in section 15 (checks, no-destructive). Mark runs `ant ingest-check /path/Group --store /data/1/project/h5adstore --json r.json`. Measure the downstream step times. | L | replicate_unit and disease_basis keys landing (stub the checks as `skip` until then) |
+| **P1: ant ingest-check, manual** (done 2026-10-05) | `lib/ingest_check/*`, `bin/ingest/ant-ingest-check`, `bin/ingest/ant-ingest-index`, `lib/facet_rules.py` (shared thresholds), `lib/ingest_md_fill.py`, scratch convert cache, JSON + md report, tests in section 15 (checks, no-destructive). Mark runs `ant ingest-check /path/Group --store /data/1/project/h5adstore --json r.json`. Measure the downstream step times. | L | replicate_unit and disease_basis keys landing (stub the checks as `skip` until then) |
 | **P2: skill** | `anthive-dataset-ingest` SKILL.md + references, written against P1 check ids. Usable at first in "prepare files for an admin" mode (curator sends the folder, Mark runs P1). | M | P1 check ids frozen |
 | **P3: upload + roles + checks server-side** | config keys, `get_dataset_upload_settings`, `_require_curator`, `lib/ingest_store.py`, `lib/ingest_s3.py`, curator endpoints, `ingest-worker` with `verify`/`profile`/`check`, MCP `INGEST_TOOLS`, ant-stack render + check, incoming key, vark and pyvark commands (spec handed to their owners), `/account/ingest`, DEPLOY docs | L | P1; scoped S3 key from the bucket owner |
 | **P4: auto-publish + build + post-hoc admin** | `build`/`post`/`retire`/`pull_rescan` jobs, release/restore integration, git commit, S3 copy and push, `/admin/ingest` page, badges, admin endpoints, held flow, HPC remote worker mode | L | P3 |
@@ -611,17 +624,17 @@ Rule kept: nothing hard-codes repo paths for runtime writes. Every path comes fr
 
 ---
 
-## 19. Open decisions for Mark
+## 19. Decisions (all accepted by Mark, 2026-10-05, with the recommended defaults)
 
-- **D1 Role name:** `curators` (decided).
-- **D2 Auto-approval:** decided as auto-publish on pass for internal access. Open: should trusted in-house curators also auto-publish `access=public` (`datasets_auto_publish_public`), or should public always wait for an admin (proposed default: wait)?
-- **D3 Build runner:** a simple api-owned queue plus polling worker (proposed), or antomaton now. Antomaton's design note was not found in Basic Memory, so it was not compared.
-- **D4 Quotas:** per-user quota (200 GB proposed), max upload (50 GB), open submissions (3), incoming retention (30 days).
-- **D5 Post steps on ingest:** which score collections, whether ucell/aucell run (expensive), whether DE pseudobulk runs by default (proposed: off).
-- **D6 Missing raw counts:** a hard error, or allowed with `counts_unavailable` (proposed: allowed with a reason, shown on the dataset page).
-- **D7 Controlled flag source:** a new mus field `data_use` (upstream vocabulary change), the crosswalk `controlled` column, or both (proposed: both).
-- **D8 Store git push:** worker commits locally and Mark pushes (proposed), or a deploy key with auto-push.
-- **D9 Send-back of a live dataset:** set it inactive immediately (proposed), or leave it visible with a warning until fixed.
+- **D1 Role name:** `curators`.
+- **D2 Auto-approval:** a pass is published automatically for `access=internal`. `access=public` **always waits for an admin** (`datasets_auto_publish_public: false`).
+- **D3 Build runner:** a simple api-owned queue (SQLite) with a polling worker. Not antomaton. Antomaton can later become a client of the same `/internal/ingest/jobs` protocol.
+- **D4 Quotas:** 200 GB per user, 50 GB per upload, 3 open submissions per user, 30 days incoming retention (`datasets_upload_quota_gb_per_user`, `datasets_upload_max_gb`, `datasets_upload_max_open_per_user`, `datasets_incoming_retention_days`).
+- **D5 Post steps on ingest:** standard geneset scores, gene stats and facet tests. ucell / aucell and DE pseudobulk are **off** by default (`datasets_post_steps` without them, `datasets_de_pseudobulk: false`).
+- **D6 Missing raw counts:** allowed with a stated reason (`counts_unavailable: <reason>` in the `.md`), shown on the dataset page. Without the reason it is an error (check `layers.counts`).
+- **D7 Controlled flag source:** both. A new mus field `data_use` (`open` or `controlled`) and the optional `controlled` column of `donor_crosswalk.tsv`.
+- **D8 Store git push:** the worker commits locally and Mark pushes (`datasets_store_git_push: false`).
+- **D9 Send-back of a live dataset:** the dataset is set inactive immediately.
 
 ### Critical Files for Implementation
 - /data/1/users/mark/anthive4/bin/api/ant-serve (`_require_uploader` ~14686 as the gating template, `_require_admin_or_local`, `/admin/release` / `/admin/restore` / `/admin/rescan` ~11878-12139)
@@ -640,3 +653,63 @@ Rule kept: nothing hard-codes repo paths for runtime writes. Every path comes fr
 - The api has no S3 keys by default (`s3.api_access: none`, 2.41.0), so presigning needs the scoped incoming key in section 11.
 - I could not find the antomaton design in Basic Memory.
 - The downstream build-step times in section 6 are estimates, except convert and facet tests, which are measured. P1 should measure the rest.
+
+
+---
+
+## 20. P1 as implemented (2026-10-05)
+
+Delivered: `bin/ingest/ant-ingest-check`, `bin/ingest/ant-ingest-index`, `lib/ingest_check/` (33 checks, frozen ids
+in `lib/ingest_check/checks_*.py`, listed by `ant ingest-check --list-checks`), `lib/facet_rules.py` (the facet test
+thresholds, now imported by `bin/annot/ant-facet-test`), `config.get_ingest_state_dir / get_ingest_index_dir /
+get_ingest_scratch_dir / get_dataset_ingest_settings`, `doc/DATASET_INGESTION.md` (what each check means), tests
+`tests/test_ingest_*.py`. `replicate_unit` / `replicate_column` / `disease_basis` were already on main
+(`lib/facet_lint.py`, `lib/replicates.py`), so `design.replicate_unit` and `design.disease_basis` are real checks, not stubs.
+
+What differs from sections 3 to 8:
+
+- **Index location.** The overlap indexes live in `config.get_ingest_index_dir()` (default `<state_dir>/ingest/index`,
+  env `ANTHIVE_INGEST_INDEX_DIR`), not in `<store>/_ingest_index/`. They hold quasi-identifiers; the state dir is
+  where site-private data goes, and the store is a git repo with sync tooling next to it. `ant-ingest-index` refuses a
+  directory inside the store.
+- **Hashes.** BLAKE2b with 8 bytes instead of xxhash64 (no new dependency). Two hashes per cell: strict
+  (normalised barcode + donor digest) and loose (barcode alone). The loose one catches the same cells under other donor
+  keys (a fallback key contains the group id, so a re-labelled copy of a dataset has different strict hashes).
+- **`ant-duckdb-check` is not read-only** (section 0 said it was). Without `--clean-wal` it still opens the database
+  read-write to build a missing `__gene_bins` table, may write `default_layer` into the `.md`, and appends to
+  `./ant-<date>.log` in the working directory. `ant ingest-check` runs it only on a private copy in the scratch dir
+  (reflink copy of the database, copy of the `.md`, symlinks to the parquet files). Its "numerical obs column missing"
+  findings for score columns are downgraded to a warning when the `.scores.parquet` sidecar holds them.
+- **Scratch convert.** `ant-convert` resolves symlinks, so the scratch copy of the h5ad is a hard link (reflink copy
+  across devices), never a symlink. Scratch builds older than 7 days are pruned.
+- **Gene universe.** `genes.ids` uses the gene names of the datasets of the same organism in the overlap index
+  (`genes.parquet`), not `gene_stats_index.parquet`, which only holds a subset of genes per dataset. Without 3 datasets
+  of the organism the share of known genes is not judged.
+- **Demographic overlap.** Besides the rule of section 8.3 (sex, age within a year, PMI within an hour, Braak, APOE; 90+
+  treated as equal), a new donor counts as matched when it has exactly one candidate or exactly one *close* candidate
+  (distance under 0.25 tolerances). The chance level of each cohort is estimated by repeating the match with the new
+  ages shifted by 6, 9 and 12 years either way. `donor_overlap` is held when at least 50% of the donors match uniquely
+  and at least 20% beyond chance; 20% beyond chance, or 15 donors, is a warning. On GF4/MIC against M23 (247 shared
+  persons by id out of 449) the match is 62% with a chance level of 32%. It cannot replace the id based check.
+- **Held reasons.** Added `data_use_unknown`: a dataset without `data_use` is held, not passed (D7: an undeclared
+  consent status is exactly what an admin should look at).
+- **Description.** `meta.required_keys` accepts the `description` key or the markdown body of the `.md`, and only warns
+  for datasets already in the store (none of them has a `description` key).
+- **`disease_basis`** is required only when `ant_disease` is published. **`layers.consistency`** is skipped when the
+  `.md` declares `normalisation:`; bulk data whose X is another normalisation (vst) must declare it.
+- **Existing datasets.** A folder that is a group in the store runs in `existing` mode: `version.initial` is skipped, a stale
+  `sha256` in the `.md` and a short description are warnings. Overlap checks leave out the dataset itself, and donor id
+  overlap ignores the other datasets of the same group.
+- **`lib/ingest_md_fill.py`** is not part of P1. It is only used by the worker, so it moves to P4 with its test.
+
+Validation on five existing datasets (`taskset -c 4-11 nice -n 19 ionice -c3`, overlap index of 152 datasets; 7 to 68 s
+each, peak 0.3 to 7.7 GB resident). All run in `existing` mode against the live store, which is why most findings are
+warnings about missing optional fields (`license`, `data_use`, `description`):
+
+| dataset | kind | errors | what it shows |
+| --- | --- | --- | --- |
+| GF4/MIC | ROSMAP microglia | 1 | `donor.overlap_ids` fails: 255 persons shared with 9 datasets (M23/AST, IMM, VAS: 247 to 248; F26/*: 222 to 244; L26/PSY 3). Demographic match 62% against a chance level of 32%: held as `donor_overlap` |
+| L26/PSY | Lee2026 PsychAD | 1 | `donor.overlap_ids` note: 8 persons in 7 datasets of M23, F26 and GF4, declared through `facet_donor_exclusions`; 39 donors beyond chance by demographics. The one error is `design.disease_basis` (`braak_cerad` without `disease_derivation`) |
+| AZ5/SLM | xenograft | 0 | animal replicate unit, donor checks skipped, `access=public` held, stale `sha256` in the `.md`, no `ant_donor` / `ant_sex` / `ant_disease` |
+| H26/EBP | bulk | 1 | `layers.consistency` fails (r 0.81: X is not log1p CP10k of the counts and the `.md` does not declare a `normalisation`) |
+| G24/MMG | clean primary | 0 | warnings only: deprecated `ant_region`, stale `sha256`, short description |

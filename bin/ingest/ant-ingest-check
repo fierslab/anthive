@@ -1,0 +1,166 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "anndata>=0.12.0",
+#   "h5py>=3.0.0",
+#   "duckdb>=0.10.0",
+#   "numpy>=1.24.0",
+#   "pandas>=2.0.0",
+#   "pyarrow>=14.0.0",
+#   "pyyaml>=6.0",
+#   "scipy>=1.10.0",
+# ]
+# ///
+"""ant-ingest-check: check a dataset submission before publication (read-only).
+
+Input: a group folder (or one ``.h5ad`` in it) holding ``<basename>.h5ad``,
+``<basename>.md``, ``<basename>.h5ad.mus`` and, for a new group, ``index.md``.
+The group folder may be a staging folder or a group already in the store.
+
+Output: a report with one pass / warn / fail / skip entry per check (schema
+``anthive.ingest_check/1``, ids in ``doc/DESIGN_dataset_ingestion.md``
+section 8.3), as JSON (``--json``) and as a markdown summary (stdout, or
+``--md-summary``). Exit code 0: no errors. 1: errors. 2: the tool failed.
+
+Strictly non-destructive. It never calls the legacy h5ad checker or its
+umbrella wrapper (both rewrite ``.md`` files), runs ``md_check`` with fixing
+off, runs ``ant-duckdb-check`` only on a private copy (it builds tables), and
+writes only to the scratch dir (a hard-linked scratch convert when the
+dataset has no ``.duckdb``) and to the output files you name. Output files
+inside the group folder or the store are refused.
+
+Controlled-access data (``donor_crosswalk.tsv``) never appears in a report:
+only counts and digests.
+
+Examples:
+    ant ingest-check /path/Group --store /data/h5adstore --json report.json
+    ant ingest-check /path/Group/dataset.h5ad --no-convert --audience curator
+    ant ingest-check /path/Group --profile-only --json profile.json
+"""
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+script_dir = Path(__file__).parent.resolve()
+sys.path.insert(0, str(script_dir.parent.parent / 'lib'))
+
+import config  # noqa: E402
+from ingest_check import check_ids, run_checks, tool_version  # noqa: E402
+from ingest_check.context import CheckContext, Settings  # noqa: E402
+from ingest_check.profile import build_profile  # noqa: E402
+from ingest_check.report import build_report, curator_view, render_markdown, scrub, to_json  # noqa: E402
+
+EXIT_PASS, EXIT_FAIL, EXIT_TOOL = 0, 1, 2
+
+
+def resolve_target(target: str, dataset: Optional[str]) -> Tuple[Path, str]:
+    """``(group folder, basename)`` for a folder or an ``.h5ad`` path.
+
+    Raises:
+        SystemExit: the target does not exist, holds no h5ad, or holds several without ``--dataset``.
+    """
+    path = Path(target).resolve()
+    if path.is_file() and path.suffix == '.h5ad':
+        return path.parent, path.stem
+    if not path.is_dir():
+        sys.exit(f'ERROR: {target} is neither a folder nor an .h5ad file')
+    candidates = sorted(item.stem for item in path.glob('*.h5ad'))
+    if dataset:
+        return path, dataset
+    if len(candidates) == 1:
+        return path, candidates[0]
+    sys.exit(f'ERROR: {path} holds {len(candidates)} h5ad files; pick one with --dataset '
+             f'({", ".join(candidates[:8]) or "none found"})')
+
+
+def refuse_unsafe_outputs(paths: List[Optional[str]], group_dir: Path, store_root: Path) -> None:
+    """Exit when an output file would land inside the submission folder or the store."""
+    for raw in paths:
+        if not raw or raw == '-':
+            continue
+        target = Path(raw).resolve()
+        for protected, label in ((group_dir, 'the group folder'), (store_root, 'the store')):
+            if protected == target or protected in target.parents:
+                sys.exit(f'ERROR: refusing to write {target}: inside {label} ({protected}). '
+                         f'ant ingest-check never writes into submissions or the store.')
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description='Check a dataset submission before publication (read-only)',
+                                     formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
+    parser.add_argument('target', nargs='?', help='group folder, or an .h5ad inside it')
+    parser.add_argument('--dataset', help='basename of the dataset when the folder holds several h5ad files')
+    parser.add_argument('--store', help='h5adstore root (default: configured store)')
+    parser.add_argument('--json', metavar='OUT', help='write the JSON report here (- for stdout)')
+    parser.add_argument('--md-summary', metavar='OUT', help='write the markdown summary here')
+    parser.add_argument('--profile-only', action='store_true', help='write the obs profile (JSON) instead of checking')
+    parser.add_argument('--no-convert', action='store_true', help='never run a scratch convert; checks that need '
+                                                                  'a .duckdb are skipped unless --duckdb is given')
+    parser.add_argument('--duckdb', help='use this .duckdb instead of a scratch convert')
+    parser.add_argument('--audience', choices=('curator', 'admin'), default='admin')
+    parser.add_argument('--checks', help='comma separated check ids or families to run')
+    parser.add_argument('--skip', help='comma separated check ids or families to skip')
+    parser.add_argument('--sha256', help='sha256 the submitter declared for the h5ad')
+    parser.add_argument('--mode', choices=('auto', 'new', 'existing'), default='auto',
+                        help='new dataset or one already in the store (auto: existing when the folder is in the store)')
+    parser.add_argument('--list-checks', action='store_true', help='print the check ids and exit')
+    args = parser.parse_args(argv)
+
+    if args.list_checks:
+        print('\n'.join(check_ids()))
+        return EXIT_PASS
+    if not args.target:
+        parser.error('target is required')
+
+    cfg = config.get_config()
+    store_root = Path(args.store).resolve() if args.store else config.get_data_folder(cfg).resolve()
+    group_dir, basename = resolve_target(args.target, args.dataset)
+    refuse_unsafe_outputs([args.json, args.md_summary], group_dir, store_root)
+    ingest = config.get_dataset_ingest_settings(cfg)
+    settings = Settings(max_upload_gb=ingest['max_upload_gb'], auto_publish_public=ingest['auto_publish_public'],
+                        default_access=ingest['default_access'])
+    try:
+        with CheckContext(group_dir, basename, store_root, config.get_ingest_scratch_dir(cfg),
+                          config.get_ingest_index_dir(cfg, create=False), settings, args.sha256,
+                          Path(args.duckdb) if args.duckdb else None, not args.no_convert, args.mode) as ctx:
+            if args.profile_only:
+                if ctx.h5ad_path is None:
+                    sys.exit(f'ERROR: {basename}.h5ad not found in {group_dir}')
+                text = json.dumps(build_profile(ctx), indent=1, default=str)
+                if args.json and args.json != '-':
+                    Path(args.json).write_text(text)
+                else:
+                    print(text)
+                return EXIT_PASS
+            only = [name.strip() for name in args.checks.split(',')] if args.checks else None
+            skipped = [name.strip() for name in args.skip.split(',')] if args.skip else []
+            results = run_checks(ctx, only, skipped)
+            report = build_report(ctx, results, 'admin', tool_version())
+            scrub(report, ctx.sensitive_tokens())
+            if args.audience == 'curator':
+                report = curator_view(report)
+            crashed = any(item.outcome.details.get('internal_error') for item in results)
+    except Exception as exc:  # noqa: BLE001 - the tool failed, not the dataset
+        print(f'ERROR: ant ingest-check failed: {type(exc).__name__}: {exc}', file=sys.stderr)
+        return EXIT_TOOL
+
+    summary = render_markdown(report)
+    if args.json == '-':
+        print(to_json(report))
+        print(summary, file=sys.stderr)
+    else:
+        if args.json:
+            Path(args.json).write_text(to_json(report))
+        print(summary)
+    if args.md_summary:
+        Path(args.md_summary).write_text(summary)
+    if crashed:
+        return EXIT_TOOL
+    return EXIT_FAIL if report['result'] == 'fail' else EXIT_PASS
+
+
+if __name__ == '__main__':
+    sys.exit(main())

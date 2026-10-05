@@ -7,6 +7,10 @@ requirements are non-negotiable and a wrong file will be rejected at intake.
 **Scope:** the structure of the `.h5ad` file itself and the metadata that
 must accompany it. Stops at the point where the file leaves your hands.
 
+**Check it before you send it:** `ant ingest-check <folder> --dataset <basename>` runs these requirements
+and the metadata rules as a read-only report (`doc/DATASET_INGESTION.md`; plan in
+`doc/DESIGN_dataset_ingestion.md`).
+
 ---
 
 ## 1. Hard requirements

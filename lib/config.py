@@ -407,6 +407,58 @@ def get_library_index_dir(cfg: Optional[Dict[str, Any]] = None) -> Path:
     return resolve_path(_setting(cfg, 'library_index', 'ANTHIVE_LIBRARY_INDEX', 'data/library_index'))
 
 
+def get_ingest_state_dir(cfg: Optional[Dict[str, Any]] = None, create: bool = True) -> Path:
+    """State of dataset ingestion (submissions, reports, overlap indexes).
+
+    Key ``ingest_state_dir`` / env ``ANTHIVE_INGEST_STATE_DIR``, default
+    ``<state_dir>/ingest``. Never inside the repo checkout or the store.
+    """
+    configured = _setting(cfg, 'ingest_state_dir', 'ANTHIVE_INGEST_STATE_DIR', None)
+    path = resolve_path(configured) if configured else get_state_dir(cfg, create=create) / 'ingest'
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_ingest_index_dir(cfg: Optional[Dict[str, Any]] = None, create: bool = True) -> Path:
+    """Overlap indexes of ``ant ingest-index`` (donor and cell-barcode digests).
+
+    Key ``ingest_index_dir`` / env ``ANTHIVE_INGEST_INDEX_DIR``, default
+    ``<ingest_state_dir>/index``. The files hold quasi-identifiers (donor
+    demographics as digests plus values), so they stay out of the store.
+    """
+    configured = _setting(cfg, 'ingest_index_dir', 'ANTHIVE_INGEST_INDEX_DIR', None)
+    path = resolve_path(configured) if configured else get_ingest_state_dir(cfg, create=create) / 'index'
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_ingest_scratch_dir(cfg: Optional[Dict[str, Any]] = None, create: bool = True) -> Path:
+    """Scratch space of ``ant ingest-check`` (hard-linked h5ad, scratch converts): ``<tmp_dir>/ingest_check``."""
+    path = get_tmp_dir(cfg, create=create) / 'ingest_check'
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_dataset_ingest_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Dataset ingestion switches that ``ant ingest-check`` reads
+    (doc/DESIGN_dataset_ingestion.md, section 12): the upload size limit,
+    whether ``access=public`` may publish without an admin, and the access
+    level new datasets default to."""
+    cfg = cfg if cfg is not None else get_config()
+    try:
+        max_gb = float(cfg.get('datasets_upload_max_gb') or 50)
+    except (TypeError, ValueError):
+        max_gb = 50.0
+    return {
+        'max_upload_gb': max_gb,
+        'auto_publish_public': bool(cfg.get('datasets_auto_publish_public', False)),
+        'default_access': str(cfg.get('datasets_default_access') or 'internal'),
+    }
+
+
 def get_model_cache_dir(cfg: Optional[Dict[str, Any]] = None) -> Path:
     """Cache for the query-embedding model: model_cache / ANTHIVE_MODEL_CACHE,
     else FASTEMBED_CACHE_PATH (baked into the image), else <state_dir>/models."""

@@ -8,6 +8,30 @@ The checking functionality has been split into three separate tools for better m
 2. **ant-ant duckdb-check** - Validates DuckDB database integrity
 3. **ant-check** - Convenience wrapper that runs both (backward compatible)
 
+## Which checker is safe to run where
+
+| Tool | Writes | Safe on a live store or a submission |
+| --- | --- | --- |
+| `ant h5ad-check` | rewrites the dataset `.md` | no |
+| `ant check` | runs `ant h5ad-check` as a subprocess, so it rewrites the `.md` too | no |
+| `ant md-check` | writes missing ids unless `--no-fix` | only with `--no-fix` |
+| `ant duckdb-check` | builds `__gene_bins` in the database, may write `default_layer` into the `.md`, appends to `./ant-<date>.log` in the working directory, and takes a write lock | no, run it on a copy |
+| `ant ingest-check` | nothing in the submission or the store (scratch dir and the output files you name only) | yes, built for it |
+
+`ant ingest-check` is the checker for a dataset that is not published yet or must not be touched
+(`doc/DESIGN_dataset_ingestion.md`, section 8). It runs `ant duckdb-check` itself, on a private copy
+in the scratch dir.
+
+```bash
+ant ingest-check /path/to/Group --dataset basename --store /data/h5adstore --json report.json
+ant ingest-check /path/to/Group/basename.h5ad --no-convert --audience curator
+ant ingest-check /path/to/Group --dataset basename --profile-only --json profile.json
+ant ingest-index build        # overlap indexes (donors, cells, genes); first, and after the store changes
+```
+
+Exit code 0: no errors. 1: at least one failed check. 2: the tool itself failed. The checks, their ids
+and what to do about each are in `doc/DATASET_INGESTION.md`.
+
 ## ant h5ad-check
 
 **Purpose:** Validate h5ad file structure and generate/update metadata file.

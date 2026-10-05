@@ -66,6 +66,31 @@ See `doc/LIBRARY.md` and `doc/LIBRARY_INDEX.md`.
 - **Default**: `data/library`
 - **Description**: Checkout of the library repository (paper records under `papers/`, any depth). Env `ANTHIVE_LIBRARY`; container sites set `data.library` in `site.yaml`.
 
+#### `datasets_upload_max_gb`
+- **Type**: number
+- **Default**: `50`
+- **Description**: Largest `.h5ad` that `ant ingest-check` (check `files.size`) and later the upload route accept. See `doc/DESIGN_dataset_ingestion.md`.
+
+#### `datasets_auto_publish_public`
+- **Type**: boolean
+- **Default**: `false`
+- **Description**: When false, a dataset whose annotation says `access=public` is held for an admin (check `access.level`). When true, a passing public dataset publishes by itself.
+
+#### `datasets_default_access`
+- **Type**: string (`internal` or `public`)
+- **Default**: `internal`
+- **Description**: Access level a new dataset gets when its `.h5ad.mus` does not say.
+
+#### `ingest_state_dir`
+- **Type**: path
+- **Default**: empty, meaning `<state_dir>/ingest`
+- **Description**: State of dataset ingestion (submissions, reports, overlap indexes). Env `ANTHIVE_INGEST_STATE_DIR`. Never inside the repo checkout or the store.
+
+#### `ingest_index_dir`
+- **Type**: path
+- **Default**: empty, meaning `<ingest_state_dir>/index`
+- **Description**: Overlap indexes written by `ant ingest-index` and read by `ant ingest-check` (donor demographics with digests of donor keys, hashed cell barcodes). The files hold quasi-identifiers: give them the permissions of `donor_crosswalk.tsv`. Env `ANTHIVE_INGEST_INDEX_DIR`.
+
 #### `library_index`
 - **Type**: path
 - **Default**: `data/library_index`
