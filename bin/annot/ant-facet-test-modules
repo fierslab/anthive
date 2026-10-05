@@ -416,10 +416,17 @@ def cell_mean_scores(conn: duckdb.DuckDBPyConnection, sidecar: Path, sample_map:
     quoted = str(sidecar).replace("'", "''")
     source_list = ','.join("'" + s.replace("'", "''") + "'" for s in sources)
     long = conn.execute(
-        f"SELECT m.sample_idx, s.source, s.catalog, s.module, AVG(s.score) AS mean_score, "
+        # AVG over doubles is order dependent: a parallel hash aggregate adds the
+        # values in a thread and scheduling dependent order and the mean differs
+        # in the last bits between runs and thread counts. The ordered aggregate
+        # sums each group in cell_id order (unique within a group), so the result
+        # does not depend on threads or load.
+        f"SELECT m.sample_idx, s.source, s.catalog, s.module, "
+        f"AVG(s.score ORDER BY s.cell_id) AS mean_score, "
         f"COUNT(s.score) AS n_scored FROM read_parquet('{quoted}') s "
         f"JOIN score_sample_map m ON s.cell_id = m.cell_id WHERE s.source IN ({source_list}) "
-        f"GROUP BY m.sample_idx, s.source, s.catalog, s.module").df()
+        f"GROUP BY m.sample_idx, s.source, s.catalog, s.module "
+        f"ORDER BY m.sample_idx, s.source, s.catalog, s.module").df()
     conn.execute('DROP TABLE score_sample_map')
     long['column'] = list(zip(long['source'], long['catalog'], long['module']))
     means = long.pivot(index='sample_idx', columns='column', values='mean_score')
@@ -517,6 +524,7 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
     manifest: Dict[str, Any] = {
         'tool': TOOL_VERSION, 'db_id': entry.db_id, 'group': entry.study, 'file': entry.stem,
         'dataset_sha256': md_yaml.get('sha256'), 'md_path': str(entry.md_path),
+        'md_sha256': aft.md_file_sha256(entry.md_path),
         'anthive4_git': aft.git_head(script_dir.parent.parent),
         'h5adstore_git': aft.git_head(store_root),
         'genesetstore_git': aft.git_head(registry.root),
@@ -939,7 +947,9 @@ def cmd_run(args: argparse.Namespace) -> None:
         if out_manifest.exists() and not args.force and args.all:
             previous = json.loads(out_manifest.read_text())
             now_has_counts = aft.counts_layer_for(entry, md_yaml) is not None
-            if previous.get('status') == 'done' and not (previous.get('no_counts') and now_has_counts):
+            mapping_current = previous.get('md_sha256') == aft.md_file_sha256(entry.md_path)
+            if previous.get('status') == 'done' and mapping_current \
+                    and not (previous.get('no_counts') and now_has_counts):
                 print(f'[skip existing] {db_id}')
                 continue
         if args.wait_for_convert:

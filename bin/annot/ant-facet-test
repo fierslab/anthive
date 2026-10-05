@@ -685,7 +685,7 @@ def pseudobulk(conn: duckdb.DuckDBPyConnection, counts_parquet: Path,
     frame = conn.execute(
         f"SELECT m.sample_idx, p.gene_id, SUM(p.value) AS count "
         f"FROM read_parquet('{quoted}') p JOIN sample_map m ON p.cell_id = m.cell_id "
-        f"GROUP BY m.sample_idx, p.gene_id").df()
+        f"GROUP BY m.sample_idx, p.gene_id ORDER BY m.sample_idx, p.gene_id").df()
     conn.execute('DROP TABLE sample_map')
     return frame
 
@@ -736,6 +736,26 @@ def composition_test(proportions: pd.Series, design: pd.DataFrame, facet: str
 # --------------------------------------------------------------------------
 # Running one dataset
 # --------------------------------------------------------------------------
+
+def md_file_sha256(md_path: Path) -> str:
+    """sha256 of the dataset .md file (front matter incl. the api mapping).
+
+    ``dataset_sha256`` in the manifest is the h5ad content hash and does not change
+    when the mapping changes; this one does, so a stale output can be detected.
+    """
+    return hashlib.sha256(Path(md_path).read_bytes()).hexdigest()
+
+
+def manifest_is_current(manifest_path: Path, md_path: Path) -> bool:
+    """True when the manifest exists and was produced from the current .md file."""
+    if not manifest_path.exists():
+        return False
+    try:
+        recorded = json.loads(manifest_path.read_text()).get('md_sha256')
+    except (OSError, ValueError):
+        return False
+    return recorded is not None and recorded == md_file_sha256(md_path)
+
 
 def git_head(path: Path) -> Optional[str]:
     try:
@@ -806,6 +826,7 @@ def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: 
     manifest: Dict[str, Any] = {
         'tool': TOOL_VERSION, 'db_id': entry.db_id, 'group': entry.study, 'file': entry.stem,
         'dataset_sha256': md_yaml.get('sha256'), 'md_path': str(entry.md_path),
+        'md_sha256': md_file_sha256(entry.md_path),
         'anthive4_git': git_head(script_dir.parent.parent),
         'h5adstore_git': git_head(store_root),
         'timestamp_utc': dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds'),
@@ -1133,7 +1154,7 @@ def cmd_run(args: argparse.Namespace) -> None:
             print(f'unknown db_id {db_id}', file=sys.stderr)
             continue
         out_manifest = out_root / entry.study / f'{entry.stem}.facet_run_manifest.json'
-        if out_manifest.exists() and not args.force and args.all:
+        if not args.force and args.all and manifest_is_current(out_manifest, entry.md_path):
             print(f'[skip existing] {db_id}')
             continue
         # cheap metadata gate first, so skipped datasets do not wait for load

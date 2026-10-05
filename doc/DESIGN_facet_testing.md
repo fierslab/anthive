@@ -140,6 +140,33 @@ Nothing is written elsewhere in `data/`; `.h5ad`, `.duckdb` and `.md` files are
 only read. R lives in `envs/facet-test-r` (limma 3.62.1, edgeR 4.4.0, R 4.4.3);
 the `anthive-data` environment has neither package and was not modified.
 
+## Reproducibility and determinism
+
+Both tools are bitwise reproducible for a given input (store state, mapping,
+tool commit, seed), independent of the DuckDB thread count and of machine load
+(`tests/test_facet_determinism.py`).
+
+* Gene tool: the pseudobulk is an integer sum of raw counts (exact, so the
+  order of addition cannot matter), the SQL result is sorted before it reaches
+  R, R runs with a fixed seed and fixed BLAS thread settings.
+* Module tool: variant A needs the donor mean of per-cell double scores. A
+  parallel DuckDB `AVG` adds the values in a scheduling dependent order, so the
+  mean differed in the last bits between runs (2026-10-05, seen as 1e-17 to 1e-14
+  differences in estimates, t, p_param and q_param between two reruns of unchanged
+  datasets). The mean is now an ordered aggregate (`AVG(score ORDER BY cell_id)`),
+  summed in a fixed order. Permutation shuffles come from seeded generators and
+  were never affected. Variant B uses exact integer count sums.
+* Summaries from runs before the fix differ from a rerun by at most ~1e-12 in
+  the parametric statistics; counts of hits did not change in the module tests.
+* `run --all` without `--force` skips a dataset only when its manifest records
+  the sha256 of the current `.md` file (`md_sha256`). `dataset_sha256` is the h5ad
+  content hash and does not change when the mapping changes, so before this
+  check a mapping fix left the old output in place. Changes outside the `.md`
+  (`.h5ad.mus`, scores sidecar, genesetstore) are not tracked: use `--force`.
+  2026-10-05c to 2026-10-05d: the hit count changes were all D26/ALL, whose 05c
+  output predates the ant_age top-coding fix (it reproduces exactly from the
+  pre-fix mapping).
+
 ## Limitations
 
 * **Composition.** Pseudobulk within a cell type does not remove composition
