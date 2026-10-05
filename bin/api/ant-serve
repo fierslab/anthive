@@ -618,7 +618,7 @@ class ConnectionPool:
         }
 
 
-_METADATA_CACHE_VERSION = 4       # bump when cache format changes
+_METADATA_CACHE_VERSION = 5       # bump when the cache format OR the cached metadata payload (keys derived in _load_database_metadata) changes
 _METADATA_CACHE_TTL_S3  = 86_400  # 24 h for S3 databases (no local mtime)
 
 
@@ -1075,7 +1075,34 @@ class DatabaseRegistry:
             scores_mtime = scores_path.stat().st_mtime if scores_path.exists() else 0.0
 
         return {'md_mtime': md_mtime, 'index_mtime': index_mtime,
-                'duckdb_mtime': duckdb_mtime, 'scores_mtime': scores_mtime}
+                'duckdb_mtime': duckdb_mtime, 'scores_mtime': scores_mtime,
+                'annotation_sig': self._annotation_signature(db_id, md_path)}
+
+    def _annotation_signature(self, db_id: str, md_path: Path) -> str:
+        """mtime signature of the annotation inputs that feed a dataset's metadata.
+
+        Covers the sibling ``.h5ad.mus``, every ``.env`` of the cascade (as walked by
+        ``mus.read_cascade``) and the collection-root ``index.md`` that
+        ``_load_database_metadata`` merges in. Local stats only, so it stays cheap.
+        """
+        paths: List[Path] = [mus.sidecar_path(md_path.with_suffix('.h5ad'))]
+        stop = self.data_folder.resolve()
+        current = md_path.parent.resolve()
+        while True:
+            paths.append(current / '.env')
+            if current == stop or current.parent == current:
+                break
+            current = current.parent
+        rel_str = self._db_extra.get(db_id, {}).get('rel_path')
+        if rel_str:
+            paths.append(self.data_folder / Path(rel_str).parts[0] / 'index.md')
+        parts = []
+        for path in paths:
+            try:
+                parts.append(f"{path}:{path.stat().st_mtime_ns}")
+            except OSError:
+                continue
+        return '|'.join(parts)
 
     def _is_cache_entry_valid(
         self, db_id: str, cached_entry: Dict[str, Any], fingerprint: Dict[str, float],
@@ -1084,6 +1111,7 @@ class DatabaseRegistry:
         db_url = self.databases[db_id]
         if cached_entry.get('md_mtime')    != fingerprint['md_mtime']:    return False
         if cached_entry.get('index_mtime') != fingerprint['index_mtime']: return False
+        if cached_entry.get('annotation_sig') != fingerprint['annotation_sig']: return False
         if db_url.startswith('s3://'):
             # No reliable mtime for S3 — fall back to 24 h TTL
             return time.time() - cached_entry.get('cached_at', 0) < _METADATA_CACHE_TTL_S3
@@ -1203,7 +1231,8 @@ class DatabaseRegistry:
         """Load metadata for all databases, using the persisted cache where possible.
 
         A cache entry is reused when the mtime of the dataset's .md file, its
-        nearest ancestor index.md, and the local .duckdb file are all unchanged.
+        nearest ancestor index.md, the collection-root index.md, the .h5ad.mus
+        sidecar, the .env cascade, and the local .duckdb file are all unchanged.
         S3-backed databases use a 24 h TTL instead.
 
         Pass force_reload=True to ignore the cache and reload everything (used by
@@ -1872,8 +1901,8 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.42.1"
-API_VERSION_RELEASED = "2026-10-02"
+API_VERSION = "2.43.0"
+API_VERSION_RELEASED = "2026-10-05"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
 # Create FastAPI app with lifespan handler (Phase 2)

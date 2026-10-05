@@ -33,6 +33,7 @@ _WANTED = {
     'EvictedDatabaseError', '_DbInstance', 'ConnectionPool',
     '_cells_json_chunks', '_cells_csv_chunks', '_CELLS_STREAM_CHUNK_ROWS',
     '_plot_cache_key', '_plot_db_fingerprint', 'restore_database', 'DatabaseRegistry',
+    '_METADATA_CACHE_VERSION', '_METADATA_CACHE_TTL_S3', '_json_serial',
 }
 
 

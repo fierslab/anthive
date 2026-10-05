@@ -37,7 +37,7 @@ from ._credentials import (
 from .exceptions import raise_for_upload_status
 
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 __all__ = ["AnthiveClient", "VarkConfigError"]
 
 
@@ -454,6 +454,17 @@ class AnthiveClient:
         persons, so do not count them as independent donors; see
         :meth:`get_donor_groups`.
 
+        Replicate fields (anthive main after 2.42.1): ``replicate_unit``
+        (``'donor'``, ``'animal'``, ``'sample'`` or ``'none'``, what a
+        biological replicate is in this dataset), ``replicate_column``
+        (the obs column that identifies a replicate),
+        ``replicate_basis`` (``'declared'`` in the dataset's ``.md`` or
+        ``'inferred'``) and ``disease_basis`` (how the disease label was
+        defined, e.g. ``'braak_cerad'`` or ``'author_dx'``). Each is a
+        plain column in ``format='dataframe'``; servers that do not
+        serve them (or datasets without a value) leave them absent or
+        ``None``.
+
         Args:
             refresh: Force a fresh catalog scan on the server.
             format: ``'list'`` (default) or ``'dataframe'`` (needs pandas).
@@ -516,7 +527,9 @@ class AnthiveClient:
 
         Newer servers add the lineage fields ``designation``,
         ``reanalysis_of``, ``donor_group`` and ``has_donor_uid``
-        (described under :meth:`get_databases`).
+        (described under :meth:`get_databases`) and the replicate
+        fields ``replicate_unit``, ``replicate_column``,
+        ``replicate_basis`` and ``disease_basis``.
         """
         return _self._get(f'/databases/{db_id}/info')
 
@@ -1306,6 +1319,14 @@ class AnthiveClient:
         """``GET /module-variability``. Fleet-wide module variability
         table (dataset x source x catalog x module x tag x statistic).
 
+        Exploratory and per-cell (descriptive): the statistics are
+        computed over cells, and cells are not replicates, so they say
+        nothing about donor-level reproducibility (use the donor-level
+        facet tests for that). Newer servers state this in ``basis``
+        (``'per-cell (descriptive)'``; ``X-Basis`` header for CSV /
+        TSV) and add a ``replicate_unit`` column to the rows. With
+        ``format='dataframe'`` the basis is kept in ``df.attrs['basis']``.
+
         Args:
             db_id: Restrict to one dataset.
             source: ``'geneset'`` or ``'starcat'``.
@@ -1346,7 +1367,10 @@ class AnthiveClient:
             import pandas as pd
             rows = (result.get('rows', result)
                     if isinstance(result, dict) else result)
-            return pd.DataFrame(rows)
+            frame = pd.DataFrame(rows)
+            if isinstance(result, dict) and 'basis' in result:
+                frame.attrs['basis'] = result['basis']
+            return frame
         return result
 
     def rescan_module_variability(self) -> Dict:
@@ -1488,7 +1512,8 @@ class AnthiveClient:
         this facet), and ``signal_strength`` (max variance-explained
         recorded in ``module_variability.parquet`` for this facet, or
         zero when no signal is on record; secondary datasets are
-        ignored on newer servers).
+        ignored on newer servers). ``signal_strength`` is per-cell
+        (descriptive) and deprecated: do not use it to rank facets.
 
         Newer servers (anthive main after 2.42.1) add ``label``,
         ``summary`` and ``defined`` (the published definition) and
@@ -1641,6 +1666,14 @@ class AnthiveClient:
         to ``q5``) server-side via DuckDB ``NTILE``. Categorical facets
         are grouped verbatim by value.
 
+        Exploratory and per-cell (descriptive): cells are not
+        replicates, so ``signal`` ranks genes by between-group variance
+        of cell-level means and is no evidence of a donor-level effect;
+        use :meth:`get_facet_tests` / :meth:`get_facet_test_genes` for
+        that. Newer servers say so in ``basis``
+        (``'per-cell (descriptive)'``), ``replicate_unit`` and
+        ``replicate_level_analysis``.
+
         Returns a dict with ``db_id``, ``facet``, ``facet_type``,
         ``layer``, ``n_groups``, ``groups`` (sorted group labels),
         ``n_cells_per_group`` (label to cell count), ``n_genes_returned``,
@@ -1681,7 +1714,12 @@ class AnthiveClient:
 
     #: Facets with donor-level test results. The facet endpoints take the
     #: short name or the ``ant_`` column (``'sex'`` or ``'ant_sex'``).
-    TESTED_FACETS = ('sex', 'disease', 'apoe_carrier', 'braak')
+    TESTED_FACETS = ('sex', 'disease', 'apoe4_carrier', 'braak')
+
+    #: Deprecated aliases the server still accepts for one release and
+    #: answers with the new name.
+    DEPRECATED_FACET_ALIASES = {'apoe_carrier': 'apoe4_carrier',
+                                'ant_apoe_carrier': 'ant_apoe4_carrier'}
 
     #: How to read facet test results. Repeated in each method's docstring
     #: so ``help()`` on one method is enough.
@@ -1696,10 +1734,15 @@ class AnthiveClient:
         "level with fewer than 5 donors (Braak: fewer than 10); p, q, t and "
         "CI are null and only the effect estimate is reported. counted "
         "means the unit counts towards replication; not_counted_reason says "
-        "why not. Replication = q < 0.05 with the same sign in k of m "
-        "independent cohorts (DRAFT cohort table, a cohort counts once, cell "
-        "types counted by group, secondary datasets and descriptive-only "
-        "units never count)."
+        "why not. replicated = partial-conjunction r_value < 0.05 (the "
+        "effect is present in at least 2 independent cohorts, same "
+        "direction; Benjamini and Heller, Simes combination of the "
+        "limma treat p values of one anchor unit per cohort). k of m is "
+        "descriptive: cohorts individually at q_treat < 0.05 among those "
+        "tested. The cohort table is a DRAFT, a cohort counts once, cell "
+        "types are counted by group, secondary datasets and "
+        "descriptive-only units never count. Units with analysis_level "
+        "'cell' are cell-level and descriptive only."
     )
 
     def _facet_rows(self, path: str, params: Dict[str, Any],
@@ -1729,7 +1772,7 @@ class AnthiveClient:
         (``expression ~ facet + sex + age + pmi + batch`` where
         available), module scores with OLS on donor-level scores plus
         label permutations. Contrasts: sex (m vs f), disease (AD vs
-        control, provisional), apoe_carrier (e4 carrier vs
+        control, provisional), apoe4_carrier (e4 carrier vs
         non-carrier), braak (linear trend per stage).
 
         Top level: ``status`` (``tested``, ``not_tested``, ``not_run``),
@@ -1747,7 +1790,13 @@ class AnthiveClient:
         ``composition_flag``, ``composition_p``, ``batch_used``,
         ``batch_confounded``), ``genes`` (``n_tested``, ``n_q05``),
         ``modules`` (per method and source: ``n_modules``,
-        ``n_q05_param``, ``n_q05_perm``) and ``model``.
+        ``n_q05_param``, ``n_q05_perm``) and ``model``. Newer servers
+        add ``analysis_level`` (``'replicate'`` or ``'cell'``),
+        ``analysis_level_label`` (``"cell-level, descriptive only"`` for
+        cell level), ``analysis_level_reason`` and ``tau_log2``. The
+        summary and units also carry ``replicate_unit``,
+        ``replicate_column``, ``replicate_basis``, ``disease_basis`` and
+        ``pool``.
 
         ``model`` is built from the run manifests: ``stratum``,
         ``facet_term``, ``donors`` (per level, analysed, dropped for a
@@ -1794,13 +1843,15 @@ class AnthiveClient:
         Rows: ``facet, cell_type, celltype_source, contrast, level_ref,
         level_test, gene, logFC, se, ci_low, ci_high, t, p_value,
         q_value, ave_expr`` (mean log2 CPM), ``n_donors, n_donors_ref,
-        n_donors_test, descriptive_only, provisional``.
+        n_donors_test, descriptive_only, provisional``. Newer servers
+        add ``p_treat``, ``q_treat`` (limma treat: H0 is
+        ``|logFC| <= tau_log2``) and ``tau_log2``.
         ``descriptive_only`` rows have null p, q, t and CI (a level has
         too few donors) and only appear with ``q=1``.
 
         Args:
             db_id: Dataset id.
-            facet: ``sex``, ``disease``, ``apoe_carrier`` or ``braak``.
+            facet: ``sex``, ``disease``, ``apoe4_carrier`` or ``braak``.
             cell_type: Cell type stratum as in :meth:`get_facet_tests`.
             celltype_source: Stratifier, e.g. ``constant_all_cells``.
             gene: One gene symbol (case-insensitive).
@@ -1854,7 +1905,8 @@ class AnthiveClient:
         score), ``t, df, p_param, q_param, p_perm, q_perm,
         n_perm_effective, n_genes_requested, n_genes_found,
         n_donors(_ref/_test), descriptive_only, provisional,
-        no_counts``.
+        no_counts``; newer servers add ``passes_effect_gate``
+        (``|std_effect| >= 0.2``).
 
         Args:
             db_id, facet, cell_type, celltype_source: As in
@@ -1887,7 +1939,7 @@ class AnthiveClient:
 
         Args:
             db_id: Dataset id.
-            facet: ``sex``, ``disease``, ``apoe_carrier`` or ``braak``.
+            facet: ``sex``, ``disease``, ``apoe4_carrier`` or ``braak``.
             cell_type: Cell type stratum.
             celltype_source: Stratifier, when a cell type occurs under
                 several.
@@ -1934,7 +1986,7 @@ class AnthiveClient:
         not be tested, with the reason.
 
         Args:
-            facet: ``'sex'`` / ``'ant_sex'``, also disease, apoe_carrier,
+            facet: ``'sex'`` / ``'ant_sex'``, also disease, apoe4_carrier,
                 braak (see :attr:`TESTED_FACETS`). Others give 404.
             top_genes: Genes at q < 0.05 listed per row (0 to 50).
             exclude_secondary: Secondary datasets are listed with
@@ -1978,29 +2030,49 @@ class AnthiveClient:
           ``n_sibling_strata``, ``significant``, donors per level,
           ``descriptive_only``, ``flags``, ``model`` (the formula),
           ``method``, ``covariates_left_out``, ``run_date``, ``tool``.
+          Newer servers add ``anchor`` (the unit that represents its
+          cohort), ``pooled`` (donor-pooled unit, ``db_id``
+          ``pool:<id>``), ``p_treat``, ``q_treat``, ``tau_log2`` (the
+          limma treat threshold), ``significant_treat``,
+          ``independence``, ``disease_basis`` and ``analysis_level``
+          (``'replicate'`` or ``'cell'``; cell-level is descriptive
+          only; ``analysis_level_reason`` says why).
         - ``replication``: one entry per cell type group with
           ``celltype_group`` (also in ``cell_type``), ``cl_id``,
           ``labels`` (the raw labels it covers), ``cohorts_tested``
           (m), ``cohorts_sig_same_sign`` (k), ``direction``,
-          ``sign_discordant``, ``cohorts_up``, ``cohorts_down`` and
-          ``badge`` (the sentence the web UI shows).
+          ``sign_discordant``, ``cohorts_up``, ``cohorts_down`` (the
+          old fields, q_value < 0.05 on the anchor units, kept for one
+          release) and, from facet engine v2: ``r_value`` (partial
+          conjunction, u = 2, BH over the genes of the facet x cell
+          type group), ``p_pc``, ``k`` (cohorts with q_treat < 0.05 in
+          the replicated direction), ``m`` (cohorts with a treat p
+          value), ``replicated`` (``r_value < 0.05``),
+          ``r_direction``, ``anchors`` (one per counted cohort:
+          ``cohort``, ``db_id``, ``pooled``, ``logFC``, ``p_treat``,
+          ``q_treat``), ``overlap_unknown`` and
+          ``cohorts_overlap_unknown`` (cohorts whose donor
+          independence was never checked), ``replication_u`` and
+          ``replication_method`` (``'simes'``). ``badge`` is the
+          sentence the web UI shows; the pre-v2 text is
+          ``legacy_badge``.
 
         How to read it: ``counted`` means the unit counts towards
         replication (counted cohort, not descriptive only, not a
-        secondary dataset, the dataset's most direct cell type source
-        for the group); ``not_counted_reason`` says why not. When
-        several strata of one dataset fall into one group, their q is
-        multiplied by ``n_sibling_strata`` (Bonferroni) into
-        ``q_counted`` before the q < 0.05 call. ``definition`` holds the
-        full replication rule: q < 0.05 with the same sign in k of m
-        independent cohorts, a cohort counts once.
+        secondary dataset, the anchor unit of its cohort for the group);
+        ``not_counted_reason`` says why not. ``replicated`` is the
+        partial-conjunction call (``r_value < 0.05``: the effect is
+        present in at least 2 independent cohorts, same direction);
+        "k of m" is only the descriptive count of cohorts individually
+        at q_treat < 0.05. ``definition`` holds the full rule; a cohort
+        counts once.
         ``descriptive_only`` units have no p or q. For APOE locus genes
         (APOE, APOC1, TOMM40, NECTIN2, ...) an e4 effect can be
         allele-linked expression or read mapping, not downstream
         biology (``notes``).
 
         Args:
-            facet: ``'sex'`` / ``'ant_sex'``, also disease, apoe_carrier,
+            facet: ``'sex'`` / ``'ant_sex'``, also disease, apoe4_carrier,
                 braak.
             gene: Gene symbol (case-insensitive).
             cell_type: A cell type group (``'microglia'``) or a raw
@@ -2034,25 +2106,32 @@ class AnthiveClient:
         is provisional and the cohort table is a DRAFT. A high rank is a
         count of separate significant results, not a pooled estimate.
 
-        Ranking (``ranking`` in the response): (1) k, the cohorts with
-        q < 0.05 and the same sign, highest first; (2) ``agreement``,
-        the fraction of the m tested cohorts whose effect has that sign
-        (significant or not), highest first; (3) ``median_abs_logFC``
-        over the m tested cohorts, largest first. The number of cohorts
-        tested is never a ranking key by itself, so "2 of 2" does not
-        outrank "2 of 4".
+        Only replicated genes are listed (partial-conjunction
+        ``r_value < 0.05``, effect present in at least 2 independent
+        cohorts, same direction). Ranking (``ranking`` in the response):
+        ``r_value`` ascending, then k (cohorts individually at
+        q_treat < 0.05 in the replicated direction), ``agreement``
+        (fraction of the m tested cohorts with that sign) and
+        ``median_abs_logFC``. k of m is descriptive, not the
+        replication call.
 
         Returns ``{facet, cell_type, celltype_group, cl_id, labels,
-        cohorts_in_cell_type, cell_types, rows, definition, ranking,
-        exclude_secondary, cohort_table_status}``. Rows: ``gene,
-        cohorts_sig_same_sign`` (k), ``cohorts_tested`` (m),
-        ``cohorts_same_sign, agreement, direction, sign_discordant,
-        units_up, units_down, median_abs_logFC, max_abs_logFC, cohorts,
-        apoe_locus``. ``cell_types`` lists the groups with their raw
-        ``labels`` and counted cohorts.
+        cohorts_in_cell_type, n_replicated, n_genes_in_family,
+        cell_types, rows, definition, ranking, exclude_secondary,
+        cohort_table_status}``; ``n_replicated`` counts the replicated
+        genes of the family, ``n_genes_in_family`` the genes tested in
+        at least 2 cohorts, and ``rows`` is capped at ``n``. Rows:
+        ``gene, r_value, p_pc, k, m, replicated, direction,
+        agreement, median_abs_logFC, cohorts, cohorts_tested_labels,
+        overlap_unknown, cohorts_overlap_unknown`` plus the old
+        ``cohorts_sig_same_sign, cohorts_tested, cohorts_same_sign,
+        sign_discordant, apoe_locus``. The v1 fields ``units_up``,
+        ``units_down`` and ``max_abs_logFC`` are gone.
+        ``cell_types`` lists the groups with their raw ``labels`` and
+        counted cohorts.
 
         Args:
-            facet: ``'sex'`` / ``'ant_sex'``, also disease, apoe_carrier,
+            facet: ``'sex'`` / ``'ant_sex'``, also disease, apoe4_carrier,
                 braak.
             cell_type: A cell type group (``'microglia'``) or a raw
                 label; default: the group with most counted cohorts.
@@ -2060,7 +2139,8 @@ class AnthiveClient:
             exclude_secondary: ``False`` lets secondary datasets count.
                 Sent only when ``False``.
             format: ``'json'`` or ``'dataframe'`` (the rows, needs
-                pandas).
+                pandas; ``n_replicated`` and ``n_genes_in_family`` go to
+                ``df.attrs``).
         """
         params: Dict[str, Any] = {'n': n}
         if cell_type is not None:
@@ -2070,13 +2150,17 @@ class AnthiveClient:
         result = self._get(f'/facets/{facet}/effects/top', params=params)
         if format == 'dataframe':
             import pandas as pd
-            return pd.DataFrame(result.get('rows', []))
+            frame = pd.DataFrame(result.get('rows', []))
+            for key in ('n_replicated', 'n_genes_in_family'):
+                if key in result:
+                    frame.attrs[key] = result[key]
+            return frame
         return result
 
     def get_gene_facet_effects(self, gene: str,
                                exclude_secondary: bool = True) -> Dict:
         """``GET /genes/{gene}/facet-effects``. Result cards of one gene
-        for every tested facet (sex, disease, apoe_carrier, braak).
+        for every tested facet (sex, disease, apoe4_carrier, braak).
 
         Returns ``{gene, facets: {facet: card}}``; each card has the
         shape of :meth:`get_facet_gene_effects`. Exploratory,

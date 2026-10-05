@@ -40,7 +40,7 @@ from .exceptions import (
 # Backward-compatibility alias (matches antclient 1.x).
 AntClient = AnthiveClient
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 __all__ = [
     "AnthiveClient", "AntClient", "VarkConfigError", "__version__",
     "AnthiveAPIError", "PaperUploadError", "PaperUploadForbiddenError",

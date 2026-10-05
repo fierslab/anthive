@@ -29,9 +29,17 @@ the spec drifting away from the running code.
 
 ---
 
-## Unreleased
+## 2.43.0 (2026-10-05)
 
-Additive (minor). No version bump yet.
+Minor bump. Mostly additive (new dataset, replication and facet-test fields), with
+three contract changes to be aware of:
+
+- `/facets/{facet}/effects/top` rows no longer carry `units_up`, `units_down` and
+  `max_abs_logFC`. Use `k`, `m`, `r_direction` and `median_abs_logFC`.
+- The replication `badge` text changed ("k of m" wording); the old text is `legacy_badge`.
+- The facet `apoe_carrier` is now `apoe4_carrier`; the old name stays as an alias.
+
+pyvark 0.9.0 and the vendored JupyterLite client cover all of this.
 
 - **Facet replication v2: partial-conjunction r-values, treat p values, one anchor per cohort**
   (2026-10-05). `/facets/{facet}/effects`, `/genes/{gene}/facet-effects` (replication

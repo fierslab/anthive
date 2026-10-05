@@ -42,6 +42,16 @@ and `lib/config.py` (anthive.yaml loader).
   → write → `POST /admin/restore/{db_id}`.
 - **Field-type detection** (gene / obs-num / obs-cat / embedding) is automatic
   from the name; plot and query endpoints depend on it.
+- **Metadata cache** (`<tmp_dir>/metadata_cache.json`) persists across
+  restarts so startup skips the slow per-dataset DuckDB load. An entry is
+  valid only while the mtimes of the `.md`, the nearest `index.md`, the
+  `.duckdb`, the scores sidecar, and `annotation_sig` (sibling `.h5ad.mus`,
+  the whole `.env` cascade, the collection-root `index.md`) are unchanged
+  (`_get_entry_fingerprint`). It does NOT know about code changes: when you
+  add or change a key that `_load_database_metadata` derives, bump
+  `_METADATA_CACHE_VERSION`, otherwise old entries keep serving the old
+  payload until `POST /admin/rescan`. S3-backed datasets use a 24 h TTL.
+  Tests: `tests/test_metadata_cache_invalidation.py`.
 - **Plot cache** is in-memory LRU keyed on `(db_id, query, format, duckdb +
   scores-sidecar mtime)`; captures the X-Plot-Caption + bytes. `?cache=miss`
   skips the lookup, re-renders and refreshes the entry (`X-Plot-Cache:
