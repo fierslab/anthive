@@ -349,6 +349,59 @@ def test_cohort_table_roles(results):
     assert cohorts['G2/ds2']['status'] == 'DRAFT'
 
 
+def _require_exclusion(results: Path, applied: bool) -> None:
+    """G2/ds2 shares persons with another counted cohort (column ``donor_exclusion``);
+    ``applied`` writes the manifest block of a counted run that dropped them."""
+    table = results / fr.COHORT_TABLE_NAME
+    lines = table.read_text().splitlines()
+    out = [lines[0] + '\tdonor_exclusion']
+    for line in lines[1:]:
+        out.append(line + ('\tpersons of CohortA' if '\tG2/ds2\t' in line else '\t'))
+    table.write_text('\n'.join(out) + '\n')
+    manifest_path = results / 'G2' / 'ds2.facet_run_manifest.json'
+    manifest = json.loads(manifest_path.read_text())
+    if applied:
+        manifest['donor_exclusion'] = {'variant': 'counted', 'counted': True, 'n_donors_before': 40,
+                                       'n_donors_excluded': 10, 'n_donors_after': 30,
+                                       'rule': {'reason': 'persons of CohortA'}}
+    manifest_path.write_text(json.dumps(manifest))
+
+
+def test_required_donor_exclusion_missing_means_not_counted(results):
+    _require_exclusion(results, applied=False)
+    engine = fr.FacetResults(results)
+    summary = engine.summary('G2/ds2', 'G2', 'ds2')
+    assert summary['cohort']['counted'] is False and summary['cohort']['exclusion_missing'] is True
+    card = engine.gene_effects('braak', 'PTPRG', DATASETS)
+    rep = card['replication'][0]
+    assert rep['cohorts_tested'] == 1 and rep['badge'].startswith('one cohort')
+    unit = [u for u in card['units'] if u['db_id'] == 'G2/ds2'][0]
+    assert unit['counted'] is False and 'donor exclusion' in unit['not_counted_reason']
+
+
+def test_required_donor_exclusion_applied_counts_and_is_described(results):
+    _require_exclusion(results, applied=True)
+    engine = fr.FacetResults(results)
+    summary = engine.summary('G2/ds2', 'G2', 'ds2')
+    assert summary['cohort']['counted'] is True and summary['cohort']['donor_exclusion_applied'] is True
+    assert summary['donor_exclusion']['genes']['n_donors_excluded'] == 10
+    unit = [u for u in summary['units'] if u['facet'] == 'braak'][0]
+    assert unit['model']['donors']['exclusion'] == '10 of 40 donors left out: persons of CohortA'
+    rep = engine.gene_effects('braak', 'PTPRG', DATASETS)['replication'][0]
+    assert rep['cohorts_tested'] == 2
+
+
+def test_supplementary_all_donors_run_is_reported_not_served(results):
+    folder = results / 'G2' / fr.SUPPLEMENTARY_DIRNAME
+    folder.mkdir()
+    (folder / 'ds2.facet_run_manifest.json').write_text(json.dumps(
+        {'status': 'done', 'n_donors': 40, 'n_cells': 1000, 'timestamp_utc': '2026-10-05T10:00:00+00:00'}))
+    summary = fr.FacetResults(results).summary('G2/ds2', 'G2', 'ds2')
+    assert summary['supplementary_all_donors']['counted'] is False
+    assert summary['supplementary_all_donors']['n_donors'] == 40
+    assert fr.FacetResults(results).summary('G1/ds1', 'G1', 'ds1')['supplementary_all_donors'] is None
+
+
 def test_gene_effects_card_and_replication(results):
     card = fr.FacetResults(results).gene_effects('braak', 'PTPRG', DATASETS)
     assert card['facet']['effect_unit'] == 'log2 fold change per Braak stage'

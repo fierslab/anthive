@@ -53,6 +53,10 @@ SUFFIXES = {
     'module_manifest': '.facet_module_run_manifest.json',
 }
 
+#: Folder (inside a group folder) of the full-donor runs of datasets that have a
+#: ``facet_donor_exclusions`` rule: supplementary, never counted, not read by the API.
+SUPPLEMENTARY_DIRNAME = 'supplementary_all_donors'
+
 FACET_ORDER = ('sex', 'disease', 'apoe_carrier', 'braak')
 METHOD_ORDER = (('cell_mean', 'geneset'), ('cell_mean', 'ucell'), ('pseudobulk', 'gene_list'))
 
@@ -90,6 +94,10 @@ VOLCANO_YLABEL = f'-log10 p (raw); coloured = q < {Q_THRESHOLD:g}'
 # the results (audit section 8.3). A cohort counts once; roles matching this
 # pattern do not count (the same rule as ant-facet-test-modules summarize).
 COHORT_TABLE_NAME = 'cohort_selection.DRAFT.tsv'
+# Optional column ``donor_exclusion`` of the cohort table: free text naming the donors that
+# must be absent from the counted run of that dataset (they are persons of another counted
+# cohort). The dataset .md carries the machine-readable rule (lib/donor_exclusions.py); a unit
+# counts only when its run manifest records that the rule was applied (``donor_exclusion.counted``).
 EXCLUDED_ROLE_PATTERN = re.compile(r'duplicate|supplement|do not|never|alternative B|T20 only', re.I)
 
 REPLICATION_DEFINITION = (
@@ -165,6 +173,9 @@ def _not_counted_reason(record: Dict[str, Any]) -> Optional[str]:
         return 'descriptive only (a level has too few donors)'
     if not record.get('cohort') or (isinstance(record.get('cohort'), float) and math.isnan(record['cohort'])):
         return 'dataset not in the cohort table'
+    if record.get('exclusion_missing'):
+        return ('this dataset shares persons with another counted cohort and its run does not record the '
+                'donor exclusion (re-run ant-facet-test)')
     if not record.get('counted'):
         return 'cohort role not counted (duplicate, supplement or alternative)'
     if record.get('celltype_group') == UNMAPPED:
@@ -437,7 +448,14 @@ class FacetResults:
         if cached is not None:
             return cached
         result = json_safe(self._compute_summary(db_id, group_folder, stem, current_sha256))
-        result['cohort'] = self.cohorts().get(db_id)
+        cohort = self.cohorts().get(db_id)
+        if cohort and cohort.get('donor_exclusion_required'):
+            applied = ((result.get('donor_exclusion') or {}).get('genes') or {}).get('counted') is True
+            cohort = {**cohort, 'donor_exclusion_applied': applied}
+            if not applied and cohort.get('counted'):
+                cohort['counted'] = False
+                cohort['exclusion_missing'] = True
+        result['cohort'] = cohort
         controls = self.sex_controls(group_folder, stem)
         for unit in result['units']:
             if unit['facet'] == 'sex' and unit['tested']:
@@ -617,6 +635,11 @@ class FacetResults:
             'genes': _run_info(gene_manifest, kind='genes'),
             'modules': _run_info(module_manifest, kind='modules'),
         }
+        donor_exclusion = {
+            'genes': (gene_manifest or {}).get('donor_exclusion'),
+            'modules': (module_manifest or {}).get('donor_exclusion'),
+        }
+        supplementary = self._supplementary_run(group_folder, stem)
         files = {
             'genes': gene_frame is not None,
             'modules': module_frame is not None,
@@ -656,8 +679,23 @@ class FacetResults:
             'dataset_changed': dataset_changed,
             'files': files,
             'runs': runs,
+            'donor_exclusion': donor_exclusion,
+            'supplementary_all_donors': supplementary,
             'units': ordered,
         }
+
+    def _supplementary_run(self, group_folder: str, stem: str) -> Optional[Dict[str, Any]]:
+        """Facts of the full-donor (non-counted) run of a dataset with a donor
+        exclusion rule: ``{counted: False, n_donors, n_cells, timestamp_utc}``;
+        None when there is none. The results themselves are not served."""
+        path = (Path(self.results_dir) / group_folder / SUPPLEMENTARY_DIRNAME
+                / f'{stem}{SUFFIXES["gene_manifest"]}')
+        manifest = self._read_json(path)
+        if not manifest or manifest.get('status') != 'done':
+            return None
+        return {'counted': False, 'n_donors': manifest.get('n_donors'), 'n_cells': manifest.get('n_cells'),
+                'timestamp_utc': manifest.get('timestamp_utc'),
+                'path': f'{group_folder}/{SUPPLEMENTARY_DIRNAME}/{stem}{SUFFIXES["gene_manifest"]}'}
 
     # ── rows ───────────────────────────────────────────────────────────────
 
@@ -794,6 +832,7 @@ class FacetResults:
                         'cell_class': row.get('cell_class', '').strip(),
                         'counted': bool(cohort) and not EXCLUDED_ROLE_PATTERN.search(role),
                         'status': row.get('status', '').strip() or 'DRAFT',
+                        'donor_exclusion_required': row.get('donor_exclusion', '').strip(),
                         'note': row.get('rule_from_audit_8_3', '').strip(),
                     }
             except Exception as exc:
@@ -923,7 +962,7 @@ class FacetResults:
             except Exception as exc:
                 log.warning('facet results: cannot read %s: %s', paths['genes'], exc)
                 continue
-            cohort = cohorts.get(dataset['db_id']) or {}
+            cohort = summary.get('cohort') or cohorts.get(dataset['db_id']) or {}
             digests = self.unit_donor_digests(dataset['group_folder'], dataset['stem'])
             for (cell_type, celltype_source), group in frame.groupby(['cell_type', 'celltype_source'], sort=False):
                 unit = tested.get((str(cell_type), str(celltype_source)))
@@ -939,6 +978,7 @@ class FacetResults:
                     'descriptive_only': bool((unit.get('flags') or {}).get('descriptive_only')),
                     'cohort': cohort.get('cohort') or None, 'cohort_label': cohort.get('cohort_label') or None,
                     'role': cohort.get('role') or None, 'counted': bool(cohort.get('counted')),
+                    'exclusion_missing': bool(cohort.get('exclusion_missing')),
                     'is_secondary': bool(dataset.get('is_secondary')),
                     'celltype_group': group_of(cell_type),
                     'summary_unit': unit,
@@ -955,7 +995,8 @@ class FacetResults:
         units = pd.DataFrame(unit_rows, columns=[
             'unit', 'db_id', 'title', 'cell_type', 'celltype_source', 'n_donors', 'n_donors_ref',
             'n_donors_test', 'level_ref', 'level_test', 'descriptive_only', 'cohort', 'cohort_label',
-            'role', 'counted', 'is_secondary', 'celltype_group', 'summary_unit', 'donor_digests'])
+            'role', 'counted', 'exclusion_missing', 'is_secondary', 'celltype_group', 'summary_unit',
+            'donor_digests'])
         if parts:
             rows = pd.concat(parts, ignore_index=True)
             rows['gene_upper'] = rows['gene'].str.upper().astype('category')
@@ -1708,6 +1749,15 @@ def build_model(unit: Dict[str, Any], records_for_unit: Dict[str, Dict[str, Any]
         'min_cells_per_donor': min_cells if min_cells is not None else NOT_RECORDED,
         'min_donors_per_level': parameters.get('min_donors_per_level', NOT_RECORDED),
     }
+    exclusion = ((gene_manifest or {}).get('donor_exclusion') or (module_manifest or {}).get('donor_exclusion'))
+    if isinstance(exclusion, dict):
+        reason = (exclusion.get('rule') or {}).get('reason') or 'donor exclusion rule of the dataset'
+        if exclusion.get('counted'):
+            donors['exclusion'] = (f'{exclusion.get("n_donors_excluded")} of {exclusion.get("n_donors_before")} '
+                                   f'donors left out: {reason}')
+        else:
+            donors['exclusion'] = (f'full donor set (not counted); the counted run leaves out '
+                                   f'{exclusion.get("n_donors_excluded")} donors: {reason}')
     facet_term = _FACET_TERMS.get(facet, (facet, NOT_RECORDED))[1]
     facet_note = dataset_facet_note(facet, gene_manifest, module_manifest)
     if facet_note:

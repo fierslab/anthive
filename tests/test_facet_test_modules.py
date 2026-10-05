@@ -175,7 +175,7 @@ PLANT_SCORE_SHIFT = 0.8
 
 
 def make_module_dataset(tmp_path: Path, n_f: int = 10, n_m: int = 10, with_counts: bool = True,
-                        seed: int = 11):
+                        seed: int = 11, extra_md: str = ''):
     """Synthetic human dataset with counts, a scores sidecar and a genesetstore.
 
     Module PLANT (GENE0..9) is up in males in T1 (counts and scores). Modules
@@ -223,7 +223,8 @@ def make_module_dataset(tmp_path: Path, n_f: int = 10, n_m: int = 10, with_count
     conn.execute('CREATE TABLE __cells AS SELECT cell_id, cell_name FROM cells')
     genes = pd.DataFrame({'gene_id': range(N_GENES), 'gene_name': [f'GENE{i}' for i in range(N_GENES)]})
     conn.execute('CREATE TABLE __genes AS SELECT * FROM genes')
-    obscat = cells[['cell_id', 'donor_id', 'Sex', 'celltype']]
+    cells['bank'] = np.where(cells['donor_id'].isin(['D00', 'D01', 'D12']), 'R', 'M')
+    obscat = cells[['cell_id', 'donor_id', 'Sex', 'celltype', 'bank']]
     conn.execute('CREATE TABLE __obscat AS SELECT * FROM obscat')
     conn.execute('CREATE TABLE __obsnum AS SELECT cell_id FROM cells')
     conn.close()
@@ -242,7 +243,7 @@ def make_module_dataset(tmp_path: Path, n_f: int = 10, n_m: int = 10, with_count
     (group_dir / f'{stem}.md').write_text(
         '---\nid: SYN\ntitle: Syn\nversion: 0.1.0\nsha256: deadbeef\nis_secondary: false\n' + layer_stats +
         'api:\n  obs_rename:\n    donor_id: ant_donor\n    Sex: ant_sex\n    celltype: ant_author_cell_type\n'
-        '  obs_value_rename:\n    Sex:\n      F: f\n      M: m\n---\n')
+        '  obs_value_rename:\n    Sex:\n      F: f\n      M: m\n' + extra_md + '---\n')
     (group_dir / f'{stem}.h5ad.mus').write_text('organism=human\nexperimental_system=post_mortem_tissue\n')
     # genesetstore
     geneset_root = tmp_path / 'genesetstore'
@@ -331,6 +332,23 @@ def test_results_are_reproducible_for_a_fixed_seed(tmp_path):
     _, out_second = _run(tmp_path, entry, store, geneset_root)
     second = pd.read_parquet(out_second / 'Syn2026' / 'Syn_mod.facet_module_tests.parquet')
     pd.testing.assert_frame_equal(first, second)
+
+
+def test_donor_exclusion_rule_applies_to_module_tests(tmp_path):
+    rule = 'facet_donor_exclusions:\n  reason: shared persons\n  obs:\n    bank: [R]\n'
+    store, geneset_root, entry = make_module_dataset(tmp_path, extra_md=rule)
+    manifest, out_root = _run(tmp_path, entry, store, geneset_root)
+    assert manifest['status'] == 'done'
+    exclusion = manifest['donor_exclusion']
+    assert exclusion['counted'] is True
+    assert (exclusion['n_donors_before'], exclusion['n_donors_excluded'], exclusion['n_donors_after']) == (20, 3, 17)
+    table = pd.read_parquet(out_root / 'Syn2026' / 'Syn_mod.facet_module_tests.parquet')
+    assert set(table['n_donors']) == {17}
+    full, out_full = _run(tmp_path, entry, store, geneset_root, all_donors=True)
+    assert full['donor_exclusion']['counted'] is False and full['n_donors'] == 20
+    supplementary = out_root / 'Syn2026' / 'supplementary_all_donors'
+    assert set(pd.read_parquet(supplementary / 'Syn_mod.facet_module_tests.parquet')['n_donors']) == {20}
+    assert set(pd.read_parquet(out_root / 'Syn2026' / 'Syn_mod.facet_module_tests.parquet')['n_donors']) == {17}
 
 
 def test_dataset_without_counts_runs_variant_a_only(tmp_path):

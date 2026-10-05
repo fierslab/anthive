@@ -78,6 +78,7 @@ script_dir = Path(__file__).parent.resolve()
 lib_dir = script_dir.parent.parent / 'lib'
 sys.path.insert(0, str(lib_dir))
 
+import donor_exclusions  # type: ignore  # noqa: E402
 from anthive_db import build_obs_view_sql  # type: ignore  # noqa: E402
 from donor_keys import COUNT_BASIS as DONOR_COUNT_BASIS, donor_key_map, key_digest  # type: ignore  # noqa: E402
 from h5adstore import H5adEntry, iter_h5adstore  # type: ignore  # noqa: E402
@@ -813,8 +814,15 @@ def facet_notes_from_md(md_yaml: Dict[str, Any]) -> Dict[str, str]:
 
 def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: List[str],
                     rscript: str, threads: int = 4, memory_limit_gb: int = 24,
-                    keep_work: bool = False) -> Dict[str, Any]:
+                    keep_work: bool = False, exclusion_from: Optional[List[str]] = None,
+                    exclusion_where: Optional[List[str]] = None,
+                    all_donors: bool = False) -> Dict[str, Any]:
     """Run all requested facets over all strata of one dataset.
+
+    The donors listed by the ``facet_donor_exclusions`` rule of the dataset
+    ``.md`` (plus ``exclusion_from`` / ``exclusion_where``, see
+    ``lib/donor_exclusions.py``) are left out; ``all_donors`` tests every
+    donor instead and writes to the supplementary folder.
 
     Returns the manifest dict (also written next to the parquet). When the
     dataset is not testable the manifest has ``status`` 'skipped' and a reason.
@@ -823,6 +831,9 @@ def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: 
     md_yaml, _ = parse_md_file(entry.md_path)
     api_config = get_api_config(md_yaml)
     annotation = mus.resolve_annotation(entry.h5ad_path, root=store_root)
+    md_rule = donor_exclusions.rule_from_md(md_yaml)
+    exclusion_rule = donor_exclusions.combine(md_rule, exclusion_from or [], exclusion_where or [])
+    variant = donor_exclusions.VARIANT_ALL_DONORS if (all_donors and md_rule) else donor_exclusions.VARIANT_COUNTED
     manifest: Dict[str, Any] = {
         'tool': TOOL_VERSION, 'db_id': entry.db_id, 'group': entry.study, 'file': entry.stem,
         'dataset_sha256': md_yaml.get('sha256'), 'md_path': str(entry.md_path),
@@ -850,6 +861,10 @@ def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: 
     if not eligible:
         manifest.update(status='skipped', reason=reason)
         return manifest
+    if all_donors and md_rule is None:
+        manifest.update(status='skipped', reason='--all-donors: this dataset has no facet_donor_exclusions '
+                                                  'rule, its counted run already uses every donor')
+        return manifest
     layer_name, counts_parquet = counts_layer_for(entry, md_yaml)  # type: ignore[misc]
     manifest['counts_layer'] = layer_name
 
@@ -865,10 +880,15 @@ def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: 
         extra_candidates = [c for c in cat_columns
                             if (CELLTYPE_CANDIDATE_RE.match(c) or BATCH_NAME_RE.search(c))
                             and not c.startswith('ant_')]
-        cells = cell_table(conn, wanted + extra_candidates)
+        exclusion_columns = [c for c in (exclusion_rule.obs_columns if exclusion_rule else [])
+                             if c not in wanted and c not in extra_candidates]
+        cells = cell_table(conn, wanted + extra_candidates + exclusion_columns)
         if 'ant_donor' not in cells:
             manifest.update(status='skipped', reason='no ant_donor facet in the current mapping')
             return manifest
+        cells, exclusion_report = donor_exclusions.apply_rule(cells, exclusion_rule, variant)
+        if exclusion_report is not None:
+            manifest['donor_exclusion'] = exclusion_report
         batch_column = find_batch_column(conn, cells)
         if batch_column is not None:
             cells['batch'] = cells[batch_column]
@@ -1043,7 +1063,7 @@ def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: 
             unit_records.append(record)
 
         manifest['units'] = unit_records
-        out_dir = out_root / entry.study
+        out_dir = donor_exclusions.result_dir(out_root, entry.study, md_rule is not None, all_donors)
         out_dir.mkdir(parents=True, exist_ok=True)
         if frames:
             table = pd.concat(frames, ignore_index=True)
@@ -1142,6 +1162,11 @@ def cmd_run(args: argparse.Namespace) -> None:
     for facet in facets:
         if facet not in FACETS:
             sys.exit(f'unknown facet {facet}; choose from {FACETS}')
+    if (args.exclude_donors_from or args.exclude_donors_where) and not args.out_root:
+        sys.exit('--exclude-donors-from / --exclude-donors-where need an explicit --out-root '
+                 '(the counted run takes its exclusions from the .md facet_donor_exclusions rule)')
+    if args.all_donors and (args.exclude_donors_from or args.exclude_donors_where):
+        sys.exit('--all-donors cannot be combined with command line exclusions')
     entries = {e.db_id: e for e in iter_h5adstore(store_root) if not e.study.startswith('_')}
     if args.all:
         targets = sorted(entries)
@@ -1153,12 +1178,17 @@ def cmd_run(args: argparse.Namespace) -> None:
         if entry is None:
             print(f'unknown db_id {db_id}', file=sys.stderr)
             continue
-        out_manifest = out_root / entry.study / f'{entry.stem}.facet_run_manifest.json'
+        # cheap metadata gate first, so skipped datasets do not wait for load
+        md_yaml, _ = parse_md_file(entry.md_path)
+        rule_in_md = donor_exclusions.rule_from_md(md_yaml) is not None
+        if args.all_donors and not rule_in_md:
+            print(f'[skip] {db_id}: --all-donors needs a facet_donor_exclusions rule in the .md')
+            continue
+        out_manifest = (donor_exclusions.result_dir(out_root, entry.study, rule_in_md, args.all_donors)
+                        / f'{entry.stem}.facet_run_manifest.json')
         if not args.force and args.all and manifest_is_current(out_manifest, entry.md_path):
             print(f'[skip existing] {db_id}')
             continue
-        # cheap metadata gate first, so skipped datasets do not wait for load
-        md_yaml, _ = parse_md_file(entry.md_path)
         eligible, reason = dataset_eligibility(
             entry, md_yaml, mus.resolve_annotation(entry.h5ad_path, root=store_root),
             get_api_config(md_yaml))
@@ -1171,15 +1201,17 @@ def cmd_run(args: argparse.Namespace) -> None:
         try:
             manifest = process_dataset(entry, store_root, out_root, facets, args.rscript,
                                        threads=args.threads, memory_limit_gb=args.memory_gb,
-                                       keep_work=args.keep_work)
+                                       keep_work=args.keep_work,
+                                       exclusion_from=args.exclude_donors_from,
+                                       exclusion_where=args.exclude_donors_where,
+                                       all_donors=args.all_donors)
         except Exception as exc:
             print(f'[error] {db_id}: {exc}', file=sys.stderr)
             summary_rows.append({'db_id': db_id, 'status': 'error', 'reason': str(exc)[:300]})
             continue
         if manifest['status'] == 'skipped':
             print(f'[skip] {db_id}: {manifest["reason"]}')
-            out_dir = out_root / entry.study
-            out_dir.mkdir(parents=True, exist_ok=True)
+            out_manifest.parent.mkdir(parents=True, exist_ok=True)
             out_manifest.write_text(json.dumps(manifest, indent=2, default=_json_default))
         else:
             n_ok = sum(1 for u in manifest['units'] if u['status'] == 'ok')
@@ -1209,6 +1241,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument('--max-load', type=float, default=12.0)
     run.add_argument('--force', action='store_true')
     run.add_argument('--keep-work', action='store_true', help='keep the temp work dir (debug)')
+    donor_exclusions.add_cli_arguments(run)
     return parser
 
 

@@ -33,6 +33,17 @@ the spec drifting away from the running code.
 
 Additive (minor). No version bump yet.
 
+- **Donor exclusions in facet tests** (2026-10-05, `doc/DESIGN_facet_testing.md`).
+  - `GET /databases/{id}/facet-tests` gains `donor_exclusion` (`genes` and
+    `modules`: the `donor_exclusion` block of the run manifests or null) and
+    `supplementary_all_donors` (`counted` false, `n_donors`, `n_cells`,
+    `timestamp_utc`, `path` of the full-donor run, null when none). The
+    results of that run are not served. `cohort` gains `donor_exclusion_required`,
+    `donor_exclusion_applied` and `exclusion_missing`; a unit of a dataset whose
+    cohort table row requires an exclusion that its manifest does not record is
+    not counted (`not_counted_reason`).
+  - Each unit `model.donors` gains `exclusion` (a sentence) when a rule was applied.
+
 - **`ant_donor_uid` from a template or a crosswalk join; distinct donor
   counts** (2026-10-05, `doc/DESIGN_canonical_columns.md`).
   - `.md` `api.obs_derive` accepts two new categorical forms:

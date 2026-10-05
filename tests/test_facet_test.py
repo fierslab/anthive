@@ -73,7 +73,7 @@ PLANTED_LOG2_FC = 2.0
 def make_dataset(tmp_path: Path, n_f: int = 10, n_m: int = 10, organism: str = 'human',
                  system: str = 'post_mortem_tissue', extra_api: str = '',
                  is_secondary: bool = False, samples_per_donor: int = 1,
-                 disease_pattern: str | None = None, seed: int = 7):
+                 disease_pattern: str | None = None, seed: int = 7, extra_md: str = ''):
     """Write a synthetic dataset; returns (store_root, H5adEntry).
 
     Two cell types (T1 with 30 cells per donor, T2 with 4 cells per donor so
@@ -134,7 +134,7 @@ def make_dataset(tmp_path: Path, n_f: int = 10, n_m: int = 10, organism: str = '
         'layer_stats:\n  counts:\n    min_nonzero: 1.0\n'
         'api:\n  obs_rename:\n    donor_id: ant_donor\n    Sex: ant_sex\n'
         '    celltype: ant_author_cell_type\n    dx: ant_disease\n' + extra_api +
-        '  obs_value_rename:\n    Sex:\n      F: f\n      M: m\n---\n')
+        '  obs_value_rename:\n    Sex:\n      F: f\n      M: m\n' + extra_md + '---\n')
     (group_dir / f'{stem}.md').write_text(md_text)
     (group_dir / f'{stem}.h5ad.mus').write_text(
         f'organism={organism}\nexperimental_system={system}\n')
@@ -325,6 +325,68 @@ def test_planted_sex_effect_recovered(tmp_path):
     for key in ('dataset_sha256', 'seed', 'r_versions', 'parameters', 'anthive4_git'):
         assert key in manifest
     assert json.loads((out_root / 'Syn2026' / 'Syn_ds.facet_run_manifest.json').read_text())['seed']
+
+
+EXCLUSION_MD = ('facet_donor_exclusions:\n  reason: shared persons\n  obs:\n'
+                '    sample_id: [D00_s0, D01_s0, D12_s0]\n')
+
+
+@needs_r
+def test_donor_exclusion_rule_counted_run_and_all_donors_run(tmp_path):
+    store, entry = make_dataset(tmp_path, n_f=10, n_m=10, extra_md=EXCLUSION_MD)
+    out_root = tmp_path / 'out'
+    counted = aft.process_dataset(entry, store, out_root, ['sex'], RSCRIPT, threads=1, memory_limit_gb=1)
+    assert counted['status'] == 'done'
+    exclusion = counted['donor_exclusion']
+    assert exclusion['counted'] is True and exclusion['variant'] == 'counted'
+    assert (exclusion['n_donors_before'], exclusion['n_donors_excluded'], exclusion['n_donors_after']) == (20, 3, 17)
+    assert counted['n_donors'] == 17
+    table = pd.read_parquet(out_root / 'Syn2026' / 'Syn_ds.facet_tests.parquet')
+    planted = table[(table['cell_type'] == 'T1') & (table['gene'] == PLANTED_GENE)].iloc[0]
+    assert planted['n_donors'] == 17 and planted['n_donors_ref'] == 8 and planted['n_donors_test'] == 9
+    # the manifest holds counts, never donor labels
+    # (the rule itself is echoed in the manifest; here its values are sample labels, in practice a bank code)
+    text = json.dumps({'units': counted['units'], 'keys': counted['donor_keys'],
+                       'counts': {k: v for k, v in exclusion.items() if k not in ('rule', 'n_excluded_by_criterion')}})
+    assert 'D00' not in text and 'D12' not in text
+    digests = [u['donor_key_digests'] for u in counted['units'] if u['status'] == 'ok'][0]
+    assert len(digests) == 17
+    # full run: every donor, supplementary folder, not counted; the counted files are untouched
+    before = (out_root / 'Syn2026' / 'Syn_ds.facet_tests.parquet').read_bytes()
+    full = aft.process_dataset(entry, store, out_root, ['sex'], RSCRIPT, threads=1, memory_limit_gb=1,
+                               all_donors=True)
+    assert full['status'] == 'done' and full['donor_exclusion']['counted'] is False
+    assert full['n_donors'] == 20 and full['donor_exclusion']['n_donors_excluded'] == 3
+    supplementary = out_root / 'Syn2026' / 'supplementary_all_donors'
+    assert (supplementary / 'Syn_ds.facet_tests.parquet').exists()
+    assert (out_root / 'Syn2026' / 'Syn_ds.facet_tests.parquet').read_bytes() == before
+    all_table = pd.read_parquet(supplementary / 'Syn_ds.facet_tests.parquet')
+    assert all_table[all_table['gene'] == PLANTED_GENE].iloc[0]['n_donors'] == 20
+
+
+@needs_r
+def test_all_donors_run_needs_a_rule_and_plain_datasets_are_unchanged(tmp_path):
+    store, entry = make_dataset(tmp_path, n_f=8, n_m=8)
+    out_root = tmp_path / 'out'
+    skipped = aft.process_dataset(entry, store, out_root, ['sex'], RSCRIPT, threads=1, memory_limit_gb=1,
+                                  all_donors=True)
+    assert skipped['status'] == 'skipped' and 'no facet_donor_exclusions' in skipped['reason']
+    plain = aft.process_dataset(entry, store, out_root, ['sex'], RSCRIPT, threads=1, memory_limit_gb=1)
+    assert plain['status'] == 'done' and 'donor_exclusion' not in plain and plain['n_donors'] == 16
+
+
+def test_malformed_exclusion_rule_is_an_error_not_a_silent_skip(tmp_path):
+    store, entry = make_dataset(tmp_path, extra_md='facet_donor_exclusions: nonsense\n')
+    with pytest.raises(ValueError, match='must be a mapping'):
+        aft.process_dataset(entry, store, tmp_path / 'out', ['sex'], RSCRIPT or 'Rscript', threads=1,
+                            memory_limit_gb=1)
+
+
+def test_unknown_exclusion_column_fails_loudly(tmp_path):
+    store, entry = make_dataset(tmp_path, extra_md='facet_donor_exclusions:\n  obs:\n    no_such_col: [x]\n')
+    with pytest.raises(ValueError, match='not an obs column'):
+        aft.process_dataset(entry, store, tmp_path / 'out', ['sex'], RSCRIPT or 'Rscript', threads=1,
+                            memory_limit_gb=1)
 
 
 @needs_r

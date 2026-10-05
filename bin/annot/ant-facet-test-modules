@@ -515,12 +515,22 @@ def package_versions() -> Dict[str, str]:
 def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[str],
                     registry: GenesetRegistry, sources: Sequence[str], n_permutations: int,
                     threads: int = 4, memory_limit_gb: int = 24, run_pseudobulk: bool = True,
-                    keep_work: bool = False, null_control_seed: Optional[int] = None) -> Dict[str, Any]:
-    """Run variants A and B over all strata and facets of one dataset; write parquet + manifest."""
+                    keep_work: bool = False, null_control_seed: Optional[int] = None,
+                    exclusion_from: Optional[List[str]] = None, exclusion_where: Optional[List[str]] = None,
+                    all_donors: bool = False) -> Dict[str, Any]:
+    """Run variants A and B over all strata and facets of one dataset; write parquet + manifest.
+
+    Donor exclusions as in ``ant-facet-test`` (``facet_donor_exclusions`` of the .md,
+    ``lib/donor_exclusions.py``); ``all_donors`` writes the full-donor run to the supplementary folder.
+    """
     started = time.time()
     md_yaml, _ = aft.parse_md_file(entry.md_path)
     api_config = aft.get_api_config(md_yaml)
     annotation = aft.mus.resolve_annotation(entry.h5ad_path, root=store_root)
+    md_rule = aft.donor_exclusions.rule_from_md(md_yaml)
+    exclusion_rule = aft.donor_exclusions.combine(md_rule, exclusion_from or [], exclusion_where or [])
+    variant = (aft.donor_exclusions.VARIANT_ALL_DONORS if (all_donors and md_rule)
+               else aft.donor_exclusions.VARIANT_COUNTED)
     manifest: Dict[str, Any] = {
         'tool': TOOL_VERSION, 'db_id': entry.db_id, 'group': entry.study, 'file': entry.stem,
         'dataset_sha256': md_yaml.get('sha256'), 'md_path': str(entry.md_path),
@@ -553,6 +563,10 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
     if not eligible:
         manifest.update(status='skipped', reason=reason)
         return manifest
+    if all_donors and md_rule is None:
+        manifest.update(status='skipped', reason='--all-donors: this dataset has no facet_donor_exclusions '
+                                                  'rule, its counted run already uses every donor')
+        return manifest
     sidecar = scores_path(entry.duckdb_path)
     counts_info = aft.counts_layer_for(entry, md_yaml)
     no_counts = counts_info is None or not run_pseudobulk
@@ -569,10 +583,15 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
                   'ant_tissue', 'ant_region', 'ant_author_cluster']
         extra = [c for c in cat_columns if (aft.CELLTYPE_CANDIDATE_RE.match(c) or aft.BATCH_NAME_RE.search(c))
                  and not c.startswith('ant_')]
-        cells = aft.cell_table(conn, wanted + extra)
+        exclusion_columns = [c for c in (exclusion_rule.obs_columns if exclusion_rule else [])
+                             if c not in wanted and c not in extra]
+        cells = aft.cell_table(conn, wanted + extra + exclusion_columns)
         if 'ant_donor' not in cells:
             manifest.update(status='skipped', reason='no ant_donor facet in the current mapping')
             return manifest
+        cells, exclusion_report = aft.donor_exclusions.apply_rule(cells, exclusion_rule, variant)
+        if exclusion_report is not None:
+            manifest['donor_exclusion'] = exclusion_report
         batch_column = aft.find_batch_column(conn, cells)
         if batch_column is not None:
             cells['batch'] = cells[batch_column]
@@ -786,7 +805,7 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
                 frame['provisional'] = aft.PROVISIONAL_FLAGS.get(job['facet'], False)
                 frames.append(frame)
 
-        out_dir = out_root / entry.study
+        out_dir = aft.donor_exclusions.result_dir(out_root, entry.study, md_rule is not None, all_donors)
         out_dir.mkdir(parents=True, exist_ok=True)
         if frames:
             table = pd.concat(frames, ignore_index=True)
@@ -925,6 +944,11 @@ def cmd_run(args: argparse.Namespace) -> None:
             sys.exit(f'unknown facet {facet}; choose from {aft.FACETS}')
     if args.null_control_seed is not None and not args.out_root:
         sys.exit('--null-control-seed needs an explicit --out-root (never the real _facet_tests)')
+    if (args.exclude_donors_from or args.exclude_donors_where) and not args.out_root:
+        sys.exit('--exclude-donors-from / --exclude-donors-where need an explicit --out-root '
+                 '(the counted run takes its exclusions from the .md facet_donor_exclusions rule)')
+    if args.all_donors and (args.exclude_donors_from or args.exclude_donors_where):
+        sys.exit('--all-donors cannot be combined with command line exclusions')
     sources = [s.strip() for s in args.sources.split(',') if s.strip()]
     registry = GenesetRegistry(Path(args.geneset_store) if args.geneset_store else default_geneset_store())
     registry.scan()
@@ -936,8 +960,13 @@ def cmd_run(args: argparse.Namespace) -> None:
         if entry is None:
             print(f'unknown db_id {db_id}', file=sys.stderr)
             continue
-        out_manifest = out_root / entry.study / f'{entry.stem}.facet_module_run_manifest.json'
         md_yaml, _ = aft.parse_md_file(entry.md_path)
+        rule_in_md = aft.donor_exclusions.rule_from_md(md_yaml) is not None
+        if args.all_donors and not rule_in_md:
+            print(f'[skip] {db_id}: --all-donors needs a facet_donor_exclusions rule in the .md')
+            continue
+        out_manifest = (aft.donor_exclusions.result_dir(out_root, entry.study, rule_in_md, args.all_donors)
+                        / f'{entry.stem}.facet_module_run_manifest.json')
         annotation = aft.mus.resolve_annotation(entry.h5ad_path, root=store_root)
         eligible, reason = module_eligibility(entry, md_yaml, annotation, aft.get_api_config(md_yaml))
         if not eligible:
@@ -961,7 +990,9 @@ def cmd_run(args: argparse.Namespace) -> None:
                                        args.permutations, threads=args.threads,
                                        memory_limit_gb=args.memory_gb,
                                        run_pseudobulk=not args.no_pseudobulk, keep_work=args.keep_work,
-                                       null_control_seed=args.null_control_seed)
+                                       null_control_seed=args.null_control_seed,
+                                       exclusion_from=args.exclude_donors_from,
+                                       exclusion_where=args.exclude_donors_where, all_donors=args.all_donors)
         except Exception as exc:
             import traceback
             traceback.print_exc()
@@ -1032,6 +1063,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument('--force', action='store_true')
     run.add_argument('--no-pseudobulk', action='store_true', help='variant A only')
     run.add_argument('--keep-work', action='store_true')
+    aft.donor_exclusions.add_cli_arguments(run)
     run.add_argument('--wait-for-convert', action='store_true',
                      help='before each dataset, wait until no bin/ingest/ant-convert process is running')
     run.add_argument('--null-control-seed', type=int, default=None,

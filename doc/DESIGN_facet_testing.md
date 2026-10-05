@@ -136,6 +136,51 @@ pathologic AD proxy (Braak III or higher and CERAD definite or probable) and
 not a clinical diagnosis. Manifests written before the key existed carry no
 note until the dataset is re-run.
 
+### Donor exclusions (`facet_donor_exclusions`, shared persons)
+
+A dataset that contains persons of another counted cohort must not be counted
+as an independent cohort on those persons. The `.md` front matter declares the
+rule (machine readable, `lib/donor_exclusions.py`):
+
+```yaml
+facet_donor_exclusions:
+  reason: Rush ROSMAP brain bank donors, counted through the ROSMAP cohort
+  obs:                    # donors with at least one cell in these values
+    Source: [R]
+  cohorts: [rosmap]       # donors whose ant_donor_uid starts with rosmap:
+```
+
+Both tools drop those donors' cells right after the per-cell table is read,
+before donors, strata, composition proportions or the limma fit exist, so every
+number of the counted run refers to the remaining donors. The manifest block
+`donor_exclusion` records the variant, the rule, donor and cell counts before
+and after, and the number of donors each criterion excludes (counts only, no
+identifiers). A malformed rule or a missing obs column is an error, never a
+silent skip.
+
+* The counted run is the default (`run --db-id L26/PSY`) and writes the normal
+  files, so the API serves it.
+* `run --all-donors` ignores the rule and tests every donor. It writes the same
+  file names under `<group>/supplementary_all_donors/`, which no glob of the
+  summaries and no API path reads, and its manifest has `donor_exclusion.counted`
+  false: a supplementary, non-counted unit. Datasets without a rule are skipped.
+* `--exclude-donors-from COHORT` and `--exclude-donors-where COLUMN=V1|V2` add
+  ad hoc exclusions on top of the rule; they need an explicit `--out-root`.
+* The cohort table has an optional column `donor_exclusion` (free text). A row
+  with a value there counts only when the dataset's gene run manifest records
+  `donor_exclusion.counted` true; otherwise the unit is listed with
+  `not_counted_reason` "...does not record the donor exclusion". So a stale run
+  from before the rule cannot be counted by accident.
+
+Used for Lee2026 (2026-10-05): PsychAD brain bank `R` (152 of 1,470 donors) and
+FreshMG `RS` (41 of 137) are Rush ROSMAP participants (Methods of Lee 2026);
+ROSMAP is already counted through M23/IMM. Evidence and the three checks are in
+the donor overlap report of 2026-10-05 (id-free attribute matching of 30 PsychAD
+donors to specific ROSMAP persons, `donor_crosswalk.tsv` alias type
+`psychad_id`). All 152 and 41 are excluded, not only the 30 identified donors
+(8 of them are in the ROSMAP datasets served here), because the other
+donors are ROSMAP participants whose ids cannot be recovered locally.
+
 Nothing is written elsewhere in `data/`; `.h5ad`, `.duckdb` and `.md` files are
 only read. R lives in `envs/facet-test-r` (limma 3.62.1, edgeR 4.4.0, R 4.4.3);
 the `anthive-data` environment has neither package and was not modified.
@@ -178,8 +223,10 @@ tool commit, seed), independent of the DuckDB thread count and of machine load
   per level detect only large effects; absence of a hit is not evidence of no
   effect. `n_lt5` units are descriptive only.
 * **Donor overlap.** Datasets are tested independently. The same persons occur
-  in several datasets (ROSMAP across M23, GF4, Z20, MY4; SEA-AD across the 14
-  Gabitto2024 files and F26; MADRC across SP4 and WA4; Lu across LC5 files).
+  in several datasets (ROSMAP across M23, GF4, Z20, MY4 and, 152 + 41 donors,
+  Lee2026; SEA-AD across the 14 Gabitto2024 files and F26; MADRC across SP4 and
+  WA4; Lu across LC5 files). Lee2026 is handled by a donor exclusion rule (above);
+  the other overlaps are handled by the cohort table roles only.
   Counting a gene as "recurring" across datasets overstates independent
   replication; cross-dataset summaries need the cohort selection table
   (audit section 8.3). No meta-analysis is done in v1.
