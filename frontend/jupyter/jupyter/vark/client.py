@@ -4,8 +4,9 @@ Targets the anthive REST API contract. See
 `https://codeberg.org/mfiers/pyvark` for sources and
 `https://codeberg.org/mfiers/vark` for the Go CLI that ships the same surface.
 
-API surface verified against **REST API 2.41.0** (2026-10-03). Older
-servers still work for every endpoint they expose; new params degrade
+API surface verified against **REST API 2.42.1** plus the unreleased facet
+test, donor-group and exclude_secondary additions on anthive main
+(2026-10-05). Older servers still work for every endpoint they expose; new params degrade
 to "server ignores it" rather than client-side errors.
 
 Works in standard Python 3.9+, in Pyodide / JupyterLite, and inside
@@ -36,7 +37,7 @@ from ._credentials import (
 from .exceptions import raise_for_upload_status
 
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 __all__ = ["AnthiveClient", "VarkConfigError"]
 
 
@@ -246,7 +247,7 @@ class AnthiveClient:
     """
 
     #: Anthive REST API version this client release was last verified against.
-    API_TARGET = "2.41.0"
+    API_TARGET = "2.42.1"
 
     #: Server-side plot geoms the client knows about. Validation prevents a
     #: round-trip on typos. Update with every new server geom.
@@ -442,6 +443,17 @@ class AnthiveClient:
         older than 2.37 omit the field, in which case the client treats
         the row as primary.
 
+        Lineage fields (anthive main after 2.42.1, unreleased at the
+        time of pyvark 0.8.0): ``designation`` (``'primary'``,
+        ``'reanalysis'`` or ``'unresolved'``, from ``is_secondary:
+        false`` / ``true`` / no key in the dataset's ``.md``),
+        ``reanalysis_of`` (list of db_ids, empty unless reanalysis),
+        ``donor_group`` (slug of the donor pool the dataset shares with
+        others, or ``None``) and ``has_donor_uid`` (the dataset
+        publishes ``ant_donor_uid``). Datasets of one donor group share
+        persons, so do not count them as independent donors; see
+        :meth:`get_donor_groups`.
+
         Args:
             refresh: Force a fresh catalog scan on the server.
             format: ``'list'`` (default) or ``'dataframe'`` (needs pandas).
@@ -501,8 +513,56 @@ class AnthiveClient:
         override for the group name (fall back to ``group`` when
         absent), and a ``date`` key with the full publication date as
         ``YYYY-MM-DD``.
+
+        Newer servers add the lineage fields ``designation``,
+        ``reanalysis_of``, ``donor_group`` and ``has_donor_uid``
+        (described under :meth:`get_databases`).
         """
         return _self._get(f'/databases/{db_id}/info')
+
+    def get_donor_groups(self, donor_group: Optional[str] = None,
+                         format: str = 'json') -> Union[Dict, Any]:
+        """``GET /donor-groups``. Datasets grouped by the donor pool they
+        share.
+
+        A donor group (``donor_group:`` in a dataset's ``.md``) names
+        datasets that hold cells of the same persons: complementary
+        splits of one study (cell classes, regions, libraries) or
+        several studies of one cohort. They must not be counted as
+        independent donors.
+
+        Returns ``{n_groups, groups, n_ungrouped}``. Each group has
+        ``donor_group``, ``n_datasets``, ``n_primary``,
+        ``n_reanalysis``, ``n_unresolved``, ``n_cells`` (primaries
+        only, so no cell is counted twice), ``has_donor_uid`` (every
+        dataset publishes ``ant_donor_uid``) and ``datasets`` (``db_id``,
+        ``title``, ``group``, ``designation``, ``is_secondary``,
+        ``reanalysis_of``, ``has_donor_uid``, ``n_cells``).
+        ``n_ungrouped`` counts datasets without a donor group. Servers
+        that count distinct donors add those counts to each group as
+        well; the client passes every field through unchanged.
+
+        Args:
+            donor_group: Only this group (slug). The server answers 404
+                for an unknown slug.
+            format: ``'json'`` (the server's dict) or ``'dataframe'``:
+                one row per (group, dataset) with the group's counts
+                prefixed ``group_`` (needs pandas).
+        """
+        params = {'donor_group': donor_group} if donor_group else None
+        result = self._get('/donor-groups', params=params)
+        if format == 'dataframe':
+            import pandas as pd
+            rows = []
+            for group in result.get('groups', []):
+                group_fields = {f'group_{key}': value
+                                for key, value in group.items()
+                                if key not in ('datasets', 'donor_group')}
+                for dataset in group.get('datasets', []):
+                    rows.append({'donor_group': group.get('donor_group'),
+                                 **group_fields, **dataset})
+            return pd.DataFrame(rows)
+        return result
 
     @_cache_short(ttl=60)
     def get_group(_self, group_id: str) -> Dict:
@@ -591,7 +651,9 @@ class AnthiveClient:
                            access: Union[str, List[str], None] = None,
                            tissue: Union[str, List[str], None] = None,
                            include_remote: bool = False,
-                           refresh: bool = False) -> Union[List[Dict], Any]:
+                           refresh: bool = False,
+                           exclude_secondary: bool = True,
+                           ) -> Union[List[Dict], Any]:
         """``GET /gene_stats_all``. Per-gene stats across every dataset
         that has a default layer registered.
 
@@ -602,6 +664,15 @@ class AnthiveClient:
         ``public``) and ``tissue``. ``include_remote=True`` also queries
         datasets that only live on S3 (slow); ``refresh=True`` bypasses
         the server cache.
+
+        ``exclude_secondary`` (default ``True``, the server's default on
+        anthive main after 2.42.1): secondary datasets (reanalyses of
+        cells another dataset serves) are left out of ``results`` and of
+        ``cross_db_cv``; the response then carries
+        ``n_excluded_secondary`` and ``exclude_secondary`` and each
+        result ``is_secondary``. Pass ``False`` to include them. The
+        client sends the parameter only when it is ``False``; older
+        servers ignore it and include every dataset.
         """
         genes_str = ','.join(genes) if isinstance(genes, list) else genes
         params: Dict[str, Any] = {'genes': genes_str,
@@ -615,6 +686,8 @@ class AnthiveClient:
             params['include_remote'] = True
         if refresh:
             params['refresh'] = True
+        if not exclude_secondary:
+            params['exclude_secondary'] = 'false'
         response = self._get('/gene_stats_all', params=params)
         if format == 'dataframe':
             import pandas as pd
@@ -627,6 +700,7 @@ class AnthiveClient:
                         'title': record['title'],
                         'n_cells_db': record['n_cells'],
                         'layer': record['layer'],
+                        'is_secondary': record.get('is_secondary', False),
                         **stat,
                     })
             return pd.DataFrame(rows)
@@ -1226,7 +1300,9 @@ class AnthiveClient:
                                min_abs: Optional[float] = None,
                                sort: str = 'value:desc',
                                limit: int = 500,
-                               format: str = 'json') -> Union[Dict, Any]:
+                               format: str = 'json',
+                               exclude_secondary: bool = True,
+                               ) -> Union[Dict, Any]:
         """``GET /module-variability``. Fleet-wide module variability
         table (dataset x source x catalog x module x tag x statistic).
 
@@ -1246,8 +1322,15 @@ class AnthiveClient:
             limit: Max rows (server default 500).
             format: ``'json'`` (the server's dict), ``'dataframe'``
                 (needs pandas), ``'csv'`` or ``'tsv'`` (text).
+            exclude_secondary: Default ``True`` (the server's default on
+                anthive main after 2.42.1): rows of secondary datasets
+                (reanalyses) are left out unless ``db_id`` names one.
+                JSON then carries ``n_excluded_secondary``, CSV / TSV the
+                ``X-Excluded-Secondary`` header. Sent only when ``False``.
         """
         params: Dict[str, Any] = {'sort': sort, 'limit': limit}
+        if not exclude_secondary:
+            params['exclude_secondary'] = 'false'
         for key, value in (('dataset', db_id), ('source', source),
                            ('catalog', catalog), ('module', module),
                            ('tag', tag), ('tag_column', tag_column),
@@ -1395,7 +1478,7 @@ class AnthiveClient:
     # ── Facets (fleet-wide ant_* obs columns) ───────────────────────────
 
     @_cache_short(ttl=60)
-    def list_facets(_self) -> List[Dict]:
+    def list_facets(_self, full: bool = False) -> Union[List[Dict], Dict]:
         """``GET /facets``. Fleet-wide inventory of ``ant_*`` obs columns.
 
         Returns a list of dicts, one per facet, with keys ``facet``,
@@ -1404,11 +1487,26 @@ class AnthiveClient:
         numerical on others), ``n_datasets`` (how many datasets carry
         this facet), and ``signal_strength`` (max variance-explained
         recorded in ``module_variability.parquet`` for this facet, or
-        zero when no signal is on record).
+        zero when no signal is on record; secondary datasets are
+        ignored on newer servers).
+
+        Newer servers (anthive main after 2.42.1) add ``label``,
+        ``summary`` and ``defined`` (the published definition) and
+        ``hidden_by_config``: True for facets outside the site's
+        ``facets_visible`` list. The web UI hides those, the API still
+        lists them.
 
         Rows are pre-sorted by ``n_datasets`` descending, then by facet
-        name. The response envelope's ``n_facets`` count is dropped;
-        take ``len(result)`` if you need it.
+        name.
+
+        Args:
+            full: ``False`` (default) returns the ``facets`` list only,
+                as before. ``True`` returns the whole response:
+                ``{n_facets, facets, facets_visible,
+                definitions_status}``. ``facets_visible`` is the site's
+                list (empty means all are shown); ``definitions_status``
+                (``state``, ``note``) says whether the definitions are
+                settled (``'under_audit'`` while the facet audit runs).
 
         Example::
 
@@ -1418,13 +1516,19 @@ class AnthiveClient:
                       facet['signal_strength'])
         """
         response = _self._get('/facets')
+        if full:
+            if isinstance(response, dict):
+                return response
+            return {'n_facets': len(response), 'facets': response}
         return (response.get('facets', response)
                 if isinstance(response, dict) else response)
 
     @_cache_short(ttl=60)
     def get_facet(_self, facet_name: str,
                   top_modules: int = 200,
-                  per_facet_value_limit: Optional[int] = None) -> Dict:
+                  per_facet_value_limit: Optional[int] = None,
+                  mapping: bool = True,
+                  exclude_secondary: bool = True) -> Dict:
         """``GET /facets/{facet_name}``. Detail page for one facet.
 
         Returns a dict describing this facet across every dataset that
@@ -1438,6 +1542,30 @@ class AnthiveClient:
         ``module_variability.parquet`` filtered on this facet, wrapped
         as ``{rows, n_total, truncated}``).
 
+        Newer servers (anthive main after 2.42.1) add:
+
+        - ``definition`` (``label``, ``summary``, ``definition``,
+          ``kind``, ``values``, ``missing``, ``hint_keywords``,
+          ``defined``, ``status`` (``registered`` or ``deprecated``),
+          ``scope``, ``replaced_by``), ``definitions_status`` and
+          ``hidden_by_config``. Registered facets include
+          ``ant_cognitive_status``, ``ant_comorbidity``, ``ant_adnc``
+          and ``ant_donor_uid``; treatment arms are a dataset-local
+          ``treatment`` column, not a facet.
+        - With ``mapping=True`` each ``datasets[]`` row also carries how
+          the dataset projects onto the facet (``mapping_kind``:
+          ``renamed``, ``derived``, ``constant``, ``native`` or
+          ``computed``; ``source_columns``, ``sources``, ``value_map``,
+          ``unmapped``, ``default``, ``constant_value``, ``n_missing``,
+          ``range``, ``redacted`` ...; see
+          :meth:`get_database_facets`), and ``non_carriers`` lists every
+          other dataset with ``candidate_columns`` and ``declared``.
+        - With ``exclude_secondary=True`` secondary datasets stay in
+          ``datasets`` with ``is_secondary: True`` and ``counted:
+          False`` but are left out of ``total_n_cells``,
+          ``value_distribution`` and ``modules``;
+          ``n_excluded_secondary`` counts them.
+
         Raises ``HTTPError`` 400 when ``facet_name`` does not start with
         ``ant_``, or 404 when no dataset carries it.
 
@@ -1447,6 +1575,11 @@ class AnthiveClient:
                 5000, default 200).
             per_facet_value_limit: Cap on distinct categorical values
                 (1 to 2000; server default 200).
+            mapping: ``False`` skips the per-dataset mapping and the
+                non-carrier list (``non_carriers`` is then ``None``;
+                faster). Sent only when ``False``.
+            exclude_secondary: ``False`` counts secondary datasets in
+                the pooled numbers. Sent only when ``False``.
 
         Example::
 
@@ -1458,7 +1591,42 @@ class AnthiveClient:
         params: Dict[str, Any] = {'top_modules': top_modules}
         if per_facet_value_limit is not None:
             params['per_facet_value_limit'] = per_facet_value_limit
+        if not mapping:
+            params['mapping'] = 'false'
+        if not exclude_secondary:
+            params['exclude_secondary'] = 'false'
         return _self._get(f'/facets/{facet_name}', params=params)
+
+    def get_database_facets(self, db_id: str, counts: bool = True) -> Dict:
+        """``GET /databases/{db_id}/facets``. How one dataset's author
+        columns project onto the ``ant_*`` facets (anthive main after
+        2.42.1).
+
+        Returns ``{db_id, n_facets, facets, hidden_sources_visible,
+        definitions_status}``. One ``facets`` entry per facet the
+        dataset declares or serves, with ``facet``, ``label``,
+        ``summary``, ``defined``, ``hidden_by_config``,
+        ``mapping_kind`` (``renamed``, ``derived``, ``constant``,
+        ``native`` or ``computed``, the last with ``computed_rule``),
+        ``live``, ``dtype``, ``source_columns``, ``sources``
+        (``column``, ``published_as``, ``hidden``), ``value_map`` (rows
+        ``from``, ``to``, ``rule``, ``n_cells``; ``rule`` is ``mapped``,
+        ``hidden``, ``passthrough`` or ``default``), ``unmapped``,
+        ``default``, ``constant_value``, ``n_cells``, ``n_missing``,
+        ``n_distinct_source_values``, ``value_map_truncated`` and
+        ``redacted``.
+
+        Columns in the dataset's ``api.obs_hidden`` stay private: for
+        non-admins ``source_columns`` is empty, ``redacted`` is True and
+        ``value_map`` rows have ``from: None``.
+
+        Args:
+            db_id: Dataset id.
+            counts: ``False`` skips the cell counts (one ``GROUP BY``
+                per facet on the server). Sent only when ``False``.
+        """
+        params = {'counts': 'false'} if not counts else None
+        return self._get(f'/databases/{db_id}/facets', params=params)
 
     @_cache_short(ttl=60)
     def get_gene_variance_by_facet(_self,
@@ -1503,6 +1671,447 @@ class AnthiveClient:
         return _self._get(
             f'/databases/{db_id}/gene-variance-by-facet', params=params,
         )
+
+    # ── Donor-level facet tests (anthive main after 2.42.1) ─────────────
+    #
+    # Read-only views over the output of ant-facet-test (genes, limma-voom
+    # on donor pseudobulks) and ant-facet-test-modules (module scores, OLS
+    # plus label permutations). See FACET_TESTS_CAVEATS below and
+    # doc/DESIGN_facet_testing.md in anthive4.
+
+    #: Facets with donor-level test results. The facet endpoints take the
+    #: short name or the ``ant_`` column (``'sex'`` or ``'ant_sex'``).
+    TESTED_FACETS = ('sex', 'disease', 'apoe_carrier', 'braak')
+
+    #: How to read facet test results. Repeated in each method's docstring
+    #: so ``help()`` on one method is enough.
+    FACET_TESTS_CAVEATS = (
+        "Facet test results are exploratory. The unit of analysis is the "
+        "donor: raw counts are summed per (donor, cell type) and each "
+        "(dataset, cell type) unit is tested on its own; nothing is pooled "
+        "and there is no meta-analysis. Datasets share donors, so rows are "
+        "not independent replications. The disease contrast (AD vs control) "
+        "is provisional: the vocabulary is not settled and 'control' means "
+        "different things between studies. descriptive_only units have a "
+        "level with fewer than 5 donors (Braak: fewer than 10); p, q, t and "
+        "CI are null and only the effect estimate is reported. counted "
+        "means the unit counts towards replication; not_counted_reason says "
+        "why not. Replication = q < 0.05 with the same sign in k of m "
+        "independent cohorts (DRAFT cohort table, a cohort counts once, cell "
+        "types counted by group, secondary datasets and descriptive-only "
+        "units never count)."
+    )
+
+    def _facet_rows(self, path: str, params: Dict[str, Any],
+                    format: str) -> Union[Dict, str, Any]:
+        """Shared GET for the facet-test row endpoints (json / csv /
+        dataframe)."""
+        if format not in ('json', 'csv', 'dataframe'):
+            raise ValueError(
+                f"format must be 'json', 'csv' or 'dataframe', got {format!r}")
+        clean = {key: value for key, value in params.items()
+                 if value is not None}
+        if format == 'csv':
+            clean['format'] = 'csv'
+            return self._get_raw(path, params=clean).text
+        result = self._get(path, params=clean)
+        if format == 'dataframe':
+            import pandas as pd
+            return pd.DataFrame(result.get('rows', []))
+        return result
+
+    def get_facet_tests(self, db_id: str) -> Dict:
+        """``GET /databases/{db_id}/facet-tests``. Donor-level facet test
+        summary of one dataset: one unit per (facet, cell type stratum).
+
+        Exploratory, donor-level; the disease contrast is provisional.
+        Genes are tested with limma-voom on donor pseudobulks
+        (``expression ~ facet + sex + age + pmi + batch`` where
+        available), module scores with OLS on donor-level scores plus
+        label permutations. Contrasts: sex (m vs f), disease (AD vs
+        control, provisional), apoe_carrier (e4 carrier vs
+        non-carrier), braak (linear trend per stage).
+
+        Top level: ``status`` (``tested``, ``not_tested``, ``not_run``),
+        ``reason``, ``n_units``, ``n_units_tested``, ``q_threshold``,
+        ``dataset_changed`` (the dataset's sha256 differs from the one
+        the run used: results may be stale), ``files`` and ``runs``
+        (tool, timestamp, seed, package versions, git commits, counts
+        layer, batch column, permutations).
+
+        Each unit: ``facet``, ``cell_type``, ``celltype_source``,
+        ``tested`` (``reason`` when not), ``contrast``, ``level_ref`` /
+        ``level_test``, ``level_counts`` (donors per level),
+        ``n_donors(_ref/_test)``, ``covariates``, ``flags``
+        (``descriptive_only``, ``n_lt5``, ``provisional``,
+        ``composition_flag``, ``composition_p``, ``batch_used``,
+        ``batch_confounded``), ``genes`` (``n_tested``, ``n_q05``),
+        ``modules`` (per method and source: ``n_modules``,
+        ``n_q05_param``, ``n_q05_perm``) and ``model``.
+
+        ``model`` is built from the run manifests: ``stratum``,
+        ``facet_term``, ``donors`` (per level, analysed, dropped for a
+        missing covariate, minimum cells per donor),
+        ``descriptive_only_rule`` and, per run (``genes``,
+        ``modules``), ``unit_of_analysis``, ``formula`` (for example
+        ``expression ~ braak + sex + age_z + pmi_z``), ``covariates``
+        (each with ``status`` included / dropped / not used and the
+        ``reason``), ``method``, ``multiple_testing``, ``tool``,
+        ``seed``, ``run_date``, ``versions``. Anything a manifest does
+        not record reads ``'not recorded'``.
+
+        Reading the flags: ``descriptive_only`` means a level has fewer
+        than 5 donors (Braak: fewer than 10), so p, q, t and CI are null
+        and only the effect is reported. ``composition_flag`` means the
+        share of the donor's cells in this stratum differs with the
+        facet (p < 0.05, uncorrected): an effect may reflect composition
+        rather than expression. ``provisional`` marks the disease
+        contrast. Absence of hits is not evidence of no effect: typical
+        units have 8 to 90 donors, so only large effects are detected in
+        the small ones.
+        """
+        return self._get(f'/databases/{db_id}/facet-tests')
+
+    def get_facet_test_genes(self,
+                             db_id: str,
+                             facet: Optional[str] = None,
+                             cell_type: Optional[str] = None,
+                             celltype_source: Optional[str] = None,
+                             gene: Optional[str] = None,
+                             *,
+                             q: float = 0.05,
+                             sort: str = 'q',
+                             limit: int = 100,
+                             format: str = 'json') -> Union[Dict, str, Any]:
+        """``GET /databases/{db_id}/facet-tests/genes``. Gene-level donor
+        pseudobulk results (limma-voom) of one dataset.
+
+        Exploratory, donor-level (n = donors, not cells); the disease
+        contrast is provisional. q is Benjamini-Hochberg within one
+        (dataset, stratum, facet), so q values of different units are
+        not comparable families.
+
+        Rows: ``facet, cell_type, celltype_source, contrast, level_ref,
+        level_test, gene, logFC, se, ci_low, ci_high, t, p_value,
+        q_value, ave_expr`` (mean log2 CPM), ``n_donors, n_donors_ref,
+        n_donors_test, descriptive_only, provisional``.
+        ``descriptive_only`` rows have null p, q, t and CI (a level has
+        too few donors) and only appear with ``q=1``.
+
+        Args:
+            db_id: Dataset id.
+            facet: ``sex``, ``disease``, ``apoe_carrier`` or ``braak``.
+            cell_type: Cell type stratum as in :meth:`get_facet_tests`.
+            celltype_source: Stratifier, e.g. ``constant_all_cells``.
+            gene: One gene symbol (case-insensitive).
+            q: Keep ``q_value < q`` (default 0.05); ``q=1`` keeps every
+                row, descriptive-only ones included.
+            sort: ``'q'`` (then ``|logFC|``), ``'effect'`` (``|logFC|``),
+                ``'p'`` or ``'gene'``.
+            limit: Rows returned (server max 2000 for json, 100000 for
+                csv; larger values give HTTP 400).
+            format: ``'json'`` (``{db_id, <filters>, n_matching,
+                n_returned, rows}``), ``'dataframe'`` (the rows, needs
+                pandas) or ``'csv'`` (text).
+
+        Raises:
+            requests.HTTPError: 404 when the dataset has no gene results,
+                400 for a bad ``sort`` or ``limit``.
+        """
+        return self._facet_rows(
+            f'/databases/{db_id}/facet-tests/genes',
+            {'facet': facet, 'cell_type': cell_type,
+             'celltype_source': celltype_source, 'gene': gene,
+             'q': q, 'sort': sort, 'limit': limit}, format)
+
+    def get_facet_test_modules(self,
+                               db_id: str,
+                               facet: Optional[str] = None,
+                               cell_type: Optional[str] = None,
+                               celltype_source: Optional[str] = None,
+                               *,
+                               method: Optional[str] = None,
+                               source: Optional[str] = None,
+                               module: Optional[str] = None,
+                               q: float = 0.05,
+                               q_by: str = 'either',
+                               sort: str = 'q',
+                               limit: int = 100,
+                               format: str = 'json') -> Union[Dict, str, Any]:
+        """``GET /databases/{db_id}/facet-tests/modules``. Module-level
+        donor results (OLS on donor-level module scores, with
+        permutation p values) of one dataset.
+
+        Exploratory, donor-level; the disease contrast is provisional.
+        BH families are (dataset, stratum, facet, method, source).
+        ``p_perm`` cannot go below 1/(n + 1) for n permutations (10,000
+        by default, recorded per run), so ``q_perm`` has a floor; read
+        ``q_param`` and ``p_perm`` together.
+
+        Rows: ``facet, cell_type, celltype_source, contrast, level_ref,
+        level_test, method, source, catalog, module, estimate, se,
+        ci_low, ci_high, std_effect`` (estimate / SD of the donor-level
+        score), ``t, df, p_param, q_param, p_perm, q_perm,
+        n_perm_effective, n_genes_requested, n_genes_found,
+        n_donors(_ref/_test), descriptive_only, provisional,
+        no_counts``.
+
+        Args:
+            db_id, facet, cell_type, celltype_source: As in
+                :meth:`get_facet_test_genes`.
+            method: ``'cell_mean'`` or ``'pseudobulk'``.
+            source: ``'geneset'``, ``'ucell'`` or ``'gene_list'``.
+            module: One module name (case-insensitive).
+            q: q threshold (default 0.05); ``q=1`` keeps every row.
+            q_by: Which q the threshold applies to: ``'param'``,
+                ``'perm'`` or ``'either'`` (default).
+            sort: ``'q'`` (``q_param``, then ``|std_effect|``),
+                ``'q_perm'``, ``'effect'`` or ``'module'``.
+            limit: Rows returned (max 2000 json, 100000 csv).
+            format: ``'json'``, ``'dataframe'`` or ``'csv'``.
+        """
+        return self._facet_rows(
+            f'/databases/{db_id}/facet-tests/modules',
+            {'facet': facet, 'cell_type': cell_type,
+             'celltype_source': celltype_source, 'method': method,
+             'source': source, 'module': module, 'q': q, 'q_by': q_by,
+             'sort': sort, 'limit': limit}, format)
+
+    def get_facet_test_volcano(self, db_id: str, facet: str, cell_type: str,
+                               celltype_source: Optional[str] = None,
+                               dest: Union[str, Path, None] = None,
+                               ) -> Union[bytes, Path]:
+        """``GET /databases/{db_id}/facet-tests/volcano.png``. Small
+        volcano plot (log2 fold change against -log10 p) of one unit's
+        gene results; q < 0.05 in colour. Exploratory.
+
+        Args:
+            db_id: Dataset id.
+            facet: ``sex``, ``disease``, ``apoe_carrier`` or ``braak``.
+            cell_type: Cell type stratum.
+            celltype_source: Stratifier, when a cell type occurs under
+                several.
+            dest: ``None`` returns the PNG bytes; a path writes them
+                there and returns the path.
+
+        Raises:
+            requests.HTTPError: 404 when the unit has no p values
+                (missing results or a descriptive-only unit).
+        """
+        params: Dict[str, Any] = {'facet': facet, 'cell_type': cell_type}
+        if celltype_source is not None:
+            params['celltype_source'] = celltype_source
+        content = self._get_raw(f'/databases/{db_id}/facet-tests/volcano.png',
+                                params=params).content
+        if dest is None:
+            return content
+        target = Path(dest)
+        target.write_bytes(content)
+        return target
+
+    def get_facet_tests_across_datasets(self, facet: str,
+                                        top_genes: int = 5,
+                                        exclude_secondary: bool = True,
+                                        format: str = 'json',
+                                        ) -> Union[Dict, Any]:
+        """``GET /facets/{facet}/tests``. Every tested (dataset, cell
+        type stratum) of one facet, sorted by donors analysed.
+
+        Exploratory, donor-level; the disease contrast is provisional.
+        No pooling: datasets are tested independently and share donors
+        (ROSMAP, SEA-AD, MADRC, ...), so rows are not independent
+        replications.
+
+        Returns ``{facet, facet_column, exclude_secondary, n_rows,
+        n_datasets_tested, rows, not_tested, q_threshold}``. Each row
+        carries the unit fields of :meth:`get_facet_tests` (contrast,
+        donors per level, covariates, flags, genes and modules at
+        q < 0.05, ``model``) plus ``db_id``, ``title``, ``group``,
+        ``top_genes`` (``gene``, ``logFC``, ``q_value``), ``run_date``,
+        ``dataset_changed``, ``cohort``, ``cohort_label``, ``role``,
+        ``counted``, ``is_secondary`` and ``celltype_group``.
+        ``not_tested`` lists datasets whose units for this facet could
+        not be tested, with the reason.
+
+        Args:
+            facet: ``'sex'`` / ``'ant_sex'``, also disease, apoe_carrier,
+                braak (see :attr:`TESTED_FACETS`). Others give 404.
+            top_genes: Genes at q < 0.05 listed per row (0 to 50).
+            exclude_secondary: Secondary datasets are listed with
+                ``is_secondary: True`` and ``counted: False`` either way;
+                ``False`` lets them count. Sent only when ``False``.
+            format: ``'json'`` or ``'dataframe'`` (the rows, needs
+                pandas; nested fields stay as objects).
+        """
+        params: Dict[str, Any] = {'top_genes': top_genes}
+        if not exclude_secondary:
+            params['exclude_secondary'] = 'false'
+        result = self._get(f'/facets/{facet}/tests', params=params)
+        if format == 'dataframe':
+            import pandas as pd
+            return pd.DataFrame(result.get('rows', []))
+        return result
+
+    def get_facet_gene_effects(self, facet: str, gene: str,
+                               cell_type: Optional[str] = None,
+                               exclude_secondary: bool = True,
+                               format: str = 'json') -> Union[Dict, Any]:
+        """``GET /facets/{facet}/effects?gene=``. Result card of one
+        gene for one facet: every tested (dataset, cell type) unit.
+
+        Exploratory, donor-level; each unit is one dataset and cell
+        type tested separately (limma-voom, n = donors); nothing is
+        pooled and there is no meta-analysis. The disease contrast is
+        provisional. The cohort table is a DRAFT.
+
+        Returns ``{query, facet, gene, n_units, units, replication,
+        cell_types, notes, apoe_locus, definition}``.
+
+        - ``facet``: ``name``, ``column``, ``contrast``,
+          ``effect_unit`` (e.g. log2 fold change, male minus female),
+          ``provisional``, ``status``.
+        - ``units``: ``db_id``, ``title``, ``cell_type`` (raw label),
+          ``celltype_source``, ``celltype_group``, ``cohort``,
+          ``cohort_label``, ``role``, ``counted``,
+          ``not_counted_reason``, ``is_secondary``, ``logFC``,
+          ``ci_low``, ``ci_high``, ``q_value``, ``q_counted``,
+          ``n_sibling_strata``, ``significant``, donors per level,
+          ``descriptive_only``, ``flags``, ``model`` (the formula),
+          ``method``, ``covariates_left_out``, ``run_date``, ``tool``.
+        - ``replication``: one entry per cell type group with
+          ``celltype_group`` (also in ``cell_type``), ``cl_id``,
+          ``labels`` (the raw labels it covers), ``cohorts_tested``
+          (m), ``cohorts_sig_same_sign`` (k), ``direction``,
+          ``sign_discordant``, ``cohorts_up``, ``cohorts_down`` and
+          ``badge`` (the sentence the web UI shows).
+
+        How to read it: ``counted`` means the unit counts towards
+        replication (counted cohort, not descriptive only, not a
+        secondary dataset, the dataset's most direct cell type source
+        for the group); ``not_counted_reason`` says why not. When
+        several strata of one dataset fall into one group, their q is
+        multiplied by ``n_sibling_strata`` (Bonferroni) into
+        ``q_counted`` before the q < 0.05 call. ``definition`` holds the
+        full replication rule: q < 0.05 with the same sign in k of m
+        independent cohorts, a cohort counts once.
+        ``descriptive_only`` units have no p or q. For APOE locus genes
+        (APOE, APOC1, TOMM40, NECTIN2, ...) an e4 effect can be
+        allele-linked expression or read mapping, not downstream
+        biology (``notes``).
+
+        Args:
+            facet: ``'sex'`` / ``'ant_sex'``, also disease, apoe_carrier,
+                braak.
+            gene: Gene symbol (case-insensitive).
+            cell_type: A cell type group (``'microglia'``) or a raw
+                stratum label (``'Mic P2RY12'``).
+            exclude_secondary: ``False`` lets secondary datasets count.
+                Sent only when ``False``.
+            format: ``'json'`` or ``'dataframe'`` (the units, needs
+                pandas).
+        """
+        params: Dict[str, Any] = {'gene': gene}
+        if cell_type is not None:
+            params['cell_type'] = cell_type
+        if not exclude_secondary:
+            params['exclude_secondary'] = 'false'
+        result = self._get(f'/facets/{facet}/effects', params=params)
+        if format == 'dataframe':
+            import pandas as pd
+            return pd.DataFrame(result.get('units', []))
+        return result
+
+    def get_facet_recurring_genes(self, facet: str,
+                                  cell_type: Optional[str] = None,
+                                  n: int = 50,
+                                  exclude_secondary: bool = True,
+                                  format: str = 'json') -> Union[Dict, Any]:
+        """``GET /facets/{facet}/effects/top``. Genes that change with a
+        facet in the most independent cohorts, within one cell type
+        group.
+
+        Exploratory, donor-level, no meta-analysis; the disease contrast
+        is provisional and the cohort table is a DRAFT. A high rank is a
+        count of separate significant results, not a pooled estimate.
+
+        Ranking (``ranking`` in the response): (1) k, the cohorts with
+        q < 0.05 and the same sign, highest first; (2) ``agreement``,
+        the fraction of the m tested cohorts whose effect has that sign
+        (significant or not), highest first; (3) ``median_abs_logFC``
+        over the m tested cohorts, largest first. The number of cohorts
+        tested is never a ranking key by itself, so "2 of 2" does not
+        outrank "2 of 4".
+
+        Returns ``{facet, cell_type, celltype_group, cl_id, labels,
+        cohorts_in_cell_type, cell_types, rows, definition, ranking,
+        exclude_secondary, cohort_table_status}``. Rows: ``gene,
+        cohorts_sig_same_sign`` (k), ``cohorts_tested`` (m),
+        ``cohorts_same_sign, agreement, direction, sign_discordant,
+        units_up, units_down, median_abs_logFC, max_abs_logFC, cohorts,
+        apoe_locus``. ``cell_types`` lists the groups with their raw
+        ``labels`` and counted cohorts.
+
+        Args:
+            facet: ``'sex'`` / ``'ant_sex'``, also disease, apoe_carrier,
+                braak.
+            cell_type: A cell type group (``'microglia'``) or a raw
+                label; default: the group with most counted cohorts.
+            n: Rows returned (1 to 500).
+            exclude_secondary: ``False`` lets secondary datasets count.
+                Sent only when ``False``.
+            format: ``'json'`` or ``'dataframe'`` (the rows, needs
+                pandas).
+        """
+        params: Dict[str, Any] = {'n': n}
+        if cell_type is not None:
+            params['cell_type'] = cell_type
+        if not exclude_secondary:
+            params['exclude_secondary'] = 'false'
+        result = self._get(f'/facets/{facet}/effects/top', params=params)
+        if format == 'dataframe':
+            import pandas as pd
+            return pd.DataFrame(result.get('rows', []))
+        return result
+
+    def get_gene_facet_effects(self, gene: str,
+                               exclude_secondary: bool = True) -> Dict:
+        """``GET /genes/{gene}/facet-effects``. Result cards of one gene
+        for every tested facet (sex, disease, apoe_carrier, braak).
+
+        Returns ``{gene, facets: {facet: card}}``; each card has the
+        shape of :meth:`get_facet_gene_effects`. Exploratory,
+        donor-level, no meta-analysis; the disease card is provisional.
+        The first call per facet reads every result file on the server
+        (a few seconds); later calls are cached.
+
+        Args:
+            gene: Gene symbol (case-insensitive).
+            exclude_secondary: ``False`` lets secondary datasets count.
+                Sent only when ``False``.
+        """
+        params = {'exclude_secondary': 'false'} if not exclude_secondary else None
+        return self._get(f'/genes/{gene}/facet-effects', params=params)
+
+    def get_facet_cohorts(self, format: str = 'json') -> Union[Dict, Any]:
+        """``GET /facets/cohorts``. The DRAFT cohort selection table used
+        to count independent cohorts.
+
+        Returns ``{status: 'DRAFT', n_datasets, datasets}``; one row per
+        dataset with ``db_id``, ``cohort``, ``cohort_label``, ``role``,
+        ``cell_class``, ``counted`` and ``note``. Datasets of one cohort
+        share donors and count once towards replication; roles such as
+        duplicates, supplements and alternatives do not count. Empty
+        when the server has no table.
+
+        Args:
+            format: ``'json'`` or ``'dataframe'`` (the rows, needs
+                pandas).
+        """
+        result = self._get('/facets/cohorts')
+        if format == 'dataframe':
+            import pandas as pd
+            return pd.DataFrame(result.get('datasets', []))
+        return result
 
     # ── Dataset summaries + downloads ───────────────────────────────────
 
