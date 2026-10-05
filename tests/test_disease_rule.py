@@ -46,3 +46,17 @@ def test_classify_frame_applies_maps_and_numeric_columns():
 def test_validate_spec_rejects(bad):
     with pytest.raises(rule.DiseaseRuleError):
         rule.validate_spec(bad)
+
+
+def test_module_imports_without_pandas():
+    """ant-md-check imports disease_rule through facet_lint and has no pandas in its script deps."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    lib_dir = Path(__file__).resolve().parent.parent / 'lib'
+    code = ("import sys; sys.modules['pandas'] = None; sys.path.insert(0, %r); "
+            "import disease_rule, facet_lint; print('ok')" % str(lib_dir))
+    result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == 'ok'

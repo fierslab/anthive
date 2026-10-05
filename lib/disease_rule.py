@@ -17,9 +17,10 @@ Pure functions, no I/O; ``tests/test_disease_rule.py``.
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional
 
-import pandas as pd
+if TYPE_CHECKING:  # pandas is only needed by classify_frame; ant-md-check imports this module without it
+    import pandas as pd
 
 RULE = 'braak_cerad'
 BRAAK_AD_MIN = 3.0
@@ -110,6 +111,8 @@ def classify_frame(braak: pd.Series, cerad: pd.Series, spec: Mapping[str, Any]) 
     Returns:
         Object series of ``AD`` / ``control`` / None with the index of ``braak``.
     """
+    import pandas as pd  # noqa: PLC0415
+
     stages = pd.to_numeric(_mapped(braak, spec['braak'].get('map')), errors='coerce')
     levels = _mapped(cerad, spec['cerad'].get('map'))
     return pd.Series([classify(stage, level) for stage, level in zip(stages, levels)],
