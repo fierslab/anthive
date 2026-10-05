@@ -14,6 +14,7 @@ import ast
 import asyncio
 import copy
 import logging
+import os
 import sys
 from collections import OrderedDict
 from contextlib import contextmanager
@@ -212,7 +213,8 @@ def test_definitions_avoid_em_dashes():
 _SERVE_WANTED = {
     '_require_admin', '_caller_is_admin', '_is_facet_column',
     '_facet_definition', '_facet_definitions_status',
-    '_collect_facet_columns_per_dataset', '_facet_value_distribution',
+    '_collect_facet_columns_per_dataset', '_facet_value_distribution', '_facet_dataset_stats',
+    '_FACET_STATS_CACHE', '_FACET_STATS_CACHE_MAX', '_FACET_STATS_LOCK', '_plot_db_fingerprint',
     '_FACET_API_CONFIG_CACHE', '_FACET_PROJECTION_CACHE', '_FACET_PROJECTION_CACHE_MAX',
     '_FACET_PROJECTION_LOCK', '_FACET_VALUE_ROWS_LIMIT', '_FACET_MAPPING_KEYS',
     '_facet_api_config', '_quote_stored_column', '_facet_add_counts',
@@ -304,12 +306,14 @@ class _FakeRegistry:
         self.data_folder = tmp_path
         self.metadata_cache: Dict[str, Dict[str, Any]] = {}
         self.paths: Dict[str, Path] = {}
+        self.databases: Dict[str, str] = {}
         md = tmp_path / 'ds1.md'
         md.write_text(MD_TEXT)
         api_config = get_api_config(parse_md_file(md)[0])
         cat, num = _build_duckdb(tmp_path / 'ds1.duckdb', api_config)
         self._db_md_bases[DB_ID] = md
         self.paths[DB_ID] = tmp_path / 'ds1.duckdb'
+        self.databases[DB_ID] = str(self.paths[DB_ID])
         self.metadata_cache[DB_ID] = {
             'id': DB_ID, 'title': 'Dataset One', 'group_id': 'G1', 'file_id': 'ds1',
             'n_cells': 6, 'collection': {'group': 'Group One'},
@@ -319,6 +323,7 @@ class _FakeRegistry:
         other_md.write_text(OTHER_MD)
         self._db_md_bases[OTHER_ID] = other_md
         self.paths[OTHER_ID] = tmp_path / 'ds2.duckdb'
+        self.databases[OTHER_ID] = str(self.paths[OTHER_ID])
         # ds2 declares ant_sex, but its served view does not expose it.
         self.metadata_cache[OTHER_ID] = {
             'id': OTHER_ID, 'title': 'Dataset Two', 'group_id': 'G1', 'file_id': 'ds2',
@@ -349,9 +354,11 @@ def serve(tmp_path):
     from fastapi.testclient import TestClient
 
     registry = _FakeRegistry(tmp_path)
+    registry.opened = []
 
     @contextmanager
     def _pooled_db(db_id: str):
+        registry.opened.append(db_id)
         conn = duckdb.connect(registry.get_database_path(db_id), read_only=True)
         try:
             yield _PooledDb(conn)
@@ -376,7 +383,7 @@ def serve(tmp_path):
         'app': app, 'registry': registry, '_pooled_db': _pooled_db,
         'parse_md_file': parse_md_file, 'safe_ident': safe_ident, 'duckdb': duckdb,
         'log': logging.getLogger('test-facet-mapping'), 'OrderedDict': OrderedDict,
-        'Lock': Lock, 'copy': copy, 'Path': Path, 'asyncio': asyncio,
+        '_plot_os': os, 'Lock': Lock, 'copy': copy, 'Path': Path, 'asyncio': asyncio,
         'Query': Query, 'Request': Request, 'HTTPException': HTTPException,
         'Dict': Dict, 'List': List, 'Any': Any, 'Optional': Optional, 'Tuple': Tuple, 'Set': Set,
         'get_auth_settings': lambda cfg=None: {'mode': 'authelia', 'admins': set()},
@@ -387,7 +394,9 @@ def serve(tmp_path):
     }
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SERVE_PATH), 'exec',
                  dont_inherit=True), namespace)
-    return TestClient(app)
+    client = TestClient(app)
+    client.registry = registry
+    return client
 
 
 ADMIN = {'Remote-User': 'root', 'Remote-Groups': 'users,admins'}
@@ -477,3 +486,16 @@ def test_facet_detail_without_mapping(serve):
     body = serve.get('/facets/ant_sex?mapping=false').json()
     assert body['non_carriers'] is None
     assert 'mapping_kind' not in body['datasets'][0]
+
+
+def test_facet_detail_value_distribution_is_cached_until_the_duckdb_changes(serve):
+    first = serve.get('/facets/ant_sex?mapping=false').json()
+    opened_after_first = len(serve.registry.opened)
+    assert opened_after_first >= 1
+    assert serve.get('/facets/ant_sex?mapping=false').json() == first
+    assert len(serve.registry.opened) == opened_after_first  # warm: no database opened
+    path = serve.registry.paths[DB_ID]
+    stat = path.stat()
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 5_000_000_000))
+    assert serve.get('/facets/ant_sex?mapping=false').json() == first
+    assert len(serve.registry.opened) > opened_after_first  # fingerprint changed: re-read

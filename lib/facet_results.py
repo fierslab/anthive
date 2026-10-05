@@ -129,6 +129,16 @@ COHORT_TABLE_NAME = 'cohort_selection.DRAFT.tsv'
 # must be absent from the counted run of that dataset (they are persons of another counted
 # cohort). The dataset .md carries the machine-readable rule (lib/donor_exclusions.py); a unit
 # counts only when its run manifest records that the rule was applied (``donor_exclusion.counted``).
+#: Parenthesised curation notes that carry a date (``(... merged into it 2026-10-05)``).
+_DATED_NOTE = re.compile(r'\s*\([^()]*\d{4}-\d{2}-\d{2}[^()]*\)')
+
+
+def public_role(role: str) -> str:
+    """The cohort role as shown to users: ``role`` without parenthesised notes that
+    contain a date (internal curation history), whitespace tidied."""
+    return _DATED_NOTE.sub('', role or '').strip()
+
+
 EXCLUDED_ROLE_PATTERN = re.compile(r'duplicate|supplement|do not|never|alternative B|T20 only', re.I)
 
 REPLICATION_DEFINITION = (
@@ -439,6 +449,7 @@ class FacetResults:
         self._cohort_cache: Optional[Tuple[Any, Dict[str, Dict[str, Any]]]] = None
         self._control_cache: Dict[Tuple, Dict[Tuple[str, str], Dict[str, Any]]] = {}
         self._gene_tables: "OrderedDict[Tuple, Tuple[pd.DataFrame, pd.DataFrame]]" = OrderedDict()
+        self._families: "OrderedDict[Tuple, Dict[str, Dict[str, Any]]]" = OrderedDict()
 
     # ── low-level reads ────────────────────────────────────────────────────
 
@@ -539,8 +550,19 @@ class FacetResults:
         return out
 
     def _with_pooled(self, datasets: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """``datasets`` plus the donor-pooled units; a pool takes the ``disease_basis`` its
+        member datasets agree on (None when they differ or declare none)."""
         known = {d['db_id'] for d in datasets}
-        return list(datasets) + [d for d in self.pooled_datasets() if d['db_id'] not in known]
+        basis_of = {d['db_id']: d.get('disease_basis') for d in datasets}
+        cohorts = self.cohorts()
+        pools = []
+        for pool in self.pooled_datasets():
+            if pool['db_id'] in known:
+                continue
+            members = (cohorts.get(pool['db_id']) or {}).get('pool_members') or []
+            bases = {basis_of.get(member) for member in members}
+            pools.append({**pool, 'disease_basis': bases.pop() if len(bases) == 1 else None})
+        return list(datasets) + pools
 
     def fingerprint(self, group_folder: str, stem: str) -> Tuple:
         """Changes whenever any result file of the dataset changes."""
@@ -549,19 +571,29 @@ class FacetResults:
     # ── summary ────────────────────────────────────────────────────────────
 
     def summary(self, db_id: str, group_folder: str, stem: str,
-                current_sha256: Optional[str] = None) -> Dict[str, Any]:
+                current_sha256: Optional[str] = None, disease_basis: Optional[str] = None) -> Dict[str, Any]:
         """Per (facet, cell type stratum) summary of one dataset's results,
         cached until a result file, the cohort table or the run logs change.
         See ``_compute_summary``; adds ``cohort`` and, on sex units,
-        ``sex_control``."""
-        key = (db_id, group_folder, stem, current_sha256, self.fingerprint(group_folder, stem),
+        ``sex_control``.
+
+        ``disease_basis`` is the dataset's current ``.md`` value; it overrides
+        the one recorded in the run manifest (runs before the key existed
+        record none) on the summary and on every unit.
+        """
+        key = (db_id, group_folder, stem, current_sha256, disease_basis, self.fingerprint(group_folder, stem),
                _file_key(self.results_dir / COHORT_TABLE_NAME))
         with self._lock:
             cached = self._summary_cache.get(key)
         if cached is not None:
             return cached
         result = json_safe(self._compute_summary(db_id, group_folder, stem, current_sha256))
+        result['disease_basis'] = disease_basis or result.get('disease_basis')
+        for unit in result['units']:
+            unit['disease_basis'] = result['disease_basis']
         cohort = self.cohorts().get(db_id)
+        if cohort:
+            cohort = {key: value for key, value in cohort.items() if key != 'role_internal'}
         if cohort and cohort.get('donor_exclusion_required'):
             applied = ((result.get('donor_exclusion') or {}).get('genes') or {}).get('counted') is True
             cohort = {**cohort, 'donor_exclusion_applied': applied}
@@ -942,7 +974,9 @@ class FacetResults:
         """db_id -> cohort record from the DRAFT cohort selection table.
 
         Record: ``cohort`` (full label), ``cohort_label`` (before the first
-        parenthesis), ``role``, ``cell_class``, ``counted`` (counts towards
+        parenthesis), ``role`` (public text: the ``role_public`` column, else the
+        table role without parenthesised dated curation notes; the raw text is
+        ``role_internal``, never served to users), ``cell_class``, ``counted`` (counts towards
         replication), ``status`` (DRAFT), ``note``, ``independence``
         (``checked`` or ``unknown``: whether donor overlap with the other
         cohorts was ever checked; unknown cohorts count but are flagged,
@@ -965,6 +999,7 @@ class FacetResults:
                         continue
                     cohort = row.get('cohort', '').strip()
                     role = row.get('role', '').strip()
+                    role_public = row.get('role_public', '').strip() or public_role(role)
                     independence = row.get('independence', '').strip().lower() or 'checked'
                     table[db_id] = {
                         'independence': independence,
@@ -972,7 +1007,8 @@ class FacetResults:
                         'pool_members': [m.strip() for m in row.get('pool_members', '').split(',') if m.strip()],
                         'cohort': cohort,
                         'cohort_label': cohort.split(' (')[0].strip() or cohort,
-                        'role': role,
+                        'role': role_public,
+                        'role_internal': role,
                         'cell_class': row.get('cell_class', '').strip(),
                         'counted': bool(cohort) and not EXCLUDED_ROLE_PATTERN.search(role),
                         'status': row.get('status', '').strip() or 'DRAFT',
@@ -1084,7 +1120,7 @@ class FacetResults:
         facet = canonical_facet(facet) if facet else facet
         datasets = self._with_pooled(datasets)
         signature = (facet, _file_key(self.results_dir / COHORT_TABLE_NAME), tuple(
-            (d['db_id'], bool(d.get('is_secondary')), self.fingerprint(d['group_folder'], d['stem']))
+            (d['db_id'], bool(d.get('is_secondary')), d.get('disease_basis'), self.fingerprint(d['group_folder'], d['stem']))
             for d in datasets))
         with self._lock:
             cached = self._gene_tables.get(signature)
@@ -1099,7 +1135,7 @@ class FacetResults:
             if _file_key(paths['genes']) is None:
                 continue
             summary = self.summary(dataset['db_id'], dataset['group_folder'], dataset['stem'],
-                                   current_sha256=dataset.get('sha256'))
+                                   current_sha256=dataset.get('sha256'), disease_basis=dataset.get('disease_basis'))
             tested = {(u['cell_type'], u['celltype_source']): u for u in summary['units']
                       if u['facet'] == facet and u['tested'] and u.get('genes')}
             if not tested:
@@ -1379,13 +1415,13 @@ class FacetResults:
         facet = canonical_facet(facet) if facet else facet
         datasets = self._with_pooled(datasets)
         signature = ('families', facet, exclude_secondary, _file_key(self.results_dir / COHORT_TABLE_NAME), tuple(
-            (d['db_id'], bool(d.get('is_secondary')), self.fingerprint(d['group_folder'], d['stem']))
+            (d['db_id'], bool(d.get('is_secondary')), d.get('disease_basis'), self.fingerprint(d['group_folder'], d['stem']))
             for d in datasets))
         with self._lock:
-            cached = self._gene_tables.get(signature)
+            cached = self._families.get(signature)
             if cached is not None:
-                self._gene_tables.move_to_end(signature)
-                return cached[0]
+                self._families.move_to_end(signature)
+                return cached
         rows, units = self.facet_gene_table(facet, datasets)
         families: Dict[str, Dict[str, Any]] = {}
         if len(units):
@@ -1395,10 +1431,10 @@ class FacetResults:
                 sub = rows[rows['unit'].isin(group_units['unit'])]
                 families[group] = self._family(sub, group_units)
         with self._lock:
-            self._gene_tables[signature] = (families, None)
-            self._gene_tables.move_to_end(signature)
-            while len(self._gene_tables) > 8:
-                self._gene_tables.popitem(last=False)
+            self._families[signature] = families
+            self._families.move_to_end(signature)
+            while len(self._families) > 8:
+                self._families.popitem(last=False)
         return families
 
     @staticmethod
@@ -1724,8 +1760,8 @@ class FacetResults:
         """
         facet = canonical_facet(facet) if facet else facet
         datasets = self._with_pooled(datasets)
-        signature = (facet, top_genes, exclude_secondary, tuple(
-            (d['db_id'], bool(d.get('is_secondary')), self.fingerprint(d['group_folder'], d['stem']))
+        signature = (facet, top_genes, exclude_secondary, _file_key(self.results_dir / COHORT_TABLE_NAME), tuple(
+            (d['db_id'], bool(d.get('is_secondary')), d.get('disease_basis'), self.fingerprint(d['group_folder'], d['stem']))
             for d in datasets))
         with self._lock:
             cached = self._overview_cache.get(signature)
@@ -1739,7 +1775,7 @@ class FacetResults:
                                                                  'module_manifest')):
                 continue
             summary = self.summary(dataset['db_id'], dataset['group_folder'], dataset['stem'],
-                                   current_sha256=dataset.get('sha256'))
+                                   current_sha256=dataset.get('sha256'), disease_basis=dataset.get('disease_basis'))
             units = [u for u in summary['units'] if u['facet'] == facet]
             tested = [u for u in units if u['tested']]
             if not tested:
@@ -1779,12 +1815,15 @@ class FacetResults:
                     'role': (summary.get('cohort') or {}).get('role'),
                     'counted': bool((summary.get('cohort') or {}).get('counted'))
                     and not (exclude_secondary and bool(dataset.get('is_secondary'))),
+                    '_cohort_counted': bool((summary.get('cohort') or {}).get('counted')),
+                    '_exclusion_missing': bool((summary.get('cohort') or {}).get('exclusion_missing')),
                     'is_secondary': bool(dataset.get('is_secondary')),
                     'celltype_group': group_of(unit.get('cell_type')),
                     'model': unit.get('model'),
                     'sex_control': unit.get('sex_control'),
                 })
         rows.sort(key=lambda r: (-(r.get('n_donors') or 0), r['db_id'], r.get('cell_type') or ''))
+        self._add_not_counted_reasons(rows, facet, exclude_secondary)
         result = json_safe({
             'facet': facet,
             'exclude_secondary': exclude_secondary,
@@ -1798,6 +1837,27 @@ class FacetResults:
                 self._overview_cache.clear()
             self._overview_cache[signature] = result
         return result
+
+    def _add_not_counted_reasons(self, rows: List[Dict[str, Any]], facet: str, exclude_secondary: bool) -> None:
+        """Set ``not_counted_reason`` on overview rows (None when the row counts) with the
+        same rules and wording as the gene effect cards; drops the private ``_`` fields."""
+        if not rows:
+            return
+        frame = pd.DataFrame({
+            'db_id': [r['db_id'] for r in rows], 'cell_type': [r.get('cell_type') for r in rows],
+            'celltype_source': [r.get('celltype_source') for r in rows],
+            'celltype_group': [r.get('celltype_group') for r in rows],
+            'cohort': [r.get('cohort') or None for r in rows], 'role': [r.get('role') for r in rows],
+            'counted': [r['_cohort_counted'] for r in rows], 'pooled': [r.get('pooled') for r in rows],
+            'is_secondary': [r.get('is_secondary') for r in rows], 'n_donors': [r.get('n_donors') for r in rows],
+            'disease_basis': [r.get('disease_basis') for r in rows],
+            'descriptive_only': [bool((r.get('flags') or {}).get('descriptive_only')) for r in rows],
+        })
+        decided = self.counting_units(frame, exclude_secondary, facet).to_dict(orient='records')
+        for row, record in zip(rows, decided):
+            record['exclusion_missing'] = row.pop('_exclusion_missing')
+            row.pop('_cohort_counted')
+            row['not_counted_reason'] = _not_counted_reason(record)
 
     def _top_genes(self, path: Path, facet: str, n_top: int) -> Dict[Tuple[str, str], List[Dict[str, Any]]]:
         """(cell_type, celltype_source) -> the n_top genes with smallest q < 0.05."""

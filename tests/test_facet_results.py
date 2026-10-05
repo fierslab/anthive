@@ -466,6 +466,105 @@ def test_facet_overview_rows(results):
     assert disease['rows'] == [] and disease['not_tested'][0]['db_id'] == 'G1/ds1'
 
 
+@pytest.mark.parametrize('role, expected', [
+    ('anchor', 'anchor'),
+    ('anchor (M23/MIC merged into it 2026-10-05)', 'anchor'),
+    ('anchor for astrocytes (ant_donor now served, 2026-10-05)', 'anchor for astrocytes'),
+    ('anchor (donor-pooled over the member files)', 'anchor (donor-pooled over the member files)'),
+    ('supplement: all donors are in M23/IMM (not counted)', 'supplement: all donors are in M23/IMM (not counted)'),
+    ('', ''),
+])
+def test_public_role_strips_dated_notes(role, expected):
+    assert fr.public_role(role) == expected
+
+
+def test_cohort_role_is_public_and_raw_role_stays_internal(results):
+    table = results / fr.COHORT_TABLE_NAME
+    table.write_text(table.read_text().replace('\tanchor\tG1/ds1', '\tanchor (merged into it 2026-10-05)\tG1/ds1'))
+    reader = fr.FacetResults(results)
+    record = reader.cohorts()['G1/ds1']
+    assert record['role'] == 'anchor' and record['role_internal'] == 'anchor (merged into it 2026-10-05)'
+    assert 'role_internal' not in reader.summary('G1/ds1', 'G1', 'ds1')['cohort']
+    assert reader.facet_overview('sex', DATASETS)['rows'][0]['role'] == 'anchor'
+    card = reader.gene_effects('braak', 'PTPRG', DATASETS)
+    assert {unit['role'] for unit in card['units']} == {'anchor'}
+
+
+def test_role_public_column_overrides_derived_text(results):
+    table = results / fr.COHORT_TABLE_NAME
+    lines = table.read_text().splitlines()
+    out = [lines[0] + '\trole_public'] + [line + ('\tClean text' if '\tG1/ds1\t' in line else '\t') for line in lines[1:]]
+    table.write_text('\n'.join(out) + '\n')
+    cohorts = fr.FacetResults(results).cohorts()
+    assert cohorts['G1/ds1']['role'] == 'Clean text' and cohorts['G2/ds2']['role'] == 'anchor'
+
+
+def test_dataset_disease_basis_overrides_the_run_manifest(results):
+    reader = fr.FacetResults(results)
+    assert reader.summary('G1/ds1', 'G1', 'ds1')['disease_basis'] is None  # old manifest: key absent
+    summary = reader.summary('G1/ds1', 'G1', 'ds1', disease_basis='braak_cerad')
+    assert summary['disease_basis'] == 'braak_cerad'
+    assert {unit['disease_basis'] for unit in summary['units']} == {'braak_cerad'}
+    manifest_path = results / 'G1' / 'ds1.facet_run_manifest.json'
+    manifest = json.loads(manifest_path.read_text())
+    manifest['disease_basis'] = 'clinical_dx'
+    manifest_path.write_text(json.dumps(manifest))
+    os.utime(manifest_path, ns=(manifest_path.stat().st_atime_ns, manifest_path.stat().st_mtime_ns + 10_000_000))
+    assert reader.summary('G1/ds1', 'G1', 'ds1')['disease_basis'] == 'clinical_dx'
+    assert reader.summary('G1/ds1', 'G1', 'ds1', disease_basis='braak_cerad')['disease_basis'] == 'braak_cerad'
+
+
+def test_disease_basis_reaches_cards_anchors_and_overview(results):
+    datasets = [{**d, 'disease_basis': 'braak_cerad'} for d in DATASETS]
+    reader = fr.FacetResults(results)
+    card = reader.gene_effects('braak', 'PTPRG', datasets)
+    assert {unit['disease_basis'] for unit in card['units']} == {'braak_cerad'}
+    assert {a['disease_basis'] for a in card['replication'][0]['anchors']} == {'braak_cerad'}
+    rows = reader.facet_overview('braak', datasets)['rows']
+    assert {row['disease_basis'] for row in rows} == {'braak_cerad'}
+    changed = reader.facet_overview('braak', [{**d, 'disease_basis': 'nia_reagan'} for d in DATASETS])['rows']
+    assert {row['disease_basis'] for row in changed} == {'nia_reagan'}
+
+
+def test_overview_rows_carry_not_counted_reason(results):
+    reader = fr.FacetResults(results)
+    rows = reader.facet_overview('braak', DATASETS)['rows']
+    assert [row['not_counted_reason'] for row in rows] == [None, None]
+    assert not any(key.startswith('_') for row in rows for key in row)
+    secondary = [{**d, 'is_secondary': d['db_id'] == 'G2/ds2'} for d in DATASETS]
+    by_id = {row['db_id']: row for row in reader.facet_overview('braak', secondary)['rows']}
+    assert by_id['G1/ds1']['not_counted_reason'] is None
+    assert by_id['G2/ds2']['not_counted_reason'] == 'secondary dataset (reanalysis)'
+    assert by_id['G2/ds2']['counted'] is False
+    descriptive = reader.facet_overview('sex', DATASETS)['rows']
+    assert {row['db_id']: row['not_counted_reason'] for row in descriptive} == {
+        'G1/ds1': None, 'G2/ds2': 'descriptive only (a level has too few donors)'}
+    cohort_table = results / fr.COHORT_TABLE_NAME
+    cohort_table.write_text('\n'.join(line for line in cohort_table.read_text().splitlines()
+                                       if '\tG1/ds1\t' not in line) + '\n')
+    missing = {row['db_id']: row for row in fr.FacetResults(results).facet_overview('braak', DATASETS)['rows']}
+    assert missing['G1/ds1']['not_counted_reason'] == 'dataset not in the cohort table'
+
+
+def test_gene_tables_and_families_do_not_evict_each_other(results):
+    reader = fr.FacetResults(results)
+    first_table = reader.facet_gene_table('braak', DATASETS)
+    first_families = reader.replication_families('braak', DATASETS)
+    for facet in fr.FACET_ORDER:
+        reader.gene_effects(facet, 'PTPRG', DATASETS)
+    assert reader.facet_gene_table('braak', DATASETS) is first_table
+    assert reader.replication_families('braak', DATASETS) is first_families
+
+
+def test_cohort_table_edit_refreshes_the_overview(results):
+    reader = fr.FacetResults(results)
+    assert reader.facet_overview('braak', DATASETS)['rows'][0]['role'] == 'anchor'
+    table = results / fr.COHORT_TABLE_NAME
+    table.write_text(table.read_text().replace('\tanchor\tG2/ds2', '\tanchor for X\tG2/ds2'))
+    os.utime(table, ns=(table.stat().st_atime_ns, table.stat().st_mtime_ns + 10_000_000))
+    assert reader.facet_overview('braak', DATASETS)['rows'][0]['role'] == 'anchor for X'
+
+
 # ── config ───────────────────────────────────────────────────────────────────
 
 def test_facets_visible_config(monkeypatch):
@@ -611,6 +710,7 @@ def test_endpoint_across_datasets_and_effects(serve):
     assert set(allf['facets']) == {'sex', 'disease', 'apoe4_carrier', 'braak'}
     cohorts = serve.get('/facets/cohorts').json()
     assert cohorts['status'] == 'DRAFT' and cohorts['n_datasets'] == 3
+    assert all('role_internal' not in record for record in cohorts['datasets'])
 
 
 # ── MCP ──────────────────────────────────────────────────────────────────────

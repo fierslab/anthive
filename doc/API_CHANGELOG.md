@@ -41,6 +41,17 @@ three contract changes to be aware of:
 
 pyvark 0.9.0 and the vendored JupyterLite client cover all of this.
 
+- **Facet test polish** (2026-10-05, additive). `disease_basis` on facet-test summaries, units,
+  effect cards, anchors and overview rows now follows the dataset `.md`; the value recorded in
+  an old run manifest only applies when the `.md` declares none (donor-pooled units take the basis
+  their members agree on). `GET /facets/{facet}/tests` rows carry `not_counted_reason` (same rules
+  and wording as the effect cards). Cohort `role` is public text (dated curation notes in
+  parentheses are stripped, or the `role_public` column of the cohort table when present);
+  `/facets/cohorts` and the summaries never serve the raw table text. `GET /facets/{name}` and
+  `GET /genes/{gene}/facet-effects` are cached (per-dataset value counts keyed on the .duckdb
+  fingerprint; gene tables and replication families no longer evict each other), warm calls take
+  well under a second.
+
 - **Facet replication v2: partial-conjunction r-values, treat p values, one anchor per cohort**
   (2026-10-05). `/facets/{facet}/effects`, `/genes/{gene}/facet-effects` (replication
   entries): new `r_value` (Benjamini and Heller partial conjunction, u = 2, Simes combination,

@@ -4175,8 +4175,9 @@ def get_facet_tests(db_id: str):
     as not available.
     """
     group_folder, stem = _facet_results_location(db_id)
-    current_sha = (registry.metadata_cache.get(db_id) or {}).get('sha256')
-    return _facet_results().summary(db_id, group_folder, stem, current_sha256=current_sha)
+    meta = registry.metadata_cache.get(db_id) or {}
+    return _facet_results().summary(db_id, group_folder, stem, current_sha256=meta.get('sha256'),
+                                    disease_basis=meta.get('disease_basis'))
 
 
 @app.get("/databases/{db_id:path}/facet-tests/genes", tags=["facet-tests"])
@@ -13223,7 +13224,8 @@ def get_facet_tests_across_datasets(
     ``GET /databases/{id}/facet-tests`` unit (contrast, donors per level,
     covariates, flags, genes and modules at q < 0.05) plus ``db_id``,
     ``title``, ``group``, ``top_genes`` (``gene``, ``logFC``, ``q_value``)
-    and ``run_date``. ``not_tested`` lists datasets with results whose units
+    ``run_date``, ``disease_basis`` and ``not_counted_reason`` (why the row does
+    not count towards replication; null when it does). ``not_tested`` lists datasets with results whose units
     for this facet could not be tested, with the reason.
 
     No pooling: datasets are tested independently and share donors (ROSMAP,
@@ -13265,6 +13267,7 @@ def _facet_test_datasets() -> List[Dict[str, Any]]:
                          'title': meta.get('title') or db_id,
                          'group': (meta.get('collection') or {}).get('group') or group_folder,
                          'sha256': meta.get('sha256'),
+                         'disease_basis': meta.get('disease_basis'),
                          'is_secondary': meta.get('is_secondary') is True})
     return datasets
 
@@ -13391,7 +13394,8 @@ def get_facet_cohorts():
     missing. Registered before ``/facets/{name}``."""
     table = _facet_results().cohorts()
     return {'status': 'DRAFT', 'n_datasets': len(table),
-            'datasets': [{'db_id': db_id, **record} for db_id, record in sorted(table.items())]}
+            'datasets': [{'db_id': db_id, **{k: v for k, v in record.items() if k != 'role_internal'}}
+                         for db_id, record in sorted(table.items())]}
 
 
 @app.get("/facets", tags=["facets"])
@@ -13438,6 +13442,48 @@ async def list_facets():
             "definitions_status": _facet_definitions_status()}
 
 
+_FACET_STATS_CACHE: "OrderedDict[tuple, Any]" = OrderedDict()
+_FACET_STATS_CACHE_MAX = 4096
+_FACET_STATS_LOCK = Lock()
+
+
+def _facet_dataset_stats(db_id: str, facet_name: str, kind: str, per_facet_limit: int) -> Optional[Any]:
+    """Value counts (categorical) or (min, max, mean, n) (numerical) of one facet in one dataset.
+
+    Cached per dataset on the fingerprint of its .duckdb (and scores sidecar),
+    so a warm ``GET /facets/{name}`` opens no database. Returns None when the
+    dataset cannot be opened or scanned (failures are not cached).
+    """
+    db_url = registry.databases.get(db_id)
+    key = (db_id, facet_name, kind, per_facet_limit, _plot_db_fingerprint(db_url) if db_url else None)
+    with _FACET_STATS_LOCK:
+        if key in _FACET_STATS_CACHE:
+            _FACET_STATS_CACHE.move_to_end(key)
+            return _FACET_STATS_CACHE[key]
+    try:
+        with _pooled_db(db_id) as db:
+            conn = db._conn
+            ident = safe_ident(facet_name)
+            if kind == 'categorical':
+                result: Any = [(str(value) if value is not None else '', int(count)) for value, count in
+                               conn.execute(
+                                   f"SELECT {ident} AS v, COUNT(*) AS n FROM obscat "
+                                   f"WHERE {ident} IS NOT NULL GROUP BY v ORDER BY n DESC LIMIT ?",
+                                   [per_facet_limit]).fetchall()]
+            else:
+                result = conn.execute(
+                    f"SELECT MIN({ident}), MAX({ident}), AVG({ident}), COUNT({ident}) "
+                    f"FROM obsnum WHERE {ident} IS NOT NULL").fetchone()
+    except Exception:
+        # Skip datasets whose duckdb can't be opened or scanned.
+        return None
+    with _FACET_STATS_LOCK:
+        _FACET_STATS_CACHE[key] = result
+        while len(_FACET_STATS_CACHE) > _FACET_STATS_CACHE_MAX:
+            _FACET_STATS_CACHE.popitem(last=False)
+    return result
+
+
 def _facet_value_distribution(facet_name: str, kind: str,
                               datasets: List[str],
                               per_facet_limit: int = 200) -> Dict[str, Any]:
@@ -13460,33 +13506,23 @@ def _facet_value_distribution(facet_name: str, kind: str,
           "per_dataset": [{"db_id": "...", "min": ..., "max": ..., "mean": ...}, ...],
           "total_cells": int,
         }
+
+    Per-dataset statistics are cached on the dataset file fingerprint
+    (``_facet_dataset_stats``).
     """
     total_cells = 0
+    if not _is_facet_column(facet_name):
+        return {'kind': kind, 'values': [], 'total_cells': 0} if kind == 'categorical' else {
+            'kind': 'numerical', 'fleet_min': None, 'fleet_max': None, 'per_dataset': [], 'total_cells': 0}
     if kind == 'categorical':
         # Aggregate value -> (n_cells across datasets, n_datasets carrying it).
         val_cells: Dict[str, int] = {}
         val_datasets: Dict[str, int] = {}
         for db_id in datasets:
-            try:
-                with _pooled_db(db_id) as db:
-                    conn = db._conn
-                    if not _is_facet_column(facet_name):
-                        continue
-                    ident = safe_ident(facet_name)
-                    rows_top = conn.execute(
-                        f"SELECT {ident} AS v, COUNT(*) AS n "
-                        f"FROM obscat WHERE {ident} IS NOT NULL "
-                        f"GROUP BY v ORDER BY n DESC LIMIT ?",
-                        [per_facet_limit],
-                    ).fetchall()
-                    for value, count in rows_top:
-                        key = str(value) if value is not None else ''
-                        val_cells[key] = val_cells.get(key, 0) + int(count)
-                        val_datasets[key] = val_datasets.get(key, 0) + 1
-                        total_cells += int(count)
-            except Exception:
-                # Skip datasets whose duckdb can't be opened or scanned.
-                continue
+            for key, count in _facet_dataset_stats(db_id, facet_name, kind, per_facet_limit) or []:
+                val_cells[key] = val_cells.get(key, 0) + count
+                val_datasets[key] = val_datasets.get(key, 0) + 1
+                total_cells += count
         values = [
             {'value': v, 'n_cells': val_cells[v], 'n_datasets': val_datasets[v]}
             for v in sorted(val_cells, key=lambda k: (-val_cells[k], k))
@@ -13503,34 +13539,23 @@ def _facet_value_distribution(facet_name: str, kind: str,
     fleet_max = -_math.inf
     per_dataset: List[Dict[str, Any]] = []
     for db_id in datasets:
-        try:
-            with _pooled_db(db_id) as db:
-                conn = db._conn
-                ident = safe_ident(facet_name)
-                row = conn.execute(
-                    f"SELECT MIN({ident}), MAX({ident}), AVG({ident}), COUNT({ident}) "
-                    f"FROM obsnum WHERE {ident} IS NOT NULL"
-                ).fetchone()
-                if row is None:
-                    continue
-                mn, mx, avg, cnt = row
-                if mn is None or mx is None or cnt is None or int(cnt) == 0:
-                    continue
-                mn_f, mx_f = float(mn), float(mx)
-                if mn_f < fleet_min:
-                    fleet_min = mn_f
-                if mx_f > fleet_max:
-                    fleet_max = mx_f
-                total_cells += int(cnt)
-                per_dataset.append({
-                    'db_id': db_id,
-                    'min': mn_f,
-                    'max': mx_f,
-                    'mean': float(avg) if avg is not None else None,
-                    'n_cells': int(cnt),
-                })
-        except Exception:
+        row = _facet_dataset_stats(db_id, facet_name, kind, per_facet_limit)
+        if row is None:
             continue
+        mn, mx, avg, cnt = row
+        if mn is None or mx is None or cnt is None or int(cnt) == 0:
+            continue
+        mn_f, mx_f = float(mn), float(mx)
+        fleet_min = min(fleet_min, mn_f)
+        fleet_max = max(fleet_max, mx_f)
+        total_cells += int(cnt)
+        per_dataset.append({
+            'db_id': db_id,
+            'min': mn_f,
+            'max': mx_f,
+            'mean': float(avg) if avg is not None else None,
+            'n_cells': int(cnt),
+        })
     return {
         'kind': 'numerical',
         'fleet_min': (None if fleet_min == _math.inf else fleet_min),

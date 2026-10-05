@@ -1,4 +1,5 @@
 """The persisted metadata cache must notice .md-only, .h5ad.mus, .env and index.md edits."""
+import json
 import os
 import sys
 from pathlib import Path
@@ -95,3 +96,21 @@ def test_entry_from_older_cache_without_signature_is_invalid(store):
     fingerprint = store._get_entry_fingerprint(DB_ID)
     entry = {key: value for key, value in fingerprint.items() if key != 'annotation_sig'}
     assert not store._is_cache_entry_valid(DB_ID, entry, fingerprint)
+
+
+def test_plain_restart_drops_cache_written_by_older_payload_version(store):
+    """A cache file of the previous version (entries without replicate_unit/disease_basis)
+    is ignored on a plain restart, so every dataset is rebuilt with the current payload."""
+    fingerprint = store._get_entry_fingerprint(DB_ID)
+    stale_entry = {**fingerprint, 'title': 'stale'}
+    path = store._cache_file_path()
+    path.write_text(json.dumps({'cache_version': store_version(store) - 1, 'entries': {DB_ID: stale_entry}}))
+    assert store._load_persisted_cache() == {}
+    assert _restart(store)['replicate_unit'] == 'replicate_unit: none'
+
+
+def store_version(registry) -> int:
+    """The cache version the registry writes."""
+    registry._cache_all_metadata()
+    return json.loads(registry._cache_file_path().read_text())['cache_version']
+
