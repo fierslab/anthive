@@ -62,15 +62,12 @@
   .gv-ds-tip .tip-row   { color: #475569; }
   .gv-ds-tip .tip-id    { font-family: var(--font-mono); color: var(--text-muted); font-size: 10px; margin-top: 4px; }
 
-  /* ── minimal sparkline: 4-char wide grey line + black tick ── */
-  .ss {
-    display: inline-block; position: relative; width: 36px; height: 10px;
-    background: #e2e8f0; border-radius: 2px; vertical-align: middle;
-  }
-  .ss .ss-tick {
-    position: absolute; top: -1px; width: 2px; height: 12px;
-    background: #0f172a; border-radius: 1px;
-  }
+  /* Stat cells use the sitewide big-dot scale (.dot-scale, base.html). All
+     three metrics have high = green: % expressed relative to the highest
+     across datasets, per-dataset percentile rank of mean, and rank of
+     mean(nonzero) across datasets. */
+  .gv-table .gv-val { --dot-w: 56px; }
+  .gv-table .gv-val .dot-scale { margin-left: 4px; }
 
   /* ── multi-gene heatmap (preserved, styled consistently) ── */
   .hm-legend { font-size: 11px; color: var(--text-muted); margin: 6px 0; }
@@ -361,12 +358,11 @@
     return one(p.organism, '') + one(p.celltype, 'cell') + one(p.disease, 'disease');
   }
 
-  // ── sparkline: minimal grey bar + black tick at the given fraction (0–1) ──
+  // ── stat dot: antDot (base.html) at the given fraction (0–1), tooltip with the exact value ──
   // For mean/mean_nonzero the fraction IS the rank (0–1); for pct_nonzero it
   // is pct/STAT_MAX.pct_nonzero.  rankPct (0–100) is pre-computed by the
   // caller and passed in so the tooltip can display it.
-  function sparkline(frac, val, rankPct, nGenes, statLabel, gene) {
-    var pct = Math.max(0, Math.min(100, (frac || 0) * 100));
+  function statDot(frac, val, rankPct, nGenes, statLabel, gene) {
     var tip = '';
     if (statLabel && gene) {
       var valStr = val != null ? num(val, statLabel === 'pct_nonzero' ? 1 : 3) : '—';
@@ -374,7 +370,7 @@
         tip = 'pct_nonzero = ' + valStr + '%'
             + '  ·  fraction of cells with detectable UMIs of ' + gene
             + ' in this dataset'
-            + '  ·  scale: 0–100%';
+            + '  ·  dot position relative to the highest value across datasets';
       } else if (statLabel === 'mean') {
         var rkStr = rankPct != null ? rankPct.toFixed(1) : '?';
         var ngStr = nGenes  != null ? nGenes.toLocaleString() : '?';
@@ -385,12 +381,11 @@
         var rkStr = rankPct != null ? rankPct.toFixed(1) : '?';
         var ngStr = nGenes  != null ? nGenes.toLocaleString() : '?';
         tip = 'mean_nonzero = ' + valStr
-            + '  ·  rank ' + rkStr + '% of ' + ngStr + ' genes in this dataset'
+            + '  ·  rank ' + rkStr + '% across datasets'
             + '  ·  rank among expressing cells only; higher = more highly expressed';
       }
     }
-    var titleAttr = tip ? ' title="' + tip.replace(/"/g, '&quot;') + '"' : '';
-    return '<span class="ss"' + titleAttr + '><span class="ss-tick" style="left:' + pct.toFixed(1) + '%"></span></span>';
+    return antDot.html(frac, { title: tip });
   }
 
   // SVG icons
@@ -463,7 +458,7 @@
          + '<a href="' + umap + '" title="UMAP coloured by ' + esc(GENE) + '">' + SVG_UMAP + '</a>';
   }
 
-  // ── cross-dataset stats for sparklines (set after data loads) ──────────────
+  // ── cross-dataset stats for the stat dots (set after data loads) ──────────────
   // pct_nonzero: natural 0–100 scale; mean / mean_nonzero use per-dataset
   // PERCENT_RANK (rank_mean from server; rank_mean_nonzero computed client-side).
   var STAT_MAX = { pct_nonzero: 100 };  // only pct_nonzero needs a cross-db max
@@ -481,7 +476,7 @@
   // so we derive it here from the loaded cross-dataset rows.
   // NOTE: this ranks this gene's mean_nonzero ACROSS datasets (not across genes
   // within one dataset), which is a different but still unit-invariant signal.
-  // The per-dataset rank_mean (from server) is used for the mean sparkline.
+  // The per-dataset rank_mean (from server) is used for the mean dot.
   function computeRankMeanNonzero(rows) {
     var sorted = rows.slice().filter(function (r) { return r.mean_nonzero != null; });
     sorted.sort(function (a, b) { return (a.mean_nonzero || 0) - (b.mean_nonzero || 0); });
@@ -759,19 +754,19 @@
       var orgFull  = ((p.organism || {}).full || ann.celltype || '');
       // We embed organism full name from PILLS for display; cell_type / tissue / biosample from DS_ANNOT.
       var orgPill  = p.organism ? '<span title="' + esc(((p.organism || {}).full || '')) + '">' + esc(((p.organism || {}).abbrev || '')) + '</span>' : '—';
-      // sparklines: pct_nonzero uses cross-db max; mean / mean_nonzero use
+      // stat dots: pct_nonzero uses cross-db max; mean / mean_nonzero use
       // per-dataset percentile rank so the bar is unit-invariant across
       // scRNA-seq and proteomics/bulk datasets.
       var nGenes    = ann.n_genes != null ? ann.n_genes : null;
-      var pctSpark  = sparkline((r.pct_nonzero  || 0) / STAT_MAX.pct_nonzero,
+      var pctDot  = statDot((r.pct_nonzero  || 0) / STAT_MAX.pct_nonzero,
                                 r.pct_nonzero, null, null, 'pct_nonzero', GENE);
       var meanRank01 = r.rank_mean != null ? r.rank_mean : null;
       var meanRankPct = meanRank01 != null ? meanRank01 * 100 : null;
-      var meanSpark = sparkline(meanRank01 != null ? meanRank01 : 0,
+      var meanDot = statDot(meanRank01,
                                 r.mean, meanRankPct, nGenes, 'mean', GENE);
       var mnzRank01  = r._rank_mean_nonzero != null ? r._rank_mean_nonzero : null;
       var mnzRankPct = mnzRank01 != null ? mnzRank01 * 100 : null;
-      var mnzSpark  = sparkline(mnzRank01 != null ? mnzRank01 : 0,
+      var mnzDot  = statDot(mnzRank01,
                                 r.mean_nonzero, mnzRankPct, nGenes, 'mean_nonzero', GENE);
       // Visible text for rank columns: show percentile (0–100), not raw value.
       var meanRankText = meanRankPct != null ? meanRankPct.toFixed(1) + '%' : '—';
@@ -785,9 +780,9 @@
         + '<td class="muted gv-narrow" style="font-size:11px" title="' + esc(ann.celltype || '') + '">' + esc(ann.celltype || '') + '</td>'
         + '<td class="muted gv-narrow" style="font-size:11px" title="' + esc(ann.tissue   || '') + '">' + esc(ann.tissue   || '') + '</td>'
         + '<td class="muted gv-narrow" style="font-size:11px" title="' + esc(ann.biosample || '') + '">' + esc(ann.biosample || '') + '</td>'
-        + '<td class="gv-val">' + num(r.pct_nonzero, 1) + '% ' + pctSpark  + '</td>'
-        + '<td class="gv-val">' + meanRankText + ' ' + meanSpark + '</td>'
-        + '<td class="gv-val">' + mnzRankText  + ' ' + mnzSpark  + '</td>'
+        + '<td class="gv-val">' + num(r.pct_nonzero, 1) + '% ' + pctDot  + '</td>'
+        + '<td class="gv-val">' + meanRankText + ' ' + meanDot + '</td>'
+        + '<td class="gv-val">' + mnzRankText  + ' ' + mnzDot  + '</td>'
         + '<td class="gv-icons" style="text-align:center">' + plotLinks(r.db_id) + '</td>'
         + '</tr>';
     }).join('');

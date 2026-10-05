@@ -80,14 +80,11 @@ URL hash scheme (feature: back-button / shareable filter state):
     .mv-panel .mv-ds-tip .tip-id { font-family: var(--font-mono); color: var(--text-muted); font-size: 10px; margin-top: 4px; }
     .mv-panel .mv-val    { font-family: var(--font-mono); text-align: right; }
     .mv-panel .mv-pos    { min-width: 160px; }
-    /* .mv-track — now uses the global .ss compact sparkline style (dataset.html).
-       Kept here so the module view still works when loaded standalone; the
-       important rules come from .ss defined in dataset.html's <style> block.
-       The width is slightly wider (80px) than the gene sparkline (32px) so the
-       peer-position column stays legible across 500+ rows. */
-    .mv-panel .mv-track  { position: relative; display: inline-block; width: 80px; height: 12px; vertical-align: middle; }
-    .mv-panel .mv-track::before { content:''; position:absolute; top:50%; left:0; right:0; height:1px; background:#d1d5db; transform:translateY(-50%); }
-    .mv-panel .mv-track .mv-mark { position: absolute; top: 1px; bottom: 1px; width: 2px; border-radius: 1px; transform: translateX(-50%); }
+    /* Peer position uses the sitewide big-dot scale (.dot-scale, base.html):
+       position = value between the min and max of the peer modules, colour by
+       third (high = strongest association = green). Wider than the gene-tab
+       dots so the column stays legible across 500+ rows. */
+    .mv-panel .mv-pos .dot-scale { --dot-w: 96px; }
     .mv-panel .mv-icons a { display: inline-flex; text-decoration: none; color: var(--text-muted); font-size: 14px; padding: 0 3px; position: relative; }
     .mv-panel .mv-icons a:hover { color: var(--link); }
     .mv-panel .mv-icons svg { width: 1em; height: 1em; }
@@ -274,7 +271,7 @@ URL hash scheme (feature: back-button / shareable filter state):
         <th class="mv-th-tag" data-sortcol="tag">facet</th>
         <th data-sortcol="method">method</th>
         <th data-sortcol="value" style="text-align:right">score</th>
-        <th class="mv-pos mv-sort-desc" data-sortcol="position">vs peer modules <span class="info" onclick="event.stopPropagation()" title="Peers = other modules scored with the SAME method on the SAME (dataset, tag). Marker = this row's value; bar spans min–max across peer modules. Click to sort by this column.">ⓘ</span></th>
+        <th class="mv-pos mv-sort-desc" data-sortcol="position">vs peer modules <span class="info" onclick="event.stopPropagation()" title="Peers = other modules scored with the SAME method on the SAME (dataset, tag). The dot is this row's value on the min–max range across peer modules; red, amber and green mark the low, middle and high third. Click to sort by this column.">ⓘ</span></th>
         <th style="text-align:center;cursor:default">plots</th>
       </tr></thead>
       <tbody class="mv-rows"></tbody>
@@ -1074,12 +1071,8 @@ URL hash scheme (feature: back-button / shareable filter state):
     var html = rows.map(function (r) {
       var pos = positionOf(r, PEER_INDEX);
       var g = PEER_INDEX[peerKey(r)] || { min: r.value, max: r.value, n: 1 };
-      var neg = r.value < 0;
-      var markL = Math.max(0, Math.min(100, pos * 100));
-      var track = '<span class="mv-track" title="this module ' + (+r.value).toFixed(3)
-        + ' · across ' + g.n + ' peer modules: ' + (+g.min).toFixed(3) + '…' + (+g.max).toFixed(3)
-        + '"><span class="mv-mark" style="left:calc(' + markL.toFixed(1) + '% - 3px);background:'
-        + (neg ? '#dc2626' : 'var(--link)') + '"></span></span>';
+      var track = antDot.html(pos, { title: 'this module ' + (+r.value).toFixed(3)
+        + ' · across ' + g.n + ' peer modules: ' + (+g.min).toFixed(3) + '…' + (+g.max).toFixed(3) });
       var dsParts = String(r.dataset).split('/');
       var dsHref = datasetUrl(r);
       var dsAnn = DS_ANNOT[r.dataset] || {};

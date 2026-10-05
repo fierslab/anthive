@@ -4810,24 +4810,29 @@ def test_genes_tab_has_search_input(client):
     assert 'searchParams.set' in html, "URL gene search-param update must be in the JS"
 
 
-def test_genes_tab_has_sparkline_elements(client):
-    """Each gene row has .ss sparkline elements for pct, rank, and variability."""
+def test_genes_tab_has_dot_scale_elements(client):
+    """Each gene row has .dot-scale big-dot elements for pct, rank, and variability."""
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
     html = resp.text
-    # .ss is the compact sparkline class.
-    assert 'class="ss"' in html or 'class="gene-sparkline"' in html, \
-        ".ss sparkline must be rendered in gene rows"
-    # Uniform sparkline tracks: pct / rank / var.
-    assert 'data-stat="pct"'  in html, "pct sparkline track required"
-    assert 'data-stat="rank"' in html, "rank sparkline track required"
-    assert 'data-stat="var"'  in html, "variability sparkline track required"
-    # No raw mean or meannz tracks.
-    assert 'data-stat="mean"'   not in html, "mean sparkline track must not appear"
-    assert 'data-stat="meannz"' not in html, "meannz sparkline track must not appear"
-    # The JS sparkline helper must be present.
-    assert "setSsMark" in html or "setSparkline" in html, \
-        "sparkline JS helper (setSsMark or setSparkline) must be defined"
+    assert 'class="dot-scale"' in html, ".dot-scale must be rendered in gene rows"
+    assert 'data-stat="pct"' in html, "pct dot track required"
+    assert 'data-stat="rank"' in html, "rank dot track required"
+    assert 'data-stat="var"' in html, "variability dot track required"
+    assert 'data-stat="mean"' not in html, "mean dot track must not appear"
+    assert 'data-stat="meannz"' not in html, "meannz dot track must not appear"
+    # Shared helper (base.html) and no leftover sparkline code.
+    assert "window.antDot" in html
+    assert "antDot.set(" in html
+    assert "setSsMark" not in html and "ss-mark" not in html
+
+
+def test_dot_scale_css_tokens_in_base(client):
+    """The shared big-dot component and its RAG tokens live in base.html."""
+    html = client.get("/browse/GroupA/ds1").text
+    for token in ("--dot-track", "--dot-red", "--dot-amber", "--dot-green"):
+        assert token in html
+    assert 'data-tone="red"' in html and "box-shadow: 0 0 0 2px var(--bg)" in html
 
 
 def test_genes_tab_rank_expr_uses_server_rank_mean(client):
@@ -5095,48 +5100,36 @@ def test_categorical_tab_ecdf_link(client):
     assert "_firstNumCol" in html, "_firstNumCol JS variable must select the numeric x-axis for ECDF"
 
 
-def test_categorical_tab_top_categories_pct_sparkline(client):
-    """Categorical tab: top categories show % label and .ss sparkline in JS render."""
+def test_categorical_tab_top_categories_pct_label(client):
+    """Categorical tab: top categories show a % label (text only, no dot scale)."""
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
-    html = resp.text
-    # JS renders % of cells next to each top category with a sparkline.
-    assert "pct" in html, "pct value must appear in categorical top-category rendering"
-    # Sparkline class emitted in JS string for top-category rendering.
-    assert 'class="ss"' in html, ".ss sparkline class must appear in page"
+    assert "pct" in resp.text, "pct value must appear in categorical top-category rendering"
 
 
-def test_compact_sparkline_css_present(client):
-    """Global .ss compact sparkline CSS must be declared in dataset page."""
-    resp = client.get("/browse/GroupA/ds1")
-    assert resp.status_code == 200
-    html = resp.text
-    assert '.ss {' in html or '.ss{' in html, ".ss CSS rule must be present"
-    assert '.ss::before' in html, ".ss::before grey line must be declared"
-    assert '.ss-mark' in html, ".ss-mark tick must be declared"
+def test_dot_scale_component_in_base(client):
+    """The sitewide big-dot CSS is defined once (base.html) with an end-inset dot and a ring."""
+    html = client.get("/browse/GroupA/ds1").text
+    assert ".dot-scale::before" in html, "grey track must be declared"
+    assert ".dot-scale-dot" in html
+    assert "(100% - var(--dot-d))" in html, "dot centre must be inset by its radius"
+    assert ".ss {" not in html and ".ss-mark" not in html, "old sparkline CSS must be gone"
 
 
-def test_module_view_sparkline_restyle(client, monkeypatch):
-    """Module view track uses new compact ::before line + 2px tick, not old pill.
-    Requires the _module_view.html partial to be included, which only happens
-    when n_module_scores > 0. We monkeypatch a minimal score column list.
-    """
+def test_module_view_peer_position_uses_dot_scale(client, monkeypatch):
+    """Module view peer-position cells render through antDot, not the old mv-track."""
     def _with_scores(api_url, path):
         result = _fake_api_get(api_url, path)
         if path.endswith('/info') and isinstance(result, dict):
             result = dict(result)
-            # Add a scanpy score column (naming convention) so n_module_scores > 0
-            # and the _module_view.html partial gets included.
             obs = dict(result.get('obs', {}))
             obs['numerical'] = ['n_genes', 'pseudotime', 'studyA::expB::Mod1']
             result['obs'] = obs
         return result
     monkeypatch.setattr(browser, '_api_get', _with_scores)
-    resp = client.get("/browse/GroupA/ds1")
-    assert resp.status_code == 200
-    html = resp.text
-    # New style: ::before pseudo-element grey line in the module view track.
-    assert '.mv-track::before' in html, ".mv-track::before must define the grey line"
+    html = client.get("/browse/GroupA/ds1").text
+    assert "antDot.html(pos" in html
+    assert "mv-track" not in html and "mv-mark" not in html
 
 
 # ── Unified breadcrumb tests (2026-08-19) ────────────────────────────────────
@@ -5362,14 +5355,12 @@ def test_gene_atlas_dataset_popover_markup_present(client):
     assert 'tip-row' in resp.text, ".tip-row not in popover markup"
 
 
-def test_gene_atlas_sparkline_class_present(client):
-    """Minimal sparkline .ss class with .ss-tick must be defined and referenced."""
+def test_gene_atlas_stat_dots(client):
+    """Gene atlas stat cells use antDot via statDot(); the old .ss sparkline is gone."""
     resp = client.get("/genes/APOE")
     assert resp.status_code == 200
-    assert 'class="ss"' in resp.text or '.ss {' in resp.text or '.ss{' in resp.text, (
-        ".ss sparkline class not found in gene atlas page"
-    )
-    assert 'ss-tick' in resp.text, ".ss-tick element missing from sparkline definition"
+    assert "function statDot" in resp.text and "antDot.html" in resp.text
+    assert "ss-tick" not in resp.text and "sparkline(" not in resp.text
 
 
 def test_gene_atlas_url_hash_gv_scheme(client):
@@ -6150,9 +6141,8 @@ def test_module_view_peer_position_has_no_score_range_text(client):
     assert "(+g.min).toFixed(2) + '–' + (+g.max).toFixed(2)" not in html, (
         "min–max range text still emitted next to peer-position sparkline"
     )
-    # The sparkline marker itself must remain.
-    assert "mv-mark" in html
-    assert "mv-track" in html
+    # The dot itself must remain.
+    assert "antDot.html(pos" in html
 
 
 def test_module_view_merges_plot_and_umap_columns(client):

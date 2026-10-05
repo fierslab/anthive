@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import col_label %}
+{% from "_macros.html" import col_label, dot_scale %}
 
 {% block title %}{{ dataset_name }} — anthive{% endblock %}
 
@@ -523,41 +523,24 @@
 {# ── Genes tab ────────────────────────────────────────────────────────
    Precomputed favourites when the dataset defines them; otherwise a
    canonical curated panel keyed on cell type. Each gene: histogram +
-   embedding scatter icon + sparkline bars for %expr, rank expr, variability.
+   embedding scatter icon + dot scale bars for %expr, rank expr, variability.
    Always rendered when the dataset has genes (n_genes > 0); curated rows only
    when gene_panel.genes is non-empty; top-variable rows fetched by JS always. #}
 {% if info and info.n_genes %}
 <section class="tab-panel" id="tab-genes" role="tabpanel">
   <style>
-    /* ── Compact sparkline (.ss) ────────────────────────────────────────────
-       A 4-char-wide (32px) track: grey centre line + black tick marker.
-       Visual: --+--  where + is the value position.
-       Applied to gene stats (%expr, rank expr, variability).
-       The .mv-track class in _module_view.html is also aliased here. */
-    .ss {
-      position: relative; display: inline-block;
-      width: 32px; height: 12px; vertical-align: middle;
-      flex: none;
-    }
-    .ss::before {
-      /* horizontal grey centre line */
-      content: ''; position: absolute;
-      top: 50%; left: 0; right: 0; height: 1px;
-      background: #d1d5db; transform: translateY(-50%);
-    }
-    .ss .ss-mark {
-      position: absolute; top: 1px; bottom: 1px;
-      width: 2px; background: #111;
-      border-radius: 1px;
-      transform: translateX(-50%);
-    }
+    /* Gene stats use the sitewide big-dot scale (.dot-scale, base.html).
+       Colour mapping (position = value on its range, high = green):
+       % expressed = pct/100; rank expression = percentile rank of the mean
+       among all genes; variability = std / highest std in the table. */
+    td.g-pct-cell, td.g-rank-cell, td.g-var-cell { --dot-w: 48px; }
     td.g-pct-cell, td.g-rank-cell, td.g-var-cell, td.g-cov-cell { white-space: nowrap; }
     td.g-pct-cell .g-pct, td.g-rank-cell .g-rank, td.g-var-cell .g-var {
       display: inline-block; width: 4em; text-align: right;
       font-family: var(--font-mono); font-size: 11px; color: #555;
       margin-right: 4px; vertical-align: middle;
     }
-    /* CoV column: plain right-aligned number, no sparkline. */
+    /* CoV column: plain right-aligned number, no dot scale. */
     td.g-cov-cell { text-align: right; }
     td.g-cov-cell .g-cov {
       display: inline-block; font-family: var(--font-mono); font-size: 11px;
@@ -600,7 +583,7 @@
     #obs-tbl-genes tbody tr.gene-item.g-hidden { display: none; }
   </style>
   <h2 class="section-head">Genes
-    <span class="info" title="Click ▬ for a histogram of the gene's expression, or ◉ for an embedding scatter coloured by the gene. Sparklines show the gene's value relative to the db-wide range for that stat. Panel source: precomputed dataset favourites, or a canonical curated panel keyed on cell type (microglia / astrocyte / neuron).">ⓘ</span></h2>
+    <span class="info" title="Click ▬ for a histogram of the gene's expression, or ◉ for an embedding scatter coloured by the gene. Each dot sits at the gene's value on that statistic's range; red, amber and green mark the low, middle and high third. Panel source: precomputed dataset favourites, or a canonical curated panel keyed on cell type (microglia / astrocyte / neuron).">ⓘ</span></h2>
   <div class="tab-loading plot-loading" data-tab-loading="genes" style="min-height:60px;display:none">
     <span class="spinner-lg"></span>
     <span>loading gene stats…<br><span class="muted" style="font-size:12px">first view can take a few seconds; cached after that</span></span>
@@ -647,13 +630,13 @@
         {% endif %}
       </td>
       <td class="g-pct-cell">
-        <span class="g-pct"></span><span class="ss" data-stat="pct" title="% expressing cells"><span class="ss-mark" style="display:none"></span></span>
+        <span class="g-pct"></span>{{ dot_scale('pct', '% expressing cells') }}
       </td>
       <td class="g-rank-cell">
-        <span class="g-rank"></span><span class="ss" data-stat="rank" title="rank expression (db-wide percentile rank of mean)"><span class="ss-mark" style="display:none"></span></span>
+        <span class="g-rank"></span>{{ dot_scale('rank', 'rank expression (percentile rank of the mean among all genes)') }}
       </td>
       <td class="g-var-cell">
-        <span class="g-var"></span><span class="ss" data-stat="var" title="std across cells; shared-scale bar within the displayed panel"><span class="ss-mark" style="display:none"></span></span>
+        <span class="g-var"></span>{{ dot_scale('var', 'std across cells, scaled to the highest in the table') }}
       </td>
       <td class="g-cov-cell">
         <span class="g-cov"></span>
@@ -666,7 +649,7 @@
   <div class="muted" style="font-size:11px;margin-top:4px">
     Stats from <code>/gene_stats</code> (log-normalised expression layer).
     <b>rank expr</b> is the percentile rank of the gene's mean among all genes in the dataset.
-    <b>std</b> is the standard deviation of expression across cells; the bar shows its share of the panel-wide max.
+    <b>std</b> is the standard deviation of expression across cells; the dot shows its share of the panel-wide max.
     <b>CoV</b> is std / mean.
   </div>
 </section>
@@ -1352,15 +1335,6 @@ document.addEventListener('DOMContentLoaded', function() {
             update();
         })();
 
-        // ── Global compact sparkline helper (used by gene, num, cat sections) ──
-        // Sets the .ss-mark position (0–1 fraction) inside a .ss container.
-        function setSsMark(container, frac) {
-            var mark = container.querySelector('.ss-mark');
-            if (!mark) return;
-            var pct = Math.max(0, Math.min(1, frac)) * 100;
-            mark.style.left = pct.toFixed(1) + '%';
-            mark.style.display = '';
-        }
         function minMax(arr) {
             if (!arr.length) return { min: 0, max: 1 };
             var mn = arr[0], mx = arr[0];
@@ -1428,7 +1402,7 @@ document.addEventListener('DOMContentLoaded', function() {
                             if (plotsCell) plotsCell.innerHTML = '';
                         } else {
                             if (topCell && tops.length) {
-                                // Show top-3 categories with % text (no sparkline — visual overload).
+                                // Show top-3 categories with % text (no dot scale — visual overload).
                                 topCell.innerHTML = '<span class="cat-top">' + tops.slice(0, 3).map(function (t) {
                                     var val = (t.value != null ? t.value : t.name);
                                     var cnt = t.count, pct = t.pct;
@@ -1487,7 +1461,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
             });
 
-        // ── Genes tab: server-side search + sparklines + gene_stats + top-var ──
+        // ── Genes tab: server-side search + dot scales + gene_stats + top-var ──
         // Runs whenever the Genes tab is present (n_genes > 0), even when there
         // are no curated rows — top-var is always fetched genome-wide.
         (function () {
@@ -1585,9 +1559,9 @@ document.addEventListener('DOMContentLoaded', function() {
                           '<td class="g-flag-cell" style="text-align:center;font-size:13px;white-space:nowrap">' + _heartHtml(true) + '</td>'
                         + '<td class="colname">' + _g + '</td>'
                         + '<td class="obs-plots">' + _plotCell + '</td>'
-                        + '<td class="g-pct-cell"><span class="g-pct"></span><span class="ss" data-stat="pct" title="% expressing cells"><span class="ss-mark" style="display:none"></span></span></td>'
-                        + '<td class="g-rank-cell"><span class="g-rank"></span><span class="ss" data-stat="rank" title="rank expression (db-wide percentile rank of mean)"><span class="ss-mark" style="display:none"></span></span></td>'
-                        + '<td class="g-var-cell"><span class="g-var"></span><span class="ss" data-stat="var" title="std across cells; shared-scale bar within the displayed panel"><span class="ss-mark" style="display:none"></span></span></td>'
+                        + '<td class="g-pct-cell"><span class="g-pct"></span>' + antDot.html(null, { stat: 'pct', title: '% expressing cells' }) + '</td>'
+                        + '<td class="g-rank-cell"><span class="g-rank"></span>' + antDot.html(null, { stat: 'rank', title: 'rank expression (percentile rank of the mean among all genes)' }) + '</td>'
+                        + '<td class="g-var-cell"><span class="g-var"></span>' + antDot.html(null, { stat: 'var', title: 'std across cells, scaled to the highest in the table' }) + '</td>'
                         + '<td class="g-cov-cell"><span class="g-cov"></span></td>';
                     _favTbody.insertBefore(_row, _favInsertAnchor);
                 });
@@ -1607,28 +1581,33 @@ document.addEventListener('DOMContentLoaded', function() {
             var _gBase = '/browse/' + {{ folder_browse_id | tojson }} + '/' + {{ file_id | tojson }};
             var _defaultEmb = {{ default_embedding | tojson }};
 
-            // ── Sparkline helper for gene rows (pct / rank_mean / rank_std) ──
+            // ── Dot-scale helper for gene rows (pct / rank_mean / rank_std) ──
             // stdRankFrac is IGNORED (kept in the signature for old call sites);
-            // variability is now rendered by refreshVarSparklines() using a
+            // variability is now rendered by refreshVarDots() using a
             // single shared max across every currently displayed row, so the
             // curated batch and the top-var batch share one y-axis.
-            function setGeneSparklines(row, statsObj, stdRankFrac) {
+            function setGeneDots(row, statsObj, stdRankFrac) {
                 var pct = statsObj.pct_nonzero != null ? statsObj.pct_nonzero : null;
                 // pct track: 0-100 absolute
-                var pctTrack = row.querySelector('.ss[data-stat="pct"]');
-                if (pctTrack && pct != null) setSsMark(pctTrack, pct / 100);
+                var pctTrack = row.querySelector('.dot-scale[data-stat="pct"]');
+                if (pctTrack && pct != null) {
+                    antDot.set(pctTrack, pct / 100, { title: pct.toFixed(1) + '% of cells express this gene' });
+                }
                 // rank_mean: server returns 0-1 percentile rank among ALL genes
-                var rankTrack = row.querySelector('.ss[data-stat="rank"]');
-                if (rankTrack && statsObj.rank_mean != null) setSsMark(rankTrack, statsObj.rank_mean);
-                // variability sparkline is set by refreshVarSparklines() below.
+                var rankTrack = row.querySelector('.dot-scale[data-stat="rank"]');
+                if (rankTrack && statsObj.rank_mean != null) {
+                    antDot.set(rankTrack, statsObj.rank_mean,
+                        { title: 'mean expression ranks at the ' + (statsObj.rank_mean * 100).toFixed(0) + 'th percentile of all genes' });
+                }
+                // variability dot scale is set by refreshVarDots() below.
             }
 
             // Compute a shared std-max across every currently rendered row,
-            // then set every .ss[data-stat="var"] marker to std / maxStd. This
+            // then set every .dot-scale[data-stat="var"] dot to std / maxStd. This
             // is what makes the curated batch and the top-var batch share one
             // scale: whether a row came from curated or top-var (or a search),
             // it competes with every other row on the same axis.
-            function refreshVarSparklines() {
+            function refreshVarDots() {
                 var tbody = document.querySelector('#obs-tbl-genes tbody');
                 if (!tbody) return;
                 var allRows = Array.from(tbody.querySelectorAll('tr.gene-item'));
@@ -1640,12 +1619,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (!(maxStd > 0)) return;
                 allRows.forEach(function (row) {
                     var v = parseFloat(row.dataset.var);
-                    var varTrack = row.querySelector('.ss[data-stat="var"]');
+                    var varTrack = row.querySelector('.dot-scale[data-stat="var"]');
                     if (!varTrack) return;
                     if (isNaN(v)) return;
-                    setSsMark(varTrack, v / maxStd);
-                    varTrack.title = 'std ' + fnum(v)
-                        + ' (of max ' + fnum(maxStd) + ' in table)';
+                    antDot.set(varTrack, v / maxStd, { title: 'std ' + fnum(v)
+                        + ' (highest in table: ' + fnum(maxStd) + ')' });
                 });
             }
 
@@ -1654,7 +1632,7 @@ document.addEventListener('DOMContentLoaded', function() {
             // starHtml: raw HTML for the flag cell content. Empty for
             // non-curated non-favourite rows; a ♥ span if the gene is a personal
             // favourite; renderTopVar/runGeneSearch decide what to pass.
-            // stdRankFrac: 0-1 fraction for variability sparkline (null if unknown).
+            // stdRankFrac: 0-1 fraction for variability dot scale (null if unknown).
             function makeGeneRow(geneName, s, starHtml, stdRankFrac) {
                 var plotHtml = ''
                     + '<a class="obs-plot-icon" href="' + _gBase + '/plot/histogram?x=' + encodeURIComponent(geneName) + '" title="histogram">'
@@ -1674,11 +1652,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 var rankStr  = s && s.rank_mean != null ? (s.rank_mean * 100).toFixed(0) + '%' : '';
                 // std value in muted text (shared-scale bar does the panel-wide comparison).
                 var varStr   = s && s.std != null ? fnum(s.std) : '';
-                // CoV: plain number, 4 decimals, right-aligned; no sparkline.
+                // CoV: plain number, 4 decimals, right-aligned; no dot scale.
                 var covStr   = s && s.cv != null ? Number(s.cv).toFixed(4) : '';
-                var pctSpark  = '<span class="ss" data-stat="pct"  title="% expressing cells"><span class="ss-mark" style="display:none"></span></span>';
-                var rankSpark = '<span class="ss" data-stat="rank" title="rank expression (db-wide percentile rank of mean)"><span class="ss-mark" style="display:none"></span></span>';
-                var varSpark  = '<span class="ss" data-stat="var"  title="std across cells; shared-scale bar within the displayed panel"><span class="ss-mark" style="display:none"></span></span>';
+                var pctSpark  = antDot.html(null, { stat: 'pct',  title: '% expressing cells' });
+                var rankSpark = antDot.html(null, { stat: 'rank', title: 'rank expression (percentile rank of the mean among all genes)' });
+                var varSpark  = antDot.html(null, { stat: 'var',  title: 'std across cells, scaled to the highest in the table' });
                 var varFrac   = stdRankFrac != null ? stdRankFrac : null;
                 // data-pct/rank/var/cov hold numeric sort keys (empty = unknown, sorts last).
                 var dataPct  = s && s.pct_nonzero != null  ? ' data-pct="'  + s.pct_nonzero + '"' : ' data-pct=""';
@@ -1694,8 +1672,8 @@ document.addEventListener('DOMContentLoaded', function() {
                     + '<td class="g-var-cell"><span class="g-var">' + esc(varStr) + '</span>' + varSpark + '</td>'
                     + '<td class="g-cov-cell"><span class="g-cov">' + esc(covStr) + '</span></td>'
                     + '</tr>';
-                // Immediately position sparklines for cells we already know.
-                // (The DOM element doesn't exist yet — caller must call setGeneSparklines
+                // Immediately position dot scales for cells we already know.
+                // (The DOM element doesn't exist yet — caller must call setGeneDots
                 // after inserting the row. stdRankFrac stored on the row via data attr.)
                 return row;
             }
@@ -1719,7 +1697,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 return result;
             }
 
-            // Hydrate text + sparklines on rendered rows given a stats map + std-rank map.
+            // Hydrate text + dot scales on rendered rows given a stats map + std-rank map.
             // Also stamps data-pct / data-rank / data-var onto each row for sort.
             function hydrateRows(rowEls, byGene, stdRankMap) {
                 rowEls.forEach(function (row) {
@@ -1746,7 +1724,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         row.dataset.cov = String(s.cv);
                     }
                     var stdRankFrac = stdRankMap[(row.dataset.gene || '').toLowerCase()];
-                    setGeneSparklines(row, s, stdRankFrac != null ? stdRankFrac : null);
+                    setGeneDots(row, s, stdRankFrac != null ? stdRankFrac : null);
                 });
             }
 
@@ -1828,7 +1806,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 // Insert rows. makeGeneRow returns HTML for a <tr>; use a
                 // temporary tbody to parse and move nodes so we don't clobber
                 // curated rows already in place. The stdRankFrac argument to
-                // makeGeneRow is a no-op now (refreshVarSparklines does the
+                // makeGeneRow is a no-op now (refreshVarDots does the
                 // shared-max scaling once every row is in the DOM).
                 var frag = document.createElement('tbody');
                 frag.innerHTML = topVar.map(function (x) {
@@ -1845,11 +1823,11 @@ document.addEventListener('DOMContentLoaded', function() {
                     mainTbody.appendChild(tvRow);
                     var s = tvByGene[(tvRow.dataset.gene || '').toLowerCase()];
                     if (!s) return;
-                    setGeneSparklines(tvRow, s, null);
+                    setGeneDots(tvRow, s, null);
                 });
                 // Every insertion rebalances the shared-max variability axis
                 // over the full table so the two batches share one scale.
-                refreshVarSparklines();
+                refreshVarDots();
             }
 
             // Elapsed-timer helper for the Genes tab spinner. Reveals the
@@ -1938,10 +1916,10 @@ document.addEventListener('DOMContentLoaded', function() {
                         d.stats.forEach(function (s) { curatedByGene[s.gene.toLowerCase()] = s; });
 
                         // stdRankMap is a legacy input to hydrateRows; the
-                        // variability sparkline is set later by
-                        // refreshVarSparklines against a shared table-wide max.
+                        // variability dot scale is set later by
+                        // refreshVarDots against a shared table-wide max.
                         hydrateRows(rows, curatedByGene, {});
-                        refreshVarSparklines();
+                        refreshVarDots();
                         // Sort the table now that variability values are hydrated.
                         applySortToTable();
 
@@ -2150,11 +2128,11 @@ document.addEventListener('DOMContentLoaded', function() {
                                 var newRowEls = Array.from(genesTbody.querySelectorAll('tr.gene-item'))
                                     .filter(function (r) { return byG[(r.dataset.gene || '').toLowerCase()]; });
                                 hydrateRows(newRowEls, byG, {});
-                                // Rescale every variability sparkline against
+                                // Rescale every variability dot scale against
                                 // the new table-wide max (a low-variability
                                 // search hit will just shift the marker inward,
                                 // which is intentional and defensible).
-                                refreshVarSparklines();
+                                refreshVarDots();
                                 // Re-sort now that stats are populated (only if
                                 // the sort is on a numeric column).
                                 if (geneSortState.col !== 'gene' && geneSortState.col !== 'star') {

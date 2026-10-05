@@ -259,3 +259,9 @@
 {{ name }}
 {%- endif -%}
 {%- endmacro %}
+
+{# dot_scale(stat, title): empty big-dot placeholder (no dot until antDot.set
+   fills it). Same markup as window.antDot.html(null, ...) in base.html. #}
+{% macro dot_scale(stat, title) -%}
+<span class="dot-scale" role="img" data-stat="{{ stat }}" title="{{ title }}" aria-label="{{ title }}"><span class="dot-scale-dot"></span></span>
+{%- endmacro %}

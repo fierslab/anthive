@@ -30,6 +30,10 @@
             --border: #e2e5e8;
             --border-light: #f1f3f5;
             --hover: #f7f9fa;
+            --dot-track: #e2e5e8;           /* big-dot scale: light grey track */
+            --dot-red:   #d7263d;           /* big-dot scale: low third */
+            --dot-amber: #f4a300;           /* big-dot scale: middle third */
+            --dot-green: #2e9e44;           /* big-dot scale: high third */
             --accent-cream: #FFF3B0;        /* warning bg */
             --accent-amber: #E09F3E;        /* medium caveat */
             --accent-red:   #9E2A2B;        /* high caveat / unpublished */
@@ -621,6 +625,27 @@
         .chat-confirm .cc-yes:hover { background: #b91c1c; }
         .chat-confirm .cc-no { background: #f1f5f9; color: var(--text); }
         .chat-confirm .cc-no:hover { background: #e2e8f0; }
+        /* ── Big dot on a scale (.dot-scale) ─────────────────────────────────
+           The one sitewide mini-visualisation for "where does this value sit
+           in its range": a thin rounded grey track with one large solid dot.
+           Markup comes from window.antDot.html() (JS) or the dot_scale macro in
+           _macros.html (server-rendered placeholders). --p is the position 0..1;
+           the dot centre is inset by its radius so it is never clipped at the
+           ends. The 2px ring in the page background makes it look cut out of
+           the line. Colour = third of the range (data-tone red/amber/green);
+           position is the primary encoding. Width: set --dot-w on a parent. */
+        .dot-scale { --dot-d: 13px; position: relative; display: inline-block; flex: none;
+                     width: var(--dot-w, 56px); height: var(--dot-d); vertical-align: middle; }
+        .dot-scale::before { content: ''; position: absolute; left: 0; right: 0; top: 50%; height: 4px;
+                     transform: translateY(-50%); border-radius: 2px; background: var(--dot-track); }
+        .dot-scale .dot-scale-dot { position: absolute; top: 50%; width: var(--dot-d); height: var(--dot-d);
+                     border-radius: 50%; background: var(--dot-color, var(--dot-track)); box-shadow: 0 0 0 2px var(--bg);
+                     left: calc(var(--dot-d) / 2 + var(--p, 0.5) * (100% - var(--dot-d)));
+                     transform: translate(-50%, -50%); }
+        .dot-scale:not([data-tone]) .dot-scale-dot { display: none; }
+        .dot-scale[data-tone="red"]   { --dot-color: var(--dot-red); }
+        .dot-scale[data-tone="amber"] { --dot-color: var(--dot-amber); }
+        .dot-scale[data-tone="green"] { --dot-color: var(--dot-green); }
         /* Sitewide loading spinner (used by any page while a long fetch runs) */
         .plot-loading { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--text-muted); font-size: 15px; padding: 20px; }
         .plot-loading .spinner-lg { width: 36px; height: 36px; border: 4px solid #e5e7eb; border-top-color: var(--link); border-radius: 50%; animation: plspin 0.8s linear infinite; }
@@ -810,6 +835,41 @@
             return sel.value;
         }
     };
+    </script>
+    <script>
+    // Big dot on a scale: shared helper for every "value within its range" cell.
+    //   antDot.html(frac, {title, invert, stat})  -> markup string; frac null = empty placeholder
+    //   antDot.set(el, frac, {title, invert})     -> update an existing .dot-scale element
+    // frac is the value position in [0,1]. Colour thirds: <1/3 red, <2/3 amber,
+    // else green. invert=true flips them for metrics where LOW is the notable end.
+    // Every current metric (% expressed, rank expression, variability, peer
+    // position) has high = notable/green, so none passes invert today.
+    // title carries the exact value (tooltip + aria-label); position stays the
+    // primary encoding so colour is never the only signal.
+    window.antDot = (function () {
+        function clamp(frac) { return Math.max(0, Math.min(1, frac)); }
+        function tone(frac, invert) {
+            var pos = clamp(invert ? 1 - frac : frac);
+            return pos < 1 / 3 ? 'red' : (pos < 2 / 3 ? 'amber' : 'green');
+        }
+        function esc(text) { return String(text).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
+        function html(frac, opts) {
+            opts = opts || {};
+            var known = frac != null && !isNaN(frac);
+            var attrs = (opts.stat ? ' data-stat="' + esc(opts.stat) + '"' : '')
+                + (opts.title ? ' title="' + esc(opts.title) + '" aria-label="' + esc(opts.title) + '"' : '')
+                + (known ? ' data-tone="' + tone(frac, opts.invert) + '" style="--p:' + clamp(frac).toFixed(4) + '"' : '');
+            return '<span class="dot-scale" role="img"' + attrs + '><span class="dot-scale-dot"></span></span>';
+        }
+        function set(el, frac, opts) {
+            opts = opts || {};
+            if (!el || frac == null || isNaN(frac)) return;
+            el.dataset.tone = tone(frac, opts.invert);
+            el.style.setProperty('--p', clamp(frac).toFixed(4));
+            if (opts.title) { el.title = opts.title; el.setAttribute('aria-label', opts.title); }
+        }
+        return { tone: tone, html: html, set: set };
+    })();
     </script>
     <script>
     // User settings — persistent, per-browser (localStorage). Set on /settings.
