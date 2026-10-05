@@ -1533,7 +1533,10 @@ class DatabaseRegistry:
             'license':          ann.get('license'),
             'contributor':      ann.get('contributor'),
             'year':             ann.get('year') or file_metadata.get('year'),
-            'updated':          ann.get('updated'),           # ISO 8601 from .h5ad.mus
+            # .md `updated:` is bumped together with `version:` (dataset changelog);
+            # fall back to the .h5ad.mus annotation timestamp.
+            'updated':          (str(file_metadata['updated']) if file_metadata.get('updated')
+                                 else ann.get('updated')),
             'created':          ann.get('created'),           # ISO 8601 from .h5ad.mus
             'source':           ann.get('source'),            # internal | external
             'access':           ann.get('access'),            # internal | public
