@@ -1,0 +1,642 @@
+# Plan: dataset ingestion route (skill-guided curator uploads that publish themselves once server-side checks pass)
+
+Status: plan, 2026-10-05. It includes Mark's decisions sent mid-task:
+- The role is called `curators`.
+- A submission whose server-side checks pass is published automatically, with a "new, unreviewed" badge. Admins can retire it or send it back afterwards.
+- Anything marked controlled-access, or with an unknown licence, waits for an admin.
+- Builds run on a capped ingest worker, and S3 is the hub where each file is written once.
+
+
+---
+
+## 0. What exists today (reused)
+
+| Piece | Where | Note for this design |
+| --- | --- | --- |
+| Paper upload gating | `lib/config.py:get_library_upload_settings`, `bin/api/ant-serve:_require_uploader` (line ~14686), `bin/api/ant-mcp:_may_upload` / `UPLOAD_TOOLS`, `anthive.default.yaml:library_upload_groups`, site.yaml `library.upload_groups`, rendered by `bin/ops/ant-stack` line 417 | Copy this pattern exactly for `datasets_upload_groups`. Basic auth mode: `auth.admins` count as `admins`. |
+| Admin gating | `_require_admin`, `_require_admin_or_local` (accepts local tools and `X-Anthive-Internal` with no `Remote-User`) | The worker calls `/admin/release`, `/admin/restore` and `/admin/rescan` with the internal secret or the new worker token. |
+| Staged swap | `POST /admin/release/{db_id}`, `POST /admin/restore/{db_id}`, `POST /admin/rescan`, `lib/config.py:get_convert_staging_dir` (`ANTHIVE_CONVERT_STAGING_DIR`) | Already the writer protocol of ant-score and AnnotationWriter. |
+| Facet lint | `lib/facet_lint.py` (`lint_api`, `lint_api_data`, `lint_lineage`, `duckdb_reader`), `lib/md_check.py:check_md_folder(fix=...)`, `bin/meta/ant-md-check --no-fix --strict-namespace --with-data` | `--with-data` needs a `.duckdb`. `ant-md-check` **fixes by default** (writes ids), so always use `fix=False`. `md_check` **skips any path with a `_` folder part below the scanned root** (line 216): scan the submission's own folder, never `_incoming` from above it. |
+| Derive forms, donor keys | `lib/obs_derive_forms.py` (`validate_spec`, `crosswalk_for`, `translate_value`, `group_id_for_md`), `lib/donor_keys.py` (`donor_key_map`, `key_digest`, `distinct_count`) | The crosswalk is read only inside the worker. |
+| Annotation | `lib/mus.py` (`resolve_annotation`, `validate_annotation`, `required_fields`), `lib/_mus_vocab.yaml` | `access` vocabulary is only `internal | public`. `license` is a soft field with no vocabulary. Controlled-access needs a new field (section 9). |
+| Structure validator | `<store>/scripts/validate_md.py` (id / group_id rules) | Run as a subprocess when present. `md_check` covers the same rules. |
+| DuckDB integrity | `bin/ingest/ant-duckdb-check` (read-only without `--clean-wal`) | Reuse as a subprocess. |
+| **Never** | `bin/ingest/ant-h5ad-check`, and `bin/meta/ant-check`, which calls ant-h5ad-check as a subprocess | Both rewrite `.md` destructively. A test enforces this (section 14). |
+| Versioning | Already in store `.md`: `version: X.Y.Z` and a `changelog:` list of `{version, date, previous_sha256, changes}` | New datasets start at `1.0.0` with a first changelog entry. |
+| Store metadata | `/data/1/project/h5adstore` is a git repo (gitlab `bdslab/anthive/h5adstore`) | `.md`, `.h5ad.mus` and `index.md` are git-tracked. `ant-sync` never touches them and skips any path with a `_` folder part. |
+| Facet test thresholds | `bin/annot/ant-facet-test`: `MIN_DONORS_DATASET=6`, `MIN_DONORS_PER_LEVEL=3`, `BRAAK_MIN_DONORS=6`, `NUMERIC_MIN_DONORS_FOR_P=10`, `MIN_DONORS_FOR_AGE_PMI=15` | Move these to `lib/facet_rules.py` so ingest-check and the facet tests share one definition. |
+| Skills | `data/skills/skills/<name>/SKILL.md` (+ `reference/`), YAML `name` and `description`, numbered sections, "the server is right" rule, explicit 403/404/503 handling, no site addresses, no data | Follow `anthive-paper-upload` (structure and refusal handling) and `anthive-setup` (one step at a time, ask before changing anything). |
+
+---
+
+## 1. Goals and non-goals
+
+**Goals**
+1. A curator (group `curators`, or `admins`) gets a dataset from their laptop or HPC into Anthive without repo, shell or S3 credentials on the server.
+2. One public skill, `anthive-dataset-ingest`, knows every step and drives the curator in order. It explains every failed check and how to fix it.
+3. All checks run server-side in the ingest worker. A result reported by the client is never trusted. vark and the skill only drive the process.
+4. A pass is published automatically, defaulting to `access=internal` (login only), with a "new, unreviewed" badge. Admins review afterwards: they mark it reviewed, send it back or retire it.
+5. Exceptions wait for an admin: controlled-access data, an unknown licence, or admin-only findings.
+6. Each file is written once. S3 is the hub. The serving host stays read-only for the api, and CPU work runs in a capped worker.
+7. Versioning from day one: `version: 1.0.0`, and a changelog entry with `sha256`.
+8. P1 alone gives Mark a usable `ant ingest-check` on a local folder.
+
+**Non-goals**
+- No dataset data through the api process or MCP. Only small text (metadata, reports) goes through them.
+- No pre-publication review page. It was dropped in favour of the post-hoc list.
+- Curator-side conversion is out (section 6).
+- No editing of existing published datasets through this route in P1 to P4. New versions of existing datasets come in P5.
+- No exposure of `donor_crosswalk.tsv` contents, cohort aliases or donor identifiers to curators, the skill text or MCP.
+- No automatic entry into the counted facet-test cohort selection (`_facet_tests/cohort_selection*.tsv`). That stays an admin decision (section 16).
+
+---
+
+## 2. Architecture
+
+```
+ curator laptop / HPC                      S3 bucket (hub)                       production host
+ ----------------------                    ---------------                       -----------------------------------------
+ AI client + skill                          _incoming/<user>/<sid>/x.h5ad         caddy -> api (ant-serve)    [read-only tree]
+  anthive-dataset-ingest  --MCP (text)-->   (presigned multipart PUT)              |  submissions DB (state_dir/ingest/)
+  vark datasets ...       --REST (text)-->  ------------------------------->       |  presigns with scoped incoming key
+     |                                      <Group>/x.h5ad (server-side copy)      |  job queue (SQLite)
+     +--- multipart PUT parts --------------> (one write per artifact)             |
+                                            <Group>/x.duckdb, layer parquet  <-+   v
+                                            (pushed async by worker)           |  ingest-worker container (cgroup capped:
+                                                                               |   cpus, memory, 1 job, nice 19, ionice idle)
+                                                                               |   claim job  -> /internal/ingest/jobs/claim
+                                                                               |   pull h5ad from S3 once
+                                                                               |   ant ingest-check (profile, checks, scratch convert)
+                                                                               |   build: move into store, /admin/rescan,
+                                                                               |          release/restore for writers, scoring,
+                                                                               |          indexes, facet tests, git commit .md
+                                                                               +-- ant-sync push '<Group>/**' (throttled)
+                                                                                   h5adstore/<Group>/... (served locally)
+
+ optional overflow worker (HPC Apptainer, docker/anthive-ingest.def): same claim protocol, pulls from S3,
+ pushes outputs to S3, then the prod worker runs a "pull + rescan" job.
+```
+
+What runs where:
+
+| Side | Runs | Never runs |
+| --- | --- | --- |
+| Curator (skill + vark or pyvark) | prepare `.md` / `.h5ad.mus`, compute sha256 locally, multipart upload, read the obs profile and reports, propose facet mappings, literature lookup via the library MCP tools | any check that counts as authoritative; any access to the crosswalk |
+| api (ant-serve) | auth, submission records, state machine, presigning, small text payloads, queue, redacting reports | reading or parsing h5ad, converting, reading the crosswalk |
+| ingest worker | checksum verification, obs profiling, `ant ingest-check`, scratch and final convert, build steps, S3 copy and push, git commit | serving |
+| admin (web UI / API) | post-hoc list, mark reviewed, send back, retire, approve held submissions | |
+
+---
+
+## 3. Data model
+
+### 3.1 Staging layout
+
+| Location | Content | Who writes |
+| --- | --- | --- |
+| S3 `_incoming/<user>/<sid>/<basename>.h5ad` | the uploaded data (multipart) | curator via presigned URLs |
+| S3 `_incoming/<user>/<sid>/meta/` | not used: metadata lives in the submission record | |
+| `<h5adstore>/_incoming/<user>/<sid>/` | worker staging: `<Group>/index.md` (new group only), `<Group>/<basename>.{h5ad,md,h5ad.mus}`, scratch `.duckdb` and layer parquet, `reports/` | worker only |
+| `<scratch_dir>/ingest/<job_id>/` | DuckDB spill and `ANTHIVE_CONVERT_STAGING_DIR` | worker |
+| `<h5adstore>/_ingest_index/` | overlap indexes: `donors.parquet` and `cells/<db_key>.parquet` | worker (`ant ingest-index`) |
+
+The underscore keeps everything out of the catalogue scan (`ant-serve` line 1150), `ant-sync` (line 170), `md_check` and `catalog_manifest`. `<user>` is the `Remote-User`, sanitised to `[a-z0-9._-]`. `<sid>` is a ULID.
+
+### 3.2 Submission record
+
+Stored in `<state_dir>/ingest/submissions.sqlite`. The api owns it, and api `state_dir` is already read-write. Resolve it with a new `config.get_ingest_state_dir()` (key `ingest_state_dir`, env `ANTHIVE_INGEST_STATE_DIR`, default `<state_dir>/ingest`). Workers never open the file. They go through `/internal/ingest/*`, so remote workers work the same way.
+
+Tables:
+- `submissions(sid PK, user, group_name, group_id, basename, title, state, access, licence, controlled, created, updated, h5ad_sha256, h5ad_size, s3_key, upload_id, md_text, mus_text, index_md_text, md_hash, last_check_id, last_check_md_hash, db_id, version, unreviewed BOOL, held_reasons JSON, admin_comments JSON)`
+- `jobs(job_id PK, sid, kind ENUM(verify, profile, check, build, post, retire, pull_rescan), state ENUM(queued, running, done, failed, cancelled), worker_id, claimed_at, heartbeat_at, attempts, params JSON, result JSON, log_tail TEXT)`
+- `events(id, sid, ts, actor, action, detail JSON)`: the audit log. The same lines are also written to `<state_dir>/ingest/audit.jsonl`.
+- Reports: `<state_dir>/ingest/reports/<sid>/<check_id>.json` (full) and `<check_id>.curator.json` (redacted).
+
+Module: `lib/ingest_store.py`, with `SubmissionStore` (SQLite WAL, a single writer lock), `transition(sid, to, actor, detail)` that validates edges, `enqueue(kind, sid, params)`, and `claim(worker_id, capabilities)` (an atomic `UPDATE ... WHERE state='queued' ... RETURNING`).
+
+### 3.3 States
+
+```
+draft -> uploading -> verifying -> ready --(PUT metadata, POST check)--> checking
+checking -> needs_changes (errors)          -> (curator edits) -> checking
+checking -> passed
+passed --(POST submit)--> held      (controlled / licence unknown / admin-only findings)
+passed --(POST submit)--> building  (auto-publish allowed)
+held --(admin approve)--> building ; held --(admin send-back)--> needs_changes ; held --(admin reject)--> rejected
+building -> live (unreviewed=1) -> live (unreviewed=0, after admin "reviewed")
+building -> build_failed --(admin rerun)--> building
+live --(admin send-back)--> needs_changes (dataset set inactive) ; live --(admin retire)--> retired
+any non-final --(curator withdraw)--> withdrawn
+```
+
+Rules:
+- `submit` is refused unless `last_check_md_hash == md_hash`, i.e. the current metadata is the metadata that passed.
+- Retention: `draft`, `withdrawn` and `rejected` submissions older than `datasets_incoming_retention_days` are cleaned up. The worker aborts their multipart uploads and deletes `_incoming/` objects. An S3 lifecycle rule on `_incoming/` is the backstop.
+
+---
+
+## 4. API endpoints (ant-serve, REST 2.4x, tag `datasets-ingest`)
+
+Gate: `_require_curator(request)`, a copy of `_require_uploader` that reads `get_dataset_upload_settings()['upload_groups']`. Curators see only their own submissions; admins see all. When `services.dataset_upload` is off, every route answers 503 `{"status": "disabled"}`.
+
+| Method + path | Role | Payload -> answer |
+| --- | --- | --- |
+| `GET /datasets/ingest/requirements` | curator | -> `{uploads_enabled, max_upload_gb, part_mb, quota_gb_remaining, required_md_keys, required_mus_fields, facet_registry_url, replicate_units:[donor,animal,sample,none], disease_basis_values, access_values, check_ids:[...], min_skill_version, auto_publish, default_access}` |
+| `POST /datasets/ingest/submissions` | curator | `{group, basename, title, new_group:bool, file:{name,size,sha256}}` -> 201 `{sid, state:'draft'}`. Checks size vs limit and quota, filename via `h5ad_utils.validate_filename`, and group existence. |
+| `GET /datasets/ingest/submissions` | curator (own) / admin (`?user=&state=`) | -> list |
+| `GET /datasets/ingest/submissions/{sid}` | owner / admin | -> record without the texts, plus `next_actions` |
+| `POST /datasets/ingest/submissions/{sid}/upload` | owner | `{part_size}` -> `{upload_id, key, parts:[{n,url}], expires}`. Calls `CreateMultipartUpload` with `ChecksumAlgorithm=SHA256`, and presigns `UploadPart` URLs for the first N parts. State -> `uploading`. |
+| `POST /datasets/ingest/submissions/{sid}/upload/parts` | owner | `{from,to}` -> fresh presigned URLs (resume or expiry) |
+| `GET /datasets/ingest/submissions/{sid}/upload` | owner | -> `{parts_done:[{n,etag,size}]}` via `ListParts` (resume) |
+| `POST /datasets/ingest/submissions/{sid}/upload/complete` | owner | `{parts:[{n,etag,checksum_sha256}]}` -> `CompleteMultipartUpload`, enqueue `verify`. State -> `verifying`. |
+| `DELETE /datasets/ingest/submissions/{sid}/upload` | owner | abort the multipart upload |
+| `GET /datasets/ingest/submissions/{sid}/obs-profile` | owner / admin | -> the worker's profile: columns, dtype, n_unique, NA fraction, the top 30 values with counts, numeric min/max/quantiles, `candidate_facets` (from `facet_mapping.candidate_columns`), layers summary, var name sample |
+| `PUT /datasets/ingest/submissions/{sid}/metadata` | owner | `{md, mus, index_md?}` (text, 256 KB cap each) -> `{md_hash, static_findings}`. `static_findings` covers YAML parse, `facet_lint.lint_api` without data in strict namespace, and `mus.validate_annotation`. These are pure functions with no crosswalk and no data, so they are safe in the api. They are advisory only. |
+| `POST /datasets/ingest/submissions/{sid}/check` | owner | -> 202 `{job_id}`. State -> `checking`. |
+| `GET /datasets/ingest/submissions/{sid}/report` | owner (redacted) / admin (`?full=1`) | -> report JSON (section 8) |
+| `GET /datasets/ingest/submissions/{sid}/report.md` | owner / admin | -> human summary |
+| `POST /datasets/ingest/submissions/{sid}/submit` | owner | `{note}` -> `{state:'building'|'held', held_reasons}` |
+| `POST /datasets/ingest/submissions/{sid}/withdraw` | owner | -> `withdrawn` |
+| `GET /admin/ingest/submissions` | admin | `?state=&unreviewed=1&since=` -> list for the post-hoc page |
+| `POST /admin/ingest/submissions/{sid}/approve` | admin | `{comment}`: held -> building |
+| `POST /admin/ingest/submissions/{sid}/reviewed` | admin | `{comment}`: clears `unreviewed` |
+| `POST /admin/ingest/submissions/{sid}/send-back` | admin | `{comments:[{check_id?, text}]}`: held/live -> needs_changes. If live, enqueue `retire` with `mode=inactive`. |
+| `POST /admin/ingest/submissions/{sid}/retire` | admin | `{reason}` -> `retire` job (`ant inactive` semantics: drop from the API, keep files) |
+| `POST /admin/ingest/submissions/{sid}/reject` | admin | `{reason}` |
+| `POST /admin/ingest/submissions/{sid}/rerun` | admin | `{kind: check|build|post}` |
+| `POST /internal/ingest/jobs/claim` | worker token | `{worker_id, capabilities:{local_store:bool, max_cells, max_gb, kinds:[...]}}` -> job or 204 |
+| `POST /internal/ingest/jobs/{job_id}/heartbeat` | worker token | `{progress, log_tail}`. A job with no heartbeat for 10 min is requeued, at most 2 attempts. |
+| `POST /internal/ingest/jobs/{job_id}/finish` | worker token | `{state, result, report?}`. The api applies the state transition. |
+| `GET /internal/ingest/submissions/{sid}/payload` | worker token | -> md, mus and index_md texts, plus the S3 key |
+
+Worker auth: a new secret `<state_dir>/secrets/ingest_worker_token`, checked by `_require_ingest_worker`, a constant-time compare on header `X-Anthive-Ingest-Token`. Extend `_require_admin_or_local` to accept it too, so the worker can call `/admin/release`, `/admin/restore`, `/admin/rescan` and `/admin/refresh-views`.
+
+Presigning: `lib/ingest_s3.py` with `presign_parts()`, `complete()`, `list_parts()` and `abort()`, using boto3 and the **scoped incoming key** (section 11).
+
+Size limits: enforced at `POST /submissions` (declared size), at complete (sum of part sizes), and again in `verify` (actual object size).
+
+---
+
+## 5. Clients
+
+### vark (Go, `vark/internal/cli/datasets_ingest.go`, `vark/internal/api/ingest.go`)
+
+| Command | Does |
+| --- | --- |
+| `vark datasets requirements [--server S] [-o json]` | GET requirements |
+| `vark datasets upload FILE.h5ad --group G --basename B --title T [--new-group] [--part-mb 64] [--resume SID]` | local sha256 (streamed, progress), POST submission, multipart upload with 4 parallel parts, per-part retries, resume through `GET .../upload`, a state file `~/.cache/vark/uploads/<sid>.json`, then complete. Prints the sid. |
+| `vark datasets status [SID] [-o json]` | list or one submission |
+| `vark datasets profile SID [-o json]` | obs profile |
+| `vark datasets metadata SID --md B.md --mus B.h5ad.mus [--index index.md]` | PUT metadata, prints static findings |
+| `vark datasets check SID [--wait]` | trigger and poll until a report exists |
+| `vark datasets report SID [-o json|md]` | report |
+| `vark datasets submit SID [--note ...]` | submit |
+| `vark datasets withdraw SID` | withdraw |
+
+`vark server check` gains `curator: true|false` and `dataset_uploads_enabled`, mirroring `uploader` and `uploads_enabled` in `internal/cli/server_check.go`.
+
+### pyvark (`vark/client.py`)
+
+Methods: `get_dataset_ingest_requirements()`, `create_dataset_submission(...)`, `upload_dataset(path, group, basename, title, part_mb=64, resume=None, progress=True)`, `get_dataset_submission(sid)`, `get_obs_profile(sid)`, `put_dataset_metadata(sid, md, mus, index_md=None)`, `check_dataset(sid, wait=True, timeout=3600)`, `get_dataset_report(sid, fmt='json')`, `submit_dataset(sid, note=None)`. Tests go in `tests/test_ingest_offline.py` with mocked HTTP. vark and pyvark are read-only for this agent: hand both to their owners as a spec.
+
+---
+
+## 6. Where does the build run, and how much data moves
+
+Measured: `ant-convert` takes 4m43s on M22/PFC (172k cells) and 7m53s on RX4/ALL (433k cells). RX4/ALL produces a 223 MB `.duckdb` plus 7.0 GB X parquet and 4.7 GB counts parquet.
+
+Facet tests are measured from `_facet_tests/*/*manifest.json`: 124 runs, 2,220 s in total (median about 18 s), maximum 241 s (Lee2026 PsychAD).
+
+Estimates, to be measured in P1 on RX4/ALL and recorded in this doc:
+
+| Step | Estimate for 400k cells |
+| --- | --- |
+| ant-score over the default geneset collections | 10 to 40 min. scanpy `score_genes` per geneset; it scales with geneset count. |
+| ucell / aucell (if enabled) | 20 to 60 min (the heaviest) |
+| gene stats and variance precompute | 5 to 15 min |
+| module variability | 5 to 20 min |
+| facet tests (gene + modules) | 1 to 5 min |
+| DE pseudobulk (optional) | 1 to 10 min |
+
+Downstream steps are 2x to 6x the convert time, so they dominate. They must not run in the api and must be capped.
+
+Let H be the h5ad size and D the derived files (duckdb + parquet, roughly 1x to 1.5x H).
+
+| Option | Transfers | Host CPU used | Latency to visible | Notes |
+| --- | --- | --- | --- | --- |
+| A. Dev box today (manual) | curator -> dev (H), dev -> S3 (H + D), S3 -> prod (H + D): 3 hops, 2H + 2D through networks | dev (Mark dislikes) | hours, manual | data hops twice; human in the loop |
+| **B. Worker on the prod host, cgroup capped (recommended)** | curator -> S3 (H, needed anyway as the archive), S3 -> prod (H once), outputs written in place in the serving store (0 hops), prod -> S3 push of D (once, async, throttled for backup and mirrors). The final h5ad key is an S3 server-side `CopyObject` from `_incoming/` (no bytes through a host). | prod, capped: `cpus` (for example 4 of N), `mem_limit` (for example 48g), one job at a time, `nice 19`, `ionice -c3`, `blkio_config.weight: 100` | convert minutes after submit; downstream after that | every artifact is written once; no dev box |
+| C. HPC worker (Apptainer, `docker/anthive-ingest.def`) | curator -> S3 (H), S3 -> HPC (H), HPC -> S3 (D), S3 -> prod (D): 4 transfers, H + 2D more than B | HPC | queue wait plus transfers | good overflow for >1.5M cells or when the prod host is busy; same claim protocol |
+| D. Curator-side conversion | curator -> S3 (H + D, and D is larger than H for big datasets) | curator | | rejected: checks must run server-side, tool version skew, curator needs the full anthive env, results not trustworthy |
+| E. Serve directly from S3 (httpfs) instead of local copies | no S3 -> prod copy, but every query reads remote | none | | rejected for primary serving: the catalogue scan is known to be slow with remote objects (DEPLOY_CONTAINERS troubleshooting: "`up` waits ... scanning a large, mostly remote catalogue"), plus remote latency on every expression read. Acceptable only on mirror sites with `s3.api_access: read`. |
+
+**Recommendation: B, with C as overflow through the same queue.** Jobs carry `n_obs` and the size from the profile. A worker claims a build only when they fit its `capabilities` (`datasets_worker_local_max_cells`, default 1,500,000; `..._local_max_gb`, default 60). Bigger jobs wait for a worker with `local_store: false` (HPC). That worker writes its outputs to S3. A small `pull_rescan` job then runs on the prod worker: `ant sync pull --include-duckdb '<Group>/<basename>*'`, then the rescan.
+
+The api stays read-only on the tree. Only the ingest worker mounts `data_rw`, as the one-off ingest container does today.
+
+Two-stage visibility on B, so curators are not kept waiting:
+- Stage 1: convert, move into the store, rescan. The dataset becomes visible with the "new, unreviewed" badge and a "processing" note.
+- Stage 2: scoring, indexes, facet tests and DE each refill the dataset under release/restore. When stage 2 is done, the note clears.
+
+---
+
+## 7. MCP tools (`bin/api/ant-mcp`)
+
+`INGEST_TOOLS` are visible only to `curators` and `admins` while `dataset_uploads_enabled`, using the same visibility filter as `UPLOAD_TOOLS`. All are thin wrappers over REST; ant-serve enforces the rules again.
+
+| Tool | Role | Notes |
+| --- | --- | --- |
+| `dataset_ingest_requirements()` | curator | |
+| `list_dataset_submissions()` | curator (own) | |
+| `dataset_submission_status(sid)` | curator | includes `next_actions` |
+| `dataset_obs_profile(sid)` | curator | value counts of the curator's own dataset; never crosswalk content |
+| `put_dataset_metadata(sid, md, mus, index_md=None)` | curator | text only, size-capped |
+| `check_dataset_submission(sid)` | curator | enqueues; poll with status |
+| `dataset_submission_report(sid)` | curator | redacted report |
+| `submit_dataset(sid, note)` | curator | |
+
+No upload tool: data never goes through MCP. The skill always uses vark or pyvark for the h5ad.
+
+No admin tools (approve, reviewed, send-back, retire, reject). Admin actions are UI and API only, for an audit trail tied to a browser session. Literature help uses the existing library tools (the anthive-literature tool set). A source paper is added through the existing paper-upload flow, with `anthive_role: source`.
+
+---
+
+## 8. `ant ingest-check`
+
+### 8.1 Tool and package
+
+- CLI: `bin/ingest/ant-ingest-check` (a uv script like its neighbours), registered in `bin/ant` `command_descriptions` as `'ingest-check': 'Check a dataset submission before publication (read-only, JSON report)'`.
+- Usage: `ant ingest-check <GROUP_DIR | file.h5ad> [--store PATH] [--json OUT] [--md-summary OUT] [--profile-only] [--no-convert] [--duckdb PATH] [--audience curator|admin] [--checks id,id] [--skip id]`
+- Library: `lib/ingest_check/` with these modules:
+  - `__init__.py`: registry of `Check(id, family, severity_default, fn)`
+  - `context.py`: `CheckContext` with paths, the md and mus dicts, a lazy h5ad handle (`anndata.read_h5ad(backed='r')`), a lazy duckdb reader, store root, group_id, crosswalk access and `redact()`
+  - `report.py`: JSON schema, md renderer, redaction
+  - `profile.py`
+  - `checks_files.py`, `checks_meta.py`, `checks_layers.py`, `checks_facets.py`, `checks_donors.py`, `checks_cells.py`, `checks_design.py`, `checks_access.py`
+- Read-only on its input. If no `.duckdb` is given, it runs `ant-convert` on a **scratch copy**: it symlinks the h5ad into `<tmp>/<Group>/`, copies the `.md`, and runs with `ANTHIVE_CONVERT_STAGING_DIR=<scratch>`, so the curator's folder is never touched. The scratch convert is cached by `(h5ad_sha256, convert-relevant md keys)`, so metadata-only edits re-run the views (`ant refresh-views` logic) and not the convert.
+- Guard: the package must never import or invoke `ant-h5ad-check`, `ant-check`, or `md_check` with `fix=True`.
+- Exit code: 0 for pass (no errors), 1 for errors, 2 for a tool failure.
+
+### 8.2 Report JSON (`schema: anthive.ingest_check/1`)
+
+```json
+{"schema":"anthive.ingest_check/1","tool_version":"<anthive __version__>","created":"...",
+ "dataset":{"group":"...","basename":"...","sha256":"...","n_obs":0,"n_vars":0},
+ "result":"pass|fail","publish":"auto|held","held_reasons":["controlled_access","licence_unknown"],
+ "counts":{"error":0,"warning":0,"info":0},
+ "checks":[{"id":"facets.unmapped_values","status":"pass|fail|warn|skip","severity":"error",
+            "summary":"...","details":{...},"fix":"... how to fix ...","docs":"skill reference anchor"}],
+ "admin_detail":{...}}
+```
+
+`admin_detail` holds cohort names, matched dataset ids and demographic match tables. It is stripped in the curator view. Identifiers never appear in either view: donor keys appear only as `key_digest`.
+
+### 8.3 Checks
+
+| id | Input | Method (reuse) | Fail rule (error) / warn |
+| --- | --- | --- | --- |
+| `files.sha256` | h5ad, declared sha256 | `checksum.calculate_sha256` (the worker already did this in `verify`) | mismatch = error |
+| `files.size` | object size | config limits | over the limit = error |
+| `files.filename` | basename | `h5ad_utils.validate_filename` | invalid = error |
+| `h5ad.structure` | h5ad | `h5ad_utils.validate_structure`, `get_h5ad_info` | unreadable or missing X/obs/var = error |
+| `meta.md_parse` | `.md` | `metadata.parse_md_file` | parse error = error |
+| `meta.catalog` | staging folder | `md_check.check_md_folder(folder, fix=False, store=<store>)` and `<store>/scripts/validate_md.py` as a subprocess when present | id or group_id invalid or duplicate = error |
+| `meta.required_keys` | `.md` | key list from requirements (title, description of at least 200 characters, version, changelog, replicate_unit, disease_basis, access-related keys) | missing = error |
+| `meta.index_md` | `<Group>/index.md` | new group: `group:`, `group_id` (3 chars, unique in the store via `md_check.collect_db_ids`), doi or `paper_title`, year, authors, `default_dataset`; existing group: group matches | error |
+| `mus.vocab` | `.h5ad.mus` and cascade | `mus.resolve_annotation`, `mus.validate_annotation`, `mus.required_fields()` | a required field missing or not in the vocabulary = error; soft field missing = warn |
+| `layers.counts` | h5ad layers | sample 2,000 cells (seed 0); a layer is counts if all sampled values are non-negative integers (`layer_stats.calculate_layer_statistics`) | no counts layer = error unless `.md` has `counts_unavailable: <reason>` (then warn) |
+| `layers.x_lognorm` | X | sampled: non-integer, max below 20, `expm1(X)` row sums with CV below 0.1, or a declared `normalisation:` | X looks raw or scaled (negative values, z-scores) = error |
+| `layers.consistency` | X vs counts | `log1p(counts/rowsum*1e4)` vs X on 1,000 cells: median r at least 0.99 (the method of the Aldinger changelog) | below 0.95 = error; 0.95 to 0.99 = warn |
+| `genes.ids` | var_names, var columns | share of var_names found in the gene universe of `gene_stats_index.parquet` for the organism; Ensembl-like names (`ENSG`, `ENSMUSG`) as the index = error (symbols required, Ensembl in `ensg_id`); duplicated var_names = error | below 70% known = error; 70% to 90% = warn |
+| `duckdb.integrity` | scratch duckdb | `bin/ingest/ant-duckdb-check <db>` (no `--clean-wal`) | non-zero exit = error |
+| `facets.namespace` | `.md api` | `facet_lint.lint_api(api, namespace_mode='strict')` | unregistered `ant_*` = error; deprecated = warn |
+| `facets.mapping_static` | `.md api` | `lint_api`: rename chains, dtype vs kind, vocabulary, `ant_braak_group` rule | error findings = error |
+| `facets.mapping_data` | api + duckdb | `facet_lint.lint_api_data` via `duckdb_reader` | missing source column or unmapped non-NULL values = error |
+| `facets.unmapped_values` | obs profile + api | every value of every source column of `obs_rename`/`obs_derive` is mapped, renamed, hidden or default-covered (`facet_mapping.translate_observed`) | any unmapped value = error, listing the values |
+| `facets.braak_range` | `ant_braak` values | whole numbers 0 to 6 (`facet_lint.parse_braak_label`) | outside = error |
+| `facets.core_present` | api | human or mouse tissue: `ant_donor` (or `ant_sample`), `ant_sex`, `ant_disease` mapped or `obs_constant`; AD-related: `ant_braak` or an explicit `braak_unavailable` | missing = warn (error for `ant_donor` when replicate_unit is donor) |
+| `donor.uid_form` | `api.obs_derive.ant_donor_uid` | `obs_derive_forms.validate_spec`; template or join | missing = error for human donor datasets; malformed = error |
+| `donor.uid_resolves` | join form + crosswalk (worker only) | `crosswalk_for` + `translate_value` over the distinct donor values | cohort unknown = error; more than 20% of values falling to the fallback = warn (admin_detail lists which, the curator view only counts) |
+| `donor.overlap_ids` | new donor keys vs `_ingest_index/donors.parquet` | `donor_keys.donor_key_map` -> `key_digest` set; intersect per existing dataset | 1 or more shared uids without `is_secondary`/`reanalysis_of`/`donor_group`/`facet_donor_exclusions` = error; with a designation = info |
+| `donor.overlap_demographics` | per-donor (sex, age, APOE genotype, Braak, PMI) vs index | candidate if sex, APOE and Braak are equal, age within 1 year (90+ treated as censored-equal) and PMI within 1 h; per existing cohort, the fraction of new donors with exactly one candidate | at least 50% matched to one cohort without a designation = **held** (admin), not a curator error; 20% to 50% = warn. Counts only to the curator; the matched cohort and dataset go to admin_detail. |
+| `cells.overlap` | hashed `(normalised barcode, donor key)` vs `_ingest_index/cells/*.parquet` | barcode normalisation strips `-1`, sample prefixes and suffixes; xxhash64; per existing dataset, the fraction of new cells found | at least 95% of new and existing cells match = "same cells": error with fix "use the merge path (new version of <db_id>)"; at least 50% of new cells inside one dataset = reanalysis: error unless `is_secondary: true` and `reanalysis_of: <db_id>` |
+| `design.designation` | `is_secondary`, `reanalysis_of`, `donor_group` | `facet_lint.lint_lineage` | error findings = error |
+| `design.replicate_unit` | `replicate_unit`, `replicate_column` | the value is in `donor|animal|sample|none`; the column exists, and its values nest within donor (or animal) | error |
+| `design.replicates_per_group` | replicate column × each core facet | `lib/facet_rules.py` thresholds: at least 6 units in total, at least 3 per facet level | below = warn (dataset still useful, facet tests skip it); `replicate_unit: none` = info |
+| `design.disease_basis` | `disease_basis` | present and in the vocabulary (set by the other agent's work) | missing = error |
+| `version.initial` | `version`, `changelog` | new dataset: `version == 1.0.0`, one changelog entry with `version`, `date`, `sha256 == h5ad sha256`, `changes` | error |
+| `access.level` | mus `access` | `internal` or `public` | missing = error; `public` = held unless `datasets_auto_publish_public: true` |
+| `access.controlled` | new mus/md field `data_use: open|controlled` (section 9), plus cohort hints from the crosswalk (worker) | | `controlled` = held; join-form cohort flagged controlled in the crosswalk while `data_use: open` = held |
+| `access.licence` | mus `license` | SPDX-like id (CC-BY-4.0, CC0-1.0, ...) or `in-house` | missing or `unknown` = held |
+
+`publish` is `auto` only when there are no errors and no held reasons.
+
+### 8.4 Overlap indexes: `bin/ingest/ant-ingest-index`
+
+`ant ingest-index build [--store PATH] [--only DB]` writes:
+- `<store>/_ingest_index/donors.parquet`: `db_key, group_id, key_digest, sex, age, apoe, braak, pmi`. Digests only, never raw uids.
+- `<store>/_ingest_index/cells/<db_key>.parquet`: `xxh64(barcode_norm|donor_key_digest)`.
+
+The build is incremental, keyed on the duckdb mtime and sha. It reads the `ant_*` views read-only. The worker refreshes the index after every build. The files sit under `_` and so never go to S3 or the API, but they contain quasi-identifiers: they get the same file permissions as the crosswalk.
+
+---
+
+## 9. Metadata additions (coordinate with the agents doing replicate_unit and disease_basis)
+
+- `.md`: `replicate_unit`, `replicate_column` (other agent), `disease_basis` (other agent), `counts_unavailable` (optional reason), `normalisation` (optional), `ingest: {sid, curator, submitted, check_report_sha256}` (written by the worker).
+- `.h5ad.mus`: `data_use=open|controlled`, a new soft field. It needs a mus vocabulary change upstream (codeberg mfiers/mus) and a refresh of `lib/_mus_vocab.yaml`. `license` stays free text but is checked by `access.licence`.
+- `lib/obscol_tags_vocab.yaml`: no change.
+- The crosswalk gets an optional column `controlled` per cohort. This is private: the file is controlled-access, so the change is invisible to the public skill.
+
+---
+
+## 10. The skill: `data/skills/skills/anthive-dataset-ingest/`
+
+Files:
+- `SKILL.md`
+- `reference/md-template.md` (annotated dataset `.md` with api block, designation, replicate keys, version 1.0.0, changelog)
+- `reference/mus-template.md`
+- `reference/facet-mapping.md` (the forms, with worked examples of `obs_rename`, `obs_value_rename`, `obs_value_hidden`, `obs_derive` map/template/join, `obs_constant`, `obs_hidden`)
+- `reference/checks.md` (one entry per check id: what it means, typical causes, how to fix, when to ask an admin)
+- `reference/designation.md` (primary vs secondary, reanalysis_of, donor_group, merge path)
+
+Update `data/skills/README.md`, add the zip to `scripts/build_zips.py`, and update the "anthive-basics -> next skill" pointer.
+
+### SKILL.md outline
+
+Front matter:
+- `name: anthive-dataset-ingest`
+- description: "Prepare, check and submit a single-cell dataset (.h5ad) for Anthive: upload with vark, describe it (.md catalogue entry, .h5ad.mus annotation, facet mapping, donor ids, design), run the server checks, fix what fails, and submit. For Anthive admins and curators; for everyone else it prepares the files to send to an admin. Requires access to an Anthive server and the vark CLI."
+
+Sections:
+
+0. **Rights and server.** `dataset_ingest_requirements` / `vark datasets requirements`, and `vark server check` (`curator`, `dataset_uploads_enabled`).
+   - 403: only curators may add datasets here. Offer to prepare the files for an admin, with no workarounds.
+   - 404: the server is too old.
+   - 503 `disabled`: ask the operator.
+   - "When the server differs from this skill, the server is right."
+1. **Ground rules (always).**
+   - Never print, guess or ask for donor identifiers of other cohorts or crosswalk contents.
+   - Never upload through MCP.
+   - Never edit server files.
+   - Never skip a failed check or argue it away. Fix it, or explain why an admin must decide.
+   - Never mark data `open` or `public` without the user confirming the licence and consent.
+   - Ask before each upload or submit.
+   - Visibility: `internal` means everyone who can log in to this site.
+2. **Gather.** Paper (DOI), file location, organism and tissue, who generated it, licence and data use agreement, whether it reuses donors or cells of a published cohort, and the target group (existing collection or new).
+3. **Upload.** `vark datasets upload ... --resume`. Explain the sid, how to resume, and the quota. Wait for the `ready` state (verify + profile).
+4. **Read the profile and the paper.** `dataset_obs_profile`; literature search for the methods (library tools; if the paper is missing, propose `anthive-paper-upload` with role `source`).
+5. **Describe: catalogue `.md`.** Title, description from the paper (no invention), `version: 1.0.0`, changelog with sha256, `replicate_unit` / `replicate_column`, `disease_basis`.
+6. **Describe: `.h5ad.mus`.** The seven required fields, soft fields, `access` (default internal), `license`, `data_use`.
+7. **Facet mapping.**
+   - Propose `obs_rename` / `obs_derive` per column from the profile's `candidate_facets` and the paper.
+   - Show a table of column -> facet -> value map and get confirmation.
+   - Every value must be mapped, hidden or defaulted.
+   - Braak as integers 0 to 6.
+   - `ant_donor_uid`: the template form `'{group_id}:{value}'` by default. When the paper says the donors come from a named cohort, say that an admin-held crosswalk may join them, use the join form with the cohort name the server's requirements list, and let the check report resolution counts.
+8. **Designation.** Primary vs `is_secondary`, `reanalysis_of`, `donor_group`. If the curator says it is the same cells as an existing dataset, explain the merge path.
+9. **Stage and check.**
+   - `put_dataset_metadata`, then read the `static_findings`.
+   - `check_dataset_submission`; poll `dataset_submission_status` every 30 to 60 s, with the expected duration from requirements.
+   - `dataset_submission_report`.
+10. **Fix loop.**
+    - For each failing check id: look up `reference/checks.md`, explain it in plain words, propose a concrete edit, apply it after an OK, and re-check.
+    - At most 5 rounds, then suggest contacting an admin with the report link.
+    - Data-level failures cannot be fixed by metadata. Say that a new h5ad upload is needed (new submission) and how to produce it, for example adding raw counts.
+11. **Submit.** Summarise what will happen:
+    - auto-publish as internal with a "new, unreviewed" badge, or held, and why;
+    - the curator can withdraw before the build;
+    - admins may send it back later.
+    Then `submit_dataset`.
+12. **After.** Report the sid, state and dataset id once live. Track stage 2 (scoring and facet tests) via status. Post-publication fixes go as a new version (P5).
+
+Failure handling table: one row per HTTP answer (401, 403, 404, 409 duplicate group or basename, 413 size or quota, 422 invalid metadata, 503 disabled, 5xx retry with back-off at most 3 times). Plus vark exit codes (resume instructions).
+
+Must never: anything that bypasses section 1, contacting S3 directly, putting identifiers in the `.md` description, claiming the dataset is checked before the server report says pass, or editing an existing published dataset through this route.
+
+---
+
+## 11. Security
+
+- **Roles:**
+  - `curators` (Authelia group, set in `datasets.upload_groups`): own submissions only.
+  - `admins`: everything.
+  - The worker token covers `/internal/ingest/*` and the admin release, restore and rescan endpoints only.
+  - Basic auth mode: `auth.admins` count as admins.
+  - `auth.mode: none` disables the feature.
+- **S3:**
+  - The api gets a **scoped incoming key**: `secrets/s3_incoming_access_key_id` and `secrets/s3_incoming_secret_access_key`. Its policy allows only `PutObject`, `CreateMultipartUpload`, `UploadPart`, `CompleteMultipartUpload`, `AbortMultipartUpload` and `ListMultipartUploadParts` on `<bucket>/_incoming/*`. It is mounted into the api only when `services.dataset_upload: true`.
+  - The presigned URL TTL is `datasets_upload_url_ttl_minutes`, default 60.
+  - The key prefix comes from the server (`_incoming/<user>/<sid>/`), never from the client.
+  - Fallback when the provider cannot scope keys: `s3.api_access: write`, with an `ant-stack check` warning.
+- **No data through the api or MCP:** only text up to 256 KB per field, and reports. Enforced by request size limits on those routes.
+- **Controlled access:**
+  - The crosswalk and `_ingest_index/` live only in the store and are read only by the worker.
+  - Reports carry digests or counts in the curator view and names in `admin_detail` only.
+  - Controlled or licence-unknown data is never auto-published.
+  - The public skill holds no cohort aliases, no site addresses and no file paths of private files.
+- **Quotas:** `datasets_upload_quota_gb_per_user` (sum of live and pending incoming bytes), `datasets_upload_max_open_per_user`, and a per-site `datasets_upload_max_gb`.
+- **Audit:** every transition, presign, metadata PUT, admin action and worker job goes to `events` and to `audit.jsonl`, with actor, ip (from Caddy), sid and the sha256 of payloads. Git commits of `.md` name the curator as author and anthive as committer (the library pattern).
+- **Untrusted inputs:**
+  - The h5ad is opened in the worker only, under cgroup limits with no network except the api and S3.
+  - YAML is loaded with `safe_load`.
+  - The md/mus texts are written to disk by the worker under fixed names.
+  - The basename and group are validated against `[A-Za-z0-9._-]` (path traversal).
+
+---
+
+## 12. Config keys
+
+`anthive.default.yaml` (flat, like `library_*`), read by `lib/config.py:get_dataset_upload_settings()`:
+
+```yaml
+# Dataset ingestion by curators (doc/DESIGN_dataset_ingestion.md).
+datasets_upload_groups: [admins]
+datasets_upload_max_gb: 50
+datasets_upload_part_mb: 64
+datasets_upload_url_ttl_minutes: 60
+datasets_upload_quota_gb_per_user: 200
+datasets_upload_max_open_per_user: 3
+datasets_incoming_prefix: _incoming
+datasets_incoming_retention_days: 30
+datasets_auto_publish: true          # pass -> live with an unreviewed badge
+datasets_auto_publish_public: false  # access=public always waits for an admin
+datasets_default_access: internal
+datasets_post_steps: [score, gene_stats, gene_variance, module_variability, facet_test, facet_test_modules]
+datasets_score_collections: []       # genesetstore experiments scored on ingest (empty: the site defaults)
+datasets_de_pseudobulk: false
+datasets_store_git_commit: true
+datasets_store_git_push: false
+datasets_worker_local_max_cells: 1500000
+datasets_worker_local_max_gb: 60
+ingest_state_dir: ''                 # default <state_dir>/ingest; env ANTHIVE_INGEST_STATE_DIR
+```
+
+`site.example.yaml` (rendered by `ant-stack` into the three configs):
+
+```yaml
+services:
+  dataset_upload: false   # curators upload datasets (needs s3 + the incoming key)
+  ingest_worker: false    # long-running worker container on this host
+datasets:
+  upload_groups: [admins, curators]
+  max_upload_gb: 50
+  quota_gb_per_user: 200
+  auto_publish: true
+  retention_days: 30
+  post_steps: [score, gene_stats, gene_variance, module_variability, facet_test, facet_test_modules]
+ingest_worker:
+  cpus: 4
+  memory: 48g
+  io_weight: 100          # blkio weight 10..1000
+  nice: 19
+  local_max_cells: 1500000
+```
+
+`ant-stack` changes (`bin/ops/ant-stack`):
+- Render the `ingest-worker` service: ingest image, `command: ant ingest-worker --api http://api:8080`, `cpus`, `mem_limit`, `blkio_config.weight`, `restart: unless-stopped`, volumes `data_rw + scratch + config_mount('ingest') + secrets/ingest_worker_token:ro`.
+- Mount the incoming key into the api only when `dataset_upload` is on.
+- `ant-stack init` generates `ingest_worker_token`.
+- New `_check_datasets(site)`:
+  - PROBLEM: `dataset_upload` without `s3.enabled` or without the incoming key files.
+  - PROBLEM: `ingest_worker` with `data.readonly`.
+  - WARNING: `dataset_upload` without `ingest_worker` (nothing will run the checks unless a remote worker is set up).
+  - WARNING: `cpus` at or above the host cores minus 2, or `memory` above half the host RAM.
+  - WARNING: `upload_groups` naming a group absent from the Authelia users file.
+  - WARNING: `auto_publish_public: true`.
+- Add `_check_secret_permissions` coverage for the new secrets.
+
+`doc/DEPLOY_CONTAINERS.md`:
+- New "Let curators add datasets" under Everyday tasks.
+- Rows in the site.yaml keys table and the "Who sees which secret" table (api: incoming key; ingest-worker: worker token + full S3 keys).
+- The diagram gets the worker.
+- A "What changed" release row.
+
+`doc/CONFIG.md`: the flat keys. `doc/HPC.md`: running `ant ingest-worker --remote` under Slurm (`docker/slurm-ingest.example.sh` variant).
+
+Rule kept: nothing hard-codes repo paths for runtime writes. Every path comes from config or env (`get_ingest_state_dir`, `get_convert_staging_dir`, scratch).
+
+---
+
+## 13. Build worker: `bin/ingest/ant-ingest-worker`
+
+- Loop: `claim` -> run the job in a subprocess with `nice`/`ionice` -> heartbeat every 30 s -> `finish`. `--once` for tests and Slurm, `--remote` (no local store: writes to S3), and `--kinds`.
+- Job `verify`: stream the S3 object -> sha256 -> compare -> size. Then enqueue `profile`.
+- Job `profile`: download to `<store>/_incoming/<user>/<sid>/<Group>/` (local) or scratch (remote) -> `ant ingest-check --profile-only`. The api stores the profile. State -> `ready`.
+- Job `check`: write the md/mus/index texts into staging -> `ant ingest-check --json --md-summary --store <store>` (scratch convert cached) -> finish with the report.
+- Job `build`, local stage 1:
+  1. Fill the catalogue fields non-destructively with `lib/ingest_md_fill.py:fill_catalog_fields(md, h5ad)`. It sets sha256, n_obs, layer_stats and obsnum/obscat defaults using `h5ad_utils` and `layer_stats`, only where the curator left them unset. It writes the `ingest:` block.
+  2. Final convert, or reuse the cached scratch convert when the h5ad sha and the convert-relevant keys match, then refresh views.
+  3. `ant-duckdb-check`.
+  4. Atomic rename of the set into `<store>/<Group>/`. New dataset: `POST /admin/rescan`. Existing db_id (P5): `/admin/release` -> swap -> `/admin/restore`.
+  5. S3 `CopyObject` from `_incoming/...h5ad` to `<Group>/<basename>.h5ad`, then delete the incoming object.
+  6. `git commit` of `.md` / `.mus` / `index.md` in the store checkout, author = curator.
+  7. State -> `live` (unreviewed).
+- Job `post`, stage 2: for each `datasets_post_steps` entry, wrap writers in release/restore as ant-score does today: `ant score <db> <collections>`, `ant-gene-stats-precompute`, `ant-gene-variance-precompute`, `ant-module-variability`, `ant-facet-test <db>`, `ant-facet-test-modules <db>` (results uncounted until an admin adds the dataset to the cohort selection), and optionally `ant-de-pseudobulk`. Then `ant-ingest-index build --only <db>`, `ant-sync push '<Group>/<basename>*'` throttled, and a final `/admin/rescan`. A failure in one step is recorded and the rest continue; it is shown as a warning on the admin list.
+- Job `retire`: `ant inactive <db_id>` semantics, then rescan, then a git commit.
+- Job `pull_rescan` (after a remote build): `ant sync pull --include-duckdb '<Group>/<basename>*'`, then rescan.
+- Antomaton vs a simple queue: use the api-owned SQLite queue with a polling worker. It has no new dependency and works for HPC through HTTP, and the job vocabulary is small. Antomaton (codeberg.org/mfiers/antomaton) can later replace the worker as a client of the same `/internal/ingest/jobs` protocol. Its design note was not found in Basic Memory, so it was not evaluated. Open decision D3.
+
+---
+
+## 14. Web UI and admin page
+
+- `web/templates/admin_ingest.html` + `web/browser.py:admin_ingest_view` (pattern of `admin_feedback_view` / `admin_mcp_links_view`, `_is_admin`), route `/admin/ingest`. It shows:
+  - recent auto-ingests and held submissions: user, dataset link, state, check summary, build and post-step status, age;
+  - actions: Mark reviewed, Send back (comment box, prefilled per failing check), Retire, Approve (held), Reject, Rerun;
+  - a full report viewer with `admin_detail`.
+- `dataset.html` and the catalogue list get a "new, unreviewed" badge (`unreviewed` from the submission joined through the `ingest.sid` in `.md`), plus a "processing" note during stage 2.
+- `web/templates/account_ingest.html` at `/account/ingest`: the curator's own submissions, state, report (redacted) and a withdraw button. A link from the user menu, shown to curators only.
+- Help: a `help.html` section "Adding a dataset" pointing to the skill and vark. `api_guide.html` gets the vark datasets commands.
+
+---
+
+## 15. Tests
+
+- `tests/test_ingest_check_layers.py`: synthetic small AnnData. Counts present or absent; X raw, scaled or lognorm; consistency.
+- `tests/test_ingest_check_facets.py`: unmapped values, Braak out of range, strict namespace, mapping_data against a tiny duckdb built with ant-convert in tmp.
+- `tests/test_ingest_check_donors.py`: template vs join forms with a fixture crosswalk in tmp (never the real one), digest-only overlap, demographic matcher thresholds, redaction (no raw uid in the curator JSON, enforced with a regex scan).
+- `tests/test_ingest_check_cells.py`: barcode normalisation, same-cells / subset / disjoint classification.
+- `tests/test_ingest_check_no_destructive.py`: greps `lib/ingest_check/` and `bin/ingest/ant-ingest-check` for `h5ad-check`, `ant-check` and `fix=True`; runs the check on a folder and asserts every file mtime and hash is unchanged.
+- `tests/test_ingest_store.py`: every legal and illegal state transition, the claim race (two threads), heartbeat requeue, retention.
+- `tests/test_ingest_api.py`: FastAPI TestClient as in `test_library_upload.py` / `test_mcp_links.py`. Group gating (curator, admin, other: 403; basic mode), own-only listing, size and quota 413, submit refused on a stale md_hash, held reasons, worker token. S3 is mocked with `moto` (add as a test dependency) for multipart presign, complete and abort.
+- `tests/test_ingest_worker.py`: `--once` with a fake api and local store. Build stage 1 moves files and calls rescan; release/restore are called around writers.
+- `tests/test_deploy_config.py` / `tests/test_ant_stack_hardening.py`: worker service rendering, cgroup keys, secret mounts (the incoming key only in the api, only when enabled), the new `check` problems and warnings.
+- `tests/test_mcp_ingest_tools.py`: visibility of `INGEST_TOOLS` by group and enabled flag.
+- `tests/test_ingest_md_fill.py`: never overwrites curator keys.
+- Skills repo: a lint in `scripts/build_zips.py` that fails on site URLs, `donor_crosswalk` content patterns, and em-dashes.
+- End to end (manual, documented in `doc/CHECK_PROCESS.md`): ingest RX4/ALL into a throwaway store with `bin/ops/ant-stack` on a test site; time each step and update the section 6 table.
+
+---
+
+## 16. Docs
+
+- New: `doc/DESIGN_dataset_ingestion.md` (this file), and `doc/DATASET_INGESTION.md` (operator and curator guide: states, what each check means, mirroring the skill's `reference/checks.md`).
+- Updated:
+  - `doc/REST_API_SPEC.md` and `doc/API_CHANGELOG.md` (new endpoints)
+  - `doc/MCP_CLIENTS.md` (tools)
+  - `doc/DEPLOY_CONTAINERS.md`, `doc/CONFIG.md`, `doc/HPC.md`
+  - `doc/CHECK_TOOLS.md` (ant ingest-check and a warning that ant-check calls ant-h5ad-check)
+  - `doc/H5AD_INGESTION_SPEC.md` (link)
+  - `bin/ingest/CLAUDE.md`, `bin/ops/CLAUDE.md`, `lib/CLAUDE.md`
+  - the web help page
+  - the skills `README.md` table
+
+---
+
+## 17. Phases
+
+| Phase | Content | Size | Depends on |
+| --- | --- | --- | --- |
+| **P1: ant ingest-check, manual** | `lib/ingest_check/*`, `bin/ingest/ant-ingest-check`, `bin/ingest/ant-ingest-index`, `lib/facet_rules.py` (shared thresholds), `lib/ingest_md_fill.py`, scratch convert cache, JSON + md report, tests in section 15 (checks, no-destructive). Mark runs `ant ingest-check /path/Group --store /data/1/project/h5adstore --json r.json`. Measure the downstream step times. | L | replicate_unit and disease_basis keys landing (stub the checks as `skip` until then) |
+| **P2: skill** | `anthive-dataset-ingest` SKILL.md + references, written against P1 check ids. Usable at first in "prepare files for an admin" mode (curator sends the folder, Mark runs P1). | M | P1 check ids frozen |
+| **P3: upload + roles + checks server-side** | config keys, `get_dataset_upload_settings`, `_require_curator`, `lib/ingest_store.py`, `lib/ingest_s3.py`, curator endpoints, `ingest-worker` with `verify`/`profile`/`check`, MCP `INGEST_TOOLS`, ant-stack render + check, incoming key, vark and pyvark commands (spec handed to their owners), `/account/ingest`, DEPLOY docs | L | P1; scoped S3 key from the bucket owner |
+| **P4: auto-publish + build + post-hoc admin** | `build`/`post`/`retire`/`pull_rescan` jobs, release/restore integration, git commit, S3 copy and push, `/admin/ingest` page, badges, admin endpoints, held flow, HPC remote worker mode | L | P3 |
+| **P5: versions** | Submissions against an existing db_id: semver bump rules (patch for metadata, minor for new layers or annotation, major for different cells), a changelog entry with `previous_sha256`, the merge path for "same cells", release/swap/restore, and version history shown on the dataset page | M | P4 |
+
+---
+
+## 18. Risks
+
+- **Prod host contention:** the cgroup caps bound CPU and memory, but IO on a shared disk can still hurt serving. Mitigations: `ionice -c3`, blkio weight, a `quiet_hours` option for stage 2, the HPC overflow, and monitoring with `/metrics`.
+- **anndata memory:** `read_h5ad` of a large file can exceed the cap. The OOM kill stays inside the worker. Size routing goes to HPC; use backed mode where the code allows.
+- **Auto-published bad biology:** checks are structural, not semantic. Mitigations: the unreviewed badge, internal-only by default, quick retire, and no counted facet-test cohort entry without an admin.
+- **Crosswalk leakage** through reports or the profile: the redaction tests, digest-only indexes, and an admin_detail split.
+- **Overlap false positives and negatives:** demographic matching is heuristic, so it holds rather than fails. Barcode normalisation varies by pipeline. Keep thresholds in config and log the outcomes to tune them.
+- **ant-check confusion:** someone reuses `ant-check` and the `.md` is rewritten. The guard test and the docs cover this.
+- **md_check underscore skip:** checking from above `_incoming` silently checks nothing. Always pass the group folder as the root, and test it.
+- **S3 provider** may not support scoped keys or `x-amz-checksum-sha256`. The fallback is worker-side sha256 (always done anyway) and `api_access: write` with a warning.
+- **Git conflicts** in the store checkout when Mark edits the same files by hand: the worker commits only its own files and `pull --rebase`s before committing. On conflict the state becomes `build_failed` with a clear message.
+- **Two agents adding keys in parallel** (replicate_unit, disease_basis): P1 stubs them; sync the vocabularies before P2.
+
+---
+
+## 19. Open decisions for Mark
+
+- **D1 Role name:** `curators` (decided).
+- **D2 Auto-approval:** decided as auto-publish on pass for internal access. Open: should trusted in-house curators also auto-publish `access=public` (`datasets_auto_publish_public`), or should public always wait for an admin (proposed default: wait)?
+- **D3 Build runner:** a simple api-owned queue plus polling worker (proposed), or antomaton now. Antomaton's design note was not found in Basic Memory, so it was not compared.
+- **D4 Quotas:** per-user quota (200 GB proposed), max upload (50 GB), open submissions (3), incoming retention (30 days).
+- **D5 Post steps on ingest:** which score collections, whether ucell/aucell run (expensive), whether DE pseudobulk runs by default (proposed: off).
+- **D6 Missing raw counts:** a hard error, or allowed with `counts_unavailable` (proposed: allowed with a reason, shown on the dataset page).
+- **D7 Controlled flag source:** a new mus field `data_use` (upstream vocabulary change), the crosswalk `controlled` column, or both (proposed: both).
+- **D8 Store git push:** worker commits locally and Mark pushes (proposed), or a deploy key with auto-push.
+- **D9 Send-back of a live dataset:** set it inactive immediately (proposed), or leave it visible with a warning until fixed.
+
+### Critical Files for Implementation
+- /data/1/users/mark/anthive4/bin/api/ant-serve (`_require_uploader` ~14686 as the gating template, `_require_admin_or_local`, `/admin/release` / `/admin/restore` / `/admin/rescan` ~11878-12139)
+- /data/1/users/mark/anthive4/lib/md_check.py and /data/1/users/mark/anthive4/lib/facet_lint.py (check reuse; `fix=False`; underscore skip at line 216)
+- /data/1/users/mark/anthive4/lib/config.py (`get_library_upload_settings` pattern, `get_state_dir`, `get_convert_staging_dir`)
+- /data/1/users/mark/anthive4/bin/ops/ant-stack (site.yaml rendering line ~417, container roles and volumes ~646-652, `_check_s3`, secret mounts)
+- /data/1/users/mark/anthive4/data/skills/skills/anthive-paper-upload/SKILL.md (skill structure and refusal conventions)
+- Also: /data/1/users/mark/anthive4/bin/api/ant-mcp (`UPLOAD_TOOLS` visibility ~109-127), /data/1/users/mark/anthive4/lib/obs_derive_forms.py, /data/1/users/mark/anthive4/lib/donor_keys.py, /data/1/users/mark/anthive4/bin/annot/ant-facet-test (thresholds lines 93-99), /data/1/users/mark/anthive4/doc/DEPLOY_CONTAINERS.md, /data/1/users/mark/anthive4/vark/internal/cli/papers_upload.go and /data/1/users/mark/pyvark/vark/client.py (`upload_paper` ~2379) for the client patterns.
+
+### Implementation notes
+- Three gotchas found while reading the code:
+  - `bin/meta/ant-check` calls `ant-h5ad-check` as a subprocess, so it is destructive too and must never be used, not just ant-h5ad-check.
+  - `ant-md-check` writes ids unless you pass `--no-fix`.
+  - `lib/md_check.py` silently skips folders whose path below the scan root starts with `_`.
+- The mus `access` vocabulary only has `internal` and `public`. Controlled access needs a new field (D7).
+- The api has no S3 keys by default (`s3.api_access: none`, 2.41.0), so presigning needs the scoped incoming key in section 11.
+- I could not find the antomaton design in Basic Memory.
+- The downstream build-step times in section 6 are estimates, except convert and facet tests, which are measured. P1 should measure the rest.
