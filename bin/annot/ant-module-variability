@@ -81,6 +81,7 @@ from metadata import parse_md_file                                 # type: ignor
 import cell_level_scope                                            # type: ignore
 import mus                                                         # type: ignore
 from scores_parquet import scores_path                             # type: ignore
+import replicates                                                  # type: ignore  # noqa: E402
 from canonical_columns import (                                    # type: ignore
     CANONICAL_TAGS as _CANONICAL_TAG_IDS,
     NUMERICAL_TAGS as _NUMERICAL_TAG_IDS,
@@ -108,6 +109,11 @@ OUTPUT_COLUMNS = (
     'dataset', 'source', 'catalog', 'module', 'tag_column', 'tag',
     'statistic', 'value', 'n_cells', 'n_categories',
 )
+
+#: Added to the aggregate (not to the per-pair cache): the replicate unit of
+#: the dataset (``lib/replicates.py``). These numbers are per-cell and stay
+#: descriptive; the API marks them ``per-cell (descriptive)``.
+REPLICATE_COLUMN = 'replicate_unit'
 
 
 # ---------------------------------------------------------------------------
@@ -917,6 +923,7 @@ def _concat_and_write(
     out_path: Path,
     cache_files: list[Path],
     keep_tags: Optional[set[str]],
+    replicate_of: Optional[dict[str, str]] = None,
 ) -> tuple[int, int]:
     """Concatenate the given cache parquets into the aggregate output.
 
@@ -932,6 +939,8 @@ def _concat_and_write(
             aggregate to the requested datasets, matching legacy
             semantics.
         keep_tags: Optional whitelist of ``tag`` values.
+        replicate_of: ``{db_id: replicate_unit}`` written as the
+            ``replicate_unit`` column (``unresolved`` for a dataset not in it).
 
     Returns:
         Tuple ``(n_rows, n_datasets)`` in the aggregate. ``(0, 0)`` if
@@ -945,11 +954,11 @@ def _concat_and_write(
         # Write an empty parquet with the canonical schema — downstream
         # readers should never see "file missing" vs "no rows" as two
         # distinct states.
-        empty = pd.DataFrame({col: [] for col in OUTPUT_COLUMNS}).astype({
+        empty = pd.DataFrame({col: [] for col in (*OUTPUT_COLUMNS, REPLICATE_COLUMN)}).astype({
             'dataset': 'object', 'source': 'object', 'catalog': 'object',
             'module': 'object', 'tag_column': 'object', 'tag': 'object',
             'statistic': 'object', 'value': 'float64',
-            'n_cells': 'int64', 'n_categories': 'int64',
+            'n_cells': 'int64', 'n_categories': 'int64', REPLICATE_COLUMN: 'object',
         })
         empty.to_parquet(tmp, engine='pyarrow', compression='zstd')
         os.replace(tmp, out_path)
@@ -958,16 +967,21 @@ def _concat_and_write(
     conn = duckdb.connect(':memory:')
     try:
         file_list = [str(path) for path in cache_files]
-        select_cols = ', '.join(OUTPUT_COLUMNS)
+        select_cols = ', '.join(f'c.{col}' for col in OUTPUT_COLUMNS)
         where_clause = ''
         params: list = [file_list]
         if keep_tags is not None:
             placeholders = ', '.join(['?'] * len(keep_tags))
-            where_clause = f'WHERE tag IN ({placeholders})'
+            where_clause = f'WHERE c.tag IN ({placeholders})'
             params.extend(sorted(keep_tags))
+        replicate_frame = pd.DataFrame(
+            sorted((replicate_of or {}).items()), columns=['dataset', REPLICATE_COLUMN])
+        conn.register('replicate_units', replicate_frame)
         conn.execute(
-            f"COPY (SELECT {select_cols} "
-            f"      FROM read_parquet(?, union_by_name=true) "
+            f"COPY (SELECT {select_cols}, "
+            f"             COALESCE(r.{REPLICATE_COLUMN}, 'unresolved') AS {REPLICATE_COLUMN} "
+            f"      FROM read_parquet(?, union_by_name=true) c "
+            f"      LEFT JOIN replicate_units r ON r.dataset = c.dataset "
             f"      {where_clause}) "
             f"TO '{tmp}' (FORMAT PARQUET, COMPRESSION ZSTD)",
             params,
@@ -1179,7 +1193,9 @@ def main() -> int:
     cache_files = [
         job.cache_path for job in jobs if job.cache_path.exists()
     ]
-    n_rows, n_datasets = _concat_and_write(root, out, cache_files, keep_tags)
+    replicate_of = {inputs.db_id: replicates.dataset_replicate_unit(inputs.md_path, inputs.duckdb_path, root)
+                    for inputs in dataset_snapshot}
+    n_rows, n_datasets = _concat_and_write(root, out, cache_files, keep_tags, replicate_of)
     print(
         f'wrote {n_rows:,} rows across {n_datasets} dataset(s) → {out}',
         file=sys.stderr,

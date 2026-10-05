@@ -483,9 +483,13 @@ def test_choose_strata_rules():
         'ant_author_cluster': ['c1', 'c2', 'c1', 'c2', 'c1', 'c2'],
     })
     membership, note = aft.choose_strata(high_res, {'cell_type_high_resolution': 'VARCHAR'})
-    assert set(membership['source']) == {'cell_type_high_resolution'}
-    assert set(membership['label']) == {'Mic P2RY12', 'T cells', 'CAMs', 'Mic TPT1'}     # NULL label dropped
-    assert 'cell_type_high_resolution' in note
+    # the two Mic labels are one group: a derived whole-microglia pool stratum is added
+    assert set(membership['source']) == {'cell_type_high_resolution', 'group_pool'}
+    own = membership[membership['source'] == 'cell_type_high_resolution']
+    assert set(own['label']) == {'Mic P2RY12', 'T cells', 'CAMs', 'Mic TPT1'}     # NULL label dropped
+    pooled = membership[membership['source'] == 'group_pool']
+    assert set(pooled['label']) == {'microglia'} and sorted(pooled['pos']) == [0, 1, 4]
+    assert 'cell_type_high_resolution' in note and 'group pool' in note
     for name in ('cell_type_high_resolution', 'author_cell_type_low_resolution', 'cell_type_fine', 'celltype_major'):
         assert aft.CELLTYPE_CANDIDATE_RE.match(name), name
     for name in ('cell_type_ontology_term_id', 'seurat_idents', 'sample'):

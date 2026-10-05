@@ -312,7 +312,8 @@ def _write_results(root: Path, db_id: str, donors: Optional[List[str]], q_value:
     folder.mkdir(parents=True, exist_ok=True)
     pd.DataFrame([{'facet': 'sex', 'cell_type': 'microglial cell', 'celltype_source': 'ant_cell_type',
                    'gene': 'GENE1', 'logFC': 0.5, 'ci_low': 0.4, 'ci_high': 0.6, 'p_value': q_value / 2,
-                   'q_value': q_value, 'n_donors': len(donors or ['x'] * 3), 'descriptive_only': False,
+                   'q_value': q_value, 'p_treat': q_value ** 2, 'q_treat': q_value,
+                   'n_donors': len(donors or ['x'] * 3), 'descriptive_only': False,
                    'n_lt5': False}]).to_parquet(folder / f'{stem}.facet_tests.parquet')
     unit = {'facet': 'sex', 'cell_type': 'microglial cell', 'celltype_source': 'ant_cell_type', 'status': 'ok',
             'n_donors_analysed': len(donors or ['x'] * 3), 'n_genes_tested': 1, 'n_sig_q05': 1,

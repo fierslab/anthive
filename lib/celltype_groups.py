@@ -53,6 +53,8 @@ def group_of(label: Any) -> str:
     folded = table['_folded'].get(text.casefold())
     if folded is not None:
         return folded
+    if text in (table.get('groups') or {}):
+        return text  # a group name labels its own pooled stratum (ant-facet-test group_pool)
     for prefix, group in table['_prefixes']:
         if text.startswith(prefix):
             return group

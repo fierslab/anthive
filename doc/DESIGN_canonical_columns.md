@@ -373,3 +373,42 @@ edited by the data job):
 > Value maps are still accepted but no longer written. Datasets whose donors
 > span several cohorts keep a value map until the join form takes more than
 > one cohort.
+
+## Update 2026-10-05: `replicate_unit`, `replicate_column`, `disease_basis`
+
+Three catalog keys of the dataset `.md` (top level, not `ant_*` obs columns) say what the
+facet statistics may treat as independent and what `ant_disease` means.
+
+| Key | Values | Role |
+| --- | --- | --- |
+| `replicate_unit` | `donor`, `animal`, `sample`, `none` | the independent replicate of the dataset. `none`: no replicate structure, nothing is tested between replicates (cell-level, descriptive only) |
+| `replicate_column` | an obs column of the served view | identifies the replicate (`ant_donor` for the human cohorts, `hash.ID` / `Mouse_ID` / `mouse.id` for xenografts). `ant-md-check` errors when the column is not an obs column (stored or written by the `api:` section) and warns when `replicate_unit` is missing |
+| `disease_basis` | `nia_reagan`, `braak_cerad`, `adnc`, `clinical_dx`, `author_dx` | what `ant_disease` is based on. Cross-cohort replication of the disease facet only combines the pathology-based values |
+
+Inference when `replicate_unit` is not declared (`lib/replicates.py`, served with
+`replicate_basis: inferred`): human data with `ant_donor` is `donor` / `ant_donor`; mouse or
+xenograft data with an animal id column (hash.ID, Mouse_ID, mouse.id, animal, ...) is `animal`.
+In a xenograft `ant_donor` names the human donor line, not the replicate, so it is never used
+as the animal; otherwise `none`. `bin/meta/ant-set-replicate` wrote the keys for all
+datasets; its `DECISIONS` table holds the hand-checked xenograft, mouse, in vitro and bulk
+entries, and the datasets it could not decide are `none` (listed in the 2026-10-05 report:
+AZ5/NST, B26/SOT, F26 summary tables, G24/MEx and PEx, H25/HNO, L24/*, PM4/*, P26/MMA, SF9/CMR,
+Si5/SSI, S26/DUN, TW5/CMA, V25/*, Z25/*).
+
+`disease_basis: braak_cerad` is the common pathology definition: AD = Braak stage III or
+higher and CERAD probable or definite; control = Braak II or lower and CERAD none or sparse;
+every other combination (PART-like or amyloid-only donors, missing values, reference donors)
+is NULL. It is declared in the `.md` as `disease_derivation` (rule, stored column
+`disease_braak_cerad`, Braak and CERAD source columns with value maps; `lib/disease_rule.py`)
+and applied by `bin/annot/ant-derive-disease`, which writes the stored column
+(`AnnotationWriter`) and edits the mapping so `ant_disease` is renamed from it. Applied to
+SEA-AD (G24, 14 files), ROSMAP (M23 x3, GF4, MY4, Z20; RADC `ceradsc` 3 = possible = sparse),
+MADRC WA4 (6 files) and Prater (P23). Everything else keeps its own labels with
+`disease_basis: author_dx` (MADRC astrocytes SP4 carry the NPDX1 neuropathologic diagnosis and
+no CERAD). `clinical_dx` is reserved for datasets whose label is documented as an ante-mortem
+clinical diagnosis (none verified yet). The ADNC facet `ant_adnc` is unchanged.
+
+SEA-AD microglia (G24/MMG, G24/PMG): `ant_cell_type` is derived from the `Supertype` column
+(microglia = the Micro-PVM_2, _2_1, _2_3, _3, _4 supertypes; Micro-PVM_1, Lymphocyte and Monocyte
+are their own strata), so the microglia stratum no longer carries about 4 percent putative
+perivascular macrophages.

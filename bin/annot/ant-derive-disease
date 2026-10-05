@@ -1,0 +1,301 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "duckdb>=1.0.0",
+#   "pandas>=2.0.0",
+#   "numpy>=1.24.0",
+#   "pyyaml>=6.0",
+#   "requests",
+# ]
+# ///
+"""ant-derive-disease: the common pathology-based ant_disease and its disease_basis.
+
+What it does
+------------
+``ant_disease`` means different things across studies. For the datasets that carry
+both a Braak stage and a CERAD score this tool applies one definition
+(``lib/disease_rule.py``): AD = Braak >= III and CERAD probable or definite;
+control = Braak <= II and CERAD none or sparse; everything else NULL. Per dataset
+(table ``DERIVATIONS`` below, source columns and value maps checked by hand):
+
+1. writes the stored categorical obs column ``disease_braak_cerad`` (AD / control / NULL)
+   through ``AnnotationWriter`` (pending column, ant-serve release / restore);
+2. edits the dataset .md (verified text edit, ``lib/md_edit.py``): the old ``ant_disease``
+   source is dropped, ``obs_rename`` publishes the new column as ``ant_disease``,
+   ``disease_derivation`` records the rule and source columns, ``disease_basis: braak_cerad``,
+   ``facet_notes.disease`` and the caveat text, ``obscat_include``, patch version bump,
+   changelog;
+3. every other dataset that publishes ``ant_disease`` gets ``disease_basis: author_dx``
+   (the author's own labels). Lee2026 is left to the Lee2026 job.
+
+Afterwards rebuild the views (``bin/ops/ant-rebuild-obs-views --only <db_id>``) and push
+the changed .duckdb files (``bin/ops/ant-sync push '<Collection>/**' --no-library``).
+
+Usage::
+
+  ant-derive-disease plan  [--db-id A,B]      # counts per label, no write
+  ant-derive-disease apply [--db-id A,B] [--no-data] [--no-md] [--no-coordinate] [--api-url URL]
+
+Inputs: .md, .duckdb (stored Braak and CERAD columns). Outputs: the new stored column in the
+.duckdb and the edited .md. Never prints donor identifiers (counts only).
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import secrets
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import duckdb
+import pandas as pd
+
+script_dir = Path(__file__).resolve().parent
+sys.path.insert(0, str(script_dir.parent.parent / 'lib'))
+
+import disease_rule  # type: ignore  # noqa: E402
+import md_edit  # type: ignore  # noqa: E402
+import metadata  # type: ignore  # noqa: E402
+from anthive_db import AnnotationWriter, AnnotationWriterError  # type: ignore  # noqa: E402
+from h5adstore import iter_h5adstore  # type: ignore  # noqa: E402
+
+COLUMN = 'disease_braak_cerad'
+SKIP_GROUPS = {'Lee2026'}               # handled by the Lee2026 job
+AUTHOR_NOTE_OVERRIDES = {
+    'SP4': 'NPDX1 neuropathologic diagnosis (ADNC vs control, no grade); CERAD is not in the dataset',
+}
+
+RADC_CERAD = {1: 'definite', 2: 'probable', 3: 'sparse', 4: 'none'}   # ceradsc: 3 = possible = sparse
+SEAAD_BRAAK = {'Braak 0': 0, 'Braak I': 1, 'Braak II': 2, 'Braak III': 3, 'Braak IV': 4, 'Braak V': 5,
+               'Braak VI': 6, 'Reference': None}
+SEAAD_CERAD = {'Absent': 'none', 'Sparse': 'sparse', 'Moderate': 'probable', 'Frequent': 'definite',
+               'Reference': None}
+MADRC_BRAAK = {'0': 0, 'I': 1, 'II': 2, 'III': 3, 'IV': 4, 'V': 5, 'VI': 6, 'unk': None}
+MADRC_CERAD = {'none': 'none', 'sparse': 'sparse', 'moderate': 'probable', 'frequent': 'definite'}
+UW_CERAD = {0: 'none', 1: 'sparse', 2: 'probable', 3: 'definite'}
+
+
+def _spec(braak_column: str, braak_map: Optional[Dict], cerad_column: str, cerad_map: Dict) -> Dict[str, Any]:
+    braak: Dict[str, Any] = {'column': braak_column}
+    if braak_map:
+        braak['map'] = braak_map
+    return {'rule': disease_rule.RULE, 'column': COLUMN, 'braak': braak,
+            'cerad': {'column': cerad_column, 'map': cerad_map}}
+
+
+def _derivations() -> Dict[str, Tuple[Dict[str, Any], str]]:
+    """db_id -> (disease_derivation spec, source note)."""
+    table: Dict[str, Tuple[Dict[str, Any], str]] = {}
+    seaad = 'SEA-AD donor table: Braak stage and CERAD score'
+    for suffix in ('MAs', 'MEn', 'MIn', 'MMG', 'MOP', 'MOl', 'MVL', 'PAs', 'PEn', 'PIn', 'PMG', 'POP', 'POl', 'PVL'):
+        table[f'G24/{suffix}'] = (_spec('Braak', SEAAD_BRAAK, 'CERAD score', SEAAD_CERAD), seaad)
+    radc = ('ROSMAP clinical table (RADC): braaksc and ceradsc (1 definite, 2 probable, 3 possible = sparse, '
+            '4 no AD); niareagansc is not part of this distribution')
+    table['M23/AST'] = (_spec('Braak', None, 'CERAD', RADC_CERAD), radc)
+    table['M23/IMM'] = (_spec('Braak', None, 'CERAD', RADC_CERAD), radc)
+    table['M23/VAS'] = (_spec('Braak', None, 'CERAD', RADC_CERAD), radc)
+    table['GF4/MIC'] = (_spec('braaksc', None, 'rosmap_ceradsc', RADC_CERAD), radc)
+    table['MY4/MRM'] = (_spec('Braak', None, 'CERAD', RADC_CERAD), radc)
+    table['Z20/ALL'] = (_spec('Braak', None, 'ceradsc', RADC_CERAD), radc)
+    madrc = 'MADRC neuropathology: braak_stage and cerad (none, sparse, moderate, frequent)'
+    for suffix in ('MEC', 'MIT', 'MPF', 'MV1', 'MV2', 'MCR'):
+        table[f'WA4/{suffix}'] = (_spec('braak_stage', MADRC_BRAAK, 'cerad', MADRC_CERAD), madrc)
+    table['P23/MIC'] = (_spec('BraakStage', None, 'CERAD', UW_CERAD),
+                        'UW ADRC neuropathology: BraakStage and CERAD (0 none, 1 sparse, 2 moderate, 3 frequent)')
+    return table
+
+
+DERIVATIONS = _derivations()
+
+
+def rule_text(source: str) -> str:
+    """The facet note shown with the dataset's disease definition."""
+    return ('pathologic AD, Braak plus neuritic plaque based: AD = Braak stage III or higher and CERAD probable or '
+            'definite; control = Braak stage II or lower and CERAD none or sparse; discordant combinations, '
+            'missing values and reference donors are NULL. Not a clinical diagnosis (cognitive status is a '
+            f'separate facet where available). Source: {source}.')
+
+
+def compute_labels(duckdb_path: Path, spec: Dict[str, Any]) -> pd.Series:
+    """Labels per cell (index = cell_name) from the stored Braak and CERAD columns."""
+    connection = duckdb.connect(str(duckdb_path), read_only=True)
+    try:
+        located = {row[0]: row[1] for row in connection.execute(
+            "SELECT column_name, table_name FROM information_schema.columns "
+            "WHERE table_name IN ('__obscat', '__obsnum')").fetchall()}
+        frames = {}
+        for part in ('braak', 'cerad'):
+            column = spec[part]['column']
+            if column not in located:
+                raise KeyError(f'column {column!r} is not stored in {duckdb_path.name}')
+            frames[part] = connection.execute(
+                f'SELECT c.cell_name, o."{column}" AS value FROM __cells c '
+                f'JOIN {located[column]} o ON o.cell_id = c.cell_id ORDER BY c.cell_id').df().set_index('cell_name')['value']
+    finally:
+        connection.close()
+    labels = disease_rule.classify_frame(frames['braak'], frames['cerad'], spec)
+    labels.index = frames['braak'].index
+    return labels
+
+
+def summarize(labels: pd.Series) -> str:
+    counts = labels.fillna('NULL').value_counts().to_dict()
+    return ', '.join(f'{key}={counts.get(key, 0)}' for key in ('AD', 'control', 'NULL'))
+
+
+def api_url(args: argparse.Namespace) -> Optional[str]:
+    if args.no_coordinate:
+        return None
+    if args.api_url:
+        return args.api_url.rstrip('/')
+    from config import get_api_url, get_config  # type: ignore  # noqa: PLC0415
+    return f'{get_api_url(get_config())}/api/'
+
+
+def is_dirty(path: Path) -> bool:
+    result = subprocess.run(['git', '-C', str(path.parent), 'status', '--porcelain', '--', path.name],
+                            capture_output=True, text=True)
+    return bool(result.stdout.strip())
+
+
+def md_operations(md_yaml: Dict[str, Any], spec: Dict[str, Any], source: str, date: str) -> List[Dict[str, Any]]:
+    """Edits that publish the derived column as ant_disease and record the rule."""
+    api = md_yaml.get('api') or {}
+    operations: List[Dict[str, Any]] = []
+    old_sources = [column for column, target in (api.get('obs_rename') or {}).items() if target == 'ant_disease']
+    for column in old_sources:
+        operations.append(md_edit.delete_path(['api', 'obs_rename', column]))
+        if (api.get('obs_value_rename') or {}).get(column) is not None:
+            operations.append(md_edit.delete_path(['api', 'obs_value_rename', column]))
+            if len(api['obs_value_rename']) == 1:
+                operations.append(md_edit.delete_path(['api', 'obs_value_rename']))
+    if 'ant_disease' in (api.get('obs_derive') or {}):
+        operations.append(md_edit.delete_path(['api', 'obs_derive', 'ant_disease']))
+    if 'obs_rename' not in api:
+        operations.append(md_edit.set_path(['api', 'obs_rename'], {}))
+    operations.append(md_edit.set_path(['api', 'obs_rename', COLUMN], 'ant_disease'))
+    operations.append(md_edit.set_top('disease_basis', 'braak_cerad'))
+    operations.append(md_edit.set_top('disease_derivation', spec))
+    note = rule_text(source)
+    if isinstance(md_yaml.get('facet_notes'), dict):
+        operations.append(md_edit.set_path(['facet_notes', 'disease'], note))
+    else:
+        operations.append(md_edit.set_top('facet_notes', {'disease': note}))
+    caveats = []
+    for caveat in md_yaml.get('caveats') or []:
+        message = str(caveat.get('message', ''))
+        if 'ant_disease' not in message:
+            caveats.append(caveat)
+        elif 'ant_adnc' in message:          # keep the ADNC half of a combined ant_adnc / ant_disease caveat
+            kept = message.split(' ant_disease uses')[0].strip()
+            caveats.append({**caveat, 'message': kept})
+    if len(caveats) != len(md_yaml.get('caveats') or []) or any(
+            'ant_disease' in str(c.get('message', '')) for c in md_yaml.get('caveats') or []):
+        caveats.append({'level': 'low', 'kind': 'note', 'scope': 'object', 'obs_flag': None,
+                        'message': 'ant_disease: ' + note, 'detected_at': date,
+                        'detected_by': 'facet engine v2 (common disease definition)'})
+        operations.append(md_edit.set_top('caveats', caveats))
+    included = md_yaml.get('obscat_include')
+    if isinstance(included, list) and COLUMN not in included:
+        operations.append(md_edit.set_top('obscat_include', list(included) + [COLUMN]))
+    operations.append(md_edit.bump_version(
+        [f'ant_disease is now the common pathology definition (disease_basis: braak_cerad): AD = Braak >= III and '
+         f'CERAD probable/definite, control = Braak <= II and CERAD none/sparse, else NULL; stored column {COLUMN}'],
+        date))
+    return operations
+
+
+def run_derivation(entry, spec: Dict[str, Any], source: str, args: argparse.Namespace) -> None:
+    md_now, _ = metadata.parse_md_file(entry.md_path)
+    if args.command == 'apply' and not args.force and md_now.get('disease_derivation') == spec \
+            and md_now.get('disease_basis') == 'braak_cerad':
+        print(f'  {entry.db_id}: already applied')
+        return
+    labels = compute_labels(entry.duckdb_path, spec)
+    print(f'  {entry.db_id}: {summarize(labels)}')
+    if args.command == 'plan':
+        return
+    if not args.no_data:
+        run_id = f'disease-{secrets.token_hex(3)}'
+        try:
+            with AnnotationWriter(entry.duckdb_path, annotator='ant-derive-disease', run_id=run_id,
+                                  catalog='common_disease_definition', db_id=entry.db_id,
+                                  ant_serve_url=api_url(args)) as writer:
+                writer.add_categorical(COLUMN, labels, on_conflict='overwrite')
+                writer.commit()
+        except AnnotationWriterError as exc:
+            sys.exit(f'ERROR: AnnotationWriter rejected write for {entry.db_id}: {exc}')
+    if not args.no_md:
+        md_yaml, _ = metadata.parse_md_file(entry.md_path)
+        if md_yaml.get('disease_basis') == 'braak_cerad' and md_yaml.get('disease_derivation') == spec:
+            return
+        if is_dirty(entry.md_path):
+            print(f'  {entry.db_id}: .md has uncommitted changes, md edit skipped')
+            return
+        text = entry.md_path.read_text(encoding='utf-8')
+        entry.md_path.write_text(
+            md_edit.apply_edits(text, md_operations(md_yaml, spec, source, args.date)), encoding='utf-8')
+
+
+def run_basis_only(entry, md_yaml: Dict[str, Any], args: argparse.Namespace) -> bool:
+    """``disease_basis: author_dx`` for a dataset that publishes ant_disease from the author's labels."""
+    if md_yaml.get('disease_basis') is not None:
+        return False
+    if args.command == 'plan':
+        return True
+    if is_dirty(entry.md_path):
+        print(f'  {entry.db_id}: .md has uncommitted changes, skipped')
+        return False
+    note = AUTHOR_NOTE_OVERRIDES.get(entry.group_id)
+    change = 'disease_basis: author_dx (the author\'s own disease labels' + (f'; {note}' if note else '') + ')'
+    text = entry.md_path.read_text(encoding='utf-8')
+    entry.md_path.write_text(md_edit.apply_edits(text, [
+        md_edit.set_top('disease_basis', 'author_dx'), md_edit.bump_version([change], args.date)]),
+        encoding='utf-8')
+    return True
+
+
+def publishes_disease(md_yaml: Dict[str, Any]) -> bool:
+    api = md_yaml.get('api') or {}
+    return ('ant_disease' in (api.get('obs_rename') or {}).values() or 'ant_disease' in (api.get('obs_derive') or {})
+            or 'ant_disease' in (api.get('obs_constant') or {}))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
+    parser.add_argument('command', choices=('plan', 'apply'))
+    parser.add_argument('--h5adstore-root', default=None)
+    parser.add_argument('--db-id', default=None, help='comma-separated db_ids')
+    parser.add_argument('--no-data', action='store_true', help='apply: do not write the stored column')
+    parser.add_argument('--no-md', action='store_true', help='apply: do not edit the .md files')
+    parser.add_argument('--basis-only', action='store_true', help='only set disease_basis: author_dx on the other datasets')
+    parser.add_argument('--no-coordinate', action='store_true')
+    parser.add_argument('--force', action='store_true', help='apply again even when the .md already records the rule')
+    parser.add_argument('--api-url', default=None)
+    parser.add_argument('--date', default=dt.date.today().isoformat())
+    args = parser.parse_args()
+    from config import get_data_folder  # type: ignore  # noqa: PLC0415
+    root = Path(args.h5adstore_root).resolve() if args.h5adstore_root else Path(get_data_folder())
+    only = set(args.db_id.split(',')) if args.db_id else None
+    n_basis = 0
+    for entry in iter_h5adstore(root):
+        if entry.study.startswith('_') or entry.study in SKIP_GROUPS or (only and entry.db_id not in only):
+            continue
+        if entry.db_id in DERIVATIONS:
+            if args.basis_only:
+                continue
+            spec, source = DERIVATIONS[entry.db_id]
+            disease_rule.validate_spec(spec)
+            run_derivation(entry, spec, source, args)
+            continue
+        md_yaml, _ = metadata.parse_md_file(entry.md_path)
+        if publishes_disease(md_yaml):
+            n_basis += int(run_basis_only(entry, md_yaml, args))
+    print(f'disease_basis author_dx {"would be set" if args.command == "plan" else "set"} on {n_basis} dataset(s)')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

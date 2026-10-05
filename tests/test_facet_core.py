@@ -85,7 +85,8 @@ def _write_dataset(root: Path, db_id: str, strata: List[Tuple[str, str, Dict[str
             logfc, q_value = effects.get(gene, (0.01, 0.9))
             rows.append({'facet': facet, 'cell_type': cell_type, 'celltype_source': source, 'gene': gene,
                          'logFC': logfc, 'ci_low': logfc - 0.1, 'ci_high': logfc + 0.1,
-                         'p_value': q_value / 2, 'q_value': q_value, 'n_donors': 20,
+                         'p_value': q_value / 2, 'q_value': q_value, 'p_treat': q_value ** 2, 'q_treat': q_value,
+                         'n_donors': 20,
                          'descriptive_only': False, 'n_lt5': False})
         units.append({'facet': facet, 'cell_type': cell_type, 'celltype_source': source, 'status': 'ok',
                       'n_donors_analysed': 20, 'n_genes_tested': len(GENES), 'n_sig_q05': 1,
@@ -197,17 +198,19 @@ def test_recurring_gene_ranking(cohorts):
     # G_A: 2 significant of 6 tested, all six up -> agreement 1.0
     # G_B: 2 significant of 6 tested; C3, C4, C5 go down, C7 slightly up -> agreement 3/6
     assert (rows['G_A']['cohorts_sig_same_sign'], rows['G_A']['cohorts_tested']) == (2, 6)
+    assert rows['G_A']['replicated'] and rows['G_A']['r_value'] < rows['G_B']['r_value'] < 0.05
+    assert 'G_C' not in rows and 'G_D' not in rows       # one significant cohort / none: not replicated
     assert rows['G_A']['agreement'] == pytest.approx(1.0)
     assert rows['G_B']['agreement'] == pytest.approx(3 / 6)
     order = [r['gene'] for r in out['rows']]
     assert order.index('G_A') < order.index('G_B')
-    assert 'never ranks a gene by itself' in out['ranking']
+    assert 'r_value' in out['ranking']
 
 
-def test_two_of_two_does_not_outrank_two_of_four_for_fewer_tests():
-    """Synthetic table straight into the ranking: X is 2 of 2, Y is 2 of 4
-    with all four cohorts up and larger effects. The old rule (cohorts
-    tested, fewer first) put X first; now Y wins on effect size."""
+def test_recurring_genes_rank_by_r_value_then_k():
+    """Synthetic table straight into the ranking: X is 2 of 2 and Y is 2 of 4
+    with all four cohorts up. Ranking is by the partial conjunction r-value
+    (smallest first), then k; a gene with one significant cohort is not listed."""
     reader = fr.FacetResults(Path('/nonexistent'))
     units = pd.DataFrame({
         'unit': [0, 1, 2, 3], 'db_id': ['a', 'b', 'c', 'd'], 'title': list('abcd'),
@@ -215,21 +218,25 @@ def test_two_of_two_does_not_outrank_two_of_four_for_fewer_tests():
         'n_donors': [20] * 4, 'n_donors_ref': [None] * 4, 'n_donors_test': [None] * 4,
         'level_ref': [None] * 4, 'level_test': [None] * 4, 'descriptive_only': [False] * 4,
         'cohort': ['A', 'B', 'C', 'D'], 'cohort_label': ['A', 'B', 'C', 'D'], 'role': ['anchor'] * 4,
-        'counted': [True] * 4, 'is_secondary': [False] * 4,
+        'counted': [True] * 4, 'is_secondary': [False] * 4, 'overlap_unknown': [False] * 4,
         'celltype_group': ['microglia'] * 4, 'summary_unit': [{}] * 4})
+    q_values = [0.01, 0.01, 0.01, 0.01, 0.4, 0.5, 0.001, 0.9, 0.9, 0.9]
     rows = pd.DataFrame({
-        'unit': [0, 1, 0, 1, 2, 3],
-        'gene': ['X', 'X', 'Y', 'Y', 'Y', 'Y'],
-        'logFC': [0.2, 0.2, 0.8, 0.8, 0.7, 0.6],
-        'ci_low': [0.0] * 6, 'ci_high': [1.0] * 6,
-        'q_value': [0.01, 0.01, 0.01, 0.01, 0.4, 0.5]})
+        'unit': [0, 1, 0, 1, 2, 3, 0, 1, 2, 3],
+        'gene': ['X', 'X', 'Y', 'Y', 'Y', 'Y', 'Z', 'Z', 'Z', 'Z'],
+        'logFC': [0.2, 0.2, 0.8, 0.8, 0.7, 0.6, 0.9, 0.1, 0.1, 0.1],
+        'ci_low': [0.0] * 10, 'ci_high': [1.0] * 10,
+        'q_value': q_values, 'q_treat': q_values, 'p_treat': [q ** 2 for q in q_values]})
     rows['gene_upper'] = rows['gene']
     reader.facet_gene_table = lambda facet, datasets: (rows, units)  # type: ignore[assignment]
-    out = reader.recurring_genes('braak', [])
-    assert [r['gene'] for r in out['rows']] == ['Y', 'X']
-    y = out['rows'][0]
-    assert (y['cohorts_sig_same_sign'], y['cohorts_tested'], y['cohorts_same_sign']) == (2, 4, 4)
-    assert y['median_abs_logFC'] == pytest.approx(0.75)
+    reader._with_pooled = lambda datasets: list(datasets)  # type: ignore[assignment]
+    out = reader.recurring_genes('braak', [{'db_id': 'a', 'group_folder': 'a', 'stem': 'a'}])
+    assert [r['gene'] for r in out['rows']] == ['X', 'Y']
+    x, y = out['rows']
+    assert x['r_value'] < y['r_value'] < 0.05
+    assert (x['k'], x['m']) == (2, 2) and (y['k'], y['m']) == (2, 4)
+    assert y['cohorts_same_sign'] == 4 and y['median_abs_logFC'] == pytest.approx(0.75)
+    assert out['n_replicated'] == 2 and out['n_genes_in_family'] == 3  # Z: one significant cohort only
 
 
 # ── ant-serve: lineage, donor groups, exclude_secondary ──────────────────────
@@ -357,7 +364,8 @@ def test_lineage_fields(serve):
     assert lineage({'is_secondary': True, 'reanalysis_of': 'V25/SAL', 'donor_group': 'voet2025'},
                    ['ant_donor_uid']) == {
         'designation': 'reanalysis', 'reanalysis_of': ['V25/SAL'], 'donor_group': 'voet2025',
-        'has_donor_uid': True}
+        'has_donor_uid': True, 'replicate_unit': 'none', 'replicate_column': None,
+        'replicate_basis': 'inferred', 'disease_basis': None}
     assert lineage({'is_secondary': False}, [])['designation'] == 'primary'
     assert lineage({}, [])['designation'] == 'unresolved'
     assert namespace['_secondary_db_ids']() == {'G1/REA'}
@@ -430,7 +438,7 @@ def test_gene_stats_all_excludes_secondaries(serve):
 def test_serve_registers_donor_groups_and_lineage():
     source = SERVE_PATH.read_text()
     assert '@app.get("/donor-groups"' in source
-    assert '**_lineage_fields(file_metadata, obs_categorical)' in source
+    assert '**_lineage_fields(file_metadata, obs_categorical, ann, obs_numerical)' in source
     for endpoint in ('def get_facet_tests_across_datasets', 'def get_facet_recurring_genes',
                      'def get_facet_gene_effects', 'def get_gene_facet_effects', 'async def get_facet_detail'):
         start = source.index(endpoint)
@@ -452,10 +460,10 @@ def test_mcp_lineage_tools():
     assert 'donor_group' in ast.get_docstring(tools['search_datasets'])
 
 
-def test_representatives_are_chosen_per_dataset_not_per_cohort():
-    """One cohort, two datasets: ds1 has a constant (n.s.) plus a substate,
-    ds2 only author substates (significant). ds2 still speaks for the cohort;
-    only ds1's substate yields to ds1's constant."""
+def test_one_anchor_dataset_per_cohort_and_group():
+    """One cohort, two datasets: ds1 has a constant (n.s.) plus a substate, ds2
+    only author substates (significant). ds1 is the cohort's anchor (more direct
+    cell type source); ds2 is supplementary and cannot vote, however significant."""
     units = pd.DataFrame({
         'unit': [0, 1, 2], 'db_id': ['ds1', 'ds1', 'ds2'],
         'cell_type': ['microglial cell', 'Mic P2RY12', 'Mic P2RY12'],
@@ -463,7 +471,50 @@ def test_representatives_are_chosen_per_dataset_not_per_cohort():
         'descriptive_only': [False] * 3, 'cohort': ['ROSMAP'] * 3, 'counted': [True] * 3,
         'is_secondary': [False] * 3})
     counted = fr.FacetResults.counting_units(units)
-    assert counted['representative'].tolist() == [True, False, True]
+    assert counted['representative'].tolist() == [True, False, False]
+    assert counted['anchor_db_id'].tolist() == ['ds1'] * 3
     rows = counted.assign(q_value=[0.9, 0.001, 0.001], logFC=[0.1, 0.5, 0.5])
     rep = fr.FacetResults._replication(rows)
-    assert (rep['cohorts_sig_same_sign'], rep['cohorts_tested']) == (1, 1)
+    assert (rep['cohorts_sig_same_sign'], rep['cohorts_tested']) == (0, 1)
+    reason = fr._not_counted_reason(counted.iloc[2].to_dict())
+    assert reason == 'supplementary: ds1 is the anchor of this cohort for this cell type group'
+
+
+def test_anchor_prefers_pooled_unit_then_anchor_role_then_donors():
+    units = pd.DataFrame({
+        'unit': [0, 1, 2, 3], 'db_id': ['wa4/mit', 'wa4/mpf', 'pool:madrc', 'other'],
+        'cell_type': ['microglial cell'] * 4, 'celltype_source': ['constant_all_cells'] * 4,
+        'descriptive_only': [False] * 4, 'cohort': ['MADRC'] * 3 + ['SEA-AD'], 'counted': [True] * 4,
+        'is_secondary': [False] * 4, 'n_donors': [31, 28, 32, 80],
+        'role': ['anchor for myeloid cells'] * 4})
+    counted = fr.FacetResults.counting_units(units)
+    assert counted['representative'].tolist() == [False, False, True, True]
+    no_pool = fr.FacetResults.counting_units(units.iloc[[0, 1]])
+    assert no_pool['representative'].tolist() == [True, False]          # most donors among equals
+
+
+def test_group_pool_beats_sibling_strata_and_constant_beats_group_pool():
+    units = pd.DataFrame({
+        'unit': [0, 1, 2, 3], 'db_id': ['d1'] * 3 + ['d2'],
+        'cell_type': ['Mic P2RY12', 'Mic TPT1', 'microglia', 'microglial cell'],
+        'celltype_source': ['cell_type_high_resolution', 'cell_type_high_resolution', 'group_pool',
+                            'constant_all_cells'],
+        'descriptive_only': [False] * 4, 'cohort': ['A', 'A', 'A', 'B'], 'counted': [True] * 4,
+        'is_secondary': [False] * 4, 'n_donors': [10] * 4})
+    counted = fr.FacetResults.counting_units(units)
+    assert counted['representative'].tolist() == [False, False, True, True]
+    assert counted['n_siblings'].tolist() == [1, 1, 1, 1]
+
+
+def test_disease_counts_only_pathology_based_definitions():
+    units = pd.DataFrame({
+        'unit': [0, 1, 2, 3], 'db_id': list('abcd'), 'cell_type': ['microglial cell'] * 4,
+        'celltype_source': ['constant_all_cells'] * 4, 'descriptive_only': [False] * 4,
+        'cohort': list('ABCD'), 'counted': [True] * 4, 'is_secondary': [False] * 4, 'n_donors': [10] * 4,
+        'disease_basis': ['nia_reagan', 'braak_cerad', 'clinical_dx', None]})
+    disease = fr.FacetResults.counting_units(units, facet='disease')
+    assert disease['representative'].tolist() == [True, True, False, False]
+    assert fr._not_counted_reason(disease.iloc[2].to_dict()).startswith('disease definition is clinical_dx')
+    assert fr._not_counted_reason(disease.iloc[3].to_dict()).startswith('disease definition is not recorded')
+    sex = fr.FacetResults.counting_units(units, facet='sex')
+    assert sex['representative'].tolist() == [True] * 4          # the basis only matters for disease

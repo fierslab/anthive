@@ -44,6 +44,8 @@ def _gene_rows(db_id: str, facet: str, cell_type: str, effects: Dict[str, Tuple[
             'ci_low': None if descriptive else logfc - 0.2, 'ci_high': None if descriptive else logfc + 0.2,
             't': None if descriptive else 2.0, 'p_value': None if descriptive else (q_value or 0.5) / 2,
             'q_value': None if descriptive else q_value, 'ave_expr': 4.0, 'df_total': 20.0,
+            'p_treat': None if descriptive else (q_value or 0.5) ** 2,
+            'q_treat': None if descriptive else q_value, 'tau_log2': 0.1375,
             'n_donors_ref': None if facet == 'braak' else float(donors[0]),
             'n_donors_test': None if facet == 'braak' else float(donors[1]),
             'contrast': {'sex': 'm_vs_f', 'braak': 'braak_per_unit', 'disease': 'AD_vs_control',
@@ -410,13 +412,18 @@ def test_gene_effects_card_and_replication(results):
     assert card['n_units'] == 2
     rep = card['replication'][0]
     assert (rep['cohorts_tested'], rep['cohorts_sig_same_sign'], rep['direction']) == (2, 2, 'up')
-    assert rep['badge'] == 'replicates in 2 of 2 independent cohorts (up)'
+    assert rep['legacy_badge'] == 'replicates in 2 of 2 independent cohorts (up)'
+    assert (rep['m'], rep['k'], rep['replicated'], rep['r_direction']) == (2, 2, True, 'up')
+    assert rep['r_value'] < 0.05 and rep['badge'].startswith('replicated in at least 2 of 2 cohorts (up): r = ')
+    assert {a['db_id'] for a in rep['anchors']} == {'G1/ds1', 'G2/ds2'}
     unit = card['units'][0]
     assert unit['model'].startswith('expression ~ braak') and unit['significant']
     assert card['definition'] == fr.REPLICATION_DEFINITION
     apoe = fr.FacetResults(results).gene_effects('braak', 'apoe', DATASETS)
     assert apoe['replication'][0]['sign_discordant'] is True
-    assert 'sign discordant' in apoe['replication'][0]['badge']
+    assert 'sign discordant' in apoe['replication'][0]['legacy_badge']
+    assert apoe['replication'][0]['replicated'] is False
+    assert apoe['replication'][0]['badge'].startswith('not replicated: r = ')
     missing = fr.FacetResults(results).gene_effects('braak', 'NOPE', DATASETS)
     assert missing['units'] == [] and missing['replication'] == []
 
@@ -426,7 +433,8 @@ def test_replication_single_cohort_and_uncounted():
                          'cohort': ['A', 'B'], 'q_value': [0.01, 0.001], 'logFC': [1.0, 1.0]})
     rep = fr.FacetResults._replication(rows)
     assert rep['cohorts_tested'] == 1
-    assert rep['badge'] == 'one cohort, not replicated (q < 0.05, up)'
+    assert rep['legacy_badge'] == 'one cohort, not replicated (q < 0.05, up)'
+    assert rep['badge'].endswith('(no treat statistics in this run: re-run ant-facet-test)')
 
 
 def test_apoe_locus_note_only_for_apoe4_carrier(results):
@@ -442,8 +450,9 @@ def test_recurring_genes(results):
     assert out['labels'] == ['microglial cell'] and out['cl_id'] == 'CL:0000129'
     top = out['rows'][0]
     assert top['gene'] == 'PTPRG' and top['cohorts_sig_same_sign'] == 2 and top['direction'] == 'up'
-    apoe = next(r for r in out['rows'] if r['gene'] == 'APOE')
-    assert apoe['sign_discordant'] and apoe['apoe_locus']
+    assert top['k'] == 2 and top['m'] == 2 and top['replicated'] and top['r_value'] < 0.05
+    assert out['n_replicated'] == 1 and out['n_genes_in_family'] == len(GENES)
+    assert all(r['gene'] != 'APOE' for r in out['rows'])  # discordant: not replicated
 
 
 def test_facet_overview_rows(results):
@@ -625,11 +634,14 @@ def test_mcp_facet_tools_and_descriptions():
                    'descriptive_only', 'composition', 'state the model'):
         assert phrase in doc, phrase
     effects = ' '.join(tools['facet_effects'].split())
-    assert 'replicates in k of m independent cohorts' in effects
-    assert 'contributes at most once' in effects and 'EXPLORATORY' in effects
+    assert 'partial-conjunction r-value' in effects and 'r_value < 0.05' in effects
+    assert 'exactly one anchor unit per' in effects and 'EXPLORATORY' in effects
+    assert 'q_treat' in effects and 'overlap_unknown' in effects
     assert 'APOE' in effects and 'PROVISIONAL' in effects
     for tool in ('facet_top_genes', 'facet_units'):
         assert 'EXPLORATORY' in tools[tool]
+    assert 'r_value' in tools['facet_top_genes'] and 'n_replicated' in tools['facet_top_genes']
+    assert 'analysis_level' in doc and 'cell-level, descriptive only' in doc and 'p_treat' in doc
     for tool in ('get_facet_tests', 'facet_effects', 'facet_top_genes', 'facet_units'):
         assert '—' not in tools[tool], tool
 

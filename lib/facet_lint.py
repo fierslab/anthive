@@ -40,6 +40,8 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 from obs_derive_forms import (FORM_JOIN, FORM_TEMPLATE, DeriveFormError, crosswalk_for, derive_form,
                               needs_group_id, normalize_value, validate_spec)
 from obscol_tags import facet_registry
+import disease_rule
+from replicates import ReplicateError, declared_replicate
 
 FACET_PREFIX = 'ant_'
 
@@ -74,6 +76,13 @@ RULES: Dict[str, str] = {
     'reanalysis_target_missing': 'reanalysis_of names a dataset that does not exist',
     'reanalysis_not_secondary': 'reanalysis_of is set but is_secondary is not true',
     'donor_group_format': 'donor_group is not a lower-case slug',
+    'replicate_unit_missing': 'dataset .md declares no replicate_unit (a default is inferred)',
+    'replicate_unit_invalid': 'replicate_unit is not donor, animal, sample or none, or replicate_column is malformed',
+    'replicate_column_missing': 'replicate_column names no obs column of the dataset',
+    'replicate_column_unused': 'replicate_unit is none but replicate_column is set',
+    'disease_basis_missing': 'dataset publishes ant_disease but declares no disease_basis',
+    'disease_basis_invalid': 'disease_basis is not one of nia_reagan, braak_cerad, adnc, clinical_dx, author_dx',
+    'disease_derivation_invalid': 'disease_derivation is malformed or disagrees with disease_basis',
 }
 
 _ROMAN = {'0': 0, 'I': 1, 'II': 2, 'III': 3, 'IV': 4, 'V': 5, 'VI': 6, 'VII': 7}
@@ -487,6 +496,67 @@ def lint_lineage(metadata: Mapping[str, Any], known_db_ids: Iterable[str]) -> Li
     return findings
 
 
+def lint_replicate(metadata: Mapping[str, Any], api: Mapping[str, Any],
+                   stored_columns: Optional[Iterable[str]] = None) -> List[Finding]:
+    """``replicate_unit`` / ``replicate_column`` rules (``lib/replicates.py``).
+
+    A missing ``replicate_unit`` is a warning (a default is inferred); an
+    invalid value, or a ``replicate_column`` that is neither a stored obs
+    column nor written by the ``api:`` section (checked only when the stored
+    columns are known), is an error.
+    """
+    findings: List[Finding] = []
+    try:
+        unit, column = declared_replicate(metadata)
+    except ReplicateError as exc:
+        return [Finding(ERROR, 'replicate_unit_invalid', str(exc))]
+    if unit is None:
+        findings.append(Finding(WARNING, 'replicate_unit_missing',
+                                'no replicate_unit (donor, animal, sample or none); a default is inferred '
+                                'from the organism, experimental system and obs columns'))
+    if unit == 'none' and column:
+        findings.append(Finding(WARNING, 'replicate_column_unused',
+                                f'replicate_unit is none but replicate_column is {column!r}'))
+    if column and stored_columns is not None:
+        available = set(stored_columns) | {target for target, _ in _targets(api or {})}
+        if column not in available:
+            findings.append(Finding(ERROR, 'replicate_column_missing',
+                                    f'replicate_column {column!r} is not an obs column of the dataset'))
+    return findings
+
+
+def lint_disease_basis(metadata: Mapping[str, Any], api: Mapping[str, Any]) -> List[Finding]:
+    """``disease_basis`` / ``disease_derivation`` rules (``lib/disease_rule.py``).
+
+    A dataset that publishes ``ant_disease`` should say what it is based on (warning
+    when missing); an unknown value is an error; ``braak_cerad`` needs a valid
+    ``disease_derivation`` and a derivation needs ``disease_basis: braak_cerad``.
+    """
+    findings: List[Finding] = []
+    basis = metadata.get('disease_basis')
+    derivation = metadata.get('disease_derivation')
+    publishes = ('ant_disease' in (api or {}).get('obs_derive', {}) or 'ant_disease' in (api or {}).get('obs_constant', {})
+                 or 'ant_disease' in (api or {}).get('obs_rename', {}).values())
+    if basis is not None and basis not in disease_rule.DISEASE_BASES:
+        findings.append(Finding(ERROR, 'disease_basis_invalid', f'disease_basis {basis!r} is not one of '
+                                                                f'{", ".join(disease_rule.DISEASE_BASES)}'))
+    elif basis is None and publishes:
+        findings.append(Finding(WARNING, 'disease_basis_missing',
+                                'ant_disease is published but disease_basis is not declared'))
+    if derivation is not None:
+        try:
+            disease_rule.validate_spec(derivation)
+        except disease_rule.DiseaseRuleError as exc:
+            findings.append(Finding(ERROR, 'disease_derivation_invalid', str(exc)))
+        if basis != 'braak_cerad':
+            findings.append(Finding(ERROR, 'disease_derivation_invalid',
+                                    'disease_derivation is set but disease_basis is not braak_cerad'))
+    elif basis == 'braak_cerad':
+        findings.append(Finding(ERROR, 'disease_derivation_invalid',
+                                'disease_basis is braak_cerad but disease_derivation is missing'))
+    return findings
+
+
 # ── reading a dataset's duckdb ───────────────────────────────────────────────
 
 def duckdb_reader(duckdb_path: Path) -> Optional[Tuple[Dict[str, str], ValueLookup, Callable[[], None]]]:
@@ -532,6 +602,6 @@ def duckdb_reader(duckdb_path: Path) -> Optional[Tuple[Dict[str, str], ValueLook
 
 __all__ = [
     'ERROR', 'WARNING', 'NAMESPACE_DEFAULT_MODE', 'RULES', 'Finding',
-    'braak_group_of', 'parse_braak_label', 'lint_api', 'lint_api_data', 'lint_lineage',
+    'braak_group_of', 'parse_braak_label', 'lint_api', 'lint_api_data', 'lint_lineage', 'lint_replicate', 'lint_disease_basis',
     'duckdb_reader',
 ]

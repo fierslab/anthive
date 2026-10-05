@@ -10,15 +10,19 @@
 # Inputs (in <work_dir>):
 #   counts_long.csv  sample_idx, gene_id, count     (raw summed counts, sparse)
 #   genes.csv        gene_id, gene_name, symbol
-#   jobs.csv         job_id, facet, stratum, numeric
+#   jobs.csv         job_id, facet, stratum, numeric, tau (log2 fold change
+#                    threshold of the treat test; per Braak unit when numeric)
 #   samples.csv      job_id, sample_idx, donor, facet_value, cov_sex, cov_age,
 #                    cov_pmi, batch   (NA covariate columns are omitted)
 # Outputs (in <work_dir>):
 #   results.csv      job_id, gene_id, logFC, se, ci_low, ci_high, t, p_value,
-#                    q_value, ave_expr, df_total
+#                    q_value, p_treat, q_treat, ave_expr, df_total
 #   job_summary.csv  job_id, status, n_genes_input, n_genes_tested, n_samples
 #
 # Usage: Rscript facet_test_limma.R <work_dir> <seed>
+# p_treat / q_treat: limma treat (McCarthy and Smyth 2009), H0 |logFC| <= tau,
+# on the same moderated fit; p_treat is a one-sided p in the direction of the
+# observed sign (the opposite tail is negligible), BH within the job.
 # Model: ~ facet_value [+ cov_sex] [+ cov_age] [+ cov_pmi] [+ batch];
 # the facet coefficient is reported (log2 CPM scale from voom).
 
@@ -72,7 +76,11 @@ for (job_index in seq_len(nrow(jobs))) {
     dge <- dge[keep, , keep.lib.sizes = FALSE]
     dge <- calcNormFactors(dge, method = "TMM")
     voom_object <- voom(dge, design)
-    fit <- eBayes(lmFit(voom_object, design))
+    linear_fit <- lmFit(voom_object, design)
+    fit <- eBayes(linear_fit)
+    tau <- if ("tau" %in% names(jobs)) jobs$tau[job_index] else 0
+    treat_fit <- treat(linear_fit, lfc = tau)
+    p_treat <- treat_fit$p.value[, "facet_value"]
     standard_error <- sqrt(fit$s2.post) * fit$stdev.unscaled[, "facet_value"]
     tail_quantile <- qt(0.975, fit$df.total)
     log_fc <- fit$coefficients[, "facet_value"]
@@ -83,6 +91,7 @@ for (job_index in seq_len(nrow(jobs))) {
       se = standard_error, ci_low = log_fc - tail_quantile * standard_error,
       ci_high = log_fc + tail_quantile * standard_error, t = t_statistic,
       p_value = p_value, q_value = p.adjust(p_value, method = "BH"),
+      p_treat = p_treat, q_treat = p.adjust(p_treat, method = "BH"),
       ave_expr = fit$Amean, df_total = fit$df.total)
     summary_row$n_genes_tested <- nrow(fit)
   }, error = function(error_condition) {

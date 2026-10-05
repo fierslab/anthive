@@ -49,6 +49,8 @@ Usage::
   ant-facet-test inventory [--out tsv]
   ant-facet-test run --db-id K22/AST [--facets sex,disease] [--out-root DIR]
   ant-facet-test run --all [--facets ...] [--max-load 12]
+  ant-facet-test run --pool madrc_myeloid     # donor-pooled unit (cohort table, column pool_members)
+  ant-facet-test summarize --out-dir DIR [--genes PTPRG,...]   # replication tables
 
 Needs an R with limma and edgeR (``--rscript`` or $ANT_FACET_RSCRIPT, default
 envs/facet-test-r/bin/Rscript). The anthive-data env has neither package.
@@ -68,7 +70,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 import duckdb
 import numpy as np
@@ -84,8 +86,11 @@ from donor_keys import COUNT_BASIS as DONOR_COUNT_BASIS, donor_key_map, key_dige
 from h5adstore import H5adEntry, iter_h5adstore  # type: ignore  # noqa: E402
 from metadata import get_api_config, parse_md_file  # type: ignore  # noqa: E402
 import mus  # type: ignore  # noqa: E402
+import facet_results  # type: ignore  # noqa: E402
+import replicates  # type: ignore  # noqa: E402
+from celltype_groups import UNMAPPED, group_of  # type: ignore  # noqa: E402
 
-TOOL_VERSION = 'ant-facet-test/1.0'
+TOOL_VERSION = 'ant-facet-test/2.0'
 SEED = 20261004
 
 # Parameters (all recorded in the run manifest).
@@ -100,6 +105,12 @@ BRAAK_MIN_DONORS = 6
 BRAAK_MIN_DISTINCT = 3
 COMPOSITION_ALPHA = 0.05
 MAX_STRATUM_LEVELS = 40            # per-cell stratifier sanity cap
+# limma treat thresholds (log2 fold change). Two-group contrasts: 10 percent. Braak is a
+# per-stage slope: 10 percent over three stages, tau = log2(1.1) / 3 per stage.
+TAU_TWO_GROUP = math.log2(1.1)
+TAU_BRAAK_PER_STAGE = math.log2(1.1) / 3
+POOLED_DIRNAME = '_pooled'         # <results>/_pooled/<pool_id>.* : donor-pooled units
+GROUP_POOL_SOURCE = 'group_pool'   # derived stratum: all labels of one cell type group pooled
 
 FACETS = ('sex', 'disease', 'apoe4_carrier', 'braak')
 FACET_COLUMN = {
@@ -512,7 +523,47 @@ def choose_strata(cells: pd.DataFrame, categorical_columns: Dict[str, str]
     membership = pd.concat(pieces, ignore_index=True)
     membership = membership[membership['label'].notna()].copy()
     membership['label'] = membership['label'].astype(str)
+    group_pools = _group_pool_strata(membership)
+    if len(group_pools):
+        membership = pd.concat([membership, group_pools], ignore_index=True)
+        notes.append(f'{group_pools["label"].nunique()} derived cell type group pool(s)')
     return membership, '; '.join(notes)
+
+
+def _group_pool_strata(membership: pd.DataFrame) -> pd.DataFrame:
+    """Derived strata that pool every label of one cell type group.
+
+    A cohort needs one all-cells unit per cell type group (replication counts
+    one anchor per cohort and group). When a stratifier source has two or more
+    labels in one group (Mic P2RY12 / Mic TPT1 / ... are all microglia), the
+    cells of those labels are also pooled into one stratum labelled with the
+    group name and source ``group_pool``. Unmapped labels and groups with a
+    single label need no pool.
+
+    Args:
+        membership: Long (pos, source, label) frame of the per-source strata.
+
+    Returns:
+        Frame with columns pos, source (``group_pool``), label (the group); empty when
+        no group has two labels.
+    """
+    pieces: List[pd.DataFrame] = []
+    for source, frame in membership.groupby('source', sort=True):
+        if source in ('none', GROUP_POOL_SOURCE):
+            continue
+        labels_by_group: Dict[str, List[str]] = {}
+        for label in sorted(frame['label'].unique()):
+            labels_by_group.setdefault(group_of(label), []).append(label)
+        for group, labels in labels_by_group.items():
+            if group == UNMAPPED or len(labels) < 2:
+                continue
+            positions = frame.loc[frame['label'].isin(labels), 'pos']
+            pieces.append(pd.DataFrame({'pos': positions.to_numpy(), 'source': GROUP_POOL_SOURCE, 'label': group}))
+    if not pieces:
+        return pd.DataFrame({'pos': pd.Series(dtype=int), 'source': pd.Series(dtype=object),
+                             'label': pd.Series(dtype=object)})
+    pooled = pd.concat(pieces, ignore_index=True)
+    return pooled.drop_duplicates(['pos', 'label'])
 
 
 def find_batch_column(conn: duckdb.DuckDBPyConnection, donors_cells: pd.DataFrame) -> Optional[str]:
@@ -818,11 +869,61 @@ def facet_notes_from_md(md_yaml: Dict[str, Any]) -> Dict[str, str]:
     return notes
 
 
+class Target(NamedTuple):
+    """What one run tests and where its results go.
+
+    A single dataset (``pool_id`` None) or a donor-pooled unit: the cells of
+    several member files of one cohort (the regional files of a cell type
+    group) pooled per donor before pseudobulking.
+    """
+    db_id: str
+    study: str
+    stem: str
+    group_id: str
+    members: List[H5adEntry]
+    pool_id: Optional[str] = None
+
+
+def pool_manifest_current(manifest_path: Path, members: List[H5adEntry]) -> bool:
+    """True when a pooled manifest records the md hashes of all current members."""
+    if not manifest_path.exists():
+        return False
+    try:
+        recorded = json.loads(manifest_path.read_text()).get('md_sha256')
+    except (OSError, ValueError):
+        return False
+    return recorded is not None and recorded == pool_md_sha256(members)
+
+
+def pool_md_sha256(members: List[H5adEntry]) -> str:
+    """sha256 over the member ids and their .md hashes (pooled counterpart of ``md_file_sha256``)."""
+    lines = '\n'.join(f'{entry.db_id}:{md_file_sha256(entry.md_path)}' for entry in sorted(members, key=lambda e: e.db_id))
+    return hashlib.sha256(lines.encode()).hexdigest()
+
+
+def disease_basis_of(md_yamls: Iterable[Dict[str, Any]]) -> Optional[str]:
+    """The ``disease_basis`` of a dataset (or of the member files of a pool).
+
+    One value when all given ``.md`` agree, ``mixed`` when they differ, None
+    when none declares it. Values: nia_reagan, braak_cerad, adnc, clinical_dx, author_dx.
+    """
+    values = {md.get('disease_basis') for md in md_yamls}
+    values.discard(None)
+    if not values:
+        return None
+    return values.pop() if len(values) == 1 else 'mixed'
+
+
+def _stratum_derivation_note(strata_note: str, pooled: bool) -> str:
+    return strata_note + ('; donor-pooled over member files' if pooled else '')
+
+
 def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: List[str],
                     rscript: str, threads: int = 4, memory_limit_gb: int = 24,
                     keep_work: bool = False, exclusion_from: Optional[List[str]] = None,
                     exclusion_where: Optional[List[str]] = None,
-                    all_donors: bool = False) -> Dict[str, Any]:
+                    all_donors: bool = False, tau_two_group: float = TAU_TWO_GROUP,
+                    tau_braak_per_stage: float = TAU_BRAAK_PER_STAGE) -> Dict[str, Any]:
     """Run all requested facets over all strata of one dataset.
 
     The donors listed by the ``facet_donor_exclusions`` rule of the dataset
@@ -833,22 +934,59 @@ def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: 
     Returns the manifest dict (also written next to the parquet). When the
     dataset is not testable the manifest has ``status`` 'skipped' and a reason.
     """
+    target = Target(db_id=entry.db_id, study=entry.study, stem=entry.stem, group_id=entry.group_id,
+                    members=[entry])
+    return process_target(target, store_root, out_root, facets, rscript, threads, memory_limit_gb, keep_work,
+                          exclusion_from, exclusion_where, all_donors, tau_two_group, tau_braak_per_stage)
+
+
+def process_pool(pool_id: str, members: List[H5adEntry], store_root: Path, out_root: Path,
+                 facets: List[str], rscript: str, threads: int = 4, memory_limit_gb: int = 24,
+                 keep_work: bool = False, tau_two_group: float = TAU_TWO_GROUP,
+                 tau_braak_per_stage: float = TAU_BRAAK_PER_STAGE) -> Dict[str, Any]:
+    """Donor-pooled run over the member files of one cohort.
+
+    A donor's cells are pooled across the member files (the regional files of
+    one cell type group, for example five MADRC regions) into one pseudobulk
+    per (donor, cell type stratum); the pooled unit is the cohort's anchor and
+    the per-region runs of the members are supplementary. Region is ignored
+    (not a covariate); the manifest records ``pool`` with the members and
+    ``multi_tissue_donors``. Results go to ``<out_root>/_pooled/<pool_id>.*``
+    with ``db_id`` ``pool:<pool_id>``.
+    """
+    target = Target(db_id=f'pool:{pool_id}', study=POOLED_DIRNAME, stem=pool_id,
+                    group_id=members[0].group_id, members=list(members), pool_id=pool_id)
+    return process_target(target, store_root, out_root, facets, rscript, threads, memory_limit_gb, keep_work,
+                          None, None, False, tau_two_group, tau_braak_per_stage)
+
+
+def process_target(target: Target, store_root: Path, out_root: Path, facets: List[str],
+                   rscript: str, threads: int, memory_limit_gb: int, keep_work: bool,
+                   exclusion_from: Optional[List[str]], exclusion_where: Optional[List[str]],
+                   all_donors: bool, tau_two_group: float, tau_braak_per_stage: float) -> Dict[str, Any]:
+    """Shared implementation of ``process_dataset`` and ``process_pool``."""
     started = time.time()
-    md_yaml, _ = parse_md_file(entry.md_path)
-    api_config = get_api_config(md_yaml)
-    annotation = mus.resolve_annotation(entry.h5ad_path, root=store_root)
+    pooled = target.pool_id is not None
+    first = target.members[0]
+    md_by_db = {entry.db_id: parse_md_file(entry.md_path)[0] for entry in target.members}
+    md_yaml = md_by_db[first.db_id]
     md_rule = donor_exclusions.rule_from_md(md_yaml)
     exclusion_rule = donor_exclusions.combine(md_rule, exclusion_from or [], exclusion_where or [])
     variant = donor_exclusions.VARIANT_ALL_DONORS if (all_donors and md_rule) else donor_exclusions.VARIANT_COUNTED
+    facet_notes: Dict[str, str] = {}
+    for md in md_by_db.values():
+        facet_notes.update(facet_notes_from_md(md))
     manifest: Dict[str, Any] = {
-        'tool': TOOL_VERSION, 'db_id': entry.db_id, 'group': entry.study, 'file': entry.stem,
-        'dataset_sha256': md_yaml.get('sha256'), 'md_path': str(entry.md_path),
-        'md_sha256': md_file_sha256(entry.md_path),
+        'tool': TOOL_VERSION, 'db_id': target.db_id, 'group': target.study, 'file': target.stem,
+        'dataset_sha256': None if pooled else md_yaml.get('sha256'),
+        'md_path': str(first.md_path),
+        'md_sha256': pool_md_sha256(target.members) if pooled else md_file_sha256(first.md_path),
         'anthive4_git': git_head(script_dir.parent.parent),
         'h5adstore_git': git_head(store_root),
         'timestamp_utc': dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds'),
         'seed': SEED, 'facets_requested': facets,
-        'facet_notes': facet_notes_from_md(md_yaml),
+        'facet_notes': facet_notes,
+        'disease_basis': disease_basis_of(md_by_db.values()),
         'parameters': {
             'min_cells_per_sample': MIN_CELLS_PER_SAMPLE, 'min_donors_dataset': MIN_DONORS_DATASET,
             'min_donors_per_level': MIN_DONORS_PER_LEVEL, 'n_lt5_threshold': N_LT5_THRESHOLD,
@@ -859,44 +997,112 @@ def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: 
             'disease_provisional': True, 'normalisation': 'edgeR calcNormFactors TMM + limma voom',
             'gene_filter': 'edgeR filterByExpr(design) defaults',
             'eBayes': 'limma eBayes defaults (trend=FALSE, robust=FALSE)',
+            'treat': 'limma treat on the same fit; H0 |log2FC| <= tau; BH within the job (q_treat)',
+            'tau_two_group_log2': tau_two_group, 'tau_braak_per_stage_log2': tau_braak_per_stage,
+            'replicate_min_per_level': replicates.MIN_REPLICATES_PER_LEVEL,
+            'replicate_min_numeric': replicates.MIN_REPLICATES_NUMERIC,
             'duckdb_threads': threads, 'duckdb_memory_limit_gb': memory_limit_gb,
         },
         'r_versions': r_versions(rscript),
     }
-    eligible, reason = dataset_eligibility(entry, md_yaml, annotation, api_config)
-    if not eligible:
-        manifest.update(status='skipped', reason=reason)
+    members: List[H5adEntry] = []
+    member_notes: List[Dict[str, Any]] = []
+    annotations: Dict[str, Dict[str, Any]] = {}
+    for entry in target.members:
+        md = md_by_db[entry.db_id]
+        api = get_api_config(md)
+        annotation = mus.resolve_annotation(entry.h5ad_path, root=store_root)
+        annotations[entry.db_id] = annotation
+        eligible, reason = dataset_eligibility(entry, md, annotation, api)
+        if eligible:
+            members.append(entry)
+        elif not pooled:
+            manifest.update(status='skipped', reason=reason)
+            return manifest
+        else:
+            member_notes.append({'db_id': entry.db_id, 'status': 'skipped', 'reason': reason})
+    if not members:
+        manifest.update(status='skipped', reason='no eligible member file')
         return manifest
     if all_donors and md_rule is None:
         manifest.update(status='skipped', reason='--all-donors: this dataset has no facet_donor_exclusions '
                                                   'rule, its counted run already uses every donor')
         return manifest
-    layer_name, counts_parquet = counts_layer_for(entry, md_yaml)  # type: ignore[misc]
-    manifest['counts_layer'] = layer_name
+    if pooled:
+        manifest['pool'] = {'pool_id': target.pool_id, 'members': [e.db_id for e in members],
+                            'skipped_members': member_notes,
+                            'region_handling': 'ignored (not a covariate); donors pooled across member files',
+                            'member_md_sha256': {e.db_id: md_file_sha256(e.md_path) for e in members}}
+    layers: Dict[str, Tuple[str, Path]] = {}
+    for entry in members:
+        layers[entry.db_id] = counts_layer_for(entry, md_by_db[entry.db_id])  # type: ignore[assignment]
+    manifest['counts_layer'] = layers[members[0].db_id][0]
 
     work_dir = Path(tempfile.mkdtemp(prefix='ant_facet_', dir=os.environ.get('ANT_FACET_TMP')))
-    conn = open_dataset(entry, api_config, threads=threads, memory_limit_gb=memory_limit_gb,
-                        temp_dir=work_dir, store_root=store_root)
+    conns: Dict[str, duckdb.DuckDBPyConnection] = {}
     try:
-        cat_columns = view_columns(conn, 'obscat') if _has_view(conn, 'obscat') else {}
-        num_columns = view_columns(conn, 'obsnum') if _has_view(conn, 'obsnum') else {}
-        wanted = ['ant_donor', 'ant_donor_uid', 'ant_sex', 'ant_disease', 'ant_apoe', 'ant_apoe4_carrier', 'ant_apoe_carrier',
-                  'ant_braak', 'ant_age', 'ant_pmi', 'ant_cell_type', 'ant_author_cell_type',
-                  'ant_tissue', 'ant_region', 'ant_author_cluster']
-        extra_candidates = [c for c in cat_columns
-                            if (CELLTYPE_CANDIDATE_RE.match(c) or BATCH_NAME_RE.search(c))
-                            and not c.startswith('ant_')]
-        exclusion_columns = [c for c in (exclusion_rule.obs_columns if exclusion_rule else [])
-                             + donor_exclusions.declared_columns(md_yaml)
-                             if c not in wanted and c not in extra_candidates]
-        cells = cell_table(conn, wanted + extra_candidates + exclusion_columns)
-        if 'ant_donor' not in cells:
-            manifest.update(status='skipped', reason='no ant_donor facet in the current mapping')
+        for entry in members:
+            conns[entry.db_id] = open_dataset(entry, get_api_config(md_by_db[entry.db_id]), threads=threads,
+                                              memory_limit_gb=memory_limit_gb, temp_dir=work_dir,
+                                              store_root=store_root)
+        cat_columns: Dict[str, str] = {}
+        replicate_info: Dict[str, Dict[str, Any]] = {}
+        cell_parts: List[pd.DataFrame] = []
+        exclusion_reports: List[Dict[str, Any]] = []
+        for file_index, entry in enumerate(members):
+            conn = conns[entry.db_id]
+            member_cat = view_columns(conn, 'obscat') if _has_view(conn, 'obscat') else {}
+            for column, kind in member_cat.items():
+                cat_columns.setdefault(column, kind)
+            member_all = set(member_cat) | set(view_columns(conn, 'obsnum') if _has_view(conn, 'obsnum') else {})
+            replicate = replicates.resolve_replicate(md_by_db[entry.db_id], annotations[entry.db_id], member_all)
+            replicate_info[entry.db_id] = replicate
+            replicate_column = replicate['replicate_column']
+            wanted = ['ant_donor', 'ant_donor_uid', 'ant_sex', 'ant_disease', 'ant_apoe', 'ant_apoe4_carrier',
+                      'ant_apoe_carrier', 'ant_braak', 'ant_age', 'ant_pmi', 'ant_cell_type',
+                      'ant_author_cell_type', 'ant_tissue', 'ant_region', 'ant_author_cluster']
+            if replicate_column and replicate_column not in wanted:
+                wanted.append(replicate_column)
+            extra_candidates = [c for c in member_cat
+                                if (CELLTYPE_CANDIDATE_RE.match(c) or BATCH_NAME_RE.search(c))
+                                and not c.startswith('ant_')]
+            exclusion_columns = [c for c in (exclusion_rule.obs_columns if exclusion_rule else [])
+                                 + donor_exclusions.declared_columns(md_by_db[entry.db_id])
+                                 if c not in wanted and c not in extra_candidates]
+            cells_part = cell_table(conn, wanted + extra_candidates + exclusion_columns)
+            if replicate['replicate_unit'] == 'none' or not replicate_column:
+                manifest.update(status='skipped', reason='replicate_unit is none: cell-level, descriptive only')
+                return manifest
+            if replicate_column not in cells_part:
+                manifest.update(status='skipped', reason=f'replicate_column {replicate_column} is not an obs column')
+                return manifest
+            if replicate_column != 'ant_donor':
+                cells_part['ant_donor'] = cells_part[replicate_column]
+            cells_part, exclusion_report = donor_exclusions.apply_rule(cells_part, exclusion_rule, variant)
+            if exclusion_report is not None:
+                exclusion_reports.append(exclusion_report)
+            if pooled:
+                # one person, one key across the member files: the uid where it exists
+                if 'ant_donor_uid' in cells_part:
+                    cells_part['ant_donor'] = cells_part['ant_donor_uid'].where(
+                        cells_part['ant_donor_uid'].notna(), cells_part['ant_donor'])
+            cells_part['file_index'] = file_index
+            cell_parts.append(cells_part)
+        cells = pd.concat(cell_parts, ignore_index=True) if len(cell_parts) > 1 else cell_parts[0]
+        if exclusion_reports:
+            manifest['donor_exclusion'] = exclusion_reports[0] if len(exclusion_reports) == 1 else {
+                'members': exclusion_reports}
+        first_replicate = replicate_info[members[0].db_id]
+        if any((r['replicate_unit'], r['replicate_column']) != (first_replicate['replicate_unit'],
+                                                                first_replicate['replicate_column'])
+               for r in replicate_info.values()):
+            manifest.update(status='skipped', reason='member files declare different replicate units')
             return manifest
-        cells, exclusion_report = donor_exclusions.apply_rule(cells, exclusion_rule, variant)
-        if exclusion_report is not None:
-            manifest['donor_exclusion'] = exclusion_report
-        batch_column = donor_exclusions.declared_batch_column(md_yaml, cells) or find_batch_column(conn, cells)
+        manifest['replicate_unit'] = first_replicate['replicate_unit']
+        manifest['replicate_column'] = first_replicate['replicate_column']
+        manifest['replicate_basis'] = first_replicate['basis']
+        batch_column = None if pooled else (donor_exclusions.declared_batch_column(md_yaml, cells)
+                                            or find_batch_column(conns[first.db_id], cells))
         if batch_column is not None:
             cells['batch'] = cells[batch_column]
         manifest['batch_column'] = batch_column
@@ -918,12 +1124,12 @@ def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: 
         # replication can count distinct donors across datasets.
         donor_key_of, donor_key_stats = donor_key_map(
             zip(cells['ant_donor'], cells['ant_donor_uid'] if 'ant_donor_uid' in cells
-                else [None] * len(cells)), entry.group_id)
+                else [None] * len(cells)), target.group_id)
         manifest['donor_keys'] = {'basis': DONOR_COUNT_BASIS, **donor_key_stats}
         membership, strata_note = choose_strata(cells, cat_columns)
-        manifest['celltype_note'] = strata_note
+        manifest['celltype_note'] = _stratum_derivation_note(strata_note, pooled)
         manifest['celltype_sources'] = sorted(membership['source'].unique().tolist())
-        cell_frame = cells.assign(pos=np.arange(len(cells)))[['pos', 'cell_id', 'ant_donor']]
+        cell_frame = cells.assign(pos=np.arange(len(cells)))[['pos', 'cell_id', 'ant_donor', 'file_index']]
         usable = membership.merge(cell_frame, on='pos', how='inner')
         usable = usable[usable['ant_donor'].notna()].copy()
         usable['donor'] = usable['ant_donor'].astype(str)
@@ -961,12 +1167,16 @@ def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: 
         keep = keep.reset_index(drop=True)
         keep['sample_idx'] = np.arange(len(keep))
 
-        symbols = gene_symbols(conn)
+        symbols = gene_symbols(conns[members[0].db_id])
         job_records: List[Dict[str, Any]] = []
         if len(keep):
             pb_cells = usable.merge(keep[['stratum', 'donor', 'sample_idx']], on=['stratum', 'donor'],
                                     how='inner')
-            long_counts = pseudobulk(conn, counts_parquet, pb_cells[['cell_id', 'sample_idx']])
+            if not pooled:
+                long_counts = pseudobulk(conns[first.db_id], layers[first.db_id][1],
+                                         pb_cells[['cell_id', 'sample_idx']])
+            else:
+                long_counts, symbols = pooled_pseudobulk(members, conns, layers, pb_cells)
             manifest['pseudobulk']['n_nonzero_entries'] = int(len(long_counts))
             sample_key = {(row.stratum, row.donor): int(row.sample_idx) for row in keep.itertuples()}
 
@@ -997,7 +1207,8 @@ def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: 
             if sample_rows:
                 pd.DataFrame(sample_rows).to_csv(work_dir / 'samples.csv', index=False)
                 pd.DataFrame([{'job_id': j['job_id'], 'facet': j['facet'], 'stratum': j['stratum'],
-                               'numeric': int(j['facet'] == 'braak')}
+                               'numeric': int(j['facet'] == 'braak'),
+                               'tau': tau_braak_per_stage if j['facet'] == 'braak' else tau_two_group}
                               for j in jobs if j['status'] == 'ok']).to_csv(work_dir / 'jobs.csv', index=False)
                 run_r(rscript, work_dir)
                 results = pd.read_csv(work_dir / 'results.csv')
@@ -1012,18 +1223,32 @@ def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: 
         unit_records: List[Dict[str, Any]] = []
         summary_by_job = {int(r.job_id): r for r in job_summary.itertuples()} if len(job_summary) else {}
         for job in jobs:
+            numeric_facet = job['facet'] == 'braak'
             record: Dict[str, Any] = {
                 'facet': job['facet'], 'cell_type': job['label'], 'celltype_source': job['source'],
                 'status': job['status'],
                 'n_donors_with_sample': job['n_donors_with_sample'],
                 'level_counts': job.get('level_counts'),
+                'replicate_unit': first_replicate['replicate_unit'],
+                'replicate_column': first_replicate['replicate_column'],
             }
             if job['status'] != 'ok':
+                record.update(analysis_level=replicates.LEVEL_CELL, analysis_level_label=replicates.CELL_LEVEL_LABEL,
+                              analysis_level_reason=job['status'])
                 unit_records.append(record)
                 continue
+            level_counts = job['level_counts']
+            level = replicates.analysis_level(
+                first_replicate['replicate_unit'], numeric_facet,
+                n_per_level=None if numeric_facet else level_counts,
+                n_replicates=level_counts.get('n_donors') if numeric_facet else None,
+                n_distinct=level_counts.get('n_distinct') if numeric_facet else None)
+            record.update(analysis_level=level['analysis_level'], analysis_level_label=level['label'],
+                          analysis_level_reason=level['reason'],
+                          tau_log2=tau_braak_per_stage if numeric_facet else tau_two_group)
             summary = summary_by_job.get(job['job_id'])
             record['donor_key_digests'] = sorted({
-                key_digest(donor_key_of.get(str(donor), f'{entry.group_id}:{donor}'))
+                key_digest(donor_key_of.get(str(donor), f'{target.group_id}:{donor}'))
                 for donor in job['design']['donor']})
             record.update({
                 'n_lt5': bool(job['n_lt5']), 'batch_used': job['batch_used'],
@@ -1040,12 +1265,12 @@ def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: 
             unit = results[results['job_id'] == job['job_id']].copy() if len(results) else pd.DataFrame()
             if len(unit):
                 if job['n_lt5']:
-                    for column in ('t', 'p_value', 'q_value', 'ci_low', 'ci_high'):
+                    for column in ('t', 'p_value', 'q_value', 'p_treat', 'q_treat', 'ci_low', 'ci_high'):
                         unit[column] = np.nan
                 else:
                     record['n_sig_q05'] = int((unit['q_value'] < 0.05).sum())
-                level_counts = job['level_counts']
-                if job['facet'] == 'braak':
+                    record['n_sig_treat_q05'] = int((unit['q_treat'] < 0.05).sum())
+                if numeric_facet:
                     unit['n_donors_ref'] = np.nan
                     unit['n_donors_test'] = np.nan
                     unit['contrast'] = 'braak_per_unit'
@@ -1062,6 +1287,7 @@ def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: 
                 unit['facet'] = job['facet']
                 unit['cell_type'] = job['label']
                 unit['celltype_source'] = job['source']
+                unit['tau_log2'] = record['tau_log2']
                 unit['n_lt5'] = bool(job['n_lt5'])
                 unit['descriptive_only'] = bool(job['n_lt5'])
                 unit['batch_used'] = job['batch_used']
@@ -1074,17 +1300,18 @@ def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: 
             unit_records.append(record)
 
         manifest['units'] = unit_records
-        out_dir = donor_exclusions.result_dir(out_root, entry.study, md_rule is not None, all_donors)
+        out_dir = (out_root / POOLED_DIRNAME if pooled else
+                   donor_exclusions.result_dir(out_root, target.study, md_rule is not None, all_donors))
         out_dir.mkdir(parents=True, exist_ok=True)
         if frames:
             table = pd.concat(frames, ignore_index=True)
             table = table.merge(symbols[['gene_id', 'symbol']].rename(columns={'symbol': 'gene'}),
                                 on='gene_id', how='left')
-            table.insert(0, 'db_id', entry.db_id)
-            table.insert(1, 'dataset', entry.stem)
+            table.insert(0, 'db_id', target.db_id)
+            table.insert(1, 'dataset', target.stem)
             table['multi_tissue_donors'] = int((donor_table['n_tissues'] > 1).sum())
             table = table.drop(columns=['job_id'])
-            table.to_parquet(out_dir / f'{entry.stem}.facet_tests.parquet', index=False)
+            table.to_parquet(out_dir / f'{target.stem}.facet_tests.parquet', index=False)
             manifest['n_result_rows'] = int(len(table))
         manifest['multi_tissue_donors'] = int((donor_table['n_tissues'] > 1).sum())
 
@@ -1102,16 +1329,56 @@ def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: 
         composition['proportion'] = composition['n_cells'] / composition['n_cells_donor']
         composition = composition.merge(donor_table[['donor', 'sex', 'disease', 'apoe4_carrier', 'braak']],
                                         on='donor', how='left')
-        composition.to_parquet(out_dir / f'{entry.stem}.facet_composition.parquet', index=False)
+        composition.to_parquet(out_dir / f'{target.stem}.facet_composition.parquet', index=False)
 
         manifest.update(status='done', runtime_seconds=round(time.time() - started, 1))
-        manifest_path = out_dir / f'{entry.stem}.facet_run_manifest.json'
+        manifest_path = out_dir / f'{target.stem}.facet_run_manifest.json'
         manifest_path.write_text(json.dumps(manifest, indent=2, default=_json_default))
         return manifest
     finally:
-        conn.close()
+        for conn in conns.values():
+            conn.close()
         if not keep_work:
             shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def pooled_pseudobulk(members: List[H5adEntry], conns: Dict[str, duckdb.DuckDBPyConnection],
+                      layers: Dict[str, Tuple[str, Path]], pb_cells: pd.DataFrame
+                      ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Pseudobulk over several member files in one gene space.
+
+    Each file's counts are summed per sample in its own DuckDB, then the gene
+    ids are mapped to one id per gene symbol (counts of ids sharing a symbol
+    are added) and the files are added together per (sample, gene).
+
+    Args:
+        members: Member datasets, in ``file_index`` order.
+        conns: Open connection per member ``db_id``.
+        layers: ``(layer name, counts parquet)`` per member ``db_id``.
+        pb_cells: Cells to sum: ``cell_id``, ``sample_idx``, ``file_index``.
+
+    Returns:
+        ``(long counts (sample_idx, gene_id, count), genes (gene_id, gene_name, symbol))``
+        with ids of the pooled gene space (sorted by symbol).
+    """
+    per_file: List[pd.DataFrame] = []
+    symbol_tables: List[pd.DataFrame] = []
+    for file_index, entry in enumerate(members):
+        part = pb_cells[pb_cells['file_index'] == file_index]
+        if not len(part):
+            continue
+        counts = pseudobulk(conns[entry.db_id], layers[entry.db_id][1], part[['cell_id', 'sample_idx']])
+        symbols = gene_symbols(conns[entry.db_id])[['gene_id', 'symbol']]
+        per_file.append(counts.merge(symbols, on='gene_id', how='inner').drop(columns='gene_id'))
+        symbol_tables.append(symbols)
+    all_symbols = sorted(set(pd.concat(symbol_tables)['symbol'].astype(str)))
+    gene_id_of = {symbol: index for index, symbol in enumerate(all_symbols)}
+    long_counts = pd.concat(per_file, ignore_index=True)
+    long_counts['gene_id'] = long_counts['symbol'].astype(str).map(gene_id_of)
+    long_counts = (long_counts.groupby(['sample_idx', 'gene_id'], as_index=False)['count'].sum()
+                   .sort_values(['sample_idx', 'gene_id']).reset_index(drop=True))
+    genes = pd.DataFrame({'gene_id': range(len(all_symbols)), 'gene_name': all_symbols, 'symbol': all_symbols})
+    return long_counts, genes
 
 
 def _json_default(value: Any) -> Any:
@@ -1166,6 +1433,102 @@ def cmd_inventory(args: argparse.Namespace) -> None:
     print(frame['reason'].value_counts().to_string())
 
 
+def datasets_from_results(out_root: Path, store_root: Path) -> List[Dict[str, Any]]:
+    """Dataset dicts (as ``FacetResults`` expects them) for every gene run manifest under ``out_root``.
+
+    ``supplementary_all_donors`` folders and the donor-pooled ``_pooled`` folder are not datasets of
+    the catalogue (pools are added by the reader itself). ``is_secondary`` comes from the dataset
+    ``.md`` when it can be found.
+    """
+    datasets: List[Dict[str, Any]] = []
+    entries = {e.db_id: e for e in iter_h5adstore(store_root) if not e.study.startswith('_')}
+    for path in sorted(out_root.glob('*/*.facet_run_manifest.json')):
+        if path.parent.name.startswith('_'):
+            continue
+        manifest = json.loads(path.read_text())
+        db_id = manifest.get('db_id')
+        if not db_id or manifest.get('status') != 'done':
+            continue
+        entry = entries.get(db_id)
+        is_secondary = False
+        if entry is not None:
+            is_secondary = parse_md_file(entry.md_path)[0].get('is_secondary') is True
+        datasets.append({'db_id': db_id, 'group_folder': path.parent.name, 'stem': manifest['file'],
+                         'title': db_id, 'is_secondary': is_secondary})
+    return datasets
+
+
+def summarize_replication(out_root: Path, store_root: Path, out_dir: Path, genes: List[str],
+                          facets: Optional[List[str]] = None) -> pd.DataFrame:
+    """Replication tables over all gene results (exploratory), written to ``out_dir``.
+
+    * ``replication_summary.tsv``: per facet x cell type group: counted cohorts and units, genes testable
+      in at least two cohorts, replicated genes (r < 0.05, up / down), genes with k >= 2 (two cohorts
+      individually q_treat < 0.05 in one direction), cohorts;
+    * ``replicated_<facet>_<group>.tsv``: the replicated genes (r_value, p_pc, k, m, direction);
+    * ``candidates.tsv``: the requested ``genes`` in every facet x group where they were testable
+      (r_value, k, m, direction, replicated);
+    * ``units.tsv``: every tested unit with its cohort, anchor flag, reason, analysis level and donors.
+
+    Returns the summary frame.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    reader = facet_results.FacetResults(out_root)
+    datasets = datasets_from_results(out_root, store_root)
+    summary_rows: List[Dict[str, Any]] = []
+    candidate_rows: List[Dict[str, Any]] = []
+    unit_rows: List[Dict[str, Any]] = []
+    wanted = {gene.upper() for gene in genes}
+    for facet in facets or list(FACETS):
+        rows, units = reader.facet_gene_table(facet, datasets)
+        if len(units):
+            counted = reader.counting_units(units, True, facet)
+            for record in counted.to_dict(orient='records'):
+                unit_rows.append({
+                    'facet': facet, 'db_id': record['db_id'], 'cell_type': record['cell_type'],
+                    'celltype_source': record['celltype_source'], 'celltype_group': record['celltype_group'],
+                    'cohort': record.get('cohort'), 'anchor': bool(record['counted_effective']),
+                    'not_counted_reason': facet_results._not_counted_reason(record),
+                    'analysis_level': record.get('analysis_level'), 'n_donors': record.get('n_donors'),
+                    'disease_basis': record.get('disease_basis'), 'independence': record.get('independence')})
+        for group, family in reader.replication_families(facet, datasets).items():
+            frame = family['frame']
+            usable = frame[frame['r_value'].notna()]
+            replicated = usable[usable['r_value'] < 0.05]
+            cohorts = sorted(family['units']['cohort_label'].dropna().unique())
+            summary_rows.append({
+                'facet': facet, 'celltype_group': group, 'n_cohorts': len(cohorts),
+                'n_anchor_units': int(len(family['units'])), 'genes_in_family': int(len(usable)),
+                'replicated_r05': int(len(replicated)),
+                'replicated_up': int((replicated['r_direction'] == 'up').sum()),
+                'replicated_down': int((replicated['r_direction'] == 'down').sum()),
+                'genes_k_ge2': int((frame['k'] >= 2).sum()), 'cohorts': ';'.join(cohorts)})
+            if len(replicated):
+                replicated.sort_values('r_value')[['gene', 'r_value', 'p_pc', 'k', 'm', 'r_direction', 'agreement',
+                                                   'median_abs_logFC']].to_csv(
+                    out_dir / f'replicated_{facet}_{group.replace(" ", "_").replace("/", "-")}.tsv',
+                    sep='\t', index=False)
+            for gene_key in wanted & set(frame.index):
+                record = frame.loc[gene_key]
+                candidate_rows.append({
+                    'facet': facet, 'celltype_group': group, 'gene': record['gene'],
+                    'r_value': record['r_value'], 'p_pc': record['p_pc'], 'k': int(record['k']), 'm': int(record['m']),
+                    'direction': record['r_direction'], 'replicated': bool(record['r_value'] < 0.05)})
+    summary = pd.DataFrame(summary_rows)
+    summary.to_csv(out_dir / 'replication_summary.tsv', sep='\t', index=False)
+    pd.DataFrame(candidate_rows).to_csv(out_dir / 'candidates.tsv', sep='\t', index=False)
+    pd.DataFrame(unit_rows).to_csv(out_dir / 'units.tsv', sep='\t', index=False)
+    return summary
+
+
+def cmd_summarize(args: argparse.Namespace) -> None:
+    store_root = Path(args.h5adstore_root).resolve()
+    out_root = Path(args.out_root) if args.out_root else store_root / '_facet_tests'
+    genes = [g.strip() for g in args.genes.split(',') if g.strip()] if args.genes else []
+    summary = summarize_replication(out_root, store_root, Path(args.out_dir), genes)
+    print(summary.drop(columns='cohorts').to_string(index=False))
+
+
 def cmd_run(args: argparse.Namespace) -> None:
     store_root = Path(args.h5adstore_root).resolve()
     out_root = Path(args.out_root) if args.out_root else store_root / '_facet_tests'
@@ -1178,11 +1541,13 @@ def cmd_run(args: argparse.Namespace) -> None:
                  '(the counted run takes its exclusions from the .md facet_donor_exclusions rule)')
     if args.all_donors and (args.exclude_donors_from or args.exclude_donors_where):
         sys.exit('--all-donors cannot be combined with command line exclusions')
+    if not (args.all or args.db_id or args.pool):
+        sys.exit('give --db-id, --pool or --all')
     entries = {e.db_id: e for e in iter_h5adstore(store_root) if not e.study.startswith('_')}
     if args.all:
         targets = sorted(entries)
     else:
-        targets = [t.strip() for t in args.db_id.split(',')]
+        targets = [t.strip() for t in (args.db_id or '').split(',') if t.strip()]
     summary_rows = []
     for db_id in targets:
         entry = entries.get(db_id)
@@ -1215,7 +1580,8 @@ def cmd_run(args: argparse.Namespace) -> None:
                                        keep_work=args.keep_work,
                                        exclusion_from=args.exclude_donors_from,
                                        exclusion_where=args.exclude_donors_where,
-                                       all_donors=args.all_donors)
+                                       all_donors=args.all_donors, tau_two_group=args.tau_two_group,
+                                       tau_braak_per_stage=args.tau_braak_per_stage)
         except Exception as exc:
             print(f'[error] {db_id}: {exc}', file=sys.stderr)
             summary_rows.append({'db_id': db_id, 'status': 'error', 'reason': str(exc)[:300]})
@@ -1230,7 +1596,59 @@ def cmd_run(args: argparse.Namespace) -> None:
                   f'{manifest.get("n_result_rows", 0)} rows, {time.time() - begin:.0f}s')
         summary_rows.append({'db_id': db_id, 'status': manifest['status'],
                              'reason': manifest.get('reason', '')})
+    if not args.all_donors:
+        summary_rows.extend(run_pools(args, store_root, out_root, facets, entries))
     print(pd.DataFrame(summary_rows)['status'].value_counts().to_string() if summary_rows else 'nothing run')
+
+
+def run_pools(args: argparse.Namespace, store_root: Path, out_root: Path, facets: List[str],
+              entries: Dict[str, H5adEntry]) -> List[Dict[str, Any]]:
+    """Run the donor-pooled units named by ``--pool`` (all of them with ``--all``).
+
+    Pools are defined by the ``pool_members`` column of the cohort table (one
+    row per pool, comma-separated member db_ids; see
+    ``facet_results.pool_definitions``). A pool is skipped without ``--force``
+    when its manifest records the current md hashes of all members.
+    """
+    definitions = facet_results.pool_definitions(out_root)
+    if args.pool:
+        wanted = [p.strip() for p in args.pool.split(',') if p.strip()]
+    elif args.all:
+        wanted = sorted(definitions)
+    else:
+        return []
+    rows: List[Dict[str, Any]] = []
+    for pool_id in wanted:
+        member_ids = definitions.get(pool_id)
+        if not member_ids:
+            print(f'unknown pool {pool_id}', file=sys.stderr)
+            continue
+        members = [entries[m] for m in member_ids if m in entries]
+        out_manifest = out_root / POOLED_DIRNAME / f'{pool_id}.facet_run_manifest.json'
+        if not args.force and args.all and pool_manifest_current(out_manifest, members):
+            print(f'[skip existing] pool:{pool_id}')
+            continue
+        wait_for_load(args.max_load)
+        begin = time.time()
+        try:
+            manifest = process_pool(pool_id, members, store_root, out_root, facets, args.rscript,
+                                    threads=args.threads, memory_limit_gb=args.memory_gb,
+                                    keep_work=args.keep_work, tau_two_group=args.tau_two_group,
+                                    tau_braak_per_stage=args.tau_braak_per_stage)
+        except Exception as exc:
+            print(f'[error] pool:{pool_id}: {exc}', file=sys.stderr)
+            rows.append({'db_id': f'pool:{pool_id}', 'status': 'error', 'reason': str(exc)[:300]})
+            continue
+        if manifest['status'] == 'skipped':
+            print(f'[skip] pool:{pool_id}: {manifest["reason"]}')
+            out_manifest.parent.mkdir(parents=True, exist_ok=True)
+            out_manifest.write_text(json.dumps(manifest, indent=2, default=_json_default))
+        else:
+            n_ok = sum(1 for u in manifest['units'] if u['status'] == 'ok')
+            print(f'[done] pool:{pool_id}: {n_ok}/{len(manifest["units"])} units tested, '
+                  f'{manifest.get("n_result_rows", 0)} rows, {time.time() - begin:.0f}s')
+        rows.append({'db_id': f'pool:{pool_id}', 'status': manifest['status'], 'reason': manifest.get('reason', '')})
+    return rows
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1240,8 +1658,12 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument('--h5adstore-root', default=None)
     inventory = sub.add_parser('inventory', parents=[common], help='metadata-level eligibility table')
     inventory.add_argument('--out', default=None)
+    summarize = sub.add_parser('summarize', parents=[common], help='replication tables over all gene results')
+    summarize.add_argument('--out-dir', required=True)
+    summarize.add_argument('--out-root', default=None, help='default <h5adstore>/_facet_tests')
+    summarize.add_argument('--genes', default=None, help='comma-separated candidate genes for candidates.tsv')
     run = sub.add_parser('run', parents=[common], help='run facet tests')
-    group = run.add_mutually_exclusive_group(required=True)
+    group = run.add_mutually_exclusive_group()
     group.add_argument('--db-id', help='comma-separated db_ids (e.g. K22/AST)')
     group.add_argument('--all', action='store_true')
     run.add_argument('--facets', default=','.join(FACETS))
@@ -1251,6 +1673,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument('--memory-gb', type=int, default=24)
     run.add_argument('--max-load', type=float, default=12.0)
     run.add_argument('--force', action='store_true')
+    run.add_argument('--pool', default=None, help='comma-separated pool ids of the cohort table '
+                     '(column pool_members); with --all every pool runs after the datasets')
+    run.add_argument('--tau-two-group', type=float, default=TAU_TWO_GROUP,
+                     help='treat threshold, log2 fold change, two-group contrasts (default log2(1.1))')
+    run.add_argument('--tau-braak-per-stage', type=float, default=TAU_BRAAK_PER_STAGE,
+                     help='treat threshold per Braak stage, log2 (default log2(1.1)/3)')
     run.add_argument('--keep-work', action='store_true', help='keep the temp work dir (debug)')
     donor_exclusions.add_cli_arguments(run)
     return parser
@@ -1260,7 +1688,7 @@ def main() -> None:
     args = build_parser().parse_args()
     if args.h5adstore_root is None:
         args.h5adstore_root = str(default_store_root())
-    {'inventory': cmd_inventory, 'run': cmd_run}[args.command](args)
+    {'inventory': cmd_inventory, 'run': cmd_run, 'summarize': cmd_summarize}[args.command](args)
 
 
 if __name__ == '__main__':

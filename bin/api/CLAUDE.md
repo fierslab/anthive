@@ -106,6 +106,12 @@ and `lib/config.py` (anthive.yaml loader).
   cached until a file changes. `facets_visible` (config) only adds
   `hidden_by_config` to the facet listings; nothing is dropped from the API.
 
+- **Facet engine v2** (2026-10-05): dataset metadata (`/databases`, info) also carries
+  `replicate_unit`, `replicate_column`, `replicate_basis`, `disease_basis` (`_lineage_fields`); the
+  facet results serve `r_value`, `k`, `m`, `anchors`, `analysis_level` (see `doc/API_CHANGELOG.md`);
+  `/module-variability` and `gene-variance-by-facet` are marked `per-cell (descriptive)`; pooled
+  units (`pool:<id>`) come from `_facet_tests/_pooled/` through `FacetResults.pooled_datasets()`.
+
 - **Lineage and secondaries** (unreleased): dataset metadata carries
   `designation`, `reanalysis_of`, `donor_group`, `has_donor_uid`
   (`_lineage_fields`); `GET /donor-groups` lists the groups. Pooled or

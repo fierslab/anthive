@@ -109,6 +109,7 @@ from geneset import GenesetRegistry  # type: ignore  # noqa: E402
 from scores_parquet import scores_path  # type: ignore  # noqa: E402
 
 TOOL_VERSION = 'ant-facet-test-modules/1.0'
+EFFECT_GATE_STD = 0.2                # |std_effect| gate of a module hit (configurable in summarize)
 SEED = aft.SEED                     # 20261004, base seed; unit seeds derive from it
 N_PERMUTATIONS = 10000              # default shuffles (was 1,000 until 2026-10-05; floor of p_perm is 1 / 10,001)
 N_BINS = 25                         # scanpy score_genes defaults, as ant-score
@@ -541,6 +542,7 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
         'timestamp_utc': dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds'),
         'seed': SEED, 'facets_requested': facets, 'sources': list(sources),
         'facet_notes': aft.facet_notes_from_md(md_yaml),
+        'disease_basis': aft.disease_basis_of([md_yaml]),
         'versions': package_versions(),
         'parameters': {
             'n_permutations': n_permutations, 'permutation': 'facet labels shuffled across donors, '
@@ -556,6 +558,9 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
             'numeric_min_donors_for_p': aft.NUMERIC_MIN_DONORS_FOR_P,
             'min_donors_for_age_pmi': aft.MIN_DONORS_FOR_AGE_PMI,
             'min_covariate_coverage': aft.MIN_COVARIATE_COVERAGE, 'disease_provisional': True,
+            'effect_gate_std_effect': EFFECT_GATE_STD,
+            'effect_gate': 'passes_effect_gate = |std_effect| >= effect_gate_std_effect; modules count '
+                           'as hits only when they pass it as well as q < 0.05',
             'duckdb_threads': threads, 'duckdb_memory_limit_gb': memory_limit_gb,
         },
     }
@@ -585,10 +590,22 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
                  and not c.startswith('ant_')]
         exclusion_columns = [c for c in (exclusion_rule.obs_columns if exclusion_rule else [])
                              + aft.donor_exclusions.declared_columns(md_yaml) if c not in wanted and c not in extra]
+        member_columns = set(cat_columns) | set(aft.view_columns(conn, 'obsnum') if aft._has_view(conn, 'obsnum') else {})
+        replicate = aft.replicates.resolve_replicate(md_yaml, annotation, member_columns)
+        manifest.update(replicate_unit=replicate['replicate_unit'], replicate_column=replicate['replicate_column'],
+                        replicate_basis=replicate['basis'])
+        if replicate['replicate_column'] and replicate['replicate_column'] not in wanted:
+            wanted.append(replicate['replicate_column'])
         cells = aft.cell_table(conn, wanted + extra + exclusion_columns)
-        if 'ant_donor' not in cells:
-            manifest.update(status='skipped', reason='no ant_donor facet in the current mapping')
+        if replicate['replicate_unit'] == 'none' or not replicate['replicate_column']:
+            manifest.update(status='skipped', reason='replicate_unit is none: cell-level, descriptive only')
             return manifest
+        if replicate['replicate_column'] not in cells:
+            manifest.update(status='skipped',
+                            reason=f'replicate_column {replicate["replicate_column"]} is not an obs column')
+            return manifest
+        if replicate['replicate_column'] != 'ant_donor':
+            cells['ant_donor'] = cells[replicate['replicate_column']]
         cells, exclusion_report = aft.donor_exclusions.apply_rule(cells, exclusion_rule, variant)
         if exclusion_report is not None:
             manifest['donor_exclusion'] = exclusion_report
@@ -712,10 +729,23 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
             record: Dict[str, Any] = {'facet': job['facet'], 'cell_type': job['label'],
                                       'celltype_source': job['source'], 'status': job['status'],
                                       'n_donors_with_sample': job['n_donors_with_sample'],
-                                      'level_counts': job.get('level_counts')}
+                                      'level_counts': job.get('level_counts'),
+                                      'replicate_unit': replicate['replicate_unit'],
+                                      'replicate_column': replicate['replicate_column']}
             if job['status'] != 'ok':
+                record.update(analysis_level=aft.replicates.LEVEL_CELL,
+                              analysis_level_label=aft.replicates.CELL_LEVEL_LABEL,
+                              analysis_level_reason=job['status'])
                 unit_records.append(record)
                 continue
+            numeric_facet = job['facet'] == 'braak'
+            level = aft.replicates.analysis_level(
+                replicate['replicate_unit'], numeric_facet,
+                n_per_level=None if numeric_facet else job['level_counts'],
+                n_replicates=job['level_counts'].get('n_donors') if numeric_facet else None,
+                n_distinct=job['level_counts'].get('n_distinct') if numeric_facet else None)
+            record.update(analysis_level=level['analysis_level'], analysis_level_label=level['label'],
+                          analysis_level_reason=level['reason'])
             design = job['design'].reset_index(drop=True)
             record['donor_key_digests'] = sorted({
                 aft.key_digest(donor_key_of.get(str(donor), f'{entry.group_id}:{donor}'))
@@ -803,6 +833,7 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
                 frame['n_donors'] = job['n_donors_analysed']
                 frame['n_lt5'] = bool(job['n_lt5'])
                 frame['descriptive_only'] = bool(job['n_lt5'])
+                frame['passes_effect_gate'] = frame['std_effect'].abs() >= EFFECT_GATE_STD
                 frame['batch_used'] = job['batch_used']
                 frame['batch_confounded'] = job['batch_confounded']
                 frame['covariates'] = ','.join(job['covariates'])
@@ -846,7 +877,8 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
 # Cross-dataset summary (exploratory)
 # --------------------------------------------------------------------------
 
-def summarize_results(out_root: Path, out_dir: Path, cohort_table: Optional[Path]) -> None:
+def summarize_results(out_root: Path, out_dir: Path, cohort_table: Optional[Path],
+                      min_std_effect: float = 0.2) -> None:
     """Tables over all module result parquets: units, hits, recurring modules.
 
     Recurrence counts (dataset, stratum) units where a module is significant at
@@ -855,7 +887,8 @@ def summarize_results(out_root: Path, out_dir: Path, cohort_table: Optional[Path
     cohorts with the DRAFT cohort selection table (donor-overlap caveat of the
     design note): datasets with a role of duplicate / supplement / do not pool /
     never alongside / alternative B are dropped, and recurrence is counted over
-    distinct cohorts (``n_cohorts``), not files (``n_datasets``).
+    distinct cohorts (``n_cohorts``), not files (``n_datasets``). A hit also needs
+    ``|std_effect| >= min_std_effect`` (default 0.2, the effect-size gate).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     files = sorted(out_root.glob('*/*.facet_module_tests.parquet'))
@@ -864,7 +897,8 @@ def summarize_results(out_root: Path, out_dir: Path, cohort_table: Optional[Path
         return
     table = pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
     table['unit'] = table['db_id'] + '|' + table['celltype_source'] + '::' + table['cell_type']
-    table['significant'] = (table['q_param'] < Q_THRESHOLD) & (table['q_perm'] < Q_THRESHOLD)
+    gate = (table['std_effect'].abs() >= min_std_effect)
+    table['significant'] = (table['q_param'] < Q_THRESHOLD) & (table['q_perm'] < Q_THRESHOLD) & gate
     table['sign'] = np.sign(table['estimate'])
     units = (table.groupby(['facet', 'method', 'source', 'unit', 'db_id', 'cell_type', 'celltype_source'])
              .agg(n_modules=('module', 'size'), n_donors=('n_donors', 'first'), n_lt5=('n_lt5', 'first'),
@@ -1043,7 +1077,7 @@ def cmd_summarize(args: argparse.Namespace) -> None:
     store_root = Path(args.h5adstore_root).resolve()
     out_root = Path(args.out_root) if args.out_root else store_root / '_facet_tests'
     cohort = Path(args.cohort_table) if args.cohort_table else out_root / 'cohort_selection.DRAFT.tsv'
-    summarize_results(out_root, Path(args.out_dir), cohort)
+    summarize_results(out_root, Path(args.out_dir), cohort, min_std_effect=args.min_std_effect)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1078,6 +1112,8 @@ def build_parser() -> argparse.ArgumentParser:
     summarize = sub.add_parser('summarize', parents=[common], help='cross-dataset tables (exploratory)')
     summarize.add_argument('--out-dir', required=True)
     summarize.add_argument('--cohort-table', default=None)
+    summarize.add_argument('--min-std-effect', type=float, default=EFFECT_GATE_STD,
+                           help='effect-size gate on |std_effect| for a hit (default 0.2)')
     return parser
 
 

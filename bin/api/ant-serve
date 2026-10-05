@@ -629,7 +629,9 @@ def _json_serial(obj: object) -> str:
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
-def _lineage_fields(file_metadata: Dict[str, Any], obs_categorical: List[str]) -> Dict[str, Any]:
+def _lineage_fields(file_metadata: Dict[str, Any], obs_categorical: List[str],
+                    annotation: Optional[Dict[str, Any]] = None,
+                    obs_numerical: Optional[List[str]] = None) -> Dict[str, Any]:
     """Lineage of one dataset from its ``.md`` (audit decision L3).
 
     ``is_secondary`` is True only for an explicit ``is_secondary: true``.
@@ -638,8 +640,18 @@ def _lineage_fields(file_metadata: Dict[str, Any], obs_categorical: List[str]) -
     2026-10 audit could not decide). ``reanalysis_of`` is a list of db_ids
     (empty for primaries and for unresolved datasets), ``donor_group`` a
     slug or None, and ``has_donor_uid`` says whether the served obscat view
-    carries ``ant_donor_uid``.
+    carries ``ant_donor_uid``. ``replicate_unit`` (donor, animal, sample,
+    none) and ``replicate_column`` come from the ``.md`` or, when undeclared,
+    are inferred (``lib/replicates.py``); ``replicate_basis`` says which
+    (``declared`` or ``inferred``). ``disease_basis`` is the ``.md`` key
+    (nia_reagan, braak_cerad, adnc, clinical_dx, author_dx) or None.
     """
+    import replicates  # noqa: PLC0415
+    try:
+        replicate = replicates.resolve_replicate(
+            file_metadata, annotation or {}, list(obs_categorical or []) + list(obs_numerical or []))
+    except replicates.ReplicateError:
+        replicate = {'replicate_unit': None, 'replicate_column': None, 'basis': 'invalid'}
     targets = file_metadata.get('reanalysis_of') or []
     if isinstance(targets, str):
         targets = [targets]
@@ -651,7 +663,23 @@ def _lineage_fields(file_metadata: Dict[str, Any], obs_categorical: List[str]) -
         'reanalysis_of': [str(t) for t in targets],
         'donor_group': str(donor_group) if donor_group else None,
         'has_donor_uid': 'ant_donor_uid' in (obs_categorical or []),
+        'replicate_unit': replicate['replicate_unit'],
+        'replicate_column': replicate['replicate_column'],
+        'replicate_basis': replicate['basis'],
+        'disease_basis': file_metadata.get('disease_basis'),
     }
+
+
+def _per_cell_basis_for(db_id: str) -> Dict[str, Any]:
+    """``basis`` / ``replicate_unit`` marker of the per-cell variability numbers of a dataset.
+
+    The numbers of ``/module-variability`` and ``gene-variance-by-facet`` treat
+    cells as units, so they are descriptive (``per-cell (descriptive)``)
+    whether a replicate-level analysis exists (``/databases/{id}/facet-tests``)
+    or is impossible (``replicate_level_analysis``); see ``lib/replicates.py``.
+    """
+    import replicates  # noqa: PLC0415
+    return replicates.per_cell_basis((registry.metadata_cache.get(db_id) or {}).get('replicate_unit'))
 
 
 def _caveats_or_empty(file_metadata: dict, md_path) -> list:
@@ -1511,7 +1539,7 @@ class DatabaseRegistry:
             # only on secondaries), the donor pool it shares with sibling
             # datasets (slug) and whether it publishes the cross-dataset
             # donor id ant_donor_uid. See _lineage_fields.
-            **_lineage_fields(file_metadata, obs_categorical),
+            **_lineage_fields(file_metadata, obs_categorical, ann, obs_numerical),
 
             # Biology & study annotation (resolved from .h5ad.mus + .env cascade)
             'organism':         ann.get('organism'),
@@ -4046,6 +4074,10 @@ def get_facet_tests(db_id: str):
           "status": "tested",            # tested | not_tested | not_run
           "reason": null,                # why not tested (manifest or run log)
           "n_units": 4, "n_units_tested": 4, "q_threshold": 0.05,
+          "replicate_unit": "donor",     # what a replicate is (donor | animal | sample | none), from the .md or inferred
+          "replicate_column": "ant_donor", "replicate_basis": "declared",   # or "inferred"
+          "disease_basis": "braak_cerad",  # what ant_disease is based on (nia_reagan | braak_cerad | adnc | clinical_dx | author_dx)
+          "pool": null,                  # donor-pooled units only: {pool_id, members, skipped_members, region_handling}
           "dataset_changed": false,      # dataset sha256 differs from the run's
           "files": {"genes": true, "modules": true, "composition": true},
           "runs": {"genes": {tool, timestamp_utc, seed, versions, dataset_sha256,
@@ -4057,6 +4089,11 @@ def get_facet_tests(db_id: str):
             "celltype_source": "constant_all_cells",
             "tested": true, "status_genes": "ok", "status_modules": "ok",
             "reason": null,              # only on untested units
+            "analysis_level": "replicate",   # replicate | cell
+            "analysis_level_label": "replicate level",   # or "cell-level, descriptive only"
+            "analysis_level_reason": null,   # why a unit is cell-level (too few replicates, no replicate unit)
+            "replicate_unit": "donor", "replicate_column": "ant_donor",
+            "tau_log2": 0.1375,          # limma treat threshold of p_treat / q_treat (Braak: per stage)
             "contrast": "m_vs_f", "level_ref": "f", "level_test": "m",
             "level_counts": {"f": 51, "m": 33},   # donors with a sample per level
             "n_donors": 84, "n_donors_ref": 51, "n_donors_test": 33,
@@ -4091,6 +4128,14 @@ def get_facet_tests(db_id: str):
     ``model`` is built from the run manifests; anything a manifest does not
     record reads "not recorded". ``genes`` / ``modules`` are null when that
     run has no record of the unit.
+
+    ``analysis_level`` (2026-10-05): ``replicate`` when the dataset has a
+    replicate unit and at least 3 replicates per level (Braak: 6 spanning the
+    range) and the unit is tested at the replicate level (pseudobulk by
+    ``replicate_column``, not necessarily a donor: animals for xenografts);
+    ``cell`` ("cell-level, descriptive only") with ``analysis_level_reason``
+    otherwise. Gene rows (``/genes``) also carry ``p_treat`` / ``q_treat``
+    (limma treat, H0 |log2FC| <= ``tau_log2``).
 
     ``descriptive_only``: a level has fewer than 5 donors (Braak: fewer than
     10), so p, q, t and CI are NULL and only the effect estimate is reported.
@@ -12919,6 +12964,7 @@ def get_module_variability(
                 "X-Rows-Returned": str(len(working)),
                 "X-Truncated": "true" if truncated else "false",
                 "X-Excluded-Secondary": str(n_excluded_secondary),
+                "X-Basis": "per-cell (descriptive)",
                 **extra_headers,
             },
         )
@@ -12933,6 +12979,8 @@ def get_module_variability(
             for skipped_id, reason in _cell_level_skips(_module_variability_path()).items()
             if not dataset or skipped_id == dataset
         },
+        # cells are not replicates: these numbers are descriptive (rows carry replicate_unit per dataset)
+        "basis": "per-cell (descriptive)",
         "rows": working.to_dict(orient="records"),
     }
     if extra_headers:
@@ -13202,27 +13250,30 @@ def get_facet_recurring_genes(
     n: int = Query(50, ge=1, le=500, description="Rows returned"),
     exclude_secondary: bool = Query(True, description="Secondary datasets (reanalyses) are listed, flagged is_secondary, but not counted towards replication"),
 ):
-    """Recurring genes of one facet in one cell type group: genes ranked by
-    k, the number of independent cohorts with q < 0.05 and the same sign
-    (highest first), then by ``agreement``, the fraction of the tested
-    cohorts whose effect has that sign, significant or not (highest first),
-    then by ``median_abs_logFC`` over the tested cohorts (largest first). The
-    number of cohorts tested is never a ranking key by itself, so "2 of 2"
-    does not outrank "2 of 4" for having fewer tests (``ranking`` states the
-    rule). Rows: ``gene, cohorts_sig_same_sign, cohorts_tested,
-    cohorts_same_sign, agreement, direction, sign_discordant, units_up,
-    units_down, median_abs_logFC, max_abs_logFC, cohorts, apoe_locus``;
+    """Genes that replicate for one facet in one cell type group.
+
+    A gene is listed when its partial-conjunction r-value is below 0.05
+    (Benjamini and Heller 2008; ``definition``): the effect is present in at
+    least 2 cohorts in the same direction. Each cohort contributes one anchor
+    unit per cell type group (a donor-pooled unit for multi-region cohorts), its
+    one-sided limma treat p value (H0: |log2FC| <= log2(1.1); Braak
+    log2(1.1)/3 per stage); the r-value is BH-adjusted over the genes of the
+    group. Ranked by ``r_value`` ascending, then ``k`` (cohorts with
+    q_treat < 0.05 in that direction), ``agreement`` and ``median_abs_logFC``
+    (``ranking`` states the rule). Rows: ``gene, r_value, p_pc, k, m,
+    replicated, direction, agreement, median_abs_logFC,
+    cohorts, cohorts_tested_labels, overlap_unknown, cohorts_overlap_unknown,
+    apoe_locus`` and the legacy ``cohorts_sig_same_sign`` (= k),
+    ``cohorts_tested`` (= m), ``cohorts_same_sign``, ``sign_discordant``.
+    ``n_replicated`` and ``n_genes_in_family`` give the counts of the group;
     ``cell_types`` lists the groups (with their raw ``labels``) and counted
     cohorts. Cell types are counted by group (``lib/celltype_groups.yaml``).
 
-    Exploratory. Each unit is one dataset and cell type, tested separately on
-    donor pseudobulks (limma-voom, n = donors); nothing is pooled and there is
-    no meta-analysis. Cohorts come from the DRAFT cohort selection table:
-    ``replication`` follows ``definition`` (q < 0.05 with the same sign in k of
-    m independent cohorts, a cohort counts once, cell types counted by their
-    group in ``lib/celltype_groups.yaml``, secondary datasets not counted).
+    Exploratory. The disease facet only combines pathology-based definitions
+    (``disease_basis`` nia_reagan, braak_cerad, adnc). Cohorts come from the
+    DRAFT cohort selection table; cohorts flagged ``overlap_unknown`` never had
+    their donor overlap checked.
     """
-    facet_name = canonical_facet(facet_name)  # deprecated alias, one release
     test_facet = _tested_facet(facet_name)
     return _facet_results().recurring_genes(test_facet, _facet_test_datasets(), cell_type=cell_type, limit=n,
                                             exclude_secondary=exclude_secondary)
@@ -13244,12 +13295,22 @@ def get_facet_gene_effects(
     (exploratory, provisional disease vocabulary, APOE locus note for APOE,
     APOC1, APOC1P1, TOMM40, NECTIN2, PVRL2).
 
-    Exploratory. Each unit is one dataset and cell type, tested separately on
-    donor pseudobulks (limma-voom, n = donors); nothing is pooled and there is
-    no meta-analysis. Cohorts come from the DRAFT cohort selection table:
-    ``replication`` follows ``definition`` (q < 0.05 with the same sign in k of
-    m independent cohorts, a cohort counts once, cell types counted by their
-    group in ``lib/celltype_groups.yaml``, secondary datasets not counted).
+    Exploratory. Each unit is one dataset (or donor-pooled cohort unit) and cell
+    type, tested separately on replicate pseudobulks (limma-voom, n =
+    replicates). ``replication`` per cell type group follows ``definition``:
+    ``r_value`` (partial conjunction over the cohorts' anchor units, replicated
+    when below 0.05), ``p_pc``, ``k`` (cohorts with q_treat < 0.05 in that
+    direction), ``m`` (cohorts tested), ``replicated``, ``r_direction``,
+    ``anchors`` (one per counted cohort: cohort, db_id, pooled, logFC, p_treat,
+    q_treat), ``overlap_unknown`` / ``cohorts_overlap_unknown`` (donor overlap
+    never checked) and ``badge``. The old count (q_value < 0.05) stays in
+    ``cohorts_tested``, ``cohorts_sig_same_sign``, ``direction``, ``cohorts_up``,
+    ``cohorts_down``, ``sign_discordant`` and ``legacy_badge`` for one release.
+    Unit cards carry ``anchor`` (= ``counted``), ``pooled``, ``p_treat``,
+    ``q_treat``, ``tau_log2``, ``analysis_level``, ``independence``,
+    ``disease_basis`` and ``not_counted_reason`` (for example "supplementary:
+    pool:madrc_myeloid is the anchor of this cohort for this cell type group").
+    Cohorts come from the DRAFT cohort selection table.
     """
     facet_name = canonical_facet(facet_name)  # deprecated alias, one release
     test_facet = _tested_facet(facet_name)
@@ -13268,12 +13329,22 @@ def get_gene_facet_effects(
     ``/facets/{facet}/effects``. The first call per facet reads every result
     file (a few seconds); later calls are cached until a file changes.
 
-    Exploratory. Each unit is one dataset and cell type, tested separately on
-    donor pseudobulks (limma-voom, n = donors); nothing is pooled and there is
-    no meta-analysis. Cohorts come from the DRAFT cohort selection table:
-    ``replication`` follows ``definition`` (q < 0.05 with the same sign in k of
-    m independent cohorts, a cohort counts once, cell types counted by their
-    group in ``lib/celltype_groups.yaml``, secondary datasets not counted).
+    Exploratory. Each unit is one dataset (or donor-pooled cohort unit) and cell
+    type, tested separately on replicate pseudobulks (limma-voom, n =
+    replicates). ``replication`` per cell type group follows ``definition``:
+    ``r_value`` (partial conjunction over the cohorts' anchor units, replicated
+    when below 0.05), ``p_pc``, ``k`` (cohorts with q_treat < 0.05 in that
+    direction), ``m`` (cohorts tested), ``replicated``, ``r_direction``,
+    ``anchors`` (one per counted cohort: cohort, db_id, pooled, logFC, p_treat,
+    q_treat), ``overlap_unknown`` / ``cohorts_overlap_unknown`` (donor overlap
+    never checked) and ``badge``. The old count (q_value < 0.05) stays in
+    ``cohorts_tested``, ``cohorts_sig_same_sign``, ``direction``, ``cohorts_up``,
+    ``cohorts_down``, ``sign_discordant`` and ``legacy_badge`` for one release.
+    Unit cards carry ``anchor`` (= ``counted``), ``pooled``, ``p_treat``,
+    ``q_treat``, ``tau_log2``, ``analysis_level``, ``independence``,
+    ``disease_basis`` and ``not_counted_reason`` (for example "supplementary:
+    pool:madrc_myeloid is the anchor of this cohort for this cell type group").
+    Cohorts come from the DRAFT cohort selection table.
     """
     datasets = _facet_test_datasets()
     reader = _facet_results()
@@ -14060,6 +14131,7 @@ async def gene_variance_by_facet(
                     for entry in top_rows
                 ],
                 'served_from':       'parquet',
+                **_per_cell_basis_for(db_id),
             }
             _gene_variance_cache_put(cache_key, result)
             return result
@@ -14256,6 +14328,7 @@ async def gene_variance_by_facet(
             'n_genes_returned': len(genes_payload),
             'genes': genes_payload,
             'served_from': 'live',
+            **_per_cell_basis_for(db_id),
         }
 
     try:

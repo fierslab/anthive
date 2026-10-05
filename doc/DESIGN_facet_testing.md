@@ -1,8 +1,29 @@
-# Design: donor-level facet testing (v1)
+# Design: donor-level facet testing (v2, 2026-10-05)
 
 Status: v1 implemented in `bin/annot/ant-facet-test` (+ `bin/annot/facet_test_limma.R`);
 module-level tests (v1.1) in `bin/annot/ant-facet-test-modules`.
 All output is exploratory. Date 2026-10-04.
+
+## v2 (2026-10-05): what changed
+
+Approved after the two reviews of the replication layer (vote counting on per-unit FDR calls,
+any-unit-per-cohort, 1,100 donors voting on 3 percent changes, ROSMAP counted through a
+substate, Lee2026 and ROSMAP sharing persons, "AD vs control" meaning different things).
+
+1. **Replication = partial conjunction** (Benjamini and Heller 2008) on limma **treat** p values
+   (H0 |log2FC| <= tau), **one anchor unit per cohort and cell type group**, r-values BH-adjusted
+   over the genes of a facet x group. `k` (cohorts with q_treat < 0.05) is only descriptive. See
+   "Replication (v2)".
+2. **Donor-pooled units** for multi-region cohorts (MADRC, SEA-AD MTG + PFC) and a derived
+   **group-pool stratum** per cell type group (ROSMAP M23/IMM Mic subclusters pooled into
+   whole microglia).
+3. **Replicate unit** (`replicate_unit`, `replicate_column`): the pseudobulk unit is the
+   dataset's replicate (donor, animal, sample), and a unit without enough replicates is
+   "cell-level, descriptive only".
+4. **Common disease definition** (`disease_basis`): Braak x CERAD 2x2 for datasets with both
+   scores; cohorts are only combined for disease when their definition is pathology based.
+5. Effect-size gate for modules (`|std_effect| >= 0.2`), SEA-AD microglia without the PVM,
+   lymphocyte and monocyte supertypes, independence flag for cohorts never checked.
 
 ## Why
 
@@ -29,7 +50,9 @@ and the served files, before any expression data is read):
 * a served raw-counts layer exists (`counts`, `UMIs`, `raw`, `raw_counts`
   by_gene sidecar) whose recorded `min_nonzero` is 1 (a normalised layer
   that happens to be named `counts`, e.g. Aldinger2021, is rejected),
-* at least 6 donors with a non-NULL `ant_donor` in the current mapping.
+* at least 6 donors with a non-NULL `ant_donor` in the current mapping (v2: at least 6
+  replicates in the dataset's `replicate_column`, see "Replicate unit and analysis level"),
+* a `replicate_unit` other than `none`.
 
 Bulk datasets are excluded because a (donor, cell type) pseudobulk with a 10
 cell minimum is undefined for one sample per donor.
@@ -91,6 +114,71 @@ resolved silently.
    and handles covariates. A simpler per-gene Wilcoxon test would not allow
    covariate adjustment; a cell-level mixed model is far more expensive and
    offers no gain once cells are collapsed within donor.
+
+## Replicate unit and analysis level
+
+A dataset's `.md` declares what an independent replicate is: `replicate_unit` (`donor`, `animal`,
+`sample`, `none`) and `replicate_column` (the obs column identifying it; `ant_donor` for the
+human cohorts, `hash.ID` / `Mouse_ID` / `mouse.id` for xenografts). Without the keys it is
+inferred (`lib/replicates.py`: human with `ant_donor` is a donor; mouse or xenograft with an animal
+id column is an animal; in a xenograft `ant_donor` is the human donor line and never the animal;
+otherwise `none`). `bin/meta/ant-set-replicate` populated all 168 datasets (99 donor, 24
+animal, 21 sample, 24 none; the `none` ones and the reasons are in `doc/DESIGN_canonical_columns.md`).
+`ant-md-check` warns when the key is missing and errors when `replicate_column` is not an obs column.
+
+The shared rule (`replicates.analysis_level`), per dataset x stratum x facet: a unit is analysed at
+the **replicate level** (pseudobulk by `replicate_column`, the tool's former donor) when
+`replicate_unit` is not `none` and there are at least 3 replicates in every level of a two-group
+facet, or at least 6 replicates spanning at least two distinct values of a numeric facet (Braak).
+Otherwise the unit is **cell-level, descriptive only**: no test, with the reason. The existing
+`n_lt5` rule (fewer than 5 per level: no p, q, CI) stays on top of it. Both tools record
+`replicate_unit`, `replicate_column`, `replicate_basis` in the run manifest, and
+`analysis_level`, `analysis_level_label`, `analysis_level_reason` on every unit; the API serves
+them per unit (`/databases/{id}/facet-tests`). Facet tests of xenograft or mouse datasets are not run
+today because the four facets (sex, disease, APOE, Braak) do not exist there; the plumbing is in
+place for treatment or genotype facets.
+
+The per-cell tools (`ant-module-variability`, `ant-gene-variance-precompute`) write a
+`replicate_unit` column into their aggregate; the API marks their numbers
+`per-cell (descriptive)` (`basis`), whether a replicate-level analysis exists or is impossible.
+
+## Effect-size gate and error control (limma treat)
+
+`facet_test_limma.R` also runs `limma::treat` on the same linear fit (H0: |log2FC| <= tau) and
+writes `p_treat` and `q_treat` (BH within the job) next to the point-null `p_value` / `q_value`.
+tau is log2(1.1) for two-group contrasts (a 10 percent change; the lower end of Smyth's range,
+McCarthy and Smyth 2009) and log2(1.1) / 3 per stage for Braak (10 percent over three stages;
+a per-stage slope has to be scaled, otherwise the gate is 3 times too strict); both are command
+line options (`--tau-two-group`, `--tau-braak-per-stage`, log2 units) and are recorded as
+`tau_log2` on every row and in the manifest. `p_treat` is the one-sided p in the direction of
+the observed sign (the opposite tail of treat's p is negligible), so a gene whose effect is
+below tau has p_treat above 0.5. For modules a hit also needs `|std_effect| >= 0.2`
+(column `passes_effect_gate`; `ant-facet-test-modules summarize --min-std-effect`).
+
+## Donor-pooled units and group-pool strata
+
+**Pooled units.** A cohort that is delivered as one file per region (MADRC: WA4 myeloid and
+SP4 astrocytes, five regions from about 30 donors; SEA-AD: one MTG and one PFC file per cell
+class) would contribute five correlated "cohorts" or a region-matched anchor of arbitrary
+choice. `ant-facet-test run --pool ID` (or `run --all`, pools after datasets) pools a donor's
+cells over the member files into **one pseudobulk per (donor, cell type stratum)**: the counts
+of each member are summed in DuckDB, gene ids are mapped to symbols (counts of ids sharing a
+symbol are added) and summed across files; the donor key is `ant_donor_uid` where it exists.
+Region is not a covariate (ignored, recorded in the manifest: `pool.region_handling`,
+`multi_tissue_donors`); the batch column is not used for pools. A pool is a row of the cohort
+table whose `db_id` is `pool:<id>` and whose `pool_members` lists the member `db_id`s; output goes
+to `<results>/_pooled/<id>.facet_*` with `db_id` `pool:<id>`. Members keep their own runs as
+supplementary units. Pools defined on 2026-10-05: `madrc_myeloid`, `madrc_astro`, and seven
+SEA-AD classes (`seaad_microglia`, `_astro`, `_endothelial`, `_inhibitory`, `_opc`, `_oligo`, `_vlmc`).
+The module tool has no pooled units; its recurring-module summary still uses the member files.
+
+**Group-pool strata.** When a stratifier source has two or more labels in one cell type group
+(ROSMAP M23/IMM: Mic P2RY12, Mic TPT1, Mic MKI67, Mic DUSP1 are all microglia; Schirmer2019
+EN-L2-3-A, EN-L4, ...), `choose_strata` adds a derived stratum with the group name as label and
+source `group_pool` containing all those cells. Priority for the anchor: dataset constant, then
+`group_pool`, then per-cell `ant_cell_type`, author cell type columns, author clusters. This
+replaces the Bonferroni-over-substrata rule for such datasets (a whole-microglia unit exists, so a
+substate with a lucky q cannot speak for the cohort).
 
 ## Thresholds and flags
 
@@ -251,6 +339,28 @@ tool commit, seed), independent of the DuckDB thread count and of machine load
   output predates the ant_age top-coding fix (it reproduces exactly from the
   pre-fix mapping).
 
+## Common disease definition
+
+`disease_basis: braak_cerad` (`lib/disease_rule.py`, `bin/annot/ant-derive-disease`): AD = Braak III
+or higher and CERAD probable or definite; control = Braak II or lower and CERAD none or sparse;
+everything else NULL (PART-like donors with tangles but no plaques, amyloid-only donors, missing
+values, SEA-AD reference donors). This is a binary pathologic-AD facet, not ADNC (Thal is missing
+for ROSMAP) and not a clinical diagnosis. Applied to SEA-AD (14 files), ROSMAP (M23 x3, GF4, MY4,
+Z20; RADC `ceradsc` 1 definite, 2 probable, 3 possible = sparse, 4 none; the native `niareagansc` is
+not in this distribution, so the 2x2 rule is used), MADRC WA4 (6 files), Prater (P23) and, by the
+Lee2026 job, PsychAD / FreshMG (authors' pure AD or control AND the same Braak and CERAD limits).
+The stored column is `disease_braak_cerad`; the `.md` records the rule as `disease_derivation`.
+All other datasets that publish `ant_disease` carry `disease_basis: author_dx`.
+
+## SEA-AD microglia stratum
+
+G24/MMG and G24/PMG derive `ant_cell_type` from the `Supertype` column: microglia = Micro-PVM_2,
+_2_1, _2_3, _3 and _4 (SEAAD); Micro-PVM_1 (putative perivascular macrophages, about 4 percent of
+the nuclei; inferred from the supertype size and the Allen MTG taxonomy, moderate to high
+confidence), Lymphocyte and Monocyte are separate strata. They are tested when at least 10 cells
+per donor exist in enough donors (MTG: PVM 66 donors, lymphocyte 22, monocyte 4), and
+`lymphocyte` / `monocyte` are unmapped cell type groups (never counted).
+
 ## Limitations
 
 * **Composition.** Pseudobulk within a cell type does not remove composition
@@ -269,7 +379,10 @@ tool commit, seed), independent of the DuckDB thread count and of machine load
   Counting a gene as "recurring" across datasets overstates independent
   replication; cross-dataset summaries need the cohort selection table
   (audit section 8.3). No meta-analysis is done in v1.
-* **Provisional disease vocabulary.** Only the literal values `AD` and
+* **Disease definition (2026-10-05).** Datasets with both Braak and CERAD use the common
+  definition (below); the others keep the author's labels (`disease_basis: author_dx`) and do not
+  enter the disease replication. The paragraph that follows describes the older state and still
+  holds for those datasets. Only the literal values `AD` and
   `control` of the current `ant_disease` mapping are used. `control` means
   different things across studies (neuropathology-defined, clinical NCI,
   psychiatric controls); AD with Lewy body or vascular co-pathology is
@@ -419,14 +532,9 @@ missing or partly written file is "not available".
   datasets" on the facet page, a forest panel on the gene page, and the help
   section "Facets and facet effects".
 
-Replication badge: "replicates in k of m independent cohorts" means q < 0.05
-with the same sign in k cohorts out of the m cohorts in which the gene was
-tested in that cell type group and facet. A cohort is a row group of
-`cohort_selection.DRAFT.tsv`; rows whose role matches duplicate, supplement,
-"do not", never, "alternative B" or "T20 only" do not count (the same rule as
-`ant-facet-test-modules summarize`), and datasets missing from the table do
-not count. A cohort counts once: it is significant in a direction when any of
-its counted units is.
+Replication (v2) is defined in the next section; the counting of cohorts and cell type groups
+follows. The old badge ("replicates in k of m independent cohorts", q < 0.05 with the same sign)
+is kept for one release as `legacy_badge` and the old count fields.
 
 Donors behind a badge (2026-10-05). Each replication entry, each recurring
 gene row and the chosen cell type group of `/facets/{name}/effects/top` carry
@@ -483,40 +591,48 @@ Purkinje cells and cortical interneurons are both "inhibitory neuron"), so a
 group-level count can combine regions; read the raw labels before drawing a
 biological conclusion. Rows marked medium in the YAML are judgement calls.
 
-Counting rules, applied per facet and gene:
+## Replication (v2)
 
-1. A unit is eligible when its cohort counts, it is not descriptive only, it
-   is not a secondary dataset (`exclude_secondary`, default on) and its group
-   is not `unmapped`.
-2. Within one dataset and group only the eligible units with the most direct
-   cell type source count: per-cell `ant_cell_type` or a dataset constant,
-   then author cell type columns, then `ant_author_cluster`. A microglia-only
-   dataset is therefore represented by its all-microglia unit, not by its
-   substates. The choice is per dataset, not per cohort: two datasets of one
-   cohort can both speak for it, and the cohort is significant when either is.
-3. When several strata of one dataset still fall into one group (Schirmer2019
-   EN-L2-3-A, EN-L4, ...), each q is multiplied by the number of those strata
-   (Bonferroni) before the q < 0.05 call (`q_counted`, `n_sibling_strata`).
-4. Units that do not count stay in the card with `counted: false` and a
-   `not_counted_reason`.
+Per gene and per (facet, cell type group):
 
-Recurring genes (`/facets/{name}/effects/top`) are ranked by (1) k, the
-number of cohorts with q < 0.05 and the same sign; (2) `agreement`, the
-fraction of the m tested cohorts whose effect has that sign, significant or
-not (a cohort's sign is its significant direction, else the sign of the mean
-log2 fold change of its counted units); (3) `median_abs_logFC` over the m
-tested cohorts. Before 2026-10-05 the second key was "cohorts tested, fewer
-first", which put "2 of 2" above "2 of 4" only because fewer cohorts had
-tested the gene; the number tested is no longer a key by itself.
+1. **Anchors.** A unit is eligible when its cohort counts (role not duplicate, supplement, "do
+   not", never, alternative B, T20 only), it is not descriptive only, not a secondary dataset
+   (`exclude_secondary`), its group is not `unmapped`, and (disease only) its `disease_basis` is
+   pathology based (`nia_reagan`, `braak_cerad`, `adnc`). Each cohort then has **exactly one anchor
+   dataset per group**: a donor-pooled unit first, then a role starting with `anchor`, then the most
+   direct cell type source, then the most donors. Only the anchor's units with the most direct
+   source count; several equal strata of that dataset share the cohort's single vote (their p
+   values are multiplied by the number of strata, Bonferroni). Everything else stays on the card
+   with `counted: false` and a `not_counted_reason` ("supplementary: pool:madrc_myeloid is the
+   anchor of this cohort for this cell type group"). ROSMAP counts through the whole-microglia
+   `group_pool` stratum of M23/IMM; MY4/MRM (all donors in M23) and Y22/BBB (ROSMAP participants)
+   are supplements; the two Lu cohorts are one cohort.
+2. **Cohort p values.** The anchor's `p_treat` (one-sided in the observed direction, tau as above).
+   For the tested direction d the cohort p is `p_treat` when the observed effect has sign d and 1
+   otherwise.
+3. **Partial conjunction (u = 2).** For direction d, the m - 1 largest of the m cohort p values are
+   combined by Fisher's method (`-2 sum ln p` against chi-square with 2(m - 1) df; Simes is
+   implemented as the alternative for dependent cohorts; Fisher assumes independent cohorts, which
+   the anchor and donor-exclusion rules aim at). With m = 2 this is the larger of the two p
+   values. The gene's p is the better direction times 2.
+4. **r-value.** Benjamini-Hochberg over all genes tested in at least 2 cohorts of the (facet,
+   group). `replicated` = r < 0.05; the direction is the better one. `r_value`, `p_pc`, `k`, `m`
+   and `anchors` are served; `k` = cohorts whose anchor has q_treat < 0.05 in that direction
+   (descriptive), `m` = cohorts with a treat p value. Runs from before the treat columns have
+   `m = 0` and no r-value until they are re-run.
+5. **Never twice.** Disease and Braak are separate facets and nothing combines them: the same
+   pathology read twice is not two replications.
 
-Effect on the main example (2026-10-05 results, Braak, PTPRG): with exact
-labels the badge was "replicates in 2 of 4 independent cohorts" in
-"microglial cell" (SEA-AD, MADRC), with Lee2026 (MG) and ROSMAP (Mic P2RY12,
-Mic TPT1 of M23/IMM) in separate one-cohort rows. With groups it is
-"replicates in 4 of 5 independent cohorts (up)" in microglia (SEA-AD, MADRC,
-Lee2026, ROSMAP; Fancy2024 up but q = 0.12), agreement 5 of 5. ROSMAP counts
-through M23/IMM while its MY4/MRM microglia unit is not significant (q = 0.96):
-the any-unit-per-cohort rule is liberal for cohorts with several datasets.
+Cohorts whose donor independence was never checked (`independence: unknown` in the cohort table:
+Gerrits2021, Grubman2019, Jakel2019, Schirmer2019, Smajic2022, Zelic2025, Olah2020, Gazestani/NPH,
+Prater2023) count but are flagged (`overlap_unknown`, `cohorts_overlap_unknown`, in the badge) so a UI
+can show "overlap unknown". The disease facet does not combine definitions of different kinds:
+clinical or author diagnoses (`author_dx`, `clinical_dx`) are listed and not counted.
+
+Recurring genes (`/facets/{name}/effects/top`) list the replicated genes (r < 0.05) ranked by
+`r_value`, then `k`, `agreement` (fraction of the m tested cohorts whose effect has the replicated
+sign, significant or not), then `median_abs_logFC`; the response gives `n_replicated` and
+`n_genes_in_family` for the group.
 
 Sex positive control (dataset card, sex units): passed when XIST is lower and
 RPS4Y1 higher in males, both at q < 0.05; the number of Y-linked genes
@@ -525,7 +641,7 @@ males at q < 0.01 is shown alongside.
 
 ## Reproducibility
 
-Seed 20261004 is passed to R (`set.seed`; limma-voom itself is
+Tool version `ant-facet-test/2.0`. Seed 20261004 is passed to R (`set.seed`; limma-voom itself is
 deterministic). Parameters are constants at the top of `ant-facet-test` and
 are copied into every manifest.
 
@@ -544,3 +660,15 @@ n_lt5, exclusion rules).
 secondary / host-sex datasets, collapse of multi-sample donors, level and
 batch rules, use of the current `.md` mapping. The end-to-end tests need
 limma + edgeR (`ANT_FACET_RSCRIPT`), otherwise they are skipped.
+
+`tests/test_facet_engine_v2.py` (v2): BH, partial conjunction (Fisher and Simes against closed forms,
+NaN rows, `u`), replicability direction; replicate unit inference and the analysis level rule;
+`replicate_unit` / `disease_basis` lint; treat columns and tau in the tool (R needed; `p_treat`
+never below the one-sided plain p, tau configurable, manifest fields), a non-donor replicate
+column, `replicate_unit: none` skipped; group-pool strata; the pooled pseudobulk equals the sum
+over member files and an end-to-end pooled run (planted effect found with 20 donors, not 40
+samples); the pooled unit wins the anchor in `facet_results`; per-cell aggregates carry
+`replicate_unit`. `tests/test_facet_core.py` and `tests/test_facet_results.py`: anchors (pooled, role,
+donors), group-pool over sibling strata, pathology-only disease, r-value ranking.
+`tests/test_disease_rule.py`: the Braak x CERAD boundaries. `tests/test_md_edit.py`: verified text
+edits of the `.md` front matter.

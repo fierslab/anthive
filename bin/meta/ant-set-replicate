@@ -1,0 +1,200 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "duckdb>=1.0.0",
+#   "pandas>=2.0.0",
+#   "numpy>=1.24.0",
+#   "pyyaml>=6.0",
+# ]
+# ///
+"""ant-set-replicate: write ``replicate_unit`` / ``replicate_column`` into every dataset .md.
+
+What it does
+------------
+For each dataset in the h5adstore the replicate unit (donor, animal, sample,
+none) and the obs column that identifies a replicate are decided and written
+as two top-level keys of the .md front matter (see ``lib/replicates.py``):
+
+* an entry of ``DECISIONS`` (below) wins: datasets whose animal or sample
+  column was checked by hand (xenografts, mouse, in vitro, bulk);
+* every other dataset gets the inferred default (``replicates.resolve_replicate``):
+  ``donor`` / ``ant_donor`` for human data with ``ant_donor``, ``animal`` with an
+  animal id column for mouse and xenograft data, otherwise ``none``.
+
+Datasets whose replicate could not be determined get ``none`` with the reason
+printed (``UNDETERMINED``): they run as cell-level, descriptive only.
+
+The edit is a verified text edit (``lib/md_edit.py``): only the two keys, the
+``version`` patch bump, ``updated`` and one changelog entry change. A file with
+uncommitted changes in its git repository is skipped (another job may be editing it).
+
+Usage::
+
+  ant-set-replicate [--h5adstore-root DIR] [--dry-run] [--only G24/MMG,...] [--date YYYY-MM-DD]
+
+Inputs: the .md, .h5ad.mus and .duckdb of every dataset (read only).
+Outputs: the .md files (front matter keys above).
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import subprocess
+import sys
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import duckdb
+
+script_dir = Path(__file__).resolve().parent
+sys.path.insert(0, str(script_dir.parent.parent / 'lib'))
+
+import md_edit  # type: ignore  # noqa: E402
+import metadata  # type: ignore  # noqa: E402
+import mus  # type: ignore  # noqa: E402
+import replicates  # type: ignore  # noqa: E402
+from h5adstore import iter_h5adstore  # type: ignore  # noqa: E402
+
+#: db_id -> (replicate_unit, replicate_column, why). Checked by hand against the stored columns.
+DECISIONS: Dict[str, Tuple[str, Optional[str], str]] = {
+    'AZ5/SLM': ('animal', 'hash.ID', '12 hashtags, one per animal'),
+    'AZ5/NST': ('none', None, 'spatial ROIs of 4 samples; animal ids not recorded'),
+    'B25/CNT': ('animal', 'Mouse', '46 mouse ids'),
+    'B26/SOT': ('none', None, 'animals are pool x hash combinations; no single animal column'),
+    'D25/DAV': ('animal', 'ID', '29 ids, one per (pool, hash) animal; confirm with the authors'),
+    'D25/HAR': ('animal', 'ant_donor', 'ant_donor is sample_id = pool x hash = 67 animals'),
+    'DB6/CPF': ('animal', 'mouse_id', '10 mouse ids'),
+    'M24/M23': ('animal', 'ant_donor', 'ant_donor is mouse.id (95 mice)'),
+    'M24/RMF': ('animal', 'ant_donor', 'ant_donor is mouse.id (95 mice)'),
+    'MZ4/CMM': ('sample', 'ant_donor', '4 samples; animal ids not recorded'),
+    'MZ4/SSM': ('sample', 'ant_donor', '7 samples; animal ids not recorded'),
+    'PM4/AST': ('none', None, 'genotype only; no animal or sample id'),
+    'PM4/MIC': ('none', None, 'genotype only; no animal or sample id'),
+    'Si5/SSI': ('none', None, 'sample_id (8) and pool_id (4) only; animals not identifiable'),
+    'S25/PhM': ('animal', 'mouse', '3 mice'), 'S25/PhW': ('animal', 'mouse', '3 mice'),
+    'S25/PhC': ('animal', 'mouse', '3 mice'), 'S25/PhS': ('animal', 'mouse', '3 mice'),
+    'S25/SGM': ('animal', 'mouse', '98 mice'), 'S25/PSW': ('animal', 'mouse', '98 mice'),
+    'S25/PSC': ('animal', 'mouse', '98 mice'), 'S25/PSS': ('animal', 'mouse', '98 mice'),
+    'S25/V3M': ('animal', 'mouse', '13 mice'), 'S25/V3C': ('animal', 'mouse', '13 mice'),
+    'S25/V3S': ('animal', 'mouse', '13 mice'),
+    'S25/V6W': ('animal', 'Mouse_ID', '33 mice'), 'S25/V6A': ('animal', 'Mouse_ID', '33 mice'),
+    'S25/V6C': ('animal', 'Mouse_ID', '33 mice'), 'S25/V6S': ('animal', 'Mouse_ID', '33 mice'),
+    'S25/V6M': ('animal', 'Mouse_ID', '33 mice'),
+    'Z25/Z1U': ('none', None, 'no obs columns'), 'Z25/Z1R': ('none', None, 'no obs columns'),
+    'Z25/Z2R': ('none', None, 'no obs columns'), 'Z25/Z3N': ('none', None, 'no replicate column'),
+    'H21/MNI': ('sample', 'sample', '12 mouse tissue samples; animal ids not recorded'),
+    'M19/CMS': ('sample', 'sample', '5 mouse samples'),
+    'M19/CH9': ('sample', 'ant_donor', 'chimera, 3 samples'),
+    'M19/IVT': ('sample', 'ant_donor', 'in vitro, 2 samples'),
+    'H25/AQC': ('sample', 'ant_donor', 'in vitro, 20 samples'),
+    'HZ3/LPS': ('sample', 'ant_donor', 'in vitro, 6 samples'),
+    'HZ3/NLP': ('sample', 'ant_donor', 'in vitro, 6 samples'),
+    'HZ3/GSM': ('sample', 'hash.ID', 'in vitro, 24 hashtags'),
+    'L24/PHu': ('none', None, 'no obs columns'), 'L24/PHM': ('none', None, 'no obs columns'),
+    'L24/PMo': ('none', None, 'no obs columns'),
+    'SH9/SMB': ('sample', 'ant_donor', 'mouse, 4 samples'),
+    'S20/SIE': ('sample', 'ant_donor', 'mouse, 10 samples'),
+    'S26/AQR': ('sample', 'ant_donor', 'mouse, samples'), 'S26/AQM': ('sample', 'ant_donor', 'mouse, samples'),
+    'S26/DUN': ('none', None, 'no obs columns'),
+    'P26/MMA': ('none', None, 'integrated mouse atlas without a replicate column'),
+    'SF9/CMR': ('none', None, 'genotype only'),
+    'V25/SSC': ('none', None, 'no obs columns'), 'V25/SAL': ('none', None, 'no obs columns'),
+    'TW5/CMA': ('none', None, 'pooled animals (NumPooledAnimals); no single animal id'),
+    'H25/EBI': ('sample', 'Sample_ID', 'bulk samples'), 'H25/FST': ('sample', 'Sample name', 'bulk samples'),
+    'H25/SGE': ('sample', 'Sample name', 'bulk samples'), 'H25/STR': ('sample', 'Sample name', 'bulk samples'),
+    'H25/HNO': ('none', None, 'bulk, no sample column'),
+    'H26/EB2': ('sample', 'Sample_ID', 'bulk samples'), 'H26/EBP': ('sample', 'Sample_ID', 'bulk samples'),
+    'H26/EPE': ('sample', 'Sample_ID', 'bulk samples'),
+    'F26/ATM': ('none', None, 'summary table without a replicate column'),
+    'F26/LTM': ('none', None, 'summary table without a replicate column'),
+    'F26/MTM': ('none', None, 'summary table without a replicate column'),
+    'G24/MEx': ('none', None, 'no obs columns served'), 'G24/PEx': ('none', None, 'no obs columns served'),
+}
+
+
+def is_dirty(path: Path) -> bool:
+    """True when ``path`` has uncommitted changes in its git repository."""
+    result = subprocess.run(['git', '-C', str(path.parent), 'status', '--porcelain', '--', path.name],
+                            capture_output=True, text=True)
+    return bool(result.stdout.strip())
+
+
+def stored_columns(duckdb_path: Path) -> set:
+    """Obs column names of a .duckdb (empty when unreadable)."""
+    if not duckdb_path.exists():
+        return set()
+    try:
+        connection = duckdb.connect(str(duckdb_path), read_only=True)
+        try:
+            return {row[0] for row in connection.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name IN ('__obscat', '__obsnum')").fetchall()}
+        finally:
+            connection.close()
+    except Exception:
+        return set()
+
+
+def decide(entry, md_yaml: Dict, root: Path) -> Tuple[str, Optional[str], str]:
+    """``(unit, column, why)`` of one dataset."""
+    if entry.db_id in DECISIONS:
+        return DECISIONS[entry.db_id]
+    api = metadata.get_api_config(md_yaml) or {}
+    columns = stored_columns(entry.duckdb_path) | set((api.get('obs_rename') or {}).values()) \
+        | set(api.get('obs_derive') or {}) | set(api.get('obs_constant') or {})
+    annotation = mus.resolve_annotation(entry.h5ad_path, root=root)
+    unit, column = replicates.infer_replicate(annotation, columns)
+    why = 'inferred: ' + ('human data with ant_donor' if unit == 'donor' else
+                          'animal id column' if unit == 'animal' else 'no replicate column found')
+    return unit, column, why
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
+    parser.add_argument('--h5adstore-root', default=None)
+    parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--only', default=None, help='comma-separated db_ids')
+    parser.add_argument('--date', default=dt.date.today().isoformat())
+    args = parser.parse_args()
+    from config import get_data_folder  # type: ignore  # noqa: PLC0415
+    root = Path(args.h5adstore_root).resolve() if args.h5adstore_root else Path(get_data_folder())
+    only = set(args.only.split(',')) if args.only else None
+    changed, unchanged, skipped_dirty = 0, 0, []
+    undetermined: List[Tuple[str, str]] = []
+    counts: Dict[str, int] = {}
+    for entry in iter_h5adstore(root):
+        if entry.study.startswith('_') or (only and entry.db_id not in only):
+            continue
+        md_yaml, _ = metadata.parse_md_file(entry.md_path)
+        unit, column, why = decide(entry, md_yaml, root)
+        counts[unit] = counts.get(unit, 0) + 1
+        if unit == 'none':
+            undetermined.append((entry.db_id, why))
+        if md_yaml.get('replicate_unit') == unit and md_yaml.get('replicate_column') == column:
+            unchanged += 1
+            continue
+        if is_dirty(entry.md_path):
+            skipped_dirty.append(entry.db_id)
+            continue
+        text = entry.md_path.read_text(encoding='utf-8')
+        operations = [md_edit.set_top('replicate_unit', unit)]
+        operations.append(md_edit.set_top('replicate_column', column) if column
+                          else md_edit.delete_path(['replicate_column']))
+        operations.append(md_edit.bump_version(
+            [f'replicate_unit: {unit}' + (f', replicate_column: {column}' if column else '') + f' ({why})'],
+            args.date))
+        new_text = md_edit.apply_edits(text, operations)
+        if not args.dry_run:
+            entry.md_path.write_text(new_text, encoding='utf-8')
+        changed += 1
+    print(f'changed {changed}, unchanged {unchanged}, units {counts}')
+    if skipped_dirty:
+        print(f'SKIPPED (uncommitted changes, rerun later): {", ".join(skipped_dirty)}')
+    print('UNDETERMINED / none (cell-level, descriptive only):')
+    for db_id, why in undetermined:
+        print(f'  {db_id}: {why}')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

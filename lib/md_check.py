@@ -365,7 +365,11 @@ def check_md_folder(
             report.add_finding(rel_path, finding)
         for finding in facet_lint.lint_lineage(metadata, known_db_ids):
             report.add_finding(rel_path, finding)
-        if not with_data or not api:
+        for finding in facet_lint.lint_replicate(metadata, api):
+            report.add_finding(rel_path, finding)
+        for finding in facet_lint.lint_disease_basis(metadata, api):
+            report.add_finding(rel_path, finding)
+        if not with_data:
             continue
         duckdb_path = md_path.with_suffix('.duckdb')
         reader = facet_lint.duckdb_reader(duckdb_path) if duckdb_path.exists() else None
@@ -374,8 +378,12 @@ def check_md_folder(
             continue
         columns, distinct_values, close = reader
         try:
-            for finding in facet_lint.lint_api_data(api, columns, distinct_values, store_root=join_root):
-                report.add_finding(rel_path, finding)
+            for finding in facet_lint.lint_replicate(metadata, api, stored_columns=columns):
+                if finding.rule == 'replicate_column_missing':
+                    report.add_finding(rel_path, finding)
+            if api:
+                for finding in facet_lint.lint_api_data(api, columns, distinct_values, store_root=join_root):
+                    report.add_finding(rel_path, finding)
             report.data_checked += 1
         finally:
             close()

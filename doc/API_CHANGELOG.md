@@ -33,6 +33,45 @@ the spec drifting away from the running code.
 
 Additive (minor). No version bump yet.
 
+- **Facet replication v2: partial-conjunction r-values, treat p values, one anchor per cohort**
+  (2026-10-05). `/facets/{facet}/effects`, `/genes/{gene}/facet-effects` (replication
+  entries): new `r_value` (Benjamini and Heller partial conjunction, u = 2, Fisher,
+  BH over the genes of one facet x cell type group; replicated = r < 0.05), `p_pc`, `k`
+  (cohorts with q_treat < 0.05 in the replicated direction), `m` (cohorts with a treat
+  p value), `replicated`, `r_direction`, `anchors` (one per counted cohort: `cohort`,
+  `db_id`, `pooled`, `logFC`, `p_treat`, `q_treat`), `overlap_unknown`,
+  `cohorts_overlap_unknown`, `replication_u`. `badge` is the new text ("replicated in
+  at least 2 of m cohorts (up): r = ...; k of m cohorts individually q < 0.05"); the
+  old text is `legacy_badge`. The old fields (`cohorts_tested`, `cohorts_sig_same_sign`,
+  `direction`, `cohorts_up`, `cohorts_down`, `sign_discordant`) keep their meaning
+  (q_value < 0.05 on the anchor units) for one release. Unit cards add `anchor`,
+  `pooled`, `p_treat`, `q_treat`, `tau_log2`, `significant_treat`, `analysis_level`,
+  `independence`, `disease_basis`. Counting changed: exactly one anchor unit per
+  (cohort, cell type group); a donor-pooled unit (`db_id` `pool:<id>`, MADRC and SEA-AD
+  regional files pooled per donor) beats single files; other units are listed with
+  `counted: false` and a `not_counted_reason`. The disease facet only combines
+  pathology-based definitions (`disease_basis`). `/facets/{facet}/effects/top` now lists
+  only genes with r < 0.05, ranked by `r_value`, then `k`, `agreement`,
+  `median_abs_logFC`; rows add `r_value`, `p_pc`, `k`, `m`, `replicated`,
+  `cohorts_tested_labels`, `overlap_unknown`, `cohorts_overlap_unknown`; the response adds
+  `n_replicated` and `n_genes_in_family`; the old row fields `units_up`, `units_down`,
+  `max_abs_logFC` are gone. Cohort rows of `/facets/cohorts` add `independence`
+  (`checked` or `unknown`), `overlap_unknown` and `pool_members`.
+- **`replicate_unit` / `replicate_column` per dataset** (2026-10-05). New `.md` catalog keys
+  (`replicate_unit`: donor, animal, sample, none; `replicate_column`: the obs column that
+  identifies a replicate), served on `/databases` and the dataset detail as
+  `replicate_unit`, `replicate_column`, `replicate_basis` (`declared` or `inferred`) and
+  `disease_basis`. `/databases/{id}/facet-tests` summary and units add `replicate_unit`,
+  `replicate_column`, `replicate_basis`, `disease_basis`, `pool`, and per unit
+  `analysis_level` (`replicate` or `cell`), `analysis_level_label` ("replicate level" or
+  "cell-level, descriptive only"), `analysis_level_reason`, `tau_log2`. Gene rows add
+  `p_treat`, `q_treat`, `tau_log2`; module rows add `passes_effect_gate`
+  (|std_effect| >= 0.2). `/facets/{facet}/tests` rows add the same unit fields,
+  `disease_basis`, `pooled`, `independence`, `overlap_unknown`.
+- **Per-cell numbers are marked** (2026-10-05). `/module-variability` (`basis`,
+  `X-Basis` for CSV, and a `replicate_unit` column in the rows) and
+  `/databases/{id}/gene-variance-by-facet` (`basis`, `replicate_unit`,
+  `replicate_level_analysis`) state `per-cell (descriptive)`: cells are not replicates.
 - **Facet `apoe_carrier` renamed `apoe4_carrier`** (2026-10-05). Same
   definition and levels (E4+ / E4-, test contrast `e4_carrier_vs_noncarrier`).
   The column is `ant_apoe4_carrier`, the facet-test facet `apoe4_carrier`,

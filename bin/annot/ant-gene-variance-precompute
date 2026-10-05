@@ -117,6 +117,7 @@ from index_freshness import (                                      # type: ignor
 from metadata import parse_md_file                                 # type: ignore
 import cell_level_scope                                            # type: ignore
 import mus                                                         # type: ignore
+import replicates                                                  # type: ignore  # noqa: E402
 
 
 CACHE_DIRNAME = '_gene_variance_cache'
@@ -129,6 +130,10 @@ OUTPUT_COLUMNS = (
     'eta_squared', 'F_stat', 'signal', 'total_var',
     'group_means_json',
 )
+
+#: Added to the aggregate (not to the per-dataset cache): the replicate unit of
+#: the dataset (``lib/replicates.py``). The numbers are per-cell and descriptive.
+REPLICATE_COLUMN = 'replicate_unit'
 
 OUTPUT_DTYPES = {
     'dataset': 'object', 'gene': 'object', 'facet': 'object',
@@ -880,12 +885,15 @@ def _cache_fingerprints(
 
 def _concat_and_write(
     out_path: Path, cache_entries: list[tuple[Path, str, str]],
+    replicate_of: Optional[dict[str, str]] = None,
 ) -> tuple[int, int, int, int]:
     """Concat per-dataset caches into the aggregate parquet.
 
     Args:
         out_path: Aggregate parquet to (atomically) replace.
         cache_entries: ``(cache_path, db_id, src_fingerprint)`` triples.
+        replicate_of: ``{db_id: replicate_unit}`` for the ``replicate_unit`` column
+            (``unresolved`` for a dataset not in it).
 
     Returns ``(n_rows, n_datasets, n_genes, n_facets)``.
     """
@@ -894,8 +902,8 @@ def _concat_and_write(
 
     if not cache_entries:
         empty = pd.DataFrame(
-            {col: [] for col in (*OUTPUT_COLUMNS, FINGERPRINT_COLUMN)}
-        ).astype({**OUTPUT_DTYPES, FINGERPRINT_COLUMN: 'object'})
+            {col: [] for col in (*OUTPUT_COLUMNS, REPLICATE_COLUMN, FINGERPRINT_COLUMN)}
+        ).astype({**OUTPUT_DTYPES, REPLICATE_COLUMN: 'object', FINGERPRINT_COLUMN: 'object'})
         empty.to_parquet(tmp, engine='pyarrow', compression='zstd')
         os.replace(tmp, out_path)
         return (0, 0, 0, 0)
@@ -908,15 +916,20 @@ def _concat_and_write(
     conn = duckdb.connect(':memory:')
     try:
         conn.register('fingerprints', fingerprints)
+        conn.register('replicate_units', pd.DataFrame(
+            sorted((replicate_of or {}).items()), columns=['dataset', REPLICATE_COLUMN]))
         select_cols = ', '.join(f'c.{col}' for col in OUTPUT_COLUMNS)
         # ORDER BY keeps the pre-join row order (file order, then row
         # order within each cache): the index's signal-tie order depends
         # on it, and it keeps the output diffable.
         conn.execute(
-            f"COPY (SELECT {select_cols}, f.{FINGERPRINT_COLUMN} "
+            f"COPY (SELECT {select_cols}, "
+            f"             COALESCE(r.{REPLICATE_COLUMN}, 'unresolved') AS {REPLICATE_COLUMN}, "
+            f"             f.{FINGERPRINT_COLUMN} "
             f"      FROM read_parquet(?, union_by_name=true, filename=true, "
             f"                        file_row_number=true) c "
             f"      LEFT JOIN fingerprints f ON f.dataset = c.dataset "
+            f"      LEFT JOIN replicate_units r ON r.dataset = c.dataset "
             f"      ORDER BY list_position(?, c.filename), c.file_row_number) "
             f"TO '{tmp}' (FORMAT PARQUET, COMPRESSION ZSTD)",
             [cache_files, cache_files],
@@ -1161,8 +1174,10 @@ def main() -> int:
         f'\nConcatenating {len(all_cache_entries)} cache file(s) -> {out}',
         file=sys.stderr,
     )
+    replicate_of = {inputs.db_id: replicates.dataset_replicate_unit(inputs.md_path, inputs.duckdb_path, root)
+                    for inputs in dataset_snapshot}
     n_rows, n_datasets, n_genes, n_facets = _concat_and_write(
-        out, all_cache_entries,
+        out, all_cache_entries, replicate_of,
     )
     print(
         f'wrote {n_rows:,} rows across {n_datasets} dataset(s), '
