@@ -174,12 +174,31 @@ silent skip.
 
 Used for Lee2026 (2026-10-05): PsychAD brain bank `R` (152 of 1,470 donors) and
 FreshMG `RS` (41 of 137) are Rush ROSMAP participants (Methods of Lee 2026);
-ROSMAP is already counted through M23/IMM. Evidence and the three checks are in
-the donor overlap report of 2026-10-05 (id-free attribute matching of 30 PsychAD
-donors to specific ROSMAP persons, `donor_crosswalk.tsv` alias type
-`psychad_id`). All 152 and 41 are excluded, not only the 30 identified donors
-(8 of them are in the ROSMAP datasets served here), because the other
-donors are ROSMAP participants whose ids cannot be recovered locally.
+ROSMAP is already counted through M23/IMM. The ids of both datasets are
+anonymised (`Donor_n`, `FM_nnn`), so the overlap was established three ways:
+
+1. Cohort label: the `Source` counts (152, 41) equal the ROSMAP counts in the
+   Methods; no donor of another bank matches a ROSMAP person.
+2. Attribute matching without ids (PsychAD): Table S4 ages are decimal years on
+   the same day grid as `ROSMAP_clinical.csv` (`age_death`). Sex, age at death
+   (1e-6 years) and PMI (hours, 1e-6) identify 30 donors one to one; Braak, CERAD
+   (PsychAD scale 1 to 4 is 5 minus ROSMAP `ceradsc`) and dementia
+   (cogdx 1 to 0, 2 and 3 to 0.5, 4 to 6 to 1) agree in 30 of 30 pairs (chance 0.04
+   per pair for all three). The same key at +-1..120 day lags gives 0.017 matches
+   per lag; age-only exact matches exceed the 30 by 7, as many as chance predicts
+   (5.9 +- 2.2 per lag). `donor_crosswalk.tsv` carries these as alias type
+   `psychad_id`. 8 of the 30 are persons in the ROSMAP datasets served here
+   (6 in M23/IMM, 3 in GF4/MIC). Donors with top-coded age (89+, 54 of the 152)
+   and FreshMG (integer ages, PMI in minutes) cannot be resolved one by one.
+3. Expression: donor pseudobulk of microglia correlated across a 300-gene panel
+   chosen on M23 vs GF4 same-person pairs (held-out AUC 0.98); 2 of the 4
+   identified donors present in M23 rank first of 381 (p about 4e-5 for two
+   first ranks), the other two do not (ranks 170, 206). Underpowered, consistent.
+
+All 152 and 41 are excluded, not only the 30 identified donors, because the other
+donors are ROSMAP participants whose ids cannot be recovered locally. The
+alternative (excluding only the 8 persons found in the ROSMAP datasets served here)
+was not run.
 
 ### Age floor and declared batch column (`facet_min_age`, `facet_batch_column`)
 
