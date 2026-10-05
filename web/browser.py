@@ -2119,6 +2119,7 @@ def get_collection_datasets(api_url: str, group_id: str) -> tuple:
             # the per-dataset .md frontmatter via the REST API. Defensive .get()
             # so a rescan-lagging API still renders (the badge just stays off).
             'is_secondary': bool(db.get('is_secondary')),
+            'version':         (str(db.get('version')).strip() or None) if db.get('version') else None,
         })
 
     # Constant-across-collection fields → header pills; varying fields → columns.
@@ -2946,6 +2947,9 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         # `.secondary-dataset` mute-class). Defaults to False so a rescan-
         # lagging API still renders.
         "is_secondary": bool(db.get('is_secondary')),
+        # Dataset version (semver) and last-updated date, shown small and grey.
+        "dataset_version": str(db.get('version')).strip() if db.get('version') else None,
+        "dataset_updated": str(db.get('updated'))[:10] if db.get('updated') else None,
         "info": info,
         "markdown_content": markdown_content,
         "obs_columns": obs_columns,

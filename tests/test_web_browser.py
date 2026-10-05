@@ -874,7 +874,7 @@ def test_genes_page_rank_text_not_raw_mean(client):  # pyright: ignore
 # id.split('/')[0] fallback.
 _DATABASES = [
     {
-        "id": "GroupA/ds1", "group_id": "GroupA", "file_id": "ds1",
+        "id": "GroupA/ds1", "group_id": "GroupA", "file_id": "ds1", "version": "0.1.4", "updated": "2026-10-05",
         "title": "Dataset One", "n_cells": 1500, "n_genes": 20000,
         "collection": {"group": "Group A Study", "experiment": "Pharmacogenomics",
                        "description": "# Group A Study\n\nA cohort of microglia datasets."},
@@ -915,7 +915,7 @@ _DATABASES = [
 # /databases/{id}/info payloads, keyed by db id.
 _INFO = {
     "GroupA/ds1": {
-        "file_id": "ds1", "group_id": "GroupA", "title": "Dataset One",
+        "file_id": "ds1", "version": "0.1.4", "updated": "2025-01-01", "group_id": "GroupA", "title": "Dataset One",
         "n_cells": 1500, "n_genes": 20000,
         "collection": {"group": "Group A Study"},
         "organism": "human", "technology": "10x_chromium_3p_v3",
@@ -3314,6 +3314,28 @@ def test_dataset_page_shows_modified(client):
     assert resp.status_code == 200
     assert ">modified<" in resp.text        # table `<td>modified</td>` row
     assert "2025-01-01" in resp.text        # _INFO has year=2025 → _modified_ts year-cast
+
+
+def test_dataset_page_shows_version_and_updated(client):
+    resp = client.get("/browse/GroupA/ds1")
+    assert resp.status_code == 200
+    assert 'id="ds-version"' in resp.text
+    assert "v0.1.4" in resp.text
+    assert "updated 2025-01-01" in resp.text
+    assert "Minor bump = data changed, patch bump = metadata only." in resp.text
+
+
+def test_dataset_page_hides_version_line_when_missing(client):
+    resp = client.get("/browse/GroupA/ds2")
+    assert resp.status_code == 200
+    assert 'id="ds-version"' not in resp.text
+
+
+def test_folder_shows_version_next_to_title(client):
+    resp = client.get("/browse/GroupA")
+    assert resp.status_code == 200
+    assert resp.text.count('class="ds-ver"') == 1
+    assert ">v0.1.4<" in resp.text
 
 
 def test_folder_external_link_icons(client):

@@ -90,6 +90,8 @@
   .idchip .idv { font-family: var(--font-mono); color: var(--text); user-select: all; }  /* one-click select to copy */
   /* greyed file basename next to the title */
   .page-title .basename { font-size: 14px; font-weight: normal; color: #94a3b8; font-family: var(--font-mono); margin-left: 6px; }
+  /* dataset version + updated date, small and grey */
+  .ds-version { font-size: 11px; color: var(--text-muted); margin: 0 0 6px; }
   /* compact provenance row up top */
   .ds-prov { display: flex; flex-wrap: wrap; gap: 3px 14px; font-size: 11px; color: var(--text-muted); margin: 0 0 8px; align-items: center; }
   .ds-prov .pk { color: #94a3b8; }
@@ -399,6 +401,10 @@
     </div>{# /.ds-actions-group #}
   </div>
 </div>
+
+{% if dataset_version or dataset_updated %}
+<div class="ds-version" id="ds-version">{% if dataset_version %}<span title="Dataset version. Minor bump = data changed, patch bump = metadata only.">v{{ dataset_version.lstrip('v') }}</span>{% endif %}{% if dataset_version and dataset_updated %} &middot; {% endif %}{% if dataset_updated %}<span>updated {{ dataset_updated }}</span>{% endif %}</div>
+{% endif %}
 
 <!-- Provenance — compact row (access/source moved to icons by the visualize button). -->
 {% if dataset_meta and (dataset_meta.license or dataset_meta.contributor or dataset_meta.doi or dataset_meta.pmid or dataset_meta.accession or dataset_meta.link) %}
