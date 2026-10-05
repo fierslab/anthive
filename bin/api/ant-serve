@@ -105,6 +105,7 @@ from geneset import (
 )
 from gene_stats_cache import GeneStatsCache
 from gene_stats_index import GeneStatsIndex
+from cell_level_scope import read_skip_summary, skip_summary_path
 from gene_variance_index import GeneVarianceIndex
 from md_check import generate_file_id, generate_group_id
 from metadata import parse_md_file, get_caveats
@@ -12761,6 +12762,15 @@ def _module_variability_path() -> Path:
     return Path(registry.data_folder) / "module_variability.parquet"
 
 
+def _cell_level_skips(parquet_path: Path) -> Dict[str, str]:
+    """Datasets the per-cell statistics tools skipped (bulk and the like), with the reason.
+
+    Read from the ``<stem>.skipped.json`` next to the aggregate parquet that
+    ``ant-module-variability`` / ``ant-gene-variance-precompute`` write.
+    """
+    return read_skip_summary(skip_summary_path(Path(parquet_path)))
+
+
 def _load_module_variability(force: bool = False):
     """Return the cached DataFrame; reload lazily on mtime change."""
     import pandas as _pd
@@ -12815,6 +12825,10 @@ def get_module_variability(
       - `F`              — Fisher F statistic (categorical).
       - `total_var`      — Var(module score) on this dataset (denominator).
       - `mean_score`     — mean of the module on this dataset.
+
+    ``skipped_datasets`` (JSON; unreleased) maps db_id to the reason a dataset
+    has no rows because it is out of scope for per-cell statistics (bulk data,
+    or about one observation per donor). Limited to ``dataset`` when given.
 
     Also see the [/analytics/query] endpoint — the same table is attached
     there as a view named `module_variability` for full SQL access.
@@ -12914,6 +12928,11 @@ def get_module_variability(
         "truncated": bool(truncated),
         "n_excluded_secondary": n_excluded_secondary,
         "sort": sort,
+        "skipped_datasets": {
+            skipped_id: reason
+            for skipped_id, reason in _cell_level_skips(_module_variability_path()).items()
+            if not dataset or skipped_id == dataset
+        },
         "rows": working.to_dict(orient="records"),
     }
     if extra_headers:
@@ -13300,10 +13319,14 @@ async def list_facets():
     stay in the data and in every API listing. ``facets_visible`` is the list
     itself (empty means all are shown).
 
-    ``signal_strength`` is the max variance-explained ``value`` across all
-    rows in ``module_variability.parquet`` where ``tag_column == facet``.
-    Zero when the facet has no signal recorded (or when the parquet is
-    absent).
+    ``signal_strength`` (DEPRECATED, kept for compatibility: max of
+    per-cell statistics; not a facet importance measure) is the max
+    variance-explained ``value`` across all rows in
+    ``module_variability.parquet`` where ``tag_column == facet``. Those
+    statistics are computed over individual cells, not donors, so they say
+    nothing about how much a facet matters. For donor-level effects use
+    ``GET /databases/{id}/facet-tests``. Zero when the facet has no signal
+    recorded (or when the parquet is absent).
     """
     def _sync() -> List[Dict[str, Any]]:
         return _build_facet_inventory()
@@ -13951,6 +13974,11 @@ async def gene_variance_by_facet(
     ``VAR_SAMP(mean_over_cells)`` across groups. Groups with fewer than 2
     non-null cells are still returned in group sizes but a gene is only
     included when it has non-zero expression in at least 2 groups.
+
+    ``precompute_skipped`` (unreleased) is present when the dataset was left
+    out of the precomputed index on purpose (bulk data, or about one
+    observation per donor); its value is the reason. The live result is
+    still returned.
     """
     facet = canonical_facet(facet)
     if not _is_facet_column(facet):
@@ -14239,6 +14267,10 @@ async def gene_variance_by_facet(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"gene-variance-by-facet failed: {exc}")
 
+    skip_reason = _cell_level_skips(registry.data_folder / 'gene_variance_index.parquet').get(db_id)
+    if skip_reason:
+        # Absent from the precomputed index on purpose; say why.
+        result = {**result, 'precompute_skipped': skip_reason}
     _gene_variance_cache_put(cache_key, result)
     return result
 

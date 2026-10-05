@@ -15,19 +15,39 @@
   {%- endif -%}
 {%- endmacro %}
 
-{% macro _fx_effects_row(column, slot) -%}
+{% macro _fx_effects_block(column, slot) -%}
 {%- from "_facet_effects.html" import fx_table, fx_untested -%}
-<tr class="ds-facet-fx" data-facet="{{ column }}">
-  <td colspan="5">
-    {% if slot.tested %}
-    <h3 class="subsection-head">Effects of {{ column[4:] }} <span class="muted">({{ slot.tested|length }} {{ 'cell type' if slot.tested|length == 1 else 'cell types' }} tested)</span></h3>
-    {{ fx_table(slot.tested, 'fx-table-' ~ column) }}
-    {% else %}
-    <div class="fx-none">Effects of {{ column[4:] }}: not tested.</div>
-    {% endif %}
-    {{ fx_untested(slot.untested) }}
-  </td>
-</tr>
+<div class="ds-facet-fx" data-facet="{{ column }}">
+  {% if slot.tested %}
+  <h3 class="subsection-head">Effects of {{ column[4:] }} <span class="muted">({{ slot.tested|length }} {{ 'cell type' if slot.tested|length == 1 else 'cell types' }} tested)</span></h3>
+  {{ fx_table(slot.tested, 'fx-table-' ~ column) }}
+  {% else %}
+  <div class="fx-none">Effects of {{ column[4:] }}: not tested.</div>
+  {% endif %}
+  {{ fx_untested(slot.untested) }}
+</div>
+{%- endmacro %}
+
+{% macro _facet_mapping_table(facets) -%}
+{%- from "_facet_mapping.html" import mapping_kind, source_columns, translation, coverage -%}
+<div class="table-wrap">
+<table class="ds-facets">
+  <thead><tr><th>Facet</th><th>Author column</th><th>Mapping</th><th>Value translation <span class="muted">(cells)</span></th><th class="num">Cells</th></tr></thead>
+  <tbody>
+    {% for f in facets %}
+    <tr class="ds-facet-row{% if not f.live %} not-live{% endif %}" data-facet="{{ f.facet }}">
+      <td data-label="Facet"><a class="fct-name" href="/facets/{{ f.facet|urlencode }}" title="{{ f.summary or f.facet }}">{{ f.facet[4:] }}</a>
+        {% if not f.live %}<div class="fm-warn" title="Declared in the dataset description but not in the served data (views not rebuilt, or the source column is missing).">declared, not served</div>{% endif %}</td>
+      <td data-label="From">{{ source_columns(f) }}</td>
+      <td data-label="Mapping">{{ mapping_kind(f.mapping_kind) }}</td>
+      <td data-label="Values">{{ translation(f, max_rows=6) }}</td>
+      <td class="num" data-label="Cells">{{ coverage(f) }}</td>
+    </tr>
+    {% endfor %}
+    {% if caller is defined %}{{ caller() }}{% endif %}
+  </tbody>
+</table>
+</div>
 {%- endmacro %}
 
 {% block content %}
@@ -209,6 +229,13 @@
   .data-card > h2:first-child { margin-top: 0; }
   .data-card.wide { grid-column: 1 / -1; }
   table.ds-facets { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  @media (min-width: 761px) {
+    table.ds-facets { table-layout: fixed; }
+    table.ds-facets > thead > tr > th:nth-child(1) { width: 12%; }
+    table.ds-facets > thead > tr > th:nth-child(2) { width: 20%; }
+    table.ds-facets > thead > tr > th:nth-child(3) { width: 9%; }
+    table.ds-facets > thead > tr > th:nth-child(5) { width: 9%; }
+  }
   table.ds-facets th, table.ds-facets td { padding: 5px 8px; border-bottom: 1px solid var(--border-light); text-align: left; vertical-align: top; }
   table.ds-facets th { font-size: 10px; text-transform: uppercase; letter-spacing: .3px; color: var(--text-muted); font-weight: 500; }
   table.ds-facets td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -460,6 +487,9 @@
   {% if n_module_scores %}
   <button type="button" class="tab-btn"        data-tab="modules"  role="tab">Genesets<span class="tab-count">{{ n_module_scores }}</span></button>
   {% endif %}
+  {% if show_facets_tab %}
+  <button type="button" class="tab-btn"        data-tab="facets"   role="tab" id="tab-btn-facets">Facets<span class="tab-count">{{ n_facets_total }}</span></button>
+  {% endif %}
   <button type="button" class="tab-btn"        data-tab="num"      role="tab">Numerical<span class="tab-count">{{ _num_cols|length }}</span></button>
   <button type="button" class="tab-btn"        data-tab="cat"      role="tab">Categorical<span class="tab-count">{{ _cat_cols|length }}</span></button>
   {% if de_studies %}
@@ -534,17 +564,11 @@
        % expressed = pct/100; rank expression = percentile rank of the mean
        among all genes; variability = std / highest std in the table. */
     td.g-pct-cell, td.g-rank-cell, td.g-var-cell { --dot-w: 48px; }
-    td.g-pct-cell, td.g-rank-cell, td.g-var-cell, td.g-cov-cell { white-space: nowrap; }
+    td.g-pct-cell, td.g-rank-cell, td.g-var-cell { white-space: nowrap; }
     td.g-pct-cell .g-pct, td.g-rank-cell .g-rank, td.g-var-cell .g-var {
       display: inline-block; width: 4em; text-align: right;
       font-family: var(--font-mono); font-size: 11px; color: #555;
       margin-right: 4px; vertical-align: middle;
-    }
-    /* CoV column: plain right-aligned number, no dot scale. */
-    td.g-cov-cell { text-align: right; }
-    td.g-cov-cell .g-cov {
-      display: inline-block; font-family: var(--font-mono); font-size: 11px;
-      color: #555; text-align: right;
     }
     /* Sortable gene-table column headers */
     #obs-tbl-genes thead th[data-sortcol] { cursor: pointer; user-select: none; white-space: nowrap; }
@@ -612,14 +636,13 @@
       <th class="obs-plots-th">plot</th>
       <th data-sortcol="pct" title="fraction of cells with expression > 0; click to sort">% expr</th>
       <th data-sortcol="rank" title="percentile rank of this gene's mean expression among all genes in the dataset (0 = lowest, 1 = highest); click to sort">rank expr</th>
-      <th data-sortcol="var" class="g-sort-desc" title="std of the gene's expression across cells, higher = more variable; click to sort">std</th>
-      <th data-sortcol="cov" style="text-align:right" title="coefficient of variation (std / mean); click to sort">CoV</th>
+      <th data-sortcol="var" class="g-sort-desc" title="Standard deviation of the gene's log-normalised expression across cells (already a relative, fold-scale spread); higher = more variable; click to sort">spread across cells</th>
     </tr></thead>
     <tbody>
     {% if gene_panel and gene_panel.genes %}
     {% for gene in gene_panel.genes %}
     {% set _b = '/browse/' ~ folder_browse_id ~ '/' ~ file_id %}
-    <tr class="gene-item gene-curated" data-gene="{{ gene }}" data-gene-lc="{{ gene|lower }}" data-pct="" data-rank="" data-var="" data-cov="">
+    <tr class="gene-item gene-curated" data-gene="{{ gene }}" data-gene-lc="{{ gene|lower }}" data-pct="" data-rank="" data-var="">
       <td class="g-flag-cell" style="text-align:center;font-size:13px;white-space:nowrap"><span class="g-flag-curated" title="dataset favourite (from this collection's top_genes)">&#9670;</span></td>
       <td class="colname">{{ gene }}</td>
       <td class="obs-plots">
@@ -636,10 +659,7 @@
         <span class="g-rank"></span>{{ dot_scale('rank', 'rank expression (percentile rank of the mean among all genes)') }}
       </td>
       <td class="g-var-cell">
-        <span class="g-var"></span>{{ dot_scale('var', 'std across cells, scaled to the highest in the table') }}
-      </td>
-      <td class="g-cov-cell">
-        <span class="g-cov"></span>
+        <span class="g-var"></span>{{ dot_scale('var', 'spread across cells (std), scaled to the highest in the table') }}
       </td>
     </tr>
     {% endfor %}
@@ -649,8 +669,7 @@
   <div class="muted" style="font-size:11px;margin-top:4px">
     Stats from <code>/gene_stats</code> (log-normalised expression layer).
     <b>rank expr</b> is the percentile rank of the gene's mean among all genes in the dataset.
-    <b>std</b> is the standard deviation of expression across cells; the dot shows its share of the panel-wide max.
-    <b>CoV</b> is std / mean.
+    <b>spread across cells</b> is the standard deviation of the log-normalised expression across cells; the dot shows its share of the panel-wide max.
   </div>
 </section>
 {% endif %}
@@ -737,57 +756,10 @@
   </div>
   {% endif %}
 
-  {% set _fx = facet_tests.by_facet if facet_tests else {} %}
-  {% set _fx_shown = dataset_facets|map(attribute='facet')|list %}
-  {% set _fx_extra = [] %}{% set _fx_untested_extra = [] %}{% for col in _fx %}{% if col not in _fx_shown %}{% if _fx[col].tested %}{% set _ = _fx_extra.append(col) %}{% elif _fx[col].untested %}{% set _ = _fx_untested_extra.append(col) %}{% endif %}{% endif %}{% endfor %}
-  {% if dataset_facets or _fx_extra %}
-  {% from "_facet_mapping.html" import facet_mapping_styles, mapping_kind, source_columns, translation, coverage %}
-  {% from "_facet_effects.html" import fx_styles, fx_intro, fx_table, fx_untested, fx_script %}
-  {{ facet_mapping_styles() }}
-  {{ fx_styles() }}
-  <div class="data-card wide" id="ds-facets">
-    <h2 class="section-head">Facets <span class="muted">({{ dataset_facets|selectattr('live')|list|length }})</span>
-      <span class="info" title="Standardised ant_ columns of this dataset and where they come from: the author column, how it was mapped (renamed, derived through a value map, or one constant value) and how each author value was translated, with cell counts. Below each facet, when it was tested: its donor-level effects per cell type. Click a facet for its definition and the other datasets that carry it.">ⓘ</span></h2>
-    <p class="fx-intro muted" id="ds-facets-hidden-note">{% if n_facets_hidden %}{{ n_facets_hidden }} other {{ 'facet is' if n_facets_hidden == 1 else 'facets are' }} hidden while the facet audit decisions are pending; {{ 'it stays' if n_facets_hidden == 1 else 'they stay' }} in the data, plots and API. {% endif %}<a href="/help#facet-effects">About facets and their effects</a></p>
-    {% if facet_tests and facet_tests.n_units_tested %}{{ fx_intro('dataset', facet_tests.n_permutations) }}
-    {% if facet_tests.cohort %}<p class="fx-intro muted" id="fx-cohort">Cohort {{ facet_tests.cohort.cohort_label }}, {{ facet_tests.cohort.role }}{% if not facet_tests.cohort.counted %} (not counted towards replication across datasets){% endif %}; from the DRAFT cohort selection table.</p>
-    {% else %}<p class="fx-intro muted" id="fx-cohort">This dataset is not in the DRAFT cohort selection table, so it does not count towards replication across datasets.</p>{% endif %}
-    {% endif %}
-    {% if facet_tests and facet_tests.dataset_changed %}<p class="fx-intro" id="fx-changed" style="color:#7a4b0c">The dataset has changed since the facet tests were run; the effects describe the earlier version.</p>{% endif %}
-    {% if facet_tests and not facet_tests.n_units_tested %}
-    <p class="fx-none" id="fx-not-tested">Effects: not tested{% if facet_tests.reason %} ({{ facet_tests.reason }}){% endif %}. Facet tests need a human primary dataset with a raw counts layer, at least 6 donors and at least 3 donors in each level.</p>
-    {% endif %}
-    <div class="table-wrap">
-    <table class="ds-facets">
-      <thead><tr><th>Facet</th><th>Author column</th><th>Mapping</th><th>Value translation <span class="muted">(cells)</span></th><th class="num">Cells</th></tr></thead>
-      <tbody>
-        {% for f in dataset_facets %}
-        <tr class="ds-facet-row{% if not f.live %} not-live{% endif %}" data-facet="{{ f.facet }}">
-          <td data-label="Facet"><a class="fct-name" href="/facets/{{ f.facet|urlencode }}" title="{{ f.summary or f.facet }}">{{ f.facet[4:] }}</a>
-            {% if not f.live %}<div class="fm-warn" title="Declared in the dataset description but not in the served data (views not rebuilt, or the source column is missing).">declared, not served</div>{% endif %}</td>
-          <td data-label="From">{{ source_columns(f) }}</td>
-          <td data-label="Mapping">{{ mapping_kind(f.mapping_kind) }}</td>
-          <td data-label="Values">{{ translation(f, max_rows=6) }}</td>
-          <td class="num" data-label="Cells">{{ coverage(f) }}</td>
-        </tr>
-        {% if _fx.get(f.facet) %}{{ _fx_effects_row(f.facet, _fx[f.facet]) }}{% endif %}
-        {% endfor %}
-        {% for col in _fx_extra %}
-        <tr class="ds-facet-row" data-facet="{{ col }}">
-          <td data-label="Facet"><a class="fct-name" href="/facets/{{ col|urlencode }}">{{ col[4:] }}</a></td>
-          <td colspan="4" class="fm-note">Not published as a column of this dataset; the facet test derived it ({% if col == 'ant_apoe4_carrier' %}any e4 allele in ant_apoe{% else %}see the model details{% endif %}).</td>
-        </tr>
-        {{ _fx_effects_row(col, _fx[col]) }}
-        {% endfor %}
-      </tbody>
-    </table>
-    </div>
-    {% if _fx_untested_extra %}
-    <div class="fx-none" id="fx-untested-extra">
-      {% for col in _fx_untested_extra %}<div>{{ col[4:]|capitalize }} was not tested ({% for item in _fx[col].untested %}{{ item.cell_type }}, {{ item.reason or 'no reason recorded' }}{{ '; ' if not loop.last }}{% endfor %}).</div>{% endfor %}</div>
-    {% endif %}
+  {% if show_facets_tab %}
+  <div class="data-card wide" id="ds-facets-pointer">
+    <p class="muted" style="margin:0">Facets and their effects: see the <a href="#facets">Facets tab</a>.</p>
   </div>
-  {{ fx_script() }}
   {% endif %}
 
   </div>
@@ -814,6 +786,65 @@
     <span>loading geneset variability…</span>
   </div>
   {% include "_module_view.html" with context %}
+</section>
+{% endif %}
+
+{# ── Facets tab ───────────────────────────────────────────────────────── #}
+{% if show_facets_tab %}
+{% from "_facet_mapping.html" import facet_mapping_styles %}
+{% from "_facet_effects.html" import fx_styles, fx_intro, fx_script %}
+<section class="tab-panel" id="tab-facets" role="tabpanel">
+  {{ facet_mapping_styles() }}
+  {{ fx_styles() }}
+  {% set _fx = facet_tests.by_facet if facet_tests else {} %}
+  {% set _fx_shown = (dataset_facets + dataset_facets_other)|map(attribute='facet')|list %}
+  {% set _fx_extra = [] %}{% set _fx_untested_extra = [] %}{% for col in _fx %}{% if col not in _fx_shown %}{% if _fx[col].tested %}{% set _ = _fx_extra.append(col) %}{% elif _fx[col].untested %}{% set _ = _fx_untested_extra.append(col) %}{% endif %}{% endif %}{% endfor %}
+  <div id="ds-facets">
+    <h2 class="section-head">Facets <span class="muted">({{ n_facets_total }})</span>
+      <span class="info" title="Standardised ant_ columns of this dataset and where they come from: the author column, how it was mapped (renamed, derived through a value map, or one constant value) and how each author value was translated, with cell counts. Below, when a facet was tested: its donor-level effects per cell type. Click a facet for its definition and the other datasets that carry it.">ⓘ</span></h2>
+    {# Unit line. A "Replicate unit" entry (donor | animal | sample | none) goes first in this paragraph once the API reports it. #}
+    <p class="fx-intro" id="fx-unit-line">
+      {% if info and info.designation %}<span id="fx-designation"><b>{{ 'Primary data' if info.designation == 'primary' else ('Reanalysis' if info.designation == 'reanalysis' else 'Designation unresolved') }}</b>{% if info.designation == 'reanalysis' %}, never counted towards replication across datasets{% endif %}.</span>{% endif %}
+      {% if info and info.donor_group %}<span id="fx-donor-group">Donor group <a href="/donor-groups#dg-{{ info.donor_group }}">{{ info.donor_group }}</a>.</span>{% endif %}
+      {% if facet_tests and facet_tests.cohort %}<span id="fx-cohort">Cohort {{ facet_tests.cohort.cohort_label }}, {{ facet_tests.cohort.role }}{% if not facet_tests.cohort.counted %} (not counted towards replication across datasets){% endif %}; from the DRAFT cohort selection table.</span>
+      {% elif facet_tests and facet_tests.n_units_tested %}<span id="fx-cohort">This dataset is not in the DRAFT cohort selection table, so it does not count towards replication across datasets.</span>{% endif %}
+      <a href="/help#facet-effects">About facets and their effects</a>
+    </p>
+    {% if facet_tests and facet_tests.dataset_changed %}<p class="fx-intro" id="fx-changed" style="color:#7a4b0c">The dataset has changed since the facet tests were run; the effects describe the earlier version.</p>{% endif %}
+
+    {% if dataset_facets or _fx_extra %}
+    <h3 class="subsection-head" id="facets-analysed">Analysed facets <span class="muted">({{ dataset_facets|length + _fx_extra|length }})</span></h3>
+    {% call _facet_mapping_table(dataset_facets) %}
+        {% for col in _fx_extra %}
+        <tr class="ds-facet-row" data-facet="{{ col }}">
+          <td data-label="Facet"><a class="fct-name" href="/facets/{{ col|urlencode }}">{{ col[4:] }}</a></td>
+          <td colspan="4" class="fm-note">Not published as a column of this dataset; the facet test derived it ({% if col == 'ant_apoe4_carrier' %}any e4 allele in ant_apoe{% else %}see the model details{% endif %}).</td>
+        </tr>
+        {% endfor %}
+    {% endcall %}
+    {% endif %}
+    {% if dataset_facets_other %}
+    <h3 class="subsection-head" id="facets-not-analysed">Not analysed yet <span class="muted">({{ dataset_facets_other|length }})</span>
+      <span class="info" title="These facets are in the data, the plots, SQL and the API. Their donor-level effects are not analysed while the facet audit decisions are pending.">ⓘ</span></h3>
+    {{ _facet_mapping_table(dataset_facets_other) }}
+    {% endif %}
+
+    {% if facet_tests and facet_tests.n_units_tested %}
+    <h2 class="section-head" id="facets-effects-head">Effects by facet</h2>
+    {{ fx_intro('dataset', facet_tests.n_permutations) }}
+    {% for f in dataset_facets + dataset_facets_other %}{% if _fx.get(f.facet) %}{{ _fx_effects_block(f.facet, _fx[f.facet]) }}{% endif %}{% endfor %}
+    {% for col in _fx_extra %}{{ _fx_effects_block(col, _fx[col]) }}{% endfor %}
+    {% if _fx_untested_extra %}
+    <div class="fx-none" id="fx-untested-extra">
+      {% for col in _fx_untested_extra %}<div>{{ col[4:]|capitalize }} was not tested ({% for item in _fx[col].untested %}{{ item.cell_type }}, {{ item.reason or 'no reason recorded' }}{{ '; ' if not loop.last }}{% endfor %}).</div>{% endfor %}</div>
+    {% endif %}
+    {% else %}
+    <h2 class="section-head" id="facets-effects-head">Effects by facet</h2>
+    <p class="fx-none" id="fx-not-tested">{% if facet_tests %}No facet tests for this dataset: {{ facet_tests.reason_text }}.{% else %}Facet test results could not be loaded.{% endif %}
+      Facet tests need a human primary dataset with a raw counts layer, at least 6 donors and at least 3 donors in each level of a facet.</p>
+    {% endif %}
+  </div>
+  {{ fx_script() }}
 </section>
 {% endif %}
 
@@ -1244,6 +1275,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 catch (_) { focusModulesRow(m[1]); }
                 return;
             }
+            if (tabPart === 'ds-facets') tabPart = 'facets';   // old anchor of the card
             activateTab(tabPart, false);
         }
         window.addEventListener('hashchange', function() { handleHash(location.hash); });
@@ -1536,7 +1568,6 @@ document.addEventListener('DOMContentLoaded', function() {
                     _row.dataset.pct    = '';
                     _row.dataset.rank   = '';
                     _row.dataset.var    = '';
-                    _row.dataset.cov    = '';
                     var _plotCell = '';
                     if (_favHasDb) {
                         var _histLink = _favBase + '/plot/histogram?x=' + encodeURIComponent(_g);
@@ -1561,8 +1592,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         + '<td class="obs-plots">' + _plotCell + '</td>'
                         + '<td class="g-pct-cell"><span class="g-pct"></span>' + antDot.html(null, { stat: 'pct', title: '% expressing cells' }) + '</td>'
                         + '<td class="g-rank-cell"><span class="g-rank"></span>' + antDot.html(null, { stat: 'rank', title: 'rank expression (percentile rank of the mean among all genes)' }) + '</td>'
-                        + '<td class="g-var-cell"><span class="g-var"></span>' + antDot.html(null, { stat: 'var', title: 'std across cells, scaled to the highest in the table' }) + '</td>'
-                        + '<td class="g-cov-cell"><span class="g-cov"></span></td>';
+                        + '<td class="g-var-cell"><span class="g-var"></span>' + antDot.html(null, { stat: 'var', title: 'spread across cells (std), scaled to the highest in the table' }) + '</td>';
                     _favTbody.insertBefore(_row, _favInsertAnchor);
                 });
             }
@@ -1652,25 +1682,21 @@ document.addEventListener('DOMContentLoaded', function() {
                 var rankStr  = s && s.rank_mean != null ? (s.rank_mean * 100).toFixed(0) + '%' : '';
                 // std value in muted text (shared-scale bar does the panel-wide comparison).
                 var varStr   = s && s.std != null ? fnum(s.std) : '';
-                // CoV: plain number, 4 decimals, right-aligned; no dot scale.
-                var covStr   = s && s.cv != null ? Number(s.cv).toFixed(4) : '';
                 var pctSpark  = antDot.html(null, { stat: 'pct',  title: '% expressing cells' });
                 var rankSpark = antDot.html(null, { stat: 'rank', title: 'rank expression (percentile rank of the mean among all genes)' });
-                var varSpark  = antDot.html(null, { stat: 'var',  title: 'std across cells, scaled to the highest in the table' });
+                var varSpark  = antDot.html(null, { stat: 'var',  title: 'spread across cells (std), scaled to the highest in the table' });
                 var varFrac   = stdRankFrac != null ? stdRankFrac : null;
-                // data-pct/rank/var/cov hold numeric sort keys (empty = unknown, sorts last).
+                // data-pct/rank/var hold numeric sort keys (empty = unknown, sorts last).
                 var dataPct  = s && s.pct_nonzero != null  ? ' data-pct="'  + s.pct_nonzero + '"' : ' data-pct=""';
                 var dataRank = s && s.rank_mean   != null  ? ' data-rank="' + s.rank_mean   + '"' : ' data-rank=""';
                 var dataVar  = s && s.std         != null  ? ' data-var="'  + s.std         + '"' : ' data-var=""';
-                var dataCov  = s && s.cv          != null  ? ' data-cov="'  + s.cv          + '"' : ' data-cov=""';
-                var row = '<tr class="gene-item" data-gene="' + esc(geneName) + '" data-gene-lc="' + esc(geneName.toLowerCase()) + '"' + dataPct + dataRank + dataVar + dataCov + '>'
+                var row = '<tr class="gene-item" data-gene="' + esc(geneName) + '" data-gene-lc="' + esc(geneName.toLowerCase()) + '"' + dataPct + dataRank + dataVar + '>'
                     + '<td class="g-flag-cell" style="text-align:center;font-size:13px;white-space:nowrap">' + (starHtml || '') + '</td>'
                     + '<td class="colname">' + esc(geneName) + '</td>'
                     + '<td class="obs-plots">' + plotHtml + '</td>'
                     + '<td class="g-pct-cell"><span class="g-pct">' + esc(pctStr) + '</span>' + pctSpark + '</td>'
                     + '<td class="g-rank-cell"><span class="g-rank">' + esc(rankStr) + '</span>' + rankSpark + '</td>'
                     + '<td class="g-var-cell"><span class="g-var">' + esc(varStr) + '</span>' + varSpark + '</td>'
-                    + '<td class="g-cov-cell"><span class="g-cov">' + esc(covStr) + '</span></td>'
                     + '</tr>';
                 // Immediately position dot scales for cells we already know.
                 // (The DOM element doesn't exist yet — caller must call setGeneDots
@@ -1717,11 +1743,6 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (varEl && s.std != null) {
                         varEl.textContent = fnum(s.std);
                         row.dataset.var = String(s.std);
-                    }
-                    var covEl = row.querySelector('.g-cov');
-                    if (covEl && s.cv != null) {
-                        covEl.textContent = Number(s.cv).toFixed(4);
-                        row.dataset.cov = String(s.cv);
                     }
                     var stdRankFrac = stdRankMap[(row.dataset.gene || '').toLowerCase()];
                     setGeneDots(row, s, stdRankFrac != null ? stdRankFrac : null);
@@ -1978,7 +1999,6 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (col === 'pct')  { av = numVal(a, 'pct');  bv = numVal(b, 'pct');  }
                     else if (col === 'rank') { av = numVal(a, 'rank'); bv = numVal(b, 'rank'); }
                     else if (col === 'var')  { av = numVal(a, 'var');  bv = numVal(b, 'var');  }
-                    else if (col === 'cov')  { av = numVal(a, 'cov');  bv = numVal(b, 'cov');  }
                     else if (col === 'gene') { return mul * (a.dataset.gene || '').localeCompare(b.dataset.gene || ''); }
                     else if (col === 'star') {
                         // Sort by "how many flags this row carries" — personal
@@ -2169,69 +2189,6 @@ document.addEventListener('DOMContentLoaded', function() {
             function applyGeneSearch(query, pushState) { runGeneSearch(query || ''); }
             // expose for tests
             window._applyGeneSearch = applyGeneSearch;
-        })();
-
-        // Modules tab. Hydrate per-tag variability cells from
-        // /module-variability. Categorical tags use omega squared; numerical
-        // use spearman rho. Value comes from the primary method score present
-        // for the module (scanpy > ucell > starcat).
-        (function () {
-            var modRows = Array.from(document.querySelectorAll('#tab-modules tr.mod-item'));
-            if (!modRows.length) return;
-            var NUMERICAL_TAGS = { braak: 1, age: 1, pmi: 1 };
-            var STAT_FOR_TAG = function (tag) {
-                return (tag in NUMERICAL_TAGS) ? 'spearman' : 'omega2';
-            };
-            var METHOD_PRIORITY = ['geneset', 'ucell'];   // starCAT dropped from the UI
-            // `min_abs=0` drops NaN rows server-side — without it the
-            // endpoint 500s on JSON-serialising NaN in large responses.
-            fetch('/api/module-variability?dataset=' + encodeURIComponent(DB_ID) + '&min_abs=0&limit=100000',
-                  { credentials: 'same-origin' })
-                .then(function (r) { return r.ok ? r.json() : null; })
-                .then(function (d) {
-                    if (!d || !d.rows) return;
-                    // Index rows: key = (catalog::module, source, tag, statistic) → value
-                    var byKey = {};
-                    var tagsWithData = {};
-                    d.rows.forEach(function (r) {
-                        var mkey = r.catalog + '::' + r.module;
-                        byKey[mkey + '|' + r.source + '|' + r.tag + '|' + r.statistic] = r.value;
-                        tagsWithData[r.tag] = true;
-                    });
-                    // Hide tag columns (both <th> and <td>) whose tag has zero
-                    // rows in this dataset — keeps the table compact.
-                    ['sex','braak','braak_group','disease','cluster','condition','age'].forEach(function (tag) {
-                        if (!tagsWithData[tag]) {
-                            document.querySelectorAll('#tab-modules .mv-tag-' + tag).forEach(function (el) {
-                                el.style.display = 'none';
-                            });
-                        }
-                    });
-                    modRows.forEach(function (row) {
-                        var modKey = row.dataset.modKey;
-                        row.querySelectorAll('td.mv-cell').forEach(function (cell) {
-                            var tag = cell.dataset.tag;
-                            var stat = STAT_FOR_TAG(tag);
-                            // Try methods in priority order
-                            for (var i = 0; i < METHOD_PRIORITY.length; i++) {
-                                var v = byKey[modKey + '|' + METHOD_PRIORITY[i] + '|' + tag + '|' + stat];
-                                if (v != null) {
-                                    var abs = Math.abs(v);
-                                    // Colour intensity by |value| on 0..1 (both stats fit that)
-                                    var alpha = Math.min(1, abs / 0.5);
-                                    var hue = (stat === 'spearman' && v < 0) ? 350 : 210;
-                                    cell.style.backgroundColor = 'hsla(' + hue + ', 70%, 55%, ' + alpha + ')';
-                                    cell.textContent = (stat === 'spearman' ? (v >= 0 ? '+' : '') + v.toFixed(2) : v.toFixed(2));
-                                    cell.title = tag + ' (' + stat + '): ' + v.toFixed(4) + '  · via ' + METHOD_PRIORITY[i];
-                                    return;
-                                }
-                            }
-                            cell.textContent = '';
-                            cell.title = tag + ': not scored / tag absent in this dataset';
-                        });
-                    });
-                })
-                .catch(function () {});
         })();
 
         // Click tracking on obs-plot links (fire-and-forget POST /obs_click).

@@ -1779,10 +1779,17 @@ def test_dataset_page_facets_card(client):
     # hidden author column: no name, explained
     assert "hidden author column" in card
     assert "50 missing" in card
-    # inside the Data tab, wrapped for phones
+    # in its own Facets tab (after Genesets), wrapped for phones; the Data tab only points to it
+    facets_tab = text.split('id="tab-facets"')[1].split("</section>")[0]
+    assert 'id="ds-facets"' in facets_tab
+    assert '<div class="table-wrap">\n<table class="ds-facets">' in facets_tab
     data_tab = text.split('id="tab-data"')[1].split("</section>")[0]
-    assert 'id="ds-facets"' in data_tab
-    assert '<div class="table-wrap">\n    <table class="ds-facets">' in data_tab
+    assert 'id="ds-facets"' not in data_tab
+    assert 'Facets and their effects: see the <a href="#facets">Facets tab</a>' in data_tab
+    bar = text.split('id="ds-tab-bar"')[1].split("</div>")[0]
+    assert 'data-tab="facets"' in bar and '<span class="tab-count">' in bar.split('data-tab="facets"')[1]
+    assert bar.index('data-tab="data"') < bar.index('data-tab="facets"') < bar.index('data-tab="num"')
+    assert 'id="fx-unit-line"' in facets_tab and 'id="fx-cohort"' in facets_tab
 
 
 def test_dataset_page_without_facets_endpoint_hides_card(client):
@@ -4663,22 +4670,33 @@ def test_module_view_sort_state_and_indicators(client):
     )
 
 
-# ── Ask 3: facet label ────────────────────────────────────────────────────────
+# ── Ask 3: obs column label, per-cell association heading ─────────────────────
 
-def test_module_view_facet_label(client):
-    """The tag filter label must read 'facet' (not bare 'tag').
-    The table column header must also say 'facet'.
-    """
+def test_module_view_obs_column_label(client):
+    """The tag filter and column read 'obs column' (not 'facet'); donor and
+    cluster columns are off in the default view; the value column is labelled
+    as an exploratory per-cell association with the pseudoreplication tooltip."""
     resp = client.get("/genesets/StudyX/Exp1")
     assert resp.status_code == 200
     html = resp.text
-    assert '>facet<' in html or 'facet</label' in html or 'facet <span' in html, (
-        "Label 'facet' not found in filter row"
-    )
-    # Column header: th contains 'facet' text.
-    assert '>facet<' in html or 'facet</th' in html, (
-        "Column header for tag column must say 'facet'"
-    )
+    assert '<label>obs column <span class="info"' in html
+    assert '>obs column: all' in html
+    assert '<th class="mv-th-tag" data-sortcol="tag">obs column</th>' in html
+    assert 'Values include braak, sex, cluster, disease' not in html
+    assert "per-cell association (exploratory)" in html
+    assert ("Computed over individual cells, not donors or animals, and not within cell type: "
+            "describes where a score differs, not a tested effect. For donor-level effects see the Facets tab.") in html
+    assert "/donor|cluster/i" in html and "mff.tag.setValues(defaultTags)" in html
+
+
+def test_module_view_no_dot_for_few_peers(client):
+    """Peer groups with fewer than 4 modules get an empty position cell, sorted last."""
+    html = client.get("/genesets/StudyX/Exp1").text
+    assert "var MIN_PEERS = 4;" in html
+    assert "g.n >= MIN_PEERS" in html
+    assert "!hasPeers(r, PEER_INDEX) ? ''" in html
+    assert 'title="fewer than 4 peer modules"' in html
+    assert "function comparePosition" in html
 
 
 # ── Ask 4: ECDF link for categorical plots ─────────────────────────────────────
@@ -5010,7 +5028,7 @@ def test_genes_tab_search_still_works(client):
 
 def test_genes_tab_uniform_column_headers(client):
     """#obs-tbl-genes has the standard column headers: star / gene / plot /
-    % expr / rank expr / std / CoV. No mean or mean(nz). The separate
+    % expr / rank expr / spread across cells. No CoV, no mean or mean(nz). The separate
     search-results table is gone."""
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
@@ -5022,8 +5040,8 @@ def test_genes_tab_uniform_column_headers(client):
     assert '% expr'     in thead or 'pct'  in thead.lower(), \
         "#obs-tbl-genes thead missing % expr column"
     assert 'rank expr'  in thead, "#obs-tbl-genes thead missing 'rank expr' column"
-    assert '>std<' in thead, "#obs-tbl-genes thead missing 'std' column"
-    assert '>CoV<' in thead, "#obs-tbl-genes thead missing 'CoV' column"
+    assert '>spread across cells<' in thead, "#obs-tbl-genes thead missing 'spread across cells' column"
+    assert '>CoV<' not in html and 'g-cov' not in html, "the CoV column is gone"
     assert 'variability' not in thead, \
         "'variability' header must be renamed to 'std'"
     assert '>mean<' not in thead and '>mean(nz)<' not in thead, \
@@ -6774,8 +6792,9 @@ def test_mcp_connection_name_matches_the_api_snippets():
 def test_dataset_facets_card_shows_effects_per_facet(client):
     text = client.get("/browse/GroupA/ds1").text
     card = text.split('id="ds-facets"')[1].split('<script>')[0]
-    # no separate tab: the effects live under the facets
-    assert 'data-tab="facets"' not in text
+    # the effects live in the Facets tab, below the mapping table
+    assert 'data-tab="facets"' in text and 'Effects by facet' in card
+    assert card.index('class="ds-facets"') < card.index('Effects by facet') < card.index('class="ds-facet-fx"')
     assert 'id="fx-intro"' in card and "exploratory" in card and "donor" in card
     assert "provisional" in card and "same donors appear in several datasets" in card
     assert 'href="/help#facet-effects"' in card
@@ -6812,9 +6831,12 @@ def test_dataset_facets_card_hides_facets_outside_the_config(client, monkeypatch
         return _fake_api_get(api_url, path)
     monkeypatch.setattr(browser, "_api_get", fake)
     card = client.get("/browse/GroupA/ds1").text.split('id="ds-facets"')[1].split("<script>")[0]
-    assert 'href="/facets/ant_tissue"' not in card and 'href="/facets/ant_braak_group"' not in card
     assert 'href="/facets/ant_sex"' in card
-    assert "2 other facets are hidden while the facet audit decisions are pending" in card
+    # not analysed facets are listed, under their own subheading, not dropped
+    assert 'id="facets-not-analysed"' in card and "Not analysed yet" in card
+    analysed, not_analysed = card.split('id="facets-not-analysed"')
+    assert 'data-facet="ant_sex"' in analysed and 'data-facet="ant_tissue"' not in analysed
+    assert 'href="/facets/ant_tissue"' in not_analysed and 'href="/facets/ant_braak_group"' in not_analysed
 
 
 def test_dataset_facets_card_not_tested_state(client, monkeypatch):
@@ -6826,8 +6848,49 @@ def test_dataset_facets_card_not_tested_state(client, monkeypatch):
     monkeypatch.setattr(browser, "_api_get", fake)
     card = client.get("/browse/GroupA/ds1").text.split('id="ds-facets"')[1]
     assert 'id="fx-not-tested"' in card
-    assert "Effects: not tested (no raw counts layer served)" in card
+    assert "No facet tests for this dataset: no raw counts layer is served" in card
     assert 'id="fx-intro"' not in card.split("<script>")[0]
+
+
+def test_dataset_facets_tab_when_every_facet_is_hidden(client, monkeypatch):
+    # M19/PRH case: all facets outside facets_visible. The tab stays, with the facets under "Not analysed yet".
+    def fake(api_url, path, **kwargs):
+        if path == "/databases/GroupA/ds1/facets":
+            return {**_DATASET_FACETS, "facets": [{**f, "hidden_by_config": True} for f in _DATASET_FACETS["facets"]]}
+        if path == "/databases/GroupA/ds1/facet-tests":
+            return {"db_id": "GroupA/ds1", "status": "not_tested", "reason": "experimental_system xenograft",
+                    "n_units": 0, "n_units_tested": 0, "units": [], "runs": {}, "files": {}}
+        return _fake_api_get(api_url, path)
+    monkeypatch.setattr(browser, "_api_get", fake)
+    text = client.get("/browse/GroupA/ds1").text
+    assert 'data-tab="facets"' in text
+    tab = text.split('id="tab-facets"')[1].split("</section>")[0]
+    assert 'id="facets-analysed"' not in tab and 'id="facets-not-analysed"' in tab
+    assert 'href="/facets/ant_sex"' in tab
+    assert "this dataset is a xenograft" in tab and "host animal" in tab
+
+
+def test_dataset_facets_tab_hidden_without_facets(client):
+    text = client.get("/browse/GroupA/ds2").text
+    assert 'data-tab="facets"' not in text and 'id="tab-facets"' not in text
+    assert "see the Facets tab" not in text
+
+
+@pytest.mark.parametrize("status,reason,expected", [
+    ("not_tested", "experimental_system bulk_tissue", "bulk tissue"),
+    ("not_tested", "experimental_system in_vitro_2d", "in vitro"),
+    ("not_tested", "experimental_system organoid", "experimental system organoid"),
+    ("not_tested", "organism not human (mouse)", "human only"),
+    ("not_tested", "secondary (is_secondary true)", "reanalysis"),
+    ("not_tested", "5 donors (< 6)", "only 5 donors; at least 6"),
+    ("not_tested", "no ant_donor facet in the current mapping", "no donor column"),
+    ("not_tested", "no facet and cell type combination had enough donors per level", "no levels at all"),
+    ("not_tested", "something new", "something new"),
+    ("not_tested", None, "no reason was recorded"),
+    ("not_run", "no facet test run has recorded this dataset", "has been run"),
+])
+def test_fx_reason_text(status, reason, expected):
+    assert expected in browser._fx_reason_text(status, reason)
 
 
 def test_dataset_page_without_facet_tests_endpoint(client):
@@ -6969,6 +7032,10 @@ def test_dataset_page_shows_lineage(client, monkeypatch):
     assert 'class="lineage-pill reanalysis"' in lineage
     assert 'id="ds-reanalysis-of"' in lineage and 'href="/browse/GroupA/ds2"' in lineage
     assert 'href="/donor-groups#dg-rosmap"' in lineage
+    # the Facets tab repeats designation and donor group in its unit line
+    unit_line = text.split('id="fx-unit-line"')[1].split("</p>")[0]
+    assert "Reanalysis" in unit_line and "never counted" in unit_line
+    assert 'href="/donor-groups#dg-rosmap"' in unit_line
 
 
 def test_dataset_page_without_designation_has_no_lineage_row(client):
@@ -7033,3 +7100,19 @@ def test_deprecated_facet_page_redirects_to_the_current_name(client):
 def test_help_mentions_the_facet_rename(client):
     text = client.get("/help").text
     assert "ant_apoe4_carrier" in text and "ant_apoe_carrier" in text
+
+
+def test_help_page_per_cell_vs_per_donor_section(client):
+    text = client.get("/help").text
+    section = text.split('id="per-cell-per-donor"')[1].split("</section>")[0]
+    for phrase in ("Per cell vs per donor", "Facets</strong> tab", "per donor", "Per-cell association (exploratory)",
+                   "pseudoreplicated", "the replicate there is the animal", "spread across cells"):
+        assert phrase.lower() in section.lower(), phrase
+    assert '<a href="#per-cell-per-donor">' in text
+    assert "—" not in section
+
+
+def test_module_view_explains_skipped_datasets(client):
+    html = client.get("/genesets/StudyX/Exp1").text
+    assert "SKIPPED = d.skipped_datasets || {};" in html
+    assert "No per-cell association statistics for this dataset: " in html

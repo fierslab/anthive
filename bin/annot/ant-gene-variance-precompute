@@ -63,12 +63,19 @@ Facet handling:
   * ``ant_braak`` (numerical) is treated as categorical here (each
     level is its own group). For truly continuous facets, we NTILE(5)
     into ``q1``..``q5`` and treat those as categories.
+  * Donor-like columns (``ant_donor``, ``ant_donor_uid``, ...) are
+    identifiers: always categorical, never quantile-binned, even when
+    the dataset stores them as numbers.
   * Skips facets with 1 unique value (no groups) or n_unique > 50 (per
     spec: uninformative for group-variance).
   * Skips ``cell_name``.
 
 Scope:
 
+  * Bulk datasets (technology bulk, or about one observation per donor)
+    are skipped: there are no cells to describe. The skipped datasets
+    and the reason go to ``gene_variance_index.skipped.json`` next to
+    the aggregate (see ``lib/cell_level_scope.py``).
   * Restricted to the genes already present in
     ``<h5adstore>/gene_stats_index.parquet`` (the "hot set"). This is
     task #324's promise; the full-genome sweep is task #330.
@@ -108,6 +115,8 @@ from index_freshness import (                                      # type: ignor
     FINGERPRINT_COLUMN, STALE_FINGERPRINT, build_fingerprint,
 )
 from metadata import parse_md_file                                 # type: ignore
+import cell_level_scope                                            # type: ignore
+import mus                                                         # type: ignore
 
 
 CACHE_DIRNAME = '_gene_variance_cache'
@@ -205,6 +214,31 @@ class DatasetInputs:
     by_gene_parquet: Path
     source_mtime: float
     fingerprint: str = STALE_FINGERPRINT
+    h5ad_path: Optional[Path] = None
+    store_root: Optional[Path] = None
+
+
+def dataset_skip_reason(inputs: DatasetInputs) -> Optional[str]:
+    """Why this dataset is out of scope (bulk, one observation per donor), or None.
+
+    Args:
+        inputs: Dataset paths.
+
+    Returns:
+        The reason to record, or None when per-cell statistics make sense.
+    """
+    annotation: dict = {}
+    if inputs.h5ad_path is not None:
+        try:
+            annotation = mus.resolve_annotation(inputs.h5ad_path, root=inputs.store_root)
+        except Exception:  # noqa: BLE001 - no annotation: only the counts can decide
+            annotation = {}
+    conn = duckdb.connect(str(inputs.duckdb_path), read_only=True)
+    try:
+        n_obs, n_donors = cell_level_scope.count_obs_and_donors(conn)
+    finally:
+        conn.close()
+    return cell_level_scope.scope_skip_reason(annotation, n_obs, n_donors)
 
 
 def _default_layer_from_md(md_path: Path) -> Optional[str]:
@@ -253,6 +287,8 @@ def build_dataset_inputs(entry, root: Path) -> Optional[DatasetInputs]:
             root,
             [entry.duckdb_path, *([by_gene] if by_gene.exists() else [])],
         ),
+        h5ad_path=entry.h5ad_path,
+        store_root=root,
     )
 
 
@@ -332,16 +368,18 @@ def _facet_cardinality(
 def _discover_facets(
     conn: duckdb.DuckDBPyConnection,
     max_cardinality: int,
-) -> list[tuple[str, str, int, int]]:
+) -> list[tuple[str, str, int, int, str]]:
     """Enumerate usable facets on one dataset.
 
     A facet is an obs column named ``ant_*``. For numerical facets we
     still emit ``'numerical'`` as the facet_type -- the compute path
-    NTILE(5)s the raw values into quantile bins.
+    NTILE(5)s the raw values into quantile bins. Donor-like columns
+    (``ant_donor``, ``ant_donor_uid``) are identifiers: they are always
+    ``'categorical'``, also when the dataset stores them as numbers.
 
     Skips: cell_name-style blacklist, single-valued columns, and
     columns with cardinality > ``max_cardinality`` (uninformative for
-    group-variance -- typically donor ids, cell barcodes).
+    group-variance -- typically cell barcodes or large donor sets).
 
     Args:
         conn: Read-only DuckDB connection.
@@ -350,10 +388,11 @@ def _discover_facets(
             numericals are always 5 groups so they pass).
 
     Returns:
-        List of ``(facet_name, facet_type, n_nonnull, n_distinct_or_5)``
-        tuples. Sorted by facet name.
+        List of ``(facet_name, facet_type, n_nonnull, n_distinct_or_5,
+        source_view)`` tuples, sorted by facet name. ``source_view`` is the
+        view (``obscat`` / ``obsnum``) the column lives in.
     """
-    out: list[tuple[str, str, int, int]] = []
+    out: list[tuple[str, str, int, int, str]] = []
     all_cols_seen: set[str] = set()
     for view_kind, view in (('cat', 'obscat'), ('num', 'obsnum')):
         try:
@@ -371,14 +410,14 @@ def _discover_facets(
             n_nonnull, n_distinct = _facet_cardinality(conn, col, view)
             if n_nonnull == 0 or n_distinct < 2:
                 continue
-            if view_kind == 'num':
+            if view_kind == 'num' and not cell_level_scope.is_donor_like(col):
                 # Continuous facets are NTILE(5)-binned regardless of
                 # raw cardinality -- always 5 groups.
-                out.append((col, 'numerical', n_nonnull, 5))
+                out.append((col, 'numerical', n_nonnull, 5, view))
             else:
                 if n_distinct > max_cardinality:
                     continue
-                out.append((col, 'categorical', n_nonnull, n_distinct))
+                out.append((col, 'categorical', n_nonnull, n_distinct, view))
             all_cols_seen.add(col)
     return sorted(out, key=lambda x: x[0])
 
@@ -388,12 +427,19 @@ def _discover_facets(
 # ---------------------------------------------------------------------------
 
 
-def _facet_group_cte(facet: str, facet_type: str) -> str:
+def _facet_group_cte(facet: str, facet_type: str, source_view: str = 'obscat') -> str:
     """Return a WITH-CTE fragment computing ``(cell_id, grp)`` for a facet.
 
-    For categorical facets, the group is ``CAST(obscat.facet AS VARCHAR)``.
+    For categorical facets, the group is the facet value cast to text; a
+    categorical facet that lives in ``obsnum`` (a numeric donor id) is read
+    from there, without the ``.0`` of a float cast.
     For numerical facets, we NTILE(5) into ``q1``..``q5`` -- same
     binning as the endpoint's live compute path.
+
+    Args:
+        facet: Obs column name.
+        facet_type: ``'categorical'`` or ``'numerical'``.
+        source_view: View holding the column (``obscat`` or ``obsnum``).
     """
     facet_ident = '"' + facet.replace('"', '""') + '"'
     if facet_type == 'numerical':
@@ -408,11 +454,15 @@ def _facet_group_cte(facet: str, facet_type: str) -> str:
                 WHERE o.{facet_ident} IS NOT NULL
             )
         """
+    if source_view == 'obsnum':
+        group_expr = f"regexp_replace(CAST(o.{facet_ident} AS VARCHAR), '\\.0$', '')"
+    else:
+        group_expr = f"CAST(o.{facet_ident} AS VARCHAR)"
     return f"""
         WITH cell_grp AS (
             SELECT c.cell_id AS cell_id,
-                   CAST(o.{facet_ident} AS VARCHAR) AS grp
-            FROM obscat o
+                   {group_expr} AS grp
+            FROM {source_view} o
             JOIN __cells c ON c.cell_name = o.cell_name
             WHERE o.{facet_ident} IS NOT NULL
         )
@@ -421,7 +471,7 @@ def _facet_group_cte(facet: str, facet_type: str) -> str:
 
 def _compute_rows_for_dataset(
     inputs: DatasetInputs,
-    facets: list[tuple[str, str, int, int]],
+    facets: list[tuple[str, str, int, int, str]],
     gene_names: list[str],
     max_facet_cardinality: int,
 ) -> list[dict]:
@@ -434,7 +484,8 @@ def _compute_rows_for_dataset(
 
     Args:
         inputs: Dataset paths and default layer.
-        facets: List of ``(facet, facet_type, n_nonnull, n_groups_est)``.
+        facets: List of ``(facet, facet_type, n_nonnull, n_groups_est,
+            source_view)`` as returned by :func:`_discover_facets`.
         gene_names: Hot-set gene names to score.
         max_facet_cardinality: Guard rail; per-facet skip already
             applied at discovery, but we re-check in case discovery
@@ -467,11 +518,11 @@ def _compute_rows_for_dataset(
 
         rows_out: list[dict] = []
 
-        for facet, facet_type, _n_nonnull, n_groups_est in facets:
+        for facet, facet_type, _n_nonnull, n_groups_est, source_view in facets:
             if facet_type == 'categorical' and n_groups_est > max_facet_cardinality:
                 continue
 
-            grp_cte = _facet_group_cte(facet, facet_type)
+            grp_cte = _facet_group_cte(facet, facet_type, source_view)
 
             # Per-(gene, grp) mean and count over the hot subset.
             gene_grp_sql = f"""
@@ -652,6 +703,7 @@ class DatasetResult:
     from_cache: bool
     elapsed_s: float
     error: Optional[str] = None
+    skipped_reason: Optional[str] = None
 
 
 def _read_cache(cache_path: Path) -> Optional[pd.DataFrame]:
@@ -682,6 +734,16 @@ def _process_dataset(job: DatasetJob, force: bool) -> DatasetResult:
     """Compute one dataset. Cache-hit if the parquet is newer than sources."""
     start = time.time()
     try:
+        skip_reason = dataset_skip_reason(job.inputs)
+        if skip_reason:
+            # Out of scope: an empty cache keeps stale rows from a previous
+            # run out of the aggregate.
+            _write_cache(job.cache_path, [])
+            return DatasetResult(
+                db_id=job.inputs.db_id, cache_path=job.cache_path,
+                n_rows=0, n_facets=0, from_cache=False,
+                elapsed_s=time.time() - start, skipped_reason=skip_reason,
+            )
         cache_mtime = _mtime(job.cache_path)
         if (
             not force
@@ -1018,6 +1080,7 @@ def main() -> int:
     summary = RunSummary()
     total = len(jobs)
     completed = 0
+    skipped_reasons: dict[str, str] = {}
 
     if workers == 1 or total <= 1:
         result_iter = (_process_dataset(job, args.force) for job in jobs)
@@ -1045,6 +1108,8 @@ def main() -> int:
                     file=sys.stderr,
                 )
             else:
+                if result.skipped_reason:
+                    skipped_reasons[result.db_id] = result.skipped_reason
                 if result.from_cache:
                     summary.cached += 1
                 else:
@@ -1071,6 +1136,14 @@ def main() -> int:
         )
         for err in summary.errors[:5]:
             print(f'  {err}', file=sys.stderr)
+
+    cell_level_scope.merge_skip_summary(
+        cell_level_scope.skip_summary_path(out),
+        {job.inputs.db_id for job in jobs}, skipped_reasons,
+    )
+    if skipped_reasons:
+        print(f'skipped {len(skipped_reasons)} out-of-scope dataset(s): '
+              f'{", ".join(sorted(skipped_reasons))}', file=sys.stderr)
 
     if not args.no_prune:
         active_ids = {inputs.db_id for inputs in dataset_snapshot}

@@ -108,6 +108,7 @@
       <li><a href="#pages">Collection and dataset pages</a></li>
       <li><a href="#plots">Plots</a></li>
       <li><a href="#genes">Genes, gene sets and facets</a></li>
+      <li><a href="#per-cell-per-donor">Per cell vs per donor</a></li>
       <li><a href="#facet-effects">Facets and facet effects</a></li>
       <li><a href="#papers">The paper library</a></li>
       <li><a href="#ai">Working with AI assistants</a>
@@ -194,16 +195,27 @@
     <ul>
       <li><strong>Gene atlas.</strong> Open <a href="/genes">genes</a> in the top bar and type a gene to see it across all datasets; several genes separated by commas give a heatmap. Favourite genes (set in Preferences) are marked.</li>
       <li><strong>Reading the dots.</strong> In the gene tables (dataset Genes tab, gene atlas) and the gene set variability tables, each value is also drawn as a big dot on a thin grey line. The position is the value on that statistic's range, from the left end (lowest) to the right end (highest); the colour shows the low (red), middle (amber) or high (green) third. Hover a dot for the exact value. Green always means the higher, more notable end, and the position carries the same information for readers who cannot tell the colours apart.</li>
-      <li><strong>Gene sets</strong> (<a href="/genesets">/genesets</a>): browse curated gene sets by study and experiment, open one to see its genes and where its module score varies most, or look up every set containing a gene. The <a href="/genesets/variability">variability heatmap</a> compares modules across datasets; note that these statistics are per cell, not per donor.</li>
+      <li><strong>Gene sets</strong> (<a href="/genesets">/genesets</a>): browse curated gene sets by study and experiment, open one to see its genes and where its module score varies most, or look up every set containing a gene. The <a href="/genesets/variability">variability heatmap</a> compares modules across datasets; its numbers are <em>per-cell associations (exploratory)</em>, computed over cells and not over donors (see <a href="#per-cell-per-donor">Per cell vs per donor</a>).</li>
       <li><strong>Module scores</strong> are computed per cell with scanpy (default) or UCell; choose the method in Preferences.</li>
-      <li><strong>Facets browser</strong> (<a href="/facets">/facets</a>, marked <em>EXP</em>): every facet with how many datasets carry it and how strongly module scores vary with it. It is experimental: numbers and groupings may still change.</li>
+      <li><strong>Facets browser</strong> (<a href="/facets">/facets</a>, marked <em>EXP</em>): every facet with how many datasets carry it, its definition and its donor-level effects across datasets. Each dataset has a <strong>Facets</strong> tab with the same information for that dataset. It is experimental: numbers and groupings may still change.</li>
     </ul>
+  </section>
+
+  <section class="help-section" id="per-cell-per-donor">
+    <h2 class="section-head">Per cell vs per donor</h2>
+    <p>Two kinds of numbers on the site look alike and mean different things.</p>
+    <ul>
+      <li><strong>Facet effects are per donor.</strong> On the <strong>Facets</strong> tab of a dataset, an effect is tested within one cell type, with the donor as the unit of replication: a donor's cells are summed or averaged into one value first, so ten thousand cells from one donor count once. These are the numbers to quote, as exploratory results.</li>
+      <li><strong>Per-cell association (exploratory) is descriptive.</strong> The omega&sup2;, spearman and similar values in the Genesets tab, on the gene set pages and in the <a href="/genesets/variability">variability heatmap</a> are computed over individual cells, not within a cell type. Cells of one donor are not independent, so these statistics are pseudoreplicated: they show where a score differs, not whether a difference is real. Columns such as donor or cluster are off in the default view because they explain a lot by construction. The same applies to the <em>spread across cells</em> column on the Genes tab, which is the standard deviation of the log-normalised expression across cells.</li>
+      <li><strong>Xenograft and mouse datasets.</strong> The replicate there is the animal, not the donor of the transplanted cells. Per-animal tests are not set up yet, so these datasets show no facet effects and the Facets tab says why.</li>
+    </ul>
+    <p>Facet effects are explained in <a href="#facet-effects">Facets and facet effects</a>.</p>
   </section>
 
   <section class="help-section" id="facet-effects">
     <h2 class="section-head">Facets and facet effects</h2>
-    <p>A facet is a standardised <code>ant_</code> column with the same name and values in every dataset that has it. Each dataset declares how its own columns map onto a facet; the Facets card on a dataset's Data tab shows that mapping value by value.</p>
-    <p id="facet-effects-visible">Four facets are analysed at the moment: sex, disease (AD vs control), APOE e4 carrier status and Braak stage. Only these are shown on the <a href="/facets">facet pages</a> and in the Facets card while the audit of the facet definitions is open. The other <code>ant_</code> columns (cell type, tissue, age and so on) are not removed: they stay in the data, in the plots, in SQL and in the API.</p>
+    <p>A facet is a standardised <code>ant_</code> column with the same name and values in every dataset that has it. Each dataset declares how its own columns map onto a facet; the Facets tab of a dataset shows that mapping value by value.</p>
+    <p id="facet-effects-visible">Four facets are analysed at the moment: sex, disease (AD vs control), APOE e4 carrier status and Braak stage. Only these are analysed and shown on the <a href="/facets">facet pages</a> while the audit of the facet definitions is open. The Facets tab of a dataset still lists every facet it has, the others under "Not analysed yet". The other <code>ant_</code> columns (cell type, tissue, age and so on) are not removed: they stay in the data, in the plots, in SQL and in the API.</p>
     <h3 class="subsection-head">What was tested</h3>
     <p>For each dataset and each cell type in it, the analysed facets are tested at the level of the donor. Raw counts of a donor's cells in that cell type are summed into one pseudobulk (donors with fewer than 10 such cells are left out). Genes are then tested with limma-voom (edgeR filterByExpr, TMM normalisation, voom, lmFit, eBayes), with sex, age and post-mortem interval as covariates when they are known for at least 90% of at least 15 donors, and batch when a donor-level batch column exists and is not confounded with the facet. Module scores are summarised per donor (the mean of the per-cell score, or a score computed on the pseudobulk) and tested with an ordinary linear model on the same covariates plus permutations of the facet labels across donors (10,000 by default; the model line of each row gives the number its run used). q values are Benjamini-Hochberg within one dataset, cell type and facet (for modules also within one method and score source).</p>
     <p>Every result row states its exact model: click <em>details</em> next to the model line for the cell type definition, the formula (for example <code>expression ~ braak + sex + age_z + pmi_z</code>), which covariates were left out and why, the donors per level, the multiple-testing scope, and the tool version, seed and run date. Anything the run did not record says "not recorded".</p>

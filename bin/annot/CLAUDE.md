@@ -56,3 +56,16 @@ duckdb does not serve (exit 1 on any gap). `--fix` restores them through
 `DEWriter` (ant-serve release/restore, no restart); `--embed-metadata`
 rewrites legacy sidecars so they carry the full `__de_study` rows. Push
 the changed files with `ant-sync push` afterwards.
+
+## Per-cell variability tools: scope
+
+`ant-module-variability` and `ant-gene-variance-precompute` describe
+differences between groups of cells and share `lib/cell_level_scope.py`:
+bulk datasets (technology containing "bulk", or at most 1.5 observations per
+donor) are skipped and listed with the reason in `<aggregate>.skipped.json`
+(read by ant-serve: `/module-variability` `skipped_datasets`,
+`gene-variance-by-facet` `precompute_skipped`); donor-like columns
+(`ant_donor`, `ant_donor_uid`, ...) are always categorical, never quantile
+binned. Caution: `ant-module-variability --only` writes an aggregate that
+holds only the datasets it ran, so never use it on the fleet parquet.
+`ant-gene-variance-precompute --only` keeps the other datasets.

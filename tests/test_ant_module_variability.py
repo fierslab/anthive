@@ -523,3 +523,89 @@ def test_main_skips_inactive_datasets(tmp_path, monkeypatch):
     assert datasets == {'TST/ACT'}, 'inactive dataset must be skipped'
     cache_dirs = {p.name for p in (store_root / amv.CACHE_DIRNAME).iterdir()}
     assert cache_dirs == {'TST__ACT'}, 'inactive dataset must not be computed'
+
+
+# --------------------------------------------------------------------------- #
+# Scope: bulk datasets are skipped, donor columns stay categorical            #
+# --------------------------------------------------------------------------- #
+
+
+def _scored_bulk_candidate(tmp_dataset, **overrides):
+    """A tiny scored dataset (30 observations) with a sex column."""
+    options = dict(
+        num_cols={'Sierksma2025::WGCNA::Black_Mito': [float(i) for i in range(len(CELL_NAMES))]},
+        cat_cols={'Sex_donor': _alternating_sex(len(CELL_NAMES))},
+        view_cat_rename={'Sex_donor': 'ant_sex'},
+        api_rename={'Sex_donor': 'ant_sex'},
+    )
+    options.update(overrides)
+    return tmp_dataset(**options)
+
+
+def test_bulk_technology_dataset_is_skipped(tmp_dataset):
+    import mus  # type: ignore
+    duckdb_path, md_path = _scored_bulk_candidate(tmp_dataset)
+    mus.write_mus_file(md_path.with_suffix('.h5ad.mus'), {'technology': 'bulk_RNA-seq'})
+    inputs = amv.build_dataset_inputs(_entry_for(duckdb_path, md_path))
+    assert 'bulk' in amv.dataset_skip_reason(inputs)
+    job = next(amv._iter_pair_jobs(duckdb_path.parent.parent, None, [inputs]))
+    result = amv._process_pair(job, force=True)
+    assert result.error is None and result.n_rows == 0
+    assert result.skipped_reason and 'bulk' in result.skipped_reason
+    assert len(pd.read_parquet(job.cache_path)) == 0
+
+
+def test_one_observation_per_donor_dataset_is_skipped(tmp_dataset):
+    donors = [f'D{i % 24:02d}' for i in range(len(CELL_NAMES))]   # 30 observations, 24 donors
+    duckdb_path, md_path = _scored_bulk_candidate(
+        tmp_dataset,
+        cat_cols={'Sex_donor': _alternating_sex(len(CELL_NAMES)), 'ant_donor': donors})
+    inputs = amv.build_dataset_inputs(_entry_for(duckdb_path, md_path))
+    assert 'about one observation per donor' in amv.dataset_skip_reason(inputs)
+
+
+def test_single_cell_dataset_is_not_skipped(tmp_dataset):
+    donors = [f'D{i % 3}' for i in range(len(CELL_NAMES))]       # 10 cells per donor
+    duckdb_path, md_path = _scored_bulk_candidate(
+        tmp_dataset,
+        cat_cols={'Sex_donor': _alternating_sex(len(CELL_NAMES)), 'ant_donor': donors})
+    inputs = amv.build_dataset_inputs(_entry_for(duckdb_path, md_path))
+    assert amv.dataset_skip_reason(inputs) is None
+    assert len(_run_dataset(duckdb_path, md_path)) > 0
+
+
+def test_main_records_skipped_datasets_and_keeps_them_across_only_runs(tmp_path, monkeypatch):
+    import json
+    import mus  # type: ignore
+    store_root = tmp_path / 'store'
+    store_root.mkdir()
+    _write_scored_dataset(store_root / 'active', 'ACT')
+    _write_scored_dataset(store_root / 'bulk', 'BLK')
+    mus.write_mus_file(store_root / 'bulk' / 'sample.h5ad.mus', {'technology': 'bulk_RNA-seq'})
+    out_parquet = tmp_path / 'mv.parquet'
+    argv = ['ant-module-variability', '--h5adstore-root', str(store_root),
+            '--out', str(out_parquet), '--workers', '1']
+    monkeypatch.setattr(sys, 'argv', argv)
+    assert amv.main() == 0
+    datasets = {row[0] for row in duckdb.execute(
+        'SELECT DISTINCT dataset FROM read_parquet(?)', [str(out_parquet)]).fetchall()}
+    assert datasets == {'TST/ACT'}
+    summary_path = tmp_path / 'mv.skipped.json'
+    assert set(json.loads(summary_path.read_text())) == {'TST/BLK'}
+    # a run limited to the other dataset leaves the record of the skipped one alone
+    monkeypatch.setattr(sys, 'argv', argv + ['--only', 'TST/ACT'])
+    assert amv.main() == 0
+    assert set(json.loads(summary_path.read_text())) == {'TST/BLK'}
+
+
+def test_donor_column_is_categorical_even_under_a_numerical_tag(tmp_dataset):
+    donors = [f'D{i % 3}' for i in range(len(CELL_NAMES))]
+    duckdb_path, md_path = _scored_bulk_candidate(
+        tmp_dataset,
+        cat_cols={'ant_donor': donors},
+        api_rename={}, view_cat_rename={},
+        obs_tags={'ant_donor': ['age']})
+    frame = _run_dataset(duckdb_path, md_path)
+    donor_rows = frame[(frame['tag_column'] == 'ant_donor') & (frame['tag'] == 'age')]
+    stats_seen = set(donor_rows['statistic'])
+    assert 'omega2' in stats_seen and 'spearman' not in stats_seen

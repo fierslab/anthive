@@ -145,9 +145,9 @@ URL hash scheme (feature: back-button / shareable filter state):
       </div>
     </div>
     <div>
-      <label>facet <span class="info" title="Standardised biological annotation aliased to ant_&lt;tag&gt; across datasets. Values include braak, sex, cluster, disease, and others. Each dataset's raw obs column is aliased to ant_&lt;tag&gt;.">ⓘ</span></label>
+      <label>obs column <span class="info" title="The cell annotation column the score is compared against, such as braak, sex, disease, donor or cluster. Donor and cluster columns are off by default (still selectable). Standardised columns are aliased to ant_&lt;tag&gt; across datasets; see the Facets tab for donor-level tests of those.">ⓘ</span></label>
       <div class="mff-widget mv-flt-tag-w">
-        <button class="mff-btn" type="button" aria-expanded="false">facet: all ▾</button>
+        <button class="mff-btn" type="button" aria-expanded="false">obs column: all ▾</button>
         <div class="mff-popover" hidden>
           <div class="mff-actions">
             <button type="button" class="mff-all">select all</button>
@@ -268,9 +268,9 @@ URL hash scheme (feature: back-button / shareable filter state):
         {% if _mv.scope != 'module' %}<th data-sortcol="catalog">group</th>{% endif %}
         <th data-sortcol="module">geneset</th>
         {% if _mv.scope != 'dataset' %}<th data-sortcol="dataset">dataset</th>{% endif %}
-        <th class="mv-th-tag" data-sortcol="tag">facet</th>
+        <th class="mv-th-tag" data-sortcol="tag">obs column</th>
         <th data-sortcol="method">method</th>
-        <th data-sortcol="value" style="text-align:right">score</th>
+        <th data-sortcol="value" style="text-align:right">per-cell association (exploratory) <span class="info" onclick="event.stopPropagation()" title="Computed over individual cells, not donors or animals, and not within cell type: describes where a score differs, not a tested effect. For donor-level effects see the Facets tab.">ⓘ</span></th>
         <th class="mv-pos mv-sort-desc" data-sortcol="position">vs peer modules <span class="info" onclick="event.stopPropagation()" title="Peers = other modules scored with the SAME method on the SAME (dataset, tag). The dot is this row's value on the min–max range across peer modules; red, amber and green mark the low, middle and high third. Click to sort by this column.">ⓘ</span></th>
         <th style="text-align:center;cursor:default">plots</th>
       </tr></thead>
@@ -380,7 +380,7 @@ URL hash scheme (feature: back-button / shareable filter state):
   initMff('mv-flt-tissue-w',     'tissue',     'tissue');
   initMff('mv-flt-technology-w', 'technology', 'technology');
   initMff('mv-flt-biosample-w',  'biosample',  'biosample');
-  initMff('mv-flt-tag-w',        'tag',        'facet');
+  initMff('mv-flt-tag-w',        'tag',        'obs column');
 
   // Column-header sort state: {col: string, dir: 'asc'|'desc'}
   var sortState = { col: 'position', dir: 'desc' };
@@ -709,6 +709,7 @@ URL hash scheme (feature: back-button / shareable filter state):
   }
 
   var ALL_ROWS = [];      // raw fetched rows
+  var SKIPPED = {};       // db_id -> why the dataset has no per-cell statistics (bulk and the like)
   var PEER_INDEX = {};    // peerKey → {min, max, n}
 
   function computePeerIndex(rows) {
@@ -720,9 +721,19 @@ URL hash scheme (feature: back-button / shareable filter state):
     });
     return idx;
   }
+  var MIN_PEERS = 4;      // fewer peer modules than this: no position dot
+  function hasPeers(r, idx) {
+    var g = idx[peerKey(r)]; return !!g && g.n >= MIN_PEERS;
+  }
   function positionOf(r, idx) {
     var g = idx[peerKey(r)]; if (!g) return 0.5;
     var span = g.max - g.min; return span ? (r.value - g.min) / span : 0.5;
+  }
+  /** Sort by peer position; rows without enough peers always go last. */
+  function comparePosition(a, b, mul) {
+    var aHas = hasPeers(a, PEER_INDEX), bHas = hasPeers(b, PEER_INDEX);
+    if (aHas !== bHas) return aHas ? -1 : 1;
+    return mul * (positionOf(a, PEER_INDEX) - positionOf(b, PEER_INDEX));
   }
 
   // ── URL hash filter state ────────────────────────────────────────────────────
@@ -1001,7 +1012,7 @@ URL hash scheme (feature: back-button / shareable filter state):
     var sortMul = sortState.dir === 'asc' ? 1 : -1;
     var col = sortState.col;
     if (col === 'position') {
-      rows.sort(function (a, b) { return sortMul * (positionOf(a, PEER_INDEX) - positionOf(b, PEER_INDEX)); });
+      rows.sort(function (a, b) { return comparePosition(a, b, sortMul); });
     } else if (col === 'value') {
       rows.sort(function (a, b) { return sortMul * (a.value - b.value); });
     } else if (col === 'catalog') {
@@ -1016,7 +1027,7 @@ URL hash scheme (feature: back-button / shareable filter state):
       rows.sort(function (a, b) { return sortMul * String(a.source).localeCompare(String(b.source)); });
     } else {
       // Fallback: peer position descending.
-      rows.sort(function (a, b) { return positionOf(b, PEER_INDEX) - positionOf(a, PEER_INDEX); });
+      rows.sort(function (a, b) { return comparePosition(a, b, -1); });
     }
     var preCapCount = rows.length;
     rows = rows.slice(0, ROW_CAP);   // cap for render sanity
@@ -1048,10 +1059,12 @@ URL hash scheme (feature: back-button / shareable filter state):
         // computation is lagging". User-facing text only. Never leak command
         // names or endpoint paths into the UI.
         if (CTX.scope === 'dataset' && CTX.dataset) {
-          if (CTX.has_canonical_tags === false) {
-            msg = 'This dataset has module scores but no facets ' +
-                  '(braak, sex, cluster, and so on). Variability statistics need ' +
-                  'at least one facet to compare scores against.';
+          if (SKIPPED[CTX.dataset]) {
+            msg = 'No per-cell association statistics for this dataset: ' + esc(SKIPPED[CTX.dataset]) + '.';
+          } else if (CTX.has_canonical_tags === false) {
+            msg = 'This dataset has module scores but no annotation columns ' +
+                  '(braak, sex, cluster, and so on). Association statistics need ' +
+                  'at least one obs column to compare scores against.';
           } else {
             msg = 'Variability statistics for ' + CTX.dataset + ' are still ' +
                   'being computed. Reload this page in a few minutes.';
@@ -1071,7 +1084,7 @@ URL hash scheme (feature: back-button / shareable filter state):
     var html = rows.map(function (r) {
       var pos = positionOf(r, PEER_INDEX);
       var g = PEER_INDEX[peerKey(r)] || { min: r.value, max: r.value, n: 1 };
-      var track = antDot.html(pos, { title: 'this module ' + (+r.value).toFixed(3)
+      var track = !hasPeers(r, PEER_INDEX) ? '' : antDot.html(pos, { title: 'this module ' + (+r.value).toFixed(3)
         + ' · across ' + g.n + ' peer modules: ' + (+g.min).toFixed(3) + '…' + (+g.max).toFixed(3) });
       var dsParts = String(r.dataset).split('/');
       var dsHref = datasetUrl(r);
@@ -1112,7 +1125,7 @@ URL hash scheme (feature: back-button / shareable filter state):
       tds.push('<td class="mv-tag">' + formatColLabel(r.tag_column || r.tag) + '</td>');
       tds.push('<td class="mv-method">' + esc(METHOD_LABEL[r.source] || r.source) + '</td>');
       tds.push('<td class="mv-val">' + (+r.value).toFixed(3) + ' <span class="muted-2" style="font-size:9px;margin-left:3px">' + esc(r.statistic) + '</span></td>');
-      tds.push('<td class="mv-pos">' + track + '</td>');
+      tds.push('<td class="mv-pos"' + (track ? '' : ' title="fewer than 4 peer modules"') + '>' + track + '</td>');
       var plotCell = (pu ? '<a href="' + pu + '" title="plot ' + esc(r.tag) + ' × ' + esc(r.module) + '">' + plotSvg + '</a>' : '')
         + (eu ? '<a href="' + eu + '" title="ECDF of ' + esc(r.module) + ' split by ' + esc(r.tag) + '">' + SVG_LINE + '</a>' : '')
         + (hu ? '<a href="' + hu + '" title="hexbin (density) of ' + esc(r.module) + ' in embedding">' + SVG_HEX + '</a>' : '')
@@ -1158,6 +1171,7 @@ URL hash scheme (feature: back-button / shareable filter state):
         // Legacy parquet rows tagged source='aucell' fold into ucell here.
         var _alg = currentAlg();
         var _algo = _alg === 'scanpy' ? 'geneset' : _alg;   // 'geneset' | 'ucell' | 'both'
+        SKIPPED = d.skipped_datasets || {};
         ALL_ROWS = (d.rows || []).filter(function (r) {
           if (r.source === 'starcat') return false;
           // legacy aucell rows in the parquet fold into 'ucell' for display
@@ -1182,6 +1196,11 @@ URL hash scheme (feature: back-button / shareable filter state):
         fillMff('dataset', Object.keys(datasets));
         fillMff('group',   Object.keys(groups));
         fillMff('tag',     Object.keys(tags));
+        // Donor and cluster columns are off in the default view (still selectable):
+        // their association is large by construction and not a biological effect.
+        var allTags = Object.keys(tags);
+        var defaultTags = allTags.filter(function (t) { return !/donor|cluster/i.test(t); });
+        if (mff.tag && defaultTags.length && defaultTags.length < allTags.length) mff.tag.setValues(defaultTags);
         // In module scope: pre-select the module widget to the landing geneset.
         var preselectModule = (CTX.scope === 'module' && CTX.module_name) ? [CTX.module_name] : null;
         fillMff('module', Object.keys(modules), preselectModule);

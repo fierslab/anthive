@@ -2927,12 +2927,15 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         dataset_facets = []
     # Facets outside the configured visible list (facets_visible) are not
     # shown for now; ant-serve flags them, they stay in the data and the API.
-    n_facets_hidden = sum(1 for f in dataset_facets if f.get('hidden_by_config'))
+    # They are not dropped: the Facets tab lists them under "Not analysed yet".
+    dataset_facets_other = [f for f in dataset_facets if f.get('hidden_by_config')]
     dataset_facets = [f for f in dataset_facets if not f.get('hidden_by_config')]
 
     return templates.TemplateResponse(request, "dataset.html", {
         "dataset_facets": dataset_facets,
-        "n_facets_hidden": n_facets_hidden,
+        "dataset_facets_other": dataset_facets_other,
+        "n_facets_total": sum(1 for f in dataset_facets + dataset_facets_other if f.get('live', True)),
+        "show_facets_tab": bool(dataset_facets or dataset_facets_other),
         "folder_name": friendly_group,
         "folder_browse_id": group_id,
         "group_id": group_id,
@@ -4357,6 +4360,48 @@ def _fx_unit_view(unit: Dict[str, Any], index: int, db_id: str = '', title: str 
     }
 
 
+_FX_SYSTEM_REASONS = {
+    'xenograft': 'a xenograft: the replicate is the host animal, not the donor of the cells, and tests per animal are not set up yet',
+    'bulk_tissue': 'bulk tissue: about one observation per sample, no cell types to test within',
+    'in_vitro_2d': 'an in vitro culture: there is no donor-level group to compare',
+    'in_vitro_3d': 'an in vitro culture: there is no donor-level group to compare',
+    'chimera': 'a chimera: the replicate is the host animal, not the donor of the cells, and tests per animal are not set up yet',
+}
+
+
+def _fx_reason_text(status: Optional[str], reason: Optional[str]) -> str:
+    """Plain-language reason why a dataset has no facet tests.
+
+    Translates the eligibility reasons of the facet tool (as served by
+    ``/databases/{id}/facet-tests``); unknown reasons are quoted verbatim.
+    """
+    text = (reason or '').strip()
+    if status == 'not_run' and not text.startswith(('experimental_system', 'organism', 'secondary')):
+        return 'no facet test has been run on this dataset yet'
+    system = re.match(r'experimental_system\s+(\S+)', text)
+    if system:
+        known = _FX_SYSTEM_REASONS.get(system.group(1))
+        return f'this dataset is {known}' if known else f'experimental system {system.group(1)}, which is not tested'
+    if text.startswith('secondary'):
+        return ('this dataset is a reanalysis of cells another dataset serves; facets are tested on the primary data '
+                'only, so the effects are shown there')
+    organism = re.match(r'organism not human \((.*)\)', text)
+    if organism:
+        return (f'organism {organism.group(1)}: the facet tests are human only; for mouse datasets the replicate '
+                'would be the animal, which is not set up yet')
+    donors = re.match(r'(\d+) donors? \(< (\d+)\)', text)
+    if donors:
+        return f'only {donors.group(1)} donors; at least {donors.group(2)} are needed'
+    if 'no raw counts layer' in text:
+        return 'no raw counts layer is served, which the donor pseudobulk needs'
+    if 'no ant_donor' in text:
+        return 'no donor column is mapped (ant_donor), so no donor-level test is possible'
+    if 'enough donors per level' in text:
+        return ('no combination of facet and cell type had enough donors per level (at least 3 donors in each level, '
+                'at least 6 donors in total); some facets may have no levels at all in this dataset')
+    return text or 'no reason was recorded'
+
+
 def _facet_tests_view(summary: Optional[Dict[str, Any]], db_id: str = '') -> Optional[Dict[str, Any]]:
     """Dataset-page data for the facet effects, grouped by facet column.
 
@@ -4378,6 +4423,7 @@ def _facet_tests_view(summary: Optional[Dict[str, Any]], db_id: str = '') -> Opt
     return {
         'status': summary.get('status'),
         'reason': summary.get('reason'),
+        'reason_text': _fx_reason_text(summary.get('status'), summary.get('reason')),
         'dataset_changed': bool(summary.get('dataset_changed')),
         'by_facet': by_facet,
         'n_units_tested': summary.get('n_units_tested') or 0,

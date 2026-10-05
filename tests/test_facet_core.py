@@ -344,6 +344,8 @@ def serve(tmp_path):
         'Dict': Dict, 'List': List, 'Any': Any, 'Optional': Optional, 'Tuple': Tuple, 'Set': Set,
         'Path': Path, 'asyncio': asyncio, '_load_module_variability': lambda: variability,
         'BACKCOMPAT_LEGACY_NAMES': {}, 'GeneStatsCache': _GeneStatsCache,
+        '_module_variability_path': lambda: tmp_path / 'module_variability.parquet',
+        '_cell_level_skips': lambda path: {'G9/BULK': 'bulk data (technology bulk_RNA-seq)', 'G1/PRI': 'about one observation per donor'},
     }
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SERVE_PATH), 'exec', dont_inherit=True), namespace)
     return TestClient(app), namespace
@@ -401,6 +403,16 @@ def test_module_variability_excludes_secondaries(serve):
     assert len(everything['rows']) == 3
     explicit = client.get('/module-variability', params={'dataset': 'G1/REA'}).json()
     assert [r['dataset'] for r in explicit['rows']] == ['G1/REA']
+
+
+def test_module_variability_reports_skipped_datasets(serve):
+    client, _ = serve
+    everything = client.get('/module-variability').json()
+    assert set(everything['skipped_datasets']) == {'G9/BULK', 'G1/PRI'}
+    one = client.get('/module-variability', params={'dataset': 'G9/BULK'}).json()
+    assert one['rows'] == [] and one['skipped_datasets'] == {'G9/BULK': 'bulk data (technology bulk_RNA-seq)'}
+    other = client.get('/module-variability', params={'dataset': 'G2/ONE'}).json()
+    assert other['skipped_datasets'] == {} and len(other['rows']) == 1
 
 
 def test_gene_stats_all_excludes_secondaries(serve):

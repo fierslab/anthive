@@ -111,8 +111,16 @@ template (`t.values` resolves to the dict method).
 definition on top (`#facet-definition`) and a Datasets card
 (`#facet-datasets`): carriers with author column, mapping kind and value
 translation, and the non-carriers folded in `#non-carriers` with name hints.
-The dataset Data tab has a wide `#ds-facets` card from
-`GET /databases/{id}/facets`. Both use the macros in `_facet_mapping.html`.
+The dataset **Facets tab** (`#facets`, after Genesets, count badge; shown
+whenever the dataset has any `ant_*` facet) holds `#ds-facets` from
+`GET /databases/{id}/facets`: unit line (`#fx-unit-line`: designation, donor
+group, cohort; the spot where a "Replicate unit" entry goes), mapping tables
+for ALL facets (analysed ones first, the rest under "Not analysed yet",
+`#facets-not-analysed`; nothing is dropped), then "Effects by facet" or the
+explicit reason there are no tests (`_fx_reason_text` in browser.py turns the
+facet-tool eligibility reason into a sentence). The Data tab keeps one pointer
+line (`#ds-facets-pointer`). `#ds-facets` as a hash still works (mapped to
+`facets`). Both pages use the macros in `_facet_mapping.html`.
 Definitions live in `lib/obscol_tags_vocab.yaml` (`facet:` blocks), never in
 templates. Those two fetches go through `_api_get_as_user`, which forwards
 `Remote-User`/`Remote-Groups` so admins see `obs_hidden` source columns;
@@ -138,15 +146,16 @@ collapsed `details.fxs-rest`. Reanalyses (`is_secondary`) get the
 `table.ds-facets td.num` (nowrap, right) out-specifies plain `.fx-table`
 rules inside the dataset card, so fx rules that must win there are written as
 `table.ds-facets table.fx-table td.x, table.fx-table td.x`.
-Places: under each facet row of the dataset `#ds-facets` card (no separate
-tab; `_facet_tests_view` groups units by facet column), "Effects across
+Places: the "Effects by facet" section of the dataset Facets tab
+(`_facet_tests_view` groups units by facet column), "Effects across
 datasets" on `/facets/{name}` (`#facet-effects`, replaces the per-cell "Top
 variable genesets/genes" cards; `#fx-recurring` lists recurring genes per cell
 type), and the gene page panel `#gene-facet-effects` (single-gene view only).
 Every unit shows its model line with a details disclosure; the help page
 section is `#facet-effects`. `facets_visible` (config, read once in
-`_facets_visible`) hides the other facets on `/facets`, the facet pages
-(non-admins get a short notice) and the dataset card; the `/facets` index no
+`_facets_visible`) marks the other facets as not analysed: `/facets` and the
+facet pages hide them (non-admins get a short notice), the dataset Facets tab
+lists them under "Not analysed yet"; the `/facets` index no
 longer shows the per-cell Signal column. Tests set `_facets_visible_cfg`
 through an autouse fixture.
 
@@ -464,6 +473,7 @@ with `nh3`/`bleach` + a CSP if editing ever widens.)
   `.ds-prov` row. Each datum appears once; sections hide when empty.
 - **Actual tab bar (2026-08):** `Overview` (only when markdown) · `Data` ·
   `Genes` (only when n_genes > 0) · `Genesets` (only when module scores) ·
+  `Facets` (only when the dataset has any facet) ·
   `Numerical` · `Categorical` · `Differential expression` (only when DE data) ·
   `Papers` (only when linked library papers) ·
   `Downloads` (JS-revealed when h5ad exists) · `⚠ Caveats` (only when caveats
