@@ -1432,8 +1432,8 @@ class FacetResults:
         n_tested = per_cohort.groupby('gene_key')['effect'].size()
         frame['agreement'] = (pd.Series(agree, index=per_cohort.index).groupby(per_cohort['gene_key']).sum()
                               / n_tested).reindex(frame.index)
-        frame['median_abs_logFC'] = per_cohort.groupby('gene_key')['effect'].apply(
-            lambda values: float(values.abs().median())).reindex(frame.index)
+        frame['median_abs_logFC'] = per_cohort.assign(_abs=per_cohort['effect'].abs()).groupby(
+            'gene_key')['_abs'].median().reindex(frame.index)
         frame['gene'] = per_cohort.groupby('gene_key')['gene'].first().reindex(frame.index)
         del flags
         return {'frame': frame, 'per_cohort': per_cohort, 'units': group_units}
