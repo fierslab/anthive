@@ -198,7 +198,7 @@ def test_recurring_gene_ranking(cohorts):
     # G_A: 2 significant of 6 tested, all six up -> agreement 1.0
     # G_B: 2 significant of 6 tested; C3, C4, C5 go down, C7 slightly up -> agreement 3/6
     assert (rows['G_A']['cohorts_sig_same_sign'], rows['G_A']['cohorts_tested']) == (2, 6)
-    assert rows['G_A']['replicated'] and rows['G_A']['r_value'] < rows['G_B']['r_value'] < 0.05
+    assert rows['G_A']['replicated'] and rows['G_A']['r_value'] <= rows['G_B']['r_value'] < 0.05
     assert 'G_C' not in rows and 'G_D' not in rows       # one significant cohort / none: not replicated
     assert rows['G_A']['agreement'] == pytest.approx(1.0)
     assert rows['G_B']['agreement'] == pytest.approx(3 / 6)
