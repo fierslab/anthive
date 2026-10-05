@@ -1349,7 +1349,7 @@ def main() -> None:
         cannot go below 1/(n + 1), so with many modules q_perm has a floor; read
         q_param and p_perm together).
 
-        Contrasts: sex = m vs f; disease = AD vs control; apoe_carrier = e4
+        Contrasts: sex = m vs f; disease = AD vs control; apoe4_carrier = e4
         carrier vs non-carrier; braak = linear trend per Braak stage.
         Disease results are PROVISIONAL: the disease vocabulary is not settled
         (what counts as control differs between studies), so they will change.
@@ -1378,7 +1378,7 @@ def main() -> None:
 
         Args:
             db_id: Dataset id, e.g. 'G24/MMG'.
-            facet: Restrict to one facet: sex, disease, apoe_carrier or braak.
+            facet: Restrict to one facet: sex, disease, apoe4_carrier or braak.
             cell_type: Restrict to one cell type stratum (as listed in the summary).
             level: 'summary' (one line per facet x cell type: donors per level,
                 covariates, flags, genes and modules at q < 0.05), 'genes'
@@ -1529,7 +1529,7 @@ def main() -> None:
         (reanalyses) are listed but not counted.
 
         Contrasts: sex m vs f; disease AD vs control (PROVISIONAL: vocabulary
-        not settled, results will change); apoe_carrier any e4 allele vs none;
+        not settled, results will change); apoe4_carrier any e4 allele vs none;
         braak linear trend per stage (not AD vs control). Flags:
         descriptive_only (a level has fewer than 5 donors, Braak fewer than 10:
         no p, q, CI); composition (cell fraction in the stratum differs with
@@ -1541,11 +1541,11 @@ def main() -> None:
 
         Args:
             gene: Gene symbol, e.g. 'PTPRG'.
-            facet: sex, disease, apoe_carrier or braak; omit for all four.
+            facet: sex, disease, apoe4_carrier or braak; omit for all four.
             cell_type: Restrict to one cell type group (e.g. 'microglia') or raw label (e.g. 'Mic P2RY12').
             exclude_secondary: Do not count reanalyses (default true).
         """
-        facets = [facet] if facet else ['sex', 'disease', 'apoe_carrier', 'braak']
+        facets = [facet] if facet else ['sex', 'disease', 'apoe4_carrier', 'braak']
         lines = [_FACET_TOOL_RULES]
         for name in facets:
             try:
@@ -1612,7 +1612,7 @@ def main() -> None:
         and its model.
 
         Args:
-            facet: sex, disease, apoe_carrier or braak.
+            facet: sex, disease, apoe4_carrier or braak.
             cell_type: Cell type group (e.g. 'microglia') or raw label; omit for the group with most cohorts (the reply lists the options).
             n: Rows (default 30, max 500).
             exclude_secondary: Do not count reanalyses (default true).
@@ -1657,7 +1657,7 @@ def main() -> None:
 
         Args:
             db_id: Dataset id, e.g. 'G24/MMG'.
-            facet: sex, disease, apoe_carrier or braak (used when db_id is not given).
+            facet: sex, disease, apoe4_carrier or braak (used when db_id is not given).
             exclude_secondary: Reanalyses are listed but marked not counted (default true).
         """
         if db_id:

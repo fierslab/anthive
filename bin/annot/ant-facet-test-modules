@@ -16,7 +16,7 @@ What it does
 Module-level sibling of ``ant-facet-test`` (which tests single genes). For
 every eligible dataset (human, primary, not xenograft / in vitro / bulk, at
 least 6 donors) and every cell type stratum, tests the same four donor-level
-facets (sex m vs f, disease AD vs control [provisional], apoe_carrier e4 vs
+facets (sex m vs f, disease AD vs control [provisional], apoe4_carrier e4 vs
 non-carrier, braak numeric) for every module of every catalog present in
 the dataset's ``<stem>.scores.parquet`` sidecar. Strata, donor tables,
 covariates, batch rules, minimum donors and the n_lt5 rule are the ones of
@@ -578,8 +578,8 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
                             temp_dir=work_dir, store_root=store_root)
     try:
         cat_columns = aft.view_columns(conn, 'obscat') if aft._has_view(conn, 'obscat') else {}
-        wanted = ['ant_donor', 'ant_donor_uid', 'ant_sex', 'ant_disease', 'ant_apoe', 'ant_apoe_carrier',
-                  'ant_braak', 'ant_age', 'ant_pmi', 'ant_cell_type', 'ant_author_cell_type',
+        wanted = ['ant_donor', 'ant_donor_uid', 'ant_sex', 'ant_disease', 'ant_apoe', 'ant_apoe4_carrier',
+                  'ant_apoe_carrier', 'ant_braak', 'ant_age', 'ant_pmi', 'ant_cell_type', 'ant_author_cell_type',
                   'ant_tissue', 'ant_region', 'ant_author_cluster']
         extra = [c for c in cat_columns if (aft.CELLTYPE_CANDIDATE_RE.match(c) or aft.BATCH_NAME_RE.search(c))
                  and not c.startswith('ant_')]

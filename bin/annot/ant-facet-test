@@ -22,7 +22,7 @@ four donor-level facets for differential gene expression:
                                      other value is dropped. PROVISIONAL:
                                      the disease vocabulary decisions
                                      (audit L17 to L21) are still open.
-  * apoe_carrier  ant_apoe_carrier   e4 carrier vs non-carrier (reference
+  * apoe4_carrier  ant_apoe4_carrier   e4 carrier vs non-carrier (reference
                                      non-carrier); derived from ant_apoe when
                                      the carrier column is absent
   * braak         ant_braak          numeric linear trend per Braak unit
@@ -101,15 +101,18 @@ BRAAK_MIN_DISTINCT = 3
 COMPOSITION_ALPHA = 0.05
 MAX_STRATUM_LEVELS = 40            # per-cell stratifier sanity cap
 
-FACETS = ('sex', 'disease', 'apoe_carrier', 'braak')
+FACETS = ('sex', 'disease', 'apoe4_carrier', 'braak')
 FACET_COLUMN = {
     'sex': 'ant_sex', 'disease': 'ant_disease',
-    'apoe_carrier': 'ant_apoe_carrier', 'braak': 'ant_braak',
+    'apoe4_carrier': 'ant_apoe4_carrier', 'braak': 'ant_braak',
 }
+#: Columns that carry the APOE e4 carrier status, current name first; the old
+#: name (``ant_apoe_carrier``) only exists on views not rebuilt since the rename.
+APOE4_CARRIER_COLUMNS = ('ant_apoe4_carrier', 'ant_apoe_carrier')
 CONTRAST = {
     'sex': ('f', 'm'),                 # (reference, tested)
     'disease': ('control', 'AD'),
-    'apoe_carrier': ('noncarrier', 'e4_carrier'),
+    'apoe4_carrier': ('noncarrier', 'e4_carrier'),
     'braak': (None, None),
 }
 
@@ -184,7 +187,7 @@ def normalize_disease(value: Any) -> Optional[str]:
     return None
 
 
-def derive_apoe_carrier_from_genotype(value: Any) -> Optional[str]:
+def derive_apoe4_carrier_from_genotype(value: Any) -> Optional[str]:
     """e4 carrier / non-carrier from an APOE genotype string (33, E3/E4, e4e4...)."""
     if value is None or (isinstance(value, float) and math.isnan(value)):
         return None
@@ -197,8 +200,8 @@ def derive_apoe_carrier_from_genotype(value: Any) -> Optional[str]:
     return None
 
 
-def normalize_apoe_carrier(value: Any) -> Optional[str]:
-    """Map an ant_apoe_carrier value to 'e4_carrier' / 'noncarrier' / None."""
+def normalize_apoe4_carrier(value: Any) -> Optional[str]:
+    """Map an ant_apoe4_carrier value to 'e4_carrier' / 'noncarrier' / None."""
     if value is None or (isinstance(value, float) and math.isnan(value)):
         return None
     text = str(value).strip().lower()
@@ -374,7 +377,8 @@ def build_donor_table(cells: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, int]
 
     Args:
         cells: per-cell frame with ant_donor and any of ant_sex, ant_disease,
-            ant_apoe_carrier, ant_apoe, ant_braak, ant_age, ant_pmi, batch.
+            ant_apoe4_carrier (or the old ant_apoe_carrier), ant_apoe, ant_braak,
+            ant_age, ant_pmi, batch.
 
     Returns:
         (donor table, conflict counts per column). A donor whose cells carry
@@ -401,17 +405,19 @@ def build_donor_table(cells: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, int]
                 record[facet_name] = None
         # apoe carrier: carrier column first, derive from genotype otherwise
         carrier_series = None
-        if 'ant_apoe_carrier' in frame and frame['ant_apoe_carrier'].notna().any():
-            carrier_series = frame['ant_apoe_carrier'].map(normalize_apoe_carrier)
+        carrier_column = next((column for column in APOE4_CARRIER_COLUMNS
+                               if column in frame and frame[column].notna().any()), None)
+        if carrier_column is not None:
+            carrier_series = frame[carrier_column].map(normalize_apoe4_carrier)
         elif 'ant_apoe' in frame:
-            carrier_series = frame['ant_apoe'].map(derive_apoe_carrier_from_genotype)
+            carrier_series = frame['ant_apoe'].map(derive_apoe4_carrier_from_genotype)
         if carrier_series is not None:
             value, conflict = _single_value(carrier_series)
-            record['apoe_carrier'] = value
+            record['apoe4_carrier'] = value
             if conflict:
-                conflicts['apoe_carrier'] = conflicts.get('apoe_carrier', 0) + 1
+                conflicts['apoe4_carrier'] = conflicts.get('apoe4_carrier', 0) + 1
         else:
-            record['apoe_carrier'] = None
+            record['apoe4_carrier'] = None
         for facet_name, column in (('braak', 'ant_braak'), ('age', 'ant_age'), ('pmi', 'ant_pmi')):
             if column in frame:
                 numeric = pd.to_numeric(frame[column], errors='coerce')
@@ -874,7 +880,7 @@ def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: 
     try:
         cat_columns = view_columns(conn, 'obscat') if _has_view(conn, 'obscat') else {}
         num_columns = view_columns(conn, 'obsnum') if _has_view(conn, 'obsnum') else {}
-        wanted = ['ant_donor', 'ant_donor_uid', 'ant_sex', 'ant_disease', 'ant_apoe', 'ant_apoe_carrier',
+        wanted = ['ant_donor', 'ant_donor_uid', 'ant_sex', 'ant_disease', 'ant_apoe', 'ant_apoe4_carrier', 'ant_apoe_carrier',
                   'ant_braak', 'ant_age', 'ant_pmi', 'ant_cell_type', 'ant_author_cell_type',
                   'ant_tissue', 'ant_region', 'ant_author_cluster']
         extra_candidates = [c for c in cat_columns
@@ -1089,7 +1095,7 @@ def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: 
         composition = pd.concat(comp_frames, ignore_index=True)
         composition['n_cells_donor'] = composition['donor'].map(donor_totals)
         composition['proportion'] = composition['n_cells'] / composition['n_cells_donor']
-        composition = composition.merge(donor_table[['donor', 'sex', 'disease', 'apoe_carrier', 'braak']],
+        composition = composition.merge(donor_table[['donor', 'sex', 'disease', 'apoe4_carrier', 'braak']],
                                         on='donor', how='left')
         composition.to_parquet(out_dir / f'{entry.stem}.facet_composition.parquet', index=False)
 

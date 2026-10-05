@@ -33,7 +33,7 @@ site:
   # the facet audit decisions are pending, only the four that the donor-level
   # facet tests analyse are shown; the other ant_* columns stay in the data
   # and the API. An empty list ([]) or null shows every facet.
-  facets_visible: [ant_sex, ant_disease, ant_apoe_carrier, ant_braak]
+  facets_visible: [ant_sex, ant_disease, ant_apoe4_carrier, ant_braak]
 
 data:
   h5adstore: /srv/anthive/h5adstore        # required

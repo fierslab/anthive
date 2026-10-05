@@ -27,6 +27,7 @@ from pathlib import Path
 _lib_dir = Path(__file__).parent.parent / 'lib'
 if str(_lib_dir) not in sys.path:
     sys.path.insert(0, str(_lib_dir))
+from facet_aliases import canonical_facet  # noqa: E402
 
 from canonical_columns import is_canonical_column, strip_ant_prefix  # noqa: E402
 
@@ -3593,8 +3594,11 @@ async def facet_detail_view(request: Request, facet_name: str):
 
     Header stats, value distribution across all carriers, and the top
     variable genesets from ``module_variability.parquet`` filtered on
-    ``tag_column == facet``.
+    ``tag_column == facet``. A deprecated facet name redirects to the current one.
     """
+    current_name = canonical_facet(facet_name)
+    if current_name != facet_name:
+        return RedirectResponse(f"/facets/{url_quote(current_name, safe='')}", status_code=307)
     api_url = _api_url(request)
     error: Optional[str] = None
     facet_data: Dict[str, Any] = {}
@@ -4227,7 +4231,7 @@ def _sort_paper_cards(cards: List[Dict]) -> List[Dict]:
 _FACET_TEST_LABELS = {
     'sex': 'Sex',
     'disease': 'Disease',
-    'apoe_carrier': 'APOE e4 carrier',
+    'apoe4_carrier': 'APOE e4 carrier',
     'braak': 'Braak stage',
 }
 

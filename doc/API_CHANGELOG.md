@@ -33,6 +33,17 @@ the spec drifting away from the running code.
 
 Additive (minor). No version bump yet.
 
+- **Facet `apoe_carrier` renamed `apoe4_carrier`** (2026-10-05). Same
+  definition and levels (E4+ / E4-, test contrast `e4_carrier_vs_noncarrier`).
+  The column is `ant_apoe4_carrier`, the facet-test facet `apoe4_carrier`,
+  `facets_visible` defaults to it. Deprecated aliases, removed after one
+  release: the obs views carry an `ant_apoe_carrier` alias column (not
+  listed as a facet), `/facets/ant_apoe_carrier` and
+  `/facets/apoe_carrier/...`, the `facet=apoe_carrier` parameters and the
+  `facets_visible` entry still work and return the new name; the web page
+  `/facets/ant_apoe_carrier` redirects. Facet-test results written before
+  the rename are read under the new name. Clients should switch names.
+
 - **Donor exclusions in facet tests** (2026-10-05, `doc/DESIGN_facet_testing.md`).
   - `GET /databases/{id}/facet-tests` gains `donor_exclusion` (`genes` and
     `modules`: the `donor_exclusion` block of the run manifests or null) and

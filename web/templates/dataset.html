@@ -775,7 +775,7 @@
         {% for col in _fx_extra %}
         <tr class="ds-facet-row" data-facet="{{ col }}">
           <td data-label="Facet"><a class="fct-name" href="/facets/{{ col|urlencode }}">{{ col[4:] }}</a></td>
-          <td colspan="4" class="fm-note">Not published as a column of this dataset; the facet test derived it ({% if col == 'ant_apoe_carrier' %}any e4 allele in ant_apoe{% else %}see the model details{% endif %}).</td>
+          <td colspan="4" class="fm-note">Not published as a column of this dataset; the facet test derived it ({% if col == 'ant_apoe4_carrier' %}any e4 allele in ant_apoe{% else %}see the model details{% endif %}).</td>
         </tr>
         {{ _fx_effects_row(col, _fx[col]) }}
         {% endfor %}

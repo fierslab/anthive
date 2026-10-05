@@ -302,10 +302,10 @@ tags:
       missing: Empty (NULL) when not genotyped.
       hint_keywords: [apoe]
 
-  apoe_carrier:
+  apoe4_carrier:
     label: APOE e4 carrier
     description: >
-      Whether the donor carries at least one APOE e4 allele.
+      Whether the donor carries at least one APOE e4 allele (E4+), or none (E4-).
     facet:
       status: registered
       scope: cross_dataset
@@ -320,6 +320,22 @@ tags:
       values: "E4+, E4-"
       missing: Empty (NULL) when the APOE genotype is missing.
       hint_keywords: [apoe]
+
+  apoe_carrier:
+    label: APOE e4 carrier (deprecated name)
+    description: >
+      Deprecated name of apoe4_carrier, kept as an alias for one release.
+    facet:
+      status: deprecated
+      replaced_by: [apoe4_carrier]
+      scope: cross_dataset
+      summary: Deprecated name of ant_apoe4_carrier (E4+ or E4-).
+      definition: >
+        Deprecated alias of ant_apoe4_carrier: carries at least one APOE e4
+        allele (E4+) or none (E4-).
+      kind: categorical
+      values: "E4+, E4-"
+      missing: Empty (NULL) when the APOE genotype is missing.
 
   disease:
     label: Disease

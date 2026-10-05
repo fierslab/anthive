@@ -22,6 +22,7 @@ import pytest
 
 import config
 import facet_results as fr
+from facet_aliases import canonical_facet
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SERVE_PATH = REPO_ROOT / 'bin' / 'api' / 'ant-serve'
@@ -45,7 +46,8 @@ def _gene_rows(db_id: str, facet: str, cell_type: str, effects: Dict[str, Tuple[
             'q_value': None if descriptive else q_value, 'ave_expr': 4.0, 'df_total': 20.0,
             'n_donors_ref': None if facet == 'braak' else float(donors[0]),
             'n_donors_test': None if facet == 'braak' else float(donors[1]),
-            'contrast': {'sex': 'm_vs_f', 'braak': 'braak_per_unit', 'disease': 'AD_vs_control'}[facet],
+            'contrast': {'sex': 'm_vs_f', 'braak': 'braak_per_unit', 'disease': 'AD_vs_control',
+                         'apoe_carrier': 'e4_carrier_vs_noncarrier'}[facet],
             'level_ref': None if facet == 'braak' else levels[0],
             'level_test': None if facet == 'braak' else levels[1],
             'n_donors': sum(donors), 'facet': facet, 'cell_type': cell_type,
@@ -427,10 +429,10 @@ def test_replication_single_cohort_and_uncounted():
     assert rep['badge'] == 'one cohort, not replicated (q < 0.05, up)'
 
 
-def test_apoe_locus_note_only_for_apoe_carrier(results):
+def test_apoe_locus_note_only_for_apoe4_carrier(results):
     reader = fr.FacetResults(results)
     assert fr.APOE_LOCUS_NOTE not in reader.gene_effects('braak', 'APOE', DATASETS)['notes']
-    card = reader.gene_effects('apoe_carrier', 'APOE', DATASETS)
+    card = reader.gene_effects('apoe4_carrier', 'APOE', DATASETS)
     assert fr.APOE_LOCUS_NOTE in card['notes'] and card['apoe_locus']
 
 
@@ -528,7 +530,7 @@ def serve(results):
         'app': app, 'registry': registry, 'FacetResults': fr.FacetResults, 'facet_results_lib': fr,
         'get_config': lambda: {}, 'get_facet_results_dir': config.get_facet_results_dir, 'os': os,
         'log': logging.getLogger('test-facet-results'), 'Lock': Lock, 'Path': Path, 'pd': pd,
-        'Response': Response, 'HTTPException': HTTPException, 'Query': Query,
+        'canonical_facet': canonical_facet, 'Response': Response, 'HTTPException': HTTPException, 'Query': Query,
         'Dict': Dict, 'List': List, 'Any': Any, 'Optional': Optional, 'Tuple': Tuple,
     }
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SERVE_PATH), 'exec', dont_inherit=True), namespace)
@@ -597,7 +599,7 @@ def test_endpoint_across_datasets_and_effects(serve):
     top = serve.get('/facets/ant_braak/effects/top', params={'n': 5}).json()
     assert top['rows'][0]['gene'] == 'PTPRG'
     allf = serve.get('/genes/PTPRG/facet-effects').json()
-    assert set(allf['facets']) == {'sex', 'disease', 'apoe_carrier', 'braak'}
+    assert set(allf['facets']) == {'sex', 'disease', 'apoe4_carrier', 'braak'}
     cohorts = serve.get('/facets/cohorts').json()
     assert cohorts['status'] == 'DRAFT' and cohorts['n_datasets'] == 3
 
@@ -649,3 +651,36 @@ def test_gene_card_is_strict_json_with_mixed_levels(results):
         json.dumps(reader.gene_effects(facet, 'PTPRG', DATASETS), allow_nan=False)
         json.dumps(reader.recurring_genes(facet, DATASETS), allow_nan=False)
         json.dumps(reader.facet_overview(facet, DATASETS), allow_nan=False)
+
+
+def _legacy_apoe_store(tmp_path: Path) -> Path:
+    """One dataset whose files still carry the pre-rename facet name."""
+    root = tmp_path / '_facet_tests'
+    group = root / 'G1'
+    group.mkdir(parents=True)
+    pd.DataFrame(_gene_rows('G1/ds1', 'apoe_carrier', 'microglial cell', {'APOE': (0.5, 0.001)},
+                            levels=('noncarrier', 'e4_carrier'))).to_parquet(group / 'ds1.facet_tests.parquet')
+    (group / 'ds1.facet_run_manifest.json').write_text(json.dumps(_gene_manifest(
+        'G1/ds1', 'G1', 'ds1', [_unit('apoe_carrier', 'microglial cell')])))
+    return root
+
+
+@pytest.mark.parametrize('requested', ['apoe4_carrier', 'apoe_carrier'])
+def test_results_written_under_the_old_facet_name_are_served_under_the_new_one(tmp_path, requested):
+    reader = fr.FacetResults(_legacy_apoe_store(tmp_path))
+    summary = reader.summary('G1/ds1', 'G1', 'ds1')
+    assert [unit['facet'] for unit in summary['units']] == ['apoe4_carrier']
+    rows, matching = reader.gene_rows('G1', 'ds1', facet=requested)
+    assert matching > 0 and set(rows['facet']) == {'apoe4_carrier'}
+    table = reader.facet_gene_table(requested, DATASETS_FOR_G1)
+    assert table is not None
+
+
+DATASETS_FOR_G1 = [{'db_id': 'G1/ds1', 'group_folder': 'G1', 'stem': 'ds1', 'title': 'ds1', 'group': 'G1',
+                    'sha256': None}]
+
+
+@pytest.mark.parametrize('name', ['ant_apoe_carrier', 'apoe_carrier', 'ant_apoe4_carrier', 'apoe4_carrier'])
+def test_endpoints_accept_the_deprecated_facet_name(serve, name):
+    body = serve.get(f'/facets/{name}/tests').json()
+    assert body['facet'] == 'apoe4_carrier' and body['facet_column'] == 'ant_apoe4_carrier'

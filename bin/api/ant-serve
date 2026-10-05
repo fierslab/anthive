@@ -91,6 +91,7 @@ from config import (get_auth_settings, get_catalog_scan_mode, get_data_folder,
                     get_library_index_dir, get_model_cache_dir, get_log_dir, get_state_dir, get_tmp_dir,
                     get_webapp_dir)
 from library_service import LIBRARY_S3_PREFIX, LibraryService
+from facet_aliases import canonical_facet, is_deprecated_facet_column
 import facet_results as facet_results_lib
 from facet_results import FacetResults
 import de_storage as lib_de_storage
@@ -4034,7 +4035,7 @@ def get_facet_tests(db_id: str):
     averaged per donor (``cell_mean``, from the stored per-cell scores) or
     computed on the pseudobulk (``pseudobulk``) and tested with OLS plus 10,000
     label permutations (the tool default; the run manifest records the actual number). Contrasts: sex (m vs f), disease (AD vs control,
-    provisional), apoe_carrier (e4 carrier vs non-carrier), braak (trend per
+    provisional), apoe4_carrier (e4 carrier vs non-carrier), braak (trend per
     stage). See ``doc/DESIGN_facet_testing.md``.
 
     Response::
@@ -4106,7 +4107,7 @@ def get_facet_tests(db_id: str):
 @app.get("/databases/{db_id:path}/facet-tests/genes", tags=["facet-tests"])
 def get_facet_test_genes(
     db_id: str,
-    facet: Optional[str] = Query(None, description="sex | disease | apoe_carrier | braak"),
+    facet: Optional[str] = Query(None, description="sex | disease | apoe4_carrier | braak"),
     cell_type: Optional[str] = Query(None, description="Cell type stratum, as in the summary"),
     celltype_source: Optional[str] = Query(None, description="Stratifier, e.g. constant_all_cells"),
     gene: Optional[str] = Query(None, description="One gene symbol (case-insensitive)"),
@@ -4143,7 +4144,7 @@ def get_facet_test_genes(
 @app.get("/databases/{db_id:path}/facet-tests/modules", tags=["facet-tests"])
 def get_facet_test_modules(
     db_id: str,
-    facet: Optional[str] = Query(None, description="sex | disease | apoe_carrier | braak"),
+    facet: Optional[str] = Query(None, description="sex | disease | apoe4_carrier | braak"),
     cell_type: Optional[str] = Query(None, description="Cell type stratum, as in the summary"),
     celltype_source: Optional[str] = Query(None, description="Stratifier, e.g. constant_all_cells"),
     method: Optional[str] = Query(None, description="cell_mean | pseudobulk"),
@@ -4188,7 +4189,7 @@ def get_facet_test_modules(
 @app.get("/databases/{db_id:path}/facet-tests/volcano.png", tags=["facet-tests"])
 def get_facet_test_volcano(
     db_id: str,
-    facet: str = Query(..., description="sex | disease | apoe_carrier | braak"),
+    facet: str = Query(..., description="sex | disease | apoe4_carrier | braak"),
     cell_type: str = Query(..., description="Cell type stratum"),
     celltype_source: Optional[str] = Query(None, description="Stratifier"),
 ):
@@ -12963,8 +12964,10 @@ def _secondary_db_ids() -> Set[str]:
 
 
 def _is_facet_column(name: str) -> bool:
-    """A facet is an obs column whose name starts with 'ant_'."""
-    return isinstance(name, str) and name.startswith('ant_') and len(name) > 4
+    """A facet is an obs column whose name starts with 'ant_'. Deprecated
+    alias columns (``ant_apoe_carrier``) are not listed as facets of their own."""
+    return (isinstance(name, str) and name.startswith('ant_') and len(name) > 4
+            and not is_deprecated_facet_column(name))
 
 
 def _facet_definition(facet_name: str) -> Dict[str, Any]:
@@ -13131,9 +13134,10 @@ def get_facet_tests_across_datasets(
     SEA-AD, MADRC, ...), so rows are not independent replications. A
     cross-dataset meta-analysis is not part of this endpoint. Exploratory.
 
-    ``facet_name`` is ``ant_sex`` or ``sex`` (also disease, apoe_carrier,
+    ``facet_name`` is ``ant_sex`` or ``sex`` (also disease, apoe4_carrier,
     braak). Other names return 404.
     """
+    facet_name = canonical_facet(facet_name)  # deprecated alias, one release
     test_facet = _tested_facet(facet_name)
     overview = _facet_results().facet_overview(test_facet, _facet_test_datasets(), top_genes=top_genes,
                                                exclude_secondary=exclude_secondary)
@@ -13143,6 +13147,7 @@ def get_facet_tests_across_datasets(
 
 def _tested_facet(facet_name: str) -> str:
     """``ant_braak`` / ``braak`` -> ``braak``; 404 for facets that are not tested."""
+    facet_name = canonical_facet(facet_name)
     test_facet = facet_name[4:] if facet_name.startswith('ant_') else facet_name
     if test_facet not in facet_results_lib.FACET_ORDER:
         raise HTTPException(status_code=404,
@@ -13198,6 +13203,7 @@ def get_facet_recurring_genes(
     m independent cohorts, a cohort counts once, cell types counted by their
     group in ``lib/celltype_groups.yaml``, secondary datasets not counted).
     """
+    facet_name = canonical_facet(facet_name)  # deprecated alias, one release
     test_facet = _tested_facet(facet_name)
     return _facet_results().recurring_genes(test_facet, _facet_test_datasets(), cell_type=cell_type, limit=n,
                                             exclude_secondary=exclude_secondary)
@@ -13226,6 +13232,7 @@ def get_facet_gene_effects(
     m independent cohorts, a cohort counts once, cell types counted by their
     group in ``lib/celltype_groups.yaml``, secondary datasets not counted).
     """
+    facet_name = canonical_facet(facet_name)  # deprecated alias, one release
     test_facet = _tested_facet(facet_name)
     return _facet_results().gene_effects(test_facet, gene, _facet_test_datasets(), cell_type=cell_type,
                                          exclude_secondary=exclude_secondary)
@@ -13238,7 +13245,7 @@ def get_gene_facet_effects(
     exclude_secondary: bool = Query(True, description="Secondary datasets (reanalyses) are listed, flagged is_secondary, but not counted towards replication"),
 ):
     """Result cards of one gene for every tested facet (sex, disease,
-    apoe_carrier, braak), keyed by facet; same shape as
+    apoe4_carrier, braak), keyed by facet; same shape as
     ``/facets/{facet}/effects``. The first call per facet reads every result
     file (a few seconds); later calls are cached until a file changes.
 
@@ -13443,6 +13450,7 @@ async def get_facet_detail(
 
     404 when the facet name is not present in the catalog.
     """
+    facet_name = canonical_facet(facet_name)  # deprecated alias, one release
     if not _is_facet_column(facet_name):
         raise HTTPException(
             status_code=400,
@@ -13944,6 +13952,7 @@ async def gene_variance_by_facet(
     non-null cells are still returned in group sizes but a gene is only
     included when it has non-zero expression in at least 2 groups.
     """
+    facet = canonical_facet(facet)
     if not _is_facet_column(facet):
         raise HTTPException(
             status_code=400,

@@ -407,7 +407,7 @@ issue_tracker_url: https://gitlab.kuleuven.be/bdslab/anthive/anthive4/-/issues
 # data, SQL, plots and API listings (the /facets API marks them
 # hidden_by_config). An empty list or null shows every facet.
 # Env: ANTHIVE_FACETS_VISIBLE (comma separated, "*" for all).
-facets_visible: [ant_sex, ant_disease, ant_apoe_carrier, ant_braak]
+facets_visible: [ant_sex, ant_disease, ant_apoe4_carrier, ant_braak]
 
 # Folder the in-app help links to for detailed docs (doc/MCP_CLIENTS.md,
 # doc/MCP_LINKS.md, ...). They live in the repo so they can be corrected

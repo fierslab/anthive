@@ -608,7 +608,7 @@ absolute path.
 | `site.hostnames` | extra names or IPs the site answers to |
 | `site.issue_tracker_url` | where the "Report an issue" entry in the user menu points (empty hides it) |
 | `site.docs_base_url` | folder the help pages link to for detailed docs such as MCP client setup (default: the anthive4 `doc/` folder on GitLab) |
-| `site.facets_visible` | the facets shown on the `/facets` pages and in the dataset page's facet card (default: `ant_sex`, `ant_disease`, `ant_apoe_carrier`, `ant_braak`, the four the donor-level facet tests analyse; `[]` shows all). Other `ant_*` columns stay in the data and the API. Temporary, while the facet audit decisions are pending |
+| `site.facets_visible` | the facets shown on the `/facets` pages and in the dataset page's facet card (default: `ant_sex`, `ant_disease`, `ant_apoe4_carrier`, `ant_braak`, the four the donor-level facet tests analyse; `[]` shows all). Other `ant_*` columns stay in the data and the API. Temporary, while the facet audit decisions are pending |
 | `data.h5adstore`, `data.genesetstore` | the data folders (absolute paths) |
 | `data.library`, `data.library_index` | the paper library checkout and the literature index folder (absolute paths; leave out to run without papers) |
 | `data.readonly` | mount the data read-only (a mirror that never annotates) |

@@ -162,13 +162,28 @@ def test_normalisers():
     assert aft.normalize_disease('AD') == 'AD' and aft.normalize_disease('control') == 'control'
     for dropped in ('AD_DLBD', 'AD_vascular', 'MCI', 'NCI', 'PD', 'other', None):
         assert aft.normalize_disease(dropped) is None
-    assert aft.normalize_apoe_carrier('E4+') == 'e4_carrier'
-    assert aft.normalize_apoe_carrier('E4-') == 'noncarrier'
-    assert aft.derive_apoe_carrier_from_genotype('E3/E4') == 'e4_carrier'
-    assert aft.derive_apoe_carrier_from_genotype('E4/E4') == 'e4_carrier'
-    assert aft.derive_apoe_carrier_from_genotype('E2/E3') == 'noncarrier'
-    assert aft.derive_apoe_carrier_from_genotype('33') == 'noncarrier'
-    assert aft.derive_apoe_carrier_from_genotype('unknown') is None
+    assert aft.normalize_apoe4_carrier('E4+') == 'e4_carrier'
+    assert aft.normalize_apoe4_carrier('E4-') == 'noncarrier'
+    assert aft.derive_apoe4_carrier_from_genotype('E3/E4') == 'e4_carrier'
+    assert aft.derive_apoe4_carrier_from_genotype('E4/E4') == 'e4_carrier'
+    assert aft.derive_apoe4_carrier_from_genotype('E2/E3') == 'noncarrier'
+    assert aft.derive_apoe4_carrier_from_genotype('33') == 'noncarrier'
+    assert aft.derive_apoe4_carrier_from_genotype('unknown') is None
+
+
+@pytest.mark.parametrize('column', ['ant_apoe4_carrier', 'ant_apoe_carrier'])
+def test_donor_table_finds_the_apoe_facet_under_the_new_and_the_old_column(column):
+    cells = pd.DataFrame({'ant_donor': ['D1', 'D1', 'D2'], column: ['E4+', 'E4+', 'E4-']})
+    donors, conflicts = aft.build_donor_table(cells)
+    assert dict(zip(donors['donor'], donors['apoe4_carrier'])) == {'D1': 'e4_carrier', 'D2': 'noncarrier'}
+    assert conflicts == {}
+
+
+def test_donor_table_prefers_the_new_column_and_derives_from_the_genotype_otherwise():
+    both = pd.DataFrame({'ant_donor': ['D1'], 'ant_apoe4_carrier': ['E4-'], 'ant_apoe_carrier': ['E4+']})
+    assert aft.build_donor_table(both)[0]['apoe4_carrier'].tolist() == ['noncarrier']
+    genotype = pd.DataFrame({'ant_donor': ['D1'], 'ant_apoe': ['E3/E4']})
+    assert aft.build_donor_table(genotype)[0]['apoe4_carrier'].tolist() == ['e4_carrier']
 
 
 def _donor_table(levels: list[str], batches: list[str] | None = None, facet: str = 'disease'):
