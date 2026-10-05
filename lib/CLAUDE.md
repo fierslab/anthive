@@ -23,12 +23,14 @@ After the 2026-06 reorgs, the consumers live under:
 | `h5ad_utils.py` | `load_h5ad`, dtype/layer inspection |
 | `geneset.py` | genesetstore parsing/registry (`Experiment`, `Geneset`, `GenesetRegistry`) |
 | `analytics.py` | SELECT-only SQL sandbox for ant-serve's analytics endpoint |
-| `facet_mapping.py` | how a dataset's `.md` `api:` section projects author columns onto `ant_*` facets (renamed / derived / constant / native / computed, value translation, redaction of `obs_hidden` sources, gap hints). Mirrors `anthive_db.build_obs_view_sql`; keep the two in step |
+| `facet_mapping.py` | how a dataset's `.md` `api:` section projects author columns onto `ant_*` facets (renamed / derived / template / join / constant / native / computed, value translation, redaction of `obs_hidden` sources, gap hints). Mirrors `anthive_db.build_obs_view_sql`; keep the two in step |
 | `obscol_tags.py` + `obscol_tags_vocab.yaml` | obs-column tag vocab; the `facet:` blocks are the single source of the facet definitions shown in the UI and API (`facet_definition`) |
 | facet registry | `obscol_tags_vocab.yaml` is also the closed `ant_*` registry (`status: registered / deprecated`, scope, controlled values, range); `canonical_columns.CANONICAL_TAGS` and friends are derived from it (`obscol_tags.facet_registry`). Register a tag there before any `.md` publishes `ant_<tag>` |
-| `facet_lint.py` | `ant md-check` rules for a dataset's `api:` section (namespace, rename chains, numeric facets, Braak range, controlled values, Braak group rule; with the `.duckdb`: missing sources, unmapped values) and lineage (`reanalysis_of`, `is_secondary`, `donor_group`) |
+| `obs_derive_forms.py` | the template (`{source, template: '{group_id}:{value}'}`) and join (`{source, join: donor_crosswalk.tsv, cohort, fallback_template}`) forms of `obs_derive`, used for `ant_donor_uid`: spec validation, value normalisation, crosswalk parsing (cached by mtime), the view SQL (the cohort's alias table is embedded as a `VALUES` subquery, so served views need no file) and `group_id_for_md`. Join tables resolve in the store root (`config.get_store_file`) |
+| `donor_keys.py` | distinct donor counting: key = `ant_donor_uid`, else `<group_id>:<ant_donor>`; `key_digest` for the facet-test manifests. Used by `/donor-groups`, the facet test tools and `facet_results` |
+| `facet_lint.py` | `ant md-check` rules for a dataset's `api:` section (namespace, rename chains, numeric facets, Braak range, controlled values, Braak group rule; template / join derive forms; with the `.duckdb`: missing sources, unmapped values, join values without a crosswalk entry) and lineage (`reanalysis_of`, `is_secondary`, `donor_group`) |
 | `celltype_groups.py` + `celltype_groups.yaml` | stratum label -> Cell Ontology based group for facet-test replication counting (exact, case folded, prefix; else `unmapped`) |
-| `facet_results.py` | read-only view of the donor-level facet test results (`facet_results_dir`, default `<h5adstore>/_facet_tests`): unit summaries with the model from the run manifests, gene and module rows, volcano PNG, sex positive control, DRAFT cohort table, replication badge and recurring genes counted per cell type group (secondaries listed, never counted). Defensive reads (missing or partial files mean not available), caches keyed by file mtime |
+| `facet_results.py` | read-only view of the donor-level facet test results (`facet_results_dir`, default `<h5adstore>/_facet_tests`): unit summaries with the model from the run manifests, gene and module rows, volcano PNG, sex positive control, DRAFT cohort table, replication badge and recurring genes counted per cell type group (secondaries listed, never counted), with summed and distinct donors (`donor_key_digests` in the manifests). Defensive reads (missing or partial files mean not available), caches keyed by file mtime |
 | `layer_stats.py`, `plotting.py`, `checksum.py`, `md_check.py` | layer stats, server-side plots, file hashing, `.md` sanity checks |
 
 ## DuckDB schema model (know this before touching anthive_db)
@@ -67,7 +69,9 @@ Context manager for adding obs columns without an h5ad rebuild. Invariants:
 - Optional `db_id`+`ant_serve_url`: on DuckDB "Conflicting lock", POSTs
   `/admin/release/{db_id}`, retries, POSTs `/admin/restore/{db_id}` on exit.
 
-`build_obs_view_sql` also computes `ant_braak_group` / `ant_apoe_carrier`
+`build_obs_view_sql` takes `group_id` (for `{group_id}` templates) and
+`store_root` (join tables; default the configured store); every caller
+passes the group id. It also computes `ant_braak_group` / `ant_apoe_carrier`
 from `ant_braak` / `ant_apoe` when the `.md` declares neither
 (`COMPUTED_FACETS`), and logs a warning for a derive whose source column is
 missing (pass the sibling table, or cross-table derives look missing).

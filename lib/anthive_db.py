@@ -22,6 +22,12 @@ import duckdb
 import numpy as np
 import pandas as pd
 
+try:
+    from obs_derive_forms import FORM_JOIN, FORM_TEMPLATE, derive_form, derive_sql as derive_form_sql
+except ImportError:  # imported as lib.anthive_db
+    from lib.obs_derive_forms import (FORM_JOIN, FORM_TEMPLATE, derive_form,  # type: ignore[no-redef]
+                                      derive_sql as derive_form_sql)
+
 
 # DuckDB identifiers we interpolate via f-strings have to be validated and
 # quoted. The allowed character set covers every obs / var / layer column we
@@ -99,6 +105,8 @@ def build_obs_view_sql(
     sibling_underscore_table: Optional[str] = None,
     sibling_columns: Optional[List[str]] = None,
     db_label: Optional[str] = None,
+    group_id: Optional[str] = None,
+    store_root: Optional[Path] = None,
 ) -> str:
     """Return the ``CREATE VIEW`` SQL for the obscat/obsnum view.
 
@@ -108,8 +116,13 @@ def build_obs_view_sql(
     ``cell_id`` is dropped (it's the join key, not a public col);
     ``cell_name`` is added.
 
-    ``obs_derive`` publishes new columns via a value-map CASE expression.
-    A derivation whose ``dtype`` matches this view is emitted here.
+    ``obs_derive`` publishes new columns via a value-map CASE expression,
+    or through the template or join form (``lib/obs_derive_forms.py``:
+    ``{source, template}`` renders ``{group_id}`` / ``{value}``; ``{source,
+    join, cohort, fallback_template}`` looks the value up in a crosswalk
+    table in the store root, embedded in the view as a ``VALUES`` list so
+    the view needs no file at query time). A derivation whose ``dtype``
+    matches this view is emitted here (template and join are categorical).
     If the derivation's ``source`` column lives in the sibling __obs*
     table (obsnum-sourced obscat derivation, or vice versa), pass the
     sibling table + column list so we can JOIN it in. A derivation whose
@@ -127,6 +140,10 @@ def build_obs_view_sql(
 
     Args:
         db_label: Dataset name used in the warning log lines.
+        group_id: The dataset's group id, for ``{group_id}`` in templates.
+            A template that needs it is left out (with a warning) when None.
+        store_root: Folder that join tables resolve against; default the
+            configured store root (``config.get_store_file``).
     """
     log = logging.getLogger(__name__)
     api = api_config or {}
@@ -142,17 +159,27 @@ def build_obs_view_sql(
     own_cols = set(columns)
     sibling_cols = set(sibling_columns or [])
     has_sibling = bool(sibling_underscore_table)
+
+    def _form_expr(spec: Dict[str, Any], table_alias: str) -> Tuple[Optional[str], Optional[str]]:
+        """Template / join derive SQL over ``<alias>.<source>``. The source
+        is numerical when it sits in __obsnum (own table of the obsnum
+        view, sibling of the obscat view)."""
+        numeric = (table_alias == 'o') == (view_dtype == 'numerical')
+        return derive_form_sql(spec, f"{table_alias}.{_q(spec['source'])}", numeric,
+                               group_id, store_root)
+
     active_derive = {}
     join_sibling = False
     for new_col, spec in derive_all.items():
-        if spec.get('dtype') != view_dtype:
+        form = derive_form(spec)
+        spec_dtype = spec.get('dtype') or ('categorical' if form in (FORM_TEMPLATE, FORM_JOIN) else None)
+        if spec_dtype != view_dtype:
             continue
         source = spec.get('source')
         if source in own_cols:
             spec = {**spec, '_source_table': 'o'}     # this view's alias
         elif source in sibling_cols and has_sibling:
             spec = {**spec, '_source_table': 's'}     # sibling alias
-            join_sibling = True
         else:
             # Source column not found: the derived column is not published.
             # Loud, because a typo or a renamed author column otherwise
@@ -162,6 +189,15 @@ def build_obs_view_sql(
                 "obs_derive %s%s: source column %r is not in %s; %s is not published",
                 new_col, f' ({db_label})' if db_label else '', source, where, new_col)
             continue
+        if form in (FORM_TEMPLATE, FORM_JOIN):
+            expression, problem = _form_expr(spec, spec['_source_table'])
+            if expression is None:
+                log.warning("obs_derive %s%s (%s form): %s; %s is not published",
+                            new_col, f' ({db_label})' if db_label else '', form, problem, new_col)
+                continue
+            spec = {**spec, '_expression': expression}
+        if spec['_source_table'] == 's':
+            join_sibling = True
         active_derive[new_col] = spec
 
     # Legacy stored col names include spaces / '#' / '.' etc. — see _q()
@@ -205,7 +241,11 @@ def build_obs_view_sql(
         alias_sql = safe_ident(alias) if col in rename else _q(alias)
         return f'{_value_expr(col, "o")} AS {alias_sql}'
 
-    def _derive_expr(spec: Dict[str, Any], table_alias: str) -> str:
+    def _derive_expr(spec: Dict[str, Any], table_alias: str) -> Optional[str]:
+        if '_expression' in spec:
+            return spec['_expression']
+        if derive_form(spec) in (FORM_TEMPLATE, FORM_JOIN):
+            return _form_expr(spec, table_alias)[0]
         col_sql = f"{table_alias}.{_q(spec['source'])}"
         mapping = spec.get('map', {}) or {}
         dtype = spec.get('dtype')
@@ -236,11 +276,11 @@ def build_obs_view_sql(
         spec = derive_all.get(target)
         if isinstance(spec, dict) and spec.get('source'):
             source = spec['source']
-            if source in own_cols:
-                return _derive_expr(spec, 'o'), False
-            if source in sibling_cols and has_sibling:
-                return _derive_expr(spec, 's'), True
-            return None
+            alias = 'o' if source in own_cols else ('s' if source in sibling_cols and has_sibling else None)
+            if alias is None:
+                return None
+            expression = _derive_expr(spec, alias)
+            return (expression, alias == 's') if expression is not None else None
         spec = constant_all.get(target)
         if isinstance(spec, dict) and spec.get('value') is not None:
             return _sql_str(spec['value']), False
@@ -2817,7 +2857,23 @@ class AnnotationWriter:
             getattr(self, 'api_config', None),
             sibling_underscore_table=sibling_underscore,
             sibling_columns=sibling_cols,
+            group_id=self._group_id_for_views(),
         ))
+
+    def _group_id_for_views(self) -> Optional[str]:
+        """Group id for ``{group_id}`` templates: the db_id prefix when the
+        writer was given one, else the dataset's index.md."""
+        db_id = getattr(self, 'db_id', None)
+        if db_id and '/' in str(db_id):
+            return str(db_id).split('/', 1)[0]
+        duckdb_path = getattr(self, 'duckdb_path', None)
+        if duckdb_path is None:
+            return None
+        try:
+            from obs_derive_forms import group_id_for_md  # noqa: PLC0415
+        except ImportError:
+            return None
+        return group_id_for_md(Path(duckdb_path).with_suffix('.md'))
 
     def _record_pending(
         self,

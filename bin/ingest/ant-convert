@@ -22,7 +22,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 import duckdb
 import numpy as np
@@ -38,6 +38,7 @@ from config import expand_value, get_config, get_convert_staging_dir
 from h5ad_utils import load_h5ad, H5ADError
 from metadata import parse_md_file, get_api_config, MetadataError
 from anthive_db import pending_state_diagnosis, build_obs_view_sql
+from obs_derive_forms import group_id_for_md
 
 
 class ConversionError(Exception):
@@ -347,7 +348,7 @@ def convert_h5ad_to_duckdb(h5ad_path: Path, config: Dict[str, Any],
         # Convert observations
         print(f"\n[5/7] Converting observations...")
         if metadata.get('obsnum_include') or metadata.get('obscat_include'):
-            convert_observations(conn, adata, metadata)
+            convert_observations(conn, adata, metadata, group_id=group_id_for_md(md_path))
         else:
             print("  (no observations to convert)")
 
@@ -758,8 +759,13 @@ def convert_layers(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict,
               f"{total_time:.1f}s  ({format_size(by_gene_size + by_cell_size)} parquet)")
 
 
-def convert_observations(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict) -> None:
-    """Convert observation (cell) annotations"""
+def convert_observations(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict,
+                         group_id: Optional[str] = None) -> None:
+    """Convert observation (cell) annotations.
+
+    ``group_id`` fills ``{group_id}`` in template / join derives; join tables
+    resolve against the configured store root.
+    """
 
     # Reserved column names that cannot be used
     RESERVED_COLUMNS = {'cell_id', 'cell_name', 'gene_id', 'gene_name'}
@@ -910,6 +916,7 @@ def convert_observations(conn: duckdb.DuckDBPyConnection, adata, metadata: Dict)
             sibling_underscore_table=f'__{sibling_name}' if sibling_columns else None,
             sibling_columns=sibling_columns,
             db_label=str(metadata.get('id') or metadata.get('title') or ''),
+            group_id=group_id,
         ))
 
 

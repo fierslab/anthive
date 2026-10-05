@@ -216,7 +216,7 @@ _SERVE_WANTED = {
     '_FACET_PROJECTION_LOCK', '_FACET_VALUE_ROWS_LIMIT', '_FACET_MAPPING_KEYS',
     '_facet_api_config', '_quote_stored_column', '_facet_add_counts',
     '_dataset_facet_projection', '_facet_entry_for_caller', '_facet_non_carriers',
-    'get_dataset_facets', 'get_facet_detail', '_secondary_db_ids',
+    'get_dataset_facets', 'get_facet_detail', '_secondary_db_ids', '_join_tables_signature',
 }
 
 DB_ID = 'G1/ds1'
@@ -300,6 +300,7 @@ def _build_duckdb(path: Path, api_config: Dict[str, Any]) -> Tuple[List[str], Li
 class _FakeRegistry:
     def __init__(self, tmp_path: Path):
         self._db_md_bases: Dict[str, Path] = {}
+        self.data_folder = tmp_path
         self.metadata_cache: Dict[str, Dict[str, Any]] = {}
         self.paths: Dict[str, Path] = {}
         md = tmp_path / 'ds1.md'

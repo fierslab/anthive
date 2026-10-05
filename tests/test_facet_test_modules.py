@@ -294,6 +294,9 @@ def test_planted_module_effect_recovered_by_both_methods(tmp_path):
         assert (nulls['q_perm'] < 0.05).sum() <= 1, nulls[['module', 'estimate', 'p_perm']]
     unit = next(u for u in manifest['units'] if u['facet'] == 'sex' and u['cell_type'] == 'T1')
     assert unit['n_sig_q05_param_cell_mean_geneset'] >= 1 and unit['n_sig_q05_param_pseudobulk_gene_list'] >= 1
+    # donor keys: no ant_donor_uid here, so every donor is keyed SY1:<donor> and stored as a digest
+    assert manifest['donor_keys']['n_donors_uid'] == 0 and manifest['donor_keys']['n_donors'] == 20
+    assert len(unit['donor_key_digests']) == 20 and all(len(d) == 16 for d in unit['donor_key_digests'])
     calibration = unit['calibration']['geneset']
     assert calibration['n_modules_shared'] == 6
     assert calibration['pearson_estimate'] > 0.5

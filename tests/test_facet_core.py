@@ -235,7 +235,7 @@ def test_two_of_two_does_not_outrank_two_of_four_for_fewer_tests():
 # ── ant-serve: lineage, donor groups, exclude_secondary ──────────────────────
 
 _SERVE_WANTED = {'_lineage_fields', '_secondary_db_ids', 'list_donor_groups', 'get_module_variability',
-                 '_alias_canonical', 'get_gene_stats_all'}
+                 '_alias_canonical', 'get_gene_stats_all', '_dataset_donor_keys'}
 
 
 class _Registry:
@@ -274,9 +274,25 @@ class _Registry:
     def list_databases(self):
         return [{'id': db_id, **meta} for db_id, meta in self.metadata_cache.items()]
 
+    def get_database_path(self, db_id):
+        return self.databases[db_id]
+
+
+def _donor_duckdb(path: Path, rows: List[Tuple[str, Optional[str]]], with_uid: bool) -> None:
+    """An obscat view with ant_donor (and ant_donor_uid) per cell; fake ids only."""
+    import duckdb
+    conn = duckdb.connect(str(path))
+    columns = 'cell_name VARCHAR, ant_donor VARCHAR' + (', ant_donor_uid VARCHAR' if with_uid else '')
+    conn.execute(f'CREATE TABLE t ({columns})')
+    for index, (donor, uid) in enumerate(rows):
+        values = [f'c{index}', donor] + ([uid] if with_uid else [])
+        conn.execute(f'INSERT INTO t VALUES ({", ".join("?" for _ in values)})', values)
+    conn.execute('CREATE VIEW obscat AS SELECT * FROM t')
+    conn.close()
+
 
 @pytest.fixture
-def serve():
+def serve(tmp_path):
     from fastapi import FastAPI, HTTPException, Query, Response
     from fastapi.responses import JSONResponse
     from fastapi.testclient import TestClient
@@ -298,8 +314,32 @@ def serve():
         def fingerprint(*args):
             return None
 
+    registry = _Registry()
+    # G1/PRI publishes a uid for D1 only; G1/REA (a reanalysis) has labels only.
+    _donor_duckdb(tmp_path / 'pri.duckdb', [('D1', 'fakecoh:0001'), ('D1', 'fakecoh:0001'), ('D3', None)], True)
+    _donor_duckdb(tmp_path / 'rea.duckdb', [('D1', None), ('D3', None), (' D3 ', None)], False)
+    registry.databases = {'G1/PRI': str(tmp_path / 'pri.duckdb'), 'G1/REA': str(tmp_path / 'rea.duckdb'),
+                          'G2/ONE': str(tmp_path / 'missing.duckdb')}
+
+    import duckdb
+    from contextlib import contextmanager
+    from threading import Lock
+
+    class _Db:
+        def __init__(self, conn):
+            self._conn = conn
+
+    @contextmanager
+    def _pooled_db(db_id):
+        conn = duckdb.connect(registry.get_database_path(db_id), read_only=True)
+        try:
+            yield _Db(conn)
+        finally:
+            conn.close()
+
     namespace: Dict[str, Any] = {
-        'app': app, 'registry': _Registry(), 'HTTPException': HTTPException, 'Query': Query,
+        '_pooled_db': _pooled_db, '_DONOR_KEYS_CACHE': {}, '_DONOR_KEYS_LOCK': Lock(),
+        'app': app, 'registry': registry, 'HTTPException': HTTPException, 'Query': Query,
         'Response': Response, 'JSONResponse': JSONResponse, 'log': logging.getLogger('test-core'),
         'Dict': Dict, 'List': List, 'Any': Any, 'Optional': Optional, 'Tuple': Tuple, 'Set': Set,
         'Path': Path, 'asyncio': asyncio, '_load_module_variability': lambda: variability,
@@ -333,6 +373,23 @@ def test_donor_groups_endpoint(serve):
     assert group['datasets'][1]['reanalysis_of'] == ['G1/PRI']
     assert group['has_donor_uid'] is False
     assert client.get('/donor-groups', params={'donor_group': 'nope'}).status_code == 404
+
+
+def test_donor_groups_distinct_donor_counts(serve):
+    client, _ = serve
+    group = client.get('/donor-groups').json()['groups'][0]
+    donors = group['donors']
+    # PRI: fakecoh:0001 (uid), G1:D3 (fallback); REA: G1:D1, G1:D3 (fallback, ' D3 ' trimmed).
+    # D1 counts twice: the reanalysis has no uid, which the fallback cannot see through.
+    assert (donors['n_donors'], donors['n_donors_uid'], donors['n_donors_fallback']) == (3, 1, 2)
+    assert donors['n_donors_primary'] == 2
+    assert (donors['n_datasets_counted'], donors['n_datasets_without_donor']) == (2, 0)
+    assert 'ant_donor_uid' in donors['basis']
+    by_id = {d['db_id']: d for d in group['datasets']}
+    assert (by_id['G1/PRI']['n_donors'], by_id['G1/PRI']['n_donors_uid']) == (2, 1)
+    assert (by_id['G1/REA']['n_donors'], by_id['G1/REA']['n_donors_uid']) == (2, 0)
+    plain = client.get('/donor-groups', params={'donor_counts': 'false'}).json()['groups'][0]
+    assert 'donors' not in plain and 'n_donors' not in plain['datasets'][0]
 
 
 def test_module_variability_excludes_secondaries(serve):

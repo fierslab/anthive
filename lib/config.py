@@ -329,6 +329,21 @@ def get_data_folder(cfg: Optional[Dict[str, Any]] = None) -> Path:
     return resolve_path(_setting(cfg, 'h5adstore', 'ANTHIVE_H5ADSTORE', 'data/h5adstore'))
 
 
+def get_store_file(name: str, cfg: Optional[Dict[str, Any]] = None) -> Path:
+    """A shared table that lives in the h5adstore root, e.g. ``donor_crosswalk.tsv``.
+
+    ``name`` is relative to the store root (``get_data_folder``). Absolute
+    paths and ``..`` components are refused (ValueError), so an ``.md`` can
+    only ever name a file inside the store. The file may not exist; callers
+    check.
+    """
+    text = str(name or '').strip()
+    candidate = Path(text)
+    if not text or candidate.is_absolute() or '..' in candidate.parts:
+        raise ValueError(f'store file must be a relative path inside the store: {name!r}')
+    return get_data_folder(cfg) / candidate
+
+
 def get_facet_results_dir(cfg: Optional[Dict[str, Any]] = None) -> Path:
     """Folder with the donor-level facet test results (read-only for the server).
 

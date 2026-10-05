@@ -315,6 +315,20 @@ tested in that cell type group and facet. A cohort is a row group of
 not count. A cohort counts once: it is significant in a direction when any of
 its counted units is.
 
+Donors behind a badge (2026-10-05). Each replication entry, each recurring
+gene row and the chosen cell type group of `/facets/{name}/effects/top` carry
+`n_donors_sum` (donors analysed, added over the counted units; a person tested
+in two datasets counts twice) and `n_donors_distinct` (each person once).
+Distinct counting keys a donor on `ant_donor_uid` where the dataset publishes
+one and on `<group_id>:<ant_donor>` otherwise (`lib/donor_keys.py`). Both test
+tools record per tested unit the digests of the analysed donors' keys
+(`donor_key_digests`, the first 16 hex digits of SHA-256; no identifiers in the
+manifests) and per run `donor_keys` (`n_donors`, `n_donors_uid`,
+`n_uid_conflicts`). The fallback cannot see one person in two collections, so
+`n_donors_distinct` is an upper bound where uids are missing; it is null when a
+counted unit comes from a run made before the digests existed (results from
+before 2026-10-05 need a re-run).
+
 ### Cell type groups (replication counting)
 
 Strata carry their dataset's label: a Cell Ontology name ("microglial

@@ -3404,9 +3404,71 @@ def list_databases(
     }
 
 
+_DONOR_KEYS_CACHE: Dict[Tuple, Optional[Dict[str, str]]] = {}
+_DONOR_KEYS_LOCK = Lock()
+
+
+def _dataset_donor_keys(db_id: str) -> Optional[Dict[str, str]]:
+    """``{donor key: kind}`` of one dataset (``lib/donor_keys.py``): the
+    distinct ``(ant_donor_uid, ant_donor)`` pairs of its served views, keyed
+    on the uid, else ``<group_id>:<ant_donor>``. None when the dataset
+    publishes neither column or cannot be read. Cached by the duckdb's
+    location and mtime (a view refresh or re-ingest changes it)."""
+    from donor_keys import donor_keys  # noqa: PLC0415
+    try:
+        db_url = str(registry.get_database_path(db_id))
+    except KeyError:
+        return None
+    mtime = None
+    if not db_url.startswith('s3://'):
+        try:
+            mtime = Path(db_url.replace('file://', '')).stat().st_mtime_ns
+        except OSError:
+            mtime = None
+    key = (db_id, db_url, mtime)
+    with _DONOR_KEYS_LOCK:
+        if key in _DONOR_KEYS_CACHE:
+            return _DONOR_KEYS_CACHE[key]
+    result: Optional[Dict[str, str]] = None
+    try:
+        with _pooled_db(db_id) as db:
+            conn = db._conn
+            columns: Dict[str, str] = {}
+            for view in ('obscat', 'obsnum'):
+                for (name,) in conn.execute(
+                        "SELECT column_name FROM information_schema.columns WHERE table_name = ? "
+                        "AND column_name IN ('ant_donor_uid', 'ant_donor')", [view]).fetchall():
+                    columns.setdefault(name, view)
+            if columns:
+                uid_view, donor_view = columns.get('ant_donor_uid'), columns.get('ant_donor')
+                uid_sql = 'u.ant_donor_uid' if uid_view else 'NULL'
+                donor_sql = 'd.ant_donor' if donor_view else 'NULL'
+                if uid_view and donor_view and uid_view != donor_view:
+                    from_sql = f'{uid_view} u JOIN {donor_view} d USING (cell_name)'
+                elif uid_view and donor_view:
+                    from_sql, donor_sql = f'{uid_view} u', 'u.ant_donor'
+                elif uid_view:
+                    from_sql = f'{uid_view} u'
+                else:
+                    from_sql = f'{donor_view} d'
+                rows = conn.execute(f"SELECT DISTINCT {uid_sql}, {donor_sql} FROM {from_sql}").fetchall()
+                result = donor_keys(rows, db_id.split('/', 1)[0])
+    except HTTPException:
+        return None  # evicted / released right now: not counted, not cached
+    except Exception as exc:  # a dataset that cannot be read is reported as not counted
+        log.warning("donor-groups: donor keys of %s unavailable: %s", db_id, exc)
+        return None
+    with _DONOR_KEYS_LOCK:
+        if len(_DONOR_KEYS_CACHE) > 2048:
+            _DONOR_KEYS_CACHE.clear()
+        _DONOR_KEYS_CACHE[key] = result
+    return result
+
+
 @app.get("/donor-groups", tags=["databases"])
 def list_donor_groups(
     donor_group: Optional[str] = Query(None, description="Only this donor group (slug)."),
+    donor_counts: bool = Query(True, description="Count distinct donors per group (reads each dataset once; cached)."),
 ):
     """Donor groups and their datasets (audit decision L3).
 
@@ -3424,6 +3486,15 @@ def list_donor_groups(
     ``is_secondary``, ``reanalysis_of``, ``has_donor_uid``, ``n_cells``).
     ``n_ungrouped`` counts datasets without a donor group. 404 when
     ``donor_group`` names no group.
+
+    With ``donor_counts`` (default) each group also has ``donors``:
+    ``n_donors`` (distinct over all its datasets), ``n_donors_uid`` /
+    ``n_donors_fallback`` (how those were keyed), ``n_donors_primary``
+    (distinct over the datasets that are not reanalyses),
+    ``n_datasets_counted`` and ``n_datasets_without_donor``; each dataset has
+    ``n_donors`` and ``n_donors_uid`` (None when it publishes neither
+    ``ant_donor_uid`` nor ``ant_donor``). A donor is keyed on its
+    ``ant_donor_uid``, else ``<group_id>:<ant_donor>`` (``basis`` says so).
     """
     groups: Dict[str, List[Dict[str, Any]]] = {}
     n_ungrouped = 0
@@ -3447,8 +3518,29 @@ def list_donor_groups(
     if donor_group and donor_group not in groups:
         raise HTTPException(status_code=404, detail=f"No dataset has donor_group {donor_group!r}")
     rows = []
+    if donor_counts:
+        from donor_keys import COUNT_BASIS, summarize  # noqa: PLC0415
     for slug in sorted(groups):
         datasets = sorted(groups[slug], key=lambda d: (d['is_secondary'], d['db_id'] or ''))
+        donors = None
+        if donor_counts:
+            key_maps: Dict[str, Optional[Dict[str, str]]] = {}
+            for dataset in datasets:
+                keys = _dataset_donor_keys(dataset['db_id']) if dataset['db_id'] else None
+                key_maps[dataset['db_id']] = keys
+                dataset['n_donors'] = len(keys) if keys is not None else None
+                dataset['n_donors_uid'] = (sum(1 for kind in keys.values() if kind == 'uid')
+                                           if keys is not None else None)
+            counted = [k for k in key_maps.values() if k is not None]
+            primary = [key_maps[d['db_id']] for d in datasets
+                       if not d['is_secondary'] and key_maps.get(d['db_id']) is not None]
+            donors = {
+                **summarize(counted),
+                'n_donors_primary': summarize(primary)['n_donors'],
+                'n_datasets_counted': len(counted),
+                'n_datasets_without_donor': len(datasets) - len(counted),
+                'basis': COUNT_BASIS,
+            }
         rows.append({
             'donor_group': slug,
             'n_datasets': len(datasets),
@@ -3457,6 +3549,7 @@ def list_donor_groups(
             'n_unresolved': sum(d['designation'] == 'unresolved' for d in datasets),
             'n_cells': sum(d['n_cells'] for d in datasets if not d['is_secondary']),
             'has_donor_uid': all(d['has_donor_uid'] for d in datasets),
+            **({'donors': donors} if donors is not None else {}),
             'datasets': datasets,
         })
     return {'n_groups': len(rows), 'groups': rows, 'n_ungrouped': n_ungrouped}
@@ -11946,6 +12039,9 @@ def refresh_views(db_id: str):
                     view_name, underscore, cols, api_config,
                     sibling_underscore_table=sibling_underscore,
                     sibling_columns=sibling_cols,
+                    db_label=db_id,
+                    group_id=db_id.split('/', 1)[0],
+                    store_root=registry.data_folder,
                 ))
                 rebuilt.append(view_name)
             conn.execute("CHECKPOINT")
@@ -13545,12 +13641,12 @@ def _facet_add_counts(db_id: str, entries: List[Dict[str, Any]],
     """Add cell counts to projection entries, on one pooled cursor.
 
     Per live facet: ``n_cells`` and ``n_missing`` (NULLs), plus ``range``
-    for numerical facets. Per renamed or derived facet: the author values
+    for numerical facets. Per renamed, derived, template or join facet: the author values
     present in the source column with their cell counts (top
     ``_FACET_VALUE_ROWS_LIMIT``), translated through the mapping. A renamed
     numerical column without value rules gets no value table.
     """
-    from facet_mapping import DERIVED, RENAMED, translate_observed  # noqa: PLC0415
+    from facet_mapping import DERIVED, JOIN, RENAMED, TEMPLATE, translate_observed  # noqa: PLC0415
     with _pooled_db(db_id) as db:
         conn = db._conn
         stored: Dict[str, set] = {}
@@ -13585,7 +13681,7 @@ def _facet_add_counts(db_id: str, entries: List[Dict[str, Any]],
                     entry['n_cells'] = int(total or 0)
                     entry['n_missing'] = int(total or 0) - int(non_null or 0)
                 kind = entry.get('mapping_kind')
-                if kind not in (RENAMED, DERIVED) or not entry.get('source_columns'):
+                if kind not in (RENAMED, DERIVED, TEMPLATE, JOIN) or not entry.get('source_columns'):
                     continue
                 if kind == RENAMED and entry.get('dtype') == 'numerical' and not entry.get('value_map'):
                     continue
@@ -13603,9 +13699,26 @@ def _facet_add_counts(db_id: str, entries: List[Dict[str, Any]],
                 n_distinct = conn.execute(
                     f"SELECT COUNT(DISTINCT {column}) FROM {table}"
                 ).fetchone()[0]
-                translate_observed(entry, observed, int(n_distinct or 0))
+                translate_observed(entry, observed, int(n_distinct or 0), store_root=registry.data_folder)
             except (duckdb.Error, ValueError) as exc:
                 log.warning("facets: counting %s on %s failed: %s", facet, db_id, exc)
+
+
+def _join_tables_signature(api_config: Dict[str, Any]) -> Tuple:
+    """(name, mtime, size) of every join table the dataset's derives name,
+    so an edited crosswalk invalidates the cached projection."""
+    from obs_derive_forms import resolve_join_file  # noqa: PLC0415
+    signature = []
+    for spec in (api_config.get('obs_derive') or {}).values():
+        name = spec.get('join') if isinstance(spec, dict) else None
+        if not name:
+            continue
+        try:
+            stat = resolve_join_file(name, registry.data_folder).stat()
+            signature.append((name, stat.st_mtime_ns, stat.st_size))
+        except (OSError, ValueError):
+            signature.append((name, None, None))
+    return tuple(sorted(signature, key=str))
 
 
 def _dataset_facet_projection(db_id: str, with_counts: bool = True,
@@ -13634,13 +13747,15 @@ def _dataset_facet_projection(db_id: str, with_counts: bool = True,
             db_mtime = Path(db_url.replace('file://', '')).stat().st_mtime_ns
         except OSError:
             db_mtime = None
-    key = (db_id, with_counts, only_facet, md_mtime, db_url, db_mtime, id(meta))
+    key = (db_id, with_counts, only_facet, md_mtime, db_url, db_mtime, id(meta),
+           _join_tables_signature(api_config))
     with _FACET_PROJECTION_LOCK:
         cached = _FACET_PROJECTION_CACHE.get(key)
         if cached is not None:
             _FACET_PROJECTION_CACHE.move_to_end(key)
             return copy.deepcopy(cached)
-    entries = project_dataset(api_config, obs.get('categorical') or [], obs.get('numerical') or [])
+    entries = project_dataset(api_config, obs.get('categorical') or [], obs.get('numerical') or [],
+                              group_id=db_id.split('/', 1)[0], store_root=registry.data_folder)
     if with_counts and entries:
         try:
             _facet_add_counts(db_id, entries, only_facet=only_facet)

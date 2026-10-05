@@ -1561,7 +1561,13 @@ def main() -> None:
                 continue
             for rep in card.get('replication') or []:
                 labels = ', '.join(rep.get('labels') or [])
-                lines.append(f"  [{rep['cell_type']}] {rep['badge']}" + (f" (labels: {labels})" if labels else ''))
+                donor_text = ''
+                if rep.get('n_donors_sum') is not None:
+                    donor_text = (f"; donors in counted units: {rep['n_donors_sum']} summed, "
+                                  + (f"{rep['n_donors_distinct']} distinct" if rep.get('n_donors_distinct') is not None
+                                     else 'distinct not recorded'))
+                lines.append(f"  [{rep['cell_type']}] {rep['badge']}{donor_text}"
+                             + (f" (labels: {labels})" if labels else ''))
             for note in card.get('notes') or []:
                 if note not in ('exploratory',):
                     lines.append(f'  note: {note}')
@@ -1579,6 +1585,14 @@ def main() -> None:
                     f"{_fmt_number(unit.get('q_value'))} | {donors} | {', '.join(flags) or '-'} | "
                     f"{unit.get('model')}{'; left out: ' + ', '.join(unit['covariates_left_out']) if unit.get('covariates_left_out') else ''}")
         return '\n'.join(lines)
+
+    def _donor_phrase(donors: Optional[dict]) -> str:
+        """', N donors (M distinct)' from n_donors_sum / n_donors_distinct, or ''."""
+        if not donors or donors.get('n_donors_sum') is None:
+            return ''
+        distinct = donors.get('n_donors_distinct')
+        return (f", {donors['n_donors_sum']} donors summed over counted units ("
+                + (f"{distinct} distinct persons" if distinct is not None else 'distinct count not recorded') + ')')
 
     @mcp.tool()
     async def facet_top_genes(facet: str, cell_type: Optional[str] = None, n: int = 30,
@@ -1609,7 +1623,8 @@ def main() -> None:
         except httpx.HTTPStatusError as exc:
             return f"Error {exc.response.status_code}: {exc.response.text[:300]}"
         lines = [_FACET_TOOL_RULES,
-                 f"{facet} in {data.get('cell_type')}: {data.get('cohorts_in_cell_type')} counted cohorts tested.",
+                 f"{facet} in {data.get('cell_type')}: {data.get('cohorts_in_cell_type')} counted cohorts tested"
+                 + _donor_phrase(data.get('donors_in_cell_type')) + '.',
                  'Other cell types: ' + ', '.join(f"{o['cell_type']} ({o['n_cohorts']} cohorts)"
                                                   for o in (data.get('cell_types') or [])[:12])]
         rows = data.get('rows') or []
@@ -1679,7 +1694,8 @@ def main() -> None:
         Datasets in one donor group share persons (complementary splits of one
         study by cell class, region or library, or several studies of one
         cohort). Count their donors once and never treat them as independent
-        replications. Each dataset is a primary, a reanalysis (its cells are
+        replications. Each group shows its distinct donors, keyed on
+        ant_donor_uid when published and on group id + ant_donor otherwise. Each dataset is a primary, a reanalysis (its cells are
         also served by the datasets it reanalyses) or unresolved.
 
         Args:
@@ -1690,16 +1706,32 @@ def main() -> None:
         except httpx.HTTPStatusError as exc:
             return f"Error {exc.response.status_code}: {exc.response.text[:300]}"
         lines = [f"{data.get('n_groups')} donor group(s); {data.get('n_ungrouped')} datasets belong to none."]
+        basis = None
         for group in data.get('groups') or []:
             lines.append(f"\n## {group['donor_group']}: {group['n_datasets']} datasets "
                          f"({group['n_primary']} primary, {group['n_reanalysis']} reanalysis, "
                          f"{group['n_unresolved']} unresolved); {group['n_cells']:,} cells in primaries")
+            donors = group.get('donors')
+            if donors:
+                basis = donors.get('basis') or basis
+                lines.append(f"Distinct donors: {donors['n_donors']} over {donors['n_datasets_counted']} "
+                             f"dataset(s) ({donors['n_donors_uid']} by ant_donor_uid, "
+                             f"{donors['n_donors_fallback']} by group id + ant_donor); "
+                             f"{donors['n_donors_primary']} in non-reanalysis datasets"
+                             + (f"; {donors['n_datasets_without_donor']} dataset(s) publish no donor column"
+                                if donors.get('n_datasets_without_donor') else ''))
             for dataset in group.get('datasets') or []:
                 lineage = dataset.get('designation') or '-'
                 if dataset.get('reanalysis_of'):
                     lineage += ' of ' + ', '.join(dataset['reanalysis_of'])
+                donor_text = ''
+                if 'n_donors' in dataset:
+                    donor_text = (' | donors: not published' if dataset['n_donors'] is None else
+                                  f" | {dataset['n_donors']} donors ({dataset.get('n_donors_uid') or 0} with uid)")
                 lines.append(f"  {dataset['db_id']} | {dataset.get('title')} | {lineage} | "
-                             f"{dataset.get('n_cells'):,} cells")
+                             f"{dataset.get('n_cells'):,} cells{donor_text}")
+        if basis:
+            lines.append(f"\nCounting: {basis}.")
         return '\n'.join(lines)
 
     @mcp.tool()

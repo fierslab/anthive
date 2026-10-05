@@ -33,6 +33,30 @@ the spec drifting away from the running code.
 
 Additive (minor). No version bump yet.
 
+- **`ant_donor_uid` from a template or a crosswalk join; distinct donor
+  counts** (2026-10-05, `doc/DESIGN_canonical_columns.md`).
+  - `.md` `api.obs_derive` accepts two new categorical forms:
+    `{source, template: '{group_id}:{value}'}` and `{source, join:
+    donor_crosswalk.tsv, cohort, fallback_template}`. The served
+    `ant_donor_uid` values do not change shape (`<cohort>:<id>`, or
+    `<group_id>:<donor>` for the template).
+  - `GET /databases/{id}/facets` and `GET /facets/{name}`: `mapping_kind`
+    can be `template` or `join`. Such entries add `template`, or
+    `join_table`, `cohort`, `fallback_template`, `n_crosswalk_aliases`
+    and `join_problem`, plus `group_id`; with counts, value rows carry the
+    rules `template`, `crosswalk`, `fallback`, `unmatched` or `null` and the
+    entry has `rule_counts`.
+  - `GET /donor-groups`: new `donor_counts` parameter (default true). Each
+    group gains `donors` (`n_donors`, `n_donors_uid`, `n_donors_fallback`,
+    `n_donors_primary`, `n_datasets_counted`, `n_datasets_without_donor`,
+    `basis`) and each dataset `n_donors` / `n_donors_uid`. Donors are keyed
+    on `ant_donor_uid`, else `<group_id>:<ant_donor>`.
+  - `/facets/{name}/effects` replication entries and
+    `/facets/{name}/effects/top` rows gain `n_donors_sum` and
+    `n_donors_distinct` (null for results from runs before 2026-10-05);
+    the top-genes reply gains `donors_in_cell_type`, and both gain
+    `donor_count_definition`.
+
 - **Donor-level facet test results.** Four read-only endpoints over the
   output of `ant-facet-test` and `ant-facet-test-modules`
   (`<h5adstore>/_facet_tests/<group>/`), visible to everyone who can see

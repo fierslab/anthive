@@ -22,6 +22,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
+try:
+    from obs_derive_forms import (FORM_JOIN, FORM_TEMPLATE, DeriveFormError, derive_form,
+                                  validate_spec as validate_derive_form)
+except ImportError:  # imported as lib.metadata
+    from lib.obs_derive_forms import (FORM_JOIN, FORM_TEMPLATE, DeriveFormError,  # type: ignore[no-redef]
+                                      derive_form, validate_spec as validate_derive_form)
+
 
 # ── DEPRECATED — use lib/mus.py for experiment annotation ────────────────
 # These describe the pre-migration `annotation:` block in `.md` frontmatter.
@@ -329,6 +336,14 @@ def get_api_config(yaml_dict: Dict[str, Any]) -> Dict[str, Any]:
               map:                              # required: value mapping
                 <old_value>: <new_value>        # unmapped values → default
               default: <value>                  # optional: fallback (else NULL)
+            <new_col_name>:                     # template form (categorical)
+              source: <existing_col>
+              template: '{group_id}:{value}'
+            <new_col_name>:                     # join form (categorical)
+              source: <existing_col>
+              join: donor_crosswalk.tsv         # table in the store root
+              cohort: <cohort>                  # crosswalk cohort
+              fallback_template: '{group_id}:{value}'   # optional
           obs_constant:
             <new_col_name>:                     # publish a new constant-value col
               value: <value>                    # required: value literal
@@ -449,6 +464,13 @@ def get_api_config(yaml_dict: Dict[str, Any]) -> Dict[str, Any]:
             raise MetadataError(
                 f"ERROR: [Metadata] api.obs_derive['{new_col}'] must be a mapping"
             )
+        if derive_form(spec) in (FORM_TEMPLATE, FORM_JOIN):
+            # template / join forms (lib/obs_derive_forms.py): no map.
+            try:
+                validated_derive[new_col] = validate_derive_form(new_col, spec)
+            except DeriveFormError as exc:
+                raise MetadataError(f"ERROR: [Metadata] {exc}")
+            continue
         source = spec.get('source')
         dtype = spec.get('dtype')
         mapping = spec.get('map') or {}

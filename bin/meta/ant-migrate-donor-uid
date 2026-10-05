@@ -1,0 +1,331 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "pyyaml>=6.0",
+# ]
+# ///
+"""ant-migrate-donor-uid - move ant_donor_uid to the join and template derive forms.
+
+One-shot migration of the dataset ``.md`` files in the h5adstore (not run
+by the code job; run it as a data job, then rebuild the views):
+
+1. **join**: every ``api.obs_derive.ant_donor_uid`` written as a value map
+   (``{source, dtype, map}``, generated from ``donor_crosswalk.tsv``) is
+   replaced by ``{source, join: donor_crosswalk.tsv, cohort: <cohort>}``.
+   The cohort is the prefix of the map's values (``rosmap:...`` gives
+   ``rosmap``). Before rewriting, every map entry is checked against the
+   crosswalk: the join must give the same uid for each mapped value (and
+   no uid for a value the map sends to null). A
+   dataset where any entry disagrees, the map has a ``default``, or the
+   values carry more than one cohort prefix is left alone and reported.
+   ``--fallback`` adds ``fallback_template: '{group_id}:{value}'`` to the
+   join (donors without a crosswalk entry then get a group-scoped uid
+   instead of NULL; this changes the served values, so it is off by
+   default).
+2. **template**: every other dataset that publishes ``ant_donor`` through
+   ``obs_rename`` (``<column>: ant_donor``) and has no ``ant_donor_uid``
+   gets ``ant_donor_uid: {source: <column>, template: '{group_id}:{value}'}``.
+   Datasets whose ``ant_donor`` is built another way (a derive, a constant,
+   a native column, or a renamed column with ``obs_value_rename`` /
+   ``obs_value_hidden`` on it, where the raw values differ from the
+   published ones) are reported for manual review, not changed.
+
+Files are edited as text (only the ``ant_donor_uid`` entry changes; the
+rest of the front matter keeps its formatting) and each edit is verified
+by re-parsing: the new ``api:`` section must equal the old one with only
+``ant_donor_uid`` replaced or added, and must pass ``get_api_config``.
+``_``-prefixed folders are skipped. Nothing is committed; the store is a
+separate git repository.
+
+The summary prints counts only. Per-file lines name the file, the source
+column and the cohort, never donor identifiers.
+
+Usage:
+    ant-migrate-donor-uid --dry-run                 # report, write nothing
+    ant-migrate-donor-uid                           # rewrite the .md files
+    ant-migrate-donor-uid --store PATH --fallback   # other store; add fallback
+    ant-migrate-donor-uid --only join               # one of the two steps
+
+After a real run: ``ant md-check`` (and ``--with-data``), commit in the
+store, then rebuild the views (``ant refresh-views`` / re-ingest) so the
+served ``ant_donor_uid`` comes from the new forms.
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from collections import Counter
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import yaml
+
+script_dir = Path(__file__).resolve().parent
+sys.path.insert(0, str(script_dir.parent.parent / 'lib'))
+
+from config import get_data_folder  # type: ignore  # noqa: E402
+from metadata import MetadataError, get_api_config  # type: ignore  # noqa: E402
+from obs_derive_forms import derive_form, load_crosswalk, normalize_value  # type: ignore  # noqa: E402
+
+TARGET = 'ant_donor_uid'
+CROSSWALK_NAME = 'donor_crosswalk.tsv'
+TEMPLATE = '{group_id}:{value}'
+FRONTMATTER_RE = re.compile(r'\A---\n(.*?\n)---\n', re.DOTALL)
+
+
+# ── planning ─────────────────────────────────────────────────────────────────
+
+def join_spec_for(spec: Dict[str, Any], crosswalk, fallback: bool) -> Tuple[Optional[Dict[str, Any]], str]:
+    """The join spec replacing a value-map ``ant_donor_uid``, or (None, reason)."""
+    mapping = spec.get('map') or {}
+    if spec.get('default') is not None:
+        return None, 'map has a default'
+    prefixes = {str(v).split(':', 1)[0] for v in mapping.values() if v is not None}
+    if len(prefixes) != 1:
+        return None, f'{len(prefixes)} cohort prefixes in the map values'
+    cohort = prefixes.pop()
+    if not crosswalk.has_cohort(cohort):
+        return None, f'cohort {cohort} not in {CROSSWALK_NAME}'
+    # An entry mapped to null must stay null: the crosswalk must not know it.
+    disagree = sum(1 for key, value in mapping.items()
+                   if crosswalk.lookup(cohort, key) != (None if value is None else str(value)))
+    if disagree:
+        return None, f'{disagree} of {len(mapping)} map entries disagree with the crosswalk'
+    new = {'source': spec['source'], 'join': CROSSWALK_NAME, 'cohort': cohort}
+    if fallback:
+        new['fallback_template'] = TEMPLATE
+    return new, f'{len(mapping)} map entries verified'
+
+
+def donor_source(api: Dict[str, Any]) -> Tuple[Optional[str], str]:
+    """The stored column published as ant_donor, or (None, why not usable)."""
+    sources = [col for col, target in (api.get('obs_rename') or {}).items() if target == 'ant_donor']
+    if 'ant_donor' in (api.get('obs_derive') or {}):
+        return None, 'ant_donor is a derive'
+    if 'ant_donor' in (api.get('obs_constant') or {}):
+        return None, 'ant_donor is a constant'
+    if not sources:
+        return None, 'ant_donor is not declared (native column or absent)'
+    source = sources[0]
+    if source in (api.get('obs_hidden') or []):
+        return None, 'ant_donor source is in obs_hidden'
+    if (api.get('obs_value_rename') or {}).get(source) or (api.get('obs_value_hidden') or {}).get(source):
+        return None, 'ant_donor source has value renames or hidden values'
+    return source, 'renamed column'
+
+
+# ── text editing ─────────────────────────────────────────────────────────────
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip(' '))
+
+
+def _block_end(lines: List[str], start: int) -> int:
+    """Index after the block whose key line is ``lines[start]``."""
+    base = _indent(lines[start])
+    index = start + 1
+    while index < len(lines):
+        line = lines[index]
+        if line.strip() and not line.lstrip().startswith('#') and _indent(line) <= base:
+            break
+        index += 1
+    while index > start + 1 and not lines[index - 1].strip():
+        index -= 1
+    return index
+
+
+def _find_key(lines: List[str], key: str, start: int, end: int, indent: Optional[int] = None) -> Optional[int]:
+    pattern = re.compile(rf'^( *){re.escape(key)}:\s*(#.*)?$')
+    for index in range(start, end):
+        match = pattern.match(lines[index])
+        if match and (indent is None or len(match.group(1)) == indent):
+            return index
+    return None
+
+
+def _spec_lines(spec: Dict[str, Any], indent: int) -> List[str]:
+    text = yaml.dump({TARGET: spec}, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    return [' ' * indent + line for line in text.rstrip('\n').split('\n')]
+
+
+def edit_frontmatter(front: str, spec: Dict[str, Any]) -> str:
+    """Front matter text with ``api.obs_derive.ant_donor_uid`` set to ``spec``."""
+    lines = front.rstrip('\n').split('\n')
+    api_line = _find_key(lines, 'api', 0, len(lines), indent=0)
+    if api_line is None:
+        raise ValueError('no top-level api: block')
+    api_end = _block_end(lines, api_line)
+    derive_line = _find_key(lines, 'obs_derive', api_line + 1, api_end)
+    if derive_line is None:
+        child_indent = next((_indent(l) for l in lines[api_line + 1:api_end] if l.strip()), 2)
+        new = [' ' * child_indent + 'obs_derive:'] + _spec_lines(spec, child_indent + 2)
+        lines[api_end:api_end] = new
+        return '\n'.join(lines) + '\n'
+    derive_end = _block_end(lines, derive_line)
+    target_line = _find_key(lines, TARGET, derive_line + 1, derive_end)
+    if target_line is not None:
+        entry_indent = _indent(lines[target_line])
+        lines[target_line:_block_end(lines, target_line)] = _spec_lines(spec, entry_indent)
+        return '\n'.join(lines) + '\n'
+    entry_indent = next((_indent(l) for l in lines[derive_line + 1:derive_end] if l.strip()),
+                        _indent(lines[derive_line]) + 2)
+    lines[derive_end:derive_end] = _spec_lines(spec, entry_indent)
+    return '\n'.join(lines) + '\n'
+
+
+def rewrite(text: str, spec: Dict[str, Any]) -> str:
+    """The whole file with the new ant_donor_uid; verified by re-parsing."""
+    match = FRONTMATTER_RE.match(text)
+    if not match:
+        raise ValueError('no YAML front matter')
+    old_meta = yaml.safe_load(match.group(1)) or {}
+    new_front = edit_frontmatter(match.group(1), spec)
+    new_meta = yaml.safe_load(new_front) or {}
+    expected = dict(old_meta)
+    expected_api = dict(expected.get('api') or {})
+    expected_derive = dict(expected_api.get('obs_derive') or {})
+    expected_derive[TARGET] = spec
+    expected_api['obs_derive'] = expected_derive
+    expected['api'] = expected_api
+    if new_meta != expected:
+        raise ValueError('re-parsed front matter differs from the intended change')
+    try:
+        get_api_config(new_meta)
+    except MetadataError as exc:
+        raise ValueError(f'new api section is invalid: {exc}') from None
+    return '---\n' + new_front + '---\n' + text[match.end():]
+
+
+# ── main ─────────────────────────────────────────────────────────────────────
+
+def dataset_mds(store: Path) -> List[Path]:
+    out = []
+    for md_path in sorted(store.rglob('*.md')):
+        rel = md_path.relative_to(store)
+        if md_path.name == 'index.md' or any(part.startswith('_') for part in rel.parts[:-1]):
+            continue
+        if len(rel.parts) < 2:
+            continue  # store-level docs (CONVENTIONS.md, README.md)
+        out.append(md_path)
+    return out
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument('--store', type=Path, default=None, help='h5adstore root (default: config)')
+    parser.add_argument('--dry-run', action='store_true', help='report only, write nothing')
+    parser.add_argument('--fallback', action='store_true',
+                        help=f"add fallback_template: '{TEMPLATE}' to the join form")
+    parser.add_argument('--only', choices=('join', 'template'), help='run one step only')
+    parser.add_argument('--quiet', action='store_true', help='summary only, no per-file lines')
+    args = parser.parse_args()
+
+    store = (args.store or get_data_folder()).resolve()
+    crosswalk_path = store / CROSSWALK_NAME
+    try:
+        crosswalk = load_crosswalk(crosswalk_path)
+    except (OSError, ValueError) as exc:
+        print(f'ERROR: cannot read {crosswalk_path}: {exc}', file=sys.stderr)
+        return 2
+
+    counts: Counter = Counter()
+    review: Counter = Counter()
+    cohorts: Counter = Counter()
+    for md_path in dataset_mds(store):
+        rel = md_path.relative_to(store)
+        text = md_path.read_text()
+        match = FRONTMATTER_RE.match(text)
+        if not match:
+            continue
+        try:
+            meta = yaml.safe_load(match.group(1)) or {}
+        except yaml.YAMLError:
+            counts['unparseable'] += 1
+            continue
+        if not isinstance(meta, dict) or not (md_path.with_suffix('.h5ad').exists()
+                                              or md_path.with_suffix('.duckdb').exists() or meta.get('id')):
+            continue
+        counts['datasets'] += 1
+        api = meta.get('api') if isinstance(meta.get('api'), dict) else {}
+        current = (api.get('obs_derive') or {}).get(TARGET)
+        new_spec: Optional[Dict[str, Any]] = None
+        if current is not None:
+            form = derive_form(current)
+            if form != 'map':
+                counts[f'already_{form}'] += 1
+                continue
+            if args.only == 'template':
+                continue
+            new_spec, reason = join_spec_for(current, crosswalk, args.fallback)
+            if new_spec is None:
+                counts['join_skipped'] += 1
+                review['join: ' + re.sub(r'\d+', 'N', reason)] += 1
+                if not args.quiet:
+                    print(f'SKIP join      {rel}: {reason}')
+                continue
+            kind = 'join'
+            cohorts[new_spec['cohort']] += 1
+            detail = f"source {current['source']}, cohort {new_spec['cohort']}, {reason}"
+        else:
+            if args.only == 'join':
+                continue
+            source, reason = donor_source(api)
+            if source is None:
+                if any(t == 'ant_donor' for t in (api.get('obs_rename') or {}).values()) or \
+                        'ant_donor' in (api.get('obs_derive') or {}) or 'ant_donor' in (api.get('obs_constant') or {}):
+                    counts['template_skipped'] += 1
+                    review[f'template: {reason}'] += 1
+                    if not args.quiet:
+                        print(f'SKIP template  {rel}: {reason}')
+                else:
+                    counts['no_ant_donor'] += 1
+                continue
+            new_spec = {'source': source, 'template': TEMPLATE}
+            kind = 'template'
+            detail = f'source {source}'
+        try:
+            new_text = rewrite(text, new_spec)
+        except ValueError as exc:
+            counts[f'{kind}_edit_failed'] += 1
+            review[f'{kind}: edit failed'] += 1
+            if not args.quiet:
+                print(f'FAIL {kind:9s} {rel}: {exc}')
+            continue
+        counts[kind] += 1
+        if is_secondary(meta):
+            counts[f'{kind}_on_reanalysis'] += 1
+        if not args.quiet:
+            print(f'{"WOULD " if args.dry_run else ""}{kind:9s} {rel}: {detail}')
+        if not args.dry_run:
+            md_path.write_text(new_text)
+
+    print()
+    print(f'{"Dry run" if args.dry_run else "Done"}: {store}')
+    print(f'  dataset .md files scanned        {counts["datasets"]}')
+    print(f'  value map -> join                {counts["join"]}'
+          + (f'  (cohorts: {", ".join(f"{c} {n}" for c, n in sorted(cohorts.items()))})' if cohorts else ''))
+    print(f'  template added                   {counts["template"]}')
+    print(f'    of which on reanalyses         {counts["template_on_reanalysis"]} '
+          f'(their donors get the reanalysis group id; check donor_group / crosswalk)')
+    print(f'  join form already                {counts["already_join"]}')
+    print(f'  template form already            {counts["already_template"]}')
+    print(f'  no declared ant_donor            {counts["no_ant_donor"]}')
+    print(f'  skipped, manual review           {counts["join_skipped"] + counts["template_skipped"]}')
+    for reason, number in sorted(review.items()):
+        print(f'    {number:4d}  {reason}')
+    failed = counts['join_edit_failed'] + counts['template_edit_failed']
+    if failed:
+        print(f'  edits that failed verification   {failed}')
+    if crosswalk.conflicts:
+        print(f'  crosswalk alias conflicts        {len(crosswalk.conflicts)} (treated as not found)')
+    return 1 if failed else 0
+
+
+def is_secondary(meta: Dict[str, Any]) -> bool:
+    return meta.get('is_secondary') is True
+
+
+if __name__ == '__main__':
+    sys.exit(main())

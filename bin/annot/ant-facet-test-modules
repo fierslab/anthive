@@ -553,10 +553,10 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
 
     work_dir = Path(tempfile.mkdtemp(prefix='ant_facet_mod_', dir=os.environ.get('ANT_FACET_TMP')))
     conn = aft.open_dataset(entry, api_config, threads=threads, memory_limit_gb=memory_limit_gb,
-                            temp_dir=work_dir)
+                            temp_dir=work_dir, store_root=store_root)
     try:
         cat_columns = aft.view_columns(conn, 'obscat') if aft._has_view(conn, 'obscat') else {}
-        wanted = ['ant_donor', 'ant_sex', 'ant_disease', 'ant_apoe', 'ant_apoe_carrier',
+        wanted = ['ant_donor', 'ant_donor_uid', 'ant_sex', 'ant_disease', 'ant_apoe', 'ant_apoe_carrier',
                   'ant_braak', 'ant_age', 'ant_pmi', 'ant_cell_type', 'ant_author_cell_type',
                   'ant_tissue', 'ant_region', 'ant_author_cluster']
         extra = [c for c in cat_columns if (aft.CELLTYPE_CANDIDATE_RE.match(c) or aft.BATCH_NAME_RE.search(c))
@@ -578,6 +578,13 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
 
         donor_table, conflicts = aft.build_donor_table(cells)
         manifest['donor_conflicts'] = conflicts
+        # Cross-dataset donor keys (lib/donor_keys.py): ant_donor_uid, else
+        # <group_id>:<ant_donor>. Each tested unit records its donors' keys so
+        # replication can count distinct donors across datasets.
+        donor_key_of, donor_key_stats = aft.donor_key_map(
+            zip(cells['ant_donor'], cells['ant_donor_uid'] if 'ant_donor_uid' in cells
+                else [None] * len(cells)), entry.group_id)
+        manifest['donor_keys'] = {'basis': aft.DONOR_COUNT_BASIS, **donor_key_stats}
         manifest['null_control_seed'] = null_control_seed
         if null_control_seed is not None:
             # negative control: every facet column is shuffled across donors (age, PMI and
@@ -677,6 +684,9 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
                 unit_records.append(record)
                 continue
             design = job['design'].reset_index(drop=True)
+            record['donor_key_digests'] = sorted({
+                aft.key_digest(donor_key_of.get(str(donor), f'{entry.group_id}:{donor}'))
+                for donor in design['donor']})
             sample_ids = [sample_key[(job['stratum'], donor)] for donor in design['donor']]
             stratum_cells = sample_n_cells.reindex(sample_ids).to_numpy()
             proportions = pd.Series(stratum_cells / donor_totals.reindex(design['donor']).to_numpy(),

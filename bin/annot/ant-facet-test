@@ -79,6 +79,7 @@ lib_dir = script_dir.parent.parent / 'lib'
 sys.path.insert(0, str(lib_dir))
 
 from anthive_db import build_obs_view_sql  # type: ignore  # noqa: E402
+from donor_keys import COUNT_BASIS as DONOR_COUNT_BASIS, donor_key_map, key_digest  # type: ignore  # noqa: E402
 from h5adstore import H5adEntry, iter_h5adstore  # type: ignore  # noqa: E402
 from metadata import get_api_config, parse_md_file  # type: ignore  # noqa: E402
 import mus  # type: ignore  # noqa: E402
@@ -278,8 +279,8 @@ def dataset_eligibility(entry: H5adEntry, md_yaml: Dict[str, Any],
 # --------------------------------------------------------------------------
 
 def open_dataset(entry: H5adEntry, api_config: Dict[str, Any], threads: int = 4,
-                 memory_limit_gb: int = 24, temp_dir: Optional[Path] = None
-                 ) -> duckdb.DuckDBPyConnection:
+                 memory_limit_gb: int = 24, temp_dir: Optional[Path] = None,
+                 store_root: Optional[Path] = None) -> duckdb.DuckDBPyConnection:
     """In-memory connection with the .duckdb attached read-only as ``ds`` and
     TEMP ``obscat`` / ``obsnum`` views rebuilt from the current .md api config.
     """
@@ -301,7 +302,9 @@ def open_dataset(entry: H5adEntry, api_config: Dict[str, Any], threads: int = 4,
             continue
         sql = build_obs_view_sql(view_name, underscore, columns[underscore], api_config,
                                  sibling_underscore_table=sibling,
-                                 sibling_columns=columns[sibling])
+                                 sibling_columns=columns[sibling],
+                                 db_label=entry.db_id, group_id=entry.group_id,
+                                 store_root=store_root)
         assert sql.startswith('CREATE VIEW')
         conn.execute('CREATE OR REPLACE TEMP VIEW' + sql[len('CREATE VIEW'):])
     return conn
@@ -831,11 +834,11 @@ def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: 
 
     work_dir = Path(tempfile.mkdtemp(prefix='ant_facet_', dir=os.environ.get('ANT_FACET_TMP')))
     conn = open_dataset(entry, api_config, threads=threads, memory_limit_gb=memory_limit_gb,
-                        temp_dir=work_dir)
+                        temp_dir=work_dir, store_root=store_root)
     try:
         cat_columns = view_columns(conn, 'obscat') if _has_view(conn, 'obscat') else {}
         num_columns = view_columns(conn, 'obsnum') if _has_view(conn, 'obsnum') else {}
-        wanted = ['ant_donor', 'ant_sex', 'ant_disease', 'ant_apoe', 'ant_apoe_carrier',
+        wanted = ['ant_donor', 'ant_donor_uid', 'ant_sex', 'ant_disease', 'ant_apoe', 'ant_apoe_carrier',
                   'ant_braak', 'ant_age', 'ant_pmi', 'ant_cell_type', 'ant_author_cell_type',
                   'ant_tissue', 'ant_region', 'ant_author_cluster']
         extra_candidates = [c for c in cat_columns
@@ -858,6 +861,13 @@ def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: 
 
         donor_table, conflicts = build_donor_table(cells)
         manifest['donor_conflicts'] = conflicts
+        # Cross-dataset donor keys (lib/donor_keys.py): ant_donor_uid, else
+        # <group_id>:<ant_donor>. Each tested unit records its donors' keys so
+        # replication can count distinct donors across datasets.
+        donor_key_of, donor_key_stats = donor_key_map(
+            zip(cells['ant_donor'], cells['ant_donor_uid'] if 'ant_donor_uid' in cells
+                else [None] * len(cells)), entry.group_id)
+        manifest['donor_keys'] = {'basis': DONOR_COUNT_BASIS, **donor_key_stats}
         membership, strata_note = choose_strata(cells, cat_columns)
         manifest['celltype_note'] = strata_note
         manifest['celltype_sources'] = sorted(membership['source'].unique().tolist())
@@ -960,6 +970,9 @@ def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: 
                 unit_records.append(record)
                 continue
             summary = summary_by_job.get(job['job_id'])
+            record['donor_key_digests'] = sorted({
+                key_digest(donor_key_of.get(str(donor), f'{entry.group_id}:{donor}'))
+                for donor in job['design']['donor']})
             record.update({
                 'n_lt5': bool(job['n_lt5']), 'batch_used': job['batch_used'],
                 'batch_confounded': job['batch_confounded'],

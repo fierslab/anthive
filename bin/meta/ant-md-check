@@ -23,6 +23,11 @@ Data .md files are also linted (lib/facet_lint.py):
   - mapping rules: rename chains, derive dtype vs facet kind, non-numeric
     or out-of-range values in numerical facets (Braak 0 to 6), values
     outside a facet vocabulary, ant_braak_group maps that break the rule
+  - obs_derive template / join forms (lib/obs_derive_forms.py): malformed
+    specs or templates, a join table missing from the store root, an
+    unknown cohort, conflicting crosswalk aliases, {group_id} without a
+    group id; with --with-data, source values the crosswalk does not know
+    when there is no fallback template
   - lineage: reanalysis_of targets exist and imply is_secondary: true
   - with --with-data, rules that read the dataset's .duckdb: missing
     derive / rename source columns, non-NULL values without a map entry

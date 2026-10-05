@@ -16,7 +16,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 
 class MdCheckReport:
@@ -170,6 +170,7 @@ def check_md_folder(
     namespace_mode: Optional[str] = None,
     with_data: bool = False,
     known_db_ids: Optional[Set[str]] = None,
+    store_root: Optional[Path] = None,
 ) -> None:
     """Check all anthive .md files under folder.
 
@@ -197,6 +198,8 @@ def check_md_folder(
             local ``.duckdb`` are listed in ``report.data_unavailable``
         known_db_ids: Dataset ids that ``reanalysis_of`` may name. Default:
             the ids found under ``folder`` (``<group_id>/<id>``)
+        store_root: Where ``obs_derive`` join tables live. Default:
+            ``folder`` when it holds the table, else the configured store.
     """
     lib_dir = Path(__file__).parent
     if str(lib_dir) not in sys.path:
@@ -353,9 +356,12 @@ def check_md_folder(
 
     if known_db_ids is None:
         known_db_ids = {db_id for _, _, _, db_id in linted if db_id}
-    for rel_path, md_path, metadata, _db_id in linted:
+    for rel_path, md_path, metadata, db_id in linted:
         api = metadata.get('api') or {}
-        for finding in facet_lint.lint_api(api, namespace_mode=namespace_mode):
+        join_root = store_root if store_root is not None else _join_root(folder, api)
+        group_id = db_id.split('/', 1)[0] if db_id else None
+        for finding in facet_lint.lint_api(api, namespace_mode=namespace_mode, store_root=join_root,
+                                           group_id=group_id):
             report.add_finding(rel_path, finding)
         for finding in facet_lint.lint_lineage(metadata, known_db_ids):
             report.add_finding(rel_path, finding)
@@ -368,11 +374,22 @@ def check_md_folder(
             continue
         columns, distinct_values, close = reader
         try:
-            for finding in facet_lint.lint_api_data(api, columns, distinct_values):
+            for finding in facet_lint.lint_api_data(api, columns, distinct_values, store_root=join_root):
                 report.add_finding(rel_path, finding)
             report.data_checked += 1
         finally:
             close()
+
+
+def _join_root(folder: Path, api: Any) -> Optional[Path]:
+    """``folder`` when every join table the api names exists under it
+    (md-check run on the store itself), else None (configured store)."""
+    derive = (api or {}).get('obs_derive') if isinstance(api, dict) else None
+    names = [spec.get('join') for spec in (derive or {}).values()
+             if isinstance(spec, dict) and isinstance(spec.get('join'), str)]
+    if names and all('..' not in Path(n).parts and (folder / n).is_file() for n in names):
+        return folder
+    return None
 
 
 def collect_db_ids(store_root: Path) -> Set[str]:

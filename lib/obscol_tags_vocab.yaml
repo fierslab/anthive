@@ -551,12 +551,17 @@ tags:
       scope: cross_dataset
       summary: Donor identifier shared across datasets, written <cohort>:<id>.
       definition: >
-        The donor written as <cohort>:<id>, for example ROSMAP:R1234567, so
-        that the same person carries the same value in every dataset. Built
-        from data/h5adstore/donor_crosswalk.tsv; the dataset's own donor
-        labels stay in the donor facet. Cross-dataset tools count donors on
-        this column.
+        The donor written as <cohort>:<id>, for example rosmap:01234567, so
+        that the same person carries the same value in every dataset. For
+        cohorts in data/h5adstore/donor_crosswalk.tsv it comes from a join on
+        that table (obs_derive join form); for other datasets the
+        collection's group id stands in for the cohort (template form,
+        <group_id>:<donor>). The dataset's own donor labels stay in the
+        donor facet. Cross-dataset tools count donors on this column, and on
+        <group_id>:<donor> where a dataset has no uid.
       kind: categorical
-      values: "<cohort>:<id>, for example ROSMAP:R1234567 or SEA-AD:H20.33.001"
-      missing: Empty (NULL) when the donor has no crosswalk entry.
+      values: "<cohort>:<id> (crosswalk cohorts, e.g. rosmap:01234567) or <group_id>:<donor> (template)"
+      missing: >
+        Empty (NULL) when the donor label is missing, or when a join finds
+        no crosswalk entry and the dataset declares no fallback template.
       hint_keywords: []

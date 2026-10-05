@@ -39,6 +39,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import pandas as pd
 
 from celltype_groups import UNMAPPED, group_info, group_of
+from donor_keys import distinct_count
 
 log = logging.getLogger(__name__)
 
@@ -102,6 +103,15 @@ REPLICATION_DEFINITION = (
     '(Bonferroni) before the q < 0.05 call.'
 )
 
+DONOR_COUNT_DEFINITION = (
+    'n_donors_sum adds the donors analysed in each counted unit (a donor tested in two datasets counts '
+    'twice); n_donors_distinct counts each person once across those units, keyed on ant_donor_uid where '
+    'the dataset publishes it and on <group_id>:<ant_donor> otherwise (the run manifests record a digest '
+    'of each analysed donor key). The fallback cannot join one person across collections, so '
+    'n_donors_distinct is an upper bound where uids are missing. n_donors_distinct is null when a counted '
+    'unit comes from a run that predates the donor keys (re-run ant-facet-test to fill it).'
+)
+
 RANKING_DEFINITION = (
     'genes ranked by (1) k, the number of independent cohorts with q < 0.05 and the same sign, highest '
     'first; (2) agreement, the fraction of the m tested cohorts whose effect has that sign (significant '
@@ -113,6 +123,22 @@ RANKING_DEFINITION = (
 #: Order in which a stratum's cell type source stands for its group when one
 #: cohort has several units in the same group (lower is more direct).
 _SOURCE_PRIORITY = {'ant_cell_type': 0, 'constant_all_cells': 0, 'ant_author_cluster': 2, 'none': 3}
+
+
+def _donor_counts(unit_rows: pd.DataFrame) -> Dict[str, Optional[int]]:
+    """``n_donors_sum`` and ``n_donors_distinct`` over counted unit rows
+    (``DONOR_COUNT_DEFINITION``). One row per unit is enough; duplicates are
+    dropped by the ``unit`` column when present."""
+    rows = unit_rows.drop_duplicates('unit') if 'unit' in unit_rows.columns else unit_rows
+    if not len(rows):
+        return {'n_donors_sum': None, 'n_donors_distinct': None}
+    n_sum = pd.to_numeric(rows['n_donors'], errors='coerce') if 'n_donors' in rows.columns else None
+    digests = list(rows['donor_digests']) if 'donor_digests' in rows.columns else [None] * len(rows)
+    digests = [d if isinstance(d, (set, frozenset)) else None for d in digests]
+    return {
+        'n_donors_sum': int(n_sum.sum()) if n_sum is not None and n_sum.notna().all() else None,
+        'n_donors_distinct': distinct_count(digests),
+    }
 
 
 def source_priority(celltype_source: Any) -> int:
@@ -830,6 +856,26 @@ class FacetResults:
                 self._control_cache[key] = out
         return out
 
+    # ── donor keys of tested units ─────────────────────────────────────────
+
+    def unit_donor_digests(self, group_folder: str, stem: str, kind: str = 'genes'
+                           ) -> Dict[Tuple[str, str, str], frozenset]:
+        """``(facet, cell_type, celltype_source) -> digests`` of the donors
+        analysed in each tested unit, from the run manifest (``kind`` genes
+        or modules). Units from runs that predate the donor keys are absent.
+        The digests stay internal: no endpoint returns them."""
+        paths = result_paths(self.results_dir, group_folder, stem)
+        manifest = self._read_json(paths['gene_manifest' if kind == 'genes' else 'module_manifest'])
+        out: Dict[Tuple[str, str, str], frozenset] = {}
+        for record in (manifest or {}).get('units') or []:
+            if not isinstance(record, dict) or record.get('status') != 'ok':
+                continue
+            digests = record.get('donor_key_digests')
+            if isinstance(digests, list):
+                out[_unit_key(record.get('facet'), record.get('cell_type'),
+                              record.get('celltype_source'))] = frozenset(str(d) for d in digests)
+        return out
+
     # ── gene rows of one facet across datasets ─────────────────────────────
 
     def facet_gene_table(self, facet: str, datasets: Sequence[Dict[str, Any]]
@@ -875,6 +921,7 @@ class FacetResults:
                 log.warning('facet results: cannot read %s: %s', paths['genes'], exc)
                 continue
             cohort = cohorts.get(dataset['db_id']) or {}
+            digests = self.unit_donor_digests(dataset['group_folder'], dataset['stem'])
             for (cell_type, celltype_source), group in frame.groupby(['cell_type', 'celltype_source'], sort=False):
                 unit = tested.get((str(cell_type), str(celltype_source)))
                 if unit is None:
@@ -892,6 +939,7 @@ class FacetResults:
                     'is_secondary': bool(dataset.get('is_secondary')),
                     'celltype_group': group_of(cell_type),
                     'summary_unit': unit,
+                    'donor_digests': digests.get(_unit_key(facet, cell_type, celltype_source)),
                 })
                 parts.append(pd.DataFrame({
                     'unit': pd.Series(index, index=group.index, dtype='int32'),
@@ -904,7 +952,7 @@ class FacetResults:
         units = pd.DataFrame(unit_rows, columns=[
             'unit', 'db_id', 'title', 'cell_type', 'celltype_source', 'n_donors', 'n_donors_ref',
             'n_donors_test', 'level_ref', 'level_test', 'descriptive_only', 'cohort', 'cohort_label',
-            'role', 'counted', 'is_secondary', 'celltype_group', 'summary_unit'])
+            'role', 'counted', 'is_secondary', 'celltype_group', 'summary_unit', 'donor_digests'])
         if parts:
             rows = pd.concat(parts, ignore_index=True)
             rows['gene_upper'] = rows['gene'].str.upper().astype('category')
@@ -974,6 +1022,7 @@ class FacetResults:
         eligible = rows[rows['representative'].astype(bool) & rows['q_value'].notna()]
         eligible = eligible.assign(q_adj=(eligible['q_value'] * eligible['n_siblings']).clip(upper=1.0))
         cohorts_tested = sorted(set(eligible['cohort']))
+        donors = _donor_counts(eligible)
         significant = eligible[eligible['q_adj'] < Q_THRESHOLD]
         up = sorted(set(significant.loc[significant['logFC'] > 0, 'cohort']))
         down = sorted(set(significant.loc[significant['logFC'] < 0, 'cohort']))
@@ -1000,6 +1049,7 @@ class FacetResults:
             'cohorts_up': up,
             'cohorts_down': down,
             'badge': badge + ('; sign discordant' if up and down else ''),
+            **donors,
         }
 
     def _resolve_group_filter(self, units: pd.DataFrame, cell_type: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
@@ -1122,6 +1172,7 @@ class FacetResults:
             'notes': notes,
             'apoe_locus': gene.upper() in APOE_LOCUS_GENES,
             'definition': REPLICATION_DEFINITION,
+            'donor_count_definition': DONOR_COUNT_DEFINITION,
         })
 
     def recurring_genes(self, facet: str, datasets: Sequence[Dict[str, Any]],
@@ -1162,9 +1213,11 @@ class FacetResults:
         chosen = group_filter or (options[0]['celltype_group'] if options else None)
         out_rows: List[Dict[str, Any]] = []
         n_cohorts = 0
+        group_donors: Dict[str, Optional[int]] = {'n_donors_sum': None, 'n_donors_distinct': None}
         if chosen is not None and len(rows):
             chosen_units = counted[counted['celltype_group'] == chosen]
             n_cohorts = int(chosen_units['cohort'].nunique())
+            group_donors = _donor_counts(chosen_units)
             sub = rows[rows['unit'].isin(chosen_units['unit']) & rows['q_value'].notna()]
             if len(sub):
                 sub = sub.merge(chosen_units[['unit', 'cohort', 'cohort_label', 'n_siblings']], on='unit', how='left')
@@ -1203,9 +1256,12 @@ class FacetResults:
                                                     ascending=[False, False, False, True]).head(limit)
                     sig_cohorts = per_cohort[per_cohort['up'] | per_cohort['down']]
                     labels = dict(zip(units['cohort'], units['cohort_label']))
+                    tested_units = sub.groupby('gene', observed=True)['unit'].apply(set)
                     for record in per_gene.to_dict(orient='records'):
                         k_up, k_down = int(record['k_up']), int(record['k_down'])
                         names = sig_cohorts.loc[sig_cohorts['gene'] == record['gene'], 'cohort']
+                        gene_donors = _donor_counts(
+                            chosen_units[chosen_units['unit'].isin(tested_units.get(record['gene'], set()))])
                         out_rows.append({
                             'gene': record['gene'],
                             'cohorts_sig_same_sign': max(k_up, k_down),
@@ -1220,6 +1276,7 @@ class FacetResults:
                             'max_abs_logFC': _finite(record.get('max_abs_logFC')),
                             'cohorts': sorted({labels.get(c) or c for c in names}),
                             'apoe_locus': str(record['gene']).upper() in APOE_LOCUS_GENES,
+                            **gene_donors,
                         })
         chosen_info = group_info(chosen) if chosen else {}
         return json_safe({
@@ -1229,6 +1286,8 @@ class FacetResults:
             'cl_id': chosen_info.get('cl_id'),
             'labels': next((o['labels'] for o in options if o['celltype_group'] == chosen), []),
             'cohorts_in_cell_type': n_cohorts,
+            'donors_in_cell_type': group_donors,
+            'donor_count_definition': DONOR_COUNT_DEFINITION,
             'cell_types': options,
             'rows': out_rows,
             'definition': REPLICATION_DEFINITION,

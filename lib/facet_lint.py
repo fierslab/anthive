@@ -17,6 +17,13 @@ Used by ``lib/md_check.py`` (``ant md-check``). Three groups of rules:
   ``.duckdb`` (optional): a derive or rename source column that does not
   exist, non-NULL source values with neither a map entry nor a default,
   and text or out-of-range values that reach a numerical facet.
+* **Derive forms.** The template and join forms of ``obs_derive``
+  (``lib/obs_derive_forms.py``): a malformed spec or template (unknown
+  placeholder, no ``{value}``, mixed forms), a join table that is not in
+  the store root, a cohort the table does not list, conflicting aliases in
+  the cohort, a template that needs ``{group_id}`` on a dataset without
+  one; with the data, source values the crosswalk does not know when there
+  is no fallback template.
 * **Lineage (decision L3).** Every ``reanalysis_of`` target exists and a
   dataset with ``reanalysis_of`` has ``is_secondary: true``.
 
@@ -30,6 +37,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
+from obs_derive_forms import (FORM_JOIN, FORM_TEMPLATE, DeriveFormError, crosswalk_for, derive_form,
+                              needs_group_id, normalize_value, validate_spec)
 from obscol_tags import facet_registry
 
 FACET_PREFIX = 'ant_'
@@ -55,6 +64,12 @@ RULES: Dict[str, str] = {
     'source_missing': 'derive source column is not in the dataset',
     'rename_source_missing': 'obs_rename source column is not in the dataset',
     'unmapped_value': 'non-NULL source value with no map entry and no default',
+    'derive_form': 'template or join derive is malformed (placeholders, mixed forms, dtype)',
+    'join_table_missing': 'join table is not in the store root or cannot be read',
+    'join_cohort_unknown': 'join cohort is not in the crosswalk table',
+    'crosswalk_conflict': 'crosswalk alias maps to two canonical ids in the cohort',
+    'template_group_id': 'template uses {group_id} but the dataset has no group id',
+    'join_unmatched': 'source value not in the crosswalk and no fallback_template',
     'numeric_from_text': 'numerical facet published from a text column',
     'reanalysis_target_missing': 'reanalysis_of names a dataset that does not exist',
     'reanalysis_not_secondary': 'reanalysis_of is set but is_secondary is not true',
@@ -158,12 +173,17 @@ def _targets(api: Mapping[str, Any]) -> List[Tuple[str, str]]:
     return out
 
 
-def lint_api(api: Mapping[str, Any], namespace_mode: str = NAMESPACE_DEFAULT_MODE) -> List[Finding]:
+def lint_api(api: Mapping[str, Any], namespace_mode: str = NAMESPACE_DEFAULT_MODE,
+             store_root: Optional[Path] = None, group_id: Optional[str] = None) -> List[Finding]:
     """Static rules on one ``api:`` section (no data needed).
 
     Args:
         api: The raw ``api:`` mapping of a dataset ``.md``.
         namespace_mode: ``warn`` or ``error`` for unregistered ``ant_*`` targets.
+        store_root: Where join tables live (default: the configured store).
+        group_id: The dataset's group id; ``''`` means known to be missing
+            (then a template with ``{group_id}`` is an error), None means
+            unknown (not checked).
 
     Returns:
         Findings in a stable order.
@@ -198,11 +218,15 @@ def lint_api(api: Mapping[str, Any], namespace_mode: str = NAMESPACE_DEFAULT_MOD
                                     f'applies one hop only, so {source} is published as {target}, not '
                                     f'{rename[target]}'))
 
+    findings.extend(_lint_derive_forms(api, store_root, group_id))
+
     for target, spec in (api.get('obs_derive') or {}).items():
         entry = registry.get(_facet_of(target) or '')
         if entry is None or not isinstance(spec, Mapping):
             continue
         dtype = spec.get('dtype')
+        if derive_form(spec) in (FORM_TEMPLATE, FORM_JOIN):
+            dtype = dtype or 'categorical'
         if dtype and dtype != entry['kind']:
             findings.append(Finding(ERROR, 'derive_dtype',
                                     f'obs_derive[{target}] has dtype {dtype} but {target} is {entry["kind"]}'))
@@ -245,6 +269,43 @@ def lint_api(api: Mapping[str, Any], namespace_mode: str = NAMESPACE_DEFAULT_MOD
     return findings
 
 
+def _lint_derive_forms(api: Mapping[str, Any], store_root: Optional[Path],
+                       group_id: Optional[str]) -> List[Finding]:
+    """Static rules for template and join derives."""
+    findings: List[Finding] = []
+    for target, spec in (api.get('obs_derive') or {}).items():
+        if derive_form(spec) not in (FORM_TEMPLATE, FORM_JOIN):
+            continue
+        try:
+            clean = validate_spec(str(target), spec)
+        except DeriveFormError as exc:
+            findings.append(Finding(ERROR, 'derive_form', str(exc)))
+            continue
+        if group_id == '' and needs_group_id(clean):
+            findings.append(Finding(ERROR, 'template_group_id',
+                                    f'obs_derive[{target}] uses {{group_id}} but the dataset has no group '
+                                    f'id (index.md group_id); the view builder drops {target}'))
+        if clean['form'] != FORM_JOIN:
+            continue
+        crosswalk, problem = crosswalk_for(clean, store_root)
+        if crosswalk is None:
+            findings.append(Finding(ERROR, 'join_table_missing',
+                                    f'obs_derive[{target}]: {problem}; the view builder drops {target}'))
+            continue
+        if problem is not None:
+            findings.append(Finding(ERROR, 'join_cohort_unknown',
+                                    f'obs_derive[{target}]: {problem}; the view builder drops {target}'))
+            continue
+        cohort = clean['cohort'].lower()
+        n_conflicts = sum(1 for c, _alias in crosswalk.conflicts if c == cohort)
+        if n_conflicts:
+            findings.append(Finding(WARNING, 'crosswalk_conflict',
+                                    f'obs_derive[{target}]: {n_conflicts} alias(es) of cohort {clean["cohort"]} '
+                                    f'map to more than one canonical id in {clean["join"]}; they are treated '
+                                    f'as not found'))
+    return findings
+
+
 def _fmt(number: float) -> str:
     return str(int(number)) if float(number).is_integer() else str(number)
 
@@ -255,7 +316,8 @@ ValueLookup = Callable[[str], Optional[List[Tuple[Any, int]]]]
 
 
 def lint_api_data(api: Mapping[str, Any], columns: Mapping[str, str],
-                  distinct_values: ValueLookup, max_listed: int = 5) -> List[Finding]:
+                  distinct_values: ValueLookup, max_listed: int = 5,
+                  store_root: Optional[Path] = None) -> List[Finding]:
     """Rules that need the dataset's stored columns and values.
 
     Args:
@@ -265,6 +327,7 @@ def lint_api_data(api: Mapping[str, Any], columns: Mapping[str, str],
         distinct_values: Column name -> ``[(value, n_cells), ...]`` of the
             distinct non-NULL stored values, or None when unreadable.
         max_listed: Values named per finding.
+        store_root: Where join tables live (default: the configured store).
 
     Returns:
         Findings in a stable order.
@@ -311,6 +374,12 @@ def lint_api_data(api: Mapping[str, Any], columns: Mapping[str, str],
                                     f'obs_derive[{target}] source {source} is not a stored column; the '
                                     f'view builder drops {target}'))
             continue
+        form = derive_form(spec)
+        if form == FORM_TEMPLATE:
+            continue  # every non-NULL value is rendered
+        if form == FORM_JOIN:
+            findings.extend(_lint_join_values(target, spec, source, distinct_values, max_listed, store_root))
+            continue
         if spec.get('default') is not None:
             continue
         # Mirror the view SQL: ``col = '<key>'`` compares text for a text
@@ -335,6 +404,32 @@ def lint_api_data(api: Mapping[str, Any], columns: Mapping[str, str],
                                     f'to NULL without a map entry or default: {listed}{more}. Add the '
                                     f'values to the map (null for an intended NULL)'))
     return findings
+
+
+def _lint_join_values(target: str, spec: Mapping[str, Any], source: str, distinct_values: ValueLookup,
+                      max_listed: int, store_root: Optional[Path]) -> List[Finding]:
+    """Source values a join derive cannot resolve (no fallback template)."""
+    if spec.get('fallback_template'):
+        return []
+    try:
+        clean = validate_spec(str(target), spec)
+    except DeriveFormError:
+        return []  # reported by the static rules
+    crosswalk, problem = crosswalk_for(clean, store_root)
+    if crosswalk is None or problem is not None:
+        return []  # reported by the static rules
+    table = crosswalk.table(clean['cohort'])
+    missing = [(value, n_cells) for value, n_cells in distinct_values(source) or []
+               if normalize_value(value) is not None and normalize_value(value) not in table]
+    if not missing:
+        return []
+    listed = ', '.join(f'{v!r} ({n} cells)' for v, n in missing[:max_listed])
+    more = f' and {len(missing) - max_listed} more' if len(missing) > max_listed else ''
+    n_cells = sum(int(n) for _v, n in missing)
+    return [Finding(WARNING, 'join_unmatched',
+                    f'obs_derive[{target}]: {len(missing)} value(s) of {source} ({n_cells} cells) are not '
+                    f'aliases of cohort {clean["cohort"]} in {clean["join"]} and there is no '
+                    f'fallback_template, so they get NULL: {listed}{more}')]
 
 
 def _value_key(value: Any) -> str:
