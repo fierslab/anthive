@@ -584,7 +584,7 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
         extra = [c for c in cat_columns if (aft.CELLTYPE_CANDIDATE_RE.match(c) or aft.BATCH_NAME_RE.search(c))
                  and not c.startswith('ant_')]
         exclusion_columns = [c for c in (exclusion_rule.obs_columns if exclusion_rule else [])
-                             if c not in wanted and c not in extra]
+                             + aft.donor_exclusions.declared_columns(md_yaml) if c not in wanted and c not in extra]
         cells = aft.cell_table(conn, wanted + extra + exclusion_columns)
         if 'ant_donor' not in cells:
             manifest.update(status='skipped', reason='no ant_donor facet in the current mapping')
@@ -592,7 +592,8 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
         cells, exclusion_report = aft.donor_exclusions.apply_rule(cells, exclusion_rule, variant)
         if exclusion_report is not None:
             manifest['donor_exclusion'] = exclusion_report
-        batch_column = aft.find_batch_column(conn, cells)
+        batch_column = (aft.donor_exclusions.declared_batch_column(md_yaml, cells)
+                        or aft.find_batch_column(conn, cells))
         if batch_column is not None:
             cells['batch'] = cells[batch_column]
         manifest['batch_column'] = batch_column
@@ -605,6 +606,10 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
 
         donor_table, conflicts = aft.build_donor_table(cells)
         manifest['donor_conflicts'] = conflicts
+        below_floor, age_floor_report = aft.donor_exclusions.below_age_floor(
+            donor_table, aft.donor_exclusions.min_age_floors(md_yaml))
+        if age_floor_report:
+            manifest['facet_min_age'] = age_floor_report
         # Cross-dataset donor keys (lib/donor_keys.py): ant_donor_uid, else
         # <group_id>:<ant_donor>. Each tested unit records its donors' keys so
         # replication can count distinct donors across datasets.
@@ -642,7 +647,8 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
         jobs: List[Dict[str, Any]] = []
         for stratum, frame in sample_sizes.groupby('stratum'):
             for facet in facets:
-                plan = aft.plan_job(donor_table, facet, frame['donor'])
+                plan = aft.plan_job(donor_table, facet,
+                                    aft.donor_exclusions.stratum_donors(frame['donor'], facet, below_floor))
                 plan.update(stratum=str(stratum), source=str(frame['source'].iloc[0]),
                             label=str(frame['label'].iloc[0]))
                 jobs.append(plan)

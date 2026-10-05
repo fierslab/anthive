@@ -181,6 +181,26 @@ donors to specific ROSMAP persons, `donor_crosswalk.tsv` alias type
 (8 of them are in the ROSMAP datasets served here), because the other
 donors are ROSMAP participants whose ids cannot be recovered locally.
 
+### Age floor and declared batch column (`facet_min_age`, `facet_batch_column`)
+
+Two more `.md` keys, both read by both tools (`lib/donor_exclusions.py`):
+
+```yaml
+facet_min_age:             # per facet; donors younger than this (years, ant_age) leave out that facet only
+  disease: 60
+  braak: 60
+facet_batch_column: Source # obs column used as the batch term instead of the name based guess
+```
+
+Donors under a floor stay in the other facets (sex keeps every donor); donors with
+an unknown age are kept and counted in the manifest block `facet_min_age`
+(`n_donors_below_floor`, `n_age_unknown_kept`). The declared batch column must be
+an obs column (an unknown name is an error); a donor with more than one value has no
+batch, and `plan_job` still drops the term when fewer than two levels remain among the
+analysed donors or when it is confounded with the facet (`batch_used`,
+`batch_confounded` in the unit record). Used for Lee2026: disease and Braak units
+leave out donors under 60 years, brain bank (`Source`) is the batch term.
+
 Nothing is written elsewhere in `data/`; `.h5ad`, `.duckdb` and `.md` files are
 only read. R lives in `envs/facet-test-r` (limma 3.62.1, edgeR 4.4.0, R 4.4.3);
 the `anthive-data` environment has neither package and was not modified.

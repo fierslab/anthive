@@ -99,3 +99,34 @@ def test_result_dir(tmp_path):
     assert dex.result_dir(tmp_path, 'G', True, False) == tmp_path / 'G'
     assert dex.result_dir(tmp_path, 'G', True, True) == tmp_path / 'G' / dex.SUPPLEMENTARY_DIRNAME
     assert dex.result_dir(tmp_path, 'G', False, True) == tmp_path / 'G'
+
+
+# ── age floor and declared batch column ───────────────────────────────────────
+
+def test_min_age_floors_parse_and_validate():
+    assert dex.min_age_floors({}) == {}
+    assert dex.min_age_floors({dex.MIN_AGE_KEY: {'ant_disease': 60, 'braak': 60.5}}) == {'disease': 60.0, 'braak': 60.5}
+    for bad in ('x', {}, {'disease': 'old'}, {'disease': -1}, {'disease': True}, [60]):
+        with pytest.raises(ValueError):
+            dex.min_age_floors({dex.MIN_AGE_KEY: bad})
+
+
+def test_below_age_floor_is_per_facet_and_keeps_unknown_ages():
+    donors = pd.DataFrame({'donor': ['a', 'b', 'c', 'd'], 'age': [30.0, 59.9, 60.0, float('nan')]})
+    below, report = dex.below_age_floor(donors, {'disease': 60.0, 'braak': 40.0})
+    assert below == {'disease': {'a', 'b'}, 'braak': {'a'}}
+    assert report['disease'] == {'floor_years': 60.0, 'n_donors_below_floor': 2, 'n_age_unknown_kept': 1,
+                                 'n_donors': 4}
+    assert dex.below_age_floor(donors, {}) == ({}, None)
+    stratum = pd.Series(['a', 'b', 'c', 'd'])
+    assert list(dex.stratum_donors(stratum, 'disease', below)) == ['c', 'd']
+    assert list(dex.stratum_donors(stratum, 'sex', below)) == ['a', 'b', 'c', 'd']       # other facets keep everyone
+
+
+def test_declared_batch_column():
+    cells = make_cells()
+    assert dex.declared_batch_column({}, cells) is None
+    assert dex.declared_batch_column({dex.BATCH_KEY: 'Source'}, cells) == 'Source'
+    assert dex.declared_columns({dex.BATCH_KEY: 'Source'}) == ['Source'] and dex.declared_columns({}) == []
+    with pytest.raises(ValueError, match='not an obs column'):
+        dex.declared_batch_column({dex.BATCH_KEY: 'nope'}, cells)

@@ -222,3 +222,85 @@ def result_dir(out_root, study: str, rule_in_md: bool, all_donors: bool):
     from pathlib import Path  # noqa: PLC0415
     base = Path(out_root) / study
     return base / SUPPLEMENTARY_DIRNAME if (all_donors and rule_in_md) else base
+
+
+# ── per-facet age floor and declared batch column (md keys) ───────────────────
+
+MIN_AGE_KEY = 'facet_min_age'
+BATCH_KEY = 'facet_batch_column'
+
+
+def min_age_floors(md_yaml: Mapping[str, Any]) -> Dict[str, float]:
+    """``facet_min_age: {disease: 60, braak: 60}`` -> ``{'disease': 60.0, 'braak': 60.0}``.
+
+    Facet names may carry the ``ant_`` prefix. A donor younger than the floor is
+    left out of the tests of that facet only (sex and the other facets keep it).
+
+    Raises:
+        ValueError: not a mapping of facet name to a non-negative number.
+    """
+    raw = md_yaml.get(MIN_AGE_KEY)
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError(f'{MIN_AGE_KEY} must map a facet name to an age in years')
+    floors: Dict[str, float] = {}
+    for name, value in raw.items():
+        key = str(name)
+        key = key[4:] if key.startswith('ant_') else key
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            raise ValueError(f'{MIN_AGE_KEY}.{name} must be a non-negative number of years')
+        floors[key] = float(value)
+    return floors
+
+
+def below_age_floor(donor_table: pd.DataFrame, floors: Mapping[str, float]
+                    ) -> Tuple[Dict[str, Set[str]], Optional[Dict[str, Any]]]:
+    """Donors under each facet's age floor, and the manifest block (counts only).
+
+    Donors with an unknown age are kept (an unknown age is not evidence of being
+    young) and counted in ``n_age_unknown_kept``.
+    """
+    if not floors:
+        return {}, None
+    age = pd.to_numeric(donor_table['age'], errors='coerce')
+    below: Dict[str, Set[str]] = {}
+    report: Dict[str, Any] = {}
+    for facet, floor in sorted(floors.items()):
+        young = set(donor_table.loc[age < floor, 'donor'].astype(str))
+        below[facet] = young
+        report[facet] = {'floor_years': floor, 'n_donors_below_floor': len(young),
+                         'n_age_unknown_kept': int(age.isna().sum()), 'n_donors': int(len(donor_table))}
+    return below, report
+
+
+def stratum_donors(donors: pd.Series, facet: str, below: Mapping[str, Set[str]]) -> pd.Series:
+    """``donors`` without those under the age floor of ``facet`` (unchanged when it has none)."""
+    young = below.get(facet)
+    if not young:
+        return donors
+    return donors[~donors.astype(str).isin(young)]
+
+
+def declared_columns(md_yaml: Mapping[str, Any]) -> List[str]:
+    """Obs columns the md asks the tools to load (the declared batch column)."""
+    column = md_yaml.get(BATCH_KEY)
+    return [str(column)] if column else []
+
+
+def declared_batch_column(md_yaml: Mapping[str, Any], cells: pd.DataFrame) -> Optional[str]:
+    """The batch column named by ``facet_batch_column`` (None without the key).
+
+    It replaces the name-based guess. The donor table still keeps it only where
+    a donor has a single value, and ``plan_job`` still drops it when it has fewer
+    than two levels among the analysed donors or is confounded with the facet.
+
+    Raises:
+        ValueError: the named column is not an obs column of the dataset.
+    """
+    column = md_yaml.get(BATCH_KEY)
+    if not column:
+        return None
+    if not isinstance(column, str) or column not in cells.columns:
+        raise ValueError(f'{BATCH_KEY} {column!r} is not an obs column of this dataset')
+    return column

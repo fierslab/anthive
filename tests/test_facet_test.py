@@ -73,7 +73,8 @@ PLANTED_LOG2_FC = 2.0
 def make_dataset(tmp_path: Path, n_f: int = 10, n_m: int = 10, organism: str = 'human',
                  system: str = 'post_mortem_tissue', extra_api: str = '',
                  is_secondary: bool = False, samples_per_donor: int = 1,
-                 disease_pattern: str | None = None, seed: int = 7, extra_md: str = ''):
+                 disease_pattern: str | None = None, seed: int = 7, extra_md: str = '',
+                 extra_rename: str = ''):
     """Write a synthetic dataset; returns (store_root, H5adEntry).
 
     Two cell types (T1 with 30 cells per donor, T2 with 4 cells per donor so
@@ -118,9 +119,13 @@ def make_dataset(tmp_path: Path, n_f: int = 10, n_m: int = 10, organism: str = '
     genes = pd.DataFrame({'gene_id': range(N_GENES),
                           'gene_name': [f'GENE{i}' for i in range(N_GENES)]})
     conn.execute('CREATE TABLE __genes AS SELECT * FROM genes')
-    obscat = cells[['cell_id', 'donor_id', 'sample_id', 'Sex', 'celltype', 'dx']]
+    donor_rank = cells['donor_id'].map({d: i for i, d in enumerate(donors)})
+    cells['bank'] = np.where(donor_rank % 2 == 0, 'BA', 'BB')      # donor level, crossed with sex
+    cells['age'] = 50.0 + 3.0 * donor_rank                          # D00 50 ... D19 107
+    obscat = cells[['cell_id', 'donor_id', 'sample_id', 'Sex', 'celltype', 'dx', 'bank']]
     conn.execute('CREATE TABLE __obscat AS SELECT * FROM obscat')
-    conn.execute('CREATE TABLE __obsnum AS SELECT cell_id FROM cells')
+    obsnum = cells[['cell_id', 'age']]
+    conn.execute('CREATE TABLE __obsnum AS SELECT * FROM obsnum')
     conn.close()
     triples = pd.DataFrame(count_triples, columns=['cell_id', 'gene_id', 'value'])
     triples['cell_id'] = triples['cell_id'].astype('int32')
@@ -133,7 +138,7 @@ def make_dataset(tmp_path: Path, n_f: int = 10, n_m: int = 10, organism: str = '
         f'is_secondary: {"true" if is_secondary else "false"}\n'
         'layer_stats:\n  counts:\n    min_nonzero: 1.0\n'
         'api:\n  obs_rename:\n    donor_id: ant_donor\n    Sex: ant_sex\n'
-        '    celltype: ant_author_cell_type\n    dx: ant_disease\n' + extra_api +
+        '    celltype: ant_author_cell_type\n    dx: ant_disease\n' + extra_rename + extra_api +
         '  obs_value_rename:\n    Sex:\n      F: f\n      M: m\n' + extra_md + '---\n')
     (group_dir / f'{stem}.md').write_text(md_text)
     (group_dir / f'{stem}.h5ad.mus').write_text(
@@ -377,6 +382,37 @@ def test_donor_exclusion_rule_counted_run_and_all_donors_run(tmp_path):
     assert (out_root / 'Syn2026' / 'Syn_ds.facet_tests.parquet').read_bytes() == before
     all_table = pd.read_parquet(supplementary / 'Syn_ds.facet_tests.parquet')
     assert all_table[all_table['gene'] == PLANTED_GENE].iloc[0]['n_donors'] == 20
+
+
+@needs_r
+def test_age_floor_applies_to_the_declared_facets_only(tmp_path):
+    pattern = ','.join(['AD', 'control'] * 10)
+    store, entry = make_dataset(tmp_path, n_f=10, n_m=10, disease_pattern=pattern,
+                                extra_rename='    age: ant_age\n', extra_md='facet_min_age:\n  disease: 80\n')
+    out_root = tmp_path / 'out'
+    manifest = aft.process_dataset(entry, store, out_root, ['sex', 'disease'], RSCRIPT, threads=1, memory_limit_gb=1)
+    assert manifest['status'] == 'done'
+    report = manifest['facet_min_age']['disease']
+    assert report['floor_years'] == 80.0 and report['n_donors_below_floor'] == 10 and report['n_donors'] == 20
+    by_facet = {u['facet']: u for u in manifest['units'] if u['status'] == 'ok'}
+    assert by_facet['sex']['n_donors_analysed'] == 20                  # sex keeps every donor
+    assert by_facet['disease']['n_donors_analysed'] == 10              # D10..D19 are 80 or older
+
+
+@needs_r
+def test_declared_batch_column_replaces_the_name_guess(tmp_path):
+    store, entry = make_dataset(tmp_path, n_f=10, n_m=10, extra_md='facet_batch_column: bank\n')
+    manifest = aft.process_dataset(entry, store, tmp_path / 'out', ['sex'], RSCRIPT, threads=1, memory_limit_gb=1)
+    assert manifest['batch_column'] == 'bank'
+    unit = [u for u in manifest['units'] if u['status'] == 'ok'][0]
+    assert unit['batch_used'] is True and unit['batch_confounded'] is False
+
+
+def test_declared_batch_column_must_exist(tmp_path):
+    store, entry = make_dataset(tmp_path, extra_md='facet_batch_column: nope\n')
+    with pytest.raises(ValueError, match='not an obs column'):
+        aft.process_dataset(entry, store, tmp_path / 'out', ['sex'], RSCRIPT or 'Rscript', threads=1,
+                            memory_limit_gb=1)
 
 
 @needs_r
