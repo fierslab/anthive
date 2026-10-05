@@ -96,6 +96,12 @@ MODULE_Q_BY = ('param', 'perm', 'either')
 
 Q_THRESHOLD = 0.05
 
+#: Combination of the m - u + 1 largest cohort p values in the partial conjunction (``lib/replication.py``):
+#: ``simes`` (default: valid under positive dependence, which cohorts that share pathology, cell states and
+#: some persons have) or ``fisher`` (independent cohorts; on the 2026-10-05 results it calls 29 instead of 2
+#: Braak microglia genes replicated, 23 of them with at most one cohort individually significant).
+PC_METHOD = 'simes'
+
 #: Disease definitions that are pathology based can be combined across cohorts; clinical or author
 #: diagnoses cannot be combined with them (``disease_basis`` key of the dataset .md).
 PATHOLOGY_BASES = frozenset({'nia_reagan', 'braak_cerad', 'adnc'})
@@ -131,7 +137,7 @@ REPLICATION_DEFINITION = (
     'donor-pooled unit for multi-region cohorts, the whole-cell-type-group stratum otherwise; other units are '
     'supplementary and listed with counted: false). The anchor\'s one-sided p value is the limma treat p value '
     '(H0: |log2 fold change| <= tau, tau = log2(1.1), Braak log2(1.1)/3 per stage) in the tested direction (1 when '
-    'the observed effect has the other sign). For a gene, the Fisher combination of the m - 1 largest of the m '
+    'the observed effect has the other sign). For a gene, the Simes combination of the m - 1 largest of the m '
     'cohort p values gives the partial conjunction p value (x 2 for the two directions); Benjamini-Hochberg over all '
     'genes tested in at least 2 cohorts of the same facet and cell type group gives r_value. k is a descriptive '
     'count: cohorts whose anchor has q_treat < 0.05 in the same direction. Descriptive-only units, secondary '
@@ -1318,7 +1324,7 @@ class FacetResults:
         if family is None:
             return {'r_value': None, 'p_pc': None, 'k': None, 'm': 0, 'replicated': None, 'r_direction': None,
                     'overlap_unknown': bool(overlap), 'cohorts_overlap_unknown': overlap,
-                    'replication_u': replication.DEFAULT_U}
+                    'replication_u': replication.DEFAULT_U, 'replication_method': PC_METHOD}
         return {
             'r_value': _finite(family.get('r_value')),
             'p_pc': _finite(family.get('p_pc')),
@@ -1328,7 +1334,7 @@ class FacetResults:
                            if _finite(family.get('r_value')) is not None else None),
             'r_direction': family.get('r_direction') if isinstance(family.get('r_direction'), str) else None,
             'overlap_unknown': bool(overlap), 'cohorts_overlap_unknown': overlap,
-            'replication_u': replication.DEFAULT_U,
+            'replication_u': replication.DEFAULT_U, 'replication_method': PC_METHOD,
         }
 
     @staticmethod
@@ -1359,7 +1365,7 @@ class FacetResults:
 
         Per group the anchor units of the counted cohorts are combined
         (``lib/replication.py``): one-sided treat p of each cohort's anchor in
-        both directions, partial conjunction (u = 2, Fisher) and BH over the
+        both directions, partial conjunction (u = 2, Simes) and BH over the
         genes tested in at least two cohorts.
 
         Returns:
@@ -1416,7 +1422,7 @@ class FacetResults:
         per_cohort['p_down'] = (per_cohort['p_down'] * per_cohort['n_siblings']).clip(upper=1.0)
         p_up = per_cohort.pivot(index='gene_key', columns='cohort', values='p_up')
         p_down = per_cohort.pivot(index='gene_key', columns='cohort', values='p_down')
-        stats_ = replication.replicability(p_up.to_numpy(), p_down.to_numpy())
+        stats_ = replication.replicability(p_up.to_numpy(), p_down.to_numpy(), method=PC_METHOD)
         frame = pd.DataFrame({'p_pc': stats_['p_pc'], 'r_value': stats_['r_value'],
                               'r_direction': stats_['direction']}, index=p_up.index)
         frame['m'] = p_up.notna().sum(axis=1).astype(int)

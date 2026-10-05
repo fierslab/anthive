@@ -549,3 +549,23 @@ def test_summarize_replication_tables(tmp_path):
     by_db = units.set_index('db_id')
     assert bool(by_db.loc['pool:madrc', 'anchor']) and not bool(by_db.loc['WA4/MIT', 'anchor'])
     assert (tmp_path / 'out' / 'replicated_sex_microglia.tsv').exists()
+
+
+def test_partial_conjunction_method_default_and_effect(monkeypatch):
+    """Simes is the default; Fisher accumulates modest p values of correlated cohorts (one strong cohort,
+    four at 0.03) and calls the gene replicated where Simes does not."""
+    assert fr.PC_METHOD == 'simes'
+    p_matrix = np.array([[1e-12, 0.03, 0.03, 0.03, 0.03]] + [[0.5, 0.6, 0.7, 0.8, 0.9]] * 50)
+    ones = np.ones_like(p_matrix)
+    for method, expected in (('simes', False), ('fisher', True)):
+        result = replication.replicability(p_matrix, ones, method=method)
+        assert bool(result['r_value'][0] < 0.05) is expected, method
+    units = pd.DataFrame({'unit': range(5), 'cohort': list('ABCDE'), 'n_siblings': 1})
+    rows = pd.DataFrame({'unit': list(range(5)) * 2, 'gene': ['G0'] * 5 + ['G1'] * 5,
+                         'gene_upper': ['G0'] * 5 + ['G1'] * 5,
+                         'logFC': [0.5] * 10, 'q_treat': [1e-12, 0.03, 0.03, 0.03, 0.03] + [0.5] * 5,
+                         'p_treat': [1e-12, 0.03, 0.03, 0.03, 0.03] + [0.5] * 5})
+    for method, expected in (('simes', 0), ('fisher', 1)):
+        monkeypatch.setattr(fr, 'PC_METHOD', method)
+        family = fr.FacetResults._family(rows, units)['frame']
+        assert int((family['r_value'] < 0.05).sum()) == expected, method

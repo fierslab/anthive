@@ -35,7 +35,7 @@ Additive (minor). No version bump yet.
 
 - **Facet replication v2: partial-conjunction r-values, treat p values, one anchor per cohort**
   (2026-10-05). `/facets/{facet}/effects`, `/genes/{gene}/facet-effects` (replication
-  entries): new `r_value` (Benjamini and Heller partial conjunction, u = 2, Fisher,
+  entries): new `r_value` (Benjamini and Heller partial conjunction, u = 2, Simes combination,
   BH over the genes of one facet x cell type group; replicated = r < 0.05), `p_pc`, `k`
   (cohorts with q_treat < 0.05 in the replicated direction), `m` (cohorts with a treat
   p value), `replicated`, `r_direction`, `anchors` (one per counted cohort: `cohort`,

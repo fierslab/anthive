@@ -611,10 +611,15 @@ Per gene and per (facet, cell type group):
    For the tested direction d the cohort p is `p_treat` when the observed effect has sign d and 1
    otherwise.
 3. **Partial conjunction (u = 2).** For direction d, the m - 1 largest of the m cohort p values are
-   combined by Fisher's method (`-2 sum ln p` against chi-square with 2(m - 1) df; Simes is
-   implemented as the alternative for dependent cohorts; Fisher assumes independent cohorts, which
-   the anchor and donor-exclusion rules aim at). With m = 2 this is the larger of the two p
-   values. The gene's p is the better direction times 2.
+   combined by **Simes'** method (`min_i (n p_(i) / i)` over the n = m - 1 selected values; valid
+   under positive dependence, which cohorts have: they share pathology, cell-state shifts and, for
+   Lee2026 and ROSMAP, persons). Fisher's method (`-2 sum ln p` against chi-square with 2(m - 1) df;
+   independent cohorts) is implemented (`facet_results.PC_METHOD`) and was the first choice, but on the
+   2026-10-05 results it calls 29 Braak microglia genes replicated against 2 for Simes, and 23 of the
+   29 have at most one cohort individually at q_treat < 0.05: it accumulates modest p values of
+   correlated cohorts. Disease microglia: 2 and 2; sex microglia: 39 and 30. The method is served
+   (`replication_method`). With m = 2 both give the larger of the two p values. The gene's p is the
+   better direction times 2.
 4. **r-value.** Benjamini-Hochberg over all genes tested in at least 2 cohorts of the (facet,
    group). `replicated` = r < 0.05; the direction is the better one. `r_value`, `p_pc`, `k`, `m`
    and `anchors` are served; `k` = cohorts whose anchor has q_treat < 0.05 in that direction
