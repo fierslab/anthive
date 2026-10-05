@@ -225,8 +225,21 @@ one-shot migration scripts keep the frozen 2026-08 list
 
 | Status | Facets |
 | --- | --- |
-| registered | donor, sex, host_sex, age, pmi, disease, braak, braak_group, apoe, apoe_carrier, cell_type, tissue, genotype, author_cluster (dataset scoped), treatment, cognitive_status, comorbidity, adnc, donor_uid |
-| deprecated | cluster (use author_cluster), condition (disease, genotype, treatment), region (tissue), ad_stage (adnc), author_cell_type (a plain column) |
+| registered | donor, sex, host_sex, age, pmi, disease, braak, braak_group, apoe, apoe_carrier, cell_type, tissue, genotype, author_cluster (dataset scoped), cognitive_status, comorbidity, adnc, donor_uid |
+| deprecated | cluster (use author_cluster), condition (disease, genotype; treatment arms to a plain column), region (tissue), ad_stage (adnc), author_cell_type (a plain column) |
+
+**Treatment is not a facet** (Mark, 2026-10-05). Treatments differ too
+much between experiments for one shared column to mean anything across
+datasets, so `treatment` has no `facet:` block and `ant_treatment` is an
+unregistered target. A dataset that has treatment arms publishes them as a
+plain, dataset-local `treatment` column (an `obs_derive` or `obs_rename`
+target without the `ant_` prefix) with explicit labels: `vehicle` (saline,
+DMSO or another vehicle), `isotype_control` (for example an IgG1 isotype
+antibody), `untreated`, `unknown_control` (the paper does not describe the
+control arm) and the treatment names themselves (`LPS`, `semagacestat`,
+`lecanemab`, ...). The dataset's `.md` names the reference level of its
+comparison in the front-matter key `treatment_reference`. Treatment is not
+in `/facets`, the facet UI, the MCP facet tools or `ant-facet-test`.
 
 Anything else under `ant_` (the singletons `ant_cause_of_death`,
 `ant_lesion`, `ant_ms_type`, `ant_subtype`, `ant_source_institution`,

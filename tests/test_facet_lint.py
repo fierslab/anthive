@@ -25,7 +25,7 @@ VOCAB = Path(obscol_tags.VOCAB_PATH)
 
 APPROVED_REGISTERED = {
     'donor', 'sex', 'host_sex', 'age', 'pmi', 'disease', 'braak', 'braak_group', 'apoe',
-    'apoe_carrier', 'cell_type', 'tissue', 'genotype', 'author_cluster', 'treatment',
+    'apoe_carrier', 'cell_type', 'tissue', 'genotype', 'author_cluster',
     'cognitive_status', 'comorbidity', 'adnc', 'donor_uid',
 }
 
@@ -87,6 +87,19 @@ def test_namespace_rule_modes():
     strict = {f.rule: f for f in facet_lint.lint_api(api, namespace_mode='error')}
     assert strict['namespace_unregistered'].severity == facet_lint.ERROR
     assert not [f for f in findings if 'ant_sex' in f.message]
+
+
+def test_treatment_is_a_dataset_local_column_not_a_facet():
+    """Treatment arms vary too much between experiments to share a facet."""
+    assert 'treatment' not in obscol_tags.facet_registry()
+    assert 'treatment' not in canonical_columns.CANONICAL_TAGS
+    assert 'treatment' in obscol_tags.load_vocab()['tags']  # still usable as an obs tag
+    for entry in obscol_tags.facet_registry().values():
+        assert 'treatment' not in entry['replaced_by']
+    findings = facet_lint.lint_api({'obs_derive': {'treatment': {'source': 'cond', 'map': {'a': 'vehicle'}}},
+                                    'obs_rename': {'drug': 'ant_treatment'}})
+    assert [f.rule for f in findings] == ['namespace_unregistered']
+    assert 'ant_treatment' in findings[0].message
 
 
 # ── L2: static mapping rules ─────────────────────────────────────────────────

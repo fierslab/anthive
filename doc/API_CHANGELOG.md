@@ -164,8 +164,11 @@ Additive (minor). No version bump yet.
   "2 of 2" above "2 of 4".
 - **Facet registry.** Facet definitions (`GET /facets/{name}` `definition`)
   gain `status` (`registered` or `deprecated`), `scope` and `replaced_by`.
-  New registered facets: `ant_treatment`, `ant_cognitive_status`,
-  `ant_comorbidity`, `ant_adnc`, `ant_donor_uid`. Deprecated:
+  New registered facets: `ant_cognitive_status`, `ant_comorbidity`,
+  `ant_adnc`, `ant_donor_uid`. `ant_treatment` was registered briefly and
+  withdrawn the same day: treatment arms are a plain dataset-local
+  `treatment` column, not a facet, and `ant_condition` now names only
+  `ant_disease` and `ant_genotype` in `replaced_by`. Deprecated:
   `ant_cluster`, `ant_condition`, `ant_region`, `ant_ad_stage`,
   `ant_author_cell_type` (still served while datasets migrate).
 - **Computed facets.** When a dataset publishes `ant_braak` or `ant_apoe`

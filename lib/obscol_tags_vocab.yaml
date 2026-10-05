@@ -346,12 +346,14 @@ tags:
       Experimental condition or treatment of the sample.
     facet:
       status: deprecated
-      replaced_by: [disease, genotype, treatment]
+      replaced_by: [disease, genotype]
       scope: dataset
       summary: Experimental condition or treatment of the sample.
       definition: >
         What was done to the sample in the experiment (treatment, stimulus,
         time point). Disease of the donor belongs in the disease facet.
+        Treatment arms go to a plain dataset-local `treatment` column, not
+        a facet.
       kind: categorical
       values: Dataset-specific labels, no shared vocabulary.
       missing: Empty (NULL) when not recorded.
@@ -462,23 +464,16 @@ tags:
   treatment:
     label: Treatment
     description: >
-      Perturbation applied to the sample in the experiment.
-    facet:
-      status: registered
-      scope: dataset
-      summary: Perturbation applied to the cells or animals (drug, stimulus, knockdown, vehicle).
-      definition: >
-        What the experimenters did to the sample: a compound, a stimulus
-        such as LPS or amyloid, a genetic knockdown delivered in the
-        experiment, or the matching vehicle or untreated control. Not the
-        donor's disease (disease) and not an inherited or engineered
-        background (genotype). Split out of the retired condition facet.
-      kind: categorical
-      values: >
-        Dataset-specific treatment labels, with 'untreated' or 'vehicle' for
-        the reference. No shared vocabulary yet.
-      missing: Empty (NULL) when not recorded.
-      hint_keywords: [treatment, stimulus, stim, drug, compound]
+      Perturbation applied to the sample in the experiment (drug, stimulus,
+      knockdown, vehicle). Usable as an obs tag only.
+    # Not a facet, by design (Mark, 2026-10-05): treatments vary too much
+    # between experiments to share one column. A dataset publishes its arms
+    # as a plain, dataset-local `treatment` column (no `ant_` prefix) with
+    # explicit labels: vehicle (saline, DMSO or another vehicle),
+    # isotype_control, untreated, unknown_control (arm not described), and
+    # the treatment names themselves. The dataset's `.md` names the
+    # reference level in `treatment_reference:`. No `facet:` block, so
+    # `ant_treatment` is an unregistered (rejected) target.
 
   cognitive_status:
     label: Cognitive status
