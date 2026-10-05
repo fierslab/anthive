@@ -2788,6 +2788,11 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         'reanalysis_of': _as_list(db.get('reanalysis_of')),
         'donor_group': db.get('donor_group'),
         'has_donor_uid': bool(db.get('has_donor_uid')),
+        # replicate unit and disease definition (API: unreleased; absent on older servers)
+        'replicate_unit': db.get('replicate_unit'),
+        'replicate_column': db.get('replicate_column'),
+        'replicate_basis': db.get('replicate_basis'),
+        'disease_basis': db.get('disease_basis'),
     }
 
     accession = db.get('accession')
@@ -2931,6 +2936,7 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
     dataset_facets_other = [f for f in dataset_facets if f.get('hidden_by_config')]
     dataset_facets = [f for f in dataset_facets if not f.get('hidden_by_config')]
 
+    facet_tests = _dataset_facet_tests(api_url, db_id)
     return templates.TemplateResponse(request, "dataset.html", {
         "dataset_facets": dataset_facets,
         "dataset_facets_other": dataset_facets_other,
@@ -2975,7 +2981,8 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "de_studies": de_studies,
         "de_total_contrasts": de_total_contrasts,
         "papers": _dataset_papers(api_url, db_id),
-        "facet_tests": _dataset_facet_tests(api_url, db_id),
+        "facet_tests": facet_tests,
+        "replicate": _replicate_view(info, (facet_tests or {}).get('replicate_source')),
         "caveats": caveats,
         "caveats_summary": caveats_summary,
         "publication_status": pub_status,
@@ -3629,12 +3636,12 @@ async def facet_detail_view(request: Request, facet_name: str):
         error = f"Failed to load facet '{facet_name}': {exc}"
     if facet_data.get("hidden_by_config") and not is_admin:
         return _facet_hidden_page(request, facet_name, visible)
-    facet_effects = None
-    if facet_name.startswith('ant_') and facet_name[4:] in _FACET_TEST_LABELS:
-        facet_effects = _facet_tests_across(api_url, facet_name)
+    # The effects table is slow on a cold cache: the page renders first and
+    # the table is fetched from /facets/{name}/effects-table.
+    facet_effects_pending = facet_name.startswith('ant_') and facet_name[4:] in _FACET_TEST_LABELS
     non_carriers = facet_data.get("non_carriers") or []
     return templates.TemplateResponse(request, "facet.html", {
-        "facet_effects": facet_effects,
+        "facet_effects_pending": facet_effects_pending,
         "hidden_by_config": bool(facet_data.get("hidden_by_config")
                                  or (visible and facet_name not in visible)),
         "facet_name": facet_name,
@@ -3646,6 +3653,22 @@ async def facet_detail_view(request: Request, facet_name: str):
         "n_non_carriers_declared": sum(1 for d in non_carriers if d.get("declared")),
         "error": error,
     })
+
+
+@router.get("/facets/{facet_name}/effects-table", response_class=HTMLResponse)
+async def facet_effects_table(request: Request, facet_name: str):
+    """HTML fragment: the per dataset and cell type effects table of one facet.
+
+    Fetched by ``facet.html`` after the page has rendered, because the
+    underlying ``/facets/{name}/tests`` call can take seconds on a cold cache.
+    Same visibility rule as the facet page.
+    """
+    visible = _facets_visible()
+    if (visible and facet_name not in visible and not _is_admin(request)) \
+            or not (facet_name.startswith('ant_') and facet_name[4:] in _FACET_TEST_LABELS):
+        return HTMLResponse('<p class="fx-none">No effects are shown for this facet.</p>', status_code=404)
+    effects = _facet_tests_across(_api_url(request), facet_name)
+    return templates.TemplateResponse(request, "_facet_effects_across.html", {"facet_effects": effects})
 
 
 def _facet_hidden_page(request: Request, facet_name: str, visible: List[str]) -> HTMLResponse:
@@ -3660,7 +3683,7 @@ def _facet_hidden_page(request: Request, facet_name: str, visible: List[str]) ->
         "non_carriers": [],
         "n_non_carriers_hinted": 0,
         "n_non_carriers_declared": 0,
-        "facet_effects": None,
+        "facet_effects_pending": False,
         "error": None,
     })
 
@@ -4270,6 +4293,23 @@ def _fx_donors_text(unit: Dict[str, Any]) -> str:
 def _fx_pills(unit: Dict[str, Any]) -> List[Tuple[str, str, str]]:
     flags = unit.get('flags') or {}
     pills: List[Tuple[str, str, str]] = []
+    level, replicate = unit.get('analysis_level'), unit.get('replicate_unit')
+    if level == 'cell':
+        pills.append(('cell-level, descriptive only', 'warn',
+                      (unit.get('analysis_level_reason') or unit.get('reason') or 'Too few replicates for a test')
+                      + '. Cells are not replicates, so there is no test, p or q; the numbers describe the cells.'))
+    elif level == 'replicate':
+        pills.append((f'replicate level ({replicate})' if replicate else 'replicate level', 'info',
+                      f'Tested on pseudobulks per {replicate or "replicate"}: the {replicate or "replicate"}, '
+                      'not the cell, is the unit of analysis.'))
+    if unit.get('pooled'):
+        pills.append(('pooled', 'info',
+                      'Several files of one cohort (regions or cell type files) pooled per donor into one unit, '
+                      'so the cohort counts once.'))
+    if unit.get('overlap_unknown'):
+        pills.append(('donor overlap not checked', 'warn',
+                      'Donor overlap with other cohorts has not been checked for this cohort; shared donors '
+                      'would make agreement between cohorts look stronger than it is.'))
     if unit.get('is_secondary'):
         pills.append(('reanalysis, not counted', 'warn',
                       'A reanalysis of cells another dataset serves. Shown, but never counted towards '
@@ -4342,7 +4382,54 @@ def _fx_model_view(model: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return {'line': '; '.join(parts) or 'not recorded', 'details': details}
 
 
-def _fx_unit_view(unit: Dict[str, Any], index: int, db_id: str = '', title: str = '') -> Dict[str, Any]:
+_DISEASE_BASIS_TEXT = {
+    'braak_cerad': 'AD vs control: pathologic (Braak x CERAD)',
+    'nia_reagan': 'AD vs control: pathologic (NIA-Reagan)',
+    'adnc': 'AD vs control: pathologic (ADNC)',
+    'clinical_dx': 'AD vs control: clinical diagnosis',
+    'author_dx': 'AD vs control: author diagnosis',
+}
+_REPLICATE_UNITS = ('donor', 'animal', 'sample', 'none')
+
+
+def _disease_basis_text(basis: Optional[str]) -> str:
+    """Plain wording of a ``disease_basis`` value; empty when none is recorded."""
+    if not basis:
+        return ''
+    return _DISEASE_BASIS_TEXT.get(str(basis), f'AD vs control: {basis}')
+
+
+def _replicate_view(*sources: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Replicate unit and disease basis of a dataset for display.
+
+    Each key takes the first non-empty value over ``sources`` (dataset info
+    first, then the facet-test summary), so a declared value wins over a
+    value copied onto the test units. None when no source names a unit.
+    """
+    def first(key: str) -> Optional[Any]:
+        for source in sources:
+            if isinstance(source, dict) and source.get(key):
+                return source[key]
+        return None
+    unit, column, basis, disease = (first('replicate_unit'), first('replicate_column'),
+                                    first('replicate_basis'), first('disease_basis'))
+    if not unit and not disease:
+        return None
+    if unit == 'none':
+        text = 'none: cell-level only'
+    elif unit and column:
+        text = f'{unit} ({column})'
+    else:
+        text = str(unit or '')
+    return {
+        'unit': unit, 'column': column, 'basis': basis,
+        'text': text + (', inferred' if unit and basis == 'inferred' else ''),
+        'disease_basis': disease, 'disease_text': _disease_basis_text(disease),
+    }
+
+
+def _fx_unit_view(unit: Dict[str, Any], index: int, db_id: str = '', title: str = '',
+                  pool_members: Optional[Dict[str, List[str]]] = None) -> Dict[str, Any]:
     modules = [{**m, 'label': _METHOD_LABELS.get((m.get('method'), m.get('source')),
                                                   f"{m.get('method')}, {m.get('source')}")}
                for m in unit.get('modules') or []]
@@ -4357,6 +4444,11 @@ def _fx_unit_view(unit: Dict[str, Any], index: int, db_id: str = '', title: str 
         'modules_view': modules,
         'model_view': _fx_model_view(unit.get('model')),
         'unit_id': f'fx-{index}',
+        # a cell-level unit has no test, whatever its flags say
+        'no_test': unit.get('analysis_level') == 'cell' or bool((unit.get('flags') or {}).get('descriptive_only')),
+        'is_pool': str(db_id or unit.get('db_id') or '').startswith('pool:'),
+        'pool_members_list': (pool_members or {}).get(db_id or unit.get('db_id') or '') or [],
+        'disease_basis_text': _disease_basis_text(unit.get('disease_basis')),
     }
 
 
@@ -4419,7 +4511,9 @@ def _facet_tests_view(summary: Optional[Dict[str, Any]], db_id: str = '') -> Opt
                                                 index, db_id=db_id))
             index += 1
         else:
-            slot['untested'].append({'cell_type': unit.get('cell_type'), 'reason': unit.get('reason')})
+            slot['untested'].append({'cell_type': unit.get('cell_type'), 'reason': unit.get('reason'),
+                                     'analysis_level': unit.get('analysis_level'),
+                                     'analysis_level_label': unit.get('analysis_level_label')})
     return {
         'status': summary.get('status'),
         'reason': summary.get('reason'),
@@ -4428,6 +4522,11 @@ def _facet_tests_view(summary: Optional[Dict[str, Any]], db_id: str = '') -> Opt
         'by_facet': by_facet,
         'n_units_tested': summary.get('n_units_tested') or 0,
         'cohort': summary.get('cohort') or None,
+        # the summary names the unit; older servers only carry it on the units
+        'replicate_source': {key: next((src[key] for src in [summary, *(summary.get('units') or [])]
+                                        if src.get(key)), None)
+                             for key in ('replicate_unit', 'replicate_column', 'replicate_basis',
+                                         'disease_basis')},
         # permutation count of the module run (run manifest); None when unknown
         'n_permutations': ((summary.get('runs') or {}).get('modules') or {}).get('n_permutations')
                           if isinstance(((summary.get('runs') or {}).get('modules') or {}).get('n_permutations'), int)
@@ -4443,6 +4542,20 @@ def _dataset_facet_tests(api_url: str, db_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _pool_members(api_url: str) -> Dict[str, List[str]]:
+    """Member datasets of every donor-pooled unit (``pool:<id>``), from the cohort table.
+
+    Empty when the API cannot answer: a pooled unit then has no member list.
+    """
+    try:
+        payload = _api_get(api_url, '/facets/cohorts') or {}
+    except Exception:
+        return {}
+    return {str(row.get('db_id')): list(row.get('pool_members') or [])
+            for row in payload.get('datasets') or []
+            if str(row.get('db_id') or '').startswith('pool:')}
+
+
 def _facet_tests_across(api_url: str, facet_name: str) -> Optional[Dict[str, Any]]:
     """Rows for the "Effects across datasets" section of /facets/{name};
     None when the facet is not tested or the API cannot answer."""
@@ -4452,8 +4565,9 @@ def _facet_tests_across(api_url: str, facet_name: str) -> Optional[Dict[str, Any
         return None
     if not isinstance(payload, dict):
         return None
+    pool_members = _pool_members(api_url)
     rows = [_fx_unit_view({**row, 'facet': payload.get('facet')}, index, db_id=row.get('db_id', ''),
-                          title=row.get('title') or '')
+                          title=row.get('title') or '', pool_members=pool_members)
             for index, row in enumerate(payload.get('rows') or [])]
     return {
         'facet': payload.get('facet'),

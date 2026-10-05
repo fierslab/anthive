@@ -159,6 +159,21 @@ lists them under "Not analysed yet"; the `/facets` index no
 longer shows the per-cell Signal column. Tests set `_facets_visible_cfg`
 through an autouse fixture.
 
+**Facet replication v2 (UI).** Badges say "replicated (r = ...)" only when the
+API `r_value` < 0.05 (`replicated`); "k of m cohorts significant (q_treat <
+0.05)" is descriptive, with the Simes partial conjunction / treat tau method
+line above the groups. Each open group lists its `anchors` (pool units
+`pool:<id>` render as text with a visible member list from `/facets/cohorts`,
+never as links). Pills: `replicate level (donor)` / `cell-level, descriptive
+only` (no tests, reason visible), `pooled`, `donor overlap not checked`;
+`fx_unit_notes` prints disease definition, cohort role and not-counted reason
+as visible lines. `/facets/{name}` renders first and fetches the units table
+from `GET /facets/{name}/effects-table` (`_facet_effects_across.html`,
+bound by `window.antFxBind`). The dataset unit line `#fx-unit-line` shows
+Replicate unit and Disease basis (`_replicate_view`: `/info` fields first, else
+the `/facet-tests` summary or its first unit). Hover-only text: base.html turns
+`.info` and `.fx-pill` into focusable click/Enter bubbles.
+
 **MCP links UI** talks to ant-serve's `GET /me/mcp`, `POST /me/mcp/links`,
 `POST /me/mcp/links/{id}/rotate`, `DELETE /me/mcp/links/{id}`,
 `GET /admin/mcp-links`, `DELETE /admin/mcp-links/{user}/{id}` client-side

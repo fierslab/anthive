@@ -711,6 +711,7 @@
         {% if dataset_meta.age %}<tr><td class="colname">age</td><td>{{ dataset_meta.age }}</td></tr>{% endif %}
         {% if dataset_meta.strain %}<tr><td class="colname">strain</td><td>{{ dataset_meta.strain }}</td></tr>{% endif %}
       {% endif %}
+      {% if replicate and replicate.unit %}<tr id="bio-replicate-unit"><td class="colname">replicate unit</td><td title="What counts as an independent replicate in the facet tests">{{ replicate.text }}</td></tr>{% endif %}
       </tbody>
     </table>
   </div>
@@ -802,12 +803,14 @@
   <div id="ds-facets">
     <h2 class="section-head">Facets <span class="muted">({{ n_facets_total }})</span>
       <span class="info" title="Standardised ant_ columns of this dataset and where they come from: the author column, how it was mapped (renamed, derived through a value map, or one constant value) and how each author value was translated, with cell counts. Below, when a facet was tested: its donor-level effects per cell type. Click a facet for its definition and the other datasets that carry it.">ⓘ</span></h2>
-    {# Unit line. A "Replicate unit" entry (donor | animal | sample | none) goes first in this paragraph once the API reports it. #}
     <p class="fx-intro" id="fx-unit-line">
+      <span id="fx-replicate">Replicate unit: <strong>{{ replicate.text if replicate and replicate.unit else 'not recorded for this dataset' }}</strong>.</span>
+      {% if replicate and replicate.disease_text %}<span id="fx-disease-basis">Disease basis: <strong>{{ replicate.disease_text }}</strong>{% if replicate.disease_basis not in ['braak_cerad', 'nia_reagan', 'adnc'] %} (not pathology based, so not combined with other cohorts){% endif %}.</span>{% endif %}
       {% if info and info.designation %}<span id="fx-designation"><b>{{ 'Primary data' if info.designation == 'primary' else ('Reanalysis' if info.designation == 'reanalysis' else 'Designation unresolved') }}</b>{% if info.designation == 'reanalysis' %}, never counted towards replication across datasets{% endif %}.</span>{% endif %}
       {% if info and info.donor_group %}<span id="fx-donor-group">Donor group <a href="/donor-groups#dg-{{ info.donor_group }}">{{ info.donor_group }}</a>.</span>{% endif %}
       {% if facet_tests and facet_tests.cohort %}<span id="fx-cohort">Cohort {{ facet_tests.cohort.cohort_label }}, {{ facet_tests.cohort.role }}{% if not facet_tests.cohort.counted %} (not counted towards replication across datasets){% endif %}; from the DRAFT cohort selection table.</span>
       {% elif facet_tests and facet_tests.n_units_tested %}<span id="fx-cohort">This dataset is not in the DRAFT cohort selection table, so it does not count towards replication across datasets.</span>{% endif %}
+      {% if facet_tests and facet_tests.cohort and facet_tests.cohort.overlap_unknown %}<span id="fx-overlap-unknown" class="fx-reason">Donor overlap with other cohorts was not checked for this cohort.</span>{% endif %}
       <a href="/help#facet-effects">About facets and their effects</a>
     </p>
     {% if facet_tests and facet_tests.dataset_changed %}<p class="fx-intro" id="fx-changed" style="color:#7a4b0c">The dataset has changed since the facet tests were run; the effects describe the earlier version.</p>{% endif %}
@@ -836,7 +839,7 @@
     {% for col in _fx_extra %}{{ _fx_effects_block(col, _fx[col]) }}{% endfor %}
     {% if _fx_untested_extra %}
     <div class="fx-none" id="fx-untested-extra">
-      {% for col in _fx_untested_extra %}<div>{{ col[4:]|capitalize }} was not tested ({% for item in _fx[col].untested %}{{ item.cell_type }}, {{ item.reason or 'no reason recorded' }}{{ '; ' if not loop.last }}{% endfor %}).</div>{% endfor %}</div>
+      {% for col in _fx_untested_extra %}<div>{{ col[4:]|capitalize }} was not tested ({% for item in _fx[col].untested %}{{ item.cell_type }}{% if item.analysis_level == 'cell' %} <span class="fx-pill warn" title="Too few replicates for a test: the numbers describe cells, not replicates.">cell-level, descriptive only</span>{% endif %}, {{ item.reason or 'no reason recorded' }}{{ '; ' if not loop.last }}{% endfor %}).</div>{% endfor %}</div>
     {% endif %}
     {% else %}
     <h2 class="section-head" id="facets-effects-head">Effects by facet</h2>

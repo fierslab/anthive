@@ -1130,10 +1130,15 @@ _FACET_TESTS_DS1 = {
     "q_threshold": 0.05, "dataset_changed": False,
     "files": {"genes": True, "modules": True, "composition": True},
     "runs": {"genes": {"tool": "ant-facet-test/1.0", "timestamp_utc": "2026-10-04T11:00:00+00:00", "seed": 20261004}},
-    "cohort": {"cohort": "CohortX (shared)", "cohort_label": "CohortX", "role": "anchor", "counted": True},
+    "cohort": {"cohort": "CohortX (shared)", "cohort_label": "CohortX", "role": "anchor", "counted": True,
+               "overlap_unknown": True},
+    "replicate_unit": "donor", "replicate_column": "ant_donor", "replicate_basis": "declared",
+    "disease_basis": "braak_cerad",
     "units": [
         {"facet": "sex", "cell_type": "microglial cell", "celltype_source": "constant_all_cells",
          "tested": True, "status_genes": "ok", "status_modules": "ok", "contrast": "m_vs_f",
+         "analysis_level": "replicate", "analysis_level_label": "replicate level", "replicate_unit": "donor",
+         "replicate_column": "ant_donor", "tau_log2": 0.1375,
          "level_ref": "f", "level_test": "m", "level_counts": {"f": 12, "m": 9}, "n_donors": 21,
          "n_donors_ref": 12, "n_donors_test": 9, "covariates": ["age"], "covariates_omitted": ["pmi"],
          "flags": _FX_UNIT_FLAGS, "genes": {"n_tested": 15000, "n_q05": 42},
@@ -1144,6 +1149,8 @@ _FACET_TESTS_DS1 = {
                          "rps4y1_q": 1e-15, "n_y_tested": 8, "n_y_up_q01": 8, "rule": "XIST down, RPS4Y1 up"}},
         {"facet": "disease", "cell_type": "microglial cell", "celltype_source": "constant_all_cells",
          "tested": False, "reason": "level with < 3 donors (control=2, AD=19)",
+         "analysis_level": "cell", "analysis_level_label": "cell-level, descriptive only",
+         "analysis_level_reason": "level with < 3 donors (control=2, AD=19)",
          "flags": {"provisional": True}, "genes": None, "modules": [], "model": {}},
         {"facet": "braak", "cell_type": "microglial cell", "celltype_source": "constant_all_cells",
          "tested": True, "contrast": "braak_per_unit", "level_ref": None, "level_test": None,
@@ -1156,14 +1163,25 @@ _FACET_TESTS_DS1 = {
 }
 
 _FACET_TESTS_ACROSS = {
-    "facet": "disease", "facet_column": "ant_disease", "n_rows": 1, "n_datasets_tested": 1,
-    "rows": [{"db_id": "GroupA/ds2", "title": "Dataset Two", "cell_type": "microglial cell",
+    "facet": "disease", "facet_column": "ant_disease", "n_rows": 2, "n_datasets_tested": 2,
+    "rows": [{"db_id": "pool:seaad_microglia", "title": "seaad_microglia (donor-pooled)", "cell_type": "microglial cell",
+              "celltype_source": "constant_all_cells", "contrast": "AD_vs_control", "level_ref": "control",
+              "level_test": "AD", "level_counts": {"control": 30, "AD": 50}, "n_donors": 80,
+              "n_donors_ref": 30, "n_donors_test": 50, "covariates": ["sex", "age"],
+              "flags": {"provisional": False, "descriptive_only": False}, "genes": {"n_tested": 15000, "n_q05": 9},
+              "modules": [], "top_genes": [], "run_date": "2026-10-04", "cohort_label": "SEA-AD", "role": "anchor",
+              "counted": True, "pooled": True, "overlap_unknown": True, "independence": "unknown",
+              "disease_basis": "braak_cerad", "analysis_level": "replicate", "replicate_unit": "donor",
+              "model": _fx_model("expression ~ disease + sex + age_z")},
+             {"db_id": "GroupA/ds2", "title": "Dataset Two", "cell_type": "microglial cell",
               "celltype_source": "constant_all_cells", "contrast": "AD_vs_control", "level_ref": "control",
               "level_test": "AD", "level_counts": {"control": 8, "AD": 20}, "n_donors": 28,
               "n_donors_ref": 8, "n_donors_test": 20, "covariates": ["sex", "age", "pmi"],
               "flags": {"provisional": True, "descriptive_only": False}, "genes": {"n_tested": 15000, "n_q05": 7},
               "modules": [], "top_genes": [{"gene": "PTPRG", "logFC": 0.4, "q_value": 0.001}],
-              "run_date": "2026-10-04", "cohort_label": "CohortY", "role": "anchor", "counted": True,
+              "run_date": "2026-10-04", "cohort_label": "CohortY", "role": "anchor", "counted": False,
+              "not_counted_reason": "disease definition is author_dx; replication only combines pathology based definitions",
+              "disease_basis": "author_dx", "analysis_level": "replicate", "replicate_unit": "donor",
               "model": _fx_model("expression ~ disease + sex + age_z + pmi_z")}],
     "not_tested": [{"db_id": "GroupA/ds1", "title": "Dataset One", "reason": "level with < 3 donors"}],
 }
@@ -1185,6 +1203,10 @@ def _fake_api_get(api_url, path, **kwargs):  # pyright: ignore
         return _FACET_TESTS_DS1
     if path == "/facets/ant_disease/tests":
         return _FACET_TESTS_ACROSS
+    if path == "/facets/cohorts":
+        return {"status": "DRAFT", "datasets": [
+            {"db_id": "pool:seaad_microglia", "pool_members": ["GroupA/ds1", "GroupA/ds2"]},
+            {"db_id": "GroupA/ds1", "pool_members": []}]}
     if path.startswith("/databases/") and path.endswith("/info"):
         db_id = path[len("/databases/"):-len("/info")]
         if db_id in _INFO:
@@ -4683,9 +4705,9 @@ def test_module_view_obs_column_label(client):
     assert '>obs column: all' in html
     assert '<th class="mv-th-tag" data-sortcol="tag">obs column</th>' in html
     assert 'Values include braak, sex, cluster, disease' not in html
-    assert "per-cell association (exploratory)" in html
-    assert ("Computed over individual cells, not donors or animals, and not within cell type: "
-            "describes where a score differs, not a tested effect. For donor-level effects see the Facets tab.") in html
+    assert "per-cell association (descriptive)" in html
+    assert ("Per-cell (descriptive): computed over individual cells, which are not replicates, and not within cell type. "
+            "It describes where a score differs, not a tested effect. For replicate-level effects see the Facets tab.") in html
     assert "/donor|cluster/i" in html and "mff.tag.setValues(defaultTags)" in html
 
 
@@ -6796,7 +6818,7 @@ def test_dataset_facets_card_shows_effects_per_facet(client):
     assert 'data-tab="facets"' in text and 'Effects by facet' in card
     assert card.index('class="ds-facets"') < card.index('Effects by facet') < card.index('class="ds-facet-fx"')
     assert 'id="fx-intro"' in card and "exploratory" in card and "donor" in card
-    assert "provisional" in card and "same donors appear in several datasets" in card
+    assert "provisional" in card and "datasets that share donors do not count twice" in card
     assert 'href="/help#facet-effects"' in card
     # one effects row under ant_sex, with the unit table and expanding rows
     assert 'class="ds-facet-fx" data-facet="ant_sex"' in card
@@ -6818,6 +6840,83 @@ def test_dataset_facets_card_shows_effects_per_facet(client):
     assert "/facet-tests" in text and "volcano.png" in text
     assert '<div class="table-wrap">\n<table class="fx-table card-table"' in card
     assert "—" not in card
+
+
+def test_dataset_facets_tab_unit_line_has_replicate_unit_and_disease_basis(client):
+    text = client.get("/browse/GroupA/ds1").text
+    unit_line = text.split('id="fx-unit-line"')[1].split("</p>")[0]
+    assert 'id="fx-replicate">Replicate unit: <strong>donor (ant_donor)</strong>' in unit_line
+    assert "Disease basis: <strong>AD vs control: pathologic (Braak x CERAD)</strong>" in unit_line
+    assert 'id="fx-overlap-unknown"' in unit_line and "not checked" in unit_line
+    # the Biology card of the Data tab repeats the unit, small
+    bio = text.split('id="bio-replicate-unit"')[1].split("</tr>")[0]
+    assert "donor (ant_donor)" in bio
+
+
+def test_dataset_facets_tab_replicate_unit_not_recorded(client, monkeypatch):
+    summary = {k: v for k, v in _FACET_TESTS_DS1.items()
+               if k not in ("replicate_unit", "replicate_column", "replicate_basis", "disease_basis")}
+    summary["units"] = [{k: v for k, v in unit.items() if k not in ("replicate_unit", "replicate_column")}
+                        for unit in summary["units"]]
+    monkeypatch.setattr(browser, "_api_get", _api_with({"/databases/GroupA/ds1/facet-tests": summary}))
+    text = client.get("/browse/GroupA/ds1").text
+    assert "Replicate unit: <strong>not recorded for this dataset</strong>" in text
+    assert 'id="bio-replicate-unit"' not in text and 'id="fx-disease-basis"' not in text
+
+
+def test_dataset_info_replicate_fields_win_over_the_test_summary(client, monkeypatch):
+    info = dict(_INFO["GroupA/ds1"], replicate_unit="animal", replicate_column="hash.ID",
+                replicate_basis="declared", disease_basis="author_dx")
+    monkeypatch.setattr(browser, "_api_get", _api_with({"/databases/GroupA/ds1/info": info}))
+    unit_line = client.get("/browse/GroupA/ds1").text.split('id="fx-unit-line"')[1].split("</p>")[0]
+    assert "<strong>animal (hash.ID)</strong>" in unit_line and "AD vs control: author diagnosis" in unit_line
+    assert "not pathology based" in unit_line
+
+
+def test_dataset_facets_tab_cell_level_unit_has_pill_and_visible_reason(client):
+    card = client.get("/browse/GroupA/ds1").text.split('id="ds-facets"')[1].split('<script>')[0]
+    assert ">replicate level (donor)</span>" in card
+    untested = card.split('id="fx-untested-extra"')[1].split("</div></div>")[0]
+    assert ">cell-level, descriptive only</span>" in untested and "control=2, AD=19" in untested
+    assert 'id="fx-flag-legend"' in card and "What the flags mean" in card
+    assert "Disease definition" not in card.split('data-facet="ant_sex"')[1].split('data-facet="ant_braak"')[0]
+
+
+@pytest.mark.parametrize("fields, expected_text", [
+    ({"replicate_unit": "donor", "replicate_column": "ant_donor"}, "donor (ant_donor)"),
+    ({"replicate_unit": "animal", "replicate_column": "hash.ID", "replicate_basis": "inferred"}, "animal (hash.ID), inferred"),
+    ({"replicate_unit": "none"}, "none: cell-level only"),
+    ({"replicate_unit": "sample"}, "sample"),
+])
+def test_replicate_view_text(fields, expected_text):
+    assert browser._replicate_view(fields)["text"] == expected_text
+
+
+def test_replicate_view_first_non_empty_source_wins_and_none_without_data():
+    view = browser._replicate_view({"replicate_unit": None}, {"replicate_unit": "donor", "replicate_column": "ant_donor",
+                                                               "disease_basis": "adnc"})
+    assert view["unit"] == "donor" and view["disease_text"] == "AD vs control: pathologic (ADNC)"
+    assert browser._replicate_view({}, None, {"replicate_unit": None}) is None
+
+
+@pytest.mark.parametrize("basis, expected", [
+    ("braak_cerad", "AD vs control: pathologic (Braak x CERAD)"),
+    ("author_dx", "AD vs control: author diagnosis"),
+    ("clinical_dx", "AD vs control: clinical diagnosis"),
+    ("something_new", "AD vs control: something_new"),
+    (None, ""),
+])
+def test_disease_basis_text(basis, expected):
+    assert browser._disease_basis_text(basis) == expected
+
+
+def test_fx_pills_analysis_level_pooled_and_overlap():
+    cell = browser._fx_pills({"analysis_level": "cell", "analysis_level_reason": "level with < 3 donors", "flags": {}})
+    assert cell[0][0] == "cell-level, descriptive only" and "level with < 3 donors" in cell[0][2]
+    replicate = browser._fx_pills({"analysis_level": "replicate", "replicate_unit": "animal", "flags": {}})
+    assert replicate[0][0] == "replicate level (animal)"
+    labels = [pill[0] for pill in browser._fx_pills({"pooled": True, "overlap_unknown": True, "flags": {}})]
+    assert labels == ["pooled", "donor overlap not checked"]
 
 
 def test_dataset_facets_card_hides_facets_outside_the_config(client, monkeypatch):
@@ -6899,20 +6998,66 @@ def test_dataset_page_without_facet_tests_endpoint(client):
     assert resp.status_code == 200 and 'id="fx-table-' not in resp.text
 
 
-def test_facet_page_effects_across_datasets(client):
+def test_facet_page_effects_across_datasets_renders_first_and_fetches_the_table(client):
     text = client.get("/facets/ant_disease").text
     section = text.split('id="facet-effects"')[1]
     assert "Effects across datasets" in text
     assert 'id="fx-methods"' in section and "limma-voom" in section and "10,000 by default" in section
     assert "1,000" not in section.split('id="fx-methods"')[1].split("</div>")[0]
-    assert "meta-analysis comes later" in section and "donors that occur in several datasets" in section
-    assert 'id="fx-table-across"' in section and 'data-db-id="GroupA/ds2"' in section
-    assert 'href="/genes/PTPRG"' in section
-    assert ">provisional</span>" in section
-    assert "Cohort CohortY, anchor" in section
+    assert "partial conjunction" in section.split('id="fx-methods"')[1].split("</div>")[0]
+    # the table is not in the page: a slot and a loader that fetches the fragment
+    assert 'id="fx-across-slot"' in section and 'data-url="/facets/ant_disease/effects-table"' in section
+    assert 'id="fx-across-loading"' in section and 'id="fx-table-across"' not in section
+    assert "antFxBind" in section
     assert 'id="fx-recurring"' in section and "DRAFT" in section
-    assert 'id="fx-across-untested"' in section
     assert 'href="/help#facet-effects"' in section
+    # M3: the disease definition is said on the page
+    assert 'id="fx-disease-definition"' in section and "pathology-based definition" in section
+    assert 'id="fx-disease-definition"' not in client.get("/facets/ant_sex").text
+
+
+def test_facet_effects_table_fragment(client):
+    resp = client.get("/facets/ant_disease/effects-table")
+    assert resp.status_code == 200
+    text = resp.text
+    assert "<html" not in text and "<script" not in text
+    assert 'id="fx-table-across"' in text and 'data-db-id="GroupA/ds2"' in text
+    assert "Units tested" in text and "2 dataset and cell type combinations in 2 datasets" in text
+    assert 'href="/genes/PTPRG"' in text
+    assert 'id="fx-across-untested"' in text
+    # a pooled unit is text with its member list, never a broken /browse/pool: link
+    assert "/browse/pool:" not in text
+    assert "<strong>pool:seaad_microglia</strong>" in text and "pooled over 2 files" in text
+    assert 'href="/browse/GroupA/ds1#data"' in text
+    assert ">pooled</span>" in text and ">donor overlap not checked</span>" in text
+    assert "Donor overlap with other cohorts was not checked" in text
+    # the not-counted reason and the disease definition are visible lines, not tooltips
+    assert '<div class="fx-reason">Not counted: disease definition is author_dx' in text
+    assert "Disease definition: AD vs control: author diagnosis; not pathology based, so never combined" in text
+    assert "Disease definition: AD vs control: pathologic (Braak x CERAD)." in text
+    assert "Cohort CohortY, anchor (not counted towards replication)" in text
+
+
+def test_facet_effects_table_fragment_failure_and_gating(client, monkeypatch):
+    def broken(api_url, path, **kwargs):
+        if path == "/facets/ant_disease/tests":
+            raise requests.HTTPError("500")
+        return _fake_api_get(api_url, path, **kwargs)
+    monkeypatch.setattr(browser, "_api_get", broken)
+    assert 'id="fx-across-error"' in client.get("/facets/ant_disease/effects-table").text
+    monkeypatch.setattr(browser, "_api_get", _fake_api_get)
+    assert client.get("/facets/ant_age/effects-table").status_code == 404
+    monkeypatch.setattr(browser, "_facets_visible_cfg", [["ant_sex"]])
+    assert client.get("/facets/ant_disease/effects-table").status_code == 404
+    admin = client.get("/facets/ant_disease/effects-table", headers={"Remote-User": "root", "Remote-Groups": "admins"})
+    assert admin.status_code == 200
+
+
+def test_pool_members_survive_a_cohort_table_failure(monkeypatch):
+    def broken(api_url, path, **kwargs):
+        raise requests.HTTPError("500")
+    monkeypatch.setattr(browser, "_api_get", broken)
+    assert browser._pool_members("http://x") == {}
 
 
 def test_facet_page_hidden_facet(client, monkeypatch):
@@ -7062,7 +7207,7 @@ def test_fx_forest_summary_first_by_cell_type_group():
     on celltype_group) with the per-dataset forest collapsed under it."""
     html = str(browser.templates.env.get_template("_facet_effects.html").module.fx_forest_assets())
     assert "celltype_group" in html and "details class=\"fxs-group\"" in html
-    assert "fxs-rest" in html and "with no counted result" in html
+    assert "fxs-rest" in html and "with no counted row" in html
     assert "not_counted_reason" in html and "n_sibling_strata" in html and "q_counted" in html
     assert "reanalysis, not counted" in html
 
@@ -7105,7 +7250,7 @@ def test_help_mentions_the_facet_rename(client):
 def test_help_page_per_cell_vs_per_donor_section(client):
     text = client.get("/help").text
     section = text.split('id="per-cell-per-donor"')[1].split("</section>")[0]
-    for phrase in ("Per cell vs per donor", "Facets</strong> tab", "per donor", "Per-cell association (exploratory)",
+    for phrase in ("Per cell vs per donor", "Facets</strong> tab", "per donor", "Per-cell association (descriptive)",
                    "pseudoreplicated", "the replicate there is the animal", "spread across cells"):
         assert phrase.lower() in section.lower(), phrase
     assert '<a href="#per-cell-per-donor">' in text
@@ -7116,3 +7261,35 @@ def test_module_view_explains_skipped_datasets(client):
     html = client.get("/genesets/StudyX/Exp1").text
     assert "SKIPPED = d.skipped_datasets || {};" in html
     assert "No per-cell association statistics for this dataset: " in html
+
+
+def test_fx_assets_show_replication_v2_wording():
+    """Badge, anchors, pooled/overlap pills, zero-replicated message, q (>=10% change) column."""
+    module = browser.templates.env.get_template("_facet_effects.html").module
+    forest = str(module.fx_forest_assets())
+    for phrase in ("replicated (r = ", "not replicated", "significant (q_treat", "Anchors: the unit that counted",
+                   "data-pool", "donor overlap not checked", "with no counted row", "full rule",
+                   "Simes", "fxf-row-model", "q (\u226510% change)"):
+        assert phrase in forest, phrase
+    assert "table.fxf .fxf-donors-col, table.fxf .fxf-q-col { display: none; }" in forest
+    assert ".fxf-reason" in forest and "fxf-reason { display: none" not in forest
+    recurring = str(module.fx_recurring("ant_braak"))
+    assert "No gene passes the replication rule for " in recurring and "r_value" in recurring
+    assert "n_replicated" in recurring and "units_up" not in recurring and "max_abs_logFC" not in recurring
+    script = str(module.fx_script())
+    assert "q_treat" in script and "antFxBind" in script and "orientation" in script
+
+
+def test_info_bubble_script_makes_hover_text_reachable():
+    text = open(browser.__file__.replace("browser.py", "templates/base.html"), encoding="utf-8").read()
+    assert ".info-pop" in text and "SELECTOR = '.info, .fx-pill'" in text and "'tabindex', '0'" in text
+
+
+def test_help_explains_replication_v2(client):
+    text = client.get("/help").text
+    section = text.split('id="facet-effects"')[1].split("</section>")[0]
+    for phrase in ("partial conjunction", "Simes", "r-value", "anchor per cohort", "pool:", "q (&ge;10% change)",
+                   "cell-level, descriptive only", "Replicate unit", "Disease basis", "pathology-based", "per-cell (descriptive)",
+                   "Fisher", "donor overlap not checked"):
+        assert phrase in section, phrase
+    assert "\u2014" not in section

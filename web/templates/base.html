@@ -443,6 +443,12 @@
             margin-left: 3px; user-select: none; vertical-align: baseline;
         }
         .info:hover { color: var(--link); }
+        .info:focus-visible, .fx-pill:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; border-radius: 3px; }
+        /* Tap/keyboard version of a hover title: opened by click or Enter on an
+           .info or .fx-pill (see the last script of the page). */
+        .info-pop { position: absolute; z-index: 80; max-width: min(340px, calc(100vw - 16px)); background: #1e293b; color: #f8fafc;
+                    font-size: 12px; font-weight: normal; line-height: 1.45; padding: 7px 10px; border-radius: 5px;
+                    text-transform: none; letter-spacing: 0; box-shadow: 0 4px 14px rgba(15, 23, 42, .3); overflow-wrap: anywhere; }
         legend .info, th .info, h2 .info { font-size: 10px; }
         /* Facet-column display. ant_* columns get a subdued grey pill
            ("facet") and their label is shown bold without the ant_ prefix.
@@ -1803,6 +1809,52 @@
           if (ss.get(OPEN) === '1') openPanel(); else applyChrome();
         })
         .catch(function () { /* status unreachable → leave dark */ });
+    })();
+    </script>
+    <script>
+    // Explanations that were hover-only: click, tap or Enter on an .info or
+    // .fx-pill shows its title text in a small bubble (Escape or an outside
+    // click closes it); static ones become keyboard focusable.
+    (function () {
+      var bubble = null;
+      var SELECTOR = '.info, .fx-pill';
+      function textOf(el) { return el.getAttribute('title') || el.getAttribute('data-info-text') || ''; }
+      function close() { if (bubble) { bubble.remove(); bubble = null; } }
+      function open(el) {
+        var text = textOf(el);
+        close();
+        if (!text) return;
+        if (el.hasAttribute('title')) { el.setAttribute('data-info-text', text); el.removeAttribute('title'); }
+        bubble = document.createElement('div');
+        bubble.className = 'info-pop';
+        bubble.setAttribute('role', 'tooltip');
+        bubble.textContent = text;
+        document.body.appendChild(bubble);
+        var rect = el.getBoundingClientRect();
+        var left = Math.max(8, Math.min(rect.left + window.scrollX, window.scrollX + document.documentElement.clientWidth - bubble.offsetWidth - 8));
+        bubble.style.left = left + 'px';
+        bubble.style.top = (rect.bottom + window.scrollY + 6) + 'px';
+      }
+      document.addEventListener('click', function (event) {
+        var el = event.target.closest ? event.target.closest(SELECTOR) : null;
+        if (!el || el.closest('[data-filter-field]') || !textOf(el)) { if (!(bubble && bubble.contains(event.target))) close(); return; }
+        event.preventDefault();
+        open(el);
+      });
+      document.addEventListener('keydown', function (event) {
+        if (event.key === 'Escape') { close(); return; }
+        if ((event.key === 'Enter' || event.key === ' ') && event.target.matches && event.target.matches(SELECTOR) && textOf(event.target)) {
+          event.preventDefault();
+          open(event.target);
+        }
+      });
+      document.addEventListener('DOMContentLoaded', function () {
+        document.querySelectorAll(SELECTOR).forEach(function (el) {
+          if (el.closest('[data-filter-field]') || !textOf(el)) return;
+          el.setAttribute('tabindex', '0');
+          el.setAttribute('role', 'button');
+        });
+      });
     })();
     </script>
 </body>

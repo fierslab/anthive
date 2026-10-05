@@ -270,7 +270,7 @@ URL hash scheme (feature: back-button / shareable filter state):
         {% if _mv.scope != 'dataset' %}<th data-sortcol="dataset">dataset</th>{% endif %}
         <th class="mv-th-tag" data-sortcol="tag">obs column</th>
         <th data-sortcol="method">method</th>
-        <th data-sortcol="value" style="text-align:right">per-cell association (exploratory) <span class="info" onclick="event.stopPropagation()" title="Computed over individual cells, not donors or animals, and not within cell type: describes where a score differs, not a tested effect. For donor-level effects see the Facets tab.">ⓘ</span></th>
+        <th data-sortcol="value" style="text-align:right">per-cell association (descriptive) <span class="info" onclick="event.stopPropagation()" title="Per-cell (descriptive): computed over individual cells, which are not replicates, and not within cell type. It describes where a score differs, not a tested effect. For replicate-level effects see the Facets tab.">ⓘ</span></th>
         <th class="mv-pos mv-sort-desc" data-sortcol="position">vs peer modules <span class="info" onclick="event.stopPropagation()" title="Peers = other modules scored with the SAME method on the SAME (dataset, tag). The dot is this row's value on the min–max range across peer modules; red, amber and green mark the low, middle and high third. Click to sort by this column.">ⓘ</span></th>
         <th style="text-align:center;cursor:default">plots</th>
       </tr></thead>

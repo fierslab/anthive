@@ -123,30 +123,39 @@
 <p class="audit-note" id="facet-hidden-admin">Only admins see this page. The facet is outside the site's <code>facets_visible</code> list while the facet audit decisions are pending.</p>
 {% endif %}
 
-{% if facet_effects is not none %}
-{% from "_facet_effects.html" import fx_styles, fx_intro, fx_table, fx_methods_box, fx_script, fx_recurring %}
+{% if facet_effects_pending %}
+{% from "_facet_effects.html" import fx_styles, fx_intro, fx_methods_box, fx_script, fx_recurring %}
 {{ fx_styles() }}
 <div class="card" id="facet-effects">
-  <h2 class="section-head">Effects across datasets <span class="muted">({{ facet_effects.rows|length }} {{ 'dataset and cell type' if facet_effects.rows|length == 1 else 'dataset and cell type combinations' }} in {{ facet_effects.n_datasets_tested }} {{ 'dataset' if facet_effects.n_datasets_tested == 1 else 'datasets' }})</span>
-    <span class="info" title="Donor-level tests of this facet, one row per dataset and cell type, sorted by the number of donors. No pooling.">ⓘ</span></h2>
+  <h2 class="section-head">Effects across datasets
+    <span class="info" title="Donor-level tests of this facet, one row per dataset and cell type. Replication across cohorts is judged per gene with one anchor unit per cohort.">ⓘ</span></h2>
   {{ fx_intro('facet') }}
-  <p class="fx-intro" id="fx-no-pooling"><strong>No pooling.</strong> Each row is a separate test. A cross-dataset meta-analysis comes later; it has to account for donors that occur in several datasets (ROSMAP, SEA-AD, MADRC and others).</p>
+  {% if facet_name == 'ant_disease' %}
+  <p class="fx-intro" id="fx-disease-definition"><strong>Disease definition.</strong> Datasets define AD vs control in different ways. Only cohorts with a pathology-based definition (Braak x CERAD, NIA-Reagan or ADNC) are combined for replication; clinical or author diagnoses are listed in the tables and never counted. Each unit below states its definition.</p>
+  {% endif %}
   {{ fx_methods_box() }}
-  {% if facet_effects.rows %}
-  <h3 class="subsection-head">Units tested <span class="muted">(one row per dataset and cell type, most donors first)</span></h3>
-  {{ fx_table(facet_effects.rows, 'fx-table-across', show_dataset=True) }}
   {{ fx_recurring(facet_name) }}
-  {% else %}
-  <p class="fx-none">No dataset has a tested result for this facet yet.</p>
-  {% endif %}
-  {% if facet_effects.not_tested %}
-  <details class="fx-untested" id="fx-across-untested">
-    <summary class="muted">{{ facet_effects.not_tested|length }} {{ 'dataset' if facet_effects.not_tested|length == 1 else 'datasets' }} with results for other facets but not this one</summary>
-    <ul>{% for item in facet_effects.not_tested %}<li><a href="/browse/{{ item.db_id }}">{{ item.db_id }}</a> {{ item.title or '' }}: <span class="muted">{{ item.reason or 'not tested' }}</span></li>{% endfor %}</ul>
-  </details>
-  {% endif %}
+  <div id="fx-across-slot" data-url="/facets/{{ facet_name|urlencode }}/effects-table">
+    <p class="fx-none" id="fx-across-loading">Loading the per dataset results&hellip;</p>
+  </div>
 </div>
 {{ fx_script() }}
+<script>
+(function () {
+    var slot = document.getElementById('fx-across-slot');
+    if (!slot) return;
+    fetch(slot.dataset.url, { credentials: 'same-origin' }).then(function (response) {
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        return response.text();
+    }).then(function (html) {
+        slot.innerHTML = html;
+        if (window.antFxBind) window.antFxBind(slot);
+        if (location.hash && document.querySelector(location.hash)) document.querySelector(location.hash).scrollIntoView();
+    }).catch(function () {
+        slot.innerHTML = '<p class="fx-none" id="fx-across-error">The per dataset results could not be loaded. Reload the page to try again.</p>';
+    });
+})();
+</script>
 {% endif %}
 
 <div class="card">

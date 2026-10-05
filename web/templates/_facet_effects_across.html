@@ -1,0 +1,20 @@
+{#- Fragment fetched by facet.html (GET /facets/{name}/effects-table): the
+    per dataset and cell type table of one facet and the datasets that were
+    not testable for it. No <script>: facet.html binds the toggles. -#}
+{% from "_facet_effects.html" import fx_table %}
+{% if facet_effects is none %}
+<p class="fx-none" id="fx-across-error">The per dataset results could not be loaded. Try again in a moment.</p>
+{% else %}
+{% if facet_effects.rows %}
+<h3 class="subsection-head">Units tested <span class="muted">({{ facet_effects.rows|length }} {{ 'dataset and cell type' if facet_effects.rows|length == 1 else 'dataset and cell type combinations' }} in {{ facet_effects.n_datasets_tested }} {{ 'dataset' if facet_effects.n_datasets_tested == 1 else 'datasets' }}, most donors first)</span></h3>
+{{ fx_table(facet_effects.rows, 'fx-table-across', show_dataset=True) }}
+{% else %}
+<p class="fx-none">No dataset has a tested result for this facet yet.</p>
+{% endif %}
+{% if facet_effects.not_tested %}
+<details class="fx-untested" id="fx-across-untested">
+  <summary class="muted">{{ facet_effects.not_tested|length }} {{ 'dataset' if facet_effects.not_tested|length == 1 else 'datasets' }} with results for other facets but not this one</summary>
+  <ul>{% for item in facet_effects.not_tested %}<li><a href="/browse/{{ item.db_id }}">{{ item.db_id }}</a> {{ item.title or '' }}: <span class="muted">{{ item.reason or 'not tested' }}</span></li>{% endfor %}</ul>
+</details>
+{% endif %}
+{% endif %}

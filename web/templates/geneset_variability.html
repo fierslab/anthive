@@ -49,11 +49,11 @@
 {% from "_macros.html" import breadcrumb %}
 {{ breadcrumb([("gene sets", "/genesets"), ("geneset variability", None)]) }}
 <h1 class="page-title">Geneset variability across the fleet
-  <span class="info" title="Per-cell association (exploratory). For each (geneset × dataset × obs column), a statistic over individual cells of how the geneset score co-varies with the column. Computed over cells, not donors or animals, and not within cell type: describes where a score differs, not a tested effect. For donor-level effects see the Facets tab of a dataset. Rows = genesets, columns = datasets, colour = statistic value.">ⓘ</span></h1>
+  <span class="info" title="Per-cell association (descriptive). For each (geneset × dataset × obs column), a statistic over individual cells of how the geneset score co-varies with the column. Computed over cells, not donors or animals, and not within cell type: describes where a score differs, not a tested effect. For donor-level effects see the Facets tab of a dataset. Rows = genesets, columns = datasets, colour = statistic value.">ⓘ</span></h1>
 
 <p class="mv-intro">Which genesets track a biological axis, and in which datasets. Pick an
 <b>obs column</b> (e.g. braak, sex) and a <b>statistic</b> below; each heat-map cell shows the
-<b>per-cell association (exploratory)</b> between that geneset's score and the column in that dataset.
+<b>per-cell association (descriptive)</b> between that geneset's score and the column in that dataset.
 It is descriptive, not a tested effect; donor-level effects are on the Facets tab of each dataset.</p>
 
 <details class="mv-stats-help">
