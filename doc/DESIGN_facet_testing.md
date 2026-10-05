@@ -40,7 +40,7 @@ cell minimum is undefined for one sample per donor.
 | --- | --- | --- | --- |
 | sex | `ant_sex` | male vs female (log fold change = male minus female) | other values dropped |
 | disease | `ant_disease` | AD vs control (control is the reference) | everything else (MCI, NCI, PD, AD_DLBD, ...) dropped. **Provisional**: vocabulary decisions L17 to L21 are open; the output column `provisional` is true |
-| apoe_carrier | `ant_apoe_carrier` | e4 carrier vs non-carrier | derived from `ant_apoe` (any e4 allele) when the carrier column is absent |
+| apoe4_carrier | `ant_apoe4_carrier` | e4 carrier vs non-carrier | derived from `ant_apoe` (any e4 allele) when the carrier column is absent |
 | braak | `ant_braak` | linear trend, log2 fold change per Braak unit | donor value must be a single number |
 
 A donor whose cells carry more than one distinct value for a facet gets NULL

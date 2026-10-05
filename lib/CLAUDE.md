@@ -71,7 +71,7 @@ Context manager for adding obs columns without an h5ad rebuild. Invariants:
 
 `build_obs_view_sql` takes `group_id` (for `{group_id}` templates) and
 `store_root` (join tables; default the configured store); every caller
-passes the group id. It also computes `ant_braak_group` / `ant_apoe_carrier`
+passes the group id. It also computes `ant_braak_group` / `ant_apoe4_carrier`
 from `ant_braak` / `ant_apoe` when the `.md` declares neither
 (`COMPUTED_FACETS`), and logs a warning for a derive whose source column is
 missing (pass the sibling table, or cross-table derives look missing).

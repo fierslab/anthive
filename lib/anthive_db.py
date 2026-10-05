@@ -23,8 +23,10 @@ import numpy as np
 import pandas as pd
 
 try:
+    from facet_aliases import DEPRECATED_FACET_COLUMNS
     from obs_derive_forms import FORM_JOIN, FORM_TEMPLATE, derive_form, derive_sql as derive_form_sql
 except ImportError:  # imported as lib.anthive_db
+    from lib.facet_aliases import DEPRECATED_FACET_COLUMNS  # type: ignore[no-redef]
     from lib.obs_derive_forms import (FORM_JOIN, FORM_TEMPLATE, derive_form,  # type: ignore[no-redef]
                                       derive_sql as derive_form_sql)
 
@@ -70,7 +72,7 @@ def _q(name: str) -> str:
 #: ``facet_mapping.COMPUTED_FACETS`` and ``facet_lint.braak_group_of``.
 COMPUTED_FACETS: Dict[str, str] = {
     'ant_braak_group': 'ant_braak',
-    'ant_apoe_carrier': 'ant_apoe',
+    'ant_apoe4_carrier': 'ant_apoe',
 }
 
 
@@ -79,7 +81,7 @@ def _computed_facet_sql(target: str, source_expr: str) -> str:
 
     * ``ant_braak_group``: Braak 0 to 2 ``low``, 3 to 4 ``medium``, 5 to 6
       ``high``; anything else (NULL, text, 7, 2.5) is NULL.
-    * ``ant_apoe_carrier``: an ``ant_apoe`` value of the shared form
+    * ``ant_apoe4_carrier``: an ``ant_apoe`` value of the shared form
       ``E<a>/E<b>`` (a, b in 2, 3, 4) is ``E4+`` when it holds an E4 allele
       and ``E4-`` otherwise; any other value (a single allele, author codes
       the dataset did not rewrite) is NULL.
@@ -89,7 +91,7 @@ def _computed_facet_sql(target: str, source_expr: str) -> str:
         return (f"CASE WHEN {stage} IN (0, 1, 2) THEN 'low' "
                 f"WHEN {stage} IN (3, 4) THEN 'medium' "
                 f"WHEN {stage} IN (5, 6) THEN 'high' ELSE NULL END")
-    if target == 'ant_apoe_carrier':
+    if target == 'ant_apoe4_carrier':
         text = f'CAST({source_expr} AS VARCHAR)'
         return (f"CASE WHEN regexp_full_match({text}, 'E[234]/E[234]') "
                 f"THEN (CASE WHEN contains({text}, 'E4') THEN 'E4+' ELSE 'E4-' END) "
@@ -130,10 +132,14 @@ def build_obs_view_sql(
     used to be dropped silently; the audit found 28 files that lost data
     that way). Pass both tables to avoid false warnings.
 
-    ``ant_braak_group`` and ``ant_apoe_carrier`` are computed centrally
+    ``ant_braak_group`` and ``ant_apoe4_carrier`` are computed centrally
     from the published ``ant_braak`` / ``ant_apoe`` (``COMPUTED_FACETS``,
     ``_computed_facet_sql``) when the ``.md`` declares neither the facet
     itself nor a stored column of that name. They land in the obscat view.
+
+    A view that exposes a renamed facet also gets the deprecated name as an
+    alias column (``facet_aliases.DEPRECATED_FACET_COLUMNS``, e.g.
+    ``ant_apoe_carrier`` = ``ant_apoe4_carrier``), kept for one release.
 
     Shared by ant-convert (initial view build) and AnnotationWriter
     (view rebuild after ALTER TABLE ADD COLUMN).
@@ -292,12 +298,14 @@ def build_obs_view_sql(
         return None
 
     projections = ['c.cell_name']
+    projected_names = ['cell_name']
     for col in columns:
         if col == 'cell_id':
             continue
         if col in hidden:
             continue
         projections.append(_projection_for(col))
+        projected_names.append(rename.get(col, col))
 
     # obs_constant projections — one literal per active constant column.
     # No source col, no CASE, just SELECT '<value>' AS <alias>. Used to
@@ -312,12 +320,14 @@ def build_obs_view_sql(
         else:
             value_sql = 'NULL' if raw_value is None else _sql_str(str(raw_value))
         projections.append(f"{value_sql} AS {safe_ident(new_col)}")
+        projected_names.append(new_col)
 
     # obs_derive projections — one CASE expression per active derivation.
     # The alias is validated by safe_ident (strict) since it's a
     # user-supplied string that lands in the public schema.
     for new_col, spec in active_derive.items():
         projections.append(f"{_derive_expr(spec, spec['_source_table'])} AS {safe_ident(new_col)}")
+        projected_names.append(new_col)
 
     # Centrally computed facets (obscat only), unless the dataset declares
     # them or stores a column of that name.
@@ -333,6 +343,7 @@ def build_obs_view_sql(
             expression, needs_sibling = published
             join_sibling = join_sibling or needs_sibling
             projections.append(f"{_computed_facet_sql(target, expression)} AS {safe_ident(target)}")
+            projected_names.append(target)
 
     join_sql = f"JOIN __cells c ON o.cell_id = c.cell_id"
     if join_sibling and sibling_underscore_table:
@@ -340,12 +351,12 @@ def build_obs_view_sql(
             f" LEFT JOIN {_q(sibling_underscore_table)} s "
             f"ON o.cell_id = s.cell_id"
         )
-    return (
-        f"CREATE VIEW {safe_ident(view_name)} AS "
-        f"SELECT {', '.join(projections)} "
-        f"FROM {_q(underscore_table)} o "
-        f"{join_sql}"
-    )
+    select_sql = f"SELECT {', '.join(projections)} FROM {_q(underscore_table)} o {join_sql}"
+    aliases = [f"{_q(current)} AS {_q(old)}" for old, current in DEPRECATED_FACET_COLUMNS.items()
+               if current in projected_names and old not in projected_names]
+    if aliases:
+        select_sql = f"SELECT *, {', '.join(aliases)} FROM ({select_sql})"
+    return f"CREATE VIEW {safe_ident(view_name)} AS {select_sql}"
 
 
 # Process-wide obs_summary memo. Keyed on the file signatures of the duckdb,

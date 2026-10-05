@@ -13,6 +13,11 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
+try:
+    from facet_aliases import DEPRECATED_FACET_COLUMNS
+except ImportError:  # imported as lib.config
+    from lib.facet_aliases import DEPRECATED_FACET_COLUMNS  # type: ignore[no-redef]
+
 
 class ConfigError(Exception):
     """Configuration-related errors"""
@@ -478,7 +483,7 @@ def get_docs_base_url(cfg: Optional[Dict[str, Any]] = None) -> str:
     return (value or DEFAULT_DOCS_BASE_URL).rstrip('/')
 
 
-DEFAULT_FACETS_VISIBLE = ('ant_sex', 'ant_disease', 'ant_apoe_carrier', 'ant_braak')
+DEFAULT_FACETS_VISIBLE = ('ant_sex', 'ant_disease', 'ant_apoe4_carrier', 'ant_braak')
 
 
 def get_facets_visible(cfg: Optional[Dict[str, Any]] = None) -> List[str]:
@@ -500,7 +505,7 @@ def get_facets_visible(cfg: Optional[Dict[str, Any]] = None) -> List[str]:
     if env_value:
         if env_value == '*':
             return []
-        return [part.strip() for part in env_value.split(',') if part.strip()]
+        return _current_facet_names(env_value.split(','))
     cfg = cfg if cfg is not None else load_config()
     if 'facets_visible' not in cfg:
         return list(DEFAULT_FACETS_VISIBLE)
@@ -509,7 +514,18 @@ def get_facets_visible(cfg: Optional[Dict[str, Any]] = None) -> List[str]:
         return []
     if isinstance(value, str):
         value = value.split(',')
-    return [str(part).strip() for part in value if str(part).strip()]
+    return _current_facet_names(value)
+
+
+def _current_facet_names(names: List[Any]) -> List[str]:
+    """Strip names, drop empties, and map deprecated facet names (the
+    one-release aliases) to their current name without duplicates."""
+    current: List[str] = []
+    for name in names:
+        text = DEPRECATED_FACET_COLUMNS.get(str(name).strip(), str(name).strip())
+        if text and text not in current:
+            current.append(text)
+    return current
 
 
 def facet_hidden_by_config(facet: str, visible: Optional[List[str]] = None) -> bool:

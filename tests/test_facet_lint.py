@@ -3,7 +3,7 @@
 Covers ``lib/obscol_tags_vocab.yaml`` as the single source of the closed
 ``ant_*`` namespace, ``lib/facet_lint.py`` (static, data and lineage rules),
 the ``md_check`` integration, and the view builder's warning plus the
-centrally computed ``ant_braak_group`` / ``ant_apoe_carrier``.
+centrally computed ``ant_braak_group`` / ``ant_apoe4_carrier``.
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ VOCAB = Path(obscol_tags.VOCAB_PATH)
 
 APPROVED_REGISTERED = {
     'donor', 'sex', 'host_sex', 'age', 'pmi', 'disease', 'braak', 'braak_group', 'apoe',
-    'apoe_carrier', 'cell_type', 'tissue', 'genotype', 'author_cluster',
+    'apoe4_carrier', 'cell_type', 'tissue', 'genotype', 'author_cluster',
     'cognitive_status', 'comorbidity', 'adnc', 'donor_uid',
 }
 
@@ -300,7 +300,7 @@ def _view(api, obscat, obsnum, rows_cat, rows_num):
     return connection
 
 
-def test_builder_computes_braak_group_and_apoe_carrier():
+def test_builder_computes_braak_group_and_apoe4_carrier():
     api = {'obs_rename': {'APOE': 'ant_apoe'},
            'obs_value_rename': {'APOE': {'34': 'E3/E4', '33': 'E3/E3', '44': 'E4/E4'}},
            'obs_derive': {'ant_braak': {'source': 'Braak', 'dtype': 'numerical',
@@ -309,7 +309,7 @@ def test_builder_computes_braak_group_and_apoe_carrier():
                        [('Braak 0', '34'), ('Braak III', '33'), ('Braak VI', '44'), ('Reference', 'E4'),
                         ('Braak II', None)],
                        [(1.0,)] * 5)
-    rows = connection.execute('SELECT c.cell_name, ant_braak_group, ant_apoe_carrier FROM obscat c '
+    rows = connection.execute('SELECT c.cell_name, ant_braak_group, ant_apoe4_carrier FROM obscat c '
                               'ORDER BY cell_name').fetchall()
     assert rows == [('c0', 'low', 'E4+'), ('c1', 'medium', 'E4-'), ('c2', 'high', 'E4+'),
                     ('c3', None, None), ('c4', 'low', None)]
@@ -323,7 +323,7 @@ def test_builder_keeps_a_declared_braak_group():
     rows = connection.execute('SELECT ant_braak_group FROM obscat ORDER BY cell_name').fetchall()
     assert rows == [('early',), ('late',)]
     columns = [r[0] for r in connection.execute('DESCRIBE obscat').fetchall()]
-    assert columns.count('ant_braak_group') == 1 and 'ant_apoe_carrier' not in columns
+    assert columns.count('ant_braak_group') == 1 and 'ant_apoe4_carrier' not in columns
 
 
 def test_builder_warns_on_missing_derive_source(caplog):
@@ -339,8 +339,8 @@ def test_builder_warns_on_missing_derive_source(caplog):
 def test_facet_mapping_describes_computed_facets():
     entries = {e['facet']: e for e in project_dataset(
         {'obs_rename': {'Braak': 'ant_braak', 'apoe': 'ant_apoe'}},
-        live_categorical=['ant_apoe', 'ant_braak_group', 'ant_apoe_carrier'], live_numerical=['ant_braak'])}
+        live_categorical=['ant_apoe', 'ant_braak_group', 'ant_apoe4_carrier'], live_numerical=['ant_braak'])}
     assert entries['ant_braak_group']['mapping_kind'] == COMPUTED
     assert entries['ant_braak_group']['live'] is True
-    assert entries['ant_apoe_carrier']['source_columns'] == ['ant_apoe']
+    assert entries['ant_apoe4_carrier']['source_columns'] == ['ant_apoe']
     assert '5 to 6 high' in entries['ant_braak_group']['computed_rule']

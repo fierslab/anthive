@@ -22,7 +22,7 @@ declares it in the ``api:`` section (validated by
   described in ``lib/obs_derive_forms.py``.
 * ``obs_constant`` ``ant_x: {value, dtype}`` broadcasts one value to every
   cell.
-* computed: ``ant_braak_group`` and ``ant_apoe_carrier`` are computed
+* computed: ``ant_braak_group`` and ``ant_apoe4_carrier`` are computed
   centrally from the published ``ant_braak`` / ``ant_apoe`` when the
   ``.md`` declares neither (``COMPUTED_FACETS``; the SQL is
   ``anthive_db._computed_facet_sql``).
@@ -46,6 +46,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from facet_aliases import is_deprecated_facet_column
 from obs_derive_forms import (FORM_JOIN, FORM_TEMPLATE, RULE_CROSSWALK, RULE_FALLBACK, RULE_TEMPLATE,
                               RULE_NULL, RULE_UNMATCHED, Crosswalk, crosswalk_for, derive_form, translate_value)
 
@@ -63,7 +64,7 @@ JOIN = 'join'
 #: as published text. Mirrors ``anthive_db.COMPUTED_FACETS``.
 COMPUTED_FACETS: Dict[str, Tuple[str, str]] = {
     'ant_braak_group': ('ant_braak', 'Braak 0 to 2 low, 3 to 4 medium, 5 to 6 high; anything else NULL'),
-    'ant_apoe_carrier': ('ant_apoe', 'E4+ when ant_apoe (E<a>/E<b>) holds an E4 allele, E4- when it holds '
+    'ant_apoe4_carrier': ('ant_apoe', 'E4+ when ant_apoe (E<a>/E<b>) holds an E4 allele, E4- when it holds '
                                      'none; values of another form NULL'),
 }
 
@@ -261,9 +262,9 @@ def project_dataset(
         entries[target] = entry
 
     # A facet the view serves without any declaration came from the h5ad
-    # itself under its ant_* name.
+    # itself under its ant_* name (the deprecated alias columns are not facets).
     for facet in sorted(live_cat | live_num):
-        if is_facet(facet) and facet not in entries:
+        if is_facet(facet) and facet not in entries and not is_deprecated_facet_column(facet):
             entry = _base(facet, NATIVE)
             entry['source_columns'] = [facet]
             entry['sources'] = [{'column': facet, 'published_as': facet, 'hidden': False}]

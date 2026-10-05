@@ -40,6 +40,7 @@ import pandas as pd
 
 from celltype_groups import UNMAPPED, group_info, group_of
 from donor_keys import distinct_count
+from facet_aliases import DEPRECATED_FACET_TAGS, canonical_facet
 
 log = logging.getLogger(__name__)
 
@@ -57,7 +58,7 @@ SUFFIXES = {
 #: ``facet_donor_exclusions`` rule: supplementary, never counted, not read by the API.
 SUPPLEMENTARY_DIRNAME = 'supplementary_all_donors'
 
-FACET_ORDER = ('sex', 'disease', 'apoe_carrier', 'braak')
+FACET_ORDER = ('sex', 'disease', 'apoe4_carrier', 'braak')
 METHOD_ORDER = (('cell_mean', 'geneset'), ('cell_mean', 'ucell'), ('pseudobulk', 'gene_list'))
 
 # Columns returned per gene row and per module row (only those present in the
@@ -197,7 +198,7 @@ FACET_INFO = {
     'sex': {'contrast': 'm vs f', 'effect_unit': 'log2 fold change, male minus female', 'provisional': False},
     'disease': {'contrast': 'AD vs control', 'effect_unit': 'log2 fold change, AD minus control',
                 'provisional': True},
-    'apoe_carrier': {'contrast': 'any e4 allele vs none (e2 carriers pooled with e3/e3)',
+    'apoe4_carrier': {'contrast': 'any e4 allele vs none (e2 carriers pooled with e3/e3)',
                      'effect_unit': 'log2 fold change, e4 carrier minus non-carrier', 'provisional': False},
     'braak': {'contrast': 'linear trend per Braak stage (not AD vs control)',
               'effect_unit': 'log2 fold change per Braak stage', 'provisional': False},
@@ -278,6 +279,34 @@ def _split_covariates(value: Any) -> List[str]:
     if not text:
         return []
     return [part.strip() for part in text.split(',') if part.strip()]
+
+
+def _rename_deprecated_facets(frame: pd.DataFrame) -> pd.DataFrame:
+    """Result frame with deprecated facet names (``apoe_carrier``) in its
+    ``facet`` column replaced by the current name; results written before the
+    rename keep working. Returns the input when nothing needs renaming."""
+    if 'facet' in frame.columns and frame['facet'].isin(list(DEPRECATED_FACET_TAGS)).any():
+        frame = frame.assign(facet=frame['facet'].replace(DEPRECATED_FACET_TAGS))
+    return frame
+
+
+def _stored_facet_names(facet: str) -> List[str]:
+    """The names ``facet`` may carry in result files: the current one plus
+    its deprecated predecessors."""
+    return [facet] + [old for old, current in DEPRECATED_FACET_TAGS.items() if current == facet]
+
+
+def _rename_deprecated_in_json(value: Any) -> Any:
+    """Manifest data with every string equal to a deprecated facet name (as a
+    value or a key) replaced by the current name."""
+    if isinstance(value, dict):
+        return {DEPRECATED_FACET_TAGS.get(key, key) if isinstance(key, str) else key:
+                _rename_deprecated_in_json(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_rename_deprecated_in_json(item) for item in value]
+    if isinstance(value, str):
+        return DEPRECATED_FACET_TAGS.get(value, value)
+    return value
 
 
 def _unit_key(facet: Any, cell_type: Any, celltype_source: Any) -> Tuple[str, str, str]:
@@ -369,7 +398,7 @@ class FacetResults:
             wanted = [c for c in columns if c in names]
             if not wanted:
                 return None
-            frame = pd.read_parquet(path, columns=wanted)
+            frame = _rename_deprecated_facets(pd.read_parquet(path, columns=wanted))
         except Exception as exc:  # partial write, corrupt file, schema change
             log.warning('facet results: cannot read %s: %s', path, exc)
             return None
@@ -391,8 +420,7 @@ class FacetResults:
                 return self._json[key]
         try:
             data = json.loads(path.read_text())
-            if not isinstance(data, dict):
-                data = None
+            data = _rename_deprecated_in_json(data) if isinstance(data, dict) else None
         except Exception as exc:
             log.warning('facet results: cannot read %s: %s', path, exc)
             return None
@@ -701,6 +729,7 @@ class FacetResults:
 
     def _filter_unit(self, frame: pd.DataFrame, facet: Optional[str], cell_type: Optional[str],
                      celltype_source: Optional[str]) -> pd.DataFrame:
+        facet = canonical_facet(facet) if facet else facet
         mask = pd.Series(True, index=frame.index)
         for column, value in (('facet', facet), ('cell_type', cell_type),
                               ('celltype_source', celltype_source)):
@@ -722,6 +751,7 @@ class FacetResults:
             (rows, number of rows matching before the limit), or None when the
             gene results file is missing or unreadable.
         """
+        facet = canonical_facet(facet) if facet else facet
         if sort not in GENE_SORTS:
             raise FacetResultsError(f'sort must be one of {", ".join(GENE_SORTS)}')
         frame = self._read_parquet(result_paths(self.results_dir, group_folder, stem)['genes'],
@@ -760,6 +790,7 @@ class FacetResults:
         orders by ``q_param``, then by absolute ``std_effect``; ``q_perm`` by
         ``q_perm``; ``effect`` by absolute ``std_effect``.
         """
+        facet = canonical_facet(facet) if facet else facet
         if sort not in MODULE_SORTS:
             raise FacetResultsError(f'sort must be one of {", ".join(MODULE_SORTS)}')
         if q_by not in MODULE_Q_BY:
@@ -933,6 +964,7 @@ class FacetResults:
             ``descriptive_only``, ``cohort``, ``cohort_label``, ``role``,
             ``counted`` and ``summary_unit`` (the summary unit dict).
         """
+        facet = canonical_facet(facet) if facet else facet
         signature = (facet, _file_key(self.results_dir / COHORT_TABLE_NAME), tuple(
             (d['db_id'], bool(d.get('is_secondary')), self.fingerprint(d['group_folder'], d['stem']))
             for d in datasets))
@@ -955,10 +987,10 @@ class FacetResults:
             if not tested:
                 continue
             try:
-                frame = pd.read_parquet(paths['genes'], columns=['facet', 'cell_type', 'celltype_source',
-                                                                 'gene', 'logFC', 'ci_low', 'ci_high',
-                                                                 'q_value'],
-                                        filters=[('facet', '==', facet)])
+                frame = _rename_deprecated_facets(pd.read_parquet(
+                    paths['genes'], columns=['facet', 'cell_type', 'celltype_source', 'gene', 'logFC',
+                                             'ci_low', 'ci_high', 'q_value'],
+                    filters=[('facet', 'in', _stored_facet_names(facet))]))
             except Exception as exc:
                 log.warning('facet results: cannot read %s: %s', paths['genes'], exc)
                 continue
@@ -1112,7 +1144,7 @@ class FacetResults:
         by cohort, with the replication badge per cell type group.
 
         Args:
-            facet: Test facet (sex, disease, apoe_carrier, braak).
+            facet: Test facet (sex, disease, apoe4_carrier, braak).
             gene: Gene symbol (case-insensitive).
             datasets: Dicts with ``db_id``, ``group_folder``, ``stem`` and
                 optional ``title``, ``sha256``, ``is_secondary``.
@@ -1126,6 +1158,7 @@ class FacetResults:
             Units carry the raw ``cell_type`` and its ``celltype_group``;
             ``replication`` and ``cell_types`` are per group.
         """
+        facet = canonical_facet(facet) if facet else facet
         rows, units = self.facet_gene_table(facet, datasets)
         info = FACET_INFO.get(facet, {'contrast': facet, 'effect_unit': 'log2 fold change', 'provisional': False})
         units = self.counting_units(units, exclude_secondary) if len(units) else units
@@ -1200,7 +1233,7 @@ class FacetResults:
                  'cell types are counted by group (lib/celltype_groups.yaml); the raw label is on each unit']
         if info.get('provisional'):
             notes.append(PROVISIONAL_NOTE)
-        if gene.upper() in APOE_LOCUS_GENES and facet == 'apoe_carrier':
+        if gene.upper() in APOE_LOCUS_GENES and facet == 'apoe4_carrier':
             notes.append(APOE_LOCUS_NOTE)
         return json_safe({
             'query': {'gene': gene, 'facet': facet, 'cell_type': cell_type,
@@ -1240,6 +1273,7 @@ class FacetResults:
         cohorts_same_sign, agreement, direction, sign_discordant, units_up,
         units_down, median_abs_logFC, max_abs_logFC, cohorts, apoe_locus``.
         """
+        facet = canonical_facet(facet) if facet else facet
         rows, units = self.facet_gene_table(facet, datasets)
         units = self.counting_units(units, exclude_secondary) if len(units) else units
         counted = units[units['counted_effective']] if len(units) else units
@@ -1348,7 +1382,7 @@ class FacetResults:
         stratum), sorted by donors analysed (most first). No pooling.
 
         Args:
-            facet: Test facet name (``sex``, ``disease``, ``apoe_carrier``, ``braak``).
+            facet: Test facet name (``sex``, ``disease``, ``apoe4_carrier``, ``braak``).
             datasets: Dicts with ``db_id``, ``group_folder``, ``stem`` and
                 optional ``title``, ``group``, ``sha256``.
             top_genes: Genes at q < 0.05 listed per row (smallest q first).
@@ -1360,6 +1394,7 @@ class FacetResults:
             lists datasets with result files whose units for this facet were
             all untested, with the reason.
         """
+        facet = canonical_facet(facet) if facet else facet
         signature = (facet, top_genes, exclude_secondary, tuple(
             (d['db_id'], bool(d.get('is_secondary')), self.fingerprint(d['group_folder'], d['stem']))
             for d in datasets))
@@ -1431,6 +1466,7 @@ class FacetResults:
 
     def _top_genes(self, path: Path, facet: str, n_top: int) -> Dict[Tuple[str, str], List[Dict[str, Any]]]:
         """(cell_type, celltype_source) -> the n_top genes with smallest q < 0.05."""
+        facet = canonical_facet(facet) if facet else facet
         try:
             import pyarrow.parquet as pq
             names = set(pq.read_schema(path).names)
@@ -1438,7 +1474,8 @@ class FacetResults:
                       if c in names]
             if len(wanted) < 6:
                 return {}
-            frame = pd.read_parquet(path, columns=wanted, filters=[('facet', '==', facet)])
+            frame = _rename_deprecated_facets(pd.read_parquet(
+                path, columns=wanted, filters=[('facet', 'in', _stored_facet_names(facet))]))
         except Exception as exc:
             log.warning('facet results: cannot read %s: %s', path, exc)
             return {}
@@ -1466,6 +1503,7 @@ class FacetResults:
             PNG bytes, or None when the unit has no gene rows with a p value
             (missing file, unknown unit, descriptive-only unit).
         """
+        facet = canonical_facet(facet) if facet else facet
         path = result_paths(self.results_dir, group_folder, stem)['genes']
         cache_key = (_file_key(path), facet, cell_type, celltype_source, n_labels)
         if cache_key[0] is None:
@@ -1605,7 +1643,7 @@ _STRATUM_SOURCES = {
 _FACET_TERMS = {
     'sex': ('sex', 'm vs f: coefficient = m minus f (f is the reference)'),
     'disease': ('disease', 'AD vs control: coefficient = AD minus control (control is the reference)'),
-    'apoe_carrier': ('apoe_carrier', 'e4 carrier vs non-carrier: coefficient = carrier minus non-carrier'),
+    'apoe4_carrier': ('apoe4_carrier', 'e4 carrier vs non-carrier: coefficient = carrier minus non-carrier'),
     'braak': ('braak', 'Braak stage as a number: coefficient = change per Braak stage (linear trend)'),
 }
 
@@ -1707,6 +1745,7 @@ def dataset_facet_note(facet: str, gene_manifest: Optional[dict], module_manifes
     Returns:
         The note text, or None when the dataset has none for this facet.
     """
+    facet = canonical_facet(facet) if facet else facet
     for manifest in (gene_manifest, module_manifest):
         notes = (manifest or {}).get('facet_notes')
         if isinstance(notes, dict) and notes.get(facet):

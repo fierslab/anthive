@@ -225,7 +225,7 @@ one-shot migration scripts keep the frozen 2026-08 list
 
 | Status | Facets |
 | --- | --- |
-| registered | donor, sex, host_sex, age, pmi, disease, braak, braak_group, apoe, apoe_carrier, cell_type, tissue, genotype, author_cluster (dataset scoped), cognitive_status, comorbidity, adnc, donor_uid |
+| registered | donor, sex, host_sex, age, pmi, disease, braak, braak_group, apoe, apoe4_carrier, cell_type, tissue, genotype, author_cluster (dataset scoped), cognitive_status, comorbidity, adnc, donor_uid |
 | deprecated | cluster (use author_cluster), condition (disease, genotype; treatment arms to a plain column), region (tissue), ad_stage (adnc), author_cell_type (a plain column) |
 
 **Treatment is not a facet** (Mark, 2026-10-05). Treatments differ too
@@ -261,7 +261,7 @@ the `.md` declares neither the facet nor a stored column of that name:
 
 * `ant_braak_group` from the published `ant_braak`: 0 to 2 `low`, 3 to 4
   `medium`, 5 to 6 `high`; NULL for anything else (NULL, text, 7, 2.5).
-* `ant_apoe_carrier` from the published `ant_apoe`: a value of the form
+* `ant_apoe4_carrier` from the published `ant_apoe`: a value of the form
   `E<a>/E<b>` (a, b in 2, 3, 4) is `E4+` when it holds E4, else `E4-`; any
   other value (a single allele such as `E4`, an author code) is NULL.
 

@@ -1091,7 +1091,7 @@ _DATASET_FACETS = {
          "source_columns": [], "sources": [], "source_hidden": False, "redacted": False,
          "value_map": [], "unmapped": None, "default": None,
          "constant_value": "prefrontal cortex", "n_cells": 1500, "n_missing": 0},
-        {"facet": "ant_apoe_carrier", "label": "APOE e4 carrier", "summary": "E4+ or E4-.",
+        {"facet": "ant_apoe4_carrier", "label": "APOE e4 carrier", "summary": "E4+ or E4-.",
          "defined": True, "mapping_kind": "derived", "live": True, "dtype": "categorical",
          "source_columns": [], "sources": [], "source_hidden": True, "redacted": True,
          "value_map": [{"from": None, "to": "E4+", "rule": "mapped", "n_cells": 700}],
@@ -6813,7 +6813,7 @@ def test_dataset_facets_card_shows_effects_per_facet(client):
 
 def test_dataset_facets_card_hides_facets_outside_the_config(client, monkeypatch):
     hidden = {**_DATASET_FACETS, "facets": [
-        {**f, "hidden_by_config": f["facet"] not in ("ant_sex", "ant_apoe_carrier")}
+        {**f, "hidden_by_config": f["facet"] not in ("ant_sex", "ant_apoe4_carrier")}
         for f in _DATASET_FACETS["facets"]]}
 
     def fake(api_url, path, **kwargs):
@@ -6891,7 +6891,7 @@ def test_facets_index_hides_facets_and_signal(client, monkeypatch):
 def test_gene_page_has_facet_effects_panel(client):
     text = client.get("/genes/PTPRG").text
     assert 'id="gene-facet-effects"' in text and 'data-gene="PTPRG"' in text
-    for facet in ("sex", "disease", "apoe_carrier", "braak"):
+    for facet in ("sex", "disease", "apoe4_carrier", "braak"):
         assert f'data-facet="{facet}"' in text
     assert "/api/facets/" in text and "renderCard" in text
     assert "exploratory" in text and 'href="/help#facet-effects"' in text
@@ -7032,3 +7032,14 @@ def test_facet_intro_uses_manifest_permutations(client):
     macro = browser.templates.env.get_template("_facet_effects.html").module.fx_intro
     assert "10,000 label permutations" in str(macro("dataset", 10000))
     assert "10,000 by default" in str(macro("facet"))
+
+
+def test_deprecated_facet_page_redirects_to_the_current_name(client):
+    response = client.get("/facets/ant_apoe_carrier", follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"] == "/facets/ant_apoe4_carrier"
+
+
+def test_help_mentions_the_facet_rename(client):
+    text = client.get("/help").text
+    assert "ant_apoe4_carrier" in text and "ant_apoe_carrier" in text

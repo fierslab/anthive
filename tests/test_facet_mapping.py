@@ -33,6 +33,7 @@ import facet_mapping  # noqa: E402
 import obscol_tags  # noqa: E402
 from anthive_db import build_obs_view_sql, safe_ident  # noqa: E402
 from canonical_columns import CANONICAL_TAGS  # noqa: E402
+from facet_aliases import canonical_facet, is_deprecated_facet_column  # noqa: E402
 from facet_mapping import (  # noqa: E402
     candidate_columns, project_dataset, redact_hidden_sources, translate_observed,
 )
@@ -49,7 +50,7 @@ API_CONFIG = {
     'obs_derive': {
         'ant_braak_group': {'source': 'braak_num', 'dtype': 'categorical',
                             'map': {0: 'low', 3: 'medium', 6: 'high'}, 'default': 'other'},
-        'ant_apoe_carrier': {'source': 'secret_code', 'dtype': 'categorical',
+        'ant_apoe4_carrier': {'source': 'secret_code', 'dtype': 'categorical',
                              'map': {'E3/E4': 'E4+', 'E3/E3': 'E4-'}},
     },
     'obs_constant': {'ant_tissue': {'value': 'prefrontal cortex', 'dtype': 'categorical'}},
@@ -142,7 +143,7 @@ def test_non_facet_targets_are_ignored():
 
 
 def test_redaction_of_hidden_source():
-    apoe = _by_facet(project_dataset(API_CONFIG, ['ant_apoe_carrier']))['ant_apoe_carrier']
+    apoe = _by_facet(project_dataset(API_CONFIG, ['ant_apoe4_carrier']))['ant_apoe4_carrier']
     assert apoe['source_hidden'] is True
     translate_observed(apoe, [('E3/E4', 5), ('E2/E4', 2), ('E3/E3', 8)], n_distinct=3)
     clean = redact_hidden_sources(apoe)
@@ -246,7 +247,7 @@ api:
         3: medium
         6: high
       default: other
-    ant_apoe_carrier:
+    ant_apoe4_carrier:
       source: secret_code
       dtype: categorical
       map:
@@ -380,6 +381,7 @@ def serve(tmp_path):
         'Dict': Dict, 'List': List, 'Any': Any, 'Optional': Optional, 'Tuple': Tuple, 'Set': Set,
         'get_auth_settings': lambda cfg=None: {'mode': 'authelia', 'admins': set()},
         '_load_module_variability': lambda force=False: None,
+        'canonical_facet': canonical_facet, 'is_deprecated_facet_column': is_deprecated_facet_column,
         '_facets_visible': lambda: [],
         'facet_hidden_by_config': lambda facet, visible=None: bool(visible) and facet not in visible,
     }
@@ -395,7 +397,7 @@ USER = {'Remote-User': 'alice', 'Remote-Groups': 'users'}
 def test_dataset_facets_endpoint_projection(serve):
     body = serve.get(f'/databases/{DB_ID}/facets', headers=USER).json()
     facets = {f['facet']: f for f in body['facets']}
-    assert set(facets) == {'ant_sex', 'ant_donor', 'ant_braak_group', 'ant_apoe_carrier', 'ant_tissue'}
+    assert set(facets) == {'ant_sex', 'ant_donor', 'ant_braak_group', 'ant_apoe4_carrier', 'ant_tissue'}
     assert body['definitions_status']['state'] == 'under_audit'
     assert body['hidden_sources_visible'] is False
 
@@ -430,7 +432,7 @@ def test_dataset_facets_hide_obs_hidden_sources_from_non_admins(serve):
     assert 'secret_code' not in text
     assert 'E2/E4' not in text and 'E3/E3' not in text
     body = serve.get(f'/databases/{DB_ID}/facets', headers=USER).json()
-    apoe = {f['facet']: f for f in body['facets']}['ant_apoe_carrier']
+    apoe = {f['facet']: f for f in body['facets']}['ant_apoe4_carrier']
     assert apoe['redacted'] is True and apoe['source_hidden'] is True
     assert apoe['source_columns'] == []
     assert {(r['to'], r['n_cells']) for r in apoe['value_map']} == {('E4+', 2), ('E4-', 2), (None, 2)}
@@ -439,7 +441,7 @@ def test_dataset_facets_hide_obs_hidden_sources_from_non_admins(serve):
 def test_dataset_facets_show_hidden_sources_to_admins(serve):
     body = serve.get(f'/databases/{DB_ID}/facets', headers=ADMIN).json()
     assert body['hidden_sources_visible'] is True
-    apoe = {f['facet']: f for f in body['facets']}['ant_apoe_carrier']
+    apoe = {f['facet']: f for f in body['facets']}['ant_apoe4_carrier']
     assert apoe['redacted'] is False and apoe['source_columns'] == ['secret_code']
     assert {r['from'] for r in apoe['value_map']} == {'E3/E4', 'E3/E3', 'E2/E4'}
 
