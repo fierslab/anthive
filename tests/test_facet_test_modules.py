@@ -12,7 +12,7 @@ End to end on a synthetic dataset (counts + scores sidecar + genesetstore):
   modules stay mostly non-significant,
 * A and B estimates correlate across modules (calibration record),
 * datasets without counts run variant A only (no_counts),
-* n_lt5 units are descriptive only,
+* n_lt5 units are tested and flagged small_sample (v3),
 * donors, strata and design rules are those of the gene tool.
 
 Run with:
@@ -367,21 +367,22 @@ def test_dataset_without_counts_runs_variant_a_only(tmp_path):
     assert plant['q_param'] < 0.05
 
 
-def test_n_lt5_is_descriptive_only(tmp_path):
+def test_small_units_are_tested_and_flagged_not_descriptive_only(tmp_path):
     store, geneset_root, entry = make_module_dataset(tmp_path, n_f=4, n_m=8)
     manifest, out_root = _run(tmp_path, entry, store, geneset_root)
     table = pd.read_parquet(out_root / 'Syn2026' / 'Syn_mod.facet_module_tests.parquet')
-    assert table['n_lt5'].all() and table['descriptive_only'].all()
+    assert table['n_lt5'].all() and table['small_sample'].all() and not table['descriptive_only'].any()
+    assert (table['facet_scope'] == 'human_postmortem').all() and manifest['facet_scope'] == 'human_postmortem'
     for column in ('p_param', 'q_param', 'p_perm', 'q_perm', 't', 'ci_low', 'ci_high'):
-        assert table[column].isna().all(), column
+        assert table[column].notna().all(), column
     assert table['estimate'].notna().all() and table['se'].notna().all()
 
 
 def test_unsupported_datasets_are_skipped(tmp_path):
     store, geneset_root, entry = make_module_dataset(tmp_path)
-    (store / 'Syn2026' / 'Syn_mod.h5ad.mus').write_text('organism=mouse\nexperimental_system=in_vivo\n')
+    (store / 'Syn2026' / 'Syn_mod.h5ad.mus').write_text('organism=human\nexperimental_system=in_vitro_2d\n')
     manifest, _ = _run(tmp_path, entry, store, geneset_root)
-    assert manifest['status'] == 'skipped' and 'organism' in manifest['reason']
+    assert manifest['status'] == 'skipped' and 'experimental_system' in manifest['reason']
     (store / 'Syn2026' / 'Syn_mod.h5ad.mus').write_text('organism=human\nexperimental_system=post_mortem_tissue\n')
     (store / 'Syn2026' / 'Syn_mod.scores.parquet').unlink()
     manifest, _ = _run(tmp_path, entry, store, geneset_root)

@@ -26,7 +26,7 @@ VOCAB = Path(obscol_tags.VOCAB_PATH)
 APPROVED_REGISTERED = {
     'donor', 'sex', 'host_sex', 'age', 'pmi', 'disease', 'braak', 'braak_group', 'apoe',
     'apoe4_carrier', 'cell_type', 'tissue', 'genotype', 'author_cluster',
-    'cognitive_status', 'comorbidity', 'adnc', 'donor_uid',
+    'cognitive_status', 'comorbidity', 'adnc', 'donor_uid', 'app_nlgf',
 }
 
 

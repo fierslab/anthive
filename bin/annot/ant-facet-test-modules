@@ -105,10 +105,14 @@ def _load_gene_tool():
 
 
 aft = _load_gene_tool()
+import facet_results  # type: ignore  # noqa: E402
+import facet_scopes  # type: ignore  # noqa: E402
+import replication  # type: ignore  # noqa: E402
+from celltype_groups import group_of  # type: ignore  # noqa: E402
 from geneset import GenesetRegistry  # type: ignore  # noqa: E402
 from scores_parquet import scores_path  # type: ignore  # noqa: E402
 
-TOOL_VERSION = 'ant-facet-test-modules/1.0'
+TOOL_VERSION = 'ant-facet-test-modules/2.0'
 EFFECT_GATE_STD = 0.2                # |std_effect| gate of a module hit (configurable in summarize)
 SEED = aft.SEED                     # 20261004, base seed; unit seeds derive from it
 N_PERMUTATIONS = 10000              # default shuffles (was 1,000 until 2026-10-05; floor of p_perm is 1 / 10,001)
@@ -120,7 +124,7 @@ DEFAULT_SOURCES = ('geneset', 'ucell')
 GENE_LIST_SOURCE = 'gene_list'      # source label of variant B (independent of the sidecar source)
 METHOD_A = 'cell_mean'
 METHOD_B = 'pseudobulk'
-MIN_RESIDUAL_DF = 2
+MIN_RESIDUAL_DF = aft.MIN_RESIDUAL_DF
 Q_THRESHOLD = 0.05
 
 ModuleKey = Tuple[str, str, str]    # (source, catalog, module)
@@ -556,6 +560,8 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
             'min_cells_per_sample': aft.MIN_CELLS_PER_SAMPLE, 'min_donors_dataset': aft.MIN_DONORS_DATASET,
             'min_donors_per_level': aft.MIN_DONORS_PER_LEVEL, 'n_lt5_threshold': aft.N_LT5_THRESHOLD,
             'numeric_min_donors_for_p': aft.NUMERIC_MIN_DONORS_FOR_P,
+            'numeric_min_replicates': aft.NUMERIC_MIN_REPLICATES, 'numeric_min_distinct': aft.NUMERIC_MIN_DISTINCT,
+            'min_residual_df': aft.MIN_RESIDUAL_DF, 'small_sample_flag_blocks_test': False,
             'min_donors_for_age_pmi': aft.MIN_DONORS_FOR_AGE_PMI,
             'min_covariate_coverage': aft.MIN_COVARIATE_COVERAGE, 'disease_provisional': True,
             'effect_gate_std_effect': EFFECT_GATE_STD,
@@ -568,6 +574,10 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
     if not eligible:
         manifest.update(status='skipped', reason=reason)
         return manifest
+    facet_scope = aft.dataset_scope(entry, annotation, api_config)
+    manifest['facet_scope'] = facet_scope
+    facets = aft.facets_for_scope(facet_scope, facets)
+    manifest['facets_tested_in_scope'] = facets
     if all_donors and md_rule is None:
         manifest.update(status='skipped', reason='--all-donors: this dataset has no facet_donor_exclusions '
                                                   'rule, its counted run already uses every donor')
@@ -583,8 +593,9 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
                             temp_dir=work_dir, store_root=store_root)
     try:
         cat_columns = aft.view_columns(conn, 'obscat') if aft._has_view(conn, 'obscat') else {}
-        wanted = ['ant_donor', 'ant_donor_uid', 'ant_sex', 'ant_disease', 'ant_apoe', 'ant_apoe4_carrier',
-                  'ant_apoe_carrier', 'ant_braak', 'ant_age', 'ant_pmi', 'ant_cell_type', 'ant_author_cell_type',
+        wanted = ['ant_donor', 'ant_donor_uid', 'ant_sex', 'ant_host_sex', 'ant_disease', 'ant_apoe',
+                  'ant_apoe4_carrier', 'ant_apoe_carrier', 'ant_app_nlgf', 'ant_braak', 'ant_age', 'ant_pmi',
+                  'ant_cell_type', 'ant_author_cell_type',
                   'ant_tissue', 'ant_region', 'ant_author_cluster']
         extra = [c for c in cat_columns if (aft.CELLTYPE_CANDIDATE_RE.match(c) or aft.BATCH_NAME_RE.search(c))
                  and not c.startswith('ant_')]
@@ -606,6 +617,8 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
             return manifest
         if replicate['replicate_column'] != 'ant_donor':
             cells['ant_donor'] = cells[replicate['replicate_column']]
+        if replicate['replicate_unit'] != 'donor' and 'ant_donor_uid' in cells:
+            cells['ant_donor_uid'] = None      # the uid names a person; an animal or sample is keyed by its label
         cells, exclusion_report = aft.donor_exclusions.apply_rule(cells, exclusion_rule, variant)
         if exclusion_report is not None:
             manifest['donor_exclusion'] = exclusion_report
@@ -618,7 +631,8 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
         manifest['n_cells'] = int(len(cells))
         manifest['n_donors'] = n_donors_all
         if n_donors_all < aft.MIN_DONORS_DATASET:
-            manifest.update(status='skipped', reason=f'{n_donors_all} donors (< {aft.MIN_DONORS_DATASET})')
+            manifest.update(status='skipped', reason=f'{n_donors_all} replicates (< {aft.MIN_DONORS_DATASET}, '
+                                                      f'the smallest numeric test)')
             return manifest
 
         donor_table, conflicts = aft.build_donor_table(cells)
@@ -639,8 +653,10 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
             # negative control: every facet column is shuffled across donors (age, PMI and
             # batch stay), so any hit is a false positive. Never write this to the real output.
             shuffler = np.random.default_rng([SEED, null_control_seed])
-            for facet_name in aft.FACETS:
-                donor_table[facet_name] = donor_table[facet_name].to_numpy()[shuffler.permutation(len(donor_table))]
+            facets = [name for name in facets if name != 'age']     # age is a covariate of the others: never shuffled
+            for facet_name in (name for name in aft.FACETS if name != 'age'):
+                if facet_name in donor_table:
+                    donor_table[facet_name] = donor_table[facet_name].to_numpy()[shuffler.permutation(len(donor_table))]
         membership, strata_note = aft.choose_strata(cells, cat_columns)
         manifest['celltype_note'] = strata_note
         manifest['celltype_sources'] = sorted(membership['source'].unique().tolist())
@@ -665,7 +681,8 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
         for stratum, frame in sample_sizes.groupby('stratum'):
             for facet in facets:
                 plan = aft.plan_job(donor_table, facet,
-                                    aft.donor_exclusions.stratum_donors(frame['donor'], facet, below_floor))
+                                    aft.donor_exclusions.stratum_donors(frame['donor'], facet, below_floor),
+                                    scope=facet_scope)
                 plan.update(stratum=str(stratum), source=str(frame['source'].iloc[0]),
                             label=str(frame['label'].iloc[0]))
                 jobs.append(plan)
@@ -731,14 +748,15 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
                                       'n_donors_with_sample': job['n_donors_with_sample'],
                                       'level_counts': job.get('level_counts'),
                                       'replicate_unit': replicate['replicate_unit'],
-                                      'replicate_column': replicate['replicate_column']}
+                                      'replicate_column': replicate['replicate_column'],
+                                      'facet_scope': facet_scope}
             if job['status'] != 'ok':
                 record.update(analysis_level=aft.replicates.LEVEL_CELL,
                               analysis_level_label=aft.replicates.CELL_LEVEL_LABEL,
                               analysis_level_reason=job['status'])
                 unit_records.append(record)
                 continue
-            numeric_facet = job['facet'] == 'braak'
+            numeric_facet = job['facet'] in aft.NUMERIC_FACETS
             level = aft.replicates.analysis_level(
                 replicate['replicate_unit'], numeric_facet,
                 n_per_level=None if numeric_facet else job['level_counts'],
@@ -757,7 +775,8 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
             composition_p = aft.composition_test(proportions, design.set_index('donor'), job['facet'])
             unit_key = (entry.db_id, job['stratum'], job['facet'])
             record.update(
-                n_lt5=bool(job['n_lt5']), batch_used=job['batch_used'], batch_confounded=job['batch_confounded'],
+                n_lt5=bool(job['n_lt5']), small_sample=bool(job['n_lt5']), descriptive_only=False,
+                batch_used=job['batch_used'], batch_confounded=job['batch_confounded'],
                 covariates=job['covariates'], covariates_omitted=job['covariates_omitted'],
                 n_donors_analysed=job['n_donors_analysed'],
                 n_donors_dropped_covariate=job['n_donors_dropped_covariate'],
@@ -773,7 +792,7 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
                 for source in sorted(set(a_values.columns.get_level_values('source'))):
                     sub = a_values.loc[:, a_values.columns.get_level_values('source') == source]
                     try:
-                        a_frame = fit_modules(sub, design, job['batch_used'], bool(job['n_lt5']),
+                        a_frame = fit_modules(sub, design, job['batch_used'], False,
                                               unit_key, n_permutations)
                     except ValueError as exc:
                         record[f'method_A_{source}_error'] = str(exc)
@@ -785,7 +804,7 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
             if scores_b is not None and len(scores_b.columns):
                 try:
                     b_frame = fit_modules(scores_b.reindex(sample_ids).reset_index(drop=True), design,
-                                          job['batch_used'], bool(job['n_lt5']), unit_key, n_permutations)
+                                          job['batch_used'], False, unit_key, n_permutations)
                     b_frame['n_control_genes'] = [control_counts[job['stratum']].get(tuple(k)) for k in b_frame.index]
                     per_method[(METHOD_B, GENE_LIST_SOURCE)] = b_frame
                 except ValueError as exc:
@@ -818,8 +837,8 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
                 frame['cell_type'] = job['label']
                 frame['celltype_source'] = job['source']
                 level_counts = job['level_counts']
-                if job['facet'] == 'braak':
-                    frame['contrast'] = 'braak_per_unit'
+                if job['facet'] in aft.NUMERIC_FACETS:
+                    frame['contrast'] = aft.NUMERIC_CONTRAST[job['facet']]
                     frame['level_ref'] = None
                     frame['level_test'] = None
                     frame['n_donors_ref'] = np.nan
@@ -832,7 +851,9 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
                     frame['n_donors_test'] = level_counts[tested]
                 frame['n_donors'] = job['n_donors_analysed']
                 frame['n_lt5'] = bool(job['n_lt5'])
-                frame['descriptive_only'] = bool(job['n_lt5'])
+                frame['small_sample'] = bool(job['n_lt5'])
+                frame['descriptive_only'] = False
+                frame['facet_scope'] = facet_scope
                 frame['passes_effect_gate'] = frame['std_effect'].abs() >= EFFECT_GATE_STD
                 frame['batch_used'] = job['batch_used']
                 frame['batch_confounded'] = job['batch_confounded']
@@ -877,6 +898,92 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
 # Cross-dataset summary (exploratory)
 # --------------------------------------------------------------------------
 
+def replicated_modules(table: pd.DataFrame, out_root: Path, cohort_table: Path,
+                       min_std_effect: float = EFFECT_GATE_STD) -> pd.DataFrame:
+    """Partial-conjunction replication of modules per facet scope, facet, method, source and cell type group.
+
+    The same structure as the gene replication (``lib/facet_results.py``): one anchor unit per cohort and cell type
+    group (``FacetResults.counting_units``), the cohort p value of a direction is the two-sided permutation p halved
+    when the estimate has that sign (1 minus the half otherwise), the m - 1 largest are combined by Simes, BH over
+    the modules of the family gives ``r_value``; ``replicated`` also needs the effect gate: the median ``std_effect``
+    over the tested cohorts has the replicated sign and ``|median| >= min_std_effect``. Units that are not
+    descriptive only and whose dataset is in the cohort table with a counted role take part.
+
+    Returns:
+        One row per (family, module): ``facet_scope, facet, method, source, celltype_group, catalog, module, r_value,
+        p_pc, m, k (cohorts with q_perm < 0.05 in the direction), direction, median_std_effect, effect_gate_passed,
+        replicated``.
+    """
+    reader = facet_results.FacetResults(cohort_table.parent)
+    cohorts = reader.cohorts()
+    basis_of: Dict[str, Any] = {}
+    for manifest_path in out_root.glob('*/*.facet_module_run_manifest.json'):
+        manifest = json.loads(manifest_path.read_text())
+        basis_of[manifest.get('db_id')] = manifest.get('disease_basis')
+    output: List[pd.DataFrame] = []
+    usable = table[~table['descriptive_only'].astype(bool)]
+    for (scope, facet, method, source), family in usable.groupby(['facet_scope', 'facet', 'method', 'source']):
+        units = family[['db_id', 'cell_type', 'celltype_source', 'n_donors']].drop_duplicates(
+            ['db_id', 'cell_type', 'celltype_source']).reset_index(drop=True)
+        units['unit'] = units.index
+        info = units['db_id'].map(lambda db_id: cohorts.get(db_id) or {})
+        units['cohort'] = [i.get('cohort') or None for i in info]
+        units['cohort_label'] = [i.get('cohort_label') or None for i in info]
+        units['role'] = [i.get('role') for i in info]
+        units['counted'] = [bool(i.get('counted')) for i in info]
+        units['descriptive_only'] = False
+        units['is_secondary'] = False
+        units['pooled'] = False
+        units['disease_basis'] = units['db_id'].map(basis_of)
+        units['celltype_group'] = units['cell_type'].map(group_of)
+        counted = facet_results.FacetResults.counting_units(units, True, facet)
+        counted = counted[counted['counted_effective']]
+        for group, group_units in counted.groupby('celltype_group'):
+            keyed = family.merge(group_units[['db_id', 'cell_type', 'celltype_source', 'cohort', 'n_siblings']],
+                                 on=['db_id', 'cell_type', 'celltype_source'], how='inner')
+            if keyed['cohort'].nunique() < 2:
+                continue
+            half = keyed['p_perm'] / 2.0
+            keyed['p_up'] = np.where(keyed['estimate'] >= 0, half, 1.0 - half)
+            keyed['p_down'] = np.where(keyed['estimate'] <= 0, half, 1.0 - half)
+            keyed['module_key'] = keyed['catalog'].astype(str) + '/' + keyed['module'].astype(str)
+            keyed['up'] = (keyed['q_perm'] * keyed['n_siblings']).clip(upper=1.0).lt(Q_THRESHOLD) & (keyed['estimate'] > 0)
+            keyed['down'] = (keyed['q_perm'] * keyed['n_siblings']).clip(upper=1.0).lt(Q_THRESHOLD) & (keyed['estimate'] < 0)
+            per_cohort = keyed.groupby(['module_key', 'cohort']).agg(
+                catalog=('catalog', 'first'), module=('module', 'first'), p_up=('p_up', 'min'), p_down=('p_down', 'min'),
+                n_siblings=('n_siblings', 'max'), up=('up', 'any'), down=('down', 'any'),
+                effect=('std_effect', 'mean')).reset_index()
+            per_cohort['p_up'] = (per_cohort['p_up'] * per_cohort['n_siblings']).clip(upper=1.0)
+            per_cohort['p_down'] = (per_cohort['p_down'] * per_cohort['n_siblings']).clip(upper=1.0)
+            p_up = per_cohort.pivot(index='module_key', columns='cohort', values='p_up')
+            p_down = per_cohort.pivot(index='module_key', columns='cohort', values='p_down')
+            stats_ = replication.replicability(p_up.to_numpy(), p_down.to_numpy(), method=facet_results.PC_METHOD)
+            frame = pd.DataFrame({'p_pc': stats_['p_pc'], 'r_value': stats_['r_value'], 'direction': stats_['direction']},
+                                 index=p_up.index)
+            frame['m'] = p_up.notna().sum(axis=1).astype(int)
+            k_up = per_cohort.groupby('module_key')['up'].sum().reindex(frame.index).fillna(0)
+            k_down = per_cohort.groupby('module_key')['down'].sum().reindex(frame.index).fillna(0)
+            frame['k'] = np.maximum(k_up, k_down).astype(int)
+            frame['median_std_effect'] = per_cohort.groupby('module_key')['effect'].median().reindex(frame.index)
+            direction_sign = frame['direction'].map({'up': 1.0, 'down': -1.0})
+            frame['effect_gate_passed'] = ((frame['median_std_effect'].abs() >= min_std_effect)
+                                           & (np.sign(frame['median_std_effect']) == direction_sign))
+            frame['replicated'] = (frame['r_value'] < replication.R_THRESHOLD) & frame['effect_gate_passed']
+            names = per_cohort.groupby('module_key')[['catalog', 'module']].first().reindex(frame.index)
+            frame = pd.concat([names, frame], axis=1).reset_index(drop=True)
+            frame.insert(0, 'celltype_group', group)
+            frame.insert(0, 'source', source)
+            frame.insert(0, 'method', method)
+            frame.insert(0, 'facet', facet)
+            frame.insert(0, 'facet_scope', scope)
+            output.append(frame[frame['r_value'].notna()])
+    if not output:
+        return pd.DataFrame(columns=['facet_scope', 'facet', 'method', 'source', 'celltype_group', 'catalog', 'module',
+                                     'p_pc', 'r_value', 'direction', 'm', 'k', 'median_std_effect',
+                                     'effect_gate_passed', 'replicated'])
+    return pd.concat(output, ignore_index=True)
+
+
 def summarize_results(out_root: Path, out_dir: Path, cohort_table: Optional[Path],
                       min_std_effect: float = 0.2) -> None:
     """Tables over all module result parquets: units, hits, recurring modules.
@@ -896,17 +1003,23 @@ def summarize_results(out_root: Path, out_dir: Path, cohort_table: Optional[Path
         print('no module result files')
         return
     table = pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
+    if 'facet_scope' not in table:
+        table['facet_scope'] = None
+    table['facet_scope'] = table['facet_scope'].fillna(facet_scopes.DEFAULT_SCOPE)   # runs before v3: human only
+    if 'descriptive_only' not in table:
+        table['descriptive_only'] = table['n_lt5']
     table['unit'] = table['db_id'] + '|' + table['celltype_source'] + '::' + table['cell_type']
     gate = (table['std_effect'].abs() >= min_std_effect)
     table['significant'] = (table['q_param'] < Q_THRESHOLD) & (table['q_perm'] < Q_THRESHOLD) & gate
     table['sign'] = np.sign(table['estimate'])
-    units = (table.groupby(['facet', 'method', 'source', 'unit', 'db_id', 'cell_type', 'celltype_source'])
+    units = (table.groupby(['facet_scope', 'facet', 'method', 'source', 'unit', 'db_id', 'cell_type', 'celltype_source'])
              .agg(n_modules=('module', 'size'), n_donors=('n_donors', 'first'), n_lt5=('n_lt5', 'first'),
+                  descriptive_only=('descriptive_only', 'first'),
                   n_sig_param=('q_param', lambda s: int((s < Q_THRESHOLD).sum())),
                   n_sig_perm=('q_perm', lambda s: int((s < Q_THRESHOLD).sum())),
                   n_sig_both=('significant', 'sum')).reset_index())
     units.to_csv(out_dir / 'module_units.tsv', sep='\t', index=False)
-    per_facet = units[~units['n_lt5']].groupby(['facet', 'method', 'source']).agg(
+    per_facet = units[~units['descriptive_only']].groupby(['facet_scope', 'facet', 'method', 'source']).agg(
         testable_units=('unit', 'nunique'), datasets=('db_id', 'nunique'),
         units_with_param_hit=('n_sig_param', lambda s: int((s > 0).sum())),
         units_with_perm_hit=('n_sig_perm', lambda s: int((s > 0).sum())),
@@ -915,7 +1028,7 @@ def summarize_results(out_root: Path, out_dir: Path, cohort_table: Optional[Path
     per_facet.to_csv(out_dir / 'module_facet_summary.tsv', sep='\t', index=False)
     print(per_facet.to_string(index=False))
 
-    eligible = table[~table['n_lt5']].copy()
+    eligible = table[~table['descriptive_only']].copy()
     eligible['cohort'] = eligible['db_id']
     if cohort_table is not None and cohort_table.exists():
         cohorts = pd.read_csv(cohort_table, sep='\t')
@@ -926,18 +1039,27 @@ def summarize_results(out_root: Path, out_dir: Path, cohort_table: Optional[Path
         eligible = eligible[eligible['db_id'].isin(allowed)].copy()
         eligible['cohort'] = eligible['db_id'].map(cohort_of)
     recurring = (eligible[eligible['significant']]
-                 .groupby(['facet', 'method', 'source', 'catalog', 'module'])
+                 .groupby(['facet_scope', 'facet', 'method', 'source', 'catalog', 'module'])
                  .agg(n_cohorts=('cohort', 'nunique'), n_datasets=('db_id', 'nunique'), n_units=('unit', 'nunique'),
                       n_pos=('sign', lambda s: int((s > 0).sum())), n_neg=('sign', lambda s: int((s < 0).sum())),
                       median_std_effect=('std_effect', 'median')).reset_index())
     recurring['sign_consistent'] = (recurring['n_pos'] == 0) | (recurring['n_neg'] == 0)
-    recurring = recurring.sort_values(['facet', 'method', 'n_cohorts', 'n_datasets'],
-                                      ascending=[True, True, False, False])
+    recurring = recurring.sort_values(['facet_scope', 'facet', 'method', 'n_cohorts', 'n_datasets'],
+                                      ascending=[True, True, True, False, False])
     recurring.to_csv(out_dir / 'module_recurring.tsv', sep='\t', index=False)
     # also: how many cohorts were testable per facet/module family (denominator for recurrence)
-    testable = (eligible.groupby(['facet', 'method', 'source'])
+    testable = (eligible.groupby(['facet_scope', 'facet', 'method', 'source'])
                 .agg(n_cohorts_testable=('cohort', 'nunique'), n_datasets_testable=('db_id', 'nunique')).reset_index())
     testable.to_csv(out_dir / 'module_testable_cohorts.tsv', sep='\t', index=False)
+    if cohort_table is not None and cohort_table.exists():
+        replicated = replicated_modules(table, out_root, cohort_table, min_std_effect)
+        replicated.to_csv(out_dir / 'module_replicated.tsv', sep='\t', index=False)
+        families = (replicated.groupby(['facet_scope', 'facet', 'method', 'source', 'celltype_group'])
+                    .agg(n_cohorts=('m', 'max'), modules=('module', 'size'),
+                         r_below_05=('r_value', lambda s: int((s < 0.05).sum())),
+                         replicated=('replicated', 'sum')).reset_index())
+        families.to_csv(out_dir / 'module_replication_summary.tsv', sep='\t', index=False)
+        print(families.to_string(index=False))
     calibration_rows = []
     for manifest_path in sorted(out_root.glob('*/*.facet_module_run_manifest.json')):
         manifest = json.loads(manifest_path.read_text())

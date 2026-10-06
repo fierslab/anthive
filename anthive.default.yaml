@@ -418,11 +418,11 @@ issue_tracker_url: https://gitlab.kuleuven.be/bdslab/anthive/anthive4/-/issues
 
 # Facets shown on the /facets pages and in the dataset page's facet card.
 # Temporary: while the facet audit decisions are pending, only the facets the
-# donor-level facet tests analyse are shown. Other ant_* columns stay in the
+# replicate-level facet tests analyse are shown. Other ant_* columns stay in the
 # data, SQL, plots and API listings (the /facets API marks them
 # hidden_by_config). An empty list or null shows every facet.
 # Env: ANTHIVE_FACETS_VISIBLE (comma separated, "*" for all).
-facets_visible: [ant_sex, ant_disease, ant_apoe4_carrier, ant_braak]
+facets_visible: [ant_sex, ant_disease, ant_apoe4_carrier, ant_braak, ant_age, ant_app_nlgf]
 
 # Folder the in-app help links to for detailed docs (doc/MCP_CLIENTS.md,
 # doc/MCP_LINKS.md, ...). They live in the repo so they can be corrected

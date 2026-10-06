@@ -8,10 +8,17 @@ the `.h5ad`).
 | `ant-score` | Scanpy module scores from the **genesetstore** (`data/genesetstore/`) → one numerical obs column per geneset. Default: writes to duckdb via `AnnotationWriter`. `--rebuild` does the legacy h5ad rewrite. |
 | `ant-starcat` | Project a dataset onto the `MICROGLIA_V1` starCAT catalog → 43 `starcat__MICROGLIA_V1__*` obs columns. Human-only; needs raw integer counts (not SCT). |
 | `ant-annotate` | Load obs columns from a TSV. `status` shows what's pending, `rollback --run-id` reverts a batch. |
-| `ant-facet-test` | Donor-level facet tests (sex, AD vs control, APOE e4, Braak) by pseudobulk limma-voom per cell type; exploratory. Output only under `<h5adstore>/_facet_tests/`. See `doc/DESIGN_facet_testing.md`. |
+| `ant-facet-test` | Replicate-level facet tests (sex, AD vs control, APOE e4, Braak, age per decade, App NL-G-F vs control) by pseudobulk limma-voom per cell type and facet scope (human post-mortem, mouse in vivo, human xenograft in mouse); exploratory. Output only under `<h5adstore>/_facet_tests/`. See `doc/DESIGN_facet_testing.md`. |
 | `ant-facet-test-modules` | Same facets for module scores: donor means of the `.scores.parquet` scores (variant A) and pseudobulk background-matched scores (variant B, needs counts), OLS + 10,000-shuffle permutation p (default), BH per (dataset, stratum, facet, method). |
 | `ant-derive-disease` | The common pathology-based `ant_disease` (Braak x CERAD 2x2, `disease_basis: braak_cerad`): writes the stored column `disease_braak_cerad` for SEA-AD, ROSMAP, MADRC WA4 and Prater (table `DERIVATIONS`), edits the `.md` (verified text edit: rename to `ant_disease`, `disease_derivation`, notes, version bump) and sets `disease_basis: author_dx` on the other datasets. `plan` shows counts. After `apply`: `bin/ops/ant-rebuild-obs-views --only <db_id>`, then `ant-sync push`. Needs `ANTHIVE_H5ADSTORE` / `ANTHIVE_CONFIG` when run from a worktree (the view rebuild resolves the crosswalk join through the configured store). |
 | `ant-suggest-tops` | Walk all `.md` files and propose `top_genes` / `top_cat` / `top_num` from curated marker panels + the cell's actual obs/var. See the script's docstring for the panels. |
+
+Facet engine v3 (2026-10-06, `doc/DESIGN_facet_testing.md`): datasets run in their facet scope (`lib/facet_scopes.py`; manifests
+and result rows carry `facet_scope`; a facet is only tested where its registry `facet_scopes` allow it), eligibility is the
+statistical minimum (`lib/facet_rules.py`: small cohorts are tested, counted and flagged `small_sample`), `app_nlgf` and `age`
+are tested facets, replication uses the ordinary one-sided p values plus an effect gate, and `summarize` writes per scope
+(`replicated_<scope>_<facet>_<group>.tsv`). `ant-facet-test-modules summarize` adds `module_replicated.tsv` (partial conjunction on
+permutation p, gate |std_effect| >= 0.2). The modules tool has no donor-pooled units.
 
 Facet engine v2 (2026-10-05, `doc/DESIGN_facet_testing.md`): `ant-facet-test` writes limma treat
 columns (`p_treat`, `q_treat`, tau log2(1.1), Braak per stage log2(1.1)/3), pools a donor's cells over

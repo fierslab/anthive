@@ -29,6 +29,57 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.44.0 (unreleased)
+
+Minor bump. Additive (new `scope` parameter, new fields, two new facets), with these changes to existing
+answers:
+
+- **Replication uses the ordinary one-sided limma p value and an effect gate** (facet engine v3, 2026-10-06).
+  `replicated` is now `r_value < 0.05` AND `effect_gate_passed`; `r_value` and `p_pc` are computed from the
+  ordinary p values (the treat p values are still served as `p_treat` / `q_treat`). On the 2026-10-05 results
+  Braak microglia goes from 2 replicated genes to 34 (all pass the gate). `k` now counts cohorts with
+  `q_value < 0.05` in the replicated direction; `k_treat` keeps the treat count. Clients that read `replicated`
+  or `r_value` get different numbers; field names are unchanged.
+- **Facets are tested, counted and replicated per facet scope** (`human_postmortem`, `mouse_in_vivo`,
+  `xenograft_human_in_mouse`, `in_vitro`): human and mouse (and xenograft) never mix. The default answer of every
+  single-answer endpoint is `human_postmortem` (for `app_nlgf`, which is not allowed there, `mouse_in_vivo`), so
+  existing clients see what they saw.
+- **Small cohorts are tested and counted.** Units with a level below 5 replicates (numeric facets below 10) are no
+  longer `descriptive_only`: they carry `flags.small_sample` / `n_lt5` and take part in replication. Eligibility is
+  3 replicates per level (4 replicates with 3 distinct values for Braak and age); datasets need at least 4
+  replicates (was 6).
+
+New:
+
+- `scope` query parameter (`human_postmortem` | `mouse_in_vivo` | `xenograft_human_in_mouse` | `in_vitro`; an unknown
+  name is a 400) on `GET /facets/{facet}/tests` (also `all`), `GET /facets/{facet}/effects`,
+  `GET /facets/{facet}/effects/top`, `GET /genes/{gene}/facet-effects`, `GET /facets/{facet}` (datasets, cell
+  counts, value distribution, per-cell module statistics and non-carriers of that scope) and
+  `GET /module-variability` (rows of the datasets of that scope). Responses carry `scope` and `scopes` (the scopes
+  with results; `GET /facets/{facet}` lists `{scope, n_datasets, n_cells}`; `GET /facets` rows carry `scopes`).
+  `GET /genes/{gene}/facet-effects` without `scope` adds `by_scope` (`{scope: {facet: card}}`) so a gene page shows
+  scopes separately; `facets` keeps one card per facet in its default scope. A gene symbol is never matched across scopes.
+- Dataset metadata (`/databases`, info) and `/databases/{id}/facet-tests` carry `facet_scope`; every unit and gene
+  or module row does too. The metadata cache version is 6.
+- Tested facets `age` (human post-mortem; log2 fold change per decade of age, model `~ age + sex + pmi [+ batch]`,
+  age effects include disease prevalence) and `app_nlgf` (`nlgf` vs `control`; mouse in vivo and xenograft hosts;
+  replicate = the animal). `GET /facets/age|app_nlgf/...` work like the other facets; `facets_visible` defaults to
+  include `ant_age` and `ant_app_nlgf`. `app_nlgf` is a registered facet (`controlled_values` nlgf, control).
+- Replication entries (`/facets/{facet}/effects`, `/genes/{gene}/facet-effects`) and rows of `/effects/top` add
+  `effect_gate_passed`, `median_logFC`, `effect_gate_tau`, `r_significant` (r < 0.05 alone), `k_treat`,
+  `replication_p` (`p_value`); the badge states the median effect and the gate. `/effects/top` adds
+  `n_r_significant` (genes with r < 0.05 before the gate) and lists only genes that pass the gate. Anchors add
+  `p_value`, `q_value`; unit cards add `p_value` and `facet_scope`.
+- Gene rows add `small_sample` and `facet_scope`; `flags` of a unit add `small_sample`.
+- Contrasts: `age_per_decade` (age), `nlgf_vs_control` (app_nlgf).
+- MCP: `facet_effects`, `facet_top_genes` and `facet_units` take `scope`; the tool texts describe the effect gate, the
+  scopes and the new facets; `facet_effects` without `facet` asks all six.
+- Registry: `facet_scopes` per facet in `lib/obscol_tags_vocab.yaml` (`ant md-check` error `facet_scope_mismatch`).
+
+Clients to update: pyvark (`scope` on the facet calls, the new replication fields, `by_scope`), vark, the agent
+skills (facet and replication texts), the JupyterLite vendored client and the web UI (scope selector, effect gate,
+`small_sample` instead of descriptive-only for small cohorts, age and app_nlgf facet pages).
+
 ## 2.43.0 (2026-10-05)
 
 Minor bump. Mostly additive (new dataset, replication and facet-test fields), with

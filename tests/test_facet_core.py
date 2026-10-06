@@ -27,6 +27,7 @@ import yaml
 
 import celltype_groups
 import facet_results as fr
+import facet_scopes
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SERVE_PATH = REPO_ROOT / 'bin' / 'api' / 'ant-serve'
@@ -198,12 +199,15 @@ def test_recurring_gene_ranking(cohorts):
     # G_A: 2 significant of 6 tested, all six up -> agreement 1.0
     # G_B: 2 significant of 6 tested; C3, C4, C5 go down, C7 slightly up -> agreement 3/6
     assert (rows['G_A']['cohorts_sig_same_sign'], rows['G_A']['cohorts_tested']) == (2, 6)
-    assert rows['G_A']['replicated'] and rows['G_A']['r_value'] <= rows['G_B']['r_value'] < 0.05
+    assert rows['G_A']['replicated'] and rows['G_A']['effect_gate_passed']
     assert 'G_C' not in rows and 'G_D' not in rows       # one significant cohort / none: not replicated
-    assert rows['G_A']['agreement'] == pytest.approx(1.0)
-    assert rows['G_B']['agreement'] == pytest.approx(3 / 6)
-    order = [r['gene'] for r in out['rows']]
-    assert order.index('G_A') < order.index('G_B')
+    assert rows['G_A']['agreement'] == pytest.approx(1.0) and rows['G_A']['median_logFC'] == pytest.approx(0.6)
+    # G_B: two cohorts clearly up, but three go the other way: r < 0.05 and the effect gate refuses it
+    assert 'G_B' not in rows and out['n_r_significant'] == out['n_replicated'] + 1
+    card = fr.FacetResults(root).gene_effects('braak', 'G_B', datasets)['replication'][0]
+    assert card['r_significant'] is True and card['replicated'] is False and card['effect_gate_passed'] is False
+    assert card['median_logFC'] == pytest.approx(-0.095, abs=1e-6) and card['r_direction'] == 'up'
+    assert 'median effect is below the effect gate' in card['badge']
     assert 'r_value' in out['ranking']
 
 
@@ -226,9 +230,10 @@ def test_recurring_genes_rank_by_r_value_then_k():
         'gene': ['X', 'X', 'Y', 'Y', 'Y', 'Y', 'Z', 'Z', 'Z', 'Z'],
         'logFC': [0.2, 0.2, 0.8, 0.8, 0.7, 0.6, 0.9, 0.1, 0.1, 0.1],
         'ci_low': [0.0] * 10, 'ci_high': [1.0] * 10,
-        'q_value': q_values, 'q_treat': q_values, 'p_treat': [q ** 2 for q in q_values]})
+        'q_value': q_values, 'q_treat': q_values, 'p_treat': [q ** 2 for q in q_values],
+        'p_value': [q ** 2 for q in q_values]})
     rows['gene_upper'] = rows['gene']
-    reader.facet_gene_table = lambda facet, datasets: (rows, units)  # type: ignore[assignment]
+    reader.facet_gene_table = lambda facet, datasets, scope=None: (rows, units)  # type: ignore[assignment]
     reader._with_pooled = lambda datasets: list(datasets)  # type: ignore[assignment]
     out = reader.recurring_genes('braak', [{'db_id': 'a', 'group_folder': 'a', 'stem': 'a'}])
     assert [r['gene'] for r in out['rows']] == ['X', 'Y']
@@ -237,12 +242,14 @@ def test_recurring_genes_rank_by_r_value_then_k():
     assert (x['k'], x['m']) == (2, 2) and (y['k'], y['m']) == (2, 4)
     assert y['cohorts_same_sign'] == 4 and y['median_abs_logFC'] == pytest.approx(0.75)
     assert out['n_replicated'] == 2 and out['n_genes_in_family'] == 3  # Z: one significant cohort only
+    assert out['scope'] == 'human_postmortem' and x['effect_gate_passed'] and x['median_logFC'] == pytest.approx(0.2)
 
 
 # ── ant-serve: lineage, donor groups, exclude_secondary ──────────────────────
 
 _SERVE_WANTED = {'_lineage_fields', '_secondary_db_ids', 'list_donor_groups', 'get_module_variability',
-                 '_alias_canonical', 'get_gene_stats_all', '_dataset_donor_keys'}
+                 '_alias_canonical', 'get_gene_stats_all', '_dataset_donor_keys', '_scope_param',
+                 '_facet_scope_of', '_SCOPE_QUERY_DESC'}
 
 
 class _Registry:
@@ -350,7 +357,7 @@ def serve(tmp_path):
         'Response': Response, 'JSONResponse': JSONResponse, 'log': logging.getLogger('test-core'),
         'Dict': Dict, 'List': List, 'Any': Any, 'Optional': Optional, 'Tuple': Tuple, 'Set': Set,
         'Path': Path, 'asyncio': asyncio, '_load_module_variability': lambda: variability,
-        'BACKCOMPAT_LEGACY_NAMES': {}, 'GeneStatsCache': _GeneStatsCache,
+        'BACKCOMPAT_LEGACY_NAMES': {}, 'GeneStatsCache': _GeneStatsCache, 'facet_scopes_lib': facet_scopes,
         '_module_variability_path': lambda: tmp_path / 'module_variability.parquet',
         '_cell_level_skips': lambda path: {'G9/BULK': 'bulk data (technology bulk_RNA-seq)', 'G1/PRI': 'about one observation per donor'},
     }
@@ -365,7 +372,11 @@ def test_lineage_fields(serve):
                    ['ant_donor_uid']) == {
         'designation': 'reanalysis', 'reanalysis_of': ['V25/SAL'], 'donor_group': 'voet2025',
         'has_donor_uid': True, 'replicate_unit': 'none', 'replicate_column': None,
-        'replicate_basis': 'inferred', 'disease_basis': None}
+        'replicate_basis': 'inferred', 'disease_basis': None, 'facet_scope': None}
+    human = {'organism': 'human', 'experimental_system': 'post_mortem_tissue'}
+    assert lineage({}, ['ant_sex'], human, [], db_id='G1/PRI')['facet_scope'] == 'human_postmortem'
+    assert lineage({}, ['ant_host_sex'], human, [], db_id='G1/PRI')['facet_scope'] == 'xenograft_human_in_mouse'
+    assert lineage({}, [], {'organism': 'mouse'}, [])['facet_scope'] == 'mouse_in_vivo'
     assert lineage({'is_secondary': False}, [])['designation'] == 'primary'
     assert lineage({}, [])['designation'] == 'unresolved'
     assert namespace['_secondary_db_ids']() == {'G1/REA'}
@@ -438,7 +449,7 @@ def test_gene_stats_all_excludes_secondaries(serve):
 def test_serve_registers_donor_groups_and_lineage():
     source = SERVE_PATH.read_text()
     assert '@app.get("/donor-groups"' in source
-    assert '**_lineage_fields(file_metadata, obs_categorical, ann, obs_numerical)' in source
+    assert '**_lineage_fields(file_metadata, obs_categorical, ann, obs_numerical, db_id=db_id)' in source
     for endpoint in ('def get_facet_tests_across_datasets', 'def get_facet_recurring_genes',
                      'def get_facet_gene_effects', 'def get_gene_facet_effects', 'async def get_facet_detail'):
         start = source.index(endpoint)

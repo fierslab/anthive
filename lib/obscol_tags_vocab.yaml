@@ -79,6 +79,12 @@ version: 1
 #   computed_from      the facet is computed centrally from another facet
 #                      when a dataset does not declare it
 #                      (`anthive_db.build_obs_view_sql`).
+#   facet_scopes       the facet scopes (lib/facet_scopes.py: human_postmortem,
+#                      mouse_in_vivo, xenograft_human_in_mouse, in_vitro) in
+#                      which a dataset may publish the facet, or `all`.
+#                      `ant md-check` errors when a dataset maps the facet
+#                      outside these scopes (facet_scope_mismatch). Facets
+#                      are tested and counted per scope, never across scopes.
 
 facet_definitions_status:
   state: under_audit
@@ -96,6 +102,7 @@ tags:
     facet:
       status: registered
       scope: cross_dataset
+      facet_scopes: all
       controlled_values: [m, f]
       summary: Biological sex of the donor or animal, coded m or f.
       definition: >
@@ -120,6 +127,7 @@ tags:
     facet:
       status: registered
       scope: cross_dataset
+      facet_scopes: [human_postmortem]
       ordered: true
       range: [0, 6]
       integer: true
@@ -144,6 +152,7 @@ tags:
       status: deprecated
       replaced_by: [author_cluster]
       scope: dataset
+      facet_scopes: all
       summary: Unsupervised cluster label (leiden, louvain, seurat_clusters).
       definition: >
         A cell grouping produced by clustering. Labels are local to one
@@ -164,6 +173,7 @@ tags:
     facet:
       status: registered
       scope: cross_dataset
+      facet_scopes: [human_postmortem]
       summary: Age of the donor or animal at sampling (post-mortem cohorts, age at death).
       definition: >
         Age of the biological subject when the sample was taken. For
@@ -188,6 +198,7 @@ tags:
     facet:
       status: registered
       scope: cross_dataset
+      facet_scopes: all
       summary: Genetic background or model line that discriminates samples.
       definition: >
         Genotype or model of the sample, for example mouse lines (WT,
@@ -209,6 +220,7 @@ tags:
     facet:
       status: registered
       scope: cross_dataset
+      facet_scopes: [xenograft_human_in_mouse]
       controlled_values: [m, f]
       summary: Sex of the host animal in a xenograft study, coded m or f.
       definition: >
@@ -232,6 +244,7 @@ tags:
     facet:
       status: registered
       scope: dataset
+      facet_scopes: all
       summary: Identifier of the donor, animal or sample a cell comes from.
       definition: >
         The biological replicate a cell belongs to, the natural grouping
@@ -253,6 +266,7 @@ tags:
     facet:
       status: registered
       scope: cross_dataset
+      facet_scopes: [human_postmortem]
       controlled_values: [low, medium, high]
       ordered: true
       computed_from: braak
@@ -275,6 +289,7 @@ tags:
       status: deprecated
       replaced_by: [adnc]
       scope: cross_dataset
+      facet_scopes: [human_postmortem]
       summary: NIA-AA AD neuropathologic change level (control, low, intermediate, high).
       definition: >
         Overall Alzheimer's disease neuropathologic change of the donor
@@ -292,6 +307,7 @@ tags:
     facet:
       status: registered
       scope: cross_dataset
+      facet_scopes: [human_postmortem, xenograft_human_in_mouse]
       controlled_values: [E2/E2, E2/E3, E2/E4, E3/E3, E3/E4, E4/E4]
       summary: APOE genotype of the donor, written E3/E4 (lower allele first).
       definition: >
@@ -309,6 +325,7 @@ tags:
     facet:
       status: registered
       scope: cross_dataset
+      facet_scopes: [human_postmortem]
       controlled_values: [E4+, E4-]
       computed_from: apoe
       summary: APOE e4 carrier status (E4+ or E4-), derived from the APOE genotype.
@@ -329,6 +346,7 @@ tags:
       status: deprecated
       replaced_by: [apoe4_carrier]
       scope: cross_dataset
+      facet_scopes: [human_postmortem]
       summary: Deprecated name of ant_apoe4_carrier (E4+ or E4-).
       definition: >
         Deprecated alias of ant_apoe4_carrier: carries at least one APOE e4
@@ -344,6 +362,7 @@ tags:
     facet:
       status: registered
       scope: cross_dataset
+      facet_scopes: [human_postmortem]
       summary: Diagnosis of the donor as a short code (AD, control, MCI, PD, MS, ...).
       definition: >
         Clinical or neuropathological diagnosis of the donor the cell comes
@@ -364,6 +383,7 @@ tags:
       status: deprecated
       replaced_by: [disease, genotype]
       scope: dataset
+      facet_scopes: all
       summary: Experimental condition or treatment of the sample.
       definition: >
         What was done to the sample in the experiment (treatment, stimulus,
@@ -382,6 +402,7 @@ tags:
     facet:
       status: registered
       scope: cross_dataset
+      facet_scopes: [human_postmortem]
       range: [0, 1000]
       summary: Post-mortem interval in hours.
       definition: >
@@ -400,6 +421,7 @@ tags:
       status: deprecated
       replaced_by: [tissue]
       scope: cross_dataset
+      facet_scopes: all
       summary: Brain region or sub-region sampled, when it varies within a dataset.
       definition: >
         Anatomical region of the sample, used when one dataset combines
@@ -416,6 +438,7 @@ tags:
     facet:
       status: registered
       scope: cross_dataset
+      facet_scopes: all
       summary: Tissue or anatomical structure, often one constant per dataset.
       definition: >
         Tissue the cells were taken from, using UBERON-style labels. Often
@@ -432,6 +455,7 @@ tags:
     facet:
       status: registered
       scope: cross_dataset
+      facet_scopes: all
       summary: Broad cell class with Cell Ontology labels (microglial cell, astrocyte, ...).
       definition: >
         Harmonised broad cell class. Single-cell-type datasets publish it
@@ -449,6 +473,7 @@ tags:
       status: deprecated
       replaced_by: []
       scope: dataset
+      facet_scopes: all
       summary: The authors' cell-type labels, not harmonised.
       definition: >
         Cell-type annotation as published by the authors, kept for
@@ -465,6 +490,7 @@ tags:
     facet:
       status: registered
       scope: dataset
+      facet_scopes: all
       summary: The authors' cluster or cell-state labels, local to each dataset.
       definition: >
         Cluster or cell-state labels as published by the authors. Labels
@@ -498,6 +524,7 @@ tags:
     facet:
       status: registered
       scope: cross_dataset
+      facet_scopes: [human_postmortem]
       controlled_values: [NCI, MCI, dementia, other_dementia]
       ordered: false
       summary: Clinical cognitive status of the donor (NCI, MCI, dementia, other_dementia).
@@ -521,6 +548,7 @@ tags:
     facet:
       status: registered
       scope: cross_dataset
+      facet_scopes: [human_postmortem]
       controlled_values: [DLBD, vascular, SCZ]
       summary: Co-occurring condition next to the main diagnosis (DLBD, vascular, SCZ).
       definition: >
@@ -542,6 +570,7 @@ tags:
     facet:
       status: registered
       scope: cross_dataset
+      facet_scopes: [human_postmortem]
       controlled_values: [Not, Low, Intermediate, High]
       ordered: true
       summary: NIA-AA AD neuropathologic change level (Not, Low, Intermediate, High).
@@ -565,6 +594,7 @@ tags:
     facet:
       status: registered
       scope: cross_dataset
+      facet_scopes: all
       summary: Donor identifier shared across datasets, written <cohort>:<id>.
       definition: >
         The donor written as <cohort>:<id>, for example rosmap:01234567, so
@@ -581,3 +611,31 @@ tags:
         Empty (NULL) when the donor label is missing, or when a join finds
         no crosswalk entry and the dataset declares no fallback template.
       hint_keywords: []
+
+  app_nlgf:
+    label: App NL-G-F knock-in genotype
+    description: >
+      Whether the mouse (or the host mouse of a xenograft) carries the App
+      NL-G-F knock-in allele (nlgf) or is the study's control (control).
+    facet:
+      status: registered
+      scope: cross_dataset
+      facet_scopes: [mouse_in_vivo, xenograft_human_in_mouse]
+      controlled_values: [nlgf, control]
+      summary: App NL-G-F knock-in mouse (nlgf) or the study's control mouse (control).
+      definition: >
+        Genotype of the mouse the cells come from, or of the host mouse for a
+        xenograft: nlgf is the App NL-G-F knock-in amyloid model, control is the
+        study's comparison mouse (wild type, or the humanised-App knock-in
+        AppHuHu / hApp control of the xenograft studies). Only the NL-G-F
+        knock-in counts as nlgf: other amyloid or tau models (APP/PS1, 5xFAD,
+        Thy-TAU22, Trem2 or Apoe alleles) are not mapped here, and mice that
+        carry NL-G-F combined with a second engineered allele (for example an
+        Apoe knockout) stay empty so that the contrast is not confounded.
+        The replicate is the animal.
+      kind: categorical
+      values: "nlgf, control"
+      missing: >
+        Empty (NULL) when the study has no comparison mouse, when every animal
+        is nlgf, or the genotype is a combination with another engineered allele.
+      hint_keywords: [nlgf, nl-g-f, app_genotype, mouse_model, mouse_genotype]

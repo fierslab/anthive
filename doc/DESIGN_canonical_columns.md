@@ -412,3 +412,60 @@ SEA-AD microglia (G24/MMG, G24/PMG): `ant_cell_type` is derived from the `Supert
 (microglia = the Micro-PVM_2, _2_1, _2_3, _3, _4 supertypes; Micro-PVM_1, Lymphocyte and Monocyte
 are their own strata), so the microglia stratum no longer carries about 4 percent putative
 perivascular macrophages.
+
+## Update 2026-10-06: facet scopes, `app_nlgf` and `age` as tested facets
+
+**Facet scopes** (`lib/facet_scopes.py`). Facets never mix human and mouse. A dataset has one scope,
+derived from `.h5ad.mus` (`organism`, `experimental_system`) and the published columns:
+
+| Scope | Cells | `experimental_system` | Datasets (2026-10-06) |
+| --- | --- | --- | --- |
+| `human_postmortem` | human, tissue from the subject | post_mortem_tissue, postmortem_tissue, fresh_biopsy, live_biopsy (or none) | 103 |
+| `mouse_in_vivo` | mouse, tissue from the animal | post_mortem_tissue (the store's value for mouse tissue), none; mouse cells labelled xenograft (PM4, MZ4) | 16 |
+| `xenograft_human_in_mouse` | human cells in a mouse host | xenograft, chimera, or any human dataset publishing `ant_host_sex` | 31 |
+| `in_vitro` | cultures | in_vitro_2d, organoid | 7 (never tested) |
+
+No scope (skipped by the tools, not linted): mixed or missing organism, bulk tissue (11). The five
+Wachter2024 files without `organism` stay human (`ASSUME_HUMAN_DB_IDS`).
+
+**Registry field `facet_scopes`** in the `facet:` block of `lib/obscol_tags_vocab.yaml` (not to be confused with the
+older `scope: cross_dataset | dataset`): the scopes in which a dataset may publish the facet; `all` or no field means
+every scope. `sex`: all; `disease`, `braak`, `braak_group`, `ad_stage`, `adnc`, `apoe4_carrier`,
+`apoe_carrier`, `cognitive_status`, `comorbidity`, `pmi`, `age`: `human_postmortem`; `apoe`:
+`human_postmortem` and `xenograft_human_in_mouse` (the APOE genotype of the iPSC donor lines);
+`host_sex`: `xenograft_human_in_mouse`; `app_nlgf`: `mouse_in_vivo` and `xenograft_human_in_mouse`. Everything
+else: all. `ant md-check` reports `facet_scope_mismatch` (error) when a dataset's `api:` section maps a facet outside
+its scopes (`facet_lint.lint_facet_scope`). The two violations in the store were fixed with the change:
+DeBaene2026 (DB6/CPF, xenograft) no longer publishes `ant_apoe4_carrier` and `ant_disease` (iPSC donor attributes;
+the source columns `APOE` and `AD_status` are untouched; widen the scopes of those two facets if you want them back);
+Hou2025 adata_qc (H25/AQC, labelled `in_vitro_2d`) no longer publishes `ant_host_sex` (an in vitro culture has no host;
+if the dataset is a xenograft the `.h5ad.mus` label is wrong and the mapping can come back).
+
+**`app_nlgf`** (`nlgf`, `control`). The App NL-G-F knock-in mouse, or the host mouse of a xenograft, against the
+study's control (wild type, or the humanised-App AppHuHu / hApp control). Tested at replicate level with the animal
+as the replicate, covariate sex (host sex in a xenograft). Mapped (`obs_derive: ant_app_nlgf`):
+
+| Dataset | Source column | nlgf | control | Note |
+| --- | --- | --- | --- | --- |
+| B25/CNT (Borrie2025) | Mouse_model | NLGF | HuHu | replicate animal (Mouse) |
+| D25/HAR (Davis2025) | mouse_genotype | NLGF | hApp | replicate animal (sample id) |
+| DB6/CPF (DeBaene2026) | genotype | AppNLGF | AppHuHu | replicate animal (mouse_id) |
+| M24/M23 (Mancuso2024), M24/RMF | mouse.genotype | APP-NLGF | APP-WT, WT | `APP-NLGF/ApoeKO` stays empty |
+| S25/V6A (Sierksma2026 Village 6M), S25/V6W | Strain | AppNLGF | AppHuHu | V6W is a secondary; `sex_mouse` is now published as `ant_host_sex` (the covariate); `Strain` is an `obs_hidden` source, only the derived facet is visible |
+| B26/SOT (Blackburn2026) | app_genotype | NLGF | hAPP | `replicate_unit: none`: published, not tested |
+| SF9/CMR (SalaFrigerio2019) | genotype | K | W | `replicate_unit: none` (one plate per genotype x age x sex x region): published, not tested; D, P, C, E (Apoe cohort codes) stay empty. K is the knock-in line (K + W = the 10,801 Leuven-mice cells; confidence 95 percent) |
+
+Not mapped, with the reason (candidates for later facets): AppNL-G-F hosts only, no control animal
+(AZ5/SLM and AZ5/NST AlbertiniZielonka2025, Si5/SSI Simpson2025 sorl1, PM4/AST and PM4/MIC Preman2024 App NL-G-F x
+Apoe-/-, H25/AQC Hou2025 PSEN lines); other models (S20/SIE Sierksma2020: APPswe/PS1 and Thy-TAU22; SH9/SMB Shah2019
+TG vs WT astrocytes, model not stated; S26/AQR and AQM Sun2026 Control vs Treat, model not stated; MZ4/CMM and SSM
+MallachZielonka2024 "AD" mouse, model not stated in the store, spatial); xenograft objects whose host genotype column is
+absent or constant (S25/V3M, SGM, PhM, Z25/*); duplicate objects of mapped datasets that are not marked
+secondary (S25/V6C, V6S, V6M and the other `prs.*` objects).
+
+**`age`** is a tested facet in `human_postmortem` (`ant_age`, years; the model uses age / 10, see
+`doc/DESIGN_facet_testing.md`). `ant_age` is not allowed in mouse datasets (their ages are strings such as `6m`).
+
+`facets_visible` defaults to `ant_sex`, `ant_disease`, `ant_apoe4_carrier`, `ant_braak`, `ant_age`, `ant_app_nlgf`
+(`anthive.default.yaml`, `lib/config.py`, `site.example.yaml`). The dev host's `anthive.yaml` has no
+`facets_visible` key, so it follows the default.

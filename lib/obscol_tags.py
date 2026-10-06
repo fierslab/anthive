@@ -158,6 +158,7 @@ def facet_definition(facet: str) -> Dict[str, Any]:
         'hint_keywords': keywords,
         'status': (facet_registry().get(tag) or {}).get('status'),
         'scope': (facet_registry().get(tag) or {}).get('scope'),
+        'facet_scopes': list((facet_registry().get(tag) or {}).get('facet_scopes') or []),
         'replaced_by': list((facet_registry().get(tag) or {}).get('replaced_by') or []),
     }
 
@@ -172,6 +173,8 @@ def facet_definitions_status() -> Dict[str, Optional[str]]:
 
 
 FACET_STATUSES = ('registered', 'deprecated')
+#: Facet scope names (``lib/facet_scopes.py``), repeated here so this module stays import-light.
+FACET_SCOPE_NAMES = ('human_postmortem', 'mouse_in_vivo', 'xenograft_human_in_mouse', 'in_vitro')
 
 
 def _as_list(value: object) -> List[str]:
@@ -189,7 +192,9 @@ def facet_registry() -> Dict[str, Dict[str, Any]]:
     Only tags whose ``facet:`` block has a ``status`` of ``registered`` or
     ``deprecated`` are facets. Each entry has ``tag``, ``column``
     (``ant_<tag>``), ``status``, ``kind`` (categorical / numerical),
-    ``scope`` (cross_dataset / dataset), ``replaced_by`` (list),
+    ``scope`` (cross_dataset / dataset), ``facet_scopes`` (list of facet scopes,
+    ``lib/facet_scopes.py``; every scope when the vocab says ``all`` or nothing),
+    ``replaced_by`` (list),
     ``controlled_values`` (list, empty when free), ``ordered``, ``range``
     (``(min, max)`` or None), ``integer`` and ``computed_from`` (tag or
     None).
@@ -213,12 +218,19 @@ def facet_registry() -> Dict[str, Dict[str, Any]]:
             if not (isinstance(value_range, (list, tuple)) and len(value_range) == 2):
                 raise ObsColTagError(f"facet {tag!r}: range must be [min, max]")
             value_range = (float(value_range[0]), float(value_range[1]))
+        facet_scopes = _as_list(block.get('facet_scopes'))
+        if facet_scopes == ['all']:
+            facet_scopes = []
+        unknown = [name for name in facet_scopes if name not in FACET_SCOPE_NAMES]
+        if unknown:
+            raise ObsColTagError(f"facet {tag!r}: unknown facet_scopes {unknown}")
         registry[tag] = {
             'tag': tag,
             'column': FACET_PREFIX + tag,
             'status': status,
             'kind': kind,
             'scope': _clean_text(block.get('scope')) or 'cross_dataset',
+            'facet_scopes': facet_scopes or list(FACET_SCOPE_NAMES),
             'replaced_by': _as_list(block.get('replaced_by')),
             'controlled_values': _as_list(block.get('controlled_values')),
             'ordered': bool(block.get('ordered', False)),

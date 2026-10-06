@@ -122,6 +122,12 @@ and `lib/config.py` (anthive.yaml loader).
   `/module-variability` and `gene-variance-by-facet` are marked `per-cell (descriptive)`; pooled
   units (`pool:<id>`) come from `_facet_tests/_pooled/` through `FacetResults.pooled_datasets()`.
 
+- **Facet engine v3** (2026-10-06, API 2.44.0): dataset metadata carries `facet_scope` (cache version 6; `_lineage_fields`);
+  every cross-dataset facet route takes `scope` (`_scope_param`, default: `human_postmortem`, or the facet's first allowed scope,
+  e.g. `mouse_in_vivo` for `app_nlgf`; `all` on `/facets/{f}/tests`) and answers `scope` / `scopes`; `/genes/{g}/facet-effects` adds
+  `by_scope`; `/facets/{f}` and `/module-variability` filter by scope. Replication fields: `effect_gate_passed`, `median_logFC`,
+  `effect_gate_tau`, `r_significant`, `k_treat`. Never pool values, cells or genes across scopes in a new endpoint (`_facet_scope_of`).
+
 - **Lineage and secondaries** (unreleased): dataset metadata carries
   `designation`, `reanalysis_of`, `donor_group`, `has_donor_uid`
   (`_lineage_fields`); `GET /donor-groups` lists the groups. Pooled or

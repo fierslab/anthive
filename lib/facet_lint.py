@@ -83,6 +83,7 @@ RULES: Dict[str, str] = {
     'disease_basis_missing': 'dataset publishes ant_disease but declares no disease_basis',
     'disease_basis_invalid': 'disease_basis is not one of nia_reagan, braak_cerad, adnc, clinical_dx, author_dx',
     'disease_derivation_invalid': 'disease_derivation is malformed or disagrees with disease_basis',
+    'facet_scope_mismatch': 'dataset publishes a facet outside the facet scopes the registry allows for it',
 }
 
 _ROMAN = {'0': 0, 'I': 1, 'II': 2, 'III': 3, 'IV': 4, 'V': 5, 'VI': 6, 'VII': 7}
@@ -554,6 +555,41 @@ def lint_disease_basis(metadata: Mapping[str, Any], api: Mapping[str, Any]) -> L
     elif basis == 'braak_cerad':
         findings.append(Finding(ERROR, 'disease_derivation_invalid',
                                 'disease_basis is braak_cerad but disease_derivation is missing'))
+    return findings
+
+
+def facet_scope_of_dataset(api: Mapping[str, Any], annotation: Mapping[str, Any], db_id: Optional[str] = None
+                           ) -> Optional[str]:
+    """Facet scope of a dataset from its resolved ``.h5ad.mus`` annotation and published facets."""
+    from facet_scopes import scope_of  # noqa: PLC0415
+    return scope_of(annotation, {column for column, _ in _targets(api or {})}, db_id=db_id)
+
+
+def lint_facet_scope(api: Mapping[str, Any], scope: Optional[str]) -> List[Finding]:
+    """Error for every facet the dataset publishes outside the scopes of the registry.
+
+    Facets never mix human and mouse (``lib/facet_scopes.py``): ``ant_braak`` in a mouse
+    dataset, ``ant_app_nlgf`` in a human post-mortem dataset and so on are errors.
+    A dataset without scope (bulk, mixed organism, unknown organism) is not checked.
+
+    Args:
+        api: The raw ``api:`` mapping of a dataset ``.md``.
+        scope: The dataset's facet scope (``facet_scopes.scope_of``) or None.
+    """
+    if scope is None:
+        return []
+    registry = facet_registry()
+    findings: List[Finding] = []
+    seen: Set[str] = set()
+    for column, how in _targets(api or {}):
+        if column in seen:
+            continue
+        seen.add(column)
+        entry = registry.get(_facet_of(column) or '')
+        if entry is not None and scope not in entry['facet_scopes']:
+            findings.append(Finding(ERROR, 'facet_scope_mismatch',
+                                    f'{column} ({how}) is published in a {scope} dataset, but the facet is '
+                                    f'only allowed in {", ".join(entry["facet_scopes"])}'))
     return findings
 
 

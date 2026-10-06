@@ -369,6 +369,8 @@ def check_md_folder(
             report.add_finding(rel_path, finding)
         for finding in facet_lint.lint_disease_basis(metadata, api):
             report.add_finding(rel_path, finding)
+        for finding in facet_lint.lint_facet_scope(api, _facet_scope(md_path, api, folder, db_id)):
+            report.add_finding(rel_path, finding)
         if not with_data:
             continue
         duckdb_path = md_path.with_suffix('.duckdb')
@@ -387,6 +389,17 @@ def check_md_folder(
             report.data_checked += 1
         finally:
             close()
+
+
+def _facet_scope(md_path: Path, api: Any, folder: Path, db_id: Optional[str]) -> Optional[str]:
+    """Facet scope of a dataset from its ``.h5ad.mus`` cascade (None when unknown or unreadable)."""
+    try:
+        import facet_lint  # noqa: PLC0415
+        import mus  # noqa: PLC0415
+        annotation = mus.resolve_annotation(md_path.with_suffix('.h5ad'), root=folder)
+        return facet_lint.facet_scope_of_dataset(api if isinstance(api, dict) else {}, annotation, db_id)
+    except Exception:
+        return None
 
 
 def _join_root(folder: Path, api: Any) -> Optional[Path]:

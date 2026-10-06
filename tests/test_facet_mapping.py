@@ -31,6 +31,7 @@ if str(LIB_DIR) not in sys.path:
     sys.path.insert(0, str(LIB_DIR))
 
 import facet_mapping  # noqa: E402
+import facet_scopes  # noqa: E402
 import obscol_tags  # noqa: E402
 from anthive_db import build_obs_view_sql, safe_ident  # noqa: E402
 from canonical_columns import CANONICAL_TAGS  # noqa: E402
@@ -220,6 +221,7 @@ _SERVE_WANTED = {
     '_facet_api_config', '_quote_stored_column', '_facet_add_counts',
     '_dataset_facet_projection', '_facet_entry_for_caller', '_facet_non_carriers',
     'get_dataset_facets', 'get_facet_detail', '_secondary_db_ids', '_join_tables_signature',
+    '_scope_param', '_facet_scope_of', '_SCOPE_QUERY_DESC',
 }
 
 DB_ID = 'G1/ds1'
@@ -389,6 +391,7 @@ def serve(tmp_path):
         'get_auth_settings': lambda cfg=None: {'mode': 'authelia', 'admins': set()},
         '_load_module_variability': lambda force=False: None,
         'canonical_facet': canonical_facet, 'is_deprecated_facet_column': is_deprecated_facet_column,
+        'facet_scopes_lib': facet_scopes,
         '_facets_visible': lambda: [],
         'facet_hidden_by_config': lambda facet, visible=None: bool(visible) and facet not in visible,
     }

@@ -11,7 +11,8 @@
 #   counts_long.csv  sample_idx, gene_id, count     (raw summed counts, sparse)
 #   genes.csv        gene_id, gene_name, symbol
 #   jobs.csv         job_id, facet, stratum, numeric, tau (log2 fold change
-#                    threshold of the treat test; per Braak unit when numeric)
+#                    threshold of the treat test; per Braak stage or per decade
+#                    of age when numeric)
 #   samples.csv      job_id, sample_idx, donor, facet_value, cov_sex, cov_age,
 #                    cov_pmi, batch   (NA covariate columns are omitted)
 # Outputs (in <work_dir>):

@@ -135,8 +135,9 @@ def test_analysis_level_rule():
     assert replicates.analysis_level(None, True, n_replicates=50, n_distinct=7)['analysis_level'] == 'cell'
     numeric = replicates.analysis_level('donor', True, n_replicates=6, n_distinct=3)
     assert numeric['analysis_level'] == 'replicate'
-    assert replicates.analysis_level('donor', True, n_replicates=5, n_distinct=5)['analysis_level'] == 'cell'
-    assert replicates.analysis_level('donor', True, n_replicates=9, n_distinct=1)['analysis_level'] == 'cell'
+    assert replicates.analysis_level('donor', True, n_replicates=3, n_distinct=3)['analysis_level'] == 'cell'
+    assert replicates.analysis_level('donor', True, n_replicates=9, n_distinct=2)['analysis_level'] == 'cell'
+    assert replicates.analysis_level('donor', True, n_replicates=4, n_distinct=3)['analysis_level'] == 'replicate'
     custom = replicates.analysis_level('donor', False, n_per_level={'a': 2, 'b': 2}, min_per_level=2)
     assert custom['analysis_level'] == 'replicate'
 
@@ -342,7 +343,7 @@ def first_n_cells(entry) -> int:
 
 @needs_r
 def test_process_pool_skips_when_no_member_is_eligible(tmp_path):
-    store, first = make_dataset(tmp_path, organism='mouse')
+    store, first = make_dataset(tmp_path, system='in_vitro_2d')
     manifest = aft.process_pool('p', [first], store, tmp_path / 'out', ['sex'], RSCRIPT, threads=1, memory_limit_gb=1)
     assert manifest['status'] == 'skipped' and manifest['reason'] == 'no eligible member file'
 
@@ -354,7 +355,8 @@ def _write_unit(folder: Path, db_id: str, stem: str, effect: float, q_value: flo
     genes = [f'G{i}' for i in range(12)]
     rows = [{'facet': 'sex', 'cell_type': 'microglial cell', 'celltype_source': 'constant_all_cells', 'gene': gene,
              'logFC': effect if gene == 'G0' else 0.01, 'ci_low': 0.0, 'ci_high': 1.0,
-             'q_value': q_value if gene == 'G0' else 0.9, 'p_treat': q_value ** 2 if gene == 'G0' else 0.8,
+             'q_value': q_value if gene == 'G0' else 0.9, 'p_value': q_value ** 2 if gene == 'G0' else 0.8,
+             'p_treat': q_value ** 2 if gene == 'G0' else 0.8,
              'q_treat': q_value if gene == 'G0' else 0.9, 'tau_log2': 0.1375, 'n_donors': 20,
              'descriptive_only': False, 'n_lt5': False} for gene in genes]
     pd.DataFrame(rows).to_parquet(folder / f'{stem}.facet_tests.parquet')
@@ -541,14 +543,16 @@ def test_summarize_replication_tables(tmp_path):
     assert [d['db_id'] for d in aft.datasets_from_results(root, store)] == ['G1/ds', 'WA4/MIT']
     summary = aft.summarize_replication(root, store, tmp_path / 'out', ['g0', 'nope'], facets=['sex'])
     row = summary.iloc[0]
-    assert (row['facet'], row['celltype_group'], row['n_cohorts'], row['replicated_r05']) == ('sex', 'microglia', 2, 1)
-    assert row['replicated_up'] == 1 and row['genes_in_family'] == 12
+    assert (row['facet_scope'], row['facet'], row['celltype_group'], row['n_cohorts'], row['replicated']) == (
+        'human_postmortem', 'sex', 'microglia', 2, 1)
+    assert row['r_below_05'] == 1 and row['replicated_up'] == 1 and row['genes_in_family'] == 12
     candidates = pd.read_csv(tmp_path / 'out' / 'candidates.tsv', sep='\t')
     assert candidates['gene'].tolist() == ['G0'] and bool(candidates['replicated'].iloc[0]) and candidates['k'].iloc[0] == 2
     units = pd.read_csv(tmp_path / 'out' / 'units.tsv', sep='\t')
     by_db = units.set_index('db_id')
     assert bool(by_db.loc['pool:madrc', 'anchor']) and not bool(by_db.loc['WA4/MIT', 'anchor'])
-    assert (tmp_path / 'out' / 'replicated_sex_microglia.tsv').exists()
+    assert (tmp_path / 'out' / 'replicated_human_postmortem_sex_microglia.tsv').exists()
+    assert set(units['facet_scope']) == {'human_postmortem'}
 
 
 def test_partial_conjunction_method_default_and_effect(monkeypatch):
@@ -564,7 +568,9 @@ def test_partial_conjunction_method_default_and_effect(monkeypatch):
     rows = pd.DataFrame({'unit': list(range(5)) * 2, 'gene': ['G0'] * 5 + ['G1'] * 5,
                          'gene_upper': ['G0'] * 5 + ['G1'] * 5,
                          'logFC': [0.5] * 10, 'q_treat': [1e-12, 0.03, 0.03, 0.03, 0.03] + [0.5] * 5,
-                         'p_treat': [1e-12, 0.03, 0.03, 0.03, 0.03] + [0.5] * 5})
+                         'p_treat': [1e-12, 0.03, 0.03, 0.03, 0.03] + [0.5] * 5,
+                         'p_value': [2e-12, 0.06, 0.06, 0.06, 0.06] + [1.0] * 5,      # halved to the one-sided p
+                         'q_value': [1e-12, 0.03, 0.03, 0.03, 0.03] + [0.5] * 5})
     for method, expected in (('simes', 0), ('fisher', 1)):
         monkeypatch.setattr(fr, 'PC_METHOD', method)
         family = fr.FacetResults._family(rows, units)['frame']

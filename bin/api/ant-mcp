@@ -468,11 +468,13 @@ def main() -> None:
             '                     available expression layers, and embedding names\n'
             '  search_genes     — confirm exact gene identifiers before using them in queries or plots\n'
             '\n'
-            'DONOR-LEVEL FACET EFFECTS  (sex, disease [provisional], APOE e4 carrier, Braak; exploratory)\n'
+            'REPLICATE-LEVEL FACET EFFECTS  (sex, disease [provisional], APOE e4 carrier, Braak, age, App NL-G-F; exploratory)\n'
             '  facet_effects    one gene: every dataset x cell type, grouped by cohort, replication badge\n'
             '  facet_top_genes  genes changing in the most independent cohorts, per cell type\n'
             '  facet_units      which units were tested, donors, model, flags; why others were not\n'
             '  get_facet_tests  gene or module rows of one dataset (limma-voom / OLS + permutations)\n'
+            '  All of them take scope= (human_postmortem | mouse_in_vivo | xenograft_human_in_mouse): facets are\n'
+            '  tested and counted per scope, human and mouse genes are never merged.\n'
             '  Prefer these over per-cell plots for donor-level facets, and state the model when reporting.\n'
             '\n'
             'PLOTTING\n'
@@ -1342,7 +1344,7 @@ def main() -> None:
         q: float = 0.05,
         limit: int = 50,
     ) -> str:
-        """Donor-level facet test results for one dataset (sex, disease, APOE e4 carrier, Braak).
+        """Replicate-level facet test results for one dataset (sex, disease, APOE e4 carrier, Braak, age, App NL-G-F).
 
         EXPLORATORY results, precomputed per dataset. The unit of replication is
         the donor, not the cell: raw counts are summed per (donor, cell type)
@@ -1357,7 +1359,13 @@ def main() -> None:
         q_param and p_perm together).
 
         Contrasts: sex = m vs f; disease = AD vs control; apoe4_carrier = e4
-        carrier vs non-carrier; braak = linear trend per Braak stage.
+        carrier vs non-carrier; braak = linear trend per Braak stage; age = linear
+        trend per decade (model ~ age + sex + pmi [+ batch]; the age effect
+        includes disease prevalence); app_nlgf = App NL-G-F knock-in vs control
+        (mouse in vivo and xenograft hosts; replicate = the animal). Each dataset
+        has one facet_scope (human_postmortem, mouse_in_vivo,
+        xenograft_human_in_mouse); a facet is only tested in the scopes the
+        registry allows.
         Disease results are PROVISIONAL: what counts as control differs between
         studies. Datasets with a Braak and a CERAD score use the common
         definition (AD = Braak >= III and CERAD probable/definite; control =
@@ -1366,13 +1374,14 @@ def main() -> None:
         p_treat and q_treat (limma treat, H0 |log2FC| <= tau; tau_log2).
         Every unit states its analysis_level: "replicate level" (pseudobulk by
         the dataset's replicate_unit: donor, animal or sample, at least 3 per
-        level, Braak at least 6) or "cell-level, descriptive only" with the
-        reason (then nothing is tested).
+        level; numeric facets at least 4 replicates with 3 distinct values) or
+        "cell-level, descriptive only" with the reason (then nothing is tested).
 
         How to read the flags:
-          descriptive_only  a level has fewer than 5 donors (Braak: fewer than 10
-                            donors); p, q, t and CI are NULL and only the effect
-                            estimate is given. Do not call these significant.
+          small_sample      a level has fewer than 5 replicates (numeric facets:
+                            fewer than 10): tested and counted, but power is low.
+          descriptive_only  the unit was not tested (no p, q or CI); only
+                            results from before 2026-10-06 use this for small cohorts.
           composition flag  the fraction of each donor's cells that falls in this
                             cell type differs with the facet (p < 0.05,
                             uncorrected); an effect may reflect a shift in cell
@@ -1393,7 +1402,7 @@ def main() -> None:
 
         Args:
             db_id: Dataset id, e.g. 'G24/MMG'.
-            facet: Restrict to one facet: sex, disease, apoe4_carrier or braak.
+            facet: Restrict to one facet: sex, disease, apoe4_carrier, braak, age or app_nlgf.
             cell_type: Restrict to one cell type stratum (as listed in the summary).
             level: 'summary' (one line per facet x cell type: donors per level,
                 covariates, flags, genes and modules at q < 0.05), 'genes'
@@ -1517,23 +1526,28 @@ def main() -> None:
 
     _FACET_TOOL_RULES = (
         'Exploratory, replicate-level results (unit = donor, animal or sample; genes: limma-voom on pseudobulk). '
-        'Datasets are tested separately. Replication = partial-conjunction r-value < 0.05 (Benjamini and Heller '
-        '2008): the effect is present in at least 2 cohorts in the same direction. Each cohort contributes ONE '
-        'anchor unit per cell type group (a donor-pooled unit for multi-region cohorts such as MADRC and SEA-AD; '
-        'other units are supplementary and never counted). The anchor p value is the limma treat p value '
-        '(H0: |log2FC| <= log2(1.1); Braak log2(1.1)/3 per stage); r_value is BH-adjusted over the genes of one '
-        'facet x cell type group. k = cohorts whose anchor has q_treat < 0.05 in that direction (descriptive), '
-        'm = cohorts tested. Cohorts with overlap_unknown never had their donor overlap checked. The disease '
-        'facet only combines pathology-based definitions (disease_basis nia_reagan, braak_cerad, adnc). Cell types '
-        'are counted by group (microglial cell, Microglia, MG and Mic P2RY12 are one group "microglia"); each unit '
-        'keeps its raw label. Reanalyses (secondary datasets) are shown but never counted. A unit with '
-        'analysis_level "cell-level, descriptive only" was not tested (too few replicates or no replicate unit).'
+        'Datasets are tested separately, and facets are tested and counted per facet SCOPE (human_postmortem, '
+        'mouse_in_vivo, xenograft_human_in_mouse): scopes and their genes are never merged. Replication = '
+        'partial-conjunction r-value < 0.05 (Benjamini and Heller 2008) on the ordinary one-sided limma p values: the '
+        'effect is present in at least 2 cohorts in the same direction. Each cohort contributes ONE anchor unit per '
+        'cell type group (a donor-pooled unit for multi-region cohorts such as MADRC and SEA-AD; other units are '
+        'supplementary and never counted). A gene is REPLICATED when r_value < 0.05 AND it passes the effect gate: '
+        'the median log2 fold change over the tested cohorts, in the replicated direction, is at least tau '
+        '(log2(1.1); Braak log2(1.1)/3 per stage; age log2(1.1) per decade; fields effect_gate_passed, median_logFC). '
+        'r_value is BH-adjusted over the genes of one scope x facet x cell type group. k = cohorts whose anchor has '
+        'q_value < 0.05 in that direction (descriptive), m = cohorts tested. Cohorts with overlap_unknown never had '
+        'their donor overlap checked. The disease facet only combines pathology-based definitions (disease_basis '
+        'nia_reagan, braak_cerad, adnc). Cell types are counted by group (microglial cell, Microglia, MG and Mic '
+        'P2RY12 are one group "microglia"); each unit keeps its raw label. Reanalyses (secondary datasets) are shown '
+        'but never counted. A unit with analysis_level "cell-level, descriptive only" was not tested (too few '
+        'replicates or no replicate unit). Small cohorts are tested and counted (3 replicates per level; 4 with 3 '
+        'distinct values for Braak and age) and carry a small_sample flag.'
     )
 
     @mcp.tool()
     async def facet_effects(gene: str, facet: Optional[str] = None, cell_type: Optional[str] = None,
-                            exclude_secondary: bool = True) -> str:
-        """Donor-level effect of one gene for the tested facets (sex, disease, APOE e4 carrier, Braak), per dataset and cell type, grouped by cohort, with a replication badge.
+                            exclude_secondary: bool = True, scope: Optional[str] = None) -> str:
+        """Replicate-level effect of one gene for the tested facets (sex, disease, APOE e4 carrier, Braak, age, App NL-G-F), per dataset and cell type, grouped by cohort, with a replication badge.
 
         EXPLORATORY. Each row is one dataset and cell type tested on its own:
         raw counts summed per donor (at least 10 cells) into a pseudobulk,
@@ -1543,14 +1557,17 @@ def main() -> None:
 
         Replication: partial-conjunction r-value (Benjamini and Heller 2008)
         for "present in at least 2 cohorts, same direction"; replicated =
-        r_value < 0.05. Each cohort contributes exactly one anchor unit per
-        cell type group (donor-pooled over regional files where a cohort has
-        several regions; per-region units are supplementary and not counted).
-        The anchor p value is the limma treat p value (H0: |log2FC| <= log2(1.1),
-        Braak log2(1.1)/3 per stage), one-sided in the observed direction; the
-        r_value is BH-adjusted over the genes of the facet x cell type group.
-        k (cohorts with q_treat < 0.05, same direction) and m (cohorts tested)
-        are descriptive. The legacy count (q_value < 0.05) is kept as
+        r_value < 0.05 AND the effect gate (the median log2 fold change over the
+        tested cohorts, in the replicated direction, is at least tau: log2(1.1);
+        Braak log2(1.1)/3 per stage; age log2(1.1) per decade). Each cohort
+        contributes exactly one anchor unit per cell type group (donor-pooled over
+        regional files where a cohort has several regions; per-region units are
+        supplementary and not counted). The anchor p value is the ordinary
+        one-sided limma p value of the tested direction (limma treat p_treat and
+        q_treat stay as extra columns); the r_value is BH-adjusted over the genes
+        of the scope x facet x cell type group. k (cohorts with q_value < 0.05,
+        same direction) and m (cohorts tested) are descriptive. The legacy count
+        (q_value < 0.05) is kept as
         legacy_badge. The disease facet only combines pathology-based
         definitions (disease_basis nia_reagan, braak_cerad, adnc). Cohorts with
         overlap_unknown never had their donor overlap checked. Cell types are
@@ -1559,10 +1576,14 @@ def main() -> None:
 
         Contrasts: sex m vs f; disease AD vs control (PROVISIONAL: vocabulary
         not settled, results will change); apoe4_carrier any e4 allele vs none;
-        braak linear trend per stage (not AD vs control). Flags:
-        descriptive_only (a level has fewer than 5 donors, Braak fewer than 10:
-        no p, q, CI); composition (cell fraction in the stratum differs with
-        the facet; the effect may reflect composition). For APOE, APOC1,
+        braak linear trend per stage (not AD vs control); age linear trend per
+        decade (includes disease prevalence); app_nlgf App NL-G-F knock-in vs
+        control mouse or host (replicate = animal). Flags: small_sample (a level
+        has fewer than 5 replicates: tested and counted, low power);
+        descriptive_only (not tested: no p, q, CI); composition (cell fraction in
+        the stratum differs with the facet; the effect may reflect composition).
+        Scopes: human_postmortem, mouse_in_vivo, xenograft_human_in_mouse are
+        never merged; a gene symbol is matched inside one scope only. For APOE, APOC1,
         APOC1P1, TOMM40, NECTIN2, PVRL2 the APOE-locus note applies.
 
         When you report a result, repeat its model line (formula, n donors,
@@ -1570,23 +1591,27 @@ def main() -> None:
 
         Args:
             gene: Gene symbol, e.g. 'PTPRG'.
-            facet: sex, disease, apoe4_carrier or braak; omit for all four.
+            facet: sex, disease, apoe4_carrier, braak, age or app_nlgf; omit for all.
             cell_type: Restrict to one cell type group (e.g. 'microglia') or raw label (e.g. 'Mic P2RY12').
             exclude_secondary: Do not count reanalyses (default true).
+            scope: human_postmortem, mouse_in_vivo or xenograft_human_in_mouse. Default: human_postmortem
+                (for app_nlgf: mouse_in_vivo); the reply names the other scopes that have results.
         """
-        facets = [facet] if facet else ['sex', 'disease', 'apoe4_carrier', 'braak']
+        facets = [facet] if facet else ['sex', 'disease', 'apoe4_carrier', 'braak', 'age', 'app_nlgf']
         lines = [_FACET_TOOL_RULES]
         for name in facets:
             try:
-                card = await _get(f'/facets/{name}/effects', gene=gene, cell_type=cell_type,
+                card = await _get(f'/facets/{name}/effects', gene=gene, cell_type=cell_type, scope=scope,
                                   exclude_secondary=str(bool(exclude_secondary)).lower())
             except httpx.HTTPStatusError as exc:
                 lines.append(f"{name}: error {exc.response.status_code}: {exc.response.text[:200]}")
                 continue
             info = card.get('facet') or {}
-            lines.append(f"\n## {gene} / {name}: {info.get('contrast')}; effect = {info.get('effect_unit')}")
+            others = [s for s in card.get('scopes') or [] if s != card.get('scope')]
+            lines.append(f"\n## {gene} / {name} [{card.get('scope')}]: {info.get('contrast')}; effect = {info.get('effect_unit')}"
+                         + (f" (other scopes with results: {', '.join(others)}; ask with scope=)" if others else ''))
             if not card.get('units'):
-                lines.append('  not tested in any dataset (gene absent or filtered out by filterByExpr)')
+                lines.append('  not tested in any dataset of this scope (gene absent or filtered out by filterByExpr)')
                 continue
             for rep in card.get('replication') or []:
                 labels = ', '.join(rep.get('labels') or [])
@@ -1630,53 +1655,59 @@ def main() -> None:
 
     @mcp.tool()
     async def facet_top_genes(facet: str, cell_type: Optional[str] = None, n: int = 30,
-                              exclude_secondary: bool = True) -> str:
+                              exclude_secondary: bool = True, scope: Optional[str] = None) -> str:
         """Genes that change with a facet in the most independent cohorts, within one cell type group.
 
         Lists the genes with a partial-conjunction r-value below 0.05 (the
-        effect is present in at least 2 cohorts in the same direction), ranked
-        by r_value, then k (cohorts with q_treat < 0.05 in that direction),
-        then agreement (fraction of the tested cohorts whose effect has that
-        sign) and the median absolute log2 fold change. Same replication
-        definition as facet_effects (one anchor unit per cohort and cell type
-        group, limma treat p values, BH over the genes of the group; cell types
-        counted by group; reanalyses not counted). The reply states how many
-        genes replicate (n_replicated) of how many were testable in at least
-        two cohorts. EXPLORATORY, disease only combines pathology-based
-        definitions, Braak is a linear trend per stage.
+        effect is present in at least 2 cohorts in the same direction) that also
+        pass the effect gate (median log2 fold change over the tested cohorts in
+        that direction at least tau), ranked by r_value, then k (cohorts with
+        q_value < 0.05 in that direction), then agreement (fraction of the tested
+        cohorts whose effect has that sign) and the median absolute log2 fold
+        change. Same replication definition as facet_effects (one anchor unit per
+        cohort and cell type group, ordinary one-sided limma p values, BH over the
+        genes of the scope and group; cell types counted by group; reanalyses not
+        counted). The reply states how many genes replicate (n_replicated) of how
+        many were testable in at least two cohorts. EXPLORATORY, disease only
+        combines pathology-based definitions, Braak is a linear trend per stage,
+        age per decade, app_nlgf is App NL-G-F vs control (mouse, xenograft hosts).
         Use facet_effects on a gene from this list to see every dataset row
         and its model.
 
         Args:
-            facet: sex, disease, apoe4_carrier or braak.
+            facet: sex, disease, apoe4_carrier, braak, age or app_nlgf.
             cell_type: Cell type group (e.g. 'microglia') or raw label; omit for the group with most cohorts (the reply lists the options).
             n: Rows (default 30, max 500).
             exclude_secondary: Do not count reanalyses (default true).
+            scope: human_postmortem, mouse_in_vivo or xenograft_human_in_mouse. Default: human_postmortem
+                (app_nlgf: mouse_in_vivo). Scopes are never merged.
         """
         try:
             data = await _get(f'/facets/{facet}/effects/top', cell_type=cell_type, n=max(1, min(int(n), 500)),
-                              exclude_secondary=str(bool(exclude_secondary)).lower())
+                              scope=scope, exclude_secondary=str(bool(exclude_secondary)).lower())
         except httpx.HTTPStatusError as exc:
             return f"Error {exc.response.status_code}: {exc.response.text[:300]}"
         lines = [_FACET_TOOL_RULES,
-                 f"{facet} in {data.get('cell_type')}: {data.get('cohorts_in_cell_type')} counted cohorts tested"
+                 f"{facet} [{data.get('scope')}] in {data.get('cell_type')}: {data.get('cohorts_in_cell_type')} counted cohorts tested"
                  + _donor_phrase(data.get('donors_in_cell_type')) + '.',
                  'Other cell types: ' + ', '.join(f"{o['cell_type']} ({o['n_cohorts']} cohorts)"
                                                   for o in (data.get('cell_types') or [])[:12])]
         rows = data.get('rows') or []
         if not rows:
-            lines.append('No gene replicated (r < 0.05) in this cell type.')
+            lines.append('No gene replicated (r < 0.05 and the effect gate) in this scope and cell type.'
+                         + (f" Other scopes with results: {', '.join(s for s in data.get('scopes') or [] if s != data.get('scope'))}."
+                            if len(data.get('scopes') or []) > 1 else ''))
             return '\n'.join(lines)
         if data.get('labels'):
             lines.append('Raw labels in this group: ' + ', '.join(data['labels']))
-        lines.append(f"{data.get('n_replicated')} genes replicate (r < 0.05) of {data.get('n_genes_in_family')} "
-                     f"testable in at least two cohorts.")
-        lines.append('gene | r_value | k of m cohorts | agreement | direction | median |log2FC| | cohorts with q_treat < 0.05')
+        lines.append(f"{data.get('n_replicated')} genes replicate (r < 0.05 and effect gate; {data.get('n_r_significant')} "
+                     f"with r < 0.05) of {data.get('n_genes_in_family')} testable in at least two cohorts.")
+        lines.append('gene | r_value | k of m cohorts | agreement | direction | median log2FC (gate tau) | cohorts with q_value < 0.05')
         for row in rows:
             lines.append(f"{row['gene']} | {_fmt_number(row.get('r_value'))} | {row['k']} of {row['m']} | "
                          f"{_fmt_number(row.get('agreement'))} | "
                          f"{row['direction']}{' (sign discordant)' if row.get('sign_discordant') else ''} | "
-                         f"{_fmt_number(row.get('median_abs_logFC'))} | "
+                         f"{_fmt_number(row.get('median_logFC'))} ({_fmt_number(row.get('effect_gate_tau'))}) | "
                          f"{', '.join(row.get('cohorts') or [])}"
                          f"{' | overlap unknown: ' + ', '.join(row['cohorts_overlap_unknown']) if row.get('overlap_unknown') else ''}"
                          f"{' | APOE locus' if row.get('apoe_locus') else ''}")
@@ -1684,7 +1715,7 @@ def main() -> None:
 
     @mcp.tool()
     async def facet_units(db_id: Optional[str] = None, facet: Optional[str] = None,
-                          exclude_secondary: bool = True) -> str:
+                          exclude_secondary: bool = True, scope: Optional[str] = None) -> str:
         """Which dataset x cell type units were tested for the facets, with donors per level, model, flags and hits; and why the others were not tested.
 
         Give db_id for one dataset (all facets, with eligibility reasons and
@@ -1697,20 +1728,21 @@ def main() -> None:
 
         Args:
             db_id: Dataset id, e.g. 'G24/MMG'.
-            facet: sex, disease, apoe4_carrier or braak (used when db_id is not given).
+            facet: sex, disease, apoe4_carrier, braak, age or app_nlgf (used when db_id is not given).
             exclude_secondary: Reanalyses are listed but marked not counted (default true).
+            scope: human_postmortem, mouse_in_vivo, xenograft_human_in_mouse or all (used with facet).
         """
         if db_id:
             return await get_facet_tests(db_id, facet=facet, level='summary')
         if not facet:
             return 'Give db_id or facet.'
         try:
-            data = await _get(f'/facets/{facet}/tests', top_genes=5,
+            data = await _get(f'/facets/{facet}/tests', top_genes=5, scope=scope,
                               exclude_secondary=str(bool(exclude_secondary)).lower())
         except httpx.HTTPStatusError as exc:
             return f"Error {exc.response.status_code}: {exc.response.text[:300]}"
         lines = [_FACET_TOOL_RULES,
-                 f"{facet}: {data.get('n_rows')} units in {data.get('n_datasets_tested')} datasets (no pooling)."]
+                 f"{facet} [{data.get('scope')}]: {data.get('n_rows')} units in {data.get('n_datasets_tested')} datasets (no pooling)."]
         for row in data.get('rows') or []:
             counts = row.get('level_counts') or {}
             donors = ', '.join(f'{k}={v}' for k, v in counts.items())

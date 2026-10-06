@@ -93,6 +93,7 @@ from config import (get_auth_settings, get_catalog_scan_mode, get_data_folder,
 from library_service import LIBRARY_S3_PREFIX, LibraryService
 from facet_aliases import canonical_facet, is_deprecated_facet_column
 import facet_results as facet_results_lib
+import facet_scopes as facet_scopes_lib
 from facet_results import FacetResults
 import de_storage as lib_de_storage
 from geneset import (
@@ -618,7 +619,7 @@ class ConnectionPool:
         }
 
 
-_METADATA_CACHE_VERSION = 5       # bump when the cache format OR the cached metadata payload (keys derived in _load_database_metadata) changes
+_METADATA_CACHE_VERSION = 6       # bump when the cache format OR the cached metadata payload (keys derived in _load_database_metadata) changes
 _METADATA_CACHE_TTL_S3  = 86_400  # 24 h for S3 databases (no local mtime)
 
 
@@ -631,7 +632,8 @@ def _json_serial(obj: object) -> str:
 
 def _lineage_fields(file_metadata: Dict[str, Any], obs_categorical: List[str],
                     annotation: Optional[Dict[str, Any]] = None,
-                    obs_numerical: Optional[List[str]] = None) -> Dict[str, Any]:
+                    obs_numerical: Optional[List[str]] = None,
+                    db_id: Optional[str] = None) -> Dict[str, Any]:
     """Lineage of one dataset from its ``.md`` (audit decision L3).
 
     ``is_secondary`` is True only for an explicit ``is_secondary: true``.
@@ -645,7 +647,11 @@ def _lineage_fields(file_metadata: Dict[str, Any], obs_categorical: List[str],
     are inferred (``lib/replicates.py``); ``replicate_basis`` says which
     (``declared`` or ``inferred``). ``disease_basis`` is the ``.md`` key
     (nia_reagan, braak_cerad, adnc, clinical_dx, author_dx) or None.
+    ``facet_scope`` (``lib/facet_scopes.py``: human_postmortem, mouse_in_vivo,
+    xenograft_human_in_mouse, in_vitro, or None) is derived from the resolved
+    ``.h5ad.mus`` annotation and the published ``ant_*`` columns.
     """
+    import facet_scopes  # noqa: PLC0415
     import replicates  # noqa: PLC0415
     try:
         replicate = replicates.resolve_replicate(
@@ -667,6 +673,8 @@ def _lineage_fields(file_metadata: Dict[str, Any], obs_categorical: List[str],
         'replicate_column': replicate['replicate_column'],
         'replicate_basis': replicate['basis'],
         'disease_basis': file_metadata.get('disease_basis'),
+        'facet_scope': facet_scopes.scope_of(
+            annotation or {}, {c for c in (obs_categorical or []) if str(c).startswith('ant_')}, db_id=db_id),
     }
 
 
@@ -1568,7 +1576,7 @@ class DatabaseRegistry:
             # only on secondaries), the donor pool it shares with sibling
             # datasets (slug) and whether it publishes the cross-dataset
             # donor id ant_donor_uid. See _lineage_fields.
-            **_lineage_fields(file_metadata, obs_categorical, ann, obs_numerical),
+            **_lineage_fields(file_metadata, obs_categorical, ann, obs_numerical, db_id=db_id),
 
             # Biology & study annotation (resolved from .h5ad.mus + .env cascade)
             'organism':         ann.get('organism'),
@@ -1901,7 +1909,7 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.43.0"
+API_VERSION = "2.44.0"
 API_VERSION_RELEASED = "2026-10-05"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
@@ -12881,6 +12889,7 @@ def get_module_variability(
     limit: int = Query(500, ge=1, le=100000, description="Max rows returned."),
     format: str = Query("json", pattern="^(json|csv|tsv)$"),
     exclude_secondary: bool = Query(True, description="Leave out rows of secondary datasets (is_secondary: true) unless `dataset` names one."),
+    scope: Optional[str] = Query(None, description="Facet scope (human_postmortem | mouse_in_vivo | xenograft_human_in_mouse | in_vitro): keep only the rows of the datasets in that scope. Default: every scope (rows are per dataset, never pooled)."),
 ):
     """Per-(dataset × source × catalog × module × tag × statistic) statistics.
 
@@ -12942,6 +12951,10 @@ def get_module_variability(
             n_excluded_secondary = int(is_secondary_row.sum())
             working = working[~is_secondary_row]
     if dataset:   working = working[working['dataset']    == dataset]
+    wanted_scope = _scope_param(scope)
+    if wanted_scope:
+        working = working[working['dataset'].isin(
+            {d for d in registry.metadata_cache if _facet_scope_of(d) == wanted_scope})]
     if source:    working = working[working['source']     == source]
     if catalog:   working = working[working['catalog']    == catalog]
     if module:    working = working[working['module']     == module]
@@ -13058,6 +13071,34 @@ def _secondary_db_ids() -> Set[str]:
     by default (``exclude_secondary``, audit decision L3)."""
     return {db_id for db_id, meta in registry.metadata_cache.items()
             if (meta or {}).get('is_secondary') is True}
+
+
+def _scope_param(scope: Optional[str], allow_all: bool = False) -> Optional[str]:
+    """Validate a ``scope`` query value (``lib/facet_scopes.py``); 400 for an unknown name.
+
+    Returns None when no scope was given (the endpoint then answers the facet's default scope),
+    or ``all`` when ``allow_all``.
+    """
+    if not scope:
+        return None
+    if allow_all and scope == 'all':
+        return scope
+    try:
+        return facet_scopes_lib.check_scope(scope)
+    except facet_scopes_lib.ScopeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc) + (' or all' if allow_all else ''))
+
+
+def _facet_scope_of(db_id: Optional[str]) -> Optional[str]:
+    """Facet scope of a served dataset (None: no scope, e.g. bulk or mixed organism). A cached entry from
+    before the key existed counts as the default scope (the cache version bump makes this a test-only case)."""
+    return (registry.metadata_cache.get(db_id) or {}).get('facet_scope', facet_scopes_lib.DEFAULT_SCOPE)
+
+
+_SCOPE_QUERY_DESC = ("Facet scope: human_postmortem | mouse_in_vivo | xenograft_human_in_mouse | in_vitro. Facets are "
+                     "tested, counted and replicated per scope; scopes and their genes are never merged. Default: "
+                     "human_postmortem (backwards compatible), or the facet's first scope when it is not allowed there "
+                     "(app_nlgf: mouse_in_vivo). The response lists `scopes` that have results.")
 
 
 def _is_facet_column(name: str) -> bool:
@@ -13186,6 +13227,7 @@ def _build_facet_inventory() -> List[Dict[str, Any]]:
             'type': type_,
             'type_mixed': mixed,
             'n_datasets': len(entry['datasets']),
+            'scopes': sorted({_facet_scope_of(d) or 'none' for d in entry['datasets']}),
             'signal_strength': float(signal.get(facet_name, 0.0)),
             # Added (unreleased): the published definition, one line for lists.
             'label': definition['label'],
@@ -13216,15 +13258,16 @@ def get_facet_tests_across_datasets(
     facet_name: str,
     top_genes: int = Query(5, ge=0, le=50, description="Genes at q < 0.05 listed per row"),
     exclude_secondary: bool = Query(True, description="Secondary datasets (reanalyses) are listed, flagged is_secondary, but not counted towards replication"),
+    scope: Optional[str] = Query(None, description=_SCOPE_QUERY_DESC + " `all` lists every scope (rows carry facet_scope; counting stays per scope)."),
 ):
-    """Donor-level facet test results of one facet in every tested dataset.
+    """Replicate-level facet test results of one facet in every tested dataset of one facet scope.
 
     One row per tested (dataset, cell type stratum), sorted by donors
     analysed (most first). Each row carries the fields of a
     ``GET /databases/{id}/facet-tests`` unit (contrast, donors per level,
     covariates, flags, genes and modules at q < 0.05) plus ``db_id``,
     ``title``, ``group``, ``top_genes`` (``gene``, ``logFC``, ``q_value``)
-    ``run_date``, ``disease_basis`` and ``not_counted_reason`` (why the row does
+    ``facet_scope``, ``run_date``, ``disease_basis`` and ``not_counted_reason`` (why the row does
     not count towards replication; null when it does). ``not_tested`` lists datasets with results whose units
     for this facet could not be tested, with the reason.
 
@@ -13233,12 +13276,14 @@ def get_facet_tests_across_datasets(
     cross-dataset meta-analysis is not part of this endpoint. Exploratory.
 
     ``facet_name`` is ``ant_sex`` or ``sex`` (also disease, apoe4_carrier,
-    braak). Other names return 404.
+    braak, age, app_nlgf). Other names return 404. ``scope`` selects the facet scope
+    (``scope`` and ``scopes`` in the response; ``all`` returns every scope).
     """
     facet_name = canonical_facet(facet_name)  # deprecated alias, one release
     test_facet = _tested_facet(facet_name)
     overview = _facet_results().facet_overview(test_facet, _facet_test_datasets(), top_genes=top_genes,
-                                               exclude_secondary=exclude_secondary)
+                                               exclude_secondary=exclude_secondary,
+                                               scope=_scope_param(scope, allow_all=True))
     return {**overview, 'facet_column': 'ant_' + test_facet,
             'q_threshold': facet_results_lib.Q_THRESHOLD}
 
@@ -13268,6 +13313,7 @@ def _facet_test_datasets() -> List[Dict[str, Any]]:
                          'group': (meta.get('collection') or {}).get('group') or group_folder,
                          'sha256': meta.get('sha256'),
                          'disease_basis': meta.get('disease_basis'),
+                         'facet_scope': meta.get('facet_scope'),
                          'is_secondary': meta.get('is_secondary') is True})
     return datasets
 
@@ -13281,23 +13327,29 @@ def get_facet_recurring_genes(
     cell_type: Optional[str] = Query(None, description="Cell type group (e.g. 'microglia') or a raw stratum label; default: the group with most cohorts"),
     n: int = Query(50, ge=1, le=500, description="Rows returned"),
     exclude_secondary: bool = Query(True, description="Secondary datasets (reanalyses) are listed, flagged is_secondary, but not counted towards replication"),
+    scope: Optional[str] = Query(None, description=_SCOPE_QUERY_DESC),
 ):
-    """Genes that replicate for one facet in one cell type group.
+    """Genes that replicate for one facet in one facet scope and cell type group.
 
     A gene is listed when its partial-conjunction r-value is below 0.05
-    (Benjamini and Heller 2008; ``definition``): the effect is present in at
-    least 2 cohorts in the same direction. Each cohort contributes one anchor
-    unit per cell type group (a donor-pooled unit for multi-region cohorts), its
-    one-sided limma treat p value (H0: |log2FC| <= log2(1.1); Braak
-    log2(1.1)/3 per stage); the r-value is BH-adjusted over the genes of the
-    group. Ranked by ``r_value`` ascending, then ``k`` (cohorts with
-    q_treat < 0.05 in that direction), ``agreement`` and ``median_abs_logFC``
-    (``ranking`` states the rule). Rows: ``gene, r_value, p_pc, k, m,
-    replicated, direction, agreement, median_abs_logFC,
+    (Benjamini and Heller 2008; ``definition``) and it passes the effect gate: the
+    effect is present in at least 2 cohorts in the same direction and the median
+    log2 fold change over the tested cohorts, in that direction, is at least tau
+    (log2(1.1); Braak log2(1.1)/3 per stage; age log2(1.1) per decade). Each cohort
+    contributes one anchor unit per cell type group (a donor-pooled unit for
+    multi-region cohorts), its ordinary one-sided limma p value; the r-value is
+    BH-adjusted over the genes of the scope and group. Ranked by ``r_value``
+    ascending, then ``k`` (cohorts with q_value < 0.05 in that direction),
+    ``agreement`` and ``median_abs_logFC``
+    (``ranking`` states the rule). Rows: ``gene, r_value, p_pc, k, k_treat, m,
+    replicated, direction, median_logFC, effect_gate_passed, effect_gate_tau,
+    agreement, median_abs_logFC,
     cohorts, cohorts_tested_labels, overlap_unknown, cohorts_overlap_unknown,
     apoe_locus`` and the legacy ``cohorts_sig_same_sign`` (= k),
     ``cohorts_tested`` (= m), ``cohorts_same_sign``, ``sign_discordant``.
-    ``n_replicated`` and ``n_genes_in_family`` give the counts of the group;
+    ``n_replicated`` (r < 0.05 and the gate), ``n_r_significant`` (r < 0.05) and
+    ``n_genes_in_family`` give the counts of the group; ``scope`` and ``scopes``
+    name the answered scope and those with results;
     ``cell_types`` lists the groups (with their raw ``labels``) and counted
     cohorts. Cell types are counted by group (``lib/celltype_groups.yaml``).
 
@@ -13308,7 +13360,7 @@ def get_facet_recurring_genes(
     """
     test_facet = _tested_facet(facet_name)
     return _facet_results().recurring_genes(test_facet, _facet_test_datasets(), cell_type=cell_type, limit=n,
-                                            exclude_secondary=exclude_secondary)
+                                            exclude_secondary=exclude_secondary, scope=_scope_param(scope))
 
 
 
@@ -13318,8 +13370,9 @@ def get_facet_gene_effects(
     gene: str = Query(..., description="Gene symbol (case-insensitive)"),
     cell_type: Optional[str] = Query(None, description="Restrict to one cell type group (e.g. 'microglia') or raw stratum label"),
     exclude_secondary: bool = Query(True, description="Secondary datasets (reanalyses) are listed, flagged is_secondary, but not counted towards replication"),
+    scope: Optional[str] = Query(None, description=_SCOPE_QUERY_DESC),
 ):
-    """Result card of one gene for one facet: every tested (dataset, cell
+    """Result card of one gene for one facet in one facet scope: every tested (dataset, cell
     type) unit with log2 fold change, 95% CI, q, donors per level, cohort and
     role, flags and model, its raw ``cell_type`` and its ``celltype_group``;
     ``counted`` with ``not_counted_reason``; ``replication`` per cell type
@@ -13330,24 +13383,29 @@ def get_facet_gene_effects(
     Exploratory. Each unit is one dataset (or donor-pooled cohort unit) and cell
     type, tested separately on replicate pseudobulks (limma-voom, n =
     replicates). ``replication`` per cell type group follows ``definition``:
-    ``r_value`` (partial conjunction over the cohorts' anchor units, replicated
-    when below 0.05), ``p_pc``, ``k`` (cohorts with q_treat < 0.05 in that
-    direction), ``m`` (cohorts tested), ``replicated``, ``r_direction``,
-    ``anchors`` (one per counted cohort: cohort, db_id, pooled, logFC, p_treat,
-    q_treat), ``overlap_unknown`` / ``cohorts_overlap_unknown`` (donor overlap
+    ``r_value`` (partial conjunction over the cohorts' anchor units, ordinary
+    one-sided limma p values), ``p_pc``, ``k`` (cohorts with q_value < 0.05 in that
+    direction), ``k_treat`` (q_treat), ``m`` (cohorts tested), ``replicated`` (r < 0.05
+    and the effect gate), ``r_significant`` (r < 0.05 alone), ``effect_gate_passed``,
+    ``median_logFC`` (median effect over the tested cohorts), ``effect_gate_tau``,
+    ``r_direction``,
+    ``anchors`` (one per counted cohort: cohort, db_id, pooled, logFC, p_value, q_value,
+    p_treat, q_treat), ``overlap_unknown`` / ``cohorts_overlap_unknown`` (donor overlap
     never checked) and ``badge``. The old count (q_value < 0.05) stays in
     ``cohorts_tested``, ``cohorts_sig_same_sign``, ``direction``, ``cohorts_up``,
     ``cohorts_down``, ``sign_discordant`` and ``legacy_badge`` for one release.
-    Unit cards carry ``anchor`` (= ``counted``), ``pooled``, ``p_treat``,
-    ``q_treat``, ``tau_log2``, ``analysis_level``, ``independence``,
+    Unit cards carry ``anchor`` (= ``counted``), ``pooled``, ``p_value``, ``p_treat``,
+    ``q_treat``, ``tau_log2``, ``analysis_level``, ``independence``, ``facet_scope``,
     ``disease_basis`` and ``not_counted_reason`` (for example "supplementary:
     pool:madrc_myeloid is the anchor of this cohort for this cell type group").
-    Cohorts come from the DRAFT cohort selection table.
+    Cohorts come from the DRAFT cohort selection table. ``scope`` / ``scopes``: the
+    answered scope and the scopes with results for this facet; genes are never matched
+    across scopes (mouse and human symbols stay apart).
     """
     facet_name = canonical_facet(facet_name)  # deprecated alias, one release
     test_facet = _tested_facet(facet_name)
     return _facet_results().gene_effects(test_facet, gene, _facet_test_datasets(), cell_type=cell_type,
-                                         exclude_secondary=exclude_secondary)
+                                         exclude_secondary=exclude_secondary, scope=_scope_param(scope))
 
 
 
@@ -13355,34 +13413,55 @@ def get_facet_gene_effects(
 def get_gene_facet_effects(
     gene: str,
     exclude_secondary: bool = Query(True, description="Secondary datasets (reanalyses) are listed, flagged is_secondary, but not counted towards replication"),
+    scope: Optional[str] = Query(None, description=_SCOPE_QUERY_DESC + " Without `scope`, `facets` holds each facet's default scope and `by_scope` every scope separately."),
 ):
     """Result cards of one gene for every tested facet (sex, disease,
-    apoe4_carrier, braak), keyed by facet; same shape as
+    apoe4_carrier, braak, age, app_nlgf), keyed by facet; same shape as
     ``/facets/{facet}/effects``. The first call per facet reads every result
     file (a few seconds); later calls are cached until a file changes.
+
+    ``facets`` answers one scope per facet (the ``scope`` parameter, else the facet's default scope);
+    ``by_scope`` (without ``scope``) lists, per scope with results, the cards of the facets
+    tested there, so a gene page can show scopes separately. The gene symbol is never matched across
+    scopes.
 
     Exploratory. Each unit is one dataset (or donor-pooled cohort unit) and cell
     type, tested separately on replicate pseudobulks (limma-voom, n =
     replicates). ``replication`` per cell type group follows ``definition``:
-    ``r_value`` (partial conjunction over the cohorts' anchor units, replicated
-    when below 0.05), ``p_pc``, ``k`` (cohorts with q_treat < 0.05 in that
-    direction), ``m`` (cohorts tested), ``replicated``, ``r_direction``,
-    ``anchors`` (one per counted cohort: cohort, db_id, pooled, logFC, p_treat,
-    q_treat), ``overlap_unknown`` / ``cohorts_overlap_unknown`` (donor overlap
+    ``r_value`` (partial conjunction over the cohorts' anchor units, ordinary
+    one-sided limma p values), ``p_pc``, ``k`` (cohorts with q_value < 0.05 in that
+    direction), ``k_treat`` (q_treat), ``m`` (cohorts tested), ``replicated`` (r < 0.05
+    and the effect gate), ``r_significant`` (r < 0.05 alone), ``effect_gate_passed``,
+    ``median_logFC`` (median effect over the tested cohorts), ``effect_gate_tau``,
+    ``r_direction``,
+    ``anchors`` (one per counted cohort: cohort, db_id, pooled, logFC, p_value, q_value,
+    p_treat, q_treat), ``overlap_unknown`` / ``cohorts_overlap_unknown`` (donor overlap
     never checked) and ``badge``. The old count (q_value < 0.05) stays in
     ``cohorts_tested``, ``cohorts_sig_same_sign``, ``direction``, ``cohorts_up``,
     ``cohorts_down``, ``sign_discordant`` and ``legacy_badge`` for one release.
-    Unit cards carry ``anchor`` (= ``counted``), ``pooled``, ``p_treat``,
-    ``q_treat``, ``tau_log2``, ``analysis_level``, ``independence``,
+    Unit cards carry ``anchor`` (= ``counted``), ``pooled``, ``p_value``, ``p_treat``,
+    ``q_treat``, ``tau_log2``, ``analysis_level``, ``independence``, ``facet_scope``,
     ``disease_basis`` and ``not_counted_reason`` (for example "supplementary:
     pool:madrc_myeloid is the anchor of this cohort for this cell type group").
-    Cohorts come from the DRAFT cohort selection table.
+    Cohorts come from the DRAFT cohort selection table. ``scope`` / ``scopes``: the
+    answered scope and the scopes with results for this facet; genes are never matched
+    across scopes (mouse and human symbols stay apart).
     """
     datasets = _facet_test_datasets()
     reader = _facet_results()
-    return {'gene': gene,
-            'facets': {facet: reader.gene_effects(facet, gene, datasets, exclude_secondary=exclude_secondary)
-                       for facet in facet_results_lib.FACET_ORDER}}
+    scope = _scope_param(scope)
+    result: Dict[str, Any] = {
+        'gene': gene, 'scope': scope,
+        'facets': {facet: reader.gene_effects(facet, gene, datasets, exclude_secondary=exclude_secondary, scope=scope)
+                   for facet in facet_results_lib.FACET_ORDER}}
+    if scope is None:
+        by_scope: Dict[str, Dict[str, Any]] = {}
+        for facet in facet_results_lib.FACET_ORDER:
+            for facet_scope in reader.scopes_with_results(facet, datasets):
+                by_scope.setdefault(facet_scope, {})[facet] = reader.gene_effects(
+                    facet, gene, datasets, exclude_secondary=exclude_secondary, scope=facet_scope)
+        result['by_scope'] = by_scope
+    return result
 
 
 
@@ -13573,8 +13652,14 @@ async def get_facet_detail(
     per_facet_value_limit: int = Query(200, ge=1, le=2000, description="Cap on distinct categorical values."),
     mapping: bool = Query(True, description="Add per-dataset mapping (source columns, value translation) and the non-carrier list."),
     exclude_secondary: bool = Query(True, description="Keep secondary datasets out of the pooled numbers (total_n_cells, value_distribution, modules); they stay in datasets, flagged is_secondary."),
+    scope: Optional[str] = Query(None, description=_SCOPE_QUERY_DESC + " Restricts datasets, total_n_cells, value_distribution, modules and non_carriers to that scope; `all` pools every scope (not recommended: mouse and human values are different things)."),
 ):
     """Detailed page data for one facet.
+
+    Per facet scope (``scope``, default as for ``/facets/{name}/effects``): ``datasets``,
+    ``total_n_cells``, ``value_distribution``, the per-cell ``modules`` and ``non_carriers``
+    only cover the datasets of that scope; ``scopes`` lists every scope that carries the facet
+    with its dataset and cell counts. Each dataset row has ``facet_scope``.
 
     ``exclude_secondary`` (default true): secondary datasets
     (``is_secondary: true``) are listed in ``datasets`` with
@@ -13617,11 +13702,28 @@ async def get_facet_detail(
             detail=f"No datasets carry facet '{facet_name}'.",
         )
 
+    # Facet scopes: values, cell counts and per-cell statistics are never pooled across scopes.
+    requested_scope = _scope_param(scope, allow_all=True)
+    allowed_scopes = facet_scopes_lib.facet_allowed_scopes(facet_name)
+    scope_default = facet_scopes_lib.DEFAULT_SCOPE if facet_scopes_lib.DEFAULT_SCOPE in allowed_scopes else allowed_scopes[0]
+    scope = requested_scope or scope_default
+    scope_of_db = {d: _facet_scope_of(d) for d, _ in dataset_kinds}
+    scope_summary: Dict[str, Dict[str, int]] = {}
+    for db_id_, _kind in dataset_kinds:
+        entry_ = scope_summary.setdefault(scope_of_db[db_id_] or 'none', {'n_datasets': 0, 'n_cells': 0})
+        entry_['n_datasets'] += 1
+        entry_['n_cells'] += int(((registry.metadata_cache.get(db_id_) or {}).get('n_cells')) or 0)
+    scopes_listing = [{'scope': name, **scope_summary[name]}
+                      for name in (*facet_scopes_lib.SCOPES, 'none') if name in scope_summary]
+    if scope != 'all':
+        dataset_kinds = [(d, k) for d, k in dataset_kinds if scope_of_db[d] == scope]
+
     # Type is the majority vote across datasets that carry the facet.
     cat_n = sum(1 for _, k in dataset_kinds if k == 'categorical')
     num_n = len(dataset_kinds) - cat_n
     facet_type = 'categorical' if cat_n >= num_n else 'numerical'
     type_mixed = 0 < cat_n < len(dataset_kinds)
+    in_scope_ids = {d for d, _ in dataset_kinds}
 
     secondary = _secondary_db_ids()
     excluded = secondary if exclude_secondary else set()
@@ -13648,6 +13750,7 @@ async def get_facet_detail(
             'file_id': db.get('file_id'),
             'n_cells': n_cells,
             'kind_on_this_dataset': kind,
+            'facet_scope': scope_of_db.get(db_id),
         })
     dataset_summaries.sort(key=lambda d: (-d['n_cells'], d['db_id']))
 
@@ -13669,7 +13772,7 @@ async def get_facet_detail(
         import numpy as _np
         keep_stats = {'eta2', 'omega2', 'R2', 'spearman'}
         keep_sources = {'geneset', 'ucell'}
-        slice_ = df[df['tag_column'] == facet_name]
+        slice_ = df[(df['tag_column'] == facet_name) & df['dataset'].isin(in_scope_ids)]
         if excluded:
             slice_ = slice_[~slice_['dataset'].isin(excluded)]
         slice_ = slice_[slice_['statistic'].isin(keep_stats)]
@@ -13714,7 +13817,10 @@ async def get_facet_detail(
             from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
             with ThreadPoolExecutor(max_workers=8) as pool:
                 list(pool.map(_one_carrier, dataset_summaries))
-            return _facet_non_carriers(facet_name, carrier_ids, dbs_by_id)
+            found = _facet_non_carriers(facet_name, carrier_ids, dbs_by_id)
+            if scope == 'all':
+                return found
+            return [row for row in found if _facet_scope_of(row.get('db_id')) == scope]
         non_carriers = await asyncio.to_thread(_sync_mapping)
 
     return {
@@ -13724,6 +13830,8 @@ async def get_facet_detail(
         'hidden_by_config': facet_hidden_by_config(facet_name, _facets_visible()),
         'definition': _facet_definition(facet_name),
         'definitions_status': _facet_definitions_status(),
+        'scope': scope,
+        'scopes': scopes_listing,
         'n_datasets': len(dataset_kinds),
         'n_excluded_secondary': sum(1 for d, _ in dataset_kinds if d in excluded),
         'exclude_secondary': exclude_secondary,

@@ -20,13 +20,17 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
+import facet_rules
+
 REPLICATE_UNITS = ('donor', 'animal', 'sample', 'none')
 DEFAULT_COLUMN_BY_UNIT = {'donor': 'ant_donor'}
 
-#: replicates per level of a two-group facet needed for a replicate-level test
-MIN_REPLICATES_PER_LEVEL = 3
-#: replicates spanning the range of a numeric facet needed for a replicate-level test
-MIN_REPLICATES_NUMERIC = 6
+#: replicates per level of a two-group facet needed for a replicate-level test (lib/facet_rules.py)
+MIN_REPLICATES_PER_LEVEL = facet_rules.MIN_REPLICATES_PER_LEVEL
+#: replicates of a numeric facet (Braak, age) needed for a replicate-level test ...
+MIN_REPLICATES_NUMERIC = facet_rules.NUMERIC_MIN_REPLICATES
+#: ... and the distinct values among them
+MIN_DISTINCT_NUMERIC = facet_rules.NUMERIC_MIN_DISTINCT
 
 LEVEL_REPLICATE = 'replicate'
 LEVEL_CELL = 'cell'
@@ -133,19 +137,21 @@ def analysis_level(replicate_unit: Optional[str], numeric: bool,
                    n_per_level: Optional[Mapping[Any, int]] = None,
                    n_replicates: Optional[int] = None, n_distinct: Optional[int] = None,
                    min_per_level: int = MIN_REPLICATES_PER_LEVEL,
-                   min_numeric: int = MIN_REPLICATES_NUMERIC) -> Dict[str, Any]:
+                   min_numeric: int = MIN_REPLICATES_NUMERIC,
+                   min_distinct: int = MIN_DISTINCT_NUMERIC) -> Dict[str, Any]:
     """Level at which one (dataset, stratum, facet) may be analysed.
 
     Replicate level needs ``replicate_unit`` other than ``none`` and, for a
     two-group facet, at least ``min_per_level`` replicates in every level, or,
-    for a numeric facet, at least ``min_numeric`` replicates spanning at least
-    two distinct values. Otherwise the numbers are cell-level and descriptive
+    for a numeric facet, at least ``min_numeric`` replicates with at least
+    ``min_distinct`` distinct values (v3: 4 and 3, the statistical minimum of a
+    trend with one covariate-free slope; v2 asked 6 and 2). Otherwise the numbers are cell-level and descriptive
     only: no p values, with an explicit reason.
 
     Args:
         replicate_unit: ``donor``, ``animal``, ``sample``, ``none`` or None
             (unknown, treated as ``none``).
-        numeric: True for a numeric facet (Braak).
+        numeric: True for a numeric facet (Braak, age).
         n_per_level: Replicates per level (two-group facet).
         n_replicates: Replicates with a value (numeric facet).
         n_distinct: Distinct values among them (numeric facet).
@@ -161,9 +167,9 @@ def analysis_level(replicate_unit: Optional[str], numeric: bool,
         return cell('no replicate unit (replicate_unit is none): cells are not independent replicates')
     if numeric:
         have = int(n_replicates or 0)
-        if have < min_numeric or int(n_distinct or 0) < 2:
+        if have < min_numeric or int(n_distinct or 0) < min_distinct:
             return cell(f'{have} {replicate_unit}s with a value spanning {int(n_distinct or 0)} distinct '
-                        f'values (need {min_numeric} spanning the range)')
+                        f'values (need {min_numeric} with at least {min_distinct} distinct values)')
     else:
         counts = {k: int(v) for k, v in (n_per_level or {}).items()}
         short = {k: v for k, v in counts.items() if v < min_per_level}

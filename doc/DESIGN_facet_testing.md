@@ -1,8 +1,92 @@
-# Design: donor-level facet testing (v2, 2026-10-05)
+# Design: replicate-level facet testing (v3, 2026-10-06)
 
-Status: v1 implemented in `bin/annot/ant-facet-test` (+ `bin/annot/facet_test_limma.R`);
-module-level tests (v1.1) in `bin/annot/ant-facet-test-modules`.
-All output is exploratory. Date 2026-10-04.
+Status: implemented in `bin/annot/ant-facet-test` (+ `bin/annot/facet_test_limma.R`); module-level tests in
+`bin/annot/ant-facet-test-modules`. The v1 and v2 text below is kept where it still holds; the v3 section above
+overrides it where they differ. All output is exploratory. Written 2026-10-04, v3 2026-10-06.
+
+## v3 (2026-10-06): what changed
+
+Decisions of 2026-10-06 (A to E). Where this section and a later one disagree, this section wins; the
+v2 text below is kept for the parts that did not change.
+
+### A. Replication on ordinary p values plus an effect gate
+
+* The cohort p value of the partial conjunction is the **ordinary one-sided limma p value** of the anchor
+  unit, not the treat p value. For a direction d the two-sided `p_value` is halved when the observed effect has
+  the sign d and `1 - p_value / 2` otherwise. The Simes combination of the m - 1 largest cohort p values, the
+  factor 2 for the two directions and BH over the genes of one **(scope, facet, cell type group)** family are
+  unchanged (u = 2, `lib/replication.py`).
+* **replicated = r < 0.05 AND the effect gate.** The gate needs the median log2 fold change over the tested
+  cohorts to have the replicated sign and `|median| >= tau`. tau (`lib/facet_rules.py`, `gate_tau`):
+  log2(1.1) for two-group contrasts, log2(1.1) / 3 per Braak stage (as before) and **log2(1.1) per decade of age**
+  (10 percent per decade; my choice, so one decade of age counts like the 10 percent of a two-group contrast; open for your decision). The result is served as `effect_gate_passed`, `median_logFC` and
+  `effect_gate_tau` next to `r_value`; `r_significant` is r < 0.05 alone.
+* `p_treat` and `q_treat` stay in the gene tables as extra columns (limma treat, H0 |log2FC| <= tau). `k` (the
+  descriptive count) is now the number of cohorts whose anchor has `q_value < 0.05` in the replicated
+  direction; `k_treat` keeps the treat based count.
+* Reproduction check before the gate (existing 2026-10-05 results, Braak, microglia, 5 counted cohorts,
+  19,480 genes in the family): Simes on the ordinary one-sided p gives **34** genes with r < 0.05 (the same 34
+  as your offline recompute), against 2 with the treat p values; all 34 pass the gate.
+* Modules: the same structure. The cohort p value is the two-sided **permutation p** halved in the same way, the
+  gate is `|median std_effect| >= 0.2` with the replicated sign, one anchor unit per cohort and cell type group
+  (`ant-facet-test-modules summarize` writes `module_replicated.tsv`). The modules tool has no donor-pooled units
+  (as in v2).
+
+### B. Small cohorts take part
+
+Test eligibility is the statistical minimum (`lib/facet_rules.py`), and every tested cohort counts towards m:
+
+| Rule | v2 | v3 |
+| --- | --- | --- |
+| Replicates in the dataset | at least 6 | at least 4 (nothing below the smallest numeric test can be tested) |
+| Two-group facet | at least 3 per level | at least 3 per level (unchanged) |
+| Numeric facet (Braak, age) | at least 6 replicates, 3 distinct values for Braak | at least 4 replicates with at least 3 distinct values |
+| `n_lt5` (a level below 5, a numeric facet below 10) | descriptive only: no p, q, CI, not counted | informational `small_sample` flag, the unit is tested and counted |
+| Age and PMI covariates | at least 15 replicates, 90 percent coverage | unchanged (they do not block a test), but a covariate is dropped when it would break the test minimum |
+| Residual degrees of freedom | the R script failed the unit below 2 | the planner keeps at least 2: covariates are dropped in the order batch, pmi, age, sex, never the test |
+| Donor-count filter for counting | none besides descriptive-only | none |
+
+The sex covariate is the **host's** sex (`ant_host_sex`) for a xenograft, where the donor sex of the human cells
+varies within an animal. `ant-facet-test run` reports the units that became testable (see the results note).
+
+### C. Facet scopes
+
+A facet scope is (organism of the analysed cells, experimental system), derived per dataset from `.h5ad.mus`
+(`lib/facet_scopes.py`): `human_postmortem` (human post-mortem and biopsy tissue), `mouse_in_vivo`,
+`xenograft_human_in_mouse` (human cells, host animal; `chimera` and any dataset publishing `ant_host_sex`) and
+`in_vitro` (listed, never tested). Missing or mixed organisms and bulk tissue have no scope and are skipped.
+Mouse cells labelled `xenograft` in the store (PM4, MZ4) are treated as `mouse_in_vivo` (a labelling
+inconsistency, reported). The scope is written to every manifest and result row (`facet_scope`) and served on
+the dataset metadata. Everything that counts or pools is computed **per scope**: replication families, recurring
+genes, cohort counting, `/facets/{f}/tests`, `/facets/{f}/effects[/top]`, `/genes/{g}/facet-effects` (`by_scope`),
+the value distributions and per-cell variability of `/facets/{f}`. Gene symbols are never matched across scopes.
+The facet registry has a `facet_scopes` field per facet (`lib/obscol_tags_vocab.yaml`; the values are listed in
+`doc/DESIGN_canonical_columns.md`); `ant md-check` errors (`facet_scope_mismatch`) when a dataset maps
+a facet outside its scopes, and the tools test only the facets a scope allows. API `scope` parameter: default
+`human_postmortem`, or the facet's first allowed scope (`mouse_in_vivo` for `app_nlgf`); responses carry
+`scope` and `scopes` (the scopes with results).
+
+### D. New facets
+
+* **`app_nlgf`** (`nlgf`, `control`; reference control; mouse in vivo and xenograft hosts): App NL-G-F
+  knock-in against the study's control host (wild type, or the humanised-App AppHuHu / hApp control). Replicate:
+  the animal (`replicate_unit: animal`). Covariate: sex (host sex in a xenograft); there is no `ant_age` for mice
+  (the age facet is human only), so no age covariate. Only the NL-G-F knock-in is `nlgf`; other models (APP/PS1,
+  5xFAD, Thy-TAU22, Trem2, Apoe alleles) are not mapped, and NL-G-F crossed with a second engineered allele
+  (Mancuso `APP-NLGF/ApoeKO`) stays empty so that the contrast is not confounded. Mapped datasets are listed in
+  `doc/DESIGN_canonical_columns.md`.
+* **`age`** (human_postmortem): linear trend per decade (`age / 10`), model `~ age + sex + pmi [+ batch]`
+  (age is not its own covariate; the disease covariate is **not** added, so an age effect includes the effect of
+  disease prevalence; a disease-adjusted variant was not built). `ant_age` of PsychAD (Lee2026) is top-coded
+  at 90 years, which flattens the slope at the top; `facet_min_age` (60 years) applies to disease and Braak only,
+  not to age. Gate tau log2(1.1) per decade.
+
+### E. Rerun
+
+`ant-facet-test run --all --force` (with the donor-pooled units) and `ant-facet-test-modules run --all --force`,
+then `summarize` into `_facet_tests/summary_2026-10-06_rerun/`. Per scope, facet and cell type group: units,
+counted cohorts and replicated genes are in that folder (`replication_summary.tsv`, `units.tsv`,
+`replicated_<scope>_<facet>_<group>.tsv`, `module_replicated.tsv`).
 
 ## v2 (2026-10-05): what changed
 
@@ -41,21 +125,26 @@ and the served files, before any expression data is read):
 
 * not `is_secondary: true` (primaries only; reanalyses are skipped; the
   result views also list any secondary unit as not counted),
-* `.h5ad.mus` organism is exactly `human` (datasets with a missing organism
-  field are skipped, except the five Wachter2024 regional files that are
-  listed in `ASSUME_HUMAN_DB_IDS` because their group describes 32 human
-  donors),
-* `experimental_system` is not xenograft, chimera, in_vitro_2d, organoid or
-  bulk_tissue, and the current mapping publishes no `ant_host_sex` facet,
+* **(v3)** the dataset has a tested facet scope (`human_postmortem`, `mouse_in_vivo`,
+  `xenograft_human_in_mouse`; `lib/facet_scopes.py`): the organism is exactly human or mouse (datasets with a
+  missing organism field are skipped, except the five Wachter2024 regional files that are listed in
+  `ASSUME_HUMAN_DB_IDS` because their group describes 32 human donors), and the `experimental_system` is not
+  in_vitro_2d, organoid or bulk_tissue. Xenografts and chimeras are tested in their own scope; the facets tested
+  are the ones the registry allows in that scope (`facet_scopes`),
 * a served raw-counts layer exists (`counts`, `UMIs`, `raw`, `raw_counts`
   by_gene sidecar) whose recorded `min_nonzero` is 1 (a normalised layer
   that happens to be named `counts`, e.g. Aldinger2021, is rejected),
-* at least 6 donors with a non-NULL `ant_donor` in the current mapping (v2: at least 6
-  replicates in the dataset's `replicate_column`, see "Replicate unit and analysis level"),
+* at least 4 replicates in the dataset's `replicate_column` (v3; v2 asked 6, v1 asked 6 donors with a
+  non-NULL `ant_donor`; see "Replicate unit and analysis level" and the v3 threshold table),
 * a `replicate_unit` other than `none`.
 
 Bulk datasets are excluded because a (donor, cell type) pseudobulk with a 10
 cell minimum is undefined for one sample per donor.
+
+(v3) In a xenograft or mouse dataset the pseudobulk unit is the animal (`replicate_column`, for example `hash.ID`,
+`Mouse_ID`, `mouse.id`); the cell line donor (`ant_donor`) is not the replicate there. Donor keys of a unit
+(`donor_key_digests`) are the replicate label scoped by the group id: `ant_donor_uid` names a person and is
+ignored for animals and samples.
 
 ## Facets and contrasts
 
@@ -65,6 +154,8 @@ cell minimum is undefined for one sample per donor.
 | disease | `ant_disease` | AD vs control (control is the reference) | everything else (MCI, NCI, PD, AD_DLBD, ...) dropped. **Provisional**: vocabulary decisions L17 to L21 are open; the output column `provisional` is true |
 | apoe4_carrier | `ant_apoe4_carrier` | e4 carrier vs non-carrier | derived from `ant_apoe` (any e4 allele) when the carrier column is absent |
 | braak | `ant_braak` | linear trend, log2 fold change per Braak unit | donor value must be a single number |
+| age (v3) | `ant_age` | linear trend, log2 fold change per decade (`age / 10`) | human_postmortem; model `~ age + sex + pmi [+ batch]`; includes disease prevalence; top-coded ages (PsychAD 90) flatten the slope |
+| app_nlgf (v3) | `ant_app_nlgf` | nlgf vs control (control is the reference) | mouse_in_vivo and xenograft_human_in_mouse; replicate = animal; covariate sex (host sex in a xenograft); NL-G-F plus a second engineered allele is NULL |
 
 A donor whose cells carry more than one distinct value for a facet gets NULL
 for it and is counted in the manifest (`donor_conflicts`). It is never
@@ -100,11 +191,13 @@ resolved silently.
 4. **Model** (R, `limma` + `edgeR`, `facet_test_limma.R`): per
    (dataset, cell type, facet), `edgeR::filterByExpr` with the design, TMM
    (`calcNormFactors`), `limma::voom`, `lmFit`, `eBayes` (defaults). Design:
-   `~ facet + sex` (sex omitted when the facet is sex), plus age and PMI
-   (z-scored) only when the unit has at least 15 donors and the covariate is
-   known for at least 90 percent of them (donors without it are then dropped;
+   `~ facet + sex` (sex omitted when the facet is sex; the host's sex for a xenograft), plus age (not for the age
+   facet) and PMI (z-scored) only when the unit has at least 15 replicates and the covariate is
+   known for at least 90 percent of them (replicates without it are then dropped;
    otherwise the covariate is omitted and listed in the manifest), plus batch
-   only when a donor-level batch column exists and is not confounded.
+   only when a donor-level batch column exists and is not confounded. (v3) A covariate is also dropped when it
+   would take the test below its minimum or the model below 2 residual degrees of freedom
+   (`covariates_omitted` entry `name(df)`): the test is never dropped for a covariate.
    Reported per gene: log2 fold change, posterior standard error, 95 percent
    confidence interval (t quantile on the moderated degrees of freedom),
    moderated t, p value, Benjamini-Hochberg q within the
@@ -129,20 +222,25 @@ animal, 21 sample, 24 none; the `none` ones and the reasons are in `doc/DESIGN_c
 The shared rule (`replicates.analysis_level`), per dataset x stratum x facet: a unit is analysed at
 the **replicate level** (pseudobulk by `replicate_column`, the tool's former donor) when
 `replicate_unit` is not `none` and there are at least 3 replicates in every level of a two-group
-facet, or at least 6 replicates spanning at least two distinct values of a numeric facet (Braak).
-Otherwise the unit is **cell-level, descriptive only**: no test, with the reason. The existing
-`n_lt5` rule (fewer than 5 per level: no p, q, CI) stays on top of it. Both tools record
+facet, or (v3) at least 4 replicates with at least 3 distinct values of a numeric facet (Braak, age; v2:
+6 replicates spanning 2 values). Otherwise the unit is **cell-level, descriptive only**: no test, with the reason.
+(v3) The former `n_lt5` rule (fewer than 5 per level: no p, q, CI) no longer blocks anything: it is the
+informational `small_sample` flag. Both tools record
 `replicate_unit`, `replicate_column`, `replicate_basis` in the run manifest, and
 `analysis_level`, `analysis_level_label`, `analysis_level_reason` on every unit; the API serves
-them per unit (`/databases/{id}/facet-tests`). Facet tests of xenograft or mouse datasets are not run
-today because the four facets (sex, disease, APOE, Braak) do not exist there; the plumbing is in
-place for treatment or genotype facets.
+them per unit (`/databases/{id}/facet-tests`). (v3) Facet tests of xenograft and mouse datasets run in their own scope with
+`sex` (donor sex in a xenograft; a village animal carries several donors, so the donor-level value conflicts and the
+unit is not testable) and `app_nlgf`.
 
 The per-cell tools (`ant-module-variability`, `ant-gene-variance-precompute`) write a
 `replicate_unit` column into their aggregate; the API marks their numbers
 `per-cell (descriptive)` (`basis`), whether a replicate-level analysis exists or is impossible.
 
 ## Effect-size gate and error control (limma treat)
+
+(v3) The treat columns are still computed and written, but replication no longer uses them: the cohort p values
+are the ordinary one-sided limma p values and the effect gate (median effect over the cohorts at least tau) takes
+the role of the treat threshold at the replication level. See "v3: A".
 
 `facet_test_limma.R` also runs `limma::treat` on the same linear fit (H0: |log2FC| <= tau) and
 writes `p_treat` and `q_treat` (BH within the job) next to the point-null `p_value` / `q_value`.
@@ -185,9 +283,9 @@ substate with a lucky q cannot speak for the cohort).
 | Rule | Value |
 | --- | --- |
 | Minimum cells per donor x cell type | 10 |
-| Minimum donors per dataset | 6 |
-| Facet level with fewer donors | dropped; fewer than 2 levels left means not tested |
-| `n_lt5` | any level with fewer than 5 donors. Numeric (Braak): fewer than 10 donors (two halves of at least 5; my choice). p, q, t and the confidence interval are set to NULL, the log fold change and SE are kept as descriptive output; `descriptive_only` is true |
+| Minimum donors per dataset | 4 (v3; v2 and v1: 6) |
+| Facet level with fewer donors | dropped; fewer than 2 levels left means not tested (3 per level; v3 numeric facets: 4 replicates, 3 distinct values) |
+| `n_lt5` / `small_sample` | any level with fewer than 5 replicates. Numeric (Braak, age): fewer than 10. v1 and v2: p, q, t and CI were set to NULL and `descriptive_only` was true. **v3: informational only**, the unit is tested and counted |
 | `batch_confounded` | the facet lies in the span of the batch indicator columns (facet is a function of batch); batch is then left out of the model |
 | `batch_used` | batch entered the model (donor-level, at least 2 levels, at most donors / 4 levels, not confounded) |
 | `composition_p`, `composition_flag` | donor-level fraction of the donor's cells that fall in this stratum, tested against the facet (Mann-Whitney U for two levels, Spearman for Braak). Flag when p < 0.05, uncorrected, exploratory |
@@ -521,12 +619,14 @@ no separate publish step. The folder is the config key `facet_results_dir`
 consolidated folder later without code changes. Reads are defensive: a
 missing or partly written file is "not available".
 
-* REST: `/databases/{id}/facet-tests` (units with a `model` object built from
+* REST (v3: every cross-dataset route takes `scope`, see "v3: C"): `/databases/{id}/facet-tests` (units with a `model` object built from
   the manifests), `/genes`, `/modules`, `/volcano.png`;
   `/facets/{name}/tests` (units across datasets), `/facets/{name}/effects?gene=`
   (result card with the replication badge), `/facets/{name}/effects/top`
   (recurring genes per cell type), `/genes/{gene}/facet-effects`,
-  `/facets/cohorts`. See `doc/API_CHANGELOG.md`.
+  `/facets/cohorts`. See `doc/API_CHANGELOG.md`. The cohort table (`cohort_selection.DRAFT.tsv`) lists mouse and
+  xenograft datasets too (one row per dataset that can be counted; a dataset that is not in it is listed with
+  `not_counted_reason` "dataset not in the cohort table").
 * MCP: `get_facet_tests`, `facet_effects`, `facet_top_genes`, `facet_units`.
 * Web: effects under each facet of the dataset Facets card, "Effects across
   datasets" on the facet page, a forest panel on the gene page, and the help
@@ -591,7 +691,11 @@ Purkinje cells and cortical interneurons are both "inhibitory neuron"), so a
 group-level count can combine regions; read the raw labels before drawing a
 biological conclusion. Rows marked medium in the YAML are judgement calls.
 
-## Replication (v2)
+## Replication (v2, changed by v3)
+
+(v3) Points 2 to 4 change: the cohort p value is the ordinary one-sided p (not `p_treat`), `k` counts
+`q_value < 0.05`, a gene is replicated when r < 0.05 and the effect gate passes, and everything is computed per
+facet scope. Anchors (point 1) and the rest are unchanged. The text below describes v2.
 
 Per gene and per (facet, cell type group):
 
@@ -646,7 +750,7 @@ males at q < 0.01 is shown alongside.
 
 ## Reproducibility
 
-Tool version `ant-facet-test/2.0`. Seed 20261004 is passed to R (`set.seed`; limma-voom itself is
+Tool versions `ant-facet-test/3.0` and `ant-facet-test-modules/2.0`. Seed 20261004 is passed to R (`set.seed`; limma-voom itself is
 deterministic). Parameters are constants at the top of `ant-facet-test` and
 are copied into every manifest.
 
@@ -677,3 +781,10 @@ samples); the pooled unit wins the anchor in `facet_results`; per-cell aggregate
 donors), group-pool over sibling strata, pathology-only disease, r-value ranking.
 `tests/test_disease_rule.py`: the Braak x CERAD boundaries. `tests/test_md_edit.py`: verified text
 edits of the `.md` front matter.
+
+`tests/test_facet_engine_v3.py` (v3): `scope_of` over the system labels, the registry `facet_scopes` per facet,
+`facet_scope_mismatch` (lint and md-check), the thresholds and taus, `app_nlgf` end to end in a mouse and a
+xenograft scope (R needed), `age` end to end, the plan rules (numeric minimum, covariates dropped before the test,
+host sex), module replication with the effect gate and per scope. `tests/test_facet_results.py`: per-scope effects,
+overview, recurring genes, the `scope` parameter on every route, the ordinary-p partial conjunction with a
+hand-computed r-value and the effect gate (including "two cohorts up, three down").

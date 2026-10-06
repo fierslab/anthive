@@ -1,4 +1,4 @@
-"""Tests for ``bin/annot/ant-facet-test`` (donor-level facet testing, v1).
+"""Tests for ``bin/annot/ant-facet-test`` (replicate-level facet testing, v3).
 
 Covers, on a tiny synthetic dataset built like ant-convert output
 (``__cells``, ``__genes``, ``__obscat``, ``__obsnum`` + a counts by_gene
@@ -7,8 +7,9 @@ sidecar + ``.md`` / ``.h5ad.mus``):
 * a planted sex effect is recovered with the right sign and size, and null
   genes stay mostly non-significant (needs R with limma + edgeR; skipped
   otherwise),
-* n_lt5 units are reported descriptively with p / q suppressed,
-* xenograft, mouse, secondary and host-sex datasets are excluded,
+* small units (a level below 5 replicates) are tested, counted and flagged ``small_sample``,
+* in vitro, bulk and secondary datasets are excluded; xenograft and mouse datasets are tested in
+  their own facet scope,
 * donors with several samples collapse into one pseudobulk sample per
   (donor, cell type) and the summed counts match,
 * the current .md mapping (not the stored view) defines the facets,
@@ -191,9 +192,12 @@ def test_donor_table_prefers_the_new_column_and_derives_from_the_genotype_otherw
     assert aft.build_donor_table(genotype)[0]['apoe4_carrier'].tolist() == ['e4_carrier']
 
 
-def _donor_table(levels: list[str], batches: list[str] | None = None, facet: str = 'disease'):
+def _donor_table(levels: list[str], batches: list[str] | None = None, facet: str = 'disease',
+                 sexes: list[str] | None = None):
     frame = pd.DataFrame({'donor': [f'D{i}' for i in range(len(levels))], facet: levels})
-    frame['sex'] = ['f', 'm'] * (len(levels) // 2) + ['f'] * (len(levels) % 2)
+    frame['sex'] = sexes if sexes is not None else ['f', 'm'] * (len(levels) // 2) + ['f'] * (len(levels) % 2)
+    frame['host_sex'] = None
+    frame['app_nlgf'] = None
     frame['age'] = np.nan
     frame['pmi'] = np.nan
     frame['braak'] = np.nan
@@ -207,12 +211,15 @@ def test_plan_job_drops_level_with_fewer_than_three_donors():
     assert plan['status'] != 'ok' and 'level' in plan['status']
 
 
-def test_plan_job_n_lt5_flag():
+def test_plan_job_n_lt5_is_an_informational_flag_that_never_blocks():
     table = _donor_table(['AD'] * 4 + ['control'] * 10)
     plan = aft.plan_job(table, 'disease', table['donor'])
     assert plan['status'] == 'ok' and plan['n_lt5'] is True
     table = _donor_table(['AD'] * 5 + ['control'] * 10)
     assert aft.plan_job(table, 'disease', table['donor'])['n_lt5'] is False
+    smallest = _donor_table(['AD'] * 3 + ['control'] * 3)
+    plan = aft.plan_job(smallest, 'disease', smallest['donor'])
+    assert plan['status'] == 'ok' and plan['n_lt5'] is True and plan['n_donors_analysed'] == 6
 
 
 def test_plan_job_batch_confounded_is_flagged_and_dropped():
@@ -246,6 +253,73 @@ def test_braak_plan_uses_numeric_value():
     assert plan['design']['facet_value'].max() == 6
 
 
+def test_numeric_facets_need_four_replicates_with_three_distinct_values():
+    table = _donor_table(['control'] * 4)
+    table['braak'] = [1.0, 3.0, 5.0, 3.0]
+    assert aft.plan_job(table, 'braak', table['donor'])['status'] == 'ok'
+    table['braak'] = [1.0, 3.0, 3.0, 1.0]            # two distinct values
+    assert 'distinct' in aft.plan_job(table, 'braak', table['donor'])['status']
+    three = _donor_table(['control'] * 3)
+    three['braak'] = [1.0, 3.0, 5.0]                 # three replicates
+    assert aft.plan_job(three, 'braak', three['donor'])['status'] != 'ok'
+
+
+def test_age_facet_is_per_decade_without_an_age_covariate():
+    table = _donor_table(['control'] * 20, sexes=['f', 'm'] * 10)
+    table['age'] = np.linspace(60.0, 95.0, 20)
+    table['pmi'] = np.linspace(2.0, 30.0, 20) % 7
+    plan = aft.plan_job(table, 'age', table['donor'])
+    assert plan['status'] == 'ok'
+    design = plan['design']
+    assert design['facet_value'].max() == pytest.approx(9.5) and design['facet_value'].min() == pytest.approx(6.0)
+    assert 'age' not in plan['covariates'] and {'sex', 'pmi'} <= set(plan['covariates'])
+    assert plan['level_counts']['value_min'] == pytest.approx(60.0) and plan['level_counts']['n_distinct'] == 20
+    assert aft.tau_for_facet('age') == pytest.approx(np.log2(1.1))
+    assert aft.tau_for_facet('braak') == pytest.approx(np.log2(1.1) / 3)
+    assert aft.tau_for_facet('sex') == pytest.approx(np.log2(1.1))
+
+
+def test_covariates_are_dropped_before_the_test_is():
+    # 4 replicates: the slope leaves 2 residual df, a sex covariate would leave 1, so the covariate goes
+    table = _donor_table(['control'] * 4, sexes=['f', 'm', 'f', 'm'])
+    table['braak'] = [1.0, 3.0, 5.0, 3.0]
+    plan = aft.plan_job(table, 'braak', table['donor'])
+    assert plan['status'] == 'ok' and plan['covariates'] == [] and 'sex(df)' in plan['covariates_omitted']
+    # 3 vs 3: sex (3 residual df left) and a two-level batch (exactly 2 left) both fit
+    six = _donor_table(['AD'] * 3 + ['control'] * 3, batches=['b1', 'b2'] * 3, sexes=['f', 'm', 'f', 'm', 'f', 'm'])
+    plan = aft.plan_job(six, 'disease', six['donor'])
+    assert plan['status'] == 'ok' and plan['covariates'] == ['sex', 'batch']
+    assert len(plan['design']) - (2 + len(plan['covariates'])) == 2
+    # a batch with more levels than the df allow is dropped, not the test
+    many = _donor_table(['AD'] * 3 + ['control'] * 3, batches=list('abcdef'), sexes=['f', 'm', 'f', 'm', 'f', 'm'])
+    plan = aft.plan_job(many, 'disease', many['donor'])
+    assert plan['status'] == 'ok' and 'batch' not in plan['covariates']
+
+
+def test_app_nlgf_plan_uses_host_sex_in_a_xenograft():
+    table = _donor_table(['control'] * 8)
+    table['app_nlgf'] = ['nlgf'] * 4 + ['control'] * 4
+    table['sex'] = ['f', 'm'] * 4                       # donor sex (varies within an animal in a village)
+    table['host_sex'] = ['f', 'f', 'm', 'm'] * 2
+    plan = aft.plan_job(table, 'app_nlgf', table['donor'], scope='xenograft_human_in_mouse')
+    assert plan['status'] == 'ok' and plan['covariates'] == ['sex']
+    design = plan['design']
+    expected = (table.set_index('donor')['host_sex'] == 'm').astype(float)
+    assert (design.set_index('donor')['cov_sex'] == expected.reindex(design['donor']).to_numpy()).all()
+    assert plan['level_counts'] == {'control': 4, 'nlgf': 4}
+    mouse = aft.plan_job(table, 'app_nlgf', table['donor'], scope='mouse_in_vivo')
+    donor_sex = (table.set_index('donor')['sex'] == 'm').astype(float)
+    assert (mouse['design'].set_index('donor')['cov_sex'] == donor_sex.reindex(mouse['design']['donor']).to_numpy()).all()
+
+
+def test_facets_for_scope_follow_the_registry():
+    allowed = aft.facets_for_scope('mouse_in_vivo', aft.FACETS)
+    assert allowed == ['sex', 'app_nlgf']
+    assert aft.facets_for_scope('xenograft_human_in_mouse', aft.FACETS) == ['sex', 'app_nlgf']
+    assert aft.facets_for_scope('human_postmortem', aft.FACETS) == ['sex', 'disease', 'apoe4_carrier', 'braak', 'age']
+    assert aft.normalize_app_nlgf('NLGF') == 'nlgf' and aft.normalize_app_nlgf('wt') is None
+
+
 # ---------------------------------------------------------------------------
 # Eligibility
 # ---------------------------------------------------------------------------
@@ -261,9 +335,13 @@ def test_eligible_baseline(tmp_path):
     assert _eligibility(tmp_path) == (True, 'ok')
 
 
-def test_xenograft_excluded(tmp_path):
-    eligible, reason = _eligibility(tmp_path, system='xenograft')
-    assert not eligible and 'xenograft' in reason
+def test_xenograft_is_a_tested_scope(tmp_path):
+    store, entry = make_dataset(tmp_path, organism='human', system='xenograft')
+    md_yaml, _ = aft.parse_md_file(entry.md_path)
+    annotation = aft.mus.resolve_annotation(entry.h5ad_path, root=store)
+    api = aft.get_api_config(md_yaml)
+    assert aft.dataset_eligibility(entry, md_yaml, annotation, api) == (True, 'ok')
+    assert aft.dataset_scope(entry, annotation, api) == 'xenograft_human_in_mouse'
 
 
 def test_in_vitro_and_bulk_excluded(tmp_path):
@@ -271,15 +349,19 @@ def test_in_vitro_and_bulk_excluded(tmp_path):
     assert not _eligibility(tmp_path / 'b', system='bulk_tissue')[0]
 
 
-def test_mouse_and_secondary_excluded(tmp_path):
-    assert not _eligibility(tmp_path / 'a', organism='mouse')[0]
-    assert not _eligibility(tmp_path / 'b', is_secondary=True)[0]
+def test_mouse_is_a_tested_scope_mixed_organism_and_secondary_are_not(tmp_path):
+    assert _eligibility(tmp_path / 'a', organism='mouse') == (True, 'ok')
+    assert not _eligibility(tmp_path / 'b', organism='human,mouse')[0]
+    assert not _eligibility(tmp_path / 'c', is_secondary=True)[0]
 
 
-def test_host_sex_facet_excluded(tmp_path):
-    eligible, reason = _eligibility(
-        tmp_path, extra_api='    sample_id: ant_host_sex\n')
-    assert not eligible and 'host' in reason
+def test_host_sex_facet_makes_a_human_dataset_a_xenograft(tmp_path):
+    store, entry = make_dataset(tmp_path, extra_api='    sample_id: ant_host_sex\n')
+    md_yaml, _ = aft.parse_md_file(entry.md_path)
+    annotation = aft.mus.resolve_annotation(entry.h5ad_path, root=store)
+    api = aft.get_api_config(md_yaml)
+    assert aft.dataset_scope(entry, annotation, api) == 'xenograft_human_in_mouse'
+    assert aft.dataset_eligibility(entry, md_yaml, annotation, api)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -441,8 +523,8 @@ def test_unknown_exclusion_column_fails_loudly(tmp_path):
 
 
 @needs_r
-def test_n_lt5_units_suppress_p_and_q(tmp_path):
-    # 3 AD vs 12 control donors: tested (>= 3 per level) but descriptive only
+def test_small_units_are_tested_counted_and_flagged(tmp_path):
+    # 3 AD vs 12 control donors: tested (>= 3 per level), flagged small_sample, p and q present, not descriptive only
     pattern = ','.join(['AD'] * 3 + ['control'] * 12)
     store, entry = make_dataset(tmp_path, n_f=8, n_m=7, disease_pattern=pattern)
     out_root = tmp_path / 'out'
@@ -451,13 +533,14 @@ def test_n_lt5_units_suppress_p_and_q(tmp_path):
     table = pd.read_parquet(out_root / 'Syn2026' / 'Syn_ds.facet_tests.parquet')
     disease = table[table['facet'] == 'disease']
     assert len(disease) > 0
-    assert disease['n_lt5'].all() and disease['descriptive_only'].all()
-    for column in ('p_value', 'q_value', 'ci_low', 'ci_high', 't'):
-        assert disease[column].isna().all()
-    assert disease['logFC'].notna().all()
+    assert disease['n_lt5'].all() and disease['small_sample'].all() and not disease['descriptive_only'].any()
+    for column in ('p_value', 'q_value', 'ci_low', 'ci_high', 't', 'p_treat', 'q_treat'):
+        assert disease[column].notna().any()
+    assert (disease['facet_scope'] == 'human_postmortem').all()
     assert disease['provisional'].all()
     unit = [u for u in manifest['units'] if u['facet'] == 'disease'][0]
-    assert unit['n_lt5'] is True and 'n_sig_q05' not in unit
+    assert unit['n_lt5'] is True and unit['small_sample'] is True and unit['descriptive_only'] is False
+    assert 'n_sig_q05' in unit and manifest['facet_scope'] == 'human_postmortem'
 
 
 def test_choose_strata_rules():

@@ -344,9 +344,9 @@ def test_replicates_per_group(submission):
 def test_few_replicates_and_thin_levels_warn(tmp_path):
     from tests.ingest_helpers import donor_obs
     sub = Submission(tmp_path / 'few')
-    sub.obs = donor_obs(30, n_donors=4)
+    sub.obs = donor_obs(30, n_donors=3)
     outcome = run(sub, checks_design.design_replicates_per_group, duckdb=True)
-    assert outcome.status == WARN and 'fewer than 6' in outcome.summary
+    assert outcome.status == WARN and 'fewer than 4' in outcome.summary
     thin = Submission(tmp_path / 'thin')
     thin.obs = donor_obs(70, n_donors=7)
     thin.obs['dx'] = thin.obs['donor'].map(lambda label: 'AD' if label in ('D00', 'D01') else 'CTRL')

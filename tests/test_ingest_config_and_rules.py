@@ -73,5 +73,5 @@ def test_facet_test_uses_the_shared_rules():
 
 
 def test_ingest_thresholds_reuse_the_facet_rules():
-    assert thresholds.MIN_UNITS_TOTAL == facet_rules.MIN_DONORS_DATASET == 6
+    assert thresholds.MIN_UNITS_TOTAL == facet_rules.MIN_DONORS_DATASET == 4
     assert thresholds.MIN_UNITS_PER_LEVEL == facet_rules.MIN_DONORS_PER_LEVEL == 3

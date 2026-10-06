@@ -535,7 +535,7 @@ def get_docs_base_url(cfg: Optional[Dict[str, Any]] = None) -> str:
     return (value or DEFAULT_DOCS_BASE_URL).rstrip('/')
 
 
-DEFAULT_FACETS_VISIBLE = ('ant_sex', 'ant_disease', 'ant_apoe4_carrier', 'ant_braak')
+DEFAULT_FACETS_VISIBLE = ('ant_sex', 'ant_disease', 'ant_apoe4_carrier', 'ant_braak', 'ant_age', 'ant_app_nlgf')
 
 
 def get_facets_visible(cfg: Optional[Dict[str, Any]] = None) -> List[str]:
