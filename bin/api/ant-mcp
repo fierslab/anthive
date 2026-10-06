@@ -1531,9 +1531,17 @@ def main() -> None:
         'partial-conjunction r-value < 0.05 (Benjamini and Heller 2008) on the ordinary one-sided limma p values: the '
         'effect is present in at least 2 cohorts in the same direction. Each cohort contributes ONE anchor unit per '
         'cell type group (a donor-pooled unit for multi-region cohorts such as MADRC and SEA-AD; other units are '
-        'supplementary and never counted). A gene is REPLICATED when r_value < 0.05 AND it passes the effect gate: '
-        'the median log2 fold change over the tested cohorts, in the replicated direction, is at least tau '
-        '(log2(1.1); Braak log2(1.1)/3 per stage; age log2(1.1) per decade; fields effect_gate_passed, median_logFC). '
+        'supplementary and never counted). A gene is REPLICATED when r_value < 0.05 (direction-consistent effect in at '
+        'least 2 cohorts; r_cohorts names the two that carry it). The effect gate is a separate, descriptive '
+        'condition: effect_gate_passed = at least 2 counted cohorts each with a log2 fold change of at least tau in '
+        'the replicated direction (tau: 10 percent, log2(1.1); Braak 10 percent over three stages; age 10 percent per '
+        'decade; effect_gate_cohorts). replicated_effect (r_treat < 0.05) is the second tier: replicated with at '
+        'least a 10 percent change at FDR 5 percent. Units carry notes and flags (inflated lambda, sex-discordant '
+        'replicates, covariates dropped, age top-coding, gene_flags: mitochondrial, ribosomal, lncRNA or clone, sex '
+        'chromosome, long gene, APOE locus). Age is run twice: unadjusted (reads as pathology too) and adjusted for '
+        'pathology (persists_after_pathology_adjustment). app_nlgf is stratified by timepoint and graft line, '
+        'states its control (control_basis), is refused when confounded and detects large effects only; xenograft '
+        'microglia are live-sorted cells, so dissociation-response genes are suspect. '
         'r_value is BH-adjusted over the genes of one scope x facet x cell type group. k = cohorts whose anchor has '
         'q_value < 0.05 in that direction (descriptive), m = cohorts tested. Cohorts with overlap_unknown never had '
         'their donor overlap checked. The disease facet only combines pathology-based definitions (disease_basis '
@@ -1557,9 +1565,11 @@ def main() -> None:
 
         Replication: partial-conjunction r-value (Benjamini and Heller 2008)
         for "present in at least 2 cohorts, same direction"; replicated =
-        r_value < 0.05 AND the effect gate (the median log2 fold change over the
-        tested cohorts, in the replicated direction, is at least tau: log2(1.1);
-        Braak log2(1.1)/3 per stage; age log2(1.1) per decade). Each cohort
+        r_value < 0.05; the effect gate (at least 2 counted cohorts each with a
+        log2 fold change of at least tau in the replicated direction: log2(1.1);
+        Braak log2(1.1)/3 per stage; age log2(1.1) per decade) is a separate
+        field (effect_gate_passed) and r_treat is a second tier (replicated with
+        at least a 10 percent change). Each cohort
         contributes exactly one anchor unit per cell type group (donor-pooled over
         regional files where a cohort has several regions; per-region units are
         supplementary and not counted). The anchor p value is the ordinary
@@ -1626,9 +1636,14 @@ def main() -> None:
                              + (f" (labels: {labels})" if labels else ''))
                 if anchors:
                     lines.append(f"    anchors: {anchors}")
+            if card.get('gene_flags'):
+                lines.append('  gene flags: ' + ', '.join(card['gene_flags']))
             for note in card.get('notes') or []:
                 if note not in ('exploratory',):
                     lines.append(f'  note: {note}')
+            unit_notes = sorted({n for u in card['units'] if u.get('counted') for n in u.get('notes') or []})
+            for note in unit_notes:
+                lines.append(f'  unit note: {note}')
             lines.append('  cohort | role | dataset | cell type | log2FC [95% CI] | q | q_treat | donors | level | flags | model')
             for unit in card['units']:
                 flags = [k for k, v in (unit.get('flags') or {}).items()
@@ -1659,9 +1674,8 @@ def main() -> None:
         """Genes that change with a facet in the most independent cohorts, within one cell type group.
 
         Lists the genes with a partial-conjunction r-value below 0.05 (the
-        effect is present in at least 2 cohorts in the same direction) that also
-        pass the effect gate (median log2 fold change over the tested cohorts in
-        that direction at least tau), ranked by r_value, then k (cohorts with
+        effect is present in at least 2 cohorts in the same direction; the effect
+        gate and the r_treat tier are shown, not filtered on), ranked by r_value, then k (cohorts with
         q_value < 0.05 in that direction), then agreement (fraction of the tested
         cohorts whose effect has that sign) and the median absolute log2 fold
         change. Same replication definition as facet_effects (one anchor unit per
@@ -1700,17 +1714,20 @@ def main() -> None:
             return '\n'.join(lines)
         if data.get('labels'):
             lines.append('Raw labels in this group: ' + ', '.join(data['labels']))
-        lines.append(f"{data.get('n_replicated')} genes replicate (r < 0.05 and effect gate; {data.get('n_r_significant')} "
-                     f"with r < 0.05) of {data.get('n_genes_in_family')} testable in at least two cohorts.")
-        lines.append('gene | r_value | k of m cohorts | agreement | direction | median log2FC (gate tau) | cohorts with q_value < 0.05')
+        lines.append(f"{data.get('n_replicated')} genes replicate (r < 0.05; {data.get('n_effect_gate')} also have an effect of "
+                     f"at least 10 percent in 2 cohorts, {data.get('n_replicated_effect')} replicate with at least 10 percent "
+                     f"by r_treat) of {data.get('n_genes_in_family')} testable in at least two cohorts.")
+        lines.append('gene | r_value | k of m cohorts | agreement | direction | carried by | effect gate | flags')
         for row in rows:
             lines.append(f"{row['gene']} | {_fmt_number(row.get('r_value'))} | {row['k']} of {row['m']} | "
                          f"{_fmt_number(row.get('agreement'))} | "
                          f"{row['direction']}{' (sign discordant)' if row.get('sign_discordant') else ''} | "
-                         f"{_fmt_number(row.get('median_logFC'))} ({_fmt_number(row.get('effect_gate_tau'))}) | "
+                         f"{', '.join(row.get('r_cohorts') or [])} | "
+                         f"{'passed' if row.get('effect_gate_passed') else 'below 10% in fewer than 2 cohorts'}"
+                         f"{' + r_treat ' + _fmt_number(row.get('r_treat')) if row.get('replicated_effect') else ''} | "
                          f"{', '.join(row.get('cohorts') or [])}"
                          f"{' | overlap unknown: ' + ', '.join(row['cohorts_overlap_unknown']) if row.get('overlap_unknown') else ''}"
-                         f"{' | APOE locus' if row.get('apoe_locus') else ''}")
+                         f"{' | flags: ' + ', '.join(row['gene_flags']) if row.get('gene_flags') else ''}")
         return '\n'.join(lines)
 
     @mcp.tool()

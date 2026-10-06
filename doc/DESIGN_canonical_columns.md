@@ -455,6 +455,12 @@ as the replicate, covariate sex (host sex in a xenograft). Mapped (`obs_derive: 
 | B26/SOT (Blackburn2026) | app_genotype | NLGF | hAPP | `replicate_unit: none`: published, not tested |
 | SF9/CMR (SalaFrigerio2019) | genotype | K | W | `replicate_unit: none` (one plate per genotype x age x sex x region): published, not tested; D, P, C, E (Apoe cohort codes) stay empty. K is the knock-in line (K + W = the 10,801 Leuven-mice cells; confidence 95 percent) |
 
+Each mapped dataset also declares `control_basis` (what the control is: `wt_host` for M24 and SF9, `humanised_app_host` for AppHuHu / hApp hosts of B25, D25, DB6, B26, S25) and, where animal-level columns
+exist, `app_nlgf_design` (M24: `timepoint_column: age`, `graft_line_column: ant_genotype`, `covariate_columns: [injection]`;
+B25: graft line `ant_genotype`; D25/HAR: graft line `donor_line`; DB6/CPF: covariate `village`). The test is stratified by
+timepoint and graft line, adjusts for the covariates and is refused when the genotype is confounded with them
+(`doc/DESIGN_facet_testing.md`, v3b). `ant md-check` rules: `control_basis_missing` (warning), `control_basis_invalid` (error).
+
 Not mapped, with the reason (candidates for later facets): AppNL-G-F hosts only, no control animal
 (AZ5/SLM and AZ5/NST AlbertiniZielonka2025, Si5/SSI Simpson2025 sorl1, PM4/AST and PM4/MIC Preman2024 App NL-G-F x
 Apoe-/-, H25/AQC Hou2025 PSEN lines); other models (S20/SIE Sierksma2020: APPswe/PS1 and Thy-TAU22; SH9/SMB Shah2019

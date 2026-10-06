@@ -369,6 +369,8 @@ def check_md_folder(
             report.add_finding(rel_path, finding)
         for finding in facet_lint.lint_disease_basis(metadata, api):
             report.add_finding(rel_path, finding)
+        for finding in facet_lint.lint_app_nlgf_design(metadata, api):
+            report.add_finding(rel_path, finding)
         for finding in facet_lint.lint_facet_scope(api, _facet_scope(md_path, api, folder, db_id)):
             report.add_finding(rel_path, finding)
         if not with_data:

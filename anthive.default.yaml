@@ -428,3 +428,8 @@ facets_visible: [ant_sex, ant_disease, ant_apoe4_carrier, ant_braak, ant_age, an
 # doc/MCP_LINKS.md, ...). They live in the repo so they can be corrected
 # without a release. Env: ANTHIVE_DOCS_BASE_URL. Empty means this default.
 docs_base_url: https://gitlab.kuleuven.be/bdslab/anthive/anthive4/-/blob/main/doc
+
+# GENCODE gene annotation (GTF with gene lines) used to flag sex-chromosome and long (> 500 kb) genes in the facet
+# result views. null: the ANTHIVE_GENE_GTF environment variable, else no span or chromosome flags (name based flags
+# remain). Read only.
+gene_annotation_gtf: null

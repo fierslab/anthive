@@ -21,8 +21,10 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import facet_lint  # noqa: E402
+import facet_results  # noqa: E402
 import facet_rules  # noqa: E402
 import facet_scopes  # noqa: E402
+import gene_classes  # noqa: E402
 import obscol_tags  # noqa: E402
 import replicates  # noqa: E402
 from test_facet_test import RSCRIPT, aft, make_dataset, needs_r  # noqa: E402
@@ -153,7 +155,10 @@ def test_md_check_reports_a_facet_outside_its_scope(tmp_path):
 
 def test_thresholds_are_the_statistical_minimum():
     assert (facet_rules.MIN_DONORS_PER_LEVEL, facet_rules.NUMERIC_MIN_REPLICATES,
-            facet_rules.NUMERIC_MIN_DISTINCT, facet_rules.MIN_RESIDUAL_DF) == (3, 4, 3, 2)
+            facet_rules.NUMERIC_MIN_DISTINCT, facet_rules.MIN_RESIDUAL_DF) == (3, 4, 3, 4)
+    assert facet_rules.MIN_TEST_RESIDUAL_DF == 2 and facet_rules.LAMBDA_INFLATED == 1.3
+    for unit in ('donor', 'animal', 'sample'):          # the p-value floor can differ by replicate unit; today it does not
+        assert facet_rules.min_per_level(unit) == 3 and facet_rules.min_numeric(unit) == 4
     assert facet_rules.MIN_DONORS_DATASET == 4
     assert replicates.MIN_REPLICATES_PER_LEVEL == 3 and replicates.MIN_REPLICATES_NUMERIC == 4
     assert replicates.MIN_DISTINCT_NUMERIC == 3
@@ -199,20 +204,63 @@ def test_app_nlgf_in_a_mouse_scope_end_to_end(tmp_path):
 
 
 @needs_r
-def test_age_facet_end_to_end_per_decade(tmp_path):
-    store, entry = make_dataset(tmp_path, n_f=10, n_m=10, extra_rename='    age: ant_age\n')
+def test_age_facet_end_to_end_per_decade_with_the_age_floor_and_the_adjusted_twin(tmp_path):
+    pattern = ','.join(['AD', 'control'] * 10)
+    store, entry = make_dataset(tmp_path, n_f=10, n_m=10, extra_rename='    age: ant_age\n', disease_pattern=pattern)
     out_root = tmp_path / 'out'
     manifest = aft.process_dataset(entry, store, out_root, ['age', 'braak'], RSCRIPT, threads=1, memory_limit_gb=1)
+    assert manifest['facets_tested_in_scope'] == ['age', 'age_adjusted', 'braak']
     age = [u for u in manifest['units'] if u['facet'] == 'age' and u['status'] == 'ok']
     assert age, manifest['units']
     unit = age[0]
     assert 'age' not in unit['covariates'] and 'sex' in unit['covariates']
     assert unit['tau_log2'] == pytest.approx(math.log2(1.1))
-    assert unit['level_counts']['n_distinct'] == 20 and unit['level_counts']['value_min'] == pytest.approx(50.0)
+    # the default age floor of 60 years leaves the four donors aged 50 to 59 out of both age units
+    assert unit['level_counts']['n_distinct'] == 16 and unit['level_counts']['value_min'] == pytest.approx(62.0)
+    assert manifest['facet_min_age']['age']['n_donors_below_floor'] == 4
+    assert unit['lambda_gc'] is not None and unit['inflated'] in (True, False) and unit['df_total_median'] > 0
+    adjusted = [u for u in manifest['units'] if u['facet'] == 'age_adjusted' and u['status'] == 'ok']
+    assert adjusted and 'pathology:disease' in adjusted[0]['covariates']
     table = pd.read_parquet(out_root / 'Syn2026' / 'Syn_ds.facet_tests.parquet')
     sub = table[table['facet'] == 'age']
     assert set(sub['contrast']) == {'age_per_decade'} and sub['level_ref'].isna().all()
+    assert sub['persists_after_pathology_adjustment'].notna().all()
+    assert set(table[table['facet'] == 'age_adjusted']['contrast']) == {'age_per_decade_pathology_adjusted'}
     assert not any(u['facet'] == 'braak' and u['status'] == 'ok' for u in manifest['units'])    # no Braak column
+
+
+@needs_r
+def test_app_nlgf_is_stratified_by_timepoint_and_refused_when_confounded(tmp_path):
+    # genotype crosses the timepoint column (bank): one unit per timepoint, 6 vs 6 animals each
+    pattern = ','.join('nlgf' if (index // 2) % 2 == 0 else 'control' for index in range(24))
+    design = 'control_basis: wt_host\napp_nlgf_design:\n  timepoint_column: bank\n'
+    store, entry = make_dataset(tmp_path / 'a', n_f=12, n_m=12, organism='mouse', disease_pattern=pattern,
+                                extra_md=NLGF_DERIVE + ANIMALS + design)
+    manifest = aft.process_dataset(entry, store, tmp_path / 'out_a', ['app_nlgf'], RSCRIPT, threads=1, memory_limit_gb=1)
+    assert manifest['status'] == 'done' and manifest['control_basis'] == 'wt_host'
+    units = [u for u in manifest['units'] if u['facet'] == 'app_nlgf' and u['status'] == 'ok']
+    assert {u['celltype_source'] for u in units} == {'ant_author_cell_type@timepoint=BA', 'ant_author_cell_type@timepoint=BB'}
+    assert all(u['level_counts'] == {'control': 6, 'nlgf': 6} and u['control_basis'] == 'wt_host' for u in units)
+    assert {u['design_subset'] for u in units} == {'timepoint=BA', 'timepoint=BB'}
+    table = pd.read_parquet(tmp_path / 'out_a' / 'Syn2026' / 'Syn_ds.facet_tests.parquet')
+    assert set(table['celltype_source']) == {u['celltype_source'] for u in units}
+    # the injection-like covariate is aligned with the genotype: the unit is refused, not silently adjusted
+    aligned = ','.join('nlgf' if index % 2 == 0 else 'control' for index in range(24))
+    store, entry = make_dataset(tmp_path / 'b', n_f=12, n_m=12, organism='mouse', disease_pattern=aligned,
+                                extra_md=NLGF_DERIVE + ANIMALS + 'control_basis: other\napp_nlgf_design:\n  covariate_columns: [bank]\n')
+    manifest = aft.process_dataset(entry, store, tmp_path / 'out_b', ['app_nlgf'], RSCRIPT, threads=1, memory_limit_gb=1)
+    statuses = {u['status'] for u in manifest['units'] if u['facet'] == 'app_nlgf'}
+    assert statuses and all('confounded with bank' in status for status in statuses)
+
+
+def test_a_missing_design_column_skips_the_dataset_with_a_reason(tmp_path):
+    if RSCRIPT is None:
+        pytest.skip('needs R')
+    pattern = ','.join(['nlgf', 'control'] * 6)
+    store, entry = make_dataset(tmp_path, n_f=6, n_m=6, organism='mouse', disease_pattern=pattern,
+                                extra_md=NLGF_DERIVE + ANIMALS + 'app_nlgf_design:\n  timepoint_column: no_such_column\n')
+    manifest = aft.process_dataset(entry, store, tmp_path / 'out', ['app_nlgf'], RSCRIPT, threads=1, memory_limit_gb=1)
+    assert manifest['status'] == 'skipped' and 'no_such_column' in manifest['reason']
 
 
 @needs_r
@@ -279,9 +327,10 @@ def test_replicated_modules_partial_conjunction_with_the_effect_gate(tmp_path):
     by_module = replicated.set_index('module')
     assert bool(by_module.loc['UP', 'replicated']) and by_module.loc['UP', 'direction'] == 'up'
     assert by_module.loc['UP', 'm'] == 3 and by_module.loc['UP', 'median_std_effect'] == pytest.approx(0.8)
-    # r < 0.05 but the standardised effect is below the 0.2 gate
+    # r < 0.05 so it replicates, but the standardised effect is below the 0.2 gate in every cohort: shown, not fused
     assert by_module.loc['WEAK', 'r_value'] < 0.05 and not bool(by_module.loc['WEAK', 'effect_gate_passed'])
-    assert not bool(by_module.loc['WEAK', 'replicated'])
+    assert bool(by_module.loc['WEAK', 'replicated']) and by_module.loc['WEAK', 'n_cohorts_ge_gate'] == 0
+    assert by_module.loc['UP', 'n_cohorts_ge_gate'] == 3
     # two cohorts up, one strongly down: "present in at least 2 cohorts" holds and the median effect is up
     assert by_module.loc['MIXED', 'k'] == 2 and bool(by_module.loc['MIXED', 'replicated'])
     assert by_module.loc['MIXED', 'median_std_effect'] == pytest.approx(0.8)
@@ -297,3 +346,76 @@ def test_replicated_modules_never_mix_scopes(tmp_path):
     table = pd.concat([human, mouse], ignore_index=True)
     replicated = mod.replicated_modules(table, root, cohort_table)
     assert replicated.empty                                   # one cohort per scope: nothing can replicate
+
+
+# ── v3b: lint, gene classes, notes, strongest facet ──────────────────────────
+
+def test_lint_control_basis_and_design():
+    api = {'obs_derive': {'ant_app_nlgf': {'source': 'g', 'map': {'a': 'nlgf'}}}}
+    assert [f.rule for f in facet_lint.lint_app_nlgf_design({}, api)] == ['control_basis_missing']
+    assert facet_lint.lint_app_nlgf_design({}, {}) == []                       # does not publish the facet
+    assert facet_lint.lint_app_nlgf_design({'control_basis': 'wt_host'}, api) == []
+    assert [f.rule for f in facet_lint.lint_app_nlgf_design({'control_basis': 'wild'}, api)] == ['control_basis_invalid']
+    design = {'control_basis': 'other', 'app_nlgf_design': {'timepoint_column': 'age', 'covariate_columns': ['inj']}}
+    assert facet_lint.lint_app_nlgf_design(design, api) == []
+    bad = {'control_basis': 'other', 'app_nlgf_design': {'nope': 'x'}}
+    assert [f.rule for f in facet_lint.lint_app_nlgf_design(bad, api)] == ['control_basis_invalid']
+
+
+@pytest.mark.parametrize('symbol, expected', [
+    ('MT-CO1', ['mitochondrial']), ('mt-Nd1', ['mitochondrial']), ('RPL13', ['ribosomal']), ('Rps6', ['ribosomal']),
+    ('AC012345.1', ['lncrna_or_clone']), ('LINC00682', ['lncrna_or_clone']), ('SNHG5-AS1', ['lncrna_or_clone']),
+    ('Gm12345', ['lncrna_or_clone']), ('2610021A01Rik', ['lncrna_or_clone']), ('APOE', ['apoe_locus']),
+    ('TREM2', []),
+])
+def test_gene_classes_by_name(symbol, expected):
+    assert gene_classes.flags(symbol, annotation={}) == expected
+
+
+def test_gene_classes_from_an_annotation():
+    annotation = {'XIST': ('chrX', 20_000), 'DMD': ('chrX', 2_200_000), 'TREM2': ('chr6', 8_000),
+                  'CNTNAP2': ('chr7', 2_300_000), 'UTY': ('chrY', 240_000)}
+    assert gene_classes.flags('XIST', annotation) == ['sex_chromosome']
+    assert gene_classes.flags('DMD', annotation) == ['sex_chromosome', 'long_gene']
+    assert gene_classes.flags('CNTNAP2', annotation) == ['long_gene']
+    assert gene_classes.flags('TREM2', annotation) == []
+    assert gene_classes.flags('trem2', annotation) == []                       # symbols are matched case-insensitively
+
+
+def test_gene_classes_read_a_gtf(tmp_path, monkeypatch):
+    gtf = tmp_path / 'genes.gtf'
+    gtf.write_text('chr1\tHAVANA\tgene\t100\t900000\t.\t+\t.\tgene_id "G1"; gene_name "LONGONE";\n'
+                   'chr1\tHAVANA\ttranscript\t100\t200\t.\t+\t.\tgene_id "G1"; gene_name "LONGONE";\n'
+                   'chrX\tHAVANA\tgene\t5\t500\t.\t-\t.\tgene_id "G2"; gene_name "XGENE";\n')
+    monkeypatch.setenv('ANTHIVE_GENE_GTF', str(gtf))
+    assert gene_classes.flags('LONGONE') == ['long_gene'] and gene_classes.flags('XGENE') == ['sex_chromosome']
+    monkeypatch.setenv('ANTHIVE_GENE_GTF', str(tmp_path / 'missing.gtf'))
+    assert gene_classes.flags('LONGONE') == []
+
+
+def test_unit_notes_say_what_a_reader_must_keep_in_mind():
+    age = facet_results.unit_notes({'facet': 'age', 'age_top_coded': 90.0, 'flags': {'small_sample': True},
+                                    'inflated': True, 'lambda_gc': 1.8, 'n_sex_discordant': 2, 'n_sex_checked': 40})
+    text = ' | '.join(age)
+    assert 'not adjusted for pathology' in text and 'top-coded at 90' in text and 'lambda 1.80' in text
+    assert 'unit-wide technical shift' in text
+    assert '2 of 40 replicates express the other sex' in text and 'small sample' in text
+    assert 'adjusted for pathology' in facet_results.unit_notes({'facet': 'age_adjusted'})[0]
+    nlgf = facet_results.unit_notes({'facet': 'app_nlgf', 'facet_scope': 'xenograft_human_in_mouse',
+                                     'control_basis': 'humanised_app_host', 'design_subset': 'timepoint=6m|line=WT',
+                                     'flags': {}})
+    text = ' | '.join(nlgf)
+    assert 'large effects only' in text and 'live-cell isolation' in text and 'humanised-App host' in text
+    assert 'stratified: timepoint=6m, line=WT' in text
+    mouse = ' | '.join(facet_results.unit_notes({'facet': 'app_nlgf', 'facet_scope': 'mouse_in_vivo', 'flags': {}}))
+    assert 'live-cell isolation' not in mouse
+
+
+def test_strongest_facet_names_the_card_a_page_opens_on():
+    cards = {'sex': {'scope': 'human_postmortem', 'replication': [{'cell_type': 'microglia', 'replicated': True, 'r_value': 0.03}]},
+             'braak': {'scope': 'human_postmortem', 'replication': [{'cell_type': 'microglia', 'replicated': True, 'r_value': 0.001},
+                                                                     {'cell_type': 'astrocyte', 'replicated': False, 'r_value': 1e-9}]},
+             'age': {'scope': 'human_postmortem', 'replication': []}}
+    assert facet_results.strongest_facet(cards) == {'facet': 'braak', 'cell_type': 'microglia', 'r_value': 0.001,
+                                                    'scope': 'human_postmortem'}
+    assert facet_results.strongest_facet({'sex': {'replication': []}}) is None

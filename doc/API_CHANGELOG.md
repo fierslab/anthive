@@ -34,7 +34,7 @@ the spec drifting away from the running code.
 Minor bump. Additive (new `scope` parameter, new fields, two new facets), with these changes to existing
 answers:
 
-- **Replication uses the ordinary one-sided limma p value and an effect gate** (facet engine v3, 2026-10-06).
+- **Replication uses the ordinary one-sided limma p value and an effect gate** (facet engine v3, 2026-10-06; the gate became a separate field in v3b, below).
   `replicated` is now `r_value < 0.05` AND `effect_gate_passed`; `r_value` and `p_pc` are computed from the
   ordinary p values (the treat p values are still served as `p_treat` / `q_treat`). On the 2026-10-05 results
   Braak microglia goes from 2 replicated genes to 34 (all pass the gate). `k` now counts cohorts with
@@ -75,6 +75,26 @@ New:
 - MCP: `facet_effects`, `facet_top_genes` and `facet_units` take `scope`; the tool texts describe the effect gate, the
   scopes and the new facets; `facet_effects` without `facet` asks all six.
 - Registry: `facet_scopes` per facet in `lib/obscol_tags_vocab.yaml` (`ant md-check` error `facet_scope_mismatch`).
+
+Facet engine v3b (same unreleased version, 2026-10-06, after the second-opinion review):
+
+- **The effect gate is no longer part of `replicated`.** `replicated` is r < 0.05 (direction-consistent effect in at least 2
+  cohorts). `effect_gate_passed` now means at least 2 cohorts each with a signed log2FC of at least tau in the replicated
+  direction (not a median); new `effect_gate_cohorts`, `n_cohorts_ge_tau`, `r_cohorts` (the two cohorts that carry the
+  r-value), `r_treat` and `replicated_effect` (second tier: the partial conjunction on the treat p values, replicated with at
+  least a 10 percent change), `effect_gate_unit` ("10%", "10% over three stages", "10% per decade"). `/effects/top` adds
+  `n_effect_gate`, `n_replicated_effect`, `r_cohorts`, `r_treat`, `replicated_effect`, `effect_gate_cohorts`, `gene_flags`
+  per row. The badge reads "direction replicates (r = ...); effect below 10% in fewer than 2 cohorts" when the gate fails.
+- New tested facet `age_adjusted` (age with the pathology term, Braak else the 2x2 disease); `age` is labelled "not adjusted
+  for pathology" and its gene rows carry `persists_after_pathology_adjustment`. The age facets exclude donors under 60 (a
+  dataset's `facet_min_age.age` wins). `FACET_ORDER` and `/genes/{g}/facet-effects` have 7 facets; `strongest_facet` names the
+  facet a gene page opens on.
+- Units add `lambda_gc`, `inflated` (lambda > 1.3), `df_total_median`, `covariates_dropped`, `n_sex_checked`,
+  `n_sex_discordant`, `age_top_coded`, `control_basis`, `design_subset`, `notes`. Cards add `gene_flags`. `app_nlgf` units are
+  stratified by timepoint and graft line (the `celltype_source` carries `@timepoint=...|line=...`), adjust for declared
+  covariates and are refused when confounded. Dataset metadata adds `control_basis` (metadata cache version 7).
+- limma: `voomWithQualityWeights` and `eBayes(robust = TRUE)`; the residual-df floor for covariates is 4. Tool version
+  `ant-facet-test/3.1`.
 
 Clients to update: pyvark (`scope` on the facet calls, the new replication fields, `by_scope`), vark, the agent
 skills (facet and replication texts), the JupyterLite vendored client and the web UI (scope selector, effect gate,

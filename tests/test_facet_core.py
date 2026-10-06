@@ -202,12 +202,18 @@ def test_recurring_gene_ranking(cohorts):
     assert rows['G_A']['replicated'] and rows['G_A']['effect_gate_passed']
     assert 'G_C' not in rows and 'G_D' not in rows       # one significant cohort / none: not replicated
     assert rows['G_A']['agreement'] == pytest.approx(1.0) and rows['G_A']['median_logFC'] == pytest.approx(0.6)
-    # G_B: two cohorts clearly up, but three go the other way: r < 0.05 and the effect gate refuses it
-    assert 'G_B' not in rows and out['n_r_significant'] == out['n_replicated'] + 1
+    # G_B: two cohorts clearly up, three go the other way: r < 0.05 (present in at least 2 cohorts, same direction);
+    # the gate looks at the two cohorts that carry it, not at the median over all of them
+    assert rows['G_B']['replicated'] and rows['G_B']['agreement'] == pytest.approx(3 / 6)
+    assert rows['G_B']['effect_gate_passed'] and set(rows['G_B']['r_cohorts']) == {'Cohort1', 'Cohort2'}
+    assert set(rows['G_B']['effect_gate_cohorts']) == {'Cohort1', 'Cohort2'}
+    assert rows['G_B']['median_logFC'] == pytest.approx(-0.095, abs=1e-6)       # descriptive only
     card = fr.FacetResults(root).gene_effects('braak', 'G_B', datasets)['replication'][0]
-    assert card['r_significant'] is True and card['replicated'] is False and card['effect_gate_passed'] is False
-    assert card['median_logFC'] == pytest.approx(-0.095, abs=1e-6) and card['r_direction'] == 'up'
-    assert 'median effect is below the effect gate' in card['badge']
+    assert card['replicated'] is True and card['effect_gate_passed'] is True and card['effect_gate_unit'] == '10% over three stages'
+    assert 'carried by Cohort' in card['badge'] and 'effect of at least 10% over three stages' in card['badge']
+    assert out['n_replicated'] == out['n_r_significant'] and out['n_effect_gate'] == out['n_replicated']
+    order = [r['gene'] for r in out['rows']]
+    assert order.index('G_A') < order.index('G_B')
     assert 'r_value' in out['ranking']
 
 
@@ -239,6 +245,7 @@ def test_recurring_genes_rank_by_r_value_then_k():
     assert [r['gene'] for r in out['rows']] == ['X', 'Y']
     x, y = out['rows']
     assert x['r_value'] < y['r_value'] < 0.05
+    assert x['r_cohorts'] == ['A', 'B'] and x['effect_gate_cohorts'] == ['A', 'B']
     assert (x['k'], x['m']) == (2, 2) and (y['k'], y['m']) == (2, 4)
     assert y['cohorts_same_sign'] == 4 and y['median_abs_logFC'] == pytest.approx(0.75)
     assert out['n_replicated'] == 2 and out['n_genes_in_family'] == 3  # Z: one significant cohort only
@@ -372,7 +379,7 @@ def test_lineage_fields(serve):
                    ['ant_donor_uid']) == {
         'designation': 'reanalysis', 'reanalysis_of': ['V25/SAL'], 'donor_group': 'voet2025',
         'has_donor_uid': True, 'replicate_unit': 'none', 'replicate_column': None,
-        'replicate_basis': 'inferred', 'disease_basis': None, 'facet_scope': None}
+        'replicate_basis': 'inferred', 'disease_basis': None, 'control_basis': None, 'facet_scope': None}
     human = {'organism': 'human', 'experimental_system': 'post_mortem_tissue'}
     assert lineage({}, ['ant_sex'], human, [], db_id='G1/PRI')['facet_scope'] == 'human_postmortem'
     assert lineage({}, ['ant_host_sex'], human, [], db_id='G1/PRI')['facet_scope'] == 'xenograft_human_in_mouse'

@@ -24,7 +24,8 @@
 # p_treat / q_treat: limma treat (McCarthy and Smyth 2009), H0 |logFC| <= tau,
 # on the same moderated fit; p_treat is a one-sided p in the direction of the
 # observed sign (the opposite tail is negligible), BH within the job.
-# Model: ~ facet_value [+ cov_sex] [+ cov_age] [+ cov_pmi] [+ batch];
+# Model: ~ facet_value [+ cov_sex] [+ cov_age] [+ cov_pmi] [+ cov_path] [+ batch];
+# voomWithQualityWeights, lmFit, eBayes(robust = TRUE) and treat(robust = TRUE) since v3b;
 # the facet coefficient is reported (log2 CPM scale from voom).
 
 suppressPackageStartupMessages({
@@ -64,6 +65,7 @@ for (job_index in seq_len(nrow(jobs))) {
     if (any(!is.na(job_samples$cov_sex))) design_frame$cov_sex <- job_samples$cov_sex
     if (any(!is.na(job_samples$cov_age))) design_frame$cov_age <- job_samples$cov_age
     if (any(!is.na(job_samples$cov_pmi))) design_frame$cov_pmi <- job_samples$cov_pmi
+    if ("cov_path" %in% names(job_samples) && any(!is.na(job_samples$cov_path))) design_frame$cov_path <- job_samples$cov_path
     if (any(job_samples$batch != "")) design_frame$batch <- factor(job_samples$batch)
     design <- model.matrix(~ ., data = design_frame)
     rownames(design) <- as.character(sample_ids)
@@ -76,11 +78,13 @@ for (job_index in seq_len(nrow(jobs))) {
     if (sum(keep) < 100) stop(paste("only", sum(keep), "genes pass filterByExpr"))
     dge <- dge[keep, , keep.lib.sizes = FALSE]
     dge <- calcNormFactors(dge, method = "TMM")
-    voom_object <- voom(dge, design)
+    # observation weights from voom plus sample quality weights (Liu et al. 2015), robust moderation
+    # (Phipson et al. 2016): one outlying donor or gene does not set the prior variance
+    voom_object <- voomWithQualityWeights(dge, design, plot = FALSE)
     linear_fit <- lmFit(voom_object, design)
-    fit <- eBayes(linear_fit)
+    fit <- eBayes(linear_fit, robust = TRUE)
     tau <- if ("tau" %in% names(jobs)) jobs$tau[job_index] else 0
-    treat_fit <- treat(linear_fit, lfc = tau)
+    treat_fit <- treat(linear_fit, lfc = tau, robust = TRUE)
     p_treat <- treat_fit$p.value[, "facet_value"]
     standard_error <- sqrt(fit$s2.post) * fit$stdev.unscaled[, "facet_value"]
     tail_quantile <- qt(0.975, fit$df.total)

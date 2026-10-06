@@ -13,6 +13,8 @@ the `.h5ad`).
 | `ant-derive-disease` | The common pathology-based `ant_disease` (Braak x CERAD 2x2, `disease_basis: braak_cerad`): writes the stored column `disease_braak_cerad` for SEA-AD, ROSMAP, MADRC WA4 and Prater (table `DERIVATIONS`), edits the `.md` (verified text edit: rename to `ant_disease`, `disease_derivation`, notes, version bump) and sets `disease_basis: author_dx` on the other datasets. `plan` shows counts. After `apply`: `bin/ops/ant-rebuild-obs-views --only <db_id>`, then `ant-sync push`. Needs `ANTHIVE_H5ADSTORE` / `ANTHIVE_CONFIG` when run from a worktree (the view rebuild resolves the crosswalk join through the configured store). |
 | `ant-suggest-tops` | Walk all `.md` files and propose `top_genes` / `top_cat` / `top_num` from curated marker panels + the cell's actual obs/var. See the script's docstring for the panels. |
 
+Facet engine v3b (2026-10-06, review): the effect gate is a separate field (at least 2 cohorts with log2FC >= tau), `r_treat` is the second tier, units carry lambda / inflated / notes / covariates_dropped / sex-discordance, `age` and `age_adjusted` run side by side (age floor 60), `app_nlgf` is stratified by timepoint and graft line from the `.md` (`control_basis`, `app_nlgf_design`), limma uses quality weights and robust eBayes, residual df floor 4.
+
 Facet engine v3 (2026-10-06, `doc/DESIGN_facet_testing.md`): datasets run in their facet scope (`lib/facet_scopes.py`; manifests
 and result rows carry `facet_scope`; a facet is only tested where its registry `facet_scopes` allow it), eligibility is the
 statistical minimum (`lib/facet_rules.py`: small cohorts are tested, counted and flagged `small_sample`), `app_nlgf` and `age`

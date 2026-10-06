@@ -23,6 +23,13 @@ All parameters are optional - if missing, defaults from `anthive.default.yaml` a
   - For very large datasets (>1M cells): adjust down as needed
 - **Impact**: Affects conversion time and peak memory usage during `ant convert`
 
+### Facet results
+
+#### `gene_annotation_gtf`
+- **Type**: path or null
+- **Default**: null (environment `ANTHIVE_GENE_GTF`)
+- **Description**: GENCODE GTF used to flag sex-chromosome genes and genes longer than 500 kb in the facet result views (`gene_flags`); read once per process. Without it only name based flags (mitochondrial, ribosomal, lncRNA or clone-named, APOE locus) are served.
+
 ### REST API (future use)
 
 #### `rest_api_host`

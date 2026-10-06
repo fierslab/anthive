@@ -83,6 +83,8 @@ RULES: Dict[str, str] = {
     'disease_basis_missing': 'dataset publishes ant_disease but declares no disease_basis',
     'disease_basis_invalid': 'disease_basis is not one of nia_reagan, braak_cerad, adnc, clinical_dx, author_dx',
     'disease_derivation_invalid': 'disease_derivation is malformed or disagrees with disease_basis',
+    'control_basis_missing': 'dataset publishes ant_app_nlgf but declares no control_basis',
+    'control_basis_invalid': 'control_basis is not wt_host, humanised_app_host or other, or app_nlgf_design is malformed',
     'facet_scope_mismatch': 'dataset publishes a facet outside the facet scopes the registry allows for it',
 }
 
@@ -555,6 +557,40 @@ def lint_disease_basis(metadata: Mapping[str, Any], api: Mapping[str, Any]) -> L
     elif basis == 'braak_cerad':
         findings.append(Finding(ERROR, 'disease_derivation_invalid',
                                 'disease_basis is braak_cerad but disease_derivation is missing'))
+    return findings
+
+
+CONTROL_BASES = ('wt_host', 'humanised_app_host', 'other')
+APP_NLGF_DESIGN_KEYS = ('timepoint_column', 'graft_line_column', 'covariate_columns')
+
+
+def lint_app_nlgf_design(metadata: Mapping[str, Any], api: Mapping[str, Any]) -> List[Finding]:
+    """``control_basis`` and ``app_nlgf_design`` rules of a dataset that publishes ``ant_app_nlgf``.
+
+    ``control_basis`` (``wt_host``, ``humanised_app_host``, ``other``) says what the control animal is; a dataset that
+    publishes the facet without it gets a warning, an unknown value or a malformed ``app_nlgf_design`` (unknown keys,
+    non-string columns) is an error.
+    """
+    findings: List[Finding] = []
+    basis = metadata.get('control_basis')
+    publishes = any(column == 'ant_app_nlgf' for column, _ in _targets(api or {}))
+    if basis is not None and basis not in CONTROL_BASES:
+        findings.append(Finding(ERROR, 'control_basis_invalid',
+                                f'control_basis {basis!r} is not one of {", ".join(CONTROL_BASES)}'))
+    elif basis is None and publishes:
+        findings.append(Finding(WARNING, 'control_basis_missing',
+                                'ant_app_nlgf is published but control_basis (wt_host, humanised_app_host, other) is not declared'))
+    design = metadata.get('app_nlgf_design')
+    if design is not None:
+        if not isinstance(design, Mapping) or set(design) - set(APP_NLGF_DESIGN_KEYS):
+            findings.append(Finding(ERROR, 'control_basis_invalid',
+                                    f'app_nlgf_design must be a mapping with keys {", ".join(APP_NLGF_DESIGN_KEYS)}'))
+        else:
+            columns = [design.get('timepoint_column'), design.get('graft_line_column')]
+            columns += list(design.get('covariate_columns') or []) if not isinstance(design.get('covariate_columns'), str) \
+                else [design.get('covariate_columns')]
+            if any(c is not None and not isinstance(c, str) for c in columns):
+                findings.append(Finding(ERROR, 'control_basis_invalid', 'app_nlgf_design columns must be strings'))
     return findings
 
 

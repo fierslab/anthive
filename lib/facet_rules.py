@@ -13,7 +13,8 @@ donors are gone as blockers. What stays is what the statistics need:
 * two-group facets: at least ``MIN_REPLICATES_PER_LEVEL`` (3) replicates per level;
 * numeric facets (Braak, age): at least ``NUMERIC_MIN_REPLICATES`` (4) replicates with at
   least ``NUMERIC_MIN_DISTINCT`` (3) distinct values;
-* the model keeps at least ``MIN_RESIDUAL_DF`` (2) residual degrees of freedom: when the
+* the model keeps at least ``MIN_RESIDUAL_DF`` (4) residual degrees of freedom with covariates (the bare
+  model needs ``MIN_TEST_RESIDUAL_DF`` = 2): when the
   covariates would take them, the covariates are dropped, never the test.
 
 ``N_LT5_THRESHOLD`` and ``NUMERIC_MIN_DONORS_FOR_P`` survive only as the informational
@@ -32,8 +33,31 @@ NUMERIC_MIN_REPLICATES = 4
 NUMERIC_MIN_DISTINCT = 3
 #: A dataset with fewer replicates than the smallest numeric test cannot be tested for any facet.
 MIN_DONORS_DATASET = NUMERIC_MIN_REPLICATES
-#: Residual degrees of freedom the model must keep; covariates are dropped before the test is.
-MIN_RESIDUAL_DF = 2
+#: Residual degrees of freedom a model with covariates must keep (v3b: 4, was 2); covariates are dropped
+#: before the test is, never the test.
+MIN_RESIDUAL_DF = 4
+#: Residual degrees of freedom the bare model (intercept and facet) needs at all: a two-group test from 3 per
+#: level has 4, a trend from 4 replicates has 2. Below this the R script refuses the unit.
+MIN_TEST_RESIDUAL_DF = 2
+#: Replicates per level of a two-group test and replicates of a trend, by ``replicate_unit``. The values are the
+#: same for every unit until the p-value floor for human donors is decided (the 2026-10-06 review asks for 5 and 10
+#: per level/replicate for donors, 3 and 6 for animals and samples).
+MIN_PER_LEVEL_BY_UNIT = {'donor': 3, 'animal': 3, 'sample': 3}
+MIN_NUMERIC_BY_UNIT = {'donor': 4, 'animal': 4, 'sample': 4}
+#: Genomic inflation factor above which a unit is flagged ``inflated`` (median chi-square of the p values / 0.4549).
+LAMBDA_INFLATED = 1.3
+#: Donors younger than this (years) leave the age facet (default; a dataset's ``facet_min_age: {age: N}`` wins).
+AGE_FACET_MIN_AGE = 60
+
+
+def min_per_level(replicate_unit):
+    """Replicates per level a two-group test needs for this replicate unit."""
+    return MIN_PER_LEVEL_BY_UNIT.get(replicate_unit or '', MIN_DONORS_PER_LEVEL)
+
+
+def min_numeric(replicate_unit):
+    """Replicates a trend test (Braak, age) needs for this replicate unit."""
+    return MIN_NUMERIC_BY_UNIT.get(replicate_unit or '', NUMERIC_MIN_REPLICATES)
 #: Informational small-sample flag (never blocks): a level below this, or a numeric facet below the second value.
 N_LT5_THRESHOLD = 5
 NUMERIC_MIN_DONORS_FOR_P = 10
@@ -66,7 +90,8 @@ MODULE_STD_EFFECT_GATE = 0.2
 __all__ = [
     'MIN_CELLS_PER_SAMPLE', 'MIN_DONORS_DATASET', 'MIN_DONORS_PER_LEVEL', 'MIN_REPLICATES_PER_LEVEL',
     'N_LT5_THRESHOLD', 'NUMERIC_MIN_DONORS_FOR_P', 'NUMERIC_MIN_REPLICATES', 'NUMERIC_MIN_DISTINCT',
-    'MIN_RESIDUAL_DF', 'MIN_DONORS_FOR_AGE_PMI', 'MIN_COVARIATE_COVERAGE', 'BRAAK_MIN_DONORS',
+    'MIN_RESIDUAL_DF', 'MIN_TEST_RESIDUAL_DF', 'MIN_PER_LEVEL_BY_UNIT', 'MIN_NUMERIC_BY_UNIT',
+    'LAMBDA_INFLATED', 'AGE_FACET_MIN_AGE', 'min_per_level', 'min_numeric', 'MIN_DONORS_FOR_AGE_PMI', 'MIN_COVARIATE_COVERAGE', 'BRAAK_MIN_DONORS',
     'BRAAK_MIN_DISTINCT', 'TAU_TWO_GROUP', 'TAU_BRAAK_PER_STAGE', 'TAU_AGE_PER_DECADE', 'AGE_UNIT_YEARS',
     'MODULE_STD_EFFECT_GATE', 'gate_tau',
 ]

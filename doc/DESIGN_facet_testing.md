@@ -4,6 +4,52 @@ Status: implemented in `bin/annot/ant-facet-test` (+ `bin/annot/facet_test_limma
 `bin/annot/ant-facet-test-modules`. The v1 and v2 text below is kept where it still holds; the v3 section above
 overrides it where they differ. All output is exploratory. Written 2026-10-04, v3 2026-10-06.
 
+## v3b (2026-10-06, after the second-opinion review): what changed
+
+Implements the parts of the review (`scratchpad/review/fable_facet_reassessment.md`) that were not decisions. Where
+this section and v3 differ, this section wins. Open for Mark: the human-donor p-value floor and the value of m (S1);
+the age floor default (60 years) and the age tau; the "tested and counted at 3 per level" rule.
+
+* **M1, the effect gate is separate from `replicated`.** `replicated` is r < 0.05 (a direction-consistent effect in at
+  least 2 cohorts). `effect_gate_passed` means at least 2 counted cohorts each with a signed log2 fold change of at least
+  tau in the replicated direction (no median); `effect_gate_cohorts` names them, `n_cohorts_ge_tau` counts them. It is a
+  descriptive filter, not part of the error control. The second tier `r_treat` is the same partial conjunction on the
+  one-sided limma treat p values with its own BH; `replicated_effect` (r_treat < 0.05) is "replicated with at least a
+  10 percent change at FDR 5 percent". `r_cohorts` names the two cohorts with the smallest one-sided p values in the
+  replicated direction, the ones that carry the r-value. The badge reads "direction replicates (r = ...); effect below
+  10% in fewer than 2 cohorts" when the gate fails. `RANKING_DEFINITION` says k is counted on q_value. Modules: the same
+  (at least 2 cohorts with a signed `std_effect` of at least 0.2).
+* **M4, calibration.** limma now runs `voomWithQualityWeights` (sample quality weights) and `eBayes(robust = TRUE)`
+  (also `treat(robust = TRUE)`) for every unit. `MIN_RESIDUAL_DF` is 4: a covariate is dropped when it would leave fewer
+  than 4 residual degrees of freedom (the bare model still needs 2: `MIN_TEST_RESIDUAL_DF`; with 4 replicates a trend has
+  2). Per unit the manifest and the API carry `lambda_gc` (median chi-square of the p values over 0.4549), `inflated`
+  (lambda > 1.3) and `df_total_median`. Strong biology also inflates lambda (an NL-G-F contrast shifts most genes), so a
+  large lambda is a prompt to look, not a verdict. The p-value floor is a function of `replicate_unit`
+  (`facet_rules.min_per_level` / `min_numeric`, tables `MIN_PER_LEVEL_BY_UNIT`, `MIN_NUMERIC_BY_UNIT`) with today's
+  values for every unit (3 per level, 4 for trends) until the human floor is decided.
+* **M2, age is run twice.** `age` (served as "age, not adjusted for pathology") and `age_adjusted` (the pathology term in
+  the model: Braak where at least 90 percent of the replicates have it, else the 2x2 disease; the variant is not run
+  without either). Each `age` gene row carries `persists_after_pathology_adjustment` (q < 0.05 with the same sign in the
+  adjusted twin). `facet_min_age` applies to age: the default floor is 60 years (`--age-floor`, `facet_rules.AGE_FACET_MIN_AGE`),
+  a dataset's `facet_min_age: {age: N}` wins. The effect gate for age is 10 percent per decade (46 percent over four
+  decades), stated as such. The unit records `age_top_coded` when ages are top-coded (at least 3 donors and 3 percent
+  at one age of 85 or more: ROSMAP 90+, PsychAD 90): the slope is attenuated.
+* **M3, `app_nlgf`.** A dataset declares `control_basis` (`wt_host`, `humanised_app_host`, `other`; linted, served on the
+  metadata and the units) and optionally `app_nlgf_design: {timepoint_column, graft_line_column, covariate_columns}`
+  (animal-level obs columns, possibly published `ant_` names). The test is stratified by timepoint and graft line (one unit
+  per combination, `celltype_source` suffix `@timepoint=6m|line=APOE33`, counted as sibling strata with the Bonferroni rule
+  of the anchor), the covariate columns enter as a factor, and the unit is refused (status "app_nlgf is confounded with
+  X: not tested") when the genotype is confounded with them. A missing declared column skips the dataset with a reason. Units
+  carry the notes "detects large effects only", the control basis and, for xenografts, "live-cell isolation:
+  dissociation-response genes are suspect". Secondaries (`renzo_mg_fixed`, `Village.6M.WGCNA_modules`) are never tested or
+  counted. The modules tool does not run `app_nlgf` or `age_adjusted`.
+* **M6, M7, S2, S4, S6, S7, S9, C7 (data side).** Per unit: `covariates_dropped` (with reasons), `notes`, `n_sex_checked` /
+  `n_sex_discordant` (replicates whose XIST and Y-gene expression disagree with their sex label; counts only), `age_top_coded`.
+  Per gene (cards and recurring rows): `gene_flags` (`mitochondrial`, `ribosomal`, `lncrna_or_clone`, `sex_chromosome`,
+  `long_gene` above 500 kb, `apoe_locus`; sex chromosome and span from the GENCODE GTF, `gene_annotation_gtf` or
+  `ANTHIVE_GENE_GTF`, `lib/gene_classes.py`). Cards carry the composition sentence and, for Braak and disease, that they are
+  one pathology axis. `/genes/{g}/facet-effects` names the `strongest_facet` the page opens on.
+
 ## v3 (2026-10-06): what changed
 
 Decisions of 2026-10-06 (A to E). Where this section and a later one disagree, this section wins; the
@@ -16,8 +62,8 @@ v2 text below is kept for the parts that did not change.
   the sign d and `1 - p_value / 2` otherwise. The Simes combination of the m - 1 largest cohort p values, the
   factor 2 for the two directions and BH over the genes of one **(scope, facet, cell type group)** family are
   unchanged (u = 2, `lib/replication.py`).
-* **replicated = r < 0.05 AND the effect gate.** The gate needs the median log2 fold change over the tested
-  cohorts to have the replicated sign and `|median| >= tau`. tau (`lib/facet_rules.py`, `gate_tau`):
+* **(superseded by v3b: the gate is separate and counts cohorts, not a median.)** The first v3 text: replicated = r < 0.05
+  AND the median log2 fold change over the tested cohorts has the replicated sign and `|median| >= tau`. tau (`lib/facet_rules.py`, `gate_tau`):
   log2(1.1) for two-group contrasts, log2(1.1) / 3 per Braak stage (as before) and **log2(1.1) per decade of age**
   (10 percent per decade; my choice, so one decade of age counts like the 10 percent of a two-group contrast; open for your decision). The result is served as `effect_gate_passed`, `median_logFC` and
   `effect_gate_tau` next to `r_value`; `r_significant` is r < 0.05 alone.

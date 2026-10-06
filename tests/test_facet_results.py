@@ -735,7 +735,7 @@ def test_endpoint_across_datasets_and_effects(serve):
     top = serve.get('/facets/ant_braak/effects/top', params={'n': 5}).json()
     assert top['rows'][0]['gene'] == 'PTPRG'
     allf = serve.get('/genes/PTPRG/facet-effects').json()
-    assert set(allf['facets']) == {'sex', 'disease', 'apoe4_carrier', 'braak', 'age', 'app_nlgf'}
+    assert set(allf['facets']) == {'sex', 'disease', 'apoe4_carrier', 'braak', 'age', 'age_adjusted', 'app_nlgf'}
     assert allf['scope'] is None and set(allf['by_scope']) == {'human_postmortem', 'mouse_in_vivo'}
     assert serve.get('/facets/braak/effects', params={'gene': 'PTPRG', 'scope': 'nowhere'}).status_code == 400
     assert serve.get('/facets/braak/effects', params={'gene': 'PTPRG', 'scope': 'mouse_in_vivo'}).json()['units'] == []
@@ -878,7 +878,7 @@ def test_overview_and_recurring_genes_are_per_scope(results):
     assert top['cohorts_in_cell_type'] == 1 and top['rows'] == []       # one cohort: nothing can replicate
 
 
-def test_family_uses_ordinary_one_sided_p_and_the_effect_gate():
+def test_family_uses_ordinary_one_sided_p_and_a_separate_effect_gate():
     """Hand-computed: two cohorts, p_value 0.02 and 0.04 (two-sided), both up. One-sided 0.01 and 0.02; m - 1 = 1
     largest value (0.02) gives p_pc 0.02, times 2 for the two directions 0.04; with a single gene r = 0.04."""
     units = pd.DataFrame({'unit': [0, 1], 'cohort': ['A', 'B'], 'n_siblings': [1, 1]})
@@ -888,26 +888,55 @@ def test_family_uses_ordinary_one_sided_p_and_the_effect_gate():
     assert family.loc['G', 'p_pc'] == pytest.approx(0.04)
     assert family.loc['G', 'r_value'] == pytest.approx(0.04) and family.loc['G', 'r_direction'] == 'up'
     assert (family.loc['G', 'k'], family.loc['G', 'k_treat'], family.loc['G', 'm']) == (2, 0, 2)
-    assert family.loc['G', 'median_logFC'] == pytest.approx(0.45) and bool(family.loc['G', 'effect_gate_passed'])
-    assert bool(family.loc['G', 'replicated'])
-    # the same p values with a median effect below tau = log2(1.1) fail the gate but keep r < 0.05
+    assert family.loc['G', 'median_logFC'] == pytest.approx(0.45)
+    assert bool(family.loc['G', 'effect_gate_passed']) and family.loc['G', 'effect_gate_cohorts'] == ['A', 'B']
+    assert bool(family.loc['G', 'replicated']) and family.loc['G', 'r_cohorts'] == ['A', 'B']
+    # the treat p values are 0.5: the effect is not shown to exceed 10 percent, the second tier does not call it
+    assert family.loc['G', 'r_treat'] > 0.05 and not bool(family.loc['G', 'replicated_effect'])
+    # replicated does not depend on the gate: the same p values with small effects keep r < 0.05, the gate fails
     small = rows.assign(logFC=[0.06, 0.05])
     gated = fr.FacetResults._family(small, units, 'sex')['frame']
-    assert bool(gated.loc['G', 'r_significant']) and not bool(gated.loc['G', 'effect_gate_passed'])
-    assert not bool(gated.loc['G', 'replicated'])
-    # the Braak gate is a third of that: the same effect passes per stage
-    assert bool(fr.FacetResults._family(small, units, 'braak')['frame'].loc['G', 'replicated'])
+    assert bool(gated.loc['G', 'replicated']) and not bool(gated.loc['G', 'effect_gate_passed'])
+    assert gated.loc['G', 'effect_gate_cohorts'] == [] and gated.loc['G', 'n_cohorts_ge_tau'] == 0
+    # the Braak gate is a third of that: the same effects pass per stage
+    assert bool(fr.FacetResults._family(small, units, 'braak')['frame'].loc['G', 'effect_gate_passed'])
 
 
-def test_gate_needs_the_replicated_sign():
-    """Cohorts A and B strongly up, C to E mildly down: r < 0.05 but the median effect is negative."""
+def test_effect_gate_needs_two_cohorts_in_the_replicated_direction_not_a_median():
+    """m = 5: two strong cohorts up and three powerless ones at zero: the median is 0, the gate is passed (2 cohorts)."""
+    units = pd.DataFrame({'unit': range(5), 'cohort': list('ABCDE'), 'n_siblings': 1})
+    rows = pd.DataFrame({'unit': range(5), 'gene': ['G'] * 5, 'gene_upper': ['G'] * 5,
+                         'logFC': [0.6, 0.5, 0.0, 0.01, -0.01], 'p_value': [1e-6, 1e-6, 0.8, 0.8, 0.8],
+                         'q_value': [1e-5] * 2 + [0.9] * 3, 'p_treat': [1e-4, 1e-4, 0.9, 0.9, 0.9],
+                         'q_treat': [1e-3] * 2 + [0.9] * 3})
+    row = fr.FacetResults._family(rows, units, 'disease')['frame'].loc['G']
+    assert row['median_logFC'] == pytest.approx(0.01) and bool(row['replicated']) and bool(row['effect_gate_passed'])
+    assert row['effect_gate_cohorts'] == ['A', 'B'] and set(row['r_cohorts']) == {'A', 'B'}
+    # one strong cohort and one at 0.30 vs 0.00: m = 2, the old median gate would have passed one cohort
+    two = pd.DataFrame({'unit': [0, 1], 'gene': ['G', 'G'], 'gene_upper': ['G', 'G'], 'logFC': [0.30, 0.0],
+                        'p_value': [1e-6, 1e-6], 'q_value': [1e-5, 1e-5], 'p_treat': [1e-3, 0.9], 'q_treat': [0.01, 0.9]})
+    row = fr.FacetResults._family(two, pd.DataFrame({'unit': [0, 1], 'cohort': ['A', 'B'], 'n_siblings': 1}),
+                                  'sex')['frame'].loc['G']
+    assert bool(row['replicated']) and not bool(row['effect_gate_passed']) and row['n_cohorts_ge_tau'] == 1
+
+
+def test_discordant_cohorts_do_not_replicate_and_the_badge_wording():
+    """Two cohorts strongly up, three mildly down: r from the two smallest p, signed gate on the replicated direction."""
     units = pd.DataFrame({'unit': range(5), 'cohort': list('ABCDE'), 'n_siblings': 1})
     rows = pd.DataFrame({'unit': range(5), 'gene': ['G'] * 5, 'gene_upper': ['G'] * 5,
                          'logFC': [0.6, 0.6, -0.3, -0.3, -0.3], 'p_value': [1e-6, 1e-6, 0.8, 0.8, 0.8],
                          'q_value': [1e-5] * 2 + [0.9] * 3, 'p_treat': [0.1] * 5, 'q_treat': [0.9] * 5})
     row = fr.FacetResults._family(rows, units, 'disease')['frame'].loc['G']
-    assert row['r_value'] < 0.05 and row['r_direction'] == 'up' and row['median_logFC'] == pytest.approx(-0.3)
-    assert not bool(row['effect_gate_passed']) and not bool(row['replicated'])
+    assert row['r_value'] < 0.05 and row['r_direction'] == 'up' and bool(row['replicated'])
+    entry = {'m': 5, 'k': 2, 'r_value': 0.01, 'r_direction': 'up', 'replicated': True, 'effect_gate_passed': False,
+             'r_cohorts': ['Alpha', 'Beta'], 'effect_gate_unit': '10%', 'cohorts_tested': 5}
+    badge = fr.FacetResults._badge(entry)
+    assert badge.startswith('direction replicates (up) (r = 0.01, carried by Alpha and Beta); effect below 10% in fewer than 2 cohorts')
+    assert 'not replicated' not in badge
+    passed = fr.FacetResults._badge({**entry, 'effect_gate_passed': True, 'effect_gate_cohorts': ['Alpha', 'Beta'],
+                                     'replicated_effect': True, 'r_treat': 0.03})
+    assert 'replicated in at least 2 of 5 cohorts (up): r = 0.01, carried by Alpha and Beta' in passed
+    assert 'effect of at least 10% in Alpha and Beta' in passed and 'r_treat = 0.03' in passed
 
 
 def test_scope_parameter_on_the_endpoints(serve):

@@ -285,15 +285,123 @@ def test_covariates_are_dropped_before_the_test_is():
     table['braak'] = [1.0, 3.0, 5.0, 3.0]
     plan = aft.plan_job(table, 'braak', table['donor'])
     assert plan['status'] == 'ok' and plan['covariates'] == [] and 'sex(df)' in plan['covariates_omitted']
-    # 3 vs 3: sex (3 residual df left) and a two-level batch (exactly 2 left) both fit
+    # 3 vs 3: sex would leave 3 residual df, below the floor of 4: the covariate goes, the test stays
     six = _donor_table(['AD'] * 3 + ['control'] * 3, batches=['b1', 'b2'] * 3, sexes=['f', 'm', 'f', 'm', 'f', 'm'])
     plan = aft.plan_job(six, 'disease', six['donor'])
+    assert plan['status'] == 'ok' and plan['covariates'] == [] and 'sex(df)' in plan['covariates_omitted']
+    # 5 vs 5: sex (7 left) and a two-level batch (6 left) fit; a batch with one level per donor does not
+    ten = _donor_table(['AD'] * 5 + ['control'] * 5, batches=['b1', 'b2'] * 5, sexes=['f', 'm'] * 5)
+    plan = aft.plan_job(ten, 'disease', ten['donor'])
     assert plan['status'] == 'ok' and plan['covariates'] == ['sex', 'batch']
-    assert len(plan['design']) - (2 + len(plan['covariates'])) == 2
-    # a batch with more levels than the df allow is dropped, not the test
-    many = _donor_table(['AD'] * 3 + ['control'] * 3, batches=list('abcdef'), sexes=['f', 'm', 'f', 'm', 'f', 'm'])
+    assert len(plan['design']) - (2 + len(plan['covariates'])) >= facet_rules_min_df()
+    many = _donor_table(['AD'] * 5 + ['control'] * 5, batches=list('abcdefghij'), sexes=['f', 'm'] * 5)
     plan = aft.plan_job(many, 'disease', many['donor'])
     assert plan['status'] == 'ok' and 'batch' not in plan['covariates']
+
+
+def facet_rules_min_df():
+    return aft.MIN_RESIDUAL_DF
+
+
+def test_age_adjusted_plan_uses_braak_else_disease_and_never_age():
+    table = _donor_table(['AD'] * 10 + ['control'] * 10, sexes=['f', 'm'] * 10)
+    table['age'] = np.linspace(61.0, 95.0, 20)
+    table['braak'] = np.linspace(0, 6, 20).round()
+    plan = aft.plan_job(table, 'age_adjusted', table['donor'])
+    assert plan['status'] == 'ok' and 'pathology:braak' in plan['covariates'] and 'age' not in plan['covariates']
+    assert plan['design']['cov_path'].notna().all()
+    no_braak = table.assign(braak=np.nan)
+    plan = aft.plan_job(no_braak, 'age_adjusted', no_braak['donor'])
+    assert plan['status'] == 'ok' and 'pathology:disease' in plan['covariates']
+    assert set(plan['design']['cov_path']) == {0.0, 1.0}
+    nothing = no_braak.assign(disease=None)
+    refused = aft.plan_job(nothing, 'age_adjusted', nothing['donor'])
+    assert refused['status'].startswith('age_adjusted: no pathology covariate')
+    unadjusted = aft.plan_job(table, 'age', table['donor'])
+    assert unadjusted['status'] == 'ok' and not any(c.startswith('pathology') for c in unadjusted['covariates'])
+
+
+def test_app_nlgf_is_refused_when_the_genotype_is_confounded_with_a_design_covariate():
+    table = _donor_table(['control'] * 8)
+    table['app_nlgf'] = ['nlgf'] * 4 + ['control'] * 4
+    table['batch'] = ['inj1'] * 4 + ['inj2'] * 4                    # injection arm = genotype
+    refused = aft.plan_job(table, 'app_nlgf', table['donor'], refuse_confounded='injection')
+    assert refused['status'] == 'app_nlgf is confounded with injection: not tested'
+    crossed = table.assign(batch=['inj1', 'inj2'] * 4)
+    ok = aft.plan_job(crossed, 'app_nlgf', crossed['donor'], refuse_confounded='injection')
+    assert ok['status'] == 'ok' and ok['batch_used'] is True
+    dropped = aft.plan_job(table, 'app_nlgf', table['donor'])          # without the rule the old behaviour: batch dropped
+    assert dropped['status'] == 'ok' and dropped['batch_confounded'] is True
+
+
+def test_split_by_design_makes_one_group_per_timepoint_and_graft_line():
+    table = _donor_table(['control'] * 8)
+    table['timepoint'] = ['3m'] * 4 + ['6m'] * 4
+    table['graft_line'] = ['WT', 'WT', 'KO', 'KO'] * 2
+    groups = dict(aft.split_by_design(table, table['donor'], {'timepoint': 'age', 'graft_line': 'line'}))
+    assert set(groups) == {'timepoint=3m|line=KO', 'timepoint=3m|line=WT', 'timepoint=6m|line=KO', 'timepoint=6m|line=WT'}
+    assert all(len(v) == 2 for v in groups.values())
+    only_time = dict(aft.split_by_design(table, table['donor'], {'timepoint': 'age'}))
+    assert set(only_time) == {'timepoint=3m', 'timepoint=6m'}
+    assert aft.split_by_design(table, table['donor'], {}) == [(None, list(table['donor']))]
+    table.loc[0, 'timepoint'] = None
+    assert sum(len(v) for v in dict(aft.split_by_design(table, table['donor'], {'timepoint': 'age'})).values()) == 7
+
+
+def test_app_nlgf_design_from_the_md():
+    design = aft.app_nlgf_design_from_md({'control_basis': 'wt_host', 'app_nlgf_design': {
+        'timepoint_column': 'age', 'graft_line_column': 'ant_genotype', 'covariate_columns': 'injection'}})
+    assert design == {'control_basis': 'wt_host', 'timepoint': 'age', 'graft_line': 'ant_genotype',
+                      'covariates': ['injection']}
+    assert aft.design_columns_of(design) == ['age', 'ant_genotype', 'injection']
+    assert aft.app_nlgf_design_from_md({})['control_basis'] is None
+    for bad in ({'control_basis': 'mystery'}, {'app_nlgf_design': ['x']}, {'app_nlgf_design': {'nope': 1}}):
+        with pytest.raises(ValueError):
+            aft.app_nlgf_design_from_md(bad)
+
+
+def test_donor_table_carries_the_design_columns():
+    cells = pd.DataFrame({'ant_donor': ['A', 'A', 'B', 'B'], 'age': ['3m', '3m', '6m', '6m'],
+                          'line': ['x', 'x', 'y', 'z'], 'inj': ['i1', 'i1', 'i2', 'i2']})
+    table, _ = aft.build_donor_table(cells, {'timepoint': 'age', 'graft_line': 'line', 'covariates': ['inj']})
+    row = table.set_index('donor')
+    assert row.loc['A', 'timepoint'] == '3m' and row.loc['A', 'graft_line'] == 'x' and row.loc['A', 'design_cov'] == 'i1'
+    assert pd.isna(row.loc['B', 'graft_line'])                      # two lines in one animal: no value, never a pick
+
+
+def test_genomic_inflation_and_sex_discordance_and_top_coding():
+    rng = np.random.default_rng(1)
+    null_p = rng.uniform(size=4000)
+    assert 0.9 < aft.genomic_inflation(null_p) < 1.1
+    assert aft.genomic_inflation(null_p ** 3) > 1.3 and aft.genomic_inflation([0.5] * 10) is None
+    symbols = pd.DataFrame({'gene_id': [0, 1, 2], 'symbol': ['XIST', 'DDX3Y', 'ACTB']})
+    rows, sample_donor, labels = [], {}, {}
+    for index in range(10):
+        male = index >= 5
+        sample_donor[index] = f'D{index}'
+        labels[f'D{index}'] = 'm' if male else 'f'
+        rows += [(index, 0, 5 if male else 400), (index, 1, 300 if male else 2), (index, 2, 10000)]
+    counts = pd.DataFrame(rows, columns=['sample_idx', 'gene_id', 'count'])
+    assert aft.sex_discordance(counts, symbols, sample_donor, labels) == {'n_checked': 10, 'n_discordant': 0}
+    labels['D2'] = 'm'                                             # a female sample labelled male
+    labels['D7'] = 'f'
+    assert aft.sex_discordance(counts, symbols, sample_donor, labels) == {'n_checked': 10, 'n_discordant': 2}
+    assert aft.sex_discordance(counts, symbols.assign(symbol=['A', 'B', 'C']), sample_donor, labels)['n_checked'] == 0
+    ages = pd.DataFrame({'age': [90.0] * 5 + list(np.linspace(60, 89, 20))})
+    assert aft.age_top_coding(ages) == 90.0
+    assert aft.age_top_coding(pd.DataFrame({'age': np.linspace(60, 89, 30)})) is None
+
+
+def test_persisting_age_genes_are_marked_from_the_adjusted_twin():
+    def unit(facet, effects, q_values):
+        return pd.DataFrame({'facet': facet, 'cell_type': 'microglial cell', 'celltype_source': 'constant_all_cells',
+                             'gene_id': [0, 1, 2], 'logFC': effects, 'q_value': q_values,
+                             'persists_after_pathology_adjustment': np.nan})
+    age = unit('age', [0.2, 0.2, -0.2], [0.01, 0.01, 0.01])
+    adjusted = unit('age_adjusted', [0.2, -0.2, -0.2], [0.01, 0.01, 0.5])
+    aft.mark_persisting_age_genes([age, adjusted])
+    assert age['persists_after_pathology_adjustment'].tolist() == [1.0, 0.0, 0.0]
+    assert adjusted['persists_after_pathology_adjustment'].isna().all()
 
 
 def test_app_nlgf_plan_uses_host_sex_in_a_xenograft():
@@ -316,7 +424,8 @@ def test_facets_for_scope_follow_the_registry():
     allowed = aft.facets_for_scope('mouse_in_vivo', aft.FACETS)
     assert allowed == ['sex', 'app_nlgf']
     assert aft.facets_for_scope('xenograft_human_in_mouse', aft.FACETS) == ['sex', 'app_nlgf']
-    assert aft.facets_for_scope('human_postmortem', aft.FACETS) == ['sex', 'disease', 'apoe4_carrier', 'braak', 'age']
+    assert aft.facets_for_scope('human_postmortem', aft.FACETS) == [
+        'sex', 'disease', 'apoe4_carrier', 'braak', 'age', 'age_adjusted']
     assert aft.normalize_app_nlgf('NLGF') == 'nlgf' and aft.normalize_app_nlgf('wt') is None
 
 

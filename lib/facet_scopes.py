@@ -124,6 +124,10 @@ def check_scope(scope: Optional[str]) -> str:
     return scope
 
 
+#: Test variants that share the registry entry of another facet (the age trend with the pathology term in the model).
+REGISTRY_TAG = {'age_adjusted': 'age'}
+
+
 def facet_allowed_scopes(facet: str) -> List[str]:
     """Scopes a facet may be published in (``facet_scopes`` of the registry; all when unset).
 
@@ -131,7 +135,8 @@ def facet_allowed_scopes(facet: str) -> List[str]:
         facet: Facet tag (``braak``) or column (``ant_braak``).
     """
     from obscol_tags import facet_registry_entry  # noqa: PLC0415
-    entry = facet_registry_entry(facet)
+    bare = facet[4:] if facet.startswith('ant_') else facet
+    entry = facet_registry_entry(REGISTRY_TAG.get(bare, bare))
     scopes = list((entry or {}).get('facet_scopes') or [])
     return scopes or list(SCOPES)
 

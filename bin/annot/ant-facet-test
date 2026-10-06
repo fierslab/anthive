@@ -94,7 +94,9 @@ from facet_rules import (AGE_UNIT_YEARS, BRAAK_MIN_DISTINCT, BRAAK_MIN_DONORS, M
                          MIN_COVARIATE_COVERAGE, MIN_DONORS_DATASET, MIN_DONORS_FOR_AGE_PMI, MIN_DONORS_PER_LEVEL,
                          MIN_REPLICATES_PER_LEVEL, MIN_RESIDUAL_DF, MODULE_STD_EFFECT_GATE, N_LT5_THRESHOLD,
                          NUMERIC_MIN_DISTINCT, NUMERIC_MIN_DONORS_FOR_P, NUMERIC_MIN_REPLICATES, TAU_AGE_PER_DECADE,
-                         TAU_BRAAK_PER_STAGE, TAU_TWO_GROUP, gate_tau)
+                         TAU_BRAAK_PER_STAGE, TAU_TWO_GROUP, gate_tau, AGE_FACET_MIN_AGE, LAMBDA_INFLATED,
+                         MIN_NUMERIC_BY_UNIT, MIN_PER_LEVEL_BY_UNIT, MIN_TEST_RESIDUAL_DF, min_numeric, min_per_level)
+import facet_rules  # type: ignore  # noqa: E402
 import facet_scopes  # type: ignore  # noqa: E402
 from anthive_db import build_obs_view_sql  # type: ignore  # noqa: E402
 from donor_keys import COUNT_BASIS as DONOR_COUNT_BASIS, donor_key_map, key_digest  # type: ignore  # noqa: E402
@@ -105,7 +107,7 @@ import facet_results  # type: ignore  # noqa: E402
 import replicates  # type: ignore  # noqa: E402
 from celltype_groups import UNMAPPED, group_of  # type: ignore  # noqa: E402
 
-TOOL_VERSION = 'ant-facet-test/3.0'
+TOOL_VERSION = 'ant-facet-test/3.1'
 SEED = 20261004
 
 # Parameters (all recorded in the run manifest).
@@ -120,14 +122,17 @@ MAX_STRATUM_LEVELS = 40            # per-cell stratifier sanity cap
 POOLED_DIRNAME = '_pooled'         # <results>/_pooled/<pool_id>.* : donor-pooled units
 GROUP_POOL_SOURCE = 'group_pool'   # derived stratum: all labels of one cell type group pooled
 
-FACETS = ('sex', 'disease', 'apoe4_carrier', 'braak', 'age', 'app_nlgf')
+FACETS = ('sex', 'disease', 'apoe4_carrier', 'braak', 'age', 'age_adjusted', 'app_nlgf')
 FACET_COLUMN = {
     'sex': 'ant_sex', 'disease': 'ant_disease',
     'apoe4_carrier': 'ant_apoe4_carrier', 'braak': 'ant_braak', 'age': 'ant_age',
-    'app_nlgf': 'ant_app_nlgf',
+    'app_nlgf': 'ant_app_nlgf', 'age_adjusted': 'ant_age',
 }
-#: Facets modelled as a numeric trend (one slope) rather than a two-group contrast.
-NUMERIC_FACETS = ('braak', 'age')
+#: Facets modelled as a numeric trend (one slope) rather than a two-group contrast. ``age_adjusted`` is the age
+#: trend with the pathology (Braak, else the 2x2 disease) in the model, run next to ``age`` (v3b).
+NUMERIC_FACETS = ('braak', 'age', 'age_adjusted')
+#: Numeric facets whose value is a number of years, modelled per decade.
+AGE_FACETS = ('age', 'age_adjusted')
 #: Columns that carry the APOE e4 carrier status, current name first; the old
 #: name (``ant_apoe_carrier``) only exists on views not rebuilt since the rename.
 APOE4_CARRIER_COLUMNS = ('ant_apoe4_carrier', 'ant_apoe_carrier')
@@ -138,9 +143,11 @@ CONTRAST = {
     'app_nlgf': ('control', 'nlgf'),
     'braak': (None, None),
     'age': (None, None),
+    'age_adjusted': (None, None),
 }
 #: ``contrast`` label of a numeric facet in the result files.
-NUMERIC_CONTRAST = {'braak': 'braak_per_unit', 'age': 'age_per_decade'}
+NUMERIC_CONTRAST = {'braak': 'braak_per_unit', 'age': 'age_per_decade',
+                    'age_adjusted': 'age_per_decade_pathology_adjusted'}
 
 # Datasets whose .h5ad.mus lacks `organism` but which are human by their own
 # group description (Wachter2024): lib/facet_scopes.ASSUME_HUMAN_DB_IDS.
@@ -424,7 +431,8 @@ def _single_value(series: pd.Series) -> Tuple[Any, bool]:
     return None, True
 
 
-def build_donor_table(cells: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, int]]:
+def build_donor_table(cells: pd.DataFrame, design_columns: Optional[Dict[str, Any]] = None
+                      ) -> Tuple[pd.DataFrame, Dict[str, int]]:
     """One row per replicate (donor, animal, sample) with normalised facet values and covariates.
 
     Args:
@@ -437,7 +445,9 @@ def build_donor_table(cells: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, int]
         more than one distinct value for a facet gets NULL for it and is
         counted as conflicting (never silently picked). The table has ``sex``,
         ``host_sex``, ``disease``, ``apoe4_carrier``, ``app_nlgf`` (text) and ``braak``, ``age``,
-        ``pmi`` (numbers).
+        ``pmi`` (numbers). ``design_columns`` (``timepoint``: column, ``graft_line``: column,
+        ``covariates``: [columns]) adds the text columns ``timepoint``, ``graft_line`` and ``design_cov`` (the
+        covariate values joined by ``|``); a replicate with two values gets NULL.
     """
     cells = cells[cells['ant_donor'].notna()].copy()
     cells['ant_donor'] = cells['ant_donor'].astype(str)
@@ -491,6 +501,20 @@ def build_donor_table(cells: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, int]
                         record[facet_name] = float(np.nanmean(unique))
             else:
                 record[facet_name] = np.nan
+        for role, column in (('timepoint', (design_columns or {}).get('timepoint')),
+                             ('graft_line', (design_columns or {}).get('graft_line'))):
+            if column and column in frame:
+                value, _ = _single_value(frame[column].astype(object).where(frame[column].notna(), None).map(
+                    lambda v: None if v is None else str(v)))
+                record[role] = value
+            else:
+                record[role] = None
+        parts = []
+        for column in (design_columns or {}).get('covariates') or []:
+            value, _ = _single_value(frame[column].map(lambda v: None if pd.isna(v) else str(v))) \
+                if column in frame else (None, False)
+            parts.append(value)
+        record['design_cov'] = None if (not parts or any(p is None for p in parts)) else '|'.join(parts)
         if 'batch' in frame:
             unique = frame['batch'].dropna().unique()
             record['batch'] = str(unique[0]) if len(unique) == 1 else None
@@ -641,18 +665,20 @@ def _is_confounded(facet_values: np.ndarray, batch_values: pd.Series) -> bool:
     return int(np.linalg.matrix_rank(stacked)) == int(rank_batch)
 
 
-def _meets_minimum(facet: str, design: pd.DataFrame) -> bool:
+def _meets_minimum(facet: str, design: pd.DataFrame, replicate_unit: Optional[str] = None) -> bool:
     """True when ``design`` (donors with a ``facet_value``) still allows the test of ``facet``."""
     if facet in NUMERIC_FACETS:
-        return len(design) >= NUMERIC_MIN_REPLICATES and design['facet_value'].nunique() >= NUMERIC_MIN_DISTINCT
+        return (len(design) >= facet_rules.min_numeric(replicate_unit)
+                and design['facet_value'].nunique() >= NUMERIC_MIN_DISTINCT)
+    floor = facet_rules.min_per_level(replicate_unit)
     counts = design['facet_value'].value_counts()
-    return bool(counts.get(0.0, 0) >= MIN_DONORS_PER_LEVEL and counts.get(1.0, 0) >= MIN_DONORS_PER_LEVEL)
+    return bool(counts.get(0.0, 0) >= floor and counts.get(1.0, 0) >= floor)
 
 
 def _level_counts(facet: str, design: pd.DataFrame) -> Dict[str, Any]:
     """Replicates per level (two-group facet) or the range of a numeric facet."""
     if facet in NUMERIC_FACETS:
-        values = design['facet_value'] * (AGE_UNIT_YEARS if facet == 'age' else 1.0)
+        values = design['facet_value'] * (AGE_UNIT_YEARS if facet in AGE_FACETS else 1.0)
         counts: Dict[str, Any] = {'n_donors': int(len(design)), 'value_min': float(values.min()),
                                   'value_max': float(values.max()), 'n_distinct': int(design['facet_value'].nunique())}
         if facet == 'braak':
@@ -671,8 +697,25 @@ def _small_sample(facet: str, design: pd.DataFrame) -> bool:
     return bool(min(counts.get(0.0, 0), counts.get(1.0, 0)) < N_LT5_THRESHOLD)
 
 
+def pathology_covariate(donors: pd.DataFrame) -> Tuple[Optional[str], Optional[pd.Series]]:
+    """The pathology term of the age-adjusted model: Braak where at least 90 percent of the donors have it,
+    else the 2x2 disease (AD = 1, control = 0) where at least 90 percent have it, else none.
+
+    Returns:
+        ``(name, values)`` with ``name`` ``braak`` or ``disease``; ``(None, None)`` when neither is known enough.
+    """
+    if len(donors) and donors['braak'].notna().mean() >= MIN_COVARIATE_COVERAGE and donors['braak'].nunique() > 1:
+        return 'braak', donors['braak'].astype(float)
+    disease = donors['disease'].map({'AD': 1.0, 'control': 0.0}) if 'disease' in donors else None
+    if disease is not None and len(donors) and disease.notna().mean() >= MIN_COVARIATE_COVERAGE \
+            and disease.nunique() > 1:
+        return 'disease', disease
+    return None, None
+
+
 def plan_job(donor_table: pd.DataFrame, facet: str, stratum_donors: Iterable[str],
-             scope: Optional[str] = None) -> Dict[str, Any]:
+             scope: Optional[str] = None, replicate_unit: Optional[str] = None,
+             refuse_confounded: Optional[str] = None) -> Dict[str, Any]:
     """Decide design, replicates and flags for one (cell type, facet) unit.
 
     Eligibility is the statistical minimum (``lib/facet_rules.py``): a two-group facet needs
@@ -688,6 +731,10 @@ def plan_job(donor_table: pd.DataFrame, facet: str, stratum_donors: Iterable[str
         stratum_donors: replicates that have a pseudobulk sample for this cell type
             (>= MIN_CELLS_PER_SAMPLE cells).
         scope: facet scope of the dataset; in a xenograft the sex covariate is the host's.
+        replicate_unit: ``donor``, ``animal`` or ``sample``: the minimums come from ``facet_rules.min_per_level`` /
+            ``min_numeric`` (the same numbers for every unit until the human p-value floor is decided).
+        refuse_confounded: name of the design covariate (``batch`` slot) that, when confounded with the facet,
+            makes the unit untestable instead of being dropped (``app_nlgf`` with injection or graft covariates).
 
     Returns:
         dict with ``status`` ('ok' or a skip reason), ``design`` (DataFrame
@@ -697,32 +744,35 @@ def plan_job(donor_table: pd.DataFrame, facet: str, stratum_donors: Iterable[str
     donors = donor_table[donor_table['donor'].isin(set(stratum_donors))].copy()
     out: Dict[str, Any] = {'facet': facet, 'n_donors_with_sample': len(donors)}
     numeric_facet = facet in NUMERIC_FACETS
+    floor_per_level = facet_rules.min_per_level(replicate_unit)
+    floor_numeric = facet_rules.min_numeric(replicate_unit)
     if numeric_facet:
-        valid = donors[donors[facet].notna()].copy()
+        source_column = 'age' if facet in AGE_FACETS else facet
+        valid = donors[donors[source_column].notna()].copy()
         out['n_donors_facet'] = len(valid)
-        distinct = valid[facet].nunique()
-        if len(valid) < NUMERIC_MIN_REPLICATES or distinct < NUMERIC_MIN_DISTINCT:
+        distinct = valid[source_column].nunique()
+        if len(valid) < floor_numeric or distinct < NUMERIC_MIN_DISTINCT:
             out.update(status=f'{facet}: {len(valid)} replicates / {distinct} distinct values '
-                              f'(need {NUMERIC_MIN_REPLICATES} / {NUMERIC_MIN_DISTINCT})')
+                              f'(need {floor_numeric} / {NUMERIC_MIN_DISTINCT})')
             return out
-        valid['facet_value'] = valid[facet].astype(float) / (AGE_UNIT_YEARS if facet == 'age' else 1.0)
+        valid['facet_value'] = valid[source_column].astype(float) / (AGE_UNIT_YEARS if facet in AGE_FACETS else 1.0)
         out['level_counts'] = _level_counts(facet, valid)
     else:
         reference, tested = CONTRAST[facet]
         valid = donors[donors[facet].isin([reference, tested])].copy()
         counts = valid[facet].value_counts().to_dict()
         out['n_donors_facet'] = len(valid)
-        kept_levels = [lv for lv in (reference, tested) if counts.get(lv, 0) >= MIN_DONORS_PER_LEVEL]
+        kept_levels = [lv for lv in (reference, tested) if counts.get(lv, 0) >= floor_per_level]
         out['level_counts'] = {reference: int(counts.get(reference, 0)), tested: int(counts.get(tested, 0))}
         if len(kept_levels) < 2:
-            out.update(status=f'level with < {MIN_DONORS_PER_LEVEL} donors '
+            out.update(status=f'level with < {floor_per_level} donors '
                               f'({reference}={counts.get(reference, 0)}, {tested}={counts.get(tested, 0)})')
             return out
         valid['facet_value'] = (valid[facet] == tested).astype(float)
 
     design = valid.copy()
     total = len(design)
-    for column in ('cov_sex', 'cov_age', 'cov_pmi'):
+    for column in ('cov_sex', 'cov_age', 'cov_pmi', 'cov_path'):
         design[column] = np.nan
     covariates: List[str] = []
     omitted: List[str] = []
@@ -737,7 +787,7 @@ def plan_job(donor_table: pd.DataFrame, facet: str, stratum_donors: Iterable[str
         sex_known = design[sex_column].isin(['f', 'm'])
         if sex_known.mean() >= MIN_COVARIATE_COVERAGE and design.loc[sex_known, sex_column].nunique() == 2:
             candidate = design[sex_known].copy()
-            if _meets_minimum(facet, candidate) and len(candidate) - (n_columns + 1) >= MIN_RESIDUAL_DF:
+            if _meets_minimum(facet, candidate, replicate_unit) and len(candidate) - (n_columns + 1) >= MIN_RESIDUAL_DF:
                 design = candidate
                 design['cov_sex'] = (design[sex_column] == 'm').astype(float)
                 covariates.append('sex')
@@ -746,14 +796,29 @@ def plan_job(donor_table: pd.DataFrame, facet: str, stratum_donors: Iterable[str
                 omitted.append('sex(df)')
         else:
             omitted.append('sex')
-    # age (not for the age facet), pmi
-    for name in (('pmi',) if facet == 'age' else ('age', 'pmi')):
+    # pathology (the age-adjusted model only): Braak, else the 2x2 disease; without it the variant is not run
+    if facet == 'age_adjusted':
+        path_name, path_values = pathology_covariate(design)
+        if path_name is None:
+            out.update(status='age_adjusted: no pathology covariate (Braak and disease known for fewer than 90 percent)')
+            return out
+        candidate = design[path_values.notna()].copy()
+        if not (_meets_minimum(facet, candidate, replicate_unit)
+                and len(candidate) - (n_columns + 1) >= MIN_RESIDUAL_DF):
+            out.update(status='age_adjusted: too few replicates left for the pathology term and 4 residual df')
+            return out
+        design = candidate
+        design['cov_path'] = path_values.reindex(design.index).to_numpy()
+        covariates.append(f'pathology:{path_name}')
+        n_columns += 1
+    # age (not for the age facets), pmi
+    for name in (('pmi',) if facet in AGE_FACETS else ('age', 'pmi')):
         if total < MIN_DONORS_FOR_AGE_PMI:
             continue
         coverage = design[name].notna().mean() if len(design) else 0.0
         if coverage >= MIN_COVARIATE_COVERAGE and design[name].nunique() > 1:
             candidate = design[design[name].notna()].copy()
-            if _meets_minimum(facet, candidate) and len(candidate) - (n_columns + 1) >= MIN_RESIDUAL_DF:
+            if _meets_minimum(facet, candidate, replicate_unit) and len(candidate) - (n_columns + 1) >= MIN_RESIDUAL_DF:
                 design = candidate
                 sd = design[name].std(ddof=0)
                 design[f'cov_{name}'] = (design[name] - design[name].mean()) / (sd if sd > 0 else 1.0)
@@ -778,6 +843,9 @@ def plan_job(donor_table: pd.DataFrame, facet: str, stratum_donors: Iterable[str
         if _is_confounded(design['facet_value'].to_numpy(), design['batch_value']):
             out['batch_confounded'] = True
             design['batch_value'] = None
+            if refuse_confounded:
+                out.update(status=f'{facet} is confounded with {refuse_confounded}: not tested')
+                return out
         elif n_batches <= max(2, len(design) // 4) and has_room(n_batches - 1):
             out['batch_used'] = True
             covariates.append('batch')
@@ -877,6 +945,161 @@ def tau_for_facet(facet: str, tau_two_group: float = TAU_TWO_GROUP, tau_braak_pe
     if facet == 'age':
         return tau_age_per_decade
     return tau_two_group
+
+
+SEX_EXPRESSION_Y_GENES = ('RPS4Y1', 'DDX3Y', 'UTY', 'KDM5D', 'USP9Y', 'EIF1AY', 'ZFY', 'NLGN4Y', 'TXLNGY', 'EIF2S3Y')
+SEX_EXPRESSION_X_GENE = 'XIST'
+
+
+def genomic_inflation(p_values: Iterable[float]) -> Optional[float]:
+    """Genomic inflation factor: median of the chi-square(1) quantiles of the p values over 0.4549 (None below 50 p).
+
+    Near 1 for a well-calibrated null; above ``facet_rules.LAMBDA_INFLATED`` the unit is flagged ``inflated``.
+    """
+    from scipy import stats as scipy_stats  # noqa: PLC0415
+    values = np.asarray([p for p in p_values if p is not None and not math.isnan(p)], dtype=float)
+    if len(values) < 50:
+        return None
+    values = np.clip(values, 1e-300, 1.0)
+    return float(np.median(scipy_stats.chi2.isf(values, 1)) / 0.4549364231195724)
+
+
+def sex_discordance(long_counts: pd.DataFrame, symbols: pd.DataFrame, sample_donor: Dict[int, str],
+                    donor_sex: Dict[str, Optional[str]]) -> Dict[str, int]:
+    """Donors whose expressed sex disagrees with their sex label (counts only, never identifiers).
+
+    Per sample the score is log2(Y-gene CPM + 1) minus log2(XIST CPM + 1). With at least 2 labelled donors of each
+    sex and a median gap of at least 2 between the sexes, a donor is discordant when its score lies on the other
+    side of the midpoint by at least 1.
+
+    Args:
+        long_counts: ``sample_idx, gene_id, count`` of the pseudobulk samples of one stratum.
+        symbols: ``gene_id, symbol``.
+        sample_donor: sample_idx -> donor label.
+        donor_sex: donor label -> ``f`` / ``m`` / None.
+
+    Returns:
+        ``{'n_checked': ..., 'n_discordant': ...}`` (zeros when the sexes are not separable here).
+    """
+    upper = symbols.assign(symbol=symbols['symbol'].astype(str).str.upper())
+    y_ids = set(upper.loc[upper['symbol'].isin(SEX_EXPRESSION_Y_GENES), 'gene_id'])
+    x_ids = set(upper.loc[upper['symbol'] == SEX_EXPRESSION_X_GENE, 'gene_id'])
+    empty = {'n_checked': 0, 'n_discordant': 0}
+    if not y_ids or not x_ids or not len(long_counts):
+        return empty
+    totals = long_counts.groupby('sample_idx')['count'].sum()
+    y_counts = long_counts[long_counts['gene_id'].isin(y_ids)].groupby('sample_idx')['count'].sum()
+    x_counts = long_counts[long_counts['gene_id'].isin(x_ids)].groupby('sample_idx')['count'].sum()
+    scores = {}
+    for sample, total in totals.items():
+        if total <= 0 or sample_donor.get(int(sample)) is None:
+            continue
+        y_cpm = 1e6 * float(y_counts.get(sample, 0.0)) / float(total)
+        x_cpm = 1e6 * float(x_counts.get(sample, 0.0)) / float(total)
+        scores[sample_donor[int(sample)]] = math.log2(y_cpm + 1.0) - math.log2(x_cpm + 1.0)
+    labelled = {d: s for d, s in scores.items() if donor_sex.get(d) in ('f', 'm')}
+    females = [s for d, s in labelled.items() if donor_sex[d] == 'f']
+    males = [s for d, s in labelled.items() if donor_sex[d] == 'm']
+    if len(females) < 2 or len(males) < 2:
+        return empty
+    median_f, median_m = float(np.median(females)), float(np.median(males))
+    if median_m - median_f < 2.0:
+        return {'n_checked': len(labelled), 'n_discordant': 0}
+    midpoint = (median_f + median_m) / 2.0
+    wrong = sum(1 for d, s in labelled.items()
+                if (donor_sex[d] == 'm' and s < midpoint - 1.0) or (donor_sex[d] == 'f' and s > midpoint + 1.0))
+    return {'n_checked': len(labelled), 'n_discordant': int(wrong)}
+
+
+def age_top_coding(donor_table: pd.DataFrame) -> Optional[float]:
+    """The age at which ages are top-coded (ROSMAP 90+, PsychAD 90), or None.
+
+    Detected as at least 3 donors, and at least 3 percent of the donors with a known age, sitting exactly on the
+    maximum age when that maximum is 85 or more.
+    """
+    ages = pd.to_numeric(donor_table['age'], errors='coerce').dropna()
+    if len(ages) < 20:
+        return None
+    top = float(ages.max())
+    at_top = int((ages == top).sum())
+    return top if top >= 85.0 and at_top >= 3 and at_top / len(ages) >= 0.03 else None
+
+
+def split_by_design(donor_table: pd.DataFrame, donors: Iterable[str], design: Dict[str, Any]
+                    ) -> List[Tuple[Optional[str], List[str]]]:
+    """Replicates of one stratum grouped by timepoint and graft line (one ``app_nlgf`` unit per group).
+
+    The amyloid response grows with age and depends on the grafted line, so a genotype contrast must not average over
+    them. Without a declared ``timepoint_column`` or ``graft_line_column`` there is one group (label None). Replicates
+    without a value for a declared column are left out. Labels read ``timepoint=6m|line=APOE33``.
+    """
+    roles = [(role, name) for role, name in (('timepoint', 'timepoint'), ('line', 'graft_line')) if design.get(name)]
+    members = donor_table[donor_table['donor'].isin(set(donors))]
+    if not roles:
+        return [(None, list(members['donor']))]
+    groups: List[Tuple[Optional[str], List[str]]] = []
+    known = members.dropna(subset=[column for _, column in roles])
+    for key, frame in known.groupby([column for _, column in roles], sort=True):
+        key = key if isinstance(key, tuple) else (key,)
+        label = '|'.join(f'{role}={value}' for (role, _), value in zip(roles, key))
+        groups.append((label, list(frame['donor'])))
+    return groups or [(None, [])]
+
+
+def mark_persisting_age_genes(frames: List[pd.DataFrame]) -> None:
+    """Fill ``persists_after_pathology_adjustment`` of the ``age`` rows (in place).
+
+    A gene of the unadjusted age unit persists when, in the age unit of the same stratum that also has the pathology
+    term in the model, it has ``q_value < 0.05`` with the same sign. Units without the adjusted twin keep NaN.
+    """
+    adjusted = {(f['cell_type'].iloc[0], f['celltype_source'].iloc[0]): f.set_index('gene_id')
+                for f in frames if f['facet'].iloc[0] == 'age_adjusted'}
+    for frame in frames:
+        if frame['facet'].iloc[0] != 'age':
+            continue
+        twin = adjusted.get((frame['cell_type'].iloc[0], frame['celltype_source'].iloc[0]))
+        if twin is None:
+            continue
+        q_adjusted = frame['gene_id'].map(twin['q_value'])
+        sign_adjusted = np.sign(frame['gene_id'].map(twin['logFC']))
+        persists = (q_adjusted < 0.05) & (sign_adjusted == np.sign(frame['logFC']))
+        frame['persists_after_pathology_adjustment'] = np.where(q_adjusted.isna(), np.nan, persists.astype(float))
+
+
+CONTROL_BASES = ('wt_host', 'humanised_app_host', 'other')
+
+
+def app_nlgf_design_from_md(md_yaml: Dict[str, Any]) -> Dict[str, Any]:
+    """The ``app_nlgf`` design of a dataset ``.md``: ``control_basis`` and the obs columns that stratify or adjust.
+
+    ``control_basis`` (top-level key; ``wt_host``, ``humanised_app_host`` or ``other``) says what the control
+    animal is. ``app_nlgf_design`` names the animal-level obs columns that must not be averaged over:
+    ``timepoint_column`` and ``graft_line_column`` stratify (one unit per value combination),
+    ``covariate_columns`` (injection arm, village) enter as a factor and make the unit untestable when
+    confounded with the genotype.
+
+    Raises:
+        ValueError: unknown ``control_basis`` or a malformed ``app_nlgf_design``.
+    """
+    basis = md_yaml.get('control_basis')
+    if basis is not None and basis not in CONTROL_BASES:
+        raise ValueError(f'control_basis {basis!r} is not one of {", ".join(CONTROL_BASES)}')
+    raw = md_yaml.get('app_nlgf_design') or {}
+    if not isinstance(raw, dict):
+        raise ValueError('app_nlgf_design must be a mapping')
+    unknown = set(raw) - {'timepoint_column', 'graft_line_column', 'covariate_columns'}
+    if unknown:
+        raise ValueError(f'app_nlgf_design has unknown keys {sorted(unknown)}')
+    covariates = raw.get('covariate_columns') or []
+    if isinstance(covariates, str):
+        covariates = [covariates]
+    return {'control_basis': basis, 'timepoint': raw.get('timepoint_column'), 'graft_line': raw.get('graft_line_column'),
+            'covariates': list(covariates)}
+
+
+def design_columns_of(design: Dict[str, Any]) -> List[str]:
+    """All obs columns named by an ``app_nlgf`` design."""
+    return [c for c in [design.get('timepoint'), design.get('graft_line'), *design.get('covariates', [])] if c]
 
 
 def md_file_sha256(md_path: Path) -> str:
@@ -1008,7 +1231,8 @@ def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: 
                     exclusion_where: Optional[List[str]] = None,
                     all_donors: bool = False, tau_two_group: float = TAU_TWO_GROUP,
                     tau_braak_per_stage: float = TAU_BRAAK_PER_STAGE,
-                    tau_age_per_decade: float = TAU_AGE_PER_DECADE) -> Dict[str, Any]:
+                    tau_age_per_decade: float = TAU_AGE_PER_DECADE,
+                    age_floor: float = AGE_FACET_MIN_AGE) -> Dict[str, Any]:
     """Run all requested facets over all strata of one dataset.
 
     The donors listed by the ``facet_donor_exclusions`` rule of the dataset
@@ -1023,14 +1247,15 @@ def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: 
                     members=[entry])
     return process_target(target, store_root, out_root, facets, rscript, threads, memory_limit_gb, keep_work,
                           exclusion_from, exclusion_where, all_donors, tau_two_group, tau_braak_per_stage,
-                          tau_age_per_decade)
+                          tau_age_per_decade, age_floor)
 
 
 def process_pool(pool_id: str, members: List[H5adEntry], store_root: Path, out_root: Path,
                  facets: List[str], rscript: str, threads: int = 4, memory_limit_gb: int = 24,
                  keep_work: bool = False, tau_two_group: float = TAU_TWO_GROUP,
                  tau_braak_per_stage: float = TAU_BRAAK_PER_STAGE,
-                 tau_age_per_decade: float = TAU_AGE_PER_DECADE) -> Dict[str, Any]:
+                 tau_age_per_decade: float = TAU_AGE_PER_DECADE,
+                    age_floor: float = AGE_FACET_MIN_AGE) -> Dict[str, Any]:
     """Donor-pooled run over the member files of one cohort.
 
     A donor's cells are pooled across the member files (the regional files of
@@ -1044,14 +1269,15 @@ def process_pool(pool_id: str, members: List[H5adEntry], store_root: Path, out_r
     target = Target(db_id=f'pool:{pool_id}', study=POOLED_DIRNAME, stem=pool_id,
                     group_id=members[0].group_id, members=list(members), pool_id=pool_id)
     return process_target(target, store_root, out_root, facets, rscript, threads, memory_limit_gb, keep_work,
-                          None, None, False, tau_two_group, tau_braak_per_stage, tau_age_per_decade)
+                          None, None, False, tau_two_group, tau_braak_per_stage, tau_age_per_decade, age_floor)
 
 
 def process_target(target: Target, store_root: Path, out_root: Path, facets: List[str],
                    rscript: str, threads: int, memory_limit_gb: int, keep_work: bool,
                    exclusion_from: Optional[List[str]], exclusion_where: Optional[List[str]],
                    all_donors: bool, tau_two_group: float, tau_braak_per_stage: float,
-                   tau_age_per_decade: float = TAU_AGE_PER_DECADE) -> Dict[str, Any]:
+                   tau_age_per_decade: float = TAU_AGE_PER_DECADE,
+                    age_floor: float = AGE_FACET_MIN_AGE) -> Dict[str, Any]:
     """Shared implementation of ``process_dataset`` and ``process_pool``."""
     started = time.time()
     pooled = target.pool_id is not None
@@ -1126,7 +1352,21 @@ def process_target(target: Target, store_root: Path, out_root: Path, facets: Lis
     facet_scope = scopes_of_members.pop()
     manifest['facet_scope'] = facet_scope
     facets = facets_for_scope(facet_scope, facets)
+    if 'age' in facets and 'age_adjusted' not in facets:
+        facets = facets[:facets.index('age') + 1] + ['age_adjusted'] + facets[facets.index('age') + 1:]
     manifest['facets_tested_in_scope'] = facets
+    try:
+        app_design = app_nlgf_design_from_md(md_yaml)
+    except ValueError as exc:
+        manifest.update(status='skipped', reason=str(exc))
+        return manifest
+    manifest['control_basis'] = app_design['control_basis']
+    manifest['app_nlgf_design'] = {k: v for k, v in app_design.items() if k != 'control_basis' and v}
+    manifest['parameters_v3b'] = {'age_floor': age_floor, 'min_residual_df': MIN_RESIDUAL_DF,
+                                  'min_test_residual_df': MIN_TEST_RESIDUAL_DF, 'lambda_inflated': LAMBDA_INFLATED,
+                                  'voom': 'voomWithQualityWeights', 'eBayes_robust': True,
+                                  'min_per_level_by_unit': MIN_PER_LEVEL_BY_UNIT,
+                                  'min_numeric_by_unit': MIN_NUMERIC_BY_UNIT}
     if all_donors and md_rule is None:
         manifest.update(status='skipped', reason='--all-donors: this dataset has no facet_donor_exclusions '
                                                   'rule, its counted run already uses every donor')
@@ -1172,8 +1412,14 @@ def process_target(target: Target, store_root: Path, out_root: Path, facets: Lis
                                 and not c.startswith('ant_')]
             exclusion_columns = [c for c in (exclusion_rule.obs_columns if exclusion_rule else [])
                                  + donor_exclusions.declared_columns(md_by_db[entry.db_id])
+                                 + (design_columns_of(app_design) if 'app_nlgf' in facets else [])
                                  if c not in wanted and c not in extra_candidates]
             cells_part = cell_table(conn, wanted + extra_candidates + exclusion_columns)
+            missing_design = [c for c in design_columns_of(app_design) if 'app_nlgf' in facets and c not in cells_part]
+            if missing_design:
+                manifest.update(status='skipped',
+                                reason=f'app_nlgf_design column(s) {missing_design} are not obs columns of the view')
+                return manifest
             if replicate['replicate_unit'] == 'none' or not replicate_column:
                 manifest.update(status='skipped', reason='replicate_unit is none: cell-level, descriptive only')
                 return manifest
@@ -1200,6 +1446,7 @@ def process_target(target: Target, store_root: Path, out_root: Path, facets: Lis
             manifest['donor_exclusion'] = exclusion_reports[0] if len(exclusion_reports) == 1 else {
                 'members': exclusion_reports}
         first_replicate = replicate_info[members[0].db_id]
+        first_replicate_unit = first_replicate['replicate_unit']
         if any((r['replicate_unit'], r['replicate_column']) != (first_replicate['replicate_unit'],
                                                                 first_replicate['replicate_column'])
                for r in replicate_info.values()):
@@ -1221,12 +1468,18 @@ def process_target(target: Target, store_root: Path, out_root: Path, facets: Lis
                                                       f'the smallest numeric test)')
             return manifest
 
-        donor_table, conflicts = build_donor_table(cells)
+        donor_table, conflicts = build_donor_table(cells, {
+            'timepoint': app_design['timepoint'], 'graft_line': app_design['graft_line'],
+            'covariates': app_design['covariates']})
         manifest['donor_conflicts'] = conflicts
-        below_floor, age_floor_report = donor_exclusions.below_age_floor(
-            donor_table, donor_exclusions.min_age_floors(md_yaml))
+        floors = donor_exclusions.min_age_floors(md_yaml)
+        floors.setdefault('age', age_floor)
+        floors['age_adjusted'] = floors['age']
+        below_floor, age_floor_report = donor_exclusions.below_age_floor(donor_table, floors)
         if age_floor_report:
             manifest['facet_min_age'] = age_floor_report
+        top_coded_at = age_top_coding(donor_table)
+        manifest['age_top_coded'] = top_coded_at
         # Cross-dataset donor keys (lib/donor_keys.py): ant_donor_uid, else
         # <group_id>:<ant_donor>. Each tested unit records its donors' keys so
         # replication can count distinct donors across datasets.
@@ -1264,12 +1517,22 @@ def process_target(target: Target, store_root: Path, out_root: Path, facets: Lis
         jobs: List[Dict[str, Any]] = []
         for stratum, frame in sample_sizes.groupby('stratum'):
             for facet in facets:
-                plan = plan_job(donor_table, facet, donor_exclusions.stratum_donors(frame['donor'], facet, below_floor),
-                                scope=facet_scope)
-                plan['stratum'] = str(stratum)
-                plan['source'] = str(frame['source'].iloc[0])
-                plan['label'] = str(frame['label'].iloc[0])
-                jobs.append(plan)
+                stratum_donor_labels = donor_exclusions.stratum_donors(frame['donor'], facet, below_floor)
+                subsets: List[Tuple[Optional[str], Iterable[str]]] = [(None, stratum_donor_labels)]
+                table, refuse = donor_table, None
+                if facet == 'app_nlgf':
+                    subsets = split_by_design(donor_table, stratum_donor_labels, app_design)
+                    if app_design['covariates']:
+                        table = donor_table.assign(batch=donor_table['design_cov'])
+                        refuse = ' and '.join(app_design['covariates'])
+                for subset_label, subset_donors in subsets:
+                    plan = plan_job(table, facet, subset_donors, scope=facet_scope,
+                                    replicate_unit=first_replicate_unit, refuse_confounded=refuse)
+                    plan['stratum'] = str(stratum)
+                    plan['source'] = str(frame['source'].iloc[0]) + (f'@{subset_label}' if subset_label else '')
+                    plan['label'] = str(frame['label'].iloc[0])
+                    plan['design_subset'] = subset_label
+                    jobs.append(plan)
         needed = {(job['stratum'], donor) for job in jobs if job['status'] == 'ok'
                   for donor in job['design']['donor']}
         keep = sample_sizes[[(s, d) in needed for s, d in zip(sample_sizes['stratum'], sample_sizes['donor'])]]
@@ -1278,6 +1541,7 @@ def process_target(target: Target, store_root: Path, out_root: Path, facets: Lis
 
         symbols = gene_symbols(conns[members[0].db_id])
         job_records: List[Dict[str, Any]] = []
+        discordance_by_stratum: Dict[str, Dict[str, int]] = {}
         if len(keep):
             pb_cells = usable.merge(keep[['stratum', 'donor', 'sample_idx']], on=['stratum', 'donor'],
                                     how='inner')
@@ -1288,6 +1552,12 @@ def process_target(target: Target, store_root: Path, out_root: Path, facets: Lis
                 long_counts, symbols = pooled_pseudobulk(members, conns, layers, pb_cells)
             manifest['pseudobulk']['n_nonzero_entries'] = int(len(long_counts))
             sample_key = {(row.stratum, row.donor): int(row.sample_idx) for row in keep.itertuples()}
+            donor_sex_label = dict(zip(donor_table['donor'], donor_table['sex']))
+            for stratum_name, stratum_samples in keep.groupby('stratum'):
+                ids = set(stratum_samples['sample_idx'])
+                discordance_by_stratum[str(stratum_name)] = sex_discordance(
+                    long_counts[long_counts['sample_idx'].isin(ids)], symbols,
+                    {int(r.sample_idx): r.donor for r in stratum_samples.itertuples()}, donor_sex_label)
 
             long_counts.to_csv(work_dir / 'counts_long.csv', index=False)
             symbols.to_csv(work_dir / 'genes.csv', index=False)
@@ -1311,6 +1581,7 @@ def process_target(target: Target, store_root: Path, out_root: Path, facets: Lis
                         'job_id': job_id, 'sample_idx': sample_key[(job['stratum'], row.donor)],
                         'donor': row.donor, 'facet_value': row.facet_value,
                         'cov_sex': row.cov_sex, 'cov_age': row.cov_age, 'cov_pmi': row.cov_pmi,
+                        'cov_path': row.cov_path,
                         'batch': row.batch_value if isinstance(row.batch_value, str) else '',
                     })
             if sample_rows:
@@ -1374,7 +1645,16 @@ def process_target(target: Target, store_root: Path, out_root: Path, facets: Lis
                 'r_status': summary.status if summary is not None else 'missing',
             })
             unit = results[results['job_id'] == job['job_id']].copy() if len(results) else pd.DataFrame()
+            record.update(control_basis=app_design['control_basis'] if job['facet'] == 'app_nlgf' else None,
+                          design_subset=job.get('design_subset'),
+                          covariates_dropped=list(job['covariates_omitted']),
+                          age_top_coded=top_coded_at if job['facet'] in AGE_FACETS else None,
+                          n_sex_checked=discordance_by_stratum.get(job['stratum'], {}).get('n_checked'),
+                          n_sex_discordant=discordance_by_stratum.get(job['stratum'], {}).get('n_discordant'))
             if len(unit):
+                lambda_gc = genomic_inflation(unit['p_value'])
+                record.update(lambda_gc=lambda_gc, df_total_median=float(unit['df_total'].median()),
+                              inflated=bool(lambda_gc is not None and lambda_gc > LAMBDA_INFLATED))
                 record['n_sig_q05'] = int((unit['q_value'] < 0.05).sum())
                 record['n_sig_treat_q05'] = int((unit['q_treat'] < 0.05).sum())
                 if numeric_facet:
@@ -1405,8 +1685,10 @@ def process_target(target: Target, store_root: Path, out_root: Path, facets: Lis
                 unit['composition_p'] = job['composition_p']
                 unit['composition_flag'] = job['composition_flag']
                 unit['provisional'] = PROVISIONAL_FLAGS.get(job['facet'], False)
+                unit['persists_after_pathology_adjustment'] = np.nan
                 frames.append(unit)
             unit_records.append(record)
+        mark_persisting_age_genes(frames)
 
         manifest['units'] = unit_records
         out_dir = (out_root / POOLED_DIRNAME if pooled else
@@ -1697,7 +1979,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                                        exclusion_where=args.exclude_donors_where,
                                        all_donors=args.all_donors, tau_two_group=args.tau_two_group,
                                        tau_braak_per_stage=args.tau_braak_per_stage,
-                                       tau_age_per_decade=args.tau_age_per_decade)
+                                       tau_age_per_decade=args.tau_age_per_decade, age_floor=args.age_floor)
         except Exception as exc:
             print(f'[error] {db_id}: {exc}', file=sys.stderr)
             summary_rows.append({'db_id': db_id, 'status': 'error', 'reason': str(exc)[:300]})
@@ -1751,7 +2033,7 @@ def run_pools(args: argparse.Namespace, store_root: Path, out_root: Path, facets
                                     threads=args.threads, memory_limit_gb=args.memory_gb,
                                     keep_work=args.keep_work, tau_two_group=args.tau_two_group,
                                     tau_braak_per_stage=args.tau_braak_per_stage,
-                                    tau_age_per_decade=args.tau_age_per_decade)
+                                    tau_age_per_decade=args.tau_age_per_decade, age_floor=args.age_floor)
         except Exception as exc:
             print(f'[error] pool:{pool_id}: {exc}', file=sys.stderr)
             rows.append({'db_id': f'pool:{pool_id}', 'status': 'error', 'reason': str(exc)[:300]})
@@ -1798,6 +2080,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help='treat threshold per Braak stage, log2 (default log2(1.1)/3)')
     run.add_argument('--tau-age-per-decade', type=float, default=TAU_AGE_PER_DECADE,
                      help='treat threshold per decade of age, log2 (default log2(1.1))')
+    run.add_argument('--age-floor', type=float, default=AGE_FACET_MIN_AGE,
+                     help='donors younger than this (years) leave the age facets; a dataset facet_min_age.age wins '
+                          '(default 60, pending a decision)')
     run.add_argument('--keep-work', action='store_true', help='keep the temp work dir (debug)')
     donor_exclusions.add_cli_arguments(run)
     return parser

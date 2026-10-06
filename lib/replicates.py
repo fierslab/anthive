@@ -136,8 +136,8 @@ def resolve_replicate(metadata: Mapping[str, Any], annotation: Mapping[str, Any]
 def analysis_level(replicate_unit: Optional[str], numeric: bool,
                    n_per_level: Optional[Mapping[Any, int]] = None,
                    n_replicates: Optional[int] = None, n_distinct: Optional[int] = None,
-                   min_per_level: int = MIN_REPLICATES_PER_LEVEL,
-                   min_numeric: int = MIN_REPLICATES_NUMERIC,
+                   min_per_level: Optional[int] = None,
+                   min_numeric: Optional[int] = None,
                    min_distinct: int = MIN_DISTINCT_NUMERIC) -> Dict[str, Any]:
     """Level at which one (dataset, stratum, facet) may be analysed.
 
@@ -160,6 +160,11 @@ def analysis_level(replicate_unit: Optional[str], numeric: bool,
         ``{analysis_level, label, reason}``; ``analysis_level`` is ``replicate``
         or ``cell``, ``reason`` is None for ``replicate``.
     """
+    if min_per_level is None:
+        min_per_level = facet_rules.min_per_level(replicate_unit)
+    if min_numeric is None:
+        min_numeric = facet_rules.min_numeric(replicate_unit)
+
     def cell(reason: str) -> Dict[str, Any]:
         return {'analysis_level': LEVEL_CELL, 'label': CELL_LEVEL_LABEL, 'reason': reason}
 

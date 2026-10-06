@@ -576,7 +576,8 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
         return manifest
     facet_scope = aft.dataset_scope(entry, annotation, api_config)
     manifest['facet_scope'] = facet_scope
-    facets = aft.facets_for_scope(facet_scope, facets)
+    # the modules tool has no pathology-adjusted age model and no app_nlgf timepoint / graft-line strata (gene tool only)
+    facets = [f for f in aft.facets_for_scope(facet_scope, facets) if f not in ('age_adjusted', 'app_nlgf')]
     manifest['facets_tested_in_scope'] = facets
     if all_donors and md_rule is None:
         manifest.update(status='skipped', reason='--all-donors: this dataset has no facet_donor_exclusions '
@@ -637,8 +638,9 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
 
         donor_table, conflicts = aft.build_donor_table(cells)
         manifest['donor_conflicts'] = conflicts
-        below_floor, age_floor_report = aft.donor_exclusions.below_age_floor(
-            donor_table, aft.donor_exclusions.min_age_floors(md_yaml))
+        floors = aft.donor_exclusions.min_age_floors(md_yaml)
+        floors.setdefault('age', aft.AGE_FACET_MIN_AGE)
+        below_floor, age_floor_report = aft.donor_exclusions.below_age_floor(donor_table, floors)
         if age_floor_report:
             manifest['facet_min_age'] = age_floor_report
         # Cross-dataset donor keys (lib/donor_keys.py): ant_donor_uid, else
@@ -905,8 +907,9 @@ def replicated_modules(table: pd.DataFrame, out_root: Path, cohort_table: Path,
     The same structure as the gene replication (``lib/facet_results.py``): one anchor unit per cohort and cell type
     group (``FacetResults.counting_units``), the cohort p value of a direction is the two-sided permutation p halved
     when the estimate has that sign (1 minus the half otherwise), the m - 1 largest are combined by Simes, BH over
-    the modules of the family gives ``r_value``; ``replicated`` also needs the effect gate: the median ``std_effect``
-    over the tested cohorts has the replicated sign and ``|median| >= min_std_effect``. Units that are not
+    the modules of the family gives ``r_value``; ``replicated`` is r < 0.05. The effect gate is a separate served
+    condition: at least 2 cohorts each with a signed ``std_effect`` of at least ``min_std_effect`` in the replicated
+    direction (``effect_gate_passed``, ``n_cohorts_ge_gate``); the median ``std_effect`` is descriptive. Units that are not
     descriptive only and whose dataset is in the cohort table with a counted role take part.
 
     Returns:
@@ -966,9 +969,11 @@ def replicated_modules(table: pd.DataFrame, out_root: Path, cohort_table: Path,
             frame['k'] = np.maximum(k_up, k_down).astype(int)
             frame['median_std_effect'] = per_cohort.groupby('module_key')['effect'].median().reindex(frame.index)
             direction_sign = frame['direction'].map({'up': 1.0, 'down': -1.0})
-            frame['effect_gate_passed'] = ((frame['median_std_effect'].abs() >= min_std_effect)
-                                           & (np.sign(frame['median_std_effect']) == direction_sign))
-            frame['replicated'] = (frame['r_value'] < replication.R_THRESHOLD) & frame['effect_gate_passed']
+            signed = per_cohort.assign(_signed=per_cohort['effect'] * per_cohort['module_key'].map(direction_sign)) \
+                .groupby('module_key')['_signed'].apply(lambda s: int((s >= min_std_effect).sum()))
+            frame['n_cohorts_ge_gate'] = signed.reindex(frame.index).fillna(0).astype(int)
+            frame['effect_gate_passed'] = frame['n_cohorts_ge_gate'] >= replication.DEFAULT_U
+            frame['replicated'] = frame['r_value'] < replication.R_THRESHOLD
             names = per_cohort.groupby('module_key')[['catalog', 'module']].first().reindex(frame.index)
             frame = pd.concat([names, frame], axis=1).reset_index(drop=True)
             frame.insert(0, 'celltype_group', group)
@@ -1214,7 +1219,7 @@ def build_parser() -> argparse.ArgumentParser:
     group = run.add_mutually_exclusive_group(required=True)
     group.add_argument('--db-id', help='comma-separated db_ids (e.g. G24/MMG)')
     group.add_argument('--all', action='store_true')
-    run.add_argument('--facets', default=','.join(aft.FACETS))
+    run.add_argument('--facets', default=','.join(f for f in aft.FACETS if f not in ('age_adjusted', 'app_nlgf')))
     run.add_argument('--sources', default=','.join(DEFAULT_SOURCES),
                      help='sidecar sources to test (geneset = scanpy score_genes, ucell = UCell); one BH family per source')
     run.add_argument('--geneset-store', default=None)

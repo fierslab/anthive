@@ -619,7 +619,7 @@ class ConnectionPool:
         }
 
 
-_METADATA_CACHE_VERSION = 6       # bump when the cache format OR the cached metadata payload (keys derived in _load_database_metadata) changes
+_METADATA_CACHE_VERSION = 7       # bump when the cache format OR the cached metadata payload (keys derived in _load_database_metadata) changes
 _METADATA_CACHE_TTL_S3  = 86_400  # 24 h for S3 databases (no local mtime)
 
 
@@ -673,6 +673,7 @@ def _lineage_fields(file_metadata: Dict[str, Any], obs_categorical: List[str],
         'replicate_column': replicate['replicate_column'],
         'replicate_basis': replicate['basis'],
         'disease_basis': file_metadata.get('disease_basis'),
+        'control_basis': file_metadata.get('control_basis'),
         'facet_scope': facet_scopes.scope_of(
             annotation or {}, {c for c in (obs_categorical or []) if str(c).startswith('ant_')}, db_id=db_id),
     }
@@ -13454,6 +13455,7 @@ def get_gene_facet_effects(
         'gene': gene, 'scope': scope,
         'facets': {facet: reader.gene_effects(facet, gene, datasets, exclude_secondary=exclude_secondary, scope=scope)
                    for facet in facet_results_lib.FACET_ORDER}}
+    result['strongest_facet'] = facet_results_lib.strongest_facet(result['facets'])
     if scope is None:
         by_scope: Dict[str, Dict[str, Any]] = {}
         for facet in facet_results_lib.FACET_ORDER:
