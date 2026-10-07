@@ -178,7 +178,9 @@ fleet-wide `module_variability.parquet`, `scores_index.parquet`,
 `gene_stats_index.parquet`, and `gene_variance_index.parquet` (each
 with its per-dataset cache prefix so incremental updates can reuse
 cached rows: `_gene_stats_cache/`, `_gene_variance_cache/`,
-`_module_variability_cache/`).
+`_module_variability_cache/`), and the facet-test results under
+`_facet_tests/` (per-dataset parquets, run manifests, pooled units,
+summaries and the cohort table; run logs and helper scripts stay local).
 `.duckdb` and the `.layer.*.parquet` expression sidecars are treated as
 derived; rebuild them locally via `make build-stale` (or pull them for
 disaster recovery with `ant-sync pull --include-duckdb`).

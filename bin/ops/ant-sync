@@ -74,7 +74,13 @@ SYNC_EXTENSIONS      = {'.h5ad', '.duckdb', '.de.parquet', '.scores.parquet',
 # module-variability + gene-stats + gene-variance caches so slave nodes
 # reap the primary's cache hits.
 SYNC_PATH_PREFIXES   = ('_module_variability_cache/', '_gene_stats_cache/',
-                        '_gene_variance_cache/')
+                        '_gene_variance_cache/',
+                        # Facet test results (per-dataset parquets, run
+                        # manifests, pooled units, summaries, cohort table):
+                        # served by ant-serve, so every site needs them.
+                        '_facet_tests/')
+# Inside a prefixed path these are never synced (run logs, helper scripts).
+PREFIX_SKIP_SUFFIXES = ('.log', '.py', '.snapshot')
 # Pull defaults to .h5ad + .de.parquet. .duckdb and .layer.*.parquet sidecars
 # are derived (rebuilt locally via `ant-build-all`). Use `pull --include-duckdb`
 # to override for disaster recovery.
@@ -164,6 +170,8 @@ def _is_syncable(
     for prefix in SYNC_PATH_PREFIXES:
         if rel.startswith(prefix):
             if any(rel.endswith(suffix) for suffix in SKIP_SUFFIXES):
+                return False
+            if rel.endswith(PREFIX_SKIP_SUFFIXES):
                 return False
             return True
     # Skip _-prefixed folders (e.g. _synapse_raw) — staging / archive areas.
