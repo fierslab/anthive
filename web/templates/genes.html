@@ -3,6 +3,7 @@
 {% block title %}{% if gene %}{{ gene }} — {% endif %}gene atlas — anthive{% endblock %}
 
 {% block content %}
+{% from "_macros.html" import doc_block %}
 <style>
   /* ── two-row filter bar (mirrors _module_view.html) ── */
   .gv-filter-row {
@@ -279,7 +280,17 @@
   </select>
   <span style="flex:1"></span>
   <span class="muted" id="gene-meta-hm"></span>
-  <span class="info" title="Pick which per-(gene, dataset) statistic the heatmap shows. abundance (scaled_mean) = mean log-norm expression clipped to the dataset's 5–95th cross-gene percentile and rescaled 0–1 (comparable across datasets). % cells expressing = fraction of cells with non-zero counts. mean = raw mean log-norm over ALL cells. mean among expressing = mean over non-zero cells only. rank = percentile of this gene's mean vs all genes in that dataset.">ⓘ</span>
+</div>
+<div id="gv-hm-about-wrap" style="display:none">
+{% call doc_block('About the heatmap values', id='gv-hm-about') %}
+  <ul>
+    <li><strong>Abundance (scaled 0 to 1).</strong> Mean log-normalised expression, clipped to the 5th to 95th percentile across genes of that dataset and rescaled, so datasets are comparable.</li>
+    <li><strong>% cells expressing.</strong> Fraction of cells with a non-zero count.</li>
+    <li><strong>Mean, all cells.</strong> Mean log-normalised expression over every cell of the dataset.</li>
+    <li><strong>Mean among expressing.</strong> The same, over the cells with a non-zero count only.</li>
+    <li><strong>Rank in dataset.</strong> Percentile of this gene's mean among all genes of that dataset.</li>
+  </ul>
+{% endcall %}
 </div>
 <div id="gene-heatmap"></div>
 <div id="gene-missing" class="muted" style="font-size:11px; margin-top:10px"></div>
@@ -930,6 +941,7 @@
         loading.style.display = 'none';
         if (MULTI) {
           document.getElementById('gv-hm-controls').style.display = '';
+          document.getElementById('gv-hm-about-wrap').style.display = '';
           renderHeatmap(data);
           return;
         }

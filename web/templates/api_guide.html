@@ -32,7 +32,7 @@
   .api-guide .cmd button { position: absolute; top: 6px; right: 6px; font-size: 11px; padding: 2px 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); border-radius: 3px; cursor: pointer; }
 </style>
 
-{% from "_macros.html" import breadcrumb %}
+{% from "_macros.html" import breadcrumb, doc_block %}
 {{ breadcrumb([("API", None)]) }}
 
 <div class="api-guide">
@@ -83,8 +83,9 @@
       <li><strong>Who you are matters.</strong> The API sees your username, so admin-only endpoints work for admins and refuse everybody else (see <a href="#permissions">below</a>).</li>
     </ul>
     {% endif %}
-    <h3 class="subsection-head">MCP links are separate</h3>
+    {% call doc_block('About MCP links (separate from the API)', id='api-guide-mcp-about') %}
     <p>The personal links on your <a href="/account/mcp" id="api-guide-mcp-link">MCP page</a> are for AI assistants. Each link is its own token that acts as your login on the MCP server (<code>/mcp</code>); it does not work on the REST API, and your password does not go into an MCP client. Treat a link like a password and revoke it there if it leaks.</p>
+    {% endcall %}
   </section>
 
   {% if _basic %}

@@ -199,6 +199,16 @@
    The home icon is the word "home" styled as a muted link — keeps it subtle
    and screen-reader-friendly.
 #}
+{# Collapsible documentation block, closed by default (sitewide pattern).
+   Usage:  {% call doc_block('About these effects', id='fx-about') %}...{% endcall %}
+   title: summary text, starts with "About ..."; the ⓘ is added here.
+   id: optional anchor; a #id link opens the block, and the open/closed state is
+       remembered per block in localStorage (base.html).
+   open: render open (only for blocks a page must not hide). #}
+{% macro doc_block(title, id=None, open=False) -%}
+<details class="doc-block"{% if id %} id="{{ id }}"{% endif %}{% if open %} open{% endif %}><summary>&#9432; {{ title }}</summary><div class="doc-body">{{ caller() }}</div></details>
+{%- endmacro %}
+
 {% macro experimental_notice(what) -%}
 {%- set _issue_url = issue_tracker_url() -%}
 <div class="exp-notice" role="note">

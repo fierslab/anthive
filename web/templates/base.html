@@ -436,6 +436,23 @@
             letter-spacing: 0;
         }
         .badge-secondary:hover { color: var(--link); }
+        /* Collapsible documentation: every explanatory or methods text block that
+           is longer than a line sits in <details class="doc-block"> (macro
+           doc_block in _macros.html), closed by default. */
+        details.doc-block { max-width: 900px; margin: 6px 0 12px; border: 1px solid var(--border-light); border-left: 3px solid var(--border);
+                            border-radius: 4px; background: #fafbfc; font-size: 12.5px; line-height: 1.55; }
+        details.doc-block > summary { cursor: pointer; padding: 5px 10px; color: var(--text-muted); font-size: 12px; list-style: none; user-select: none; }
+        details.doc-block > summary::-webkit-details-marker { display: none; }
+        details.doc-block > summary::after { content: "\25B8"; margin-left: 6px; font-size: 10px; }
+        details.doc-block[open] > summary::after { content: "\25BE"; }
+        details.doc-block > summary:hover { color: var(--link); }
+        details.doc-block > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; border-radius: 3px; }
+        details.doc-block > .doc-body { padding: 2px 12px 8px; }
+        details.doc-block > .doc-body > :first-child { margin-top: 2px; }
+        details.doc-block > .doc-body p { margin: 4px 0 6px; }
+        details.doc-block > .doc-body ul { margin: 4px 0 6px 18px; padding: 0; }
+        details.doc-block > .doc-body dl { margin: 4px 0; }
+        details.doc-block details.doc-block { margin: 6px 0; }
         /* Compact help: a small ⓘ revealing its text on hover (native title),
            so explanatory prose doesn't take up space. Used across all views. */
         .info {
@@ -449,6 +466,7 @@
         .info-pop { position: absolute; z-index: 80; max-width: min(340px, calc(100vw - 16px)); background: #1e293b; color: #f8fafc;
                     font-size: 12px; font-weight: normal; line-height: 1.45; padding: 7px 10px; border-radius: 5px;
                     text-transform: none; letter-spacing: 0; box-shadow: 0 4px 14px rgba(15, 23, 42, .3); overflow-wrap: anywhere; }
+        .info-pop .info-pop-link { color: #bfdbfe; text-decoration: underline; font-size: 11px; }
         legend .info, th .info, h2 .info { font-size: 10px; }
         /* Facet-column display. ant_* columns get a subdued grey pill
            ("facet") and their label is shown bold without the ant_ prefix.
@@ -1829,6 +1847,15 @@
         bubble.className = 'info-pop';
         bubble.setAttribute('role', 'tooltip');
         bubble.textContent = text;
+        var term = el.getAttribute('data-glossary');
+        if (term) {
+          var more = document.createElement('a');
+          more.href = '/help#glossary-' + term;
+          more.className = 'info-pop-link';
+          more.textContent = 'More in the glossary';
+          bubble.appendChild(document.createElement('br'));
+          bubble.appendChild(more);
+        }
         document.body.appendChild(bubble);
         var rect = el.getBoundingClientRect();
         var left = Math.max(8, Math.min(rect.left + window.scrollX, window.scrollX + document.documentElement.clientWidth - bubble.offsetWidth - 8));
@@ -1855,6 +1882,52 @@
           el.setAttribute('role', 'button');
         });
       });
+    })();
+    </script>
+    <script>
+    // Collapsible documentation blocks and sections (details.doc-block,
+    // details.help-section): remember open/closed per block in localStorage,
+    // and open every closed ancestor of a #hash target (deep links, TOC clicks).
+    (function () {
+      var PREFIX = 'doc.open.';
+      function blockKey(el) {
+        if (el.dataset.docKey) return el.dataset.docKey;
+        if (el.id) return location.pathname + '#' + el.id;
+        var summary = el.querySelector('summary');
+        return location.pathname + ':' + (summary ? summary.textContent.trim().slice(0, 60) : '');
+      }
+      function stored(el) { try { return localStorage.getItem(PREFIX + blockKey(el)); } catch (e) { return null; } }
+      function store(el) { try { localStorage.setItem(PREFIX + blockKey(el), el.open ? '1' : '0'); } catch (e) {} }
+      function restore(root) {
+        (root || document).querySelectorAll('details.doc-block').forEach(function (el) {
+          var value = stored(el);
+          if (value === '1') el.open = true;
+        });
+      }
+      function openTarget() {
+        if (!location.hash || location.hash.length < 2) return;
+        var target = null;
+        try { target = document.getElementById(decodeURIComponent(location.hash.slice(1))); } catch (e) { return; }
+        if (!target) return;
+        var changed = false;
+        for (var node = target; node; node = node.parentElement) {
+          if (node.tagName === 'DETAILS' && !node.open) { node.open = true; changed = true; }
+        }
+        if (changed || target.tagName === 'DETAILS') target.scrollIntoView();
+      }
+      window.antDocRestore = restore;
+      document.addEventListener('toggle', function (event) {
+        var el = event.target;
+        if (el && el.classList && el.classList.contains('doc-block')) store(el);
+      }, true);
+      document.addEventListener('click', function (event) {
+        var link = event.target.closest ? event.target.closest('a[href^="#"]') : null;
+        if (!link || link.getAttribute('href').length < 2) return;
+        var id = link.getAttribute('href').slice(1);
+        if (id === location.hash.slice(1)) setTimeout(openTarget, 0);
+      });
+      window.addEventListener('hashchange', openTarget);
+      document.addEventListener('DOMContentLoaded', function () { restore(); openTarget(); });
     })();
     </script>
 </body>

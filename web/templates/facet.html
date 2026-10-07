@@ -68,7 +68,7 @@
 {% from "_facet_mapping.html" import facet_mapping_styles, mapping_kind, source_columns, translation, coverage %}
 {{ facet_mapping_styles() }}
 
-{% from "_macros.html" import breadcrumb, experimental_notice %}
+{% from "_macros.html" import breadcrumb, experimental_notice, doc_block %}
 {{ breadcrumb([("facets", "/facets"), (facet_name, None)]) }}
 {{ experimental_notice("facets") }}
 
@@ -128,10 +128,13 @@
 {{ fx_styles() }}
 <div class="card" id="facet-effects">
   <h2 class="section-head">Effects across datasets
-    <span class="info" title="Donor-level tests of this facet, one row per dataset and cell type. Replication across cohorts is judged per gene with one anchor unit per cohort.">ⓘ</span></h2>
+    <span class="info" data-glossary="replicate-unit" title="Tests of this facet per donor, one row per dataset and cell type, with replication counted across cohorts.">ⓘ</span></h2>
   {{ fx_intro('facet') }}
   {% if facet_name == 'ant_disease' %}
-  <p class="fx-intro" id="fx-disease-definition"><strong>Disease definition.</strong> Datasets define AD vs control in different ways. Only cohorts with a pathology-based definition (Braak x CERAD, NIA-Reagan or ADNC) are combined for replication; clinical or author diagnoses are listed in the tables and never counted. Each unit below states its definition.</p>
+<p class="fx-intro" id="fx-disease-definition"><strong>Disease means pathologic AD</strong> (Braak and CERAD neuropathology), not a clinical diagnosis. Some of these donors had no dementia.</p>
+  {% call doc_block('About the disease definition', id='fx-disease-about') %}
+    <p>Datasets define AD versus control in different ways. Only cohorts with a pathology-based definition (Braak and CERAD, NIA-Reagan or ADNC) are combined for replication; clinical or author diagnoses are listed in the tables and never counted. Each unit below states its definition. Braak stage and pathologic AD are one axis read twice, so a gene replicated under both is one observation, not two findings (<a href="/help#glossary-disease-basis">glossary</a>).</p>
+  {% endcall %}
   {% endif %}
   {{ fx_methods_box() }}
   {{ fx_recurring(facet_name) }}
@@ -238,7 +241,7 @@
 
 <div class="card" id="facet-datasets">
   <h2 class="section-head">Datasets <span class="muted">({{ fd.datasets|length }} with this facet, {{ non_carriers|length }} without)</span>
-    <span class="info" title="How each dataset publishes this facet: the author column it comes from, how it was mapped (renamed, derived through a value map, or one constant value) and how each author value was translated. Cell counts are per author value. Values the table does not list are kept as they are (renamed) or replaced by the default (derived).">ⓘ</span></h2>
+    <span class="info" data-glossary="facet" title="Where each dataset's values for this facet come from and how the author's values were translated.">ⓘ</span></h2>
   {% if fd.datasets %}
   <div class="table-wrap">
   <table class="carrier-table" id="carrier-table">

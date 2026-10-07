@@ -4290,53 +4290,54 @@ def _fx_donors_text(unit: Dict[str, Any]) -> str:
     return ', '.join(f'{level} {n}' for level, n in counts.items())
 
 
-def _fx_pills(unit: Dict[str, Any]) -> List[Tuple[str, str, str]]:
+def _fx_pills(unit: Dict[str, Any]) -> List[Tuple[str, str, str, str]]:
+    """Flag pills of one unit as (label, css class, one-sentence tooltip, glossary slug)."""
     flags = unit.get('flags') or {}
-    pills: List[Tuple[str, str, str]] = []
+    pills: List[Tuple[str, str, str, str]] = []
     level, replicate = unit.get('analysis_level'), unit.get('replicate_unit')
     if level == 'cell':
         pills.append(('cell-level, descriptive only', 'warn',
                       (unit.get('analysis_level_reason') or unit.get('reason') or 'Too few replicates for a test')
-                      + '. Cells are not replicates, so there is no test, p or q; the numbers describe the cells.'))
+                      + '; the numbers describe cells, so there is no p or q value.', 'descriptive-only'))
     elif level == 'replicate':
         pills.append((f'replicate level ({replicate})' if replicate else 'replicate level', 'info',
-                      f'Tested on pseudobulks per {replicate or "replicate"}: the {replicate or "replicate"}, '
-                      'not the cell, is the unit of analysis.'))
+                      f'Tested with one value per {replicate or "replicate"}, not per cell.', 'analysis-level'))
     if unit.get('pooled'):
         pills.append(('pooled', 'info',
-                      'Several files of one cohort (regions or cell type files) pooled per donor into one unit, '
-                      'so the cohort counts once.'))
+                      'Several files of one cohort were combined per donor, so the cohort counts once.',
+                      'pooled-unit'))
     if unit.get('overlap_unknown'):
         pills.append(('donor overlap not checked', 'warn',
-                      'Donor overlap with other cohorts has not been checked for this cohort; shared donors '
-                      'would make agreement between cohorts look stronger than it is.'))
+                      'It is not known whether this cohort shares donors with another, which would inflate agreement.',
+                      'donor-overlap'))
     if unit.get('is_secondary'):
         pills.append(('reanalysis, not counted', 'warn',
-                      'A reanalysis of cells another dataset serves. Shown, but never counted towards '
-                      'replication and left out of pooled numbers.'))
+                      'A reanalysis of cells another dataset serves; shown but never counted.', 'cohort'))
     if flags.get('descriptive_only'):
         pills.append(('descriptive only', 'warn',
-                      'A level has fewer than 5 donors (Braak: fewer than 10). Estimates are shown '
-                      'without p, q or confidence interval and cannot be called significant.'))
+                      'Too few donors in a group for a p or q value; the estimate is shown for orientation.',
+                      'descriptive-only'))
     if flags.get('provisional'):
         pills.append(('provisional', 'warn',
-                      'Disease vocabulary is not settled yet (what counts as control differs between '
-                      'studies). These results will change.'))
+                      'What counts as control still differs between studies, so these results may change.',
+                      'disease-basis'))
     if flags.get('composition_flag'):
         pvalue = flags.get('composition_p')
         ptext = f' (p = {pvalue:.2g})' if isinstance(pvalue, (int, float)) else ''
         pills.append(('composition', 'warn',
-                      "The fraction of each donor's cells in this cell type differs with the facet"
-                      f'{ptext}, uncorrected. An effect may reflect a change in composition or cell '
-                      'state rather than in expression.'))
+                      f"The share of this cell type among each donor's cells changes with the facet{ptext}, "
+                      'so the effect may be a shift in which cells were captured.', 'composition'))
     if flags.get('batch_confounded'):
         pills.append(('batch confounded', 'warn',
-                      'The facet cannot be separated from batch, so batch was left out of the model.'))
+                      'The facet cannot be separated from batch, so batch was left out of the model.',
+                      'covariates'))
     if flags.get('batch_used'):
-        pills.append(('batch adjusted', 'info', 'A donor-level batch column was included in the model.'))
+        pills.append(('batch adjusted', 'info', 'A donor-level batch column was included in the model.',
+                      'covariates'))
     if unit.get('dataset_changed'):
-        pills.append(('data changed', 'warn', 'The dataset changed after this test was run; the result '
-                                               'describes the earlier version.'))
+        pills.append(('data changed', 'warn',
+                      'The dataset changed after this test was run; the result describes the earlier version.',
+                      'facet'))
     return pills
 
 
