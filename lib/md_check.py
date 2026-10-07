@@ -16,7 +16,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 class MdCheckReport:
@@ -371,7 +371,10 @@ def check_md_folder(
             report.add_finding(rel_path, finding)
         for finding in facet_lint.lint_app_nlgf_design(metadata, api):
             report.add_finding(rel_path, finding)
-        for finding in facet_lint.lint_facet_scope(api, _facet_scope(md_path, api, folder, db_id)):
+        for finding in facet_lint.lint_facet_exclude(metadata):
+            report.add_finding(rel_path, finding)
+        scope_info = _facet_scope(md_path, api, folder, db_id, metadata)
+        for finding in facet_lint.lint_facet_scope(api, scope_info[0], mouse_only=scope_info[1]):
             report.add_finding(rel_path, finding)
         if not with_data:
             continue
@@ -393,15 +396,23 @@ def check_md_folder(
             close()
 
 
-def _facet_scope(md_path: Path, api: Any, folder: Path, db_id: Optional[str]) -> Optional[str]:
-    """Facet scope of a dataset from its ``.h5ad.mus`` cascade (None when unknown or unreadable)."""
+def _facet_scope(md_path: Path, api: Any, folder: Path, db_id: Optional[str],
+                 metadata: Optional[Dict[str, Any]] = None) -> Tuple[Optional[str], bool]:
+    """``(facet scope, mouse_only)`` of a dataset from its ``.h5ad.mus`` cascade (``(None, False)`` when unreadable).
+
+    A dataset excluded from the facet layer (``facet_scopes.facet_exclusion_reason``) has no scope.
+    """
     try:
         import facet_lint  # noqa: PLC0415
+        import facet_scopes  # noqa: PLC0415
         import mus  # noqa: PLC0415
         annotation = mus.resolve_annotation(md_path.with_suffix('.h5ad'), root=folder)
-        return facet_lint.facet_scope_of_dataset(api if isinstance(api, dict) else {}, annotation, db_id)
+        if facet_scopes.facet_exclusion_reason(annotation, metadata) is not None:
+            return None, False
+        return (facet_lint.facet_scope_of_dataset(api if isinstance(api, dict) else {}, annotation, db_id),
+                facet_scopes.is_mouse_only(annotation))
     except Exception:
-        return None
+        return None, False
 
 
 def _join_root(folder: Path, api: Any) -> Optional[Path]:

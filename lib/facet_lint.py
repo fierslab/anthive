@@ -521,10 +521,28 @@ def lint_replicate(metadata: Mapping[str, Any], api: Mapping[str, Any],
         findings.append(Finding(WARNING, 'replicate_column_unused',
                                 f'replicate_unit is none but replicate_column is {column!r}'))
     if column and stored_columns is not None:
-        available = set(stored_columns) | {target for target, _ in _targets(api or {})}
+        available = set(stored_columns) | {target for target, _ in _targets(api or {})} | {'cell_name'}
         if column not in available:
             findings.append(Finding(ERROR, 'replicate_column_missing',
                                     f'replicate_column {column!r} is not an obs column of the dataset'))
+    return findings
+
+
+def lint_facet_exclude(metadata: Mapping[str, Any]) -> List[Finding]:
+    """``facet_exclude`` / ``facet_exclude_reason`` rules (``facet_scopes.facet_exclusion_reason``).
+
+    ``facet_exclude`` must be a boolean; ``true`` needs a non-empty ``facet_exclude_reason``, and a reason without
+    ``facet_exclude: true`` is a warning (it has no effect).
+    """
+    findings: List[Finding] = []
+    flag = metadata.get('facet_exclude')
+    reason = metadata.get('facet_exclude_reason')
+    if flag is not None and not isinstance(flag, bool):
+        findings.append(Finding(ERROR, 'facet_exclude_invalid', f'facet_exclude {flag!r} must be true or false'))
+    elif flag is True and not (isinstance(reason, str) and reason.strip()):
+        findings.append(Finding(ERROR, 'facet_exclude_invalid', 'facet_exclude is true but facet_exclude_reason is missing'))
+    elif not flag and reason is not None:
+        findings.append(Finding(WARNING, 'facet_exclude_reason_unused', 'facet_exclude_reason is set but facet_exclude is not true'))
     return findings
 
 
@@ -601,7 +619,7 @@ def facet_scope_of_dataset(api: Mapping[str, Any], annotation: Mapping[str, Any]
     return scope_of(annotation, {column for column, _ in _targets(api or {})}, db_id=db_id)
 
 
-def lint_facet_scope(api: Mapping[str, Any], scope: Optional[str]) -> List[Finding]:
+def lint_facet_scope(api: Mapping[str, Any], scope: Optional[str], mouse_only: bool = False) -> List[Finding]:
     """Error for every facet the dataset publishes outside the scopes of the registry.
 
     Facets never mix human and mouse (``lib/facet_scopes.py``): ``ant_braak`` in a mouse
@@ -611,12 +629,24 @@ def lint_facet_scope(api: Mapping[str, Any], scope: Optional[str]) -> List[Findi
     Args:
         api: The raw ``api:`` mapping of a dataset ``.md``.
         scope: The dataset's facet scope (``facet_scopes.scope_of``) or None.
+        mouse_only: The dataset is pure mouse (``facet_scopes.is_mouse_only``): any facet outside the structural
+            tags (donor, cell type, tissue, ...) is an error.
     """
-    if scope is None:
-        return []
     registry = facet_registry()
     findings: List[Finding] = []
     seen: Set[str] = set()
+    if mouse_only:
+        from facet_scopes import MOUSE_ONLY_ALLOWED_TAGS  # noqa: PLC0415
+        for column, how in _targets(api or {}):
+            tag = _facet_of(column) or ''
+            if column not in seen and tag not in MOUSE_ONLY_ALLOWED_TAGS and tag in registry:
+                findings.append(Finding(ERROR, 'facet_scope_mismatch',
+                                        f'{column} ({how}) is published in a mouse-only dataset; mouse-only datasets are '
+                                        f'not part of the facet layer (decision 2026-10-07): keep the column plain'))
+            seen.add(column)
+        return findings
+    if scope is None:
+        return []
     for column, how in _targets(api or {}):
         if column in seen:
             continue

@@ -577,7 +577,7 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
     facet_scope = aft.dataset_scope(entry, annotation, api_config)
     manifest['facet_scope'] = facet_scope
     # the modules tool has no pathology-adjusted age model and no app_nlgf timepoint / graft-line strata (gene tool only)
-    facets = [f for f in aft.facets_for_scope(facet_scope, facets) if f not in ('age_adjusted', 'app_nlgf')]
+    facets = [f for f in aft.facets_for_scope(facet_scope, facets) if f not in (*aft.SENSITIVITY_FACETS, 'app_nlgf')]
     manifest['facets_tested_in_scope'] = facets
     if all_donors and md_rule is None:
         manifest.update(status='skipped', reason='--all-donors: this dataset has no facet_donor_exclusions '
@@ -597,7 +597,7 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
         wanted = ['ant_donor', 'ant_donor_uid', 'ant_sex', 'ant_host_sex', 'ant_disease', 'ant_apoe',
                   'ant_apoe4_carrier', 'ant_apoe_carrier', 'ant_app_nlgf', 'ant_braak', 'ant_age', 'ant_pmi',
                   'ant_cell_type', 'ant_author_cell_type',
-                  'ant_tissue', 'ant_region', 'ant_author_cluster']
+                  'ant_tissue', 'tissue_uberon', 'ant_region', 'ant_author_cluster']
         extra = [c for c in cat_columns if (aft.CELLTYPE_CANDIDATE_RE.match(c) or aft.BATCH_NAME_RE.search(c))
                  and not c.startswith('ant_')]
         exclusion_columns = [c for c in (exclusion_rule.obs_columns if exclusion_rule else [])
@@ -766,6 +766,7 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
                 n_distinct=job['level_counts'].get('n_distinct') if numeric_facet else None)
             record.update(analysis_level=level['analysis_level'], analysis_level_label=level['label'],
                           analysis_level_reason=level['reason'])
+            below_floor = level['analysis_level'] == aft.replicates.LEVEL_BELOW_FLOOR
             design = job['design'].reset_index(drop=True)
             record['donor_key_digests'] = sorted({
                 aft.key_digest(donor_key_of.get(str(donor), f'{entry.group_id}:{donor}'))
@@ -777,7 +778,7 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
             composition_p = aft.composition_test(proportions, design.set_index('donor'), job['facet'])
             unit_key = (entry.db_id, job['stratum'], job['facet'])
             record.update(
-                n_lt5=bool(job['n_lt5']), small_sample=bool(job['n_lt5']), descriptive_only=False,
+                n_lt5=bool(job['n_lt5']), small_sample=bool(job['n_lt5']), descriptive_only=below_floor,
                 batch_used=job['batch_used'], batch_confounded=job['batch_confounded'],
                 covariates=job['covariates'], covariates_omitted=job['covariates_omitted'],
                 n_donors_analysed=job['n_donors_analysed'],
@@ -794,7 +795,7 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
                 for source in sorted(set(a_values.columns.get_level_values('source'))):
                     sub = a_values.loc[:, a_values.columns.get_level_values('source') == source]
                     try:
-                        a_frame = fit_modules(sub, design, job['batch_used'], False,
+                        a_frame = fit_modules(sub, design, job['batch_used'], below_floor,
                                               unit_key, n_permutations)
                     except ValueError as exc:
                         record[f'method_A_{source}_error'] = str(exc)
@@ -806,7 +807,7 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
             if scores_b is not None and len(scores_b.columns):
                 try:
                     b_frame = fit_modules(scores_b.reindex(sample_ids).reset_index(drop=True), design,
-                                          job['batch_used'], False, unit_key, n_permutations)
+                                          job['batch_used'], below_floor, unit_key, n_permutations)
                     b_frame['n_control_genes'] = [control_counts[job['stratum']].get(tuple(k)) for k in b_frame.index]
                     per_method[(METHOD_B, GENE_LIST_SOURCE)] = b_frame
                 except ValueError as exc:
@@ -854,7 +855,7 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
                 frame['n_donors'] = job['n_donors_analysed']
                 frame['n_lt5'] = bool(job['n_lt5'])
                 frame['small_sample'] = bool(job['n_lt5'])
-                frame['descriptive_only'] = False
+                frame['descriptive_only'] = below_floor
                 frame['facet_scope'] = facet_scope
                 frame['passes_effect_gate'] = frame['std_effect'].abs() >= EFFECT_GATE_STD
                 frame['batch_used'] = job['batch_used']
@@ -1219,7 +1220,7 @@ def build_parser() -> argparse.ArgumentParser:
     group = run.add_mutually_exclusive_group(required=True)
     group.add_argument('--db-id', help='comma-separated db_ids (e.g. G24/MMG)')
     group.add_argument('--all', action='store_true')
-    run.add_argument('--facets', default=','.join(f for f in aft.FACETS if f not in ('age_adjusted', 'app_nlgf')))
+    run.add_argument('--facets', default=','.join(f for f in aft.FACETS if f not in (*aft.SENSITIVITY_FACETS, 'app_nlgf')))
     run.add_argument('--sources', default=','.join(DEFAULT_SOURCES),
                      help='sidecar sources to test (geneset = scanpy score_genes, ucell = UCell); one BH family per source')
     run.add_argument('--geneset-store', default=None)

@@ -96,6 +96,22 @@ Facet engine v3b (same unreleased version, 2026-10-06, after the second-opinion 
 - limma: `voomWithQualityWeights` and `eBayes(robust = TRUE)`; the residual-df floor for covariates is 4. Tool version
   `ant-facet-test/3.1`.
 
+Facet engine v3c (same unreleased version, 2026-10-07):
+
+- **`mouse_in_vivo` is retired.** The scopes are `human_postmortem`, `xenograft_human_in_mouse`, `in_vitro`; pure mouse
+  datasets have no facet layer. `scope=mouse_in_vivo` is a 400. `app_nlgf` is a xenograft facet only (its default scope is
+  `xenograft_human_in_mouse`).
+- Units add `analysis_level` `below_floor` (descriptive) next to `replicate` and `cell`; rows and units add `n_small`;
+  `r_strong` / `replicated_strong` (tau 25 percent) next to `r_treat`; unit QC `lambda_gc`, `inflated`, `df_total_median`,
+  `notes`; new tested facets `braak_threshold`, `apoe4_dose` (registered under `braak` and `apoe4_carrier`).
+- Registry: `tissue` is a coarse facet with controlled values (21 group terms, `human_postmortem` only); `region` and
+  `author_cell_type` are deprecated; `host_genotype` is new; `lesion`, `ms_type`, `cause_of_death`, `ethnicity`,
+  `source_institution`, `technology`, `group` are deprecated entries. `ant_tissue` values change (umbrella terms); the
+  specific term is the plain column `tissue_uberon` (+ `tissue_uberon_id`). `ant_cell_type` is NULL for cells the authors left
+  unassigned or called doublets.
+- Datasets excluded from the facet layer (spatial, proteomics, metacell sets, Francken2026) have no results and no cohort rows.
+- The metadata cache version is 7.
+
 Clients to update: pyvark (`scope` on the facet calls, the new replication fields, `by_scope`), vark, the agent
 skills (facet and replication texts), the JupyterLite vendored client and the web UI (scope selector, effect gate,
 `small_sample` instead of descriptive-only for small cohorts, age and app_nlgf facet pages).

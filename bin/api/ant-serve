@@ -647,7 +647,7 @@ def _lineage_fields(file_metadata: Dict[str, Any], obs_categorical: List[str],
     are inferred (``lib/replicates.py``); ``replicate_basis`` says which
     (``declared`` or ``inferred``). ``disease_basis`` is the ``.md`` key
     (nia_reagan, braak_cerad, adnc, clinical_dx, author_dx) or None.
-    ``facet_scope`` (``lib/facet_scopes.py``: human_postmortem, mouse_in_vivo,
+    ``facet_scope`` (``lib/facet_scopes.py``: human_postmortem,
     xenograft_human_in_mouse, in_vitro, or None) is derived from the resolved
     ``.h5ad.mus`` annotation and the published ``ant_*`` columns.
     """
@@ -12890,7 +12890,7 @@ def get_module_variability(
     limit: int = Query(500, ge=1, le=100000, description="Max rows returned."),
     format: str = Query("json", pattern="^(json|csv|tsv)$"),
     exclude_secondary: bool = Query(True, description="Leave out rows of secondary datasets (is_secondary: true) unless `dataset` names one."),
-    scope: Optional[str] = Query(None, description="Facet scope (human_postmortem | mouse_in_vivo | xenograft_human_in_mouse | in_vitro): keep only the rows of the datasets in that scope. Default: every scope (rows are per dataset, never pooled)."),
+    scope: Optional[str] = Query(None, description="Facet scope (human_postmortem | xenograft_human_in_mouse | in_vitro): keep only the rows of the datasets in that scope. Default: every scope (rows are per dataset, never pooled)."),
 ):
     """Per-(dataset × source × catalog × module × tag × statistic) statistics.
 
@@ -13096,10 +13096,10 @@ def _facet_scope_of(db_id: Optional[str]) -> Optional[str]:
     return (registry.metadata_cache.get(db_id) or {}).get('facet_scope', facet_scopes_lib.DEFAULT_SCOPE)
 
 
-_SCOPE_QUERY_DESC = ("Facet scope: human_postmortem | mouse_in_vivo | xenograft_human_in_mouse | in_vitro. Facets are "
+_SCOPE_QUERY_DESC = ("Facet scope: human_postmortem | xenograft_human_in_mouse | in_vitro. Facets are "
                      "tested, counted and replicated per scope; scopes and their genes are never merged. Default: "
                      "human_postmortem (backwards compatible), or the facet's first scope when it is not allowed there "
-                     "(app_nlgf: mouse_in_vivo). The response lists `scopes` that have results.")
+                     "(app_nlgf: xenograft_human_in_mouse). The response lists `scopes` that have results.")
 
 
 def _is_facet_column(name: str) -> bool:

@@ -8,12 +8,17 @@ the `.h5ad`).
 | `ant-score` | Scanpy module scores from the **genesetstore** (`data/genesetstore/`) → one numerical obs column per geneset. Default: writes to duckdb via `AnnotationWriter`. `--rebuild` does the legacy h5ad rewrite. |
 | `ant-starcat` | Project a dataset onto the `MICROGLIA_V1` starCAT catalog → 43 `starcat__MICROGLIA_V1__*` obs columns. Human-only; needs raw integer counts (not SCT). |
 | `ant-annotate` | Load obs columns from a TSV. `status` shows what's pending, `rollback --run-id` reverts a batch. |
-| `ant-facet-test` | Replicate-level facet tests (sex, AD vs control, APOE e4, Braak, age per decade, App NL-G-F vs control) by pseudobulk limma-voom per cell type and facet scope (human post-mortem, mouse in vivo, human xenograft in mouse); exploratory. Output only under `<h5adstore>/_facet_tests/`. See `doc/DESIGN_facet_testing.md`. |
+| `ant-facet-test` | Replicate-level facet tests (sex, AD vs control, APOE e4, Braak, age per decade, App NL-G-F vs control) by pseudobulk limma-voom per cell type and facet scope (human post-mortem, human xenograft in mouse; pure mouse datasets have no facet layer); exploratory. Output only under `<h5adstore>/_facet_tests/`. See `doc/DESIGN_facet_testing.md`. |
 | `ant-facet-test-modules` | Same facets for module scores: donor means of the `.scores.parquet` scores (variant A) and pseudobulk background-matched scores (variant B, needs counts), OLS + 10,000-shuffle permutation p (default), BH per (dataset, stratum, facet, method). |
 | `ant-derive-disease` | The common pathology-based `ant_disease` (Braak x CERAD 2x2, `disease_basis: braak_cerad`): writes the stored column `disease_braak_cerad` for SEA-AD, ROSMAP, MADRC WA4 and Prater (table `DERIVATIONS`), edits the `.md` (verified text edit: rename to `ant_disease`, `disease_derivation`, notes, version bump) and sets `disease_basis: author_dx` on the other datasets. `plan` shows counts. After `apply`: `bin/ops/ant-rebuild-obs-views --only <db_id>`, then `ant-sync push`. Needs `ANTHIVE_H5ADSTORE` / `ANTHIVE_CONFIG` when run from a worktree (the view rebuild resolves the crosswalk join through the configured store). |
 | `ant-suggest-tops` | Walk all `.md` files and propose `top_genes` / `top_cat` / `top_num` from curated marker panels + the cell's actual obs/var. See the script's docstring for the panels. |
 
 Facet engine v3b (2026-10-06, review): the effect gate is a separate field (at least 2 cohorts with log2FC >= tau), `r_treat` is the second tier, units carry lambda / inflated / notes / covariates_dropped / sex-discordance, `age` and `age_adjusted` run side by side (age floor 60), `app_nlgf` is stratified by timepoint and graft line from the `.md` (`control_basis`, `app_nlgf_design`), limma uses quality weights and robust eBayes, residual df floor 4.
+
+Facet engine v3c (2026-10-07): `dataset_eligibility` also refuses datasets excluded from the facet layer
+(`facet_scopes.facet_exclusion_reason`: spatial or mass spectrometry technology, `facet_exclude: true` in the `.md`); `n_tissues` counts
+`ant_tissue`, `tissue_uberon` and `ant_region`; `ant_tissue` is a coarse facet (`lib/tissue_groups.yaml`). See the v3c section of
+`doc/DESIGN_facet_testing.md`.
 
 Facet engine v3 (2026-10-06, `doc/DESIGN_facet_testing.md`): datasets run in their facet scope (`lib/facet_scopes.py`; manifests
 and result rows carry `facet_scope`; a facet is only tested where its registry `facet_scopes` allow it), eligibility is the

@@ -37,6 +37,9 @@ suppressPackageStartupMessages({
 args <- commandArgs(trailingOnly = TRUE)
 work_dir <- args[1]
 set.seed(as.integer(args[2]))
+# optional 3rd argument: label-permutation null shuffles for units with fewer than null_max_samples samples
+null_permutations <- if (length(args) >= 3) as.integer(args[3]) else 0L
+null_max_samples <- 40L
 
 counts_long <- fread(file.path(work_dir, "counts_long.csv"))
 jobs <- fread(file.path(work_dir, "jobs.csv"))
@@ -50,7 +53,9 @@ for (job_index in seq_len(nrow(jobs))) {
   current_job <- jobs$job_id[job_index]
   job_samples <- samples[samples$job_id == current_job]
   summary_row <- data.table(job_id = current_job, status = "ok", n_genes_input = 0L,
-                            n_genes_tested = 0L, n_samples = nrow(job_samples))
+                            n_genes_tested = 0L, n_samples = nrow(job_samples),
+                            null_permutations = NA_integer_, null_lambda_median = NA_real_,
+                            null_hits_mean = NA_real_, null_hits_max = NA_real_)
   tryCatch({
     sample_ids <- job_samples$sample_idx
     job_counts <- counts_long[counts_long$sample_idx %in% sample_ids]
@@ -86,6 +91,9 @@ for (job_index in seq_len(nrow(jobs))) {
     tau <- if ("tau" %in% names(jobs)) jobs$tau[job_index] else 0
     treat_fit <- treat(linear_fit, lfc = tau, robust = TRUE)
     p_treat <- treat_fit$p.value[, "facet_value"]
+    # strong tier: H0 |logFC| <= tau_strong (log2(1.25) scaled like tau)
+    tau_strong <- if ("tau_strong" %in% names(jobs)) jobs$tau_strong[job_index] else tau
+    p_treat_strong <- treat(linear_fit, lfc = tau_strong, robust = TRUE)$p.value[, "facet_value"]
     standard_error <- sqrt(fit$s2.post) * fit$stdev.unscaled[, "facet_value"]
     tail_quantile <- qt(0.975, fit$df.total)
     log_fc <- fit$coefficients[, "facet_value"]
@@ -97,8 +105,29 @@ for (job_index in seq_len(nrow(jobs))) {
       ci_high = log_fc + tail_quantile * standard_error, t = t_statistic,
       p_value = p_value, q_value = p.adjust(p_value, method = "BH"),
       p_treat = p_treat, q_treat = p.adjust(p_treat, method = "BH"),
+      p_treat_strong = p_treat_strong, q_treat_strong = p.adjust(p_treat_strong, method = "BH"),
       ave_expr = fit$Amean, df_total = fit$df.total)
     summary_row$n_genes_tested <- nrow(fit)
+    # label-permutation null (small units only): the same pipeline on shuffled facet values, covariates fixed
+    if (null_permutations > 0 && nrow(design) < null_max_samples) {
+      null_lambdas <- numeric(0); null_hits <- numeric(0)
+      for (shuffle in seq_len(null_permutations)) {
+        shuffled <- design_frame
+        shuffled$facet_value <- sample(shuffled$facet_value)
+        null_design <- model.matrix(~ ., data = shuffled)
+        if (qr(null_design)$rank < ncol(null_design)) next
+        null_fit <- eBayes(lmFit(voomWithQualityWeights(dge, null_design, plot = FALSE), null_design), robust = TRUE)
+        null_p <- null_fit$p.value[, "facet_value"]
+        null_lambdas <- c(null_lambdas, median(qchisq(pmax(null_p, 1e-300), 1, lower.tail = FALSE)) / 0.4549364)
+        null_hits <- c(null_hits, sum(p.adjust(null_p, method = "BH") < 0.05))
+      }
+      if (length(null_hits)) {
+        summary_row$null_permutations <- length(null_hits)
+        summary_row$null_lambda_median <- median(null_lambdas)
+        summary_row$null_hits_mean <- mean(null_hits)
+        summary_row$null_hits_max <- max(null_hits)
+      }
+    }
   }, error = function(error_condition) {
     summary_row$status <<- conditionMessage(error_condition)
   })

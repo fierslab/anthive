@@ -166,16 +166,16 @@ def results(tmp_path: Path) -> Path:
     group4 = root / 'M1'
     group4.mkdir()
     rows4 = (_gene_rows('M1/mus', 'sex', 'microglial cell', {'Xist': (-8.0, 1e-12)}, genes=MOUSE_GENES,
-                        scope='mouse_in_vivo')
+                        scope='xenograft_human_in_mouse')
              + _gene_rows('M1/mus', 'app_nlgf', 'microglial cell', {'Trem2': (1.2, 1e-5), 'Cd9': (0.9, 0.001)},
-                          levels=('control', 'nlgf'), donors=(5, 5), genes=MOUSE_GENES, scope='mouse_in_vivo'))
+                          levels=('control', 'nlgf'), donors=(5, 5), genes=MOUSE_GENES, scope='xenograft_human_in_mouse'))
     pd.DataFrame(rows4).to_parquet(group4 / 'mus.facet_tests.parquet')
     manifest4 = _gene_manifest('M1/mus', 'M1', 'ds4', [
-        _unit('sex', 'microglial cell', facet_scope='mouse_in_vivo'),
-        _unit('app_nlgf', 'microglial cell', facet_scope='mouse_in_vivo', n_lt5=True, small_sample=True,
+        _unit('sex', 'microglial cell', facet_scope='xenograft_human_in_mouse'),
+        _unit('app_nlgf', 'microglial cell', facet_scope='xenograft_human_in_mouse', n_lt5=True, small_sample=True,
               descriptive_only=False, level_counts={'control': 5, 'nlgf': 5}, covariates=['sex'],
               n_donors_analysed=10)])
-    manifest4.update(tool='ant-facet-test/3.0', facet_scope='mouse_in_vivo', replicate_unit='animal',
+    manifest4.update(tool='ant-facet-test/3.0', facet_scope='xenograft_human_in_mouse', replicate_unit='animal',
                      replicate_column='mouse_id')
     (group4 / 'mus.facet_run_manifest.json').write_text(json.dumps(manifest4))
     (root / 'run_2026-10-04.log').write_text('[skip] G3/ds3: no raw counts layer served\n[done] G1/ds1: 2/3 units\n')
@@ -563,7 +563,7 @@ def test_overview_rows_carry_not_counted_reason(results):
     assert by_id['G2/ds2']['counted'] is False
     descriptive = reader.facet_overview('sex', DATASETS)['rows']
     assert {row['db_id']: row['not_counted_reason'] for row in descriptive} == {
-        'G1/ds1': None, 'G2/ds2': 'descriptive only (a level has too few donors)'}
+        'G1/ds1': None, 'G2/ds2': 'descriptive only (below the p-value floor of its replicate unit)'}
     cohort_table = results / fr.COHORT_TABLE_NAME
     cohort_table.write_text('\n'.join(line for line in cohort_table.read_text().splitlines()
                                        if '\tG1/ds1\t' not in line) + '\n')
@@ -641,7 +641,7 @@ class _FakeRegistry:
         self._db_extra = {}
         self.metadata_cache = {'G1/ds1': {'title': 'Dataset one', 'sha256': 'abc123'},
                                'G2/ds2': {'title': 'Dataset two'},
-                               'M1/mus': {'title': 'Mouse dataset', 'facet_scope': 'mouse_in_vivo'}}
+                               'M1/mus': {'title': 'Mouse dataset', 'facet_scope': 'xenograft_human_in_mouse'}}
 
 
 @pytest.fixture
@@ -735,10 +735,11 @@ def test_endpoint_across_datasets_and_effects(serve):
     top = serve.get('/facets/ant_braak/effects/top', params={'n': 5}).json()
     assert top['rows'][0]['gene'] == 'PTPRG'
     allf = serve.get('/genes/PTPRG/facet-effects').json()
-    assert set(allf['facets']) == {'sex', 'disease', 'apoe4_carrier', 'braak', 'age', 'age_adjusted', 'app_nlgf'}
-    assert allf['scope'] is None and set(allf['by_scope']) == {'human_postmortem', 'mouse_in_vivo'}
+    assert set(allf['facets']) == {'sex', 'disease', 'apoe4_carrier', 'apoe4_dose', 'braak', 'braak_threshold', 'age',
+                                   'age_adjusted', 'app_nlgf'}
+    assert allf['scope'] is None and set(allf['by_scope']) == {'human_postmortem', 'xenograft_human_in_mouse'}
     assert serve.get('/facets/braak/effects', params={'gene': 'PTPRG', 'scope': 'nowhere'}).status_code == 400
-    assert serve.get('/facets/braak/effects', params={'gene': 'PTPRG', 'scope': 'mouse_in_vivo'}).json()['units'] == []
+    assert serve.get('/facets/braak/effects', params={'gene': 'PTPRG', 'scope': 'xenograft_human_in_mouse'}).json()['units'] == []
     cohorts = serve.get('/facets/cohorts').json()
     assert cohorts['status'] == 'DRAFT' and cohorts['n_datasets'] == 4
     assert all('role_internal' not in record for record in cohorts['datasets'])
@@ -837,13 +838,13 @@ MOUSE_DATASETS = [{'db_id': 'M1/mus', 'group_folder': 'M1', 'stem': 'mus', 'titl
 def test_every_dataset_has_one_scope_and_scopes_are_listed(results):
     reader = fr.FacetResults(results)
     assert reader.dataset_scope(DATASETS[0]) == 'human_postmortem'          # run before v3: human
-    assert reader.dataset_scope(MOUSE_DATASETS[0]) == 'mouse_in_vivo'       # from the manifest
+    assert reader.dataset_scope(MOUSE_DATASETS[0]) == 'xenograft_human_in_mouse'       # from the manifest
     assert reader.dataset_scope({**DATASETS[2], 'facet_scope': 'in_vitro'}) == 'in_vitro'
-    assert reader.scopes_with_results('sex', DATASETS + MOUSE_DATASETS) == ['human_postmortem', 'mouse_in_vivo']
-    assert reader.scopes_with_results('app_nlgf', DATASETS + MOUSE_DATASETS) == ['mouse_in_vivo']
-    assert reader.default_scope('braak') == 'human_postmortem' and reader.default_scope('app_nlgf') == 'mouse_in_vivo'
+    assert reader.scopes_with_results('sex', DATASETS + MOUSE_DATASETS) == ['human_postmortem', 'xenograft_human_in_mouse']
+    assert reader.scopes_with_results('app_nlgf', DATASETS + MOUSE_DATASETS) == ['xenograft_human_in_mouse']
+    assert reader.default_scope('braak') == 'human_postmortem' and reader.default_scope('app_nlgf') == 'xenograft_human_in_mouse'
     summary = reader.summary('M1/mus', 'M1', 'mus')
-    assert summary['facet_scope'] == 'mouse_in_vivo' and {u['facet_scope'] for u in summary['units']} == {'mouse_in_vivo'}
+    assert summary['facet_scope'] == 'xenograft_human_in_mouse' and {u['facet_scope'] for u in summary['units']} == {'xenograft_human_in_mouse'}
     nlgf = next(u for u in summary['units'] if u['facet'] == 'app_nlgf')
     assert nlgf['flags']['small_sample'] is True and nlgf['flags']['descriptive_only'] is False
 
@@ -853,14 +854,14 @@ def test_gene_effects_are_per_scope_and_genes_are_not_merged(results):
     everything = DATASETS + MOUSE_DATASETS
     human = reader.gene_effects('sex', 'xist', everything)
     assert human['scope'] == 'human_postmortem' and {u['db_id'] for u in human['units']} == {'G1/ds1', 'G2/ds2'}
-    assert human['scopes'] == ['human_postmortem', 'mouse_in_vivo']
-    mouse = reader.gene_effects('sex', 'XIST', everything, scope='mouse_in_vivo')
+    assert human['scopes'] == ['human_postmortem', 'xenograft_human_in_mouse']
+    mouse = reader.gene_effects('sex', 'XIST', everything, scope='xenograft_human_in_mouse')
     assert {u['db_id'] for u in mouse['units']} == {'M1/mus'} and mouse['units'][0]['gene'] == 'Xist'
-    assert mouse['units'][0]['facet_scope'] == 'mouse_in_vivo'
+    assert mouse['units'][0]['facet_scope'] == 'xenograft_human_in_mouse'
     # the mouse symbol is not found through a human-only question and the human cohorts do not leak in
     assert reader.gene_effects('sex', 'Trem2', everything)['units'] == []
     nlgf = reader.gene_effects('app_nlgf', 'Trem2', everything)
-    assert nlgf['scope'] == 'mouse_in_vivo' and [u['db_id'] for u in nlgf['units']] == ['M1/mus']
+    assert nlgf['scope'] == 'xenograft_human_in_mouse' and [u['db_id'] for u in nlgf['units']] == ['M1/mus']
     assert nlgf['units'][0]['contrast'] if 'contrast' in nlgf['units'][0] else True
 
 
@@ -869,12 +870,12 @@ def test_overview_and_recurring_genes_are_per_scope(results):
     everything = DATASETS + MOUSE_DATASETS
     human = reader.facet_overview('sex', everything)
     assert human['scope'] == 'human_postmortem' and {r['db_id'] for r in human['rows']} == {'G1/ds1', 'G2/ds2'}
-    mouse = reader.facet_overview('sex', everything, scope='mouse_in_vivo')
-    assert {r['db_id'] for r in mouse['rows']} == {'M1/mus'} and mouse['rows'][0]['facet_scope'] == 'mouse_in_vivo'
+    mouse = reader.facet_overview('sex', everything, scope='xenograft_human_in_mouse')
+    assert {r['db_id'] for r in mouse['rows']} == {'M1/mus'} and mouse['rows'][0]['facet_scope'] == 'xenograft_human_in_mouse'
     both = reader.facet_overview('sex', everything, scope='all')
-    assert {r['facet_scope'] for r in both['rows']} == {'human_postmortem', 'mouse_in_vivo'}
+    assert {r['facet_scope'] for r in both['rows']} == {'human_postmortem', 'xenograft_human_in_mouse'}
     top = reader.recurring_genes('app_nlgf', everything)
-    assert top['scope'] == 'mouse_in_vivo' and top['scopes'] == ['mouse_in_vivo']
+    assert top['scope'] == 'xenograft_human_in_mouse' and top['scopes'] == ['xenograft_human_in_mouse']
     assert top['cohorts_in_cell_type'] == 1 and top['rows'] == []       # one cohort: nothing can replicate
 
 
@@ -941,21 +942,21 @@ def test_discordant_cohorts_do_not_replicate_and_the_badge_wording():
 
 def test_scope_parameter_on_the_endpoints(serve):
     default = serve.get('/facets/ant_sex/tests').json()
-    assert default['scope'] == 'human_postmortem' and default['scopes'] == ['human_postmortem', 'mouse_in_vivo']
+    assert default['scope'] == 'human_postmortem' and default['scopes'] == ['human_postmortem', 'xenograft_human_in_mouse']
     assert {r['db_id'] for r in default['rows']} <= {'G1/ds1', 'G2/ds2'}
-    mouse = serve.get('/facets/ant_sex/tests', params={'scope': 'mouse_in_vivo'}).json()
+    mouse = serve.get('/facets/ant_sex/tests', params={'scope': 'xenograft_human_in_mouse'}).json()
     assert {r['db_id'] for r in mouse['rows']} == {'M1/mus'}
     both = serve.get('/facets/ant_sex/tests', params={'scope': 'all'}).json()
-    assert {r['facet_scope'] for r in both['rows']} == {'human_postmortem', 'mouse_in_vivo'}
+    assert {r['facet_scope'] for r in both['rows']} == {'human_postmortem', 'xenograft_human_in_mouse'}
     card = serve.get('/facets/app_nlgf/effects', params={'gene': 'Trem2'}).json()
-    assert card['scope'] == 'mouse_in_vivo' and [u['db_id'] for u in card['units']] == ['M1/mus']
-    assert serve.get('/facets/ant_app_nlgf/effects/top').json()['scope'] == 'mouse_in_vivo'
+    assert card['scope'] == 'xenograft_human_in_mouse' and [u['db_id'] for u in card['units']] == ['M1/mus']
+    assert serve.get('/facets/ant_app_nlgf/effects/top').json()['scope'] == 'xenograft_human_in_mouse'
     assert serve.get('/facets/sex/effects/top', params={'scope': 'xenograft_human_in_mouse'}).json()['rows'] == []
     assert serve.get('/facets/sex/effects', params={'gene': 'Xist', 'scope': 'bogus'}).status_code == 400
     assert serve.get('/facets/sex/tests', params={'scope': 'bogus'}).status_code == 400
     gene = serve.get('/genes/Trem2/facet-effects').json()
-    assert gene['facets']['app_nlgf']['scope'] == 'mouse_in_vivo' and gene['facets']['sex']['units'] == []
-    assert gene['by_scope']['mouse_in_vivo']['app_nlgf']['units'][0]['db_id'] == 'M1/mus'
+    assert gene['facets']['app_nlgf']['scope'] == 'xenograft_human_in_mouse' and gene['facets']['sex']['units'] == []
+    assert gene['by_scope']['xenograft_human_in_mouse']['app_nlgf']['units'][0]['db_id'] == 'M1/mus'
     human_only = serve.get('/genes/Trem2/facet-effects', params={'scope': 'human_postmortem'}).json()
     assert 'by_scope' not in human_only and human_only['scope'] == 'human_postmortem'
 

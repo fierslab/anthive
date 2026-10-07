@@ -473,7 +473,7 @@ def main() -> None:
             '  facet_top_genes  genes changing in the most independent cohorts, per cell type\n'
             '  facet_units      which units were tested, donors, model, flags; why others were not\n'
             '  get_facet_tests  gene or module rows of one dataset (limma-voom / OLS + permutations)\n'
-            '  All of them take scope= (human_postmortem | mouse_in_vivo | xenograft_human_in_mouse): facets are\n'
+            '  All of them take scope= (human_postmortem | xenograft_human_in_mouse): facets are\n'
             '  tested and counted per scope, human and mouse genes are never merged.\n'
             '  Prefer these over per-cell plots for donor-level facets, and state the model when reporting.\n'
             '\n'
@@ -1362,8 +1362,8 @@ def main() -> None:
         carrier vs non-carrier; braak = linear trend per Braak stage; age = linear
         trend per decade (model ~ age + sex + pmi [+ batch]; the age effect
         includes disease prevalence); app_nlgf = App NL-G-F knock-in vs control
-        (mouse in vivo and xenograft hosts; replicate = the animal). Each dataset
-        has one facet_scope (human_postmortem, mouse_in_vivo,
+        (xenograft hosts; replicate = the animal). Each dataset
+        has one facet_scope (human_postmortem,
         xenograft_human_in_mouse); a facet is only tested in the scopes the
         registry allows.
         Disease results are PROVISIONAL: what counts as control differs between
@@ -1527,7 +1527,7 @@ def main() -> None:
     _FACET_TOOL_RULES = (
         'Exploratory, replicate-level results (unit = donor, animal or sample; genes: limma-voom on pseudobulk). '
         'Datasets are tested separately, and facets are tested and counted per facet SCOPE (human_postmortem, '
-        'mouse_in_vivo, xenograft_human_in_mouse): scopes and their genes are never merged. Replication = '
+        'xenograft_human_in_mouse): scopes and their genes are never merged. Replication = '
         'partial-conjunction r-value < 0.05 (Benjamini and Heller 2008) on the ordinary one-sided limma p values: the '
         'effect is present in at least 2 cohorts in the same direction. Each cohort contributes ONE anchor unit per '
         'cell type group (a donor-pooled unit for multi-region cohorts such as MADRC and SEA-AD; other units are '
@@ -1592,7 +1592,7 @@ def main() -> None:
         has fewer than 5 replicates: tested and counted, low power);
         descriptive_only (not tested: no p, q, CI); composition (cell fraction in
         the stratum differs with the facet; the effect may reflect composition).
-        Scopes: human_postmortem, mouse_in_vivo, xenograft_human_in_mouse are
+        Scopes: human_postmortem, xenograft_human_in_mouse are
         never merged; a gene symbol is matched inside one scope only. For APOE, APOC1,
         APOC1P1, TOMM40, NECTIN2, PVRL2 the APOE-locus note applies.
 
@@ -1604,8 +1604,8 @@ def main() -> None:
             facet: sex, disease, apoe4_carrier, braak, age or app_nlgf; omit for all.
             cell_type: Restrict to one cell type group (e.g. 'microglia') or raw label (e.g. 'Mic P2RY12').
             exclude_secondary: Do not count reanalyses (default true).
-            scope: human_postmortem, mouse_in_vivo or xenograft_human_in_mouse. Default: human_postmortem
-                (for app_nlgf: mouse_in_vivo); the reply names the other scopes that have results.
+            scope: human_postmortem or xenograft_human_in_mouse. Default: human_postmortem
+                (for app_nlgf: xenograft_human_in_mouse); the reply names the other scopes that have results.
         """
         facets = [facet] if facet else ['sex', 'disease', 'apoe4_carrier', 'braak', 'age', 'app_nlgf']
         lines = [_FACET_TOOL_RULES]
@@ -1693,8 +1693,8 @@ def main() -> None:
             cell_type: Cell type group (e.g. 'microglia') or raw label; omit for the group with most cohorts (the reply lists the options).
             n: Rows (default 30, max 500).
             exclude_secondary: Do not count reanalyses (default true).
-            scope: human_postmortem, mouse_in_vivo or xenograft_human_in_mouse. Default: human_postmortem
-                (app_nlgf: mouse_in_vivo). Scopes are never merged.
+            scope: human_postmortem or xenograft_human_in_mouse. Default: human_postmortem
+                (app_nlgf: xenograft_human_in_mouse). Scopes are never merged.
         """
         try:
             data = await _get(f'/facets/{facet}/effects/top', cell_type=cell_type, n=max(1, min(int(n), 500)),
@@ -1747,7 +1747,7 @@ def main() -> None:
             db_id: Dataset id, e.g. 'G24/MMG'.
             facet: sex, disease, apoe4_carrier, braak, age or app_nlgf (used when db_id is not given).
             exclude_secondary: Reanalyses are listed but marked not counted (default true).
-            scope: human_postmortem, mouse_in_vivo, xenograft_human_in_mouse or all (used with facet).
+            scope: human_postmortem, xenograft_human_in_mouse or all (used with facet).
         """
         if db_id:
             return await get_facet_tests(db_id, facet=facet, level='summary')

@@ -367,15 +367,22 @@ def test_dataset_without_counts_runs_variant_a_only(tmp_path):
     assert plant['q_param'] < 0.05
 
 
-def test_small_units_are_tested_and_flagged_not_descriptive_only(tmp_path):
+def test_units_below_the_donor_p_floor_are_descriptive(tmp_path):
     store, geneset_root, entry = make_module_dataset(tmp_path, n_f=4, n_m=8)
     manifest, out_root = _run(tmp_path, entry, store, geneset_root)
     table = pd.read_parquet(out_root / 'Syn2026' / 'Syn_mod.facet_module_tests.parquet')
-    assert table['n_lt5'].all() and table['small_sample'].all() and not table['descriptive_only'].any()
+    assert table['n_lt5'].all() and table['small_sample'].all() and table['descriptive_only'].all()
     assert (table['facet_scope'] == 'human_postmortem').all() and manifest['facet_scope'] == 'human_postmortem'
     for column in ('p_param', 'q_param', 'p_perm', 'q_perm', 't', 'ci_low', 'ci_high'):
-        assert table[column].notna().all(), column
+        assert table[column].isna().all(), column
     assert table['estimate'].notna().all() and table['se'].notna().all()
+
+
+def test_units_at_the_donor_p_floor_report_p_values(tmp_path):
+    store, geneset_root, entry = make_module_dataset(tmp_path, n_f=5, n_m=8)
+    manifest, out_root = _run(tmp_path, entry, store, geneset_root)
+    table = pd.read_parquet(out_root / 'Syn2026' / 'Syn_mod.facet_module_tests.parquet')
+    assert not table['descriptive_only'].any() and table['p_param'].notna().all() and table['p_perm'].notna().all()
 
 
 def test_unsupported_datasets_are_skipped(tmp_path):

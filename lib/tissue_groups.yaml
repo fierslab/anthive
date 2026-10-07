@@ -1,0 +1,102 @@
+# Tissue groups for the ant_tissue facet (decision 2026-10-07, L37/L38).
+#
+# ant_tissue is a COARSE facet: every specific anatomical label of a dataset maps to one of the group terms below
+# (the keys of `groups`). The most specific UBERON label stays in the plain columns tissue_uberon (label) and
+# tissue_uberon_id; those two are never facets. A label belongs to exactly one group. Umbrella rules:
+#   prefrontal cortex  = dorsolateral prefrontal cortex (BA9/46), frontal pole (BA10), BA9, BA46, superior frontal gyrus
+#   cingulate cortex   = anterior cingulate cortex (kept apart from the prefrontal umbrella)
+#   frontal cortex     = frontal lobe or frontal cortex when the authors do not say which part
+#   cerebral cortex    = cortex without any lobe or area (a whole-cortex dissection or an unspecified sample)
+#   white matter       = every white matter label regardless of lobe (spinal cord white matter is spinal cord)
+#   basal ganglia      = striatum and caudate nucleus; midbrain = midbrain and substantia nigra
+# Xenograft, in vitro and organoid datasets have no tissue facet (decision L39). Ids come from the UBERON release
+# 2026-10-01; occipitotemporal cortex has no UBERON term (id null).
+version: 1
+groups:
+  prefrontal cortex:
+    - {label: "prefrontal cortex", uberon_id: "UBERON:0000451"}
+    - {label: "dorsolateral prefrontal cortex", uberon_id: "UBERON:0009834"}
+    - {label: "superior frontal gyrus", uberon_id: "UBERON:0002661"}
+    - {label: "frontal pole", uberon_id: "UBERON:0002795"}
+    - {label: "Brodmann (1909) area 10", uberon_id: "UBERON:0013541"}
+    - {label: "Brodmann (1909) area 9", uberon_id: "UBERON:0013540"}
+    - {label: "Brodmann (1909) area 46", uberon_id: "UBERON:0006483"}
+  cingulate cortex:
+    - {label: "anterior cingulate cortex", uberon_id: "UBERON:0009835"}
+    - {label: "cingulate cortex", uberon_id: "UBERON:0003027"}
+  frontal cortex:
+    - {label: "frontal cortex", uberon_id: "UBERON:0001870"}
+    - {label: "frontal lobe", uberon_id: "UBERON:0016525"}
+  motor cortex:
+    - {label: "motor cortex", uberon_id: null}
+    - {label: "primary motor cortex", uberon_id: "UBERON:0001384"}
+    - {label: "Brodmann (1909) area 4", uberon_id: "UBERON:0013535"}
+    - {label: "premotor cortex", uberon_id: "UBERON:0016634"}
+  temporal cortex:
+    - {label: "temporal cortex", uberon_id: "UBERON:0016538"}
+    - {label: "temporal lobe", uberon_id: "UBERON:0001871"}
+    - {label: "middle temporal gyrus", uberon_id: "UBERON:0002771"}
+    - {label: "inferior temporal gyrus", uberon_id: "UBERON:0002751"}
+  parietal cortex:
+    - {label: "parietal cortex", uberon_id: "UBERON:0016530"}
+    - {label: "parietal lobe", uberon_id: "UBERON:0001872"}
+    - {label: "angular gyrus", uberon_id: "UBERON:0002686"}
+    - {label: "precuneus", uberon_id: null}
+    - {label: "Brodmann (1909) area 7", uberon_id: "UBERON:0013538"}
+    - {label: "primary somatosensory cortex", uberon_id: "UBERON:0008933"}
+  occipital cortex:
+    - {label: "occipital cortex", uberon_id: "UBERON:0016540"}
+    - {label: "occipital lobe", uberon_id: "UBERON:0002021"}
+    - {label: "Brodmann (1909) area 17", uberon_id: "UBERON:8440010"}
+    - {label: "primary visual cortex", uberon_id: "UBERON:0002436"}
+    - {label: "visual cortex", uberon_id: "UBERON:0000411"}
+    - {label: "Brodmann (1909) area 18", uberon_id: "UBERON:0006473"}
+    - {label: "occipitotemporal cortex", uberon_id: null}
+  insular cortex:
+    - {label: "insular cortex", uberon_id: "UBERON:0034891"}
+    - {label: "insula", uberon_id: "UBERON:0002022"}
+  entorhinal cortex:
+    - {label: "entorhinal cortex", uberon_id: "UBERON:0002728"}
+  hippocampus:
+    - {label: "hippocampus", uberon_id: null}
+    - {label: "hippocampus proper", uberon_id: null}
+    - {label: "hippocampal formation", uberon_id: "UBERON:0002421"}
+  cerebral cortex:
+    - {label: "cerebral cortex", uberon_id: "UBERON:0000956"}
+    - {label: "cortex", uberon_id: "UBERON:0001851"}
+    - {label: "neocortex", uberon_id: "UBERON:0001950"}
+    - {label: "lobe of cerebral hemisphere", uberon_id: "UBERON:0016526"}
+    - {label: "cerebral hemisphere", uberon_id: "UBERON:0001869"}
+  white matter:
+    - {label: "white matter", uberon_id: "UBERON:0002316"}
+    - {label: "brain white matter", uberon_id: "UBERON:0003544"}
+    - {label: "white matter of frontal lobe", uberon_id: "UBERON:0016528"}
+    - {label: "white matter of parietal lobe", uberon_id: "UBERON:0016531"}
+    - {label: "white matter of temporal lobe", uberon_id: "UBERON:0016534"}
+    - {label: "white matter of occipital lobe", uberon_id: "UBERON:0016535"}
+    - {label: "white matter of cerebellum", uberon_id: "UBERON:0002317"}
+    - {label: "corpus callosum", uberon_id: "UBERON:0002336"}
+  basal ganglia:
+    - {label: "basal ganglia", uberon_id: null}
+    - {label: "striatum", uberon_id: "UBERON:0002435"}
+    - {label: "caudate nucleus", uberon_id: "UBERON:0001873"}
+  thalamus:
+    - {label: "thalamus", uberon_id: null}
+  midbrain:
+    - {label: "midbrain", uberon_id: "UBERON:0001891"}
+    - {label: "substantia nigra", uberon_id: "UBERON:0002038"}
+  cerebellum:
+    - {label: "cerebellum", uberon_id: "UBERON:0002037"}
+  brainstem:
+    - {label: "brainstem", uberon_id: "UBERON:0002298"}
+    - {label: "pons", uberon_id: "UBERON:0000988"}
+    - {label: "facial nucleus", uberon_id: "UBERON:0000127"}
+  hypothalamus:
+    - {label: "hypothalamus", uberon_id: "UBERON:0001898"}
+  spinal cord:
+    - {label: "spinal cord", uberon_id: "UBERON:0002240"}
+    - {label: "cervical spinal cord white matter", uberon_id: "UBERON:0014614"}
+  olfactory bulb:
+    - {label: "olfactory bulb", uberon_id: "UBERON:0002264"}
+  brain:
+    - {label: "brain", uberon_id: "UBERON:0000955"}

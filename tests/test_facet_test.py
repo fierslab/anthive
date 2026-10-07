@@ -415,17 +415,16 @@ def test_app_nlgf_plan_uses_host_sex_in_a_xenograft():
     expected = (table.set_index('donor')['host_sex'] == 'm').astype(float)
     assert (design.set_index('donor')['cov_sex'] == expected.reindex(design['donor']).to_numpy()).all()
     assert plan['level_counts'] == {'control': 4, 'nlgf': 4}
-    mouse = aft.plan_job(table, 'app_nlgf', table['donor'], scope='mouse_in_vivo')
+    mouse = aft.plan_job(table, 'app_nlgf', table['donor'], scope='human_postmortem')      # donor sex outside a xenograft
     donor_sex = (table.set_index('donor')['sex'] == 'm').astype(float)
     assert (mouse['design'].set_index('donor')['cov_sex'] == donor_sex.reindex(mouse['design']['donor']).to_numpy()).all()
 
 
 def test_facets_for_scope_follow_the_registry():
-    allowed = aft.facets_for_scope('mouse_in_vivo', aft.FACETS)
-    assert allowed == ['sex', 'app_nlgf']
+    assert aft.facets_for_scope('mouse_in_vivo', aft.FACETS) == []            # retired scope: no facet is allowed
     assert aft.facets_for_scope('xenograft_human_in_mouse', aft.FACETS) == ['sex', 'app_nlgf']
     assert aft.facets_for_scope('human_postmortem', aft.FACETS) == [
-        'sex', 'disease', 'apoe4_carrier', 'braak', 'age', 'age_adjusted']
+        'sex', 'disease', 'apoe4_carrier', 'apoe4_dose', 'braak', 'braak_threshold', 'age', 'age_adjusted']
     assert aft.normalize_app_nlgf('NLGF') == 'nlgf' and aft.normalize_app_nlgf('wt') is None
 
 
@@ -458,8 +457,9 @@ def test_in_vitro_and_bulk_excluded(tmp_path):
     assert not _eligibility(tmp_path / 'b', system='bulk_tissue')[0]
 
 
-def test_mouse_is_a_tested_scope_mixed_organism_and_secondary_are_not(tmp_path):
-    assert _eligibility(tmp_path / 'a', organism='mouse') == (True, 'ok')
+def test_mouse_only_mixed_organism_and_secondary_are_not_eligible(tmp_path):
+    eligible, reason = _eligibility(tmp_path / 'a', organism='mouse')
+    assert not eligible and 'mouse-only' in reason
     assert not _eligibility(tmp_path / 'b', organism='human,mouse')[0]
     assert not _eligibility(tmp_path / 'c', is_secondary=True)[0]
 
@@ -632,24 +632,36 @@ def test_unknown_exclusion_column_fails_loudly(tmp_path):
 
 
 @needs_r
-def test_small_units_are_tested_counted_and_flagged(tmp_path):
-    # 3 AD vs 12 control donors: tested (>= 3 per level), flagged small_sample, p and q present, not descriptive only
+def test_units_below_the_p_floor_are_fitted_but_report_estimates_only(tmp_path):
+    # 3 AD vs 12 control donors: fitted (3 per level is the minimum) but below the donor floor of 5 per level
     pattern = ','.join(['AD'] * 3 + ['control'] * 12)
     store, entry = make_dataset(tmp_path, n_f=8, n_m=7, disease_pattern=pattern)
     out_root = tmp_path / 'out'
-    manifest = aft.process_dataset(entry, store, out_root, ['disease'], RSCRIPT, threads=1,
-                                   memory_limit_gb=1)
+    manifest = aft.process_dataset(entry, store, out_root, ['disease'], RSCRIPT, threads=1, memory_limit_gb=1)
     table = pd.read_parquet(out_root / 'Syn2026' / 'Syn_ds.facet_tests.parquet')
     disease = table[table['facet'] == 'disease']
-    assert len(disease) > 0
-    assert disease['n_lt5'].all() and disease['small_sample'].all() and not disease['descriptive_only'].any()
-    for column in ('p_value', 'q_value', 'ci_low', 'ci_high', 't', 'p_treat', 'q_treat'):
-        assert disease[column].notna().any()
-    assert (disease['facet_scope'] == 'human_postmortem').all()
-    assert disease['provisional'].all()
+    assert len(disease) > 0 and disease['descriptive_only'].all() and disease['small_sample'].all()
+    for column in ('p_value', 'q_value', 'ci_low', 'ci_high', 't', 'p_treat', 'q_treat', 'p_treat_strong'):
+        assert disease[column].isna().all(), column
+    assert disease['logFC'].notna().all() and disease['se'].notna().all()
     unit = [u for u in manifest['units'] if u['facet'] == 'disease'][0]
-    assert unit['n_lt5'] is True and unit['small_sample'] is True and unit['descriptive_only'] is False
-    assert 'n_sig_q05' in unit and manifest['facet_scope'] == 'human_postmortem'
+    assert unit['descriptive_only'] is True and unit['analysis_level'] == 'below_floor'
+    assert unit['analysis_level_label'] == 'descriptive (below the p-value floor)' and 'n_sig_q05' not in unit
+    assert unit['lambda_gc'] is not None                                  # a diagnostic, still computed
+
+
+@needs_r
+def test_units_at_the_p_floor_report_p_values_and_the_strong_tier(tmp_path):
+    pattern = ','.join(['AD'] * 5 + ['control'] * 10)
+    store, entry = make_dataset(tmp_path, n_f=8, n_m=7, disease_pattern=pattern)
+    out_root = tmp_path / 'out'
+    manifest = aft.process_dataset(entry, store, out_root, ['disease'], RSCRIPT, threads=1, memory_limit_gb=1)
+    table = pd.read_parquet(out_root / 'Syn2026' / 'Syn_ds.facet_tests.parquet')
+    disease = table[table['facet'] == 'disease']
+    assert not disease['descriptive_only'].any() and disease['p_value'].notna().any()
+    assert disease['p_treat_strong'].notna().any() and (disease['p_treat_strong'] >= disease['p_treat'] - 1e-12).all()
+    unit = [u for u in manifest['units'] if u['facet'] == 'disease'][0]
+    assert unit['analysis_level'] == 'replicate' and unit['small_sample'] is False and manifest['facet_scope'] == 'human_postmortem'
 
 
 def test_choose_strata_rules():

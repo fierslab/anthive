@@ -21,7 +21,7 @@ size), so a rewritten file is picked up on the next request.
 
 The design and the statistics are described in ``doc/DESIGN_facet_testing.md``.
 Everything here is exploratory output. Since v3 (2026-10-06) every cross-dataset view is per facet scope
-(``lib/facet_scopes.py``: human post-mortem, mouse in vivo, human cells xenografted into mouse): the ``scope``
+(``lib/facet_scopes.py``: human post-mortem, human cells xenografted into mouse): the ``scope``
 argument selects one, the default is ``FacetResults.default_scope(facet)``, and genes are never matched across scopes.
 
 Nothing here talks to HTTP; ant-serve wraps it (``/databases/{id}/facet-tests``).
@@ -71,7 +71,8 @@ SUPPLEMENTARY_DIRNAME = 'supplementary_all_donors'
 POOLED_DIRNAME = '_pooled'
 POOL_PREFIX = 'pool:'
 
-FACET_ORDER = ('sex', 'disease', 'apoe4_carrier', 'braak', 'age', 'age_adjusted', 'app_nlgf')
+FACET_ORDER = ('sex', 'disease', 'apoe4_carrier', 'apoe4_dose', 'braak', 'braak_threshold', 'age', 'age_adjusted',
+               'app_nlgf')
 METHOD_ORDER = (('cell_mean', 'geneset'), ('cell_mean', 'ucell'), ('pseudobulk', 'gene_list'))
 
 # Columns returned per gene row and per module row (only those present in the
@@ -174,7 +175,7 @@ REPLICATION_DEFINITION = (
     'nia_reagan, braak_cerad or adnc); clinical or author diagnoses are listed but not counted. Cohorts whose donor '
     'independence was never checked (independence: unknown) are counted and flagged (overlap_unknown). Cell type '
     'labels are counted by their group (lib/celltype_groups.yaml; unmapped labels never count). Facets are tested and '
-    'counted per facet scope (human post-mortem, mouse in vivo, human cells xenografted into mouse); scopes and '
+    'counted per facet scope (human post-mortem, human cells xenografted into mouse); scopes and '
     'their genes are never merged.'
 )
 
@@ -243,7 +244,7 @@ def _not_counted_reason(record: Dict[str, Any]) -> Optional[str]:
     if record.get('excluded_secondary'):
         return 'secondary dataset (reanalysis)'
     if record.get('descriptive_only'):
-        return 'descriptive only (a level has too few donors)'
+        return 'descriptive only (below the p-value floor of its replicate unit)'
     if not record.get('cohort') or (isinstance(record.get('cohort'), float) and math.isnan(record['cohort'])):
         return 'dataset not in the cohort table'
     if record.get('exclusion_missing'):
@@ -286,6 +287,10 @@ FACET_INFO = {
     'age': {'contrast': 'age, not adjusted for pathology: linear trend per decade (re-detects AD pathology: read '
                         'next to the pathology-adjusted model)',
             'effect_unit': 'log2 fold change per decade of age', 'provisional': False},
+    'apoe4_dose': {'contrast': 'linear trend per APOE e4 allele (0, 1, 2 alleles; a sensitivity analysis of the carrier contrast)',
+                   'effect_unit': 'log2 fold change per e4 allele', 'provisional': False},
+    'braak_threshold': {'contrast': 'Braak stage III or higher vs II or lower (a sensitivity analysis of the linear trend)',
+                        'effect_unit': 'log2 fold change, high minus low Braak', 'provisional': False},
     'age_adjusted': {'contrast': 'age, adjusted for pathology (Braak, else pathologic AD): linear trend per decade',
                      'effect_unit': 'log2 fold change per decade of age', 'provisional': False},
     'app_nlgf': {'contrast': 'App NL-G-F knock-in vs control',
@@ -1267,13 +1272,13 @@ class FacetResults:
                 available = set(pq.read_schema(paths['genes']).names)
                 wanted = [c for c in ('facet', 'cell_type', 'celltype_source', 'gene', 'logFC', 'ci_low',
                                       'ci_high', 'p_value', 'q_value', 'p_treat', 'q_treat',
-                                      'persists_after_pathology_adjustment') if c in available]
+                                      'persists_after_pathology_adjustment', 'p_treat_strong') if c in available]
                 frame = _rename_deprecated_facets(pd.read_parquet(
                     paths['genes'], columns=wanted, filters=[('facet', 'in', _stored_facet_names(facet))]))
             except Exception as exc:
                 log.warning('facet results: cannot read %s: %s', paths['genes'], exc)
                 continue
-            for column in ('p_value', 'p_treat', 'q_treat', 'persists_after_pathology_adjustment'):
+            for column in ('p_value', 'p_treat', 'q_treat', 'persists_after_pathology_adjustment', 'p_treat_strong'):
                 if column not in frame.columns:
                     frame[column] = np.nan
             cohort = summary.get('cohort') or cohorts.get(dataset['db_id']) or {}
@@ -1313,6 +1318,7 @@ class FacetResults:
                     'ci_high': pd.to_numeric(group['ci_high'], errors='coerce').astype('float32'),
                     'p_value': pd.to_numeric(group['p_value'], errors='coerce').astype('float64'),
                     'q_value': pd.to_numeric(group['q_value'], errors='coerce').astype('float64'),
+                    'p_treat_strong': pd.to_numeric(group['p_treat_strong'], errors='coerce').astype('float64'),
                     'persists_after_pathology_adjustment': pd.to_numeric(
                         group['persists_after_pathology_adjustment'], errors='coerce').astype('float32'),
                     'p_treat': pd.to_numeric(group['p_treat'], errors='coerce').astype('float64'),
@@ -1332,6 +1338,7 @@ class FacetResults:
             rows = pd.DataFrame({'unit': pd.Series(dtype='int32'), 'gene': pd.Series(dtype='category'),
                                  'logFC': pd.Series(dtype='float32'), 'ci_low': pd.Series(dtype='float32'),
                                  'ci_high': pd.Series(dtype='float32'), 'p_value': pd.Series(dtype='float64'),
+                                 'p_treat_strong': pd.Series(dtype='float64'),
                                  'persists_after_pathology_adjustment': pd.Series(dtype='float32'),
                                  'q_value': pd.Series(dtype='float64'),
                                  'p_treat': pd.Series(dtype='float64'), 'q_treat': pd.Series(dtype='float64'),
@@ -1489,18 +1496,21 @@ class FacetResults:
             eligible.get('cohort_label', eligible['cohort']), eligible.get('overlap_unknown', [False] * len(eligible)))
             if flag}) if len(eligible) else []
         label_of = dict(zip(eligible['cohort'], eligible.get('cohort_label', eligible['cohort']))) if len(eligible) else {}
+        n_small = int((pd.to_numeric(eligible['n_donors'], errors='coerce')
+                       < facet_rules.SMALL_COHORT_REPLICATES).sum()) if len(eligible) and 'n_donors' in eligible else 0
 
         def labels(cohorts: Any) -> List[str]:
             return [str(label_of.get(c) or c) for c in (cohorts if isinstance(cohorts, list) else [])]
 
         base = {'overlap_unknown': bool(overlap), 'cohorts_overlap_unknown': overlap,
                 'replication_u': replication.DEFAULT_U, 'replication_method': PC_METHOD, 'replication_p': PC_P_COLUMN,
-                'effect_gate_unit': gate_words(facet)}
+                'effect_gate_unit': gate_words(facet), 'small_cohort_replicates': facet_rules.SMALL_COHORT_REPLICATES}
         if family is None:
             return {'r_value': None, 'p_pc': None, 'k': None, 'k_treat': None, 'm': 0, 'replicated': None,
                     'r_significant': None, 'effect_gate_passed': None, 'effect_gate_cohorts': [],
                     'n_cohorts_ge_tau': None, 'median_logFC': None, 'effect_gate_tau': None, 'r_treat': None,
-                    'replicated_effect': None, 'r_cohorts': [], 'r_direction': None, **base}
+                    'replicated_effect': None, 'r_strong': None, 'replicated_strong': None, 'n_small': n_small,
+                    'r_cohorts': [], 'r_direction': None, **base}
         has_r = _finite(family.get('r_value')) is not None
         has_treat = _finite(family.get('r_treat')) is not None
         return {
@@ -1518,6 +1528,9 @@ class FacetResults:
             'effect_gate_tau': _finite(family.get('effect_gate_tau')),
             'r_treat': _finite(family.get('r_treat')),
             'replicated_effect': bool(family.get('replicated_effect')) if has_treat else None,
+            'r_strong': _finite(family.get('r_strong')),
+            'replicated_strong': bool(family.get('replicated_strong')) if has_treat else None,
+            'n_small': n_small,
             'r_cohorts': labels(family.get('r_cohorts')),
             'r_direction': family.get('r_direction') if isinstance(family.get('r_direction'), str) else None,
             **base,
@@ -1549,9 +1562,13 @@ class FacetResults:
                         f'effect of at least {unit} in {gate_names}')
                 if entry.get('replicated_effect'):
                     text += f'; also replicated with at least {unit} (r_treat = {entry["r_treat"]:.2g})'
+                    if entry.get('replicated_strong'):
+                        text += f'; and with at least 25% (r_strong = {entry["r_strong"]:.2g})'
             else:
                 text = (f'direction replicates{direction} (r = {r_value:.2g}{carried}); effect below {unit} in fewer '
                         f'than 2 cohorts; {k_text}')
+        if entry.get('n_small'):
+            text += f'; m includes {entry["n_small"]} cohorts below {entry.get("small_cohort_replicates", 20)} donors'
         if entry.get('overlap_unknown'):
             text += '; donor overlap unknown for ' + ', '.join(entry['cohorts_overlap_unknown'])
         return text
@@ -1616,7 +1633,8 @@ class FacetResults:
         cohorts each with a log2 fold change of at least tau (``facet_rules.gate_tau``) in the replicated direction
         (signed), ``effect_gate_passed`` with ``effect_gate_cohorts``. ``r_treat`` is the second tier: the same
         partial conjunction on the one-sided limma treat p values (H0: |log2FC| <= tau) with its own BH;
-        ``replicated_effect`` = r_treat < 0.05, replicated with at least a tau-sized change at FDR 5 percent.
+        ``replicated_effect`` = r_treat < 0.05, replicated with at least a tau-sized change at FDR 5 percent;
+        ``r_strong`` / ``replicated_strong`` the same with a 25 percent change (``facet_rules.strong_tau``).
         ``k`` counts cohorts with q_value < 0.05 in the direction (``k_treat``: q_treat).
         """
         columns = ['unit', 'cohort', 'n_siblings']
@@ -1628,6 +1646,9 @@ class FacetResults:
         sub['p_up'] = np.where(p_two.isna(), np.nan, np.where(log_fc >= 0, half, 1.0 - half))
         sub['p_down'] = np.where(p_two.isna(), np.nan, np.where(log_fc <= 0, half, 1.0 - half))
         p_treat = sub['p_treat']
+        p_strong = sub['p_treat_strong'] if 'p_treat_strong' in sub else pd.Series(np.nan, index=sub.index)
+        sub['ps_up'] = np.where(p_strong.isna(), np.nan, np.where(log_fc > 0, p_strong, 1.0))
+        sub['ps_down'] = np.where(p_strong.isna(), np.nan, np.where(log_fc < 0, p_strong, 1.0))
         sub['pt_up'] = np.where(p_treat.isna(), np.nan, np.where(log_fc > 0, p_treat, 1.0))
         sub['pt_down'] = np.where(p_treat.isna(), np.nan, np.where(log_fc < 0, p_treat, 1.0))
         q_adjusted = (sub['q_value'] * sub['n_siblings']).clip(upper=1.0)
@@ -1638,11 +1659,11 @@ class FacetResults:
         sub['down_treat'] = (q_treat_adjusted < Q_THRESHOLD) & (log_fc < 0)
         per_cohort = sub.groupby(['gene_key', 'cohort'], observed=True).agg(
             gene=('gene', 'first'), p_up=('p_up', 'min'), p_down=('p_down', 'min'),
-            pt_up=('pt_up', 'min'), pt_down=('pt_down', 'min'),
+            pt_up=('pt_up', 'min'), pt_down=('pt_down', 'min'), ps_up=('ps_up', 'min'), ps_down=('ps_down', 'min'),
             n_siblings=('n_siblings', 'max'), up=('up', 'any'), down=('down', 'any'),
             up_treat=('up_treat', 'any'), down_treat=('down_treat', 'any'),
             effect=('logFC', 'mean')).reset_index()
-        for column in ('p_up', 'p_down', 'pt_up', 'pt_down'):
+        for column in ('p_up', 'p_down', 'pt_up', 'pt_down', 'ps_up', 'ps_down'):
             per_cohort[column] = (per_cohort[column] * per_cohort['n_siblings']).clip(upper=1.0)
         p_up = per_cohort.pivot(index='gene_key', columns='cohort', values='p_up')
         p_down = per_cohort.pivot(index='gene_key', columns='cohort', values='p_down')
@@ -1654,6 +1675,12 @@ class FacetResults:
         treat_down = per_cohort.pivot(index='gene_key', columns='cohort', values='pt_down').reindex(
             index=p_up.index, columns=p_up.columns)
         treat_stats = replication.replicability(treat_up.to_numpy(), treat_down.to_numpy(), method=PC_METHOD)
+        strong_up = per_cohort.pivot(index='gene_key', columns='cohort', values='ps_up').reindex(
+            index=p_up.index, columns=p_up.columns)
+        strong_down = per_cohort.pivot(index='gene_key', columns='cohort', values='ps_down').reindex(
+            index=p_up.index, columns=p_up.columns)
+        strong_stats = replication.replicability(strong_up.to_numpy(), strong_down.to_numpy(), method=PC_METHOD)
+        frame['r_strong'] = strong_stats['r_value']
         frame['p_pc_treat'] = treat_stats['p_pc']
         frame['r_treat'] = treat_stats['r_value']
         frame['m'] = p_up.notna().sum(axis=1).astype(int)
@@ -1693,6 +1720,7 @@ class FacetResults:
         frame['r_significant'] = frame['r_value'] < replication.R_THRESHOLD
         frame['replicated'] = frame['r_significant']
         frame['replicated_effect'] = frame['r_treat'] < replication.R_THRESHOLD
+        frame['replicated_strong'] = frame['r_strong'] < replication.R_THRESHOLD
         frame['gene'] = per_cohort.groupby('gene_key')['gene'].first().reindex(frame.index)
         return {'frame': frame, 'per_cohort': per_cohort, 'units': group_units}
 
@@ -1842,7 +1870,7 @@ class FacetResults:
                     'run_date': model.get('run_date', NOT_RECORDED),
                     'tool': model.get('tool', NOT_RECORDED),
                 })
-        notes = ['exploratory', f'facet scope {scope}: scopes (human, mouse, xenograft) are never mixed',
+        notes = ['exploratory', f'facet scope {scope}: scopes (human, xenograft) are never mixed',
                  'datasets are tested separately; replication combines one anchor unit per cohort',
                  'cohort table is a DRAFT',
                  'cell types are counted by group (lib/celltype_groups.yaml); the raw label is on each unit']
@@ -2337,6 +2365,8 @@ _FACET_TERMS = {
     'braak': ('braak', 'Braak stage as a number: coefficient = change per Braak stage (linear trend)'),
     'age': ('age', 'age in decades (age / 10): coefficient = change per 10 years (linear trend); NOT adjusted for '
                    'pathology, so the age effect includes the effect of AD pathology prevalence'),
+    'apoe4_dose': ('apoe4_dose', 'number of e4 alleles (0, 1, 2): coefficient = change per e4 allele (linear trend)'),
+    'braak_threshold': ('braak_threshold', 'high (Braak III or higher) vs low (II or lower): coefficient = high minus low'),
     'age_adjusted': ('age', 'age in decades (age / 10) with the pathology term (Braak, else pathologic AD) in the model: '
                             'coefficient = change per 10 years at equal pathology'),
     'app_nlgf': ('app_nlgf', 'nlgf vs control: coefficient = App NL-G-F knock-in minus control (control is the reference)'),
@@ -2549,7 +2579,13 @@ def build_model(unit: Dict[str, Any], records_for_unit: Dict[str, Dict[str, Any]
     min_cells = parameters.get('min_cells_per_sample')
     n_lt5 = parameters.get('n_lt5_threshold')
     numeric_min = parameters.get('numeric_min_donors_for_p')
-    if n_lt5 is not None and numeric_min is not None:
+    floors_level = (parameters.get('p_floor_per_level_by_unit') or {})
+    floors_numeric = (parameters.get('p_floor_numeric_by_unit') or {})
+    if floors_level and floors_numeric:
+        rule = ('descriptive (estimate and SE only, no p, q or CI) below the p-value floor of the replicate unit: '
+                f'two-group facets {", ".join(f"{k} {v}" for k, v in floors_level.items())} per level; trends '
+                f'{", ".join(f"{k} {v}" for k, v in floors_numeric.items())} replicates')
+    elif n_lt5 is not None and numeric_min is not None:
         rule = (f'descriptive only (no p, q or CI) when a level has fewer than {n_lt5} donors; '
                 f'for Braak when fewer than {numeric_min} donors')
     else:

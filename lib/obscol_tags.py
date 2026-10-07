@@ -174,7 +174,7 @@ def facet_definitions_status() -> Dict[str, Optional[str]]:
 
 FACET_STATUSES = ('registered', 'deprecated')
 #: Facet scope names (``lib/facet_scopes.py``), repeated here so this module stays import-light.
-FACET_SCOPE_NAMES = ('human_postmortem', 'mouse_in_vivo', 'xenograft_human_in_mouse', 'in_vitro')
+FACET_SCOPE_NAMES = ('human_postmortem', 'xenograft_human_in_mouse', 'in_vitro')
 
 
 def _as_list(value: object) -> List[str]:

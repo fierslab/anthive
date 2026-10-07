@@ -195,7 +195,7 @@ def test_facet_definition_shape_and_status():
     sex = obscol_tags.facet_definition('ant_sex')
     assert sex['facet'] == 'ant_sex' and sex['tag'] == 'sex' and sex['label'] == 'Sex'
     assert 'm' in sex['values'] and 'sex' in sex['hint_keywords']
-    unknown = obscol_tags.facet_definition('ant_lesion')
+    unknown = obscol_tags.facet_definition('ant_mystery_axis')
     assert unknown['defined'] is False and unknown['summary'] == ''
     status = obscol_tags.facet_definitions_status()
     assert status['state'] == 'under_audit'

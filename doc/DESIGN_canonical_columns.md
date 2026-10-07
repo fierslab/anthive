@@ -475,3 +475,19 @@ secondary (S25/V6C, V6S, V6M and the other `prs.*` objects).
 `facets_visible` defaults to `ant_sex`, `ant_disease`, `ant_apoe4_carrier`, `ant_braak`, `ant_age`, `ant_app_nlgf`
 (`anthive.default.yaml`, `lib/config.py`, `site.example.yaml`). The dev host's `anthive.yaml` has no
 `facets_visible` key, so it follows the default.
+
+## Update 2026-10-07: tissue, region, author clusters and retired singleton facets
+
+* `mouse_in_vivo` is retired (above, scope table): pure mouse datasets have no facet layer.
+* **Tissue** (decisions L37 to L39). `ant_tissue` is the coarse facet; its controlled values are the group terms of
+  `lib/tissue_groups.yaml` (prefrontal cortex, cingulate cortex, frontal cortex, motor cortex, temporal cortex, parietal
+  cortex, occipital cortex, insular cortex, entorhinal cortex, hippocampus, cerebral cortex, white matter, basal ganglia,
+  thalamus, midbrain, cerebellum, brainstem, hypothalamus, spinal cord, olfactory bulb, brain). The most specific UBERON
+  term is the plain column `tissue_uberon` with `tissue_uberon_id`; they are not registered facets. `ant_region` is
+  deprecated (`replaced_by: tissue`). The facet exists in `human_postmortem` only: xenograft and in vitro datasets do
+  not publish it. `lib/tissue_groups.py` exposes `coarse_tissue`, `uberon_id`, `lookup`.
+* **Author clusters.** `ant_author_cluster` is dataset-scoped by definition; `ant_author_cell_type` is deprecated and merged
+  into it. Broad cell-type labels belong in `ant_cell_type` (Cell Ontology labels; labels that are not cell types are NULL).
+* **Retired singleton facets**: `lesion`, `ms_type`, `cause_of_death`, `ethnicity`, `source_institution`, `technology`,
+  `group` are deprecated registry entries; the values live in plain obs columns.
+* `ant_genotype` is the genotype of the sequenced cells, `ant_host_genotype` the mouse host (registered, xenograft scope).

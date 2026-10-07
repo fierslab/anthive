@@ -123,8 +123,16 @@ def test_declared_replicate_rejects_bad_values(metadata):
 
 
 def test_analysis_level_rule():
-    ok = replicates.analysis_level('donor', False, n_per_level={'f': 3, 'm': 3})
+    ok = replicates.analysis_level('donor', False, n_per_level={'f': 5, 'm': 5})
     assert ok == {'analysis_level': 'replicate', 'label': 'replicate level', 'reason': None}
+    # fitted but below the p-value floor of the replicate unit: donors need 5 per level, animals and samples 3
+    low = replicates.analysis_level('donor', False, n_per_level={'f': 3, 'm': 9})
+    assert low['analysis_level'] == 'below_floor' and low['label'] == 'descriptive (below the p-value floor)'
+    assert replicates.analysis_level('animal', False, n_per_level={'f': 3, 'm': 3})['analysis_level'] == 'replicate'
+    assert replicates.analysis_level('donor', True, n_replicates=9, n_distinct=5)['analysis_level'] == 'below_floor'
+    assert replicates.analysis_level('donor', True, n_replicates=10, n_distinct=5)['analysis_level'] == 'replicate'
+    assert replicates.analysis_level('animal', True, n_replicates=5, n_distinct=5)['analysis_level'] == 'below_floor'
+    assert replicates.analysis_level('sample', True, n_replicates=6, n_distinct=3)['analysis_level'] == 'replicate'
     few = replicates.analysis_level('animal', False, n_per_level={'ctrl': 2, 'treated': 6})
     assert few['analysis_level'] == 'cell' and few['label'] == 'cell-level, descriptive only'
     assert 'fewer than 3 animals' in few['reason']
@@ -133,13 +141,13 @@ def test_analysis_level_rule():
     none = replicates.analysis_level('none', False, n_per_level={'f': 9, 'm': 9})
     assert none['analysis_level'] == 'cell' and 'replicate_unit is none' in none['reason']
     assert replicates.analysis_level(None, True, n_replicates=50, n_distinct=7)['analysis_level'] == 'cell'
-    numeric = replicates.analysis_level('donor', True, n_replicates=6, n_distinct=3)
+    numeric = replicates.analysis_level('donor', True, n_replicates=12, n_distinct=3)
     assert numeric['analysis_level'] == 'replicate'
     assert replicates.analysis_level('donor', True, n_replicates=3, n_distinct=3)['analysis_level'] == 'cell'
     assert replicates.analysis_level('donor', True, n_replicates=9, n_distinct=2)['analysis_level'] == 'cell'
-    assert replicates.analysis_level('donor', True, n_replicates=4, n_distinct=3)['analysis_level'] == 'replicate'
-    custom = replicates.analysis_level('donor', False, n_per_level={'a': 2, 'b': 2}, min_per_level=2)
-    assert custom['analysis_level'] == 'replicate'
+    assert replicates.analysis_level('animal', True, n_replicates=6, n_distinct=3)['analysis_level'] == 'replicate'
+    custom = replicates.analysis_level('animal', False, n_per_level={'a': 2, 'b': 2}, min_per_level=2)
+    assert custom['analysis_level'] == 'below_floor'      # fitted at 2 per level, still below the animal floor of 3
 
 
 # ── lib/facet_lint.py ────────────────────────────────────────────────────────

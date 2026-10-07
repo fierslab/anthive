@@ -42,11 +42,11 @@ from test_facet_test_modules import mod  # noqa: E402
     ({'organism': 'human', 'experimental_system': 'xenograft'}, (), 'xenograft_human_in_mouse'),
     ({'organism': 'human', 'experimental_system': 'chimera'}, (), 'xenograft_human_in_mouse'),
     ({'organism': 'human', 'experimental_system': 'post_mortem_tissue'}, ('ant_host_sex',), 'xenograft_human_in_mouse'),
-    ({'organism': 'mouse', 'experimental_system': 'post_mortem_tissue'}, (), 'mouse_in_vivo'),
-    ({'organism': 'mouse'}, (), 'mouse_in_vivo'),
-    ({'organism': 'mouse', 'experimental_system': 'xenograft'}, (), 'mouse_in_vivo'),      # a labelling slip
+    ({'organism': 'mouse', 'experimental_system': 'post_mortem_tissue'}, (), None),      # mouse_in_vivo was retired
+    ({'organism': 'mouse'}, (), None),
+    ({'organism': 'mouse', 'experimental_system': 'xenograft'}, (), None),               # a labelling slip: still pure mouse
     ({'organism': 'human', 'experimental_system': 'in_vitro_2d'}, (), 'in_vitro'),
-    ({'organism': 'mouse', 'experimental_system': 'organoid'}, (), 'in_vitro'),
+    ({'organism': 'mouse', 'experimental_system': 'organoid'}, (), None),                # pure mouse, any system
     ({'organism': 'human', 'experimental_system': 'bulk_tissue'}, (), None),
     ({'organism': ['human', 'mouse'], 'experimental_system': 'post_mortem_tissue'}, (), None),
     ({'organism': 'rat'}, (), None),
@@ -64,20 +64,26 @@ def test_missing_organism_is_human_only_for_the_listed_wachter_files():
 
 def test_check_scope_and_default():
     assert facet_scopes.check_scope(None) == facet_scopes.check_scope('') == 'human_postmortem'
-    assert facet_scopes.check_scope('mouse_in_vivo') == 'mouse_in_vivo'
+    assert facet_scopes.check_scope('xenograft_human_in_mouse') == 'xenograft_human_in_mouse'
+    with pytest.raises(facet_scopes.ScopeError):
+        facet_scopes.check_scope('mouse_in_vivo')
+    assert facet_scopes.is_mouse_only({'organism': 'mouse'}) and not facet_scopes.is_mouse_only({'organism': 'human'})
+    assert not facet_scopes.is_mouse_only({'organism': ['human', 'mouse']})
     with pytest.raises(facet_scopes.ScopeError):
         facet_scopes.check_scope('martian')
-    assert set(facet_scopes.TESTED_SCOPES) == {'human_postmortem', 'mouse_in_vivo', 'xenograft_human_in_mouse'}
+    assert set(facet_scopes.TESTED_SCOPES) == {'human_postmortem', 'xenograft_human_in_mouse'}
 
 
 # ── the facet registry ───────────────────────────────────────────────────────
 
 @pytest.mark.parametrize('facet, scopes', [
-    ('sex', ['human_postmortem', 'mouse_in_vivo', 'xenograft_human_in_mouse', 'in_vitro']),
+    ('sex', ['human_postmortem', 'xenograft_human_in_mouse', 'in_vitro']),
+    ('genotype', ['human_postmortem', 'xenograft_human_in_mouse', 'in_vitro']),
+    ('host_genotype', ['xenograft_human_in_mouse']),
     ('disease', ['human_postmortem']), ('braak', ['human_postmortem']), ('apoe4_carrier', ['human_postmortem']),
     ('adnc', ['human_postmortem']), ('cognitive_status', ['human_postmortem']), ('age', ['human_postmortem']),
     ('host_sex', ['xenograft_human_in_mouse']),
-    ('app_nlgf', ['mouse_in_vivo', 'xenograft_human_in_mouse']),
+    ('app_nlgf', ['xenograft_human_in_mouse']),
     ('apoe', ['human_postmortem', 'xenograft_human_in_mouse']),
 ])
 def test_registry_scopes_per_facet(facet, scopes):
@@ -95,7 +101,7 @@ def test_every_facet_scope_name_in_the_vocab_is_known_and_app_nlgf_is_registered
         assert set(declared) <= set(facet_scopes.SCOPES), tag
     entry = obscol_tags.facet_registry()['app_nlgf']
     assert entry['status'] == 'registered' and entry['controlled_values'] == ['nlgf', 'control']
-    assert obscol_tags.facet_definition('app_nlgf')['facet_scopes'] == ['mouse_in_vivo', 'xenograft_human_in_mouse']
+    assert obscol_tags.facet_definition('app_nlgf')['facet_scopes'] == ['xenograft_human_in_mouse']
     assert facet_scopes.facet_in_scope('app_nlgf', None) and not facet_scopes.facet_in_scope('app_nlgf', 'human_postmortem')
 
 
@@ -116,13 +122,13 @@ def test_unknown_facet_scope_in_the_vocab_is_an_error(monkeypatch):
 def test_lint_facet_scope_mismatch():
     api = {'obs_rename': {'Braak': 'ant_braak'}, 'obs_derive': {'ant_app_nlgf': {'source': 'g', 'map': {'a': 'nlgf'}}},
            'obs_constant': {'ant_sex': {'value': 'f'}}}
-    mouse = facet_lint.lint_facet_scope(api, 'mouse_in_vivo')
-    assert [(f.severity, f.rule) for f in mouse] == [('error', 'facet_scope_mismatch')] and 'ant_braak' in mouse[0].message
+    mouse = facet_lint.lint_facet_scope(api, 'in_vitro')
+    assert {f.rule for f in mouse} == {'facet_scope_mismatch'} and any('ant_braak' in f.message for f in mouse)
     human = facet_lint.lint_facet_scope(api, 'human_postmortem')
     assert [f.rule for f in human] == ['facet_scope_mismatch'] and 'ant_app_nlgf' in human[0].message
     assert facet_lint.lint_facet_scope(api, 'xenograft_human_in_mouse')[0].message.count('ant_braak') == 1
     assert facet_lint.lint_facet_scope(api, None) == []            # no scope: nothing to say
-    assert facet_lint.lint_facet_scope({}, 'mouse_in_vivo') == []
+    assert facet_lint.lint_facet_scope({}, 'in_vitro') == []
     assert 'facet_scope_mismatch' in facet_lint.RULES
 
 
@@ -147,7 +153,7 @@ def test_md_check_reports_a_facet_outside_its_scope(tmp_path):
     report = md_check.MdCheckReport()
     md_check.check_md_folder(tmp_path, report, fix=False)
     messages = [item for item in report.errors if 'facet_scope_mismatch' in item]
-    assert len(messages) == 1 and 'ant_braak' in messages[0] and 'ant_sex' not in messages[0]
+    assert len(messages) == 2 and all('mouse-only' in m for m in messages)      # braak and sex: no facet in a pure mouse dataset
     assert 'facet_scope_mismatch' in ' '.join(report.rule_summary())
 
 
@@ -157,8 +163,15 @@ def test_thresholds_are_the_statistical_minimum():
     assert (facet_rules.MIN_DONORS_PER_LEVEL, facet_rules.NUMERIC_MIN_REPLICATES,
             facet_rules.NUMERIC_MIN_DISTINCT, facet_rules.MIN_RESIDUAL_DF) == (3, 4, 3, 4)
     assert facet_rules.MIN_TEST_RESIDUAL_DF == 2 and facet_rules.LAMBDA_INFLATED == 1.3
-    for unit in ('donor', 'animal', 'sample'):          # the p-value floor can differ by replicate unit; today it does not
+    for unit in ('donor', 'animal', 'sample'):          # the fit minimum is the same for every unit
         assert facet_rules.min_per_level(unit) == 3 and facet_rules.min_numeric(unit) == 4
+    # the p-value floor (decided 2026-10-07) differs: donors vary more than inbred animals
+    assert (facet_rules.p_floor_per_level('donor'), facet_rules.p_floor_numeric('donor')) == (5, 10)
+    assert (facet_rules.p_floor_per_level('animal'), facet_rules.p_floor_numeric('animal')) == (3, 6)
+    assert (facet_rules.p_floor_per_level('sample'), facet_rules.p_floor_numeric('sample')) == (3, 6)
+    assert facet_rules.SMALL_COHORT_REPLICATES == 20
+    assert facet_rules.strong_tau('sex') == pytest.approx(math.log2(1.25))
+    assert facet_rules.strong_tau('braak') == pytest.approx(math.log2(1.25) / 3)
     assert facet_rules.MIN_DONORS_DATASET == 4
     assert replicates.MIN_REPLICATES_PER_LEVEL == 3 and replicates.MIN_REPLICATES_NUMERIC == 4
     assert replicates.MIN_DISTINCT_NUMERIC == 3
@@ -182,21 +195,21 @@ NLGF_DERIVE = ('  obs_derive:\n    ant_app_nlgf:\n      source: dx\n      dtype:
 
 
 @needs_r
-def test_app_nlgf_in_a_mouse_scope_end_to_end(tmp_path):
+def test_app_nlgf_in_a_xenograft_end_to_end_without_host_sex(tmp_path):
     pattern = ','.join(['nlgf', 'control'] * 6)                     # alternates, balanced over the two sexes
-    store, entry = make_dataset(tmp_path, n_f=6, n_m=6, organism='mouse', disease_pattern=pattern,
+    store, entry = make_dataset(tmp_path, n_f=6, n_m=6, system='xenograft', disease_pattern=pattern,
                                 extra_md=NLGF_DERIVE + ANIMALS)
     out_root = tmp_path / 'out'
     manifest = aft.process_dataset(entry, store, out_root, list(aft.FACETS), RSCRIPT, threads=1, memory_limit_gb=1)
-    assert manifest['status'] == 'done' and manifest['facet_scope'] == 'mouse_in_vivo'
+    assert manifest['status'] == 'done' and manifest['facet_scope'] == 'xenograft_human_in_mouse'
     assert manifest['facets_tested_in_scope'] == ['sex', 'app_nlgf']
     assert {u['facet'] for u in manifest['units']} == {'sex', 'app_nlgf'}           # no disease, braak, age in mouse
     nlgf = [u for u in manifest['units'] if u['facet'] == 'app_nlgf' and u['status'] == 'ok']
-    assert nlgf and nlgf[0]['facet_scope'] == 'mouse_in_vivo' and nlgf[0]['covariates'] == ['sex']
+    assert nlgf and nlgf[0]['facet_scope'] == 'xenograft_human_in_mouse' and nlgf[0]['covariates'] == []   # no host sex published
     assert nlgf[0]['level_counts'] == {'control': 6, 'nlgf': 6} and nlgf[0]['small_sample'] is False
     assert nlgf[0]['tau_log2'] == pytest.approx(math.log2(1.1))
     table = pd.read_parquet(out_root / 'Syn2026' / 'Syn_ds.facet_tests.parquet')
-    assert set(table['facet']) == {'sex', 'app_nlgf'} and (table['facet_scope'] == 'mouse_in_vivo').all()
+    assert set(table['facet']) == {'sex', 'app_nlgf'} and (table['facet_scope'] == 'xenograft_human_in_mouse').all()
     sub = table[table['facet'] == 'app_nlgf']
     assert set(sub['contrast']) == {'nlgf_vs_control'} and set(sub['level_ref']) == {'control'}
     sex = table[(table['facet'] == 'sex') & (table['gene'] == 'GENE0') & (table['cell_type'] == 'T1')]
@@ -209,7 +222,7 @@ def test_age_facet_end_to_end_per_decade_with_the_age_floor_and_the_adjusted_twi
     store, entry = make_dataset(tmp_path, n_f=10, n_m=10, extra_rename='    age: ant_age\n', disease_pattern=pattern)
     out_root = tmp_path / 'out'
     manifest = aft.process_dataset(entry, store, out_root, ['age', 'braak'], RSCRIPT, threads=1, memory_limit_gb=1)
-    assert manifest['facets_tested_in_scope'] == ['age', 'age_adjusted', 'braak']
+    assert manifest['facets_tested_in_scope'] == ['age', 'age_adjusted', 'braak', 'braak_threshold']
     age = [u for u in manifest['units'] if u['facet'] == 'age' and u['status'] == 'ok']
     assert age, manifest['units']
     unit = age[0]
@@ -234,7 +247,7 @@ def test_app_nlgf_is_stratified_by_timepoint_and_refused_when_confounded(tmp_pat
     # genotype crosses the timepoint column (bank): one unit per timepoint, 6 vs 6 animals each
     pattern = ','.join('nlgf' if (index // 2) % 2 == 0 else 'control' for index in range(24))
     design = 'control_basis: wt_host\napp_nlgf_design:\n  timepoint_column: bank\n'
-    store, entry = make_dataset(tmp_path / 'a', n_f=12, n_m=12, organism='mouse', disease_pattern=pattern,
+    store, entry = make_dataset(tmp_path / 'a', n_f=12, n_m=12, system='xenograft', disease_pattern=pattern,
                                 extra_md=NLGF_DERIVE + ANIMALS + design)
     manifest = aft.process_dataset(entry, store, tmp_path / 'out_a', ['app_nlgf'], RSCRIPT, threads=1, memory_limit_gb=1)
     assert manifest['status'] == 'done' and manifest['control_basis'] == 'wt_host'
@@ -246,7 +259,7 @@ def test_app_nlgf_is_stratified_by_timepoint_and_refused_when_confounded(tmp_pat
     assert set(table['celltype_source']) == {u['celltype_source'] for u in units}
     # the injection-like covariate is aligned with the genotype: the unit is refused, not silently adjusted
     aligned = ','.join('nlgf' if index % 2 == 0 else 'control' for index in range(24))
-    store, entry = make_dataset(tmp_path / 'b', n_f=12, n_m=12, organism='mouse', disease_pattern=aligned,
+    store, entry = make_dataset(tmp_path / 'b', n_f=12, n_m=12, system='xenograft', disease_pattern=aligned,
                                 extra_md=NLGF_DERIVE + ANIMALS + 'control_basis: other\napp_nlgf_design:\n  covariate_columns: [bank]\n')
     manifest = aft.process_dataset(entry, store, tmp_path / 'out_b', ['app_nlgf'], RSCRIPT, threads=1, memory_limit_gb=1)
     statuses = {u['status'] for u in manifest['units'] if u['facet'] == 'app_nlgf'}
@@ -257,7 +270,7 @@ def test_a_missing_design_column_skips_the_dataset_with_a_reason(tmp_path):
     if RSCRIPT is None:
         pytest.skip('needs R')
     pattern = ','.join(['nlgf', 'control'] * 6)
-    store, entry = make_dataset(tmp_path, n_f=6, n_m=6, organism='mouse', disease_pattern=pattern,
+    store, entry = make_dataset(tmp_path, n_f=6, n_m=6, system='xenograft', disease_pattern=pattern,
                                 extra_md=NLGF_DERIVE + ANIMALS + 'app_nlgf_design:\n  timepoint_column: no_such_column\n')
     manifest = aft.process_dataset(entry, store, tmp_path / 'out', ['app_nlgf'], RSCRIPT, threads=1, memory_limit_gb=1)
     assert manifest['status'] == 'skipped' and 'no_such_column' in manifest['reason']
@@ -284,7 +297,7 @@ def test_inventory_lists_the_scope(tmp_path):
     store, entry = make_dataset(tmp_path, organism='mouse')
     md_yaml, _ = aft.parse_md_file(entry.md_path)
     annotation = aft.mus.resolve_annotation(entry.h5ad_path, root=store)
-    assert aft.dataset_scope(entry, annotation, aft.get_api_config(md_yaml)) == 'mouse_in_vivo'
+    assert aft.dataset_scope(entry, annotation, aft.get_api_config(md_yaml)) is None      # pure mouse: no scope
 
 
 # ── ant-facet-test-modules: replication of modules ───────────────────────────
@@ -342,7 +355,7 @@ def test_replicated_modules_never_mix_scopes(tmp_path):
     ids = ['A/a', 'B/b']
     root, cohort_table = _cohort_table(tmp_path, ids)
     human = _module_table({'A/a': {'M': (0.5, 0.8, 0.0002)}})
-    mouse = _module_table({'B/b': {'M': (0.5, 0.8, 0.0002)}}).assign(facet_scope='mouse_in_vivo')
+    mouse = _module_table({'B/b': {'M': (0.5, 0.8, 0.0002)}}).assign(facet_scope='in_vitro')
     table = pd.concat([human, mouse], ignore_index=True)
     replicated = mod.replicated_modules(table, root, cohort_table)
     assert replicated.empty                                   # one cohort per scope: nothing can replicate
@@ -407,7 +420,7 @@ def test_unit_notes_say_what_a_reader_must_keep_in_mind():
     text = ' | '.join(nlgf)
     assert 'large effects only' in text and 'live-cell isolation' in text and 'humanised-App host' in text
     assert 'stratified: timepoint=6m, line=WT' in text
-    mouse = ' | '.join(facet_results.unit_notes({'facet': 'app_nlgf', 'facet_scope': 'mouse_in_vivo', 'flags': {}}))
+    mouse = ' | '.join(facet_results.unit_notes({'facet': 'app_nlgf', 'facet_scope': 'human_postmortem', 'flags': {}}))
     assert 'live-cell isolation' not in mouse
 
 
@@ -419,3 +432,93 @@ def test_strongest_facet_names_the_card_a_page_opens_on():
     assert facet_results.strongest_facet(cards) == {'facet': 'braak', 'cell_type': 'microglia', 'r_value': 0.001,
                                                     'scope': 'human_postmortem'}
     assert facet_results.strongest_facet({'sex': {'replication': []}}) is None
+
+
+# ── v3c: p-value floors, small cohorts, sensitivity facets, strong tier, permutation null ────────
+
+def test_apoe_dose_and_braak_threshold_in_the_donor_table():
+    assert aft.derive_apoe4_dose_from_genotype('E3/E4') == 1.0 and aft.derive_apoe4_dose_from_genotype('44') == 2.0
+    assert aft.derive_apoe4_dose_from_genotype('e2e3') == 0.0 and aft.derive_apoe4_dose_from_genotype('unknown') is None
+    cells = pd.DataFrame({'ant_donor': ['A', 'B', 'C', 'D'], 'ant_apoe': ['E3/E4', 'E4/E4', 'E3/E3', None],
+                          'ant_braak': [2.0, 3.0, 6.0, None]})
+    table = aft.build_donor_table(cells)[0].set_index('donor')
+    assert table.loc['B', 'apoe4_dose'] == 2.0 and table.loc['C', 'apoe4_dose'] == 0.0 and pd.isna(table.loc['D', 'apoe4_dose'])
+    assert [table.loc[d, 'braak_threshold'] for d in 'ABC'] == ['low', 'high', 'high'] and pd.isna(table.loc['D', 'braak_threshold'])
+    plan_table = pd.DataFrame({'donor': [f'D{i}' for i in range(12)], 'braak_threshold': ['low'] * 6 + ['high'] * 6,
+                               'sex': ['f', 'm'] * 6, 'apoe4_dose': [0.0, 1.0, 2.0] * 4,
+                               'age': np.nan, 'pmi': np.nan, 'braak': np.nan, 'batch': None, 'host_sex': None})
+    two = aft.plan_job(plan_table, 'braak_threshold', plan_table['donor'])
+    assert two['status'] == 'ok' and two['level_counts'] == {'low': 6, 'high': 6}
+    dose = aft.plan_job(plan_table, 'apoe4_dose', plan_table['donor'])
+    assert dose['status'] == 'ok' and dose['level_counts']['n_distinct'] == 3
+    assert aft.tau_for_facet('apoe4_dose') == pytest.approx(math.log2(1.1) / 2)
+    assert facet_scopes.facet_allowed_scopes('apoe4_dose') == ['human_postmortem']
+    assert facet_scopes.facet_allowed_scopes('braak_threshold') == ['human_postmortem']
+
+
+def test_badge_says_how_many_small_cohorts_m_includes_and_the_strong_tier():
+    entry = {'m': 5, 'k': 2, 'r_value': 0.01, 'r_direction': 'up', 'replicated': True, 'effect_gate_passed': True,
+             'effect_gate_cohorts': ['A', 'B'], 'r_cohorts': ['A', 'B'], 'effect_gate_unit': '10%', 'cohorts_tested': 5,
+             'replicated_effect': True, 'r_treat': 0.02, 'replicated_strong': True, 'r_strong': 0.04, 'n_small': 3,
+             'small_cohort_replicates': 20}
+    badge = facet_results.FacetResults._badge(entry)
+    assert 'm includes 3 cohorts below 20 donors' in badge and 'r_strong = 0.04' in badge
+    assert 'm includes' not in facet_results.FacetResults._badge({**entry, 'n_small': 0})
+
+
+def test_n_small_counts_anchor_units_below_twenty_analysed_replicates():
+    units = pd.DataFrame({'unit': [0, 1, 2], 'cohort': list('ABC'), 'cohort_label': list('ABC'),
+                          'n_donors': [60, 12, 19], 'n_siblings': 1, 'overlap_unknown': False,
+                          'counted': True, 'descriptive_only': False})
+    eligible = units.assign(representative=True)
+    fields = facet_results.FacetResults._replicability_fields(None, 3, eligible, 'sex')
+    assert fields['n_small'] == 2 and fields['small_cohort_replicates'] == 20
+
+
+def test_strong_tier_needs_a_25_percent_change():
+    units = pd.DataFrame({'unit': [0, 1], 'cohort': ['A', 'B'], 'n_siblings': [1, 1]})
+    rows = pd.DataFrame({'unit': [0, 1], 'gene': ['G', 'G'], 'gene_upper': ['G', 'G'], 'logFC': [0.5, 0.5],
+                         'p_value': [1e-6, 1e-6], 'q_value': [1e-5, 1e-5], 'p_treat': [1e-5, 1e-5], 'q_treat': [1e-4, 1e-4],
+                         'p_treat_strong': [0.4, 0.4]})
+    row = facet_results.FacetResults._family(rows, units, 'sex')['frame'].loc['G']
+    assert bool(row['replicated']) and bool(row['replicated_effect']) and not bool(row['replicated_strong'])
+    rows['p_treat_strong'] = [1e-5, 1e-5]
+    row = facet_results.FacetResults._family(rows, units, 'sex')['frame'].loc['G']
+    assert bool(row['replicated_strong']) and row['r_strong'] < 0.05
+
+
+@needs_r
+def test_permutation_null_is_recorded_for_small_units(tmp_path, monkeypatch):
+    monkeypatch.setattr(aft, 'NULL_PERMUTATIONS', 3)
+    store, entry = make_dataset(tmp_path, n_f=6, n_m=6)
+    manifest = aft.process_dataset(entry, store, tmp_path / 'out', ['sex'], RSCRIPT, threads=1, memory_limit_gb=1)
+    unit = [u for u in manifest['units'] if u['facet'] == 'sex' and u['status'] == 'ok'][0]
+    assert unit['null_permutations'] == 3 and unit['null_hits_mean'] >= 0 and unit['null_lambda_median'] > 0
+    assert unit['null_hits_max'] >= unit['null_hits_mean'] and manifest['parameters_v3b']['null_permutations'] == 3
+
+
+# ── 2026-10-07: pure mouse datasets leave the facet layer; genotype / host_genotype split ────────
+
+def test_a_pure_mouse_dataset_may_publish_only_structural_facets():
+    api = {'obs_rename': {'mouse': 'ant_donor', 'Sex': 'ant_sex', 'g': 'ant_genotype'},
+           'obs_derive': {'ant_app_nlgf': {'source': 'g', 'map': {'a': 'nlgf'}}},
+           'obs_constant': {'ant_cell_type': {'value': 'microglial cell'}}}
+    findings = facet_lint.lint_facet_scope(api, None, mouse_only=True)
+    assert {f.rule for f in findings} == {'facet_scope_mismatch'} and len(findings) == 3
+    assert all('mouse-only' in f.message for f in findings) and all(f.severity == 'error' for f in findings)
+    assert {c for f in findings for c in ('ant_sex', 'ant_genotype', 'ant_app_nlgf') if c in f.message} == {
+        'ant_sex', 'ant_genotype', 'ant_app_nlgf'}
+    assert facet_lint.lint_facet_scope({'obs_rename': {'m': 'ant_donor'}}, None, mouse_only=True) == []
+
+
+def test_genotype_is_the_cells_own_genome_and_host_genotype_is_xenograft_only():
+    definition = obscol_tags.facet_definition('genotype')
+    assert 'SEQUENCED cells' in obscol_tags.load_vocab()['tags']['genotype']['description']
+    assert definition['facet_scopes'] == ['human_postmortem', 'xenograft_human_in_mouse', 'in_vitro']
+    host = obscol_tags.facet_registry()['host_genotype']
+    assert host['status'] == 'registered' and host['facet_scopes'] == ['xenograft_human_in_mouse']
+    vocabulary = obscol_tags.load_vocab()['allele_vocabulary']
+    assert 'App NL-G-F' in vocabulary['App'] and 'APOE e4/e4' in vocabulary['APOE'] and 'TREM2 R47H' in vocabulary['TREM2']
+    assert {'PSEN1', 'PSEN2', 'PICALM'} <= set(vocabulary)
+    assert facet_scopes.facet_in_scope('host_genotype', 'xenograft_human_in_mouse')
+    assert not facet_scopes.facet_in_scope('host_genotype', 'human_postmortem')

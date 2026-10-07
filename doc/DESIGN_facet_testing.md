@@ -4,6 +4,53 @@ Status: implemented in `bin/annot/ant-facet-test` (+ `bin/annot/facet_test_limma
 `bin/annot/ant-facet-test-modules`. The v1 and v2 text below is kept where it still holds; the v3 section above
 overrides it where they differ. All output is exploratory. Written 2026-10-04, v3 2026-10-06.
 
+## v3c (2026-10-07): scopes, floors, exclusions, anatomy: what changed
+
+Decisions of Mark on 2026-10-07 (accepting the reassessment recommendations and the store audit). Where this section and
+v3b or v3 differ, this section wins.
+
+* **Scopes.** `mouse_in_vivo` is retired: pure mouse datasets (organism exactly `mouse`) have no facet layer, no tests and
+  no registry facets beyond the structural tags (`facet_scopes.MOUSE_ONLY_ALLOWED_TAGS`). Scopes are `human_postmortem`,
+  `xenograft_human_in_mouse`, `in_vitro`. `app_nlgf` is a xenograft facet only.
+* **p-value floors by replicate unit** (`facet_rules.MIN_PER_LEVEL_BY_UNIT`, `MIN_NUMERIC_BY_UNIT`, `p_floor_*`). Analysis
+  levels are `replicate`, `below_floor` (descriptive, below the floor of the unit) and `cell`. The fit needs 3 replicates
+  per level (4 for a trend with 3 distinct values).
+* **m keeps every tested cohort**; each gene row and unit carries `n_small` (cohorts below 5 replicates per level). The
+  effect gate has a second tier `r_strong` (tau 25 percent, `facet_rules.STRONG_FACTOR`) next to `r_treat` (tau 10 percent).
+* **Sensitivity facets** (registered under their parent, `facet_scopes.REGISTRY_TAG`): `braak_threshold` (Braak III and
+  higher against II and lower), `apoe4_dose` (0, 1, 2 alleles), `age_adjusted`. Age floor 60 years (`facet_min_age`).
+  Label-permutation nulls (`--null-permutations`) exist but are off by default (about 7 times the fit).
+* **Genotype split.** `ant_genotype` is the genotype of the sequenced cells' genome (graft line or donor), the new
+  `ant_host_genotype` is the mouse host. Shared allele vocabulary (App NL-G-F, App hu/hu, wt, APOE e3/e4, TREM2 R47H and so on).
+* **Generic exclusion from the facet layer** (`facet_scopes.facet_exclusion_reason`, checked by `dataset_eligibility`
+  and so by `plan_job`, and by `facet_lint.lint_facet_exclude`): a dataset is excluded when its `technology` is a spatial
+  platform (Visium, Slide-seq, Slide-tags, MERFISH, Stereo-seq, NovaST, CosMx, Xenium) or mass spectrometry, when its
+  `experimental_system` is `spatial`, or when its `.md` says `facet_exclude: true` with a non-empty `facet_exclude_reason`
+  (used for the metacell sets Z25/Z3N and Z25/Z2R and for all Francken2026 sets until Mark says otherwise). Excluded datasets
+  keep their facet columns for browsing; they are never tested or counted. Each carries a caveat (topic `facet_excluded`).
+* **Replicate units.** B26/SOT animal = `orig.ident` (22 animals), Si5/SSI animal = `orig.ident` (8 mice) with `pool_id` as
+  declared batch column (`facet_batch_column`; the engine drops it when confounded), H25/HNO sample = one row per sample
+  (`replicate_column: cell_name`, which `lint_replicate` now accepts). The open questions are on `ASK_THE_LAB.md`.
+* **Anatomy.** `ant_tissue` is a coarse facet with umbrella terms (`lib/tissue_groups.yaml`, `lib/tissue_groups.py`):
+  every prefrontal subdivision (DLPFC BA9/46, frontal pole BA10, BA9, superior frontal gyrus) is "prefrontal cortex",
+  the anterior cingulate is "cingulate cortex" (kept apart), every white matter label is "white matter", and so on (21 terms,
+  controlled values of the registry). The most specific UBERON term per dataset or cell is in the plain columns
+  `tissue_uberon` and `tissue_uberon_id`, never a facet. `ant_region` is retired (its columns stay as plain obs columns).
+  Xenograft and in vitro datasets have no tissue facet (`facet_scopes: [human_postmortem]`). The donor table's `n_tissues`
+  counts `ant_tissue`, `tissue_uberon` and `ant_region`, so multi-region donors stay flagged. Pools are defined by the cohort
+  table member list and need no region column.
+* **Cell types and clusters.** Author labels that are not cell types (`unknown`, `unID`, `doublet`) are NULL in
+  `ant_cell_type` (cells stay). `ant_author_cluster` is explicitly dataset-scoped (the authors' finest clustering, never compared
+  across datasets); `ant_author_cell_type` is retired and merged into it; single-valued clusters are no longer published;
+  cell-type labels moved to per-cell `ant_cell_type` with Cell Ontology labels (SEA-AD inhibitory subclasses, Smajic, Lu
+  nuclei, Shah). Contradicted constants became per-cell derives (Gazestani, Mathys 2024, Lee 2026 class MG and PVM, Prinz
+  human myeloid atlas, Olah, Fancy vascular). DeBaene2026 doublets are NULL; its BAM clusters stay "microglial cell"
+  (a derive reads one column; follow-up). `unknown`, `doublet` and the like are never strata.
+* **Retired facets.** `lesion`, `ms_type`, `cause_of_death`, `ethnicity`, `source_institution`, `technology`, `group` are
+  `deprecated` in the registry (they were already plain columns since 2026-10-05; `ant_group` folds into the tissue mapping).
+* **Cohort table.** Xenograft datasets that are tested got their own anchor rows (independence `unknown`); LC5/VCF, LC5/XNB
+  (spatial) and the Francken rows are marked not tested.
+
 ## v3b (2026-10-06, after the second-opinion review): what changed
 
 Implements the parts of the review (`scratchpad/review/fable_facet_reassessment.md`) that were not decisions. Where

@@ -26,7 +26,7 @@ VOCAB = Path(obscol_tags.VOCAB_PATH)
 APPROVED_REGISTERED = {
     'donor', 'sex', 'host_sex', 'age', 'pmi', 'disease', 'braak', 'braak_group', 'apoe',
     'apoe4_carrier', 'cell_type', 'tissue', 'genotype', 'author_cluster',
-    'cognitive_status', 'comorbidity', 'adnc', 'donor_uid', 'app_nlgf',
+    'cognitive_status', 'comorbidity', 'adnc', 'donor_uid', 'app_nlgf', 'host_genotype',
 }
 
 
@@ -77,11 +77,11 @@ def test_legacy_alias_set_is_frozen():
 
 
 def test_namespace_rule_modes():
-    api = {'obs_rename': {'Lesion': 'ant_lesion', 'region': 'ant_region', 'sex': 'ant_sex'}}
+    api = {'obs_rename': {'Lesion': 'ant_mystery_axis', 'region': 'ant_region', 'sex': 'ant_sex'}}
     findings = facet_lint.lint_api(api)
     by_rule = {f.rule: f for f in findings}
     assert by_rule['namespace_unregistered'].severity == facet_lint.WARNING
-    assert 'ant_lesion' in by_rule['namespace_unregistered'].message
+    assert 'ant_mystery_axis' in by_rule['namespace_unregistered'].message
     assert by_rule['namespace_deprecated'].severity == facet_lint.WARNING
     assert 'ant_tissue' in by_rule['namespace_deprecated'].message
     strict = {f.rule: f for f in facet_lint.lint_api(api, namespace_mode='error')}
@@ -243,7 +243,7 @@ def store(tmp_path: Path) -> Path:
     _write_md(root / 'Study2024' / 'index.md', {'group': 'Study2024', 'group_id': 'S24'})
     _write_md(root / 'Study2024' / 'primary.md', {
         'id': 'PRI', 'donor_group': 'study2024',
-        'api': {'obs_rename': {'donor': 'ant_donor', 'Braak': 'ant_braak', 'Lesion': 'ant_lesion'}}})
+        'api': {'obs_rename': {'donor': 'ant_donor', 'Braak': 'ant_braak', 'Lesion': 'ant_mystery_axis'}}})
     _write_md(root / 'Study2024' / 'reanalysis.md', {
         'id': 'REA', 'reanalysis_of': ['S24/PRI', 'S24/GONE'],
         'api': {'obs_rename': {'sample': 'donor_id', 'donor_id': 'ant_donor'}}})

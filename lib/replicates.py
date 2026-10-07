@@ -34,6 +34,8 @@ MIN_DISTINCT_NUMERIC = facet_rules.NUMERIC_MIN_DISTINCT
 
 LEVEL_REPLICATE = 'replicate'
 LEVEL_CELL = 'cell'
+LEVEL_BELOW_FLOOR = 'below_floor'
+BELOW_FLOOR_LABEL = 'descriptive (below the p-value floor)'
 CELL_LEVEL_LABEL = 'cell-level, descriptive only'
 
 #: how ``replicate_unit`` was obtained
@@ -181,6 +183,18 @@ def analysis_level(replicate_unit: Optional[str], numeric: bool,
         if len(counts) < 2 or short:
             detail = ', '.join(f'{k}={v}' for k, v in counts.items()) or 'no levels'
             return cell(f'fewer than {min_per_level} {replicate_unit}s in a level ({detail})')
+    # fitted, but below the p-value floor of this replicate unit: estimate and SE only
+    if numeric:
+        floor_numeric = facet_rules.p_floor_numeric(replicate_unit)
+        if int(n_replicates or 0) < floor_numeric:
+            return {'analysis_level': LEVEL_BELOW_FLOOR, 'label': BELOW_FLOOR_LABEL,
+                    'reason': f'{int(n_replicates or 0)} {replicate_unit}s: a trend reports p values from {floor_numeric}'}
+    else:
+        floor_level = facet_rules.p_floor_per_level(replicate_unit)
+        smallest = min(int(v) for v in (n_per_level or {}).values())
+        if smallest < floor_level:
+            return {'analysis_level': LEVEL_BELOW_FLOOR, 'label': BELOW_FLOOR_LABEL,
+                    'reason': f'{smallest} {replicate_unit}s in the smaller level: p values from {floor_level} per level'}
     return {'analysis_level': LEVEL_REPLICATE, 'label': REPLICATE_LABEL, 'reason': None}
 
 

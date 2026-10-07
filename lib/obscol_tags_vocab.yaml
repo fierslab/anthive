@@ -80,7 +80,7 @@ version: 1
 #                      when a dataset does not declare it
 #                      (`anthive_db.build_obs_view_sql`).
 #   facet_scopes       the facet scopes (lib/facet_scopes.py: human_postmortem,
-#                      mouse_in_vivo, xenograft_human_in_mouse, in_vitro) in
+#                      xenograft_human_in_mouse, in_vitro; mouse_in_vivo was retired 2026-10-07) in
 #                      which a dataset may publish the facet, or `all`.
 #                      `ant md-check` errors when a dataset maps the facet
 #                      outside these scopes (facet_scope_mismatch). Facets
@@ -189,24 +189,49 @@ tags:
   genotype:
     label: Genotype / model
     description: >
-      Genetic background or model that discriminates samples — mouse
-      lines (WT vs AppNLGF vs 5xFAD vs P301L), human variant carriers
-      (APOE ε4 vs ε3, PSEN1 variants, TREM2 R47H), or xenograft
-      donor genotype. Distinct from disease staging (see 'braak') and
-      distinct from disease-status flags. If a column mixes disease
-      state and genotype, split it before tagging.
+      Genotype of the genome of the SEQUENCED cells themselves: the graft
+      line of a xenograft (APOE e4/e4, TREM2 R47H, PICALM LOF) or the donor
+      of human tissue (TREM2 R62H carrier). The genotype of the mouse HOST of
+      a xenograft is `host_genotype`, never this tag. Distinct from disease
+      staging (see 'braak') and from disease-status flags. If a column mixes
+      cell genotype, host genotype or disease state, split it before tagging.
+      Pure mouse datasets publish no genotype facet (decision 2026-10-07).
     facet:
       status: registered
       scope: cross_dataset
-      facet_scopes: all
-      summary: Genetic background or model line that discriminates samples.
+      facet_scopes: [human_postmortem, xenograft_human_in_mouse, in_vitro]
+      summary: Genotype of the sequenced cells' own genome (graft line, donor).
       definition: >
-        Genotype or model of the sample, for example mouse lines (WT,
-        AppNLGF, 5xFAD) or human variant carriers. Not disease state.
+        Genotype of the cells that were sequenced: the graft line of a
+        xenograft or the donor of human tissue. The mouse host of a xenograft
+        has its own tag, host_genotype. Alleles are written with the shared
+        allele vocabulary (see the `allele_vocabulary` block of this file).
       kind: categorical
-      values: Dataset-specific labels, no shared vocabulary yet.
+      values: "Allele tokens of the shared vocabulary, for example APOE e4/e4, TREM2 R47H, wt; several loci joined with '; '."
       missing: Empty (NULL) when not recorded.
-      hint_keywords: [genotype, strain, line]
+      hint_keywords: [genotype, line]
+
+  host_genotype:
+    label: Host genotype (xenograft)
+    description: >
+      For xenograft studies: the genotype of the HOST mouse (for example
+      App NL-G-F or the humanised-App control). Kept separate from `genotype`
+      (the genome of the sequenced cells), as host_sex is from sex.
+    facet:
+      status: registered
+      scope: cross_dataset
+      facet_scopes: [xenograft_human_in_mouse]
+      summary: Genotype of the host mouse of a xenograft (App NL-G-F, App hu/hu, wt).
+      definition: >
+        Genotype of the mouse the human cells are grafted into, written with the
+        shared allele vocabulary (`allele_vocabulary`): App NL-G-F knock-in,
+        App hu/hu (humanised App control), wt, combinations joined with '; ' (for
+        example App NL-G-F; Apoe KO). The genotype of the grafted cells is the
+        genotype facet. The app_nlgf facet is derived from this one.
+      kind: categorical
+      values: "Allele tokens of the shared vocabulary, for example App NL-G-F, App hu/hu, wt."
+      missing: Empty (NULL) when the host genotype is not recorded.
+      hint_keywords: [host_genotype, mouse_genotype, app_genotype, mouse_model, strain]
 
   host_sex:
     label: Host sex (xenograft)
@@ -422,10 +447,10 @@ tags:
       replaced_by: [tissue]
       scope: cross_dataset
       facet_scopes: all
-      summary: Brain region or sub-region sampled, when it varies within a dataset.
+      summary: Retired 2026-10-07 (decision L38); the coarse region is tissue, the specific one tissue_uberon.
       definition: >
-        Anatomical region of the sample, used when one dataset combines
-        several regions. A single region for the whole dataset is in tissue.
+        Retired. The region information is in the coarse facet tissue and
+        in the plain column tissue_uberon (most specific UBERON term).
       kind: categorical
       values: Free-text region names, not yet a controlled vocabulary.
       missing: Empty (NULL) when not recorded.
@@ -434,19 +459,26 @@ tags:
   tissue:
     label: Tissue
     description: >
-      Tissue or anatomical structure of the sample.
+      Coarse brain region of the sample (umbrella terms such as prefrontal cortex).
     facet:
       status: registered
       scope: cross_dataset
-      facet_scopes: all
-      summary: Tissue or anatomical structure, often one constant per dataset.
+      facet_scopes: [human_postmortem]
+      controlled_values: [prefrontal cortex, cingulate cortex, frontal cortex, motor cortex, temporal cortex, parietal cortex, occipital cortex, insular cortex, entorhinal cortex, hippocampus, cerebral cortex, white matter, basal ganglia, thalamus, midbrain, cerebellum, brainstem, hypothalamus, spinal cord, olfactory bulb, brain]
+      summary: Coarse brain region (umbrella term), comparable across datasets.
       definition: >
-        Tissue the cells were taken from, using UBERON-style labels. Often
-        published as a constant for the whole dataset (api.obs_constant).
+        Coarse anatomical group of the sample, from the table in
+        lib/tissue_groups.yaml: every prefrontal subdivision (dorsolateral
+        prefrontal cortex BA9/46, frontal pole BA10, superior frontal gyrus)
+        is "prefrontal cortex", anterior cingulate is "cingulate cortex",
+        every white matter label is "white matter", and so on. The most
+        specific UBERON term of a dataset is in the plain columns
+        tissue_uberon and tissue_uberon_id, which are never facets.
+        Xenograft, in vitro and organoid datasets have no tissue facet.
       kind: categorical
-      values: "UBERON-style labels, for example 'prefrontal cortex', 'hippocampus'."
-      missing: Empty (NULL) when not recorded.
-      hint_keywords: [tissue]
+      values: "Group terms of lib/tissue_groups.yaml, for example 'prefrontal cortex', 'temporal cortex', 'hippocampus'."
+      missing: Empty (NULL) when not recorded or not mappable (for example a layer or a tumour label).
+      hint_keywords: [tissue, region, area, brain_region, location]
 
   cell_type:
     label: Cell type
@@ -471,10 +503,10 @@ tags:
       The authors' own cell-type annotation, kept as published.
     facet:
       status: deprecated
-      replaced_by: []
+      replaced_by: [author_cluster]
       scope: dataset
       facet_scopes: all
-      summary: The authors' cell-type labels, not harmonised.
+      summary: Retired 2026-10-07 (decision L35); merged into author_cluster.
       definition: >
         Cell-type annotation as published by the authors, kept for
         reference next to the harmonised cell_type facet.
@@ -491,14 +523,143 @@ tags:
       status: registered
       scope: dataset
       facet_scopes: all
-      summary: The authors' cluster or cell-state labels, local to each dataset.
+      summary: The authors' finest cluster or cell-state labels, local to each dataset.
       definition: >
-        Cluster or cell-state labels as published by the authors. Labels
-        are dataset specific and are not comparable across datasets.
+        The authors' finest clustering or annotation as published (clusters,
+        states, subtypes; the former author_cell_type is merged into it).
+        Explicitly dataset-scoped: labels are never compared across
+        datasets. A dataset with a single value does not publish it, and
+        broad cell-type labels belong in cell_type, not here.
       kind: categorical
       values: Dataset-specific labels.
       missing: Empty (NULL) for cells without a cluster.
       hint_keywords: [cluster, clusters, leiden, louvain, state, subcluster]
+
+  lesion:
+    label: Lesion (retired)
+    description: >
+      Retired singleton facet (one collection).
+    facet:
+      status: deprecated
+      replaced_by: []
+      scope: dataset
+      facet_scopes: all
+      summary: Retired 2026-10-07 (decisions L23 and L44); keep the values as a plain obs column.
+      definition: >
+        Retired. The values stay available as an ordinary obs column of the
+        dataset, not as an ant_ facet.
+      kind: categorical
+      values: Dataset-specific labels.
+      missing: Empty (NULL) when not recorded.
+      hint_keywords: [lesion]
+
+  ms_type:
+    label: MS type (retired)
+    description: >
+      Retired singleton facet (one collection).
+    facet:
+      status: deprecated
+      replaced_by: []
+      scope: dataset
+      facet_scopes: all
+      summary: Retired 2026-10-07 (decisions L23 and L44); keep the values as a plain obs column.
+      definition: >
+        Retired. The values stay available as an ordinary obs column of the
+        dataset, not as an ant_ facet.
+      kind: categorical
+      values: Dataset-specific labels.
+      missing: Empty (NULL) when not recorded.
+      hint_keywords: [ms_type]
+
+  cause_of_death:
+    label: Cause of death (retired)
+    description: >
+      Retired singleton facet (one collection).
+    facet:
+      status: deprecated
+      replaced_by: []
+      scope: dataset
+      facet_scopes: all
+      summary: Retired 2026-10-07 (decisions L23 and L44); keep the values as a plain obs column.
+      definition: >
+        Retired. The values stay available as an ordinary obs column of the
+        dataset, not as an ant_ facet.
+      kind: categorical
+      values: Dataset-specific labels.
+      missing: Empty (NULL) when not recorded.
+      hint_keywords: [cause_of_death]
+
+  ethnicity:
+    label: Ethnicity (retired)
+    description: >
+      Retired singleton facet (too sparse and not harmonised).
+    facet:
+      status: deprecated
+      replaced_by: []
+      scope: dataset
+      facet_scopes: all
+      summary: Retired 2026-10-07 (decisions L23 and L44); keep the values as a plain obs column.
+      definition: >
+        Retired. The values stay available as an ordinary obs column of the
+        dataset, not as an ant_ facet.
+      kind: categorical
+      values: Dataset-specific labels.
+      missing: Empty (NULL) when not recorded.
+      hint_keywords: [ethnicity]
+
+  source_institution:
+    label: Source institution (retired)
+    description: >
+      Retired singleton facet (a technical descriptor).
+    facet:
+      status: deprecated
+      replaced_by: []
+      scope: dataset
+      facet_scopes: all
+      summary: Retired 2026-10-07 (decisions L23 and L44); keep the values as a plain obs column.
+      definition: >
+        Retired. The values stay available as an ordinary obs column of the
+        dataset, not as an ant_ facet.
+      kind: categorical
+      values: Dataset-specific labels.
+      missing: Empty (NULL) when not recorded.
+      hint_keywords: [source_institution]
+
+  technology:
+    label: Technology (retired)
+    description: >
+      Retired singleton facet (a dataset-level field, not a per-cell facet).
+    facet:
+      status: deprecated
+      replaced_by: []
+      scope: dataset
+      facet_scopes: all
+      summary: Retired 2026-10-07 (decisions L23 and L44); keep the values as a plain obs column.
+      definition: >
+        Retired. The values stay available as an ordinary obs column of the
+        dataset, not as an ant_ facet.
+      kind: categorical
+      values: Dataset-specific labels.
+      missing: Empty (NULL) when not recorded.
+      hint_keywords: [technology]
+
+  group:
+    label: Group (retired)
+    description: >
+      Retired singleton facet (folded into the tissue mapping).
+    facet:
+      status: deprecated
+      replaced_by: []
+      scope: dataset
+      facet_scopes: all
+      summary: Retired 2026-10-07 (decisions L23 and L44); keep the values as a plain obs column.
+      definition: >
+        Retired. The values stay available as an ordinary obs column of the
+        dataset, not as an ant_ facet.
+      kind: categorical
+      values: Dataset-specific labels.
+      missing: Empty (NULL) when not recorded.
+      hint_keywords: [group]
 
   # ── Tags added 2026-10-05 with the closed namespace (decision L1) and the
   #    disease vocabulary split (L17, L19, L21, L22) and donor identity (L5) ──
@@ -615,17 +776,16 @@ tags:
   app_nlgf:
     label: App NL-G-F knock-in genotype
     description: >
-      Whether the mouse (or the host mouse of a xenograft) carries the App
-      NL-G-F knock-in allele (nlgf) or is the study's control (control).
+      Whether the host mouse of a xenograft carries the App NL-G-F knock-in
+      allele (nlgf) or is the study's control (control). Derived from host_genotype.
     facet:
       status: registered
       scope: cross_dataset
-      facet_scopes: [mouse_in_vivo, xenograft_human_in_mouse]
+      facet_scopes: [xenograft_human_in_mouse]
       controlled_values: [nlgf, control]
-      summary: App NL-G-F knock-in mouse (nlgf) or the study's control mouse (control).
+      summary: App NL-G-F knock-in host (nlgf) or the study's control host (control) of a xenograft.
       definition: >
-        Genotype of the mouse the cells come from, or of the host mouse for a
-        xenograft: nlgf is the App NL-G-F knock-in amyloid model, control is the
+        Genotype of the host mouse of a xenograft (host_genotype): nlgf is the App NL-G-F knock-in amyloid model, control is the
         study's comparison mouse (wild type, or the humanised-App knock-in
         AppHuHu / hApp control of the xenograft studies). Only the NL-G-F
         knock-in counts as nlgf: other amyloid or tau models (APP/PS1, 5xFAD,
@@ -639,3 +799,15 @@ tags:
         Empty (NULL) when the study has no comparison mouse, when every animal
         is nlgf, or the genotype is a combination with another engineered allele.
       hint_keywords: [nlgf, nl-g-f, app_genotype, mouse_model, mouse_genotype]
+
+# Shared allele vocabulary (2026-10-07, audit L41) for the `genotype` and `host_genotype` facets. Not enforced as controlled
+# values; datasets write these tokens so that genotypes compare across studies. A value is one token per locus, several
+# loci joined with '; '. `wt` is wild type at every locus listed elsewhere.
+allele_vocabulary:
+  App:    [App NL-G-F, App hu/hu, App wt]            # mouse host knock-ins: NL-G-F, humanised App, wild type
+  APOE:   [APOE e2/e2, APOE e2/e3, APOE e2/e4, APOE e3/e3, APOE e3/e4, APOE e4/e4, APOE KO]   # human cells; Apoe KO for a host
+  TREM2:  [TREM2 R47H, TREM2 R62H, TREM2 CV, TREM2 KO]
+  PSEN1:  [PSEN1 Int4/Int4, PSEN1 Int4/wt, PSEN1 wt/wt, PSEN1 null/null]
+  PSEN2:  [PSEN2 null/null]
+  PICALM: [PICALM LOF]
+  other:  [wt, karyotype XY, karyotype XX, karyotype XO, karyotype XXY]

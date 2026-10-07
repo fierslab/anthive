@@ -383,7 +383,7 @@ def test_lineage_fields(serve):
     human = {'organism': 'human', 'experimental_system': 'post_mortem_tissue'}
     assert lineage({}, ['ant_sex'], human, [], db_id='G1/PRI')['facet_scope'] == 'human_postmortem'
     assert lineage({}, ['ant_host_sex'], human, [], db_id='G1/PRI')['facet_scope'] == 'xenograft_human_in_mouse'
-    assert lineage({}, [], {'organism': 'mouse'}, [])['facet_scope'] == 'mouse_in_vivo'
+    assert lineage({}, [], {'organism': 'mouse'}, [])['facet_scope'] is None          # pure mouse: no facet layer
     assert lineage({'is_secondary': False}, [])['designation'] == 'primary'
     assert lineage({}, [])['designation'] == 'unresolved'
     assert namespace['_secondary_db_ids']() == {'G1/REA'}
