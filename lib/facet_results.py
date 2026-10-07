@@ -229,7 +229,10 @@ def gate_words(facet: Optional[str]) -> str:
 def source_priority(celltype_source: Any) -> int:
     """0 dataset constant, 1 derived group pool (all labels of a cell type group),
     2 per-cell ant_cell_type, 3 author cell type column, 4 author clusters, 5 all cells pooled."""
-    return _SOURCE_PRIORITY.get(str(celltype_source).split('@')[0], _AUTHOR_SOURCE_PRIORITY)
+    source = str(celltype_source).split('@')[0]
+    if source.endswith('_author_cluster'):
+        return _SOURCE_PRIORITY['ant_author_cluster']
+    return _SOURCE_PRIORITY.get(source, _AUTHOR_SOURCE_PRIORITY)
 
 
 def _known_group_names() -> set:
@@ -2439,6 +2442,8 @@ def _stratum_source_text(source: str) -> str:
         return f'{_stratum_source_text(base)}, stratum {subset.replace("|", ", ")}'
     if source in _STRATUM_SOURCES:
         return _STRATUM_SOURCES[source]
+    if source.endswith('_author_cluster'):
+        return f'author clusters ({source}), dataset-scoped, expression-defined groups'
     return f'per-cell author column {source}'
 
 

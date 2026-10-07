@@ -191,6 +191,37 @@ labels:
   # other
   ependymal cell: ependymal cell
   choroid plexus epithelial cell: choroid plexus epithelial cell
+  # Cell Ontology neuron subtypes (2026-10-07: per-cell ant_cell_type of SEA-AD, Ma2022, Galvao2024, Smajic2022, Lu nuclei)
+  L2/3 intratelencephalic projecting glutamatergic neuron: excitatory neuron
+  L2/3-6 intratelencephalic projecting glutamatergic neuron: excitatory neuron
+  L4 intratelencephalic projecting glutamatergic neuron: excitatory neuron
+  L5 intratelencephalic projecting glutamatergic neuron: excitatory neuron
+  L6 intratelencephalic projecting glutamatergic neuron: excitatory neuron
+  L6 intratelencephalic projecting Car3 glutamatergic neuron: excitatory neuron
+  L5 extratelencephalic projecting glutamatergic cortical neuron: excitatory neuron
+  L5/6 near-projecting glutamatergic neuron of the primary motor cortex: excitatory neuron
+  L6 corticothalamic-projecting glutamatergic cortical neuron: excitatory neuron
+  L6b glutamatergic cortical neuron: excitatory neuron
+  VIP GABAergic interneuron: inhibitory neuron
+  pvalb GABAergic interneuron: inhibitory neuron
+  sst GABAergic interneuron: inhibitory neuron
+  lamp5 GABAergic interneuron: inhibitory neuron
+  sncg GABAergic interneuron: inhibitory neuron
+  Lamp5 Lhx6 neuron: inhibitory neuron
+  pvalb chandelier GABAergic interneuron: inhibitory neuron
+  PAX6 GABAergic interneuron: inhibitory neuron
+  sst chodl GABAergic interneuron: inhibitory neuron
+  cerebral cortex GABAergic interneuron: inhibitory neuron
+  # immune and myeloid labels of the per-cell derives (L32)
+  central nervous system macrophage: perivascular macrophage   # CNS-associated macrophages; same group as CAMs
+  monocyte: myeloid (mixed)
+  conventional dendritic cell: myeloid (mixed)
+  plasmacytoid dendritic cell: myeloid (mixed)
+  lymphocyte: immune (mixed)
+  plasmablast: immune (mixed)
+  B cell: immune (mixed)
+  natural killer cell: immune (mixed)
+  neural cell: neuron (mixed)
   # not a cell type
   all: unmapped                          # Gerrits2021, all cells pooled
   unknown: unmapped

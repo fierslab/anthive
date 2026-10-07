@@ -486,8 +486,10 @@ secondary (S25/V6C, V6S, V6M and the other `prs.*` objects).
   term is the plain column `tissue_uberon` with `tissue_uberon_id`; they are not registered facets. `ant_region` is
   deprecated (`replaced_by: tissue`). The facet exists in `human_postmortem` only: xenograft and in vitro datasets do
   not publish it. `lib/tissue_groups.py` exposes `coarse_tissue`, `uberon_id`, `lookup`.
-* **Author clusters.** `ant_author_cluster` is dataset-scoped by definition; `ant_author_cell_type` is deprecated and merged
-  into it. Broad cell-type labels belong in `ant_cell_type` (Cell Ontology labels; labels that are not cell types are NULL).
+* **Author clusters.** The generic `ant_author_cluster` and `ant_author_cell_type` are deprecated. Clusters are published per cell
+  type as `ant_<group>_author_cluster` (mg, astro, oligo, opc, exn, inn, endo; registry flag `dataset_scoped`, values
+  `<db_id>/cluster_<label>`), only where they nest inside one cell type. Broad cell-type labels belong in `ant_cell_type` (Cell
+  Ontology labels; labels that are not cell types are NULL).
 * **Retired singleton facets**: `lesion`, `ms_type`, `cause_of_death`, `ethnicity`, `source_institution`, `technology`,
   `group` are deprecated registry entries; the values live in plain obs columns.
 * `ant_genotype` is the genotype of the sequenced cells, `ant_host_genotype` the mouse host (registered, xenograft scope).

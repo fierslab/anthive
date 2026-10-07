@@ -104,8 +104,10 @@ Facet engine v3c (same unreleased version, 2026-10-07):
 - Units add `analysis_level` `below_floor` (descriptive) next to `replicate` and `cell`; rows and units add `n_small`;
   `r_strong` / `replicated_strong` (tau 25 percent) next to `r_treat`; unit QC `lambda_gc`, `inflated`, `df_total_median`,
   `notes`; new tested facets `braak_threshold`, `apoe4_dose` (registered under `braak` and `apoe4_carrier`).
-- Registry: `tissue` is a coarse facet with controlled values (21 group terms, `human_postmortem` only); `region` and
-  `author_cell_type` are deprecated; `host_genotype` is new; `lesion`, `ms_type`, `cause_of_death`, `ethnicity`,
+- Registry: `tissue` is a coarse facet with controlled values (21 group terms, `human_postmortem` only); `region`,
+  `author_cell_type` and the generic `author_cluster` are deprecated, replaced by `mg_author_cluster`, `astro_author_cluster`,
+  `oligo_author_cluster`, `opc_author_cluster`, `exn_author_cluster`, `inn_author_cluster`, `endo_author_cluster` (dataset-scoped,
+  `dataset_scoped` in the registry entry, no gene tests); `host_genotype` is new; `lesion`, `ms_type`, `cause_of_death`, `ethnicity`,
   `source_institution`, `technology`, `group` are deprecated entries. `ant_tissue` values change (umbrella terms); the
   specific term is the plain column `tissue_uberon` (+ `tissue_uberon_id`). `ant_cell_type` is NULL for cells the authors left
   unassigned or called doublets.

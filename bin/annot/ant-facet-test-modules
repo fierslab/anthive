@@ -597,7 +597,7 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
         wanted = ['ant_donor', 'ant_donor_uid', 'ant_sex', 'ant_host_sex', 'ant_disease', 'ant_apoe',
                   'ant_apoe4_carrier', 'ant_apoe_carrier', 'ant_app_nlgf', 'ant_braak', 'ant_age', 'ant_pmi',
                   'ant_cell_type', 'ant_author_cell_type',
-                  'ant_tissue', 'tissue_uberon', 'ant_region', 'ant_author_cluster']
+                  'ant_tissue', 'tissue_uberon', 'ant_region', *aft.AUTHOR_CLUSTER_COLUMNS]
         extra = [c for c in cat_columns if (aft.CELLTYPE_CANDIDATE_RE.match(c) or aft.BATCH_NAME_RE.search(c))
                  and not c.startswith('ant_')]
         exclusion_columns = [c for c in (exclusion_rule.obs_columns if exclusion_rule else [])

@@ -364,6 +364,8 @@ def build_obs_view_sql(
 # re-ingest, new scores) produces a new key and the stale entry ages out.
 _OBS_SUMMARY_MEMO: "OrderedDict[tuple, Dict[str, Dict[str, Any]]]" = OrderedDict()
 _OBS_SUMMARY_MEMO_MAX_ENTRIES = 256
+#: Categorical columns whose HyperLogLog estimate is at most this are recounted exactly.
+_OBS_SUMMARY_EXACT_UNIQUE_LIMIT = 5000
 _OBS_SUMMARY_MEMO_LOCK = threading.Lock()
 
 _NUMERIC_TYPE_PREFIXES = (
@@ -969,8 +971,9 @@ class AnthiveDB:
                          plus 'has_nonfinite': True when inf/nan values were
                          nulled out of the stats
 
-        ``n_unique`` is HyperLogLog-approximate (as DuckDB SUMMARIZE's
-        ``approx_unique``); every quantile, the median included, is exact.
+        ``n_unique`` is exact up to ``_OBS_SUMMARY_EXACT_UNIQUE_LIMIT`` distinct values and
+        HyperLogLog-approximate above it (the estimate is badly biased for small
+        cardinalities); every quantile, the median included, is exact.
         Missing values are reported as ``pct_missing`` (0-100). Empty when
         neither obscat nor obsnum exists in this dataset.
 
@@ -1066,12 +1069,28 @@ class AnthiveDB:
             except duckdb.Error:
                 continue
             total_rows = int(aggregate_row[0] or 0)
+            exact_unique: Dict[str, int] = {}
+            if kind == 'cat':
+                # HyperLogLog overestimates small cardinalities badly (89 donors read as 104), so a column the estimate
+                # puts below the exact-count limit is counted exactly in one more pass over those columns only.
+                small_columns = [name for index, (name, _dtype) in enumerate(columns)
+                                 if int(aggregate_row[1 + 2 * index] or 0) <= _OBS_SUMMARY_EXACT_UNIQUE_LIMIT]
+                if small_columns:
+                    try:
+                        exact_row = self._conn.execute(
+                            f"SELECT {', '.join(f'COUNT(DISTINCT {_q(name)})' for name in small_columns)} FROM {source_sql}"
+                        ).fetchone()
+                        exact_unique = {name: int(count) for name, count in zip(small_columns, exact_row)}
+                    except duckdb.Error:
+                        exact_unique = {}
 
             position = 1
             for name, _dtype in columns:
                 if kind == 'cat':
                     n_unique, non_null = aggregate_row[position:position + 2]
                     position += 2
+                    if name in exact_unique:
+                        n_unique = exact_unique[name]
                     out[name] = {
                         'type': 'cat',
                         'n_unique': int(n_unique) if n_unique is not None else 0,

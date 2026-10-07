@@ -192,7 +192,7 @@ def facet_registry() -> Dict[str, Dict[str, Any]]:
     Only tags whose ``facet:`` block has a ``status`` of ``registered`` or
     ``deprecated`` are facets. Each entry has ``tag``, ``column``
     (``ant_<tag>``), ``status``, ``kind`` (categorical / numerical),
-    ``scope`` (cross_dataset / dataset), ``facet_scopes`` (list of facet scopes,
+    ``scope`` (cross_dataset / dataset), ``dataset_scoped`` (labels are only meaningful inside one dataset), ``facet_scopes`` (list of facet scopes,
     ``lib/facet_scopes.py``; every scope when the vocab says ``all`` or nothing),
     ``replaced_by`` (list),
     ``controlled_values`` (list, empty when free), ``ordered``, ``range``
@@ -230,6 +230,7 @@ def facet_registry() -> Dict[str, Dict[str, Any]]:
             'status': status,
             'kind': kind,
             'scope': _clean_text(block.get('scope')) or 'cross_dataset',
+            'dataset_scoped': bool(block.get('dataset_scoped', _clean_text(block.get('scope')) == 'dataset')),
             'facet_scopes': facet_scopes or list(FACET_SCOPE_NAMES),
             'replaced_by': _as_list(block.get('replaced_by')),
             'controlled_values': _as_list(block.get('controlled_values')),

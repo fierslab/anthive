@@ -445,3 +445,25 @@ def test_annotation_writer_add_after_commit_refused(dataset):
         writer.commit()
         with pytest.raises(AnnotationWriterError, match='already committed'):
             writer.add_numerical('late', pd.Series({n: 1.0 for n in CELL_NAMES}))
+
+
+def test_obs_summary_n_unique_is_exact_for_small_cardinalities(tmp_path, monkeypatch):
+    """HyperLogLog read 89 donors as 104 on a real dataset; small cardinalities are counted exactly."""
+    n_cells, n_donors = 6000, 89
+    monkeypatch.setattr(sys.modules[__name__], 'N_CELLS', n_cells)
+    monkeypatch.setattr(sys.modules[__name__], 'CELL_NAMES', [f"cell_{i:05d}" for i in range(n_cells)])
+
+    def frames():
+        obsnum = pd.DataFrame({'cell_id': range(n_cells), 'age_raw': np.arange(n_cells, dtype=float),
+                               'n_counts': np.ones(n_cells), 'secret': np.zeros(n_cells)})
+        obscat = pd.DataFrame({'cell_id': range(n_cells), 'donor_raw': [f"D{i % n_donors}" for i in range(n_cells)],
+                               'batch': ['a'] * n_cells, 'tie_col': ['x'] * n_cells})
+        return obsnum, obscat
+
+    monkeypatch.setattr(sys.modules[__name__], '_obs_frames', frames)
+    clear_obs_summary_memo()
+    handle = AnthiveDB(build_dataset(tmp_path))
+    try:
+        assert handle.obs_summary()['ant_donor']['n_unique'] == n_donors
+    finally:
+        handle.close()

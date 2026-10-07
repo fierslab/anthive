@@ -150,7 +150,7 @@ tags:
       as a discrete grouping axis rather than an ordinal covariate.
     facet:
       status: deprecated
-      replaced_by: [author_cluster]
+      replaced_by: []
       scope: dataset
       facet_scopes: all
       summary: Unsupervised cluster label (leiden, louvain, seurat_clusters).
@@ -503,10 +503,10 @@ tags:
       The authors' own cell-type annotation, kept as published.
     facet:
       status: deprecated
-      replaced_by: [author_cluster]
+      replaced_by: []
       scope: dataset
       facet_scopes: all
-      summary: Retired 2026-10-07 (decision L35); merged into author_cluster.
+      summary: Retired 2026-10-07 (decision L35); the columns stay as plain obs columns.
       definition: >
         Cell-type annotation as published by the authors, kept for
         reference next to the harmonised cell_type facet.
@@ -516,24 +516,172 @@ tags:
       hint_keywords: [celltype, cell_type, annotation, subtype]
 
   author_cluster:
-    label: Author cluster
+    label: Author cluster (retired)
     description: >
-      The authors' cluster or cell-state labels, kept as published.
+      The authors' clusters, kept as published. Retired as a facet on 2026-10-07 (decision L35):
+      clusters are only meaningful inside one cell type, see the per-cell-type author cluster facets.
     facet:
-      status: registered
+      status: deprecated
+      replaced_by: [mg_author_cluster, astro_author_cluster, oligo_author_cluster, opc_author_cluster, exn_author_cluster, inn_author_cluster, endo_author_cluster]
       scope: dataset
+      dataset_scoped: true
       facet_scopes: all
-      summary: The authors' finest cluster or cell-state labels, local to each dataset.
+      summary: Retired 2026-10-07; replaced by one author cluster facet per cell type group.
       definition: >
-        The authors' finest clustering or annotation as published (clusters,
-        states, subtypes; the former author_cell_type is merged into it).
-        Explicitly dataset-scoped: labels are never compared across
-        datasets. A dataset with a single value does not publish it, and
-        broad cell-type labels belong in cell_type, not here.
+        Retired. A cluster label is only comparable inside one cell type of one dataset. The author columns stay
+        as plain obs columns; the clusters that nest inside one cell type are published as
+        ant_<group>_author_cluster (mg, astro, oligo, opc, exn, inn, endo).
       kind: categorical
       values: Dataset-specific labels.
       missing: Empty (NULL) for cells without a cluster.
       hint_keywords: [cluster, clusters, leiden, louvain, state, subcluster]
+
+  mg_author_cluster:
+    label: Author cluster (microglia)
+    description: >
+      The authors' finest clustering inside the microglia population of one dataset, kept as published.
+    facet:
+      status: registered
+      scope: dataset
+      dataset_scoped: true
+      facet_scopes: all
+      summary: The authors' clusters or states of the microglia population, local to each dataset.
+      definition: >
+        Cluster or cell-state labels of microglia cells as published by the authors, written
+        <db_id>/cluster_<label>. Dataset-scoped by definition: labels are never compared across datasets.
+        Published only where the authors' clusters nest inside this one cell type (a single-cell-type dataset, or a
+        mixed dataset whose clusters belong to one cell type; cells of other types are empty). No gene tests run
+        on it; a per-donor cluster composition analysis is planned.
+      kind: categorical
+      values: Dataset-specific labels.
+      missing: Empty (NULL) for cells without a cluster or of another cell type.
+      hint_keywords: [mg_cluster]
+
+  astro_author_cluster:
+    label: Author cluster (astrocyte)
+    description: >
+      The authors' finest clustering inside the astrocyte population of one dataset, kept as published.
+    facet:
+      status: registered
+      scope: dataset
+      dataset_scoped: true
+      facet_scopes: all
+      summary: The authors' clusters or states of the astrocyte population, local to each dataset.
+      definition: >
+        Cluster or cell-state labels of astrocyte cells as published by the authors, written
+        <db_id>/cluster_<label>. Dataset-scoped by definition: labels are never compared across datasets.
+        Published only where the authors' clusters nest inside this one cell type (a single-cell-type dataset, or a
+        mixed dataset whose clusters belong to one cell type; cells of other types are empty). No gene tests run
+        on it; a per-donor cluster composition analysis is planned.
+      kind: categorical
+      values: Dataset-specific labels.
+      missing: Empty (NULL) for cells without a cluster or of another cell type.
+      hint_keywords: [astro_cluster]
+
+  oligo_author_cluster:
+    label: Author cluster (oligodendrocyte)
+    description: >
+      The authors' finest clustering inside the oligodendrocyte population of one dataset, kept as published.
+    facet:
+      status: registered
+      scope: dataset
+      dataset_scoped: true
+      facet_scopes: all
+      summary: The authors' clusters or states of the oligodendrocyte population, local to each dataset.
+      definition: >
+        Cluster or cell-state labels of oligodendrocyte cells as published by the authors, written
+        <db_id>/cluster_<label>. Dataset-scoped by definition: labels are never compared across datasets.
+        Published only where the authors' clusters nest inside this one cell type (a single-cell-type dataset, or a
+        mixed dataset whose clusters belong to one cell type; cells of other types are empty). No gene tests run
+        on it; a per-donor cluster composition analysis is planned.
+      kind: categorical
+      values: Dataset-specific labels.
+      missing: Empty (NULL) for cells without a cluster or of another cell type.
+      hint_keywords: [oligo_cluster]
+
+  opc_author_cluster:
+    label: Author cluster (oligodendrocyte precursor cell)
+    description: >
+      The authors' finest clustering inside the oligodendrocyte precursor cell population of one dataset, kept as published.
+    facet:
+      status: registered
+      scope: dataset
+      dataset_scoped: true
+      facet_scopes: all
+      summary: The authors' clusters or states of the oligodendrocyte precursor cell population, local to each dataset.
+      definition: >
+        Cluster or cell-state labels of oligodendrocyte precursor cell cells as published by the authors, written
+        <db_id>/cluster_<label>. Dataset-scoped by definition: labels are never compared across datasets.
+        Published only where the authors' clusters nest inside this one cell type (a single-cell-type dataset, or a
+        mixed dataset whose clusters belong to one cell type; cells of other types are empty). No gene tests run
+        on it; a per-donor cluster composition analysis is planned.
+      kind: categorical
+      values: Dataset-specific labels.
+      missing: Empty (NULL) for cells without a cluster or of another cell type.
+      hint_keywords: [opc_cluster]
+
+  exn_author_cluster:
+    label: Author cluster (excitatory (glutamatergic) neuron)
+    description: >
+      The authors' finest clustering inside the excitatory (glutamatergic) neuron population of one dataset, kept as published.
+    facet:
+      status: registered
+      scope: dataset
+      dataset_scoped: true
+      facet_scopes: all
+      summary: The authors' clusters or states of the excitatory (glutamatergic) neuron population, local to each dataset.
+      definition: >
+        Cluster or cell-state labels of excitatory (glutamatergic) neuron cells as published by the authors, written
+        <db_id>/cluster_<label>. Dataset-scoped by definition: labels are never compared across datasets.
+        Published only where the authors' clusters nest inside this one cell type (a single-cell-type dataset, or a
+        mixed dataset whose clusters belong to one cell type; cells of other types are empty). No gene tests run
+        on it; a per-donor cluster composition analysis is planned.
+      kind: categorical
+      values: Dataset-specific labels.
+      missing: Empty (NULL) for cells without a cluster or of another cell type.
+      hint_keywords: [exn_cluster]
+
+  inn_author_cluster:
+    label: Author cluster (inhibitory (GABAergic) neuron)
+    description: >
+      The authors' finest clustering inside the inhibitory (GABAergic) neuron population of one dataset, kept as published.
+    facet:
+      status: registered
+      scope: dataset
+      dataset_scoped: true
+      facet_scopes: all
+      summary: The authors' clusters or states of the inhibitory (GABAergic) neuron population, local to each dataset.
+      definition: >
+        Cluster or cell-state labels of inhibitory (GABAergic) neuron cells as published by the authors, written
+        <db_id>/cluster_<label>. Dataset-scoped by definition: labels are never compared across datasets.
+        Published only where the authors' clusters nest inside this one cell type (a single-cell-type dataset, or a
+        mixed dataset whose clusters belong to one cell type; cells of other types are empty). No gene tests run
+        on it; a per-donor cluster composition analysis is planned.
+      kind: categorical
+      values: Dataset-specific labels.
+      missing: Empty (NULL) for cells without a cluster or of another cell type.
+      hint_keywords: [inn_cluster]
+
+  endo_author_cluster:
+    label: Author cluster (endothelial cell)
+    description: >
+      The authors' finest clustering inside the endothelial cell population of one dataset, kept as published.
+    facet:
+      status: registered
+      scope: dataset
+      dataset_scoped: true
+      facet_scopes: all
+      summary: The authors' clusters or states of the endothelial cell population, local to each dataset.
+      definition: >
+        Cluster or cell-state labels of endothelial cell cells as published by the authors, written
+        <db_id>/cluster_<label>. Dataset-scoped by definition: labels are never compared across datasets.
+        Published only where the authors' clusters nest inside this one cell type (a single-cell-type dataset, or a
+        mixed dataset whose clusters belong to one cell type; cells of other types are empty). No gene tests run
+        on it; a per-donor cluster composition analysis is planned.
+      kind: categorical
+      values: Dataset-specific labels.
+      missing: Empty (NULL) for cells without a cluster or of another cell type.
+      hint_keywords: [endo_cluster]
 
   lesion:
     label: Lesion (retired)

@@ -40,12 +40,20 @@ v3b or v3 differ, this section wins.
   counts `ant_tissue`, `tissue_uberon` and `ant_region`, so multi-region donors stay flagged. Pools are defined by the cohort
   table member list and need no region column.
 * **Cell types and clusters.** Author labels that are not cell types (`unknown`, `unID`, `doublet`) are NULL in
-  `ant_cell_type` (cells stay). `ant_author_cluster` is explicitly dataset-scoped (the authors' finest clustering, never compared
-  across datasets); `ant_author_cell_type` is retired and merged into it; single-valued clusters are no longer published;
-  cell-type labels moved to per-cell `ant_cell_type` with Cell Ontology labels (SEA-AD inhibitory subclasses, Smajic, Lu
-  nuclei, Shah). Contradicted constants became per-cell derives (Gazestani, Mathys 2024, Lee 2026 class MG and PVM, Prinz
-  human myeloid atlas, Olah, Fancy vascular). DeBaene2026 doublets are NULL; its BAM clusters stay "microglial cell"
-  (a derive reads one column; follow-up). `unknown`, `doublet` and the like are never strata.
+  `ant_cell_type` (cells stay). The generic `ant_author_cluster` is retired as a facet (plain author columns stay). Author
+  clusters are published per cell type only, as `ant_<group>_author_cluster` (`mg`, `astro`, `oligo`, `opc`, `exn`, `inn`,
+  `endo`; registered with `dataset_scoped: true`, values `<db_id>/cluster_<label>`, never compared across datasets): for
+  single-cell-type datasets, and for mixed datasets only where the clusters nest inside one cell type (SEA-AD supertypes
+  inside the microglia, inhibitory and excitatory files, the Mathys microglia and astrocyte clusters, Olah and Lee microglia
+  states; cells of other types are empty). Columns that span cell types (Lu subtypes, Gittings layers, Zhou, Zelic, the
+  Ayhan, Galvao, Castonguay, Jakel, Yang cell-type columns) are not published. No gene tests run on these facets; the unit
+  composition tables (`facet_composition.parquet`) carry the donor x cluster proportions of the dataset's cluster column for
+  the planned composition analysis (`ant-facet-test.author_cluster_column`). `ant_author_cell_type` is retired. Cell-type
+  labels moved to per-cell `ant_cell_type` with Cell Ontology labels (SEA-AD inhibitory subclasses and excitatory layers,
+  Smajic, Lu nuclei, Shah); `lib/celltype_groups.yaml` maps these labels to the groups. Contradicted constants became
+  per-cell derives (Gazestani, Mathys 2023 and 2024, Lee 2026 class MG and PVM, Prinz human myeloid atlas, Olah, Fancy
+  vascular). DeBaene2026 doublets are NULL; its BAM clusters stay "microglial cell" (a derive reads one column;
+  follow-up). `unknown`, `doublet` and the like are never strata.
 * **Retired facets.** `lesion`, `ms_type`, `cause_of_death`, `ethnicity`, `source_institution`, `technology`, `group` are
   `deprecated` in the registry (they were already plain columns since 2026-10-05; `ant_group` folds into the tissue mapping).
 * **Cohort table.** Xenograft datasets that are tested got their own anchor rows (independence `unknown`); LC5/VCF, LC5/XNB

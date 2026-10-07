@@ -25,7 +25,9 @@ VOCAB = Path(obscol_tags.VOCAB_PATH)
 
 APPROVED_REGISTERED = {
     'donor', 'sex', 'host_sex', 'age', 'pmi', 'disease', 'braak', 'braak_group', 'apoe',
-    'apoe4_carrier', 'cell_type', 'tissue', 'genotype', 'author_cluster',
+    'apoe4_carrier', 'cell_type', 'tissue', 'genotype',
+    'mg_author_cluster', 'astro_author_cluster', 'oligo_author_cluster', 'opc_author_cluster',
+    'exn_author_cluster', 'inn_author_cluster', 'endo_author_cluster',
     'cognitive_status', 'comorbidity', 'adnc', 'donor_uid', 'app_nlgf', 'host_genotype',
 }
 
@@ -64,7 +66,8 @@ def test_new_facet_vocabularies():
     assert registry['adnc']['controlled_values'] == ['Not', 'Low', 'Intermediate', 'High']
     assert registry['adnc']['ordered'] is True
     assert registry['braak']['range'] == (0.0, 6.0) and registry['braak']['integer']
-    assert registry['author_cluster']['scope'] == 'dataset'
+    assert registry['author_cluster']['scope'] == 'dataset' and registry['author_cluster']['status'] == 'deprecated'
+    assert registry['mg_author_cluster']['scope'] == 'dataset'
     assert '<cohort>:<id>' in obscol_tags.facet_definition('ant_donor_uid')['summary']
     assert registry['braak_group']['computed_from'] == 'braak'
 

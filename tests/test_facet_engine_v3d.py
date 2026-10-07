@@ -18,8 +18,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import facet_lint  # noqa: E402
+import facet_results  # noqa: E402
 import facet_scopes  # noqa: E402
 import obscol_tags  # noqa: E402
+import celltype_groups  # noqa: E402
 import tissue_groups  # noqa: E402
 from test_facet_test import aft, make_dataset  # noqa: E402
 
@@ -152,11 +154,43 @@ def test_retired_facets_are_deprecated(name):
     assert obscol_tags.facet_registry()[name]['status'] == 'deprecated'
 
 
-def test_author_cell_type_is_merged_into_author_cluster():
+CLUSTER_TAGS = ['mg_author_cluster', 'astro_author_cluster', 'oligo_author_cluster', 'opc_author_cluster',
+                'exn_author_cluster', 'inn_author_cluster', 'endo_author_cluster']
+
+
+def test_generic_author_cluster_is_retired_for_per_cell_type_facets():
     registry = obscol_tags.facet_registry()
-    assert registry['author_cell_type']['replaced_by'] == ['author_cluster']
+    assert registry['author_cluster']['status'] == 'deprecated'
+    assert registry['author_cluster']['replaced_by'] == CLUSTER_TAGS
     assert registry['region']['replaced_by'] == ['tissue']
-    assert 'dataset-scoped' in obscol_tags.facet_definition('author_cluster')['definition'].replace('\n', ' ')
+    for tag in CLUSTER_TAGS:
+        assert registry[tag]['status'] == 'registered'
+        assert registry[tag]['dataset_scoped'] is True and registry[tag]['scope'] == 'dataset'
+    assert registry['sex']['dataset_scoped'] is False
+
+
+def test_cluster_columns_match_the_registry_and_are_never_cross_dataset():
+    assert set(aft.AUTHOR_CLUSTER_COLUMNS) == {'ant_' + tag for tag in CLUSTER_TAGS} | {'ant_author_cluster'}
+    assert 'ant_mg_author_cluster' in aft.AUTHOR_CLUSTER_COLUMNS
+
+
+def test_author_cluster_column_prefers_the_per_cell_type_column():
+    frame = pd.DataFrame({'ant_donor': ['a'], 'ant_author_cluster': ['x'], 'ant_mg_author_cluster': ['y']})
+    assert aft.author_cluster_column(frame) == 'ant_mg_author_cluster'
+    assert aft.author_cluster_column(frame.drop(columns='ant_mg_author_cluster')) == 'ant_author_cluster'
+    assert aft.author_cluster_column(frame[['ant_donor']]) is None
+
+
+def test_cluster_strata_and_source_priority_accept_the_per_group_columns():
+    assert facet_results.source_priority('ant_mg_author_cluster') == facet_results.source_priority('ant_author_cluster') == 4
+    assert 'ant_mg_author_cluster' in facet_results._stratum_source_text('ant_mg_author_cluster')
+
+
+def test_a_cluster_column_is_the_only_stratifier_when_cell_types_are_absent():
+    cells = pd.DataFrame({'ant_donor': ['a', 'a', 'b', 'b'],
+                          'ant_mg_author_cluster': ['d1/cluster_1', 'd1/cluster_2', 'd1/cluster_1', 'd1/cluster_2']})
+    membership, _ = aft.choose_strata(cells, {})
+    assert set(membership['source']) >= {'ant_mg_author_cluster'}
 
 
 # ── n_tissues counts the specific column ─────────────────────────────────────
@@ -167,3 +201,17 @@ def test_n_tissues_counts_tissue_uberon_within_one_coarse_group():
                                             'dorsolateral prefrontal cortex', 'dorsolateral prefrontal cortex']})
     table, _ = aft.build_donor_table(cells)
     assert dict(zip(table['donor'], table['n_tissues'])) == {'d1': 2, 'd2': 1}
+
+
+# ── cell type groups of the Cell Ontology subtype labels ─────────────────────
+
+@pytest.mark.parametrize('label, group', [
+    ('L2/3 intratelencephalic projecting glutamatergic neuron', 'excitatory neuron'),
+    ('L6 intratelencephalic projecting Car3 glutamatergic neuron', 'excitatory neuron'),
+    ('VIP GABAergic interneuron', 'inhibitory neuron'), ('Lamp5 Lhx6 neuron', 'inhibitory neuron'),
+    ('pvalb chandelier GABAergic interneuron', 'inhibitory neuron'), ('sst chodl GABAergic interneuron', 'inhibitory neuron'),
+    ('central nervous system macrophage', 'perivascular macrophage'), ('monocyte', 'myeloid (mixed)'),
+    ('plasmablast', 'immune (mixed)'), ('T cell', 'T cell'), ('erythrocyte', 'unmapped'),
+])
+def test_cell_ontology_subtype_labels_belong_to_a_group(label, group):
+    assert celltype_groups.group_of(label) == group

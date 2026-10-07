@@ -163,6 +163,10 @@ ASSUME_HUMAN_DB_IDS = facet_scopes.ASSUME_HUMAN_DB_IDS
 COUNTS_LAYER_NAMES = ('counts', 'UMIs', 'raw', 'raw_counts')
 #: Experimental systems that are never tested (cultures and bulk tissue); xenografts are a facet scope.
 EXCLUDED_SYSTEMS = {'in_vitro_2d', 'organoid', 'bulk_tissue'}
+#: Author cluster columns: one per cell type group (decision 2026-10-07, L35) and the retired generic column.
+AUTHOR_CLUSTER_COLUMNS = ('ant_mg_author_cluster', 'ant_astro_author_cluster', 'ant_oligo_author_cluster',
+                          'ant_opc_author_cluster', 'ant_exn_author_cluster', 'ant_inn_author_cluster',
+                          'ant_endo_author_cluster', 'ant_author_cluster')
 BATCH_NAME_RE = re.compile(r'(?i)(batch|pool|library|lane|plate|chip|chemistry|sequencing_run|run_id)')
 CELLTYPE_CANDIDATE_RE = re.compile(
     r'(?i)^(author_)?(cell_?type\d*|cell_?type_(high|low|fine|coarse|broad)_?res\w*|cell_?type_(fine|coarse|broad|major|minor)\w*'
@@ -559,6 +563,11 @@ def build_donor_table(cells: pd.DataFrame, design_columns: Optional[Dict[str, An
 # Cell-type stratifier
 # --------------------------------------------------------------------------
 
+def author_cluster_column(cells: pd.DataFrame) -> Optional[str]:
+    """The author cluster column of a cell table (a per-cell-type one, else the retired generic one), or None."""
+    return next((column for column in AUTHOR_CLUSTER_COLUMNS if column in cells), None)
+
+
 def choose_strata(cells: pd.DataFrame, categorical_columns: Dict[str, str]
                   ) -> Tuple[pd.DataFrame, str]:
     """Cell type strata as a long (cell position, source, label) membership table.
@@ -607,14 +616,15 @@ def choose_strata(cells: pd.DataFrame, categorical_columns: Dict[str, str]
                                                 'label': cells[column].astype('object').to_numpy()}))
                     notes.append(f'per-cell column {column} ({levels} levels)')
                     break
-        if not pieces and constant is None and 'ant_author_cluster' in cells:
+        cluster_column = author_cluster_column(cells)
+        if not pieces and constant is None and cluster_column:
             # No cell type information at all: the author cluster column is the only
             # per-cell grouping. Expression-defined, so labelled as such in celltype_source.
-            levels = cells['ant_author_cluster'].nunique(dropna=True)
+            levels = cells[cluster_column].nunique(dropna=True)
             if 2 <= levels <= MAX_STRATUM_LEVELS:
-                pieces.append(pd.DataFrame({'pos': positions, 'source': 'ant_author_cluster',
-                                            'label': cells['ant_author_cluster'].astype('object').to_numpy()}))
-                notes.append(f'ant_cell_type absent; ant_author_cluster used ({levels} levels)')
+                pieces.append(pd.DataFrame({'pos': positions, 'source': cluster_column,
+                                            'label': cells[cluster_column].astype('object').to_numpy()}))
+                notes.append(f'ant_cell_type absent; {cluster_column} used ({levels} levels)')
         if not pieces:
             pieces.append(pd.DataFrame({'pos': positions, 'source': 'none', 'label': 'all'}))
             notes.append('single stratum (no cell type information)')
@@ -1447,7 +1457,7 @@ def process_target(target: Target, store_root: Path, out_root: Path, facets: Lis
             wanted = ['ant_donor', 'ant_donor_uid', 'ant_sex', 'ant_host_sex', 'ant_disease', 'ant_apoe',
                       'ant_apoe4_carrier', 'ant_apoe_carrier', 'ant_app_nlgf', 'ant_braak', 'ant_age', 'ant_pmi',
                       'ant_cell_type',
-                      'ant_author_cell_type', 'ant_tissue', 'tissue_uberon', 'ant_region', 'ant_author_cluster']
+                      'ant_author_cell_type', 'ant_tissue', 'tissue_uberon', 'ant_region', *AUTHOR_CLUSTER_COLUMNS]
             if replicate_column and replicate_column not in wanted:
                 wanted.append(replicate_column)
             extra_candidates = [c for c in member_cat
@@ -1767,11 +1777,12 @@ def process_target(target: Target, store_root: Path, out_root: Path, facets: Lis
         # composition table: donor x (cell type, and author cluster when present) proportions
         comp_frames = [usable.groupby(['donor', 'source', 'label']).size().rename('n_cells').reset_index()
                        .rename(columns={'label': 'level'}).assign(kind='cell_type')]
-        if 'ant_author_cluster' in cells and 2 <= cells['ant_author_cluster'].nunique() <= 200:
-            tmp = cells[cells['ant_donor'].notna() & cells['ant_author_cluster'].notna()].copy()
+        cluster_column = author_cluster_column(cells)
+        if cluster_column and 2 <= cells[cluster_column].nunique() <= 200:
+            tmp = cells[cells['ant_donor'].notna() & cells[cluster_column].notna()].copy()
             tmp['donor'] = tmp['ant_donor'].astype(str)
-            comp_frames.append(tmp.groupby(['donor', 'ant_author_cluster']).size().rename('n_cells')
-                               .reset_index().rename(columns={'ant_author_cluster': 'level'})
+            comp_frames.append(tmp.groupby(['donor', cluster_column]).size().rename('n_cells')
+                               .reset_index().rename(columns={cluster_column: 'level'})
                                .assign(kind='author_cluster'))
         composition = pd.concat(comp_frames, ignore_index=True)
         composition['n_cells_donor'] = composition['donor'].map(donor_totals)
