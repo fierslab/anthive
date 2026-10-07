@@ -68,7 +68,7 @@ def test_derivation_table_is_valid_and_covers_the_expected_datasets():
         assert source and spec['column'] == derive.COLUMN, db_id
     groups = {db_id.split('/')[0] for db_id in derive.DERIVATIONS}
     assert groups == {'G24', 'M23', 'GF4', 'MY4', 'Z20', 'WA4', 'P23'}
-    assert len(derive.DERIVATIONS) == 27
+    assert len(derive.DERIVATIONS) == 29
     assert 'L26/PSY' not in derive.DERIVATIONS and 'Lee2026' in derive.SKIP_GROUPS
 
 

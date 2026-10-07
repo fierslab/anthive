@@ -2424,9 +2424,14 @@ class AnnotationWriter:
         catalog: Optional[str] = None,
         db_id: Optional[str] = None,
         ant_serve_url: Optional[str] = None,
+        verbatim_names: bool = False,
     ):
         """
         Args:
+            verbatim_names: Accept the author's own obs column names (spaces,
+                hyphens, ...) instead of bare identifiers; they are always
+                double-quoted. For ``ant-restore-obs``, which restores columns
+                that already exist under such names in the h5ad.
             duckdb_path: Path to the dataset's .duckdb file
             annotator:   Tool name (e.g. 'ant-score', 'ant-starcat')
             run_id:      Unique per-invocation id (for rollback / audit)
@@ -2453,6 +2458,7 @@ class AnnotationWriter:
         self.duckdb_path = Path(duckdb_path)
         if not self.duckdb_path.exists():
             raise AnnotationWriterError(f"duckdb not found: {self.duckdb_path}")
+        self.verbatim_names = verbatim_names
         self.annotator = annotator
         self.run_id = run_id
         self.catalog = catalog
@@ -2630,8 +2636,14 @@ class AnnotationWriter:
         *,
         source_hash: Optional[str] = None,
         on_conflict: Literal['fail', 'overwrite'] = 'fail',
+        record_pending: bool = True,
     ) -> None:
-        """Add a DOUBLE obs column. `values.index` must be cell_name."""
+        """Add a DOUBLE obs column. `values.index` must be cell_name.
+
+        ``record_pending=False`` skips the ``__pending_cols`` row, for columns
+        that already exist in the h5ad (``ant-restore-obs``): nothing is left
+        for ``ant-merge-h5ad`` to write back.
+        """
         self._add_column(
             col_name=col_name,
             values=values,
@@ -2640,6 +2652,7 @@ class AnnotationWriter:
             kind='num',
             on_conflict=on_conflict,
             source_hash=source_hash,
+            record_pending=record_pending,
         )
 
     def add_categorical(
@@ -2650,6 +2663,7 @@ class AnnotationWriter:
         source_hash: Optional[str] = None,
         on_conflict: Literal['fail', 'overwrite'] = 'fail',
         max_cardinality: int = 10000,
+        record_pending: bool = True,
     ) -> None:
         """Add a VARCHAR obs column. `values.index` must be cell_name.
 
@@ -2671,6 +2685,7 @@ class AnnotationWriter:
             kind='cat',
             on_conflict=on_conflict,
             source_hash=source_hash,
+            record_pending=record_pending,
         )
 
     def commit(self) -> None:
@@ -2697,13 +2712,19 @@ class AnnotationWriter:
         kind: str,                  # 'num' | 'cat'
         on_conflict: str,
         source_hash: Optional[str],
+        record_pending: bool = True,
     ) -> None:
         if self._conn is None:
             raise AnnotationWriterError("Writer not entered (use `with`).")
         if self._committed:
             raise AnnotationWriterError("Writer already committed.")
 
-        _validate_anno_col_name(col_name)
+        if self.verbatim_names:
+            if (not isinstance(col_name, str) or not col_name.strip() or '\x00' in col_name
+                    or col_name.lower() in {'cell_id', 'cell_name', 'gene_id', 'gene_name'}):
+                raise AnnotationWriterError(f"Unusable column name: {col_name!r}")
+        else:
+            _validate_anno_col_name(col_name)
 
         underscore_table = f"__{target}"  # __obsnum / __obscat
 
@@ -2759,7 +2780,8 @@ class AnnotationWriter:
                     )
                 # Overwrite path: skip ADD COLUMN, just UPDATE.
                 self._update_values(underscore_table, col_name, values, cell_id_by_name)
-                self._record_pending(col_name, target, kind, source_hash)
+                if record_pending:
+                    self._record_pending(col_name, target, kind, source_hash)
                 self._refresh_view(target, underscore_table)
                 return
 
@@ -2769,11 +2791,12 @@ class AnnotationWriter:
             self._txn_cols.append((col_name, target))
             self._refresh_view(target, underscore_table)
             self._update_values(underscore_table, col_name, values, cell_id_by_name)
-            self._record_pending(col_name, target, kind, source_hash)
+            if record_pending:
+                self._record_pending(col_name, target, kind, source_hash)
             return
 
         # --- ALTER TABLE ADD COLUMN, then UPDATE ---
-        safe_col = safe_ident(col_name)
+        safe_col = self._ident(col_name)
         try:
             self._conn.execute(
                 f"ALTER TABLE {safe_ident(underscore_table)} "
@@ -2786,8 +2809,13 @@ class AnnotationWriter:
         self._txn_cols.append((col_name, target))
 
         self._update_values(underscore_table, col_name, values, cell_id_by_name)
-        self._record_pending(col_name, target, kind, source_hash)
+        if record_pending:
+            self._record_pending(col_name, target, kind, source_hash)
         self._refresh_view(target, underscore_table)
+
+    def _ident(self, name: str) -> str:
+        """Quoted identifier: strict for annotator names, verbatim-quoted for restored author names."""
+        return _q(name) if self.verbatim_names else safe_ident(name)
 
     def _create_obs_base_table(
         self,
@@ -2801,7 +2829,7 @@ class AnnotationWriter:
         self._conn.execute(
             f"CREATE TABLE {safe_ident(underscore_table)} ("
             f"  cell_id INTEGER PRIMARY KEY, "
-            f"  {safe_ident(col_name)} {sql_type}"
+            f"  {self._ident(col_name)} {sql_type}"
             f")"
         )
         # Insert (cell_id, NULL) rows
@@ -2832,7 +2860,7 @@ class AnnotationWriter:
         try:
             self._conn.execute(
                 f"UPDATE {safe_ident(underscore_table)} t "
-                f"SET {safe_ident(col_name)} = ta.val "
+                f"SET {self._ident(col_name)} = ta.val "
                 f"FROM temp_anno ta WHERE t.cell_id = ta.cell_id"
             )
         finally:
@@ -2930,7 +2958,7 @@ class AnnotationWriter:
             try:
                 self._conn.execute(
                     f"ALTER TABLE {safe_ident(underscore_table)} "
-                    f"DROP COLUMN {safe_ident(col_name)}"
+                    f"DROP COLUMN {self._ident(col_name)}"
                 )
             except Exception as exc:
                 print(f"  ⚠ rollback: drop {col_name} from {underscore_table}: {exc}")
